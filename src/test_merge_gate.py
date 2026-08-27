@@ -5,7 +5,7 @@ import json, os, pathlib, subprocess, sys, tempfile
 
 TMP = tempfile.mkdtemp()
 os.environ["DOIT_ROOT"] = str(pathlib.Path(TMP) / "ledger")
-os.environ["DOIT_LEDGER_FILE"] = "L-executor-test.jsonl"
+os.environ["DOIT_GATE_LEDGER_FILE"] = "L-executor-test.jsonl"
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 import merge_gate as mg
 
@@ -305,6 +305,91 @@ except mg.Undetermined:
 check("a stray argument is refused", _exit(lambda: mg.parse(["main", "src/*"])))
 check("--writes with no value is refused", _exit(lambda: mg.parse(["main", "--writes"])))
 check("an unknown flag is refused", _exit(lambda: mg.parse(["main", "-x"])))
+
+# ------------------------------------------------- D115: round 3's findings
+# ★ The lesson of --writes: three arg checks all asserted FAILURE cases, so a
+# flag that never worked at all passed its own suite. Positive cases first.
+check("★ --writes actually works (it exited unconditionally for two rounds)",
+      mg.parse(["main", "--writes", "src/*"]) == ("main", None, ["src/*"]))
+check("--writes takes several values",
+      mg.parse(["main", "--writes", "src/*", "docs/"])[2] == ["src/*", "docs/"])
+check("--spec and --writes compose",
+      mg.parse(["main", "--writes", "src/*", "--spec", "L-spec-0001"])[:2] == ("main", "L-spec-0001"))
+check("a stray argument is still refused", _exit(lambda: mg.parse(["main", "src/*"])))
+check("--writes with no value is still refused", _exit(lambda: mg.parse(["main", "--writes"])))
+
+# prose after the colon must not become a grant
+for prose, why in ((("writes: the web dashboard only"), "'web' became a directory grant"),
+                   (("Writes: see the table below"), "'table' became a directory grant")):
+    (CONTENT / "L-spec-p.md").write_text(prose + "\n")
+    try:
+        g = mg.writes_grant("L-spec-p"); check(f"★ prose refused ({why})", False)
+    except mg.Undetermined as e:
+        check(f"★ prose after the colon is not a grant ({why})", "not a path" in str(e))
+
+# breadth is behaviour, not a list of spellings
+for bad in ("*/**", "**.*", "**/*.*", "*", "**", "**/*"):
+    try:
+        mg.check_grant([bad], "t"); check(f"grant {bad!r} refused", False)
+    except mg.Undetermined as e:
+        check(f"★ {bad!r} refused as an off switch", "off switch" in str(e))
+
+# ...while the real forms still parse
+(CONTENT / "L-spec-bold.md").write_text("**Writes:** `src/*`, docs/\n")
+check("★ **Writes:** src/* parses (it was refused, accusing the author)",
+      mg.writes_grant("L-spec-bold") == ["src/*", "docs/"])
+(CONTENT / "L-spec-tbl2.md").write_text("| **Writes** | `src/**`, `db/migrate/` |\n")
+check("a table row with symmetric globs survives",
+      mg.writes_grant("L-spec-tbl2") == ["src/**", "db/migrate/"])
+check("a bare directory needs its slash, and then works", mg.granted("src/a.py", ["src/"]))
+
+# a line break in ANY path must not misalign the batch and kill revert detection
+d, _ = repo()
+sh("git", "-C", d, "checkout", "-q", "main")
+weird = pathlib.Path(d, "we\nird.txt"); weird.write_text("x")
+sh("git", "-C", d, "add", "-A"); sh("git", "-C", d, "commit", "-qm", "a path with a line break")
+on(d, lambda dd: pathlib.Path(dd, "old.txt").write_text("v1"))
+check("★ a newline-bearing path does not kill revert detection for other files",
+      mg.gate("work", "main", GRANT).reverted == ["old.txt"])
+
+# ambient env must not redirect the gate at another repo
+d, _ = repo(); on(d, lambda dd: pathlib.Path(dd, "late.txt").unlink())
+other, _ = repo()
+os.chdir(d); os.environ["GIT_DIR"] = str(pathlib.Path(other, ".git"))
+try:
+    check("★ GIT_DIR cannot redirect the gate to another repository",
+          any(x.startswith("late.txt@") for x in mg.gate("work", "main", []).removed))
+finally:
+    del os.environ["GIT_DIR"]
+
+# an ambiguous ref is refused even when git is told not to warn about it
+d, _ = repo()
+sh("git", "-C", d, "tag", "main", "HEAD~1")
+sh("git", "-C", d, "config", "core.warnAmbiguousRefs", "false")
+os.chdir(d)
+try:
+    mg.gate("work", "main", []); check("ambiguity refused", False)
+except mg.Undetermined as e:
+    check("★ ambiguity is read from the ref store, not from a warning git can be told to suppress",
+          "ambiguous" in str(e))
+
+# knobs may not silently weaken the gate
+d, _ = repo(); on(d, lambda dd: pathlib.Path(dd, "migrations/001.sql").unlink())
+for var, val in (("DOIT_MIGRATIONS", "zzz"), ("DOIT_REVERT_DEPTH", "0")):
+    os.environ[var] = val
+    try:
+        mg.gate("work", "main", ["migrations/"]); check(f"{var}={val} refused", False)
+    except mg.Undetermined:
+        check(f"★ {var}={val} is refused, not silently honoured", True)
+    finally:
+        del os.environ[var]
+mg.load_config()
+
+d, _ = repo(); os.chdir(d)
+try:
+    mg.gate("main", "main", []); check("self-merge refused", False)
+except mg.Undetermined as e:
+    check("gating a branch against itself is could-not-determine", "nothing to gate" in str(e))
 
 print(f"merge-gate: {sum(ok)}/{len(ok)} checks pass")
 sys.exit(0 if all(ok) else 1)
