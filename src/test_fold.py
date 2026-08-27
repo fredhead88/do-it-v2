@@ -65,6 +65,25 @@ notop = ledger(**{"L-planner-01.jsonl": [built[0]], "L-builder-01.jsonl": [
     {"ts": stamp(0), "type": "spec-closed", "subject": S, "charter": C}]})
 assert notop[1][S]["state"] == "written", "only the operator may close a spec unbuilt"
 
+# a builder may not clear the rejections against its own work
+selfclear = ledger(**{"L-builder-01.jsonl": built + [
+    {"ts": stamp(0), "type": "criterion-cleared", "subject": S, "criterion": "AC1"}],
+    "L-grader-01.jsonl": [
+        {"ts": stamp(1), "type": "verdict", "subject": S, "confirmed": False},
+        {"ts": stamp(1), "type": "rejected-criterion", "subject": S, "criterion": "AC1"}]})
+assert selfclear[1][S]["rejects"] == 1, "a builder cannot clear its own rejected criterion"
+gclear = ledger(**{"L-builder-01.jsonl": built, "L-grader-01.jsonl": [
+    {"ts": stamp(1), "type": "verdict", "subject": S, "confirmed": False},
+    {"ts": stamp(1), "type": "rejected-criterion", "subject": S, "criterion": "AC1"},
+    {"ts": stamp(0), "type": "criterion-cleared", "subject": S, "criterion": "AC1"}]})
+assert gclear[1][S]["rejects"] == 0, "a grader can"
+exclear = ledger(**{"L-builder-01.jsonl": built, "L-grader-01.jsonl": [
+    {"ts": stamp(1), "type": "rejected-criterion", "subject": S, "criterion": "AC1"}],
+    "L-executor-01.jsonl": [
+        {"ts": stamp(0), "type": "criterion-cleared", "subject": S, "criterion": "AC1"}]})
+assert exclear[1][S]["rejects"] == 1, \
+    "the executor may REJECT (its merge gate is a gate) but may not CLEAR"
+
 _, sp, _, _, _ = ledger(**{"L-builder-01.jsonl": built, "L-grader-01.jsonl": graded,
                            "L-reviewer-01.jsonl": reviewed, "L-executor-01.jsonl": shipped +
                            [{"ts": stamp(0), "type": "rejected-criterion", "subject": S,
@@ -155,4 +174,4 @@ assert "corrections applied: 1" in fold.render(*((lambda e: (e,) + fold.fold(e))
     "the builder's rejected attempt is already on the unauthorized line"
 
 shutil.rmtree(TMP)
-print("fold: 26 checks pass")
+print("fold: 29 checks pass")

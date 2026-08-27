@@ -23,7 +23,16 @@ PROJECT = os.environ.get("DOIT_PROJECT")          # §9.1/D93: a filter, not a s
 EMITS = {"verdict": {"grader"}, "review": {"reviewer"}, "shipped": {"executor"},
          "charter-retracted": {"operator"}, "restore-verified": {"drill"},
          "correction": {"operator"},                       # D111
-         "spec-closed": {"operator"}}                       # D112
+         "spec-closed": {"operator"},                       # D112
+         # ★ Asymmetric on purpose. REJECTING is the safe direction — a spurious
+         # rejection costs rework, never a false pass — so any judging or gating
+         # seat may do it, the Executor included (its merge gate is a gate).
+         # CLEARING is the dangerous direction and is judging seats only.
+         # The builder is kept out of both: otherwise it could clear the
+         # rejections against its own build and reach `accepted` from one seat,
+         # which is exactly what the verdict and review rows exist to prevent.
+         "rejected-criterion": {"grader", "reviewer", "executor"},
+         "criterion-cleared": {"grader", "reviewer"}}
 # A correction may override anything but these: D90 takes the actor from the
 # FILENAME, and a correction that could rewrite it reopens every check below.
 UNCORRECTABLE = ("actor", "_src")
