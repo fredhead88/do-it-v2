@@ -2812,6 +2812,33 @@ excision case fools.
 > **proceed** · removals outside grant → **`rework`** · **could-not-determine →
 > `rework`. An unresolvable ref never reads as clean.**
 
+> **★ AMBIENT STATE IS NOT TRUSTED, AND THERE IS NO RENAME EXEMPTION** *(D114 —
+> two judging seats, blind to each other, both ranked the same defect first)*.
+>
+> **A rename is a removal.** `R` is a *similarity heuristic*, not a declaration
+> of intent — git pairs an unrelated 89%-similar file as a rename — so a gate
+> that exempts a rename whose destination falls inside the grant lets
+> `git mv supabase/migrations/001_init.sql src/001_init.sql` through as
+> **clean.** That is this section's own excision case, produced by the guard
+> written to catch it. **The destination is reported as information, never as a
+> reason to skip.**
+>
+> **Every git call is pinned** — repo toplevel, `diff.relative=false`,
+> `diff.ignoreSubmodules=none`, `core.quotepath=false`, `LC_ALL=C`. A *security
+> decision* read from the caller's cwd, config or locale is a decision the branch
+> author can influence: `diff.relative` plus a subdirectory cwd hid **every**
+> removal outside that directory.
+>
+> **A shallow clone or a replace-ref is a hard stop, and an ambiguous ref is
+> could-not-determine.** A truncated history cannot answer a question about
+> history — and CI checkouts are shallow by default. A tag and a branch both
+> named `main` resolve to the **tag**, warn on stderr, and **exit 0**.
+>
+> **The verdict records `main_sha`, `branch_sha` and `merged_tree`.** Without
+> them nothing ties a `clean` to the `--no-ff` that follows it — and that gap is
+> precisely how a grader established that every gate event in the ledger
+> **predated the code it was offered as evidence for.**
+
 **It is a forcing function, not a capability** — no model release makes an unread
 numstat row appear. And it is a script for §4.11's standing reason: **a script
 cannot be reasoned out of a check and a model can** (§4.4).
