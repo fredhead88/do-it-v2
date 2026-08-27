@@ -39,6 +39,20 @@ _, sp, _, _, _ = ledger(**{"L-builder-01.jsonl": built, "L-grader-01.jsonl": gra
                            "L-executor-01.jsonl": shipped})
 assert sp[S]["state"] == "shipped", "no review event -> never accepted (D29)"
 
+# a failed grade must not render like a spec merely waiting to be looked at
+failed = ledger(**{"L-builder-01.jsonl": built, "L-grader-01.jsonl": [
+    {"ts": stamp(1), "type": "verdict", "subject": S, "confirmed": False},
+    {"ts": stamp(1), "type": "rejected-criterion", "subject": S, "criterion": "AC1"},
+    {"ts": stamp(1), "type": "rejected-criterion", "subject": S, "criterion": "AC3"}]})
+assert failed[1][S]["rejects"] == 2, "standing rejections are counted"
+assert "2 REJECTED, needs rework" in fold.render(*failed), \
+    "the board distinguishes 'not looked at yet' from 'looked at and failed'"
+cleared = ledger(**{"L-builder-01.jsonl": built, "L-grader-01.jsonl": [
+    {"ts": stamp(1), "type": "verdict", "subject": S, "confirmed": False},
+    {"ts": stamp(1), "type": "rejected-criterion", "subject": S, "criterion": "AC1"},
+    {"ts": stamp(0), "type": "criterion-cleared", "subject": S, "criterion": "AC1"}]})
+assert cleared[1][S]["rejects"] == 0, "a cleared criterion stops standing"
+
 _, sp, _, _, _ = ledger(**{"L-builder-01.jsonl": built, "L-grader-01.jsonl": graded,
                            "L-reviewer-01.jsonl": reviewed, "L-executor-01.jsonl": shipped +
                            [{"ts": stamp(0), "type": "rejected-criterion", "subject": S,
@@ -129,4 +143,4 @@ assert "corrections applied: 1" in fold.render(*((lambda e: (e,) + fold.fold(e))
     "the builder's rejected attempt is already on the unauthorized line"
 
 shutil.rmtree(TMP)
-print("fold: 20 checks pass")
+print("fold: 23 checks pass")

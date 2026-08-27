@@ -94,12 +94,19 @@ def read_events():
     return [e for e in out if not PROJECT or e.get("project") == PROJECT]
 
 
+def standing_rejects(evs):
+    """Criteria a grader rejected and nobody has cleared. A spec carrying any of
+    these is NOT awaiting review — it is waiting on rework, and the board must
+    not render the two the same way."""
+    return ({e.get("criterion") for e in evs if e["type"] == "rejected-criterion"}
+            - {e.get("criterion") for e in evs if e["type"] == "criterion-cleared"})
+
+
 def spec_state(evs, retracted):
     """accepted / shipped-owed-evidence / dropped, or the pipeline state it is stuck in."""
     types = {e["type"] for e in evs}
-    standing_rejects = ({e.get("criterion") for e in evs if e["type"] == "rejected-criterion"}
-                        - {e.get("criterion") for e in evs if e["type"] == "criterion-cleared"})
-    if "shipped" in types and not standing_rejects:
+    open_rejects = standing_rejects(evs)
+    if "shipped" in types and not open_rejects:
         graded = any(e["type"] == "verdict" and e.get("confirmed") for e in evs)
         if graded and "review" in types:
             return "accepted"                                        # §2.5 accepted()
@@ -129,6 +136,7 @@ def fold(events):
     for sid, evs in by_subject.items():
         if sid.startswith("L-spec-"):
             specs[sid] = {"id": sid, "state": spec_state(evs, retracted), "evs": evs,
+                          "rejects": len(standing_rejects(evs)),
                           "charter": next((e.get("charter") for e in reversed(evs)
                                            if e.get("charter")), None),
                           "age": age_days(evs[-1])}
@@ -181,8 +189,12 @@ def render(events, specs, charters, ignored, by_subject):
                       f"{e.get('owner') or '⚠ NOBODY'} · {age_days(e):.1f}d" for e in open_blocks])
     block("WRITTEN, NOT PICKED UP", [f"{s['id']} · {s['age']:.1f}d{flag(s)}" for s in pick("written")])
     block("IN FLIGHT", [f"{s['id']} · {s['age']:.1f}d{flag(s)}" for s in pick("building")])
-    block("AWAITING VERIFICATION", [f"{s['id']} · {s['state']} · {s['age']:.1f}d{flag(s)}"
-                                    for s in pick("graded", "reviewing", "shipped")])
+    # A standing rejection is the difference between "waiting to be looked at" and
+    # "already looked at and failed". Same section, but the row may not read the same.
+    block("AWAITING VERIFICATION",
+          [f"{s['id']} · {s['state']} · {s['age']:.1f}d"
+           + (f"  ⚠ {s['rejects']} REJECTED, needs rework" if s["rejects"] else "") + flag(s)
+           for s in pick("graded", "reviewing", "shipped")])
     block("OWED EVIDENCE", [f"{s['id']} · wakes " + str(next(
         (e.get("wake_at") for e in s["evs"] if e["type"] == "owed-ac"), "?"))
         for s in pick("shipped-owed-evidence")])
