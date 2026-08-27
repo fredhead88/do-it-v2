@@ -13,13 +13,17 @@ are **prose, not code** (see *What is not here* below).
 
 ## Install
 
+Needs **python3** and **git 2.38 or newer** (`git merge-tree --write-tree`).
+
 ```bash
-git clone <this repo> ~/Projects/do-it && ~/Projects/do-it/install.sh
+git clone https://github.com/fredhead88/do-it.git ~/Projects/do-it
+~/Projects/do-it/install.sh
 ```
 
-Idempotent. It creates `~/.do-it/`, **runs every check before putting anything on
-your PATH**, and links `doit` into `~/.local/bin`. An install that ships a red
-suite is how a guard becomes a guard that is not running.
+Idempotent. It checks your git version, creates `~/.do-it/`, **runs every check
+before putting anything on your PATH**, and links `doit` into `~/.local/bin`. An
+install that ships a red suite is how a guard becomes a guard that is not
+running.
 
 ## Use
 
@@ -44,7 +48,7 @@ doit test
 | `src/fold.py` | reads `~/.do-it/events/*.jsonl`, derives every state, renders the board |
 | `src/merge_gate.py` | catches a merge that **removes** a file nobody is watching |
 | `src/backup.sh` | one-way `restic` push, and a restore drill that proves it |
-| `src/test_*.py` | 37 checks. The merge-gate ones all run against real git repos |
+| `src/test_*.py` | 58 checks. The merge-gate ones all run against real git repos |
 
 ### The five ideas that make it work
 
@@ -72,11 +76,18 @@ path is absent at both ends — so the usual guards see nothing and the file is
 gone. Measured on a real repo: **7 of the last 200 merges removed a path and
 landed.**
 
-The gate diffs the branch against **current main** to find candidates, then
-confirms each against the **live merge-base** — a path absent there was never the
-branch's to delete, and naming it would be a false alarm. Both reads are
-necessary: the first alone misses the scar, the second alone cries wolf, and a
-guard that cries wolf gets worked around.
+The gate **performs the merge and looks at the result.** `git merge-tree
+--write-tree` does the real three-way merge in memory and hands back the tree it
+would produce; the gate diffs current main against that tree. Whatever the merge
+would actually remove, it removes — no modelling, no inference.
+
+Two earlier mechanisms were tried here and both were wrong, in the same way.
+One diffed the branch against its recorded base, and was blind to the scar
+above. One diffed against current main and confirmed each candidate against the
+merge-base — which works until a branch has been merged into and kept going, at
+which point git has **several** valid merge-bases and picks one arbitrarily.
+Reproduced: it picked the one lacking the file, the gate said clean, the merge
+deleted it. **Both were reasoning about a merge instead of performing one.**
 
 Removals and reverts are filtered to paths outside the branch's `writes:` grant.
 **Removals under `migrations/` are named regardless** — a deletion there removes
@@ -112,3 +123,14 @@ also the reason to distrust any claim in this file that was not checked.
 
 The backup is **unproven** until you set a destination — the board says so on
 every render, by design.
+
+## Reading the design
+
+`design/system-design-v2.md` is the whole thing: every decision, why it was made,
+and what it replaced. It is long and it argues with itself in places, which is
+the point — the reasoning is the artifact, not the conclusions.
+
+## Licence
+
+None yet. Nothing here grants you rights to use it; it is public to be read.
+Ask if you want to use it for something.

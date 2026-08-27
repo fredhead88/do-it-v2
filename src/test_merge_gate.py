@@ -10,6 +10,9 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent))
 import merge_gate as mg
 
 GRANT, ok = ["src/*", "docs/"], []
+CONTENT = pathlib.Path(os.environ["DOIT_ROOT"]) / "content"
+CONTENT.mkdir(parents=True, exist_ok=True)
+(CONTENT / "L-spec-0001.md").write_text("# spec\n\nwrites: src/*, docs/\n")
 
 
 def sh(*a):
@@ -119,6 +122,96 @@ d, _ = repo(); on(d, lambda d: None)
 check("a clean branch exits 0", mg.main_(["work", "main"]) == 0)
 ev = [json.loads(l) for l in LEDGER.read_text().splitlines()]
 check("clean event written too", ev[-1]["type"] == "merge-gate-clean")
+
+# ---------------------------------------------------------------- D113 cases
+# Every one of these was CLEAN under the merge-base mechanism and is a real
+# removal. They are the reason D110 was superseded.
+
+def crisscross():
+    """A long-lived branch merged into and kept going has SEVERAL merge-bases."""
+    d = tempfile.mkdtemp()
+    sh("git", "init", "-q", "-b", "main", d)
+    sh("git", "-C", d, "config", "user.email", "t@t"); sh("git", "-C", d, "config", "user.name", "t")
+    pathlib.Path(d, "a.txt").write_text("a")
+    sh("git", "-C", d, "add", "-A"); sh("git", "-C", d, "commit", "-qm", "base")
+    sh("git", "-C", d, "branch", "work")
+    pathlib.Path(d, "victim.txt").write_text("victim")
+    sh("git", "-C", d, "add", "-A"); sh("git", "-C", d, "commit", "-qm", "M1")
+    m1 = sh("git", "-C", d, "rev-parse", "HEAD").strip()
+    sh("git", "-C", d, "checkout", "-q", "work")
+    pathlib.Path(d, "w.txt").write_text("w")
+    sh("git", "-C", d, "add", "-A"); sh("git", "-C", d, "commit", "-qm", "W1")
+    w1 = sh("git", "-C", d, "rev-parse", "HEAD").strip()
+    sh("git", "-C", d, "merge", "-q", "--no-edit", m1)
+    sh("git", "-C", d, "checkout", "-q", "--detach", m1)
+    sh("git", "-C", d, "merge", "-q", "--no-edit", w1)
+    sh("git", "-C", d, "branch", "-f", "main", "HEAD")
+    sh("git", "-C", d, "checkout", "-q", "work")
+    sh("git", "-C", d, "rm", "-q", "victim.txt")
+    sh("git", "-C", d, "commit", "-qm", "work deletes victim")
+    os.chdir(d)
+    return d
+
+d = crisscross()
+check("criss-cross history has more than one merge-base",
+      len(sh("git", "-C", d, "merge-base", "--all", "main", "work").split()) > 1)
+check("★ criss-cross removal is named (D110 said clean here)",
+      any(r.startswith("victim.txt@") for r in mg.gate("work", "main", [])[0]))
+
+d, _ = repo()
+on(d, lambda d: (pathlib.Path(d, "sod").mkdir(exist_ok=True),
+                 pathlib.Path(d, "sod/סוד.txt").write_text("x")))
+sh("git", "-C", d, "checkout", "-q", "main")
+pathlib.Path(d, "sod").mkdir(exist_ok=True); pathlib.Path(d, "sod/סוד.txt").write_text("x")
+sh("git", "-C", d, "add", "-A"); sh("git", "-C", d, "commit", "-qm", "main gains a hebrew path")
+on(d, lambda d: pathlib.Path(d, "sod/סוד.txt").unlink())
+check("★ a Hebrew filename is named, not silently dropped by C-quoting",
+      any(r.startswith("sod/סוד.txt@") for r in mg.gate("work", "main", GRANT)[0]))
+
+d, _ = repo()
+def swap(d):
+    pathlib.Path(d, "migrations/001.sql").unlink()
+    os.symlink("/dev/null", pathlib.Path(d, "migrations/001.sql"))
+on(d, swap)
+check("★ typechange (file replaced by a symlink) is a removal",
+      any(r.startswith("migrations/001.sql@") for r in mg.gate("work", "main", [])[0]))
+
+# grant boundaries — over-granting is under-reporting
+check("a grant of `src` does not cover `src_backup/keys.py`",
+      not mg.granted("src_backup/keys.py", ["src"]))
+check("a grant of `docs` does not cover `docs-internal/runbook.md`",
+      not mg.granted("docs-internal/runbook.md", ["docs"]))
+check("`*` does not cross a path separator", not mg.granted("secrets/prod_keys.py", ["*.py"]))
+check("a bare `*` does not disable the gate", not mg.granted("secrets/prod.py", ["*"]))
+check("`**` does cross, when you ask for it", mg.granted("src/deep/a.py", ["src/**"]))
+check("a grant of a file does not cover its .orig",
+      not mg.granted("src/a.py.orig", ["src/a.py"]))
+check("a directory grant still works", mg.granted("docs/x.md", ["docs/"]))
+
+# the migrations carve-out must fire where migrations actually live
+d, _ = repo()
+sh("git", "-C", d, "checkout", "-q", "main")
+pathlib.Path(d, "supabase/migrations").mkdir(parents=True)
+pathlib.Path(d, "supabase/migrations/001_init.sql").write_text("create")
+sh("git", "-C", d, "add", "-A"); sh("git", "-C", d, "commit", "-qm", "real migrations location")
+on(d, lambda d: pathlib.Path(d, "supabase/migrations/001_init.sql").unlink())
+check("★ supabase/migrations/ is named even under a grant covering it",
+      any("supabase/migrations" in r for r in mg.gate("work", "main", ["supabase/**"])[0]))
+
+# could-not-determine, in all its forms
+d, _ = repo(); on(d, lambda d: None)
+try:
+    mg.writes_grant("L-spec-nonexistent"); check("missing spec raises", False)
+except mg.Undetermined:
+    check("a named spec with no content file is could-not-determine", True)
+(CONTENT / "L-spec-nogrant.md").write_text("# spec with no grant line\n")
+try:
+    mg.writes_grant("L-spec-nogrant"); check("missing grant raises", False)
+except mg.Undetermined:
+    check("a spec stating no writes: grant is could-not-determine, not an empty grant", True)
+check("the design's own `| **Writes** | src/* |` table row parses",
+      (lambda: [(CONTENT / "L-spec-tbl.md").write_text("| **Writes** | `src/*`, docs/ |\n"),
+                mg.writes_grant("L-spec-tbl")][1])() == ["src/*", "docs/"])
 
 print(f"merge-gate: {sum(ok)}/{len(ok)} checks pass")
 sys.exit(0 if all(ok) else 1)

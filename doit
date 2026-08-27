@@ -7,8 +7,27 @@ case "${1:-board}" in
   gate)    shift; exec python3 "$SRC/merge_gate.py" "$@" ;;
   backup)  shift; exec bash "$SRC/backup.sh" "$@" ;;
   test)    cd "$SRC" && python3 test_fold.py && exec python3 test_merge_gate.py ;;
-  help|-h) sed -n '2,20p' "$SRC/fold.py"; echo "  doit gate <branch> [main] [--spec ID]   merge guard, exit 1 = do not merge"
-           echo "  doit backup push|drill                  replicate / prove the backup"
-           echo "  doit test                               run every check" ;;
+  help|-h|--help) cat <<'USAGE'
+doit — a ledger that derives state, and the guards that read it
+
+  doit                                    render the board
+  doit states                             every derived state, one per line
+  doit append <type> <subject> [k=v ...]  append one event, then re-fold
+  doit gate <branch> [main] [--spec ID]   merge guard. exit 1 = DO NOT MERGE
+  doit backup push | drill                replicate the ledger / prove it restores
+  doit test                               run every check
+  doit help
+
+Environment
+  DOIT_ROOT         where the ledger lives            (default ~/.do-it)
+  DOIT_PROJECT      scope the board to one project
+  DOIT_LEDGER_FILE  which actor file you write as     (the filename IS the actor)
+  DOIT_K            owed ACs a charter may close over (default 0 — deny)
+  DOIT_RESTIC_REPO  backup destination
+
+The ledger is append-only. Never edit or delete a line: repair with an
+operator-only `correction` event.
+USAGE
+    ;;
   *)       exec python3 "$SRC/fold.py" "$@" ;;
 esac

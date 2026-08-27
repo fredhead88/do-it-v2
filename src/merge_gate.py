@@ -1,37 +1,47 @@
 #!/usr/bin/env python3
-"""merge-gate — diff the branch against CURRENT main, never against base_sha.
+"""merge-gate — perform the merge in memory and diff the result. Never model it.
 
-  merge_gate.py <branch> [main] [--spec L-spec-0001] [--writes GLOB ...]
+  merge_gate.py <branch> [main] [--spec ID] [--writes GLOB ...]
 
 THE SCAR (§4.11, D108): a path main gained *after* the branch's `base_sha`, and
 that the branch then deletes, is absent at both ends of `base_sha..branch` and
-produces no numstat row at all — not a violation, *nothing*. A two-dot diff
-against current main is the only diff that sees it. Measured: 7 of the last 200
-merges on main removed a path and landed.
+produces no numstat row at all — not a violation, *nothing*. Measured: 7 of the
+last 200 merges on main removed a path and landed.
+
+★ HOW (D113, superseding D110). `git merge-tree --write-tree` performs the real
+three-way merge and hands back the tree it would produce; the gate diffs current
+main against THAT. Two earlier mechanisms were tried and both were wrong:
+
+  - `base_sha..branch` (v1) — blind to the scar entirely, which is D108.
+  - two-dot diff + live merge-base confirmation (D110) — flags nothing spurious
+    in simple history, but a long-lived branch has SEVERAL merge-bases and git
+    picks one arbitrarily. Verified: 2 bases, git chose the one lacking the
+    file, the gate said clean, and the real merge deleted it.
+
+Both were reasoning ABOUT a merge. This asks git to do it. The precision that
+D110's longest paragraph defends falls out for free, because the real merge —
+not a model of it — decides what the branch actually removes.
 
 Three caller states, never conflated (§5.3): nothing-to-report -> proceed (0) ·
 removals/reverts outside the grant -> rework (1) · could-not-determine ->
-rework (1). AN UNRESOLVABLE REF NEVER READS AS CLEAN.
-
-★ PRECISION. The two-dot diff FINDS candidates; the LIVE merge-base CONFIRMS
-them. Without that second read the gate names every path main gained while the
-branch was out — paths a three-way merge would keep, not delete — and a guard
-that misapplies is a guard that gets worked around (operator evidence: the last
-one "was often misapplying, so we would just get stuck"). This is not a retreat
-to `base_sha`: `base_sha` is the RECORDED base, frozen when the branch was cut.
-The merge-base is computed now and MOVES when the branch merges main — which is
-precisely what the scar branch did, so the scar still lands. The two differ
-exactly on the case D108 is about.
+rework (1). AN UNRESOLVABLE REF, A CONFLICT, A TIMEOUT, AN EXHAUSTED HISTORY
+WINDOW AND A MISSING `writes:` GRANT ALL READ AS REWORK, NEVER AS CLEAN.
 
 Runs at the Executor's merge step (§3.9, D17), BEFORE `--no-ff`.
 """
-import fnmatch, json, os, pathlib, subprocess, sys
+import json, os, re, subprocess, sys, time
 
 import fold
 
-# A removal here is always named, grant or not — the excision case fools every
-# consistency check by removing the evidence along with the artifact (D108).
-MIGRATIONS = os.environ.get("DOIT_MIGRATIONS", "migrations/")
+# A removal under a `migrations/` path SEGMENT is always named, grant or not — the
+# excision case fools every consistency check by removing the evidence along with
+# the artifact (D108). Segment, not prefix: real migrations live at
+# `supabase/migrations/`, and a prefix test silently exempts them.
+MIGRATIONS = re.compile(os.environ.get("DOIT_MIGRATIONS", r"(^|/)migrations/"), re.I)
+GIT_TIMEOUT = float(os.environ.get("DOIT_GIT_TIMEOUT", "20"))     # seconds, per call
+DEADLINE = float(os.environ.get("DOIT_GATE_DEADLINE", "60"))      # seconds, whole run
+REVERT_DEPTH = int(os.environ.get("DOIT_REVERT_DEPTH", "200"))    # revisions per path
+_START = time.monotonic()
 
 
 class Undetermined(Exception):
@@ -39,78 +49,144 @@ class Undetermined(Exception):
 
 
 def git(*args):
-    p = subprocess.run(("git",) + args, capture_output=True, text=True)
+    if time.monotonic() - _START > DEADLINE:
+        raise Undetermined(f"deadline of {DEADLINE:.0f}s exceeded — a partial scan is not a clean one")
+    try:
+        p = subprocess.run(("git",) + args, capture_output=True, timeout=GIT_TIMEOUT)
+    except (OSError, subprocess.SubprocessError) as e:      # git missing, killed, hung
+        raise Undetermined(f"git {' '.join(args)}: {e}")
     if p.returncode:
-        raise Undetermined(" ".join(args) + ": " + (p.stderr.strip() or "failed"))
+        raise Undetermined(" ".join(args) + ": " +
+                           (p.stderr.decode(errors="replace").strip() or "failed"))
     return p.stdout
 
 
 def blob(ref, path):
-    """None when the path is absent at that ref — determinate, not a failure."""
+    """The blob id, None if the path is genuinely ABSENT there. A git failure is
+    NOT absence — it raises, because could-not-determine may never read as clean.
+    (The old code returned None for both, and a quoted path then vanished.)"""
     try:
-        return git("rev-parse", f"{ref}:{path}").strip()
-    except Undetermined:
+        p = subprocess.run(("git", "rev-parse", f"{ref}:{path}"),
+                           capture_output=True, timeout=GIT_TIMEOUT)
+    except (OSError, subprocess.SubprocessError) as e:
+        raise Undetermined(f"rev-parse {ref}:{path}: {e}")
+    err = p.stderr.decode(errors="replace")
+    if p.returncode == 0:
+        return p.stdout.decode().strip()
+    if "does not exist" in err or "exists on disk, but not in" in err:
         return None
+    raise Undetermined(f"rev-parse {ref}:{path}: {err.strip() or 'failed'}")
+
+
+def glob_rx(g):
+    """`*` never crosses a path separator; `**` does. fnmatch's `*` crosses, which
+    is how a grant of `*.py` came to cover `secrets/prod_keys.py`."""
+    out, i = "", 0
+    while i < len(g):
+        if g.startswith("**", i):
+            out, i = out + ".*", i + 2
+        elif g[i] == "*":
+            out, i = out + "[^/]*", i + 1
+        elif g[i] == "?":
+            out, i = out + "[^/]", i + 1
+        else:
+            out, i = out + re.escape(g[i]), i + 1
+    return re.compile(out)
 
 
 def granted(path, grant):
-    return any(fnmatch.fnmatch(path, g) or path.startswith(g.rstrip("*"))
-               for g in grant if g)
+    """A grant covers a path, a directory's contents, or a glob — never a SIBLING.
+    `src` must not grant `src_backup/keys.py`, so the boundary is a separator."""
+    for g in (x for x in grant if x):
+        if g.endswith("/"):
+            if path.startswith(g):
+                return True
+        elif glob_rx(g).fullmatch(path):
+            return True
+        elif not any(c in g for c in "*?") and path.startswith(g.rstrip("/") + "/"):
+            return True
+    return False
 
 
-def reverted(path, mb, main, branch, depth=50):
-    """Survives the merge, but its content is a pre-main revision of the path."""
-    here, now = blob(branch, path), blob(main, path)
-    if here is None or here == now or blob(mb, path) != now:
-        return False        # base != main means the branch never saw main's version
-    # ponytail: last `depth` revisions of this path on main. Deeper needs a
-    # measured case; nothing in the corpus reverts further back than that.
-    return any(blob(c, path) == here
-               for c in git("rev-list", f"-{depth}", main, "--", path).split())
+def diff_names(a, b):
+    """`git diff -z --name-status`, parsed. -z gives RAW paths — no C-quoting, so
+    a Hebrew or space-bearing filename survives instead of failing every lookup."""
+    toks = git("diff", "-z", "--name-status", a, b).decode("utf-8", "surrogateescape").split("\0")
+    out, i = [], 0
+    while i < len(toks) and toks[i]:
+        st = toks[i]
+        if st[0] in "RC":                       # status, source, destination
+            out.append((st, toks[i + 1], toks[i + 2])); i += 3
+        else:
+            out.append((st, toks[i + 1], None)); i += 2
+    return out
+
+
+def reverted(path, tree, main):
+    """The merged content is an EARLIER revision of this path on main."""
+    here, now = blob(tree, path), blob(main, path)
+    if here is None or here == now:
+        return False
+    revs = git("rev-list", f"-{REVERT_DEPTH + 1}", main, "--", path).split()
+    if len(revs) > REVERT_DEPTH:
+        raise Undetermined(f"{path}: more than {REVERT_DEPTH} revisions — window exhausted, "
+                           f"which is could-not-determine, not clean")
+    return any(blob(c.decode(), path) == here for c in revs)
 
 
 def gate(branch, main, grant):
+    """What the merge would actually do to main, filtered to paths outside the grant."""
     git("rev-parse", "--verify", f"{main}^{{commit}}")
     git("rev-parse", "--verify", f"{branch}^{{commit}}")
-    mb = git("merge-base", main, branch).strip()
+    # ★ The real three-way merge, in memory. Not a model of one.
+    tree = git("merge-tree", "--write-tree", main, branch).decode().splitlines()[0].strip()
     removed, reverts = [], []
-    for line in git("diff", "--name-status", main, branch).splitlines():
-        f = line.split("\t")
-        if len(f) < 2:
-            continue
-        st, path = f[0], f[1]          # for R, f[1] is the path main loses
-        if st[0] in "DR" and (path.startswith(MIGRATIONS) or not granted(path, grant)):
-            if blob(mb, path) is not None:      # the branch HAD it, so the merge drops it
-                removed.append(f"{path}@{(blob(main, path) or '?')[:7]}")
-        elif st[0] == "M" and not granted(path, grant) and reverted(path, mb, main, branch):
+    for st, path, dest in diff_names(main, tree):
+        # D removes it · R moves it elsewhere · T replaces the file with something
+        # that is not it (a symlink over a migration is the excision case exactly).
+        if st[0] in "DRT" and (MIGRATIONS.search(path) or not granted(path, grant)):
+            if st[0] == "R" and dest and granted(dest, grant):
+                continue                                  # moved INTO the branch's own area
+            where = f" -> {dest}" if dest else ""
+            removed.append(f"{path}@{(blob(main, path) or '?')[:7]}{where}")
+        elif st[0] == "M" and not granted(path, grant) and reverted(path, tree, main):
             reverts.append(path)
     return removed, reverts
 
 
 def writes_grant(spec):
-    """`writes:` line in the spec's content file, comma- or space-separated."""
+    """The spec's `writes:` grant. A named spec with no grant is could-not-determine
+    — silently returning [] made every legitimate removal look like a violation,
+    which is the misapplication that gets a guard switched off."""
     p = fold.ROOT / "content" / f"{spec}.md"
-    for line in (p.read_text().splitlines() if p.exists() else []):
-        if line.strip().lower().startswith("writes:"):
-            return [g for g in line.split(":", 1)[1].replace(",", " ").split() if g]
-    return []
+    if not p.exists():
+        raise Undetermined(f"no content file for {spec} — cannot read its writes: grant")
+    for line in p.read_text().splitlines():
+        m = re.match(r"\s*[|*_\-\s]*writes\b[*_:| ]+(.+)", line, re.I)
+        if m:
+            body = m.group(1).strip().strip("|").replace("`", "")
+            return [g for g in re.split(r"[,\s|]+", body) if g]
+    raise Undetermined(f"{spec} states no writes: grant — nothing to filter against")
 
 
 def main_(argv):
-    branch, rest = argv[0], argv[1:]
+    branch, rest = argv[0], list(argv[1:])
     main = rest[0] if rest and not rest[0].startswith("-") else os.environ.get("DOIT_MAIN", "main")
     spec, grant, flag = None, [], None
     for a in rest:
         if a.startswith("--"):
             flag = a[2:]
+            if flag not in ("spec", "writes"):
+                sys.exit(f"merge-gate: unknown flag --{flag}")     # a typo is not a verdict
         elif flag == "spec":
             spec, flag = a, None
         elif flag == "writes":
             grant.append(a)
-    grant += writes_grant(spec) if spec else []
     os.environ.setdefault("DOIT_LEDGER_FILE", "L-executor-0001.jsonl")
     subject = spec or branch
     try:
+        if spec:
+            grant += writes_grant(spec)
         removed, reverts = gate(branch, main, grant)
         status = "rework" if (removed or reverts) else "clean"
         fold.append([f"merge-gate-{status}", subject, f"branch={branch}"]

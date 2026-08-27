@@ -4,6 +4,17 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="${DOIT_ROOT:-$HOME/.do-it}"
 
+# git merge-tree --write-tree arrived in 2.38. The merge guard is the reason this
+# is checked at install rather than discovered at a merge (D113).
+need=2.38
+have=$(git --version | awk '{print $3}')
+if [ "$(printf '%s\n%s\n' "$need" "$have" | sort -V | head -1)" != "$need" ]; then
+  echo "ERROR: git $have found, $need or newer required (git merge-tree --write-tree)." >&2
+  exit 1
+fi
+command -v python3 >/dev/null || { echo "ERROR: python3 not found." >&2; exit 1; }
+echo "git:     $have"
+
 mkdir -p "$ROOT/events" "$ROOT/content"
 echo "ledger:  $ROOT"
 

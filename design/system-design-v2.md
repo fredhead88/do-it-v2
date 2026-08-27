@@ -2770,25 +2770,36 @@ merges clean, as **its #1 silent killer.**
 
 | | |
 |---|---|
-| **Input** | the branch, **current main** (never the recorded `base_sha`), **the live merge-base** (D110), and the spec's `writes:` grant |
+| **Input** | the branch, **current main** (never the recorded `base_sha`), **the merged tree from `git merge-tree`** (D113), and the spec's `writes:` grant |
 | **Output** | `{status ∈ {clean, rework}, removed[], reverted[], undetermined?}` — every path filtered to those **outside** the grant |
 | **Writes** | `merge-gate-clean` / `merge-gate-rework{removed,reverted}` |
 | **Budget** | wall-clock cap |
 | **Runs** | the Executor's merge step (§3.9, D17 — one committer), **before `--no-ff`** |
 
-> **★ IT READS TWICE, AND THE SECOND READ IS WHAT MAKES IT USABLE** *(D110 —
-> found by building it)*. The two-dot diff against current main **finds**
-> candidates; the **live merge-base confirms** them. A gate that stops at the
-> first read names **every path main gained while the branch was out** — paths a
-> three-way merge **keeps**, because the branch never had them to delete. That is
-> most merges, and **a guard that misapplies is a guard that gets worked around**;
-> this project has already killed one remedy for exactly that failure.
-> **This is not a retreat to `base_sha`, and the distinction is the whole point.**
-> `base_sha` is **recorded** — written into the spec at cut time and frozen there.
-> The merge-base is **computed at merge time and moves when the branch merges
-> main**, which is precisely what the scar branch does before deleting the file.
-> **The two refs differ exactly on this section's case and agree everywhere
-> else.** A path absent at the merge-base was never the branch's to delete.
+> **★ IT PERFORMS THE MERGE — IT NEVER MODELS ONE** *(D113, superseding D110)*.
+> `git merge-tree --write-tree main branch` does the real three-way merge in
+> memory and returns the tree it would produce; the gate diffs **current main
+> against that tree.**
+>
+> **Three mechanisms have now been tried and the pattern across them is the
+> finding.** v1 diffed `base_sha..branch` and was blind to the scar entirely
+> (D108). **D110 diffed against current main and confirmed each candidate against
+> the live merge-base** — which works until the branch has been merged into and
+> kept going, at which point **there are several merge-bases and git picks one
+> arbitrarily.** Reproduced: two bases, git chose the one **lacking** the file,
+> the gate said **clean**, and the real merge deleted it.
+> **Both mechanisms reasoned ABOUT a merge instead of performing one, and both
+> failed exactly where the model and the merge diverge.**
+>
+> **D110 is discharged rather than reversed.** Its requirement — catch real
+> removals without crying wolf — is met more completely, and the false-alarm
+> problem it was invented to solve **stops existing**, because the real merge has
+> already decided what the branch removes. **The modelling was the defect.**
+>
+> **Verified on four cases that all read `clean` under D110:** a criss-cross
+> removal · a Hebrew filename (the `-z` diff is raw, so C-quoting no longer makes
+> a path vanish) · a migration replaced by a symlink (`T`) · **and D110's own
+> precision case, which stays clean.**
 
 **It reports two things, both filtered to paths outside the branch's `writes:`
 grant:** paths the merge would **remove**, and paths that survive but **revert to
