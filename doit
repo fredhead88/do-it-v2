@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# ponytail: dispatch, nothing else. All the logic is in src/.
+set -euo pipefail
+HERE="$(python3 -c 'import os,sys; print(os.path.dirname(os.path.realpath(sys.argv[1])))' "${BASH_SOURCE[0]}")"
+SRC="$HERE/src"
+case "${1:-board}" in
+  gate)    shift; exec python3 "$SRC/merge_gate.py" "$@" ;;
+  backup)  shift; exec bash "$SRC/backup.sh" "$@" ;;
+  test)    cd "$SRC" && python3 test_fold.py && exec python3 test_merge_gate.py ;;
+  help|-h) sed -n '2,20p' "$SRC/fold.py"; echo "  doit gate <branch> [main] [--spec ID]   merge guard, exit 1 = do not merge"
+           echo "  doit backup push|drill                  replicate / prove the backup"
+           echo "  doit test                               run every check" ;;
+  *)       exec python3 "$SRC/fold.py" "$@" ;;
+esac
