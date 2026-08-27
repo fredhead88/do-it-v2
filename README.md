@@ -16,7 +16,7 @@ are **prose, not code** (see *What is not here* below).
 Needs **python3** and **git 2.38 or newer** (`git merge-tree --write-tree`).
 
 ```bash
-git clone https://github.com/fredhead88/do-it.git ~/Projects/do-it
+git clone https://github.com/fredhead88/do-it-v2.git ~/Projects/do-it
 ~/Projects/do-it/install.sh
 ```
 
@@ -123,6 +123,14 @@ also the reason to distrust any claim in this file that was not checked.
 
 The backup is **unproven** until you set a destination — the board says so on
 every render, by design.
+
+## Relationship to DO-IT v4.7
+
+`fredhead88/do-it` is the predecessor — a filesystem-inbox spec pipeline, shipped
+and used. **This is a ground-up redesign that shares no code with it.** v4.7's
+record is one of the corpora the design was tested against: several of the
+decisions here exist because something in v4.7 failed in a specific, measured way.
+It is a successor, not a fork, and the old repo stands on its own.
 
 ## Reading the design
 
