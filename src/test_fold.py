@@ -136,6 +136,14 @@ assert len(fold.read_events()) == len(evs[0]), "half-written line skipped, rest 
 os.environ["DOIT_LEDGER_FILE"] = "L-operator-01.jsonl"
 fold.append(["observed", "-"])
 
+# an all-digit sha must not become an integer; a bool must still be a bool
+ev = fold.append(["merge-gate-clean", "L-spec-x", "merged_tree=628758778891",
+                  "sha=9b7e02d", "confirmed=false", "payload=[1,2]", "n:=17"])
+assert ev["merged_tree"] == "628758778891", "an all-digit sha stays a string"
+assert ev["sha"] == "9b7e02d"
+assert ev["confirmed"] is False, "true/false/null are unambiguous and stay typed"
+assert ev["payload"] == [1, 2] and ev["n"] == 17, "explicit JSON still works"
+
 # a subject's project comes from the subject, not the caller's cwd — a script run
 # from elsewhere must not strand its events under a second label (found by running
 # merge-gate from the repo root, where cwd said `do-it-v2` and the charter said `do-it`)
@@ -174,4 +182,4 @@ assert "corrections applied: 1" in fold.render(*((lambda e: (e,) + fold.fold(e))
     "the builder's rejected attempt is already on the unauthorized line"
 
 shutil.rmtree(TMP)
-print("fold: 29 checks pass")
+print("fold: 33 checks pass")

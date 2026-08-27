@@ -261,9 +261,24 @@ def append(argv):
          "project": PROJECT or subject_project(argv[1]) or pathlib.Path.cwd().name}
     for kv in argv[2:]:
         k, _, v = kv.partition("=")
-        try:                       # numbers/bools/objects typed; everything else a string
-            e[k] = json.loads(v)   # ponytail: a sha like 9b7e02d must not parse as 9
-        except json.JSONDecodeError:
+        # ★ A BARE VALUE IS A STRING unless it is UNAMBIGUOUSLY JSON. Bare numbers
+        # are not: an all-digit git sha (`628758778891`) parsed as an integer and
+        # went into the ledger unquoted — the same class as the earlier bug where
+        # `9b7e02d` became `9`, which survived because that one happened to raise.
+        # Identifiers outnumber arithmetic in this ledger, so the default flips.
+        # Write `k:=<json>` when a number really is a number.
+        if k.endswith(":"):
+            k = k[:-1]
+            try:
+                e[k] = json.loads(v)
+            except json.JSONDecodeError:
+                e[k] = v
+        elif v[:1] in "{[\"" or v in ("true", "false", "null"):
+            try:
+                e[k] = json.loads(v)
+            except json.JSONDecodeError:
+                e[k] = v
+        else:
             e[k] = v
     path.parent.mkdir(parents=True, exist_ok=True)
     line = json.dumps(e, sort_keys=True)
