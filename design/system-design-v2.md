@@ -2839,6 +2839,32 @@ excision case fools.
 > precisely how a grader established that every gate event in the ledger
 > **predated the code it was offered as evidence for.**
 
+> **★ THE GRANT IS VALIDATED, NEVER INTERPRETED** *(D115)*. Three rounds of
+> judging seats each found a different way for **English to become a grant** —
+> `writes: the web dashboard only` granted `web/` and passed a deletion of the
+> whole directory. **The format was wrong, not the guard.** A token must look
+> like a path; a bare directory carries its trailing slash, which no English word
+> does; and **breadth is tested by behaviour** — each candidate grant is asked
+> whether it covers paths no grant may ever cover. `*/**`, `**.*` and `**/*.*`
+> are all off switches, and **not one of them would occur to anyone writing a
+> blocklist of spellings.**
+>
+> **Every `GIT_*` variable is dropped** *(D115)*. `GIT_DIR` redirects the whole
+> gate at another repository and **beats `-C`** — and git sets it itself inside
+> hooks, aliases, `rebase --exec` and `bisect run`, so this is the ordinary case,
+> not an attack. **Ambiguity is read from the ref store**, not from a warning
+> `core.warnAmbiguousRefs` can be told to suppress: D114's own fix was defeated
+> by the very class of thing D114 was about.
+>
+> **★ What three rounds established about the mechanism itself.** An adversarial
+> reviewer could not produce a **single** false negative from `merge-tree` +
+> diff, and a grader ran **60 randomized histories** in which `merge-tree`
+> produced a tree identical to a real `--no-ff` **every time.** Every defect
+> across all three rounds lived in the layer *around* it. **Severity migrated
+> outward — rounds 1 and 2 broke the merge logic, round 3 broke argument parsing
+> and grant text — which is what convergence looks like, and is the first
+> evidence in this project that the review loop terminates.**
+
 **It is a forcing function, not a capability** — no model release makes an unread
 numstat row appear. And it is a script for §4.11's standing reason: **a script
 cannot be reasoned out of a check and a model can** (§4.4).
