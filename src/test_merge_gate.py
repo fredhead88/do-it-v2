@@ -19,6 +19,14 @@ def sh(*a):
     return subprocess.run(a, capture_output=True, text=True, check=True).stdout
 
 
+def _exit(fn):
+    """True when the callable exits rather than proceeding on bad input."""
+    try:
+        fn(); return False
+    except SystemExit:
+        return True
+
+
 def check(name, cond):
     ok.append(bool(cond))
     print(("  ok   " if cond else "  FAIL ") + name)
@@ -58,7 +66,7 @@ d, base = repo()
 on(d, lambda d: pathlib.Path(d, "late.txt").unlink())
 check("base_sha..branch produces no row at all (why v1's guard missed it)",
       "late.txt" not in sh("git", "-C", d, "diff", "--name-status", base, "work"))
-removed, reverts = mg.gate("work", "main", GRANT)
+removed, reverts = mg.gate("work", "main", GRANT)[:2]
 check("gate names the removal", any(r.startswith("late.txt@") for r in removed))
 check("the removal carries main's revision", removed and len(removed[0].split("@")[1]) == 7)
 
@@ -67,7 +75,7 @@ check("the removal carries main's revision", removed and len(removed[0].split("@
 # guard worked around. Must be clean.
 d, _ = repo()
 on(d, lambda d: pathlib.Path(d, "keep.txt").write_text("branch edit"), merge=False)
-check("un-merged main advance is NOT a removal", mg.gate("work", "main", GRANT)[0] == [])
+check("un-merged main advance is NOT a removal", mg.gate("work", "main", GRANT).removed == [])
 
 # 2 — a removal INSIDE the writes: grant is the branch's own business.
 d, _ = repo()
@@ -75,7 +83,7 @@ sh("git", "-C", d, "checkout", "-q", "main")
 pathlib.Path(d, "src").mkdir(); pathlib.Path(d, "src/mine.py").write_text("x")
 sh("git", "-C", d, "add", "-A"); sh("git", "-C", d, "commit", "-qm", "granted file")
 on(d, lambda d: pathlib.Path(d, "src/mine.py").unlink())
-check("granted removal is clean", mg.gate("work", "main", GRANT)[0] == [])
+check("granted removal is clean", mg.gate("work", "main", GRANT).removed == [])
 
 # 3 — migrations are named whatever the grant says (the excision case: the
 # deletion removes the evidence along with the artifact, so parity stays GREEN).
@@ -83,21 +91,21 @@ d, _ = repo()
 on(d, lambda d: pathlib.Path(d, "migrations/001.sql").unlink())
 check("migrations removal named even under a grant covering it",
       any(r.startswith("migrations/001.sql@")
-          for r in mg.gate("work", "main", ["migrations/"])[0]))
+          for r in mg.gate("work", "main", ["migrations/"]).removed))
 check("migrations removal named with no grant",
-      any(r.startswith("migrations/") for r in mg.gate("work", "main", GRANT)[0]))
+      any(r.startswith("migrations/") for r in mg.gate("work", "main", GRANT).removed))
 
 # 4 — a survivor that reverts to a pre-main revision.
 d, _ = repo()
 on(d, lambda d: pathlib.Path(d, "old.txt").write_text("v1"))
-_, reverts = mg.gate("work", "main", GRANT)
+reverts = mg.gate("work", "main", GRANT).reverted
 check("revert to a pre-main revision is caught", reverts == ["old.txt"])
 check("a file that simply never moved is not a revert", "keep.txt" not in reverts)
 
 # 5 — nothing to report.
 d, _ = repo()
 on(d, lambda d: None)
-check("no removals, no reverts -> clean", mg.gate("work", "main", GRANT) == ([], []))
+check("no removals, no reverts -> clean", mg.gate("work", "main", GRANT)[:2] == ([], []))
 
 # 6 — could-not-determine is never clean, and it is never silent.
 try:
@@ -156,7 +164,7 @@ d = crisscross()
 check("criss-cross history has more than one merge-base",
       len(sh("git", "-C", d, "merge-base", "--all", "main", "work").split()) > 1)
 check("★ criss-cross removal is named (D110 said clean here)",
-      any(r.startswith("victim.txt@") for r in mg.gate("work", "main", [])[0]))
+      any(r.startswith("victim.txt@") for r in mg.gate("work", "main", []).removed))
 
 d, _ = repo()
 on(d, lambda d: (pathlib.Path(d, "sod").mkdir(exist_ok=True),
@@ -166,7 +174,7 @@ pathlib.Path(d, "sod").mkdir(exist_ok=True); pathlib.Path(d, "sod/סוד.txt").w
 sh("git", "-C", d, "add", "-A"); sh("git", "-C", d, "commit", "-qm", "main gains a hebrew path")
 on(d, lambda d: pathlib.Path(d, "sod/סוד.txt").unlink())
 check("★ a Hebrew filename is named, not silently dropped by C-quoting",
-      any(r.startswith("sod/סוד.txt@") for r in mg.gate("work", "main", GRANT)[0]))
+      any(r.startswith("sod/סוד.txt@") for r in mg.gate("work", "main", GRANT).removed))
 
 d, _ = repo()
 def swap(d):
@@ -174,7 +182,7 @@ def swap(d):
     os.symlink("/dev/null", pathlib.Path(d, "migrations/001.sql"))
 on(d, swap)
 check("★ typechange (file replaced by a symlink) is a removal",
-      any(r.startswith("migrations/001.sql@") for r in mg.gate("work", "main", [])[0]))
+      any(r.startswith("migrations/001.sql@") for r in mg.gate("work", "main", []).removed))
 
 # grant boundaries — over-granting is under-reporting
 check("a grant of `src` does not cover `src_backup/keys.py`",
@@ -196,7 +204,7 @@ pathlib.Path(d, "supabase/migrations/001_init.sql").write_text("create")
 sh("git", "-C", d, "add", "-A"); sh("git", "-C", d, "commit", "-qm", "real migrations location")
 on(d, lambda d: pathlib.Path(d, "supabase/migrations/001_init.sql").unlink())
 check("★ supabase/migrations/ is named even under a grant covering it",
-      any("supabase/migrations" in r for r in mg.gate("work", "main", ["supabase/**"])[0]))
+      any("supabase/migrations" in r for r in mg.gate("work", "main", ["supabase/**"]).removed))
 
 # could-not-determine, in all its forms
 d, _ = repo(); on(d, lambda d: None)
@@ -212,6 +220,91 @@ except mg.Undetermined:
 check("the design's own `| **Writes** | src/* |` table row parses",
       (lambda: [(CONTENT / "L-spec-tbl.md").write_text("| **Writes** | `src/*`, docs/ |\n"),
                 mg.writes_grant("L-spec-tbl")][1])() == ["src/*", "docs/"])
+
+# ------------------------------------------------- D114: ambient state and renames
+# Both judging seats, blind to each other, ranked the rename hole first.
+
+d, _ = repo()
+sh("git", "-C", d, "checkout", "-q", "main")
+pathlib.Path(d, "supabase/migrations").mkdir(parents=True)
+pathlib.Path(d, "supabase/migrations/001_init.sql").write_text("create")
+sh("git", "-C", d, "add", "-A"); sh("git", "-C", d, "commit", "-qm", "real migrations")
+def moveout(d):
+    pathlib.Path(d, "src").mkdir(exist_ok=True)
+    sh("git", "-C", d, "mv", "late.txt", "src/late.txt")
+    sh("git", "-C", d, "mv", "supabase/migrations/001_init.sql", "src/001_init.sql")
+on(d, moveout)
+r = mg.gate("work", "main", ["src/**"])
+check("★ a rename into the grant is still a removal of the old path",
+      any(x.startswith("late.txt@") for x in r.removed))
+check("★ a migration moved out of migrations/ is named despite the grant",
+      any("supabase/migrations/001_init.sql" in x for x in r.removed))
+check("the rename destination is reported, not hidden",
+      any("-> src/late.txt" in x for x in r.removed))
+
+# an ambiguous ref must not silently resolve to the wrong object
+d, _ = repo()
+sh("git", "-C", d, "tag", "main", "HEAD~1")          # a TAG named main, beside the branch
+os.chdir(d)
+try:
+    mg.gate("work", "main", []); check("ambiguous ref raises", False)
+except mg.Undetermined as e:
+    check("★ a ref that is both a tag and a branch is could-not-determine",
+          "ambiguous" in str(e).lower())
+
+# a truncated history cannot answer a question about history
+d, _ = repo(); on(d, lambda dd: pathlib.Path(dd, "late.txt").unlink())
+shallow = tempfile.mkdtemp() + "/s"
+sh("git", "clone", "-q", "--depth", "1", "--no-local", "file://" + d, shallow)
+os.chdir(shallow)
+try:
+    mg.gate("HEAD", "HEAD", []); check("shallow repo raises", False)
+except mg.Undetermined as e:
+    check("★ a shallow clone is a hard stop, not a clean", "shallow" in str(e).lower())
+
+# ambient git config must not be able to hide a removal
+d, _ = repo()
+sh("git", "-C", d, "config", "diff.relative", "true")
+sh("git", "-C", d, "config", "diff.ignoreSubmodules", "all")
+on(d, lambda dd: pathlib.Path(dd, "late.txt").unlink())
+pathlib.Path(d, "web").mkdir(exist_ok=True)
+os.chdir(pathlib.Path(d, "web"))
+check("★ diff.relative + a subdirectory cwd cannot hide a removal",
+      any(x.startswith("late.txt@") for x in mg.gate("work", "main", []).removed))
+os.chdir(d)
+
+# the deadline is per run, not per process
+d, _ = repo(); on(d, lambda dd: None)
+mg.DEADLINE = 3600
+import time as _t
+mg.gate("work", "main", [])
+mg._START = _t.monotonic() - 10_000          # as if a previous run had burned the clock
+mg.DEADLINE = 60
+check("★ the deadline clock restarts each run", mg.gate("work", "main", [])[:2] == ([], []))
+
+# grants that are not grants
+for bad in ("*", "**", "**/*"):
+    (CONTENT / "L-spec-off.md").write_text(f"writes: {bad}\n")
+    try:
+        mg.writes_grant("L-spec-off"); check(f"grant {bad!r} rejected", False)
+    except mg.Undetermined as e:
+        check(f"★ a grant of {bad!r} is refused as an off switch", "off switch" in str(e))
+
+# prose must not become a grant
+(CONTENT / "L-spec-prose.md").write_text(
+    "Writes are limited to the merge gate script.\n\n| **Writes** | `src/*` |\n")
+check("★ an English sentence starting with 'Writes' is not parsed as a grant",
+      mg.writes_grant("L-spec-prose") == ["src/*"])
+(CONTENT / "L-spec-empty.md").write_text("| writes | |\n")
+try:
+    mg.writes_grant("L-spec-empty"); check("empty grant rejected", False)
+except mg.Undetermined:
+    check("a writes: line with no paths on it is could-not-determine", True)
+
+# argument handling: a typo is not a verdict
+check("a stray argument is refused", _exit(lambda: mg.parse(["main", "src/*"])))
+check("--writes with no value is refused", _exit(lambda: mg.parse(["main", "--writes"])))
+check("an unknown flag is refused", _exit(lambda: mg.parse(["main", "-x"])))
 
 print(f"merge-gate: {sum(ok)}/{len(ok)} checks pass")
 sys.exit(0 if all(ok) else 1)
