@@ -53,6 +53,18 @@ cleared = ledger(**{"L-builder-01.jsonl": built, "L-grader-01.jsonl": [
     {"ts": stamp(0), "type": "criterion-cleared", "subject": S, "criterion": "AC1"}]})
 assert cleared[1][S]["rejects"] == 0, "a cleared criterion stops standing"
 
+# D112 — the operator may close a spec that was never built, and it never reads
+# as accepted. Anyone else saying so is ignored like any other unauthorized emit.
+closed = ledger(**{"L-planner-01.jsonl": [built[0]], "L-operator-01.jsonl": [
+    {"ts": stamp(0), "type": "spec-closed", "subject": S, "charter": C,
+     "why": "answered by operator evidence, never built"},
+    {"ts": stamp(0), "type": "l1-complete", "subject": C}]})
+assert closed[1][S]["state"] == "closed-unbuilt", closed[1][S]["state"]
+assert "1 closed unbuilt" in fold.render(*closed), "an unbuilt close is visible at charter close"
+notop = ledger(**{"L-planner-01.jsonl": [built[0]], "L-builder-01.jsonl": [
+    {"ts": stamp(0), "type": "spec-closed", "subject": S, "charter": C}]})
+assert notop[1][S]["state"] == "written", "only the operator may close a spec unbuilt"
+
 _, sp, _, _, _ = ledger(**{"L-builder-01.jsonl": built, "L-grader-01.jsonl": graded,
                            "L-reviewer-01.jsonl": reviewed, "L-executor-01.jsonl": shipped +
                            [{"ts": stamp(0), "type": "rejected-criterion", "subject": S,
@@ -143,4 +155,4 @@ assert "corrections applied: 1" in fold.render(*((lambda e: (e,) + fold.fold(e))
     "the builder's rejected attempt is already on the unauthorized line"
 
 shutil.rmtree(TMP)
-print("fold: 23 checks pass")
+print("fold: 26 checks pass")

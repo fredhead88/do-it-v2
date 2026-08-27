@@ -517,6 +517,36 @@ Deny-by-default, the same shape as the T0 classifier. It exists because some
 truths are only observable later — a cron that has not fired yet, a weekly
 rollup, a real client's data arriving Monday.
 
+**`closed-unbuilt`** *(D112 — found by needing it)*:
+
+```
+closed-unbuilt(spec) = ∃ spec-closed event, operator-fired only
+```
+
+**A spec's question can be answered before the spec is built** — by evidence the
+operator already had, by another spec's work, or by the question turning out not
+to matter. **Until D112 the lifecycle had no way to say so:** the terminal states
+were `accepted`, `shipped-owed-evidence`, and `dropped` — and `dropped` is
+reachable only through charter retraction, which is one-way and kills the whole
+charter (D76). **So a spec answered without building had exactly two
+representations, and both were lies:** leave it `written`, and the board reports
+open work that nobody is ever going to do; or manufacture a verdict, **which is
+gate-gaming with extra steps.**
+
+> **★ It is deliberately not `accepted`.** Nothing here was built, graded,
+> reviewed or verified — `accepted` means four specific things happened and none
+> of them did. A state that collapsed the two would make the acceptance count,
+> the grading corpus and D26's N=30 gate all quietly wrong.
+
+**Operator-fired only**, enforced in the fold like every other type: an agent
+that emits `spec-closed` is recorded, ignored and counted. **The reason is D76's
+reason** — a spec closing itself because it is hard is the same gate-gaming exit
+as a charter retracting itself.
+
+**It surfaces at charter close and nowhere else.** Terminal work does not queue,
+so it appears in no working section; the charter-close row carries `N closed
+unbuilt`, which is the one moment anyone asks *was this actually done?*
+
 - **A script wakes at `wake_at` — never a sleeping agent** — runs the declared
   query, and appends a verdict event. The Executor picks it up on its normal
   lane re-scan.

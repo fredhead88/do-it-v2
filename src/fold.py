@@ -22,7 +22,8 @@ PROJECT = os.environ.get("DOIT_PROJECT")          # §9.1/D93: a filter, not a s
 # Who may emit what. A type absent here is open to any actor (§2.5).
 EMITS = {"verdict": {"grader"}, "review": {"reviewer"}, "shipped": {"executor"},
          "charter-retracted": {"operator"}, "restore-verified": {"drill"},
-         "correction": {"operator"}}                      # D111
+         "correction": {"operator"},                       # D111
+         "spec-closed": {"operator"}}                       # D112
 # A correction may override anything but these: D90 takes the actor from the
 # FILENAME, and a correction that could rewrite it reopens every check below.
 UNCORRECTABLE = ("actor", "_src")
@@ -112,6 +113,11 @@ def spec_state(evs, retracted):
             return "accepted"                                        # §2.5 accepted()
         if any(e["type"] == "owed-ac" and ts(e.get("wake_at")) > NOW for e in evs):
             return "shipped-owed-evidence"                           # D25
+    if "spec-closed" in types:
+        # D112: the operator closed it without a build — the question it was
+        # written to answer got answered another way. Terminal, and deliberately
+        # NOT `accepted`: nothing here was graded, reviewed, or verified.
+        return "closed-unbuilt"
     charter = next((e.get("charter") for e in reversed(evs) if e.get("charter")), None)
     if charter in retracted and "shipped" not in types:
         return "dropped"                                             # D76, terminal for alarms
@@ -149,8 +155,8 @@ def fold(events):
         owed = sum(1 for s in mine if s["state"] == "shipped-owed-evidence")
         if cid in retracted:
             c["state"] = "retracted"
-        elif (mine and all(s["state"] in ("accepted", "shipped-owed-evidence", "dropped")
-                           for s in mine)
+        elif (mine and all(s["state"] in ("accepted", "shipped-owed-evidence", "dropped",
+                                          "closed-unbuilt") for s in mine)
               and {"sweep-fixpoint", "charter-review-complete"} <= types and owed <= K):
             c["state"] = "L2-complete"
         elif "l1-complete" in types:
@@ -158,6 +164,7 @@ def fold(events):
         else:
             c["state"] = "open"
         c["owed"] = owed
+        c["unbuilt"] = sum(1 for s in mine if s["state"] == "closed-unbuilt")
     return specs, charters, ignored, by_subject
 
 
@@ -198,7 +205,14 @@ def render(events, specs, charters, ignored, by_subject):
     block("OWED EVIDENCE", [f"{s['id']} · wakes " + str(next(
         (e.get("wake_at") for e in s["evs"] if e["type"] == "owed-ac"), "?"))
         for s in pick("shipped-owed-evidence")])
+    # An unbuilt close is invisible in every working section — terminal work does
+    # not queue. It surfaces HERE, at the one moment someone asks "was this
+    # actually done?" (D112).
+    # ponytail: on a charter still `open` it is therefore visible nowhere. The ten
+    # sections are fixed and the board answers "what needs you now", which a
+    # terminal spec does not. Revisit if a cut spec is ever quietly lost this way.
     block("CHARTER CLOSE", [f"{c['id']} · {c['state']} · {c['owed']} owed (K={K})"
+                            + (f" · {c['unbuilt']} closed unbuilt" if c["unbuilt"] else "")
                             for c in charters.values()
                             if c["state"] in ("L1-complete", "L2-complete", "retracted")])
     block("SHIPPED SINCE YOU LOOKED", [e.get("subject", "?") for e in since("shipped")])
