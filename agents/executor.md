@@ -39,7 +39,7 @@ is waiting for you. `doit events <subject>` is how you check each row.
 
 | Lane says | You check | You do |
 |---|---|---|
-| **a `question` with no `decision` naming it** (a decision carries `ref`) | reversible, with a `default`, past its `deadline`? | reversible → decide: `doit append decision <subject> ref=<file:line> why="…" revert="…"`. Irreversible, or no default → `doit append escalation-blocking <subject> why="…"`. Before the deadline: nothing — the builder is working on the default. |
+| **a `question` with no `decision` naming it** (a decision's `ref` is the question's `src`, as `doit events` prints it) | reversible, with a `default`, past its `deadline`? | reversible → decide: `doit append decision <subject> ref=<the question's src> why="…" revert="…"`. Irreversible, or no default → `doit append escalation-blocking <subject> why="…"`. Before the deadline: nothing — the builder is working on the default. |
 | **a `spawn-failed` or `spawn-stale`** on the subject with no later `spawn-done` from the same role | its `why` | `api_error` → nothing; already escalated. A refusal (`is_error`) or `contamination` → `escalation-blocking` naming the contract: the packet or the contract text is wrong (D120). Timeout, null output, missing file, changed repo, stale → re-dispatch once with the same packet; a second failure → `escalation-blocking`. |
 | **`written`** | an `L-spec-auditor-*` `spawn-done` for this subject? if it had findings, a later `spec-written`? a footprint shared with a `building` spec of a higher-priority charter (earlier goal date)? | no audit → dispatch `spec-auditor`. Audited with findings, no rework yet → dispatch `spec-writer` with the fix list. `bad_cut` → `doit append bad-cut <spec>` and `escalation-blocking` (re-cut is authorship's, §4.3). Collision → `doit append blocked <spec> id=<spec>-wait owner=executor why="…"` and wait. Otherwise cut the worktree, install the wave's ratified dependencies if the Plan names any (D73), dispatch `builder`. |
 | **`graded` / `reviewing` / `shipped`-not-accepted** — the pipeline after a build | **the newest** of `build-done`, `verdict`, `review` on the subject | see the block below; act on that one event only. |
@@ -52,7 +52,11 @@ is waiting for you. `doit events <subject>` is how you check each row.
 - **newest is `build-done`** (nothing has judged it since — a first build or a
   rework): status `DONE` → dispatch `grader`; the same packet recipe whether
   it is round one or a re-grade. `BLOCKED` / `NEEDS_CONTEXT` → its `question`
-  rows are yours; none → `escalation-blocking` with the `build-blocked` reason.
+  rows are yours, and a build already blocked on a question does not wait for
+  the deadline: decide now if it is reversible. Every question decided (a
+  `decision` whose `ref` names it) → re-dispatch `builder` on the same
+  worktree with each decision's `why` in the packet as a binding constraint;
+  an undecidable one → `escalation-blocking` with the `build-blocked` reason.
 - **newest is a `verdict`**: a `rejected-criterion` standing (none
   `criterion-cleared` since) → **rework**: dispatch `builder` on the same
   worktree and branch, the packet carrying every standing criterion with its

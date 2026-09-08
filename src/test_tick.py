@@ -54,8 +54,19 @@ tick.main()
 assert len([l for l in tick.TICK.read_text().splitlines() if '"spawn-stale"' in l]) == 1, "stale is recorded once"
 ev_file.unlink()
 
+# an open escalation keeps the subject off the lane; a decision after it puts it back
+esc = TMP / "events" / "L-executor-0090.jsonl"
+esc.write_text(json.dumps({"v": 1, "ts": fold.NOW.isoformat(timespec="seconds"), "type": "escalation-blocking",
+                           "subject": "L-spec-0001", "why": "seat", "spawn": "L-executor-0090"}) + "\n")
+assert tick.main() == 0 and ticks()[-1]["lane"] == 0, "an escalated subject is the operator's, not the lane's"
+esc.write_text(esc.read_text() + json.dumps({"v": 1, "ts": fold.NOW.isoformat(timespec="seconds"), "type": "decision",
+                                             "subject": "L-spec-0001", "why": "w", "revert": "r", "spawn": "L-executor-0090"}) + "\n")
+tick.main()
+assert ticks()[-1]["lane"] == 1, "a decision after the escalation returns it to the lane"
+esc.unlink()
+
 held = open(TMP / "tick.lock", "w")
 fcntl.flock(held, fcntl.LOCK_EX)
 before = len(ticks())
 assert tick.main() == 0 and len(ticks()) == before, "flock: a second tick is dropped, not queued"
-print("tick: 9 checks pass")
+print("tick: 11 checks pass")

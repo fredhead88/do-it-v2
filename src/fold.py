@@ -309,7 +309,7 @@ if __name__ == "__main__":
     if cmd == "events":                      # one subject's events, oldest first, as the fold read them
         for e in ev:
             if e.get("subject") == sys.argv[2]:
-                print(json.dumps({k: v for k, v in e.items() if k != "_src"}, sort_keys=True))
+                print(json.dumps({**{k: v for k, v in e.items() if k != "_src"}, "src": e["_src"]}, sort_keys=True))
     elif cmd == "states":
         for sid, s in sorted({**specs, **charters}.items()):
             print(f"{sid}\t{s['state']}")

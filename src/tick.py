@@ -29,7 +29,14 @@ def in_flight(ev):
     is back on the lane for the Executor's failed-spawn row."""
     started = {e.get("spawn"): e for e in ev if e["type"] in ("build-started", "spawn-started")}
     ended = {e.get("spawn") for e in ev if e["type"] in ("spawn-done", "spawn-failed", "spawn-stale")}
-    busy = set()
+    # An open escalation is the operator's: the subject leaves the lane until a
+    # decision or an unblocked event lands after it — else every cron tick pays
+    # for an Executor that reads the escalation and does nothing.
+    last = {}
+    for e in ev:
+        if e["type"] in ("escalation-blocking", "decision", "unblocked") and e.get("subject"):
+            last[e["subject"]] = e["type"]
+    busy = {s for s, t in last.items() if t == "escalation-blocking"}
     for sid, e in started.items():
         if sid in ended:
             continue
