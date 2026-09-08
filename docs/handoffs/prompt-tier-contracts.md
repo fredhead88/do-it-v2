@@ -299,6 +299,33 @@ process will measure zero. **Not fixed here:** the one-line change (stamp at wri
 time, not at import) touches every module that reads `fold.NOW` for age, which is
 a fold change and not this item's. (Found by the real deploy run, 2026-09-08.)
 
+### 25. A packet that cannot find a thing reports none, and none reads as fine
+Found by the first real review (`L-reviewer-0002`, 2026-09-08). `p_reviewer`'s
+criteria extractor anchored on an `AC\\d+ \\[` line; the real spec's criteria are
+bold (`**AC1 [ui] — ...**`), so item 3 of the packet read *"none found in the
+spec"* and the reviewer returned `n_blocking: 0` — **a review of nothing that is
+byte-identical to a clean review**. Only the grader's second extractor
+(`section(body, "Acceptance")`) saw all nine. Fixed in `5450cef`: one
+`criteria()` for both roles, and it refuses rather than reporting none.
+**The shape generalises and is worth a sweep**: every `or ["none"]` fallback in
+`packet.py` is a place where absent input reads as an empty answer. The
+remaining ones (`--` metrics, the card's AC rows, the review account) were not
+touched here — each needs its own judgment about whether absent is legitimately
+empty.
+
+### 26. Nothing ever wrote `l1-complete`, and every test passed
+Found closing the first real charter (2026-09-08). `fold` derives
+`L1-complete` from an `l1-complete` event; the Executor's entire close row —
+`sweep-fixpoint`, `charter-reviewer`, `reap` — gates on `L1-complete`; and no
+contract, script or pane emitted it. The Planner's ⑦ printed a handover and
+stopped. So `L-charter-0002` had every spec `accepted` and stayed `open`, and
+the tick went idle with the close half of the machine unreachable. Fixed in
+`9b5f1d3`: ⑦ has the `doit append l1-complete` line, `EMITS["l1-complete"] =
+{planner, operator}`, two fold checks. **It is the fourth defect of the shape
+CLAUDE.md names — invisible to a passing suite because the suite wrote the
+event itself** (`test_fold.py:67` had been appending `l1-complete` by hand
+since the fold was written).
+
 ### 22. The tick's lane is global, so §12.2 step 3 is not expressible
 `tick.lane()` is every actionable spec plus every `L1-complete` charter in the
 root. §12.2 step 3 says *move one charter through the new chain while everything
@@ -381,6 +408,31 @@ charter that relies on them.
 - [x] **§3.6's audit scripts** — `src/audit.py` + `doit audit cut|plan`, the deterministic pre-pass both fable audits rest on, and its output is the plan-auditor's packet item 3. Six checks, each with its own negative, and **every one of them can answer `undetermined`, which is not a pass**: same-wave footprint overlap (a unit with no `Wave:` makes it undetermined, because the rule is per wave); the `Consumes:`/`Produces:` graph, including a seam produced in a *later* wave than it is consumed; a name produced by two units with no owner, cleared only by the Plan's Shared decisions section; the requirement-id diff units-vs-charter in both directions; footprint size against §4.3's ceiling (no `--repo` → undetermined; a footprint resolving to nothing on disk → undetermined, never small); and the acquisition ADR trail against `adr-filed{kind: acquisition}` (no Plan at stage `cut` → undetermined). The charter-set diff was **moved, not duplicated**: `think.coverage` *is* `audit.goal_coverage` now, and a check asserts the identity so nobody writes the second one. **The landing is a wrapper check, not prose** (§7.3): `doit dispatch plan-auditor` refuses a packet that carries no `## Script pre-pass` block before it spends, because "the script did not run" otherwise reads exactly like "the script found nothing"; `agents/planner.md` ② and ④ now carry the `doit audit` command lines and ① names the six labels the parser reads. Verified: `./doit test` green, `audit: 44 checks pass`; the wrapper's refusal and its acceptance both run as real subprocesses, and `doit audit` runs end-to-end through `doit`. **Spawned for real, key unset** (`DOIT_ROOT=~/.do-it-scratch/audit-scripts`, **kept**; `~/.do-it` untouched): `plan-auditor` on Fable at stage `cut`, on a deliberately flawed cut of a real charter over this repo — 3 turns, 39.6 s, $0.43 list, session `21794b32-356a-4079-b530-7b24e467b332`, `bad_cut: true`, `contamination: false`, 9 findings. It **used the block as ground truth and never re-derived it** (its mechanical findings are tagged "(script)") and spent its pass on semantics — a missed extract, a review path no unit delivers, an unpinned event filter — which is §3.6 working. It also filed the `undetermined` acquisition line as a finding rather than reading it as clean. **One defect it found, fixed with its regression check:** the ownership rule cleared a name produced by two units in different waves as "the earliest is the owner"; an extract has exactly *one* producer (§3.7), and a later unit re-producing a wave-1 name re-touches what wave 1 landed. The script now catches by itself what the auditor had to find by hand. Re-folded the real `~/.do-it` before and after: `doit states` identical, ignored still 3 (2026-09-08, ninth session).
 - [x] **`deploy` and `tree-cleanup` scripts** (§4.11) — `src/deploy.py` + `doit deploy` and `src/tree_cleanup.py` + `doit reap`, and the Executor's merge and close rows now call them instead of describing them. Two things the item's wording left implicit and that are the whole value: **a deploy "lands" only when the handed-in check exits 0 *and prints the sha*** — exit 0 alone proves the service answers, not that this build answers, and that is the exact way a deploy reports landed when it did not; and **the reaper's ancestry is patch-id tested**, because under squash-merge `git branch --merged` *and* `--is-ancestor` both say "not merged" about a branch whose content is on main, which is §8.11's instrument running and confidently wrong. Two guards that are checks rather than prose (§7.3): `doit deploy` refuses a missing `--check` before it runs anything, and `doit reap` refuses a charter that is not `L2-complete` or `retracted` — the close-only rule was the Executor's prose, and a model can be reasoned out of prose. Two fold rules landed with them: `EMITS[deploy-landed]` and `EMITS[tree-reaped]` = `{executor, operator}`, the clearing direction and the record of destruction; `deploy-started`/`deploy-failed` stay open, because reporting a failure is the safe direction. Verified: `./doit test` green, `deploy: 28 checks pass` · `tree-cleanup: 26 checks pass` — every check runs the real script as a subprocess against real bash commands and real git repositories, and each has its negative (a check that exits 0 without the sha is FAILED; a command failure never consults the check; the check runs at least once even at the cap; a second concurrent deploy is dropped with *no* event; a squash-merged branch is reaped only after the test proves both git answers wrong; a branch with one unmerged commit, a dirty worktree, and a spec with no `ready_sha` are each retained with the reason naming which test failed; `--dry-run` judges and destroys nothing; a `deploy-landed`/`tree-reaped` written into a builder's file is recorded and ignored). **Run end-to-end for real** (`DOIT_ROOT=~/.do-it-scratch/deploy-reap`, **kept**; `~/.do-it` untouched): a real repo, a real worktree, a real `--no-ff` merge at `96967ee`, then `doit deploy` landed it (`deployed 96967ee7157a to local`, `deploy-landed`+`worked`); a second deploy of a sha the target never took **failed while its check exited 0 four times in a row** serving the *other* sha — the failure this script exists for — and printed the `git revert -m 1` line; `doit reap` then refused the open charter, and after `sweep-fixpoint`+`charter-review-complete` derived L2-complete it removed the worktree and the branch and wrote one `tree-reaped{reaped:[l-spec-0001], retained:[]}`. One finding carried as Active Problem 21: `fold.NOW` is frozen at import, so a script's own events share a timestamp. Re-folded the real `~/.do-it` before and after: `doit states` identical, ignored still 3 (2026-09-08, tenth session).
 - [~] **One real charter through the ten contracts** (§12.2 step 3) on this repository under `~/.do-it`. **PARTIAL: the forward half ran for real; the build half did not.** `L-charter-0002 · Spend per project on the board` was written by a real `thinker` spawn (13 turns, $0.61, session `220fdb80-627c-426a-811e-352119436cc3`), landed by `doit think --land`, then cut and planned by a real `planner` pane (52 turns, $3.21, session `23d48bce-839d-426e-a9b8-b84be0ce3fe8`): one unit, one wave, both fable audits dispatched and returned (`bad_cut: false` at stage `cut`, 5 more findings at stage `plan`), Plan rev 3 with its nine sections, `L-adr-0001` filed, three owed sweep questions. A second planner context dispatched the `spec-writer` (⑥–⑦, $0.62, session `f5f9f8e6-fc72-4714-82f6-2bda4dfb360d`) and `L-spec-0004` was written. Real Executor ticks then dispatched the `spec-auditor` — 12 findings, `contamination: false`, session `f60a8ce4-aabf-4416-9d5c-60e5f72f077d` — and the rework `spec-writer`. **10 spawns, $8.45 list, 2 blocking escalations, 1 wasted spawn**, all recorded in `docs/handoffs/baseline-2026-09.md` (D100's baseline, and it is the deliverable this item exists for). **What remains: `builder`, `grader`, `reviewer`, the merge through the gate, and the charter close (`sweep-fixpoint` → `charter-reviewer` → `doit reap`) — i.e. `L-spec-0004` from `written` to `accepted` and `L-charter-0002` to L2-complete.** The ledger, the charter, the cut, the Plan, both audits and the spec are all on disk under `~/.do-it`; restart the loop with `~/.do-it-scratch/first-charter/tickloop.sh` (90 s) and it continues from where it stopped. **Three defects found by running it, each fixed with its own regression check and its own commit** — `dispatch.alloc` allocating over content files only (`3a9d35c`), `tick.in_flight` crashing on a pre-wrapper start event with no `spawn` id (`a996cee`), `packet.sibling_bodies` crashing on a `spec-written` with no `path` (`80d1ba4`). Verified: `./doit test` green (dispatch 18 · tick 14 · packet 23, the three new checks), and the run itself is in the real ledger — `doit events L-charter-0002` and `doit events L-spec-0004` (2026-09-08, eleventh session).
+  **Twelfth session — the build half ran for real and the spec reached `accepted`.**
+  The eleventh session's tick loop was still live when this step started and had
+  already carried `L-spec-0004` through `builder` (opus, 29 turns, $2.07, session
+  `3ca4f264-97c3-4306-8d80-01c7c28ad982`, one commit `4de8d60`, 3 deviations),
+  `grader` (fable, 13 turns, $1.14, session `0eba0bd8-cc56-4dba-9587-a26dbf6518b5`,
+  all nine criteria met) and `reviewer` round 1 (opus, 11 turns, $0.52, session
+  `30e8bc7b-644e-448e-b17a-be8cc62eefd7`); the Executor then merged through the
+  gate (`merge-gate-clean`, merge `cf08106`) and the fold derived `accepted`.
+  **Two defects were found by running it, each fixed with its own regression check
+  and its own commit** — the reviewer's round-1 packet carried **no criteria at
+  all** and it returned `n_blocking: 0` on a review of nothing (`5450cef`), and
+  **nothing in the system ever wrote `l1-complete`**, so no charter could ever
+  leave `open` and the whole close row was unreachable (`9b5f1d3`). The reviewer
+  was re-run for real on the fixed packet — round 2, depth `full`, all nine
+  criteria driven, `n_blocking: 0`, 19 turns, $1.07, session
+  `33da77e7-fff2-4cee-9a6e-f7a27e308925` — and its question about the round label
+  was answered with an operator `decision`. A real Executor tick then reached
+  `sweep-fixpoint` (K=0 owed, no open briefs). **PARTIAL: what remains is the
+  last two ticks — `charter-reviewer` and `doit reap`** — i.e. `L-charter-0002`
+  from `L1-complete` to L2-complete. Restart `~/.do-it-scratch/first-charter/tickloop.sh 6`
+  and it continues. Verified: `./doit test` green (fold 70 · packet 30, the four
+  new checks), `doit states` → `L-spec-0004 accepted`, `L-charter-0002
+  L1-complete`, and the board renders the charter's own product —
+  `spend · do-it · $N · N spawns — list-price estimate … not money billed`
+  (2026-09-08, twelfth session).
 
 ## Reference
 
@@ -444,6 +496,17 @@ model change spawn each contract once on its own model with its own schema.
 Both are now visible in the ledger: `spawn-done.cli` and `.contract_sha256`.
 
 ## Session Log
+- 2026-09-08 (twelfth session, driver item 8 continued): the build half of the
+  first real charter. The previous step's claim was re-verified first, from the
+  scratch root rather than the sentence — `thinker-out.json`, `planner-out.json`
+  and `planner2-out.json` carry the sessions, turns and costs the handoff claims,
+  to the cent. Its tick loop was **still running**, and had carried the spec
+  through builder, grader and reviewer to `accepted` while this step read the
+  handoff. Two defects found by running: a reviewer packet that reported *"none
+  found in the spec"* over nine criteria and a review that returned no blocking
+  finding on it, and an `l1-complete` event nothing in the system ever wrote.
+  Both are the same shape as the four before them — **the suite passed because
+  the suite supplied the input the real world did not**.
 - 2026-09-08 (tenth session, driver item 7): §4.11's other two scripts. `src/deploy.py` + `doit deploy` (28 checks), `src/tree_cleanup.py` + `doit reap` (26 checks), two `EMITS` entries in `fold.py`, and the Executor's merge and close rows rewritten to call the scripts rather than describe the steps. The previous step's claim was re-verified first: `~/.do-it-scratch/audit-scripts` is intact and its `L-plan-auditor-0001.jsonl` carries the session `21794b32-…`, `claude-fable-5-1`, 3 turns, $0.4346, `bad_cut: true`, `contamination: false` and nine `audit-finding` events at stage `cut` — the handoff's numbers, from the ledger rather than the sentence. The two new scripts were each written against the failure §4.11 names for them rather than against their happy path, and both failures turned out to be the same shape: **a check that answers is not a check that agrees.** A deploy whose post-deploy check exits 0 while serving a different sha reads exactly like a successful deploy, and a squash-merged branch reads exactly like an unmerged one to git's own flag. Both are now the thing the test proves before it proves the script.
 - 2026-09-08 (ninth session, driver item 6): §3.6's pre-pass. `src/audit.py` + `doit audit` + `src/test_audit.py` (44 checks); `think.py`'s `section`/`ID`/`LISTED`/`coverage` moved into `audit` so the requirement-id diff has one implementation at both levels; `dispatch.py` refuses a plan-auditor packet with no pre-pass block before it spends; `agents/planner.md` ①②④ and `agents/plan-auditor.md` name the block and the rule that an `undetermined` line is not a pass. The previous step's claim was re-verified first: `~/.do-it-scratch/vet-dep-probe` is intact and its two `spawn-done` events carry the sessions, models, turns and costs the handoff claims. The real plan-auditor run then did what the throwaway chain did in the third session — it found a defect in the thing that had just been written, and the fix turned a semantic finding into a mechanical one.
 - 2026-09-08 (eighth session, driver item 5): the install gate and the last two contracts. `scripts/vet-dep.mjs` + `.claude/settings.json` (73 checks), `src/paid_call.py` + `doit paid-call` (27 checks), `doit alloc <kind> --dir`, two HEALTH lines for the override and warning counts, `install.sh` now refuses without node because a gate that cannot run is not a gate. `reuse-scout` (Sonnet) and `probe` (Opus) spawned for real, which completes D120's one-spawn-per-contract condition. Two defects in `dispatch.py` had to be fixed before the probe could run at all, and both were invisible to a suite that had never dispatched a `dir`-kind role: **`porcelain()` read "not a git repository" as undetermined and refused the one contract whose cwd is outside every repo on purpose**, and the `--path` check compared a trailing-slash run directory against a bare name. The probe then found a defect in `vet-dep` that `vet-dep`'s own tests could not — OSV advisories are version-scoped — which is the probe doing exactly what §4.6·10 says it is for.

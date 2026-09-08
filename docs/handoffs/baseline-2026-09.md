@@ -10,8 +10,9 @@ driven by real Executor ticks — on this repository, under the real `~/.do-it`.
 estimate under seat auth (`costBasis: list`). It is a *size* measure, not money
 billed; the real meter is the seat's usage window.
 
-**Status: the forward half ran; the build half had not finished when the step's
-context ran out.** What is here is what actually happened, not a projection.
+**Status: the forward half and the build half both ran; the charter is
+`L1-complete` with the last two ticks — charter-review and reap — outstanding.**
+What is here is what actually happened, not a projection.
 
 ## The charter
 
@@ -98,3 +99,43 @@ system could not make.
    pathless `spec-written`. All three are the same shape: **a field the wrapper
    always writes, absent on an event written before the wrapper existed.** The
    ledger is append-only, so pre-wrapper events are permanent inputs.
+
+
+## The build half (twelfth session)
+
+| # | Role | Model | Turns | Wall | Cost (list) | Session | Outcome |
+|---|---|---|---|---|---|---|---|
+| 11 | `executor` ticks 3–7 | opus | 5–11 | — | $1.67 | — | dispatched builder, grader, reviewer; merged; swept to fixpoint |
+| 12 | `builder` | opus | 29 | 358 s | $2.07 | `3ca4f264-97c3-4306-8d80-01c7c28ad982` | one commit `4de8d60`, 3 deviations, `worked`, a `spec-contradiction` and an `adr-friction` |
+| 13 | `grader` | fable | 13 | 119 s | $1.14 | `0eba0bd8-cc56-4dba-9587-a26dbf6518b5` | all nine criteria met, `card_ok: yes`; one `card-quality` — the card had rows for AC1–AC6 only |
+| 14 | `reviewer` round 1 | opus | 11 | 330 s | $0.52 | `30e8bc7b-644e-448e-b17a-be8cc62eefd7` | **`n_blocking: 0` on a review of nothing** — its packet said "none found in the spec" |
+| 15 | `reviewer` round 2 | opus | 19 | 265 s | $1.07 | `33da77e7-fff2-4cee-9a6e-f7a27e308925` | all nine criteria driven at depth `full`, `n_blocking: 0`, and it asked whether the round label was right |
+
+**Build half: 5 spawns + 5 executor ticks, $6.47 list.** Running total for the
+charter: **20 spawns, $14.92 list, 2 blocking escalations, 1 wasted spawn, 1
+wasted review.**
+
+## What the operator had to do — the build half
+
+| When | What | Avoidable? |
+|---|---|---|
+| after review round 1 | fixed `packet.py` (commit `5450cef`), re-dispatched the reviewer | the defect was durable and is now fixed; **the review that reviewed nothing cost a full Opus spawn and would have closed the charter** |
+| at charter close | fixed `fold.py` + `planner.md` (commit `9b5f1d3`), appended `l1-complete` as operator | the fix is durable; the append was needed once, for a charter whose Planner ran before the line existed |
+| after review round 2 | answered the reviewer's `question` with a `decision` | no — that is §4.9 working: it asked, it defaulted safely, it did not wait |
+
+**Seven operator interventions across the whole charter, five of them code fixes
+to DO-IT itself, two of them answers the system asked for correctly.** No
+product decision was ever escalated to the operator.
+
+## What the build half taught
+
+- **Absent input reads as an empty answer.** Both defects here are that: a
+  packet reporting `none` over nine criteria, and an event nobody ever wrote.
+  Neither was a wrong answer — both were *no answer, formatted as one*.
+- **A review with nothing to review is byte-identical to a clean review.** The
+  reviewer said so in an `evidence-gap` and returned no blocking finding
+  anyway, which is correct behaviour on a packet that lied to it.
+- **The suite supplies what the world does not.** `test_fold.py` had been
+  appending `l1-complete` by hand since the fold was written, and
+  `test_packet.py`'s fixture spec used unbolded `AC1 [` lines. Four of this
+  repo's defects now have that shape.
