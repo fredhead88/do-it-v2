@@ -149,6 +149,23 @@ refuses("grader", "L-card-0001 · DONE · built by L-builder-0007", worktree=str
 refuses("grader", "renamed the helper because the twin check found a near-identical one already",
         worktree=str(REPO))
 
+# The Executor's cut recipe names the worktree directory for the branch and the
+# branch for the spec, so the grader packet — the one packet that must carry the
+# worktree path — carried the builder's branch and was refused: every spec built
+# on that recipe was ungradeable, and the suite missed it because its worktree was
+# never named after the branch (L-spec-0005, 2026-09-08). A branch the grader can
+# derive from the subject it already holds is not a cue.
+WT = TMP / "worktrees" / "t" / "l-spec-0001"
+WT.mkdir(parents=True)
+t = build("grader", worktree=str(WT))
+assert str(WT) in t, "the grader must be told where the build is"
+# ...and a branch it cannot derive is still a cue, and still stripped.
+ev("builder", "build-done", "L-spec-0002", status="DONE", branch="claude/L-spec-0002-feature",
+   base_sha="1111111", ready_sha="2222222", verify_exit=0, tests_added=True)
+c2 = packet.Ctx(packet.argparse.Namespace(subject="L-spec-0002", charter=None, project="t"))
+assert ("the builder's branch", "claude/L-spec-0002-feature") in packet.builder_cues(c2), \
+    "a branch that is not the subject is a cue the grader must never see"
+
 # ── 4. spec-writer (rework) ──────────────────────────────────────────────────
 ev("spec-auditor", "audit-finding", "L-spec-0001", list="findings", field="Verification",
    category="unfalsifiable", finding="AC1's review path observes nothing that could fail",
@@ -194,7 +211,8 @@ refuses("charter-reviewer", "Cut this way because one wave keeps the footprint f
 # ── the file itself ──────────────────────────────────────────────────────────
 ps = {p.name for p in (TMP / "packets").glob("*.md")}
 assert ps == {"L-charter-0001-charter-reviewer-1.md", "L-spec-0001-builder-1.md",
-              "L-spec-0001-grader-1.md", "L-spec-0001-reviewer-1.md",
+              "L-spec-0001-grader-1.md", "L-spec-0001-grader-2.md",
+              "L-spec-0001-reviewer-1.md",
               "L-spec-0001-spec-auditor-1.md", "L-spec-0001-spec-writer-1.md",
               "L-spec-0001-spec-writer-2.md"}, ps
 assert "REFUSED" not in "".join(p.read_text() for p in (TMP / "packets").glob("*.md")), \

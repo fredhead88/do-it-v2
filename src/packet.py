@@ -303,7 +303,10 @@ def p_charter_reviewer(c):
     for s in sorted(mine, key=lambda s: s["id"]):
         bd = next((e for e in reversed(s["evs"]) if e["type"] == "build-done"), None)
         sw = next((e for e in reversed(s["evs"]) if e["type"] == "spec-written"), None)
-        bd and cards.append(f"   {s['id']}: {bd['card']}")
+        # A build-done with no card is a gap the charter-reviewer must see, not a
+        # row it never gets (AP24/AP25: absent must not read as fine).
+        bd and cards.append(
+            f"   {s['id']}: {bd.get('card') or 'NO CARD RECORDED — build-done carries none'}")
         sw and specs.append(f"   {s['id']}: {sw['path']}")
     fp = c.last("sweep-fixpoint")
     return [
@@ -361,12 +364,25 @@ def builder_cues(c):
     """Who built it, on what branch, when, and what it argued — §4.6·4's strip list."""
     bd, out = c.last("build-done"), []
     if bd:
-        out += [("the builder's branch", bd.get("branch")), ("base_sha", bd.get("base_sha")),
+        # A branch named for the subject is not a cue. The grader's packet names the
+        # subject by necessity, and the Executor's cut recipe makes the worktree
+        # directory the branch name — so stripping it refused every spec built on
+        # that recipe, the grader packet being the one that must carry the worktree
+        # path (L-spec-0005, 2026-09-08). Strip only what the grader cannot already
+        # derive from what it legitimately holds; anything short of provably
+        # derivable stays stripped.
+        branch = bd.get("branch")
+        if branch and branch.lower() != c.a.subject.lower():
+            out.append(("the builder's branch", branch))
+        out += [("base_sha", bd.get("base_sha")),
                 ("ready_sha", bd.get("ready_sha")), ("a build timestamp", bd.get("ts"))]
         out += [("the builder's spawn id", e.get("spawn")) for e in c.all_of("spawn-done")
                 if e.get("actor") == "builder"]
+        # is_file, not exists: the "/" fallback for a build-done with no card is a
+        # directory and passes exists() (AP24 — a field the wrapper always writes,
+        # absent on an event written before it did).
         card = pathlib.Path(bd.get("card") or "/")
-        if card.exists():
+        if card.is_file():
             head = card.read_text().splitlines()[0]
             out.append(("the card's header line", head))
             # who built it, straight off the header — the cue the grader must not see
