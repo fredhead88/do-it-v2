@@ -6,7 +6,7 @@ models.** The three driver skills, the dispatch wrapper and the Executor tick
 are unwritten. Nothing blocks them: (a) is decided (D116), the panes (D117),
 the contract count (D118), the skills mechanism (D119) and the first-spawn
 findings (D120) are all in the design.
-Last updated: 2026-09-08 (second session)
+Last updated: 2026-09-08 (handover after the second session)
 
 ## Goal
 Write the artifacts that make DO-IT v2's roles *exist*: ten sub-agent contracts,
@@ -42,6 +42,11 @@ the merge gate has fired on a real merge]:
 | **`agents/<name>.md` × 10** | **986** | **the ten contracts — agent files, nine fields each** |
 | **`agents/<name>.schema.json` × 10** | **1692** | **their Output schemas — draft-07, no `$schema`, no `$ref`** |
 | `install.sh` | +7 | symlinks `agents/*.md` into `~/.claude/agents/` so `--agent <name>` resolves from any cwd |
+
+Once installed, the ten contracts also appear as Agent-tool subagent types in
+any Claude Code session on this machine — the D116 in-session fallback is live
+without further work. Do not dispatch them that way for real work: the
+in-session path has no schema and no `usage`.
 
 **Spawned for real on the D116 line, key unset** (all in the 09-08 meter file):
 
@@ -204,6 +209,8 @@ D120, per-model. On CLI upgrade re-run rows M, R, I2, Q of the 09-08 file; on
 model change spawn each contract once on its own model with its own schema.
 
 ## Session Log
+- 2026-09-08: handover. State verified from git: `do-it` clean at `a582cdb`, pushed;
+  `do-it-v2` register at `a1f465c` (no remote). Nothing changed since.
 - 2026-09-08 (second session): D116–D120 written and carried. Meter run
   extended to ~60 spawns (~$8, $0 metered): the seat is on disk; `--bare` is
   metered by its help text; the D116 line measured at 7,440 tok; skills settle
