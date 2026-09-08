@@ -211,4 +211,11 @@ ev("planner", "spec-written", "L-spec-0009")            # no path=, deliberately
 build("spec-writer")
 assert (TMP / "packets" / "L-spec-0001-spec-writer-2.md").exists(), "a pathless sibling is skipped, not crashed on"
 
+# Same shape one layer over: a `build-done` with no `card`. Four sit in the real
+# ledger from the pre-wrapper era and one of them crashed `doit packet builder`,
+# which is the one dispatch a written spec cannot proceed without.
+ev("builder", "build-done", "L-spec-0002")              # no card=, deliberately
+t = build("builder", worktree=str(REPO), repo=str(REPO))
+assert "another builder's card" not in t, "a cardless build-done is skipped, not crashed on"
+
 print(f"packet: {N} packets built, six Blindness lists enforced")

@@ -81,11 +81,11 @@ class Ctx:
 
     def spec_file(self):
         e = self.last("spec-written") or die(f"{self.a.subject} has no spec-written event")
-        return resolve(e["path"])
+        return resolve(e.get("path") or die(f"{self.a.subject}'s spec-written carries no path"))
 
     def card_file(self):
         e = self.last("build-done") or die(f"{self.a.subject} has no build-done event")
-        return resolve(e["card"])
+        return resolve(e.get("card") or die(f"{self.a.subject}'s build-done carries no card"))
 
     def footprint(self):
         return (self.last("spec-written") or {}).get("footprint") or []
@@ -326,11 +326,16 @@ def sibling_bodies(c):
 
 
 def other_cards(c):
+    """Every other spec's card. Same shape as sibling_bodies: a `build-done` need not
+    carry a `card` — the pre-wrapper era wrote four that do not, and one of them
+    crashed `doit packet builder`, the one dispatch a written spec cannot proceed
+    without. A card with no file on disk has nothing to leak."""
     out = []
     for sid, s in c.specs.items():
         if sid == c.a.subject:
             continue
-        e = next((x for x in reversed(s["evs"]) if x["type"] == "build-done"), None)
+        e = next((x for x in reversed(s["evs"])
+                  if x["type"] == "build-done" and pathlib.Path(x.get("card") or "/").is_file()), None)
         if e:
             out += [(f"another builder's card ({sid})", l) for l in long_lines(pathlib.Path(e["card"]), 30)[:20]]
     return out
@@ -344,7 +349,7 @@ def builder_cues(c):
                 ("ready_sha", bd.get("ready_sha")), ("a build timestamp", bd.get("ts"))]
         out += [("the builder's spawn id", e.get("spawn")) for e in c.all_of("spawn-done")
                 if e.get("actor") == "builder"]
-        card = pathlib.Path(bd["card"])
+        card = pathlib.Path(bd.get("card") or "/")
         if card.exists():
             head = card.read_text().splitlines()[0]
             out.append(("the card's header line", head))
@@ -380,12 +385,12 @@ def strip(c, role):
         bd = c.last("build-done")
         # Not the shas: item 1 hands the reviewer the worktree AT ready_sha. What it
         # must not see is the card's prose and the grader's reasons (§4.6·5).
-        card = [("the card's prose", l) for l in long_lines(pathlib.Path(bd["card"]), 30)] if bd else []
+        card = [("the card's prose", l) for l in long_lines(pathlib.Path(bd.get("card") or "/"), 30)] if bd else []
         return card + grader_reasons(c) + [("a declared deviation", e.get("what"))
                                            for e in c.all_of("build-deviation")]
     if role == "charter-reviewer":
         pw = c.last("plan-written")
-        return [("the Plan's rationale", l) for l in long_lines(pathlib.Path(pw["path"]))] if pw else []
+        return [("the Plan's rationale", l) for l in long_lines(pathlib.Path(pw.get("path") or "/"))] if pw else []
     return []
 
 
