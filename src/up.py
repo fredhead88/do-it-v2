@@ -39,7 +39,7 @@ def pane_cmd():
             "--disallowedTools", ",".join(f"Skill({s})" for s in tick.RETIRE)]
 
 
-INSTALLED = pathlib.Path.home() / ".claude" / "agents" / "planner.md"
+AGENTS_HOME = pathlib.Path.home() / ".claude" / "agents"
 
 
 def install(contract):
@@ -47,15 +47,17 @@ def install(contract):
     measured: a pane launched without this exits 1 with `--agent 'planner' not found`
     AFTER the cron line has been printed, which reads like success. The ten contracts
     are symlinked there already; this is the eleventh link, made idempotently and
-    never over somebody else's file."""
-    if INSTALLED.is_symlink() and INSTALLED.resolve() == contract.resolve():
+    never over somebody else's file. `think.py` links the twelfth through this same
+    function, because the hole is the launcher's and not the Planner's."""
+    link = AGENTS_HOME / contract.name
+    if link.is_symlink() and link.resolve() == contract.resolve():
         return
-    if INSTALLED.exists() or INSTALLED.is_symlink():
-        sys.exit(f"up: {INSTALLED} is not this repo's contract — resolve it by hand:\n"
-                 f"  ln -sfn {contract} {INSTALLED}")
-    INSTALLED.parent.mkdir(parents=True, exist_ok=True)
-    INSTALLED.symlink_to(contract)
-    print(f"# linked {INSTALLED} -> {contract}")
+    if link.exists() or link.is_symlink():
+        sys.exit(f"up: {link} is not this repo's contract — resolve it by hand:\n"
+                 f"  ln -sfn {contract} {link}")
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(contract)
+    print(f"# linked {link} -> {contract}")
 
 
 def main(print_only=False):

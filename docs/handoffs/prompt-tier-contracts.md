@@ -8,10 +8,11 @@ packets are a script now, not the Executor's prose** — `doit packet` builds ea
 role's Input list from the ledger and refuses to write a packet carrying what
 that role's Blindness strips. The remaining work is queued under Next Steps as a checklist that
 `scripts/drive.sh` executes unattended, one fresh session per item, with the
-handoff as the only state. **The Planner pane exists and loads**; the Thinker driver,
-`vet-dep`, the audit scripts, and the deploy and tree-cleanup scripts are what is
-left in that queue.
-Last updated: 2026-09-08 (sixth session — the driver loop's third item)
+handoff as the only state. **The Planner pane exists and loads**, and so does **the Thinker session**: `doit think`
+opens it, and `doit think --land` is the one place a charter's five sections, its
+`review_path` and its `Covers:` are ever checked. `vet-dep`, the audit scripts,
+and the deploy and tree-cleanup scripts are what is left in that queue.
+Last updated: 2026-09-08 (seventh session — the driver loop's fourth item)
 
 ## Goal
 Write the artifacts that make DO-IT v2's roles *exist*: ten sub-agent contracts,
@@ -38,7 +39,7 @@ is that line plus every check below.
 **Register:** `~/.claude/do-it-v2/open-topics.md` (D1–D120) · design copy synced.
 
 **Built and running** [`doit test`: fold 55 + merge-gate 73 + dispatch 16 mocked
-spawns + packet 22 + tick 11 + up 31; three real spawns through the wrapper]:
+spawns + packet 22 + tick 11 + up 31 + think 57; three real spawns through the wrapper]:
 
 | File | Lines | What |
 |---|---|---|
@@ -53,6 +54,8 @@ spawns + packet 22 + tick 11 + up 31; three real spawns through the wrapper]:
 | `src/test_dispatch.py` · `src/test_tick.py` | ~160 | every after-the-fact check exercised against the failure it was written for |
 | **`agents/planner.md`** | **~175** | **the Planner pane** (§3.5, D80) — the seven-step cycle with its exact command lines, the Plan's nine required sections as slots, the sweep's blocks-vs-owed rule, and the rules that bind (never read a spec it commissioned; read-only on code; no return path). No schema: a pane's Output is the files and events it writes |
 | **`src/up.py`** + `src/test_up.py` | **~75** + ~95 | **`doit up`** — links the contract into `~/.claude/agents/`, allocates the pane's `L-planner-NNNN.jsonl`, prints the cron line and never installs it |
+| **`agents/thinker.md`** | **~175** | **the Thinker session** (§3.3) — the twelfth agent file and the second interactive one: the inventory-first opening, the three shapes, the charter's five sections written out as the template `--land` enforces, §7.9's triage rules (adjacent only, never deletes, name the master threads), and the rules that bind (spawns nothing; read-only on code; requirements, never execution shape) |
+| **`src/think.py`** + `src/test_think.py` | **~200** + ~190 | **`doit think`** — opens `claude -n think-<topic> --agent thinker` (named, so §8.9's `creative` counter is derivable), links the contract where `--agent` looks, allocates `L-thinker-NNNN.jsonl`. **`--land FILE …` is the only place a charter is checked**: five sections, a requirement with a stable id, a `review_path` with both halves, a non-empty `Covers:`, no execution-shape heading — then `charter-filed`, then the both-directions coverage diff and a detached `plan-auditor` at **stage `charter-set`** (D98). `--discard` leaves one line so "ended with nothing" and "still open" differ |
 | `src/backup.sh` | 69 | one-way restic push + restore drill |
 | `agents/<name>.md` × 10 · `<name>.schema.json` × 10 | 986 · 1692 | the ten contracts and their Output schemas (unchanged this session) |
 | `doit` | | `dispatch` (`--detach`), `packet`, `tick`, `up`, `alloc`, `events` subcommands; `test` runs all six suites |
@@ -77,7 +80,6 @@ spawns + packet 22 + tick 11 + up 31; three real spawns through the wrapper]:
 
 | Missing | Size | Kind |
 |---|---|---|
-| Thinker (interactive) driver skill | ~300 | **prompt** |
 | §3.6's six audit scripts · `scripts/vet-dep.mjs` | ~150 | code |
 | Rest of fold's rules: typed ACs, blind grading | ~80 | code |
 | `doit doctor` — `agents/*.md` vs `~/.claude/agents/` (Active Problem 15) | ~15 | code |
@@ -215,6 +217,19 @@ is open for any future contract**: `doit dispatch` reads `agents/<role>.md` off
 disk for its frontmatter and hash, so it never notices, and the spawn fails at
 the CLI with a message the wrapper records as `is_error`. A `doit doctor` that
 diffs `agents/*.md` against `~/.claude/agents/` is the fix; it is not written.
+`think.py` links the twelfth contract through the same `up.install()` — the
+function now takes any contract and derives the link name from it — so the two
+launchers cannot drift apart, but `doit dispatch` still notices nothing.
+
+### 16. §3.3 and §2.1 disagree about who writes a goal
+§3.3's shape table says a **brainstorm** produces *"a goal or a charter"*; §2.1's
+artifact table says the **Goal** is *written by the operator*. `think.py` therefore
+authorizes `charter-filed` to `{thinker, operator}` and leaves `goal-filed`
+unauthorized — open to any actor, as it was — rather than guess which table wins.
+It matters because `--land`'s charter-set diff reads the newest `goal-filed`
+event's path: whoever may write that event chooses what every charter is diffed
+against. A register decision, not a code one. (Found writing the Thinker,
+2026-09-08.)
 
 ### 14. The previous step's `- [x]` cannot be re-run
 Its evidence — `doit states` → `L-spec-0001 accepted`, a toy repo's merge sha —
@@ -253,9 +268,9 @@ charter that relies on them.
 
 - [x] **Fold rules** — in `src/fold.py`: `DECLARES` (the nine contracts' May-declare lists) folded into `EMITS` at import; `over_budget()` against `dispatch.ROLES` and the tick's cap → a `budget-exceeded` HEALTH line, not an eleventh board section (§8.3's ten are positional); `must-fix` joined `standing_rejects` (D101) so acceptance does not depend on the wrapper also writing a `rejected-criterion` beside it; overdue `question`s under NEEDS YOU, answered by a `decision`/`unblocked` whose `ref` is the `file:line` `doit events` already prints; the NEWEST `charter-review-*` verdict decides L2 and only the charter-reviewer may give it; `dwell_days()` derives the wedge bar from the log's own stage crossings (2 × median, the 1-day default until three crossings). Also closed one AP12 bullet: `open_escalations()` is the tick's lane rule verbatim, so a decided escalation leaves NEEDS YOU. Verified: `./doit test` green, `fold: 55 checks pass` (33 → 55) — each rule has its own check *including the negative*: a builder's `hollow` ignored, an executor's `owed-ac` ignored, a charter refused its own `charter-review-complete`, a `not-complete` after a `complete` leaving L2, a `decision` answering by `ref`, an unparseable deadline read as past, and a 4-day build that wedges against the 1-day default but not against the measured 6. Re-folded the real `~/.do-it` ledger before and after: `doit states` identical and the ignored list unchanged at 3, so no historical event was newly invalidated (2026-09-08, fifth session).
 - [x] **Planner driver** — `agents/planner.md` (the eleventh agent file, and the only interactive one: no schema, no `StructuredOutput`, `Skill` kept so §10.5's KEEP list survives the deny). The cycle is ⓪ probe → ① cut file + `cut-written` → ② `doit dispatch plan-auditor` at stage `cut` → ③ the Plan's nine required sections + `plan-written` → ④ plan-audit at stage `plan` → ⑤ the batched question sweep → ⑥ one `spec-writer` dispatch per slot → ⑦ clear. `src/up.py` + `doit up`: links the contract where `--agent` looks, allocates the pane's own `L-planner-NNNN.jsonl` (D90), **prints** the cron line and never installs it. Two new pieces the cycle could not run without: `doit alloc <kind>` (§2.8 max+1 under content, `O_EXCL`) because a Planner inventing spec ids hands two units the same one, and `EMITS[cut-written|plan-written] = {planner}` because the two fable audits are blind to an author the fold did not otherwise name. Verified: `./doit test` green, `up: 31 checks pass` — the cron line honours `DOIT_TICK_MIN` and carries this root and this `doit`; `crontab` appears nowhere in the module; the RETIRE list is denied by name; a missing contract and a foreign file at the link name each exit loud with the fixing line; two `doit alloc spec` calls give 0001 and 0002 and a different kind numbers from its own max; a `plan-written` from a builder and a `cut-written` from an executor are recorded and ignored while the Planner's lands. **Spawned for real, key unset** (`~/.do-it-scratch/planner-load`, `~/.do-it` untouched): `claude -p --agent planner` resolved on `claude-opus-5`, 1 turn, 3.5 s, $0.14 list — and the first attempt exited 1 with `--agent 'planner' not found` **after** the cron line had printed, which is the defect `install()` and its checks now hold. Re-folded the real `~/.do-it` before and after: `doit states` identical, ignored still 3. Scratch roots removed (2026-09-08, sixth session).
-- [ ] **Thinker driver** — `agents/thinker.md`, interactive and read-only on code: authors a charter with its five sections and `review_path` (§3.4), files it (`doit append charter-filed`), triages briefs. Reference `~/.claude/skills/think`.
+- [x] **Thinker driver** — `agents/thinker.md` (the twelfth agent file, the second interactive one) plus `src/think.py` + `doit think`. The item said `doit append charter-filed`; **the append is the wrong half of it** — a charter appended by hand is a charter nothing checked, and §3.4's rules would have shipped as prose (§7.3). So landing is a command: `doit think --land FILE …` refuses the five sections one at a time, a requirement with no stable id, a `review_path` missing either half (D99), an empty `Covers:`, a charter written outside `content/`, and an execution-shape *heading* (seams · waves · interfaces · data shapes · error handling · schema · branch — §3.4's own NOT-in-the-charter list); only then does it append `charter-filed`, and only then — if the set cites a goal — does it run the requirement-id diff **both directions** and dispatch `plan-auditor` at **stage `charter-set`** detached (D98, §3.3: the check is the driver's, because the Thinker spawns nothing). `--discard` is the equally cheap exit and leaves one line so "ended with nothing" and "still open" are different states. `fold.EMITS["charter-filed"] = {thinker, operator}` — the landing checks are what authorize the seat. `up.install()` generalised to any contract, so both launchers close Active Problem 15 the same way. Verified: `./doit test` green, `think: 57 checks pass` — every refusal with its negative (the word "seams" in a *sentence* still lands; `Covers: none` is the §12.2 adopted-project case and passes; a set with one bad charter appends *nothing*, not the good ones; a `charter-filed` from the planner or a builder is recorded and ignored; a charter citing goal ids with no goal file escalates rather than passing silently). **Run for real, key unset** (`DOIT_ROOT=~/.do-it-scratch/thinker`, `~/.do-it` untouched): `doit alloc charter` → a real charter written → `doit think --land` filed it as actor `thinker` and the fold derived `L-charter-0001 open`; `claude -p --agent thinker` resolved on `claude-opus-5`, 1 turn, 5.2 s, $0.11 list, and named the five sections back in order — the template in the body is the one the check enforces. Re-folded the real `~/.do-it` before and after: `doit states` identical, ignored still 3. Scratch root removed (2026-09-08, seventh session).
 - [ ] **`scripts/vet-dep.mjs`** (§6.7b: the install gate is the vetting script) and a real `reuse-scout` spawn (Sonnet) on a scratch slot. Then `probe`: a run dir under content, a stub paid-call wrapper (§10.4) that logs spend, a real spawn (Opus) against one harmless external. Both contracts then trusted per D120.
-- [ ] **§3.6's audit scripts** — `src/audit.py`: same-wave footprint overlap; the `Consumes:`/`Produces:` graph; a shared name introduced twice with no owner; the requirement-id diff in both directions (units vs charter; charter set vs goal); the size heuristic against §4.3; the ADR-trail diff. Its output is the plan-auditor's packet item 3. Tests.
+- [ ] **§3.6's audit scripts** — `src/audit.py`: same-wave footprint overlap; the `Consumes:`/`Produces:` graph; a shared name introduced twice with no owner; the requirement-id diff in both directions (units vs charter; **charter set vs goal already exists as `think.coverage()` — move it, do not write a second one**); the size heuristic against §4.3; the ADR-trail diff. Its output is the plan-auditor's packet item 3. Tests.
 - [ ] **`deploy` and `tree-cleanup` scripts** (§4.11) — `src/deploy.py`: serial, waits, verifies the sha is live, `deploy-started` / `deploy-landed` / `deploy-failed`; `src/tree_cleanup.py`: reaps only the provably dead (patch-id ancestry, clean worktree, nothing unmerged), `tree-reaped{reaped, retained, retained_reason}`. Update the Executor's merge and close rows to call them. Tests.
 - [ ] **One real charter through the ten contracts** (§12.2 step 3) on this repository under `~/.do-it`: the Thinker files it, the Planner cuts, plans and specs it, the tick drives it to L2-complete (run `doit tick` every 90 s in a loop for the duration — installing cron is the operator's, never the step's). Keep it one wave — for example "the board shows spend per project from `spawn-done`". Record the baseline (D100) in `docs/handoffs/baseline-2026-09.md`: spawns, cost, turns, escalations, what the operator had to do.
 
@@ -274,9 +289,11 @@ charter that relies on them.
 - Probes: `~/.claude/agents/doit-probe-minimal.md`, `doit-probe-schema.md`,
   `doit-probe-skill.md` — throwaway, safe to delete
 
-**The eleventh agent file is the Planner** — a pane, not a contract: no schema, no
-`StructuredOutput`, `Skill` on its `tools:` line, launched interactively by `doit up`
-and never by the wrapper. It is symlinked into `~/.claude/agents/` like the ten.
+**The eleventh and twelfth agent files are the Planner and the Thinker** — panes, not
+contracts: no schema, no `StructuredOutput`, `Skill` on the `tools:` line, launched
+interactively by `doit up` and `doit think` and never by the wrapper. Both are
+symlinked into `~/.claude/agents/` like the ten. The Planner is standing and holds one
+charter; the Thinker is ephemeral and ends when its artifact lands.
 
 **The ten contracts** (models are the *contracts'*, from §4.6):
 
@@ -319,6 +336,7 @@ model change spawn each contract once on its own model with its own schema.
 Both are now visible in the ledger: `spawn-done.cli` and `.contract_sha256`.
 
 ## Session Log
+- 2026-09-08 (seventh session, driver item 4): the Thinker. `agents/thinker.md` and `src/think.py` + `doit think` (open · `--land` · `--discard`), `src/test_think.py` (57 checks) wired into `doit test`, `charter-filed` authorized to the Thinker and the operator in `fold.EMITS`, `up.install()` generalised so both launchers link their contract the same way. The item's `doit append charter-filed` became a landing command instead: §3.4's five sections, the `review_path` and the `Covers:` line only bind if something refuses the file, and nothing downstream ever re-reads a charter for shape. The charter-set audit (D98) landed with it — the coverage diff runs both directions and the packet carries stage `charter-set`. One finding carried as Active Problem 16: §3.3 and §2.1 disagree about who may file a goal, so `goal-filed` was left unauthorized rather than guessed.
 - 2026-09-08 (sixth session, driver item 3): the Planner pane. `agents/planner.md` (the eleventh agent file, interactive, no schema), `src/up.py` + `doit up`, `doit alloc`, `cut-written`/`plan-written` authorized to the Planner in `fold.EMITS`, `src/test_up.py` (31 checks) wired into `doit test`. The pane was launched for real and the first launch failed `--agent 'planner' not found` — an agent file in this repo is invisible until it is symlinked into `~/.claude/agents/`, a step nothing had recorded (Active Problem 15). `up.install()` is that step, and the second launch loaded on Opus in 1 turn.
 - 2026-09-08 (fifth session, driver item 2): the fold's remaining rules. `fold.py` 315 → 456 lines, `test_fold.py` 33 → 55 checks. Two authorization holes closed that nothing had noticed: any actor could emit `owed-ac` and walk a shipped spec into `shipped-owed-evidence`, and any actor could emit `charter-review-complete` — a charter could review itself closed. Two existing tests moved their events to the actor whose contract declares them. The board keeps its ten sections; the Budget comparison is a HEALTH line.
 - 2026-09-08 (fourth session, driver item 1): `src/packet.py` + `src/test_packet.py` written; `doit packet` wired; the Executor's five hand-built recipes replaced by six command lines; `Writes:` added to slot 4 of the spec template. `spec-auditor` spawned for real on Fable through the new packet — clean, 12 findings, and three of them were defects in *this* repo that a grep could not have found. Two findings carried here as Active Problems 13 and 14.

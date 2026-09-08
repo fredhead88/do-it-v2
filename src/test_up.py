@@ -53,22 +53,23 @@ except SystemExit as e:
 # ── the contract is linked where `--agent` looks, or the pane dies after the ──
 # ── cron line has printed, which reads like success (measured 2026-09-08) ─────
 (dispatch.AGENTS / "planner.md").write_text((real_agents / "planner.md").read_text())
-up.INSTALLED = TMP / "claude-agents" / "planner.md"
+up.AGENTS_HOME = TMP / "claude-agents"
+LINK = up.AGENTS_HOME / "planner.md"
 _, env = up.main(print_only=True)
-ok(up.INSTALLED.is_symlink() and up.INSTALLED.resolve() == (dispatch.AGENTS / "planner.md").resolve(),
+ok(LINK.is_symlink() and LINK.resolve() == (dispatch.AGENTS / "planner.md").resolve(),
    "up links the contract into ~/.claude/agents — `--agent planner` resolves nowhere else")
 ok(env["DOIT_LEDGER_FILE"] == "L-planner-0001.jsonl", f"the pane writes as itself (D90): {env['DOIT_LEDGER_FILE']}")
 ok(env["PATH"].split(":")[0] == str(up.HERE.parent), "`doit` resolves inside the pane")
 _, env2 = up.main(print_only=True)
 ok(env2["DOIT_LEDGER_FILE"] == "L-planner-0002.jsonl", "a second pane never shares the first's actor file")
-ok(up.INSTALLED.is_symlink(), "linking is idempotent — a second up does not fail on its own link")
-up.INSTALLED.unlink(); up.INSTALLED.write_text("someone else's planner")
+ok(LINK.is_symlink(), "linking is idempotent — a second up does not fail on its own link")
+LINK.unlink(); LINK.write_text("someone else's planner")
 try:
     up.main(print_only=True)
     ok(False, "a foreign file at the link name must stop the pane")
 except SystemExit as e:
     ok("ln -sfn" in str(e), f"and it names the one line that resolves it: {e}")
-up.INSTALLED.unlink()
+LINK.unlink()
 ok((fold.ROOT / "logs").is_dir(), "the cron line's log directory exists before the line is handed over")
 
 # ── `doit alloc` — the id the Planner must not invent ────────────────────────

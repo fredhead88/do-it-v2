@@ -45,7 +45,13 @@ EMITS = {"verdict": {"grader"}, "review": {"reviewer"}, "shipped": {"executor"},
          # meaningful if the artifact they point at is the Planner's. A
          # `plan-written` from any other seat also aims the charter-reviewer's
          # Blindness strip list (packet.py) at a file the Planner never wrote.
-         "cut-written": {"planner"}, "plan-written": {"planner"}}
+         "cut-written": {"planner"}, "plan-written": {"planner"},
+         # §2.1/§3.4: the charter has one author, and `doit think --land` is the one
+         # path that checks its five sections before the event points at it. A
+         # charter-filed from anywhere else is a charter nothing checked — the
+         # Planner would cut from it and the charter-reviewer would close against a
+         # done-condition that may not exist.
+         "charter-filed": {"thinker", "operator"}}
 
 # §4.4's `May declare` line, one contract at a time — the fold authorizes (§4.6).
 # A declaration lands as an event TYPED BY ITS TERM (dispatch.events_for), so a
