@@ -376,9 +376,10 @@ the tree. Until then **the driver must keep the tree clean for the duration of a
 spawn** — write scratch elsewhere and copy in at the end. (Found the same run.)
 
 **It recurred in the thirteenth session and it will keep recurring.** That step
-ran out of budget with an `L-spec-writer-0003` spawn still in flight and had to
-write its own handoff to commit at all, which voids it; the Executor's
-failed-spawn row re-dispatches it once. **The driver step and the tick loop cannot
+ran out of budget with an `L-spec-writer-0003` spawn still in flight and wrote its
+own handoff anyway, because the commit is the only evidence it ran. **It got away
+with it by seconds** — the spawn landed at 12:35:00 and the first handoff write
+followed it, so the porcelain check saw no change. That is luck, not a method. **The driver step and the tick loop cannot
 both hold the tree**, and no amount of discipline fixes that — the check's blast
 radius has to shrink to the paths the spawn was granted. It is now the cheapest
 unblocking fix in this file.
@@ -496,9 +497,15 @@ charter that relies on them.
   `doit alloc spec` → `L-spec-0005`, a slot file naming R3, the brief verbatim,
   the charter's constraints and the three adjacent briefs as out-of-scope,
   `brief-answered` linking it by `ref`, and a detached `spec-writer` dispatch.
-  **PARTIAL: `L-spec-0005` is in flight at `spawn-started` and the rest of its
-  chain — audit, build, grade, review, merge, then a second `charter-reviewer` and
-  the reap — has not run.** Restart `~/.do-it-scratch/first-charter/tickloop.sh 40`
+  That `spec-writer` then **landed clean** — `L-spec-0005` written, five ACs over
+  `ui`/`backend`/`observed-data`, footprint `src/fold.py` + `src/test_fold.py`,
+  `requirement_ids: [R3]`, 0 owed, 28 turns, $2.19 list, session
+  `6a883730-b54f-4466-9975-b4829e8e6c76` — plus a real `charter-gap` worth reading
+  before the build: *R3 is reachable only where a name is asserted, i.e. under
+  `DOIT_PROJECT`; unfiltered, a project the ledger never names still cannot
+  render, and seeding it needs a registry §8.2 forbids.*
+  **PARTIAL: the rest of the chain — `spec-auditor`, build, grade, review, merge,
+  then a second `charter-reviewer` and the reap — has not run.** Restart `~/.do-it-scratch/first-charter/tickloop.sh 40`
   and it continues; the loop's log is `tickloop-13.log` beside it. Verified:
   `./doit test` green (fold 79 · packet 35, the fourteen new checks), the board's
   CHARTER CLOSE line reads `L-charter-0002 · L1-complete · 0 owed (K=0) · 1
