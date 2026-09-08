@@ -20,7 +20,7 @@ half-run**: `L-charter-0002` was thought, landed, cut, planned, audited twice
 and specced by real spawns under the real `~/.do-it`; the build half (builder,
 grader, reviewer, merge, close) is what is left, and D100's baseline is in
 `docs/handoffs/baseline-2026-09.md`.
-Last updated: 2026-09-08 (eleventh session — the driver loop's eighth item)
+Last updated: 2026-09-08 (thirteenth session — the driver loop's eighth item, third pass)
 
 ## Goal
 Write the artifacts that make DO-IT v2's roles *exist*: ten sub-agent contracts,
@@ -46,8 +46,8 @@ is that line plus every check below.
 **Repo:** `~/Projects/do-it` · remote `https://github.com/fredhead88/do-it-v2.git` · Public.
 **Register:** `~/.claude/do-it-v2/open-topics.md` (D1–D120) · design copy synced.
 
-**Built and running** [`doit test`: fold 55 + merge-gate 73 + dispatch 17 mocked
-spawns + packet 22 + tick 11 + up 31 + think 57 + paid-call 27 + audit 44 +
+**Built and running** [`doit test`: fold 79 + merge-gate 73 + dispatch 18 mocked
+spawns + packet 35 + tick 11 + up 31 + think 57 + paid-call 27 + audit 44 +
 deploy 28 + tree-cleanup 26 + vet-dep 73; six real spawns through the wrapper]:
 
 | File | Lines | What |
@@ -326,6 +326,34 @@ CLAUDE.md names — invisible to a passing suite because the suite wrote the
 event itself** (`test_fold.py:67` had been appending `l1-complete` by hand
 since the fold was written).
 
+### 27. `sweep-fixpoint` was a stamp, and D7 was prose
+Found closing the first real charter (2026-09-08, thirteenth session), and it is
+the **fifth** defect of the shape CLAUDE.md names. §3.13 says a
+`charter-review-not-complete` goes *back to ① with new specs*. Neither half of
+that sentence was reachable:
+
+- **Nothing checked `sweep-fixpoint`.** The fold read it out of a set. Any actor
+  could write one, and a charter with an unanswered in-scope brief derived
+  `L2-complete` anyway — the sweep is §3.12's *fixpoint*, and a fixpoint nothing
+  tests is a checklist with one box.
+- **Nothing could spec a brief.** §3.9 says *"in-scope briefs during execution
+  (D7) — the Executor authors the new spec itself"*. The Executor's own
+  `L1-complete` row said **"briefs open → nothing until specced"**, and no other
+  role, script or pane authors one. An in-scope brief was a silent wedge.
+- **And the packet refused round one.** `p_spec_writer` assumed every non-Planner
+  round was a rework (`die("no audit findings on this subject")`), and `Ctx`
+  refused a subject with no events at all — which is exactly what a spec id
+  allocated one second ago has.
+
+Fixed in `8b22c8a`: `fold.open_briefs` (in-scope = a `brief` naming the
+`requirement` it serves, §2.6's citation test; discharged by a `brief-answered`
+whose `ref` is its `src`) is an L2 conjunct and renders on CHARTER CLOSE;
+`sweep-fixpoint` and `brief-answered` are authorized to `{executor, operator}`;
+the Executor's row authors the brief — `doit alloc spec`, a slot file, the
+`brief-answered` link, `doit packet spec-writer --slot`, dispatch; and the packet
+admits a slot-only round one for a spec-writer and nobody else. fold 70 → 79,
+packet 30 → 35, every rule with its negative.
+
 ### 22. The tick's lane is global, so §12.2 step 3 is not expressible
 `tick.lane()` is every actionable spec plus every `L1-complete` charter in the
 root. §12.2 step 3 says *move one charter through the new chain while everything
@@ -346,6 +374,14 @@ recorded as `spawn-failed`, re-run from scratch. The check is right to exist and
 its blast radius is wrong: it should compare the paths the spawn was granted, not
 the tree. Until then **the driver must keep the tree clean for the duration of a
 spawn** — write scratch elsewhere and copy in at the end. (Found the same run.)
+
+**It recurred in the thirteenth session and it will keep recurring.** That step
+ran out of budget with an `L-spec-writer-0003` spawn still in flight and had to
+write its own handoff to commit at all, which voids it; the Executor's
+failed-spawn row re-dispatches it once. **The driver step and the tick loop cannot
+both hold the tree**, and no amount of discipline fixes that — the check's blast
+radius has to shrink to the paths the spawn was granted. It is now the cheapest
+unblocking fix in this file.
 
 ### 24. Every defect the first charter found had the same shape
 `alloc` over content files only, `tick.in_flight` on a start event with no
@@ -437,6 +473,38 @@ charter that relies on them.
   L1-complete`, and the board renders the charter's own product —
   `spend · do-it · $N · N spawns — list-price estimate … not money billed`
   (2026-09-08, twelfth session).
+  **Thirteenth session — the not-complete verdict was answered, and answering it
+  found the fifth invisible defect.** The previous step's claim was re-verified
+  from the ledger first, not the sentence: `L-charter-reviewer-0001.jsonl` carries
+  session `3db40d5a-e8aa-40e9-b480-dca71ec51425`, `claude-opus-5`, 22 turns,
+  `cost_usd` 1.2697285, `verdict: not-complete`, `contamination: false` and its
+  five `audit-finding`s — the handoff's numbers to the cent; `./doit test` green.
+  **§3.13's "not complete → back to ① with new specs" was unreachable in both
+  halves** — nothing checked `sweep-fixpoint`, and nothing could author the spec
+  an in-scope brief implies (Active Problem 27, fixed in `8b22c8a`). The five
+  findings were then triaged by §2.6's citation test, which is authorship's, and
+  the triage is in the ledger: **one in-scope `brief` citing R3**
+  (`L-operator-local.jsonl:19`, findings 1–2 — the no-spawn project renders
+  silence, and AC2 drove a project that has events instead of the charter's own
+  case) and **three `adjacent`** (`:20`–`:22` — `over_budget`'s TypeError,
+  `tick.py` writing no `project`, the `last tick: never` line under a filter),
+  each excluded by the charter's own Constraints section, so no requirement of
+  this charter can cite them. **The charter was NOT narrowed and nothing built was
+  touched.** The escalation was cleared with that reasoning
+  (`unblocked`, ref `L-executor-0013.jsonl:1`) and the tick loop restarted: a real
+  Executor tick (`L-executor-0014`) then **authored the brief's spec by itself** —
+  `doit alloc spec` → `L-spec-0005`, a slot file naming R3, the brief verbatim,
+  the charter's constraints and the three adjacent briefs as out-of-scope,
+  `brief-answered` linking it by `ref`, and a detached `spec-writer` dispatch.
+  **PARTIAL: `L-spec-0005` is in flight at `spawn-started` and the rest of its
+  chain — audit, build, grade, review, merge, then a second `charter-reviewer` and
+  the reap — has not run.** Restart `~/.do-it-scratch/first-charter/tickloop.sh 40`
+  and it continues; the loop's log is `tickloop-13.log` beside it. Verified:
+  `./doit test` green (fold 79 · packet 35, the fourteen new checks), the board's
+  CHARTER CLOSE line reads `L-charter-0002 · L1-complete · 0 owed (K=0) · 1
+  in-scope brief(s) open` — before the fix it read clean while nothing could act —
+  and `~/.do-it/content/slot-L-spec-0005.md` is the Executor's own authorship
+  (2026-09-08, thirteenth session).
 
 ## Reference
 
@@ -500,6 +568,22 @@ model change spawn each contract once on its own model with its own schema.
 Both are now visible in the ledger: `spawn-done.cli` and `.contract_sha256`.
 
 ## Session Log
+- 2026-09-08 (thirteenth session, driver item 8 continued): the charter-reviewer's
+  `not-complete` answered. The previous step's claim was verified from
+  `L-charter-reviewer-0001.jsonl` rather than its sentence — session, model,
+  turns and `cost_usd` to the cent. Then the fifth defect of the shape CLAUDE.md
+  names: **§3.13's return path did not exist.** `sweep-fixpoint` was a stamp the
+  fold read out of a set, and D7's *"the Executor authors the new spec itself"*
+  was prose in §3.9 and a row in no contract — the Executor's own line read
+  "briefs open → nothing until specced", so an in-scope brief was a silent wedge.
+  `fold.open_briefs` makes the fixpoint a rule with a negative (an `adjacent`
+  brief does not hold the close), both new events are authorized, and the packet
+  admits a slot-only round one. The triage itself stayed authorship's: one
+  in-scope brief citing R3, three adjacent, each excluded by the charter's own
+  Constraints — **the charter was not narrowed to fit what was built.** A real
+  Executor tick then authored `L-spec-0005` from the brief unaided. The step ran
+  out of budget with its `spec-writer` in flight, which is Active Problem 23
+  recurring exactly as written.
 - 2026-09-08 (twelfth session, driver item 8 continued): the build half of the
   first real charter. The previous step's claim was re-verified first, from the
   scratch root rather than the sentence — `thinker-out.json`, `planner-out.json`
