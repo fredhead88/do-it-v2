@@ -3,12 +3,15 @@
 ## Status
 **The wrapper, the tick, and the Executor contract exist and have driven a
 throwaway spec from `written` to `accepted` on ticks alone.** Nine of the ten
-contracts have run on their own models; `probe` and `reuse-scout` remain. The remaining work is queued under Next Steps as a checklist that
+contracts have run on their own models; `probe` and `reuse-scout` remain. **The
+packets are a script now, not the Executor's prose** — `doit packet` builds each
+role's Input list from the ledger and refuses to write a packet carrying what
+that role's Blindness strips. The remaining work is queued under Next Steps as a checklist that
 `scripts/drive.sh` executes unattended, one fresh session per item, with the
 handoff as the only state. The driver skills for the Planner and Thinker, the
 packet scripts, `vet-dep`, the audit scripts, the deploy and tree-cleanup
 scripts, and most fold rules are in that queue.
-Last updated: 2026-09-08 (handover after the third session; the loop takes it from here)
+Last updated: 2026-09-08 (fourth session — the driver loop's first item)
 
 ## Goal
 Write the artifacts that make DO-IT v2's roles *exist*: ten sub-agent contracts,
@@ -34,8 +37,8 @@ is that line plus every check below.
 **Repo:** `~/Projects/do-it` · remote `https://github.com/fredhead88/do-it-v2.git` · Public.
 **Register:** `~/.claude/do-it-v2/open-topics.md` (D1–D120) · design copy synced.
 
-**Built and running** [`doit test`: fold 33 + merge-gate 69 + dispatch 16 mocked
-spawns + tick 5; two real spawns through the wrapper]:
+**Built and running** [`doit test`: fold 33 + merge-gate 73 + dispatch 16 mocked
+spawns + packet 22 + tick 11; three real spawns through the wrapper]:
 
 | File | Lines | What |
 |---|---|---|
@@ -45,18 +48,20 @@ spawns + tick 5; two real spawns through the wrapper]:
 | **`src/tick.py`** | **~85** | **D117.** `flock`; fold; `tick{lane, spawned}` event; spawns `-p --agent executor` with the executor schema and `--disallowedTools` naming §10.5's RETIRE list, only when the lane is actionable; idle spawns nothing; a null Output is a failed spawn; the Executor's `actions[]` land on its `spawn-done` |
 | **`agents/executor.md`** + `.schema.json` | **157** | **the Executor contract** — the lane-state → action table, the per-role packet recipes (hand-built until the packet scripts exist), the worktree cut, the rules that bind, `actions[]` Output. Spawned only by the tick. `doit dispatch --detach` is its one spawn path; `doit events <subject>` its one ledger read |
 | **`scripts/drive.sh`** + `docs/handoffs/driver-prompt.md` | 43 + 38 | **the unattended driver** for Next Steps: one fresh `claude -p` (Opus, $10 cap) per unchecked item; refuses a dirty tree; stops on a red suite, an uncommitted step, or a `- [!]` item; `touch $DOIT_ROOT/drive.stop` stops it |
+| **`src/packet.py`** | **~300** | **the packet builder.** `doit packet <role> <subject>` writes `$R/packets/<subject>-<role>-<n>.md` from the ledger and content dir, for the six roles the Executor dispatches. The Input list is the per-role builder; **the Blindness list is `strip()`, which pulls this subject's *real* forbidden strings — the builder's spawn id and branch, the grader's reasons, a sibling spec's body, the Plan's rationale — and refuses before writing.** Also writes `$R/content/verify-<spec>.sh` from the spec's `## 8. Verification` block |
+| `src/test_packet.py` | ~200 | per role: the Input list it must carry, the honest packet scanned against its real strip list, and the builder forced to leak one so the refusal fires |
 | `src/test_dispatch.py` · `src/test_tick.py` | ~160 | every after-the-fact check exercised against the failure it was written for |
 | `src/backup.sh` | 69 | one-way restic push + restore drill |
 | `agents/<name>.md` × 10 · `<name>.schema.json` × 10 | 986 · 1692 | the ten contracts and their Output schemas (unchanged this session) |
-| `doit` | | `dispatch` (`--detach`), `tick`, `events` subcommands; `test` runs all four suites |
+| `doit` | | `dispatch` (`--detach`), `packet`, `tick`, `events` subcommands; `test` runs all five suites |
 
-**Spawned for real, key unset** (five in the 09-08 meter file; two through the wrapper this session, in a scratch `DOIT_ROOT` — nothing touched `~/.do-it`):
+**Spawned for real, key unset** (five in the 09-08 meter file; three through the wrapper, each in a scratch `DOIT_ROOT` — nothing touched `~/.do-it`):
 
 | Contract | Model | Ran? | Notes |
 |---|---|---|---|
 | `research` | haiku | **yes** — a real dig into `fold.py`, correct | Write needs the whole-tool grant (D120) |
 | `grader` | Fable | **yes** — contamination exit | |
-| `spec-auditor` | Fable | **yes**, after two rewordings | safeguard bisected, D120 |
+| **`spec-auditor`** | Fable | **yes, through the wrapper, on a `doit packet` packet** — 6 findings + 6 rejected on a deliberately flawed scratch spec, `bad_cut: false`, `contamination: false`; 20 turns, 114 s, $1.25 | it read the real repo: named `test_fold.py`'s 33 fixed assertions, `EMITS`, and `tick.py`'s base dict. Earlier run: safeguard bisected, D120 |
 | `plan-auditor` | Fable | **yes**, after the schema fix | |
 | `charter-reviewer` | Opus | **yes** — contamination exit | |
 | **`spec-writer`** | Opus | **yes, through the wrapper** — 199-line spec, eleven slots, two typed ACs with review paths, a three-step Verification including a mutation test; 9 turns, 79 s, $0.34 | `spec-written` + `spawn-done` appended; repo status unchanged |
@@ -71,7 +76,6 @@ spawns + tick 5; two real spawns through the wrapper]:
 | Missing | Size | Kind |
 |---|---|---|
 | Planner (pane) and Thinker (interactive) driver skills | ~600 | **prompt** |
-| **The packet scripts** — one per role; the strip list *is* the Blindness field (correction #6). Two things the real spawns fixed: a multi-step Verification block goes into a script file and the packet hands `bash <file>` (the card's `verify.command` is capped at 300 chars); the worktree is cut clean, before anything runs in it | 250–350 | code |
 | §3.6's six audit scripts · `scripts/vet-dep.mjs` · `do-it up` (one pane + one cron line, D117) | ~200 | code |
 | Rest of fold's rules: `EMITS` for declaration terms per role, Budget vs `usage` (`budget-exceeded`), typed ACs, blind grading, wedge, `must-fix`, charter-review verdict | ~250 | code |
 
@@ -174,6 +178,22 @@ per role. That list is the fold's to-do.
   re-tested rejection; the gate's grant). The escalation text is worth
   reading before diagnosing.
 
+### 13. The Executor's own `spawn-done` carries no `project` — found by the real audit
+`tick.py:82` builds its base as `{"spawn": ledger.stem}`: no `project`, no
+`subject`. So a project-filtered board (§9.1/D93) drops every Executor spawn,
+and **the Budget-vs-`usage` rule queued in the next item would silently miss
+the driver's own spend** — the same shape as Active Problem 11's last bullet
+about the `tick` event. Not fixed here: which project a tick that acted on
+three charters belongs to is the fold-rules item's question, not a guess for
+this one. (Found by `L-spec-auditor-0001` reading the repo, 2026-09-08.)
+
+### 14. The previous step's `- [x]` cannot be re-run
+Its evidence — `doit states` → `L-spec-0001 accepted`, a toy repo's merge sha —
+lived in a scratch root the session deleted, by design. What *is* re-runnable
+held: `./doit test` green on all suites. Every later step that spawns for real
+should expect the same: the ledger line is the durable claim, the scratch root
+is not.
+
 ## Key Decisions Made
 
 - **2026-09-08 (D120) — first real spawns.** Whole-tool Write grant plus
@@ -200,7 +220,8 @@ charter that relies on them.
 
 - [x] `agents/executor.md` + schema, `doit dispatch --detach`, `doit events`, the tick passing the schema and recording `actions[]`. Verified: a real tick on the throwaway spawned the Executor, which dispatched the grader detached with a blind packet (2026-09-08, third session).
 - [x] The throwaway chain to `accepted`, driven by ticks alone (a 90-second `doit tick` loop standing in for cron): grader (Fable) rejected on residue → Executor dispatched rework → builder returned BLOCKED with a §4.9 question → Executor decided it → rework → re-grade confirmed → operator `correction` voided the stale rejection (D111) → reviewer (Opus, first run, `gates-only`, no blocking) → gate refused twice on the missing `Writes:` grant, Executor escalated, operator decided, Executor re-ran the gate with `--writes` and merged `--no-ff` → `shipped` → the fold derived `accepted`. Verified: `doit states` → `L-spec-0001 accepted`; the toy's `master` carries merge `8714276`. Nine Executor ticks, three builders, two graders, one reviewer; seven defects found and fixed on the way (Active Problem 12). Scratch root gone with the session (2026-09-08, third session).
-- [ ] **Packet scripts** — `src/packet.py <role> <subject> …` writes `$R/packets/<subject>-<role>-<n>.md` from the ledger and content dir. Move the per-role recipes out of `agents/executor.md` §Dispatching into code; the strip list is each contract's Blindness (correction #6); wrap the spec's `## 8. Verification` block into `$R/content/verify-<spec>.sh`; one test per role asserting a stripped item never appears. Then shorten the executor's recipes to `doit packet <role> …`. Spawn for real: `spec-auditor` (Fable) on a scratch spec through the new packet.
+- [x] **Packet scripts** — `src/packet.py`, `doit packet <role> <subject>`, six roles (the ones the Executor dispatches), each an Input list in code and a `strip()` list pulled from the ledger. `agents/executor.md` §Dispatching is now six command lines instead of five hand-built recipes. `Writes:` joined slot 4 of the spec template in both `spec-writer.md` and `spec-auditor.md` — the merge gate reads it from the file, and its absence blocked the first real merge. Verified: `./doit test` green, `packet: 22 packets built, six Blindness lists enforced` — per role the honest packet is scanned against that subject's real forbidden strings *and* the role's builder is monkey-patched to leak one, which must make `main` refuse before any file is written. Spawned for real (scratch `DOIT_ROOT=~/.do-it-scratch/packet-scripts`, key unset, `~/.do-it` untouched): `spec-auditor` on Fable through `doit packet` on a deliberately flawed scratch spec — 20 turns, 114 s, $1.25 list, `contamination: false`, `bad_cut: false`, 6 findings + 6 rejected, including the R3 the pre-pass fed it and three defects it found by reading this repo. Scratch root removed (2026-09-08, fourth session).
+
 - [ ] **Fold rules** — in `src/fold.py`: `EMITS` per role for every declaration term in the contracts' May-declare lists; Budget vs `spawn-done` usage and cost against `dispatch.ROLES` → a derived `budget-exceeded` on the board; a standing `must-fix` blocks acceptance like `rejected-criterion`; a `question` past its `deadline` with no `decision` naming it renders under NEEDS YOU; `charter-review-complete` → L2 as designed; `DWELL_DAYS` per state from the spawn durations the ledger now carries. A test for each.
 - [ ] **Planner driver** — `agents/planner.md`, a pane (D80, D117), interactive: charter → §3.6 three-step (write the cut file, `doit dispatch plan-auditor` at stage `cut`, write the Plan, plan-audit at stage `plan`) → one `spec-writer` dispatch per slot → handover (`plan-written`, `cut-written` events; `spec-written` is the wrapper's). Commissions `research`, `reuse-scout`, `probe`. Reference `~/.claude/skills/orc` and `think`. Plus `doit up`: starts the Planner pane (`claude --agent planner --disallowedTools <RETIRE>`) and **prints** the cron line for `doit tick` — never installs it; cron is the operator's.
 - [ ] **Thinker driver** — `agents/thinker.md`, interactive and read-only on code: authors a charter with its five sections and `review_path` (§3.4), files it (`doit append charter-filed`), triages briefs. Reference `~/.claude/skills/think`.
@@ -265,6 +286,7 @@ model change spawn each contract once on its own model with its own schema.
 Both are now visible in the ledger: `spawn-done.cli` and `.contract_sha256`.
 
 ## Session Log
+- 2026-09-08 (fourth session, driver item 1): `src/packet.py` + `src/test_packet.py` written; `doit packet` wired; the Executor's five hand-built recipes replaced by six command lines; `Writes:` added to slot 4 of the spec template. `spec-auditor` spawned for real on Fable through the new packet — clean, 12 findings, and three of them were defects in *this* repo that a grep could not have found. Two findings carried here as Active Problems 13 and 14.
 - 2026-09-08 (third session, end): the throwaway reached `accepted` on ticks alone; nine of ten contracts have run; the gate gained `--writes`-composes-with-`--spec`, a refused `--help`, and the tick names its ledger file; `scripts/drive.sh` started on the Next Steps queue.
 - 2026-09-08 (third session, later): the first real chain ran tick → Executor → grader → Executor → rework builder; the grader (Fable, 5 turns) rejected the done-condition on `__pycache__/` residue and the second Executor (12 turns) correctly dispatched a rework. Four gaps found and fixed (Active Problem 12): `spawn-started` for every role, in-flight and stale handling in the tick, re-grade clears a standing rejection, the Executor's rows re-cut around the newest event. Cost figures corrected to seat usage.
 - 2026-09-08 (third session, continued): `agents/executor.md` and its schema written; `doit dispatch --detach`, `doit events`; the tick passes the schema and records the Executor's actions. A real tick on the throwaway spawned the Executor (Opus, 8 turns, $0.39), which wrote a blind grader packet and dispatched the grader. `scripts/drive.sh` and the driver prompt written; Next Steps rewritten as its queue.

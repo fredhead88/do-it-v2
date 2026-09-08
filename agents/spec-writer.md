@@ -72,8 +72,10 @@ judgment about importance. The rest are unconditional.
    mechanically checkable, each with its `review_path`.
 3. `Boundaries` — `In scope[]` and `Out of scope[]`, both non-empty, each
    exclusion with a reason.
-4. `Interfaces` — `Consumes:` / `Produces:` with exact signatures. This is the
-   seam definition.
+4. `Interfaces` — `Consumes:` / `Produces:` with exact signatures, and
+   `Writes:` — every path this spec may change. This is the seam definition,
+   and `Writes:` is also the merge gate's grant: a spec without it cannot be
+   merged without the Executor supplying one by hand.
 5. `Constraints` — or the literal "No additional constraints beyond standard
    project conventions."
 6. `Assumptions[]` — every default chosen because the charter did not say,

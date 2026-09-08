@@ -97,55 +97,26 @@ via an Agent tool, never awaited:
 
 `--cwd` is the repository for `spec-auditor` and `spec-writer`, the worktree for
 `builder`, `grader` and `reviewer`. The wrapper appends `build-started` before a
-builder, checks everything after, and pokes a tick when the spawn ends. Write the
-packet file first. A packet is the role's **Input** list, in order, and nothing
-its **Blindness** strips; until the packet scripts exist you build it by hand
-from the contract's Input section (`~/.claude/agents/<role>.md`):
+builder, checks everything after, and pokes a tick when the spawn ends.
 
-- **spec-auditor** — 1 the spec path; 2 "your cwd is the repository"; 3 the
-  pre-pass, run and pasted: `grep -nE 'TODO|TBD|\[NEEDS CLARIFICATION|as needed|etc\.' <spec>`,
-  the `[NEEDS CLARIFICATION` count, whether `## 8. Verification` holds a
-  command, and the requirement ids the spec cites against the charter's list
-  (ids only); 4 calibration: none yet. **Never** the charter's text, the
-  Assumptions section's reasoning, or a prior audit.
-- **spec-writer (rework)** — its ten Input items as the Plan gives them
-  (charter extract, the plan slot, the builder envelope, cost paths,
-  neighbours' `Produces:`, ADRs, probe residue, the same path, the template),
-  plus the audit's `findings[]` as the fix list. Same spec id, same path; the
-  wrapper appends a second `spec-written`.
-- **builder** — 1 the spec path; 2 the charter extract: constraints and
-  product decisions, verbatim; 3 `base_sha` = `git -C "$REPO" rev-parse <main>`;
-  4 the verify command and done-condition: write the spec's `## 8. Verification`
-  code block verbatim to `$R/content/verify-<spec>.sh` and hand
-  `bash $R/content/verify-<spec>.sh` (the card's `verify.command` is capped at
-  300 characters); done-condition = that command exits 0, `git status
-  --porcelain` is empty after the commit, one commit above `base_sha`; 5 sibling
-  `Produces:` from the Plan, or "none"; 6 parked findings on the footprint, or
-  "none"; 7 the live conflict list: one line per other open spec whose
-  footprint intersects — id · what it changes · state — or "none"; 8 ADR ids or
-  "none", and the conventions file path or "none". For rework add the standing
-  rejected criteria with their `why` and every `must-fix` `reverify` line.
-  Close with: "Your cwd is your worktree, on branch `<branch>`. One spec, one
-  commit, on that branch."
-- **grader** — 1 the acceptance criteria verbatim from the spec, typed; 2 the
-  card's per-criterion rows — id, type, disposition, evidence type, check —
-  **not** the card's header or branch line, nothing naming who built it; 3
-  "evidence-type validator: not installed; no row is pre-failed"; 4 the verify
-  command with the exit code and one-line result from the card's verify line;
-  5 one checker: `verify-<spec>` · version = `shasum -a 256` of the script ·
-  coverage note "the spec's Verification block" · cwd = the worktree; 6 the
-  done-condition. **Never** the builder's spawn id, branch, commit message,
-  timestamps, or deviations.
-- **reviewer** — 1 the deployed thing: the URL the charter names, or for an
-  internal-surface spec the worktree at `ready_sha`; 2 the done-condition; 3
-  every criterion verbatim; 4 every `review_path`; 5 pre-pass: the verify exit
-  code from the card; 6 metrics: none; 7 the review account: `none` unless
-  `$R/review-account-<project>` exists (paste it); 8 `ui` → add
-  `--mcp-config $R/review-mcp.json`. Plus `depth` and `round` (1; 2 after a
-  rework). **Never** the card's prose or the grader's reasons.
-- **charter-reviewer** — 1 the charter file; 2 every card in the charter
-  (paths); 3 the spec paths; 4 "sweep fixpoint reached <ts>"; 5 the review
-  account and browser as above. **Never** the Plan's rationale.
+**The packet is a script's output, never yours to compose.** `doit packet` builds
+it from the ledger — the role's **Input** list, in order — and refuses to write it
+when what that role's **Blindness** strips is in it. It prints the path; that path
+is `--packet`:
+
+    P=$(doit packet spec-auditor     <spec>    --charter <charter file>)
+    P=$(doit packet spec-writer      <spec>)                    # rework: + the audit's fix list
+    P=$(doit packet builder          <spec>    --worktree <WT> --repo <REPO>)
+    P=$(doit packet grader           <spec>    --worktree <WT>)
+    P=$(doit packet reviewer         <spec>    --worktree <WT> --depth gates-only|full --round 1|2)
+    P=$(doit packet charter-reviewer <charter> --charter <charter file>)
+
+`doit packet builder` also writes `$R/content/verify-<spec>.sh` from the spec's
+`Verification` block and hands `bash` on it — the card's `verify.command` is capped
+at 300 characters. Rework needs no flag: the standing rejected criteria, the
+`must-fix` reverify lines and every binding `decision` are in the ledger, and the
+script puts them in. A refusal names what leaked; fix the ledger or the content,
+never the packet by hand.
 
 ## Cutting a worktree
 

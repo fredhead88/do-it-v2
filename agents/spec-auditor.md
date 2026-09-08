@@ -57,7 +57,8 @@ holds.
    with a `review_path`.
 3. `Boundaries` — `In scope[]` and `Out of scope[]`, both non-empty, each
    exclusion with a reason.
-4. `Interfaces` — `Consumes:` / `Produces:` with exact signatures.
+4. `Interfaces` — `Consumes:` / `Produces:` with exact signatures, and
+   `Writes:` — the paths this spec may change, which is the merge gate's grant.
 5. `Constraints` — or the literal "No additional constraints beyond standard
    project conventions."
 6. `Assumptions[]` — every default chosen because the charter did not say,
