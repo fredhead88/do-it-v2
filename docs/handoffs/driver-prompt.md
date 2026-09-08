@@ -5,7 +5,9 @@ only evidence you ran.
 1. Read `docs/handoffs/prompt-tier-contracts.md` in full. Active Problems and
    Key Decisions bind you. `CLAUDE.md` in this repository binds you.
 2. Verify the previous step's claim before trusting it: run `./doit test`, and
-   re-run whatever the most recent `- [x]` item says it verified. A claim that
+   re-run whatever the most recent `- [x]` item says it verified. A claimed
+   real spawn is verified by its scratch root's ledger file, or failing that
+   by the transcript its `session` id names — not by the sentence. A claim that
    does not hold is a finding — record it under Active Problems and fix it
    before your own item, if it is small; otherwise mark your item `- [!]` with
    why and stop.
@@ -17,7 +19,11 @@ only evidence you ran.
    - where the item says "spawn for real", spawn for real, under a scratch
      `DOIT_ROOT` (`~/.do-it-scratch/<item>`), with `ANTHROPIC_API_KEY` unset,
      and record turns, cost, and what landed on disk — never in `~/.do-it`
-     unless the item says so;
+     unless the item says so. **Keep the scratch root; never delete it.** It
+     is the evidence the next step verifies. Also record the `session` id from
+     each real spawn's `spawn-done` event: the CLI's own transcript of that
+     spawn is `~/.claude/projects/<cwd slug>/<session>.jsonl`, and it is the
+     durable record if the scratch root is ever lost;
    - prose does not fire: a rule that is not a hook, a fold rule, a required
      field, or a wrapper check did not ship (§7.3).
 4. Finish: `./doit test` green; tick the item `- [x] …` and append one line
