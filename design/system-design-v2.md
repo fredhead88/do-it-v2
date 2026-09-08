@@ -1846,6 +1846,19 @@ drafts; 23k was measured under a lighter config.)*
 > | **Budget** | `--output-format json` returns `usage` per spawn | **fold** — the wrapper appends it, the fold compares it with the declared Budget. **The first path on which `budget-exceeded` can fire mechanically**; in-session dispatch returns text only |
 > | *the residual* | `CLAUDE.md` (global and project), auto-memory, git status — **what only `--bare` skips** | **measured, never guaranteed** — ~4k tok on this machine (3,649 bare against 7,440–7,900 on the line above), re-measured by the D105 probe per installation and per CLI version. A residual carrying anything in a contract's Blindness class is an installation defect, and the probe's output is where it shows |
 >
+> **★ Measured on the first real spawns** *(D120, 2026-09-08)*. Write is
+> granted whole, never by pattern — under `dontAsk` a path-pattern grant denies
+> in both spellings — so confinement is after the fact: **the file exists at
+> the path the packet named, and `git status --porcelain` is unchanged across
+> every non-builder spawn**, or the spawn failed. A denied write came back as a
+> success claim on the first day, and that check is what caught it. A refused
+> spawn (`is_error: true`, cost above zero) is a failed spawn, never retried
+> identically. And **the schema is part of the prefix the model's safeguards
+> read**: Fable 5.1 refused two of the four Fable contracts — on the word
+> *rationale* in a schema description, and on a line asking for
+> considered-and-dropped candidates — so **every contract is spawned once on
+> its own model, with its own schema, before it is trusted.**
+>
 > **The silent-fallback defect closes by construction, not by a fold term.** The
 > dispatch environment carries no `ANTHROPIC_API_KEY`, so there is no meter to
 > fall through to: an unreachable seat is `is_error: true`,
@@ -1862,7 +1875,8 @@ drafts; 23k was measured under a lighter config.)*
 > **Re-run on every CLI upgrade — auth changed under this design once already
 > (2.1.246 → 2.1.263):** row M (seat from a plain environment), row R (the full
 > line), row I2 (the `tools:` binding), row Q (the MCP leak). A failed re-run is
-> a design event, not an ops note.
+> a design event, not an ops note. **And on every model change: each contract
+> once, on its own model, with its own schema** (D120).
 >
 > **What this does not decide.** *The panes*: D104's *"floor, not residue"* has
 > lost its auth premise; what remains is D80's Planner asymmetry — **decided at
@@ -2095,6 +2109,10 @@ by the fold or by a hook is decoration.
 - **Permitted skills are named in the contract** (D66). Anything not named is
   out of path — otherwise an installed plugin quietly reintroduces machinery
   this design removed (§10.5).
+- **The prefix and the schema clear the assigned model's safeguards, and this
+  is measured, not assumed** (D120). A contract is spawned once on its own
+  model with its own schema before it is trusted. A refusal is deterministic
+  and charges the prefix.
 
 **Corrections from the v1 research pass that still bind** *(each measured; the
 ones superseded by this meeting's decisions are marked)*:
@@ -5810,8 +5828,8 @@ than that last one.
 
 | Build | Size | Note |
 |---|---|---|
-| **The ten sub-agent contracts** (§4.6) | ~1,100–1,500 `[e]` | ten roles at roughly the density of an existing agent definition. §4.4 fixes the shape, which is what makes the estimate possible at all |
-| **Their ten `Output` schemas** | ~200 `[e]` | **not optional** — D82: *"a contract with no `Output` schema cannot be spawned at all"* |
+| **The ten sub-agent contracts** (§4.6) — **written 2026-09-08: `agents/*.md`, 986 lines** *(D120)* | ~1,100–1,500 `[e]` | ten roles at roughly the density of an existing agent definition. §4.4 fixes the shape, which is what makes the estimate possible at all |
+| **Their ten `Output` schemas** — **written: `agents/*.schema.json`, 1692 lines, draft-07** *(D120)* | ~200 `[e]` | **not optional** — D82: *"a contract with no `Output` schema cannot be spawned at all"* |
 | **The three driver skills** — Planner, Executor, Thinker | ~900 `[e]` | **this is how those roles exist**; there is no other artifact that constitutes them. `orc` + `think` + `rev` = 659 lines for three thinner drivers |
 | **§3.6's six scripts** | ~150–250 `[e]` | *counted here and in ③·6 — they are the same line item, listed twice so neither tier can lose them again* |
 
@@ -6039,7 +6057,7 @@ process-code repo (§9.1), reads it from there.)*
 | **spec-template slot ceiling · gate-suite wall-clock ceiling** | §7.6 | same — **these two rows carry no number at all**, and the template moved **9 → 11 slots in one pass** (finding 12's `cost_path`, D92's `security_path`). **The one accreting artifact with two growth events is the one with no bound** — set this ceiling against that trend rather than against a guess |
 | **pre-image copy-size threshold** | §5.11 | the pre-image gate: above it, a destructive statement blocks |
 | **reap horizon for `_restore_` / `_dropped_` tables** | §5.11 | the reap script. *Currently exists only as `reap: +30d` inside a worked example* |
-| **`--model` identifiers per contract** | §4.5 | every spawn. *§4.5 names tiers, not strings* |
+| ~~**`--model` identifiers per contract**~~ — **SET in the contract files, 2026-09-08** *(D120)* | §4.5 | every spawn. `agents/<name>.md` carries `claude-opus-5` · `claude-fable-5-1` · `claude-sonnet-5` · `claude-haiku-4-5-20251001`, all four exercised on the seat. **The second row in this table to close** |
 | **precision floors, and the minimum N they need** | §4.6·2, §4.6·5 | the auditor's calibration file; the reviewer's blocking→advisory demotion |
 | **`stale-gate`'s N · `never-fired`'s N** | §2.4, §5.7 | the gate-corpus fold queries |
 | **hook count · calibration-file size · T2 entry count · drift-table rows** | §7.6 | the `retro` ceiling check. **Four rows added because §7.3's landing sites were unbounded** — three of the four places an improvement may land had no ceiling at all |
