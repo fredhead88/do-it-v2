@@ -1,9 +1,9 @@
 # Prompt Tier — Ten Contracts, the Wrapper, the Tick, Three Drivers
 
 ## Status
-**The wrapper, the tick, and the Executor contract exist and have driven a real
-chain on a throwaway spec.** Eight of the ten contracts have run on their own
-models. The remaining work is queued under Next Steps as a checklist that
+**The wrapper, the tick, and the Executor contract exist and have driven a
+throwaway spec from `written` to `accepted` on ticks alone.** Nine of the ten
+contracts have run on their own models; `probe` and `reuse-scout` remain. The remaining work is queued under Next Steps as a checklist that
 `scripts/drive.sh` executes unattended, one fresh session per item, with the
 handoff as the only state. The driver skills for the Planner and Thinker, the
 packet scripts, `vet-dep`, the audit scripts, the deploy and tree-cleanup
@@ -61,9 +61,10 @@ spawns + tick 5; two real spawns through the wrapper]:
 | `charter-reviewer` | Opus | **yes** — contamination exit | |
 | **`spec-writer`** | Opus | **yes, through the wrapper** — 199-line spec, eleven slots, two typed ACs with review paths, a three-step Verification including a mutation test; 9 turns, 79 s, $0.34 | `spec-written` + `spawn-done` appended; repo status unchanged |
 | **`builder`** | Opus | **yes, through the wrapper** — one commit on its branch, worktree clean, the spec's own verify block exits 0; 14 turns, 100 s, $0.60, no denials | `build-done`, 2 × `build-deviation` (minor), `worked`, `spawn-done`; card 11 lines |
-| **`executor`** (driver) | Opus | **yes, from a real tick** — read the lane, wrote a blind grader packet, dispatched it detached, returned `actions: [dispatch-grader L-spec-0001]`; 8 turns, $0.39 | the tick recorded it on `spawn-done` |
+| **`executor`** (driver) | Opus | **yes, nine ticks** — dispatched grader, rework builder, re-grade, reviewer; decided one builder question; escalated twice on real gaps with the fix named in the text; merged through the gate. 6–12 turns each | every action on its `spawn-done` |
+| **`reviewer`** | Opus | **yes, through the wrapper** — `gates-only`, round 1, no blocking finding, one `unverifiable`; first run of the contract | `review` + `spawn-done` |
 | `reuse-scout` | Sonnet | model id resolves; **not spawned** | needs `vet-dep` (does not exist) |
-| `reviewer` · `probe` | Opus | **not spawned** | need a review account + `--mcp-config` browser; a run dir + §10.4's paid-call wrapper |
+| `probe` | Opus | **not spawned** | needs a run dir + §10.4's paid-call wrapper |
 
 **Not written:**
 
@@ -93,10 +94,10 @@ were measured to fire under `dontAsk` (probe, haiku, $0.05): all three denied,
 `echo ok` ran, and `permission_denials` in the JSON is the independent record —
 the wrapper carries it as `denied[]` on `spawn-done`.
 
-### 9. Three contracts have never run
-`reviewer`, `probe`, `reuse-scout`. Each needs a piece of the packet tier:
-a browser `--mcp-config` and a read-only review account; a run directory plus
-the paid-call wrapper; `vet-dep`. D120's rule applies: one spawn each on its
+### 9. Two contracts have never run
+`probe`, `reuse-scout`. Each needs a piece of the packet tier: a run directory
+plus the paid-call wrapper; `vet-dep`. The reviewer has run `gates-only`; its
+`full` depth still needs a browser `--mcp-config` and a review account. D120's rule applies: one spawn each on its
 own model with its own schema before trust.
 
 ### 10. The fold's vocabulary — the wrapper's half is done, the fold's is not
@@ -154,6 +155,25 @@ per role. That list is the fold's to-do.
   the packet script should phrase it as "no tracked file modified, no
   untracked file outside `__pycache__/`" or the charter must ignore bytecode.
 
+- **The spec template has no `Writes:` line, and the merge gate needs a grant.**
+  The gate returned could-not-determine on the first real merge. The Executor
+  now passes the `spec-written` event's `footprint` as `--writes`; the packet
+  script step should also add a `Writes:` line (= the footprint) to the spec
+  template so the gate can read it from the file. A could-not-determine is
+  escalated, never forced.
+- **The gate wrote its verdict as `L-executor-0001`** (a pane-era default);
+  the tick now sets `DOIT_GATE_LEDGER_FILE` to the current Executor's file.
+  `doit gate --help` appended a rework event with subject `--help`; a flag
+  where the branch belongs is now refused before any event.
+- **A resolved escalation stays under NEEDS YOU.** The fold has no rule for
+  a `decision` or `unblocked` answering an `escalation-blocking`; the tick
+  has one (the subject returns to the lane) but the board does not. Fold
+  to-do, with Active Problem 10.
+- **Every Executor that hit a gap escalated instead of looping**, and two of
+  its escalations named the fix that was then made (the grader clearing a
+  re-tested rejection; the gate's grant). The escalation text is worth
+  reading before diagnosing.
+
 ## Key Decisions Made
 
 - **2026-09-08 (D120) — first real spawns.** Whole-tool Write grant plus
@@ -179,7 +199,7 @@ the packet scripts before the drivers that call them; the fold rules before the
 charter that relies on them.
 
 - [x] `agents/executor.md` + schema, `doit dispatch --detach`, `doit events`, the tick passing the schema and recording `actions[]`. Verified: a real tick on the throwaway spawned the Executor, which dispatched the grader detached with a blind packet (2026-09-08, third session).
-- [~] The throwaway chain to `shipped`: grader (Fable) → reviewer (Opus, first run) → `doit gate` → `--no-ff` merge → `shipped`. PARTIAL: in flight at handover; the Session Log records how far it got. The scratch root is gone with the session; re-run on a fresh scratch if a step needs the evidence again.
+- [x] The throwaway chain to `accepted`, driven by ticks alone (a 90-second `doit tick` loop standing in for cron): grader (Fable) rejected on residue → Executor dispatched rework → builder returned BLOCKED with a §4.9 question → Executor decided it → rework → re-grade confirmed → operator `correction` voided the stale rejection (D111) → reviewer (Opus, first run, `gates-only`, no blocking) → gate refused twice on the missing `Writes:` grant, Executor escalated, operator decided, Executor re-ran the gate with `--writes` and merged `--no-ff` → `shipped` → the fold derived `accepted`. Verified: `doit states` → `L-spec-0001 accepted`; the toy's `master` carries merge `8714276`. Nine Executor ticks, three builders, two graders, one reviewer; seven defects found and fixed on the way (Active Problem 12). Scratch root gone with the session (2026-09-08, third session).
 - [ ] **Packet scripts** — `src/packet.py <role> <subject> …` writes `$R/packets/<subject>-<role>-<n>.md` from the ledger and content dir. Move the per-role recipes out of `agents/executor.md` §Dispatching into code; the strip list is each contract's Blindness (correction #6); wrap the spec's `## 8. Verification` block into `$R/content/verify-<spec>.sh`; one test per role asserting a stripped item never appears. Then shorten the executor's recipes to `doit packet <role> …`. Spawn for real: `spec-auditor` (Fable) on a scratch spec through the new packet.
 - [ ] **Fold rules** — in `src/fold.py`: `EMITS` per role for every declaration term in the contracts' May-declare lists; Budget vs `spawn-done` usage and cost against `dispatch.ROLES` → a derived `budget-exceeded` on the board; a standing `must-fix` blocks acceptance like `rejected-criterion`; a `question` past its `deadline` with no `decision` naming it renders under NEEDS YOU; `charter-review-complete` → L2 as designed; `DWELL_DAYS` per state from the spawn durations the ledger now carries. A test for each.
 - [ ] **Planner driver** — `agents/planner.md`, a pane (D80, D117), interactive: charter → §3.6 three-step (write the cut file, `doit dispatch plan-auditor` at stage `cut`, write the Plan, plan-audit at stage `plan`) → one `spec-writer` dispatch per slot → handover (`plan-written`, `cut-written` events; `spec-written` is the wrapper's). Commissions `research`, `reuse-scout`, `probe`. Reference `~/.claude/skills/orc` and `think`. Plus `doit up`: starts the Planner pane (`claude --agent planner --disallowedTools <RETIRE>`) and **prints** the cron line for `doit tick` — never installs it; cron is the operator's.
@@ -187,7 +207,7 @@ charter that relies on them.
 - [ ] **`scripts/vet-dep.mjs`** (§6.7b: the install gate is the vetting script) and a real `reuse-scout` spawn (Sonnet) on a scratch slot. Then `probe`: a run dir under content, a stub paid-call wrapper (§10.4) that logs spend, a real spawn (Opus) against one harmless external. Both contracts then trusted per D120.
 - [ ] **§3.6's audit scripts** — `src/audit.py`: same-wave footprint overlap; the `Consumes:`/`Produces:` graph; a shared name introduced twice with no owner; the requirement-id diff in both directions (units vs charter; charter set vs goal); the size heuristic against §4.3; the ADR-trail diff. Its output is the plan-auditor's packet item 3. Tests.
 - [ ] **`deploy` and `tree-cleanup` scripts** (§4.11) — `src/deploy.py`: serial, waits, verifies the sha is live, `deploy-started` / `deploy-landed` / `deploy-failed`; `src/tree_cleanup.py`: reaps only the provably dead (patch-id ancestry, clean worktree, nothing unmerged), `tree-reaped{reaped, retained, retained_reason}`. Update the Executor's merge and close rows to call them. Tests.
-- [ ] **One real charter through the ten contracts** (§12.2 step 3) on this repository under `~/.do-it`: the Thinker files it, the Planner cuts, plans and specs it, the tick drives it to L2-complete. Keep it one wave — for example "the board shows spend per project from `spawn-done`". Record the baseline (D100) in `docs/handoffs/baseline-2026-09.md`: spawns, cost, turns, escalations, what the operator had to do.
+- [ ] **One real charter through the ten contracts** (§12.2 step 3) on this repository under `~/.do-it`: the Thinker files it, the Planner cuts, plans and specs it, the tick drives it to L2-complete (run `doit tick` every 90 s in a loop for the duration — installing cron is the operator's, never the step's). Keep it one wave — for example "the board shows spend per project from `spawn-done`". Record the baseline (D100) in `docs/handoffs/baseline-2026-09.md`: spawns, cost, turns, escalations, what the operator had to do.
 
 ## Reference
 
@@ -245,6 +265,7 @@ model change spawn each contract once on its own model with its own schema.
 Both are now visible in the ledger: `spawn-done.cli` and `.contract_sha256`.
 
 ## Session Log
+- 2026-09-08 (third session, end): the throwaway reached `accepted` on ticks alone; nine of ten contracts have run; the gate gained `--writes`-composes-with-`--spec`, a refused `--help`, and the tick names its ledger file; `scripts/drive.sh` started on the Next Steps queue.
 - 2026-09-08 (third session, later): the first real chain ran tick → Executor → grader → Executor → rework builder; the grader (Fable, 5 turns) rejected the done-condition on `__pycache__/` residue and the second Executor (12 turns) correctly dispatched a rework. Four gaps found and fixed (Active Problem 12): `spawn-started` for every role, in-flight and stale handling in the tick, re-grade clears a standing rejection, the Executor's rows re-cut around the newest event. Cost figures corrected to seat usage.
 - 2026-09-08 (third session, continued): `agents/executor.md` and its schema written; `doit dispatch --detach`, `doit events`; the tick passes the schema and records the Executor's actions. A real tick on the throwaway spawned the Executor (Opus, 8 turns, $0.39), which wrote a blind grader packet and dispatched the grader. `scripts/drive.sh` and the driver prompt written; Next Steps rewritten as its queue.
 - 2026-09-08 (third session): `src/dispatch.py` and `src/tick.py` written with
