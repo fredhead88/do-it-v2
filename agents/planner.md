@@ -57,9 +57,17 @@ downstream specs consume. Ask for it in the sweep (⑤).
 ### ① The cut — a file before it is audited (D94)
 
 Decide the unit boundaries and **write them down**. `$R/content/cut-<charter>.md`,
-one block per unit: id-less slot name, one-line goal, the charter requirement ids
-it delivers, `Footprint:`, `Consumes:` / `Produces:` with exact signatures, and
-its wave.
+one block per unit: a heading with the id-less slot name, then these labels, which
+are what `doit audit` reads — a unit block is a heading that carries a
+`Footprint:`, and a label it omits is a check that comes back `undetermined`:
+
+    ## <slot name>
+    Goal: one line
+    Delivers: R2, R3          the charter requirement ids this unit delivers
+    Footprint: src/a.py src/b.py     (or a list under the label; globs allowed)
+    Consumes: TxStatus enum   one signature per line
+    Produces: refund(tx, amount) -> Receipt
+    Wave: 1
 
 The cut is the highest-risk decision in the system. Three ways to settle a thing
 two units both need, in order of preference (§3.7): **extract** it into its own
@@ -72,10 +80,24 @@ right; four is waterfall.
 
 ### ② Cut-audit — fable, blind to your rationale
 
+The script runs first (§3.6). Six mechanical checks — same-wave footprint
+overlap, undefined seams, a shared name introduced twice with no owner, the
+requirement-id diff against the charter, unit size against §4.3, and the
+acquisition ADR trail — are the auditor's ground truth and never its work:
+
+    doit audit cut <charter> --cut "$R/content/cut-<charter>.md" \
+      --charter <the charter file> --repo "$R/repos/<project>" --out "$R/content/audit-cut-<charter>.md"
+
+Read its findings yourself first: a `bad_cut` you can see in the block is one you
+fix before you spend a spawn on it. **An `undetermined` line is not a pass** — a
+missing `--repo` or a unit with no `Wave:` is a check that could not run, and the
+fix is the missing input, not the dispatch. Then the packet — which carries the
+block verbatim, and the wrapper refuses it without one:
+
     doit dispatch plan-auditor <charter> --packet <packet file> --cwd "$R/repos/<project>" --charter <charter>
 
 The packet carries **stage `cut`**, the cut file, the charter's done-condition,
-and the script pre-pass as ground truth. **Never your reasons for cutting it
+and that block as ground truth. **Never your reasons for cutting it
 that way** — they are the one thing this auditor is blind to (§3.6), and a
 sentence of rationale in the packet voids the run as contamination and charges
 for it. Do not describe alternatives you considered.
@@ -105,8 +127,15 @@ short document:
 
 ### ④ Plan-audit — fable again, same contract, **stage `plan`**
 
-Same command as ②, and the packet carries the cut file, the Plan, and **the
-cut-audit's findings** — the one prior-round input in the system, by design.
+The pre-pass runs again with the Plan, which is what makes its last two checks
+answerable — a shared name the Shared decisions section now owns, and an
+acquisition row with no ADR on the trail:
+
+    doit audit plan <charter> --cut "$R/content/cut-<charter>.md" --plan "$R/content/plan-<charter>.md" \
+      --charter <the charter file> --repo "$R/repos/<project>" --out "$R/content/audit-plan-<charter>.md"
+
+Same dispatch as ②, and the packet carries the cut file, the Plan, that block, and
+**the cut-audit's findings** — the one prior-round input in the system, by design.
 Still no rationale. A finding you do not act on is a line in the Plan saying why.
 
 ### ⑤ The question sweep — batched, once, here

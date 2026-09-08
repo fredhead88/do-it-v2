@@ -22,7 +22,12 @@ import argparse, os, pathlib, re, subprocess, sys
 
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-import dispatch, fold, tick, up  # noqa: E402
+import audit, dispatch, fold, tick, up  # noqa: E402
+# The requirement-id machinery is `audit`'s, and it is one implementation used at
+# two levels (§3.6): units against their charter there, the charter set against the
+# goal here. `section` reads a heading's body; `LISTED`/`ID` are the stable-id forms.
+from audit import ID, LISTED, section          # noqa: E402
+from audit import goal_coverage as coverage    # noqa: E402
 
 DOIT = HERE.parent / "doit"
 
@@ -34,10 +39,6 @@ SECTIONS = ("Intent", "Requirements", "Constraints and product decisions",
 # binding architectural decisions with no audit between them and the builders.
 PLANS = re.compile(r"^#+\s*[0-9.]*\s*(seams?|waves?|interfaces?|data shapes?|"
                    r"error[- ]handling|schema|branch)\b", re.I | re.M)
-# A stable requirement id: the coverage diff, §3.12's citation test and the
-# charter review all key off these, so a requirement without one is not citable.
-ID = re.compile(r"\b([A-Z][A-Z0-9]{0,7}-?\d+)\b")
-LISTED = re.compile(r"^\s*[-*]?\s*\**([A-Z][A-Z0-9]{0,7}-?\d+)\**\s*[:.]", re.M)
 
 
 def die(msg):
@@ -50,16 +51,6 @@ def pane_cmd(topic):
     that name, which is the only reason that counter is derivable at all."""
     return ["claude", "-n", f"think-{topic}", "--agent", "thinker",
             "--disallowedTools", ",".join(f"Skill({s})" for s in tick.RETIRE)]
-
-
-def section(text, name):
-    """One section's body: from its heading to the next heading of any depth."""
-    m = re.search(rf"^#+\s*[0-9.]*\s*{re.escape(name)}\b.*$", text, re.I | re.M)
-    if not m:
-        return None
-    rest = text[m.end():]
-    nxt = re.search(r"^#+\s", rest, re.M)
-    return rest[:nxt.start()] if nxt else rest
 
 
 def covers(body):
@@ -117,18 +108,6 @@ def goal_path(explicit):
     return pathlib.Path(e["path"]) if e else None
 
 
-def coverage(goal_text, charters):
-    """The requirement-id diff, and it runs BOTH directions (D98, §3.6): a goal
-    requirement no charter cites is under-delivery; a charter citing what the goal
-    does not ask for is scope creep — and a charter citing an `Out of scope[]` id
-    is the drift §7.9 says this same diff catches."""
-    want = set(LISTED.findall(section(goal_text, "Requirements") or ""))
-    out = set(LISTED.findall(section(goal_text, "Out of scope") or ""))
-    cited = {i for c in charters for i in c["covers"]}
-    return {"undelivered": sorted(want - cited), "creep": sorted(cited - want - out),
-            "out_of_scope": sorted(cited & out)}
-
-
 def charter_set_packet(goal, charters, diff):
     """§4.6 · 6's `stage: charter-set` Input, exactly: the charter set, the goal's
     done-condition, and the both-directions diff. No rationale — the plan-auditor
@@ -136,10 +115,7 @@ def charter_set_packet(goal, charters, diff):
     g = goal.read_text()
     parts = [f"stage: charter-set\ngoal: {goal.stem}\n",
              "## The goal's done-condition\n" + (section(g, "Done for the whole") or "(none)"),
-             "\n## Coverage diff (mechanical, both directions)\n"
-             f"- goal requirements no charter cites: {diff['undelivered'] or 'none'}\n"
-             f"- charter ids the goal does not ask for: {diff['creep'] or 'none'}\n"
-             f"- charter ids on the goal's Out of scope list: {diff['out_of_scope'] or 'none'}\n"]
+             "\n" + audit.render("charter-set", audit.coverage_rows(diff))]
     for c in charters:
         parts.append(f"\n## {c['id']} — {c['title']}\n" + pathlib.Path(c["path"]).read_text())
     p = fold.ROOT / "content" / f"charter-set-{goal.stem}.md"

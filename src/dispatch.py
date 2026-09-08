@@ -250,6 +250,15 @@ def main(a):
     if prior:
         fail(f"identical packet and contract already failed as {prior.get('spawn')} "
              f"({str(prior.get('why'))[:60]}); not retried (D120) — not spent")
+    # §3.6: most of both fable audits is a script, and the script runs first. A
+    # plan-auditor packet with no pre-pass block asks the model to re-derive six
+    # mechanical checks — and "the script did not run" then reads exactly like
+    # "the script found nothing". Refused before it spends.
+    import audit
+    if a.role == "plan-auditor" and audit.HEADER not in packet:
+        fail(f"plan-auditor packet carries no script pre-pass ('{audit.HEADER}') — "
+             f"run `doit audit <stage> {a.subject} --cut …` and put its block in the packet "
+             f"(§3.6) — not spent")
     before = None if builder else porcelain(cwd)
     if not builder and before is None:
         fail(f"repo status undetermined in {cwd} before spawn — not spent")

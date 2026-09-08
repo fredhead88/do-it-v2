@@ -29,6 +29,12 @@ no owner) · requirement-ID coverage in both directions · any unit past the
 one-context size heuristic · an acquisition decision for every declared
 dependency.
 
+It arrives under `## Script pre-pass (ground truth — do not re-derive)`, one
+line per check, and each line reads exactly one of three ways: `none` · a list
+of findings · `undetermined — <why>`. **An `undetermined` check is not a clean
+one.** Where a check could not run, say so in your findings; do not fill the gap
+by deriving it yourself, and do not treat the gap as a pass.
+
 You are not given the Planner's rationale. If it appears in the packet, set
 `contamination: true` and return.
 
