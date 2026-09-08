@@ -341,8 +341,17 @@ def main(a):
     print(json.dumps({"spawn": spawn, "ok": True, **meta}))
 
 
-CLI = subprocess.run(["claude", "--version"], capture_output=True, text=True).stdout.split()[0:1] or [None]
-CLI = CLI[0]
+def cli_version():
+    """Recorded on every terminal event (D120: re-trust on a CLI change). A version
+    that cannot be read is recorded as null, never a crash — the CLI replaces its own
+    binary on auto-update, and one exec during the swap took the whole suite down."""
+    try:
+        return subprocess.run(["claude", "--version"], capture_output=True, text=True, timeout=30).stdout.split()[0]
+    except (OSError, subprocess.SubprocessError, IndexError):
+        return None
+
+
+CLI = cli_version()
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
