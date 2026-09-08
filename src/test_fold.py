@@ -71,6 +71,17 @@ notop = ledger(**{"L-planner-01.jsonl": [built[0]], "L-builder-01.jsonl": [
     {"ts": stamp(0), "type": "spec-closed", "subject": S, "charter": C}]})
 assert notop[1][S]["state"] == "written", "only the operator may close a spec unbuilt"
 
+# §3.11's L1 conjunct is the Planner's claim, and nothing derives it: the first
+# real charter had every spec accepted and stayed `open`, so the Executor's close
+# row was unreachable. A builder saying so is recorded and ignored like any other
+# unauthorized emit.
+l1 = ledger(**{"L-planner-01.jsonl": [built[0], {"ts": stamp(0), "type": "l1-complete", "subject": C}]})
+assert l1[2][C]["state"] == "L1-complete", l1[2][C]["state"]
+notl1 = ledger(**{"L-planner-01.jsonl": [built[0]], "L-builder-01.jsonl": [
+    {"ts": stamp(0), "type": "l1-complete", "subject": C}]})
+assert C not in notl1[2] and notl1[3], \
+    "only the Planner or the operator may declare L1-complete; a builder's is ignored"
+
 # a builder may not clear the rejections against its own work
 selfclear = ledger(**{"L-builder-01.jsonl": built + [
     {"ts": stamp(0), "type": "criterion-cleared", "subject": S, "criterion": "AC1"}],
@@ -395,4 +406,4 @@ stale = ledger(**{"L-tick-local.jsonl": [{"ts": mins(30), "type": "tick", "lane"
 assert "TICK STALE" in fold.render(*stale)
 assert "last tick: never" in fold.render(*ledger(**{"L-operator-local.jsonl": []}))
 
-print("fold: 68 checks pass")
+print("fold: 70 checks pass")

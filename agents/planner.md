@@ -169,9 +169,17 @@ one already: the next tick picks it up.
 
 ### ⑦ Clear
 
-When every slot has a `spec-written` (or a `spec-killed`), print the handover —
-charter, units, waves, the ids written, the open sweep questions — and stop.
-Do not start another charter in this context.
+When every slot has a `spec-written` (or a `spec-killed`), the charter is
+L1-complete — every requirement covered by a spec, every spec written, audited
+and handed — and **that is an event, not a state of mind**:
+
+    doit append l1-complete <charter> why:='"<every slot, one line>"'
+
+Nothing else in the system writes it, and until it exists the Executor's close
+row cannot fire: the sweep, the charter-review and the reap all gate on
+L1-complete. Then print the handover — charter, units, waves, the ids written,
+the open sweep questions — and stop. Do not start another charter in this
+context.
 
 ## Commissioning the cheap diggers
 

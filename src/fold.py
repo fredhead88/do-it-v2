@@ -52,6 +52,14 @@ EMITS = {"verdict": {"grader"}, "review": {"reviewer"}, "shipped": {"executor"},
          # Planner would cut from it and the charter-reviewer would close against a
          # done-condition that may not exist.
          "charter-filed": {"thinker", "operator"},
+         # §3.11's L1 conjunct, and until the first real charter reached it nobody
+         # emitted this event at all: every spec of L-charter-0002 was accepted and
+         # the charter stayed `open`, so the Executor's close row — sweep-fixpoint,
+         # charter-reviewer, reap — was unreachable. L1 is the Planner's claim
+         # (every requirement covered by a spec, every spec written, audited and
+         # handed); the operator keeps it for an adopted charter whose Planner ran
+         # before the command existed.
+         "l1-complete": {"planner", "operator"},
          # §4.11's two scripts. Both write as the seat that ran them (D90: the
          # filename), and both make a claim only that seat may make. `deploy-landed`
          # says a sha is LIVE — the clearing direction, and the one event in the
