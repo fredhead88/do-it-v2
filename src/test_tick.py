@@ -54,6 +54,23 @@ tick.main()
 assert len([l for l in tick.TICK.read_text().splitlines() if '"spawn-stale"' in l]) == 1, "stale is recorded once"
 ev_file.unlink()
 
+# a start with NO spawn id — hand-written, or written before the wrapper existed.
+# It crashed the tick on the first real charter: `sid.split` on None, and every
+# tick after it was dead. It cannot be matched to a terminal event, so it ages
+# out on the role's cap and names nothing.
+ev_file = TMP / "events" / "L-builder-0009.jsonl"
+ev_file.write_text(json.dumps({"v": 1, "ts": fold.NOW.isoformat(timespec="seconds"),
+                               "type": "build-started", "subject": "L-spec-0001"}) + "\n")
+assert tick.main() == 0 and ticks()[-1]["lane"] == 0, "an anonymous start does not crash the tick"
+old = (fold.NOW - __import__("datetime").timedelta(days=12)).isoformat(timespec="seconds")
+ev_file.write_text(json.dumps({"v": 1, "ts": old, "type": "spawn-started",
+                               "role": "grader", "subject": "L-spec-0001"}) + "\n")
+before_stale = len([l for l in tick.TICK.read_text().splitlines() if '"spawn-stale"' in l])
+assert tick.main() == 0 and ticks()[-1]["lane"] == 1, "aged out: back on the lane"
+assert len([l for l in tick.TICK.read_text().splitlines() if '"spawn-stale"' in l]) == before_stale, \
+    "nothing to name: a spawn-stale with no spawn id would be unmatchable and repeat every tick"
+ev_file.unlink()
+
 # an open escalation keeps the subject off the lane; a decision after it puts it back
 esc = TMP / "events" / "L-executor-0090.jsonl"
 esc.write_text(json.dumps({"v": 1, "ts": fold.NOW.isoformat(timespec="seconds"), "type": "escalation-blocking",
@@ -69,4 +86,4 @@ held = open(TMP / "tick.lock", "w")
 fcntl.flock(held, fcntl.LOCK_EX)
 before = len(ticks())
 assert tick.main() == 0 and len(ticks()) == before, "flock: a second tick is dropped, not queued"
-print("tick: 11 checks pass")
+print("tick: 14 checks pass")

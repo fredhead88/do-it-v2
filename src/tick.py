@@ -27,7 +27,7 @@ def in_flight(ev):
     dispatches the same work twice. A start older than twice its role's cap with no
     terminal event is a dead wrapper: recorded once as spawn-stale, and the subject
     is back on the lane for the Executor's failed-spawn row."""
-    started = {e.get("spawn"): e for e in ev if e["type"] in ("build-started", "spawn-started")}
+    started = [e for e in ev if e["type"] in ("build-started", "spawn-started")]
     ended = {e.get("spawn") for e in ev if e["type"] in ("spawn-done", "spawn-failed", "spawn-stale")}
     # An open escalation is the operator's: the subject leaves the lane until a
     # decision or an unblocked event lands after it — else every cron tick pays
@@ -37,13 +37,20 @@ def in_flight(ev):
         if e["type"] in ("escalation-blocking", "decision", "unblocked") and e.get("subject"):
             last[e["subject"]] = e["type"]
     busy = {s for s, t in last.items() if t == "escalation-blocking"}
-    for sid, e in started.items():
-        if sid in ended:
+    for e in started:
+        sid = e.get("spawn")
+        if sid and sid in ended:
             continue
-        role = "-".join(sid.split("-")[1:-1])
+        # A start with no spawn id is not the wrapper's — a hand-written one, or a
+        # pre-wrapper event. It can never be matched to a terminal event, so it is
+        # aged out on the role's own cap and there is nothing to name in a
+        # `spawn-stale`: the subject simply returns to the lane, where the
+        # Executor's failed-spawn row is what looks at it.
+        role = "-".join(sid.split("-")[1:-1]) if sid else (e.get("role") or "")
         cap = dispatch.ROLES.get(role, (None, 60, 0))[1]
         if (fold.NOW - fold.ts(e.get("ts"))).total_seconds() / 60 > 2 * cap:
-            dispatch.emit(TICK, {"spawn": sid}, "spawn-stale", subject=e.get("subject"), role=role, cap_min=cap)
+            sid and dispatch.emit(TICK, {"spawn": sid}, "spawn-stale",
+                                  subject=e.get("subject"), role=role, cap_min=cap)
         else:
             busy.add(e.get("subject"))
     return busy
