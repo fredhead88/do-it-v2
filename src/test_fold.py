@@ -23,6 +23,12 @@ def ledger(**files):
 
 
 S, C = "L-spec-0142", "L-charter-0031"
+
+# D90: the actor is the filename, and a hyphenated role must not collapse to its
+# first token — L-spec-writer and L-spec-auditor are two actors, not one "spec".
+ev, *_ = ledger(**{"L-spec-writer-0007.jsonl": [{"ts": stamp(0), "type": "spec-written", "subject": S}],
+                   "L-operator-local.jsonl": [{"ts": stamp(0), "type": "observed", "subject": S}]})
+assert {e["actor"] for e in ev} == {"spec-writer", "operator"}, {e["actor"] for e in ev}
 built = [{"ts": stamp(3), "type": "spec-written", "subject": S, "charter": C},
          {"ts": stamp(2), "type": "build-started", "subject": S},
          {"ts": stamp(2), "type": "build-done", "subject": S}]

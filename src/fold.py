@@ -86,8 +86,10 @@ def read_events():
     """Every event in every file, oldest first. A torn tail never wedges the fold."""
     out = []
     for f in sorted(EVENTS.glob("*.jsonl")):
+        # L-<role>-<nnnn>: the role may itself carry hyphens (L-spec-writer-0007),
+        # so strip one machine prefix and one trailing token, never split on all.
         parts = f.stem.split("-")
-        actor = parts[1] if len(parts) >= 3 else f.stem
+        actor = "-".join(parts[1:-1]) if len(parts) >= 3 else f.stem
         for n, line in enumerate(f.read_text().splitlines(), 1):
             if not line.strip():
                 continue
