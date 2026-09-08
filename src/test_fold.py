@@ -379,6 +379,35 @@ finally:
 assert len(rows) == 1 and "spend · p · $1.00 · 1 spawns · attributed only" in rows[0], rows
 assert "list-price estimate" in rows[0], "the filtered row still says what it is not"
 
+# R3 — and the filter value seeds its OWN row, so a project the ledger never names
+# reads zero-out-of-zero-spawns rather than as silence. The `attributed only`
+# caveat stays on the zero row: drop it only when the number is zero and the
+# reader learns the caveat is about size.
+fold.PROJECT = "ghost"
+try:
+    rows = spend(ledger(**{"L-operator-local.jsonl": [sp_ev(project="p", cost_usd=1.0)]}))
+    empty = ledger(**{"L-operator-local.jsonl": []})
+    erows, eboard = spend(empty), fold.render(*empty)
+finally:
+    fold.PROJECT = None
+for r in (rows, erows):
+    assert len(r) == 1 and "spend · ghost · $0.00 · 0 spawns · attributed only" in r[0], r
+    assert "list-price estimate" in r[0] and " unpriced" not in r[0], r
+assert len([l for l in eboard.splitlines() if l.startswith("## ")]) == 10, \
+    "an empty ledger under a filter still renders the ten sections, and does not raise"
+
+# ...and that label is now UNVOUCHED: DOIT_PROJECT is operator environment reaching
+# the board with no event behind it, so it must pass the same collapse as a ledger
+# label or it forges an eleventh section — §8.3's ten are positional.
+fold.PROJECT = "x\n## FORGED (9)"
+try:
+    forged_env = ledger(**{"L-operator-local.jsonl": [sp_ev(project="p", cost_usd=1.0)]})
+    frows, fboard = spend(forged_env), fold.render(*forged_env)
+finally:
+    fold.PROJECT = None
+assert len([l for l in fboard.splitlines() if l.startswith("## ")]) == 10, "ten sections, always"
+assert len(frows) == 1 and "spend · x ## FORGED (9) · $0.00 · 0 spawns" in frows[0], frows
+
 # a label is a DIRECTORY NAME by default and nothing curates it: a newline in one
 # must not forge a board line, and above all not an eleventh section — §8.3's ten
 # are positional, which is the whole reason that layout exists.
@@ -449,4 +478,4 @@ stale = ledger(**{"L-tick-local.jsonl": [{"ts": mins(30), "type": "tick", "lane"
 assert "TICK STALE" in fold.render(*stale)
 assert "last tick: never" in fold.render(*ledger(**{"L-operator-local.jsonl": []}))
 
-print("fold: 79 checks pass")
+print("fold: 84 checks pass")
