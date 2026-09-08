@@ -51,7 +51,15 @@ EMITS = {"verdict": {"grader"}, "review": {"reviewer"}, "shipped": {"executor"},
          # charter-filed from anywhere else is a charter nothing checked — the
          # Planner would cut from it and the charter-reviewer would close against a
          # done-condition that may not exist.
-         "charter-filed": {"thinker", "operator"}}
+         "charter-filed": {"thinker", "operator"},
+         # §4.11's two scripts. Both write as the seat that ran them (D90: the
+         # filename), and both make a claim only that seat may make. `deploy-landed`
+         # says a sha is LIVE — the clearing direction, and the one event in the
+         # ledger that a reader will trust without re-checking; `tree-reaped` is the
+         # record of something destroyed. `deploy-started` and `deploy-failed` stay
+         # open: reporting a failure is the safe direction (see rejected-criterion).
+         "deploy-landed": {"executor", "operator"},
+         "tree-reaped": {"executor", "operator"}}
 
 # §4.4's `May declare` line, one contract at a time — the fold authorizes (§4.6).
 # A declaration lands as an event TYPED BY ITS TERM (dispatch.events_for), so a

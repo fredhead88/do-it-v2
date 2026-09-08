@@ -8,13 +8,15 @@ case "${1:-board}" in
   dispatch) shift; exec python3 "$SRC/dispatch.py" "$@" ;;
   packet)  shift; exec python3 "$SRC/packet.py" "$@" ;;
   audit)   shift; exec python3 "$SRC/audit.py" "$@" ;;
+  deploy)  shift; exec python3 "$SRC/deploy.py" "$@" ;;
+  reap)    shift; exec python3 "$SRC/tree_cleanup.py" "$@" ;;
   vet-dep) shift; exec node "$HERE/scripts/vet-dep.mjs" "$@" ;;
   paid-call) shift; exec python3 "$SRC/paid_call.py" "$@" ;;
   tick)    exec python3 "$SRC/tick.py" ;;
   up)      shift; exec python3 "$SRC/up.py" "$@" ;;
   think)   shift; exec python3 "$SRC/think.py" "$@" ;;
   backup)  shift; exec bash "$SRC/backup.sh" "$@" ;;
-  test)    cd "$SRC" && python3 test_fold.py && python3 test_merge_gate.py && python3 test_dispatch.py && python3 test_packet.py && python3 test_tick.py && python3 test_up.py && python3 test_think.py && python3 test_paid_call.py && python3 test_audit.py && exec node ../src/test_vet_dep.mjs ;;
+  test)    cd "$SRC" && python3 test_fold.py && python3 test_merge_gate.py && python3 test_dispatch.py && python3 test_packet.py && python3 test_tick.py && python3 test_up.py && python3 test_think.py && python3 test_paid_call.py && python3 test_audit.py && python3 test_deploy.py && python3 test_tree_cleanup.py && exec node ../src/test_vet_dep.mjs ;;
   help|-h|--help) cat <<'USAGE'
 doit — a ledger that derives state, and the guards that read it
 
@@ -27,6 +29,8 @@ doit — a ledger that derives state, and the guards that read it
   doit audit cut|plan <charter> --cut F [...]  the six mechanical checks under both fable audits (§3.6)
   doit vet-dep [--pypi] <pkg>... | --hook  the install gate, and the scout's ground truth (§6.7b)
   doit paid-call <label> -- <cmd...>      run a call that spends, log it, enforce the cap (§10.4)
+  doit deploy <spec> --sha S --target T --cmd C --check C  serial; waits; proves the sha is live (§4.11)
+  doit reap <charter> [--repo D] [--dry-run]   reap only the provably dead worktrees at close (§4.11)
   doit dispatch <role> <subject> [...]    spawn one contract, check it, append its events (-h for flags)
   doit tick                               fold; spawn the Executor only if the lane is actionable (D117)
   doit up                                 start the Planner pane; print (never install) the tick's cron line
@@ -46,6 +50,8 @@ Environment
   DOIT_SPEND_CAP_USD     paid-call refuses past this; there is no uncapped mode
   DOIT_RESTIC_REPO  backup destination
   DOIT_TICK_MIN     the cron interval; a tick older than 2× is STALE (default 5)
+  DOIT_DEPLOY_TIMEOUT  wall-clock cap on a deploy, command plus wait (default 600)
+  DOIT_REAP_DEPTH   how far back on main the reaper reads patch-ids  (default 200)
 
 The ledger is append-only. Never edit or delete a line: repair with an
 operator-only `correction` event.

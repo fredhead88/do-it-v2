@@ -27,7 +27,7 @@ worktree. Cards, verdicts, summaries and the spec are what you read.
 - `doit states` · `doit events <subject>` (that subject's events, oldest
   first) · `doit append <type> <subject> k=v …` (writes as you —
   `DOIT_LEDGER_FILE` is preset to your spawn file; never change it) ·
-  `doit dispatch --detach …` · `doit gate`.
+  `doit dispatch --detach …` · `doit gate` · `doit deploy` · `doit reap`.
 - You may read the charter and the Plan (§3.9). Builders get extracts only.
 
 ## What the lane asks of you — in this order
@@ -44,7 +44,7 @@ is waiting for you. `doit events <subject>` is how you check each row.
 | **`written`** | an `L-spec-auditor-*` `spawn-done` for this subject? if it had findings, a later `spec-written`? a footprint shared with a `building` spec of a higher-priority charter (earlier goal date)? | no audit → dispatch `spec-auditor`. Audited with findings, no rework yet → dispatch `spec-writer` with the fix list. `bad_cut` → `doit append bad-cut <spec>` and `escalation-blocking` (re-cut is authorship's, §4.3). Collision → `doit append blocked <spec> id=<spec>-wait owner=executor why="…"` and wait. Otherwise cut the worktree, install the wave's ratified dependencies if the Plan names any (D73), dispatch `builder`. |
 | **`graded` / `reviewing` / `shipped`-not-accepted** — the pipeline after a build | **the newest** of `build-done`, `verdict`, `review` on the subject | see the block below; act on that one event only. |
 | **`building`** | — | nothing; in flight. |
-| **charter `L1-complete`** | open briefs for the charter (`brief` events no `spec-written` answers); `sweep-fixpoint`? `charter-review-complete`? | briefs open → nothing until specced. None open, no fixpoint → `doit append sweep-fixpoint <charter>`. Fixpoint, no review → dispatch `charter-reviewer`. `charter-review-not-complete` with findings no spec answers → `escalation-blocking`. L2 derived → reap: a spec whose `ready_sha` is an ancestor of main (`git merge-base --is-ancestor`) with a clean worktree gets `git worktree remove` and `git branch -d`; retain everything else with a reason; `doit append tree-reaped <charter> reaped:=[…] retained:=[…]`. |
+| **charter `L1-complete`** | open briefs for the charter (`brief` events no `spec-written` answers); `sweep-fixpoint`? `charter-review-complete`? | briefs open → nothing until specced. None open, no fixpoint → `doit append sweep-fixpoint <charter>`. Fixpoint, no review → dispatch `charter-reviewer`. `charter-review-not-complete` with findings no spec answers → `escalation-blocking`. L2 derived → reap: `doit reap <charter> --repo "$R/repos/<project>"` and nothing else. The script judges ancestry by patch-id (`git branch --merged` is confidently wrong under squash-merge), retains anything it cannot prove dead with a reason, and writes the one `tree-reaped` event. It refuses a charter that is not L2-complete or retracted, so a wrong argument destroys nothing. |
 | **`escalation-blocking` open on a subject** | — | touch nothing on that subject. Act on the others. |
 
 **The pipeline after a build — act on the newest event:**
@@ -77,10 +77,15 @@ is waiting for you. `doit events <subject>` is how you check each row.
   field, and a spec file without a `Writes:` line has no other; exit 0 →
   `git -C "$REPO" merge --no-ff <branch> -m "merge(<spec>): <goal line>"` →
   `doit append shipped <spec> sha=<merge sha> branch=<branch>` → if the
-  charter names a deploy command: run it, verify the sha is live,
-  `doit append deploy-landed <spec> sha=…`; not verified →
+  charter names a deploy command:
+  `doit deploy <spec> --sha <merge sha> --target <target> --cmd '<the charter's
+  deploy command>' --check '<the charter's post-deploy check>'`. It is serial, it
+  waits, and it writes `deploy-landed` only when the check exits 0 **and names the
+  sha** — you never append that event yourself. Exit 0 → done. Exit 1 →
   `git -C "$REPO" revert --no-edit -m 1 <merge sha>` then `escalation-blocking`
-  (rollback first, §5.8). Gate exit 1 with `removed[]` / `reverted[]` →
+  quoting the `deploy-failed` event's `why` (rollback first, §5.8 — revert before
+  you diagnose). Exit 3 → another deploy holds the lock; do nothing, the next tick
+  retries. Gate exit 1 with `removed[]` / `reverted[]` →
   rework with them in the packet; "could not determine" → `escalation-blocking`
   quoting it — undetermined is never clean, and it is never yours to force.
 
