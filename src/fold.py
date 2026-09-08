@@ -39,7 +39,13 @@ EMITS = {"verdict": {"grader"}, "review": {"reviewer"}, "shipped": {"executor"},
          # §3.11's L2 conjunct. A charter that could stamp its own review complete
          # is the acceptance hole one level up.
          "charter-review-complete": {"charter-reviewer"},
-         "charter-review-not-complete": {"charter-reviewer"}}
+         "charter-review-not-complete": {"charter-reviewer"},
+         # §3.2 rows 3 and 4: the cut and the Plan have one author, and the two
+         # fable audits are blind to that author's rationale — which is only
+         # meaningful if the artifact they point at is the Planner's. A
+         # `plan-written` from any other seat also aims the charter-reviewer's
+         # Blindness strip list (packet.py) at a file the Planner never wrote.
+         "cut-written": {"planner"}, "plan-written": {"planner"}}
 
 # §4.4's `May declare` line, one contract at a time — the fold authorizes (§4.6).
 # A declaration lands as an event TYPED BY ITS TERM (dispatch.events_for), so a
@@ -441,6 +447,14 @@ def append(argv):
 
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else "board"
+    if cmd == "alloc":
+        # §2.8: allocated by the fold at write time, max+1, before the event. The
+        # import is here and not at the top because dispatch shells out to
+        # `claude --version` at import and the board must not pay for that.
+        import dispatch
+        (ROOT / "content").mkdir(parents=True, exist_ok=True)
+        print(dispatch.alloc(ROOT / "content", f"L-{sys.argv[2]}-", ".md"))
+        sys.exit(0)
     if cmd == "append":
         append(sys.argv[2:])
     ev = read_events()
