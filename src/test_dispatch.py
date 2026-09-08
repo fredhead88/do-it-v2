@@ -128,6 +128,42 @@ code, types, evs, _ = spawn("grader", out=grade([met]))
 assert [e["criterion"] for e in evs if e["type"] == "criterion-cleared"] == ["DONE-COND"] and rejects() == 0, \
     "a confirmed verdict clears a standing rejection the packet no longer names (first real chain)"
 
+# ★ `probe` runs OUTSIDE every repo on purpose (§4.6·10, §9.5). Read as
+# undetermined, that refuses the one contract that spends at planning time
+# before it spends anything at all.
+OUTSIDE = TMP / "run-dir"
+OUTSIDE.mkdir()
+assert dispatch.porcelain(OUTSIDE) == dispatch.NOT_A_REPO, "no repo is a definite answer, not an undetermined one"
+assert dispatch.porcelain(REPO) is not None and dispatch.porcelain(REPO) != dispatch.NOT_A_REPO
+probe_out = {"path": "content/L-probe-0001/", "summary": "s", "externals": [{"name": "x", "came_back": "y"}],
+             "n_inputs": 3, "spend_usd": 0.0, "broke": [], "complete": True, "contamination": False,
+             "declarations": []}
+pd = TMP / "content" / "L-probe-0001"
+pd.mkdir(parents=True)
+(pd / "run.md").write_text("ran")
+a = argparse.Namespace(role="probe", subject="L-charter-0001", packet=str(PK), path=str(pd),
+                       cwd=str(OUTSIDE), charter=None, project="t", mcp_config=None, timeout=None, max_usd=None)
+
+
+def fake(cmd, packet, cwd, timeout):
+    return argparse.Namespace(returncode=0, stderr="", stdout=json.dumps(
+        {"is_error": False, "terminal_reason": "completed", "structured_output": probe_out, "num_turns": 1,
+         "usage": {"input_tokens": 1, "output_tokens": 2}, "total_cost_usd": 0.01, "modelUsage": {"m": {}},
+         "permission_denials": []}))
+
+
+dispatch.run_claude = fake
+try:
+    dispatch.main(a)
+    code = 0
+except SystemExit as e:
+    code = e.code
+N += 1
+pev = [json.loads(l) for l in max((TMP / "events").glob("L-probe-*.jsonl")).read_text().splitlines()]
+assert code == 0, [e.get("why") for e in pev]
+assert [e["type"] for e in pev] == ["spawn-started", "probe-run", "spawn-done"], [e["type"] for e in pev]
+assert pev[1]["externals"] == ["x"] and pev[1]["n_inputs"] == 3, pev[1]
+
 ev = fold.read_events()
 specs, *_ = fold.fold(ev)
 assert {e["actor"] for e in ev} >= {"research", "spec-writer", "builder", "grader"}, "D90: the actor is the filename"

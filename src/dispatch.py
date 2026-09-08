@@ -66,9 +66,20 @@ def emit(dst, base, type_, /, **kv):
     assert line in dst.read_text().splitlines(), f"append to {dst} did not land"
 
 
+# ★ `probe` runs with its cwd OUTSIDE every repo on purpose (§4.6·10, §9.5): its
+# run directory is under the ledger root so there is no accidental path into the
+# product. "Not a repository" is a definite answer, not an undetermined one, and
+# reading it as undetermined refused the probe before it ever spent.
+NOT_A_REPO = "<not a git repository>"
+
+
 def porcelain(cwd):
     r = subprocess.run(["git", "status", "--porcelain"], cwd=cwd, capture_output=True, text=True)
-    return r.stdout if r.returncode == 0 else None      # None = undetermined, never clean
+    if r.returncode == 0:
+        return r.stdout
+    if "not a git repository" in r.stderr.lower():
+        return NOT_A_REPO                               # definite: there is no repo to mutate
+    return None                                         # None = undetermined, never clean
 
 
 def run_claude(cmd, packet, cwd, timeout):
@@ -287,7 +298,9 @@ def main(a):
         fail("contamination: the packet carried what Blindness strips; the run is void")
     if kind and not (a.role == "spec-writer" and out["status"] != "written"):
         p = pathlib.Path(a.path) if a.path else fail("a writing role needs --path")
-        if out.get("path") and not out["path"].endswith(p.name):
+        # A run directory is named with a trailing slash by its own contract, and
+        # `content/L-probe-0001/`.endswith("L-probe-0001") is false.
+        if out.get("path") and not out["path"].rstrip("/").endswith(p.name):
             fail(f"path mismatch: packet named {p.name}, output says {out['path']}")
         exists = p.is_dir() and any(p.iterdir()) if kind == "dir" else p.is_file() and p.stat().st_size > 0
         if not exists:
