@@ -33,15 +33,50 @@ EMITS = {"verdict": {"grader"}, "review": {"reviewer"}, "shipped": {"executor"},
          # rejections against its own build and reach `accepted` from one seat,
          # which is exactly what the verdict and review rows exist to prevent.
          "rejected-criterion": {"grader", "reviewer", "executor"},
-         "criterion-cleared": {"grader", "reviewer"}}
+         "criterion-cleared": {"grader", "reviewer"},
+         # D101: the reviewer's blocking event, and it blocks HERE — see standing_rejects.
+         "must-fix": {"reviewer"},
+         # §3.11's L2 conjunct. A charter that could stamp its own review complete
+         # is the acceptance hole one level up.
+         "charter-review-complete": {"charter-reviewer"},
+         "charter-review-not-complete": {"charter-reviewer"}}
+
+# §4.4's `May declare` line, one contract at a time — the fold authorizes (§4.6).
+# A declaration lands as an event TYPED BY ITS TERM (dispatch.events_for), so a
+# term outside the emitting role's list is recorded and ignored like any other
+# stamp. `escaped` is on nobody's list on purpose: the builder cannot see the
+# audit, so the fold derives it.
+DECLARES = {
+    "builder": "spec-ambiguity spec-contradiction spec-unbuildable adr-friction decision-wait "
+               "footprint-miss loop approaches-exhausted budget-exceeded context-exhausted "
+               "bad-cut worked",
+    "charter-reviewer": "charter-gap hollow evidence-gap worked",
+    "grader": "hollow card-quality evidence-gap gate-infra worked",
+    "plan-auditor": "charter-gap seam-undefined bad-cut worked",
+    "probe": "charter-gap",
+    "research": "",                       # observes a codebase, not the system's health
+    "reuse-scout": "unclassified",
+    "reviewer": "hollow post-ship-defect regression rework blocked-external evidence-gap unverifiable",
+    "spec-auditor": "false-premise stale-current-state premise-from-prose unverified-universal "
+                    "reader-not-checked owed-ac wrong-evidence-type adversary-noise "
+                    "superseded-by-concurrent-charter gate-gaming audit-scope-expanded",
+    "spec-writer": "spec-unbuildable charter-gap seam-undefined adr-friction owed-ac",
+}
+for _role, _terms in DECLARES.items():
+    for _term in _terms.split():
+        EMITS.setdefault(_term, set()).add(_role)
 # A correction may override anything but these: D90 takes the actor from the
 # FILENAME, and a correction that could rewrite it reopens every check below.
 UNCORRECTABLE = ("actor", "_src")
 APPLIED = []          # corrections that actually landed, for HEALTH. See apply_corrections.
 
-# ponytail: §12.5 leaves expected dwell UNSET — it is derived from the stage
-# timings the log already carries, once the log has some. One dict until then.
+# §12.5 leaves expected dwell UNSET, to be derived from the stage timings the log
+# carries. These are the fallback, used until the log has DWELL_MIN_N crossings of
+# a stage; after that dwell_days() measures it. (enter, leave) per state.
 DWELL_DAYS = {"written": 1, "building": 1, "graded": 1, "reviewing": 1}
+STAGES = {"written": ("spec-written", "build-started"), "building": ("build-started", "build-done"),
+          "graded": ("build-done", "verdict"), "reviewing": ("verdict", "review")}
+DWELL_MIN_N = 3
 # §2.5's `count(owed) <= K`. K is unset in §12.5, so the default denies rather
 # than invents: no owed evidence may ride into a closed charter until K is measured.
 K = int(os.environ.get("DOIT_K", "0"))
@@ -108,11 +143,107 @@ def read_events():
 
 
 def standing_rejects(evs):
-    """Criteria a grader rejected and nobody has cleared. A spec carrying any of
-    these is NOT awaiting review — it is waiting on rework, and the board must
-    not render the two the same way."""
-    return ({e.get("criterion") for e in evs if e["type"] == "rejected-criterion"}
-            - {e.get("criterion") for e in evs if e["type"] == "criterion-cleared"})
+    """Criteria a grader rejected or a reviewer marked `must-fix`, that nobody has
+    cleared. A spec carrying any of these is NOT awaiting review — it is waiting on
+    rework, and the board must not render the two the same way.
+
+    ★ D101 put the reviewer's blocking event here rather than beside it: a
+    `must-fix` the fold does not read is advice, and §5.3's rule is that ONE
+    standing blocking criterion stops acceptance regardless of who wrote it. The
+    wrapper happens to write a `rejected-criterion` alongside each one today; that
+    is the wrapper's choice, and acceptance must not depend on it."""
+    raised = {e.get("criterion") for e in evs if e["type"] in ("rejected-criterion", "must-fix")}
+    return raised - {e.get("criterion") for e in evs if e["type"] == "criterion-cleared"}
+
+
+def charter_review(evs):
+    """The NEWEST charter-review verdict (§3.11's L2 conjunct), not merely the
+    presence of a `complete` one: a charter reviewed complete, reopened, and
+    reviewed again as not-complete must leave L2, and a set-membership test can
+    never say so."""
+    seen = [e["type"] for e in evs if e["type"].startswith("charter-review-")]
+    return seen[-1] if seen else None
+
+
+def deadline_passed(s):
+    """An unparseable or absent deadline is PAST, never future: a guard that cannot
+    establish its answer returns the failure state, and the failure state here is
+    "the operator looks at it"."""
+    try:
+        d = datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return True
+    return (d if d.tzinfo else d.replace(tzinfo=timezone.utc)) < NOW
+
+
+def overdue_questions(events):
+    """§4.9: "wait indefinitely is a wedge, not a default". A `question` whose
+    deadline has passed with nothing naming it is the operator's. A `decision` or
+    an `unblocked` answers one by `ref` — the `file:line` the fold hands out as
+    `src` on `doit events`, which is the same handle a correction uses (D111)."""
+    answered = {e.get("ref") for e in events if e.get("type") in ("decision", "unblocked")}
+    return [e for e in events if e.get("type") == "question"
+            and e["_src"] not in answered and deadline_passed(e.get("deadline"))]
+
+
+def open_escalations(events):
+    """Per subject, the NEWEST of escalation-blocking / decision / unblocked — the
+    tick's rule verbatim (tick.py's lane filter). A resolved escalation that stays
+    under NEEDS YOU while the tick has already put the subject back on the lane is
+    two answers to one question, and the board is the one the operator reads."""
+    last = {}
+    for e in events:
+        if e.get("type") in ("escalation-blocking", "decision", "unblocked") and e.get("subject"):
+            last[e["subject"]] = e
+    return [e for e in last.values() if e["type"] == "escalation-blocking"]
+
+
+def caps():
+    """(wall-clock minutes, dollars) per role, read from the one place each is
+    declared — never a second copy here."""
+    import dispatch, tick                                  # lazy: both import fold
+    return {**{r: (m, u) for r, (_, m, u) in dispatch.ROLES.items()},
+            "executor": (tick.MINUTES, tick.USD)}
+
+
+def over_budget(events):
+    """§4.4's Budget field, checked. The spawn's `usage` comes back in the JSON
+    result and the wrapper puts it on `spawn-done`; a Budget nothing compares is
+    decoration, and §4.4 correction 9 says `budget-exceeded` cannot fire without a
+    cap. The actor is the file (D90), so the role — and therefore the cap — is not
+    a field the spawn wrote about itself."""
+    cap, out = caps(), []
+    for e in events:
+        if e.get("type") != "spawn-done" or e["actor"] not in cap:
+            continue
+        tmin, usd = cap[e["actor"]]
+        cost, mins = e.get("cost_usd") or 0, (e.get("duration_ms") or 0) / 60000.0
+        why = ([f"${cost:.2f} > ${usd}"] if cost > usd else []
+               ) + ([f"{mins:.0f}m > {tmin}m"] if mins > tmin else [])
+        if why:
+            out.append(f"{e.get('spawn') or e['_src']} · {e['actor']} · " + " · ".join(why))
+    return out
+
+
+def dwell_days(by_subject):
+    """Expected dwell per state, measured from the log's own stage crossings — the
+    fallback stands until DWELL_MIN_N specs have crossed. Twice the MEDIAN crossing,
+    not twice the longest: one spec that sat over a weekend would otherwise raise
+    the bar for every spec after it, and a wedge alarm nothing can trip is worse
+    than no alarm."""
+    import statistics
+    out = dict(DWELL_DAYS)
+    for state, (enter, leave) in STAGES.items():
+        obs = []
+        for evs in by_subject.values():
+            a = next((e for e in evs if e["type"] == enter), None)
+            b = a and next((e for e in evs if e["type"] == leave
+                            and ts(e["ts"]) >= ts(a["ts"])), None)
+            if b:
+                obs.append((ts(b["ts"]) - ts(a["ts"])).total_seconds() / 86400)
+        if len(obs) >= DWELL_MIN_N:
+            out[state] = 2 * statistics.median(obs)
+    return out
 
 
 def spec_state(evs, retracted):
@@ -169,7 +300,8 @@ def fold(events):
             c["state"] = "retracted"
         elif (mine and all(s["state"] in ("accepted", "shipped-owed-evidence", "dropped",
                                           "closed-unbuilt") for s in mine)
-              and {"sweep-fixpoint", "charter-review-complete"} <= types and owed <= K):
+              and "sweep-fixpoint" in types and owed <= K
+              and charter_review(c["evs"]) == "charter-review-complete"):
             c["state"] = "L2-complete"
         elif "l1-complete" in types:
             c["state"] = "L1-complete"
@@ -180,8 +312,8 @@ def fold(events):
     return specs, charters, ignored, by_subject
 
 
-def wedged(spec):
-    return spec["age"] > DWELL_DAYS.get(spec["state"], 1e9)
+def wedged(spec, dwell=None):
+    return spec["age"] > (dwell or DWELL_DAYS).get(spec["state"], 1e9)
 
 
 def render(events, specs, charters, ignored, by_subject):
@@ -192,7 +324,8 @@ def render(events, specs, charters, ignored, by_subject):
                                for x in by_subject.get(e.get("subject", ""), []))]
     since = lambda t: [e for e in events if e.get("type") == t and ts(e["ts"]) > looked]
     pick = lambda *st: [s for s in specs.values() if s["state"] in st]
-    flag = lambda s: "  ⚠ WEDGE" if wedged(s) else ""
+    dwell = dwell_days(by_subject)
+    flag = lambda s: "  ⚠ WEDGE" if wedged(s, dwell) else ""
 
     scope = f" · project={PROJECT}" if PROJECT else ""
     L = [f"# board · {NOW.isoformat(timespec='seconds')} · fold @ {len(events)}{scope}", ""]
@@ -203,7 +336,9 @@ def render(events, specs, charters, ignored, by_subject):
         L.append("")
 
     block("NEEDS YOU", [f"{e.get('subject','?')} · {e.get('why','escalation')}"
-                        for e in events if e.get("type") == "escalation-blocking"])
+                        for e in open_escalations(events)]
+          + [f"{e.get('subject','?')} · unanswered past {e.get('deadline','no deadline')}"
+             f" · {e.get('asks','?')}" for e in overdue_questions(events)])
     block("BLOCKED", [f"{e.get('subject','?')} · {e.get('why','?')} · owner "
                       f"{e.get('owner') or '⚠ NOBODY'} · {age_days(e):.1f}d" for e in open_blocks])
     block("WRITTEN, NOT PICKED UP", [f"{s['id']} · {s['age']:.1f}d{flag(s)}" for s in pick("written")])
@@ -241,6 +376,10 @@ def render(events, specs, charters, ignored, by_subject):
     if ignored:
         health.append(f"unauthorized events recorded and ignored: {len(ignored)} "
                       f"(last: {ignored[-1]['_src']})")
+    # §4.4 Budget, derived. Not a board section: a spawn that blew its cap is a
+    # health signal, not a queue item, and §8.3's ten sections are positional.
+    if (ob := over_budget(events)):
+        health.append(f"budget-exceeded: {len(ob)} spawn(s) over cap (last: {ob[-1]})")
     # D117: the Executor is a tick. A last tick older than twice the interval is
     # the alarm — the same shape as a wake_at passed with no verdict.
     # ponytail: a tick event has no project, so a project-filtered board reads "never".
