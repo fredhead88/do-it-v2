@@ -319,6 +319,18 @@ check("--spec and --writes compose",
 check("a stray argument is still refused", _exit(lambda: mg.parse(["main", "src/*"])))
 check("--writes with no value is still refused", _exit(lambda: mg.parse(["main", "--writes"])))
 
+# ★ the first real merge: the spec template has no Writes: line, --writes was given anyway
+(CONTENT / "L-spec-nw.md").write_text("# a spec with no grant line\n")
+check("★ --writes supplies the grant when the spec file states none", mg.grant_for("L-spec-nw", ["calc.py"]) == ["calc.py"])
+try:
+    mg.grant_for("L-spec-nw", []); check("no grant line and no --writes is could-not-determine", False)
+except mg.Undetermined as e:
+    check("no grant line and no --writes is could-not-determine", "states no writes" in str(e))
+try:
+    mg.grant_for("L-spec-none", ["calc.py"]); check("a missing content file stays could-not-determine under --writes", False)
+except mg.Undetermined as e:
+    check("a missing content file stays could-not-determine under --writes", "no content file" in str(e))
+
 # prose after the colon must not become a grant
 for prose, why in ((("writes: the web dashboard only"), "'web' became a directory grant"),
                    (("Writes: see the table below"), "'table' became a directory grant")):

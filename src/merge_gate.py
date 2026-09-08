@@ -379,6 +379,19 @@ def parse(rest):
     return main, spec, grant
 
 
+def grant_for(spec, cli):
+    """The spec's writes: grant plus the CLI's. A spec file that states no grant is
+    could-not-determine on its own, but an explicit --writes IS a grant — the spec
+    template carries no Writes: line, which blocked the first real merge. A missing
+    content file or a bad id stays could-not-determine whatever the CLI says."""
+    try:
+        return cli + writes_grant(spec)
+    except Undetermined as e:
+        if cli and "states no writes: grant" in str(e):
+            return cli
+        raise
+
+
 def main_(argv):
     branch = argv[0]
     if branch.startswith("-"):      # `doit gate --help` once appended a rework event with subject "--help"
@@ -393,7 +406,7 @@ def main_(argv):
         if grant:
             check_grant(grant, "--writes")     # the CLI was never checked at all
         if spec:
-            grant += writes_grant(spec)
+            grant = grant_for(spec, grant)
         r = gate(branch, main, grant)
         removed, reverts, main_sha, branch_sha, tree = r
         status = "rework" if (removed or reverts) else "clean"
