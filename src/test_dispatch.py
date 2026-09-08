@@ -169,4 +169,17 @@ specs, *_ = fold.fold(ev)
 assert {e["actor"] for e in ev} >= {"research", "spec-writer", "builder", "grader"}, "D90: the actor is the filename"
 assert specs["L-spec-0001"]["state"] == "reviewing", specs["L-spec-0001"]["state"]
 assert dispatch.alloc(TMP / "events", "L-x-", ".jsonl") != dispatch.alloc(TMP / "events", "L-x-", ".jsonl")
+
+# §2.8: max+1 over the ids that EXIST. The Planner hit this on the first real
+# charter — three spec subjects lived in the ledger with no content file, so
+# alloc handed back an id already carrying `spec-closed`. A spec-writer
+# dispatched there is a silent loss in an append-only ledger.
+(TMP / "content").mkdir(exist_ok=True)
+(TMP / "content" / "L-spec-0001.md").write_text("the only file\n")
+dispatch.emit(TMP / "events" / "L-planner-0001.jsonl", {}, "spec-written", subject="L-spec-0007")
+dispatch.emit(TMP / "events" / "L-planner-0001.jsonl", {}, "brief", subject="L-brief-0042")
+got = dispatch.alloc(TMP / "content", "L-spec-", ".md")
+assert got.stem == "L-spec-0008", got            # the ledger's 0007 raised the floor
+assert dispatch.subject_ids("L-spec-") and 42 not in dispatch.subject_ids("L-spec-"), "another kind never counts"
+N += 1
 print(f"dispatch: {N} spawns mocked, every check fired")

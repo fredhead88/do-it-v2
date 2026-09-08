@@ -12,7 +12,7 @@ above zero; an unreachable seat is api_error with zero tokens. The contract
 appends nothing — every event below is derived from the Output object into this
 spawn's own file, and the actor is that filename (D90).
 """
-import argparse, atexit, hashlib, json, os, pathlib, subprocess, sys
+import argparse, atexit, hashlib, json, os, pathlib, re, subprocess, sys
 from datetime import datetime, timezone
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -43,9 +43,26 @@ def frontmatter(role):
             (l.split(":", 1) for l in text.strip().splitlines() if ":" in l)}
 
 
+def subject_ids(prefix):
+    """The ids of that kind the LEDGER owns. A spec id can exist as a subject with
+    no content file — three did, from a charter whose specs were never written out —
+    and §2.8's max+1 is over the ids that exist, not over the files that happen to.
+    Allocating over files alone re-issues such an id, and the second `spec-written`
+    lands on a subject the fold has already resolved to terminal: it never renders,
+    the Executor never picks it up, and an append-only ledger cannot take it back."""
+    out = []
+    for f in EVENTS.glob("*.jsonl"):
+        for line in f.read_text().splitlines():
+            m = re.match(rf"{re.escape(prefix)}(\d+)$", (json.loads(line).get("subject") or "")
+                         ) if line.strip().startswith("{") else None
+            m and out.append(int(m.group(1)))
+    return out
+
+
 def alloc(d, prefix, suffix):
     """max+1 of a kind (§2.8), claimed with O_EXCL so two concurrent spawns never share a file."""
-    n = max([int(p.stem.rsplit("-", 1)[1]) for p in d.glob(f"{prefix}[0-9]*{suffix}")] or [0])
+    n = max([int(p.stem.rsplit("-", 1)[1]) for p in d.glob(f"{prefix}[0-9]*{suffix}")]
+            + subject_ids(prefix) or [0])
     while True:
         n += 1
         path = d / f"{prefix}{n:04d}{suffix}"
