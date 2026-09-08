@@ -139,3 +139,56 @@ product decision was ever escalated to the operator.
   appending `l1-complete` by hand since the fold was written, and
   `test_packet.py`'s fixture spec used unbolded `AC1 [` lines. Four of this
   repo's defects now have that shape.
+
+## The close half (thirteenth and fourteenth sessions) — the charter reached L2
+
+The charter-reviewer's `not-complete` (spawn 16) is where §3.13's return path
+begins, and running it is what proved the path did not exist: nothing checked
+`sweep-fixpoint`, and no role, script or pane could author the spec an in-scope
+brief implies. Both are now rules (`8b22c8a`). The triage itself stayed
+authorship's — one in-scope brief citing R3, three adjacent, each excluded by
+the charter's own Constraints — and **the charter was not narrowed to fit what
+had been built.**
+
+| # | Role | Model | Turns | Wall | Cost (list) | Session | Outcome |
+|---|---|---|---|---|---|---|---|
+| 17 | `spec-writer` (L-spec-0005) | opus | 28 | 385 s | $2.19 | `6a883730-b54f-4466-9975-b4829e8e6c76` | five ACs over `ui`/`backend`/`observed-data`, and a real `charter-gap`: R3 is reachable only where a name is asserted |
+| 18 | `spec-auditor` | fable | 44 | 243 s | $2.43 | `6d024639-7dee-4c06-92dc-76a4858dec28` | 11 findings, `contamination: false` |
+| 19 | `spec-writer` (rework) | opus | 10 | 152 s | $0.78 | `abb901c5-2dc2-4fd5-b11b-0b2d112db9dd` | the fix list answered |
+| 20 | `builder` | opus | 39 | 505 s | $2.25 | `1e000724-72fc-49a0-88cb-d4be0d2c2364` | one commit `94f2963`, 2 deviations, `L-adr-0002`, and a `spec-ambiguity` naming a line the spec had located wrongly |
+| 21 | `grader` | fable | 13 | 110 s | $0.99 | `208c19ec-da5f-41a4-b214-f37529ac10e5` | all five criteria met, `card_ok: yes`, one `checker-coverage-change` naming what the checker does *not* see |
+| 22 | `reviewer` | opus | 13 | 134 s | $0.52 | `138cd480-4df6-4345-a643-77ff29fbf493` | round 1 at depth `full`, `n_blocking: 0` — on a packet that carried its criteria this time |
+| 23 | `charter-reviewer` round 2 | opus | 25 | 486 s | $1.21 | `e099082d-187c-4392-b1ae-3539a3681a99` | **`verdict: complete`**, `uncovered_requirement_ids: []`, plus four findings and two `charter-gap`s it filed anyway |
+
+**Close half: 7 contract spawns + 14 executor ticks, $15.92 list.** Whole
+charter: **41 spawns, $30.84 list, 3 blocking escalations, 1 wasted spawn, 1
+wasted review.** Merge `534d08c` through the gate; `tree-reaped` on both
+branches; `L-charter-0002` is `L2-complete` and nothing of it stands on disk.
+
+## What the operator had to do — the close half
+
+| When | What | Avoidable? |
+|---|---|---|
+| after the `not-complete` | triaged five findings by §2.6's citation test, appended one in-scope `brief` and three adjacent, cleared the escalation | **no — this is the one judgment §2.6 reserves for authorship**, and the register has no rule that could have made it |
+| escalation 3 | fixed `packet.py` (`0755894`), appended `unblocked` | the fix is durable: the grader's packet refused every spec whose branch is named for the spec, which is the Executor's own cut recipe |
+| at close | fixed `tick.py` (`67c0618`) so a reapable charter stays on the lane | durable; before it, `doit reap` was unreachable by any tick |
+| after close | fixed `fold.py` (`611e60f`) so a `charter` field that is a path names the same charter as one that is an id, then re-ran `doit reap` | durable; the reaper had reported success over a standing worktree |
+
+## What the close half taught
+
+- **The return path is the part nobody runs.** Four sessions built the forward
+  chain and it worked the first time. §3.13's *"not complete → back to ① with
+  new specs"* had two unreachable halves and a packet that refused round one,
+  and none of it was visible until a real charter-reviewer said no.
+- **A charter reference has two spellings and only one of them was ever
+  compared.** `L-charter-0002` and `/…/content/L-charter-0002.md` are the same
+  charter; the fold compared the raw field, so a spec written with the second
+  belonged to no charter at all. The reaper skipped its worktree and reported
+  `retained: []`, the charter-reviewer's packet named one card for a charter
+  that shipped two — and the L2 conjuncts are quantified over that same set, so
+  **the charter could have closed over a spec that was never built.** It is the
+  seventh defect of the shape this repo keeps finding, and the fifth to be
+  invisible because absent input reads as an empty answer.
+- **The system's own escalations named their fixes again.** All three did. The
+  cheapest way to find out what to build next is to read what the Executor said
+  it could not do.
