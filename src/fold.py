@@ -245,6 +245,55 @@ def over_budget(events):
     return out
 
 
+def spend_rows(events):
+    """Seat spend per project, derived HERE at fold time from the ledger and from
+    nothing else — no cache, no column, no file (§8.2: never a second truth).
+    INFORMATION, never a gate: `over_budget` above owns caps, this sets none and
+    fires nothing. Returns (label, dollars, spawns, unpriced), dollars descending
+    then label ascending, the unattributed residue last.
+
+    ★ Every project the ledger names gets a row, including one with no spawn at
+    all — `$0.00 · 0 spawns` is a MEASUREMENT, and the row is standing so an
+    unmeasured project cannot read as a free one. Spawns carrying no `project`
+    (tick.py's own, whose base is `{"spawn": …}`) sum into their own row and into
+    no named project's figure: unattributed spend is never spread (L-adr-0001).
+
+    A `cost_usd` is a dollar when `float()` gives a finite non-bool. Anything else
+    — absent, None, a non-numeric string, NaN/inf, `true` — is UNPRICED: it counts
+    as a spawn, adds 0, and SAYS SO in the unpriced count, because a silent zero
+    and a real zero are the one pair this row exists to tell apart. Parsing rather
+    than rejecting is deliberate: `doit append … cost_usd=1.5` stores the STRING
+    "1.5" (see append: a bare value is a string unless unambiguously JSON), and a
+    replayed spawn drew real money.
+    """
+    rows = {p: [0.0, 0, 0] for p in {e["project"] for e in events if e.get("project")}}
+    for e in events:
+        if e.get("type") not in ("spawn-done", "spawn-failed"):
+            continue
+        r = rows.setdefault(e.get("project") or None, [0.0, 0, 0])   # None: unattributed
+        r[1] += 1
+        v, usd = e.get("cost_usd"), None
+        if not isinstance(v, bool):                      # a bool is not a price
+            try:
+                usd = float(v)
+            except (TypeError, ValueError):
+                usd = None
+        if usd is None or usd != usd or usd in (float("inf"), float("-inf")):
+            r[2] += 1
+        else:
+            r[0] += usd
+
+    def row(p, usd, n, unpriced):
+        # ★ `project` defaults to a DIRECTORY NAME (dispatch.py), so it is not
+        # curated: a newline in one would forge a board line or an eleventh
+        # section, which is the exact failure §8.3's fixed layout exists to
+        # prevent. Collapse all whitespace — the label renders on one line or not
+        # at all.
+        lab = "(no project)" if p is None else " ".join(str(p).split()) or "(no project)"
+        return (p is None, -usd, lab, usd, n, unpriced)
+    return [r[2:] for r in sorted(row(p, *v) for p, v in rows.items())]
+
+
 def dwell_days(by_subject):
     """Expected dwell per state, measured from the log's own stage crossings — the
     fallback stands until DWELL_MIN_N specs have crossed. Twice the MEDIAN crossing,
@@ -400,6 +449,18 @@ def render(events, specs, charters, ignored, by_subject):
     # health signal, not a queue item, and §8.3's ten sections are positional.
     if (ob := over_budget(events)):
         health.append(f"budget-exceeded: {len(ob)} spawn(s) over cap (last: {ob[-1]})")
+    # L-charter-0002: what the seats drew, per project. Beside budget-exceeded and
+    # for the same reason stated two lines up — a HEALTH signal, never an eleventh
+    # section — and unlike it, never a gate: these rows are strings, nothing reads
+    # them. Under DOIT_PROJECT the events are already filtered (§9.1), so the row
+    # is one project's attributed share and says so rather than claiming a total.
+    for lab, usd, n, unpriced in spend_rows(events):
+        health.append(f"spend · {lab} · ${usd:.2f} · {n} spawns"
+                      + (f" · {unpriced} unpriced" if unpriced else "")
+                      + (" · attributed only (§9.1 filter; L-adr-0001)" if PROJECT else "")
+                      + " — list-price estimate of seat-drawn work, not money billed;"
+                        " standing line, so an unmeasured project cannot read as a"
+                        " free one (R2/R3)")
     # ★ §6.7b/§10.2: the override is explicit and writes an event, and THE OVERRIDE
     # COUNT IS ITSELF THE METRIC that says the 7-day window is set wrong. A count
     # nobody renders is not a metric, so it lands here rather than in the script.

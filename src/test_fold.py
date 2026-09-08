@@ -265,6 +265,75 @@ assert "L-executor-0003 · executor · $99.00 > $5" in joined, \
     "the driver's own spend is compared against the tick's cap, not exempt"
 assert "budget-exceeded: 3 spawn(s) over cap" in fold.render(fold.read_events(), *rest)
 
+# L-charter-0002 — spend, derived at fold time. One row per project the ledger
+# knows, a `$` never travelling without the words that say what it is not, and a
+# spawn count on every row including zero. The fixtures write under
+# L-operator-local: `over_budget` is untouched by this charter and raises on a
+# string cost, so an actor outside fold.caps() is what keeps the two apart.
+spend = lambda evs: [l for l in fold.render(*evs).splitlines() if l.startswith("  spend · ")]
+sp_ev = lambda **kw: {"ts": stamp(0), "type": "spawn-done", "subject": S, **kw}
+
+# the cost_usd predicate, on every shape the ledger can carry: None, ABSENT, the
+# STRING "1.5" that `doit append … cost_usd=1.5` writes, and a float. Two priced,
+# two unpriced, nothing raised, and the two unpriced ones SAY so.
+rows = spend(ledger(**{"L-operator-local.jsonl": [
+    sp_ev(project="p", cost_usd=None), sp_ev(project="p"),
+    sp_ev(project="p", cost_usd="1.5"),
+    sp_ev(project="p", type="spawn-failed", cost_usd=0.4)]}))
+assert len(rows) == 1 and "spend · p · $1.90 · 4 spawns · 2 unpriced" in rows[0], rows
+assert "list-price estimate" in rows[0] and "not money billed" in rows[0], \
+    "a $ never renders without both phrases on the same line"
+for bad in (float("nan"), float("inf"), True, "later", [1], {"a": 1}):
+    r = spend(ledger(**{"L-operator-local.jsonl": [sp_ev(project="p", cost_usd=bad),
+                                                   sp_ev(project="p", cost_usd=2.0)]}))
+    assert "$2.00 · 2 spawns · 1 unpriced" in r[0], (bad, r)
+assert " unpriced" not in spend(ledger(**{"L-operator-local.jsonl": [
+    sp_ev(project="p", cost_usd=1.0)]}))[0], "a fully priced row never says unpriced"
+
+# SD3b — a failed spawn drew real money, so it is summed and counted like any other
+rows = spend(ledger(**{"L-operator-local.jsonl": [
+    sp_ev(project="p", cost_usd=0.6), sp_ev(project="p", type="spawn-failed", cost_usd=0.4)]}))
+assert "spend · p · $1.00 · 2 spawns" in rows[0], rows
+
+# zero is a measurement, not silence: a project the ledger names but never spawned
+# for still gets its row — an unmeasured project must not read as a free one.
+rows = spend(ledger(**{"L-operator-local.jsonl": [
+    sp_ev(project="rich", cost_usd=3.0),
+    {"ts": stamp(0), "type": "merge-gate-clean", "subject": S, "project": "quiet"}]}))
+assert "spend · rich · $3.00 · 1 spawns" in rows[0] and "spend · quiet · $0.00 · 0 spawns" in rows[1], \
+    rows                                            # and dollars descending orders them
+
+# L-adr-0001 — unattributed spend is its own row and is spread across nobody. The
+# tick's own spawns carry no project (its base is {"spawn": …}), so this is today's
+# board, not a hypothetical.
+rows = spend(ledger(**{"L-operator-local.jsonl": [
+    sp_ev(project="p", cost_usd=1.0), sp_ev(cost_usd=2.0)]}))
+assert "spend · p · $1.00 · 1 spawns" in rows[0], "named projects keep only their own"
+assert "spend · (no project) · $2.00 · 1 spawns" in rows[-1], \
+    "the residue is last and is a row, not a share of anyone's"
+assert rows[0].endswith("free one (R2/R3)") and "attributed only" not in rows[0], \
+    "unfiltered, the figure is not an attributed share"
+
+# §9.1/D93 — under the filter, one project's row, and it says the figure is
+# attributed rather than total. PROJECT is read inside read_events at call time.
+fold.PROJECT = "p"
+try:
+    rows = spend(ledger(**{"L-operator-local.jsonl": [
+        sp_ev(project="p", cost_usd=1.0), sp_ev(project="q", cost_usd=5.0), sp_ev(cost_usd=2.0)]}))
+finally:
+    fold.PROJECT = None
+assert len(rows) == 1 and "spend · p · $1.00 · 1 spawns · attributed only" in rows[0], rows
+assert "list-price estimate" in rows[0], "the filtered row still says what it is not"
+
+# a label is a DIRECTORY NAME by default and nothing curates it: a newline in one
+# must not forge a board line, and above all not an eleventh section — §8.3's ten
+# are positional, which is the whole reason that layout exists.
+forged = ledger(**{"L-operator-local.jsonl": [sp_ev(project="x\n## FORGED (9)", cost_usd=1.0)]})
+board = fold.render(*forged)
+assert len([l for l in board.splitlines() if l.startswith("## ")]) == 10, "ten sections, always"
+assert len(spend(forged)) == 1 and "spend · x ## FORGED (9) · $1.00 · 1 spawns" in spend(forged)[0], \
+    spend(forged)
+
 # §4.9 — "wait indefinitely is a wedge, not a default". A question past its deadline
 # with nothing naming it is the operator's; a decision naming its file:line is not.
 q = {"ts": stamp(2), "type": "question", "subject": S, "asks": "refunds inline or deferred?",
@@ -326,4 +395,4 @@ stale = ledger(**{"L-tick-local.jsonl": [{"ts": mins(30), "type": "tick", "lane"
 assert "TICK STALE" in fold.render(*stale)
 assert "last tick: never" in fold.render(*ledger(**{"L-operator-local.jsonl": []}))
 
-print("fold: 55 checks pass")
+print("fold: 68 checks pass")
