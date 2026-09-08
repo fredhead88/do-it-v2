@@ -3,8 +3,10 @@
 ## Status
 The design is complete and the substrate runs. **The prompt tier — ~4/5 of the
 total build and almost none of it code — is unwritten, and as of 2026-09-08 it is
-unblocked:** the (a) decision is written (D116), the §4.2 freeze is lifted, and
-the contract spawn line is measured end to end on the seat.
+unblocked:** the (a) decision is written (D116), the §4.2 freeze is lifted, the contract
+spawn line is measured end to end on the seat, and the panes (D117), the
+contract count (D118) and the skills mechanism (D119) are decided. **Nothing
+blocks drafting.**
 Last updated: 2026-09-08 (second session)
 
 ## Goal
@@ -49,10 +51,11 @@ is prose.**
 | Ten `Output` schemas | ~200 | schema |
 | Three driver skills | ~900 | **prompt** |
 | **The dispatch wrapper** — `env -u`, the line above, null-`structured_output` → failed spawn, `usage` → event, `api_error` → operator escalation | ~40 | code |
+| **`do-it tick`** — fold first, spawn `-p --agent executor` only on an actionable lane, `flock`, `tick` event (D117) | ~40 | code |
 | §3.6's six audit scripts | 150–250 | code |
 | Rest of fold's rules (typed ACs, blind grading, wedge, **Budget vs `usage`**) | ~250 | code |
 
-Honest total ~3,000–3,700 lines, of which ~650 is code.
+Honest total ~3,000–3,700 lines, of which ~700 is code.
 
 ## Active Problems
 
@@ -87,28 +90,41 @@ through to; an unreachable seat is `is_error:true`, `terminal_reason:api_error`,
 never a retry, never `seat-exhausted`. **The wrapper does not exist yet** — see
 the table above.
 
-### 4. The panes question is reopened with a *different* premise
-D104's *"the two panes are the floor"* rested on a spawn being unable to draw the
-seat. Row M shows a cron job can. What still argues for panes is D80's Planner
-asymmetry (§3.9: an unplanned relay loses a charter's reasoning) — the Executor
-is stateless and could be a `-p` spawn from the wake script. **Owed its own D.**
+### 4. ~~The panes question~~ — DECIDED (D117)
+**The Executor is a tick, the Planner stays a pane.** `do-it tick` folds first
+and spawns `-p --agent executor` only on an actionable lane; it is scheduled
+(cron) and poked (`spec-handover` and every sub-agent wrapper end with one);
+`flock` keeps it to one at a time; liveness is a `tick` event plus a fold query.
+The Planner stays a pane on D80's argument alone. The old two-pane shape is the
+fallback if D116's re-run rows fail on a CLI upgrade.
 
-### 5. Per-skill restriction has no CLI mechanism yet
-D66 says permitted skills are *named* in the contract. The CLI offers `Skill` in
-the `tools:` line or not. **Measure `--allowedTools "Skill(name)"` (one spawn)
-before the driver skills are drafted** — it decides whether D66 lands as a
-runtime restriction or as a fold check on the transcript.
+### 5. ~~Per-skill restriction~~ — DECIDED (D119, rows S–U)
+A per-name *allow* does nothing; a per-name *deny* works;
+`--disable-slash-commands` removes the tool even when the agent file declares
+it. **Sub-agent spawns: no `Skill` tool and `--disable-slash-commands`** — the
+builder's techniques are inlined in its body (§10.5 b). **Driver spawns:
+`--disallowedTools` naming §10.5's RETIRE list verbatim.**
 
-### 6. Where contract files resolve from
-`--agent <name>` resolves from `~/.claude/agents/` or `<cwd>/.claude/agents/`.
-Spawns run with cwd = the *client* repo, so the contracts must either be
-installed into `~/.claude/agents/` by `install.sh` (symlink from
-`do-it/agents/`) or passed inline via `--agents <json>`. One-line decision at
-drafting time; §9.5 says they version with the code, so the source of truth is
-the repo either way.
+### 6. ~~Where contract files resolve from~~ — DECIDED (drafting convention)
+Contracts live in git at `~/Projects/do-it/agents/<name>.md`, each `Output`
+schema beside it as `agents/<name>.schema.json`. `install.sh` symlinks the `.md`
+files into `~/.claude/agents/` so `--agent <name>` resolves from any cwd — the
+same pattern it already uses for `doit` → `~/.local/bin`. §9.5: they version
+with the code.
 
 ## Key Decisions Made
 
+- **2026-09-08 (D117) — one pane and one job.** The Executor is a tick; the
+  Planner stays a pane for D80's reason and no other; the two-pane shape is the
+  fallback. Deletes the supervisor's restart-on-exit and the D94 restart.
+- **2026-09-08 (D118) — there is no eleventh contract.** A unit's shape is
+  reviewed only where it crosses units (plan-audit, the three plan-time gates);
+  inside a unit it is reversible by construction and the builder's to decide.
+  Reopens only on a `must-fix` cluster rooted in within-unit shape.
+- **2026-09-08 (D119) — skills land as two flags.** No Skill tool plus
+  `--disable-slash-commands` for sub-agents; `--disallowedTools` carrying the
+  RETIRE list for drivers. A runtime whitelist does not exist and is not
+  pretended.
 - **2026-09-08 (D116) — `--bare` conceded; the seat is the meter; the contract is
   the agent file; the spawn is the one line above.** In-session dispatch of the
   same file stays valid as the fallback. `-p` is primary because it is the only
@@ -138,12 +154,11 @@ the repo either way.
 ## Next Steps
 
 1. ~~Write the (a) decision~~ — **done, D116.**
-2. **Write the panes decision** (next free D-number) — Active Problem 4. The
-   question is now purely D80's asymmetry, not auth.
-3. **Settle the shape question** (Key Decisions, item 3) — one paragraph in §3.6.
-   It determines the contract count before you write contracts.
-4. **Measure `--allowedTools "Skill(name)"`** — Active Problem 5. One spawn.
-5. **Draft the ten contracts as agent files.** Order: `spec-writer` →
+2. ~~Write the panes decision~~ — **done, D117.**
+3. ~~Settle the shape question~~ — **done, D118. The count is ten.**
+4. ~~Measure `--allowedTools "Skill(name)"`~~ — **done, D119.**
+5. **Draft the ten contracts as agent files** in `agents/`, and add the
+   `install.sh` symlink line with the first one. Order: `spec-writer` →
    `spec-auditor` → `builder` → `grader` → `reviewer` → `plan-auditor` →
    `research` → `reuse-scout` → `charter-reviewer` → `probe`. Each gets §4.4's
    **nine fields**, no more, no fewer; `tools:` always carries `StructuredOutput`;
@@ -165,7 +180,8 @@ the repo either way.
 - Ledger: `~/.do-it/events/*.jsonl` · `DOIT_ROOT` moves it
 - Meter tests: `~/.claude/do-it-v2/research/METER-TEST-2026-08-26.md` and
   `-2026-09-08.md` (two runs in one file)
-- Probes: `~/.claude/agents/doit-probe-minimal.md`, `doit-probe-schema.md`
+- Probes: `~/.claude/agents/doit-probe-minimal.md`, `doit-probe-schema.md`,
+  `doit-probe-skill.md` — all throwaway, all safe to delete
 - Design history / open topics: `~/.claude/do-it-v2/`
 
 **The ten contracts and their assigned models** (§4.6 — preserve these; they are
@@ -219,12 +235,13 @@ under the design once already (2.1.246 → 2.1.263). A failed re-run is a design
 event.
 
 ## Session Log
-- 2026-09-08 (second session): D116 written and carried. Second meter run, 19
-  spawns, ~$0.52, $0 metered: cold `env -i` failures were `USER`; a plain
+- 2026-09-08 (second session): D116, D117, D118, D119 written and carried.
+  Second meter run, 22 spawns, ~$0.60, $0 metered: cold `env -i` failures were `USER`; a plain
   environment reaches the seat; `--bare` is metered by its own help text;
   `--json-schema` needs `StructuredOutput` in `tools:`; MCP leaks under `-p`
-  without `--strict-mcp-config`; the full line measures 7,440 tok. Freeze
-  lifted, four HELD blocks re-grounded, §4.4 Output row fixed. No code changed.
+  without `--strict-mcp-config`; the full line measures 7,440 tok; a per-name
+  skill deny works and an allow does not. Freeze lifted, four HELD blocks
+  re-grounded, §4.4 Output row fixed. No code changed.
 - 2026-09-08 (first session): Audited a Chezky transcript for concrete
   suggestions; six proposals drafted, then blind-audited and five cut. Ran the
   §12.5 meter probe (7 spawns): schema path draws the seat, D104 overturned,

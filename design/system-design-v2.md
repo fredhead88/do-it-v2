@@ -832,6 +832,8 @@ fixpoint instead of an assertion.
 
 **Two standing autonomous panes, one shared sub-agent library, ephemeral Thinker
 sessions for anything conversational. The operator lives in none of them.**
+*(D117: one standing pane — the Planner — and one scheduled job — the Executor.
+The diagram is unchanged because what each drives is unchanged.)*
 
 ```
   ephemeral THINKER sessions            operator-driven, short-lived
@@ -883,6 +885,52 @@ than the tool** — the same treatment §9.9 gives a backup destination:
 
 *`launchd` satisfies all three on this operator's machine and is named in §12.6
 as ops work, not here as design.*
+
+> ### ★ D117 — one pane and one job: the Executor is a tick, not a pane
+>
+> *(2026-09-08. Re-runs D104's* "the two panes are the floor of this
+> architecture, not its residue." *)* That conclusion rested on one fact — a
+> `-p` spawn could not draw the seat, so anything autonomous had to be an
+> interactive session. D116's row M removes it: the seat is in the keychain, and
+> a plain terminal or cron environment reaches it. **With the premise gone the
+> two panes separate, because they were never held up by the same thing.**
+>
+> **The Executor was a job wearing a pane.** §3.9 already says everything a job
+> needs said: *stateless by construction · kill it, respawn it, it folds the
+> ledger and re-scans its lane · never reads a build artifact · hitting the
+> context ceiling costs nothing.* A process with those properties does not need
+> to stay alive between turns; it needs to run when there is something to do.
+> **So it runs as a tick:** `do-it tick` folds the ledger and, **only if the fold
+> shows an actionable lane**, spawns `-p --agent executor` on the D116 line to
+> take the next durable action — dispatch, merge, deploy, close — and exit. An
+> idle tick spawns no model. Sub-agents are detached subprocesses whose wrapper
+> appends their terminal event; the next tick sees it. A tick is **scheduled**
+> (cron, every few minutes) **and poked** — `spec-handover` and every sub-agent
+> wrapper end by running one — so latency is a poke, not an interval. One tick
+> at a time per ledger (`flock`); a second tick arriving while one runs is
+> dropped and loses nothing, because the durable list is the queue (§3.10).
+>
+> **What this deletes.** The supervisor's *restart on exit* — a job has no exit
+> to survive — and with it the half of D95 that existed for D94: the
+> seat-exhaustion resume is now **the first tick after `resets_at`**, with no
+> pane to restart. Executor liveness stops being an enumeration of named
+> sessions and becomes a fold query — **a `tick` event, and a last tick older
+> than twice the interval is the alarm** — the same shape as `wake_at` passed
+> with no verdict (§2.5). That cashes Part 11's *"liveness monitoring is an
+> artifact of the pane model"* instead of quoting it. `do-it up` now starts
+> **one** pane and installs **one** cron line.
+>
+> **The Planner stays a pane, for D80's reason and no other.** One charter is
+> one context, its relay is planned, and §3.6 had to make the cut durable
+> precisely because the context between steps is *worth keeping* — the auditors
+> are blind to that reasoning because it exists. Nothing in the meter test
+> touches that argument. It is the pane's floor now, and it is a design choice
+> rather than an auth artifact — which is what D104 could not say.
+>
+> **The fallback is the old shape, unchanged.** If D116's re-run rows fail on a
+> CLI upgrade, `do-it up` starts the Executor as a pane again and dispatch is
+> in-session (D105). Same skill file, same contracts; only the invocation
+> changes. Nothing here is burned.
 
 **Panes are not defined by which agents they can spawn — they are defined by
 what they drive.** Both draw on the same library. That is why a rejected spec
@@ -1159,6 +1207,31 @@ diff cannot see, and it is exactly what *"four good specs that don't add up"*
 describes. The agent is handed the script output as ground truth and spends its
 one pass there.
 
+> **★ Why no stage reviews a solution's shape — a consequence, not a hole**
+> *(D118)*. Both audits are completeness checks: *do these units add up*, *does
+> this plan build that cut without an unowned seam*. Nothing between the
+> plan-audit and the grader looks at *how* a builder intends to solve its unit —
+> §3.8 forbids the spec from carrying an implementation plan, and no contract
+> asks for one. That is deliberate, and the reason is where irreversibility
+> lives. **The shape is reviewed exactly where it is expensive to change: across
+> units.** Seams, shared shapes and names, acquisition and the branch layout are
+> Plan sections and the plan-audit's subject; a data-layer change, a new
+> dependency and anything outward-facing each have a plan-time or merge-time
+> gate of their own (§5.11, §6.7, §10.1). **Inside one unit the shape is
+> reversible by construction** — one spec, one commit, one revert (§5.8) — and
+> the only context that can judge it is the one with the code in front of it,
+> which is the builder's (§3.8). A shape reviewed before the build is a guess
+> reviewed by another guess; after the build it is the grader's per-AC verdicts
+> and the reviewer's `must-fix`, and what those pass is debt (D107), filed
+> against the footprint and offered to the next builder who touches it. **There
+> is no eleventh contract.** The admission test settles it: an architect stage
+> converts no silent failure into a loud one that the plan-audit and
+> `merge-gate` do not already convert; it adds a second opinion on a reversible
+> decision, which is the panel finding (§4.4 · 5) at a different altitude.
+> **What would reopen this:** a `must-fix` cluster whose root cause is
+> within-unit shape — and `retro` reads that as `bad-cut` (the unit was too big
+> to hold in one context) before it reads it as a missing stage.
+
 **Instrument on this pair, and it already exists:** D32's **sweep rounds per
 charter** directly measures whether these two audits earn their keep. A charter
 whose sweep keeps finding new required work is a charter whose cut-audit missed
@@ -1276,7 +1349,9 @@ Kill it, respawn it, it folds the ledger and re-scans its lane. Nothing is lost.
 Compare the Planner, whose relay loses a charter's accumulated reasoning — which
 is exactly why §3.5 has to make that one *planned*. **What actually bounds the
 Executor's load is the Planner's pull-throttle** (*do not plan charter N+2 until
-charter N has landed*), a coupling neither section previously named.
+charter N has landed*), a coupling neither section previously named. **Since
+D117 the Executor runs as a tick, not a pane (§3.1) — every property in this
+paragraph is a job's.**
 
 **What it may see** (D6✓): the **charter**, always — intent must be visible as
 deviations happen — and the **Plan** as needed for its own dispatch decisions.
@@ -1349,7 +1424,9 @@ which is exactly why the nudge is free to send and must always be sent. An
 optional nudge produces a system whose latency nobody can predict.
 
 Standing nudges: **"new specs available"** (Planner → Executor) and sub-agent
-completion / escalation nudges to their parent. *(v1's second standing nudge,
+completion / escalation nudges to their parent. *(D117: a nudge to the Executor
+is a poke that runs a tick — `spec-handover` and every sub-agent wrapper end
+with one.)* *(v1's second standing nudge,
 "queue running dry", is deleted — D56.)*
 
 A nudge may **never** carry the only copy of a fact, and never be a synchronous
@@ -1663,7 +1740,8 @@ Budgets throughout this document are stated **in tokens, never in USD.**
 > and keychain are never read."* **The premise stands** — all tokens come from
 > the seat — **and the mechanism is now `-p` without `--bare`**, decided at D116
 > below. *"The two panes are the floor"* rested on a spawn being unable to draw
-> the seat; it cannot rest there now, and it is owed its own decision.
+> the seat; it cannot rest there now — **decided at D117 (§3.1): one pane, one
+> job.**
 
 **What `--bare` was doing, and what is now owed.** It was never a flag; it was
 an enforcement layer. It refused to auto-discover hooks, plugins, MCP servers,
@@ -1787,10 +1865,11 @@ drafts; 23k was measured under a lighter config.)*
 > a design event, not an ops note.
 >
 > **What this does not decide.** *The panes*: D104's *"floor, not residue"* has
-> lost its auth premise; what remains is D80's Planner asymmetry, and that is
-> owed its own D. *Per-skill restriction*: the CLI offers `Skill` in the `tools:`
-> line or not; D66's named-skill list has no finer mechanism yet — measure
-> `--allowedTools "Skill(name)"` before the driver skills are drafted. *D73's
+> lost its auth premise; what remains is D80's Planner asymmetry — **decided at
+> D117 (§3.1): the Executor is a tick, the Planner stays a pane.** *Per-skill
+> restriction*: **measured and decided at D119 (§10.5)** — sub-agents carry no
+> Skill tool and `--disable-slash-commands`; drivers carry the RETIRE list as
+> `--disallowedTools`. *D73's
 > rationale* is re-grounded on §1.4 at the four sites that held it.
 
 **Standing spawn flags — retired by D104, and six of seven restored by D116 on
@@ -1888,7 +1967,9 @@ into the same wall**, burning the window it is waiting on.
    the declared query, and appends an event. The Executor picks it up on its
    normal lane re-scan."* **Same script, different payload:** owed evidence uses
    it to test a truth on a clock; this uses it to **restart the pane on a
-   clock.**
+   clock.** *(D117: there is no Executor pane to restart — the first tick after
+   `resets_at` is the resume, and the wake script's append is what makes that
+   tick actionable.)*
 
 > **Hit the cap at 01:00, the window renews at 04:00, and the work continues
 > without the operator.**
@@ -5570,6 +5651,21 @@ out of path.** Otherwise the plugin quietly reintroduces what was removed.
 policies are suggestions. **Enforcement is the contract's permitted-skill list** —
 the same guard-not-suggestion logic as the install hook.
 
+> **★ How the list lands** *(D119, measured 2026-09-08 — rows S–U of
+> `research/METER-TEST-2026-09-08.md`)*. A per-name *allow*
+> (`--allowedTools "Skill(name)"`) does **not** restrict the Skill tool; a
+> per-name *deny* (`--disallowedTools "Skill(name)"`) does; and
+> `--disable-slash-commands` removes the tool outright, even from an agent whose
+> `tools:` line declares it. So: **sub-agent contracts carry no `Skill` tool and
+> every sub-agent spawn carries `--disable-slash-commands`** — the builder's
+> techniques (`verification-before-completion`, `systematic-debugging`,
+> `test-driven-development`) are extracted into its contract body per (b)
+> above, where they sit in the cached prefix and cannot be un-invoked. **Driver
+> spawns carry `--disallowedTools` naming the RETIRE list above, verbatim** — a
+> deny list is the honest form for a retire list, because it *is* one. The KEEP
+> list is what remains. **A runtime whitelist does not exist on this CLI and is
+> not pretended.**
+
 ## 10.6 Drift signals
 
 Observable symptoms meaning an invariant is **already** violated — more useful
@@ -5603,7 +5699,7 @@ is the coordination fabric around it.
 
 | Don't build | Why |
 |---|---|
-| **Liveness monitoring of idle processes** | ~6,900 lines answering *"is this pane awake?"* — an artifact of the pane model, not of nature. And `ListAgents` gives liveness free (§9.6) |
+| **Liveness monitoring of idle processes** | ~6,900 lines answering *"is this pane awake?"* — an artifact of the pane model, not of nature. And `ListAgents` gives liveness free (§9.6). **D117 removes the model for the Executor: its liveness is a `tick` event and a fold query** |
 | **Cross-agent notification machinery** — pokes, acks, backoff, caps | the durable list already **is** the queue |
 | **Session-handoff plumbing** | size specs to one context and there is no handoff to lose |
 | **Automated intake / auto-filing** | measured negative yield: **50 junk records, 7.7% of a ledger**, each needing manual killing |
@@ -5993,7 +6089,7 @@ them.* Day counts are `[s]` sourced from the audit or `[e]` estimated.*)*
 | Task | Cost | Blocks |
 |---|---|---|
 | **★ The `path → component` partition** — hand-authored, per repo | **~0 up front** (D91) | **Re-priced.** It used to be ~0.5 day per repo of blocking prerequisite, because the drift check *fails the build* on any path it does not cover and on day one of an existing repo **every path is unmapped**. **D91 baselines it**: everything existing is grandfathered into `unmapped-legacy`, the check fires only on new paths, and a path gets a real component when a charter touches that area. **The largest and most easily-skipped row on this list stops blocking anything** |
-| **★ A supervisor for the panes** (§3.1, D95) | ~1 hour `[e]` | **`do-it up` surviving a reboot, and D94's seat-exhaustion resume, which needs restart-on-exit to work at all.** `launchd` satisfies the three required properties on this machine. *The design names the properties; this row names the tool* |
+| **★ A supervisor for the pane, and a cron line for the tick** (§3.1, D95, D117) | ~1 hour `[e]` | **D117: the Executor is a tick — restart-on-exit and the D94 restart are gone; one cron line plus `flock`. What remains is the Planner pane:** `do-it up` surviving a reboot. `launchd` satisfies the three required properties on this machine. *The design names the properties; this row names the tool* |
 | **A `review-account` per app** (D27, §4.6·5) | ~0.5–1 day × up to 6 client apps `[s]` | any review deeper than `gates-only`. **Not needed for the §12.1 bootstrap**, which is chosen to avoid it |
 | **A non-prod database copy per app** (§5.11, §12.5·6) | real day count, per app `[s]` | §5.11's two lower tiers. Supabase branching covers Supabase-hosted projects cheaply; the rest must be named individually |
 | **A backup destination** (§9.9, §12.5·6a) | ~1 hour `[e]` | §9.9 entirely. Five required properties, no host named — see §12.5 |
