@@ -22,9 +22,31 @@ MINUTES, USD = 20, 5          # one durable action per tick — never uncapped (
 TICK = fold.EVENTS / "L-tick-local.jsonl"
 
 
-def lane(specs, charters):
-    return sorted([f"{s['id']} · {s['state']}" for s in specs.values() if s["state"] in ACTIONABLE]
-                  + [f"{c['id']} · {c['state']}" for c in charters.values() if c["state"] == "L1-complete"])
+def in_flight(ev):
+    """Subjects with a spawn started and not ended — off the lane, or the next tick
+    dispatches the same work twice. A start older than twice its role's cap with no
+    terminal event is a dead wrapper: recorded once as spawn-stale, and the subject
+    is back on the lane for the Executor's failed-spawn row."""
+    started = {e.get("spawn"): e for e in ev if e["type"] in ("build-started", "spawn-started")}
+    ended = {e.get("spawn") for e in ev if e["type"] in ("spawn-done", "spawn-failed", "spawn-stale")}
+    busy = set()
+    for sid, e in started.items():
+        if sid in ended:
+            continue
+        role = "-".join(sid.split("-")[1:-1])
+        cap = dispatch.ROLES.get(role, (None, 60, 0))[1]
+        if (fold.NOW - fold.ts(e.get("ts"))).total_seconds() / 60 > 2 * cap:
+            dispatch.emit(TICK, {"spawn": sid}, "spawn-stale", subject=e.get("subject"), role=role, cap_min=cap)
+        else:
+            busy.add(e.get("subject"))
+    return busy
+
+
+def lane(specs, charters, busy=frozenset()):
+    return sorted([f"{s['id']} · {s['state']}" for s in specs.values()
+                   if s["state"] in ACTIONABLE and s["id"] not in busy]
+                  + [f"{c['id']} · {c['state']}" for c in charters.values()
+                     if c["state"] == "L1-complete" and c["id"] not in busy])
 
 
 def main():
@@ -38,7 +60,7 @@ def main():
     ev = fold.read_events()
     specs, charters, ignored, by_subject = fold.fold(ev)
     board = fold.render(ev, specs, charters, ignored, by_subject)
-    todo, have = lane(specs, charters), (dispatch.AGENTS / "executor.md").exists()
+    todo, have = lane(specs, charters, in_flight(ev)), (dispatch.AGENTS / "executor.md").exists()
     dispatch.emit(TICK, {}, "tick", lane=len(todo), spawned=bool(todo and have))
     if not todo:
         print("tick: idle")
@@ -48,10 +70,12 @@ def main():
         return 1
     ledger = dispatch.alloc(fold.EVENTS, "L-executor-", ".jsonl")
     os.environ["DOIT_LEDGER_FILE"] = ledger.name          # its own appends land as itself (D90)
+    os.environ["PATH"] = f"{dispatch.HERE.parent}:{os.environ.get('PATH', '')}"   # `doit` resolves
     fm, base = dispatch.frontmatter("executor"), {"spawn": ledger.stem}
+    schema = dispatch.AGENTS / "executor.schema.json"
     cmd = ["claude", "-p", "--agent", "executor", "--strict-mcp-config", "--permission-mode", "dontAsk",
-           "--output-format", "json", "--max-budget-usd", str(USD),
-           "--allowedTools", ",".join(t.strip() for t in fm["tools"].split(",")),
+           "--output-format", "json", "--max-budget-usd", str(USD), "--json-schema", schema.read_text(),
+           "--allowedTools", ",".join(t.strip() for t in fm["tools"].split(",") if t.strip() != "StructuredOutput"),
            "--disallowedTools", ",".join(f"Skill({s})" for s in RETIRE)]
     prompt = (f"{ledger.stem}: take the next durable action on this lane, then exit.\n\n"
               + "\n".join(todo) + "\n\n" + board)
@@ -60,14 +84,17 @@ def main():
     except Exception as e:        # timeout or no JSON: recorded; the next tick re-scans the same lane
         dispatch.emit(ledger, base, "spawn-failed", why=f"{type(e).__name__}: {str(e)[:200]}")
         return 1
-    u, bad = res.get("usage") or {}, bool(res.get("is_error"))
+    u, out = res.get("usage") or {}, res.get("structured_output")
+    bad = bool(res.get("is_error")) or out is None          # null output is a failed spawn (D116)
     if bad and (res.get("terminal_reason") == "api_error" or res.get("api_error_status")):
         dispatch.emit(ledger, base, "escalation-blocking", subject="executor",
                       why=f"seat unreachable ({res.get('api_error_status')}) — /login as the operator")
     kv = dict(cost_usd=res.get("total_cost_usd"), input_tokens=u.get("input_tokens"), lane=len(todo),
               output_tokens=u.get("output_tokens"), turns=res.get("num_turns"), cli=dispatch.CLI)
     if bad:
-        kv["why"] = str(res.get("result"))[:300]
+        kv["why"] = "null structured_output" if out is None and not res.get("is_error") else str(res.get("result"))[:300]
+    else:
+        kv.update(idle=out.get("idle"), actions=[f"{x['action']} {x['subject']}" for x in out.get("actions", [])])
     dispatch.emit(ledger, base, "spawn-failed" if bad else "spawn-done", **kv)
     print(f"tick: executor {ledger.stem} {'failed' if bad else 'done'}")
     return int(bad)

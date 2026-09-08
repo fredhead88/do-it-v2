@@ -14,6 +14,7 @@ doit — a ledger that derives state, and the guards that read it
 
   doit                                    render the board
   doit states                             every derived state, one per line
+  doit events <subject>                   one subject's events, oldest first
   doit append <type> <subject> [k=v ...]  append one event, then re-fold
   doit gate <branch> [main] [--spec ID]   merge guard. exit 1 = DO NOT MERGE
   doit dispatch <role> <subject> [...]    spawn one contract, check it, append its events (-h for flags)

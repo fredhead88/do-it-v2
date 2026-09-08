@@ -3,6 +3,7 @@
 
   fold.py                                    fold, rewrite board.md
   fold.py states                             derived states, one per line
+  fold.py events <subject>                   one subject's events, oldest first
   fold.py append <type> <subject> [k=v ...]  append one event, then re-fold
 
 The ledger (~/.do-it/events/*.jsonl) is append-only and never edited. The ACTOR
@@ -305,7 +306,11 @@ if __name__ == "__main__":
         append(sys.argv[2:])
     ev = read_events()
     specs, charters, ignored, by_subject = fold(ev)
-    if cmd == "states":
+    if cmd == "events":                      # one subject's events, oldest first, as the fold read them
+        for e in ev:
+            if e.get("subject") == sys.argv[2]:
+                print(json.dumps({k: v for k, v in e.items() if k != "_src"}, sort_keys=True))
+    elif cmd == "states":
         for sid, s in sorted({**specs, **charters}.items()):
             print(f"{sid}\t{s['state']}")
     else:

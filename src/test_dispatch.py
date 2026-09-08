@@ -34,7 +34,9 @@ def spawn(role, out=None, result=None, side=None, path=None, subject="L-spec-000
         code = 0
     except SystemExit as e:
         code = e.code
-    evs = [json.loads(l) for l in max((TMP / "events").glob(f"L-{role}-*.jsonl")).read_text().splitlines()]
+    raw = [json.loads(l) for l in max((TMP / "events").glob(f"L-{role}-*.jsonl")).read_text().splitlines()]
+    spawn.raw = raw
+    evs = [e for e in raw if e["type"] != "spawn-started"]      # asserted once below, hidden elsewhere
     global N
     N += 1
     return code, [e["type"] for e in evs], evs, fake.cmd if hasattr(fake, "cmd") else None
@@ -71,6 +73,7 @@ stray.unlink()
 
 code, types, evs, _ = spawn("research", out=research, path=rp)
 assert code == 0 and types == ["research-filed", "spawn-done"], types
+assert spawn.raw[0]["type"] == "spawn-started" and spawn.raw[0]["role"] == "research", "every role starts loudly"
 assert evs[1]["answered"] == "yes" and evs[1]["cost_usd"] == 0.01 and evs[1]["packet_sha256"], evs[1]
 assert "actor" not in evs[1], "D90: never an actor field"
 
@@ -115,6 +118,10 @@ code, types, evs, _ = spawn("grader", out=grade([met]))
 assert types == ["verdict", "spawn-done"] and evs[0]["confirmed"] is True, "same coverage note: no change event"
 code, types, evs, _ = spawn("grader", out=grade([met], card_ok="cannot-assess", could_not_run=True))
 assert evs[0]["confirmed"] is False and "gate-infra" in types
+# a re-grade that finds the rejected AC2 met clears it; the fold then shows no standing rejection
+code, types, evs, _ = spawn("grader", out=grade([met, {"ac": "AC2", "verdict": "met", "reason": "now evidenced"}]))
+assert "criterion-cleared" in types and evs[0]["confirmed"] is True, types
+assert fold.fold(fold.read_events())[0]["L-spec-0001"]["rejects"] == 0, "rework can reach accepted"
 
 # D120: a refusal is deterministic and charges. The same bytes are not sent twice;
 # the api_error above, by contrast, must stay retryable after /login.

@@ -1,0 +1,24 @@
+{
+  "title": "executor Output — the durable actions one tick took (D117)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["actions", "idle"],
+  "properties": {
+    "idle": {"type": "boolean", "description": "true when the lane held nothing that was the Executor's"},
+    "actions": {
+      "type": "array",
+      "maxItems": 5,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["action", "subject", "spawned", "why"],
+        "properties": {
+          "action": {"type": "string", "enum": ["dispatch-spec-auditor", "dispatch-spec-writer", "dispatch-builder", "dispatch-grader", "dispatch-reviewer", "dispatch-charter-reviewer", "decide", "escalate", "block", "merge", "deploy", "rollback", "sweep-fixpoint", "reap"]},
+          "subject": {"type": "string", "maxLength": 40},
+          "spawned": {"type": "string", "maxLength": 200, "description": "the line `doit dispatch --detach` printed, or empty"},
+          "why": {"type": "string", "maxLength": 300}
+        }
+      }
+    }
+  }
+}

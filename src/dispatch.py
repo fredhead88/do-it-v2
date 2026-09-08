@@ -157,6 +157,13 @@ def events_for(role, out, a, base):
         ev += [("rejected-criterion", dict(criterion=v["ac"], why=v["reason"])) for v in vs if v["verdict"] == "unmet"]
         if out["could_not_run"] and not any(t == "gate-infra" for t, _ in decl):
             ev.append(("gate-infra", dict(line="could_not_run")))
+        # A re-grade that finds a standing rejection met clears it — the grader may
+        # clear (fold.EMITS), and without this a rework could never reach accepted.
+        import fold
+        specs, *_ = fold.fold(fold.read_events())
+        standing = fold.standing_rejects(specs.get(a.subject, {"evs": []})["evs"])
+        ev += [("criterion-cleared", dict(criterion=v["ac"], evidence=v["reason"]))
+               for v in vs if v["verdict"] == "met" and v["ac"] in standing]
         ev += coverage_changes(out["checkers"])
     elif role == "reviewer":
         ev.append(("review", dict(depth=out["depth"], round=out["round"], n_blocking=len(out["blocking"]))))
@@ -230,8 +237,12 @@ def main(a):
     before = None if builder else porcelain(cwd)
     if not builder and before is None:
         fail(f"repo status undetermined in {cwd} before spawn — not spent")
+    # A start event for every role: the tick reads a start with no terminal event as
+    # in flight and keeps the subject off the lane (found on the first real chain).
     if builder:
         emit(ledger, base, "build-started", worktree=cwd)
+    else:
+        emit(ledger, base, "spawn-started", role=a.role)
     packet += f"\n\nspawn_id: {spawn}\n"
     tools = [t.strip() for t in fm["tools"].split(",") if t.strip() != "StructuredOutput"]
     mcp = json.load(open(a.mcp_config)) if a.mcp_config else {}
@@ -300,4 +311,15 @@ if __name__ == "__main__":
     ap.add_argument("--mcp-config", help="the browser, for the two reviewer roles")
     ap.add_argument("--timeout", type=int, help="minutes; overrides the role default")
     ap.add_argument("--max-usd", type=float, help="overrides the role default")
-    main(ap.parse_args())
+    ap.add_argument("--detach", action="store_true", help="fork and return at once; needs --packet FILE")
+    a = ap.parse_args()
+    if a.detach:        # D117: sub-agents are detached subprocesses; the wrapper's terminal event and poke follow
+        if a.packet == "-":
+            sys.exit("--detach needs --packet FILE")
+        (ROOT / "logs").mkdir(parents=True, exist_ok=True)
+        log = open(ROOT / "logs" / f"dispatch-{a.role}-{now().replace(':', '')}.log", "ab")
+        p = subprocess.Popen([sys.executable, __file__] + [x for x in sys.argv[1:] if x != "--detach"],
+                             start_new_session=True, stdin=subprocess.DEVNULL, stdout=log, stderr=log)
+        print(json.dumps({"detached": p.pid, "role": a.role, "subject": a.subject, "log": log.name}))
+        sys.exit(0)
+    main(a)
