@@ -1,0 +1,118 @@
+{
+  "title": "probe Output — the pointer shape over a run directory (§4.6·10, D82, D96)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "path",
+    "summary",
+    "externals",
+    "n_inputs",
+    "spend_usd",
+    "broke",
+    "complete",
+    "contamination",
+    "declarations"
+  ],
+  "properties": {
+    "path": {
+      "type": "string",
+      "maxLength": 300,
+      "description": "content/probe-NNNN/"
+    },
+    "summary": {
+      "type": "string",
+      "maxLength": 1500,
+      "description": "where external reality entered and what came back at each point — never the outputs"
+    },
+    "externals": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 10,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "came_back"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 80
+          },
+          "came_back": {
+            "type": "string",
+            "maxLength": 300
+          }
+        }
+      }
+    },
+    "n_inputs": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "spend_usd": {
+      "type": "number",
+      "minimum": 0
+    },
+    "broke": {
+      "type": "array",
+      "maxItems": 4,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "shape",
+          "how"
+        ],
+        "properties": {
+          "shape": {
+            "type": "string",
+            "enum": [
+              "input",
+              "retrieval",
+              "output",
+              "one-shot-artifact"
+            ]
+          },
+          "how": {
+            "type": "string",
+            "maxLength": 300
+          }
+        }
+      }
+    },
+    "complete": {
+      "type": "boolean",
+      "description": "false when a cap stopped the run before all N inputs"
+    },
+    "contamination": {
+      "type": "boolean",
+      "description": "true = a cut or Plan reached the packet; nothing was run"
+    },
+    "declarations": {
+      "type": "array",
+      "maxItems": 5,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "term",
+          "line"
+        ],
+        "properties": {
+          "term": {
+            "type": "string",
+            "enum": [
+              "charter-gap"
+            ]
+          },
+          "line": {
+            "type": "string",
+            "maxLength": 200
+          }
+        }
+      }
+    }
+  }
+}

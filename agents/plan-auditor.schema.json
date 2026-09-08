@@ -1,0 +1,101 @@
+{
+  "title": "plan-auditor Output — stage-tagged findings and one boolean (§4.6·6, D82, D98)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "stage",
+    "findings",
+    "bad_cut",
+    "contamination",
+    "declarations"
+  ],
+  "properties": {
+    "stage": {
+      "type": "string",
+      "enum": [
+        "cut",
+        "plan",
+        "charter-set"
+      ]
+    },
+    "contamination": {
+      "type": "boolean",
+      "description": "true = the Planner's argument reached the packet; the run is void"
+    },
+    "findings": {
+      "type": "array",
+      "maxItems": 15,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "kind",
+          "finding",
+          "refs"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "semantic-coverage",
+              "wave1-not-core",
+              "wave1-too-big",
+              "missed-extract",
+              "unowned-seam",
+              "signature-mismatch",
+              "missing-acquisition",
+              "cites-undelivered-goal-requirement",
+              "cites-no-goal-requirement",
+              "oversize-unit",
+              "other"
+            ]
+          },
+          "finding": {
+            "type": "string",
+            "maxLength": 400
+          },
+          "refs": {
+            "type": "array",
+            "maxItems": 10,
+            "items": {
+              "type": "string",
+              "maxLength": 60
+            },
+            "description": "unit ids, requirement ids, or charter ids this concerns"
+          }
+        }
+      }
+    },
+    "bad_cut": {
+      "type": "boolean",
+      "description": "cut stage only: re-cut before planning"
+    },
+    "declarations": {
+      "type": "array",
+      "maxItems": 10,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "term",
+          "line"
+        ],
+        "properties": {
+          "term": {
+            "type": "string",
+            "enum": [
+              "charter-gap",
+              "seam-undefined",
+              "bad-cut",
+              "worked"
+            ]
+          },
+          "line": {
+            "type": "string",
+            "maxLength": 200
+          }
+        }
+      }
+    }
+  }
+}

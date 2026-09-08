@@ -1,0 +1,179 @@
+{
+  "title": "spec-writer Output — the summary, never the spec body (§4.6·1, D80, D82)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "status",
+    "spec_id",
+    "ac_count",
+    "ac_types",
+    "footprint",
+    "requirement_ids",
+    "owed",
+    "unknowns",
+    "split",
+    "weak_dimensions",
+    "escalations",
+    "declarations"
+  ],
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": [
+        "written",
+        "killed",
+        "split-proposed"
+      ]
+    },
+    "killed_by_check": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 8,
+      "description": "required when status is killed"
+    },
+    "spec_id": {
+      "type": "string",
+      "maxLength": 40
+    },
+    "ac_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "ac_types": {
+      "type": "array",
+      "maxItems": 4,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "enum": [
+          "ui",
+          "backend",
+          "observed-data",
+          "financial"
+        ]
+      }
+    },
+    "footprint": {
+      "type": "array",
+      "maxItems": 60,
+      "items": {
+        "type": "string",
+        "maxLength": 200
+      },
+      "description": "paths — a durable field, not a display string (D80)"
+    },
+    "requirement_ids": {
+      "type": "array",
+      "maxItems": 40,
+      "items": {
+        "type": "string",
+        "maxLength": 40
+      }
+    },
+    "owed": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "count of owed criteria"
+    },
+    "unknowns": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "count of [NEEDS CLARIFICATION] entries"
+    },
+    "split": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {
+        "type": "string",
+        "maxLength": 80
+      },
+      "description": "proposed unit names when status is split-proposed"
+    },
+    "weak_dimensions": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {
+        "type": "string",
+        "maxLength": 120
+      },
+      "description": "named when the interview cap was hit"
+    },
+    "escalations": {
+      "type": "array",
+      "maxItems": 6,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "asks",
+          "blocks",
+          "default",
+          "deadline"
+        ],
+        "properties": {
+          "asks": {
+            "type": "string",
+            "maxLength": 300
+          },
+          "blocks": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 10,
+            "items": {
+              "type": "string",
+              "maxLength": 40
+            }
+          },
+          "default": {
+            "type": "string",
+            "maxLength": 300
+          },
+          "deadline": {
+            "type": "string",
+            "maxLength": 40
+          }
+        }
+      }
+    },
+    "declarations": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "term",
+          "line"
+        ],
+        "properties": {
+          "term": {
+            "type": "string",
+            "enum": [
+              "spec-unbuildable",
+              "charter-gap",
+              "seam-undefined",
+              "adr-friction",
+              "owed-ac"
+            ]
+          },
+          "line": {
+            "type": "string",
+            "maxLength": 200
+          }
+        }
+      }
+    }
+  },
+  "if": {
+    "properties": {
+      "status": {
+        "const": "killed"
+      }
+    }
+  },
+  "then": {
+    "required": [
+      "killed_by_check"
+    ]
+  }
+}

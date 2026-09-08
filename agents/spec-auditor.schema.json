@@ -1,0 +1,105 @@
+{
+  "title": "spec-auditor Output — a fix list, not a verdict (§4.6·2, D42, D82)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "findings",
+    "bad_cut",
+    "rejected",
+    "advisory",
+    "contamination"
+  ],
+  "properties": {
+    "contamination": {
+      "type": "boolean",
+      "description": "true = the packet carried the charter, the author's argument, or a prior audit; the run is void and every other field is ignored"
+    },
+    "findings": {
+      "type": "array",
+      "maxItems": 10,
+      "description": "ranked, most important first",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "field",
+          "category",
+          "finding",
+          "suggested_fix",
+          "confirms_with"
+        ],
+        "properties": {
+          "field": {
+            "type": "string",
+            "maxLength": 40,
+            "description": "the spec slot: Goal, Requirements, Boundaries, Interfaces, Constraints, Assumptions, Unknowns, Verification, rollback_path, cost_path, security_path"
+          },
+          "category": {
+            "type": "string",
+            "enum": [
+              "false-premise",
+              "stale-current-state",
+              "premise-from-prose",
+              "unverified-universal",
+              "reader-not-checked",
+              "owed-ac",
+              "wrong-evidence-type",
+              "adversary-noise",
+              "superseded-by-concurrent-charter",
+              "gate-gaming",
+              "audit-scope-expanded"
+            ]
+          },
+          "finding": {
+            "type": "string",
+            "maxLength": 400
+          },
+          "suggested_fix": {
+            "type": "string",
+            "maxLength": 400
+          },
+          "confirms_with": {
+            "type": "string",
+            "maxLength": 300,
+            "description": "one read-only command that confirms the finding, or the literal [UNVERIFIED]"
+          }
+        }
+      }
+    },
+    "bad_cut": {
+      "type": "boolean",
+      "description": "unbuildable as cut, or an AC cannot be made falsifiable; routes to re-cut or spin-off"
+    },
+    "rejected": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "finding",
+          "why_dropped"
+        ],
+        "properties": {
+          "finding": {
+            "type": "string",
+            "maxLength": 300
+          },
+          "why_dropped": {
+            "type": "string",
+            "maxLength": 300
+          }
+        }
+      }
+    },
+    "advisory": {
+      "type": "array",
+      "maxItems": 10,
+      "items": {
+        "type": "string",
+        "maxLength": 300
+      },
+      "description": "cannot block; clustering these is how the AC vocabulary learns"
+    }
+  }
+}

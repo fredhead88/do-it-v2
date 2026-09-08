@@ -1,0 +1,35 @@
+{
+  "title": "research Output — the pointer shape (§4.7, D82)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "path",
+    "summary",
+    "answered",
+    "contamination"
+  ],
+  "properties": {
+    "path": {
+      "type": "string",
+      "maxLength": 300,
+      "description": "content/research-NNNN.md, as given in the packet"
+    },
+    "summary": {
+      "type": "string",
+      "maxLength": 1500,
+      "description": "at most twelve lines: the answer, what it rests on, how sure"
+    },
+    "answered": {
+      "type": "string",
+      "enum": [
+        "yes",
+        "partial",
+        "no"
+      ]
+    },
+    "contamination": {
+      "type": "boolean",
+      "description": "true = the requester's hypothesis reached the packet; nothing was written"
+    }
+  }
+}

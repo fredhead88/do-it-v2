@@ -1,0 +1,383 @@
+{
+  "title": "builder Output — the output card as an object (§4.6·3, §5.10, D42, D81, D82)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "status",
+    "identity",
+    "acs",
+    "verify",
+    "stubs",
+    "deviations",
+    "tests",
+    "not_built",
+    "unknowns",
+    "built_against",
+    "escalations",
+    "declarations"
+  ],
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": [
+        "DONE",
+        "BLOCKED",
+        "NEEDS_CONTEXT"
+      ]
+    },
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "spec_id",
+        "built_by",
+        "branch",
+        "base_sha",
+        "ready_sha"
+      ],
+      "properties": {
+        "spec_id": {
+          "type": "string",
+          "maxLength": 40
+        },
+        "built_by": {
+          "type": "string",
+          "maxLength": 80,
+          "description": "the spawn id the wrapper handed you"
+        },
+        "branch": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "base_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{7,40}$"
+        },
+        "ready_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{7,40}$"
+        }
+      }
+    },
+    "acs": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 40,
+      "description": "one row per acceptance criterion, none dropped",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "criterion_type",
+          "evidence",
+          "evidence_type",
+          "check",
+          "disposition"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "maxLength": 20
+          },
+          "criterion_type": {
+            "type": "string",
+            "enum": [
+              "ui",
+              "backend",
+              "observed-data",
+              "financial"
+            ]
+          },
+          "evidence": {
+            "type": "string",
+            "maxLength": 400,
+            "description": "path to the artifact, or the artifact itself if one line"
+          },
+          "evidence_type": {
+            "type": "string",
+            "enum": [
+              "screenshot+trace",
+              "signed-response",
+              "live-db-query",
+              "reconciliation",
+              "command-output",
+              "file-read",
+              "grep",
+              "none"
+            ]
+          },
+          "check": {
+            "type": "string",
+            "maxLength": 300,
+            "description": "the confirming read-only command, or the literal [UNVERIFIED]"
+          },
+          "disposition": {
+            "type": "string",
+            "enum": [
+              "done",
+              "not-done",
+              "owed"
+            ]
+          }
+        }
+      }
+    },
+    "verify": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "command",
+        "exit_code",
+        "result"
+      ],
+      "properties": {
+        "command": {
+          "type": "string",
+          "maxLength": 300,
+          "description": "the command the spec authored, unchanged"
+        },
+        "exit_code": {
+          "type": "integer"
+        },
+        "result": {
+          "type": "string",
+          "maxLength": 200
+        }
+      }
+    },
+    "stubs": {
+      "type": "array",
+      "maxItems": 20,
+      "description": "required even when empty — none must be stated",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "why"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "why": {
+            "type": "string",
+            "maxLength": 200
+          }
+        }
+      }
+    },
+    "deviations": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "what",
+          "why"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "minor",
+              "significant",
+              "architectural"
+            ]
+          },
+          "what": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "why": {
+            "type": "string",
+            "maxLength": 600,
+            "description": "for significant, this becomes the ADR body"
+          }
+        }
+      }
+    },
+    "tests": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "added"
+      ],
+      "properties": {
+        "added": {
+          "type": "boolean"
+        },
+        "none_reason": {
+          "type": "string",
+          "maxLength": 300,
+          "description": "required when added is false: regression risk accepted because …"
+        }
+      },
+      "if": {
+        "properties": {
+          "added": {
+            "const": false
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "none_reason"
+        ]
+      }
+    },
+    "not_built": {
+      "type": "array",
+      "maxItems": 30,
+      "description": "required even when empty",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "item",
+          "reason"
+        ],
+        "properties": {
+          "item": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "out-of-scope-per-spec",
+              "irreversible-without-authorization",
+              "hard-blocked-externally",
+              "true-human-fork"
+            ]
+          }
+        }
+      }
+    },
+    "unknowns": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "string",
+        "maxLength": 200
+      }
+    },
+    "built_against": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "string",
+        "maxLength": 120
+      },
+      "description": "the conflict-list entries you read and built against"
+    },
+    "escalations": {
+      "type": "array",
+      "maxItems": 10,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "asks",
+          "blocks",
+          "default",
+          "deadline"
+        ],
+        "properties": {
+          "asks": {
+            "type": "string",
+            "maxLength": 300
+          },
+          "blocks": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 10,
+            "items": {
+              "type": "string",
+              "maxLength": 40
+            }
+          },
+          "default": {
+            "type": "string",
+            "maxLength": 300,
+            "description": "required for a reversible question; the literal none-irreversible for an irreversible one"
+          },
+          "deadline": {
+            "type": "string",
+            "maxLength": 40,
+            "description": "ISO-8601"
+          }
+        }
+      }
+    },
+    "declarations": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "term",
+          "line"
+        ],
+        "properties": {
+          "term": {
+            "type": "string",
+            "enum": [
+              "spec-ambiguity",
+              "spec-contradiction",
+              "spec-unbuildable",
+              "adr-friction",
+              "decision-wait",
+              "footprint-miss",
+              "loop",
+              "approaches-exhausted",
+              "budget-exceeded",
+              "context-exhausted",
+              "bad-cut",
+              "worked"
+            ]
+          },
+          "root_cause": {
+            "type": "string",
+            "enum": [
+              "false-premise",
+              "stale-current-state",
+              "premise-from-prose",
+              "unverified-universal",
+              "reader-not-checked",
+              "owed-ac",
+              "wrong-evidence-type",
+              "adversary-noise",
+              "superseded-by-concurrent-charter"
+            ]
+          },
+          "line": {
+            "type": "string",
+            "maxLength": 200
+          }
+        },
+        "if": {
+          "properties": {
+            "term": {
+              "enum": [
+                "spec-ambiguity",
+                "spec-contradiction",
+                "spec-unbuildable"
+              ]
+            }
+          }
+        },
+        "then": {
+          "required": [
+            "root_cause"
+          ]
+        }
+      }
+    }
+  }
+}

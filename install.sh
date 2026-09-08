@@ -31,6 +31,14 @@ case ":$PATH:" in
   *) echo "NOTE: $BIN is not on your PATH. Add:  export PATH=\"$BIN:\$PATH\"" ;;
 esac
 
+# The ten contracts are agent files. `--agent <name>` resolves them from
+# ~/.claude/agents/ whatever the cwd (D116); symlinked so the repo stays the
+# source of truth (§9.5).
+AGENTS="$HOME/.claude/agents"
+mkdir -p "$AGENTS"
+for f in "$HERE"/agents/*.md; do ln -sf "$f" "$AGENTS/$(basename "$f")"; done
+echo "agents:  $AGENTS/<name>.md -> $HERE/agents/"
+
 if ! command -v restic >/dev/null 2>&1; then
   echo "NOTE: restic not installed and DOIT_RESTIC_REPO unset, so the ledger has"
   echo "      no copy. The board will say so on every render until you fix it."

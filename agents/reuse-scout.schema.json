@@ -1,0 +1,210 @@
+{
+  "title": "reuse-scout Output — the pointer shape over a scored comparison (§6.6, D36, D44, D82)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "path",
+    "summary",
+    "candidates",
+    "nothing_cleared",
+    "complete",
+    "contamination",
+    "declarations"
+  ],
+  "properties": {
+    "path": {
+      "type": "string",
+      "maxLength": 300,
+      "description": "content/reuse-NNNN.md"
+    },
+    "summary": {
+      "type": "string",
+      "maxLength": 1500,
+      "description": "summary-first; the comparison in a few lines, never a recommendation"
+    },
+    "candidates": {
+      "type": "array",
+      "maxItems": 10,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "kind",
+          "installed_major",
+          "doc_url",
+          "gates",
+          "fit"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 120
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "package",
+              "copy-in"
+            ]
+          },
+          "installed_major": {
+            "type": "string",
+            "maxLength": 20,
+            "description": "the exact major that would be installed"
+          },
+          "doc_url": {
+            "type": "string",
+            "maxLength": 300,
+            "description": "docs for that major"
+          },
+          "gates": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "license",
+              "alive",
+              "legible",
+              "docs_at_major"
+            ],
+            "properties": {
+              "license": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "pass",
+                  "value"
+                ],
+                "properties": {
+                  "pass": {
+                    "type": "boolean"
+                  },
+                  "value": {
+                    "type": "string",
+                    "maxLength": 200,
+                    "description": "the raw value vet-dep returned"
+                  }
+                }
+              },
+              "alive": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "pass",
+                  "value"
+                ],
+                "properties": {
+                  "pass": {
+                    "type": "boolean"
+                  },
+                  "value": {
+                    "type": "string",
+                    "maxLength": 200,
+                    "description": "the raw value vet-dep returned"
+                  }
+                }
+              },
+              "legible": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "pass",
+                  "value"
+                ],
+                "properties": {
+                  "pass": {
+                    "type": "boolean"
+                  },
+                  "value": {
+                    "type": "string",
+                    "maxLength": 200,
+                    "description": "the raw value vet-dep returned"
+                  }
+                }
+              },
+              "docs_at_major": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "pass",
+                  "value"
+                ],
+                "properties": {
+                  "pass": {
+                    "type": "boolean"
+                  },
+                  "value": {
+                    "type": "string",
+                    "maxLength": 200,
+                    "description": "the raw value vet-dep returned"
+                  }
+                }
+              }
+            }
+          },
+          "fit": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "surface_fraction",
+              "forces_adoption_of"
+            ],
+            "properties": {
+              "surface_fraction": {
+                "type": "string",
+                "maxLength": 120,
+                "description": "what fraction of its surface we would use — a fact, not a score"
+              },
+              "forces_adoption_of": {
+                "type": "string",
+                "maxLength": 200,
+                "description": "provider or context, data-model ownership, heavy peer deps — or none"
+              }
+            }
+          },
+          "previously_rejected": {
+            "type": "string",
+            "maxLength": 40,
+            "description": "the ADR id, when the trail already ruled"
+          }
+        }
+      }
+    },
+    "nothing_cleared": {
+      "type": "boolean",
+      "description": "no candidate passed every mechanical gate — a complete, successful output"
+    },
+    "complete": {
+      "type": "boolean",
+      "description": "false when the timebox ended the search"
+    },
+    "contamination": {
+      "type": "boolean",
+      "description": "true = the Planner's preference reached the packet"
+    },
+    "declarations": {
+      "type": "array",
+      "maxItems": 5,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "term",
+          "line"
+        ],
+        "properties": {
+          "term": {
+            "type": "string",
+            "enum": [
+              "unclassified"
+            ]
+          },
+          "line": {
+            "type": "string",
+            "maxLength": 200
+          }
+        }
+      }
+    }
+  }
+}

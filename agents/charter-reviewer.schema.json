@@ -1,0 +1,167 @@
+{
+  "title": "charter-reviewer Output — a verdict and a driven walkthrough (§4.6·9, D33, D82, D99, D102)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "verdict",
+    "findings",
+    "uncovered_requirement_ids",
+    "unrolled_not_built",
+    "walkthrough",
+    "contamination",
+    "declarations"
+  ],
+  "properties": {
+    "verdict": {
+      "type": "string",
+      "enum": [
+        "complete",
+        "not-complete"
+      ]
+    },
+    "contamination": {
+      "type": "boolean",
+      "description": "true = a argument reached the packet; the run is void"
+    },
+    "findings": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "kind",
+          "finding",
+          "refs"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "missing-dependency-between-shipped-specs",
+              "requirement-cited-not-addressed",
+              "unowned-seam",
+              "journey-failed",
+              "other"
+            ]
+          },
+          "finding": {
+            "type": "string",
+            "maxLength": 400
+          },
+          "refs": {
+            "type": "array",
+            "maxItems": 10,
+            "items": {
+              "type": "string",
+              "maxLength": 60
+            }
+          }
+        }
+      }
+    },
+    "uncovered_requirement_ids": {
+      "type": "array",
+      "maxItems": 40,
+      "items": {
+        "type": "string",
+        "maxLength": 40
+      }
+    },
+    "unrolled_not_built": {
+      "type": "array",
+      "maxItems": 60,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "card",
+          "item",
+          "reason"
+        ],
+        "properties": {
+          "card": {
+            "type": "string",
+            "maxLength": 40
+          },
+          "item": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 100
+          }
+        }
+      }
+    },
+    "walkthrough": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "steps",
+        "stopped_at",
+        "worked_if",
+        "failed_if",
+        "depth"
+      ],
+      "properties": {
+        "steps": {
+          "type": "array",
+          "maxItems": 40,
+          "items": {
+            "type": "string",
+            "maxLength": 200
+          }
+        },
+        "stopped_at": {
+          "type": "string",
+          "maxLength": 200,
+          "description": "the step where the journey stopped, or the literal end"
+        },
+        "worked_if": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "failed_if": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "depth": {
+          "type": "string",
+          "enum": [
+            "full",
+            "gates-only"
+          ]
+        }
+      }
+    },
+    "declarations": {
+      "type": "array",
+      "maxItems": 10,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "term",
+          "line"
+        ],
+        "properties": {
+          "term": {
+            "type": "string",
+            "enum": [
+              "charter-gap",
+              "hollow",
+              "evidence-gap",
+              "worked"
+            ]
+          },
+          "line": {
+            "type": "string",
+            "maxLength": 200
+          }
+        }
+      }
+    }
+  }
+}

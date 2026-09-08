@@ -1,0 +1,148 @@
+{
+  "title": "grader Output — per-criterion verdicts, two roll-ups, no score (§4.6·4, §5.3, D82)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "verdicts",
+    "matches_intent",
+    "card_ok",
+    "checkers",
+    "could_not_run",
+    "contamination",
+    "declarations"
+  ],
+  "properties": {
+    "contamination": {
+      "type": "boolean",
+      "description": "true = a stripped item reached the packet; the run is void"
+    },
+    "could_not_run": {
+      "type": "boolean",
+      "description": "over budget or the packet could not be graded; appends gate-infra, never a rework verdict"
+    },
+    "verdicts": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 40,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "ac",
+          "verdict",
+          "reason"
+        ],
+        "properties": {
+          "ac": {
+            "type": "string",
+            "maxLength": 20,
+            "description": "the criterion id, e.g. AC3"
+          },
+          "verdict": {
+            "type": "string",
+            "enum": [
+              "met",
+              "unmet",
+              "cannot-assess"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 400,
+            "description": "required on every path, including met"
+          },
+          "reason_code": {
+            "type": "string",
+            "enum": [
+              "evidence-missing",
+              "tool-failed",
+              "criterion-unevaluable-from-packet",
+              "evidence-contradictory"
+            ]
+          }
+        }
+      }
+    },
+    "matches_intent": {
+      "type": "string",
+      "enum": [
+        "yes",
+        "no",
+        "cannot-assess"
+      ]
+    },
+    "card_ok": {
+      "type": "string",
+      "enum": [
+        "yes",
+        "no",
+        "cannot-assess"
+      ]
+    },
+    "checkers": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "version",
+          "coverage_note",
+          "result"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "maxLength": 80
+          },
+          "version": {
+            "type": "string",
+            "maxLength": 80
+          },
+          "coverage_note": {
+            "type": "string",
+            "maxLength": 300,
+            "description": "what this checker can and cannot see — a clean run is evidence of this, never of the property"
+          },
+          "result": {
+            "type": "string",
+            "enum": [
+              "pass",
+              "fail",
+              "could-not-run"
+            ]
+          }
+        }
+      }
+    },
+    "declarations": {
+      "type": "array",
+      "maxItems": 10,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "term",
+          "line"
+        ],
+        "properties": {
+          "term": {
+            "type": "string",
+            "enum": [
+              "hollow",
+              "card-quality",
+              "evidence-gap",
+              "gate-infra",
+              "worked"
+            ]
+          },
+          "line": {
+            "type": "string",
+            "maxLength": 200
+          }
+        }
+      }
+    }
+  }
+}
