@@ -59,7 +59,7 @@ the merge gate has fired on a real merge]:
 
 | Missing | Size | Kind |
 |---|---|---|
-| **The dispatch wrapper** — the line above; `build-started` before, events from the Output object after; **null `structured_output` → failed**; **file at the named path or failed**; **`git status --porcelain` unchanged across non-builder spawns or failed**; **`is_error` → failed, never retried identically**; `usage` → event; `api_error` → operator escalation | ~80 | code |
+| **The dispatch wrapper** — the line above; `build-started` before, events from the Output object after; **null `structured_output` → failed**; **file at the named path or failed**; **`git status --porcelain` unchanged across non-builder spawns or failed**; **`is_error` → failed, never retried identically**; `usage` → event; `api_error` → operator escalation; **each spawn's events go to `~/.do-it/events/L-<role>-<spawn>.jsonl` — the actor is the filename (D90), and the fold ignores a `verdict` from any file not named for the grader** | ~80 | code |
 | **`do-it tick`** — fold first, spawn `-p --agent executor` only on an actionable lane, `flock`, `tick` event (D117) | ~40 | code |
 | Three driver skills — Planner, Executor, Thinker | ~900 | **prompt** |
 | §3.6's six audit scripts, the packet script (per role: what it strips, what it carries), `scripts/vet-dep.mjs` | 250–350 | code |
