@@ -274,8 +274,10 @@ on one.**
 **Not a rate, and solid — dated artifacts**
 The **69-day dead lane** (§1.7). The context-floor measurements on this machine
 (**`-p` full config 118,360 → `-p --bare` 3,649 → in-session, tools declared,
-~6,000 tok** — the last is the only one that measures the *chosen* mechanism,
-D104/D105). 2 of 292 installed packages running scripts
+~6,000 tok → `-p --agent`, tools declared, MCP stripped, schema on, ~7,900 tok**
+— the last measures the *chosen* mechanism, D104/D105/D116; the first is stale
+and per-environment, re-measured at 13–18k on 2026-09-08). 2 of 292 installed
+packages running scripts
 at install. 365/365 verified signatures against **67 attestations (~18%)**. All
 78 resolved Python packages having wheels. *These are facts about a specific
 system on a specific date, not rates that generalize — but within their scope
@@ -1298,7 +1300,7 @@ cannot see, so it is never asked to.
 - **Install the wave's dependencies** (D73) — the Plan's ratified acquisition set
   is installed **by the Executor, before dispatch**. It is a driver-tier pane, so
   the install gate's hook actually fires; a `--bare` builder's would not (§6.7e).
-  > **⚠ HELD — the premise below is false since D104.** An in-session sub-agent does **not** structurally skip hooks the way `--bare` did. The conclusion may still be right for other reasons; **it has not been re-argued.** **That argument is still owed** — it gets its `D` number when it is made; until then this text states a reason that no longer holds. *(§4.2, D104/D105.)*
+  > **★ Re-grounded** *(D116)*. The reason given below — that a `--bare` builder runs no hooks — is false on every seat path: `--bare` is conceded and a non-bare spawn runs the hooks it discovers. **D73 stands on §1.4 instead**: a new dependency is effectively irreversible, and §4.9's trigger 4 routes an irreversible action to escalation, never to the sub-agent. That the install gate now also fires for a builder is extra enforcement, not the rationale.
 - **Deploy** — via a **serial script** that waits for the deploy to land (§4.11, D88).
 - **Charter close** — the three steps in §3.13.
 
@@ -1650,6 +1652,19 @@ Budgets throughout this document are stated **in tokens, never in USD.**
 > residue** — the opposite of the direction §12.2's strangler plan points, and
 > the opposite of what a reader of Part 11 would expect.
 
+> **★ D104's mechanical claim is false on CLI 2.1.263, and its pane conclusion
+> has lost its premise** *(D116, measured 2026-09-08 —
+> `research/METER-TEST-2026-09-08.md`)*. A non-bare `-p` spawn **reaches the
+> seat** — from this session's environment and from a plain terminal environment
+> with no session variable at all; a deliberately *invalid* key is ignored. D104's
+> row 3 — *"the same spawn without `--bare` fails identically"* — was taken on a
+> stale credential that failed both arms and masked the flag. **`--bare` was the
+> cause after all**, and not by accident: the flag's own help text says *"OAuth
+> and keychain are never read."* **The premise stands** — all tokens come from
+> the seat — **and the mechanism is now `-p` without `--bare`**, decided at D116
+> below. *"The two panes are the floor"* rested on a spawn being unable to draw
+> the seat; it cannot rest there now, and it is owed its own decision.
+
 **What `--bare` was doing, and what is now owed.** It was never a flag; it was
 an enforcement layer. It refused to auto-discover hooks, plugins, MCP servers,
 memory or `CLAUDE.md`, so everything had to be passed explicitly — **§4.4's
@@ -1679,39 +1694,120 @@ drafts; 23k was measured under a lighter config.)*
 > Unlike `K`, `H`, expected dwell and `N`, **it is measurable in one afternoon**
 > — spawn one sub-agent and read what it actually loaded.
 
-> ### ★ Two guarantees are now owed, and until they are decided the contracts are enforced by instruction
+> **★ The table, re-measured** *(D116, 2026-09-08)*. `-p` full config is
+> **13–18k** on this machine today, not 118,360 — config load is per-environment
+> and that figure was a heavier one. The path this document now chooses measures
+> **`-p --agent <contract>` with tools declared, MCP stripped and the schema on:
+> ~7,400–7,900 tok**, against in-session ~6,000 (D105) and `--bare` 3,649. The
+> ~4k between `--bare` and the chosen line is `CLAUDE.md`, auto-memory and git
+> status — **the residual only `--bare` removes, and `--bare` is conceded.**
+
+> ### ★ Two guarantees were owed — both are now decided *(b: measured 2026-09-08 · a: D116)*
 >
 > **§4.6 · 2 and §7.3 both say that is not enforcement.** This is the largest
 > open item in the document.
 >
 > **(a) *Nothing implicit*.** What bounds an in-session sub-agent's inherited
 > context, and what makes a contract's declared Input/Tools/Model **binding
-> rather than advisory**?
+> rather than advisory**? **→ D116:** the contract file's `tools:` and `model:`
+> lines, runtime-enforced on both seat paths; `--strict-mcp-config` for MCP; the
+> packet script for Input. What stays implicit is the **measured residual**.
 >
 > **(b) *Output is a schema*.** D82 makes `Output` a JSON schema *"or a contract
 > with no `Output` schema cannot be spawned at all"*, enforced by
 > `--json-schema`. What makes *"tiny summary, never a transcript"* mechanical
-> when that flag is unavailable?
+> when that flag is unavailable? **→ Measured 2026-09-08:** the flag is
+> available on the seat and honoured — provided the contract's `tools:` line
+> carries `StructuredOutput` (D116).
 >
-> **Nothing downstream may be edited until both are decided.** `--bare` or
-> `--json-schema` is load-bearing at **§4.3, §4.4, §4.6 (all ten contracts),
-> §4.5, §6.7e, §10.1 and D82** — those sites still describe the rejected
-> mechanism, **knowingly**, because editing them is the second decision and not
-> this one. **A reader hitting one of them should return here.**
+> ~~**Nothing downstream may be edited until both are decided.**~~ **Both are
+> decided; the freeze is lifted** *(D116)*. `--bare` or `--json-schema` was
+> load-bearing at **§4.3, §4.4, §4.6 (all ten contracts), §4.5, §6.7e, §10.1
+> and D82**. Under D116, `--json-schema` is back as measured, `--bare` is
+> replaced by the contract file's own declarations plus `--strict-mcp-config`,
+> and §4.4's Output row and the four HELD blocks are corrected in the same pass.
+> **A site that still reads `--bare` as live after this pass is a defect, not a
+> hold.**
 
-**Standing spawn flags — RETIRED by D104, kept because what they bought is
-still owed:**
+> ### ★ D116 — `--bare` is conceded; the seat is the meter; "nothing implicit" is a declaration in the contract file
+>
+> **The trade in one line: `--bare` buys config isolation and costs the seat —
+> by definition.** `claude --help` on 2.1.263: *"Anthropic auth is strictly
+> `ANTHROPIC_API_KEY` or apiKeyHelper via `--settings` (OAuth and keychain are
+> never read)."* The one-meter rule at the head of this section is an operator
+> decision, so the side is forced: **`--bare` is conceded, permanently, on any
+> CLI that documents the flag this way.** *(Measured 2026-09-08, 26 spawns
+> across two runs — `research/METER-TEST-2026-09-08.md`.)*
+>
+> **The spawn:**
+>
+> ```
+> env -u ANTHROPIC_API_KEY claude -p "<packet>" \
+>   --agent <contract> \            ← the file IS the contract: tools:, model:, prefix
+>   --strict-mcp-config \           ← no MCP server the contract did not name
+>   --permission-mode dontAsk \     ← deny, never prompt into a void
+>   --json-schema <Output schema> \ ← honoured only if tools: carries StructuredOutput
+>   --output-format json            ← returns usage per spawn
+> ```
+>
+> **From any environment that carries `USER` — a plain terminal, or cron.** The
+> seat credential is in the keychain and any process running as the user reads
+> it; the running session is **not** the auth root (row M: a full environment
+> minus every `CLAUDE*` and `ANTHROPIC*` variable reaches the seat; every cold
+> failure was `env -i` dropping `USER`, row O).
+>
+> **What (a) now says.** *Nothing implicit* was a runtime guarantee only `--bare`
+> gave. It is replaced by four enforced declarations and one measured residual:
+>
+> | Field | Bound by | Enforced? |
+> |---|---|---|
+> | **Tools** | the contract file's `tools:` line — built-in tools — plus `--strict-mcp-config` for MCP | **runtime**, both seat paths. Row I2: an agent declared `Read` reports *"one tool: Read"*. Row Q: the same line **leaks every MCP server in `~/.claude.json`** until `--strict-mcp-config` is set |
+> | **Model** | the contract file's `model:` line | **runtime** — row H ran haiku from the file with no `--model` flag |
+> | **Input** | the packet script (correction #6 — blindness is constructed) | **script** — nothing else ever bounded it |
+> | **Output** | `--json-schema`, which needs the `StructuredOutput` tool | **runtime — with one trap:** a `tools:` line without `StructuredOutput` returns `is_error: false` and `structured_output: null`. **Every contract's `tools:` line carries `StructuredOutput`, and the wrapper treats a null `structured_output` as a failed spawn** |
+> | **Budget** | `--output-format json` returns `usage` per spawn | **fold** — the wrapper appends it, the fold compares it with the declared Budget. **The first path on which `budget-exceeded` can fire mechanically**; in-session dispatch returns text only |
+> | *the residual* | `CLAUDE.md` (global and project), auto-memory, git status — **what only `--bare` skips** | **measured, never guaranteed** — ~4k tok on this machine (3,649 bare against 7,440–7,900 on the line above), re-measured by the D105 probe per installation and per CLI version. A residual carrying anything in a contract's Blindness class is an installation defect, and the probe's output is where it shows |
+>
+> **The silent-fallback defect closes by construction, not by a fold term.** The
+> dispatch environment carries no `ANTHROPIC_API_KEY`, so there is no meter to
+> fall through to: an unreachable seat is `is_error: true`,
+> `terminal_reason: api_error`, zero tokens (rows F, G, K, L, N). The wrapper
+> records a failed spawn and routes it as an **escalation to the operator** —
+> the one person who can `/login` — never retried, and never `seat-exhausted`,
+> which is a clock and not a credential.
+>
+> **In-session dispatch of the same file remains valid** (D105) and is the
+> fallback for a CLI version that cannot reach the seat from `-p`. The contract
+> does not change; only the driver's call does. The `-p` line is primary because
+> it is the only path on which Output and Budget are enforced rather than hoped.
+>
+> **Re-run on every CLI upgrade — auth changed under this design once already
+> (2.1.246 → 2.1.263):** row M (seat from a plain environment), row R (the full
+> line), row I2 (the `tools:` binding), row Q (the MCP leak). A failed re-run is
+> a design event, not an ops note.
+>
+> **What this does not decide.** *The panes*: D104's *"floor, not residue"* has
+> lost its auth premise; what remains is D80's Planner asymmetry, and that is
+> owed its own D. *Per-skill restriction*: the CLI offers `Skill` in the `tools:`
+> line or not; D66's named-skill list has no finer mechanism yet — measure
+> `--allowedTools "Skill(name)"` before the driver skills are drafted. *D73's
+> rationale* is re-grounded on §1.4 at the four sites that held it.
+
+**Standing spawn flags — retired by D104, and six of seven restored by D116 on
+the non-bare `-p` path:**
 
 ```
-claude --bare -p \                                    ← rejected: cannot draw the seat
-  --allowedTools "<exact set from the contract>" \    ← (a) owes an in-session equivalent
-  --permission-mode dontAsk \                         ← (a) owes an in-session equivalent
-  --model <explicit, never inherited> \               ← survives: dispatch names the model
-  --exclude-dynamic-system-prompt-sections \          ← (a) owes an in-session equivalent
-  --append-system-prompt-file <the contract prefix> \ ← survives: the prefix is prompt text
-  --output-format json --json-schema <schema>         ← (b) owes an in-session equivalent
+claude --bare -p \                                    ← conceded (D116): --bare never reads the seat
+  --allowedTools "<exact set from the contract>" \    ← restored as the contract file's tools: line + --strict-mcp-config
+  --permission-mode dontAsk \                         ← restored verbatim
+  --model <explicit, never inherited> \               ← restored as the contract file's model: line
+  --exclude-dynamic-system-prompt-sections \          ← moves the per-machine sections; removes nothing — the residual
+  --append-system-prompt-file <the contract prefix> \ ← restored as the contract file's body (--agent)
+  --output-format json --json-schema <schema>         ← restored verbatim; needs StructuredOutput in tools:
 ```
 
+*(The paragraph below was written when five of seven were open. It stands as the
+record of what each flag bought; under D116 one is conceded and six are back.)*
 **Two of seven survive the mechanism change; five are the open work.** What each
 bought must be reconstructed or explicitly conceded — `--permission-mode dontAsk`
 denied anything outside the declared allow-set **rather than prompting into a
@@ -1752,7 +1848,8 @@ discovered:**
    > constraint rather than adding one** — but §6.7e's *"installation is the
    > Executor's, never a builder's"* (D73) was reasoned **from** this skip, and
    > **a conclusion that survives its premise still has to be re-argued.** It is
-   > held, not overturned, pending (a).
+   > held, not overturned, pending (a). **→ Decided at D116: hooks fire on every
+   > seat path, and D73 is re-grounded on §1.4 (§6.7e).**
    Hooks remain live for the driver tier and for the operator's own shell, which
    is where the install gate (§6.7) fires — **and that is why installation is
    the Executor's, never a builder's** (D73, §6.7e).
@@ -1866,7 +1963,8 @@ wrong-size detectors available and neither costs a spawn.
 
 **The honest tension:** cost pressure says *fewer, larger*; the context ceiling
 says *smaller than you think*. They resolve in opposite directions and **the
-ceiling wins** — exceeding it costs rework, and the spawn floor is 3.6k.
+ceiling wins** — exceeding it costs rework, and the spawn floor is ~8k (D116 —
+3.6k measured `--bare`).
 **When in doubt, cut smaller.**
 
 **Guard exceptions are encoded, not left to overrides** (D39, generalized).
@@ -1890,11 +1988,11 @@ by the fold or by a hook is decoration.
 |---|---|
 | **Input** | exactly what it's handed; nothing implicit |
 | **Blindness** | what it must *not* see. Verification integrity lives here |
-| **Output** | **the JSON schema this spawn is validated against** (D82; enforced by the dispatch layer's structured-output path, which retries on mismatch — *not* by `--json-schema`, which D104 rejected along with the `-p` mechanism. §4.2, D105). Two shapes only (D82, D62): a **verdict set** returned directly and capped, or a **pointer** `{path, summary}` where volume is the problem. Never a transcript. *Any one-line form shown below is a **rendering** of that object for the board and the log — never the contract* |
+| **Output** | **the JSON schema this spawn is validated against** (D82; enforced by `--json-schema` on the `-p --agent` spawn line — measured on the seat 2026-09-08 — **which requires `StructuredOutput` in the contract's `tools:` line**; a null `structured_output` is a failed spawn. §4.2, D116). Two shapes only (D82, D62): a **verdict set** returned directly and capped, or a **pointer** `{path, summary}` where volume is the problem. Never a transcript. *Any one-line form shown below is a **rendering** of that object for the board and the log — never the contract* |
 | **Writes** | what it appends to the ledger and content dir |
-| **Tools** | capability *and* cost — identical tool sets share a cached prefix |
-| **Model** | always explicit, never inherited |
-| **Budget** | wall clock / attempts / **tokens**, declared up front |
+| **Tools** | capability *and* cost — identical tool sets share a cached prefix. **Built-in tools only; MCP is excluded by `--strict-mcp-config`; `StructuredOutput` is always present** (D116) |
+| **Model** | always explicit, never inherited — the contract file's `model:` line (D116) |
+| **Budget** | wall clock / attempts / **tokens**, declared up front — **and checked: the spawn's `usage` comes back in the JSON result and the fold compares** (D116) |
 | **May declare** | which dysfunction terms it may emit (the fold authorizes) |
 | **Learns** | what this agent teaches the system, and where that lands |
 
@@ -1968,8 +2066,9 @@ ground truth, spend the spawn on the judgment residue.**
 **★ Per-spec, not batched** *(D72 — this reverses v1).* v1 batched the reviewer
 over the awaiting queue. That was originally a **cost** decision against a
 23k / $0.24 spawn floor; the floor is now measured at **~6,000 tok per spawn**
-(D105 — in-session, tools declared; the earlier 3.6k figure measured `--bare`,
-which D104 rejected, and the dollar figure is void since all tokens are seat
+(D105 — in-session, tools declared; **~7,900 on the `-p --agent` line D116
+chooses**; the earlier 3.6k figure measured `--bare`,
+which D116 concedes, and the dollar figure is void since all tokens are seat
 tokens) and v1
 recorded that the cost half of the argument had evaporated, keeping batching on
 a fallback — *"a batched reviewer walking the queue in one context is what the
@@ -1987,9 +2086,9 @@ wave, and the reviewer stops being the only role exempt from §4.3's sizing law.
 
 **The cost, stated:** the review account is injected into N spawns per wave
 rather than one (§6.7c still scopes it), and each spawn starts its own browser
-per spawn — an in-session sub-agent that declares its tools carries no MCP
-servers by default, so the browser is granted through the contract's `Tools`
-declaration rather than a flag (D105). That wall-clock is the
+per spawn — a spawn that declares its tools carries no MCP servers (in-session
+by default, D105; under `-p` by `--strict-mcp-config`, D116), so the browser is
+granted through the contract's `Tools` declaration. That wall-clock is the
 one thing batching genuinely bought. **Cross-spec pattern-spotting is not a
 loss** — §3.13 already assigns composition failures to `charter-reviewer`.
 
@@ -2258,7 +2357,7 @@ the ADR trail (§2.7). This is pre-flight check 2 one level down — check 2 ask
 built* — and it is D43's acquisition rule applied inside the codebase instead of
 outside it.
 
-> **⚠ HELD — the premise below is false since D104.** An in-session sub-agent does **not** structurally skip hooks the way `--bare` did. The conclusion may still be right for other reasons; **it has not been re-argued.** **That argument is still owed** — it gets its `D` number when it is made; until then this text states a reason that no longer holds. *(§4.2, D104/D105.)*
+> **★ Re-grounded** *(D116)*. The reason given below — that a `--bare` builder runs no hooks — is false on every seat path: `--bare` is conceded and a non-bare spawn runs the hooks it discovers. **D73 stands on §1.4 instead**: a new dependency is effectively irreversible, and §4.9's trigger 4 routes an irreversible action to escalation, never to the sub-agent. That the install gate now also fires for a builder is extra enforcement, not the rationale.
 
 **★ A builder never installs a dependency** (D73). The Executor pre-installs the
 wave's ratified set before dispatch (§6.7e), because the install gate is a hook
@@ -2348,7 +2447,7 @@ scores Acc=0.90 with κ=0.
 | **Blindness** | the builder's card as the *only* source. **Evidence type must match criterion type** — a DB-level or API-simulation result is an **auto-fail** for a `ui` criterion. Measured: "all 16 checks green" from a DB-simulation script while the real wizard flow was broken; Playwright was first touched 6+ hours in, **18 seconds after** the operator demanded it |
 | **Output** | `{blocking[], recommendations[], reverify[], offer[], depth}` — and the separation of the two lists is **in the schema, not in formatting**: each `blocking` finding names the AC it violates; `recommendations` are advisory and **cannot block**. `reverify` carries **runnable conditions including the negative ones**. `offer` is the product — **0–3 items, ranked, naming which artifact to look at** — and an **empty `offer` is a first-class terminal output**, not a missing field |
 | **Writes** | per-criterion `verdict` events + a **`must-fix`** event that **blocks in the fold** *(D101 — renamed from `corrective`, which named two things at opposite ends of a spec's life; the post-ship **spec** keeps the word)*. **Records `depth`** — `full` or `gates-only` — on every spec it touches; a review that could see nothing must say so rather than skip silently (D29) |
-| **Tools** | browser/UI drive for `ui`; live-DB-gated query for `observed-data`; the canonical endpoint for `financial`. **Granted through this contract's `Tools` declaration** — a declared tool set carries no MCP servers by default, and that declaration is what removes the ~60 KB deferred-tool surface from the spawn (D105) |
+| **Tools** | browser/UI drive for `ui`; live-DB-gated query for `observed-data`; the canonical endpoint for `financial`. **Granted through this contract's `Tools` declaration** — a declared tool set carries no MCP servers — by default in-session, by `--strict-mcp-config` under `-p` (D116) — and that declaration is what removes the ~60 KB deferred-tool surface from the spawn (D105) |
 | **Credentials** | **a dedicated `review-account` per app** (D27) — scoped/limited role on **prod** where the app supports it, full account where it doesn't; in the local secrets file, never git, injected only into this spawn's env. **Hard invariant: the reviewer never holds a credential that can delete data or spend money.** Each entry carries `capabilities: read \| write-scoped \| none` — where **`write-scoped` means *may create and update; may never delete and never move money*** (D75), so it stays inside the invariant rather than in tension with it so the reviewer can distinguish *"this failed"* from *"I wasn't equipped to check this."* Destructive-path checks **escalate instead of executing** |
 | **Model** | Opus. No evidence any family reviews better |
 | **Budget** | **per spec** (D72) — one pass over one unit, as a stage in that spec's own pipeline, never over a queue. **2 rounds, not 3**: round 2 is scope-pinned to standing rejected criteria only. **A third round is not a round, it is an escalation** |
@@ -3812,7 +3911,7 @@ help — and §1.4 holds that reversibility buys speed, so the inverse earns a g
 
 ### (e) ★ Who installs — the gate only exists where the hook fires
 
-> **⚠ HELD — the premise below is false since D104.** An in-session sub-agent does **not** structurally skip hooks the way `--bare` did. The conclusion may still be right for other reasons; **it has not been re-argued.** **That argument is still owed** — it gets its `D` number when it is made; until then this text states a reason that no longer holds. *(§4.2, D104/D105.)* **This subsection is the load-bearing one:** its whole argument is *the gate only exists where the hook fires*, and under in-session dispatch **the hook now fires for builders too** — which does not make D73 wrong, but does remove the reason given for it. **Re-argue on the merits: should a builder install a dependency when §1.4 calls a new dependency effectively irreversible?** That argument survives D104 untouched, and it may be the better one.
+> **★ Re-grounded** *(D116)*. The premise below — a `--bare` sub-agent runs none of (b) — is false on every seat path: `--bare` is conceded and a non-bare spawn discovers and runs its hooks. **This subsection's title is therefore no longer the argument.** D73's rule survives on §1.4's merits: a new dependency is effectively irreversible, and §4.9's trigger 4 routes an irreversible action to escalation — so a builder does not install for the same reason it does not drop a table. The install gate now firing for builders too is a second net under the same rule, and the merge-time backstop below is unchanged.
 
 *(D73.)* The gate in (b) is a `PreToolUse` hook, and §4.2 establishes that a
 `--bare` sub-agent runs none. The builder is the only role that writes product
@@ -5274,7 +5373,7 @@ times in one session** · an agent worked around one of its operator's own rules
 | **★ Install gate** | the install command | an unvetted or bumped dependency (§10.2) | **★ D54** |
 | **★ Size cap** | write / commit | files past the cap (§10.3) | **★ D69** |
 | **★ Paid-API gate** | dispatch (a shared gate) | silent quota drains (§10.4) | **★ D70** |
-| **★ Acquisition-set gate** | merge | a package no plan ratified reaching main — the `--bare` builder's install path (§6.7e). **⚠ Rationale held — see §6.7e; the gate itself is unaffected, only the reason given for needing it** | **★ D73** |
+| **★ Acquisition-set gate** | merge | a package no plan ratified reaching main — a builder's install path (§6.7e). **Rationale re-grounded on §1.4 (D116); the gate itself is unchanged** | **★ D73** |
 | **★ Pre-image gate** | a destructive statement | an irreversible data-layer change running without a run-tested undo (§5.11) | **★ D74** |
 
 **Deleted from v1's list: the provenance gate.** It blocked a push when a lead
@@ -5295,7 +5394,7 @@ rule deletes the machinery that fed it.)*
 **And note where hooks cannot reach:** `--bare` sub-agents run **none** of them
 (§4.2). For sub-agents, **the fold is the enforcement layer.**
 
-> **⚠ HELD — the premise below is false since D104.** An in-session sub-agent does **not** structurally skip hooks the way `--bare` did. The conclusion may still be right for other reasons; **it has not been re-argued.** **That argument is still owed** — it gets its `D` number when it is made; until then this text states a reason that no longer holds. *(§4.2, D104/D105.)* **Note the direction: this one loosens.** If in-session sub-agents run hooks, then *"the fold is the only enforcement option"* is no longer forced — the fold may still be the right choice, but it is now a choice. §4.4 requires it for an independent reason, so nothing collapses; the *necessity* claim does. Hooks fire in the
+> **★ Re-grounded** *(D116)*. `--bare` is conceded and a non-bare `-p` spawn runs the hooks it discovers, so *"`--bare` sub-agents run none of them"* is retired: **hooks fire on every tier.** The fold stays the enforcement layer for sub-agents because §4.4 requires it — a sub-agent's declarations are recomputed, never trusted — not because nothing else can reach them. Where the fold's after-the-fact answer is too weak, the enforcement point still moves to merge. Hooks fire in the
 driver tier and in the operator's own shell — which is exactly where the install
 gate needs to be, **and is why D73 puts installation on the Executor rather than
 the builder** (§6.7e). Where the fold's after-the-fact answer is too weak —
@@ -5850,7 +5949,7 @@ process-code repo (§9.1), reads it from there.)*
 | **hook count · calibration-file size · T2 entry count · drift-table rows** | §7.6 | the `retro` ceiling check. **Four rows added because §7.3's landing sites were unbounded** — three of the four places an improvement may land had no ceiling at all |
 | **debt items per file** *(D107)* | §7.6, §2.6 | the `retro` ceiling check. **Unset because the artifact does not exist yet** — D103's ratchet reads a current value and there is none. It takes its number from the first pass that looks, and **the number it wants is per-file, not total**: the failure mode is one cold surface accreting items nobody is ever offered |
 | **expected dwell per state** | §8.6, §2.5 | the wedge alarm — see the note below |
-| ~~**per-sub-agent context floor under in-session dispatch**~~ *(D104)* — **SET at ~6,000 tok, measured 2026-08-26** *(D105)* | §4.2, §4.3 | §4.3's sizing and every contract `Budget`. **The first row in this table ever to close.** Declaring `Tools:` removes the deferred-tool list — ~70% of the untrimmed floor — so the contract field *is* the isolation mechanism. Kept here struck through rather than deleted, so the table shows that a row can close |
+| ~~**per-sub-agent context floor under in-session dispatch**~~ *(D104)* — **SET at ~6,000 tok, measured 2026-08-26** *(D105)* | §4.2, §4.3 | §4.3's sizing and every contract `Budget`. **The first row in this table ever to close.** Declaring `Tools:` removes the deferred-tool list — ~70% of the untrimmed floor — so the contract field *is* the isolation mechanism. Kept here struck through rather than deleted, so the table shows that a row can close. **Re-measured 2026-09-08 on the `-p --agent` line D116 chooses: ~7,900 tok — per path as well as per installation; the row stays closed** |
 
 > **★ The context floor was the one unset value that was cheap, and it is now
 > closed** *(D105)*. Every other row here needs the system to run before it can be
@@ -5862,10 +5961,13 @@ process-code repo (§9.1), reads it from there.)*
 > wrapper ~500 · git status ~300 · memory index ~150 — is per-installation, not a
 > property of the design.
 >
-> **One assumption inside it is still UNVERIFIED and is flagged in D105 itself:**
-> that the schema-carrying dispatch path draws the seat. It is in-session, so it
-> should — **but that is the identical assumption class that produced D104's
-> defect. Measure it before any contract depends on it.**
+> ~~**One assumption inside it is still UNVERIFIED and is flagged in D105 itself:**
+> that the schema-carrying dispatch path draws the seat.~~ **VERIFIED 2026-09-08**
+> *(D116)*: the schema-carrying path draws the seat — rows D, P, Q and R of
+> `research/METER-TEST-2026-09-08.md` — **with a trap D105 could not have seen:**
+> the schema is honoured only when the contract's `tools:` line carries
+> `StructuredOutput`; without it the spawn succeeds with a null
+> `structured_output`. Measured before any contract depends on it, as instructed.
 
 > **★ The dwell values are not like the others, and this is the one that should
 > worry you.** §8.6 derives expected dwell from the stage timings the event log
