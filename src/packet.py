@@ -64,6 +64,21 @@ def section(body, name):
     return (rest[:end.start()] if end else rest).strip().splitlines()
 
 
+def criteria(body):
+    """The spec's acceptance criteria, verbatim and with their review paths.
+
+    One extractor for the grader and the reviewer, because they had two and the
+    reviewer's — an `AC\\d+ \\[` line anchor — missed a spec whose criteria are
+    bold (`**AC1 [ui] — ...**`). It reported "none found in the spec" and the
+    reviewer returned no blocking finding on a review of nothing
+    (`L-reviewer-0002`, 2026-09-08). A criterion the packet cannot find is
+    undetermined, and undetermined is never clean: refuse."""
+    return (section(body, "Acceptance")
+            or [l for l in body.splitlines() if re.match(r"\s*\**AC\d+ \[", l)]
+            or die("no acceptance criteria in the spec — a grade or review of "
+                   "nothing is not a pass"))
+
+
 class Ctx:
     def __init__(self, a):
         self.a = a
@@ -235,14 +250,14 @@ def p_builder(c):
 def p_grader(c):
     spec, card, v = c.spec_file(), c.card_file(), verify_script(c)
     body = spec.read_text()
-    crit = section(body, "Acceptance") or [l for l in body.splitlines() if re.match(r"\s*AC\d+ \[", l)]
+    crit = criteria(body)
     rows = [l for l in card.read_text().splitlines() if AC_ROW.match(l)]
     vline = next((l for l in card.read_text().splitlines() if l.startswith("verify ")), "verify: not reported")
     ver = subprocess.run(["shasum", "-a", "256", str(v)], capture_output=True, text=True).stdout.split()[0][:16] \
         if v else "no script"
     return [
         "1. The acceptance criteria, verbatim from the spec, typed, each with its evidence obligation:",
-        *(crit or ["   none found in the spec — grade nothing and say so"]),
+        *crit,
         "2. The output card's per-criterion rows. These are claims to test, not facts:",
         *([f"   {r}" for r in rows] or ["   none"]),
         "3. Evidence-type validator: not installed; no row is pre-failed on its account.",
@@ -256,14 +271,7 @@ def p_grader(c):
 def p_reviewer(c):
     spec = c.spec_file()
     body = spec.read_text()
-    start = next((i for i, l in enumerate(body.splitlines()) if re.match(r"\s*AC\d+ \[", l)), None)
-    lines = body.splitlines()
-    crit = []
-    if start is not None:
-        for l in lines[start:]:
-            if re.match(r"^#+ ", l):
-                break
-            crit.append(l)
+    crit = criteria(body)
     bd = c.last("build-done") or {}
     where = c.a.url or f"the worktree at ready_sha {bd.get('ready_sha', '?')}: `{c.worktree()}`"
     return [
@@ -271,7 +279,7 @@ def p_reviewer(c):
         f"2. The done-condition: {DONE}.",
         "3. Every criterion the spec enumerates, verbatim, with its `review_path` "
         "(log in as / go to / do / worked if / failed if):",
-        *(crit or ["   none found in the spec"]),
+        *crit,
         f"4. Structural pre-pass, ground truth: the spec's verify command reported exit "
         f"{bd.get('verify_exit', '?')}.",
         "5. Metrics you may cite: none supplied.",

@@ -218,4 +218,41 @@ ev("builder", "build-done", "L-spec-0002")              # no card=, deliberately
 t = build("builder", worktree=str(REPO), repo=str(REPO))
 assert "another builder's card" not in t, "a cardless build-done is skipped, not crashed on"
 
+# The criteria the grader and the reviewer are handed. `L-reviewer-0002` reviewed
+# `L-spec-0004` against "none found in the spec" and returned no blocking finding:
+# the reviewer's own extractor anchored on an `AC1 [` line and the real spec's
+# criteria are bold (`**AC1 [ui] — ...**`). Both roles now read the same
+# extractor, and a spec it cannot read refuses instead of reporting none.
+BOLD = TMP / "content" / "L-spec-0011.md"
+BOLD.write_text("""# L-spec-0011
+## 8. Verification
+```
+true
+```
+## Acceptance criteria
+
+**AC1 [ui] - every project gets a line.**
+    worked if   a spend line renders
+    failed if   none does
+""")
+ev("spec-writer", "spec-written", "L-spec-0011", path=str(BOLD), footprint=["src/fold.py"])
+ev("builder", "build-done", "L-spec-0011", card=str(CARD), ready_sha="deadbee", verify_exit=0)
+for role in ("grader", "reviewer"):
+    t = build(role, "L-spec-0011", worktree=str(REPO))
+    assert "AC1 [ui]" in t, f"the {role} packet dropped a bold criterion"
+    assert "none found in the spec" not in t, f"the {role} packet reported none over a spec that has one"
+
+NONE = TMP / "content" / "L-spec-0012.md"
+NONE.write_text("# L-spec-0012\n## 1. Goal\nA spec with no criteria at all.\n")
+ev("spec-writer", "spec-written", "L-spec-0012", path=str(NONE), footprint=["src/fold.py"])
+ev("builder", "build-done", "L-spec-0012", card=str(CARD), ready_sha="deadbee", verify_exit=0)
+for role in ("grader", "reviewer"):
+    N += 1
+    try:
+        build(role, "L-spec-0012", worktree=str(REPO))
+    except SystemExit as e:
+        assert "no acceptance criteria" in str(e.code), e.code
+    else:
+        raise AssertionError(f"{role} built a packet over a spec with no criteria")
+
 print(f"packet: {N} packets built, six Blindness lists enforced")
