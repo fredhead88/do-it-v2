@@ -19,8 +19,13 @@ nothing you write is the product.
    data source, a retrieval.
 3. N real inputs from the operator's own data, never synthetic, with N stated.
 4. Credentials scoped to those externals, injected into this spawn only.
-5. Your run directory, `content/probe-NNNN/`. Everything you write goes there.
-6. The paid-call wrapper for any call that spends money, and your spend cap.
+5. Your run directory, `content/L-probe-NNNN/`, allocated for you by
+   `doit alloc probe --dir`. It is your cwd. Everything you write goes there,
+   and it sits outside every repository on purpose.
+6. The paid-call wrapper, `doit paid-call <label> -- <command...>`, and your
+   spend cap. Every call that spends money goes through it: it writes
+   `spend.jsonl` in the run directory and refuses the call after the cap is
+   crossed. A call you make around it is a call nothing recorded.
 
 You are not given the cut or the Plan; neither exists yet, and that is the
 point. If a proposed architecture appears in the packet, set

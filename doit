@@ -7,11 +7,13 @@ case "${1:-board}" in
   gate)    shift; exec python3 "$SRC/merge_gate.py" "$@" ;;
   dispatch) shift; exec python3 "$SRC/dispatch.py" "$@" ;;
   packet)  shift; exec python3 "$SRC/packet.py" "$@" ;;
+  vet-dep) shift; exec node "$HERE/scripts/vet-dep.mjs" "$@" ;;
+  paid-call) shift; exec python3 "$SRC/paid_call.py" "$@" ;;
   tick)    exec python3 "$SRC/tick.py" ;;
   up)      shift; exec python3 "$SRC/up.py" "$@" ;;
   think)   shift; exec python3 "$SRC/think.py" "$@" ;;
   backup)  shift; exec bash "$SRC/backup.sh" "$@" ;;
-  test)    cd "$SRC" && python3 test_fold.py && python3 test_merge_gate.py && python3 test_dispatch.py && python3 test_packet.py && python3 test_tick.py && python3 test_up.py && exec python3 test_think.py ;;
+  test)    cd "$SRC" && python3 test_fold.py && python3 test_merge_gate.py && python3 test_dispatch.py && python3 test_packet.py && python3 test_tick.py && python3 test_up.py && python3 test_think.py && python3 test_paid_call.py && exec node ../src/test_vet_dep.mjs ;;
   help|-h|--help) cat <<'USAGE'
 doit — a ledger that derives state, and the guards that read it
 
@@ -21,12 +23,14 @@ doit — a ledger that derives state, and the guards that read it
   doit append <type> <subject> [k=v ...]  append one event, then re-fold
   doit gate <branch> [main] [--spec ID]   merge guard. exit 1 = DO NOT MERGE
   doit packet <role> <subject> [...]      build that role's packet from the ledger (-h for flags)
+  doit vet-dep [--pypi] <pkg>... | --hook  the install gate, and the scout's ground truth (§6.7b)
+  doit paid-call <label> -- <cmd...>      run a call that spends, log it, enforce the cap (§10.4)
   doit dispatch <role> <subject> [...]    spawn one contract, check it, append its events (-h for flags)
   doit tick                               fold; spawn the Executor only if the lane is actionable (D117)
   doit up                                 start the Planner pane; print (never install) the tick's cron line
   doit think <topic> | --land F… | --discard <topic>
                                           open a Thinker session, or land its charters (§3.3)
-  doit alloc <kind>                       claim the next L-<kind>-NNNN under content and print its path (§2.8)
+  doit alloc <kind> [--dir]               claim the next L-<kind>-NNNN under content and print its path (§2.8)
   doit backup push | drill                replicate the ledger / prove it restores
   doit test                               run every check
   doit help
@@ -36,6 +40,8 @@ Environment
   DOIT_PROJECT      scope the board to one project
   DOIT_LEDGER_FILE  which actor file you write as     (the filename IS the actor)
   DOIT_K            owed ACs a charter may close over (default 0 — deny)
+  DOIT_INSTALL_OVERRIDE  a reason: vet-dep allows the blocked install and records it
+  DOIT_SPEND_CAP_USD     paid-call refuses past this; there is no uncapped mode
   DOIT_RESTIC_REPO  backup destination
   DOIT_TICK_MIN     the cron interval; a tick older than 2× is STALE (default 5)
 

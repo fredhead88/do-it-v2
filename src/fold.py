@@ -392,6 +392,15 @@ def render(events, specs, charters, ignored, by_subject):
     # health signal, not a queue item, and §8.3's ten sections are positional.
     if (ob := over_budget(events)):
         health.append(f"budget-exceeded: {len(ob)} spawn(s) over cap (last: {ob[-1]})")
+    # ★ §6.7b/§10.2: the override is explicit and writes an event, and THE OVERRIDE
+    # COUNT IS ITSELF THE METRIC that says the 7-day window is set wrong. A count
+    # nobody renders is not a metric, so it lands here rather than in the script.
+    if (ov := [e for e in events if e.get("type") == "install-override"]):
+        health.append(f"dependency install overrides: {len(ov)} "
+                      f"(last: {ov[-1].get('subject','?')}) — §6.7b: the count says the cooldown is set wrong")
+    if (iw := [e for e in events if e.get("type") == "install-warned"]):
+        health.append(f"installs allowed on an inconclusive check: {len(iw)} "
+                      f"(last: {iw[-1].get('subject','?')}) — §10.2: open, but recorded")
     # D117: the Executor is a tick. A last tick older than twice the interval is
     # the alarm — the same shape as a wake_at passed with no verdict.
     # ponytail: a tick event has no project, so a project-filtered board reads "never".
@@ -459,6 +468,11 @@ if __name__ == "__main__":
         # `claude --version` at import and the board must not pay for that.
         import dispatch
         (ROOT / "content").mkdir(parents=True, exist_ok=True)
+        if "--dir" in sys.argv:                      # probe's run directory (§4.6·10)
+            p = dispatch.alloc(ROOT / "content", f"L-{sys.argv[2]}-", "")
+            p.unlink(), p.mkdir()
+            print(p)
+            sys.exit(0)
         print(dispatch.alloc(ROOT / "content", f"L-{sys.argv[2]}-", ".md"))
         sys.exit(0)
     if cmd == "append":

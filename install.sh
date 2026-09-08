@@ -13,6 +13,9 @@ if [ "$(printf '%s\n%s\n' "$need" "$have" | sort -V | head -1)" != "$need" ]; th
   exit 1
 fi
 command -v python3 >/dev/null || { echo "ERROR: python3 not found." >&2; exit 1; }
+# The install gate (§6.7b) is a PreToolUse hook that runs scripts/vet-dep.mjs.
+# Without node it does not run, and a gate that is not running is not a gate.
+command -v node >/dev/null || { echo "ERROR: node not found — the install gate (.claude/settings.json -> scripts/vet-dep.mjs) cannot run without it." >&2; exit 1; }
 echo "git:     $have"
 
 mkdir -p "$ROOT/events" "$ROOT/content"
@@ -20,7 +23,7 @@ echo "ledger:  $ROOT"
 
 # The checks run BEFORE anything is put on PATH. An install that ships a red
 # suite is how a guard becomes a guard that is not running.
-( cd "$HERE/src" && python3 test_fold.py && python3 test_merge_gate.py && python3 test_dispatch.py && python3 test_tick.py )
+( cd "$HERE/src" && python3 test_fold.py && python3 test_merge_gate.py && python3 test_dispatch.py && python3 test_tick.py && python3 test_paid_call.py && node test_vet_dep.mjs )
 
 BIN="${DOIT_BIN:-$HOME/.local/bin}"
 mkdir -p "$BIN"

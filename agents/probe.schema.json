@@ -17,7 +17,7 @@
     "path": {
       "type": "string",
       "maxLength": 300,
-      "description": "content/probe-NNNN/"
+      "description": "content/L-probe-NNNN/"
     },
     "summary": {
       "type": "string",
