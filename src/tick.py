@@ -11,7 +11,7 @@ whose terminal events the next tick sees.
 """
 import fcntl, json, os, pathlib, sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import dispatch, fold  # noqa: E402
+import dispatch, fold, tree_cleanup  # noqa: E402
 
 # Waiting for the Executor's next durable action. `building` is in flight, not waiting.
 ACTIONABLE = {"written", "graded", "reviewing", "shipped"}
@@ -56,11 +56,23 @@ def in_flight(ev):
     return busy
 
 
-def lane(specs, charters, busy=frozenset()):
+def lane(specs, charters, busy=frozenset(), reaped=frozenset()):
+    """A charter that is CLOSED and not yet reaped is still the Executor's.
+
+    §4.11's reaper refuses any charter that is not `L2-complete` or `retracted`,
+    and this lane admitted only `L1-complete` — so the moment a charter became
+    reapable it left the lane, and `doit reap` was unreachable by any tick. Found
+    closing L-charter-0002 (2026-09-08): the charter-reviewer returned complete,
+    the fold derived L2 in the same fold, and the tick went idle with two
+    worktrees standing. L-charter-0001 had been `retracted` since August with its
+    worktree still on disk for the same reason — the sixth defect invisible to a
+    passing suite, because nothing tested the lane past L1."""
     return sorted([f"{s['id']} · {s['state']}" for s in specs.values()
                    if s["state"] in ACTIONABLE and s["id"] not in busy]
                   + [f"{c['id']} · {c['state']}" for c in charters.values()
-                     if c["state"] == "L1-complete" and c["id"] not in busy])
+                     if c["id"] not in busy
+                     and (c["state"] == "L1-complete"
+                          or (c["state"] in tree_cleanup.CLOSED and c["id"] not in reaped))])
 
 
 def main():
@@ -74,7 +86,8 @@ def main():
     ev = fold.read_events()
     specs, charters, ignored, by_subject = fold.fold(ev)
     board = fold.render(ev, specs, charters, ignored, by_subject)
-    todo, have = lane(specs, charters, in_flight(ev)), (dispatch.AGENTS / "executor.md").exists()
+    reaped = {e.get("subject") for e in ev if e["type"] == "tree-reaped"}
+    todo, have = lane(specs, charters, in_flight(ev), reaped), (dispatch.AGENTS / "executor.md").exists()
     dispatch.emit(TICK, {}, "tick", lane=len(todo), spawned=bool(todo and have))
     if not todo:
         print("tick: idle")

@@ -82,8 +82,29 @@ tick.main()
 assert ticks()[-1]["lane"] == 1, "a decision after the escalation returns it to the lane"
 esc.unlink()
 
+# A closed charter stays on the lane until it is reaped. §4.11's reaper refuses
+# anything not L2-complete or retracted, and the lane used to admit only
+# L1-complete: the reap was unreachable by any tick, and L-charter-0001 sat
+# retracted with its worktree standing (2026-09-08).
+ch = TMP / "events" / "L-operator-tick.jsonl"   # retracted is the operator's (fold.EMITS)
+ch.write_text("".join(json.dumps(e) + "\n" for e in [
+    {"v": 1, "ts": "2026-09-08T09:00:00+00:00", "type": "charter-filed", "subject": "L-charter-0003"},
+    {"v": 1, "ts": "2026-09-08T10:00:00+00:00", "type": "charter-retracted", "subject": "L-charter-0003",
+     "why": "w"}]))
+specs, charters, _, _ = fold.fold(fold.read_events())
+assert charters["L-charter-0003"]["state"] == "retracted"
+assert "L-charter-0003 · retracted" in tick.lane(specs, charters), \
+    "a charter that is reapable and unreaped is the Executor's, or doit reap never runs"
+ch.write_text(ch.read_text() + json.dumps({"v": 1, "ts": "2026-09-08T11:00:00+00:00", "type": "tree-reaped",
+                                           "subject": "L-charter-0003", "reaped": [], "retained": []}) + "\n")
+specs, charters, _, _ = fold.fold(fold.read_events())
+reaped = {e.get("subject") for e in fold.read_events() if e["type"] == "tree-reaped"}
+assert "L-charter-0003 · retracted" not in tick.lane(specs, charters, reaped=reaped), \
+    "once reaped it leaves the lane for good, or every tick pays to reap it again"
+ch.unlink()
+
 held = open(TMP / "tick.lock", "w")
 fcntl.flock(held, fcntl.LOCK_EX)
 before = len(ticks())
 assert tick.main() == 0 and len(ticks()) == before, "flock: a second tick is dropped, not queued"
-print("tick: 14 checks pass")
+print("tick: 16 checks pass")
