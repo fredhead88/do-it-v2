@@ -296,7 +296,15 @@ def spend_rows(events):
     "1.5" (see append: a bare value is a string unless unambiguously JSON), and a
     replayed spawn drew real money.
     """
-    rows = {p: [0.0, 0, 0] for p in {e["project"] for e in events if e.get("project")}}
+    seeds = {e["project"] for e in events if e.get("project")}
+    # ★ R3: under §9.1 the filter value itself seeds a row, so a project with NO
+    # event at all reads `$0.00 · 0 spawns` rather than as silence — zero-out-of-
+    # zero-spawns is the measurement R3 exists for. Unfiltered there is no name
+    # asserted from outside the ledger, so nothing is seeded and the row set stays
+    # exactly what the ledger names (§8.2: a registry would be a second truth).
+    # The seeded label is UNVOUCHED environment (DOIT_PROJECT) and passes through
+    # the same whitespace collapse in row() below as any ledger label.
+    rows = {p: [0.0, 0, 0] for p in ((seeds | {PROJECT}) if PROJECT else seeds)}
     for e in events:
         if e.get("type") not in ("spawn-done", "spawn-failed"):
             continue
@@ -428,7 +436,11 @@ def render(events, specs, charters, ignored, by_subject):
     dwell = dwell_days(by_subject)
     flag = lambda s: "  ⚠ WEDGE" if wedged(s, dwell) else ""
 
-    scope = f" · project={PROJECT}" if PROJECT else ""
+    # ★ Same collapse as spend_rows' labels, and for the same reason: DOIT_PROJECT
+    # is operator environment with no event vouching for it, and a newline in it
+    # forged an ELEVENTH section here — §8.3's ten are positional. Pre-existing on
+    # this line; the spend row now carries the same value, so both are collapsed.
+    scope = f" · project={' '.join(str(PROJECT).split())}" if PROJECT else ""
     L = [f"# board · {NOW.isoformat(timespec='seconds')} · fold @ {len(events)}{scope}", ""]
 
     def block(title, rows, note=""):
