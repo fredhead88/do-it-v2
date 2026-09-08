@@ -381,6 +381,8 @@ def parse(rest):
 
 def main_(argv):
     branch = argv[0]
+    if branch.startswith("-"):      # `doit gate --help` once appended a rework event with subject "--help"
+        sys.exit(f"merge-gate: {branch!r} is not a branch\n{__doc__}")
     main, spec, grant = parse(list(argv[1:]))
     # NOT setdefault: an inherited DOIT_LEDGER_FILE routed the executor's stop
     # into another seat's file, and fold takes the actor from the filename — the

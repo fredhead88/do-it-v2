@@ -72,14 +72,17 @@ is waiting for you. `doit events <subject>` is how you check each row.
 - **newest is a `review`**: a `must-fix` standing → **rework** as above (the
   reverify lines are the packet's centre); the rework re-enters at
   `build-done`. Nothing standing and the verdict confirmed → **merge**:
-  `doit gate <branch> <main> --spec <spec>`; exit 0 →
+  `doit gate <branch> <main> --spec <spec> --writes <every path in the
+  spec-written event's footprint>` — the grant is the footprint, a durable
+  field, and a spec file without a `Writes:` line has no other; exit 0 →
   `git -C "$REPO" merge --no-ff <branch> -m "merge(<spec>): <goal line>"` →
   `doit append shipped <spec> sha=<merge sha> branch=<branch>` → if the
   charter names a deploy command: run it, verify the sha is live,
   `doit append deploy-landed <spec> sha=…`; not verified →
   `git -C "$REPO" revert --no-edit -m 1 <merge sha>` then `escalation-blocking`
-  (rollback first, §5.8). Gate exit 1 → rework with the gate's `removed[]` /
-  `reverted[]` in the packet.
+  (rollback first, §5.8). Gate exit 1 with `removed[]` / `reverted[]` →
+  rework with them in the packet; "could not determine" → `escalation-blocking`
+  quoting it — undetermined is never clean, and it is never yours to force.
 
 Anything not here is not yours. A `written` spec whose charter was retracted
 derives to `dropped` — the fold does that, not you.

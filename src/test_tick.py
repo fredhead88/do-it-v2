@@ -22,7 +22,7 @@ seen, out = {}, {"idle": False, "actions": [{"action": "dispatch-grader", "subje
 
 
 def fake(cmd, prompt, cwd, timeout):
-    seen.update(cmd=cmd, prompt=prompt, ledger=os.environ.get("DOIT_LEDGER_FILE"))
+    seen.update(cmd=cmd, prompt=prompt, ledger=os.environ.get("DOIT_LEDGER_FILE"), gate=os.environ.get("DOIT_GATE_LEDGER_FILE"))
     return argparse.Namespace(stdout=json.dumps({"is_error": False, "total_cost_usd": 0.5, "num_turns": 3,
                                                  "usage": {"input_tokens": 9, "output_tokens": 1},
                                                  "structured_output": seen.get("out")}))
@@ -33,7 +33,7 @@ seen["out"] = out
 assert tick.main() == 0 and ticks()[-1]["spawned"] is True
 assert "L-spec-0001 · written" in seen["prompt"] and "--agent" in seen["cmd"] and "executor" in seen["cmd"]
 assert "Skill(subagent-driven-development)" in seen["cmd"][seen["cmd"].index("--disallowedTools") + 1], "D119: RETIRE denied by name"
-assert seen["ledger"] == "L-executor-0002.jsonl", "the Executor's own appends land in its spawn file (D90)"
+assert seen["ledger"] == seen["gate"] == "L-executor-0002.jsonl", "the Executor's appends and the gate's verdict land in its spawn file (D90)"
 assert "--json-schema" in seen["cmd"] and "StructuredOutput" not in seen["cmd"][seen["cmd"].index("--allowedTools") + 1]
 done = json.loads((TMP / "events" / "L-executor-0002.jsonl").read_text().splitlines()[-1])
 assert done["type"] == "spawn-done" and done["cost_usd"] == 0.5 and done["spawn"] == "L-executor-0002"

@@ -305,6 +305,7 @@ except mg.Undetermined:
 check("a stray argument is refused", _exit(lambda: mg.parse(["main", "src/*"])))
 check("--writes with no value is refused", _exit(lambda: mg.parse(["main", "--writes"])))
 check("an unknown flag is refused", _exit(lambda: mg.parse(["main", "-x"])))
+check("★ a flag where the branch belongs is refused before any event (`doit gate --help`)", _exit(lambda: mg.main_(["--help"])))
 
 # ------------------------------------------------- D115: round 3's findings
 # ★ The lesson of --writes: three arg checks all asserted FAILURE cases, so a

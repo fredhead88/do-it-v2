@@ -77,6 +77,7 @@ def main():
         return 1
     ledger = dispatch.alloc(fold.EVENTS, "L-executor-", ".jsonl")
     os.environ["DOIT_LEDGER_FILE"] = ledger.name          # its own appends land as itself (D90)
+    os.environ["DOIT_GATE_LEDGER_FILE"] = ledger.name     # and so does the gate's verdict (its pane-era default was L-executor-0001)
     os.environ["PATH"] = f"{dispatch.HERE.parent}:{os.environ.get('PATH', '')}"   # `doit` resolves
     fm, base = dispatch.frontmatter("executor"), {"spawn": ledger.stem}
     schema = dispatch.AGENTS / "executor.schema.json"
