@@ -188,4 +188,12 @@ assert "corrections applied: 1" in fold.render(*((lambda e: (e,) + fold.fold(e))
     "the builder's rejected attempt is already on the unauthorized line"
 
 shutil.rmtree(TMP)
+# D117: liveness is a fold query. Fresh tick: fine. Old tick: the alarm. No tick: says so.
+mins = lambda m: (T - timedelta(minutes=m)).isoformat(timespec="seconds")
+fresh = ledger(**{"L-tick-local.jsonl": [{"ts": mins(1), "type": "tick", "lane": 0}]})
+assert "last tick: 1m ago" in fold.render(*fresh) and "STALE" not in fold.render(*fresh)
+stale = ledger(**{"L-tick-local.jsonl": [{"ts": mins(30), "type": "tick", "lane": 0}]})
+assert "TICK STALE" in fold.render(*stale)
+assert "last tick: never" in fold.render(*ledger(**{"L-operator-local.jsonl": []}))
+
 print("fold: 33 checks pass")

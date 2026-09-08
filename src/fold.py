@@ -240,6 +240,15 @@ def render(events, specs, charters, ignored, by_subject):
     if ignored:
         health.append(f"unauthorized events recorded and ignored: {len(ignored)} "
                       f"(last: {ignored[-1]['_src']})")
+    # D117: the Executor is a tick. A last tick older than twice the interval is
+    # the alarm — the same shape as a wake_at passed with no verdict.
+    # ponytail: a tick event has no project, so a project-filtered board reads "never".
+    tick = max((ts(e["ts"]) for e in events if e.get("type") == "tick"), default=None)
+    interval = int(os.environ.get("DOIT_TICK_MIN", "5"))
+    ago = (NOW - tick).total_seconds() / 60 if tick else None
+    health.append("last tick: never — the Executor has not run (D117)" if not tick else
+                  f"last tick: {ago:.0f}m ago" + (f"  ⚠ TICK STALE — over 2×{interval}m; is the cron line installed?"
+                                                  if ago > 2 * interval else ""))
     L += ["## HEALTH"] + ["  " + h for h in health] + [""]
 
     BOARD.parent.mkdir(parents=True, exist_ok=True)

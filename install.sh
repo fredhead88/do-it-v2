@@ -20,7 +20,7 @@ echo "ledger:  $ROOT"
 
 # The checks run BEFORE anything is put on PATH. An install that ships a red
 # suite is how a guard becomes a guard that is not running.
-( cd "$HERE/src" && python3 test_fold.py && python3 test_merge_gate.py )
+( cd "$HERE/src" && python3 test_fold.py && python3 test_merge_gate.py && python3 test_dispatch.py && python3 test_tick.py )
 
 BIN="${DOIT_BIN:-$HOME/.local/bin}"
 mkdir -p "$BIN"
