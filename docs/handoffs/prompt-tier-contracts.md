@@ -425,8 +425,12 @@ charter that relies on them.
   criteria driven, `n_blocking: 0`, 19 turns, $1.07, session
   `33da77e7-fff2-4cee-9a6e-f7a27e308925` — and its question about the round label
   was answered with an operator `decision`. A real Executor tick then reached
-  `sweep-fixpoint` (K=0 owed, no open briefs). **PARTIAL: what remains is the
-  last two ticks — `charter-reviewer` and `doit reap`** — i.e. `L-charter-0002`
+  `sweep-fixpoint` (K=0 owed, no open briefs). **The `charter-reviewer` then
+  ran for real and returned `verdict: not-complete`** (opus, 22 turns, $1.27,
+  session `3db40d5a-e8aa-40e9-b480-dca71ec51425`, `contamination: false`) — the
+  charter's done-for-the-whole is not observably true, so the close is correctly
+  blocked and `doit reap` must not run. **PARTIAL: what remains is reading that
+  verdict's findings, answering them with a spec or a retraction, and the reap** — i.e. `L-charter-0002`
   from `L1-complete` to L2-complete. Restart `~/.do-it-scratch/first-charter/tickloop.sh 6`
   and it continues. Verified: `./doit test` green (fold 70 · packet 30, the four
   new checks), `doit states` → `L-spec-0004 accepted`, `L-charter-0002
