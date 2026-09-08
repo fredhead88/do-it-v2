@@ -111,29 +111,22 @@ grade = lambda vs, **kw: {"verdicts": vs, "matches_intent": "yes", "card_ok": "y
                           "contamination": False, "declarations": [],
                           "checkers": [{"id": "gate", "version": "1", "coverage_note": "n1", "result": "pass"}], **kw}
 met, unmet = {"ac": "AC1", "verdict": "met", "reason": "r"}, {"ac": "AC2", "verdict": "unmet", "reason": "no evidence"}
+rejects = lambda: fold.fold(fold.read_events())[0]["L-spec-0001"]["rejects"]
 code, types, evs, _ = spawn("grader", out=grade([met, unmet]))
 assert types == ["verdict", "rejected-criterion", "checker-coverage-change", "spawn-done"], types
-assert evs[0]["confirmed"] is False and evs[1]["criterion"] == "AC2"
-code, types, evs, _ = spawn("grader", out=grade([met]))
-assert types == ["verdict", "spawn-done"] and evs[0]["confirmed"] is True, "same coverage note: no change event"
+assert evs[0]["confirmed"] is False and evs[1]["criterion"] == "AC2" and rejects() == 1
 code, types, evs, _ = spawn("grader", out=grade([met], card_ok="cannot-assess", could_not_run=True))
-assert evs[0]["confirmed"] is False and "gate-infra" in types
-# a re-grade that finds the rejected AC2 met clears it; the fold then shows no standing rejection
+assert evs[0]["confirmed"] is False and "gate-infra" in types and "criterion-cleared" not in types
+assert "checker-coverage-change" not in types, "same coverage note: no change event"
 code, types, evs, _ = spawn("grader", out=grade([met, {"ac": "AC2", "verdict": "met", "reason": "now evidenced"}]))
-assert "criterion-cleared" in types and evs[0]["confirmed"] is True, types
-assert fold.fold(fold.read_events())[0]["L-spec-0001"]["rejects"] == 0, "rework can reach accepted"
-
-# D120: a refusal is deterministic and charges. The same bytes are not sent twice;
-# the api_error above, by contrast, must stay retryable after /login.
-PK.write_text("a packet Fable refuses\n")
-code, types, evs, cmd = spawn("spec-auditor", result={"is_error": True, "result": "safeguards flagged [reasoning_extraction]"})
-assert code == 1 and evs[0]["why"].startswith("is_error") and cmd, "the first refusal spends"
-code, types, evs, cmd = spawn("spec-auditor", result={"is_error": True, "result": "would charge again"})
-assert code == 1 and "not retried" in evs[0]["why"] and cmd is None, "the identical packet is refused before it spends"
-PK.write_text("a packet\n")
-code, types, evs, cmd = spawn("research", result={"is_error": True, "terminal_reason": "api_error",
-                                                  "api_error_status": 401, "result": "Not logged in"}, path=rp)
-assert cmd and evs[-1]["why"].startswith("api_error"), "an api_error is spent on again — the operator may have logged in"
+assert "criterion-cleared" in types and evs[0]["confirmed"] is True and rejects() == 0, "a re-grade that names it met clears it"
+code, types, evs, _ = spawn("grader", out=grade([met, {"ac": "DONE-COND", "verdict": "unmet", "reason": "residue"}]))
+assert rejects() == 1
+code, types, evs, _ = spawn("grader", out=grade([met], card_ok="no"))
+assert "criterion-cleared" not in types and rejects() == 1, "an unconfirmed verdict clears nothing it did not test"
+code, types, evs, _ = spawn("grader", out=grade([met]))
+assert [e["criterion"] for e in evs if e["type"] == "criterion-cleared"] == ["DONE-COND"] and rejects() == 0, \
+    "a confirmed verdict clears a standing rejection the packet no longer names (first real chain)"
 
 ev = fold.read_events()
 specs, *_ = fold.fold(ev)

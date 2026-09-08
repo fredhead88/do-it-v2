@@ -162,8 +162,13 @@ def events_for(role, out, a, base):
         import fold
         specs, *_ = fold.fold(fold.read_events())
         standing = fold.standing_rejects(specs.get(a.subject, {"evs": []})["evs"])
-        ev += [("criterion-cleared", dict(criterion=v["ac"], evidence=v["reason"]))
-               for v in vs if v["verdict"] == "met" and v["ac"] in standing]
+        met = {v["ac"]: v["reason"] for v in vs if v["verdict"] == "met"}
+        confirmed = ev[0][1]["confirmed"]
+        # A confirmed verdict found everything met, the done-condition included — a
+        # rejection the packet no longer names (round one's DONE-COND) cannot outlive
+        # it, or the Executor reworks forever. Seen on the first real chain.
+        ev += [("criterion-cleared", dict(criterion=c, evidence=met.get(c) or f"confirmed verdict {base['spawn']}"))
+               for c in sorted(standing) if c in met or confirmed]
         ev += coverage_changes(out["checkers"])
     elif role == "reviewer":
         ev.append(("review", dict(depth=out["depth"], round=out["round"], n_blocking=len(out["blocking"]))))
