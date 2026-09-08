@@ -199,18 +199,34 @@ PLAN = TMP / "content" / "L-plan-0001.md"
 PLAN.write_text("# plan\nCut this way because one wave keeps the footprint from colliding with itself.\n")
 ev("planner", "plan-written", "L-charter-0001", path=str(PLAN))
 ev("executor", "sweep-fixpoint", "L-charter-0001")
+# A spec whose `charter` field is the charter's PATH — which is what the packet
+# hands the role, so it is what the role writes back — belongs to the charter all
+# the same. Unnormalised it belonged to none, and the real charter-reviewer was
+# handed one card for a charter that had shipped two (L-charter-reviewer-0002).
+CARD3 = TMP / "content" / "L-card-0003.md"
+CARD3.write_text("# L-card-0003 · DONE\n")
+ev("spec-writer", "spec-written", "L-spec-0003", spec="L-spec-0003", path=str(SIB),
+   footprint=["src/fold.py"], requirement_ids=["R3"], charter=str(CHARTER))
+ev("builder", "build-done", "L-spec-0003", status="DONE", card=str(CARD3), ready_sha="3333333")
 t = build("charter-reviewer", subject="L-charter-0001", charter=str(CHARTER))
 assert str(CHARTER) in t and str(CARD) in t and str(SPEC) in t and str(SIB) in t
+assert str(CARD3) in t, "a path-named spec's card is the charter's card too"
 assert "fixpoint result: reached 20" in t and "never money" in t
 cc = packet.Ctx(packet.argparse.Namespace(subject="L-charter-0001", charter=str(CHARTER), project="t"))
 absent(t, packet.strip(cc, "charter-reviewer"))
 assert "keeps the footprint from colliding" not in t, "the Plan's rationale is stripped"
 refuses("charter-reviewer", "Cut this way because one wave keeps the footprint from colliding with itself.",
         subject="L-charter-0001", charter=str(CHARTER))
+# ...and the same field is how every packet FINDS the charter on disk. Unnormalised
+# it matched no `charter-filed` subject, `charter_file()` returned None, and the
+# builder's item 2 — the charter's binding constraints, verbatim — read "none".
+t = build("builder", subject="L-spec-0003", worktree=str(REPO), repo=str(REPO))
+assert "Currency is USD" in t, "a path-named charter is still found on disk"
 
 # ── the file itself ──────────────────────────────────────────────────────────
 ps = {p.name for p in (TMP / "packets").glob("*.md")}
 assert ps == {"L-charter-0001-charter-reviewer-1.md", "L-spec-0001-builder-1.md",
+              "L-spec-0003-builder-1.md",
               "L-spec-0001-grader-1.md", "L-spec-0001-grader-2.md",
               "L-spec-0001-reviewer-1.md",
               "L-spec-0001-spec-auditor-1.md", "L-spec-0001-spec-writer-1.md",

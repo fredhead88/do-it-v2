@@ -233,6 +233,29 @@ assert ch[C]["state"] == "L1-complete" and len(ig) == 1, "a builder may not decl
 evs = ledger(**{**L1, "L-grader-02.jsonl": inscope})
 assert "1 in-scope brief(s) open" in fold.render(*evs), "CHARTER CLOSE names what holds it"
 
+# A `charter` field is sometimes a PATH — that is what the packet hands the role,
+# and the ledger is append-only, so both forms are permanent input to every fold.
+# Unnormalised, the spec belonged to NO charter: `mine` was empty, so `doit reap`
+# skipped its worktree and reported success, the charter-reviewer's packet named
+# one card for a charter that shipped two, and — the severe half — the L2
+# conjuncts are quantified over `mine`, so the charter closed without it.
+P = f"/Users/x/.do-it/content/{C}.md"
+pathish = {**done, "L-builder-01.jsonl": [{**built[0], "charter": P}] + built[1:]}
+_, sp, ch, _, _ = ledger(**pathish)
+assert sp[S]["charter"] == C, sp[S]["charter"]
+assert ch[C]["state"] == "L2-complete", "a path-form charter still closes on its own spec"
+# the negative, and it is the one that matters: an unaccepted spec named by path
+# must hold the close, exactly as an id-named one does.
+_, sp, ch, _, _ = ledger(**{k: v for k, v in pathish.items() if k != "L-reviewer-01.jsonl"})
+assert sp[S]["state"] == "shipped" and ch[C]["state"] == "open", \
+    "a path-named spec that is not accepted must block L2, not vanish from the charter"
+# and retraction reaches it too — D76's drop is the same comparison
+_, sp, _, _, _ = ledger(**{"L-builder-01.jsonl": [{**built[0], "charter": P}],
+                           "L-operator-01.jsonl": [{"ts": stamp(0), "type": "charter-retracted",
+                                                    "subject": C}]})
+assert sp[S]["state"] == "dropped", "a retracted charter drops its path-named specs too"
+assert fold.charter_id(None) is None and fold.charter_id(C) == C, "an id normalises to itself"
+
 # the board renders every section, keeps empty ones, and carries its own provenance
 evs = ledger(**done)                      # back to the L2 ledger the checks above left
 board = fold.render(*evs)
@@ -478,4 +501,4 @@ stale = ledger(**{"L-tick-local.jsonl": [{"ts": mins(30), "type": "tick", "lane"
 assert "TICK STALE" in fold.render(*stale)
 assert "last tick: never" in fold.render(*ledger(**{"L-operator-local.jsonl": []}))
 
-print("fold: 84 checks pass")
+print("fold: 89 checks pass")

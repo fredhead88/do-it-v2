@@ -128,7 +128,9 @@ class Ctx:
         return resolve(p) if p else None
 
     def charter_id(self):
-        return next((e.get("charter") for e in reversed(self.evs) if e.get("charter")), None)
+        # Normalised, because half the ledger's `charter` fields are a path: an
+        # unnormalised one matches no `charter-filed` subject and the file is lost.
+        return fold.charter_id(next((e.get("charter") for e in reversed(self.evs) if e.get("charter")), None))
 
 
 def verify_script(c):

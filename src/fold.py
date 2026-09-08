@@ -118,6 +118,19 @@ K = int(os.environ.get("DOIT_K", "0"))
 NOW = datetime.now(timezone.utc)
 
 
+def charter_id(v):
+    """The charter an event names, as an ID. Half the ledger's `charter` fields are
+    a PATH (`/…/content/L-charter-0002.md`) because that is what the packet hands
+    the role, and the ledger is append-only, so both forms are permanent input to
+    every future fold. Comparing the raw field to a charter id made L-spec-0005
+    belong to no charter at all: `doit reap` skipped its worktree and reported
+    `retained: []` — success — while the branch stood, and the charter-reviewer's
+    packet named one card for a charter that shipped two. Worse, the L2 conjuncts
+    are quantified over `mine`, so a charter could close over a spec it owns that
+    was never built. Found closing L-charter-0002 (2026-09-08)."""
+    return pathlib.PurePath(str(v)).name.removesuffix(".md") if v else v
+
+
 def ts(s):
     try:
         return datetime.fromisoformat(str(s).replace("Z", "+00:00"))
@@ -368,7 +381,7 @@ def spec_state(evs, retracted):
         # written to answer got answered another way. Terminal, and deliberately
         # NOT `accepted`: nothing here was graded, reviewed, or verified.
         return "closed-unbuilt"
-    charter = next((e.get("charter") for e in reversed(evs) if e.get("charter")), None)
+    charter = charter_id(next((e.get("charter") for e in reversed(evs) if e.get("charter")), None))
     if charter in retracted and "shipped" not in types:
         return "dropped"                                             # D76, terminal for alarms
     for state, marker in (("shipped", "shipped"), ("reviewing", "verdict"),
@@ -393,8 +406,8 @@ def fold(events):
         if sid.startswith("L-spec-"):
             specs[sid] = {"id": sid, "state": spec_state(evs, retracted), "evs": evs,
                           "rejects": len(standing_rejects(evs)),
-                          "charter": next((e.get("charter") for e in reversed(evs)
-                                           if e.get("charter")), None),
+                          "charter": charter_id(next((e.get("charter") for e in reversed(evs)
+                                                     if e.get("charter")), None)),
                           "age": age_days(evs[-1])}
         elif sid.startswith("L-charter-"):
             charters[sid] = {"id": sid, "evs": evs, "age": age_days(evs[-1])}
