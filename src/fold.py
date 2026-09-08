@@ -67,7 +67,13 @@ EMITS = {"verdict": {"grader"}, "review": {"reviewer"}, "shipped": {"executor"},
          # record of something destroyed. `deploy-started` and `deploy-failed` stay
          # open: reporting a failure is the safe direction (see rejected-criterion).
          "deploy-landed": {"executor", "operator"},
-         "tree-reaped": {"executor", "operator"}}
+         "tree-reaped": {"executor", "operator"},
+         # §3.12's fixpoint claim and the link that discharges one in-scope brief.
+         # Both are L2 conjuncts in all but name: a seat that may stamp
+         # `sweep-fixpoint` can close a charter over work it never swept, and a seat
+         # that may stamp `brief-answered` can discharge a brief no spec answers.
+         "sweep-fixpoint": {"executor", "operator"},
+         "brief-answered": {"executor", "operator"}}
 
 # §4.4's `May declare` line, one contract at a time — the fold authorizes (§4.6).
 # A declaration lands as an event TYPED BY ITS TERM (dispatch.events_for), so a
@@ -212,6 +218,22 @@ def overdue_questions(events):
     answered = {e.get("ref") for e in events if e.get("type") in ("decision", "unblocked")}
     return [e for e in events if e.get("type") == "question"
             and e["_src"] not in answered and deadline_passed(e.get("deadline"))]
+
+
+def open_briefs(events):
+    """§3.12: completion is a fixpoint, not a checklist. An **in-scope** brief — one
+    naming the charter `requirement` it serves, because §2.6 makes the sweep's
+    judgment a citation and no citable requirement means `adjacent`, which is the
+    Thinker's inbox and not this charter's — holds the sweep open until a spec
+    answers it. `brief-answered` names one by `ref`: the `file:line` the fold hands
+    out as `src`, the same handle a `decision` and a `correction` use.
+
+    Without this, `sweep-fixpoint` is a stamp. The Executor's own row read "briefs
+    open → nothing until specced", so an unanswered brief wedged the close silently
+    while nothing stopped the fixpoint being written over it (D7, §7.3)."""
+    answered = {e.get("ref") for e in events if e.get("type") == "brief-answered"}
+    return [e for e in events if e.get("type") == "brief" and e.get("requirement")
+            and e["_src"] not in answered]
 
 
 def open_escalations(events):
@@ -378,6 +400,7 @@ def fold(events):
         elif (mine and all(s["state"] in ("accepted", "shipped-owed-evidence", "dropped",
                                           "closed-unbuilt") for s in mine)
               and "sweep-fixpoint" in types and owed <= K
+              and not open_briefs(c["evs"])
               and charter_review(c["evs"]) == "charter-review-complete"):
             c["state"] = "L2-complete"
         elif "l1-complete" in types:
@@ -385,6 +408,7 @@ def fold(events):
         else:
             c["state"] = "open"
         c["owed"] = owed
+        c["briefs"] = len(open_briefs(c["evs"]))
         c["unbuilt"] = sum(1 for s in mine if s["state"] == "closed-unbuilt")
     return specs, charters, ignored, by_subject
 
@@ -436,6 +460,7 @@ def render(events, specs, charters, ignored, by_subject):
     # sections are fixed and the board answers "what needs you now", which a
     # terminal spec does not. Revisit if a cut spec is ever quietly lost this way.
     block("CHARTER CLOSE", [f"{c['id']} · {c['state']} · {c['owed']} owed (K={K})"
+                            + (f" · {c['briefs']} in-scope brief(s) open" if c["briefs"] else "")
                             + (f" · {c['unbuilt']} closed unbuilt" if c["unbuilt"] else "")
                             for c in charters.values()
                             if c["state"] in ("L1-complete", "L2-complete", "retracted")])

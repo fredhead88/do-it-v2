@@ -255,4 +255,28 @@ for role in ("grader", "reviewer"):
     else:
         raise AssertionError(f"{role} built a packet over a spec with no criteria")
 
+# D7 · §3.12 — the Executor authors the spec an in-scope brief implies. That spec
+# has no plan slot (the Planner cleared) and no audit yet, so its round one is a
+# slot the EXECUTOR wrote. Before this the rework path refused it: "no audit
+# findings on this subject", and the close row had nowhere to go.
+BRIEF_SLOT = TMP / "slot-L-spec-0020.md"
+BRIEF_SLOT.write_text("Brief (L-charter-reviewer-0001.jsonl:3, cites R3): the no-spawn project renders\n"
+                      "silence. Footprint hint: src/fold.py.\n9. The path to write the spec: "
+                      f"{TMP / 'content' / 'L-spec-0020.md'}\n")
+t = build("spec-writer", subject="L-spec-0020", slot=str(BRIEF_SLOT))
+assert "cites R3" in t and "Fix list" not in t, "round one from a slot carries no fix list"
+
+# ...and the negatives, both of them: no slot at all is still the Planner's round
+# one and refuses, and a PRIOR packet with no findings is a rework with nothing to
+# rework — the mistake the original refusal was written for, still refused.
+for kw, want in ((dict(), "round one carries the plan slot"),
+                 (dict(slot=str(BRIEF_SLOT)), "a rework packet with no fix list")):
+    N += 1
+    try:
+        build("spec-writer", "L-spec-0009" if not kw else "L-spec-0020", **kw)
+    except SystemExit as e:
+        assert want in str(e.code), e.code
+    else:
+        raise AssertionError(f"spec-writer built a packet it should have refused: {want}")
+
 print(f"packet: {N} packets built, six Blindness lists enforced")

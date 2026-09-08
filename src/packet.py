@@ -84,7 +84,10 @@ class Ctx:
         self.a = a
         self.specs, self.charters, _, self.by = fold.fold(fold.read_events())
         self.evs = self.by.get(a.subject, [])
-        if not self.evs:
+        if not self.evs and not (getattr(a, "slot", None) and getattr(a, "role", None) == "spec-writer"):
+            # The one legitimate exception is spec-writer round one: the spec id was
+            # just allocated and nothing has been written about it yet, so the slot
+            # IS the input (D7 — the Executor authoring a brief's spec has no other).
             die(f"{a.subject} has no events — nothing to build a packet from")
 
     def last(self, t, subject=None):
@@ -206,7 +209,12 @@ def p_spec_writer(c):
             "which only the Planner holds")
     findings = [e for e in c.all_of("audit-finding") if e.get("list") != "rejected"]
     if not findings:
-        die("no audit findings on this subject — a rework packet with no fix list is round one again")
+        # Round one from a slot the Executor wrote is legitimate — D7's brief-authored
+        # spec has no plan slot and no audit yet. Round one from a PRIOR PACKET is a
+        # rework with nothing to rework, which is the mistake this refuses.
+        if prev or not c.a.slot:
+            die("no audit findings on this subject — a rework packet with no fix list is round one again")
+        return base
     return base + ["", "## Fix list — apply each, same spec id, same path", ""] + [
         f"{i}. [{f.get('field', '?')} · {f.get('category', '?')}] {f.get('finding', '')}"
         f"{'  → ' + f['suggested_fix'] if f.get('suggested_fix') else ''}"

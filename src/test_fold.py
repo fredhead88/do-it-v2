@@ -190,6 +190,49 @@ _, _, ch, _, _ = ledger(**{**done, "L-charter-reviewer-01.jsonl": [
     {"ts": stamp(0), "type": "charter-review-complete", "subject": C}]})
 assert ch[C]["state"] == "L2-complete", "and a re-review that passes closes it"
 
+# §3.12 — completion is a fixpoint. An IN-SCOPE brief (one citing the charter
+# requirement it serves, §2.6) holds the close open no matter what else is true:
+# before this rule the Executor's own row said "briefs open → nothing until
+# specced" and nothing stopped a `sweep-fixpoint` being stamped over one.
+L1 = {**done, "L-planner-01.jsonl": [{"ts": stamp(3), "type": "l1-complete", "subject": C}]}
+inscope = [{"ts": stamp(1), "type": "brief", "subject": C, "requirement": "R3",
+            "blocked_me": False, "hit_while": S, "fact": "the no-spawn project renders silence"}]
+_, _, ch, _, _ = ledger(**{**L1, "L-grader-02.jsonl": inscope})
+assert ch[C]["state"] == "L1-complete" and ch[C]["briefs"] == 1, \
+    "an unanswered in-scope brief holds the sweep open (§3.12)"
+
+# ...and the negative, which is the whole reason the citation is the criterion:
+# an ADJACENT brief is the Thinker's inbox (§7.9), never this charter's blocker.
+adjacent = [{k: v for k, v in inscope[0].items() if k != "requirement"}]
+_, _, ch, _, _ = ledger(**{**L1, "L-grader-02.jsonl": adjacent})
+assert ch[C]["state"] == "L2-complete" and ch[C]["briefs"] == 0, \
+    "no citable requirement -> adjacent -> not this charter's (§2.6)"
+
+# a spec answers it by `ref` — the same file:line handle a decision uses
+answered = [{"ts": stamp(0), "type": "brief-answered", "subject": C,
+             "ref": "L-grader-02.jsonl:1", "spec": "L-spec-0143"}]
+_, _, ch, _, _ = ledger(**{**L1, "L-grader-02.jsonl": inscope,
+                           "L-executor-02.jsonl": answered})
+assert ch[C]["state"] == "L2-complete", "brief-answered by ref discharges it"
+
+_, _, ch, _, _ = ledger(**{**L1, "L-grader-02.jsonl": inscope, "L-executor-02.jsonl":
+                           [{**answered[0], "ref": "L-grader-02.jsonl:7"}]})
+assert ch[C]["state"] == "L1-complete", "a ref naming nothing answers nothing"
+
+# both new events are L2 conjuncts in all but name, so both are authorized: a
+# builder that may stamp either closes a charter from the seat being judged.
+_, _, ch, ig, _ = ledger(**{**L1, "L-grader-02.jsonl": inscope,
+                            "L-builder-02.jsonl": answered})
+assert ch[C]["state"] == "L1-complete" and len(ig) == 1, "only the Executor may answer a brief"
+_, _, ch, ig, _ = ledger(**{**L1, "L-executor-01.jsonl": shipped,
+                            "L-builder-02.jsonl": [{"ts": stamp(0), "type": "sweep-fixpoint",
+                                                    "subject": C}]})
+assert ch[C]["state"] == "L1-complete" and len(ig) == 1, "a builder may not declare the sweep done"
+
+# and the board says so, because a close blocked by something invisible is a wedge
+evs = ledger(**{**L1, "L-grader-02.jsonl": inscope})
+assert "1 in-scope brief(s) open" in fold.render(*evs), "CHARTER CLOSE names what holds it"
+
 # the board renders every section, keeps empty ones, and carries its own provenance
 evs = ledger(**done)                      # back to the L2 ledger the checks above left
 board = fold.render(*evs)
@@ -406,4 +449,4 @@ stale = ledger(**{"L-tick-local.jsonl": [{"ts": mins(30), "type": "tick", "lane"
 assert "TICK STALE" in fold.render(*stale)
 assert "last tick: never" in fold.render(*ledger(**{"L-operator-local.jsonl": []}))
 
-print("fold: 70 checks pass")
+print("fold: 79 checks pass")
