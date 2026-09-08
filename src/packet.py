@@ -315,7 +315,11 @@ def sibling_bodies(c):
     for sid, s in c.specs.items():
         if sid == c.a.subject:
             continue
-        e = next((x for x in reversed(s["evs"]) if x["type"] == "spec-written"), None)
+        # A `spec-written` need not carry a path: the three from the pre-wrapper era
+        # do not, and one of them crashed the first real rework dispatch. A sibling
+        # with no file on disk has no body to leak — it is skipped, never guessed at.
+        e = next((x for x in reversed(s["evs"])
+                  if x["type"] == "spec-written" and pathlib.Path(x.get("path") or "/").is_file()), None)
         if e:
             out += [(f"a sibling spec's body ({sid})", l) for l in long_lines(pathlib.Path(e["path"]))[:20]]
     return out

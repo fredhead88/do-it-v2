@@ -204,4 +204,11 @@ build("spec-auditor")
 assert (TMP / "packets" / "L-spec-0001-spec-auditor-2.md").exists(), "n increments"
 assert (TMP / "packets" / "L-spec-0001-spec-auditor-1.md").read_text() == first, "never overwritten"
 
+# A `spec-written` with no `path` — the pre-wrapper era wrote three, and one of
+# them crashed `doit packet spec-writer` on the first real rework dispatch, which
+# is the one dispatch a spec with audit findings cannot proceed without.
+ev("planner", "spec-written", "L-spec-0009")            # no path=, deliberately
+build("spec-writer")
+assert (TMP / "packets" / "L-spec-0001-spec-writer-2.md").exists(), "a pathless sibling is skipped, not crashed on"
+
 print(f"packet: {N} packets built, six Blindness lists enforced")
