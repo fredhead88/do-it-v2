@@ -700,3 +700,18 @@ the driver's `S<n>`.*
 - **Systemic:** a probe whose external is "CI" must run ON CI; the Planner contract's D96 should
   say so, and `doit` could own the `gh workflow run … full_run=true` line as the canonical
   "enumerate reds" probe for this repository.
+
+### S28. The pane made its own S23 mistake: a `;` in a shell chain dispatched a spawn on a packet with no fix list
+- **Mechanism:** transcribing the spec-audit Output (S18) failed (the JSONL transcript's JSON block
+  was not where the regex looked); the pane's command line continued past the failure because a
+  `;` separated the validate step from the packet+dispatch steps. `doit packet spec-writer` built
+  a rework packet with an EMPTY fix list (no `audit-finding` events yet) and `doit dispatch --seat`
+  appended `spawn-started` for `L-spec-writer-0009` before the pane noticed. The pane killed the
+  waiting wrapper; the ledger now carries a `spawn-started` with no `spawn-done`/`spawn-failed`.
+- **Pilot:** the Output was then transcribed correctly (parse the JSONL, find the text part),
+  validated, stamped; 24 events landed; a correct rework packet dispatched as `L-spec-writer-0010`.
+  The ghost `L-spec-writer-0009` is left as-is (an operator `correction` is the only clean fix).
+- **Systemic:** `doit packet spec-writer` for a rework should REFUSE when the subject has a
+  `spec-auditor` `spawn-done` but zero `audit-finding` events since the last `spec-written` — an
+  empty fix list on a rework round is never right; and `dispatch --seat` should write
+  `spawn-started` only when the pane stamps `meta.json`, or record `spawn-abandoned` on SIGTERM.
