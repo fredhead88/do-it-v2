@@ -12,6 +12,7 @@ case "${1:-board}" in
   reap)    shift; exec python3 "$SRC/tree_cleanup.py" "$@" ;;
   vet-dep) shift; exec node "$HERE/scripts/vet-dep.mjs" "$@" ;;
   paid-call) shift; exec python3 "$SRC/paid_call.py" "$@" ;;
+  validate) shift; exec python3 "$SRC/validate.py" "$@" ;;
   tick)    exec python3 "$SRC/tick.py" ;;
   up)      shift; exec python3 "$SRC/up.py" "$@" ;;
   think)   shift; exec python3 "$SRC/think.py" "$@" ;;
@@ -29,6 +30,7 @@ doit — a ledger that derives state, and the guards that read it
   doit audit cut|plan <charter> --cut F [...]  the six mechanical checks under both fable audits (§3.6)
   doit vet-dep [--pypi] <pkg>... | --hook  the install gate, and the scout's ground truth (§6.7b)
   doit paid-call <label> -- <cmd...>      run a call that spends, log it, enforce the cap (§10.4)
+  doit validate <role> <file>             the seat route's StructuredOutput: an Output object against its schema
   doit deploy <spec> --sha S --target T --cmd C --check C  serial; waits; proves the sha is live (§4.11)
   doit reap <charter> [--repo D] [--dry-run]   reap only the provably dead worktrees at close (§4.11)
   doit dispatch <role> <subject> [...]    spawn one contract, check it, append its events (-h for flags)

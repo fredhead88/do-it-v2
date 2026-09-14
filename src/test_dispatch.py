@@ -264,4 +264,28 @@ sev = [json.loads(l) for l in max((TMP / "events").glob("L-research-*.jsonl")).r
 assert code == 1 and sev[-1]["type"] == "spawn-failed" and "violates research.schema.json" in sev[-1]["why"], sev[-1]
 del os.environ["DOIT_SEAT"]
 N += 1
+# DOIT_REPO_VOLATILE: a declared path that moves under a spawn does not void it; an undeclared one still does.
+os.environ["DOIT_REPO_VOLATILE"] = "docs/sessions/*"
+import importlib
+importlib.reload(dispatch)
+dispatch.run_claude = never
+(REPO / "docs" / "sessions").mkdir(parents=True)
+vol = REPO / "docs" / "sessions" / "health.md"
+rp4 = TMP / "content" / "L-research-0004.md"
+assert dispatch.porcelain(REPO) == "", dispatch.porcelain(REPO)
+vol.write_text("cron wrote this")
+assert dispatch.porcelain(REPO) == "", "a declared volatile path is invisible to the check"
+stray.write_text("x")
+assert "stray.txt" in dispatch.porcelain(REPO), "an undeclared path is still seen"
+stray.unlink(), vol.unlink()
+del os.environ["DOIT_REPO_VOLATILE"]
+importlib.reload(dispatch)
+
+# `doit validate` is the seat route's StructuredOutput: exit 1 names the violation, exit 0 says VALID.
+good, bad = TMP / "good.json", TMP / "bad.json"
+good.write_text(json.dumps(research)), bad.write_text(json.dumps({**research, "answered": "maybe"}))
+v = lambda f: subprocess.run([sys.executable, str(pathlib.Path(__file__).parent / "validate.py"), "research", str(f)],
+                             capture_output=True, text=True)
+assert v(good).returncode == 0 and "VALID" in v(good).stdout, v(good)
+assert v(bad).returncode == 1 and "INVALID at answered" in v(bad).stderr, v(bad)
 print(f"dispatch: {N} spawns mocked, every check fired")

@@ -138,6 +138,19 @@ audit. None of them can run here.
 - **Systemic:** the schema is the contract's, so the *wrapper* owns enforcement, never
   the transport. Same rule as `packet.py` owning the Blindness strip.
 
+### S10. A model cannot count characters; the seat route needs its own StructuredOutput
+- **Mechanism:** on `claude -p` the StructuredOutput tool validates against
+  `--json-schema` server-side and the model retries until it complies. Asked in prose
+  to keep a `finding` under 400 characters, the same Opus sub-agent returned 445/444/
+  409/419, then 4 of 6 still over after being told the exact lengths, then 1 still over
+  after being told to aim for 380. Four round-trips for a formatting constraint.
+- **Pilot:** `doit validate <role> <file>` (new) — the sub-agent writes its object to
+  `$R/seat/<spawn>.output.json` and runs the validator until it prints VALID, then
+  returns. That file is outside the repository, so the porcelain check is unaffected.
+- **Systemic:** the seat prompt template must carry that loop for every role, and
+  `run_seat` should accept the bare `<spawn>.output.json` directly (wrapping the
+  envelope itself) instead of waiting for a hand-written `result.json`.
+
 ### Smaller, all real
 - `install.sh` creates `events/` and `content/` but not `repos/` (baseline finding 1,
   still true); `ln -s` was the operator's line again.

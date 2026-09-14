@@ -90,10 +90,24 @@ def emit(dst, base, type_, /, **kv):
 NOT_A_REPO = "<not a git repository>"
 
 
+# Paths other processes write to while a spawn runs — a cron's health file, a
+# session hook's handoff — declared by the operator, never inferred. The
+# baseline's finding 2 (a $2.19 spawn voided by the driver's own handoff file)
+# fired again on the Albert Scott pilot: a cron rewrote docs/sessions/process-
+# health.md under a 15-minute audit, and the whole spawn was void. The check is
+# still whole-tree by default; this only lets a root declare what it knows moves.
+VOLATILE = [g for g in os.environ.get("DOIT_REPO_VOLATILE", "").split() if g]
+
+
 def porcelain(cwd):
-    r = subprocess.run(["git", "status", "--porcelain"], cwd=cwd, capture_output=True, text=True)
+    r = subprocess.run(["git", "status", "--porcelain", "--untracked-files=all"], cwd=cwd, capture_output=True, text=True)
     if r.returncode == 0:
-        return r.stdout
+        if not VOLATILE:
+            return r.stdout
+        import fnmatch
+        keep = [l for l in r.stdout.splitlines()
+                if not any(fnmatch.fnmatch(l[3:].strip().strip('"'), g) for g in VOLATILE)]
+        return "\n".join(keep) + ("\n" if keep else "")
     if "not a git repository" in r.stderr.lower():
         return NOT_A_REPO                               # definite: there is no repo to mutate
     return None                                         # None = undetermined, never clean
