@@ -590,3 +590,34 @@ the driver's `S<n>`.*
 - **Systemic:** `DECIDED WITHOUT YOU` already exists for decisions; a `decision` whose
   subject is a charter another pane is driving should surface there for that pane on
   its next fold. Verify whether it does; the pilot could not wait to see.
+
+### S22. A charter's Intent can be false about production and nothing in the pipeline checks it
+- **Mechanism:** L-charter-0002's Intent — "Production serves `1afd6273c` while master is sixty
+  merged specs ahead" — reads `/version`, which only `deploy.sh` writes. Two GitHub workflows
+  (`deploy-api.yml`, `deploy-pipelines.yml`, since April) rsync `api/`, `pipelines/`, `agents/`
+  to the droplet and restart the API on every master push. Measured 2026-09-14: 736 + 659 files
+  on the droplet are newer than the Sep 12 deploy; the 1439 merge pushed under R3 was live on
+  prod 18 seconds later. The Thinker, the charter-set audit, the Planner and the operator's
+  ruling all reasoned from `/version`.
+- **Pilot:** found by accident — `gh run list` showed "Deploy API · success" on the R3 push.
+  Recorded as a `brief` on L-charter-0002 and in the deploy record; the charter's R5/R6 still
+  hold, but its Intent, Goal A's "sixty specs undeployed", and the rollback story (the next
+  push re-syncs code forward after a rollback) all need the correction.
+- **Systemic:** a charter that names a production state should carry a probe (D96) even when
+  the "external" is our own box: `/version` is a claim, `find -newer` is a measurement. The
+  Thinker contract's five sections have no "measured, not read" requirement for the Intent's
+  premise; the spec-auditor's `false-premise` category exists one level too late.
+
+### S23. The spec's Verification block is prose the grader runs — and a `;` in it inverted the gate
+- **Mechanism:** the spec-writer's rework put the spec-820 scanner into the §9 chain "advisorily"
+  with `;` before the final pytest. In bash that discards the whole preceding list's status, so
+  `VERIFY_OK` would print after an earlier link failed; and under `set -e` a red scanner as the
+  list's last command would abort the script instead. The verify SCRIPT the builder runs is the
+  Executor's (charter 1 precedent), so the pane rewrote it as one `&&` chain with the scanner as a
+  labelled advisory line after it, and told the builder which one is the checker.
+- **Pilot:** `verify-L-spec-0002.sh` (Executor-authored) differs from the spec's §9 block. The
+  grader's packet carries the script; the reviewer reads the spec. Recorded here so the divergence
+  is not read as drift.
+- **Systemic:** `doit packet builder` should GENERATE the verify script from the spec's fenced
+  block and lint it (`bash -n`, no bare `;`/`||` inside the gated chain, absolute interpreter),
+  refusing the packet on a violation — the same "packets are a script's output" rule (S6).
