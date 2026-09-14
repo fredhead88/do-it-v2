@@ -151,6 +151,22 @@ audit. None of them can run here.
   `run_seat` should accept the bare `<spawn>.output.json` directly (wrapping the
   envelope itself) instead of waiting for a hand-written `result.json`.
 
+### S11. The whole-tree "repo status unchanged" check voids spawns on a repo that has crons
+- **Mechanism:** the baseline's finding 2, unfixed: `porcelain()` compares `git status
+  --porcelain` over the whole tree before and after a non-builder spawn. Albert Scott's
+  repo has a liveness sweep (`scripts/watcher_sweep_liveness.sh`) and a session-end hook
+  that rewrite `docs/sessions/*` on their own schedule. One rewrote
+  `process-health.md` under the 15-minute cut audit; the audit was recorded as
+  `spawn-failed` and its findings never landed.
+- **Pilot:** `DOIT_REPO_VOLATILE="docs/sessions/*"` — an operator-declared glob list the
+  check ignores; `porcelain` now lists untracked files one per line so a glob can name
+  them. The audit was re-dispatched as `L-plan-auditor-0002` and fed the *same*
+  auditor's on-disk Output (its reads were of files under `scripts/ci` and `tests/`,
+  which the sweep did not touch); the ledger shows both spawns and the reason.
+- **Systemic:** the check should compare against the spawn's *grant* (the paths it may
+  read and must not write), or hash the granted tree, rather than the whole status.
+  Declaring volatility is a stopgap that has to be repeated per project.
+
 ### Smaller, all real
 - `install.sh` creates `events/` and `content/` but not `repos/` (baseline finding 1,
   still true); `ln -s` was the operator's line again.
@@ -166,4 +182,7 @@ audit. None of them can run here.
 |---|---|---|---|---|
 | — | thinker (pane) | seat | this pane (Fable) | `L-charter-0001` written from v4 spec 1447; `doit think --land` accepted it first try; `Covers: none` → no charter-set audit |
 | — | planner (pane) | seat | this pane | cut: 1 unit, 1 wave, footprint = the five files 1447 names; `doit audit cut` clean on five checks, `undetermined` on the acquisition trail (correct at stage cut) |
-| 1 | plan-auditor (cut) | seat | opus | dispatched; result pending |
+| 1 | plan-auditor (cut) · `L-plan-auditor-0001` | seat | opus | audit ran (11 turns, ~124 s, 82k sub-agent tokens): 6 findings, `bad_cut: false`, `charter-gap` + `worked`. Output over `maxLength` four times (S9/S10). **Spawn voided by the wrapper**: a cron rewrote `docs/sessions/process-health.md` during the run (S11) |
+| 2 | plan-auditor (cut) · `L-plan-auditor-0002` | seat | opus | re-dispatch, same packet, under `DOIT_REPO_VOLATILE`; fed spawn 1's validated on-disk Output — 6 `audit-finding` + 2 declarations + `spawn-done` landed |
+| — | planner (pane) | seat | this pane | acted on all six: footprint +`handover_validate.py`; `L-adr-0001` (fixture-repo rule); Plan with SD1–SD4 (SD2 = lazy referent at the entry point, the auditor's missed extract) and a line per finding; `plan-written`; stage-plan pre-pass clean on all six checks including the acquisition trail |
+| 3 | plan-auditor (plan) · `L-plan-auditor-0003` | seat | opus | dispatched with the `doit validate` loop; result pending |

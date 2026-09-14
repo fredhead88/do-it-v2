@@ -142,16 +142,28 @@ def run_seat(spawn, cmd, packet, cwd, timeout):
     SEAT.mkdir(parents=True, exist_ok=True)
     (SEAT / f"{spawn}.packet.md").write_text(packet)
     (SEAT / f"{spawn}.cmd.json").write_text(json.dumps({"cmd": cmd, "cwd": cwd}, indent=1))
-    want = SEAT / f"{spawn}.result.json"
+    want, bare = SEAT / f"{spawn}.result.json", SEAT / f"{spawn}.output.json"
     print(json.dumps({"seat": spawn, "packet": str(SEAT / f"{spawn}.packet.md"),
-                      "result_expected_at": str(want), "cwd": cwd, "timeout_s": timeout}), flush=True)
+                      "result_expected_at": str(want), "or_output_at": str(bare),
+                      "cwd": cwd, "timeout_s": timeout}), flush=True)
     t0 = time.time()
-    while not want.is_file():
+    while not (want.is_file() or bare.is_file()):
         if time.time() - t0 > timeout:
             raise subprocess.TimeoutExpired(cmd, timeout)
         time.sleep(2)
     time.sleep(1)                       # a writer that is still writing
-    return SeatResult(want.read_text())
+    if want.is_file():
+        return SeatResult(want.read_text())
+    # The bare Output the contract validated with `doit validate`, plus whatever the
+    # pane recorded beside it (`<spawn>.meta.json`: model, session, turns). The
+    # envelope is built here so no hand ever writes one.
+    meta_p = SEAT / f"{spawn}.meta.json"
+    m = json.loads(meta_p.read_text()) if meta_p.is_file() else {}
+    env = {"is_error": False, "terminal_reason": "completed", "structured_output": json.loads(bare.read_text()),
+           "num_turns": m.get("turns"), "duration_ms": m.get("duration_ms"), "usage": m.get("usage") or {},
+           "total_cost_usd": None, "modelUsage": {m["model"]: {}} if m.get("model") else {},
+           "session_id": m.get("session"), "permission_denials": m.get("denied") or []}
+    return SeatResult(json.dumps(env))
 
 
 def poke():

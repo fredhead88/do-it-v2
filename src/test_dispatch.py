@@ -264,6 +264,39 @@ sev = [json.loads(l) for l in max((TMP / "events").glob("L-research-*.jsonl")).r
 assert code == 1 and sev[-1]["type"] == "spawn-failed" and "violates research.schema.json" in sev[-1]["why"], sev[-1]
 del os.environ["DOIT_SEAT"]
 N += 1
+# A bare, validated Output plus a meta sidecar is accepted as-is: the envelope is the wrapper's.
+os.environ["DOIT_SEAT"] = "1"
+rp5 = TMP / "content" / "L-research-0005.md"
+
+
+def seat_writer_bare():
+    for _ in range(400):
+        pk = list((TMP / "seat").glob("*.packet.md")) if (TMP / "seat").is_dir() else []
+        pk = [q for q in pk if not (TMP / "seat" / (q.name.split(".")[0] + ".output.json")).exists()
+              and not (TMP / "seat" / (q.name.split(".")[0] + ".result.json")).exists()]
+        if pk:
+            sid = pk[0].name.split(".")[0]
+            rp5.write_text("dug")
+            (TMP / "seat" / f"{sid}.meta.json").write_text(json.dumps({"model": "claude-opus-5", "session": "seat-3", "turns": 4}))
+            (TMP / "seat" / f"{sid}.output.json").write_text(json.dumps({**research, "path": "content/L-research-0005.md"}))
+            return
+        time.sleep(0.05)
+
+
+threading.Thread(target=seat_writer_bare, daemon=True).start()
+a = argparse.Namespace(role="research", subject="L-spec-0001", packet=str(PK), path=str(rp5), cwd=str(REPO),
+                       charter=None, project="t", mcp_config=None, timeout=1, max_usd=None, seat=True)
+try:
+    dispatch.main(a)
+    code = 0
+except SystemExit as e:
+    code = e.code
+sev = [json.loads(l) for l in max((TMP / "events").glob("L-research-*.jsonl")).read_text().splitlines()]
+assert code == 0 and sev[-1]["type"] == "spawn-done" and sev[-1]["session"] == "seat-3" \
+    and sev[-1]["model"] == "claude-opus-5" and sev[-1]["turns"] == 4, sev[-1]
+del os.environ["DOIT_SEAT"]
+N += 1
+
 # DOIT_REPO_VOLATILE: a declared path that moves under a spawn does not void it; an undeclared one still does.
 os.environ["DOIT_REPO_VOLATILE"] = "docs/sessions/*"
 import importlib
