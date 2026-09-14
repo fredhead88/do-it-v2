@@ -510,3 +510,83 @@ the driver's `S<n>`.*
 - **Systemic:** `think.land` should build the set from every `charter-filed` event whose
   charter cites the goal (plus the ones passed now), not from `argv`. The design's word
   is *charter set*; the code's is *this call*.
+
+### T12. An `open` charter is invisible on the board
+- **Mechanism:** `doit states` shows L-charter-0002/0003/0004 as `open`; `doit` (the
+  board) lists none of them — `WRITTEN, NOT PICKED UP` is a spec heading, and no heading
+  shows a charter that has been filed but not cut. The driver pane asked the operator
+  for a ruling on "the deploy charter" without knowing three had landed.
+- **Pilot:** the operator carries the fact between panes by hand.
+- **Systemic:** the board needs a `CHARTERS OPEN (n)` line (charter-filed, no
+  `plan-written`), the mirror of `CHARTER CLOSE`. A Planner that "does not wait to be
+  asked" (§3.5) has to be able to see what it should pick up.
+
+## Driver pane, second sitting — charters 0004 and 0002 (started 2026-09-14 ~07:11 UTC, a fresh pane)
+
+### S18. A contract's `tools:` line now binds the Agent-tool type — and strips the seat route's output loop with it
+- **Mechanism:** once the harness loaded the contracts as agent types (S4's later
+  measurement), a `plan-auditor` spawn gets exactly `Read, Glob, Grep, StructuredOutput`.
+  The seat route's completion loop — write `<spawn>.output.json`, run `doit validate` —
+  needs Write and Bash. Both cut-audit and charter-set-audit spawns returned "I cannot
+  write the file" with the Output object in the final message.
+- **Pilot:** the pane transcribes the returned object verbatim into
+  `seat/<spawn>.output.json`, runs `doit validate`, stamps `meta.json`. The transcription
+  is a hand between the model and the ledger; over-long strings (401 chars) were trimmed
+  by the pane, which is exactly the D120 per-word safeguard failing at the wrong layer.
+- **Systemic:** the seat backend needs a `StructuredOutput`-equivalent the sub-agent can
+  emit without Write — the harness's own StructuredOutput tool IS listed on every
+  contract, so the wrapper should accept the Agent tool's structured return as the
+  Output (D116's `structured_output` field by another route), and the pane should never
+  type a finding.
+
+### S19. `doit alloc` treats any argument as a kind — `doit alloc -h` allocated `L--h-0001.md`
+- **Mechanism:** `alloc <kind>` builds `L-<kind>-NNNN` with no validation of the kind
+  token (T2 is the no-argument crash; this is its sibling).
+- **Pilot:** the junk content file was deleted by hand (no event references it).
+- **Systemic:** validate `kind` against the id kinds §2.8 names, and honour `-h`.
+
+### S20. The charter-set packet was rebuilt by importing `think.py` — the fix T11 asks for, done by hand
+- **Mechanism:** T11 — each `--land` call overwrites `charter-set-<goal>.md` with only
+  the charters of that call. Goal A's packet showed 0004 alone.
+- **Pilot:** the driver imported `think.check`, `think.coverage`, `think.charter_set_packet`
+  from `~/do-it-v2/src` and rebuilt the packet from 0001 + 0002 + 0004 without appending
+  any event, then dispatched `plan-auditor L-goal-0001 --seat` on it. The audit returned
+  8 findings (G3–G5 unowned; G1 spans an uncited charter and a citing one; L-charter-0002's
+  Intent names L-charter-0001 as the precondition when the live one is 0004; the Vercel
+  bundle sha is unproven by R6).
+- **Systemic:** T11's fix — `land` builds the set from every `charter-filed` event citing
+  the goal — plus a `doit think --audit-set <goal>` that rebuilds and dispatches without
+  landing anything.
+
+### S21. Declarations land as events typed by their term, and nothing reads them back by that name
+- **Mechanism:** a spawn's `declarations` land as one event per term (`charter-gap`,
+  `worked`, `seam-undefined` …), not under a `declaration` type. A reader that greps for
+  the word "declaration" finds none; the pane's hand-built plan-stage packet carried the
+  nine findings and no declaration lines because it looked for the wrong type.
+- **Pilot:** the plan audit ran without the cut-audit's three declaration lines.
+- **Systemic:** minor; the packet builders (S6) should read the term-typed events, and
+  `dispatch.py` should document the shape once.
+
+### T13. "Human-only" was read as "human keystrokes", and the operator corrected it
+- **Mechanism:** the v4 handover says *"Never run `ingest_inbound_spec.sh` yourself. Surface
+  these and wait for the operator."* Spec 552's actual gate is `--confirm` (or a TTY
+  confirm) — a human *decision*, which the operator gave in this session and which was
+  appended to the ledger before the run. The Thinker first told the operator to run
+  two shell commands himself; he pushed back, correctly, and the Thinker ran them
+  (#270 → 1448, #262 → 1449). v4's own role table lists the ingest script under
+  `think`.
+- **Pilot:** the confirmation lives as a `decision` event one line above the `DONE`
+  event on the same subject — the ledger is the human-in-the-loop record.
+- **Systemic:** when the ingest port exists in v2 (T7), its human gate should be *a
+  decision event on the ledger*, checked by the command, not a flag on a shell line.
+  That is what makes it auditable and what lets any pane run it once the decision
+  exists.
+
+### T14. The driver pane cannot be told anything except by typing into it
+- **Mechanism:** the ruling on the deploy was appended as a `decision` on
+  L-charter-0002; the driver was mid-spawn (a plan-auditor running) and its board has
+  no heading for open charters (T12), so the Thinker also `tmux send-keys` a pointer
+  into its prompt. Two panes on one ledger with no notification path except the fold.
+- **Systemic:** `DECIDED WITHOUT YOU` already exists for decisions; a `decision` whose
+  subject is a charter another pane is driving should surface there for that pane on
+  its next fold. Verify whether it does; the pilot could not wait to see.
