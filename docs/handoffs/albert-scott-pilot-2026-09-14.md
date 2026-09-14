@@ -254,6 +254,23 @@ audit. None of them can run here.
   should check it — a merge gate refusing at merge time is the most expensive place to
   learn the shape.
 
+### S17. A "known trap" that comes true has no lane row
+- **Mechanism:** the charter and spec both said more pre-existing reds probably sit
+  behind the fail-fast plugin and are out of scope. One did. The Executor contract has
+  rows for a failed deploy (revert) and for a gate that could not determine, but none
+  for "the deploy gate refuses for a reason outside this charter": the spec is
+  `shipped`, not accepted, blocked on an external; the charter is `L1-complete` with
+  one owed AC that can never be proven until *another* charter lands.
+- **Pilot:** a `blocked` record with `owner=executor` (renders under BLOCKED with an
+  owner, not as a wedge) and an adjacent `brief` on the charter carrying the fact and
+  the footprint hint, so the Thinker's triage (§7.9) can cluster it — it belongs to
+  Goal A's "master deployable" charter, which the parallel Thinker pane is writing now.
+- **Systemic:** `deploy.py` should distinguish *gate refused before touching the
+  target* (exit 2, `deploy-refused{why}`, no rollback line) from *target changed and
+  the check never named the sha* (exit 1, `deploy-failed`, rollback); and the Executor
+  contract needs the row: refused for an external → `blocked` + `brief`, never revert.
+  This is S8 measured, not predicted.
+
 ### Smaller, all real
 - `doit dispatch --packet ""` reads `.` as the packet and crashes with a traceback
   before allocating a spawn; it should refuse an empty or non-file packet path.
@@ -293,7 +310,9 @@ audit. None of them can run here.
 | 9 | grader · `L-grader-0001` | seat | opus | 15 tool uses, ~188 s, 92k tokens; validated first try. Re-ran the checker and every row's `check`: 11 `met`, DONE-COND `met`, AC12 `cannot-assess` (owed, unevaluable from the packet — the honest third state), `matches_intent: yes`, `card_ok: yes`, `worked` + `evidence-gap`. The fold: `confirmed: false` because one row is not `met` → spec state `reviewing` |
 | — | executor (pane) | seat | this pane | executor.md's row for "not confirmed, nothing standing, only cannot-assess": reviewer at `gates-only`, round 1. `doit packet reviewer` carried all 12 criteria with their review paths |
 | 10 | reviewer (round 1, gates-only) · `L-reviewer-0001` | seat | opus | 15 tool uses, ~153 s, 87k tokens; validated first try. Drove every path at ready_sha: 0 blocking, 4 recommendations (docstring/behaviour conflict, CLI exit-code change unswept, guard style, AC10 wording), 11 reverify conditions, AC12 `unverifiable` (owed) |
-| — | executor (pane) | seat | this pane | `decision` recorded (merge with AC12 owed — S15); `doit gate` refused once on the spec's `Writes:` shape (S16), `clean` after the parser fix; `git merge --no-ff`; `shipped`; v4 ledger 1447 → shipped; push |
+| — | executor (pane) | seat | this pane | `decision` recorded (merge with AC12 owed — S15); `doit gate` refused once on the spec's `Writes:` shape (S16), `clean` after the parser fix; `git merge --no-ff` → `aa9817d96`; `shipped`; v4 ledger 1447 → shipped; pushed 06:25 UTC |
+| — | CI on `aa9817d96` | — | — | four of five required checks green; **`pytest` FAILURE after 30 min: baseline gate `new=1 fixed=255 known=233`** — the one NEW red is `tests/test_deploy_activation_assertion.py::test_present_and_pathed_passes`, **not** test_903 (which left the NEW list: the fix holds on CI). Reproduced identically at pre-merge `0841a5a72`: pre-existing, from the 810 merges, hidden behind test_903 by the fail-fast plugin — the charter's own "known trap" |
+| — | executor (pane) | seat | this pane | charter rule applied: blocked-external, no revert; `blocked` on the spec (`owner=executor`, `id=L-spec-0001-wait-ci`) and a `brief` on the charter (`blocked_me=true`, `hit_while=L-spec-0001`, footprint hint `tests/test_deploy_activation_assertion.py deploy.sh`). `doit deploy` deliberately NOT run against a gate known to refuse (S8). AC12 stays owed; the spec reads `shipped`, the charter `L1-complete`; the worktree stays until L2 |
 | — | thinker (pane) · `L-thinker-0002` | seat | **Fable 5.1, a real pane** | opened by the operator's request as tmux window `flow:think-goals` (`claude -n think-goals --agent thinker --model claude-fable-5-1`, RETIRE list denied, ledger file preset), seeded with `content/think-goals-brief.md`: write the two goals (profitability platform operating; Yitzy's work operating) and their first charters, land with `--print-only` so the charter-set audit is the driver pane's to run via seat. Verified seat-billed: no `ANTHROPIC_API_KEY` in any environment, status line shows the seat windows |
 
 ## What v2 got right on this charter (so far)
