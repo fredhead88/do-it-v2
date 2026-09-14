@@ -773,3 +773,22 @@ the driver's `S<n>`.*
   substituted in, never `merge-base` at run time); the grader packet should scrub
   `Co-Authored-By`/`Claude-Session` trailers from any commit text it hands over, or the AC10
   shape should point at the card and the history file only.
+
+### S32. Someone ran `doit tick` on this ledger: two metered Executor spawns, three seat spawns nobody served, and a ghost spec
+- **Measured:** `L-executor-0003` (11:27 box time) and `L-executor-0004` (12:00) carry
+  `cost_usd` 1.016 and 1.073 — the tick's own `claude -p` line, i.e. the metered pool the
+  project bans (spec 572). The driver pane never runs the tick (`DOIT_NO_POKE=1`, ruling on
+  `pilot-1447`); no cron line exists; the actor is unknown (a parallel session or the operator).
+  The tick's Executor then: answered charter 4's R5 brief with a NEW spec id `L-spec-0004` (empty
+  file + a slot it wrote), dispatched `spec-writer` twice and `charter-reviewer` once on the seat
+  route — where a seat spawn waits for a human pane to serve it, and none did — so all three
+  timed out after 30 min (`spawn-failed`); and stamped `sweep-fixpoint` on L-charter-0001 at 11:27,
+  before the driver's own at 13:58. The driver later answered the same R5 brief with L-spec-0003,
+  so the ledger now holds two `brief-answered` for one brief.
+- **Pilot:** nothing external was touched (the seat spawns never ran). The ghost `L-spec-0004`
+  stays allocated and empty; an operator `correction` is the only clean fix.
+- **Systemic:** (1) the tick must refuse to run when the ledger root's `env.sh` says
+  `DOIT_SEAT=1` and no pane has registered as the seat server — a seat spawn with no server is
+  a 30-minute hole by construction; (2) the tick's own spawn must honour the same seat/metered
+  ruling as its children (it did not: children went seat, the Executor went metered);
+  (3) `doit` needs an actor identity on every append beyond the filename (who ran this tick?).
