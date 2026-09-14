@@ -669,6 +669,12 @@ the driver's `S<n>`.*
 | 19 | spec-writer (rework 2) · `L-spec-writer-0006` | seat | opus | 3 turns, 100k; §9 rebuilt as one `&&` chain + `rc=$?` + advisory 820 line + `exit $rc`; AC3 wording comment-inclusive |
 | 20 | builder (rework) · `L-builder-0003` | seat | opus | 21 turns, 113k; amended to `937c7adc6`, token count 0, checker `VERIFY_OK` + `ADVISORY spec-820 exit=1`; corrected the first card's "820 red on 7 files" (5) |
 | 21 | grader (re-grade) · `L-grader-0003` | seat | opus | 14 turns, 81k; 10 met, AC11/AC12 cannot-assess (owed), done-condition satisfied, `matches_intent: yes`, `card_ok: yes` |
+| 22 | reviewer · `L-reviewer-0003` (L-spec-0003) | seat | opus | 0 blocking; merged `b7b935c51`; pytest check-run on master GREEN for the first time in the pilot |
+| — | executor (pane) · deploy attempt #1 | seat | this pane | `doit deploy` on `b7b935c51`: gate PASS, tree synced, `/version` stamped, migrations ABORTED at `listing_run_authority_v1`; `./deploy.sh --rollback` → `1afd6273c` healthy (S30) |
+| 23 | charter-reviewer · `L-charter-reviewer-0002` (charter 1) | seat | opus | `complete`, 1 finding |
+| 24 | charter-reviewer · `L-charter-reviewer-0003` (charter 4) | seat | opus | `complete`, 3 findings; two adjacent briefs filed by the pane |
+| — | operator (pane, under ruling) · closes | — | — | `spec-closed` L-spec-0001, L-spec-0002 (built+merged, owed evidence never derives; S33) and ghost L-spec-0004 (S32); charters 1 and 4 fold **L2-complete**; `doit reap` removed `l-spec-0001/0002/0003` worktrees + branches, nothing retained |
+| — | executor (pane) · deploy attempt #2 | — | — | ON HOLD: coordinator's candidate `34cf284` REJECTED in independent review (`GRANT USAGE ON SCHEMA extensions` silently no-ops on hosted Supabase → `gen_random_bytes` permission denied at first real capability grant); successor removes the `extensions` dependency |
 | — | executor (pane) | seat | this pane | R1–R3 of L-charter-0002 done by hand under the operator's ruling (rollback dry-run, lock absent, migration list + resolver target, 1439 merged `bd2a7bafb` and pushed; CI: one NEW red = the 0004 red); S22 discovered (push-deploy workflows); `doit gate l-spec-0002 master` clean pre-review |
 
 ### S26. One red per ~2-hour cycle: the fail-fast plugin turns "make master green" into a serial charter chain
@@ -792,3 +798,31 @@ the driver's `S<n>`.*
   a 30-minute hole by construction; (2) the tick's own spawn must honour the same seat/metered
   ruling as its children (it did not: children went seat, the Executor went metered);
   (3) `doit` needs an actor identity on every append beyond the filename (who ran this tick?).
+
+### S33. The only operator close for a built, merged spec is `spec-closed`, and the fold then calls it `closed-unbuilt`
+- **Mechanism:** L-spec-0001 and L-spec-0002 were built, graded (11/12 and 10/12), reviewed
+  with zero blocking findings, and merged. Their unmet criteria are post-merge observations by
+  construction (a check-run on the merge sha; a cron that exists only after the deploy). The
+  grader records them `cannot-assess`, so `verdict.confirmed` is false; the state is `shipped`,
+  never `accepted`; and `shipped-owed-evidence` only derives from an `owed-ac` with a future
+  `wake_at`, which no seat writes (S15). The charter's L2 conjunct needs every spec in
+  `accepted / shipped-owed-evidence / dropped / closed-unbuilt`, so both charters sat at
+  `L1-complete` after their charter reviews said `complete`. The one operator instrument that
+  moves a spec out of `shipped` is D112's `spec-closed`, whose fold label is `closed-unbuilt`
+  and whose docstring says "the operator closed it without a build". The board now reads
+  `L-charter-0001 · L2-complete · 1 closed unbuilt` for a charter whose one spec was built and
+  is live on master. The label is false and the operator had no truthful alternative.
+- **Second half:** the rogue tick's ghost `L-spec-0004` (S32) bound itself to `L-charter-0004`
+  by allocation alone — two `spawn-started`/`spawn-failed` pairs, no `spec-written`, empty
+  content file, state `unknown` — and that alone held the charter at L1 after every real spec
+  was closed. There is no non-operator way to retire an allocation that never became a spec;
+  `spec-closed` was used (truthfully, this time) for that too.
+- **Cost:** two operator rulings and three operator events to close two charters the ledger
+  already had every fact to close; a board line that misdescribes the pilot's headline result.
+- **Systemic:** (1) a re-grade path for owed criteria: an operator (or Executor, citing
+  evidence) `owed-met` event per criterion, folded into the verdict so `accepted` derives
+  from what was actually observed after merge; (2) `spec-closed` should carry a `built:` flag
+  or the fold should label a closed spec that has `shipped` as `closed-shipped`, never
+  `closed-unbuilt`; (3) an allocation with no `spec-written` after its spawn fails should not
+  bind to the charter's L2 conjunct — the fold should treat it as `void`, or `alloc` should
+  be reversible by the actor that allocated it.
