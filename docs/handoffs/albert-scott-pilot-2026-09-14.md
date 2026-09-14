@@ -180,7 +180,25 @@ audit. None of them can run here.
   requirement ids, out-of-scope seeds) and a `--land-goal` that appends `goal-filed`;
   a HEALTH line when charters exist and no goal does.
 
+### S13. "The file exists" is not "the contract finished"
+- **Mechanism:** the first seat route read `<spawn>.output.json` as soon as it
+  appeared. A contract iterating with `doit validate` writes an invalid draft first;
+  the wrapper read the draft, recorded `spawn-failed` (schema), and the validated
+  version landed a second later. The spec file was on disk and correct; the ledger
+  said the spawn failed.
+- **Pilot:** completion is the pane's `<spawn>.meta.json` stamp (written after the
+  sub-agent returns), never the Output's existence. The spec-writer was re-dispatched
+  as `L-spec-writer-0002` with the same, validated Output; both spawns are on the
+  ledger. Note the `l1-complete` was appended before `spec-written` landed, because
+  the pane believed the first wrapper had succeeded — the record is honest about the
+  order and the fold does not care, but it is a scar.
+- **Systemic:** every handoff between a driver and a wrapper needs an explicit
+  "done" token distinct from the artifact — the same shape as §9.2's "content first,
+  event second".
+
 ### Smaller, all real
+- `doit dispatch --packet ""` reads `.` as the packet and crashes with a traceback
+  before allocating a spawn; it should refuse an empty or non-file packet path.
 - A worktree cut from this repository has no `.venv`; the verify command the spec
   authors must either use the repository's absolute interpreter or the Executor must
   link the venv into the worktree at cut time (the pilot links it).
@@ -203,7 +221,11 @@ audit. None of them can run here.
 | — | planner (pane) | seat | this pane | acted on all six: footprint +`handover_validate.py`; `L-adr-0001` (fixture-repo rule); Plan with SD1–SD4 (SD2 = lazy referent at the entry point, the auditor's missed extract) and a line per finding; `plan-written`; stage-plan pre-pass clean on all six checks including the acquisition trail |
 | 3 | plan-auditor (plan) · `L-plan-auditor-0003` | seat | opus | 17 tool uses, ~224 s, 97k tokens; **validated its own Output first try** with `doit validate`. 7 findings, `charter-gap` + `worked`. Found a same-defect sibling test outside the footprint (`tests/test_903_r2_kit_handover_guards.py`, also red, not baselined), that approach (a) therefore cannot reach the done-condition, and that the Plan's SD2/SD3 contradicted two in-repo contract statements |
 | — | planner (pane) | seat | this pane | acted on all seven (no re-audit — one round per stage): SD2 fixed to a call shape and named as approach (b); SD3 pins observed behaviour and defers FAIL-vs-WARN to Q4; SD4 rules (a) out; SD5 brings the sibling in (footprint widened, `charter-gap` expected); SD6 an owed observed-data AC on the check-run; Q1 stands; finding 7 (deferral) is the operator's ruling |
-| 4 | spec-writer · `L-spec-writer-0001` | seat | opus | dispatched on the slot packet; result pending |
+| 4 | spec-writer · `L-spec-writer-0001` | seat | opus | 30 tool uses, ~371 s, 117k tokens: 397-line spec, 11 ACs (`backend`, `observed-data`), 1 owed, 1 unknown, `charter-gap` + `owed-ac` declared, no escalations. **Recorded `spawn-failed`**: the wrapper read its invalid first draft (S13) |
+| 5 | spec-writer · `L-spec-writer-0002` | seat | opus | re-dispatch, same packet, same validated Output under the fixed completion signal — `spec-written`, `charter-gap`, `owed-ac`, `spawn-done` |
+| — | planner (pane) | seat | this pane | `l1-complete` appended (one slot, written) — before `spec-written` landed, see S13 |
+| — | executor (pane) | seat | this pane | first Executor action: `doit packet spec-auditor` built the packet from the ledger (pre-pass: 1 placeholder grep = the spec's one counted unknown; ids cited = charter ids exactly) |
+| 6 | spec-auditor · `L-spec-auditor-0001` | seat | opus | dispatched; result pending |
 
 ## What v2 got right on this charter (so far)
 - **Two blind audits found what the v4 spec missed.** 1447's `writes:` footprint omitted
