@@ -199,9 +199,10 @@ audit. None of them can run here.
 ### Smaller, all real
 - `doit dispatch --packet ""` reads `.` as the packet and crashes with a traceback
   before allocating a spawn; it should refuse an empty or non-file packet path.
-- A worktree cut from this repository has no `.venv`; the verify command the spec
-  authors must either use the repository's absolute interpreter or the Executor must
-  link the venv into the worktree at cut time (the pilot links it).
+- A worktree cut from this repository has no `.venv`; the spec-auditor caught it and
+  the reworked spec uses the repository's absolute interpreter. Linking the venv in is
+  wrong: `.venv/` in `.gitignore` is directory-shaped, so a symlink shows as untracked
+  residue and fails the done-condition.
 - `install.sh` creates `events/` and `content/` but not `repos/` (baseline finding 1,
   still true); `ln -s` was the operator's line again.
 - `doit append` re-renders the whole board to stdout on every append; in a pane that
@@ -227,7 +228,9 @@ audit. None of them can run here.
 | — | executor (pane) | seat | this pane | first Executor action: `doit packet spec-auditor` built the packet from the ledger (pre-pass: 1 placeholder grep = the spec's one counted unknown; ids cited = charter ids exactly) |
 | 6 | spec-auditor · `L-spec-auditor-0001` | seat | opus | 29 tool uses, ~416 s, 123k tokens; validated first try. 7 findings (every one with a runnable `confirms_with`), 9 rejected with the clearing observation, 2 advisory, `bad_cut: false`. Caught: no `.venv` in any worktree so every verify command would die; a review path reading a banner `_run_validate_spec` never prints; the OSError branch nobody pinned; a Verification chain that prints OK without the new tests existing; guessed `-k` filters for unnamed tests |
 | — | executor (pane) | seat | this pane | `doit packet spec-writer --slot` built the rework packet: round one's slot + the 7-item fix list (S6: round one's packet lives under `content/`, so `--slot` is needed again on rework — the script's `prev` glob only sees `packets/`) |
-| 7 | spec-writer (rework) · `L-spec-writer-0003` | seat | opus | dispatched; result pending |
+| 7 | spec-writer (rework) · `L-spec-writer-0003` | seat | opus | 25 tool uses, ~329 s, 115k tokens; validated first try. All seven fixes applied in place: 12 ACs, 1 owed (AC12, the check-run), 1 unknown kept open (FAIL-vs-WARN, Q4), two weak dimensions named honestly |
+| — | executor (pane) | seat | this pane | worktree cut clean from `master` @ `fc8c839ba` (branch `l-spec-0001`, under `$R/worktrees/`, on disk); `doit packet builder` built the packet and wrote `verify-L-spec-0001.sh` from the spec's Verification block (absolute interpreter, byte-identity diffs, positive existence greps for the three new tests). A `.venv` symlink I had added showed as untracked residue and was removed before the builder started |
+| 8 | builder · `L-builder-0001` | seat | opus | dispatched (`build-started` on the ledger); result pending |
 
 ## What v2 got right on this charter (so far)
 - **Two blind audits found what the v4 spec missed.** 1447's `writes:` footprint omitted
