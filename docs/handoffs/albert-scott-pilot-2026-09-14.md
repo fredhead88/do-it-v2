@@ -196,6 +196,22 @@ audit. None of them can run here.
   "done" token distinct from the artifact — the same shape as §9.2's "content first,
   event second".
 
+### S14. The builder's per-criterion rows have no durable home past the card's fifteen lines
+- **Mechanism:** `write_card` renders at most fifteen lines (§5.10) and `p_grader`
+  reads the criterion rows back from that render. Twelve criteria → six rows reach the
+  grader; the other six are claims it cannot see and therefore cannot test. The
+  builder's Output object itself is not in the ledger (`spawn-done` keeps scalars
+  only). The baseline saw this on the first chain ("the card had rows for AC1–AC6
+  only", filed as `card-quality`) and it recurred here unchanged.
+- **Pilot:** `content/L-card-0001.json` — the full card object, with
+  `deviations[].why` stripped (the builder's reasoning, the one thing the judge must
+  never read) — handed to the grader beside the packet. The wrapper now writes that
+  sidecar on every build and the grader packet reads every row from it.
+- **Systemic:** the render is the operator's summary; the object is the record. Every
+  role whose Output carries arrays the next role must test (builder `acs`, reviewer
+  `blocking`/`reverify`, charter-reviewer `unrolled_not_built`) needs the same
+  sidecar, or the arrays go into the ledger as their own events.
+
 ### Smaller, all real
 - `doit dispatch --packet ""` reads `.` as the packet and crashes with a traceback
   before allocating a spawn; it should refuse an empty or non-file packet path.
@@ -230,7 +246,9 @@ audit. None of them can run here.
 | — | executor (pane) | seat | this pane | `doit packet spec-writer --slot` built the rework packet: round one's slot + the 7-item fix list (S6: round one's packet lives under `content/`, so `--slot` is needed again on rework — the script's `prev` glob only sees `packets/`) |
 | 7 | spec-writer (rework) · `L-spec-writer-0003` | seat | opus | 25 tool uses, ~329 s, 115k tokens; validated first try. All seven fixes applied in place: 12 ACs, 1 owed (AC12, the check-run), 1 unknown kept open (FAIL-vs-WARN, Q4), two weak dimensions named honestly |
 | — | executor (pane) | seat | this pane | worktree cut clean from `master` @ `fc8c839ba` (branch `l-spec-0001`, under `$R/worktrees/`, on disk); `doit packet builder` built the packet and wrote `verify-L-spec-0001.sh` from the spec's Verification block (absolute interpreter, byte-identity diffs, positive existence greps for the three new tests). A `.venv` symlink I had added showed as untracked residue and was removed before the builder started |
-| 8 | builder · `L-builder-0001` | seat | opus | dispatched (`build-started` on the ledger); result pending |
+| 8 | builder · `L-builder-0001` | seat | opus | 49 tool uses, ~455 s, 144k tokens; validated first try. `DONE`: one commit `fabe586` (2 files, +164/−6), verify exit 0 `VERIFY_OK` (65 passed), 12 rows (11 done with command evidence, AC12 owed), 2 minor deviations, tests added, 5 not-built with legal reasons, 2 unknowns, `worked`. Reported one further pre-existing red (`test_962_handover_rule5…[AC5-builder-worktree-0]`) as out of scope instead of chasing it |
+| — | executor (pane) | seat | this pane | `doit packet grader` — the card render carried 6 of 12 rows (S14); full rows handed over as `L-card-0001.json`, reasons stripped |
+| 9 | grader · `L-grader-0001` | seat | opus | dispatched; result pending |
 | — | thinker (pane) · `L-thinker-0002` | seat | **Fable 5.1, a real pane** | opened by the operator's request as tmux window `flow:think-goals` (`claude -n think-goals --agent thinker --model claude-fable-5-1`, RETIRE list denied, ledger file preset), seeded with `content/think-goals-brief.md`: write the two goals (profitability platform operating; Yitzy's work operating) and their first charters, land with `--print-only` so the charter-set audit is the driver pane's to run via seat. Verified seat-billed: no `ANTHROPIC_API_KEY` in any environment, status line shows the seat windows |
 
 ## What v2 got right on this charter (so far)

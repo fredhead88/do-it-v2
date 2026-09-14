@@ -102,6 +102,8 @@ assert types == ["build-started", "build-done", "adr-filed", "build-deviation", 
 assert evs[0]["ts"] <= evs[-1]["ts"] and "--disallowedTools" in cmd and "Bash(*--no-verify*)" in cmd[cmd.index("--disallowedTools") + 1]
 c = TMP / "content" / "L-card-0001.md"
 assert c.exists() and len(c.read_text().splitlines()) <= 15 and "not built: n" in c.read_text(), c.read_text()
+cj = json.loads(c.with_suffix(".json").read_text())
+assert len(cj["acs"]) == 13 and "why" not in cj["deviations"][0], "every row survives beside the render; never the builder's why"
 assert (TMP / "content" / "L-adr-0001.md").exists() and evs[2]["adr"] == "L-adr-0001"
 assert evs[3]["deviation"] == "significant" and evs[3]["type"] == "build-deviation", "the deviation's kind survives the event type"
 assert evs[5]["root_cause"] == "false-premise", "a declaration is an event typed by its term"

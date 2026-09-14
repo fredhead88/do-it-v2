@@ -208,6 +208,15 @@ def write_card(out, subject, spawn):
     assert len(L) <= 15, len(L)
     path = CONTENT / (subject.replace("-spec-", "-card-") + ".md")
     path.write_text("\n".join(L) + "\n")
+    # The rendered card is the operator's fifteen lines (§5.10); the grader's packet
+    # needs EVERY per-criterion row, and the first real chain lost rows 7+ to the cap
+    # (baseline: "the card had rows for AC1–AC6 only"). The full card object is the
+    # durable record — minus `deviations[].why`, which is the builder's reasoning and
+    # the one thing the judge must never read.
+    full = {k: out[k] for k in ("status", "identity", "acs", "verify", "stubs", "tests",
+                                "not_built", "unknowns", "built_against")}
+    full["deviations"] = [{"type": d["type"], "what": d["what"]} for d in out["deviations"]]
+    path.with_suffix(".json").write_text(json.dumps(full, indent=1))
     return path
 
 

@@ -262,6 +262,14 @@ def p_grader(c):
     body = spec.read_text()
     crit = criteria(body)
     rows = [l for l in card.read_text().splitlines() if AC_ROW.match(l)]
+    # Every row, from the card object the wrapper writes beside the rendered card —
+    # the fifteen-line render drops rows past its room, and a grader that cannot see
+    # a claim cannot test it. Falls back to the render for a pre-sidecar card.
+    side = card.with_suffix(".json")
+    if side.is_file():
+        import json
+        rows = [f"{a['id']} [{a['criterion_type']}] {a['disposition']} · {a['evidence_type']} · "
+                f"check: {a['check']} · evidence: {a['evidence']}" for a in json.loads(side.read_text())["acs"]]
     vline = next((l for l in card.read_text().splitlines() if l.startswith("verify ")), "verify: not reported")
     ver = subprocess.run(["shasum", "-a", "256", str(v)], capture_output=True, text=True).stdout.split()[0][:16] \
         if v else "no script"
