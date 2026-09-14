@@ -146,19 +146,24 @@ def run_seat(spawn, cmd, packet, cwd, timeout):
     print(json.dumps({"seat": spawn, "packet": str(SEAT / f"{spawn}.packet.md"),
                       "result_expected_at": str(want), "or_output_at": str(bare),
                       "cwd": cwd, "timeout_s": timeout}), flush=True)
+    # The completion signal is the PANE's stamp — `<spawn>.meta.json` (or a full
+    # `result.json`) — never the Output file's existence: a contract iterating on its
+    # Output with `doit validate` writes an invalid draft first, and the wrapper read
+    # that draft on the first real spec-writer spawn and recorded it as failed while
+    # the validated version landed a second later.
+    meta_p = SEAT / f"{spawn}.meta.json"
     t0 = time.time()
-    while not (want.is_file() or bare.is_file()):
+    while not (want.is_file() or (meta_p.is_file() and bare.is_file())):
         if time.time() - t0 > timeout:
             raise subprocess.TimeoutExpired(cmd, timeout)
         time.sleep(2)
     time.sleep(1)                       # a writer that is still writing
     if want.is_file():
         return SeatResult(want.read_text())
-    # The bare Output the contract validated with `doit validate`, plus whatever the
-    # pane recorded beside it (`<spawn>.meta.json`: model, session, turns). The
-    # envelope is built here so no hand ever writes one.
-    meta_p = SEAT / f"{spawn}.meta.json"
-    m = json.loads(meta_p.read_text()) if meta_p.is_file() else {}
+    # The bare Output the contract validated with `doit validate`, plus what the pane
+    # recorded beside it (model, session, turns). The envelope is built here so no
+    # hand ever writes one.
+    m = json.loads(meta_p.read_text())
     env = {"is_error": False, "terminal_reason": "completed", "structured_output": json.loads(bare.read_text()),
            "num_turns": m.get("turns"), "duration_ms": m.get("duration_ms"), "usage": m.get("usage") or {},
            "total_cost_usd": None, "modelUsage": {m["model"]: {}} if m.get("model") else {},

@@ -277,8 +277,11 @@ def seat_writer_bare():
         if pk:
             sid = pk[0].name.split(".")[0]
             rp5.write_text("dug")
-            (TMP / "seat" / f"{sid}.meta.json").write_text(json.dumps({"model": "claude-opus-5", "session": "seat-3", "turns": 4}))
+            # an invalid draft first, as a contract iterating with `doit validate` writes
+            (TMP / "seat" / f"{sid}.output.json").write_text(json.dumps({**research, "answered": "maybe"}))
+            time.sleep(3.5)             # longer than the wrapper's poll + settle
             (TMP / "seat" / f"{sid}.output.json").write_text(json.dumps({**research, "path": "content/L-research-0005.md"}))
+            (TMP / "seat" / f"{sid}.meta.json").write_text(json.dumps({"model": "claude-opus-5", "session": "seat-3", "turns": 4}))
             return
         time.sleep(0.05)
 
