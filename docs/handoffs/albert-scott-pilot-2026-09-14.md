@@ -77,7 +77,12 @@ audit. None of them can run here.
   found. Available agents: blind-spec-auditor, claude, …`), so contracts linked into
   `~/.claude/agents/` after launch are invisible to it. Every contract is pasted into
   the sub-agent's prompt as `general-purpose`, with its `tools:` line as an
-  instruction. A pane started *after* `install.sh` may see them — untested.
+  instruction. **Later measured:** about an hour after `install.sh`, the same pane's
+  Agent-type list DID refresh and now lists every contract (`builder`, `grader`,
+  `spec-auditor`, …) with its `tools:` line — so the harness re-reads
+  `~/.claude/agents/` on some cadence, not only at launch. Spawns after that point can
+  use the contract as the type and get the sandbox for free; the first ten in this
+  pilot ran as `general-purpose`.
 - **Systemic:** if the seat backend is real, the contracts must be loadable as agent
   types by the interactive CLI, and `install.sh` should verify that (Active Problem 15's
   `doit doctor`).
@@ -370,3 +375,39 @@ the driver's `S<n>`.*
   already-filed charter, or whether a goal may list `Delivered by: L-charter-NNNN`
   against a requirement so the diff reads it. Either is a one-line rule; today
   there is none and the diff will be wrong forever on this project.
+
+### T6. "How relevant is this still?" cannot be answered against a prod that is 60 specs behind master
+- **Mechanism:** the operator's second reaction to Goal A: the named defects are old
+  spec numbers (255 is June) and the most user-relevant block is the Instinct
+  user-imitation audit; he wanted relevance settled *before* the goal was handed over.
+  Measured: the four money correctives are dated 09-06…09-11 (fresh, live-measured;
+  only the spec numbers are old); the Instinct set is 24/26 shipped with **9 of 25
+  verdicts REJECTED** and 598 files in the v4 corrective inbox. But prod is at
+  `1afd6273c` (09-12) with master 60 merged specs ahead, so any "is it still live?"
+  probe today measures a sha that is about to be replaced.
+- **Pilot:** Goal A makes re-measurement *after* the deploy a requirement (each named
+  defect is re-probed on the deployed sha; still-live → owning charter, dead →
+  recorded as already-fixed), instead of triaging the inbox now.
+- **Systemic:** a goal for an adopted project with a deploy backlog should carry a
+  "re-measure on the new sha" requirement as a standing pattern; D96's probe is the
+  Planner's tool for it, and the Thinker brief should say that relevance of inherited
+  defects is a probe, not a reading.
+
+### T7. The multi-dev ingest port exists in the design and not on this box
+- **Mechanism:** §4.8/D13–D19 answer the operator's "how does Yitzy's stuff enter v2?"
+  precisely: another developer's spec is a **free-standing spec** (`charter: null`,
+  D15), author-prefixed id (D16), T2 review tier when it touches prod/data/money
+  (D19), submitted into *our* Executor only (D17); never a charter, never a brief,
+  optionally attached to a charter later. On this box the only ingest is v4's
+  `ingest_inbound_spec.sh` (human-only, spec 552), which allocates a v4 number and
+  writes the v4 ledger — no `spec-written` event with `charter: null` is appended
+  anywhere, so v2's Executor cannot see an ingested spec.
+- **Pilot:** Goal B states the going-forward flow in the design's terms and keeps
+  ingest human-only; the bridge (v4 ingest → v2 `spec-written`) is a DO-IT change and
+  lives here, not in a charter.
+- **Systemic:** the ingest port needs a driver-side command (`doit ingest <pr>
+  --confirm`?) that performs the human-gated fetch and appends `spec-written`
+  `charter: null` `author: <prefix>` — the same shape as v4's script, pointed at the
+  ledger. Also: Vercel marks every docs-only inbound PR red because the commit
+  author's GitHub login is not linked to his Vercel member account — a project-side
+  fact, but the same class as S11: an external signal the operator has to read past.
