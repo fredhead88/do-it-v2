@@ -685,3 +685,18 @@ the driver's `S<n>`.*
 - **Systemic:** a Planner probe (D96) for any charter whose done-condition is a CI check-run
   should be exactly that enumeration; and a fail-fast CI is the wrong instrument for a
   done-condition of "green whatever reds remain" (the charter-set audit's finding 3 said so).
+
+### S27. A local "enumerate every red" run is not CI: box state makes 503 false NEWs out of 1
+- **Mechanism:** the pane ran the full suite on the builder box to list every NEW red at once.
+  The gate reported `new=7150` (503 node ids): live-DB tests that skip on CI (no DSN) but run
+  here (`.env` present) and hit the spec-909 denial; scanner tests polluted by a nested tree the
+  listing session keeps inside the repo (`.qurlife-l3-work/`, git-ignored); box-tooling tests
+  reading `~/.claude` state; collection-parity tests needing base refs. Signal-to-noise ≈ 0.
+- **Pilot:** discarded. The workflow already has the right instrument — `python-tests.yml`
+  `workflow_dispatch` with `full_run: true` drops the fail-fast flag on a clean runner — and the
+  pane triggered it on master (`gh workflow run python-tests.yml --ref master -f full_run=true`).
+  ~45 min of box CPU wasted; also noted `/tmp` (tmpfs, 7.7G) at 81% from six `/tmp/listing-*`
+  worktrees of the parallel session — the OOM/tmpfs class CLAUDE.md warns about.
+- **Systemic:** a probe whose external is "CI" must run ON CI; the Planner contract's D96 should
+  say so, and `doit` could own the `gh workflow run … full_run=true` line as the canonical
+  "enumerate reds" probe for this repository.
