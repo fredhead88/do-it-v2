@@ -358,6 +358,19 @@ def main(a):
     out = res.get("structured_output")
     if out is None:
         fail("null structured_output — tools: line lacks StructuredOutput, or the model never called it")
+    # The CLI enforces --json-schema on its own route; the seat route has no CLI, so
+    # the schema is checked here for both — a 440-character finding against a
+    # 400 cap came back from the first seat spawn and nothing refused it.
+    try:
+        import jsonschema
+        jsonschema.validate(out, json.loads(schema_path.read_text()))
+    except ImportError:
+        if seat:
+            fail("jsonschema is not importable and this is a seat spawn — the Output is unchecked, "
+                 "and unchecked is never clean (pip install jsonschema)")
+    except jsonschema.ValidationError as e:
+        fail(f"structured_output violates {schema_path.name}: {e.message[:200]} at "
+             f"{'/'.join(str(x) for x in e.absolute_path) or '<root>'}")
     if out.get("contamination"):
         fail("contamination: the packet carried what Blindness strips; the run is void")
     if kind and not (a.role == "spec-writer" and out["status"] != "written"):

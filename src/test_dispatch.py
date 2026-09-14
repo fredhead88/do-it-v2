@@ -230,6 +230,38 @@ assert code == 0, [e.get("why") for e in sev]
 assert [e["type"] for e in sev] == ["spawn-started", "research-filed", "spawn-done"], [e["type"] for e in sev]
 assert sev[-1]["spawn_path"] == "seat" and sev[-1]["session"] == "seat-1" and sev[-1]["model"] == "seat-model", sev[-1]
 assert sev[-1]["cost_usd"] is None, "a seat spawn has no list-price figure and must not read as free"
+N += 1
+
+# The schema is the wrapper's to enforce on the seat route — the CLI is not there to.
+rp3 = TMP / "content" / "L-research-0003.md"
+
+
+def seat_writer_bad():
+    for _ in range(400):
+        pk = list((TMP / "seat").glob("*.packet.md")) if (TMP / "seat").is_dir() else []
+        pk = [q for q in pk if not (TMP / "seat" / (q.name.split(".")[0] + ".result.json")).exists()]
+        if pk:
+            sid = pk[0].name.split(".")[0]
+            rp3.write_text("dug")
+            (TMP / "seat" / f"{sid}.result.json").write_text(json.dumps(
+                {"is_error": False, "structured_output": {**research, "path": "content/L-research-0003.md",
+                                                          "answered": "maybe"},
+                 "num_turns": 1, "usage": {}, "total_cost_usd": None, "modelUsage": {}, "session_id": "seat-2",
+                 "permission_denials": []}))
+            return
+        time.sleep(0.05)
+
+
+threading.Thread(target=seat_writer_bad, daemon=True).start()
+a = argparse.Namespace(role="research", subject="L-spec-0001", packet=str(PK), path=str(rp3), cwd=str(REPO),
+                       charter=None, project="t", mcp_config=None, timeout=1, max_usd=None, seat=True)
+try:
+    dispatch.main(a)
+    code = 0
+except SystemExit as e:
+    code = e.code
+sev = [json.loads(l) for l in max((TMP / "events").glob("L-research-*.jsonl")).read_text().splitlines()]
+assert code == 1 and sev[-1]["type"] == "spawn-failed" and "violates research.schema.json" in sev[-1]["why"], sev[-1]
 del os.environ["DOIT_SEAT"]
 N += 1
 print(f"dispatch: {N} spawns mocked, every check fired")
