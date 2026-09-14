@@ -418,8 +418,12 @@ def fold(events):
         owed = sum(1 for s in mine if s["state"] == "shipped-owed-evidence")
         if cid in retracted:
             c["state"] = "retracted"
-        elif (mine and all(s["state"] in ("accepted", "shipped-owed-evidence", "dropped",
-                                          "closed-unbuilt") for s in mine)
+        # An operational charter (S25/S35: a deploy, a drill) has NO specs — its
+        # deliverable is a record. `all()` over an empty set is True, so such a
+        # charter closes on the operator's l1-complete + the sweep fixpoint + a
+        # complete charter review, exactly the three things that ARE its lane.
+        elif (all(s["state"] in ("accepted", "shipped-owed-evidence", "dropped",
+                                 "closed-unbuilt") for s in mine)
               and "sweep-fixpoint" in types and owed <= K
               and not open_briefs(c["evs"])
               and charter_review(c["evs"]) == "charter-review-complete"):

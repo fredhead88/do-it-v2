@@ -677,6 +677,7 @@ the driver's `S<n>`.*
 | — | executor (pane) · deploy attempt #2 | — | — | ON HOLD: coordinator's candidate `34cf284` REJECTED in independent review (`GRANT USAGE ON SCHEMA extensions` silently no-ops on hosted Supabase → `gen_random_bytes` permission denied at first real capability grant); successor removes the `extensions` dependency |
 | — | executor (pane) · revert | — | — | Chain `34cf28425→81992d6f3→93f85aeeb` ff-pushed after a clean prod role assert → required `pg-parity` + `spec 770` RED (role guard vs shared CI cluster) → operator "revert it" → `173e03743` (tree == `b7b935c51`); its `pytest` check red only on collection-parity `lost=4` (a revert of added tests reads as lost) |
 | — | executor (pane) · deploy attempt #2 | — | — | Chain `a78d815e0…21962db5f` (strict role semantics + CI scratch cleanup) verified, ff-pushed, all required green (pytest queued 30 min, ran 45); `doit deploy` gate PASS block-mode, `deploy.sh --all` LANDED `21962db5f` 17:23:40Z, migrations `→ listing_membership_l1_v1`; wrapper could not mark landed (S34), stopped, landed recorded by a record-only `doit deploy --sha 21962db5f`; R5 PASS, R6 captured on 4 surfaces × 2 clients × 2 months |
+| 25 | charter-reviewer · `L-charter-reviewer-0004` → re-served as `-0005` (charter 2) | seat | opus | 30 turns, 89k, 11.5 min; `complete`, depth full, 7 findings (untagged unmapped money figure on the ASIN surface; goya ASIN grain empty; request_health collector cron failing hourly against a prohibited head; R7 met by re-scoping two of four specs; R5 proves by /version alone — it md5-matched five files itself; browser leg undrivable without a staff account). First serve stamped `project: .do-it` (S35) |
 | — | executor (pane) | seat | this pane | R1–R3 of L-charter-0002 done by hand under the operator's ruling (rollback dry-run, lock absent, migration list + resolver target, 1439 merged `bd2a7bafb` and pushed; CI: one NEW red = the 0004 red); S22 discovered (push-deploy workflows); `doit gate l-spec-0002 master` clean pre-review |
 
 ### S26. One red per ~2-hour cycle: the fail-fast plugin turns "make master green" into a serial charter chain
@@ -853,3 +854,29 @@ the driver's `S<n>`.*
   under `logs/` as it is produced, with the event carrying the path, not a tail; (3) a
   `deploy-started` with neither `landed` nor `failed` after the wrapper is gone should be
   visible on the board as its own row, not silently absent.
+
+### S35. A spec-less operational charter could not fold L2-complete, and a seat spawn launched from the wrong directory strands its events under a second project
+- **Mechanism, half one:** the L2 conjunct read `mine and all(...)`: a charter with zero specs
+  (`mine == []`) could never close, whatever the operator, the sweep and the charter review said.
+  L-charter-0002 — the deploy, the pilot's headline — sat at `L1-complete` with `l1-complete`,
+  `sweep-fixpoint`, zero open in-scope briefs and `charter-review-complete{depth: full}` all on the
+  ledger. S25 already recorded that an operational charter has no lane path *into* the close;
+  this is the same charter having no path *out* of it. Fixed in the pane by dropping `mine and`
+  (all() over the empty set is True; the three events that remain ARE an operational charter's
+  lane); the fold tests pass.
+- **Mechanism, half two:** `fold.append` stamps `project` from `$DOIT_PROJECT`, else the
+  subject's first event, else `cwd.name`. The seat wrapper's child ran without the pane's env and
+  the reviewer's events landed as `project: ".do-it"` because the pane launched `doit dispatch`
+  from the ledger root instead of `repos/albert-scott`. The filtered board (§9.1/D93) ignored
+  the whole review — verdict, seven findings, walkthrough — with no warning: `charter_review()`
+  returned `None` exactly as if nobody had reviewed. Recovered by re-dispatching from the repo
+  directory and serving the identical validated output + meta to the new spawn (`-0005`); the
+  `-0004` file stays as the append-only record of a mis-stamped spawn.
+- **Cost:** one wasted dispatch, ~15 min, and a board that said "not reviewed" about a review
+  that had run for 11 minutes on Opus.
+- **Systemic:** (1) `subject_project()` should win over `cwd.name` even when the first event's
+  project differs from the caller's — a charter's events are the charter's project, full stop;
+  the cwd fallback belongs only to a subject with no prior event; (2) the dispatch wrapper
+  should refuse (or warn loudly) when `cwd.name` differs from the subject's project;
+  (3) the board needs an `IGNORED (other project)` count so a filtered read cannot silently
+  hide events on the subject it is displaying.
