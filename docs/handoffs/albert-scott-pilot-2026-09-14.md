@@ -608,19 +608,23 @@ the driver's `S<n>`.*
   Thinker contract's five sections have no "measured, not read" requirement for the Intent's
   premise; the spec-auditor's `false-premise` category exists one level too late.
 
-### S23. The spec's Verification block is prose the grader runs — and a `;` in it inverted the gate
-- **Mechanism:** the spec-writer's rework put the spec-820 scanner into the §9 chain "advisorily"
-  with `;` before the final pytest. In bash that discards the whole preceding list's status, so
-  `VERIFY_OK` would print after an earlier link failed; and under `set -e` a red scanner as the
-  list's last command would abort the script instead. The verify SCRIPT the builder runs is the
-  Executor's (charter 1 precedent), so the pane rewrote it as one `&&` chain with the scanner as a
-  labelled advisory line after it, and told the builder which one is the checker.
-- **Pilot:** `verify-L-spec-0002.sh` (Executor-authored) differs from the spec's §9 block. The
-  grader's packet carries the script; the reviewer reads the spec. Recorded here so the divergence
-  is not read as drift.
-- **Systemic:** `doit packet builder` should GENERATE the verify script from the spec's fenced
-  block and lint it (`bash -n`, no bare `;`/`||` inside the gated chain, absolute interpreter),
-  refusing the packet on a violation — the same "packets are a script's output" rule (S6).
+### S23. The spec's Verification block IS the checker, generated verbatim — and a `;` in it inverted the gate
+- **Mechanism:** `packet.py::verify_script` turns the spec's fenced §9 block into
+  `content/verify-<spec>.sh` (`set -euo pipefail` + the block) at every `doit packet builder`,
+  overwriting whatever is there. The rework spec-writer put the spec-820 scanner into the chain
+  "advisorily" with `;` before the final pytest: `;` discards the preceding list's status, so
+  `VERIFY_OK` printed after a false link (`! grep -q '@ALBERT_SCOTT_PYTHONPATH@'` — the builder
+  had written the token in a comment); and had the chain reached the scanner, its pre-existing
+  red as the list's last command would have aborted the script under `set -e`. The builder
+  reported "chain links all true"; the grader re-ran the checker and caught both.
+- **Pilot:** the pane first hand-wrote a corrected script, which the packet builder silently
+  overwrote (the pane did not know verify_script existed). The grade came back `card_ok: no`,
+  AC3 unmet; the fix is a round-2 spec-writer rework of §9 (chain-only, scanner after it) plus a
+  builder rework. The grader worked exactly as designed.
+- **Systemic:** `verify_script` should LINT the block before writing it — `bash -n`; no bare
+  `;`, `||` or newline-separated statement inside the gated chain; absolute interpreter — and
+  refuse the packet on a violation. The Executor's hand-authored script was the wrong remedy
+  and the generator is the right place.
 
 ### S24. A builder that saves evidence under `seat/<its own spawn id>…` poisons the grader packet
 - **Mechanism:** the builder saved its AC10 droplet observation as
