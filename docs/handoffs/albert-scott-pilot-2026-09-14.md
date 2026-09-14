@@ -670,3 +670,18 @@ the driver's `S<n>`.*
 | 20 | builder (rework) · `L-builder-0003` | seat | opus | 21 turns, 113k; amended to `937c7adc6`, token count 0, checker `VERIFY_OK` + `ADVISORY spec-820 exit=1`; corrected the first card's "820 red on 7 files" (5) |
 | 21 | grader (re-grade) · `L-grader-0003` | seat | opus | 14 turns, 81k; 10 met, AC11/AC12 cannot-assess (owed), done-condition satisfied, `matches_intent: yes`, `card_ok: yes` |
 | — | executor (pane) | seat | this pane | R1–R3 of L-charter-0002 done by hand under the operator's ruling (rollback dry-run, lock absent, migration list + resolver target, 1439 merged `bd2a7bafb` and pushed; CI: one NEW red = the 0004 red); S22 discovered (push-deploy workflows); `doit gate l-spec-0002 master` clean pre-review |
+
+### S26. One red per ~2-hour cycle: the fail-fast plugin turns "make master green" into a serial charter chain
+- **Mechanism:** CI's `pytest_fail_fast_plugin` stops the run at the first NEW red, so each merge
+  reveals exactly one more pre-existing red. Charter 1 cleared test_903 → revealed the activation
+  red; charter 4 cleared that → revealed `test_pipeline_common::TestPipelineDb::test_start_and_complete_run`,
+  which reproduces at the deployed sha of Sep 12 and cannot be baselined: it emits a `failed` AND
+  an `error` for one node id, which `pytest_baseline_gate.py` reports as a COLLISION and reads as
+  NEW forever. Both charters' R5 said "file the next one as a brief, do not chase" — correct per
+  charter, but the deploy has now been refused three times by three different pre-existing reds.
+- **Pilot:** the pane launched the full suite locally WITHOUT fail-fast (junit + the same baseline
+  gate) to enumerate every NEW red in one pass, so the next charter is "master green" with the
+  whole list as its Requirements, not "the next red".
+- **Systemic:** a Planner probe (D96) for any charter whose done-condition is a CI check-run
+  should be exactly that enumeration; and a fail-fast CI is the wrong instrument for a
+  done-condition of "green whatever reds remain" (the charter-set audit's finding 3 said so).
