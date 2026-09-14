@@ -736,3 +736,25 @@ the driver's `S<n>`.*
   hand here, under a recorded decision); (4) fail-fast CI plus one-red-per-charter is the
   worst possible pairing — the probe row (S27) fixes it; (5) seat transcription (S18) costs a
   human-shaped mistake per audit — the StructuredOutput return must be the Output.
+
+### S30. The first real `doit deploy` failed at the target's migration step, and the script threw away the one line that says why
+- **Mechanism:** `deploy.py` runs the handed-in command, keeps only a `TAIL` of its output in
+  the `deploy-failed` event, and prints the same tail to stdout. The failing statement block was
+  in the tail; the psycopg2 error line (the actual "why") was above it and is gone. The pane made
+  it worse: a second launch (dropped by the flock, correctly) opened the same log file with `>`
+  and truncated the first run's stdout. Net: a production deploy failed and nobody can quote the
+  error. Also observed: `deploy.py`'s "rollback first — git revert -m 1 <sha>" advice is wrong
+  for this target — the failure was the target (migration) not the build, `blocked-external` was
+  appended correctly, and a `git revert` of a green merge would have re-redded master; the
+  right rollback was the target's own (`./deploy.sh --rollback`), which the pane ran.
+- **Pilot:** prod: healthy throughout (API restarted by deploy.sh, then by the rollback), tree
+  synced then restored, `/version` `b7b935c51` for ~8 minutes then back to `1afd6273c`, DB
+  untouched (transactional DDL). The rollback's own post-check failed on a POE parser-lineage
+  marker (`POE_PARSER_CODE_REVISION` absent from the running service's environment vs the
+  restored marker file) — a consistency assertion, not a functional break.
+- **Systemic:** `deploy.py` must persist the FULL command output to `$R/logs/deploy-<spec>-<sha>-<n>.log`
+  and name it in the event (the tail is for the board, not the record); it must refuse a second
+  concurrent launch BEFORE opening any file the first holds; its failure advice must distinguish
+  build-rollback (`git revert`) from target-rollback (the target's own command, handed in as a
+  `--rollback` argument and RUN by the script when `--check` fails, §5.8) — S8's split, now
+  measured on a real failure.
