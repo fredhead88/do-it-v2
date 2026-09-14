@@ -715,3 +715,24 @@ the driver's `S<n>`.*
   `spec-auditor` `spawn-done` but zero `audit-finding` events since the last `spec-written` — an
   empty fix list on a rework round is never right; and `dispatch --seat` should write
   `spawn-started` only when the pane stamps `meta.json`, or record `spawn-abandoned` on SIGTERM.
+
+### S29. Wall-clock: one small fix spec costs ~2 hours through v2, and the operator's verdict is "terrible"
+- **Measured (second sitting, 07:11 → 13:10 UTC, ~6 h):** three merges to master, zero deploys.
+  Per spawn: spec-writer 9–15 min (166k–194k sub-agent tokens), spec-auditor 9–11 min, builder
+  12–21 min, grader 6 min, reviewer 6 min, plan-auditor 2–4 min. Per spec end to end (write →
+  audit → rework → build → grade → review → merge): L-spec-0002 ≈ 2 h 10 min including one
+  grade-bounce; L-spec-0003 ≈ 2 h and counting including one build-escalation. Per merge: +30
+  min CI. Serial reds via fail-fast (S26): three merges where one enumeration would have done.
+  Pane overhead: two transcription mistakes (S18/S28) ~15 min; the wrong local enumeration
+  (S27) ~45 min; two operator pauses ~60 min.
+- **Operator ruling (Ephraim, 2026-09-14 ~13:05 UTC): "that amount of time is terrible. You
+  must file that in the list of observations about the system."** Filed.
+- **Systemic:** (1) the blind audit rounds are the largest fixed cost and found real defects
+  every time — keep them, but cap the spec at the size an auditor reads in 5 min (the 700-line
+  L-spec-0003 is the problem, not the audit); (2) builder/grader/reviewer read the whole spec
+  and the whole code path again each — the packet should carry the spec's AC table and the
+  diff, not the spec; (3) a rework that changes one literal should not need a full spawn
+  (D116's "the Executor never edits a spec" costs 10 min per literal — the Executor did it by
+  hand here, under a recorded decision); (4) fail-fast CI plus one-red-per-charter is the
+  worst possible pairing — the probe row (S27) fixes it; (5) seat transcription (S18) costs a
+  human-shaped mistake per audit — the StructuredOutput return must be the Output.
