@@ -675,6 +675,8 @@ the driver's `S<n>`.*
 | 24 | charter-reviewer · `L-charter-reviewer-0003` (charter 4) | seat | opus | `complete`, 3 findings; two adjacent briefs filed by the pane |
 | — | operator (pane, under ruling) · closes | — | — | `spec-closed` L-spec-0001, L-spec-0002 (built+merged, owed evidence never derives; S33) and ghost L-spec-0004 (S32); charters 1 and 4 fold **L2-complete**; `doit reap` removed `l-spec-0001/0002/0003` worktrees + branches, nothing retained |
 | — | executor (pane) · deploy attempt #2 | — | — | ON HOLD: coordinator's candidate `34cf284` REJECTED in independent review (`GRANT USAGE ON SCHEMA extensions` silently no-ops on hosted Supabase → `gen_random_bytes` permission denied at first real capability grant); successor removes the `extensions` dependency |
+| — | executor (pane) · revert | — | — | Chain `34cf28425→81992d6f3→93f85aeeb` ff-pushed after a clean prod role assert → required `pg-parity` + `spec 770` RED (role guard vs shared CI cluster) → operator "revert it" → `173e03743` (tree == `b7b935c51`); its `pytest` check red only on collection-parity `lost=4` (a revert of added tests reads as lost) |
+| — | executor (pane) · deploy attempt #2 | — | — | Chain `a78d815e0…21962db5f` (strict role semantics + CI scratch cleanup) verified, ff-pushed, all required green (pytest queued 30 min, ran 45); `doit deploy` gate PASS block-mode, `deploy.sh --all` LANDED `21962db5f` 17:23:40Z, migrations `→ listing_membership_l1_v1`; wrapper could not mark landed (S34), stopped, landed recorded by a record-only `doit deploy --sha 21962db5f`; R5 PASS, R6 captured on 4 surfaces × 2 clients × 2 months |
 | — | executor (pane) | seat | this pane | R1–R3 of L-charter-0002 done by hand under the operator's ruling (rollback dry-run, lock absent, migration list + resolver target, 1439 merged `bd2a7bafb` and pushed; CI: one NEW red = the 0004 red); S22 discovered (push-deploy workflows); `doit gate l-spec-0002 master` clean pre-review |
 
 ### S26. One red per ~2-hour cycle: the fail-fast plugin turns "make master green" into a serial charter chain
@@ -826,3 +828,28 @@ the driver's `S<n>`.*
   `closed-unbuilt`; (3) an allocation with no `spec-written` after its spawn fails should not
   bind to the charter's L2 conjunct — the fold should treat it as `void`, or `alloc` should
   be reversible by the actor that allocated it.
+
+### S34. `doit deploy` can never mark a deploy landed when the target prints a short sha — and would have written a false `deploy-failed` on a deploy that landed
+- **Mechanism:** `deploy.py::live()` is `code == 0 and sha[:12] in out`. The `--sha` is the
+  full merge sha (the script refuses anything under 7 chars and the driver notes say "pass the
+  full merge sha"). The target's `/version` prints `{"sha":"21962db5f",…}` — nine characters,
+  what `git rev-parse --short` gives on this repo. Nine can never contain twelve. The wrapper ran
+  the gate and `deploy.sh --all` (exit 0, `/version` stamped at 17:23:40Z), then sat in its
+  check loop for the rest of the 1500 s cap, at the end of which it would have appended
+  `deploy-failed` + `blocked-external` with `why=the check never reported 21962db5f239 live` —
+  on a deploy that was live from minute two. The listing coordinator spotted the same mismatch
+  from the outside and sent an URGENT "do not roll back on the timeout".
+- **Compounding:** because `subprocess.run(capture_output=True)` holds every byte of the
+  deploy command's output in memory until the wrapper exits, stopping the wrapper (the only way
+  to prevent the false event — `deploy.py` traps nothing) discards the whole `deploy.sh` log.
+  S30's loss was a tail; this one is total. The post-deploy evidence had to be re-measured on
+  production by hand.
+- **Cost:** ~12 minutes of a live production deploy with no truthful ledger state; a second,
+  record-only `doit deploy … --sha 21962db5f --cmd 'echo …'` to get `deploy-landed` written;
+  an operator interrupt.
+- **Systemic:** (1) `live()` must match on the longer-of-the-two-prefixes rule — `out` contains
+  `sha[:n]` for the largest n ≤ 12 that the check actually prints, or simply `sha[:7] in out`
+  since `--sha` already refuses under 7; (2) the deploy command's output must stream to a file
+  under `logs/` as it is produced, with the event carrying the path, not a tail; (3) a
+  `deploy-started` with neither `landed` nor `failed` after the wrapper is gone should be
+  visible on the board as its own row, not silently absent.
