@@ -621,3 +621,15 @@ the driver's `S<n>`.*
 - **Systemic:** `doit packet builder` should GENERATE the verify script from the spec's fenced
   block and lint it (`bash -n`, no bare `;`/`||` inside the gated chain, absolute interpreter),
   refusing the packet on a violation — the same "packets are a script's output" rule (S6).
+
+### S24. A builder that saves evidence under `seat/<its own spawn id>…` poisons the grader packet
+- **Mechanism:** the builder saved its AC10 droplet observation as
+  `seat/L-builder-0002.droplet-activation-rows.txt` and cited the path in the card's evidence.
+  `doit packet grader` strips the builder's spawn id by design (Blindness) and REFUSED the packet
+  — correctly — but the refusal is printed on stdout where the packet path goes, so the shell
+  passed the refusal text to `doit dispatch --packet` as a filename and got a traceback.
+- **Pilot:** the pane moved the file to `content/L-spec-0002-droplet-activation-rows.txt`,
+  rewrote the path in the card JSON/MD and the builder Output, and rebuilt the packet (clean).
+- **Systemic:** two fixes — the builder contract should name where evidence files go
+  (`content/<spec>-…`, never `seat/`), and `packet.py` should print a refusal to stderr and exit
+  non-zero so a caller cannot mistake it for a path.
