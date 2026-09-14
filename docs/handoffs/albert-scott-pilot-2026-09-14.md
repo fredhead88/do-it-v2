@@ -167,7 +167,23 @@ audit. None of them can run here.
   read and must not write), or hash the granted tree, rather than the whole status.
   Declaring volatility is a stopgap that has to be repeated per project.
 
+### S12. There is no path to file a goal, so an adopted project stays at `goal: null`
+- **Mechanism:** D98 makes `Covers:` the governor's checkable arrow, and `think.py`
+  reads `goal-filed` events — but nothing writes one. `doit alloc` has no `goal` kind
+  in its documentation, `thinker.md` has no goal shape, and the board never says
+  "no goal on file". The operator's actual goals here — *the profitability platform
+  operating* and *everything Yitzy sent over operating* — are goal-shaped (dated,
+  several charters each), and the pilot charter cites `Covers: none` because there is
+  nowhere to point.
+- **Pilot:** none; the charter runs under §12.2's `goal: null`.
+- **Systemic:** a Thinker shape that produces a goal file (title, date, `G<n>`
+  requirement ids, out-of-scope seeds) and a `--land-goal` that appends `goal-filed`;
+  a HEALTH line when charters exist and no goal does.
+
 ### Smaller, all real
+- A worktree cut from this repository has no `.venv`; the verify command the spec
+  authors must either use the repository's absolute interpreter or the Executor must
+  link the venv into the worktree at cut time (the pilot links it).
 - `install.sh` creates `events/` and `content/` but not `repos/` (baseline finding 1,
   still true); `ln -s` was the operator's line again.
 - `doit append` re-renders the whole board to stdout on every append; in a pane that
@@ -185,4 +201,19 @@ audit. None of them can run here.
 | 1 | plan-auditor (cut) · `L-plan-auditor-0001` | seat | opus | audit ran (11 turns, ~124 s, 82k sub-agent tokens): 6 findings, `bad_cut: false`, `charter-gap` + `worked`. Output over `maxLength` four times (S9/S10). **Spawn voided by the wrapper**: a cron rewrote `docs/sessions/process-health.md` during the run (S11) |
 | 2 | plan-auditor (cut) · `L-plan-auditor-0002` | seat | opus | re-dispatch, same packet, under `DOIT_REPO_VOLATILE`; fed spawn 1's validated on-disk Output — 6 `audit-finding` + 2 declarations + `spawn-done` landed |
 | — | planner (pane) | seat | this pane | acted on all six: footprint +`handover_validate.py`; `L-adr-0001` (fixture-repo rule); Plan with SD1–SD4 (SD2 = lazy referent at the entry point, the auditor's missed extract) and a line per finding; `plan-written`; stage-plan pre-pass clean on all six checks including the acquisition trail |
-| 3 | plan-auditor (plan) · `L-plan-auditor-0003` | seat | opus | dispatched with the `doit validate` loop; result pending |
+| 3 | plan-auditor (plan) · `L-plan-auditor-0003` | seat | opus | 17 tool uses, ~224 s, 97k tokens; **validated its own Output first try** with `doit validate`. 7 findings, `charter-gap` + `worked`. Found a same-defect sibling test outside the footprint (`tests/test_903_r2_kit_handover_guards.py`, also red, not baselined), that approach (a) therefore cannot reach the done-condition, and that the Plan's SD2/SD3 contradicted two in-repo contract statements |
+| — | planner (pane) | seat | this pane | acted on all seven (no re-audit — one round per stage): SD2 fixed to a call shape and named as approach (b); SD3 pins observed behaviour and defers FAIL-vs-WARN to Q4; SD4 rules (a) out; SD5 brings the sibling in (footprint widened, `charter-gap` expected); SD6 an owed observed-data AC on the check-run; Q1 stands; finding 7 (deferral) is the operator's ruling |
+| 4 | spec-writer · `L-spec-writer-0001` | seat | opus | dispatched on the slot packet; result pending |
+
+## What v2 got right on this charter (so far)
+- **Two blind audits found what the v4 spec missed.** 1447's `writes:` footprint omitted
+  `handover_validate.py` and a sibling test file that is red from the identical defect;
+  its two "permitted approaches" were both symptom-side of an eager resolve that
+  contradicts the module's own docstring. Neither auditor had my reasoning; both read
+  the code. Under v4 this would have been a builder discovering it mid-build and a
+  rework round.
+- **The pre-pass earned its keep.** `doit audit` said `undetermined` on the acquisition
+  trail at stage cut and `none` at stage plan; both auditors treated the block as
+  ground truth and spent their pass on semantics, as designed.
+- **Every failure is an event.** The voided spawn, the re-dispatch, the schema retries
+  are all in the ledger with reasons; nothing was edited.
