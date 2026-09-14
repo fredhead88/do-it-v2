@@ -225,7 +225,9 @@ audit. None of them can run here.
 | 5 | spec-writer · `L-spec-writer-0002` | seat | opus | re-dispatch, same packet, same validated Output under the fixed completion signal — `spec-written`, `charter-gap`, `owed-ac`, `spawn-done` |
 | — | planner (pane) | seat | this pane | `l1-complete` appended (one slot, written) — before `spec-written` landed, see S13 |
 | — | executor (pane) | seat | this pane | first Executor action: `doit packet spec-auditor` built the packet from the ledger (pre-pass: 1 placeholder grep = the spec's one counted unknown; ids cited = charter ids exactly) |
-| 6 | spec-auditor · `L-spec-auditor-0001` | seat | opus | dispatched; result pending |
+| 6 | spec-auditor · `L-spec-auditor-0001` | seat | opus | 29 tool uses, ~416 s, 123k tokens; validated first try. 7 findings (every one with a runnable `confirms_with`), 9 rejected with the clearing observation, 2 advisory, `bad_cut: false`. Caught: no `.venv` in any worktree so every verify command would die; a review path reading a banner `_run_validate_spec` never prints; the OSError branch nobody pinned; a Verification chain that prints OK without the new tests existing; guessed `-k` filters for unnamed tests |
+| — | executor (pane) | seat | this pane | `doit packet spec-writer --slot` built the rework packet: round one's slot + the 7-item fix list (S6: round one's packet lives under `content/`, so `--slot` is needed again on rework — the script's `prev` glob only sees `packets/`) |
+| 7 | spec-writer (rework) · `L-spec-writer-0003` | seat | opus | dispatched; result pending |
 
 ## What v2 got right on this charter (so far)
 - **Two blind audits found what the v4 spec missed.** 1447's `writes:` footprint omitted
