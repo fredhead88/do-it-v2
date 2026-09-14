@@ -319,6 +319,21 @@ check("--spec and --writes compose",
 check("a stray argument is still refused", _exit(lambda: mg.parse(["main", "src/*"])))
 check("--writes with no value is still refused", _exit(lambda: mg.parse(["main", "--writes"])))
 
+# ★ the second real merge: the spec-writer put a parenthetical on the Writes: line and the
+# paths in a fenced block under it. A list under an empty line is a grant; a sentence is not.
+(CONTENT / "L-spec-block.md").write_text(
+    "**Writes:** (the merge gate's grant — the slot's footprint, verbatim)\n\n```\na/b.py\nc/\n```\n\n## 5. Next\n")
+check("a parenthetical-only Writes: line takes the fenced list under it",
+      mg.writes_grant("L-spec-block") == ["a/b.py", "c/"])
+(CONTENT / "L-spec-bullets.md").write_text("Writes: (see below)\n- `a/b.py`\n- c/\n\nnot a path\n")
+check("bullets under it too, and the list ends at the blank line",
+      mg.writes_grant("L-spec-bullets") == ["a/b.py", "c/"])
+(CONTENT / "L-spec-parenprose.md").write_text("Writes: (the grant)\n\nthe web dashboard only\n")
+try:
+    mg.writes_grant("L-spec-parenprose"); check("prose under a parenthetical is still refused", False)
+except mg.Undetermined:
+    check("prose under a parenthetical is still refused", True)
+
 # ★ the first real merge: the spec template has no Writes: line, --writes was given anyway
 (CONTENT / "L-spec-nw.md").write_text("# a spec with no grant line\n")
 check("★ --writes supplies the grant when the spec file states none", mg.grant_for("L-spec-nw", ["calc.py"]) == ["calc.py"])

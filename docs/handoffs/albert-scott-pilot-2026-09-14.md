@@ -212,6 +212,43 @@ audit. None of them can run here.
   `blocking`/`reverify`, charter-reviewer `unrolled_not_built`) needs the same
   sidecar, or the arrays go into the ledger as their own events.
 
+### S15. An owed criterion has no route to `shipped-owed-evidence`, and K=0 means it could not ride anyway
+- **Mechanism:** `fold.spec_state` derives `accepted` from a `confirmed` verdict plus a
+  review, and `shipped-owed-evidence` from an `owed-ac` event whose `wake_at` is in
+  the future. But `owed-ac` is a *declaration* (spec-writer, builder) and the
+  declaration schema is `{term, line}` — no `wake_at` can be written, so the D25 state
+  is unreachable from any real spawn. A spec with one honestly-owed criterion (here
+  AC12: the post-merge check-run) grades `cannot-assess` on that row, the wrapper
+  writes `confirmed: false`, and after the merge the spec reads plain `shipped` —
+  the same rendering as "nothing has judged it". Separately, `DOIT_K` defaults to 0,
+  so a charter cannot close over any owed evidence until the operator sets K.
+- **Pilot:** merged on an Executor `decision` event that names why (all builder-
+  provable rows met, review clean, the one `cannot-assess` is owed by construction).
+  After the deploy, the grader is re-dispatched with the live check-run reachable, so
+  the re-grade can `confirm` and `accepted` derives. `doit deploy` cannot run before
+  CI is green, so the window in which the spec reads `shipped`-and-nothing-more is
+  real and is the ledger's honest state.
+- **Systemic:** `owed-ac` needs `wake_at` (and the observation that will prove it) as
+  required fields — the spec-writer's contract already says "the observation and the
+  `wake_at` that will prove it" — and the grader's `cannot-assess` on an owed row
+  should not zero `confirmed`; the fold should read *confirmed over the evaluable
+  rows* + *owed rows with a future wake_at* as `shipped-owed-evidence`. K must be a
+  measured setting, not an unset default that silently forbids the whole state.
+
+### S16. The gate's grant parser and the spec-writer's `Writes:` shape disagree
+- **Mechanism:** D115 makes `writes_grant` read the `Writes:` LINE and refuse prose
+  ("`'(the'` is not a path or a glob"). The spec-writer wrote
+  `**Writes:** (the merge gate's grant — the slot's footprint, verbatim)` and the seven
+  paths in a fenced block beneath — a shape the contract's own words invite. The first
+  gate run on the second real merge was `rework — could not determine`.
+- **Pilot:** the parser now takes a list (bullets or a fenced block) under a
+  parenthetical-only `Writes:` line, up to the first blank line or heading; a
+  sentence there is still refused (tests added). Gate re-run: `clean`.
+- **Systemic:** the spec-writer contract should state the grant's exact shape (paths
+  on the `Writes:` line, or one per line under it, nothing else), and the spec-auditor
+  should check it — a merge gate refusing at merge time is the most expensive place to
+  learn the shape.
+
 ### Smaller, all real
 - `doit dispatch --packet ""` reads `.` as the packet and crashes with a traceback
   before allocating a spawn; it should refuse an empty or non-file packet path.
@@ -250,7 +287,8 @@ audit. None of them can run here.
 | — | executor (pane) | seat | this pane | `doit packet grader` — the card render carried 6 of 12 rows (S14); full rows handed over as `L-card-0001.json`, reasons stripped |
 | 9 | grader · `L-grader-0001` | seat | opus | 15 tool uses, ~188 s, 92k tokens; validated first try. Re-ran the checker and every row's `check`: 11 `met`, DONE-COND `met`, AC12 `cannot-assess` (owed, unevaluable from the packet — the honest third state), `matches_intent: yes`, `card_ok: yes`, `worked` + `evidence-gap`. The fold: `confirmed: false` because one row is not `met` → spec state `reviewing` |
 | — | executor (pane) | seat | this pane | executor.md's row for "not confirmed, nothing standing, only cannot-assess": reviewer at `gates-only`, round 1. `doit packet reviewer` carried all 12 criteria with their review paths |
-| 10 | reviewer (round 1, gates-only) · `L-reviewer-0001` | seat | opus | dispatched; result pending |
+| 10 | reviewer (round 1, gates-only) · `L-reviewer-0001` | seat | opus | 15 tool uses, ~153 s, 87k tokens; validated first try. Drove every path at ready_sha: 0 blocking, 4 recommendations (docstring/behaviour conflict, CLI exit-code change unswept, guard style, AC10 wording), 11 reverify conditions, AC12 `unverifiable` (owed) |
+| — | executor (pane) | seat | this pane | `decision` recorded (merge with AC12 owed — S15); `doit gate` refused once on the spec's `Writes:` shape (S16), `clean` after the parser fix; `git merge --no-ff`; `shipped`; v4 ledger 1447 → shipped; push |
 | — | thinker (pane) · `L-thinker-0002` | seat | **Fable 5.1, a real pane** | opened by the operator's request as tmux window `flow:think-goals` (`claude -n think-goals --agent thinker --model claude-fable-5-1`, RETIRE list denied, ledger file preset), seeded with `content/think-goals-brief.md`: write the two goals (profitability platform operating; Yitzy's work operating) and their first charters, land with `--print-only` so the charter-set audit is the driver pane's to run via seat. Verified seat-billed: no `ANTHROPIC_API_KEY` in any environment, status line shows the seat windows |
 
 ## What v2 got right on this charter (so far)
@@ -265,3 +303,70 @@ audit. None of them can run here.
   ground truth and spent their pass on semantics, as designed.
 - **Every failure is an event.** The voided spawn, the re-dispatch, the schema retries
   are all in the ledger with reasons; nothing was edited.
+
+---
+
+## Thinker-pane record — `L-thinker-0002`, Fable 5.1, a different seat (started 2026-09-14 ~06:20 UTC)
+
+*Written by the Thinker pane, not the driver pane above, and marked as such at the
+operator's request: the first interactive Thinker session in the v2 shape is itself
+part of the pilot. Same rule as above — each entry names the mechanism, what was done
+here, and what the system should become. Numbered `T<n>` so they never collide with
+the driver's `S<n>`.*
+
+### T1. The goal's `date:` reads as an arbitrary deadline unless the reader is told it is the ordering key
+- **Mechanism:** the brief said *"ask the operator — it arbitrates when things slip"*.
+  The operator's first reaction: *"a date for each goal seems a little funny as a point
+  of understanding priority."* He was right that it is priority — the design says so
+  (§3.2 Goal row, D80: *"the date is read: it is what orders concurrent charters"*) —
+  but neither the brief nor `thinker.md` says it, so the first thing the operator was
+  asked for looked like ceremony.
+- **Pilot:** dates ruled — Goal B (Yitzy) `2026-09-14`, Goal A (profitability)
+  `2026-09-15`; B therefore orders ahead of A.
+- **Systemic:** `thinker.md`'s goal shape (S12) should state *the date orders
+  concurrent charters* in the line that asks for it, so the operator is asked for a
+  priority, which he has, instead of a deadline, which he may not.
+
+### T2. `doit alloc` with no kind crashes instead of printing usage
+- **Mechanism:** `fold.py:603` reads `sys.argv[2]` unguarded → `IndexError` traceback.
+- **Pilot:** harmless; `doit help` documents the form. **Patch only.**
+
+### T3. The record has no per-role convention, and the brief forbade the second role from writing to it
+- **Mechanism:** `think-goals-brief.md` lists this file under *"read, do not edit"*;
+  the operator then asked the Thinker to record into it *"through the lens of a
+  different perspective and recorded as such."* Two panes, one record, no rule.
+- **Pilot:** this section — appended, never interleaved, `T<n>` ids, the driver's
+  text untouched.
+- **Systemic:** if the pilot record is the systemic log, every pane role that runs
+  during a pilot gets an appended section keyed by its ledger actor id. Same shape as
+  the ledger itself: the filename is the actor.
+
+### T4. The source material described Yitzy's stream from a v4 lens, and undersold what already flows
+- **Mechanism:** handover §4 frames "waiting on us" as *two open PRs, untriaged, no
+  ledger record*. Measured (`gh pr list --author yitzchak-eg`): **30 PRs**, 28 already
+  ingested through the human-only `ingest_inbound_spec.sh` and closed as couriers;
+  of the 13 September ingests (1424–1436) **12 are `merged`, 1 `held`** — and every
+  merged one is undeployed behind 1447, exactly like the profit fixes. The intake pipe
+  exists and works; the far end (deploy) is the same choke point Goal A has.
+- **Pilot:** Goal B is therefore written around *delivered to prod*, not *PRs
+  ingested*; ingest of #270/#262 stays human-only (spec 552) and is an operator
+  action the goal names, never a charter's.
+- **Systemic:** a handover written from a stamped-ledger world reports queue length;
+  a goal in v2 needs delivered-to-prod. The Thinker should re-measure "waiting on us"
+  from the far end before writing a goal, and the brief should say so.
+
+### T5. A charter that predates its goal can never cite it (`Covers:` is write-once)
+- **Mechanism:** `L-charter-0001` landed `Covers: none` under `goal: null` (§12.2);
+  D98 says `Covers:` is written as the charter is written and never reconciled after.
+  Goal A's first requirement is necessarily "a green master sha can deploy" — the
+  thing charter 0001 delivers — so the coverage diff will report that requirement as
+  *no charter cites* for as long as 0001 lives, or Goal A must omit its own
+  precondition.
+- **Pilot:** Goal A will name it as a requirement and the charter-set write-up will
+  state that 0001 covers it by construction (the brief's own instruction: "a Goal A
+  charter set may cite it as existing coverage").
+- **Systemic:** every adopted project hits this on its first goal. The design should
+  say whether an operator-only `correction` event may attach `Covers:` to an
+  already-filed charter, or whether a goal may list `Delivered by: L-charter-NNNN`
+  against a requirement so the diff reads it. Either is a one-line rule; today
+  there is none and the diff will be wrong forever on this project.

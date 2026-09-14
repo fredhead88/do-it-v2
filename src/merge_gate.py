@@ -340,7 +340,8 @@ def writes_grant(spec):
     p = fold.ROOT / "content" / f"{spec}.md"
     if not p.exists():
         raise Undetermined(f"no content file for {spec} — cannot read its writes: grant")
-    for line in p.read_text().splitlines():
+    lines = p.read_text().splitlines()
+    for i, line in enumerate(lines):
         # The key may wear markdown (`**Writes:**`, `| **Writes** |`); the VALUES
         # may not be touched, because `src/**` is a glob and `**bold**` is not.
         # So emphasis is stripped from the key region only, never per token.
@@ -351,6 +352,28 @@ def writes_grant(spec):
         if m.group(0)[:m.start(1)].count("**") % 2 == 1 and body.startswith("**"):
             body = body[2:]                       # the closing half of `**Writes:**`
         body = body.strip().strip("|").replace("`", "").strip()
+        # A value that is ONLY a parenthetical — `Writes: (the merge gate's grant)` —
+        # names nothing; the grant is the list that follows, one path per line, in a
+        # fenced block or as bullets, up to the first blank line after it starts or
+        # the next heading. Prose on the line itself is still refused below: this
+        # reads a list, it never reads a sentence. Seen on the second real merge.
+        if re.fullmatch(r"\(.*\)", body):
+            toks, started = [], False
+            for nxt in lines[i + 1:]:
+                t = nxt.strip()
+                if t.startswith("```"):
+                    if started:
+                        break
+                    continue
+                if not t:
+                    if started:
+                        break
+                    continue
+                if t.startswith("#"):
+                    break
+                started = True
+                toks += [x for x in re.split(r"[,\s|]+", t.lstrip("-* ").replace("`", "")) if x]
+            return check_grant(toks, spec)
         return check_grant([t for t in re.split(r"[,\s|]+", body) if t], spec)
     raise Undetermined(f"{spec} states no writes: grant — nothing to filter against")
 
