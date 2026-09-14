@@ -271,6 +271,25 @@ audit. None of them can run here.
   contract needs the row: refused for an external → `blocked` + `brief`, never revert.
   This is S8 measured, not predicted.
 
+### Operator rulings taken at the end of charter 1 (2026-09-14 ~07:10 UTC)
+- **`DOIT_K=1`** — a charter may close over one owed criterion (the post-merge
+  observation pattern) and no more. Recorded as a `decision` on `pilot-1447` with
+  `ref=DOIT_K`; set in `~/.do-it/env.sh`, which every pane that runs `doit` against
+  this root must `source` (it also carries `DOIT_SEAT=1`, `DOIT_NO_POKE=1`,
+  `DOIT_PROJECT`, `DOIT_REPO_VOLATILE`). Note S15 still stands: with the schema as it
+  is, an owed criterion cannot reach `shipped-owed-evidence`, so K=1 has nothing to
+  count until `owed-ac` carries `wake_at`; the board reads `0 owed (K=1)` for a charter
+  that in truth owes one.
+- **Charter 2 is the deploy charter** ("master is deployable": the
+  `test_deploy_activation_assertion` red, the deploy behind the pre-deploy gate, the
+  `/version` sha check), first under Goal A, ahead of the money correctives. It runs
+  through v2 from a fresh pane the same way charter 1 did. When its deploy lands, the
+  grader is re-dispatched on `L-spec-0001` so AC12 confirms and charter 1 closes.
+- **The hand-off between panes is the ledger, not a message.** The Thinker lands the
+  charter (`doit think --land … --print-only` → `charter-filed`); the Planner pane sees
+  it on the board and cuts it. The brief filed on `L-charter-0001` (the exact red) is
+  on the same board for the Thinker to cite.
+
 ### Smaller, all real
 - `doit dispatch --packet ""` reads `.` as the packet and crashes with a traceback
   before allocating a spawn; it should refuse an empty or non-file packet path.
@@ -430,3 +449,64 @@ the driver's `S<n>`.*
   ledger. Also: Vercel marks every docs-only inbound PR red because the commit
   author's GitHub login is not linked to his Vercel member account — a project-side
   fact, but the same class as S11: an external signal the operator has to read past.
+
+### T8. Goal requirement ids are not namespaced, and `--land` without `--goal` picks the newest goal
+- **Mechanism:** `Covers:` carries bare ids (`G2`); `think.py:goal_path` with no
+  `--goal` takes *the newest `goal-filed` event*. This ledger now has two goals filed
+  seconds apart (L-goal-0001 profitability, L-goal-0002 Yitzy), both with a `G1`…`G5`.
+  A charter landed without `--goal` is diffed against Goal B whatever it meant, and a
+  `Covers: G2` cannot say which goal's G2 it delivers. The brief's instruction to
+  always pass `--goal` is the only thing keeping the diff honest.
+- **Pilot:** every land call here passes `--goal` explicitly; the charter-set write-up
+  states the goal per charter.
+- **Systemic:** either the goal's requirement ids carry the goal's own id
+  (`L-goal-0001/G2`, or the design's intended author-prefix form), or `Covers:` takes a
+  `goal:` field and `--land` refuses to diff without one when more than one goal is
+  on the ledger. Multi-goal is the normal state of a real project; the single-goal
+  assumption is the pilot's, not the design's.
+
+### T9. Two goals can be delivered by one charter, and the diff cannot say so
+- **Mechanism:** L-goal-0002 G1 (Yitzy's twelve merged specs live on prod) is delivered
+  by the same deploy that delivers L-goal-0001 G2. A charter cites one goal
+  (`--goal` is singular); the other goal's requirement will read as *no charter cites*
+  forever, exactly like T5.
+- **Pilot:** L-goal-0002 says "delivered by the same deploy as L-goal-0001 G2; no
+  separate charter" in the requirement's own text, and the write-up repeats it.
+- **Systemic:** same fix as T5/T8 — a `Delivered by:` line on a goal requirement that
+  the diff reads, so cross-goal and pre-goal delivery are both first-class instead of
+  permanent false findings.
+
+### T10. The charter-set is written against a board that moves under it, and that was fine
+- **Mechanism:** while L-charter-0002 (the backlog deploy) was being written, the Executor
+  merged `L-spec-0001` and its deploy-on-green was refused by a *second* pre-existing red
+  (`test_deploy_activation_assertion::test_present_and_pathed_passes`, from the 810 r3
+  merges) — exactly the "known trap" L-charter-0001 named. Goal A's G1 was therefore not
+  delivered by 0001 alone.
+- **Pilot:** the Thinker re-read the board before landing, wrote L-charter-0004 for the
+  new red under G1, and landed it in the same session. The `blocked` event's `why` was
+  precise enough to write the charter from without reading the CI log.
+- **Systemic:** nothing to change — the ledger did its job. Recorded because it is the
+  first time a Thinker session consumed an Executor event mid-session and the shape held.
+
+### Thinker session summary (L-thinker-0002, closed 2026-09-14 ~07:10 UTC)
+- Filed: `L-goal-0001` (profitability, 2026-09-15, G1–G5) · `L-goal-0002` (Yitzy, 2026-09-14, G1–G6).
+- Landed with `--print-only`: `L-charter-0002` (backlog deploy, A/G2) · `L-charter-0003`
+  (foreign-owned lock, B/G5) · `L-charter-0004` (activation-assertion red, A/G1).
+- Deliberately not charters, on the goals as operator actions: ingest of PRs #270/#262
+  (B/G2), the 1178 authorization (A/G4), Yitzy linking his GitHub login to his Vercel
+  member account (B/G4).
+- Expected false findings in the charter-set diffs, all explained above: A/G3–G5 (charters
+  follow the deploy by design, T6), B/G1 (delivered by A's deploy, T9), B/G2/G4/G6
+  (operator or Yitzy actions, T7).
+
+### T11. The charter-set packet is per-`--land` call, not per goal
+- **Mechanism:** landing L-charter-0002 wrote `charter-set-L-goal-0001.md` with
+  *uncited: G1, G3, G4, G5*; landing L-charter-0004 in a later call **overwrote** it with
+  *uncited: G2, G3, G4, G5*. Each call diffs only the charters passed to it, so a goal
+  whose charters land across calls never has one packet that shows its true coverage,
+  and the audit dispatched from the last line sees one charter, not the set.
+- **Pilot:** the driver should run the Goal A audit knowing the packet under-reports;
+  the real set is 0001 (by construction), 0002, 0004.
+- **Systemic:** `think.land` should build the set from every `charter-filed` event whose
+  charter cites the goal (plus the ones passed now), not from `argv`. The design's word
+  is *charter set*; the code's is *this call*.
