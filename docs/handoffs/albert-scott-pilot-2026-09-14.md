@@ -637,3 +637,36 @@ the driver's `S<n>`.*
 - **Systemic:** two fixes — the builder contract should name where evidence files go
   (`content/<spec>-…`, never `seat/`), and `packet.py` should print a refusal to stderr and exit
   non-zero so a caller cannot mistake it for a path.
+
+### S25. A charter with no code unit has no lane path — the Executor ran it by hand
+- **Mechanism:** L-charter-0002's footprint is "the deploy record, the merge of 1439, and the
+  evidence captures" — no unit a builder could build, so no spec, no `spec-written`, no
+  `l1-complete`, and the close row (sweep-fixpoint → charter-reviewer → reap) cannot fire. The
+  operator's ruling assigned R1–R3 to the driver pane directly; R4–R8 are `doit deploy` and
+  post-deploy observations the pane makes.
+- **Pilot:** the pane recorded R1–R3 as an `evidence` event (an open type) pointing at
+  `content/deploy-record-L-charter-0002.md`, and will append `deploy-landed` and the R5–R8
+  observations the same way; `l1-complete` is the operator's to append (fold.EMITS allows it) so
+  the charter-reviewer can read the deploy record against the done-condition.
+- **Systemic:** the design needs an "operational charter" shape — units whose builder is the
+  Executor (or the operator) and whose card is an evidence file — or a rule that such work is a
+  goal's requirement delivered by a `decision` + `evidence` pair, not a charter.
+
+## Run log — second sitting (2026-09-14 07:11 → , driver pane; every seat spawn `cost_usd` null)
+
+| # | Role | Backend | Model | Outcome |
+|---|---|---|---|---|
+| 11 | plan-auditor (charter-set) · `L-plan-auditor-0004` | seat | opus | packet rebuilt from 0001+0002+0004 (S20); 4 turns, 48k tokens; **no Write/Bash in the typed spawn (S18)** — pane transcribed the object; 8 findings on L-goal-0001 (G3–G5 unowned, G1 split across an uncited and a citing charter, 0002's stale precondition, Vercel bundle sha unproven), `charter-gap` + `seam-undefined` + `worked` |
+| 12 | plan-auditor (cut) · `L-plan-auditor-0005` | seat | opus | 11 turns, 112k; transcribed (S18), one finding trimmed to 400 chars by the pane; 9 findings, `bad_cut: false`; caught: R3's live-box clause unowned, the review_path would SKIP the five rows on the builder box, sig-join not name-join, R2's `mode:block` premise wrong (rows are `mode:warn`), four of five seed sources are deploy.sh's heredoc not a template |
+| — | planner (pane) | seat | this pane | Plan SD1–SD7 + `L-adr-0002` (manifest-row ↔ fixture-seed parity); every finding a line; stage-plan pre-pass clean on all six checks |
+| 13 | plan-auditor (plan) · `L-plan-auditor-0006` | seat | opus | 11 turns, 117k; returned the object in-message (S18); 6 findings: the test file is 1,437 lines (63 of headroom, not "1,370+"), SD4's observation ran unscoped (`ACTIVATION_BOX` unset unions the builder crontab), the review_path bullet is unreachable before the deploy, the verbatim transcript was time-bombed, sig-only join covers one of three failure modes, the (builder fixture, droplet box) pair unmodelled — all acted on (SD2 → real gate in a NEW file, SD4 re-measured scoped, SD8 file-size) |
+| 14 | spec-writer · `L-spec-writer-0004` | seat | opus | 22 turns, 166k, ~9.5 min; 578-line spec, 12 ACs (7 backend / 5 observed-data), 2 owed, 1 unknown, 6 declarations; left a stray `.tmp` file (no Edit tool) that the pane removed |
+| 15 | spec-auditor · `L-spec-auditor-0002` | seat | opus | 19 turns, 154k; returned in-message (S18), pane transcribed, all six findings over 400 chars trimmed; 5 findings (spec-820 forbids the absolute test-to-test import the spec mandated; `_manifest_row_names` unbounded regex over 86 same-shaped rows; AC11's wake_at (deploy.sh "never installs" the cron — later measured FALSE by the rework: `_run_cron_install_loop` does); P3 vacuous; ratchet arithmetic unmeasured), 14 rejected with clearing observations, 5 advisory |
+| 16 | spec-writer (rework) · `L-spec-writer-0005` | seat | opus | 7 turns, 135k; all five fixes applied; corrected the auditor's installer premise with a measurement (A13) |
+| — | executor (pane) | seat | this pane | `doit packet builder` regenerated `verify-L-spec-0002.sh` from §9 (S23 — the pane's hand-written script was overwritten unnoticed); worktree cut from `bd2a7bafb` |
+| 17 | builder · `L-builder-0002` | seat | opus | 20 turns, 135k, ~12.5 min; one commit `019e87362` (+238: 52 seeds, 186-line parity file), VERIFY_OK; saved evidence under `seat/<own id>…` → grader packet REFUSED (S24), pane relocated it |
+| 18 | grader · `L-grader-0002` | seat | opus | 9 turns, 77k; re-ran the checker: AC3 **unmet** (the builder wrote the forbidden placeholder token in a comment), and found the §9 chain's `;` masked the false link — `card_ok: no`, `card-quality` + `evidence-gap` + `worked` |
+| 19 | spec-writer (rework 2) · `L-spec-writer-0006` | seat | opus | 3 turns, 100k; §9 rebuilt as one `&&` chain + `rc=$?` + advisory 820 line + `exit $rc`; AC3 wording comment-inclusive |
+| 20 | builder (rework) · `L-builder-0003` | seat | opus | 21 turns, 113k; amended to `937c7adc6`, token count 0, checker `VERIFY_OK` + `ADVISORY spec-820 exit=1`; corrected the first card's "820 red on 7 files" (5) |
+| 21 | grader (re-grade) · `L-grader-0003` | seat | opus | 14 turns, 81k; 10 met, AC11/AC12 cannot-assess (owed), done-condition satisfied, `matches_intent: yes`, `card_ok: yes` |
+| — | executor (pane) | seat | this pane | R1–R3 of L-charter-0002 done by hand under the operator's ruling (rollback dry-run, lock absent, migration list + resolver target, 1439 merged `bd2a7bafb` and pushed; CI: one NEW red = the 0004 red); S22 discovered (push-deploy workflows); `doit gate l-spec-0002 master` clean pre-review |
