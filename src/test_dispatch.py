@@ -182,4 +182,54 @@ got = dispatch.alloc(TMP / "content", "L-spec-", ".md")
 assert got.stem == "L-spec-0008", got            # the ledger's 0007 raised the floor
 assert dispatch.subject_ids("L-spec-") and 42 not in dispatch.subject_ids("L-spec-"), "another kind never counts"
 N += 1
+# ── the seat path: no `claude -p`; the result comes back from a file. Where the
+# headless CLI is banned as metered (Albert Scott, spec 572) the spawn is an
+# interactive session's sub-agent, and the wrapper only writes the packet and
+# waits. Every after-the-fact check above runs unchanged on it, and the terminal
+# event says which route ran, so the two are distinguishable forever.
+import threading, time
+os.environ["DOIT_SEAT"] = "1"
+
+
+def never(*_):
+    raise AssertionError("the seat path must not exec claude -p")
+
+
+dispatch.run_claude = never
+rp2 = TMP / "content" / "L-research-0002.md"
+
+
+def seat_writer():
+    for _ in range(400):
+        pk = list((TMP / "seat").glob("*.packet.md")) if (TMP / "seat").is_dir() else []
+        pk = [q for q in pk if not (TMP / "seat" / (q.name.split(".")[0] + ".result.json")).exists()]
+        if pk:
+            sid = pk[0].name.split(".")[0]
+            assert f"spawn_id: {sid}" in pk[0].read_text(), "the packet carries the spawn id"
+            assert json.loads((TMP / "seat" / f"{sid}.cmd.json").read_text())["cmd"][:2] == ["claude", "-p"], \
+                "the line that WOULD have run is recorded beside the packet"
+            rp2.write_text("dug")
+            (TMP / "seat" / f"{sid}.result.json").write_text(json.dumps(
+                {"is_error": False, "structured_output": {**research, "path": "content/L-research-0002.md"},
+                 "num_turns": 3, "usage": {"input_tokens": 5, "output_tokens": 6}, "total_cost_usd": None,
+                 "modelUsage": {"seat-model": {}}, "session_id": "seat-1", "permission_denials": []}))
+            return
+        time.sleep(0.05)
+
+
+threading.Thread(target=seat_writer, daemon=True).start()
+a = argparse.Namespace(role="research", subject="L-spec-0001", packet=str(PK), path=str(rp2), cwd=str(REPO),
+                       charter=None, project="t", mcp_config=None, timeout=1, max_usd=None, seat=False)
+try:
+    dispatch.main(a)
+    code = 0
+except SystemExit as e:
+    code = e.code
+sev = [json.loads(l) for l in max((TMP / "events").glob("L-research-*.jsonl")).read_text().splitlines()]
+assert code == 0, [e.get("why") for e in sev]
+assert [e["type"] for e in sev] == ["spawn-started", "research-filed", "spawn-done"], [e["type"] for e in sev]
+assert sev[-1]["spawn_path"] == "seat" and sev[-1]["session"] == "seat-1" and sev[-1]["model"] == "seat-model", sev[-1]
+assert sev[-1]["cost_usd"] is None, "a seat spawn has no list-price figure and must not read as free"
+del os.environ["DOIT_SEAT"]
+N += 1
 print(f"dispatch: {N} spawns mocked, every check fired")

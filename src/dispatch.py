@@ -105,6 +105,41 @@ def run_claude(cmd, packet, cwd, timeout):
                           env=env, timeout=timeout)
 
 
+SEAT = ROOT / "seat"
+
+
+class SeatResult:
+    """The same three fields main() reads off a subprocess result."""
+    def __init__(self, stdout, returncode=0, stderr=""):
+        self.stdout, self.returncode, self.stderr = stdout, returncode, stderr
+
+
+def run_seat(spawn, cmd, packet, cwd, timeout):
+    """The seat path (D116 by another route). Where `claude -p` is banned as metered
+    — the Albert Scott rule, spec 572 — the spawn runs as an interactive session's
+    seat-billed sub-agent instead. This function does not spawn: it writes the
+    packet and the line that WOULD have run to `$R/seat/<spawn>.*`, prints where the
+    result is expected, and waits for `<spawn>.result.json` — the same JSON envelope
+    `claude -p --output-format json` prints (is_error, structured_output, usage,
+    total_cost_usd, num_turns, session_id, modelUsage, permission_denials). Every
+    after-the-fact check in main() then runs unchanged, and the ledger records
+    `spawn_path: seat` so the two routes are distinguishable forever."""
+    import time
+    SEAT.mkdir(parents=True, exist_ok=True)
+    (SEAT / f"{spawn}.packet.md").write_text(packet)
+    (SEAT / f"{spawn}.cmd.json").write_text(json.dumps({"cmd": cmd, "cwd": cwd}, indent=1))
+    want = SEAT / f"{spawn}.result.json"
+    print(json.dumps({"seat": spawn, "packet": str(SEAT / f"{spawn}.packet.md"),
+                      "result_expected_at": str(want), "cwd": cwd, "timeout_s": timeout}), flush=True)
+    t0 = time.time()
+    while not want.is_file():
+        if time.time() - t0 > timeout:
+            raise subprocess.TimeoutExpired(cmd, timeout)
+        time.sleep(2)
+    time.sleep(1)                       # a writer that is still writing
+    return SeatResult(want.read_text())
+
+
 def poke():
     """D117: every wrapper ends by running one tick, so latency is a poke, not an interval."""
     if not os.environ.get("DOIT_NO_POKE"):
@@ -297,8 +332,11 @@ def main(a):
         cmd += ["--disallowedTools", ",".join(BUILDER_DENY)]
     if a.mcp_config:
         cmd += ["--mcp-config", a.mcp_config]
+    seat = bool(getattr(a, "seat", False) or os.environ.get("DOIT_SEAT"))
+    meta["spawn_path"] = "seat" if seat else "claude-p"
     try:
-        r = run_claude(cmd, packet, cwd, (a.timeout or tmin) * 60)
+        r = (run_seat(spawn, cmd, packet, cwd, (a.timeout or tmin) * 60) if seat
+             else run_claude(cmd, packet, cwd, (a.timeout or tmin) * 60))
     except subprocess.TimeoutExpired:
         fail(f"timeout after {a.timeout or tmin} min")
     try:
@@ -365,6 +403,9 @@ if __name__ == "__main__":
     ap.add_argument("--timeout", type=int, help="minutes; overrides the role default")
     ap.add_argument("--max-usd", type=float, help="overrides the role default")
     ap.add_argument("--detach", action="store_true", help="fork and return at once; needs --packet FILE")
+    ap.add_argument("--seat", action="store_true",
+                    help="do not run `claude -p`; write the packet under $R/seat/ and wait for "
+                         "<spawn>.result.json from a seat-billed sub-agent (or DOIT_SEAT=1)")
     a = ap.parse_args()
     if a.detach:        # D117: sub-agents are detached subprocesses; the wrapper's terminal event and poke follow
         if a.packet == "-":
