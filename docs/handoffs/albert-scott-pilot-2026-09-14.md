@@ -758,3 +758,18 @@ the driver's `S<n>`.*
   build-rollback (`git revert`) from target-rollback (the target's own command, handed in as a
   `--rollback` argument and RUN by the script when `--check` fails, §5.8) — S8's split, now
   measured on a real failure.
+
+### S31. The checker dies at merge, and the commit trailer leaks the builder model to the grader
+- **Mechanism (a):** every `verify-<spec>.sh` link keys on `$(git merge-base HEAD master)`; after the
+  merge that is `HEAD`, so every diff link is vacuous and the parity-gate link fails
+  (`allowlisted_lost=0`). A post-merge re-grade cannot re-run the checker; the grader
+  recomputed every property against `HEAD^` by hand and declared `gate-infra`.
+- **Mechanism (b):** AC10's evidence is the commit message, and the commit message carries the
+  project's mandatory `Co-Authored-By: <model>` trailer — the grader saw the builder's model
+  through the artifact under grade and flagged it rather than voiding (voiding would make AC10
+  permanently ungradeable).
+- **Pilot:** L-spec-0003 accepted (12/12) on the recomputation.
+- **Systemic:** the checker generator should pin the base sha at build time (`BASE=<base_sha>`
+  substituted in, never `merge-base` at run time); the grader packet should scrub
+  `Co-Authored-By`/`Claude-Session` trailers from any commit text it hands over, or the AC10
+  shape should point at the card and the history file only.
