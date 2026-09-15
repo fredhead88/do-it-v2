@@ -1050,8 +1050,8 @@ the driver's `S<n>`.*
   `Produces:` name is in the same unit whose Goal line names it as written/emitted — or, simpler,
   the Plan's Seams section is the authority and the cut's Consumes/Produces lines are derived from
   it at plan stage, never typed twice. Filed under a-14's packet/plan work.
-- **Fix status (2026-09-15):** open — a-14 (derive the cut's seam lines from the Plan, or check
-  direction in `audit.py`).
+- **Fix status (2026-09-15 v0.3.0):** `audit.py` checks seam direction as a conservative cut-stage
+  finding (a-14, `5423a9c`); deriving the cut's lines from the Plan is still open.
 
 ### R5. "Changes must be made through a pull request" is a bypass notice on this repo, not a refusal
 - **Measured (2026-09-15 07:19Z):** `git push origin master` of the L-spec-0005 merge printed
@@ -1121,6 +1121,97 @@ the driver's `S<n>`.*
 - **CI:** `Python Tests` on `f38ba5dda` **completed success** at 08:22Z (pytest + pg-parity green,
   45 min); every other required check green; `Repo Lint Guards` red is pre-existing and adjacent
   (brief filed). The first merge's `pytest` run was cancelled by the second push's concurrency group.
-- **Fix status (2026-09-15):** the map, the seat route, the stamping and the tick refusal are
-  verified on a real charter; open: a-6 (owed-met / closed-shipped), a-14 (Planner packets),
-  b-6 (threshold arithmetic in the charter), the token split + weights (retro handoff step 9).
+- **Fix status (2026-09-15 v0.3.0):** a-6, a-14 and the token split + weights shipped (`CHANGELOG.md`
+  0.3.0); charter 3 re-measured at 45.7M cache-read + 458k output = 8.96M input-equivalent tokens
+  (`doit spend L-charter-0003`). Open: b-6 (threshold arithmetic in the charter).
+
+## Driver + Thinker pane, 2026-09-15 09:00–11:00Z (job 37cb0ec6 · L-thinker-0003 · operator-approved six changes → v0.3.0; audit → L-charter-0005…0010)
+
+Own section per the pilot-record convention (change list b-12). Measured while presenting the
+six changes, building them with five Sonnet sub-agents, and writing six charters from the QurLife
+walkthrough. Ranked by minutes lost or defects caught.
+
+### R8. Two places declare a pane's model, and the launchers read neither
+- **Measured:** `models.toml` says `claude-fable-5-1` for thinker and planner; `agents/thinker.md`
+  and `agents/planner.md` frontmatter say `model: claude-opus-5`; `doit up` and `doit think` pass
+  no `--model`. The panes opened for the next drive were put on Fable only by hand-adding
+  `--model claude-fable-5-1` to the printed command; the Executor pane, launched with
+  `--model claude-sonnet-5`, came up on Opus (the flag did not take for that id).
+- **Systemic:** the S5 class again — the ruling lives in one file and the launcher obeys another.
+  `up.pane_cmd()`/`think.pane_cmd()` should read `models.toml` and pass `--model`; the frontmatter
+  model line on pane contracts should go, or be generated from the map.
+- **Fix status:** open — change list a-18.
+
+### R9. A charter template with no deploy line yields charters that prove themselves on a worktree
+- **Measured:** all five audit-derived charters said "re-run on the merged sha"; L-plan-auditor-0010
+  (finding 3) caught that no unit in the set deploys the fixes and the goal's done-condition is
+  what Shlomo sees on production. L-charter-0001 had a deploy line only because a hand wrote it.
+- **Systemic:** `agents/thinker.md` §3 (Constraints) needs a required line — how this charter's
+  result reaches the surface named in §4 — and `think.py`'s landing check could refuse a charter
+  whose done-for-the-whole names a host that no Constraint line names a deploy for.
+- **Fix status:** open — change list b-13; the six charters carry the line by hand.
+
+### R10. The charter-set audit under-reports by construction, and filed charters are invisible
+- **Measured:** `doit think --land` built the packet from only the five files passed, so the
+  pre-pass reported G1 and G2 as uncited (both are delivered by L-charter-0002/0004); the packet was
+  rebuilt by importing `think.py` over every `charter-filed` citing the goal (T11's workaround,
+  second time). The board has no `CHARTERS OPEN` block, so six filed charters do not appear on it.
+- **Systemic:** change list a-9, hit again.
+- **Fix status:** open — a-9.
+
+### R11. Operator events have no shape check
+- **Measured:** `doit append decision L-goal-0001 line=…` was accepted; the board renders `why`, so
+  the DECIDED line read `?` until a `correction` moved the text (L-operator-local.jsonl:9 → :10).
+  `doit alloc -h` allocated `content/L--h-0001.md`.
+- **Systemic:** `fold.append` should carry a per-type required-field table for the operator's
+  event types (`decision`: `why`+`revert`; `owed-met`: `criterion`+`evidence`; `correction`:
+  `ref`+`set`+`why`) and refuse a bare kind on `alloc` (a-16 "smaller").
+- **Fix status:** open — change list a-19.
+
+### R12. Sub-agent worktree isolation pins to the cwd repo, not the repo under change
+- **Measured:** five builders dispatched with `isolation: worktree` from a pane whose cwd is
+  `/opt/albert-scott` each got a worktree of *that* repo. One refused (correctly), three
+  improvised worktrees of `~/do-it-v2` under `/tmp`, one was re-dispatched after a worktree was
+  cut by hand under the job's tmp dir. Same brief, three behaviours.
+- **Systemic:** a v2 change is itself a build; the driver should cut the worktree (`git -C
+  ~/do-it-v2 worktree add …`) and name it in the brief, never rely on the harness's isolation.
+  One line in `scripts/seat/README.md` and the driver's own practice.
+- **Fix status:** practice from this session on; README line — change list b-14.
+
+### R13. The previous remediation round closed money defects with copy, and verification accepted it
+- **Measured:** spec 1322 marked AS-18/19/20 "EXPLAINED" (a note that Net P&L and Real profit
+  differ, both left on screen); rev confirmed; the 2026-09-15 walkthrough finds all three STILL
+  BROKEN because a client cannot trace money through an explanation. The done-condition was
+  "explain", not "reconcile".
+- **Systemic:** not a v2 defect — the v2 charter's done-for-the-whole being *the client's
+  question* is the mechanism that prevents it; the six charters phrase every §4 that way and name
+  1322's lineage so a builder cannot satisfy a requirement with copy. Keep §4 strict at charter
+  review.
+- **Fix status:** by construction in L-charter-0005…0009.
+
+### R14. Cost was invisible, and cache reads are the cost
+- **Measured:** charter 3 read as 2.12M "blended" tokens; the four-way split from the sub-agent
+  transcripts says 45.7M cache-read + 1.68M cache-write + 458k output + 854 input = 8.96M
+  input-equivalent tokens (`[weights]`: output 5, cache-read 0.1, cache-write 1.25). The whole
+  root: Opus 45 spawns 18.1M weighted, Sonnet 11 spawns 6.3M. Cache reads dominate because a
+  sub-agent runs 40–140 tool calls over a growing context.
+- **Systemic:** a-7 (packets carry the AC table and the diff, not the whole spec) is now the
+  measured lever, and per-contract token budgets (`budget-exceeded`, §4.4) can be set from real
+  numbers.
+- **Fix status:** measurement shipped (v0.3.0, retro step 9); a-7 and budgets open.
+
+### R15. Serving a seat spawn is still a hand-run loop
+- **Measured:** L-plan-auditor-0010 was served by the pane running the Agent tool, then typing
+  model, session, turns, duration and tokens into `stamp.sh`. v0.3.0 reads the tokens from the
+  transcript; turns and duration are still typed, and the wrapper cannot tell whether anyone is
+  serving a packet it wrote.
+- **Systemic:** with the Executor as its own pane (this session's layout), serving is that pane's
+  loop; `usage.py` already has the transcript, so turns and duration can come from it too, and
+  the wrapper could write a `seat-unserved` alarm after N minutes with no `.meta.json`.
+- **Fix status:** open — change list a-20.
+
+### R16. The Opus judges earned their seats again
+- **Measured:** L-plan-auditor-0010 (Opus, 5.6 min, 118k blended) found the deploy seam, three
+  shared files with no owner, R5's footprint overreach, a dangling unit name and the uncovered
+  audit finding N3 in one round. Every one changed the charters.
+- **Systemic:** none; recorded so the map's three Opus seats keep their evidence.

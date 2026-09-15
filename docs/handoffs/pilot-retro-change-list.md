@@ -38,6 +38,9 @@ design-doc or contract change; (c) = drop, with why.
 | 15 | **`doit ingest <pr>`** — performs the human-gated fetch and appends `spec-written{charter: null, author: <prefix>}`; the human gate is a `decision` event on the ledger the command checks, not a flag. | T7, T13 | Yitzy's 1448/1449 sit numbered with no v2 path; "human-only" mis-read as "human keystrokes" | new `src/ingest.py` |
 | 16 | **Small, each with a one-line test:** `--packet ""` refused before allocating; `doit alloc` validates `kind` and honours `-h` (S19, T2); `audit.fields` treats `none`/`—` as empty (S7); `install.sh` creates `repos/` and verifies the contracts load as Agent types (S4, "doctor"); `doit append` prints the event line only; `doit up --print-only` allocates nothing; packet refusals exit non-zero on stderr (S24 — verify: `die()` already uses `sys.exit(str)`); fold counts role-switches per session id on HEALTH (S3). | Smaller, S19, T2, S7, S4, S24, S3 | tracebacks, one junk content file, ~25 lines of board noise per append | `src/dispatch.py`, `src/fold.py`, `src/audit.py`, `install.sh`, `src/up.py`, `src/packet.py` |
 | 17 | **Verify T14:** a `decision` on a charter another pane drives surfaces under `DECIDED WITHOUT YOU` for that pane on its next fold. A test, then a fix only if it fails. | T14 | unknown — the pilot could not wait to see | `src/test_fold.py` |
+| 18 | **Launchers read the model map.** `up.pane_cmd()`/`think.pane_cmd()` pass `--model` from `models.toml`; pane contracts lose their frontmatter `model:` line (or it is generated). | R8 | two panes opened on the wrong model but for a hand-typed flag | `src/up.py`, `src/think.py`, `agents/thinker.md`, `agents/planner.md` |
+| 19 | **Operator event shapes.** `fold.append` carries a required-field table per operator event type (`decision`, `owed-met`, `correction`, `brief-answered`) and refuses a miss; `doit alloc` refuses a bare or flag-shaped kind. | R11 | one `?` on the board + one correction; one junk content file | `src/fold.py`, `src/dispatch.py` |
+| 20 | **Serving is observable.** `usage.py` supplies turns and duration to `stamp.sh` from the transcript; the wrapper writes a `seat-unserved` alarm when a packet has no `.meta.json` after N minutes. | R15 | hand-typed numbers per spawn; an unserved packet is silent | `src/usage.py`, `scripts/seat/stamp.sh`, `src/dispatch.py` |
 
 ## (b) Design-doc and contract changes, ranked
 
@@ -55,6 +58,8 @@ design-doc or contract change; (c) = drop, with why.
 | 10 | **Thinker re-folds before answering anything about state after an idle gap**, not only on the first message. | T15 | `agents/thinker.md` |
 | 11 | **Planner contract D96:** a probe whose external is CI runs *on* CI (`gh workflow run … full_run=true` is the canonical enumerate-reds probe for this repo); a done-condition of "check-run green" is that enumeration, not one red per charter. Cut-file docs show the no-seam form (empty `Consumes:`). | S26, S27, S7 | `agents/planner.md` |
 | 12 | **Pilot-record convention:** every pane role that runs during a pilot appends its own section keyed by ledger actor id, never interleaved. | T3 | `docs/handoffs/` README line |
+| 13 | **Thinker §3 carries a required deploy line** — how the charter's result reaches the surface §4 names; `think.py` may refuse a §4 host with no §3 deploy line. | R9 | `agents/thinker.md`, `src/think.py` |
+| 14 | **A v2 change is a build**: the driver cuts the worktree of `~/do-it-v2` and names it in the sub-agent brief; the harness's `isolation: worktree` pins to the cwd repo. | R12 | `scripts/seat/README.md` |
 
 ## (c) Dropped, with why
 
