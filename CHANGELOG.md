@@ -10,7 +10,63 @@ each direction.
 
 ## [Unreleased]
 
-### Fixed
+## [0.3.0] — 2026-09-15
+
+The day charter 3 closed with no operator hands: the six changes the retro argued for, each
+approved by the operator in plain English before it was built.
+
+### Added
+- **Token and wall-clock accounting** (retro step 9): the seat stamp reads the four-way usage
+  split (input, output, cache read, cache write) from the sub-agent's own transcript
+  (`~/.claude/projects/<slug>/<pane>/subagents/agent-<id>.jsonl`, deduped by message id) and
+  stamps it on the terminal event; `models.toml` gains a `[weights]` table (price ratios per
+  model, input = 1.0); the board gains a **`SPEND`** block per model (raw four columns + weighted
+  input-equivalent tokens, never dollars); `doit spend <charter|spec|spawn>` prints the per-spawn
+  table and, for a charter, the stage wall clock derived from event timestamps;
+  `scripts/seat/backfill_tokens.py` appends `correction` events for pre-split seat spawns (48
+  of 48 resolved on the Albert Scott root). The blended `subagent_tokens` figure is kept as its
+  own column — it tracks the final context size, not billed usage (charter 3: 2.12M blended,
+  45.7M cache-read + 458k output measured, 8.96M input-equivalent weighted). `src/usage.py`.
+- **`owed-met`** (a-6, S15/S33): an executor/operator event citing the evidence for an owed
+  criterion; when every `owed-ac` has a later `owed-met` the spec derives `accepted` with no
+  re-grade spawn. A grader `cannot-assess` on an owed row no longer zeroes `confirmed` (the
+  fold derives confirmed over evaluable rows; dispatch stamps `cannot_assess` on the verdict).
+  `spec-closed` on a shipped spec derives `closed-shipped`, which counts as done for L2. An
+  allocation whose spec-writer spawn failed with no `spec-written` derives `void` and binds
+  nothing.
+- **`deploy.py` tells the truth** (a-4, S34/S30/S8/S17): `live()` matches 7 characters; the
+  command's output streams to `$R/logs/deploy-<spec>-<sha7>-<n>.log` as produced and the events
+  carry `log=`; the flock is taken before any file is opened; `--gate '<cmd>'` separates
+  `deploy-refused` (exit 2, not `blocked-external`) from `deploy-failed` (exit 1);
+  `--rollback '<cmd>'` runs the target's own rollback when the check never names the sha and the
+  event carries `rollback=ran|absent|failed`; a `deploy-started` with no terminal event renders
+  `deploy in flight` on the board.
+- **Checker lint and BASE pin** (a-5, S23/S31a): `verify_script` runs `bash -n`, refuses a bare
+  `;`/`||` or a newline-separated statement outside the `&&` chain, requires an absolute
+  interpreter for python/pytest/ruff/node/npm, and pins `BASE=<sha>` at packet time (recorded
+  `base_sha` first, `git merge-base` once as the fallback), rewriting `$(git merge-base …)` to
+  `$BASE`; a violation refuses the packet.
+- **The Planner's packets come from `packet.py`** (a-14, S6/S21/R3/R4): `doit packet
+  plan-auditor <charter> --stage cut|plan|charter-set` and `doit packet spec-writer <spec>
+  --unit <name> --charter <path>` build from the ledger's `cut-written`/`plan-written` events
+  with a rationale strip and the Blindness check; `scripts/seat/mkpacket.py`/`mkslot.py` remain
+  as the reference shape. `audit.py`'s cut pre-pass gains `seam_direction` — a conservative
+  finding when a `Produces:` sits in the unit that reads it (the charter-3 inversion).
+- **Design doc** (b-1, b-2): D121 — the backend is a seam (`claude-p` · `seat` · `codex`)
+  decided once per root; D117 holds only for `claude-p` roots; permitted role collapses and the
+  fold's count of them; `cost_usd: null` renders unmeasured. §4.5: the Model column is the map's
+  default, a judge never shares its author's vendor, D120's re-trust is keyed on
+  `(contract, model_used)`; the 2026-09-15 Claude-only ruling recorded.
+
+### Changed
+- The board has eleven sections now (SPEND is the eleventh); §8.3's "ten, fixed" is amended by
+  this entry, not yet in the design doc.
+- `dispatch.py`: `model_observed` on the seat route is true only when a transcript was actually
+  read; `model_used` prefers the transcript's model over the pane-typed one; `subagent_tokens`
+  is stamped on the terminal event instead of discarded.
+
+
+### Fixed (carried from Unreleased)
 - `doit dispatch` refuses an empty or non-file `--packet` before allocating a spawn id (a shell
   that captured a failed `doit packet` into a variable handed `""`, which read `.` and crashed
   after allocation). ("Smaller" list; hit again on charter 3.)
@@ -18,7 +74,7 @@ each direction.
   `content/slot-<spec>.md` when no packet is on disk, so the first rework of a spec no longer
   needs `--slot` typed by hand. (S6, half.)
 
-### Changed
+### Changed (carried from Unreleased)
 - `fold.py`: the OWED EVIDENCE line shows the first `owed-ac` that carries a `wake_at`, not the first
   `owed-ac` (a pre-schema declaration without one hid the instant a later one named).
 - `agents/grader.md`: the worktree's history is not the grader's — `git log/show/diff/blame` and

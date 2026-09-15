@@ -136,12 +136,13 @@ grant.
 ## What is not here yet
 
 The design (`design/system-design-v2.md`) is ahead of the code in the places the
-pilot found. The ranked list is `docs/handoffs/pilot-retro-change-list.md`; the
-largest open items are a `deploy.py` that keeps its full log and separates "the
-gate refused" from "the target broke", a checker generator that lints the spec's
-verification block, owed evidence that can actually be owed, and a per-goal
-charter set. None of those is prose-only; each is a code change with a test and
-each names the pilot entry it answers.
+pilot found. The ranked list is `docs/handoffs/pilot-retro-change-list.md`; as of
+0.3.0 the largest open items are per-contract token budgets that fire
+`budget-exceeded` from the measured split, the per-goal charter set on the board
+(a-9: `CHARTERS OPEN`, `--land` refusing without `--goal`), grant-scoped
+porcelain (a-10), `doit ingest` (a-15) and `doit doctor` (a-16). None of those is
+prose-only; each is a code change with a test and each names the pilot entry it
+answers.
 
 ## Relationship to DO-IT v4.7
 
