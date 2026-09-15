@@ -1305,3 +1305,68 @@ Planner's first spawn on L-charter-0005…0010; nothing built yet)
   run it.
 - **Fix status:** open — change list b-17 (state the SSH-wrapped form in `agents/executor.md`'s
   dispatching section, once, so every future `--check` is written correctly the first time).
+
+## Planner pane, `L-planner-0005` — 2026-09-15 10:17Z → (Fable; L-charter-0010 commissioned as four probes, then L-charter-0005)
+
+Own section per b-12. Measured while reading in and commissioning L-charter-0010's probes
+(L-probe-0001…0004, dispatched 10:29:27Z, all four served by `L-executor-0006`). Ranked by what it
+cost or hid.
+
+### R24. Three documents disagree on where a probe runs and who allocates its directory
+- **Measured:** `agents/planner.md` ⓪ says `--path "$R/content/probe-<charter>"`, `--cwd
+  "$R/repos/<project>"`, and "`doit alloc` … is the wrong tool here"; `agents/probe.md` Input 5
+  says the run directory is "allocated for you by `doit alloc probe --dir`" and "is your cwd";
+  `src/dispatch.py:98` says the probe's cwd is OUTSIDE every repo on purpose and `fold.py:888`
+  implements `alloc … --dir`. Followed probe.md + dispatch.py (`doit alloc probe --dir` ×4,
+  `--cwd <run dir>`); the planner contract's line would have put the porcelain check on
+  `/opt/albert-scott`, where `docs/sessions/*` is volatile (`DOIT_REPO_VOLATILE`), and would have
+  named a path no `alloc` claimed. Ten minutes reading three sources to settle one flag.
+- **Systemic:** the planner contract predates `alloc --dir`. Change list b-18.
+- **Fix status:** open — b-18.
+
+### R25. `doit packet` has no `probe` role, so the one packet the Planner builds by hand is the one with credentials in it
+- **Measured:** `doit packet` accepts seven roles; `probe` is not one, though `doit dispatch`
+  accepts it. Four probe packets were hand-written (347 lines) carrying the charter verbatim, the
+  externals, N, the credential NAMES, the run directory, the record shape and the read-only
+  rules — the a-14 shape, one role short. The strip list (`packet.py::strip`) therefore never
+  checked them for a cut or a Plan; the only contamination guard on a probe packet is the
+  author's care.
+- **Systemic:** a-14 stopped at plan-auditor + spec-writer. Change list a-25.
+- **Fix status:** open — a-25.
+
+### R26. Four detached dispatches in one second share one log file
+- **Measured:** `doit dispatch … --detach` ×4 at 10:29:27Z → every child printed the same
+  `log: …/dispatch-probe-2026-09-15T102927+0000.log` (`dispatch.py:619` names the file by role +
+  second). All four wrappers append to it interleaved; a wrapper failure is not attributable to
+  a spawn without reading the seat dir.
+- **Systemic:** the log name has no spawn id because the id is allocated after the fork.
+  Change list a-26.
+- **Fix status:** open — a-26.
+
+### R27. The Planner contract has no operational-charter branch, and its checks read an evidence-only unit as undetermined
+- **Measured:** L-charter-0010 is operational by its own Constraints ("deliverable is the
+  evidence write-up and the decision events, not code"); b-7's lane (`evidence` →
+  `l1-complete` → sweep → charter-review) is in the fold (`fold.py:657`, `dd8d993`), and
+  `evidence` is unrestricted in `EMITS`. `planner.md` ①–⑦ assume code units: a zero-unit cut
+  makes the cut-audit's requirement-coverage check report every R undelivered, and
+  `audit.sizes()` reads a footprint of new files only as "unmeasurable … not a small unit" —
+  so an evidence unit can never come back clean. The operator's brief for this pane said
+  "cut, plan, commission"; on the contract as written the honest reading is: commission the
+  probes (⓪), write the cut and Plan as records of why there is no code unit, spend no audit
+  spawn on a zero-unit cut, land the write-up as `evidence{path, covers}`, then `l1-complete`.
+  Named here for veto.
+- **Systemic:** b-16 names the landing event; nothing tells the Planner which of its seven
+  steps apply. Change list b-19.
+- **Fix status:** open — b-19; this charter is the first measurement.
+
+### R28. "Read-only against production" is a sentence in the packet, not a credential
+- **Measured:** `/opt/albert-scott/.env` holds one Supabase DSN, `SUPABASE_DB_URL`, read-write;
+  no `*_RO` / read-only DSN exists on the builder box (the `dev_readonly` role exists on prod per
+  the privilege census, its password is not on this box). §4.6·10 says the probe holds "read
+  scope … never write access to product data"; the only enforcement available was the packet
+  rule `PGOPTIONS="-c default_transaction_read_only=on"` plus a pasted `SHOW` line in the run
+  record. Same for `ssh root@167.71.46.51`: a root shell told to read.
+- **Systemic:** the probe contract does not itself require the session-level read-only proof;
+  a packet author who forgets it hands a probe a write path. Change list b-20 (contract text);
+  the read-only DSN is a product-side brief, not a v2 change.
+- **Fix status:** open — b-20.
