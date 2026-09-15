@@ -6,7 +6,7 @@
 - **Operator rulings (12:0xZ):** next charter = **L-charter-0006**; all pane rulings stand; 1178 restore proceeds under 0014; both writes authorized.
 - **Owed to the operator:** one `correction` per malformed decision at `L-planner-0005.jsonl:4-7` (commands in the session reply).
 
-## Traps measured this session (pilot record R24–R28, R32–R34, R36–R40, R46 (R41–R45 are other panes'); change list a-25…a-36, b-18…b-24)
+## Traps measured this session (pilot record R24–R28, R32–R34, R36–R40, R46 (R41–R45 are other panes'); change list a-25…a-36, b-18…b-23, b-25)
 - Probe: `doit alloc probe --dir`, `--cwd <run dir>`; no `doit packet probe` (hand-build; no cut/Plan in it); require `date -u` in raw files; `SET default_transaction_read_only = on` as the first statement (PGOPTIONS is ignored by the pooler); no read-only DSN exists.
 - Research role times out at 5 min; spec-auditor at 15 — a VALID Output after the wait is voided; the operator corrects.
 - On a monolith the cut-audit needs two rounds; cut on call-site topology (ask research for call sites / purity per touched function); every footprint glob must resolve (`test_1346*.py` matched nothing).
