@@ -1,0 +1,7 @@
+Continue working on do-it-v2 and the Albert Scott profitability platform.
+
+Read /home/albert/do-it-v2/docs/handoffs/profit-audit-charters-and-v2-review.md and pick up from the Next Steps section.
+
+Context: charter 3 closed today on the Claude-only model map with no operator hands; a Codex audit of the QurLife profit portal (docs/sessions/2026-09-15-profit-v2-client-walkthrough.md) says NOT READY and nothing owns its findings yet.
+
+Priority: Step 2 — present the system changes in plain English and do the approved ones; then Step 4 — as the Thinker, turn the audit into charters under L-goal-0001.
