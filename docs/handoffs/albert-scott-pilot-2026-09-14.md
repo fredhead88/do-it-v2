@@ -1562,3 +1562,15 @@ cost or hid.
   nothing forbids cutting three in parallel, and the seat backend's hand-serving is the real
   ceiling (a-20 makes it observable, b-23 gives it an owner). Change list b-24.
 - **Fix status:** open — b-24; the merge itself is done on the ledger.
+
+### R44. A served audit with no stamp is invisible to the fold (L-thinker-0004)
+- **Measured:** L-plan-auditor-0015 (the merged set's charter-set audit) was served at 12:01Z —
+  `seat/L-plan-auditor-0015.output.json` exists, 11 findings, VALID — but nobody ran `stamp.sh`,
+  so no `.meta.json`, no `spawn-done`, no `audit-finding` events; the ledger still shows it
+  running and the Thinker folded the findings from the output file by hand. Second time today a
+  seat spawn's completion depended on a human remembering the second command (R15, a-20).
+- **Systemic:** a-20's `seat-unserved` alarm covers the unserved case; the served-but-unstamped
+  case has no alarm and no self-heal. The wrapper can treat `output.json` VALID + no
+  `meta.json` after N minutes as "stamp it yourself with what the transcript resolves" — the
+  stamp is derivable (usage.py already reads the transcript). Change list a-29.
+- **Fix status:** open — a-29.
