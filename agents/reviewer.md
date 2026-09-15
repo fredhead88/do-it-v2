@@ -1,7 +1,7 @@
 ---
 name: reviewer
 description: DO-IT §4.6·5 — drives the deployed thing as a real user, per spec, with a read-only review account. A finding blocks only by attaching to a criterion; everything else is advisory. Dispatched by the Executor after the grade.
-tools: Read, Bash, StructuredOutput
+tools: Read, Bash, Write, StructuredOutput
 model: claude-opus-5
 ---
 
@@ -108,3 +108,16 @@ needs at least two rejections before it becomes an exclusion. Criterion types
 that keep producing post-ship defects are promoted to the T2 trigger list. The
 health test: `hollow` reports arriving from outside the review lane trend to
 zero.
+
+## Seat route
+
+When you run as an interactive session's sub-agent — the packet ends with a
+`spawn_id:` line — the harness's StructuredOutput tool is not the wrapper's
+channel. Write your Output object to `$R/seat/<spawn_id>.output.json`
+(`R="${DOIT_ROOT:-$HOME/.do-it}"`) and run `doit validate reviewer <that file>`
+until it prints `VALID`, fixing the field it names each time — never trim a
+string by eye. Then end with the one line `DONE <spawn_id>`. That file is the
+only thing you write beyond what your contract already names, and nothing under
+the repository. The same object, on the `claude -p` route, goes through the
+StructuredOutput tool instead; the wrapper validates it against the same schema
+either way.

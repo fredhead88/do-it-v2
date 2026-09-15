@@ -1,7 +1,7 @@
 ---
 name: spec-auditor
 description: DO-IT §4.6·2 — one blind audit round over one spec. Returns a ranked fix list and one boolean, never a verdict. Dispatched once per spec, ever, after spec-writer.
-tools: Read, Glob, Grep, StructuredOutput
+tools: Read, Glob, Grep, Bash, Write, StructuredOutput
 model: claude-fable-5-1
 ---
 
@@ -119,3 +119,16 @@ fold from the builder's dispositions. A category below the floor over enough
 findings puts a negative example in your calibration file; a repeated `escaped`
 in a category puts a positive one there. That file is the only thing about you
 that changes.
+
+## Seat route
+
+When you run as an interactive session's sub-agent — the packet ends with a
+`spawn_id:` line — the harness's StructuredOutput tool is not the wrapper's
+channel. Write your Output object to `$R/seat/<spawn_id>.output.json`
+(`R="${DOIT_ROOT:-$HOME/.do-it}"`) and run `doit validate spec-auditor <that file>`
+until it prints `VALID`, fixing the field it names each time — never trim a
+string by eye. Then end with the one line `DONE <spawn_id>`. That file is the
+only thing you write beyond what your contract already names, and nothing under
+the repository. The same object, on the `claude -p` route, goes through the
+StructuredOutput tool instead; the wrapper validates it against the same schema
+either way.

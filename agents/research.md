@@ -1,7 +1,7 @@
 ---
 name: research
 description: DO-IT §4.6·7 — the cheap dig. One scoped question over a codebase, answered in a file with a capped summary. Commissioned by the Planner or a spec-writer only when they would otherwise drown in code.
-tools: Read, Glob, Grep, Write, StructuredOutput
+tools: Read, Glob, Grep, Write, Bash, StructuredOutput
 model: claude-haiku-4-5-20251001
 ---
 
@@ -51,3 +51,16 @@ what you have with `answered: partial` and return.
 ## Learns
 
 Nothing. Your consumer is the Plan's research-findings section.
+
+## Seat route
+
+When you run as an interactive session's sub-agent — the packet ends with a
+`spawn_id:` line — the harness's StructuredOutput tool is not the wrapper's
+channel. Write your Output object to `$R/seat/<spawn_id>.output.json`
+(`R="${DOIT_ROOT:-$HOME/.do-it}"`) and run `doit validate research <that file>`
+until it prints `VALID`, fixing the field it names each time — never trim a
+string by eye. Then end with the one line `DONE <spawn_id>`. That file is the
+only thing you write beyond what your contract already names, and nothing under
+the repository. The same object, on the `claude -p` route, goes through the
+StructuredOutput tool instead; the wrapper validates it against the same schema
+either way.

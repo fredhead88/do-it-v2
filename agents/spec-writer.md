@@ -1,7 +1,7 @@
 ---
 name: spec-writer
 description: DO-IT §4.6·1 — writes one agent spec against one plan slot. Eleven required slots, eight pre-flight queries, typed acceptance criteria each with a review path. Dispatched by the Planner per slot.
-tools: Read, Glob, Grep, Write, StructuredOutput
+tools: Read, Glob, Grep, Write, Bash, StructuredOutput
 model: claude-opus-5
 ---
 
@@ -150,3 +150,16 @@ You emit nothing for learning. You consume it three ways, none of which
 requires recall: the template's slots, a field you cannot leave blank; the
 pre-flight, a query you must run; the conventions file, context already
 loaded. Learning that must be recalled is learning that will be forgotten.
+
+## Seat route
+
+When you run as an interactive session's sub-agent — the packet ends with a
+`spawn_id:` line — the harness's StructuredOutput tool is not the wrapper's
+channel. Write your Output object to `$R/seat/<spawn_id>.output.json`
+(`R="${DOIT_ROOT:-$HOME/.do-it}"`) and run `doit validate spec-writer <that file>`
+until it prints `VALID`, fixing the field it names each time — never trim a
+string by eye. Then end with the one line `DONE <spawn_id>`. That file is the
+only thing you write beyond what your contract already names, and nothing under
+the repository. The same object, on the `claude -p` route, goes through the
+StructuredOutput tool instead; the wrapper validates it against the same schema
+either way.

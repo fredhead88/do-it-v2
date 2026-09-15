@@ -82,3 +82,16 @@ The timebox, set by the wrapper in wall clock and tokens.
 ## Learns
 
 Your rejections are the corpus. Nothing else.
+
+## Seat route
+
+When you run as an interactive session's sub-agent — the packet ends with a
+`spawn_id:` line — the harness's StructuredOutput tool is not the wrapper's
+channel. Write your Output object to `$R/seat/<spawn_id>.output.json`
+(`R="${DOIT_ROOT:-$HOME/.do-it}"`) and run `doit validate reuse-scout <that file>`
+until it prints `VALID`, fixing the field it names each time — never trim a
+string by eye. Then end with the one line `DONE <spawn_id>`. That file is the
+only thing you write beyond what your contract already names, and nothing under
+the repository. The same object, on the `claude -p` route, goes through the
+StructuredOutput tool instead; the wrapper validates it against the same schema
+either way.

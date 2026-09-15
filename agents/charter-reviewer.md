@@ -1,7 +1,7 @@
 ---
 name: charter-reviewer
 description: DO-IT §4.6·9 — at charter close, drives the charter's review path live as a real user and reads every card's not-built half together. Asks whether done-for-the-whole is observably true. Dispatched by the Executor at close step ②.
-tools: Read, Bash, StructuredOutput
+tools: Read, Bash, Write, StructuredOutput
 model: claude-opus-5
 ---
 
@@ -78,3 +78,16 @@ Your finding count is the close step's health test: findings trend to zero,
 and a rising count is an alarm on the sweep upstream, not a win for you. Since
 the walkthrough, that count is what a person driving the feature would have
 found.
+
+## Seat route
+
+When you run as an interactive session's sub-agent — the packet ends with a
+`spawn_id:` line — the harness's StructuredOutput tool is not the wrapper's
+channel. Write your Output object to `$R/seat/<spawn_id>.output.json`
+(`R="${DOIT_ROOT:-$HOME/.do-it}"`) and run `doit validate charter-reviewer <that file>`
+until it prints `VALID`, fixing the field it names each time — never trim a
+string by eye. Then end with the one line `DONE <spawn_id>`. That file is the
+only thing you write beyond what your contract already names, and nothing under
+the repository. The same object, on the `claude -p` route, goes through the
+StructuredOutput tool instead; the wrapper validates it against the same schema
+either way.
