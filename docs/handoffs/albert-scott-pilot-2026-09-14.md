@@ -966,3 +966,19 @@ the driver's `S<n>`.*
   at 05:58:31Z); `dispatch` takes its backend from the map and refuses a `--seat`/`DOIT_SEAT`
   that contradicts it. Every terminal event now stamps `model_requested` beside `model_used`
   (S5). Full list: `docs/handoffs/pilot-retro-change-list.md`.
+
+### R2. The harness snapshots the Agent-type list at pane start, so a contract edited mid-session is invisible to a typed spawn
+- **Measured (2026-09-15 06:28Z):** after 0.2.0 gave `plan-auditor` `Bash, Write` and a *Seat route*
+  section, a typed `plan-auditor` spawn from this pane (opened before the edit) reported
+  `TOOLS: Read, Glob, Grep` — the tools line as it was when the pane started. S4 measured the
+  opposite direction (a list that refreshed ~1 h after `install.sh`); both are true: the list
+  refreshes on the harness's own cadence, and a pane cannot know whether it has.
+- **Pilot:** every spawn of charter 3 is served as `general-purpose` with the contract file read
+  first (the pilot's first-ten-spawns shape, S4); `meta.json` records `served_as` so the ledger says
+  which shape ran. The `tools:` sandbox is therefore after-the-fact for the whole charter.
+- **Systemic:** the seat route must never depend on the typed agent's tool list — the pane's
+  serving prompt should always name the contract file and the seat instructions itself; and
+  `doit doctor` (change list a-16) should compare the pane's live type list against `agents/*.md`
+  before the first dispatch.
+- **Fix status (2026-09-15):** open — a-16 (`doit doctor`); the serving-prompt half is practice
+  from this charter on.
