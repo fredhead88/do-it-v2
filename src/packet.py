@@ -16,7 +16,7 @@ Writes `$R/packets/<subject>-<role>-<n>.md` and prints the path.
 import argparse, hashlib, os, pathlib, re, subprocess, sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import fold  # noqa: E402
+import audit, fold  # noqa: E402
 
 ROOT = pathlib.Path(os.environ.get("DOIT_ROOT", pathlib.Path.home() / ".do-it"))
 CONTENT, PACKETS = ROOT / "content", ROOT / "packets"
@@ -84,9 +84,15 @@ class Ctx:
         self.a = a
         self.specs, self.charters, _, self.by = fold.fold(fold.read_events())
         self.evs = self.by.get(a.subject, [])
-        if not self.evs and not (getattr(a, "slot", None) and getattr(a, "role", None) == "spec-writer"):
-            # The one legitimate exception is spec-writer round one: the spec id was
-            # just allocated and nothing has been written about it yet, so the slot
+        spec_writer_round_one = (getattr(a, "role", None) == "spec-writer"
+                                 and (getattr(a, "slot", None) or getattr(a, "unit", None)))
+        # a-14: `stage: charter-set` names no single charter at all — its subject is
+        # the goal, and the charter SET comes from every `charter-filed` event on the
+        # ledger, not from this one subject's own stream.
+        charter_set = (getattr(a, "role", None) == "plan-auditor" and getattr(a, "stage", None) == "charter-set")
+        if not self.evs and not spec_writer_round_one and not charter_set:
+            # The one other legitimate exception is spec-writer round one: the spec id
+            # was just allocated and nothing has been written about it yet, so the slot
             # IS the input (D7 — the Executor authoring a brief's spec has no other).
             die(f"{a.subject} has no events — nothing to build a packet from")
 
@@ -131,6 +137,23 @@ class Ctx:
         # Normalised, because half the ledger's `charter` fields are a path: an
         # unnormalised one matches no `charter-filed` subject and the file is lost.
         return fold.charter_id(next((e.get("charter") for e in reversed(self.evs) if e.get("charter")), None))
+
+    def cut_file(self):
+        """The Planner's cut for a charter (a-14): a `cut-written` event's path, else
+        the `content/cut-<charter>.md` convention `mkpacket.py` used by hand."""
+        e = self.last("cut-written")
+        p = (e or {}).get("path") or str(CONTENT / f"cut-{self.a.subject}.md")
+        return resolve(p)
+
+    def plan_file(self):
+        """The Planner's Plan, same shape as `cut_file()`. `None`, not a die — a
+        `stage: cut` packet has no Plan yet, and that is a stage fact, not an error."""
+        e = self.last("plan-written")
+        p = (e or {}).get("path")
+        if p:
+            return resolve(p)
+        cand = CONTENT / f"plan-{self.a.subject}.md"
+        return cand if cand.is_file() else None
 
 
 INTERP_NAMES = {"python", "python3", "pytest", "ruff", "node", "npm"}
@@ -301,7 +324,196 @@ def review_account(c):
     return p.read_text().strip() if p.exists() else "none — drive only what an anonymous visitor can reach"
 
 
-# ─────────────────────────────── the six Input lists ───────────────────────────────
+RATIONALE_HEADING = re.compile(r"^#+\s*(Rationale|Why)\b", re.I)
+
+
+def _sec(text, name, default="(none)"):
+    """`section()` returns a list of lines; the a-14 packets embed prose, so join it
+    back into text once, here, rather than at every call site."""
+    lines = section(text, name)
+    return "\n".join(lines) if lines else default
+
+
+def strip_rationale(text):
+    """No Planner rationale ever reaches the plan-auditor, or a round-one spec-writer
+    packet built straight from the cut/Plan (a-14, §4.6·6: "You are not given the
+    Planner's rationale"). Strips any `## Rationale`/`## Why` section, to the next
+    heading of any depth, and any line starting `Rationale:` — proactively, before
+    the text is ever assembled into a packet (the Blindness `strip()` check below is
+    the second, narrower line of defence, scoped to just those sections)."""
+    out, skip = [], False
+    for line in text.splitlines():
+        if RATIONALE_HEADING.match(line):
+            skip = True
+            continue
+        if skip and re.match(r"^#+\s", line):
+            skip = False
+        if skip:
+            continue
+        if re.match(r"^\s*Rationale:", line, re.I):
+            continue
+        out.append(line)
+    return "\n".join(out)
+
+
+def cut_audit_findings(c):
+    """The LATEST cut-audit's findings only, mkpacket.py's `files[-1:]`: a re-cut is
+    audited fresh and a superseded round's findings must not ride along into the
+    plan-audit."""
+    hits = [e for e in c.all_of("audit-finding") if e.get("stage") == "cut"]
+    if not hits:
+        return []
+    latest = max(e["_src"].split(":")[0] for e in hits)
+    return [e for e in hits if e["_src"].split(":")[0] == latest]
+
+
+def _doc_for_charter(c, charter_id, event_type, prefix):
+    """Where a charter-scoped document (cut, Plan) lives: the event that names it —
+    looked up by CHARTER id, not the Ctx's own subject, since a spec-writer's round
+    one is scoped to a spec that does not exist in the ledger yet — else the
+    `content/<prefix>-<charter>.md` convention `mkpacket.py`/`mkslot.py` used by hand."""
+    e = c.last(event_type, charter_id)
+    return (e or {}).get("path") or str(CONTENT / f"{prefix}-{charter_id}.md")
+
+
+def _unit_field(block, name):
+    m = re.search(rf"^{name}:\s*(.*)$", block, re.M)
+    return m.group(1).strip() if m else ""
+
+
+def p_plan_auditor(c):
+    """The Planner's packet for the plan-auditor (a-14, S6/S21): done-condition,
+    requirements, the cut — plus, at stage `plan`, the Plan and the latest cut-audit's
+    findings — plus the `doit audit` script pre-pass. No rationale (`strip_rationale`).
+    `stage: charter-set` is the one stage with no single charter: it comes from every
+    `charter-filed` event on the ledger, diffed against a goal."""
+    stage = c.a.stage or die("plan-auditor needs --stage cut|plan|charter-set")
+    if stage == "charter-set":
+        return _charter_set_packet(c)
+    ch = c.charter_file()
+    ch_text = ch.read_text() if ch else None
+    cut = resolve(_doc_for_charter(c, c.a.subject, "cut-written", "cut"))
+    L = [f"stage: {stage}", f"charter: {c.a.subject}", "",
+         "## The charter's done-condition",
+         (strip_rationale(_sec(ch_text, "Done for the whole"))
+          if ch_text else "(no charter on file — `--charter PATH` or a charter-filed event)"),
+         "", "## The charter's requirements",
+         (strip_rationale(_sec(ch_text, "Requirements"))
+          if ch_text else "(no charter on file)"),
+         "", "## The cut", strip_rationale(cut.read_text().rstrip())]
+    plan_text = None
+    if stage == "plan":
+        plan_path = _doc_for_charter(c, c.a.subject, "plan-written", "plan")
+        plan = pathlib.Path(plan_path)
+        if not plan.is_file():
+            die(f"stage plan needs a Plan — a `plan-written` event on {c.a.subject}, "
+                f"or {plan_path}")
+        plan_text = plan.read_text()
+        findings = cut_audit_findings(c)
+        L += ["", "## The Plan", strip_rationale(plan_text.rstrip()),
+              "", "## The cut-audit's findings (prior round, by design)"]
+        L += ([f"- [{f.get('category')}] {f.get('finding')}"
+               + (f" — confirms_with: {f['confirms_with']}" if f.get("confirms_with") else "")
+               for f in findings] or ["   none"])
+    L += ["", audit.prepass(stage, cut.read_text(), ch_text, plan_text, c.a.repo)]
+    return L
+
+
+def _charter_set_packet(c):
+    """§4.6·6's `stage: charter-set` Input, exactly (think.py's `charter_set_packet`,
+    reused rather than re-implemented — §3.6: the coverage diff is one implementation):
+    the charter set, the goal's done-condition, and the both-directions diff."""
+    import think
+    goal = think.goal_path(c.a.goal)
+    if not goal or not goal.is_file():
+        die("stage charter-set needs a goal — `--goal PATH` or a goal-filed event; "
+            "§12.2: charter-set has nothing to diff without one")
+    charters = []
+    for cid, ch in c.charters.items():
+        ev = next((e for e in ch["evs"] if e["type"] == "charter-filed"), None)
+        if not ev:
+            continue
+        cov = ev.get("covers") or ""
+        charters.append({"id": cid, "path": ev.get("path"), "title": ev.get("title", cid),
+                          "covers": [] if cov in ("", "none") else cov.split()})
+    diff = think.coverage(goal.read_text(), charters)
+    g = goal.read_text()
+    L = [f"stage: charter-set", f"goal: {goal.stem}", "",
+         "## The goal's done-condition", strip_rationale(_sec(g, "Done for the whole")),
+         "", audit.render("charter-set", audit.coverage_rows(diff))]
+    for ch in sorted(charters, key=lambda x: x["id"]):
+        p = pathlib.Path(ch["path"]) if ch["path"] else None
+        body = strip_rationale(p.read_text()) if p and p.is_file() else "(no file on disk)"
+        L += [f"## {ch['id']} — {ch['title']}", body]
+    return L
+
+
+def _round_one_slot(c):
+    """Round one, built straight from the cut/Plan/charter (a-14, closes S6/S21) —
+    the shape `mkslot.py` built by hand for the pilot, and spec-writer.md's Input
+    items 1-9: the charter extract, this unit's block, the Plan's Seams + Shared
+    decisions verbatim, the envelope, siblings' `Produces:`, ADRs, the write path,
+    the 400-line cap. No Rationale (`strip_rationale`)."""
+    unit = c.a.unit or die("spec-writer round one needs --unit: the cut's unit heading this spec covers")
+    ch = c.charter_file() or die("spec-writer round one needs --charter: the requirement ids and "
+                                 "constraints have no other source before the spec exists")
+    charter_id = fold.charter_id(c.a.charter)
+    cut_path = pathlib.Path(_doc_for_charter(c, charter_id, "cut-written", "cut"))
+    if not cut_path.is_file():
+        die(f"no cut on file for {charter_id} — a `cut-written` event, or content/cut-{charter_id}.md")
+    cut_text = cut_path.read_text()
+    blocks = {m.group(1): m.group(0) for m in re.finditer(r"^## (\S+)\n(?:(?!^## ).*\n?)*", cut_text, re.M)}
+    ub = blocks.get(unit)
+    if ub is None:
+        die(f"no unit `{unit}` in the cut for {charter_id} — units on file: "
+            f"{', '.join(sorted(blocks)) or 'none'}")
+    delivers = [d.strip() for d in _unit_field(ub, "Delivers").split(",") if d.strip()]
+    goal, footprint, wave = _unit_field(ub, "Goal"), _unit_field(ub, "Footprint"), _unit_field(ub, "Wave")
+    consumes, produces = _unit_field(ub, "Consumes") or "nothing", _unit_field(ub, "Produces") or "nothing"
+    ch_text = ch.read_text()
+    reqs = [l for l in section(ch_text, "Requirements") if any(l.strip().startswith(f"- {r}") for r in delivers)]
+    siblings = [f"- `{n}` produces: {_unit_field(b, 'Produces') or 'nothing'}"
+                for n, b in sorted(blocks.items()) if n != unit]
+    plan_path = pathlib.Path(_doc_for_charter(c, charter_id, "plan-written", "plan"))
+    plan_text = plan_path.read_text() if plan_path.is_file() else None
+    adrs = [e["adr"] for e in c.by.get(charter_id, []) if e.get("type") == "adr-filed" and e.get("adr")]
+    L = [f"## Plan slot · unit `{unit}` · charter {charter_id} · wave {wave or '?'}", "",
+         "1. Charter extract — the requirement ids this slot covers, and the constraints and "
+         "product decisions that bind it, verbatim:", "",
+         f"Requirements delivered by this unit: {', '.join(delivers) or 'none'}.", ""]
+    L += reqs or ["(none matched by id in the charter's Requirements section)"]
+    L += ["", "Constraints and product decisions, verbatim:",
+          strip_rationale(_sec(ch_text, "Constraints", "(none on file)")), "",
+          "2. The plan slot:",
+          f"- Unit: `{unit}`", f"- Goal: {goal}",
+          f"- Footprint (= the merge grant, `Writes:`): {footprint}",
+          f"- Wave: {wave or '?'}. Seams: Consumes {consumes}; Produces {produces}.",
+          "- The Plan's Seams and Shared decisions this spec must honour, verbatim:", ""]
+    if plan_text:
+        L += ["### Seams", strip_rationale(_sec(plan_text, "Seams")), "",
+              "### Shared decisions", strip_rationale(_sec(plan_text, "Shared decisions"))]
+    else:
+        L += ["(no Plan on file yet — Seams/Shared decisions unavailable)"]
+    L += ["", f"3. Read access to the repository: your cwd is "
+              f"`{c.a.repo or ROOT / 'repos' / c.project()}`. Read-only.",
+          "", f"4. Builder capability envelope: {c.a.envelope or 'none on file'}.",
+          "", f"5. Cost-path inventory: {c.a.cost_path or 'none on file'}.",
+          "", "6. Sibling units' `Produces:`:"] + (siblings or ["   none"])
+    L += ["", f"7. Acquisition ADRs for this footprint: {', '.join(adrs) or 'none'}.",
+          "", "8. Probe residue: none on file.",
+          "", f"9. Write the spec to: `{CONTENT / (c.a.subject + '.md')}`. "
+              "That path is the ONLY file you may write.",
+          "", "10. The template: the eleven slots of your contract (spec-writer.md). Every "
+              "acceptance criterion is `AC<n> [type]:` with type from `ui` · `backend` · "
+              "`observed-data` · `financial`, and carries a `review_path` (log in as / go to / "
+              f"do / worked if / failed if). Name the charter in the spec header as "
+              f"`charter: {charter_id}` and cite `Writes:` exactly as the footprint above — a "
+              "bare space-separated list of paths on one line, no prose in the list. "
+              "**The spec is at most 400 lines** — say less, cite more.", ""]
+    return L
+
+
+# ─────────────────────────────── the seven Input lists ──────────────────────────────
 
 def p_spec_auditor(c):
     spec, v = c.spec_file(), verify_script(c)
@@ -331,14 +543,21 @@ def p_spec_auditor(c):
 
 def p_spec_writer(c):
     """Rework. Round one is the Planner's: it holds the plan slot, which is not in the
-    ledger. Rework is round one's packet plus the audit's list."""
+    ledger. Rework is round one's packet plus the audit's list.
+
+    Round one itself has two sources now (a-14): `--unit NAME` (bare `--slot`, or
+    `--slot` with `--unit`) builds it straight from the cut/Plan/charter
+    (`_round_one_slot`, reproducing `mkslot.py`); `--slot FILE`, or the
+    `content/slot-<spec>.md` convention, still reads a hand-built one."""
+    if c.a.unit or c.a.slot is True:
+        return _round_one_slot(c)
     prev = sorted(PACKETS.glob(f"{c.a.subject}-spec-writer-*.md"))
     # Round one's packet is the Planner's slot file, which by convention lives at
     # content/slot-<spec>.md (planner.md ⑥, executor.md's brief row) — not under
     # packets/. The first rework of every pilot spec needed `--slot` typed by hand
     # for that reason (S6); the convention is read here so it does not.
-    slot = c.a.slot or (str(CONTENT / f"slot-{c.a.subject}.md")
-                        if (CONTENT / f"slot-{c.a.subject}.md").is_file() else None)
+    slot = (c.a.slot if isinstance(c.a.slot, str) else None) or (
+        str(CONTENT / f"slot-{c.a.subject}.md") if (CONTENT / f"slot-{c.a.subject}.md").is_file() else None)
     if prev:
         base = prev[-1].read_text().splitlines()
     elif slot:
@@ -469,7 +688,8 @@ def p_charter_reviewer(c):
 
 
 BUILD = {"spec-auditor": p_spec_auditor, "spec-writer": p_spec_writer, "builder": p_builder,
-         "grader": p_grader, "reviewer": p_reviewer, "charter-reviewer": p_charter_reviewer}
+         "grader": p_grader, "reviewer": p_reviewer, "charter-reviewer": p_charter_reviewer,
+         "plan-auditor": p_plan_auditor}
 
 
 # ──────────────────────────── Blindness, as a check ────────────────────────────
@@ -570,6 +790,26 @@ def strip(c, role):
     if role == "charter-reviewer":
         pw = c.last("plan-written")
         return [("the Plan's rationale", l) for l in long_lines(pathlib.Path(pw.get("path") or "/"))] if pw else []
+    if role == "plan-auditor":
+        # The whole cut/Plan is legitimately IN the packet at their stages — unlike
+        # charter-reviewer above, this is scoped to just the Rationale/Why sections
+        # (`strip_rationale` already removes them from the text; this is the second,
+        # narrower line of defence, not a re-check of the whole file).
+        if c.a.stage == "charter-set":
+            return []
+        out = []
+        docs = [(c.cut_file, "the cut's rationale")]
+        if c.a.stage == "plan":
+            docs.append((lambda: pathlib.Path(_doc_for_charter(c, c.a.subject, "plan-written", "plan")), "the Plan's rationale"))
+        for getter, label in docs:
+            f = getter()
+            if not f or not pathlib.Path(f).is_file():
+                continue
+            body = pathlib.Path(f).read_text()
+            for name in ("Rationale", "Why"):
+                sec = section(body, name)
+                out += [(label, l) for l in sec if len(l.strip()) > 50] if sec else []
+        return out
     return []
 
 
@@ -580,7 +820,14 @@ def main(argv=None):
     ap.add_argument("subject")
     ap.add_argument("--charter", help="path to the charter file; else the charter-filed event")
     ap.add_argument("--repo"), ap.add_argument("--worktree"), ap.add_argument("--project")
-    ap.add_argument("--slot", help="spec-writer round one: the file holding the plan slot")
+    ap.add_argument("--slot", nargs="?", const=True,
+                    help="spec-writer round one: a FILE holding a hand-built plan slot, or bare "
+                         "(with --unit) to build it from the cut/Plan/charter (a-14)")
+    ap.add_argument("--unit", help="spec-writer round one, built from scratch: the cut's unit heading")
+    ap.add_argument("--envelope", help="spec-writer round one: the builder capability envelope")
+    ap.add_argument("--cost-path", help="spec-writer round one: the cost-path inventory")
+    ap.add_argument("--stage", choices=["cut", "plan", "charter-set"], help="plan-auditor's stage")
+    ap.add_argument("--goal", help="plan-auditor stage charter-set: the goal file; else the goal-filed event")
     ap.add_argument("--produces", help="sibling units' Produces: signatures")
     ap.add_argument("--conventions"), ap.add_argument("--base-sha"), ap.add_argument("--url")
     ap.add_argument("--depth", default="gates-only", choices=["gates-only", "full"])

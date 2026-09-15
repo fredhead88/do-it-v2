@@ -10,7 +10,7 @@ import json, os, pathlib, re, subprocess, sys, tempfile
 TMP = pathlib.Path(tempfile.mkdtemp())
 os.environ["DOIT_ROOT"], os.environ["DOIT_PROJECT"] = str(TMP), "t"
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
-import fold, packet  # noqa: E402
+import audit, fold, packet  # noqa: E402
 
 REPO = TMP / "repo"
 (TMP / "content").mkdir(parents=True)
@@ -275,6 +275,141 @@ refuses("charter-reviewer", "Cut this way because one wave keeps the footprint f
 t = build("builder", subject="L-spec-0003", worktree=str(REPO), repo=str(REPO))
 assert "Currency is USD" in t, "a path-named charter is still found on disk"
 
+# ── 7. plan-auditor (a-14, S6/S21) ────────────────────────────────────────────
+CUT_L1 = TMP / "content" / "cut-L-charter-0001.md"
+CUT_L1.write_text("""# cut for L-charter-0001
+
+## unit-a
+Goal: derive spend per project
+Delivers: R1
+Footprint: src/fold.py
+Consumes:
+Produces:
+Wave: 1
+
+## unit-b
+Goal: read spend from spawn-done usage only
+Delivers: R2
+Footprint: src/other.py
+Consumes:
+Produces:
+Wave: 1
+
+## Rationale
+This cut was chosen because it keeps wave 1 minimal and testable.
+""")
+ev("planner", "cut-written", "L-charter-0001", path=str(CUT_L1))
+
+t = build("plan-auditor", subject="L-charter-0001", stage="cut", repo=str(REPO))
+assert "stage: cut" in t and "charter: L-charter-0001" in t
+assert "review_path" in t and "worked if a spend column renders" in t, "the done-condition, verbatim"
+assert "R1 — the board carries a spend column" in t, "the requirements, verbatim"
+assert "## unit-a" in t and "## unit-b" in t, "the cut, embedded whole"
+assert audit.HEADER in t and "same-wave footprint overlap" in t, "the doit audit block"
+assert "kept wave 1 minimal" not in t, "no rationale — strip_rationale removes the section"
+pa1 = packet.Ctx(packet.argparse.Namespace(subject="L-charter-0001", charter=None, project="t", stage="cut"))
+absent(t, packet.strip(pa1, "plan-auditor"))
+N += 1
+try:
+    build("plan-auditor", subject="L-charter-0001")
+except SystemExit as e:
+    assert "needs --stage" in str(e.code), e.code
+else:
+    raise AssertionError("plan-auditor with no --stage should refuse")
+
+PLAN_L1 = TMP / "content" / "plan-L-charter-0001.md"
+PLAN_L1.write_text("""# Plan · L-charter-0001
+
+## Seams
+None — both units are independent.
+
+## Shared decisions
+None.
+
+## Rationale
+Chose one wave because the two units' footprints never collide with each other.
+""")
+ev("planner", "plan-written", "L-charter-0001", path=str(PLAN_L1))
+os.environ["DOIT_LEDGER_FILE"] = "L-plan-auditor-0001.jsonl"
+fold.append(["audit-finding", "L-charter-0001", "stage=cut", "category=stale",
+             "finding=old finding, superseded by the re-cut"])
+os.environ["DOIT_LEDGER_FILE"] = "L-plan-auditor-0002.jsonl"
+fold.append(["audit-finding", "L-charter-0001", "stage=cut", "category=seam-undefined",
+             "finding=wave 1 has no producer for X", "confirms_with=script"])
+
+t = build("plan-auditor", subject="L-charter-0001", stage="plan", repo=str(REPO))
+assert "## The Plan" in t and "None — both units are independent." in t
+assert "wave 1 has no producer for X" in t and "confirms_with: script" in t
+assert "old finding, superseded" not in t, "only the LATEST cut-audit round rides along (mkpacket.py's files[-1:])"
+assert "kept wave 1 minimal" not in t and "footprints never collide" not in t, \
+    "no rationale, from either the cut or the Plan"
+assert audit.HEADER in t and "stage: plan" in t
+pa2 = packet.Ctx(packet.argparse.Namespace(subject="L-charter-0001", charter=None, project="t", stage="plan"))
+absent(t, packet.strip(pa2, "plan-auditor"))
+refuses("plan-auditor", "Chose one wave because the two units' footprints never collide with each other.",
+        subject="L-charter-0001", stage="plan", repo=str(REPO))
+# a charter with a cut but no Plan yet
+CUT_L2 = TMP / "content" / "cut-L-charter-0002.md"
+CUT_L2.write_text("## unit-x\nGoal: x\nDelivers: R9\nFootprint: x.py\nWave: 1\n")
+ev("operator", "charter-filed", "L-charter-0002", path=str(CHARTER))
+ev("planner", "cut-written", "L-charter-0002", path=str(CUT_L2))
+N += 1
+try:
+    build("plan-auditor", subject="L-charter-0002", stage="plan")
+except SystemExit as e:
+    assert "needs a Plan" in str(e.code), e.code
+else:
+    raise AssertionError("stage plan with no Plan on file should refuse")
+
+# stage charter-set: no single charter — the whole set, diffed against a goal
+GOAL = TMP / "content" / "L-goal-0001.md"
+GOAL.write_text("# goal\n## Requirements\n- G1: reduce onboarding time\n"
+               "- G2: measure spend per project\n\n"
+               "## Done for the whole\nreview_path: go to the board / worked if both are visible.\n")
+ev("operator", "charter-filed", "L-charter-0005", path=str(CHARTER), title="Spend visibility", covers="G2")
+t = build("plan-auditor", subject="not-a-real-charter-subject", stage="charter-set", goal=str(GOAL))
+assert "stage: charter-set" in t and "goal: L-goal-0001" in t
+assert "go to the board / worked if both are visible" in t
+assert "goal requirements no charter cites:" in t and "G1" in t, "the both-directions diff"
+assert "## L-charter-0001 — L-charter-0001" in t and "## L-charter-0005 — Spend visibility" in t
+N += 1
+try:
+    build("plan-auditor", subject="also-not-real", stage="charter-set")
+except SystemExit as e:
+    assert "needs a goal" in str(e.code), e.code
+else:
+    raise AssertionError("stage charter-set with no goal should refuse")
+
+# ── 8. spec-writer round one, built from scratch (a-14, closes S6/S21) ───────
+t = build("spec-writer", subject="L-spec-0030", charter=str(CHARTER), unit="unit-a", worktree=str(REPO))
+assert "unit `unit-a`" in t and "charter L-charter-0001" in t
+assert "R1 — the board carries a spend column" in t, "the requirement lines this unit delivers, verbatim"
+assert "Currency is USD" in t, "constraints and product decisions, verbatim"
+assert "### Seams" in t and "None — both units are independent." in t
+assert "unit-b" in t and "produces: nothing" in t, "the sibling's Produces:"
+assert str(TMP / "content" / "L-spec-0030.md") in t, "the write path"
+assert "at most 400 lines" in t
+assert "kept wave 1 minimal" not in t and "footprints never collide" not in t, "no rationale, either document"
+t2 = build("spec-writer", subject="L-spec-0031", charter=str(CHARTER), unit="unit-b",
+          envelope="a builder alone can run pytest", cost_path="none")
+assert "a builder alone can run pytest" in t2 and "Cost-path inventory: none" in t2
+N += 1
+try:
+    # bare --slot (the CLI shape a-14 names) with no --unit: reaches
+    # `_round_one_slot`'s own check, not Ctx's "no events" guard.
+    packet.main(["spec-writer", "L-spec-0032", "--slot", "--charter", str(CHARTER)])
+except SystemExit as e:
+    assert "needs --unit" in str(e.code), e.code
+else:
+    raise AssertionError("round one from scratch with no --unit should refuse")
+N += 1
+try:
+    build("spec-writer", subject="L-spec-0033", unit="unit-a")
+except SystemExit as e:
+    assert "needs --charter" in str(e.code), e.code
+else:
+    raise AssertionError("round one from scratch with no --charter should refuse")
+
 # ── the file itself ──────────────────────────────────────────────────────────
 ps = {p.name for p in (TMP / "packets").glob("*.md")}
 assert ps == {"L-charter-0001-charter-reviewer-1.md", "L-spec-0001-builder-1.md",
@@ -283,7 +418,10 @@ assert ps == {"L-charter-0001-charter-reviewer-1.md", "L-spec-0001-builder-1.md"
               "L-spec-0001-reviewer-1.md",
               "L-spec-0001-spec-auditor-1.md", "L-spec-0001-spec-writer-1.md",
               "L-spec-0001-spec-writer-2.md", "L-spec-0010-spec-writer-1.md",
-              "L-spec-0027-spec-auditor-1.md"}, ps
+              "L-spec-0027-spec-auditor-1.md",
+              "L-charter-0001-plan-auditor-1.md", "L-charter-0001-plan-auditor-2.md",
+              "not-a-real-charter-subject-plan-auditor-1.md",
+              "L-spec-0030-spec-writer-1.md", "L-spec-0031-spec-writer-1.md"}, ps
 assert "REFUSED" not in "".join(p.read_text() for p in (TMP / "packets").glob("*.md")), \
     "a refused packet is never written to disk"
 first = (TMP / "packets" / "L-spec-0001-spec-auditor-1.md").read_text()
@@ -366,4 +504,4 @@ for kw, want in ((dict(), "round one carries the plan slot"),
     else:
         raise AssertionError(f"spec-writer built a packet it should have refused: {want}")
 
-print(f"packet: {N} packets built, six Blindness lists enforced")
+print(f"packet: {N} packets built, seven Blindness lists enforced")

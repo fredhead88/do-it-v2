@@ -186,6 +186,70 @@ def shared(us, plan_text):
     return found, None
 
 
+WRITE_VERBS = re.compile(r"\b(writes?|written|raises?|raised|emits?|creates?|generates?|sets?|"
+                         r"appends?|stamps?|produces?)\b", re.I)
+READ_VERBS = re.compile(r"\b(reads?|renders?|rendering|renderings|displays?|shows?|parses?|"
+                        r"consumes?)\b", re.I)
+# The Plan's Seams section names a producer/consumer by POSITION — "(unit N)" — where
+# N is the unit's 1-indexed place in the cut, the one stable handle two independent
+# documents (cut, Plan) can agree on without re-parsing each other's prose.
+SEAM_AUTHORITY = re.compile(r"`([\w.\-/]+)`[^\n]*?produced by[^(\n]*\(unit\s*(\d+)\)"
+                            r"[^\n]*?consumed by[^(\n]*\(unit\s*(\d+)\)", re.I)
+
+
+def _requirement_text(charter_text, ids):
+    """The Requirements-section prose for the ids a unit `Delivers:` — the
+    "requirement lines" half of the seam-direction check's evidence."""
+    if not charter_text or not ids:
+        return ""
+    sec = section(charter_text, "Requirements") or ""
+    return " ".join(l for l in sec.splitlines() if any(l.strip().startswith(f"- {i}") for i in ids))
+
+
+def seam_direction(us, charter_text=None, plan_text=None):
+    """A `Produces: X` must sit in the unit whose own Goal/requirement lines say it
+    WRITES or EMITS X; a `Consumes: X` must not. Two sources of evidence, both
+    conservative — a finding, never a refusal, because a verb count is a heuristic,
+    not a parse:
+
+    (a) the unit's own Goal (plus the charter's requirement text for what it
+        `Delivers:`), scored by write- vs read-verbs — a unit whose prose reads
+        like a consumer (renders, reads, displays…) but is cut as a producer, or
+        the reverse, is a mismatch worth a human's look;
+    (b) the Plan's Seams section, when it is precise enough to name the producing
+        and consuming unit BY POSITION (`(unit N)`) — the authority once it exists
+        (§3.6), and a cut line contradicting it is a finding regardless of (a).
+
+    Caught the charter-3 inversion: the cut had the renderer (whose Goal reads
+    "carries … verbatim" / "an operator reads") declared as the `Produces:`, and
+    the reaper (whose Goal reads "raises the flag file … whose body carries") as
+    the `Consumes:` — backwards from what each unit's own Goal says, and backwards
+    from what the Plan's Seams section later settled as the authority."""
+    found = []
+    for u in us:
+        gtext = " ".join(u["goal"]) + " " + _requirement_text(charter_text, u["delivers"])
+        w, r = len(WRITE_VERBS.findall(gtext)), len(READ_VERBS.findall(gtext))
+        for s in u["produces"]:
+            if r > w and r > 0:
+                found.append(f"{u['name']} Produces `{sig_name(s)}`, but its Goal reads like a "
+                             f"consumer ({r} read-verb(s), {w} write-verb(s) — check the direction)")
+        for s in u["consumes"]:
+            if w > r and w > 0:
+                found.append(f"{u['name']} Consumes `{sig_name(s)}`, but its Goal reads like a "
+                             f"producer ({w} write-verb(s), {r} read-verb(s) — check the direction)")
+    if plan_text is not None:
+        sec = section(plan_text, "Seams") or ""
+        for m in SEAM_AUTHORITY.finditer(re.sub(r"\s+", " ", sec)):
+            name, pnum, cnum = sig_name(m.group(1)), int(m.group(2)), int(m.group(3))
+            if 1 <= pnum <= len(us) and name not in [sig_name(x) for x in us[pnum - 1]["produces"]]:
+                found.append(f"the Plan's Seams section names unit {pnum} (`{us[pnum-1]['name']}`) "
+                             f"as producing `{name}`, but the cut does not list it there")
+            if 1 <= cnum <= len(us) and name not in [sig_name(x) for x in us[cnum - 1]["consumes"]]:
+                found.append(f"the Plan's Seams section names unit {cnum} (`{us[cnum-1]['name']}`) "
+                             f"as consuming `{name}`, but the cut does not list it there")
+    return found, None
+
+
 def sizes(us, repo):
     """The size heuristic against §4.3's ceiling: the footprint a builder must read,
     at ~4 bytes a token, plus the spawn floor. A footprint that resolves to nothing on
@@ -290,7 +354,9 @@ def prepass(stage, cut_text, charter_text=None, plan_text=None, repo=None, event
             ("shared names introduced twice with no owner", *shared(us, plan_text)),
             ("requirement coverage, units vs charter", *units_vs_charter(us, charter_text)),
             ("unit size vs the §4.3 ceiling", *sizes(us, repo)),
-            ("acquisition ADR trail", *acquisition(plan_text, events))]
+            ("acquisition ADR trail", *acquisition(plan_text, events)),
+            ("seam direction (Produces/Consumes vs the unit's own Goal, and the "
+             "Plan's Seams where it is the authority)", *seam_direction(us, charter_text, plan_text))]
     return f"units: {len(us)} · waves: {sorted({u['wave'] for u in us if u['wave'] is not None})}\n" \
            + render(stage, rows)
 
