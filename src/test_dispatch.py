@@ -86,6 +86,16 @@ assert code == 0 and types == ["spec-written", "question", "spawn-done"], types
 assert evs[0]["unknown_count"] == 1 and evs[0]["footprint"] == ["a.py"]
 code, types, evs, _ = spawn("spec-writer", out={**sw, "status": "killed", "killed_by_check": 2, "escalations": []})
 assert code == 0 and types == ["spec-killed", "spawn-done"] and evs[0]["check"] == 2, "killed needs no file"
+# S15: an owed criterion carries the instant that proves it, or the schema refuses it.
+owed = {**sw, "escalations": [], "declarations": [{"term": "owed-ac", "criterion": "AC7", "wake_at": "2026-09-16T11:04:00Z",
+                                                   "line": "the lock is reaped on the first run after it passes the threshold"}]}
+code, types, evs, _ = spawn("spec-writer", out=owed, path=sp, side=lambda: sp.write_text("spec"))
+assert code == 0 and "owed-ac" in types and next(e for e in evs if e["type"] == "owed-ac")["wake_at"] == "2026-09-16T11:04:00Z", evs
+assert fold.ts("2026-09-16T11:04:00Z").tzinfo is not None, "the fold parses the Z form"
+PK.write_text("a packet, owed without wake_at\n")
+code, types, evs, _ = spawn("spec-writer", out={**owed, "declarations": [{"term": "owed-ac", "line": "no instant"}]}, path=sp)
+assert code == 1 and "violates spec-writer.schema.json" in evs[-1]["why"] and "wake_at" in evs[-1]["why"], evs[-1]
+PK.write_text("a packet\n")
 
 card = {"status": "DONE", "identity": {"spec_id": "L-spec-0001", "built_by": "L-builder-0001", "branch": "l-spec-0001",
                                        "base_sha": "abc1234", "ready_sha": "def5678"},

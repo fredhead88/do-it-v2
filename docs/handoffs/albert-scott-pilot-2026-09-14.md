@@ -253,7 +253,7 @@ audit. None of them can run here.
   should not zero `confirmed`; the fold should read *confirmed over the evaluable
   rows* + *owed rows with a future wake_at* as `shipped-owed-evidence`. K must be a
   measured setting, not an unset default that silently forbids the whole state.
-- **Fix status (2026-09-15):** **open** — a-6 (`owed-ac` carries `wake_at`; `cannot-assess` on an owed row does not zero `confirmed`; `owed-met`). Re-measured as S33.
+- **Fix status (2026-09-15):** **half shipped** (charter 3, unreleased): the spec-writer's `owed-ac` declaration now requires `criterion` + `wake_at`, so the event the fold reads can exist; L-spec-0006's AC7 is the first to ride it. Still open (a-6): `cannot-assess` on an owed row zeroes `confirmed`, `owed-met`, `closed-shipped`.
 
 ### S16. The gate's grant parser and the spec-writer's `Writes:` shape disagree
 - **Mechanism:** D115 makes `writes_grant` read the `Writes:` LINE and refuse prose

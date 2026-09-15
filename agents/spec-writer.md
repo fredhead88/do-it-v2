@@ -56,7 +56,11 @@ Run each. Record what it found in `Assumptions[]`, or kill the spec.
    short-circuited. Conditional on a paid footprint.
 7. **Buildability envelope.** For each criterion: can a builder alone in a
    worktree produce this evidence? No: declare it an owed criterion, with the
-   observation and the `wake_at` that will prove it.
+   observation and the `wake_at` that will prove it. The declaration is
+   `{term: owed-ac, criterion: AC<n>, wake_at: <ISO-8601 instant>, line: <the observation>}`
+   — `wake_at` and `criterion` are required on that term (the schema refuses an owed-ac
+   without them), because the fold derives `shipped-owed-evidence` from the instant and
+   nothing else can.
 8. **Declare the repro class** on any bug-fix spec: `reproducible` — the repro
    is the evidence — or `not-reproducible-here` — say why, the fix path must
    not depend on local repro, and name the observation that will confirm the

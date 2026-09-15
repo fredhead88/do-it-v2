@@ -22,6 +22,11 @@ each direction.
 - `agents/grader.md`: the worktree's history is not the grader's — `git log/show/diff/blame` and
   the commit message are forbidden by name. A Sonnet grader ran `git log --oneline` to confirm its
   sha, saw the commit subject the packet strips, and honestly voided its run (charter 3, R6).
+- `agents/spec-writer.schema.json`: an `owed-ac` declaration requires `criterion` and `wake_at`
+  (ISO-8601), so the wrapper's `owed-ac` event carries the instant the fold derives
+  `shipped-owed-evidence` from; a spec can now honestly owe a criterion instead of being
+  closed as `closed-unbuilt` after merge. (S15, S33 — the declaration half; `owed-met` and
+  `closed-shipped` remain open, change list a-6.)
 
 ## [0.2.0] — 2026-09-15
 
