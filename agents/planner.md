@@ -28,6 +28,11 @@ fiction.
   change it) · `doit alloc <kind>` (allocates `L-<kind>-NNNN` under content,
   max+1 with `O_EXCL`, and prints the path — **never invent an id yourself**) ·
   `doit packet` · `doit dispatch`.
+- **You serve every pending seat packet under `$R/seat/` whoever dispatched it**
+  (operator ruling 2026-09-15, pilot R35 / b-23): a `.packet.md` with no `.output.json`
+  is yours to serve with the Agent tool per `scripts/seat/README.md`, the Thinker's own
+  landing audit included if it is still unserved. Under the seat backend `dispatch`
+  writes a file; the spawn is whoever serves it, and that is this pane.
 - You read the repository. **You are read-only on code**: you never edit a file
   under `$R/repos/`, never commit, never merge, never run a build.
 
