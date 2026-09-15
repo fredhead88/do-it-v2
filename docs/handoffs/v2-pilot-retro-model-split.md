@@ -134,9 +134,8 @@ without the seat spend of running everything on a frontier model.
    (`L-operator-local.jsonl`, ref `L-spec-writer-0016.jsonl:5`) adding the writer's own stated
    `wake_at` to its owed-ac declaration so the fold could derive `shipped-owed-evidence`.
    CI on the merges: 6 of 7 checks green on both; `Repo Lint Guards` red is pre-existing (brief
-   filed); `Python Tests` on `f38ba5dda` was still running at 08:00Z — check
-   `gh run list --commit f38ba5dda3fa9a89eea07c09635297bddadb1edc`; a NEW red outside the two
-   footprints is `blocked-external` + brief, never a revert (S17).
+   filed); `Python Tests` on `f38ba5dda` **completed success** 08:22Z (pytest + pg-parity). Charter 3's
+   master is green on every required check.
 9. **Token accounting (operator ask, 2026-09-15):** record the backend's usage split on every
    terminal event (`claude -p` and codex already give input/output/cache read/cache write; the
    seat route gives one blended figure), add a `[weights]` table to `models.toml` (per model: the

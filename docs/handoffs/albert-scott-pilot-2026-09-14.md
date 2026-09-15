@@ -1118,9 +1118,9 @@ the driver's `S<n>`.*
   reaper on cron (paused), so a human runs `/opt/albert-scott/scripts/liveness_reaper.sh` once on
   master after that instant, then the lock is gone and `~/.claude/ledger/liveness/liveness-reaper.log`
   names `yitzy`. Then a re-grade (or `owed-met`, a-6) turns the spec `accepted`.
-- **CI:** both merges green on 6 of 7 checks; `Repo Lint Guards` red is pre-existing and adjacent
-  (brief filed); the first merge's `pytest` run was cancelled by the second push's concurrency
-  group — the run on `f38ba5dda` is the one that counts (result in the retro handoff).
+- **CI:** `Python Tests` on `f38ba5dda` **completed success** at 08:22Z (pytest + pg-parity green,
+  45 min); every other required check green; `Repo Lint Guards` red is pre-existing and adjacent
+  (brief filed). The first merge's `pytest` run was cancelled by the second push's concurrency group.
 - **Fix status (2026-09-15):** the map, the seat route, the stamping and the tick refusal are
   verified on a real charter; open: a-6 (owed-met / closed-shipped), a-14 (Planner packets),
   b-6 (threshold arithmetic in the charter), the token split + weights (retro handoff step 9).
