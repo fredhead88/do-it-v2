@@ -470,4 +470,14 @@ with contextlib.redirect_stdout(io.StringIO()) as buf:
 assert "spec-auditor      seat      claude-opus-5" in buf.getvalue(), buf.getvalue()
 del os.environ["DOIT_LEDGER_FILE"]
 MT.unlink()
+# An empty or non-file --packet is refused before a spawn id exists (pilot "Smaller"; charter 3).
+before_files = sorted((TMP / "events").glob("L-research-*.jsonl"))
+for bad_packet in ("", str(TMP / "nowhere.md")):
+    try:
+        dispatch.main(argparse.Namespace(role="research", subject="L-spec-0001", packet=bad_packet, path=None, cwd=str(REPO),
+                                         charter=None, project="t", mcp_config=None, timeout=None, max_usd=None, seat=False))
+        raise AssertionError("a non-file packet must be refused")
+    except SystemExit as e:
+        assert "not a file" in str(e.code) and "nothing allocated" in str(e.code), e.code
+assert sorted((TMP / "events").glob("L-research-*.jsonl")) == before_files, "refused before allocation: no new spawn file"
 print(f"dispatch: {N} spawns mocked, every check fired")

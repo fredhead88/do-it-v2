@@ -114,7 +114,7 @@ audit. None of them can run here.
 - **Systemic:** add `plan-auditor` (all three stages) and `spec-writer --slot` to
   `packet.py`, with a strip list for the Planner's rationale (the one thing §3.6 makes
   those auditors blind to). Until then the blindness is manual.
-- **Fix status (2026-09-15):** **open** — a-14 (plan-auditor at all three stages and `spec-writer --slot` into `packet.py`, with the rationale strip).
+- **Fix status (2026-09-15):** **half shipped** (charter 3, unreleased): the rework packet reads `content/slot-<spec>.md` itself — the `--slot` hand-typing is gone. The plan-auditor packets (all three stages) and round-one slots are still hand-built (`mkpacket.py` / `mkslot.py` in the retro pane's tmp dir) — a-14.
 
 ### S7. Cut-file documentation gap: an empty seam label vs `none`
 - **Mechanism:** `audit.fields()` splits a label's value into names. `Consumes: none`
@@ -308,7 +308,7 @@ audit. None of them can run here.
   on the same board for the Thinker to cite.
 
 ### Smaller, all real
-*Fix status (2026-09-15): every item here is open — `pilot-retro-change-list.md` a-16, one line and one test each.*
+*Fix status (2026-09-15): `--packet ""` is refused before allocation (charter 3, unreleased — it fired again there first); the rest are open — `pilot-retro-change-list.md` a-16, one line and one test each.*
 
 - `doit dispatch --packet ""` reads `.` as the packet and crashes with a traceback
   before allocating a spawn; it should refuse an empty or non-file packet path.
@@ -768,7 +768,7 @@ the driver's `S<n>`.*
   `spec-auditor` `spawn-done` but zero `audit-finding` events since the last `spec-written` — an
   empty fix list on a rework round is never right; and `dispatch --seat` should write
   `spawn-started` only when the pane stamps `meta.json`, or record `spawn-abandoned` on SIGTERM.
-- **Fix status (2026-09-15):** **open** — a-11 (rework packet refuses on zero findings; `spawn-abandoned` on SIGTERM). The transcription half is closed by S18's 0.2.0 fix.
+- **Fix status (2026-09-15):** the rework-packet refusal on zero findings **already exists** in `packet.py` (`a rework packet with no fix list is round one again`, test-covered); `spawn-abandoned` on SIGTERM is open, a-11. The transcription half is closed by S18's 0.2.0 fix.
 
 ### S29. Wall-clock: one small fix spec costs ~2 hours through v2, and the operator's verdict is "terrible"
 - **Measured (second sitting, 07:11 → 13:10 UTC, ~6 h):** three merges to master, zero deploys.

@@ -202,19 +202,25 @@ def p_spec_writer(c):
     """Rework. Round one is the Planner's: it holds the plan slot, which is not in the
     ledger. Rework is round one's packet plus the audit's list."""
     prev = sorted(PACKETS.glob(f"{c.a.subject}-spec-writer-*.md"))
+    # Round one's packet is the Planner's slot file, which by convention lives at
+    # content/slot-<spec>.md (planner.md ⑥, executor.md's brief row) — not under
+    # packets/. The first rework of every pilot spec needed `--slot` typed by hand
+    # for that reason (S6); the convention is read here so it does not.
+    slot = c.a.slot or (str(CONTENT / f"slot-{c.a.subject}.md")
+                        if (CONTENT / f"slot-{c.a.subject}.md").is_file() else None)
     if prev:
         base = prev[-1].read_text().splitlines()
-    elif c.a.slot:
-        base = pathlib.Path(c.a.slot).read_text().splitlines()
+    elif slot:
+        base = pathlib.Path(slot).read_text().splitlines()
     else:
-        die("no prior spec-writer packet and no --slot: round one carries the plan slot, "
-            "which only the Planner holds")
+        die("no prior spec-writer packet, no --slot, and no content/slot-<spec>.md: round one "
+            "carries the plan slot, which only the Planner holds")
     findings = [e for e in c.all_of("audit-finding") if e.get("list") != "rejected"]
     if not findings:
         # Round one from a slot the Executor wrote is legitimate — D7's brief-authored
         # spec has no plan slot and no audit yet. Round one from a PRIOR PACKET is a
         # rework with nothing to rework, which is the mistake this refuses.
-        if prev or not c.a.slot:
+        if prev or not slot:
             die("no audit findings on this subject — a rework packet with no fix list is round one again")
         return base
     return base + ["", "## Fix list — apply each, same spec id, same path", ""] + [

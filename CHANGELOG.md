@@ -10,6 +10,14 @@ each direction.
 
 ## [Unreleased]
 
+### Fixed
+- `doit dispatch` refuses an empty or non-file `--packet` before allocating a spawn id (a shell
+  that captured a failed `doit packet` into a variable handed `""`, which read `.` and crashed
+  after allocation). ("Smaller" list; hit again on charter 3.)
+- `doit packet spec-writer` on a rework reads the Planner's round-one slot from
+  `content/slot-<spec>.md` when no packet is on disk, so the first rework of a spec no longer
+  needs `--slot` typed by hand. (S6, half.)
+
 ## [0.2.0] — 2026-09-15
 
 The day-after-the-pilot release: the model map, and the changes that stop the driver pane doing a

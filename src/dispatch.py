@@ -393,6 +393,11 @@ def main(a):
     kind, tmin, usd = ROLES[a.role]
     atexit.register(poke)
     fm, schema_path = frontmatter(a.role), AGENTS / f"{a.role}.schema.json"
+    # An empty or non-file --packet is refused BEFORE a spawn id is allocated: a shell
+    # that captured a failed `doit packet` into a variable hands "" here, which read `.`
+    # as the packet and crashed after the fact (pilot "Smaller" list; hit again on charter 3).
+    if a.packet != "-" and not (a.packet and pathlib.Path(a.packet).is_file()):
+        sys.exit(f"dispatch: --packet {a.packet!r} is not a file — nothing allocated, nothing spent")
     packet = sys.stdin.read() if a.packet == "-" else pathlib.Path(a.packet).read_text()
     EVENTS.mkdir(parents=True, exist_ok=True), CONTENT.mkdir(parents=True, exist_ok=True)
     ledger = alloc(EVENTS, f"L-{a.role}-", ".jsonl")

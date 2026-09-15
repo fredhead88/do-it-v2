@@ -180,6 +180,17 @@ t2 = build("spec-writer")
 assert t2.startswith(t.split("## Fix list")[0][:60]), "round two reuses the packet on disk, not --slot"
 absent(t, packet.strip(c, "spec-writer"))
 refuses("spec-writer", "A sibling slot's internals, which no other role may ever be handed.")
+# The Planner's round-one slot lives at content/slot-<spec>.md by convention; a rework
+# with no packet on disk reads it without --slot (pilot S6 — every first rework needed
+# the flag typed by hand; charter 3 crashed a dispatch on the refusal captured as "").
+SPEC10 = TMP / "content" / "L-spec-0010.md"
+SPEC10.write_text("# L-spec-0010\n## 1. Goal\nx\n")
+(TMP / "content" / "slot-L-spec-0010.md").write_text(f"1. Charter extract: R1.\n9. The path to write the spec: {SPEC10}\n")
+ev("spec-writer", "spec-written", "L-spec-0010", spec="L-spec-0010", path=str(SPEC10), footprint=[])
+ev("spec-auditor", "audit-finding", "L-spec-0010", list="findings", field="Goal", category="vague",
+   finding="the goal names no observable", suggested_fix="name one")
+t10 = build("spec-writer", subject="L-spec-0010")
+assert "Fix list" in t10 and "the goal names no observable" in t10 and str(SPEC10) in t10, "the content slot is round one's packet"
 
 # ── 5. reviewer ──────────────────────────────────────────────────────────────
 ev("grader", "verdict", "L-spec-0001", confirmed=False, n=1, matches_intent="yes", card_ok="yes")
@@ -230,7 +241,7 @@ assert ps == {"L-charter-0001-charter-reviewer-1.md", "L-spec-0001-builder-1.md"
               "L-spec-0001-grader-1.md", "L-spec-0001-grader-2.md",
               "L-spec-0001-reviewer-1.md",
               "L-spec-0001-spec-auditor-1.md", "L-spec-0001-spec-writer-1.md",
-              "L-spec-0001-spec-writer-2.md"}, ps
+              "L-spec-0001-spec-writer-2.md", "L-spec-0010-spec-writer-1.md"}, ps
 assert "REFUSED" not in "".join(p.read_text() for p in (TMP / "packets").glob("*.md")), \
     "a refused packet is never written to disk"
 first = (TMP / "packets" / "L-spec-0001-spec-auditor-1.md").read_text()
