@@ -1,6 +1,11 @@
 # do-it-v2 pilot retro — inefficiency, model-per-agent, and the Codex/Claude split
 
 ## Status
+**2026-09-15 08:00Z — charter 3 (L-charter-0003) is L2-complete** on the Claude-only map: 77 min
+first cut → reap, two specs, 17 spawns, 2.12M blended tokens, zero operator interventions (R7 in
+the pilot record). v0.2.0 shipped; four wrapper/contract defects fixed on the day (see CHANGELOG
+Unreleased). Owed: L-spec-0006 AC7 wakes 2026-09-16T11:04Z — see Next Steps 8.
+
 Pilot day 1 (2026-09-14) is over: 3 charters closed, the 60-spec backlog deployed, prod on
 `5cd5c47de`. The systemic record (S1–**S35** driver, T1–T15 thinker — the "S14" here was
 stale) has now been read whole and turned into one ranked list:
@@ -116,7 +121,30 @@ without the seat spend of running everything on a frontier model.
 6. **Board fixes:** CHARTERS OPEN line (T12); per-goal charter-set packet (T11); `--land`
    refuses without `--goal` when >1 goal (T8).
 7. **Ingest port** `doit ingest <pr>` with a ledger `decision` as the human gate (T7/T13).
-8. Only then: charter 0003, and Goal A's G3 re-measurement charters on `5cd5c47de`.
+8. ~~Charter 0003~~ **DONE 2026-09-15** (L2-complete 07:45Z, R7). **Operator action tomorrow,
+   after 2026-09-16T11:04Z**, on the builder box as `albert`:
+   ```
+   cd /opt/albert-scott && git pull --ff-only && scripts/liveness_reaper.sh --dry-run && scripts/liveness_reaper.sh
+   ls -la ~/.claude/ledger/liveness/ | grep grading; tail -3 ~/.claude/ledger/liveness/liveness-reaper.log
+   ```
+   Expected: no 957 lock; a `reaped unopenable lock … owner=yitzy` line. Then re-dispatch the
+   grader on L-spec-0006 (`doit packet grader L-spec-0006 --worktree <a fresh worktree of master>`)
+   so AC7 confirms and the spec derives `accepted` — or, once a-6 ships, append `owed-met`.
+   Also on the record for a veto: the pane, acting as operator, appended one `correction`
+   (`L-operator-local.jsonl`, ref `L-spec-writer-0016.jsonl:5`) adding the writer's own stated
+   `wake_at` to its owed-ac declaration so the fold could derive `shipped-owed-evidence`.
+   CI on the merges: 6 of 7 checks green on both; `Repo Lint Guards` red is pre-existing (brief
+   filed); `Python Tests` on `f38ba5dda` was still running at 08:00Z — check
+   `gh run list --commit f38ba5dda3fa9a89eea07c09635297bddadb1edc`; a NEW red outside the two
+   footprints is `blocked-external` + brief, never a revert (S17).
+9. **Token accounting (operator ask, 2026-09-15):** record the backend's usage split on every
+   terminal event (`claude -p` and codex already give input/output/cache read/cache write; the
+   seat route gives one blended figure), add a `[weights]` table to `models.toml` (per model: the
+   four price ratios), render per-model raw + weighted totals on the board (`SPEND` block) and
+   `doit spend <charter|spec>`; derive stage wall-clock from event timestamps; backfill the split
+   for seat spawns from their sub-agent transcripts (`session` → `~/.claude/projects/…`) once, to
+   calibrate. Then declared token budgets per contract with `budget-exceeded` (§4.4).
+10. Then Goal A's G3 re-measurement charters on `f38ba5dda`.
 
 ## Reference
 - v2 repo `~/do-it-v2` (`src/`, `agents/`, `design/system-design-v2.md`, `docs/handoffs/`).
@@ -131,6 +159,11 @@ without the seat spend of running everything on a frontier model.
   `hello@ephraimgreenblatt.com` is deactivated as a portal login.
 
 ## Session Log
+- 2026-09-15 (retro pane, second block): v0.2.0 shipped (profiles, fallback, seat route in every
+  contract, VERSION/CHANGELOG/README, Fix status on every record entry); charter 3 driven end to
+  end from this pane as Planner + Executor on `models.claude-only.toml` — R2–R7 recorded, run log
+  in the pilot record; fixes shipped on the day: empty `--packet` refusal, rework slot fallback,
+  grader git-history rule, owed-ac `wake_at` in the schema, OWED EVIDENCE render.
 - 2026-09-15 (retro pane): read S1–S35 + T1–T15 whole; wrote the ranked change list; decided
   and installed the model map; codex backend + requested/used stamping + tick refusal shipped
   with tests (`./doit test` green, 26 dispatch spawns mocked); tick refusal proved on the real
