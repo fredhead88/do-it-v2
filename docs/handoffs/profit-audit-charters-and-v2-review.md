@@ -80,6 +80,32 @@ charter 3 — tokens and wall clock visible on the board while it does.
 - **Charters, not a new goal, for the audit** (recommendation, not yet ruled): Goal A exists and
   its G3/G5 are the slot; land with `--goal L-goal-0001`.
 
+## Status addendum — 2026-09-15 11:15Z (L-thinker-0004, the triage/probe Thinker)
+L-charter-0010's four probes ran (L-probe-0001…0004, all `complete`, $0). From their run-records
+the Thinker landed **six more charters against Goal A** at 10:59Z — L-charter-0011 (cron targets
+exist + first fire observed, G6), 0012 (deploy.sh the only path, `/version` = tree; G2, G6), 0013
+(255 anchors, G3), 0014 (827 sign + the 1178 restore with B1189 collapsed on all seven columns; G3,
+G4), 0015 (877: the nightly job finishes and reports truthfully, G5), 0016 (CI truth: tsc, inert
+guard, full suite, lint guard, + R8 the credentialed probe for 1317/1335/1316; G1, G3) — plus
+`charter-revised` on 0007 (R9 untagged ASIN-list money) and 0008 (R7 the 1336 provenance leak, R8
+= AS-32/1319). Goal A gained **G6** by operator ruling; two decisions on L-goal-0001 record the
+six approved triage items and the push-deploy ruling. Charter-set audit L-plan-auditor-0011 (9
+findings, no bad cut) folded in one revise round. Triage write-up:
+`content/brief-triage-L-thinker-0004.md`.
+
+**Owed / open after this session:**
+1. **Operator ruling, no default** (0011 R3): apply the prohibited `request_health_buckets` head,
+   or uninstall the hourly cron until it is applied. R3's unit is not cut until it is a `decision`.
+2. **Decisions on L-goal-0001 for the dead items** (0010's own R2; also 0015 R7 / 0016 R7): pypdf
+   (L-probe-0004), 1186 (L-probe-0002), B1189-as-precondition (L-probe-0001, spec 1180), 384
+   r2ac1/r2ac3 and 1324 ac2 (L-probe-0003). L-charter-0010's R3 write-up is still the Planner's.
+3. **Set order** the Planner cuts to: 0012 first among backend charters (push-deploy still live
+   until then); 0011 → 0012 → 0015 on `deploy.sh`; 0013 → 0014 on `cash_basis_etl.py`; 0013 →
+   0015 on the Data Health surface; 0016's `REQUIRED_CHECKS` change last of all.
+4. Pilot record: R17–R23, R29–R31, R35 and change-list a-21…a-24, a-27, a-28, b-15…b-17, b-21,
+   b-23 are this session's (`--print-only` lands — six duplicate `charter-filed` voided by
+   corrections; the Thinker cannot serve its own landing's audit under the seat backend).
+
 ## Next Steps (2026-09-15 10:30Z — supersedes the list below, kept for the record)
 1. **After 2026-09-16T11:04Z**: run the owed reaper step (retro Next Steps 8) on master, then
    `doit append owed-met L-spec-0006 criterion=AC7 evidence=<log line>` from an executor/operator
