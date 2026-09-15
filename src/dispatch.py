@@ -332,9 +332,16 @@ def events_for(role, out, a, base):
         ev += [("audit-finding", f) for f in out["findings"]]
     elif role == "grader":
         vs = out["verdicts"]
+        # S15/S33 (a-6): `confirmed` here stays the LITERAL all-rows-met roll-up —
+        # the model's own claim, computed before this spawn's dispatch could know
+        # which criteria the spec-writer had declared owed. The fold (verdict_
+        # confirmed) is where a `cannot-assess` row on an owed criterion stops
+        # zeroing it; that needs the row-level data this event did not carry
+        # before, so `cannot_assess` rides beside `confirmed` now.
         ev.append(("verdict", dict(confirmed=all(v["verdict"] == "met" for v in vs)
                                    and out["matches_intent"] == "yes" and out["card_ok"] == "yes",
-                                   n=len(vs), matches_intent=out["matches_intent"], card_ok=out["card_ok"])))
+                                   n=len(vs), matches_intent=out["matches_intent"], card_ok=out["card_ok"],
+                                   cannot_assess=[v["ac"] for v in vs if v["verdict"] == "cannot-assess"])))
         ev += [("rejected-criterion", dict(criterion=v["ac"], why=v["reason"])) for v in vs if v["verdict"] == "unmet"]
         if out["could_not_run"] and not any(t == "gate-infra" for t, _ in decl):
             ev.append(("gate-infra", dict(line="could_not_run")))
