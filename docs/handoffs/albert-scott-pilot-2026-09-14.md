@@ -982,3 +982,36 @@ the driver's `S<n>`.*
   before the first dispatch.
 - **Fix status (2026-09-15):** open — a-16 (`doit doctor`); the serving-prompt half is practice
   from this charter on.
+
+### R3. Charter 3's Planner stage on the Claude-only map: three Opus audits, zero transcription, one honest re-cut
+- **Measured (2026-09-15 06:28–07:00Z):** L-plan-auditor-0007 (cut, 224 s, 100k tok, 18 tool uses),
+  -0008 (re-cut, 312 s, 106k, 19), -0009 (plan, 302 s, 110k, 18) — every one served as
+  `general-purpose` + contract file (R2), every one wrote and validated its own Output first
+  try, every terminal event stamped `model_requested = model_used = claude-opus-5`,
+  `model_match: true`, `first_on_model: true` on -0007 and `false` after. The pane typed nothing.
+- **What the audits bought:** -0007 returned `bad_cut: true` — the first bad_cut of the pilot —
+  on three real defects the Planner had not seen: R2's "owner on the surface" was undeliverable
+  from the reaper's footprint (the analyzer renders a fixed string and sits 4 lines under the
+  ratchet cap), R3's 7-day threshold makes R4 false until 2026-09-16T11:03Z (the charter's own
+  premise, an S22-class defect in the Thinker's Intent), and the mode-000 fixture could not
+  exercise the reap path at all. -0008 cleared the two-unit re-cut and found the seam had no
+  composition owner; -0009 caught that the durable log would break the reaper's existing
+  dry-run-mutates-nothing test, and that a cut-audit finding about a second surface was false on
+  measurement. Sonnet judges would have had to find all of that; that comparison is not run.
+- **Planner cost:** the cut, re-cut, Plan and ADR were ~30 min of pane time; the packets were
+  hand-built by two scripts (`mkpacket.py`, `mkslot.py` under the job's tmp dir — S6 is still
+  open, a-14, and those two scripts are the shape `packet.py` needs).
+- **Systemic:** (1) a Thinker Intent that names a threshold-dependent state needs the arithmetic
+  in the charter (b-6, measured again); (2) the plan-auditor's second cut round is cheap (5 min)
+  and found a real seam defect — keep "one loop here"; (3) `mkpacket.py` / `mkslot.py` → a-14.
+- **Fix status (2026-09-15):** the map and serving shape verified on three real spawns; a-14 open.
+
+## Charter 3 run log (2026-09-15, retro pane; every spawn seat, `cost_usd` null, models per `models.claude-only.toml`)
+
+| # | Role | Model (requested = used) | Outcome |
+|---|---|---|---|
+| — | planner (this pane, Fable) | — | cut 1 unit → `bad_cut` → re-cut 2 units; Plan + `L-adr-0005`; both pre-passes clean |
+| 1 | plan-auditor (cut) · `L-plan-auditor-0007` | opus | 224 s · 7 findings · **`bad_cut: true`** (surface undeliverable from footprint; R3/R4 threshold contradiction; fixture cannot reach the reap path) |
+| 2 | plan-auditor (cut, round 2) · `L-plan-auditor-0008` | opus | 312 s · 7 findings · `bad_cut: false` (seam unowned → SD1/ADR; wave-1-not-core → one wave; flag self-erases → accepted; mode-000 ruling made explicit) |
+| 3 | plan-auditor (plan) · `L-plan-auditor-0009` | opus | 302 s · 6 findings, all acted on in the Plan (dry-run purity; R4 names its run; Q3 withdrawn on measurement; raise() copy bound by tests; composition fixture; guarded read) |
+| 4–5 | spec-writer · `L-spec-writer-0013` (L-spec-0005) · `-0014` (L-spec-0006) | sonnet | dispatched 07:0x in parallel — |
