@@ -1574,3 +1574,35 @@ cost or hid.
   `meta.json` after N minutes as "stamp it yourself with what the transcript resolves" — the
   stamp is derivable (usage.py already reads the transcript). Change list a-29.
 - **Fix status:** open — a-29.
+
+### R45. A late stamp lands after the dispatcher's own timeout, and the terminal event never fires — reconstructed by hand from `events_for()` (L-executor-0006)
+- **Measured:** all five of my own `doit dispatch --detach` spawns this stretch (four
+  `spec-auditor`, one `plan-auditor` served on the Planner's behalf) hit exactly R44's class, one
+  step further: I received each completion notification, ran `doit validate` on the Output (all
+  five VALID), then paused mid-batch — first to raise the cross-pane serving-conflict question
+  (AskUserQuestion + a failed `SendMessage` to a peer that ListAgents never listed), then to
+  investigate the WEDGE flag it caused. By the time I ran `stamp.sh`, every one of the five
+  `run_seat()` waiters had already given up at their 900s deadline and written `spawn-failed{why:
+  "timeout after 15 min"}` — the real work had finished in 5.7–7.5 minutes each, well inside the
+  window, but the wait ends at 900s from `spawn-started` regardless of what stamp.sh does after.
+  `meta.json` then landed with no waiter left alive to consume it: the terminal `spawn-done` and
+  every derived `audit-finding` never fired, and `doit packet spec-writer <spec>` refused rework
+  ("no audit findings on this subject") even though real, complete audits sat validated on disk.
+- **What I did:** appended a `correction` on each `spawn-failed` event naming the superseding
+  valid output (so nothing re-dispatches a $0.10–0.30 duplicate audit), then wrote a one-off
+  script importing `dispatch.events_for()` and `dispatch.emit()` directly — the exact functions
+  `main()` calls — to derive and append the real `audit-finding`/`spawn-done` events from the
+  already-validated `output.json` + `meta.json` pairs, reading `contract_sha256`/`packet_sha256`/
+  `backend`/`model_requested` off the existing `spawn-failed` event rather than recomputing them.
+  `doit packet spec-writer` built cleanly afterward on all four.
+- **Systemic:** two gaps stack here. (1) R44/a-29 (served-but-unstamped self-heal) would have
+  caught this if it existed. (2) Sharper than R44: the *cause* was my own mid-batch interruption
+  for something that could have waited — `stamp.sh` should be the very next action after a
+  completion notification, before any side investigation, exactly because a live dispatcher-side
+  timeout is running the whole time regardless of what the serving pane does next. Worth a line in
+  `executor.md`/the seat README: stamp first, investigate second. (3) `events_for()` + `emit()`
+  being pure, importable functions made the by-hand reconstruction possible at all without
+  re-running the sub-agent — that reusability is worth keeping if a-29 is ever built as a proper
+  `doit stamp --recover <spawn>` path instead of a one-off script.
+- **Fix status:** open — a-29 (the general fix); a new line for `scripts/seat/README.md` /
+  `executor.md` on stamping before doing anything else with a completion notification.
