@@ -52,6 +52,8 @@ design-doc or contract change; (c) = drop, with why.
 | 29 | **`research` default timeout 15 min** (`ROLES["research"]`), or the packet passes `--timeout`; a spawn that finished its file after the wrapper gave up is an undeclared success the ledger cannot see. | R33 | one 5-min timeout on a 6-min map; a usable file with no `research-done` | `src/dispatch.py` |
 | 30 | **`probe-run` carries `summary`** beside path/externals/n_inputs/spend/complete, so the charter's event stream says what the probe found, not only where it looked. | R34 | five probes' findings readable only from `spawn-done` scalars | `src/dispatch.py` |
 | 31 | **`evidence` covering every charter R derives L1** for a charter with zero specs (the operational lane, b-7), or the fold flags "evidence complete, no l1-complete" on the board; today L1 waits on a Planner event nothing reminds it to write. | R37 | one operational charter, closed by hand | `src/fold.py` |
+| 32 | **A research packet template for a cut's footprint**: for every function a unit touches — its call sites (file:line), whether it is pure or reads state, the generated files its output feeds — so the Planner cuts on topology, not pointers. | R38 | two Opus cut-audit rounds (8 min) spent on call-site facts | `src/packet.py` (research), `agents/research.md` |
+| 33 | **The pre-pass refuses a footprint entry that resolves to nothing** (a glob or path with no file on disk) instead of folding it into "unmeasurable" only when every entry misses; a new-file entry is declared with a `(new)` suffix. | R38 | `test_1346*.py` in a cut that two audits read | `src/audit.py` |
 
 ## (b) Design-doc and contract changes, ranked
 
