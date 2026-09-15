@@ -5,7 +5,7 @@ Every role gets two: the Input list it must carry, and — the point of the file
 that its Blindness list never reaches the packet. The second is exercised twice
 per role: the honest packet is scanned for the real forbidden strings, and the
 builder is then made to leak one and the refusal must fire."""
-import json, os, pathlib, subprocess, sys, tempfile
+import json, os, pathlib, re, subprocess, sys, tempfile
 
 TMP = pathlib.Path(tempfile.mkdtemp())
 os.environ["DOIT_ROOT"], os.environ["DOIT_PROJECT"] = str(TMP), "t"
@@ -48,7 +48,7 @@ Assumed the seat's list price is the only figure available, because the charter
 never named a metered source and the meter file records zero dollars metered.
 ## 8. Verification
 ```
-cd src && python3 test_fold.py
+cd src && /usr/bin/python3 test_fold.py
 ```
 ## Acceptance criteria
 AC1 [backend]: the board renders a spend column per project.
@@ -99,7 +99,7 @@ ev("spec-writer", "spec-written", "L-spec-0002", spec="L-spec-0002", path=str(SI
    footprint=["src/fold.py"], requirement_ids=["R2"], charter="L-charter-0001")
 
 # ── 1. spec-auditor ──────────────────────────────────────────────────────────
-t = build("spec-auditor")
+t = build("spec-auditor", worktree=str(REPO))
 assert str(SPEC) in t and "cwd is the repository" in t, t
 assert "Verification section holds a runnable command: yes" in t
 assert "[NEEDS CLARIFICATION] count: 0" in t
@@ -108,12 +108,53 @@ assert "Calibration examples: none" in t
 c = packet.Ctx(packet.argparse.Namespace(subject="L-spec-0001", charter=None, project="t"))
 absent(t, packet.strip(c, "spec-auditor"))
 assert "never named a metered source" not in t, "the author's Assumptions reasoning is stripped"
-refuses("spec-auditor", "Currency is USD to two places, and the seat's list price is a size, not a bill.")
+refuses("spec-auditor", "Currency is USD to two places, and the seat's list price is a size, not a bill.",
+        worktree=str(REPO))
 
 # the verify script is a file now, not a 300-char field (§5.10)
 V = TMP / "content" / "verify-L-spec-0001.sh"
-assert V.exists() and "cd src && python3 test_fold.py" in V.read_text() and os.access(V, os.X_OK)
+assert V.exists() and "cd src && /usr/bin/python3 test_fold.py" in V.read_text() and os.access(V, os.X_OK)
 assert "set -euo pipefail" in V.read_text(), "a multi-step block must not exit 0 over an earlier failure"
+assert re.match(r"#!/usr/bin/env bash\nset -euo pipefail\nBASE=\S+\n", V.read_text()), \
+    "BASE is pinned once, right after set -euo pipefail (a-5 rule d)"
+
+# ── 1b. verify_script lint (a-5, S23/S31a) ────────────────────────────────────
+def bad_verify(block, want, subject):
+    """One spec whose Verification block violates one rule; the packet must refuse."""
+    global N
+    p = TMP / "content" / f"{subject}.md"
+    p.write_text(f"# {subject}\n## 8. Verification\n```\n{block}\n```\n"
+                 "## Acceptance criteria\nAC1 [backend]: x.\n"
+                 "  review_path: log in as x / go to x / do x / worked if x / failed if x.\n")
+    ev("spec-writer", "spec-written", subject, path=str(p), footprint=["src/fold.py"])
+    N += 1
+    try:
+        build("spec-auditor", subject=subject, worktree=str(REPO))
+    except SystemExit as e:
+        assert want in str(e.code), e.code
+    else:
+        raise AssertionError(f"{subject}: {block!r} should have been refused ({want})")
+
+
+bad_verify("cd src; /usr/bin/python3 test_fold.py", "bare `;`", "L-spec-0021")
+bad_verify("cd src && /usr/bin/python3 test_fold.py || true", "bare `||`", "L-spec-0022")
+bad_verify("cd src\n/usr/bin/python3 test_fold.py", "newline-separated statement", "L-spec-0023")
+bad_verify("cd src && python3 test_fold.py", "absolute path", "L-spec-0024")
+bad_verify("cd src && /usr/bin/env python3 test_fold.py", "absolute path", "L-spec-0025")
+bad_verify("cd src && /usr/bin/python3 -c \"print('", "fails `bash -n`", "L-spec-0026")
+
+# the merge-base rewrite and the BASE pin, together
+MERGE = TMP / "content" / "L-spec-0027.md"
+MERGE.write_text("# L-spec-0027\n## 8. Verification\n```\necho $(git merge-base main HEAD)\n```\n"
+                 "## Acceptance criteria\nAC1 [backend]: x.\n"
+                 "  review_path: log in as x / go to x / do x / worked if x / failed if x.\n")
+ev("spec-writer", "spec-written", "L-spec-0027", path=str(MERGE), footprint=["src/fold.py"])
+build("spec-auditor", subject="L-spec-0027", worktree=str(REPO))
+mtxt = (TMP / "content" / "verify-L-spec-0027.sh").read_text()
+mlines = mtxt.splitlines()
+assert mlines[1] == "set -euo pipefail" and mlines[2].startswith("BASE="), mlines[:4]
+assert "$(git merge-base" not in mtxt and "echo $BASE" in mtxt, mtxt
+N += 1
 
 # ── 2. builder ───────────────────────────────────────────────────────────────
 t = build("builder", worktree=str(REPO), repo=str(REPO))
@@ -241,7 +282,8 @@ assert ps == {"L-charter-0001-charter-reviewer-1.md", "L-spec-0001-builder-1.md"
               "L-spec-0001-grader-1.md", "L-spec-0001-grader-2.md",
               "L-spec-0001-reviewer-1.md",
               "L-spec-0001-spec-auditor-1.md", "L-spec-0001-spec-writer-1.md",
-              "L-spec-0001-spec-writer-2.md", "L-spec-0010-spec-writer-1.md"}, ps
+              "L-spec-0001-spec-writer-2.md", "L-spec-0010-spec-writer-1.md",
+              "L-spec-0027-spec-auditor-1.md"}, ps
 assert "REFUSED" not in "".join(p.read_text() for p in (TMP / "packets").glob("*.md")), \
     "a refused packet is never written to disk"
 first = (TMP / "packets" / "L-spec-0001-spec-auditor-1.md").read_text()

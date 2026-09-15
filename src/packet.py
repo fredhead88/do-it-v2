@@ -133,20 +133,151 @@ class Ctx:
         return fold.charter_id(next((e.get("charter") for e in reversed(self.evs) if e.get("charter")), None))
 
 
+INTERP_NAMES = {"python", "python3", "pytest", "ruff", "node", "npm"}
+MERGE_BASE_CALL = re.compile(r"\$\(\s*git\s+merge-base\b[^)]*\)")
+
+
+def _quote_aware_scan(block):
+    """One pass over a bash block, aware of `'...'`/`"..."` strings and `#`
+    comments (not a shell parser — good enough for a verify block, which is one
+    gated command chain, not general bash): the top-level segments split on
+    `&&`, and any bare `;` (not `;;`) or bare `||` found outside a quote."""
+    segs, cur, bad, i, n, q = [], "", [], 0, len(block), None
+    while i < n:
+        ch = block[i]
+        if q:
+            cur += ch
+            if ch == "\\" and q == '"' and i + 1 < n:
+                cur += block[i + 1]
+                i += 2
+                continue
+            if ch == q:
+                q = None
+            i += 1
+            continue
+        if ch in "'\"":
+            q, cur = ch, cur + ch
+            i += 1
+            continue
+        if ch == "#":
+            j = block.find("\n", i)
+            j = n if j == -1 else j
+            cur += block[i:j]
+            i = j
+            continue
+        if block[i:i + 2] == "&&":
+            segs.append(cur)
+            cur = ""
+            i += 2
+            continue
+        if block[i:i + 2] == "||":
+            bad.append("a bare `||` near " + repr(block[max(0, i - 20):i + 22].strip()))
+            cur += "||"
+            i += 2
+            continue
+        if ch == ";" and block[i:i + 2] != ";;":
+            bad.append("a bare `;` near " + repr(block[max(0, i - 20):i + 1].strip()))
+            cur += ch
+            i += 1
+            continue
+        cur += ch
+        i += 1
+    segs.append(cur)
+    return [s.strip() for s in segs if s.strip()], bad
+
+
+def _newline_violations(block):
+    """Rule (b)'s other half: a physical line that is not the block's last and
+    does not end in `&&` is a statement the `&&` chain does not gate — `set -e`
+    covers it today, but the next edit that wraps one line in a conditional
+    would not, and a linted block is not meant to depend on that."""
+    lines = [l for l in block.splitlines() if l.strip() and not l.strip().startswith("#")]
+    return [l.strip() for l in lines[:-1] if not l.split("#", 1)[0].rstrip().endswith("&&")]
+
+
+def _interp_violations(segs):
+    """Rule (c): a segment invoking python/python3/pytest/ruff/node/npm — directly,
+    or via `env` — by bare name resolves through the builder's PATH, which a worktree
+    with no activated venv does not carry the same way twice."""
+    out = []
+    for seg in segs:
+        toks = seg.split()
+        while toks and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", toks[0]):
+            toks.pop(0)
+        if toks and pathlib.PurePosixPath(toks[0]).name == "env":
+            toks = toks[1:]
+        if not toks:
+            continue
+        cmd = toks[0]
+        if pathlib.PurePosixPath(cmd).name in INTERP_NAMES and not cmd.startswith("/"):
+            out.append(f"`{cmd}` in `{seg.strip()}`")
+    return out
+
+
+def verify_base_sha(c):
+    """The base a verify script is measured against, pinned ONCE here — never
+    re-derived by the running script, which is what a `$(git merge-base …)` inside
+    the block itself would do on every run. Precedence: `--base-sha`, a recorded
+    `base_sha` (build-done is the most authoritative — it is the actual build's —
+    then build-started, then spec-written), else `git merge-base` against the
+    worktree, once, at packet time; `git rev-parse HEAD` is the last resort for a
+    worktree with nothing to diverge from yet."""
+    if c.a.base_sha:
+        return c.a.base_sha
+    for t in ("build-done", "build-started", "spec-written"):
+        e = c.last(t)
+        if e and e.get("base_sha"):
+            return e["base_sha"]
+    wt = c.worktree()
+    for ref in ("main", "master"):
+        r = subprocess.run(["git", "-C", wt, "merge-base", "HEAD", ref], capture_output=True, text=True)
+        if r.returncode == 0 and r.stdout.strip():
+            return r.stdout.strip()
+    r = subprocess.run(["git", "-C", wt, "rev-parse", "HEAD"], capture_output=True, text=True)
+    if r.returncode == 0 and r.stdout.strip():
+        return r.stdout.strip()
+    die(f"{c.a.subject}: no base_sha recorded, and neither `git merge-base` nor "
+        f"`git rev-parse HEAD` in {wt} produced one — pin it with --base-sha")
+
+
 def verify_script(c):
     """The spec's Verification block becomes `$R/content/verify-<spec>.sh`; the packet
     hands `bash <that>`. A multi-step block cannot ride in the card's verify.command,
-    which §5.10 caps at 300 characters."""
+    which §5.10 caps at 300 characters.
+
+    Linted before it is ever written (S23/S31a): `bash -n` on the assembled script;
+    the block must be one `&&`-gated chain (no bare `;`/`||`, no newline-separated
+    statement outside it); an interpreter named by a bare word instead of an
+    absolute path; and `BASE=<sha>` pinned once, with any `$(git merge-base …)` in
+    the block rewritten to `$BASE`. Any violation refuses the packet — `die()`,
+    non-zero exit, on stderr — rather than writing a script that lies about what it
+    checks."""
     spec = c.spec_file()
     lines = section(spec.read_text(), "Verification")
     blk = re.search(r"```[a-z]*\n(.*?)```", "\n".join(lines), re.S)
     if not blk or not blk.group(1).strip():
         return None
-    p = CONTENT / f"verify-{c.a.subject}.sh"
-    p.parent.mkdir(parents=True, exist_ok=True)
+    block = blk.group(1)
+    segs, bad = _quote_aware_scan(block)
+    bad += [f"a newline-separated statement — `{l}` does not end in `&&`"
+            for l in _newline_violations(block)]
+    if bad:
+        die(f"{c.a.subject}'s Verification block is not one gated `&&` chain: " + "; ".join(bad[:3]))
+    bad_interp = _interp_violations(segs)
+    if bad_interp:
+        die(f"{c.a.subject}'s Verification block names an interpreter by bare word, not an "
+            f"absolute path: " + "; ".join(bad_interp[:3]))
+    base = verify_base_sha(c)
+    block = MERGE_BASE_CALL.sub("$BASE", block)
     # -e, because a multi-command block whose last line passes would otherwise exit 0
     # over an earlier failure, and the done-condition is that exit code.
-    p.write_text("#!/usr/bin/env bash\nset -euo pipefail\n" + blk.group(1))
+    text = f"#!/usr/bin/env bash\nset -euo pipefail\nBASE={base}\n" + block
+    check = subprocess.run(["bash", "-n", "/dev/stdin"], input=text, capture_output=True, text=True)
+    if check.returncode != 0:
+        die(f"{c.a.subject}'s assembled verify script fails `bash -n`: {check.stderr.strip()}")
+    p = CONTENT / f"verify-{c.a.subject}.sh"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(text)
     p.chmod(0o755)
     return p
 
