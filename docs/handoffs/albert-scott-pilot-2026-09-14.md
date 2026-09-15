@@ -1014,4 +1014,6 @@ the driver's `S<n>`.*
 | 1 | plan-auditor (cut) · `L-plan-auditor-0007` | opus | 224 s · 7 findings · **`bad_cut: true`** (surface undeliverable from footprint; R3/R4 threshold contradiction; fixture cannot reach the reap path) |
 | 2 | plan-auditor (cut, round 2) · `L-plan-auditor-0008` | opus | 312 s · 7 findings · `bad_cut: false` (seam unowned → SD1/ADR; wave-1-not-core → one wave; flag self-erases → accepted; mode-000 ruling made explicit) |
 | 3 | plan-auditor (plan) · `L-plan-auditor-0009` | opus | 302 s · 6 findings, all acted on in the Plan (dry-run purity; R4 names its run; Q3 withdrawn on measurement; raise() copy bound by tests; composition fixture; guarded read) |
-| 4–5 | spec-writer · `L-spec-writer-0013` (L-spec-0005) · `-0014` (L-spec-0006) | sonnet | dispatched 07:0x in parallel — |
+| 4 | spec-writer · `L-spec-writer-0013` (L-spec-0005) | sonnet | 329 s · 139k tok · 41 tool uses · 262-line spec, 7 ACs (backend), 0 owed, 0 unknowns; validated first try |
+| 5 | spec-writer · `L-spec-writer-0014` (L-spec-0006) | sonnet | 539 s · 177k tok · 30 tool uses · 358-line spec, 7 ACs (6 backend + 1 owed observed-data, R4 wake_at 2026-09-16T11:04Z); validated first try; **found the cut's seam direction inverted vs the Plan and followed the Plan** (a Planner slip, R4 below) |
+| — | planner (this pane) | — | `l1-complete` 07:2x — two slots written; both ran in parallel (one wave) |
