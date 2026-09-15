@@ -2,15 +2,43 @@
 
 Used to drive charter 3 (2026-09-15). Interim until `packet.py` owns the Planner's packets (change list a-14).
 
-- `stamp.sh <spawn> <model> <session> <tool_uses> <duration_ms> <subagent_tokens>` — validates
-  `seat/<spawn>.output.json` and writes `<spawn>.meta.json`, which is the wrapper's completion
-  signal (S13). Run after the Agent-tool sub-agent returns; the numbers are in its usage line.
+- `stamp.sh <spawn> <model> <session> <turns> <duration_ms> <subagent_tokens>` — validates
+  `seat/<spawn>.output.json`, then calls `src/usage.py stamp` to resolve `<session>`'s OWN
+  sub-agent transcript (`~/.claude/projects/*/*/subagents/agent-<id>.jsonl`, newest match) and
+  write `<spawn>.meta.json` — the wrapper's completion signal (S13). `<model>`,`<session>`,
+  `<turns>`,`<duration_ms>`,`<subagent_tokens>` are still read off the sub-agent's own usage line
+  by hand, same as before; `usage.py` now ALSO writes, alongside the hand-supplied blended
+  `subagent_tokens`, the four-way split (`input_tokens`, `output_tokens`,
+  `cache_read_input_tokens`, `cache_creation_input_tokens` — deduped by message id, since a
+  streamed response repeats its usage object as it grows) and `model_observed` — the model the
+  transcript's assistant lines actually ran on, which `dispatch.run_seat` prefers over the typed
+  `<model>` for `model_used`, and which makes `model_observed` on the terminal event true only
+  when that evidence exists (retro step 9, 2026-09-15). No transcript resolves -> the four
+  fields and `model_observed` stay null (unmeasured is never zero) and stamp.sh warns on stderr,
+  but still stamps — a missing transcript must not block the completion signal.
 - `mkpacket.py <charter> cut|plan <out>` — the plan-auditor packet (stage cut or plan) in the
   pilot's shape: done-condition, requirements, the cut, (the Plan + the latest cut-audit's
   findings at stage plan), the `doit audit` block. No rationale.
 - `mkslot.py <charter> <unit> <spec-id> <out>` — the round-one spec-writer slot: charter extract,
   the unit's block, the Plan's Seams + Shared decisions verbatim, envelope, siblings' Produces,
   ADRs, write path, the 400-line cap.
+- `backfill_tokens.py [--apply] [--root R]` — the one-time retro backfill (operator ask,
+  2026-09-15): for every seat `spawn-done` with a `session` and no split yet, resolves the
+  transcript the same way `stamp.sh` now does going forward and prints what it would write
+  (default) or appends a `correction` event under `DOIT_LEDGER_FILE` (`--apply`) — the ledger is
+  append-only, so this repairs by naming the old event, never by editing it. `--apply` is the
+  integrator's call, never run against a root you do not operate.
+
+## `doit spend <charter|spec|spawn-id>` (retro step 9)
+
+Not a seat-route helper — it lives in `src/fold.py`, wired the way `doit states` is (the `doit`
+entry script's wildcard case forwards to `fold.py`, which dispatches `spend` internally). A
+per-spawn table (spawn, role, model, the four tokens, a weighted input-equivalent total from
+`models.toml`'s `[weights]`, duration, wall clock) plus totals; for a charter, also the stage
+wall clock derived from event timestamps (`cut-written -> l1-complete -> first shipped -> last
+shipped -> charter-review-complete -> tree-reaped`). Read-only: it never writes `board.md`. The
+board itself grew a `## SPEND` block from the same fold (`spend_by_model` in `src/fold.py`),
+alongside the older per-project dollar line on `## HEALTH`, which is unchanged.
 
 Serving pattern (R2: the harness snapshots agent types at pane start, so serve as
 `general-purpose` and name the contract file): Agent(model=<from models.toml>, prompt = "You are the

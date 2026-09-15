@@ -345,6 +345,185 @@ def spend_rows(events):
     return [r[2:] for r in sorted(row(p, *v) for p, v in rows.items())]
 
 
+def spend_by_model(events):
+    """Token spend per model, derived HERE at fold time and nowhere else (§8.2) —
+    retro step 9 (operator ask, 2026-09-15): the seat route now carries a real
+    four-way split (dispatch.py's `input_tokens`/`output_tokens`/`cache_read`/
+    `cache_creation`, from src/usage.py via stamp.sh), and this is its board
+    rendering. `claude -p` and codex already carried a split; a seat spawn from
+    before stamp.sh learned to compute it carries only the OLDER blended
+    `subagent_tokens` — the two are summed into separate columns and never
+    combined, because they measure different things (see src/usage.py's
+    docstring: cache reads bill on every call that re-reads them, so a
+    cumulative billed sum is not the same number as a point-in-time blend).
+
+    Returns (rows, unmeasured): rows keyed by model (`model_used`, else
+    `model_requested`, else the pre-map `model` — spend_rows' own priority),
+    each `{n, split_n, input, output, cache_read, cache_creation, blended,
+    blended_n, weighted, weighted_n}`; `unmeasured` counts spawns carrying
+    neither the split nor a blended figure. `weighted` sums only the split
+    spawns — a blended-only figure cannot be decomposed into the four price
+    ratios, so it is never guessed into the weighted total. `split_n` (not
+    just a truthy sum) is what the renderer checks before showing the raw
+    columns — a spawn genuinely measured at all-zero tokens must still render
+    as measured, not fall through to looking unmeasured."""
+    import models
+    weights = models.load_weights()
+    rows, unmeasured = {}, 0
+    for e in events:
+        if e.get("type") not in ("spawn-done", "spawn-failed"):
+            continue
+        model = e.get("model_used") or e.get("model_requested") or e.get("model") or "(unknown)"
+        r = rows.setdefault(model, dict(n=0, split_n=0, input=0, output=0, cache_read=0, cache_creation=0,
+                                        blended=0, blended_n=0, weighted=0.0, weighted_n=0))
+        r["n"] += 1
+        four = (e.get("input_tokens"), e.get("output_tokens"), e.get("cache_read"), e.get("cache_creation"))
+        if all(v is not None for v in four):
+            r["split_n"] += 1
+            r["input"] += four[0]; r["output"] += four[1]
+            r["cache_read"] += four[2]; r["cache_creation"] += four[3]
+            w = weights.get(model)
+            if w:
+                r["weighted"] += (four[0] * w["input"] + four[1] * w["output"]
+                                  + four[2] * w["cache_read"] + four[3] * w["cache_creation"])
+                r["weighted_n"] += 1
+        elif e.get("subagent_tokens") is not None:
+            r["blended"] += e["subagent_tokens"]
+            r["blended_n"] += 1
+        else:
+            unmeasured += 1
+    return rows, unmeasured
+
+
+def spend_detail(events, subject):
+    """Per-spawn token/time rows for `doit spend <charter|spec|spawn-id>` — the
+    same ledger the board folds from, filtered to one subject. A charter's rows
+    are every spawn whose `charter` field (normalized through charter_id, since
+    it may be a path) names it, OR whose own subject IS the charter (a
+    plan-auditor or charter-reviewer spawn); a spec's rows are every spawn on
+    that subject; anything else is read as a bare spawn id, one row."""
+    import models
+    weights = models.load_weights()
+    by_spawn = collections.defaultdict(list)
+    for e in events:
+        if e.get("spawn"):
+            by_spawn[e["spawn"]].append(e)
+
+    def wants(spawn_id, terminal):
+        if subject.startswith("L-charter-"):
+            return charter_id(terminal.get("charter")) == subject or terminal.get("subject") == subject
+        if subject.startswith("L-spec-"):
+            return terminal.get("subject") == subject
+        return spawn_id == subject
+
+    rows = []
+    for spawn_id, evs in by_spawn.items():
+        terminal = next((e for e in evs if e["type"] in ("spawn-done", "spawn-failed")), None)
+        if terminal is None or not wants(spawn_id, terminal):
+            continue
+        model = terminal.get("model_used") or terminal.get("model_requested") or terminal.get("model")
+        four = {k: terminal.get(k) for k in ("input_tokens", "output_tokens", "cache_read", "cache_creation")}
+        weighted = None
+        if all(v is not None for v in four.values()):
+            w = weights.get(model)
+            if w:
+                weighted = (four["input_tokens"] * w["input"] + four["output_tokens"] * w["output"]
+                            + four["cache_read"] * w["cache_read"] + four["cache_creation"] * w["cache_creation"])
+        dur = terminal.get("duration_ms")
+        start = min((ts(e["ts"]) for e in evs), default=None)
+        rows.append({"spawn": spawn_id, "role": terminal.get("actor"), "model": model, **four,
+                     "subagent_tokens": terminal.get("subagent_tokens"), "weighted": weighted,
+                     "duration_min": dur / 60000.0 if dur is not None else None,
+                     "start": start.isoformat(timespec="seconds") if start else None,
+                     "end": terminal.get("ts"), "failed": terminal["type"] == "spawn-failed"})
+    rows.sort(key=lambda r: r["start"] or "")
+    return rows
+
+
+# Stage name -> the event type whose EARLIEST occurrence marks it, for the charter
+# wall clock (§4.2). `cut-written` can happen more than once (a bad-cut finding
+# sends the Planner back); the FIRST is the charter's actual start, matching what
+# an operator reading the ledger from the top would call "when this began".
+CHARTER_STAGE_EVENTS = [("cut-written", "cut-written"), ("l1-complete", "l1-complete"),
+                        ("charter-review-complete", "charter-review-complete"),
+                        ("tree-reaped", "tree-reaped")]
+
+
+def charter_stage_clock(events, cid, specs):
+    """The stage wall clock (§4.2): cut-written -> l1-complete -> first spec
+    shipped -> last spec shipped -> charter-review-complete -> tree-reaped,
+    derived purely from event timestamps already on the ledger — no new event,
+    no second truth. A stage this ledger never crossed is OMITTED, not zeroed:
+    a charter closed without a review must not render a false review-to-reap
+    span. Returns ([(gap_name, minutes), ...], total_minutes_or_None)."""
+    charter_evs = [e for e in events if e.get("subject") == cid]
+
+    def earliest(t):
+        cand = [ts(e["ts"]) for e in charter_evs if e["type"] == t]
+        return min(cand) if cand else None
+
+    mine = [s for s in specs.values() if s["charter"] == cid]
+    shipped = sorted(ts(e["ts"]) for s in mine for e in s["evs"] if e["type"] == "shipped")
+    stages = [(name, earliest(t)) for name, t in CHARTER_STAGE_EVENTS[:2]]
+    stages += [("first shipped", shipped[0] if shipped else None),
+              ("last shipped", shipped[-1] if shipped else None)]
+    stages += [(name, earliest(t)) for name, t in CHARTER_STAGE_EVENTS[2:]]
+    present = [(name, t) for name, t in stages if t is not None]
+    gaps = [(f"{a[0]} → {b[0]}", (b[1] - a[1]).total_seconds() / 60)
+            for a, b in zip(present, present[1:])]
+    total = (present[-1][1] - present[0][1]).total_seconds() / 60 if len(present) >= 2 else None
+    return gaps, total
+
+
+def render_spend(subject, events, specs):
+    """`doit spend <charter|spec|spawn-id>` — a per-spawn table plus totals, and
+    for a charter, the stage wall clock. Read-only: never writes board.md or
+    anything else (fold's own report on demand, not a second board)."""
+    rows = spend_detail(events, subject)
+    L = [f"# spend · {subject} · {len(rows)} spawn(s)", ""]
+    tot = collections.Counter()
+    unmeasured = 0
+    for r in rows:
+        four_present = all(r[k] is not None for k in ("input_tokens", "output_tokens", "cache_read", "cache_creation"))
+        if four_present:
+            wtxt = f"{r['weighted']:,.0f}" if r["weighted"] is not None else "unweighted"
+            for k in ("input_tokens", "output_tokens", "cache_read", "cache_creation"):
+                tot[k] += r[k]
+            if r["weighted"] is not None:
+                tot["weighted"] += r["weighted"]
+        elif r["subagent_tokens"] is not None:
+            wtxt = f"blended {r['subagent_tokens']:,}"
+            tot["blended"] += r["subagent_tokens"]
+        else:
+            wtxt = "unmeasured"
+            unmeasured += 1
+        dur = f"{r['duration_min']:.1f}m" if r["duration_min"] is not None else "—"
+        # ★ Distinct labels, not `k.split('_')[0]` — "cache_read" and "cache_creation"
+        # both start "cache", and a label collision here silently hid one column.
+        labels = {"input_tokens": "in", "output_tokens": "out",
+                  "cache_read": "cache_read", "cache_creation": "cache_creation"}
+        four = " ".join(f"{labels[k]} {r[k]:,}" if r[k] is not None else f"{labels[k]} —"
+                        for k in ("input_tokens", "output_tokens", "cache_read", "cache_creation"))
+        L.append(f"  {r['spawn']} · {r['role'] or '?'} · {r['model'] or '?'} · {four} · "
+                 f"weighted {wtxt} · {dur} · {r['start'] or '?'}→{r['end'] or '?'}"
+                 + ("  FAILED" if r["failed"] else ""))
+    L.append("")
+    L.append(f"totals: {len(rows)} spawn(s) · input {tot['input_tokens']:,} · "
+             f"output {tot['output_tokens']:,} · cache_read {tot['cache_read']:,} · "
+             f"cache_creation {tot['cache_creation']:,} · weighted {tot['weighted']:,.0f} "
+             f"input-equiv tokens · blended {tot['blended']:,} (unsplit) · unmeasured {unmeasured}")
+    if subject.startswith("L-charter-"):
+        gaps, total = charter_stage_clock(events, subject, specs)
+        L += ["", "## stage wall clock"]
+        if not gaps:
+            L.append("  (fewer than two stages crossed on this ledger)")
+        for name, mins in gaps:
+            L.append(f"  {name} · {mins:.1f} min")
+        if total is not None:
+            L.append(f"  total (first stage crossed → last) · {total:.1f} min")
+    return "\n".join(L)
+
+
 def dwell_days(by_subject):
     """Expected dwell per state, measured from the log's own stage crossings — the
     fallback stands until DWELL_MIN_N specs have crossed. Twice the MEDIAN crossing,
@@ -455,8 +634,9 @@ def render(events, specs, charters, ignored, by_subject):
 
     # ★ Same collapse as spend_rows' labels, and for the same reason: DOIT_PROJECT
     # is operator environment with no event vouching for it, and a newline in it
-    # forged an ELEVENTH section here — §8.3's ten are positional. Pre-existing on
-    # this line; the spend row now carries the same value, so both are collapsed.
+    # would forge an extra section here — §8.3's sections (ten, plus the SPEND
+    # block added by retro step 9) are positional. Pre-existing on this line; the
+    # spend row now carries the same value, so both are collapsed.
     scope = f" · project={' '.join(str(PROJECT).split())}" if PROJECT else ""
     L = [f"# board · {NOW.isoformat(timespec='seconds')} · fold @ {len(events)}{scope}", ""]
 
@@ -485,7 +665,7 @@ def render(events, specs, charters, ignored, by_subject):
     # An unbuilt close is invisible in every working section — terminal work does
     # not queue. It surfaces HERE, at the one moment someone asks "was this
     # actually done?" (D112).
-    # ponytail: on a charter still `open` it is therefore visible nowhere. The ten
+    # ponytail: on a charter still `open` it is therefore visible nowhere. The
     # sections are fixed and the board answers "what needs you now", which a
     # terminal spec does not. Revisit if a cut spec is ever quietly lost this way.
     block("CHARTER CLOSE", [f"{c['id']} · {c['state']} · {c['owed']} owed (K={K})"
@@ -496,6 +676,26 @@ def render(events, specs, charters, ignored, by_subject):
     block("SHIPPED SINCE YOU LOOKED", [e.get("subject", "?") for e in since("shipped")])
     block("DECIDED WITHOUT YOU", [f"{e.get('subject','?')} · {e.get('why','?')} · revert "
                                   f"{e.get('revert','⚠ none')}" for e in since("decision")])
+
+    # SPEND — retro step 9 (operator ask, 2026-09-15): a per-model token block of
+    # its own, alongside (not instead of) the per-project dollar line already on
+    # HEALTH below. §8.3 called the layout above "ten sections, fixed, never
+    # reshuffled" — this IS the sanctioned eleventh, added deliberately for this
+    # ask; `doit spend <charter|spec|spawn-id>` (render_spend) is the drill-down.
+    spend_by, spend_unmeasured = spend_by_model(events)
+
+    def spend_row(model, r):
+        parts = [f"{r['n']} spawns"]
+        if r["split_n"]:
+            parts.append(f"in {r['input']:,} out {r['output']:,} cache_read {r['cache_read']:,} "
+                        f"cache_creation {r['cache_creation']:,}")
+            parts.append(f"weighted {r['weighted']:,.0f} input-equiv tokens"
+                        if r["weighted_n"] else "weighted n/a — no [weights] for this model")
+        if r["blended_n"]:
+            parts.append(f"blended {r['blended']:,} tokens ({r['blended_n']} unsplit seat spawn(s))")
+        return f"{model} · " + " · ".join(parts)
+    block("SPEND", [spend_row(m, r) for m, r in sorted(spend_by.items())]
+          + [f"unmeasured: {spend_unmeasured} spawn(s) carry no usage at all"])
 
     drill = max((ts(e["ts"]) for e in events if e.get("type") == "restore-verified"), default=None)
     health = [f"restore drill: {'never run — the backup is unproven' if not drill else f'{(NOW-drill).days}d ago'}"]
@@ -617,5 +817,9 @@ if __name__ == "__main__":
     elif cmd == "states":
         for sid, s in sorted({**specs, **charters}.items()):
             print(f"{sid}\t{s['state']}")
+    elif cmd == "spend":                     # retro step 9: read-only, never writes board.md
+        if len(sys.argv) < 3:
+            sys.exit("usage: doit spend <charter|spec|spawn-id>")
+        print(render_spend(sys.argv[2], ev, specs))
     else:
         print(render(ev, specs, charters, ignored, by_subject))

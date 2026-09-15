@@ -94,3 +94,44 @@ model = "claude-haiku-4-5-20251001"
 [contracts.reuse-scout]
 backend = "seat"
 model = "claude-sonnet-5"
+
+# [weights] — retro step 9 (operator ask, 2026-09-15). Price ratios per model,
+# relative to input=1.0, that fold.py's SPEND block and `doit spend` use to
+# render an input-equivalent WEIGHTED TOKEN total (never a dollar figure —
+# §4.2's budgets are token counts). Optional: a model missing here renders
+# unweighted, not zero-weighted. The four numbers below are Claude's public
+# per-token price ratios (output ~5x input; a cache read ~0.1x; a cache write
+# ~1.25x, the 5-minute ephemeral tier) and are used here for EVERY model named
+# in this map, gpt-6-astra included — Astra's own vendor ratios were not looked
+# up for this pass, so its weighted figure is a placeholder on Claude's curve,
+# not a verified Codex price. Flagged for the operator; replace when real
+# GPT-6 Astra ratios are available.
+[weights.claude-fable-5-1]
+input = 1.0
+output = 5.0
+cache_read = 0.1
+cache_creation = 1.25
+
+[weights.claude-sonnet-5]
+input = 1.0
+output = 5.0
+cache_read = 0.1
+cache_creation = 1.25
+
+[weights.claude-opus-5]
+input = 1.0
+output = 5.0
+cache_read = 0.1
+cache_creation = 1.25
+
+[weights.claude-haiku-4-5-20251001]
+input = 1.0
+output = 5.0
+cache_read = 0.1
+cache_creation = 1.25
+
+[weights.gpt-6-astra]           # placeholder — Claude's ratios, not Astra's own (see note above)
+input = 1.0
+output = 5.0
+cache_read = 0.1
+cache_creation = 1.25

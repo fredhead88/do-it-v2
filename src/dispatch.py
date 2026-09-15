@@ -9,6 +9,10 @@ The BACKEND — claude-p, seat, or codex — and the MODEL are the ledger root's
 Every terminal event stamps `backend`, `model_requested` (the map) beside
 `model_used` (what came back), `model_match`, and `first_on_model` — the D120
 trust run of a (contract, model) pair is then a ledger fact, not a memory.
+Also stamped: the four-way token split (`input_tokens`, `output_tokens`,
+`cache_read`, `cache_creation`) and, on a seat spawn whose stamp.sh resolved
+it, `subagent_tokens` — the route's OLDER blended figure, kept beside the
+split rather than replaced by it (src/usage.py; retro step 9).
 
 Every check here converts a silent failure into a loud one, and each was observed
 before it was written (D116, D120): a tools: line without StructuredOutput comes
@@ -234,10 +238,19 @@ def run_seat(spawn, cmd, packet, cwd, timeout):
     # recorded beside it (model, session, turns). The envelope is built here so no
     # hand ever writes one.
     m = json.loads(meta_p.read_text())
+    # `model_observed` (usage.py's stamp) is the model the sub-agent's OWN
+    # transcript actually ran on — real evidence, where `model` is only the pane
+    # operator's typed claim. Prefer it as the modelUsage key so `model_used`
+    # downstream reflects what was observed, not assumed, and stamp `model_observed`
+    # true only when that evidence exists (a bare `model` with no transcript match
+    # is exactly as unverified as codex's flag-only guess, and must not default true).
+    observed = m.get("model_observed")
+    model_for_usage = observed or m.get("model")
     env = {"is_error": False, "terminal_reason": "completed", "structured_output": json.loads(bare.read_text()),
            "num_turns": m.get("turns"), "duration_ms": m.get("duration_ms"), "usage": m.get("usage") or {},
-           "total_cost_usd": None, "modelUsage": {m["model"]: {}} if m.get("model") else {},
-           "session_id": m.get("session"), "permission_denials": m.get("denied") or []}
+           "total_cost_usd": None, "modelUsage": {model_for_usage: {}} if model_for_usage else {},
+           "session_id": m.get("session"), "permission_denials": m.get("denied") or [],
+           "model_observed": observed is not None}
     return SeatResult(json.dumps(env))
 
 
@@ -512,6 +525,13 @@ def main(a):
     meta.update(model=used, cost_usd=res.get("total_cost_usd"),
                 input_tokens=u.get("input_tokens"), output_tokens=u.get("output_tokens"),
                 cache_read=u.get("cache_read_input_tokens"), cache_creation=u.get("cache_creation_input_tokens"),
+                # The seat route's blended figure (stamp.sh's <subagent_tokens> arg,
+                # pre-dating the four-way split): a single Task-tool token count that
+                # is NOT the sum of the four fields above (caching makes them measure
+                # different things — see src/usage.py). Kept on the event, alongside
+                # the split, never in place of it, so a pre-split spawn's only number
+                # is not lost and the SPEND block can render it honestly as unsplit.
+                subagent_tokens=u.get("subagent_tokens"),
                 turns=res.get("num_turns"), duration_ms=res.get("duration_ms"), session=res.get("session_id"),
                 denied=[d.get("tool_name") for d in (res.get("permission_denials") or [])][:10])
     if res.get("is_error"):

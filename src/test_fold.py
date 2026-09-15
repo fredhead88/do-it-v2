@@ -430,29 +430,124 @@ finally:
 for r in (rows, erows):
     assert len(r) == 1 and "spend · ghost · $0.00 · 0 spawns · attributed only" in r[0], r
     assert "list-price estimate" in r[0] and " unpriced" not in r[0], r
-assert len([l for l in eboard.splitlines() if l.startswith("## ")]) == 10, \
-    "an empty ledger under a filter still renders the ten sections, and does not raise"
+assert len([l for l in eboard.splitlines() if l.startswith("## ")]) == 11, \
+    "an empty ledger under a filter still renders every section, and does not raise"
 
 # ...and that label is now UNVOUCHED: DOIT_PROJECT is operator environment reaching
 # the board with no event behind it, so it must pass the same collapse as a ledger
-# label or it forges an eleventh section — §8.3's ten are positional.
+# label or it forges an extra section — §8.3's sections (ten, plus SPEND, retro
+# step 9) are positional.
 fold.PROJECT = "x\n## FORGED (9)"
 try:
     forged_env = ledger(**{"L-operator-local.jsonl": [sp_ev(project="p", cost_usd=1.0)]})
     frows, fboard = spend(forged_env), fold.render(*forged_env)
 finally:
     fold.PROJECT = None
-assert len([l for l in fboard.splitlines() if l.startswith("## ")]) == 10, "ten sections, always"
+assert len([l for l in fboard.splitlines() if l.startswith("## ")]) == 11, "sections, always"
 assert len(frows) == 1 and "spend · x ## FORGED (9) · $0.00 · 0 spawns" in frows[0], frows
 
 # a label is a DIRECTORY NAME by default and nothing curates it: a newline in one
-# must not forge a board line, and above all not an eleventh section — §8.3's ten
-# are positional, which is the whole reason that layout exists.
+# must not forge a board line, and above all not an extra section — §8.3's
+# positional layout is the whole reason that check exists.
 forged = ledger(**{"L-operator-local.jsonl": [sp_ev(project="x\n## FORGED (9)", cost_usd=1.0)]})
 board = fold.render(*forged)
-assert len([l for l in board.splitlines() if l.startswith("## ")]) == 10, "ten sections, always"
+assert len([l for l in board.splitlines() if l.startswith("## ")]) == 11, "sections, always"
 assert len(spend(forged)) == 1 and "spend · x ## FORGED (9) · $1.00 · 1 spawns" in spend(forged)[0], \
     spend(forged)
+
+# retro step 9 (operator ask, 2026-09-15) — SPEND: a per-model token block of its
+# own, one row per model, split spawns' four columns summed separately from
+# blended-only spawns' subagent_tokens (the two are never combined — they
+# measure different things, src/usage.py), a weighted total from models.toml's
+# [weights], and a final unmeasured count.
+(TMP / "models.toml").write_text(
+    '[defaults]\nbackend = "seat"\n'
+    '[weights.claude-sonnet-5]\ninput = 1.0\noutput = 5.0\ncache_read = 0.1\ncache_creation = 1.25\n')
+tok_ev = lambda **kw: {"ts": stamp(0), "type": "spawn-done", "subject": S, "spawn": "L-grader-9001", **kw}
+def spend_block(evs):
+    lines = fold.render(*evs).split("## SPEND")[1].split("## HEALTH")[0].strip().splitlines()
+    return [l.strip() for l in lines[1:]]        # lines[0] is the "(n)" count suffix
+
+split_only = ledger(**{"L-operator-local.jsonl": [
+    tok_ev(model_used="claude-sonnet-5", input_tokens=100, output_tokens=10,
+          cache_read=50, cache_creation=20)]})
+rows = spend_block(split_only)
+assert rows[0].startswith("claude-sonnet-5 · 1 spawns · in 100 out 10 cache_read 50 cache_creation 20"), rows
+# weighted = 100*1.0 + 10*5.0 + 50*0.1 + 20*1.25 = 180
+assert "weighted 180 input-equiv tokens" in rows[0], rows
+assert rows[-1] == "unmeasured: 0 spawn(s) carry no usage at all", rows
+
+blended_only = ledger(**{"L-operator-local.jsonl": [
+    tok_ev(model_used="claude-opus-5", subagent_tokens=89662)]})
+rows = spend_block(blended_only)
+assert "claude-opus-5 · 1 spawns · blended 89,662 tokens (1 unsplit seat spawn(s))" in rows[0], rows
+
+no_weights = ledger(**{"L-operator-local.jsonl": [
+    tok_ev(model_used="gpt-unweighed", input_tokens=1, output_tokens=1, cache_read=0, cache_creation=0)]})
+rows = spend_block(no_weights)
+assert "weighted n/a — no [weights] for this model" in rows[0], \
+    "a model with no [weights] entry renders unweighted, never a fabricated ratio"
+
+neither = ledger(**{"L-operator-local.jsonl": [tok_ev(model_used="m")]})
+rows = spend_block(neither)
+assert rows[-1] == "unmeasured: 1 spawn(s) carry no usage at all", rows
+
+# a spawn genuinely measured at all-zero tokens (all four present, all 0) must
+# still render as measured — a truthy-sum check would wrongly fall through to
+# looking unmeasured.
+all_zero = ledger(**{"L-operator-local.jsonl": [
+    tok_ev(model_used="claude-sonnet-5", input_tokens=0, output_tokens=0, cache_read=0, cache_creation=0)]})
+rows = spend_block(all_zero)
+assert rows[0].startswith("claude-sonnet-5 · 1 spawns · in 0 out 0 cache_read 0 cache_creation 0"), rows
+assert rows[-1] == "unmeasured: 0 spawn(s) carry no usage at all", rows
+
+# unattributed spend (no `model_used`/`model_requested`/`model` at all) groups
+# under "(unknown)" rather than silently vanishing.
+unknown = ledger(**{"L-operator-local.jsonl": [{"ts": stamp(0), "type": "spawn-done", "subject": S,
+                                                "spawn": "L-x-0001"}]})
+rows = spend_block(unknown)
+assert rows[0].startswith("(unknown) · 1 spawns") and rows[-1] == "unmeasured: 1 spawn(s) carry no usage at all", rows
+
+# `doit spend <charter|spec|spawn-id>` — a per-spawn table + totals, and for a
+# charter the stage wall clock. Read-only: never touches board.md.
+stamp_h = lambda hh: (T - timedelta(hours=hh)).isoformat(timespec="seconds")   # larger hh = further in the past
+CID = "L-charter-0099"
+charter_evs = {
+    "L-planner-01.jsonl": [{"ts": stamp_h(50), "type": "cut-written", "subject": CID},
+                           {"ts": stamp_h(45), "type": "cut-written", "subject": CID},  # a re-cut; the FIRST still wins
+                           {"ts": stamp_h(40), "type": "l1-complete", "subject": CID}],
+    "L-builder-9002.jsonl": [{"ts": stamp_h(35), "type": "spawn-started", "subject": S, "spawn": "L-builder-9002",
+                              "charter": CID},
+                             {"ts": stamp_h(30), "type": "spawn-done", "subject": S, "spawn": "L-builder-9002",
+                              "charter": CID, "model_used": "claude-sonnet-5", "input_tokens": 200,
+                              "output_tokens": 40, "cache_read": 100, "cache_creation": 10, "duration_ms": 60000}],
+    "L-executor-01.jsonl": [{"ts": stamp_h(25), "type": "shipped", "subject": S, "charter": CID}],
+    "L-charter-reviewer-01.jsonl": [{"ts": stamp_h(5), "type": "charter-review-complete", "subject": CID}],
+    "L-executor-02.jsonl": [{"ts": stamp_h(1), "type": "tree-reaped", "subject": CID}],
+}
+before_board = (TMP / "board.md").read_text() if (TMP / "board.md").is_file() else None
+ev, sp, ch, ign, by_subj = ledger(**charter_evs)
+assert sp[S]["charter"] == CID, "the spec's own spawn-done events carry the charter field"
+out = fold.render_spend(CID, ev, sp)
+assert "L-builder-9002 · builder · claude-sonnet-5" in out and "in 200 out 40 cache_read 100 cache_creation 10" in out, out
+assert "weighted 422" in out, out          # 200*1 + 40*5 + 100*0.1 + 10*1.25 = 422.5 -> 422
+assert "1.0m" in out, "duration_ms=60000 -> 1.0 minute"
+assert "cut-written → l1-complete" in out and "charter-review-complete → tree-reaped" in out
+assert (TMP / "board.md").read_text() == before_board or before_board is None, \
+    "doit spend must never write board.md"
+
+# a spec id narrows to that spec's own spawns
+out_spec = fold.render_spend(S, ev, sp)
+assert "L-builder-9002" in out_spec
+
+# a bare spawn id renders that one row alone
+out_spawn = fold.render_spend("L-builder-9002", ev, sp)
+assert out_spawn.startswith(f"# spend · L-builder-9002 · 1 spawn(s)") and "L-builder-9002" in out_spawn
+assert "## stage wall clock" not in out_spawn, "the stage clock is a charter-only section"
+
+# a subject with no spawns at all renders zero rows, never raises
+out_none = fold.render_spend("L-spec-9999", ev, sp)
+assert "0 spawn(s)" in out_none
 
 # §4.9 — "wait indefinitely is a wedge, not a default". A question past its deadline
 # with nothing naming it is the operator's; a decision naming its file:line is not.

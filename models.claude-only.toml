@@ -70,3 +70,30 @@ model = "claude-haiku-4-5-20251001"
 [contracts.reuse-scout]
 backend = "seat"
 model = "claude-sonnet-5"
+
+# [weights] — retro step 9 (operator ask, 2026-09-15). Same shape and ratios as
+# models.example.toml: see that file's comment for what these mean and why
+# they are the same four numbers for every model named here.
+[weights.claude-fable-5-1]
+input = 1.0
+output = 5.0
+cache_read = 0.1
+cache_creation = 1.25
+
+[weights.claude-sonnet-5]
+input = 1.0
+output = 5.0
+cache_read = 0.1
+cache_creation = 1.25
+
+[weights.claude-opus-5]
+input = 1.0
+output = 5.0
+cache_read = 0.1
+cache_creation = 1.25
+
+[weights.claude-haiku-4-5-20251001]
+input = 1.0
+output = 5.0
+cache_read = 0.1
+cache_creation = 1.25
