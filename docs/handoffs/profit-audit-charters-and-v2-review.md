@@ -1,11 +1,13 @@
 # Profit audit → charters, and the v2 review after charter 3
 
 ## Status
-2026-09-15 08:40Z. Charter 3 closed on the Claude-only map in 77 min with no operator hands; v0.2.0 shipped.
-A Codex audit of the QurLife profitability portal exists and says **NOT READY** with blocking money
-defects. Nothing has been done with that audit yet. The next session has two jobs, in this order:
-(1) present the system changes today's run argues for, in plain English, and do the ones the
-operator approves; (2) as a Thinker, turn the audit into charters under Goal A and land them.
+2026-09-15 10:30Z. Both jobs of the 08:40Z handoff are done: the operator approved all six system
+changes and they are built, merged, tested and tagged **v0.3.0**; the audit is owned by six charters
+under Goal A (L-charter-0005 … 0010, `charter-filed` on `L-thinker-0003.jsonl`), the Opus charter-set
+audit ran once (L-plan-auditor-0010, 12 findings, no bad cut) and its findings on the new charters
+were folded in one revise round (`charter-revised` events). The next session **drives** them —
+Planner/Executor pane, one charter at a time, K=1 — starting with L-charter-0010 (the probe) and
+L-charter-0005 (the money model).
 
 ## Goal
 Every blocking finding in the profitability audit is owned by a charter with a dollar figure and a
@@ -78,7 +80,34 @@ charter 3 — tokens and wall clock visible on the board while it does.
 - **Charters, not a new goal, for the audit** (recommendation, not yet ruled): Goal A exists and
   its G3/G5 are the slot; land with `--goal L-goal-0001`.
 
-## Next Steps
+## Next Steps (2026-09-15 10:30Z — supersedes the list below, kept for the record)
+1. **After 2026-09-16T11:04Z**: run the owed reaper step (retro Next Steps 8) on master, then
+   `doit append owed-met L-spec-0006 criterion=AC7 evidence=<log line>` from an executor/operator
+   ledger file — v0.3.0's `owed-met` derives `accepted` with no re-grade spawn.
+2. **Drive L-charter-0010 first** (the probe: measured numbers for 255, 827, pypdf, the ten
+   Instinct rejections, B1189, 877, 1186 on the deployed sha; operational charter, no code). Its
+   write-up is what the next Thinker needs to charter G4/G5 and G3's residue (L-plan-auditor-0010
+   findings 1, 2, 4).
+3. **Then L-charter-0005 → 0006 → 0007 → 0008 → 0009**, in that order because of the shared-file
+   ownership lines each charter now carries (`day_detail.py`, `components/profit-v2/overview/`,
+   `sales-view.tsx`). Each charter's Constraints state the deploy (`predeploy_gate.sh && ./deploy.sh
+   --all`, Vercel on push, `/version` names the merged sha) and its review path runs on production
+   against `verify@albertscott.com` over Aug 1–31 and Sep 1–15 — merged is not deployed
+   (finding 3).
+4. **Use v0.3.0's new tooling from the first spawn**: `doit packet plan-auditor <charter> --stage
+   cut|plan` and `doit packet spec-writer <spec> --unit <name> --charter <path>` replace
+   `mkpacket.py`/`mkslot.py`; `stamp.sh` now reads the four-way token split from the sub-agent
+   transcript; `doit spend <charter>` and the board's `SPEND` block show the cost as it runs.
+   The design doc's §8.3 still says "ten sections" — SPEND made it eleven; amend when next in it.
+5. **Findings on closed charters, not acted on** (L-plan-auditor-0010 findings 5–8): L-charter-0004
+   R2 preserved a `mode:block` the tier-2 pricing row never had (`deploy.sh:1115` is
+   `box:droplet|mode:warn`); its R3 is unobservable on the builder box; no charter owns "the
+   pytest check-run is green" as an end state; L-charter-0001 cites no goal requirement. Operator's
+   call whether any becomes a brief.
+6. The audit report is now committed on master (it was untracked; a builder's worktree could not
+   have read it).
+
+## Next Steps (as written 08:40Z)
 1. **Read, in this order** (30 min): `pilot-retro-change-list.md` whole; R2–R7 in the pilot record
    (from `### R2.`); `v2-pilot-retro-model-split.md` Next Steps 4–10. Then `doit` and
    `doit models show`.
@@ -124,6 +153,20 @@ charter 3 — tokens and wall clock visible on the board while it does.
   clean).
 
 ## Session Log
+- 2026-09-15 10:30Z (this session, Fable pane, job 37cb0ec6): read the change list, R2–R7 and the
+  audit whole; presented six system changes with minutes and payoff → all six approved → built by
+  five Sonnet sub-agents in v2 worktrees (the `isolation: worktree` option pins to the *cwd* repo,
+  so worktrees of `~/do-it-v2` were created by hand) and merged: a-6 owed-met/closed-shipped/void,
+  a-4 deploy truth, a-5 checker lint + BASE, a-14 Planner packets + seam direction, retro-9 token
+  accounting (48/48 seat spawns backfilled on the real root; charter 3 measured at 45.7M cache-read
+  + 458k output = 8.96M input-equivalent tokens against the 2.12M "blended" figure), b-1/b-2 D121.
+  `./doit test` green, tag v0.3.0. As Thinker (L-thinker-0003): five charters clustered by root
+  cause (money model / bridge+cash proofs / provenance labels / client language+state / Promos),
+  each Intent carrying the report's measured figures and sha 5cd5c47de; operator decision on
+  L-goal-0001 naming the walkthrough as G3's re-measurement and listing what is still unowned;
+  charter-set audit L-plan-auditor-0010 (Opus, 5.6 min, 12 findings) → one revise round + a sixth
+  probe charter L-charter-0010 covering G3/G4/G5's unmeasured items. Named for veto: the sixth
+  charter was landed on the audit's finding without a second operator round (retractable).
 - 2026-09-15 (retro pane): v0.2.0 shipped; charter 3 closed on the Claude-only map (R2–R7);
   five fixes on the day; audit report landed from Codex; this handoff written.
 - 2026-09-15 (earlier): pilot record read whole → ranked change list; model map decided; S32
