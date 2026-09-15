@@ -1216,45 +1216,6 @@ walkthrough. Ranked by minutes lost or defects caught.
   audit finding N3 in one round. Every one changed the charters.
 - **Systemic:** none; recorded so the map's three Opus seats keep their evidence.
 
-## Executor pane, `L-executor-0006` — 2026-09-15 (folded the board, cleared it, polling for the
-Planner's first spawn on L-charter-0005…0010; nothing built yet)
-
-### R17. A decision's `ref` not naming the question's `src` leaves NEEDS YOU open a full day after the ruling shipped
-- **Measured:** `L-builder-0004.jsonl:8` opened a `question` on `L-spec-0003` (deadline
-  2026-09-15) asking to ratify the ninth collection-parity allowlist entry. An Executor `decision`
-  answering that exact question exists (2026-09-14, "AC3 mandates removing the parametrized
-  case... allowlist must carry NINE ids, not eight") — but it was appended with `ref=AC12`, not
-  the question's `src`. `doit`'s fold matches a question to its answer by `ref == src` (executor.md:
-  "a decision's `ref` is the question's `src`, as `doit events` prints it"), so the match never
-  fired: the default was taken and shipped a day ago (prod carries the ninth entry, deployed
-  5cd5c47de), yet `NEEDS YOU (1)` still rendered this morning as if nobody had ruled. I re-decided
-  it (`ref=L-builder-0004.jsonl:8`) to clear the board; the ruling itself did not change.
-- **Systemic:** the contract already states the rule correctly; nothing enforces it. `doit append
-  decision` accepts any `ref` string, so a hand-typed shorthand (`AC12`, a criterion id — reads
-  naturally to a human, wrong to the fold) silently produces a permanently-stale NEEDS YOU row
-  instead of an error at write time. The fold has no way to tell "answered with the wrong ref"
-  from "never answered" — both render identically until someone reads every open question's full
-  text and greps for it by hand, which is what this session did.
-- **Fix status:** open — change list a-21 (validate `ref` against the subject's open-question
-  `src` set at append time, not at fold time).
-
-### R18. The `--check` convention for a droplet target is SSH-wrapped, and nothing in `executor.md` says so
-- **Measured:** `executor.md`'s merge/deploy row and `deploy.py`'s own help text both just say
-  `--check '<the charter's post-deploy check>'` with no shape. Read naturally ("`/version` names
-  the merged sha") that reads as a public-URL probe; from this pane, `https://clients.
-  albertscott.com/version` 404s (that host is the Vercel frontend, not the API) and
-  `/api/version` 401s (portal auth). `deploy.sh`'s own rollback block never calls it that way — it
-  reads the sha over `ssh root@167.71.46.51 "curl -sf http://127.0.0.1:8000/version"` (deploy.sh:785).
-  Charter 2's R5 ("PASS, `/version` 21962db5f") was measured that way, not over the public host —
-  the run log doesn't say so, and a pane driving its first deploy would have to find deploy.sh:785
-  itself to learn the shape, as this one did before any charter needed it.
-- **Systemic:** a charter's Constraints line naming `/version` as the check is correct but
-  underspecified; the command a builder or Executor actually runs needs the SSH form, and that
-  convention lives in one script 3,900 lines away from the contract that tells the Executor to
-  run it.
-- **Fix status:** open — change list b-15 (state the SSH-wrapped form in `agents/executor.md`'s
-  dispatching section, once, so every future `--check` is written correctly the first time).
-
 ## Thinker pane, 2026-09-15 10:19Z → (L-thinker-0004 · shape B brief triage, then G4/G5/G3-residue charters from L-charter-0010's probe)
 
 Own section per b-12. Measured while triaging the adjacent inbox into
@@ -1305,3 +1266,42 @@ cost or hid.
 - **Systemic:** the fold has no per-actor looked-at cursor; a `looked{actor, ts}` event or a
   `--since` on the board would bound both blocks.
 - **Fix status:** open — change list a-23.
+
+## Executor pane, `L-executor-0006` — 2026-09-15 (folded the board, cleared it, polling for the
+Planner's first spawn on L-charter-0005…0010; nothing built yet)
+
+### R22. A decision's `ref` not naming the question's `src` leaves NEEDS YOU open a full day after the ruling shipped
+- **Measured:** `L-builder-0004.jsonl:8` opened a `question` on `L-spec-0003` (deadline
+  2026-09-15) asking to ratify the ninth collection-parity allowlist entry. An Executor `decision`
+  answering that exact question exists (2026-09-14, "AC3 mandates removing the parametrized
+  case... allowlist must carry NINE ids, not eight") — but it was appended with `ref=AC12`, not
+  the question's `src`. `doit`'s fold matches a question to its answer by `ref == src` (executor.md:
+  "a decision's `ref` is the question's `src`, as `doit events` prints it"), so the match never
+  fired: the default was taken and shipped a day ago (prod carries the ninth entry, deployed
+  5cd5c47de), yet `NEEDS YOU (1)` still rendered this morning as if nobody had ruled. I re-decided
+  it (`ref=L-builder-0004.jsonl:8`) to clear the board; the ruling itself did not change.
+- **Systemic:** the contract already states the rule correctly; nothing enforces it. `doit append
+  decision` accepts any `ref` string, so a hand-typed shorthand (`AC12`, a criterion id — reads
+  naturally to a human, wrong to the fold) silently produces a permanently-stale NEEDS YOU row
+  instead of an error at write time. The fold has no way to tell "answered with the wrong ref"
+  from "never answered" — both render identically until someone reads every open question's full
+  text and greps for it by hand, which is what this session did.
+- **Fix status:** open — change list a-24 (validate `ref` against the subject's open-question
+  `src` set at append time, not at fold time).
+
+### R23. The `--check` convention for a droplet target is SSH-wrapped, and nothing in `executor.md` says so
+- **Measured:** `executor.md`'s merge/deploy row and `deploy.py`'s own help text both just say
+  `--check '<the charter's post-deploy check>'` with no shape. Read naturally ("`/version` names
+  the merged sha") that reads as a public-URL probe; from this pane, `https://clients.
+  albertscott.com/version` 404s (that host is the Vercel frontend, not the API) and
+  `/api/version` 401s (portal auth). `deploy.sh`'s own rollback block never calls it that way — it
+  reads the sha over `ssh root@167.71.46.51 "curl -sf http://127.0.0.1:8000/version"` (deploy.sh:785).
+  Charter 2's R5 ("PASS, `/version` 21962db5f") was measured that way, not over the public host —
+  the run log doesn't say so, and a pane driving its first deploy would have to find deploy.sh:785
+  itself to learn the shape, as this one did before any charter needed it.
+- **Systemic:** a charter's Constraints line naming `/version` as the check is correct but
+  underspecified; the command a builder or Executor actually runs needs the SSH form, and that
+  convention lives in one script 3,900 lines away from the contract that tells the Executor to
+  run it.
+- **Fix status:** open — change list b-17 (state the SSH-wrapped form in `agents/executor.md`'s
+  dispatching section, once, so every future `--check` is written correctly the first time).
