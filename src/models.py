@@ -33,20 +33,33 @@ def load(path=None):
     out = {"_default": default}
     for name, c in (d.get("contracts") or {}).items():
         b, m = c.get("backend", default), c.get("model")
-        if b not in BACKENDS:
-            raise ValueError(f"{p}: contracts.{name}.backend {b!r} is not one of {BACKENDS}")
-        if not m:
-            raise ValueError(f"{p}: contracts.{name} names no model")
-        if m.startswith("claude-fable") and b != "pane":
-            raise ValueError(f"{p}: contracts.{name}: {m} on backend {b!r} — Fable is pane-only "
-                             "(the Agent tool substitutes Sonnet silently; `-p` cannot select it)")
+        _check(p, name, b, m)
         if name in PANE_ONLY and b != "pane":
             raise ValueError(f"{p}: contracts.{name} is a pane role; backend {b!r} is not pane")
         if name == "executor" and b not in EXECUTOR_BACKENDS:
             raise ValueError(f"{p}: contracts.executor.backend {b!r} — the Executor is a pane or "
                              f"the tick's claude-p, nothing else is implemented")
-        out[name] = {"backend": b, "model": m}
+        fb = c.get("fallback")
+        if fb is not None:
+            # What the wrapper re-dispatches on when the PRIMARY backend refuses for its
+            # own reason (a Codex limit) — never a pane, never the same backend.
+            _check(p, f"{name}.fallback", fb.get("backend"), fb.get("model"))
+            if fb["backend"] in ("pane", b):
+                raise ValueError(f"{p}: contracts.{name}.fallback.backend {fb['backend']!r} — "
+                                 f"a fallback is a different, dispatchable backend")
+            fb = {"backend": fb["backend"], "model": fb["model"]}
+        out[name] = {"backend": b, "model": m, "fallback": fb}
     return out
+
+
+def _check(p, name, b, m):
+    if b not in BACKENDS:
+        raise ValueError(f"{p}: contracts.{name}.backend {b!r} is not one of {BACKENDS}")
+    if not m:
+        raise ValueError(f"{p}: contracts.{name} names no model")
+    if m.startswith("claude-fable") and b != "pane":
+        raise ValueError(f"{p}: contracts.{name}: {m} on backend {b!r} — Fable is pane-only "
+                         "(the Agent tool substitutes Sonnet silently; `-p` cannot select it)")
 
 
 def backend_of(role, mp):
@@ -62,8 +75,40 @@ def resolve(role, contract_model=None, mp=None, path=None):
         return {"backend": None, "model": contract_model, "source": "contract-default"}
     c = mp.get(role)
     if c is None:
-        return {"backend": mp["_default"], "model": contract_model, "source": "models.toml-default"}
-    return {"backend": c["backend"], "model": c["model"], "source": "models.toml"}
+        return {"backend": mp["_default"], "model": contract_model, "source": "models.toml-default", "fallback": None}
+    return {"backend": c["backend"], "model": c["model"], "source": "models.toml", "fallback": c.get("fallback")}
+
+
+PROFILES = {"mixed": "models.example.toml", "claude-only": "models.claude-only.toml"}
+
+
+def main(argv):
+    """doit models show | use <mixed|claude-only>. `use` copies the repo's template over
+    the root's map — validated first — and records `models-changed` on the ledger, so a
+    change of ruling is an event and not a mystery the next fold cannot explain."""
+    import hashlib, shutil, sys
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+    if argv[:1] == ["show"]:
+        mp = load()
+        if mp is None:
+            print(f"no map at {PATH} — every dispatch runs the flag/env route (pre-map behaviour)")
+            return 1
+        print(f"{PATH} · default backend {mp['_default']}")
+        for name, c in sorted((k, v) for k, v in mp.items() if not k.startswith("_")):
+            fb = c.get("fallback")
+            print(f"  {name:17} {c['backend']:9} {c['model']}" + (f"  (fallback {fb['backend']} {fb['model']})" if fb else ""))
+        return 0
+    if argv[:1] == ["use"] and len(argv) == 2 and argv[1] in PROFILES:
+        src = pathlib.Path(__file__).resolve().parent.parent / PROFILES[argv[1]]
+        load(src)                                           # a template that lies is never installed
+        PATH.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(src, PATH)
+        digest = hashlib.sha256(PATH.read_bytes()).hexdigest()[:16]
+        import fold
+        fold.append(["models-changed", "models", f"profile={argv[1]}", f"sha256={digest}", f"path={PATH}"])
+        print(f"models: {PATH} <- {src.name} (profile {argv[1]}, sha256 {digest})")
+        return 0
+    sys.exit(f"usage: doit models show | use <{'|'.join(PROFILES)}>")
 
 
 def first_on_model(events, contract_sha256, model):
@@ -71,3 +116,8 @@ def first_on_model(events, contract_sha256, model):
     ledger has run this exact contract on this model before — the trust run."""
     return not any(e.get("type") == "spawn-done" and e.get("contract_sha256") == contract_sha256
                    and (e.get("model_used") or e.get("model")) == model for e in events)
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(main(sys.argv[1:]))

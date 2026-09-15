@@ -48,7 +48,7 @@ rp = TMP / "content" / "L-research-0001.md"
 code, types, evs, cmd = spawn("research", out=None, path=rp)
 assert code == 1 and types == ["spawn-failed"] and "null structured_output" in evs[0]["why"], (types, evs)
 assert "--agent" in cmd and "research" in cmd and "--strict-mcp-config" in cmd and "ANTHROPIC_API_KEY" not in " ".join(cmd)
-assert cmd[cmd.index("--allowedTools") + 1] == "Read,Glob,Grep,Write", "the allow list is the contract's tools: line"
+assert cmd[cmd.index("--allowedTools") + 1] == "Read,Glob,Grep,Write,Bash", "the allow list is the contract's tools: line"
 
 code, types, evs, _ = spawn("research", result={"is_error": True, "terminal_reason": "api_error",
                                                 "api_error_status": 401, "result": "Not logged in"}, path=rp)
@@ -410,5 +410,64 @@ real_popen, dispatch.subprocess.Popen = dispatch.subprocess.Popen, boom
 dispatch.poke()
 dispatch.subprocess.Popen = real_popen
 os.environ["DOIT_NO_POKE"] = "1"
+MT.unlink()
+
+# `fallback`: a codex refusal that is the backend's own re-dispatches ONCE on the fallback
+# backend, and the event says so. Here: codex dead -> seat, served by the seat writer.
+MT.write_text('[contracts.research]\nbackend = "codex"\nmodel = "gpt-6-astra"\n'
+              'fallback = { backend = "seat", model = "claude-sonnet-5" }\n')
+rp7 = TMP / "content" / "L-research-0007.md"
+
+
+def seat_writer_fb():
+    for _ in range(600):
+        pk = [q for q in (list((TMP / "seat").glob("*.packet.md")) if (TMP / "seat").is_dir() else [])
+              if not (TMP / "seat" / (q.name.split(".")[0] + ".result.json")).exists()
+              and not (TMP / "seat" / (q.name.split(".")[0] + ".output.json")).exists()
+              and (TMP / "seat" / (q.name.split(".")[0] + ".cmd.json")).exists()
+              and json.loads((TMP / "seat" / (q.name.split(".")[0] + ".cmd.json")).read_text())["cmd"][:2] == ["claude", "-p"]]
+        if pk:
+            sid = pk[0].name.split(".")[0]
+            rp7.write_text("dug")
+            (TMP / "seat" / f"{sid}.result.json").write_text(json.dumps(
+                {"is_error": False, "structured_output": {**research, "path": "content/L-research-0007.md"},
+                 "num_turns": 2, "usage": {}, "total_cost_usd": None, "modelUsage": {"claude-sonnet-5": {}},
+                 "session_id": "seat-fb", "permission_denials": []}))
+            return
+        time.sleep(0.05)
+
+
+dispatch.run_codex_exec = codex_dead
+PK.write_text("a packet for the fallback run\n")   # D120 refuses an identical packet that already failed on codex
+threading.Thread(target=seat_writer_fb, daemon=True).start()
+code, ev = run("research", rp7)
+PK.write_text("a packet\n")
+assert code == 0 and [e["type"] for e in ev] == ["spawn-started", "backend-fallback", "research-filed", "spawn-done"], \
+    [(e["type"], e.get("why")) for e in ev]
+assert ev[1]["from_backend"] == "codex" and ev[1]["to_backend"] == "seat" and "weekly limit" in ev[1]["why"]
+d = ev[-1]
+assert d["backend"] == "seat" and d["backend_fallback"] is True and d["fallback_from"] == "codex" \
+    and d["model_requested"] == "claude-sonnet-5" and d["model_used"] == "claude-sonnet-5" and d["session"] == "seat-fb", d
+MT.write_text('[contracts.research]\nbackend = "codex"\nmodel = "gpt-6-astra"\n'
+              'fallback = { backend = "codex", model = "gpt-6-astra" }\n')
+try:
+    models.load()
+    raise AssertionError("a fallback on the same backend must be refused")
+except ValueError as e:
+    assert "different" in str(e)
+MT.unlink()
+
+# `doit models use <profile>` installs a validated template and records the change.
+os.environ["DOIT_LEDGER_FILE"] = "L-operator-test.jsonl"
+import io, contextlib
+with contextlib.redirect_stdout(io.StringIO()):
+    assert models.main(["use", "claude-only"]) == 0
+assert MT.is_file() and models.load()["spec-auditor"]["model"] == "claude-opus-5" and models.backend_of("executor", models.load()) == "pane"
+chg = [json.loads(l) for l in (TMP / "events" / "L-operator-test.jsonl").read_text().splitlines()]
+assert chg[-1]["type"] == "models-changed" and chg[-1]["profile"] == "claude-only" and chg[-1]["sha256"], chg[-1]
+with contextlib.redirect_stdout(io.StringIO()) as buf:
+    assert models.main(["show"]) == 0
+assert "spec-auditor      seat      claude-opus-5" in buf.getvalue(), buf.getvalue()
+del os.environ["DOIT_LEDGER_FILE"]
 MT.unlink()
 print(f"dispatch: {N} spawns mocked, every check fired")

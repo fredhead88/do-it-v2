@@ -476,6 +476,27 @@ def main(a):
         res = json.loads(r.stdout)
     except ValueError:
         fail(f"exit {r.returncode}, no JSON on stdout: {r.stderr[-300:]!r}")
+    # A codex refusal is the backend's, not the packet's (a weekly limit, a sandbox
+    # denial, a dead CLI): with a `fallback` on the map the spawn runs ONCE more on
+    # that backend, and the event says so. Never a third route, never silently.
+    if backend == "codex" and res.get("is_error") and mm.get("fallback"):
+        fb = mm["fallback"]
+        emit(ledger, base, "backend-fallback", from_backend="codex", to_backend=fb["backend"],
+             to_model=fb["model"], why=str(res.get("result"))[:200])
+        backend, seat = fb["backend"], fb["backend"] == "seat"
+        mm = {**mm, "model": fb["model"]}
+        cmd[cmd.index("--model") + 1] = fb["model"]
+        meta.update(backend=backend, spawn_path=backend, model_requested=fb["model"],
+                    backend_fallback=True, fallback_from="codex")
+        try:
+            r = run_seat(spawn, cmd, packet, cwd, (a.timeout or tmin) * 60) if seat \
+                else run_claude(cmd, packet, cwd, (a.timeout or tmin) * 60)
+        except subprocess.TimeoutExpired:
+            fail(f"timeout after {a.timeout or tmin} min (on the fallback backend {backend})")
+        try:
+            res = json.loads(r.stdout)
+        except ValueError:
+            fail(f"fallback {backend}: exit {r.returncode}, no JSON on stdout: {r.stderr[-300:]!r}")
     u = res.get("usage") or {}
     # What came back is the record; the contract's line is never written in its place
     # (pilot S5: the ledger said Fable for a day of Opus). Unobserved is null.

@@ -21,6 +21,10 @@
 #   * every terminal event stamps model_requested (this file) beside model_used
 #     (what the backend reported), and `first_on_model` marks the D120 trust run
 #     of a (contract, model) pair.
+#   * `fallback = { backend, model }` on a contract is the ONE re-dispatch the
+#     wrapper makes when the primary backend refuses for its own reason (a Codex
+#     weekly limit). It is stamped `backend_fallback: true`. Never a pane.
+#   * `doit models use mixed|claude-only` swaps this file; `doit models show` prints it.
 #
 # the argued map (2026-09-15 retro; see docs/handoffs/pilot-retro-change-list.md)
 #   * a judge never shares its author's vendor: spec-writer/builder on Codex ⇒
@@ -61,22 +65,27 @@ model = "claude-sonnet-5"   # fallback: claude-opus-5
 [contracts.spec-writer]
 backend = "codex"
 model = "gpt-6-astra"
+fallback = { backend = "seat", model = "claude-sonnet-5" }   # when Codex refuses on its limit
 
 [contracts.builder]
 backend = "codex"
 model = "gpt-6-astra"
+fallback = { backend = "seat", model = "claude-sonnet-5" }   # when Codex refuses on its limit
 
 [contracts.probe]
 backend = "codex"
 model = "gpt-6-astra"
+fallback = { backend = "seat", model = "claude-sonnet-5" }   # when Codex refuses on its limit
 
 [contracts.reviewer]
 backend = "codex"           # provisional — see header
 model = "gpt-6-astra"
+fallback = { backend = "seat", model = "claude-sonnet-5" }   # when Codex refuses on its limit
 
 [contracts.charter-reviewer]
 backend = "codex"           # provisional — see header
 model = "gpt-6-astra"
+fallback = { backend = "seat", model = "claude-sonnet-5" }   # when Codex refuses on its limit
 
 [contracts.research]
 backend = "seat"

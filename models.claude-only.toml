@@ -1,0 +1,72 @@
+# models.claude-only.toml — the model map with no Codex in it.
+#
+# Install with `doit models use claude-only` (copies this file to $DOIT_ROOT/models.toml
+# and records a `models-changed` event). Use it when the Codex weekly limit is gone, or
+# when a root must run on the Claude seat alone. `doit models use mixed` restores the
+# mixed map (models.example.toml).
+#
+# The principle, from the 2026-09-15 retro: Sonnet AUTHORS, the strongest sub-agent
+# model JUDGES. The blind audits found real defects on every pilot run and are the
+# shortest spawns; authors get reworked anyway, and this project already builds on
+# Sonnet. Opus appears in exactly three judging seats, chosen on measured value —
+# it is nobody's default (operator ruling). Fable is pane-only.
+#
+# `fallback` on a contract is what the wrapper re-dispatches on when the primary
+# backend refuses for a reason that is the backend's, not the packet's (a Codex
+# limit, a seat that cannot be reached). None are needed on a Claude-only map, so
+# none are set; see models.example.toml for the shape.
+
+[defaults]
+backend = "seat"
+
+[contracts.thinker]
+backend = "pane"
+model = "claude-fable-5-1"
+
+[contracts.planner]
+backend = "pane"
+model = "claude-fable-5-1"
+
+[contracts.executor]
+backend = "pane"            # under a seat-only root the driver pane IS the Executor (S2)
+model = "claude-sonnet-5"   # once the pane no longer types findings (change list a-1); until then, whoever drives
+
+[contracts.spec-writer]
+backend = "seat"
+model = "claude-sonnet-5"   # reworked by the audit anyway; specs capped at 400 lines
+
+[contracts.builder]
+backend = "seat"
+model = "claude-sonnet-5"   # the v4 precedent; checker + grader catch it
+
+[contracts.spec-auditor]
+backend = "seat"
+model = "claude-opus-5"     # one round ever; real findings every pilot run; ~9 min
+
+[contracts.plan-auditor]
+backend = "seat"
+model = "claude-opus-5"     # three short spawns per charter; found the sibling red
+
+[contracts.charter-reviewer]
+backend = "seat"
+model = "claude-opus-5"     # one per charter; the done-for-the-whole call
+
+[contracts.grader]
+backend = "seat"
+model = "claude-sonnet-5"   # mechanical: re-runs the checker; the validator is ground truth
+
+[contracts.reviewer]
+backend = "seat"
+model = "claude-sonnet-5"   # drives the deployed thing with the MCP browser
+
+[contracts.probe]
+backend = "seat"
+model = "claude-sonnet-5"
+
+[contracts.research]
+backend = "seat"
+model = "claude-haiku-4-5-20251001"
+
+[contracts.reuse-scout]
+backend = "seat"
+model = "claude-sonnet-5"
