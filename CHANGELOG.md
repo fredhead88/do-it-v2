@@ -18,6 +18,11 @@ each direction.
   `content/slot-<spec>.md` when no packet is on disk, so the first rework of a spec no longer
   needs `--slot` typed by hand. (S6, half.)
 
+### Changed
+- `agents/grader.md`: the worktree's history is not the grader's — `git log/show/diff/blame` and
+  the commit message are forbidden by name. A Sonnet grader ran `git log --oneline` to confirm its
+  sha, saw the commit subject the packet strips, and honestly voided its run (charter 3, R6).
+
 ## [0.2.0] — 2026-09-15
 
 The day-after-the-pilot release: the model map, and the changes that stop the driver pane doing a

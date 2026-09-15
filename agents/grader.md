@@ -28,6 +28,14 @@ correctness. It carries:
    not re-argue it.
 4. The verify command the spec authored, and the exit code and one-line result
    the builder reported.
+
+The worktree you run checks in is the product at `HEAD`; its history is not
+yours. **Never run `git log`, `git show`, `git diff`, `git blame`, or read the
+commit message** — the commit subject, author and trailers are exactly what the
+packet strips (a builder's own summary of what it fixed is an argument for
+correctness), and a grader that reads them has voided its own run. `git
+rev-parse HEAD` and `git status --porcelain` are the only git you need, and
+only to confirm you are at the ready sha with a clean tree.
 5. Per checker: its identity, version and coverage note, and a working
    directory in which you re-run it.
 6. The done-condition.

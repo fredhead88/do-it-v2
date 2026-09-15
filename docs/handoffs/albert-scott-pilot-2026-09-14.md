@@ -1027,7 +1027,9 @@ the driver's `S<n>`.*
 | — | executor (this pane) | — | `doit packet builder L-spec-0006` → checker `pytest test_611 && bash -n && shellcheck`, clean; `doit packet grader L-spec-0005` (133 lines, every row from the card sidecar) |
 | 11 | builder · `L-builder-0007` (L-spec-0006) | sonnet | 808 s · 200k tok · 46 tool uses · one commit `f9272051b`; 23/23 tests, `bash -n` + shellcheck clean; AC7 carried as owed; card validated first try |
 | — | CI on `bf0d05556` | — | 6 of 7 checks green within 2 min; **Repo Lint Guards red — pre-existing** (red on base `5cd5c47de` and on `62c04d46b`): 2 bare UTC date casts in `asin_inventory_timeline.py`, outside the footprint → adjacent `brief`, not chased (S17); `Python Tests` still running |
-| 14 | grader · `L-grader-0007` (L-spec-0006) | sonnet | in flight |
+| 14 | grader · `L-grader-0007` (L-spec-0006) | sonnet | 107 s · **voided itself**: ran `git log --oneline` to confirm the sha, saw the commit subject the packet strips, declared `contamination: true`, graded nothing (R6). Wrapper: `spawn-failed` contamination |
+| — | executor (this pane) | — | grader.md gains the rule (no git history reads; `rev-parse` + `status` only) → contract sha changes, so D120's identical-retry refusal does not fire; packet rebuilt identical (`-grader-2.md`) |
+| 15 | grader (re-grade) · `L-grader-0008` (L-spec-0006) | sonnet | in flight |
 | 12 | grader · `L-grader-0006` (L-spec-0005) | sonnet | **72 s** · 81k tok · 14 tool uses · 9/9 `met`, `matches_intent: yes`, `card_ok: yes`; re-ran every check and read the test source (vs 6.5 min median on Opus in the pilot) |
 | 13 | reviewer (gates-only, round 1) · `L-reviewer-0004` (L-spec-0005) | sonnet | **95 s** · 85k tok · 17 tool uses · drove all 9 paths; 0 blocking, nothing unverifiable; done-condition met (vs 4.2 min median on Opus) |
 | — | executor (this pane) | — | L-spec-0005 → `accepted` (verdict confirmed + clean review); `doit gate` clean; `git merge --no-ff` → `bf0d05556`; `shipped`; pushed — origin printed "Changes must be made through a pull request" but the push landed (branch protection requires PRs with 0 approvals and does not enforce on admins; the line is a bypass notice, not a refusal — R5) |
@@ -1059,3 +1061,21 @@ the driver's `S<n>`.*
   exit code), never its stderr prose — a remote's notice text is not a verdict. One line in
   executor.md (b-9) and, if `doit` ever owns the push, an exit-code check.
 - **Fix status (2026-09-15):** open — b-9.
+
+### R6. A grader that confirms its sha with `git log` reads the one line the packet strips, and the honest model voids itself
+- **Measured (2026-09-15 07:4xZ):** `L-grader-0007` (Sonnet) ran `git log --oneline` in the worktree
+  "to check the commit state" before any checker, saw the builder's commit subject (`reaper's lock
+  test learns unopenable is not held`) — an argument for exactly the criterion under grade — and
+  returned `contamination: true` with every row `cannot-assess`. The pilot's Opus grader
+  (`L-grader-0003`, S31) hit the same class through a commit trailer and chose to flag rather than
+  void. Neither was wrong by its contract; the contract never said which git was allowed.
+- **Cost:** one 107 s spawn and a re-dispatch; the D120 identical-retry guard would have refused
+  the same packet on the same contract, so the fix had to be the contract (it was: the rule is now
+  in `grader.md`, and the contract hash moved).
+- **Systemic:** blindness that is constructed in the packet can be un-constructed by a tool the
+  contract grants — Bash is `git`. The rule now names the git the grader may run. The stronger
+  fix (a-8) is the packet builder scrubbing trailers *and* the grader running in a worktree whose
+  HEAD commit message is replaced by the spec id (a detached `git commit-tree` of the same tree),
+  so there is nothing to read.
+- **Fix status (2026-09-15):** contract rule shipped (unreleased, `agents/grader.md`); the
+  structural fix is a-8.
