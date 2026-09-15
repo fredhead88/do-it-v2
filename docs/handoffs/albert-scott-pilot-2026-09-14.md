@@ -1457,3 +1457,29 @@ cost or hid.
   the Thinker may serve exactly the audit its own `--land` produced, nothing else. Change list
   b-23.
 - **Fix status:** open — b-23; today the Planner pane serves L-plan-auditor-0011 by hand.
+
+### R36. `doit append decision` accepted four decisions with no `why`, and the board rendered them as `?` (L-planner-0005)
+- **Measured:** the pane passed one quoted `item=… probe=… why=…` string as a single `k=v`, so
+  each event landed with `item` holding the whole sentence and no `why`; `append` accepted all
+  four and `DECIDED WITHOUT YOU` rendered `L-goal-0001 · ? · revert …`. Four properly-formed
+  decisions were appended after; the malformed four (`L-planner-0005.jsonl:4-7`) stand and are
+  named for an operator `correction`.
+- **Systemic:** a-19's field table would have refused at write time; a decision without `why`
+  is the a-24 class one field over. No new row — a-19 covers it; recorded as its second hit.
+- **Fix status:** open — a-19.
+
+### R37. An operational charter through the Planner: five probes, zero units, 43 minutes, $0 (L-planner-0005)
+- **Measured:** L-charter-0010 `charter-filed` 09:45 → probes dispatched 10:29:27 (four, one
+  per external-credential pair; a fifth at 10:59 for three criteria the portal probe could not
+  reach) → `cut-written` (0 units) 10:59:49 → `plan-written` + `evidence{R1 R3 R4 R5 R6}` +
+  four `decision`s on L-goal-0001 + `l1-complete` 11:12:43. Probe wall clock 10–28 min each,
+  all `complete: true`, all served concurrently by L-executor-0006; the Thinker (L-thinker-0004)
+  chartered six new charters from the first four run records before the write-up existed
+  (R30). No cut-audit or plan-audit spawn (R27/b-19). The write-up corrected the framing of
+  three charter items (B1189 dead, 877 not a crash, 255 fleet-wide) — the D96 payoff, measured.
+- **Systemic:** the lane worked without a code unit; what is missing is written (b-19). One more
+  gap: `l1-complete` for an operational charter is the Planner's event, but nothing derives it
+  from `evidence` covering every R — a Planner who forgets it leaves the Executor's close row
+  dark. Fold: an `evidence` whose `covers` spans every charter R could derive L1 on its own.
+  Change list a-31.
+- **Fix status:** open — a-31.

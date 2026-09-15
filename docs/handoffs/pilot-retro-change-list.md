@@ -51,6 +51,7 @@ design-doc or contract change; (c) = drop, with why.
 | 28 | **`--print-only` never appends.** `think.land(print_only=True)` runs `check()` on every file and prints the coverage diff and the audit command, and appends nothing; a test asserts the ledger is byte-identical after a dry run. | R31 | six duplicate `charter-filed` events, six corrections | `src/think.py`, `src/test_think.py` |
 | 29 | **`research` default timeout 15 min** (`ROLES["research"]`), or the packet passes `--timeout`; a spawn that finished its file after the wrapper gave up is an undeclared success the ledger cannot see. | R33 | one 5-min timeout on a 6-min map; a usable file with no `research-done` | `src/dispatch.py` |
 | 30 | **`probe-run` carries `summary`** beside path/externals/n_inputs/spend/complete, so the charter's event stream says what the probe found, not only where it looked. | R34 | five probes' findings readable only from `spawn-done` scalars | `src/dispatch.py` |
+| 31 | **`evidence` covering every charter R derives L1** for a charter with zero specs (the operational lane, b-7), or the fold flags "evidence complete, no l1-complete" on the board; today L1 waits on a Planner event nothing reminds it to write. | R37 | one operational charter, closed by hand | `src/fold.py` |
 
 ## (b) Design-doc and contract changes, ranked
 
