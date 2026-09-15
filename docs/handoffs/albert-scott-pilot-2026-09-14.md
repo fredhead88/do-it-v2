@@ -1652,3 +1652,64 @@ dispatched 13:17:52Z, `--timeout 15`). Ranked by what it cost or hid.
 - **Measured:** `L-research-0002` (dispatched 13:17:52Z, `--timeout 15`) → `spawn-failed{timeout after 15 min}` 13:32:52Z, packet never opened; `L-plan-auditor-0016` (the cut-audit, 13:39:52Z, role default 15) → `spawn-failed` 13:54:52Z, same. In the same window the Executor pane (`L-executor-0006`) served and stamped its own four rework spec-writers (`L-spec-writer-0021…0024`, dispatched 12:57:23Z, stamped 13:11–13:24Z) and nothing else. The operator's boot prompt routes serving to the Executor "for every seat spawn"; the Executor's behaviour keys on its own dispatches, and nothing on the ledger or the board tells it a foreign packet is waiting (a-20's `seat-unserved` alarm is unbuilt; the fold's IN FLIGHT block lists specs, not spawns). Both re-dispatched with wider windows (`L-research-0003` 45 min at 13:33:32Z; `L-plan-auditor-0017` 60 min at 13:55:02Z) so the waiter outlives the Executor's next look — a timeout widened to cover a serving delay, not a running contract, which is a-36's p95 argument inverted.
 - **Systemic:** R49's other half. A pane that cannot serve (no `Agent`) dispatching to a pane that serves only what it dispatched leaves every cross-pane spawn to expire at its role timeout, silently, at 0 tokens. The cross-pane trigger has to be a fold query: a board block `SEAT PENDING (n)` listing every `spawn-started` seat spawn with no terminal event and no `.output.json`, oldest first with age — the a-20 alarm made a standing board line rather than a threshold. Until it exists, a Planner on this backend cannot rely on any spawn it dispatches being served before its timeout. Change list a-38.
 - **Fix status:** open — a-38 (a-20 sharpened); this charter's cut-audit is `L-plan-auditor-0017`, pending.
+
+## Executor pane, `L-executor-0006` — 2026-09-15, continued (found and served the four stalled L-charter-0006 spawns R50 names)
+
+### R51. Confirming R50 from the other side: this pane's own seat-poll monitor lapsed for ~5 hours during a single deep task, and nobody — not the monitor, not the board — said so
+- **Measured:** `L-research-0002`/`L-plan-auditor-0016` (13:17–13:55Z) and their wider-window
+  re-dispatches `L-research-0003`/`L-plan-auditor-0017` (13:33Z, 45 min; 13:55Z, 60 min) all four
+  ended `spawn-failed{timeout}` with no notification ever reaching me — I found them only by
+  running `ls ~/.do-it/seat/*.packet.md` by hand at 18:13Z while chasing R50 itself, ~4.5 hours
+  after the first one appeared. My own background seat-poll `Monitor` (armed with a 30-minute cap,
+  as the tool requires) had lapsed sometime during the L-charter-0005 merge/review/K=1/owed-ac
+  stretch — a single continuous task run long enough that I never hit an idle point to notice the
+  monitor's own 30-minute expiry notice, or did notice one and re-armed it, then it lapsed again
+  the same way, silently, with nothing distinguishing "no new packets" from "not watching any
+  more." R50's fix (a `SEAT PENDING (n)` board block, oldest-first with age) would have caught
+  this from either side — I re-read `doit`'s board output roughly a dozen times during that
+  stretch for other reasons and it never once told me a foreign spawn was aging out.
+  Both packets were still valid (no repo drift affecting a code-mapping question or a cut audit
+  against current HEAD) and served clean once found.
+- **Systemic:** confirms R50/a-38 is not merely a Planner-side gap — it is symmetric. A tool-level
+  `Monitor` re-arms itself only if the pane notices the expiry and re-issues the call; a long,
+  focused task (mine ran ~90 minutes single-threaded resolving one merge's UI-review question)
+  is exactly the condition under which that notice is easiest to miss, because nothing else
+  interrupts to surface it. The fix is the same board block R50 already asks for, checked as a
+  matter of routine between actions — not only when a notification prompts it — and, more
+  robustly, checked independent of whether any particular `Monitor` instance happens to still be
+  armed.
+- **Fix status:** open — a-38 (shared with R50); practice change starting now: check `doit` (or
+  at minimum `ls ~/.do-it/seat/*.packet.md` against served state) between multi-step stretches,
+  not only on a monitor notification.
+
+### R52. The rework packet builder resurfaces already-fixed findings on a third round, instead of only the standing ones
+- **Measured:** `doit packet spec-writer L-spec-0008` (attempted for a narrow, unrelated task —
+  adding owed-ac declarations after two clean review rounds) built successfully and would have
+  handed a THIRD-round spec-writer the exact same fix list from round 1's spec-audit, already
+  fully applied in round 2 (`p_spec_writer`'s `findings = [e for e in c.all_of("audit-finding") if
+  e.get("list") != "rejected"]` reads every non-rejected `audit-finding` ever recorded on the
+  subject, with no check for whether a LATER `spec-written` already answered it — unlike the
+  builder/grader path, which has `standing_rejects()` for exactly this "still open, not yet
+  cleared" distinction on `rejected-criterion`). Caught by inspection before dispatch, not run.
+- **Systemic:** `spec-auditor`'s `audit-finding{list: "findings"}` has no `criterion-cleared`-style
+  companion event the way a grader's `rejected-criterion` does, so the packet builder cannot tell
+  "still owed" from "already fixed two rounds ago" — every fix list it builds after round 1 is the
+  original list, forever, regardless of how many rework rounds already applied it. Worked around
+  here by hand-building a narrow packet instead of using the tool (a deliberate exception to
+  "never compose the packet by hand," justified by the tool's demonstrated bug for this exact
+  case — noted for veto).
+- **Fix status:** open — new change list item (a) `p_spec_writer` should only include an
+  `audit-finding` whose subject has no LATER `spec-written` event, or spec-auditor should emit a
+  clearing event mirroring `criterion-cleared` when a rework packet was built and served since.
+
+### R53. A dynamic-dwell WEDGE flag on `written` doesn't know about Plan wave order
+- **Measured:** `L-spec-0010` (wave 2, explicitly waiting for wave 1's three specs to merge and
+  rebase per the Plan) sat `written` for ~35 minutes and was flagged `⚠ WEDGE` on the board —
+  `dwell_days()` derives its threshold from this SESSION's own observed written→building
+  transitions (mostly under 15 minutes today), so a deliberate, Plan-mandated wait past that
+  reads as stuck even though nothing was wrong.
+- **Systemic:** the dynamic dwell heuristic (§12.5) has no way to know a `written` spec is
+  waiting on a same-charter sibling's merge by design; a false WEDGE costs nothing by itself but
+  trains a reader to discount the flag exactly when it might one day be real.
+- **Fix status:** open — minor; a-38's `SEAT PENDING` work is higher-value, not filing a change
+  list row for this one alone.
