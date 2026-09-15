@@ -18,6 +18,37 @@ PATH = ROOT / "models.toml"
 BACKENDS = ("pane", "seat", "claude-p", "codex")
 PANE_ONLY = ("thinker", "planner")
 EXECUTOR_BACKENDS = ("pane", "claude-p")
+WEIGHT_FIELDS = ("input", "output", "cache_read", "cache_creation")
+
+
+def _weights(d, p):
+    """[weights]: model -> {input, output, cache_read, cache_creation} price
+    ratios, relative to input=1.0 (retro step 9: fold.py's SPEND block and
+    `doit spend` use these to render an input-equivalent weighted total —
+    TOKENS, never dollars, §4.2). Optional, per model: a map with no [weights]
+    table, or a model missing from one, renders unweighted — never a fabricated
+    ratio. A model that IS named must carry all four keys, or the map is wrong,
+    not partially wrong."""
+    out = {}
+    for model, w in (d.get("weights") or {}).items():
+        missing = [f for f in WEIGHT_FIELDS if f not in w]
+        if missing:
+            raise ValueError(f"{p}: weights.{model} missing {missing}")
+        try:
+            out[model] = {f: float(w[f]) for f in WEIGHT_FIELDS}
+        except (TypeError, ValueError):
+            raise ValueError(f"{p}: weights.{model} has a non-numeric ratio")
+    return out
+
+
+def load_weights(path=None):
+    """The [weights] table alone — for a caller (fold.py's SPEND block, `doit
+    spend`) that wants price ratios without the full contract map. {} when the
+    root has no models.toml, or the map has no [weights] table."""
+    p = pathlib.Path(path or PATH)
+    if not p.is_file():
+        return {}
+    return _weights(tomllib.loads(p.read_text()), p)
 
 
 def load(path=None):
@@ -30,7 +61,7 @@ def load(path=None):
     default = (d.get("defaults") or {}).get("backend", "claude-p")
     if default not in BACKENDS:
         raise ValueError(f"{p}: defaults.backend {default!r} is not one of {BACKENDS}")
-    out = {"_default": default}
+    out = {"_default": default, "_weights": _weights(d, p)}
     for name, c in (d.get("contracts") or {}).items():
         b, m = c.get("backend", default), c.get("model")
         _check(p, name, b, m)

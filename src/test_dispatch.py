@@ -325,6 +325,53 @@ assert code == 0 and sev[-1]["type"] == "spawn-done" and sev[-1]["session"] == "
 del os.environ["DOIT_SEAT"]
 N += 1
 
+# retro step 9: a meta sidecar carrying the four-way split (stamp.sh/usage.py's
+# shape) plus model_observed flows onto the terminal event UNCHANGED by main()
+# — model_used prefers the OBSERVED model (real transcript evidence) over the
+# pane-typed `model` field, and model_observed is true only because that
+# evidence exists; subagent_tokens (the older blended figure) rides beside the
+# split, not instead of it.
+os.environ["DOIT_SEAT"] = "1"
+rp5b = TMP / "content" / "L-research-0005b.md"
+
+
+def seat_writer_split():
+    for _ in range(400):
+        pk = list((TMP / "seat").glob("*.packet.md")) if (TMP / "seat").is_dir() else []
+        pk = [q for q in pk if not (TMP / "seat" / (q.name.split(".")[0] + ".output.json")).exists()
+              and not (TMP / "seat" / (q.name.split(".")[0] + ".result.json")).exists()]
+        if pk:
+            sid = pk[0].name.split(".")[0]
+            rp5b.write_text("dug")
+            (TMP / "seat" / f"{sid}.output.json").write_text(json.dumps({**research, "path": "content/L-research-0005b.md"}))
+            (TMP / "seat" / f"{sid}.meta.json").write_text(json.dumps({
+                "model": "claude-opus-5", "session": "seat-split", "turns": 7, "duration_ms": 42000,
+                "model_observed": "claude-sonnet-5",     # the transcript's OWN model, not the typed claim above
+                "usage": {"subagent_tokens": 5000, "input_tokens": 10, "output_tokens": 20,
+                          "cache_read_input_tokens": 300, "cache_creation_input_tokens": 40}}))
+            return
+        time.sleep(0.05)
+
+
+threading.Thread(target=seat_writer_split, daemon=True).start()
+a = argparse.Namespace(role="research", subject="L-spec-0001", packet=str(PK), path=str(rp5b), cwd=str(REPO),
+                       charter=None, project="t", mcp_config=None, timeout=1, max_usd=None, seat=True)
+try:
+    dispatch.main(a)
+    code = 0
+except SystemExit as e:
+    code = e.code
+sev = [json.loads(l) for l in max((TMP / "events").glob("L-research-*.jsonl")).read_text().splitlines()]
+d = sev[-1]
+assert code == 0 and d["type"] == "spawn-done", d
+assert d["model_used"] == "claude-sonnet-5", "model_used prefers the transcript-observed model over the typed one"
+assert d["model_observed"] is True, "real transcript evidence -> observed, not assumed"
+assert d["input_tokens"] == 10 and d["output_tokens"] == 20 and d["cache_read"] == 300 \
+    and d["cache_creation"] == 40, d
+assert d["subagent_tokens"] == 5000, "the older blended figure rides beside the split, not replaced by it"
+del os.environ["DOIT_SEAT"]
+N += 1
+
 # DOIT_REPO_VOLATILE: a declared path that moves under a spawn does not void it; an undeclared one still does.
 os.environ["DOIT_REPO_VOLATILE"] = "docs/sessions/*"
 import importlib
@@ -493,6 +540,43 @@ with contextlib.redirect_stdout(io.StringIO()) as buf:
 assert "spec-auditor      seat      claude-opus-5" in buf.getvalue(), buf.getvalue()
 del os.environ["DOIT_LEDGER_FILE"]
 MT.unlink()
+
+# [weights] — retro step 9: model -> price ratios relative to input=1.0. No
+# models.toml, or a map with no [weights] table, or a model missing from it,
+# all render unweighted ({} / absent) rather than fabricating a ratio; a model
+# that IS named must carry all four keys and they must be numbers, or the map
+# is refused like any other bad map.
+assert models.load_weights(TMP / "no-such-models.toml") == {}, "no file -> {}"
+MT.write_text('[defaults]\nbackend = "seat"\n')
+assert models.load_weights() == {}, "a map with no [weights] table -> {}"
+MT.write_text('[defaults]\nbackend = "seat"\n'
+              '[weights.claude-sonnet-5]\ninput = 1.0\noutput = 5.0\ncache_read = 0.1\ncache_creation = 1.25\n')
+w = models.load_weights()
+assert w == {"claude-sonnet-5": {"input": 1.0, "output": 5.0, "cache_read": 0.1, "cache_creation": 1.25}}, w
+assert models.load()["_weights"] == w, "load() carries the same table under _weights"
+MT.write_text('[defaults]\nbackend = "seat"\n'
+              '[weights.claude-sonnet-5]\ninput = 1.0\noutput = 5.0\n')          # missing two required keys
+try:
+    models.load_weights()
+    raise AssertionError("a named model missing a required ratio must be refused")
+except ValueError as e:
+    assert "missing" in str(e), str(e)
+MT.write_text('[defaults]\nbackend = "seat"\n'
+              '[weights.claude-sonnet-5]\ninput = 1.0\noutput = "five"\ncache_read = 0.1\ncache_creation = 1.25\n')
+try:
+    models.load_weights()
+    raise AssertionError("a non-numeric ratio must be refused")
+except ValueError as e:
+    assert "non-numeric" in str(e), str(e)
+MT.unlink()
+# both shipped templates carry a valid [weights] table for every model they name
+REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
+for tmpl in ("models.example.toml", "models.claude-only.toml"):
+    tw = models.load(REPO_ROOT / tmpl)["_weights"]
+    assert tw["claude-sonnet-5"] == {"input": 1.0, "output": 5.0, "cache_read": 0.1, "cache_creation": 1.25}, (tmpl, tw)
+assert "gpt-6-astra" in models.load(REPO_ROOT / "models.example.toml")["_weights"], \
+    "every model models.example.toml names in a contract gets a weights row"
+
 # An empty or non-file --packet is refused before a spawn id exists (pilot "Smaller"; charter 3).
 before_files = sorted((TMP / "events").glob("L-research-*.jsonl"))
 for bad_packet in ("", str(TMP / "nowhere.md")):
