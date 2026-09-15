@@ -932,6 +932,40 @@ as ops work, not here as design.*
 > in-session (D105). Same skill file, same contracts; only the invocation
 > changes. Nothing here is burned.
 
+> ### ★ D121 — the backend is a seam, decided per root
+>
+> *(2026-09-15, pilot retro S1/S2/S3/S5 — `docs/handoffs/pilot-retro-change-list.md`
+> (b)-1.)* D117 held because a spawn had exactly one shape this design named. It
+> does not have to. **The backend is a first-class seam with three named
+> values — `claude-p`, `seat`, `codex` — chosen once per ledger root in
+> `models.toml`, never per call, never per shell** (S32: a per-shell environment
+> variable stood in for this ruling once and a banned `claude -p` ran twice,
+> $2.09 metered, before the root's own file could refuse it). **D117 holds only
+> for a root whose Executor backend is `claude-p`** — the tick, the cron line,
+> the `wake_at`-shaped liveness are that backend's shape, not a property of the
+> Executor role itself.
+>
+> **Under `seat`, the Executor is a standing pane again** (S2, option a): the
+> tick collapses to a poke that wakes it, keeping stateless-by-construction and
+> losing kill-and-respawn, because no process on this backend can `-p`-spawn a
+> model to check. `do-it up` on a seat root starts the Executor pane and
+> installs no cron line; HEALTH's `last tick: never` then reads as a fact.
+>
+> **Seat-only permits exactly one collapse** (S3): Planner and Executor may
+> write from the same pane, in turn — `L-planner-NNNN` then `L-executor-NNNN` —
+> because §3.6's rationale-blindness lives in what the packets carry, not in
+> which process types them; "never read a spec you commissioned" moves from
+> structural to observed discipline. **Thinker collapses into nothing, on any
+> backend** — its five-section reasoning is the exact context a Planner or
+> Executor pane must not carry in. The fold counts every role-switch inside one
+> session id and HEALTH renders it, so an unpermitted collapse is visible, not
+> merely disallowed.
+>
+> **A `cost_usd` the backend cannot price renders `unmeasured`, never `$0.00`.**
+> A seat spawn's terminal event carries `cost_usd: null` — §4.2's one-meter rule
+> still holds nothing to convert to a dollar — and a null read as a free run is
+> the silent zero §4.4 already rules out for every other field.
+
 **Panes are not defined by which agents they can spawn — they are defined by
 what they drive.** Both draw on the same library. That is why a rejected spec
 never travels back to the Planner: the Executor spawns its own spec-writer and
@@ -1885,6 +1919,12 @@ drafts; 23k was measured under a lighter config.)*
 > Skill tool and `--disable-slash-commands`; drivers carry the RETIRE list as
 > `--disallowedTools`. *D73's
 > rationale* is re-grounded on §1.4 at the four sites that held it.
+>
+> **Amended 2026-09-15 (D121, §3.1).** That pane/tick split holds only when the
+> root's Executor backend is `claude-p`. The backend itself — `claude-p` /
+> `seat` / `codex` — is a seam chosen once per ledger root in `models.toml`;
+> under `seat` the Executor is a pane again, and `cost_usd: null` on a seat
+> spawn's terminal event renders *unmeasured*, never `$0.00`.
 
 **Standing spawn flags — retired by D104, and six of seven restored by D116 on
 the non-bare `-p` path:**
@@ -2122,14 +2162,27 @@ ones superseded by this meeting's decisions are marked)*:
 | 1 | The auditor's blindness is **no author rationale and no prior-round findings**, *not* no code. An auditor blind to code is useless; one fed the writer's argument is contaminated | **stands** |
 | 2 | **Prohibition lists are the wrong form.** Head-to-head: a prohibition arm produced *more* of the unwanted content than a positive-recipe arm. Omission failures need **required slots**; the banned-phrase list survives only as the auditor's grep vocabulary | **stands** |
 | 3 | Audit rounds do not converge — measured 9-round run: 15, 8, **12**, 2, 8, 1, 4, 1, 0 defects | **superseded by D24** — there is no round 2 to converge |
-| 4 | **Cross-vendor buys self-preference removal only** — 9 judges / 7 families = 2.18 effective votes, and the highest-correlated pairs are cross-family | **stands, and is now moot** (§4.2) |
+| 4 | **Cross-vendor buys self-preference removal only** — 9 judges / 7 families = 2.18 effective votes, and the highest-correlated pairs are cross-family | **stands — un-mooted 2026-09-15 (§4.5, D121):** a `codex` backend is a second meter, so cross-vendor exists again; this correction's own finding (self-preference removal only, not diversity) is why the rule is judge≠author's-vendor (§4.5), never a panel |
 | 5 | **Judge panels fail twice over** — no token saving, and panel voting *amplified* overcommitment (+4.7%) while suppressing minority dissent in 48% of cases | **stands** |
 | 6 | **Blindness must be constructed, never instructed.** Recency metadata moved verdicts +30%, provenance labels +18%, CAR = **0** | **stands — load-bearing** |
 | 7 | **Reasons-before-verdict does not debias.** Keep reasons (they are the operator's narrowing surface), but do not believe they debias | **stands** |
 | 8 | **The third gate state is the best cost/benefit item in the pass.** Three-option judges overcommitted on >84% of mixed-evidence cases; a typed non-commitment verdict dropped that to ~19% | **stands** |
 | 9 | **Budgets do not "start generous with no cap."** `budget-exceeded`, `loop` and `context-exhausted` cannot fire without a cap | **stands** |
+| 10 | **The backend was one shape, and this document named it** — every spawn was assumed to run `-p`, on the seat, from one root-wide mechanism | **added 2026-09-15 — D121 (§3.1):** the backend is a seam (`claude-p` / `seat` / `codex`), chosen once per ledger root, never per call |
 
 ## 4.5 The library
+
+**The Model column below is the map's *default*, not a binding** — `models.toml`
+(§3.1 D121) rules per ledger root; a root with no map runs the column as
+written. **A judge never shares its author's vendor**: when
+`spec-writer`/`builder` runs on Codex, `spec-auditor`/`grader` runs on Claude,
+and the reverse — blindness by construction, one level up, the same doctrine
+correction #6 above already puts inside the packet script. **D120's re-trust is
+keyed on `(contract, model_used)`**, not the contract alone; the first
+`spawn-done` this ledger holds for that pair is stamped `first_on_model` and
+*is* the trust run. **The 2026-09-15 Claude-only ruling** (no Codex on this
+root): Sonnet authors, Opus judges at three seats chosen on measured value —
+nobody's default — Fable is pane-only.
 
 | # | Contract | Runs | Model | One line |
 |---|---|---|---|---|
