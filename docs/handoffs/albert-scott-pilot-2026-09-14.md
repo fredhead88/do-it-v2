@@ -100,7 +100,7 @@ audit. None of them can run here.
 - **Systemic:** the contract's `model:` should be a *preference* the backend maps,
   with the mapping recorded once per ledger root, and `contract_sha256` re-trust
   (D120) keyed on `(contract, model actually used)`.
-- **Fix status (2026-09-15):** **shipped 0.2.0**: `models.toml` per root, `model_requested` vs `model_used` (+ `model_observed`, `model_match`, `first_on_model`) on every terminal event, Fable refused off a pane. Verified by tests. The D120 trust run per (contract, model) is owed: charter 3 is the first.
+- **Fix status (2026-09-15):** **shipped 0.2.0 and verified on charter 3** (R7): 17 spawns, every `model_requested == model_used`, seven `(contract, model)` trust runs stamped `first_on_model`.
 
 ### S6. The Planner's own packets are hand-built, and the rule says packets never are
 - **Mechanism:** `packet.py` builds packets for the six roles the *Executor*
@@ -569,7 +569,7 @@ the driver's `S<n>`.*
   contract, so the wrapper should accept the Agent tool's structured return as the
   Output (D116's `structured_output` field by another route), and the pane should never
   type a finding.
-- **Fix status (2026-09-15):** **shipped 0.2.0**: `Write`+`Bash` on `plan-auditor`, `spec-auditor`, `grader`, `reviewer`, `charter-reviewer`, and a *Seat route* section in every dispatchable contract (the sub-agent writes `seat/<spawn>.output.json` and runs `doit validate` itself). **Unverified on a live typed spawn** — charter 3 is the test. On the codex backend the loop does not exist at all (`--output-schema -o`).
+- **Fix status (2026-09-15):** **shipped 0.2.0**: `Write`+`Bash` on `plan-auditor`, `spec-auditor`, `grader`, `reviewer`, `charter-reviewer`, and a *Seat route* section in every dispatchable contract (the sub-agent writes `seat/<spawn>.output.json` and runs `doit validate` itself). **Verified on charter 3** (17 spawns served as general-purpose + contract, R2; every Output written and validated by the sub-agent itself; the pane typed nothing). On the codex backend the loop does not exist at all (`--output-schema -o`).
 
 ### S19. `doit alloc` treats any argument as a kind — `doit alloc -h` allocated `L--h-0001.md`
 - **Mechanism:** `alloc <kind>` builds `L-<kind>-NNNN` with no validation of the kind
@@ -1032,7 +1032,8 @@ the driver's `S<n>`.*
 | 15 | grader (re-grade) · `L-grader-0008` (L-spec-0006) | sonnet | 111 s · 90k tok · 15 tool uses · 7/8 `met`, AC7 `cannot-assess` (owed, wake_at not reached); `matches_intent: yes`, `card_ok: yes` |
 | 16 | reviewer (gates-only, round 1) · `L-reviewer-0005` (L-spec-0006) | sonnet | 229 s · 101k tok · 23 tool uses · all paths matched (non-root, so the permission fixtures ran); AC7 `unverifiable` until wake_at; 0 blocking |
 | — | executor (this pane) | — | `decision` (merge with AC7 owed, K=1) · gate clean · `git merge --no-ff` → `f38ba5dda` · `shipped` · pushed (bypass notice again) · the Executor's own `owed-ac` was **ignored by the fold** (only spec-writer/spec-auditor may emit it — S15 measured from the other side) → operator `correction` on the writer's declaration adding the `wake_at` its own text states → `shipped-owed-evidence` derived · `sweep-fixpoint` (the one brief is adjacent) · CI: the first merge's pytest run was **cancelled by the second push** (`cancel-in-progress: true` on the workflow's concurrency group), so the check-run that counts is on `f38ba5dda` |
-| 17 | charter-reviewer · `L-charter-reviewer-0006` | opus | in flight |
+| 17 | charter-reviewer · `L-charter-reviewer-0006` | opus | 354 s · 133k tok · 37 tool uses · **`complete`, depth full**: dry-run then one real reaper run on merged master; the foreign lock reported (flag + durable log, owner=yitzy mode=664 age=5d holder=none), not reaped (27 h early, R3-correct); the surface rendered the `detail:` line live — the cross-spec seam composes on real data; own five-lock fixture board confirmed the safety property (both held fixtures untouched). 4 findings → 3 adjacent briefs |
+| — | executor (this pane) | — | `charter-review-complete` → **L-charter-0003 `L2-complete`** (L-spec-0005 accepted, L-spec-0006 shipped-owed-evidence, K=1) · `doit reap` removed both worktrees and branches, retained nothing · 07:45:10Z |
 | 12 | grader · `L-grader-0006` (L-spec-0005) | sonnet | **72 s** · 81k tok · 14 tool uses · 9/9 `met`, `matches_intent: yes`, `card_ok: yes`; re-ran every check and read the test source (vs 6.5 min median on Opus in the pilot) |
 | 13 | reviewer (gates-only, round 1) · `L-reviewer-0004` (L-spec-0005) | sonnet | **95 s** · 85k tok · 17 tool uses · drove all 9 paths; 0 blocking, nothing unverifiable; done-condition met (vs 4.2 min median on Opus) |
 | — | executor (this pane) | — | L-spec-0005 → `accepted` (verdict confirmed + clean review); `doit gate` clean; `git merge --no-ff` → `bf0d05556`; `shipped`; pushed — origin printed "Changes must be made through a pull request" but the push landed (branch protection requires PRs with 0 approvals and does not enforce on admins; the line is a bypass notice, not a refusal — R5) |
@@ -1082,3 +1083,44 @@ the driver's `S<n>`.*
   so there is nothing to read.
 - **Fix status (2026-09-15):** contract rule shipped (unreleased, `agents/grader.md`); the
   structural fix is a-8.
+
+### R7. Charter 3 closed: 77 minutes, two specs, seventeen spawns, no operator intervention, on Sonnet authors and Opus judges
+- **Measured (2026-09-15, ledger timestamps):** `cut-written` 06:27:50Z → `l1-complete` 06:56:59Z →
+  `shipped` 07:19:27Z (L-spec-0005) and 07:36:52Z (L-spec-0006) → `charter-review-complete`
+  07:45:04Z → `tree-reaped` 07:45:10Z. **77 min for the whole charter** against ~2 h *per spec* in
+  the pilot (S29). Both units ran as one wave, so the two spec chains overlapped.
+
+| Role | Model | Spawns | Failed | Blended tokens | Spawn minutes | Median |
+|---|---|---|---|---|---|---|
+| spec-writer | Sonnet 5 | 4 | 0 | 655k | 28.9 | 7.2 |
+| builder | Sonnet 5 | 2 | 0 | 331k | 19.3 | 9.6 |
+| plan-auditor | Opus 5 | 3 | 0 | 315k | 14.0 | 5.0 |
+| grader | Sonnet 5 | 3 | 1 (self-void, R6) | 254k | 4.8 | 1.8 |
+| spec-auditor | Opus 5 | 2 | 0 | 250k | 14.9 | 7.5 |
+| reviewer | Sonnet 5 | 2 | 0 | 186k | 5.4 | 2.7 |
+| charter-reviewer | Opus 5 | 1 | 0 | 133k | 5.9 | 5.9 |
+| **total** | | **17** | **1** | **2.12M** | **93** | |
+
+  Tokens are the harness's single blended figure per sub-agent (no input/output/cache split on
+  the seat route — the pane's own tokens are unmeasured); every spawn's `model_requested` equals
+  its `model_used`; the seven `(contract, model)` pairs above are stamped `first_on_model: true`
+  on their first run — the D120 trust runs the map owed.
+- **What the map bought:** graders and reviewers on Sonnet ran in 1–3 min against 4–7 on Opus in
+  the pilot, and every one validated its Output first try; the pane typed nothing (S18 verified).
+  The Opus judges found real defects at every stage (R3, and the two spec-audits: a guard test
+  outside the grant that the change would break; a held foreign lock a naive classifier would
+  reap). Sonnet writers absorbed 8 and 7 fixes in place at ≤ 400 lines. Whether Sonnet judges
+  would have found the same is not measured.
+- **Operator hands:** zero during the run. One ruling was taken by the pane as operator under the
+  2026-09-15 autonomy instruction — the `correction` promoting the writer's stated `wake_at` into
+  the field (see the run log) — and is named here so it can be vetoed.
+- **What is owed:** L-spec-0006 AC7 (charter R4) wakes 2026-09-16T11:04:00Z; nothing runs the
+  reaper on cron (paused), so a human runs `/opt/albert-scott/scripts/liveness_reaper.sh` once on
+  master after that instant, then the lock is gone and `~/.claude/ledger/liveness/liveness-reaper.log`
+  names `yitzy`. Then a re-grade (or `owed-met`, a-6) turns the spec `accepted`.
+- **CI:** both merges green on 6 of 7 checks; `Repo Lint Guards` red is pre-existing and adjacent
+  (brief filed); the first merge's `pytest` run was cancelled by the second push's concurrency
+  group — the run on `f38ba5dda` is the one that counts (result in the retro handoff).
+- **Fix status (2026-09-15):** the map, the seat route, the stamping and the tick refusal are
+  verified on a real charter; open: a-6 (owed-met / closed-shipped), a-14 (Planner packets),
+  b-6 (threshold arithmetic in the charter), the token split + weights (retro handoff step 9).
