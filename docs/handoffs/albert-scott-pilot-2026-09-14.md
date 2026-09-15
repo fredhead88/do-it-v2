@@ -1407,3 +1407,39 @@ cost or hid.
   `land` it means "run everything but the dispatch". The flag's own help text promises the
   first. Change list a-28.
 - **Fix status:** open — a-28.
+
+### R32. A probe's `measured_at` is typed, not captured (L-planner-0005)
+- **Measured:** L-probe-0002's run record stamps `measured_at: 10:31–11:20Z` and `11:20–11:35Z`
+  on a spawn whose ledger window is 10:29:27 → 10:48:26Z (`spawn-done`, 1,076 s). The figures are
+  backed by raw files; the times are invented. L-probe-0004, whose packet asked for `date -u`
+  before and after each run, has true stamps. "Record the date" produced a typed field;
+  "stamp `date -u` into the raw file" produced a measurement.
+- **Systemic:** the record shape asks for a time and nothing captures one. Change list b-22
+  (`probe.md`: the run record's time is copied from a captured `date -u` line, never typed);
+  the consolidating write-up cites the ledger window as the measurement time.
+- **Fix status:** open — b-22; the L-charter-0010 write-up says so in its Caveats.
+
+### R33. `research`'s 5-minute default timed out a seven-question map that then finished anyway (L-planner-0005)
+- **Measured:** `L-research-0001` (haiku, per the map) was dispatched 10:33:26Z with a seven-part
+  question over ~9k lines of profit_v2 code; the wrapper recorded `spawn-failed{why: "timeout
+  after 5 min"}` (`ROLES["research"] = ("file", 5, 1)`, `dispatch.py:39`) while the sub-agent
+  kept writing and landed a 281-line map at 10:39Z. The map is usable and unaudited: the failed
+  spawn appended no `research-done`, so nothing in the ledger points at the file.
+- **Systemic:** the role default fits a one-question dig; a Planner-sized map is 3× that. Either
+  the packet author passes `--timeout` (it exists) or the default moves to 15 min like
+  reuse-scout. Change list a-29.
+- **Fix status:** open — a-29; the Planner used the file as pointers and re-verified every line
+  it relied on.
+
+### R34. The packet's read-only rule did not survive the pooler; the probe fixed it on its own (L-planner-0005)
+- **Measured:** `PGOPTIONS="-c default_transaction_read_only=on"` does not take effect through
+  the Supabase session pooler (`SHOW` printed `off`); L-probe-0001 noticed, switched to `SET
+  default_transaction_read_only = on` as the first `-c` of each `psql` invocation, and pasted
+  every `SHOW` → `on`. A less careful contract would have run read-write on the RW credential
+  with the packet believing otherwise. Also measured: `probe-run` carries
+  `path/externals/n_inputs/spend/complete` and no `summary` (`dispatch.py:391`); the summary
+  lives only on `spawn-done`, so `doit events <charter>` shows where a probe looked, not what
+  it found.
+- **Systemic:** b-20's text must name the session-level `SET`, not the startup parameter
+  (amended in place); `probe-run` gaining `summary` is one line (a-30).
+- **Fix status:** open — b-20 amended, a-30.
