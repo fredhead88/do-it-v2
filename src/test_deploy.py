@@ -51,7 +51,8 @@ with tempfile.TemporaryDirectory() as d:
     check(e["sha"] == SHA and e["target"] == "prod", "deploy-landed carries the sha and the target")
     check(events(d)[0]["type"] == "deploy-started",
           "★ started is written BEFORE the command runs — a deploy that hangs must be visible")
-    check("deployed 8714276abc12 to prod" in p.stdout, "…and it renders as §4.11's line")
+    check("deployed 8714276 to prod" in p.stdout,
+          "…and it renders as §4.11's line, with the 7-char sha (S34)")
 
 # ── the failure the script exists to prevent ──────────────────────────────────
 with tempfile.TemporaryDirectory() as d:
@@ -63,8 +64,12 @@ with tempfile.TemporaryDirectory() as d:
     check(types(d) == ["deploy-started", "deploy-failed", "blocked-external"],
           f"…and it is a failure with an external cause: {types(d)}")
     check("never reported" in events(d)[1]["why"], "the why says what was not established")
-    check(SHA[:12] in p.stderr and "git revert --no-edit -m 1" in p.stderr,
-          "★ rollback first (§5.8): the failure prints the revert line with the sha in it")
+    check(SHA[:7] in p.stderr, "the failure names the sha (7-char, S34) in the advice")
+    check("git revert" not in p.stderr,
+          "★ v: a target failure no longer advises git revert — that line is gone")
+    check("no --rollback given" in p.stderr,
+          "…it names that no rollback was given, since none was passed")
+    check(events(d)[1]["rollback"] == "absent", "…and the event says the same: rollback=absent")
 
 with tempfile.TemporaryDirectory() as d:
     p = run(d, "L-spec-0001", "--sha", SHA, "--target", "prod",
@@ -139,5 +144,127 @@ with tempfile.TemporaryDirectory() as d:
                            env=dict(os.environ, DOIT_ROOT=d)).stdout
     check("unauthorized events recorded and ignored: 1" in board,
           f"★ …the FOLD does: a builder's deploy-landed is recorded and ignored:\n{board[-400:]}")
+
+# ── a-4·i: live() matches sha[:7], not sha[:12] (S34) ──────────────────────────
+with tempfile.TemporaryDirectory() as d:
+    nine = SHA[:9]                            # the real target's check prints exactly this shape
+    p = run(d, "L-spec-0001", "--sha", SHA, "--target", "prod",
+            "--cmd", "echo ok", "--check", f"echo build {nine} is live")
+    check(p.returncode == 0,
+          f"★ i: a check that prints only a 9-char sha (the real target's shape) must land, "
+          f"not false-fail on a 12-char match: {p.stderr}")
+    check(types(d) == ["deploy-started", "deploy-landed", "worked"],
+          "…12 minutes of false deploy-failed is exactly this bug")
+
+# ── a-4·ii: output streams to the log AS PRODUCED, and the event carries it ────
+with tempfile.TemporaryDirectory() as d:
+    root = pathlib.Path(d); (root / "events").mkdir(parents=True)
+    proc = subprocess.Popen([sys.executable, str(HERE / "deploy.py"), "L-spec-0001", "--sha", SHA,
+                             "--target", "prod", "--cmd",
+                             "echo partial-output-marker; sleep 5", "--check", f"echo {SHA}"],
+                            env=dict(os.environ, DOIT_ROOT=d, DOIT_DEPLOY_TIMEOUT="30",
+                                    DOIT_DEPLOY_POLL="0.01"),
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    logdir = root / "logs"
+    seen = False
+    for _ in range(500):                      # wait for the marker to land, not for a clock
+        if logdir.exists():
+            logs = list(logdir.glob("*.log"))
+            if logs and "partial-output-marker" in logs[0].read_text():
+                seen = True
+                break
+        __import__("time").sleep(0.02)
+    check(seen, "★ ii: the log carries output WHILE the command is still running, not only at exit")
+    logfile = list(logdir.glob("*.log"))[0]
+    check(logfile.name.startswith(f"deploy-L-spec-0001-{SHA[:7]}-") and logfile.name.endswith(".log"),
+          f"log filename matches deploy-<spec>-<sha7>-<n>.log: {logfile.name}")
+    proc.kill()
+    proc.wait(timeout=10)
+    check("partial-output-marker" in logfile.read_text(),
+          "…and a KILLED run leaves the log so far, not nothing")
+
+with tempfile.TemporaryDirectory() as d:
+    p = run(d, "L-spec-0001", "--sha", SHA, "--target", "prod",
+            "--cmd", "echo x", "--check", f"echo {SHA}")
+    ev = events(d)
+    check(all("log" in e for e in ev if e["type"] in ("deploy-started", "deploy-landed")),
+          "deploy-started and deploy-landed both carry log=<path>")
+    check(pathlib.Path(ev[0]["log"]).exists(), "…and the path is real, not decoration")
+    check("log_tail" not in ev[1], "log_tail is a failure field — landed never carries one")
+
+# ── a-4·iii: a dropped second launch opens NOTHING, log included ───────────────
+with tempfile.TemporaryDirectory() as d:
+    root = pathlib.Path(d); (root / "events").mkdir(parents=True)
+    slow = subprocess.Popen([sys.executable, str(HERE / "deploy.py"), "L-spec-0001", "--sha", SHA,
+                             "--target", "prod", "--cmd", "sleep 2", "--check", f"echo {SHA}"],
+                            env=dict(os.environ, DOIT_ROOT=d, DOIT_DEPLOY_TIMEOUT="10"),
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    for _ in range(400):
+        if (root / "deploy.lock").exists() and types(d):
+            break
+        __import__("time").sleep(0.01)
+    p = run(d, "L-spec-0002", "--sha", SHA, "--target", "prod", "--cmd", "echo x", "--check", f"echo {SHA}")
+    check(p.returncode == 3, f"a second concurrent deploy is still dropped: {p.returncode}")
+    logs = list((root / "logs").glob("*")) if (root / "logs").exists() else []
+    check(len(logs) == 1,
+          f"★ iii: the dropped request opened no log of its own — only the first's exists: {logs}")
+    slow.wait(timeout=30)
+
+# ── a-4·iv: a gate refusal is exit 2 deploy-refused, --cmd never runs ──────────
+with tempfile.TemporaryDirectory() as d:
+    p = run(d, "L-spec-0001", "--sha", SHA, "--target", "prod",
+            "--gate", "echo gate-checked; exit 9",
+            "--cmd", "echo CMD-RAN-MARKER", "--check", f"echo {SHA}")
+    check(p.returncode == 2, f"★ iv: a gate refusal exits 2, not 1: {p.returncode}")
+    check(types(d) == ["deploy-started", "deploy-refused"],
+          f"…and it is deploy-refused, never deploy-failed/blocked-external: {types(d)}")
+    check("blocked-external" not in types(d),
+          "deploy-refused is NOT blocked-external — nothing external was touched (S8/S17)")
+    logtext = pathlib.Path(events(d)[1]["log"]).read_text()
+    check("gate-checked" in logtext, "the gate ran")
+    check("CMD-RAN-MARKER" not in logtext,
+          "★ iv: --cmd never ran — refused before the target was touched")
+
+with tempfile.TemporaryDirectory() as d:
+    p = run(d, "L-spec-0001", "--sha", SHA, "--target", "prod",
+            "--gate", "exit 0", "--cmd", "exit 5", "--check", f"echo {SHA}")
+    check(p.returncode == 1,
+          "a gate that PASSES still lets a failing --cmd read as deploy-failed (exit 1), the "
+          "target may have changed")
+    check(types(d) == ["deploy-started", "deploy-failed", "blocked-external"], types(d))
+
+# ── a-4·v: --rollback is the target's own command, run on a failed check ───────
+with tempfile.TemporaryDirectory() as d:
+    p = run(d, "L-spec-0001", "--sha", SHA, "--target", "prod",
+            "--cmd", "echo ok", "--check", "echo the service is up",   # never names the sha -> check fails
+            "--rollback", "echo rollback-ran-marker")
+    check(p.returncode == 1, "still a failed deploy")
+    failed = [e for e in events(d) if e["type"] == "deploy-failed"][0]
+    check(failed["rollback"] == "ran",
+          f"★ v: rollback=ran when --cmd succeeded but the check never confirmed: {failed}")
+    check("rollback-ran-marker" in pathlib.Path(failed["log"]).read_text(),
+          "…and its output joins the SAME log")
+    check("rollback ran" in p.stderr, "…and stderr names it, not git revert")
+
+with tempfile.TemporaryDirectory() as d:
+    p = run(d, "L-spec-0001", "--sha", SHA, "--target", "prod",
+            "--cmd", "echo ok", "--check", "echo the service is up",
+            "--rollback", "exit 3")
+    failed = [e for e in events(d) if e["type"] == "deploy-failed"][0]
+    check(failed["rollback"] == "failed", "rollback=failed when the rollback command itself exits non-zero")
+    check("rollback FAILED" in p.stderr, "…and stderr says so, loudly")
+
+with tempfile.TemporaryDirectory() as d:
+    # --cmd itself failing is a different branch — rollback does not run there,
+    # because --cmd's own exit already said what happened (see deploy.py docstring).
+    p = run(d, "L-spec-0001", "--sha", SHA, "--target", "prod",
+            "--cmd", "exit 5", "--check", f"echo {SHA}", "--rollback", "echo should-not-run")
+    failed = [e for e in events(d) if e["type"] == "deploy-failed"][0]
+    check(failed["rollback"] == "absent",
+          "★ v: a failed --cmd does not trigger --rollback — only a failed check does")
+    check("should-not-run" not in pathlib.Path(failed["log"]).read_text(),
+          "…and the rollback command never actually ran")
+
+# ── a-4·vi is fold's, not deploy.py's — see test_fold.py ───────────────────────
 
 print(f"deploy: {N} checks pass")

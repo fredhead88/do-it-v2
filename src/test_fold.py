@@ -506,6 +506,30 @@ _, sp, _, _, by = ledger(**{**crossed(3, 3), "L-builder-99.jsonl": [
     {"ts": stamp(7), "type": "build-started", "subject": "L-spec-9999"}]})
 assert fold.wedged(sp["L-spec-9999"], fold.dwell_days(by)), "7 days is past twice the median"
 
+# ── a-4·vi: a deploy-started with no terminal event renders IN FLIGHT (S34) ────
+S9, sha_full = "L-spec-0900", "abcdef1234567890"
+inflight = ledger(**{"L-executor-01.jsonl": [
+    {"ts": stamp(0), "type": "deploy-started", "subject": S9,
+     "sha": sha_full, "target": "prod", "log": "/tmp/x.log"}]})
+board = fold.render(*inflight)
+assert "deploy in flight · L-spec-0900 · abcdef1 ·" in board, \
+    "★ vi: a killed deploy wrapper is visible on the board, not silently lost"
+
+landed = ledger(**{"L-executor-01.jsonl": [
+    {"ts": stamp(0), "type": "deploy-started", "subject": S9, "sha": sha_full, "target": "prod"},
+    {"ts": stamp(0), "type": "deploy-landed", "subject": S9, "sha": sha_full, "target": "prod"}]})
+assert "deploy in flight" not in fold.render(*landed), "a landed deploy is no longer in flight"
+
+refused = ledger(**{"L-executor-01.jsonl": [
+    {"ts": stamp(0), "type": "deploy-started", "subject": S9, "sha": sha_full, "target": "prod"},
+    {"ts": stamp(0), "type": "deploy-refused", "subject": S9, "sha": sha_full, "target": "prod"}]})
+assert "deploy in flight" not in fold.render(*refused), "a refused deploy is no longer in flight either"
+
+failed = ledger(**{"L-executor-01.jsonl": [
+    {"ts": stamp(0), "type": "deploy-started", "subject": S9, "sha": sha_full, "target": "prod"},
+    {"ts": stamp(0), "type": "deploy-failed", "subject": S9, "sha": sha_full, "target": "prod"}]})
+assert "deploy in flight" not in fold.render(*failed), "a failed deploy is no longer in flight either"
+
 shutil.rmtree(TMP)
 # D117: liveness is a fold query. Fresh tick: fine. Old tick: the alarm. No tick: says so.
 mins = lambda m: (T - timedelta(minutes=m)).isoformat(timespec="seconds")
