@@ -163,6 +163,77 @@ ok(found == [], f"and both filed is none: {found}")
 found, _ = audit.acquisition("## Acquisition decisions\n- none\n", [])
 ok(found == [], f"`none` is a decision, and it needs no ADR: {found}")
 
+# ── 7 · seam direction (R4) ──────────────────────────────────────────────────
+found, und = audit.seam_direction(us)
+ok(und is None and found == [], f"the base fixture's Goals carry no read/write verbs at all: {found}")
+
+# the charter-3 inversion shape: the renderer's Goal reads like a consumer
+# (renders/reads) yet is cut as the Produces; the reaper's Goal reads like a
+# producer (raises/writes/appends) yet is cut as the Consumes — backwards, both.
+INVERTED = """# cut for L-charter-0003
+
+## flag-detail-on-the-health-surface
+Goal: the liveness-alarm line renders the flag body's detail line verbatim when the body has one, so an operator reads who and what on the same line as the flag name; both renderings are covered by a test
+Delivers: R2
+Footprint: a.py
+Consumes:
+Produces: LIVENESS_FLAG_DETAIL_LINE
+Wave: 1
+
+## reaper-three-way-lock-test
+Goal: raises the flag file whose body carries a detail line naming the lock, and appends a durable log line; removes the flag when the lock clears
+Delivers: R1
+Footprint: b.py
+Consumes: LIVENESS_FLAG_DETAIL_LINE
+Produces:
+Wave: 1
+"""
+us3 = audit.units(INVERTED)
+found, und = audit.seam_direction(us3)
+ok(und is None and len(found) == 2, f"both units are flagged, one each: {found}")
+ok(any("flag-detail-on-the-health-surface" in f and "Produces" in f and "consumer" in f for f in found),
+   f"the renderer Produces the seam but its own Goal reads like a consumer: {found}")
+ok(any("reaper-three-way-lock-test" in f and "Consumes" in f and "producer" in f for f in found),
+   f"the reaper Consumes the seam but its own Goal reads like a producer: {found}")
+
+# the correctly-directed cut (reaper produces, renderer consumes) raises nothing
+FIXED = """# cut for L-charter-0003
+
+## flag-detail-on-the-health-surface
+Goal: the liveness-alarm line renders the flag body's detail line verbatim when the body has one, so an operator reads who and what on the same line as the flag name; both renderings are covered by a test
+Delivers: R2
+Footprint: a.py
+Consumes: LIVENESS_FLAG_DETAIL_LINE
+Produces:
+Wave: 1
+
+## reaper-three-way-lock-test
+Goal: raises the flag file whose body carries a detail line naming the lock, and appends a durable log line; removes the flag when the lock clears
+Delivers: R1
+Footprint: b.py
+Consumes:
+Produces: LIVENESS_FLAG_DETAIL_LINE
+Wave: 1
+"""
+us_fixed = audit.units(FIXED)
+found, und = audit.seam_direction(us_fixed)
+ok(found == [], f"correctly directed — reaper produces, renderer consumes — raises nothing: {found}")
+
+# the Plan's Seams section as authority: it names the producer/consumer by
+# position, and a cut line contradicting it is a finding regardless of the
+# verb heuristic — the real L-charter-0003 Plan's own wording, trimmed.
+PLAN_SEAMS = ("## Seams\n`LIVENESS_FLAG_DETAIL_LINE` — produced by the reaper (unit 2) as a body "
+             "line of the flag file,\nconsumed by the renderer (unit 1). Exact grammar, owned by "
+             "this Plan (SD1).\n")
+found, und = audit.seam_direction(us3, plan_text=PLAN_SEAMS)
+ok(any("names unit 2" in f and "producing" in f and "reaper-three-way-lock-test" in f for f in found),
+   f"the Plan says unit 2 produces it; the inverted cut's unit 2 does not: {found}")
+ok(any("names unit 1" in f and "consuming" in f and "flag-detail-on-the-health-surface" in f for f in found),
+   f"the Plan says unit 1 consumes it; the inverted cut's unit 1 does not: {found}")
+found, und = audit.seam_direction(us_fixed, plan_text=PLAN_SEAMS)
+ok(all("names unit" not in f for f in found),
+   f"the Plan-authority check is silent once the cut agrees with it: {found}")
+
 # ── the block: undetermined can never render as none ────────────────────────
 block = audit.prepass("cut", CUT, CHARTER, None, None, [])
 ok(block.startswith("units: 3 · waves: [1, 2]"), f"the counts lead: {block.splitlines()[0]}")
