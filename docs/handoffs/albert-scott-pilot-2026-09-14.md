@@ -881,3 +881,36 @@ the driver's `S<n>`.*
   should refuse (or warn loudly) when `cwd.name` differs from the subject's project;
   (3) the board needs an `IGNORED (other project)` count so a filtered read cannot silently
   hide events on the subject it is displaying.
+
+### T15. An idle pane answers from memory, and its memory is a day old
+- **Mechanism:** asked on 2026-09-15 whether "the charters got done", the Thinker
+  answered "landed, not built" from its last board read (2026-09-14 07:03). The board
+  at that moment said L-charter-0001/0002/0004 `L2-complete`, three specs shipped, the
+  deploy landed (R5 PASS on 21962db5f), prod at 5cd5c47de. The operator caught it
+  ("so the 8 hours of work yesterday didn't build anything?").
+- **Pilot:** re-read the board, corrected the answer.
+- **Systemic:** the Thinker contract says "open with the inventory" for the first
+  message; it should say *every* message after an idle gap re-folds before it answers
+  anything about state. Cheap rule, and it is exactly §9.2's "durable state is truth"
+  applied to the pane's own claims.
+
+---
+
+## Retro pane — 2026-09-15 (a third actor; appended, never interleaved, per T3)
+
+### R1. S32 resolved: the rogue tick was the wrapper's own atexit poke, and the ruling was a per-shell variable
+- **Measured:** the first `tick{spawned: true}` (11:25:58Z) is the same second as
+  `L-spec-auditor-0003`'s `spawn-done`; the second (11:57:34Z) is exactly 30 minutes after the
+  metered Executor's own detached `L-spec-writer-0011` started — that wrapper's timeout, then its
+  atexit poke. No transcript on this box carries `doit tick` as a typed command. The two metered
+  spawns have their own transcripts under `~/.claude/projects/-home-albert--do-it/`
+  (`entrypoint: sdk-cli`, `claude-opus-5`).
+- **Mechanism:** `dispatch.main` registers `poke()` with `atexit`, guarded only by `DOIT_NO_POKE`;
+  one wrapper ran from a shell without `env.sh` sourced. A per-shell variable was standing in for
+  a per-root ruling.
+- **Fix (shipped 2026-09-15):** `$DOIT_ROOT/models.toml` is the root's ruling on backend and
+  model per contract (`src/models.py`); `poke()` and `tick.main` read it and refuse when the
+  Executor's backend is not `claude-p` (refusal recorded as `tick{refused}` — fired on this root
+  at 05:58:31Z); `dispatch` takes its backend from the map and refuses a `--seat`/`DOIT_SEAT`
+  that contradicts it. Every terminal event now stamps `model_requested` beside `model_used`
+  (S5). Full list: `docs/handoffs/pilot-retro-change-list.md`.
