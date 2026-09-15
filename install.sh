@@ -20,6 +20,14 @@ echo "git:     $have"
 
 mkdir -p "$ROOT/events" "$ROOT/content"
 echo "ledger:  $ROOT"
+# The model map is the root's ruling on backend and model per contract (models.py).
+# Installed from the template only when absent: an existing map is a decision.
+if [ ! -f "$ROOT/models.toml" ]; then
+  cp "$HERE/models.example.toml" "$ROOT/models.toml"
+  echo "models:  $ROOT/models.toml (from models.example.toml — edit it; it is the ruling)"
+else
+  echo "models:  $ROOT/models.toml (kept)"
+fi
 
 # The checks run BEFORE anything is put on PATH. An install that ships a red
 # suite is how a guard becomes a guard that is not running.

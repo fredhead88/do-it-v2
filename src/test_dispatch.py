@@ -326,4 +326,89 @@ v = lambda f: subprocess.run([sys.executable, str(pathlib.Path(__file__).parent 
                              capture_output=True, text=True)
 assert v(good).returncode == 0 and "VALID" in v(good).stdout, v(good)
 assert v(bad).returncode == 1 and "INVALID at answered" in v(bad).stderr, v(bad)
+
+# ── the model map (models.toml): decided once per root; requested vs used stamped on
+# every terminal event; the codex backend; a flag that disagrees is refused unspent.
+import models
+MT = TMP / "models.toml"
+MT.write_text('[defaults]\nbackend = "seat"\n'
+              '[contracts.research]\nbackend = "codex"\nmodel = "gpt-6-astra"\n'
+              '[contracts.grader]\nbackend = "claude-p"\nmodel = "claude-sonnet-5"\n')
+rp6 = TMP / "content" / "L-research-0006.md"
+
+
+def fake_codex(cmd, packet, cwd, timeout):
+    fake_codex.cmd = cmd
+    assert packet.startswith("a packet") and "spawn_id: L-research-" in packet
+    pathlib.Path(cmd[cmd.index("-o") + 1]).write_text(json.dumps({**research, "path": "content/L-research-0006.md"}))
+    rp6.write_text("dug")
+    return argparse.Namespace(returncode=0, stderr="", stdout="\n".join(json.dumps(e) for e in [
+        {"type": "thread.started", "thread_id": "codex-1"}, {"type": "turn.started"},
+        {"type": "turn.completed", "usage": {"input_tokens": 100, "cached_input_tokens": 10, "output_tokens": 7}},
+        {"type": "turn.completed", "usage": {"input_tokens": 50, "cached_input_tokens": 0, "output_tokens": 3}}]))
+
+
+dispatch.run_codex_exec, dispatch.run_claude = fake_codex, never
+
+
+def run(role, path, seat=False):
+    a = argparse.Namespace(role=role, subject="L-spec-0001", packet=str(PK), path=str(path), cwd=str(REPO),
+                           charter=None, project="t", mcp_config=None, timeout=1, max_usd=None, seat=seat)
+    try:
+        dispatch.main(a)
+        code = 0
+    except SystemExit as e:
+        code = e.code
+    global N
+    N += 1
+    return code, [json.loads(l) for l in max((TMP / "events").glob(f"L-{role}-*.jsonl")).read_text().splitlines()]
+
+
+code, ev = run("research", rp6)
+assert code == 0 and ev[-1]["type"] == "spawn-done", [e.get("why") for e in ev]
+d = ev[-1]
+assert d["backend"] == d["spawn_path"] == "codex" and d["model_requested"] == "gpt-6-astra" and d["model_map"] == "models.toml", d
+assert d["model_used"] == "gpt-6-astra" and d["model_observed"] is False and d["model_match"] is True, "codex does not echo its model: used = the flag, and the event says unobserved"
+assert d["session"] == "codex-1" and d["turns"] == 2 and d["input_tokens"] == 150 and d["cache_read"] == 10 and d["cost_usd"] is None, d
+assert d["first_on_model"] is True, "the first spawn-done of a (contract, model) pair is the D120 trust run"
+c = fake_codex.cmd
+assert c[:2] == ["codex", "exec"] and c[c.index("-m") + 1] == "gpt-6-astra" and c[c.index("--sandbox") + 1] == "workspace-write" \
+    and "--output-schema" in c and c[-1] == "-", c
+assert (TMP / "seat" / f"{d['spawn']}.codex.jsonl").is_file() and (TMP / "seat" / f"{d['spawn']}.cmd.json").is_file()
+code, ev = run("research", rp6)
+assert code == 0 and ev[-1]["first_on_model"] is False, "the second run on the same (contract, model) is not the trust run"
+code, ev = run("research", rp6, seat=True)
+assert code == 1 and [e["type"] for e in ev] == ["spawn-failed"] and "contradicts" in ev[-1]["why"], \
+    "a flag that disagrees with the root's map is refused before a start event or a spend"
+code, types, evs, cmd = spawn("grader", out=grade([met]))
+assert code == 0 and cmd[cmd.index("--model") + 1] == "claude-sonnet-5", "the map's model rides the -p line"
+assert evs[-1]["backend"] == "claude-p" and evs[-1]["model_requested"] == "claude-sonnet-5" and evs[-1]["model_used"] == "m" \
+    and evs[-1]["model_match"] is False and evs[-1]["model_observed"] is True, evs[-1]
+# codex that returned nothing usable is a failed spawn, not a null read as clean
+def codex_dead(cmd, packet, cwd, timeout):
+    return argparse.Namespace(returncode=1, stderr="quota", stdout=json.dumps({"type": "error", "message": "weekly limit"}))
+dispatch.run_codex_exec = codex_dead
+code, ev = run("research", rp6)
+assert code == 1 and ev[-1]["type"] == "spawn-failed" and "weekly limit" in ev[-1]["why"], ev[-1]
+# the loader refuses a map that lies
+for bad, word in [('[contracts.grader]\nbackend = "seat"\nmodel = "claude-fable-5-1"\n', "pane-only"),
+                  ('[contracts.thinker]\nbackend = "seat"\nmodel = "claude-sonnet-5"\n', "pane role"),
+                  ('[contracts.executor]\nbackend = "codex"\nmodel = "gpt-6-astra"\n', "executor"),
+                  ('[contracts.builder]\nbackend = "cloud"\nmodel = "x"\n', "not one of")]:
+    MT.write_text(bad)
+    try:
+        models.load()
+        raise AssertionError(f"accepted: {bad}")
+    except ValueError as e:
+        assert word in str(e), (word, str(e))
+# the poke obeys the map: an Executor that is a pane is never poked into claude -p (S32)
+MT.write_text('[contracts.executor]\nbackend = "pane"\nmodel = "claude-sonnet-5"\n')
+del os.environ["DOIT_NO_POKE"]
+def boom(*a, **k):
+    raise AssertionError("poke spawned tick.py on a root whose Executor is a pane")
+real_popen, dispatch.subprocess.Popen = dispatch.subprocess.Popen, boom
+dispatch.poke()
+dispatch.subprocess.Popen = real_popen
+os.environ["DOIT_NO_POKE"] = "1"
+MT.unlink()
 print(f"dispatch: {N} spawns mocked, every check fired")

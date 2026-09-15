@@ -1,0 +1,87 @@
+# models.toml — the model map: contract → backend → model, decided ONCE per ledger root.
+#
+# Copy to $DOIT_ROOT/models.toml (install.sh does, if none is there). Read by
+# `doit dispatch`, `doit tick`, and the wrapper's end-of-spawn poke. Environment
+# variables (DOIT_SEAT, DOIT_NO_POKE) may only AGREE with this file — a per-shell
+# variable stood in for this ruling once and the tick ran `claude -p` twice on a
+# root that bans it (pilot S32, $2.09 metered, three 30-minute unserved spawns).
+#
+# backends
+#   pane      a standing interactive session the operator opens; never dispatched
+#   seat      an interactive session's Agent-tool sub-agent (seat-billed; the
+#             wrapper writes the packet and waits — `doit dispatch --seat`)
+#   claude-p  `claude -p --agent <role>` (metered on some plans — banned on the
+#             Albert Scott root, spec 572)
+#   codex     `codex exec` on the ChatGPT plan, OPENAI_API_KEY stripped
+#
+# rules the loader enforces
+#   * claude-fable-* is pane-only: the Agent tool substitutes Sonnet for it
+#     silently, and a map that names Fable on any other backend is a lie.
+#   * thinker and planner are pane-only; executor is pane or claude-p (the tick).
+#   * every terminal event stamps model_requested (this file) beside model_used
+#     (what the backend reported), and `first_on_model` marks the D120 trust run
+#     of a (contract, model) pair.
+#
+# the argued map (2026-09-15 retro; see docs/handoffs/pilot-retro-change-list.md)
+#   * a judge never shares its author's vendor: spec-writer/builder on Codex ⇒
+#     spec-auditor/grader on Claude. Blindness by construction, one level up.
+#   * Opus is nobody's default (operator ruling); it is the named fallback for a
+#     judging contract whose Sonnet run measurably drops findings.
+#   * reviewer/charter-reviewer on Codex are provisional until the 2026-09-15
+#     client walkthrough report says Codex + repo-venv Playwright drives the
+#     deployed thing; fallback is seat + claude-sonnet-5.
+
+[defaults]
+backend = "seat"
+
+[contracts.thinker]
+backend = "pane"
+model = "claude-fable-5-1"
+
+[contracts.planner]
+backend = "pane"
+model = "claude-fable-5-1"
+
+[contracts.executor]
+backend = "pane"            # under a seat-only root the driver pane IS the Executor (S2)
+model = "claude-sonnet-5"   # "dumb and fast" by contract; whoever drives the pane
+
+[contracts.grader]
+backend = "seat"
+model = "claude-sonnet-5"   # fallback: claude-opus-5
+
+[contracts.spec-auditor]
+backend = "seat"
+model = "claude-sonnet-5"   # fallback: claude-opus-5
+
+[contracts.plan-auditor]
+backend = "seat"
+model = "claude-sonnet-5"   # fallback: claude-opus-5
+
+[contracts.spec-writer]
+backend = "codex"
+model = "gpt-6-astra"
+
+[contracts.builder]
+backend = "codex"
+model = "gpt-6-astra"
+
+[contracts.probe]
+backend = "codex"
+model = "gpt-6-astra"
+
+[contracts.reviewer]
+backend = "codex"           # provisional — see header
+model = "gpt-6-astra"
+
+[contracts.charter-reviewer]
+backend = "codex"           # provisional — see header
+model = "gpt-6-astra"
+
+[contracts.research]
+backend = "seat"
+model = "claude-haiku-4-5-20251001"
+
+[contracts.reuse-scout]
+backend = "seat"
+model = "claude-sonnet-5"

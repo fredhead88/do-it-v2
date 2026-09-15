@@ -11,7 +11,7 @@ whose terminal events the next tick sees.
 """
 import fcntl, json, os, pathlib, sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import dispatch, fold, tree_cleanup  # noqa: E402
+import dispatch, fold, models, tree_cleanup  # noqa: E402
 
 # Waiting for the Executor's next durable action. `building` is in flight, not waiting.
 ACTIONABLE = {"written", "graded", "reviewing", "shipped"}
@@ -83,6 +83,15 @@ def main():
     except BlockingIOError:
         print("tick: one is running; this one is dropped")
         return 0
+    # The root's ruling first (pilot S32): a tick spawns `claude -p`, and a root whose
+    # Executor is a pane — or whose map says anything but claude-p — is never ticked
+    # into the metered pool. Refused loudly and recorded, so HEALTH can see it.
+    mp = models.load()
+    if mp is not None and models.backend_of("executor", mp) != "claude-p":
+        why = f"executor backend is {models.backend_of('executor', mp)!r} under {models.PATH}; a tick can only spawn claude-p"
+        dispatch.emit(TICK, {}, "tick", lane=None, spawned=False, refused=why)
+        print(f"tick: refused — {why}", file=sys.stderr)
+        return 2
     ev = fold.read_events()
     specs, charters, ignored, by_subject = fold.fold(ev)
     board = fold.render(ev, specs, charters, ignored, by_subject)

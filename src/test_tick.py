@@ -103,8 +103,17 @@ assert "L-charter-0003 · retracted" not in tick.lane(specs, charters, reaped=re
     "once reaped it leaves the lane for good, or every tick pays to reap it again"
 ch.unlink()
 
+# The root's map rules the tick out (pilot S32): an Executor that is a pane — or anything
+# but claude-p — is never ticked into the metered pool. Refused, recorded, exit 2.
+import models
+(TMP / "models.toml").write_text('[contracts.executor]\nbackend = "pane"\nmodel = "claude-sonnet-5"\n')
+assert tick.main() == 2 and ticks()[-1]["spawned"] is False and "claude-p" in ticks()[-1]["refused"], ticks()[-1]
+(TMP / "models.toml").write_text('[contracts.executor]\nbackend = "claude-p"\nmodel = "claude-sonnet-5"\n')
+assert tick.main() == 0 and ticks()[-1]["spawned"] is True, "a map that says claude-p changes nothing"
+(TMP / "models.toml").unlink()
+
 held = open(TMP / "tick.lock", "w")
 fcntl.flock(held, fcntl.LOCK_EX)
 before = len(ticks())
 assert tick.main() == 0 and len(ticks()) == before, "flock: a second tick is dropped, not queued"
-print("tick: 16 checks pass")
+print("tick: 18 checks pass")

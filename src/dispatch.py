@@ -4,6 +4,12 @@
   dispatch.py <role> <subject> [--packet FILE|-] [--path P] [--cwd DIR] [--charter ID]
               [--project NAME] [--mcp-config FILE] [--timeout MIN] [--max-usd N]
 
+The BACKEND — claude-p, seat, or codex — and the MODEL are the ledger root's ruling,
+`$DOIT_ROOT/models.toml` (models.py). `--seat` / DOIT_SEAT may only agree with it.
+Every terminal event stamps `backend`, `model_requested` (the map) beside
+`model_used` (what came back), `model_match`, and `first_on_model` — the D120
+trust run of a (contract, model) pair is then a ledger fact, not a memory.
+
 Every check here converts a silent failure into a loud one, and each was observed
 before it was written (D116, D120): a tools: line without StructuredOutput comes
 back is_error:false with structured_output:null; a denied Write came back as
@@ -17,6 +23,8 @@ from datetime import datetime, timezone
 
 HERE = pathlib.Path(__file__).resolve().parent
 AGENTS = HERE.parent / "agents"
+sys.path.insert(0, str(HERE))
+import models  # noqa: E402
 ROOT = pathlib.Path(os.environ.get("DOIT_ROOT", pathlib.Path.home() / ".do-it"))
 EVENTS, CONTENT = ROOT / "events", ROOT / "content"
 
@@ -119,6 +127,68 @@ def run_claude(cmd, packet, cwd, timeout):
                           env=env, timeout=timeout)
 
 
+# Roles whose contract writes a file: the Codex sandbox lets them write in the
+# spawn's cwd and under content/; every judging role runs read-only. The
+# builder's BUILDER_DENY patterns have no Codex spelling — the sandbox, the
+# porcelain check and the merge gate are the enforcement on that backend.
+CODEX_WRITES = ("builder", "spec-writer", "research", "reuse-scout", "probe", "reviewer", "charter-reviewer")
+
+
+def run_codex_exec(cmd, packet, cwd, timeout):
+    """The one subprocess the codex backend runs. Neither vendor's metered key is
+    in the environment: the spawn draws the ChatGPT plan or it fails loudly."""
+    env = {k: v for k, v in os.environ.items() if k not in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY")}
+    return subprocess.run(cmd, input=packet, capture_output=True, text=True, cwd=cwd, env=env, timeout=timeout)
+
+
+def run_codex(spawn, role, model, schema_path, packet, cwd, timeout):
+    """The codex backend (pilot S1). `codex exec` reads the packet on stdin, enforces
+    the contract's schema itself (`--output-schema`), writes the final object to
+    `-o` (no `doit validate` loop, no transcription — pilot S18/S28), and streams
+    events as JSONL, from which turns, tokens and the thread id are read. Codex
+    does not echo the model it ran, so `model_used` is the flag it was given and
+    the event says `model_observed: false`. Cost is unpriced on the plan (null)."""
+    import time
+    SEAT.mkdir(parents=True, exist_ok=True)
+    (SEAT / f"{spawn}.packet.md").write_text(packet)
+    out, log = SEAT / f"{spawn}.output.json", SEAT / f"{spawn}.codex.jsonl"
+    sandbox = "workspace-write" if role in CODEX_WRITES else "read-only"
+    cmd = ["codex", "exec", "-C", str(cwd), "-m", model, "--sandbox", sandbox, "--skip-git-repo-check",
+           "--json", "--output-schema", str(schema_path), "-o", str(out), "--add-dir", str(CONTENT), "-"]
+    (SEAT / f"{spawn}.cmd.json").write_text(json.dumps({"cmd": cmd, "cwd": str(cwd)}, indent=1))
+    t0 = time.time()
+    r = run_codex_exec(cmd, packet, str(cwd), timeout)
+    log.write_text(r.stdout or "")
+    thread, turns, usage, errors = None, 0, {}, []
+    for line in (r.stdout or "").splitlines():
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        t = e.get("type")
+        if t == "thread.started":
+            thread = e.get("thread_id")
+        elif t == "turn.completed":
+            turns += 1
+            for k, v in (e.get("usage") or {}).items():
+                usage[k] = usage.get(k, 0) + (v or 0)
+        elif t in ("error", "turn.failed"):
+            errors.append(str(e.get("message") or e)[:200])
+    try:
+        structured = json.loads(out.read_text()) if out.is_file() else None
+    except ValueError:
+        structured = None
+    bad = r.returncode != 0 or bool(errors)
+    env = {"is_error": bad, "terminal_reason": "error" if bad else "completed", "structured_output": structured,
+           "num_turns": turns or None, "duration_ms": int((time.time() - t0) * 1000),
+           "usage": {"input_tokens": usage.get("input_tokens"), "output_tokens": usage.get("output_tokens"),
+                     "cache_read_input_tokens": usage.get("cached_input_tokens"),
+                     "cache_creation_input_tokens": usage.get("cache_write_input_tokens")},
+           "total_cost_usd": None, "modelUsage": {model: {}}, "model_observed": False, "session_id": thread,
+           "permission_denials": [], "result": "; ".join(errors) or (r.stderr or "")[-300:]}
+    return SeatResult(json.dumps(env), r.returncode, r.stderr)
+
+
 SEAT = ROOT / "seat"
 
 
@@ -172,10 +242,18 @@ def run_seat(spawn, cmd, packet, cwd, timeout):
 
 
 def poke():
-    """D117: every wrapper ends by running one tick, so latency is a poke, not an interval."""
-    if not os.environ.get("DOIT_NO_POKE"):
-        subprocess.Popen([sys.executable, str(HERE / "tick.py")], start_new_session=True,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    """D117: every wrapper ends by running one tick, so latency is a poke, not an interval.
+    The ROOT's map rules first: a tick can only spawn a claude-p Executor, and a root
+    whose Executor is a pane must never be poked into `claude -p` (pilot S32 — one
+    wrapper without DOIT_NO_POKE in its shell cost $2.09 metered and three unserved
+    30-minute spawns). The variable stays as the second guard, never the only one."""
+    if os.environ.get("DOIT_NO_POKE"):
+        return
+    mp = models.load()
+    if mp is not None and models.backend_of("executor", mp) != "claude-p":
+        return
+    subprocess.Popen([sys.executable, str(HERE / "tick.py")], start_new_session=True,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def file_adr(kind, title, body, base):
@@ -324,6 +402,10 @@ def main(a):
         base["charter"] = a.charter
     meta = dict(model=fm.get("model"), packet_sha256=sha(packet), contract_sha256=sha(
         (AGENTS / f"{a.role}.md").read_bytes() + schema_path.read_bytes()), cli=CLI)
+    mm = models.resolve(a.role, fm.get("model"))
+    flag_seat = bool(getattr(a, "seat", False) or os.environ.get("DOIT_SEAT"))
+    backend = mm["backend"] or ("seat" if flag_seat else "claude-p")
+    meta.update(backend=backend, spawn_path=backend, model_requested=mm["model"], model_map=mm["source"])
 
     def fail(why):
         emit(ledger, base, "spawn-failed", why=why, **meta)
@@ -342,6 +424,13 @@ def main(a):
     if prior:
         fail(f"identical packet and contract already failed as {prior.get('spawn')} "
              f"({str(prior.get('why'))[:60]}); not retried (D120) — not spent")
+    # The map is decided once per root. A flag or variable that disagrees with it is
+    # the per-shell ruling S32 measured the cost of; it is refused, not honoured.
+    if mm["backend"] == "pane":
+        fail(f"{a.role} is a pane role under {models.PATH} — it is opened, never dispatched — not spent")
+    if mm["backend"] and flag_seat and mm["backend"] != "seat":
+        fail(f"--seat/DOIT_SEAT contradicts {models.PATH} (backend={mm['backend']} for {a.role}); "
+             f"the map is decided once per root — edit the file, not the flag — not spent")
     # §3.6: most of both fable audits is a script, and the script runs first. A
     # plan-auditor packet with no pre-pass block asks the model to re-derive six
     # mechanical checks — and "the script did not run" then reads exactly like
@@ -364,7 +453,8 @@ def main(a):
     tools = [t.strip() for t in fm["tools"].split(",") if t.strip() != "StructuredOutput"]
     mcp = json.load(open(a.mcp_config)) if a.mcp_config else {}
     tools += [f"mcp__{s}" for s in mcp.get("mcpServers", {})]
-    cmd = ["claude", "-p", "--agent", a.role, "--strict-mcp-config", "--permission-mode", "dontAsk",
+    cmd = ["claude", "-p", "--agent", a.role, "--model", mm["model"] or fm.get("model", ""),
+           "--strict-mcp-config", "--permission-mode", "dontAsk",
            "--disable-slash-commands", "--output-format", "json", "--json-schema", schema_path.read_text(),
            "--max-budget-usd", str(a.max_usd or usd), "--allowedTools", ",".join(tools),
            "--add-dir", str(CONTENT)]
@@ -372,11 +462,14 @@ def main(a):
         cmd += ["--disallowedTools", ",".join(BUILDER_DENY)]
     if a.mcp_config:
         cmd += ["--mcp-config", a.mcp_config]
-    seat = bool(getattr(a, "seat", False) or os.environ.get("DOIT_SEAT"))
-    meta["spawn_path"] = "seat" if seat else "claude-p"
+    seat = backend == "seat"
     try:
-        r = (run_seat(spawn, cmd, packet, cwd, (a.timeout or tmin) * 60) if seat
-             else run_claude(cmd, packet, cwd, (a.timeout or tmin) * 60))
+        if backend == "codex":
+            r = run_codex(spawn, a.role, mm["model"], schema_path, packet, cwd, (a.timeout or tmin) * 60)
+        elif seat:
+            r = run_seat(spawn, cmd, packet, cwd, (a.timeout or tmin) * 60)
+        else:
+            r = run_claude(cmd, packet, cwd, (a.timeout or tmin) * 60)
     except subprocess.TimeoutExpired:
         fail(f"timeout after {a.timeout or tmin} min")
     try:
@@ -384,7 +477,13 @@ def main(a):
     except ValueError:
         fail(f"exit {r.returncode}, no JSON on stdout: {r.stderr[-300:]!r}")
     u = res.get("usage") or {}
-    meta.update(model=next(iter(res.get("modelUsage") or {}), fm.get("model")), cost_usd=res.get("total_cost_usd"),
+    # What came back is the record; the contract's line is never written in its place
+    # (pilot S5: the ledger said Fable for a day of Opus). Unobserved is null.
+    used = next(iter(res.get("modelUsage") or {}), None)
+    meta.update(model_used=used, model_observed=bool(used) and res.get("model_observed", True),
+                model_match=(used == mm["model"]) if used and mm["model"] else None,
+                first_on_model=models.first_on_model(fold.read_events(), meta["contract_sha256"], used) if used else None)
+    meta.update(model=used, cost_usd=res.get("total_cost_usd"),
                 input_tokens=u.get("input_tokens"), output_tokens=u.get("output_tokens"),
                 cache_read=u.get("cache_read_input_tokens"), cache_creation=u.get("cache_creation_input_tokens"),
                 turns=res.get("num_turns"), duration_ms=res.get("duration_ms"), session=res.get("session_id"),

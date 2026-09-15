@@ -45,6 +45,7 @@ doit — a ledger that derives state, and the guards that read it
 
 Environment
   DOIT_ROOT         where the ledger lives            (default ~/.do-it)
+  $DOIT_ROOT/models.toml   contract -> backend -> model, decided once per root (template: models.example.toml)
   DOIT_PROJECT      scope the board to one project
   DOIT_LEDGER_FILE  which actor file you write as     (the filename IS the actor)
   DOIT_K            owed ACs a charter may close over (default 0 — deny)
