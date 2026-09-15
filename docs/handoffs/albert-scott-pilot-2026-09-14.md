@@ -1396,3 +1396,14 @@ cost or hid.
   Change list b-21.
 - **Fix status:** open — b-21. L-charter-0013 … 0015 cite the probe run-records, not the prior
   specs, for every figure.
+
+### R31. `doit think --land --print-only` lands (L-thinker-0004)
+- **Measured:** two dry runs (five charters at 10:57:02Z, one at 10:58:57Z) each appended
+  `charter-filed` before the real landing at 10:59:06Z: `think.land()` appends in its first loop
+  and checks `print_only` only around the dispatch (`src/think.py:129-132, 148`). Six duplicate
+  `charter-filed` events on L-thinker-0004.jsonl (lines 2-6, 8), voided by six operator
+  `correction{set: type=voided}` events from the pane under the autonomy instruction.
+- **Systemic:** `--print-only` on `open_session` means "build the command, run nothing"; on
+  `land` it means "run everything but the dispatch". The flag's own help text promises the
+  first. Change list a-28.
+- **Fix status:** open — a-28.

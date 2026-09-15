@@ -48,6 +48,7 @@ design-doc or contract change; (c) = drop, with why.
 | 25 | **`doit packet probe`.** The eighth role: charter verbatim, externals, N, credential names, the run directory, the record shape, the read-only rules — and the same `strip()` (no cut, no Plan, no architecture) every other packet gets. | R25 | four hand-built packets, 347 lines, unchecked by `strip()` | `src/packet.py` |
 | 26 | **A detached dispatch logs per spawn.** `--detach` names its log by role + spawn id (allocate before the fork, or rename after), never by the second. | R26 | four wrappers interleaved in one file | `src/dispatch.py` |
 | 27 | **Probe packets state checkout-vs-deployed drift per path.** `doit packet probe` runs `git diff --stat <deployed> <checkout> -- <paths under test>` in the script pre-pass and prints the result per external; an empty diff is ground truth the probe cites instead of declaring a gap. | R29 | one charter-gap declared and closed by hand for a fact a script has | `src/packet.py` |
+| 28 | **`--print-only` never appends.** `think.land(print_only=True)` runs `check()` on every file and prints the coverage diff and the audit command, and appends nothing; a test asserts the ledger is byte-identical after a dry run. | R31 | six duplicate `charter-filed` events, six corrections | `src/think.py`, `src/test_think.py` |
 
 ## (b) Design-doc and contract changes, ranked
 
