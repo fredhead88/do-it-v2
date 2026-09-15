@@ -93,6 +93,8 @@ six approved triage items and the push-deploy ruling. Charter-set audit L-plan-a
 findings, no bad cut) folded in one revise round. Triage write-up:
 `content/brief-triage-L-thinker-0004.md`.
 
+**Merge, 11:56Z (operator ruling: fewer, fuller charters):** 0011+0012 → **L-charter-0017**, 0013+0014 → **L-charter-0018**, 0007+0008 → **L-charter-0019**; the six originals are `retracted` (ref → successor), every requirement and figure carried over. 0005 (L1-complete, L-spec-0007…0010) and 0006 untouched. Open now: 0006, 0009, 0015, 0016, 0017, 0018, 0019 (+0005 in flight, 0010 closing). Cut order: **0017 first** (push-deploy still syncs until it deploys) → 0018 → 0015 → 0006/0019/0009 → 0016 last. Charter-set audit L-plan-auditor-0012 dispatched at 11:56Z — the Planner serves it; fold its findings in one round.
+
 **Owed / open after this session:**
 1. **Operator ruling, no default** (0011 R3): apply the prohibited `request_health_buckets` head,
    or uninstall the hourly cron until it is applied. R3's unit is not cut until it is a `decision`.

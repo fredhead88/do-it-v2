@@ -1501,3 +1501,64 @@ cost or hid.
 - **Fix status:** recorded; nothing new.
 
 **Handover (this pane stops here — one charter per context is already exceeded by one):** L-charter-0010 `L1-complete` (Executor's close row: sweep-fixpoint, charter-review against the write-up `content/evidence-L-charter-0010.md`, no reap). L-charter-0005 `L1-complete`: L-spec-0007/0008/0009 (wave 1, parallel, disjoint) and L-spec-0010 (wave 2, after the three merge, rebase; last merge carries the deploy + R7) are `written` and the Executor's. Open sweep questions (all owed, defaults in `plan-L-charter-0005.md`): Q1 canonical lens (both stay), Q2 scoped ACoS denominator, Q3 the September estimate card changes value, Q4 R7 runs as the verifier account, Q5 no third cut-audit / no second plan-audit. For veto: four malformed `decision`s at `L-planner-0005.jsonl:4-7`; the four dead-item decisions on L-goal-0001 appended by this pane. Next charter for a fresh Planner context: L-charter-0006 in the money order, or L-charter-0012 first among the backend set per L-thinker-0004's set-order note.
+
+## Executor pane, `L-executor-0006` — 2026-09-15, continued (picked up L-charter-0005's four `written` specs)
+
+### R41. All four of the charter's spec-writers named an interpreter by bare word; `spec-writer.md` never states the rule the packet builder enforces
+- **Measured:** `doit packet spec-auditor` refused on all four of L-charter-0005's specs
+  (L-spec-0007/0008/0009/0010) the first time each was tried: three named `ruff` or `npm` by bare
+  word, one (L-spec-0009) also used backslash line-continuation, which the newline lint reads as
+  three statements not ending in `&&` (the line ends in a literal `\`, not the `&&` token). Four
+  for four, on four different Sonnet spec-writer spawns that otherwise validated clean and passed
+  spec-audit-worthy review. `grep -rn "ruff\|npm\|absolute\|bare word\|interpreter\|&&"
+  agents/spec-writer.md` returns nothing — the rule `src/packet.py`'s `verify_script()` enforces
+  (a-5, shipped) is nowhere in the contract that writes the block it enforces against.
+- **Systemic:** a-5 closed the builder-side half (the packet refuses a bad block) but never closed
+  the writer-side half (the writer has no way to know the rule exists, let alone self-check
+  against it before submitting). Every one of these was a mechanical, no-judgment fix (substitute
+  the absolute path already used elsewhere in the repo, e.g. `/opt/albert-scott/.venv/bin/ruff`,
+  `/usr/bin/npm`; move `&&` to line-end instead of `\`-continuation) — I made them directly as
+  four Executor `decision`s under the D116 one-literal carve-out (b-3) rather than re-spawning
+  four spec-writers for a formatting fix each would have no way to know to avoid next time either.
+- **Fix status:** open — new change list item (b) `spec-writer.md` §9 states the exact rule
+  `verify_script()` checks (absolute-path interpreter list, one `&&`-gated chain, no bare `;`/`||`)
+  so a writer can self-check before submitting instead of round-tripping through a refused packet.
+
+### R42. `doit dispatch --detach` on the seat backend is the Executor's own dispatch path too, undocumented in `executor.md`'s "Dispatching" section as written
+- **Measured:** dispatching my own `spec-auditor` spawns (not the Planner's) the first time, I
+  read `executor.md`'s "Dispatching — the exact line" section literally: "never via an Agent tool"
+  for `doit dispatch --detach`. Running it confirmed what R2/R15 already established from the
+  other side: on this root's `seat` backend, `doit dispatch --detach <role> <subject> --packet
+  <file> --cwd <dir> --charter <charter> --project <project>` forks a background python process
+  that writes `$R/seat/<spawn>.packet.md` + `.cmd.json`, prints the detached pid and returns
+  immediately, and then polls for `<spawn>.result.json` OR (`<spawn>.meta.json` AND
+  `.output.json`) — exactly what serving-then-`stamp.sh` produces (`src/dispatch.py:205
+  run_seat`). So `doit dispatch --detach` is not itself "an Agent tool call" — it is the correct
+  and only way to allocate a spawn id and a ledger `spawn-started` event on this backend, whether
+  the caller is the Planner or the Executor; the *serving* step after it (Agent tool, general-
+  purpose + contract file, per R2) is the same for both. I had no doc telling me this before
+  trying it; `doit packet spec-auditor <spec> --charter <file>` alone does not create a spawn id
+  or a seat packet — it only proves the packet would build.
+- **Systemic:** `executor.md`'s "Dispatching" section reads as written for a `claude-p` root and
+  needed inference for a `seat` root Executor-as-pane (D121). The section should say, once: on
+  `seat`, `doit dispatch --detach` writes the seat files and forks a waiter; you (the pane) then
+  serve exactly as you would a Planner's dispatch, and the waiter's own poll — not you — writes
+  the terminal `spawn-done`/`spawn-failed` event once `stamp.sh` lands the meta file.
+- **Fix status:** open — new change list item (b) `executor.md`'s "Dispatching" section states the
+  seat-backend shape explicitly instead of leaving it to be inferred from R2/R15/`dispatch.py`.
+
+### R43. Twelve open charters into one serial Planner (L-thinker-0004)
+- **Measured:** by 11:00Z Goal A had 12 open charters (0005–0016), each at the design's grain
+  (one feature, 5–11 requirements, 2–5 specs). The Planner pane, hand-serving every seat spawn,
+  had cut one (0010, zero units) and researched one (0005) — the operator read it as "10 behind".
+  Per charter the fixed cost before code is ~5 served spawns (cut audit ×1–3, plan audit, spec
+  audits, charter review) plus a deploy. 0005 alone took three cuts (two bad-cut) to L1-complete.
+  Operator ruling: merge where footprint and done-condition are shared. Merged 0011+0012 → 0017,
+  0013+0014 → 0018, 0007+0008 → 0019 (six `charter-retracted` with `ref` to the successor); 0005
+  was already L1-complete with four specs, so 0005+0006 was left. 12 → 9 open, 7 waiting.
+- **Systemic:** two things, neither about charter size. (1) The Thinker contract has no rule on how
+  many charters a landing may put in front of one Planner, or which is first — a set of twelve is
+  a queue nobody ordered. (2) The Planner works one charter at a time by habit, not by contract;
+  nothing forbids cutting three in parallel, and the seat backend's hand-serving is the real
+  ceiling (a-20 makes it observable, b-23 gives it an owner). Change list b-24.
+- **Fix status:** open — b-24; the merge itself is done on the ledger.
