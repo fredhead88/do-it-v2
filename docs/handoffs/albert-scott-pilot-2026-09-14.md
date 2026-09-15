@@ -1029,3 +1029,31 @@ the driver's `S<n>`.*
 | 12 | grader · `L-grader-0006` (L-spec-0005) | sonnet | **72 s** · 81k tok · 14 tool uses · 9/9 `met`, `matches_intent: yes`, `card_ok: yes`; re-ran every check and read the test source (vs 6.5 min median on Opus in the pilot) |
 | 13 | reviewer (gates-only, round 1) · `L-reviewer-0004` (L-spec-0005) | sonnet | **95 s** · 85k tok · 17 tool uses · drove all 9 paths; 0 blocking, nothing unverifiable; done-condition met (vs 4.2 min median on Opus) |
 | — | executor (this pane) | — | L-spec-0005 → `accepted` (verdict confirmed + clean review); `doit gate` clean; `git merge --no-ff` → `bf0d05556`; `shipped`; pushed — origin printed "Changes must be made through a pull request" but the push landed (branch protection requires PRs with 0 approvals and does not enforce on admins; the line is a bypass notice, not a refusal — R5) |
+
+### R4. The Planner inverted a seam's direction in the cut, and the spec-writer caught it against the Plan
+- **Measured:** `cut-L-charter-0003.md` (second cut) gave the reaper unit `Consumes: LIVENESS_FLAG_DETAIL_LINE`
+  and the renderer unit `Produces:` it — backwards: the reaper writes the line, the renderer reads it.
+  The Plan's Seams section had it right. `doit audit` passed the cut (a Consumes with a matching
+  Produces is "defined", whichever way round), both Opus plan-audits passed it, and the Sonnet
+  spec-writer for the reaper (`L-spec-writer-0014`) was the one that noticed, followed the Plan,
+  and recorded a resolved `seam-undefined` declaration.
+- **Systemic:** the pre-pass checks that a seam's two ends *exist*, not that the producing unit is
+  the one whose footprint holds the producer. A cheap extension: `audit.py` could check that a
+  `Produces:` name is in the same unit whose Goal line names it as written/emitted — or, simpler,
+  the Plan's Seams section is the authority and the cut's Consumes/Produces lines are derived from
+  it at plan stage, never typed twice. Filed under a-14's packet/plan work.
+- **Fix status (2026-09-15):** open — a-14 (derive the cut's seam lines from the Plan, or check
+  direction in `audit.py`).
+
+### R5. "Changes must be made through a pull request" is a bypass notice on this repo, not a refusal
+- **Measured (2026-09-15 07:19Z):** `git push origin master` of the L-spec-0005 merge printed
+  `remote: - Changes must be made through a pull request.` and **landed** (`git ls-remote` →
+  `bf0d05556`). Branch protection on `master`: `required_pull_request_reviews` with
+  `required_approving_review_count: 0`, `enforce_admins: false`; the pushing account is an admin.
+  The pilot pushed master directly all day yesterday under the same rule; the notice is GitHub's
+  "you bypassed" line. The repo's CLAUDE.md line "master takes direct pushes with no push
+  restrictions" is half true: there is a rule, and admins pass through it.
+- **Systemic:** the Executor's merge row should read the push's *result* (`git ls-remote` or the
+  exit code), never its stderr prose — a remote's notice text is not a verdict. One line in
+  executor.md (b-9) and, if `doit` ever owns the push, an exit-code check.
+- **Fix status (2026-09-15):** open — b-9.
