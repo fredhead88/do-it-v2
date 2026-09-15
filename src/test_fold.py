@@ -506,6 +506,113 @@ _, sp, _, _, by = ledger(**{**crossed(3, 3), "L-builder-99.jsonl": [
     {"ts": stamp(7), "type": "build-started", "subject": "L-spec-9999"}]})
 assert fold.wedged(sp["L-spec-9999"], fold.dwell_days(by)), "7 days is past twice the median"
 
+# a-6 (S15/S33) — owed evidence can actually be owed, and a shipped spec can be
+# closed truthfully.
+
+# 1/2. A grader `cannot-assess` on an OWED row (an `owed-ac` on the subject
+# already names the criterion) must not zero `confirmed` — the fold reads
+# `confirmed`/`matches_intent`/`card_ok`/`cannot_assess` and derives confirmed
+# over the evaluable rows. Not yet `accepted`, though: the owed criterion itself
+# still has no `owed-met`, so it stays `shipped-owed-evidence`.
+owed_ac7 = [{"ts": stamp(0), "type": "owed-ac", "subject": S, "criterion": "AC7", "wake_at": stamp(-7)}]
+cannot_assess_owed = [{"ts": stamp(1), "type": "verdict", "subject": S, "confirmed": False,
+                       "matches_intent": "yes", "card_ok": "yes", "cannot_assess": ["AC7"]}]
+_, sp, _, _, _ = ledger(**{"L-builder-01.jsonl": built, "L-grader-01.jsonl": cannot_assess_owed,
+                           "L-reviewer-01.jsonl": reviewed, "L-executor-01.jsonl": shipped,
+                           "L-spec-writer-01.jsonl": owed_ac7})
+assert sp[S]["state"] == "shipped-owed-evidence", \
+    "cannot-assess on an owed row doesn't zero confirmed, but the owed criterion is still unmet"
+
+# ...and the negative: cannot-assess on a row NOBODY declared owed must still
+# zero confirmed exactly as before.
+cannot_assess_nonowed = [{"ts": stamp(1), "type": "verdict", "subject": S, "confirmed": False,
+                          "matches_intent": "yes", "card_ok": "yes", "cannot_assess": ["AC9"]}]
+_, sp, _, _, _ = ledger(**{"L-builder-01.jsonl": built, "L-grader-01.jsonl": cannot_assess_nonowed,
+                           "L-reviewer-01.jsonl": reviewed, "L-executor-01.jsonl": shipped})
+assert sp[S]["state"] == "shipped", \
+    "cannot-assess on a row nobody declared owed still is not confirmed"
+
+# 1. An `owed-met` (Executor or operator, citing the evidence) discharges the
+# owed criterion, and `accepted` derives with no new verdict — no re-grade spawn.
+owed_met = [{"ts": stamp(0), "type": "owed-met", "subject": S, "criterion": "AC7",
+            "evidence": "the post-merge check-run: https://ci/run/42 green"}]
+_, sp, _, _, _ = ledger(**{"L-builder-01.jsonl": built, "L-grader-01.jsonl": cannot_assess_owed,
+                           "L-reviewer-01.jsonl": reviewed,
+                           "L-executor-01.jsonl": shipped + owed_met,
+                           "L-spec-writer-01.jsonl": owed_ac7})
+assert sp[S]["state"] == "accepted", "owed-met discharges the owed criterion; the fold derives accepted alone"
+
+# ...and only the Executor or the operator may write it — the same restriction
+# as `owed-ac` one level up, for the same reason: a builder that could clear its
+# own owed criterion could walk a shipped spec to `accepted` from one seat.
+_, sp, _, ig, _ = ledger(**{"L-builder-01.jsonl": built, "L-grader-01.jsonl": cannot_assess_owed,
+                           "L-reviewer-01.jsonl": reviewed, "L-executor-01.jsonl": shipped,
+                           "L-spec-writer-01.jsonl": owed_ac7,
+                           "L-builder-02.jsonl": owed_met})
+assert sp[S]["state"] == "shipped-owed-evidence" and len(ig) == 1, \
+    "only the executor or the operator may discharge an owed criterion"
+
+# 5. The board names a partially-discharged owed spec: one criterion met and
+# awaiting the next fold, the other still just waiting on its wake_at.
+owed_two = [{"ts": stamp(0), "type": "owed-ac", "subject": S, "criterion": "AC7", "wake_at": stamp(-7)},
+            {"ts": stamp(0), "type": "owed-ac", "subject": S, "criterion": "AC9", "wake_at": stamp(-3)}]
+cannot_assess_both = [{"ts": stamp(1), "type": "verdict", "subject": S, "confirmed": False,
+                       "matches_intent": "yes", "card_ok": "yes", "cannot_assess": ["AC7", "AC9"]}]
+partial = ledger(**{"L-builder-01.jsonl": built, "L-grader-01.jsonl": cannot_assess_both,
+                    "L-reviewer-01.jsonl": reviewed, "L-executor-01.jsonl": shipped + owed_met,
+                    "L-spec-writer-01.jsonl": owed_two})
+assert partial[1][S]["state"] == "shipped-owed-evidence", partial[1][S]["state"]
+pboard = fold.render(*partial)
+assert "AC7 met, awaiting fold" in pboard and "AC9 met, awaiting fold" not in pboard, pboard
+# and a spec with no owed-met at all renders exactly as before — no note.
+plain_owed = ledger(**{"L-builder-01.jsonl": built, "L-grader-01.jsonl": cannot_assess_owed,
+                       "L-reviewer-01.jsonl": reviewed, "L-executor-01.jsonl": shipped,
+                       "L-spec-writer-01.jsonl": owed_ac7})
+assert "met, awaiting fold" not in fold.render(*plain_owed), "no owed-met yet: the line is unchanged"
+
+# 3. D112 + S33 — the operator's only close instrument must not call a BUILT,
+# MERGED spec `closed-unbuilt`. A `shipped` event on the subject makes it
+# `closed-shipped` instead, and that label counts as done for the charter's L2
+# conjunct exactly like `closed-unbuilt` does.
+closed_shipped = ledger(**{"L-builder-01.jsonl": built, "L-executor-01.jsonl": shipped,
+                           "L-operator-01.jsonl": [{"ts": stamp(0), "type": "spec-closed", "subject": S,
+                                                    "charter": C, "why": "post-merge observation only"}]})
+assert closed_shipped[1][S]["state"] == "closed-shipped", closed_shipped[1][S]["state"]
+l2_with_closed_shipped = ledger(**{
+    "L-builder-01.jsonl": built,
+    "L-executor-01.jsonl": shipped + [{"ts": stamp(0), "type": "sweep-fixpoint", "subject": C}],
+    "L-operator-01.jsonl": [{"ts": stamp(0), "type": "spec-closed", "subject": S, "charter": C,
+                             "why": "post-merge observation only"}],
+    "L-charter-reviewer-01.jsonl": [{"ts": stamp(0), "type": "charter-review-complete", "subject": C}]})
+assert l2_with_closed_shipped[1][S]["state"] == "closed-shipped"
+assert l2_with_closed_shipped[2][C]["state"] == "L2-complete", \
+    "closed-shipped counts as done for the charter's L2 conjunct (S33)"
+# and the untouched case is unchanged: never built at all is still closed-unbuilt.
+never_built = ledger(**{"L-planner-01.jsonl": [built[0]], "L-operator-01.jsonl": [
+    {"ts": stamp(0), "type": "spec-closed", "subject": S, "charter": C, "why": "answered another way"}]})
+assert never_built[1][S]["state"] == "closed-unbuilt", never_built[1][S]["state"]
+
+# 4. S32/S33 — an allocation whose spec-writer spawn failed and never wrote a
+# spec derives `void`, not a pipeline state it looks stuck in.
+ghost = {"L-spec-writer-09.jsonl": [
+    {"ts": stamp(1), "type": "spawn-started", "subject": "L-spec-0999", "role": "spec-writer", "charter": C},
+    {"ts": stamp(0), "type": "spawn-failed", "subject": "L-spec-0999", "why": "timeout after 30 min"}]}
+_, sp, _, _, _ = ledger(**ghost)
+assert sp["L-spec-0999"]["state"] == "void", sp["L-spec-0999"]["state"]
+# ...and a retry that DOES land a spec-written is never void, even carrying the
+# same subject's earlier failure.
+retried = ledger(**{"L-spec-writer-09.jsonl": ghost["L-spec-writer-09.jsonl"] + [
+    {"ts": stamp(0), "type": "spec-written", "subject": "L-spec-0999", "charter": C}]})
+assert retried[1]["L-spec-0999"]["state"] == "written", retried[1]["L-spec-0999"]["state"]
+# a void allocation does not bind — and does not block — its charter's L2
+# conjunct: `done` below is otherwise a clean L2-complete charter (see the fixed
+# ledger built earlier); adding one ghost spec on the same charter must not hold
+# it at L1 the way the real L-spec-0004 did.
+voidbind = ledger(**{**done, **ghost})
+assert voidbind[1]["L-spec-0999"]["state"] == "void"
+assert voidbind[2][C]["state"] == "L2-complete", \
+    "a void allocation does not bind the charter's L2 conjunct (S32/S33)"
+
 shutil.rmtree(TMP)
 # D117: liveness is a fold query. Fresh tick: fine. Old tick: the alarm. No tick: says so.
 mins = lambda m: (T - timedelta(minutes=m)).isoformat(timespec="seconds")
@@ -515,4 +622,4 @@ stale = ledger(**{"L-tick-local.jsonl": [{"ts": mins(30), "type": "tick", "lane"
 assert "TICK STALE" in fold.render(*stale)
 assert "last tick: never" in fold.render(*ledger(**{"L-operator-local.jsonl": []}))
 
-print("fold: 89 checks pass")
+print("fold: 104 checks pass")

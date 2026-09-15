@@ -140,6 +140,19 @@ code, types, evs, _ = spawn("grader", out=grade([met]))
 assert [e["criterion"] for e in evs if e["type"] == "criterion-cleared"] == ["DONE-COND"] and rejects() == 0, \
     "a confirmed verdict clears a standing rejection the packet no longer names (first real chain)"
 
+# a-6 (S15/S33): the verdict event carries which rows were cannot-assess, not just
+# the roll-up — the fold needs the row-level data to widen `confirmed` over
+# EVALUABLE rows when a cannot-assess row's criterion was declared owed. This
+# wrapper still writes the literal, strict `confirmed` (unaware of `owed-ac` —
+# that's the fold's job); it only stops hiding which rows those were.
+cannot_assess = {"ac": "AC7", "verdict": "cannot-assess", "reason": "post-merge check-run does not exist yet",
+                 "reason_code": "criterion-unevaluable-from-packet"}
+code, types, evs, _ = spawn("grader", out=grade([met, cannot_assess]))
+assert types[0] == "verdict" and evs[0]["confirmed"] is False and evs[0]["cannot_assess"] == ["AC7"], evs[0]
+assert "rejected-criterion" not in types, "cannot-assess is not unmet — no rejected-criterion for it"
+code, types, evs, _ = spawn("grader", out=grade([met]))
+assert evs[0]["cannot_assess"] == [], "an all-met grade carries an empty list, not an absent field"
+
 # ★ `probe` runs OUTSIDE every repo on purpose (§4.6·10, §9.5). Read as
 # undetermined, that refuses the one contract that spends at planning time
 # before it spends anything at all.

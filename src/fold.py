@@ -73,7 +73,15 @@ EMITS = {"verdict": {"grader"}, "review": {"reviewer"}, "shipped": {"executor"},
          # `sweep-fixpoint` can close a charter over work it never swept, and a seat
          # that may stamp `brief-answered` can discharge a brief no spec answers.
          "sweep-fixpoint": {"executor", "operator"},
-         "brief-answered": {"executor", "operator"}}
+         "brief-answered": {"executor", "operator"},
+         # S15/S33 (a-6): the wake script's `verdict` re-grade is one route to
+         # discharging an owed criterion; `owed-met` is the other — the Executor or
+         # the operator, citing the evidence directly, no re-grade spawn required.
+         # Restricted the same way `owed-ac` itself is restricted one level up: a
+         # seat that could stamp this on any shipped spec would walk it to
+         # `accepted` alone, which is exactly what the verdict+review pair exists
+         # to prevent.
+         "owed-met": {"executor", "operator"}}
 
 # §4.4's `May declare` line, one contract at a time — the fold authorizes (§4.6).
 # A declaration lands as an event TYPED BY ITS TERM (dispatch.events_for), so a
@@ -366,21 +374,65 @@ def dwell_days(by_subject):
     return out
 
 
+def verdict_confirmed(v, owed_criteria):
+    """A `verdict` event's confirmed-ness, but over EVALUABLE rows (S15/S33): a
+    `cannot-assess` row whose criterion an `owed-ac` on this subject already named
+    does not zero it — that row was never gradeable and declaring it owed is
+    exactly what said so up front. The literal `confirmed` field (set at grade
+    time, from the model's own `all(met)`, before the fold could know which
+    criteria were owed) is trusted first; this only widens it, and only for rows
+    that are BOTH `cannot-assess` AND owed. A real `unmet` never reaches here —
+    it stands as a `rejected-criterion` and blocks the caller before this is
+    consulted. A `cannot-assess` on a criterion nobody declared owed is left
+    exactly as it was: not confirmed."""
+    if v.get("confirmed"):
+        return True
+    ca = {c for c in (v.get("cannot_assess") or []) if c}
+    if not ca or not ca <= owed_criteria:
+        return False
+    return v.get("matches_intent") == "yes" and v.get("card_ok") == "yes"
+
+
 def spec_state(evs, retracted):
-    """accepted / shipped-owed-evidence / dropped, or the pipeline state it is stuck in."""
+    """accepted / shipped-owed-evidence / dropped / closed-shipped / closed-unbuilt /
+    void, or the pipeline state it is stuck in."""
     types = {e["type"] for e in evs}
+    # S32/S33 (a-6): an allocation whose spec-writer spawn failed and never wrote a
+    # spec is not stuck in a pipeline state — it is VOID. The actor is the filename
+    # (D90), so "its spec-writer" is read off the events' own actor, never a body
+    # field a failed spawn never got to write. `fold()` below drops a void spec out
+    # of `mine` entirely, so it cannot bind — or hold open — its charter's L2
+    # conjunct the way the ghost L-spec-0004 did.
+    if ("spec-written" not in types and "spec-killed" not in types
+            and any(e["type"] == "spawn-started" and e["actor"] == "spec-writer" for e in evs)
+            and any(e["type"] == "spawn-failed" and e["actor"] == "spec-writer" for e in evs)):
+        return "void"
     open_rejects = standing_rejects(evs)
     if "shipped" in types and not open_rejects:
-        graded = any(e["type"] == "verdict" and e.get("confirmed") for e in evs)
-        if graded and "review" in types:
+        # S15/S33: `owed-ac` now carries the criterion it owes (the schema
+        # requires it), and `owed-met` — the Executor or the operator, citing the
+        # evidence — discharges one without a re-grade spawn. `accepted` needs
+        # every owed criterion met, not merely a confirmed verdict; short of that,
+        # an UNMET owed criterion with a future `wake_at` is `shipped-owed-evidence`
+        # exactly as before.
+        owed_criteria = {e.get("criterion") for e in evs if e["type"] == "owed-ac" and e.get("criterion")}
+        met_criteria = {e.get("criterion") for e in evs if e["type"] == "owed-met" and e.get("criterion")}
+        graded = any(e["type"] == "verdict" and verdict_confirmed(e, owed_criteria) for e in evs)
+        if graded and "review" in types and owed_criteria <= met_criteria:
             return "accepted"                                        # §2.5 accepted()
-        if any(e["type"] == "owed-ac" and ts(e.get("wake_at")) > NOW for e in evs):
+        if any(e["type"] == "owed-ac" and e.get("criterion") not in met_criteria
+               and ts(e.get("wake_at")) > NOW for e in evs):
             return "shipped-owed-evidence"                           # D25
     if "spec-closed" in types:
-        # D112: the operator closed it without a build — the question it was
-        # written to answer got answered another way. Terminal, and deliberately
-        # NOT `accepted`: nothing here was graded, reviewed, or verified.
-        return "closed-unbuilt"
+        # D112 + S33: the operator's only close instrument used to read
+        # `closed-unbuilt` even over a spec that was built, graded, reviewed and
+        # merged — a false label that cost two operator rulings to work around by
+        # hand. A `shipped` event on the subject means it WAS built: label it
+        # truthfully and let `fold()` below count it as done for L2, same as
+        # `closed-unbuilt`. Deliberately NOT `accepted`: nothing here says every
+        # criterion was proven, only that the operator closed the question another
+        # way after a real build existed.
+        return "closed-shipped" if "shipped" in types else "closed-unbuilt"
     charter = charter_id(next((e.get("charter") for e in reversed(evs) if e.get("charter")), None))
     if charter in retracted and "shipped" not in types:
         return "dropped"                                             # D76, terminal for alarms
@@ -413,7 +465,12 @@ def fold(events):
             charters[sid] = {"id": sid, "evs": evs, "age": age_days(evs[-1])}
 
     for cid, c in charters.items():
-        mine = [s for s in specs.values() if s["charter"] == cid]
+        # S32/S33 (a-6): a `void` allocation — a spec-writer spawn that failed and
+        # never produced a `spec-written` — does not bind this charter's L2
+        # conjunct at all, in either direction: not counted against it (the ghost
+        # L-spec-0004 held L-charter-0004 at L1 for exactly this reason), and not
+        # counted FOR it either. It is simply not `mine`.
+        mine = [s for s in specs.values() if s["charter"] == cid and s["state"] != "void"]
         types = {e["type"] for e in c["evs"]}
         owed = sum(1 for s in mine if s["state"] == "shipped-owed-evidence")
         if cid in retracted:
@@ -423,7 +480,7 @@ def fold(events):
         # charter closes on the operator's l1-complete + the sweep fixpoint + a
         # complete charter review, exactly the three things that ARE its lane.
         elif (all(s["state"] in ("accepted", "shipped-owed-evidence", "dropped",
-                                 "closed-unbuilt") for s in mine)
+                                 "closed-unbuilt", "closed-shipped") for s in mine)
               and "sweep-fixpoint" in types and owed <= K
               and not open_briefs(c["evs"])
               and charter_review(c["evs"]) == "charter-review-complete"):
@@ -479,9 +536,20 @@ def render(events, specs, charters, ignored, by_subject):
           [f"{s['id']} · {s['state']} · {s['age']:.1f}d"
            + (f"  ⚠ {s['rejects']} REJECTED, needs rework" if s["rejects"] else "") + flag(s)
            for s in pick("graded", "reviewing", "shipped")])
-    block("OWED EVIDENCE", [f"{s['id']} · wakes " + str(next(
-        (e.get("wake_at") for e in s["evs"] if e["type"] == "owed-ac" and e.get("wake_at")), "?"))
-        for s in pick("shipped-owed-evidence")])
+    def owed_line(s):
+        wake = str(next((e.get("wake_at") for e in s["evs"]
+                         if e["type"] == "owed-ac" and e.get("wake_at")), "?"))
+        # a-6: a spec can carry more than one owed criterion, and `owed-met` may
+        # discharge some before the rest wake — that partial state is meaningful
+        # (it is progress the operator would otherwise have to grep for) and gets
+        # a note; a spec with NO owed-met yet renders exactly as before. A spec
+        # whose owed-met covers EVERY owed criterion has already derived
+        # `accepted` (spec_state) and simply is not in this list at all.
+        met = sorted({e.get("criterion") for e in s["evs"]
+                      if e["type"] == "owed-met" and e.get("criterion")})
+        return f"{s['id']} · wakes {wake}" + "".join(f"  ·  {c} met, awaiting fold" for c in met)
+
+    block("OWED EVIDENCE", [owed_line(s) for s in pick("shipped-owed-evidence")])
     # An unbuilt close is invisible in every working section — terminal work does
     # not queue. It surfaces HERE, at the one moment someone asks "was this
     # actually done?" (D112).
