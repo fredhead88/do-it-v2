@@ -442,6 +442,20 @@ def wedged(spec, dwell=None):
     return spec["age"] > (dwell or DWELL_DAYS).get(spec["state"], 1e9)
 
 
+def in_flight_deploys(events):
+    """§4.11's `deploy-started` with no terminal event after it, per subject —
+    the wrapper may have been killed, and the ledger otherwise has no event that
+    says the deploy ended. Newest deploy-related event per subject decides:
+    `deploy-landed` / `deploy-failed` / `deploy-refused` all close it, only a
+    trailing `deploy-started` is still open (S34)."""
+    DEPLOY_TYPES = ("deploy-started", "deploy-landed", "deploy-failed", "deploy-refused")
+    last = {}
+    for e in events:
+        if e.get("type") in DEPLOY_TYPES and e.get("subject") is not None:
+            last[e["subject"]] = e
+    return [e for e in last.values() if e["type"] == "deploy-started"]
+
+
 def render(events, specs, charters, ignored, by_subject):
     looked = max((ts(e["ts"]) for e in events if e.get("type") == "observed"),
                  default=datetime.min.replace(tzinfo=timezone.utc))
@@ -472,7 +486,11 @@ def render(events, specs, charters, ignored, by_subject):
     block("BLOCKED", [f"{e.get('subject','?')} · {e.get('why','?')} · owner "
                       f"{e.get('owner') or '⚠ NOBODY'} · {age_days(e):.1f}d" for e in open_blocks])
     block("WRITTEN, NOT PICKED UP", [f"{s['id']} · {s['age']:.1f}d{flag(s)}" for s in pick("written")])
-    block("IN FLIGHT", [f"{s['id']} · {s['age']:.1f}d{flag(s)}" for s in pick("building")])
+    # A deploy-started with no landed/failed/refused after it is a wrapper that
+    # may be dead — visible here, not silently lost (S34).
+    block("IN FLIGHT", [f"{s['id']} · {s['age']:.1f}d{flag(s)}" for s in pick("building")]
+          + [f"deploy in flight · {e.get('subject','?')} · {str(e.get('sha',''))[:7]} · "
+             f"{age_days(e):.1f}d" for e in in_flight_deploys(events)])
     # A standing rejection is the difference between "waiting to be looked at" and
     # "already looked at and failed". Same section, but the row may not read the same.
     block("AWAITING VERIFICATION",
