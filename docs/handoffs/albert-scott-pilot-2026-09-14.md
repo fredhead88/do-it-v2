@@ -1443,3 +1443,17 @@ cost or hid.
 - **Systemic:** b-20's text must name the session-level `SET`, not the startup parameter
   (amended in place); `probe-run` gaining `summary` is one line (a-30).
 - **Fix status:** open — b-20 amended, a-30.
+
+### R35. The Thinker's own landing needs a spawn the Thinker may not serve (L-thinker-0004)
+- **Measured:** `doit think --land` (six charters, 10:59:06Z) dispatched L-plan-auditor-0011 on
+  the seat backend: a packet on disk, waiting for a pane with the Agent tool. `agents/thinker.md`
+  forbids the Agent tool (§3.3, D73: the *command* owns the spawn). The packet sat unserved
+  until the operator asked why; the previous session (L-thinker-0003) never hit this because one
+  pane wore the driver and Thinker hats and served its own audit.
+- **Systemic:** D73's "the driver command owns the privileged act" was written for `claude -p`,
+  where dispatch ran the model. Under the seat backend dispatch writes a file and the spawn is
+  whoever serves it — the rule now points at nobody. Two contract lines close it: the Planner
+  pane serves every pending seat packet regardless of who dispatched it (a standing job), and
+  the Thinker may serve exactly the audit its own `--land` produced, nothing else. Change list
+  b-23.
+- **Fix status:** open — b-23; today the Planner pane serves L-plan-auditor-0011 by hand.
