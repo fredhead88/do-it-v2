@@ -1611,3 +1611,39 @@ cost or hid.
 - **Measured:** two charters produced nine owed questions (Q1–Q5 on 0005, Q1–Q5 on 0010) and six rulings named for veto. All live in `plan-*.md` files and pilot-record prose; none is a ledger event (`escalation-blocking` exists only for blocking questions, and none was blocking). `NEEDS YOU` rendered nothing for any of them. When the operator returned, the questions were put through `AskUserQuestion` in the pane and the four answers were recorded as three `decision`s on L-goal-0001 by the Planner (12:0xZ) — a pane-typed record of an operator ruling, the S25 shape the design tried to retire. Also measured, from `L-operator-local.jsonl` 12:52:57Z: the Executor's spec-auditor on L-spec-0010 hit the 15-min wrapper timeout with a VALID Output already written — the a-29 class (research, 5 min) one role over.
 - **Systemic:** an owed question is a fold query only if it is an event. `escalation-owed{charter, q, default, revert}` from the Planner, rendered under a board block (`OWED QUESTIONS (n)`, defaults shown) and answered by an operator `decision` whose `ref` is the question's `src` (the R22 rule) — b-25; `named-for-veto` as the same shape with `default=stands` — same row. Wrapper timeouts sized to the measured p95 per role, not a guess — a-29 widened to every role (a-36).
 - **Fix status:** open — b-25, a-36.
+
+## Planner pane, `L-planner-0006` — 2026-09-15 13:09Z → (Fable; L-charter-0006, Bridge and Cash proofs)
+
+Own section per b-12. Measured while reading in and commissioning the cut research (`L-research-0002`,
+dispatched 13:17:52Z, `--timeout 15`). Ranked by what it cost or hid.
+
+### R47. The seat scan the Planner contract prescribes counts dead spawns as unserved (L-planner-0006)
+- **Measured:** `agents/planner.md` Input: "a `.packet.md` with no `.output.json` is yours to serve".
+  Run literally at 13:10Z the scan listed nine packets; five of them (`L-charter-reviewer-0001`,
+  `L-plan-auditor-0002`, `L-spec-writer-0009/-0011/-0012`) are spawns with a terminal event on the
+  ledger — four `spawn-failed{timeout after 30 min}` from 2026-09-14 and one `spawn-done` whose
+  output landed as `.result.json`, not `.output.json`. The other four (`L-spec-writer-0021…0024`,
+  12:57:23Z) are the Executor's live rework dispatches on L-spec-0007…0010. Nothing on disk tells the
+  two apart; the ledger does, and the contract's rule does not say to read it.
+- **Systemic:** the serving rule needs a terminal filter — a packet is pending only while its spawn
+  has `spawn-started` and no `spawn-done` / `spawn-failed` — and the dispatcher could mark the
+  packet on its own terminal event (rename to `.packet.done.md`, or delete). a-20's `seat-unserved`
+  alarm has the same hole if it scans the directory. Change list a-37.
+- **Fix status:** open — a-37; this pane served nothing (R49).
+
+### R48. `doit alloc --help` allocated `content/L---help-0001.md` a fourth time (L-planner-0006)
+- **Measured:** the file R19 removed by hand was re-created 0 bytes at 13:10Z by this pane reading
+  the flags the way every other `doit` subcommand documents them. Fourth hit (S19, T2, R11, R19).
+  Left on disk this time so the count is visible; no ledger reference.
+- **Systemic:** none new — a-16 / a-19 carry it. Recorded as the fourth measurement.
+- **Fix status:** open — a-16, a-19.
+
+### R49. The Planner pane has no Agent tool, so the b-23 serving rule is a sentence it cannot execute (L-planner-0006)
+- **Measured:** `agents/planner.md`'s `tools:` line is `Read, Glob, Grep, Bash, Write, Skill`; the
+  same file's Input says the pane "serve[s] every pending seat packet … with the Agent tool per
+  `scripts/seat/README.md`" (operator ruling R35 / b-23). The operator's boot prompt for this pane
+  routed serving to the Executor (flow:2.3) instead, which is the only reading the harness permits.
+  Under D121 the contract and the launcher disagree on who serves, and the pane finds out by trying.
+- **Systemic:** b-23's text and the `tools:` line must agree; whichever pane serves needs `Agent`
+  in its contract's `tools:` (R2: the harness snapshots the list at pane start). Change list b-26.
+- **Fix status:** open — b-26; serving for this charter is the Executor's by the operator's prompt.
