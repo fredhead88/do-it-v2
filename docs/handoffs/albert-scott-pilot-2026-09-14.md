@@ -1215,3 +1215,93 @@ walkthrough. Ranked by minutes lost or defects caught.
   shared files with no owner, R5's footprint overreach, a dangling unit name and the uncovered
   audit finding N3 in one round. Every one changed the charters.
 - **Systemic:** none; recorded so the map's three Opus seats keep their evidence.
+
+## Executor pane, `L-executor-0006` — 2026-09-15 (folded the board, cleared it, polling for the
+Planner's first spawn on L-charter-0005…0010; nothing built yet)
+
+### R17. A decision's `ref` not naming the question's `src` leaves NEEDS YOU open a full day after the ruling shipped
+- **Measured:** `L-builder-0004.jsonl:8` opened a `question` on `L-spec-0003` (deadline
+  2026-09-15) asking to ratify the ninth collection-parity allowlist entry. An Executor `decision`
+  answering that exact question exists (2026-09-14, "AC3 mandates removing the parametrized
+  case... allowlist must carry NINE ids, not eight") — but it was appended with `ref=AC12`, not
+  the question's `src`. `doit`'s fold matches a question to its answer by `ref == src` (executor.md:
+  "a decision's `ref` is the question's `src`, as `doit events` prints it"), so the match never
+  fired: the default was taken and shipped a day ago (prod carries the ninth entry, deployed
+  5cd5c47de), yet `NEEDS YOU (1)` still rendered this morning as if nobody had ruled. I re-decided
+  it (`ref=L-builder-0004.jsonl:8`) to clear the board; the ruling itself did not change.
+- **Systemic:** the contract already states the rule correctly; nothing enforces it. `doit append
+  decision` accepts any `ref` string, so a hand-typed shorthand (`AC12`, a criterion id — reads
+  naturally to a human, wrong to the fold) silently produces a permanently-stale NEEDS YOU row
+  instead of an error at write time. The fold has no way to tell "answered with the wrong ref"
+  from "never answered" — both render identically until someone reads every open question's full
+  text and greps for it by hand, which is what this session did.
+- **Fix status:** open — change list a-21 (validate `ref` against the subject's open-question
+  `src` set at append time, not at fold time).
+
+### R18. The `--check` convention for a droplet target is SSH-wrapped, and nothing in `executor.md` says so
+- **Measured:** `executor.md`'s merge/deploy row and `deploy.py`'s own help text both just say
+  `--check '<the charter's post-deploy check>'` with no shape. Read naturally ("`/version` names
+  the merged sha") that reads as a public-URL probe; from this pane, `https://clients.
+  albertscott.com/version` 404s (that host is the Vercel frontend, not the API) and
+  `/api/version` 401s (portal auth). `deploy.sh`'s own rollback block never calls it that way — it
+  reads the sha over `ssh root@167.71.46.51 "curl -sf http://127.0.0.1:8000/version"` (deploy.sh:785).
+  Charter 2's R5 ("PASS, `/version` 21962db5f") was measured that way, not over the public host —
+  the run log doesn't say so, and a pane driving its first deploy would have to find deploy.sh:785
+  itself to learn the shape, as this one did before any charter needed it.
+- **Systemic:** a charter's Constraints line naming `/version` as the check is correct but
+  underspecified; the command a builder or Executor actually runs needs the SSH form, and that
+  convention lives in one script 3,900 lines away from the contract that tells the Executor to
+  run it.
+- **Fix status:** open — change list b-15 (state the SSH-wrapped form in `agents/executor.md`'s
+  dispatching section, once, so every future `--check` is written correctly the first time).
+
+## Thinker pane, 2026-09-15 10:19Z → (L-thinker-0004 · shape B brief triage, then G4/G5/G3-residue charters from L-charter-0010's probe)
+
+Own section per b-12. Measured while triaging the adjacent inbox into
+`content/brief-triage-L-thinker-0004.md` and waiting for the probe write-up. Ranked by what it
+cost or hid.
+
+### R17. The adjacent inbox is invisible, and a Thinker cannot tag it
+- **Measured:** 15 `brief` events on the ledger, 13 adjacent, 10 open facts after dedupe — and
+  the board renders none of them (no INBOX block; `open_briefs()` counts only briefs carrying
+  `requirement`). §7.9 says triage "clusters and tags"; `EMITS` lets a thinker append only
+  `charter-filed`, so every tag lives in a markdown file the fold never reads. One brief
+  (`L-executor-0001.jsonl:6`, `blocked_me: true`, no `requirement`) was delivered by L-spec-0002
+  on 2026-09-14 and has no `brief-answered`, no board row, and no way for this seat to say so.
+- **Systemic:** the inbox is a fold query the board does not run, and the tag is an event that
+  does not exist. Change list a-22 (board INBOX line + `brief-triaged{ref, tag, writeup}` on the
+  thinker's list) and b-15 (§7.9 / `agents/thinker.md`: a tag is an event, the write-up cites it).
+- **Fix status:** open — a-22, b-15.
+
+### R18. Briefs have two shapes
+- **Measured:** 11 briefs carry `fact` + `footprint` (L-executor-0001/0002); 4 carry `why` +
+  `footprint_hint` (L-executor-0005). §2.6 promises dedupe-by-footprint "is a fold query only
+  because this field exists"; with two names it was a hand read (b3 = b12 found by eye).
+- **Systemic:** no field table for `brief` — the a-19 gap (operator event shapes) one type over.
+- **Fix status:** open — change list a-21.
+
+### R19. `doit alloc --help` allocated `content/L---help-0001.md`
+- **Measured:** a 0-byte file under content, no ledger reference, removed by hand and named for
+  veto in the session. Third hit of the same class (S19, T2, R11).
+- **Systemic:** none new — a-16 / a-19 already carry the fix; recorded as the third measurement.
+- **Fix status:** open — a-16, a-19.
+
+### R20. Waiting on an operational charter's write-up has no named signal
+- **Measured:** this seat's standing job starts "when L-charter-0010's probe write-up lands
+  under content". `evidence{path, covers}` exists and L-charter-0002's deploy record landed
+  with it (L-executor-0002.jsonl, 07:35Z) — but L-charter-0010's text says only "a write-up
+  under content", the probe contract declares only `charter-gap`, and nothing tells the
+  waiting pane which event to watch; it polled `find content -newer …` until it found the
+  precedent by grepping the ledger.
+- **Systemic:** b-7's operational-charter shape names the lane (`evidence` → `l1-complete` → …)
+  but the Thinker template and the probe contract never say "the deliverable lands as
+  `evidence{path, covers}`". Change list b-16.
+- **Fix status:** open — b-16.
+
+### R21. `DECIDED WITHOUT YOU` has no cursor
+- **Measured:** 17 decisions rendered in full (~5 KB) on every `doit`, most of them from
+  2026-09-14 and already acted on; the contract's "open with the inventory" is read past them
+  each time. `SHIPPED SINCE YOU LOOKED` has the same "since" with no "you".
+- **Systemic:** the fold has no per-actor looked-at cursor; a `looked{actor, ts}` event or a
+  `--since` on the board would bound both blocks.
+- **Fix status:** open — change list a-23.

@@ -41,6 +41,9 @@ design-doc or contract change; (c) = drop, with why.
 | 18 | **Launchers read the model map.** `up.pane_cmd()`/`think.pane_cmd()` pass `--model` from `models.toml`; pane contracts lose their frontmatter `model:` line (or it is generated). | R8 | two panes opened on the wrong model but for a hand-typed flag | `src/up.py`, `src/think.py`, `agents/thinker.md`, `agents/planner.md` |
 | 19 | **Operator event shapes.** `fold.append` carries a required-field table per operator event type (`decision`, `owed-met`, `correction`, `brief-answered`) and refuses a miss; `doit alloc` refuses a bare or flag-shaped kind. | R11 | one `?` on the board + one correction; one junk content file | `src/fold.py`, `src/dispatch.py` |
 | 20 | **Serving is observable.** `usage.py` supplies turns and duration to `stamp.sh` from the transcript; the wrapper writes a `seat-unserved` alarm when a packet has no `.meta.json` after N minutes. | R15 | hand-typed numbers per spawn; an unserved packet is silent | `src/usage.py`, `scripts/seat/stamp.sh`, `src/dispatch.py` |
+| 21 | **One brief shape.** `fold.append`'s field table gains `brief`: `fact`, `footprint` (a list of paths), `blocked_me`, `hit_while`; `why`/`footprint_hint` refused or mapped; the a-19 table one type over. | R18 | 11 briefs one shape, 4 another; dedupe by footprint was a hand read | `src/fold.py`, `src/validate.py`, `agents/executor.md` |
+| 22 | **The inbox is on the board and a tag is an event.** Board `INBOX (n)`: briefs with no `requirement` and no `brief-answered`, deduped by footprint, oldest first; a `blocked_me: true` brief with no `requirement` sits under NEEDS YOU until cited or answered. New event `brief-triaged{ref, tag, writeup}` on the thinker's and operator's lists; `doit think --land` accepts a triage write-up and appends one per tagged brief. | R17 | 10 open adjacent facts invisible; one delivered brief unstampable by the seat that found it | `src/fold.py`, `src/think.py`, `agents/thinker.md` |
+| 23 | **A looked-at cursor.** `looked{actor}` appended by the pane on open (or `doit --since <ts>`); `DECIDED WITHOUT YOU` and `SHIPPED SINCE YOU LOOKED` render only what is newer than the reader's last cursor, the rest as a count. | R21 | ~5 KB of acted-on decisions re-read on every fold | `src/fold.py`, `agents/thinker.md`, `agents/planner.md` |
 
 ## (b) Design-doc and contract changes, ranked
 
@@ -60,6 +63,8 @@ design-doc or contract change; (c) = drop, with why.
 | 12 | **Pilot-record convention:** every pane role that runs during a pilot appends its own section keyed by ledger actor id, never interleaved. | T3 | `docs/handoffs/` README line |
 | 13 | **Thinker §3 carries a required deploy line** — how the charter's result reaches the surface §4 names; `think.py` may refuse a §4 host with no §3 deploy line. | R9 | `agents/thinker.md`, `src/think.py` |
 | 14 | **A v2 change is a build**: the driver cuts the worktree of `~/do-it-v2` and names it in the sub-agent brief; the harness's `isolation: worktree` pins to the cwd repo. | R12 | `scripts/seat/README.md` |
+| 15 | **§7.9 / thinker: a triage tag is an event, not prose.** The write-up cites the `brief-triaged` events it produced; archive is the `tag: archive` value on that event, reversible by a later one. | R17 | `design/system-design-v2.md` §7.9, `agents/thinker.md` |
+| 16 | **Operational charter: the deliverable lands as `evidence{path, covers}`, and the charter says so.** The Thinker's operational-charter Constraints name the landing event; the probe contract may declare `evidence`; a pane waiting on it reads `doit events <charter>`, not `find -newer`. | R20 | `agents/thinker.md`, `agents/probe.md`, `agents/executor.md`, b-7's lane text |
 
 ## (c) Dropped, with why
 
