@@ -480,7 +480,7 @@ def render(events, specs, charters, ignored, by_subject):
            + (f"  ⚠ {s['rejects']} REJECTED, needs rework" if s["rejects"] else "") + flag(s)
            for s in pick("graded", "reviewing", "shipped")])
     block("OWED EVIDENCE", [f"{s['id']} · wakes " + str(next(
-        (e.get("wake_at") for e in s["evs"] if e["type"] == "owed-ac"), "?"))
+        (e.get("wake_at") for e in s["evs"] if e["type"] == "owed-ac" and e.get("wake_at")), "?"))
         for s in pick("shipped-owed-evidence")])
     # An unbuilt close is invisible in every working section — terminal work does
     # not queue. It surfaces HERE, at the one moment someone asks "was this

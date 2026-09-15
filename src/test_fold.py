@@ -293,6 +293,20 @@ assert fold.append(["merge-gate-clean", "L-charter-new"])["project"] == here, \
     "known subject keeps its own project, whatever directory the caller ran from"
 os.chdir(pathlib.Path(__file__).parent)
 
+# OWED EVIDENCE renders the first owed-ac that CARRIES a wake_at — a declaration
+# without one (the pre-schema shape) must not hide the instant a later one names.
+(fold.EVENTS / "L-spec-writer-77.jsonl").write_text("".join(json.dumps(e) + "\n" for e in [
+    {"ts": stamp(0), "type": "spec-written", "subject": "L-spec-0077", "charter": "L-charter-owed"},
+    {"ts": stamp(0), "type": "owed-ac", "subject": "L-spec-0077", "line": "no instant here"},
+    {"ts": stamp(0), "type": "owed-ac", "subject": "L-spec-0077", "criterion": "AC1", "wake_at": "2099-01-01T00:00:00Z", "line": "x"}]))
+(fold.EVENTS / "L-executor-77.jsonl").write_text(json.dumps(
+    {"ts": stamp(0), "type": "shipped", "subject": "L-spec-0077", "sha": "abc", "charter": "L-charter-owed"}) + "\n")
+_ev = fold.read_events(); _sp, _ch, _ig, _by = fold.fold(_ev)
+assert _sp["L-spec-0077"]["state"] == "shipped-owed-evidence", _sp["L-spec-0077"]["state"]
+assert "wakes 2099-01-01T00:00:00Z" in fold.render(_ev, _sp, _ch, _ig, _by), "the render names the instant, not None"
+for _f in ("L-spec-writer-77.jsonl", "L-executor-77.jsonl"):
+    (fold.EVENTS / _f).unlink()
+
 # D111 — an operator-only correction overrides one event by file:line, never deletes
 tgt = fold.EVENTS / "L-operator-99.jsonl"
 tgt.write_text(json.dumps({"ts": stamp(0), "type": "charter-retracted", "subject": "L-charter-fix",

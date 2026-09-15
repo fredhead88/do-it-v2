@@ -19,6 +19,8 @@ each direction.
   needs `--slot` typed by hand. (S6, half.)
 
 ### Changed
+- `fold.py`: the OWED EVIDENCE line shows the first `owed-ac` that carries a `wake_at`, not the first
+  `owed-ac` (a pre-schema declaration without one hid the instant a later one named).
 - `agents/grader.md`: the worktree's history is not the grader's — `git log/show/diff/blame` and
   the commit message are forbidden by name. A Sonnet grader ran `git log --oneline` to confirm its
   sha, saw the commit subject the packet strips, and honestly voided its run (charter 3, R6).
