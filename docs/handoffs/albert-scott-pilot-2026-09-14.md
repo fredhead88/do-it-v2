@@ -1370,3 +1370,29 @@ cost or hid.
   a packet author who forgets it hands a probe a write path. Change list b-20 (contract text);
   the read-only DSN is a product-side brief, not a v2 change.
 - **Fix status:** open — b-20.
+
+### R29. A probe declares a charter-gap that one `git diff --stat` resolves (L-thinker-0004)
+- **Measured:** L-probe-0004 ran the profit_v2 test tree at checkout `fd75a5210` and declared
+  `charter-gap: figures here are checkout-sha evidence` because it may not check out the deployed
+  sha. `git diff --stat 5cd5c47de fd75a5210 -- api pipelines agents` is empty — the tree it
+  tested is the deployed one. The Thinker resolved it by hand; the probe could not, and the
+  packet did not tell it.
+- **Systemic:** the probe packet's script pre-pass should state, per external, whether the paths
+  under test differ between the checkout and the deployed sha, so "checkout ≠ deployed" is a
+  fact on the packet, not a gap the probe declares and a Thinker closes. Change list a-27.
+- **Fix status:** open — a-27.
+
+### R30. An operational charter's source material was stale by two days, and the audit did not catch it (L-thinker-0004)
+- **Measured:** L-charter-0010 framed B1189 as "unresolved" from spec 1178 (2026-08-29); spec
+  1180 (`source_brief: B1189`, shipped 2026-08-31) had already unified both writers, and
+  L-probe-0001 measured 0/303 mismatches where 1178 measured 25/303. Likewise the 827 "policy
+  call" both prior records call open was ratified (the wrong way) by spec 1187 R2 with a test.
+  Neither L-thinker-0003 nor L-plan-auditor-0010 read the v4 ledger for successor specs of the
+  ids the charter named; the probe found both in ten minutes with `git grep` at the sha.
+- **Systemic:** the spec-auditor has `stale-current-state` / `premise-from-prose`; the
+  charter-set audit has no term for an Intent built from a record older than the deployed sha.
+  A Thinker template line — for every brief or spec id the Intent names, the newest v4 record
+  citing it and its status — is a read the Thinker can do and the plan-auditor can check.
+  Change list b-21.
+- **Fix status:** open — b-21. L-charter-0013 … 0015 cite the probe run-records, not the prior
+  specs, for every figure.
