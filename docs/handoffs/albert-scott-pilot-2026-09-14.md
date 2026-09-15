@@ -1025,7 +1025,9 @@ the driver's `S<n>`.*
 | — | executor (this pane) | — | `doit packet builder L-spec-0005` → checker is one `&&` chain (pytest on 3 files + ruff), `bash -n` clean; worktree `l-spec-0005` @ 5cd5c47de |
 | 10 | builder · `L-builder-0006` (L-spec-0005) | sonnet | 349 s · 131k tok · 53 tool uses · one commit `f6a97e8f0` (+35-line module, analyzers.py net +2 → 1498/1500, 5 new tests, guard test re-pointed); checker exit 0 (27 passed, ruff clean); card validated first try |
 | — | executor (this pane) | — | `doit packet builder L-spec-0006` → checker `pytest test_611 && bash -n && shellcheck`, clean; `doit packet grader L-spec-0005` (133 lines, every row from the card sidecar) |
-| 11 | builder · `L-builder-0007` (L-spec-0006) | sonnet | in flight |
+| 11 | builder · `L-builder-0007` (L-spec-0006) | sonnet | 808 s · 200k tok · 46 tool uses · one commit `f9272051b`; 23/23 tests, `bash -n` + shellcheck clean; AC7 carried as owed; card validated first try |
+| — | CI on `bf0d05556` | — | 6 of 7 checks green within 2 min; **Repo Lint Guards red — pre-existing** (red on base `5cd5c47de` and on `62c04d46b`): 2 bare UTC date casts in `asin_inventory_timeline.py`, outside the footprint → adjacent `brief`, not chased (S17); `Python Tests` still running |
+| 14 | grader · `L-grader-0007` (L-spec-0006) | sonnet | in flight |
 | 12 | grader · `L-grader-0006` (L-spec-0005) | sonnet | **72 s** · 81k tok · 14 tool uses · 9/9 `met`, `matches_intent: yes`, `card_ok: yes`; re-ran every check and read the test source (vs 6.5 min median on Opus in the pilot) |
 | 13 | reviewer (gates-only, round 1) · `L-reviewer-0004` (L-spec-0005) | sonnet | **95 s** · 85k tok · 17 tool uses · drove all 9 paths; 0 blocking, nothing unverifiable; done-condition met (vs 4.2 min median on Opus) |
 | — | executor (this pane) | — | L-spec-0005 → `accepted` (verdict confirmed + clean review); `doit gate` clean; `git merge --no-ff` → `bf0d05556`; `shipped`; pushed — origin printed "Changes must be made through a pull request" but the push landed (branch protection requires PRs with 0 approvals and does not enforce on admins; the line is a bypass notice, not a refusal — R5) |
