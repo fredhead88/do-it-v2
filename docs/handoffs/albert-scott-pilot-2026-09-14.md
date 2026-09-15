@@ -1026,4 +1026,5 @@ the driver's `S<n>`.*
 | 10 | builder · `L-builder-0006` (L-spec-0005) | sonnet | 349 s · 131k tok · 53 tool uses · one commit `f6a97e8f0` (+35-line module, analyzers.py net +2 → 1498/1500, 5 new tests, guard test re-pointed); checker exit 0 (27 passed, ruff clean); card validated first try |
 | — | executor (this pane) | — | `doit packet builder L-spec-0006` → checker `pytest test_611 && bash -n && shellcheck`, clean; `doit packet grader L-spec-0005` (133 lines, every row from the card sidecar) |
 | 11 | builder · `L-builder-0007` (L-spec-0006) | sonnet | in flight |
-| 12 | grader · `L-grader-0006` (L-spec-0005) | sonnet | in flight |
+| 12 | grader · `L-grader-0006` (L-spec-0005) | sonnet | **72 s** · 81k tok · 14 tool uses · 9/9 `met`, `matches_intent: yes`, `card_ok: yes`; re-ran every check and read the test source (vs 6.5 min median on Opus in the pilot) |
+| 13 | reviewer (gates-only, round 1) · `L-reviewer-0004` (L-spec-0005) | sonnet | in flight |
