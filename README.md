@@ -1,43 +1,85 @@
-# A ledger that derives state, and the guards that read it
+# A ledger that derives state, and the roles and guards that read it
 
 DO-IT keeps a project's state in append-only event files and **derives** every
 fact from them — nothing is ever stamped, edited, or asserted. The board you read
-is a projection, disposable and rebuilt on every render.
+is a projection, disposable and rebuilt on every render. Around that ledger sit
+thirteen role contracts (markdown files with an output schema each), one dispatch
+wrapper that runs a contract on any of three backends and checks it after the
+fact, and the scripts that own everything deterministic — the merge gate, the
+deploy, the reaper, the audit pre-pass, the packets.
 
-**Read this part before you rely on it:** what is here is the *substrate* and one
-guard. It is genuinely finished and genuinely used — but it is roughly a fifth of
-the system described in `design/system-design-v2.md`, and the missing four fifths
-are **prose, not code** (see *What is not here* below).
+**Version:** `VERSION` (`doit version`); history in `CHANGELOG.md`. Current: 0.2.0.
+
+**Status, honestly:** this ran its first real project on 2026-09-14 — the Albert
+Scott pilot: three charters closed, a 60-spec backlog deployed, 41 spawns, 7 of
+them failed for wrapper or driver reasons and none for a model's. The record of
+that day, entry by entry with what was changed for each, is
+`docs/handoffs/albert-scott-pilot-2026-09-14.md`; the ranked list of what the
+day says the system must become is `docs/handoffs/pilot-retro-change-list.md`.
+Every guard in this repo that is claimed to work has fired on a real case and
+its event is in a ledger; the ones that have not are named as such.
 
 ---
 
 ## Install
 
-Needs **python3** and **git 2.38 or newer** (`git merge-tree --write-tree`).
+Needs **python3 ≥ 3.11** (`tomllib`), **git 2.38 or newer** (`git merge-tree
+--write-tree`), **node** (the install gate), and `jsonschema` importable.
 
 ```bash
-git clone https://github.com/fredhead88/do-it-v2.git ~/Projects/do-it
-~/Projects/do-it/install.sh
+git clone https://github.com/fredhead88/do-it-v2.git ~/do-it-v2
+~/do-it-v2/install.sh
 ```
 
-Idempotent. It checks your git version, creates `~/.do-it/`, **runs every check
-before putting anything on your PATH**, and links `doit` into `~/.local/bin`. An
-install that ships a red suite is how a guard becomes a guard that is not
-running.
+Idempotent. It checks versions, creates `~/.do-it/`, installs the model map from
+the mixed template when the root has none, **runs every check before putting
+anything on your PATH**, links `doit` into `~/.local/bin`, and links the contracts
+into `~/.claude/agents/`.
 
 ## Use
 
 ```bash
-doit                         # render the board
-doit states                  # every derived state, one per line
-doit append <type> <subject> [k=v ...]
-doit gate <branch> [main] [--spec ID]    # merge guard. exit 1 = do not merge
-doit backup push | drill
-doit test
+doit                                    # render the board
+doit states · doit events <subject>     # derived states; one subject's events
+doit append <type> <subject> [k=v ...]  # append one event, then re-fold
+doit models show | use <mixed|claude-only>   # the root's model map
+doit think <topic> | --land F…          # a Thinker session; land its charters
+doit up                                 # the Planner pane; the tick's cron line
+doit packet <role> <subject> [...]      # a role's packet, built from the ledger
+doit dispatch <role> <subject> [...]    # run one contract, check it, append its events
+doit audit cut|plan <charter> ...       # the six mechanical checks under the audits
+doit gate <branch> [main] [--spec ID]   # merge guard. exit 1 = do not merge
+doit deploy <spec> --sha S ...          # serial; waits; proves the sha is live
+doit reap <charter>                     # reap only provably dead worktrees
+doit validate <role> <file>             # an Output object against its schema
+doit tick                               # fold; spawn the Executor if the lane is actionable
+doit backup push | drill · doit test · doit version · doit help
 ```
 
-`DOIT_ROOT` moves the ledger · `DOIT_PROJECT` scopes the board to one project ·
-`DOIT_LEDGER_FILE` picks which actor file you are writing as.
+`DOIT_ROOT` moves the ledger · `DOIT_PROJECT` scopes the board · `DOIT_LEDGER_FILE`
+picks which actor file you write as · `DOIT_K` is the owed criteria a charter may
+close over. The full list is under `doit help`.
+
+### The model map
+
+`$DOIT_ROOT/models.toml` decides, once per ledger root, which **backend** runs
+each contract and on which **model**:
+
+| backend | what it is |
+|---|---|
+| `pane` | a standing interactive session the operator opens; never dispatched (Thinker, Planner, and the Executor under a seat-only root) |
+| `seat` | an interactive session's sub-agent, seat-billed; the wrapper writes the packet and waits for the pane to serve it |
+| `claude-p` | `claude -p --agent <role>`; metered on some plans, banned on some roots |
+| `codex` | `codex exec` on the ChatGPT plan, schema enforced by the CLI |
+
+Two templates ship: `models.example.toml` (Claude and Codex mixed, with a
+`fallback` per Codex contract for when its weekly limit is gone) and
+`models.claude-only.toml`. The loader refuses a map that lies — Fable on anything
+but a pane, a pane role dispatched — and every terminal event records
+`model_requested` beside `model_used`, so the ledger can never again say one
+model ran when another did. Flags and environment variables may only agree with
+the file. The tick reads it too, and refuses to spawn on a root whose Executor is
+a pane.
 
 ---
 
@@ -45,10 +87,17 @@ doit test
 
 | File | What it does |
 |---|---|
-| `src/fold.py` | reads `~/.do-it/events/*.jsonl`, derives every state, renders the board |
-| `src/merge_gate.py` | catches a merge that **removes** a file nobody is watching |
-| `src/backup.sh` | one-way `restic` push, and a restore drill that proves it |
-| `src/test_*.py` | 58 checks. The merge-gate ones all run against real git repos |
+| `src/fold.py` | reads `~/.do-it/events/*.jsonl`, derives every state, renders the board; `EMITS` is who may emit what |
+| `src/dispatch.py` | runs one contract on `claude-p`, `seat` or `codex`; every after-the-fact check (schema, file on disk, repo unchanged, contamination); appends the events the Output implies |
+| `src/models.py` | the model map: load, validate, resolve, `doit models` |
+| `src/packet.py` | per-role packets from the ledger, with the Blindness strip that refuses a contaminated packet before it is written |
+| `src/audit.py` | the six mechanical checks that run before either plan audit |
+| `src/merge_gate.py` | catches a merge that **removes** a file nobody is watching (performs the merge in memory and looks) |
+| `src/deploy.py` · `src/tree_cleanup.py` | serial deploy that proves the sha is live; reaper that proves death by patch-id |
+| `src/think.py` · `src/up.py` · `src/tick.py` | Thinker landing and the charter-set diff; the Planner pane; the Executor tick |
+| `src/validate.py` · `src/paid_call.py` · `scripts/vet-dep.mjs` · `src/backup.sh` | the seat route's StructuredOutput; the paid-call cap; the install gate; the restic push and drill |
+| `agents/*.md` + `*.schema.json` | thirteen contracts, ten Output schemas |
+| `src/test_*.py`, `src/test_vet_dep.mjs` | ~580 checks; `./doit test` runs them all |
 
 ### The five ideas that make it work
 
@@ -65,8 +114,7 @@ doit test
    answer returns the failure state, never the pass state.
 5. **Corrections are events, not edits.** A mistake is repaired by an
    operator-only `correction` that names one prior event and overrides fields on
-   it. The mistake and the repair both stay on the record — strictly more than an
-   edit would leave. Corrections are counted on the board, always.
+   it. The mistake and the repair both stay on the record.
 
 ### The merge guard, specifically
 
@@ -78,51 +126,22 @@ landed.**
 
 The gate **performs the merge and looks at the result.** `git merge-tree
 --write-tree` does the real three-way merge in memory and hands back the tree it
-would produce; the gate diffs current main against that tree. Whatever the merge
-would actually remove, it removes — no modelling, no inference.
-
-Two earlier mechanisms were tried here and both were wrong, in the same way.
-One diffed the branch against its recorded base, and was blind to the scar
-above. One diffed against current main and confirmed each candidate against the
-merge-base — which works until a branch has been merged into and kept going, at
-which point git has **several** valid merge-bases and picks one arbitrarily.
-Reproduced: it picked the one lacking the file, the gate said clean, the merge
-deleted it. **Both were reasoning about a merge instead of performing one.**
-
-Removals and reverts are filtered to paths outside the branch's `writes:` grant.
-**Removals under `migrations/` are named regardless** — a deletion there removes
-the evidence along with the artifact, which is what fools every consistency check
-downstream.
+would produce; the gate diffs current main against that tree. Two earlier
+mechanisms reasoned about the merge instead of performing it, and both were
+fooled the same way. Removals under `migrations/` are named regardless of the
+grant.
 
 ---
 
-## What is not here
+## What is not here yet
 
-`design/system-design-v2.md` is the full specification. Against it, this repo is
-**item ① and one guard**. Still to be written, and it is **~4/5 of the total**:
-
-| Missing | Rough size | Kind |
-|---|---|---|
-| Ten sub-agent contracts (the "seats") | 1,100–1,500 lines | **prose** |
-| Their ten output schemas | ~200 lines | schema |
-| Three driver skills — Planner, Executor, Thinker | ~900 lines | **prose** |
-| Six audit scripts | 150–250 lines | code |
-| The rest of the fold's rules (typed ACs, blind grading, wedge queries) | ~250 lines | code |
-
-**A seat is a markdown file, not a program.** Its `tools:` line *is* the sandbox —
-that is the whole isolation mechanism, measured and confirmed. So "write the
-sub-agents" means writing prompts, not building an agent framework.
-
-## Status, honestly
-
-The ledger here has run one real charter: this system building itself. One spec
-is built and its guard has fired on a real merge; two specs are written and not
-picked up. **Four defects have been found by running this code and none of them
-was visible in the unit tests** — which is the argument for the whole design, and
-also the reason to distrust any claim in this file that was not checked.
-
-The backup is **unproven** until you set a destination — the board says so on
-every render, by design.
+The design (`design/system-design-v2.md`) is ahead of the code in the places the
+pilot found. The ranked list is `docs/handoffs/pilot-retro-change-list.md`; the
+largest open items are a `deploy.py` that keeps its full log and separates "the
+gate refused" from "the target broke", a checker generator that lints the spec's
+verification block, owed evidence that can actually be owed, and a per-goal
+charter set. None of those is prose-only; each is a code change with a test and
+each names the pilot entry it answers.
 
 ## Relationship to DO-IT v4.7
 
@@ -130,7 +149,6 @@ every render, by design.
 and used. **This is a ground-up redesign that shares no code with it.** v4.7's
 record is one of the corpora the design was tested against: several of the
 decisions here exist because something in v4.7 failed in a specific, measured way.
-It is a successor, not a fork, and the old repo stands on its own.
 
 ## Reading the design
 

@@ -40,6 +40,7 @@ audit. None of them can run here.
   future `codex` — chosen per ledger root, not per call. The seat backend needs a
   *driver* that is not the operator's fingers (see S2). `cost_usd` on a seat spawn is
   `null` and must render as *unmeasured*, never as `$0.00` (R3 of L-charter-0002).
+- **Fix status (2026-09-15):** **shipped 0.2.0** (`c8c1a8c` + `models.py`): the backend is a first-class seam — `models.toml` names `pane` · `seat` · `claude-p` · `codex` per contract, and `dispatch.py` has all three dispatchable backends. Verified by unit tests and one live `codex exec` smoke; a real contract on codex is not yet run. Still open: `cost_usd: null` rendering as *unmeasured* on the board (`pilot-retro-change-list.md` b-1).
 
 ### S2. The Executor cannot be a tick where the tick cannot spawn a model
 - **Mechanism:** D117 makes the Executor a cron job (`doit tick` → `claude -p --agent
@@ -54,6 +55,7 @@ audit. None of them can run here.
   seat-capable driver exists — e.g. a Codex CLI session that can dispatch — and the
   tick targets it. Until then §3.1's "how it is started, and what keeps it alive" is
   false for any project with the ban.
+- **Fix status (2026-09-15):** **half shipped 0.2.0**: the map declares the Executor a `pane` on this root and the tick refuses (verified on this root, `tick{refused}` 2026-09-15T05:58:31Z). The design text (§3.1/D117) still says the Executor is a tick — open, `pilot-retro-change-list.md` b-1.
 
 ### S3. Three roles in one pane is allowed by the fold and unguarded by anything
 - **Mechanism:** the actor is the filename (D90). Nothing stops one pane from writing
@@ -66,6 +68,7 @@ audit. None of them can run here.
 - **Systemic:** if seat-only is a supported mode, say which role collapses are
   permitted and which are not, and have the fold count role-switches per session id
   on HEALTH (the `session` field is already on every terminal event).
+- **Fix status (2026-09-15):** **open** — the HEALTH role-switch count is `pilot-retro-change-list.md` a-16; which collapses seat-only permits is b-1.
 
 ### S4. The Agent tool cannot enforce a contract's `tools:` line per call
 - **Mechanism:** §4.4 says the `tools:` line *is* the sandbox, enforced by
@@ -86,6 +89,7 @@ audit. None of them can run here.
 - **Systemic:** if the seat backend is real, the contracts must be loadable as agent
   types by the interactive CLI, and `install.sh` should verify that (Active Problem 15's
   `doit doctor`).
+- **Fix status (2026-09-15):** **measured, then closed by 0.2.0**: the harness does load the contracts as Agent types (refreshes on a cadence); the typed spawns lost the seat loop (S18) and 0.2.0 gives every judging contract `Write`+`Bash` and a *Seat route* section so a typed spawn can serve it. `install.sh` verifying loadability (`doit doctor`) is open, a-16.
 
 ### S5. Model substitution changes which safeguard rules apply
 - **Mechanism:** `grader`, `spec-auditor`, `plan-auditor` are `model: claude-fable-5-1`.
@@ -96,6 +100,7 @@ audit. None of them can run here.
 - **Systemic:** the contract's `model:` should be a *preference* the backend maps,
   with the mapping recorded once per ledger root, and `contract_sha256` re-trust
   (D120) keyed on `(contract, model actually used)`.
+- **Fix status (2026-09-15):** **shipped 0.2.0**: `models.toml` per root, `model_requested` vs `model_used` (+ `model_observed`, `model_match`, `first_on_model`) on every terminal event, Fable refused off a pane. Verified by tests. The D120 trust run per (contract, model) is owed: charter 3 is the first.
 
 ### S6. The Planner's own packets are hand-built, and the rule says packets never are
 - **Mechanism:** `packet.py` builds packets for the six roles the *Executor*
@@ -109,6 +114,7 @@ audit. None of them can run here.
 - **Systemic:** add `plan-auditor` (all three stages) and `spec-writer --slot` to
   `packet.py`, with a strip list for the Planner's rationale (the one thing §3.6 makes
   those auditors blind to). Until then the blindness is manual.
+- **Fix status (2026-09-15):** **open** — a-14 (plan-auditor at all three stages and `spec-writer --slot` into `packet.py`, with the rationale strip).
 
 ### S7. Cut-file documentation gap: an empty seam label vs `none`
 - **Mechanism:** `audit.fields()` splits a label's value into names. `Consumes: none`
@@ -117,6 +123,7 @@ audit. None of them can run here.
 - **Pilot:** `Consumes:` / `Produces:` left empty; pre-pass clean.
 - **Systemic:** `planner.md` ① should show the no-seam form; or `split()` should
   treat `none`/`—` as empty.
+- **Fix status (2026-09-15):** **open** — a-16 (`audit.fields` treats `none`/`—` as empty).
 
 ### S8. `deploy-failed` conflates "the gate refused" with "this merge broke it"
 - **Mechanism:** `deploy.py` returns one status for command failure, sha never named,
@@ -130,6 +137,7 @@ audit. None of them can run here.
 - **Systemic:** `doit deploy` needs a distinguishable exit for "the deploy command
   refused before touching the target" (gate) vs "the target changed and the check
   never named the sha" (rollback). Only the second is §5.8's case.
+- **Fix status (2026-09-15):** **open** — a-4 (`deploy-refused` exit 2 vs `deploy-failed` exit 1); measured again as S17 and S30.
 
 ### S9. The seat route had no schema enforcement, and the wrapper never had any of its own
 - **Mechanism:** on the `claude -p` route the CLI enforces `--json-schema`; `dispatch.py`
@@ -142,6 +150,7 @@ audit. None of them can run here.
   to re-emit its object within the limits, which is what the CLI's enforcement does.
 - **Systemic:** the schema is the contract's, so the *wrapper* owns enforcement, never
   the transport. Same rule as `packet.py` owning the Blindness strip.
+- **Fix status (2026-09-15):** **shipped 2026-09-14** (`a8b7b76`); verified on every seat spawn since (the wrapper refused L-spec-writer-0001/0007 on schema).
 
 ### S10. A model cannot count characters; the seat route needs its own StructuredOutput
 - **Mechanism:** on `claude -p` the StructuredOutput tool validates against
@@ -155,6 +164,7 @@ audit. None of them can run here.
 - **Systemic:** the seat prompt template must carry that loop for every role, and
   `run_seat` should accept the bare `<spawn>.output.json` directly (wrapping the
   envelope itself) instead of waiting for a hand-written `result.json`.
+- **Fix status (2026-09-15):** **shipped 2026-09-14** (`9c7ecdb`, `doit validate`); the "every role" half shipped 0.2.0 as the *Seat route* section in every dispatchable contract.
 
 ### S11. The whole-tree "repo status unchanged" check voids spawns on a repo that has crons
 - **Mechanism:** the baseline's finding 2, unfixed: `porcelain()` compares `git status
@@ -171,6 +181,7 @@ audit. None of them can run here.
 - **Systemic:** the check should compare against the spawn's *grant* (the paths it may
   read and must not write), or hash the granted tree, rather than the whole status.
   Declaring volatility is a stopgap that has to be repeated per project.
+- **Fix status (2026-09-15):** **stopgap shipped 2026-09-14** (`9c7ecdb`, `DOIT_REPO_VOLATILE`; verified: L-plan-auditor-0002 ran clean under it). Grant-scoped porcelain is open, a-10.
 
 ### S12. There is no path to file a goal, so an adopted project stays at `goal: null`
 - **Mechanism:** D98 makes `Covers:` the governor's checkable arrow, and `think.py`
@@ -184,6 +195,7 @@ audit. None of them can run here.
 - **Systemic:** a Thinker shape that produces a goal file (title, date, `G<n>`
   requirement ids, out-of-scope seeds) and a `--land-goal` that appends `goal-filed`;
   a HEALTH line when charters exist and no goal does.
+- **Fix status (2026-09-15):** **partly closed on the day**: two `goal-filed` events exist on this ledger, so a filing path was built into `think.py` during the pilot. The HEALTH line and the goal shape's date wording are open, b-8.
 
 ### S13. "The file exists" is not "the contract finished"
 - **Mechanism:** the first seat route read `<spawn>.output.json` as soon as it
@@ -200,6 +212,7 @@ audit. None of them can run here.
 - **Systemic:** every handoff between a driver and a wrapper needs an explicit
   "done" token distinct from the artifact — the same shape as §9.2's "content first,
   event second".
+- **Fix status (2026-09-15):** **shipped 2026-09-14** (`c1ceab5`); verified on L-spec-writer-0002 and every seat spawn after it.
 
 ### S14. The builder's per-criterion rows have no durable home past the card's fifteen lines
 - **Mechanism:** `write_card` renders at most fifteen lines (§5.10) and `p_grader`
@@ -216,6 +229,7 @@ audit. None of them can run here.
   role whose Output carries arrays the next role must test (builder `acs`, reviewer
   `blocking`/`reverify`, charter-reviewer `unrolled_not_built`) needs the same
   sidecar, or the arrays go into the ledger as their own events.
+- **Fix status (2026-09-15):** **builder half shipped 2026-09-14** (`8d2b325`, `L-card-NNNN.json`; verified: L-grader-0001 read all 12 rows). Reviewer / charter-reviewer sidecars open, a-13.
 
 ### S15. An owed criterion has no route to `shipped-owed-evidence`, and K=0 means it could not ride anyway
 - **Mechanism:** `fold.spec_state` derives `accepted` from a `confirmed` verdict plus a
@@ -239,6 +253,7 @@ audit. None of them can run here.
   should not zero `confirmed`; the fold should read *confirmed over the evaluable
   rows* + *owed rows with a future wake_at* as `shipped-owed-evidence`. K must be a
   measured setting, not an unset default that silently forbids the whole state.
+- **Fix status (2026-09-15):** **open** — a-6 (`owed-ac` carries `wake_at`; `cannot-assess` on an owed row does not zero `confirmed`; `owed-met`). Re-measured as S33.
 
 ### S16. The gate's grant parser and the spec-writer's `Writes:` shape disagree
 - **Mechanism:** D115 makes `writes_grant` read the `Writes:` LINE and refuse prose
@@ -253,6 +268,7 @@ audit. None of them can run here.
   on the `Writes:` line, or one per line under it, nothing else), and the spec-auditor
   should check it — a merge gate refusing at merge time is the most expensive place to
   learn the shape.
+- **Fix status (2026-09-15):** **parser shipped 2026-09-14** (`ee9efb2`; verified: the gate re-ran `clean`). The contract statement of the `Writes:` shape is open, b-4.
 
 ### S17. A "known trap" that comes true has no lane row
 - **Mechanism:** the charter and spec both said more pre-existing reds probably sit
@@ -270,6 +286,7 @@ audit. None of them can run here.
   the check never named the sha* (exit 1, `deploy-failed`, rollback); and the Executor
   contract needs the row: refused for an external → `blocked` + `brief`, never revert.
   This is S8 measured, not predicted.
+- **Fix status (2026-09-15):** **open** — a-4 for the script, b-9 for the Executor row. Applied by hand on the day (a `blocked` + `brief`).
 
 ### Operator rulings taken at the end of charter 1 (2026-09-14 ~07:10 UTC)
 - **`DOIT_K=1`** — a charter may close over one owed criterion (the post-merge
@@ -291,6 +308,8 @@ audit. None of them can run here.
   on the same board for the Thinker to cite.
 
 ### Smaller, all real
+*Fix status (2026-09-15): every item here is open — `pilot-retro-change-list.md` a-16, one line and one test each.*
+
 - `doit dispatch --packet ""` reads `.` as the packet and crashes with a traceback
   before allocating a spawn; it should refuse an empty or non-file packet path.
 - A worktree cut from this repository has no `.venv`; the spec-auditor caught it and
@@ -369,10 +388,12 @@ the driver's `S<n>`.*
 - **Systemic:** `thinker.md`'s goal shape (S12) should state *the date orders
   concurrent charters* in the line that asks for it, so the operator is asked for a
   priority, which he has, instead of a deadline, which he may not.
+- **Fix status (2026-09-15):** **open** — b-8 (the goal shape's date line says it orders concurrent charters).
 
 ### T2. `doit alloc` with no kind crashes instead of printing usage
 - **Mechanism:** `fold.py:603` reads `sys.argv[2]` unguarded → `IndexError` traceback.
 - **Pilot:** harmless; `doit help` documents the form. **Patch only.**
+- **Fix status (2026-09-15):** **open** — a-16 (with S19).
 
 ### T3. The record has no per-role convention, and the brief forbade the second role from writing to it
 - **Mechanism:** `think-goals-brief.md` lists this file under *"read, do not edit"*;
@@ -383,6 +404,7 @@ the driver's `S<n>`.*
 - **Systemic:** if the pilot record is the systemic log, every pane role that runs
   during a pilot gets an appended section keyed by its ledger actor id. Same shape as
   the ledger itself: the filename is the actor.
+- **Fix status (2026-09-15):** **adopted**: the retro pane's `R<n>` section below follows it; writing the convention down is b-12.
 
 ### T4. The source material described Yitzy's stream from a v4 lens, and undersold what already flows
 - **Mechanism:** handover §4 frames "waiting on us" as *two open PRs, untriaged, no
@@ -397,6 +419,7 @@ the driver's `S<n>`.*
 - **Systemic:** a handover written from a stamped-ledger world reports queue length;
   a goal in v2 needs delivered-to-prod. The Thinker should re-measure "waiting on us"
   from the far end before writing a goal, and the brief should say so.
+- **Fix status (2026-09-15):** **open** — b-8 (the Thinker re-measures "waiting on us" from the far end).
 
 ### T5. A charter that predates its goal can never cite it (`Covers:` is write-once)
 - **Mechanism:** `L-charter-0001` landed `Covers: none` under `goal: null` (§12.2);
@@ -413,6 +436,7 @@ the driver's `S<n>`.*
   already-filed charter, or whether a goal may list `Delivered by: L-charter-NNNN`
   against a requirement so the diff reads it. Either is a one-line rule; today
   there is none and the diff will be wrong forever on this project.
+- **Fix status (2026-09-15):** **open** — b-8 (`Delivered by:` on a goal requirement).
 
 ### T6. "How relevant is this still?" cannot be answered against a prod that is 60 specs behind master
 - **Mechanism:** the operator's second reaction to Goal A: the named defects are old
@@ -430,6 +454,7 @@ the driver's `S<n>`.*
   "re-measure on the new sha" requirement as a standing pattern; D96's probe is the
   Planner's tool for it, and the Thinker brief should say that relevance of inherited
   defects is a probe, not a reading.
+- **Fix status (2026-09-15):** **open** — b-8 (re-measure-on-the-new-sha as a standing requirement).
 
 ### T7. The multi-dev ingest port exists in the design and not on this box
 - **Mechanism:** §4.8/D13–D19 answer the operator's "how does Yitzy's stuff enter v2?"
@@ -449,6 +474,7 @@ the driver's `S<n>`.*
   ledger. Also: Vercel marks every docs-only inbound PR red because the commit
   author's GitHub login is not linked to his Vercel member account — a project-side
   fact, but the same class as S11: an external signal the operator has to read past.
+- **Fix status (2026-09-15):** **open** — a-15 (`doit ingest <pr>` with a `decision` event as the gate).
 
 ### T8. Goal requirement ids are not namespaced, and `--land` without `--goal` picks the newest goal
 - **Mechanism:** `Covers:` carries bare ids (`G2`); `think.py:goal_path` with no
@@ -464,6 +490,7 @@ the driver's `S<n>`.*
   `goal:` field and `--land` refuses to diff without one when more than one goal is
   on the ledger. Multi-goal is the normal state of a real project; the single-goal
   assumption is the pilot's, not the design's.
+- **Fix status (2026-09-15):** **open** — a-9 (`--land` refuses without `--goal` when >1 goal; namespaced ids).
 
 ### T9. Two goals can be delivered by one charter, and the diff cannot say so
 - **Mechanism:** L-goal-0002 G1 (Yitzy's twelve merged specs live on prod) is delivered
@@ -475,6 +502,7 @@ the driver's `S<n>`.*
 - **Systemic:** same fix as T5/T8 — a `Delivered by:` line on a goal requirement that
   the diff reads, so cross-goal and pre-goal delivery are both first-class instead of
   permanent false findings.
+- **Fix status (2026-09-15):** **open** — b-8 (with T5).
 
 ### T10. The charter-set is written against a board that moves under it, and that was fine
 - **Mechanism:** while L-charter-0002 (the backlog deploy) was being written, the Executor
@@ -487,6 +515,7 @@ the driver's `S<n>`.*
   precise enough to write the charter from without reading the CI log.
 - **Systemic:** nothing to change — the ledger did its job. Recorded because it is the
   first time a Thinker session consumed an Executor event mid-session and the shape held.
+- **Fix status (2026-09-15):** **nothing to change** (c) — the record says so.
 
 ### Thinker session summary (L-thinker-0002, closed 2026-09-14 ~07:10 UTC)
 - Filed: `L-goal-0001` (profitability, 2026-09-15, G1–G5) · `L-goal-0002` (Yitzy, 2026-09-14, G1–G6).
@@ -510,6 +539,7 @@ the driver's `S<n>`.*
 - **Systemic:** `think.land` should build the set from every `charter-filed` event whose
   charter cites the goal (plus the ones passed now), not from `argv`. The design's word
   is *charter set*; the code's is *this call*.
+- **Fix status (2026-09-15):** **open** — a-9 (with S20).
 
 ### T12. An `open` charter is invisible on the board
 - **Mechanism:** `doit states` shows L-charter-0002/0003/0004 as `open`; `doit` (the
@@ -520,6 +550,7 @@ the driver's `S<n>`.*
 - **Systemic:** the board needs a `CHARTERS OPEN (n)` line (charter-filed, no
   `plan-written`), the mirror of `CHARTER CLOSE`. A Planner that "does not wait to be
   asked" (§3.5) has to be able to see what it should pick up.
+- **Fix status (2026-09-15):** **open** — a-9 (`CHARTERS OPEN (n)` on the board).
 
 ## Driver pane, second sitting — charters 0004 and 0002 (started 2026-09-14 ~07:11 UTC, a fresh pane)
 
@@ -538,12 +569,14 @@ the driver's `S<n>`.*
   contract, so the wrapper should accept the Agent tool's structured return as the
   Output (D116's `structured_output` field by another route), and the pane should never
   type a finding.
+- **Fix status (2026-09-15):** **shipped 0.2.0**: `Write`+`Bash` on `plan-auditor`, `spec-auditor`, `grader`, `reviewer`, `charter-reviewer`, and a *Seat route* section in every dispatchable contract (the sub-agent writes `seat/<spawn>.output.json` and runs `doit validate` itself). **Unverified on a live typed spawn** — charter 3 is the test. On the codex backend the loop does not exist at all (`--output-schema -o`).
 
 ### S19. `doit alloc` treats any argument as a kind — `doit alloc -h` allocated `L--h-0001.md`
 - **Mechanism:** `alloc <kind>` builds `L-<kind>-NNNN` with no validation of the kind
   token (T2 is the no-argument crash; this is its sibling).
 - **Pilot:** the junk content file was deleted by hand (no event references it).
 - **Systemic:** validate `kind` against the id kinds §2.8 names, and honour `-h`.
+- **Fix status (2026-09-15):** **open** — a-16.
 
 ### S20. The charter-set packet was rebuilt by importing `think.py` — the fix T11 asks for, done by hand
 - **Mechanism:** T11 — each `--land` call overwrites `charter-set-<goal>.md` with only
@@ -557,6 +590,7 @@ the driver's `S<n>`.*
 - **Systemic:** T11's fix — `land` builds the set from every `charter-filed` event citing
   the goal — plus a `doit think --audit-set <goal>` that rebuilds and dispatches without
   landing anything.
+- **Fix status (2026-09-15):** **open** — a-9 (`land` builds the set from every `charter-filed` citing the goal; `doit think --audit-set`).
 
 ### S21. Declarations land as events typed by their term, and nothing reads them back by that name
 - **Mechanism:** a spawn's `declarations` land as one event per term (`charter-gap`,
@@ -566,6 +600,7 @@ the driver's `S<n>`.*
 - **Pilot:** the plan audit ran without the cut-audit's three declaration lines.
 - **Systemic:** minor; the packet builders (S6) should read the term-typed events, and
   `dispatch.py` should document the shape once.
+- **Fix status (2026-09-15):** **open** — a-14.
 
 ### T13. "Human-only" was read as "human keystrokes", and the operator corrected it
 - **Mechanism:** the v4 handover says *"Never run `ingest_inbound_spec.sh` yourself. Surface
@@ -581,6 +616,7 @@ the driver's `S<n>`.*
   decision event on the ledger*, checked by the command, not a flag on a shell line.
   That is what makes it auditable and what lets any pane run it once the decision
   exists.
+- **Fix status (2026-09-15):** **open** — a-15 (with T7).
 
 ### T14. The driver pane cannot be told anything except by typing into it
 - **Mechanism:** the ruling on the deploy was appended as a `decision` on
@@ -590,6 +626,7 @@ the driver's `S<n>`.*
 - **Systemic:** `DECIDED WITHOUT YOU` already exists for decisions; a `decision` whose
   subject is a charter another pane is driving should surface there for that pane on
   its next fold. Verify whether it does; the pilot could not wait to see.
+- **Fix status (2026-09-15):** **open** — a-17: verify first, fix only if it fails.
 
 ### S22. A charter's Intent can be false about production and nothing in the pipeline checks it
 - **Mechanism:** L-charter-0002's Intent — "Production serves `1afd6273c` while master is sixty
@@ -607,6 +644,7 @@ the driver's `S<n>`.*
   the "external" is our own box: `/version` is a claim, `find -newer` is a measurement. The
   Thinker contract's five sections have no "measured, not read" requirement for the Intent's
   premise; the spec-auditor's `false-premise` category exists one level too late.
+- **Fix status (2026-09-15):** **open** — b-6 (a charter Intent that names a production state carries a probe).
 
 ### S23. The spec's Verification block IS the checker, generated verbatim — and a `;` in it inverted the gate
 - **Mechanism:** `packet.py::verify_script` turns the spec's fenced §9 block into
@@ -625,6 +663,7 @@ the driver's `S<n>`.*
   `;`, `||` or newline-separated statement inside the gated chain; absolute interpreter — and
   refuse the packet on a violation. The Executor's hand-authored script was the wrong remedy
   and the generator is the right place.
+- **Fix status (2026-09-15):** **open** — a-5 (`verify_script` lints the block; `BASE` pinned at build time).
 
 ### S24. A builder that saves evidence under `seat/<its own spawn id>…` poisons the grader packet
 - **Mechanism:** the builder saved its AC10 droplet observation as
@@ -637,6 +676,7 @@ the driver's `S<n>`.*
 - **Systemic:** two fixes — the builder contract should name where evidence files go
   (`content/<spec>-…`, never `seat/`), and `packet.py` should print a refusal to stderr and exit
   non-zero so a caller cannot mistake it for a path.
+- **Fix status (2026-09-15):** **half true already**: `packet.die()` is `sys.exit(str)`, which writes to stderr with exit 1 — the REFUSED path that reached stdout needs a look (a-16). The builder contract naming `content/<spec>-…` for evidence is open, b-5.
 
 ### S25. A charter with no code unit has no lane path — the Executor ran it by hand
 - **Mechanism:** L-charter-0002's footprint is "the deploy record, the merge of 1439, and the
@@ -651,6 +691,7 @@ the driver's `S<n>`.*
 - **Systemic:** the design needs an "operational charter" shape — units whose builder is the
   Executor (or the operator) and whose card is an evidence file — or a rule that such work is a
   goal's requirement delivered by a `decision` + `evidence` pair, not a charter.
+- **Fix status (2026-09-15):** **fold half shipped 2026-09-14** (`dd8d993`, with S35). The operational-charter shape in the design is open, b-7.
 
 ## Run log — second sitting (2026-09-14 07:11 → , driver pane; every seat spawn `cost_usd` null)
 
@@ -695,6 +736,7 @@ the driver's `S<n>`.*
 - **Systemic:** a Planner probe (D96) for any charter whose done-condition is a CI check-run
   should be exactly that enumeration; and a fail-fast CI is the wrong instrument for a
   done-condition of "green whatever reds remain" (the charter-set audit's finding 3 said so).
+- **Fix status (2026-09-15):** **dropped for v2** (c) — Albert Scott's CI plugin, filed on their side; the Planner-probe rule survives as b-11.
 
 ### S27. A local "enumerate every red" run is not CI: box state makes 503 false NEWs out of 1
 - **Mechanism:** the pane ran the full suite on the builder box to list every NEW red at once.
@@ -710,6 +752,7 @@ the driver's `S<n>`.*
 - **Systemic:** a probe whose external is "CI" must run ON CI; the Planner contract's D96 should
   say so, and `doit` could own the `gh workflow run … full_run=true` line as the canonical
   "enumerate reds" probe for this repository.
+- **Fix status (2026-09-15):** **open** — b-11 (a probe whose external is CI runs on CI). The local run was discarded on the day.
 
 ### S28. The pane made its own S23 mistake: a `;` in a shell chain dispatched a spawn on a packet with no fix list
 - **Mechanism:** transcribing the spec-audit Output (S18) failed (the JSONL transcript's JSON block
@@ -725,6 +768,7 @@ the driver's `S<n>`.*
   `spec-auditor` `spawn-done` but zero `audit-finding` events since the last `spec-written` — an
   empty fix list on a rework round is never right; and `dispatch --seat` should write
   `spawn-started` only when the pane stamps `meta.json`, or record `spawn-abandoned` on SIGTERM.
+- **Fix status (2026-09-15):** **open** — a-11 (rework packet refuses on zero findings; `spawn-abandoned` on SIGTERM). The transcription half is closed by S18's 0.2.0 fix.
 
 ### S29. Wall-clock: one small fix spec costs ~2 hours through v2, and the operator's verdict is "terrible"
 - **Measured (second sitting, 07:11 → 13:10 UTC, ~6 h):** three merges to master, zero deploys.
@@ -746,6 +790,7 @@ the driver's `S<n>`.*
   hand here, under a recorded decision); (4) fail-fast CI plus one-red-per-charter is the
   worst possible pairing — the probe row (S27) fixes it; (5) seat transcription (S18) costs a
   human-shaped mistake per audit — the StructuredOutput return must be the Output.
+- **Fix status (2026-09-15):** (1) spec ≤ 400 lines: open, b-3 · (2) packets carry the AC table + diff: open, a-7 · (3) literal reworks without a spawn: open, b-3 · (4) fail-fast pairing: b-11 · **(5) shipped 0.2.0** — the seat route no longer needs the pane to type anything.
 
 ### S30. The first real `doit deploy` failed at the target's migration step, and the script threw away the one line that says why
 - **Mechanism:** `deploy.py` runs the handed-in command, keeps only a `TAIL` of its output in
@@ -768,6 +813,7 @@ the driver's `S<n>`.*
   build-rollback (`git revert`) from target-rollback (the target's own command, handed in as a
   `--rollback` argument and RUN by the script when `--check` fails, §5.8) — S8's split, now
   measured on a real failure.
+- **Fix status (2026-09-15):** **open** — a-4 (full log under `logs/`, refuse a second launch before opening files, target rollback as an argument).
 
 ### S31. The checker dies at merge, and the commit trailer leaks the builder model to the grader
 - **Mechanism (a):** every `verify-<spec>.sh` link keys on `$(git merge-base HEAD master)`; after the
@@ -783,6 +829,7 @@ the driver's `S<n>`.*
   substituted in, never `merge-base` at run time); the grader packet should scrub
   `Co-Authored-By`/`Claude-Session` trailers from any commit text it hands over, or the AC10
   shape should point at the card and the history file only.
+- **Fix status (2026-09-15):** **open** — a-5 (`BASE` pinned) and a-8 (trailer scrub).
 
 ### S32. Someone ran `doit tick` on this ledger: two metered Executor spawns, three seat spawns nobody served, and a ghost spec
 - **Measured:** `L-executor-0003` (11:27 box time) and `L-executor-0004` (12:00) carry
@@ -802,6 +849,7 @@ the driver's `S<n>`.*
   a 30-minute hole by construction; (2) the tick's own spawn must honour the same seat/metered
   ruling as its children (it did not: children went seat, the Executor went metered);
   (3) `doit` needs an actor identity on every append beyond the filename (who ran this tick?).
+- **Fix status (2026-09-15):** **shipped 0.2.0** — the mechanism is R1 below (the wrapper's own atexit poke); `poke()` and `tick.main` now read `models.toml` and refuse; **verified on this root** (`tick{refused}` 2026-09-15T05:58:31Z). Actor identity on every append (3) is open, a-16.
 
 ### S33. The only operator close for a built, merged spec is `spec-closed`, and the fold then calls it `closed-unbuilt`
 - **Mechanism:** L-spec-0001 and L-spec-0002 were built, graded (11/12 and 10/12), reviewed
@@ -830,6 +878,7 @@ the driver's `S<n>`.*
   `closed-unbuilt`; (3) an allocation with no `spec-written` after its spawn fails should not
   bind to the charter's L2 conjunct — the fold should treat it as `void`, or `alloc` should
   be reversible by the actor that allocated it.
+- **Fix status (2026-09-15):** **open** — a-6 (`owed-met`; `closed-shipped`; a void allocation does not bind L2).
 
 ### S34. `doit deploy` can never mark a deploy landed when the target prints a short sha — and would have written a false `deploy-failed` on a deploy that landed
 - **Mechanism:** `deploy.py::live()` is `code == 0 and sha[:12] in out`. The `--sha` is the
@@ -855,6 +904,7 @@ the driver's `S<n>`.*
   under `logs/` as it is produced, with the event carrying the path, not a tail; (3) a
   `deploy-started` with neither `landed` nor `failed` after the wrapper is gone should be
   visible on the board as its own row, not silently absent.
+- **Fix status (2026-09-15):** **open** — a-4 (`sha[:7]`; streamed log; a `deploy-started` with no terminal event on the board).
 
 ### S35. A spec-less operational charter could not fold L2-complete, and a seat spawn launched from the wrong directory strands its events under a second project
 - **Mechanism, half one:** the L2 conjunct read `mine and all(...)`: a charter with zero specs
@@ -881,6 +931,7 @@ the driver's `S<n>`.*
   should refuse (or warn loudly) when `cwd.name` differs from the subject's project;
   (3) the board needs an `IGNORED (other project)` count so a filtered read cannot silently
   hide events on the subject it is displaying.
+- **Fix status (2026-09-15):** **half one shipped 2026-09-14** (`dd8d993`, verified: L-charter-0002 folded L2-complete). Half two (`subject_project` wins; cwd mismatch warning; IGNORED count) open, a-12.
 
 ### T15. An idle pane answers from memory, and its memory is a day old
 - **Mechanism:** asked on 2026-09-15 whether "the charters got done", the Thinker
@@ -895,6 +946,7 @@ the driver's `S<n>`.*
   applied to the pane's own claims.
 
 ---
+- **Fix status (2026-09-15):** **open** — b-10 (the Thinker re-folds after any idle gap).
 
 ## Retro pane — 2026-09-15 (a third actor; appended, never interleaved, per T3)
 
