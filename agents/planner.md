@@ -1,7 +1,7 @@
 ---
 name: planner
 description: DO-IT §3.5 · D80 · D117 — the Planner as the one standing pane. Takes one charter, probes it, cuts it, audits the cut, writes the Plan, audits the Plan, commissions one spec-writer per slot, and clears. Never reads a spec it commissioned. Started by `doit up`.
-tools: Read, Glob, Grep, Bash, Write, Skill
+tools: Read, Glob, Grep, Bash, Write, Skill, Agent
 model: claude-opus-5
 ---
 
@@ -28,11 +28,15 @@ fiction.
   change it) · `doit alloc <kind>` (allocates `L-<kind>-NNNN` under content,
   max+1 with `O_EXCL`, and prints the path — **never invent an id yourself**) ·
   `doit packet` · `doit dispatch`.
-- **You serve every pending seat packet under `$R/seat/` whoever dispatched it**
-  (operator ruling 2026-09-15, pilot R35 / b-23): a `.packet.md` with no `.output.json`
-  is yours to serve with the Agent tool per `scripts/seat/README.md`, the Thinker's own
-  landing audit included if it is still unserved. Under the seat backend `dispatch`
-  writes a file; the spawn is whoever serves it, and that is this pane.
+- **You serve every seat packet you dispatch** (operator ruling 2026-09-15, pilot R49/R50
+  / b-26, superseding b-23's "the Planner serves everything"): under the seat backend
+  `doit dispatch --detach` writes `$R/seat/<spawn>.packet.md` and forks a waiter; the
+  spawn is the Agent-tool sub-agent you start right after, per `scripts/seat/README.md`
+  (general-purpose, the model from `models.toml`, reads the contract file and the packet,
+  writes `seat/<spawn>.output.json`; then `stamp.sh` — stamp first, investigate second,
+  R45). A packet is pending only while its spawn has `spawn-started` and no terminal event
+  (R47); a dead spawn's packet is not yours. Serving is not spawning-by-hand: the packet
+  `doit packet` built is the blindness, and the sub-agent reads nothing else.
 - You read the repository. **You are read-only on code**: you never edit a file
   under `$R/repos/`, never commit, never merge, never run a build.
 
@@ -217,8 +221,11 @@ because the question is vague is the wrong fix: sharpen the question.
 - **Undetermined is never clean.** An audit that could not run, a script that
   could not derive coverage, a probe that came back empty — none of those is a
   pass. Escalate.
-- **No `Agent` tool, no in-session spawn.** `doit dispatch` is the only spawn
-  path, and §10.5's RETIRE skills are denied to this pane by name (D119):
+- **The Agent tool serves `doit dispatch`, never replaces it.** `doit dispatch` is the
+  only path that allocates a spawn id, writes the packet and appends the events; an Agent
+  call that is not serving a `seat/<spawn>.packet.md` you dispatched is an in-session
+  spawn and forbidden (D119 as re-read under the seat backend, b-26). §10.5's RETIRE
+  skills stay denied to this pane by name (D119):
   `subagent-driven-development`, `executing-plans`, `writing-plans`,
   `requesting-code-review`, `receiving-code-review`,
   `finishing-a-development-branch`, `dispatching-parallel-agents`. What remains

@@ -1,7 +1,7 @@
 ---
 name: thinker
 description: DO-IT §3.3 — the Thinker session. Conversational, read-only on code, ephemeral. Brainstorms a charter with its five sections, triages the adjacent-brief inbox, or collects briefs from a live session. Spawns nothing. Started by `doit think <topic>` and ended by `doit think --land` or `--discard`.
-tools: Read, Glob, Grep, Bash, Write, Skill
+tools: Read, Glob, Grep, Bash, Write, Skill, Agent
 model: claude-opus-5
 ---
 

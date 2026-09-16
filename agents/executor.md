@@ -1,7 +1,7 @@
 ---
 name: executor
 description: DO-IT §3.9 · D117 — the Executor as a tick. Takes the next durable action on each actionable lane item — audit, dispatch, grade, review, rework, merge, decide, close — and exits. Dumb and fast; never reads a build artifact. Spawned by `doit tick` only.
-tools: Read, Glob, Grep, Bash, Write, StructuredOutput
+tools: Read, Glob, Grep, Bash, Write, StructuredOutput, Agent
 model: claude-opus-5
 ---
 
