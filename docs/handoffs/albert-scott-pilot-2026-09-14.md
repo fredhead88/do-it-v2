@@ -1881,3 +1881,38 @@ dispatched 13:17:52Z, `--timeout 15`). Ranked by what it cost or hid.
 - **The improvement, precisely stated:** I self-corrected on suspicion rather than needing a relay or a second, independent measurement to trigger the check. The defect itself — treating "the Planner hasn't moved" as "the ball is still in its court" rather than "check my own board line first" — is unchanged and is the third measured instance in one session (L-charter-0005's rework round, L-charter-0006's rework round, now L-charter-0006's spec-audit dispatch). Three instances of the identical shape in one session is a habit, not a slip.
 - **Systemic:** a-41's fix (render the lane owner beside each spec state) is necessary but, on this evidence, not sufficient by itself — even with the correct board line available on request (`executor.md:44` never moved), the failure mode is not reading the board/contract proactively on an idle tick, only reactively after minutes-to-hours have passed. A cheap mitigation available today, without waiting on a-41: the standing Monitor's own poll script could also grep the board for `WRITTEN, NOT PICKED UP` entries older than some threshold and surface them as its own event line, the same way it already surfaces new seat packets — turning "idle, nothing to serve" into "idle, but check this."
 - **Fix status:** open — a-41 stands; adding the WRITTEN-staleness line to `seatpoll.sh` (or its board-parity successor) is a same-session, low-cost mitigation worth landing before the next idle stretch.
+
+### R62. A good research spawn was recorded `spawn-failed` because `doit alloc` and `doit dispatch` allocate from two different counters (L-planner-0010, 2026-09-16 ~09:46Z)
+- **Measured:** `doit alloc research` handed back the content path `content/L-research-0003.md`
+  (the content counter's max+1). `doit dispatch research --path content/L-research-0003.md` then
+  allocated the *spawn* id `L-research-0004` from the spawn counter — the two counters are not the
+  same counter and had drifted by one, because `L-research-0003` already existed as a spawn id on
+  L-charter-0006 while `content/L-research-0003.md` had never been taken. The research contract
+  wrote its findings to `content/L-research-0004.md` — a path derived from its own spawn id, not
+  the path the packet named — and the wrapper's post-hoc path check failed the spawn:
+  `spawn-failed · why="path mismatch: packet named L-research-0003.md, output says
+  content/research-0004.md"`. The work itself is complete and good: 31 KB of findings, all six
+  defects traced to `file:line`, output card `answered: yes / contamination: false`, VALID under
+  `doit validate research`. `content/L-research-0003.md` is left as a 0-byte alloc stub. So the
+  ledger records a failure, no `research-filed` event exists, and a fold-only reader cannot find
+  the artifact that was produced.
+- **The repair is operator-only, which is the second half of the defect.** `correction` is
+  restricted to `actor: operator` (`fold.py:159`, D111), so the Planner cannot name its own
+  mis-pathed artifact on the ledger. The attempt appended as `L-planner-0010.jsonl:1` and was
+  counted on HEALTH as one of the "unauthorized events recorded and ignored" — an audit trail of
+  the attempt, which is the designed behaviour, but it means the findings' real path survives only
+  in this record and in the Planner's handover, not in the fold.
+- **Systemic:** two fixes, both small. (a) `dispatch` should take the `--path` it was given as the
+  spawn's write target and put it in the packet as the only path, or `alloc` and the spawn counter
+  should be one counter — today a Planner can do everything right and still lose the spawn.
+  (b) A `--path` mismatch where the file that *was* written validates is a mis-filing, not a
+  failure; the wrapper could record `spawn-done` with the observed path and a `path_moved` field
+  rather than `spawn-failed`, so good work stops being thrown away on a naming slip.
+- **Also measured, separately:** the Agent-tool `model` override did not reach the sub-agent. This
+  pane served the packet with `model: sonnet` (per the operator's standing sub-agent model floor,
+  which overrides `models.toml`'s `research = haiku`), and the terminal event stamped
+  `model_used: claude-haiku-4-5-20251001` with `model_observed: true` — i.e. the transcript's own
+  assistant lines ran on Haiku. Either the override is dropped on the seat route or `usage.py`
+  resolved the wrong transcript. Worth one measurement before anyone relies on a per-serve model
+  choice again; the standing floor is currently unenforceable from the serving pane.
+- **Fix status:** open — no change-list id yet; R62(a) and R62(b) are the two candidates.
