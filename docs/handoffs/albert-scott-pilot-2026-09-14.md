@@ -1808,3 +1808,64 @@ dispatched 13:17:52Z, `--timeout 15`). Ranked by what it cost or hid.
   tooling gap.
 - **Fix status:** open — a-41 (shared with R56); practice note: an audited-with-findings spec is
   mine to move on sight, not on notification.
+
+### R58. `DOIT_LEDGER_FILE` doesn't survive a Bash-tool shell boundary, and `doit gate`/`doit append` silently fall back to the wrong file when it's unset (L-executor-0006, 2026-09-16 ~04:15Z)
+- **Measured:** the operator's boot command exports `DOIT_LEDGER_FILE=L-executor-0006.jsonl` as a
+  prefix to the top-level `claude -n executor` invocation, but each Bash-tool call in this harness
+  is its own fresh shell — exported vars from the pane's own launch environment do not propagate
+  into it, and `~/.do-it/env.sh` never sets `DOIT_LEDGER_FILE` itself. Earlier in this session I
+  compensated by hand, prefixing every `doit` invocation with `DOIT_LEDGER_FILE=L-executor-0006.jsonl`
+  (37 occurrences in this session's transcript). After a context compaction/resume, that habit did
+  not survive the handoff: I resumed with only `source ~/.do-it/env.sh`, and three `doit gate` calls
+  landed their `merge-gate-clean` events on `L-executor-0001.jsonl` (`merge_gate.py:426`'s own
+  fallback) and three `doit append shipped` calls landed on `L-operator-local.jsonl`
+  (`fold.py:848`'s fallback) — as actor `operator`, not `executor`.
+- **This silently broke the board, not just the audit trail.** `fold.py:24`'s `EMITS` restricts
+  `"shipped": {"executor"}` (the same mechanism R-documented earlier for `owed-ac`/spec-writer). A
+  `shipped` event from actor `operator` is invisible to `spec_state()`'s `accepted` check, so all
+  three specs stayed shown as `reviewing` on the board after a real, pushed merge — nothing said so
+  out loud; the board just quietly never advanced. Caught only because I went looking for *why* the
+  board hadn't moved, not from any error or warning.
+- **Not the same bug as R51 (seat-poll lapse) but the same shape:** a pane-level piece of state that
+  the operator's boot command sets once, that this harness's tool boundaries don't actually
+  preserve, with no runtime check that would notice its absence — only silent misfiling.
+- **Fix applied this session:** re-emitted the three `shipped` events correctly (`export
+  DOIT_LEDGER_FILE=L-executor-0006.jsonl` in the same command as the `doit append`, not relying on
+  a prior `source`), and recorded a `decision` event on the correct ledger documenting the gap
+  rather than rewriting the two misfiled events (append-only). Not proposing to edit `L-executor-0001.jsonl`
+  / `L-operator-local.jsonl` after the fact.
+- **Systemic:** `doit`'s own top-level dispatcher could assert `DOIT_LEDGER_FILE` is set (and matches
+  the caller's declared role) before running any subcommand that appends, rather than each
+  subcommand independently defaulting to a different fallback file. Absent that, the practice fix is
+  mechanical: every `doit gate`/`doit append`/`doit dispatch` call in this pane explicitly sets
+  `DOIT_LEDGER_FILE=L-executor-0006.jsonl` in the same command, every time, permanently — not just
+  "when I remember to."
+- **Fix status:** open (tooling); practice fix applied and now standing for the rest of this
+  session.
+
+### R59. L-spec-0011 was merged to master with zero reviewer ever dispatched against it (L-executor-0006, 2026-09-16 ~04:18Z)
+- **Measured:** while chasing R58's board-stall symptom, `fold.read_events()` filtered to
+  `L-spec-0011` showed a `verdict` (the grade) but no `review` event type at all, and a grep across
+  every `~/.do-it/events/L-reviewer-*.jsonl` file for `L-spec-0011` returned nothing — no reviewer
+  spawn was ever dispatched for this spec. It went grade → merge, skipping the lane's own
+  grade → review → merge order, and I did not notice at merge time because `doit gate` only checks
+  file-footprint cleanliness against `main`, not lane-order completeness.
+- **Root cause, best read:** three wave-1 specs were graded and reviewed in close succession
+  (L-spec-0012, L-spec-0013 reviewers dispatched and served; L-spec-0011's grader ran far longer —
+  660s vs ~100-250s for the others — and its completion notification landed last), and somewhere in
+  tracking "three outstanding, waiting on the slowest one" I merged all three together once the
+  slowest (the grade) came back, without checking that a *review* — a materially different lane
+  step — existed for each.
+- **Fix applied this session:** did not paper over it. Rebuilt a worktree at L-spec-0011's own
+  merge-tip commit (`git worktree add ... 486ef2a7b`, detached HEAD — the branch itself was already
+  deleted post-merge), built and dispatched a real `reviewer` packet (`L-reviewer-0013`) against it,
+  and held for its verdict before treating the spec as `accepted` — even though the code was already
+  live on `master`. A finding from this out-of-order review would need a follow-up fix commit, not a
+  revert of an already-merged, already-shipped-to-others'-work branch base.
+- **Systemic:** neither `doit gate` nor the board's `spec_state()` cross-checks that a `review` event
+  exists before a spec is merge-eligible — the Executor's own lane discipline is the only gate. A
+  cheap fold-level check ("does this subject have a `verdict` with no matching `review` before its
+  `merge-gate-clean`?") would have caught this at gate time instead of at board-stall investigation
+  time.
+- **Fix status:** open (tooling — add the missing-review check to `doit gate`); this instance
+  corrected in-session before charter close.
