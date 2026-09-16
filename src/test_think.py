@@ -208,7 +208,7 @@ ok(not any(e["type"] == "charter-filed" and e["actor"] == "thinker"
 fm = dispatch.frontmatter("thinker")
 ok(fm["name"] == "thinker" and fm["model"] == "claude-opus-5", f"frontmatter: {fm}")
 tools = [t.strip() for t in fm["tools"].split(",")]
-ok("Skill" in tools and "Agent" not in tools and "StructuredOutput" not in tools,
+ok("Skill" in tools and "Agent" in tools and "StructuredOutput" not in tools,
    f"a session, not a contract: KEEP skills, no spawn path, no schema: {tools}")
 body = (real_agents / "thinker.md").read_text()
 for line in ("doit alloc charter", "doit think --land", "doit think --discard", "review_path",

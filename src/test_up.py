@@ -99,7 +99,7 @@ fm = dispatch.frontmatter("planner")
 ok(fm["name"] == "planner" and fm["model"] == "claude-opus-5", f"frontmatter: {fm}")
 tools = [t.strip() for t in fm["tools"].split(",")]
 ok("Skill" in tools, "the pane keeps §10.5's KEEP skills — the deny list is what removes the rest")
-ok("Agent" not in tools, "no Agent tool: `doit dispatch` is the only spawn path")
+ok("Agent" in tools, "the Agent tool serves the pane's own `doit dispatch` seat packets (b-26); dispatch stays the only spawn path")
 ok("StructuredOutput" not in tools, "a pane has no schema; its Output is the files and events it writes")
 body = (real_agents / "planner.md").read_text()
 for step in ("cut-written", "plan-written", "doit dispatch plan-auditor", "doit alloc spec",
