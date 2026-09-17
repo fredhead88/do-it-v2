@@ -13,11 +13,11 @@ system, and §4.9 routes those to a human rather than to an unattended process.
 `test_up.py` holds that as a check, because it is exactly the rule a later edit
 would helpfully break.
 """
-import os, pathlib, sys
+import importlib, os, pathlib, subprocess, sys, time
 
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-import dispatch, fold, tick  # noqa: E402
+import dispatch, fold, models, tick  # noqa: E402
 
 DOIT = HERE.parent / "doit"
 
@@ -78,6 +78,238 @@ def main(print_only=False):
     if print_only:
         return cmd, env
     os.execvpe(cmd[0], cmd, env)
+
+
+# ── the Executor's own supervising loop (L-charter-0021 R1/R2/R12/R15) ───────
+# A second, INDEPENDENT loop. `main()` above is the Planner's and is untouched:
+# the Executor pane had a launcher only in an operator's hands, and nothing
+# re-read the ledger or restarted it when it ended.
+
+# Wave-1 seams this unit consumes but does not own. Their module has not landed
+# on this root yet (measured 2026-09-17: `pane_name` and `decide_overdue` are
+# defined nowhere under src/), so they are bound late, by name, and each is
+# overridable by the module attribute below — which is also how a test stubs one.
+SEAM_MODULES = ("pane_identity", "panes", "board", "relay")
+PANE_NAME = None                      # pane_name(ledger_file) -> str
+DECIDE_OVERDUE = None                 # decide_overdue(events) -> list[dict]
+_SLEEP = time.sleep                   # the backoff, stubbable — never a real wait in a test
+
+
+def _seam(name, hook):
+    """Late-bind a wave-1 seam. This module's own `hook` attribute wins (a test, or
+    a wiring line); otherwise the first module on sys.path that produces it. None
+    when nothing does yet: wave 1 may land after this unit, and a launcher that
+    dies on a missing sibling is worse than one that says the sibling is missing."""
+    fn = globals().get(hook)
+    if callable(fn):
+        return fn
+    for mod in SEAM_MODULES:
+        try:
+            m = importlib.import_module(mod)
+        except Exception:
+            continue
+        fn = getattr(m, name, None)
+        if callable(fn):
+            globals()[hook] = fn
+            return fn
+    return None
+
+
+def _stem(ledger_file):
+    """`L-executor-0031.jsonl` -> `L-executor-0031`. The FALLBACK for `pane_name`
+    only — this is not that seam and must never be read as it (AC1): it is the
+    same `ledger.stem` `dispatch.alloc` already returned, so the pane's name and
+    its ledger actor cannot drift apart (D90) while wave 1 is in flight."""
+    s = str(ledger_file)
+    return s[:-len(".jsonl")] if s.endswith(".jsonl") else s
+
+
+def executor_deny_list():
+    """The Executor pane's `--disallowedTools`: §10.5's RETIRE by name (D119), plus
+    the suite runs and the commit its contract says it must not perform by hand
+    (R15a). Every Bash entry is the `Bash(<cmd>:*)` PREFIX form `dispatch.BUILDER_DENY`
+    already ships — the only shape measured to fire (docs/handoffs/prompt-tier-
+    contracts.md, 2026-09-08). A mid-path glob nobody has watched fire would be
+    decoration; a spelling a prefix cannot reach is R15(b)'s porcelain backstop's
+    job, not a pattern's. Prevention here is best-effort and says so."""
+    return [f"Skill({s})" for s in tick.RETIRE] + [
+        "Bash(pytest:*)", "Bash(python3 -m pytest:*)", "Bash(python -m pytest:*)",
+        "Bash(npm test:*)", "Bash(npm run test:*)", "Bash(doit test:*)",
+        "Bash(./doit test:*)", "Bash(node:*)", "Bash(git commit:*)"]
+
+
+def executor_prompt(ledger_file, board):
+    """The pane is SELF-SEEDED: this is passed as claude's positional prompt, so
+    there is no blinking cursor waiting for an operator to type the lane in."""
+    stem = _stem(ledger_file)
+    return (f"{stem}: you are the Executor pane on this root, and this is your whole seed.\n"
+            f"Take the next durable action on the board below, then the next. You write no "
+            f"product code and run no suite: `doit dispatch` is the only build path, and your "
+            f"deny list holds you to it.\n"
+            f"End yourself at a quiet point — `up.quiet_point(fold.read_events(), '{stem}')` is "
+            f"that predicate: your own handover (`doit append message-sent {stem} ...`) is on "
+            f"your ledger file AND nothing is in flight. Ending is safe: every fact you acted on "
+            f"is durable ledger state, the next pane re-derives this same board, and the loop "
+            f"starts it the moment you exit — no keystroke, no wait.\n\n" + board)
+
+
+def _pane_argv(ledger_file, board):
+    """`claude -n <ledger stem> --agent executor ...` (R12). Interactive by
+    construction: no -p, no --json-schema, no ANTHROPIC_API_KEY (spec 572, D121)."""
+    name = (_seam("pane_name", "PANE_NAME") or _stem)(ledger_file)
+    return ["claude", "-n", name, "--agent", "executor",
+            "--disallowedTools", ",".join(executor_deny_list()),
+            "--dangerously-skip-permissions", executor_prompt(ledger_file, board)]
+
+
+def _from_pane(src, stem):
+    """An event's `_src` (`<file>:<line>`) is this pane's own. Prefix alone would
+    read L-executor-0031's handover as L-executor-0003's."""
+    s = str(src or "")
+    return s.startswith(stem) and s[len(stem):len(stem) + 1] in (".", ":")
+
+
+def quiet_point(events, pane):
+    """Is ending safe for this pane? True only once its OWN ledger file carries a
+    `message-sent` handover (L-adr-0043's four event types; no fifth is invented
+    here) AND nothing is in flight.
+
+    NOT pure: `tick.in_flight` appends one `spawn-stale` into `tick.TICK` per dead
+    spawn, by that function's own shipped contract. That append is idempotent
+    (`in_flight` counts `spawn-stale` in its own `ended` set) and is the only write
+    this predicate can cause.
+
+    A pane is never in flight against ITSELF: the loop's own `spawn-started` for
+    the running pane is dropped before `in_flight` sees the list, or the pane it
+    describes could never reach a quiet point and the restart loop never turns."""
+    stem = _stem(str(pane).rsplit("/", 1)[-1])
+    if not any(e.get("type") == "message-sent" and _from_pane(e.get("_src"), stem) for e in events):
+        return False
+    return not tick.in_flight([e for e in events if e.get("spawn") != stem])
+
+
+def _open_builds(events):
+    """Lowercased subjects with a `build-started` and no terminal event — the
+    worktrees a detached builder is legitimately writing into right now. Derived
+    here rather than via `tick.in_flight` on purpose: R15(b) must cause no write,
+    and `in_flight` emits."""
+    ended = {e.get("spawn") for e in events
+             if e.get("type") in ("build-done", "spawn-done", "spawn-failed", "spawn-stale")
+             and e.get("spawn")}
+    return {str(e.get("subject")).lower() for e in events
+            if e.get("type") == "build-started" and e.get("spawn") not in ended and e.get("subject")}
+
+
+def _repo_dirs(root):
+    """R15(b)'s two globs, exactly: `repos/*` (the master checkouts the Executor
+    contract forbids it to edit) and `worktrees/*/*` (that contract's own
+    `WT="$R/worktrees/<project>/<spec, lowercased>"` layout)."""
+    root = pathlib.Path(root)
+    return sorted(set(root.glob("repos/*")) | set(root.glob("worktrees/*/*")))
+
+
+def _porcelain(p):
+    try:
+        return dispatch.porcelain(p)
+    except OSError:
+        return None                    # gone or unreadable: undetermined, and undetermined is never clean
+
+
+def _snapshot(root, paths=None):
+    """path -> porcelain, for each watched repo. NOT_A_REPO (a plain project
+    directory) and None (undetermined) are kept as themselves and can never
+    produce a diff: a difference you could not establish is not an edit."""
+    return {str(p): _porcelain(p) for p in (_repo_dirs(root) if paths is None else paths)}
+
+
+def _repo_edits(before, after, ledger, events):
+    """R15(b), the detective half. A path in one snapshot and not the other (a
+    `git worktree add`, a `doit reap`) is not a diff — only paths in both are
+    compared. A worktree with an OPEN `build-started` is skipped: a detached
+    builder writes there by grant, and including it would drown this signal in
+    builder work. Everything left is a hand on a repo the Executor was told not
+    to touch, and gets one `repo-edit` on that pane's own ledger file."""
+    open_builds, out = _open_builds(events), []
+    for path in sorted(set(before) & set(after)):
+        b, a = before[path], after[path]
+        if b is None or a is None or dispatch.NOT_A_REPO in (b, a) or b == a:
+            continue
+        p = pathlib.Path(path)
+        if p.parent.parent.name == "worktrees" and p.name.lower() in open_builds:
+            continue
+        changed = sorted(set(a.splitlines()) ^ set(b.splitlines()))
+        dispatch.emit(ledger, {}, "repo-edit", subject=ledger.stem, ledger=ledger.name,
+                      path=path, changed=changed[:20])
+        out.append(path)
+    return out
+
+
+def _settle_overdue(events):
+    """A6: once per cycle, immediately before this cycle's pane is launched, and
+    never under print_only (the seam writes, by its producer's contract)."""
+    fn = _seam("decide_overdue", "DECIDE_OVERDUE")
+    if fn is None:
+        print("up: decide_overdue has not landed on this root (wave 1) — 0 of this cycle's "
+              "overdue questions were settled; the pane starts on an unsettled board", file=sys.stderr)
+        return []
+    return list(fn(events) or [])
+
+
+def executor_loop(root, interval, print_only=False, max_cycles=None):
+    """Forever: settle what a default now settles, derive the board, launch a named,
+    self-seeded, tool-restricted Executor pane, wait for it to end itself, record
+    any repo it touched, and start the next one — with no keystroke between.
+
+    `interval` is the backoff when the pane will not START (and AC4's bound), never
+    a sleep between a healthy pane's exit and the next one's launch. `max_cycles`
+    is a test-only seam; no caller outside this file passes it."""
+    root = pathlib.Path(root)
+    contract = dispatch.AGENTS / "executor.md"
+    if not contract.exists():
+        sys.exit(f"up: no executor contract at {contract} — the pane is the contract (D116)")
+    # The root's ruling first, and loudly (mirrors tick.main's own guard): a root whose
+    # map says claude-p is the TICK's to drive, and a second driver here would duplicate it.
+    mp = models.load(root / "models.toml")
+    if mp is not None and models.backend_of("executor", mp) != "pane":
+        why = (f"executor backend is {models.backend_of('executor', mp)!r} under "
+               f"{root / 'models.toml'}; executor_loop supervises a pane and nothing else (L-adr-0035)")
+        print(f"up: refused — {why}", file=sys.stderr)
+        sys.exit(2)
+    install(contract)
+    (root / "events").mkdir(parents=True, exist_ok=True)
+    (root / "logs").mkdir(parents=True, exist_ok=True)
+    cycles = 0
+    while max_cycles is None or cycles < max_cycles:
+        cycles += 1
+        ledger = dispatch.alloc(root / "events", "L-executor-", ".jsonl")
+        ev = fold.read_events()
+        if not print_only:
+            _settle_overdue(ev)
+            ev = fold.read_events()          # its decisions are on the board this pane reads
+        board = fold.render(ev, *fold.fold(ev))
+        cmd = _pane_argv(ledger.name, board)
+        env = {**os.environ, "DOIT_ROOT": str(root), "DOIT_LEDGER_FILE": ledger.name,
+               "DOIT_GATE_LEDGER_FILE": ledger.name,
+               "PATH": f"{HERE.parent}:{os.environ.get('PATH', '')}"}
+        print(f"# executor pane: {ledger.stem} · {' '.join(cmd[:-1])}")
+        if print_only:
+            return cmd, env
+        before = _snapshot(root)
+        base, t0 = {"spawn": ledger.stem}, time.time()
+        dispatch.emit(ledger, base, "spawn-started", subject=ledger.stem, role="executor",
+                      backend="pane", pane=cmd[cmd.index("-n") + 1])
+        try:
+            code = subprocess.run(cmd, env=env, cwd=str(root)).returncode
+        except OSError as e:
+            dispatch.emit(ledger, base, "spawn-failed", subject=ledger.stem,
+                          why=f"{type(e).__name__}: {str(e)[:200]}")
+            print(f"up: the executor pane would not start ({e}) — retrying in {interval}m", file=sys.stderr)
+            _SLEEP(float(interval) * 60)
+            continue
+        edits = _repo_edits(before, _snapshot(root), ledger, fold.read_events())
+        dispatch.emit(ledger, base, "spawn-done", subject=ledger.stem, exit_code=code,
+                      seconds=round(time.time() - t0, 1), repo_edits=len(edits))
+        print(f"# executor pane {ledger.stem} ended (exit {code}) · {len(edits)} repo-edit — next pane now")
 
 
 if __name__ == "__main__":
