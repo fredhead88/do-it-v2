@@ -18,6 +18,12 @@ from datetime import datetime, timezone
 
 ROOT = pathlib.Path(os.environ.get("DOIT_ROOT", pathlib.Path.home() / ".do-it"))
 EVENTS, BOARD = ROOT / "events", ROOT / "board.md"
+# Where the harness writes one json per live session — the directory pane-identity
+# reads to answer "which panes are up" (R14). Measured on this box 2026-09-17:
+# ~/.claude/sessions/<pid>.json. Overridable so a test never depends on the
+# operator's real sessions, and so a relocated harness is a config change.
+SESSIONS = pathlib.Path(os.environ.get("DOIT_SESSIONS_DIR",
+                                       pathlib.Path.home() / ".claude" / "sessions"))
 PROJECT = os.environ.get("DOIT_PROJECT")          # §9.1/D93: a filter, not a second read
 
 # Who may emit what. A type absent here is open to any actor (§2.5).
@@ -88,7 +94,28 @@ EMITS = {"verdict": {"grader"}, "review": {"reviewer"}, "shipped": {"executor"},
          # `cut-written` is: a seat that could write `planner-ended reason=l1-complete`
          # about a Planner it is not would retire a charter nobody planned, and a seat
          # that could write `planner-started` would keep one off the queue forever.
-         "planner-started": {"planner"}, "planner-ended": {"planner"}}
+         "planner-started": {"planner"}, "planner-ended": {"planner"},
+         # L-adr-0043's four new types. Each is scoped to exactly the actor(s) the
+         # requirement that created it names, and no wider — EMITS is this system's
+         # only authorization gate, and a name opened too far is a stamp waiting to
+         # happen.
+         # R4: carry-over is the OPERATOR's own command. Not the Thinker (which
+         # would be re-deciding what a v4 record already decided) and not the
+         # Planner (which would be cutting a spec that is already cut).
+         "spec-carried": {"operator"},
+         # R8: a conflict is a builder RE-DISPATCH, and the Executor is the only
+         # seat that dispatches. A builder recording its own rework attempt would
+         # be counting its own collisions.
+         "conflict-rework": {"executor"},
+         # R13/L-adr-0037: the three PANE contracts, and only those. A dispatched
+         # sub-agent does not address a pane — it returns to the seat that spawned
+         # it — so a `message-sent` from one is a stamp about a channel it does not
+         # have.
+         "message-sent": {"planner", "executor", "thinker"},
+         # R15/L-adr-0038: the Executor is the only seat with a repository in reach
+         # and the only one forbidden to edit it, which is exactly why the event
+         # exists and why nobody else may write one on its behalf.
+         "repo-edit": {"executor"}}
 
 # §4.4's `May declare` line, one contract at a time — the fold authorizes (§4.6).
 # A declaration lands as an event TYPED BY ITS TERM (dispatch.events_for), so a
@@ -274,6 +301,249 @@ def open_escalations(events):
         if e.get("type") in ("escalation-blocking", "decision", "unblocked") and e.get("subject"):
             last[e["subject"]] = e
     return [e for e in last.values() if e["type"] == "escalation-blocking"]
+
+
+# R3's shape, in one place, read by the refusal (append), by the health count
+# (malformed_escalations) and by the board (open_questions) — three readers, one
+# rule, so a refused write and a counted row can never disagree about what
+# "malformed" means.
+ESCALATION_TRIPLE = ("default", "deadline", "revert")
+
+
+def _has(e, k):
+    """A field is PRESENT when it carries a non-blank string. `default=` with an
+    empty value is the exact shape a hurried pane writes, and treating it as
+    present would let the refusal be satisfied by typing the field name."""
+    return bool(str(e.get(k) or "").strip())
+
+
+def escalation_ok(e):
+    """§4.9/R3: an escalation-blocking carries `default`+`deadline`+`revert` — all
+    three, because a default with no deadline never fires and a deadline with no
+    revert fires into something nobody can undo — OR it names the irreversible act
+    that forbids a default at all (`irreversible`). The disjunction is the whole
+    rule: "wait indefinitely is a wedge, not a default" cannot apply to a deploy
+    that has already gone out."""
+    return all(_has(e, k) for k in ESCALATION_TRIPLE) or _has(e, "irreversible")
+
+
+def malformed_escalations(events):
+    """Escalations already ON the ledger that carry neither shape. `append()`
+    refuses these at the door, but the door is not the only entrance:
+    `dispatch.py` and `tick.py` write `escalation-blocking` through
+    `dispatch.emit()`, which never passes through here, and the ledger is
+    append-only so every pre-R3 escalation is permanent input to every future
+    fold. Counting them is the only enforcement those two call sites have until a
+    spec in their own footprint updates them."""
+    return [e for e in events if e.get("type") == "escalation-blocking" and not escalation_ok(e)]
+
+
+def open_questions(events):
+    """Every open escalation and every overdue question, each with the fields the
+    operator needs to ACT rather than to go and look: the default that will be
+    applied, the deadline it applies at, the undo, and how long it has been
+    waiting.
+
+    The undo column is asymmetric on purpose. An ESCALATION carries either a
+    `revert` or the `irreversible` act that is the reason it has no default; a
+    QUESTION has neither — its mandatory four are asks/blocks/default/deadline
+    (§ "Escalation is a ledger append, not a message") and the revert belongs to
+    the `decision` that answers it. So a question row says so in words rather
+    than rendering an empty column the reader must interpret, and it is never
+    padded with an invented revert."""
+    rows = []
+    for e in open_escalations(events):
+        rows.append({"kind": "escalation", "subject": e.get("subject", "?"),
+                     "asks": e.get("why") or "escalation",
+                     "default": e.get("default"), "deadline": e.get("deadline"),
+                     "revert": e.get("revert"), "irreversible": e.get("irreversible"),
+                     "malformed": not escalation_ok(e),
+                     "age_days": age_days(e), "src": e["_src"]})
+    for e in overdue_questions(events):
+        rows.append({"kind": "question", "subject": e.get("subject", "?"),
+                     "asks": e.get("asks", "?"),
+                     "default": e.get("default"), "deadline": e.get("deadline"),
+                     "revert": "revert n/a — question", "irreversible": None,
+                     "malformed": False,
+                     "age_days": age_days(e), "src": e["_src"]})
+    return rows
+
+
+def question_line(r):
+    """One NEEDS YOU row from one open_questions row. A malformed escalation is
+    rendered DIFFERENTLY from a compliant one — same section, but the reader must
+    not have to notice an absence: the marker names what is missing, because the
+    row cannot be acted on until someone supplies it."""
+    if r["malformed"]:
+        return (f"{r['subject']} · {r['asks']} · ⚠ malformed — carries neither "
+                f"default+deadline+revert nor a named irreversible act "
+                f"({r['src']}) · {r['age_days']:.1f}d")
+    if r["kind"] == "question":
+        return (f"{r['subject']} · unanswered past {r['deadline'] or 'no deadline'}"
+                f" · {r['asks']} · default {r['default'] or '⚠ none'}"
+                f" · {r['revert']} · {r['age_days']:.1f}d")
+    # Both may be present — an escalation can carry a revert AND still name an act
+    # that is already irreversible. Neither is dropped: the revert the operator
+    # would run and the thing it cannot undo are different facts.
+    undo = " · ".join(([f"revert {r['revert']}"] if _has(r, "revert") else [])
+                      + ([f"irreversible: {r['irreversible']}"] if _has(r, "irreversible") else []))
+    absent = "n/a — irreversible act named"
+    return (f"{r['subject']} · {r['asks']}"
+            f" · default {r['default'] or absent}"
+            f" · deadline {r['deadline'] or absent}"
+            f" · {undo} · {r['age_days']:.1f}d")
+
+
+def decide_overdue(events):
+    """§4.9's other half, mechanised: a REVERSIBLE overdue question — one carrying
+    a recorded default — is settled BY that default, as a `decision` event, and
+    the existing DECIDED WITHOUT YOU block shows it without one line of new
+    rendering. An irreversible one (no default) is untouched and stays the
+    operator's, which is the entire point of the distinction.
+
+    ★ Re-reads the ledger immediately before each write and never trusts the
+    `events` snapshot it was handed — append()'s own rule ("never trust the write
+    — re-read", §9.2 rule 4) extended to a write that DEPENDS on a read. Two
+    back-to-back calls therefore append exactly one decision, even when the second
+    is fed the stale pre-first-call snapshot a buggy caller would still be
+    holding. Returns what it appended, which on a settled ledger is []."""
+    out = []
+    for q in overdue_questions(events):
+        if not _has(q, "default"):
+            continue                       # irreversible: no default to apply
+        if not any(x["_src"] == q["_src"] for x in overdue_questions(read_events())):
+            continue                       # answered since the snapshot — including by us
+        out.append(append(["decision", q.get("subject") or "-", f"ref={q['_src']}",
+                           "why=applied the recorded default, unanswered past deadline: "
+                           + str(q.get("default"))]))
+    return out
+
+
+def free_standing(events):
+    """R6: an accepted spec that names NO charter, with the review tier it was
+    accepted at. A free-standing spec merges, ships and is accepted through the
+    same gate as any other — and that promise is unobserved unless the board can
+    say how many took the route and at what depth, which is the number that says
+    whether the lane is being used as designed or as a way around the gate."""
+    specs = fold(events)[0]
+    out = []
+    for sid, s in sorted(specs.items()):
+        if s["state"] != "accepted" or s["charter"]:
+            continue
+        tier = next((e.get("depth") for e in reversed(s["evs"])
+                     if e["type"] == "review" and e.get("depth")), None)
+        out.append({"id": sid, "tier": tier})
+    return out
+
+
+class Closable(dict):
+    """The five named conjuncts, PLUS a three-value positional read for the
+    consumer already on main.
+
+    Reconciled at the conflict re-dispatch (L-adr-0044). `src/tick.py` — landed,
+    green, and outside this unit's `Writes:` — calls
+    `(getattr(fold, "closable", None) or closable_fallback)(events, c)` and
+    unpacks a 3-tuple `(accepted, fixpoint, review_owed)`; its own fallback
+    docstring says it stands in "until `the-fold-and-the-board` lands the real one
+    in `fold`". Landing a bare 5-key dict there does not raise a shape error a
+    reader could act on — it either unpacks to three KEY STRINGS (every one
+    truthy: a charter would silently leave the lane) or dies with a ValueError in
+    `tick.lane()`. Neither is a report.
+
+    So the positional read exists and is FOLDED EXACTLY as `closable_fallback`
+    folds it — `owed_within_k` rides with `all_accepted`, `no_open_briefs` rides
+    with `sweep_derived` — because those are the conjuncts each one belongs to,
+    and a triple that dropped them would report a charter closable that `fold()`
+    holds at `L1-complete`. The five names remain the contract; the triple is a
+    lossless projection of it, not a second answer.
+
+    Only `__iter__` is overridden: `dict(c)`, `{**c}`, `c.keys()`, `c.items()`,
+    `in`, `[]` and `json.dumps` all keep dict semantics (measured). The one
+    changed behaviour is bare `for x in c`, which yields the three booleans
+    rather than key strings — read `.keys()` when you want names."""
+    ORDER = ("all_accepted", "sweep_derived", "review_owed")
+
+    def __iter__(self):
+        return iter((self["all_accepted"] and self["owed_within_k"],
+                     self["sweep_derived"] and self["no_open_briefs"],
+                     self["review_owed"]))
+
+
+def _closable(charter_evs, mine):
+    """§3.11's L2-complete predicate, the five conjuncts the code actually
+    requires — NOT the three the seam prose names. `owed <= K` and "no open
+    in-scope brief" are carried out with the other three precisely so that no
+    caller can reconstruct L2 without them: a consumer that ANDs only the three
+    named facts closes a charter over owed evidence and unanswered briefs.
+
+    Polarity is pinned here and nowhere else. `review_owed` is TRUE when a
+    charter-review is still owed, so L2-complete is
+    `all_accepted and sweep_derived and owed_within_k and no_open_briefs and not
+    review_owed` — written once so neither a builder nor a consumer picks it."""
+    types = {e["type"] for e in charter_evs}
+    return Closable(
+        all_accepted=all(s["state"] in ("accepted", "shipped-owed-evidence", "dropped",
+                                        "closed-unbuilt", "closed-shipped") for s in mine),
+        sweep_derived="sweep-fixpoint" in types,
+        owed_within_k=sum(1 for s in mine if s["state"] == "shipped-owed-evidence") <= K,
+        no_open_briefs=not open_briefs(charter_evs),
+        review_owed=charter_review(charter_evs) != "charter-review-complete")
+
+
+def l2_complete(c):
+    """The one place the five conjuncts are ANDed. Callers read this, never their
+    own conjunction of the dict."""
+    return (c["all_accepted"] and c["sweep_derived"] and c["owed_within_k"]
+            and c["no_open_briefs"] and not c["review_owed"])
+
+
+def closable(events, charter):
+    """The L2 predicate for ONE charter, callable before the ledger carries
+    `sweep-fixpoint` — or any event at all — for it. `fold()` derives charter
+    state through the same `_closable`, so this can never drift from the board.
+
+    `charter` is the charter ID, matching every other id-taking function in this
+    file — or one of `fold()`'s own charter dicts, which is what the landed
+    `tick.lane()` passes and what `tick.closable_fallback` already accepts
+    (`charter["id"] if isinstance(charter, dict) else charter`). Taking both is
+    the reconciliation, not a second signature: an unhashable dict reaching
+    `charter in charters` is a TypeError inside the fold, which is the least
+    useful place for it to surface.
+
+    A charter the ledger has never named is not an error: it returns the honest
+    all-false-but-the-vacuous-ones answer rather than raising, because "is this
+    closable yet" is a question asked BEFORE the work, not only after it."""
+    cid = charter["id"] if isinstance(charter, dict) else charter
+    specs, charters, _, by_subject = fold(events)
+    if cid in charters:
+        return Closable(charters[cid]["closable"])
+    mine = [s for s in specs.values() if s["charter"] == cid and s["state"] != "void"]
+    return _closable(by_subject.get(cid, []), mine)
+
+
+def _cell(d, *keys):
+    """The first of `keys` the producer actually carries, else `?`. A key present
+    but None is NOT a value — panes.py sets `status` to None when the harness file
+    omits it, and rendering the word `None` would read as a measurement."""
+    for k in keys:
+        v = d.get(k)
+        if v is not None:
+            return v
+    return "?"
+
+
+def _panes():
+    """(module, None) or (None, why-not). `src/panes.py` is pane-identity's
+    footprint and a CONCURRENT wave-1 unit (L-adr-0044), so this module must run
+    whether or not it has merged yet — and must SAY which, because a board that
+    silently omits its live-pane section is indistinguishable from a board with no
+    live panes. Same lazy-import idiom as caps() above, for the same reason: the
+    import is paid for only by the caller that needs it."""
+    try:
+        import panes                                       # lazy: a concurrent unit
+        return panes, None
+    except Exception as x:                                 # noqa: BLE001
+        return None, f"src/panes.py not importable ({type(x).__name__}: {x}) — pane-identity, L-adr-0044"
 
 
 def caps():
@@ -659,17 +929,17 @@ def fold(events):
         mine = [s for s in specs.values() if s["charter"] == cid and s["state"] != "void"]
         types = {e["type"] for e in c["evs"]}
         owed = sum(1 for s in mine if s["state"] == "shipped-owed-evidence")
+        # R11: the predicate lives in `_closable` now, not inline here — one
+        # implementation, reachable by a caller that needs to ask before the
+        # sweep, and no second copy to drift. Derivation is unchanged, K included.
+        c["closable"] = _closable(c["evs"], mine)
         if cid in retracted:
             c["state"] = "retracted"
         # An operational charter (S25/S35: a deploy, a drill) has NO specs — its
         # deliverable is a record. `all()` over an empty set is True, so such a
         # charter closes on the operator's l1-complete + the sweep fixpoint + a
         # complete charter review, exactly the three things that ARE its lane.
-        elif (all(s["state"] in ("accepted", "shipped-owed-evidence", "dropped",
-                                 "closed-unbuilt", "closed-shipped") for s in mine)
-              and "sweep-fixpoint" in types and owed <= K
-              and not open_briefs(c["evs"])
-              and charter_review(c["evs"]) == "charter-review-complete"):
+        elif l2_complete(c["closable"]):
             c["state"] = "L2-complete"
         elif "l1-complete" in types:
             c["state"] = "L1-complete"
@@ -743,10 +1013,11 @@ def render(events, specs, charters, ignored, by_subject):
         L.extend("  " + r for r in rows)
         L.append("")
 
-    block("NEEDS YOU", [f"{e.get('subject','?')} · {e.get('why','escalation')}"
-                        for e in open_escalations(events)]
-          + [f"{e.get('subject','?')} · unanswered past {e.get('deadline','no deadline')}"
-             f" · {e.get('asks','?')}" for e in overdue_questions(events)])
+    # R3: the row carries what it takes to DECIDE — the default that will be
+    # applied, the deadline, the undo or the irreversible act that is the reason
+    # there is no default, and the age. A row that says only "this is blocked"
+    # sends the operator to the ledger to find out what blocking means.
+    block("NEEDS YOU", [question_line(r) for r in open_questions(events)])
     block("BLOCKED", [f"{e.get('subject','?')} · {e.get('why','?')} · owner "
                       f"{e.get('owner') or '⚠ NOBODY'} · {age_days(e):.1f}d" for e in open_blocks])
     block("WRITTEN, NOT PICKED UP", [f"{s['id']} · {s['age']:.1f}d{flag(s)}" for s in pick("written")])
@@ -810,6 +1081,41 @@ def render(events, specs, charters, ignored, by_subject):
     block("SPEND", [spend_row(m, r) for m, r in sorted(spend_by.items())]
           + [f"unmeasured: {spend_unmeasured} spawn(s) carry no usage at all"])
 
+    # LIVE PANES — R14, the sanctioned TWELFTH section (§8.3's ten, plus SPEND at
+    # retro step 9). Anchored POSITIONALLY: last block, immediately before the
+    # HEALTH list, never at a line number, so a block merged in elsewhere in
+    # render() cannot move it and it cannot move one.
+    #
+    # ★ src/panes.py is a CONCURRENT unit (L-adr-0044). The import is lazy and
+    # its absence is a STATED unavailability, never a crash and never silence:
+    # the board is the one surface the operator reads, and a render() that raises
+    # because a sibling has not merged yet takes every other section with it.
+    panes_mod, panes_err = _panes()
+    if panes_mod is None:
+        pane_rows = [f"unavailable — {panes_err}"]
+    else:
+        try:
+            # ★ Each cell via .get with a `?` fallback: the Plan's Seams pin
+            # live_panes' per-pane keys in PROSE only, so a key-name mismatch at
+            # merge must degrade to a visible `?` rather than a KeyError.
+            #
+            # ★★ Reconciled at merge (L-adr-0044, the conflict re-dispatch): the
+            # LANDED src/panes.py names two of those cells `last_event_age_days`
+            # and `status`, where the Seams prose said "age of its last event" and
+            # "harness status". Both spellings are read, landed name first — the
+            # producer's own key is authoritative, and dropping the prose name
+            # would silently un-test the shape this unit was specified against.
+            # Measured before this line existed: a real board rendered `last event
+            # ? · ?` for both live panes.
+            pane_rows = [f"{p.get('name','?')} · {p.get('contract','?')} · {p.get('cwd','?')}"
+                         f" · {p.get('ledger_file','?')}"
+                         f" · last event {_cell(p, 'last_event_age_days', 'age_days')}"
+                         f" · {_cell(p, 'status', 'harness_status')}"
+                         for p in panes_mod.live_panes(SESSIONS, events)]
+        except Exception as x:                       # noqa: BLE001 — see above
+            pane_rows = [f"unavailable — panes.live_panes raised {type(x).__name__}: {x}"]
+    block("LIVE PANES", pane_rows)
+
     drill = max((ts(e["ts"]) for e in events if e.get("type") == "restore-verified"), default=None)
     health = [f"restore drill: {'never run — the backup is unproven' if not drill else f'{(NOW-drill).days}d ago'}"]
     # The degrade half of the block above (L-adr-0033). It lands HERE rather than at
@@ -848,6 +1154,39 @@ def render(events, specs, charters, ignored, by_subject):
     if (ov := [e for e in events if e.get("type") == "install-override"]):
         health.append(f"dependency install overrides: {len(ov)} "
                       f"(last: {ov[-1].get('subject','?')}) — §6.7b: the count says the cooldown is set wrong")
+    # R3 — escalations already on the ledger that the append path would refuse.
+    # `dispatch.py` and `tick.py` do not go through append(), and the ledger is
+    # append-only, so this count is the ONLY enforcement reaching those writes.
+    # A standing line: zero is the measurement that says the refusal is holding.
+    me = malformed_escalations(events)
+    health.append(f"malformed escalations: {len(me)} — carry neither default+deadline+revert"
+                  " nor a named irreversible act (R3)"
+                  + (f" (last: {me[-1].get('subject','?')} · {me[-1]['_src']})" if me else ""))
+    # R15/L-adr-0038 — the Executor does not edit a repository. A session that
+    # should read zero says so when it does not, plainly and with no threshold:
+    # the count IS the finding.
+    re_ = [e for e in events if e.get("type") == "repo-edit"]
+    health.append(f"repo-edit events: {len(re_)} — the Executor does not edit a repository (L-adr-0038)"
+                  + (f" (last: {re_[-1].get('subject','?')} · {re_[-1].get('path','?')})" if re_ else ""))
+    # R13/L-adr-0037 — "a message that never became a record". The count is
+    # pane-identity's to compute; unavailable is stated, never silently zero,
+    # because a zero nobody measured reads exactly like a clean one.
+    pm, perr = _panes()
+    try:
+        health.append(f"unrecorded messages: {pm.unrecorded_messages(events)}"
+                      " — a message carrying a decision or a finding that no later event names"
+                      if pm is not None else
+                      f"unrecorded messages: unavailable — {perr}")
+    except Exception as x:                                 # noqa: BLE001
+        health.append(f"unrecorded messages: unavailable — panes.unrecorded_messages raised "
+                      f"{type(x).__name__}: {x}")
+    # R6 — the free-standing lane, observed. A standing line for the same reason
+    # as the two above: "nobody used it" and "nobody measured it" are different
+    # facts and must not render the same.
+    fs = free_standing(events)
+    health.append(f"free-standing accepted specs: {len(fs)} — accepted with no charter"
+                  + (" (" + ", ".join(f"{s['id']} at {s['tier'] or '⚠ no tier'}" for s in fs) + ")"
+                     if fs else ""))
     if (iw := [e for e in events if e.get("type") == "install-warned"]):
         health.append(f"installs allowed on an inconclusive check: {len(iw)} "
                       f"(last: {iw[-1].get('subject','?')}) — §10.2: open, but recorded")
@@ -902,6 +1241,23 @@ def append(argv):
                 e[k] = v
         else:
             e[k] = v
+    # ★ R3, and it is CONTENT BEFORE EVENT (§9.2 rule 3) applied to the event's own
+    # fields: an escalation-blocking with no default, no deadline and no revert is
+    # a wedge dressed as a record — nothing fires, nothing can be undone, and the
+    # lane waits indefinitely, which §4.9 says is not a default. Refused at the
+    # door, with the missing requirement NAMED: the Executor's and Planner's
+    # documented commands are one field short today (their own contracts are
+    # sibling footprints), so the operator must see WHY rather than a bare
+    # non-zero exit. Nothing is written — the raise precedes the open().
+    # Binds `escalation-blocking` ONLY: a `question`'s mandatory four are
+    # asks/blocks/default/deadline and its revert belongs to the answering
+    # decision, so append() gains no new rule for it.
+    if e["type"] == "escalation-blocking" and not escalation_ok(e):
+        raise SystemExit(
+            f"refused: escalation-blocking {e['subject']} carries neither "
+            "default= AND deadline= AND revert= (a reversible escalation) nor "
+            "irreversible=<the act that forbids a default> (an irreversible one). "
+            "Nothing was written. (R3)")
     path.parent.mkdir(parents=True, exist_ok=True)
     line = json.dumps(e, sort_keys=True)
     with open(path, "a") as fh:
