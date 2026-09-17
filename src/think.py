@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """think — open a Thinker session, and land what it produced (§3.3).
 
-  think.py <topic>                 open `claude -n think-<topic> --agent thinker`
+  think.py <topic>                 open `claude -n L-thinker-NNNN --agent thinker`
+                                   (the pane is named after its own ledger file,
+                                   so a message to that actor has a pane to land on)
   think.py --land FILE [FILE …]    check each charter, append charter-filed,
                                    fire the charter-set audit (D98)
   think.py --discard <topic>       end with nothing kept, on the record
@@ -22,7 +24,7 @@ import argparse, os, pathlib, re, subprocess, sys
 
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-import audit, dispatch, fold, tick, up  # noqa: E402
+import audit, dispatch, fold, panes, tick, up  # noqa: E402
 # The requirement-id machinery is `audit`'s, and it is one implementation used at
 # two levels (§3.6): units against their charter there, the charter set against the
 # goal here. `section` reads a heading's body; `LISTED`/`ID` are the stable-id forms.
@@ -45,11 +47,16 @@ def die(msg):
     sys.exit(f"think: {msg}")
 
 
-def pane_cmd(topic):
+def pane_cmd(name):
     """Named, so the session is findable in `claude agents`, in /resume and in the
     terminal title (§3.3) — and §8.9 infers the `creative` category from exactly
-    that name, which is the only reason that counter is derivable at all."""
-    return ["claude", "-n", f"think-{topic}", "--agent", "thinker",
+    that name, which is the only reason that counter is derivable at all.
+
+    `name` is the pane's name, not the topic: it is the ledger stem this session
+    writes as (`panes.pane_name(ledger.name)`), so the address a message is sent
+    to and the actor the fold derives from the filename (D90) are one string. An
+    operator-typed `think-<topic>` was addressable by nobody."""
+    return ["claude", "-n", name, "--agent", "thinker",
             "--disallowedTools", ",".join(f"Skill({s})" for s in tick.RETIRE),
             "--dangerously-skip-permissions"]
 
@@ -161,8 +168,11 @@ def open_session(topic, print_only=False):
     ledger = dispatch.alloc(fold.EVENTS, "L-thinker-", ".jsonl")
     env = {**os.environ, "DOIT_LEDGER_FILE": ledger.name,
            "PATH": f"{HERE.parent}:{os.environ.get('PATH', '')}"}
-    cmd = pane_cmd(topic)
-    print(f"# thinker: {ledger.stem} · {' '.join(cmd)}")
+    # The pane is named after the ledger allocated two lines up, and after
+    # nothing else: `-n` and DOIT_LEDGER_FILE are the same id in the same call,
+    # so a message addressed to the actor the fold derives lands on this pane.
+    cmd = pane_cmd(panes.pane_name(ledger.name))
+    print(f"# thinker: {ledger.stem} · {topic} · {' '.join(cmd)}")
     if print_only:
         return cmd, env
     os.execvpe(cmd[0], cmd, env)
@@ -183,8 +193,14 @@ def main(argv=None):
         # are different states. §3.3: discarding must cost what landing costs.
         if not a.topic:
             die("--discard names the topic it is discarding")
-        fold.append(["think-discarded", f"think-{a.topic}"])
-        print(f"# discarded think-{a.topic} — nothing kept")
+        # The record names the LEDGER it is ending, not only the topic: after the
+        # rename, `think-<topic>` is a name no pane was ever launched under, so a
+        # discard recorded under it points at nothing that ever existed. The
+        # topic still rides along — it is what the session was about.
+        ledger = os.environ.get("DOIT_LEDGER_FILE")
+        name = panes.pane_name(ledger) if ledger else f"think-{a.topic}"
+        fold.append(["think-discarded", name, f"topic=think-{a.topic}"])
+        print(f"# discarded {name} · think-{a.topic} — nothing kept")
         return None
     if not a.topic:
         ap.error("a topic, --land FILE …, or --discard <topic>")
