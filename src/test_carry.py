@@ -1,0 +1,368 @@
+#!/usr/bin/env python3
+"""One runnable check on `doit carry`. Run: env -u DOIT_PROJECT python3 test_carry.py
+
+Everything is a fixture. `DOIT_ROOT`, the v4 ledger, the inbox and the staging tree
+all point under one temporary directory — the operator's real `~/.claude/ledger`,
+`~/.claude/spec-inbox` and `~/.claude/spec-staging` are READ-ONLY from this seat,
+and a test that wrote fixtures there would violate that even if it cleaned up.
+
+`doit dispatch` and `doit append` are a recorded-argv stub, never a real spawn: a
+live $5 spec-writer inside a test run is itself a failure, so the stub counts its
+own calls and `dispatch.alloc` is counted separately to prove every refusal fires
+before an allocation.
+
+`DOIT_PROJECT` is PINNED here rather than inherited (A10), and deliberately set to a
+label that matches neither the fixture `spec-carried` event's project nor the
+`spec-written` one's: that is the only arrangement in which the idempotency guard's
+neutralised read is distinguishable from `fold.read_events()`'s filtered one.
+"""
+import contextlib, io, json, os, pathlib, sys, tempfile, types
+
+TMP = pathlib.Path(tempfile.mkdtemp(prefix="carry-test-"))
+os.environ["DOIT_ROOT"] = str(TMP / "root")
+os.environ["V4_LEDGER_DIR"] = str(TMP / "ledger")
+os.environ["V4_INBOX_DIR"] = str(TMP / "inbox")
+os.environ["V4_STAGING_DIR"] = str(TMP / "staging")
+os.environ["DOIT_PROJECT"] = "pinned-by-the-suite"
+for d in ("root/content", "root/events", "ledger", "inbox", "staging", "repo/.git"):
+    (TMP / d).mkdir(parents=True, exist_ok=True)
+REPO = TMP / "repo"
+HEAD = "4d1c0ffee4d1c0ffee4d1c0ffee4d1c0ffee1234"
+(REPO / ".git" / "HEAD").write_text(HEAD + "\n")
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import carry, dispatch, fold  # noqa: E402
+
+N = 0
+TICK = [0]
+
+
+def check(cond, msg):
+    global N
+    assert cond, msg
+    N += 1
+
+
+def stamp():
+    TICK[0] += 1
+    return f"2026-09-17T10:{TICK[0] // 60:02d}:{TICK[0] % 60:02d}+00:00"
+
+
+def write_event(actor, e):
+    p = pathlib.Path(os.environ["DOIT_ROOT"]) / "events" / f"{actor}.jsonl"
+    with open(p, "a") as fh:
+        fh.write(json.dumps({"v": 1, "ts": stamp(), **e}) + "\n")
+
+
+def record(num, stem, intent="carry me", spec_file=None, at="'2026-09-15T12:52:02Z'",
+           status="registered"):
+    """A fixture v4 record in 1454's shape. `spec_file` defaults to a staging path
+    that does NOT exist — the measured state of all fifteen real records."""
+    sf = spec_file if spec_file is not None else str(TMP / "staging" / f"{stem}-spec.md")
+    body = (f"spec_id: {num}-{stem}\ntitle: fixture {num}\nintent: '{intent}'\n"
+            f"status: {status}\nhanded_over_at: {at}\nspec_file: {sf}\nsource_brief: null\n")
+    p = TMP / "ledger" / f"{num}-{stem}.yml"
+    p.write_text(body)
+    return p
+
+
+def inbox(num, stem, text):
+    p = TMP / "inbox" / f"{num}-{stem}-spec.md"
+    p.write_text(text)
+    return p
+
+
+# ── the stub: every subprocess `carry` makes, recorded and never run ───────────
+CALLS = []
+
+
+class Stub:
+    """Stands in for `carry.subprocess`. It records argv and returns a canned result;
+    it never runs anything, so no dispatch in this file can spend."""
+    def __init__(self):
+        self.dispatch = lambda argv: (0, "", "")
+        self.append = self.record_append
+
+    def record_append(self, argv):
+        kv = dict(x.split("=", 1) for x in argv[4:])
+        # what `doit append` would write — including a `project` label that differs
+        # from DOIT_PROJECT, which is the whole point of AC3.
+        write_event("L-operator-stub", {"type": argv[2], "subject": argv[3],
+                                        "project": "a-completely-different-project", **kv})
+        return 0, "", ""
+
+    def run(self, cmd, capture_output=False, text=False, **kw):
+        CALLS.append(list(cmd))
+        rc, out, err = (self.dispatch if cmd[1] == "dispatch" else self.append)(list(cmd))
+        return types.SimpleNamespace(returncode=rc, stdout=out, stderr=err)
+
+
+STUB = Stub()
+carry.subprocess = STUB
+
+ALLOCS = [0]
+_real_alloc = dispatch.alloc
+
+
+def counting_alloc(d, prefix, suffix):
+    ALLOCS[0] += 1
+    return _real_alloc(d, prefix, suffix)
+
+
+dispatch.alloc = counting_alloc
+
+NET = [0]
+import urllib.request  # noqa: E402
+
+
+def no_network(*a, **k):
+    NET[0] += 1
+    raise AssertionError("carry must never open a network connection")
+
+
+urllib.request.urlopen = no_network
+
+
+def run(argv):
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        code = carry.main(argv)
+    return code, out.getvalue(), err.getvalue()
+
+
+def writer(footprint, path_written=True, rc=0, stderr="", status=None):
+    """A `doit dispatch spec-writer` that behaves the way the real one would."""
+    def go(argv):
+        if rc == 0 and path_written:
+            pathlib.Path(argv[argv.index("--path") + 1]).write_text("# fixture spec\n")
+            write_event("L-spec-writer-0001", {"type": "spec-written", "subject": argv[3],
+                                               "project": "another-project-again",
+                                               "path": argv[argv.index("--path") + 1],
+                                               "footprint": footprint})
+        elif rc == 0 and status:
+            write_event("L-spec-writer-0001", {"type": "spawn-done", "subject": argv[3],
+                                               "project": "another-project-again", "status": status})
+        return rc, "" if rc else json.dumps({"ok": True}), stderr
+    return go
+
+
+TRAILER_LITERAL = ("\n---\nCarry this spec over into v2 form — Writes: line, AC ids, "
+                   "Verification block, under 400 lines. Change nothing substantive. "
+                   "charter: null (free-standing, D15). Source: v4 spec 1454.\n")
+
+# ══ AC4 · review_tier — the four predicates, the no-match case, and the order ══
+for path, want in [("api/app/routers/billing.py", ("full", "money")),
+                   ("api/alembic_supabase/versions/0099_x.py", ("full", "migration")),
+                   ("deploy.sh", ("full", "production-config")),
+                   ("pipelines/amazon/runner.py", ("full", "production-data")),
+                   ("/etc/cron.d/albert-scott-amazon", ("full", "production-config")),
+                   ("scripts/amazon/feed_probes.py", ("gates-only", "none")),
+                   ("src/carry.py", ("gates-only", "none"))]:
+    check(carry.review_tier([path]) == want, f"review_tier({path!r}) -> {carry.review_tier([path])}")
+check(carry.review_tier(["api/app/routers/billing_cron.py"]) == ("full", "money"),
+      "★ first hit wins: a path matching both `billing` and `cron` reports money, not config")
+check(carry.review_tier(["src/carry.py", "deploy.sh"]) == ("full", "production-config"),
+      "the predicate scans every path in the footprint, not only the first")
+
+# ══ AC2 · refusal by name, BEFORE allocation ═══════════════════════════════════
+# Ordered first, while no content/L-spec-*.md can possibly exist yet.
+CONTENT = pathlib.Path(os.environ["DOIT_ROOT"]) / "content"
+record(1454, "feed-health-probes-fail-per-client-on-an-absent-date-column")
+INBOX_BYTES = b"# 1454 fixture spec\n\nThe staged material, verbatim.\n"
+inbox(1454, "feed-health-probes-fail-per-client-on-an-absent-date-column",
+      INBOX_BYTES.decode())
+
+record(1470, "empty-intent", intent="")
+record(1471, "no-staged-spec-anywhere")
+record(1499, "ambiguous-a"), record(1499, "ambiguous-b")
+record(1472, "stale-spec-file-but-inbox-present", spec_file="/nowhere/at/all/1472-spec.md")
+inbox(1472, "stale-spec-file-but-inbox-present", "# 1472 staged\n")
+
+BASE = ["--repo", str(REPO), "--project", "albert-scott"]
+for argv, needle, why in [
+    (["1470"] + BASE, "empty or missing", "an empty `intent` is refused by name"),
+    (["1471"] + BASE, "no staged spec — inbox glob", "no inbox match and no readable spec_file"),
+    (["9999"] + BASE, "no v4 record matching 9999 under", "zero ledger matches, named"),
+    (["1499"] + BASE, "1499 is ambiguous: 2 matches", "★ two matches is a refusal, never the first"),
+]:
+    code, out, err = run(argv)
+    check(code != 0 and needle in err, f"{why}: {err!r}")
+
+os.environ["DOIT_PROJECT"] = ""
+code, out, err = run(["1454", "--repo", str(REPO)])
+check(code != 0 and "--project is unset and DOIT_PROJECT is empty" in err,
+      f"★ an unset project refuses rather than carrying into the wrong repo: {err!r}")
+os.environ["DOIT_PROJECT"] = "pinned-by-the-suite"
+
+check(ALLOCS[0] == 0, f"★ every refusal fired BEFORE alloc — {ALLOCS[0]} allocation(s) happened")
+check(CALLS == [], f"★ no refusal reached a dispatch: {CALLS}")
+check(list(CONTENT.glob("L-spec-*.md")) == [], "no placeholder spec file was left behind")
+
+# the sixth fixture: a stale `spec_file` with an inbox copy present CARRIES.
+STUB.dispatch = writer(["src/x.py"])
+code, out, err = run(["1472"] + BASE)
+check(code == 0, f"★ a stale spec_file with an inbox copy carries, it does not refuse: {err!r}")
+slot = pathlib.Path(json.loads(out)["packet"])
+check(slot.read_bytes().startswith(b"# 1472 staged\n"), "the inbox copy is the staged material")
+
+# ...and `spec_file` is still the fallback when the inbox has no match at all.
+record(1473, "spec-file-only", spec_file=str(TMP / "staging" / "1473-real-spec.md"))
+(TMP / "staging" / "1473-real-spec.md").write_text("# 1473 from spec_file\n")
+code, out, err = run(["1473"] + BASE)
+check(code == 0 and pathlib.Path(json.loads(out)["packet"]).read_bytes().startswith(
+    b"# 1473 from spec_file\n"), f"a readable spec_file is the second resolution step: {err!r}")
+
+# ══ AC1 · carried_slot builds the hand path's exact shape ══════════════════════
+ALLOCS[0], CALLS[:] = 0, []
+slot, spec_id, source_id, charter = carry.carried_slot("1454")
+body = slot.read_bytes()
+check(body.startswith(INBOX_BYTES), "the packet STARTS with the staged bytes")
+check(body[len(INBOX_BYTES):] == TRAILER_LITERAL.encode(),
+      f"★ and its remainder is the trailer, byte for byte: {body[len(INBOX_BYTES):]!r}")
+check(b"spawn_id" not in body, "★ carry appends no spawn_id line — dispatch owns that")
+check("—" in TRAILER_LITERAL and carry.TRAILER.format(source_id="1454") == TRAILER_LITERAL,
+      "the trailer constant is the precedent's, em dash included")
+check(__import__("re").fullmatch(r"L-spec-\d{4}", spec_id), f"freshly allocated id: {spec_id}")
+check(source_id == "1454", f"source_id is the v4 id: {source_id}")
+check(charter is None, "★ charter is None — a carried spec is free-standing (D15)")
+check(carry.carried_slot("1454")[1] != spec_id, "a second call allocates a second id, never reuses")
+
+# the full argv, through main
+ALLOCS[0], CALLS[:] = 0, []
+STUB.dispatch = writer(["api/app/routers/billing.py", "docs/notes.md"])
+code, out, err = run(["1454"] + BASE)
+check(code == 0, f"the happy path exits 0: {err!r}")
+res = json.loads(out)
+d = next(c for c in CALLS if c[1] == "dispatch")
+check(d[:4] == [str(carry.doit_bin()), "dispatch", "spec-writer", res["spec"]],
+      f"dispatch is invoked as an argv list for the allocated id: {d[:4]}")
+check(d[d.index("--packet") + 1] == res["packet"], "--packet is the slot this tool wrote")
+want_path = str(pathlib.Path(os.environ["DOIT_ROOT"]) / "content" / f"{res['spec']}.md")
+check(d[d.index("--path") + 1] == want_path and os.path.isabs(want_path),
+      f"★ --path is ABSOLUTE: dispatch resolves it against the invoking shell's cwd: {want_path}")
+check(d[d.index("--cwd") + 1] == str(REPO), "--cwd is the --repo value, never os.getcwd()")
+check(d[d.index("--project") + 1] == "albert-scott", "--project is explicit, never the dir basename")
+check("--charter" not in d, "★ no --charter anywhere: the carried spec is charter: null")
+check(all(c[0] == str(carry.doit_bin()) and c[1] in ("dispatch", "append") for c in CALLS)
+      and len(CALLS) == 2, f"★ only the two stubbed doit calls ran — nothing spent: {CALLS}")
+check(ALLOCS[0] == 1, f"exactly one allocation on the happy path: {ALLOCS[0]}")
+
+# ══ AC5(a) · the spec-carried event, its tier, and its verbatim audited_at ═════
+ap = next(c for c in CALLS if c[1] == "append")
+check(ap[2:4] == ["spec-carried", res["spec"]], f"append spec-carried <the new spec id>: {ap}")
+kv = dict(x.split("=", 1) for x in ap[4:])
+check(kv["source"] == "1454", f"source is the v4 id: {kv}")
+check(kv["tier"] == "full" and res["rule"] == "money",
+      "★ the tier came from the spec-written event's footprint, not from any markdown")
+check(kv["audited_at"] == "2026-09-15T12:52:02Z",
+      f"★ audited_at is the record's handed_over_at VERBATIM, not re-serialized: {kv}")
+record(1474, "unquoted-stamp", at="2026-09-15T12:52:02Z")
+check(carry.load_record(TMP / "ledger" / "1474-unquoted-stamp.yml")["handed_over_at"]
+      == "2026-09-15T12:52:02Z",
+      "★ an UNQUOTED stamp survives too — safe_load would hand back a datetime")
+check((CONTENT / f"{res['spec']}.md").is_file(), "the writer's spec is at the allocated path")
+
+# ══ AC3 · the guard sees what the project filter hides ═════════════════════════
+carried = carry.already_carried("1454")
+check(carried and carried["subject"] == res["spec"], "the guard finds the spec-carried event")
+check(carried["project"] != os.environ["DOIT_PROJECT"], "...whose project differs from DOIT_PROJECT")
+check(fold.PROJECT == "pinned-by-the-suite", "fold read DOIT_PROJECT at import")
+check(not [e for e in fold.read_events() if e.get("type") == "spec-carried"],
+      "★ fold.read_events() CANNOT see that event — a naive guard would double-spend $5")
+ALLOCS[0], CALLS[:] = 0, []
+code, out, err = run(["1454"] + BASE)
+check(code != 0 and f"already carried as {res['spec']}" in err and "--force" in err,
+      f"★ the guard fires anyway, naming the existing spec: {err!r}")
+check(ALLOCS[0] == 0 and CALLS == [], "the guard refuses before alloc and before any dispatch")
+code, out, err = run(["1454", "--force"] + BASE)
+check(code == 0 and json.loads(out)["spec"] != res["spec"], f"--force carries again: {err!r}")
+check(ALLOCS[0] == 1, "…and allocates exactly once when forced")
+
+# ══ AC5(b) · an empty footprint refuses to stamp ═══════════════════════════════
+record(1480, "empty-footprint"), inbox(1480, "empty-footprint", "# 1480\n")
+ALLOCS[0], CALLS[:] = 0, []
+STUB.dispatch = writer([])
+code, out, err = run(["1480"] + BASE)
+check(code != 0 and "written with an empty footprint — no tier stamped" in err,
+      f"★ an empty footprint is a refusal to stamp, not a silent gates-only: {err!r}")
+check(not [c for c in CALLS if c[1] == "append"], "…and nothing was appended")
+check(carry.already_carried("1480") is None, "no spec-carried event exists for it")
+
+# ══ AC5(c) · dispatch's fail() path: no stamp, and a retry is permitted ════════
+record(1481, "dispatch-fails"), inbox(1481, "dispatch-fails", "# 1481\n")
+STUB.dispatch = writer(None, rc=1, stderr="FAILED L-spec-writer-0002: is_error: budget\n")
+code, out, err = run(["1481"] + BASE)
+check(code != 0 and "FAILED L-spec-writer-0002: is_error: budget" in err,
+      f"★ the reason dispatch gave is printed, not swallowed: {err!r}")
+check(carry.already_carried("1481") is None, "a failed dispatch stamps nothing")
+STUB.dispatch = writer(["src/ok.py"])
+code, out, err = run(["1481"] + BASE)
+check(code == 0, f"★ …so the same source retries with no --force: a failed spawn is not burned: {err!r}")
+check(json.loads(out)["tier"] == "gates-only", "and a neutral footprint tiers gates-only")
+
+# ══ AC5(d) · a `killed` spawn: zero exit, no spec-written ══════════════════════
+record(1482, "killed-spawn"), inbox(1482, "killed-spawn", "# 1482\n")
+STUB.dispatch = writer(None, path_written=False, status="killed")
+code, out, err = run(["1482"] + BASE)
+check(code != 0 and "spawn returned status killed — no spec written" in err,
+      f"★ a killed spawn names its status and stamps nothing: {err!r}")
+check(carry.already_carried("1482") is None, "no spec-carried for a killed spawn")
+STUB.dispatch = writer(["src/ok.py"])
+code, out, err = run(["1482"] + BASE)
+check(code == 0, "a killed spawn is a retry by design, not a permanently burned source")
+
+# ══ AC9 · the PR url: recognized, constructed from flags, never fetched ════════
+URL = "https://github.com/o/r/pull/1"
+ALLOCS[0], CALLS[:] = 0, []
+STUB.dispatch = writer(["deploy.sh"])
+code, out, err = run([URL, "--title", "A Carried Title", "--body", "the intent, prose and all"]
+                     + BASE)
+check(code == 0, f"the PR path carries from flags: {err!r}")
+pk = pathlib.Path(json.loads(out)["packet"]).read_text()
+front, _, rest = pk.partition("---\n\n")
+check(json.dumps("the intent, prose and all") in front, f"frontmatter intent is --body: {front!r}")
+check("source_brief: null" in front and json.dumps(HEAD) in front,
+      f"★ frontmatter carries source_brief: null and the --repo HEAD: {front!r}")
+check(rest.startswith("# A Carried Title\n"), f"the body starts with # <title>: {rest[:40]!r}")
+check(pk.endswith(carry.TRAILER.format(source_id=URL)),
+      f"★ …and ends with the trailer carrying the url as its source id: {pk[-90:]!r}")
+check(json.loads(out)["source"] == URL, "the event's source is the url")
+for flags in (["--title", "T"], ["--body", "B"], []):
+    code, out, err = run([URL] + flags + BASE + ["--force"])
+    check(code != 0 and "needs both --title and --body" in err,
+          f"★ a missing flag is a refusal, never a silently empty packet: {flags} -> {err!r}")
+check(carry.is_url(URL) and not carry.is_url("1454"),
+      "a url is recognized as a url and a v4 id is not")
+try:
+    carry.carried_slot(URL)
+    check(False, "carried_slot must refuse a url rather than glob the ledger for it")
+except carry.Refusal as e:
+    check("is a url, not a v4 record id" in str(e), f"★ …by name: {e}")
+check(NET[0] == 0, "★ zero network calls: the live gh fetch is owed (AC9), never guessed")
+check(all(c[1] in ("dispatch", "append") for c in CALLS), f"only the two doit calls ran: {CALLS}")
+
+# ══ A9 · the PyYAML-less fallback refuses rather than mis-parses ═══════════════
+p = TMP / "ledger" / "1490-folded.yml"
+p.write_text("spec_id: 1490-folded\nintent: 'line one\n  and its fold'\nstatus: registered\n"
+             "handed_over_at: '2026-09-15T12:52:02Z'\nspec_file: /nowhere\n")
+check(carry._regex_record(p, p.read_text().replace("'line one", "plain")) ["intent"] == "plain",
+      "the fallback reads a plain scalar")
+try:
+    carry._regex_record(p, p.read_text())
+    check(False, "a folded intent must not be silently truncated by the fallback")
+except carry.Refusal as e:
+    check("folded or block scalar" in str(e), f"★ A9: the fallback refuses a fold, never guesses: {e}")
+
+# ══ the dispatcher's three edits, read from the file (AC6) ═════════════════════
+DOIT = (pathlib.Path(__file__).resolve().parent.parent / "doit").read_text()
+check("\n  carry)   shift; exec python3 \"$SRC/carry.py\" \"$@\" ;;\n" in DOIT,
+      "doit carries one new case line")
+tc = DOIT.split("\n  test)")[1].split(";;")[0]
+check("&&" not in tc, f"★ the test) case is no longer an && chain: {tc!r}")
+check("test_*.py" in tc and "test_*.mjs" in tc and tc.index("test_*.py") < tc.index("test_*.mjs"),
+      "★ it globs every test_*.py then every test_*.mjs — a new test file needs no edit here")
+check("PASS" in tc and "FAIL" in tc and 'exit "$rc"' in tc,
+      "one PASS/FAIL line per file, and a non-zero exit if any failed")
+check(DOIT.count("doit carry") == 1, "exactly one help line names `doit carry`")
+
+print(f"carry: {N} checks pass")
