@@ -2140,3 +2140,24 @@ answering two Planner escalations and clearing the orchestration box from 95% to
   misleads). Handled here by L-adr-0084: one allocated host-ledger number per charter, and the spec
   is written against the *line shape* with the number as an operator-owed input, so nothing blocks.
 - **Fix status:** open — wants a brief on how v2 ids map onto host-project numbering.
+
+### R90. `doit pane-end`'s pending-packet check is global, not pane-scoped — one pane's work blocks another pane's exit (L-planner-0016, 2026-09-17)
+- **Measured:** with L-charter-0022 `L1-complete`, the handover written and pushed, and all four of
+  this pane's own spawns stamped terminal, `doit pane-end L-charter-0022 --handover <file>` refused:
+  `refused: 2 pending seat packet(s) outstanding (L-plan-auditor-0034, L-spec-writer-0142)`. Neither
+  is this pane's: they carry subjects `L-goal-0002` and `L-spec-0076`, appear in no Planner ledger
+  file, and both trace to `events/L-thinker-0004.jsonl` — a *different, concurrently running pane*.
+  This pane's own `spawn-started` count in `events/L-planner-0016.jsonl` is 0 (the seat backend
+  records spawn events under the spawn's own file, which is itself worth knowing).
+- **Why it matters under D117:** standing panes are meant to be independent. A global pending check
+  couples their lifecycles — a Planner that has finished cleanly cannot exit while any other pane
+  anywhere has a packet in flight, and with several standing panes the window where *nothing* is
+  pending may effectively never arrive. The serving rule (operator ruling 2026-09-15, b-26) is
+  explicitly per-pane — "you serve every seat packet **you dispatch**" — so the exit check should be
+  scoped the same way it is served. Serving another pane's packet to clear my own exit would be the
+  exact thing that rule forbids.
+- **Second, smaller defect:** the refusal printed its reason but exited **rc=0**, where the
+  contract says it "refuses, printing the reason and **exiting non-zero**". Anything scripting
+  `pane-end` will read a refusal as success.
+- **Fix status:** open — wants a change-list id: scope `pane-end`'s pending check to packets whose
+  spawn this pane dispatched, and return non-zero on refusal.
