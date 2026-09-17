@@ -8,6 +8,14 @@ os.environ["DOIT_ROOT"] = str(TMP)
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 import fold  # noqa: E402
 
+# src/panes.py has landed (L-adr-0044), so every render() below now calls the REAL
+# live_panes() — against the operator's own ~/.claude/sessions unless this is
+# pinned. A check that reads live machine state is not a check. Pinned to an empty
+# scratch dir so LIVE PANES renders deterministically; the section's own behaviour
+# is proved further down against a stub, on both the present and absent legs.
+SESSIONS_DEFAULT = fold.SESSIONS
+fold.SESSIONS = TMP / "sessions"
+
 T = datetime.now(timezone.utc)
 stamp = lambda d=0: (T - timedelta(days=d)).isoformat(timespec="seconds")
 
@@ -445,7 +453,12 @@ finally:
 for r in (rows, erows):
     assert len(r) == 1 and "spend · ghost · $0.00 · 0 spawns · attributed only" in r[0], r
     assert "list-price estimate" in r[0] and " unpriced" not in r[0], r
-assert len(sections(eboard)) == 11, \
+# 12, not 11: §8.3's ten, plus SPEND (retro step 9) and now LIVE PANES (R14).
+# These three counts are the check that a forged label cannot invent a section —
+# the NUMBER moves when a section is deliberately added, the check does not.
+# Counted through sections() (the PLANNER WAITING ON pass-through is relay's
+# lines, not a fold.py section) so both rules hold at once.
+assert len(sections(eboard)) == 12, \
     "an empty ledger under a filter still renders every section, and does not raise"
 
 # ...and that label is now UNVOUCHED: DOIT_PROJECT is operator environment reaching
@@ -458,7 +471,7 @@ try:
     frows, fboard = spend(forged_env), fold.render(*forged_env)
 finally:
     fold.PROJECT = None
-assert len(sections(fboard)) == 11, "sections, always"
+assert len(sections(fboard)) == 12, "sections, always"
 assert len(frows) == 1 and "spend · x ## FORGED (9) · $0.00 · 0 spawns" in frows[0], frows
 
 # a label is a DIRECTORY NAME by default and nothing curates it: a newline in one
@@ -466,7 +479,7 @@ assert len(frows) == 1 and "spend · x ## FORGED (9) · $0.00 · 0 spawns" in fr
 # positional layout is the whole reason that check exists.
 forged = ledger(**{"L-operator-local.jsonl": [sp_ev(project="x\n## FORGED (9)", cost_usd=1.0)]})
 board = fold.render(*forged)
-assert len(sections(board)) == 11, "sections, always"
+assert len(sections(board)) == 12, "sections, always"
 assert len(spend(forged)) == 1 and "spend · x ## FORGED (9) · $1.00 · 1 spawns" in spend(forged)[0], \
     spend(forged)
 
@@ -480,8 +493,18 @@ assert len(spend(forged)) == 1 and "spend · x ## FORGED (9) · $1.00 · 1 spawn
     '[weights.claude-sonnet-5]\ninput = 1.0\noutput = 5.0\ncache_read = 0.1\ncache_creation = 1.25\n')
 tok_ev = lambda **kw: {"ts": stamp(0), "type": "spawn-done", "subject": S, "spawn": "L-grader-9001", **kw}
 def spend_block(evs):
-    lines = fold.render(*evs).split("## SPEND")[1].split("## HEALTH")[0].strip().splitlines()
-    return [l.strip() for l in lines[1:]]        # lines[0] is the "(n)" count suffix
+    # ★ Stops at the NEXT section header, whatever it is — not at "## HEALTH" by
+    # name. LIVE PANES (R14) now sits between SPEND and HEALTH, and a helper that
+    # names its neighbour breaks every time a section is legitimately added.
+    lines = fold.render(*evs).split("## SPEND")[1].strip().splitlines()
+    out = []
+    for l in lines[1:]:                          # lines[0] is the "(n)" count suffix
+        if l.startswith("## "):
+            break
+        out.append(l.strip())
+    while out and not out[-1]:
+        out.pop()
+    return out
 
 split_only = ledger(**{"L-operator-local.jsonl": [
     tok_ev(model_used="claude-sonnet-5", input_tokens=100, output_tokens=10,
@@ -794,7 +817,7 @@ assert "## PLANNER WAITING ON" not in wb, \
     "fold.py synthesizes no header of its own around a pass-through block"
 assert "PLANNER WAITING ON" not in wb[wb.index("## SPEND"):wb.index("## HEALTH")], \
     "and never in the SPEND/HEALTH gap, which spend_block() slices"
-assert len(sections(wb)) == 11, "the block is not a twelfth section"
+assert len(sections(wb)) == 12, "the block is not a section of its own (12 = ten + SPEND + LIVE PANES)"
 
 # R6: a dry queue is CONTENT, not a reason to omit the slot.
 assert "PLANNER WAITING ON: no open charters" in with_relay(
@@ -815,6 +838,404 @@ assert gone.count(degrade) == 1 and gone.index(degrade) > gone.index("## HEALTH"
     "a missing producer says so once, under HEALTH"
 assert gone.count("PLANNER WAITING ON") == 1, \
     "and renders no block content it does not have"
-assert len(sections(gone)) == 11, "the degrade line is a HEALTH row, not a section"
+assert len(sections(gone)) == 12, "the degrade line is a HEALTH row, not a section"
 
-print("fold: 104 checks pass")
+# ══════════════════════════════════════════════════════════════════════════════
+# L-charter-0021 · the-fold-and-the-board
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── R3/AC1 · append() refuses a malformed escalation-blocking, AT THE DOOR ─────
+# Through the real CLI, so the EXIT CODE and the stderr the operator sees are what
+# is checked, not an in-process exception. Nothing partially written: the ledger
+# file must not exist at all after the refusal.
+import subprocess                                                     # noqa: E402
+ESC_LEDGER = "L-executor-esc.jsonl"
+
+
+def run_append(*argv, ledger_file=ESC_LEDGER):
+    env = {**os.environ, "DOIT_ROOT": str(TMP), "DOIT_LEDGER_FILE": ledger_file}
+    return subprocess.run([sys.executable, str(pathlib.Path(__file__).parent / "fold.py"),
+                           "append", *argv], capture_output=True, text=True, env=env)
+
+
+def esc_lines(name=ESC_LEDGER):
+    f = TMP / "events" / name
+    return [l for l in f.read_text().splitlines() if l.strip()] if f.is_file() else []
+
+
+ledger(**{"L-operator-local.jsonl": []})
+# (a) bare why= — the exact shape agents/executor.md's question lane row writes today
+r = run_append("escalation-blocking", "L-test-0001", "why=x")
+assert r.returncode != 0, (r.returncode, r.stdout, r.stderr)
+out = r.stdout + r.stderr
+assert "default" in out and "deadline" in out and "revert" in out and "irreversible" in out, \
+    "the refusal NAMES the missing requirement — the documented Executor/Planner command " \
+    "is one field short until the-contracts lands, and a bare non-zero exit tells nobody why"
+assert esc_lines() == [], "a refused append writes NOTHING, not even a partial line"
+
+# (b) the reversible shape: all three together
+r = run_append("escalation-blocking", "L-test-0001", "why=x", "default=defer",
+               f"deadline={stamp(-1)}", "revert=revert the merge commit")
+assert r.returncode == 0, (r.returncode, r.stderr)
+assert len(esc_lines()) == 1, esc_lines()
+
+# (c) the irreversible shape: no default is possible, and the act is named
+r = run_append("escalation-blocking", "L-test-0001", "why=x",
+               "irreversible=the deploy is already live")
+assert r.returncode == 0, (r.returncode, r.stderr)
+assert len(esc_lines()) == 2, esc_lines()
+
+# ...and each of the three, alone, is NOT enough — the triple is a conjunction
+for partial in (("default=defer",), (f"deadline={stamp(-1)}",), ("revert=undo it",),
+                ("default=defer", f"deadline={stamp(-1)}"),
+                ("default=defer", "revert=undo it")):
+    r = run_append("escalation-blocking", "L-test-0001", "why=x", *partial)
+    assert r.returncode != 0, (partial, r.returncode)
+assert len(esc_lines()) == 2, "no partial shape landed a line"
+# ...and a blank value is not a present field: typing the field name is not the rule
+r = run_append("escalation-blocking", "L-test-0001", "why=x", "default=", "deadline=", "revert=")
+assert r.returncode != 0, "default= with nothing after it is absent, not present"
+
+# (d) the refusal binds escalation-blocking ONLY. A question's mandatory four are
+# asks/blocks/default/deadline; its revert lives on the answering decision, so a
+# question with no revert must still land.
+r = run_append("question", "L-test-0002", "asks=inline or deferred?", "blocks=AC3",
+               "default=defer", f"deadline={stamp(-1)}", ledger_file="L-builder-q.jsonl")
+assert r.returncode == 0, (r.returncode, r.stderr)
+assert len(esc_lines("L-builder-q.jsonl")) == 1, "append() gains no new rule for `question`"
+
+# ── R3/AC2 · the ledger's OWN malformed escalations, which append() never saw ──
+# dispatch.py and tick.py write escalation-blocking through dispatch.emit(), not
+# through append(), and the ledger is append-only — so counting is the only
+# enforcement that reaches them.
+bad_esc = ledger(**{"L-executor-01.jsonl": [
+    {"ts": stamp(2), "type": "escalation-blocking", "subject": S,
+     "why": "the gate wants a --writes grant"}]})
+assert len(fold.malformed_escalations(bad_esc[0])) == 1, fold.malformed_escalations(bad_esc[0])
+assert fold.malformed_escalations(bad_esc[0])[0]["subject"] == S
+bad_board = fold.render(*bad_esc)
+assert "malformed escalations: 1" in bad_board, bad_board
+assert f"(last: {S} ·" in bad_board, "HEALTH names the subject, not just a number"
+# ...and a compliant ledger says ZERO rather than going quiet: a count nobody
+# renders at zero cannot tell a holding refusal from an unmeasured one.
+good_esc = ledger(**{"L-executor-01.jsonl": [
+    {"ts": stamp(2), "type": "escalation-blocking", "subject": S, "why": "w",
+     "default": "defer", "deadline": stamp(1), "revert": "revert the merge"}]})
+assert "malformed escalations: 0" in fold.render(*good_esc)
+assert fold.malformed_escalations(good_esc[0]) == []
+
+# ── R3/AC3 · NEEDS YOU rows carry what it takes to DECIDE ─────────────────────
+S_R, S_I, S_Q, S_M = "L-spec-0201", "L-spec-0202", "L-spec-0203", "L-spec-0204"
+needs = ledger(**{"L-executor-01.jsonl": [
+    {"ts": stamp(2), "type": "escalation-blocking", "subject": S_R, "why": "the gate wants a grant",
+     "default": "take the narrow grant", "deadline": stamp(1), "revert": "revert the merge commit"},
+    {"ts": stamp(3), "type": "escalation-blocking", "subject": S_I, "why": "the deploy already went",
+     "irreversible": "the droplet is serving the new sha"},
+    {"ts": stamp(4), "type": "escalation-blocking", "subject": S_M, "why": "bare, pre-R3"}],
+    "L-builder-01.jsonl": [
+    {"ts": stamp(2), "type": "question", "subject": S_Q, "asks": "refunds inline or deferred?",
+     "blocks": ["AC3"], "default": "defer", "deadline": stamp(1)}]})
+rows = {r["subject"]: r for r in fold.open_questions(needs[0])}
+assert set(rows) == {S_R, S_I, S_Q, S_M}, rows
+assert rows[S_Q]["revert"] == "revert n/a — question", rows[S_Q]
+assert rows[S_I]["irreversible"] == "the droplet is serving the new sha"
+assert rows[S_M]["malformed"] and not rows[S_R]["malformed"] and not rows[S_I]["malformed"]
+nboard = fold.render(*needs)
+needs_block = nboard.split("## NEEDS YOU")[1].split("## BLOCKED")[0]
+line = {s: next(l for l in needs_block.splitlines() if s in l) for s in (S_R, S_I, S_Q, S_M)}
+# the reversible escalation: default, deadline, revert, age — all four
+assert "default take the narrow grant" in line[S_R] and "revert revert the merge commit" in line[S_R], line[S_R]
+assert stamp(1) in line[S_R] and line[S_R].rstrip().endswith("d"), line[S_R]
+# the irreversible one: the named act stands where the revert would be, and the
+# two absent fields say WHY they are absent rather than rendering empty
+assert "irreversible: the droplet is serving the new sha" in line[S_I], line[S_I]
+assert line[S_I].count("n/a — irreversible act named") == 2, line[S_I]
+# the question: asks, default, deadline, age, and the literal — never an invented revert
+assert "refunds inline or deferred?" in line[S_Q] and "default defer" in line[S_Q], line[S_Q]
+assert "revert n/a — question" in line[S_Q] and f"unanswered past {stamp(1)}" in line[S_Q], line[S_Q]
+# the malformed one renders DIFFERENTLY — the reader must not have to notice an absence
+assert "⚠ malformed" in line[S_M] and "⚠ malformed" not in line[S_R] + line[S_I] + line[S_Q], line[S_M]
+assert "revert n/a — question" not in line[S_R] + line[S_I], "a question's literal is a question's"
+# ...and an escalation carrying BOTH keeps both — the revert the operator would
+# run and the thing that cannot be undone are different facts, and neither is dropped
+S_B = "L-spec-0205"
+both = ledger(**{"L-executor-01.jsonl": [
+    {"ts": stamp(1), "type": "escalation-blocking", "subject": S_B, "why": "partial rollout",
+     "default": "hold", "deadline": stamp(1), "revert": "revert the code",
+     "irreversible": "the migration already ran"}]})
+bline = next(l for l in fold.render(*both).split("## NEEDS YOU")[1].split("## BLOCKED")[0].splitlines()
+             if S_B in l)
+assert "revert revert the code" in bline and "irreversible: the migration already ran" in bline, bline
+
+# ── R3/AC4 · decide_overdue settles a reversible overdue question EXACTLY once ──
+os.environ["DOIT_LEDGER_FILE"] = "L-executor-auto.jsonl"
+auto_q = {"ts": stamp(2), "type": "question", "subject": S, "asks": "refunds inline or deferred?",
+          "blocks": ["AC3"], "default": "defer", "deadline": stamp(1)}
+stale_ev = ledger(**{"L-builder-01.jsonl": [auto_q]})[0]
+first = fold.decide_overdue(stale_ev)
+assert len(first) == 1, first
+assert first[0]["type"] == "decision" and first[0]["subject"] == S, first
+assert first[0]["ref"] == "L-builder-01.jsonl:1", first[0]["ref"]
+assert "defer" in first[0]["why"], first[0]["why"]
+after = fold.read_events()
+assert len([e for e in after if e["type"] == "decision"]) == 1, "exactly one decision landed"
+# ★ the buggy-caller case: fed the PRE-first-call snapshot, in which the question
+# is still open. It must re-read before writing — the snapshot is not the ledger.
+assert fold.decide_overdue(stale_ev) == [], "a second call on a stale snapshot appends nothing"
+assert len([e for e in fold.read_events() if e["type"] == "decision"]) == 1, \
+    "re-read before the write is what makes two back-to-back calls idempotent"
+# ...and an IRREVERSIBLE overdue question — no recorded default — is never settled
+# automatically. That distinction is the entire reason the default is mandatory.
+nodef = ledger(**{"L-builder-01.jsonl": [{k: v for k, v in auto_q.items() if k != "default"}]})[0]
+assert fold.decide_overdue(nodef) == [], "no default: it stays the operator's"
+assert [e for e in fold.read_events() if e["type"] == "decision"] == []
+
+# ── R3/AC5 · and it renders through the EXISTING DECIDED WITHOUT YOU block ────
+auto = ledger(**{"L-builder-01.jsonl": [auto_q]})
+assert S in fold.render(*auto).split("## NEEDS YOU")[1].split("## BLOCKED")[0], \
+    "before: the question is the operator's"
+fold.decide_overdue(auto[0])
+settled_ev = fold.read_events()
+sboard = fold.render(settled_ev, *fold.fold(settled_ev))
+decided = sboard.split("## DECIDED WITHOUT YOU")[1].split("## SPEND")[0]
+assert S in decided and "defer" in decided, decided
+assert "revert ⚠ none" in decided, \
+    "an auto-settled decision has no operator-authored undo, and the EXISTING fallback says so"
+assert S not in sboard.split("## NEEDS YOU")[1].split("## BLOCKED")[0], \
+    "after: the newest event on the subject is a decision, so it leaves NEEDS YOU"
+os.environ["DOIT_LEDGER_FILE"] = "L-operator-01.jsonl"
+
+# ── R6/AC6 · free_standing — accepted with no charter, and at what tier ───────
+FS = "L-spec-0301"
+free = ledger(**{
+    "L-builder-01.jsonl": built + [                    # `built` carries charter C
+        {"ts": stamp(3), "type": "spec-written", "subject": FS},          # no charter, anywhere
+        {"ts": stamp(2), "type": "build-started", "subject": FS},
+        {"ts": stamp(2), "type": "build-done", "subject": FS}],
+    "L-grader-01.jsonl": graded + [{"ts": stamp(1), "type": "verdict", "subject": FS, "confirmed": True}],
+    "L-reviewer-01.jsonl": reviewed + [{"ts": stamp(1), "type": "review", "subject": FS,
+                                        "depth": "gates-only"}],
+    "L-executor-01.jsonl": shipped + [{"ts": stamp(0), "type": "shipped", "subject": FS}]})
+assert free[1][FS]["state"] == "accepted" and free[1][S]["state"] == "accepted"
+assert fold.free_standing(free[0]) == [{"id": FS, "tier": "gates-only"}], fold.free_standing(free[0])
+fboard2 = fold.render(*free)
+assert "free-standing accepted specs: 1" in fboard2 and f"{FS} at gates-only" in fboard2, fboard2
+# a chartered accepted spec is not free-standing, and an unaccepted charter-less
+# one is not either — "accepted" is the whole promise R6 makes observable.
+notyet = ledger(**{"L-builder-01.jsonl": [{"ts": stamp(3), "type": "spec-written", "subject": FS}]})
+assert fold.free_standing(notyet[0]) == [], "written is not accepted"
+assert "free-standing accepted specs: 0" in fold.render(*notyet), "zero is a measurement"
+
+# ── R11/AC7 · closable() IS fold()'s predicate, all five conjuncts ────────────
+# (i) every charter-state fixture above already ran, unmodified. (ii) on each of
+# them, `L2-complete` iff the five-conjunct AND — the polarity pinned once, in
+# fold.l2_complete, so neither a builder nor a consumer picks it.
+brief_answer = [{"ts": stamp(0), "type": "brief-answered", "subject": C,
+                 "ref": "L-grader-02.jsonl:1", "spec": "L-spec-0143"}]
+# ★ K is read from DOIT_K at import, and the operator's env.sh sets it to 1 on
+# this box — so a test that ASSUMED the 0 default would pass or fail depending on
+# whose shell ran it. Pinned by assignment, restored after (Assumptions: K stays
+# fold.K, never a parameter).
+_K = fold.K
+fold.K = 0
+for name, files in (("L2", done),
+                    ("L1", L1),
+                    ("brief open", {**L1, "L-grader-02.jsonl": inscope}),
+                    ("brief answered", {**L1, "L-grader-02.jsonl": inscope,
+                                        "L-executor-02.jsonl": brief_answer}),
+                    ("adjacent brief", {**L1, "L-grader-02.jsonl": adjacent}),
+                    ("re-review reopened", {**done, "L-charter-reviewer-01.jsonl": [
+                        {"ts": stamp(2), "type": "charter-review-complete", "subject": C},
+                        {"ts": stamp(0), "type": "charter-review-not-complete", "subject": C}]}),
+                    ("void allocation", {**done, **ghost}),
+                    ("closed-shipped credit", {
+                        "L-builder-01.jsonl": built,
+                        "L-executor-01.jsonl": shipped + [{"ts": stamp(0), "type": "sweep-fixpoint",
+                                                           "subject": C}],
+                        "L-operator-01.jsonl": [{"ts": stamp(0), "type": "spec-closed", "subject": S,
+                                                 "charter": C, "why": "post-merge observation only"}],
+                        "L-charter-reviewer-01.jsonl": [{"ts": stamp(0),
+                                                         "type": "charter-review-complete",
+                                                         "subject": C}]}),
+                    ("retracted", {**done, "L-operator-02.jsonl": [
+                        {"ts": stamp(0), "type": "charter-retracted", "subject": C}]})):
+    fx = ledger(**files)
+    cl = fold.closable(fx[0], C)
+    # .keys(), not set(cl): the positional projection below owns bare iteration.
+    assert set(cl.keys()) == {"all_accepted", "sweep_derived", "owed_within_k",
+                              "no_open_briefs", "review_owed"}, (name, cl)
+    if fx[2][C]["state"] != "retracted":             # retraction pre-empts the predicate
+        assert (fx[2][C]["state"] == "L2-complete") == fold.l2_complete(cl), (name, fx[2][C]["state"], cl)
+    # ★ L-adr-0044 reconciliation: the landed tick.lane() unpacks a 3-tuple and
+    # ANDs it as `accepted and fixpoint and not review_owed`. That projection must
+    # agree with l2_complete() on every fixture — and must LOSE no conjunct: K and
+    # the open-brief ride with the fact each belongs to, exactly as
+    # tick.closable_fallback folds them. Passing the charter DICT too, which is
+    # what tick actually hands over.
+    acc, fix, owed_rev = cl
+    assert (acc, fix, owed_rev) == (cl["all_accepted"] and cl["owed_within_k"],
+                                    cl["sweep_derived"] and cl["no_open_briefs"],
+                                    cl["review_owed"]), (name, cl)
+    assert (acc and fix and not owed_rev) == fold.l2_complete(cl), (name, cl)
+    assert dict(fold.closable(fx[0], fx[2][C])) == dict(cl), \
+        "a charter dict reads the same as its id — tick.lane() passes the dict"
+
+# (iii) the `owed <= K` conjunct, which nothing exercised before: a charter whose
+# specs are OTHERWISE all accepted, with the fixpoint, no open brief and a complete
+# review, plus exactly one shipped-owed-evidence spec, at the default K = 0.
+SO = "L-spec-0401"
+owedk = ledger(**{
+    "L-builder-01.jsonl": built + [{"ts": stamp(3), "type": "spec-written", "subject": SO, "charter": C},
+                                   {"ts": stamp(2), "type": "build-started", "subject": SO}],
+    "L-grader-01.jsonl": graded,
+    "L-reviewer-01.jsonl": reviewed,
+    "L-spec-writer-01.jsonl": [{"ts": stamp(0), "type": "owed-ac", "subject": SO,
+                                "criterion": "AC7", "wake_at": stamp(-7)}],
+    "L-executor-01.jsonl": shipped + [{"ts": stamp(0), "type": "shipped", "subject": SO},
+                                      {"ts": stamp(0), "type": "sweep-fixpoint", "subject": C}],
+    "L-charter-reviewer-01.jsonl": [{"ts": stamp(0), "type": "charter-review-complete", "subject": C}]})
+assert owedk[1][SO]["state"] == "shipped-owed-evidence", owedk[1][SO]["state"]
+assert owedk[1][S]["state"] == "accepted"
+assert owedk[2][C]["state"] != "L2-complete", \
+    "one owed spec at K=0 must hold the charter open — the conjunct nothing tested"
+ck = fold.closable(owedk[0], C)
+assert ck["owed_within_k"] is False, ck
+assert (ck["all_accepted"], ck["sweep_derived"], ck["no_open_briefs"], ck["review_owed"]) \
+    == (True, True, True, False), ck
+assert not fold.l2_complete(ck)
+# ★ and the 3-value projection does NOT lose the K conjunct: a consumer that only
+# unpacks (accepted, fixpoint, review_owed) must still see this charter as open,
+# or the lane drops it before its owed evidence lands (tick.closable_fallback's
+# own warning, which this reconciliation must not reintroduce).
+assert tuple(ck) == (False, True, False), tuple(ck)
+assert not (tuple(ck)[0] and tuple(ck)[1] and not tuple(ck)[2]), ck
+# ...and raising K to 1 closes it, through the same one predicate
+fold.K = 1
+try:
+    raised = ledger(**{
+        "L-builder-01.jsonl": built + [{"ts": stamp(3), "type": "spec-written", "subject": SO, "charter": C},
+                                       {"ts": stamp(2), "type": "build-started", "subject": SO}],
+        "L-grader-01.jsonl": graded, "L-reviewer-01.jsonl": reviewed,
+        "L-spec-writer-01.jsonl": [{"ts": stamp(0), "type": "owed-ac", "subject": SO,
+                                    "criterion": "AC7", "wake_at": stamp(-7)}],
+        "L-executor-01.jsonl": shipped + [{"ts": stamp(0), "type": "shipped", "subject": SO},
+                                          {"ts": stamp(0), "type": "sweep-fixpoint", "subject": C}],
+        "L-charter-reviewer-01.jsonl": [{"ts": stamp(0), "type": "charter-review-complete",
+                                         "subject": C}]})
+    assert raised[2][C]["state"] == "L2-complete" and fold.l2_complete(fold.closable(raised[0], C))
+finally:
+    fold.K = 0
+assert fold.K == 0, "K is pinned by assignment for this block, not read from the shell"
+# ...and a charter the ledger has never named answers honestly instead of raising —
+# "is this closable yet" is asked BEFORE the sweep, not only after it.
+unknown_c = fold.closable(owedk[0], "L-charter-9999")
+assert unknown_c["all_accepted"] is True and unknown_c["sweep_derived"] is False \
+    and unknown_c["review_owed"] is True and not fold.l2_complete(unknown_c), unknown_c
+fold.K = _K
+
+# ── R4/R8/R13/R15/AC8 · the four new EMITS entries, exactly their actors ──────
+assert fold.EMITS["spec-carried"] == {"operator"}
+assert fold.EMITS["conflict-rework"] == {"executor"}
+assert fold.EMITS["message-sent"] == {"planner", "executor", "thinker"}
+assert fold.EMITS["repo-edit"] == {"executor"}
+for etype, good_file, bad_file in (("spec-carried", "L-operator-01.jsonl", "L-builder-01.jsonl"),
+                                   ("conflict-rework", "L-executor-01.jsonl", "L-builder-01.jsonl"),
+                                   ("message-sent", "L-thinker-01.jsonl", "L-builder-01.jsonl"),
+                                   ("repo-edit", "L-executor-01.jsonl", "L-planner-01.jsonl")):
+    body = {"ts": stamp(0), "type": etype, "subject": S}
+    okfx = ledger(**{good_file: [body]})
+    assert okfx[3] == [] and any(e["type"] == etype for e in okfx[4][S]), (etype, okfx[3])
+    badfx = ledger(**{bad_file: [body]})
+    assert len(badfx[3]) == 1 and badfx[3][0]["type"] == etype, (etype, badfx[3])
+    assert S not in badfx[4], "an unauthorized emit does not reach the fold at all"
+    assert "unauthorized events recorded and ignored: 1" in fold.render(*badfx), etype
+# ...and message-sent's other two panes are authorized, while a dispatched
+# sub-agent role is not — a sub-agent returns to its seat, it does not address a pane
+for pane in ("L-planner-01.jsonl", "L-executor-01.jsonl"):
+    assert ledger(**{pane: [{"ts": stamp(0), "type": "message-sent", "subject": S}]})[3] == [], pane
+assert len(ledger(**{"L-grader-01.jsonl": [{"ts": stamp(0), "type": "message-sent",
+                                            "subject": S}]})[3]) == 1
+
+# ── R15/AC9 · the repo-edit count is honest at zero AND at nonzero ────────────
+none_edits = ledger(**{"L-executor-01.jsonl": shipped})
+assert "repo-edit events: 0" in fold.render(*none_edits), \
+    "a session that should read zero must SAY zero — silence is not a measurement"
+two_edits = ledger(**{"L-executor-01.jsonl": [
+    {"ts": stamp(1), "type": "repo-edit", "subject": "L-executor-0007.jsonl",
+     "path": "src/fold.py"},
+    {"ts": stamp(0), "type": "repo-edit", "subject": "L-executor-0007.jsonl",
+     "path": "src/tick.py"}]})
+eboard2 = fold.render(*two_edits)
+assert "repo-edit events: 2" in eboard2 and "src/tick.py" in eboard2, eboard2
+
+# ── R13/R14/AC10 · LIVE PANES and the unrecorded-message count DEGRADE, loudly ─
+# Both legs synthetic. Never "src/panes.py happens to be missing on disk" — that
+# is a property of merge order, not of this code, and it would stop testing the
+# absent leg the moment pane-identity merges.
+# `types` is imported at the top of this file (the with_relay stub needs it too).
+pane_fx = ledger(**{"L-executor-01.jsonl": shipped})
+_saved = sys.modules.get("panes", "‹absent›")
+try:
+    sys.modules["panes"] = None          # python raises ImportError on a None entry
+    absent = fold.render(*pane_fx)       # must not raise
+    assert "## LIVE PANES (1)" in absent, absent
+    live_block = absent.split("## LIVE PANES")[1].split("## HEALTH")[0]
+    assert "unavailable" in live_block and "panes" in live_block, live_block
+    assert "unrecorded messages: unavailable" in absent, absent
+
+    stub = types.ModuleType("panes")
+    stub.live_panes = lambda sessions_dir, events: [
+        {"name": "planner", "contract": "agents/planner.md", "cwd": "/home/x/do-it-v2",
+         "ledger_file": "L-planner-0014.jsonl", "age_days": 0.3, "harness_status": "idle"}]
+    stub.unrecorded_messages = lambda events: 3
+    sys.modules["panes"] = stub
+    present = fold.render(*pane_fx)
+    live_block = present.split("## LIVE PANES")[1].split("## HEALTH")[0]
+    assert "## LIVE PANES (1)" in present, present
+    for cell in ("planner", "agents/planner.md", "/home/x/do-it-v2",
+                 "L-planner-0014.jsonl", "0.3", "idle"):
+        assert cell in live_block, (cell, live_block)
+    assert "unavailable" not in live_block, live_block
+    assert "unrecorded messages: 3" in present, present
+
+    # ★ the LANDED seam (L-adr-0044, reconciled at the conflict re-dispatch):
+    # src/panes.py names two of those cells `last_event_age_days` and `status`,
+    # not the Seams prose's "age of its last event"/"harness status". The real
+    # spelling must render its VALUE, not a `?` — measured against the merged
+    # module, which rendered `last event ? · ?` for two live panes before this.
+    stub.live_panes = lambda sessions_dir, events: [
+        {"name": "L-executor-0007", "contract": "executor", "cwd": "/opt/albert-scott",
+         "ledger_file": "L-executor-0007.jsonl", "last_event_age_days": 0.7,
+         "status": "busy"}]
+    landed = fold.render(*pane_fx).split("## LIVE PANES")[1].split("## HEALTH")[0]
+    for cell in ("L-executor-0007.jsonl", "last event 0.7", "busy"):
+        assert cell in landed, (cell, landed)
+    assert "?" not in landed, landed
+    # a key present but None is not a value: `None` must never read as a status
+    stub.live_panes = lambda sessions_dir, events: [
+        {"name": "p", "contract": "c", "cwd": "/w", "ledger_file": "l.jsonl",
+         "last_event_age_days": None, "status": None}]
+    nones = fold.render(*pane_fx).split("## LIVE PANES")[1].split("## HEALTH")[0]
+    assert "None" not in nones and nones.count("?") == 2, nones
+
+    # a key-name mismatch at merge is a visible `?` cell, never a KeyError that
+    # takes every other section of the board down with it
+    stub.live_panes = lambda sessions_dir, events: [{"name": "planner"}]
+    mismatch = fold.render(*pane_fx)
+    assert mismatch.split("## LIVE PANES")[1].split("## HEALTH")[0].count("?") >= 5, mismatch
+
+    # and a sibling that raises is stated too, not propagated
+    def _boom(*a, **k):
+        raise RuntimeError("seam changed")
+    stub.live_panes, stub.unrecorded_messages = _boom, _boom
+    raised_b = fold.render(*pane_fx)
+    assert "unavailable — panes.live_panes raised RuntimeError" in raised_b, raised_b
+    assert "unavailable — panes.unrecorded_messages raised RuntimeError" in raised_b, raised_b
+finally:
+    if _saved == "‹absent›":
+        sys.modules.pop("panes", None)
+    else:
+        sys.modules["panes"] = _saved
+assert SESSIONS_DEFAULT.name == "sessions", SESSIONS_DEFAULT
+
+print("fold: 104 checks pass · +91 assertions (L-charter-0021: R3 R6 R11 R13 R14 R15)")
