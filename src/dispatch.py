@@ -125,6 +125,39 @@ def porcelain(cwd):
     return None                                         # None = undetermined, never clean
 
 
+def repo_moved(before, after, role):
+    """What moved in the repository across a spawn — an observation, never a verdict.
+    Another charter's builder merging into the same shared checkout is not this
+    spawn's misbehaviour, and a read-only audit that ran correctly beside it is
+    recorded as what it was.
+
+    `lines` is the sorted symmetric difference of the two snapshots' whole
+    non-empty porcelain lines, status columns included: diffing lines and not path
+    names is what makes a status-only change visible, since a file staged mid-spawn
+    moves " M a.txt" -> "M  a.txt" and its *path* diff is empty. `paths` is the
+    sorted de-duplicated set those lines name (column 4 onward, quote-stripped —
+    the extraction porcelain()'s own VOLATILE filter uses), a rename split on
+    " -> " so `R  a.txt -> b.txt` contributes both names and never the joined
+    string. `by_this_spawn` is the role fact `role == "builder"`, deliberately not
+    a claim of authorship: outside the builder, write access inside cwd is
+    forbidden by contract prose on seat/claude-p and mechanically *granted* on
+    codex (CODEX_WRITES + --sandbox workspace-write), so the field says which role
+    was dispatched and the event records the movement either way.
+
+    Called only with two real, determinate porcelain strings: the undetermined and
+    NOT_A_REPO-flip cases are decided by main() before this is reached, so it never
+    reads a sentinel as a diff."""
+    b, a = ({l for l in (s or "").splitlines() if l.strip()} for s in (before, after))
+    lines = sorted(b ^ a)
+    paths = set()
+    for line in lines:
+        for p in line[3:].strip().split(" -> "):
+            p = p.strip().strip('"')
+            if p:
+                paths.add(p)
+    return {"lines": lines, "paths": sorted(paths), "by_this_spawn": role == "builder"}
+
+
 def run_claude(cmd, packet, cwd, timeout):
     env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}   # no meter to fall through to
     return subprocess.run(cmd, input=packet, capture_output=True, text=True, cwd=cwd,
@@ -133,8 +166,10 @@ def run_claude(cmd, packet, cwd, timeout):
 
 # Roles whose contract writes a file: the Codex sandbox lets them write in the
 # spawn's cwd and under content/; every judging role runs read-only. The
-# builder's BUILDER_DENY patterns have no Codex spelling — the sandbox, the
-# porcelain check and the merge gate are the enforcement on that backend.
+# builder's BUILDER_DENY patterns have no Codex spelling — the sandbox and the
+# merge gate are the enforcement on that backend. The post-spawn porcelain
+# comparison is not one of them: it records movement on spawn-done (repo_moved)
+# instead of voiding the spawn, because concurrent work is not misbehaviour.
 CODEX_WRITES = ("builder", "spec-writer", "research", "reuse-scout", "probe", "reviewer", "charter-reviewer")
 
 
@@ -575,12 +610,32 @@ def main(a):
         if not exists:
             fail(f"nothing at {p} — the model reported {out.get('status') or out.get('answered')} "
                  "with no file on disk (D120 W3)")
-    if not builder and porcelain(cwd) != before:
-        fail(f"repo status changed across a non-builder spawn: {porcelain(cwd)!r}")
+    # Repo movement across a non-builder spawn is an observation, not a verdict:
+    # the Executor merges into the very directory a concurrent spec-writer or
+    # spec-auditor was handed as --cwd, and voiding that audit lost three correct
+    # runs to hand-repair. Two things are still hard failures, because they are a
+    # broken observation rather than concurrency: an after-snapshot that cannot be
+    # read at all, and the repository itself coming or going under --cwd.
+    moved = None
+    if not builder:
+        after = porcelain(cwd)                    # read exactly once — a second call is a third snapshot
+        if after is None:
+            fail(f"repo status undetermined in {cwd} after spawn — the observation is broken, "
+                 "not the spawn; the movement cannot be recorded")
+        if (before == NOT_A_REPO) != (after == NOT_A_REPO):
+            fail(f"repo identity changed across a non-builder spawn: {before!r} -> {after!r}")
+        if after != before:
+            moved = repo_moved(before, after, a.role)
     for t, kv in events_for(a.role, out, a, base):
         emit(ledger, base, t, **kv)
     scalars = {k: v for k, v in out.items() if isinstance(v, (str, int, float, bool))}
-    emit(ledger, base, "spawn-done", **{**scalars, **meta})
+    done = {**scalars, **meta}
+    # Emitted whenever the snapshots differ, never gated on lines/paths being
+    # non-empty: the observation is that the repository moved, and an empty
+    # derived list must not silently erase it.
+    if moved is not None:
+        done["repo_moved"] = moved
+    emit(ledger, base, "spawn-done", **done)
     print(json.dumps({"spawn": spawn, "ok": True, **meta}))
 
 
