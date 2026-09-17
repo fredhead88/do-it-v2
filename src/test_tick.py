@@ -1,50 +1,60 @@
 #!/usr/bin/env python3
 """One runnable check on the tick. Run: python3 test_tick.py"""
-import argparse, fcntl, json, os, pathlib, sys, tempfile
+import datetime, fcntl, json, os, pathlib, re, sys, tempfile
 
 TMP = pathlib.Path(tempfile.mkdtemp())
 os.environ["DOIT_ROOT"], os.environ["DOIT_NO_POKE"] = str(TMP), "1"
+# ★ `fold.PROJECT` is read ONCE at import and `fold.read_events()` filters on it.
+# These fixtures carry no `project` key, so a pane with DOIT_PROJECT set turns every
+# assertion below false-red. Popped here, before the import, never in the caller's shell.
+os.environ.pop("DOIT_PROJECT", None)
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
-import dispatch, fold, tick  # noqa: E402
+import fold, tick  # noqa: E402
 
-ticks = lambda: [json.loads(l) for l in tick.TICK.read_text().splitlines()]
-assert tick.main() == 0 and ticks()[-1] == {**ticks()[-1], "lane": 0, "spawned": False}, "idle: no model spawned"
-
-(TMP / "events" / "L-planner-0001.jsonl").write_text(json.dumps(
-    {"v": 1, "ts": "2026-09-08T10:00:00+00:00", "type": "spec-written", "subject": "L-spec-0001"}) + "\n")
-dispatch.AGENTS = TMP / "agents"
-dispatch.AGENTS.mkdir()
-assert tick.main() == 1 and ticks()[-1]["lane"] == 1 and ticks()[-1]["spawned"] is False, "lane, no contract: loud"
-
-(dispatch.AGENTS / "executor.md").write_text("---\nname: executor\ntools: Read, Bash, Skill, StructuredOutput\nmodel: claude-opus-5\n---\n")
-(dispatch.AGENTS / "executor.schema.json").write_text('{"type": "object"}')
-seen, out = {}, {"idle": False, "actions": [{"action": "dispatch-grader", "subject": "L-spec-0001", "spawned": "", "why": "w"}]}
+NOW = fold.NOW.isoformat(timespec="seconds")
+EV = TMP / "events"
 
 
-def fake(cmd, prompt, cwd, timeout):
-    seen.update(cmd=cmd, prompt=prompt, ledger=os.environ.get("DOIT_LEDGER_FILE"), gate=os.environ.get("DOIT_GATE_LEDGER_FILE"))
-    return argparse.Namespace(stdout=json.dumps({"is_error": False, "total_cost_usd": 0.5, "num_turns": 3,
-                                                 "usage": {"input_tokens": 9, "output_tokens": 1},
-                                                 "structured_output": seen.get("out")}))
-dispatch.run_claude = fake
-assert tick.main() == 1, "null structured_output is a failed spawn"
-assert json.loads((TMP / "events" / "L-executor-0001.jsonl").read_text().splitlines()[-1])["why"] == "null structured_output"
-seen["out"] = out
-assert tick.main() == 0 and ticks()[-1]["spawned"] is True
-assert "L-spec-0001 · written" in seen["prompt"] and "--agent" in seen["cmd"] and "executor" in seen["cmd"]
-assert "Skill(subagent-driven-development)" in seen["cmd"][seen["cmd"].index("--disallowedTools") + 1], "D119: RETIRE denied by name"
-assert seen["ledger"] == seen["gate"] == "L-executor-0002.jsonl", "the Executor's appends and the gate's verdict land in its spawn file (D90)"
-assert "--json-schema" in seen["cmd"] and "StructuredOutput" not in seen["cmd"][seen["cmd"].index("--allowedTools") + 1]
-done = json.loads((TMP / "events" / "L-executor-0002.jsonl").read_text().splitlines()[-1])
-assert done["type"] == "spawn-done" and done["cost_usd"] == 0.5 and done["spawn"] == "L-executor-0002"
-assert done["actions"] == ["dispatch-grader L-spec-0001"] and done["idle"] is False, "the tick's actions are ledger facts"
+def ticks():
+    """`tick`-TYPED lines only: in_flight() appends spawn-stale to the same file."""
+    lines = tick.TICK.read_text().splitlines() if tick.TICK.exists() else []
+    return [e for e in (json.loads(a) for a in lines) if e["type"] == "tick"]
+
+
+def write(name, *events):
+    p = EV / name
+    p.write_text("".join(json.dumps({"v": 1, "ts": NOW, **e}) + "\n" for e in events))
+    return p
+
+
+def folded():
+    ev = fold.read_events()
+    specs, charters, _, _ = fold.fold(ev)
+    return ev, specs, charters
+
+
+# R1/AC1: there is no Executor-spawn path left in the file, under any backend — the
+# grep is the acceptance criterion, so it is also the regression test.
+SRC = (pathlib.Path(__file__).parent / "tick.py").read_text()
+assert not re.search(r"run_claude|--agent|executor\.schema\.json|models\.|dispatch\.alloc", SRC), \
+    "tick.py must contain no code path that starts an Executor process (L-adr-0035)"
+
+# An idle tick: one tick event, lane 0, nothing spawned and no `spawned` key to report it.
+assert tick.main() == 0, "a tick is a fold-and-record; it is never an error"
+assert len(ticks()) == 1 and ticks()[-1]["lane"] == 0, "idle: exactly one tick event, lane 0"
+assert "spawned" not in ticks()[-1], "nothing spawns, so nothing reports having spawned"
+
+# A lane with work on it is recorded, not acted on — and the executor contract's
+# presence on disk is no longer this process's business (it used to exit 1 over it).
+write("L-planner-0001.jsonl", {"ts": "2026-09-08T10:00:00+00:00", "type": "spec-written", "subject": "L-spec-0001"})
+assert tick.main() == 0 and ticks()[-1]["lane"] == 1, "a lane of 1 is recorded and the tick exits clean"
+assert len(ticks()) == 2, "AC10: exactly one tick event per run that takes the lock"
 
 # in flight: a start with no terminal event keeps the subject off the lane; a stale one puts it back
-ev_file = TMP / "events" / "L-grader-0009.jsonl"
-ev_file.write_text(json.dumps({"v": 1, "ts": fold.NOW.isoformat(timespec="seconds"), "type": "spawn-started",
-                               "role": "grader", "subject": "L-spec-0001", "spawn": "L-grader-0009"}) + "\n")
+ev_file = write("L-grader-0009.jsonl", {"type": "spawn-started", "role": "grader",
+                                        "subject": "L-spec-0001", "spawn": "L-grader-0009"})
 assert tick.main() == 0 and ticks()[-1]["lane"] == 0, "an in-flight grader keeps its subject off the lane"
-old_ts = (fold.NOW - __import__("datetime").timedelta(minutes=45)).isoformat(timespec="seconds")
+old_ts = (fold.NOW - datetime.timedelta(minutes=45)).isoformat(timespec="seconds")
 ev_file.write_text(json.dumps({"v": 1, "ts": old_ts, "type": "spawn-started", "role": "grader",
                                "subject": "L-spec-0001", "spawn": "L-grader-0009"}) + "\n")
 tick.main()
@@ -58,11 +68,9 @@ ev_file.unlink()
 # It crashed the tick on the first real charter: `sid.split` on None, and every
 # tick after it was dead. It cannot be matched to a terminal event, so it ages
 # out on the role's cap and names nothing.
-ev_file = TMP / "events" / "L-builder-0009.jsonl"
-ev_file.write_text(json.dumps({"v": 1, "ts": fold.NOW.isoformat(timespec="seconds"),
-                               "type": "build-started", "subject": "L-spec-0001"}) + "\n")
+ev_file = write("L-builder-0009.jsonl", {"type": "build-started", "subject": "L-spec-0001"})
 assert tick.main() == 0 and ticks()[-1]["lane"] == 0, "an anonymous start does not crash the tick"
-old = (fold.NOW - __import__("datetime").timedelta(days=12)).isoformat(timespec="seconds")
+old = (fold.NOW - datetime.timedelta(days=12)).isoformat(timespec="seconds")
 ev_file.write_text(json.dumps({"v": 1, "ts": old, "type": "spawn-started",
                                "role": "grader", "subject": "L-spec-0001"}) + "\n")
 before_stale = len([l for l in tick.TICK.read_text().splitlines() if '"spawn-stale"' in l])
@@ -71,49 +79,142 @@ assert len([l for l in tick.TICK.read_text().splitlines() if '"spawn-stale"' in 
     "nothing to name: a spawn-stale with no spawn id would be unmatchable and repeat every tick"
 ev_file.unlink()
 
-# an open escalation keeps the subject off the lane; a decision after it puts it back
-esc = TMP / "events" / "L-executor-0090.jsonl"
-esc.write_text(json.dumps({"v": 1, "ts": fold.NOW.isoformat(timespec="seconds"), "type": "escalation-blocking",
-                           "subject": "L-spec-0001", "why": "seat", "spawn": "L-executor-0090"}) + "\n")
+# AC6 — an open escalation keeps the subject off the lane; a decision after it puts it back.
+# The ONE gate at this layer that is still a gate, because it is the operator's.
+esc = write("L-executor-0090.jsonl", {"type": "escalation-blocking", "subject": "L-spec-0001",
+                                      "why": "seat", "spawn": "L-executor-0090"})
 assert tick.main() == 0 and ticks()[-1]["lane"] == 0, "an escalated subject is the operator's, not the lane's"
-esc.write_text(esc.read_text() + json.dumps({"v": 1, "ts": fold.NOW.isoformat(timespec="seconds"), "type": "decision",
-                                             "subject": "L-spec-0001", "why": "w", "revert": "r", "spawn": "L-executor-0090"}) + "\n")
+esc.write_text(esc.read_text() + json.dumps({"v": 1, "ts": NOW, "type": "decision", "subject": "L-spec-0001",
+                                             "why": "w", "revert": "r", "spawn": "L-executor-0090"}) + "\n")
 tick.main()
 assert ticks()[-1]["lane"] == 1, "a decision after the escalation returns it to the lane"
 esc.unlink()
 
-# A closed charter stays on the lane until it is reaped. §4.11's reaper refuses
+# AC9 — a closed charter stays on the lane until it is reaped. §4.11's reaper refuses
 # anything not L2-complete or retracted, and the lane used to admit only
 # L1-complete: the reap was unreachable by any tick, and L-charter-0001 sat
 # retracted with its worktree standing (2026-09-08).
-ch = TMP / "events" / "L-operator-tick.jsonl"   # retracted is the operator's (fold.EMITS)
-ch.write_text("".join(json.dumps(e) + "\n" for e in [
-    {"v": 1, "ts": "2026-09-08T09:00:00+00:00", "type": "charter-filed", "subject": "L-charter-0003"},
-    {"v": 1, "ts": "2026-09-08T10:00:00+00:00", "type": "charter-retracted", "subject": "L-charter-0003",
-     "why": "w"}]))
-specs, charters, _, _ = fold.fold(fold.read_events())
+ch = write("L-operator-tick.jsonl",   # retracted is the operator's (fold.EMITS)
+           {"ts": "2026-09-08T09:00:00+00:00", "type": "charter-filed", "subject": "L-charter-0003"},
+           {"ts": "2026-09-08T10:00:00+00:00", "type": "charter-retracted", "subject": "L-charter-0003", "why": "w"})
+ev, specs, charters = folded()
 assert charters["L-charter-0003"]["state"] == "retracted"
 assert "L-charter-0003 · retracted" in tick.lane(specs, charters), \
     "a charter that is reapable and unreaped is the Executor's, or doit reap never runs"
 ch.write_text(ch.read_text() + json.dumps({"v": 1, "ts": "2026-09-08T11:00:00+00:00", "type": "tree-reaped",
                                            "subject": "L-charter-0003", "reaped": [], "retained": []}) + "\n")
-specs, charters, _, _ = fold.fold(fold.read_events())
-reaped = {e.get("subject") for e in fold.read_events() if e["type"] == "tree-reaped"}
+ev, specs, charters = folded()
+reaped = {e.get("subject") for e in ev if e["type"] == "tree-reaped"}
 assert "L-charter-0003 · retracted" not in tick.lane(specs, charters, reaped=reaped), \
     "once reaped it leaves the lane for good, or every tick pays to reap it again"
 ch.unlink()
 
-# The root's map rules the tick out (pilot S32): an Executor that is a pane — or anything
-# but claude-p — is never ticked into the metered pool. Refused, recorded, exit 2.
-import models
-(TMP / "models.toml").write_text('[contracts.executor]\nbackend = "pane"\nmodel = "claude-sonnet-5"\n')
-assert tick.main() == 2 and ticks()[-1]["spawned"] is False and "claude-p" in ticks()[-1]["refused"], ticks()[-1]
-(TMP / "models.toml").write_text('[contracts.executor]\nbackend = "claude-p"\nmodel = "claude-sonnet-5"\n')
-assert tick.main() == 0 and ticks()[-1]["spawned"] is True, "a map that says claude-p changes nothing"
-(TMP / "models.toml").unlink()
+# AC3 (R6) — a free-standing spec is on the lane on its own terms. It names no
+# charter at all, and an unrelated charter sitting at L1-complete cannot touch it.
+write("L-planner-0007.jsonl", {"type": "spec-written", "subject": "L-spec-0077"})
+write("L-operator-0007.jsonl",            # l1-complete is EMITS-gated to planner/operator
+      {"type": "charter-filed", "subject": "L-charter-0007"},
+      {"type": "l1-complete", "subject": "L-charter-0007"})
+ev, specs, charters = folded()
+assert specs["L-spec-0077"]["state"] == "written" and specs["L-spec-0077"]["charter"] is None, \
+    "the fixture is a genuinely free-standing spec, or AC3 proves nothing"
+assert charters["L-charter-0007"]["state"] == "L1-complete", "the fixture charter really is at L1-complete"
+assert "L-spec-0077 · written" in tick.lane(specs, charters, events=ev), \
+    "R6: a spec's presence on the lane never depends on any charter's state"
 
+# AC7/AC8 (R11) — the wave-1 seam decides the L1-complete charter, and only it.
+seen = {}
+
+
+def stub(events, charter):
+    seen.update(n=len(events), cid=charter["id"] if isinstance(charter, dict) else charter)
+    return seen["verdict"]
+
+
+seen["verdict"] = (True, True, False)          # all accepted, fixpoint derived, no review owed
+fold.closable = stub
+lanes = tick.lane(specs, charters, events=ev)
+assert "L-charter-0007 · L1-complete" not in lanes, \
+    "AC7: a fully-accepted charter closes without an Executor decision"
+assert seen["n"] == len(ev) and seen["cid"] == "L-charter-0007", \
+    "closable() is handed the whole ledger, never the charter's own c['evs']"
+assert "L-spec-0077 · written" in lanes, "R6 again: the charter leaving does not take the free spec with it"
+seen["verdict"] = (True, True, True)           # a charter-review is still owed
+assert "L-charter-0007 · L1-complete" in tick.lane(specs, charters, events=ev), \
+    "AC8: a review still owed is the Executor's dispatch to make"
+del fold.closable                              # back to the fallback for everything below
+
+# AC11 — the fallback mirrors fold.fold()'s FULL L2 conjunction: an open in-scope
+# brief holds the charter at L1-complete, so it must stay on the lane for the
+# Executor's brief-author row. A three-conjunct fallback would drop it here and
+# strand it short of reap forever.
+write("L-operator-0011.jsonl",
+      {"type": "charter-filed", "subject": "L-charter-0011"},
+      {"type": "l1-complete", "subject": "L-charter-0011"},
+      {"type": "sweep-fixpoint", "subject": "L-charter-0011"},
+      {"type": "brief", "subject": "L-charter-0011", "requirement": "R3", "why": "unanswered"})
+write("L-charter-reviewer-0011.jsonl", {"type": "charter-review-complete", "subject": "L-charter-0011"})
+ev, specs, charters = folded()
+c11 = charters["L-charter-0011"]
+assert c11["state"] == "L1-complete" and c11["briefs"] == 1 and c11["owed"] == 0, \
+    "the fold itself holds this charter at L1 on the brief alone"
+assert tick.closable_fallback(ev, c11) == (True, False, False), \
+    "AC11: accepted and reviewed, but an open brief means no fixpoint"
+assert "L-charter-0011 · L1-complete" in tick.lane(specs, charters, events=ev), \
+    "AC11: it stays on the lane, or the brief is never authored and reap never comes"
+brief_src = next(e["_src"] for e in ev if e["type"] == "brief" and e.get("subject") == "L-charter-0011")
+write("L-executor-0011.jsonl", {"type": "brief-answered", "subject": "L-charter-0011", "ref": brief_src})
+ev, specs, charters = folded()
+assert tick.closable_fallback(ev, charters["L-charter-0011"]) == (True, True, False), \
+    "answer the brief and the same fallback reports the fixpoint derived"
+(EV / "L-operator-0011.jsonl").unlink()
+(EV / "L-charter-reviewer-0011.jsonl").unlink()
+(EV / "L-executor-0011.jsonl").unlink()
+
+# AC4 (R7) — a `blocked` event is a footprint wait, not a lane exclusion. The
+# Executor writes one when two units share a footprint; nothing here reads it.
+write("L-executor-0044.jsonl",
+      {"type": "spec-written", "subject": "L-spec-0044"},
+      {"type": "blocked", "subject": "L-spec-0044", "id": "L-spec-0044-wait",
+       "owner": "executor", "why": "footprint overlap with L-spec-0045"})
+ev, specs, charters = folded()
+assert specs["L-spec-0044"]["state"] == "written", "a blocked spec is still a written spec"
+assert "L-spec-0044 · written" in tick.lane(specs, charters, tick.in_flight(ev), events=ev), \
+    "AC4: an unmatched `blocked` never removes a spec from the lane"
+
+# AC5 (R7) — one subject's own in-flight spawn excludes that subject and nothing else.
+# Two written specs sharing a footprint both stand, while a third builds.
+write("L-planner-0055.jsonl",
+      {"type": "spec-written", "subject": "L-spec-0055"},
+      {"type": "spec-written", "subject": "L-spec-0056"},
+      {"type": "spec-written", "subject": "L-spec-0057"})
+write("L-builder-0055.jsonl", {"type": "build-started", "subject": "L-spec-0057", "spawn": "L-builder-0055"})
+ev, specs, charters = folded()
+busy = tick.in_flight(ev)
+lanes = tick.lane(specs, charters, busy, events=ev)
+assert busy == {"L-spec-0057"}, "only the subject with the open spawn is busy"
+assert "L-spec-0055 · written" in lanes and "L-spec-0056 · written" in lanes, \
+    "AC5: a footprint-adjacent spec is never struck off for a sibling's build"
+assert specs["L-spec-0057"]["state"] == "building" and not [x for x in lanes if x.startswith("L-spec-0057")], \
+    "the building spec is in flight, not waiting"
+
+# AC10 — one tick event per lock-acquiring run, carrying the count lane() returned.
+expect = len(tick.lane(specs, charters, tick.in_flight(ev),
+                       {e.get("subject") for e in ev if e["type"] == "tree-reaped"}, events=ev))
+n = len(ticks())
+assert tick.main() == 0 and len(ticks()) == n + 1, "exactly one tick line per run"
+assert ticks()[-1]["lane"] == expect and isinstance(ticks()[-1]["lane"], int), \
+    "AC10: the tick records the count lane() returned, as an int"
+
+# AC12 — the three constants out-of-footprint readers depend on are untouched.
+assert (tick.MINUTES, tick.USD) == (20, 5) and len(tick.RETIRE) == 7, "the Executor's declared cap survives"
+assert fold.caps()["executor"] == (tick.MINUTES, tick.USD), "fold.caps() reads them from here, still"
+assert tick.RETIRE[0] == "subagent-driven-development" and tick.RETIRE[-1] == "dispatching-parallel-agents", \
+    "§10.5's RETIRE tuple, verbatim — think.pane_cmd() and up.pane_cmd() deny it by name"
+
+# AC10, the other half — a run the flock drops records nothing at all.
 held = open(TMP / "tick.lock", "w")
 fcntl.flock(held, fcntl.LOCK_EX)
 before = len(ticks())
 assert tick.main() == 0 and len(ticks()) == before, "flock: a second tick is dropped, not queued"
-print("tick: 18 checks pass")
+print("tick: 39 checks pass")
