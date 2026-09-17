@@ -711,6 +711,26 @@ def render(events, specs, charters, ignored, by_subject):
     scope = f" · project={' '.join(str(PROJECT).split())}" if PROJECT else ""
     L = [f"# board · {NOW.isoformat(timespec='seconds')} · fold @ {len(events)}{scope}", ""]
 
+    # R5/R6: whatever relay-queries' waiting_lines(events, ROOT) returns, verbatim
+    # and in order, immediately under the title and above NEEDS YOU. A PURE
+    # PASS-THROUGH: no reordering, no dedup, no truncation, no re-wrapping, and no
+    # "## " header of fold.py's own making — whether a returned line carries one is
+    # relay's contract, and this file has no authority to strip a prefix it did not
+    # add. Not a twelfth positional section: it is the question ("what is the
+    # planner waiting on?") the rest of the board cannot answer. A dry queue still
+    # renders its one line — "nothing waiting" IS the answer, never a reason to
+    # omit the slot (R6).
+    # L-adr-0033 degrade: ImportError ONLY. A relay that imports and then raises is
+    # a bug in a landed producer and must propagate — swallowing it would hide a
+    # live failure behind a "not merged yet" line that is no longer true.
+    waiting_unavailable = False
+    try:
+        from relay import waiting_lines
+    except ImportError:
+        waiting_unavailable = True
+    else:
+        L += list(waiting_lines(events, ROOT)) + [""]
+
     def block(title, rows, note=""):
         L.append(f"## {title} ({len(rows)}){note}")
         L.extend("  " + r for r in rows)
@@ -785,6 +805,12 @@ def render(events, specs, charters, ignored, by_subject):
 
     drill = max((ts(e["ts"]) for e in events if e.get("type") == "restore-verified"), default=None)
     health = [f"restore drill: {'never run — the backup is unproven' if not drill else f'{(NOW-drill).days}d ago'}"]
+    # The degrade half of the block above (L-adr-0033). It lands HERE rather than at
+    # the block's own position so that slot stays a pure pass-through of relay's
+    # lines and nothing else — same loudness, a surface fold.py already owns. The
+    # wording is fixed by the spec, not chosen here: it is asserted literally.
+    if waiting_unavailable:
+        health.append("PLANNER WAITING ON: unavailable — relay-queries not merged (L-adr-0033)")
     # D111: a silent correction is an edit with extra steps. Counted from what
     # APPLIED, not from `events` — corrections apply before §9.1's project filter,
     # so a filtered board would otherwise under-report its own repairs.
