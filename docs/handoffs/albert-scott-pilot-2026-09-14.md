@@ -2082,3 +2082,61 @@ answering two Planner escalations and clearing the orchestration box from 95% to
 - **Measured:** 3,394 empty `/tmp/doit-seat-*`-class directories, one per spawn, never removed; an escalation event (`L-planner-0016.jsonl:5`) carrying `default: None`, `deadline: None` — the schema allowed an escalation nobody can answer by default. The box went 95% → 61% (57G free) with a recoverable safety net (`/var/tmp/_cleanup-20260917/README.md` + `MANIFEST.md`, `~/.claude/archive-20260917/`, delete after 2026-09-24).
 - **Systemic:** the dispatcher should remove its seat tmp dir on terminal event; `doit validate` should refuse an escalation without a default and a deadline (R80's "disk full" is exactly the case where "answer on the merits" is the only path, and it needs a deadline more than any other).
 - **Fix status:** open — no change-list id.
+
+### R87. The per-spec blind audit is the Plan's only *measured* check — it caught three Plan defects the plan-audit could not (L-planner-0016, L-charter-0022, 2026-09-17)
+- **Measured:** four wave-2 spec-audits returned 36 findings, all `bad_cut: false`. Three of them
+  were defects in the **Planner's own Plan and ADRs**, not in the specs, and all three had survived
+  the fable plan-audit clean:
+  1. **Two unrelated constants both equal 8.5h, and the Plan named the wrong one.** L-adr-0065 and a
+     `decision` event on `L-goal-0001` attributed the nightly tier-2 kill to
+     `tier2_units._TIER2_WATCHDOG_ENVELOPE_MINUTES = 8*60+30`. That constant kills nothing — its
+     only consumer is `_unit_window()` → concurrency planning. The real killer is a *different
+     process*, `stuck_killer.py`, at `max(_REAP_THRESHOLDS_HOURS['amazon_runner_tier2']=8h,
+     _CLIENT_SUBPROCESS_TIMEOUT_S=4h) + _KILL_GRACE_HOURS=0.5h`, on a 30-min tick. The arithmetic
+     agreed, so the false reading looked confirmed. **It inverted a design conclusion**: the real
+     killer sends SIGTERM with a 30-second grace before SIGKILL, so the job *can* record its own
+     end on the nights it dies — which the in-process-watchdog reading made look impossible.
+  2. **A rollback ADR scoped its pre-image to the defect, not to the write.** L-adr-0071 said
+     "exactly the rows the write touches"; the only canonical writer,
+     `upsert_settlement_headers(engine, agency_id, client_id)`, takes no settlement filter and
+     rewrites the whole client. And 9 settlements have no header row at all, so the writer INSERTs
+     them and an UPDATE-only restore cannot undo it. A rollback that cannot undo an INSERT is not a
+     rollback.
+  3. **`FILE_SIZE_GUARD_OVERRIDE=1` is commit-global**, not per-file (`file_size_guard.sh:23` exits
+     0 before building any file set), so using it to land a 3-line registration un-caps every other
+     file in the same commit.
+- **Systemic:** the plan-auditor reads documents against a charter; the spec-auditor measures
+  against HEAD. Only the second can catch a Plan whose *premises about the code* are wrong, and a
+  Planner's premises are exactly what the blind plan-audit is blind to. **Do not treat the per-spec
+  audit as a spec-quality gate — it is the Plan's last measured check, and the Planner must read
+  every finding asking "is this mine?" before handing it to the writer.** Three of 36 were.
+- **Fix status:** all three corrected in the Plan, the ADRs and (for 1) a superseding `decision`
+  event. No change-list id — this is doctrine, not a tool bug.
+
+### R88. A spec criterion demanded a non-dry-run write through a fixture that falls back to production (L-planner-0016, 2026-09-17)
+- **Measured:** `pg_engine_ready` → `pg_parity_dsn` → `resolve_live_db_dsn(prefer='parity')` returns
+  `SUPABASE_DB_URL` — the live money database — when `AS_LIVE_DB_TARGET` and `PG_PARITY_DB_URL` are
+  unset. A wave-2 spec's AC1 demanded a non-dry-run CREATE+UPDATE graded through exactly that
+  fixture, while its own prose asserted the fixture was "a scratch Postgres … distinct from
+  `SUPABASE_DB_URL`". The hazard was one indirection below the name the spec used.
+- **Second of its kind this charter.** Earlier, a spec-writer asked for a formatting-only fix
+  *added* `alembic -c api/alembic_supabase.ini upgrade head` to a Verification block with a comment
+  claiming "scratch DB only". Both were caught by a human-equivalent read, not by the pipeline.
+- **Systemic:** **nothing in DO-IT checks a Verification block or a review path for
+  database-writing commands.** `doit packet` strips contamination and `doit validate` checks card
+  shape; neither looks at what the commands *do*. Now covered for this charter by L-adr-0083 (a
+  criterion writes only to a DSN the harness itself created, else it is `owed` and operator-observed)
+  — but an ADR binds one charter, and this wants to be a wrapper check.
+- **Fix status:** open — wants a change-list id: refuse a spec whose Verification or review path
+  contains a write/DDL verb against a DSN the block did not create.
+
+### R89. DO-IT v2 ids collide with the host project's numeric guards (L-planner-0016, 2026-09-17)
+- **Measured:** `api/alembic_supabase/ops_backup_manifest.txt` is `table_name|origin_spec|date`, and
+  two shipped guard tests raise unless `origin_spec.isdigit()`. `L-spec-0073` is not numeric, so no
+  DO-IT v2 spec can register an `ops_backup` table under its own id.
+- **Systemic:** this is the first collision, not the last — guards in a host repo routinely key on an
+  integer spec id. The two tempting fixes are both wrong: loosening the guard to fit our naming
+  (that guard is the boundary spec 927 bought), and inventing a plausible number (collides or
+  misleads). Handled here by L-adr-0084: one allocated host-ledger number per charter, and the spec
+  is written against the *line shape* with the number as an operator-owed input, so nothing blocks.
+- **Fix status:** open — wants a brief on how v2 ids map onto host-project numbering.
