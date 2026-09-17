@@ -17,16 +17,35 @@ case "${1:-board}" in
   up)      shift; exec python3 "$SRC/up.py" "$@" ;;
   pane-end) shift; exec python3 "$SRC/pane_end.py" "$@" ;;
   think)   shift; exec python3 "$SRC/think.py" "$@" ;;
+  carry)   shift; exec python3 "$SRC/carry.py" "$@" ;;
   models)  shift; exec python3 "$SRC/models.py" "$@" ;;
   version) cat "$HERE/VERSION" ;;
   backup)  shift; exec bash "$SRC/backup.sh" "$@" ;;
   # ★ DISCOVERED, never enumerated. This was a hardcoded && chain of twelve
   # files, so a new src/test_*.py ran nowhere and its guard was advisory until
-  # someone remembered to add it. `set -e` stops the loop on the first failure,
-  # exactly as the chain did.
+  # someone remembered to add it. The `· <file>` marker names the file that is
+  # running now, so a hang is attributable.
+  # Run-all, not fail-fast: the chain (and a bare `set -e` loop) hid every
+  # failure after the first. One PASS/FAIL line per file, its output kept (a
+  # swallowed traceback is an undiagnosable failure), non-zero if any failed.
+  # The glob covers test_*.mjs too, so test_vet_dep.mjs needs no tail call.
   test)    cd "$SRC"
-           for t in test_*.py; do printf '· %s\n' "$t"; python3 "$t"; done
-           exec node "$SRC/test_vet_dep.mjs" ;;
+           rc=0
+           for f in test_*.py test_*.mjs; do
+             [ -e "$f" ] || continue
+             printf '· %s\n' "$f"
+             runner=python3
+             if [ "${f%.mjs}" != "$f" ]; then runner=node; fi
+             if out=$("$runner" "$f" 2>&1); then
+               echo "PASS $f"
+             else
+               s=$?
+               echo "FAIL $f (exit $s)"
+               rc=1
+             fi
+             printf '%s\n' "$out"
+           done
+           exit "$rc" ;;
   help|-h|--help) cat <<'USAGE'
 doit — a ledger that derives state, and the guards that read it
 
@@ -49,6 +68,8 @@ doit — a ledger that derives state, and the guards that read it
   doit pane-end <charter> --handover F [--root D]   the Planner's ⑦: end this pane's own process, if it may
   doit think <topic> | --land F… | --discard <topic>
                                           open a Thinker session, or land its charters (§3.3)
+  doit carry <source> [--repo D] [--project N]
+                                          carry an inbound v4 record (or PR url) into a charter:null spec-writer spawn
   doit models show | use <mixed|claude-only>   the root's model map: print it, or install a profile
   doit version                            print the release version (VERSION; CHANGELOG.md has the history)
   doit alloc <kind> [--dir]               claim the next L-<kind>-NNNN under content and print its path (§2.8)
