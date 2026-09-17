@@ -239,4 +239,81 @@ for line in ("doit alloc charter", "doit think --land", "doit think --discard", 
 for s in think.SECTIONS:
     ok(s in body, f"the template names the section the landing check refuses without: {s}")
 
+# ── sequencing on landing: recorded, refused, or degraded — never silent ─────
+# The producing seam (`relay.sequencing`) may not be in the tree yet, so it is forced
+# to both of its states here: absent, then stood in by its DECLARED contract only.
+# That is what makes these provable now instead of owed.
+SEQ = GOOD.replace("Covers: G2, G7", "Covers: none")
+PROSE = "Cost is the CLI's list-price estimate, not money."
+
+
+def seq_charter(name, *lines):
+    return charter(name, SEQ.replace(PROSE, "\n".join(lines) or PROSE))
+
+
+def seq_stub(source, events):
+    """L-spec-0029's declared contract and nothing else — a MAPPING in, the four
+    lists or None out. Its real normalizer is that unit's to prove, not this one's."""
+    keys = [k for k in think.SEQ_KINDS if source.get(k) is not None]
+    if not keys:
+        return None
+    filed = {e["subject"] for e in events if e.get("type") == "charter-filed"}
+    out = {k: [] for k in think.SEQ_KINDS + ("unknown",)}
+    for k in keys:
+        for cid in str(source[k]).split():
+            (out[k] if cid in filed else out["unknown"]).append(cid)
+    return out
+
+
+seam, think.sequencing = think.sequencing, None
+buf = io.StringIO()
+with contextlib.redirect_stdout(buf):
+    think.land([seq_charter("L-charter-0020.md", "after: L-charter-0011 — filed already")],
+               print_only=True)
+ok(not (set(think.SEQ_KINDS) & fold.read_events()[-1].keys())
+   and "sequenc" in buf.getvalue().lower(),
+   f"no producer in the tree: land degrades to today and SAYS it did: {buf.getvalue()!r}")
+
+think.sequencing = seq_stub
+think.land([seq_charter("L-charter-0021.md")], print_only=True)
+ok(not (set(think.SEQ_KINDS) & fold.read_events()[-1].keys()),
+   "a charter declaring no block carries none of the three keys — not three empty ones")
+
+think.land([seq_charter("L-charter-0022.md", "after: L-charter-0011 — land that one first",
+                        "conflicts: L-charter-0015 — both rewrite the board")], print_only=True)
+ev = fold.read_events()[-1]
+ok(ev.get("after") == ["L-charter-0011"] and ev.get("conflicts") == ["L-charter-0015"]
+   and ev.get("alongside") == [],
+   f"a declared block lands as three JSON arrays, always all three together: {ev}")
+
+# R10: a sequencing entry naming a charter that does not exist, from a fixture ledger
+before = len(fold.read_events())
+try:
+    think.land([seq_charter("L-charter-0023.md"),
+                seq_charter("L-charter-0024.md", "after: L-charter-0999 — never filed")],
+               print_only=True)
+    ok(False, "an entry naming a charter with no charter-filed event must refuse")
+except SystemExit as e:
+    ok("L-charter-0999" in str(e) and len(fold.read_events()) == before,
+       f"the refusal names the id, and the WHOLE batch is refused before any append: {e}")
+try:
+    think.land([seq_charter("L-charter-0025.md", "after: L-charter-0025 — itself")],
+               print_only=True)
+    ok(False, "a charter naming itself must refuse")
+except SystemExit as e:
+    ok("L-charter-0025" in str(e), f"self-reference is unknown like any other id: {e}")
+try:
+    think.land([seq_charter("L-charter-0026.md", "after: L-charter-0011")], print_only=True)
+    ok(False, "an entry with an id and no reason must refuse")
+except SystemExit as e:
+    ok("one-line reason" in str(e), f"a malformed entry is named, never dropped: {e}")
+
+think.land([seq_charter("L-charter-0027.md", "- after: L-charter-0999 — a bullet is prose",
+                        "  conflicts: L-charter-0999 — and so is an indent")], print_only=True)
+ok(not (set(think.SEQ_KINDS) & fold.read_events()[-1].keys()),
+   "only column 0 is an entry — that is what keeps the parse off charter prose")
+ok(think.check(charter("L-charter-0028.md"))["covers"] == ["G2", "G7"],
+   "check() still takes one argument: the ledger it reads defaults inside the function")
+think.sequencing = seam
+
 print(f"think: {n} checks pass")
