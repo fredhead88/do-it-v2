@@ -141,10 +141,16 @@ def resolve(ref):
     return p.stdout.decode().strip()
 
 
-def preflight():
-    """A truncated history cannot answer a question about history."""
+def preflight(repo=None):
+    """A truncated history cannot answer a question about history.
+
+    `repo` is the directory the toplevel is resolved FROM — the process cwd when
+    None, which is every existing caller. It is honoured as the `-C` that `run()`
+    already carries, never by `os.chdir()`: the gate runs inside the Executor's
+    process and moving that process's cwd out from under it is a side effect no
+    caller of a read-only check can be asked to expect."""
     global _TOP
-    _TOP = None                 # resolve the toplevel in the CALLER's cwd, not the last run's
+    _TOP = repo                 # resolve the toplevel in the CALLER's cwd, not the last run's
     p = run(("rev-parse", "--show-toplevel"))
     if p.returncode:
         raise Undetermined("not inside a git repository")
@@ -263,12 +269,23 @@ def revert_window(paths, main):
     return window
 
 
-def gate(branch, main, grant):
-    """What the merge would actually do to main, filtered to paths outside the grant."""
+def begin_run(repo=None):
+    """Everything a run owns before it asks git anything: a fresh deadline, the
+    knobs re-read and validated, and the toplevel resolved from `repo`.
+
+    One helper rather than two copies, because `conflicted()` must inherit the
+    whole of D113-D115's hardening — the GIT_* strip, the pinned config, the
+    shallow/replace-ref/submodule hard stops — and a second hand-rolled prologue
+    is exactly how one of them comes to be missing from the other."""
     global _START
     _START = time.monotonic()          # the budget is per RUN, not per process
     load_config()
-    preflight()
+    preflight(repo)
+
+
+def gate(branch, main, grant):
+    """What the merge would actually do to main, filtered to paths outside the grant."""
+    begin_run()
     main_sha, branch_sha = resolve(main), resolve(branch)
     if main_sha == branch_sha:
         raise Undetermined(f"{branch} and {main} are the same commit — there is nothing to gate, "
@@ -415,6 +432,35 @@ def grant_for(spec, cli):
         raise
 
 
+def conflict_event(branch, main, spec):
+    """Classify a real conflict and record it. Returns the exit code, or None when
+    the classification itself could not be established — in which case the caller
+    falls back to the generic rework append, because a conflict we could not
+    describe is still a could-not-determine and must never go unrecorded.
+
+    ★ The import is HERE and not at the top: `conflict.py` imports this module at
+    module scope, there is exactly one call site, and a top-level import buys a
+    cycle for nothing. `fold.py`'s `__main__` block sets the precedent.
+
+    What this does NOT do is act on the verdict. Issuing the re-dispatch packet
+    and appending an `escalation-blocking` are the Executor's, not the gate's; the
+    gate's whole job is to make the distinction a fact in the ledger."""
+    import conflict
+    try:
+        r = conflict.conflicted(branch, main, os.getcwd())
+        a = conflict.conflict_attempts(fold.read_events(), spec)
+    except Undetermined:
+        return None
+    fold.append(["conflict-rework", spec, f"branch={branch}",
+                 # `attempt:=` — a bare `attempt=1` round-trips as the string "1"
+                 # (fold's D-rule: a bare value is a string unless unambiguously JSON)
+                 f"attempt:={json.dumps(a.attempt)}", f"verdict={a.verdict}",
+                 f"paths={json.dumps(r.paths)}"])
+    print(f"merge-gate: conflict — attempt {a.attempt}, {a.verdict} ({spec} on {branch})"
+          + (f"\n  paths: {', '.join(r.paths)}" if r.paths else ""))
+    return 1
+
+
 def main_(argv):
     branch = argv[0]
     if branch.startswith("-"):      # `doit gate --help` once appended a rework event with subject "--help"
@@ -448,6 +494,22 @@ def main_(argv):
               + (f"\n  reverted: {', '.join(reverts)}" if reverts else ""))
         return 0 if status == "clean" else 1
     except Undetermined as e:
+        # ★ ONE Undetermined is not like the others. A real content conflict with a
+        # spec id is a re-dispatchable outcome — which paths collide, and whether
+        # this spec has collided before — not a human's decision. Every OTHER
+        # could-not-determine (a bad grant, an unknown ref, a shallow clone, a
+        # branch gated against itself) still reads as generic rework.
+        #
+        # The discriminator is the MESSAGE, and deliberately only the message —
+        # the precedent `grant_for()` sets two functions up (`if cli and "states
+        # no writes: grant" in str(e)`). It must not be "did gate() raise?":
+        # `check_grant`/`grant_for` raise BEFORE gate() runs, so a spec id with no
+        # content file on a genuinely conflicting branch would report a conflict
+        # and hide the grant error behind it.
+        if spec and "does not apply cleanly" in str(e):
+            ev = conflict_event(branch, main, spec)
+            if ev is not None:
+                return ev
         fold.append(["merge-gate-rework", subject, f"branch={branch}", f"undetermined={e}"])
         print(f"merge-gate: rework — could not determine: {e}")
         return 1
