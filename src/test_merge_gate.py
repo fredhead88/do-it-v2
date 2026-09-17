@@ -419,5 +419,92 @@ try:
 except mg.Undetermined as e:
     check("gating a branch against itself is could-not-determine", "nothing to gate" in str(e))
 
+# ------------------------------------------- a conflict is its own outcome (R7/R8)
+# ★ A real content conflict used to raise the SAME undifferentiated Undetermined
+# as a shallow clone and a malformed grant, so `merge-gate-rework` was all the
+# Executor ever saw — and its only rule for that is escalation. Two specs
+# building the same files is the normal case; it cost a human decision every time.
+
+
+def conflict_repo():
+    """main and work edit the SAME line of the same file. A real collision,
+    performed by git, never modelled — the branch is left checked out and the
+    process cwd is the repo, exactly as the Executor's merge step stands."""
+    d = tempfile.mkdtemp()
+    sh("git", "init", "-q", "-b", "main", d)
+    sh("git", "-C", d, "config", "user.email", "t@t"); sh("git", "-C", d, "config", "user.name", "t")
+    pathlib.Path(d, "src").mkdir()
+    pathlib.Path(d, "src/a.py").write_text("BASE\nx\ny\n")
+    sh("git", "-C", d, "add", "-A"); sh("git", "-C", d, "commit", "-qm", "base")
+    sh("git", "-C", d, "branch", "work")
+    pathlib.Path(d, "src/a.py").write_text("MAIN\nx\ny\n")
+    sh("git", "-C", d, "add", "-A"); sh("git", "-C", d, "commit", "-qm", "main edits the line")
+    sh("git", "-C", d, "checkout", "-q", "work")
+    pathlib.Path(d, "src/a.py").write_text("WORK\nx\ny\n")
+    sh("git", "-C", d, "add", "-A"); sh("git", "-C", d, "commit", "-qm", "work edits the line")
+    os.chdir(d)
+    return d
+
+
+def events():
+    return [json.loads(l) for l in LEDGER.read_text().splitlines()]
+
+
+def of_type(t, subject=None):
+    return [e for e in events() if e["type"] == t and (subject is None or e["subject"] == subject)]
+
+
+# the branch really does conflict — assert the premise before grading the verdict
+d = conflict_repo()
+check("the fixture is a real conflict (git itself says so)",
+      subprocess.run(("git", "-C", d, "merge-tree", "--write-tree", "main", "work"),
+                     capture_output=True).returncode != 0)
+before = len(of_type("conflict-rework", "L-spec-0001"))
+check("a conflicting branch with --spec still exits 1",
+      mg.main_(["work", "main", "--spec", "L-spec-0001"]) == 1)
+ev = of_type("conflict-rework", "L-spec-0001")
+check("★ a real conflict appends conflict-rework, not merge-gate-rework",
+      len(ev) == before + 1 and events()[-1]["type"] == "conflict-rework")
+check("the first conflict is attempt 1 and a re-dispatch",
+      ev[-1]["attempt"] == 1 and ev[-1]["verdict"] == "re-dispatch")
+check("★ attempt is a JSON integer, not the string \"1\" (fold's bare-value rule)",
+      isinstance(ev[-1]["attempt"], int) and not isinstance(ev[-1]["attempt"], bool))
+check("the colliding paths are on the event, exactly",
+      ev[-1]["paths"] == ["src/a.py"] and ev[-1]["branch"] == "work")
+
+# ★ R8: the SECOND time is an escalation. Nothing counted before this, so every
+# conflict was could-not-determine and every one of those escalated on attempt 1.
+check("a second conflict for the same spec still exits 1",
+      mg.main_(["work", "main", "--spec", "L-spec-0001"]) == 1)
+ev = of_type("conflict-rework", "L-spec-0001")
+check("★ the second conflict is attempt 2 and escalate",
+      len(ev) == before + 2 and ev[-1]["attempt"] == 2 and ev[-1]["verdict"] == "escalate")
+check("★ the gate never appends escalation-blocking itself — that is the "
+      "Executor's act, and the boundary is held in code, not prose",
+      "escalation-blocking" not in LEDGER.read_text())
+
+# a conflict with NO spec id has nothing to re-dispatch and nothing to count
+check("a conflict without --spec still exits 1", mg.main_(["work", "main"]) == 1)
+check("★ no --spec: the pre-existing merge-gate-rework path, untouched",
+      events()[-1]["type"] == "merge-gate-rework"
+      and "does not apply cleanly" in events()[-1]["undetermined"])
+
+# ★ AND ONLY THE CONFLICT MESSAGE RECLASSIFIES. check_grant/grant_for raise
+# BEFORE gate() runs, so a missing content file on a genuinely conflicting branch
+# would otherwise report a conflict and hide the grant error behind it.
+n_conflict = len(of_type("conflict-rework"))
+for argv, why in ((["no-such-branch", "main", "--spec", "L-spec-0001"], "an unknown ref"),
+                  (["main", "main", "--spec", "L-spec-0001"], "a branch gated against itself"),
+                  (["work", "main", "--spec", "L-spec-none"], "a spec with no content file")):
+    check(f"★ with --spec, {why} is still generic rework", mg.main_(argv) == 1
+          and events()[-1]["type"] == "merge-gate-rework")
+check("★ not one of the three emitted conflict-rework (a grant error is never "
+      "masked behind a conflict verdict)", len(of_type("conflict-rework")) == n_conflict)
+
+# and a CLEAN merge with --spec is still clean — the new branch is inert there
+d, _ = repo(); on(d, lambda dd: None)
+check("a clean branch with --spec is unaffected", mg.main_(["work", "main", "--spec", "L-spec-0001"]) == 0)
+check("and it wrote merge-gate-clean", events()[-1]["type"] == "merge-gate-clean")
+
 print(f"merge-gate: {sum(ok)}/{len(ok)} checks pass")
 sys.exit(0 if all(ok) else 1)
