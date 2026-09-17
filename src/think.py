@@ -20,11 +20,19 @@ with a stable id, a `review_path` carrying both halves, a non-empty `Covers:`,
 and no execution-shape heading. A rule that is not one of these did not ship
 (§7.3).
 """
-import argparse, os, pathlib, re, subprocess, sys
+import argparse, json, os, pathlib, re, subprocess, sys
 
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import audit, dispatch, fold, panes, tick, up  # noqa: E402
+# The sequencing seam, bound ONCE and at module level so a verifier can substitute a
+# stand-in by assigning to `think.sequencing`. `relay.sequencing` is the producing
+# unit's declared name, not one picked here — a guessed module would leave this
+# permanently None after that unit merges and the feature would never activate.
+try:
+    from relay import sequencing            # noqa: E402
+except ImportError:                          # not merged yet: degrade, and say so
+    sequencing = None
 # The requirement-id machinery is `audit`'s, and it is one implementation used at
 # two levels (§3.6): units against their charter there, the charter set against the
 # goal here. `section` reads a heading's body; `LISTED`/`ID` are the stable-id forms.
@@ -41,6 +49,11 @@ SECTIONS = ("Intent", "Requirements", "Constraints and product decisions",
 # binding architectural decisions with no audit between them and the builders.
 PLANS = re.compile(r"^#+\s*[0-9.]*\s*(seams?|waves?|interfaces?|data shapes?|"
                    r"error[- ]handling|schema|branch)\b", re.I | re.M)
+# A charter-level ORDER decision, not execution shape: it names charters, never units,
+# files, seams or waves — which is why it is a line in the body and not a sixth §3.4
+# heading (SECTIONS is a closed set the check already enforces).
+SEQ_KINDS = ("after", "alongside", "conflicts")
+SEQ_LINE = re.compile(rf"^({'|'.join(SEQ_KINDS)}):(.*)$", re.M)
 
 
 def die(msg):
@@ -71,9 +84,33 @@ def covers(body):
     return sorted(set(ID.findall(line)))
 
 
-def check(path):
+def sequencing_block(t, name):
+    """The `after:`/`alongside:`/`conflicts:` lines a charter declares, as the mapping
+    the `sequencing` seam takes: `{kind: "<id> <id> …"}`, the same space-joined form
+    `covers=` already uses. A key appears iff at least one line of that kind appears —
+    a mapping carrying all three keys would read as a *declared empty* block, and "no
+    block at all" and "an empty block" must not look alike. An indented or bulleted
+    `- after: …` is prose; only column 0 is an entry, which is what keeps this parse
+    off charter prose."""
+    block = {}
+    for m in SEQ_LINE.finditer(t):
+        kind, rest = m.group(1), m.group(2).split(None, 1)
+        if len(rest) < 2 or not rest[1].strip():
+            die(f"{name}: '{m.group(0).strip()}' — a sequencing line is "
+                f"`{kind}: <charter-id> <one-line reason>`, and this one has "
+                f"{'no charter id' if not rest else 'no reason'} after the colon. "
+                f"A malformed entry is refused, never silently dropped")
+        block.setdefault(kind, []).append(rest[0])
+    return {k: " ".join(v) for k, v in block.items()}
+
+
+def check(path, events=None):
     """Refuse a charter the Planner could not plan from, before any event points
-    at it. Returns the facts the `charter-filed` event carries."""
+    at it. Returns the facts the `charter-filed` event carries.
+
+    `events` is the ledger the sequencing check reads (which charters have a
+    `charter-filed` event); it defaults to `fold.read_events()` so every existing
+    single-argument call site keeps working unchanged."""
     p = pathlib.Path(path).resolve()
     content = (fold.ROOT / "content").resolve()
     if content not in p.parents:
@@ -102,8 +139,28 @@ def check(path):
     if not c and not re.search(r"\bnone\b|\bnull\b", body["Covers"], re.I):
         die(f"{p.name}: Covers: is empty. Name the goal requirement ids this charter "
             f"delivers, or `Covers: none` where there is no goal document (§12.2)")
+    block = sequencing_block(t, p.name)
+    seq = None
+    if sequencing is None:
+        # The producer is not in the tree. L-adr-0033's rule for a failing producer,
+        # applied to a missing one: degrade to yesterday's behaviour and SAY SO, so a
+        # block that is silently not being enforced cannot pass for one that is.
+        if block:
+            kinds = " ".join(sorted(block))
+            print(f"# sequencing seam unavailable (relay.sequencing not importable) — "
+                  f"{p.name}'s {kinds} line(s) are recorded nowhere and checked "
+                  f"by nothing; landing continues as before")
+    else:
+        # The mapping goes in whole, empty or not: deciding that no keys means "no
+        # block declared" is the seam's, not this caller's.
+        seq = sequencing(block, fold.read_events() if events is None else events)
+        if seq and seq.get("unknown"):
+            die(f"{p.name}: sequencing names {', '.join(seq['unknown'])} — no charter "
+                f"has been filed under that id (a charter naming ITSELF lands here too: "
+                f"it has no `charter-filed` event either, yet). Land the charter it "
+                f"depends on first; nothing in this set was appended")
     title = next((l.lstrip("# ").strip() for l in t.splitlines() if l.startswith("# ")), p.stem)
-    return {"id": p.stem, "path": str(p), "title": title, "covers": c}
+    return {"id": p.stem, "path": str(p), "title": title, "covers": c, "seq": seq}
 
 
 def goal_path(explicit):
@@ -134,11 +191,21 @@ def charter_set_packet(goal, charters, diff):
 def land(paths, goal=None, print_only=False):
     """Check every charter BEFORE appending any event: a set that lands half-way
     leaves the coverage diff reading a set that does not exist."""
-    charters = [check(p) for p in paths]
+    events = fold.read_events() if sequencing else None
+    charters = [check(p, events) for p in paths]
     for c in charters:
-        fold.append(["charter-filed", c["id"], f"path={c['path']}", f"title={c['title']}",
-                     "covers=" + (" ".join(c["covers"]) or "none")])
-        print(f"# filed {c['id']} · covers {' '.join(c['covers']) or 'none'} · {c['path']}")
+        fields = ["charter-filed", c["id"], f"path={c['path']}", f"title={c['title']}",
+                  "covers=" + (" ".join(c["covers"]) or "none")]
+        if c["seq"] is not None:
+            # All three, together, or none of them — a subset would make "declared
+            # nothing of this kind" and "the field was never written" the same read.
+            # `fold.append` parses a value opening with `[` as JSON, so these land as
+            # real arrays rather than as the string "['L-charter-0001']".
+            fields += [f"{k}={json.dumps(list(c['seq'].get(k) or []))}" for k in SEQ_KINDS]
+        fold.append(fields)
+        seq = f" · {' '.join(fields[5:])}" if c["seq"] is not None else ""
+        print(f"# filed {c['id']} · covers {' '.join(c['covers']) or 'none'} · "
+              f"{c['path']}{seq}")
     g = goal_path(goal)
     if not any(c["covers"] for c in charters):
         print("# no charter cites a goal requirement — no charter-set audit (§12.2: goal: null)")
