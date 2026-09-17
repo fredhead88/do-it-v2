@@ -1970,3 +1970,22 @@ dispatched 13:17:52Z, `--timeout 15`). Ranked by what it cost or hid.
 - **Measured:** `stamp.sh` takes `<turns> <duration_ms> <subagent_tokens>` as hand-supplied figures, and the only place they exist is the Agent tool's completion notification. For `L-plan-auditor-0027` the output landed at ~13 minutes into a **15-minute** `plan-auditor` cap with the hand-back not yet delivered, so the pane stamped with `turns=0, subagent_tokens=0` (duration derived from file mtimes) to save the spawn from a timeout. The real figures arrived ~90 seconds later: **19 tool uses, 84,882 tokens, 272,786 ms**. The ledger now carries two false zeros that `doit spend` will read as a free Opus round, and `correction` is operator-only, so they are permanent.
 - **Systemic:** the stamp requires information the harness delivers *after* the deadline the wrapper enforces. Either the waiter's cap should start from the packet's answer rather than from dispatch, or `stamp.sh` should accept "unmeasured" and write null — the fold already distinguishes unpriced from zero for dollars (`spend_rows`) and has no such distinction for tokens.
 - **Fix status:** open — no change-list id.
+
+### R72. `doit test` is red at HEAD only because `DOIT_PROJECT` is set in the shell that runs it (L-planner-0014, 2026-09-17 ~09:00Z)
+- **Measured:** a spec-writer ran `./doit test` at `ba6a264` to establish its baseline and got
+  `test_fold.py:31 AssertionError: set()`, then narrowed its own spec's Verification section to one
+  test file and documented the red baseline in Constraints. Re-run from this pane with
+  `env -u DOIT_PROJECT`, the same file passes **104 checks**. The cause: `test_fold.py` builds a
+  scratch ledger whose events carry no `project` field, and `fold.PROJECT` is read from the
+  environment **at import time** (`fold.py:21`), so `read_events()` filters every scratch event out
+  and the first assertion sees an empty set.
+- **Why it matters beyond one spec:** every pane on this box runs with `DOIT_PROJECT` set — that is
+  what `env.sh` is for — so a builder, a grader or an Executor that runs the suite in its own shell
+  sees a false red on a file it did not touch. §5.7 says a red baseline is recorded and warned, not
+  blocked, which means the false red does not stop anything; it just quietly makes every baseline
+  comparison meaningless and costs a spec-writer a narrowed verification scope.
+- **Systemic:** a test suite whose result depends on the operator's shell is not a gate. Either
+  `test_fold.py` should set its own `DOIT_PROJECT` (its fixtures already control the root), or
+  `doit test` should clear it before running — `test_deploy.py:27` and `test_tree_cleanup.py:83`
+  already pop it by hand, so two files know and the rest do not.
+- **Fix status:** open — not in L-charter-0021's footprint; worth a brief.
