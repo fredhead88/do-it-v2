@@ -64,10 +64,19 @@ ok(us[1]["produces"] == ["refund(tx, amount) -> Receipt"],
    f"a signature keeps its commas; only ids and paths split on them: {us[1]['produces']}")
 ok(us[0]["wave"] == 1 and us[2]["delivers"] == ["R3"], f"wave and delivers parse: {us[0]}")
 try:
-    audit.prepass("cut", "# a cut with no unit blocks\n")
+    audit.prepass_two_file("cut", "# a cut with no unit blocks\n")
     ok(False, "a cut file declaring no unit must be loud, not an all-clear")
 except SystemExit as e:
     ok("Undetermined is never clean" in str(e), f"and it says why: {e}")
+# and the SAME refusal reached through the doc engine's own single argument (AC8).
+# The pre-spec call above passed `"cut"` as argument one; under `prepass(doc_text,…)`
+# that argument becomes the document, `"cut"` parses to zero units, and the assertion
+# would keep passing while exercising neither engine's real input.
+try:
+    audit.prepass("# a document with no unit blocks\n")
+    ok(False, "a document declaring no unit must be loud, not an all-clear")
+except SystemExit as e:
+    ok("Undetermined is never clean" in str(e), f"and the doc engine says why too: {e}")
 
 # ── 1 · same-wave footprint overlap ─────────────────────────────────────────
 found, und = audit.overlap(us)
@@ -235,7 +244,7 @@ ok(all("names unit" not in f for f in found),
    f"the Plan-authority check is silent once the cut agrees with it: {found}")
 
 # ── the block: undetermined can never render as none ────────────────────────
-block = audit.prepass("cut", CUT, CHARTER, None, None, [])
+block = audit.prepass_two_file("cut", CUT, CHARTER, None, None, [])
 ok(block.startswith("units: 3 · waves: [1, 2]"), f"the counts lead: {block.splitlines()[0]}")
 ok(audit.HEADER in block and "stage: cut" in block, "the header the wrapper looks for, and the stage")
 ok("- unit size vs the §4.3 ceiling: undetermined" in block, f"no repo → undetermined in the rendered block:\n{block}")
@@ -245,6 +254,83 @@ ok("undetermined" not in block.split("same-wave footprint overlap")[1].splitline
 ok("no unit delivers R4" in block, "and the findings are the auditor's ground truth")
 ok("; found anyway: " in audit.render("cut", [("x", ["a finding"], "why")]),
    "an undetermined check that found something anyway still reports both")
+
+
+def row(block, label):
+    """One rendered row: its own line, plus the indented findings listed under it."""
+    lines = block.splitlines()
+    i = next(k for k, l in enumerate(lines) if l.startswith(f"- {label}"))
+    out = [lines[i]]
+    for l in lines[i + 1:]:
+        if not l.startswith("  - "):
+            break
+        out.append(l)
+    return "\n".join(out)
+
+
+# ── the one document, one stage (R9) ────────────────────────────────────────
+# What took two files and two runs takes one document and one: the unit blocks,
+# the Shared decisions block, the Acquisition decisions block and the question
+# sweep arrive together, and every check reads the one document.
+DOC = CUT + """
+## Shared decisions
+- `TxStatus` is owned by enum-states
+
+## Acquisition decisions
+- `chalk` 5 — https://example/chalk
+
+## Question sweep
+- Q1: does the settlement window move?
+"""
+import inspect  # noqa: E402
+ok(list(inspect.signature(audit.prepass).parameters) == ["doc_text", "charter_text", "repo", "events"],
+   f"the declared seam, exactly: {list(inspect.signature(audit.prepass).parameters)}")
+ok(list(inspect.signature(audit.prepass_two_file).parameters)
+   == ["stage", "cut_text", "charter_text", "plan_text", "repo", "events"],
+   "and the legacy engine keeps the pre-spec signature under its new name")
+ok(audit.units(DOC) == us, "the added sections declare no `Footprint:`, so none of them is a unit")
+
+doc_block = audit.prepass(DOC, CHARTER, str(repo), [])
+ok(doc_block.startswith("units: 3 · waves: [1, 2]"), f"the counts lead here too: {doc_block.splitlines()[0]}")
+ok(audit.HEADER in doc_block and "stage: doc" in doc_block,
+   f"the header the wrapper looks for, and the one stage: {doc_block.splitlines()[1]}")
+ROWS = [audit.OVERLAP_LABEL, "undefined seams (a Consumes with no Produces)",
+        "shared names introduced twice with no owner", "requirement coverage, units vs charter",
+        "unit size vs the §4.3 ceiling", "acquisition ADR trail",
+        "seam direction (Produces/Consumes vs the unit's own Goal"]
+ok([l for l in ROWS if f"- {l}" not in doc_block] == [],
+   f"all seven checks run in ONE pass over ONE document: {[l for l in ROWS if f'- {l}' not in doc_block]}")
+ok("no unit delivers R4" in row(doc_block, "requirement coverage, units vs charter"),
+   "the requirement-id diff measures what it always measured")
+ok("`chalk` is declared in the Plan with no acquisition ADR on the trail"
+   in row(doc_block, "acquisition ADR trail"),
+   f"the document's own Acquisition section IS the trail's other side: {row(doc_block, 'acquisition ADR trail')}")
+ok("undetermined" not in row(doc_block, "acquisition ADR trail"),
+   "a document that carries the section leaves no `no Plan at this stage` excuse")
+
+# a document missing the sections: a finding, never `undetermined` — in the
+# one-document model there is no "the Plan comes later" left to plead (AC4).
+bare = audit.prepass(same, CHARTER, str(repo), [])
+r_shared = row(bare, "shared names introduced twice with no owner")
+ok("TxStatus" in r_shared and "no owner" in r_shared and "undetermined" not in r_shared,
+   f"no Shared decisions section means no owner was named, which is the finding: {r_shared}")
+r_acq = row(bare, "acquisition ADR trail")
+ok("the Plan has no Acquisition decisions section" in r_acq and "undetermined" not in r_acq,
+   f"a missing section is a missing decision, not an unanswerable question: {r_acq}")
+
+# ── the overlap row is advisory, and the block says so (R7, AC2) ────────────
+CLASH = CUT.replace("Footprint: src/cancel.py", "Footprint: src/refund.py")
+want, _ = audit.overlap(audit.units(CLASH))
+ok(len(want) == 1, f"the fixture really overlaps: {want}")
+ok("advisory only, never blocks a dispatch" in audit.OVERLAP_LABEL
+   and audit.OVERLAP_LABEL.startswith("same-wave footprint overlap"),
+   f"the advisory wording is added to the old label, not swapped for it: {audit.OVERLAP_LABEL}")
+for engine, b in (("doc", audit.prepass(CLASH, CHARTER, str(repo), [])),
+                  ("cut", audit.prepass_two_file("cut", CLASH, CHARTER, None, str(repo), []))):
+    ok(f"- {audit.OVERLAP_LABEL}:" in b,
+       f"the {engine} engine's overlap row says in the block that it never blocks a dispatch:\n{b}")
+    ok(row(b, audit.OVERLAP_LABEL).splitlines()[1:] == [f"  - {f}" for f in want],
+       f"and it still reports exactly what overlap() returns, unchanged: {row(b, audit.OVERLAP_LABEL)}")
 
 # ── the wrapper refuses a plan-auditor packet with no pre-pass ──────────────
 import dispatch  # noqa: E402
@@ -258,7 +344,7 @@ ok(r.returncode == 1 and "no script pre-pass" in r.stderr,
    f"§3.6: the script runs first, and a packet without its output is refused before it spends: {r.stderr[-200:]}")
 ok(any('"spawn-failed"' in l and "pre-pass" in l for f in (TMP / "events").glob("*.jsonl")
        for l in f.read_text().splitlines()), "and the refusal is on the record, not just on stderr")
-pk.write_text("stage: cut\n" + audit.prepass("cut", CUT, CHARTER, None, str(repo), []))
+pk.write_text("stage: cut\n" + audit.prepass_two_file("cut", CUT, CHARTER, None, str(repo), []))
 r = subprocess.run([sys.executable, str(pathlib.Path(dispatch.__file__)), "plan-auditor", "L-charter-0001",
                     "--packet", str(pk), "--cwd", str(repo)], capture_output=True, text=True,
                    env={**os.environ, "DOIT_ROOT": str(TMP), "PATH": "/nonexistent"})
@@ -281,5 +367,31 @@ r = subprocess.run([str(DOIT), "audit", "plan", "L-charter-0001", "--cut", str(T
 ok(r.returncode == 0 and "stage: plan" in r.stdout and "wcwidth" in r.stdout,
    f"stage plan reads the Plan and the trail: {r.stdout[-300:]}")
 ok((TMP / "block.md").read_text() == r.stdout, "--out writes the same block the packet gets")
+
+# ── the CLI's third stage, and the two it did not replace ───────────────────
+(TMP / "doc.md").write_text(DOC)
+(TMP / "charter.md").write_text(CHARTER)
+r = subprocess.run([str(DOIT), "audit", "doc", "L-charter-0001", "--doc", str(TMP / "doc.md"),
+                    "--charter", str(TMP / "charter.md"), "--repo", str(repo)],
+                   capture_output=True, text=True, env={**os.environ, "DOIT_ROOT": str(TMP)})
+ok(r.returncode == 0 and "stage: doc" in r.stdout and audit.HEADER in r.stdout,
+   f"`doit audit doc --doc F` is one run over one document: {r.stderr[-300:]}")
+ok(audit.OVERLAP_LABEL in r.stdout and "no unit delivers R4" in r.stdout,
+   f"and it carries the advisory label and the findings: {r.stdout[-300:]}")
+r = subprocess.run([str(DOIT), "audit", "doc", "L-charter-0001"], capture_output=True, text=True,
+                   env={**os.environ, "DOIT_ROOT": str(TMP)})
+ok(r.returncode != 0 and "needs --doc" in r.stderr,
+   f"stage doc without the document is refused, not audited half-way: {r.stderr[-120:]}")
+r = subprocess.run([str(DOIT), "audit", "cut", "L-charter-0001"], capture_output=True, text=True,
+                   env={**os.environ, "DOIT_ROOT": str(TMP)})
+ok(r.returncode != 0 and "needs --cut" in r.stderr,
+   f"--cut became optional to argparse, so stage cut has to say it itself: {r.stderr[-120:]}")
+h = subprocess.run([sys.executable, str(pathlib.Path(audit.__file__).resolve()), "-h"],
+                   capture_output=True, text=True, env={**os.environ, "DOIT_ROOT": str(TMP)})
+hh = " ".join(h.stdout.split())
+ok(h.returncode == 0 and "{cut,plan,doc}" in hh, f"the help names all three stages: {hh[:200]}")
+ok("required at stage doc (R9)" in hh and "required at stage cut|plan" in hh
+   and "required at stage plan" in hh,
+   f"both document forms are documented, and neither legacy one was removed: {hh}")
 
 print(f"audit: {n} checks pass")

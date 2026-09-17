@@ -1,8 +1,15 @@
 #!/usr/bin/env python3
 """audit — the deterministic pre-pass under both fable audits (§3.6).
 
+  audit.py doc  <charter> --doc FILE [--charter FILE] [--repo DIR]
   audit.py cut  <charter> --cut FILE [--charter FILE] [--repo DIR]
   audit.py plan <charter> --cut FILE --plan FILE [--charter FILE] [--repo DIR]
+
+One document, one stage (R9): `--doc` runs every check in a single pass over one
+document that carries the unit blocks, the Shared decisions block, the Acquisition
+decisions block and the question sweep together. `--cut`/`--plan` are the retained
+two-file engine (`prepass_two_file`), unchanged, for the charters already cut that
+way.
 
 §3.6: *"Most of both audits is a script, and the script runs first."* Six checks,
 every one of them mechanical, handed to the plan-auditor as ground truth it does
@@ -26,6 +33,13 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import fold  # noqa: E402
 
 HEADER = "## Script pre-pass (ground truth — do not re-derive)"
+
+# R7: the overlap row is advisory and never blocks a dispatch — and the block must
+# SAY so, because nothing else in the rendered text distinguishes this row from the
+# six that do bite. The old plain label stays a prefix of it on purpose: every
+# reader (and every assertion) that splits on `same-wave footprint overlap` keeps
+# finding it.
+OVERLAP_LABEL = "same-wave footprint overlap — advisory only, never blocks a dispatch (R7)"
 
 # §4.3: hand back at ~35–40% of a 1M window. A unit whose footprint alone reaches
 # that has no room to spare, and §3.6 calls this the cheapest bad-cut detector.
@@ -344,12 +358,40 @@ def read(p):
     return q.read_text()
 
 
-def prepass(stage, cut_text, charter_text=None, plan_text=None, repo=None, events=None):
+def prepass(doc_text, charter_text=None, repo=None, events=None):
+    """The one document, one stage (R9). One pass over one document that carries the
+    unit blocks, the Shared decisions block, the Acquisition decisions block and the
+    question sweep together — the same seven checks, measuring exactly what they
+    measured over two files, with the document standing in for both halves.
+
+    **A missing section here is a finding, never `undetermined`.** The two-file engine
+    can honestly say "no Plan at this stage"; this one cannot — the document is the
+    whole thing by construction, so a document with no Acquisition decisions section
+    has made no acquisition decision, and that is a finding."""
+    us = units(doc_text)
+    if not us:
+        die("the document declares no unit — a unit block carries a `Footprint:` line "
+            "(planner.md ①). Undetermined is never clean")
+    rows = [(OVERLAP_LABEL, *overlap(us)),
+            ("undefined seams (a Consumes with no Produces)", *seams(us)),
+            ("shared names introduced twice with no owner", *shared(us, doc_text)),
+            ("requirement coverage, units vs charter", *units_vs_charter(us, charter_text)),
+            ("unit size vs the §4.3 ceiling", *sizes(us, repo)),
+            ("acquisition ADR trail", *acquisition(doc_text, events)),
+            ("seam direction (Produces/Consumes vs the unit's own Goal, and the "
+             "Plan's Seams where it is the authority)", *seam_direction(us, charter_text, doc_text))]
+    return f"units: {len(us)} · waves: {sorted({u['wave'] for u in us if u['wave'] is not None})}\n" \
+           + render("doc", rows)
+
+
+def prepass_two_file(stage, cut_text, charter_text=None, plan_text=None, repo=None, events=None):
+    """The retained two-file engine, behaviour unchanged, for the `--cut`/`--plan`
+    callers and the charters already cut under two files."""
     us = units(cut_text)
     if not us:
         die("the cut file declares no unit — a unit block carries a `Footprint:` line "
             "(planner.md ①). Undetermined is never clean")
-    rows = [("same-wave footprint overlap", *overlap(us)),
+    rows = [(OVERLAP_LABEL, *overlap(us)),
             ("undefined seams (a Consumes with no Produces)", *seams(us)),
             ("shared names introduced twice with no owner", *shared(us, plan_text)),
             ("requirement coverage, units vs charter", *units_vs_charter(us, charter_text)),
@@ -363,17 +405,27 @@ def prepass(stage, cut_text, charter_text=None, plan_text=None, repo=None, event
 
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="doit audit", description=__doc__.split("\n\n")[0])
-    ap.add_argument("stage", choices=["cut", "plan"])
+    ap.add_argument("stage", choices=["cut", "plan", "doc"])
     ap.add_argument("subject", help="the charter id — what the audit's events are about")
-    ap.add_argument("--cut", required=True, help="the cut file (§3.6 ①, D94)")
+    ap.add_argument("--doc", help="the one document — unit blocks, Shared decisions, "
+                                  "Acquisition decisions and the question sweep together; "
+                                  "required at stage doc (R9)")
+    ap.add_argument("--cut", help="the cut file (§3.6 ①, D94); required at stage cut|plan")
     ap.add_argument("--plan", help="the Plan; required at stage plan")
     ap.add_argument("--charter", help="the charter file, for the requirement-id diff")
     ap.add_argument("--repo", help="the repository, for the size heuristic")
     ap.add_argument("--out", help="write the block here as well as to stdout")
     a = ap.parse_args(argv)
-    if a.stage == "plan" and not a.plan:
-        die("stage plan needs --plan: the plan-audit reads the cut AND the Plan (§3.6 ④)")
-    block = prepass(a.stage, read(a.cut), read(a.charter), read(a.plan), a.repo)
+    if a.stage == "doc":
+        if not a.doc:
+            die("stage doc needs --doc: the one-stage audit reads one document (R9)")
+        block = prepass(read(a.doc), read(a.charter), a.repo)
+    else:
+        if not a.cut:
+            die(f"stage {a.stage} needs --cut: the two-file audit reads the cut file (§3.6 ①)")
+        if a.stage == "plan" and not a.plan:
+            die("stage plan needs --plan: the plan-audit reads the cut AND the Plan (§3.6 ④)")
+        block = prepass_two_file(a.stage, read(a.cut), read(a.charter), read(a.plan), a.repo)
     if a.out:
         pathlib.Path(a.out).write_text(block)
     print(block, end="")
