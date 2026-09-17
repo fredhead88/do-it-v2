@@ -13,7 +13,7 @@ system, and §4.9 routes those to a human rather than to an unattended process.
 `test_up.py` holds that as a check, because it is exactly the rule a later edit
 would helpfully break.
 """
-import importlib, os, pathlib, subprocess, sys, time
+import importlib, json, os, pathlib, subprocess, sys, time
 
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -31,13 +31,19 @@ def cron_line():
             f">> {fold.ROOT}/logs/tick.log 2>&1")
 
 
-def pane_cmd():
+def pane_cmd(prompt=None):
     """Interactive, so no -p, no --json-schema, no --output-format: the pane's
     Output is the files and events it writes. The agent file's tools: line is the
-    sandbox; the deny list is the only form a retire list has (D119)."""
-    return ["claude", "--agent", "planner",
-            "--disallowedTools", ",".join(f"Skill({s})" for s in tick.RETIRE),
-            "--dangerously-skip-permissions"]
+    sandbox; the deny list is the only form a retire list has (D119).
+
+    `prompt` is the opening turn the supervisor hands the pane — one charter id, or
+    a serving pass's comma-joined spawn ids — and it goes on as a TRAILING
+    POSITIONAL, after --dangerously-skip-permissions. That flag is the last option
+    this builds, and a positional in front of it reads as its value."""
+    cmd = ["claude", "--agent", "planner",
+           "--disallowedTools", ",".join(f"Skill({s})" for s in tick.RETIRE),
+           "--dangerously-skip-permissions"]
+    return cmd + [prompt] if prompt else cmd
 
 
 AGENTS_HOME = pathlib.Path.home() / ".claude" / "agents"
@@ -61,23 +67,204 @@ def install(contract):
     print(f"# linked {link} -> {contract}")
 
 
-def main(print_only=False):
+def main(print_only=False, max_cycles=None):
+    """One `doit up` is one FOREGROUND SUPERVISOR: derive the next plannable
+    charter, run a Planner pane on it as a child, wait for it to exit, record the
+    outcome, repeat — with no keystroke in between. The launcher never replaces
+    itself with the pane (L-adr-0026): a process that has been replaced is not
+    there to notice the pane end, and the operator becomes the relay.
+
+    `max_cycles` is the fixtures' bound and nothing else's. Unset, the loop is
+    unbounded and a dry queue HOLDS rather than ends it (R6) — `doit up` stops
+    when the operator stops it.
+
+    `print_only` is the old one-shot dry run, unchanged in every observable way:
+    no relay call, no child, no event, no launcher file, and no sleep."""
     contract = dispatch.AGENTS / "planner.md"
     if not contract.exists():
         sys.exit(f"up: no planner contract at {contract} — the pane is the contract (D116)")
     install(contract)
     (fold.ROOT / "events").mkdir(parents=True, exist_ok=True)
     (fold.ROOT / "logs").mkdir(parents=True, exist_ok=True)
-    ledger = dispatch.alloc(fold.EVENTS, "L-planner-", ".jsonl")
-    env = {**os.environ, "DOIT_LEDGER_FILE": ledger.name,
-           "PATH": f"{HERE.parent}:{os.environ.get('PATH', '')}"}
-    cmd = pane_cmd()
     print("# the tick is cron's, and cron is yours — install this line yourself:")
     print(cron_line())
-    print(f"# planner pane: {ledger.stem} · {' '.join(cmd)}")
     if print_only:
-        return cmd, env
-    os.execvpe(cmd[0], cmd, env)
+        ledger = dispatch.alloc(fold.EVENTS, "L-planner-", ".jsonl")
+        cmd = pane_cmd()
+        print(f"# planner pane: {ledger.stem} · {' '.join(cmd)}")
+        return cmd, _child_env(ledger)
+    state, cycles = {"up": None, "watermark": None, "said": None}, 0
+    while max_cycles is None or cycles < max_cycles:
+        cycles += 1
+        _cycle(state)
+    return cycles
+
+
+# ── the supervisor: constants and the private helpers main() runs on ──────────
+SUPERVISED = "DOIT_SUPERVISED"            # presence-only, on every child this starts
+INTERVAL_ENV, INTERVAL_DEFAULT = "DOIT_SUPERVISOR_INTERVAL_SEC", 30.0
+POLL_STEP = 0.5                           # how finely a hold notices a ledger write
+RELAY_FNS = ("plannable", "waiting_lines", "ledger_changed",
+             "pending_packets", "planner_attempts")
+
+
+def _interval():
+    """Seconds between re-derivations while the queue is dry. Env-overridable in the
+    pattern DOIT_TICK_MIN already sets, so a fixture can drive the loop at zero."""
+    try:
+        return float(os.environ.get(INTERVAL_ENV, INTERVAL_DEFAULT))
+    except (TypeError, ValueError):
+        return INTERVAL_DEFAULT
+
+
+def _guarded(fn, *a, **kw):
+    """EVERY relay call, without exception. relay-queries lands after this unit, so
+    `import relay` failing is itself one of the failures R5 names — and a launcher
+    that dies on an absent sibling is a launcher nobody can run. Degrade and say so
+    (L-adr-0033): one line naming the exception, then the cycle holds."""
+    try:
+        import relay                                          # noqa: PLC0415 — see docstring
+        return True, getattr(relay, fn)(*a, **kw)
+    except Exception as e:
+        print(f"# relay.{fn} unavailable — {type(e).__name__}: {e}")
+        return False, None
+
+
+def _degrade():
+    """A relay that failed has already printed its one line. Start nothing, append
+    nothing, and wait out the interval so a missing sibling cannot spin the box."""
+    time.sleep(_interval())
+
+
+def _child_env(ledger, supervised=False):
+    """The pane writes as itself (D90) and resolves `doit` from this repo. The marker
+    is presence-only: the pane reads it to know it may end itself."""
+    env = {**os.environ, "DOIT_LEDGER_FILE": ledger.name,
+           "PATH": f"{HERE.parent}:{os.environ.get('PATH', '')}"}
+    if supervised:
+        env[SUPERVISED] = "1"
+    return env
+
+
+def _launcher(state):
+    """ONE L-up-NNNN.jsonl per run, allocated lazily on the run's first
+    launcher-authored event. The actor is the filename and never a field (D90,
+    fold.read_events), so the launcher's own rows need a file of the launcher's own;
+    `L-up-0001` folds to the actor `up`."""
+    if state["up"] is None:
+        state["up"] = dispatch.alloc(fold.EVENTS, "L-up-", ".jsonl")
+    return state["up"]
+
+
+def _ended(ledger):
+    """True if the pane wrote its own end row. Re-read, never remembered (§9.2)."""
+    for line in ledger.read_text().splitlines():
+        if not line.strip().startswith("{"):
+            continue
+        try:
+            if json.loads(line).get("type") == "planner-ended":
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def _start(state, subject, mode, attempt, prompt, spawn_ids=None):
+    """Start one pane and wait for it. The start row lands in the CHILD's own file
+    before the child exists (L-adr-0027) — a pane that dies in its first second has
+    still been recorded as started, which is the whole of planner_attempts' input.
+    The end row is appended only where the child wrote none: its own clean
+    `planner-ended` is the better record and is never doubled."""
+    ledger = dispatch.alloc(fold.EVENTS, "L-planner-", ".jsonl")
+    base, ids = {"spawn": ledger.stem}, ({"spawn_ids": spawn_ids} if spawn_ids else {})
+    dispatch.emit(ledger, base, "planner-started", subject=subject, planner=ledger.stem,
+                  attempt=attempt, mode=mode, **ids)
+    cmd = pane_cmd(prompt)
+    print(f"# planner pane: {ledger.stem} · {mode} · {subject} · attempt {attempt}")
+    rc = subprocess.run(cmd, env=_child_env(ledger, supervised=True)).returncode
+    if not _ended(ledger):
+        dispatch.emit(ledger, base, "planner-ended", subject=subject, planner=ledger.stem,
+                      mode=mode, reason=f"exit-{rc}", **ids)
+
+
+def _charter_pass(state, events, charter):
+    """One ready charter. False means the relay failed and the cycle holds."""
+    ok, att = _guarded("planner_attempts", events, charter_id=charter)
+    if not ok:
+        return False
+    att = att or {}
+    if att.get("next") == "escalate":
+        led = _launcher(state)
+        dispatch.emit(led, {"spawn": led.stem}, "escalation-blocking", subject=charter,
+                      last_reason=att.get("last_reason"), attempts=att.get("attempts"),
+                      why=f"planner on {charter} ended {att.get('attempts')}x without landing — "
+                          f"last: {att.get('last_reason')}")
+        print(f"# {charter}: escalation-blocking — last {att.get('last_reason')}")
+        return True                       # the charter leaves `ready` on relay's own exclusion
+    _start(state, subject=charter, mode="charter",
+           attempt=int(att.get("attempts") or 0) + 1, prompt=charter)
+    return True
+
+
+def _serving_split(events, pending):
+    """Pending spawn ids, minus the ones a serving pass already took. The record is
+    this spec's own `spawn_ids=` field on a serving `planner-ended` — an id served
+    once is not served again, and one that is skipped is said out loud."""
+    ids = sorted({(p.get("spawn") if isinstance(p, dict) else p) for p in (pending or [])})
+    served = set()
+    for e in events:
+        if e.get("type") == "planner-ended" and e.get("mode") == "serving":
+            served |= {s for s in str(e.get("spawn_ids") or "").split(",") if s}
+    return [i for i in ids if i not in served], [i for i in ids if i in served]
+
+
+def _hold(state, lines):
+    """A dry queue holds the loop open (R6). The waiting text is the board's own
+    (L-adr-0032) and is re-printed only when it changes, so an idle night does not
+    scroll the pane. A ledger write ends the hold immediately; otherwise the
+    interval does."""
+    if lines != state["said"]:
+        for line in lines:
+            print(line)
+        state["said"] = lines
+    end = time.monotonic() + _interval()
+    while True:
+        ok, res = _guarded("ledger_changed", fold.ROOT, state["watermark"])
+        if not ok:
+            return
+        changed, state["watermark"] = res
+        if changed or time.monotonic() >= end:
+            return
+        time.sleep(min(POLL_STEP, max(0.0, end - time.monotonic())))
+
+
+def _cycle(state):
+    """One turn of the loop: charter work first, a serving pass only while none is
+    plannable (L-adr-0029), and a hold when there is neither."""
+    events = fold.read_events()
+    ok, plan = _guarded("plannable", events, fold.ROOT)
+    if not ok:
+        return _degrade()
+    ready = list(plan[0])
+    ok, pending = _guarded("pending_packets", events, fold.ROOT)   # derived every cycle
+    if not ok:
+        return _degrade()
+    if ready:
+        for charter in ready:
+            if not _charter_pass(state, events, charter):
+                return _degrade()
+        return
+    todo, skipped = _serving_split(events, pending)
+    for spawn in skipped:
+        print(f"# serving: {spawn} already had a serving pass — skipped")
+    if todo:
+        ids = ",".join(todo)
+        return _start(state, subject="serving:" + ids, mode="serving",
+                      attempt=1, prompt=ids, spawn_ids=ids)
+    ok, lines = _guarded("waiting_lines", events, fold.ROOT)
+    if not ok:
+        return _degrade()
+    _hold(state, list(lines))
 
 
 # ── the Executor's own supervising loop (L-charter-0021 R1/R2/R12/R15) ───────

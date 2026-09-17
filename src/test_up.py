@@ -274,4 +274,259 @@ ok(up._seam("pane_name", "PANE_NAME") is None and up._seam("decide_overdue", "DE
 ok(up._stem("L-executor-0031.jsonl") == "L-executor-0031" and up._stem("L-executor-0031") == "L-executor-0031",
    "the pane_name fallback is the same ledger.stem dispatch.alloc already returned")
 
+# ── L-spec-0031 · the-supervisor fixtures ─────
+# No live process and no live pane: `subprocess.run` is recorded, `relay` is a
+# stand-in (relay-queries lands after this unit), and every fixture gets a root of
+# its own, because the supervisor's whole input is a ledger.
+import contextlib, io, json as js, time as clock, types  # noqa: E402
+
+
+def sup_root(name):
+    r = TMP / name
+    (r / "events").mkdir(parents=True, exist_ok=True)
+    (r / "logs").mkdir(parents=True, exist_ok=True)
+    fold.ROOT, fold.EVENTS, dispatch.EVENTS = r, r / "events", r / "events"
+    return r
+
+
+def sup_relay(**fns):
+    m = types.ModuleType("relay")
+    base = {"plannable": lambda *a, **k: ([], []), "waiting_lines": lambda *a, **k: [],
+            "ledger_changed": lambda *a, **k: (False, None), "pending_packets": lambda *a, **k: [],
+            "planner_attempts": lambda *a, **k: {"attempts": 0, "last_reason": "", "next": "start"}}
+    for k, v in {**base, **fns}.items():
+        setattr(m, k, v)
+    sys.modules["relay"] = m
+    return m
+
+
+def sup_runs(rc=0, write=None):
+    """Replaces subprocess.run — records the launch, never makes one. `started` is
+    read at launch time, so AC5's ordering is observed and not inferred."""
+    calls = []
+
+    def run(cmd, env=None, **kw):
+        led = fold.EVENTS / env["DOIT_LEDGER_FILE"]
+        calls.append({"cmd": cmd, "env": env, "ledger": led,
+                      "started": [l for l in led.read_text().splitlines() if "planner-started" in l]})
+        write and write(led)
+        return types.SimpleNamespace(returncode=rc)
+    up.subprocess = types.SimpleNamespace(run=run)
+    return calls
+
+
+def sup_rows(f=None):
+    files = [f] if f else sorted(fold.EVENTS.glob("*.jsonl"))
+    return [js.loads(l) for p in files for l in p.read_text().splitlines() if l.strip()]
+
+
+def sup_boom(*a, **k):
+    raise RuntimeError("relay is out")
+
+
+os.environ["DOIT_SUPERVISOR_INTERVAL_SEC"] = "0"
+
+# ── AC1 · one main(), one Planner per plannable charter, and never an exec ────
+sup_root("ac1")
+sup_relay(plannable=lambda *a, **k: (["L-charter-0001", "L-charter-0002"], []))
+calls = sup_runs()
+up.main(max_cycles=1)
+ok([c["cmd"][-1] for c in calls] == ["L-charter-0001", "L-charter-0002"],
+   f"the loop starts one Planner per ready charter, each named its own charter: {[c['cmd'][-1] for c in calls]}")
+ok(all(c["cmd"][-2] == "--dangerously-skip-permissions" for c in calls),
+   f"the opening prompt is a trailing positional, AFTER the last option (ba6a264): {calls[0]['cmd']}")
+ok(all(c["env"].get("DOIT_SUPERVISED") == "1" for c in calls),
+   "every supervised child carries the marker the pane reads to end itself")
+stems = [c["env"]["DOIT_LEDGER_FILE"] for c in calls]
+ok(len(set(stems)) == 2 and all(s.startswith("L-planner-") for s in stems),
+   f"each Planner writes as itself and never over the last one's file (D90): {stems}")
+ok("execvpe" not in inspect.getsource(up), "the launcher never replaces itself with the pane — a "
+                                           "replaced process cannot notice the pane exit (L-adr-0026)")
+
+# ── AC12 · print-only is what it was: no relay, no child, no event, no L-up ───
+sup_root("ac12")
+seen = []
+sup_relay(**{f: (lambda *a, _f=f, **k: seen.append(_f)) for f in up.RELAY_FNS})
+calls = sup_runs()
+cmd1, env1 = up.main(print_only=True)
+cmd2, env2 = up.main(print_only=True)
+ok(env1["DOIT_LEDGER_FILE"] == "L-planner-0001.jsonl" and env2["DOIT_LEDGER_FILE"] == "L-planner-0002.jsonl",
+   f"print-only still allocates one fresh pane file per call: {env1['DOIT_LEDGER_FILE']} {env2['DOIT_LEDGER_FILE']}")
+ok(cmd1 == up.pane_cmd() and cmd2 == up.pane_cmd(), f"and builds today's argv, with no prompt on it: {cmd1}")
+ok(env1["PATH"].split(":")[0] == str(up.HERE.parent), "`doit` still resolves inside the pane")
+ok(not seen and not calls, f"print-only calls no relay function and starts nothing: {seen}")
+ok(not list(fold.EVENTS.glob("L-up-*.jsonl")), "print-only allocates no launcher file")
+ok(all(p.stat().st_size == 0 for p in fold.EVENTS.glob("*.jsonl")), "and appends no event anywhere")
+sys.modules["relay"] = None                  # unimportable: see AC7's note below
+cmd3, env3 = up.main(print_only=True)
+ok(cmd3 == up.pane_cmd() and env3["DOIT_LEDGER_FILE"] == "L-planner-0003.jsonl",
+   "with relay unimportable — the state this unit was written against — print-only is unchanged")
+
+# ── AC3/AC13 · restart once, then escalate ON THE CHARTER, in the launcher's file
+sup_root("ac3")
+
+
+def sup_attempts(events, charter_id=None, **k):
+    return ({"attempts": 2, "last_reason": "exit-1", "next": "escalate"} if charter_id == "L-charter-0001"
+            else {"attempts": 0, "last_reason": "", "next": "start"})
+
+
+sup_relay(plannable=lambda *a, **k: (["L-charter-0001", "L-charter-0002"], []), planner_attempts=sup_attempts)
+calls = sup_runs()
+up.main(max_cycles=1)
+esc = [e for e in sup_rows() if e["type"] == "escalation-blocking"]
+ok(len(esc) == 1 and esc[0]["subject"] == "L-charter-0001",
+   f"the escalation is keyed on the CHARTER, not on 'executor' (Plan decision 9): {esc}")
+ok(esc[0].get("last_reason") == "exit-1", f"and it carries the last reason, not just a count: {esc[0]}")
+ok([c["cmd"][-1] for c in calls] == ["L-charter-0002"],
+   f"the escalated charter starts nothing and the next ready charter still starts that cycle: {calls}")
+ups = list(fold.EVENTS.glob("L-up-[0-9][0-9][0-9][0-9].jsonl"))
+ok(len(ups) == 1, f"one L-up-NNNN.jsonl per run, allocated lazily and reused: {ups}")
+evs = fold.read_events()
+esc = [e for e in evs if e["type"] == "escalation-blocking"]
+ok(esc and esc[0]["actor"] == "up", f"the actor is the filename, and it folds to `up` (D90): {esc[0]['actor']}")
+_, _, ignored, _ = fold.fold(evs)
+ok(not [e for e in ignored if e["type"] == "escalation-blocking"],
+   "escalation-blocking has no EMITS row, so the launcher's actor never lands it in `ignored`")
+ok([e["subject"] for e in fold.open_escalations(evs)] == ["L-charter-0001"],
+   "and open_escalations keys on the subject alone — the charter is excluded wherever it is read")
+
+# ── AC4 · the end row only where the child wrote none ─────────────────────────
+sup_root("ac4-crash")
+sup_relay(plannable=lambda *a, **k: (["L-charter-0001"], []))
+calls = sup_runs(rc=1)
+up.main(max_cycles=1)
+ends = [e for e in sup_rows(calls[0]["ledger"]) if e["type"] == "planner-ended"]
+ok(len(ends) == 1 and ends[0]["reason"] == "exit-1" and ends[0]["mode"] == "charter",
+   f"a pane that dies writing nothing still leaves the failed-attempt record: {ends}")
+sup_root("ac4-clean")
+sup_relay(plannable=lambda *a, **k: (["L-charter-0002"], []))
+calls = sup_runs(write=lambda led: dispatch.emit(led, {"spawn": led.stem}, "planner-ended",
+                                                 subject="L-charter-0002", planner=led.stem,
+                                                 mode="charter", reason="l1-complete"))
+up.main(max_cycles=1)
+ends = [e for e in sup_rows(calls[0]["ledger"]) if e["type"] == "planner-ended"]
+ok(len(ends) == 1 and ends[0]["reason"] == "l1-complete",
+   f"and the pane's own clean end row is never doubled by the launcher's: {ends}")
+
+# ── AC5 · planner-started lands in the child's own file BEFORE the child runs ─
+sup_root("ac5")
+sup_relay(plannable=lambda *a, **k: (["L-charter-0007"], []),
+          planner_attempts=lambda *a, **k: {"attempts": 1, "last_reason": "exit-2", "next": "retry"})
+calls = sup_runs()
+up.main(max_cycles=1)
+led = calls[0]["ledger"]
+st = [e for e in sup_rows(led) if e["type"] == "planner-started"]
+ok(len(st) == 1 and st[0]["subject"] == "L-charter-0007" and st[0]["planner"] == led.stem
+   and st[0]["attempt"] == 2 and st[0]["mode"] == "charter",
+   f"the start row names charter, planner, attempt and mode, in the child's own file: {st}")
+ok(calls[0]["started"], "and it is on disk before the child starts — a pane that dies in its "
+                        "first second has still been recorded as started (L-adr-0027)")
+
+# ── AC6 · a dry queue holds the loop open and says what it is waiting on ──────
+sup_root("ac6")
+WAIT = ["PLANNER WAITING ON", "  L-charter-0003 · after: L-charter-0002"]
+sup_relay(waiting_lines=lambda *a, **k: WAIT)
+calls = sup_runs()
+buf = io.StringIO()
+with contextlib.redirect_stdout(buf):
+    cycles = up.main(max_cycles=3)
+out = buf.getvalue().splitlines()
+ok(cycles == 3 and not calls, "an empty queue holds the loop open and starts nothing; it never ends it (R6)")
+ok([l for l in out if l in WAIT] == WAIT,
+   f"the board's waiting lines are the pane's, verbatim and in order (L-adr-0032): {[l for l in out if l in WAIT]}")
+ok(out.count(WAIT[0]) == 1, "and unchanged waiting is not re-printed — a dry night does not scroll the pane")
+os.environ["DOIT_SUPERVISOR_INTERVAL_SEC"] = "600"
+sup_relay(waiting_lines=lambda *a, **k: WAIT, ledger_changed=lambda *a, **k: (True, 7))
+t0 = clock.monotonic()
+with contextlib.redirect_stdout(io.StringIO()):
+    up.main(max_cycles=2)
+ok(clock.monotonic() - t0 < 5, "a ledger write re-derives immediately instead of waiting out the interval")
+os.environ["DOIT_SUPERVISOR_INTERVAL_SEC"] = "0"
+
+# ── AC7 · a relay failure degrades to one named line and starts nothing ───────
+# relay-queries LANDED on main while this unit was in flight — `src/relay.py` exists
+# as of this rebase, where A10 measured it absent. So absence is simulated at the
+# import layer rather than read off the disk: `None` in sys.modules is exactly the
+# ImportError `import relay` raises when the file is not there, and R5 names the
+# EXCEPTION, never the missing file. The guard has to hold either way, or the first
+# root that ships without a sibling wedges the launcher.
+sup_root("ac7-absent")
+sys.modules["relay"] = None
+calls = sup_runs()
+buf = io.StringIO()
+with contextlib.redirect_stdout(buf):
+    up.main(max_cycles=2)
+ok(("ImportError" in buf.getvalue() or "ModuleNotFoundError" in buf.getvalue()) and not calls
+   and not any(p.stat().st_size for p in fold.EVENTS.glob("*.jsonl")),
+   f"with src/relay.py absent the loop names the exception and starts nothing: {buf.getvalue()!r}")
+for fn in up.RELAY_FNS:
+    sup_root("ac7-" + fn)
+    conf = {fn: sup_boom}
+    if fn == "planner_attempts":
+        conf["plannable"] = lambda *a, **k: (["L-charter-0001"], [])
+    sup_relay(**conf)
+    calls = sup_runs()
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        up.main(max_cycles=1)
+    ok("RuntimeError" in buf.getvalue() and not calls
+       and not any(p.stat().st_size for p in fold.EVENTS.glob("*.jsonl")),
+       f"relay.{fn} raising is caught, named, and starts no pane of either mode: {buf.getvalue()!r}")
+
+# ── AC8 · the serving pass, and charter work's priority over it ───────────────
+sup_root("ac8")
+PEND = [{"spawn": "L-builder-0009", "age": 3}, {"spawn": "L-grader-0002", "age": 1}]
+IDS = "L-builder-0009,L-grader-0002"
+sup_relay(pending_packets=lambda *a, **k: PEND)
+calls = sup_runs()
+up.main(max_cycles=1)
+ok(len(calls) == 1 and calls[0]["cmd"][-1] == IDS,
+   f"a pending packet is served on the FIRST cycle with nothing plannable: {calls}")
+rows = sup_rows(calls[0]["ledger"])
+ok([e["mode"] for e in rows] == ["serving", "serving"] and rows[0]["subject"] == "serving:" + IDS
+   and rows[0]["spawn_ids"] == IDS and rows[0]["attempt"] == 1,
+   f"both rows carry mode=serving, the serving subject and the sorted ids: {rows}")
+ok(rows[-1]["type"] == "planner-ended" and rows[-1]["spawn_ids"] == IDS and rows[-1]["reason"] == "exit-0",
+   f"and the end row carries the ids the next cycle's already-attempted check reads: {rows[-1]}")
+sup_root("ac8-priority")
+sup_relay(plannable=lambda *a, **k: (["L-charter-0005"], []), pending_packets=lambda *a, **k: PEND)
+calls = sup_runs()
+up.main(max_cycles=1)
+ok(len(calls) == 1 and calls[0]["cmd"][-1] == "L-charter-0005"
+   and all(e["mode"] == "charter" for e in sup_rows(calls[0]["ledger"])),
+   f"a ready charter pre-empts the serving pass entirely that cycle (L-adr-0029): {calls}")
+
+# ── AC9 · at most one serving pass per spawn id, and the skip is said out loud ─
+sup_root("ac9")
+seed = fold.EVENTS / "L-planner-0001.jsonl"
+dispatch.emit(seed, {"spawn": seed.stem}, "planner-ended", subject="serving:L-builder-0009",
+              planner=seed.stem, mode="serving", spawn_ids="L-builder-0009", reason="exit-0")
+sup_relay(pending_packets=lambda *a, **k: [{"spawn": "L-builder-0009"}])
+calls = sup_runs()
+buf = io.StringIO()
+with contextlib.redirect_stdout(buf):
+    up.main(max_cycles=1)
+ok(not calls, f"a spawn a serving pass already took is never taken a second time: {calls}")
+ok("L-builder-0009" in buf.getvalue() and "skipped" in buf.getvalue(),
+   f"and the skip is printed, never a silent drop: {buf.getvalue()!r}")
+
+# ── AC14 · the other half of this file belongs to L-spec-0045 (A2) ────────────
+# A2 called the merge order and it held the other way round: L-spec-0045 landed on
+# main first, so its additive functions are HERE already and this unit rebased onto
+# them. The boundary is the same boundary — this spec wrote none of them, calls none
+# of them, and left every one intact and callable above.
+ok(all(callable(getattr(up, f, None)) for f in ("executor_loop", "executor_prompt",
+                                                "executor_deny_list", "quiet_point")),
+   "L-spec-0045's additive functions survive this spec's rebase intact, none rewritten here")
+ok(not hasattr(up, "pane_name"),
+   "and `pane_name` is still a sibling's Produces — imported, never redefined in up.py (AC1 of 0045)")
+ok("Bash(git commit:*)" in up.executor_deny_list()
+   and "L-executor-0099" in up.executor_prompt("L-executor-0099.jsonl", "B"),
+   "the Executor launcher's own shape is untouched by the supervisor loop that now sits above it")
+ok("-n" not in up.pane_cmd() and "-n" not in up.pane_cmd("L-charter-0001"),
+   f"and no pane name is added here — that is R12's Planner half on L-charter-0021: {up.pane_cmd('x')}")
+ok(callable(up.cron_line) and callable(up.install) and up.AGENTS_HOME.name == "claude-agents",
+   "cron_line, install and AGENTS_HOME are untouched by this spec")
+# ── end L-spec-0031 fixtures ─────
 print(f"up: {n} checks pass")
