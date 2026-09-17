@@ -201,9 +201,26 @@ and handed — and **that is an event, not a state of mind**:
 
 Nothing else in the system writes it, and until it exists the Executor's close
 row cannot fire: the sweep, the charter-review and the reap all gate on
-L1-complete. Then print the handover — charter, units, waves, the ids written,
-the open sweep questions — and stop. Do not start another charter in this
-context.
+L1-complete. Then **write** the handover to a file — charter, units, waves, the
+ids written, the open sweep questions — and end this pane:
+
+    doit pane-end <charter> --handover <the file you just wrote>
+
+`src/pane_end.py` ends the pane's own OS process: it walks its own ancestor
+chain to the nearest `claude` and sends it SIGTERM. **Process exit is the only
+end signal** — nothing here sends keys to a pane or reads a pane's screen, and
+"stop responding" is not an end: it leaves the pane alive for a human to kill
+by hand, which is the thing this replaces.
+
+It refuses, printing the reason and exiting non-zero, unless all four hold: the
+`l1-complete` above is on the ledger **from an actor `fold.EMITS` authorizes**,
+the handover file exists and is non-empty, the seat relay reports no pending
+packet, and `DOIT_SUPERVISED` says a supervisor can replace this pane. A refusal
+is information, not a failure — read it, fix what it names, run it again. If it
+refuses because nothing supervises this pane, you are done: print the handover
+and stop, exactly as before.
+
+Do not start another charter in this context.
 
 ## Commissioning the cheap diggers
 
