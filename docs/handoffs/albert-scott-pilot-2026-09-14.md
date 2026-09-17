@@ -2161,3 +2161,98 @@ answering two Planner escalations and clearing the orchestration box from 95% to
   `pane-end` will read a refusal as success.
 - **Fix status:** open — wants a change-list id: scope `pane-end`'s pending check to packets whose
   spawn this pane dispatched, and return non-zero on refusal.
+
+## Planner pane, 2026-09-17 16:44Z → (L-planner-0017 · L-charter-0023)
+
+Own section per b-12. Measured while planning the 20-requirement signal-honesty charter: one Plan,
+one fable plan-audit, three wave-1 spec-writers and their three blind audits.
+
+### R91. `doit packet plan-auditor --stage plan` is dead code — it calls `prepass()` with the `prepass_two_file()` signature (L-planner-0017, 2026-09-17 16:57Z)
+- **Measured:** `doit packet plan-auditor L-charter-0023 --stage plan` exits 1 with
+  `TypeError: prepass() takes from 1 to 4 positional arguments but 5 were given`.
+  `src/packet.py:486` calls `audit.prepass(stage, cut.read_text(), ch_text, plan_text, c.a.repo)`,
+  but `src/audit.py:361` is `prepass(doc_text, charter_text=None, repo=None, events=None)` — the
+  five-positional form is `prepass_two_file()` at line 387. The `plan` branch has not been run since
+  the two-file seam was split.
+- **Why it matters and why it is cheap.** The *correct* stage for this pilot's shape is
+  `--stage doc` ("the cut and the Plan are ONE document and one audit"), which works and is what
+  the Planner contract's one-document cycle describes. But the contract's §② text still writes
+  `doit audit plan <charter> --cut … --plan …`, and a Planner reading it will reach for
+  `--stage plan` first, hit a Python traceback, and have to read `packet.py` to discover the working
+  flag. The two-file `cut`/`plan` stages are the *older* shape; `doc` is the current one.
+- **Systemic:** either fix the call (`prepass_two_file`) or delete the `cut`/`plan` stages and let
+  the flag error name `doc`. A traceback is not a deprecation notice. Note `doit audit plan`
+  (the standalone script) still works and is what §② names — only the *packet* builder's `plan`
+  stage is broken, so the mechanical pre-pass and the packet disagree about which flag is live.
+- **Fix status:** open — no change-list id. Worked around with `--stage doc`.
+
+### R92. R81 is now 6 of 6 across two charters: every spec-writer writes a Verification block the packet builder refuses, and no contract states the rule (L-planner-0017, 2026-09-17 17:20–17:40Z)
+- **Measured, 3 of 3 on this charter's wave 1, after 3 of 3 on the last one.** Every spawn returned
+  a schema-VALID card, the wrapper appended `spec-written`, and `doit packet spec-auditor` then
+  refused all three, for three *different* reasons: `L-spec-0079` — "names an interpreter by bare
+  word, not an absolute path: `pytest`"; `L-spec-0078` — "is not one gated `&&` chain", naming three
+  newline-separated statements; `L-spec-0080` — "a bare `||` near `_guard.py && exit 1 || exit 0`"
+  plus two backslash-continuation lines read as separate statements. Three independent Sonnet spawns
+  invented three plausible shapes because nothing told them the shape.
+- **The rule is enforced in `packet.py` and stated nowhere.** `agents/spec-writer.md:89` says only
+  "`Verification` — the exact command the grader will run… Empty or trivial is a blocker". It does
+  not mention the single `&&` chain, absolute interpreters, the `||` ban, or the one-physical-line
+  requirement. `doit validate spec-writer` validates the **card**; the body is unvalidated until an
+  auditor wants it. R75 recorded this once, R81 measured 3 of 3 and called it systemic, and a second
+  100% run settles it beyond argument.
+- **What it costs, and the workaround's cost.** D24 gives a spec one `spec-writer` round, and
+  spending it on formatting would leave the actual audit's findings unfixable — so, as in R75 and
+  R81, the already-stamped sub-agents were resumed for a text-only edit. Cheap and correct, and
+  **outside the ledger's spawn accounting**: `doit spend` under-counts these three specs by 5 + 56 +
+  92 tool uses across three resumes. The resume message had to carry the unstated contract by hand,
+  all seven clauses, three times.
+- **Nothing dangerous slipped this time, but the hole that let it through last time is unchanged.**
+  R81's worst finding was a spec-writer *adding* `alembic upgrade head` to a Verification block when
+  asked for a formatting fix. `packet.py`'s checks are shape checks; a gated absolute-path chain
+  containing a production migration passes every one of them. Each of this round's three fix
+  messages pre-emptively named the DB-write ban for that reason — a Planner hand-carrying a safety
+  rule into a prompt is not a control.
+- **Systemic, unchanged from R81 and now twice-measured.** (1) State the shape in
+  `agents/spec-writer.md` and in the packet template — one gated `&&` chain on one physical line,
+  absolute interpreter paths, no `||`, no inline comments, no step that cannot fail, no DB write.
+  (2) Run `packet.py`'s body check inside `doit validate spec-writer`, so a malformed block never
+  reaches `spec-written`. (3) Add the DB-write deny-list. (1) is a docs edit and would have
+  prevented all six.
+- **Fix status:** open — no change-list id. Second measurement of the R75/R81 class.
+
+### R93. Every false premise this Planner shipped came from reading documentation instead of running one command (L-planner-0017, L-charter-0023, 2026-09-17)
+- **Measured.** The plan-audit returned 13 findings and the three per-spec audits returned 10, 9 and
+  9. `bad_cut: false` on all four — the carve held. But **eleven of the 41 were defects in the
+  Planner's own Plan and ADRs**, not in the specs, and every one of the false-premise class came
+  from trusting a document over the live system:
+  1. *"The `rls-isolation` job selects `api/tests/profit_v2` wholesale by marker, so the marker IS
+     the wiring."* The job is `if: ${{ vars.RLS_ISOLATION_ENABLED == 'true' }}` and
+     `gh api repos/:owner/:repo/actions/variables` returns `total_count: 0`. It has never run.
+     Source of the error: the job's own explanatory comment, which describes gating on a
+     `TEST_DB_URL` secret and reads as though it runs.
+  2. *"`SUPABASE_DB_URL` is not an Actions secret and adding one was declined."* `gh secret list`
+     shows it present since 2026-09-10T12:22:31Z; the credential step passes and the job dies on
+     `FATAL: (EADDRNOTALLOWED) address not in tenant allow_list`. Source of the error: spec 928's
+     recorded decision, true when written and stale by a week.
+  3. *"`REQUIRED_CHECKS` gains the dashboard-quality context."* It already holds it, in both
+     `predeploy_gate.sh:657` and `branch_protection.sh:71` — arrays this Planner had *read* and
+     quoted in the same session.
+  In each case one shell command — `gh api .../actions/variables`, `gh secret list`, `grep` — would
+  have settled it, and in each case a plausible document was read instead.
+- **The other eight were the same failure one level down**: signatures written as callables that do
+  not exist (`required_activation_row_grammar()`), a matcher with no callable seam for the test that
+  must assert it, a criterion hung on a whole-repo property, a brief with no path or write grant,
+  a test file with twelve lines of headroom under a 1,500-line ratchet, and a gate placed after
+  `systemctl restart` that could not refuse anything it claimed to refuse.
+- **Systemic, and it is doctrine rather than a tool bug.** The previous charter's R87 said the
+  per-spec audit is the Plan's only *measured* check. This charter says the same thing with a
+  second, sharper edge: **the plan-auditor reads the repo too, and it caught the premise errors the
+  mechanical pre-pass cannot see** — coverage, seams, unit size and the acquisition trail were all
+  `none` while three load-bearing premises were false. The pre-pass proves the document is
+  well-formed, not that it is true. A Planner should treat every sentence of the form "X already
+  does Y" as unwritten until a command has printed it, and the cost of that discipline is seconds.
+- **Worth keeping:** the audits' `rejected` lists were long (10 and 10 and 8) and the measured
+  claims that *did* come from commands held up under re-check every time — the competitor-VOC sig
+  mismatch, the three nightly sigs matching, the 1,488-line file, the eight `TestPipelineDb` ids.
+  The split is clean: measured claims survived, inferred claims did not.
+- **Fix status:** doctrine, no change-list id. Second measurement of the R87 class.
