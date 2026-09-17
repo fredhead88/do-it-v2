@@ -81,7 +81,14 @@ EMITS = {"verdict": {"grader"}, "review": {"reviewer"}, "shipped": {"executor"},
          # seat that could stamp this on any shipped spec would walk it to
          # `accepted` alone, which is exactly what the verdict+review pair exists
          # to prevent.
-         "owed-met": {"executor", "operator"}}
+         "owed-met": {"executor", "operator"},
+         # L-charter-0020 R8: the Planner's own run, opened and closed on the ledger
+         # so `relay.planner_attempts` can pair them into a tally and the launcher
+         # keeps no state in memory. Restricted to the Planner for the same reason
+         # `cut-written` is: a seat that could write `planner-ended reason=l1-complete`
+         # about a Planner it is not would retire a charter nobody planned, and a seat
+         # that could write `planner-started` would keep one off the queue forever.
+         "planner-started": {"planner"}, "planner-ended": {"planner"}}
 
 # §4.4's `May declare` line, one contract at a time — the fold authorizes (§4.6).
 # A declaration lands as an event TYPED BY ITS TERM (dispatch.events_for), so a
