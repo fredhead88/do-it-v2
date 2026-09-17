@@ -1,32 +1,41 @@
 #!/usr/bin/env python3
-"""tick — fold, then spawn the Executor only if the fold shows an actionable lane (D117).
+"""tick — fold the ledger, compute the actionable lane, record one liveness fact.
 
-  tick.py     one tick: fold, decide, spawn-or-exit. Scheduled (cron) and poked
-              (every dispatch ends with one). One at a time per ledger — flock —
-              and a dropped duplicate loses nothing: the durable list is the queue.
+  tick.py     one tick: fold, compute, record. Scheduled (cron) and poked (every
+              dispatch ends with one). One at a time per ledger — flock — and a
+              dropped duplicate loses nothing: the durable list is the queue.
 
-An idle tick spawns no model. The Executor is a job, not a pane: it takes the
-next durable action on the lane and exits; its sub-agents are detached dispatches
-whose terminal events the next tick sees.
+A tick starts no Executor, under any backend (L-adr-0035). It is a pure
+fold-and-record: it spends nothing, it can be run at any frequency by anything,
+and the one event it appends is what `fold` reads for staleness. The Executor is
+a supervised pane that reads the same lane for itself; nothing here launches it.
 """
-import fcntl, json, os, pathlib, sys
+import fcntl, os, pathlib, sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import dispatch, fold, models, tree_cleanup  # noqa: E402
+import dispatch, fold, tree_cleanup  # noqa: E402
 
 # Waiting for the Executor's next durable action. `building` is in flight, not waiting.
 ACTIONABLE = {"written", "graded", "reviewing", "shipped"}
-# §10.5's RETIRE list, verbatim — a driver spawn denies it by name (D119).
+# §10.5's RETIRE list, verbatim — every pane launcher denies it by name (D119).
+# NOT dead with the spawn path: fold.caps(), think.pane_cmd() and up.pane_cmd() read these.
 RETIRE = ("subagent-driven-development", "executing-plans", "writing-plans", "requesting-code-review",
           "receiving-code-review", "finishing-a-development-branch", "dispatching-parallel-agents")
-MINUTES, USD = 20, 5          # one durable action per tick — never uncapped (§4.4 correction 9)
+MINUTES, USD = 20, 5          # the Executor's declared cap, read by fold.caps() (§4.4 correction 9)
 TICK = fold.EVENTS / "L-tick-local.jsonl"
+# §3.11's L2 conjunction, quantified over `mine` — a spec in one of these is done for its charter.
+SPEC_DONE = ("accepted", "shipped-owed-evidence", "dropped", "closed-unbuilt", "closed-shipped")
 
 
 def in_flight(ev):
     """Subjects with a spawn started and not ended — off the lane, or the next tick
     dispatches the same work twice. A start older than twice its role's cap with no
     terminal event is a dead wrapper: recorded once as spawn-stale, and the subject
-    is back on the lane for the Executor's failed-spawn row."""
+    is back on the lane for the Executor's failed-spawn row.
+
+    A `blocked` event is deliberately NOT read here (R7). The Executor writes one
+    when two units share a footprint, and a footprint collision is that unit's own
+    wait — never a reason to strike a second, merely adjacent subject off the lane.
+    Only an open `escalation-blocking` gates, because that one is the operator's."""
     started = [e for e in ev if e["type"] in ("build-started", "spawn-started")]
     ended = {e.get("spawn") for e in ev if e["type"] in ("spawn-done", "spawn-failed", "spawn-stale")}
     # An open escalation is the operator's: the subject leaves the lane until a
@@ -56,7 +65,28 @@ def in_flight(ev):
     return busy
 
 
-def lane(specs, charters, busy=frozenset(), reaped=frozenset()):
+def closable_fallback(events, charter):
+    """`closable(events, charter)` until `the-fold-and-the-board` lands the real one
+    in `fold` — (every spec accepted, sweep fixpoint derived, charter-review owed).
+
+    It mirrors `fold.fold()`'s L2 conjunction in FULL, all five conjuncts, not the
+    three the seam names: the brief conjunct and `K` ride with the fact they belong
+    to (an open in-scope brief is exactly what holds the sweep short of a fixpoint;
+    an owed criterion over K is exactly what holds a spec short of accepted). A
+    fallback missing either would report a charter closable that `fold.fold()` holds
+    at `L1-complete` — dropping it off the lane before the Executor's brief-author
+    row can fire, and stranding it short of reap forever."""
+    cid = charter["id"] if isinstance(charter, dict) else charter
+    evs = charter["evs"] if isinstance(charter, dict) else [e for e in events if e.get("subject") == cid]
+    specs = fold.fold(events)[0] if events else {}
+    mine = [s for s in specs.values() if s["charter"] == cid and s["state"] != "void"]
+    owed = sum(1 for s in mine if s["state"] == "shipped-owed-evidence")
+    accepted = all(s["state"] in SPEC_DONE for s in mine) and owed <= fold.K
+    fixpoint = "sweep-fixpoint" in {e["type"] for e in evs} and not fold.open_briefs(evs)
+    return accepted, fixpoint, fold.charter_review(evs) != "charter-review-complete"
+
+
+def lane(specs, charters, busy=frozenset(), reaped=frozenset(), events=()):
     """A charter that is CLOSED and not yet reaped is still the Executor's.
 
     §4.11's reaper refuses any charter that is not `L2-complete` or `retracted`,
@@ -66,16 +96,35 @@ def lane(specs, charters, busy=frozenset(), reaped=frozenset()):
     the fold derived L2 in the same fold, and the tick went idle with two
     worktrees standing. L-charter-0001 had been `retracted` since August with its
     worktree still on disk for the same reason — the sixth defect invisible to a
-    passing suite, because nothing tested the lane past L1."""
+    passing suite, because nothing tested the lane past L1.
+
+    A charter at `L1-complete` whose `closable()` reads all-accepted, fixpoint
+    derived and no review owed is NOT on the lane (R11): there is no decision left
+    for the Executor to take, the fold moves it to `L2-complete` on its own, and it
+    comes back here once — for the reap. One with a review still owed appears
+    exactly as before, because dispatching the charter-reviewer IS the Executor's
+    judgment to make.
+
+    A spec's presence never depends on any charter (R6): a `charter: null` spec is
+    on the lane on its own terms, and no charter's state, closability or absence
+    from `charters` can take it off."""
+    def waiting(c):
+        if c["state"] in tree_cleanup.CLOSED:
+            return c["id"] not in reaped
+        if c["state"] != "L1-complete":
+            return False
+        if not events:
+            return True      # nothing to judge closability from: the charter stays the Executor's
+        accepted, fixpoint, review_owed = (getattr(fold, "closable", None) or closable_fallback)(events, c)
+        return not (accepted and fixpoint and not review_owed)
     return sorted([f"{s['id']} · {s['state']}" for s in specs.values()
                    if s["state"] in ACTIONABLE and s["id"] not in busy]
                   + [f"{c['id']} · {c['state']}" for c in charters.values()
-                     if c["id"] not in busy
-                     and (c["state"] == "L1-complete"
-                          or (c["state"] in tree_cleanup.CLOSED and c["id"] not in reaped))])
+                     if c["id"] not in busy and waiting(c)])
 
 
 def main():
+    """Fold, compute the lane, append exactly one `tick`. Never a spawn (L-adr-0035)."""
     fold.EVENTS.mkdir(parents=True, exist_ok=True)
     lock = open(fold.ROOT / "tick.lock", "w")
     try:
@@ -83,58 +132,15 @@ def main():
     except BlockingIOError:
         print("tick: one is running; this one is dropped")
         return 0
-    # The root's ruling first (pilot S32): a tick spawns `claude -p`, and a root whose
-    # Executor is a pane — or whose map says anything but claude-p — is never ticked
-    # into the metered pool. Refused loudly and recorded, so HEALTH can see it.
-    mp = models.load()
-    if mp is not None and models.backend_of("executor", mp) != "claude-p":
-        why = f"executor backend is {models.backend_of('executor', mp)!r} under {models.PATH}; a tick can only spawn claude-p"
-        dispatch.emit(TICK, {}, "tick", lane=None, spawned=False, refused=why)
-        print(f"tick: refused — {why}", file=sys.stderr)
-        return 2
     ev = fold.read_events()
-    specs, charters, ignored, by_subject = fold.fold(ev)
-    board = fold.render(ev, specs, charters, ignored, by_subject)
+    specs, charters, _, _ = fold.fold(ev)
     reaped = {e.get("subject") for e in ev if e["type"] == "tree-reaped"}
-    todo, have = lane(specs, charters, in_flight(ev), reaped), (dispatch.AGENTS / "executor.md").exists()
-    dispatch.emit(TICK, {}, "tick", lane=len(todo), spawned=bool(todo and have))
-    if not todo:
-        print("tick: idle")
-        return 0
-    if not have:
-        print(f"tick: {len(todo)} on the lane but no executor contract in {dispatch.AGENTS}", file=sys.stderr)
-        return 1
-    ledger = dispatch.alloc(fold.EVENTS, "L-executor-", ".jsonl")
-    os.environ["DOIT_LEDGER_FILE"] = ledger.name          # its own appends land as itself (D90)
-    os.environ["DOIT_GATE_LEDGER_FILE"] = ledger.name     # and so does the gate's verdict (its pane-era default was L-executor-0001)
-    os.environ["PATH"] = f"{dispatch.HERE.parent}:{os.environ.get('PATH', '')}"   # `doit` resolves
-    fm, base = dispatch.frontmatter("executor"), {"spawn": ledger.stem}
-    schema = dispatch.AGENTS / "executor.schema.json"
-    cmd = ["claude", "-p", "--agent", "executor", "--strict-mcp-config", "--permission-mode", "dontAsk",
-           "--output-format", "json", "--max-budget-usd", str(USD), "--json-schema", schema.read_text(),
-           "--allowedTools", ",".join(t.strip() for t in fm["tools"].split(",") if t.strip() != "StructuredOutput"),
-           "--disallowedTools", ",".join(f"Skill({s})" for s in RETIRE)]
-    prompt = (f"{ledger.stem}: take the next durable action on this lane, then exit.\n\n"
-              + "\n".join(todo) + "\n\n" + board)
-    try:
-        res = json.loads(dispatch.run_claude(cmd, prompt, str(fold.ROOT), MINUTES * 60).stdout)
-    except Exception as e:        # timeout or no JSON: recorded; the next tick re-scans the same lane
-        dispatch.emit(ledger, base, "spawn-failed", why=f"{type(e).__name__}: {str(e)[:200]}")
-        return 1
-    u, out = res.get("usage") or {}, res.get("structured_output")
-    bad = bool(res.get("is_error")) or out is None          # null output is a failed spawn (D116)
-    if bad and (res.get("terminal_reason") == "api_error" or res.get("api_error_status")):
-        dispatch.emit(ledger, base, "escalation-blocking", subject="executor",
-                      why=f"seat unreachable ({res.get('api_error_status')}) — /login as the operator")
-    kv = dict(cost_usd=res.get("total_cost_usd"), input_tokens=u.get("input_tokens"), lane=len(todo),
-              output_tokens=u.get("output_tokens"), turns=res.get("num_turns"), cli=dispatch.CLI)
-    if bad:
-        kv["why"] = "null structured_output" if out is None and not res.get("is_error") else str(res.get("result"))[:300]
-    else:
-        kv.update(idle=out.get("idle"), actions=[f"{x['action']} {x['subject']}" for x in out.get("actions", [])])
-    dispatch.emit(ledger, base, "spawn-failed" if bad else "spawn-done", **kv)
-    print(f"tick: executor {ledger.stem} {'failed' if bad else 'done'}")
-    return int(bad)
+    todo = lane(specs, charters, in_flight(ev), reaped, events=ev)
+    # The one liveness fact: `fold` reads the newest of these for staleness, and
+    # `lane` is the count — the whole record this process leaves behind.
+    dispatch.emit(TICK, {}, "tick", lane=len(todo))
+    print("tick: idle" if not todo else f"tick: {len(todo)} on the lane\n" + "\n".join(todo))
+    return 0
 
 
 if __name__ == "__main__":
