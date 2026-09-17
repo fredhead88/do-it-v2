@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """One runnable check on the fold rules. Run: python3 test_fold.py"""
-import json, os, pathlib, shutil, sys, tempfile
+import json, os, pathlib, shutil, sys, tempfile, types
 from datetime import datetime, timedelta, timezone
 
 TMP = pathlib.Path(tempfile.mkdtemp())
@@ -420,6 +420,21 @@ assert "list-price estimate" in rows[0], "the filtered row still says what it is
 # reads zero-out-of-zero-spawns rather than as silence. The `attributed only`
 # caveat stays on the zero row: drop it only when the number is zero and the
 # reader learns the caveat is about size.
+
+
+def sections(b):
+    """The '## ' headings fold.py itself wrote — everything from NEEDS YOU down.
+
+    The PLANNER WAITING ON block sits ABOVE NEEDS YOU and is a verbatim
+    pass-through of relay's waiting_lines() (R5/AC4): fold.py may not strip a
+    prefix it did not add, so a '## ' inside that block is relay's line, not a
+    fold.py section, and counting it would break these checks with nobody at
+    fault. Everything the forgery checks below care about (a label reaching SPEND
+    or HEALTH) is downstream of NEEDS YOU, so this loses none of their sharpness.
+    """
+    return [l for l in b[b.index("## NEEDS YOU"):].splitlines() if l.startswith("## ")]
+
+
 fold.PROJECT = "ghost"
 try:
     rows = spend(ledger(**{"L-operator-local.jsonl": [sp_ev(project="p", cost_usd=1.0)]}))
@@ -430,7 +445,7 @@ finally:
 for r in (rows, erows):
     assert len(r) == 1 and "spend · ghost · $0.00 · 0 spawns · attributed only" in r[0], r
     assert "list-price estimate" in r[0] and " unpriced" not in r[0], r
-assert len([l for l in eboard.splitlines() if l.startswith("## ")]) == 11, \
+assert len(sections(eboard)) == 11, \
     "an empty ledger under a filter still renders every section, and does not raise"
 
 # ...and that label is now UNVOUCHED: DOIT_PROJECT is operator environment reaching
@@ -443,7 +458,7 @@ try:
     frows, fboard = spend(forged_env), fold.render(*forged_env)
 finally:
     fold.PROJECT = None
-assert len([l for l in fboard.splitlines() if l.startswith("## ")]) == 11, "sections, always"
+assert len(sections(fboard)) == 11, "sections, always"
 assert len(frows) == 1 and "spend · x ## FORGED (9) · $0.00 · 0 spawns" in frows[0], frows
 
 # a label is a DIRECTORY NAME by default and nothing curates it: a newline in one
@@ -451,7 +466,7 @@ assert len(frows) == 1 and "spend · x ## FORGED (9) · $0.00 · 0 spawns" in fr
 # positional layout is the whole reason that check exists.
 forged = ledger(**{"L-operator-local.jsonl": [sp_ev(project="x\n## FORGED (9)", cost_usd=1.0)]})
 board = fold.render(*forged)
-assert len([l for l in board.splitlines() if l.startswith("## ")]) == 11, "sections, always"
+assert len(sections(board)) == 11, "sections, always"
 assert len(spend(forged)) == 1 and "spend · x ## FORGED (9) · $1.00 · 1 spawns" in spend(forged)[0], \
     spend(forged)
 
@@ -740,5 +755,66 @@ assert "last tick: 1m ago" in fold.render(*fresh) and "STALE" not in fold.render
 stale = ledger(**{"L-tick-local.jsonl": [{"ts": mins(30), "type": "tick", "lane": 0}]})
 assert "TICK STALE" in fold.render(*stale)
 assert "last tick: never" in fold.render(*ledger(**{"L-operator-local.jsonl": []}))
+
+# R5/R6 — PLANNER WAITING ON. relay-queries is the producer; this file only proves
+# the SLOT: the lines it returns reach the board verbatim, above NEEDS YOU, and a
+# missing producer degrades instead of raising. relay is stubbed through sys.modules
+# so these hold whether or not src/relay.py exists in the tree yet.
+empty_ev = ledger(**{"L-operator-local.jsonl": []})
+
+
+def with_relay(lines):
+    """Render once with waiting_lines() stubbed to return `lines`.
+
+    `lines=None` installs the None sentinel, which makes `from relay import ...`
+    raise ImportError whether or not src/relay.py is on disk — that is the whole
+    point: the degrade check must not become a no-op the day relay-queries merges.
+    """
+    prev, had = sys.modules.get("relay"), "relay" in sys.modules
+    if lines is None:
+        sys.modules["relay"] = None
+    else:
+        m = types.ModuleType("relay")
+        m.waiting_lines = lambda e, r: list(lines)
+        sys.modules["relay"] = m
+    try:
+        return fold.render(*empty_ev)
+    finally:
+        sys.modules.pop("relay", None)
+        if had:
+            sys.modules["relay"] = prev
+
+
+stub = ["PLANNER WAITING ON", "  L-charter-0007 · after: L-charter-0002 not landed"]
+wb = with_relay(stub)
+assert wb.startswith("# board · "), "the block goes UNDER the title, never above it"
+assert 0 < wb.index("\n".join(stub)) < wb.index("## NEEDS YOU"), \
+    "the waiting block renders between the title and NEEDS YOU"
+assert "## PLANNER WAITING ON" not in wb, \
+    "fold.py synthesizes no header of its own around a pass-through block"
+assert "PLANNER WAITING ON" not in wb[wb.index("## SPEND"):wb.index("## HEALTH")], \
+    "and never in the SPEND/HEALTH gap, which spend_block() slices"
+assert len(sections(wb)) == 11, "the block is not a twelfth section"
+
+# R6: a dry queue is CONTENT, not a reason to omit the slot.
+assert "PLANNER WAITING ON: no open charters" in with_relay(
+    ["PLANNER WAITING ON: no open charters"]), "an empty queue still renders its line"
+
+# AC4: pure pass-through — order kept, duplicates kept, nothing dropped or re-wrapped.
+dupes = ["PLANNER WAITING ON", "  L-charter-0009 · conflict building",
+         "  L-charter-0011 · footprint intersects L-spec-0031",
+         "  L-charter-0011 · footprint intersects L-spec-0031",
+         "  L-charter-0003 · count throttle: L-charter-0002 not landed"]
+assert "\n".join(dupes) in with_relay(dupes), \
+    "fold.py does not reorder, dedupe or truncate what relay handed it"
+
+# L-adr-0033: no relay yet -> one line on HEALTH, and the run does NOT raise.
+gone = with_relay(None)
+degrade = "PLANNER WAITING ON: unavailable — relay-queries not merged (L-adr-0033)"
+assert gone.count(degrade) == 1 and gone.index(degrade) > gone.index("## HEALTH"), \
+    "a missing producer says so once, under HEALTH"
+assert gone.count("PLANNER WAITING ON") == 1, \
+    "and renders no block content it does not have"
+assert len(sections(gone)) == 11, "the degrade line is a HEALTH row, not a section"
 
 print("fold: 104 checks pass")
