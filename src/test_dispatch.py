@@ -6,6 +6,11 @@ import argparse, json, os, pathlib, subprocess, sys, tempfile
 
 TMP = pathlib.Path(tempfile.mkdtemp())
 os.environ["DOIT_ROOT"], os.environ["DOIT_NO_POKE"] = str(TMP), "1"
+# Hermetic w.r.t. the pane: env.sh exports DOIT_SEAT=1 in every pane on this box,
+# which routes every mocked spawn into run_seat to wait for a <spawn>.result.json
+# no mock ever writes — the file then hangs to the role timeout instead of failing.
+# The seat-route blocks below set and del it around themselves on purpose.
+os.environ.pop("DOIT_SEAT", None)
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 import dispatch, fold  # noqa: E402
 
@@ -67,12 +72,48 @@ code, types, evs, _ = spawn("research", out={**research, "path": "content/L-rese
 assert code == 1 and "path mismatch" in evs[0]["why"]
 
 stray = REPO / "stray.txt"
+# Concurrent work is not a failed spawn: a file appearing under --cwd mid-run is
+# another charter's build landing in the same shared checkout, and the spawn that
+# ran correctly beside it records the movement instead of being voided by it.
 code, types, evs, _ = spawn("research", out=research, path=rp, side=lambda: stray.write_text("x"))
-assert code == 1 and "repo status changed" in evs[0]["why"], "a non-builder spawn that touches the repo fails"
+assert code == 0 and types == ["research-filed", "spawn-done"], (code, types, evs)
+assert evs[-1]["repo_moved"] == {"lines": ["?? stray.txt"], "paths": ["stray.txt"], "by_this_spawn": False}, evs[-1]
 stray.unlink()
+
+# The after-snapshot going undetermined is a broken observation, not concurrency.
+real_porcelain = dispatch.porcelain
+
+
+def nth(seq):
+    """porcelain() answering seq[0] on the before-snapshot and seq[1] on the after."""
+    calls = []
+
+    def fake_porcelain(cwd):
+        calls.append(cwd)
+        return seq[min(len(calls) - 1, len(seq) - 1)](cwd)
+    return fake_porcelain
+
+
+dispatch.porcelain = nth([real_porcelain, lambda cwd: None])
+code, types, evs, _ = spawn("research", out=research, path=rp)
+dispatch.porcelain = real_porcelain
+assert code == 1 and types == ["spawn-failed"], (code, types, evs)
+assert "undetermined" in evs[0]["why"] and "after" in evs[0]["why"], evs[0]["why"]
+assert evs[0]["why"] != f"repo status undetermined in {REPO} before spawn — not spent", \
+    "the after-spawn message is its own, never the before-spawn one"
+
+# A NOT_A_REPO <-> real flip is the repository itself coming or going under --cwd:
+# still a hard failure, and never routed into repo_moved.
+for seq in ([real_porcelain, lambda cwd: dispatch.NOT_A_REPO], [lambda cwd: dispatch.NOT_A_REPO, real_porcelain]):
+    dispatch.porcelain = nth(seq)
+    code, types, evs, _ = spawn("research", out=research, path=rp)
+    dispatch.porcelain = real_porcelain
+    assert code == 1 and types == ["spawn-failed"] and "repo identity changed" in evs[0]["why"], (code, types, evs)
+    assert not any("repo_moved" in e for e in spawn.raw), "a sentinel flip is never a movement"
 
 code, types, evs, _ = spawn("research", out=research, path=rp)
 assert code == 0 and types == ["research-filed", "spawn-done"], types
+assert "repo_moved" not in evs[-1], "nothing moved: the observation is absent, not an empty noise field"
 assert spawn.raw[0]["type"] == "spawn-started" and spawn.raw[0]["role"] == "research", "every role starts loudly"
 assert evs[1]["answered"] == "yes" and evs[1]["cost_usd"] == 0.01 and evs[1]["packet_sha256"], evs[1]
 assert "actor" not in evs[1], "D90: never an actor field"
@@ -160,6 +201,23 @@ OUTSIDE = TMP / "run-dir"
 OUTSIDE.mkdir()
 assert dispatch.porcelain(OUTSIDE) == dispatch.NOT_A_REPO, "no repo is a definite answer, not an undetermined one"
 assert dispatch.porcelain(REPO) is not None and dispatch.porcelain(REPO) != dispatch.NOT_A_REPO
+
+# ★ repo_moved proven directly, not only through a mocked spawn: the whole-line
+# symmetric difference, the paths those lines name, and the role fact.
+rm = dispatch.repo_moved
+assert rm("", "?? a.txt\n", "research") == {"lines": ["?? a.txt"], "paths": ["a.txt"], "by_this_spawn": False}
+assert rm("?? a.txt\n", "", "research") == {"lines": ["?? a.txt"], "paths": ["a.txt"], "by_this_spawn": False}, \
+    "a path that went away moved too"
+assert rm("?? a.txt\n", "?? a.txt\n", "research") == {"lines": [], "paths": [], "by_this_spawn": False}, \
+    "identical snapshots moved nothing"
+staged = rm(" M a.txt\n", "M  a.txt\n", "research")
+assert staged["lines"] == [" M a.txt", "M  a.txt"] and staged["paths"] == ["a.txt"], staged
+assert staged["lines"], "the operator staging a file mid-spawn is a real movement whose path diff is empty"
+ren = rm("", "R  a.txt -> b.txt\n", "research")
+assert ren["paths"] == ["a.txt", "b.txt"] and not any(" -> " in p for p in ren["paths"]), ren
+assert rm("", "?? a.txt\n", "builder")["by_this_spawn"] is True
+assert rm("", "?? a.txt\n", "grader")["by_this_spawn"] is False, \
+    "by_this_spawn is which role was dispatched, never a proof of authorship"
 probe_out = {"path": "content/L-probe-0001/", "summary": "s", "externals": [{"name": "x", "came_back": "y"}],
              "n_inputs": 3, "spend_usd": 0.0, "broke": [], "complete": True, "contamination": False,
              "declarations": []}
