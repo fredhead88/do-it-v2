@@ -504,4 +504,282 @@ for kw, want in ((dict(), "round one carries the plan slot"),
     else:
         raise AssertionError(f"spec-writer built a packet it should have refused: {want}")
 
+# ── 9. R9(b) · the multi-line Footprint:/Consumes:/Produces: reader ──────────
+# A real cut writes a seam's entries on the lines BENEATH a bare label, and a footprint
+# that does not fit one line the same way. Read as "the remainder of the label line",
+# every entry after the first was silently dropped (measured on the real
+# `packets/L-spec-0049-spec-writer-1.md`), a two-line `Footprint:` was truncated to its
+# first path — narrowing the merge grant below the audited cut — and a label with NO
+# entry lines bled the next field in: a bare `Produces:` above `Wave: 2` rendered
+# `produces: Wave: 2`. All three are asserted below.
+CH3 = TMP / "content" / "L-charter-0003.md"
+CH3.write_text("""# charter
+## Requirements
+- R1 — every entry of a multi-line field reaches the packet, in the cut's own order
+- R2 — a label with no entry line beneath it still reads nothing
+## Constraints and product decisions
+Entries are never re-ordered and never deduplicated.
+## Done for the whole
+review_path: go to the packet / worked if every entry is there
+""")
+CUT_L3 = TMP / "content" / "cut-L-charter-0003.md"
+CUT_L3.write_text("""# cut for L-charter-0003
+
+## unit-m
+Goal: carry every entry
+Delivers: R1
+Footprint: src/one.py
+src/two.py
+Consumes:
+Produces:
+p_alpha(a) -> alpha
+p_beta(b) -> beta
+p_gamma(c) -> gamma
+Wave: 1
+
+## unit-n
+Goal: read the sibling's produces
+Delivers: R2
+Footprint: src/four.py
+Consumes:
+c_one(x) -> one
+Produces:
+Wave: 2
+""")
+ENTRIES = "p_alpha(a) -> alpha; p_beta(b) -> beta; p_gamma(c) -> gamma"
+
+t = build("spec-writer", subject="L-spec-0050", charter=str(CH3), unit="unit-m")
+assert "- Footprint (= the merge grant, `Writes:`): src/one.py src/two.py" in t, \
+    "a two-line Footprint is the whole merge grant, not its first line"
+assert f"- Wave: 1. Seams: Consumes nothing; Produces {ENTRIES}." in t, \
+    "every entry under a bare Produces: label, and `nothing` only where there is none"
+assert "- `unit-n` produces: nothing" in t, \
+    "a label with no entry line beneath it reads nothing — never the next field bled in"
+assert "produces: Wave: 2" not in t, "the `\\s*`-crosses-the-newline bleed is closed"
+for entry in ("src/one.py", "src/two.py", "p_alpha(a) -> alpha", "p_beta(b) -> beta",
+              "p_gamma(c) -> gamma"):
+    assert entry in t, f"{entry!r} was dropped by the field reader"
+
+t = build("spec-writer", subject="L-spec-0051", charter=str(CH3), unit="unit-n")
+assert f"- `unit-m` produces: {ENTRIES}" in t, "a sibling's multi-line Produces:, whole"
+assert "- Wave: 2. Seams: Consumes c_one(x) -> one; Produces nothing." in t
+assert "- Footprint (= the merge grant, `Writes:`): src/four.py" in t, "one-line fields are unchanged"
+
+# ── 10. R9(a) · --stage doc: one document, one audit, no cut file ─────────────
+DOC = TMP / "content" / "plan-L-charter-0009.md"
+DOC.write_text("""# L-charter-0009 — the cut and the Plan, one document
+
+## unit-solo
+Goal: one document, one audit
+Delivers: R1
+Footprint: src/solo.py
+Consumes:
+Produces:
+solo(x) -> y
+Wave: 1
+
+## Seams
+solo(x) -> y, produced by unit-solo.
+
+## Rationale
+Collapsed because two documents meant two audits and one of them was always stale.
+""")
+ev("operator", "charter-filed", "L-charter-0009", path=str(CHARTER))
+assert not (TMP / "content" / "cut-L-charter-0009.md").exists(), "stage doc asks for no cut file"
+assert not [e for e in fold.read_events()
+            if e["type"] == "cut-written" and e["subject"] == "L-charter-0009"], "and no cut-written event"
+
+CALLS = []
+REAL_PREPASS = packet.audit.prepass
+STANDIN = "STAND-IN GROUND TRUTH BLOCK · stage doc"
+
+
+def standin(*a, **k):
+    """`src/audit.py` is a sibling's footprint and is not on this tree: the call SHAPE is
+    what this unit owes, and a stand-in is what proves it (never the sibling's body)."""
+    CALLS.append((a, k))
+    return STANDIN
+
+
+packet.audit.prepass = standin
+try:
+    t = build("plan-auditor", subject="L-charter-0009", stage="doc", charter=str(CHARTER),
+              repo=str(REPO))
+    assert "stage: doc" in t and "charter: L-charter-0009" in t
+    assert "## unit-solo" in t and "solo(x) -> y" in t, "the whole document body is embedded"
+    assert "worked if a spend column renders" in t, "the charter's done-condition, verbatim"
+    assert "R1 — the board carries a spend column" in t, "the charter's requirements, verbatim"
+    assert "two audits and one of them was always stale" not in t, "no rationale, ever"
+    assert STANDIN in t, "the audit's return value lands verbatim in the packet"
+    (args, kw), = CALLS
+    assert kw == {} and len(args) == 4, f"prepass(doc_text, charter_text, repo, events): {args!r}"
+    assert args[0] == packet.strip_rationale(DOC.read_text().rstrip()), "arg 1 is the WHOLE document"
+    assert args[1] == CHARTER.read_text(), "arg 2 is the charter text"
+    assert args[2] == str(REPO), "arg 3 is the repo"
+    assert args[3] is None, "arg 4 is events — None; the sibling resolves it via fold.read_events()"
+    pa3 = packet.Ctx(packet.argparse.Namespace(subject="L-charter-0009", charter=str(CHARTER),
+                                               project="t", stage="doc"))
+    absent(t, packet.strip(pa3, "plan-auditor"))
+    refuses("plan-auditor", "Collapsed because two documents meant two audits and one of "
+            "them was always stale.", subject="L-charter-0009", stage="doc",
+            charter=str(CHARTER), repo=str(REPO))
+    # ...and the document may equally be named by a `plan-written` event.
+    DOC2 = TMP / "content" / "one-doc-L-charter-0010.md"
+    DOC2.write_text("# L-charter-0010\n\n## unit-solo2\nGoal: g\nDelivers: R2\n"
+                    "Footprint: src/s2.py\nWave: 1\n")
+    ev("operator", "charter-filed", "L-charter-0010", path=str(CHARTER))
+    ev("planner", "plan-written", "L-charter-0010", path=str(DOC2))
+    t = build("plan-auditor", subject="L-charter-0010", stage="doc", charter=str(CHARTER),
+              repo=str(REPO))
+    assert "## unit-solo2" in t, "a plan-written event's path is the document too"
+finally:
+    packet.audit.prepass = REAL_PREPASS
+
+ev("operator", "charter-filed", "L-charter-0011", path=str(CHARTER))
+N += 1
+try:
+    build("plan-auditor", subject="L-charter-0011", stage="doc", charter=str(CHARTER))
+except SystemExit as e:
+    assert "needs the one document" in str(e.code), e.code
+else:
+    raise AssertionError("stage doc with no document on file should refuse")
+
+# ── 11. R10 · the Planner dispatches the audit and the rewrite itself ─────────
+REPOS_T = TMP / "repos" / "t"
+REPOS_T.mkdir(parents=True)
+subprocess.run(["git", "init", "-q"], cwd=REPOS_T, check=True)
+subprocess.run(["git", "-C", str(REPOS_T), "commit", "-q", "--allow-empty", "-m", "root"],
+               check=True, env={**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+                                "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"})
+REPO_HEAD = subprocess.run(["git", "-C", str(REPOS_T), "rev-parse", "HEAD"],
+                           capture_output=True, text=True).stdout.strip()
+
+SPEC60 = TMP / "content" / "L-spec-0060.md"
+SPEC60.write_text("""# L-spec-0060
+## 8. Verification
+```
+cd src && /usr/bin/python3 test_fold.py
+```
+## Acceptance criteria
+AC1 [backend]: x.
+  review_path: log in as x / go to x / do x / worked if x / failed if x.
+""")
+# no base_sha on the event, deliberately: not one of the ledger's spec-written events
+# carries one, because a spec's audit is dispatched before any build exists.
+ev("spec-writer", "spec-written", "L-spec-0060", spec="L-spec-0060", path=str(SPEC60),
+   footprint=["src/fold.py"], charter="L-charter-0001")
+assert not (TMP / "worktrees" / "t" / "l-spec-0060").is_dir(), "no worktree before the build"
+N += 1
+p60 = pathlib.Path(packet.packet_spec_auditor("L-spec-0060"))
+assert p60.is_file() and str(SPEC60) in p60.read_text(), \
+    "a bare packet_spec_auditor(spec) builds a packet; it does not die for want of a base"
+assert f"BASE={REPO_HEAD}\n" in (TMP / "content" / "verify-L-spec-0060.sh").read_text(), \
+    "with no worktree on disk the base is the project repo's HEAD, pinned once"
+N += 1
+assert pathlib.Path(packet.packet_spec_auditor("L-spec-0060", base_sha="cafe1234")).is_file()
+assert (TMP / "content" / "verify-L-spec-0060.sh").read_text().splitlines()[2] == "BASE=cafe1234", \
+    "an explicit base_sha still wins — the existing precedence above the fallback is untouched"
+
+
+def same_body_across_ledgers(fn, *a):
+    """The one variable under test is DOIT_LEDGER_FILE. Each call's packet is removed
+    between runs because `p_spec_writer` legitimately builds on the previous packet on
+    disk, and that is a fact about the spec's history, not about who is calling."""
+    global N
+    out = []
+    for led in ("L-planner-0001.jsonl", "L-executor-0001.jsonl"):
+        os.environ["DOIT_LEDGER_FILE"] = led
+        N += 1
+        q = pathlib.Path(fn(*a))
+        out.append(q.read_text())
+        q.unlink()
+    return out
+
+
+(TMP / "content" / "slot-L-spec-0060.md").write_text(
+    f"1. Charter extract: R1.\n9. The path to write the spec: {SPEC60}\n")
+ev("spec-auditor", "audit-finding", "L-spec-0060", list="findings", field="Goal",
+   category="vague", finding="the goal names no observable", suggested_fix="name one")
+
+b1, b2 = same_body_across_ledgers(packet.packet_spec_auditor, "L-spec-0060")
+assert b1 == b2, "the spec-auditor packet body must not depend on the caller's ledger file"
+b1, b2 = same_body_across_ledgers(packet.packet_spec_rework, "L-spec-0060")
+assert b1 == b2 and "Fix list" in b1 and "the goal names no observable" in b1, \
+    "the spec-rework packet carries the standing findings, and the same body for any caller"
+packet.audit.prepass = standin
+try:
+    b1, b2 = same_body_across_ledgers(packet.packet_plan_auditor, "L-charter-0009")
+finally:
+    packet.audit.prepass = REAL_PREPASS
+assert b1 == b2 and "stage: doc" in b1, \
+    "the plan-auditor packet body must not depend on the caller's ledger file"
+os.environ["DOIT_LEDGER_FILE"] = "L-operator-0001.jsonl"
+
+# R10's consumed seam: `review_tier(footprint)`'s two-word vocabulary is already the
+# shipped flag's. Proven, not built — no src/packet.py change is owed for it.
+for d in ("full", "gates-only"):
+    t = build("reviewer", worktree=str(REPO), depth=d, round="1")
+    assert f"depth: {d} · round: 1" in t, "the review-tier vocabulary builds, unchanged"
+
+# ── 12. R15 · a rework is a re-dispatch carrying a hint, never a diff ─────────
+HINT = "The predicate reads `client`; the column is `client_id`."
+plain = build("builder", worktree=str(REPO), repo=str(REPO))
+hinted = build("builder", worktree=str(REPO), repo=str(REPO), hint=HINT)
+BLOCK = ["This is a re-dispatch on the same worktree and branch. The correction, verbatim:",
+         HINT, "   The paths it concerns: src/fold.py."]
+hl = hinted.splitlines()
+i = hl.index(BLOCK[0])
+assert hl[i:i + 3] == BLOCK, hl[i:i + 3]
+assert hl[:i] + hl[i + 3:] == plain.splitlines(), \
+    "same worktree, branch, Writes:, conflict list and ADRs — the hint adds one block and moves nothing"
+assert "rejected — AC1:" in hinted and BLOCK[0] in hinted, \
+    "a standing grader rejection and a hint are two independent sections; neither is dropped"
+N += 1
+assert HINT in pathlib.Path(packet.packet_builder_rework("L-spec-0001", HINT)).read_text(), \
+    "the Python-import route builds the same re-dispatch packet as the CLI"
+
+before = len(list((TMP / "packets").glob("*.md")))
+for bad in ("Use this:\n```\nx = 1\n```\n",
+            "--- a/src/fold.py\n+++ b/src/fold.py\n",
+            "@@ -1,3 +1,3 @@\n-old\n+new\n",
+            "+++ b/src/fold.py"):
+    N += 1
+    try:
+        packet.packet_builder_rework("L-spec-0001", bad)
+    except SystemExit as e:
+        assert "carries a diff" in str(e.code), e.code
+    else:
+        raise AssertionError(f"a diff-shaped hint was rendered into a packet: {bad!r}")
+assert len(list((TMP / "packets").glob("*.md"))) == before, "a refused hint writes no packet"
+
+# ...and the negative control: the scan is over the HINT ARGUMENT ALONE. A charter's
+# Constraints extract may legitimately carry a `---` rule, and the build still succeeds.
+CH7 = TMP / "content" / "L-charter-0007.md"
+CH7.write_text("""# charter
+## Requirements
+- R7 — the refusal scan runs on the hint argument alone
+## Constraints and product decisions
+---
+The line above is a horizontal rule in a charter, not a diff hunk.
+## Done for the whole
+review_path: go / worked if the build still succeeds
+""")
+ev("operator", "charter-filed", "L-charter-0007", path=str(CH7))
+SPEC70 = TMP / "content" / "L-spec-0070.md"
+SPEC70.write_text("""# L-spec-0070
+## 8. Verification
+```
+cd src && /usr/bin/python3 test_fold.py
+```
+## Acceptance criteria
+AC1 [backend]: x.
+  review_path: log in as x / go to x / do x / worked if x / failed if x.
+""")
+ev("spec-writer", "spec-written", "L-spec-0070", spec="L-spec-0070", path=str(SPEC70),
+   footprint=["src/fold.py"], charter="L-charter-0007")
+t = build("builder", subject="L-spec-0070", worktree=str(REPO), repo=str(REPO),
+          hint="Rename the column in the predicate; one line.")
+assert "\n---\n" in t, "a `---` rule in the charter extract is carried, never scanned"
+assert "Rename the column in the predicate; one line." in t, "and the honest hint still builds"
+
 print(f"packet: {N} packets built, seven Blindness lists enforced")
