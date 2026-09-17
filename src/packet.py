@@ -244,7 +244,17 @@ def verify_base_sha(c):
     `base_sha` (build-done is the most authoritative — it is the actual build's —
     then build-started, then spec-written), else `git merge-base` against the
     worktree, once, at packet time; `git rev-parse HEAD` is the last resort for a
-    worktree with nothing to diverge from yet."""
+    worktree with nothing to diverge from yet.
+
+    One further, documented last-resort step, and only then the `die()`: **when the
+    worktree path is not a directory**, take `git -C <repo> rev-parse HEAD`, the same
+    repo path `_round_one_slot` and `p_builder` already derive (`--repo`, else
+    `$R/repos/<project>`). A spec's audit is dispatched BEFORE any build, so at that
+    moment no `base_sha` is recorded (not one `spec-written` event on the ledger
+    carries one), and the worktree the builder will cut does not exist yet — without
+    this step a bare `packet_spec_auditor(spec)` dies, and the base has to be handed
+    in out of band by whoever dispatches. The existing precedence above is untouched;
+    the `die()` remains for the case where the repo itself yields nothing."""
     if c.a.base_sha:
         return c.a.base_sha
     for t in ("build-done", "build-started", "spec-written"):
@@ -259,6 +269,11 @@ def verify_base_sha(c):
     r = subprocess.run(["git", "-C", wt, "rev-parse", "HEAD"], capture_output=True, text=True)
     if r.returncode == 0 and r.stdout.strip():
         return r.stdout.strip()
+    if not pathlib.Path(wt).is_dir():
+        repo = getattr(c.a, "repo", None) or str(ROOT / "repos" / c.project())
+        r = subprocess.run(["git", "-C", repo, "rev-parse", "HEAD"], capture_output=True, text=True)
+        if r.returncode == 0 and r.stdout.strip():
+            return r.stdout.strip()
     die(f"{c.a.subject}: no base_sha recorded, and neither `git merge-base` nor "
         f"`git rev-parse HEAD` in {wt} produced one — pin it with --base-sha")
 
@@ -376,9 +391,60 @@ def _doc_for_charter(c, charter_id, event_type, prefix):
     return (e or {}).get("path") or str(CONTENT / f"{prefix}-{charter_id}.md")
 
 
+FIELD_LABEL = re.compile(r"^(?:Goal|Delivers|Footprint|Consumes|Produces|Wave):")
+
+
 def _unit_field(block, name):
+    """A SINGLE-LINE unit field: `Goal:`, `Delivers:`, `Wave:` — and ONLY those three.
+    The multi-line fields have their own reader below; this one is deliberately not it.
+
+    Measured, not assumed: `\\s*` is not newline-safe, so against a BARE label this
+    returns the next non-blank line's text — a bare `Produces:` above `Wave: 2` yields
+    `"Wave: 2"`, not `""`. That bleed is why the multi-line fields moved off this
+    reader; the three above always carry their value on the label line, so it does not
+    reach them, and their extraction is unchanged on purpose."""
     m = re.search(rf"^{name}:\s*(.*)$", block, re.M)
     return m.group(1).strip() if m else ""
+
+
+def _unit_field_lines(block, name):
+    """Every entry of a MULTI-LINE unit field (`Footprint:`, `Consumes:`, `Produces:`),
+    in the cut's own order — never re-ordered, never deduplicated.
+
+    The defect this closes, as MEASURED against the real cut and the real packet built
+    from it (`packets/L-spec-0049-spec-writer-1.md`), not as reasoned about: a real cut
+    writes its seam entries on the lines BENEATH a bare label, and `_unit_field` reads
+    the label LINE. It did not render `nothing` there — it rendered the FIRST entry and
+    silently dropped the rest, for the unit's own Seams line and for every sibling's
+    Produces alike, and truncated a multi-line `Footprint:` to its first path,
+    narrowing the merge grant below the audited cut. Where a label has no entry lines
+    at all it was worse still: `\\s*` crosses the newline, so a bare `Produces:` above
+    `Wave: 2` rendered `produces: Wave: 2`. `content/cut-L-charter-0021.md`'s own
+    header tells authors to work around this by keeping footprints on one line; the
+    reader is the thing that was wrong, so the reader is what is fixed here.
+
+    The rule: the remainder of the label line if it carries one, then every non-empty
+    line under it, up to the next field label or the end of the unit block. A label
+    with no entry line beneath it and nothing after the colon yields `[]` — which the
+    callers still render as `nothing`.
+
+    Deliberately NOT `audit.fields()`'s rule, which continues a label only on
+    `-`/`*` bullet lines and so sees no entries at all in a real cut whose seam
+    entries are bare lines. The divergence is declared, not hidden: one cut must not
+    be read two ways, and reconciling it belongs to whoever owns `src/audit.py`."""
+    lines = block.splitlines()
+    for i, line in enumerate(lines):
+        m = re.match(rf"^{name}:\s*(.*)$", line)
+        if not m:
+            continue
+        out = [m.group(1).strip()] if m.group(1).strip() else []
+        for nxt in lines[i + 1:]:
+            if FIELD_LABEL.match(nxt) or nxt.startswith("## "):
+                break
+            if nxt.strip():
+                out.append(nxt.strip())
+        return out
+    return []
 
 
 def p_plan_auditor(c):
@@ -387,9 +453,11 @@ def p_plan_auditor(c):
     findings — plus the `doit audit` script pre-pass. No rationale (`strip_rationale`).
     `stage: charter-set` is the one stage with no single charter: it comes from every
     `charter-filed` event on the ledger, diffed against a goal."""
-    stage = c.a.stage or die("plan-auditor needs --stage cut|plan|charter-set")
+    stage = c.a.stage or die("plan-auditor needs --stage doc|cut|plan|charter-set")
     if stage == "charter-set":
         return _charter_set_packet(c)
+    if stage == "doc":
+        return _doc_packet(c)
     ch = c.charter_file()
     ch_text = ch.read_text() if ch else None
     cut = resolve(_doc_for_charter(c, c.a.subject, "cut-written", "cut"))
@@ -417,6 +485,35 @@ def p_plan_auditor(c):
                for f in findings] or ["   none"])
     L += ["", audit.prepass(stage, cut.read_text(), ch_text, plan_text, c.a.repo)]
     return L
+
+
+def _doc_packet(c):
+    """`stage: doc` — the cut and the Plan are ONE document and one audit, not two
+    files and two rounds. The document keeps the Plan's name, `plan-<charter>.md`,
+    so `Ctx.plan_file()` (a `plan-written` event's path, else the convention) finds
+    it unchanged; there is no cut file at this stage and none is looked for.
+
+    The whole document goes to the fable audit, after `strip_rationale`, through the
+    four-positional seam `audit.prepass(doc_text, charter_text, repo, events)` —
+    `events=None`, matching how the `cut`/`plan` calls already omit it and leave the
+    sibling to resolve it via `fold.read_events()`.
+
+    `--stage cut`/`plan`/`charter-set` are untouched: the charters cut under the
+    two-document convention are not retrofitted."""
+    ch = c.charter_file()
+    ch_text = ch.read_text() if ch else None
+    doc = c.plan_file() or die(
+        f"stage doc needs the one document — a `plan-written` event on {c.a.subject}, "
+        f"or {CONTENT / f'plan-{c.a.subject}.md'}")
+    doc_text = strip_rationale(doc.read_text().rstrip())
+    return ["stage: doc", f"charter: {c.a.subject}", "",
+            "## The charter's done-condition",
+            (strip_rationale(_sec(ch_text, "Done for the whole"))
+             if ch_text else "(no charter on file — `--charter PATH` or a charter-filed event)"),
+            "", "## The charter's requirements",
+            (strip_rationale(_sec(ch_text, "Requirements")) if ch_text else "(no charter on file)"),
+            "", "## The document — the cut and the Plan, collapsed", doc_text,
+            "", audit.prepass(doc_text, ch_text, c.a.repo, None)]
 
 
 def _charter_set_packet(c):
@@ -468,11 +565,16 @@ def _round_one_slot(c):
         die(f"no unit `{unit}` in the cut for {charter_id} — units on file: "
             f"{', '.join(sorted(blocks)) or 'none'}")
     delivers = [d.strip() for d in _unit_field(ub, "Delivers").split(",") if d.strip()]
-    goal, footprint, wave = _unit_field(ub, "Goal"), _unit_field(ub, "Footprint"), _unit_field(ub, "Wave")
-    consumes, produces = _unit_field(ub, "Consumes") or "nothing", _unit_field(ub, "Produces") or "nothing"
+    goal, wave = _unit_field(ub, "Goal"), _unit_field(ub, "Wave")
+    # Multi-line fields (`_unit_field_lines`): the footprint joins with a space, because
+    # `Writes:` is a bare space-separated path list; the seams join with `; `, because
+    # an entry is a signature that may itself carry commas.
+    footprint = " ".join(_unit_field_lines(ub, "Footprint"))
+    consumes = "; ".join(_unit_field_lines(ub, "Consumes")) or "nothing"
+    produces = "; ".join(_unit_field_lines(ub, "Produces")) or "nothing"
     ch_text = ch.read_text()
     reqs = [l for l in section(ch_text, "Requirements") if any(l.strip().startswith(f"- {r}") for r in delivers)]
-    siblings = [f"- `{n}` produces: {_unit_field(b, 'Produces') or 'nothing'}"
+    siblings = [f"- `{n}` produces: {'; '.join(_unit_field_lines(b, 'Produces')) or 'nothing'}"
                 for n, b in sorted(blocks.items()) if n != unit]
     plan_path = pathlib.Path(_doc_for_charter(c, charter_id, "plan-written", "plan"))
     plan_text = plan_path.read_text() if plan_path.is_file() else None
@@ -579,7 +681,33 @@ def p_spec_writer(c):
         for i, f in enumerate(findings, 1)]
 
 
+HINT_DIFF_MARKER = re.compile(r"^(\+\+\+|---|@@)")
+
+
+def hint_block(c):
+    """L-adr-0039's builder re-dispatch: a one-line correction, or a merge collision,
+    is a re-dispatch carrying a SENTENCE and the paths it concerns — never a diff, and
+    never an Executor's hand on the code. One shape for both.
+
+    A hint carrying a fenced code block, or any line starting `+++`/`---`/`@@`, is
+    refused outright: a diff is an implementation plan, and the builder with the code
+    in front of it is the one that writes that. The scan runs over the HINT ARGUMENT
+    ALONE — a charter's Constraints extract elsewhere in the same packet may
+    legitimately carry a `---` rule, and tripping on that would refuse honest builds."""
+    hint = getattr(c.a, "hint", None)
+    if not hint:
+        return []
+    if "```" in hint or any(HINT_DIFF_MARKER.match(l) for l in hint.splitlines()):
+        die("--hint carries a diff, not a sentence (a fenced block, or a line starting "
+            "`+++`/`---`/`@@`). Say what is wrong in one sentence; the builder writes the "
+            "change (L-adr-0039).")
+    return ["This is a re-dispatch on the same worktree and branch. The correction, verbatim:",
+            hint,
+            f"   The paths it concerns: {', '.join(c.footprint()) or 'none stated'}."]
+
+
 def p_builder(c):
+    hint = hint_block(c)          # refused before anything else is assembled
     spec, v = c.spec_file(), verify_script(c)
     repo = c.a.repo or str(ROOT / "repos" / c.project())
     base_sha = c.a.base_sha or subprocess.run(
@@ -606,6 +734,10 @@ def p_builder(c):
     if rej or fix:
         L += ["", "This is a rework on the same worktree and branch. Standing and blocking:",
               *[f"   rejected — {x}" for x in rej], *[f"   must-fix — {x}" for x in fix]]
+    # Two independent sections: a standing grader rejection and a hint may both be on
+    # one packet, and neither is dropped when the other is present.
+    if hint:
+        L += ["", *hint]
     for d in c.all_of("decision"):
         L.append(f"   decided, and binding: {d.get('why', '')}")
     L += ["", f"Your cwd is your worktree, on branch `{c.a.subject.lower()}`. "
@@ -798,6 +930,14 @@ def strip(c, role):
         if c.a.stage == "charter-set":
             return []
         out = []
+        # At stage `doc` there is no cut file and none is looked for: `cut_file()`
+        # resolves or dies, so asking it here would refuse a one-document packet for
+        # want of the very file the stage exists to do without.
+        if c.a.stage == "doc":
+            return [("the document's rationale", l)
+                    for f in [c.plan_file()] if f and pathlib.Path(f).is_file()
+                    for name in ("Rationale", "Why")
+                    for l in section(pathlib.Path(f).read_text(), name) if len(l.strip()) > 50]
         docs = [(c.cut_file, "the cut's rationale")]
         if c.a.stage == "plan":
             docs.append((lambda: pathlib.Path(_doc_for_charter(c, c.a.subject, "plan-written", "plan")), "the Plan's rationale"))
@@ -826,7 +966,10 @@ def main(argv=None):
     ap.add_argument("--unit", help="spec-writer round one, built from scratch: the cut's unit heading")
     ap.add_argument("--envelope", help="spec-writer round one: the builder capability envelope")
     ap.add_argument("--cost-path", help="spec-writer round one: the cost-path inventory")
-    ap.add_argument("--stage", choices=["cut", "plan", "charter-set"], help="plan-auditor's stage")
+    ap.add_argument("--stage", choices=["cut", "plan", "charter-set", "doc"],
+                    help="plan-auditor's stage; `doc` is the one-document stage")
+    ap.add_argument("--hint", help="builder re-dispatch: one sentence saying what is wrong "
+                                   "(a merge collision, a one-line correction) — never a diff")
     ap.add_argument("--goal", help="plan-auditor stage charter-set: the goal file; else the goal-filed event")
     ap.add_argument("--produces", help="sibling units' Produces: signatures")
     ap.add_argument("--conventions"), ap.add_argument("--base-sha"), ap.add_argument("--url")
@@ -846,6 +989,42 @@ def main(argv=None):
     p.write_text(text)
     assert p.read_text() == text, f"write to {p} did not land"
     return p
+
+
+# ───────────────────── the producers a pane calls as plain Python ─────────────────────
+# The Planner dispatches a spec's audit and its rewrite itself, and a correction or a
+# merge collision is a builder re-dispatch — so those packets must be buildable from
+# inside a Python pane, not only off a command line. Each is a thin wrapper over
+# `main(argv)`: one code path, one Blindness check, one file-naming sequence for the CLI
+# route and the import route alike, exactly as `if __name__ == "__main__"` already
+# delegates. None of them reads who is calling: no actor, no role, no `DOIT_LEDGER_FILE`
+# enters a packet body, so the same call from any pane yields the same bytes.
+
+def packet_plan_auditor(charter):
+    """The single-stage plan-auditor packet for a charter whose cut and Plan are one
+    document. Returns the packet path."""
+    return main(["plan-auditor", charter, "--stage", "doc"])
+
+
+def packet_spec_auditor(spec, base_sha=None):
+    """The packet for the audit the Planner dispatches. Returns the packet path.
+
+    With no `base_sha` and no worktree on disk it BUILDS rather than dying —
+    `verify_base_sha`'s last-resort step takes the project repo's HEAD."""
+    return main(["spec-auditor", spec] + (["--base-sha", base_sha] if base_sha else []))
+
+
+def packet_spec_rework(spec):
+    """The packet carrying the standing audit findings for the rewrite the Planner
+    dispatches. Returns the packet path."""
+    return main(["spec-writer", spec])
+
+
+def packet_builder_rework(spec, hint):
+    """The builder re-dispatch packet (L-adr-0039) — the identical builder packet for
+    that spec's own worktree, plus the hint verbatim and the paths it concerns. A
+    diff-shaped hint is refused, not rendered. Returns the packet path."""
+    return main(["builder", spec, "--hint", hint])
 
 
 if __name__ == "__main__":
