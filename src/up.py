@@ -36,7 +36,8 @@ def pane_cmd():
     Output is the files and events it writes. The agent file's tools: line is the
     sandbox; the deny list is the only form a retire list has (D119)."""
     return ["claude", "--agent", "planner",
-            "--disallowedTools", ",".join(f"Skill({s})" for s in tick.RETIRE)]
+            "--disallowedTools", ",".join(f"Skill({s})" for s in tick.RETIRE),
+            "--dangerously-skip-permissions"]
 
 
 AGENTS_HOME = pathlib.Path.home() / ".claude" / "agents"

@@ -50,7 +50,8 @@ def pane_cmd(topic):
     terminal title (§3.3) — and §8.9 infers the `creative` category from exactly
     that name, which is the only reason that counter is derivable at all."""
     return ["claude", "-n", f"think-{topic}", "--agent", "thinker",
-            "--disallowedTools", ",".join(f"Skill({s})" for s in tick.RETIRE)]
+            "--disallowedTools", ",".join(f"Skill({s})" for s in tick.RETIRE),
+            "--dangerously-skip-permissions"]
 
 
 def covers(body):
