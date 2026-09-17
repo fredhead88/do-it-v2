@@ -6,12 +6,12 @@ is a charter that would otherwise reach the Planner unprovable, uncited, or
 carrying the Plan's decisions — and every one is written with its negative, so a
 refusal that fires on everything counts as nothing.
 """
-import os, pathlib, sys, tempfile
+import contextlib, io, os, pathlib, sys, tempfile
 
 TMP = pathlib.Path(tempfile.mkdtemp())
 os.environ["DOIT_ROOT"], os.environ["DOIT_NO_POKE"] = str(TMP), "1"
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
-import dispatch, fold, think, tick, up  # noqa: E402
+import dispatch, fold, panes, think, tick, up  # noqa: E402
 
 n = 0
 CONTENT = TMP / "content"
@@ -173,9 +173,11 @@ ok([e["actor"] for e in ignored] == ["planner", "builder"],
 ok(len(by["L-charter-0100"]) == 2, "the Thinker's and the operator's land")
 
 # ── the session: named, thinker, RETIRE denied, and linked where --agent looks ─
-cmd = think.pane_cmd("spend")
-ok(cmd[:5] == ["claude", "-n", "think-spend", "--agent", "thinker"],
+cmd = think.pane_cmd("L-thinker-0068")
+ok(cmd[:5] == ["claude", "-n", "L-thinker-0068", "--agent", "thinker"],
    f"§3.3: named, so `claude agents` and §8.9's creative counter can find it: {cmd}")
+ok("think-L-thinker-0068" not in cmd,
+   f"the name is passed through, never re-decorated into an unaddressable string: {cmd}")
 ok(not ({"-p", "--output-format", "--json-schema"} & set(cmd)), f"conversational, not a spawn: {cmd}")
 deny = cmd[cmd.index("--disallowedTools") + 1]
 ok(all(f"Skill({s})" in deny for s in tick.RETIRE), "D119: every RETIRE skill denied by name")
@@ -189,17 +191,37 @@ except SystemExit as e:
     ok("no thinker contract" in str(e), f"and name itself: {e}")
 (dispatch.AGENTS / "thinker.md").write_text((real_agents / "thinker.md").read_text())
 up.AGENTS_HOME = TMP / "claude-agents"
-_, env = think.open_session("spend", print_only=True)
+cmd, env = think.open_session("spend", print_only=True)
 ok((up.AGENTS_HOME / "thinker.md").is_symlink(),
    "the contract is linked into ~/.claude/agents — `--agent thinker` resolves nowhere else (AP15)")
 ok(env["DOIT_LEDGER_FILE"] == "L-thinker-0002.jsonl",
    f"the session writes as itself, and never over the last one's file (D90): {env['DOIT_LEDGER_FILE']}")
 
+# ── the pane is named after that ledger, so a message to the actor lands ─────
+ok(cmd[1] == "-n" and cmd[2] == panes.pane_name(env["DOIT_LEDGER_FILE"]),
+   f"`-n` and DOIT_LEDGER_FILE are one id, set in one call: {cmd[:3]} vs {env['DOIT_LEDGER_FILE']}")
+ok(cmd[2] != "think-spend",
+   f"the topic no longer names the pane — `think-spend` addresses nothing: {cmd[:3]}")
+ok(cmd[3:5] == ["--agent", "thinker"] and "--dangerously-skip-permissions" in cmd,
+   f"and the launch keeps every flag it had, ba6a264's included: {cmd}")
+cmd2, env2 = think.open_session("spend", print_only=True)
+ok(cmd2[2] == panes.pane_name(env2["DOIT_LEDGER_FILE"]) and cmd2[2] != cmd[2],
+   f"a second session on the same topic is a second pane with a second name: {cmd2[2]} vs {cmd[2]}")
+ok(cmd2[2] == "L-thinker-0003",
+   f"and that name is the ledger `alloc` just claimed, not a repeat (D90): {cmd2[2]}")
+
 # ── discard costs what landing costs, and leaves the state distinguishable ───
 os.environ["DOIT_LEDGER_FILE"] = "L-thinker-0002.jsonl"
-think.main(["spend", "--discard"])
-ok(any(e["type"] == "think-discarded" and e["subject"] == "think-spend" for e in fold.read_events()),
-   "§3.3: a discarded session is on the record, so 'ended with nothing' and 'still open' differ")
+out = io.StringIO()
+with contextlib.redirect_stdout(out):
+    think.main(["spend", "--discard"])
+d = next((e for e in fold.read_events() if e["type"] == "think-discarded"), None)
+ok(d and d["subject"] == "L-thinker-0002",
+   f"§3.3: a discarded session is on the record under the ledger it ended: {d}")
+ok(d and d["topic"] == "think-spend" and d["_src"].startswith("L-thinker-0002.jsonl:"),
+   f"the topic is still recorded, and the event lands in that session's own file: {d}")
+ok("L-thinker-0002" in out.getvalue() and "think-spend" in out.getvalue(),
+   f"and the printed line names the ledger, not only a name no pane carried: {out.getvalue()!r}")
 ok(not any(e["type"] == "charter-filed" and e["actor"] == "thinker"
            and e["subject"].startswith("think-") for e in fold.read_events()),
    "and it keeps no content")
