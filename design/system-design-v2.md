@@ -977,9 +977,8 @@ pane is the cross-pane coordination this design exists to delete.
 | # | Artifact | Author | Audited by | Then crosses to |
 |---|---|---|---|---|
 | 1 | **Goal** — the scope document; **the SOW on client work** (D98) | operator | — | Thinker |
-| 2 | **Charter** — requirements only, and `Covers:` the goal requirements it delivers | **Thinker** | **the charter-set audit** ← *audit #0*, fired by `do-it think --land` (D98) · then the cut-audit sees it (as the done-condition) | Planner |
-| 3 | **The cut** — how the charter breaks into units | Planner | **fable cut-audit** ← *audit #1* | — |
-| 4 | **Plan** — waves, seams, shared decisions, acquisition, branch layout | **Planner** | **fable plan-audit** ← *audit #2* | Executor |
+| 2 | **Charter** — requirements only, and `Covers:` the goal requirements it delivers | **Thinker** | **the charter-set audit** ← *audit #0*, fired by `do-it think --land` (D98) · then the plan-audit sees it (as the done-condition) | Planner |
+| 3 | **The Plan** — **one document**: how the charter breaks into units, plus waves, seams, shared decisions, acquisition, branch layout | **Planner** | **one fable audit** ← *audit #1*, over the whole document | Executor |
 | 5 | **Agent specs** | `spec-writer` × N | `spec-auditor`, **one round ever** (D24) | Executor |
 | 6 | **Build → verdict → review → deploy** | Executor + library | Part 5 | — |
 | 7 | **Charter close** | Executor | charter review (D33) | done |
@@ -1172,53 +1171,54 @@ covers **two** cases, and the second was never stated:
 *One artifact now does three jobs — multi-dev ingest, §12.1's bootstrap, and
 maintenance. That is a reason not to add a fourth mechanism, not a coincidence.*
 
-## 3.6 The three-step, and the two fable audits
+## 3.6 The one document, and the one fable audit
 
-*(D2.)* The cut is the highest-risk decision in the system and in v1 it had no
-adversarial pass at all. v2 gives it one — **before** the Plan is written, so
-that a bad cut is caught while it is still cheap to change.
+*(D2.)* How the charter breaks into units is the highest-risk decision in the
+system and in v1 it had no adversarial pass at all. v2 gives it one — over the
+**one** document that carries both the units and the decisions that bind them, so
+that a bad carve is caught before a single spec is commissioned.
 
 ```
    charter
       │
       ▼
-   ① CUT          Planner decides the unit boundaries — **and writes them down**
-      │
+   ① PLAN         Planner decides the unit boundaries **and writes them down**,
+      │           in the same document as the waves, seams, shared decisions,
+      │           acquisition rows and branch layout
       ▼
-   ② CUT-AUDIT    fable · blind to the Planner's rationale, sees the charter
+   ② THE AUDIT    fable · blind to the Planner's rationale, sees the charter
       │           asks: do these units add up to done-for-the-whole,
-      │                 and is wave 1 genuinely the contested core?
+      │                 is wave 1 genuinely the contested core,
+      │                 and does the document build its own units
+      │                 without a seam nobody owns?
       ▼
-   ③ PLAN         Planner writes waves, seams, shared decisions, acquisition,
-      │           branch layout
-      ▼
-   ④ PLAN-AUDIT   fable · asks: does this plan build that cut without a seam
-      │           nobody owns?
-      ▼
-    specs
+    specs — each with its own spec-audit, dispatched by the Planner
 ```
 
-**★ The cut is a durable artifact before the cut-audit runs** *(D94)*. It was
+**★ The carve is a durable artifact before anything audits it** *(D94)*. It was
 previously held in the Planner's context until the Plan was written — the **one
 non-durable link** in a chain whose every other step writes a file and an event.
-If the Planner is lost between ① and ③ — a relay, a crash, a seat window running
-dry — **the cut is gone and its audit findings point at nothing.** Writing it
-costs one file and gives the cut-audit a stable referent it did not have.
+If the Planner is lost before ② — a relay, a crash, a seat window running dry —
+**the carve is gone and its audit findings point at nothing.** Writing it costs
+one file and gives the audit a stable referent it did not have.
 
-**Why two audits and not one.** They ask different questions of different
-artifacts, and the first one's findings change what the second one reads. An
-audit that sees only the finished plan cannot cheaply say *"the cut was wrong"* —
-by then the plan is an argument for the cut, and auditors are moved by
-arguments.
+**Why one audit and not two.** The split bought a second spawn and a second
+relay-shaped hole, not a better carve: the two rounds read the same units against
+the same done-condition, and the second round's *"the cut was wrong"* is a
+finding the first round could already make once the units and the decisions
+arrive together. **One document means the auditor never has to be moved by an
+argument written after the fact** — there is no later artifact for the carve to
+be justified in. The per-spec audit downstream is unchanged and stays one round
+ever (D24).
 
 **Why fable, and not the spec-auditor.** They need **opposite blindness**:
 
-| | `spec-auditor` (§4.6) | the two fable audits |
+| | `spec-auditor` (§4.6) | the fable plan-audit |
 |---|---|---|
 | **Input** | one spec | the whole unit set **+ the charter's done-condition** |
 | **Blind to** | **the charter**, the author's rationale | the Planner's rationale only |
 | **Asks** | *where could a builder make a confident wrong assumption?* | *do these add up to the feature?* |
-| **Runs** | once per spec | once per cut, once per plan |
+| **Runs** | once per spec | **once per charter**, over the one document |
 | **Catches** | an unbuildable spec | four good specs that don't add up |
 
 One agent cannot both be blind to a thing and be responsible for it.
@@ -1266,9 +1266,9 @@ one pass there.
 > within-unit shape — and `retro` reads that as `bad-cut` (the unit was too big
 > to hold in one context) before it reads it as a missing stage.
 
-**Instrument on this pair, and it already exists:** D32's **sweep rounds per
-charter** directly measures whether these two audits earn their keep. A charter
-whose sweep keeps finding new required work is a charter whose cut-audit missed
+**Instrument on this, and it already exists:** D32's **sweep rounds per
+charter** directly measures whether this audit earns its keep. A charter whose
+sweep keeps finding new required work is a charter whose plan-audit missed
 things.
 
 ## 3.7 The cut
@@ -1332,7 +1332,11 @@ same **name** is the real signal, and it is what `seam-undefined` reports.*
   decisions concrete, not to build volume. A big wave 1 serializes the bulk of
   the work — the worst outcome available. It may be several small parallel specs.
 - **Wave 2 fragments wide**, because contention is settled.
-- Within a wave: **zero** overlap. Across waves: unlimited. No threshold to tune.
+- Within a wave, **overlap is advisory**. Prefer none; a declared overlap is a
+  note to the builders and to the merge order, never a block and never a wait.
+  A same-wave collision is settled at merge time by a builder re-dispatch, which
+  is cheap, and holding a dispatch to avoid it is not. Across waves: unlimited.
+  No threshold to tune.
 - **Two waves is usually right. Four is waterfall.**
 - Waves are a dependency ordering, **not a stop-the-world barrier.**
 
@@ -1384,8 +1388,11 @@ Compare the Planner, whose relay loses a charter's accumulated reasoning — whi
 is exactly why §3.5 has to make that one *planned*. **What actually bounds the
 Executor's load is the Planner's pull-throttle** (*do not plan charter N+2 until
 charter N has landed*), a coupling neither section previously named. **Since
-D117 the Executor runs as a tick, not a pane (§3.1) — every property in this
-paragraph is a job's.**
+D117 as re-read here, the Executor runs as a supervised pane — re-reading the
+ledger on an interval no longer than five minutes, ending itself only at a quiet
+point with a one-line handover, and restarted fresh by the launcher (§3.1).
+Every property in this paragraph is that pane's, and holds because the pane
+holds nothing.**
 
 **What it may see** (D6✓): the **charter**, always — intent must be visible as
 deviations happen — and the **Plan** as needed for its own dispatch decisions.
@@ -2191,7 +2198,7 @@ nobody's default — Fable is pane-only.
 | 3 | `builder` | per spec | Opus | the only role that writes product code |
 | 4 | `grader` | per spec | Fable | blind, packet-only, per-AC verdicts |
 | 5 | `reviewer` | **per spec** | Opus | drives the deployed thing as a real user |
-| 6 | `plan-auditor` | per cut, per plan (2×) | **Fable** | do these add up to the feature? (§3.6) |
+| 6 | `plan-auditor` | **per charter, once** — two stages (`plan`, `charter-set`), one round each | **Fable** | do these add up to the feature? (§3.6) |
 | 7 | `research` | when the Planner or spec-writer would otherwise drown | Haiku | a cheap codebase dig (D3, D22) |
 | 8 | `reuse-scout` | when acquisition is in question | Sonnet | scored candidate comparison (§6.6) |
 | 9 | `charter-reviewer` | per charter close | Opus | is done-for-the-whole observably true? |
@@ -2650,13 +2657,13 @@ and §1.7 makes that unconditional, since nothing may wait on the operator — b
 **what the operator's post-hoc looking catches is the honest measure of this
 role's quality** (§8.5).
 
-### 6 · `plan-auditor` — one contract, three stages
+### 6 · `plan-auditor` — one contract, **two stages**
 
 | Field | Contract |
 |---|---|
-| **Input** | `stage: cut` → the unit set + **the charter's done-condition** + the mechanical script output. `stage: plan` → the same, plus the written Plan and the cut-audit's findings. **`stage: charter-set`** (D98) → the charter set + **the goal's done-condition** + the both-directions coverage diff. **Fired by `do-it think --land`, not by a pane** (§3.3) |
+| **Input** | **`stage: plan`** → the Planner's one document — the unit set **and** the waves, seams, shared decisions and acquisition rows — + **the charter's done-condition** + the mechanical script output. **`stage: charter-set`** (D98) → the charter set + **the goal's done-condition** + the both-directions coverage diff. **Fired by `do-it think --land`, not by a pane** (§3.3) |
 | **Blindness** | the Planner's rationale. **Not** blind to the charter — that is its whole subject, and it is the inverse of the spec-auditor's blindness (§3.6) |
-| **Output** | `{stage, findings[], bad_cut}` — findings on semantic coverage · whether wave 1 is genuinely the contested core and genuinely small · whether an extract was missed · (stage `plan`) unowned seams and missing acquisition decisions · **(stage `charter-set`) a charter that cites a goal requirement it does not deliver, and a charter citing none at all** |
+| **Output** | `{stage, findings[], bad_cut}` — **`bad_cut` is a `stage: plan` verdict** · findings on semantic coverage · whether wave 1 is genuinely the contested core and genuinely small · whether an extract was missed · unowned seams and missing acquisition decisions · **(stage `charter-set`) a charter that cites a goal requirement it does not deliver, and a charter citing none at all** |
 | **Writes** | `audit-finding` events tagged with the stage |
 | **Tools** | Read, Glob, `/usr/bin/grep`. No spawn |
 | **May declare** | `charter-gap`, `seam-undefined`, `bad-cut`, `worked` |
@@ -4408,7 +4415,7 @@ by this meeting:
 | grader kill-criterion numbers at N=30 | D26 |
 | **what operator looking caught that agent review missed** | D30 — *a signal that did not previously exist* |
 | test-corpus health: `never-fired`, `always-noisy`, suite wall-clock | D34 |
-| **sweep rounds per charter** — the instrument on the two fable audits | D32 |
+| **sweep rounds per charter** — the instrument on the one fable audit | D32 |
 | **days since the last verified restore** — and *"no destination configured"* is a failure, not a blank | D85, §9.9 |
 
 **And four columns moved here off the board** *(D87)*. Two were **already in the
@@ -6160,7 +6167,7 @@ them.* Day counts are `[s]` sourced from the audit or `[e]` estimated.*)*
 | Task | Cost | Blocks |
 |---|---|---|
 | **★ The `path → component` partition** — hand-authored, per repo | **~0 up front** (D91) | **Re-priced.** It used to be ~0.5 day per repo of blocking prerequisite, because the drift check *fails the build* on any path it does not cover and on day one of an existing repo **every path is unmapped**. **D91 baselines it**: everything existing is grandfathered into `unmapped-legacy`, the check fires only on new paths, and a path gets a real component when a charter touches that area. **The largest and most easily-skipped row on this list stops blocking anything** |
-| **★ A supervisor for the pane, and a cron line for the tick** (§3.1, D95, D117) | ~1 hour `[e]` | **D117: the Executor is a tick — restart-on-exit and the D94 restart are gone; one cron line plus `flock`. What remains is the Planner pane:** `do-it up` surviving a reboot. `launchd` satisfies the three required properties on this machine. *The design names the properties; this row names the tool* |
+| **★ A supervisor for both panes** (§3.1, D95, D117) | ~1 hour `[e]` | **D117 as re-read: the Executor is a supervised pane too — restart-on-exit is back and it is the mechanism, not a workaround.** The launcher restarts each pane fresh after it ends itself at a quiet point, and `do-it up` must survive a reboot. `launchd` satisfies the three required properties on this machine. *The design names the properties; this row names the tool* |
 | **A `review-account` per app** (D27, §4.6·5) | ~0.5–1 day × up to 6 client apps `[s]` | any review deeper than `gates-only`. **Not needed for the §12.1 bootstrap**, which is chosen to avoid it |
 | **A non-prod database copy per app** (§5.11, §12.5·6) | real day count, per app `[s]` | §5.11's two lower tiers. Supabase branching covers Supabase-hosted projects cheaply; the rest must be named individually |
 | **A backup destination** (§9.9, §12.5·6a) | ~1 hour `[e]` | §9.9 entirely. Five required properties, no host named — see §12.5 |
