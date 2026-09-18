@@ -2256,3 +2256,148 @@ one fable plan-audit, three wave-1 spec-writers and their three blind audits.
   mismatch, the three nightly sigs matching, the 1,488-line file, the eight `TestPipelineDb` ids.
   The split is clean: measured claims survived, inferred claims did not.
 - **Fix status:** doctrine, no change-list id. Second measurement of the R87 class.
+
+### R94. The R66 grader-contamination class, measured a 3rd time — root cause found, fixed at the contract level, confirmed effective immediately (L-executor-0007, 2026-09-18)
+- **Measured.** Three separate graders this session (L-grader-0117/L-spec-0056, L-grader-0124/
+  L-spec-0059, L-grader-0129/L-spec-0056-retry) all self-contaminated the identical way: ran
+  `git log` while confirming the done-condition's commit count, saw the stripped commit subject,
+  and correctly self-voided (`contamination: true`, every criterion `cannot-assess`). This is R66's
+  exact class ("a second, unrelated D120 gap... the contamination here was procedural"), now
+  measured a third time by a different pane.
+- **Root cause, not found in R66:** `agents/grader.md` sanctioned `git rev-parse HEAD` and
+  `git status --porcelain` for confirming ready-sha and clean-tree, but named no safe command for
+  confirming *commit count above base_sha* — exactly what a done-condition asserting "exactly one
+  commit above base_sha" needs, and exactly what drove three separate graders to reach for
+  `git log` out of necessity, not carelessness. One grader in this same session
+  (L-grader-0128/L-spec-0059-rework) independently discovered the safe form itself
+  (`git rev-list --count base_sha..HEAD`) and used it cleanly; the other three didn't know it was
+  sanctioned.
+- **Fix, done in this session:** added `git rev-list --count <base_sha>..HEAD` to `agents/grader.md`
+  as a third explicitly-sanctioned command, with a one-line note that none of the three can surface
+  a subject/author/trailer. Immediately confirmed: the very next grader dispatched after the edit
+  (L-grader-0130, same spec L-spec-0056) used `git rev-list --count` unprompted and returned a clean
+  verdict with zero contamination.
+- **Side effect, not the primary fix:** editing `agents/grader.md` changes `contract_sha256`, which
+  naturally busts D120's dedup match for every future grader dispatch — R66's "the contamination
+  here was procedural, retry is exactly what should happen" now holds by construction, not by
+  a manual bypass, for any future edit to this contract.
+- **Interim, coarser instrument also added this session:** `DOIT_DEDUP_OVERRIDE=1` in `dispatch.py`
+  — a visible, stderr-logged, one-shot bypass of the D120 identical-packet-and-contract refusal,
+  matching this repo's own house style for other guardrail overrides (`FILE_SIZE_GUARD_OVERRIDE`,
+  `GENESIS_FINGERPRINT_UNCHANGED`). Used once (L-spec-0056's first retry, before the contract fix
+  was written) then superseded by the real fix above. This is NOT R66's proposed `packet_fault`
+  bool — it doesn't distinguish packet-defect from worker-accident automatically, it just lets an
+  operator or Executor force a retry when they've judged it's a worker accident. R66's distinction
+  is still the more correct long-term shape; this is a cheap stopgap that happened to also unblock
+  the session.
+- **Fix status:** the grader.md contract fix is **done** (this commit). R66's `packet_fault`
+  `dispatch.py`/`usage.py` distinction is still open — no change-list id yet; see change-list row
+  b-28 below for the contract fix, and a-44 for the override.
+
+### R95. The bare `**Writes:**`-header parenthetical bug is systemic, not occasional — 8 recurrences in one session, always patched per-spec, never fixed at the source (L-executor-0007, 2026-09-17/18)
+- **Measured.** `merge_gate.py`'s `writes_grant()` refused the merge gate on a bare `**Writes:**`
+  header followed immediately by a fenced/bare path list with no parenthetical on the header's own
+  line — `check_grant([])` raises "has a writes: line with no paths on it" because the
+  parenthetical-only detection (`re.fullmatch(r"\(.*\)", body)`) needs the *header line itself* to
+  carry a parenthetical, and an empty body doesn't match it. Hit and hand-patched on **8 different
+  specs this session** (L-spec-0045, 0052, 0054, 0057, 0060, 0061, plus two more from the prior
+  segment) — every single one a spec-writer output, never a builder or grader artifact. L-spec-0054
+  additionally exposed a second shape of the same bug: a *multi-line* parenthetical explanation
+  (open paren on line 1, close paren four lines later) is invisible to the same-line-only regex and
+  gets mis-parsed as the grant list itself (`'(the' is not a path or a glob`).
+- **Every occurrence was fixed the same way, by hand, after the fact:** add a one-line
+  parenthetical like `(this unit's footprint)` to the spec file and re-run the gate. Never once was
+  the underlying spec-writer template or contract corrected, so it keeps recurring on new specs
+  from new spec-writer spawns.
+- **Systemic — this is a spec-writer contract gap, not a merge_gate.py bug.** `merge_gate.py`'s
+  parenthetical requirement is a reasonable, working design (a bare header could mean "see the list
+  below" ambiguously without it); the actual defect is that `agents/spec-writer.md` / the Verify
+  block template never states the requirement, so roughly half of this session's spec-writer
+  outputs got it wrong. The fix belongs in the spec-writer contract (state the shape: `**Writes:**
+  (one-line description)` always, never a bare header), or in `doit validate spec-writer` /
+  `packet.py`'s pre-flight so a malformed Writes: header is caught at `spec-written` time instead of
+  at merge time, five-plus roles later.
+- **Fix status:** open — no change-list id. Every occurrence this session was a hand-patch, not a
+  contract fix; unlike R94, nobody has yet edited the spec-writer side of this one.
+
+### R96. `merge_gate.py`'s path-token regex rejected the project's own mandated stack shape — Next.js App Router `(route-group)` folders (L-executor-0007, 2026-09-17)
+- **Measured.** `check_grant()`'s validation regex (`[A-Za-z0-9_.@+*?\[\]/-]+`) rejected every
+  Writes: path containing a parenthesized route-group folder, e.g.
+  `dashboard/src/app/(dashboard)/dashboard/clients/[name]/profit-v2/reports/page.tsx` — L-spec-0054
+  hit this on all four of its App Router page paths.
+- **Fixed at the tool source** (not spec content): `src/merge_gate.py`, added `()` to the character
+  class. Verified against the tool's own suite before trusting it: `test_merge_gate.py` → 93/93
+  checks pass, unchanged.
+- **Why this is systemic, not a one-off:** the host project's own `CLAUDE.md` mandates "Next.js 16
+  (App Router)" as the required stack, and Next's App Router convention IS parenthesized
+  route-group folders — this was never going to be a one-time miss, it would have recurred on every
+  future dashboard page-route spec until fixed.
+- **Fix status:** done, this session. Change-list row a-44 below.
+
+### R97. No supported path to reconcile a spawn whose background dispatch wrapper recorded a terminal `spawn-failed` before its output later became valid — hand-written recovery script used 5+ times this session (L-executor-0007, 2026-09-17/18)
+- **Measured.** The weekly rate-limit interruption killed roughly a dozen in-flight `doit dispatch
+  --seat` background wrappers mid-run. `scripts/seat/stamp.sh` only ever writes `<spawn>.meta.json`
+  (resolving usage from the transcript) — it does not itself emit ledger events. Normal event
+  emission happens inside the long-running background wrapper process, which polls for
+  `<spawn>.output.json` and calls `dispatch.events_for`/`emit` once it validates. When that
+  wrapper had already exited with a terminal `spawn-failed` (timeout, or the harness detecting the
+  interruption) *before* the agent's real `output.json` was later fixed up and re-validated,
+  stamping afterward does not retroactively add the missing `build-done`/`verdict`/`review` events
+  — `doit packet <role>` then fails with "has no build-done event" even though a fully valid,
+  schema-passing output sits right there on disk.
+- **Worked around, every time, by hand:** a standalone Python script importing `dispatch` and
+  `fold` directly, reconstructing a minimal `SimpleNamespace` matching the original dispatch args,
+  calling `dispatch.events_for(role, output, args, base)` to derive the correct event tuples, and
+  `dispatch.emit()`-ing each one plus a final `spawn-done`. Used at least 5 times this session
+  (L-builder-0084/L-spec-0060, L-builder-0085/L-spec-0055, L-builder-0087/L-spec-0058,
+  L-builder-0079/L-spec-0065, L-builder-0080/L-spec-0080) — always correct, always requiring the
+  operator-pane equivalent to know `dispatch.py`'s internals well enough to hand-build the call.
+- **Systemic:** there is no `doit reconcile <spawn>` or equivalent first-class command that says
+  "an output.json exists and validates, but the ledger's terminal event for this spawn says
+  spawn-failed and predates it — replay the correct events." Every pane that survives an
+  interruption of this shape will hand-roll the same script.
+- **Fix status:** open — no change-list id. Candidate: `doit reconcile <spawn>` wrapping exactly the
+  script above, refusing unless the on-disk output postdates the recorded `spawn-failed` and
+  validates clean.
+
+### R98. A stale spec citation shipped identically across at least 3 specs in the same wave, always caught and disclosed, never fixed at the source (L-executor-0007, 2026-09-17/18)
+- **Measured.** L-spec-0059, L-spec-0060, and the builder for at least one more charter-0019
+  wave-2 spec all independently cite `api/app/lib/profit_v2/services/source_link.py:196-200` as
+  "a `logger.warning(...)` call containing `fee_bucket` as prose" — and in every case, the builder
+  or grader confirmed no such `logger.warning` call exists at that location (it's a docstring/
+  comment today). Every occurrence disclosed the drift honestly and substituted a real, verbatim,
+  nearby line that still satisfies the AC's underlying intent — never fabricated, never silently
+  passed. Graded/reviewed `met`/`card_ok: yes` each time on that basis.
+- **Systemic:** this is the same stale-citation defect landing three-plus times from what is very
+  likely one shared source — either a Plan-level citation that all three spec-writers copied, or
+  `source_link.py` genuinely changed shape between when the Plan was written and when wave 2's
+  specs were, without anyone re-verifying the citation. Each spec-writer/builder/grader caught it
+  independently and paid the cost of re-deriving a substitute; none of them fixed the citation at
+  its source so the next sibling spec would stop hitting it too.
+- **Fix status:** open — no change-list id. Candidate: when a spec-writer or builder finds a
+  Plan-cited line reference stale, the correction should propagate back to the Plan/citation source
+  (or at minimum a `charter-gap`/`spec-ambiguity` event should name it as **shared**, so a sibling
+  spec-writer building from the same Plan doesn't re-hit it blind) rather than each spec silently
+  absorbing the same fix independently.
+
+### R99. Out-of-Writes-grant pre-existing test failures block a spec's DONE-COND even when 100% of that spec's own work is correct — measured on 2+ specs this session, no doctrine decided (L-executor-0007, 2026-09-18)
+- **Measured.** L-spec-0058's grader: 9 of 10 assessable ACs `met`, but `matches_intent: no`
+  because the spec's own aggregate verify script requires exit 0 across the whole test file set,
+  and one pre-existing, out-of-Writes-grant test (`test_asin_detail_mocked_200`, confirmed identical
+  on base_sha, with/without `SUPABASE_DB_URL`) fails. Separately, L-builder-0080 and L-builder-0079
+  both independently hit and disclosed the *same class* against a different pre-existing red test
+  (`test_928_fingerprint_staleness_gate.py::test_r1_migration_without_fingerprint_is_blocked`,
+  itself root-caused this session to a missing `contract_drift_guard.sh` in a test's own scratch-
+  repo fixture builder, already filed as brief 1223) — not caused by, and not fixable within, any
+  of these units' own footprints.
+- **Systemic, and genuinely undecided:** should a spec's DONE-COND (or a grader's `matches_intent`)
+  ever fail purely because of a pre-existing, out-of-grant red test the spec's own Writes: never
+  touches? Right now the answer is "yes, mechanically" — the verify script's exit code is the
+  literal done-condition, with no carve-out for "this failure predates my base_sha and isn't in my
+  footprint." Every occurrence this session was escalated to the operator rather than decided
+  unilaterally, since it's a real content judgment (broaden the verify script's scope with a
+  documented known-red exception list? require a fresh checkout free of pre-existing red before any
+  spec starts? something else?), not a tooling defect.
+- **Fix status:** open — no change-list id, no doctrine decided. Recommend deciding this once,
+  centrally (a known-red exception mechanism analogous to `pytest_known_red_baseline.txt`'s CI-level
+  one, scoped per-spec-verify rather than whole-suite), rather than re-litigating it per spec.
