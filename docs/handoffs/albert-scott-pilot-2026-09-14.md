@@ -2444,3 +2444,29 @@ one fable plan-audit, three wave-1 spec-writers and their three blind audits.
   1" block — the fix list already has the shape for it. Failing that, `planner.md` should state
   plainly that a Plan edit between rounds must be hand-carried into the packet.
 - **Fix status:** open. No change-list id yet.
+
+### R102. The Planner has no instrument to retire a spec it re-carved — `spec-killed` is a different event that changes no state (L-planner-0017, L-charter-0023, 2026-09-18)
+- **Measured.** After `L-spec-0089`'s audit returned `bad_cut: true`, `planner.md` ⑤ says a slot
+  clears with "a `spec-written` (or a `spec-killed`)", so this pane appended `spec-killed` on
+  L-spec-0089 and recommissioned the unit as L-spec-0092. `doit states` still reads **`written`**.
+  `fold.state()` uses `spec-killed` for exactly one thing — the void branch, where a spec-writer
+  spawn *failed before writing a file* (`dispatch.py:371` emits it from `killed_by_check`) — and the
+  only event that retires a spec that *does* have a file is **`spec-closed`**, which `fold.EMITS`
+  restricts to `{"operator"}`.
+- **Consequence.** A re-carved spec sits in the Executor's `WRITTEN, NOT PICKED UP` block looking
+  perfectly live, and the next Executor pass builds it. Here that means a builder adding the very
+  `tsc --noEmit` step a shipped pre-deploy guard forbids — a red build and a gated merge, spent on
+  a spec its own Planner retired an hour earlier.
+- **Why the gap is structural, not an oversight.** `bad_cut: true` is *defined* as the Planner's
+  loop (`planner.md` ②: "re-carve the unit, rewrite the document, recommission the slot"), so the
+  contract mandates an action whose durable half only the operator can write. The workaround — an
+  `escalation-blocking` plus a `message-sent`, both filed here — is prose that a busy Executor has
+  to read and obey, which is precisely what the ledger exists to replace.
+- **Fix candidates:** (a) open `spec-closed` to `{"planner", "executor", "operator"}` when the
+  subject's own charter is the Planner's current one — the Planner already authors the cut, so
+  retiring a slot it cut is not a new authority; (b) add a distinct `spec-recarved` event carrying
+  the replacement id, terminal for the old spec and traceable to the new one — better, because it
+  records *why* and links the successor, which `spec-closed` does not; (c) at minimum, fix
+  `planner.md` ⑤, which currently tells the Planner to use an event that does nothing.
+- **Fix status:** open. No change-list id yet. Escalation filed on L-charter-0023 with a
+  2026-09-18T15:00Z deadline asking the operator to append the `spec-closed`.
