@@ -2401,3 +2401,46 @@ one fable plan-audit, three wave-1 spec-writers and their three blind audits.
 - **Fix status:** open — no change-list id, no doctrine decided. Recommend deciding this once,
   centrally (a known-red exception mechanism analogous to `pytest_known_red_baseline.txt`'s CI-level
   one, scoped per-spec-verify rather than whole-suite), rather than re-litigating it per spec.
+
+### R100. An ADR amended in its own file but not in the Plan's Shared-decisions table cost a whole spec — the packet carries the table, not the file (L-planner-0017, L-charter-0023, 2026-09-18)
+- **Measured.** `L-spec-0089`'s blind audit returned the charter's first `bad_cut: true`. The unit
+  (`a-type-error-and-a-comment-are-not-lint-reds`) was fine; the spec added a `tsc --noEmit` step
+  that `tests/ci/test_t2_next_build_supersedes_tsc.sh` — live in `predeploy-gate.yml:69-70`, green
+  — exists to forbid. The writer was obeying its packet: L-adr-0097 had been **amended in the ADR
+  file** to reverse exactly that step, and the unit's own prose block said "the unit adds no tsc
+  step", but the Plan's **Shared-decisions table** still carried 0097's original text — and
+  `packet.py` builds a spec-writer packet from `### Shared decisions` verbatim. The unit prose and
+  the decisions table disagreed, and the table won because it is the part that travels.
+- **Class, not incident.** Every ADR in this system has two homes: `content/L-adr-NNNN.md` and one
+  row in the Plan's Shared-decisions table. Only the row reaches a spec-writer. An amendment
+  written to the file alone is invisible to every downstream spawn, and it is *worse* than no
+  amendment, because the Planner reads its own ADR file when checking and sees the correction it
+  believes it shipped.
+- **Cost.** One spec-writer spawn, one spec-auditor spawn, a `spec-killed`, a re-carve, and a fresh
+  round-one spawn on a new id — the full price of a bad cut, for a text edit in a table.
+- **Fix candidates:** (a) `doit audit plan` cross-checks each `L-adr-NNNN` row's text against the
+  ADR file and reports a divergence — mechanical, cheap, and it is exactly the class the pre-pass
+  already exists for; (b) the Plan's table holds only the ADR id + a one-line title and the packet
+  builder inlines the ADR **file**, so there is one copy of the text; (c) at minimum, a rule in
+  `planner.md`: an ADR amendment is not written until the Shared-decisions row is rewritten.
+  (b) is the real fix — two copies of a decision is the defect, and the row is the redundant one.
+- **Fix status:** open. No change-list id yet.
+
+### R101. A rework packet is the previous packet plus a fix list, so it re-ships every stale fact the slot carried (L-planner-0017, L-charter-0023, 2026-09-18)
+- **Measured.** After correcting four unit blocks in the Plan (footprints and measured inventories
+  both), `doit packet spec-writer <spec>` for the rework rounds emitted the **pre-correction**
+  slot: `packet.py` builds a round-≥2 packet as `prev[-1].read_text() + "## Fix list"`. That is
+  deliberate (it is how a rework keeps its round-one framing), but the consequence is that a
+  Planner correction made *between* rounds never reaches the writer unless the Planner appends it
+  to the packet file by hand — which is what this pane did, as a "## Planner corrections — these
+  override the packet above" section on all four.
+- **Why it matters here.** Three of the four corrections were repairs to figures this Plan itself
+  had shipped wrong (a 35/30/65 cron inventory that was really 33/27/60 + 5 waiting locks; a
+  `fields_total = 60` that no fixture grain supports; a `Writes:` grant missing a file the
+  Verification command required). Without the hand-appended section the writer would have reworked
+  against the same wrong numbers and the second audit would have found them again.
+- **Fix candidates:** rebuild the slot half of a rework packet from the *current* cut/Plan rather
+  than replaying the prior packet, and diff it into the packet as an explicit "changed since round
+  1" block — the fix list already has the shape for it. Failing that, `planner.md` should state
+  plainly that a Plan edit between rounds must be hand-carried into the packet.
+- **Fix status:** open. No change-list id yet.
