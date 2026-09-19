@@ -2470,3 +2470,76 @@ one fable plan-audit, three wave-1 spec-writers and their three blind audits.
   `planner.md` ⑤, which currently tells the Planner to use an event that does nothing.
 - **Fix status:** open. No change-list id yet. Escalation filed on L-charter-0023 with a
   2026-09-18T15:00Z deadline asking the operator to append the `spec-closed`.
+
+### R103. `mkpacket.py` ships the Planner's carve rationale into the blind plan audit, and ships the whole Plan twice (L-planner-0018, L-charter-0024, 2026-09-19)
+- **Measured.** `doit packet plan-auditor L-charter-0024 --stage plan` printed nothing and exited
+  clean — R91's dead code path, still dead. The documented fallback,
+  `scripts/seat/mkpacket.py <charter> plan <out>`, first failed on
+  `FileNotFoundError: content/cut-L-charter-0024.md`, because under the one-document convention
+  (L-charter-0023's precedent) there is no `cut-*.md`. Symlinking `cut-L-charter-0024.md` →
+  `plan-L-charter-0024.md` made it run — and it then emitted an **80,007-byte** packet in which
+  the identical Plan appears **twice**, once under `## The cut` (line 28) and once under
+  `## The Plan` (line 436), because both section builders resolve to the same file.
+- **The serious half is not the duplication.** `planner.md` ② is explicit: the packet carries the
+  block and the charter, and **never** the Planner's reasons for carving it that way — "a sentence
+  of rationale in the packet voids the run as contamination and charges for it. Do not describe
+  alternatives you considered." `mkpacket.py` hands the file through whole, so the packet it built
+  carried, verbatim: the Waves table's **"Why together"** justification column; a Gate-invariants
+  paragraph headed **"One gate invariant considered and not cut separately"**; and a §3.7
+  merge-versus-extract justification naming merge as a **"last resort"**. Three separate
+  descriptions of alternatives considered, in a packet whose entire premise is that the auditor
+  cannot see them.
+- **Why the builder cannot be blamed for it.** The strip `mkpacket.py` implements is a "no
+  Rationale" strip — it looks for a *section named* Rationale. Carve reasoning does not live under
+  that heading in a Plan written to `planner.md` ①'s own template: the template **mandates** a
+  Waves section ("which units run simultaneously") and a Gate-invariants section, and the natural
+  way to write either is to say why. The template and the blindness rule are in tension, and the
+  packet builder resolves it the unsafe way, silently.
+- **Consequence here.** Caught by hand before dispatch: the packet was rebuilt manually, section
+  by section, with the Waves table reduced to membership, the "considered and not cut" paragraph
+  dropped, and the §3.7 justification dropped — 40,886 bytes against 80,007, with an explicit
+  `"Why together" in packet → False` assertion run before dispatch. Nobody instructed this pane to
+  check; a Planner who trusted the documented builder would have spent an Opus audit on a
+  contaminated packet and had no way to know.
+- **Fix candidates:** (a) make the strip structural rather than by-heading — the packet carries
+  only the labelled fields (`Goal:`/`Delivers:`/`Footprint:`/`Consumes:`/`Produces:`/`Wave:`), the
+  Seams table, the Shared-decisions table, the Acquisition table and the pre-pass, and nothing
+  else from the document; (b) failing that, have `dispatch plan-auditor`'s wrapper **refuse** a
+  packet containing a prose justification marker the way it already refuses one with no pre-pass
+  block — it refuses for a missing section, so refusing for a forbidden one is the same mechanism;
+  (c) teach both builders the one-document convention so the Plan is emitted once, which is also
+  a straight halving of every plan-audit's input cost.
+- **Fix status:** open. No change-list id yet. The manual packet is the workaround, and it is not
+  written down anywhere a next Planner would find it.
+
+### R104. A seat sub-agent that starts background work returns control without its card, and only a human-style nudge resumes it (L-planner-0018, L-probe-0009, 2026-09-19)
+- **Measured.** `L-probe-0009` was dispatched `--detach` and served by an Agent-tool sub-agent per
+  `scripts/seat/README.md`. The probe's work is long-running by nature — three full pytest runs.
+  The sub-agent launched each run in the background, armed a monitor, and then **ended its turn**.
+  It notified as `completed` **four times** with the work unfinished, each time with a `<result>`
+  reading like "Waiting for the armed monitor to notify me when `-n 4` completes." Each
+  notification carried the note "stopped with background work of its own still running... the
+  result below may be interim."
+- **Consequence.** The spawn sat with `spawn-started` and no terminal event — pending, by R47 —
+  while nothing was running. It took **four** `SendMessage` nudges from the serving pane to carry
+  it through: resume after the baseline, resume after `-n 2`, resume after `-n 4`, and a fourth
+  purely to run `stamp.sh`, because the card was written to `seat/L-probe-0009.output.json` and
+  the spawn was still unstamped. Without a pane watching, that packet stays pending forever and
+  `doit pane-end`'s no-pending-packet precondition never clears.
+- **Not the sub-agent's fault, and not the probe contract's.** Nothing in `probe.md` or the seat
+  README tells a server that its turn must not end until the card is stamped, and the Agent tool's
+  own idiom — arm a monitor, end the turn, get re-invoked — is exactly what it did. The seat route
+  assumes a spawn runs to completion inside one turn; a contract whose work outlives a turn breaks
+  that assumption, and `probe` is the contract most likely to.
+- **Cost.** Four extra round trips and ~7 minutes of a Planner's attention on a spawn that was
+  working correctly the whole time. The nudges were also not free of risk: each one told the
+  sub-agent what was on disk, which for a *blind* contract would have been contamination. It was
+  safe here only because a probe has no blindness requirement.
+- **Fix candidates:** (a) state in `scripts/seat/README.md` and in every long-running contract
+  that the server's turn ends **after** `stamp.sh`, never before, and that background work must be
+  waited on inside the turn; (b) have the dispatch waiter treat "card on disk, no meta" as a
+  stampable state and stamp it itself after a grace period — the card is the artifact, the stamp is
+  bookkeeping; (c) give `doit` a `reconcile` verb for this, which is also R97's ask from the
+  Executor side, so one instrument would close both.
+- **Fix status:** open. No change-list id yet. Overlaps R97 (no supported path to reconcile a spawn
+  whose terminal state and whose output disagree).
