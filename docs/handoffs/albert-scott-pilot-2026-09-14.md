@@ -2543,3 +2543,13 @@ one fable plan-audit, three wave-1 spec-writers and their three blind audits.
   Executor side, so one instrument would close both.
 - **Fix status:** open. No change-list id yet. Overlaps R97 (no supported path to reconcile a spawn
   whose terminal state and whose output disagree).
+
+### R105. A not-complete charter review has no teeth: its findings land as one escalation, not as briefs that hold the charter open (L-thinker-0004, 2026-09-19)
+- **Measured:** L-charter-reviewer-0012 returned not-complete on L-charter-0021 (R1, R2, R3, R11, R12 + R14's board render; 17 unrolled not-built items, every one "out-of-scope-per-spec" on its own card — the loop built and unit-tested, wired to no launcher). The ledger carried it as a single `escalation-blocking` whose default is "leave open". Zero in-scope briefs existed, so nothing would ever commission a corrective spec; the Thinker's first instinct was to roll the residue into a new charter, which the operator questioned and which would have closed 0021 with its promise unmet. Filed by hand instead: six `brief{requirement}` events on 0021 (the L-charter-0005 / L-spec-0063 precedent).
+- **Systemic:** `charter-review-not-complete` should emit one in-scope brief per uncovered requirement itself — the reviewer already names the ids. And "out-of-scope-per-spec" on N cards for the same item (here: the wiring, on L-card-0045 and L-card-0046) is a seam nobody owns; the sweep should surface an item two cards both disown.
+- **Fix status:** open — no change-list id.
+
+### R106. The inbound lane has a command and no clock, and the author cannot see a pickup (L-thinker-0004, 2026-09-19)
+- **Measured:** 23 cross-box v4 records carried into 25 L-specs, every carry triggered by someone looking; `lane()` reads only the v2 ledger; all 21 still-registered records read `registered` on the v4 side though ten are shipped; 1448–1460 have no `spec-carried` (hand path), 1461–1470 have one written from the Executor's ledger while `EMITS` says operator-only. A cron on `doit carry` would hang in `run_seat()` and burn a slot.
+- **Systemic:** chartered as L-charter-0025, `after: L-charter-0021`.
+- **Fix status:** chartered.
