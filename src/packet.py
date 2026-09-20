@@ -21,12 +21,36 @@ import audit, fold  # noqa: E402
 ROOT = pathlib.Path(os.environ.get("DOIT_ROOT", pathlib.Path.home() / ".do-it"))
 CONTENT, PACKETS = ROOT / "content", ROOT / "packets"
 
-# The done-condition every build-facing packet carries. Bytecode is not residue:
-# the first real chain rejected a correct build because running the verify script
-# left `__pycache__/` in the worktree, and "porcelain empty" cannot be the
-# condition for a repo with no .gitignore for it (Active Problem 12).
+# The done-condition every build-facing packet carries, BY DEFAULT. Bytecode is
+# not residue: the first real chain rejected a correct build because running the
+# verify script left `__pycache__/` in the worktree, and "porcelain empty" cannot
+# be the condition for a repo with no .gitignore for it (Active Problem 12).
 DONE = ("the verify command exits 0; no tracked file is modified and no untracked file "
         "outside `__pycache__/` remains; exactly one commit above base_sha")
+
+
+def done_condition(c, charter_id):
+    """L-spec-0129: the done-condition text THIS packet carries. A charter may
+    rule its own baseline convention (e.g. L-charter-0021's
+    FAIL-SET-IDENTICAL-OR-SMALLER — hold the fail set identical to or smaller
+    than a named baseline, rather than force exit 0) and record it as a
+    `done-condition-override` event on the charter's own subject — planner or
+    operator only. `fold.EMITS` is the sole authorization gate (R2): an override
+    authored by any other actor never reaches `by_subject`, so it is invisible
+    here — this function does not re-check the actor, because there is nothing
+    left to check by the time an event survives the fold.
+
+    No charter, or a charter with no override on file, returns the hardcoded
+    `DONE` string UNCHANGED — R1's regression floor (AC1): byte-identical to
+    current behavior. The LATEST override wins, same convention as every other
+    `last()`-style read in this file."""
+    if charter_id:
+        ev = next((e for e in reversed(c.by.get(charter_id, []))
+                   if e["type"] == "done-condition-override" and e.get("clause")), None)
+        if ev:
+            return ev["clause"]
+    return DONE
+
 
 AC_ROW = re.compile(r"^\S+ \[(ui|backend|observed-data|financial)\] ")
 PLACEHOLDER = re.compile(r"TODO|TBD|\[NEEDS CLARIFICATION|as needed|etc\.")
@@ -483,7 +507,7 @@ def p_plan_auditor(c):
         L += ([f"- [{f.get('category')}] {f.get('finding')}"
                + (f" — confirms_with: {f['confirms_with']}" if f.get("confirms_with") else "")
                for f in findings] or ["   none"])
-    L += ["", audit.prepass(stage, cut.read_text(), ch_text, plan_text, c.a.repo)]
+    L += ["", audit.prepass_two_file(stage, cut.read_text(), ch_text, plan_text, c.a.repo)]
     return L
 
 
@@ -717,13 +741,14 @@ def p_builder(c):
     extract = section(ch.read_text(), "Constraints") if ch else []
     rej, fix = c.standing()
     adrs = [e["adr"] for e in c.all_of("adr-filed") if e.get("adr")]
+    done = done_condition(c, c.charter_id())
     L = [f"1. The spec: `{spec}`. Read it from disk once. You are not given its text here.",
          "2. The charter extract — binding constraints and product decisions, verbatim:",
          *(extract or ["   none"]),
          f"3. `base_sha` = {base_sha}. Read it back from the worktree and confirm it before the first edit.",
          f"4. Verify command: `bash {v}`" if v else
          "4. Verify command: NONE — the spec's Verification block is empty. Declare `spec-ambiguity` and stop.",
-         f"   Done-condition: {DONE}.",
+         f"   Done-condition: {done}.",
          f"5. Sibling units' `Produces:` — {c.a.produces or 'none'}.",
          "6. Parked findings on your footprint: none on file.",
          "7. Live cross-charter conflict list — id · what it changes · state:",
@@ -761,6 +786,7 @@ def p_grader(c):
     vline = next((l for l in card.read_text().splitlines() if l.startswith("verify ")), "verify: not reported")
     ver = subprocess.run(["shasum", "-a", "256", str(v)], capture_output=True, text=True).stdout.split()[0][:16] \
         if v else "no script"
+    done = done_condition(c, c.charter_id())
     return [
         "1. The acceptance criteria, verbatim from the spec, typed, each with its evidence obligation:",
         *crit,
@@ -770,7 +796,7 @@ def p_grader(c):
         f"4. The verify command the spec authored, with the reported exit code and result: {vline}",
         f"5. Checker: `verify-{c.a.subject}` · version {ver} · coverage note "
         f"\"the spec's Verification block\" · re-run it with cwd `{c.worktree()}`.",
-        f"6. The done-condition: {DONE}.",
+        f"6. The done-condition: {done}.",
     ]
 
 
@@ -780,9 +806,10 @@ def p_reviewer(c):
     crit = criteria(body)
     bd = c.last("build-done") or {}
     where = c.a.url or f"the worktree at ready_sha {bd.get('ready_sha', '?')}: `{c.worktree()}`"
+    done = done_condition(c, c.charter_id())
     return [
         f"1. The deployed thing, on its execution host: {where}. Never staging.",
-        f"2. The done-condition: {DONE}.",
+        f"2. The done-condition: {done}.",
         "3. Every criterion the spec enumerates, verbatim, with its `review_path` "
         "(log in as / go to / do / worked if / failed if):",
         *crit,

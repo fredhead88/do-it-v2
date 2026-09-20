@@ -66,6 +66,15 @@ EMITS = {"verdict": {"grader"}, "review": {"reviewer"}, "shipped": {"executor"},
          # handed); the operator keeps it for an adopted charter whose Planner ran
          # before the command existed.
          "l1-complete": {"planner", "operator"},
+         # L-spec-0129: a structured, per-charter override of the DONE
+         # done-condition's exit-0 clause — subject is the CHARTER id (R3: the
+         # ruling is charter-level, every spec under it inherits it), never a
+         # spec. `packet.py`'s `done_condition()` reads it off the charter's own
+         # event stream, which `fold()` has already authorized here — a
+         # `builder`/`grader`/`reviewer` actor's attempt lands in `ignored`, not
+         # `by_subject`, so the packet builder never even sees it (R2). Same
+         # actor set as `l1-complete`: a charter-level claim, not a build-time one.
+         "done-condition-override": {"planner", "operator"},
          # §4.11's two scripts. Both write as the seat that ran them (D90: the
          # filename), and both make a claim only that seat may make. `deploy-landed`
          # says a sha is LIVE — the clearing direction, and the one event in the
