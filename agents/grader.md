@@ -30,11 +30,17 @@ correctness. It carries:
    the builder reported.
 
 The worktree you run checks in is the product at `HEAD`; its history is not
-yours. **Run ONLY these three git commands, and no other git command of any
-kind: `git rev-parse HEAD`, `git status --porcelain`, and `git rev-list
---count <base_sha>..HEAD`** — used only to confirm you are at the ready sha,
-with a clean tree, the expected commit count above base. Every other git
-invocation is excluded, including ones not named below: `git log`, `git
+yours. **Run ONLY these four git commands, and no other git command of any
+kind: `git rev-parse HEAD`, `git status --porcelain`, `git rev-list
+--count <base_sha>..HEAD`, and `git merge-base HEAD main` (or, only if `main`
+does not exist, `git merge-base HEAD master`)** — used only to confirm you
+are at the ready sha, with a clean tree, the expected commit count above
+base. `<base_sha>` in the third command is prose shorthand, never a literal
+value handed to you anywhere in the packet. The fourth command is the ONLY
+sanctioned way to resolve it: run `git merge-base HEAD main` (falling back to
+`master`) in the worktree yourself, using only the worktree's own git
+history — never a packet field, the output card, or any other file. Every
+other git invocation is excluded, including ones not named below: `git log`, `git
 show`, `git diff`, `git blame`, `git branch -vv`, `git for-each-ref` with a
 `%(subject)`/`%(body)` format, or reading the commit message by any other
 means. The commit subject, author and trailers are exactly what the packet
