@@ -1133,6 +1133,56 @@ assert unknown_c["all_accepted"] is True and unknown_c["sweep_derived"] is False
     and unknown_c["review_owed"] is True and not fold.l2_complete(unknown_c), unknown_c
 fold.K = _K
 
+# ── L-spec-0125 R11/AC1-AC4 · charter_review_owed(charter_evs) — the sole gate ─
+# D90: only a `thinker`/`operator`-named file lands `charter-filed`, and only a
+# `charter-reviewer`-named file lands `charter-review-complete` — any other
+# filename is silently dropped, and the fixture would pass for the wrong reason
+# (no events reaching charter_evs, not the intended case).
+RC = "L-charter-1101"
+_review_complete = [{"ts": stamp(0), "type": "charter-review-complete", "subject": RC}]
+
+
+def _owed(covers=None, filed=True, reviewed=False):
+    files = {}
+    if filed:
+        files["L-thinker-0001.jsonl"] = [{"ts": stamp(1), "type": "charter-filed",
+                                          "subject": RC, "covers": covers}]
+    if reviewed:
+        files["L-charter-reviewer-0001.jsonl"] = _review_complete
+    fx = ledger(**files)
+    return fold.charter_review_owed(fx[4].get(RC, []))
+
+
+# AC1 — the explicit "none" string short-circuits False, review landed or not.
+assert _owed("none", reviewed=False) is False, "AC1: Covers: none never owes a review"
+assert _owed("none", reviewed=True) is False, "AC1: still False once a review lands too"
+
+# AC2 — case-insensitive "null" and whitespace-padded " NONE " short-circuit the same way.
+for spelling in ("null", "NULL", "Null", " NONE "):
+    assert _owed(spelling, reviewed=False) is False, (spelling, "AC2")
+
+# AC3 — a non-empty id list is the UNCHANGED existing rule: True with no review,
+# False once one lands.
+assert _owed("G3 G4 G5", reviewed=False) is True, "AC3: an id list still owes a review"
+assert _owed("G3 G4 G5", reviewed=True) is False, "AC3: ...until one lands, unchanged"
+
+# AC4 — undetermined is never clean: a raw JSON `null` covers value and an absent
+# `charter-filed` event both behave exactly like AC3's non-empty list, never like
+# the explicit none/null spelling.
+assert _owed(None, filed=True, reviewed=False) is True, "AC4a: raw JSON null falls through"
+assert _owed(None, filed=True, reviewed=True) is False, "AC4a: ...until a review lands"
+assert _owed(filed=False, reviewed=False) is True, "AC4b: no charter-filed event -> unchanged rule"
+assert _owed(filed=False, reviewed=True) is False, "AC4b: ...until a review lands"
+
+# The same fixture shape, run through the real fold.closable()/l2_complete(), so
+# R11's fix is proven at the conjunct it actually gates, not only at the bare function.
+none_fx = ledger(**{"L-thinker-0001.jsonl": [{"ts": stamp(1), "type": "charter-filed",
+                                              "subject": RC, "covers": "none"}]})
+none_cl = fold.closable(none_fx[0], RC)
+assert none_cl["review_owed"] is False, none_cl
+_none_specs = [s for s in none_fx[1].values() if s["charter"] == RC]
+assert _none_specs == [], "no specs on this fixture charter, by construction"
+
 # ── R4/R8/R13/R15/AC8 · the four new EMITS entries, exactly their actors ──────
 assert fold.EMITS["spec-carried"] == {"operator"}
 assert fold.EMITS["conflict-rework"] == {"executor"}

@@ -122,6 +122,40 @@ assert charters["L-charter-0007"]["state"] == "L1-complete", "the fixture charte
 assert "L-spec-0077 · written" in tick.lane(specs, charters, events=ev), \
     "R6: a spec's presence on the lane never depends on any charter's state"
 
+# AC8 (L-spec-0125 R11) — a `Covers: none` charter with every other L2 conjunct
+# true, and no `charter-review-complete` event ever appended, still reaches
+# `L2-complete` through the REAL fold.closable() (not the fallback) and moves
+# from the lane's "awaiting a decision" state onto the reap branch.
+assert getattr(fold, "closable", None) is not None, \
+    "the real fold.closable must be resolved here, not the fallback (AC8's own precondition)"
+RC = "L-charter-1101"
+write("L-operator-1101.jsonl",            # charter-filed + l1-complete: both operator-emittable
+      {"type": "charter-filed", "subject": RC, "covers": "none"},
+      {"type": "l1-complete", "subject": RC})
+write("L-builder-1101.jsonl",
+      {"type": "spec-written", "subject": "L-spec-1101", "charter": RC},
+      {"type": "build-started", "subject": "L-spec-1101"},
+      {"type": "build-done", "subject": "L-spec-1101"})
+write("L-grader-1101.jsonl", {"type": "verdict", "subject": "L-spec-1101", "confirmed": True})
+write("L-reviewer-1101.jsonl", {"type": "review", "subject": "L-spec-1101", "depth": "gates-only"})
+write("L-executor-1101.jsonl",
+      {"type": "shipped", "subject": "L-spec-1101"},
+      {"type": "sweep-fixpoint", "subject": RC})
+# deliberately NO charter-review-* event of any kind for RC anywhere above.
+ev, specs, charters = folded()
+assert specs["L-spec-1101"]["state"] == "accepted", specs["L-spec-1101"]["state"]
+assert charters[RC]["state"] == "L2-complete", \
+    "R11: Covers: none must never hold a charter open on a review nothing gates the dispatch of"
+lanes = tick.lane(specs, charters, events=ev)
+assert f"{RC} · L2-complete" in lanes, \
+    "AC8: the charter reaches the reap branch, not stuck at L1-complete awaiting a decision"
+assert f"{RC} · L1-complete" not in lanes, "AC8: the pre-fix bug (stuck at L1) must not reproduce here"
+# Cleanup: this fixture's own build-started (no spawn id) would otherwise leak
+# into in_flight()'s busy set for every fixture below it in this file.
+for f in ("L-operator-1101.jsonl", "L-builder-1101.jsonl", "L-grader-1101.jsonl",
+          "L-reviewer-1101.jsonl", "L-executor-1101.jsonl"):
+    (EV / f).unlink()
+
 # AC7/AC8 (R11) — the wave-1 seam decides the L1-complete charter, and only it.
 seen = {}
 
