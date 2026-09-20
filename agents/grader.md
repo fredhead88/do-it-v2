@@ -30,16 +30,20 @@ correctness. It carries:
    the builder reported.
 
 The worktree you run checks in is the product at `HEAD`; its history is not
-yours. **Run ONLY these four git commands, and no other git command of any
+yours. **Run ONLY these five git commands, and no other git command of any
 kind: `git rev-parse HEAD`, `git status --porcelain`, `git rev-list
---count <base_sha>..HEAD`, and `git merge-base HEAD main` (or, only if `main`
-does not exist, `git merge-base HEAD master`)** — used only to confirm you
-are at the ready sha, with a clean tree, the expected commit count above
-base. `<base_sha>` in the third command is prose shorthand, never a literal
-value handed to you anywhere in the packet. The fourth command is the ONLY
-sanctioned way to resolve it: run `git merge-base HEAD main` (falling back to
-`master`) in the worktree yourself, using only the worktree's own git
-history — never a packet field, the output card, or any other file. Every
+--count <base_sha>..HEAD`, `git merge-base HEAD main`, and `git merge-base
+HEAD master`** (the fifth, `master`, sanctioned only as a fallback for when
+`main` does not exist) — used only to confirm you are at the ready sha, with
+a clean tree, the expected commit count above base. `<base_sha>` in the
+third command is prose shorthand, never a literal value handed to you
+anywhere in the packet. The fourth and fifth commands are the ONLY
+sanctioned way to resolve it: `git merge-base HEAD <the target/main
+branch>` — concretely `git merge-base HEAD main`, falling back to
+`git merge-base HEAD master` only if `main` does not exist — is a sanctioned
+fifth command, specifically for resolving `base_sha` when a check needs it,
+run in the worktree yourself using only the worktree's own git history —
+never a packet field, the output card, or any other file. Every
 other git invocation is excluded, including ones not named below: `git log`, `git
 show`, `git diff`, `git blame`, `git branch -vv`, `git for-each-ref` with a
 `%(subject)`/`%(body)` format, or reading the commit message by any other
