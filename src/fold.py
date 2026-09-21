@@ -5,6 +5,7 @@
   fold.py states                             derived states, one per line
   fold.py events <subject>                   one subject's events, oldest first
   fold.py append <type> <subject> [k=v ...]  append one event, then re-fold
+  fold.py review-owed <charter>              "owed"/"not-owed" — read-only (R11)
 
 The ledger (~/.do-it/events/*.jsonl) is append-only and never edited. The ACTOR
 of an event is the FILENAME it sits in, never a field inside it (D90, §2.5) —
@@ -263,6 +264,29 @@ def charter_review(evs):
     return seen[-1] if seen else None
 
 
+def charter_review_owed(charter_evs):
+    """R11 — the sole predicate for "is a charter-review owed for this charter":
+    `_closable`'s `review_owed` conjunct and `doit review-owed` both read this and
+    nothing else, so the L2 conjunct and the Executor's dispatch decision can never
+    disagree about the same fact.
+
+    `False` only when the charter's own NEWEST `charter-filed` event's `covers`
+    field is the explicit string `none`/`null` (case-insensitive, surrounding
+    whitespace ignored — the D98/§12.2 convention `think.covers()`/`relay._ids()`
+    already write at land time). Every other case — a non-empty id list, an absent
+    `charter-filed` event, or a raw JSON `null` `covers` value (a tolerated
+    defensive input with no instance on the live ledger today, not a legacy
+    population) — falls through UNCHANGED to today's rule: undetermined is never
+    clean, only the explicit empty spelling buys "no review owed"."""
+    filed = [e for e in charter_evs if e["type"] == "charter-filed"]
+    if filed:
+        covers = filed[-1].get("covers")
+        spelling = "" if covers is None else str(covers)
+        if spelling.strip().lower() in ("none", "null"):
+            return False
+    return charter_review(charter_evs) != "charter-review-complete"
+
+
 def deadline_passed(s):
     """An unparseable or absent deadline is PAST, never future: a guard that cannot
     establish its answer returns the failure state, and the failure state here is
@@ -488,7 +512,11 @@ def _closable(charter_evs, mine):
     Polarity is pinned here and nowhere else. `review_owed` is TRUE when a
     charter-review is still owed, so L2-complete is
     `all_accepted and sweep_derived and owed_within_k and no_open_briefs and not
-    review_owed` — written once so neither a builder nor a consumer picks it."""
+    review_owed` — written once so neither a builder nor a consumer picks it.
+
+    `review_owed` is `charter_review_owed(charter_evs)` — R11: a `Covers: none`
+    charter never owes a review nothing gates the dispatch of, no matter what
+    `charter_review` alone would answer."""
     types = {e["type"] for e in charter_evs}
     return Closable(
         all_accepted=all(s["state"] in ("accepted", "shipped-owed-evidence", "dropped",
@@ -496,7 +524,7 @@ def _closable(charter_evs, mine):
         sweep_derived="sweep-fixpoint" in types,
         owed_within_k=sum(1 for s in mine if s["state"] == "shipped-owed-evidence") <= K,
         no_open_briefs=not open_briefs(charter_evs),
-        review_owed=charter_review(charter_evs) != "charter-review-complete")
+        review_owed=charter_review_owed(charter_evs))
 
 
 def l2_complete(c):
@@ -1305,5 +1333,9 @@ if __name__ == "__main__":
         if len(sys.argv) < 3:
             sys.exit("usage: doit spend <charter|spec|spawn-id>")
         print(render_spend(sys.argv[2], ev, specs))
+    elif cmd == "review-owed":               # R11: read-only, the same predicate _closable reads
+        if len(sys.argv) < 3:
+            sys.exit("usage: doit review-owed <charter>")
+        print("owed" if charter_review_owed(by_subject.get(sys.argv[2], [])) else "not-owed")
     else:
         print(render(ev, specs, charters, ignored, by_subject))

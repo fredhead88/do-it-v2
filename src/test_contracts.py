@@ -5,7 +5,7 @@ A marker checker, not a linter. Every rule L-charter-0021 puts into a pane
 contract or into the design record is a literal string that must be PRESENT in
 the file that must carry it, or a literal string that must be ABSENT because the
 old behaviour it describes is retired. One ok() call per acceptance criterion,
-AC1..AC19; AC20 is this file existing and running green.
+AC1..AC19, AC21; AC20 is this file existing and running green.
 
 Marker literals live here as Python constants and are compared with `in` against
 the file's text — never shell-quoted, never round-tripped through grep — so a
@@ -247,6 +247,15 @@ ok(
     "R9 · §4.6·6's plan-auditor row matches the two-stage contract",
     present=[(DESIGN, "two stages")],
     absent=[(DESIGN, "per cut, per plan (2×)")],
+)
+
+
+# --- AC21 — L-spec-0125 R11: row 52's not-owed branch, pinned to one literal ---
+
+ok(
+    "AC21",
+    "L-spec-0125 R11 · charter-reviewer dispatched only where doit review-owed says owed",
+    present=[(EXECUTOR, "not-owed → no charter-reviewer dispatch")],
 )
 
 
