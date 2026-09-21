@@ -782,4 +782,83 @@ t = build("builder", subject="L-spec-0070", worktree=str(REPO), repo=str(REPO),
 assert "\n---\n" in t, "a `---` rule in the charter extract is carried, never scanned"
 assert "Rename the column in the predicate; one line." in t, "and the honest hint still builds"
 
+# ── 13. L-spec-0129 · a per-charter done-condition override ──────────────────
+# A COUNTER, not a fixed id: this function runs twice in one process — once here,
+# directly, so `python3 test_packet.py` (the suite runner's own invocation)
+# exercises it, and once more when pytest discovers and calls
+# `test_done_condition_override` as its own node (AC5's review_path). A fixed
+# charter/spec id would carry the FIRST run's override event into the SECOND
+# run's "no override yet" (AC1) assertion — a same-process rerun is not a fresh
+# ledger. Each call mints its own charter/spec id instead.
+_DC_N = [98]
+
+
+def test_done_condition_override():
+    """AC1: no override on the charter — every role's done-condition is the
+    hardcoded default, byte-identical. AC2: a `planner`/`operator` override on
+    the charter reaches builder, grader AND reviewer alike, every spec under it.
+    AC3: an override authored by a disallowed actor (builder/grader/reviewer) is
+    dropped by `fold()`'s own EMITS authorization before `packet.py` ever sees
+    it — the packet falls back to the default, unchanged."""
+    _DC_N[0] += 1
+    cid, sid = f"L-charter-{_DC_N[0]:04d}", f"L-spec-{_DC_N[0]:04d}"
+    CH = TMP / "content" / f"{cid}.md"
+    CH.write_text("""# charter
+## Requirements
+- R1 — a per-charter override reaches every packet under it
+## Constraints and product decisions
+FAIL-SET-IDENTICAL-OR-SMALLER: hold the fail set identical to or smaller than
+the named baseline, rather than force exit 0.
+## Done for the whole
+review_path: go to the board / worked if the override reaches every packet
+""")
+    ev("operator", "charter-filed", cid, path=str(CH))
+    SPEC = TMP / "content" / f"{sid}.md"
+    SPEC.write_text(f"""# {sid}
+## 8. Verification
+```
+cd src && /usr/bin/python3 test_fold.py
+```
+## Acceptance criteria
+AC1 [backend]: x.
+  review_path: log in as x / go to x / do x / worked if x / failed if x.
+""")
+    ev("spec-writer", "spec-written", sid, spec=sid, path=str(SPEC),
+       footprint=["src/fold.py"], charter=cid)
+
+    # AC1: no override event on the charter at all.
+    tb = build("builder", subject=sid, worktree=str(REPO), repo=str(REPO))
+    assert f"Done-condition: {packet.DONE}." in tb, "AC1: no override — the default DONE reaches the builder"
+    CARD = TMP / "content" / f"L-card-{_DC_N[0]:04d}.md"
+    CARD.write_text(f"# L-card-{_DC_N[0]:04d} · DONE\n")
+    ev("builder", "build-done", sid, status="DONE", card=str(CARD), ready_sha="cafefeed")
+    tg = build("grader", subject=sid, worktree=str(REPO))
+    assert f"The done-condition: {packet.DONE}." in tg, "AC1: no override — the default reaches the grader"
+    tr = build("reviewer", subject=sid, worktree=str(REPO))
+    assert f"The done-condition: {packet.DONE}." in tr, "AC1: no override — the default reaches the reviewer"
+
+    # AC3: a disallowed actor's override is recorded on the ledger but never
+    # authorized — fold()'s own EMITS drops it into `ignored`, not `by_subject`,
+    # before Ctx ever reads it, so packet.py has nothing to fall back FROM.
+    ev("builder", "done-condition-override", cid,
+       clause="a builder can never talk its way out of the exit-0 gate")
+    tb2 = build("builder", subject=sid, worktree=str(REPO), repo=str(REPO))
+    assert f"Done-condition: {packet.DONE}." in tb2, \
+        "AC3: a builder-authored override is ignored — the default stands"
+
+    # AC2: a planner/operator override reaches builder, grader and reviewer alike.
+    SUBSTITUTE = ("FAIL-SET-IDENTICAL-OR-SMALLER: the fail-set is identical to or "
+                  "smaller than the named baseline")
+    ev("operator", "done-condition-override", cid, clause=SUBSTITUTE)
+    tb3 = build("builder", subject=sid, worktree=str(REPO), repo=str(REPO))
+    assert f"Done-condition: {SUBSTITUTE}." in tb3, "AC2: the override reaches the builder"
+    assert f"Done-condition: {packet.DONE}." not in tb3, "the stale default must not also be present"
+    tg2 = build("grader", subject=sid, worktree=str(REPO))
+    assert f"The done-condition: {SUBSTITUTE}." in tg2, "AC2: the override reaches the grader"
+    tr2 = build("reviewer", subject=sid, worktree=str(REPO))
+    assert f"The done-condition: {SUBSTITUTE}." in tr2, "AC2: the override reaches the reviewer"
+
+
+test_done_condition_override()
+
 print(f"packet: {N} packets built, seven Blindness lists enforced")
