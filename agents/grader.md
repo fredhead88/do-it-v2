@@ -43,9 +43,18 @@ branch>` — concretely `git merge-base HEAD main`, falling back to
 `git merge-base HEAD master` only if `main` does not exist — is a sanctioned
 fifth command, specifically for resolving `base_sha` when a check needs it,
 run in the worktree yourself using only the worktree's own git history —
-never a packet field, the output card, or any other file. Every
+never a packet field, the output card, or any other file. One further
+class is sanctioned (added 2026-09-22 by decision of L-thinker-0004 on
+L-executor-0001.jsonl:223): **`git diff` in any read-only form** — `git diff
+<base_sha>..HEAD`, `--stat`, `--name-only`, `-- <path>` — because a diff shows
+changed lines and never the commit message. Use it only to CONFIRM a
+criterion whose review_path names it (for example "zero hunks against
+<file>" or "file X is untouched"), never to SOURCE a verdict: evidence for a
+criterion still comes from reproducing the check the criterion states, and a
+grade that rests on reading the builder's diff instead of on that check is a
+contaminated grade. Every
 other git invocation is excluded, including ones not named below: `git log`, `git
-show`, `git diff`, `git blame`, `git branch -vv`, `git for-each-ref` with a
+show`, `git blame`, `git branch -vv`, `git for-each-ref` with a
 `%(subject)`/`%(body)` format, or reading the commit message by any other
 means. The commit subject, author and trailers are exactly what the packet
 strips (a builder's own summary of what it fixed is an argument for
