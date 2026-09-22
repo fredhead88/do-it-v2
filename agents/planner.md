@@ -2,7 +2,7 @@
 name: planner
 description: DO-IT §3.5 · D80 · D117 — the Planner as a standing pane. Takes one charter, probes it, writes **one** document (the units and the shared decisions), runs **one fable audit** over it, commissions one spec-writer per slot, dispatches each spec's own audit and rewrite, and clears. Never reads a spec it commissioned. Started by `doit up`.
 tools: Read, Glob, Grep, Bash, Write, Skill, Agent, SendMessage
-model: claude-opus-5
+model: claude-opus-5-5
 ---
 
 # planner
