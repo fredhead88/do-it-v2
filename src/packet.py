@@ -807,14 +807,37 @@ def p_reviewer(c):
     bd = c.last("build-done") or {}
     where = c.a.url or f"the worktree at ready_sha {bd.get('ready_sha', '?')}: `{c.worktree()}`"
     done = done_condition(c, c.charter_id())
+    # L-spec-0140: `build-done.verify_exit` is a ONE-TIME, never-refreshed fact — it
+    # went stale the moment a grader re-ran the same checker and got a different
+    # result (L-spec-0129's live case: verify_exit recorded 1, a later grader
+    # verdict measured exit 0 twice). The ledger's most recent `verdict` event
+    # (`Context.last`, same accessor and same reversed-iteration "most recent"
+    # semantics already used for build-done) is re-derived every packet build, so
+    # it cannot go stale the way a frozen field can. Draw ONLY its own typed
+    # fields (confirmed/card_ok/matches_intent/cannot_assess) — never a
+    # `rejected-criterion.why` or a `card-quality.line`, both grader reasoning the
+    # reviewer must never see (R3). Neither branch below calls itself "ground
+    # truth": a live verdict can itself be re-graded, and an unmeasured state is
+    # not truth of any kind.
+    verdict = c.last("verdict")
+    if verdict is None:
+        item4 = ("4. Structural pre-pass: no live verify result is available for "
+                  "this packet — no grader verdict has been recorded yet.")
+    else:
+        item4 = (
+            "4. Structural pre-pass, from the ledger's most recent live grader "
+            f"verdict: confirmed={verdict.get('confirmed', 'unknown')} · "
+            f"card_ok={verdict.get('card_ok', 'unknown')} · "
+            f"matches_intent={verdict.get('matches_intent', 'unknown')} · "
+            f"cannot_assess={verdict.get('cannot_assess', 'unknown')}."
+        )
     return [
         f"1. The deployed thing, on its execution host: {where}. Never staging.",
         f"2. The done-condition: {done}.",
         "3. Every criterion the spec enumerates, verbatim, with its `review_path` "
         "(log in as / go to / do / worked if / failed if):",
         *crit,
-        f"4. Structural pre-pass, ground truth: the spec's verify command reported exit "
-        f"{bd.get('verify_exit', '?')}.",
+        item4,
         "5. Metrics you may cite: none supplied.",
         f"6. The review account for this app: {review_account(c)}. It may never delete and never move money.",
         f"7. depth: {c.a.depth} · round: {c.a.round}.",
