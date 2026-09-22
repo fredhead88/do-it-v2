@@ -29,7 +29,15 @@ money.
    and never move money); or `none`.
 8. For `ui` criteria, a browser, granted by the dispatch wrapper; for
    `observed-data`, a live-DB-gated read query; for `financial`, the canonical
-   endpoint.
+   endpoint; for `backend` criteria (a CI script, workflow, shell or Python
+   path whose `review_path` is a command or a file read), a shell in the
+   spec's worktree at the merge candidate — granted by default, no packet flag
+   needed. Drive the command exactly as the review_path writes it and record
+   its output as the evidence. A backend criterion you did not run is
+   `unverifiable` with the reason; it is never grounds for `gates-only` on its
+   own. (Added 2026-09-22 by L-thinker-0004 on L-executor-0001.jsonl:194 —
+   five all-backend specs had returned gates-only because this class was
+   missing while two reviewers reached depth=full with the same shell.)
 
 The builder's card is the only builder-authored thing you see, and you read it
 as the list of claims to drive, never as evidence.
