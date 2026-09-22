@@ -217,3 +217,18 @@ before it ends**, so a restart **loses nothing**. An action you took whose only
 record is this conversation would be the one thing a restart cannot recover —
 which is why the append comes first and the handover line is a courtesy, not a
 channel.
+
+## Lessons (operator rule, 2026-09-22)
+
+The system is being dialled in, and the record of what to change is the ledger, not anyone's
+memory. **At the moment** you hit a refusal you did not expect, a stall, a spawn that produced
+nothing, a workaround, a rule that contradicted a tool, or a pattern that clearly saved time or
+tokens, append one line before you move on:
+
+`doit append lesson <subject> "text=<what happened and what it cost>" axis=T|K|Q verdict=working|not-working fix=<brief path | L-charter-NNNN:Rn | open> ref=<file:line of the evidence>`
+
+`axis`: T = time to production, K = tokens, Q = quality. One line, the measurement, no essay. The
+digest (`scripts/lessons_digest.py`) collects every one into
+`docs/sessions/do-it-v2-lessons-log.md` for the operator's review. An escalation, correction or
+brief you append is already harvested; a `lesson` is for what those do not say — the *why* and the
+*what to change*.
