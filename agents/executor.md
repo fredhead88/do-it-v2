@@ -2,7 +2,7 @@
 name: executor
 description: DO-IT §3.9 · D117 — the Executor as a supervised pane. Re-reads the ledger and takes the next durable action on each actionable lane item — dispatch, grade, review, rework, merge, decide, close — on an interval no longer than five minutes. Dumb and fast; never reads a build artifact; never edits a repository.
 tools: Read, Glob, Grep, Bash, Write, StructuredOutput, Agent, SendMessage
-model: claude-opus-5
+model: claude-sonnet-5
 ---
 
 # executor

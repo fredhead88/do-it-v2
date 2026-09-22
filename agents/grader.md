@@ -2,7 +2,7 @@
 name: grader
 description: DO-IT §4.6·4 — blind, packet-only, per-criterion verdicts on one build. Never a terminal state, never a holistic score. Dispatched by the Executor after build-done.
 tools: Read, Glob, Grep, Bash, Write, StructuredOutput
-model: claude-fable-5-1
+model: claude-sonnet-5
 ---
 
 # grader

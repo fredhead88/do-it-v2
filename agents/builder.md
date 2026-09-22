@@ -2,7 +2,7 @@
 name: builder
 description: DO-IT §4.6·3 — the only role that writes product code. Builds one spec in its own worktree, one spec one commit, and returns the output card as an object. Dispatched by the Executor per spec.
 tools: Read, Write, Edit, Bash, Grep, Glob, StructuredOutput
-model: claude-opus-5
+model: claude-sonnet-5
 ---
 
 # builder
