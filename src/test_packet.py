@@ -239,12 +239,37 @@ ev("grader", "rejected-criterion", "L-spec-0001", criterion="AC1",
    why="the column renders but the total is the sum of a filtered read, which is wrong")
 t = build("reviewer", worktree=str(REPO), depth="gates-only", round="1")
 assert "AC1 [backend]" in t and "review_path" in t, "every criterion, and every review path"
-assert "reported exit 0" in t and "depth: gates-only · round: 1" in t
+# A live grader verdict is on the ledger for L-spec-0001 (above) — item 4 must draw
+# from IT, not from the frozen build-done.verify_exit=0, and must never call either
+# state "ground truth" (L-spec-0140).
+assert "confirmed=False" in t and "card_ok=yes" in t and "matches_intent=yes" in t, t
+assert "ground truth" not in t.lower() and "reported exit" not in t, t
+assert "depth: gates-only · round: 1" in t
 assert "review account" in t and "never move money" in t
 absent(t, packet.strip(c, "reviewer"))
 assert "sum of a filtered read" not in t, "the grader's reasons are the reviewer's blind spot"
 refuses("reviewer", "the column renders but the total is the sum of a filtered read, which is wrong",
         worktree=str(REPO))
+
+# L-SPEC-0140-REGRESSION: the stale-build-time-exit-vs-live-verdict contrast that
+# blocked L-spec-0129's review, plus the no-verdict-yet case.
+REG = TMP / "content" / "L-spec-0021.md"
+REG.write_text("# L-spec-0021\n## Acceptance criteria\nAC1 [backend]: x\n"
+                "  review_path: y\n")
+ev("spec-writer", "spec-written", "L-spec-0021", spec="L-spec-0021", path=str(REG), footprint=[])
+ev("builder", "build-done", "L-spec-0021", status="DONE", card=str(REG),
+   ready_sha="0021ready", verify_exit=0)
+t2r = build("reviewer", subject="L-spec-0021", worktree=str(REPO))
+i2r = next(l for l in t2r.splitlines() if l.startswith("4."))
+assert "no live verify result" in i2r.lower(), f"no verdict yet must say so: {i2r!r}"
+assert "?" not in i2r and not re.search(r"exit\s+\d", i2r), f"no bare ? / no exit digit: {i2r!r}"
+ev("grader", "verdict", "L-spec-0021", confirmed=True, n=1, matches_intent="yes", card_ok="yes")
+t2r2 = build("reviewer", subject="L-spec-0021", worktree=str(REPO))
+i2r2 = next(l for l in t2r2.splitlines() if l.startswith("4."))
+assert "ground truth" not in i2r2.lower() and "exit 0" not in i2r2, \
+    f"the frozen exit must not resurface once a verdict exists: {i2r2!r}"
+assert "confirmed=True" in i2r2 or "confirmed=true" in i2r2.lower(), \
+    f"the live verdict's own fields must surface: {i2r2!r}"
 
 # ── 6. charter-reviewer ──────────────────────────────────────────────────────
 PLAN = TMP / "content" / "L-plan-0001.md"
@@ -416,6 +441,7 @@ assert ps == {"L-charter-0001-charter-reviewer-1.md", "L-spec-0001-builder-1.md"
               "L-spec-0003-builder-1.md",
               "L-spec-0001-grader-1.md", "L-spec-0001-grader-2.md",
               "L-spec-0001-reviewer-1.md",
+              "L-spec-0021-reviewer-1.md", "L-spec-0021-reviewer-2.md",
               "L-spec-0001-spec-auditor-1.md", "L-spec-0001-spec-writer-1.md",
               "L-spec-0001-spec-writer-2.md", "L-spec-0010-spec-writer-1.md",
               "L-spec-0027-spec-auditor-1.md",
