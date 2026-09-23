@@ -1,15 +1,24 @@
 #!/usr/bin/env python3
 """One runnable check on the tick. Run: python3 test_tick.py"""
-import datetime, fcntl, json, os, pathlib, re, sys, tempfile
+import contextlib, datetime, fcntl, io, json, os, pathlib, re, sys, tempfile
 
 TMP = pathlib.Path(tempfile.mkdtemp())
 os.environ["DOIT_ROOT"], os.environ["DOIT_NO_POKE"] = str(TMP), "1"
+# L-spec-0190: `tick.main()` now calls `carry.uncarried()`/`carry.sync_v4()` for
+# real on every run. `carry.py`'s own doc comment is explicit that these three
+# must point at fixture directories, never the operator's real ledger/inbox/
+# staging tree (test_carry.py's own precedent) — left unset, the very first
+# `tick.main()` below reads the operator's live `~/.claude/ledger` and leaks
+# real inbound rows into this suite.
+os.environ["V4_LEDGER_DIR"] = str(TMP / "v4-ledger")
+os.environ["V4_INBOX_DIR"] = str(TMP / "v4-inbox")
+os.environ["V4_STAGING_DIR"] = str(TMP / "v4-staging")
 # ★ `fold.PROJECT` is read ONCE at import and `fold.read_events()` filters on it.
 # These fixtures carry no `project` key, so a pane with DOIT_PROJECT set turns every
 # assertion below false-red. Popped here, before the import, never in the caller's shell.
 os.environ.pop("DOIT_PROJECT", None)
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
-import fold, tick  # noqa: E402
+import carry, fold, tick  # noqa: E402
 
 NOW = fold.NOW.isoformat(timespec="seconds")
 EV = TMP / "events"
@@ -283,4 +292,174 @@ assert not any(l.startswith(DUE_S) for l in lanes), \
 for f in ("L-spec-writer-9192.jsonl", "L-builder-9192.jsonl", "L-executor-9192.jsonl"):
     (EV / f).unlink()
 
-print("tick: 41 checks pass")
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-0190 · inbound-picked-up-unattended (L-charter-0028) — R9
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _isolated_events():
+    """A fresh, empty ledger dir — for the 'otherwise-empty ledger' fixtures
+    below, decoupled from the shared TMP/events every fixture above this
+    banner has been accumulating into."""
+    iso = pathlib.Path(tempfile.mkdtemp()) / "events"
+    iso.mkdir(parents=True)
+    return iso
+
+
+def write_to(d, name, *events):
+    p = d / name
+    p.write_text("".join(json.dumps({"v": 1, "ts": NOW, **e}) + "\n" for e in events))
+    return p
+
+
+# AC1 — tick.lane() gains a 6th, keyword-defaulted `inbound` argument: one
+# "inbound:<source> · uncarried" row per item not in `busy`, merged into the
+# same sorted result as the existing spec/charter rows.
+lanes = tick.lane({}, {}, inbound=[{"source": "283", "kind": "pr"}])
+assert lanes == ["inbound:283 · uncarried"], \
+    f"AC1: a lone inbound item not in busy is the sole row returned: {lanes}"
+
+# AC2(a) — an open escalation-blocking whose subject equals the source id
+# excludes it exactly like the existing busy-filtering behavior specs/charters
+# get from in_flight(); a decision after it restores the row.
+iso = _isolated_events()
+saved_events, saved_tick = fold.EVENTS, tick.TICK
+fold.EVENTS = iso
+p = write_to(iso, "L-executor-0283.jsonl", {"type": "escalation-blocking", "subject": "283",
+                                            "why": "carry", "spawn": "L-executor-0283"})
+ev = fold.read_events()
+busy = tick.in_flight(ev)
+lanes = tick.lane({}, {}, busy, events=ev, inbound=[{"source": "283", "kind": "pr"}])
+assert not any(l.startswith("inbound:283") for l in lanes), \
+    "AC2(a): an escalated source is excluded exactly like a spec or charter"
+p.write_text(p.read_text() + json.dumps({"v": 1, "ts": NOW, "type": "decision", "subject": "283",
+                                         "why": "w", "revert": "r", "spawn": "L-executor-0283"}) + "\n")
+ev = fold.read_events()
+busy = tick.in_flight(ev)
+lanes = tick.lane({}, {}, busy, events=ev, inbound=[{"source": "283", "kind": "pr"}])
+assert any(l.startswith("inbound:283") for l in lanes), \
+    "AC2(a): a decision after the escalation restores the row"
+fold.EVENTS = saved_events
+
+# AC2(b) — a content/carry-<spec_id>.packet.md file whose trailing line names
+# the source, and whose own spec_id is itself in `busy`, excludes the source
+# until that spawn reaches a terminal event (fix 5).
+iso = _isolated_events()
+fold.EVENTS = iso
+content_dir = fold.ROOT / "content"
+content_dir.mkdir(parents=True, exist_ok=True)
+packet = content_dir / "carry-L-spec-0299.packet.md"
+packet.write_text("body\n\n---\nSource: v4 spec 283.\n")
+try:
+    write_to(iso, "L-spec-writer-0299.jsonl", {"type": "spawn-started", "role": "spec-writer",
+                                               "subject": "L-spec-0299", "spawn": "L-spec-writer-0299"})
+    ev = fold.read_events()
+    busy = tick.in_flight(ev)
+    assert "L-spec-0299" in busy, "AC2(b) precondition: the spec-writer spawn must be in flight"
+    lanes = tick.lane({}, {}, busy, events=ev, inbound=[{"source": "283", "kind": "pr"}])
+    assert not any(l.startswith("inbound:283") for l in lanes), \
+        "AC2(b): a packet-detected in-flight carry excludes its source from the lane"
+    write_to(iso, "L-executor-0299.jsonl", {"type": "spawn-done", "subject": "L-spec-0299",
+                                            "spawn": "L-spec-writer-0299", "status": "written"})
+    ev = fold.read_events()
+    busy = tick.in_flight(ev)
+    lanes = tick.lane({}, {}, busy, events=ev, inbound=[{"source": "283", "kind": "pr"}])
+    assert any(l.startswith("inbound:283") for l in lanes), \
+        "AC2(b): once the spawn reaches a terminal event, the exclusion lifts"
+finally:
+    packet.unlink()
+    fold.EVENTS = saved_events
+
+# AC3 — tick.main() calls carry.uncarried(ev) once per run and folds every
+# item it returns into the todo list lane() computes, idle or busy.
+iso = _isolated_events()
+fold.EVENTS, tick.TICK = iso, iso / "L-tick-local.jsonl"
+real_uncarried, real_sync = carry.uncarried, carry.sync_v4
+carry.uncarried = lambda events: [{"source": "999-ac3", "kind": "pr", "registered_at": NOW,
+                                   "attempts": 0, "last_error": None}]
+carry.sync_v4 = lambda events: 0
+buf = io.StringIO()
+with contextlib.redirect_stdout(buf):
+    rc = tick.main()
+out = buf.getvalue()
+assert rc == 0 and "inbound:999-ac3 · uncarried" in out, \
+    f"AC3: carry.uncarried()'s item is folded into the printed lane: {out!r}"
+assert len(ticks()) == 1 and ticks()[-1]["lane"] == 1, \
+    "AC3: an otherwise-empty ledger records the one inbound item as the whole lane"
+carry.uncarried, carry.sync_v4 = real_uncarried, real_sync
+fold.EVENTS, tick.TICK = saved_events, saved_tick
+
+# AC4 — tick.main() calls carry.sync_v4(ev) exactly once per run, independent
+# of whether carry.uncarried() returns anything.
+iso = _isolated_events()
+fold.EVENTS, tick.TICK = iso, iso / "L-tick-local.jsonl"
+real_uncarried, real_sync = carry.uncarried, carry.sync_v4
+calls = {"n": 0}
+
+
+def counting_sync(events):
+    calls["n"] += 1
+    return 0
+
+
+carry.uncarried = lambda events: []
+carry.sync_v4 = counting_sync
+assert tick.main() == 0 and calls["n"] == 1, "AC4: sync_v4 called exactly once, this run"
+assert tick.main() == 0 and calls["n"] == 2, "AC4: and exactly once more, the next run"
+carry.uncarried, carry.sync_v4 = real_uncarried, real_sync
+fold.EVENTS, tick.TICK = saved_events, saved_tick
+
+# AC5 — a carry.uncarried/carry.sync_v4 call that raises does not stop the
+# tick's own heartbeat: tick.main() still returns 0, still appends exactly one
+# `tick` event carrying a `carry_error` field naming the exception, and the
+# OTHER call's contribution still lands (the two calls are guarded
+# independently — fix 8).
+iso = _isolated_events()
+fold.EVENTS, tick.TICK = iso, iso / "L-tick-local.jsonl"
+real_uncarried, real_sync = carry.uncarried, carry.sync_v4
+
+
+def _raise_uncarried(events):
+    raise RuntimeError("boom")
+
+
+def _raise_sync(events):
+    raise RuntimeError("sync boom")
+
+
+carry.uncarried, carry.sync_v4 = _raise_uncarried, (lambda events: 0)
+n0 = len(ticks())
+assert tick.main() == 0, "AC5: a raising carry.uncarried never stops the tick's own heartbeat"
+assert len(ticks()) == n0 + 1, "AC5: exactly one new tick event lands"
+assert "boom" in ticks()[-1].get("carry_error", ""), \
+    f"AC5: the tick event names the caught exception: {ticks()[-1]}"
+
+carry.uncarried = lambda events: [{"source": "999-ac5", "kind": "pr", "registered_at": NOW,
+                                   "attempts": 0, "last_error": None}]
+carry.sync_v4 = _raise_sync
+buf = io.StringIO()
+with contextlib.redirect_stdout(buf):
+    rc = tick.main()
+out = buf.getvalue()
+assert rc == 0 and "inbound:999-ac5 · uncarried" in out, \
+    f"AC5: carry.uncarried's item still lands when carry.sync_v4 raises: {out!r}"
+assert "sync boom" in ticks()[-1].get("carry_error", ""), ticks()[-1]
+
+carry.uncarried, carry.sync_v4 = real_uncarried, real_sync
+fold.EVENTS, tick.TICK = saved_events, saved_tick
+
+# AC6 (part 2, fix 1) — the row's --title/--body argv is what the PR path
+# needs: carry.pr_slot(url, None, None, repo) refuses by name, exactly
+# mirroring a bare `doit carry <source>` on a PR source; supplying both turns
+# the refusal into a successful carry that writes the packet file.
+pr_url = "https://github.com/fredhead88/albert-scott-platform/pull/999"
+try:
+    carry.pr_slot(pr_url, None, None, str(TMP))
+    raise AssertionError("AC6: carry.pr_slot with no --title/--body must refuse by name")
+except carry.Refusal:
+    pass
+slot, spec_id, source_id, charter = carry.pr_slot(pr_url, "t", "b", str(TMP))
+assert pathlib.Path(slot).is_file() and source_id == pr_url and charter is None, \
+    "AC6: --title/--body turn the by-name refusal into a successful carry, writing the packet"
+
+print("tick: 48 checks pass")
