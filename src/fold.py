@@ -35,7 +35,10 @@ EMITS = {"verdict": {"grader"}, "review": {"reviewer"}, "shipped": {"executor"},
          "restore-verified": {"drill", "operator", "executor"},
          # R10/L-spec-0192: added now so no later unit's append is dropped, though
          # the code emitting each is out of this footprint.
-         "inbound-registered": {"operator", "thinker"},
+         "inbound-registered": {"operator", "thinker", "intake"},               # L-spec-0242
+         "inbound-awaiting": {"intake"}, "inbound-awaiting-gone": {"intake"},   # SD1/SD15
+         "inbound-pr-commented": {"intake"}, "inbound-closed": {"intake", "operator"},
+         "inbound-note-listed": {"intake"}, "inbound-note-gone": {"intake"}, "note-answered": {"thinker", "operator"},
          "carry-failed": {"executor", "operator"},
          "backup-failed": {"backup"},
          # L-spec-0195/AC6: a verify-waiver substitutes a no-op for one &&-segment
@@ -689,6 +692,16 @@ def _carry():
         return carry, None
     except Exception as x:                                 # noqa: BLE001
         return None, f"src/carry.py not importable ({type(x).__name__}: {x})"
+
+
+def _intake():
+    """(module, None) or (None, why-not) — same lazy PANES idiom as _carry()/
+    _panes(), backing INBOUND's awaiting rows (AC8/L-spec-0242) alone."""
+    try:
+        import intake                                      # lazy: a concurrent unit
+        return intake, None
+    except Exception as x:                                 # noqa: BLE001
+        return None, f"src/intake.py not importable ({type(x).__name__}: {x})"
 
 
 def _backup():
@@ -1356,6 +1369,14 @@ def render(events, specs, charters, ignored, by_subject):
             inbound_rows = [inbound_line(r) for r in carry_mod.uncarried(events)]
         except Exception as x:                             # noqa: BLE001
             inbound_rows = [f"unavailable — carry.uncarried raised {type(x).__name__}: {x}"]
+    intake_mod, intake_err = _intake()
+    if intake_mod is None:
+        inbound_rows.append(f"unavailable — {intake_err}")
+    else:
+        try:
+            inbound_rows += intake_mod.board_rows(events)
+        except Exception as x:                             # noqa: BLE001
+            inbound_rows.append(f"unavailable — intake.board_rows raised {type(x).__name__}: {x}")
     block("INBOUND", inbound_rows)
 
     block("SHIPPED SINCE YOU LOOKED", [e.get("subject", "?") for e in since("shipped")])

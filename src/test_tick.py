@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """One runnable check on the tick. Run: python3 test_tick.py"""
-import contextlib, datetime, fcntl, io, json, os, pathlib, re, sys, tempfile
+import contextlib, datetime, fcntl, io, json, os, pathlib, re, sys, tempfile, types
 
 TMP = pathlib.Path(tempfile.mkdtemp())
 os.environ["DOIT_ROOT"], os.environ["DOIT_NO_POKE"] = str(TMP), "1"
@@ -18,10 +18,34 @@ os.environ["V4_STAGING_DIR"] = str(TMP / "v4-staging")
 # assertion below false-red. Popped here, before the import, never in the caller's shell.
 os.environ.pop("DOIT_PROJECT", None)
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
-import carry, fold, tick  # noqa: E402
+import carry, fold, intake, tick  # noqa: E402
 
 NOW = fold.NOW.isoformat(timespec="seconds")
 EV = TMP / "events"
+
+# L-spec-0242 (AC11): `tick._record()` now calls `intake.run(ev)` on EVERY pass —
+# ONE module-level `intake.subprocess = STUB`-shaped assignment, before the
+# FIRST `tick.main()` call below, so all 22 existing fixtures plus every new
+# one route through it; a per-fixture patch that only new fixtures received
+# would leave the 22 existing ones reaching a REAL `gh` (installed on this box).
+INTAKE_CALLS = []
+
+
+class _IntakeStub:
+    """A healthy rate, empty listings both labels — `intake.run()` contributes
+    nothing to any fixture's ledger, so every existing lane/tick assertion
+    below is unaffected by its presence."""
+    def run(self, argv, capture_output=True, text=True, **kw):
+        INTAKE_CALLS.append(list(argv))
+        if argv[:3] == ["gh", "api", "rate_limit"]:
+            return types.SimpleNamespace(
+                returncode=0, stdout=json.dumps({"resources": {"core": {"remaining": 5000}}}), stderr="")
+        if argv[:3] == ["gh", "pr", "list"]:
+            return types.SimpleNamespace(returncode=0, stdout="[]", stderr="")
+        raise AssertionError(f"test_tick.py's intake stub got an unexpected call: {argv}")
+
+
+intake.subprocess = _IntakeStub()
 
 
 def ticks():
@@ -610,3 +634,57 @@ assert not any(l.startswith("inbound:9198-src") for l in lanes198), \
 fold.EVENTS = saved_events
 
 print("tick: L-spec-0198 AC5 check passes")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-0242 · intake-core (L-charter-0031) — AC13, SD11's wave-1 half:
+# `tick._record()` calls `intake.run(ev)` off its FIRST `fold.read_events()`,
+# then RE-READS before `carry.uncarried()`/`fold.fold()`/`lane()` run.
+# ══════════════════════════════════════════════════════════════════════════════
+iso242 = _isolated_events()
+fold.EVENTS = iso242
+real_intake_run, real_uncarried242 = intake.run, carry.uncarried
+seen242 = {}
+
+
+def _fake_intake_run(events):
+    write_to(iso242, "L-intake-local.jsonl",
+             {"type": "inbound-registered", "subject": "https://x/pull/1", "source": "https://x/pull/1",
+              "project": "albert-scott", "title": "t", "author_login": "a", "auto": True, "body": "b"})
+    return {"spec_prs": [], "note_prs": []}
+
+
+def _asserting_uncarried(events):
+    seen242["types"] = {e["type"] for e in events}
+    return []
+
+
+intake.run, carry.uncarried = _fake_intake_run, _asserting_uncarried
+assert tick.main() == 0
+assert "inbound-registered" in seen242.get("types", set()), \
+    "AC13: intake.run(ev)'s own append is visible to carry.uncarried() via the RE-READ ledger"
+intake.run, carry.uncarried = real_intake_run, real_uncarried242
+fold.EVENTS = saved_events
+
+# AC13, the other half — a raising intake.run never stops the tick's own
+# heartbeat: `intake_error` lands additively, `lane`/`carry_error` unaffected.
+iso242b = _isolated_events()
+fold.EVENTS = iso242b
+
+
+def _raising_intake_run(events):
+    raise RuntimeError("intake boom")
+
+
+intake.run = _raising_intake_run
+n0_242 = len(ticks())
+assert tick.main() == 0, "AC13: a raising intake.run never stops the tick's own heartbeat"
+assert len(ticks()) == n0_242 + 1, "AC13: exactly one new tick event lands"
+last242 = ticks()[-1]
+assert "intake boom" in last242.get("intake_error", ""), \
+    f"AC13: the tick event names the caught exception on intake_error: {last242}"
+assert "carry_error" not in last242 and last242["lane"] == 0, \
+    f"AC13: lane/carry_error are otherwise unaffected: {last242}"
+intake.run = real_intake_run
+fold.EVENTS = saved_events
+
+print("tick: L-spec-0242 AC13 checks pass")

@@ -930,4 +930,48 @@ check("charter" in kv7t and kv7t["charter"] == CHARTER_AC3 and "charter" not in 
 check("charter_reason" not in kv7t and kv7u.get("charter_reason") == "untrusted",
       f"★ AC7: charter_reason absent vs 'untrusted': {kv7t} vs {kv7u}")
 
+# ══ AC14 (SD13) · --from-ledger resolves title/body in-process, never a shell ═
+PR_URL_AC14 = "https://github.com/o/r/pull/1414"
+write_event("L-intake-local", {"type": "inbound-registered", "subject": PR_URL_AC14,
+                               "source": PR_URL_AC14, "project": "albert-scott",
+                               "title": "AC14 fixture title", "author_login": "trusted-eg",
+                               "auto": True, "body": "AC14 fixture body"})
+ALLOCS[0], CALLS[:] = 0, []
+STUB.dispatch = writer(["src/ac14.py"])
+code, out, err = run([PR_URL_AC14, "--from-ledger"] + BASE)
+check(code == 0, f"AC14: a --from-ledger carry succeeds through main(): {err!r}")
+res14 = json.loads(out)
+packet14 = pathlib.Path(res14["packet"]).read_text()
+check(carry._frontmatter_value(packet14, "intent") == "AC14 fixture body",
+      f"AC14: the packet's intent matches the ledger event's body byte-for-byte: {packet14!r}")
+check("# AC14 fixture title" in packet14, f"AC14: the packet's title heading matches: {packet14!r}")
+check(carry.frontmatter_charter(packet14) is None,
+      f"AC14: charter absent/null exactly as a manual --title/--body carry of the same body would "
+      f"produce (charter/author are `pr_slot`'s own, untouched — Boundaries): {packet14!r}")
+
+# combining --from-ledger with --title/--body refuses BEFORE any alloc
+allocs_before14 = ALLOCS[0]
+try:
+    carry._do_carry(PR_URL_AC14 + "-combo", repo=REPO, project="albert-scott",
+                    from_ledger=True, title="x", body="y")
+    raise AssertionError("AC14: combining --from-ledger with --title/--body must refuse")
+except carry.Refusal:
+    pass
+check(ALLOCS[0] == allocs_before14, "AC14: the combined-flags refusal fires before any alloc")
+
+# --from-ledger naming a url with no inbound-registered event refuses by name
+try:
+    carry._do_carry("https://github.com/o/r/pull/9999-no-such-registration", repo=REPO,
+                    project="albert-scott", from_ledger=True)
+    raise AssertionError("AC14: --from-ledger with no matching event must refuse")
+except carry.Refusal:
+    pass
+
+# --title/--body keep working exactly as today for a source not using --from-ledger
+ALLOCS[0], CALLS[:] = 0, []
+STUB.dispatch = writer(["src/ac14b.py"])
+code, out, err = run(["https://github.com/o/r/pull/1415", "--title", "manual t",
+                     "--body", "manual b"] + BASE)
+check(code == 0, f"AC14: a plain --title/--body carry (no --from-ledger) is unaffected: {err!r}")
+
 print(f"carry: {N} checks pass")

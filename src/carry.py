@@ -501,23 +501,41 @@ def parser():
     p.add_argument("--project", help="the project label; default $DOIT_PROJECT")
     p.add_argument("--title", help="PR path only: the spec title")
     p.add_argument("--body", help="PR path only: the intent")
+    p.add_argument("--from-ledger", action="store_true", dest="from_ledger",
+                   help="PR path only (SD13): resolve title/body from the newest "
+                        "inbound-registered event naming <source>, in-process")
     p.add_argument("--force", action="store_true", help="carry a source that was already carried")
     return p
 
 
-def _do_carry(source, *, repo=None, project=None, force=False, title=None, body=None):
+def _title_body_from_ledger(url):
+    """(title, body) off the newest `inbound-registered` event naming `url` in
+    `scan_events()` — in-process, never a shell (SD13)."""
+    hits = scan_events(lambda e: e.get("type") == "inbound-registered" and str(e.get("source")) == url)
+    if not hits:
+        raise Refusal(f"carry: --from-ledger found no inbound-registered event naming {url}")
+    ev = sorted(hits, key=lambda e: e.get("ts") or "")[-1]
+    return ev.get("title") or "", ev.get("body") or ""
+
+
+def _do_carry(source, *, repo=None, project=None, force=False, title=None, body=None,
+              from_ledger=False):
     """Today's `main()` logic, refactored into a private, importable callable — the
     seven-field dict `main()` used to print directly. Raises `Refusal` for every
     failure BEFORE `alloc` fires, `CarryFailed` for every failure after. Not a seam:
     no sibling's Consumes names `_do_carry`; call `carry()` instead."""
     project, repo = resolve_target(project, repo)
     source = source.strip()
+    if from_ledger and (title or body):
+        raise Refusal("carry: --from-ledger and --title/--body are mutually exclusive")
     sid = source if is_url(source) else (numeric_prefix(source) or source)
     prior = None if force else already_carried(sid)
     if prior:
         raise Refusal(f"carry: {source} was already carried as {prior.get('subject')}; "
                       f"re-run with --force to carry again")
     if is_url(source):
+        if from_ledger:
+            title, body = _title_body_from_ledger(source)
         slot, spec_id, source_id, charter, charter_reason = pr_slot(source, title, body, repo)
         audited_at = now()
     else:
@@ -605,7 +623,7 @@ def main(argv=None):
     say = lambda m: print(m, file=sys.stderr)
     try:
         res = _do_carry(a.source, repo=a.repo, project=a.project, force=a.force,
-                        title=a.title, body=a.body)
+                        title=a.title, body=a.body, from_ledger=a.from_ledger)
     except Refusal as e:
         say(str(e))
         return 2
