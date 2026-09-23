@@ -123,11 +123,19 @@ assert spawn.raw[0]["type"] == "spawn-started" and spawn.raw[0]["role"] == "rese
 assert evs[1]["answered"] == "yes" and evs[1]["cost_usd"] == 0.01 and evs[1]["packet_sha256"], evs[1]
 assert "actor" not in evs[1], "D90: never an actor field"
 
+# L-spec-0195: a well-formed spec fixture — a real `## Verification` `&&` chain,
+# an `## Acceptance Criteria` section, a path-shaped `**Writes:**` line — so the
+# `spec-writer` wrapper's `validate.spec_shape` gate passes and every assertion
+# below that expects no `spec-shape-failed` keeps passing unchanged (Assumptions).
+WELL_FORMED_SPEC = ("# fixture spec\n## Verification\n```\ntrue\n```\n"
+                    "## Acceptance Criteria\nAC1 [backend]: x.\n  review_path: y\n"
+                    "Writes: a.py\n")
+
 sw = {"status": "written", "spec_id": "L-spec-0001", "ac_count": 2, "ac_types": ["backend"], "footprint": ["a.py"],
       "requirement_ids": ["R1"], "owed": 0, "unknowns": 1, "split": [], "weak_dimensions": [],
       "escalations": [{"asks": "q?", "blocks": ["AC1"], "default": "d", "deadline": "2026-09-09"}], "declarations": []}
 sp = TMP / "content" / "L-spec-0001.md"
-code, types, evs, _ = spawn("spec-writer", out=sw, path=sp, side=lambda: sp.write_text("spec"))
+code, types, evs, _ = spawn("spec-writer", out=sw, path=sp, side=lambda: sp.write_text(WELL_FORMED_SPEC))
 assert code == 0 and types == ["spec-written", "question", "spawn-done"], types
 assert evs[0]["unknown_count"] == 1 and evs[0]["footprint"] == ["a.py"]
 # AC11/L-spec-0192: its own dedicated subject, never "L-spec-0001" — R3's new
@@ -140,7 +148,7 @@ assert code == 0 and types == ["spec-killed", "spawn-done"] and evs[0]["check"] 
 # S15: an owed criterion carries the instant that proves it, or the schema refuses it.
 owed = {**sw, "escalations": [], "declarations": [{"term": "owed-ac", "criterion": "AC7", "wake_at": "2026-09-16T11:04:00Z",
                                                    "line": "the lock is reaped on the first run after it passes the threshold"}]}
-code, types, evs, _ = spawn("spec-writer", out=owed, path=sp, side=lambda: sp.write_text("spec"))
+code, types, evs, _ = spawn("spec-writer", out=owed, path=sp, side=lambda: sp.write_text(WELL_FORMED_SPEC))
 assert code == 0 and "owed-ac" in types and next(e for e in evs if e["type"] == "owed-ac")["wake_at"] == "2026-09-16T11:04:00Z", evs
 assert fold.ts("2026-09-16T11:04:00Z").tzinfo is not None, "the fold parses the Z form"
 PK.write_text("a packet, owed without wake_at\n")
@@ -957,6 +965,45 @@ for bad_packet in ("", str(TMP / "nowhere.md")):
     except SystemExit as e:
         assert "not a file" in str(e.code) and "nothing allocated" in str(e.code), e.code
 assert sorted((TMP / "events").glob("L-research-*.jsonl")) == before_files, "refused before allocation: no new spawn file"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-0195 · spec-shape-checked-before-build (L-charter-0028) — AC2, AC4, AC6
+#
+# Placed BEFORE the L-spec-0192 section below on purpose: that section hand-writes
+# spec-writer ledger files with non-numeric spawn-id suffixes ("...-stale9192",
+# "...-open9192", ...), and this file's own `spawn()` helper finds "the latest"
+# role file with a bare `max()` over a glob — lexicographically, not by alloc
+# order — so a "spec-writer" spawn issued AFTER those exist would silently read
+# one of THEM back instead of its own freshly allocated file.
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── AC6 · fold.EMITS["verify-waiver"] is executor/operator only ────────────────
+assert fold.EMITS["verify-waiver"] == {"executor", "operator"}, fold.EMITS["verify-waiver"]
+
+# ── AC2 · a malformed spec: spec-written, then spec-shape-failed, never
+#          spawn-failed; fold state stays "written", never "void" ─────────────
+BAD_SHAPE_SPEC = "# L-spec-0093\nno verification, no acceptance criteria, no writes grant\n"
+sp93 = TMP / "content" / "L-spec-0093.md"
+code, types, evs, cmd = spawn("spec-writer", out={**sw, "spec_id": "L-spec-0093"}, path=sp93,
+                              side=lambda: sp93.write_text(BAD_SHAPE_SPEC), subject="L-spec-0093")
+assert code == 0 and types == ["spec-written", "spec-shape-failed", "question", "spawn-done"], types
+assert evs[1]["findings"], "spec-shape-failed carries what validate.spec_shape returned"
+specs, *_ = fold.fold(fold.read_events())
+assert specs["L-spec-0093"]["state"] == "written", \
+    f"AC2: fold state stays 'written', never 'void': {specs['L-spec-0093']['state']}"
+
+# ── AC4 · a builder dispatch against it is refused before any spend, and clears
+#          the instant a fresh well-formed spec-written lands ─────────────────
+code, types, evs, cmd = spawn("builder", out=card, subject="L-spec-0093")
+assert code == 1 and types == ["spawn-failed"] and "spec-shape" in evs[0]["why"], (types, evs)
+assert evs[0].get("reason") == "spec-shape", evs[0]
+assert cmd is None, "run_claude must never be called on a spec-shape refusal"
+
+code, types, evs, cmd = spawn("spec-writer", out={**sw, "spec_id": "L-spec-0093"}, path=sp93,
+                              side=lambda: sp93.write_text(WELL_FORMED_SPEC), subject="L-spec-0093")
+assert code == 0 and types == ["spec-written", "question", "spawn-done"], types
+code, types, evs, cmd = spawn("builder", out=card, subject="L-spec-0093")
+assert code == 0 and cmd is not None, (code, types, evs)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # L-spec-0192 · fold-states-owed-due-and-killed (L-charter-0028) — R3

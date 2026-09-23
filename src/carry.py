@@ -378,6 +378,15 @@ def _do_carry(source, *, repo=None, project=None, force=False, title=None, body=
     ev = spec_written(spec_id)
     if ev is None:
         raise CarryFailed(f"carry: spawn returned status {spawn_status(spec_id)} — no spec written")
+    # L-spec-0195/AC5: a spec the tools cannot read never reaches `spec-carried` —
+    # named here, in `carry`'s own path, rather than deferred to whatever the
+    # eventual `spec-writer` wrapper does with it, because carry-both-ledgers built
+    # in wave 1, before `validate.spec_shape` existed for it to call.
+    import validate                  # here, not at the top: mirrors this file's own
+                                      # lazy `import fold`/`import dispatch` below
+    findings = validate.spec_shape(pathlib.Path(path).read_text())
+    if findings:
+        raise CarryFailed(f"carry: {spec_id} fails spec-shape validation — {'; '.join(findings)}")
     footprint = ev.get("footprint") or []
     if not footprint:
         raise CarryFailed(f"carry: {spec_id} was written with an empty footprint — no tier stamped")
