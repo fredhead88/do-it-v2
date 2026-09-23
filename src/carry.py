@@ -34,9 +34,21 @@ FIELDS = ("spec_id", "intent", "status", "spec_file", "handed_over_at")
 
 # The trailer the hand path typed, verbatim (em dash U+2014). `carry.py` appends no
 # `spawn_id` line of its own — `dispatch` owns that (`packet += f"\n\nspawn_id: …"`).
+# `{charter_clause}` is the one variable sentence (L-spec-0198, Produces): the
+# free-standing literal, byte-identical to the precedent, when `charter` is not
+# honored for any reason, or the honored charter's own id (D3) when it is.
 TRAILER = ("\n---\nCarry this spec over into v2 form — Writes: line, AC ids, Verification "
-           "block, under 400 lines. Change nothing substantive. charter: null (free-standing, "
-           "D15). Source: v4 spec {source_id}.\n")
+           "block, under 400 lines. Change nothing substantive. {charter_clause} "
+           "Source: v4 spec {source_id}.\n")
+
+
+def _charter_clause(charter):
+    """The TRAILER's one variable sentence. `charter` is `None` for every
+    not-honored outcome (untrusted/absent/unknown/closed) — the free-standing
+    literal, verbatim (D15) — and the charter id itself, `(declared, D3)`, only
+    when honored."""
+    return (f"charter: {charter} (declared, D3)." if charter is not None
+            else "charter: null (free-standing, D15).")
 
 # Checked in this order, first hit wins; case-insensitive substring per path.
 # `/versions/` and `migration` are separate rules on purpose: an Alembic path is
@@ -87,6 +99,130 @@ def ledger_actor():
     stem = pathlib.Path(os.environ.get("DOIT_LEDGER_FILE", "L-operator-local.jsonl")).stem
     parts = stem.split("-")
     return "-".join(parts[1:-1]) if len(parts) >= 3 else stem
+
+
+# ── trusted-author inbound charter (L-spec-0198) ────────────────────────────────
+def trusted_authors(path=None):
+    """One `{"login", "email"}` dict per well-formed `[[author]]` table in the
+    TOML doc at `path` (default `$DOIT_ROOT/trusted_inbound_authors.toml`, read
+    at call time via `root()` — never at import). An incomplete table (either
+    key absent, blank, or non-string) is dropped, not an error. Absent file, any
+    parse exception (`tomllib.TOMLDecodeError` included), or a non-list `author`
+    key all degrade to `[]` — never an exception (AC1)."""
+    p = pathlib.Path(path) if path is not None else (root() / "trusted_inbound_authors.toml")
+    try:
+        import tomllib
+        with open(p, "rb") as f:
+            doc = tomllib.load(f)
+    except (OSError, ValueError, ImportError):
+        return []
+    rows = doc.get("author")
+    if not isinstance(rows, list):
+        return []
+    out = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        login, email = row.get("login"), row.get("email")
+        if isinstance(login, str) and login.strip() and isinstance(email, str) and email.strip():
+            out.append({"login": login, "email": email})
+    return out
+
+
+def _frontmatter_value(spec_text, key):
+    """The trimmed value of `key:` inside the leading `---`-delimited frontmatter
+    block — the same block `pr_slot` writes and the live `~/.claude/spec-inbox/
+    *.md` shape (`intent:`/`author:`/`base_sha:`/`charter:`). `None` for no
+    leading block, no such key inside it, or a `null`/`~`/blank value."""
+    lines = spec_text.split("\n")
+    if not lines or lines[0].strip() != "---":
+        return None
+    block, closed = [], False
+    for line in lines[1:]:
+        if line.strip() == "---":
+            closed = True
+            break
+        block.append(line)
+    if not closed:
+        return None
+    for line in block:
+        m = re.match(rf"^{re.escape(key)}:[ \t]*(.*)$", line)
+        if m:
+            v = m.group(1).strip()
+            if v[:1] in "'\"" and len(v) > 1 and v.endswith(v[0]):
+                v = v[1:-1]
+            return v if v not in ("", "null", "~") else None
+    return None
+
+
+def frontmatter_charter(spec_text):
+    """The trimmed `charter:` value inside the leading frontmatter block, or
+    `None` for no leading block, no `charter:` key, or a `null`/`~`/blank
+    value (AC2)."""
+    return _frontmatter_value(spec_text, "charter")
+
+
+def _frontmatter_author_email(spec_text):
+    """The email to match against `trusted_authors()`: the `<…>` substring of
+    the frontmatter `author:` value, or — absent angle brackets — the whole
+    trimmed value when it contains `@`. `None` otherwise (Boundaries)."""
+    v = _frontmatter_value(spec_text, "author")
+    if v is None:
+        return None
+    m = re.search(r"<([^<>]*)>", v)
+    if m:
+        return m.group(1).strip() or None
+    return v.strip() if "@" in v else None
+
+
+def trusted_author_for(spec_text):
+    """The matched `trusted_authors()` row's `login` (or `email` when blank) —
+    case-insensitive, trimmed, against `spec_text`'s own frontmatter `author:`
+    email. `None` on no match, no rows, or unusable author frontmatter (every
+    PR-sourced packet resolves here, A4)."""
+    email = _frontmatter_author_email(spec_text)
+    if not email:
+        return None
+    needle = email.strip().lower()
+    for row in trusted_authors():
+        if (row.get("email") or "").strip().lower() == needle:
+            return row.get("login") or row.get("email")
+    return None
+
+
+def _charter_validity(charter_id):
+    """(state, ever_filed) for a charter id, read via `scan_events(lambda e:
+    True)` folded through `fold.fold()` — project-unfiltered (finding 2), NEVER
+    `fold.read_events()`, whose import-time `DOIT_PROJECT` filter would drop a
+    `charter-filed` event stamped under another project label. `state` is
+    `None` when the ledger has never named this charter id at all."""
+    import fold                          # here, not at the top: mirrors this
+                                          # file's own lazy `import dispatch`/`import fold`
+    events = scan_events(lambda e: True)
+    _, charters, _, _ = fold.fold(events)
+    c = charters.get(charter_id)
+    if c is None:
+        return None, False
+    return c.get("state"), any(e.get("type") == "charter-filed" for e in c["evs"])
+
+
+def _resolve_charter(spec_text, trusted_author):
+    """(charter, charter_reason) — A9's four-way split, trust gated FIRST
+    (Planner ruling, finding 1): an untrusted author's declared charter is
+    recorded on `charter_reason` but never honored, even naming a real, open
+    charter. Evaluated in order: trust, then presence, then validity."""
+    named = frontmatter_charter(spec_text)
+    if trusted_author is None:
+        return None, ("untrusted" if named else "absent")
+    if not named:
+        return None, "absent"
+    import tree_cleanup                  # here, not at the top: same lazy idiom
+    state, ever_filed = _charter_validity(named)
+    if not ever_filed:
+        return None, "unknown"
+    if state in tree_cleanup.CLOSED:
+        return None, "closed"
+    return named, None
 
 
 # ── the v4 record ─────────────────────────────────────────────────────────────
@@ -197,10 +333,13 @@ def _write_slot(body, source_id):
 
 
 def carried_slot(source):
-    """(slot_path, spec_id, source_id, charter=None) for a v4 record id.
+    """(slot_path, spec_id, source_id, charter, charter_reason) for a v4 record id.
 
     The packet is the staged bytes plus the trailer — not a verbatim copy of the
-    staged file, which would hand the writer no directive at all."""
+    staged file, which would hand the writer no directive at all. `charter` is
+    honored only when the staged material's own `author:` frontmatter matches
+    `trusted_authors()` FIRST (finding 1); `charter_reason` names why not
+    otherwise (`untrusted`/`absent`/`unknown`/`closed`)."""
     source = source.strip()
     if is_url(source):
         raise Refusal(f"carry: {source} is a url, not a v4 record id — the PR path builds its "
@@ -210,7 +349,12 @@ def carried_slot(source):
         raise Refusal(f"carry: refuses {source}: v4 record {path.name} has an empty or missing "
                       f"`intent` — there is nothing to carry")
     staged = staged_material(source, source_id, record)
-    return _write_slot(staged + TRAILER.format(source_id=source_id).encode(), source_id)
+    text = staged.decode("utf-8", "replace")
+    trusted_author = trusted_author_for(text)
+    charter, charter_reason = _resolve_charter(text, trusted_author)
+    trailer = TRAILER.format(charter_clause=_charter_clause(charter), source_id=source_id)
+    slot, spec_id, source_id, _ = _write_slot(staged + trailer.encode(), source_id)
+    return slot, spec_id, source_id, charter, charter_reason
 
 
 def head_sha(repo):
@@ -243,7 +387,11 @@ def head_sha(repo):
 
 def pr_slot(url, title, body, repo):
     """The narrow PR path: construction only. Both flags are required — a missing one
-    is a refusal, never a silently empty packet. AC9's live-fetch half is owed."""
+    is a refusal, never a silently empty packet. AC9's live-fetch half is owed.
+    `author:` is always the invoking operator's local username, never a real
+    GitHub login (A4), so `trusted_author` — and therefore `charter` — always
+    resolves `None`; `charter_reason` is always `"absent"` (no `charter:` key is
+    ever written here) until a live PR-author fetch exists (out of scope)."""
     if not (title and title.strip()) or not (body and body.strip()):
         raise Refusal(f"carry: refuses {url}: the PR path needs both --title and --body — this "
                       f"command constructs the packet from flags and never fetches the PR")
@@ -255,8 +403,12 @@ def pr_slot(url, title, body, repo):
             f"author: {json.dumps(author or 'unknown')}\n"
             f"base_sha: {json.dumps(head_sha(repo))}\n"
             "---\n\n"
-            f"# {title}\n") + TRAILER.format(source_id=url)
-    return _write_slot(text.encode(), url.strip())
+            f"# {title}\n")
+    trusted_author = trusted_author_for(text)
+    charter, charter_reason = _resolve_charter(text, trusted_author)
+    trailer = TRAILER.format(charter_clause=_charter_clause(charter), source_id=url)
+    slot, spec_id, source_id, _ = _write_slot((text + trailer).encode(), url.strip())
+    return slot, spec_id, source_id, charter, charter_reason
 
 
 # ── the tier ──────────────────────────────────────────────────────────────────
@@ -277,13 +429,19 @@ def scan_events(pred):
     """Every matching event under `$DOIT_ROOT/events`, oldest file first, with NO
     project filter. `fold.read_events()` drops every event whose `project` differs
     from `DOIT_PROJECT`, so a spec carried under another project label is invisible
-    to a naive guard and the double-spend the guard exists to prevent happens anyway."""
+    to a naive guard and the double-spend the guard exists to prevent happens anyway.
+
+    Every returned event is stamped with `actor`, derived from its source filename
+    exactly as `fold.read_events()` derives it (L-spec-0198, finding 2) — additive;
+    existing callers that never look at `actor` are unaffected."""
     out = []
     for f in sorted((root() / "events").glob("*.jsonl")):
         try:
             lines = f.read_text().splitlines()
         except OSError:
             continue
+        parts = f.stem.split("-")
+        actor = "-".join(parts[1:-1]) if len(parts) >= 3 else f.stem
         for line in lines:
             if not line.strip().startswith("{"):
                 continue
@@ -291,6 +449,7 @@ def scan_events(pred):
                 e = json.loads(line)
             except ValueError:
                 continue
+            e = {**e, "actor": actor}
             if pred(e):
                 out.append(e)
     return out
@@ -359,16 +518,23 @@ def _do_carry(source, *, repo=None, project=None, force=False, title=None, body=
         raise Refusal(f"carry: {source} was already carried as {prior.get('subject')}; "
                       f"re-run with --force to carry again")
     if is_url(source):
-        slot, spec_id, source_id, _ = pr_slot(source, title, body, repo)
+        slot, spec_id, source_id, charter, charter_reason = pr_slot(source, title, body, repo)
         audited_at = now()
     else:
         # `handed_over_at` rides through VERBATIM: never re-parsed as a datetime
         # and re-serialized, which would rewrite the v4 record's own stamp.
         audited_at = (resolve_record(source)[1].get("handed_over_at") or now())
-        slot, spec_id, source_id, _ = carried_slot(source)
+        slot, spec_id, source_id, charter, charter_reason = carried_slot(source)
+    # Re-derived from the packet's own persisted frontmatter (never re-computed
+    # from the pre-trailer text) so `carried_slot`/`pr_slot` keep the 5-tuple
+    # shape their Produces signature pins, and `_do_carry` still learns who the
+    # trust match named for the `spec-carried` stamp (R10).
+    trusted_author = trusted_author_for(pathlib.Path(slot).read_text())
     path = str(root() / "content" / f"{spec_id}.md")
-    cmd = [str(doit_bin()), "dispatch", "spec-writer", spec_id, "--packet", str(slot),
-           "--path", path, "--cwd", str(repo), "--project", project]
+    cmd = [str(doit_bin()), "dispatch", "spec-writer", spec_id]
+    if charter is not None:
+        cmd += ["--charter", charter]
+    cmd += ["--packet", str(slot), "--path", path, "--cwd", str(repo), "--project", project]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
         why = next((l for l in (r.stderr or "").splitlines() if l.startswith("FAILED ")),
@@ -396,6 +562,13 @@ def _do_carry(source, *, repo=None, project=None, force=False, title=None, body=
     # afterward — identically to the dispatch-failure and killed-spawn paths above.
     event = {"v": 1, "ts": now(), "type": "spec-carried", "subject": spec_id, "source": source_id,
              "tier": tier, "audited_at": audited_at, "footprint": footprint}
+    # Null encoding, pinned (finding 3): each of the three is OMITTED — from the
+    # event dict `check_append` sees AND from the append argv — when `None`,
+    # never the literal `"null"` and never a `k:=null` forced key.
+    for k, v in (("charter", charter), ("charter_reason", charter_reason),
+                ("trusted_author", trusted_author)):
+        if v is not None:
+            event[k] = v
     actor = ledger_actor()
     import fold                          # here, not at the top: mirrors this file's own lazy
                                           # `import dispatch` inside `_write_slot` — `check_append`
@@ -404,10 +577,14 @@ def _do_carry(source, *, repo=None, project=None, force=False, title=None, body=
     if reason is not None:
         raise CarryFailed(f"carry: {spec_id} would not be honoured by the fold — {reason}. "
                           f"Nothing was appended.")
-    ap = subprocess.run([str(doit_bin()), "append", "spec-carried", spec_id,
-                         f"source={source_id}", f"tier={tier}", f"audited_at={audited_at}",
-                         f"footprint={json.dumps(footprint)}"],
-                        capture_output=True, text=True)
+    ap_argv = [str(doit_bin()), "append", "spec-carried", spec_id,
+              f"source={source_id}", f"tier={tier}", f"audited_at={audited_at}",
+              f"footprint={json.dumps(footprint)}"]
+    for k, v in (("charter", charter), ("charter_reason", charter_reason),
+                ("trusted_author", trusted_author)):
+        if v is not None:
+            ap_argv.append(f"{k}={v}")
+    ap = subprocess.run(ap_argv, capture_output=True, text=True)
     if ap.returncode != 0:
         raise CarryFailed(f"carry: {spec_id} was written but spec-carried did not append — "
                           f"{(ap.stderr or '').strip()[-160:]}")
