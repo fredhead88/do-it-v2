@@ -463,7 +463,19 @@ def write_verify_script(c):
     characters. A `VerifyLint` from the pure function still refuses the packet
     here — `die()`, non-zero exit, on stderr — rather than writing a script
     that lies about what it checks; `None` (no Verification block) passes
-    through unchanged for every caller's own empty-verify line."""
+    through unchanged for every caller's own empty-verify line.
+
+    L-spec-0194: right after the injected `BASE=<sha>` line, and before the
+    spec's own block, one further conditional line is inserted when the
+    subject's OWN most recent `build-started` carries `dsn_role == "readonly"`
+    (`dispatch.provision_worktree_env`'s verdict) — meaning `<worktree>/.env`
+    now holds the RO DSN under the name every `live_db` test reads. Exporting
+    it at the OS-process level, before any interpreter in the chain starts, is
+    what stops a `live_db` criterion from self-skipping — a bare `.env` file
+    alone does not, since neither conftest in albert-scott calls
+    `load_dotenv`. No `build-started` event yet, or `dsn_role` reading
+    `absent`/`refused`/missing entirely, adds no line — byte-for-byte what this
+    function produced before this addition."""
     spec = c.spec_file()
     try:
         text = verify_script(spec.read_text())
@@ -473,7 +485,9 @@ def write_verify_script(c):
         return None
     base = verify_base_sha(c)
     shebang, set_e, block = text.split("\n", 2)
-    text = f"{shebang}\n{set_e}\nBASE={base}\n{block}"
+    bs = c.last("build-started")
+    dsn_line = "set -a; . ./.env; set +a\n" if bs and bs.get("dsn_role") == "readonly" else ""
+    text = f"{shebang}\n{set_e}\nBASE={base}\n" + dsn_line + block
     p = CONTENT / f"verify-{c.a.subject}.sh"
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(text)

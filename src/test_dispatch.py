@@ -13,7 +13,7 @@ os.environ["DOIT_ROOT"], os.environ["DOIT_NO_POKE"] = str(TMP), "1"
 # The seat-route blocks below set and del it around themselves on purpose.
 os.environ.pop("DOIT_SEAT", None)
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
-import dispatch, fold  # noqa: E402
+import dispatch, fold, harness  # noqa: E402
 
 REPO = TMP / "repo"
 REPO.mkdir()
@@ -716,5 +716,223 @@ r2 = dispatch.emit(EMIT_VERDICT, {}, "verdict", subject="x", confirmed=True, n=1
 assert r2 is None, r2
 assert any(json.loads(l)["type"] == "verdict" for l in EMIT_VERDICT.read_text().splitlines()), \
     "an actor/type mismatch alone is never refused at the emit() door — only recorded and ignored at fold time"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-0194 · worktree-readonly-dsn (L-charter-0028) — R3
+# ══════════════════════════════════════════════════════════════════════════════
+_H = []
+
+
+def _root(name):
+    """A fresh, private directory this file is responsible for cleaning up —
+    never the real HOME/DOIT_ROOT (harness.py, L-spec-0183)."""
+    p = harness.test_root(name)
+    _H.append(p)
+    return p
+
+
+def _checkout(name, env_text=None):
+    d = _root(f"checkout-{name}")
+    if env_text is not None:
+        (d / ".env").write_text(env_text)
+    return d
+
+
+def _worktree(name, git=False, gitignore=None, existing_env=None):
+    d = _root(f"worktree-{name}")
+    if git:
+        subprocess.run(["git", "init", "-q"], cwd=d, check=True)
+    if gitignore is not None:
+        (d / ".gitignore").write_text(gitignore)
+    if existing_env is not None:
+        (d / ".env").write_text(existing_env)
+    return d
+
+
+# ── AC1 · no .env at all -> None ──────────────────────────────────────────────
+co1 = _checkout("ac1")
+assert dispatch.readonly_dsn(co1) is None, "AC1"
+
+# ── AC2 · .env with SUPABASE_DB_URL / SUPABASE_DB_URL_DIRECT only -> None ─────
+co2 = _checkout("ac2", "SUPABASE_DB_URL=rw1\nSUPABASE_DB_URL_DIRECT=rw2\n")
+assert dispatch.readonly_dsn(co2) is None, "AC2"
+
+# ── AC3 · four .env shapes ─────────────────────────────────────────────────────
+assert dispatch.readonly_dsn(_checkout("ac3-1", "SUPABASE_DB_URL_RO=plain-value\n")) == "plain-value", \
+    "AC3.1: unquoted value verbatim"
+assert dispatch.readonly_dsn(_checkout("ac3-2", 'SUPABASE_DB_URL_RO="quoted-value"\n')) == "quoted-value", \
+    "AC3.2: double-quoted value, quotes stripped"
+assert dispatch.readonly_dsn(_checkout("ac3-3", "# a comment\nSUPABASE_DB_URL_RO=real-value\n")) == "real-value", \
+    "AC3.3: a comment line is not a declaration"
+assert dispatch.readonly_dsn(_checkout("ac3-4", "SUPABASE_DB_URL_RO=first\nSUPABASE_DB_URL_RO=second\n")) == "second", \
+    "AC3.4: the key declared twice -> the LAST value"
+
+# ── AC4 · no RO key -> "absent", nothing written, worktree need not be a repo ──
+wt4 = _worktree("ac4")
+r = dispatch.provision_worktree_env(wt4, co2)
+assert r == "absent" and not (wt4 / ".env").exists(), ("AC4", r)
+
+# ── AC5 · RO byte-equals SUPABASE_DB_URL -> "refused" ─────────────────────────
+co5 = _checkout("ac5", "SUPABASE_DB_URL=same-value\nSUPABASE_DB_URL_RO=same-value\n")
+wt5 = _worktree("ac5")
+r = dispatch.provision_worktree_env(wt5, co5)
+assert r == "refused" and not (wt5 / ".env").exists(), ("AC5", r)
+
+# ── AC6 · RO byte-equals SUPABASE_DB_URL_DIRECT (distinct from SUPABASE_DB_URL)
+#         -> "refused" — the widened, not-just-SUPABASE_DB_URL match ──────────
+co6 = _checkout("ac6", "SUPABASE_DB_URL=rw-value\nSUPABASE_DB_URL_DIRECT=direct-value\n"
+                       "SUPABASE_DB_URL_RO=direct-value\n")
+wt6 = _worktree("ac6")
+r = dispatch.provision_worktree_env(wt6, co6)
+assert r == "refused" and not (wt6 / ".env").exists(), ("AC6", r)
+
+# A checkout with a valid RO DSN distinct from every OTHER DB_URL-named key,
+# reused by AC7-AC10.
+CO_VALID = _checkout("valid", "SUPABASE_DB_URL=rw-value\nSUPABASE_DB_URL_DIRECT=direct-value\n"
+                              "PG_PARITY_DB_URL=parity-value\nSUPABASE_DB_URL_RO=ro-distinct-value\n")
+RO_LINE = b"SUPABASE_DB_URL=ro-distinct-value\n"
+
+# ── AC7 · worktree IS a git repo, .gitignore does not list .env -> "refused",
+#         proving the ignore-gate fires independently of the equality gate ────
+wt7 = _worktree("ac7", git=True)   # no .gitignore at all
+r = dispatch.provision_worktree_env(wt7, CO_VALID)
+assert r == "refused" and not (wt7 / ".env").exists(), ("AC7", r)
+
+# ── AC8 · fresh git worktree, .gitignore lists .env, no pre-existing .env ─────
+wt8 = _worktree("ac8", git=True, gitignore=".env\n")
+r = dispatch.provision_worktree_env(wt8, CO_VALID)
+env8 = wt8 / ".env"
+assert r == "readonly" and env8.read_bytes() == RO_LINE, ("AC8", r, env8.read_bytes() if env8.exists() else None)
+assert (env8.stat().st_mode & 0o777) == 0o600, oct(env8.stat().st_mode)
+
+# ── AC9 · repeated on AC8's already-provisioned pair -> "readonly" again,
+#         content unchanged (idempotent) ──────────────────────────────────────
+r2 = dispatch.provision_worktree_env(wt8, CO_VALID)
+assert r2 == "readonly" and env8.read_bytes() == RO_LINE, ("AC9", r2)
+
+# ── AC10 · a pre-existing, unrelated .env -> "refused", bytes unchanged,
+#          worktree need not be a git repo ────────────────────────────────────
+wt10 = _worktree("ac10", existing_env="SOME_OTHER_VAR=x\n")
+before10 = (wt10 / ".env").read_bytes()
+r = dispatch.provision_worktree_env(wt10, CO_VALID)
+assert r == "refused" and (wt10 / ".env").read_bytes() == before10, ("AC10", r)
+
+for p in _H:
+    harness.cleanup(p)
+
+# ── AC11-AC15 · dispatch.main() wires dsn_role end to end ────────────────────
+DSN_PROJECT = "dsnproj"
+DSN_CHECKOUT = TMP / "repos" / DSN_PROJECT
+DSN_CHECKOUT.mkdir(parents=True)
+(DSN_CHECKOUT / ".env").write_text("SUPABASE_DB_URL=rw-value\nSUPABASE_DB_URL_DIRECT=direct-value\n"
+                                   "SUPABASE_DB_URL_RO=e2e-ro-value\n")
+E2E_LINE = b"SUPABASE_DB_URL=e2e-ro-value\n"
+_H2 = []
+
+
+def _dsn_worktree(name):
+    d = harness.test_root(f"dsn-wt-{name}")
+    _H2.append(d)
+    subprocess.run(["git", "init", "-q"], cwd=d, check=True)
+    (d / ".gitignore").write_text(".env\n")
+    return d
+
+
+def drive(role, subject, cwd, project, out):
+    """Like spawn() above, but drives dispatch.main() with a caller-chosen
+    project/cwd — spawn() itself is pinned to REPO/project="t" for every
+    other case in this file, which is exactly the case dsn_role=="absent"
+    ends up exercising anyway (no repos/t/.env ever exists here)."""
+    res = {"is_error": False, "terminal_reason": "completed", "structured_output": out, "num_turns": 1,
+           "usage": {"input_tokens": 1, "output_tokens": 2}, "total_cost_usd": 0.01,
+           "modelUsage": {"m": {}}, "permission_denials": []}
+    seen = {}
+
+    def fake(cmd, packet, cwd_, timeout):
+        p = pathlib.Path(cwd_) / ".env"
+        seen["env_exists_at_call"] = p.exists()
+        seen["env_bytes_at_call"] = p.read_bytes() if p.exists() else None
+        fake.cmd = cmd
+        return argparse.Namespace(stdout=json.dumps(res), returncode=0, stderr="")
+    dispatch.run_claude = fake
+    a = argparse.Namespace(role=role, subject=subject, packet=str(PK), path=None,
+                           cwd=str(cwd), charter=None, project=project, mcp_config=None,
+                           timeout=None, max_usd=None)
+    try:
+        dispatch.main(a)
+        code = 0
+    except SystemExit as e:
+        code = e.code
+    # [0-9]*, not *: L-builder-notgrader-test.jsonl (EMIT_VERDICT, above) also
+    # matches a bare "L-builder-*.jsonl" and, being non-numeric, sorts after
+    # every real 4-digit spawn id — max() would silently pick IT instead.
+    raw = [json.loads(l) for l in
+           max((TMP / "events").glob(f"L-{role}-[0-9]*.jsonl")).read_text().splitlines()]
+    return code, raw, seen
+
+
+# AC11: build-started carries dsn_role=="readonly", and <cwd>/.env exists with
+# the exact one line already at the moment the mocked spawn is invoked.
+wt11 = _dsn_worktree("ac11")
+code, raw11, seen11 = drive("builder", "L-spec-0111", wt11, DSN_PROJECT, card)
+bs11 = next(e for e in raw11 if e["type"] == "build-started")
+assert bs11["dsn_role"] == "readonly", bs11
+assert seen11["env_exists_at_call"] and seen11["env_bytes_at_call"] == E2E_LINE, \
+    ("AC11: not provisioned before the mocked spawn ran", seen11)
+assert (wt11 / ".env").read_bytes() == E2E_LINE, "AC11: final state"
+
+# AC12: the grader's own spawn-started carries role AND dsn_role together.
+wt12 = _dsn_worktree("ac12")
+code, raw12, seen12 = drive("grader", "L-spec-0112", wt12, DSN_PROJECT, grade([met]))
+ss12 = next(e for e in raw12 if e["type"] == "spawn-started")
+assert ss12["role"] == "grader" and ss12["dsn_role"] == "readonly", ss12
+
+# AC13: every OTHER role's spawn-started carries no dsn_role key at all.
+# A fresh packet body, not the file-wide "a packet\n": an identical
+# (packet, contract) pair already failed as L-research-0018 (weekly limit)
+# above, and D120 refuses to re-spend on that exact combination.
+PK.write_text("a packet for AC13\n")
+code, types, evs, _ = spawn("research", out=research, path=rp)
+PK.write_text("a packet\n")
+assert code == 0, (code, types, evs)
+assert spawn.raw[0]["type"] == "spawn-started" and spawn.raw[0]["role"] == "research", spawn.raw[0]
+assert "dsn_role" not in spawn.raw[0], spawn.raw[0]
+
+# AC14: a.project falsy -> dsn_role=="absent", no .env written, and the
+# git-check-ignore subprocess is never invoked at all.
+wt14 = harness.test_root("dsn-wt-ac14")   # deliberately not even a git repo
+_H2.append(wt14)
+_ignore_calls = {"n": 0}
+_real_subprocess_run = subprocess.run
+
+
+def _counting_run(cmd, *a_, **kw):
+    if len(cmd) > 1 and cmd[0] == "git" and "check-ignore" in cmd:
+        _ignore_calls["n"] += 1
+    return _real_subprocess_run(cmd, *a_, **kw)
+
+
+subprocess.run = _counting_run
+try:
+    code, raw14, seen14 = drive("builder", "L-spec-0114", wt14, None, card)
+finally:
+    subprocess.run = _real_subprocess_run
+bs14 = next(e for e in raw14 if e["type"] == "build-started")
+assert bs14["dsn_role"] == "absent" and not (wt14 / ".env").exists() and _ignore_calls["n"] == 0, \
+    (bs14, _ignore_calls)
+
+# AC15: the RO DSN literal appears in neither captured stdout/stderr nor any
+# field of any ledger event appended on the subject.
+wt15 = _dsn_worktree("ac15")
+_buf_out, _buf_err = io.StringIO(), io.StringIO()
+with contextlib.redirect_stdout(_buf_out), contextlib.redirect_stderr(_buf_err):
+    code, raw15, seen15 = drive("builder", "L-spec-0115", wt15, DSN_PROJECT, card)
+_captured = _buf_out.getvalue() + _buf_err.getvalue()
+assert "e2e-ro-value" not in _captured, "AC15: the DSN literal leaked into stdout/stderr"
+for e in raw15:
+    assert "e2e-ro-value" not in json.dumps(e), ("AC15: the DSN literal leaked into a ledger event", e)
+
+for p in _H2:
+    harness.cleanup(p)
 
 print(f"dispatch: {N} spawns mocked, every check fired")

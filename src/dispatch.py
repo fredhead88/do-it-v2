@@ -476,6 +476,77 @@ def events_for(role, out, a, base):
     return ev + qs + decl
 
 
+def _parse_env(path):
+    """KEY=value pairs from an `.env` file: last occurrence wins, a `#`-prefixed
+    or key-less line is not a declaration, matching outer quotes are stripped.
+    Values are never further trimmed or case-folded (L-spec-0194 Constraints —
+    every byte/value comparison downstream is raw equality). `{}` when `path`
+    is not a file."""
+    out = {}
+    if not path.is_file():
+        return out
+    for raw in path.read_text().splitlines():
+        s = raw.strip()
+        if not s or s.startswith("#") or "=" not in s:
+            continue
+        key, _, val = s.partition("=")
+        key = key.strip()
+        if not key:
+            continue
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in "'\"":
+            val = val[1:-1]
+        out[key] = val
+    return out
+
+
+def readonly_dsn(project_checkout):
+    """The value bound to SUPABASE_DB_URL_RO in <project_checkout>/.env, or
+    None when the file or the key is absent. A local file read only — never a
+    subprocess, never a network call (L-spec-0194 Constraints)."""
+    return _parse_env(pathlib.Path(project_checkout) / ".env").get("SUPABASE_DB_URL_RO")
+
+
+def provision_worktree_env(worktree, project_checkout):
+    """Copies the checkout's operator-placed read-only DSN into `<worktree>/.env`
+    under the name every `live_db` test reads, SUPABASE_DB_URL — refusing,
+    never guessing, whenever the value could instead be a mislabeled read-write
+    credential (L-spec-0194 security_path). Returns on the first matching step:
+      "absent"   — the checkout carries no SUPABASE_DB_URL_RO; nothing written.
+      "refused"  — the RO value byte-equals some OTHER checkout key whose name
+                   contains DB_URL; OR `<worktree>/.env` already exists holding
+                   different bytes; OR the worktree's own `.gitignore` does not
+                   cover `.env` (a later `git add -A` there would commit it).
+      "readonly" — `<worktree>/.env` already holds exactly this one line
+                   (idempotent, no write), or now does after writing it, mode
+                   0o600.
+    The one subprocess this runs, `git check-ignore`, decides the last step
+    only; its stdout/stderr are discarded and never logged, and the DSN value
+    is never passed to it (Constraints — the narrow, named subprocess
+    exception)."""
+    worktree, project_checkout = pathlib.Path(worktree), pathlib.Path(project_checkout)
+    dsn = readonly_dsn(project_checkout)
+    if dsn is None:
+        return "absent"
+    env = _parse_env(project_checkout / ".env")
+    if any(k != "SUPABASE_DB_URL_RO" and "DB_URL" in k and v == dsn for k, v in env.items()):
+        return "refused"
+    line = f"SUPABASE_DB_URL={dsn}\n"
+    dest = worktree / ".env"
+    if dest.exists():
+        return "readonly" if dest.read_bytes() == line.encode() else "refused"
+    try:
+        r = subprocess.run(["git", "-C", str(worktree), "check-ignore", "-q", "--no-index", ".env"],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        ignored = r.returncode == 0
+    except OSError:
+        ignored = False
+    if not ignored:
+        return "refused"
+    dest.write_text(line)
+    dest.chmod(0o600)
+    return "readonly"
+
+
 def main(a):
     kind, tmin, usd = ROLES[a.role]
     atexit.register(poke)
@@ -547,10 +618,19 @@ def main(a):
         fail(f"repo status undetermined in {cwd} before spawn — not spent")
     # A start event for every role: the tick reads a start with no terminal event as
     # in flight and keeps the subject off the lane (found on the first real chain).
+    # L-spec-0194: the worktree's read-only DSN rides in HERE, before the start
+    # event, so `dsn_role` on it is never stale by the time the spec's own
+    # verify script (packet.verify_script) decides whether to export it.
+    dsn_role = None
+    if a.role in ("builder", "grader"):
+        dsn_role = provision_worktree_env(cwd, ROOT / "repos" / a.project) if a.project else "absent"
     if builder:
-        emit(ledger, base, "build-started", worktree=cwd)
+        emit(ledger, base, "build-started", worktree=cwd, dsn_role=dsn_role)
     else:
-        emit(ledger, base, "spawn-started", role=a.role)
+        kv = {"role": a.role}
+        if a.role == "grader":
+            kv["dsn_role"] = dsn_role
+        emit(ledger, base, "spawn-started", **kv)
     packet += f"\n\nspawn_id: {spawn}\n"
     tools = [t.strip() for t in fm["tools"].split(",") if t.strip() != "StructuredOutput"]
     mcp = json.load(open(a.mcp_config)) if a.mcp_config else {}

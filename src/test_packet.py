@@ -978,4 +978,57 @@ btxt = (TMP / "content" / "verify-L-spec-0080.sh").read_text()
 assert btxt.splitlines()[2] == "BASE=X0000001", \
     f"AC6: the earliest build-done's base_sha wins, never a later round's or the live worktree HEAD: {btxt.splitlines()[:4]!r}"
 
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-0194 · worktree-readonly-dsn (L-charter-0028) — R3, AC17-AC18
+# ══════════════════════════════════════════════════════════════════════════════
+DSN_LINE = "set -a; . ./.env; set +a"
+
+
+def _dsn_spec(sid):
+    p = TMP / "content" / f"{sid}.md"
+    p.write_text(f"# {sid}\n## 8. Verification\n```\ncd src && /usr/bin/python3 test_fold.py\n```\n"
+                 "## Acceptance criteria\nAC1 [backend]: x.\n"
+                 "  review_path: log in as x / go to x / do x / worked if x / failed if x.\n")
+    ev("spec-writer", "spec-written", sid, path=str(p), footprint=["src/fold.py"])
+
+
+# AC18a: no build-started event on the subject at all — this is the reference
+# text every other AC18 case must reproduce byte-for-byte.
+S18A = "L-spec-0301"
+_dsn_spec(S18A)
+build("spec-auditor", subject=S18A, worktree=str(REPO))
+REF_NO_DSN = (TMP / "content" / f"verify-{S18A}.sh").read_text()
+assert DSN_LINE not in REF_NO_DSN, "AC18a: no build-started -> no export line"
+N += 1
+
+# AC17: the subject's most recent build-started carries dsn_role="readonly" —
+# the export line lands immediately after BASE=<sha> and before the block.
+S17 = "L-spec-0302"
+_dsn_spec(S17)
+ev("builder", "build-started", S17, worktree="/x", dsn_role="readonly")
+build("spec-auditor", subject=S17, worktree=str(REPO))
+t17 = (TMP / "content" / f"verify-{S17}.sh").read_text()
+lines17 = t17.splitlines()
+assert lines17[2].startswith("BASE=") and lines17[3] == DSN_LINE, lines17[:5]
+assert "cd src && /usr/bin/python3 test_fold.py" in t17
+N += 1
+
+# AC18b: dsn_role="absent" -> no export line, byte-identical to the no-event case.
+S18B = "L-spec-0303"
+_dsn_spec(S18B)
+ev("builder", "build-started", S18B, worktree="/x", dsn_role="absent")
+build("spec-auditor", subject=S18B, worktree=str(REPO))
+t18b = (TMP / "content" / f"verify-{S18B}.sh").read_text()
+assert DSN_LINE not in t18b and t18b == REF_NO_DSN, "AC18b"
+N += 1
+
+# AC18c: dsn_role="refused" -> no export line, byte-identical too.
+S18C = "L-spec-0304"
+_dsn_spec(S18C)
+ev("builder", "build-started", S18C, worktree="/x", dsn_role="refused")
+build("spec-auditor", subject=S18C, worktree=str(REPO))
+t18c = (TMP / "content" / f"verify-{S18C}.sh").read_text()
+assert DSN_LINE not in t18c and t18c == REF_NO_DSN, "AC18c"
+N += 1
+
 print(f"packet: {N} packets built, seven Blindness lists enforced")
