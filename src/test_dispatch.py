@@ -3,6 +3,7 @@
 The spawn is mocked; every after-the-fact check is exercised against the
 failure it was written for (D116, D120)."""
 import argparse, json, os, pathlib, subprocess, sys, tempfile
+from datetime import datetime as _dt, timedelta as _timedelta, timezone as _timezone
 
 TMP = pathlib.Path(tempfile.mkdtemp())
 os.environ["DOIT_ROOT"], os.environ["DOIT_NO_POKE"] = str(TMP), "1"
@@ -59,6 +60,10 @@ code, types, evs, _ = spawn("research", result={"is_error": True, "terminal_reas
                                                 "api_error_status": 401, "result": "Not logged in"}, path=rp)
 assert code == 1 and types == ["escalation-blocking", "spawn-failed"], types
 assert "/login" in evs[0]["why"], "an unreachable seat is the operator's, never retried"
+# AC23/L-spec-0192: this call now carries what satisfies escalation_ok, or emit()'s
+# new required-fields door (R3) would have refused it outright and dropped the
+# type from `types` above entirely — the assertion just above is the regression.
+assert fold.escalation_ok(evs[0]) and "irreversible" in evs[0], evs[0]
 
 code, types, evs, _ = spawn("research", out=research, path=rp)
 assert code == 1 and "nothing at" in evs[0]["why"], "D120 W3: a success claim with no file on disk fails"
@@ -125,7 +130,12 @@ sp = TMP / "content" / "L-spec-0001.md"
 code, types, evs, _ = spawn("spec-writer", out=sw, path=sp, side=lambda: sp.write_text("spec"))
 assert code == 0 and types == ["spec-written", "question", "spawn-done"], types
 assert evs[0]["unknown_count"] == 1 and evs[0]["footprint"] == ["a.py"]
-code, types, evs, _ = spawn("spec-writer", out={**sw, "status": "killed", "killed_by_check": 2, "escalations": []})
+# AC11/L-spec-0192: its own dedicated subject, never "L-spec-0001" — R3's new
+# refusal (AC10) reads `spec-killed` as terminal, and the card/builder-dispatch
+# fixture further down still targets the harness-default "L-spec-0001"; a
+# spec-killed written there would collide with it and break a passing path.
+code, types, evs, _ = spawn("spec-writer", out={**sw, "status": "killed", "killed_by_check": 2, "escalations": []},
+                            subject="L-spec-0002")
 assert code == 0 and types == ["spec-killed", "spawn-done"] and evs[0]["check"] == 2, "killed needs no file"
 # S15: an owed criterion carries the instant that proves it, or the schema refuses it.
 owed = {**sw, "escalations": [], "declarations": [{"term": "owed-ac", "criterion": "AC7", "wake_at": "2026-09-16T11:04:00Z",
@@ -645,4 +655,66 @@ for bad_packet in ("", str(TMP / "nowhere.md")):
     except SystemExit as e:
         assert "not a file" in str(e.code) and "nothing allocated" in str(e.code), e.code
 assert sorted((TMP / "events").glob("L-research-*.jsonl")) == before_files, "refused before allocation: no new spawn file"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-0192 · fold-states-owed-due-and-killed (L-charter-0028) — R3
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── AC10 · role=builder is refused against a killed subject, before any spend ─
+code, types, evs, cmd = spawn("spec-writer", out={**sw, "status": "killed", "killed_by_check": 2,
+                                                   "escalations": []}, subject="L-spec-0099")
+assert code == 0 and types == ["spec-killed", "spawn-done"], (types, evs)
+code, types, evs, cmd = spawn("builder", out=card, subject="L-spec-0099")
+assert code == 1 and types == ["spawn-failed"] and "killed" in evs[0]["why"], (types, evs)
+assert cmd is None, "run_claude must never be called on a killed-subject refusal"
+
+# ── AC12 · role=builder is refused while a spec-writer spawn is still open ────
+OPEN_SW = TMP / "events" / "L-spec-writer-open9192.jsonl"
+dispatch.emit(OPEN_SW, {}, "spawn-started", subject="L-spec-0097", role="spec-writer",
+             spawn="L-spec-writer-open9192")
+code, types, evs, cmd = spawn("builder", out=card, subject="L-spec-0097")
+assert code == 1 and types == ["spawn-failed"] and "spec-writer spawn" in evs[0]["why"], (types, evs)
+assert cmd is None, "run_claude must never be called on an open-spec-writer-spawn refusal"
+
+# ── AC13a · a spawn-done for the EXACT spawn id lets the builder proceed ──────
+DONE_SW = TMP / "events" / "L-spec-writer-done9192.jsonl"
+dispatch.emit(DONE_SW, {}, "spawn-started", subject="L-spec-0096", role="spec-writer",
+             spawn="L-spec-writer-done9192")
+dispatch.emit(DONE_SW, {}, "spawn-done", subject="L-spec-0096", spawn="L-spec-writer-done9192")
+code, types, evs, cmd = spawn("builder", out=card, subject="L-spec-0096")
+assert code == 0 and cmd is not None, (code, types, evs)
+
+# ── AC13b · a spawn-stale for the EXACT spawn id proceeds too ─────────────────
+STALE_SW = TMP / "events" / "L-spec-writer-stale9192.jsonl"
+dispatch.emit(STALE_SW, {}, "spawn-started", subject="L-spec-0095", role="spec-writer",
+             spawn="L-spec-writer-stale9192")
+dispatch.emit(STALE_SW, {}, "spawn-stale", subject="L-spec-0095", spawn="L-spec-writer-stale9192")
+code, types, evs, cmd = spawn("builder", out=card, subject="L-spec-0095")
+assert code == 0 and cmd is not None, (code, types, evs)
+
+# ── AC13c · an unmatchable start (no spawn id) aged past 2x the spec-writer cap
+# also proceeds — mirroring tick.in_flight's own handling of one.
+_cap = dispatch.ROLES["spec-writer"][1]
+_old_ts = (_dt.now(_timezone.utc) - _timedelta(minutes=2 * _cap + 5)).isoformat(timespec="seconds")
+OLD_SW = TMP / "events" / "L-spec-writer-nospawn9192.jsonl"
+OLD_SW.write_text(json.dumps({"v": 1, "ts": _old_ts, "type": "spawn-started",
+                              "subject": "L-spec-0094", "role": "spec-writer"}) + "\n")
+code, types, evs, cmd = spawn("builder", out=card, subject="L-spec-0094")
+assert code == 0 and cmd is not None, (code, types, evs)
+
+# ── AC14 · dispatch.emit() gates on the required-fields door ONLY ─────────────
+EMIT_ESC = TMP / "events" / "L-emit-esc-test.jsonl"
+before_lines = EMIT_ESC.read_text().splitlines() if EMIT_ESC.is_file() else []
+reason = dispatch.emit(EMIT_ESC, {}, "escalation-blocking", subject="x", why="y")
+after_lines = EMIT_ESC.read_text().splitlines() if EMIT_ESC.is_file() else []
+assert reason is not None and "default" in reason and "deadline" in reason and "revert" in reason, reason
+assert after_lines == before_lines, "a field-refused emit() writes nothing"
+
+EMIT_VERDICT = TMP / "events" / "L-builder-notgrader-test.jsonl"   # actor "builder" is not in EMITS["verdict"]
+r2 = dispatch.emit(EMIT_VERDICT, {}, "verdict", subject="x", confirmed=True, n=1,
+                   matches_intent="yes", card_ok="yes", cannot_assess=[])
+assert r2 is None, r2
+assert any(json.loads(l)["type"] == "verdict" for l in EMIT_VERDICT.read_text().splitlines()), \
+    "an actor/type mismatch alone is never refused at the emit() door — only recorded and ignored at fold time"
+
 print(f"dispatch: {N} spawns mocked, every check fired")

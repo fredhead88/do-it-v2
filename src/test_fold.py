@@ -1184,7 +1184,9 @@ _none_specs = [s for s in none_fx[1].values() if s["charter"] == RC]
 assert _none_specs == [], "no specs on this fixture charter, by construction"
 
 # ── R4/R8/R13/R15/AC8 · the four new EMITS entries, exactly their actors ──────
-assert fold.EMITS["spec-carried"] == {"operator"}
+# R10/L-spec-0192 widens spec-carried to admit the executor's own `doit carry`
+# write — see the dedicated EMITS-widening block further down.
+assert fold.EMITS["spec-carried"] == {"operator", "executor"}
 assert fold.EMITS["conflict-rework"] == {"executor"}
 assert fold.EMITS["message-sent"] == {"planner", "executor", "thinker"}
 assert fold.EMITS["repo-edit"] == {"executor"}
@@ -1288,4 +1290,192 @@ finally:
         sys.modules["panes"] = _saved
 assert SESSIONS_DEFAULT.name == "sessions", SESSIONS_DEFAULT
 
-print("fold: 104 checks pass · +91 assertions (L-charter-0021: R3 R6 R11 R13 R14 R15)")
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-0192 · fold-states-owed-due-and-killed (L-charter-0028)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── AC1 · a due, unmet owed-ac -> shipped-owed-due, not evidence or plain shipped
+due_ac1 = [{"ts": stamp(0), "type": "owed-ac", "subject": S, "criterion": "AC1", "wake_at": stamp(7)}]
+_, sp, _, _, _ = ledger(**{"L-builder-01.jsonl": built, "L-grader-01.jsonl": graded,
+                           "L-reviewer-01.jsonl": reviewed, "L-executor-01.jsonl": shipped,
+                           "L-spec-writer-01.jsonl": due_ac1})
+assert sp[S]["state"] == "shipped-owed-due", sp[S]["state"]
+
+# ── AC2 · same fixture, wake_at 7 days in the FUTURE -> stays shipped-owed-evidence (D25)
+future_ac1 = [{**due_ac1[0], "wake_at": stamp(-7)}]
+_, sp, _, _, _ = ledger(**{"L-builder-01.jsonl": built, "L-grader-01.jsonl": graded,
+                           "L-reviewer-01.jsonl": reviewed, "L-executor-01.jsonl": shipped,
+                           "L-spec-writer-01.jsonl": future_ac1})
+assert sp[S]["state"] == "shipped-owed-evidence", sp[S]["state"]
+
+# ── AC3 · a due criterion plus a co-existing NOT-yet-due one -> due wins
+due_plus_pending = due_ac1 + [{"ts": stamp(0), "type": "owed-ac", "subject": S,
+                                "criterion": "AC2", "wake_at": stamp(-7)}]
+_, sp, _, _, _ = ledger(**{"L-builder-01.jsonl": built, "L-grader-01.jsonl": graded,
+                           "L-reviewer-01.jsonl": reviewed, "L-executor-01.jsonl": shipped,
+                           "L-spec-writer-01.jsonl": due_plus_pending})
+assert sp[S]["state"] == "shipped-owed-due", sp[S]["state"]
+
+# ── AC4 · owed-met after the due owed-ac discharges it -> accepted
+_, sp, _, _, _ = ledger(**{"L-builder-01.jsonl": built, "L-grader-01.jsonl": graded,
+                           "L-reviewer-01.jsonl": reviewed,
+                           "L-executor-01.jsonl": shipped + [{"ts": stamp(0), "type": "owed-met",
+                                                              "subject": S, "criterion": "AC1",
+                                                              "evidence": "checked by hand"}],
+                           "L-spec-writer-01.jsonl": due_ac1})
+assert sp[S]["state"] == "accepted", sp[S]["state"]
+
+# ── AC5 · a standing rejected-criterion routes away from shipped-owed-due entirely
+_, sp, _, _, _ = ledger(**{"L-builder-01.jsonl": built, "L-grader-01.jsonl": graded,
+                           "L-reviewer-01.jsonl": reviewed,
+                           "L-executor-01.jsonl": shipped + [{"ts": stamp(0), "type": "rejected-criterion",
+                                                              "subject": S, "criterion": "AC1"}],
+                           "L-spec-writer-01.jsonl": due_ac1})
+assert sp[S]["state"] == "shipped", sp[S]["state"]
+
+# ── AC8 · owed_due() — one row per due-and-unmet criterion, across every spec
+S2 = "L-spec-0143"
+built_s2 = [{**e, "subject": S2} for e in built]
+graded_s2 = [{**e, "subject": S2} for e in graded]
+reviewed_s2 = [{**e, "subject": S2} for e in reviewed]
+shipped_s2 = [{**e, "subject": S2} for e in shipped]
+due_ac1_s2 = [{"ts": stamp(0), "type": "owed-ac", "subject": S2, "criterion": "AC1", "wake_at": stamp(7)}]
+pending_ac2_s2 = [{"ts": stamp(0), "type": "owed-ac", "subject": S2, "criterion": "AC2", "wake_at": stamp(-7)}]
+_, sp8, _, _, _ = ledger(**{
+    "L-builder-01.jsonl": built + built_s2, "L-grader-01.jsonl": graded + graded_s2,
+    "L-reviewer-01.jsonl": reviewed + reviewed_s2, "L-executor-01.jsonl": shipped + shipped_s2,
+    "L-spec-writer-01.jsonl": due_ac1 + due_ac1_s2 + pending_ac2_s2})
+rows = fold.owed_due(sp8)
+assert {(r["spec"], r["criterion"]) for r in rows} == {(S, "AC1"), (S2, "AC1")}, rows
+assert all(r["days_overdue"] > 0 for r in rows), rows
+assert all(set(r) == {"spec", "criterion", "due_at", "days_overdue", "src"} for r in rows), rows
+
+# ── AC9 · killed is terminal — survives a LATER stage event on the same subject
+S3 = "L-spec-0144"
+_, sp9, _, _, _ = ledger(**{
+    "L-spec-writer-01.jsonl": [{"ts": stamp(3), "type": "spec-written", "subject": S3},
+                              {"ts": stamp(2), "type": "spec-killed", "subject": S3, "check": 2}],
+    "L-builder-01.jsonl": [{"ts": stamp(1), "type": "build-started", "subject": S3}]})
+assert sp9[S3]["state"] == "killed", sp9[S3]["state"]
+
+# ── AC15 · append() raises for each missing required field, writes nothing;
+# an actor/type mismatch ALONE does not raise (the direct pair to AC14's 2nd case)
+os.environ["DOIT_LEDGER_FILE"] = "L-ac15-test.jsonl"
+AC15_LEDGER = fold.EVENTS / "L-ac15-test.jsonl"
+if AC15_LEDGER.is_file():
+    AC15_LEDGER.unlink()
+for argv, missing_word in (
+    (["escalation-blocking", "L-spec-9999"], "default"),
+    (["owed-ac", "L-spec-9999", "wake_at=2026-10-01T00:00:00Z"], "criterion"),
+    (["spec-carried", "L-spec-9999", "source=1454", "tier=1"], "audited_at"),
+):
+    before15 = AC15_LEDGER.read_text() if AC15_LEDGER.is_file() else ""
+    try:
+        fold.append(argv)
+        raise AssertionError(f"{argv[0]} with a missing field must raise SystemExit")
+    except SystemExit as e:
+        assert missing_word in str(e.code), (argv, e.code)
+    after15 = AC15_LEDGER.read_text() if AC15_LEDGER.is_file() else ""
+    assert after15 == before15, "nothing is written on a refused append"
+# the fourth case: an actor/type mismatch alone (verdict from a "random" actor,
+# under DOIT_LEDGER_FILE=L-random-local.jsonl) is NOT refused — the direct pair
+# to AC14's second sub-case.
+os.environ["DOIT_LEDGER_FILE"] = "L-random-local.jsonl"
+RANDOM_LEDGER = fold.EVENTS / "L-random-local.jsonl"
+if RANDOM_LEDGER.is_file():
+    RANDOM_LEDGER.unlink()
+fold.append(["verdict", "L-spec-9999", "confirmed=true"])
+assert RANDOM_LEDGER.is_file() and len(RANDOM_LEDGER.read_text().splitlines()) == 1, \
+    "an actor/type mismatch alone does not refuse the write"
+os.environ["DOIT_LEDGER_FILE"] = "L-operator-01.jsonl"
+
+# ── AC16 · check_append() checks BOTH actor membership and required fields —
+# only append()/emit()'s OWN use of it (AC14/AC15) is field-only.
+sc_ev = {"type": "spec-carried", "subject": "L-spec-1", "source": "1", "tier": "1",
+         "audited_at": "2026-09-22T00:00:00Z"}
+assert fold.check_append(sc_ev, "executor") is None, fold.check_append(sc_ev, "executor")
+r16 = fold.check_append(sc_ev, "builder")
+assert r16 is not None and "builder" in r16, r16
+# a ledger fixture with a spec-carried event whose FILE actor is executor lands
+# in by_subject, not ignored — a regression against today's {"operator"}-only.
+_, _, _, ig16, by16 = ledger(**{"L-executor-01.jsonl": [
+    {"ts": stamp(0), "type": "spec-carried", "subject": S, "source": "1", "tier": "1",
+     "audited_at": stamp(0)}]})
+assert ig16 == [] and any(e["type"] == "spec-carried" for e in by16[S]), (ig16, by16.get(S))
+
+# ── AC17 · check_append() on owed-ac: executor passes, builder refused, a
+# spec-writer with NO criterion is refused naming the field
+oa_ev = {"type": "owed-ac", "criterion": "AC1", "wake_at": "2026-10-01T00:00:00Z"}
+assert fold.check_append(oa_ev, "executor") is None, fold.check_append(oa_ev, "executor")
+assert fold.check_append(oa_ev, "builder") is not None
+oa_missing = {"type": "owed-ac", "wake_at": "2026-10-01T00:00:00Z"}
+r17 = fold.check_append(oa_missing, "spec-writer")
+assert r17 is not None and "criterion" in r17, r17
+
+# ── AC18 · the three new EMITS entries, exactly, plus restore-verified's widening
+assert fold.EMITS["inbound-registered"] == {"operator", "thinker"}
+assert fold.EMITS["carry-failed"] == {"executor", "operator"}
+assert fold.EMITS["backup-failed"] == {"backup"}
+assert {"operator", "executor"} <= fold.EMITS["restore-verified"] and "drill" in fold.EMITS["restore-verified"]
+_, _, _, ig18, by18 = ledger(**{"L-operator-01.jsonl": [
+    {"ts": stamp(0), "type": "restore-verified", "subject": S}]})
+assert ig18 == [] and any(e["type"] == "restore-verified" for e in by18[S]), (ig18, by18.get(S))
+
+# ── AC19 · test_fold.py's PRE-EXISTING ignored-owed-ac fixture (lines ~157-167,
+# the `owed`/D25 block above) needed no edit at all — both its assertions already
+# ran, unchanged, earlier in this file, and this file already exited 0 to reach
+# here. Re-asserted directly as the regression: an executor-authored owed-ac
+# with no criterion and no co-existing spec-writer declaration is STILL ignored,
+# now that EMITS["owed-ac"] admits the executor — the re-dating gate finds no
+# matching prior declaration and drops it exactly as before.
+owed19 = [{"ts": stamp(0), "type": "owed-ac", "subject": S, "wake_at": stamp(-7)}]
+_, sp19, _, ig19, _ = ledger(**{"L-builder-01.jsonl": built, "L-executor-01.jsonl": shipped + owed19})
+assert sp19[S]["state"] == "shipped" and len(ig19) == 1, (sp19[S]["state"], ig19)
+
+# ── AC20 · the re-date governs due-ness; re-dating a DIFFERENT, undeclared
+# criterion is dropped exactly like any other unauthorized emit
+S4 = "L-spec-0145"
+sw_ac7 = [{"ts": stamp(3), "type": "spec-written", "subject": S4, "charter": C},
+          {"ts": stamp(2), "type": "owed-ac", "subject": S4, "criterion": "AC7", "wake_at": stamp(-7)}]
+built4 = [{"ts": stamp(2), "type": "build-started", "subject": S4},
+          {"ts": stamp(2), "type": "build-done", "subject": S4}]
+shipped4 = [{"ts": stamp(0), "type": "shipped", "subject": S4}]
+redate_due = [{"ts": stamp(0), "type": "owed-ac", "subject": S4, "criterion": "AC7", "wake_at": stamp(7)}]
+_, sp20, _, _, by20 = ledger(**{"L-spec-writer-01.jsonl": sw_ac7, "L-builder-01.jsonl": built4,
+                                "L-executor-01.jsonl": shipped4 + redate_due})
+assert any(e["type"] == "owed-ac" and e["actor"] == "executor" for e in by20[S4]), \
+    "the re-date lands in by_subject, not ignored"
+assert sp20[S4]["state"] == "shipped-owed-due", sp20[S4]["state"]
+
+redate_other = [{"ts": stamp(0), "type": "owed-ac", "subject": S4, "criterion": "AC9", "wake_at": stamp(7)}]
+_, sp20b, _, ig20b, _ = ledger(**{"L-spec-writer-01.jsonl": sw_ac7, "L-builder-01.jsonl": built4,
+                                  "L-executor-01.jsonl": shipped4 + redate_other})
+assert len(ig20b) == 1 and ig20b[0]["criterion"] == "AC9", ig20b
+assert sp20b[S4]["state"] == "shipped-owed-evidence", sp20b[S4]["state"]
+
+# ── AC21 · verdict_confirmed's owed_criteria is spec-writer/spec-auditor-authored
+# ONLY — called directly against a hand-built evs bypassing fold()'s own filter
+hand_evs = [
+    {"type": "shipped", "subject": "L-spec-9099", "actor": "executor", "_src": "x:1", "ts": stamp(0)},
+    {"type": "review", "subject": "L-spec-9099", "actor": "reviewer", "_src": "x:2", "ts": stamp(0),
+     "depth": "gates-only"},
+    {"type": "verdict", "subject": "L-spec-9099", "actor": "grader", "_src": "x:3", "ts": stamp(1),
+     "cannot_assess": ["AC9"], "matches_intent": "yes", "card_ok": "yes"},
+    {"type": "owed-ac", "subject": "L-spec-9099", "actor": "executor", "_src": "x:4", "ts": stamp(0),
+     "criterion": "AC9", "wake_at": stamp(1)},
+]
+assert fold.spec_state(hand_evs, set()) != "accepted", fold.spec_state(hand_evs, set())
+
+# ── AC22 · a shipped-owed-due subject renders under AWAITING VERIFICATION, and
+# NOT under OWED EVIDENCE
+evs22 = ledger(**{"L-builder-01.jsonl": built, "L-grader-01.jsonl": graded,
+                  "L-reviewer-01.jsonl": reviewed, "L-executor-01.jsonl": shipped,
+                  "L-spec-writer-01.jsonl": due_ac1})
+board22 = fold.render(*evs22)
+av_block = board22.split("## AWAITING VERIFICATION")[1].split("## OWED EVIDENCE")[0]
+oe_block = board22.split("## OWED EVIDENCE")[1].split("## CHARTER CLOSE")[0]
+assert S in av_block, av_block
+assert S not in oe_block, oe_block
+
+print("fold: 104 checks pass · +91 assertions (L-charter-0021: R3 R6 R11 R13 R14 R15)"
+      " · +L-spec-0192 (fold-states-owed-due-and-killed: AC1-5 AC8 AC9 AC15-22)")
