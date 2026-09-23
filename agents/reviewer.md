@@ -58,6 +58,17 @@ Silent mis-scoping is worse than failing loudly.
 
 Tree residue you notice is a finding. Cleaning it is not your job.
 
+**Pre-existing failures** (operator ruling, 2026-09-23, L-operator-0001.jsonl). A `review_path` command that fails only on
+tests that fail identically at the spec's `base_sha`, in files and on source
+lines outside the spec's `Writes:` grant, is not a blocking finding, even when
+the criterion's literal text says the suite must pass. You cannot run the base
+yourself (no git), so rely on the base-run evidence (command plus both failure
+lists) recorded on the builder card or the grade. Check yourself that each
+failing file is outside `Writes:`. With that evidence, record the failure as
+advisory and judge the criterion on the rest. Without it, record an
+`unverifiable` evidence gap, not a block. A failure you can tie to the spec's
+own diff still blocks.
+
 ## Rounds
 
 Round 1 drives every path. Round 2 is scope-pinned to the standing rejected
