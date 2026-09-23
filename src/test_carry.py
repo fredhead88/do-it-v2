@@ -232,18 +232,22 @@ check(code == 0 and pathlib.Path(json.loads(out)["packet"]).read_bytes().startsw
     b"# 1473 from spec_file\n"), f"a readable spec_file is the second resolution step: {err!r}")
 
 # ══ AC1 · carried_slot builds the hand path's exact shape ══════════════════════
+FREE_STANDING_CLAUSE = "charter: null (free-standing, D15)."
 ALLOCS[0], CALLS[:] = 0, []
-slot, spec_id, source_id, charter = carry.carried_slot("1454")
+slot, spec_id, source_id, charter, charter_reason = carry.carried_slot("1454")
 body = slot.read_bytes()
 check(body.startswith(INBOX_BYTES), "the packet STARTS with the staged bytes")
 check(body[len(INBOX_BYTES):] == TRAILER_LITERAL.encode(),
       f"★ and its remainder is the trailer, byte for byte: {body[len(INBOX_BYTES):]!r}")
 check(b"spawn_id" not in body, "★ carry appends no spawn_id line — dispatch owns that")
-check("—" in TRAILER_LITERAL and carry.TRAILER.format(source_id="1454") == TRAILER_LITERAL,
+check("—" in TRAILER_LITERAL
+      and carry.TRAILER.format(charter_clause=FREE_STANDING_CLAUSE, source_id="1454") == TRAILER_LITERAL,
       "the trailer constant is the precedent's, em dash included")
 check(__import__("re").fullmatch(r"L-spec-\d{4}", spec_id), f"freshly allocated id: {spec_id}")
 check(source_id == "1454", f"source_id is the v4 id: {source_id}")
 check(charter is None, "★ charter is None — a carried spec is free-standing (D15)")
+check(charter_reason == "absent", "★ no author frontmatter at all on this fixture — untrusted "
+      "never even applies: absent, not untrusted")
 check(carry.carried_slot("1454")[1] != spec_id, "a second call allocates a second id, never reuses")
 
 # the full argv, through main
@@ -359,7 +363,7 @@ check(json.dumps("the intent, prose and all") in front, f"frontmatter intent is 
 check("source_brief: null" in front and json.dumps(HEAD) in front,
       f"★ frontmatter carries source_brief: null and the --repo HEAD: {front!r}")
 check(rest.startswith("# A Carried Title\n"), f"the body starts with # <title>: {rest[:40]!r}")
-check(pk.endswith(carry.TRAILER.format(source_id=URL)),
+check(pk.endswith(carry.TRAILER.format(charter_clause=FREE_STANDING_CLAUSE, source_id=URL)),
       f"★ …and ends with the trailer carrying the url as its source id: {pk[-90:]!r}")
 check(json.loads(out)["source"] == URL, "the event's source is the url")
 for flags in (["--title", "T"], ["--body", "B"], []):
@@ -672,5 +676,258 @@ after_listing = sorted(p.name for p in TMP.iterdir())
 check(before_listing == after_listing,
       f"★ a non-digit source, including one shaped for path traversal, is never glob-matched "
       f"outside ledger_dir: {before_listing} -> {after_listing}")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-0198 · trusted-author-inbound-charter (L-charter-0028)
+# ══════════════════════════════════════════════════════════════════════════════
+TRUST_DIR = TMP / "trust"
+TRUST_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def fm_v4_spec(author_line, charter_line=None, body="# fixture body\n"):
+    """A staged v4 spec's frontmatter block in the live spec-inbox shape (AC2/AC3):
+    `intent:`/`author:`/`base_sha:`[/`charter:`]."""
+    lines = ["---", "intent: 'carry me'", f"author: {author_line}", "base_sha: 'deadbeef'"]
+    if charter_line is not None:
+        lines.append(f"charter: {charter_line}")
+    lines += ["---", "", body]
+    return "\n".join(lines)
+
+
+# ══ AC1 · trusted_authors() ═════════════════════════════════════════════════════
+GOOD_TOML = TRUST_DIR / "good.toml"
+GOOD_TOML.write_text('[[author]]\nlogin = "yitzchak-eg"\nemail = "yitzchak@ephraimgreenblatt.com"\n\n'
+                     '[[author]]\nlogin = "second-row"\nemail = "second@example.com"\n')
+check(carry.trusted_authors(GOOD_TOML) == [
+    {"login": "yitzchak-eg", "email": "yitzchak@ephraimgreenblatt.com"},
+    {"login": "second-row", "email": "second@example.com"}],
+    f"AC1: a well-formed TOML file returns one dict per table, both rows: "
+    f"{carry.trusted_authors(GOOD_TOML)}")
+
+MALFORMED_TOML = TRUST_DIR / "malformed.toml"
+MALFORMED_TOML.write_text("[[author]\nlogin = oops\n")  # invalid TOML syntax
+check(carry.trusted_authors(MALFORMED_TOML) == [],
+      "★ AC1: an invalid TOML file degrades to [], never raises")
+
+WRONGSHAPE_TOML = TRUST_DIR / "wrongshape.toml"
+WRONGSHAPE_TOML.write_text('author = "not-a-list-of-tables"\n')
+check(carry.trusted_authors(WRONGSHAPE_TOML) == [],
+      "★ AC1: a non-list `author` key degrades to [], never raises")
+
+check(carry.trusted_authors(TRUST_DIR / "does-not-exist.toml") == [],
+      "AC1: a non-existent path returns []")
+
+INCOMPLETE_TOML = TRUST_DIR / "incomplete.toml"
+INCOMPLETE_TOML.write_text('[[author]]\nlogin = "only-login"\n\n[[author]]\nemail = "only@email.com"\n')
+check(carry.trusted_authors(INCOMPLETE_TOML) == [],
+      "AC1: an incomplete table (one of login/email missing) is dropped, not an error")
+
+# path=None default, over an otherwise-empty fixture root: no live allowlist file
+# exists yet under $DOIT_ROOT at all.
+LIVE_ALLOWLIST = pathlib.Path(os.environ["DOIT_ROOT"]) / "trusted_inbound_authors.toml"
+check(not LIVE_ALLOWLIST.exists(), "AC1 precondition: no live allowlist file under this fixture root")
+check(carry.trusted_authors(None) == [], "AC1: path=None with no file present returns []")
+
+# ══ AC2 · frontmatter_charter() ═════════════════════════════════════════════════
+FM_HAPPY = "---\nintent: 'x'\nauthor: 'a <a@b.com>'\nbase_sha: 'deadbeef'\ncharter: L-charter-0028\n---\n\n# body\n"
+check(carry.frontmatter_charter(FM_HAPPY) == "L-charter-0028",
+      f"AC2: the trimmed charter: value from a leading frontmatter block: "
+      f"{carry.frontmatter_charter(FM_HAPPY)!r}")
+FM_NO_BLOCK = "# no leading frontmatter block at all\ncharter: L-charter-0028\n"
+check(carry.frontmatter_charter(FM_NO_BLOCK) is None, "AC2: no leading --- block -> None")
+FM_NO_KEY = "---\nintent: 'x'\nauthor: 'a <a@b.com>'\n---\n\n# body\n"
+check(carry.frontmatter_charter(FM_NO_KEY) is None, "AC2: a block with no charter: key -> None")
+for blank_val in ("null", "~", ""):
+    fm = f"---\nintent: 'x'\ncharter: {blank_val}\n---\n\n# body\n"
+    check(carry.frontmatter_charter(fm) is None, f"AC2: charter: {blank_val!r} -> None")
+
+# ══ the live allowlist: one trusted row, used by AC3/AC4/AC6/AC7 below ═════════
+ALLOWLIST_TEXT = '[[author]]\nlogin = "trusted-eg"\nemail = "trusted@example.com"\n'
+LIVE_ALLOWLIST.write_text(ALLOWLIST_TEXT)
+
+# ══ AC3 · trust matches, charter validity project-unfiltered, charter honored ══
+CHARTER_AC3 = "L-charter-2198"
+write_event("L-thinker-2198", {"type": "charter-filed", "subject": CHARTER_AC3,
+                               "project": "yet-another-project-for-ac3"})
+record(1600, "trusted-with-open-charter")
+inbox(1600, "trusted-with-open-charter",
+      fm_v4_spec("Trusted Person <trusted@example.com>", CHARTER_AC3, "# 1600 fixture spec\n"))
+
+slot3, spec_id3, source_id3, charter3, charter_reason3 = carry.carried_slot("1600")
+check(charter3 == CHARTER_AC3 and charter_reason3 is None,
+      f"AC3: carried_slot returns the honored charter and no charter_reason: "
+      f"{charter3!r} {charter_reason3!r}")
+check(b"charter: null" not in slot3.read_bytes(), "AC3: the packet does not contain 'charter: null'")
+
+ALLOCS[0], CALLS[:] = 0, []
+STUB.dispatch = writer(["src/ac3.py"])
+code, out, err = run(["1600"] + BASE)
+check(code == 0, f"AC3: the full carry succeeds through main(): {err!r}")
+res_ac3 = json.loads(out)
+d_ac3 = next(c for c in CALLS if c[1] == "dispatch")
+check(d_ac3[3] == res_ac3["spec"] and d_ac3[4:6] == ["--charter", CHARTER_AC3],
+      f"AC3: the dispatch argv contains --charter <id> right after the id: {d_ac3}")
+ap_ac3 = next(c for c in CALLS if c[1] == "append")
+kv_ac3 = dict(x.split("=", 1) for x in ap_ac3[4:])
+check(kv_ac3.get("charter") == CHARTER_AC3, f"AC3: charter present on the append: {kv_ac3}")
+check("charter_reason" not in kv_ac3, f"★ AC3: charter_reason KEY ABSENT (finding 3): {kv_ac3}")
+check(b"charter: null" not in pathlib.Path(res_ac3["packet"]).read_bytes(),
+      "AC3: no 'charter: null' anywhere in the final packet")
+
+# ══ AC4 · the four-way charter_reason split, first three ALLOWLISTED-author ════
+def assert_not_honored(record_num, want_reason):
+    ALLOCS[0], CALLS[:] = 0, []
+    STUB.dispatch = writer(["src/ac4.py"])
+    code, out, err = run([str(record_num)] + BASE)
+    check(code == 0, f"AC4({want_reason}): fixture {record_num} carries cleanly: {err!r}")
+    res = json.loads(out)
+    d = next(c for c in CALLS if c[1] == "dispatch")
+    check("--charter" not in d, f"AC4({want_reason}): no --charter anywhere: {d}")
+    ap = next(c for c in CALLS if c[1] == "append")
+    kv = dict(x.split("=", 1) for x in ap[4:])
+    check("charter" not in kv, f"AC4({want_reason}): charter KEY ABSENT: {kv}")
+    check(kv.get("charter_reason") == want_reason, f"AC4({want_reason}): {kv}")
+    pkt = pathlib.Path(res["packet"]).read_bytes()
+    want_trailer = carry.TRAILER.format(charter_clause=FREE_STANDING_CLAUSE,
+                                        source_id=str(record_num)).encode()
+    check(pkt.endswith(want_trailer),
+          f"AC4({want_reason}): the unchanged free-standing trailer, byte-identical to "
+          f"TRAILER_LITERAL's own literal: {pkt[-140:]!r}")
+    return res
+
+
+record(1601, "trusted-no-charter")
+inbox(1601, "trusted-no-charter",
+      fm_v4_spec("Trusted Person <trusted@example.com>", None, "# 1601 fixture\n"))
+assert_not_honored(1601, "absent")
+
+CHARTER_AC4B = "L-charter-2199"  # never named by any event anywhere on this ledger
+record(1602, "trusted-unknown-charter")
+inbox(1602, "trusted-unknown-charter",
+      fm_v4_spec("Trusted Person <trusted@example.com>", CHARTER_AC4B, "# 1602 fixture\n"))
+assert_not_honored(1602, "unknown")
+
+CHARTER_AC4C = "L-charter-2200"
+write_event("L-operator-2200", {"type": "charter-filed", "subject": CHARTER_AC4C, "covers": "none"})
+write_event("L-executor-2200", {"type": "sweep-fixpoint", "subject": CHARTER_AC4C})
+_, charters_ac4c, _, _ = fold.fold(carry.scan_events(lambda e: True))
+check(charters_ac4c[CHARTER_AC4C]["state"] == "L2-complete",
+      f"AC4(c) precondition: the fixture charter really is L2-complete: {charters_ac4c[CHARTER_AC4C]}")
+record(1603, "trusted-closed-charter")
+inbox(1603, "trusted-closed-charter",
+      fm_v4_spec("Trusted Person <trusted@example.com>", CHARTER_AC4C, "# 1603 fixture\n"))
+assert_not_honored(1603, "closed")
+
+record(1604, "untrusted-with-open-charter")
+inbox(1604, "untrusted-with-open-charter",
+      fm_v4_spec("Random Person <nobody@example.com>", CHARTER_AC3, "# 1604 fixture\n"))
+assert_not_honored(1604, "untrusted")
+
+# ══ AC5 · regression guard — structural, true regardless of trust ══════════════
+record(1605, "trusted-plain")
+inbox(1605, "trusted-plain",
+      fm_v4_spec("Trusted Person <trusted@example.com>", None, "# 1605 fixture\n"))
+ALLOCS[0], CALLS[:] = 0, []
+STUB.dispatch = writer(["src/ac5.py"])
+code, out, err = run(["1605"] + BASE)
+check(code == 0, f"AC5: fixture carries cleanly: {err!r}")
+res_ac5 = json.loads(out)
+ap_ac5 = next(c for c in CALLS if c[1] == "append")
+kv_ac5 = dict(x.split("=", 1) for x in ap_ac5[4:])
+check(kv_ac5.get("trusted_author") == "trusted-eg",
+      f"AC5: trusted_author is the matched row's login: {kv_ac5}")
+check([c[1] for c in CALLS] == ["dispatch", "append"],
+      f"★ AC5: the CALLS list contains only dispatch/append — no spec-auditor anywhere: {CALLS}")
+_grep = __import__("subprocess").run(
+    ["grep", "-c", "spec-auditor", str(pathlib.Path(__file__).resolve().parent / "carry.py")],
+    capture_output=True, text=True)
+check(_grep.stdout.strip() == "0",
+      f"★ AC5: grep -c 'spec-auditor' src/carry.py reads 0 — D1 is structural: {_grep.stdout!r}")
+_all_ev_ac5 = carry.scan_events(lambda e: True)
+_specs_ac5, _, _, _ = fold.fold(_all_ev_ac5)
+check(_specs_ac5[res_ac5["spec"]]["state"] == "written",
+      f"AC5: fold.fold() reports the carried spec's state as 'written': {_specs_ac5[res_ac5['spec']]}")
+
+# ══ AC6 · the three not-trusted-by-default shapes ══════════════════════════════
+# (a) an untrusted author naming no charter at all (disjoint from AC4(d), which
+# names a charter): trusted_author=None, charter_reason="absent", tier/rule as always.
+record(1606, "untrusted-no-charter")
+inbox(1606, "untrusted-no-charter",
+      fm_v4_spec("Random Person <nobody@example.com>", None, "# 1606 fixture\n"))
+ALLOCS[0], CALLS[:] = 0, []
+STUB.dispatch = writer(["src/ac6a.py"])
+code, out, err = run(["1606"] + BASE)
+check(code == 0, f"AC6(a): fixture carries cleanly: {err!r}")
+res_ac6a = json.loads(out)
+ap_ac6a = next(c for c in CALLS if c[1] == "append")
+kv_ac6a = dict(x.split("=", 1) for x in ap_ac6a[4:])
+check("trusted_author" not in kv_ac6a, f"AC6(a): trusted_author key absent: {kv_ac6a}")
+check("charter" not in kv_ac6a and kv_ac6a.get("charter_reason") == "absent",
+      f"AC6(a): charter_reason=absent, charter key absent: {kv_ac6a}")
+check(res_ac6a["tier"] == "gates-only" and res_ac6a["rule"] == "none",
+      f"AC6(a): tier/rule unaffected by trust: {res_ac6a}")
+
+# (b) no live allowlist file at all: absent file trusts nobody, even an email
+# that would otherwise match a real row.
+LIVE_ALLOWLIST_BACKUP = LIVE_ALLOWLIST.read_bytes()
+LIVE_ALLOWLIST.unlink()
+check(carry.trusted_authors(None) == [], "AC6(b): trusted_authors(None) returns [] with no file")
+record(1607, "would-have-matched")
+TEXT_1607 = fm_v4_spec("Trusted Person <trusted@example.com>", None, "# 1607 fixture\n")
+inbox(1607, "would-have-matched", TEXT_1607)
+check(carry.trusted_author_for(TEXT_1607) is None,
+      "★ AC6(b): an absent allowlist file trusts nobody, even a would-have-matched email")
+slot6b, _, _, charter6b, reason6b = carry.carried_slot("1607")
+check(charter6b is None and reason6b == "absent", f"AC6(b): {charter6b!r} {reason6b!r}")
+LIVE_ALLOWLIST.write_bytes(LIVE_ALLOWLIST_BACKUP)
+
+# (c) a PR-sourced carry always stamps trusted_author=None and
+# (charter, charter_reason) = (None, "absent"), regardless of --body.
+PR_URL_AC6C = "https://github.com/o/r/pull/606"
+slot6c, _, _, charter6c, reason6c = carry.pr_slot(
+    PR_URL_AC6C, "T", "please add trusted@example.com — looks like a match, is not", str(REPO))
+check(charter6c is None and reason6c == "absent", f"AC6(c): {charter6c!r} {reason6c!r}")
+check(carry.trusted_author_for(slot6c.read_text()) is None,
+      "★ AC6(c): a PR-sourced author frontmatter (the operator's own username) never matches, "
+      "regardless of what --body contains")
+
+# ══ AC7 · the falsifiable trust assertion ═══════════════════════════════════════
+TEMPLATE_AC7 = fm_v4_spec("AC7 Person <ac7@example.com>", CHARTER_AC3, "# ac7 template\n")
+record(1700, "ac7-template-a")
+inbox(1700, "ac7-template-a", TEMPLATE_AC7)
+record(1701, "ac7-template-b")
+inbox(1701, "ac7-template-b", TEMPLATE_AC7)
+
+LIVE_ALLOWLIST.write_text(LIVE_ALLOWLIST.read_text()
+                          + '\n[[author]]\nlogin = "ac7-eg"\nemail = "ac7@example.com"\n')
+ALLOCS[0], CALLS[:] = 0, []
+STUB.dispatch = writer(["src/ac7.py"])
+code, out, err = run(["1700"] + BASE)
+check(code == 0, f"AC7 (trusted run): {err!r}")
+ap7t = next(c for c in CALLS if c[1] == "append")
+kv7t = dict(x.split("=", 1) for x in ap7t[4:])
+
+LIVE_ALLOWLIST.write_bytes(LIVE_ALLOWLIST_BACKUP)  # back to just trusted-eg — ac7@ untrusted again
+ALLOCS[0], CALLS[:] = 0, []
+STUB.dispatch = writer(["src/ac7.py"])
+code, out, err = run(["1701"] + BASE)
+check(code == 0, f"AC7 (untrusted run): {err!r}")
+ap7u = next(c for c in CALLS if c[1] == "append")
+kv7u = dict(x.split("=", 1) for x in ap7u[4:])
+
+check(kv7t["source"] != kv7u["source"],
+      "AC7: source differs only by the distinct ids used to dodge idempotency")
+_shared7 = (set(kv7t) | set(kv7u)) - {"source"}
+_diffs7 = {k for k in _shared7 if kv7t.get(k) != kv7u.get(k)}
+check(_diffs7 == {"trusted_author", "charter", "charter_reason"},
+      f"★ AC7: the diff's key set is exactly trusted_author/charter/charter_reason: {_diffs7}")
+check(kv7t["tier"] == kv7u["tier"] and kv7t["footprint"] == kv7u["footprint"],
+      f"AC7: tier/footprint are byte-identical: {kv7t} vs {kv7u}")
+check("trusted_author" in kv7t and "trusted_author" not in kv7u,
+      f"★ AC7: trusted_author present vs absent: {kv7t} vs {kv7u}")
+check("charter" in kv7t and kv7t["charter"] == CHARTER_AC3 and "charter" not in kv7u,
+      f"★ AC7: charter present (honored) vs absent: {kv7t} vs {kv7u}")
+check("charter_reason" not in kv7t and kv7u.get("charter_reason") == "untrusted",
+      f"★ AC7: charter_reason absent vs 'untrusted': {kv7t} vs {kv7u}")
 
 print(f"carry: {N} checks pass")

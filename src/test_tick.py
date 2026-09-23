@@ -459,8 +459,9 @@ try:
     raise AssertionError("AC6: carry.pr_slot with no --title/--body must refuse by name")
 except carry.Refusal:
     pass
-slot, spec_id, source_id, charter = carry.pr_slot(pr_url, "t", "b", str(TMP))
-assert pathlib.Path(slot).is_file() and source_id == pr_url and charter is None, \
+slot, spec_id, source_id, charter, charter_reason = carry.pr_slot(pr_url, "t", "b", str(TMP))
+assert (pathlib.Path(slot).is_file() and source_id == pr_url and charter is None
+        and charter_reason == "absent"), \
     "AC6: --title/--body turn the by-name refusal into a successful carry, writing the packet"
 
 print("tick: 48 checks pass")
@@ -573,3 +574,39 @@ assert tickfile5.exists() and len(tickfile5.read_text().splitlines()) == 1, \
     f"0187-AC5: L-tick-local.jsonl gains exactly one line: {tickfile5}"
 
 print("tick: 0187 R3 checks pass")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-0198 · trusted-author-inbound-charter (L-charter-0028) — AC5's "same
+# wake / next pass" reading (A10, Planner ruling): `tick.lane` re-folded over a
+# carry's own just-produced `spec-carried` + `spec-written` events lists the
+# spec as written, with no `inbound:` row left standing for its now-carried
+# source. `src/tick.py` itself is READ here, never written (finding 5) —
+# `tick.lane` is the existing, unaffected seam this file alone is granted to call.
+# ══════════════════════════════════════════════════════════════════════════════
+iso198 = _isolated_events()
+fold.EVENTS = iso198
+write_to(iso198, "L-spec-writer-9198.jsonl", {"type": "spec-written", "subject": "L-spec-9198"})
+write_to(iso198, "L-operator-9198.jsonl",
+         {"type": "spec-carried", "subject": "L-spec-9198", "source": "9198-src",
+          "tier": "gates-only", "audited_at": NOW, "charter": "L-charter-9198",
+          "trusted_author": "yitzchak-eg"})
+ev198 = fold.read_events()
+specs198, charters198, _, _ = fold.fold(ev198)
+assert specs198["L-spec-9198"]["state"] == "written", \
+    f"AC5 (L-spec-0198): fold.fold() reports the just-carried spec as 'written': {specs198['L-spec-9198']}"
+busy198 = tick.in_flight(ev198)
+# The "next pass": `carry.uncarried()` would no longer report `9198-src` once a
+# `spec-carried` names it, so the inbound list this pass folds over already
+# excludes it — proven directly (never trusting a separate implementation to
+# agree) rather than re-importing `carry` for a source `tick.py` never touches.
+inbound198 = [row for row in [{"source": "9198-src", "kind": "v4"}]
+             if row["source"] not in {e.get("source") for e in ev198 if e.get("type") == "spec-carried"}]
+assert inbound198 == [], "AC5 (L-spec-0198) precondition: the fixture inbound row is excluded"
+lanes198 = tick.lane(specs198, charters198, busy198, events=ev198, inbound=inbound198)
+assert "L-spec-9198 · written" in lanes198, \
+    f"AC5 (L-spec-0198): tick.lane's NEXT pass over the just-produced events lists it as written: {lanes198}"
+assert not any(l.startswith("inbound:9198-src") for l in lanes198), \
+    "AC5 (L-spec-0198): no inbound: row remains for the now-carried source"
+fold.EVENTS = saved_events
+
+print("tick: L-spec-0198 AC5 check passes")
