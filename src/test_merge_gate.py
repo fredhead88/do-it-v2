@@ -506,5 +506,119 @@ d, _ = repo(); on(d, lambda dd: None)
 check("a clean branch with --spec is unaffected", mg.main_(["work", "main", "--spec", "L-spec-0001"]) == 0)
 check("and it wrote merge-gate-clean", events()[-1]["type"] == "merge-gate-clean")
 
+# ------------------------------------------------- R3e/R3f: writes: grant shapes
+
+# R3e/AC7: a bare, EMPTY **Writes:** declaration reads the path list beneath it
+# exactly as a parenthetical value already does, instead of raising
+# "has a writes: line with no paths on it".
+(CONTENT / "L-spec-bare.md").write_text("**Writes:**\n- src/foo.py\n- src/bar.py\n")
+check("★ a bare, empty **Writes:** reads the path list beneath it (R3e/AC7)",
+      mg.writes_grant("L-spec-bare") == ["src/foo.py", "src/bar.py"])
+(CONTENT / "L-spec-bareprose.md").write_text("**Writes:** see the table below\n- src/x.py\n")
+try:
+    mg.writes_grant("L-spec-bareprose"); check("bare-shape prose rejected", False)
+except mg.Undetermined as e:
+    check("★ prose on a bare Writes: line is still refused (not the empty-value case)",
+          "not a path" in str(e))
+
+# AC8: grant_from_text(text) is a new, pure function — no content-directory
+# read, no spec id — reading all three accepted shapes directly.
+check("★ grant_from_text(a) — the bare-label path block",
+      mg.grant_from_text("**Writes:**\n- src/foo.py\n- src/bar.py\n") == ["src/foo.py", "src/bar.py"])
+check("★ grant_from_text(b) — the wrapped-parenthetical shape, unchanged",
+      mg.grant_from_text("**Writes:** (the merge gate's grant)\n\n```\na/b.py\nc/\n```\n")
+      == ["a/b.py", "c/"])
+try:
+    mg.grant_from_text("Writes: the web dashboard only\n"); check("prose(a/b) rejected", False)
+except mg.Undetermined as e:
+    check("★ grant_from_text refuses prose in the bare/parenthetical shapes",
+          "not a path" in str(e))
+
+# AC8(c): the YAML-frontmatter writes: list, per content/carry-L-spec-0166.packet.md:34-36
+# ("the shape all four inbound PRs use").
+FRONT = ("---\nintent: >\n  some text\nbase_sha: ad7a9f7c4\nwrites:\n"
+         "  - pipelines/amazon/collectors/tier1.py\n"
+         "  - tests/pipelines/amazon/test_tier1.py\n---\n\n# title\nbody\n")
+check("★ grant_from_text(c) — the YAML-frontmatter writes: list",
+      mg.grant_from_text(FRONT) == ["pipelines/amazon/collectors/tier1.py",
+                                     "tests/pipelines/amazon/test_tier1.py"])
+(CONTENT / "L-spec-front.md").write_text(FRONT)
+check("★ writes_grant reads the frontmatter shape too, through the same indirection",
+      mg.writes_grant("L-spec-front") == ["pipelines/amazon/collectors/tier1.py",
+                                           "tests/pipelines/amazon/test_tier1.py"])
+
+# A9: the fast path (PyYAML importable, the normal case here) and the narrow
+# regex fallback (PyYAML hidden) parse the SAME frontmatter identically.
+real_yaml = sys.modules.get("yaml")
+sys.modules["yaml"] = None
+try:
+    check("★ A9 fallback (PyYAML hidden) parses the frontmatter shape identically",
+          mg.grant_from_text(FRONT) == ["pipelines/amazon/collectors/tier1.py",
+                                         "tests/pipelines/amazon/test_tier1.py"])
+finally:
+    if real_yaml is not None:
+        sys.modules["yaml"] = real_yaml
+    else:
+        sys.modules.pop("yaml", None)
+
+# frontmatter prose is still refused.
+try:
+    mg.grant_from_text("---\nwrites: the web dashboard only\n---\n\nbody\n")
+    check("frontmatter prose rejected", False)
+except mg.Undetermined as e:
+    check("★ prose in the frontmatter writes: value is still refused",
+          "not a path" in str(e))
+
+# a frontmatter block with no writes: key at all falls through cleanly — it
+# never crashes on a missing key.
+try:
+    mg.grant_from_text("---\nintent: x\n---\n\nno writes: line anywhere\n")
+    check("frontmatter-with-no-writes-key rejected", False)
+except mg.Undetermined as e:
+    check("★ a frontmatter block with no writes: key falls through, not a crash",
+          "states no writes" in str(e))
+
+# ------------------------------------------------------ R3f/AC9: out_of_grant
+
+(CONTENT / "L-spec-oog.md").write_text("**Writes:** src/*\n")
+
+# Reproduction 1: an addition/modification outside the grant, on a branch that
+# is otherwise gate()-clean (no removal, no revert).
+d, _ = repo()
+on(d, lambda dd: (pathlib.Path(dd, "docs").mkdir(exist_ok=True),
+                  pathlib.Path(dd, "docs/new.md").write_text("outside the grant")))
+og = mg.out_of_grant("work", "main", "L-spec-oog")
+check("★ out_of_grant names an addition outside the grant (R3f/AC9 repro 1)",
+      og == ["docs/new.md"])
+gr = mg.gate("work", "main", ["src/*"])
+check("★ ...while gate() on the identical branch/grant still reports clean",
+      gr.removed == [] and gr.reverted == [])
+
+# Reproduction 2: a rename FROM a granted path INTO an ungranted destination —
+# named by the DESTINATION, never the source; gate()'s own verdict (which
+# judges the SAME rename by its source) is unchanged.
+d, _ = repo()
+sh("git", "-C", d, "checkout", "-q", "main")
+pathlib.Path(d, "src").mkdir(exist_ok=True); pathlib.Path(d, "src/keep2.py").write_text("x")
+sh("git", "-C", d, "add", "-A"); sh("git", "-C", d, "commit", "-qm", "granted source file")
+def rename_out(dd):
+    pathlib.Path(dd, "docs").mkdir(exist_ok=True)
+    sh("git", "-C", dd, "mv", "src/keep2.py", "docs/keep2.py")
+on(d, rename_out)
+og2 = mg.out_of_grant("work", "main", "L-spec-oog")
+check("★ a rename INTO an ungranted destination is named by the destination (R3f/AC9 repro 2)",
+      og2 == ["docs/keep2.py"])
+gr2 = mg.gate("work", "main", ["src/*"])
+check("★ gate() itself is unchanged — it still judges the SAME rename by its source",
+      gr2.removed == [])
+
+# out_of_grant still hard-stops on the same conditions gate() does.
+try:
+    mg.out_of_grant("no-such-branch", "main", "L-spec-oog")
+    check("out_of_grant unresolvable ref raises", False)
+except mg.Undetermined:
+    check("★ out_of_grant raises Undetermined for the same hard stops as gate() "
+          "(unresolvable ref)", True)
+
 print(f"merge-gate: {sum(ok)}/{len(ok)} checks pass")
 sys.exit(0 if all(ok) else 1)

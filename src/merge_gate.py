@@ -322,6 +322,43 @@ def gate(branch, main, grant):
     return Result(removed, reverts, main_sha, branch_sha, tree)
 
 
+def out_of_grant(branch, main, spec_id):
+    """R3f/AC9 — read-only, additive, for a sibling unit to surface as a reviewer
+    finding (ADR-0028-6), never a gate refusal here: NAMES every path a merge of
+    `branch` into `main` would ADD or MODIFY outside `spec_id`'s Writes grant,
+    performing the identical in-memory merge `gate()` already performs
+    (`merge-tree --write-tree`). An `R`/`C` diff entry is judged on its
+    DESTINATION path, never its source — a rename/copy from a granted path
+    INTO an ungranted one returns the destination, even though the source
+    alone would read as in-grant (`gate()`'s own removed-list check, by
+    contrast, judges a rename by its SOURCE — whether removing the old path
+    was authorized — and that is unchanged: this function never touches
+    `gate()`'s verdict). A pure removal/typechange (`D`/`T`) is `gate()`'s own
+    business and is never named here. Never raises to signal "some paths are
+    out of grant" — an empty list is the normal clean case; still raises
+    `Undetermined` for the same hard-stop conditions `gate()` itself does
+    (shallow clone, ambiguous ref, no usable grant, deadline exceeded)."""
+    begin_run()
+    grant = grant_for(spec_id, [])
+    main_sha, branch_sha = resolve(main), resolve(branch)
+    if main_sha == branch_sha:
+        raise Undetermined(f"{branch} and {main} are the same commit — there is nothing to gate, "
+                           f"and an empty diff is not a clean merge")
+    p = run(("merge-tree", "--write-tree", main_sha, branch_sha))
+    if p.returncode:
+        raise Undetermined("the merge does not apply cleanly — a conflicted merge is not a gated one")
+    tree = p.stdout.decode().splitlines()[0].strip()
+    out = []
+    for st, path, dest in diff_names(main_sha, tree):
+        code = st[0]
+        if code in "DT":
+            continue
+        target = dest if (code in "RC" and dest) else path
+        if not granted(target, grant):
+            out.append(target)
+    return out
+
+
 def check_grant(toks, whose):
     """★ A grant is VALIDATED, never interpreted.
 
@@ -348,16 +385,66 @@ def check_grant(toks, whose):
     return toks
 
 
-def writes_grant(spec):
-    """The spec's `writes:` grant. Deny loudly rather than guess: a named spec with
-    no usable grant is could-not-determine, because an empty grant makes every
-    legitimate removal look like a violation."""
-    if not re.fullmatch(r"[A-Za-z0-9._-]+", spec):
-        raise Undetermined(f"{spec!r} is not a spec id")
-    p = fold.ROOT / "content" / f"{spec}.md"
-    if not p.exists():
-        raise Undetermined(f"no content file for {spec} — cannot read its writes: grant")
-    lines = p.read_text().splitlines()
+FRONTMATTER = re.compile(r"\A---\r?\n(.*?\n)---\r?\n", re.S)
+
+
+def _frontmatter_grant(text):
+    """R3f/AC8(c): the YAML-frontmatter `writes:` list shape — read directly off
+    a live example, `content/carry-L-spec-0166.packet.md:34-36`. Returns
+    `(found, value)`: `found=False` when `text` carries no frontmatter block, or
+    the block carries no `writes:` key at all — `grant_from_text` then falls
+    through to the bare-label/parenthetical shapes over the rest of the text.
+    `found=True` with the raw value once a `writes:` key exists, whether or not
+    it is a usable list — a prose value there is still refused by the caller,
+    never silently skipped.
+
+    A9 (YAML-optional): `yaml.safe_load` when importable; a narrow regex
+    fallback, scoped to just the `writes:` key, when it is not — never a
+    general YAML parser. Same convention as `src/carry.py:load_record`/
+    `_regex_record`."""
+    m = FRONTMATTER.match(text)
+    if not m:
+        return False, None
+    fm = m.group(1)
+    try:
+        import yaml
+    except ImportError:
+        lines = fm.splitlines()
+        for i, line in enumerate(lines):
+            if re.match(r"^writes:\s*\S", line):
+                return True, line.split(":", 1)[1].strip()   # inline value: prose, refused below
+            if not re.match(r"^writes:\s*$", line):
+                continue
+            toks = []
+            for nxt in lines[i + 1:]:
+                mm = re.match(r"^\s*-\s*(\S+)\s*$", nxt)
+                if not mm:
+                    break
+                toks.append(mm.group(1))
+            return True, toks
+        return False, None
+    d = yaml.safe_load(fm) or {}
+    return ("writes" in d), d.get("writes")
+
+
+def grant_from_text(text):
+    """★ A grant is validated, never interpreted (`check_grant`) — R3f/AC8: pure,
+    no content-directory read, no spec id, reading a `writes:` grant in three
+    shapes: (a) the path block beneath a BARE `**Writes:**` (R3e/AC7 — an empty
+    value falls through to this the same as (b) below, instead of raising
+    "has a writes: line with no paths on it"); (b) a parenthetical value, the
+    path list beneath it read up to the first blank line or the next heading
+    (unchanged, existing behavior); (c) a YAML-frontmatter `writes:` list
+    (`_frontmatter_grant`, tried first — it is a structurally distinct shape,
+    the file's very first bytes, so it never collides with (a)/(b)). Prose on
+    the declaration line, in any shape, still raises `Undetermined`."""
+    found, val = _frontmatter_grant(text)
+    if found:
+        if not isinstance(val, list):
+            raise Undetermined(f"the grant: {val!r} is not a path or a glob. Prose is not a grant — "
+                               f"a writes: frontmatter key must be a YAML list")
+        return check_grant([str(x) for x in val], "the grant")
+    lines = text.splitlines()
     for i, line in enumerate(lines):
         # The key may wear markdown (`**Writes:**`, `| **Writes** |`); the VALUES
         # may not be touched, because `src/**` is a glob and `**bold**` is not.
@@ -369,12 +456,13 @@ def writes_grant(spec):
         if m.group(0)[:m.start(1)].count("**") % 2 == 1 and body.startswith("**"):
             body = body[2:]                       # the closing half of `**Writes:**`
         body = body.strip().strip("|").replace("`", "").strip()
-        # A value that is ONLY a parenthetical — `Writes: (the merge gate's grant)` —
-        # names nothing; the grant is the list that follows, one path per line, in a
-        # fenced block or as bullets, up to the first blank line after it starts or
-        # the next heading. Prose on the line itself is still refused below: this
-        # reads a list, it never reads a sentence. Seen on the second real merge.
-        if re.fullmatch(r"\(.*\)", body):
+        # A value that is EMPTY (R3e — a bare `**Writes:**` with nothing after the
+        # colon) or ONLY a parenthetical — `Writes: (the merge gate's grant)` —
+        # names nothing itself; the grant is the list that follows, one path per
+        # line, in a fenced block or as bullets, up to the first blank line after
+        # it starts or the next heading. Prose on the line itself is still
+        # refused below: this reads a list, it never reads a sentence.
+        if body == "" or re.fullmatch(r"\(.*\)", body):
             toks, started = [], False
             for nxt in lines[i + 1:]:
                 t = nxt.strip()
@@ -390,9 +478,22 @@ def writes_grant(spec):
                     break
                 started = True
                 toks += [x for x in re.split(r"[,\s|]+", t.lstrip("-* ").replace("`", "")) if x]
-            return check_grant(toks, spec)
-        return check_grant([t for t in re.split(r"[,\s|]+", body) if t], spec)
-    raise Undetermined(f"{spec} states no writes: grant — nothing to filter against")
+            return check_grant(toks, "the grant")
+        return check_grant([t for t in re.split(r"[,\s|]+", body) if t], "the grant")
+    raise Undetermined("states no writes: grant — nothing to filter against")
+
+
+def writes_grant(spec):
+    """The spec's `writes:` grant. Deny loudly rather than guess: a named spec with
+    no usable grant is could-not-determine, because an empty grant makes every
+    legitimate removal look like a violation. A thin reader now (R3f): resolve
+    `content/<spec>.md`'s text, call `grant_from_text`."""
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", spec):
+        raise Undetermined(f"{spec!r} is not a spec id")
+    p = fold.ROOT / "content" / f"{spec}.md"
+    if not p.exists():
+        raise Undetermined(f"no content file for {spec} — cannot read its writes: grant")
+    return grant_from_text(p.read_text())
 
 
 def parse(rest):
