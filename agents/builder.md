@@ -88,6 +88,8 @@ Claims that do not survive the grader: "the tests pass so it works", "I checked
 a similar case", "it worked earlier in the session", "the change is too small
 to break anything", "I will verify after committing".
 
+**Never write a literal commit sha into the card** (2026-09-23, 4 grader refusals in one night). In any `check`, `evidence` or prose field, refer to the base as `$(git merge-base HEAD origin/master)`, never as its hex id. The grader's Blindness rule strips `base_sha`, and a card that repeats it makes `doit packet grader` refuse the whole packet. The card's own `base_sha` and `ready_sha` fields are the only place a sha belongs.
+
 **Pre-existing failures** (operator ruling, 2026-09-23, L-operator-0001.jsonl). When a verify step or `review_path` fails on a
 test that you did not touch, do not work around it, edit it or escalate it.
 Run the same command in a detached scratch worktree at `base_sha`, with the
