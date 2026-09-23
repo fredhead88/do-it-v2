@@ -19,7 +19,7 @@ fixture would prove a row whose actor is `operator` while production (up.py's
 `DOIT_LEDGER_FILE=L-planner-NNNN.jsonl`) writes one whose actor is `planner` —
 and only the second is the row R8 asks for.
 """
-import json, os, pathlib, shutil, sys, tempfile
+import contextlib, io, json, os, pathlib, shutil, subprocess, sys, tempfile
 
 TMP = pathlib.Path(tempfile.mkdtemp())
 A, B = TMP / "rootA", TMP / "rootB"
@@ -153,11 +153,23 @@ def boom(events, root):
 
 r = refuses("pending_packets raised", B, pending_packets=boom)
 check("pending" in r.lower() or "unresolved" in r, f"reason must name the failed lookup: {r}")
-# ★ Run BEFORE the stub below exists: `src/relay.py` is not on this tree, so the
-# real import fails, and an unresolvable check must read exactly like a non-empty one.
-check(pane_end.RELAY_MODULE not in sys.modules, "the relay stub must not exist yet")
+# ★ measured 2026-09-23: `src/relay.py` (relay-queries, L-spec-0029) landed on
+# main long before this unit's base_sha, so it is a real, importable module on
+# this tree — "run before the stub below exists" no longer holds. Unimportable
+# is simulated instead, the same technique AC7's `up.py` fixture already uses:
+# `sys.modules[name] = None` is exactly the ModuleNotFoundError `import relay`
+# raises when the file genuinely is not there, so `_pending`'s
+# `importlib.import_module` sees the identical failure a truly-missing sibling
+# would produce. Restored immediately after, so AC4b's later REAL import below
+# is untouched.
+real_relay_module = sys.modules.get(pane_end.RELAY_MODULE)
+sys.modules[pane_end.RELAY_MODULE] = None
 r = refuses("no injection and no importable relay module", B)
 check(pane_end.RELAY_MODULE in r, f"reason must name the module it could not resolve: {r}")
+if real_relay_module is not None:
+    sys.modules[pane_end.RELAY_MODULE] = real_relay_module
+else:
+    del sys.modules[pane_end.RELAY_MODULE]
 
 # ──────────────────── AC3 · content before event (§9.2 rule 3) ────────────────────
 r = refuses("handover file does not exist", B, pending_packets=CLEAR,
@@ -239,6 +251,156 @@ ledger(B, **{"L-planner-0001.jsonl": l1()})
 r = refuses("the ancestor walk found no claude", B, pending_packets=CLEAR,
             find_ancestor=lambda: None)
 check("claude" in r, f"reason must name what it could not find: {r}")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-0187 · executor-runs-unattended (L-charter-0028) — R3, check_and_end_executor
+# ══════════════════════════════════════════════════════════════════════════════
+STEM = "L-executor-0031"
+ESTEM_LEDGER = f"{STEM}.jsonl"
+
+
+def esent(**extra):
+    return [{"type": "message-sent", "subject": STEM, **extra}]
+
+
+def refuses_executor(why, root, **kw):
+    """Mirrors `refuses()` above, for the Executor path: NO effect of any kind on
+    a refusal — no signal, no ledger growth. Returns the stderr text (this
+    function prints its own reason, unlike `check_and_end`)."""
+    before = lines(root)
+    kill = Spy()
+    child_env = kw.pop("child_env", {"DOIT_SUPERVISED": "1", "DOIT_LEDGER_FILE": ESTEM_LEDGER})
+    buf = io.StringIO()
+    with contextlib.redirect_stderr(buf):
+        code = pane_end.check_and_end_executor(
+            kw.pop("handover_path", HANDOVER), root=root, kill=kill,
+            find_ancestor=kw.pop("find_ancestor", lambda: 4242),
+            child_env=child_env, **kw)
+    check(code == 1, f"{why}: must refuse (1), got {code}")
+    check(kill.calls == [], f"{why}: refused but signalled {kill.calls}")
+    check(lines(root) == before, f"{why}: refused but the ledger grew — {before} -> {lines(root)}")
+    return buf.getvalue()
+
+
+# ── 0187-AC6 · the quiet-point precondition, via up.quiet_point (never l1-complete) ──
+# (a) no message-sent anywhere on the pane's own file.
+r = refuses_executor("no message-sent at all", ledger(B, **{ESTEM_LEDGER: []}), pending_packets=CLEAR)
+check("quiet point" in r or "message-sent" in r, f"0187-AC6(a): reason must name it: {r}")
+
+# (b) message-sent present, but a REAL unterminated spawn is in flight.
+r = refuses_executor(
+    "message-sent present, a real spawn still in flight",
+    ledger(B, **{ESTEM_LEDGER: esent(),
+                "L-builder-0099.jsonl": [{"type": "build-started", "subject": "L-spec-0099",
+                                          "spawn": "L-builder-0099",
+                                          "ts": fold.NOW.isoformat(timespec="seconds")}]}),
+    pending_packets=CLEAR)
+check("quiet point" in r or "flight" in r, f"0187-AC6(b): reason must name it: {r}")
+
+# (c) both cleared — the quiet-point precondition itself does not refuse.
+ledger(B, **{ESTEM_LEDGER: esent()})
+kill_c, walk_c = Spy(), Spy(ret=4242)
+code_c = pane_end.check_and_end_executor(HANDOVER, root=B, pending_packets=CLEAR,
+                                         child_env={"DOIT_SUPERVISED": "1", "DOIT_LEDGER_FILE": ESTEM_LEDGER},
+                                         kill=kill_c, find_ancestor=walk_c)
+check(code_c == 0, f"0187-AC6(c): quiet point cleared and every other precondition holds -> ends: {code_c}")
+
+# (d) an open escalation-blocking on an UNRELATED subject elsewhere never stalls
+#     this pane's own quiet point (Assumption 7/AC6(d)) — spawn_in_flight, not
+#     in_flight. (a)/(b) cleared for the pane's own subject.
+ledger(B, **{ESTEM_LEDGER: esent(),
+            "L-executor-9999.jsonl": [{"type": "escalation-blocking", "subject": "L-spec-9999",
+                                       "why": "operator question", "spawn": "L-executor-9999-esc"}]})
+kill_d, walk_d = Spy(), Spy(ret=4243)
+code_d = pane_end.check_and_end_executor(HANDOVER, root=B, pending_packets=CLEAR,
+                                         child_env={"DOIT_SUPERVISED": "1", "DOIT_LEDGER_FILE": ESTEM_LEDGER},
+                                         kill=kill_d, find_ancestor=walk_d)
+check(code_d == 0, f"0187-AC6(d): an unrelated open escalation elsewhere must never stall this pane: {code_d}")
+
+# ── 0187-AC7 · the handover precondition, content before event ───────────────
+ledger(B, **{ESTEM_LEDGER: esent()})
+r = refuses_executor("handover file does not exist", B, pending_packets=CLEAR,
+                     handover_path=TMP / "0187-nope.md")
+check("handover" in r, f"0187-AC7: reason must name the handover: {r}")
+r = refuses_executor("handover file is empty", B, pending_packets=CLEAR, handover_path=EMPTY)
+check("handover" in r, f"0187-AC7: reason must name the handover: {r}")
+
+# ── 0187-AC8 · the pending-packets precondition ───────────────────────────────
+ledger(B, **{ESTEM_LEDGER: esent()})
+r = refuses_executor("a pending seat packet is outstanding", B,
+                     pending_packets=lambda e, root: [{"spawn": "L-builder-0047", "age_min": 3.0}])
+check("pending" in r, f"0187-AC8: reason must name the pending packet: {r}")
+
+
+def boom_e(events, root):
+    raise RuntimeError("relay is unhappy")
+
+
+r = refuses_executor("pending_packets raised", B, pending_packets=boom_e)
+check("pending" in r.lower() or "unresolved" in r, f"0187-AC8: reason must name the failed lookup: {r}")
+
+# ── 0187-AC9 · the supervised-marker precondition, reusing pane_end.supervised() ──
+ledger(B, **{ESTEM_LEDGER: esent()})
+r = refuses_executor("supervised marker absent", B, pending_packets=CLEAR,
+                     child_env={"DOIT_LEDGER_FILE": ESTEM_LEDGER})
+check(pane_end.SUPERVISED_ENV in r, f"0187-AC9: reason must name the marker: {r}")
+r = refuses_executor("supervised marker present but EMPTY", B, pending_packets=CLEAR,
+                     child_env={"DOIT_SUPERVISED": "", "DOIT_LEDGER_FILE": ESTEM_LEDGER})
+check(pane_end.SUPERVISED_ENV in r, f"0187-AC9: reason must name the marker: {r}")
+
+# ── 0187-AC10 · the green path ────────────────────────────────────────────────
+ledger(A)                                          # the root DOIT_ROOT points at: stays untouched
+ledger(B, **{ESTEM_LEDGER: esent()})
+before10 = lines(B)
+kill10, walk10 = Spy(), Spy(ret=5555)
+code10 = pane_end.check_and_end_executor(
+    HANDOVER, root=B, pending_packets=CLEAR,
+    child_env={"DOIT_SUPERVISED": "1", "DOIT_LEDGER_FILE": ESTEM_LEDGER},
+    kill=kill10, find_ancestor=walk10)
+check(code10 == 0, f"0187-AC10: all four preconditions hold -> return int 0: {code10}")
+check(len(kill10.calls) == 1, f"0187-AC10: kill fires exactly once, got {kill10.calls}")
+import signal as _signal2  # noqa: E402
+check(kill10.calls[0][0] == (5555, _signal2.SIGTERM),
+      f"0187-AC10: SIGTERM to the pid find_ancestor returned: {kill10.calls[0][0]}")
+check(lines(B) == before10,
+      f"0187-AC10: the ledger's own line count is unchanged by the call itself (Assumption 4): "
+      f"{before10} -> {lines(B)}")
+check(lines(A) == {}, f"0187-AC10: root A (DOIT_ROOT) gained a line it must not have: {lines(A)}")
+
+# ── 0187-AC11 · no resolvable ancestor pid ────────────────────────────────────
+ledger(B, **{ESTEM_LEDGER: esent()})
+r = refuses_executor("the ancestor walk found no claude", B, pending_packets=CLEAR,
+                     find_ancestor=lambda: None)
+check("claude" in r, f"0187-AC11: reason must name what it could not find: {r}")
+
+# ── 0187-AC12 · doit pane-end --executor --handover F — CLI wiring, real subprocess ──
+DOIT_BIN = str(pathlib.Path(__file__).resolve().parent.parent / "doit")
+env12 = {**os.environ, "DOIT_ROOT": str(B)}
+env12.pop("DOIT_PROJECT", None)
+env12.pop("DOIT_LEDGER_FILE", None)
+
+# (a) --handover omitted -> argparse usage error, non-zero exit.
+p12a = subprocess.run([DOIT_BIN, "pane-end", "--executor"], capture_output=True, text=True, env=env12)
+check(p12a.returncode != 0, f"0187-AC12(a): --handover omitted must be a usage error: {p12a.returncode}")
+
+# (b) neither a charter positional nor --executor given -> a named usage refusal.
+p12b = subprocess.run([DOIT_BIN, "pane-end", "--handover", str(HANDOVER)],
+                      capture_output=True, text=True, env=env12)
+check(p12b.returncode != 0, f"0187-AC12(b): neither charter nor --executor must refuse: {p12b.returncode}")
+check("--executor" in (p12b.stderr or "") or "charter" in (p12b.stderr or ""),
+      f"0187-AC12(b): the refusal names what is missing: {p12b.stderr!r}")
+
+# (c) --executor --handover <real file>, a fresh fixture root with no message-sent
+#     at all -> exit 1, stderr names "quiet point" — deterministic, ancestor-walk
+#     independent (the FIRST precondition refuses before any pid is resolved).
+FRESH = TMP / "root-ac12c"
+(FRESH / "events").mkdir(parents=True)
+env12c = {**env12, "DOIT_ROOT": str(FRESH), "DOIT_LEDGER_FILE": ESTEM_LEDGER}
+p12c = subprocess.run([DOIT_BIN, "pane-end", "--executor", "--handover", str(HANDOVER)],
+                      capture_output=True, text=True, env=env12c)
+check(p12c.returncode == 1, f"0187-AC12(c): exit 1 on a fresh root with no message-sent: {p12c.returncode}")
+check("quiet point" in (p12c.stderr or ""),
+      f"0187-AC12(c): stderr names the quiet point: {p12c.stderr!r}")
 
 shutil.rmtree(TMP, ignore_errors=True)
 print(f"pane_end: {N} checks pass")

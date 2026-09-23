@@ -42,7 +42,7 @@ writes into no root but its own fixture.
 import argparse, importlib, os, pathlib, signal, sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import fold  # noqa: E402
+import fold, up  # noqa: E402
 
 # ── the seams, pinned by name so a sibling's spec can be grepped against them ──
 RELAY_MODULE = "relay"              # src/relay.py, written by relay-queries
@@ -203,12 +203,111 @@ def check_and_end(charter, handover, *, root=None, child_env=None,
     return True, f"ended: SIGTERM to {CLAUDE} pid {pid}; {ENDED} appended for {charter}"
 
 
+def _own_stem(child_env):
+    """Which pane is `check_and_end_executor`'s own — `child_env`'s
+    `DOIT_LEDGER_FILE`, falling back to `os.environ`'s (the convention
+    `fold.append`/`up._child_env`/`think.py` already use, 0187 Unknowns §7).
+    An unresolvable stem reads as `""`, which `up.quiet_point` never matches
+    against any real `message-sent` row — a refusal, never a guess."""
+    led = (child_env or {}).get("DOIT_LEDGER_FILE") or os.environ.get("DOIT_LEDGER_FILE") or ""
+    return up._stem(led) if led else ""
+
+
+def check_and_end_executor(handover, *, root=None, child_env=None,
+                           pending_packets=None, kill=os.kill,
+                           find_ancestor=ancestor_claude_pid):
+    """R3's Executor-side ⑦: end THIS pane's own OS process, and only when it
+    may. Mirrors `check_and_end`'s four-precondition shape — `up.quiet_point`
+    in place of `l1-complete` (no charter argument: the pane's own quiet point
+    IS the criterion), handover, pending packets, then the supervised marker —
+    in that order, so a fresh root with nothing on it refuses deterministically
+    at the FIRST precondition, ancestor-walk-independent (AC12(c)).
+
+    Returns `0` on a clean end (after signalling), `1` on any refusal; prints
+    the reason to stdout on success, stderr on refusal — this function does its
+    own printing (unlike `check_and_end`, whose caller prints).
+
+    Appends NO event of its own (0187 Assumption 4): `executor_loop`
+    unconditionally appends `spawn-done` once the OS process exits, and this
+    pane's own `message-sent` handover is already the durable record of why —
+    a `check_and_end_executor`-authored event would be redundant."""
+    events_dir = bind_root(root)
+    handover = pathlib.Path(handover)
+    child_env = {} if child_env is None else child_env
+    stem = _own_stem(child_env)
+
+    try:
+        events = fold.read_events()
+    except OSError as exc:
+        print(f"refused: the ledger under {events_dir} could not be read ({exc})", file=sys.stderr)
+        return 1
+
+    # 1 — the pane's own quiet point: its own message-sent handover AND nothing
+    #     REAL in flight (tick.spawn_in_flight — an escalation elsewhere never
+    #     stalls this, Assumption 7/AC6(d)).
+    if not up.quiet_point(events, stem):
+        print(f"refused: {stem or '(no DOIT_LEDGER_FILE)'} has not reached a quiet point — no "
+              f"message-sent handover on its own file yet, or something real is still in flight",
+              file=sys.stderr)
+        return 1
+
+    # 2 — the handover is on disk and says something. Content before event.
+    try:
+        size = handover.stat().st_size
+    except OSError:
+        print(f"refused: handover file {handover} does not exist", file=sys.stderr)
+        return 1
+    if size == 0:
+        print(f"refused: handover file {handover} is empty (0 bytes)", file=sys.stderr)
+        return 1
+
+    # 3 — nothing outstanding at the seat relay, and an unanswerable question
+    #     counts as outstanding.
+    try:
+        outstanding = _pending(pending_packets, events, fold.ROOT)
+    except Exception as exc:
+        print(f"refused: pending-packet check unresolved — "
+              f"{RELAY_MODULE}.{RELAY_PENDING} raised {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
+    if outstanding:
+        named = ", ".join(str(p.get("spawn", p) if isinstance(p, dict) else p)
+                          for p in outstanding[:3])
+        print(f"refused: {len(outstanding)} pending seat packet(s) outstanding ({named})",
+              file=sys.stderr)
+        return 1
+
+    # 4 — something can replace this pane.
+    if not supervised(child_env):
+        print(f"refused: the supervised marker {SUPERVISED_ENV} is absent or empty "
+              f"— no supervisor can replace this pane", file=sys.stderr)
+        return 1
+
+    # The pid is resolved BEFORE any effect: a walk that cannot find the pane
+    # must signal nothing.
+    pid = find_ancestor()
+    if not pid:
+        print(f"refused: no ancestor process named {CLAUDE!r} found above this one "
+              f"— nothing to signal", file=sys.stderr)
+        return 1
+
+    kill(pid, signal.SIGTERM)
+    print(f"ended: SIGTERM to {CLAUDE} pid {pid} — {stem}")
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="pane-end", description=__doc__.splitlines()[0])
-    ap.add_argument("charter", help="the charter id this pane planned (L-charter-NNNN)")
+    ap.add_argument("charter", nargs="?", default=None,
+                    help="the charter id this pane planned (L-charter-NNNN) — the Planner path")
+    ap.add_argument("--executor", action="store_true",
+                    help="the Executor path: quiet point in place of l1-complete, no charter")
     ap.add_argument("--handover", required=True, help="path to the handover file, already written")
     ap.add_argument("--root", default=None, help="the do-it root to read and append under")
     a = ap.parse_args(argv)
+    if a.executor:
+        return check_and_end_executor(a.handover, root=a.root)
+    if not a.charter:
+        ap.error("a charter (L-charter-NNNN), or --executor, is required")
     ended, reason = check_and_end(a.charter, a.handover, root=a.root)
     if not ended:
         print(reason, file=sys.stderr)

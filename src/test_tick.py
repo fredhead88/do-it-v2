@@ -26,7 +26,8 @@ EV = TMP / "events"
 
 def ticks():
     """`tick`-TYPED lines only: in_flight() appends spawn-stale to the same file."""
-    lines = tick.TICK.read_text().splitlines() if tick.TICK.exists() else []
+    p = tick.tick_path()
+    lines = p.read_text().splitlines() if p.exists() else []
     return [e for e in (json.loads(a) for a in lines) if e["type"] == "tick"]
 
 
@@ -67,10 +68,10 @@ old_ts = (fold.NOW - datetime.timedelta(minutes=45)).isoformat(timespec="seconds
 ev_file.write_text(json.dumps({"v": 1, "ts": old_ts, "type": "spawn-started", "role": "grader",
                                "subject": "L-spec-0001", "spawn": "L-grader-0009"}) + "\n")
 tick.main()
-stale = [json.loads(l) for l in tick.TICK.read_text().splitlines() if '"spawn-stale"' in l]
+stale = [json.loads(l) for l in tick.tick_path().read_text().splitlines() if '"spawn-stale"' in l]
 assert stale and stale[-1]["spawn"] == "L-grader-0009" and ticks()[-1]["lane"] == 1, "past 2× the cap: stale, back on the lane"
 tick.main()
-assert len([l for l in tick.TICK.read_text().splitlines() if '"spawn-stale"' in l]) == 1, "stale is recorded once"
+assert len([l for l in tick.tick_path().read_text().splitlines() if '"spawn-stale"' in l]) == 1, "stale is recorded once"
 ev_file.unlink()
 
 # a start with NO spawn id — hand-written, or written before the wrapper existed.
@@ -82,9 +83,9 @@ assert tick.main() == 0 and ticks()[-1]["lane"] == 0, "an anonymous start does n
 old = (fold.NOW - datetime.timedelta(days=12)).isoformat(timespec="seconds")
 ev_file.write_text(json.dumps({"v": 1, "ts": old, "type": "spawn-started",
                                "role": "grader", "subject": "L-spec-0001"}) + "\n")
-before_stale = len([l for l in tick.TICK.read_text().splitlines() if '"spawn-stale"' in l])
+before_stale = len([l for l in tick.tick_path().read_text().splitlines() if '"spawn-stale"' in l])
 assert tick.main() == 0 and ticks()[-1]["lane"] == 1, "aged out: back on the lane"
-assert len([l for l in tick.TICK.read_text().splitlines() if '"spawn-stale"' in l]) == before_stale, \
+assert len([l for l in tick.tick_path().read_text().splitlines() if '"spawn-stale"' in l]) == before_stale, \
     "nothing to name: a spawn-stale with no spawn id would be unmatchable and repeat every tick"
 ev_file.unlink()
 
@@ -323,7 +324,7 @@ assert lanes == ["inbound:283 · uncarried"], \
 # excludes it exactly like the existing busy-filtering behavior specs/charters
 # get from in_flight(); a decision after it restores the row.
 iso = _isolated_events()
-saved_events, saved_tick = fold.EVENTS, tick.TICK
+saved_events = fold.EVENTS
 fold.EVENTS = iso
 p = write_to(iso, "L-executor-0283.jsonl", {"type": "escalation-blocking", "subject": "283",
                                             "why": "carry", "spawn": "L-executor-0283"})
@@ -373,7 +374,7 @@ finally:
 # AC3 — tick.main() calls carry.uncarried(ev) once per run and folds every
 # item it returns into the todo list lane() computes, idle or busy.
 iso = _isolated_events()
-fold.EVENTS, tick.TICK = iso, iso / "L-tick-local.jsonl"
+fold.EVENTS = iso
 real_uncarried, real_sync = carry.uncarried, carry.sync_v4
 carry.uncarried = lambda events: [{"source": "999-ac3", "kind": "pr", "registered_at": NOW,
                                    "attempts": 0, "last_error": None}]
@@ -387,12 +388,12 @@ assert rc == 0 and "inbound:999-ac3 · uncarried" in out, \
 assert len(ticks()) == 1 and ticks()[-1]["lane"] == 1, \
     "AC3: an otherwise-empty ledger records the one inbound item as the whole lane"
 carry.uncarried, carry.sync_v4 = real_uncarried, real_sync
-fold.EVENTS, tick.TICK = saved_events, saved_tick
+fold.EVENTS = saved_events
 
 # AC4 — tick.main() calls carry.sync_v4(ev) exactly once per run, independent
 # of whether carry.uncarried() returns anything.
 iso = _isolated_events()
-fold.EVENTS, tick.TICK = iso, iso / "L-tick-local.jsonl"
+fold.EVENTS = iso
 real_uncarried, real_sync = carry.uncarried, carry.sync_v4
 calls = {"n": 0}
 
@@ -407,7 +408,7 @@ carry.sync_v4 = counting_sync
 assert tick.main() == 0 and calls["n"] == 1, "AC4: sync_v4 called exactly once, this run"
 assert tick.main() == 0 and calls["n"] == 2, "AC4: and exactly once more, the next run"
 carry.uncarried, carry.sync_v4 = real_uncarried, real_sync
-fold.EVENTS, tick.TICK = saved_events, saved_tick
+fold.EVENTS = saved_events
 
 # AC5 — a carry.uncarried/carry.sync_v4 call that raises does not stop the
 # tick's own heartbeat: tick.main() still returns 0, still appends exactly one
@@ -415,7 +416,7 @@ fold.EVENTS, tick.TICK = saved_events, saved_tick
 # OTHER call's contribution still lands (the two calls are guarded
 # independently — fix 8).
 iso = _isolated_events()
-fold.EVENTS, tick.TICK = iso, iso / "L-tick-local.jsonl"
+fold.EVENTS = iso
 real_uncarried, real_sync = carry.uncarried, carry.sync_v4
 
 
@@ -446,7 +447,7 @@ assert rc == 0 and "inbound:999-ac5 · uncarried" in out, \
 assert "sync boom" in ticks()[-1].get("carry_error", ""), ticks()[-1]
 
 carry.uncarried, carry.sync_v4 = real_uncarried, real_sync
-fold.EVENTS, tick.TICK = saved_events, saved_tick
+fold.EVENTS = saved_events
 
 # AC6 (part 2, fix 1) — the row's --title/--body argv is what the PR path
 # needs: carry.pr_slot(url, None, None, repo) refuses by name, exactly
@@ -463,3 +464,112 @@ assert pathlib.Path(slot).is_file() and source_id == pr_url and charter is None,
     "AC6: --title/--body turn the by-name refusal into a successful carry, writing the packet"
 
 print("tick: 48 checks pass")
+
+# spawn_in_flight is the split (0187, Interfaces): an escalation-blocking with NO
+# real spawn beside it is busy for in_flight but never for spawn_in_flight.
+write("L-executor-9401.jsonl", {"type": "escalation-blocking", "subject": "L-spec-9401",
+                                "why": "operator question", "spawn": "L-executor-9401"})
+ev9, _, _ = folded()
+assert "L-spec-9401" in tick.in_flight(ev9), "sanity: in_flight includes escalation-busy"
+assert "L-spec-9401" not in tick.spawn_in_flight(ev9), \
+    "0187: spawn_in_flight excludes escalation-busy entirely — the split Interfaces names"
+(EV / "L-executor-9401.jsonl").unlink()
+
+print("tick: 41 checks pass")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-0187 · executor-runs-unattended (L-charter-0028) — R3, tick.wait
+# ══════════════════════════════════════════════════════════════════════════════
+import subprocess as _sp, threading as _th, time as _time  # noqa: E402
+
+DOIT_BIN = str(pathlib.Path(__file__).resolve().parent.parent / "doit")
+
+
+def _fresh_root(name):
+    r = TMP / name
+    (r / "events").mkdir(parents=True, exist_ok=True)
+    return r
+
+
+# ── 0187-AC2: no false "changed" on the very first look ──────────────────────
+r2 = _fresh_root("wait-ac2")
+t0 = _time.monotonic()
+reason = tick.wait(r2, max_s=0.3)
+elapsed = _time.monotonic() - t0
+assert elapsed >= 0.25 and reason == "interval", \
+    f"0187-AC2: nothing written at all -> interval, never an instant false 'changed': {elapsed} {reason}"
+
+# ── 0187-AC3: a mid-call ledger write wakes it promptly ──────────────────────
+r3 = _fresh_root("wait-ac3")
+
+
+def _late_write3():
+    _time.sleep(0.1)
+    (r3 / "events" / "L-operator-wait3.jsonl").write_text(
+        json.dumps({"v": 1, "ts": NOW, "type": "spec-written", "subject": "L-spec-9301"}) + "\n")
+
+
+th3 = _th.Thread(target=_late_write3)
+th3.start()
+t0 = _time.monotonic()
+reason = tick.wait(r3, max_s=5)
+elapsed = _time.monotonic() - t0
+th3.join()
+assert reason == "changed" and elapsed < 1, \
+    f"0187-AC3: a real mid-call write wakes wait() well under the 5s bound: {elapsed} {reason}"
+
+# ── 0187-AC4: exactly one `tick` per RETURNING call, tick.main()'s own shape ──
+r4 = _fresh_root("wait-ac4")
+fold.ROOT, fold.EVENTS = r4, r4 / "events"      # so tick.tick_path() below reads root 4
+tick.wait(r4, max_s=0.2)                        # call 1: times out
+
+
+def _late_write4():
+    _time.sleep(0.05)
+    (r4 / "events" / "L-operator-wait4.jsonl").write_text(
+        json.dumps({"v": 1, "ts": NOW, "type": "spec-written", "subject": "L-spec-9302"}) + "\n")
+
+
+th4 = _th.Thread(target=_late_write4)
+th4.start()
+tick.wait(r4, max_s=5)                          # call 2: woken
+th4.join()
+lines4 = [json.loads(l) for l in tick.tick_path().read_text().splitlines() if l.strip()]
+assert len(lines4) == 2 and all(e["type"] == "tick" and isinstance(e.get("lane"), int) for e in lines4), \
+    f"0187-AC4: exactly one tick event per returning call, each carrying an int lane=: {lines4}"
+
+# ── 0187-AC16: wait()'s own appended tick never wakes a SUBSEQUENT call ──────
+r16 = _fresh_root("wait-ac16")
+reason1 = tick.wait(r16, max_s=0.3)
+reason2 = tick.wait(r16, max_s=0.3)
+assert reason1 == "interval" and reason2 == "interval", \
+    f"0187-AC16: the first call's own tick append must not read as 'changed' to the second: {reason1} {reason2}"
+
+# ── 0187-AC17: tick.wait(root=...) writes under the GIVEN root, never the ────
+# importing process's DOIT_ROOT ────────────────────────────────────────────
+rootA = _fresh_root("wait-ac17-A")
+rootB = _fresh_root("wait-ac17-B")
+fold.ROOT, fold.EVENTS = rootA, rootA / "events"     # "the importing process's DOIT_ROOT"
+tick.wait(rootB, max_s=0.2)
+tick_a = rootA / "events" / "L-tick-local.jsonl"
+tick_b = rootB / "events" / "L-tick-local.jsonl"
+assert tick_b.exists() and len(tick_b.read_text().splitlines()) == 1, \
+    f"0187-AC17: the tick lands under the GIVEN root B: {tick_b}"
+assert not tick_a.exists(), \
+    f"0187-AC17: root A (the importing process's own DOIT_ROOT) gains nothing: {tick_a}"
+
+# restore this file's own binding before continuing (tick.wait mutates fold.ROOT/EVENTS globally)
+fold.ROOT, fold.EVENTS = TMP, EV
+
+# ── 0187-AC5: `doit wait --max SEC` — real CLI subprocess ────────────────────
+r5 = _fresh_root("wait-ac5-cli")
+env5 = {**os.environ, "DOIT_ROOT": str(r5)}
+env5.pop("DOIT_PROJECT", None)
+proc = _sp.run([DOIT_BIN, "wait", "--max", "0.2"], capture_output=True, text=True, env=env5)
+assert proc.returncode == 0, f"0187-AC5: exit 0: {proc.returncode} {proc.stderr}"
+assert proc.stdout.strip() == "interval", f"0187-AC5: prints 'interval': {proc.stdout!r}"
+tickfile5 = r5 / "events" / "L-tick-local.jsonl"
+assert tickfile5.exists() and len(tickfile5.read_text().splitlines()) == 1, \
+    f"0187-AC5: L-tick-local.jsonl gains exactly one line: {tickfile5}"
+
+print("tick: 0187 R3 checks pass")

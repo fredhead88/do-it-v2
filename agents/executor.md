@@ -51,7 +51,7 @@ waiting for you. `doit events <subject>` is how you check each row.
 | **`building`** | — | nothing; in flight. |
 | **`shipped-owed-evidence`, an owed criterion's `wake_at` passed** | run the criterion's own declared observation from the repo — never a build artifact | holds → `doit append owed-met <spec> criterion=<AC id> evidence=<the path, or the quoted observation>`. The fold derives `accepted` once every owed criterion on the spec has one — no re-grade spawn (S15/S33). Does not hold → the restore decision first (§5.8), then a corrective; the closed spec is never reopened. |
 | **charter `L1-complete`, or `L2-complete`/`retracted` with no `tree-reaped`** | open in-scope briefs for the charter (a `brief` naming the `requirement` it serves, with no `brief-answered` whose `ref` is its `src`); `sweep-fixpoint`? `charter-review-complete`? | **an open in-scope brief is yours to author** (D7, §3.12): `S=$(doit alloc spec)`, write `$R/content/slot-$S.md` — the brief's own words, the `requirement` it cites, its footprint hint, and the charter's Constraints section verbatim — then `doit append brief-answered <charter> ref=<the brief's src> spec=$S`, `P=$(doit packet spec-writer $S --slot $R/content/slot-$S.md --charter <charter file>)` and dispatch `spec-writer`. A brief with no `requirement` is `adjacent` (§2.6) and is not yours. The fold holds the close open while one stands, so a `sweep-fixpoint` written over one buys nothing. None open, no fixpoint → `doit append sweep-fixpoint <charter>`. Fixpoint, no review → `doit review-owed <charter>` decides it: `owed` → dispatch `charter-reviewer`; `not-owed → no charter-reviewer dispatch` (a `Covers: none` charter is left for the reap branch above once the fold moves it to `L2-complete` on its own). `charter-review-not-complete` → `escalation-blocking` naming every finding: which requirement is uncovered, and which findings are inside the charter's footprint and which are not. **Converting a finding into a brief is authorship's, not yours** — you hold extracts of nothing here, but the in-scope/adjacent split is the sweep's citation test (§2.6) and the operator makes it. Once briefs are filed and the escalation cleared, the row above authors them. L2 derived → reap: `doit reap <charter> --repo "$R/repos/<project>"` and nothing else. The script judges ancestry by patch-id (`git branch --merged` is confidently wrong under squash-merge), retains anything it cannot prove dead with a reason, and writes the one `tree-reaped` event. It refuses a charter that is not L2-complete or retracted, so a wrong argument destroys nothing. |
-| **`escalation-blocking` open on a subject** | — | touch nothing on that subject. Act on the others. |
+| **`escalation-blocking` open on a subject** | does it carry `measure=` (a read-only command) and `met_when=` (what that command's output reads when the condition holds)? | run `measure`; its output matches `met_when` → close it yourself: `doit append decision <subject> ref=<the escalation's own _src> why="<what measure read>" revert="n/a — closed by re-measurement, not by choice"`. No match yet → touch nothing, try again next pass. **No `measure=` present → touch nothing on that subject at all** — it is the operator's to notice and close. Act on the others either way. |
 
 **The pipeline after a build — act on the newest event:**
 
@@ -191,6 +191,16 @@ deviation the builder must declare. Rework reuses the worktree. A missing
   reading artifacts.
 - **No Agent tool, no skills, no in-session spawn.** `doit dispatch --detach`
   is the only spawn path.
+- **A re-measurable escalation closes itself — you never leave it for the
+  operator to notice by eye.** An `escalation-blocking` you or a builder wrote
+  MAY carry `measure=<a read-only command>` and `met_when=<what its output
+  reads when the condition holds>` — a condition you can re-check without an
+  operator's judgment. When it does: run `measure` each pass on that subject;
+  the moment its output matches `met_when`, close it yourself — `doit append
+  decision <subject> ref=<the escalation's own _src> why="<what measure read>"
+  revert="n/a — closed by re-measurement, not by choice"`. An escalation with
+  no `measure=` is the operator's alone; "touch nothing on that subject" (the
+  lane-table row above) still holds for it.
 
 ## Output
 
@@ -207,16 +217,33 @@ sub-agent you serve is in flight, no merge is half-done, no dispatch is
 un-appended. Mid-spawn is not a quiet point and neither is mid-merge; wait for
 the terminal event, then end.
 
-Past roughly 35–40% of your context, take no new subject and reach the next
-quiet point deliberately. Then print a **one-line handover** — the lane as it
-stands and nothing else — and stop.
-The pane is then **restarted fresh by the launcher** against the same ledger;
-nothing is carried across in prose because there is nothing to carry.
+**At the end of every turn**, start `doit wait --max 300` as a background
+task before you stop talking. It blocks on the ledger (or up to five minutes)
+and then returns — that is what wakes you inside five minutes whether or not
+anyone types, whether the queue is dry or you are mid-context. Do not wait on
+it in the foreground; let it run behind you and act again on your next turn.
+
+Past roughly 35–40% of your context, or once you are genuinely idle with
+nothing left the lane asks of you, reach a quiet point deliberately: write a
+**one-line handover** — the lane as it stands and nothing else — onto your own
+ledger file: `doit append message-sent <your ledger stem> "text=<the lane as
+it stands>"`. Then end the OS process itself with `doit pane-end --executor --handover
+<the handover file's path>`.
+**Never a bare stop, never a printed line and nothing else** — a pane that
+only prints and idles is not replaced, and the loop does not turn. `doit
+pane-end --executor` refuses (and prints why, ending nothing) unless your own
+handover is on disk, nothing of yours is in flight, no seat packet is
+pending, and a supervisor is there to replace you — read its reason and fix
+what it names, never retry blind.
+
+The pane is then **restarted fresh by the launcher** (`up.executor_loop`)
+against the same ledger, the moment this OS process exits — no keystroke, no
+wait. Nothing is carried across in prose because there is nothing to carry.
 
 That is safe for exactly one reason: **every fact you acted on is on the ledger
 before it ends**, so a restart **loses nothing**. An action you took whose only
 record is this conversation would be the one thing a restart cannot recover —
-which is why the append comes first and the handover line is a courtesy, not a
+which is why the append comes first and the handover is a ledger event, not a
 channel.
 
 ## Lessons (operator rule, 2026-09-22)
