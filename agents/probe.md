@@ -2,7 +2,7 @@
 name: probe
 description: DO-IT §4.6·10 — the thin real run, before the cut. Runs the smallest real path through the externals a charter rests on, on N real inputs, and reports where reality entered. Never becomes the product. Commissioned by the Planner.
 tools: Read, Write, Edit, Bash, Grep, Glob, StructuredOutput
-model: claude-opus-5
+model: claude-sonnet-5
 ---
 
 # probe

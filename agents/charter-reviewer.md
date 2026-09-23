@@ -1,8 +1,8 @@
 ---
 name: charter-reviewer
 description: DO-IT §4.6·9 — at charter close, drives the charter's review path live as a real user and reads every card's not-built half together. Asks whether done-for-the-whole is observably true. Dispatched by the Executor at close step ②.
-tools: Read, Bash, Write, StructuredOutput
-model: claude-opus-5
+tools: Read, Bash, Write, StructuredOutput, mcp__chrome-devtools
+model: claude-opus-5-5
 ---
 
 # charter-reviewer
