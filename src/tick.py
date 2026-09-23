@@ -237,24 +237,31 @@ def _record():
     except BlockingIOError:
         return None
     ev = fold.read_events()
-    # SD11 (L-spec-0242, extended by L-spec-0244): `intake.run(ev)` fires off
-    # the FIRST read, its own try/except so a raise never stops the tick's own
-    # heartbeat (mirroring `carry_error` below); `notes.run(ev, note_prs)`
-    # follows immediately (no `pr_closeout.run` present yet at this build) and
-    # sits on the SAME `intake_error` field, `; `-joined — then the ledger is
-    # RE-READ before anything else, so a same-tick `inbound-registered`/
-    # `inbound-awaiting`/`inbound-note-listed`/`inbound-note-gone` append is
-    # what `carry.uncarried`/`fold.fold`/`lane` see.
+    # SD11 (L-spec-0242, extended by L-spec-0244 and L-spec-0243): `intake.run(ev)`
+    # fires off the FIRST read, its own try/except so a raise never stops the
+    # tick's own heartbeat (mirroring `carry_error` below); `notes.run(ev,
+    # note_prs)` and `pr_closeout.run(ev, spec_prs)` both follow, each reading
+    # its own slice of the SAME `intake.run(ev)` call's return, and both sit on
+    # the SAME `intake_error` field, `; `-joined — then the ledger is RE-READ
+    # before anything else, so a same-tick `inbound-registered`/
+    # `inbound-awaiting`/`inbound-note-listed`/`inbound-note-gone`/
+    # `inbound-closed`/`inbound-pr-commented` append is what
+    # `carry.uncarried`/`fold.fold`/`lane` see.
     intake_errors = []
-    note_prs = []
+    r = {}
     try:
-        note_prs = (intake.run(ev) or {}).get("note_prs") or []
+        r = intake.run(ev) or {}
     except Exception as e:
         intake_errors.append(f"run: {e}")
     try:
-        notes.run(ev, note_prs)
+        notes.run(ev, r.get("note_prs") or [])
     except Exception as e:
         intake_errors.append(f"notes: {e}")
+    try:
+        import pr_closeout
+        pr_closeout.run(ev, r.get("spec_prs", []))
+    except Exception as e:
+        intake_errors.append(f"pr_closeout: {e}")
     ev = fold.read_events()
     specs, charters, _, _ = fold.fold(ev)
     reaped = {e.get("subject") for e in ev if e["type"] == "tree-reaped"}
