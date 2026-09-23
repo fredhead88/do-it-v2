@@ -18,6 +18,7 @@ case "${1:-board}" in
   pane-end) shift; exec python3 "$SRC/pane_end.py" "$@" ;;
   think)   shift; exec python3 "$SRC/think.py" "$@" ;;
   carry)   shift; exec python3 "$SRC/carry.py" "$@" ;;
+  guard)   shift; exec python3 "$SRC/guard.py" "$@" ;;
   models)  shift; exec python3 "$SRC/models.py" "$@" ;;
   version) cat "$HERE/VERSION" ;;
   backup)  shift; exec bash "$SRC/backup.sh" "$@" ;;
