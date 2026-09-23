@@ -16,7 +16,7 @@ Writes `$R/packets/<subject>-<role>-<n>.md` and prints the path.
 import argparse, hashlib, os, pathlib, re, subprocess, sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import audit, fold  # noqa: E402
+import audit, fold, merge_gate  # noqa: E402
 
 ROOT = pathlib.Path(os.environ.get("DOIT_ROOT", pathlib.Path.home() / ".do-it"))
 CONTENT, PACKETS = ROOT / "content", ROOT / "packets"
@@ -454,6 +454,70 @@ def verify_script(spec_text):
     return text
 
 
+def standing_waivers(c):
+    """L-spec-0195/AC7-AC9: every `verify-waiver{step, reason}` on this subject —
+    `(step, reason)` pairs, step ascending, 1-indexed against the same `&&`
+    segmentation `_quote_aware_scan` produces. A step re-waived carries the LATEST
+    reason (a later operator/executor event may re-state one); nothing here
+    re-numbers or invalidates a waiver when a later rework changes the segment
+    count — that drift is the Executor's, out of band (Out of scope)."""
+    out = {}
+    for e in c.all_of("verify-waiver"):
+        step = e.get("step")
+        if step:
+            out[int(step)] = e.get("reason", "")
+    return sorted(out.items())
+
+
+def apply_waivers(block, waivers):
+    """L-spec-0195/AC7: `block` with every waived 1-indexed `&&`-segment replaced by
+    a no-op (`true`) — `waivers` is `standing_waivers(c)`'s `(step, reason)` list.
+    `[]` returns `block` unchanged."""
+    if not waivers:
+        return block
+    steps = {s for s, _ in waivers}
+    segs, _ = _quote_aware_scan(block)
+    segs = ["true" if (i + 1) in steps else s for i, s in enumerate(segs)]
+    return " && ".join(segs) + "\n"
+
+
+def waiver_line(c):
+    """L-spec-0195/AC8: one line naming every standing waived step and its reason,
+    for the grader's and reviewer's own text — never the card (Out of scope,
+    finding 5)."""
+    w = standing_waivers(c)
+    if not w:
+        return "no standing verify-waiver applies to this subject"
+    return "; ".join(f"step {s} waived — {r}" for s, r in w)
+
+
+def out_of_grant_line(c):
+    """L-spec-0195/AC9: `merge_gate.out_of_grant(branch, "main", spec_id)`'s result,
+    for the reviewer packet ONLY (ADR-0028-6) — never the grader's, never the
+    builder's. `merge_gate`'s own convention (every existing caller, including its
+    own test suite) is the process cwd; this chdir's there and back rather than
+    changing that seam's signature, which is owned by a sibling unit and consumed
+    here strictly by its Seams-table signature. Never raises: a missing branch, a
+    repo directory that does not exist, or `merge_gate.Undetermined` all render as
+    prose, and packet building always completes (no `die()`, per AC9)."""
+    bd = c.last("build-done") or {}
+    branch = bd.get("branch")
+    if not branch:
+        return "no build-done branch on record for this subject"
+    repo = c.a.repo or str(ROOT / "repos" / c.project())
+    if not pathlib.Path(repo).is_dir():
+        return "could not determine — no repository checkout on disk to gate against"
+    prev = os.getcwd()
+    try:
+        os.chdir(repo)
+        paths = merge_gate.out_of_grant(branch, "main", c.a.subject)
+    except merge_gate.Undetermined:
+        return "could not determine"
+    finally:
+        os.chdir(prev)
+    return "no path outside the Writes grant" if not paths else "out-of-grant path(s): " + ", ".join(paths)
+
+
 def write_verify_script(c):
     """The orchestration `verify_script` used to do itself: resolve the spec,
     resolve the real `base_sha` (`verify_base_sha`), inject `BASE=<sha>` right
@@ -475,7 +539,15 @@ def write_verify_script(c):
     alone does not, since neither conftest in albert-scott calls
     `load_dotenv`. No `build-started` event yet, or `dsn_role` reading
     `absent`/`refused`/missing entirely, adds no line — byte-for-byte what this
-    function produced before this addition."""
+    function produced before this addition.
+
+    L-spec-0195/finding 3: writes a PER-ROLE file, `verify-<subject>-<c.a.role>.sh`
+    — never one file two roles share, because a grader/reviewer waiver and the
+    builder's own real chain must never collide on one path. For `c.a.role` in
+    `("grader", "reviewer")` only, every standing `verify-waiver{step}` on the
+    subject (`standing_waivers`) substitutes a no-op (`true`) for that 1-indexed
+    `&&`-segment of the block, BEFORE the BASE/dsn assembly above — the builder's
+    own script is never touched by a waiver, whatever role dispatched it."""
     spec = c.spec_file()
     try:
         text = verify_script(spec.read_text())
@@ -485,10 +557,12 @@ def write_verify_script(c):
         return None
     base = verify_base_sha(c)
     shebang, set_e, block = text.split("\n", 2)
+    if c.a.role in ("grader", "reviewer"):
+        block = apply_waivers(block, standing_waivers(c))
     bs = c.last("build-started")
     dsn_line = "set -a; . ./.env; set +a\n" if bs and bs.get("dsn_role") == "readonly" else ""
     text = f"{shebang}\n{set_e}\nBASE={base}\n" + dsn_line + block
-    p = CONTENT / f"verify-{c.a.subject}.sh"
+    p = CONTENT / f"verify-{c.a.subject}-{c.a.role}.sh"
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(text)
     p.chmod(0o755)
@@ -844,17 +918,23 @@ def p_spec_writer(c):
         die("no prior spec-writer packet, no --slot, and no content/slot-<spec>.md: round one "
             "carries the plan slot, which only the Planner holds")
     findings = [e for e in c.all_of("audit-finding") if e.get("list") != "rejected"]
-    if not findings:
+    # L-spec-0195/finding 2: a `spec-shape-failed` finding list is a SECOND, equally
+    # sufficient source for the Fix list — either source alone is enough to build a
+    # rework packet, and neither empties the other's contribution when both are
+    # present.
+    shape_findings = [f for e in c.all_of("spec-shape-failed") for f in (e.get("findings") or [])]
+    if not findings and not shape_findings:
         # Round one from a slot the Executor wrote is legitimate — D7's brief-authored
         # spec has no plan slot and no audit yet. Round one from a PRIOR PACKET is a
         # rework with nothing to rework, which is the mistake this refuses.
         if prev or not slot:
             die("no audit findings on this subject — a rework packet with no fix list is round one again")
         return base
-    return base + ["", "## Fix list — apply each, same spec id, same path", ""] + [
-        f"{i}. [{f.get('field', '?')} · {f.get('category', '?')}] {f.get('finding', '')}"
-        f"{'  → ' + f['suggested_fix'] if f.get('suggested_fix') else ''}"
-        for i, f in enumerate(findings, 1)]
+    lines = [f"{i}. [{f.get('field', '?')} · {f.get('category', '?')}] {f.get('finding', '')}"
+             f"{'  → ' + f['suggested_fix'] if f.get('suggested_fix') else ''}"
+             for i, f in enumerate(findings, 1)]
+    lines += [f"{len(findings) + i}. [spec-shape] {f}" for i, f in enumerate(shape_findings, 1)]
+    return base + ["", "## Fix list — apply each, same spec id, same path", ""] + lines
 
 
 HINT_DIFF_MARKER = re.compile(r"^(\+\+\+|---|@@)")
@@ -949,11 +1029,17 @@ def p_grader(c):
         f"5. Checker: `verify-{c.a.subject}` · version {ver} · coverage note "
         f"\"the spec's Verification block\" · re-run it with cwd `{c.worktree()}`.",
         f"6. The done-condition: {done}.",
+        f"7. Standing verify-waivers applied to this checker: {waiver_line(c)}.",
     ]
 
 
 def p_reviewer(c):
     spec = c.spec_file()
+    # L-spec-0195/finding 4: the reviewer's own call to write_verify_script — new
+    # work, not an existing behaviour extended. Its checker file is `verify-
+    # <subject>-reviewer.sh`, waived exactly like the grader's own; never cited by
+    # path here (the grader's item 5 already names that convention).
+    write_verify_script(c)
     body = spec.read_text()
     crit = criteria(body)
     bd = c.last("build-done") or {}
@@ -993,6 +1079,8 @@ def p_reviewer(c):
         "5. Metrics you may cite: none supplied.",
         f"6. The review account for this app: {review_account(c)}. It may never delete and never move money.",
         f"7. depth: {c.a.depth} · round: {c.a.round}.",
+        f"8. Standing verify-waivers applied to this checker: {waiver_line(c)}.",
+        f"9. Paths this branch touches outside the spec's Writes grant (ADR-0028-6): {out_of_grant_line(c)}.",
     ]
 
 

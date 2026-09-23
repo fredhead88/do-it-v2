@@ -427,6 +427,16 @@ def events_for(role, out, a, base):
                                             ac_types=out["ac_types"], requirement_ids=out["requirement_ids"],
                                             owed_ac_count=out["owed"], unknown_count=out["unknowns"],
                                             footprint=out["footprint"])))
+            # L-spec-0195/R3: a spec the tools cannot read is bounced HERE, at write
+            # time — never discovered only when a builder is dispatched against it
+            # (fold.py's `void`, which erased it from its charter). `spec-written`
+            # above is unconditional; this is a SECOND event on the same subject,
+            # never a substitute for it, and never `spawn-failed` (that would read
+            # as `void`, the very bug this closes).
+            import validate
+            findings = validate.spec_shape(pathlib.Path(a.path).read_text())
+            if findings:
+                ev.append(("spec-shape-failed", dict(findings=findings)))
         elif out["status"] == "killed":
             ev.append(("spec-killed", dict(check=out["killed_by_check"])))
     elif role == "spec-auditor":
@@ -621,6 +631,12 @@ def main(a):
             fail(f"{a.subject} is killed — refusing role=builder before any spend")
         if open_spec_writer_spawn(all_ev, a.subject):
             fail(f"{a.subject} carries an open spec-writer spawn — refusing role=builder before any spend")
+        # L-spec-0195/AC4: a spec still standing broken (its most recent of
+        # {spec-written, spec-shape-failed} is spec-shape-failed) is refused here,
+        # before any spend — never discovered only at dispatch (R3's Goal).
+        if fold.spec_shape_pending([e for e in all_ev if e.get("subject") == a.subject]):
+            fail(f"{a.subject} fails spec-shape validation — refusing role=builder before any spend",
+                 reason="spec-shape")
     prior = next((e for e in fold.read_events() if e.get("type") == "spawn-failed"
                   and e.get("packet_sha256") == meta["packet_sha256"]
                   and e.get("contract_sha256") == meta["contract_sha256"]

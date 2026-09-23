@@ -140,11 +140,20 @@ def run(argv):
     return code, out.getvalue(), err.getvalue()
 
 
-def writer(footprint, path_written=True, rc=0, stderr="", status=None):
+# L-spec-0195: a well-formed spec fixture — a real `## Verification` `&&` chain,
+# an `## Acceptance Criteria` section, a path-shaped `Writes:` line — so every
+# happy-path `writer()` fixture keeps clearing `validate.spec_shape` unchanged
+# (Assumptions).
+WELL_FORMED_SPEC = ("# fixture spec\n## Verification\n```\ntrue\n```\n"
+                    "## Acceptance Criteria\nAC1 [backend]: x.\n  review_path: y\n"
+                    "Writes: a.py\n")
+
+
+def writer(footprint, path_written=True, rc=0, stderr="", status=None, spec_text=WELL_FORMED_SPEC):
     """A `doit dispatch spec-writer` that behaves the way the real one would."""
     def go(argv):
         if rc == 0 and path_written:
-            pathlib.Path(argv[argv.index("--path") + 1]).write_text("# fixture spec\n")
+            pathlib.Path(argv[argv.index("--path") + 1]).write_text(spec_text)
             write_event("L-spec-writer-0001", {"type": "spec-written", "subject": argv[3],
                                                "project": "another-project-again",
                                                "path": argv[argv.index("--path") + 1],
@@ -320,6 +329,22 @@ check(carry.already_carried("1482") is None, "no spec-carried for a killed spawn
 STUB.dispatch = writer(["src/ok.py"])
 code, out, err = run(["1482"] + BASE)
 check(code == 0, "a killed spawn is a retry by design, not a permanently burned source")
+
+# ══ L-spec-0195/AC5 · a spec that fails validate.spec_shape never reaches
+#    spec-carried — the refusal names spec-shape and the findings ═════════════
+record(1483, "malformed-verification"), inbox(1483, "malformed-verification", "# 1483\n")
+BAD_SHAPE_SPEC = "# 1483\nno verification, no acceptance criteria, no writes grant\n"
+ALLOCS[0], CALLS[:] = 0, []
+STUB.dispatch = writer(["src/ok.py"], spec_text=BAD_SHAPE_SPEC)
+code, out, err = run(["1483"] + BASE)
+check(code != 0 and "fails spec-shape validation" in err and "Verification:" in err,
+      f"★ a spec the tools cannot read never reaches spec-carried: {err!r}")
+check(not [c for c in CALLS if c[1] == "append"], "…and nothing was appended")
+check(carry.already_carried("1483") is None, "no spec-carried event exists for it")
+# ...and the source is not burned: a retry with a well-formed spec carries.
+STUB.dispatch = writer(["src/ok.py"])
+code, out, err = run(["1483"] + BASE)
+check(code == 0, f"★ a spec-shape refusal is a retry, not a permanently burned source: {err!r}")
 
 # ══ AC9 · the PR url: recognized, constructed from flags, never fetched ════════
 URL = "https://github.com/o/r/pull/1"

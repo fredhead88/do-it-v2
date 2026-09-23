@@ -112,7 +112,8 @@ refuses("spec-auditor", "Currency is USD to two places, and the seat's list pric
         worktree=str(REPO))
 
 # the verify script is a file now, not a 300-char field (§5.10)
-V = TMP / "content" / "verify-L-spec-0001.sh"
+# L-spec-0195: PER-ROLE now — spec-auditor's own file, never shared with any other role.
+V = TMP / "content" / "verify-L-spec-0001-spec-auditor.sh"
 assert V.exists() and "cd src && /usr/bin/python3 test_fold.py" in V.read_text() and os.access(V, os.X_OK)
 assert "set -euo pipefail" in V.read_text(), "a multi-step block must not exit 0 over an earlier failure"
 assert re.match(r"#!/usr/bin/env bash\nset -euo pipefail\nBASE=\S+\n", V.read_text()), \
@@ -150,7 +151,7 @@ MERGE.write_text("# L-spec-0027\n## 8. Verification\n```\necho $(git merge-base 
                  "  review_path: log in as x / go to x / do x / worked if x / failed if x.\n")
 ev("spec-writer", "spec-written", "L-spec-0027", path=str(MERGE), footprint=["src/fold.py"])
 build("spec-auditor", subject="L-spec-0027", worktree=str(REPO))
-mtxt = (TMP / "content" / "verify-L-spec-0027.sh").read_text()
+mtxt = (TMP / "content" / "verify-L-spec-0027-spec-auditor.sh").read_text()
 mlines = mtxt.splitlines()
 assert mlines[1] == "set -euo pipefail" and mlines[2].startswith("BASE="), mlines[:4]
 assert "$(git merge-base" not in mtxt and "echo $BASE" in mtxt, mtxt
@@ -158,7 +159,8 @@ N += 1
 
 # ── 2. builder ───────────────────────────────────────────────────────────────
 t = build("builder", worktree=str(REPO), repo=str(REPO))
-assert f"bash {V}" in t and "__pycache__" in t, "the residue lesson is in the done-condition"
+VB = TMP / "content" / "verify-L-spec-0001-builder.sh"     # L-spec-0195: builder's own file
+assert f"bash {VB}" in t and "__pycache__" in t, "the residue lesson is in the done-condition"
 assert "Writes (the merge grant" in t and "src/fold.py" in t, "the footprint is the grant"
 assert "L-spec-0002 · src/fold.py · written" in t, "the conflict list is id, what, state"
 assert "Currency is USD" in t, "the charter EXTRACT — constraints and decisions — is carried verbatim"
@@ -699,11 +701,11 @@ N += 1
 p60 = pathlib.Path(packet.packet_spec_auditor("L-spec-0060"))
 assert p60.is_file() and str(SPEC60) in p60.read_text(), \
     "a bare packet_spec_auditor(spec) builds a packet; it does not die for want of a base"
-assert f"BASE={REPO_HEAD}\n" in (TMP / "content" / "verify-L-spec-0060.sh").read_text(), \
+assert f"BASE={REPO_HEAD}\n" in (TMP / "content" / "verify-L-spec-0060-spec-auditor.sh").read_text(), \
     "with no worktree on disk the base is the project repo's HEAD, pinned once"
 N += 1
 assert pathlib.Path(packet.packet_spec_auditor("L-spec-0060", base_sha="cafe1234")).is_file()
-assert (TMP / "content" / "verify-L-spec-0060.sh").read_text().splitlines()[2] == "BASE=cafe1234", \
+assert (TMP / "content" / "verify-L-spec-0060-spec-auditor.sh").read_text().splitlines()[2] == "BASE=cafe1234", \
     "an explicit base_sha still wins — the existing precedence above the fallback is untouched"
 
 
@@ -974,7 +976,7 @@ ev("spec-writer", "spec-written", "L-spec-0080", spec="L-spec-0080", path=str(SP
 ev("builder", "build-done", "L-spec-0080", status="DONE", base_sha="X0000001", ready_sha="r1")
 ev("builder", "build-done", "L-spec-0080", status="DONE", base_sha="Y0000002", ready_sha="r2")
 build("spec-auditor", subject="L-spec-0080", worktree=str(REPO))
-btxt = (TMP / "content" / "verify-L-spec-0080.sh").read_text()
+btxt = (TMP / "content" / "verify-L-spec-0080-spec-auditor.sh").read_text()
 assert btxt.splitlines()[2] == "BASE=X0000001", \
     f"AC6: the earliest build-done's base_sha wins, never a later round's or the live worktree HEAD: {btxt.splitlines()[:4]!r}"
 
@@ -997,7 +999,7 @@ def _dsn_spec(sid):
 S18A = "L-spec-0301"
 _dsn_spec(S18A)
 build("spec-auditor", subject=S18A, worktree=str(REPO))
-REF_NO_DSN = (TMP / "content" / f"verify-{S18A}.sh").read_text()
+REF_NO_DSN = (TMP / "content" / f"verify-{S18A}-spec-auditor.sh").read_text()
 assert DSN_LINE not in REF_NO_DSN, "AC18a: no build-started -> no export line"
 N += 1
 
@@ -1007,7 +1009,7 @@ S17 = "L-spec-0302"
 _dsn_spec(S17)
 ev("builder", "build-started", S17, worktree="/x", dsn_role="readonly")
 build("spec-auditor", subject=S17, worktree=str(REPO))
-t17 = (TMP / "content" / f"verify-{S17}.sh").read_text()
+t17 = (TMP / "content" / f"verify-{S17}-spec-auditor.sh").read_text()
 lines17 = t17.splitlines()
 assert lines17[2].startswith("BASE=") and lines17[3] == DSN_LINE, lines17[:5]
 assert "cd src && /usr/bin/python3 test_fold.py" in t17
@@ -1018,7 +1020,7 @@ S18B = "L-spec-0303"
 _dsn_spec(S18B)
 ev("builder", "build-started", S18B, worktree="/x", dsn_role="absent")
 build("spec-auditor", subject=S18B, worktree=str(REPO))
-t18b = (TMP / "content" / f"verify-{S18B}.sh").read_text()
+t18b = (TMP / "content" / f"verify-{S18B}-spec-auditor.sh").read_text()
 assert DSN_LINE not in t18b and t18b == REF_NO_DSN, "AC18b"
 N += 1
 
@@ -1027,8 +1029,140 @@ S18C = "L-spec-0304"
 _dsn_spec(S18C)
 ev("builder", "build-started", S18C, worktree="/x", dsn_role="refused")
 build("spec-auditor", subject=S18C, worktree=str(REPO))
-t18c = (TMP / "content" / f"verify-{S18C}.sh").read_text()
+t18c = (TMP / "content" / f"verify-{S18C}-spec-auditor.sh").read_text()
 assert DSN_LINE not in t18c and t18c == REF_NO_DSN, "AC18c"
 N += 1
+
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-0195 · spec-shape-checked-before-build (L-charter-0028) — AC2, AC6-AC9
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── AC2 · a rework's Fix list draws from spec-shape-failed too, alongside any
+#          standing audit-finding — neither source empties the other ──────────
+SPEC0093 = TMP / "content" / "L-spec-0093.md"
+SPEC0093.write_text("# L-spec-0093\n## 1. Goal\nx\n")
+(TMP / "content" / "slot-L-spec-0093.md").write_text(
+    f"1. Charter extract: R1.\n9. The path to write the spec: {SPEC0093}\n")
+ev("spec-writer", "spec-written", "L-spec-0093", spec="L-spec-0093", path=str(SPEC0093), footprint=[])
+ev("spec-writer", "spec-shape-failed", "L-spec-0093",
+   findings=["Verification: no `## Verification` section in the spec"])
+ev("spec-auditor", "audit-finding", "L-spec-0093", list="findings", field="Goal",
+   category="vague", finding="the goal names no observable", suggested_fix="name one")
+t93 = build("spec-writer", subject="L-spec-0093")
+assert ("Fix list" in t93 and "no `## Verification` section" in t93
+        and "the goal names no observable" in t93), \
+    "AC2: a spec-shape-failed finding and an audit-finding both survive into the Fix list"
+
+# ── AC6 · fold.EMITS["verify-waiver"] is executor/operator only ────────────────
+assert fold.EMITS["verify-waiver"] == {"executor", "operator"}, fold.EMITS["verify-waiver"]
+
+# ── AC7 · per-role scripts; grader's and reviewer's are waived, builder's is not
+SPEC0090 = TMP / "content" / "L-spec-0090.md"
+SPEC0090.write_text("""# L-spec-0090
+## 8. Verification
+```
+false && true
+```
+## Acceptance criteria
+AC1 [backend]: x.
+  review_path: log in as x / go to x / do x / worked if x / failed if x.
+""")
+ev("spec-writer", "spec-written", "L-spec-0090", spec="L-spec-0090", path=str(SPEC0090),
+   footprint=["src/fold.py"])
+CARD0090 = TMP / "content" / "L-card-0090.md"
+CARD0090.write_text("# L-card-0090 · DONE\n")
+ev("builder", "build-done", "L-spec-0090", status="DONE", card=str(CARD0090),
+   branch="l-spec-0090", base_sha=REPO_HEAD, ready_sha=REPO_HEAD)
+ev("operator", "verify-waiver", "L-spec-0090", step=1, reason="known infra gap")
+
+build("builder", subject="L-spec-0090", worktree=str(REPOS_T), repo=str(REPOS_T))
+build("grader", subject="L-spec-0090", worktree=str(REPOS_T))
+build("reviewer", subject="L-spec-0090", worktree=str(REPOS_T), repo=str(REPOS_T))
+Vb90 = TMP / "content" / "verify-L-spec-0090-builder.sh"
+Vg90 = TMP / "content" / "verify-L-spec-0090-grader.sh"
+Vr90 = TMP / "content" / "verify-L-spec-0090-reviewer.sh"
+assert Vb90.is_file() and Vg90.is_file() and Vr90.is_file(), "AC7: three separate per-role files exist"
+assert subprocess.run(["bash", str(Vg90)]).returncode == 0, "AC7: the grader's waived script exits 0"
+assert subprocess.run(["bash", str(Vr90)]).returncode == 0, "AC7: the reviewer's waived script exits 0"
+assert subprocess.run(["bash", str(Vb90)]).returncode != 0, \
+    "AC7: the builder's script stays the real, unwaived chain"
+
+# ── AC8 · two waivers, both steps and reasons named in grader's and reviewer's
+#          own text; a subject with no standing waiver states plainly none apply
+SPEC0091 = TMP / "content" / "L-spec-0091.md"
+SPEC0091.write_text("""# L-spec-0091
+## 8. Verification
+```
+false && true && false
+```
+## Acceptance criteria
+AC1 [backend]: x.
+  review_path: log in as x / go to x / do x / worked if x / failed if x.
+""")
+ev("spec-writer", "spec-written", "L-spec-0091", spec="L-spec-0091", path=str(SPEC0091),
+   footprint=["src/fold.py"])
+CARD0091 = TMP / "content" / "L-card-0091.md"
+CARD0091.write_text("# L-card-0091 · DONE\n")
+ev("builder", "build-done", "L-spec-0091", status="DONE", card=str(CARD0091),
+   branch="l-spec-0091", base_sha=REPO_HEAD, ready_sha=REPO_HEAD)
+ev("operator", "verify-waiver", "L-spec-0091", step=1, reason="infra gap one")
+ev("executor", "verify-waiver", "L-spec-0091", step=3, reason="infra gap three")
+tg91 = build("grader", subject="L-spec-0091", worktree=str(REPOS_T))
+tr91 = build("reviewer", subject="L-spec-0091", worktree=str(REPOS_T), repo=str(REPOS_T))
+for t in (tg91, tr91):
+    assert ("step 1" in t and "infra gap one" in t and "step 3" in t and "infra gap three" in t), \
+        f"AC8: both waived steps and reasons must be named: {t!r}"
+
+SPEC0092 = TMP / "content" / "L-spec-0092.md"
+SPEC0092.write_text("""# L-spec-0092
+## 8. Verification
+```
+true
+```
+## Acceptance criteria
+AC1 [backend]: x.
+  review_path: log in as x / go to x / do x / worked if x / failed if x.
+Writes: src/fold.py
+""")
+ev("spec-writer", "spec-written", "L-spec-0092", spec="L-spec-0092", path=str(SPEC0092),
+   footprint=["src/fold.py"])
+CARD0092 = TMP / "content" / "L-card-0092.md"
+CARD0092.write_text("# L-card-0092 · DONE\n")
+ev("builder", "build-done", "L-spec-0092", status="DONE", card=str(CARD0092),
+   branch="l-spec-0092", base_sha=REPO_HEAD, ready_sha=REPO_HEAD)
+tg92 = build("grader", subject="L-spec-0092", worktree=str(REPOS_T))
+tr92 = build("reviewer", subject="L-spec-0092", worktree=str(REPOS_T), repo=str(REPOS_T))
+for t in (tg92, tr92):
+    assert "no standing verify-waiver applies" in t, f"AC8: no waiver states plainly none apply: {t!r}"
+
+# ── AC9 · merge_gate.out_of_grant is cited in the reviewer packet only ─────────
+# `out_of_grant`'s own signature names "main" as the merge target (AC9's fixture,
+# per instruction 12) — REPOS_T's default branch is "master" (this box's git
+# config), so a "main" ref must exist for `resolve("main")` to succeed at all.
+subprocess.run(["git", "-C", str(REPOS_T), "branch", "main"], check=True)
+subprocess.run(["git", "-C", str(REPOS_T), "checkout", "-qb", "grant-oog"], check=True,
+               env={**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+                    "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"})
+(REPOS_T / "outside_grant.py").write_text("x = 1\n")
+subprocess.run(["git", "-C", str(REPOS_T), "add", "outside_grant.py"], check=True)
+subprocess.run(["git", "-C", str(REPOS_T), "commit", "-q", "-m", "touches a path outside the grant"],
+               check=True, env={**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+                                "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"})
+subprocess.run(["git", "-C", str(REPOS_T), "checkout", "-q", "master"], check=True)
+
+ev("builder", "build-done", "L-spec-0092", status="DONE", card=str(CARD0092),
+   branch="grant-oog", base_sha=REPO_HEAD, ready_sha=REPO_HEAD)
+tb_oog = build("builder", subject="L-spec-0092", worktree=str(REPOS_T), repo=str(REPOS_T))
+tg_oog = build("grader", subject="L-spec-0092", worktree=str(REPOS_T))
+tr_oog = build("reviewer", subject="L-spec-0092", worktree=str(REPOS_T), repo=str(REPOS_T))
+assert "outside_grant.py" in tr_oog, f"AC9: the reviewer packet names the out-of-grant path: {tr_oog!r}"
+assert "outside_grant.py" not in tb_oog, "AC9: the builder packet carries no such line"
+assert "outside_grant.py" not in tg_oog, "AC9: the grader packet carries no such line"
+
+# ...and Undetermined renders as "could not determine", never a die().
+ev("builder", "build-done", "L-spec-0092", status="DONE", card=str(CARD0092),
+   branch="no-such-branch-anywhere", base_sha=REPO_HEAD, ready_sha=REPO_HEAD)
+tr_und = build("reviewer", subject="L-spec-0092", worktree=str(REPOS_T), repo=str(REPOS_T))
+assert "could not determine" in tr_und, f"AC9: Undetermined renders as prose, never a die(): {tr_und!r}"
 
 print(f"packet: {N} packets built, seven Blindness lists enforced")

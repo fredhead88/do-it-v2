@@ -38,6 +38,10 @@ EMITS = {"verdict": {"grader"}, "review": {"reviewer"}, "shipped": {"executor"},
          "inbound-registered": {"operator", "thinker"},
          "carry-failed": {"executor", "operator"},
          "backup-failed": {"backup"},
+         # L-spec-0195/AC6: a verify-waiver substitutes a no-op for one &&-segment
+         # of a grader's/reviewer's own verify script — never the builder's — so
+         # only the two judging-adjacent actors who are not the builder may file one.
+         "verify-waiver": {"executor", "operator"},
          "correction": {"operator"},                       # D111
          "spec-closed": {"operator"},                       # D112
          # ★ Asymmetric on purpose. REJECTING is the safe direction — a spurious
@@ -270,6 +274,16 @@ def standing_rejects(evs):
     is the wrapper's choice, and acceptance must not depend on it."""
     raised = {e.get("criterion") for e in evs if e["type"] in ("rejected-criterion", "must-fix")}
     return raised - {e.get("criterion") for e in evs if e["type"] == "criterion-cleared"}
+
+
+def spec_shape_pending(evs):
+    """L-spec-0195/AC4: true while this subject's most recent of {`spec-written`,
+    `spec-shape-failed`} is `spec-shape-failed` — the spec stands broken, and a
+    builder dispatch against it must be refused before any spend (never at
+    dispatch, R3's Goal). Clears the instant a later `spec-written` with no
+    trailing `spec-shape-failed` lands — an ordinary rework round."""
+    last = next((e for e in reversed(evs) if e["type"] in ("spec-written", "spec-shape-failed")), None)
+    return bool(last and last["type"] == "spec-shape-failed")
 
 
 def charter_review(evs):
