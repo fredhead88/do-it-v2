@@ -51,6 +51,14 @@ class Refusal(Exception):
     """A by-name refusal. Always raised before `alloc`; `main` prints it and exits non-zero."""
 
 
+class CarryFailed(Exception):
+    """Every failure AFTER `alloc` fires: a killed/failed spawn, an empty footprint, a
+    `doit append spec-carried` that returned non-zero, or a `fold.check_append` refusal.
+    Nothing is stamped on any of these paths, so an unforced retry of the same source
+    succeeds afterward — identical semantics to today's dispatch-failure and
+    killed-spawn paths. `main` prints it and exits non-zero, same as `Refusal`."""
+
+
 def _dir(var, default):
     return pathlib.Path(os.environ.get(var) or (pathlib.Path.home() / default))
 
@@ -65,6 +73,20 @@ doit_bin = lambda: HERE.parent / "doit"
 now = lambda: datetime.now(timezone.utc).isoformat(timespec="seconds")
 is_url = lambda s: bool(re.match(r"^https?://", s.strip()))
 numeric_prefix = lambda s: (re.match(r"^(\d+)", s.strip()) or [None, None])[1]
+
+# Captured before `uncarried()`/`sync_v4()` shadow the name with a same-named
+# parameter (the Plan's own declared seam name) — both call this alias for "the
+# operator's real ledger dir" when their own `ledger_dir=` argument is None.
+_default_ledger_dir = ledger_dir
+
+
+def ledger_actor():
+    """The actor a `DOIT_LEDGER_FILE` name resolves to — the identical derivation
+    `fold.read_events()` applies to a ledger filename (D90, §2.5), so an append this
+    module builds names the actor the fold would independently derive for it."""
+    stem = pathlib.Path(os.environ.get("DOIT_LEDGER_FILE", "L-operator-local.jsonl")).stem
+    parts = stem.split("-")
+    return "-".join(parts[1:-1]) if len(parts) >= 3 else stem
 
 
 # ── the v4 record ─────────────────────────────────────────────────────────────
@@ -137,6 +159,27 @@ def staged_material(source, prefix, record):
             return cand.read_bytes()
     raise Refusal(f"carry: refuses {source}: no staged spec — inbox glob {pattern} matched nothing "
                   f"and spec_file {sf} is not readable")
+
+
+def _has_staged_material(prefix, record, inbox_dir_path):
+    """Whether `staged_material`'s own two-step rule would resolve for this record —
+    without reading or returning the bytes, and never raising: `uncarried()` reports
+    a record's staging state either way, unlike `carry()`'s by-name refusal. `prefix`
+    is always drawn from `ledger_dir`'s own directory listing (never event/attacker
+    data), so this helper has no path-traversal surface of its own (security_path)."""
+    try:
+        hits = glob.glob(str(pathlib.Path(inbox_dir_path) / f"{prefix}-*-spec.md"))
+        if len(hits) == 1:
+            return True
+        if len(hits) > 1:
+            return False  # ambiguous — `carry()` would refuse, not succeed
+        sf = record.get("spec_file")
+        for cand in ([pathlib.Path(sf), staging_dir() / pathlib.Path(sf).name] if sf else []):
+            if cand.is_file():
+                return True
+        return False
+    except (OSError, ValueError):
+        return False
 
 
 # ── the slot ──────────────────────────────────────────────────────────────────
@@ -277,14 +320,14 @@ def spawn_status(spec_id):
 
 
 # ── the command ───────────────────────────────────────────────────────────────
-def resolve_target(a):
+def resolve_target(project, repo):
     """(project, repo). Never inherited: `dispatch` defaults `cwd` to `os.getcwd()`
     and `project` to that directory's basename, which would carry into this repo."""
-    project = (a.project or os.environ.get("DOIT_PROJECT") or "").strip()
+    project = (project or os.environ.get("DOIT_PROJECT") or "").strip()
     if not project:
         raise Refusal("carry: --project is unset and DOIT_PROJECT is empty — name the project the "
                       "spec is written against")
-    repo = pathlib.Path(a.repo) if a.repo else (root() / "repos" / project)
+    repo = pathlib.Path(repo) if repo else (root() / "repos" / project)
     if not repo.is_dir():
         raise Refusal(f"carry: --repo {repo} is not a directory — name the repo the spec is "
                       f"written against, rather than carry into the wrong one")
@@ -303,28 +346,26 @@ def parser():
     return p
 
 
-def main(argv=None):
-    a = parser().parse_args(argv)
-    say = lambda m: print(m, file=sys.stderr)
-    try:
-        project, repo = resolve_target(a)
-        source = a.source.strip()
-        sid = source if is_url(source) else (numeric_prefix(source) or source)
-        prior = None if a.force else already_carried(sid)
-        if prior:
-            raise Refusal(f"carry: {source} was already carried as {prior.get('subject')}; "
-                          f"re-run with --force to carry again")
-        if is_url(source):
-            slot, spec_id, source_id, _ = pr_slot(source, a.title, a.body, repo)
-            audited_at = now()
-        else:
-            # `handed_over_at` rides through VERBATIM: never re-parsed as a datetime
-            # and re-serialized, which would rewrite the v4 record's own stamp.
-            audited_at = (resolve_record(source)[1].get("handed_over_at") or now())
-            slot, spec_id, source_id, _ = carried_slot(source)
-    except Refusal as e:
-        say(str(e))
-        return 2
+def _do_carry(source, *, repo=None, project=None, force=False, title=None, body=None):
+    """Today's `main()` logic, refactored into a private, importable callable — the
+    seven-field dict `main()` used to print directly. Raises `Refusal` for every
+    failure BEFORE `alloc` fires, `CarryFailed` for every failure after. Not a seam:
+    no sibling's Consumes names `_do_carry`; call `carry()` instead."""
+    project, repo = resolve_target(project, repo)
+    source = source.strip()
+    sid = source if is_url(source) else (numeric_prefix(source) or source)
+    prior = None if force else already_carried(sid)
+    if prior:
+        raise Refusal(f"carry: {source} was already carried as {prior.get('subject')}; "
+                      f"re-run with --force to carry again")
+    if is_url(source):
+        slot, spec_id, source_id, _ = pr_slot(source, title, body, repo)
+        audited_at = now()
+    else:
+        # `handed_over_at` rides through VERBATIM: never re-parsed as a datetime
+        # and re-serialized, which would rewrite the v4 record's own stamp.
+        audited_at = (resolve_record(source)[1].get("handed_over_at") or now())
+        slot, spec_id, source_id, _ = carried_slot(source)
     path = str(root() / "content" / f"{spec_id}.md")
     cmd = [str(doit_bin()), "dispatch", "spec-writer", spec_id, "--packet", str(slot),
            "--path", path, "--cwd", str(repo), "--project", project]
@@ -332,27 +373,151 @@ def main(argv=None):
     if r.returncode != 0:
         why = next((l for l in (r.stderr or "").splitlines() if l.startswith("FAILED ")),
                    (r.stderr or r.stdout or "").strip().splitlines()[-1:] or ["no reason given"])
-        say(f"carry: {spec_id} was not written — {why if isinstance(why, str) else why[0]}")
-        return 1
+        raise CarryFailed(f"carry: {spec_id} was not written — "
+                          f"{why if isinstance(why, str) else why[0]}")
     ev = spec_written(spec_id)
     if ev is None:
-        say(f"carry: spawn returned status {spawn_status(spec_id)} — no spec written")
-        return 1
+        raise CarryFailed(f"carry: spawn returned status {spawn_status(spec_id)} — no spec written")
     footprint = ev.get("footprint") or []
     if not footprint:
-        say(f"carry: {spec_id} was written with an empty footprint — no tier stamped")
-        return 1
+        raise CarryFailed(f"carry: {spec_id} was written with an empty footprint — no tier stamped")
     tier, rule = review_tier(footprint)
+    # The `spec-carried` append is checked against the fold BEFORE it fires (Target 3):
+    # a refusal here stamps nothing, so an unforced retry of the same source succeeds
+    # afterward — identically to the dispatch-failure and killed-spawn paths above.
+    event = {"v": 1, "ts": now(), "type": "spec-carried", "subject": spec_id, "source": source_id,
+             "tier": tier, "audited_at": audited_at, "footprint": footprint}
+    actor = ledger_actor()
+    import fold                          # here, not at the top: mirrors this file's own lazy
+                                          # `import dispatch` inside `_write_slot` — `check_append`
+                                          # is a sibling's seam, not yet on `fold.py` at base_sha
+    reason = fold.check_append(event, actor)
+    if reason is not None:
+        raise CarryFailed(f"carry: {spec_id} would not be honoured by the fold — {reason}. "
+                          f"Nothing was appended.")
     ap = subprocess.run([str(doit_bin()), "append", "spec-carried", spec_id,
-                         f"source={source_id}", f"tier={tier}", f"audited_at={audited_at}"],
+                         f"source={source_id}", f"tier={tier}", f"audited_at={audited_at}",
+                         f"footprint={json.dumps(footprint)}"],
                         capture_output=True, text=True)
     if ap.returncode != 0:
-        say(f"carry: {spec_id} was written but spec-carried did not append — "
-            f"{(ap.stderr or '').strip()[-160:]}")
+        raise CarryFailed(f"carry: {spec_id} was written but spec-carried did not append — "
+                          f"{(ap.stderr or '').strip()[-160:]}")
+    return {"spec": spec_id, "source": source_id, "tier": tier, "rule": rule,
+            "packet": str(slot), "path": path, "project": project}
+
+
+def carry(source, *, repo=None, project=None, force=False, title=None, body=None):
+    """The Plan's own declared seam: the L-spec id. Raises `Refusal` before any
+    `alloc`, `CarryFailed` after. A one-line wrapper — `_do_carry` is the whole
+    implementation; this function exists so a caller who only wants the id, not
+    every field, does not have to know `_do_carry` exists."""
+    return _do_carry(source, repo=repo, project=project, force=force, title=title, body=body)["spec"]
+
+
+def main(argv=None):
+    a = parser().parse_args(argv)
+    say = lambda m: print(m, file=sys.stderr)
+    try:
+        res = _do_carry(a.source, repo=a.repo, project=a.project, force=a.force,
+                        title=a.title, body=a.body)
+    except Refusal as e:
+        say(str(e))
+        return 2
+    except CarryFailed as e:
+        say(str(e))
         return 1
-    print(json.dumps({"spec": spec_id, "source": source_id, "tier": tier, "rule": rule,
-                      "packet": str(slot), "path": path, "project": project}))
+    print(json.dumps(res))
     return 0
+
+
+# ── the other half: what the fold has not yet carried, and syncing it back ─────
+def uncarried(events, inbox=None, ledger_dir=None):
+    """One entry per {source, kind, registered_at, attempts, last_error}, sorted by
+    `source` (string comparison).
+
+    `kind: "v4"`: every `registered` v4 record directly under `ledger_dir` whose
+    numeric stem prefix is a bare digit string and whose staged material currently
+    resolves (`_has_staged_material`), EXCLUDED when a `spec-carried` event in
+    `events` already names that exact source.
+
+    `kind: "pr"`: every distinct `source` an `inbound-registered` event in `events`
+    names, with no matching `spec-carried` event."""
+    ld = pathlib.Path(ledger_dir) if ledger_dir is not None else _default_ledger_dir()
+    ib = pathlib.Path(inbox) if inbox is not None else inbox_dir()
+    carried_sources = {str(e.get("source")) for e in events if e.get("type") == "spec-carried"}
+
+    def attempts_for(source):
+        fails = [e for e in events if e.get("type") == "carry-failed"
+                 and str(e.get("source")) == source]
+        return len(fails), (fails[-1].get("error") if fails else None)
+
+    out = []
+    if ld.is_dir():
+        for p in sorted(ld.glob("*.yml")):
+            prefix = p.stem.split("-", 1)[0]
+            if not str(prefix).strip().isdigit():
+                continue
+            try:
+                rec = load_record(p)
+            except (OSError, ValueError):
+                continue
+            if (rec.get("status") or "") != "registered":
+                continue
+            if prefix in carried_sources:
+                continue
+            if not _has_staged_material(prefix, rec, ib):
+                continue
+            n, last = attempts_for(prefix)
+            out.append({"source": prefix, "kind": "v4", "registered_at": rec.get("handed_over_at"),
+                       "attempts": n, "last_error": last})
+
+    seen_pr = set()
+    for e in events:
+        if e.get("type") != "inbound-registered":
+            continue
+        src = str(e.get("source"))
+        if src in seen_pr or src in carried_sources:
+            continue
+        seen_pr.add(src)
+        n, last = attempts_for(src)
+        out.append({"source": src, "kind": "pr", "registered_at": e.get("ts"),
+                   "attempts": n, "last_error": last})
+
+    out.sort(key=lambda d: d["source"])
+    return out
+
+
+def sync_v4(events, ledger_dir=None):
+    """For every `spec-carried` event in `events` (processed in the given order),
+    flip the matching v4 record's `registered` status to `superseded` plus
+    `superseded_by: <spec id>` — a two-line, additive splice, every other byte of
+    the file unchanged. Returns the count of v4 records updated.
+
+    Skips (never raises) a source that is not a bare digit string, a source that
+    resolves to zero or more than one file under `ledger_dir`, or a record whose
+    current `status:` line does not read exactly `registered` — including one this
+    same call already advanced, so this is a one-time transition, never re-applied."""
+    ld = pathlib.Path(ledger_dir) if ledger_dir is not None else _default_ledger_dir()
+    n = 0
+    for e in events:
+        if e.get("type") != "spec-carried":
+            continue
+        source = str(e.get("source") or "").strip()
+        if not source.isdigit():
+            continue
+        hits = sorted(ld.glob(f"{source}-*.yml"))
+        if len(hits) != 1:
+            continue
+        p = hits[0]
+        text = p.read_text()
+        if not re.search(r"(?m)^status:\s*registered\s*$", text):
+            continue
+        spec_id = e.get("subject")
+        new_text = re.sub(r"(?m)^status:.*\n",
+                          f"status: superseded\nsuperseded_by: {spec_id}\n", text, count=1)
+        p.write_text(new_text)
+        n += 1
+    return n
 
 
 if __name__ == "__main__":
