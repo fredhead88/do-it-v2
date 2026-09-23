@@ -645,6 +645,308 @@ for tmpl in ("models.example.toml", "models.claude-only.toml"):
 assert "gpt-6-astra" in models.load(REPO_ROOT / "models.example.toml")["_weights"], \
     "every model models.example.toml names in a contract gets a weights row"
 
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-0189 · unserved-seat-fails-loudly (L-charter-0028) — R6
+# ══════════════════════════════════════════════════════════════════════════════
+import unittest.mock as _mock
+
+DISPATCH_TIME = time  # the real `time` module dispatch.run_seat's local `import time` shares
+_real_sleep = time.sleep  # captured BEFORE any patch — a direct object ref survives mock.patch("time.sleep", ...)
+
+
+def _rm_seat(spawn_id):
+    for suf in (".packet.md", ".cmd.json"):
+        p = TMP / "seat" / f"{spawn_id}{suf}"
+        p.exists() and p.unlink()
+
+
+# Sweep orphaned packets from earlier in this file (e.g. L-research-0018's codex
+# `is_error` run, which writes a `.packet.md` that never resolves to `.output.json`
+# or `.result.json`) — this block's own glob-based "find the open packet" helpers
+# below must not pick up a leftover from a wholly unrelated, already-answered test.
+if (TMP / "seat").is_dir():
+    for _p in list((TMP / "seat").glob("*.packet.md")):
+        _sid = _p.name.split(".")[0]
+        if not (TMP / "seat" / f"{_sid}.result.json").exists() and \
+                not (TMP / "seat" / f"{_sid}.output.json").exists():
+            _rm_seat(_sid)
+
+
+# ── AC1 · run_seat called directly: nobody ever claims -> Unserved, well under
+# the 60s `timeout` argument, naming the spawn id ─────────────────────────────
+os.environ["DOIT_SEAT_CLAIM_SEC"] = "1"
+ac1_spawn = "L-research-r6ac1"
+t0 = DISPATCH_TIME.time()
+try:
+    dispatch.run_seat(ac1_spawn, ["claude", "-p"], "packet", str(REPO), 60)
+    raise AssertionError("run_seat must raise Unserved when nobody claims the seat")
+except dispatch.Unserved as e:
+    ac1_wall = DISPATCH_TIME.time() - t0
+    ac1_msg = str(e)
+assert ac1_spawn in ac1_msg, ac1_msg
+assert ac1_wall < 15, f"run_seat waited {ac1_wall}s for a 1s claim window — the 60s timeout, not the claim window, must not be what fired"
+_rm_seat(ac1_spawn)
+del os.environ["DOIT_SEAT_CLAIM_SEC"]
+N += 1
+
+# ── AC2 · the 300s default does not fire prematurely within a short window ────
+ac2_spawn = "L-research-r6ac2"
+ac2_holder = {}
+
+
+def ac2_bg():
+    try:
+        dispatch.run_seat(ac2_spawn, ["claude", "-p"], "packet", str(REPO), 6)
+    except Exception as exc:
+        ac2_holder["exc"] = exc
+
+
+ac2_th = threading.Thread(target=ac2_bg, daemon=True)
+ac2_th.start()
+ac2_th.join(3)
+assert "exc" not in ac2_holder, f"the default (unset) claim window fired prematurely: {ac2_holder.get('exc')}"
+ac2_th.join(6)
+assert isinstance(ac2_holder.get("exc"), subprocess.TimeoutExpired), \
+    "the probe's own short `timeout` fired normally afterward — never dispatch.Unserved — proving the default window did not fire early"
+_rm_seat(ac2_spawn)
+N += 1
+
+
+def _seat_driven(role, subject, timeout_min, path=None):
+    a = argparse.Namespace(role=role, subject=subject, packet=str(PK), path=path, cwd=str(REPO),
+                           charter=None, project="t", mcp_config=None, timeout=timeout_min, max_usd=None,
+                           seat=False)
+    t0 = DISPATCH_TIME.time()
+    try:
+        dispatch.main(a)
+        code = 0
+    except SystemExit as ex:
+        code = ex.code
+    wall = DISPATCH_TIME.time() - t0
+    raw = [json.loads(l) for l in max((TMP / "events").glob(f"L-{role}-*.jsonl")).read_text().splitlines()]
+    return code, raw, wall
+
+
+# ── AC3 · main(): a fully-unserved seat dispatch fails loudly, well under 15s ──
+os.environ["DOIT_SEAT"] = "1"
+dispatch.run_claude = never
+os.environ["DOIT_SEAT_CLAIM_SEC"] = "1"
+# a fresh packet body — L-research-0018 earlier in this file already recorded an
+# is_error failure for the default "a packet\n" body on this same contract, and
+# D120's dedup (packet_sha256 + contract_sha256) would refuse this dispatch before
+# it ever reached run_seat, on a packet whose CONTENT happens to match, not a re-run.
+PK.write_text("a packet for r6ac3\n")
+code, raw, wall = _seat_driven("research", "L-spec-0001", 60)
+PK.write_text("a packet\n")
+assert code == 1 and [e["type"] for e in raw] == ["spawn-started", "spawn-failed"], raw
+assert raw[-1]["reason"] == "unserved" and raw[-1]["spawn_path"] == "seat", raw[-1]
+assert wall < 15, wall
+_rm_seat(raw[0]["spawn"])
+N += 1
+
+# ── AC4 · a CLAIMED seat is wholly unaffected — reaches spawn-done, no
+# spawn-failed anywhere in its (unfiltered) event list ─────────────────────────
+PK.write_text("a packet for r6ac4\n")           # same D120 reason as AC3 above
+rp_ac4 = TMP / "content" / "L-research-r6ac4.md"
+
+
+def claim_then_finish():
+    for _ in range(400):
+        # neither `.result.json` NOR `.output.json`: earlier fixtures in this file
+        # (seat_writer_bare, seat_writer_split) complete via output.json+meta.json
+        # and never write a result.json, so a filter on result.json alone would
+        # still see their packet.md as "open" and grab the wrong one; the NEWEST
+        # by mtime is this test's own, freshly written.
+        pk = [q for q in (list((TMP / "seat").glob("*.packet.md")) if (TMP / "seat").is_dir() else [])
+              if not (TMP / "seat" / (q.name.split(".")[0] + ".result.json")).exists()
+              and not (TMP / "seat" / (q.name.split(".")[0] + ".output.json")).exists()]
+        if pk:
+            sid = max(pk, key=lambda q: q.stat().st_mtime).name.split(".")[0]
+            (TMP / "seat" / f"{sid}.claimed").write_text("")
+            time.sleep(0.2)
+            rp_ac4.write_text("dug")
+            (TMP / "seat" / f"{sid}.result.json").write_text(json.dumps(
+                {"is_error": False, "structured_output": {**research, "path": "content/L-research-r6ac4.md"},
+                 "num_turns": 1, "usage": {}, "total_cost_usd": None, "modelUsage": {"m": {}},
+                 "session_id": "r6ac4", "permission_denials": []}))
+            return
+        time.sleep(0.05)
+
+
+threading.Thread(target=claim_then_finish, daemon=True).start()
+a = argparse.Namespace(role="research", subject="L-spec-0001", packet=str(PK), path=str(rp_ac4), cwd=str(REPO),
+                       charter=None, project="t", mcp_config=None, timeout=1, max_usd=None, seat=True)
+try:
+    dispatch.main(a)
+    code = 0
+except SystemExit as e:
+    code = e.code
+sev = [json.loads(l) for l in max((TMP / "events").glob("L-research-*.jsonl")).read_text().splitlines()]
+assert code == 0 and [e["type"] for e in sev] == ["spawn-started", "research-filed", "spawn-done"], sev
+assert not any(e["type"] == "spawn-failed" for e in sev), "a claimed seat must never fail as unserved"
+PK.write_text("a packet\n")
+del os.environ["DOIT_SEAT_CLAIM_SEC"]
+N += 1
+
+# ── AC5 · codex-fallback-to-seat: unserved on the FALLBACK's own seat dispatch ─
+# DOIT_SEAT is still "1" from AC3/AC4 (a.seat=False there too) — but here the map
+# itself names backend="codex" for research, and a DOIT_SEAT that disagrees with
+# the map is refused on principle (S32), so it must be unset: the fallback's own
+# seat dispatch gets its backend from the map's `fallback=` clause, not the flag.
+del os.environ["DOIT_SEAT"]
+os.environ["DOIT_SEAT_CLAIM_SEC"] = "1"
+MT.write_text('[contracts.research]\nbackend = "codex"\nmodel = "gpt-6-astra"\n'
+              'fallback = { backend = "seat", model = "claude-sonnet-5" }\n')
+dispatch.run_codex_exec = codex_dead
+PK.write_text("a packet for the r6ac5 fallback run\n")
+rp_ac5 = TMP / "content" / "L-research-r6ac5.md"
+a = argparse.Namespace(role="research", subject="L-spec-0001", packet=str(PK), path=str(rp_ac5), cwd=str(REPO),
+                       charter=None, project="t", mcp_config=None, timeout=1, max_usd=None, seat=False)
+try:
+    dispatch.main(a)
+    code = 0
+except SystemExit as e:
+    code = e.code
+PK.write_text("a packet\n")
+sev = [json.loads(l) for l in max((TMP / "events").glob("L-research-*.jsonl")).read_text().splitlines()]
+assert code == 1 and sev[-1]["type"] == "spawn-failed" and sev[-1]["reason"] == "unserved", sev[-1]
+assert not any(e["type"] == "spawn-done" for e in sev), "the second run_seat call site (the fallback) must be covered too"
+assert any(e["type"] == "backend-fallback" for e in sev), sev
+_rm_seat(sev[0]["spawn"])
+del os.environ["DOIT_SEAT_CLAIM_SEC"]
+MT.unlink()
+N += 1
+
+# ── AC6 · scripts/seat/claim.sh: O_EXCL semantics, all three sub-cases ─────────
+claim_root = TMP / "claimtest"
+(claim_root / "seat").mkdir(parents=True)
+spawn_c = "L-research-claimtest1"
+(claim_root / "seat" / f"{spawn_c}.packet.md").write_text("packet\n")
+env_c = {**os.environ, "DOIT_ROOT": str(claim_root)}
+r1 = subprocess.run(["bash", "scripts/seat/claim.sh", spawn_c], cwd=str(REPO_ROOT), env=env_c,
+                    capture_output=True, text=True)
+assert r1.returncode == 0, r1.stderr
+claimed_p = claim_root / "seat" / f"{spawn_c}.claimed"
+assert claimed_p.is_file(), "the first claim must create the file"
+before_stat = claimed_p.stat()
+r2 = subprocess.run(["bash", "scripts/seat/claim.sh", spawn_c], cwd=str(REPO_ROOT), env=env_c,
+                    capture_output=True, text=True)
+assert r2.returncode != 0, "a second claim on the same spawn must be refused"
+after_stat = claimed_p.stat()
+assert before_stat.st_mtime_ns == after_stat.st_mtime_ns and claimed_p.read_text() == "", \
+    "the second call must not touch the first invocation's file"
+spawn_nopkt = "L-research-claimtest-nopacket"
+r3 = subprocess.run(["bash", "scripts/seat/claim.sh", spawn_nopkt], cwd=str(REPO_ROOT), env=env_c,
+                    capture_output=True, text=True)
+assert r3.returncode != 0
+assert not (claim_root / "seat" / f"{spawn_nopkt}.claimed").is_file()
+N += 1
+
+# ── AC7 · all three serving-pattern texts name claim.sh as a first/before step ─
+def _claim_first(text):
+    lines = text.splitlines()
+    low = [l.lower() for l in lines]
+    for i, l in enumerate(low):
+        if "claim.sh" in l:
+            window = low[max(0, i - 1):i + 2]
+            if any(("first" in w or "before" in w) for w in window):
+                return True
+    return False
+
+
+for relpath in ("scripts/seat/README.md", "agents/planner.md", "agents/thinker.md"):
+    fp = REPO_ROOT / relpath
+    assert _claim_first(fp.read_text()), f"{relpath} must name claim.sh as its first/before serving step"
+N += 1
+
+# ── AC8 · the builder case, driven for real (not fabricated) ───────────────────
+os.environ["DOIT_SEAT"] = "1"          # no models.toml now (AC5 unlinked it) — the flag forces the seat backend
+os.environ["DOIT_SEAT_CLAIM_SEC"] = "1"
+a = argparse.Namespace(role="builder", subject="L-spec-0001", packet=str(PK), path=None, cwd=str(REPO),
+                       charter=None, project="t", mcp_config=None, timeout=60, max_usd=None, seat=False)
+try:
+    dispatch.main(a)
+    code = 0
+except SystemExit as e:
+    code = e.code
+bev = [json.loads(l) for l in max((TMP / "events").glob("L-builder-*.jsonl")).read_text().splitlines()]
+assert code == 1 and [e["type"] for e in bev] == ["build-started", "spawn-failed"], bev
+assert bev[0]["backend"] == "seat", bev[0]
+assert bev[-1]["reason"] == "unserved", bev[-1]
+_rm_seat(bev[0]["spawn"])
+del os.environ["DOIT_SEAT_CLAIM_SEC"]
+del os.environ["DOIT_SEAT"]
+
+import relay  # noqa: E402
+assert relay.unserved(bev, TMP) == [], \
+    "the real pair (build-started + spawn-failed{reason:unserved}) is already terminal, not pending — " \
+    "and its own event timestamps postdate fold.NOW (a snapshot taken once, earlier in this run), so it " \
+    "has not yet 'aged into' the failed-unserved window either — see AC10 for the synthetic in-window case"
+N += 1
+
+# ── AC12 (dispatch half) · the 300s default boundary, on a fake clock ──────────
+_ac12i_spawn = "L-research-r6ac12i"
+
+
+def _fake_time_301():
+    _fake_time_301.n += 1
+    return 0.0 if _fake_time_301.n == 1 else 301.0
+
+
+_fake_time_301.n = 0
+real_wall_t0 = time.perf_counter()
+with _mock.patch("time.time", _fake_time_301), _mock.patch("time.sleep", lambda s: None):
+    try:
+        dispatch.run_seat(_ac12i_spawn, ["claude", "-p"], "packet", str(REPO), 6000)
+        raise AssertionError("expected Unserved at the 301s mark")
+    except dispatch.Unserved:
+        pass
+real_wall_301 = time.perf_counter() - real_wall_t0
+assert real_wall_301 < 5, f"the fake clock must have decided it, not real time: {real_wall_301}s"
+_rm_seat(_ac12i_spawn)
+N += 1
+
+_ac12ii_spawn = "L-research-r6ac12ii"
+_want2 = TMP / "seat" / f"{_ac12ii_spawn}.result.json"
+
+
+def _write_result_fast():
+    for _ in range(2000):
+        if (TMP / "seat" / f"{_ac12ii_spawn}.packet.md").is_file():
+            break
+        _real_sleep(0.001)          # the genuine sleep — time.sleep is mocked to a no-op during this scenario
+    _want2.write_text(json.dumps(
+        {"is_error": False, "structured_output": {**research, "path": "content/L-research-r6ac12ii.md"},
+         "num_turns": 1, "usage": {}, "total_cost_usd": None, "modelUsage": {"m": {}},
+         "session_id": "fc2", "permission_denials": []}))
+
+
+def _fake_time_299():
+    _fake_time_299.n += 1
+    return 0.0 if _fake_time_299.n == 1 else 299.0
+
+
+_fake_time_299.n = 0
+_th_fast = threading.Thread(target=_write_result_fast, daemon=True)
+_th_fast.start()
+real_wall_t0 = time.perf_counter()
+with _mock.patch("time.time", _fake_time_299), _mock.patch("time.sleep", lambda s: None):
+    r = dispatch.run_seat(_ac12ii_spawn, ["claude", "-p"], "packet", str(REPO), 6000)
+real_wall_299 = time.perf_counter() - real_wall_t0
+_th_fast.join(5)
+assert real_wall_299 < 1.0, f"the boundary held at 299s the whole time: returned in {real_wall_299}s real time"
+assert isinstance(r, dispatch.SeatResult), r
+_rm_seat(_ac12ii_spawn)
+N += 1
+
+# the source-text supplement: DOIT_SEAT_CLAIM_SEC's default (300) appears in BOTH files
+for relpath in ("src/dispatch.py", "src/relay.py"):
+    text = (REPO_ROOT / relpath).read_text()
+    assert 'os.environ.get("DOIT_SEAT_CLAIM_SEC", 300)' in text, \
+        f"{relpath} is missing the DOIT_SEAT_CLAIM_SEC default reader, or its default diverged"
+N += 1
+
+
 # An empty or non-file --packet is refused before a spawn id exists (pilot "Smaller"; charter 3).
 before_files = sorted((TMP / "events").glob("L-research-*.jsonl"))
 for bad_packet in ("", str(TMP / "nowhere.md")):

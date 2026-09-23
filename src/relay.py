@@ -6,6 +6,7 @@
   ledger_changed(root, mark)     -> (changed, mark)    has the ledger moved since a prior look
   sequencing(source, events)     -> a declared after:/alongside:/conflicts: block, or None
   pending_packets(events, root)  -> dispatched seats with no answer yet
+  unserved(events, root)         -> seat dispatches nobody claimed in time (R6)
   planner_attempts(events, cid)  -> {attempts, last_reason, next}
 
 Queries, and nothing else. Nothing here appends an event, opens a pane or spawns
@@ -20,7 +21,7 @@ cleared — the footprint check is skipped AND `waiting_lines` says so, in a `no
 line that stands whether or not anything is ready. A total order that was never
 computed is never implied.
 """
-import hashlib, pathlib, re, sys
+import hashlib, os, pathlib, re, sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import audit, fold  # noqa: E402
@@ -341,6 +342,74 @@ def pending_packets(events, root=None):
             continue
         out.append({"spawn": sid,
                     "age_min": (fold.NOW - fold.ts(e.get("ts"))).total_seconds() / 60.0})
+    return out
+
+
+# ── unserved seats: a dispatched packet nobody claimed ───────────────────────
+
+# The terminal set `pending_packets` and `tick.in_flight` already use — named here
+# rather than re-derived, so a fourth definition of "resolved" never appears.
+TERMINAL = {"spawn-done", "spawn-failed", "spawn-stale"}
+
+
+def unserved(events, root=None, since_h=24):
+    """R6/L-spec-0189: one `{spawn, role, subject, age_min, status}` row per
+    seat-backend start event (`spawn-started{backend:"seat"}` for every role but the
+    builder, `build-started{backend:"seat"}` for it — `role` is read off the event's
+    own `role` field for the former, and is the literal `"builder"` for the latter,
+    the only role `main()` ever emits `build-started` for) whose claim window has
+    elapsed with no claim file ever landing on disk.
+
+    `DOIT_SEAT_CLAIM_SEC`'s default (300) is read independently here, never by
+    importing `dispatch` — `dispatch.py` imports `models` and shells out to
+    `claude --version` at module scope on every import, a cost and a side effect this
+    query module must not acquire just to read one integer (this file's own
+    `_goal_context` precedent, on `think.goal_path`).
+
+    A row whose seat was ever claimed (`$root/seat/<spawn>.claimed` on disk) is never
+    listed, whatever else is true of it — a served seat is served, however long it
+    then runs. Absent that: no terminal event yet -> `status: "pending"`, once the
+    claim window has elapsed (never decayed by `since_h` — this unit adds no decay of
+    its own; a pending row clears the moment ANY terminal event lands, `spawn-stale`
+    included). A terminal `spawn-failed{reason: "unserved"}` timestamped within the
+    last `since_h` hours -> `status: "failed-unserved"`. Any other terminal event —
+    `spawn-done`, `spawn-stale`, or a `spawn-failed` whose `reason` is not
+    `"unserved"` — excludes the row: the spawn resolved."""
+    root = pathlib.Path(root or fold.ROOT)
+    claim_sec = int(os.environ.get("DOIT_SEAT_CLAIM_SEC", 300))
+    starts, terminal = {}, {}
+    for e in events:
+        sid = e.get("spawn")
+        if not sid:
+            continue
+        t = e.get("type")
+        if t in ("spawn-started", "build-started") and e.get("backend") == "seat":
+            starts[sid] = e
+        elif t in TERMINAL:
+            terminal[sid] = e
+    out = []
+    for sid, e in sorted(starts.items()):
+        if (root / "seat" / f"{sid}.claimed").exists():
+            continue                                     # served — never listed
+        role = e.get("role") if e.get("type") == "spawn-started" else "builder"
+        term = terminal.get(sid)
+        if term is not None:
+            # "within the last since_h hours" is a past-facing window ending at
+            # fold.NOW: an age of 0 or negative (the terminal event lands AT or
+            # AFTER fold.NOW — the ordinary case for a real spawn observed live,
+            # since fold.NOW is a snapshot taken once, earlier) is not "in the
+            # last since_h hours", it has not aged INTO that window yet.
+            if term.get("type") == "spawn-failed" and term.get("reason") == "unserved":
+                age_s = (fold.NOW - fold.ts(term.get("ts"))).total_seconds()
+                if 0 < age_s <= since_h * 3600:
+                    out.append({"spawn": sid, "role": role, "subject": e.get("subject"),
+                               "age_min": (fold.NOW - fold.ts(e.get("ts"))).total_seconds() / 60.0,
+                               "status": "failed-unserved"})
+            continue                                     # any other terminal: resolved
+        elapsed = (fold.NOW - fold.ts(e.get("ts"))).total_seconds()
+        if elapsed > claim_sec:
+            out.append({"spawn": sid, "role": role, "subject": e.get("subject"),
+                       "age_min": elapsed / 60.0, "status": "pending"})
     return out
 
 

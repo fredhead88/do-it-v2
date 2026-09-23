@@ -269,6 +269,17 @@ class SeatResult:
         self.stdout, self.returncode, self.stderr = stdout, returncode, stderr
 
 
+class Unserved(Exception):
+    """R6/L-spec-0189: nobody claimed this seat within DOIT_SEAT_CLAIM_SEC of the
+    packet appearing on disk. Raised only by `run_seat`, and only before the terminal-
+    result wait would otherwise run out the full role timeout — a packet nobody serves
+    must fail loudly long before that, not wait out up to 90 minutes (the builder's own
+    cap) indistinguishable, on the ledger, from a spawn that WAS served and ran long."""
+    def __init__(self, spawn, claim_path, elapsed):
+        self.spawn, self.claim_path, self.elapsed = spawn, claim_path, elapsed
+        super().__init__(f"{spawn}: unserved after {elapsed:.0f}s — no {claim_path} on disk")
+
+
 def run_seat(spawn, cmd, packet, cwd, timeout):
     """The seat path (D116 by another route). Where `claude -p` is banned as metered
     — the Albert Scott rule, spec 572 — the spawn runs as an interactive session's
@@ -278,7 +289,15 @@ def run_seat(spawn, cmd, packet, cwd, timeout):
     `claude -p --output-format json` prints (is_error, structured_output, usage,
     total_cost_usd, num_turns, session_id, modelUsage, permission_denials). Every
     after-the-fact check in main() then runs unchanged, and the ledger records
-    `spawn_path: seat` so the two routes are distinguishable forever."""
+    `spawn_path: seat` so the two routes are distinguishable forever.
+
+    R6: the same loop also tracks whether `<spawn>.claimed` has ever appeared on
+    disk — written ONLY by `scripts/seat/claim.sh` (O_EXCL; this function never
+    writes it, ADR-0028-2). If it has not appeared within `DOIT_SEAT_CLAIM_SEC`
+    (default 300) seconds of this function starting, `Unserved` is raised — well
+    before `timeout` can run out. Once a claim is observed, the check stops firing
+    for the rest of this call: a claimed-but-slow seat still waits out the full
+    `timeout` exactly as before this unit."""
     import time
     SEAT.mkdir(parents=True, exist_ok=True)
     (SEAT / f"{spawn}.packet.md").write_text(packet)
@@ -293,8 +312,17 @@ def run_seat(spawn, cmd, packet, cwd, timeout):
     # that draft on the first real spec-writer spawn and recorded it as failed while
     # the validated version landed a second later.
     meta_p = SEAT / f"{spawn}.meta.json"
+    claim_p = SEAT / f"{spawn}.claimed"
+    claim_sec = int(os.environ.get("DOIT_SEAT_CLAIM_SEC", 300))
     t0 = time.time()
+    claimed = False
     while not (want.is_file() or (meta_p.is_file() and bare.is_file())):
+        if not claimed and claim_p.is_file():
+            claimed = True
+        if not claimed:
+            elapsed = time.time() - t0
+            if elapsed > claim_sec:
+                raise Unserved(spawn, claim_p, elapsed)
         if time.time() - t0 > timeout:
             raise subprocess.TimeoutExpired(cmd, timeout)
         time.sleep(2)
@@ -570,8 +598,11 @@ def main(a):
     backend = mm["backend"] or ("seat" if flag_seat else "claude-p")
     meta.update(backend=backend, spawn_path=backend, model_requested=mm["model"], model_map=mm["source"])
 
-    def fail(why):
-        emit(ledger, base, "spawn-failed", why=why, **meta)
+    def fail(why, reason=None):
+        kv = {"why": why}
+        if reason is not None:
+            kv["reason"] = reason
+        emit(ledger, base, "spawn-failed", **kv, **meta)
         print(f"FAILED {spawn}: {why}", file=sys.stderr)
         sys.exit(1)
 
@@ -625,9 +656,9 @@ def main(a):
     if a.role in ("builder", "grader"):
         dsn_role = provision_worktree_env(cwd, ROOT / "repos" / a.project) if a.project else "absent"
     if builder:
-        emit(ledger, base, "build-started", worktree=cwd, dsn_role=dsn_role)
+        emit(ledger, base, "build-started", worktree=cwd, dsn_role=dsn_role, backend=backend)
     else:
-        kv = {"role": a.role}
+        kv = {"role": a.role, "backend": backend}
         if a.role == "grader":
             kv["dsn_role"] = dsn_role
         emit(ledger, base, "spawn-started", **kv)
@@ -654,6 +685,8 @@ def main(a):
             r = run_claude(cmd, packet, cwd, (a.timeout or tmin) * 60)
     except subprocess.TimeoutExpired:
         fail(f"timeout after {a.timeout or tmin} min")
+    except Unserved as e:
+        fail(f"unserved: {e}", reason="unserved")
     try:
         res = json.loads(r.stdout)
     except ValueError:
@@ -675,6 +708,8 @@ def main(a):
                 else run_claude(cmd, packet, cwd, (a.timeout or tmin) * 60)
         except subprocess.TimeoutExpired:
             fail(f"timeout after {a.timeout or tmin} min (on the fallback backend {backend})")
+        except Unserved as e:
+            fail(f"unserved: {e}", reason="unserved")
         try:
             res = json.loads(r.stdout)
         except ValueError:

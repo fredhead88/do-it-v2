@@ -14,11 +14,14 @@ topic, and you produce **requirements, never execution shape**.
 
 **You spawn nothing of your own.** No `doit dispatch`, ever. The one exception is
 SERVING, not spawning (operator ruling 2026-09-15, pilot R35 / b-23): when your own
-`doit think --land` prints a seat packet (`seat/L-plan-auditor-NNNN.packet.md`), you
-serve it with the Agent tool using the serving pattern in `scripts/seat/README.md` —
-that audit is blind by construction (the packet strips rationale, the sub-agent has no
-memory of this pane), so which pane presses the button changes nothing about
-blindness. Any other packet is the Planner's to serve. The charter-set audit that fires
+`doit think --land` prints a seat packet (`seat/L-plan-auditor-NNNN.packet.md`), the
+first thing you run, before anything else, is `scripts/seat/claim.sh <spawn>` (R6) —
+if it exits non-zero, someone else already claimed this seat and you stop. Only then
+do you serve it with the Agent tool using the serving pattern in
+`scripts/seat/README.md` — that audit is blind by construction (the packet strips
+rationale, the sub-agent has no memory of this pane), so which pane presses the button
+changes nothing about blindness. Any other packet is the Planner's to serve. The
+charter-set audit that fires
 when a charter set lands is `doit think --land`'s, not yours (§3.3, D73): the
 driver owns the privileged act because that is where the checks are. A Thinker
 that spawned auditors would be a fourth pane in everything but name.
