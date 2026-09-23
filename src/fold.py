@@ -666,6 +666,41 @@ def _panes():
         return None, f"src/panes.py not importable ({type(x).__name__}: {x}) — pane-identity, L-adr-0044"
 
 
+def _relay_unserved():
+    """(func, None) or (None, why-not) — R6/L-spec-0196: the PANES degrade idiom
+    (Constraints), never the `waiting_lines` pass-through-and-propagate rule:
+    `relay.unserved` backs exactly one section (UNSERVED), not the lone
+    pass-through slot, so it must degrade on its own rather than take every
+    other section down with it. A SEPARATE import from `waiting_lines`' own
+    import above the title — the two degrade independently (AC10): a `relay`
+    stub can expose a working `waiting_lines` and still lack `unserved`."""
+    try:
+        from relay import unserved
+        return unserved, None
+    except Exception as x:                                 # noqa: BLE001
+        return None, f"src/relay.py not importable ({type(x).__name__}: {x})"
+
+
+def _carry():
+    """(module, None) or (None, why-not) — same lazy PANES idiom as _panes()/
+    _relay_unserved(), backing INBOUND (R9/L-spec-0196) alone."""
+    try:
+        import carry                                       # lazy: a concurrent unit
+        return carry, None
+    except Exception as x:                                 # noqa: BLE001
+        return None, f"src/carry.py not importable ({type(x).__name__}: {x})"
+
+
+def _backup():
+    """(module, None) or (None, why-not) — same lazy PANES idiom as _panes()/
+    _relay_unserved(), backing the `mirror: ` HEALTH line (R1/L-spec-0196) alone."""
+    try:
+        import backup                                      # lazy: a concurrent unit
+        return backup, None
+    except Exception as x:                                 # noqa: BLE001
+        return None, f"src/backup.py not importable ({type(x).__name__}: {x})"
+
+
 def caps():
     """(wall-clock minutes, dollars) per role, read from the one place each is
     declared — never a second copy here."""
@@ -1232,15 +1267,41 @@ def render(events, specs, charters, ignored, by_subject):
     block("IN FLIGHT", [f"{s['id']} · {s['age']:.1f}d{flag(s)}" for s in pick("building")]
           + [f"deploy in flight · {e.get('subject','?')} · {str(e.get('sha',''))[:7]} · "
              f"{age_days(e):.1f}d" for e in in_flight_deploys(events)])
+
+    # UNSERVED — R6/L-spec-0196: one row per `relay.unserved()` entry, a
+    # dispatched packet nobody claimed (pending) or that failed the claim window
+    # (failed-unserved) within the last 24h. PANES-idiom degrade (Constraints):
+    # a missing/raising `relay.unserved` states so, once, and never takes the
+    # rest of the board with it. `unserved_list`/`unserved_err` feed the HEALTH
+    # count below — a failure there is stated too, never a silent zero.
+    def unserved_line(r):
+        return (f"{r['spawn']} · {r['role']} · {r['subject']} · "
+                f"age {r['age_min']:.0f}m · {r['status']}")
+
+    unserved_fn, unserved_err = _relay_unserved()
+    unserved_list = None
+    if unserved_fn is None:
+        unserved_rows = [f"unavailable — {unserved_err}"]
+    else:
+        try:
+            unserved_list = unserved_fn(events, ROOT)
+            unserved_rows = [unserved_line(r) for r in unserved_list]
+        except Exception as x:                             # noqa: BLE001
+            unserved_err = f"relay.unserved raised {type(x).__name__}: {x}"
+            unserved_rows = [f"unavailable — {unserved_err}"]
+    block("UNSERVED", unserved_rows)
+
     # A standing rejection is the difference between "waiting to be looked at" and
     # "already looked at and failed". Same section, but the row may not read the same.
-    # R7/L-spec-0192: `shipped-owed-due` widens this pick by one token, pending
-    # the sibling unit's own section (ADR-0028-6) — a due criterion is at least
-    # as much "awaiting verification" as a plain `shipped` spec is.
+    # R7/L-spec-0196: narrowed back to exclude `shipped-owed-due` now that OWED
+    # DUE (below) is its one home (Planner-directed exception to the
+    # no-trigger-change Constraint) — L-spec-0192 widened this pick by one
+    # token pending this unit's own section (ADR-0028-6); a `shipped-owed-due`
+    # spec renders exactly once now, never here too (AC12).
     block("AWAITING VERIFICATION",
           [f"{s['id']} · {s['state']} · {s['age']:.1f}d"
            + (f"  ⚠ {s['rejects']} REJECTED, needs rework" if s["rejects"] else "") + flag(s)
-           for s in pick("graded", "reviewing", "shipped", "shipped-owed-due")])
+           for s in pick("graded", "reviewing", "shipped")])
     def owed_line(s):
         wake = str(next((e.get("wake_at") for e in s["evs"]
                          if e["type"] == "owed-ac" and e.get("wake_at")), "?"))
@@ -1255,6 +1316,18 @@ def render(events, specs, charters, ignored, by_subject):
         return f"{s['id']} · wakes {wake}" + "".join(f"  ·  {c} met, awaiting fold" for c in met)
 
     block("OWED EVIDENCE", [owed_line(s) for s in pick("shipped-owed-evidence")])
+
+    # OWED DUE — R7/L-spec-0196: one row per `fold.owed_due(specs)` entry, a
+    # due-and-unmet owed criterion. This unit adds no state logic (owed_due()
+    # itself is L-spec-0192's, same file) — only the row and the HEALTH count/
+    # fault fragment. "Enumerate before writing 'all'": every row over 7 days
+    # overdue is named on the HEALTH line, never a truncated "(last: …)".
+    def owed_due_line(r):
+        return (f"{r['spec']} · {r['criterion']} · {r['due_at']} · "
+                f"{round(r['days_overdue'])}d overdue")
+
+    owed_due_rows = owed_due(specs)
+    block("OWED DUE", [owed_due_line(r) for r in owed_due_rows])
     # An unbuilt close is invisible in every working section — terminal work does
     # not queue. It surfaces HERE, at the one moment someone asks "was this
     # actually done?" (D112).
@@ -1266,6 +1339,25 @@ def render(events, specs, charters, ignored, by_subject):
                             + (f" · {c['unbuilt']} closed unbuilt" if c["unbuilt"] else "")
                             for c in charters.values()
                             if c["state"] in ("L1-complete", "L2-complete", "retracted")])
+
+    # INBOUND — R9/L-spec-0196: one row per `carry.uncarried()` entry, covering
+    # both an uncarried v4 record and an unreadable/uncarried PR source — the
+    # one seam that enumerates both. PANES-idiom degrade (Constraints).
+    def inbound_line(r):
+        base = (f"{r['source']} · {r['kind']} · registered {r['registered_at']} · "
+                f"{r['attempts']} attempt(s)")
+        return base + (f" · last_error: {r['last_error']}" if r.get("last_error") else "")
+
+    carry_mod, carry_err = _carry()
+    if carry_mod is None:
+        inbound_rows = [f"unavailable — {carry_err}"]
+    else:
+        try:
+            inbound_rows = [inbound_line(r) for r in carry_mod.uncarried(events)]
+        except Exception as x:                             # noqa: BLE001
+            inbound_rows = [f"unavailable — carry.uncarried raised {type(x).__name__}: {x}"]
+    block("INBOUND", inbound_rows)
+
     block("SHIPPED SINCE YOU LOOKED", [e.get("subject", "?") for e in since("shipped")])
     block("DECIDED WITHOUT YOU", [f"{e.get('subject','?')} · {e.get('why','?')} · revert "
                                   f"{e.get('revert','⚠ none')}" for e in since("decision")])
@@ -1304,22 +1396,18 @@ def render(events, specs, charters, ignored, by_subject):
         pane_rows = [f"unavailable — {panes_err}"]
     else:
         try:
-            # ★ Each cell via .get with a `?` fallback: the Plan's Seams pin
-            # live_panes' per-pane keys in PROSE only, so a key-name mismatch at
-            # merge must degrade to a visible `?` rather than a KeyError.
-            #
-            # ★★ Reconciled at merge (L-adr-0044, the conflict re-dispatch): the
-            # LANDED src/panes.py names two of those cells `last_event_age_days`
-            # and `status`, where the Seams prose said "age of its last event" and
-            # "harness status". Both spellings are read, landed name first — the
-            # producer's own key is authoritative, and dropping the prose name
-            # would silently un-test the shape this unit was specified against.
-            # Measured before this line existed: a real board rendered `last event
-            # ? · ?` for both live panes.
-            pane_rows = [f"{p.get('name','?')} · {p.get('contract','?')} · {p.get('cwd','?')}"
-                         f" · {p.get('ledger_file','?')}"
-                         f" · last event {_cell(p, 'last_event_age_days', 'age_days')}"
-                         f" · {_cell(p, 'status', 'harness_status')}"
+            # R5/L-spec-0196: `panes.live_panes()`'s NEW Seams-table shape —
+            # `{name, role, cwd, ledger, age_s, busy}` — one name per fact, so
+            # the two-key reconciliation the OLD shape made necessary is gone.
+            # Still each cell via `_cell()`'s `?` fallback (single key now): a
+            # value present but None must not render the word `None`, and a
+            # key-name mismatch (e.g. the producer's own reshape landing later
+            # than this unit) degrades to a visible `?`, never a KeyError that
+            # takes every other section down with it.
+            pane_rows = [f"{_cell(p, 'name')} · {_cell(p, 'role')} · {_cell(p, 'cwd')}"
+                         f" · {_cell(p, 'ledger')}"
+                         f" · age {_cell(p, 'age_s')}s"
+                         f" · {_cell(p, 'busy')}"
                          for p in panes_mod.live_panes(SESSIONS, events)]
         except Exception as x:                       # noqa: BLE001 — see above
             pane_rows = [f"unavailable — panes.live_panes raised {type(x).__name__}: {x}"]
@@ -1408,6 +1496,44 @@ def render(events, specs, charters, ignored, by_subject):
     health.append("last tick: never — the Executor has not run (D117)" if not tick else
                   f"last tick: {ago:.0f}m ago" + (f"  ⚠ TICK STALE — over 2×{interval}m; is the cron line installed?"
                                                   if ago > 2 * interval else ""))
+
+    # R7/L-spec-0196 — "due owed: N", naming every criterion overdue more than
+    # 7 days (enumerated, never a truncated "(last: …)").
+    due_fault = [r for r in owed_due_rows if r["days_overdue"] > 7]
+    due_owed_health = f"due owed: {len(owed_due_rows)}"
+    if due_fault:
+        due_owed_health += "  ⚠ OVER 7 DAYS: " + ", ".join(
+            f"{r['spec']} {r['criterion']} {round(r['days_overdue'])}d" for r in due_fault)
+    health.append(due_owed_health)
+    # R6/L-spec-0196 — "unserved packets: N": a failure keeps it non-zero, the
+    # count is never dropped from once it fails (the Plan's own words). The
+    # whole line degrades when `relay.unserved` is unavailable/raises, matching
+    # the section it backs.
+    health.append(f"unserved packets: {len(unserved_list)}" if unserved_list is not None
+                  else f"unserved packets: unavailable — {unserved_err}")
+    # R7/L-spec-0196 — the Goal's "each open escalation … as a row of its own"
+    # is already NEEDS YOU's; this is only the missing aggregate.
+    health.append(f"open escalations: {len(open_escalations(events))}")
+    # R1/L-spec-0196 — the mirror-push line (ADR-0028-4), backup.last_push()'s
+    # own three legs: ok (age), failing-since, never-pushed. PANES-idiom degrade.
+    def mirror_line(d):
+        if d.get("ts") is None:
+            return "mirror: never pushed"
+        if not d.get("ok"):
+            return f"mirror: failing since {d['ts']}"
+        age = d.get("age_s")
+        return (f"mirror: last push {int(age // 60)}m ago" if age is not None
+                else f"mirror: failing since {d['ts']}")
+
+    backup_mod, backup_err = _backup()
+    if backup_mod is None:
+        health.append(f"mirror: unavailable — {backup_err}")
+    else:
+        try:
+            health.append(mirror_line(backup_mod.last_push(ROOT)))
+        except Exception as x:                             # noqa: BLE001
+            health.append(f"mirror: unavailable — backup.last_push raised {type(x).__name__}: {x}")
+
     L += ["## HEALTH"] + ["  " + h for h in health] + [""]
 
     BOARD.parent.mkdir(parents=True, exist_ok=True)

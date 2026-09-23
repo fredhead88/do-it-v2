@@ -5,6 +5,13 @@ from datetime import datetime, timedelta, timezone
 
 TMP = pathlib.Path(tempfile.mkdtemp())
 os.environ["DOIT_ROOT"] = str(TMP)
+# INBOUND (R9/L-spec-0196) calls the REAL carry.uncarried() when `carry` is not
+# explicitly stubbed (AC22 and friends). carry.py's own ledger/inbox dirs key off
+# V4_LEDGER_DIR/V4_INBOX_DIR, NOT DOIT_ROOT — pinned here too, or this file would
+# read the operator's real ~/.claude/ledger and ~/.claude/spec-inbox (measured:
+# it does, 15 real records, the moment this line is absent).
+os.environ["V4_LEDGER_DIR"] = str(TMP / "v4-ledger-absent")
+os.environ["V4_INBOX_DIR"] = str(TMP / "v4-inbox-absent")
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 import fold  # noqa: E402
 
@@ -458,7 +465,7 @@ for r in (rows, erows):
 # the NUMBER moves when a section is deliberately added, the check does not.
 # Counted through sections() (the PLANNER WAITING ON pass-through is relay's
 # lines, not a fold.py section) so both rules hold at once.
-assert len(sections(eboard)) == 12, \
+assert len(sections(eboard)) == 15, \
     "an empty ledger under a filter still renders every section, and does not raise"
 
 # ...and that label is now UNVOUCHED: DOIT_PROJECT is operator environment reaching
@@ -471,7 +478,7 @@ try:
     frows, fboard = spend(forged_env), fold.render(*forged_env)
 finally:
     fold.PROJECT = None
-assert len(sections(fboard)) == 12, "sections, always"
+assert len(sections(fboard)) == 15, "sections, always"
 assert len(frows) == 1 and "spend · x ## FORGED (9) · $0.00 · 0 spawns" in frows[0], frows
 
 # a label is a DIRECTORY NAME by default and nothing curates it: a newline in one
@@ -479,7 +486,7 @@ assert len(frows) == 1 and "spend · x ## FORGED (9) · $0.00 · 0 spawns" in fr
 # positional layout is the whole reason that check exists.
 forged = ledger(**{"L-operator-local.jsonl": [sp_ev(project="x\n## FORGED (9)", cost_usd=1.0)]})
 board = fold.render(*forged)
-assert len(sections(board)) == 12, "sections, always"
+assert len(sections(board)) == 15, "sections, always"
 assert len(spend(forged)) == 1 and "spend · x ## FORGED (9) · $1.00 · 1 spawns" in spend(forged)[0], \
     spend(forged)
 
@@ -817,7 +824,7 @@ assert "## PLANNER WAITING ON" not in wb, \
     "fold.py synthesizes no header of its own around a pass-through block"
 assert "PLANNER WAITING ON" not in wb[wb.index("## SPEND"):wb.index("## HEALTH")], \
     "and never in the SPEND/HEALTH gap, which spend_block() slices"
-assert len(sections(wb)) == 12, "the block is not a section of its own (12 = ten + SPEND + LIVE PANES)"
+assert len(sections(wb)) == 15, "the block is not a section of its own (15 = ten + SPEND + LIVE PANES + OWED DUE/UNSERVED/INBOUND, L-spec-0196)"
 
 # R6: a dry queue is CONTENT, not a reason to omit the slot.
 assert "PLANNER WAITING ON: no open charters" in with_relay(
@@ -838,7 +845,7 @@ assert gone.count(degrade) == 1 and gone.index(degrade) > gone.index("## HEALTH"
     "a missing producer says so once, under HEALTH"
 assert gone.count("PLANNER WAITING ON") == 1, \
     "and renders no block content it does not have"
-assert len(sections(gone)) == 12, "the degrade line is a HEALTH row, not a section"
+assert len(sections(gone)) == 15, "the degrade line is a HEALTH row, not a section"
 
 # ══════════════════════════════════════════════════════════════════════════════
 # L-charter-0021 · the-fold-and-the-board
@@ -1220,7 +1227,7 @@ two_edits = ledger(**{"L-executor-01.jsonl": [
 eboard2 = fold.render(*two_edits)
 assert "repo-edit events: 2" in eboard2 and "src/tick.py" in eboard2, eboard2
 
-# ── R13/R14/AC10 · LIVE PANES and the unrecorded-message count DEGRADE, loudly ─
+# ── R13/R14/AC5/AC10 · LIVE PANES and the unrecorded-message count DEGRADE ────
 # Both legs synthetic. Never "src/panes.py happens to be missing on disk" — that
 # is a property of merge order, not of this code, and it would stop testing the
 # absent leg the moment pane-identity merges.
@@ -1235,43 +1242,37 @@ try:
     assert "unavailable" in live_block and "panes" in live_block, live_block
     assert "unrecorded messages: unavailable" in absent, absent
 
+    # AC5/R5/L-spec-0196: panes.live_panes()'s NEW Seams-table shape — exactly
+    # `{name, role, cwd, ledger, age_s, busy}`, one name per fact, no more
+    # two-key reconciliation. All six values render; none of the OLD shape's
+    # key names (contract/status/ledger_file/last_event_age_days/name_source)
+    # ever appears anywhere in the block.
     stub = types.ModuleType("panes")
     stub.live_panes = lambda sessions_dir, events: [
-        {"name": "planner", "contract": "agents/planner.md", "cwd": "/home/x/do-it-v2",
-         "ledger_file": "L-planner-0014.jsonl", "age_days": 0.3, "harness_status": "idle"}]
+        {"name": "planner", "role": "planner", "cwd": "/home/x/do-it-v2",
+         "ledger": "L-planner-0014.jsonl", "age_s": 259, "busy": True}]
     stub.unrecorded_messages = lambda events: 3
     sys.modules["panes"] = stub
     present = fold.render(*pane_fx)
     live_block = present.split("## LIVE PANES")[1].split("## HEALTH")[0]
     assert "## LIVE PANES (1)" in present, present
-    for cell in ("planner", "agents/planner.md", "/home/x/do-it-v2",
-                 "L-planner-0014.jsonl", "0.3", "idle"):
+    for cell in ("planner", "/home/x/do-it-v2", "L-planner-0014.jsonl", "259", "True"):
         assert cell in live_block, (cell, live_block)
     assert "unavailable" not in live_block, live_block
+    for old_key in ("contract", "status", "ledger_file", "last_event_age_days", "name_source"):
+        assert old_key not in live_block, (old_key, live_block)
     assert "unrecorded messages: 3" in present, present
 
-    # ★ the LANDED seam (L-adr-0044, reconciled at the conflict re-dispatch):
-    # src/panes.py names two of those cells `last_event_age_days` and `status`,
-    # not the Seams prose's "age of its last event"/"harness status". The real
-    # spelling must render its VALUE, not a `?` — measured against the merged
-    # module, which rendered `last event ? · ?` for two live panes before this.
+    # a key present but None is not a value: `None` must never read as a cell
     stub.live_panes = lambda sessions_dir, events: [
-        {"name": "L-executor-0007", "contract": "executor", "cwd": "/opt/albert-scott",
-         "ledger_file": "L-executor-0007.jsonl", "last_event_age_days": 0.7,
-         "status": "busy"}]
-    landed = fold.render(*pane_fx).split("## LIVE PANES")[1].split("## HEALTH")[0]
-    for cell in ("L-executor-0007.jsonl", "last event 0.7", "busy"):
-        assert cell in landed, (cell, landed)
-    assert "?" not in landed, landed
-    # a key present but None is not a value: `None` must never read as a status
-    stub.live_panes = lambda sessions_dir, events: [
-        {"name": "p", "contract": "c", "cwd": "/w", "ledger_file": "l.jsonl",
-         "last_event_age_days": None, "status": None}]
+        {"name": "p", "role": None, "cwd": "/w", "ledger": "l.jsonl",
+         "age_s": None, "busy": False}]
     nones = fold.render(*pane_fx).split("## LIVE PANES")[1].split("## HEALTH")[0]
     assert "None" not in nones and nones.count("?") == 2, nones
 
-    # a key-name mismatch at merge is a visible `?` cell, never a KeyError that
-    # takes every other section of the board down with it
+    # a key-name mismatch at merge (e.g. the OLD shape, still landed as of this
+    # spec's write time) is a visible `?` cell, never a KeyError that takes
+    # every other section of the board down with it
     stub.live_panes = lambda sessions_dir, events: [{"name": "planner"}]
     mismatch = fold.render(*pane_fx)
     assert mismatch.split("## LIVE PANES")[1].split("## HEALTH")[0].count("?") >= 5, mismatch
@@ -1466,16 +1467,271 @@ hand_evs = [
 ]
 assert fold.spec_state(hand_evs, set()) != "accepted", fold.spec_state(hand_evs, set())
 
-# ── AC22 · a shipped-owed-due subject renders under AWAITING VERIFICATION, and
-# NOT under OWED EVIDENCE
+# ── AC12/AC22 · a shipped-owed-due subject renders under OWED DUE, exactly
+# once, and NOT under AWAITING VERIFICATION or OWED EVIDENCE (R7/L-spec-0196:
+# this unit narrows AWAITING VERIFICATION's pick(...) back to exclude
+# `shipped-owed-due` now that OWED DUE — inserted between OWED EVIDENCE and
+# CHARTER CLOSE — is its one home; L-spec-0192's own AC22 expected the
+# interim "renders under AWAITING VERIFICATION" state pending this unit).
 evs22 = ledger(**{"L-builder-01.jsonl": built, "L-grader-01.jsonl": graded,
                   "L-reviewer-01.jsonl": reviewed, "L-executor-01.jsonl": shipped,
                   "L-spec-writer-01.jsonl": due_ac1})
 board22 = fold.render(*evs22)
 av_block = board22.split("## AWAITING VERIFICATION")[1].split("## OWED EVIDENCE")[0]
-oe_block = board22.split("## OWED EVIDENCE")[1].split("## CHARTER CLOSE")[0]
-assert S in av_block, av_block
+oe_block = board22.split("## OWED EVIDENCE")[1].split("## OWED DUE")[0]
+od_block = board22.split("## OWED DUE")[1].split("## CHARTER CLOSE")[0]
+assert S not in av_block, av_block
 assert S not in oe_block, oe_block
+assert S in od_block, od_block
+
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-0196 · board-shows-each-signal-as-itself (L-charter-0028, wave 3)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── AC1 · one due, unmet owed-ac (10d overdue) -> one OWED DUE row; empty stays visible
+due10 = [{"ts": stamp(0), "type": "owed-ac", "subject": S, "criterion": "AC1", "wake_at": stamp(10)}]
+ev1 = ledger(**{"L-builder-01.jsonl": built, "L-grader-01.jsonl": graded,
+               "L-reviewer-01.jsonl": reviewed, "L-executor-01.jsonl": shipped,
+               "L-spec-writer-01.jsonl": due10})
+board1 = fold.render(*ev1)
+assert "## OWED DUE (1)" in board1, board1
+od_block1 = board1.split("## OWED DUE")[1].split("## CHARTER CLOSE")[0]
+assert S in od_block1 and "AC1" in od_block1 and "10d overdue" in od_block1, od_block1
+assert due10[0]["wake_at"] in od_block1, od_block1
+empty_board1 = fold.render(*ledger(**{"L-operator-local.jsonl": []}))
+assert "## OWED DUE (0)" in empty_board1, empty_board1
+
+# ── AC2 · a 3d and a 9d overdue row: HEALTH names only the 9d row in the fault
+# fragment; zero rows over 7 days renders no fault fragment at all
+S2 = "L-spec-0143"
+built2 = [{"ts": stamp(3), "type": "spec-written", "subject": S2, "charter": C},
+          {"ts": stamp(2), "type": "build-started", "subject": S2},
+          {"ts": stamp(2), "type": "build-done", "subject": S2}]
+graded2 = [{"ts": stamp(1), "type": "verdict", "subject": S2, "confirmed": True}]
+reviewed2 = [{"ts": stamp(1), "type": "review", "subject": S2, "depth": "gates-only"}]
+shipped2 = [{"ts": stamp(0), "type": "shipped", "subject": S2}]
+due3 = [{"ts": stamp(0), "type": "owed-ac", "subject": S, "criterion": "AC1", "wake_at": stamp(3)}]
+due9 = [{"ts": stamp(0), "type": "owed-ac", "subject": S2, "criterion": "AC2", "wake_at": stamp(9)}]
+ev2 = ledger(**{"L-builder-01.jsonl": built + built2, "L-grader-01.jsonl": graded + graded2,
+               "L-reviewer-01.jsonl": reviewed + reviewed2,
+               "L-executor-01.jsonl": shipped + shipped2,
+               "L-spec-writer-01.jsonl": due3 + due9})
+board2 = fold.render(*ev2)
+due_line2 = [l for l in board2.splitlines() if l.strip().startswith("due owed:")][0]
+assert "due owed: 2" in due_line2 and "OVER 7 DAYS" in due_line2, due_line2
+assert S2 in due_line2 and "AC2" in due_line2 and "9d" in due_line2, due_line2
+assert S not in due_line2, due_line2
+
+ev2b = ledger(**{"L-builder-01.jsonl": built, "L-grader-01.jsonl": graded,
+                 "L-reviewer-01.jsonl": reviewed, "L-executor-01.jsonl": shipped,
+                 "L-spec-writer-01.jsonl": due3})
+board2b = fold.render(*ev2b)
+due_line2b = [l for l in board2b.splitlines() if l.strip().startswith("due owed:")][0]
+assert "due owed: 1" in due_line2b and "OVER 7 DAYS" not in due_line2b, due_line2b
+
+# ── AC3 · carry.uncarried: a v4 row with no last_error, a pr row with one
+_saved_carry = sys.modules.get("carry", "‹absent›")
+try:
+    carry_stub = types.ModuleType("carry")
+    carry_stub.uncarried = lambda events: [
+        {"source": "1471", "kind": "v4", "registered_at": "2026-09-01T00:00:00Z",
+         "attempts": 0, "last_error": None},
+        {"source": "https://github.com/x/y/pull/9", "kind": "pr",
+         "registered_at": "2026-09-02T00:00:00Z", "attempts": 2, "last_error": "clone failed"},
+    ]
+    sys.modules["carry"] = carry_stub
+    board3 = fold.render(*ledger(**{"L-operator-local.jsonl": []}))
+    assert "## INBOUND (2)" in board3, board3
+    inbound_block3 = board3.split("## INBOUND")[1].split("## SHIPPED SINCE YOU LOOKED")[0]
+    assert "1471" in inbound_block3 and "v4" in inbound_block3, inbound_block3
+    assert "clone failed" in inbound_block3, inbound_block3
+    v4_row3 = [l for l in inbound_block3.splitlines() if "1471" in l][0]
+    assert "None" not in v4_row3 and "last_error" not in v4_row3, v4_row3
+finally:
+    if _saved_carry == "‹absent›":
+        sys.modules.pop("carry", None)
+    else:
+        sys.modules["carry"] = _saved_carry
+
+# ── AC4 · relay.unserved: a pending and a failed-unserved row, both counted
+_saved_relay4 = sys.modules.get("relay", "‹absent›")
+try:
+    relay_stub4 = types.ModuleType("relay")
+    relay_stub4.waiting_lines = lambda e, r: ["PLANNER WAITING ON: no open charters"]
+    relay_stub4.unserved = lambda events, root: [
+        {"spawn": "L-builder-0100", "role": "builder", "subject": "L-spec-0100",
+         "age_min": 12.0, "status": "pending"},
+        {"spawn": "L-grader-0101", "role": "grader", "subject": "L-spec-0101",
+         "age_min": 500.0, "status": "failed-unserved"},
+    ]
+    sys.modules["relay"] = relay_stub4
+    board4 = fold.render(*ledger(**{"L-operator-local.jsonl": []}))
+    assert "## UNSERVED (2)" in board4, board4
+    unserved_block4 = board4.split("## UNSERVED")[1].split("## AWAITING VERIFICATION")[0]
+    assert "L-builder-0100" in unserved_block4 and "pending" in unserved_block4, unserved_block4
+    assert "L-grader-0101" in unserved_block4 and "failed-unserved" in unserved_block4, unserved_block4
+    assert "unserved packets: 2" in board4, board4
+finally:
+    if _saved_relay4 == "‹absent›":
+        sys.modules.pop("relay", None)
+    else:
+        sys.modules["relay"] = _saved_relay4
+
+# AC5 (LIVE PANES' new six-key seam shape) is proved above, in the R13/R14
+# degrade block, against the same stub technique this file already used for
+# the old shape — see "AC5/R5/L-spec-0196" there.
+
+# ── AC6 · open escalations counts exactly the unresolved ones
+Sx, Sy, Sz = "L-spec-9001", "L-spec-9002", "L-spec-9003"
+
+
+def esc(subj):
+    return {"ts": stamp(1), "type": "escalation-blocking", "subject": subj,
+            "asks": "?", "default": "d", "deadline": stamp(-1), "revert": "r"}
+
+
+ev6 = ledger(**{"L-operator-local.jsonl": [
+    esc(Sx), esc(Sy), esc(Sz),
+    {"ts": stamp(0), "type": "decision", "subject": Sz, "why": "w", "revert": "r"}]})
+board6 = fold.render(*ev6)
+assert f"open escalations: {len(fold.open_escalations(ev6[0]))}" in board6, board6
+assert "open escalations: 2" in board6, board6
+
+# ── AC7 · backup.last_push's three mirror legs, no `None` in any of them
+_saved_backup7 = sys.modules.get("backup", "‹absent›")
+try:
+    backup_stub7 = types.ModuleType("backup")
+    backup_stub7.last_push = lambda root: {"ok": True, "age_s": 125, "ts": "2026-09-01T00:00:00Z"}
+    sys.modules["backup"] = backup_stub7
+    board7a = fold.render(*ledger(**{"L-operator-local.jsonl": []}))
+    mirror7a = [l for l in board7a.splitlines() if l.strip().startswith("mirror:")][0]
+    assert "mirror: last push 2m ago" in mirror7a and "None" not in mirror7a, mirror7a
+
+    backup_stub7.last_push = lambda root: {"ok": False, "ts": "2026-09-20T00:00:00Z", "age_s": None}
+    board7b = fold.render(*ledger(**{"L-operator-local.jsonl": []}))
+    mirror7b = [l for l in board7b.splitlines() if l.strip().startswith("mirror:")][0]
+    assert "mirror: failing since 2026-09-20T00:00:00Z" in mirror7b and "None" not in mirror7b, mirror7b
+
+    backup_stub7.last_push = lambda root: {"ok": False, "ts": None, "age_s": None}
+    board7c = fold.render(*ledger(**{"L-operator-local.jsonl": []}))
+    mirror7c = [l for l in board7c.splitlines() if l.strip().startswith("mirror:")][0]
+    assert "mirror: never pushed" in mirror7c and "None" not in mirror7c, mirror7c
+finally:
+    if _saved_backup7 == "‹absent›":
+        sys.modules.pop("backup", None)
+    else:
+        sys.modules["backup"] = _saved_backup7
+
+# ── AC9 · 15 sections, original twelve in their original relative order,
+# AWAITING VERIFICATION unmoved (only its picked contents narrow, R7), LIVE
+# PANES still between SPEND and HEALTH
+board9 = fold.render(*ledger(**{"L-executor-01.jsonl": shipped}))
+assert len(sections(board9)) == 15, sections(board9)
+expected_order9 = ["## NEEDS YOU", "## BLOCKED", "## WRITTEN, NOT PICKED UP", "## IN FLIGHT",
+                   "## UNSERVED", "## AWAITING VERIFICATION", "## OWED EVIDENCE", "## OWED DUE",
+                   "## CHARTER CLOSE", "## INBOUND", "## SHIPPED SINCE YOU LOOKED",
+                   "## DECIDED WITHOUT YOU", "## SPEND", "## LIVE PANES", "## HEALTH"]
+got_order9 = [h.split(" (")[0] for h in sections(board9)]
+assert got_order9 == expected_order9, got_order9
+
+# ── AC10 · relay.unserved / carry.uncarried / backup.last_push each degrade
+# on their own — PANES idiom, never propagate, every OTHER section (including,
+# for the two relay riggings, PLANNER WAITING ON) byte-identical to baseline.
+baseline_evs10 = ledger(**{"L-operator-local.jsonl": []})
+
+
+def _boom10(*a, **k):
+    raise RuntimeError("boom")
+
+
+def _relay_mod10(unserved_mode):
+    m = types.ModuleType("relay")
+    m.waiting_lines = lambda e, r: ["PLANNER WAITING ON: no open charters"]
+    if unserved_mode == "ok":
+        m.unserved = lambda events, root: []
+    elif unserved_mode == "raise":
+        m.unserved = _boom10
+    # unserved_mode == "import-error": no `unserved` attribute at all
+    return m
+
+
+def _carry_mod10(mode):
+    if mode == "import-error":
+        return None
+    m = types.ModuleType("carry")
+    m.uncarried = _boom10 if mode == "raise" else (lambda events: [])
+    return m
+
+
+def _backup_mod10(mode):
+    if mode == "import-error":
+        return None
+    m = types.ModuleType("backup")
+    m.last_push = _boom10 if mode == "raise" else (
+        lambda root: {"ok": True, "age_s": 60, "ts": "2026-01-01T00:00:00Z"})
+    return m
+
+
+def _render_rigged10(relay_mod, carry_mod, backup_mod):
+    saved = {}
+    for name, mod in (("relay", relay_mod), ("carry", carry_mod), ("backup", backup_mod)):
+        saved[name] = sys.modules.get(name, "‹absent›")
+        sys.modules[name] = mod
+    try:
+        return fold.render(*baseline_evs10)          # must not raise
+    finally:
+        for name, prev in saved.items():
+            if prev == "‹absent›":
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = prev
+
+
+def _mask_region10(text, start, end):
+    i = text.index(start) + len(start)
+    j = text.index(end, i)
+    return text[:i] + "‹REGION›" + text[j:]
+
+
+def _mask_line10(text, prefix):
+    return "\n".join("‹LINE›" if l.strip().startswith(prefix) else l for l in text.splitlines())
+
+
+baseline10 = _render_rigged10(_relay_mod10("ok"), _carry_mod10("ok"), _backup_mod10("ok"))
+
+# relay: ImportError leg (no `unserved` attribute) and raise leg
+for mode, wording in (("import-error", "unavailable — src/relay.py not importable ("),
+                      ("raise", "unavailable — relay.unserved raised RuntimeError: boom")):
+    board_r = _render_rigged10(_relay_mod10(mode), _carry_mod10("ok"), _backup_mod10("ok"))
+    unserved_block_r = board_r.split("## UNSERVED")[1].split("## AWAITING VERIFICATION")[0]
+    assert wording in unserved_block_r, (mode, unserved_block_r)
+    assert "PLANNER WAITING ON: no open charters" in board_r, (mode, board_r)
+    masked_a = _mask_line10(_mask_region10(baseline10, "## UNSERVED", "## AWAITING VERIFICATION"),
+                            "unserved packets:")
+    masked_b = _mask_line10(_mask_region10(board_r, "## UNSERVED", "## AWAITING VERIFICATION"),
+                            "unserved packets:")
+    assert masked_a == masked_b, (mode, masked_a, masked_b)
+
+# carry: ImportError leg (module absent) and raise leg
+for mode, wording in (("import-error", "unavailable — src/carry.py not importable ("),
+                      ("raise", "unavailable — carry.uncarried raised RuntimeError: boom")):
+    board_c = _render_rigged10(_relay_mod10("ok"), _carry_mod10(mode), _backup_mod10("ok"))
+    inbound_block_c = board_c.split("## INBOUND")[1].split("## SHIPPED SINCE YOU LOOKED")[0]
+    assert wording in inbound_block_c, (mode, inbound_block_c)
+    masked_a = _mask_region10(baseline10, "## INBOUND", "## SHIPPED SINCE YOU LOOKED")
+    masked_b = _mask_region10(board_c, "## INBOUND", "## SHIPPED SINCE YOU LOOKED")
+    assert masked_a == masked_b, (mode, masked_a, masked_b)
+
+# backup: ImportError leg (module absent) and raise leg — one HEALTH line only
+for mode, wording in (("import-error", "unavailable — src/backup.py not importable ("),
+                      ("raise", "unavailable — backup.last_push raised RuntimeError: boom")):
+    board_b = _render_rigged10(_relay_mod10("ok"), _carry_mod10("ok"), _backup_mod10(mode))
+    mirror_line_b = [l for l in board_b.splitlines() if l.strip().startswith("mirror:")][0]
+    assert wording in mirror_line_b, (mode, mirror_line_b)
+    masked_a = _mask_line10(baseline10, "mirror:")
+    masked_b = _mask_line10(board_b, "mirror:")
+    assert masked_a == masked_b, (mode, masked_a, masked_b)
 
 print("fold: 104 checks pass · +91 assertions (L-charter-0021: R3 R6 R11 R13 R14 R15)"
-      " · +L-spec-0192 (fold-states-owed-due-and-killed: AC1-5 AC8 AC9 AC15-22)")
+      " · +L-spec-0192 (fold-states-owed-due-and-killed: AC1-5 AC8 AC9 AC15-22)"
+      " · +L-spec-0196 (board-shows-each-signal-as-itself: AC1-7 AC9 AC10 AC12)")
