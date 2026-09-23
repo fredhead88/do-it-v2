@@ -887,4 +887,95 @@ AC1 [backend]: x.
 
 test_done_condition_override()
 
+# ── 14. L-spec-0191 · packet parsers read valid specs (R3a-R3f) ──────────────
+
+# AC1: verify_script(spec_text) is pure — no Ctx, no base_sha argument, no
+# filesystem write, never sys.exit; None for an absent/empty Verification
+# block; raises VerifyLint (never SystemExit) on a lint violation.
+N += 1
+assert packet.verify_script("# no verification section at all\n") is None, \
+    "AC1: no Verification block at all returns None, direct call"
+N += 1
+assert packet.verify_script("## 8. Verification\n```\n\n```\n") is None, \
+    "AC1: an empty fenced block returns None, direct call"
+N += 1
+files_before = set((TMP / "content").glob("verify-*.sh"))
+try:
+    packet.verify_script("## 8. Verification\n```\ncd src; /usr/bin/python3 test_fold.py\n```\n")
+    raise AssertionError("a bare `;` should raise VerifyLint")
+except packet.VerifyLint as e:
+    assert "bare `;`" in str(e), e
+assert set((TMP / "content").glob("verify-*.sh")) == files_before, \
+    "AC1: verify_script performs no filesystem write, even on a lint violation"
+
+# AC2/R3a: a backslash-continued block is one logical &&-chain, not several
+# newline-separated statements — positive and negative repro, direct call.
+GOOD_CONT = ("## 8. Verification\n```\necho start && \\\ncd src && \\\n"
+             "/usr/bin/python3 -c \"print(1)\"\n```\n")
+N += 1
+text = packet.verify_script(GOOD_CONT)
+assert text is not None and "set -euo pipefail" in text, \
+    "AC2 positive: a real multi-line && chain assembles cleanly, no violation"
+BAD_CONT = "## 8. Verification\n```\ncd src && \\\npython3 x.py\n```\n"
+N += 1
+try:
+    packet.verify_script(BAD_CONT)
+    raise AssertionError("a bare interpreter on a continued line must still raise")
+except packet.VerifyLint as e:
+    assert "absolute path" in str(e), \
+        "the join must not mask rule (c) — the bare-interpreter check still runs: " + str(e)
+
+# AC3/R3b: a `#` inside a quoted string, on a line ending in `&&`, is not a
+# false newline-separated-statement violation — the spec's own reproduction,
+# direct call on the linter itself.
+N += 1
+assert packet._newline_violations('echo "value # not comment" &&\n'
+                                   '/usr/bin/python3 -c "print(1)"') == [], \
+    "AC3: a `#` inside quotes does not truncate before the real trailing &&"
+
+# AC4/AC5/R3c: packet.section ignores a `#`-prefixed line inside a fenced code
+# block, for both the start match and the end match; returns str | None.
+FENCED_A = ("## Verification\n```\n# comment inside fenced code, not a heading\n"
+            "echo hi\n```\n## Next\nafter\n")
+N += 1
+sec_a = packet.section(FENCED_A, "Verification")
+assert sec_a is not None and "echo hi" in sec_a and "## Next" not in sec_a, \
+    "AC4(a): a fenced #-line is not read as the section's own end heading"
+FENCED_B = ("## Unrelated\n```\n# Verification of assumptions happens elsewhere\n"
+            "noise\n```\n## Verification\n```\nreal content\n```\n")
+N += 1
+sec_b = packet.section(FENCED_B, "Verification")
+assert sec_b is not None and "real content" in sec_b and "noise" not in sec_b, \
+    "AC4(b): an earlier fenced #-line is not read as the section's START heading"
+N += 1
+assert packet.section("# just a title\nno such section here\n", "Nonexistent") is None, \
+    "AC5: no matching heading outside a fence returns None, never []"
+N += 1
+assert packet.criteria(BOLD.read_text()) and isinstance(packet.criteria(BOLD.read_text()), list), \
+    "AC5: every in-file caller of section() still works over the new str | None contract"
+
+# R3d/AC6: a rework round's base_sha pins to the EARLIEST build-done, never a
+# later round's own base_sha and never the live worktree HEAD.
+SPEC80 = TMP / "content" / "L-spec-0080.md"
+SPEC80.write_text("""# L-spec-0080
+## 8. Verification
+```
+cd src && /usr/bin/python3 test_fold.py
+```
+## Acceptance criteria
+AC1 [backend]: x.
+  review_path: log in as x / go to x / do x / worked if x / failed if x.
+""")
+ev("spec-writer", "spec-written", "L-spec-0080", spec="L-spec-0080", path=str(SPEC80),
+   footprint=["src/fold.py"])
+# Fixture models the corrupted self-report the live lesson names: round 1's
+# base_sha=X, round 2's own base_sha=Y, and the worktree's live HEAD is a
+# THIRD value (REPO's real HEAD) — none of Y or the live HEAD may win.
+ev("builder", "build-done", "L-spec-0080", status="DONE", base_sha="X0000001", ready_sha="r1")
+ev("builder", "build-done", "L-spec-0080", status="DONE", base_sha="Y0000002", ready_sha="r2")
+build("spec-auditor", subject="L-spec-0080", worktree=str(REPO))
+btxt = (TMP / "content" / "verify-L-spec-0080.sh").read_text()
+assert btxt.splitlines()[2] == "BASE=X0000001", \
+    f"AC6: the earliest build-done's base_sha wins, never a later round's or the live worktree HEAD: {btxt.splitlines()[:4]!r}"
+
 print(f"packet: {N} packets built, seven Blindness lists enforced")

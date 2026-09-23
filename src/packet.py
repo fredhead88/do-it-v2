@@ -78,14 +78,41 @@ def long_lines(path, n=50):
         return []
 
 
-def section(body, name):
-    """The lines under the first heading whose text contains `name`, to the next heading."""
-    m = re.search(rf"^#+\s*\d*\.?\s*[^\n]*{name}[^\n]*$", body, re.M | re.I)
-    if not m:
-        return []
-    rest = body[m.end():]
-    end = re.search(r"^#+ ", rest, re.M)
-    return (rest[:end.start()] if end else rest).strip().splitlines()
+FENCE = re.compile(r"^```")
+
+
+def _heading_positions(text):
+    """Line indices that are real markdown headings (`^#+ `) — SKIPPING any such
+    -looking line that sits inside a fenced (``` ``` ```) code block. Fence state
+    toggles on any line starting with ``` , the same convention every fenced
+    block in this repo already uses."""
+    out, in_fence = [], False
+    for i, line in enumerate(text.splitlines()):
+        if FENCE.match(line):
+            in_fence = not in_fence
+            continue
+        if not in_fence and re.match(r"^#+ ", line):
+            out.append(i)
+    return out
+
+
+def section(text, name):
+    """The joined body of the first heading matching `name`, up to the next
+    heading of any level — skipping a `#`-prefixed line that sits inside a
+    fenced (``` ``` ```) code block, for BOTH the start match and the end
+    match (R3c). `str | None`: `None` when no matching heading exists outside
+    a fence; an existing heading with nothing beneath it before the next
+    heading returns `""` (found, just empty) — never a bare list, never `[]`
+    for absent."""
+    lines = text.splitlines()
+    headings = _heading_positions(text)
+    pat = re.compile(rf"^#+\s*\d*\.?\s*[^\n]*{name}[^\n]*$", re.I)
+    start = next((i for i in headings if pat.match(lines[i])), None)
+    if start is None:
+        return None
+    end = next((i for i in headings if i > start), None)
+    body_lines = lines[start + 1:end] if end is not None else lines[start + 1:]
+    return "\n".join(body_lines).strip()
 
 
 def criteria(body):
@@ -97,7 +124,8 @@ def criteria(body):
     reviewer returned no blocking finding on a review of nothing
     (`L-reviewer-0002`, 2026-09-08). A criterion the packet cannot find is
     undetermined, and undetermined is never clean: refuse."""
-    return (section(body, "Acceptance")
+    sec = section(body, "Acceptance")
+    return ((sec.splitlines() if sec else None)
             or [l for l in body.splitlines() if re.match(r"\s*\**AC\d+ \[", l)]
             or die("no acceptance criteria in the spec — a grade or review of "
                    "nothing is not a pass"))
@@ -233,13 +261,78 @@ def _quote_aware_scan(block):
     return [s.strip() for s in segs if s.strip()], bad
 
 
+def _join_continuations(block):
+    """R3a: a physical line ending in a backslash continuation (`... && \\`) joins
+    with the line beneath it into ONE logical line, once, before either lint pass
+    below runs — so a real multi-line `&&`-chain reads as the single command it
+    is, not as several newline-separated statements. Quote-aware, the same way
+    `_quote_aware_scan` is: a trailing backslash inside an open quote is a
+    literal character of the string, not a continuation, so it is copied
+    through untouched rather than joined away."""
+    out, i, n, q = "", 0, len(block), None
+    while i < n:
+        ch = block[i]
+        if q:
+            out += ch
+            if ch == "\\" and q == '"' and i + 1 < n:
+                out += block[i + 1]
+                i += 2
+                continue
+            if ch == q:
+                q = None
+            i += 1
+            continue
+        if ch in "'\"":
+            q, out = ch, out + ch
+            i += 1
+            continue
+        if ch == "\\" and i + 1 < n and block[i + 1] == "\n":
+            out = out.rstrip(" \t") + " "
+            i += 2
+            continue
+        out += ch
+        i += 1
+    return out
+
+
+def _strip_comment(line):
+    """R3b: a quote-aware `#`-strip for ONE physical line — a `#` inside a
+    `'...'`/`"..."` string is never read as a comment start. `_newline_violations`
+    below used to strip naively (`l.split("#", 1)[0]`), which truncated a line
+    like `echo "value # not comment" &&` before its real trailing `&&`."""
+    out, i, n, q = "", 0, len(line), None
+    while i < n:
+        ch = line[i]
+        if q:
+            out += ch
+            if ch == "\\" and q == '"' and i + 1 < n:
+                out += line[i + 1]
+                i += 2
+                continue
+            if ch == q:
+                q = None
+            i += 1
+            continue
+        if ch in "'\"":
+            q, out = ch, out + ch
+            i += 1
+            continue
+        if ch == "#":
+            break
+        out += ch
+        i += 1
+    return out
+
+
 def _newline_violations(block):
     """Rule (b)'s other half: a physical line that is not the block's last and
     does not end in `&&` is a statement the `&&` chain does not gate — `set -e`
     covers it today, but the next edit that wraps one line in a conditional
-    would not, and a linted block is not meant to depend on that."""
+    would not, and a linted block is not meant to depend on that. `block` is
+    expected already joined by `_join_continuations` (a real continuation is
+    never a violation); the `#`-strip is quote-aware (R3b)."""
     lines = [l for l in block.splitlines() if l.strip() and not l.strip().startswith("#")]
-    return [l.strip() for l in lines[:-1] if not l.split("#", 1)[0].rstrip().endswith("&&")]
+    return [l.strip() for l in lines[:-1] if not _strip_comment(l).rstrip().endswith("&&")]
 
 
 def _interp_violations(segs):
@@ -264,11 +357,22 @@ def _interp_violations(segs):
 def verify_base_sha(c):
     """The base a verify script is measured against, pinned ONCE here — never
     re-derived by the running script, which is what a `$(git merge-base …)` inside
-    the block itself would do on every run. Precedence: `--base-sha`, a recorded
-    `base_sha` (build-done is the most authoritative — it is the actual build's —
-    then build-started, then spec-written), else `git merge-base` against the
-    worktree, once, at packet time; `git rev-parse HEAD` is the last resort for a
-    worktree with nothing to diverge from yet.
+    the block itself would do on every run. Precedence, all five steps (R3d):
+    `--base-sha`, else the EARLIEST recorded `build-done.base_sha` for this
+    subject, else `build-started`, else `spec-written`, else `git merge-base`
+    against the worktree, once, at packet time; `git rev-parse HEAD` is the last
+    resort for a worktree with nothing to diverge from yet.
+
+    R3d — EARLIEST, never the live worktree HEAD and never a later round's own
+    base_sha: on a rework round (same worktree, same branch, an earlier round's
+    commit already on it) the worktree's live HEAD is that earlier round's own
+    `ready_sha`, not the true pre-round-1 base — third live occurrence, named at
+    `events/L-executor-0001.jsonl:255`, caught once already at
+    `events/L-builder-0207.jsonl:6`. `c.all_of("build-done")` is already scoped to
+    THIS subject's own event stream (`Ctx.evs`), so a subject re-cut under a new
+    spec id never inherits a killed predecessor's anchor. `build-started`/
+    `spec-written` are unchanged — the MOST RECENT of each, same as before — only
+    the `build-done` step moved from most-recent to earliest.
 
     One further, documented last-resort step, and only then the `die()`: **when the
     worktree path is not a directory**, take `git -C <repo> rev-parse HEAD`, the same
@@ -281,7 +385,10 @@ def verify_base_sha(c):
     the `die()` remains for the case where the repo itself yields nothing."""
     if c.a.base_sha:
         return c.a.base_sha
-    for t in ("build-done", "build-started", "spec-written"):
+    bd = next((e for e in c.all_of("build-done") if e.get("base_sha")), None)
+    if bd:
+        return bd["base_sha"]
+    for t in ("build-started", "spec-written"):
         e = c.last(t)
         if e and e.get("base_sha"):
             return e["base_sha"]
@@ -302,41 +409,71 @@ def verify_base_sha(c):
         f"`git rev-parse HEAD` in {wt} produced one — pin it with --base-sha")
 
 
-def verify_script(c):
-    """The spec's Verification block becomes `$R/content/verify-<spec>.sh`; the packet
-    hands `bash <that>`. A multi-step block cannot ride in the card's verify.command,
-    which §5.10 caps at 300 characters.
+class VerifyLint(Exception):
+    """A Verification block violates one of `verify_script`'s lint rules — the
+    only exception `verify_script` raises."""
 
-    Linted before it is ever written (S23/S31a): `bash -n` on the assembled script;
-    the block must be one `&&`-gated chain (no bare `;`/`||`, no newline-separated
-    statement outside it); an interpreter named by a bare word instead of an
-    absolute path; and `BASE=<sha>` pinned once, with any `$(git merge-base …)` in
-    the block rewritten to `$BASE`. Any violation refuses the packet — `die()`,
-    non-zero exit, on stderr — rather than writing a script that lies about what it
-    checks."""
-    spec = c.spec_file()
-    lines = section(spec.read_text(), "Verification")
-    blk = re.search(r"```[a-z]*\n(.*?)```", "\n".join(lines), re.S)
+
+def verify_script(spec_text):
+    """AC1: pure — no `Ctx`, no `base_sha` argument, no filesystem write, never
+    calls `sys.exit`. `None` when the spec's Verification fenced block is empty
+    or absent (each call site's own "Verify command: NONE" line is unaffected).
+    On a lint violation raises `VerifyLint`, the only exception this function
+    raises. Otherwise returns the assembled `#!/usr/bin/env bash\\nset -euo
+    pipefail\\n` + linted block, any `$(git merge-base …)` call rewritten to the
+    LITERAL `$BASE` — this function never resolves one; `write_verify_script`
+    below pins the real value.
+
+    Linted (S23/S31a): `bash -n` on the assembled script; the block must be one
+    `&&`-gated chain (no bare `;`/`||`, no newline-separated statement outside
+    it, once backslash-continuation lines are joined into their one logical
+    line — R3a/R3b); an interpreter named by a bare word instead of an
+    absolute path."""
+    sec = section(spec_text, "Verification")
+    blk = re.search(r"```[a-z]*\n(.*?)```", sec or "", re.S)
     if not blk or not blk.group(1).strip():
         return None
     block = blk.group(1)
-    segs, bad = _quote_aware_scan(block)
+    joined = _join_continuations(block)
+    segs, bad = _quote_aware_scan(joined)
     bad += [f"a newline-separated statement — `{l}` does not end in `&&`"
-            for l in _newline_violations(block)]
+            for l in _newline_violations(joined)]
     if bad:
-        die(f"{c.a.subject}'s Verification block is not one gated `&&` chain: " + "; ".join(bad[:3]))
+        raise VerifyLint("Verification block is not one gated `&&` chain: " + "; ".join(bad[:3]))
     bad_interp = _interp_violations(segs)
     if bad_interp:
-        die(f"{c.a.subject}'s Verification block names an interpreter by bare word, not an "
-            f"absolute path: " + "; ".join(bad_interp[:3]))
-    base = verify_base_sha(c)
+        raise VerifyLint("Verification block names an interpreter by bare word, not an "
+                          "absolute path: " + "; ".join(bad_interp[:3]))
     block = MERGE_BASE_CALL.sub("$BASE", block)
     # -e, because a multi-command block whose last line passes would otherwise exit 0
     # over an earlier failure, and the done-condition is that exit code.
-    text = f"#!/usr/bin/env bash\nset -euo pipefail\nBASE={base}\n" + block
+    text = f"#!/usr/bin/env bash\nset -euo pipefail\n" + block
     check = subprocess.run(["bash", "-n", "/dev/stdin"], input=text, capture_output=True, text=True)
     if check.returncode != 0:
-        die(f"{c.a.subject}'s assembled verify script fails `bash -n`: {check.stderr.strip()}")
+        raise VerifyLint(f"assembled verify script fails `bash -n`: {check.stderr.strip()}")
+    return text
+
+
+def write_verify_script(c):
+    """The orchestration `verify_script` used to do itself: resolve the spec,
+    resolve the real `base_sha` (`verify_base_sha`), inject `BASE=<sha>` right
+    after `set -euo pipefail`, and write the executable `$R/content/verify-
+    <spec>.sh` — the packet hands `bash <that>`, because a multi-step block
+    cannot ride in the card's verify.command, which §5.10 caps at 300
+    characters. A `VerifyLint` from the pure function still refuses the packet
+    here — `die()`, non-zero exit, on stderr — rather than writing a script
+    that lies about what it checks; `None` (no Verification block) passes
+    through unchanged for every caller's own empty-verify line."""
+    spec = c.spec_file()
+    try:
+        text = verify_script(spec.read_text())
+    except VerifyLint as e:
+        die(f"{c.a.subject}'s {e}")
+    if text is None:
+        return None
+    base = verify_base_sha(c)
+    shebang, set_e, block = text.split("\n", 2)
+    text = f"{shebang}\n{set_e}\nBASE={base}\n{block}"
     p = CONTENT / f"verify-{c.a.subject}.sh"
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(text)
@@ -367,10 +504,10 @@ RATIONALE_HEADING = re.compile(r"^#+\s*(Rationale|Why)\b", re.I)
 
 
 def _sec(text, name, default="(none)"):
-    """`section()` returns a list of lines; the a-14 packets embed prose, so join it
-    back into text once, here, rather than at every call site."""
-    lines = section(text, name)
-    return "\n".join(lines) if lines else default
+    """`section()` returns the section's text (`str | None`) directly now; this
+    wrapper only supplies the default for "no such heading"/"empty body"."""
+    sec = section(text, name)
+    return sec if sec else default
 
 
 def strip_rationale(text):
@@ -597,7 +734,8 @@ def _round_one_slot(c):
     consumes = "; ".join(_unit_field_lines(ub, "Consumes")) or "nothing"
     produces = "; ".join(_unit_field_lines(ub, "Produces")) or "nothing"
     ch_text = ch.read_text()
-    reqs = [l for l in section(ch_text, "Requirements") if any(l.strip().startswith(f"- {r}") for r in delivers)]
+    reqs = [l for l in (section(ch_text, "Requirements") or "").splitlines()
+            if any(l.strip().startswith(f"- {r}") for r in delivers)]
     siblings = [f"- `{n}` produces: {'; '.join(_unit_field_lines(b, 'Produces')) or 'nothing'}"
                 for n, b in sorted(blocks.items()) if n != unit]
     plan_path = pathlib.Path(_doc_for_charter(c, charter_id, "plan-written", "plan"))
@@ -642,7 +780,7 @@ def _round_one_slot(c):
 # ─────────────────────────────── the seven Input lists ──────────────────────────────
 
 def p_spec_auditor(c):
-    spec, v = c.spec_file(), verify_script(c)
+    spec, v = c.spec_file(), write_verify_script(c)
     body = spec.read_text()
     hits = [f"  {n}: {l.strip()}" for n, l in enumerate(body.splitlines(), 1) if PLACEHOLDER.search(l)]
     cited = set((c.last("spec-written") or {}).get("requirement_ids") or [])
@@ -732,13 +870,13 @@ def hint_block(c):
 
 def p_builder(c):
     hint = hint_block(c)          # refused before anything else is assembled
-    spec, v = c.spec_file(), verify_script(c)
+    spec, v = c.spec_file(), write_verify_script(c)
     repo = c.a.repo or str(ROOT / "repos" / c.project())
     base_sha = c.a.base_sha or subprocess.run(
         ["git", "-C", c.worktree(), "rev-parse", "HEAD"],
         capture_output=True, text=True).stdout.strip() or "UNKNOWN — read it back from the worktree"
     ch = c.charter_file()
-    extract = section(ch.read_text(), "Constraints") if ch else []
+    extract = (section(ch.read_text(), "Constraints") or "").splitlines() if ch else []
     rej, fix = c.standing()
     adrs = [e["adr"] for e in c.all_of("adr-filed") if e.get("adr")]
     done = done_condition(c, c.charter_id())
@@ -771,7 +909,7 @@ def p_builder(c):
 
 
 def p_grader(c):
-    spec, card, v = c.spec_file(), c.card_file(), verify_script(c)
+    spec, card, v = c.spec_file(), c.card_file(), write_verify_script(c)
     body = spec.read_text()
     crit = criteria(body)
     rows = [l for l in card.read_text().splitlines() if AC_ROW.match(l)]
@@ -953,7 +1091,8 @@ def strip(c, role):
     if role == "spec-auditor":
         ch = c.charter_file()
         return ([("the charter's text", l) for l in long_lines(ch)] if ch else []) + \
-               [("the spec's Assumptions reasoning", l) for l in section(c.spec_file().read_text(), "Assumptions")
+               [("the spec's Assumptions reasoning", l)
+                for l in (section(c.spec_file().read_text(), "Assumptions") or "").splitlines()
                 if len(l.strip()) > 50] + \
                [("a prior audit finding", e.get("finding")) for e in c.all_of("audit-finding")]
     if role == "spec-writer":
@@ -987,7 +1126,8 @@ def strip(c, role):
             return [("the document's rationale", l)
                     for f in [c.plan_file()] if f and pathlib.Path(f).is_file()
                     for name in ("Rationale", "Why")
-                    for l in section(pathlib.Path(f).read_text(), name) if len(l.strip()) > 50]
+                    for l in (section(pathlib.Path(f).read_text(), name) or "").splitlines()
+                    if len(l.strip()) > 50]
         docs = [(c.cut_file, "the cut's rationale")]
         if c.a.stage == "plan":
             docs.append((lambda: pathlib.Path(_doc_for_charter(c, c.a.subject, "plan-written", "plan")), "the Plan's rationale"))
@@ -998,7 +1138,7 @@ def strip(c, role):
             body = pathlib.Path(f).read_text()
             for name in ("Rationale", "Why"):
                 sec = section(body, name)
-                out += [(label, l) for l in sec if len(l.strip()) > 50] if sec else []
+                out += [(label, l) for l in sec.splitlines() if len(l.strip()) > 50] if sec else []
         return out
     return []
 
