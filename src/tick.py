@@ -12,7 +12,7 @@ a supervised pane that reads the same lane for itself; nothing here launches it.
 """
 import argparse, fcntl, os, pathlib, re, sys, time
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import carry, dispatch, fold, intake, tree_cleanup  # noqa: E402
+import carry, dispatch, fold, intake, notes, tree_cleanup  # noqa: E402
 # `relay` is imported LAZILY, inside `wait()` only — importing tick.py must not
 # force `relay` (and its own `audit` import) into sys.modules for every caller,
 # `pane_end.py` among them, that only wants `up.quiet_point`'s tick.py half.
@@ -237,16 +237,24 @@ def _record():
     except BlockingIOError:
         return None
     ev = fold.read_events()
-    # SD11 (L-spec-0242): `intake.run(ev)` fires off the FIRST read, its own
-    # try/except so a raise never stops the tick's own heartbeat (mirroring
-    # `carry_error` below) — then the ledger is RE-READ before anything else,
-    # so a same-tick `inbound-registered`/`inbound-awaiting` `intake.run` just
-    # appended is what `carry.uncarried`/`fold.fold`/`lane` see.
+    # SD11 (L-spec-0242, extended by L-spec-0244): `intake.run(ev)` fires off
+    # the FIRST read, its own try/except so a raise never stops the tick's own
+    # heartbeat (mirroring `carry_error` below); `notes.run(ev, note_prs)`
+    # follows immediately (no `pr_closeout.run` present yet at this build) and
+    # sits on the SAME `intake_error` field, `; `-joined — then the ledger is
+    # RE-READ before anything else, so a same-tick `inbound-registered`/
+    # `inbound-awaiting`/`inbound-note-listed`/`inbound-note-gone` append is
+    # what `carry.uncarried`/`fold.fold`/`lane` see.
     intake_errors = []
+    note_prs = []
     try:
-        intake.run(ev)
+        note_prs = (intake.run(ev) or {}).get("note_prs") or []
     except Exception as e:
         intake_errors.append(f"run: {e}")
+    try:
+        notes.run(ev, note_prs)
+    except Exception as e:
+        intake_errors.append(f"notes: {e}")
     ev = fold.read_events()
     specs, charters, _, _ = fold.fold(ev)
     reaped = {e.get("subject") for e in ev if e["type"] == "tree-reaped"}
