@@ -12,6 +12,7 @@ TMP = pathlib.Path(tempfile.mkdtemp())
 os.environ["DOIT_ROOT"], os.environ["DOIT_NO_POKE"] = str(TMP), "1"
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 import dispatch, fold, tick, up  # noqa: E402
+import panes as panes_mod  # noqa: E402 — aliased: `panes` is reused below as a local variable name
 
 n = 0
 
@@ -40,6 +41,19 @@ deny = cmd[cmd.index("--disallowedTools") + 1]
 ok(all(f"Skill({s})" in deny for s in tick.RETIRE), "D119: every RETIRE skill denied by name, or the "
                                                     "plugin reintroduces the loop D24 deleted")
 ok(not ({"-p", "--json-schema", "--output-format"} & set(cmd)), f"the pane is interactive, not a -p spawn: {cmd}")
+
+# ── AC1: pane_cmd(name=...) — R12's Planner half of the naming rule ──────────
+ok(up.pane_cmd() == cmd and up.pane_cmd(name=None) == cmd,
+   f"AC1: name=None, the default (or passed explicitly), is byte-identical to today's argv: {cmd}")
+named = up.pane_cmd(name="L-planner-0042")
+ok(named[:4] == ["claude", "-n", "L-planner-0042", "--agent"],
+   f"AC1: given a name, the first four tokens are claude, -n, the name, --agent: {named[:4]}")
+ok(named[3:] == cmd[1:], f"AC1: everything from --agent on is byte-identical whether or not a "
+                         f"name is given: {named[3:]} vs {cmd[1:]}")
+named_p, unnamed_p = up.pane_cmd("L-charter-0009", name="L-planner-0099"), up.pane_cmd("L-charter-0009")
+ok(named_p[:3] == ["claude", "-n", "L-planner-0099"], f"AC1: -n placement holds with a prompt too: {named_p[:3]}")
+ok(named_p[3:] == unnamed_p[1:], f"AC1: the deny list, skip-permissions flag and trailing prompt "
+                                 f"positional are identical whether or not a name is given: {named_p} vs {unnamed_p}")
 
 # ── a missing contract is loud, not a claude that fails five minutes later ───
 dispatch.AGENTS, real_agents = TMP / "agents", dispatch.AGENTS
@@ -96,13 +110,16 @@ ok(len(by["L-charter-0001"]) == 1, "the Planner's own lands")
 
 # ── the contract the launcher spawns is the contract on disk ────────────────
 fm = dispatch.frontmatter("planner")
-ok(fm["name"] == "planner" and fm["model"] == "claude-opus-5", f"frontmatter: {fm}")
+ok(fm["name"] == "planner" and fm["model"] == "claude-opus-5-5", f"frontmatter: {fm}")
 tools = [t.strip() for t in fm["tools"].split(",")]
 ok("Skill" in tools, "the pane keeps §10.5's KEEP skills — the deny list is what removes the rest")
 ok("Agent" in tools, "the Agent tool serves the pane's own `doit dispatch` seat packets (b-26); dispatch stays the only spawn path")
 ok("StructuredOutput" not in tools, "a pane has no schema; its Output is the files and events it writes")
 body = (real_agents / "planner.md").read_text()
-for step in ("cut-written", "plan-written", "doit dispatch plan-auditor", "doit alloc spec",
+# "cut-written" is stale here: 014b204 collapsed the old two-document cut-then-Plan
+# flow into one planning document and removed the separate cut-written event with
+# it — the body no longer names a step that does not exist.
+for step in ("plan-written", "doit dispatch plan-auditor", "doit alloc spec",
              "doit dispatch spec-writer", "Never read a spec you commissioned"):
     ok(step in body, f"the cycle names {step!r} — a step the body omits is a step nothing performs")
 
@@ -268,9 +285,9 @@ ok({str(p) for p in up._repo_dirs(TMP)} == {str(MASTER), str(BUILDING)},
 
 # ── the seams wave 1 owes, and what this loop does while they are missing ────
 up.PANE_NAME = None
-ok(up._seam("pane_name", "PANE_NAME") is None and up._seam("decide_overdue", "DECIDE_OVERDUE") is None,
-   "measured 2026-09-17: neither wave-1 seam is on this root yet — the loop binds them late "
-   "and says so, rather than crashing on a sibling that has not landed")
+ok(up._seam("pane_name", "PANE_NAME") is panes_mod.pane_name
+   and up._seam("decide_overdue", "DECIDE_OVERDUE") is None,
+   "pane_name now resolves to the shipped panes.pane_name; decide_overdue is still unbound")
 ok(up._stem("L-executor-0031.jsonl") == "L-executor-0031" and up._stem("L-executor-0031") == "L-executor-0031",
    "the pane_name fallback is the same ledger.stem dispatch.alloc already returned")
 
@@ -320,6 +337,14 @@ def sup_rows(f=None):
     return [js.loads(l) for p in files for l in p.read_text().splitlines() if l.strip()]
 
 
+def named_ok(calls):
+    """AC2: every pane `_start` actually launches carries `-n <its own ledger
+    stem>` right after `claude`, matching the `DOIT_LEDGER_FILE` its own
+    environment carries — the pane's launch name and the file it appends events
+    under (D90) cannot drift apart."""
+    return all(c["cmd"][1:3] == ["-n", c["env"]["DOIT_LEDGER_FILE"][:-len(".jsonl")]] for c in calls)
+
+
 def sup_boom(*a, **k):
     raise RuntimeError("relay is out")
 
@@ -342,6 +367,8 @@ ok(len(set(stems)) == 2 and all(s.startswith("L-planner-") for s in stems),
    f"each Planner writes as itself and never over the last one's file (D90): {stems}")
 ok("execvpe" not in inspect.getsource(up), "the launcher never replaces itself with the pane — a "
                                            "replaced process cannot notice the pane exit (L-adr-0026)")
+ok(named_ok(calls), f"AC2/R12: every dispatched Planner pane is named its own ledger stem, right "
+                    f"after claude, agreeing with its own DOIT_LEDGER_FILE: {[c['cmd'][:3] for c in calls]}")
 
 # ── AC12 · print-only is what it was: no relay, no child, no event, no L-up ───
 sup_root("ac12")
@@ -352,15 +379,20 @@ cmd1, env1 = up.main(print_only=True)
 cmd2, env2 = up.main(print_only=True)
 ok(env1["DOIT_LEDGER_FILE"] == "L-planner-0001.jsonl" and env2["DOIT_LEDGER_FILE"] == "L-planner-0002.jsonl",
    f"print-only still allocates one fresh pane file per call: {env1['DOIT_LEDGER_FILE']} {env2['DOIT_LEDGER_FILE']}")
-ok(cmd1 == up.pane_cmd() and cmd2 == up.pane_cmd(), f"and builds today's argv, with no prompt on it: {cmd1}")
+ok(cmd1 == up.pane_cmd(name="L-planner-0001") and cmd2 == up.pane_cmd(name="L-planner-0002"),
+   f"AC2: the print-only branch now names the pane it would print, from its own ledger stem: {cmd1}")
+ok(cmd1[1:3] == ["-n", "L-planner-0001"] and cmd2[1:3] == ["-n", "L-planner-0002"],
+   f"AC2: -n immediately after claude, naming each printed pane its own stem: {cmd1[:3]} {cmd2[:3]}")
 ok(env1["PATH"].split(":")[0] == str(up.HERE.parent), "`doit` still resolves inside the pane")
 ok(not seen and not calls, f"print-only calls no relay function and starts nothing: {seen}")
 ok(not list(fold.EVENTS.glob("L-up-*.jsonl")), "print-only allocates no launcher file")
 ok(all(p.stat().st_size == 0 for p in fold.EVENTS.glob("*.jsonl")), "and appends no event anywhere")
 sys.modules["relay"] = None                  # unimportable: see AC7's note below
 cmd3, env3 = up.main(print_only=True)
-ok(cmd3 == up.pane_cmd() and env3["DOIT_LEDGER_FILE"] == "L-planner-0003.jsonl",
-   "with relay unimportable — the state this unit was written against — print-only is unchanged")
+ok(cmd3 == up.pane_cmd(name="L-planner-0003") and env3["DOIT_LEDGER_FILE"] == "L-planner-0003.jsonl",
+   "with relay unimportable — the state this unit was written against — print-only is unchanged, "
+   "and the relay-unimportable case still names the pane (AC2)")
+ok(cmd3[1:3] == ["-n", "L-planner-0003"], "AC2: naming does not depend on relay being importable")
 
 # ── AC3/AC13 · restart once, then escalate ON THE CHARTER, in the launcher's file
 sup_root("ac3")
@@ -489,6 +521,8 @@ ok([e["mode"] for e in rows] == ["serving", "serving"] and rows[0]["subject"] ==
    f"both rows carry mode=serving, the serving subject and the sorted ids: {rows}")
 ok(rows[-1]["type"] == "planner-ended" and rows[-1]["spawn_ids"] == IDS and rows[-1]["reason"] == "exit-0",
    f"and the end row carries the ids the next cycle's already-attempted check reads: {rows[-1]}")
+ok(named_ok(calls), f"AC2: the serving pass names its pane too — it reuses _start's own naming: "
+                    f"{calls[0]['cmd'][:3]}")
 sup_root("ac8-priority")
 sup_relay(plannable=lambda *a, **k: (["L-charter-0005"], []), pending_packets=lambda *a, **k: PEND)
 calls = sup_runs()
@@ -525,7 +559,9 @@ ok("Bash(git commit:*)" in up.executor_deny_list()
    and "L-executor-0099" in up.executor_prompt("L-executor-0099.jsonl", "B"),
    "the Executor launcher's own shape is untouched by the supervisor loop that now sits above it")
 ok("-n" not in up.pane_cmd() and "-n" not in up.pane_cmd("L-charter-0001"),
-   f"and no pane name is added here — that is R12's Planner half on L-charter-0021: {up.pane_cmd('x')}")
+   f"and no pane name is added when `name` is omitted from either call — AC1's name=None default "
+   f"is byte-identical to today's argv; R12 itself is what the two named call sites above rely "
+   f"on: {up.pane_cmd('x')}")
 ok(callable(up.cron_line) and callable(up.install) and up.AGENTS_HOME.name == "claude-agents",
    "cron_line, install and AGENTS_HOME are untouched by this spec")
 # ── end L-spec-0031 fixtures ─────

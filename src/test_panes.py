@@ -138,6 +138,9 @@ ok(a and a["contract"] == "executor" and a["ledger_file"] == "L-executor-0007.js
 ok(a["last_event_age_days"] is None, f"a ledger with no events in hand is None, never 0: {a}")
 ok(b and b["contract"] == "planner" and b["name_source"] == "derived",
    f"a harness-derived name takes its contract from `agent` (measured shape b): {b}")
+ok(a["contract_reason"] is None and b["contract_reason"] is None,
+   f"AC3: a resolved contract carries no reason — the field exists only to explain 'unknown': "
+   f"{a['contract_reason']!r} {b['contract_reason']!r}")
 ok(b["ledger_file"] is None and b["last_event_age_days"] is None,
    f"and no ledger file is fabricated from a name that is not a ledger id: {b}")
 ok(b["status"] == "shell" and a["status"] == "busy",
@@ -158,8 +161,9 @@ ok(not [r for r in rows if r["name"] in (None, "not json", "a")],
    f"a .key, a .md, invalid JSON and a JSON list are not panes: {rows}")
 ok(len(rows) == 3, f"the two real panes and the oddly-named live one, and nothing else: {rows}")
 t = by_name(rows, "../../etc/passwd")
-ok(t and t["ledger_file"] is None and t["contract"] is None,
-   f"a traversal-shaped name yields no ledger file and no guessed contract: {t}")
+ok(t and t["ledger_file"] is None and t["contract"] == "unknown" and t["contract_reason"],
+   f"AC3: a traversal-shaped name yields no ledger file, contract 'unknown', and a stated, "
+   f"non-empty contract_reason — never the bare word None: {t}")
 
 # ── the register never raises, and never invents a directory ────────────────
 ok(panes.live_panes(TMP / "no-such-dir", [], now=NOW) == [],
