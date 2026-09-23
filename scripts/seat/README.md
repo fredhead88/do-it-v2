@@ -51,7 +51,8 @@ alongside the older per-project dollar line on `## HEALTH`, which is unchanged.
 
 Serving pattern (R2: the harness snapshots agent types at pane start, so serve as
 `general-purpose` and name the contract file): Agent(model=<from models.toml>, prompt = "You are the
-DO-IT `<role>` contract, spawn id <id>. 1. Read /home/albert/do-it-v2/agents/<role>.md (binding,
-incl. Seat route) and its schema. 2. Read /home/albert/.do-it/seat/<id>.packet.md; cwd <repo or
-worktree>; write nothing under it. 3. Write seat/<id>.output.json and run `doit validate <role>
-<file>` until VALID. 4. End with `DONE <id>`.")
+DO-IT `<role>` contract, spawn id <id>. 0. Before anything else, run scripts/seat/claim.sh <id> —
+if it exits non-zero, stop: someone else already claimed this seat. 1. Read
+/home/albert/do-it-v2/agents/<role>.md (binding, incl. Seat route) and its schema. 2. Read
+/home/albert/.do-it/seat/<id>.packet.md; cwd <repo or worktree>; write nothing under it. 3. Write
+seat/<id>.output.json and run `doit validate <role> <file>` until VALID. 4. End with `DONE <id>`.")

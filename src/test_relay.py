@@ -238,6 +238,85 @@ with open(d / "events" / "L-builder-0046.jsonl", "a") as fh:
 changed, mark3 = relay.ledger_changed(d, mark)
 ok(changed is True and mark3 != mark, "one appended line moves the watermark")
 
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-0189 · unserved-seat-fails-loudly (L-charter-0028) — R6
+# ══════════════════════════════════════════════════════════════════════════════
+os.environ.pop("DOIT_SEAT_CLAIM_SEC", None)      # the default (300s) for this whole block
+
+
+def sev(d, sid, type_, subject, ts, **kw):
+    """One event for `relay.unserved`'s fixtures — an explicit `ts`, since these tests
+    pin exact boundaries (elapsed=299s/301s, `since_h`'s 2h/30h) the auto-incrementing
+    `ev()` helper (one-minute-per-call resolution) cannot express."""
+    p = d / "events" / f"{sid}.jsonl"
+    with open(p, "a") as fh:
+        fh.write(json.dumps({"v": 1, "ts": ts, "type": type_, "subject": subject,
+                             "project": PROJECT, "spawn": sid, **kw}, sort_keys=True) + "\n")
+
+
+def iso(delta_seconds):
+    return (fold.NOW - datetime.timedelta(seconds=delta_seconds)).isoformat(timespec="seconds")
+
+
+# ── AC9 · a claimed seat is never listed, whatever the state of its claim ──────
+d = scene("unserved-claimed")
+sev(d, "L-builder-0100", "build-started", "L-spec-0040", iso(1000), backend="seat")
+(d / "seat" / "L-builder-0100.claimed").write_text("")
+ok(relay.unserved(read(), d) == [], "a served seat is never listed, however long it has been running")
+
+# ── AC8 (relay half) · role inferred as "builder" for a pending build-started row ──
+# `build-started` carries no `role` field of its own (main()'s builder branch never
+# writes one) — relay.unserved must infer the literal "builder" rather than reading
+# a field that is not there. Distinct from AC9's claimed-build-started fixture: this
+# one has NO `.claimed` file and NO terminal event, so it must surface as `pending`.
+d = scene("unserved-builder-pending")
+sev(d, "L-builder-0101", "build-started", "L-spec-0055", iso(301), backend="seat")
+rows = relay.unserved(read(), d)
+ok(len(rows) == 1 and rows[0]["role"] == "builder" and rows[0]["status"] == "pending"
+   and rows[0]["spawn"] == "L-builder-0101" and rows[0]["subject"] == "L-spec-0055",
+   f"a pending build-started row must infer role=='builder': {rows}")
+
+# ── AC10 · failed-unserved, and the since_h decay window ───────────────────────
+d = scene("unserved-failed")
+sev(d, "L-research-0100", "spawn-started", "L-spec-0041", iso(3 * 3600), backend="seat", role="research")
+sev(d, "L-research-0100", "spawn-failed", "L-spec-0041", iso(1 * 3600), reason="unserved")
+rows = relay.unserved(read(), d, since_h=24)
+ok(len(rows) == 1 and rows[0]["status"] == "failed-unserved" and rows[0]["role"] == "research"
+   and rows[0]["spawn"] == "L-research-0100", rows)
+
+d = scene("unserved-decayed")
+sev(d, "L-research-0101", "spawn-started", "L-spec-0042", iso(33 * 3600), backend="seat", role="research")
+sev(d, "L-research-0101", "spawn-failed", "L-spec-0042", iso(30 * 3600), reason="unserved")
+ok(relay.unserved(read(), d, since_h=24) == [], "a failure 30h old at since_h=24 has decayed off the board")
+
+# ── AC11 · exclusions: not-seat, resolved, aged-out, and an unrelated reason ───
+d = scene("unserved-exclusions")
+sev(d, "L-research-0102", "spawn-started", "L-spec-0043", iso(1000), backend="claude-p", role="research")
+sev(d, "L-research-0103", "spawn-started", "L-spec-0044", iso(1000), backend="seat", role="research")
+sev(d, "L-research-0103", "spawn-done", "L-spec-0044", iso(10))
+sev(d, "L-research-0104", "spawn-started", "L-spec-0045", iso(1000), backend="seat", role="research")
+sev(d, "L-research-0104", "spawn-stale", "L-spec-0045", iso(10))
+sev(d, "L-research-0105", "spawn-started", "L-spec-0046", iso(1000), backend="seat", role="research")
+sev(d, "L-research-0105", "spawn-failed", "L-spec-0046", iso(10), reason="something-else")
+ok(relay.unserved(read(), d) == [],
+   "(a) not seat-route, (b) served-then-done, (c) aged out by tick's own spawn-stale, "
+   "(d) a spawn-failed for an unrelated reason — all four absent")
+
+# ── AC12 · the 300s default boundary, behaviourally ─────────────────────────────
+d = scene("unserved-boundary-over")
+sev(d, "L-research-0106", "spawn-started", "L-spec-0047", iso(301), backend="seat", role="research")
+rows = relay.unserved(read(), d)
+ok(len(rows) == 1 and rows[0]["status"] == "pending" and rows[0]["spawn"] == "L-research-0106", rows)
+
+d = scene("unserved-boundary-under")
+sev(d, "L-research-0107", "spawn-started", "L-spec-0048", iso(299), backend="seat", role="research")
+ok(relay.unserved(read(), d) == [], "299s has not elapsed the default 300s claim window")
+
+# the source-text supplement: the SAME default (300) is read independently in dispatch.py
+_dispatch_src = (pathlib.Path(__file__).parent / "dispatch.py").read_text()
+ok('os.environ.get("DOIT_SEAT_CLAIM_SEC", 300)' in _dispatch_src,
+   "src/dispatch.py must carry the same DOIT_SEAT_CLAIM_SEC default reader (300) relay.py does")
+
 # ── AC7: the two EMITS rows, in the file and through the fold ──
 src = (pathlib.Path(__file__).parent / "fold.py").read_text()
 literal = src[src.index("EMITS = {"):src.index("\nDECLARES = {")]
