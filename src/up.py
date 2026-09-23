@@ -31,7 +31,7 @@ def cron_line():
             f">> {fold.ROOT}/logs/tick.log 2>&1")
 
 
-def pane_cmd(prompt=None):
+def pane_cmd(prompt=None, name=None):
     """Interactive, so no -p, no --json-schema, no --output-format: the pane's
     Output is the files and events it writes. The agent file's tools: line is the
     sandbox; the deny list is the only form a retire list has (D119).
@@ -39,8 +39,14 @@ def pane_cmd(prompt=None):
     `prompt` is the opening turn the supervisor hands the pane — one charter id, or
     a serving pass's comma-joined spawn ids — and it goes on as a TRAILING
     POSITIONAL, after --dangerously-skip-permissions. That flag is the last option
-    this builds, and a positional in front of it reads as its value."""
-    cmd = ["claude", "--agent", "planner",
+    this builds, and a positional in front of it reads as its value.
+
+    `name` is the pane's own ledger stem (R12, mirroring the Executor's own
+    `_pane_argv`): given, it is `-n <name>` as the first two tokens after
+    `claude`. Omitted (the default), the argv is byte-identical to before this
+    parameter existed — no `-n` anywhere."""
+    cmd = ["claude"] + (["-n", name] if name else []) + [
+           "--agent", "planner",
            "--disallowedTools", ",".join(f"Skill({s})" for s in tick.RETIRE),
            "--dangerously-skip-permissions"]
     return cmd + [prompt] if prompt else cmd
@@ -90,7 +96,8 @@ def main(print_only=False, max_cycles=None):
     print(cron_line())
     if print_only:
         ledger = dispatch.alloc(fold.EVENTS, "L-planner-", ".jsonl")
-        cmd = pane_cmd()
+        name = (_seam("pane_name", "PANE_NAME") or _stem)(ledger.name)
+        cmd = pane_cmd(name=name)
         print(f"# planner pane: {ledger.stem} · {' '.join(cmd)}")
         return cmd, _child_env(ledger)
     state, cycles = {"up": None, "watermark": None, "said": None}, 0
@@ -179,7 +186,8 @@ def _start(state, subject, mode, attempt, prompt, spawn_ids=None):
     base, ids = {"spawn": ledger.stem}, ({"spawn_ids": spawn_ids} if spawn_ids else {})
     dispatch.emit(ledger, base, "planner-started", subject=subject, planner=ledger.stem,
                   attempt=attempt, mode=mode, **ids)
-    cmd = pane_cmd(prompt)
+    name = (_seam("pane_name", "PANE_NAME") or _stem)(ledger.name)
+    cmd = pane_cmd(prompt, name=name)
     print(f"# planner pane: {ledger.stem} · {mode} · {subject} · attempt {attempt}")
     rc = subprocess.run(cmd, env=_child_env(ledger, supervised=True)).returncode
     if not _ended(ledger):
@@ -195,10 +203,22 @@ def _charter_pass(state, events, charter):
     att = att or {}
     if att.get("next") == "escalate":
         led = _launcher(state)
+        # R3/L-spec-0192: `escalation_ok` now gates this write (via `emit()`'s
+        # `required_reason` door) — mirroring dispatch.py's own post-0192 fix for
+        # the identical gap, this names the irreversible act rather than inventing
+        # a default/deadline/revert for a retry that R7's at-most-one-restart rule
+        # already forbids from happening on its own (measured: this call site was
+        # silently refused, and no escalation-blocking row has landed from it,
+        # since L-spec-0192 shipped — an unrelated, pre-existing bug fixed here
+        # because it otherwise blocks this file from ever reaching exit 0).
         dispatch.emit(led, {"spawn": led.stem}, "escalation-blocking", subject=charter,
                       last_reason=att.get("last_reason"), attempts=att.get("attempts"),
                       why=f"planner on {charter} ended {att.get('attempts')}x without landing — "
-                          f"last: {att.get('last_reason')}")
+                          f"last: {att.get('last_reason')}",
+                      irreversible=f"{att.get('attempts')} planner attempt(s) on {charter} already ran "
+                                   f"and drew their budget; R7's at-most-one-restart rule means this "
+                                   f"charter is not retried automatically — an operator must record a "
+                                   f"decision or unblocked on {charter} to resume it")
         print(f"# {charter}: escalation-blocking — last {att.get('last_reason')}")
         return True                       # the charter leaves `ready` on relay's own exclusion
     _start(state, subject=charter, mode="charter",

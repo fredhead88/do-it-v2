@@ -166,13 +166,27 @@ def live_panes(sessions_dir=None, events=(), now=None):
         name = meta.get("name")
         role = ledger_role(name)
         ledger_file = f"{name}.jsonl" if role else None
+        contract = meta.get("agent") or role
+        contract_reason = None
+        if contract is None:
+            # R5: the cell that used to be the bare value `None` — which, read
+            # un-wrapped by fold.py's `.get('contract','?')`, rendered as the
+            # literal word "None" and misled an operator into reading "no
+            # contract" as "no measurement." `"unknown"` plus a stated reason
+            # is never mistaken for either.
+            contract = "unknown"
+            contract_reason = (f"name {name!r} carries no agent field and resolves to no known "
+                                f"ledger role — nothing here names a contract")
         out.append({
             "name": name,
             # Verbatim from the file: whether the operator passed `-n` is the
             # difference between a pane that can be addressed and one that
             # cannot, and it is not this module's to decide.
             "name_source": meta.get("nameSource"),
-            "contract": meta.get("agent") or role,
+            "contract": contract,
+            # None when `contract` resolved; a stated reason when it fell back
+            # to "unknown".
+            "contract_reason": contract_reason,
             "cwd": meta.get("cwd"),
             # The harness's own field, passed through. `shell` is real and
             # measured; coercing status into busy/idle would erase it.
