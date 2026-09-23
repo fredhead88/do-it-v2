@@ -15,7 +15,9 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import dispatch, fold, tree_cleanup  # noqa: E402
 
 # Waiting for the Executor's next durable action. `building` is in flight, not waiting.
-ACTIONABLE = {"written", "graded", "reviewing", "shipped"}
+# R7/L-spec-0192: `shipped-owed-due` joins — a due criterion is the Executor's own
+# action to take (owed_met/a re-grade), not merely a state to observe.
+ACTIONABLE = {"written", "graded", "reviewing", "shipped", "shipped-owed-due"}
 # §10.5's RETIRE list, verbatim — every pane launcher denies it by name (D119).
 # NOT dead with the spawn path: fold.caps(), think.pane_cmd() and up.pane_cmd() read these.
 RETIRE = ("subagent-driven-development", "executing-plans", "writing-plans", "requesting-code-review",

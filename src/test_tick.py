@@ -251,4 +251,36 @@ held = open(TMP / "tick.lock", "w")
 fcntl.flock(held, fcntl.LOCK_EX)
 before = len(ticks())
 assert tick.main() == 0 and len(ticks()) == before, "flock: a second tick is dropped, not queued"
-print("tick: 39 checks pass")
+held.close()
+
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-0192 · fold-states-owed-due-and-killed (L-charter-0028) — R7
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── AC6/AC7 · shipped-owed-due is ACTIONABLE, but an open escalation still
+# excludes its subject from the lane exactly like any other actionable state.
+assert "shipped-owed-due" in tick.ACTIONABLE and "shipped-owed-due" not in tick.SPEC_DONE, \
+    "AC7: shipped-owed-due is on the lane, and is never counted as done for a charter's L2 conjunct"
+DUE_S = "L-spec-9192"
+old_wake = (fold.NOW - datetime.timedelta(days=7)).isoformat(timespec="seconds")
+write("L-spec-writer-9192.jsonl",
+      {"type": "spec-written", "subject": DUE_S},
+      {"type": "owed-ac", "subject": DUE_S, "criterion": "AC1", "wake_at": old_wake})
+write("L-builder-9192.jsonl",
+      {"type": "build-started", "subject": DUE_S}, {"type": "build-done", "subject": DUE_S})
+write("L-executor-9192.jsonl",
+      {"type": "shipped", "subject": DUE_S},
+      {"type": "escalation-blocking", "subject": DUE_S, "why": "footprint overlap",
+       "default": "wait", "deadline": "2099-01-01T00:00:00Z", "revert": "n/a",
+       "spawn": "L-executor-9192-esc"})
+ev, specs, charters = folded()
+assert specs[DUE_S]["state"] == "shipped-owed-due", specs[DUE_S]["state"]
+busy = tick.in_flight(ev)
+assert DUE_S in busy, "the open escalation must mark the subject busy"
+lanes = tick.lane(specs, charters, busy, events=ev)
+assert not any(l.startswith(DUE_S) for l in lanes), \
+    "AC6: an open escalation excludes a shipped-owed-due subject exactly as any other ACTIONABLE state"
+for f in ("L-spec-writer-9192.jsonl", "L-builder-9192.jsonl", "L-executor-9192.jsonl"):
+    (EV / f).unlink()
+
+print("tick: 41 checks pass")

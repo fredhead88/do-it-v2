@@ -86,13 +86,45 @@ def alloc(d, prefix, suffix):
 
 
 def emit(dst, base, type_, /, **kv):
-    """Never trust the write — re-read (§9.2 rule 4). Never an actor field (D90)."""
+    """Never trust the write — re-read (§9.2 rule 4). Never an actor field (D90).
+    R3/L-spec-0192: gated by `fold.required_reason` — the required-fields door
+    ONLY (an actor/type mismatch is never refused here, only recorded-and-
+    ignored at fold time, ADR-0028-3). Returns `None` once the line has landed;
+    else the refusal, and nothing is written."""
     e = {**kv, **base, "v": 1, "ts": now(), "type": type_}
     e.pop("actor", None)
+    import fold                                  # lazy: see fold.py's own alloc() note
+    reason = fold.required_reason(e)
+    if reason:
+        return reason
     line = json.dumps(e, sort_keys=True, default=str)
     with open(dst, "a") as fh:
         fh.write(line + "\n")
     assert line in dst.read_text().splitlines(), f"append to {dst} did not land"
+    return None
+
+
+def open_spec_writer_spawn(all_ev, subject):
+    """R3/L-spec-0192: whether SUBJECT carries a spec-writer `spawn-started` with
+    no matching terminal event — `tick.in_flight`'s own terminal tuple
+    (spawn-done/spawn-failed/spawn-stale) and its own aging rule (busy within
+    twice the role's cap, dispatchable once older, whether or not the start
+    named a spawn id), scoped here to one subject and one role so `dispatch.
+    main()` and the tick can never disagree about what counts as open."""
+    ended = {e.get("spawn") for e in all_ev if e["type"] in ("spawn-done", "spawn-failed", "spawn-stale")}
+    cap = ROLES["spec-writer"][1]
+    for e in all_ev:
+        if (e.get("subject") != subject or e["type"] != "spawn-started"
+                or e.get("role") != "spec-writer"):
+            continue
+        sid = e.get("spawn")
+        if sid and sid in ended:
+            continue
+        import fold
+        if (fold.NOW - fold.ts(e.get("ts"))).total_seconds() / 60 > 2 * cap:
+            continue                              # aged out — dispatchable, mirrors tick.in_flight
+        return True
+    return False
 
 
 # ★ `probe` runs with its cwd OUTSIDE every repo on purpose (§4.6·10, §9.5): its
@@ -477,6 +509,16 @@ def main(a):
     # the one failure that IS retried — after the operator logs in.
     sys.path.insert(0, str(HERE))
     import fold
+    # R3/L-spec-0192: a builder dispatch against a killed subject, or one still
+    # carrying an open spec-writer spawn, is refused HERE — before any
+    # subprocess or spend, and before the `build-started` event itself
+    # (cost_path). Scoped to role="builder" only.
+    if builder:
+        all_ev = fold.read_events()
+        if fold.spec_state([e for e in all_ev if e.get("subject") == a.subject], set()) == "killed":
+            fail(f"{a.subject} is killed — refusing role=builder before any spend")
+        if open_spec_writer_spawn(all_ev, a.subject):
+            fail(f"{a.subject} carries an open spec-writer spawn — refusing role=builder before any spend")
     prior = next((e for e in fold.read_events() if e.get("type") == "spawn-failed"
                   and e.get("packet_sha256") == meta["packet_sha256"]
                   and e.get("contract_sha256") == meta["contract_sha256"]
@@ -578,8 +620,15 @@ def main(a):
                 denied=[d.get("tool_name") for d in (res.get("permission_denials") or [])][:10])
     if res.get("is_error"):
         if res.get("terminal_reason") == "api_error" or res.get("api_error_status"):
+            # R3/L-spec-0192: `escalation_ok` now gates this write (via `emit()`'s
+            # `required_reason` door) — the spawn already ran and drew its budget
+            # and is NOT retried automatically (D120), so this names the
+            # irreversible act rather than inventing a default/deadline/revert
+            # for a retry that will never happen on its own.
             emit(ledger, base, "escalation-blocking",
-                 why=f"seat unreachable ({res.get('api_error_status')}) — /login as the operator; {spawn} is not retried")
+                 why=f"seat unreachable ({res.get('api_error_status')}) — /login as the operator; {spawn} is not retried",
+                 irreversible=f"{spawn} already ran and drew its budget; it will not be retried "
+                              "automatically — the operator must /login and re-dispatch")
             fail(f"api_error {res.get('api_error_status')}: {str(res.get('result'))[:300]}")
         fail(f"is_error: {str(res.get('result'))[:300]}")
     out = res.get("structured_output")

@@ -29,7 +29,15 @@ PROJECT = os.environ.get("DOIT_PROJECT")          # §9.1/D93: a filter, not a s
 
 # Who may emit what. A type absent here is open to any actor (§2.5).
 EMITS = {"verdict": {"grader"}, "review": {"reviewer"}, "shipped": {"executor"},
-         "charter-retracted": {"operator"}, "restore-verified": {"drill"},
+         "charter-retracted": {"operator"},
+         # R10/L-spec-0192: `doit restore` may run as the operator or the executor;
+         # `"drill"` (the automated proof run) stays exactly as it was.
+         "restore-verified": {"drill", "operator", "executor"},
+         # R10/L-spec-0192: added now so no later unit's append is dropped, though
+         # the code emitting each is out of this footprint.
+         "inbound-registered": {"operator", "thinker"},
+         "carry-failed": {"executor", "operator"},
+         "backup-failed": {"backup"},
          "correction": {"operator"},                       # D111
          "spec-closed": {"operator"},                       # D112
          # ★ Asymmetric on purpose. REJECTING is the safe direction — a spurious
@@ -112,7 +120,10 @@ EMITS = {"verdict": {"grader"}, "review": {"reviewer"}, "shipped": {"executor"},
          # R4: carry-over is the OPERATOR's own command. Not the Thinker (which
          # would be re-deciding what a v4 record already decided) and not the
          # Planner (which would be cutting a spec that is already cut).
-         "spec-carried": {"operator"},
+         # R10/L-spec-0192: the Executor's own `doit carry` also writes this event
+         # (carry.py already runs it through fold.append()); the operator's grant
+         # is unchanged.
+         "spec-carried": {"operator", "executor"},
          # R8: a conflict is a builder RE-DISPATCH, and the Executor is the only
          # seat that dispatches. A builder recording its own rework attempt would
          # be counting its own collisions.
@@ -151,6 +162,12 @@ DECLARES = {
 for _role, _terms in DECLARES.items():
     for _term in _terms.split():
         EMITS.setdefault(_term, set()).add(_role)
+# R10/L-spec-0192: the Executor may RE-DATE an already-declared owed criterion
+# (move its `wake_at`), never declare a new one — `fold()` below enforces the
+# narrower grant at fold time (subject-scoped, not `check_append`'s business);
+# `EMITS` membership alone only gets an executor-authored `owed-ac` as far as
+# that second gate.
+EMITS["owed-ac"].add("executor")
 # A correction may override anything but these: D90 takes the actor from the
 # FILENAME, and a correction that could rewrite it reopens every check below.
 UNCORRECTABLE = ("actor", "_src")
@@ -358,6 +375,58 @@ def escalation_ok(e):
     rule: "wait indefinitely is a wedge, not a default" cannot apply to a deploy
     that has already gone out."""
     return all(_has(e, k) for k in ESCALATION_TRIPLE) or _has(e, "irreversible")
+
+
+# R3/L-spec-0192 — the required-fields door: exactly these three types carry a
+# check beyond bare `EMITS` membership; every other type is membership-only.
+# `escalation-blocking`'s own shape is `escalation_ok` (an OR, not a field list)
+# and stays special-cased in `required_reason` below; these two are a plain
+# field list.
+REQUIRED = {"owed-ac": ("criterion",), "spec-carried": ("source", "tier", "audited_at")}
+
+
+def required_reason(e):
+    """Field-only, actor-blind: `None` when `e` carries what its type requires (or
+    requires nothing — every type outside `REQUIRED` and `escalation-blocking`).
+    Never re-reads the ledger, never looks at actor — the actor question is
+    `check_append`'s alone. This is the door `append()` and `dispatch.emit()`
+    both apply: a missing required field is refused, an actor/type mismatch is
+    not (ADR-0028-3) — that stays recorded-and-ignored at fold time."""
+    t = e.get("type")
+    if t == "escalation-blocking":
+        if escalation_ok(e):
+            return None
+        return (f"escalation-blocking {e.get('subject', '?')} carries neither "
+                "default= AND deadline= AND revert= (a reversible escalation) nor "
+                "irreversible=<the act that forbids a default> (an irreversible one)")
+    fields = REQUIRED.get(t)
+    if fields:
+        missing = [k for k in fields if not _has(e, k)]
+        if missing:
+            return (f"{t} {e.get('subject', '?')} missing required field(s): "
+                    + ", ".join(f"{k}=" for k in missing))
+    return None
+
+
+def check_append(event, actor):
+    """The one predicate deciding whether a write survives ANY door that calls it
+    with the real actor: `required_reason` above, plus `EMITS` actor membership.
+    Pure — one event dict, one actor string in, a reason string or `None` out;
+    never re-reads the ledger, no side effect (load-bearing: AC16/AC17/AC21 call
+    this, and `spec_state`, directly). `append()`/`emit()` apply `required_reason`
+    alone — an actor/type mismatch is never refused at either door, only
+    recorded-and-ignored at fold time; a caller needing the full any-reason
+    refusal (`carry-both-ledgers`, the Executor's `owed-ac` re-date, `doit
+    restore`) calls THIS directly with the real actor and refuses on any
+    non-`None` return (ADR-0028-3)."""
+    reason = required_reason(event)
+    if reason:
+        return reason
+    allowed = EMITS.get(event.get("type"))
+    if allowed is not None and actor not in allowed:
+        return (f"actor mismatch: {actor!r} may not emit {event.get('type')!r} "
+                f"(allowed: {sorted(allowed)})")
+    return None
 
 
 def malformed_escalations(events):
@@ -887,9 +956,15 @@ def verdict_confirmed(v, owed_criteria):
 
 
 def spec_state(evs, retracted):
-    """accepted / shipped-owed-evidence / dropped / closed-shipped / closed-unbuilt /
-    void, or the pipeline state it is stuck in."""
+    """killed / accepted / shipped-owed-due / shipped-owed-evidence / dropped /
+    closed-shipped / closed-unbuilt / void, or the pipeline state it is stuck in."""
     types = {e["type"] for e in evs}
+    # R3/L-spec-0192: `killed` is TERMINAL the instant a `spec-killed` event
+    # exists — checked first and unconditionally, so it survives any later stage
+    # event on the same subject (AC9): a spec-writer that kills a spec never
+    # un-kills it by writing anything more.
+    if "spec-killed" in types:
+        return "killed"
     # S32/S33 (a-6): an allocation whose spec-writer spawn failed and never wrote a
     # spec is not stuck in a pipeline state — it is VOID. The actor is the filename
     # (D90), so "its spec-writer" is read off the events' own actor, never a body
@@ -907,14 +982,44 @@ def spec_state(evs, retracted):
         # evidence — discharges one without a re-grade spawn. `accepted` needs
         # every owed criterion met, not merely a confirmed verdict; short of that,
         # an UNMET owed criterion with a future `wake_at` is `shipped-owed-evidence`
-        # exactly as before.
+        # (D25), and one whose `wake_at` has already passed is `shipped-owed-due`
+        # (R7/L-spec-0192) — distinct from, and taking priority over, evidence when
+        # a subject carries both.
+        #
+        # `verdict_owed` (spec-writer/spec-auditor authored ONLY) is what
+        # `verdict_confirmed` below widens over — an executor's re-date moves
+        # WHEN a criterion is due, never WHICH criteria count as owed (R10,
+        # AC21). `owed_criteria` (any authorized actor) is what decides
+        # unmet/due/evidence: it can never admit a criterion `verdict_owed`
+        # would not also admit, because `fold()`'s own subject-scoped
+        # classification only keeps an executor-authored `owed-ac` when a
+        # matching spec-writer/spec-auditor declaration already sits in `evs`.
+        verdict_owed = {e.get("criterion") for e in evs if e["type"] == "owed-ac" and e.get("criterion")
+                        and e.get("actor") in ("spec-writer", "spec-auditor")}
         owed_criteria = {e.get("criterion") for e in evs if e["type"] == "owed-ac" and e.get("criterion")}
         met_criteria = {e.get("criterion") for e in evs if e["type"] == "owed-met" and e.get("criterion")}
-        graded = any(e["type"] == "verdict" and verdict_confirmed(e, owed_criteria) for e in evs)
+        graded = any(e["type"] == "verdict" and verdict_confirmed(e, verdict_owed) for e in evs)
         if graded and "review" in types and owed_criteria <= met_criteria:
             return "accepted"                                        # §2.5 accepted()
-        if any(e["type"] == "owed-ac" and e.get("criterion") not in met_criteria
-               and ts(e.get("wake_at")) > NOW for e in evs):
+        # Due takes priority over evidence (R7). A criterion-bearing owed-ac is
+        # grouped by criterion, and the LATEST one (`evs` is ts-sorted) governs
+        # its due-ness — the re-date rule (R10): an executor's later event
+        # overrides an earlier spec-writer/auditor one for the SAME criterion.
+        # A criterion-less owed-ac (the pre-schema shape, D25) has no grouping
+        # key and is read per event, exactly as before this unit.
+        last_wake, loose = {}, []
+        for e in evs:
+            if e["type"] != "owed-ac":
+                continue
+            c = e.get("criterion")
+            (last_wake.__setitem__(c, e.get("wake_at")) if c else loose.append(e.get("wake_at")))
+
+        def dated(w):
+            return w is not None and str(w).strip() != ""
+        wakes_unmet = [w for c, w in last_wake.items() if c not in met_criteria] + loose
+        if any(dated(w) and ts(w) <= NOW for w in wakes_unmet):
+            return "shipped-owed-due"                                # R7
+        if any(dated(w) and ts(w) > NOW for w in wakes_unmet):
             return "shipped-owed-evidence"                           # D25
     if "spec-closed" in types:
         # D112 + S33: the operator's only close instrument used to read
@@ -940,9 +1045,29 @@ def spec_state(evs, retracted):
 def fold(events):
     by_subject, ignored = collections.defaultdict(list), []
     for e in events:
-        allowed = EMITS.get(e.get("type"))
-        (ignored if allowed and e["actor"] not in allowed else
-         by_subject[e.get("subject", "")]).append(e)
+        etype, subj = e.get("type"), e.get("subject", "")
+        allowed = EMITS.get(etype)
+        if allowed is not None and e["actor"] not in allowed:
+            ignored.append(e)
+            continue
+        # R10/L-spec-0192: `EMITS["owed-ac"]` now admits the executor, but ONLY to
+        # RE-DATE — never to declare. This is `fold()`'s own subject-scoped
+        # classification, not `check_append`'s (which sees one event and never
+        # the rest of the stream): an executor-authored `owed-ac` survives here
+        # ONLY when the subject's stream already carries an EARLIER (by ts — and
+        # `events` arrives here already ts-sorted, so "earlier" is "already in
+        # `by_subject[subj]`") spec-writer/spec-auditor `owed-ac` for the
+        # IDENTICAL criterion. Any other criterion is ignored exactly like any
+        # other unauthorized emit.
+        if etype == "owed-ac" and e["actor"] not in ("spec-writer", "spec-auditor"):
+            crit = e.get("criterion")
+            prior = bool(crit) and any(
+                x["type"] == "owed-ac" and x.get("criterion") == crit
+                and x["actor"] in ("spec-writer", "spec-auditor") for x in by_subject[subj])
+            if not prior:
+                ignored.append(e)
+                continue
+        by_subject[subj].append(e)
 
     retracted = {s for s, evs in by_subject.items()
                  if any(e["type"] == "charter-retracted" for e in evs)}
@@ -986,6 +1111,36 @@ def fold(events):
         c["briefs"] = len(open_briefs(c["evs"]))
         c["unbuilt"] = sum(1 for s in mine if s["state"] == "closed-unbuilt")
     return specs, charters, ignored, by_subject
+
+
+def owed_due(specs):
+    """R7/L-spec-0192: one `{spec, criterion, due_at, days_overdue, src}` row per
+    due-and-unmet owed criterion, across every spec in `specs` (`fold()`'s own
+    dict) — the data the board's own `shipped-owed-due` rendering and, later, a
+    lane item of its own (agents/executor.md — a later unit's Writes grant, not
+    this one's) both read. Mirrors `spec_state`'s own re-date-governs rule: the
+    LATEST `owed-ac` event per criterion decides due-ness, whichever authorized
+    actor wrote it. A not-yet-due or already-met criterion is not a row."""
+    out = []
+    for sid, s in specs.items():
+        evs = s["evs"]
+        owed_criteria = {e.get("criterion") for e in evs if e["type"] == "owed-ac" and e.get("criterion")}
+        met_criteria = {e.get("criterion") for e in evs if e["type"] == "owed-met" and e.get("criterion")}
+        last_wake, last_src = {}, {}
+        for e in evs:
+            if e["type"] == "owed-ac" and e.get("criterion"):
+                last_wake[e["criterion"]] = e.get("wake_at")
+                last_src[e["criterion"]] = e.get("_src")
+        for c in owed_criteria - met_criteria:
+            w = last_wake.get(c)
+            if w is None or not str(w).strip():
+                continue
+            due_at = ts(w)
+            if due_at <= NOW:
+                out.append({"spec": sid, "criterion": c, "due_at": w,
+                            "days_overdue": (NOW - due_at).total_seconds() / 86400,
+                            "src": last_src.get(c)})
+    return out
 
 
 def wedged(spec, dwell=None):
@@ -1065,10 +1220,13 @@ def render(events, specs, charters, ignored, by_subject):
              f"{age_days(e):.1f}d" for e in in_flight_deploys(events)])
     # A standing rejection is the difference between "waiting to be looked at" and
     # "already looked at and failed". Same section, but the row may not read the same.
+    # R7/L-spec-0192: `shipped-owed-due` widens this pick by one token, pending
+    # the sibling unit's own section (ADR-0028-6) — a due criterion is at least
+    # as much "awaiting verification" as a plain `shipped` spec is.
     block("AWAITING VERIFICATION",
           [f"{s['id']} · {s['state']} · {s['age']:.1f}d"
            + (f"  ⚠ {s['rejects']} REJECTED, needs rework" if s["rejects"] else "") + flag(s)
-           for s in pick("graded", "reviewing", "shipped")])
+           for s in pick("graded", "reviewing", "shipped", "shipped-owed-due")])
     def owed_line(s):
         wake = str(next((e.get("wake_at") for e in s["evs"]
                          if e["type"] == "owed-ac" and e.get("wake_at")), "?"))
@@ -1279,22 +1437,14 @@ def append(argv):
         else:
             e[k] = v
     # ★ R3, and it is CONTENT BEFORE EVENT (§9.2 rule 3) applied to the event's own
-    # fields: an escalation-blocking with no default, no deadline and no revert is
-    # a wedge dressed as a record — nothing fires, nothing can be undone, and the
-    # lane waits indefinitely, which §4.9 says is not a default. Refused at the
-    # door, with the missing requirement NAMED: the Executor's and Planner's
-    # documented commands are one field short today (their own contracts are
-    # sibling footprints), so the operator must see WHY rather than a bare
-    # non-zero exit. Nothing is written — the raise precedes the open().
-    # Binds `escalation-blocking` ONLY: a `question`'s mandatory four are
-    # asks/blocks/default/deadline and its revert belongs to the answering
-    # decision, so append() gains no new rule for it.
-    if e["type"] == "escalation-blocking" and not escalation_ok(e):
-        raise SystemExit(
-            f"refused: escalation-blocking {e['subject']} carries neither "
-            "default= AND deadline= AND revert= (a reversible escalation) nor "
-            "irreversible=<the act that forbids a default> (an irreversible one). "
-            "Nothing was written. (R3)")
+    # fields: `required_reason` is the one required-fields door (`escalation-
+    # blocking`, `owed-ac`, `spec-carried` — L-spec-0192), refused at the door
+    # with the missing requirement NAMED. Nothing is written — the raise precedes
+    # the open(). An actor/type mismatch is never refused here (ADR-0028-3) — it
+    # stays recorded-and-ignored at fold time.
+    reason = required_reason(e)
+    if reason:
+        raise SystemExit(f"refused: {reason}. Nothing was written. (R3)")
     path.parent.mkdir(parents=True, exist_ok=True)
     line = json.dumps(e, sort_keys=True)
     with open(path, "a") as fh:
