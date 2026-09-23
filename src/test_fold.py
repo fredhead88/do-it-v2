@@ -1414,7 +1414,20 @@ r17 = fold.check_append(oa_missing, "spec-writer")
 assert r17 is not None and "criterion" in r17, r17
 
 # ── AC18 · the three new EMITS entries, exactly, plus restore-verified's widening
-assert fold.EMITS["inbound-registered"] == {"operator", "thinker"}
+# (L-spec-0242/AC5, SD1/SD15: the bare `inbound-registered` equality widens to
+# `intake`, plus intake's own seven further entries — exactly these eight,
+# nothing else changed.)
+assert fold.EMITS["inbound-registered"] == {"operator", "thinker", "intake"}, fold.EMITS["inbound-registered"]
+assert fold.EMITS["inbound-awaiting"] == {"intake"}, fold.EMITS["inbound-awaiting"]
+assert fold.EMITS["inbound-awaiting-gone"] == {"intake"}, fold.EMITS["inbound-awaiting-gone"]
+assert fold.EMITS["inbound-pr-commented"] == {"intake"}, fold.EMITS["inbound-pr-commented"]
+assert fold.EMITS["inbound-closed"] == {"intake", "operator"}, fold.EMITS["inbound-closed"]
+assert fold.EMITS["inbound-note-listed"] == {"intake"}, fold.EMITS["inbound-note-listed"]
+assert fold.EMITS["inbound-note-gone"] == {"intake"}, fold.EMITS["inbound-note-gone"]
+assert fold.EMITS["note-answered"] == {"thinker", "operator"}, fold.EMITS["note-answered"]
+assert fold.check_append({"type": "inbound-registered", "subject": "u", "source": "u",
+                         "project": "albert-scott"}, "intake") is None, \
+    "AC5: the intake actor may now emit inbound-registered"
 assert fold.EMITS["carry-failed"] == {"executor", "operator"}
 assert fold.EMITS["backup-failed"] == {"backup"}
 assert {"operator", "executor"} <= fold.EMITS["restore-verified"] and "drill" in fold.EMITS["restore-verified"]
@@ -1732,6 +1745,54 @@ for mode, wording in (("import-error", "unavailable — src/backup.py not import
     masked_b = _mask_line10(board_b, "mirror:")
     assert masked_a == masked_b, (mode, masked_a, masked_b)
 
+# ── L-spec-0242 AC8 · intake.board_rows() joins INBOUND after carry.uncarried()'s
+# own rows, and degrades on its own (unimportable / raises) — never touching
+# carry's own rows, never propagating out of render().
+_saved_carry_242 = sys.modules.get("carry", "‹absent›")
+_saved_intake_242 = sys.modules.get("intake", "‹absent›")
+try:
+    carry_stub_242 = types.ModuleType("carry")
+    carry_stub_242.uncarried = lambda events: [
+        {"source": "8801", "kind": "v4", "registered_at": "2026-09-01T00:00:00Z",
+         "attempts": 0, "last_error": None}]
+    sys.modules["carry"] = carry_stub_242
+
+    intake_stub_242 = types.ModuleType("intake")
+    intake_stub_242.board_rows = lambda events: [
+        "https://github.com/o/r/pull/8802 · awaiting registration · rando · opened 2026-09-02T00:00:00Z"]
+    sys.modules["intake"] = intake_stub_242
+    board_242 = fold.render(*ledger(**{"L-operator-local.jsonl": []}))
+    inbound_242 = board_242.split("## INBOUND")[1].split("## SHIPPED SINCE YOU LOOKED")[0]
+    assert "8801" in inbound_242, inbound_242
+    assert "pull/8802" in inbound_242 and "awaiting registration" in inbound_242, inbound_242
+    assert inbound_242.index("8801") < inbound_242.index("pull/8802"), \
+        f"AC8: intake.board_rows()'s rows land AFTER carry.uncarried()'s own: {inbound_242}"
+
+    # degrade: intake unimportable — a `None` sys.modules entry raises ImportError on
+    # `import intake` (the same idiom `_carry_mod10`'s "import-error" leg relies on),
+    # without requiring the real src/intake.py to actually be missing on disk.
+    sys.modules["intake"] = None
+    board_242b = fold.render(*ledger(**{"L-operator-local.jsonl": []}))
+    inbound_242b = board_242b.split("## INBOUND")[1].split("## SHIPPED SINCE YOU LOOKED")[0]
+    assert "8801" in inbound_242b, inbound_242b
+    assert "unavailable — src/intake.py not importable (" in inbound_242b, inbound_242b
+
+    # degrade: intake.board_rows raises — same shape
+    intake_stub_242c = types.ModuleType("intake")
+    intake_stub_242c.board_rows = lambda events: (_ for _ in ()).throw(RuntimeError("boom"))
+    sys.modules["intake"] = intake_stub_242c
+    board_242c = fold.render(*ledger(**{"L-operator-local.jsonl": []}))
+    inbound_242c = board_242c.split("## INBOUND")[1].split("## SHIPPED SINCE YOU LOOKED")[0]
+    assert "8801" in inbound_242c, inbound_242c
+    assert "unavailable — intake.board_rows raised RuntimeError: boom" in inbound_242c, inbound_242c
+finally:
+    for name, saved in (("carry", _saved_carry_242), ("intake", _saved_intake_242)):
+        if saved == "‹absent›":
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = saved
+
 print("fold: 104 checks pass · +91 assertions (L-charter-0021: R3 R6 R11 R13 R14 R15)"
       " · +L-spec-0192 (fold-states-owed-due-and-killed: AC1-5 AC8 AC9 AC15-22)"
-      " · +L-spec-0196 (board-shows-each-signal-as-itself: AC1-7 AC9 AC10 AC12)")
+      " · +L-spec-0196 (board-shows-each-signal-as-itself: AC1-7 AC9 AC10 AC12)"
+      " · +L-spec-0242 (intake-core: AC5 AC8)")
