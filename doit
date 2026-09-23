@@ -19,6 +19,7 @@ case "${1:-board}" in
   pane-end) shift; exec python3 "$SRC/pane_end.py" "$@" ;;
   think)   shift; exec python3 "$SRC/think.py" "$@" ;;
   carry)   shift; exec python3 "$SRC/carry.py" "$@" ;;
+  note-close) shift; exec python3 "$SRC/notes.py" "$@" ;;
   guard)   shift; exec python3 "$SRC/guard.py" "$@" ;;
   models)  shift; exec python3 "$SRC/models.py" "$@" ;;
   version) cat "$HERE/VERSION" ;;
@@ -74,6 +75,7 @@ doit — a ledger that derives state, and the guards that read it
                                           open a Thinker session, or land its charters (§3.3)
   doit carry <source> [--repo D] [--project N]
                                           carry an inbound v4 record (or PR url) into a charter:null spec-writer spawn
+  doit note-close <pr> --response FILE   post FILE as the closing comment on an inbound-note PR, close it, record it
   doit models show | use <mixed|claude-only>   the root's model map: print it, or install a profile
   doit version                            print the release version (VERSION; CHANGELOG.md has the history)
   doit alloc <kind> [--dir]               claim the next L-<kind>-NNNN under content and print its path (§2.8)

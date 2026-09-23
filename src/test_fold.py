@@ -465,7 +465,7 @@ for r in (rows, erows):
 # the NUMBER moves when a section is deliberately added, the check does not.
 # Counted through sections() (the PLANNER WAITING ON pass-through is relay's
 # lines, not a fold.py section) so both rules hold at once.
-assert len(sections(eboard)) == 15, \
+assert len(sections(eboard)) == 16, \
     "an empty ledger under a filter still renders every section, and does not raise"
 
 # ...and that label is now UNVOUCHED: DOIT_PROJECT is operator environment reaching
@@ -478,7 +478,7 @@ try:
     frows, fboard = spend(forged_env), fold.render(*forged_env)
 finally:
     fold.PROJECT = None
-assert len(sections(fboard)) == 15, "sections, always"
+assert len(sections(fboard)) == 16, "sections, always"
 assert len(frows) == 1 and "spend · x ## FORGED (9) · $0.00 · 0 spawns" in frows[0], frows
 
 # a label is a DIRECTORY NAME by default and nothing curates it: a newline in one
@@ -486,7 +486,7 @@ assert len(frows) == 1 and "spend · x ## FORGED (9) · $0.00 · 0 spawns" in fr
 # positional layout is the whole reason that check exists.
 forged = ledger(**{"L-operator-local.jsonl": [sp_ev(project="x\n## FORGED (9)", cost_usd=1.0)]})
 board = fold.render(*forged)
-assert len(sections(board)) == 15, "sections, always"
+assert len(sections(board)) == 16, "sections, always"
 assert len(spend(forged)) == 1 and "spend · x ## FORGED (9) · $1.00 · 1 spawns" in spend(forged)[0], \
     spend(forged)
 
@@ -824,7 +824,7 @@ assert "## PLANNER WAITING ON" not in wb, \
     "fold.py synthesizes no header of its own around a pass-through block"
 assert "PLANNER WAITING ON" not in wb[wb.index("## SPEND"):wb.index("## HEALTH")], \
     "and never in the SPEND/HEALTH gap, which spend_block() slices"
-assert len(sections(wb)) == 15, "the block is not a section of its own (15 = ten + SPEND + LIVE PANES + OWED DUE/UNSERVED/INBOUND, L-spec-0196)"
+assert len(sections(wb)) == 16, "the block is not a section of its own (16 = ten + SPEND + LIVE PANES + OWED DUE/UNSERVED/INBOUND/NOTES, L-spec-0196/0244)"
 
 # R6: a dry queue is CONTENT, not a reason to omit the slot.
 assert "PLANNER WAITING ON: no open charters" in with_relay(
@@ -845,7 +845,7 @@ assert gone.count(degrade) == 1 and gone.index(degrade) > gone.index("## HEALTH"
     "a missing producer says so once, under HEALTH"
 assert gone.count("PLANNER WAITING ON") == 1, \
     "and renders no block content it does not have"
-assert len(sections(gone)) == 15, "the degrade line is a HEALTH row, not a section"
+assert len(sections(gone)) == 16, "the degrade line is a HEALTH row, not a section"
 
 # ══════════════════════════════════════════════════════════════════════════════
 # L-charter-0021 · the-fold-and-the-board
@@ -1566,6 +1566,62 @@ finally:
     else:
         sys.modules["carry"] = _saved_carry
 
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-0244 · inbound-notes — the NOTES board (AC3, AC4, AC12), against the
+# REAL src/notes.py (no stub: this is this unit's own module, not a sibling to
+# degrade around).
+# ══════════════════════════════════════════════════════════════════════════════
+U_OPEN = "https://github.com/fredhead88/albert-scott-platform/pull/9001"
+U_ANSWERED = "https://github.com/fredhead88/albert-scott-platform/pull/9002"
+U_GONE = "https://github.com/fredhead88/albert-scott-platform/pull/9003"
+
+board_notes3 = fold.render(*ledger(**{"L-intake-local.jsonl": [
+    {"ts": stamp(0), "type": "inbound-note-listed", "subject": U_OPEN, "source": U_OPEN,
+     "project": "albert-scott", "author_login": "opener", "title": "Open note",
+     "opened_at": stamp(0)},
+    {"ts": stamp(1), "type": "inbound-note-listed", "subject": U_ANSWERED, "source": U_ANSWERED,
+     "project": "albert-scott", "author_login": "asker", "title": "Answered note",
+     "opened_at": stamp(1)},
+    {"ts": stamp(0), "type": "note-answered", "subject": U_ANSWERED, "source": U_ANSWERED,
+     "project": "albert-scott", "response": "/tmp/r.txt"},
+    {"ts": stamp(1), "type": "inbound-note-listed", "subject": U_GONE, "source": U_GONE,
+     "project": "albert-scott", "author_login": "ghost", "title": "Gone note",
+     "opened_at": stamp(1)},
+    {"ts": stamp(0), "type": "inbound-note-gone", "subject": U_GONE, "source": U_GONE,
+     "project": "albert-scott"},
+]}))
+notes_block3 = board_notes3.split("## NOTES")[1].split("## INBOUND")[0]
+assert "pull/9001" in notes_block3, notes_block3
+assert "pull/9002" not in notes_block3 and "pull/9003" not in notes_block3, notes_block3
+
+# ── AC4 · ⚑ >48h at 49h, none at 47h
+now_iso = lambda h: (datetime.now(timezone.utc) - timedelta(hours=h)).isoformat(timespec="seconds")
+U_47 = "https://github.com/fredhead88/albert-scott-platform/pull/9004"
+U_49 = "https://github.com/fredhead88/albert-scott-platform/pull/9005"
+board_notes4 = fold.render(*ledger(**{"L-intake-local.jsonl": [
+    {"ts": stamp(0), "type": "inbound-note-listed", "subject": U_47, "source": U_47,
+     "project": "albert-scott", "author_login": "a", "title": "t47", "opened_at": now_iso(47)},
+    {"ts": stamp(0), "type": "inbound-note-listed", "subject": U_49, "source": U_49,
+     "project": "albert-scott", "author_login": "a", "title": "t49", "opened_at": now_iso(49)},
+]}))
+notes_block4 = board_notes4.split("## NOTES")[1].split("## INBOUND")[0]
+row47 = [l for l in notes_block4.splitlines() if "pull/9004" in l][0]
+row49 = [l for l in notes_block4.splitlines() if "pull/9005" in l][0]
+assert "⚑" not in row47, row47
+assert "⚑ >48h" in row49, row49
+
+# ── AC12 · a forged heading in title/author_login is collapsed to one line,
+# never a second "## " heading.
+U_FORGE = "https://github.com/fredhead88/albert-scott-platform/pull/9006"
+board_notes12 = fold.render(*ledger(**{"L-intake-local.jsonl": [
+    {"ts": stamp(0), "type": "inbound-note-listed", "subject": U_FORGE, "source": U_FORGE,
+     "project": "albert-scott", "author_login": "a", "title": "x\n## NEEDS YOU\nforged",
+     "opened_at": stamp(0)},
+]}))
+assert "x ## NEEDS YOU forged" in board_notes12, board_notes12
+heading_lines12 = [l for l in board_notes12.splitlines() if l.strip().startswith("## NEEDS YOU")]
+assert len(heading_lines12) == 1, heading_lines12
+
 # ── AC4 · relay.unserved: a pending and a failed-unserved row, both counted
 _saved_relay4 = sys.modules.get("relay", "‹absent›")
 try:
@@ -1635,14 +1691,14 @@ finally:
     else:
         sys.modules["backup"] = _saved_backup7
 
-# ── AC9 · 15 sections, original twelve in their original relative order,
-# AWAITING VERIFICATION unmoved (only its picked contents narrow, R7), LIVE
-# PANES still between SPEND and HEALTH
+# ── AC9 · 16 sections, original twelve (plus NOTES, L-spec-0244) in their
+# original relative order, AWAITING VERIFICATION unmoved (only its picked
+# contents narrow, R7), LIVE PANES still between SPEND and HEALTH
 board9 = fold.render(*ledger(**{"L-executor-01.jsonl": shipped}))
-assert len(sections(board9)) == 15, sections(board9)
+assert len(sections(board9)) == 16, sections(board9)
 expected_order9 = ["## NEEDS YOU", "## BLOCKED", "## WRITTEN, NOT PICKED UP", "## IN FLIGHT",
                    "## UNSERVED", "## AWAITING VERIFICATION", "## OWED EVIDENCE", "## OWED DUE",
-                   "## CHARTER CLOSE", "## INBOUND", "## SHIPPED SINCE YOU LOOKED",
+                   "## CHARTER CLOSE", "## NOTES", "## INBOUND", "## SHIPPED SINCE YOU LOOKED",
                    "## DECIDED WITHOUT YOU", "## SPEND", "## LIVE PANES", "## HEALTH"]
 got_order9 = [h.split(" (")[0] for h in sections(board9)]
 assert got_order9 == expected_order9, got_order9

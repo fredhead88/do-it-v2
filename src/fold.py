@@ -704,6 +704,16 @@ def _intake():
         return None, f"src/intake.py not importable ({type(x).__name__}: {x})"
 
 
+def _notes():
+    """(module, None) or (None, why-not) — same lazy PANES idiom as _carry()/
+    _panes()/_intake(), backing the NOTES section (L-spec-0244) alone."""
+    try:
+        import notes                                       # lazy: a sibling unit
+        return notes, None
+    except Exception as x:                                 # noqa: BLE001
+        return None, f"src/notes.py not importable ({type(x).__name__}: {x})"
+
+
 def _backup():
     """(module, None) or (None, why-not) — same lazy PANES idiom as _panes()/
     _relay_unserved(), backing the `mirror: ` HEALTH line (R1/L-spec-0196) alone."""
@@ -1352,6 +1362,20 @@ def render(events, specs, charters, ignored, by_subject):
                             + (f" · {c['unbuilt']} closed unbuilt" if c["unbuilt"] else "")
                             for c in charters.values()
                             if c["state"] in ("L1-complete", "L2-complete", "retracted")])
+
+    # NOTES — R4/L-spec-0244: one row per url whose latest tracked state is
+    # `inbound-note-listed` (age in hours, `⚑ >48h`), via `notes.board_rows`.
+    # PANES-idiom degrade (Constraints): a fold not yet carrying `notes.py`
+    # shows one visible line, never a crash.
+    notes_mod, notes_err = _notes()
+    if notes_mod is None:
+        notes_rows = [f"unavailable — {notes_err}"]
+    else:
+        try:
+            notes_rows = notes_mod.board_rows(events)
+        except Exception as x:                             # noqa: BLE001
+            notes_rows = [f"unavailable — notes.board_rows raised {type(x).__name__}: {x}"]
+    block("NOTES", notes_rows)
 
     # INBOUND — R9/L-spec-0196: one row per `carry.uncarried()` entry, covering
     # both an uncarried v4 record and an unreadable/uncarried PR source — the
