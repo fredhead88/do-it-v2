@@ -8,12 +8,22 @@ an in-process call against a foreign root).
 import (matching `test_carry.py`), and every `restore-verified` append this file
 causes lands there — never under any `root=` this file passes around.
 """
-import os, pathlib, subprocess, sys, tempfile
+import json, os, pathlib, subprocess, sys, tempfile
+from datetime import datetime, timedelta, timezone
 
 TMP = pathlib.Path(tempfile.mkdtemp(prefix="restore-test-"))
 os.environ["DOIT_ROOT"] = str(TMP / "doit-root-unused")
 os.environ["DOIT_LEDGER_FILE"] = "L-drill-test.jsonl"       # never the operator's real actor file
 os.environ["DOIT_PROJECT"] = "pinned-by-the-suite"
+# L-spec-0196 (wave 3): board_diff()'s subprocess (env=_fold_env(root)) inherits
+# THIS process's environment, and INBOUND/LIVE PANES read from V4_LEDGER_DIR/
+# V4_INBOX_DIR/DOIT_SESSIONS_DIR, none of which key off DOIT_ROOT — pinned to
+# empty scratch dirs, or a board_diff subprocess in this suite reads the
+# operator's real ~/.claude/ledger, ~/.claude/spec-inbox and ~/.claude/sessions
+# (measured: it does, absent this pin).
+os.environ["V4_LEDGER_DIR"] = str(TMP / "v4-ledger-absent")
+os.environ["V4_INBOX_DIR"] = str(TMP / "v4-inbox-absent")
+os.environ["DOIT_SESSIONS_DIR"] = str(TMP / "sessions-absent")
 os.environ.update(GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
                   GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
 
@@ -239,6 +249,74 @@ check(any(name == "mirror_push_age_reserved" for name, _pat, _mode in restore.VO
 check(not restore.VOLATILE[[n for n, _p, _m in restore.VOLATILE].index("mirror_push_age_reserved")][1]
       .match("# board · irrelevant"),
       "AC8: …and matches nothing in a normal render today")
+
+# ══ L-spec-0196 (wave 3) · AC8 — this unit's own VOLATILE additions, proved
+# through the REAL restore.board_diff (subprocess per root), never fold.NOW
+# injection (R1's Target: "fold.NOW is NEVER injected or overridden"). ═══════
+os.environ["DOIT_SEAT_CLAIM_SEC"] = "60"       # a real few-minutes-old dispatch counts as pending
+
+
+# AC8's actual pair: root A's `wake_at` is real-now-minus-10-days (CROSSES the
+# 7-day fault line, so `health_due_owed_fault`'s `⚠ OVER 7 DAYS` fragment is
+# real content on this leg), root B's is real-now-minus-3-days (does NOT
+# cross — that HEALTH fragment is wholly ABSENT on this leg, never emitted at
+# all). Each root's `wake_at` is computed fresh against real wall-clock `now`
+# at seed time — never a single shared literal — so `due_at` (owed_due()'s
+# verbatim echo of it) is a genuinely different raw timestamp between the two
+# roots, exactly the case `owed_due_due_at_fragment` exists to mask (see
+# restore.VOLATILE's comment there for the measured defect this closes: prior
+# to that entry, `restore.board_diff` on this exact pair returned a non-empty
+# diff naming the `due_at` mismatch, even though nothing here is a real
+# content difference — both roots carry the SAME spec, SAME criterion, and
+# only the wall-clock-relative wake_at differs).
+def _seed_ac8_root(root, *, owed_criterion, wake_days_ago, unserved_minutes_ago, backup_state):
+    (root / "events").mkdir(parents=True)
+    wake_at = (datetime.now(timezone.utc)
+              - timedelta(days=wake_days_ago)).isoformat(timespec="seconds")
+    dispatch_ts = (datetime.now(timezone.utc)
+                  - timedelta(minutes=unserved_minutes_ago)).isoformat(timespec="seconds")
+    (root / "events" / "L-spec-writer-0001.jsonl").write_text(
+        json.dumps({"v": 1, "ts": "2026-09-01T00:00:00+00:00", "type": "spec-written",
+                    "subject": "L-spec-0001", "project": "pinned-by-the-suite"}) + "\n"
+        + json.dumps({"v": 1, "ts": "2026-09-01T00:00:00+00:00", "type": "owed-ac",
+                      "subject": "L-spec-0001", "criterion": owed_criterion,
+                      "wake_at": wake_at, "project": "pinned-by-the-suite"}) + "\n")
+    (root / "events" / "L-executor-0001.jsonl").write_text(
+        json.dumps({"v": 1, "ts": dispatch_ts, "type": "spawn-started", "subject": "L-spec-0002",
+                    "spawn": "L-builder-9001", "role": "builder", "backend": "seat",
+                    "project": "pinned-by-the-suite"}) + "\n")
+    if backup_state is not None:
+        (root / "backup-state.json").write_text(json.dumps(backup_state))
+
+
+ac8_a, ac8_b = TMP / "l0196-board-a", TMP / "l0196-board-b"
+_seed_ac8_root(ac8_a, owed_criterion="AC1", wake_days_ago=10, unserved_minutes_ago=2,
+               backup_state={"ts": (datetime.now(timezone.utc) - timedelta(seconds=60))
+                             .isoformat(timespec="seconds"), "snapshot": "abc123",
+                             "remote": "git@example.com:x/y.git", "ok": True})
+_seed_ac8_root(ac8_b, owed_criterion="AC1", wake_days_ago=3, unserved_minutes_ago=40,
+               backup_state=None)                          # "never pushed" leg
+
+d_l0196 = restore.board_diff(ac8_a, ac8_b)
+check(d_l0196 == [],
+      f"L-spec-0196 AC8: two roots differing only in clock/window-relative content "
+      f"(wake_at 10d-crossing vs 3d-non-crossing the 7-day fault line, unserved "
+      f"dispatched 2m vs 40m ago, mirror ok-60s-ago vs never-pushed, and whatever "
+      f"few seconds of real clock separate the two subprocess renders) diff to []: "
+      f"{d_l0196}")
+
+# negative case: identical setup to root A in every other respect — SAME
+# wake_days_ago (10, crossing), SAME unserved timing, SAME backup state — with
+# ONLY the criterion changed. A REAL content difference is never normalized away.
+ac8_c = TMP / "l0196-board-c"
+_seed_ac8_root(ac8_c, owed_criterion="AC2", wake_days_ago=10, unserved_minutes_ago=2,
+               backup_state={"ts": (datetime.now(timezone.utc) - timedelta(seconds=60))
+                             .isoformat(timespec="seconds"), "snapshot": "abc123",
+                             "remote": "git@example.com:x/y.git", "ok": True})
+d_l0196_neg = restore.board_diff(ac8_a, ac8_c)
+check(d_l0196_neg != [], f"L-spec-0196 AC8: a genuinely different criterion is NOT []: {d_l0196_neg}")
+check(any("AC1" in row or "AC2" in row for row in d_l0196_neg),
+      f"L-spec-0196 AC8: the diff names the criterion mismatch: {d_l0196_neg}")
 
 # ══ §5 · the operator's real ledger is never touched by a fixture-root test ═
 after_sizes = ({p: p.stat().st_size for p in REAL_LEDGER.glob("*.jsonl")}

@@ -126,8 +126,12 @@ def restore(snapshot, root=None, dry_run=False, remote=None, config_path=None):
 
 
 # ── board_diff (ADR-0028-4) ───────────────────────────────────────────────────
-# Wave-1 entries only. Wave-3's `board-shows-each-signal-as-itself` extends this
-# constant with its own "last mirror push age" line — never a second one.
+# Wave-1 entries, plus wave-3's `board-shows-each-signal-as-itself` (L-spec-0196)
+# additions below the marker — additive only, never shrunk, each landing in the
+# SAME commit as the content it covers (R1). The reserved `mirror_push_age_
+# reserved` entry above never matched this unit's actual `mirror: ` wording (its
+# own audit-confirmed gap) — L-spec-0196 ships its OWN `health_mirror` entry
+# rather than relying on it.
 VOLATILE = (
     ("header", re.compile(r"^# board · .*$"), "drop"),
     ("live_panes_header", re.compile(r"^## LIVE PANES \(\d+\).*$"), "drop"),
@@ -145,6 +149,46 @@ VOLATILE = (
     # mirror's own push age is itself a clock-derived value and belongs here
     # the day it exists, not in a second constant.
     ("mirror_push_age_reserved", re.compile(r"^  last mirror push age: .*$"), "drop"),
+    # ── L-spec-0196 (wave 3) — R1's Target, one entry per exclusion named there ──
+    # UNSERVED's rows: both age_min and rolling-window status are clock/window-
+    # relative, never a fixed fact of the backed-up events. The section HEADER's
+    # own count is NOT excluded — that count is real content (derived from the
+    # backed-up events themselves) and must still diff normally.
+    ("unserved_row", re.compile(r"^  .* · age \d+m · (pending|failed-unserved)$"), "drop"),
+    # OWED DUE's `due_at` field (the raw `wake_at` a criterion carries) — MUST
+    # run before `owed_due_days_fragment` below: it anchors on the still-literal
+    # `\d+d overdue` suffix, and once that entry rewrites it to `<N>d overdue`
+    # the anchor no longer matches (measured directly — reordering this after
+    # it silently no-ops the whole entry). Measured defect, this round: `due_at`
+    # is `owed_due()`'s verbatim echo of the triggering `owed-ac` event's
+    # `wake_at`, so ANY two roots seeded with a different wake_at — including
+    # the exact AC8 pair this entry exists for, root A's wake_at ~10 real-days-
+    # ago (crosses the 7-day fault line) vs root B's ~3 real-days-ago (does
+    # not) — carry a genuinely different `due_at` timestamp for the identical
+    # spec/criterion, and `restore.board_diff` reported that mismatch as real
+    # content (reproduced directly against this file's own `board_diff`,
+    # non-empty). `due_at` is exactly as clock-relative as the `Nd overdue`/
+    # fault-line fragments dropped elsewhere in this set — it is the SAME
+    # wake-at-vs-now fact, just unrounded — so it is normalized the same way:
+    # the row's SPEC and CRITERION fields (its real identity — anchored via the
+    # full-line match so nothing else on the line can be swept in) stay live
+    # and a genuinely different criterion (AC8's negative-case leg) still
+    # surfaces; only the volatile timestamp between them is masked.
+    ("owed_due_due_at_fragment",
+     re.compile(r"^(  \S+ · \S+ · )\S+( · \d+d overdue)$"),
+     r"normalize:\1<DUE_AT>\2"),
+    # OWED DUE's `Nd overdue` fragment — the day-count text only.
+    ("owed_due_days_fragment", re.compile(r"\d+d overdue"), "normalize:<N>d overdue"),
+    # `due owed: N`'s fault fragment only — the count itself (`N`) stays and
+    # diffs normally; only the OVER-7-DAYS enumeration (day counts) is dropped.
+    ("health_due_owed_fault", re.compile(r"  ⚠ OVER 7 DAYS:.*$"), "normalize:"),
+    # `unserved packets: N` — the WHOLE line, not a fragment: the count itself is
+    # window-relative (a packet can leave the 24h window purely because time
+    # passed, with no new event).
+    ("health_unserved_packets", re.compile(r"^  unserved packets: .*$"), "drop"),
+    # This unit's OWN entry (added rather than assumed inherited from the base
+    # set) — every HEALTH line beginning `mirror: `, all three of AC7's legs.
+    ("health_mirror", re.compile(r"^  mirror: .*$"), "drop"),
 )
 
 
@@ -153,11 +197,17 @@ def _normalize(text):
     for line in text.splitlines():
         dropped = False
         for _name, pattern, mode in VOLATILE:
-            if mode == "drop" and pattern.match(line):
-                dropped = True
-                break
-            if mode == "normalize":
+            if mode == "drop":
+                if pattern.match(line):
+                    dropped = True
+                    break
+            elif mode == "normalize":
                 line = pattern.sub(" · <AGE>d", line)
+            elif mode.startswith("normalize:"):
+                # A per-entry replacement (never the single hardcoded " · <AGE>d"
+                # string) — lets a later entry normalize a DIFFERENT fragment
+                # shape without disturbing "day_age"'s own substitution above.
+                line = pattern.sub(mode.split(":", 1)[1], line)
         if not dropped:
             out.append(line)
     return "\n".join(out)
