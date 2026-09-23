@@ -10,9 +10,9 @@ fold-and-record: it spends nothing, it can be run at any frequency by anything,
 and the one event it appends is what `fold` reads for staleness. The Executor is
 a supervised pane that reads the same lane for itself; nothing here launches it.
 """
-import fcntl, os, pathlib, sys
+import fcntl, os, pathlib, re, sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import dispatch, fold, tree_cleanup  # noqa: E402
+import carry, dispatch, fold, tree_cleanup  # noqa: E402
 
 # Waiting for the Executor's next durable action. `building` is in flight, not waiting.
 # R7/L-spec-0192: `shipped-owed-due` joins — a due criterion is the Executor's own
@@ -88,7 +88,37 @@ def closable_fallback(events, charter):
     return accepted, fixpoint, fold.charter_review(evs) != "charter-review-complete"
 
 
-def lane(specs, charters, busy=frozenset(), reaped=frozenset(), events=()):
+def _carry_packet_busy(busy):
+    """L-spec-0190 R9 (fix 5) — sources whose own carry packet names a spec_id
+    that is itself in-flight. A filesystem read, not a new event type (EMITS
+    has no room for one; A11): glob `content/carry-*.packet.md`, parse the
+    spec_id out of each filename, and read the file's trailing non-blank line
+    for `Source: v4 spec <X>.`; `<X>` is busy exactly when that spec_id is
+    itself in `busy`. No write to any packet file — read-only."""
+    out = set()
+    content = fold.ROOT / "content"
+    if not content.is_dir():
+        return out
+    for p in sorted(content.glob("carry-*.packet.md")):
+        name = p.name
+        if not (name.startswith("carry-") and name.endswith(".packet.md")):
+            continue
+        spec_id = name[len("carry-"):-len(".packet.md")]
+        if spec_id not in busy:
+            continue
+        try:
+            lines = [l for l in p.read_text().splitlines() if l.strip()]
+        except OSError:
+            continue
+        if not lines:
+            continue
+        m = re.match(r"Source:\s*v4 spec\s+(.+)\.$", lines[-1].strip())
+        if m:
+            out.add(m.group(1).strip())
+    return out
+
+
+def lane(specs, charters, busy=frozenset(), reaped=frozenset(), events=(), inbound=()):
     """A charter that is CLOSED and not yet reaped is still the Executor's.
 
     §4.11's reaper refuses any charter that is not `L2-complete` or `retracted`,
@@ -109,7 +139,14 @@ def lane(specs, charters, busy=frozenset(), reaped=frozenset(), events=()):
 
     A spec's presence never depends on any charter (R6): a `charter: null` spec is
     on the lane on its own terms, and no charter's state, closability or absence
-    from `charters` can take it off."""
+    from `charters` can take it off.
+
+    L-spec-0190 R9: `inbound` is `carry.uncarried()`'s own list of
+    `{source, kind, registered_at, attempts, last_error}` dicts. One
+    `"inbound:<source> · uncarried"` row lands per item whose `source` is
+    neither in `busy` (a direct subject match on an open `escalation-blocking`
+    — `in_flight()`'s existing behavior, unchanged) nor the target of a
+    packet-detected in-flight carry (`_carry_packet_busy`, fix 5)."""
     def waiting(c):
         if c["state"] in tree_cleanup.CLOSED:
             return c["id"] not in reaped
@@ -119,14 +156,24 @@ def lane(specs, charters, busy=frozenset(), reaped=frozenset(), events=()):
             return True      # nothing to judge closability from: the charter stays the Executor's
         accepted, fixpoint, review_owed = (getattr(fold, "closable", None) or closable_fallback)(events, c)
         return not (accepted and fixpoint and not review_owed)
+    packet_busy = _carry_packet_busy(busy)
     return sorted([f"{s['id']} · {s['state']}" for s in specs.values()
                    if s["state"] in ACTIONABLE and s["id"] not in busy]
                   + [f"{c['id']} · {c['state']}" for c in charters.values()
-                     if c["id"] not in busy and waiting(c)])
+                     if c["id"] not in busy and waiting(c)]
+                  + [f"inbound:{i['source']} · uncarried" for i in inbound
+                     if i.get("source") not in busy and i.get("source") not in packet_busy])
 
 
 def main():
-    """Fold, compute the lane, append exactly one `tick`. Never a spawn (L-adr-0035)."""
+    """Fold, compute the lane, append exactly one `tick`. Never a spawn (L-adr-0035).
+
+    L-spec-0190 R9: `carry.uncarried(ev)` and `carry.sync_v4(ev)` each run once
+    per tick, unconditionally (idle or not), each independently exception-guarded
+    (fix 8) — one raising call never silences the other's contribution nor the
+    tick's own heartbeat. A caught exception adds nothing of its own to the lane;
+    the same `tick` event instead carries an additive `carry_error` field naming
+    it, never a second event type."""
     fold.EVENTS.mkdir(parents=True, exist_ok=True)
     lock = open(fold.ROOT / "tick.lock", "w")
     try:
@@ -137,10 +184,23 @@ def main():
     ev = fold.read_events()
     specs, charters, _, _ = fold.fold(ev)
     reaped = {e.get("subject") for e in ev if e["type"] == "tree-reaped"}
-    todo = lane(specs, charters, in_flight(ev), reaped, events=ev)
+    errors = []
+    try:
+        inbound = carry.uncarried(ev)
+    except Exception as e:
+        inbound = []
+        errors.append(f"uncarried: {e}")
+    try:
+        carry.sync_v4(ev)
+    except Exception as e:
+        errors.append(f"sync_v4: {e}")
+    todo = lane(specs, charters, in_flight(ev), reaped, events=ev, inbound=inbound)
     # The one liveness fact: `fold` reads the newest of these for staleness, and
     # `lane` is the count — the whole record this process leaves behind.
-    dispatch.emit(TICK, {}, "tick", lane=len(todo))
+    kv = {"lane": len(todo)}
+    if errors:
+        kv["carry_error"] = "; ".join(errors)
+    dispatch.emit(TICK, {}, "tick", **kv)
     print("tick: idle" if not todo else f"tick: {len(todo)} on the lane\n" + "\n".join(todo))
     return 0
 
