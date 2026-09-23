@@ -85,6 +85,17 @@ consistent with what you computed.
 Never a holistic score. Never a spec-level verdict. Never a rework verdict: the
 fold derives rework from standing rejections.
 
+**Pre-existing failures** (operator ruling, 2026-09-23, L-operator-0001.jsonl). A failing test does not make a criterion
+`unmet`, and does not fail the verify chain's done-condition, when both hold:
+(1) it fails identically at the spec's `base_sha` — the same command run in a
+detached scratch worktree at `base_sha` with the same gitignored `.env` copied
+in — and (2) the test file and the source line it fails on are outside the
+spec's `Writes:` grant. Take the base run from the card if the builder recorded
+it, and re-run it yourself when you can. Record the command and both failure
+lists beside the criterion, then grade it on the remaining tests. A failure
+present at HEAD and absent at `base_sha` is this spec's, and still fails. This
+holds even when the criterion's literal text says the whole suite must pass.
+
 ## Output → events
 
 The wrapper appends one `verdict` event from this object, carrying
