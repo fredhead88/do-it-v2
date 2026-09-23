@@ -296,9 +296,10 @@ def _cycle(state):
 # on this root yet (measured 2026-09-17: `pane_name` and `decide_overdue` are
 # defined nowhere under src/), so they are bound late, by name, and each is
 # overridable by the module attribute below — which is also how a test stubs one.
-SEAM_MODULES = ("pane_identity", "panes", "board", "relay")
+SEAM_MODULES = ("pane_identity", "panes", "board", "relay", "guard")
 PANE_NAME = None                      # pane_name(ledger_file) -> str
 DECIDE_OVERDUE = None                 # decide_overdue(events) -> list[dict]
+GUARD_REGISTERED = None               # guard.registered(settings_path=None) -> bool
 _SLEEP = time.sleep                   # the backoff, stubbable — never a real wait in a test
 
 
@@ -347,17 +348,26 @@ def executor_deny_list():
 
 def executor_prompt(ledger_file, board):
     """The pane is SELF-SEEDED: this is passed as claude's positional prompt, so
-    there is no blinking cursor waiting for an operator to type the lane in."""
+    there is no blinking cursor waiting for an operator to type the lane in.
+
+    R3: names BOTH halves of unattended operation — the background wake (`doit
+    wait --max 300` at the end of every turn) and the real end command (`doit
+    pane-end --executor --handover <file>`, never a bare stop)."""
     stem = _stem(ledger_file)
     return (f"{stem}: you are the Executor pane on this root, and this is your whole seed.\n"
             f"Take the next durable action on the board below, then the next. You write no "
             f"product code and run no suite: `doit dispatch` is the only build path, and your "
             f"deny list holds you to it.\n"
+            f"At the end of every turn, start `doit wait --max 300` as a background task — it "
+            f"blocks on the ledger or up to five minutes, so a real change wakes you inside five "
+            f"minutes whether or not anyone types.\n"
             f"End yourself at a quiet point — `up.quiet_point(fold.read_events(), '{stem}')` is "
             f"that predicate: your own handover (`doit append message-sent {stem} ...`) is on "
-            f"your ledger file AND nothing is in flight. Ending is safe: every fact you acted on "
-            f"is durable ledger state, the next pane re-derives this same board, and the loop "
-            f"starts it the moment you exit — no keystroke, no wait.\n\n" + board)
+            f"your ledger file AND nothing is in flight. Then end the OS process itself with "
+            f"`doit pane-end --executor --handover <the handover file>` — never a bare stop; a "
+            f"pane that only prints and idles is never replaced. Ending is safe: every fact you "
+            f"acted on is durable ledger state, the next pane re-derives this same board, and the "
+            f"loop starts it the moment you exit — no keystroke, no wait.\n\n" + board)
 
 
 def _pane_argv(ledger_file, board):
@@ -379,20 +389,28 @@ def _from_pane(src, stem):
 def quiet_point(events, pane):
     """Is ending safe for this pane? True only once its OWN ledger file carries a
     `message-sent` handover (L-adr-0043's four event types; no fifth is invented
-    here) AND nothing is in flight.
+    here) AND nothing REAL is in flight.
 
-    NOT pure: `tick.in_flight` appends one `spawn-stale` into `tick.TICK` per dead
-    spawn, by that function's own shipped contract. That append is idempotent
-    (`in_flight` counts `spawn-stale` in its own `ended` set) and is the only write
-    this predicate can cause.
+    `tick.spawn_in_flight` (0187), not `tick.in_flight`: an open
+    `escalation-blocking` on an unrelated subject elsewhere is the OPERATOR's,
+    never a reason to stall this pane's own end (measured: `in_flight`'s merged
+    busy set otherwise stalls every Executor pane behind any one open operator
+    escalation, anywhere — 0187 Assumption 7, AC6(d)). `tick.lane`'s own use of
+    `in_flight` is unchanged; only this predicate switches.
+
+    NOT pure: `tick.spawn_in_flight` appends one `spawn-stale` into
+    `tick.tick_path()` per dead spawn, by that function's own shipped contract.
+    That append is idempotent (`ended` already counts `spawn-stale`) and is the
+    only write this predicate can cause.
 
     A pane is never in flight against ITSELF: the loop's own `spawn-started` for
-    the running pane is dropped before `in_flight` sees the list, or the pane it
-    describes could never reach a quiet point and the restart loop never turns."""
+    the running pane is dropped before `spawn_in_flight` sees the list, or the
+    pane it describes could never reach a quiet point and the restart loop never
+    turns."""
     stem = _stem(str(pane).rsplit("/", 1)[-1])
     if not any(e.get("type") == "message-sent" and _from_pane(e.get("_src"), stem) for e in events):
         return False
-    return not tick.in_flight([e for e in events if e.get("spawn") != stem])
+    return not tick.spawn_in_flight([e for e in events if e.get("spawn") != stem])
 
 
 def _open_builds(events):
@@ -462,6 +480,28 @@ def _settle_overdue(events):
     return list(fn(events) or [])
 
 
+def _check_guard():
+    """R3's own guard check, at the loop's start: `guard.registered()` late-bound
+    exactly as `pane_name` already is (`_seam("registered", "GUARD_REGISTERED")`).
+    A missing seam (wave 1 not merged on this root) or a False registration each
+    print ONE stderr line and let the loop proceed — this launcher never blocks
+    on a guard it does not own and cannot install (ADR-0028-7)."""
+    fn = _seam("registered", "GUARD_REGISTERED")
+    if fn is None:
+        print("up: guard.registered has not landed on this root yet — proceeding unguarded",
+              file=sys.stderr)
+        return
+    try:
+        ok = fn()
+    except Exception as e:
+        print(f"up: guard.registered raised {type(e).__name__}: {e} — proceeding unguarded",
+              file=sys.stderr)
+        return
+    if not ok:
+        print("up: the destructive-delete-guard is not registered for this user "
+              "(doit guard install) — proceeding unguarded", file=sys.stderr)
+
+
 def executor_loop(root, interval, print_only=False, max_cycles=None):
     """Forever: settle what a default now settles, derive the board, launch a named,
     self-seeded, tool-restricted Executor pane, wait for it to end itself, record
@@ -482,6 +522,7 @@ def executor_loop(root, interval, print_only=False, max_cycles=None):
                f"{root / 'models.toml'}; executor_loop supervises a pane and nothing else (L-adr-0035)")
         print(f"up: refused — {why}", file=sys.stderr)
         sys.exit(2)
+    _check_guard()
     install(contract)
     (root / "events").mkdir(parents=True, exist_ok=True)
     (root / "logs").mkdir(parents=True, exist_ok=True)
@@ -495,9 +536,11 @@ def executor_loop(root, interval, print_only=False, max_cycles=None):
             ev = fold.read_events()          # its decisions are on the board this pane reads
         board = fold.render(ev, *fold.fold(ev))
         cmd = _pane_argv(ledger.name, board)
-        env = {**os.environ, "DOIT_ROOT": str(root), "DOIT_LEDGER_FILE": ledger.name,
-               "DOIT_GATE_LEDGER_FILE": ledger.name,
-               "PATH": f"{HERE.parent}:{os.environ.get('PATH', '')}"}
+        # R3 gap 1: built through `_child_env(..., supervised=True)` — a hand-built
+        # dict here never set DOIT_SUPERVISED, so `pane_end.supervised()`'s
+        # precondition refused for every pane this loop ever started.
+        env = {**_child_env(ledger, supervised=True), "DOIT_ROOT": str(root),
+               "DOIT_GATE_LEDGER_FILE": ledger.name}
         print(f"# executor pane: {ledger.stem} · {' '.join(cmd[:-1])}")
         if print_only:
             return cmd, env

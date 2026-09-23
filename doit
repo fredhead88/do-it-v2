@@ -14,6 +14,7 @@ case "${1:-board}" in
   paid-call) shift; exec python3 "$SRC/paid_call.py" "$@" ;;
   validate) shift; exec python3 "$SRC/validate.py" "$@" ;;
   tick)    exec python3 "$SRC/tick.py" ;;
+  wait)    shift; exec python3 "$SRC/tick.py" wait "$@" ;;
   up)      shift; exec python3 "$SRC/up.py" "$@" ;;
   pane-end) shift; exec python3 "$SRC/pane_end.py" "$@" ;;
   think)   shift; exec python3 "$SRC/think.py" "$@" ;;
@@ -66,6 +67,7 @@ doit — a ledger that derives state, and the guards that read it
   doit reap <charter> [--repo D] [--dry-run]   reap only the provably dead worktrees at close (§4.11)
   doit dispatch <role> <subject> [...]    spawn one contract, check it, append its events (-h for flags)
   doit tick                               fold; spawn the Executor only if the lane is actionable (D117)
+  doit wait [--max SEC]                   block until the ledger changes or SEC pass (default 300), then tick
   doit up                                 start the Planner pane; print (never install) the tick's cron line
   doit pane-end <charter> --handover F [--root D]   the Planner's ⑦: end this pane's own process, if it may
   doit think <topic> | --land F… | --discard <topic>

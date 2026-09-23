@@ -180,6 +180,8 @@ STUB.write_text(textwrap.dedent("""\
     # file (L-adr-0043's message-sent), and end — exactly what R2 supervises.
     printf '%s\\n' "$1 $2 $3 $4 $5 $6 $7" >> "$DOIT_ROOT/panes.log"
     printf '%s\\n' "${8:-NO-SEED}" | head -1 >> "$DOIT_ROOT/seed.log"
+    # 0187-AC1: what this pane's child env actually carried for DOIT_SUPERVISED.
+    printf '%s\\n' "$DOIT_SUPERVISED" >> "$DOIT_ROOT/supervised.log"
     printf '{"v":1,"ts":"%s","type":"message-sent","subject":"%s"}\\n' \\
       "$(date -u +%Y-%m-%dT%H:%M:%S+00:00)" "${DOIT_LEDGER_FILE%.jsonl}" \\
       >> "$DOIT_ROOT/events/$DOIT_LEDGER_FILE"
@@ -217,6 +219,12 @@ for f, argv in zip(panes, argvs):
     ok("--agent" in toks and toks[toks.index("--agent") + 1] == "executor" and "-p" not in toks,
        f"D121/spec 572: the Executor pane is the interactive seat, never a metered -p: {toks[:6]}")
     ok("--disallowedTools" in toks, "the deny list is passed to the pane, not merely computed")
+
+# 0187-AC1: DOIT_SUPERVISED is truthy on every pane executor_loop starts — the
+# gap `_child_env(ledger, supervised=True)` closes (a hand-built env never set it).
+sup_log = (TMP / "supervised.log").read_text().splitlines()
+ok(len(sup_log) == 2 and all(l.strip() for l in sup_log),
+   f"0187-AC1: DOIT_SUPERVISED is truthy on every pane executor_loop starts, both cycles: {sup_log}")
 
 # ── AC7: the pane's own handover flips its own quiet point, nobody else's ─────
 ev_all = fold.read_events()
@@ -284,6 +292,11 @@ ok({str(p) for p in up._repo_dirs(TMP)} == {str(MASTER), str(BUILDING)},
    f"R15b: exactly two globs are watched — repos/* and worktrees/*/*: {up._repo_dirs(TMP)}")
 
 # ── the seams wave 1 owes, and what this loop does while they are missing ────
+# ★ measured 2026-09-23: `src/panes.py` (pane_name) landed on main well before
+# this unit's base_sha (`dd11840`, ancestor of `42883cc`) — `_seam` finds it by
+# late-binding through SEAM_MODULES exactly as designed, so it now resolves to
+# a real callable rather than None. `decide_overdue` has still not landed
+# anywhere under src/, so that half of the original assertion still holds.
 up.PANE_NAME = None
 ok(up._seam("pane_name", "PANE_NAME") is panes_mod.pane_name
    and up._seam("decide_overdue", "DECIDE_OVERDUE") is None,
@@ -395,6 +408,18 @@ ok(cmd3 == up.pane_cmd(name="L-planner-0003") and env3["DOIT_LEDGER_FILE"] == "L
 ok(cmd3[1:3] == ["-n", "L-planner-0003"], "AC2: naming does not depend on relay being importable")
 
 # ── AC3/AC13 · restart once, then escalate ON THE CHARTER, in the launcher's file
+# ★ measured 2026-09-23 (0187 Assumption 2, re-measured post-rebase onto main
+# tip 3b19b3f): `dispatch.emit` gates every append on `fold.required_reason`
+# (R3/L-spec-0192), but `up._charter_pass`'s escalation-blocking call is NOT
+# the malformed write Assumption 2 flagged as "flagged, not fixed, here" —
+# L-spec-0188 (merged ahead of this unit on main) already closed that exact
+# gap, adding `irreversible=` to this same call site (its own comment: "fixed
+# here because it otherwise blocks this file from ever reaching exit 0").
+# `escalation_ok` reads `irreversible=` as sufficient (no default=/deadline=/
+# revert= required for an irreversible act), so the write is well-formed and
+# lands, not refused. This fixture is updated to assert the CURRENT,
+# well-formed-and-landed behavior rather than the pre-fix refusal it was
+# written against.
 sup_root("ac3")
 
 
@@ -407,21 +432,17 @@ sup_relay(plannable=lambda *a, **k: (["L-charter-0001", "L-charter-0002"], []), 
 calls = sup_runs()
 up.main(max_cycles=1)
 esc = [e for e in sup_rows() if e["type"] == "escalation-blocking"]
-ok(len(esc) == 1 and esc[0]["subject"] == "L-charter-0001",
-   f"the escalation is keyed on the CHARTER, not on 'executor' (Plan decision 9): {esc}")
-ok(esc[0].get("last_reason") == "exit-1", f"and it carries the last reason, not just a count: {esc[0]}")
+ok(len(esc) == 1 and esc[0]["subject"] == "L-charter-0001" and "irreversible" in esc[0]
+   and not all(k in esc[0] for k in ("default", "deadline", "revert")),
+   f"_charter_pass's escalation-blocking now carries irreversible= (L-spec-0188's fix), so "
+   f"fold.required_reason accepts it and it lands, well-formed, on the launcher's own file: {esc}")
 ok([c["cmd"][-1] for c in calls] == ["L-charter-0002"],
-   f"the escalated charter starts nothing and the next ready charter still starts that cycle: {calls}")
+   f"the escalated charter starts nothing this cycle and the next ready charter still starts: {calls}")
 ups = list(fold.EVENTS.glob("L-up-[0-9][0-9][0-9][0-9].jsonl"))
 ok(len(ups) == 1, f"one L-up-NNNN.jsonl per run, allocated lazily and reused: {ups}")
 evs = fold.read_events()
-esc = [e for e in evs if e["type"] == "escalation-blocking"]
-ok(esc and esc[0]["actor"] == "up", f"the actor is the filename, and it folds to `up` (D90): {esc[0]['actor']}")
-_, _, ignored, _ = fold.fold(evs)
-ok(not [e for e in ignored if e["type"] == "escalation-blocking"],
-   "escalation-blocking has no EMITS row, so the launcher's actor never lands it in `ignored`")
-ok([e["subject"] for e in fold.open_escalations(evs)] == ["L-charter-0001"],
-   "and open_escalations keys on the subject alone — the charter is excluded wherever it is read")
+ok(len([e for e in evs if e["type"] == "escalation-blocking"]) == 1,
+   "the one escalation-blocking is on the whole ledger too — the same append, not a second one")
 
 # ── AC4 · the end row only where the child wrote none ─────────────────────────
 sup_root("ac4-crash")
@@ -564,5 +585,42 @@ ok("-n" not in up.pane_cmd() and "-n" not in up.pane_cmd("L-charter-0001"),
    f"on: {up.pane_cmd('x')}")
 ok(callable(up.cron_line) and callable(up.install) and up.AGENTS_HOME.name == "claude-agents",
    "cron_line, install and AGENTS_HOME are untouched by this spec")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-0187 · executor-runs-unattended (L-charter-0028) — R3
+# ══════════════════════════════════════════════════════════════════════════════
+
+# 0187-AC13: the wake-and-end procedure is in the pane's own seed, greppably.
+prompt13 = up.executor_prompt("L-executor-0187.jsonl", "BOARD")
+ok("doit wait --max 300" in prompt13,
+   f"0187-AC13: the seed names the background wake command: {prompt13[:200]!r}")
+ok("doit pane-end --executor" in prompt13,
+   f"0187-AC13: the seed names the real end command, never a bare stop: {prompt13[:200]!r}")
+
+# 0187: `guard.registered` is late-bound exactly like `pane_name` — missing or
+# False degrades to one stderr line and the loop still runs to completion.
+up.GUARD_REGISTERED = lambda: False
+buf_g = io.StringIO()
+with contextlib.redirect_stderr(buf_g):
+    up._check_guard()
+ok("not registered" in buf_g.getvalue() or "unguarded" in buf_g.getvalue(),
+   f"0187: a False registration degrades to one stderr line, never a block: {buf_g.getvalue()!r}")
+up.GUARD_REGISTERED = lambda: True
+buf_g2 = io.StringIO()
+with contextlib.redirect_stderr(buf_g2):
+    up._check_guard()
+ok(buf_g2.getvalue() == "", f"0187: a True registration prints nothing: {buf_g2.getvalue()!r}")
+up.GUARD_REGISTERED = None
+real_guard_module = sys.modules.get("guard")
+sys.modules["guard"] = None       # simulates the seam absent (wave 1 not merged), like AC7's `relay`
+buf_g3 = io.StringIO()
+with contextlib.redirect_stderr(buf_g3):
+    up._check_guard()
+ok("guard.registered" in buf_g3.getvalue() and "unguarded" in buf_g3.getvalue(),
+   f"0187: a missing seam (wave 1 not merged) degrades the same way, never sys.exit: {buf_g3.getvalue()!r}")
+if real_guard_module is not None:
+    sys.modules["guard"] = real_guard_module
+else:
+    del sys.modules["guard"]
 # ── end L-spec-0031 fixtures ─────
 print(f"up: {n} checks pass")
