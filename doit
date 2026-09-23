@@ -21,7 +21,8 @@ case "${1:-board}" in
   guard)   shift; exec python3 "$SRC/guard.py" "$@" ;;
   models)  shift; exec python3 "$SRC/models.py" "$@" ;;
   version) cat "$HERE/VERSION" ;;
-  backup)  shift; exec bash "$SRC/backup.sh" "$@" ;;
+  backup)  shift; exec python3 "$SRC/backup.py" "$@" ;;
+  restore) shift; exec python3 "$SRC/restore.py" "$@" ;;
   # ★ DISCOVERED, never enumerated. This was a hardcoded && chain of twelve
   # files, so a new src/test_*.py ran nowhere and its guard was advisory until
   # someone remembered to add it. The `· <file>` marker names the file that is
@@ -74,7 +75,8 @@ doit — a ledger that derives state, and the guards that read it
   doit models show | use <mixed|claude-only>   the root's model map: print it, or install a profile
   doit version                            print the release version (VERSION; CHANGELOG.md has the history)
   doit alloc <kind> [--dir]               claim the next L-<kind>-NNNN under content and print its path (§2.8)
-  doit backup push | drill                replicate the ledger / prove it restores
+  doit backup push | watch --for N | status | cron   replicate the ledger (§9.9)
+  doit restore <snapshot> [--root D] [--dry-run] [--remote U]  rebuild from the mirror
   doit test                               run every check
   doit help
 
