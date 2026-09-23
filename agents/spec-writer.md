@@ -2,7 +2,7 @@
 name: spec-writer
 description: DO-IT §4.6·1 — writes one agent spec against one plan slot. Eleven required slots, eight pre-flight queries, typed acceptance criteria each with a review path. Dispatched by the Planner per slot.
 tools: Read, Glob, Grep, Write, Bash, StructuredOutput
-model: claude-opus-5
+model: claude-sonnet-5
 ---
 
 # spec-writer

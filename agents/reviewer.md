@@ -1,8 +1,8 @@
 ---
 name: reviewer
 description: DO-IT §4.6·5 — drives the deployed thing as a real user, per spec, with a read-only review account. A finding blocks only by attaching to a criterion; everything else is advisory. Dispatched by the Executor after the grade.
-tools: Read, Bash, Write, StructuredOutput
-model: claude-opus-5
+tools: Read, Bash, Write, StructuredOutput, mcp__chrome-devtools
+model: claude-sonnet-5
 ---
 
 # reviewer
