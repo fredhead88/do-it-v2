@@ -295,19 +295,88 @@ def check_and_end_executor(handover, *, root=None, child_env=None,
     return 0
 
 
+def check_and_end_relay(*, root=None, child_env=None, pending_packets=None,
+                        kill=os.kill, find_ancestor=ancestor_claude_pid):
+    """The relay pane's own ⑦ (L-spec-0270 R1). Two preconditions, refusal-first,
+    UNDETERMINED IS NEVER CLEAN — mirroring `check_and_end_executor`'s shape,
+    but with neither an `l1-complete` nor a handover: the relay carries no
+    decision forward, so requiring one here would invent an artifact nothing
+    reads.
+
+      1. `up._unclaimed_pending` (the same filter `up.relay_main` uses) is
+         empty. Ending over an unclaimed packet strands it with no server.
+      2. the supervised marker (`DOIT_SUPERVISED`) is present and non-empty.
+
+    On both clearing: resolve the nearest ancestor `claude` process, SIGTERM
+    it, print the outcome, return `0`. Any refusal prints its reason to
+    stderr and returns `1` with no signal sent. Appends no event of its own —
+    `relay_main`'s own `spawn-done` is the terminal record."""
+    events_dir = bind_root(root)
+    child_env = {} if child_env is None else child_env
+
+    try:
+        events = fold.read_events()
+    except OSError as exc:
+        print(f"refused: the ledger under {events_dir} could not be read ({exc})", file=sys.stderr)
+        return 1
+
+    # 1 — nothing unclaimed remains.
+    try:
+        pending = _pending(pending_packets, events, fold.ROOT)
+    except Exception as exc:
+        print(f"refused: pending-packet check unresolved — "
+              f"{RELAY_MODULE}.{RELAY_PENDING} raised {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
+    outstanding = up._unclaimed_pending(pending, fold.ROOT)
+    if outstanding:
+        named = ", ".join(str(p.get("spawn", p) if isinstance(p, dict) else p)
+                          for p in outstanding[:3])
+        print(f"refused: {len(outstanding)} unclaimed seat packet(s) outstanding ({named})",
+              file=sys.stderr)
+        return 1
+
+    # 2 — something can replace this pane.
+    if not supervised(child_env):
+        print(f"refused: the supervised marker {SUPERVISED_ENV} is absent or empty "
+              f"— no supervisor can replace this pane", file=sys.stderr)
+        return 1
+
+    # The pid is resolved BEFORE any effect: a walk that cannot find the pane
+    # must signal nothing.
+    pid = find_ancestor()
+    if not pid:
+        print(f"refused: no ancestor process named {CLAUDE!r} found above this one "
+              f"— nothing to signal", file=sys.stderr)
+        return 1
+
+    kill(pid, signal.SIGTERM)
+    print(f"ended: SIGTERM to {CLAUDE} pid {pid} — relay")
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="pane-end", description=__doc__.splitlines()[0])
     ap.add_argument("charter", nargs="?", default=None,
                     help="the charter id this pane planned (L-charter-NNNN) — the Planner path")
     ap.add_argument("--executor", action="store_true",
                     help="the Executor path: quiet point in place of l1-complete, no charter")
-    ap.add_argument("--handover", required=True, help="path to the handover file, already written")
+    ap.add_argument("--relay", action="store_true",
+                    help="the relay path: end once nothing unclaimed remains — no charter, no handover")
+    ap.add_argument("--handover", default=None,
+                    help="path to the handover file, already written (required on the charter "
+                         "and --executor paths; not read on --relay)")
     ap.add_argument("--root", default=None, help="the do-it root to read and append under")
     a = ap.parse_args(argv)
+    if a.relay:
+        return check_and_end_relay(root=a.root)
     if a.executor:
+        if not a.handover:
+            ap.error("--handover is required for --executor")
         return check_and_end_executor(a.handover, root=a.root)
     if not a.charter:
-        ap.error("a charter (L-charter-NNNN), or --executor, is required")
+        ap.error("a charter (L-charter-NNNN), --executor, or --relay is required")
+    if not a.handover:
+        ap.error("--handover is required for a charter")
     ended, reason = check_and_end(a.charter, a.handover, root=a.root)
     if not ended:
         print(reason, file=sys.stderr)

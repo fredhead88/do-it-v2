@@ -16,6 +16,7 @@ case "${1:-board}" in
   tick)    exec python3 "$SRC/tick.py" ;;
   wait)    shift; exec python3 "$SRC/tick.py" wait "$@" ;;
   up)      shift; exec python3 "$SRC/up.py" "$@" ;;
+  relay)   shift; exec python3 "$SRC/up.py" --relay "$@" ;;
   pane-end) shift; exec python3 "$SRC/pane_end.py" "$@" ;;
   think)   shift; exec python3 "$SRC/think.py" "$@" ;;
   carry)   shift; exec python3 "$SRC/carry.py" "$@" ;;
@@ -70,6 +71,7 @@ doit — a ledger that derives state, and the guards that read it
   doit tick                               fold; spawn the Executor only if the lane is actionable (D117)
   doit wait [--max SEC]                   block until the ledger changes or SEC pass (default 300), then tick
   doit up                                 start the Planner pane; print (never install) the tick's cron line
+  doit relay [--print-only]               start the standing relay pane on whatever is pending, unclaimed
   doit pane-end <charter> --handover F [--root D]   the Planner's ⑦: end this pane's own process, if it may
   doit think <topic> | --land F… | --discard <topic>
                                           open a Thinker session, or land its charters (§3.3)

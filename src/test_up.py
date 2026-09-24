@@ -623,4 +623,117 @@ if real_guard_module is not None:
 else:
     del sys.modules["guard"]
 # ── end L-spec-0031 fixtures ─────
+
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-0270 · relay-contract (L-charter-0033 R1) — relay_pane_cmd, RELAY_DRY,
+# _unclaimed_pending, relay_main, and `doit relay`'s __main__ wiring.
+# ══════════════════════════════════════════════════════════════════════════════
+shutil.copyfile(real_agents / "relay.md", dispatch.AGENTS / "relay.md")
+
+# ── AC2: relay_pane_cmd is pane_cmd's byte-identical twin, agent name aside ──
+bare_p, bare_r = up.pane_cmd(), up.relay_pane_cmd()
+ok(bare_r == ["claude", "--agent", "relay"] + bare_p[3:],
+   f"AC2: byte-identical to pane_cmd() except the agent name: {bare_p} vs {bare_r}")
+named_pp, named_rr = up.pane_cmd(name="L-relay-0001"), up.relay_pane_cmd(name="L-relay-0001")
+ok(named_rr == ["claude", "-n", "L-relay-0001", "--agent", "relay"] + named_pp[5:],
+   f"AC2: the name= form too: {named_pp} vs {named_rr}")
+prompt_pp = up.pane_cmd(prompt="L-builder-0009")
+prompt_rr = up.relay_pane_cmd(prompt="L-builder-0009")
+ok(prompt_rr == ["claude", "--agent", "relay"] + prompt_pp[3:],
+   f"AC2: the prompt= form too: {prompt_pp} vs {prompt_rr}")
+BANNED = {"-p", "--json-schema", "--output-format"}
+ok(not (BANNED & set(bare_r)) and not (BANNED & set(named_rr)) and not (BANNED & set(prompt_rr)),
+   f"AC2: never -p, --json-schema or --output-format, in any of the three forms: "
+   f"{bare_r} / {named_rr} / {prompt_rr}")
+
+# ── AC3(a)/(b): the LIVE loop, nothing unclaimed -> RELAY_DRY, no subprocess, no event ─
+sup_root("relay-ac3a")
+sup_relay(pending_packets=lambda *a, **k: [])
+calls = sup_runs()
+buf = io.StringIO()
+with contextlib.redirect_stdout(buf):
+    up.relay_main(print_only=False, max_cycles=1)
+ok(up.RELAY_DRY in buf.getvalue(), f"AC3(a): prints RELAY_DRY: {buf.getvalue()!r}")
+ok(calls == [], f"AC3(a): no subprocess.run call: {calls}")
+ok(all(p.stat().st_size == 0 for p in fold.EVENTS.glob("*.jsonl")),
+   "AC3(a): no event appended anywhere")
+
+sup_root("relay-ac3b")
+(fold.ROOT / "seat").mkdir(parents=True, exist_ok=True)
+(fold.ROOT / "seat" / "L-builder-0009.claimed").touch()
+sup_relay(pending_packets=lambda *a, **k: [{"spawn": "L-builder-0009", "age_min": 3}])
+calls = sup_runs()
+buf = io.StringIO()
+with contextlib.redirect_stdout(buf):
+    up.relay_main(print_only=False, max_cycles=1)
+ok(up.RELAY_DRY in buf.getvalue(),
+   f"AC3(b): a single already-claimed pending packet still reads as nothing unclaimed: {buf.getvalue()!r}")
+ok(calls == [], f"AC3(b): no subprocess.run call: {calls}")
+ok(all(p.stat().st_size == 0 for p in fold.EVENTS.glob("*.jsonl")),
+   "AC3(b): no event appended anywhere")
+
+# ── AC4: print-only, nothing unclaimed -> None, zero writes at all ───────────
+sup_root("relay-ac4")
+sup_relay(pending_packets=lambda *a, **k: [])
+calls = sup_runs()
+buf = io.StringIO()
+with contextlib.redirect_stdout(buf):
+    ret4 = up.relay_main(print_only=True, max_cycles=1)
+ok(up.RELAY_DRY in buf.getvalue(), f"AC4: prints RELAY_DRY: {buf.getvalue()!r}")
+ok(ret4 is None, f"AC4: returns None: {ret4}")
+ok(calls == [], f"AC4: no subprocess.run call: {calls}")
+ok(not list(fold.EVENTS.glob("L-relay-*.jsonl")), "AC4: allocates no L-relay-*.jsonl file at all")
+
+# ── AC5: print-only, one unclaimed packet -> (cmd, env), the allocation only ─
+sup_root("relay-ac5")
+sup_relay(pending_packets=lambda *a, **k: [{"spawn": "L-builder-0009", "age_min": 3}])
+calls = sup_runs()
+ret5 = up.relay_main(print_only=True, max_cycles=1)
+ok(ret5 is not None, f"AC5: returns (cmd, env), not None: {ret5}")
+cmd5, env5 = ret5
+ok(cmd5[cmd5.index("--agent") + 1] == "relay", f"AC5: --agent relay: {cmd5}")
+ok(cmd5[1] == "-n" and cmd5[2].startswith("L-relay-"),
+   f"AC5: a freshly allocated -n L-relay-<NNNN> pair: {cmd5[:3]}")
+ok(cmd5[-1] == "L-builder-0009", f"AC5: the trailing positional names the pending spawn id: {cmd5}")
+ok(calls == [], f"AC5: no subprocess started: {calls}")
+allocated5 = list(fold.EVENTS.glob("L-relay-*.jsonl"))
+ok(len(allocated5) == 1 and allocated5[0].stem == cmd5[2],
+   f"AC5: the allocated ledger file names the pane cmd already carries: {allocated5} vs {cmd5[2]}")
+ok(allocated5[0].stat().st_size == 0, "AC5: and it is 0 bytes — no event appended")
+
+# ── AC6: the LIVE loop, one unclaimed packet -> one pane, spawn-started/spawn-done ─
+sup_root("relay-ac6")
+sup_relay(pending_packets=lambda *a, **k: [{"spawn": "L-builder-0009", "age_min": 3}])
+calls = sup_runs(rc=0)
+up.relay_main(print_only=False, max_cycles=1)
+ok(len(calls) == 1, f"AC6: exactly one subprocess.run call: {calls}")
+cmd6 = calls[0]["cmd"]
+ok(cmd6[cmd6.index("--agent") + 1] == "relay", f"AC6: --agent relay: {cmd6}")
+ok(cmd6[1] == "-n" and cmd6[2].startswith("L-relay-"),
+   f"AC6: a freshly allocated -n L-relay-<NNNN> pair: {cmd6[:3]}")
+rows6 = [js.loads(l) for l in calls[0]["ledger"].read_text().splitlines()]
+ok([r["type"] for r in rows6] == ["spawn-started", "spawn-done"],
+   f"AC6: spawn-started then spawn-done, in that order, on the one ledger file: {[r['type'] for r in rows6]}")
+ok(all(r.get("role") == "relay" for r in rows6), f"AC6: both events carry role relay: {rows6}")
+ok(rows6[1].get("exit_code") == 0, f"AC6: spawn-done carries exit_code 0: {rows6[1]}")
+
+# ── AC7: `doit relay --print-only` reaches relay_main end to end, never main ──
+AC7_ROOT, AC7_HOME = TMP / "relay-ac7-root", TMP / "relay-ac7-home"
+(AC7_ROOT / "events").mkdir(parents=True)
+(AC7_ROOT / "seat").mkdir(parents=True)
+(AC7_ROOT / "seat" / "L-builder-0009.packet.md").write_text("packet body\n")
+(AC7_ROOT / "events" / "L-executor-0001.jsonl").write_text(json.dumps({
+    "v": 1, "ts": fold.NOW.isoformat(timespec="seconds"), "type": "spawn-started",
+    "subject": "L-spec-0009", "spawn": "L-builder-0009", "role": "builder"}) + "\n")
+env7 = {**os.environ, "DOIT_ROOT": str(AC7_ROOT), "HOME": str(AC7_HOME)}
+env7.pop("DOIT_PROJECT", None)
+env7.pop("DOIT_LEDGER_FILE", None)
+p7 = subprocess.run([DOIT, "relay", "--print-only"], capture_output=True, text=True, env=env7)
+ok("--agent relay" in p7.stdout, f"AC7: reaches relay_main, not main: out={p7.stdout!r} err={p7.stderr!r}")
+ok("--agent planner" not in p7.stdout, f"AC7: never mentions --agent planner: {p7.stdout!r}")
+ok("L-builder-0009" in p7.stdout, f"AC7: names the pending spawn id: {p7.stdout!r}")
+leftover7 = list((AC7_ROOT / "events").glob("L-relay-*.jsonl"))
+ok(bool(leftover7) and all(p.stat().st_size == 0 for p in leftover7),
+   f"AC7: any L-relay-*.jsonl left under events/ is 0 bytes: {leftover7}")
+
 print(f"up: {n} checks pass")

@@ -402,5 +402,52 @@ check(p12c.returncode == 1, f"0187-AC12(c): exit 1 on a fresh root with no messa
 check("quiet point" in (p12c.stderr or ""),
       f"0187-AC12(c): stderr names the quiet point: {p12c.stderr!r}")
 
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-0270 · relay-contract (L-charter-0033 R1) — check_and_end_relay, AC8
+# ══════════════════════════════════════════════════════════════════════════════
+C = TMP / "rootC"
+UNCLAIMED = lambda events, root: [{"spawn": "L-builder-0009", "age_min": 3}]  # noqa: E731
+
+
+def refuses_relay(why, root, **kw):
+    """Mirrors `refuses_executor()` above: NO effect of any kind on a refusal —
+    no signal, no ledger growth. Returns the stderr text."""
+    before = lines(root)
+    kill = Spy()
+    child_env = kw.pop("child_env", {"DOIT_SUPERVISED": "1"})
+    buf = io.StringIO()
+    with contextlib.redirect_stderr(buf):
+        code = pane_end.check_and_end_relay(
+            root=root, kill=kill, find_ancestor=kw.pop("find_ancestor", lambda: 4242),
+            child_env=child_env, **kw)
+    check(code == 1, f"{why}: must refuse (1), got {code}")
+    check(kill.calls == [], f"{why}: refused but signalled {kill.calls}")
+    check(lines(root) == before, f"{why}: refused but the ledger grew — {before} -> {lines(root)}")
+    return buf.getvalue()
+
+
+# (a) an unclaimed pending packet exists, supervised marker set -> refuse.
+ledger(C)
+r = refuses_relay("an unclaimed pending packet outstanding", C, pending_packets=UNCLAIMED)
+check("unclaimed" in r or "outstanding" in r, f"AC8(a): reason must name it: {r}")
+
+# (b) nothing unclaimed, but the supervised marker is absent -> refuse.
+ledger(C)
+r = refuses_relay("no supervisor to replace this pane", C, pending_packets=CLEAR, child_env={})
+check("supervised" in r, f"AC8(b): reason must name the supervised marker: {r}")
+
+# (c) success: nothing unclaimed — including the case where the only pending
+#     packet's `.claimed` file exists — and the supervised marker is set.
+ledger(C)
+(C / "seat").mkdir(parents=True, exist_ok=True)
+(C / "seat" / "L-builder-0009.claimed").touch()
+kill_r, walk_r = Spy(), Spy(ret=5150)
+code_r = pane_end.check_and_end_relay(root=C, pending_packets=UNCLAIMED, kill=kill_r,
+                                      find_ancestor=walk_r, child_env={"DOIT_SUPERVISED": "1"})
+check(code_r == 0, f"AC8(c): nothing unclaimed and supervised -> ends: {code_r}")
+import signal as _signal3  # noqa: E402
+check(len(kill_r.calls) == 1 and kill_r.calls[0][0] == (5150, _signal3.SIGTERM),
+      f"AC8(c): one SIGTERM to the resolved ancestor pid, and only once: {kill_r.calls}")
+
 shutil.rmtree(TMP, ignore_errors=True)
 print(f"pane_end: {N} checks pass")
