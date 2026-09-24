@@ -645,10 +645,23 @@ def uncarried(events, inbox=None, ledger_dir=None):
     `events` already names that exact source.
 
     `kind: "pr"`: every distinct `source` an `inbound-registered` event in `events`
-    names, with no matching `spec-carried` event."""
+    names, with no matching `spec-carried` event.
+
+    L-charter-0033/board-owners, Target 3: a source named by an authorized-actor
+    `inbound-covered` event (a duplicate-kill, no real carry) is ALSO excluded
+    from both loops — actor-gated from the start: an `inbound-covered` from any
+    other actor is read and does NOT drop the source, the same way an
+    unauthorized event is ignored everywhere else in the ledger (ADR-0028-3)."""
     ld = pathlib.Path(ledger_dir) if ledger_dir is not None else _default_ledger_dir()
     ib = pathlib.Path(inbox) if inbox is not None else inbox_dir()
     carried_sources = {str(e.get("source")) for e in events if e.get("type") == "spec-carried"}
+    import fold                          # here, not at the top: mirrors this file's own lazy
+                                          # `import fold` inside `_do_carry`/`_charter_validity` —
+                                          # `EMITS` is a sibling's seam, not yet on `fold.py` at
+                                          # first-writing's base_sha
+    covered_sources = {str(e.get("source")) for e in events
+                       if e.get("type") == "inbound-covered"
+                       and e.get("actor") in fold.EMITS.get("inbound-covered", set())}
 
     def attempts_for(source):
         fails = [e for e in events if e.get("type") == "carry-failed"
@@ -667,7 +680,7 @@ def uncarried(events, inbox=None, ledger_dir=None):
                 continue
             if (rec.get("status") or "") != "registered":
                 continue
-            if prefix in carried_sources:
+            if prefix in carried_sources or prefix in covered_sources:
                 continue
             if not _has_staged_material(prefix, rec, ib):
                 continue
@@ -680,7 +693,7 @@ def uncarried(events, inbox=None, ledger_dir=None):
         if e.get("type") != "inbound-registered":
             continue
         src = str(e.get("source"))
-        if src in seen_pr or src in carried_sources:
+        if src in seen_pr or src in carried_sources or src in covered_sources:
             continue
         seen_pr.add(src)
         n, last = attempts_for(src)

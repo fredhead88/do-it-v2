@@ -344,4 +344,29 @@ with open(d / "events" / "L-planner-0003.jsonl", "a") as fh:
 ok("L-charter-0404" not in {e.get("subject") for e in read()},
    "an unstamped event is filtered out, so the fixtures never depend on the operator's shell")
 
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-0271 · board-owners (L-charter-0033) — Target 5/SD16
+# ══════════════════════════════════════════════════════════════════════════════
+os.environ.pop("DOIT_SEAT_CLAIM_SEC", None)      # the default (300s) for this whole block
+
+# ── AC12 · a later same-(subject,role) spawn-done clears the earlier row's
+# UNSERVED listing too ─────────────────────────────────────────────────────────
+d = scene("unserved-later-spawn-done")
+sev(d, "L-builder-0200", "spawn-started", "L-spec-0271", iso(2000), backend="seat", role="builder")
+sev(d, "L-builder-0200", "spawn-failed", "L-spec-0271", iso(100), reason="unserved")
+sev(d, "L-builder-0201", "spawn-started", "L-spec-0271", iso(1000), backend="seat", role="builder")
+sev(d, "L-builder-0201", "spawn-done", "L-spec-0271", iso(10))
+ok(relay.unserved(read(), d) == [],
+   "A (the earlier, failed-unserved) is excluded because a LATER same-(subject,role) "
+   "spawn (B) resolved spawn-done; B is excluded because it is itself resolved "
+   "(the file's own existing rule)")
+
+# ── AC13 · a seat-stale'd pending row reports stale-still-offered ──────────────
+d = scene("unserved-seat-stale")
+sev(d, "L-research-0200", "spawn-started", "L-spec-0272", iso(1000), backend="seat", role="research")
+sev(d, "L-research-0200", "seat-stale", "L-spec-0272", iso(301), role="research", age_s=301)
+rows = relay.unserved(read(), d)
+ok(len(rows) == 1 and rows[0]["status"] == "stale-still-offered"
+   and rows[0]["spawn"] == "L-research-0200", rows)
+
 print(f"relay: {N} checks pass")

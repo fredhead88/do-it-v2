@@ -657,6 +657,34 @@ entry10 = next(e for e in u10 if e["source"] == "1472")
 check(entry10["attempts"] == 2 and entry10["last_error"] == "still none",
       f"★ attempts/last_error are read from carry-failed, last entry wins: {entry10}")
 
+# ══ L-spec-0271/AC6 · uncarried() excludes a v4 source covered by an
+# authorized-actor inbound-covered, and does NOT exclude one covered by an
+# unauthorized actor ═══════════════════════════════════════════════════════════
+record_at(FL, 1498, "covered-authorized", spec_file=str(FRESH / "nowhere" / "1498-spec.md"))
+inbox_at(FI, 1498, "covered-authorized", "# 1498 fresh inbox\n")
+record_at(FL, 1497, "covered-unauthorized", spec_file=str(FRESH / "nowhere" / "1497-spec.md"))
+inbox_at(FI, 1497, "covered-unauthorized", "# 1497 fresh inbox\n")
+events11 = events10 + [
+    {"type": "inbound-covered", "source": "1498", "covered_by": "L-spec-0999", "actor": "executor"},
+    {"type": "inbound-covered", "source": "1497", "covered_by": "L-spec-0998", "actor": "builder"},
+]
+u11 = carry.uncarried(events11, inbox=FI, ledger_dir=FL)
+check(not any(e["source"] == "1498" for e in u11),
+      f"★ uncarried() excludes a v4 source covered by an authorized-actor inbound-covered: {u11}")
+check(any(e["source"] == "1497" for e in u11),
+      f"★ uncarried() does NOT exclude a v4 source covered by an unauthorized actor: {u11}")
+
+# ══ L-spec-0271/AC7 · uncarried() excludes a pr source covered by an
+# authorized-actor inbound-covered — the identical, actor-gated exclusion set
+# AC6 proves for v4 sources backs the pr loop too ═════════════════════════════
+events13 = events9 + [
+    {"type": "inbound-covered", "source": "https://github.com/o/r/pull/9",
+     "covered_by": "L-spec-0999", "actor": "executor"},
+]
+u13 = carry.uncarried(events13, inbox=FI, ledger_dir=FL)
+check(not any(e["source"] == "https://github.com/o/r/pull/9" for e in u13),
+      f"★ uncarried() excludes a pr source covered by an authorized-actor inbound-covered: {u13}")
+
 # ══ AC12 · a non-digit source is never glob-matched outside ledger_dir ════════
 decoy = TMP / "decoy-1.yml"
 decoy.write_bytes(b"status: registered\n")
