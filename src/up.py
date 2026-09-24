@@ -17,7 +17,7 @@ import importlib, json, os, pathlib, subprocess, sys, time
 
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-import dispatch, fold, models, tick  # noqa: E402
+import dispatch, fold, launch, models, tick  # noqa: E402
 
 DOIT = HERE.parent / "doit"
 
@@ -31,7 +31,7 @@ def cron_line():
             f">> {fold.ROOT}/logs/tick.log 2>&1")
 
 
-def pane_cmd(prompt=None, name=None):
+def pane_cmd(prompt=None, name=None, model=None):
     """Interactive, so no -p, no --json-schema, no --output-format: the pane's
     Output is the files and events it writes. The agent file's tools: line is the
     sandbox; the deny list is the only form a retire list has (D119).
@@ -44,22 +44,27 @@ def pane_cmd(prompt=None, name=None):
     `name` is the pane's own ledger stem (R12, mirroring the Executor's own
     `_pane_argv`): given, it is `-n <name>` as the first two tokens after
     `claude`. Omitted (the default), the argv is byte-identical to before this
-    parameter existed — no `-n` anywhere."""
+    parameter existed — no `-n` anywhere.
+
+    `model` (L-spec-0320 R2), truthy, inserts `["--model", model]` right after
+    `--agent planner`; falsy (every call site before this parameter existed)
+    leaves the argv byte-identical to before it."""
     cmd = ["claude"] + (["-n", name] if name else []) + [
-           "--agent", "planner",
+           "--agent", "planner"] + (["--model", model] if model else []) + [
            "--disallowedTools", ",".join(f"Skill({s})" for s in tick.RETIRE),
            "--dangerously-skip-permissions"]
     return cmd + [prompt] if prompt else cmd
 
 
-def relay_pane_cmd(prompt=None, name=None):
+def relay_pane_cmd(prompt=None, name=None, model=None):
     """`up.pane_cmd()`'s byte-identical twin for the relay contract (L-spec-0270
     R1): same shape, same RETIRE deny list, same interactive flags — never `-p`,
     `--json-schema` or `--output-format` — with `--agent relay` in place of
     `--agent planner`. `prompt` is the comma-joined unclaimed spawn ids, oldest
-    first; `name` is the pane's own ledger stem, exactly as `pane_cmd` uses it."""
+    first; `name` is the pane's own ledger stem, exactly as `pane_cmd` uses it;
+    `model` is `pane_cmd`'s own new keyword, same insertion point."""
     cmd = ["claude"] + (["-n", name] if name else []) + [
-           "--agent", "relay",
+           "--agent", "relay"] + (["--model", model] if model else []) + [
            "--disallowedTools", ",".join(f"Skill({s})" for s in tick.RETIRE),
            "--dangerously-skip-permissions"]
     return cmd + [prompt] if prompt else cmd
@@ -200,12 +205,20 @@ def _start(state, subject, mode, attempt, prompt, spawn_ids=None):
     dispatch.emit(ledger, base, "planner-started", subject=subject, planner=ledger.stem,
                   attempt=attempt, mode=mode, **ids)
     name = (_seam("pane_name", "PANE_NAME") or _stem)(ledger.name)
-    cmd = pane_cmd(prompt, name=name)
+    mp = models.load(fold.ROOT / "models.toml")
+    model = launch.model_for("planner")
+    model_configured = models.resolve("planner", mp=mp).get("model") if mp is not None else None
+    cmd = pane_cmd(prompt, name=name, model=model)
     print(f"# planner pane: {ledger.stem} · {mode} · {subject} · attempt {attempt}")
-    rc = subprocess.run(cmd, env=_child_env(ledger, supervised=True)).returncode
+    env = launch.child_env("planner", base=_child_env(ledger, supervised=True))
+    proc = subprocess.Popen(cmd, env=env)
+    launch.record("planner", ledger.stem, proc.pid, model or "unpinned",
+                  str(dispatch.AGENTS / "planner.md"), model_configured=model_configured)
+    rc = proc.wait()
     if not _ended(ledger):
         dispatch.emit(ledger, base, "planner-ended", subject=subject, planner=ledger.stem,
                       mode=mode, reason=f"exit-{rc}", **ids)
+    launch.ended(ledger.stem, rc)
 
 
 def _charter_pass(state, events, charter):
@@ -346,6 +359,7 @@ def relay_main(print_only=False, max_cycles=None):
         sys.exit(f"up: no relay contract at {contract} — the pane is the contract (D116)")
     install(contract)
     (fold.ROOT / "events").mkdir(parents=True, exist_ok=True)
+    mp = models.load(fold.ROOT / "models.toml")
     state, cycles = {"watermark": None, "said": None}, 0
     while max_cycles is None or cycles < max_cycles:
         cycles += 1
@@ -359,20 +373,26 @@ def relay_main(print_only=False, max_cycles=None):
             continue
         ledger = dispatch.alloc(fold.EVENTS, "L-relay-", ".jsonl")
         ids = ",".join(str(p.get("spawn") if isinstance(p, dict) else p) for p in todo)
-        cmd = relay_pane_cmd(prompt=ids, name=ledger.stem)
+        model = launch.model_for("relay")
+        model_configured = models.resolve("relay", mp=mp).get("model") if mp is not None else None
+        cmd = relay_pane_cmd(prompt=ids, name=ledger.stem, model=model)
         if print_only:
             print(f"# relay pane: {ledger.stem} · {' '.join(cmd)}")
             return cmd, _child_env(ledger)
         base = {"spawn": ledger.stem}
-        env = _child_env(ledger, supervised=True)
+        env = launch.child_env("relay", base=_child_env(ledger, supervised=True))
         dispatch.emit(ledger, base, "spawn-started", subject=ledger.stem, role="relay")
         print(f"# relay pane: {ledger.stem} · serving {ids}")
         try:
-            rc = subprocess.run(cmd, env=env).returncode
+            proc = subprocess.Popen(cmd, env=env)
         except OSError as e:
             dispatch.emit(ledger, base, "spawn-failed", subject=ledger.stem, role="relay",
                           why=f"{type(e).__name__}: {str(e)[:200]}")
             continue
+        launch.record("relay", ledger.stem, proc.pid, model or "unpinned",
+                      str(dispatch.AGENTS / "relay.md"), model_configured=model_configured)
+        rc = proc.wait()
+        launch.ended(ledger.stem, rc)
         dispatch.emit(ledger, base, "spawn-done", subject=ledger.stem, role="relay", exit_code=rc)
     return None
 
@@ -460,13 +480,14 @@ def executor_prompt(ledger_file, board):
             f"loop starts it the moment you exit — no keystroke, no wait.\n\n" + board)
 
 
-def _pane_argv(ledger_file, board):
+def _pane_argv(ledger_file, board, model=None):
     """`claude -n <ledger stem> --agent executor ...` (R12). Interactive by
-    construction: no -p, no --json-schema, no ANTHROPIC_API_KEY (spec 572, D121)."""
+    construction: no -p, no --json-schema, no ANTHROPIC_API_KEY (spec 572, D121).
+    `model`, truthy, inserts `["--model", model]` right after `--agent executor`."""
     name = (_seam("pane_name", "PANE_NAME") or _stem)(ledger_file)
-    return ["claude", "-n", name, "--agent", "executor",
-            "--disallowedTools", ",".join(executor_deny_list()),
-            "--dangerously-skip-permissions", executor_prompt(ledger_file, board)]
+    return (["claude", "-n", name, "--agent", "executor"] + (["--model", model] if model else []) +
+            ["--disallowedTools", ",".join(executor_deny_list()),
+             "--dangerously-skip-permissions", executor_prompt(ledger_file, board)])
 
 
 def _from_pane(src, stem):
@@ -616,6 +637,7 @@ def executor_loop(root, interval, print_only=False, max_cycles=None):
     install(contract)
     (root / "events").mkdir(parents=True, exist_ok=True)
     (root / "logs").mkdir(parents=True, exist_ok=True)
+    events_dir = root / "events"
     cycles = 0
     while max_cycles is None or cycles < max_cycles:
         cycles += 1
@@ -625,12 +647,14 @@ def executor_loop(root, interval, print_only=False, max_cycles=None):
             _settle_overdue(ev)
             ev = fold.read_events()          # its decisions are on the board this pane reads
         board = fold.render(ev, *fold.fold(ev))
-        cmd = _pane_argv(ledger.name, board)
+        model = launch.model_for("executor")
+        model_configured = models.resolve("executor", mp=mp).get("model") if mp is not None else None
+        cmd = _pane_argv(ledger.name, board, model=model)
         # R3 gap 1: built through `_child_env(..., supervised=True)` — a hand-built
         # dict here never set DOIT_SUPERVISED, so `pane_end.supervised()`'s
         # precondition refused for every pane this loop ever started.
-        env = {**_child_env(ledger, supervised=True), "DOIT_ROOT": str(root),
-               "DOIT_GATE_LEDGER_FILE": ledger.name}
+        env = {**launch.child_env("executor", base=_child_env(ledger, supervised=True)),
+               "DOIT_ROOT": str(root), "DOIT_GATE_LEDGER_FILE": ledger.name}
         print(f"# executor pane: {ledger.stem} · {' '.join(cmd[:-1])}")
         if print_only:
             return cmd, env
@@ -639,13 +663,18 @@ def executor_loop(root, interval, print_only=False, max_cycles=None):
         dispatch.emit(ledger, base, "spawn-started", subject=ledger.stem, role="executor",
                       backend="pane", pane=cmd[cmd.index("-n") + 1])
         try:
-            code = subprocess.run(cmd, env=env, cwd=str(root)).returncode
+            proc = subprocess.Popen(cmd, env=env, cwd=str(root))
         except OSError as e:
             dispatch.emit(ledger, base, "spawn-failed", subject=ledger.stem,
                           why=f"{type(e).__name__}: {str(e)[:200]}")
             print(f"up: the executor pane would not start ({e}) — retrying in {interval}m", file=sys.stderr)
             _SLEEP(float(interval) * 60)
             continue
+        launch.record("executor", ledger.stem, proc.pid, model or "unpinned",
+                      str(dispatch.AGENTS / "executor.md"), model_configured=model_configured,
+                      events_dir=events_dir)
+        code = proc.wait()
+        launch.ended(ledger.stem, code, events_dir=events_dir)
         edits = _repo_edits(before, _snapshot(root), ledger, fold.read_events())
         dispatch.emit(ledger, base, "spawn-done", subject=ledger.stem, exit_code=code,
                       seconds=round(time.time() - t0, 1), repo_edits=len(edits))

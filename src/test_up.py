@@ -331,8 +331,11 @@ def sup_relay(**fns):
 
 
 def sup_runs(rc=0, write=None):
-    """Replaces subprocess.run — records the launch, never makes one. `started` is
-    read at launch time, so AC5's ordering is observed and not inferred."""
+    """Replaces subprocess.run/Popen — records the launch, never makes one.
+    `started` is read at launch time, so AC5's ordering is observed and not
+    inferred. `_start`/`relay_main`/`executor_loop` now call `Popen`, not
+    `run` (L-spec-0320 R2) — the stand-in routes through the SAME closure so
+    every `calls`-based assertion below sees an identical shape."""
     calls = []
 
     def run(cmd, env=None, **kw):
@@ -341,7 +344,11 @@ def sup_runs(rc=0, write=None):
                       "started": [l for l in led.read_text().splitlines() if "planner-started" in l]})
         write and write(led)
         return types.SimpleNamespace(returncode=rc)
-    up.subprocess = types.SimpleNamespace(run=run)
+
+    def popen(cmd, env=None, **kw):
+        run(cmd, env=env, **kw)
+        return types.SimpleNamespace(pid=999999, wait=lambda: rc)
+    up.subprocess = types.SimpleNamespace(run=run, Popen=popen)
     return calls
 
 
