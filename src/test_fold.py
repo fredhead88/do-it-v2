@@ -1848,7 +1848,72 @@ finally:
         else:
             sys.modules[name] = saved
 
+# ── L-spec-0264 (deployer-actor) AC1 · deploy-landed's set gains `deployer`,
+# exact equality — a stray extra or a dropped existing actor both fail.
+assert fold.EMITS["deploy-landed"] == {"executor", "operator", "deployer"}, \
+    fold.EMITS["deploy-landed"]
+
+# AC2 · the two new EMITS entries, pinned to their own minimal sets; `deployer`
+# is explicitly excluded from deploy-approved (SD8/SD24: it never clears its
+# own hold).
+assert fold.EMITS["deploy-attempt"] == {"deployer"}, fold.EMITS["deploy-attempt"]
+assert fold.EMITS["deploy-approved"] == {"operator", "thinker"}, fold.EMITS["deploy-approved"]
+assert "deployer" not in fold.EMITS["deploy-approved"]
+
+# AC3 · deploy-started/deploy-failed/deploy-refused stay absent from EMITS —
+# the open-door design is unchanged, proven rather than merely unbroken.
+assert "deploy-started" not in fold.EMITS
+assert "deploy-failed" not in fold.EMITS
+assert "deploy-refused" not in fold.EMITS
+
+# AC4 · check_append() enforces the new/changed grants at the single-event door
+ev_landed_264 = {"type": "deploy-landed", "subject": S}
+assert fold.check_append(ev_landed_264, "deployer") is None, \
+    fold.check_append(ev_landed_264, "deployer")
+assert fold.check_append(ev_landed_264, "builder") is not None
+
+ev_attempt_264 = {"type": "deploy-attempt", "subject": S, "outcome": "deployed"}
+assert fold.check_append(ev_attempt_264, "deployer") is None, \
+    fold.check_append(ev_attempt_264, "deployer")
+assert fold.check_append(ev_attempt_264, "executor") is not None
+assert fold.check_append(ev_attempt_264, "operator") is not None
+
+ev_approved_264 = {"type": "deploy-approved", "subject": S, "sha": "abc1234"}
+assert fold.check_append(ev_approved_264, "operator") is None, \
+    fold.check_append(ev_approved_264, "operator")
+assert fold.check_append(ev_approved_264, "thinker") is None, \
+    fold.check_append(ev_approved_264, "thinker")
+assert fold.check_append(ev_approved_264, "deployer") is not None
+
+ev_started_264 = {"type": "deploy-started", "subject": S}
+assert fold.check_append(ev_started_264, "deployer") is None, \
+    fold.check_append(ev_started_264, "deployer")
+
+# AC5 · D90's real filename-to-actor path (no mock): `L-deployer-local.jsonl`
+# derives actor "deployer" for free, and fold() honours its deploy-landed/
+# deploy-attempt claims rather than ignoring them.
+ev264, *_ = ledger(**{"L-deployer-local.jsonl": [
+    {"ts": stamp(0), "type": "deploy-landed", "subject": S},
+    {"ts": stamp(1), "type": "deploy-attempt", "subject": S, "outcome": "deployed"}]})
+assert {e["actor"] for e in ev264} == {"deployer"}, {e["actor"] for e in ev264}
+_, _, ignored264, by_subject264 = fold.fold(ev264)
+assert not any(e["type"] in ("deploy-landed", "deploy-attempt") for e in ignored264), ignored264
+assert any(e["type"] == "deploy-landed" for e in by_subject264[S]), by_subject264[S]
+assert any(e["type"] == "deploy-attempt" for e in by_subject264[S]), by_subject264[S]
+
+# AC6 · a deployer-authored deploy-started/deploy-landed pair renders and
+# clears "deploy in flight" exactly as an executor-authored pair already does
+# (in_flight_deploys() is actor-blind by construction — unaffected by this spec).
+board264a = fold.render(*ledger(**{"L-deployer-local.jsonl": [
+    {"ts": stamp(0), "type": "deploy-started", "subject": S9, "sha": sha_full, "target": "prod"}]}))
+assert "deploy in flight" in board264a, board264a
+board264b = fold.render(*ledger(**{"L-deployer-local.jsonl": [
+    {"ts": stamp(0), "type": "deploy-started", "subject": S9, "sha": sha_full, "target": "prod"},
+    {"ts": stamp(0), "type": "deploy-landed", "subject": S9, "sha": sha_full, "target": "prod"}]}))
+assert "deploy in flight" not in board264b, board264b
+
 print("fold: 104 checks pass · +91 assertions (L-charter-0021: R3 R6 R11 R13 R14 R15)"
       " · +L-spec-0192 (fold-states-owed-due-and-killed: AC1-5 AC8 AC9 AC15-22)"
       " · +L-spec-0196 (board-shows-each-signal-as-itself: AC1-7 AC9 AC10 AC12)"
-      " · +L-spec-0242 (intake-core: AC5 AC8)")
+      " · +L-spec-0242 (intake-core: AC5 AC8)"
+      " · +L-spec-0264 (deployer-actor: AC1-9)")

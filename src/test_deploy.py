@@ -128,8 +128,9 @@ with tempfile.TemporaryDirectory() as d:
 
 # ── the fold's rule, not the script's ─────────────────────────────────────────
 import fold  # noqa: E402
-check(fold.EMITS["deploy-landed"] == {"executor", "operator"},
-      "★ deploy-landed is the clearing direction — only the seat that ran the deploy may claim it")
+check(fold.EMITS["deploy-landed"] == {"executor", "operator", "deployer"},
+      "★ deploy-landed is the clearing direction — only the seat that ran the deploy may claim it "
+      "(L-charter-0032/L-spec-0264: `deployer` joins the two existing actors)")
 check("deploy-failed" not in fold.EMITS and "deploy-started" not in fold.EMITS,
       "…while reporting a failure stays open to any actor (the safe direction)")
 
