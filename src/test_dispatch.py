@@ -744,7 +744,10 @@ os.environ["DOIT_SEAT_CLAIM_SEC"] = "1"
 # D120's dedup (packet_sha256 + contract_sha256) would refuse this dispatch before
 # it ever reached run_seat, on a packet whose CONTENT happens to match, not a re-run.
 PK.write_text("a packet for r6ac3\n")
-code, raw, wall = _seat_driven("research", "L-spec-0001", 60)
+# L-spec-0262/SWP1: research is a writing role with no system-wide default, so it
+# needs an explicit --path to ever reach run_seat at all (the case this fixture
+# means to exercise) — a bare TMP/content path, never opened, is enough.
+code, raw, wall = _seat_driven("research", "L-spec-0001", 60, path=str(TMP / "content" / "L-research-r6ac3.md"))
 PK.write_text("a packet\n")
 assert code == 1 and [e["type"] for e in raw] == ["spawn-started", "spawn-failed"], raw
 assert raw[-1]["reason"] == "unserved" and raw[-1]["spawn_path"] == "seat", raw[-1]
@@ -965,6 +968,167 @@ for bad_packet in ("", str(TMP / "nowhere.md")):
     except SystemExit as e:
         assert "not a file" in str(e.code) and "nothing allocated" in str(e.code), e.code
 assert sorted((TMP / "events").glob("L-research-*.jsonl")) == before_files, "refused before allocation: no new spawn file"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-0262 · seat-write-path (L-charter-0031) — SWP1-SWP5
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── AC2 · research/reuse-scout with a.path=None: refused before any spend —
+#    exactly one spawn-failed, no start event, no backend ever entered ────────
+_ac2_hit = []
+_real_run_claude, _real_run_seat, _real_run_codex = dispatch.run_claude, dispatch.run_seat, dispatch.run_codex
+
+
+def _ac2_boom(name):
+    def f(*a_, **k_):
+        _ac2_hit.append(name)
+        raise AssertionError(f"{name} must not be entered on a pre-spend refusal")
+    return f
+
+
+dispatch.run_claude, dispatch.run_seat, dispatch.run_codex = _ac2_boom("run_claude"), _ac2_boom("run_seat"), _ac2_boom("run_codex")
+for _role in ("research", "reuse-scout"):
+    # A fresh packet body — the bare default "a packet\n" already carries a
+    # standing D120 dedup entry for research (research-0018's codex "weekly
+    # limit" failure earlier in this file), which would refuse this dispatch
+    # for THAT reason and mask the one this fixture means to prove.
+    PK.write_text(f"a packet for AC2 ({_role})\n")
+    code, raw, _ = _seat_driven(_role, "L-spec-0001", 1, path=None)
+    PK.write_text("a packet\n")
+    assert code == 1 and [e["type"] for e in raw] == ["spawn-failed"], (_role, raw)
+    assert raw[0]["why"] == "a writing role needs --path", raw[0]
+dispatch.run_claude, dispatch.run_seat, dispatch.run_codex = _real_run_claude, _real_run_seat, _real_run_codex
+assert _ac2_hit == [], "AC2: no backend was ever entered on the pre-spend refusal"
+N += 1
+
+
+def _swp_serve(make_ready):
+    """Background thread for the fixtures below: waits for exactly one still-open
+    seat packet, calls `make_ready()` to create whatever file/dir the structured
+    output it returns claims exists, then answers with a fixed completion envelope."""
+    for _ in range(400):
+        pk = [q for q in (list((TMP / "seat").glob("*.packet.md")) if (TMP / "seat").is_dir() else [])
+              if not (TMP / "seat" / (q.name.split(".")[0] + ".result.json")).exists()
+              and not (TMP / "seat" / (q.name.split(".")[0] + ".output.json")).exists()]
+        if pk:
+            sid = max(pk, key=lambda q: q.stat().st_mtime).name.split(".")[0]
+            out = make_ready()
+            (TMP / "seat" / f"{sid}.result.json").write_text(json.dumps(
+                {"is_error": False, "structured_output": out, "num_turns": 1, "usage": {},
+                 "total_cost_usd": None, "modelUsage": {"m": {}}, "session_id": sid, "permission_denials": []}))
+            return
+        time.sleep(0.05)
+
+
+def _swp_dispatch(role, subject, path, make_ready, cwd=None, packet_text=None):
+    """Drives dispatch.main() directly on the seat backend (seat=True — no
+    DOIT_SEAT env needed); returns (code, events, spawn_id, cmd_json, packet_text).
+    `packet_text`, when given, is written to PK for this call only and restored
+    to the file-wide default after — a research dispatch earlier in this file
+    already left a standing D120 dedup entry on the bare "a packet\\n" body."""
+    if packet_text is not None:
+        PK.write_text(packet_text)
+    threading.Thread(target=_swp_serve, args=(make_ready,), daemon=True).start()
+    a = argparse.Namespace(role=role, subject=subject, packet=str(PK), path=path, cwd=str(cwd or REPO),
+                           charter=None, project="t", mcp_config=None, timeout=1, max_usd=None, seat=True)
+    try:
+        dispatch.main(a)
+        code = 0
+    except SystemExit as e:
+        code = e.code
+    if packet_text is not None:
+        PK.write_text("a packet\n")
+    raw = [json.loads(l) for l in max((TMP / "events").glob(f"L-{role}-*.jsonl")).read_text().splitlines()]
+    sid = raw[0]["spawn"]
+    cj = json.loads((TMP / "seat" / f"{sid}.cmd.json").read_text())
+    return code, raw, sid, cj, (TMP / "seat" / f"{sid}.packet.md").read_text()
+
+
+def _mk_spec(dest, subject):
+    # spec-writer's own schema carries no "path" property (additionalProperties:
+    # false) — its Output never echoes one back; `dispatch.main` reads the file at
+    # `a.path` directly, so writing WELL_FORMED_SPEC there is the whole contract.
+    def ready():
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(WELL_FORMED_SPEC)
+        return {**sw, "spec_id": subject, "escalations": []}
+    return ready
+
+
+def _mk_file(dest, base):
+    def ready():
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text("dug")
+        return {**base, "path": str(dest)}
+    return ready
+
+
+# ── AC1·SWP1 · spec-writer, no --path: gets the CONTENT default and reaches
+#    spec-written/spawn-done — never "a writing role needs --path" ───────────
+swp_sub1 = "L-spec-0261a"
+swp_dest1 = dispatch.CONTENT / f"{swp_sub1}.md"
+code, raw1, sid1, cj1, pkt1 = _swp_dispatch("spec-writer", swp_sub1, None, _mk_spec(swp_dest1, swp_sub1), cwd=TMP)
+assert code == 0 and [e["type"] for e in raw1] == ["spawn-started", "spec-written", "spawn-done"], raw1
+assert not any(e["type"] == "spawn-failed" for e in raw1), "AC1: no needs-path failure for a defaulted spec-writer"
+
+# ── AC3·SWP2 · cmd.json["path"] for that same spawn: absolute, the CONTENT
+#    default, and (this fixture's cwd IS the ledger root) the review_path's own
+#    cwd-relative formula too ──────────────────────────────────────────────────
+assert cj1["path"] == str(swp_dest1) == str(pathlib.Path(TMP) / "content" / f"{swp_sub1}.md"), cj1
+
+# ── AC4·SWP2 · every kind-truthy role WITH an explicit --path: cmd.json["path"]
+#    present, absolute, equal to the resolved value; a kind=None role (builder)
+#    gets null ─────────────────────────────────────────────────────────────────
+swp_r = TMP / "content" / "L-swp-ac4-research.md"
+_, _, _, cj_r, _ = _swp_dispatch("research", "L-spec-0261b", str(swp_r), _mk_file(swp_r, research),
+                                 packet_text="a packet for swp ac4 research\n")
+assert cj_r["path"] == str(swp_r) and pathlib.Path(cj_r["path"]).is_absolute(), cj_r
+
+swp_rs = TMP / "content" / "L-swp-ac4-reuse.md"
+reuse_out = {"summary": "s", "candidates": [], "nothing_cleared": True, "complete": True,
+            "contamination": False, "declarations": []}
+_, _, _, cj_rs, _ = _swp_dispatch("reuse-scout", "L-spec-0261c", str(swp_rs), _mk_file(swp_rs, reuse_out))
+assert cj_rs["path"] == str(swp_rs) and pathlib.Path(cj_rs["path"]).is_absolute(), cj_rs
+
+swp_pd = TMP / "content" / "L-swp-ac4-probe"
+
+
+def _swp_probe_ready():
+    swp_pd.mkdir(parents=True, exist_ok=True)
+    (swp_pd / "run.md").write_text("ran")
+    return {**probe_out, "path": str(swp_pd) + "/"}
+
+
+_, _, _, cj_p, _ = _swp_dispatch("probe", "L-spec-0261d", str(swp_pd), _swp_probe_ready)
+assert cj_p["path"] == str(swp_pd) and pathlib.Path(cj_p["path"]).is_absolute(), cj_p
+
+swp_sw = TMP / "content" / "L-swp-ac4-spec.md"
+_, _, _, cj_sw, _ = _swp_dispatch("spec-writer", "L-spec-0261e", str(swp_sw), _mk_spec(swp_sw, "L-spec-0261e"))
+assert cj_sw["path"] == str(swp_sw) and pathlib.Path(cj_sw["path"]).is_absolute(), cj_sw
+
+_, _, sid_b, cj_b, pkt_b = _swp_dispatch("builder", "L-spec-0261f", None, lambda: card)
+assert cj_b["path"] is None, cj_b
+N += 1
+
+# ── AC5·SWP2 · a RELATIVE --path (spec-writer) resolves ABSOLUTE against the
+#    spawn's own cwd ───────────────────────────────────────────────────────────
+swp_rel = "content/L-spec-0261g.md"
+swp_rel_abs = str(pathlib.Path(REPO) / swp_rel)
+_, _, _, cj5, _ = _swp_dispatch("spec-writer", "L-spec-0261g", swp_rel,
+                                _mk_spec(pathlib.Path(swp_rel_abs), "L-spec-0261g"))
+assert cj5["path"] == swp_rel_abs and pathlib.Path(cj5["path"]).is_absolute(), cj5
+pathlib.Path(swp_rel_abs).unlink()             # REPO's porcelain must stay clean for later fixtures
+N += 1
+
+# ── AC6·SWP3 · the packet text: "WRITE PATH: <path>\n\n" + original, for a
+#    writing role; byte-identical (no prefix) for a non-writing role ──────────
+assert pkt1.startswith(f"WRITE PATH: {cj1['path']}\n\n"), pkt1[:120]
+assert pkt1[len(f"WRITE PATH: {cj1['path']}\n\n"):] == PK.read_text() + f"\n\nspawn_id: {sid1}\n", \
+    "AC6: the remainder is the original packet, byte-for-byte"
+assert not pkt_b.startswith("WRITE PATH:"), "AC6: a non-writing role's packet carries no WRITE PATH prefix"
+assert pkt_b == PK.read_text() + f"\n\nspawn_id: {sid_b}\n", \
+    "AC6: a non-writing role's packet is byte-identical to the one passed in"
+N += 1
 
 # ══════════════════════════════════════════════════════════════════════════════
 # L-spec-0195 · spec-shape-checked-before-build (L-charter-0028) — AC2, AC4, AC6
