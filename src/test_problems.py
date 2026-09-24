@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """One runnable check on the problem-register rules (L-spec-0279). Run: python3 test_problems.py"""
-import contextlib, io, itertools, json, os, pathlib, shutil, sys, tempfile
+import contextlib, io, itertools, json, os, pathlib, shutil, subprocess, sys, tempfile
 from datetime import datetime, timedelta, timezone
 
 TMP = pathlib.Path(tempfile.mkdtemp())
 os.environ["DOIT_ROOT"] = str(TMP)
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 import fold, problems  # noqa: E402
+
+REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 T = datetime(2026, 9, 24, tzinfo=timezone.utc)
 
@@ -250,3 +252,60 @@ p2_19 = next(p for p in r19 if p["slug"] == "p2")
 assert p2_19["fixes"] == [], p2_19
 assert p2_19["occurrences"] == 1, p2_19
 print("AC19 ok")
+
+# ── L-spec-0280/SD19 wiring — harvest.occurrences() folded into register() ──
+# Every block below passes toml_path explicitly (a nonexistent tmp path), per
+# L-spec-0280's own Assumptions: never relies on toml_path=None reading
+# whatever problems.toml happens to be on disk at test time.
+NO_TOML = str(TMP / "no-such-problems-0280.toml")
+
+# ── AC13 · a bare spawn-failed, no pre-existing Problem: mints one, harvest-style
+ac13_ev = ev("spawn-failed", reason="unserved", ts=iso(0), duration_ms=60000)
+r13 = problems.register([ac13_ev], toml_path=NO_TOML)
+assert len(r13) == 1, r13
+assert r13[0]["slug"] == "seat-unserved" and r13[0]["occurrences"] == 1, r13[0]
+assert r13[0]["statement_needed"] is True and r13[0]["statement"], r13[0]
+print("AC13 ok")
+
+# ── AC14 · a harvested build-deviation (no token, similarity >= 0.6) folds
+# into the EXISTING lesson-derived Problem, never a second one
+ac14_lesson = ev("lesson", problem="batch-double-charge",
+                  statement="the retry loop double-charged the batch API on failure", ts=iso(0))
+ac14_dev = ev("build-deviation", what="the retry loop double-charged the batch API", ts=iso(1))
+r14 = problems.register([ac14_lesson, ac14_dev], toml_path=NO_TOML)
+assert len(r14) == 1, r14
+assert r14[0]["slug"] == "batch-double-charge", r14[0]
+assert r14[0]["occurrences"] == 2 and r14[0]["last_seen"] == iso(1), r14[0]
+print("AC14 ok")
+
+# ── AC15 · cost aggregation flows through the same fold as lesson occurrences:
+# one measured, one blind -> cost_min sums only the measured one, cost_unmeasured
+# counts the blind one
+ac15_a = ev("spawn-failed", reason="unserved", ts=iso(0), duration_ms=60000)
+ac15_b = ev("spawn-failed", reason="unserved", ts=iso(1))
+r15 = problems.register([ac15_a, ac15_b], toml_path=NO_TOML)
+p15 = next(p for p in r15 if p["slug"] == "seat-unserved")
+assert p15["occurrences"] == 2, p15
+assert p15["cost_min"] == 1.0, p15
+assert p15["cost_unmeasured"] == 1, p15
+print("AC15 ok")
+
+# ── AC16 (observed-data) · a live-CLI check against a scratch $DOIT_ROOT seeded
+# with exactly the AC13 fixture: `doit problems --json` lists seat-unserved
+# with occurrences==1. Its own subprocess (never this file's own process, which
+# pins DOIT_ROOT to TMP above) so it exercises the real `doit problems` CLI
+# path end-to-end, not register() called in-process.
+scratch16 = pathlib.Path(tempfile.mkdtemp())
+(scratch16 / "events").mkdir(parents=True)
+fixture16 = {"v": 1, "type": "spawn-failed", "reason": "unserved", "ts": iso(0), "duration_ms": 60000}
+(scratch16 / "events" / "L-operator-local.jsonl").write_text(json.dumps(fixture16) + "\n")
+r16cli = subprocess.run(
+    [str(REPO_ROOT / "doit"), "problems", "--json"],
+    cwd=str(REPO_ROOT), capture_output=True, text=True,
+    env={**os.environ, "DOIT_ROOT": str(scratch16)},
+)
+assert r16cli.returncode == 0, (r16cli.returncode, r16cli.stdout, r16cli.stderr)
+payload16 = json.loads(r16cli.stdout)
+seat16 = next((p for p in payload16["problems"] if p["slug"] == "seat-unserved"), None)
+assert seat16 is not None and seat16["occurrences"] == 1, payload16
+print("AC16 ok")
