@@ -312,6 +312,15 @@ def _window_min_override(spec_text):
     return None
 
 
+def spec_path(subject):
+    """The one definition of a spec-writer's canonical write destination (R5,
+    L-spec-0321): `window_min`'s fallback and `main`'s spec-writer default both
+    call this instead of repeating the literal. `.absolute()` is defensive, not
+    decorative — a set-but-empty DOIT_ROOT bypasses `os.environ.get`'s default,
+    which would otherwise leave CONTENT (and this) relative."""
+    return (CONTENT / f"{subject}.md").absolute()
+
+
 def window_min(role, subject, events, *, backend="seat"):
     """L-spec-0269: the window a role's spawn is offered under. A non-`seat`
     backend (`run_claude`/`run_codex`) always gets the flat, unbumped role cap —
@@ -342,7 +351,7 @@ def window_min(role, subject, events, *, backend="seat"):
         except OSError:
             text = None
     else:
-        p = CONTENT / f"{subject}.md"
+        p = spec_path(subject)
         if p.is_file():
             try:
                 text = p.read_text()
@@ -764,16 +773,22 @@ def main(a):
     # missing value, not an unknown one. Every OTHER writing role (`research`,
     # `reuse-scout`, `probe`) dispatched with no --path is refused immediately,
     # with the unchanged message below, before any subprocess runs. A relative
-    # --path (any writing role) is made absolute against this spawn's own cwd
-    # before it is written anywhere — the post-spawn existence/mismatch checks
-    # below, and every seat/codex write, then see only the resolved value.
+    # --path for `spec-writer` resolves against ROOT ($DOIT_ROOT), never cwd —
+    # every other writing role keeps resolving relative to this spawn's own cwd,
+    # unchanged. SWP2 (R5/L-spec-0321): a resolved `spec-writer` path that is not
+    # exactly `spec_path(a.subject)` is refused here too, before any seat file
+    # exists — the post-spawn existence/mismatch checks below, and every
+    # seat/codex write, then see only a path already proven canonical.
     if kind and not a.path:
         if a.role == "spec-writer":
-            a.path = str(CONTENT / f"{a.subject}.md")
+            a.path = str(spec_path(a.subject))
         else:
             fail("a writing role needs --path")
     if kind and not pathlib.Path(a.path).is_absolute():
-        a.path = str(pathlib.Path(cwd) / a.path)
+        a.path = str((ROOT if a.role == "spec-writer" else pathlib.Path(cwd)) / a.path)
+    if kind and a.role == "spec-writer" and pathlib.Path(a.path).absolute() != spec_path(a.subject):
+        fail(f"spec-writer --path {a.path!r} does not resolve to spec_path({a.subject!r}) — not spent",
+             reason="write-path-mismatch")
     write_path = a.path if kind else None
     before = None if builder else porcelain(cwd)
     if not builder and before is None:

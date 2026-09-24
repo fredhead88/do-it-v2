@@ -1310,6 +1310,15 @@ def _mk_file(dest, base):
     return ready
 
 
+# ── AC1 (L-spec-0321/R5) · spec_path returns an absolute path even when
+#    CONTENT itself is relative — proven directly, not through the
+#    environment ─────────────────────────────────────────────────────────────
+_content_real = dispatch.CONTENT
+dispatch.CONTENT = pathlib.Path("content")
+assert dispatch.spec_path("x").is_absolute(), "AC1: spec_path must be absolute even with a relative CONTENT"
+dispatch.CONTENT = _content_real
+N += 1
+
 # ── AC1·SWP1 · spec-writer, no --path: gets the CONTENT default and reaches
 #    spec-written/spawn-done — never "a writing role needs --path" ───────────
 swp_sub1 = "L-spec-0261a"
@@ -1349,22 +1358,59 @@ def _swp_probe_ready():
 _, _, _, cj_p, _ = _swp_dispatch("probe", "L-spec-0261d", str(swp_pd), _swp_probe_ready)
 assert cj_p["path"] == str(swp_pd) and pathlib.Path(cj_p["path"]).is_absolute(), cj_p
 
-swp_sw = TMP / "content" / "L-swp-ac4-spec.md"
-_, _, _, cj_sw, _ = _swp_dispatch("spec-writer", "L-spec-0261e", str(swp_sw), _mk_spec(swp_sw, "L-spec-0261e"))
-assert cj_sw["path"] == str(swp_sw) and pathlib.Path(cj_sw["path"]).is_absolute(), cj_sw
-
 _, _, sid_b, cj_b, pkt_b = _swp_dispatch("builder", "L-spec-0261f", None, lambda: card)
 assert cj_b["path"] is None, cj_b
 N += 1
 
-# ── AC5·SWP2 · a RELATIVE --path (spec-writer) resolves ABSOLUTE against the
-#    spawn's own cwd ───────────────────────────────────────────────────────────
+# ── AC3 (L-spec-0321/R5) · a RELATIVE --path (spec-writer), dispatched under a
+#    cwd that is NOT $DOIT_ROOT (REPO, reproducing the 13:40Z incident's shape),
+#    resolves against ROOT — never that cwd — to spec_path(subject) ───────────
 swp_rel = "content/L-spec-0261g.md"
-swp_rel_abs = str(pathlib.Path(REPO) / swp_rel)
 _, _, _, cj5, _ = _swp_dispatch("spec-writer", "L-spec-0261g", swp_rel,
-                                _mk_spec(pathlib.Path(swp_rel_abs), "L-spec-0261g"))
-assert cj5["path"] == swp_rel_abs and pathlib.Path(cj5["path"]).is_absolute(), cj5
-pathlib.Path(swp_rel_abs).unlink()             # REPO's porcelain must stay clean for later fixtures
+                                _mk_spec(dispatch.spec_path("L-spec-0261g"), "L-spec-0261g"))
+assert cj5["path"] == str(dispatch.spec_path("L-spec-0261g")), cj5
+N += 1
+
+# ── AC4 (L-spec-0321/R5) · spec-writer with a --path that is well-formed and
+#    absolute under $DOIT_ROOT/content/, but names a DIFFERENT file than the
+#    subject (the exact shape the old code silently honored, formerly
+#    swp_sw/"L-spec-0261e") — refused before any seat file exists: exit 1, one
+#    spawn-failed(reason=write-path-mismatch), no backend entered. Driven
+#    DIRECTLY through dispatch.main — never through _swp_dispatch/_swp_serve,
+#    whose background thread would otherwise wait for a seat packet this
+#    refusal never writes, then serve the NEXT still-open packet
+#    (L-spec-0261f/builder, above) with this call's own make_ready() output,
+#    corrupting that already-completed fixture ─────────────────────────────────
+swp_sw = TMP / "content" / "L-swp-ac4-spec.md"
+_seat_before = sorted((TMP / "seat").glob("*")) if (TMP / "seat").is_dir() else []
+dispatch.run_claude, dispatch.run_seat, dispatch.run_codex = _ac2_boom("run_claude"), _ac2_boom("run_seat"), _ac2_boom("run_codex")
+a_sw = argparse.Namespace(role="spec-writer", subject="L-spec-0261e", packet=str(PK), path=str(swp_sw),
+                          cwd=str(REPO), charter=None, project="t", mcp_config=None, timeout=1,
+                          max_usd=None, seat=True)
+try:
+    dispatch.main(a_sw)
+    raise AssertionError("a mismatched spec-writer --path must be refused")
+except SystemExit as e:
+    code_sw = e.code
+dispatch.run_claude, dispatch.run_seat, dispatch.run_codex = _real_run_claude, _real_run_seat, _real_run_codex
+raw_sw = [json.loads(l) for l in max((TMP / "events").glob("L-spec-writer-*.jsonl")).read_text().splitlines()]
+assert code_sw == 1 and [e["type"] for e in raw_sw] == ["spawn-failed"], raw_sw
+assert raw_sw[0]["reason"] == "write-path-mismatch", raw_sw[0]
+_seat_after = sorted((TMP / "seat").glob("*")) if (TMP / "seat").is_dir() else []
+assert _seat_after == _seat_before, "AC4: no seat/<spawn>.* file for the refused spawn"
+assert _ac2_hit == [], "AC4: no backend was ever entered on the write-path-mismatch refusal"
+N += 1
+
+# ── AC5 (L-spec-0321/R5) · spec-writer with --path EXPLICITLY equal to
+#    spec_path(subject) still succeeds — the mismatch check does not
+#    over-refuse the legitimate case (e.g. carry.py's own explicit-absolute
+#    call pattern) ───────────────────────────────────────────────────────────
+swp_match_subj = "L-spec-0261h"
+swp_match_path = str(dispatch.spec_path(swp_match_subj))
+code_m, raw_m, _, cj_m, _ = _swp_dispatch("spec-writer", swp_match_subj, swp_match_path,
+                                          _mk_spec(dispatch.spec_path(swp_match_subj), swp_match_subj))
+assert code_m == 0 and [e["type"] for e in raw_m] == ["spawn-started", "spec-written", "spawn-done"], raw_m
+assert cj_m["path"] == swp_match_path, cj_m
 N += 1
 
 # ── AC6·SWP3 · the packet text: "WRITE PATH: <path>\n\n" + original, for a

@@ -37,7 +37,10 @@ money.
    `unverifiable` with the reason; it is never grounds for `gates-only` on its
    own. (Added 2026-09-22 by L-thinker-0004 on L-executor-0001.jsonl:194 —
    five all-backend specs had returned gates-only because this class was
-   missing while two reviewers reached depth=full with the same shell.)
+   missing while two reviewers reached depth=full with the same shell.) A
+   `scripts/verify/*` script's result counts as evidence only after
+   `scripts/verify/droplet_smoke.py <script>` exits 0 for that same script;
+   otherwise the criterion is `unverifiable`.
 
 The builder's card is the only builder-authored thing you see, and you read it
 as the list of claims to drive, never as evidence.
