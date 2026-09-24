@@ -132,6 +132,34 @@ assert len([l for l in tick.tick_path().read_text().splitlines() if '"spawn-stal
     "nothing to name: a spawn-stale with no spawn id would be unmatchable and repeat every tick"
 ev_file.unlink()
 
+# ── L-spec-0269 AC6 · window_min-aware staleness replaces the flat 2×cap ──────
+# A seat grader recorded with window_min=45 (the observed-data bump) is NOT
+# stale at 50 minutes — the old rule (2×15=30) would have called it stale; the
+# new (window_min or cap)+cap = 45+15 = 60 does not.
+ev269a_file = write("L-grader-0269a.jsonl", {"ts": (fold.NOW - datetime.timedelta(minutes=50)).isoformat(timespec="seconds"),
+                                             "type": "spawn-started", "role": "grader", "subject": "L-spec-0269a",
+                                             "spawn": "L-grader-0269a", "window_min": 45})
+ev269a = fold.read_events()
+before_stale269 = len([l for l in tick.tick_path().read_text().splitlines() if '"spawn-stale"' in l])
+busy269a = tick.in_flight(ev269a)
+assert "L-spec-0269a" in busy269a, "50 min < window_min(45)+cap(15)=60: still busy, not aged out"
+assert len([l for l in tick.tick_path().read_text().splitlines() if '"spawn-stale"' in l]) == before_stale269, \
+    "no spawn-stale for the window_min=45 fixture at 50 minutes"
+ev269a_file.unlink()
+
+# A `claude-p`-backend grader on an observed-data subject records window_min as
+# the FLAT role cap (15) — never the 45-minute bump — so it is stale at 31
+# minutes exactly like the pre-existing no-window_min fixture above.
+ev269b_file = write("L-grader-0269b.jsonl", {"ts": (fold.NOW - datetime.timedelta(minutes=31)).isoformat(timespec="seconds"),
+                                             "type": "spawn-started", "role": "grader", "subject": "L-spec-0269b",
+                                             "spawn": "L-grader-0269b", "window_min": 15, "backend": "claude-p"})
+ev269b = fold.read_events()
+busy269b = tick.in_flight(ev269b)
+assert "L-spec-0269b" not in busy269b, "31 min > 15+15=30: aged out, stale, exactly as the no-bump case"
+stale269b = [json.loads(l) for l in tick.tick_path().read_text().splitlines() if '"spawn-stale"' in l]
+assert any(s["spawn"] == "L-grader-0269b" for s in stale269b), stale269b
+ev269b_file.unlink()
+
 # AC6 — an open escalation keeps the subject off the lane; a decision after it puts it back.
 # The ONE gate at this layer that is still a gate, because it is the operator's.
 esc = write("L-executor-0090.jsonl", {"type": "escalation-blocking", "subject": "L-spec-0001",
