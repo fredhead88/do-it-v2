@@ -680,24 +680,90 @@ if (TMP / "seat").is_dir():
             _rm_seat(_sid)
 
 
-# ── AC1 · run_seat called directly: nobody ever claims -> Unserved, well under
-# the 60s `timeout` argument, naming the spawn id ─────────────────────────────
+# ── L-spec-0269 AC1 (rewrite of the old AC1 block, §5) · run_seat given
+# ledger=/base=/role=: nobody ever claims -> exactly one non-terminal
+# `seat-stale` between roughly 1s and 3s of wall time, and `Unserved` does NOT
+# fire there any more (the 60s timeout/window is untouched) ──────────────────
 os.environ["DOIT_SEAT_CLAIM_SEC"] = "1"
 ac1_spawn = "L-research-r6ac1"
-t0 = DISPATCH_TIME.time()
-try:
-    dispatch.run_seat(ac1_spawn, ["claude", "-p"], "packet", str(REPO), 60)
-    raise AssertionError("run_seat must raise Unserved when nobody claims the seat")
-except dispatch.Unserved as e:
-    ac1_wall = DISPATCH_TIME.time() - t0
-    ac1_msg = str(e)
-assert ac1_spawn in ac1_msg, ac1_msg
-assert ac1_wall < 15, f"run_seat waited {ac1_wall}s for a 1s claim window — the 60s timeout, not the claim window, must not be what fired"
+ac1_ledger = TMP / "events" / "L-r6ac1-ledger.jsonl"
+ac1_ledger.write_text("")
+ac1_base = {"subject": "L-spec-0269ac1", "project": "t", "spawn": ac1_spawn}
+ac1_holder = {}
+
+
+def _ac1_bg():
+    try:
+        dispatch.run_seat(ac1_spawn, ["claude", "-p"], "packet", str(REPO), 60,
+                          ledger=ac1_ledger, base=ac1_base, role="grader")
+    except Exception as exc:
+        ac1_holder["exc"] = exc
+
+
+ac1_th = threading.Thread(target=_ac1_bg, daemon=True)
+ac1_th.start()
+ac1_th.join(3.5)
+assert "exc" not in ac1_holder, f"AC1: run_seat must not raise within the claim window's own ping: {ac1_holder.get('exc')}"
+ac1_lines = [json.loads(l) for l in ac1_ledger.read_text().splitlines() if l.strip()]
+assert len(ac1_lines) == 1 and ac1_lines[0]["type"] == "seat-stale", ac1_lines
+assert ac1_lines[0]["spawn"] == ac1_spawn and ac1_lines[0]["role"] == "grader" and \
+    ac1_lines[0]["subject"] == "L-spec-0269ac1" and ac1_lines[0]["age_s"] >= 1, ac1_lines[0]
 _rm_seat(ac1_spawn)
+N += 1
+
+# ── L-spec-0269 AC2 (direct half) · run_seat given `window=3` (seconds) raises
+# `Unserved` once wall time passes 3s — NOT at DOIT_SEAT_CLAIM_SEC=1 ──────────
+ac2b_spawn = "L-research-0269ac2"
+ac2b_t0 = DISPATCH_TIME.time()
+try:
+    dispatch.run_seat(ac2b_spawn, ["claude", "-p"], "packet", str(REPO), 60, window=3)
+    raise AssertionError("run_seat must raise Unserved once window=3 elapses")
+except dispatch.Unserved:
+    ac2b_wall = DISPATCH_TIME.time() - ac2b_t0
+assert 3 <= ac2b_wall < 8, f"AC2: must fire at ~3s (the window), not ~1s (the claim ping): {ac2b_wall}"
+_rm_seat(ac2b_spawn)
 del os.environ["DOIT_SEAT_CLAIM_SEC"]
 N += 1
 
-# ── AC2 · the 300s default does not fire prematurely within a short window ────
+# ── L-spec-0269 AC3 · claimed at (simulated) 2.5s, cap 4s: the wait-for-result
+# clock restarts at the CLAIM, not the call's start — a result landing at
+# (simulated) 6s — 3.5s after the claim — is picked up normally, never treated
+# as a timeout (a single, start-measured clock would have raised at 6s) ──────
+ac3_spawn = "L-research-0269ac3"
+(TMP / "seat").mkdir(parents=True, exist_ok=True)
+(TMP / "seat" / f"{ac3_spawn}.claimed").write_text("")     # pre-claimed: observed on the very first check
+
+
+def _ac3_finish():
+    _real_sleep(0.05)
+    (TMP / "seat" / f"{ac3_spawn}.result.json").write_text(json.dumps(
+        {"is_error": False, "structured_output": {**research, "path": "content/L-research-0269ac3.md"},
+         "num_turns": 1, "usage": {}, "total_cost_usd": None, "modelUsage": {"m": {}},
+         "session_id": "ac3", "permission_denials": []}))
+
+
+def _fake_time_ac3():
+    _fake_time_ac3.n += 1
+    return {1: 0.0, 2: 2.5}.get(_fake_time_ac3.n, 6.0)
+
+
+_fake_time_ac3.n = 0
+threading.Thread(target=_ac3_finish, daemon=True).start()
+real_t0_ac3 = time.perf_counter()
+with _mock.patch("time.time", _fake_time_ac3), _mock.patch("time.sleep", lambda s: None):
+    r_ac3 = dispatch.run_seat(ac3_spawn, ["claude", "-p"], "packet", str(REPO), 4, window=3)
+real_wall_ac3 = time.perf_counter() - real_t0_ac3
+assert isinstance(r_ac3, dispatch.SeatResult), r_ac3
+assert real_wall_ac3 < 5, f"the fake clock must have decided it, not real time: {real_wall_ac3}s"
+_rm_seat(ac3_spawn)
+N += 1
+
+# ── AC2 (updated for L-spec-0269) · the 300s DOIT_SEAT_CLAIM_SEC default does
+# not fire prematurely within a short window — but the exception an omitted
+# `window` produces for a wholly-unclaimed seat is now `Unserved`, not
+# `TimeoutExpired`: back-compat means the SAME timing (window defaults to
+# `timeout`), never the SAME exception type, since which of the two now fires
+# turns on claimed state, not on which of claim_sec/timeout is smaller ────────
 ac2_spawn = "L-research-r6ac2"
 ac2_holder = {}
 
@@ -714,8 +780,9 @@ ac2_th.start()
 ac2_th.join(3)
 assert "exc" not in ac2_holder, f"the default (unset) claim window fired prematurely: {ac2_holder.get('exc')}"
 ac2_th.join(6)
-assert isinstance(ac2_holder.get("exc"), subprocess.TimeoutExpired), \
-    "the probe's own short `timeout` fired normally afterward — never dispatch.Unserved — proving the default window did not fire early"
+assert isinstance(ac2_holder.get("exc"), dispatch.Unserved), \
+    "L-spec-0269: an omitted window defaults to timeout, so a wholly-unclaimed seat now ends in " \
+    "Unserved once that shared threshold elapses, not TimeoutExpired"
 _rm_seat(ac2_spawn)
 N += 1
 
@@ -735,23 +802,54 @@ def _seat_driven(role, subject, timeout_min, path=None):
     return code, raw, wall
 
 
-# ── AC3 · main(): a fully-unserved seat dispatch fails loudly, well under 15s ──
+# ── L-spec-0269 (rewrite of the old AC3 main() block, §5) · DOIT_SEAT_CLAIM_SEC
+# alone no longer ends the wait — a `window_min: 1` on the dispatched subject's
+# spec text is read (and, being smaller than research's own 5-min cap, has no
+# effect — proving the "raised, never lowered" rule holds even here); what
+# actually keeps this fast is a mocked clock jumping straight past whatever
+# window is computed (no role's cap is under 5 real minutes). `main()`'s
+# existing `except Unserved` path still turns this into a terminal
+# `spawn-failed{reason: "unserved"}`, byte-for-byte, well under 15s of REAL
+# wall time, with one non-terminal `seat-stale` recorded first ────────────────
 os.environ["DOIT_SEAT"] = "1"
 dispatch.run_claude = never
 os.environ["DOIT_SEAT_CLAIM_SEC"] = "1"
+ac3main_subject = "L-spec-0269ac3main"
+(TMP / "content").mkdir(parents=True, exist_ok=True)
+(TMP / "content" / f"{ac3main_subject}.md").write_text(
+    "# L-spec-0269ac3main\nwindow_min: 1\n\n## 1. Goal\n\ntext\n")
 # a fresh packet body — L-research-0018 earlier in this file already recorded an
 # is_error failure for the default "a packet\n" body on this same contract, and
 # D120's dedup (packet_sha256 + contract_sha256) would refuse this dispatch before
 # it ever reached run_seat, on a packet whose CONTENT happens to match, not a re-run.
 PK.write_text("a packet for r6ac3\n")
+
+
+def _fake_time_ac3main():
+    _fake_time_ac3main.n += 1
+    return 0.0 if _fake_time_ac3main.n == 1 else 100000.0
+
+
+_fake_time_ac3main.n = 0
 # L-spec-0262/SWP1: research is a writing role with no system-wide default, so it
 # needs an explicit --path to ever reach run_seat at all (the case this fixture
 # means to exercise) — a bare TMP/content path, never opened, is enough.
-code, raw, wall = _seat_driven("research", "L-spec-0001", 60, path=str(TMP / "content" / "L-research-r6ac3.md"))
+a3main = argparse.Namespace(role="research", subject=ac3main_subject, packet=str(PK),
+                            path=str(TMP / "content" / "L-research-r6ac3.md"), cwd=str(REPO),
+                            charter=None, project="t", mcp_config=None, timeout=60, max_usd=None, seat=False)
+real_t0_ac3main = time.perf_counter()
+with _mock.patch("time.time", _fake_time_ac3main), _mock.patch("time.sleep", lambda s: None):
+    try:
+        dispatch.main(a3main)
+        code = 0
+    except SystemExit as ex:
+        code = ex.code
+real_wall_ac3main = time.perf_counter() - real_t0_ac3main
 PK.write_text("a packet\n")
-assert code == 1 and [e["type"] for e in raw] == ["spawn-started", "spawn-failed"], raw
+raw = [json.loads(l) for l in max((TMP / "events").glob("L-research-*.jsonl")).read_text().splitlines()]
+assert code == 1 and [e["type"] for e in raw] == ["spawn-started", "seat-stale", "spawn-failed"], raw
 assert raw[-1]["reason"] == "unserved" and raw[-1]["spawn_path"] == "seat", raw[-1]
-assert wall < 15, wall
+assert real_wall_ac3main < 15, real_wall_ac3main
 _rm_seat(raw[0]["spawn"])
 N += 1
 
@@ -813,11 +911,19 @@ PK.write_text("a packet for the r6ac5 fallback run\n")
 rp_ac5 = TMP / "content" / "L-research-r6ac5.md"
 a = argparse.Namespace(role="research", subject="L-spec-0001", packet=str(PK), path=str(rp_ac5), cwd=str(REPO),
                        charter=None, project="t", mcp_config=None, timeout=1, max_usd=None, seat=False)
+# L-spec-0269: `Unserved` on the fallback's own seat dispatch now waits out
+# `window` (a role's own minutes-cap, at minimum) rather than
+# DOIT_SEAT_CLAIM_SEC — shrunk here to 0 so this pre-existing fixture (whose
+# own point is the fallback's `reason` shape, not window timing) stays fast.
+_real_window_min_ac5 = dispatch.window_min
+dispatch.window_min = lambda *a_, **k_: 0
 try:
     dispatch.main(a)
     code = 0
 except SystemExit as e:
     code = e.code
+finally:
+    dispatch.window_min = _real_window_min_ac5
 PK.write_text("a packet\n")
 sev = [json.loads(l) for l in max((TMP / "events").glob("L-research-*.jsonl")).read_text().splitlines()]
 assert code == 1 and sev[-1]["type"] == "spawn-failed" and sev[-1]["reason"] == "unserved", sev[-1]
@@ -873,6 +979,13 @@ N += 1
 # ── AC8 · the builder case, driven for real (not fabricated) ───────────────────
 os.environ["DOIT_SEAT"] = "1"          # no models.toml now (AC5 unlinked it) — the flag forces the seat backend
 os.environ["DOIT_SEAT_CLAIM_SEC"] = "1"
+# L-spec-0269: `Unserved` now waits out `window` (the builder's own 90-min cap,
+# at minimum), not DOIT_SEAT_CLAIM_SEC — shrunk to 0 so this pre-existing
+# fixture (whose own point is the terminal shape, not window timing) still
+# raises `Unserved` before its own claim-window log would ever fire, keeping
+# the event list exactly `["build-started", "spawn-failed"]`, no `seat-stale`.
+_real_window_min_ac8 = dispatch.window_min
+dispatch.window_min = lambda *a_, **k_: 0
 a = argparse.Namespace(role="builder", subject="L-spec-0001", packet=str(PK), path=None, cwd=str(REPO),
                        charter=None, project="t", mcp_config=None, timeout=60, max_usd=None, seat=False)
 try:
@@ -880,6 +993,8 @@ try:
     code = 0
 except SystemExit as e:
     code = e.code
+finally:
+    dispatch.window_min = _real_window_min_ac8
 bev = [json.loads(l) for l in max((TMP / "events").glob("L-builder-*.jsonl")).read_text().splitlines()]
 assert code == 1 and [e["type"] for e in bev] == ["build-started", "spawn-failed"], bev
 assert bev[0]["backend"] == "seat", bev[0]
@@ -895,26 +1010,35 @@ assert relay.unserved(bev, TMP) == [], \
     "has not yet 'aged into' the failed-unserved window either — see AC10 for the synthetic in-window case"
 N += 1
 
-# ── AC12 (dispatch half) · the 300s default boundary, on a fake clock ──────────
+# ── L-spec-0269 (rewrite of the old AC12i block, §5) · a clock frozen forever
+# past DOIT_SEAT_CLAIM_SEC no longer terminates the wait on its own (window
+# defaults to the unreached timeout=6000) — a BOUNDED sequence advancing past
+# an explicit small `window=330` is what must raise `Unserved`, in a bounded
+# call count, never an unbounded loop against a frozen clock ─────────────────
+os.environ["DOIT_SEAT_CLAIM_SEC"] = "1"
 _ac12i_spawn = "L-research-r6ac12i"
+_ac12i_seq = [0.0, 301.0, 301.0, 340.0]
+_ac12i_idx = {"i": 0}
 
 
 def _fake_time_301():
-    _fake_time_301.n += 1
-    return 0.0 if _fake_time_301.n == 1 else 301.0
+    i = min(_ac12i_idx["i"], len(_ac12i_seq) - 1)
+    _ac12i_idx["i"] += 1
+    return _ac12i_seq[i]
 
 
-_fake_time_301.n = 0
 real_wall_t0 = time.perf_counter()
 with _mock.patch("time.time", _fake_time_301), _mock.patch("time.sleep", lambda s: None):
     try:
-        dispatch.run_seat(_ac12i_spawn, ["claude", "-p"], "packet", str(REPO), 6000)
-        raise AssertionError("expected Unserved at the 301s mark")
+        dispatch.run_seat(_ac12i_spawn, ["claude", "-p"], "packet", str(REPO), 6000, window=330)
+        raise AssertionError("expected Unserved once the sequence passes the 330s window")
     except dispatch.Unserved:
         pass
 real_wall_301 = time.perf_counter() - real_wall_t0
 assert real_wall_301 < 5, f"the fake clock must have decided it, not real time: {real_wall_301}s"
+assert _ac12i_idx["i"] <= len(_ac12i_seq) + 1, f"AC12i: bounded call count expected, got {_ac12i_idx['i']}"
 _rm_seat(_ac12i_spawn)
+del os.environ["DOIT_SEAT_CLAIM_SEC"]
 N += 1
 
 _ac12ii_spawn = "L-research-r6ac12ii"
@@ -955,6 +1079,129 @@ for relpath in ("src/dispatch.py", "src/relay.py"):
     text = (REPO_ROOT / relpath).read_text()
     assert 'os.environ.get("DOIT_SEAT_CLAIM_SEC", 300)' in text, \
         f"{relpath} is missing the DOIT_SEAT_CLAIM_SEC default reader, or its default diverged"
+N += 1
+
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-0269 · seat-stays-offered (L-charter-0033) — AC4, AC5, AC7
+# ══════════════════════════════════════════════════════════════════════════════
+import socket  # noqa: E402 — waiter_host comparisons below
+
+# ── AC5 · dispatch.window_min: all five cases, pasted with their computed
+# number (or, for (e), the no-exception result) ───────────────────────────────
+(TMP / "content").mkdir(parents=True, exist_ok=True)
+assert dispatch.window_min("builder", "L-spec-0269a5-nonseat", [], backend="claude-p") == 90, \
+    "a non-seat backend always gets the flat, unbumped role cap"
+assert dispatch.window_min("grader", "L-spec-0269a5a", [], backend="seat") == 15, \
+    "(a) plain grader, no observed-data event -> the role's own cap"
+ev_a5b = [{"type": "spec-written", "spec": "L-spec-0269a5b", "ac_types": ["observed-data"], "ts": dispatch.now()}]
+assert dispatch.window_min("grader", "L-spec-0269a5b", ev_a5b, backend="seat") == 45, \
+    "(b) observed-data grader -> 45"
+(TMP / "content" / "L-spec-0269a5c.md").write_text("# fixture\nwindow_min: 500\n\n## 1. Goal\n")
+ev_a5c = [{"type": "spec-written", "spec": "L-spec-0269a5c", "ac_types": ["observed-data"], "ts": dispatch.now()}]
+assert dispatch.window_min("grader", "L-spec-0269a5c", ev_a5c, backend="seat") == 240, \
+    "(c) window_min: 500, base 45 -> raised to 500, then capped at 240"
+(TMP / "content" / "L-spec-0269a5d.md").write_text("# fixture\nwindow_min: 10\n\n## 1. Goal\n")
+assert dispatch.window_min("builder", "L-spec-0269a5d", [], backend="seat") == 90, \
+    "(d) window_min: 10 must never LOWER a 90-min builder window"
+assert dispatch.window_min("reviewer", "L-spec-0269a5e-nonexistent", [], backend="seat") == 30, \
+    "(e) no spec-written event and no readable content file -> the plain role cap, no exception"
+N += 1
+
+# ── AC4 · a spawn-started (grader, non-builder) carries window_min/waiter_pid/
+# waiter_host/waiter_proc_start under BOTH backends, differing correctly on an
+# observed-data subject ────────────────────────────────────────────────────────
+ac4_subj = "L-spec-0269ac4"
+(TMP / "events" / "L-fixture-0269ac4.jsonl").write_text(json.dumps({
+    "v": 1, "ts": dispatch.now(), "type": "spec-written", "subject": ac4_subj, "spec": ac4_subj,
+    "path": str(TMP / "content" / f"{ac4_subj}.md"), "ac_types": ["observed-data"], "ac_count": 1,
+    "requirement_ids": ["R1"], "owed_ac_count": 0, "unknown_count": 0, "footprint": ["x.py"]}) + "\n")
+
+os.environ.pop("DOIT_SEAT", None)
+PK.write_text("a packet for AC4 claude-p\n")
+code, types, evs, _ = spawn("grader", out=grade([met]), subject=ac4_subj)
+PK.write_text("a packet\n")
+ss_cp = spawn.raw[0]
+assert ss_cp["type"] == "spawn-started" and ss_cp["backend"] == "claude-p", ss_cp
+assert ss_cp["window_min"] == 15, "AC4/AC6: claude-p never gets the 45-min seat bump"
+assert ss_cp["waiter_pid"] == os.getpid() and ss_cp["waiter_host"] == socket.gethostname(), ss_cp
+assert "waiter_proc_start" in ss_cp, ss_cp
+
+os.environ["DOIT_SEAT"] = "1"
+os.environ["DOIT_SEAT_CLAIM_SEC"] = "1"
+
+
+def _ac4_serve():
+    for _ in range(400):
+        pk = [q for q in (list((TMP / "seat").glob("*.packet.md")) if (TMP / "seat").is_dir() else [])
+              if not (TMP / "seat" / (q.name.split(".")[0] + ".result.json")).exists()
+              and not (TMP / "seat" / (q.name.split(".")[0] + ".output.json")).exists()]
+        if pk:
+            sid = max(pk, key=lambda q: q.stat().st_mtime).name.split(".")[0]
+            (TMP / "seat" / f"{sid}.result.json").write_text(json.dumps(
+                {"is_error": False, "structured_output": grade([met]), "num_turns": 1, "usage": {},
+                 "total_cost_usd": None, "modelUsage": {"m": {}}, "session_id": sid, "permission_denials": []}))
+            return
+        time.sleep(0.05)
+
+
+threading.Thread(target=_ac4_serve, daemon=True).start()
+PK.write_text("a packet for AC4 seat\n")
+a4 = argparse.Namespace(role="grader", subject=ac4_subj, packet=str(PK), path=None, cwd=str(REPO),
+                        charter=None, project="t", mcp_config=None, timeout=1, max_usd=None, seat=True)
+try:
+    dispatch.main(a4)
+except SystemExit:
+    pass
+PK.write_text("a packet\n")
+raw4 = [json.loads(l) for l in max((TMP / "events").glob("L-grader-*.jsonl")).read_text().splitlines()]
+ss_seat = raw4[0]
+assert ss_seat["type"] == "spawn-started" and ss_seat["backend"] == "seat", ss_seat
+assert ss_seat["window_min"] == 45, "AC4/AC5(b): the seat backend gets the observed-data bump"
+assert ss_seat["waiter_pid"] == os.getpid() and ss_seat["waiter_host"] == socket.gethostname(), ss_seat
+assert "waiter_proc_start" in ss_seat, ss_seat
+_rm_seat(raw4[0]["spawn"])
+del os.environ["DOIT_SEAT_CLAIM_SEC"]
+del os.environ["DOIT_SEAT"]
+N += 1
+
+# ── AC7 (dispatch half) · a REAL wall-clock timeout's `spawn-failed` now
+# carries `reason: "timeout"` (mirroring the existing `reason: "unserved"`
+# assertion above) — both of main()'s `except subprocess.TimeoutExpired` sites
+# now stamp it; this fixture drives the first ─────────────────────────────────
+def _timeout_boom(cmd, packet, cwd, timeout):
+    raise subprocess.TimeoutExpired(cmd, timeout)
+
+
+_real_run_claude_to = dispatch.run_claude
+dispatch.run_claude = _timeout_boom
+os.environ.pop("DOIT_SEAT", None)
+PK.write_text("a packet for AC7 timeout\n")
+a7 = argparse.Namespace(role="research", subject="L-spec-0001", packet=str(PK),
+                        path=str(TMP / "content" / "L-research-0269to.md"), cwd=str(REPO),
+                        charter=None, project="t", mcp_config=None, timeout=1, max_usd=None, seat=False)
+try:
+    dispatch.main(a7)
+    code7 = 0
+except SystemExit as e:
+    code7 = e.code
+PK.write_text("a packet\n")
+dispatch.run_claude = _real_run_claude_to
+raw7 = [json.loads(l) for l in max((TMP / "events").glob("L-research-*.jsonl")).read_text().splitlines()]
+assert code7 == 1 and [e["type"] for e in raw7] == ["spawn-started", "spawn-failed"], raw7
+assert raw7[-1]["reason"] == "timeout" and "timeout after" in raw7[-1]["why"], raw7[-1]
+N += 1
+
+# ── AC7 (doc-consistency half) · agents/executor.md's spawn-failed/spawn-stale
+# row names the counted-attempt shape (the same one carry-failed's own row
+# already uses) and the reviewer round-2-cap sentence, for reason in
+# {unserved, timeout} — the same idiom `_claim_first` already uses for
+# claim.sh, not a second grep step in Verification ────────────────────────────
+_exec_text = (REPO_ROOT / "agents" / "executor.md").read_text()
+_row7 = next(l for l in _exec_text.splitlines() if "spawn-failed" in l and "spawn-stale" in l and "no later" in l)
+assert "{unserved, timeout}" in _row7, "AC7: the row must name reason in {unserved, timeout}"
+assert "third" in _row7 and "escalation-blocking" in _row7, \
+    "AC7: the counted-attempt (third-failure) wording must be present"
+assert "round-2 cap" in _row7, "AC7: the reviewer round-cap sentence must be present"
 N += 1
 
 

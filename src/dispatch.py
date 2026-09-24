@@ -22,13 +22,14 @@ above zero; an unreachable seat is api_error with zero tokens. The contract
 appends nothing — every event below is derived from the Output object into this
 spawn's own file, and the actor is that filename (D90).
 """
-import argparse, atexit, hashlib, json, os, pathlib, re, subprocess, sys
+import argparse, atexit, hashlib, json, os, pathlib, re, socket, subprocess, sys
 from datetime import datetime, timezone
 
 HERE = pathlib.Path(__file__).resolve().parent
 AGENTS = HERE.parent / "agents"
 sys.path.insert(0, str(HERE))
 import models  # noqa: E402
+import panes  # noqa: E402 — proc_start/alive; no circular import (panes imports nothing of ours)
 ROOT = pathlib.Path(os.environ.get("DOIT_ROOT", pathlib.Path.home() / ".do-it"))
 EVENTS, CONTENT = ROOT / "events", ROOT / "content"
 
@@ -286,7 +287,74 @@ class Unserved(Exception):
         super().__init__(f"{spawn}: unserved after {elapsed:.0f}s — no {claim_path} on disk")
 
 
-def run_seat(spawn, cmd, packet, cwd, timeout, path=None):
+def _window_min_override(spec_text):
+    """L-spec-0269, Planner amendment SD22: a spec's own leading `window_min: N`
+    line, read WITHOUT requiring the `---`-delimited block `carry.frontmatter_
+    charter`/`carry._frontmatter_value` demand — no live spec opens that way
+    (§6). Scans only the lines before the first line starting with `## `.
+    Returns the int on the first matching `^window_min:\\s*(\\d+)\\s*$` line, else
+    `None` on no such line, no match, or (defensively) an unparseable value —
+    never an exception."""
+    if not spec_text:
+        return None
+    head = []
+    for line in spec_text.splitlines():
+        if line.startswith("## "):
+            break
+        head.append(line)
+    for line in head:
+        m = re.match(r"^window_min:\s*(\d+)\s*$", line)
+        if m:
+            try:
+                return int(m.group(1))
+            except ValueError:
+                return None
+    return None
+
+
+def window_min(role, subject, events, *, backend="seat"):
+    """L-spec-0269: the window a role's spawn is offered under. A non-`seat`
+    backend (`run_claude`/`run_codex`) always gets the flat, unbumped role cap —
+    `Unserved`/claiming is a seat-only concept. On `backend="seat"`: `grader`/
+    `reviewer` get 45 minutes instead of their own cap when the subject's newest
+    `spec-written` event's `ac_types` names `observed-data` or (reserved)
+    `live-db`; that base is then raised, never lowered, to the subject's own
+    leading `window_min:` line when one is present and larger; the result is
+    capped at 240 regardless. No `spec-written` event and no readable
+    `content/<subject>.md` degrades cleanly to the plain base — never an
+    exception (§4, §6)."""
+    if backend != "seat":
+        return ROLES.get(role, (None, 240, 0))[1]
+    import fold                                  # lazy: see fold.py's own alloc() note
+    base = ROLES[role][1]
+    newest = None
+    for e in events:
+        if e.get("type") == "spec-written" and e.get("spec") == subject:
+            if newest is None or fold.ts(e.get("ts")) > fold.ts(newest.get("ts")):
+                newest = e
+    if role in ("grader", "reviewer") and newest and \
+            set(newest.get("ac_types") or []) & {"observed-data", "live-db"}:
+        base = 45
+    text = None
+    if newest and newest.get("path"):
+        try:
+            text = pathlib.Path(newest["path"]).read_text()
+        except OSError:
+            text = None
+    else:
+        p = CONTENT / f"{subject}.md"
+        if p.is_file():
+            try:
+                text = p.read_text()
+            except OSError:
+                text = None
+    override = _window_min_override(text) if text else None
+    if override is not None and override > base:
+        base = override
+    return min(base, 240)
+
+
+def run_seat(spawn, cmd, packet, cwd, timeout, path=None, *, window=None, ledger=None, base=None, role=None):
     """The seat path (D116 by another route). Where `claude -p` is banned as metered
     — the Albert Scott rule, spec 572 — the spawn runs as an interactive session's
     seat-billed sub-agent instead. This function does not spawn: it writes the
@@ -297,13 +365,19 @@ def run_seat(spawn, cmd, packet, cwd, timeout, path=None):
     after-the-fact check in main() then runs unchanged, and the ledger records
     `spawn_path: seat` so the two routes are distinguishable forever.
 
-    R6: the same loop also tracks whether `<spawn>.claimed` has ever appeared on
-    disk — written ONLY by `scripts/seat/claim.sh` (O_EXCL; this function never
-    writes it, ADR-0028-2). If it has not appeared within `DOIT_SEAT_CLAIM_SEC`
-    (default 300) seconds of this function starting, `Unserved` is raised — well
-    before `timeout` can run out. Once a claim is observed, the check stops firing
-    for the rest of this call: a claimed-but-slow seat still waits out the full
-    `timeout` exactly as before this unit.
+    R6/L-spec-0269: the same loop also tracks whether `<spawn>.claimed` has ever
+    appeared on disk — written ONLY by `scripts/seat/claim.sh` (O_EXCL; this
+    function never writes it, ADR-0028-2). Two clocks, not one: at
+    `DOIT_SEAT_CLAIM_SEC` (default 300) seconds unclaimed, this function no
+    longer raises — it appends one non-terminal `seat-stale{spawn, role,
+    subject, age_s}` (via `emit`, when `ledger` and `base` are both given; never
+    a second one on the same call) and keeps waiting. It gives up for real —
+    raising `Unserved`, exactly as before — only once `window` seconds have
+    passed with no claim (`window` defaults to `timeout` when omitted, so a
+    caller supplying neither keeps a single-clock, back-compat wait). Once a
+    claim IS observed, the wait-for-result deadline becomes `timeout` seconds
+    counted from the claim instant, not from this call's start — a claim
+    landing at the edge of the window still gets the whole cap to finish.
 
     L-spec-0262 (SWP2/SWP3): `path` is the writing role's already-resolved,
     absolute write destination (`None` for a non-writing role), computed once by
@@ -317,9 +391,10 @@ def run_seat(spawn, cmd, packet, cwd, timeout, path=None):
     (SEAT / f"{spawn}.packet.md").write_text(packet_text)
     (SEAT / f"{spawn}.cmd.json").write_text(json.dumps({"cmd": cmd, "cwd": cwd, "path": path}, indent=1))
     want, bare = SEAT / f"{spawn}.result.json", SEAT / f"{spawn}.output.json"
+    window = timeout if window is None else window
     print(json.dumps({"seat": spawn, "packet": str(SEAT / f"{spawn}.packet.md"),
                       "result_expected_at": str(want), "or_output_at": str(bare),
-                      "cwd": cwd, "timeout_s": timeout}), flush=True)
+                      "cwd": cwd, "timeout_s": timeout, "window_s": window}), flush=True)
     # The completion signal is the PANE's stamp — `<spawn>.meta.json` (or a full
     # `result.json`) — never the Output file's existence: a contract iterating on its
     # Output with `doit validate` writes an invalid draft first, and the wrapper read
@@ -330,14 +405,20 @@ def run_seat(spawn, cmd, packet, cwd, timeout, path=None):
     claim_sec = int(os.environ.get("DOIT_SEAT_CLAIM_SEC", 300))
     t0 = time.time()
     claimed = False
+    claim_t = None
+    stale_emitted = False
     while not (want.is_file() or (meta_p.is_file() and bare.is_file())):
         if not claimed and claim_p.is_file():
-            claimed = True
+            claimed, claim_t = True, time.time()
         if not claimed:
             elapsed = time.time() - t0
-            if elapsed > claim_sec:
+            if not stale_emitted and elapsed > claim_sec:
+                stale_emitted = True
+                if ledger is not None and base is not None:
+                    emit(ledger, base, "seat-stale", role=role, age_s=elapsed)
+            if elapsed > window:
                 raise Unserved(spawn, claim_p, elapsed)
-        if time.time() - t0 > timeout:
+        elif time.time() - claim_t > timeout:
             raise subprocess.TimeoutExpired(cmd, timeout)
         time.sleep(2)
     time.sleep(1)                       # a writer that is still writing
@@ -705,10 +786,17 @@ def main(a):
     dsn_role = None
     if a.role in ("builder", "grader"):
         dsn_role = provision_worktree_env(cwd, ROOT / "repos" / a.project) if a.project else "absent"
+    # L-spec-0269: every start records the window it was offered under and who
+    # is waiting on it — any role, any backend (a flat, unbumped cap for
+    # run_claude/run_codex; the full formula, load-bearing, for run_seat).
+    wm = window_min(a.role, a.subject, fold.read_events(), backend=backend)
+    waiter_pid = os.getpid()
+    waiter_kv = dict(window_min=wm, waiter_pid=waiter_pid, waiter_host=socket.gethostname(),
+                     waiter_proc_start=panes.proc_start(waiter_pid))
     if builder:
-        emit(ledger, base, "build-started", worktree=cwd, dsn_role=dsn_role, backend=backend)
+        emit(ledger, base, "build-started", worktree=cwd, dsn_role=dsn_role, backend=backend, **waiter_kv)
     else:
-        kv = {"role": a.role, "backend": backend}
+        kv = {"role": a.role, "backend": backend, **waiter_kv}
         if a.role == "grader":
             kv["dsn_role"] = dsn_role
         emit(ledger, base, "spawn-started", **kv)
@@ -731,11 +819,12 @@ def main(a):
             r = run_codex(spawn, a.role, mm["model"], schema_path, packet, cwd, (a.timeout or tmin) * 60,
                          path=write_path)
         elif seat:
-            r = run_seat(spawn, cmd, packet, cwd, (a.timeout or tmin) * 60, path=write_path)
+            r = run_seat(spawn, cmd, packet, cwd, (a.timeout or tmin) * 60, path=write_path,
+                        window=wm * 60, ledger=ledger, base=base, role=a.role)
         else:
             r = run_claude(cmd, packet, cwd, (a.timeout or tmin) * 60)
     except subprocess.TimeoutExpired:
-        fail(f"timeout after {a.timeout or tmin} min")
+        fail(f"timeout after {a.timeout or tmin} min", reason="timeout")
     except Unserved as e:
         fail(f"unserved: {e}", reason="unserved")
     try:
@@ -755,10 +844,11 @@ def main(a):
         meta.update(backend=backend, spawn_path=backend, model_requested=fb["model"],
                     backend_fallback=True, fallback_from="codex")
         try:
-            r = run_seat(spawn, cmd, packet, cwd, (a.timeout or tmin) * 60, path=write_path) if seat \
+            r = run_seat(spawn, cmd, packet, cwd, (a.timeout or tmin) * 60, path=write_path,
+                        window=wm * 60, ledger=ledger, base=base, role=a.role) if seat \
                 else run_claude(cmd, packet, cwd, (a.timeout or tmin) * 60)
         except subprocess.TimeoutExpired:
-            fail(f"timeout after {a.timeout or tmin} min (on the fallback backend {backend})")
+            fail(f"timeout after {a.timeout or tmin} min (on the fallback backend {backend})", reason="timeout")
         except Unserved as e:
             fail(f"unserved: {e}", reason="unserved")
         try:

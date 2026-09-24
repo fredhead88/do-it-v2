@@ -75,7 +75,15 @@ def _spawn_busy(ev):
         # Executor's failed-spawn row is what looks at it.
         role = "-".join(sid.split("-")[1:-1]) if sid else (e.get("role") or "")
         cap = dispatch.ROLES.get(role, (None, 60, 0))[1]
-        if (fold.NOW - fold.ts(e.get("ts"))).total_seconds() / 60 > 2 * cap:
+        # L-spec-0269/R1: the subject's own recorded `window_min` (its offered
+        # claim window), plus the role's cap for the working wait after a claim
+        # — replacing the flat `2 * cap`, which read a spec whose window was
+        # raised as a dead wrapper before it had had its full chance to be
+        # claimed. An event with no recorded `window_min` (every pre-existing
+        # one, and every non-seat-backend one) falls back to `cap`, reproducing
+        # `2 * cap` exactly.
+        window = e.get("window_min") or cap
+        if (fold.NOW - fold.ts(e.get("ts"))).total_seconds() / 60 > window + cap:
             sid and dispatch.emit(tick_path(), {"spawn": sid}, "spawn-stale",
                                   subject=e.get("subject"), role=role, cap_min=cap)
         else:
