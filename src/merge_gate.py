@@ -65,6 +65,13 @@ ENV.update(LC_ALL="C", LANG="C", GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0"
 SENTINELS = ("secrets/prod_keys.py", ".github/workflows/deploy.yml",
              "migrations/001_init.sql", "a/b/c/d/e.txt", "Makefile")
 MIGRATIONS = re.compile(DEFAULT_MIGRATIONS, re.I)
+# L-spec-0273/PL-008(a): a path token must LOOK like a path — `(`/`)` joined the
+# accepted character set because Next.js route groups are real paths
+# (`dashboard/src/app/(dashboard)/...`) that `check_grant` refused outright,
+# raising Undetermined on a legitimate Writes: grant. A named constant, not an
+# inline literal, so a regression guard (packet_lint.check_bracket_path_rejected)
+# can prove the fix by swapping this back to its pre-fix pattern and forward.
+PATH_TOKEN_RE = re.compile(r"[A-Za-z0-9_.@+*?\[\]()/-]+")
 GIT_TIMEOUT, DEADLINE, REVERT_DEPTH, REVERT_MAX_PATHS = 20.0, 60.0, 50, 200
 _TOP, _START, _KNOBS = None, time.monotonic(), {}
 
@@ -375,7 +382,7 @@ def check_grant(toks, whose):
     if not toks:
         raise Undetermined(f"{whose} has a writes: line with no paths on it")
     for t in toks:
-        if not re.fullmatch(r"[A-Za-z0-9_.@+*?\[\]/-]+", t) or not any(c in t for c in "/.*?"):
+        if not PATH_TOKEN_RE.fullmatch(t) or not any(c in t for c in "/.*?"):
             raise Undetermined(f"{whose}: {t!r} is not a path or a glob. Prose is not a grant — "
                                f"write a bare directory as {t}/ if that is what you meant")
         hit = [s for s in SENTINELS if granted(s, [t])]

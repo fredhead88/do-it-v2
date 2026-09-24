@@ -31,7 +31,7 @@ fi
 
 # The checks run BEFORE anything is put on PATH. An install that ships a red
 # suite is how a guard becomes a guard that is not running.
-( cd "$HERE/src" && python3 test_fold.py && python3 test_merge_gate.py && python3 test_dispatch.py && python3 test_tick.py && python3 test_paid_call.py && node test_vet_dep.mjs )
+( cd "$HERE/src" && python3 test_fold.py && python3 test_merge_gate.py && python3 test_packet_lint.py && python3 test_dispatch.py && python3 test_tick.py && python3 test_paid_call.py && node test_vet_dep.mjs )
 
 BIN="${DOIT_BIN:-$HOME/.local/bin}"
 mkdir -p "$BIN"

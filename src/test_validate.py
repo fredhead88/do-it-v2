@@ -68,4 +68,24 @@ f = validate.spec_shape(PROSE_WRITES)
 check(len(f) == 1 and f[0].startswith("Writes grant:"),
       f"a prose Writes value names exactly that bucket: {f}")
 
+# ── AC2(b)/AC3: a warn-severity PL-001 hit (base_sha: HEAD) never blocks
+# spec_shape, and spec_shape_warnings surfaces exactly that finding ──────────
+BASE_SHA_HEAD = ("# L-spec-fixture\n"
+                  "base_sha: HEAD\n"
+                  "## Verification\n"
+                  "```\n"
+                  "true && true\n"
+                  "```\n"
+                  "## Acceptance Criteria\n"
+                  "AC1 [backend]: x.\n"
+                  "  review_path: y\n"
+                  "Writes: a.py\n")
+check(validate.spec_shape(BASE_SHA_HEAD) == [],
+      "a warn-severity PL-001 hit (base_sha: HEAD) never blocks spec_shape")
+w = validate.spec_shape_warnings(BASE_SHA_HEAD)
+check(len(w) == 1 and w[0].startswith("PL-001: "),
+      f"spec_shape_warnings surfaces exactly the PL-001 finding: {w}")
+check(validate.spec_shape_warnings(WELL_FORMED) == [],
+      "a clean spec carries no spec_shape_warnings either")
+
 print(f"validate: {N} checks over spec_shape's four fixtures")

@@ -169,6 +169,26 @@ absent(t, packet.strip(c, "builder"))
 refuses("builder", "A sibling slot's internals, which no other role may ever be handed.",
         worktree=str(REPO), repo=str(REPO))
 
+# ── 2b. AC13/PL-009 — the builder packet carries its own ## STOP section, and
+# packet-lint stays silent while it does; strip that section out and the
+# non-blocking notice appears, the file is still written, main() still returns
+# the path. A grader packet built against the same checklist is unaffected.
+assert "## STOP" in t and "DSN missing in a worktree" in t and "fills /tmp" in t \
+    and "leaves master red" in t, "p_builder's own output names the three local-box footguns"
+assert "Packet-lint notices" not in t, "an unmodified builder packet gets no PL-009 notice"
+N += 1
+real_builder = packet.BUILD["builder"]
+packet.BUILD["builder"] = lambda c: [l for l in real_builder(c)
+                                      if l != "## STOP" and "DSN missing in a worktree" not in l
+                                      and "fills /tmp" not in l and "leaves master red" not in l]
+try:
+    stripped = build("builder", worktree=str(REPO), repo=str(REPO))
+finally:
+    packet.BUILD["builder"] = real_builder
+assert "PL-009:" in stripped and "## Packet-lint notices (non-blocking)" in stripped, \
+    f"a builder packet missing ## STOP gets a non-blocking PL-009 notice: {stripped[-300:]!r}"
+N += 1
+
 # ── 3. grader ────────────────────────────────────────────────────────────────
 CARD = TMP / "content" / "L-card-0001.md"
 CARD.write_text("# L-card-0001 · DONE · built by L-builder-0007\n"
@@ -184,6 +204,9 @@ t = build("grader", worktree=str(REPO))
 assert "AC1 [backend] built · log" in t, "the card's per-criterion rows are carried, as claims"
 assert "verify `bash verify.sh` → exit 0" in t and "validator: not installed" in t
 assert "verify-L-spec-0001" in t and "coverage note" in t and "__pycache__" in t
+assert "Packet-lint notices" not in t, \
+    "PL-009's applies_to (packet:builder) never matches packet:grader, even against the same checklist"
+N += 1
 absent(t, packet.strip(c, "grader"))
 for gone in ("built by L-builder-0007", "branch l-spec-0001 · base", "abc1234deadbeef",
              "def5678deadbeef", "renamed the helper", "not built:"):
@@ -440,6 +463,7 @@ else:
 # ── the file itself ──────────────────────────────────────────────────────────
 ps = {p.name for p in (TMP / "packets").glob("*.md")}
 assert ps == {"L-charter-0001-charter-reviewer-1.md", "L-spec-0001-builder-1.md",
+              "L-spec-0001-builder-2.md",
               "L-spec-0003-builder-1.md",
               "L-spec-0001-grader-1.md", "L-spec-0001-grader-2.md",
               "L-spec-0001-reviewer-1.md",
