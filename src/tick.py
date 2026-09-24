@@ -12,7 +12,7 @@ a supervised pane that reads the same lane for itself; nothing here launches it.
 """
 import argparse, fcntl, os, pathlib, re, sys, time
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import carry, dispatch, fold, intake, notes, tree_cleanup  # noqa: E402
+import carry, dispatch, fold, intake, notes, pane_resume, tree_cleanup  # noqa: E402
 # `relay` is imported LAZILY, inside `wait()` only — importing tick.py must not
 # force `relay` (and its own `audit` import) into sys.modules for every caller,
 # `pane_end.py` among them, that only wants `up.quiet_point`'s tick.py half.
@@ -268,6 +268,14 @@ def _record():
         carry.sync_v4(ev)
     except Exception as e:
         errors.append(f"sync_v4: {e}")
+    # L-spec-0274/R3: a stalled Claude pane says why, and this restarts what
+    # can be restarted — its own try/except, on this SAME re-read `ev`, never
+    # merged into `carry_error` (a different concern, a different field).
+    pane_resume_error = None
+    try:
+        pane_resume.run(ev)
+    except Exception as e:
+        pane_resume_error = f"{e}"
     todo = lane(specs, charters, in_flight(ev), reaped, events=ev, inbound=inbound)
     # The one liveness fact: `fold` reads the newest of these for staleness, and
     # `lane` is the count — the whole record this process leaves behind.
@@ -276,6 +284,8 @@ def _record():
         kv["carry_error"] = "; ".join(errors)
     if intake_errors:
         kv["intake_error"] = "; ".join(intake_errors)
+    if pane_resume_error:
+        kv["pane_resume_error"] = pane_resume_error
     dispatch.emit(tick_path(), {}, "tick", **kv)
     return todo
 

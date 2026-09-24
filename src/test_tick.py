@@ -18,7 +18,7 @@ os.environ["V4_STAGING_DIR"] = str(TMP / "v4-staging")
 # assertion below false-red. Popped here, before the import, never in the caller's shell.
 os.environ.pop("DOIT_PROJECT", None)
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
-import carry, fold, intake, tick  # noqa: E402
+import carry, fold, intake, pane_resume, tick  # noqa: E402
 
 NOW = fold.NOW.isoformat(timespec="seconds")
 EV = TMP / "events"
@@ -46,6 +46,25 @@ class _IntakeStub:
 
 
 intake.subprocess = _IntakeStub()
+
+# L-spec-0274 (R3): `tick._record()` now calls `pane_resume.run(ev)` on EVERY
+# pass too. Left unpatched, that call reads this BOX's own real
+# `~/.claude/sessions` (pane_resume.run's own default) and could send a real
+# `continue` into a real tmux pane out of this very test file — the one
+# outcome the spec's own Constraints forbid a test suite from ever risking.
+# Stubbed the same way `intake.subprocess` is: one module-level swap, before
+# the FIRST `tick.main()` below, so every existing fixture and every new one
+# routes through it; `test_pane_resume.py` alone exercises the real function.
+PANE_RESUME_CALLS = []
+_real_pane_resume_run = pane_resume.run
+
+
+def _pane_resume_stub(ev, **kw):
+    PANE_RESUME_CALLS.append(len(ev))
+    return {"resumed": [], "escalated": [], "skipped": []}
+
+
+pane_resume.run = _pane_resume_stub
 
 
 def ticks():
@@ -688,3 +707,45 @@ intake.run = real_intake_run
 fold.EVENTS = saved_events
 
 print("tick: L-spec-0242 AC13 checks pass")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-0274 · pane-resume (L-charter-0033) — AC6: `tick._record()` calls
+# `pane_resume.run(ev)` in its own try/except, placed after `carry.sync_v4(ev)`
+# and before `todo = lane(...)`, on the same re-read `ev`; a raising `run()`
+# contributes `pane_resume_error` without touching `carry_error`/`intake_error`
+# or stopping the tick's own heartbeat.
+# ══════════════════════════════════════════════════════════════════════════════
+iso274 = _isolated_events()
+fold.EVENTS = iso274
+seen274 = {}
+
+
+def _raising_pane_resume(ev, **kw):
+    seen274["n"] = len(ev)
+    raise RuntimeError("pane_resume boom")
+
+
+pane_resume.run = _raising_pane_resume
+n0_274 = len(ticks())
+assert tick.main() == 0, "AC6: a raising pane_resume.run never stops the tick's own heartbeat"
+assert len(ticks()) == n0_274 + 1, "AC6: exactly one new tick event lands"
+last274 = ticks()[-1]
+assert "pane_resume boom" in last274.get("pane_resume_error", ""), \
+    f"AC6: the tick event names the caught exception on pane_resume_error: {last274}"
+assert "carry_error" not in last274 and "intake_error" not in last274 and isinstance(last274["lane"], int), \
+    f"AC6: carry_error/intake_error untouched, lane still an int: {last274}"
+assert seen274.get("n") == 0, \
+    "AC6: pane_resume.run is called on the re-read ev, an otherwise-empty isolated ledger here"
+pane_resume.run = _pane_resume_stub
+fold.EVENTS = saved_events
+
+# AC6, the other half — a normal (non-raising) pane_resume.run contributes no
+# `pane_resume_error` at all, and intake/carry are unaffected by its presence.
+iso274b = _isolated_events()
+fold.EVENTS = iso274b
+assert tick.main() == 0
+last274b = ticks()[-1]
+assert "pane_resume_error" not in last274b, f"AC6: a clean run adds no error field: {last274b}"
+fold.EVENTS = saved_events
+
+print("tick: L-spec-0274 AC6 checks pass")
