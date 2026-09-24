@@ -74,8 +74,18 @@ assert all(r_empty[f] is None for f in usage.FIELDS) and r_empty["transcript"] =
 # never had one) resolves to the same all-None shape without touching the fs
 assert usage.resolve(None, PROJECTS) == {**{f: None for f in usage.FIELDS}, "model_observed": None, "transcript": None}
 
+# count_turns: the distinct-assistant-id count, independent of split_from_transcript,
+# and None-safe (★ count_turns is the distinct-id count, and None-safe).
+got_turns = usage.count_turns(f3)
+assert got_turns == 2, got_turns  # m1 (streamed twice, same id) + m2 -> 2 distinct ids
+assert usage.count_turns(f4) is None, "no assistant usage at all -> None, never 0"
+assert usage.count_turns(None) is None, "no path -> None"
+
 # stamp(): the meta.json the pane writes. subagent_tokens (hand-supplied) is
-# kept ALONGSIDE the resolved split, never replaced by it.
+# kept ALONGSIDE the resolved split, never replaced by it. `turns`, unlike
+# duration_ms/subagent_tokens, is now cross-checked against the transcript's
+# own derived count (★ only turns is corrected past 10%; duration_ms and
+# subagent_tokens are never touched, no matter the gap).
 ROOT = TMP / "root"
 meta, resolved = usage.stamp("L-grader-0099", "claude-sonnet-5", "agent-grow1", "3", "5000", "12345",
                              root=str(ROOT), projects=PROJECTS)
@@ -83,9 +93,47 @@ assert resolved is True
 assert meta["usage"] == {"subagent_tokens": 12345, "input_tokens": 4, "output_tokens": 45,
                          "cache_read_input_tokens": 300, "cache_creation_input_tokens": 50}, meta["usage"]
 assert meta["model"] == "claude-sonnet-5" and meta["model_observed"] == "claude-sonnet-5" \
-    and meta["session"] == "agent-grow1" and meta["turns"] == 3 and meta["duration_ms"] == 5000
+    and meta["session"] == "agent-grow1" and meta["turns"] == 2 and meta["duration_ms"] == 5000, meta
+assert meta["turns_supplied"] == 3 and meta["stamp_corrected"] == "turns", meta
 on_disk = json.loads((ROOT / "seat" / "L-grader-0099.meta.json").read_text())
 assert on_disk == meta, "stamp() must not claim the write landed without re-reading it"
+
+# omitted turns ("-"): derived from the transcript, or None when nothing
+# resolves — never invented as 0 (★ omitted turns is the transcript's own
+# derived count, or None when nothing resolves).
+meta_omitted, _ = usage.stamp("L-grader-0101", "claude-sonnet-5", "agent-grow1", "-", "5000", "1",
+                              root=str(ROOT), projects=PROJECTS)
+assert meta_omitted["turns"] == 2, meta_omitted
+assert "turns_supplied" not in meta_omitted and "stamp_corrected" not in meta_omitted, meta_omitted
+
+meta_omitted_ghost, _ = usage.stamp("L-grader-0102", "claude-opus-5", "agent-ghost", "-", "1000", "999",
+                                    root=str(ROOT), projects=PROJECTS)
+assert meta_omitted_ghost["turns"] is None, meta_omitted_ghost
+assert "turns_supplied" not in meta_omitted_ghost and "stamp_corrected" not in meta_omitted_ghost, \
+    meta_omitted_ghost
+
+# a supplied turns within 10% of the derived value is kept, uncorrected
+# (★ a supplied turns value within 10% of the derived one is kept, uncorrected).
+meta_close, _ = usage.stamp("L-grader-0103", "claude-sonnet-5", "agent-grow1", "2", "5000", "399",
+                            root=str(ROOT), projects=PROJECTS)
+assert meta_close["turns"] == 2, meta_close
+assert "turns_supplied" not in meta_close and "stamp_corrected" not in meta_close, meta_close
+
+# the CLI path (stamp_main) derives turns via the literal "-" sentinel
+# identically to the Python API (★ the CLI path derives turns via the literal
+# - sentinel, identically to the Python API). stamp_main's internal resolve()
+# call reads usage.PROJECTS directly (no --projects flag exists), so the
+# fixture root is monkeypatched in and restored immediately after.
+_real_projects = usage.PROJECTS
+usage.PROJECTS = PROJECTS
+try:
+    rc = usage.stamp_main(["L-x-0004", "claude-sonnet-5", "agent-grow1", "-", "5000", "1",
+                           "--root", str(ROOT)])
+finally:
+    usage.PROJECTS = _real_projects
+assert rc == 0, rc
+cli_meta = json.loads((ROOT / "seat" / "L-x-0004.meta.json").read_text())
+assert cli_meta["turns"] == 2, cli_meta
 
 # no transcript resolves: the four fields (and model_observed) stay null, the
 # blended figure is still written, and stamp() says unresolved so the CLI can warn

@@ -10,9 +10,9 @@ fold-and-record: it spends nothing, it can be run at any frequency by anything,
 and the one event it appends is what `fold` reads for staleness. The Executor is
 a supervised pane that reads the same lane for itself; nothing here launches it.
 """
-import argparse, fcntl, os, pathlib, re, sys, time
+import argparse, fcntl, os, pathlib, re, socket, sys, time
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import carry, dispatch, fold, intake, notes, pane_resume, tree_cleanup  # noqa: E402
+import carry, dispatch, fold, intake, notes, pane_resume, panes, tree_cleanup  # noqa: E402
 # `relay` is imported LAZILY, inside `wait()` only — importing tick.py must not
 # force `relay` (and its own `audit` import) into sys.modules for every caller,
 # `pane_end.py` among them, that only wants `up.quiet_point`'s tick.py half.
@@ -60,7 +60,16 @@ def _spawn_busy(ev):
     A start older than twice its role's cap with no terminal event is a dead
     wrapper: recorded once as `spawn-stale` (on the CURRENT `tick_path()`, never
     a stale import-time path), and the subject is back on the lane for the
-    Executor's failed-spawn row."""
+    Executor's failed-spawn row.
+
+    A same-host, confirmed-dead waiter goes stale immediately, independent of
+    elapsed time: when the started event carries a truthy `waiter_pid` and
+    `waiter_host` equal to this process's own hostname, `panes._is_live` (reused
+    verbatim, built with a synthetic `{"procStart": waiter_proc_start}` meta
+    dict) decides liveness — a confirmed-dead waiter never gets the benefit of
+    the doubt an unreadable pid/start-time does. An event missing `waiter_pid`/
+    `waiter_host`, or naming a different host, falls through to the existing
+    elapsed-time check unchanged."""
     started = [e for e in ev if e["type"] in ("build-started", "spawn-started")]
     ended = {e.get("spawn") for e in ev if e["type"] in ("spawn-done", "spawn-failed", "spawn-stale")}
     busy = set()
@@ -75,6 +84,12 @@ def _spawn_busy(ev):
         # Executor's failed-spawn row is what looks at it.
         role = "-".join(sid.split("-")[1:-1]) if sid else (e.get("role") or "")
         cap = dispatch.ROLES.get(role, (None, 60, 0))[1]
+        waiter_pid = e.get("waiter_pid")
+        if waiter_pid and e.get("waiter_host") == socket.gethostname() and \
+                not panes._is_live(waiter_pid, {"procStart": e.get("waiter_proc_start")}):
+            sid and dispatch.emit(tick_path(), {"spawn": sid}, "spawn-stale",
+                                  subject=e.get("subject"), role=role, cap_min=cap, reason="waiter-dead")
+            continue
         # L-spec-0269/R1: the subject's own recorded `window_min` (its offered
         # claim window), plus the role's cap for the working wait after a claim
         # — replacing the flat `2 * cap`, which read a spec whose window was

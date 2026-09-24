@@ -777,3 +777,124 @@ assert "pane_resume_error" not in last274b, f"AC6: a clean run adds no error fie
 fold.EVENTS = saved_events
 
 print("tick: L-spec-0274 AC6 checks pass")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-0275 · honest-recording (L-charter-0033) — R2 Target 2: a same-host,
+# confirmed-dead waiter's spawn goes stale immediately, independent of the
+# elapsed-time cap.
+# ══════════════════════════════════════════════════════════════════════════════
+import socket, panes  # noqa: E402
+
+HOST = socket.gethostname()
+
+
+def _dead_pid():
+    """A forked-and-reaped child pid — guaranteed dead, no network."""
+    pid = os.fork()
+    if pid == 0:
+        os._exit(0)
+    os.waitpid(pid, 0)
+    return pid
+
+
+# AC8 — a same-host, confirmed-dead waiter_pid: spawn-stale fires immediately,
+# though the event's own ts is fresh (well inside any elapsed-time cap), and
+# the subject returns to the lane right away.
+iso8 = _isolated_events()
+fold.EVENTS = iso8
+dead8 = _dead_pid()
+write_to(iso8, "L-planner-8801.jsonl", {"type": "spec-written", "subject": "L-spec-8801"})
+write_to(iso8, "L-grader-8801.jsonl", {"type": "spawn-started", "role": "grader",
+                                       "subject": "L-spec-8801", "spawn": "L-grader-8801",
+                                       "waiter_host": HOST, "waiter_pid": dead8})
+assert tick.main() == 0
+stale8 = [json.loads(l) for l in tick.tick_path().read_text().splitlines() if '"spawn-stale"' in l]
+assert stale8 and stale8[-1]["spawn"] == "L-grader-8801" and stale8[-1].get("reason") == "waiter-dead", \
+    f"AC8: a same-host confirmed-dead waiter is stale immediately, reason=waiter-dead: {stale8}"
+ev8, specs8, charters8 = folded()
+assert "L-spec-8801 · written" in tick.lane(specs8, charters8, tick.in_flight(ev8), events=ev8), \
+    "AC8: the subject returns to the lane immediately, not after 2x the cap"
+fold.EVENTS = saved_events
+
+# AC9 — a live waiter_pid whose recorded waiter_proc_start does NOT match its
+# own real proc_start (a pid-reuse simulation): dead, not busy, exactly as AC8.
+iso9 = _isolated_events()
+fold.EVENTS = iso9
+write_to(iso9, "L-planner-8802.jsonl", {"type": "spec-written", "subject": "L-spec-8802"})
+write_to(iso9, "L-grader-8802.jsonl", {"type": "spawn-started", "role": "grader",
+                                       "subject": "L-spec-8802", "spawn": "L-grader-8802",
+                                       "waiter_host": HOST, "waiter_pid": os.getpid(),
+                                       "waiter_proc_start": "not-a-real-start-time"})
+assert tick.main() == 0
+stale9 = [json.loads(l) for l in tick.tick_path().read_text().splitlines() if '"spawn-stale"' in l]
+assert stale9 and stale9[-1]["spawn"] == "L-grader-8802" and stale9[-1].get("reason") == "waiter-dead", \
+    f"AC9: a mismatched proc_start (pid reuse) is dead even though the pid itself is alive: {stale9}"
+fold.EVENTS = saved_events
+
+# AC10 — panes.proc_start monkeypatched to always return None (an unreadable
+# own start time): an alive pid stays busy, never dead, regardless of what
+# waiter_proc_start names.
+iso10 = _isolated_events()
+fold.EVENTS = iso10
+real_proc_start = panes.proc_start
+panes.proc_start = lambda pid: None
+try:
+    write_to(iso10, "L-planner-8803.jsonl", {"type": "spec-written", "subject": "L-spec-8803"})
+    write_to(iso10, "L-grader-8803.jsonl", {"type": "spawn-started", "role": "grader",
+                                            "subject": "L-spec-8803", "spawn": "L-grader-8803",
+                                            "waiter_host": HOST, "waiter_pid": os.getpid(),
+                                            "waiter_proc_start": "anything-at-all"})
+    assert tick.main() == 0
+    stale10 = [l for l in tick.tick_path().read_text().splitlines() if '"spawn-stale"' in l]
+    assert not stale10, f"AC10: an unreadable own proc_start is alive, never dead: {stale10}"
+    ev10, specs10, charters10 = folded()
+    assert "L-spec-8803 · written" not in tick.lane(specs10, charters10, tick.in_flight(ev10), events=ev10), \
+        "AC10: the subject stays busy — it is not on the lane"
+finally:
+    panes.proc_start = real_proc_start
+    fold.EVENTS = saved_events
+
+# AC11 — an int-typed waiter_proc_start that matches (once cast to str) is
+# never a false positive for dead: the subject stays busy.
+iso11 = _isolated_events()
+fold.EVENTS = iso11
+real_start = panes.proc_start(os.getpid())
+write_to(iso11, "L-planner-8804.jsonl", {"type": "spec-written", "subject": "L-spec-8804"})
+write_to(iso11, "L-grader-8804.jsonl", {"type": "spawn-started", "role": "grader",
+                                        "subject": "L-spec-8804", "spawn": "L-grader-8804",
+                                        "waiter_host": HOST, "waiter_pid": os.getpid(),
+                                        "waiter_proc_start": int(real_start)})
+assert tick.main() == 0
+stale11 = [l for l in tick.tick_path().read_text().splitlines() if '"spawn-stale"' in l]
+assert not stale11, f"AC11: an int-typed matching waiter_proc_start is never a false positive: {stale11}"
+ev11, specs11, charters11 = folded()
+assert "L-spec-8804 · written" not in tick.lane(specs11, charters11, tick.in_flight(ev11), events=ev11), \
+    "AC11: the subject stays busy"
+fold.EVENTS = saved_events
+
+# AC12(a)/(b) — cross-host and fields-missing spawns fall through unaffected,
+# to the existing elapsed-time behavior (busy, no immediate spawn-stale). The
+# two pre-existing 2x-cap spawn-stale fixtures earlier in this file (the
+# 45-minute-old L-grader-0009 fixture; the 12-day-old anonymous build-started
+# fixture) carry no waiter_* fields, are untouched above, and already passed
+# exactly as at base_sha (AC12(c)).
+iso12 = _isolated_events()
+fold.EVENTS = iso12
+dead12 = _dead_pid()
+write_to(iso12, "L-planner-8805.jsonl", {"type": "spec-written", "subject": "L-spec-8805"})
+write_to(iso12, "L-grader-8805.jsonl", {"type": "spawn-started", "role": "grader",
+                                        "subject": "L-spec-8805", "spawn": "L-grader-8805",
+                                        "waiter_host": "definitely-not-this-host", "waiter_pid": dead12})
+write_to(iso12, "L-planner-8806.jsonl", {"type": "spec-written", "subject": "L-spec-8806"})
+write_to(iso12, "L-grader-8806.jsonl", {"type": "spawn-started", "role": "grader",
+                                        "subject": "L-spec-8806", "spawn": "L-grader-8806"})
+assert tick.main() == 0
+stale12 = [l for l in tick.tick_path().read_text().splitlines() if '"spawn-stale"' in l]
+assert not stale12, f"AC12(a)/(b): cross-host and fields-missing spawns are unaffected, still busy: {stale12}"
+ev12, specs12, charters12 = folded()
+lanes12 = tick.lane(specs12, charters12, tick.in_flight(ev12), events=ev12)
+assert "L-spec-8805 · written" not in lanes12 and "L-spec-8806 · written" not in lanes12, \
+    "AC12(a)/(b): both subjects stay busy, falling through to the existing elapsed behavior"
+fold.EVENTS = saved_events
+
+print("tick: L-spec-0275 R2 Target 2 checks pass")

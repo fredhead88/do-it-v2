@@ -202,6 +202,16 @@ deviation the builder must declare. Rework reuses the worktree. A missing
   reading artifacts.
 - **No Agent tool, no skills, no in-session spawn.** `doit dispatch --detach`
   is the only spawn path.
+- **Never hand-append an event a tool already writes.** `merge-gate-clean`
+  (`doit gate`); `spawn-started`/`spawn-done`/`spawn-failed`/`spawn-stale`/
+  `build-started` (the dispatch/seat wrapper and the tick); `spec-written`/
+  `spec-shape-failed`/`spec-killed` (the wrapper's post-`stamp.sh` flow); and
+  five `deploy-started`/`deploy-attempt`/`deploy-landed`/`deploy-failed`/
+  `deploy-refused` events (`doit deploy` / the `deployer` actor) are each
+  appended by the tool that already runs the action, never by hand — a
+  missing one of these is re-run or fixed at its tool, never typed onto the
+  ledger yourself. No other event this pane already appends by hand is
+  affected by this rule.
 - **A re-measurable escalation closes itself — you never leave it for the
   operator to notice by eye.** An `escalation-blocking` you or a builder wrote
   MAY carry `measure=<a read-only command>` and `met_when=<what its output

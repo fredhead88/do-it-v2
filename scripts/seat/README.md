@@ -13,16 +13,22 @@ reproduce — read them when `doit packet`'s output looks wrong, not as a second
   `seat/<spawn>.output.json`, then calls `src/usage.py stamp` to resolve `<session>`'s OWN
   sub-agent transcript (`~/.claude/projects/*/*/subagents/agent-<id>.jsonl`, newest match) and
   write `<spawn>.meta.json` — the wrapper's completion signal (S13). `<model>`,`<session>`,
-  `<turns>`,`<duration_ms>`,`<subagent_tokens>` are still read off the sub-agent's own usage line
-  by hand, same as before; `usage.py` now ALSO writes, alongside the hand-supplied blended
-  `subagent_tokens`, the four-way split (`input_tokens`, `output_tokens`,
-  `cache_read_input_tokens`, `cache_creation_input_tokens` — deduped by message id, since a
-  streamed response repeats its usage object as it grows) and `model_observed` — the model the
-  transcript's assistant lines actually ran on, which `dispatch.run_seat` prefers over the typed
-  `<model>` for `model_used`, and which makes `model_observed` on the terminal event true only
-  when that evidence exists (retro step 9, 2026-09-15). No transcript resolves -> the four
-  fields and `model_observed` stay null (unmeasured is never zero) and stamp.sh warns on stderr,
-  but still stamps — a missing transcript must not block the completion signal.
+  `<duration_ms>`,`<subagent_tokens>` are still read off the sub-agent's own usage line by hand,
+  same as before, and are never compared against anything or corrected; `usage.py` now ALSO
+  writes, alongside the hand-supplied blended `subagent_tokens`, the four-way split
+  (`input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens` —
+  deduped by message id, since a streamed response repeats its usage object as it grows) and
+  `model_observed` — the model the transcript's assistant lines actually ran on, which
+  `dispatch.run_seat` prefers over the typed `<model>` for `model_used`, and which makes
+  `model_observed` on the terminal event true only when that evidence exists (retro step 9,
+  2026-09-15). No transcript resolves -> the four fields and `model_observed` stay null
+  (unmeasured is never zero) and stamp.sh warns on stderr, but still stamps — a missing
+  transcript must not block the completion signal. `<turns>` is the one field that may now be
+  the literal `-`, meaning "omitted": `usage.py` then derives it from the transcript's own
+  distinct-assistant-id count (itself possibly null, never invented as 0); a hand-typed
+  `<turns>` that differs from that derived count by more than 10% is overridden with the
+  derived value, and the override lands on the meta as `turns_supplied`/`stamp_corrected:
+  "turns"` — `<duration_ms>`/`<subagent_tokens>` carry no such path, ever.
 - `mkpacket.py <charter> cut|plan <out>` — the plan-auditor packet (stage cut or plan) in the
   pilot's shape: done-condition, requirements, the cut, (the Plan + the latest cut-audit's
   findings at stage plan), the `doit audit` block. No rationale. Reference shape for
