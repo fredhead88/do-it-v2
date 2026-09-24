@@ -1,0 +1,87 @@
+# crons.toml — the builder-box cron manifest (L-spec-0318, L-charter-0036 R4/R3).
+#
+# One [[row]] per job this box needs running. `where = "user"` rows live in the
+# personal crontab (`crontab -l`) and are checkable AND installable by this
+# tool; `where = "cron.d"` rows live under /etc/cron.d, need root, and are
+# print-only here (SD6) — `doit crons install` refuses them.
+#
+# Substitution tokens, applied textually to `schedule`, `command`, `path`
+# wherever they occur (src/crons.py's `_tokens()`):
+#   {doit}     this repo's doit, absolute (symlink-resolved)
+#   {repo}     {doit}'s parent
+#   {root}     str(fold.ROOT), read live at call time
+#   {tick_min} os.environ.get("DOIT_TICK_MIN", "5")
+#
+# `sig` is a regex (TOML literal string — no escape processing) used to detect
+# an already-installed line for this row; it is matched against non-commented
+# lines only.
+
+[[row]]
+name = "tick"
+where = "user"
+schedule = "*/{tick_min} * * * *"
+command = "DOIT_ROOT={root} {doit} tick >> {root}/logs/tick.log 2>&1"
+path = "{doit}"
+sig = '\bdoit tick\b'
+owner = "thinker"
+project = "do-it-v2"
+
+[[row]]
+name = "look"
+where = "user"
+schedule = "*/10 * * * *"
+command = "{doit} look >> {root}/logs/look.log 2>&1"
+path = "{doit}"
+sig = '\bdoit look\b'
+owner = "thinker"
+project = "do-it-v2"
+
+[[row]]
+name = "tmp-reaper"
+where = "user"
+schedule = "7,37 * * * *"
+command = "{doit} reap-tmp"
+path = "{doit}"
+sig = '\bdoit reap-tmp\b'
+owner = "thinker"
+project = "do-it-v2"
+
+[[row]]
+name = "lessons-digest"
+where = "user"
+schedule = "7 * * * *"
+command = "{repo}/scripts/lessons_digest.py >> {root}/lessons-digest.log 2>&1"
+path = "{repo}/scripts/lessons_digest.py"
+sig = 'lessons_digest\.py\b'
+owner = "thinker"
+project = "do-it-v2"
+
+[[row]]
+name = "backup-watch"
+where = "user"
+schedule = "* * * * *"
+command = "{doit} backup watch --for 60 >> {root}/backup.log 2>&1"
+path = "{doit}"
+sig = '\bdoit backup watch\b'
+owner = "thinker"
+project = "do-it-v2"
+
+[[row]]
+name = "ledger-snapshot"
+where = "user"
+schedule = "*/10 * * * *"
+command = "/var/backups/do-it/snapshot.sh >/dev/null 2>&1"
+path = "/var/backups/do-it/snapshot.sh"
+sig = 'snapshot\.sh\b'
+owner = "thinker"
+project = "do-it-v2"
+
+[[row]]
+name = "auto-deploy"
+where = "cron.d"
+schedule = "*/5 * * * *"
+command = "albert /opt/albert-scott/venv/bin/python /opt/albert-scott/scripts/ops/auto_deploy.py --once >> /var/log/albert-scott/auto-deploy-run.log 2>&1"
+path = "/opt/albert-scott/venv/bin/python"
+sig = 'auto_deploy\.py\b.*--once\b'
+owner = "deployer"
+project = "albert-scott"

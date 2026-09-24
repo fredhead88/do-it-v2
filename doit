@@ -27,6 +27,7 @@ case "${1:-board}" in
   version) cat "$HERE/VERSION" ;;
   backup)  shift; exec python3 "$SRC/backup.py" "$@" ;;
   restore) shift; exec python3 "$SRC/restore.py" "$@" ;;
+  crons)   shift; exec python3 "$SRC/crons.py" "$@" ;;
   # ★ DISCOVERED, never enumerated. This was a hardcoded && chain of twelve
   # files, so a new src/test_*.py ran nowhere and its guard was advisory until
   # someone remembered to add it. The `· <file>` marker names the file that is
@@ -86,6 +87,8 @@ doit — a ledger that derives state, and the guards that read it
   doit alloc <kind> [--dir]               claim the next L-<kind>-NNNN under content and print its path (§2.8)
   doit backup push | watch --for N | status | cron   replicate the ledger (§9.9)
   doit restore <snapshot> [--root D] [--dry-run] [--remote U]  rebuild from the mirror
+  doit crons check|print [name]|install <name>   builder-box cron manifest — measure, show, or
+                                          install one row from crons.toml (L-charter-0036 R4)
   doit test                               run every check
   doit help
 
