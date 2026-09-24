@@ -74,6 +74,35 @@ def split_from_transcript(path):
     return {**totals, "model_observed": model}
 
 
+def count_turns(path):
+    """The count of distinct assistant message ids in the transcript at `path` —
+    the same per-line filter and dedup-by-id set split_from_transcript already
+    applies, read as an independent single pass. None when `path` is falsy,
+    unreadable, or no line satisfies the filter — unmeasured is never zero."""
+    if not path:
+        return None
+    try:
+        lines = pathlib.Path(path).read_text().splitlines()
+    except OSError:
+        return None
+    ids = set()
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            e = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if e.get("type") != "assistant":
+            continue
+        msg = e.get("message") or {}
+        mid, usage_obj = msg.get("id"), msg.get("usage")
+        if not mid or not usage_obj:
+            continue
+        ids.add(mid)
+    return len(ids) if ids else None
+
+
 def resolve(session, projects=None):
     """session -> {input_tokens, output_tokens, cache_read_input_tokens,
     cache_creation_input_tokens, model_observed, transcript}. All four token
@@ -111,13 +140,34 @@ def stamp(spawn, model, session, turns, duration_ms, subagent_tokens, root=None,
     typed (the requested model); the four-way split and `model_observed` (the
     model the transcript's own assistant lines actually ran on — real evidence,
     unlike the operator's typed claim) are added alongside the still
-    hand-supplied blended `subagent_tokens`, never replacing it. Returns the
-    meta dict written, and whether a transcript resolved (for stamp.sh's
-    warning — a missing transcript must not block the completion signal)."""
+    hand-supplied blended `subagent_tokens`, never replacing it. `duration_ms`
+    and `subagent_tokens` are always taken as supplied, never derived or
+    corrected. `turns` may be `None` or the literal string "-" to mean
+    "omitted": it is then set to the transcript's own derived turn count
+    (count_turns), itself possibly None when nothing resolves — never invented
+    as 0. A supplied `turns` that differs from the derived count by more than
+    10% (of the derived value) is overridden with the derived value, and the
+    override is recorded as `turns_supplied`/`stamp_corrected: "turns"`; a
+    supplied value within 10% (or with no derived value to compare against) is
+    kept as supplied, uncorrected. Returns the meta dict written, and whether a
+    transcript resolved (for stamp.sh's warning — a missing transcript must not
+    block the completion signal)."""
     r = pathlib.Path(root) if root else pathlib.Path(os.environ.get("DOIT_ROOT", pathlib.Path.home() / ".do-it"))
     split = resolve(session, projects)
+    derived = count_turns(split["transcript"])
+    omitted = turns is None or turns == "-"
+    corrected = {}
+    if omitted:
+        turns_value = derived
+    else:
+        supplied = int(turns)
+        if derived is not None and abs(supplied - derived) > 0.10 * max(abs(derived), 1):
+            turns_value = derived
+            corrected = {"turns_supplied": supplied, "stamp_corrected": "turns"}
+        else:
+            turns_value = supplied
     meta = {
-        "model": model, "session": session, "turns": int(turns), "duration_ms": int(duration_ms),
+        "model": model, "session": session, "turns": turns_value, "duration_ms": int(duration_ms),
         "usage": {
             "subagent_tokens": int(subagent_tokens),
             "input_tokens": split["input_tokens"], "output_tokens": split["output_tokens"],
@@ -126,6 +176,7 @@ def stamp(spawn, model, session, turns, duration_ms, subagent_tokens, root=None,
         },
         "model_observed": split["model_observed"],
         "served_as": "general-purpose+contract",
+        **corrected,
     }
     seat_dir = r / "seat"
     seat_dir.mkdir(parents=True, exist_ok=True)

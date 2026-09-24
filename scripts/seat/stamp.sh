@@ -9,6 +9,13 @@
 # (which is only the pane operator's typed claim). No transcript resolves -> the
 # four fields stay null (unmeasured is never zero) and this warns on stderr, but
 # still stamps: a missing transcript must not block the completion signal.
+# <turns> may now be the literal "-" to mean "omitted": usage.py then derives it
+# from the transcript's own distinct-assistant-id count (itself possibly null).
+# A supplied <turns> that differs from that derived count by more than 10% is
+# overridden with the derived value, and the override is recorded on the meta
+# as turns_supplied/stamp_corrected: "turns". <duration_ms> and
+# <subagent_tokens> stay exactly as documented above — hand-typed, required,
+# never compared against anything, never corrected.
 set -euo pipefail
 R="${DOIT_ROOT:-$HOME/.do-it}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
