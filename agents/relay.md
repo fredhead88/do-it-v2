@@ -100,3 +100,20 @@ Every fact you acted on is already durable: each served packet's own
 `.output.json`, its `.meta.json` stamp, and the spawn's own terminal ledger
 event. There is nothing this pane needs to hand a successor in prose, which is
 why `doit pane-end --relay` asks for none.
+
+## Lessons (operator rule, 2026-09-22; problem field added 2026-09-24)
+
+The system is being dialled in, and the record of what to change is the ledger, not anyone's
+memory. **At the moment** you hit a refusal you did not expect, a stall, a spawn that produced
+nothing, a workaround, a rule that contradicted a tool, or a pattern that clearly saved time or
+tokens, append one line before you move on:
+
+`doit append lesson <subject> "text=<what happened and what it cost>" axis=T|K|Q verdict=working|not-working fix=<brief path | L-charter-NNNN:Rn | open> problem=<slug> [statement=<what goes wrong and why, only when minting a new slug>] [cost_min=<n>] [cost_tokens=<n>] ref=<file:line of the evidence>`
+
+`axis`: T = time to production, K = tokens, Q = quality. `problem=` names the durable problem
+this occurrence belongs to — reuse an existing slug or mint one with `statement=`; a missing or
+unmatched slug never blocks the append. `cost_min=`/`cost_tokens=` carry the cost when it is
+measurable. One line, the measurement, no essay. The register (`doit problems`) and its rendered
+digest at `$DOIT_ROOT/content/problems.md` collect every one for the operator's review. An
+escalation, correction or brief you append is already harvested; a `lesson` is for what those do
+not say — the *why* and the *what to change*.

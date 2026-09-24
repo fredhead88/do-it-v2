@@ -64,3 +64,13 @@ only thing you write beyond what your contract already names, and nothing under
 the repository. The same object, on the `claude -p` route, goes through the
 StructuredOutput tool instead; the wrapper validates it against the same schema
 either way.
+
+## Lessons (operator rule, 2026-09-24)
+
+This adds no new write and no new event: you already return the free text that carries this
+build's outcome — a deviation, a `rejected-criterion`, an escalation's `asks`, a finding, or your
+capped summary. When you know the durable problem an occurrence of it belongs to, lead that text
+with `problem:<slug> —` (reuse an existing slug; a guess that turns out wrong costs nothing to
+correct later). Leaving the token off is never a failure: `problem-harvest` classifies the
+untagged remainder from the event's own shape. The register (`doit problems`) and its digest at
+`$DOIT_ROOT/content/problems.md` collect every one for the operator's review.

@@ -30,6 +30,44 @@ DESIGN = "design/system-design-v2.md"
 
 PANES = (EXECUTOR, PLANNER, THINKER)
 
+# L-spec-0277 — the pane block (`relay.md`/`planner.md`/`thinker.md`) and the
+# blind-role block (the ten sub-agent contracts). The Executor's own contract
+# is deliberately never named below: wave 3's `register-digest` unit carries
+# its identical edit (Plan amendment SD11), and a check pinning its pre-edit
+# state here would break the moment that unit ships.
+LESSON_PANE_FILES = ("agents/relay.md", PLANNER, THINKER)
+LESSON_BLIND_FILES = (
+    "agents/builder.md",
+    "agents/grader.md",
+    "agents/reviewer.md",
+    "agents/spec-writer.md",
+    "agents/spec-auditor.md",
+    "agents/plan-auditor.md",
+    "agents/charter-reviewer.md",
+    "agents/probe.md",
+    "agents/research.md",
+    "agents/reuse-scout.md",
+)
+LESSON_HEADING = "## Lessons"
+
+
+def _lessons_tail(rel: str) -> str | None:
+    """The file's text from its `## Lessons` heading to EOF, or None if the
+    heading is missing or not the file's last `## ` heading."""
+    body = text(rel)
+    headings = [
+        (i, line)
+        for i, line in enumerate(body.splitlines())
+        if line.startswith("## ")
+    ]
+    lesson_idxs = [i for i, line in enumerate(headings) if headings[i][1].startswith(LESSON_HEADING)]
+    if len(lesson_idxs) != 1:
+        return None
+    if lesson_idxs[0] != len(headings) - 1:
+        return None
+    start_line = headings[lesson_idxs[0]][0]
+    return "\n".join(body.splitlines()[start_line:])
+
 _cache: dict[str, str] = {}
 _failures: list[str] = []
 _checks = 0
@@ -257,6 +295,65 @@ ok(
     "L-spec-0125 R11 · charter-reviewer dispatched only where doit review-owed says owed",
     present=[(EXECUTOR, "not-owed → no charter-reviewer dispatch")],
 )
+
+
+# --- L-spec-0277 — the Lessons `## ` heading is present, singular, and last --
+# for every touched pane and blind-role file. The Executor's own contract is
+# never named here (Planner amendment SD16).
+
+_checks += 1
+for _rel in LESSON_PANE_FILES + LESSON_BLIND_FILES:
+    _tail = _lessons_tail(_rel)
+    if _tail is None:
+        _failures.append(
+            "L-spec-0277 (heading position/uniqueness) — "
+            f"{_rel}: does not have exactly one `## Lessons` heading as its "
+            "last `## ` heading"
+        )
+
+# --- L-spec-0277 — the pane block is pairwise byte-identical, relay/planner/
+# thinker, from the `## Lessons` heading to EOF -------------------------------
+
+_checks += 1
+_pane_tails = {rel: _lessons_tail(rel) for rel in LESSON_PANE_FILES}
+_pane_ref_rel, _pane_ref = LESSON_PANE_FILES[0], _pane_tails[LESSON_PANE_FILES[0]]
+if _pane_ref is not None:
+    for _rel in LESSON_PANE_FILES[1:]:
+        if _pane_tails[_rel] != _pane_ref:
+            _failures.append(
+                "L-spec-0277 (pane block byte-identity) — "
+                f"{_rel} does not match {_pane_ref_rel} from `## Lessons` to EOF"
+            )
+
+# --- L-spec-0277 — the blind-role block is pairwise byte-identical across the
+# ten sub-agent contracts, from the `## Lessons` heading to EOF --------------
+
+_checks += 1
+_blind_tails = {rel: _lessons_tail(rel) for rel in LESSON_BLIND_FILES}
+_blind_ref_rel, _blind_ref = LESSON_BLIND_FILES[0], _blind_tails[LESSON_BLIND_FILES[0]]
+if _blind_ref is not None:
+    for _rel in LESSON_BLIND_FILES[1:]:
+        if _blind_tails[_rel] != _blind_ref:
+            _failures.append(
+                "L-spec-0277 (blind-role block byte-identity) — "
+                f"{_rel} does not match {_blind_ref_rel} from `## Lessons` to EOF"
+            )
+
+# --- L-spec-0277 — the two blocks never cross-contaminate: the blind-role
+# block never carries `doit append lesson`, the pane block's ten-file group
+# never carries `problem-harvest` -------------------------------------------
+
+_checks += 1
+if _blind_ref is not None and "doit append lesson" in _blind_ref:
+    _failures.append(
+        "L-spec-0277 (block separation) — the blind-role block contains "
+        "'doit append lesson', which belongs only to the pane block"
+    )
+if _pane_ref is not None and "problem-harvest" in _pane_ref:
+    _failures.append(
+        "L-spec-0277 (block separation) — the pane block contains "
+        "'problem-harvest', which belongs only to the blind-role block"
+    )
 
 
 # --- report -------------------------------------------------------------------
