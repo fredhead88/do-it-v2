@@ -997,6 +997,12 @@ def p_builder(c):
         L += ["", *hint]
     for d in c.all_of("decision"):
         L.append(f"   decided, and binding: {d.get('why', '')}")
+    # L-spec-0273: three known local-box footguns, informational only — the
+    # fixes are L-charter-0028's, not this builder's to make.
+    L += ["## STOP",
+          "- DSN missing in a worktree can silently skip a live_db criterion instead of failing it (L-charter-0028).",
+          "- the stale test baseline cloned per builder fills /tmp across many builds (L-charter-0028).",
+          "- a gate-clean merge sometimes leaves master red (L-charter-0028)."]
     L += ["", f"Your cwd is your worktree, on branch `{c.a.subject.lower()}`. "
               f"The repository is `{repo}`. One spec, one commit, on that branch."]
     return L
@@ -1275,6 +1281,17 @@ def main(argv=None):
     if hit:
         die("REFUSED — the packet carries what {}'s Blindness strips: {}".format(
             a.role, "; ".join(f"{w} ({str(s)[:60]!r})" for w, s in hit[:3])))
+    # L-spec-0273/R5: the append-only checklist, run against the assembled
+    # packet text itself (`packet:<role>`) — `applies_to` never equals
+    # "packet:builder" for any role but "builder", so a grader/spec-auditor/etc
+    # packet is untouched either way, even though the checklist carries PL-009.
+    import packet_lint  # noqa: E402 — local: packet_lint imports this module back
+    block_texts, warn_texts = packet_lint.split(
+        packet_lint.run(text, packet_lint.CHECKLIST, f"packet:{a.role}"))
+    if block_texts:
+        die("REFUSED — packet-lint blocked: " + "; ".join(block_texts))
+    if warn_texts:
+        text += "## Packet-lint notices (non-blocking)\n" + "\n".join(f"- {w}" for w in warn_texts) + "\n"
     PACKETS.mkdir(parents=True, exist_ok=True)
     n = 1 + len(list(PACKETS.glob(f"{a.subject}-{a.role}-*.md")))
     p = PACKETS / f"{a.subject}-{a.role}-{n}.md"

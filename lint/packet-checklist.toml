@@ -1,0 +1,88 @@
+# lint/packet-checklist.toml — append-only, versioned, severity-graded packet
+# lint (L-spec-0273 / L-charter-0033, SD9/SD15/SD21). A new recurring packet
+# defect is closed by adding ONE [[entry]] row here plus one check function in
+# src/packet_lint.py — never by hand-patching an existing bucket.
+#
+# {id, since, applies_to, check, message, severity}
+#   applies_to — exactly "spec" or "packet:<role>". One value, never a list.
+#   severity   — "warn" or "block".
+#
+# A row's EFFECTIVE severity is "block" when a [[promotion]] row below names
+# its id, else the row's own severity. Promoting an existing row from
+# advisory to blocking costs one new [[promotion]] row — never editing this
+# row (append-only) and never a code change.
+#
+# PL-001..PL-009 all ship severity="warn". No [[promotion]] row exists yet,
+# so every one's effective severity is "warn" today (AC2).
+
+[[entry]]
+id = "PL-001"
+since = "2026-09-24"
+applies_to = "spec"
+check = "check_base_sha_head"
+message = "base_sha is the literal string HEAD, not a pinned commit"
+severity = "warn"
+
+[[entry]]
+id = "PL-002"
+since = "2026-09-24"
+applies_to = "spec"
+check = "check_ac_truncated"
+message = "the last acceptance criterion has no review_path and its last line is not a finished sentence"
+severity = "warn"
+
+[[entry]]
+id = "PL-003"
+since = "2026-09-24"
+applies_to = "spec"
+check = "check_cd_prefix"
+message = "the Verification block shells into cd /opt/albert-scott instead of an absolute interpreter path"
+severity = "warn"
+
+[[entry]]
+id = "PL-004"
+since = "2026-09-24"
+applies_to = "spec"
+check = "check_bare_node_tools"
+message = "the Verification block invokes npm/npx/node by bare name instead of an absolute path"
+severity = "warn"
+
+[[entry]]
+id = "PL-005"
+since = "2026-09-24"
+applies_to = "spec"
+check = "check_sibling_heading"
+message = "a heading names a different spec/charter id than this spec's own"
+severity = "warn"
+
+[[entry]]
+id = "PL-006"
+since = "2026-09-24"
+applies_to = "spec"
+check = "check_review_path_base_comparison"
+message = "a review_path asks the reviewer to diff or compare against main/master/origin instead of naming a fixed base"
+severity = "warn"
+
+[[entry]]
+id = "PL-007"
+since = "2026-09-24"
+applies_to = "spec"
+check = "check_ac_contradiction"
+message = "an identifier is asserted to exit both 0 and 1 across the acceptance criteria"
+severity = "warn"
+
+[[entry]]
+id = "PL-008"
+since = "2026-09-24"
+applies_to = "spec"
+check = "check_bracket_path_rejected"
+message = "merge_gate.grant_from_text rejects a Writes: path containing ( ) [ ] — the path-token regex regressed"
+severity = "warn"
+
+[[entry]]
+id = "PL-009"
+since = "2026-09-24"
+applies_to = "packet:builder"
+check = "check_missing_stop_section"
+message = "the builder packet is missing its ## STOP section naming the local-box footguns"
+severity = "warn"

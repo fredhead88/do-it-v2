@@ -28,8 +28,9 @@ def spec_shape(spec_text):
     Returns `[]` when all three buckets pass ("packetable"); otherwise one non-empty
     finding per FAILED bucket, each naming which bucket it is."""
     sys.path.insert(0, str(HERE))
-    import merge_gate, packet  # noqa: E402 — local, so a CLI-only caller of this
-                                # module never pays for packet.py's own imports
+    import merge_gate, packet, packet_lint  # noqa: E402 — local, so a CLI-only
+                                # caller of this module never pays for packet.py's
+                                # own imports
 
     findings = []
 
@@ -68,7 +69,24 @@ def spec_shape(spec_text):
     except merge_gate.Undetermined as e:
         findings.append(f"Writes grant: {e}")
 
+    # L-spec-0273/R5: the append-only checklist, PL-001..009 — only a
+    # BLOCK-severity hit ever joins the return above; PL-001..009 ship warn
+    # today, so this is unchanged in effect (AC2) until a future
+    # [[promotion]] row exists.
+    block_texts, _warn_texts = packet_lint.split(packet_lint.run(spec_text, packet_lint.CHECKLIST, "spec"))
+    findings += block_texts
+
     return findings
+
+
+def spec_shape_warnings(spec_text):
+    """L-spec-0273/R5: the WARN-severity `applies_to="spec"` checklist findings
+    `spec_shape` withholds — pure, same call as `spec_shape`'s own. Not wired to
+    any ledger event by this unit (charter-gap); a future reader surfaces it."""
+    sys.path.insert(0, str(HERE))
+    import packet_lint  # noqa: E402
+    _block_texts, warn_texts = packet_lint.split(packet_lint.run(spec_text, packet_lint.CHECKLIST, "spec"))
+    return warn_texts
 
 
 def main(argv):

@@ -578,6 +578,13 @@ except mg.Undetermined as e:
     check("★ a frontmatter block with no writes: key falls through, not a crash",
           "states no writes" in str(e))
 
+# L-spec-0273/AC11 PL-008(a): the path-token regex accepts `(` and `)`, so a
+# Next.js route-group path no longer raises Undetermined — the pre-fix pattern
+# refused a legitimate Writes: grant outright.
+BRACKET_PATH = "dashboard/src/app/(dashboard)/dashboard/clients/[name]/profit-v2/reports/page.tsx"
+check("★ AC11 — grant_from_text accepts a Writes: path holding ( ) [ ]",
+      mg.grant_from_text(f"Writes: {BRACKET_PATH}\n") == [BRACKET_PATH])
+
 # ------------------------------------------------------ R3f/AC9: out_of_grant
 
 (CONTENT / "L-spec-oog.md").write_text("**Writes:** src/*\n")
