@@ -119,6 +119,14 @@ EMITS = {"verdict": {"grader"}, "review": {"reviewer"}, "shipped": {"executor"},
          # that may stamp `brief-answered` can discharge a brief no spec answers.
          "sweep-fixpoint": {"executor", "operator"},
          "brief-answered": {"executor", "operator"},
+         # L-charter-0033/board-owners, Target 2: the mirror of brief-answered's
+         # own restriction, one line above — the Thinker's TRIAGE clearing route.
+         "brief-routed": {"thinker", "operator"},
+         # L-charter-0033/board-owners, Target 3: "written by the spec-writer's
+         # kill path or the Executor" (Seams) — the two seats already trusted to
+         # end a spec's lifecycle. This spec adds no call site that emits it;
+         # admission precedes the emitter (fold.py:36-37's own precedent).
+         "inbound-covered": {"spec-writer", "executor"},
          # S15/S33 (a-6): the wake script's `verdict` re-grade is one route to
          # discharging an owed criterion; `owed-met` is the other — the Executor or
          # the operator, citing the evidence directly, no re-grade spawn required.
@@ -372,6 +380,30 @@ def open_briefs(events):
             and e["_src"] not in answered]
 
 
+def triage_briefs(events):
+    """L-charter-0033/board-owners, Target 2: the mirror of `open_briefs()` above —
+    every `brief` event with NO `requirement` field (out-of-scope, the Thinker's
+    inbox rather than a charter's) not yet named by a `ref` on an AUTHORIZED
+    `brief-answered` or `brief-routed` event.
+
+    This actor check is THIS function's own responsibility, unlike
+    `open_briefs()`'s unguarded read: `open_briefs()` gets away with it only
+    because its sole caller (`fold.fold()`'s own `charter_evs`) always hands it
+    an already-admitted `evs` slice; `render()` receives the raw, unreduced
+    `events` list at both its call sites (fold.py:1690, up.py:537). Without this
+    check, a raw jsonl line dropped into any ledger file — e.g. one named
+    `L-builder-0001.jsonl`, giving actor `builder` (the filename-derived-actor
+    rule, D90) — carrying `type: "brief-routed"` and a matching `ref` would clear
+    a TRIAGE row despite `EMITS["brief-routed"]` never admitting `builder` to
+    write it (ADR-0028-3: an unauthorized event is read and ignored, everywhere
+    in the ledger)."""
+    cleared = {e.get("ref") for e in events
+               if e.get("type") in ("brief-answered", "brief-routed")
+               and e.get("actor") in EMITS.get(e.get("type"), set())}
+    return [e for e in events if e.get("type") == "brief" and not e.get("requirement")
+            and e["_src"] not in cleared]
+
+
 def open_escalations(events):
     """Per subject, the NEWEST of escalation-blocking / decision / unblocked — the
     tick's rule verbatim (tick.py's lane filter). A resolved escalation that stays
@@ -413,7 +445,50 @@ def escalation_ok(e):
 # `escalation-blocking`'s own shape is `escalation_ok` (an OR, not a field list)
 # and stays special-cased in `required_reason` below; these two are a plain
 # field list.
-REQUIRED = {"owed-ac": ("criterion",), "spec-carried": ("source", "tier", "audited_at")}
+REQUIRED = {"owed-ac": ("criterion",), "spec-carried": ("source", "tier", "audited_at"),
+            "inbound-covered": ("source", "covered_by")}
+
+
+# L-charter-0033/board-owners, Target 1: who owns each board() row and what
+# clears it, one entry per section render() emits THROUGH block() — HEALTH is a
+# status write, not a block()-based row list (render()'s own `L += ["## HEALTH"]
+# ...`, never through block()'s own `(n)`-count header), and deliberately
+# carries no entry here. Two entries are BINDING, from the Plan's own Seams/SD3
+# text verbatim (UNSERVED, TRIAGE); the other fourteen are spec-writer defaults,
+# cited to what already, provably, acts on each row today (agents/executor.md's
+# Lane table). The board-lint test in test_fold.py asserts this dict's key set
+# equals the rendered title set exactly — the ratchet against a future block()
+# call with no matching entry.
+BOARD_OWNERS = {
+    "NEEDS YOU": ("executor", ("decision", "unblocked")),
+    "BLOCKED": ("operator", ("unblocked",)),
+    "WRITTEN, NOT PICKED UP": ("executor", ("build-started", "spec-killed")),
+    "IN FLIGHT": ("executor", ("build-done", "deploy-landed", "deploy-failed", "deploy-refused")),
+    "UNSERVED": ("relay", "derived: a claim file (seat/<spawn>.claimed) or a terminal event "
+                          "(spawn-done/spawn-failed/spawn-stale) landing for the spawn"),
+    "AWAITING VERIFICATION": ("executor", ("verdict", "review", "shipped")),
+    "OWED EVIDENCE": ("executor", ("owed-met", "verdict")),
+    "OWED DUE": ("executor", ("owed-met",)),
+    "CHARTER CLOSE": ("executor", ("tree-reaped",)),
+    "TRIAGE": ("thinker", ("brief-answered", "brief-routed")),
+    "NOTES": ("thinker", ("note-answered",)),
+    "INBOUND": ("executor", "derived: recomputed each render from carry.uncarried() PLUS "
+                            "intake.board_rows(). A carry.uncarried() row (v4/pr) clears on "
+                            "spec-carried, or on an authorized-actor inbound-covered (Target 3). "
+                            "An intake.board_rows() row (a §5 PR awaiting registration, module "
+                            "intake.py, out of this unit's footprint) clears on its own "
+                            "inbound-registered/spec-carried/inbound-awaiting-gone — "
+                            "inbound-covered does NOT clear it. inbound-closed is admitted "
+                            "(fold.EMITS) but read by neither today — it clears nothing "
+                            "(a pre-existing gap, unchanged, out of scope)"),
+    "SHIPPED SINCE YOU LOOKED": ("operator", "derived: clears once a new observed event moves "
+                                             "\"looked\" past this row's own timestamp"),
+    "DECIDED WITHOUT YOU": ("operator", "derived: same as SHIPPED SINCE YOU LOOKED"),
+    "SPEND": ("operator", "derived: recomputed live every render from spend_by_model(events); "
+                          "carries no backlog"),
+    "LIVE PANES": ("operator", "derived: recomputed live every render from panes.live_panes(); "
+                               "carries no backlog"),
+}
 
 
 def required_reason(e):
@@ -616,11 +691,34 @@ def _closable(charter_evs, mine):
 
     `review_owed` is `charter_review_owed(charter_evs)` — R11: a `Covers: none`
     charter never owes a review nothing gates the dispatch of, no matter what
-    `charter_review` alone would answer."""
+    `charter_review` alone would answer.
+
+    L-charter-0033/board-owners, Target 4: `all_accepted` additionally counts a
+    `killed` spec as accepted-for-closure when its newest `spec-killed` event
+    names a `superseded_by` spec PRESENT IN THIS CHARTER'S OWN `mine` list whose
+    own state is in the SAME five-state done-set — `tick.SPEC_DONE`'s own
+    literal, duplicated here rather than imported (fold.py must not depend on
+    tick.py) — every other spec in `mine` is already checked against. NOT
+    narrowed to `accepted` alone: a supersede whose replacement reached, say,
+    `closed-unbuilt` is exactly as closure-worthy as a plain spec in that state.
+    A `superseded_by` naming a spec absent from `mine`, or whose state is
+    outside that set, does not count — undetermined stays blocking."""
     types = {e["type"] for e in charter_evs}
+    done_states = ("accepted", "shipped-owed-evidence", "dropped",
+                  "closed-unbuilt", "closed-shipped")
+    by_id = {s["id"]: s for s in mine}
+
+    def spec_ok(s):
+        if s["state"] in done_states:
+            return True
+        if s["state"] != "killed":
+            return False
+        newest_kill = next((e for e in reversed(s["evs"]) if e["type"] == "spec-killed"), None)
+        repl = by_id.get(newest_kill and newest_kill.get("superseded_by"))
+        return repl is not None and repl["state"] in done_states
+
     return Closable(
-        all_accepted=all(s["state"] in ("accepted", "shipped-owed-evidence", "dropped",
-                                        "closed-unbuilt", "closed-shipped") for s in mine),
+        all_accepted=all(spec_ok(s) for s in mine),
         sweep_derived="sweep-fixpoint" in types,
         owed_within_k=sum(1 for s in mine if s["state"] == "shipped-owed-evidence") <= K,
         no_open_briefs=not open_briefs(charter_evs),
@@ -1291,6 +1389,19 @@ def render(events, specs, charters, ignored, by_subject):
         L.extend("  " + r for r in rows)
         L.append("")
 
+    # TRIAGE — L-charter-0033/board-owners, Target 2: a requirement-less brief
+    # (the Thinker's inbox, not a charter's — the mirror of open_briefs' in-scope
+    # filter), with its age, until an authorized brief-answered/brief-routed
+    # clears it (triage_briefs() re-checks authorization itself; see its own
+    # docstring for why). Placed here, ABOVE NEEDS YOU rather than beside its
+    # peers further down — a genuine block()-rendered section (proven by the
+    # board-lint test against the FULL rendered text, not by test_fold.py's own
+    # sections() helper, which is scoped BY THAT HELPER'S OWN DOCSTRING to
+    # "everything from NEEDS YOU down"); placement is explicitly not graded
+    # (Target 2).
+    block("TRIAGE", [f"{e.get('subject','?')} · {e.get('why','?')} · {age_days(e):.1f}d"
+                     for e in triage_briefs(events)])
+
     # R3: the row carries what it takes to DECIDE — the default that will be
     # applied, the deadline, the undo or the irreversible act that is the reason
     # there is no default, and the age. A row that says only "this is blocked"
@@ -1312,8 +1423,13 @@ def render(events, specs, charters, ignored, by_subject):
     # rest of the board with it. `unserved_list`/`unserved_err` feed the HEALTH
     # count below — a failure there is stated too, never a silent zero.
     def unserved_line(r):
+        # L-charter-0033/board-owners, Target 5 (SD16): a seat-stale'd pending row
+        # renders its own display text — comma, not hyphen — and every other
+        # status string (pending, failed-unserved) renders exactly as it does
+        # today, unchanged.
+        status = "stale, still offered" if r["status"] == "stale-still-offered" else r["status"]
         return (f"{r['spawn']} · {r['role']} · {r['subject']} · "
-                f"age {r['age_min']:.0f}m · {r['status']}")
+                f"age {r['age_min']:.0f}m · {status}")
 
     unserved_fn, unserved_err = _relay_unserved()
     unserved_list = None

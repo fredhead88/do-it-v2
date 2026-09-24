@@ -374,10 +374,20 @@ def unserved(events, root=None, since_h=24):
     included). A terminal `spawn-failed{reason: "unserved"}` timestamped within the
     last `since_h` hours -> `status: "failed-unserved"`. Any other terminal event —
     `spawn-done`, `spawn-stale`, or a `spawn-failed` whose `reason` is not
-    `"unserved"` — excludes the row: the spawn resolved."""
+    `"unserved"` — excludes the row: the spawn resolved.
+
+    L-charter-0033/board-owners, Target 5 (SD16): (a) a row for spawn `sid` is
+    ALSO excluded when some OTHER start `sid2` shares the same `(subject, role)`,
+    has its own start timestamp no earlier than `sid`'s, and resolves to a
+    terminal `spawn-done` — a successful re-offer clears the stale row it
+    replaced, whatever `sid`'s own status would otherwise have been. (b) a row
+    that would render `pending` additionally checks for a `seat-stale` event on
+    the same `sid` (the sibling `seat-stays-offered` unit's own Produces,
+    `{spawn, role, subject, age_s}`); when one exists, `status` is the literal
+    `"stale-still-offered"` instead."""
     root = pathlib.Path(root or fold.ROOT)
     claim_sec = int(os.environ.get("DOIT_SEAT_CLAIM_SEC", 300))
-    starts, terminal = {}, {}
+    starts, terminal, seat_stale = {}, {}, {}
     for e in events:
         sid = e.get("spawn")
         if not sid:
@@ -387,10 +397,29 @@ def unserved(events, root=None, since_h=24):
             starts[sid] = e
         elif t in TERMINAL:
             terminal[sid] = e
+        elif t == "seat-stale":
+            seat_stale[sid] = e
+
+    def key(ev):
+        return (ev.get("subject"), ev.get("role") if ev.get("type") == "spawn-started" else "builder")
+
+    superseded = set()
+    for sid, e in starts.items():
+        t_sid, k = fold.ts(e.get("ts")), key(e)
+        for sid2, e2 in starts.items():
+            if sid2 == sid or key(e2) != k or fold.ts(e2.get("ts")) < t_sid:
+                continue
+            term2 = terminal.get(sid2)
+            if term2 is not None and term2.get("type") == "spawn-done":
+                superseded.add(sid)
+                break
+
     out = []
     for sid, e in sorted(starts.items()):
         if (root / "seat" / f"{sid}.claimed").exists():
             continue                                     # served — never listed
+        if sid in superseded:
+            continue                                     # a later same-(subject,role) spawn-done
         role = e.get("role") if e.get("type") == "spawn-started" else "builder"
         term = terminal.get(sid)
         if term is not None:
@@ -408,8 +437,9 @@ def unserved(events, root=None, since_h=24):
             continue                                     # any other terminal: resolved
         elapsed = (fold.NOW - fold.ts(e.get("ts"))).total_seconds()
         if elapsed > claim_sec:
+            status = "stale-still-offered" if sid in seat_stale else "pending"
             out.append({"spawn": sid, "role": role, "subject": e.get("subject"),
-                       "age_min": elapsed / 60.0, "status": "pending"})
+                       "age_min": elapsed / 60.0, "status": status})
     return out
 
 

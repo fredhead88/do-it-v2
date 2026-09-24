@@ -1912,6 +1912,173 @@ board264b = fold.render(*ledger(**{"L-deployer-local.jsonl": [
     {"ts": stamp(0), "type": "deploy-landed", "subject": S9, "sha": sha_full, "target": "prod"}]}))
 assert "deploy in flight" not in board264b, board264b
 
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-0271 · board-owners (L-charter-0033)
+# ══════════════════════════════════════════════════════════════════════════════
+import re as re271  # noqa: E402
+
+# ── AC1 · fold.BOARD_OWNERS is complete and well-typed for every block()-
+# rendered section, and HEALTH is excluded by name ─────────────────────────────
+board271_empty = fold.render(*ledger())
+titles271 = {m.group(1) for m in re271.finditer(r"^## (.+) \(\d+\)$", board271_empty, re271.M)}
+assert titles271 == set(fold.BOARD_OWNERS), (titles271, set(fold.BOARD_OWNERS))
+assert "HEALTH" not in fold.BOARD_OWNERS, \
+    "★ BOARD_OWNERS is complete and well-typed for every block()-rendered section, and HEALTH is excluded by name"
+assert not re271.search(r"^## HEALTH \(\d+\)$", board271_empty, re271.M), \
+    "★ BOARD_OWNERS is complete and well-typed for every block()-rendered section, and HEALTH is excluded by name"
+for _title271, (_owner271, _closer271) in fold.BOARD_OWNERS.items():
+    assert isinstance(_owner271, str) and _owner271, (_title271, _owner271)
+    if isinstance(_closer271, str):
+        assert _closer271.startswith("derived: ") and len(_closer271) > len("derived: "), \
+            (_title271, _closer271)
+    else:
+        assert (isinstance(_closer271, tuple) and _closer271
+               and all(isinstance(c, str) and c for c in _closer271)), (_title271, _closer271)
+
+# ── AC2 · UNSERVED is relay-owned/derived and TRIAGE is thinker-owned with
+# both closers ──────────────────────────────────────────────────────────────────
+assert fold.BOARD_OWNERS["UNSERVED"][0] == "relay", fold.BOARD_OWNERS["UNSERVED"]
+assert (isinstance(fold.BOARD_OWNERS["UNSERVED"][1], str)
+       and fold.BOARD_OWNERS["UNSERVED"][1].startswith("derived: ")), fold.BOARD_OWNERS["UNSERVED"]
+assert fold.BOARD_OWNERS["TRIAGE"] == ("thinker", ("brief-answered", "brief-routed")), \
+    fold.BOARD_OWNERS["TRIAGE"]
+
+# ── AC3 · a requirement-less brief renders under TRIAGE with its age; a
+# requirement-bearing one does not (open_briefs', not triage_briefs') ──────────
+brief_ev3 = {"ts": stamp(2), "type": "brief", "subject": "L-charter-0033", "why": "orphan"}
+board271_3 = fold.render(*ledger(**{"L-thinker-0001.jsonl": [brief_ev3]}))
+triage271_3 = board271_3.split("## TRIAGE")[1].split("## NEEDS YOU")[0]
+expected_age3 = f"{fold.age_days(brief_ev3):.1f}d"
+assert "orphan" in triage271_3 and expected_age3 in triage271_3, (triage271_3, expected_age3)
+
+brief_ev3b = {"ts": stamp(2), "type": "brief", "subject": "L-charter-0033", "why": "orphan",
+             "requirement": "R2"}
+board271_3b = fold.render(*ledger(**{"L-thinker-0001.jsonl": [brief_ev3b]}))
+triage271_3b = board271_3b.split("## TRIAGE")[1].split("## NEEDS YOU")[0]
+assert "orphan" not in triage271_3b, triage271_3b
+
+# ── AC4 · TRIAGE clears via an authorized brief-answered or brief-routed
+# (executor/operator, thinker/operator); an unauthorized-actor brief-routed
+# does not clear it, and the check is triage_briefs' own, not fold.fold()'s
+# ignored list ───────────────────────────────────────────────────────────────
+brief_ev4 = {"ts": stamp(2), "type": "brief", "subject": "L-charter-0033", "why": "orphan4"}
+ev4a, *_ = ledger(**{"L-thinker-0001.jsonl": [brief_ev4]})
+src4 = next(e["_src"] for e in ev4a if e.get("why") == "orphan4")
+
+board4a = fold.render(*ledger(**{"L-thinker-0001.jsonl": [brief_ev4],
+                                 "L-executor-0001.jsonl": [
+                                     {"ts": stamp(0), "type": "brief-answered", "ref": src4}]}))
+triage4a = board4a.split("## TRIAGE")[1].split("## NEEDS YOU")[0]
+assert "orphan4" not in triage4a, triage4a
+
+board4b = fold.render(*ledger(**{"L-thinker-0001.jsonl": [brief_ev4],
+                                 "L-thinker-0002.jsonl": [
+                                     {"ts": stamp(0), "type": "brief-routed", "ref": src4}]}))
+triage4b = board4b.split("## TRIAGE")[1].split("## NEEDS YOU")[0]
+assert "orphan4" not in triage4b, triage4b
+
+board4c = fold.render(*ledger(**{"L-thinker-0001.jsonl": [brief_ev4],
+                                 "L-builder-0001.jsonl": [
+                                     {"ts": stamp(0), "type": "brief-routed", "ref": src4}]}))
+triage4c = board4c.split("## TRIAGE")[1].split("## NEEDS YOU")[0]
+assert "orphan4" in triage4c, triage4c
+
+# ── AC5 · inbound-covered is admitted for spec-writer/executor and requires
+# source+covered_by ─────────────────────────────────────────────────────────────
+assert fold.EMITS["inbound-covered"] == {"spec-writer", "executor"}, fold.EMITS["inbound-covered"]
+assert fold.REQUIRED["inbound-covered"] == ("source", "covered_by"), fold.REQUIRED["inbound-covered"]
+reason5 = fold.check_append({"type": "inbound-covered", "subject": "S", "source": "1472"}, "executor")
+assert reason5 is not None and "covered_by" in reason5, reason5
+
+# ── AC8-AC11 · a killed spec's superseded_by, read against the SAME five-state
+# done-set every other spec in `mine` is checked against ───────────────────────
+CID271, S1_271, S2_271 = "L-charter-2801", "L-spec-2801", "L-spec-2802"
+
+
+def _kill_fixture271(s2_files, superseded_by=S2_271):
+    kill_ev = {"ts": stamp(4), "type": "spec-killed", "subject": S1_271, "check": 2}
+    if superseded_by is not None:
+        kill_ev["superseded_by"] = superseded_by
+    files = {
+        "L-spec-writer-01.jsonl": [
+            {"ts": stamp(5), "type": "spec-written", "subject": S1_271, "charter": CID271}],
+        "L-builder-01.jsonl": [kill_ev],
+        "L-thinker-01.jsonl": [
+            {"ts": stamp(3), "type": "charter-filed", "subject": CID271, "covers": "none"}],
+        "L-executor-01.jsonl": [
+            {"ts": stamp(0), "type": "sweep-fixpoint", "subject": CID271}],
+    }
+    files.update(s2_files)
+    return ledger(**files)
+
+
+accepted_s2_files271 = {
+    "L-spec-writer-02.jsonl": [
+        {"ts": stamp(3), "type": "spec-written", "subject": S2_271, "charter": CID271}],
+    "L-builder-02.jsonl": [{"ts": stamp(2), "type": "build-started", "subject": S2_271},
+                          {"ts": stamp(2), "type": "build-done", "subject": S2_271}],
+    "L-grader-02.jsonl": [{"ts": stamp(1), "type": "verdict", "subject": S2_271, "confirmed": True}],
+    "L-reviewer-02.jsonl": [{"ts": stamp(1), "type": "review", "subject": S2_271, "depth": "gates-only"}],
+    "L-executor-02.jsonl": [{"ts": stamp(0), "type": "shipped", "subject": S2_271}],
+}
+
+# AC8 · a killed spec's superseded_by, accepted, releases L2-complete via both
+# fold() and closable()
+ev8, specs8, charters8, _, _ = _kill_fixture271(accepted_s2_files271)
+assert specs8[S2_271]["state"] == "accepted", specs8[S2_271]["state"]
+assert charters8[CID271]["state"] == "L2-complete", charters8[CID271]
+cl8 = fold.closable(ev8, CID271)
+assert cl8["all_accepted"] is True and fold.l2_complete(cl8), cl8
+
+# AC9 · a superseded_by target reaching any done-state (closed-unbuilt), not
+# only accepted, still releases L2-complete
+closed_unbuilt_s2_files271 = {
+    "L-operator-02.jsonl": [{"ts": stamp(0), "type": "spec-closed", "subject": S2_271,
+                            "charter": CID271}],
+}
+ev9, specs9, charters9, _, _ = _kill_fixture271(closed_unbuilt_s2_files271)
+assert specs9[S2_271]["state"] == "closed-unbuilt", specs9[S2_271]["state"]
+assert charters9[CID271]["state"] == "L2-complete", charters9[CID271]
+
+# AC10 · a superseded_by target outside every done-state does not release the charter
+shipped_only_s2_files271 = {
+    "L-spec-writer-02.jsonl": [
+        {"ts": stamp(3), "type": "spec-written", "subject": S2_271, "charter": CID271}],
+    "L-builder-02.jsonl": [{"ts": stamp(2), "type": "build-started", "subject": S2_271},
+                          {"ts": stamp(2), "type": "build-done", "subject": S2_271}],
+    "L-executor-02.jsonl": [{"ts": stamp(0), "type": "shipped", "subject": S2_271}],
+}
+ev10, specs10, charters10, _, _ = _kill_fixture271(shipped_only_s2_files271)
+assert specs10[S2_271]["state"] == "shipped", specs10[S2_271]["state"]
+assert charters10[CID271]["state"] != "L2-complete", charters10[CID271]
+assert fold.closable(ev10, CID271)["all_accepted"] is False
+
+# AC11 · a killed spec with no superseded_by still blocks L2-complete, unchanged
+ev11, specs11, charters11, _, _ = _kill_fixture271(accepted_s2_files271, superseded_by=None)
+assert specs11[S1_271]["state"] == "killed", specs11[S1_271]["state"]
+assert charters11[CID271]["state"] != "L2-complete", charters11[CID271]
+assert fold.closable(ev11, CID271)["all_accepted"] is False
+
+# ── AC13 (fold half) · unserved_line() maps "stale-still-offered" to the
+# display text "stale, still offered" ───────────────────────────────────────────
+relay_stub271 = types.ModuleType("relay")
+relay_stub271.waiting_lines = lambda events, root: []
+relay_stub271.unserved = lambda events, root: [
+    {"spawn": "L-research-0200", "role": "research", "subject": "L-spec-0272",
+     "age_min": 6.0, "status": "stale-still-offered"}]
+_saved271 = sys.modules.get("relay", "‹absent›")
+try:
+    sys.modules["relay"] = relay_stub271
+    board271_stale = fold.render(*ledger())
+finally:
+    if _saved271 == "‹absent›":
+        sys.modules.pop("relay", None)
+    else:
+        sys.modules["relay"] = _saved271
+unserved_block271 = board271_stale.split("## UNSERVED")[1].split("## AWAITING VERIFICATION")[0]
+assert "stale, still offered" in unserved_block271, unserved_block271
+assert "pending" not in unserved_block271, unserved_block271
+
 print("fold: 104 checks pass · +91 assertions (L-charter-0021: R3 R6 R11 R13 R14 R15)"
       " · +L-spec-0192 (fold-states-owed-due-and-killed: AC1-5 AC8 AC9 AC15-22)"
       " · +L-spec-0196 (board-shows-each-signal-as-itself: AC1-7 AC9 AC10 AC12)"
