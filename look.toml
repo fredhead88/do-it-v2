@@ -1,0 +1,30 @@
+# look.toml — the babysitter's own config (L-charter-0036 R1/R3/R4/R5,
+# L-spec-0322). Read relative to look.py's own path (repo root), not
+# $DOIT_ROOT — these are versioned defaults that ship with the code, matching
+# problems.toml's own precedent. Every value here has a hardcoded fallback in
+# look.DEFAULTS; a missing, unreadable, or malformed file degrades to those
+# defaults rather than failing the pass (look.load_toml()).
+
+[thresholds]
+tmp_high = 85
+tmp_high_clear = 75
+disk_high = 90
+disk_high_clear = 85
+tmp_climbing_slope = 10          # pts/hour, informational — the fill-projection below is what fires
+tmp_climbing_full_within_h = 2
+pass_budget_s = 90               # AC18's hard per-pass wall-clock budget
+
+[[prod]]
+project = "albert-scott"
+repo = "/opt/albert-scott"
+ssh_target = "root@167.71.46.51"
+base_url = "http://127.0.0.1:8000"   # loopback bind address; curl runs OVER ssh_target (deploy.sh:883,6490)
+version_path = "/version"
+health_path = "/health"
+
+[pane_at_menu]
+codex_patterns = []   # ships empty (Unknowns) — not load-bearing for this cut
+# `codex_targets` (tmux target strings to capture) is this builder's own
+# addition: `codex_patterns` alone has nothing to match against without a
+# target list, and the spec's Produces names only the pattern list.
+codex_targets = []

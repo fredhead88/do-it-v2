@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """One runnable check on the tick. Run: python3 test_tick.py"""
-import contextlib, datetime, fcntl, io, json, os, pathlib, re, sys, tempfile, types
+import contextlib, datetime, fcntl, io, json, os, pathlib, re, sys, tempfile, time, types
 
 TMP = pathlib.Path(tempfile.mkdtemp())
 os.environ["DOIT_ROOT"], os.environ["DOIT_NO_POKE"] = str(TMP), "1"
@@ -898,3 +898,115 @@ assert "L-spec-8805 · written" not in lanes12 and "L-spec-8806 · written" not 
 fold.EVENTS = saved_events
 
 print("tick: L-spec-0275 R2 Target 2 checks pass")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-0322 · look-mutual-watch (L-charter-0036 R1/SD13/SD22) — AC11/AC17
+# ══════════════════════════════════════════════════════════════════════════════
+# `crons` genuinely does not exist in this repo pre-wave-1-merge: `import crons,
+# look` fails on `crons` before `look` is even reached, so the ImportError half
+# below needs no stubbing at all. The present-row halves stub BOTH modules —
+# `tick._record()`'s own `import crons, look` picks up whatever `sys.modules`
+# already holds.
+
+
+class _FakeLook:
+    def __init__(self, state=None):
+        self.calls = []
+        self._state = state or {}
+
+    def emit_once(self, condition, key, owner, reading, events, **kw):
+        self.calls.append((condition, key, owner))
+        return {"condition": condition, "key": key}
+
+    def _read_state(self, root):
+        return self._state
+
+
+class _CronsMissingLook:
+    @staticmethod
+    def check():
+        return [{"name": "look"}]
+
+
+class _CronsPresent:
+    @staticmethod
+    def check():
+        return []
+
+
+# AC11(a) — the `look` row missing: exactly one cron-missing/look/thinker call.
+iso11 = _isolated_events()
+fold.EVENTS = iso11
+fakelook11 = _FakeLook()
+sys.modules["crons"], sys.modules["look"] = _CronsMissingLook(), fakelook11
+try:
+    assert tick.main() == 0, "AC11: a tick with the look row missing still exits clean"
+finally:
+    del sys.modules["crons"], sys.modules["look"]
+assert fakelook11.calls == [("cron-missing", "look", "thinker")], \
+    f"AC11: exactly one cron-missing/look/thinker call via look.emit_once: {fakelook11.calls}"
+assert "look_error" not in ticks()[-1], "AC11: no look_error on a clean (stub-importable) pass"
+fold.EVENTS = saved_events
+
+# AC11(b) — `crons`/`look` NOT importable: the tick completes normally, its
+# usual lane unchanged, and the SAME `tick` event names the exception.
+iso11b = _isolated_events()
+fold.EVENTS = iso11b
+assert "crons" not in sys.modules, "AC11: crons must be genuinely unimportable for this half"
+assert tick.main() == 0, "AC11: an ImportError degrades the tick, never crashes it"
+assert "look_error" in ticks()[-1] and "crons" in ticks()[-1]["look_error"], \
+    f"AC11: the same tick event names the import failure: {ticks()[-1]}"
+fold.EVENTS = saved_events
+print("AC11 ok")
+
+# AC17(a) — `look` row present, `last_pass` >25 min old: one look-stale/thinker call.
+iso17 = _isolated_events()
+fold.EVENTS = iso17
+old_last_pass = (fold.NOW - datetime.timedelta(minutes=30)).isoformat(timespec="seconds")
+fakelook17 = _FakeLook(state={"last_pass": old_last_pass})
+sys.modules["crons"], sys.modules["look"] = _CronsPresent(), fakelook17
+try:
+    assert tick.main() == 0
+finally:
+    del sys.modules["crons"], sys.modules["look"]
+assert fakelook17.calls == [("look-stale", "look-stale", "thinker")], \
+    f"AC17: a stale last_pass (row present) briefs look-stale/thinker: {fakelook17.calls}"
+fold.EVENTS = saved_events
+
+# AC17(b) — a fresh last_pass (<25 min) appends nothing.
+iso17b = _isolated_events()
+fold.EVENTS = iso17b
+fresh_last_pass = (fold.NOW - datetime.timedelta(minutes=5)).isoformat(timespec="seconds")
+fakelook17b = _FakeLook(state={"last_pass": fresh_last_pass})
+sys.modules["crons"], sys.modules["look"] = _CronsPresent(), fakelook17b
+try:
+    assert tick.main() == 0
+finally:
+    del sys.modules["crons"], sys.modules["look"]
+assert fakelook17b.calls == [], "AC17: within 25 minutes, no look-stale brief"
+fold.EVENTS = saved_events
+
+# AC17(c) — the REAL `look.run()`, a fresh pass, clears an open look-stale entry.
+import look as _real_look  # noqa: E402
+
+
+class _NullRunner:
+    def ssh(self, *a): raise RuntimeError("no net")
+    def git(self, *a): raise RuntimeError("no net")
+    def tmux_capture(self, *a): raise RuntimeError("no net")
+    def crontab_text(self, *a): raise RuntimeError("no net")
+    def disk_usage(self, *a): return {"total": 1, "used": 0, "free": 1}
+    def clock(self): return time.monotonic()
+    def sleep(self, s): pass
+
+
+root17c = pathlib.Path(tempfile.mkdtemp())
+(root17c / "events").mkdir()
+toml17c = root17c / "look.toml"
+toml17c.write_text("")   # no [[prod]] rows, no codex targets — nothing external ever fires
+opened17c = _real_look.emit_once("look-stale", "look-stale", "thinker", {"last_pass": None}, [], root=root17c)
+assert opened17c is not None, "AC17: seeding an open look-stale brief to be cleared"
+res17c = _real_look.run([], now=fold.NOW, runner=_NullRunner(), root=root17c, toml_path=toml17c)
+assert any(a.get("ref") for a in res17c["answered"]), \
+    f"AC17: a fresh look.run() pass clears an open look-stale entry that same pass: {res17c}"
+print("AC17 ok")

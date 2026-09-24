@@ -306,6 +306,28 @@ def _record():
         pane_resume.run(ev)
     except Exception as e:
         pane_resume_error = f"{e}"
+    # L-spec-0322/L-charter-0036 R1/SD13/SD22: the tick's own two look-mutual-watch
+    # checks — the `look` cron row missing, and `look`'s own last_pass gone stale
+    # (>25 min or absent) while the row IS present. Both route through
+    # `look.emit_once` (the SAME dedupe path `doit look` itself uses), never a
+    # second event type. Lazily imported, guarded exactly like `carry_error`
+    # above: an ImportError (module absent pre-merge) or any other exception
+    # contributes nothing to the lane, and is named on this SAME `tick` event.
+    look_error = None
+    try:
+        import crons, look
+        missing = crons.check() or []
+        row = next((r for r in missing if (r.get("name") if isinstance(r, dict) else r) == "look"), None)
+        if row is not None:
+            look.emit_once("cron-missing", "look", "thinker", row, ev)
+        else:
+            st = look._read_state(fold.ROOT) or {}
+            last_pass = st.get("last_pass")
+            stale = last_pass is None or (fold.NOW - fold.ts(last_pass)).total_seconds() > 25 * 60
+            if stale:
+                look.emit_once("look-stale", "look-stale", "thinker", {"last_pass": last_pass}, ev)
+    except Exception as e:
+        look_error = f"{e}"
     todo = lane(specs, charters, in_flight(ev), reaped, events=ev, inbound=inbound)
     # The one liveness fact: `fold` reads the newest of these for staleness, and
     # `lane` is the count — the whole record this process leaves behind.
@@ -316,6 +338,8 @@ def _record():
         kv["intake_error"] = "; ".join(intake_errors)
     if pane_resume_error:
         kv["pane_resume_error"] = pane_resume_error
+    if look_error:
+        kv["look_error"] = look_error
     dispatch.emit(tick_path(), {}, "tick", **kv)
     return todo
 
