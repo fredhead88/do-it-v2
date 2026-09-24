@@ -41,6 +41,11 @@ close. Skip any subject with a spawn in flight — a `build-started` or
 `spawn-started` with no terminal event yet — everything else on the lane is
 waiting for you. `doit events <subject>` is how you check each row.
 
+On every pass, also walk `fold.BOARD_OWNERS`: treat every section whose owner
+is `"executor"` as actionable, not only the rows the lane table below already
+lists — a section this table has not caught up with still binds you the
+moment `BOARD_OWNERS` names you as its owner.
+
 | Lane says | You check | You do |
 |---|---|---|
 | **a `question` with no `decision` naming it** (a decision's `ref` is the question's `src`, as `doit events` prints it) | reversible, with a `default`, past its `deadline`? | reversible → decide: `doit append decision <subject> ref=<the question's src> why="…" revert="…"`. Irreversible, or no default → `doit append escalation-blocking <subject> why="…"`. Before the deadline: nothing — the builder is working on the default. |

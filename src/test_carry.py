@@ -1002,4 +1002,70 @@ code, out, err = run(["https://github.com/o/r/pull/1415", "--title", "manual t",
                      "--body", "manual b"] + BASE)
 check(code == 0, f"AC14: a plain --title/--body carry (no --from-ledger) is unaffected: {err!r}")
 
-print(f"carry: {N} checks pass")
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-0276 · defaults-and-dispatch-order (L-charter-0033) — R5 (carry half, AC15)
+# ══════════════════════════════════════════════════════════════════════════════
+import validate as validate276  # noqa: E402
+_orig_warn276 = getattr(validate276, "spec_shape_warnings", None)
+validate276.spec_shape_warnings = lambda text: ["PL-002: test finding"]
+try:
+    # ── the full round trip: one spec-lint-warning lands, BEFORE spec-carried,
+    # actor "operator" (D90: the stub's own ledger filename), not ignored ──────
+    fresh_root("ac276")
+    fold.check_append = lambda event, actor: None
+    STUB.dispatch = writer(["src/ac276.py"])
+    ALLOCS[0], CALLS[:] = 0, []
+    res276 = carry._do_carry("1454", repo=REPO, project="albert-scott", force=True)
+    append_calls276 = [c for c in CALLS if c[1] == "append"]
+    check(len(append_calls276) == 2 and append_calls276[0][2] == "spec-lint-warning"
+          and append_calls276[1][2] == "spec-carried",
+          f"AC15: one spec-lint-warning append, before the sibling spec-carried: {CALLS}")
+    lc276 = append_calls276[0]
+    check(lc276[3] == res276["spec"] and "finding=PL-002: test finding" in lc276[4:],
+          f"AC15: subject=<spec id> finding=<the mocked finding>: {lc276}")
+    lint_ev276 = next(e for e in carry.scan_events(
+        lambda e: e.get("type") == "spec-lint-warning" and e.get("subject") == res276["spec"]))
+    check(lint_ev276["actor"] == "operator", f"AC15: D90's own ledger-filename actor: {lint_ev276}")
+    check("operator" in fold.EMITS["spec-lint-warning"],
+          "AC15: operator is an authorized actor for spec-lint-warning — never recorded-and-ignored")
+
+    # ── dedup: the SAME (subject, finding) pair, appended twice, lands once ────
+    # (`_do_carry` allocates a FRESH spec id per call, so the dedup unit,
+    # `_append_lint_warnings`, is exercised directly here — same code path
+    # `_do_carry` calls, same `validate` module object, just without a second
+    # real dispatch+alloc round trip to force the identical subject.)
+    dedup_id276 = res276["spec"]
+    CALLS[:] = []
+    carry._append_lint_warnings(dedup_id276, res276["path"], validate276)
+    check(not any(c[1] == "append" for c in CALLS),
+          "AC15: an identical (subject, finding) pair is not appended twice")
+
+    # ── best-effort: a failing spec-lint-warning append never raises
+    # CarryFailed and never blocks the sibling spec-carried append ────────────
+    fresh_root("ac276b")
+    fold.check_append = lambda event, actor: None
+    STUB.dispatch = writer(["src/ac276b.py"])
+    _real_record_append276 = STUB.append
+
+    def _fail_lint_append276(argv):
+        if argv[2] == "spec-lint-warning":
+            return 1, "", "boom"
+        return _real_record_append276(argv)
+    STUB.append = _fail_lint_append276
+    try:
+        ALLOCS[0], CALLS[:] = 0, []
+        res276b = carry._do_carry("1454", repo=REPO, project="albert-scott", force=True)
+        check(set(res276b) == {"spec", "source", "tier", "rule", "packet", "path", "project"},
+              f"AC15: a failed spec-lint-warning append still lets spec-carried land: {res276b}")
+        ev276b = carry.already_carried("1454")
+        check(ev276b is not None and ev276b.get("subject") == res276b["spec"],
+              "AC15: spec-carried landed despite the spec-lint-warning append failing")
+    finally:
+        STUB.append = _real_record_append276
+finally:
+    if _orig_warn276 is None:
+        delattr(validate276, "spec_shape_warnings")
+    else:
+        validate276.spec_shape_warnings = _orig_warn276
+
+print(f"carry: {N} checks pass · +L-spec-0276 (defaults-and-dispatch-order: AC15)")

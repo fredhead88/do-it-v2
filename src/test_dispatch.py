@@ -23,7 +23,8 @@ PK.write_text("a packet\n")
 N = 0
 
 
-def spawn(role, out=None, result=None, side=None, path=None, subject="L-spec-0001"):
+def spawn(role, out=None, result=None, side=None, path=None, subject="L-spec-0001",
+          charter=None, project="t"):
     res = {"is_error": False, "terminal_reason": "completed", "structured_output": out, "num_turns": 1,
            "usage": {"input_tokens": 1, "output_tokens": 2}, "total_cost_usd": 0.01,
            "modelUsage": {"m": {}}, "permission_denials": [], **(result or {})}
@@ -34,13 +35,19 @@ def spawn(role, out=None, result=None, side=None, path=None, subject="L-spec-000
         return argparse.Namespace(stdout=json.dumps(res), returncode=0, stderr="")
     dispatch.run_claude = fake
     a = argparse.Namespace(role=role, subject=subject, packet=str(PK), path=path and str(path),
-                           cwd=str(REPO), charter=None, project="t", mcp_config=None, timeout=None, max_usd=None)
+                           cwd=str(REPO), charter=charter, project=project, mcp_config=None,
+                           timeout=None, max_usd=None)
     try:
         dispatch.main(a)
         code = 0
     except SystemExit as e:
         code = e.code
-    raw = [json.loads(l) for l in max((TMP / "events").glob(f"L-{role}-*.jsonl")).read_text().splitlines()]
+    # L-spec-0276: numeric suffixes only (mirrors alloc()'s own glob) — a later
+    # fixture named e.g. `L-builder-notgrader-test.jsonl` (AC14 above) sorts
+    # ABOVE every real `L-builder-0014.jsonl`-style alloc()'d file under plain
+    # `max()`, and this helper must always read the spawn IT JUST MADE.
+    raw = [json.loads(l) for l in
+           max((TMP / "events").glob(f"L-{role}-[0-9]*.jsonl")).read_text().splitlines()]
     spawn.raw = raw
     evs = [e for e in raw if e["type"] != "spawn-started"]      # asserted once below, hidden elsewhere
     global N
@@ -1435,6 +1442,8 @@ dispatch.emit(OPEN_SW, {}, "spawn-started", subject="L-spec-0097", role="spec-wr
 code, types, evs, cmd = spawn("builder", out=card, subject="L-spec-0097")
 assert code == 1 and types == ["spawn-failed"] and "spec-writer spawn" in evs[0]["why"], (types, evs)
 assert cmd is None, "run_claude must never be called on an open-spec-writer-spawn refusal"
+# L-spec-0276/AC13: the open-spec-writer-spawn refusal now names its reason.
+assert evs[0].get("reason") == "rework-open", evs[0]
 
 # ── AC13a · a spawn-done for the EXACT spawn id lets the builder proceed ──────
 DONE_SW = TMP / "events" / "L-spec-writer-done9192.jsonl"
@@ -1695,4 +1704,87 @@ for e in raw15:
 for p in _H2:
     harness.cleanup(p)
 
-print(f"dispatch: {N} spawns mocked, every check fired")
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-0276 · defaults-and-dispatch-order (L-charter-0033) — R3 Target 4, R5
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── AC10 · wave-order refuses under a bare id, a path, or no --charter at all,
+# identically; a killed OR shipped earlier-wave sibling unblocks it ───────────
+plan_ch276 = TMP / "content" / "plan-CH276.md"
+plan_ch276.write_text(
+    "# Plan — CH276\n\n"
+    "## unit-a\nGoal: g.\nFootprint:\n- src/x276.py\nWave: 1\n\n"
+    "## unit-b\nGoal: g.\nFootprint:\n- src/y276.py\nWave: 2\n")
+SW276 = TMP / "events" / "L-spec-writer-fx276a.jsonl"
+dispatch.emit(SW276, {}, "spec-written", subject="L-spec-2761", charter="CH276", footprint=["src/x276.py"])
+dispatch.emit(SW276, {}, "spec-written", subject="L-spec-2762", charter="CH276", footprint=["src/y276.py"])
+
+for charter_arg in ("CH276", "/any/path/CH276.md", None):
+    code, types, evs, cmd = spawn("builder", out=card, subject="L-spec-2762", charter=charter_arg)
+    assert code == 1 and cmd is None and evs[-1]["type"] == "spawn-failed" \
+        and evs[-1].get("reason") == "wave-order", (charter_arg, code, types, evs)
+
+dispatch.emit(SW276, {}, "shipped", subject="L-spec-2761")
+for charter_arg in ("CH276", "/any/path/CH276.md", None):
+    code, types, evs, cmd = spawn("builder", out=card, subject="L-spec-2762", charter=charter_arg)
+    assert code == 0 and cmd is not None, (charter_arg, code, types, evs)
+
+# ── AC11 · a killed wave-1 sibling never blocks wave 2 ─────────────────────────
+dispatch.emit(SW276, {}, "spec-written", subject="L-spec-2765", charter="CH276", footprint=["src/x276.py"])
+dispatch.emit(SW276, {}, "spec-killed", subject="L-spec-2765", check=1)
+dispatch.emit(SW276, {}, "spec-written", subject="L-spec-2763", charter="CH276", footprint=["src/y276.py"])
+code, types, evs, cmd = spawn("builder", out=card, subject="L-spec-2763", charter="CH276")
+assert code == 0 and cmd is not None, (code, types, evs)
+
+# ── AC12 · wrong-project is refused before any spend ───────────────────────────
+# A FRESH subject: L-spec-2762 already carries a "project" field from its own
+# earlier successful `build-started` above (AC10's second loop, project="t",
+# `spawn()`'s own default) — `subject_project` reads a subject's FIRST-ever
+# project, so this must be a subject nothing has dispatched before.
+SW276c = TMP / "events" / "L-spec-writer-fx276c.jsonl"
+dispatch.emit(SW276c, {}, "spec-written", subject="L-spec-2767", project="acme276")
+code, types, evs, cmd = spawn("builder", out=card, subject="L-spec-2767", project="other-project")
+assert code == 1 and cmd is None and evs[-1]["type"] == "spawn-failed" \
+    and evs[-1].get("reason") == "wrong-project", (code, types, evs)
+
+# ── AC14 · no resolvable charter, or no plan file, is undetermined — never a
+# refusal — and `build-started` carries `wave_note="undetermined"` ────────────
+SW276b = TMP / "events" / "L-spec-writer-fx276b.jsonl"
+dispatch.emit(SW276b, {}, "spec-written", subject="L-spec-2764", footprint=["src/z276.py"])
+code, types, evs, cmd = spawn("builder", out=card, subject="L-spec-2764")
+assert code == 0 and cmd is not None, (code, types, evs)
+bs276 = next(e for e in evs if e["type"] == "build-started")
+assert bs276.get("wave_note") == "undetermined", bs276
+# ...and a resolved charter/wave that DID determine carries no wave_note at all.
+# (L-spec-2762's own recorded project is "t" — `spawn()`'s default, stamped by
+# its own first successful build-started in AC10's second loop above.)
+code, types, evs, cmd = spawn("builder", out=card, subject="L-spec-2762", charter="CH276")
+bs_det = next(e for e in evs if e["type"] == "build-started")
+assert "wave_note" not in bs_det, bs_det
+
+# ── AC15 (dispatch half) · validate.spec_shape_warnings monkeypatched onto the
+# imported module object; one deduplicated spec-lint-warning per finding ──────
+import validate as validate276  # noqa: E402
+_orig_warn276 = getattr(validate276, "spec_shape_warnings", None)
+validate276.spec_shape_warnings = lambda text: ["PL-002: test finding"]
+try:
+    sp276a = TMP / "content" / "L-spec-0276-lint-a.md"
+    code, types, evs, cmd = spawn("spec-writer", out={**sw, "spec_id": "L-spec-2766"}, path=sp276a,
+                                  side=lambda: sp276a.write_text(WELL_FORMED_SPEC), subject="L-spec-2766")
+    assert types.count("spec-lint-warning") == 1, types
+    lw276 = next(e for e in evs if e["type"] == "spec-lint-warning")
+    assert lw276["subject"] == "L-spec-2766" and lw276["finding"] == "PL-002: test finding", lw276
+
+    sp276b = TMP / "content" / "L-spec-0276-lint-b.md"
+    code2, types2, evs2, cmd2 = spawn("spec-writer", out={**sw, "spec_id": "L-spec-2766"}, path=sp276b,
+                                      side=lambda: sp276b.write_text(WELL_FORMED_SPEC), subject="L-spec-2766")
+    assert "spec-lint-warning" not in types2, \
+        "AC15: an identical (subject, finding) pair is not appended twice"
+finally:
+    if _orig_warn276 is None:
+        delattr(validate276, "spec_shape_warnings")
+    else:
+        validate276.spec_shape_warnings = _orig_warn276
+
+print(f"dispatch: {N} spawns mocked, every check fired · +L-spec-0276 "
+      "(defaults-and-dispatch-order: AC10-AC15)")

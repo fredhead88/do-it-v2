@@ -128,6 +128,116 @@ def open_spec_writer_spawn(all_ev, subject):
     return False
 
 
+# L-spec-0276/R3 Target 4: the settled states `wave_blocker` treats as "done with
+# this wave, safe to build past" — `tick.SPEC_DONE`'s own five, plus `killed` and
+# `void` (a killed/void sibling never blocks a later wave; `dispatch.py` must not
+# import `tick`, since `tick.py` already imports `dispatch` — Constraints), plus
+# bare `shipped` itself: the Goal's own wording is "an UNMERGED ... wave", and
+# `shipped` is the literal, Executor-only ledger event that records a merge
+# (AC10) — a minimal fixture that never reaches a verdict/review carries no
+# other SPEC_DONE label at all, and the wave-order gate is about merge order,
+# not acceptance order.
+SETTLED_STATES = ("accepted", "shipped", "shipped-owed-evidence", "dropped", "closed-unbuilt",
+                  "closed-shipped", "killed", "void")
+
+
+def resolve_charter(all_ev, subject, charter_arg):
+    """L-spec-0276/R3 Target 4: `charter_arg` (`--charter`, bare id or path)
+    normalises via `pathlib.Path(x).stem` (a no-op on a bare id — Assumptions);
+    absent, the NEWEST (by `ts`) of `subject`'s own `spec-written`/`spec-carried`
+    events carrying a non-null `charter` field, normalised the same way. `None`
+    when neither source resolves one — most live `build-started`/`spec-written`
+    events carry no `charter` at all, and this must not crash on that."""
+    if charter_arg:
+        return pathlib.Path(charter_arg).stem
+    cand = [e for e in all_ev if e.get("subject") == subject
+            and e.get("type") in ("spec-written", "spec-carried") and e.get("charter")]
+    if not cand:
+        return None
+    newest = max(cand, key=lambda e: str(e.get("ts", "")))
+    return pathlib.Path(newest["charter"]).stem
+
+
+def _plan_units(charter):
+    """Yields `(footprint_set, wave)` per `## <name>` unit in
+    `content/plan-<charter>.md` that carries both a `Footprint:` list and a
+    `Wave: N` line — a non-unit section (e.g. `## Research findings`) has
+    neither and is silently skipped, never mismatched to a unit."""
+    plan_path = CONTENT / f"plan-{charter}.md"
+    if not plan_path.is_file():
+        return
+    lines = plan_path.read_text().splitlines()
+    # Split on top-level `## ` headings by hand (never DOTALL over the whole
+    # file — a greedy `.*` there swallows every later heading too, since `$`
+    # under re.S still permits `.` to cross every line boundary in between).
+    starts = [i for i, l in enumerate(lines) if l.startswith("## ")]
+    for n, i in enumerate(starts):
+        end = starts[n + 1] if n + 1 < len(starts) else len(lines)
+        body = "\n".join(lines[i + 1:end])
+        fp_m = re.search(r"(?m)^Footprint:\s*\n((?:- .*\n?)+)", body)
+        wave_m = re.search(r"(?m)^Wave:\s*(\d+)\s*$", body)
+        if not fp_m or not wave_m:
+            continue
+        fp = set()
+        for line in fp_m.group(1).splitlines():
+            line = line.strip()
+            if line.startswith("- "):
+                tok = line[2:].strip().split()
+                if tok:
+                    fp.add(tok[0])
+        yield fp, int(wave_m.group(1))
+
+
+def spec_wave(charter, footprint):
+    """L-spec-0276/R3 Target 4 (Assumptions): the spec's own footprint (a set of
+    path strings) against each unit's `Footprint:` list — exact set equality
+    wins outright; failing that, the highest-Jaccard-overlap unit at or above
+    0.5; below that bar, or with no plan file at all, `None` ("undetermined" —
+    "the unit boundary is not this check's call", SD6)."""
+    fp_set = set(footprint or [])
+    best_wave, best_score = None, 0.0
+    for unit_fp, wave in _plan_units(charter):
+        if unit_fp == fp_set:
+            return wave
+        union = unit_fp | fp_set
+        score = len(unit_fp & fp_set) / len(union) if union else 0.0
+        if score > best_score:
+            best_score, best_wave = score, wave
+    return best_wave if best_score >= 0.5 else None
+
+
+def wave_blocker(all_ev, charter, subject, wave):
+    """L-spec-0276/R3 Target 4(a): the id of a sibling spec on the SAME charter
+    whose own unit is an EARLIER wave and is not yet SETTLED (Assumptions) — the
+    reason a `role=builder` dispatch on `subject` must refuse; `None` when no
+    such sibling exists (or `wave` is itself `None` — "undetermined" never
+    blocks, SD6)."""
+    if wave is None:
+        return None
+    import fold
+    by_subject = {}
+    for e in all_ev:
+        sid = e.get("subject")
+        if sid:
+            by_subject.setdefault(sid, []).append(e)
+    for sid, evs in by_subject.items():
+        if sid == subject or not sid.startswith("L-spec-"):
+            continue
+        sib_charter_raw = next((e.get("charter") for e in reversed(evs) if e.get("charter")), None)
+        if sib_charter_raw is None or pathlib.Path(sib_charter_raw).stem != charter:
+            continue
+        sib_written = next((e for e in reversed(evs)
+                            if e.get("type") == "spec-written" and e.get("footprint")), None)
+        if not sib_written:
+            continue
+        sib_wave = spec_wave(charter, sib_written["footprint"])
+        if sib_wave is None or sib_wave >= wave:
+            continue
+        if fold.spec_state(evs, set()) not in SETTLED_STATES:
+            return sid
+    return None
+
+
 # ★ `probe` runs with its cwd OUTSIDE every repo on purpose (§4.6·10, §9.5): its
 # run directory is under the ledger root so there is no accidental path into the
 # product. "Not a repository" is a definite answer, not an undetermined one, and
@@ -532,6 +642,25 @@ def events_for(role, out, a, base):
             findings = validate.spec_shape(pathlib.Path(a.path).read_text())
             if findings:
                 ev.append(("spec-shape-failed", dict(findings=findings)))
+            # L-spec-0276/R5 (SD25): a packet-lint `warn` finding becomes one
+            # visible, deduplicated `spec-lint-warning` event — best-effort by
+            # construction (`emit()` never raises; a refusal just returns a
+            # reason string and the sibling `spec-written` above still lands).
+            # `getattr`, not a bare call: `packet-lint` (wave 1) had not merged at
+            # this spec's own base_sha, so real `validate.py` carries no
+            # `spec_shape_warnings` yet — every OTHER spec-writer dispatch here
+            # (not monkeypatching it, per AC15) must keep working unchanged
+            # rather than crash on an AttributeError from a sibling's not-yet-
+            # landed function (Wave 2 runs after Wave 1 merges — Constraints).
+            warn_fn = getattr(validate, "spec_shape_warnings", None)
+            warn_findings = warn_fn(pathlib.Path(a.path).read_text()) if warn_fn else []
+            if warn_findings:
+                import fold
+                seen = {(e.get("subject"), e.get("finding")) for e in fold.read_events()
+                        if e.get("type") == "spec-lint-warning"}
+                for f in warn_findings:
+                    if (a.subject, f) not in seen:
+                        ev.append(("spec-lint-warning", dict(finding=f)))
         elif out["status"] == "killed":
             ev.append(("spec-killed", dict(check=out["killed_by_check"])))
     elif role == "spec-auditor":
@@ -720,12 +849,43 @@ def main(a):
     # carrying an open spec-writer spawn, is refused HERE — before any
     # subprocess or spend, and before the `build-started` event itself
     # (cost_path). Scoped to role="builder" only.
+    wave_note = None
     if builder:
         all_ev = fold.read_events()
         if fold.spec_state([e for e in all_ev if e.get("subject") == a.subject], set()) == "killed":
             fail(f"{a.subject} is killed — refusing role=builder before any spend")
+        # L-spec-0276/R3 Target 4(a): a builder must not run ahead of an
+        # unmerged, unsettled earlier plan wave on the SAME charter. No
+        # resolvable charter, no plan file, or no unit matching this spec's own
+        # footprint is `wave_note="undetermined"` on `build-started` below —
+        # never a refusal (SD6: "the unit boundary is not this check's call").
+        wave_charter = resolve_charter(all_ev, a.subject, a.charter)
+        if wave_charter is not None:
+            own_footprint = next((e.get("footprint") for e in reversed(all_ev)
+                                  if e.get("subject") == a.subject and e.get("type") == "spec-written"
+                                  and e.get("footprint")), None)
+            wave = spec_wave(wave_charter, own_footprint) if own_footprint else None
+            if wave is None:
+                wave_note = "undetermined"
+            else:
+                blocker = wave_blocker(all_ev, wave_charter, a.subject, wave)
+                if blocker:
+                    fail(f"{a.subject} (wave {wave}, charter {wave_charter}) runs ahead of "
+                         f"unsettled earlier-wave sibling {blocker} — refusing role=builder "
+                         "before any spend", reason="wave-order")
+        else:
+            wave_note = "undetermined"
+        # L-spec-0276/R3 Target 4(b): the effective project of this dispatch
+        # (--project, else --cwd's basename — already computed as base["project"])
+        # disagrees with `fold.subject_project(subject)`, when the latter is known.
+        subj_project = fold.subject_project(a.subject)
+        if subj_project is not None and subj_project != base["project"]:
+            fail(f"{a.subject} is recorded under project={subj_project!r}; this dispatch is "
+                 f"project={base['project']!r} — refusing role=builder before any spend",
+                 reason="wrong-project")
         if open_spec_writer_spawn(all_ev, a.subject):
-            fail(f"{a.subject} carries an open spec-writer spawn — refusing role=builder before any spend")
+            fail(f"{a.subject} carries an open spec-writer spawn — refusing role=builder before any spend",
+                 reason="rework-open")
         # L-spec-0195/AC4: a spec still standing broken (its most recent of
         # {spec-written, spec-shape-failed} is spec-shape-failed) is refused here,
         # before any spend — never discovered only at dispatch (R3's Goal).
@@ -794,7 +954,13 @@ def main(a):
     waiter_kv = dict(window_min=wm, waiter_pid=waiter_pid, waiter_host=socket.gethostname(),
                      waiter_proc_start=panes.proc_start(waiter_pid))
     if builder:
-        emit(ledger, base, "build-started", worktree=cwd, dsn_role=dsn_role, backend=backend, **waiter_kv)
+        # L-spec-0276/R3 Target 4: `wave_note="undetermined"` only — an
+        # optional field, omitted (not a forced null) whenever the wave WAS
+        # determined (Null encoding, mirrors carry.py's own convention).
+        # L-spec-0269: every start also records the window it was offered
+        # under and who is waiting on it (waiter_kv).
+        emit(ledger, base, "build-started", worktree=cwd, dsn_role=dsn_role, backend=backend,
+             **waiter_kv, **({"wave_note": wave_note} if wave_note else {}))
     else:
         kv = {"role": a.role, "backend": backend, **waiter_kv}
         if a.role == "grader":
