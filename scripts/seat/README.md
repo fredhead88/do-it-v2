@@ -49,6 +49,15 @@ shipped -> charter-review-complete -> tree-reaped`). Read-only: it never writes 
 board itself grew a `## SPEND` block from the same fold (`spend_by_model` in `src/fold.py`),
 alongside the older per-project dollar line on `## HEALTH`, which is unchanged.
 
+A writing role's write destination is never asked or inferred (L-spec-0262):
+`dispatch.run_seat`/`dispatch.run_codex` resolve it before any spend and write it
+in two places a server reads from, never derives — the packet's own first line,
+`WRITE PATH: <absolute path>`, followed by a blank line ahead of the packet's
+existing content; and `seat/<spawn>.cmd.json`'s `"path"` key (an absolute string
+for a writing role, `null` for a non-writing one). A relay pane or the Planner
+serving a writing-role seat reads its destination off one of those two, not by
+asking the operator or guessing from the contract file.
+
 Serving pattern (R2: the harness snapshots agent types at pane start, so serve as
 `general-purpose` and name the contract file): Agent(model=<from models.toml>, prompt = "You are the
 DO-IT `<role>` contract, spawn id <id>. 0. Before anything else, run scripts/seat/claim.sh <id> —

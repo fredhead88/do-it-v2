@@ -212,21 +212,27 @@ def run_codex_exec(cmd, packet, cwd, timeout):
     return subprocess.run(cmd, input=packet, capture_output=True, text=True, cwd=cwd, env=env, timeout=timeout)
 
 
-def run_codex(spawn, role, model, schema_path, packet, cwd, timeout):
+def run_codex(spawn, role, model, schema_path, packet, cwd, timeout, path=None):
     """The codex backend (pilot S1). `codex exec` reads the packet on stdin, enforces
     the contract's schema itself (`--output-schema`), writes the final object to
     `-o` (no `doit validate` loop, no transcription — pilot S18/S28), and streams
     events as JSONL, from which turns, tokens and the thread id are read. Codex
     does not echo the model it ran, so `model_used` is the flag it was given and
-    the event says `model_observed: false`. Cost is unpriced on the plan (null)."""
+    the event says `model_observed: false`. Cost is unpriced on the plan (null).
+
+    L-spec-0262 (SWP2/SWP3): `path` is the writing role's already-resolved,
+    absolute write destination (`None` for a non-writing role) — `main` computes
+    it once, before any spend, and hands it here so nothing serving this seat
+    ever has to ask or infer it."""
     import time
     SEAT.mkdir(parents=True, exist_ok=True)
-    (SEAT / f"{spawn}.packet.md").write_text(packet)
+    packet_text = f"WRITE PATH: {path}\n\n{packet}" if path else packet
+    (SEAT / f"{spawn}.packet.md").write_text(packet_text)
     out, log = SEAT / f"{spawn}.output.json", SEAT / f"{spawn}.codex.jsonl"
     sandbox = "workspace-write" if role in CODEX_WRITES else "read-only"
     cmd = ["codex", "exec", "-C", str(cwd), "-m", model, "--sandbox", sandbox, "--skip-git-repo-check",
            "--json", "--output-schema", str(schema_path), "-o", str(out), "--add-dir", str(CONTENT), "-"]
-    (SEAT / f"{spawn}.cmd.json").write_text(json.dumps({"cmd": cmd, "cwd": str(cwd)}, indent=1))
+    (SEAT / f"{spawn}.cmd.json").write_text(json.dumps({"cmd": cmd, "cwd": str(cwd), "path": path}, indent=1))
     t0 = time.time()
     r = run_codex_exec(cmd, packet, str(cwd), timeout)
     log.write_text(r.stdout or "")
@@ -280,7 +286,7 @@ class Unserved(Exception):
         super().__init__(f"{spawn}: unserved after {elapsed:.0f}s — no {claim_path} on disk")
 
 
-def run_seat(spawn, cmd, packet, cwd, timeout):
+def run_seat(spawn, cmd, packet, cwd, timeout, path=None):
     """The seat path (D116 by another route). Where `claude -p` is banned as metered
     — the Albert Scott rule, spec 572 — the spawn runs as an interactive session's
     seat-billed sub-agent instead. This function does not spawn: it writes the
@@ -297,11 +303,19 @@ def run_seat(spawn, cmd, packet, cwd, timeout):
     (default 300) seconds of this function starting, `Unserved` is raised — well
     before `timeout` can run out. Once a claim is observed, the check stops firing
     for the rest of this call: a claimed-but-slow seat still waits out the full
-    `timeout` exactly as before this unit."""
+    `timeout` exactly as before this unit.
+
+    L-spec-0262 (SWP2/SWP3): `path` is the writing role's already-resolved,
+    absolute write destination (`None` for a non-writing role), computed once by
+    `main` before any spend. It rides on `cmd.json["path"]` and, for a writing
+    role, prefixes the packet text itself with `WRITE PATH: <path>\\n\\n` — so a
+    relay pane or the Planner reads its destination off disk and never asks or
+    infers it (the direct cause of a packet expiring unserved)."""
     import time
     SEAT.mkdir(parents=True, exist_ok=True)
-    (SEAT / f"{spawn}.packet.md").write_text(packet)
-    (SEAT / f"{spawn}.cmd.json").write_text(json.dumps({"cmd": cmd, "cwd": cwd}, indent=1))
+    packet_text = f"WRITE PATH: {path}\n\n{packet}" if path else packet
+    (SEAT / f"{spawn}.packet.md").write_text(packet_text)
+    (SEAT / f"{spawn}.cmd.json").write_text(json.dumps({"cmd": cmd, "cwd": cwd, "path": path}, indent=1))
     want, bare = SEAT / f"{spawn}.result.json", SEAT / f"{spawn}.output.json"
     print(json.dumps({"seat": spawn, "packet": str(SEAT / f"{spawn}.packet.md"),
                       "result_expected_at": str(want), "or_output_at": str(bare),
@@ -660,6 +674,26 @@ def main(a):
         fail(f"plan-auditor packet carries no script pre-pass ('{audit.HEADER}') — "
              f"run `doit audit <stage> {a.subject} --cut …` and put its block in the packet "
              f"(§3.6) — not spent")
+    # SWP1 (L-spec-0262): a writing role's write destination is resolved HERE,
+    # before any spend — the same point as the refusals above, and well before
+    # the spawn-started/build-started event. `spec-writer` is the one writing
+    # role whose destination is independently known system-wide: `carry.py`'s
+    # `_do_carry` already computes this identical `root() / "content" /
+    # f"{spec_id}.md"` before it ever calls dispatch, so no --path from it is a
+    # missing value, not an unknown one. Every OTHER writing role (`research`,
+    # `reuse-scout`, `probe`) dispatched with no --path is refused immediately,
+    # with the unchanged message below, before any subprocess runs. A relative
+    # --path (any writing role) is made absolute against this spawn's own cwd
+    # before it is written anywhere — the post-spawn existence/mismatch checks
+    # below, and every seat/codex write, then see only the resolved value.
+    if kind and not a.path:
+        if a.role == "spec-writer":
+            a.path = str(CONTENT / f"{a.subject}.md")
+        else:
+            fail("a writing role needs --path")
+    if kind and not pathlib.Path(a.path).is_absolute():
+        a.path = str(pathlib.Path(cwd) / a.path)
+    write_path = a.path if kind else None
     before = None if builder else porcelain(cwd)
     if not builder and before is None:
         fail(f"repo status undetermined in {cwd} before spawn — not spent")
@@ -694,9 +728,10 @@ def main(a):
     seat = backend == "seat"
     try:
         if backend == "codex":
-            r = run_codex(spawn, a.role, mm["model"], schema_path, packet, cwd, (a.timeout or tmin) * 60)
+            r = run_codex(spawn, a.role, mm["model"], schema_path, packet, cwd, (a.timeout or tmin) * 60,
+                         path=write_path)
         elif seat:
-            r = run_seat(spawn, cmd, packet, cwd, (a.timeout or tmin) * 60)
+            r = run_seat(spawn, cmd, packet, cwd, (a.timeout or tmin) * 60, path=write_path)
         else:
             r = run_claude(cmd, packet, cwd, (a.timeout or tmin) * 60)
     except subprocess.TimeoutExpired:
@@ -720,7 +755,7 @@ def main(a):
         meta.update(backend=backend, spawn_path=backend, model_requested=fb["model"],
                     backend_fallback=True, fallback_from="codex")
         try:
-            r = run_seat(spawn, cmd, packet, cwd, (a.timeout or tmin) * 60) if seat \
+            r = run_seat(spawn, cmd, packet, cwd, (a.timeout or tmin) * 60, path=write_path) if seat \
                 else run_claude(cmd, packet, cwd, (a.timeout or tmin) * 60)
         except subprocess.TimeoutExpired:
             fail(f"timeout after {a.timeout or tmin} min (on the fallback backend {backend})")
