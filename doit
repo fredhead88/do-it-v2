@@ -10,6 +10,7 @@ case "${1:-board}" in
   audit)   shift; exec python3 "$SRC/audit.py" "$@" ;;
   deploy)  shift; exec python3 "$SRC/deploy.py" "$@" ;;
   reap)    shift; exec python3 "$SRC/tree_cleanup.py" "$@" ;;
+  reap-tmp) shift; exec python3 "$SRC/reap_tmp.py" "$@" ;;
   vet-dep) shift; exec node "$HERE/scripts/vet-dep.mjs" "$@" ;;
   paid-call) shift; exec python3 "$SRC/paid_call.py" "$@" ;;
   validate) shift; exec python3 "$SRC/validate.py" "$@" ;;
