@@ -1,0 +1,40 @@
+# problems.toml — the register's own config: the rank divisor, the delay
+# thresholds, and the harvest table (SD14). Read relative to problems.py's own
+# path, not $DOIT_ROOT (see problems.py / L-spec-0279 Assumptions): these are
+# versioned code constants that ship with the code, unlike a per-installation
+# file such as models.toml (only an .example is checked in for that one).
+#
+# Consumed TODAY: [rank] cost_divisor_min, by problems.register()'s ranking
+# formula. [delay] and [[harvest]] below are written for wave 2's
+# delay-occurrences / problem-harvest slots (L-charter-0034) — out of this
+# spec's scope per Boundaries; this spec ships their shape and default rows
+# only, and nothing here reads them yet.
+
+[rank]
+# doit problems --json ranks descending by:
+#   occurrences * (1 + (cost_min or 0) / cost_divisor_min)
+# i.e. an hour of recorded interruption cost counts for roughly one extra
+# occurrence.
+cost_divisor_min = 60.0
+
+[delay]
+# Minutes of a lesson's own `cost_min` past which wave 2's delay-occurrences
+# slot counts the interruption as a "delay" rather than routine noise. Not
+# read by this spec.
+warn_min = 15.0
+block_min = 60.0
+
+# One row per pattern wave 2's problem-harvest slot mines for `problem-occurred`
+# candidates against the charter's own axis vocabulary (speed / efficiency /
+# parallel-work). Not read by this spec.
+[[harvest]]
+pattern = "adr-friction"
+axis = "speed"
+
+[[harvest]]
+pattern = "loop"
+axis = "efficiency"
+
+[[harvest]]
+pattern = "conflict-rework"
+axis = "parallel-work"

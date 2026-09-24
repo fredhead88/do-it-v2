@@ -2084,3 +2084,19 @@ print("fold: 104 checks pass · +91 assertions (L-charter-0021: R3 R6 R11 R13 R1
       " · +L-spec-0196 (board-shows-each-signal-as-itself: AC1-7 AC9 AC10 AC12)"
       " · +L-spec-0242 (intake-core: AC5 AC8)"
       " · +L-spec-0264 (deployer-actor: AC1-9)")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-0279 · problem-register (L-charter-0034)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── AC18 · fold.EMITS["fix-shipped"] admits exactly {executor, operator,
+# thinker} — check_append refuses a builder-authored one, clears an
+# thinker-authored one
+ev_fix18 = {"type": "fix-shipped", "subject": "p1", "ref": "abc", "ts": stamp(0)}
+assert fold.check_append(ev_fix18, "builder") is not None, \
+    "a builder may not claim a fix shipped"
+assert fold.check_append(ev_fix18, "thinker") is None, \
+    fold.check_append(ev_fix18, "thinker")
+assert fold.EMITS["fix-shipped"] == {"executor", "operator", "thinker"}, fold.EMITS["fix-shipped"]
+assert fold.EMITS["problem-occurred"] == {"tick"}, fold.EMITS["problem-occurred"]
+print("AC18 ok")
