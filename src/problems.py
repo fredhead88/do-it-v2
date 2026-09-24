@@ -18,6 +18,9 @@ import collections, difflib, json, os, pathlib, re, sys, tomllib
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 import fold  # noqa: E402 — read_events()/EMITS/ts(): the same fold this register sits over
+import harvest  # noqa: E402 — L-spec-0280/SD19: classifies spawn-failed/build-deviation/
+                 # rejected-criterion/correction into occurrences this register folds in.
+                 # harvest.py never imports fold or problems, so no import cycle.
 
 # Repo root, next to `doit` — resolved relative to THIS file, never $DOIT_ROOT
 # (Assumptions): these are versioned code constants (rank divisor, delay
@@ -175,6 +178,47 @@ def register(events, toml_path=None):
                     "occurrences": occurrences, "first_seen": first_seen, "last_seen": last_seen,
                     "cost_min": cost_min, "cost_tokens": cost_tokens, "cost_unmeasured": cost_unmeasured,
                     "fixes": fixes, "recurred_after_fix": recurred_after_fix})
+
+    # L-spec-0280/SD19 — fold harvest.occurrences() (spawn-failed/build-deviation/
+    # rejected-criterion/correction, EMITS-authority-filtered exactly like every
+    # other type this register reads) into the Problem list `out` built above:
+    # join by slug, or mint a new Problem with statement_needed=True (unless an
+    # author's problem-minted event already names this slug, in which case that
+    # statement is used and statement_needed is False, same as the lesson path
+    # above). Additive only — every assertion above this block is unchanged.
+    by_slug = {p["slug"]: p for p in out}
+    join_targets = [{"slug": p["slug"], "statement": p["statement"]} for p in out]
+    for row in harvest.occurrences(filtered, join_targets, toml_path):
+        slug = row["slug"]
+        p = by_slug.get(slug)
+        if p is not None:
+            p["occurrences"] += 1
+            ts = row["ts"]
+            if ts is not None:
+                if p["first_seen"] is None or str(ts) < str(p["first_seen"]):
+                    p["first_seen"] = ts
+                if p["last_seen"] is None or str(ts) > str(p["last_seen"]):
+                    p["last_seen"] = ts
+            if row["cost_min"] is not None:
+                p["cost_min"] = (p["cost_min"] or 0) + row["cost_min"]
+            else:
+                p["cost_unmeasured"] += 1
+            if row["cost_tokens"] is not None:
+                p["cost_tokens"] = (p["cost_tokens"] or 0) + row["cost_tokens"]
+        else:
+            if slug in minted:
+                statement, statement_needed = minted[slug], False
+            else:
+                text = row.get("text") or ""
+                statement = text[:200] if text else f"(harvested {row['source_type']}, no free text)"
+                statement_needed = True
+            new_p = {"slug": slug, "statement": statement, "statement_needed": statement_needed,
+                     "occurrences": 1, "first_seen": row["ts"], "last_seen": row["ts"],
+                     "cost_min": row["cost_min"], "cost_tokens": row["cost_tokens"],
+                     "cost_unmeasured": 1 if row["cost_min"] is None else 0,
+                     "fixes": [], "recurred_after_fix": False}
+            out.append(new_p)
+            by_slug[slug] = new_p
 
     cfg = _load_rank_config(toml_path)
     divisor = cfg["cost_divisor_min"] or 1.0
