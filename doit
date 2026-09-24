@@ -22,6 +22,7 @@ case "${1:-board}" in
   carry)   shift; exec python3 "$SRC/carry.py" "$@" ;;
   note-close) shift; exec python3 "$SRC/notes.py" "$@" ;;
   guard)   shift; exec python3 "$SRC/guard.py" "$@" ;;
+  problems) shift; exec python3 "$SRC/problems.py" "$@" ;;
   models)  shift; exec python3 "$SRC/models.py" "$@" ;;
   version) cat "$HERE/VERSION" ;;
   backup)  shift; exec python3 "$SRC/backup.py" "$@" ;;
@@ -60,6 +61,8 @@ doit — a ledger that derives state, and the guards that read it
   doit spend <charter|spec|spawn-id>      per-spawn token table + totals; charter stage wall clock (read-only)
   doit append <type> <subject> [k=v ...]  append one event, then re-fold
   doit gate <branch> [main] [--spec ID]   merge guard. exit 1 = DO NOT MERGE
+  doit problems [--open] [--json] [--needs-statement] [--health] [--config PATH]
+                                           the ledger folded into recurring problems (L-charter-0034)
   doit packet <role> <subject> [...]      build that role's packet from the ledger (-h for flags)
   doit audit cut|plan <charter> --cut F [...]  the six mechanical checks under both fable audits (§3.6)
   doit vet-dep [--pypi] <pkg>... | --hook  the install gate, and the scout's ground truth (§6.7b)

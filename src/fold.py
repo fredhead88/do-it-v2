@@ -157,7 +157,17 @@ EMITS = {"verdict": {"grader"}, "review": {"reviewer"}, "shipped": {"executor"},
          # R15/L-adr-0038: the Executor is the only seat with a repository in reach
          # and the only one forbidden to edit it, which is exactly why the event
          # exists and why nobody else may write one on its behalf.
-         "repo-edit": {"executor"}}
+         "repo-edit": {"executor"},
+         # L-charter-0034/L-spec-0279, SD15's permission table. A `fix-shipped`
+         # claims a problem was actually fixed — the same asymmetry `shipped`
+         # itself already has (one seat's claim, trusted without re-check) — so
+         # only the seats that ship or operate may write one.
+         "fix-shipped": {"executor", "operator", "thinker"},
+         # Its only call site is `src/tick.py`, a sibling wave-2 unit outside
+         # this footprint — added now on the same "don't drop a later unit's
+         # append" precedent this dict already documents above for the
+         # `inbound-*` entries (L-spec-0192).
+         "problem-occurred": {"tick"}}
 
 # §4.4's `May declare` line, one contract at a time — the fold authorizes (§4.6).
 # A declaration lands as an event TYPED BY ITS TERM (dispatch.events_for), so a
@@ -1611,7 +1621,15 @@ def subject_project(subject):
 
 def append(argv):
     """Content before event, always (§9.2 rule 3). Never trust the write — re-read (rule 4)."""
-    path = EVENTS / os.environ.get("DOIT_LEDGER_FILE", "L-operator-local.jsonl")
+    argv = list(argv)
+    # L-spec-0279/R3: a literal --inbox token anywhere in argv is a filename-
+    # routing flag — general across event types, not lesson-specific — stripped
+    # before k=v parsing, forcing the write path to L-inbox-local.jsonl and
+    # overriding DOIT_LEDGER_FILE, so D90's filename-derived actor is `inbox`.
+    inbox = "--inbox" in argv
+    if inbox:
+        argv = [a for a in argv if a != "--inbox"]
+    path = EVENTS / ("L-inbox-local.jsonl" if inbox else os.environ.get("DOIT_LEDGER_FILE", "L-operator-local.jsonl"))
     e = {"v": 1, "ts": NOW.isoformat(timespec="seconds"), "type": argv[0], "subject": argv[1],
          "project": PROJECT or subject_project(argv[1]) or pathlib.Path.cwd().name}
     for kv in argv[2:]:
@@ -1635,6 +1653,24 @@ def append(argv):
                 e[k] = v
         else:
             e[k] = v
+    # L-spec-0279/R3: the type=="lesson" mint hook. Lazy import — mirrors this
+    # file's own lazy `import dispatch` at the `alloc` branch below, to avoid a
+    # problems.py<->fold.py import cycle (problems.py imports read_events()/EMITS
+    # from here). Never blocks (SD5): a missing `problem=` defaults, and a mint
+    # with no `statement=` still appends — it surfaces later via
+    # `doit problems --needs-statement`.
+    if e["type"] == "lesson":
+        import problems
+        if "problem" not in e:
+            e["problem"] = "unassigned"
+        slug = e["problem"]
+        prior = read_events()
+        if problems.occurrence_count(prior, slug) == 0:      # a mint, whether given or defaulted
+            existing = problems.register(prior)               # excludes `unassigned` on its own
+            suggestions = problems.suggest_slugs(slug, e.get("statement") or "", existing)
+            if suggestions:
+                print(f"mint: {slug!r} is new — near-duplicate slug(s): {', '.join(suggestions)}",
+                      file=sys.stderr)
     # ★ R3, and it is CONTENT BEFORE EVENT (§9.2 rule 3) applied to the event's own
     # fields: `required_reason` is the one required-fields door (`escalation-
     # blocking`, `owed-ac`, `spec-carried` — L-spec-0192), refused at the door
