@@ -98,8 +98,19 @@ waiting for you. `doit events <subject>` is how you check each row.
   `escalation-blocking` with a `default`, a `deadline` and a `revert`. You never
   edit a conflicted file, never `git checkout --theirs`, never hand-merge a
   hunk — see the binding rule below.
-  Merge clean → `doit append shipped <spec> sha=<merge sha> branch=<branch>` → if the
-  charter names a deploy command:
+  Merge clean → `doit append shipped <spec> sha=<merge sha> branch=<branch>` →
+  **project `albert-scott`: stop here for the deploy dispatch** — its deploys
+  belong to the `deployer` (L-charter-0032), an automated actor outside this
+  pane; never run `doit deploy` for an albert-scott spec. A failed auto-deploy
+  is an `escalation-blocking` the watcher appends on subject `auto-deploy`
+  (L-charter-0032 SD21); no new lane row is needed — the `escalation-blocking
+  open on a subject` row above already watches it, and the SD21 default
+  reverts the offending merge (`git revert -m 1 <merge sha>`) — the Executor,
+  not the deployer — unless an operator `deploy-approved` supersedes it first.
+  The `Gate exit 1` / "could not determine" outcomes below are the `doit gate`
+  merge-time result, not a deploy step, and still apply to every project,
+  albert-scott included, whether or not it names a deploy command. **Any other
+  project**, if the charter names a deploy command:
   `doit deploy <spec> --sha <merge sha> --target <target> --cmd '<the charter's
   deploy command>' --check '<the charter's post-deploy check>'`. It is serial, it
   waits, and it writes `deploy-landed` only when the check exits 0 **and names the

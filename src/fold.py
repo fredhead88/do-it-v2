@@ -97,8 +97,22 @@ EMITS = {"verdict": {"grader"}, "review": {"reviewer"}, "shipped": {"executor"},
          # ledger that a reader will trust without re-checking; `tree-reaped` is the
          # record of something destroyed. `deploy-started` and `deploy-failed` stay
          # open: reporting a failure is the safe direction (see rejected-criterion).
-         "deploy-landed": {"executor", "operator"},
+         # L-charter-0032/L-spec-0264: `deployer` (D90's filename-derived actor for
+         # `L-deployer-local.jsonl`) joins the two existing actors on `deploy-landed`,
+         # on the same footing.
+         "deploy-landed": {"executor", "operator", "deployer"},
          "tree-reaped": {"executor", "operator"},
+         # L-charter-0032/L-spec-0264, SD8/SD24: the deployer's own one-line-per-
+         # attempt summary — nobody else may claim one, the same reasoning as
+         # `planner-started`/`planner-ended` above (a seat that could write about a
+         # deploy it did not make would retire a charter nobody planned).
+         "deploy-attempt": {"deployer"},
+         # SD8 gives the mechanism (an operator's `deploy-approved sha=<target>`
+         # releases a hold); SD24 adds `thinker`, since the Thinker already deploys
+         # albert-scott under the operator's standing approval (charter §3) and so
+         # may release a hold too. `deployer` is deliberately excluded — it never
+         # clears its own hold, the same asymmetry `criterion-cleared` has above.
+         "deploy-approved": {"operator", "thinker"},
          # §3.12's fixpoint claim and the link that discharges one in-scope brief.
          # Both are L2 conjuncts in all but name: a seat that may stamp
          # `sweep-fixpoint` can close a charter over work it never swept, and a seat
