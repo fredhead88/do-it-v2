@@ -52,6 +52,19 @@ def pane_cmd(prompt=None, name=None):
     return cmd + [prompt] if prompt else cmd
 
 
+def relay_pane_cmd(prompt=None, name=None):
+    """`up.pane_cmd()`'s byte-identical twin for the relay contract (L-spec-0270
+    R1): same shape, same RETIRE deny list, same interactive flags — never `-p`,
+    `--json-schema` or `--output-format` — with `--agent relay` in place of
+    `--agent planner`. `prompt` is the comma-joined unclaimed spawn ids, oldest
+    first; `name` is the pane's own ledger stem, exactly as `pane_cmd` uses it."""
+    cmd = ["claude"] + (["-n", name] if name else []) + [
+           "--agent", "relay",
+           "--disallowedTools", ",".join(f"Skill({s})" for s in tick.RETIRE),
+           "--dangerously-skip-permissions"]
+    return cmd + [prompt] if prompt else cmd
+
+
 AGENTS_HOME = pathlib.Path.home() / ".claude" / "agents"
 
 
@@ -285,6 +298,83 @@ def _cycle(state):
     if not ok:
         return _degrade()
     _hold(state, list(lines))
+
+
+# ── the relay: a second, standing loop, independent of the charter/serving
+# priority above (L-spec-0270 R1) ─────────────────────────────────────────────
+RELAY_DRY = "RELAY WAITING: no pending packets"
+
+
+def _unclaimed_pending(pending, root):
+    """`relay.pending_packets` minus whatever a claim file already served.
+    `pending_packets` itself does not apply this filter (its own docstring says
+    so); this is the relay's own gate, run once here so `relay_main` and
+    `check_and_end_relay` (src/pane_end.py) can never disagree about what
+    "unclaimed" means."""
+    root = pathlib.Path(root)
+    seat = root / "seat"
+    out = []
+    for p in pending or ():
+        sid = p.get("spawn") if isinstance(p, dict) else p
+        if not (seat / f"{sid}.claimed").exists():
+            out.append(p)
+    return out
+
+
+def relay_main(print_only=False, max_cycles=None):
+    """The relay's own standing loop (R1), alongside `main()` (Planner) and
+    `executor_loop` (Executor) — a fourth member of this module's family of
+    loop functions, never a branch inside `_cycle()` (see the spec's own
+    Boundaries: merging it there would collapse this module's one-pane-per-tick
+    shape into a second thing per tick).
+
+    Every cycle: `relay.pending_packets` then `_unclaimed_pending`. Nothing
+    unclaimed -> print `RELAY_DRY`; print_only returns None here, having done
+    no write at all; otherwise `_hold` (this module's own, already used by the
+    Planner) waits out `_interval()` or a ledger change, then the loop
+    continues. Something unclaimed -> allocate one fresh `L-relay-<NNNN>.jsonl`
+    (D90), build the pane command naming every unclaimed spawn id, oldest
+    first, as the opening prompt; print_only prints and returns `(cmd, env)`
+    with no subprocess and no event (the allocation itself is the one file
+    write, still empty); otherwise run the pane in the foreground and wait for
+    it — it ends ITSELF via `doit pane-end --relay`, this loop never signals
+    it — recording `spawn-started`/`spawn-done` (or `spawn-failed` on an
+    `OSError` starting it)."""
+    import relay
+    contract = dispatch.AGENTS / "relay.md"
+    if not contract.exists():
+        sys.exit(f"up: no relay contract at {contract} — the pane is the contract (D116)")
+    install(contract)
+    (fold.ROOT / "events").mkdir(parents=True, exist_ok=True)
+    state, cycles = {"watermark": None, "said": None}, 0
+    while max_cycles is None or cycles < max_cycles:
+        cycles += 1
+        pending = relay.pending_packets(fold.read_events(), fold.ROOT)
+        todo = _unclaimed_pending(pending, fold.ROOT)
+        if not todo:
+            if print_only:
+                print(RELAY_DRY)
+                return None
+            _hold(state, [RELAY_DRY])
+            continue
+        ledger = dispatch.alloc(fold.EVENTS, "L-relay-", ".jsonl")
+        ids = ",".join(str(p.get("spawn") if isinstance(p, dict) else p) for p in todo)
+        cmd = relay_pane_cmd(prompt=ids, name=ledger.stem)
+        if print_only:
+            print(f"# relay pane: {ledger.stem} · {' '.join(cmd)}")
+            return cmd, _child_env(ledger)
+        base = {"spawn": ledger.stem}
+        env = _child_env(ledger, supervised=True)
+        dispatch.emit(ledger, base, "spawn-started", subject=ledger.stem, role="relay")
+        print(f"# relay pane: {ledger.stem} · serving {ids}")
+        try:
+            rc = subprocess.run(cmd, env=env).returncode
+        except OSError as e:
+            dispatch.emit(ledger, base, "spawn-failed", subject=ledger.stem, role="relay",
+                          why=f"{type(e).__name__}: {str(e)[:200]}")
+            continue
+        dispatch.emit(ledger, base, "spawn-done", subject=ledger.stem, role="relay", exit_code=rc)
+    return None
 
 
 # ── the Executor's own supervising loop (L-charter-0021 R1/R2/R12/R15) ───────
@@ -563,4 +653,7 @@ def executor_loop(root, interval, print_only=False, max_cycles=None):
 
 
 if __name__ == "__main__":
-    main("--print-only" in sys.argv[1:])
+    if "--relay" in sys.argv[1:]:
+        relay_main(print_only="--print-only" in sys.argv[1:])
+    else:
+        main("--print-only" in sys.argv[1:])

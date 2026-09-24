@@ -40,7 +40,7 @@ SESSIONS = pathlib.Path.home() / ".claude" / "sessions"
 # 2026-09-17. This list is what keeps `ledger_file` from being fabricated out of
 # an arbitrary pane name; a new role joins it when a role joins the system.
 ROLES = frozenset("builder charter-reviewer executor grader plan-auditor planner probe "
-                  "research reviewer spec-auditor spec-writer thinker".split())
+                  "relay research reviewer spec-auditor spec-writer thinker".split())
 # L-<role>-<nnnn>, where the role may itself carry hyphens (L-spec-writer-0007) —
 # the same shape `fold.read_events` derives the actor from.
 LEDGER_ID = re.compile(r"^L-([a-z][a-z0-9-]*[a-z0-9])-(\d{4,})$")

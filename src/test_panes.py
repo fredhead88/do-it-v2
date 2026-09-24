@@ -185,6 +185,11 @@ ok(panes.ledger_role("L-spec-0005") is None,
 ok(panes.ledger_role("../../etc/passwd") is None and panes.ledger_role(None) is None,
    "and neither is a path or nothing")
 
+# ── AC1 (L-spec-0270) · relay joins the role list ────────────────────────────
+ok("relay" in panes.ROLES, "AC1: the relay contract is a real ledger role, not a name it merely uses")
+ok(panes.ledger_role("L-relay-0007") == "relay",
+   "AC1: an L-relay-NNNN pane resolves to the relay role, so its ledger file address resolves")
+
 for p in KIDS:
     p.kill()
     p.wait()
