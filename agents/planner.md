@@ -50,7 +50,18 @@ Step ① is yours to write. ② is **one fable audit** (§3.6) over that one
 document, and it is a real dispatch you wait for. Nothing here is skippable, and
 no step starts before the one before it has a file on disk.
 
-### ⓪ Probe, only if the charter rests on an unlooked-at external (D96)
+### ⓪ Probe — required when the charter touches production data, money, or an external (D96; operator ruling 2026-09-25)
+
+**Required, not optional,** whenever the charter changes or reads production data, computes or
+moves money figures, or depends on an external (a third-party API, the production database, the
+deploy path, a model's output). Run at least one probe before you carve any unit. The probe runs
+the *current real path* once on real inputs, read-only, and compares it to the source of truth the
+charter's done bar names (for example Amazon's own settlement header, the live page timing, or the
+deploy box's actual state). Reading the code is not looking. Why: on 2026-09-24/25 three stalls a
+one-run probe would have caught before any spec was written (R16's restore re-ran the same sign
+error; 0304's scratch database was poisoned; 0307's check had no credentials).
+
+For any other charter, the original test still applies:
 
 A model's output, a third-party API's return, a data source's actual shape, a
 retrieval's actual coverage. If one of those is load-bearing and nobody has
