@@ -118,7 +118,9 @@ EMITS = {"verdict": {"grader"}, "review": {"reviewer"}, "shipped": {"executor"},
          # `sweep-fixpoint` can close a charter over work it never swept, and a seat
          # that may stamp `brief-answered` can discharge a brief no spec answers.
          "sweep-fixpoint": {"executor", "operator"},
-         "brief-answered": {"executor", "operator"},
+         # L-spec-0322/L-charter-0036 R1: `look` clears its own briefs (SD22) —
+         # the one `EMITS` growth this spec's SD12 cap allows.
+         "brief-answered": {"executor", "operator", "look"},
          # L-charter-0033/board-owners, Target 2: the mirror of brief-answered's
          # own restriction, one line above — the Thinker's TRIAGE clearing route.
          "brief-routed": {"thinker", "operator"},
