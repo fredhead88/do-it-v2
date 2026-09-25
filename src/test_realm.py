@@ -14,7 +14,9 @@ def test_compact_keeps_pipeline_rows_and_drops_noise():
          "duration_ms": 61000, "subagent_tokens": 12345, "status": "DONE", "model_used": "claude-sonnet-5"}
     c = realm.compact(e, "grader")
     assert c["r"] == "grader" and c["dur"] == 61000 and c["tok"] == 12345 and c["a"] == "grader"
-    assert realm.compact({"ts": "x", "type": "lesson"}, "x") is None
+    assert realm.compact({"ts": "x", "type": "worked"}, "x") is None
+    assert realm.compact({"ts": "x", "type": "lesson", "text": "no problem field"}, "builder") is None
+    assert realm.compact({"ts": "x", "type": "lesson", "problem": "disk-full", "text": "t"}, "thinker")["pb"] == "disk-full"
 
 def test_bootstrap_and_offsets_over_a_throwaway_root():
     w("L-executor-0001.jsonl", [

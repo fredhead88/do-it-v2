@@ -43,6 +43,7 @@ KEEP = {
     "verdict", "review", "merge-gate-clean", "merge-gate-rework", "shipped", "escalation-blocking",
     "question", "decision", "spec-written", "charter-filed", "plan-written", "tick", "spec-killed",
     "deploy-landed", "deploy-failed", "charter-retracted", "charter-complete",
+    "brief", "brief-answered", "lesson", "spec-carried", "inbound-registered", "inbound-closed", "inbound-covered",
 }
 CHARTER_ONLY = {"audit-finding", "charter-gap", "l1-complete", "sweep-fixpoint", "cut-written", "planner-started",
                 "planner-ended", "probe-run", "seam-undefined"}   # kept only on charter subjects
@@ -74,6 +75,8 @@ def compact(e, actor):
     subj = e.get("subject")
     if ty not in KEEP and not (ty in CHARTER_ONLY and str(subj or "").startswith("L-charter-")):
         return None
+    if ty == "lesson" and not (actor == "thinker" and e.get("problem")):
+        return None                      # only the Thinker's problem-naming lessons are a handled signal
     r = {"t": e.get("ts", ""), "ty": ty, "s": subj, "a": actor, "pr": e.get("project")}
     if ty in CHARTER_ONLY:
         r["k"] = e.get("kind") or e.get("stage") or e.get("status")
@@ -115,7 +118,42 @@ def compact(e, actor):
         r["why"] = trunc(e.get("why"), 200)
     elif ty == "shipped":
         r["sha"] = e.get("sha")
+    elif ty == "brief":
+        r.update(pb=e.get("problem"), cond=e.get("condition"), key=e.get("key"), own=e.get("owner"),
+                 why=trunc(e.get("why") or e.get("text"), 220), req=e.get("requirement"))
+    elif ty == "brief-answered":
+        r.update(ref=e.get("ref"), why=trunc(e.get("why"), 160), rs=_ref_subject(e.get("ref")))
+    elif ty == "lesson":
+        r.update(pb=e.get("problem"), fix=e.get("fix"), why=trunc(e.get("text") or e.get("why"), 240))
+    elif ty in ("spec-carried", "inbound-closed", "inbound-covered"):
+        r.update(src=e.get("source") or e.get("pr"), why=trunc(e.get("why") or e.get("reason"), 160))
+    elif ty == "inbound-registered":
+        r.update(au=e.get("author_login"), ti=trunc(e.get("title"), 120), src=e.get("source"))
     return {k: v for k, v in r.items() if v is not None}
+
+
+_REF_CACHE = {}
+
+
+def _ref_subject(ref):
+    """`brief-answered.ref` is `<file>:<line>`; resolve it to that line's subject, read-only."""
+    if not ref or ":" not in str(ref):
+        return None
+    if ref in _REF_CACHE:
+        return _REF_CACHE[ref]
+    name, _, n = str(ref).rpartition(":")
+    out = None
+    try:
+        f = EVENTS / name
+        if f.is_file() and n.isdigit():
+            for i, line in enumerate(f.read_text(errors="replace").splitlines(), 1):
+                if i == int(n):
+                    out = json.loads(line).get("subject")
+                    break
+    except (OSError, json.JSONDecodeError, ValueError):
+        out = None
+    _REF_CACHE[ref] = out
+    return out
 
 
 def read_all():
@@ -303,6 +341,51 @@ def maker_index(raw, states):
     return out
 
 
+def sys_signals():
+    """Signals no ledger row carries: the root disk, the live checkout vs origin/main, the tick's own omens."""
+    import shutil
+    out = {"at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")}
+    try:
+        u = shutil.disk_usage("/")
+        out["disk"] = {"root_pct": round(100 * u.used / u.total, 1), "free_gb": round(u.free / 1e9, 1)}
+        t = shutil.disk_usage("/tmp")
+        out["disk"]["tmp_pct"] = round(100 * t.used / t.total, 1)
+    except OSError:
+        pass
+    try:
+        repo = HERE.parent
+        behind = subprocess.run(["git", "-C", str(repo), "rev-list", "--count", "HEAD..origin/main"], capture_output=True, text=True, timeout=10)
+        head = subprocess.run(["git", "-C", str(repo), "rev-parse", "--short", "HEAD"], capture_output=True, text=True, timeout=10)
+        fetched = (repo / ".git" / "FETCH_HEAD")
+        out["live"] = {"behind": int(behind.stdout.strip() or 0) if behind.returncode == 0 else None, "head": head.stdout.strip(),
+                       "fetched": dt.datetime.fromtimestamp(fetched.stat().st_mtime, dt.timezone.utc).isoformat(timespec="seconds") if fetched.is_file() else None}
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    return out
+
+
+_OMENS_SCRIPT = {"at": None, "lines": []}
+
+
+def tick_omens():
+    """Run the Thinker's own ~/.do-it/omens.py (read-only, prints lines) so the page can show what the tick sees."""
+    script = ROOT / "omens.py"
+    if not script.is_file():
+        return None
+    try:
+        p = subprocess.run([sys.executable, str(script)], capture_output=True, text=True, timeout=180, env={**os.environ, "DOIT_ROOT": str(ROOT)})
+        lines = []
+        for l in p.stdout.splitlines():
+            parts = [x.strip() for x in l.split("|", 2)]
+            if len(parts) == 3:
+                lines.append({"sev": parts[0], "name": parts[1], "detail": trunc(parts[2], 200)})
+        _OMENS_SCRIPT.update(at=dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), lines=lines)
+        return _OMENS_SCRIPT
+    except (OSError, subprocess.SubprocessError) as ex:
+        sys.stderr.write(f"realm: omens.py failed: {ex}\n")
+        return None
+
+
 def derive_states():
     """`doit states` through fold.py, in a subprocess so a fold error never kills the server."""
     try:
@@ -379,7 +462,7 @@ def bootstrap(hours, states=None):
             "ledger_start": rows[0]["t"] if rows else None, "n_events": len(raw), "events": window_rows,
             "stats": role_stats(raw), "states": states,
             "seat": seat_summary(), "titles": titles, "counts": dict(counts.most_common(60)),
-            "queue": queue_stats(rows, claims), "caps": ROLE_CAPS_MIN, "charters": charters, "spec_charter": spec_charter, "makers": maker_index(raw, states)}
+            "queue": queue_stats(rows, claims), "caps": ROLE_CAPS_MIN, "charters": charters, "spec_charter": spec_charter, "makers": maker_index(raw, states), "sys": sys_signals(), "tick_omens": _OMENS_SCRIPT if _OMENS_SCRIPT["at"] else None}
 
 
 # ---------------------------------------------------------------- streaming
@@ -509,9 +592,17 @@ def _post(url, token, obj):
 
 
 def heartbeat_forever():
+    n = 0
     while True:
         time.sleep(15)
+        n += 1
         HUB.send("heartbeat", {"now": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")})
+        if n % 4 == 0:                       # every minute
+            HUB.send("sys", sys_signals())
+        if n % 20 == 1:                      # every five minutes, staggered
+            o = tick_omens()
+            if o:
+                HUB.send("tick_omens", o)
 
 
 # ---------------------------------------------------------------- http
@@ -644,6 +735,7 @@ def main(argv=None):
         Handler.key = key
     threading.Thread(target=tail_forever, daemon=True).start()
     threading.Thread(target=heartbeat_forever, daemon=True).start()
+    threading.Thread(target=tick_omens, daemon=True).start()
     if a.push:
         tf = ROOT / "realm.push"
         if not tf.is_file():
