@@ -465,7 +465,7 @@ for r in (rows, erows):
 # the NUMBER moves when a section is deliberately added, the check does not.
 # Counted through sections() (the PLANNER WAITING ON pass-through is relay's
 # lines, not a fold.py section) so both rules hold at once.
-assert len(sections(eboard)) == 16, \
+assert len(sections(eboard)) == 17, \
     "an empty ledger under a filter still renders every section, and does not raise"
 
 # ...and that label is now UNVOUCHED: DOIT_PROJECT is operator environment reaching
@@ -478,7 +478,7 @@ try:
     frows, fboard = spend(forged_env), fold.render(*forged_env)
 finally:
     fold.PROJECT = None
-assert len(sections(fboard)) == 16, "sections, always"
+assert len(sections(fboard)) == 17, "sections, always"
 assert len(frows) == 1 and "spend · x ## FORGED (9) · $0.00 · 0 spawns" in frows[0], frows
 
 # a label is a DIRECTORY NAME by default and nothing curates it: a newline in one
@@ -486,7 +486,7 @@ assert len(frows) == 1 and "spend · x ## FORGED (9) · $0.00 · 0 spawns" in fr
 # positional layout is the whole reason that check exists.
 forged = ledger(**{"L-operator-local.jsonl": [sp_ev(project="x\n## FORGED (9)", cost_usd=1.0)]})
 board = fold.render(*forged)
-assert len(sections(board)) == 16, "sections, always"
+assert len(sections(board)) == 17, "sections, always"
 assert len(spend(forged)) == 1 and "spend · x ## FORGED (9) · $1.00 · 1 spawns" in spend(forged)[0], \
     spend(forged)
 
@@ -606,8 +606,17 @@ answered = fold.render(*ledger(**{"L-builder-01.jsonl": [q], "L-executor-01.json
      "why": "defer, per ADR-0009", "revert": "revert the commit"}]}))
 assert "unanswered past" not in answered, "a decision naming its file:line answers it"
 assert "## NEEDS YOU (0)" in answered
+# L-spec-0276/R3 Target 1-2: an unparseable, non-anchor deadline no longer
+# auto-passes (Target 1) — it surfaces under DEADLINE UNRESOLVABLE instead
+# (Target 2), never silently dropped either. Was: "an unparseable deadline is
+# past — undetermined is never clean" (the pre-Target-1 behaviour this spec
+# replaces — Boundaries names this exact assertion).
 bad = fold.render(*ledger(**{"L-builder-01.jsonl": [{**q, "deadline": "sometime"}]}))
-assert "unanswered past" in bad, "an unparseable deadline is past — undetermined is never clean"
+assert "unanswered past" not in bad, "an unparseable deadline never silently auto-overdue"
+assert "## NEEDS YOU (0)" in bad, "...and so it is not under NEEDS YOU either"
+du_block = bad[bad.index("## DEADLINE UNRESOLVABLE"):]
+assert S in du_block and "sometime" in du_block, \
+    "an unparseable deadline is visible under DEADLINE UNRESOLVABLE instead"
 
 # ...and an escalation the operator answered leaves NEEDS YOU. The rule is the
 # tick's verbatim — newest of escalation-blocking / decision / unblocked per subject
@@ -824,7 +833,9 @@ assert "## PLANNER WAITING ON" not in wb, \
     "fold.py synthesizes no header of its own around a pass-through block"
 assert "PLANNER WAITING ON" not in wb[wb.index("## SPEND"):wb.index("## HEALTH")], \
     "and never in the SPEND/HEALTH gap, which spend_block() slices"
-assert len(sections(wb)) == 16, "the block is not a section of its own (16 = ten + SPEND + LIVE PANES + OWED DUE/UNSERVED/INBOUND/NOTES, L-spec-0196/0244)"
+assert len(sections(wb)) == 17, ("the block is not a section of its own (17 = ten + SPEND + LIVE PANES "
+                                 "+ OWED DUE/UNSERVED/INBOUND/NOTES, L-spec-0196/0244 + DEADLINE "
+                                 "UNRESOLVABLE, L-spec-0276)")
 
 # R6: a dry queue is CONTENT, not a reason to omit the slot.
 assert "PLANNER WAITING ON: no open charters" in with_relay(
@@ -845,7 +856,7 @@ assert gone.count(degrade) == 1 and gone.index(degrade) > gone.index("## HEALTH"
     "a missing producer says so once, under HEALTH"
 assert gone.count("PLANNER WAITING ON") == 1, \
     "and renders no block content it does not have"
-assert len(sections(gone)) == 16, "the degrade line is a HEALTH row, not a section"
+assert len(sections(gone)) == 17, "the degrade line is a HEALTH row, not a section"
 
 # ══════════════════════════════════════════════════════════════════════════════
 # L-charter-0021 · the-fold-and-the-board
@@ -1691,15 +1702,17 @@ finally:
     else:
         sys.modules["backup"] = _saved_backup7
 
-# ── AC9 · 16 sections, original twelve (plus NOTES, L-spec-0244) in their
-# original relative order, AWAITING VERIFICATION unmoved (only its picked
-# contents narrow, R7), LIVE PANES still between SPEND and HEALTH
+# ── AC9 · 17 sections (16, plus DEADLINE UNRESOLVABLE — L-spec-0276, last),
+# original twelve (plus NOTES, L-spec-0244) in their original relative order,
+# AWAITING VERIFICATION unmoved (only its picked contents narrow, R7), LIVE
+# PANES still between SPEND and HEALTH
 board9 = fold.render(*ledger(**{"L-executor-01.jsonl": shipped}))
-assert len(sections(board9)) == 16, sections(board9)
+assert len(sections(board9)) == 17, sections(board9)
 expected_order9 = ["## NEEDS YOU", "## BLOCKED", "## WRITTEN, NOT PICKED UP", "## IN FLIGHT",
                    "## UNSERVED", "## AWAITING VERIFICATION", "## OWED EVIDENCE", "## OWED DUE",
                    "## CHARTER CLOSE", "## NOTES", "## INBOUND", "## SHIPPED SINCE YOU LOOKED",
-                   "## DECIDED WITHOUT YOU", "## SPEND", "## LIVE PANES", "## HEALTH"]
+                   "## DECIDED WITHOUT YOU", "## SPEND", "## LIVE PANES", "## HEALTH",
+                   "## DEADLINE UNRESOLVABLE"]
 got_order9 = [h.split(" (")[0] for h in sections(board9)]
 assert got_order9 == expected_order9, got_order9
 
@@ -2079,11 +2092,87 @@ unserved_block271 = board271_stale.split("## UNSERVED")[1].split("## AWAITING VE
 assert "stale, still offered" in unserved_block271, unserved_block271
 assert "pending" not in unserved_block271, unserved_block271
 
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-0276 · defaults-and-dispatch-order (L-charter-0033) — R3 Target 1-2
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── AC1 · "before merge" passes once a `shipped` event for the subject exists ──
+ev276 = [{"type": "spec-written", "subject": "S276"}]
+assert fold.deadline_passed("before merge", ev276, "S276") is False
+ev276b = ev276 + [{"type": "shipped", "subject": "S276"}]
+assert fold.deadline_passed("before merge", ev276b, "S276") is True
+
+# ── AC2 · "before deploy" needs its OWN subject's deploy-landed when the
+# project has ANY deploy-landed at all — the fallback must NOT engage ─────────
+ev276c = [{"type": "spec-written", "subject": "S276", "project": "P276"},
+          {"type": "spec-written", "subject": "T276", "project": "P276"},
+          {"type": "deploy-landed", "subject": "T276", "project": "P276"}]
+assert fold.deadline_passed("before deploy", ev276c, "S276") is False, \
+    "★ before-deploy needs its OWN subject's deploy-landed when the project has any"
+ev276d = ev276c + [{"type": "deploy-landed", "subject": "S276", "project": "P276"}]
+assert fold.deadline_passed("before deploy", ev276d, "S276") is True
+
+# ── AC3 · before-deploy falls back to shipped when its project has no
+# deploy-landed AT ALL ─────────────────────────────────────────────────────────
+ev276e = [{"type": "spec-written", "subject": "S276", "project": "P276"},
+          {"type": "shipped", "subject": "S276", "project": "P276"}]
+assert fold.deadline_passed("before deploy", ev276e, "S276") is True, \
+    "★ before-deploy falls back to shipped when its project has no deploy-landed at all"
+ev276f = [{"type": "spec-written", "subject": "S276", "project": "P276"}]
+assert fold.deadline_passed("before deploy", ev276f, "S276") is False
+
+# ── AC4 · an ISO deadline is unchanged; blank and unparseable ones never
+# auto-pass ─────────────────────────────────────────────────────────────────
+assert fold.deadline_passed(stamp(1), [], "S276") is True, \
+    "★ an ISO deadline is unchanged; blank and unparseable ones never auto-pass"
+assert fold.deadline_passed(stamp(-3), [], "S276") is False
+assert fold.deadline_passed("whenever", [], "S276") is False
+assert fold.deadline_passed(None, [], "S276") is False
+
+# ── AC5 · an unparseable deadline is never silently overdue and always
+# visible somewhere ─────────────────────────────────────────────────────────
+S276g = "L-spec-276g"
+q276g = {"ts": stamp(2), "type": "question", "subject": S276g, "asks": "x?",
+         "default": "d", "deadline": "whenever"}
+b276g = fold.render(*ledger(**{"L-builder-276g.jsonl": [q276g]}))
+assert S276g not in b276g.split("## NEEDS YOU")[1].split("## BLOCKED")[0], \
+    "★ an unparseable deadline is never silently overdue and always visible somewhere"
+du276g = b276g[b276g.index("## DEADLINE UNRESOLVABLE"):]
+assert S276g in du276g and "whenever" in du276g and "builder" in du276g, du276g
+
+# ── AC6 · a blank deadline is never silently overdue either ───────────────────
+S276h = "L-spec-276h"
+q276h = {"ts": stamp(2), "type": "question", "subject": S276h, "asks": "x?", "default": "d"}
+b276h = fold.render(*ledger(**{"L-builder-276h.jsonl": [q276h]}))
+assert S276h not in b276h.split("## NEEDS YOU")[1].split("## BLOCKED")[0], \
+    "★ a blank deadline is never silently overdue either"
+du276h = b276h[b276h.index("## DEADLINE UNRESOLVABLE"):]
+assert S276h in du276h and "no deadline" in du276h, du276h
+
+# ── AC7 · an anchored deadline on a killed subject is unreachable, not
+# invisible ─────────────────────────────────────────────────────────────────
+S276i = "L-spec-276i"
+q276i = {"ts": stamp(2), "type": "question", "subject": S276i, "asks": "x?",
+         "default": "d", "deadline": "before merge"}
+b276i = fold.render(*ledger(**{
+    "L-spec-writer-276i.jsonl": [{"ts": stamp(3), "type": "spec-killed", "subject": S276i, "check": 1}],
+    "L-builder-276i.jsonl": [q276i]}))
+assert S276i not in b276i.split("## NEEDS YOU")[1].split("## BLOCKED")[0], \
+    "★ an anchored deadline on a killed subject is unreachable, not invisible"
+du276i = b276i[b276i.index("## DEADLINE UNRESOLVABLE"):]
+assert S276i in du276i and "before merge" in du276i, du276i
+
+# ── AC8 · DEADLINE UNRESOLVABLE is registered in BOARD_OWNERS with a
+# non-empty owner and closers ─────────────────────────────────────────────────
+assert fold.BOARD_OWNERS["DEADLINE UNRESOLVABLE"] == ("operator", ("decision", "unblocked")), \
+    "★ DEADLINE UNRESOLVABLE is registered in BOARD_OWNERS with a non-empty owner and closers"
+
 print("fold: 104 checks pass · +91 assertions (L-charter-0021: R3 R6 R11 R13 R14 R15)"
       " · +L-spec-0192 (fold-states-owed-due-and-killed: AC1-5 AC8 AC9 AC15-22)"
       " · +L-spec-0196 (board-shows-each-signal-as-itself: AC1-7 AC9 AC10 AC12)"
       " · +L-spec-0242 (intake-core: AC5 AC8)"
-      " · +L-spec-0264 (deployer-actor: AC1-9)")
+      " · +L-spec-0264 (deployer-actor: AC1-9)"
+      " · +L-spec-0276 (defaults-and-dispatch-order: AC1-9)")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # L-spec-0279 · problem-register (L-charter-0034)

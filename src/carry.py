@@ -518,6 +518,36 @@ def _title_body_from_ledger(url):
     return ev.get("title") or "", ev.get("body") or ""
 
 
+def _append_lint_warnings(spec_id, path, validate):
+    """L-spec-0276/R5 (SD25): a packet-lint `warn` finding becomes one visible,
+    deduplicated `spec-lint-warning` event per finding, appended via `doit
+    append` (never in-process — this module shells out to `doit`, mirroring
+    the `spec-carried` append it sits beside). Best-effort: a failed append
+    (`doit append`'s own non-zero exit) is never raised as `CarryFailed` and
+    never blocks the caller. `getattr`, not a bare call: `packet-lint` (wave 1)
+    had not merged at this spec's own base_sha, so real `validate.py` carries
+    no `spec_shape_warnings` yet (Wave 2 runs after Wave 1 merges —
+    Constraints); `validate` is passed in, not imported here, so a test can
+    monkeypatch the module object and this reads the patched version through
+    the SAME reference `_do_carry` already holds.
+
+    The dedup read is `scan_events()`, NOT `fold.read_events()` — the same
+    reason `already_carried`/`spec_written` already use it: a project-filtered
+    read is blind to a prior `spec-lint-warning` recorded under a different
+    project label, and a blind dedup check re-appends exactly the duplicate it
+    exists to prevent."""
+    warn_fn = getattr(validate, "spec_shape_warnings", None)
+    warn_findings = warn_fn(pathlib.Path(path).read_text()) if warn_fn else []
+    if not warn_findings:
+        return
+    seen = {(e.get("subject"), e.get("finding"))
+            for e in scan_events(lambda e: e.get("type") == "spec-lint-warning")}
+    for f in warn_findings:
+        if (spec_id, f) not in seen:
+            subprocess.run([str(doit_bin()), "append", "spec-lint-warning", spec_id, f"finding={f}"],
+                           capture_output=True, text=True)
+
+
 def _do_carry(source, *, repo=None, project=None, force=False, title=None, body=None,
               from_ledger=False):
     """Today's `main()` logic, refactored into a private, importable callable — the
@@ -595,6 +625,9 @@ def _do_carry(source, *, repo=None, project=None, force=False, title=None, body=
     if reason is not None:
         raise CarryFailed(f"carry: {spec_id} would not be honoured by the fold — {reason}. "
                           f"Nothing was appended.")
+    # L-spec-0276/R5 (SD25): appended BEFORE the `spec-carried` append below,
+    # and best-effort — see `_append_lint_warnings`'s own docstring.
+    _append_lint_warnings(spec_id, path, validate)
     ap_argv = [str(doit_bin()), "append", "spec-carried", spec_id,
               f"source={source_id}", f"tier={tier}", f"audited_at={audited_at}",
               f"footprint={json.dumps(footprint)}"]

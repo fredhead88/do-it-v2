@@ -209,6 +209,13 @@ for _role, _terms in DECLARES.items():
 # `EMITS` membership alone only gets an executor-authored `owed-ac` as far as
 # that second gate.
 EMITS["owed-ac"].add("executor")
+# L-spec-0276/R5 (SD25): a packet-lint `warn` finding becomes one visible,
+# deduplicated event. The same four actors already admitted for
+# `spec-carried`/`spec-written` (widened by the two more either hook site may
+# run under — a spec-writer ledger, or a thinker session driving `doit carry`),
+# since either `dispatch.py`'s `spec-written` site or `carry.py`'s
+# `spec-carried` site may append one.
+EMITS["spec-lint-warning"] = {"spec-writer", "executor", "operator", "thinker"}
 # A correction may override anything but these: D90 takes the actor from the
 # FILENAME, and a correction that could rewrite it reopens every check below.
 UNCORRECTABLE = ("actor", "_src")
@@ -355,14 +362,43 @@ def charter_review_owed(charter_evs):
     return charter_review(charter_evs) != "charter-review-complete"
 
 
-def deadline_passed(s):
-    """An unparseable or absent deadline is PAST, never future: a guard that cannot
-    establish its answer returns the failure state, and the failure state here is
-    "the operator looks at it"."""
+def _anchor_shipped(events, subject):
+    return any(e.get("type") == "shipped" and e.get("subject") == subject for e in events)
+
+
+def deadline_passed(s, events, subject):
+    """L-spec-0276/R3 Target 1: an ISO-8601 `s` behaves exactly as before (compared
+    to `NOW`). A blank/absent `s` no longer auto-passes — it returns `False`
+    instead, since a guard that cannot establish its answer must not silently
+    read as overdue any more (Target 2 surfaces it instead). `s` reading (case/
+    whitespace-insensitive) "before merge" passes once a `shipped` event for
+    `subject` exists in `events`; "before deploy" passes once `subject`'s own
+    `deploy-landed` exists, falling back to the before-merge rule whenever
+    `events` carries no `deploy-landed` anywhere for the SAME project as
+    `subject` (read off each event's own `project` field, never a fresh
+    `subject_project`/`read_events()` call — this stays pure and testable
+    against a hand-built `events` list). Any other non-blank, non-ISO,
+    non-anchor string never passes either — surfaced by
+    `unresolvable_deadline_questions`, never silently swallowed."""
+    spelling = "" if s is None else str(s).strip()
+    if not spelling:
+        return False
+    low = spelling.lower()
+    if low in ("before merge", "before deploy"):
+        if low == "before merge":
+            return _anchor_shipped(events, subject)
+        if any(e.get("type") == "deploy-landed" and e.get("subject") == subject for e in events):
+            return True
+        subj_project = next((e.get("project") for e in events
+                             if e.get("subject") == subject and e.get("project")), None)
+        if subj_project is not None and any(
+                e.get("type") == "deploy-landed" and e.get("project") == subj_project for e in events):
+            return False
+        return _anchor_shipped(events, subject)
     try:
-        d = datetime.fromisoformat(str(s).replace("Z", "+00:00"))
-    except (ValueError, TypeError):
-        return True
+        d = datetime.fromisoformat(spelling.replace("Z", "+00:00"))
+    except ValueError:
+        return False
     return (d if d.tzinfo else d.replace(tzinfo=timezone.utc)) < NOW
 
 
@@ -373,7 +409,41 @@ def overdue_questions(events):
     `src` on `doit events`, which is the same handle a correction uses (D111)."""
     answered = {e.get("ref") for e in events if e.get("type") in ("decision", "unblocked")}
     return [e for e in events if e.get("type") == "question"
-            and e["_src"] not in answered and deadline_passed(e.get("deadline"))]
+            and e["_src"] not in answered
+            and deadline_passed(e.get("deadline"), events, e.get("subject"))]
+
+
+def unresolvable_deadline_questions(events):
+    """L-spec-0276/R3 Target 2: every unanswered open question (the identical
+    "answered" definition `overdue_questions` already computes) whose deadline
+    is (a) blank/absent, (b) non-blank, fails ISO parsing, and is not (ci)
+    "before merge"/"before deploy", or (c) IS one of those two anchors but the
+    anchor can never fire because the question's own subject is
+    killed/void/dropped (`deadline_passed` already returns `False` for all
+    three — this is the reader that makes each one VISIBLE instead of merely
+    not-overdue)."""
+    answered = {e.get("ref") for e in events if e.get("type") in ("decision", "unblocked")}
+    out = []
+    for e in events:
+        if e.get("type") != "question" or e["_src"] in answered:
+            continue
+        d = e.get("deadline")
+        spelling = "" if d is None else str(d).strip()
+        if not spelling:
+            out.append(e)
+            continue
+        low = spelling.lower()
+        if low in ("before merge", "before deploy"):
+            subj = e.get("subject")
+            subj_evs = [x for x in events if x.get("subject") == subj]
+            if spec_state(subj_evs, set()) in ("killed", "void", "dropped"):
+                out.append(e)
+            continue
+        try:
+            datetime.fromisoformat(spelling.replace("Z", "+00:00"))
+        except ValueError:
+            out.append(e)
+    return out
 
 
 def open_briefs(events):
@@ -458,7 +528,8 @@ def escalation_ok(e):
 # and stays special-cased in `required_reason` below; these two are a plain
 # field list.
 REQUIRED = {"owed-ac": ("criterion",), "spec-carried": ("source", "tier", "audited_at"),
-            "inbound-covered": ("source", "covered_by")}
+            "inbound-covered": ("source", "covered_by"),
+            "spec-lint-warning": ("finding",)}
 
 
 # L-charter-0033/board-owners, Target 1: who owns each board() row and what
@@ -500,6 +571,10 @@ BOARD_OWNERS = {
                           "carries no backlog"),
     "LIVE PANES": ("operator", "derived: recomputed live every render from panes.live_panes(); "
                                "carries no backlog"),
+    # L-spec-0276/R3 Target 2: the operator resolves a deadline no author could
+    # (unresolvable syntax, or an anchor whose event can never fire); closers
+    # mirror overdue_questions' own "answered" set.
+    "DEADLINE UNRESOLVABLE": ("operator", ("decision", "unblocked")),
 }
 
 
@@ -1722,6 +1797,13 @@ def render(events, specs, charters, ignored, by_subject):
             health.append(f"mirror: unavailable — backup.last_push raised {type(x).__name__}: {x}")
 
     L += ["## HEALTH"] + ["  " + h for h in health] + [""]
+
+    # L-spec-0276/R3 Target 2: appended last, its own section — never folded into
+    # NEEDS YOU (Target 1 already returns `False`, never overdue, for all three
+    # cases this lists), and never silently dropped either.
+    block("DEADLINE UNRESOLVABLE",
+          [f"{e.get('subject', '?')} · {e.get('deadline') or 'no deadline'} · {e.get('actor', '?')}"
+           for e in unresolvable_deadline_questions(events)])
 
     BOARD.parent.mkdir(parents=True, exist_ok=True)
     BOARD.write_text("\n".join(L))
