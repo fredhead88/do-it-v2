@@ -16,6 +16,7 @@ Server-Sent Events. Never appends, never edits, never touches a repository.
                                the token in ~/.do-it/realm.push. Outbound only.
 """
 import argparse
+import bisect
 import collections
 import datetime as dt
 import http.server
@@ -386,6 +387,226 @@ def tick_omens():
         return None
 
 
+# ---------------------------------------------------------------- metric history (for trends)
+HISTORY_FILE = ROOT / "realm-history.json"      # the realm's own state, never the ledger
+HISTORY = {}                                     # metric -> [[iso, value], ...], oldest first
+HISTORY_KEEP_H = 72
+_H_LOCK = threading.Lock()
+
+
+def _parse(t):
+    try:
+        d = dt.datetime.fromisoformat(str(t).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return d if d.tzinfo else d.replace(tzinfo=dt.timezone.utc)   # a bare deadline is UTC
+
+
+def metrics_at(rows, states, claims, at, sys_sig=None, makers=None, spec_ch=None):
+    """The number behind each omen, as of `at` (a datetime). Rows are compact, oldest first.
+    Everything here is reconstructable from the ledger at any past time except states-based
+    counts (owed, closable, churn-by-state) which use the states given."""
+    T = at.isoformat(timespec="seconds")
+    H1 = (at - dt.timedelta(hours=1)).isoformat(timespec="seconds")
+    H12 = (at - dt.timedelta(hours=12)).isoformat(timespec="seconds")
+    H24 = (at - dt.timedelta(hours=24)).isoformat(timespec="seconds")
+    rs = [r for r in rows if r["t"] <= T]
+    m = {}
+    # lane and executor gap
+    ticks = [r for r in rs if r["ty"] == "tick"]
+    if ticks:
+        m["lane"] = ticks[-1].get("ln")
+        lt = _parse(ticks[-1]["t"])
+        m["exec_gap_min"] = round((at - lt).total_seconds() / 60, 1) if lt else None
+    # ravens: open escalations and overdue ones
+    esc, dec = {}, {}
+    for r in rs:
+        if r["ty"] in ("escalation-blocking", "question"):
+            esc.setdefault(r["s"], []).append(r)
+        elif r["ty"] == "decision" and r["s"] in esc:
+            esc.pop(r["s"], None)
+    m["ravens"] = len(esc)
+    over = 0
+    for subj, l in esc.items():
+        a0 = _parse(l[0]["t"])
+        dl = _parse(l[-1].get("dl") or "")
+        if (a0 and (at - a0).total_seconds() > 4 * 3600) or (dl and dl < at):
+            over += 1
+    m["ravens_overdue"] = over
+    # shelf: written, not built or killed
+    shelf = {}
+    for r in rs:
+        if r["ty"] == "spec-written":
+            shelf[r["s"]] = r["t"]
+        elif r["ty"] in ("build-started", "spec-killed"):
+            shelf.pop(r["s"], None)
+    m["shelf"] = len(shelf)
+    oldest = min((_parse(t) for t in shelf.values() if _parse(t)), default=None)
+    m["shelf_oldest_h"] = round((at - oldest).total_seconds() / 3600, 1) if oldest else 0
+    # inbound: registered, not carried or closed
+    inb = {}
+    for r in rs:
+        if r["ty"] == "inbound-registered" and r.get("src"):
+            inb[r["src"]] = r["t"]
+        elif r["ty"] in ("spec-carried", "inbound-closed", "inbound-covered") and r.get("src"):
+            for k in list(inb):
+                if str(r["src"]) in k or k in str(r["src"]):
+                    inb.pop(k, None)
+    m["inbound"] = sum(1 for t in inb.values() if _parse(t) and (at - _parse(t)).total_seconds() > 2 * 3600)
+    # runs: unclaimed, vanished, failure rate, deadlocks, blocked, gate
+    started, ended = {}, set()
+    for r in rs:
+        if r["ty"] in ("spawn-started", "build-started") and r.get("sp"):
+            started[r["sp"]] = r
+        elif r["ty"] in ("spawn-done", "spawn-failed") and r.get("sp"):
+            ended.add(r["sp"])
+    unclaimed = vanished = 0
+    for sp, r in started.items():
+        if sp in ended:
+            continue
+        t0 = _parse(r["t"])
+        age = (at - t0).total_seconds() / 60 if t0 else 0
+        role = r.get("r") or role_of(sp)
+        cap = ROLE_CAPS_MIN.get(role, 30)
+        cl = _parse(claims.get(sp) or "")
+        if 1 < age <= 3 * cap and not (cl and cl <= at):
+            unclaimed += 1
+        if 3 * cap < age < 48 * 60:
+            vanished += 1
+    m["unclaimed"], m["vanished"] = unclaimed, vanished
+    rec = [r for r in rs if r["ty"] in ("spawn-done", "spawn-failed") and r["t"] > H1]
+    m["spike"] = round(sum(1 for r in rec if r["ty"] == "spawn-failed") / len(rec), 2) if len(rec) >= 5 else 0
+    dead = churn = blocked = gate = 0
+    per = {}
+    for r in rs:
+        if not str(r.get("s") or "").startswith("L-spec-"):
+            continue
+        d = per.setdefault(r["s"], {"cont": 0, "lastCont": "", "lastDone": "", "verd": 0, "lastOk": None, "build": None, "buildT": "", "gate": None, "gateT": "", "last": ""})
+        d["last"] = r["t"]
+        ty = r["ty"]
+        if ty == "spawn-failed" and re.search(r"contamin|identical|D120", str(r.get("why") or ""), re.I):
+            d["cont"] += 1
+            d["lastCont"] = r["t"]
+        elif ty == "spawn-done":
+            d["lastDone"] = r["t"]
+        elif ty == "verdict":
+            d["verd"] += 1
+            d["lastOk"] = bool(r.get("ok"))
+        elif ty in ("build-done", "build-blocked"):
+            d["build"] = "BLOCKED" if ty == "build-blocked" else r.get("st")
+            d["buildT"] = r["t"]
+        elif ty in ("merge-gate-clean", "merge-gate-rework"):
+            d["gate"] = ty
+            d["gateT"] = r["t"]
+    for d in per.values():
+        if d.get("last", "") < H24:
+            continue
+        if d["cont"] >= 2 and d["lastDone"] < d["lastCont"]:
+            dead += 1
+        if d["verd"] >= 3 and d["lastOk"] is False:
+            churn += 1
+        if d["build"] and d["build"] != "DONE" and d["buildT"] > H12:
+            blocked += 1
+        if d["gate"] == "merge-gate-rework" and d["gateT"] > H12:
+            gate += 1
+    m.update(deadlock=dead, churn=churn, blocked=blocked, gate=gate)
+    # states-based (now only): owed, closable
+    if states:
+        st = dict(states)
+        m["owed"] = sum(1 for v in st.values() if "owed" in v)
+        if spec_ch:
+            by = {}
+            for spec, c in spec_ch.items():
+                by.setdefault(c, []).append(st.get(spec))
+            closable = 0
+            for c, vals in by.items():
+                cs = st.get(c, "")
+                vals = [v for v in vals if v]
+                if not vals or re.search(r"complete|retracted", cs, re.I):
+                    continue
+                live = [v for v in vals if not re.search(r"killed|void|dropped|unknown", v)]
+                if live and all(re.match(r"^(accepted|shipped)$", v) for v in live) and not any(subj in esc for subj, _ in [(sp, 0) for sp, cc in spec_ch.items() if cc == c]):
+                    closable += 1
+            m["closable"] = closable
+    if sys_sig:
+        if sys_sig.get("disk"):
+            m["disk"] = sys_sig["disk"]["root_pct"]
+        if sys_sig.get("live") and sys_sig["live"].get("behind") is not None:
+            m["behind"] = sys_sig["live"]["behind"]
+    return {k: v for k, v in m.items() if v is not None}
+
+
+def history_load():
+    global HISTORY
+    try:
+        HISTORY = json.loads(HISTORY_FILE.read_text()) if HISTORY_FILE.is_file() else {}
+    except (OSError, json.JSONDecodeError):
+        HISTORY = {}
+
+
+def history_add(sample, at):
+    T = at.isoformat(timespec="seconds")
+    cutoff = (at - dt.timedelta(hours=HISTORY_KEEP_H)).isoformat(timespec="seconds")
+    with _H_LOCK:
+        for k, v in sample.items():
+            ser = HISTORY.setdefault(k, [])
+            if ser and ser[-1][0] >= T:
+                continue
+            ser.append([T, v])
+            while ser and ser[0][0] < cutoff:
+                ser.pop(0)
+        try:
+            HISTORY_FILE.write_text(json.dumps(HISTORY, separators=(",", ":")))
+        except OSError as ex:
+            sys.stderr.write(f"realm: history not saved: {ex}\n")
+
+
+def history_backfill(rows, claims, hours=24, step_min=15):
+    """Reconstruct the ledger-derived series for the last `hours`, only where nothing is stored yet."""
+    now = dt.datetime.now(dt.timezone.utc)
+    earliest = min((ser[0][0] for ser in HISTORY.values() if ser), default=now.isoformat(timespec="seconds"))
+    at = now - dt.timedelta(hours=hours)
+    added = 0
+    while at < now:
+        T = at.isoformat(timespec="seconds")
+        if T < earliest:
+            m = metrics_at(rows, None, claims, at)
+            with _H_LOCK:
+                for k, v in m.items():
+                    bisect.insort(HISTORY.setdefault(k, []), [T, v])
+            added += 1
+        at += dt.timedelta(minutes=step_min)
+    with _H_LOCK:
+        for ser in HISTORY.values():
+            ser.sort()
+    return added
+
+
+def sample_forever():
+    """Every five minutes: the metrics now, appended to the history and streamed."""
+    history_load()
+    try:
+        rows, raw, _ = read_all()
+        n = history_backfill(rows, seat_claims())
+        if n:
+            sys.stderr.write(f"realm: backfilled {n} history points\n")
+    except Exception as ex:  # noqa: BLE001
+        sys.stderr.write(f"realm: backfill failed: {ex}\n")
+    while True:
+        try:
+            rows, raw, _ = read_all()
+            states = HUB.states or derive_states() or []
+            HUB.states = states
+            _, spec_ch = charter_index(raw)
+            now = dt.datetime.now(dt.timezone.utc)
+            m = metrics_at(rows, states, seat_claims(), now, sys_signals(), None, spec_ch)
+            history_add(m, now)
+            HUB.send("history", {"history": HISTORY, "now": m})
+        except Exception as ex:  # noqa: BLE001
+            sys.stderr.write(f"realm: sample failed: {ex}\n")
+        time.sleep(300)
+
+
 def derive_states():
     """`doit states` through fold.py, in a subprocess so a fold error never kills the server."""
     try:
@@ -462,7 +683,7 @@ def bootstrap(hours, states=None):
             "ledger_start": rows[0]["t"] if rows else None, "n_events": len(raw), "events": window_rows,
             "stats": role_stats(raw), "states": states,
             "seat": seat_summary(), "titles": titles, "counts": dict(counts.most_common(60)),
-            "queue": queue_stats(rows, claims), "caps": ROLE_CAPS_MIN, "charters": charters, "spec_charter": spec_charter, "makers": maker_index(raw, states), "sys": sys_signals(), "tick_omens": _OMENS_SCRIPT if _OMENS_SCRIPT["at"] else None}
+            "queue": queue_stats(rows, claims), "caps": ROLE_CAPS_MIN, "charters": charters, "spec_charter": spec_charter, "makers": maker_index(raw, states), "sys": sys_signals(), "tick_omens": _OMENS_SCRIPT if _OMENS_SCRIPT["at"] else None, "history": HISTORY}
 
 
 # ---------------------------------------------------------------- streaming
@@ -716,6 +937,7 @@ def main(argv=None):
     if not EVENTS.is_dir():
         sys.exit(f"realm: no ledger at {EVENTS}")
     if a.snapshot:
+        history_load()
         snap = bootstrap(a.hours)
         snap["live"] = False
         pathlib.Path(a.snapshot).write_text(json.dumps(snap, separators=(",", ":")))
@@ -736,6 +958,7 @@ def main(argv=None):
     threading.Thread(target=tail_forever, daemon=True).start()
     threading.Thread(target=heartbeat_forever, daemon=True).start()
     threading.Thread(target=tick_omens, daemon=True).start()
+    threading.Thread(target=sample_forever, daemon=True).start()
     if a.push:
         tf = ROOT / "realm.push"
         if not tf.is_file():
