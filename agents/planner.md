@@ -108,6 +108,15 @@ footprint overlap is **advisory**: prefer none, but a declared overlap is a note
 to the builders and to the merge order, never a reason to hold a dispatch. A
 merge conflict is a builder re-dispatch, and that is cheap.
 
+**Shared files in one wave get a merge order (operator ruling 2026-09-25).** Units in the
+same wave may share a footprint file and still build in parallel. When they do, the plan
+names their merge order under the shared decisions, for example `Merge order (src/fold.py):
+unit-a, then unit-b`. The Executor merges in that order; each later unit rebases once onto
+the earlier merge before its gate, and no merge of another unit touching that file cuts in
+between. Why: on 2026-09-24/25, parallel merges with no order forced L-spec-0261 into three
+rebuild-and-regrade rounds, and 0275, 0276 and 0214 into two each. Build in parallel, merge
+in order.
+
 **Then the Shared-decisions block**, and the rest of the required sections. A
 missing section is a missing decision, not a short document:
 
