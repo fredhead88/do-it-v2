@@ -224,6 +224,19 @@ def charter_index(raw):
                 ch.setdefault(c, {}).setdefault("project", e.get("project"))
         elif ty in ("plan-written", "charter-retracted", "charter-complete"):
             ch.setdefault(subj, {})[ty.split("-")[1]] = e.get("ts")
+    # A spec file may name a charter in its frontmatter that its spec-written event did not carry.
+    content = ROOT / "content"
+    if content.is_dir():
+        for f in content.glob("L-spec-*.md"):
+            if f.stem in spec_ch:
+                continue
+            try:
+                m = re.search(r"^charter:\s*(L-charter-\d+)", f.read_text(errors="replace")[:3000], re.M)
+            except OSError:
+                continue
+            if m:
+                spec_ch[f.stem] = m.group(1)
+                ch.setdefault(m.group(1), {})
     for cid, meta in ch.items():
         meta.update(charter_text(cid))
     return ch, spec_ch
