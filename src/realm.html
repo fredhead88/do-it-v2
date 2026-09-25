@@ -1,0 +1,935 @@
+<title>Realm of DO-IT</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Cinzel:wght@600;800&family=Noto+Sans:ital,wght@0,400;0,600;1,400&display=swap">
+<style>
+:root{
+  --night:#0e0b1c; --glass:rgba(16,12,34,.82); --glass2:rgba(24,18,48,.92); --gold:#e6c46a; --gold2:#a8842e; --hair:rgba(230,196,106,.45);
+  --paper:#efe6d2; --paper2:#d9cdb0; --ink:#2a2118; --ink2:#5a4d3c; --text:#efe6d2; --mute:#9a92ad; --red:#ff6a5c; --green:#8fe08f; --amber:#ffc46b; --blue:#7fc4ff;
+  --display:'Cinzel',Georgia,serif; --body:'Noto Sans',system-ui,sans-serif; color-scheme:dark;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;background:var(--night);color:var(--text);font-family:var(--body);font-size:15px;line-height:1.4;overflow:hidden}
+#app{height:100%;display:grid;grid-template-rows:auto 1fr;grid-template-columns:1fr 380px;grid-template-areas:"hud hud" "stage panel"}
+.hud{grid-area:hud;display:grid;grid-template-columns:auto 1fr;grid-template-rows:auto auto;grid-template-areas:"title stats" "row row";align-items:center;column-gap:22px;row-gap:4px;padding:8px 16px 6px;background:linear-gradient(#1a1430,#100c22);border-bottom:1px solid var(--hair);padding-top:calc(8px + env(safe-area-inset-top,0px));overflow:hidden}
+.hud h1{grid-area:title;display:flex;align-items:center;gap:10px}
+.mode{font-family:var(--display);font-size:9px;letter-spacing:.2em;padding:3px 8px;border:1px solid var(--hair);color:var(--mute);border-radius:2px;text-shadow:none;white-space:nowrap}
+.mode.live{color:var(--green);border-color:var(--green)}.mode.live::before{content:'';display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--green);margin-right:6px;box-shadow:0 0 8px var(--green);animation:pulse 1.4s ease-in-out infinite}
+.mode.off{color:var(--red);border-color:var(--red)}
+.stats{grid-area:stats;display:flex;gap:6px;overflow:hidden;white-space:nowrap;min-width:0}
+.row{grid-area:row;display:flex;gap:14px;align-items:center;min-width:0;overflow:hidden}
+.hud h1{font-family:var(--display);font-weight:800;font-size:15px;margin:0;color:var(--gold);letter-spacing:.18em;white-space:nowrap;text-shadow:0 0 12px rgba(230,196,106,.35)}
+.hud .stat{display:flex;flex-direction:column;width:112px;flex:none;overflow:hidden}
+.hud .stat b{font-family:var(--display);font-weight:800;font-size:14px;color:#fff;font-variant-numeric:tabular-nums;white-space:nowrap;letter-spacing:.02em;overflow:hidden;text-overflow:clip;height:20px;line-height:20px}
+.hud .stat span{font-size:10px;color:var(--mute);text-transform:uppercase;letter-spacing:.16em}
+.hud .stat.warn b{color:var(--amber)}.hud .stat.bad b{color:var(--red);text-shadow:0 0 10px rgba(255,106,92,.5)}.hud .stat.good b{color:var(--green)}
+.hud .ctl{display:flex;gap:6px;align-items:center;flex:none}
+.btn{font-family:var(--display);font-weight:600;font-size:11px;letter-spacing:.12em;padding:7px 11px;background:linear-gradient(#2a2250,#1a1436);color:var(--text);border:1px solid var(--hair);cursor:pointer;border-radius:2px}
+.btn:hover{border-color:var(--gold);color:#fff}
+.btn.on{background:linear-gradient(#e6c46a,#b8923a);color:#1a1230;border-color:#f2d98a}
+.btn.live{border-color:var(--green);color:var(--green)}
+.btn.live.on{background:linear-gradient(#8fe08f,#4fa34f);color:#0e2a0e;border-color:#b8f0b8}
+.btn:focus-visible,input:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+.scrub{display:flex;align-items:center;gap:8px;flex:1 1 auto;min-width:120px}
+.scrub input{flex:1;accent-color:var(--gold);height:20px}
+.scrub small{font-size:11px;color:var(--mute);white-space:nowrap;font-variant-numeric:tabular-nums}
+.stage{grid-area:stage;display:grid;grid-template-rows:1fr auto;background:#07060f;overflow:hidden;min-width:0;min-height:0}
+.view{position:relative;min-height:0;overflow:hidden}
+canvas#map{position:absolute;inset:0;width:100%;height:100%;display:block;cursor:default}
+canvas#map.hand{cursor:pointer}
+#status{position:absolute;left:50%;top:46%;transform:translate(-50%,-50%);z-index:6;background:var(--glass2);border:1px solid var(--hair);padding:14px 22px;font-family:var(--display);font-size:12px;letter-spacing:.16em;color:var(--gold);text-align:center;border-radius:2px;max-width:80%}
+#status small{display:block;font-family:var(--body);font-size:12px;letter-spacing:0;color:var(--mute);margin-top:6px;text-transform:none}
+#status.err{color:var(--red);border-color:var(--red)}
+#tip{position:absolute;pointer-events:none;background:var(--glass2);color:#fff;border:1px solid var(--hair);padding:4px 10px;font-size:12px;letter-spacing:.04em;white-space:nowrap;transform:translate(-50%,-150%);display:none;z-index:3;border-radius:2px}
+#bubble{position:absolute;z-index:4;width:300px;max-width:calc(100% - 24px);display:none;transform:translate(-50%,-100%);filter:drop-shadow(0 6px 14px rgba(0,0,0,.55))}
+#bubble .tag{display:inline-block;font-family:var(--display);font-weight:700;font-size:12px;letter-spacing:.06em;color:#fff;background:#4a4650;padding:4px 18px;margin-left:10px;clip-path:polygon(8px 0,calc(100% - 8px) 0,100% 50%,calc(100% - 8px) 100%,8px 100%,0 50%);position:relative;top:6px}
+#bubble .box{background:linear-gradient(#f4ecda,#e4d8bd);color:var(--ink);border:2px solid #3a3430;padding:14px 16px 12px;clip-path:polygon(10px 0,calc(100% - 10px) 0,100% 10px,100% calc(100% - 10px),calc(100% - 10px) 100%,10px 100%,0 calc(100% - 10px),0 10px);font-size:14px;line-height:1.45}
+#bubble .box b{font-family:var(--display);font-size:12px;letter-spacing:.06em}
+#bubble .box a{color:#7a2f18;text-decoration:underline;cursor:pointer;font-weight:600}
+#bubble .box .tiny{font-size:12px;color:var(--ink2)}
+#bubble::after{content:"";position:absolute;left:50%;bottom:-12px;border:8px solid transparent;border-top:10px solid #3a3430;transform:translateX(-50%)}
+.omens{position:absolute;left:12px;top:12px;z-index:3;width:min(330px,46%);display:flex;flex-direction:column;gap:6px;pointer-events:none}
+.omen{pointer-events:auto;background:var(--glass2);border:1px solid var(--hair);border-left:4px solid var(--amber);padding:6px 10px 6px 10px;cursor:pointer;border-radius:2px;box-shadow:0 6px 18px rgba(0,0,0,.45)}
+.omen.crit{border-left-color:var(--red);background:linear-gradient(90deg,rgba(90,20,30,.92),var(--glass2))}
+.omen b{display:block;font-family:var(--display);font-size:11.5px;letter-spacing:.06em;color:#fff}
+.omen.crit b{color:#ffb0a6}.omen.warn b{color:#ffd9a0}
+.omen span{display:block;font-size:12.5px;color:#d9d2e6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.omen.head{background:var(--glass2);border:1px solid var(--hair);box-shadow:none;padding:4px 10px;cursor:pointer;display:flex;justify-content:space-between;align-items:center}
+.omen.head small{font-family:var(--body);font-size:11px;color:var(--mute);letter-spacing:.04em}
+.omens.min .omen:not(.head){display:none}
+.omen.head b{font-size:10px;letter-spacing:.24em;color:var(--gold)}
+.omen.quiet b{color:var(--green)}
+.stage.alarm .view::after{content:"";position:absolute;inset:0;pointer-events:none;box-shadow:inset 0 0 0 3px rgba(255,90,70,.5),inset 0 0 60px rgba(255,60,40,.14)}
+@keyframes pulse{0%,100%{opacity:.35}50%{opacity:1}}
+@media (prefers-reduced-motion:reduce){.stage.alarm .view::after{animation:none;opacity:.7}}
+.cb{border:1px solid var(--hair);border-radius:3px;padding:10px 12px;margin:0 0 10px;background:rgba(255,255,255,.03);cursor:pointer}
+.cb:hover{border-color:var(--gold)}
+.cb .id{font-family:var(--display);font-size:11px;letter-spacing:.1em;color:var(--gold)}
+.cb .ti{font-size:13.5px;margin:2px 0 6px;line-height:1.3}
+.cb .seg{display:flex;height:10px;border:1px solid var(--hair);overflow:hidden;background:rgba(255,255,255,.05);margin:4px 0}
+.cb .seg i{display:block;height:100%}
+.cb .cnt{font-size:12px;color:var(--mute);display:flex;flex-wrap:wrap;gap:4px 10px}
+.cb .hold{font-size:12.5px;margin-top:4px;color:#ffd9a0}
+.cb .hold.ok{color:var(--green)}
+.cb .hold.bad{color:#ffb0a6}
+.proj{font-family:var(--display);font-size:11px;letter-spacing:.2em;color:var(--mute);margin:14px 0 8px}
+.key{display:flex;flex-wrap:wrap;gap:4px 12px;font-size:11.5px;color:var(--mute);margin:6px 0 10px}
+.key i{display:inline-block;width:10px;height:10px;margin-right:4px;vertical-align:-1px}
+#dossier{position:absolute;inset:12px;z-index:7;background:linear-gradient(180deg,rgba(22,16,44,.97),rgba(12,9,26,.97));border:1px solid var(--gold2);box-shadow:0 20px 60px rgba(0,0,0,.6);overflow-y:auto;padding:22px 26px 30px;border-radius:3px}
+#dossier[hidden]{display:none}
+#dossier .top{display:flex;gap:14px;align-items:flex-start;justify-content:space-between;flex-wrap:wrap}
+#dossier .id{font-family:var(--display);font-size:12px;letter-spacing:.18em;color:var(--gold)}
+#dossier h2{font-family:var(--body);font-weight:600;font-size:clamp(17px,1.7vw,22px);line-height:1.35;margin:6px 0 4px;color:#fff;max-width:70ch;text-wrap:balance}
+#dossier .done{font-size:13.5px;color:var(--mute);max-width:80ch;margin:0 0 12px}
+#dossier .verdict{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:6px 0 14px;font-size:15px}
+#dossier .verdict .big{font-family:var(--display);font-size:13px;letter-spacing:.1em;padding:6px 12px;border:1px solid var(--hair);border-radius:2px}
+#dossier .verdict .big.ok{color:var(--green);border-color:var(--green)}#dossier .verdict .big.bad{color:var(--red);border-color:var(--red)}#dossier .verdict .big.warn{color:var(--amber);border-color:var(--amber)}
+#dossier .btns{display:flex;gap:6px;flex:none}
+#dossier .cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:18px;margin-top:14px}
+#dossier .col h4{font-family:var(--display);font-size:10px;letter-spacing:.22em;margin:0 0 6px;color:var(--gold);border-bottom:1px solid var(--hair);padding-bottom:4px}
+#dossier .col ul{margin:0;padding-left:16px;font-size:13.5px}#dossier .col li{margin:4px 0}
+#dossier .col .act{border-left:3px solid var(--amber);padding:6px 10px;margin:6px 0;background:rgba(255,196,107,.06);font-size:13.5px}
+#dossier .col .act.bad{border-left-color:var(--red);background:rgba(255,106,92,.07)}
+#dossier .col .act b{display:block;font-family:var(--display);font-size:10.5px;letter-spacing:.08em;margin-bottom:2px}
+#dossier .col .act .tiny{display:block;margin-top:3px}
+#dossier .ms{list-style:none;padding:0;margin:0}
+#dossier .ms li{display:grid;grid-template-columns:96px 1fr;gap:8px;padding:3px 0;border-top:1px solid rgba(255,255,255,.06);font-size:13px}
+#dossier .ms time{color:var(--mute);font-variant-numeric:tabular-nums;font-size:12px;padding-top:1px}
+#dossier .ms li.bad span{color:#ff9a90}#dossier .ms li.good span{color:#a8f0a8}#dossier .ms li.esc span{color:#ffd28a}
+#journey{display:block;width:100%;height:auto;border:1px solid var(--hair);background:rgba(0,0,0,.25);margin:10px 0 4px}
+.jkey{display:flex;flex-wrap:wrap;gap:4px 12px;font-size:11.5px;color:var(--mute);margin:0 0 6px}.jkey i{display:inline-block;width:10px;height:10px;margin-right:4px;vertical-align:-1px}
+#dossier a.link{color:var(--gold);text-decoration:underline;cursor:pointer}
+#dossier .wsh{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:12px;margin-top:14px}
+.relic{border:1px solid var(--hair);border-radius:3px;padding:10px 12px 10px 10px;background:rgba(255,255,255,.03);display:grid;grid-template-columns:64px 1fr;gap:10px;cursor:pointer;align-items:start}
+.relic:hover{border-color:var(--gold)}
+.relic canvas{width:64px;height:64px;image-rendering:pixelated;border-radius:3px;background:radial-gradient(circle at 50% 35%,rgba(255,255,255,.08),rgba(0,0,0,.35))}
+.relic b{display:block;font-size:13.5px;line-height:1.3;color:#fff;margin-bottom:3px;overflow-wrap:anywhere}
+.relic>div{min-width:0}
+.relic .st{display:inline-block;font-family:var(--display);font-size:9px;letter-spacing:.12em;padding:2px 7px;border:1px solid var(--hair);border-radius:2px;margin:0 4px 4px 0}
+.relic .w{font-size:12px;color:#c9c2d8;line-height:1.35;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.relic .m{font-size:11px;color:var(--mute);margin-top:4px}
+.relic.trophy{background:linear-gradient(135deg,rgba(230,196,106,.12),rgba(255,255,255,.02));border-color:rgba(230,196,106,.45)}
+.relic.dead{opacity:.6}
+#banner{display:block;width:100%;height:auto;border:1px solid var(--hair);margin:8px 0 6px;image-rendering:pixelated}
+.wstats{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:13.5px;margin:0 0 4px}.wstats b{font-family:var(--display);font-size:13px;color:#fff}
+#dossier .intent-full{font-size:13.5px;color:#d9d2e6;max-width:90ch;margin:0 0 6px}
+.chip.focus{border-color:var(--amber);color:var(--amber)}.chip.focus a{color:#fff;text-decoration:underline;cursor:pointer;margin-left:6px}
+#log li.dim{opacity:.35}
+.cb .lead{font-size:14.5px;color:#fff;margin:3px 0 4px;line-height:1.35}
+.cb .ti{font-size:12px;color:var(--mute)}
+@media (max-width:900px){#dossier{inset:6px;padding:14px}}
+.legend{position:absolute;right:12px;top:12px;z-index:2;display:flex;gap:5px;flex-wrap:wrap;justify-content:flex-end;max-width:62%}
+.chip{font-size:11px;letter-spacing:.06em;background:var(--glass);border:1px solid var(--hair);padding:3px 9px;color:#fff;cursor:pointer;display:flex;align-items:center;gap:6px;border-radius:2px}
+.chip:hover{border-color:var(--gold)}
+.chip i{display:inline-block;width:9px;height:9px;border:1px solid #000;border-radius:1px}
+#log{height:136px;background:linear-gradient(#100c22,#0b0818);border-top:1px solid var(--hair);padding:6px 14px;overflow-y:auto;z-index:2}
+#log h3{font-family:var(--display);font-size:11px;letter-spacing:.2em;margin:0 0 4px;color:var(--gold);display:flex;justify-content:space-between;align-items:center}
+#log h3 button{font-family:var(--body);font-size:12px;background:none;border:0;color:var(--mute);cursor:pointer}
+#log ul{list-style:none;margin:0;padding:0}
+#log li{padding:2px 0;border-top:1px solid rgba(255,255,255,.05);cursor:pointer;display:grid;grid-template-columns:auto 1fr;gap:10px;font-size:13px;white-space:nowrap;overflow:hidden}
+#log li span{overflow:hidden;text-overflow:ellipsis}
+#log li:hover{background:rgba(255,255,255,.04)}
+#log li time{color:var(--mute);font-variant-numeric:tabular-nums}
+#log li .who{color:var(--gold)}
+#log li.bad .who{color:var(--red)}#log li.good .who{color:var(--green)}#log li.esc .who{color:var(--amber)}#log li.ship .who{color:var(--blue)}
+#log.min{height:32px;overflow:hidden}#log.min ul{display:none}
+.panel{grid-area:panel;background:linear-gradient(180deg,#1a1434,#0f0b20);color:var(--text);overflow-y:auto;border-left:1px solid var(--hair);padding:18px 20px calc(20px + env(safe-area-inset-bottom,0px));position:relative;min-width:0}
+.panel .close{display:block;position:absolute;right:10px;top:10px;font-family:var(--display);font-size:10px;letter-spacing:.1em;background:none;color:var(--mute);border:1px solid var(--hair);padding:5px 9px;cursor:pointer;border-radius:2px}
+.panel .close:hover{color:#fff;border-color:var(--gold)}
+#app.nopanel{grid-template-columns:1fr}#app.nopanel .panel{display:none}
+#reopen{display:none;position:absolute;right:12px;bottom:12px;z-index:4}#app.nopanel #reopen{display:block}
+.panel h2{font-family:var(--display);font-weight:800;font-size:17px;letter-spacing:.08em;margin:0 0 2px;color:var(--gold);line-height:1.4;text-wrap:balance}
+.panel .cls{font-size:11px;color:var(--mute);text-transform:uppercase;letter-spacing:.16em;margin-bottom:12px}
+.panel h4{font-family:var(--display);font-size:10px;letter-spacing:.22em;margin:16px 0 5px;color:var(--gold);opacity:.9;border-bottom:1px solid var(--hair);padding-bottom:3px}
+.panel p{margin:0 0 7px;font-size:14.5px}
+.panel ul{margin:0 0 6px;padding-left:18px}.panel li{margin:3px 0;font-size:14px}
+.panel code{font-family:ui-monospace,Menlo,monospace;background:rgba(255,255,255,.08);padding:0 4px;font-size:12.5px;border-radius:2px}
+.panel .kv{display:grid;grid-template-columns:auto 1fr;gap:3px 12px;font-size:13.5px;margin:4px 0}
+.panel .kv b{color:var(--mute);font-weight:normal;text-transform:uppercase;font-size:10px;letter-spacing:.14em;padding-top:3px}
+.panel .kv span{font-variant-numeric:tabular-nums}
+.panel .pix{display:block;image-rendering:pixelated;margin:0 0 10px;border:1px solid var(--hair);background:radial-gradient(circle at 50% 30%,#3a2f5e,#161228);padding:6px}
+.panel .bar{height:8px;background:rgba(255,255,255,.08);border:1px solid var(--hair);position:relative;margin:4px 0}
+.panel .bar i{position:absolute;left:0;top:0;bottom:0;background:var(--red)}
+.panel .tl{list-style:none;padding:0;margin:0}
+.panel .tl li{display:grid;grid-template-columns:auto 1fr;gap:8px;padding:3px 0;border-top:1px solid rgba(255,255,255,.06);font-size:13px}
+.panel .tl time{color:var(--mute);font-variant-numeric:tabular-nums;white-space:nowrap;font-size:12px}
+.panel .tl li.bad{color:#ff9a90}.panel .tl li.good{color:#a8f0a8}.panel .tl li.esc{color:#ffd28a}
+.panel a.link{color:var(--gold);text-decoration:underline;cursor:pointer}
+.panel .pill{display:inline-block;font-size:11px;letter-spacing:.06em;padding:1px 8px;border:1px solid var(--hair);margin:2px 4px 2px 0;border-radius:2px}
+.panel .pill.bad{border-color:var(--red);color:var(--red)}.panel .pill.good{border-color:var(--green);color:var(--green)}.panel .pill.warn{border-color:var(--amber);color:var(--amber)}
+.panel table{border-collapse:collapse;font-size:13px;width:100%}
+.panel td,.panel th{padding:3px 6px;border-bottom:1px solid rgba(255,255,255,.06);text-align:left;font-variant-numeric:tabular-nums}
+.panel th{font-size:10px;text-transform:uppercase;letter-spacing:.12em;color:var(--mute);font-weight:normal}
+.tiny{font-size:12px;color:var(--mute)}
+@media (max-width:900px){
+  #app{grid-template-columns:1fr;grid-template-areas:"hud" "stage"}
+  .hud{column-gap:10px;padding:6px 12px}.hud .stat{width:92px}.stats{overflow-x:auto}
+  .panel{position:fixed;left:0;right:0;bottom:0;max-height:62%;border-left:0;border-top:1px solid var(--gold2);box-shadow:0 -12px 30px rgba(0,0,0,.6);transform:translateY(105%);transition:transform .25s;z-index:5;padding:14px 16px}
+  .panel.open{transform:none}
+  .panel .close{background:var(--gold2);color:#fff;border:0}
+  #log{height:104px}.legend{max-width:75%}
+}
+@media (prefers-reduced-motion:reduce){.panel{transition:none}}
+</style>
+
+<div id="app">
+  <header class="hud">
+    <h1>REALM OF DO-IT <span class="mode" id="mode">…</span></h1>
+    <div class="stats">
+    <div class="stat" style="width:150px"><b id="h-clock">—</b><span id="h-clock-l">chronicle time</span></div>
+    <div class="stat" id="h-exec"><b>—</b><span>executor</span></div>
+    <div class="stat" id="h-lane"><b>—</b><span>lane</span></div>
+    <div class="stat" id="h-flight"><b>—</b><span>in flight</span></div>
+    <div class="stat" id="h-shelf"><b>—</b><span>shelf</span></div>
+    <div class="stat" id="h-esc"><b>—</b><span>ravens</span></div>
+    <div class="stat" id="h-ship"><b>—</b><span>shipped</span></div>
+    <div class="stat" id="h-fail"><b>—</b><span>fallen</span></div>
+    </div>
+    <div class="row">
+    <div class="ctl">
+      <button class="btn live" id="b-live" aria-label="Return to live">LIVE</button>
+      <button class="btn" id="b-play" aria-label="Play or pause">PAUSE</button>
+      <button class="btn spd" data-s="60">1m/s</button>
+      <button class="btn spd on" data-s="180">3m/s</button>
+      <button class="btn spd" data-s="720">12m/s</button>
+      <button class="btn" id="b-charters">CHARTERS</button>
+      <button class="btn" id="b-yitzy" style="border-color:#7fc4ff;color:#bfe2ff">YITZY'S WORLD</button>
+      <button class="btn" id="b-omens">OMENS</button>
+      <button class="btn" id="b-census">CENSUS</button>
+      <button class="btn" id="b-help">GUIDE</button>
+    </div>
+    <div class="scrub"><small id="s-a">—</small><input type="range" id="scrub" min="0" max="1000" value="0" aria-label="Scrub chronicle time"><small id="s-b">—</small></div>
+    </div>
+  </header>
+  <div class="stage">
+    <div class="view"><canvas id="map"></canvas><div id="status">WAKING THE REALM<small>fetching the ledger…</small></div><div id="tip"></div><div class="legend" id="legend"></div><div class="omens" id="omens"></div>
+      <button class="btn" id="reopen">CODEX ▸</button><div id="bubble"><span class="tag" id="bb-tag"></span><div class="box" id="bb-box"></div></div><div id="dossier" hidden></div></div>
+    <div id="log"><h3><span>CHRONICLE</span><button id="log-min" aria-label="Minimise log">hide</button></h3><ul id="log-ul"></ul></div>
+  </div>
+  <aside class="panel" id="panel" aria-live="polite"><button class="close" id="p-close">CLOSE</button><div id="p-body"></div></aside>
+</div>
+
+<script id="ledger" type="application/json">/*__DATA__*/</script>
+<script>
+'use strict';
+const W = 1280, H = 800;
+function status(t,sub,err){const s=document.getElementById('status');if(!s)return;if(t==null){s.style.display='none';return;}s.style.display='block';s.className=err?'err':'';s.innerHTML=t+(sub?'<small>'+sub+'</small>':'');}
+window.addEventListener('error',e=>status('SOMETHING BROKE',(e.message||'')+' · '+(e.filename||'').split('/').pop()+':'+e.lineno,true));
+window.addEventListener('unhandledrejection',e=>status('SOMETHING BROKE',String(e.reason&&e.reason.message||e.reason),true));
+const $ = id => document.getElementById(id);
+const REDUCED = matchMedia('(prefers-reduced-motion: reduce)').matches;
+const toMs = t => { if (!t) return 0; if (/^\d\d-\d\d T?/.test(t) || /^\d\d-\d\dT/.test(t)) { const m = /^(\d\d)-(\d\d)T(\d\d):(\d\d)/.exec(t); return Date.UTC(2026,+m[1]-1,+m[2],+m[3],+m[4]); } const v = Date.parse(t); return isNaN(v) ? 0 : v; };
+const fmt = ms => { const d = new Date(ms); const p = n => String(n).padStart(2,'0'); return `${p(d.getUTCMonth()+1)}-${p(d.getUTCDate())} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}`; };
+const fmtDur = ms => { const m = Math.round(ms/60000); if (m < 60) return m + ' min'; const h = Math.floor(m/60); return h + 'h ' + (m%60) + 'm'; };
+const fmtAge = ms => { const m = Math.max(0,Math.round(ms/60000)); if (m < 60) return String(m).padStart(2,'0') + 'm'; const h = Math.floor(m/60); return h + 'h' + String(m%60).padStart(2,'0'); };
+const kTok = n => n == null ? '?' : (n >= 1e6 ? (n/1e6).toFixed(1)+'M' : Math.round(n/1000)+'k');
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const roleOf = sp => sp ? sp.split('-').slice(1,-1).join('-') : null;
+const actorRole = a => !a ? null : (a === 'operator' || a.startsWith('L-operator')) ? 'operator' : roleOf(a);
+
+/* ---------------- roles, places, codex ---------------- */
+const MODEL = {thinker:'Opus 5.5',planner:'Opus 5.5',executor:'Sonnet 5',relay:'Sonnet 5','spec-writer':'Sonnet 5','spec-auditor':'Fable 5.1',builder:'Sonnet 5',grader:'Sonnet 5',reviewer:'Sonnet 5','plan-auditor':'Fable 5.1',probe:'Sonnet 5',research:'Haiku 4.5','reuse-scout':'Sonnet 5','charter-reviewer':'Opus 5.5',operator:'Human'};
+let CAP = {'spec-writer':30,'spec-auditor':15,builder:90,grader:15,reviewer:30,'plan-auditor':15,research:5,'reuse-scout':15,'charter-reviewer':30,probe:120};
+const WORK = {'spec-writer':'scriptorium','spec-auditor':'chapel','plan-auditor':'chapel',probe:'probehut',research:'burrow','reuse-scout':'ranger',builder:'forge',grader:'court',reviewer:'inn','charter-reviewer':'gate',thinker:'observatory',planner:'maphall',executor:'tower',relay:'docks',operator:'keep'};
+const DISPATCHER = {'spec-writer':'maphall','spec-auditor':'maphall','plan-auditor':'maphall',probe:'maphall',research:'maphall','reuse-scout':'maphall',builder:'tower',grader:'tower',reviewer:'tower','charter-reviewer':'tower'};
+const ROLE_NAME = {thinker:'Thinker',planner:'Planner',executor:'Executor',relay:'Relay ferryman','spec-writer':'Spec-writer','spec-auditor':'Spec-auditor',builder:'Builder',grader:'Grader',reviewer:'Reviewer','plan-auditor':'Plan-auditor',probe:'Probe',research:'Research','reuse-scout':'Reuse-scout','charter-reviewer':'Charter-reviewer',operator:'Operator'};
+const PAL = {
+  thinker:{h:'#6a4fc0',s:'#f3cfa6',R:'#8d6ee8',r:'#5a3fae',b:'#e6c46a',k:'#2a2038',p:'#fff3b0'},
+  planner:{h:'#2b7f8c',s:'#f3cfa6',R:'#39aab8',r:'#1f6e78',b:'#e6c46a',k:'#2a2038',p:'#efe6d2'},
+  executor:{h:'#9a2a1c',s:'#f3cfa6',R:'#d9524a',r:'#9a2f28',b:'#e6c46a',k:'#2a2038',p:'#e6c46a'},
+  relay:{h:'#4a3420',s:'#dcae82',R:'#7d5a35',r:'#553a20',b:'#c9a86a',k:'#2a2038',p:'#c9a86a'},
+  'spec-writer':{h:'#2c4fa8',s:'#f3cfa6',R:'#4a7ce0',r:'#2f52a8',b:'#efe6d2',k:'#2a2038',p:'#ffffff'},
+  'spec-auditor':{h:'#585870',s:'#1a1428',R:'#7a7a96',r:'#4e4e66',b:'#a97cff',k:'#2a2038',p:'#c9b6ff',hood:true},
+  'plan-auditor':{h:'#6a5a30',s:'#1a1428',R:'#9a844a',r:'#6a5a30',b:'#e6c46a',k:'#2a2038',p:'#e6c46a',hood:true},
+  builder:{h:'#7a4a1e',s:'#ecbd95',R:'#b8763a',r:'#7a4a1e',b:'#3b2a1a',k:'#2a2038',p:'#a8b0c4'},
+  grader:{h:'#3a2a6e',s:'#f3cfa6',R:'#6b4bb8',r:'#48318a',b:'#1a1428',k:'#2a2038',p:'#c9a86a',blind:true},
+  reviewer:{h:'#2a6e3a',s:'#dcae82',R:'#48b062',r:'#2f7a42',b:'#e6c46a',k:'#2a2038',p:'#ffd36b'},
+  probe:{h:'#8a6a2a',s:'#ecbd95',R:'#c9a25a',r:'#8a6a2a',b:'#3b2a1a',k:'#2a2038',p:'#7fc4ff'},
+  research:{h:'#6b4a2a',s:'#ecbd95',R:'#9a7a4a',r:'#6b4a2a',b:'#c9a86a',k:'#2a2038',p:'#efe6d2'},
+  'reuse-scout':{h:'#3a5a2a',s:'#dcae82',R:'#5c8a42',r:'#3a5a2a',b:'#b8763a',k:'#2a2038',p:'#c9a86a'},
+  'charter-reviewer':{h:'#8a8fa0',s:'#f3cfa6',R:'#c4cad8',r:'#8a90a4',b:'#d9524a',k:'#2a2038',p:'#e6c46a'},
+  operator:{h:'#e6c46a',s:'#f3cfa6',R:'#a8302a',r:'#6e1e1a',b:'#e6c46a',k:'#2a2038',p:'#fff'},
+  maker:{h:'#2a2a30',s:'#f3cfa6',R:'#3a6ea8',r:'#274d78',b:'#e6c46a',k:'#2a2038',p:'#ffffff'},
+};
+const BODY = ['.....hhhh.....','....hhhhhh....','...hhhhhhhh...','...hhhhhhhh...','...hssssssh...','...sseeeess...','...ssssssss...','....ssssss....','.....ssss.....','....RRRRRR....','...RRRRRRRR...','..rRRRRRRRRr..','..rRRRRRRRRr..','..sRRRRRRRRs..','...RbbbbbbR...','...rrrrrrrr...','...rrrrrrrr...','...rrrrrrrr...','...rr....rr...','...rr....rr...','...kk....kk...','..kkk....kkk..'];
+const LEGS = [null, ['..rr.....rr...','..rr......rr..','..kk......kk..','.kkk......kkk.'], ['....rr..rr....','....rr..rr....','....kk..kk....','...kkk..kkk...']];
+const EYE = {5:'...sseeeess...'};
+const PROPS = { hammer:['..ggg','..ggg','..gg.','...b.','...b.','...b.','...b.'], quill:['....w','...w.','..w..','.w...','w....','b....','.....'], gavel:['ggg..','ggg..','.b...','.b...','.b...','.bbb.','.....'], lantern:['..y..','.yyy.','.yyy.','.yyy.','..y..','.....','.....'], map:['wwwww','wbwbw','wwbww','wbwbw','wwwww','.....','.....'], bell:['..y..','.yyy.','.yyy.','yyyyy','..y..','.....','.....'], pole:['b....','b....','b....','b....','b....','b....','b....'], star:['..y..','.yyy.','yyyyy','.yyy.','y...y','.....','.....'], net:['.bbb.','b...b','b...b','.bbb.','..w..','..w..','..w..'], bow:['b....','.b...','..b..','.b...','b....','.....','.....'], shield:['.yyy.','yyyyy','yyyyy','.yyy.','..y..','.....','.....'], crown:['y.y.y','yyyyy','yyyyy','.....','.....','.....','.....'], eye:['.www.','wbbbw','wbybw','wbbbw','.www.','.....','.....'], spade:['..b..','.bbb.','bbbbb','..w..','..w..','..w..','.....'] };
+const ROLE_PROP = {thinker:'star',planner:'map',executor:'bell',relay:'pole','spec-writer':'quill','spec-auditor':'eye','plan-auditor':'eye',builder:'hammer',grader:'gavel',reviewer:'lantern',probe:'net',research:'spade','reuse-scout':'bow','charter-reviewer':'shield',operator:'crown',maker:'hammer'};
+const GLYPHS = {check:['....g','...gg','g.gg.','ggg..','.g...'], cross:['r...r','.r.r.','..r..','.r.r.','r...r'], q:['.yyy.','y...y','...y.','..y..','..y..'], dots:['.....','.....','w.w.w','.....','.....'], zz:['wwww.','...w.','..w..','.w...','wwww.'], scroll:['wwwww','w...w','wwwww','w...w','wwwww'], skull:['.www.','wwwww','wbwbw','wwwww','.w.w.']};
+const GC = {g:'#8fe08f',r:'#ff6a5c',y:'#ffd36b',w:'#ffffff',b:'#1a1428'};
+function shade(hex,d){const n=parseInt(hex.slice(1),16);const f=v=>Math.max(0,Math.min(255,v+d));return '#'+[(n>>16)&255,(n>>8)&255,n&255].map(v=>f(v).toString(16).padStart(2,'0')).join('');}
+const SP = 3, SW = 14*SP+18, SH = 22*SP;
+const spriteCache = new Map();
+function makeSprite(role, frame, ghost) {
+  const key = role+frame+(ghost?'g':''); if (spriteCache.has(key)) return spriteCache.get(key);
+  const p = PAL[role] || PAL.builder; const rows = BODY.slice(); if (frame) { const L = LEGS[frame]; rows[18]=L[0]; rows[19]=L[1]; rows[20]=L[2]; rows[21]=L[3]; }
+  const c = document.createElement('canvas'); c.width = SW+6; c.height = SH+6; const x = c.getContext('2d');
+  const col = {h:p.h, s:p.s, e:'#1a1428', R:p.R, r:p.r, b:p.b, k:p.k};
+  if (p.hood) { col.s = '#1a1428'; col.e = p.p; }
+  const px = (i,j,color) => { x.fillStyle = color; x.fillRect((i+1)*SP+3, j*SP+3, SP, SP); };
+  // silhouette outline
+  for (let j=0;j<22;j++) for (let i=0;i<14;i++) { let ch = rows[j][i]; if (ch==='.') continue; x.fillStyle = 'rgba(14,10,28,.6)'; for (const [dx,dy] of [[-1,0],[1,0],[0,-1],[0,1]]) x.fillRect((i+1)*SP+3+dx*SP*0.6, j*SP+3+dy*SP*0.6, SP, SP); }
+  for (let j=0;j<22;j++) for (let i=0;i<14;i++) { let ch = rows[j][i]; if (ch==='.') continue;
+    if (p.hood && j>=4 && j<=8 && (i<=3 || i>=10)) ch = 'h';
+    if (p.hood && j===4) ch = 'h';
+    if (p.blind && j===5 && i>=3 && i<=10) ch = 'b';
+    let color = col[ch]; if (ghost) color = j%2 ? '#d6ddff' : '#c2ccf5';
+    // simple shading: left lit, right shadowed on robe/hair
+    if (!ghost && (ch==='R'||ch==='h') && i>=9) color = shade(color,-22);
+    if (!ghost && ch==='R' && i<=4) color = shade(color,14);
+    px(i,j,color); }
+  if (!ghost) { const g = PROPS[ROLE_PROP[role]]; if (g) { const pc = {g:'#a8b0c4',b:'#3b2a1a',w:p.p,y:p.p}; for (let j=0;j<7;j++) for (let i=0;i<5;i++) { const ch=g[j][i]; if (ch==='.') continue; x.fillStyle = pc[ch]||p.p; x.fillRect((i+16)*SP+3, (j+9)*SP+3, SP, SP); } } }
+  if (ghost) x.globalAlpha = 1;
+  spriteCache.set(key,c); return c;
+}
+function drawGlyph(ctx,name,x,y,S=3){const g=GLYPHS[name];if(!g)return;for(let j=0;j<5;j++)for(let i=0;i<5;i++){const ch=g[j][i];if(ch==='.')continue;ctx.fillStyle=GC[ch];ctx.fillRect(x+i*S,y+j*S,S,S);}}
+const MON = {
+  wraith:{name:'Timeout Wraith',rows:['..wwww..','.wwwwww.','.wbwwbw.','.wwwwww.','wwwwwwww','w.wwww.w','..w..w..','.w....w.'],c:{w:'#b8c0e8',b:'#1a1428'}},
+  ghost:{name:'Unserved Ghost',rows:['..wwww..','.wwwwww.','.wbwwbw.','.wwwwww.','.wwwwww.','.wwwwww.','.w.ww.w.','........'],c:{w:'#e6f0ff',b:'#4a5aa8'}},
+  slime:{name:'Contamination Slime',rows:['........','...gg...','..gggg..','.gbggbg.','.gggggg.','gggggggg','gggggggg','.g.gg.g.'],c:{g:'#8fe04f',b:'#1a1428'}},
+  gargoyle:{name:'Refusal Gargoyle',rows:['s.....s.','ss...ss.','.ssssss.','.srssrs.','.ssssss.','..ssss..','.ss..ss.','ss....ss'],c:{s:'#8a8fa0',r:'#ff5e52'}},
+  reaper:{name:'SIGTERM Reaper',rows:['..kkkk..','.kkkkkk.','.kwkkwk.','.kkkkkk.','kkkkkkkk','.kkkkkk.','..k..k..','........'],c:{k:'#2a2038',w:'#ff5e52'}},
+};
+const monCache = new Map();
+function monsterSprite(k){if(monCache.has(k))return monCache.get(k);const m=MON[k],S=5,c=document.createElement('canvas');c.width=8*S;c.height=8*S;const x=c.getContext('2d');for(let j=0;j<8;j++)for(let i=0;i<8;i++){const ch=m.rows[j][i];if(ch==='.')continue;x.fillStyle=m.c[ch];x.fillRect(i*S,j*S,S,S);}monCache.set(k,c);return c;}
+function monsterFor(why){const w=(why||'').toLowerCase();if(w.includes('unserved'))return 'ghost';if(w.includes('timeout')||w.includes('timed out'))return 'wraith';if(w.includes('contamin'))return 'slime';if(w.includes('sigterm')||w.includes('killed'))return 'reaper';return 'gargoyle';}
+
+const PLACES = {
+  keep:{n:"Operator's Keep",x:50,y:70,w:180,h:150,kind:'castle',yard:{x:140,y:240},wins:[[84,140],[196,140]]},
+  observatory:{n:"Thinker's Observatory",x:300,y:40,w:120,h:180,kind:'observatory',yard:{x:360,y:240},wins:[[360,150]]},
+  maphall:{n:"Planner's Map Hall",x:500,y:80,w:190,h:140,kind:'hall',yard:{x:595,y:240},wins:[[530,170],[595,170],[660,170]]},
+  scriptorium:{n:'Scriptorium',x:770,y:90,w:160,h:130,kind:'timber',yard:{x:850,y:240},wins:[[800,170],[900,170]]},
+  chapel:{n:'Audit Chapel',x:1000,y:50,w:130,h:170,kind:'chapel',yard:{x:1065,y:240},wins:[[1065,150]]},
+  outer:{n:'The Outer Lands',x:1150,y:0,w:130,h:400,kind:'outer'},
+  probehut:{n:"Probe's Camp",x:1170,y:300,w:80,h:60,kind:'tent',yard:{x:1200,y:385},wins:[]},
+  burrow:{n:'Research Cellar',x:700,y:330,w:90,h:50,kind:'cellar',yard:{x:745,y:395},wins:[]},
+  ranger:{n:"Reuse-scout's Post",x:900,y:290,w:80,h:90,kind:'post',wins:[],yard:{x:940,y:400}},
+  docks:{n:'The Ferry (seat)',x:500,y:400,w:100,h:90,kind:'docks',yard:{x:550,y:350},wins:[]},
+  tower:{n:"Executor's Watchtower",x:590,y:540,w:100,h:150,kind:'tower',yard:{x:640,y:720},wins:[[640,600]]},
+  forge:{n:"Builders' Forge",x:230,y:560,w:170,h:120,kind:'forge',yard:{x:315,y:710},wins:[[262,640],[368,640]]},
+  court:{n:"Grader's Court",x:400,y:690,w:150,h:90,kind:'court',yard:{x:475,y:645},wins:[]},
+  inn:{n:"Reviewer's Inn",x:760,y:660,w:140,h:110,kind:'timber',yard:{x:830,y:640},wins:[[790,730],[870,730]]},
+  gate:{n:'Merge Gate',x:930,y:540,w:110,h:120,kind:'gate',yard:{x:985,y:690},wins:[]},
+  harbor:{n:'Deploy Harbor',x:1060,y:680,w:200,h:100,kind:'harbor',wins:[]},
+  town:{n:'Prod Town',x:1070,y:470,w:200,h:180,kind:'town',yard:{x:1100,y:660},wins:[]},
+  chronicle:{n:'The Great Chronicle',x:60,y:560,w:120,h:160,kind:'obelisk',yard:{x:120,y:740},wins:[]},
+};
+for (const k in PLACES) PLACES[k].id = k;
+const CX = {
+ thinker:{quest:'Turn one topic into a charter: requirements only, five sections. Never execution shape.',why:'v1 charters were a requirements document and an implementation plan at once, audited as neither (D1). Splitting what from how lets the charter-set audit and the plan audit each check one thing. Specs never come from a Thinker.',how:['Started by <code>doit think &lt;topic&gt;</code>, ended by <code>--land</code> or <code>--discard</code>.','Reads the ledger, goals, ADRs and the board. May read code to check a claim; never edits, commits or builds.','<code>--land</code> fires audit #0, the charter-set stage of the plan-auditor, and the Thinker claims and serves that one seat packet.','Relays operator rulings as <code>decision</code> events; triages the brief inbox.'],sees:'Goal, charters, ADRs, the board, code read-only.',blind:'Nothing structural. It spawns nothing.',tip:'Operator rulings enter the ledger here; most decision events are written from Thinker panes.',ref:'§3.3 · agents/thinker.md'},
+ planner:{quest:'Take one charter, probe it if it rests on an unexamined external, write ONE plan document, run ONE Fable audit, commission one spec-writer per slot plus its single audit round, then clear.',why:'One charter is one context (D80). The Planner has no learning mechanism, so nothing comes back to it and its rationale is stripped from every packet, which keeps the auditors blind. Never plan charter N+2 before N has landed.',how:['Standing pane started by <code>doit up</code>.','<code>doit alloc</code>, <code>doit packet</code>, <code>doit dispatch --detach</code>: a seat packet and a forked waiter.','Claims and serves its own packets: <code>claim.sh</code>, an Agent-tool sub-agent, <code>stamp.sh</code>.','Hands specs to the Executor via <code>spec-handover</code>. There is no return path.'],sees:'The charter, the repo read-only, research and probe residue.',blind:'Never reads a spec it commissioned.',tip:'Wall-clock is queue latency, not model time. Specs wait on the shelf a median of 48 min before a builder takes them.',ref:'§3.5 · agents/planner.md'},
+ executor:{quest:'Fold the ledger, read the lane, take the next durable action on every actionable item: dispatch, grade, review, rework, merge, decide, close. Again within five minutes.',why:'Dumb and fast on purpose. The thing running unattended at 3am never reasons about decomposition and never holds an artifact. Stateless by construction: kill it, restart it, nothing is lost.',how:['<code>doit states</code> is the pass: run it, act, run it again. Each pass appends a <code>tick</code> with the lane size.','Every action is a ledger append or a detached dispatch whose wrapper writes one.','Runs <code>merge-gate</code> before <code>--no-ff</code>; deploys through a serial script; closes a charter in three gated steps.','Rework never bounces to the Planner.'],sees:'The charter and the Plan. Cards, verdicts, summaries, the spec.',blind:'Never a diff, a log, or a file under a worktree.',tip:'A tick gap over five minutes means the pane is dead; the launcher restarts it. The lane has never drained.',ref:'§3.9 · D117 · agents/executor.md'},
+ relay:{quest:'Claim, serve, stamp. Turn every unclaimed seat packet into a served sub-agent, oldest first, and end when nothing unclaimed remains.',why:'All tokens come from the seat, never a metered key. A subprocess with <code>--bare</code> cannot draw the seat, so an interactive pane has to press the button, and it must not be the Planner\'s charter work that waits.',how:['<code>claim.sh &lt;spawn&gt;</code>: non-zero means someone else has it, skip.','Read the packet, start a general-purpose sub-agent on the contract and packet.','<code>stamp.sh</code> records model, session, turns, duration and tokens, releasing the wrapper.'],sees:'Packets and command envelopes.',blind:'Never plans, never writes product code, never decides.',tip:'The wrapper gives up after 300 s unclaimed. The Unserved Ghost is a relay that was not running.',ref:'§4.2 · agents/relay.md'},
+ 'spec-writer':{quest:'Write one agent spec for one plan slot. Eleven required slots, eight pre-flight queries, typed acceptance criteria each with a review_path.',why:'A builder gets one context window and one commit; the spec is all it knows. Pre-flight kills specs that should not exist.',how:['Packet: charter extract, one plan slot, sibling <code>Produces:</code>, acquisition ADRs, probe residue, the builder capability envelope, the cost-path inventory.','Reads the code: a spec written blind to code is unbuildable.','Writes <code>content/spec-NNNN.md</code>, returns a summary object, never the body.'],sees:'Repo read access, the charter extract, neighbours\' interfaces.',blind:'Sibling slots\' internals and any prior audit rationale.',tip:'Highest-volume role and the one most often left unserved at the ferry.',ref:'§4.6·1 · agents/spec-writer.md'},
+ 'spec-auditor':{quest:'One blind audit round over one spec. A ranked fix list and one boolean, bad_cut. Never a verdict, never a second round.',why:'The writer applies the list and the spec dispatches (D24). Blind to the charter and the author\'s reasons so it audits the spec, not the story.',how:['Packet: spec path, repo, the mechanical pre-pass, calibration examples.','Spends the pass on what a grep cannot see: is each review_path a read-only observation that fails if the criterion is false?'],sees:'The spec and the repo.',blind:'The charter, the rationale, any prior audit. In the packet: <code>contamination: true</code>, run void, still charged.',tip:'Cheap and reliable: median 3 min, 4% failure.',ref:'§4.6·2 · D24 · agents/spec-auditor.md'},
+ builder:{quest:'Build one spec in one worktree on one branch, one commit, and return an output card that says what was built AND what was not.',why:'The only role that writes product code. The card carries no rationale because an explanation handed to the judge is gameable.',how:['Packet: spec path (never text), charter extract, <code>base_sha</code>, verify command and done-condition, sibling <code>Produces:</code>, parked findings, conflict list, ADR ids.','Verifies every identifier the spec hands it against live state before use.','Emits <code>build-started</code>, then <code>build-done</code> with DONE, BLOCKED or NEEDS_CONTEXT.'],sees:'Its worktree, the spec, extracts.',blind:'Other units\' specs, other branches, the fold, the grader\'s rubric. Never spawns, installs, touches main.',tip:'Median 15 min, p90 42 min, 90-minute cap. BLOCKED cards are mostly mis-dispatches.',ref:'§4.6·3 · agents/builder.md'},
+ grader:{quest:'Per-criterion verdicts on one build from a packet a script built. Never a terminal state, never a holistic score.',why:'<code>accepted</code> is derived by the fold, never stamped. Three verdict states: pass, violation, could-not-run.',how:['The packet strips author, model, branch, commit message, card prose and every builder argument.','Carries typed criteria, the card\'s rows as claims, the validator result, the verify command and exit code.','Exactly five git commands permitted.'],sees:'The product at HEAD, the spec\'s criteria.',blind:'The diff, the tree\'s history, the builder\'s reasons, who dispatched it.',tip:'Worst failure rate of any role: timeouts at the 15-minute cap and packet contamination.',ref:'§4.6·4 · §5.2 · agents/grader.md'},
+ reviewer:{quest:'Drive the deployed thing as a real user, per spec, with a read-only review account. Hold the verdict of record.',why:'A green build, a merged commit and a confirmed deploy show the fix exists; none show that prod did the thing. Never staging.',how:['Packet: done-condition, every criterion\'s review_path, structural pre-pass, fold metrics, review account with capability.','A browser for ui, a live-DB read for observed-data, the canonical endpoint for financial, a worktree shell for backend.','Returns depth <code>full</code> or <code>gates-only</code>.'],sees:'Prod, through the review account.',blind:'Never holds a credential that can delete data or spend money.',tip:'A run of gates-only reviews is a spec problem: the review_paths were not drivable.',ref:'§4.6·5 · agents/reviewer.md'},
+ 'plan-auditor':{quest:'Do these units add up to the whole they claim? Two stages: plan and charter-set.',why:'Composition failures are invisible per spec. Sees the charter as its subject, never the Planner\'s reasons for the cut.',how:['Script output is ground truth: overlaps (advisory), undefined seams, undecided shared shapes, coverage both directions, oversize units, acquisition per dependency.','Finds the seam nobody owns.'],sees:'The charter, the plan, the goal\'s done-condition.',blind:'The Planner\'s rationale.',tip:'Never failed in this ledger. The cheapest guard in the pipeline.',ref:'§4.6·6 · agents/plan-auditor.md'},
+ probe:{quest:'Run the smallest real path through the externals a charter rests on, on N real inputs, before the cut.',why:'A failed probe invalidates the cut and everything under it (D96). Never becomes the product.',how:['Packet: charter, named externals, N real inputs, scoped credentials, a run directory outside every repo, the paid-call wrapper with a spend cap.','No security, no robustness, no tests.'],sees:'The externals.',blind:'The cut or the Plan.',tip:'The most expensive role per run and the cheapest way to avoid a wrong cut.',ref:'§4.6·10 · agents/probe.md'},
+ research:{quest:'Answer one scoped question about a codebase, in a file, summary capped at twelve lines.',why:'The cheap dig. Most escalations are information that exists and should never reach anyone.',how:['One question, one named area, one write path. Find, do not infer.'],sees:'The repo.',blind:'The requester\'s hypothesis.',tip:'Both digs so far timed out at the 5-minute cap.',ref:'§4.6·7 · agents/research.md'},
+ 'reuse-scout':{quest:'One timeboxed search for something that already exists. A scored comparison, never a recommendation.',why:'May never be the reason something is adopted. Deliverables ship to paying clients, so the license gate is a hard block.',how:['<code>vet-dep</code> runs the gates keyless.','Previously rejected candidates are reported by ADR id.'],sees:'The need, the stack, the ADR trail.',blind:'The Planner\'s preference.',tip:'Rarely dispatched.',ref:'§6.6 · agents/reuse-scout.md'},
+ 'charter-reviewer':{quest:'At charter close, drive the charter\'s review_path live and read every card\'s not-built half together.',why:'Per-spec review cannot catch composition failures (§3.13, D99).',how:['Packet: the charter, every output card, the spec set, the sweep\'s fixpoint result, review account and browser.','<code>not-complete</code> sends the charter back to the sweep.'],sees:'The whole charter and everything built under it.',blind:'All rationale.',tip:'Every run so far returned not-complete: done-for-the-whole rests on owed production evidence.',ref:'§4.6·9 · agents/charter-reviewer.md'},
+ operator:{quest:'Write the Goal, rule on irreversible escalations, read the morning report.',why:'The operator is never on the critical path of a state transition (§1.7). A reversible escalation carries a default that fires at its deadline.',how:['Escalation is a ledger append with asks, blocks, default, deadline. It routes sub-agent → Executor → operator.','Only the operator may write a <code>correction</code> the fold honours.'],sees:'Everything.',blind:'By design, nothing waits on you unless it is irreversible.',tip:'Read the oldest raven first.',ref:'§1.7 · §4.9'},
+};
+const PX = {
+ keep:{title:"Operator's Keep",body:'Where the Goal is written and where ravens land. Each raven is an <code>escalation-blocking</code> or <code>question</code>; it flies back on a <code>decision</code> for the same subject. A burning beacon means something waits on a ruling.',driver:'Read the oldest raven first. Reversible escalations fire their default at the deadline.'},
+ observatory:{title:"Thinker's Observatory",body:'Charters are born here. A raised banner is a <code>charter-filed</code> event travelling to the Map Hall.',driver:'Charter titles are the done-for-the-whole in one sentence.'},
+ maphall:{title:"Planner's Map Hall",body:'One charter, one plan document, one Fable audit. Spec-writers, auditors, probes and research are dispatched from here as seat packets that walk down to the ferry.',driver:'A plan-written flag followed by spec-written scrolls is the healthy rhythm.'},
+ scriptorium:{title:'Scriptorium',body:'Spec-writers write here. Each finished scroll is a <code>spec-written</code> event and goes to the shelf at the Watchtower.',driver:'The tower shelf is the queue that costs wall-clock.'},
+ chapel:{title:'Audit Chapel',body:'The hooded ones on Fable, blind to rationale by packet construction, one round ever. Fix lists and one boolean, never verdicts.',driver:'A Contamination Slime here means a packet leaked the charter into a blind role.'},
+ outer:{title:'The Outer Lands',body:'Everything outside the code: a model\'s output, a third-party API, a data source\'s real shape. Only the Probe goes there.',driver:'A charter resting on an Outer Lands assumption with no probe is a guess.'},
+ probehut:{title:"Probe's Camp",body:'The thin real run. Its directory lives outside every repository.',driver:'Read the probe residue before approving a plan.'},
+ burrow:{title:'Research Cellar',body:'The cheap dig, on Haiku. One scoped question answered in a file.',driver:'Both digs timed out at 5 minutes. The cap is the bug.'},
+ ranger:{title:"Reuse-scout's Post",body:'Searches for something that already exists and runs the acquisition gates.',driver:'License gate failures are hard blocks.'},
+ docks:{title:'The Ferry (the seat)',body:'Every sub-agent is a seat packet: a file under <code>seat/</code> a standing pane must claim, serve and stamp. All tokens come from the seat.',driver:'A packet nobody claims for 300 s becomes an Unserved Ghost. That is a relay pane not running.'},
+ tower:{title:"Executor's Watchtower",body:'The bell rings on every <code>tick</code>. Scrolls at the door are specs written but not yet dispatched to a builder.',driver:'Time since the last bell (over 5 min: dead pane) and shelf depth.'},
+ forge:{title:"Builders' Forge",body:'One worktree per spec, one branch, one commit. The fire is lit while a builder works.',driver:'BLOCKED cards are usually mis-dispatches. Read the reason first.'},
+ court:{title:"Grader's Court",body:'The blindfolded judge. Verdicts per criterion in three states. <code>accepted</code> is computed by the fold.',driver:'A rising could-not-run rate is either a broken packet builder or a hedging judge.'},
+ inn:{title:"Reviewer's Inn",body:'Reviewers set out from here to drive prod as a real user with a read-only account.',driver:'gates-only in a row is a spec problem.'},
+ gate:{title:'Merge Gate',body:'<code>merge-gate</code> diffs the branch against main. Exit 0 pass, 1 violation, 2 could-not-run.',driver:'A red gate with an undetermined reason is git state, not code.'},
+ harbor:{title:'Deploy Harbor',body:'Deploy is a serial script that waits. Each <code>shipped</code> is a boat to Prod Town.',driver:'Shipped is not accepted; owed-evidence specs still owe a review on prod.'},
+ town:{title:'Prod Town',body:'The deployed thing. Every shipped spec lights one more window.',driver:'Green on staging is not proof.'},
+ chronicle:{title:'The Great Chronicle (the ledger)',body:'Append-only <code>events/*.jsonl</code>. Every state is derived from it, never stamped. Each spark flying here is one event.',driver:'The ledger is truth: <code>doit states</code>, <code>doit events &lt;subject&gt;</code>. Never edit it.'},
+};
+const MX = {
+ wraith:{body:'A run that hit its role cap. Builder 90, probe 120, spec-writer 30, reviewer 30, charter-reviewer 30, grader 15, auditors 15, research 5 minutes.',driver:'Graders die to this most.'},
+ ghost:{body:'A seat packet nobody claimed within 300 s. The sub-agent never ran; no tokens spent.',driver:'Start <code>doit relay</code>.'},
+ slime:{body:'A blind role found something in its packet it must never see and returned <code>contamination: true</code>. Void, still charged.',driver:'Rebuild the packet; the D120 refusal blocks retrying the identical one.'},
+ gargoyle:{body:'A pre-spend refusal by the dispatch wrapper: spec-shape, an open spec-writer, no <code>--path</code>, a D120 identical packet. Nothing spent.',driver:'Read the refusal reason; it names the fix.'},
+ reaper:{body:'Killed by SIGTERM: the pane serving it was ended or restarted mid-run.',driver:'Check whether the subject was re-dispatched.'},
+};
+const PACKET = {
+ 'spec-writer':['charter extract (requirement ids, constraints verbatim)','one plan slot','sibling Produces: signatures','acquisition ADRs, probe residue','builder capability envelope, cost-path inventory','write path content/spec-NNNN.md'],
+ 'spec-auditor':['spec path','mechanical pre-pass output','calibration examples','STRIPPED: charter, rationale, prior audits'],
+ 'plan-auditor':['the plan document or charter set','charter done-condition','script output: seams, overlaps, coverage','STRIPPED: Planner rationale'],
+ builder:['spec path (never text)','charter extract','base_sha','verify command + done-condition','sibling Produces:, parked findings, conflict list, ADR ids','STRIPPED: other specs, other cards, the fold'],
+ grader:['typed acceptance criteria','card rows per criterion, as claims','validator result','verify command + exit','STRIPPED: author, model, branch, commit message, card prose'],
+ reviewer:['done-condition','every criterion\'s review_path','structural pre-pass','fold metrics','review account','browser or worktree shell per criterion type'],
+ probe:['charter','named externals','N real inputs','scoped credentials','run dir + paid-call wrapper','STRIPPED: the cut, the Plan'],
+ research:['one question','one named area','write path','STRIPPED: the hypothesis'],
+ 'reuse-scout':['the need','the stack','plan slot','ADR trail','vet-dep','STRIPPED: Planner preference'],
+ 'charter-reviewer':['charter, all five sections','every output card','spec set','sweep fixpoint result','review account + browser','STRIPPED: all rationale'],
+};
+
+/* ---------------- data & sim state ---------------- */
+let DATA = null, EVENTS = [], T0 = 0, T1 = 0, LIVE = false;
+const S = { now:0, speed:180, playing:true, cursor:0, quiet:false, actors:new Map(), packets:[], effects:[], sparks:[], ravens:[], boats:[], shelf:new Map(), esc:new Map(), lastTick:null, lane:null, shipped:0, fails:0, done:0, failsBy:{}, spawnsBy:{}, doneBy:{}, subjectEvents:new Map(), log:[], gate:{flash:0,ok:true}, bell:0, verdicts:{ok:0,no:0}, reviews:{full:0,gates:0}, charters:new Map(), plans:new Set(), slotUse:{}, lastStates:null, recent:[], vanished:[], alarms:[], alarmT:0, focus:null };
+let qcount = 0;
+function subjectPush(s,e){if(!s)return;if(!S.subjectEvents.has(s))S.subjectEvents.set(s,[]);S.subjectEvents.get(s).push(e);}
+function placeSlot(pid){const p=PLACES[pid];if(!p||!p.yard)return{x:640,y:400};const used=S.slotUse[pid]||0;S.slotUse[pid]=used+1;const i=used%12;return{x:p.yard.x-110+(i%6)*44,y:p.yard.y+Math.floor(i/6)*40};}
+function releaseSlot(pid){if(S.slotUse[pid])S.slotUse[pid]--;}
+function pathLen(pts){let L=0;for(let i=1;i<pts.length;i++)L+=Math.abs(pts[i].x-pts[i-1].x)+Math.abs(pts[i].y-pts[i-1].y);return L;}
+function pathAt(pts,d){for(let i=1;i<pts.length;i++){const seg=Math.abs(pts[i].x-pts[i-1].x)+Math.abs(pts[i].y-pts[i-1].y);if(d<=seg||i===pts.length-1){const k=seg?Math.min(1,d/seg):1;return{x:pts[i-1].x+(pts[i].x-pts[i-1].x)*k,y:pts[i-1].y+(pts[i].y-pts[i-1].y)*k};}d-=seg;}return pts[pts.length-1];}
+function setPath(a,pts){a.path=pts;a.pathT=0;a.pathDur=Math.max(.2,pathLen(pts)/(REDUCED?1e9:170));}
+const roadY = pt => pt.y < 440 ? 330 : 640;
+const dedupe = arr => arr.filter((p,i)=>i===0||p.x!==arr[i-1].x||p.y!==arr[i-1].y);
+const toWork = (from,slot) => dedupe([from,{x:from.x,y:roadY(slot)===330?330:352},{x:640,y:roadY(slot)===330?330:352},{x:640,y:roadY(slot)},{x:slot.x,y:roadY(slot)},slot]);
+const toFerry = from => dedupe([from,{x:from.x,y:roadY(from)},{x:640,y:roadY(from)},{x:640,y:480}]);
+
+function reset(t){S.now=t;S.cursor=0;S.actors.clear();S.packets=[];S.effects=[];S.sparks=[];S.ravens=[];S.boats=[];S.shelf.clear();S.esc.clear();S.lastTick=null;S.lane=null;S.shipped=0;S.fails=0;S.done=0;S.failsBy={};S.spawnsBy={};S.doneBy={};S.subjectEvents.clear();S.log=[];S.verdicts={ok:0,no:0};S.reviews={full:0,gates:0};S.charters.clear();S.plans.clear();S.slotUse={};S.recent=[];S.vanished=[];S.alarms=[];$('log-ul').innerHTML='';}
+function seek(t){reset(T0);S.quiet=true;process(t);S.quiet=false;S.now=t;renderLog();if(DATA)computeOmens();}
+function addLog(e,cls,who,text){const item={ms:e.ms,cls,who,text,s:e.s||e.sp};S.log.push(item);if(S.log.length>80)S.log.shift();if(!S.quiet)renderLogItem(item);}
+function renderLog(){const ul=$('log-ul');ul.innerHTML='';for(const it of S.log.slice(-40))renderLogItem(it);}
+function renderLogItem(it){const ul=$('log-ul');const li=document.createElement('li');li.className=(it.cls||'')+(inFocus(it.s)?'':' dim');li.innerHTML=`<time>${fmt(it.ms).slice(6)}</time><span><span class="who">${esc(it.who)}</span> ${esc(it.text)}</span>`;li.onclick=()=>openSubject(it.s);ul.prepend(li);while(ul.children.length>40)ul.lastChild.remove();}
+function spawnActor(e,role){const sp=e.sp;if(!sp||S.actors.has(sp))return;const wp=WORK[role]||'tower';const slot=placeSlot(wp);const origin=PLACES[DISPATCHER[role]||'tower'];
+  const a={sp,role,subject:e.s,start:e.ms,x:470+(qcount++%6)*24,y:300,slot,wp,state:'queued',path:null,pathT:0,pathDur:1,bubble:null,bubbleT:0,until:e.ms+5*60000,prj:e.pr,claimed:e.cl?toMs(e.cl):null};
+  if(a.claimed&&a.claimed>a.start)a.until=Math.min(a.claimed,a.start+300000);
+  S.actors.set(sp,a);S.spawnsBy[role]=(S.spawnsBy[role]||0)+1;
+  if(S.quiet){a.state='working';a.x=slot.x;a.y=slot.y;}else if(origin&&origin.yard)S.packets.push({x:origin.yard.x,y:origin.yard.y,tx:550,ty:400,t:0,dur:.9,sp});}
+function finishActor(sp,ok,why){const a=S.actors.get(sp);if(!a)return;a.done=true;if(S.quiet){S.actors.delete(sp);releaseSlot(a.wp);return;}
+  if(ok){a.state='leaving';a.bubble='check';a.bubbleT=1.2;setPath(a,toFerry({x:a.x,y:a.y}));}
+  else{a.state='dying';a.bubble='skull';a.bubbleT=2.5;const k=monsterFor(why);S.effects.push({kind:'monster',m:k,x:a.x+34,y:a.y-10,t:0,dur:3,sp});}}
+function process(until){
+  while(S.cursor<EVENTS.length&&EVENTS[S.cursor].ms<=until){handle(EVENTS[S.cursor++]);}
+  for(const [sp,a] of S.actors){if(a.done)continue;const cap=(CAP[a.role]||30)*60000;if(until-a.start>cap*3){a.done=true;if(S.quiet){S.actors.delete(sp);releaseSlot(a.wp);}else{a.state='dying';a.bubble='q';a.bubbleT=2.5;addLog({ms:until,s:a.subject,sp},'bad',sp,`vanished: no spawn-done or spawn-failed was ever written for ${a.subject}`);}S.vanished.push({ms:until,sp});}}
+}
+function handle(e){const ty=e.ty;if(ty!=='tick')subjectPush(e.s,e);if(e.sp&&e.sp!==e.s)subjectPush(e.sp,e);
+  const spark=pid=>{if(S.quiet||S.sparks.length>160||REDUCED)return;const p=PLACES[pid];if(!p)return;S.sparks.push({x:p.x+p.w/2,y:p.y+p.h/2,t:0});};
+  const roleA=actorRole(e.a);
+  switch(ty){
+    case 'tick':S.lastTick=e.ms;S.lane=e.ln;if(!S.quiet&&!REDUCED)S.bell=1;break;
+    case 'spawn-started':{const r=e.r;if(!r||!WORK[r])break;spawnActor(e,r);addLog(e,'',e.sp,`sets out for the ${PLACES[WORK[r]].n}: ${e.s||'?'}`);spark(DISPATCHER[r]||'tower');break;}
+    case 'build-started':spawnActor(e,'builder');if(e.s)S.shelf.delete(e.s);addLog(e,'',e.sp,`takes ${e.s} to the forge`);spark('tower');break;
+    case 'spawn-done':{const r=e.r||roleOf(e.sp);S.done++;S.recent.push({ms:e.ms,ok:true});S.doneBy[r]=(S.doneBy[r]||0)+1;finishActor(e.sp,true);addLog(e,'good',e.sp,`returns from ${e.s}: ${e.dur?fmtDur(e.dur):'?'}, ${kTok(e.tok)} tokens${e.st?', '+e.st:''}`);spark(WORK[r]||'tower');break;}
+    case 'spawn-failed':{const r=e.r||roleOf(e.sp);S.fails++;S.recent.push({ms:e.ms,ok:false,why:e.why});S.failsBy[r]=(S.failsBy[r]||0)+1;const k=monsterFor(e.why);S.failsBy['_'+k]=(S.failsBy['_'+k]||0)+1;
+      if(!S.actors.has(e.sp)){const p=PLACES[WORK[r]||'tower'];if(!S.quiet)S.effects.push({kind:'monster',m:k,x:(k==='ghost'?540:p.yard?p.yard.x:p.x)+20,y:(k==='ghost'?400:p.yard?p.yard.y:p.y),t:0,dur:3,sp:e.sp});}else finishActor(e.sp,false,e.why);
+      addLog(e,'bad',e.sp,`fell to the ${MON[k].name}: ${e.why}`);break;}
+    case 'build-done':addLog(e,e.st==='DONE'?'good':'bad','Forge',`${e.s} ${e.st}${e.vx!=null?', verify exit '+e.vx:''}`);spark('forge');break;
+    case 'build-blocked':addLog(e,'bad',e.sp,`blocked on ${e.s}: ${e.why}`);break;
+    case 'verdict':if(e.ok)S.verdicts.ok++;else S.verdicts.no++;addLog(e,e.ok?'good':'bad','Court',`${e.s}: ${e.ok?'confirmed':'not confirmed'} on ${e.n} criteria${e.ca?', '+e.ca+' could not assess':''}`);if(!S.quiet)S.effects.push({kind:'glyph',g:e.ok?'check':'cross',x:475,y:670,t:0,dur:1.5});spark('court');break;
+    case 'review':if(e.d==='full')S.reviews.full++;else S.reviews.gates++;addLog(e,e.nb?'bad':'','Road',`${e.s} reviewed, depth ${e.d}, ${e.nb} blocking`);spark('inn');break;
+    case 'merge-gate-clean':S.gate={flash:S.quiet?0:2,ok:true};addLog(e,'good','Gate',`opens for ${e.s}`);spark('gate');break;
+    case 'merge-gate-rework':S.gate={flash:S.quiet?0:2,ok:false};addLog(e,'bad','Gate',`refuses ${e.s}: ${e.why||'rework'}`);spark('gate');break;
+    case 'shipped':S.shipped++;if(!S.quiet&&!REDUCED)S.boats.push({t:0,dur:3,s:e.s});addLog(e,'ship','Harbor',`${e.s} shipped to Prod Town${e.sha?' ('+e.sha+')':''}`);spark('harbor');break;
+    case 'deploy-failed':addLog(e,'bad','Harbor',`deploy failed for ${e.s}`);break;
+    case 'escalation-blocking':case 'question':{const list=S.esc.get(e.s)||[];list.push({ms:e.ms,why:e.why,a:e.a,df:e.df,dl:e.dl});S.esc.set(e.s,list);
+      if(!S.quiet&&!REDUCED){const from=PLACES[WORK[roleA]||'tower'];S.ravens.push({x:from.x+from.w/2,y:from.y,tx:140,ty:90,t:0,dur:1.8});}
+      addLog(e,'esc',e.a,`sends a raven about ${e.s}: ${e.why}`);break;}
+    case 'decision':if(S.esc.has(e.s)){S.esc.delete(e.s);if(!S.quiet&&!REDUCED){const to=PLACES[WORK[roleA]||'tower'];S.ravens.push({x:140,y:90,tx:to.x+to.w/2,ty:to.y,t:0,dur:1.8});}}addLog(e,'esc',e.a,`rules on ${e.s}: ${e.why}`);break;
+    case 'spec-written':S.shelf.set(e.s,e.ms);{const c=charterId(e.ch);if(c&&DATA){DATA.spec_charter[e.s]=c;if(!DATA.charters[c])DATA.charters[c]={project:e.pr};}}if(!S.quiet)S.packets.push({x:850,y:220,tx:700,ty:650,t:0,dur:1.5,scroll:true});addLog(e,'','Scriptorium',`${e.s} written: ${e.ac??'?'} criteria over ${e.fp??'?'} files`);spark('scriptorium');break;
+    case 'spec-killed':S.shelf.delete(e.s);addLog(e,'bad','Scriptorium',`${e.s} killed: ${e.why||''}`);break;
+    case 'charter-filed':S.charters.set(e.s,e.ti);if(DATA){DATA.charters[e.s]={...(DATA.charters[e.s]||{}),title:e.ti,project:e.pr,filed:e.t};}if(!S.quiet)S.packets.push({x:360,y:220,tx:595,ty:220,t:0,dur:1.2,banner:true});addLog(e,'ship','Observatory',`charter ${e.s} raised: ${e.ti}`);spark('observatory');break;
+    case 'charter-retracted':addLog(e,'bad','Observatory',`charter ${e.s} retracted: ${e.why||''}`);break;
+    case 'plan-written':S.plans.add(e.s);if(!S.quiet)S.packets.push({x:595,y:220,tx:1065,ty:220,t:0,dur:1.2,scroll:true});addLog(e,'','Map Hall',`plan written for ${e.s}`);spark('maphall');break;
+  }}
+
+/* ---------------- rendering: HD-2D ---------------- */
+const cv=$('map'),ctx=cv.getContext('2d');const wc=document.createElement('canvas');wc.width=W;wc.height=H;const g=wc.getContext('2d');
+let scale=1,ox=0,oy=0;
+function resize(){const r=cv.parentElement.getBoundingClientRect();const dpr=Math.min(1.75,devicePixelRatio||1);cv.width=Math.floor(r.width*dpr);cv.height=Math.floor(r.height*dpr);scale=Math.min(r.width/W,r.height/H);ox=(r.width-W*scale)/2;oy=(r.height-H*scale)/2;cv._dpr=dpr;}
+addEventListener('resize',resize);resize();if(window.ResizeObserver)new ResizeObserver(resize).observe(cv.parentElement);
+function mulberry(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};}
+const R = (c,x,y,w,h,col)=>{c.fillStyle=col;c.fillRect(x|0,y|0,w|0,h|0);};
+const STONE=['#8b957f','#96a08a','#7f8974','#a0aa94','#8a9380'], STONE_D='#5e6657', STONE_L='#b9c2ad';
+function cobbles(c,x,y,w,h,rnd,light=0){for(let j=y;j<y+h;j+=16)for(let i=x+((j/16)%2?8:0);i<x+w;i+=16){let col=STONE[Math.floor(rnd()*STONE.length)];if(light)col=shade(col,light);R(c,i,j,16,16,STONE_D);R(c,i+1,j+1,14,14,col);R(c,i+1,j+1,14,1,shade(col,18));R(c,i+1,j+1,1,14,shade(col,10));if(rnd()<.06)R(c,i+4,j+6,6,4,'#6f8a5c');}}
+function diamond(c,cx,cy,s,col){c.fillStyle=col;c.beginPath();c.moveTo(cx,cy-s);c.lineTo(cx+s,cy);c.lineTo(cx,cy+s);c.lineTo(cx-s,cy);c.closePath();c.fill();}
+function inlay(c,cx,cy){diamond(c,cx,cy,26,'#a9b39a');diamond(c,cx,cy,20,'#8e9a84');diamond(c,cx,cy,12,'#b4bea6');diamond(c,cx,cy,5,'#7d8a70');}
+function bricks(c,x,y,w,h,base,rnd,rows=11,bw=26){c.save();c.beginPath();c.rect(x,y,w,h);c.clip();R(c,x,y,w,h,shade(base,-40));for(let j=y;j<y+h;j+=rows){const off=((j-y)/rows)%2?bw/2:0;for(let i=x-bw+off;i<x+w;i+=bw){const col=shade(base,Math.floor(rnd()*18-9));R(c,i+1,j+1,bw-2,rows-2,col);R(c,i+1,j+1,bw-2,1,shade(col,22));R(c,i+1,j+1,1,rows-2,shade(col,14));R(c,i+bw-2,j+1,1,rows-2,shade(col,-18));if(rnd()<.05)R(c,i+3,j+rows-4,bw-8,2,'#6f8a5c');}}c.restore();}
+function timber(c,x,y,w,h,rnd){R(c,x,y,w,h,'#d9c9a3');for(let i=0;i<60;i++)R(c,x+rnd()*w,y+rnd()*h,3,2,'#cbb98f');const B='#4a3320';R(c,x,y,w,6,B);R(c,x,y+h/2-3,w,6,B);R(c,x,y+h-6,w,6,B);for(let i=x;i<=x+w-6;i+=Math.floor(w/4))R(c,i,y,6,h,B);R(c,x+w-6,y,6,h,B);c.strokeStyle=B;c.lineWidth=5;for(let i=x;i<x+w-6;i+=Math.floor(w/4)){c.beginPath();c.moveTo(i+6,y+6);c.lineTo(i+Math.floor(w/4),y+h/2-3);c.stroke();}}
+function roof(c,x,y,w,depth,col,rnd){const top=y-depth;c.fillStyle=shade(col,-30);c.beginPath();c.moveTo(x-10,y+4);c.lineTo(x+w+10,y+4);c.lineTo(x+w-6,top);c.lineTo(x+6,top);c.closePath();c.fill();
+  c.save();c.beginPath();c.moveTo(x-8,y);c.lineTo(x+w+8,y);c.lineTo(x+w-8,top+2);c.lineTo(x+8,top+2);c.closePath();c.clip();R(c,x-8,top,w+16,depth+2,col);
+  for(let j=top+4;j<y;j+=8){const k=(j-top)/depth;const lx=x+8-16*k, rx=x+w-8+16*k;R(c,lx,j,rx-lx,1,shade(col,-26));for(let i=lx+((j/8)%2?8:0);i<rx;i+=16)R(c,i,j+1,1,7,shade(col,-14));if(rnd()<.3)R(c,lx+rnd()*(rx-lx),j+2,6,4,shade(col,16));}
+  c.restore();R(c,x+6,top-2,w-12,4,shade(col,28));R(c,x-10,y,w+20,4,'rgba(0,0,0,.35)');}
+function archWin(c,x,y,w,h,lit){R(c,x-2,y-2,w+4,h+4,'#2a2a30');c.fillStyle='#2a2a30';c.beginPath();c.arc(x+w/2,y,w/2+2,Math.PI,0);c.fill();c.fillStyle=lit?'#ffcd7a':'#3a3450';c.beginPath();c.arc(x+w/2,y,w/2,Math.PI,0);c.fill();R(c,x,y,w,h,lit?'#ffcd7a':'#3a3450');R(c,x+w/2-1,y-w/2,2,h+w/2,'#2a2a30');R(c,x,y+h/2-1,w,2,'#2a2a30');if(lit){R(c,x+2,y+2,3,3,'#fff1c8');}}
+function door(c,x,y,w,h){R(c,x-3,y,w+6,h,'#2a2420');c.fillStyle='#2a2420';c.beginPath();c.arc(x+w/2,y,w/2+3,Math.PI,0);c.fill();c.fillStyle='#5a3d22';c.beginPath();c.arc(x+w/2,y,w/2,Math.PI,0);c.fill();R(c,x,y,w,h,'#5a3d22');for(let i=x+4;i<x+w;i+=6)R(c,i,y-w/2+4,1,h+w/2-4,'#3f2a16');R(c,x+w-8,y+h/2,3,3,'#c9a86a');}
+function balustrade(c,x,y,w){R(c,x,y,w,6,'#a9b39a');R(c,x,y+6,w,2,'#5e6657');for(let i=x;i<x+w;i+=22){R(c,i,y+8,22,16,'#8b957f');c.fillStyle='#4a5044';c.beginPath();c.arc(i+11,y+16,6,Math.PI,0);c.fill();R(c,i+5,y+16,12,8,'#4a5044');R(c,i+20,y+6,2,18,'#5e6657');}R(c,x,y+24,w,3,'#5e6657');}
+function wallFace(c,x,y,w,h,rnd){bricks(c,x,y,w,h,'#7a8470',rnd,10,24);R(c,x,y,w,3,'#b9c2ad');R(c,x,y+h-3,w,3,'#3f463a');}
+function stairs(c,x,y,w,h){const n=Math.floor(h/9);for(let i=0;i<n;i++){const yy=y+i*9;R(c,x-i,yy,w+2*i,6,'#aeb8a2');R(c,x-i,yy+6,w+2*i,3,'#4a5044');}R(c,x-n,y-4,4,h+4,'#8b957f');R(c,x+w+n-4,y-4,4,h+4,'#8b957f');}
+function bush(c,x,y,r,rnd){for(let i=0;i<5;i++){const dx=(rnd()-.5)*r*1.4,dy=(rnd()-.5)*r*.8;c.fillStyle=['#3e7a34','#4f9440','#6bb04e'][i%3];c.beginPath();c.arc(x+dx,y+dy,r*.55,0,7);c.fill();}for(let i=0;i<6;i++){c.fillStyle='#8fd86a';c.fillRect(x+(rnd()-.5)*r*1.3,y+(rnd()-.5)*r*.7,3,2);}}
+function planter(c,x,y,w,h,rnd){R(c,x-4,y-4,w+8,h+8,'#5e6657');R(c,x-2,y-2,w+4,h+4,'#a9b39a');R(c,x,y,w,h,'#3d6b34');for(let i=0;i<w*h/60;i++)R(c,x+rnd()*w,y+rnd()*h,3,2,'#4f8a42');for(let i=0;i<w/48;i++)bush(c,x+24+i*48,y+h/2,18,rnd);for(let i=0;i<w/16;i++){c.fillStyle=['#f6f0d8','#e7a0c8','#ffd36b'][i%3];c.fillRect(x+rnd()*w,y+rnd()*h,3,3);}}
+function lamp(c,x,y){R(c,x-2,y-30,4,30,'#2a2a30');R(c,x-6,y-2,12,4,'#2a2a30');R(c,x-5,y-40,10,12,'#2a2a30');R(c,x-3,y-38,6,8,'#ffd36b');}
+const rnd0=mulberry(9);
+const LAMPS=[[110,342],[300,342],[470,342],[760,342],[1000,342],[200,654],[540,654],[900,654],[1040,654]];
+const PLANTERS=[[150,290,130,44],[830,335,110,36],[190,735,180,36],[600,738,120,36]];
+const bg=document.createElement('canvas');bg.width=W;bg.height=H;
+(function paintBg(){const c=bg.getContext('2d');const rnd=mulberry(3);
+  cobbles(c,0,0,W,410,rnd);cobbles(c,0,520,W,280,rnd,-6);
+  // roads: lighter strip
+  cobbles(c,0,318,W,28,rnd,22);cobbles(c,0,628,W,28,rnd,22);cobbles(c,626,346,28,64,rnd,22);cobbles(c,626,520,28,110,rnd,22);
+  for(const x of [140,360,595,850,1065])inlay(c,x,332);for(const x of [315,475,830,985])inlay(c,x,642);inlay(c,640,700);
+  // outer lands: darker stone with fog
+  const og=c.createLinearGradient(1150,0,1280,0);og.addColorStop(0,'rgba(60,45,90,0)');og.addColorStop(1,'rgba(60,45,90,.85)');c.fillStyle=og;c.fillRect(1140,0,140,410);
+  for(let i=0;i<40;i++)R(c,1150+rnd()*130,rnd()*400,10,4,'rgba(30,20,50,.5)');
+  for(const p of PLANTERS)planter(c,...p,rnd);
+  // north parapet
+  balustrade(c,0,0,W);
+  // terrace edge
+  balustrade(c,0,392,496,rnd);balustrade(c,604,392,0,rnd);balustrade(c,690,392,W-690,rnd);
+  wallFace(c,0,416,496,36,rnd);wallFace(c,690,416,W-690,36,rnd);
+  // water
+  const wg=c.createLinearGradient(0,450,0,522);wg.addColorStop(0,'#2b4d6e');wg.addColorStop(1,'#1c3752');c.fillStyle=wg;c.fillRect(0,450,W,72);
+  R(c,0,520,W,10,'#a9b39a');R(c,0,528,W,4,'#5e6657');
+  // pier + ferry
+  R(c,500,416,100,40,'#6b4a2a');for(let y=418;y<456;y+=6)R(c,500,y,100,4,'#8a6a3a');R(c,498,416,4,44,'#4a3420');R(c,598,416,4,44,'#4a3420');R(c,540,456,20,18,'#4a3420');
+  // stairs and bridge
+  stairs(c,600,394,80,56);R(c,596,450,88,72,'#7f8974');bricks(c,596,450,88,72,'#8b957f',rnd,10,22);R(c,596,450,6,72,'#b9c2ad');R(c,678,450,6,72,'#b9c2ad');
+  // south parapet
+  balustrade(c,0,776,W);
+  // harbor basin
+  R(c,1060,700,220,100,'#1c3752');R(c,1060,696,220,6,'#a9b39a');R(c,1070,720,90,10,'#6b4a2a');
+  for(const l of LAMPS)lamp(c,...l);
+  for(const p of Object.values(PLACES))drawPlaceStatic(c,p,rnd);
+})();
+function drawPlaceStatic(c,p,rnd){const{x,y,w,h,kind}=p;
+  switch(kind){
+    case 'castle':{bricks(c,x,y+40,w,h-40,'#8f97a6',rnd);roof(c,x+20,y+40,w-40,26,'#5a6b8a',rnd);for(let i=0;i<w;i+=22)R(c,x+i,y+28,12,14,'#8f97a6');bricks(c,x-6,y+10,40,h-10,'#7f8796',rnd,9,20);bricks(c,x+w-34,y+10,40,h-10,'#7f8796',rnd,9,20);for(let i=0;i<3;i++){R(c,x-6+i*14,y,10,12,'#7f8796');R(c,x+w-34+i*14,y,10,12,'#7f8796');}
+      door(c,x+w/2-14,y+h-44,28,44);archWin(c,x+30,y+70,12,18,false);archWin(c,x+w-42,y+70,12,18,false);R(c,x+w/2-2,y+2,4,28,'#2a2a30');break;}
+    case 'observatory':{bricks(c,x+10,y+60,w-20,h-60,'#6e6e96',rnd,10,22);c.fillStyle='#3f3a7a';c.beginPath();c.arc(x+w/2,y+62,w/2-10,Math.PI,0);c.fill();c.fillStyle='#5a52a6';c.beginPath();c.arc(x+w/2-8,y+58,w/2-22,Math.PI,0);c.fill();R(c,x+w/2-3,y+8,6,32,'#c9a86a');R(c,x+w/2-8,y+2,16,8,'#e6c46a');door(c,x+w/2-11,y+h-36,22,36);archWin(c,x+w/2-6,y+100,12,18,true);for(let i=0;i<5;i++)R(c,x+18+i*20,y+28+((i*7)%9),2,2,'#fff');break;}
+    case 'hall':{bricks(c,x,y+44,w,h-44,'#9a9484',rnd);roof(c,x,y+44,w,40,'#7a3a2e',rnd);door(c,x+w/2-14,y+h-42,28,42);for(let i=0;i<3;i++)archWin(c,x+24+i*65,y+80,12,20,false);R(c,x+w-26,y-6,4,50,'#2a2a30');break;}
+    case 'timber':{bricks(c,x,y+h-30,w,30,'#8b957f',rnd,10,22);timber(c,x,y+40,w,h-70,rnd);roof(c,x,y+40,w,34,'#6b4a2a',rnd);door(c,x+w/2-12,y+h-38,24,38);archWin(c,x+22,y+70,12,18,false);archWin(c,x+w-34,y+70,12,18,false);R(c,x+w/2-24,y+52,48,5,'#f6f0d8');R(c,x+w/2-24,y+62,48,5,'#f6f0d8');break;}
+    case 'chapel':{bricks(c,x+10,y+60,w-20,h-60,'#8a8fa0',rnd,10,22);c.fillStyle='#4b4b5e';c.beginPath();c.moveTo(x,y+64);c.lineTo(x+w/2,y+4);c.lineTo(x+w,y+64);c.closePath();c.fill();c.fillStyle='#5c5c72';c.beginPath();c.moveTo(x+w/2,y+8);c.lineTo(x+w-6,y+62);c.lineTo(x+w/2+6,y+62);c.closePath();c.fill();R(c,x+w/2-3,y-14,6,20,'#a97cff');R(c,x+w/2-9,y-8,18,4,'#a97cff');door(c,x+w/2-11,y+h-36,22,36);c.fillStyle='#2a2a30';c.beginPath();c.arc(x+w/2,y+96,12,0,7);c.fill();c.fillStyle='#a97cff';c.beginPath();c.arc(x+w/2,y+96,9,0,7);c.fill();R(c,x+22,y+100,8,24,'#c9b6ff');R(c,x+w-30,y+100,8,24,'#c9b6ff');break;}
+    case 'tent':{c.fillStyle='#b8924a';c.beginPath();c.moveTo(x,y+h);c.lineTo(x+w/2,y);c.lineTo(x+w,y+h);c.closePath();c.fill();c.fillStyle='#8a6a2a';c.beginPath();c.moveTo(x+w/2,y);c.lineTo(x+w,y+h);c.lineTo(x+w/2+10,y+h);c.closePath();c.fill();R(c,x+w/2-8,y+h-24,16,24,'#2a2420');R(c,x+w+6,y+h-6,22,6,'#4a3420');break;}
+    case 'cellar':{R(c,x,y+20,w,h-20,'#7a8470');bricks(c,x,y+20,w,h-20,'#7a8470',rnd,8,18);R(c,x+w/2-20,y+26,40,22,'#2a2420');R(c,x+w/2-18,y+28,36,18,'#5a3d22');for(let i=0;i<4;i++)R(c,x+w/2-18+i*9,y+28,1,18,'#3f2a16');R(c,x+w/2-24,y+h-2,48,4,'#5e6657');break;}
+    case 'post':{R(c,x+w/2-8,y+40,16,h-40,'#5a3d22');c.fillStyle='#2f6b2a';c.beginPath();c.arc(x+w/2,y+36,36,0,7);c.fill();c.fillStyle='#3f8a3c';c.beginPath();c.arc(x+w/2-10,y+26,24,0,7);c.fill();R(c,x+w/2-28,y+48,56,8,'#a07a44');R(c,x+w/2-26,y+56,4,16,'#7a5a2e');R(c,x+w/2+22,y+56,4,16,'#7a5a2e');break;}
+    case 'docks':break;
+    case 'tower':{bricks(c,x+16,y+24,w-32,h-24,'#8a8fa0',rnd,10,22);for(let i=0;i<w-32;i+=14)R(c,x+16+i,y+10,8,16,'#8a8fa0');R(c,x+w/2-2,y-30,4,44,'#2a2a30');R(c,x+w/2+2,y-30,22,12,'#d9524a');R(c,x+w/2-16,y+40,4,44,'#5a5f70');R(c,x+w/2+12,y+40,4,44,'#5a5f70');R(c,x+w/2-16,y+36,32,4,'#5a5f70');door(c,x+w/2-12,y+h-40,24,40);archWin(c,x+w/2-6,y+96,12,18,false);break;}
+    case 'forge':{bricks(c,x,y+36,w,h-36,'#6e6e7e',rnd,10,24);roof(c,x,y+36,w,30,'#3a3a4a',rnd);bricks(c,x+w-44,y-16,22,52,'#5a5a68',rnd,8,11);door(c,x+w/2-16,y+h-44,32,44);archWin(c,x+22,y+70,14,20,false);archWin(c,x+w-36,y+70,14,20,false);R(c,x+w/2-30,y+h-8,60,6,'#2a2420');break;}
+    case 'court':{R(c,x,y+20,w,h-20,'#c9c2d8');bricks(c,x,y+20,w,h-20,'#c9c2d8',rnd,10,26);R(c,x-6,y+14,w+12,8,'#6b4bb8');R(c,x-6,y+22,w+12,3,'#3a2a6e');for(let i=0;i<5;i++){R(c,x+10+i*32,y+26,10,h-30,'#f0ecf6');R(c,x+10+i*32,y+26,2,h-30,'#ffffff');R(c,x+18+i*32,y+26,2,h-30,'#9a92ad');}door(c,x+w/2-10,y+h-30,20,30);R(c,x+w/2-16,y-2,32,18,'#6b4bb8');R(c,x+w/2-6,y+2,12,10,'#e6c46a');break;}
+    case 'gate':{bricks(c,x,y+20,26,h-20,'#8a8fa0',rnd,9,20);bricks(c,x+w-26,y+20,26,h-20,'#8a8fa0',rnd,9,20);for(let i=0;i<3;i++){R(c,x+i*10,y+10,6,10,'#8a8fa0');R(c,x+w-26+i*10,y+10,6,10,'#8a8fa0');}bricks(c,x+26,y+40,w-52,24,'#7a7f90',rnd,8,18);R(c,x+w/2-16,y+22,32,12,'#e6c46a');break;}
+    case 'harbor':{R(c,x,y+20,w,14,'#6b4a2a');for(let i=0;i<w;i+=14)R(c,x+i,y+22,10,10,'#8a6a3a');R(c,x+w-30,y-10,6,30,'#4a3420');R(c,x+w-24,y-8,20,14,'#7fc4ff');break;}
+    case 'town':{bricks(c,x,y+150,w,20,'#8b957f',rnd,8,18);for(let i=0;i<5;i++){const hx=x+8+i*38,hy=y+60+(i%2)*40;timber(c,hx,hy+16,30,34,rnd);roof(c,hx,hy+16,30,16,['#7a3a2e','#2f52a8','#2a6e3a','#7a3a2e','#6b4a2a'][i],rnd);door(c,hx+11,hy+36,8,14);}
+      bricks(c,x+20,y+20,w-40,30,'#8a8fa0',rnd,8,20);for(let i=0;i<8;i++)R(c,x+20+i*22,y+10,10,12,'#8a8fa0');door(c,x+w/2-12,y+30,24,20);break;}
+    case 'obelisk':{R(c,x+34,y+120,52,36,'#4a4a58');bricks(c,x+34,y+120,52,36,'#5a5a68',rnd,8,12);R(c,x+48,y+10,24,112,'#5a5a68');R(c,x+50,y+12,8,108,'#7a7a88');R(c,x+64,y+12,6,108,'#4a4a58');c.fillStyle='#8a8a98';c.beginPath();c.moveTo(x+48,y+12);c.lineTo(x+60,y-8);c.lineTo(x+72,y+12);c.closePath();c.fill();break;}
+    case 'outer':break;
+  }}
+function drawPlaceDynamic(p,t){const{x,y,w,h,kind}=p;const c=g;
+  switch(kind){
+    case 'castle':{const n=S.esc.size;R(c,x+w/2+2,y+2,18,10,n?'#ff5e52':'#e6c46a');if(n&&!REDUCED){const f=6+Math.sin(t*8)*3;R(c,x+8,y-6-f,12,8+f,'#ff8a3a');R(c,x+10,y-10-f,8,6,'#ffd36b');}break;}
+    case 'hall':if(S.plans.size)R(c,x+w-22,y-6,18,10,'#39aab8');break;
+    case 'docks':{const q=[...S.actors.values()].filter(a=>a.state==='queued').length;const bob=REDUCED?0:Math.sin(t*2)*2;R(c,520,470+bob,60,16,'#6b4a2a');R(c,516,466+bob,68,6,'#8a6a3a');R(c,548,446+bob,4,24,'#4a3420');R(c,552,448+bob,18,12,'#efe6d2');for(let i=0;i<Math.min(q,8);i++){R(c,506+i*11,420,8,10,'#efe6d2');R(c,506+i*11,423,8,2,'#9a2f28');}break;}
+    case 'tower':{const sw=S.bell>0&&!REDUCED?Math.sin(t*20)*S.bell*4:0;R(c,x+w/2-6+sw,y+44,12,14,'#e6c46a');R(c,x+w/2-2+sw,y+58,4,3,'#e6c46a');const n=S.shelf.size;for(let i=0;i<Math.min(n,18);i++){const cx=x+w+6+(i%6)*10,cy=y+h-10-Math.floor(i/6)*10;R(c,cx,cy,8,8,'#efe6d2');R(c,cx,cy+3,8,2,'#9a2f28');}if(n>18){c.fillStyle='#fff';c.font='12px Noto Sans';c.fillText('+'+(n-18),x+w+66,y+h-10);}break;}
+    case 'forge':{const busy=[...S.actors.values()].some(a=>a.role==='builder'&&a.state==='working');if(busy){R(c,x+w/2-12,y+h-30,24,18,'#ff8a3a');R(c,x+w/2-6,y+h-26,12,10,'#ffd36b');}if(!REDUCED)for(let i=0;i<3;i++){const k=(t*.5+i*.33)%1;c.globalAlpha=(1-k)*.6;R(c,x+w-40+Math.sin(k*6+i)*8,y-20-k*50,14,12,'#c9c9d4');}c.globalAlpha=1;break;}
+    case 'gate':{const f=S.gate.flash>0;const col=f?(S.gate.ok?'#8fe08f':'#ff5e52'):'#2a2420';const open=f&&S.gate.ok;R(c,x+26,y+64,w-52,h-64,open?'#a0aa94':col);if(!open)for(let i=0;i<5;i++)R(c,x+30+i*12,y+64,4,h-64,'#1a1428');break;}
+    case 'town':{for(let i=0;i<5;i++){const hx=x+8+i*38,hy=y+60+(i%2)*40;const lit=S.shipped>i*10;R(c,hx+4,hy+24,5,6,lit?'#ffcd7a':'#3a3450');R(c,hx+20,hy+24,5,6,lit?'#ffcd7a':'#3a3450');}c.fillStyle='#fff';c.font='700 11px Cinzel';c.fillText('PROD',x+w/2-16,y+8);break;}
+    case 'obelisk':{const gl=REDUCED?1:.6+Math.sin(t*3)*.4;for(let i=0;i<8;i++){c.globalAlpha=gl;R(c,x+56,y+20+i*12,8,6,'#7fc4ff');}c.globalAlpha=1;c.fillStyle='rgba(255,255,255,.85)';c.font='12px Noto Sans';c.fillText((DATA?DATA.n_events.toLocaleString():'')+' events',x+24,y+h+30);break;}
+  }
+  if(kind!=='outer'){const hi=hover&&hover.kind==='place'&&hover.id===p.id;c.font='700 13px Cinzel';c.textAlign='center';const label=p.n.toUpperCase(),tw=c.measureText(label).width;c.fillStyle='rgba(8,6,20,.62)';c.fillRect(x+w/2-tw/2-7,y+h+5,tw+14,17);c.fillStyle=hi?'#fff':'#f1e6c8';c.fillText(label,x+w/2,y+h+18);c.textAlign='left';}
+  else{c.fillStyle='rgba(255,255,255,.55)';c.font='700 12px Cinzel';c.save();c.translate(x+w-16,y+60);c.rotate(Math.PI/2);c.fillText('THE OUTER LANDS',0,0);c.restore();}}
+function lit(pid){if(['keep','observatory','maphall','tower'].includes(pid))return true;for(const a of S.actors.values())if(a.wp===pid&&a.state==='working')return true;return false;}
+function daylight(ms){const h=new Date(ms).getHours()+new Date(ms).getMinutes()/60;// local hour
+  const night=h<5.5||h>20.5?1:h<7?1-(h-5.5)/1.5:h>19?(h-19)/1.5:0;const dusk=(h>17&&h<20.5)?1-Math.abs(h-18.75)/1.75:(h>5&&h<8)?1-Math.abs(h-6.5)/1.5:0;return{night:Math.max(0,Math.min(1,night)),dusk:Math.max(0,Math.min(1,dusk))};}
+let hover=null;const standing=[];
+let FX=2;/* 2 full · 1 no blur · 0 no blur, no glow */let slowFrames=0,fxT=0;
+function adaptFX(cost){if(FX===0)return;if(cost>45){slowFrames++;if(slowFrames>=12){FX--;slowFrames=0;console.log('realm: frame cost '+cost.toFixed(0)+'ms, effects level now '+FX);}}else if(slowFrames>0)slowFrames--;}
+const ease=k=>k<.5?2*k*k:1-Math.pow(-2*k+2,2)/2;
+function drawStanding(role,pid,t,dx=0){const p=PLACES[pid];const x=p.x+p.w/2-SW/2+dx,y=p.y+p.h-SH+4;const f=REDUCED?0:Math.round(t*2)%2;g.drawImage(makeSprite(role,0),x,y+(f?-1:0));standing.push({x,y,role});}
+function drawActor(a,t){const moving=a.state==='walking'||a.state==='leaving';const f=moving&&!REDUCED?1+(Math.floor(t*7)%2):0;
+  g.fillStyle='rgba(10,8,20,.35)';g.beginPath();g.ellipse(a.x+SW/2,a.y+SH+2,16,5,0,0,7);g.fill();
+  if(a.state==='dying')g.globalAlpha=Math.max(0,a.bubbleT/2.5);
+  if(!inFocus(a.subject))g.globalAlpha=.22;
+  g.drawImage(makeSprite(a.role,f,a.state==='dying'),a.x,a.y+(a.state==='working'&&!REDUCED?Math.round(Math.sin(t*3+a.x)):0));g.globalAlpha=1;
+  if(a.state==='working'){const el=S.now-a.start;const cap=(CAP[a.role]||30)*60000;const k=Math.min(1,el/cap);R(g,a.x+6,a.y-10,36,5,'rgba(10,8,20,.7)');R(g,a.x+7,a.y-9,34*k,3,k>.85?'#ff6a5c':k>.6?'#ffc46b':'#8fe08f');if(!REDUCED&&Math.floor(t*2)%2)drawGlyph(g,'dots',a.x+14,a.y-22,2);}
+  if(a.state==='queued')drawGlyph(g,'zz',a.x+34,a.y-14,2);
+  if(a.bubble)drawGlyph(g,a.bubble,a.x+14,a.y-26,3);}
+function frame(dt,t){
+  if(!DATA){const dpr=cv._dpr;ctx.setTransform(dpr,0,0,dpr,0,0);ctx.fillStyle='#07060f';ctx.fillRect(0,0,cv.width,cv.height);ctx.translate(ox,oy);ctx.scale(scale,scale);ctx.imageSmoothingEnabled=false;ctx.drawImage(bg,0,0);ctx.fillStyle='rgba(14,18,64,.5)';ctx.fillRect(0,0,W,H);ctx.setTransform(1,0,0,1,0,0);return;}
+  if(LIVE&&S.playing){S.now=Date.now();process(S.now);}
+  else if(S.playing&&S.now<T1){S.now=Math.min(T1,S.now+dt*1000*S.speed);process(S.now);}
+  if(S.bell>0)S.bell-=dt*2;if(S.gate.flash>0)S.gate.flash-=dt;
+  for(const [sp,a] of S.actors){
+    if(a.state==='queued'){if(S.now>=a.until||a.done){a.state='walking';setPath(a,toWork({x:a.x,y:a.y},a.slot));}}
+    else if(a.state==='walking'||a.state==='leaving'){a.pathT+=dt;const k=Math.min(1,a.pathT/a.pathDur);const pt=pathAt(a.path,k*pathLen(a.path));a.x=pt.x;a.y=pt.y;
+      if(k>=1){if(a.state==='walking'){a.state=a.done?'leaving':'working';if(a.done)setPath(a,toFerry({x:a.x,y:a.y}));}else{S.actors.delete(sp);releaseSlot(a.wp);}}}
+    else if(a.state==='dying'){a.bubbleT-=dt;a.y-=dt*8;if(a.bubbleT<=0){S.actors.delete(sp);releaseSlot(a.wp);}}
+    if(a.bubble&&a.state!=='dying'){a.bubbleT-=dt;if(a.bubbleT<=0)a.bubble=null;}}
+  for(const p of S.packets)p.t+=dt;S.packets=S.packets.filter(p=>p.t<p.dur);
+  for(const e of S.effects)e.t+=dt;S.effects=S.effects.filter(e=>e.t<e.dur);
+  for(const s of S.sparks)s.t+=dt;S.sparks=S.sparks.filter(s=>s.t<1.2);
+  for(const r of S.ravens)r.t+=dt;S.ravens=S.ravens.filter(r=>r.t<r.dur);
+  for(const b of S.boats)b.t+=dt;S.boats=S.boats.filter(b=>b.t<b.dur);
+
+  // ---- world pass
+  g.setTransform(1,0,0,1,0,0);g.imageSmoothingEnabled=false;g.drawImage(bg,0,0);
+  if(!REDUCED){g.fillStyle='rgba(255,255,255,.14)';for(let i=0;i<50;i++){const x=((i*97+t*24)%(W+40))-20,y=456+(i*37)%60;g.fillRect(x|0,y,16,2);}g.fillStyle='rgba(255,255,255,.08)';for(let i=0;i<20;i++){const x=1070+((i*53+t*10)%200),y=706+(i*23)%90;g.fillRect(x|0,y,12,2);}}
+  const drawables=[];
+  for(const p of Object.values(PLACES))drawables.push({y:p.y+p.h,f:()=>drawPlaceDynamic(p,t)});
+  standing.length=0;
+  drawables.push({y:236,f:()=>{drawStanding('operator','keep',t);drawStanding('thinker','observatory',t);drawStanding('planner','maphall',t);}});
+  drawables.push({y:700,f:()=>drawStanding('executor','tower',t)});
+  drawables.push({y:470,f:()=>{const bob=REDUCED?0:Math.sin(t*2)*2;const x=524,y=404;g.drawImage(makeSprite('relay',0),x,y+bob);standing.push({x,y,role:'relay'});}});
+  for(const a of S.actors.values())drawables.push({y:a.y+SH,f:()=>drawActor(a,t)});
+  drawables.sort((a,b)=>a.y-b.y);for(const d of drawables)d.f();
+  for(const p of S.packets){const k=ease(p.t/p.dur);const x=p.x+(p.tx-p.x)*k,y=p.y+(p.ty-p.y)*k-Math.sin(k*Math.PI)*46;if(p.banner){R(g,x,y,4,24,'#4a3420');R(g,x+4,y,18,11,'#8d6ee8');}else{drawGlyph(g,'scroll',x,y,3);R(g,x,y+6,15,3,'#9a2f28');}}
+  for(const r of S.ravens){const k=ease(r.t/r.dur);const x=r.x+(r.tx-r.x)*k,y=r.y+(r.ty-r.y)*k-Math.sin(k*Math.PI)*100;const w=Math.sin(t*20)>0;R(g,x-9,y+(w?-2:2),9,3,'#0e0b1c');R(g,x,y,6,5,'#0e0b1c');R(g,x+6,y+(w?-2:2),9,3,'#0e0b1c');R(g,x+6,y+1,2,2,'#ffd36b');}
+  for(const s of S.sparks){const k=s.t/1.2;const x=s.x+(120-s.x)*k,y=s.y+(580-s.y)*k-Math.sin(k*Math.PI)*70;g.globalAlpha=1-k*.5;R(g,x,y,4,4,'#9fd8ff');g.globalAlpha=1;}
+  for(const b of S.boats){const k=ease(b.t/b.dur);const x=1080+90*k,y=740-70*k;R(g,x,y,34,10,'#6b4a2a');R(g,x+14,y-16,3,16,'#4a3420');R(g,x+17,y-14,12,9,'#efe6d2');if(k>.8)for(let i=0;i<8;i++)R(g,1150+((i*53)%90),480+((i*37)%60)-(k-.8)*120,4,4,['#ffd36b','#ff8fb0','#7fc4ff'][i%3]);}
+  for(const e of S.effects){if(e.kind==='monster'){const m=monsterSprite(e.m);const bob=REDUCED?0:Math.sin(t*6)*3;g.globalAlpha=e.t>e.dur-1?e.dur-e.t:1;g.drawImage(m,e.x,e.y-24+bob);g.globalAlpha=1;e.bx=e.x;e.by=e.y-24;}else if(e.kind==='glyph')drawGlyph(g,e.g,e.x,e.y-e.t*22,4);}
+  drawOmens(t);S.alarmT+=dt;if(S.alarmT>2){S.alarmT=0;computeOmens();}
+  if(hover&&hover.kind==='actor'){const a=S.actors.get(hover.id);if(a){g.strokeStyle='rgba(255,255,255,.9)';g.lineWidth=2;g.strokeRect(a.x+4,a.y-2,SW-8,SH+4);}}
+
+  // ---- lighting
+  const dl=daylight(S.now);
+  if(dl.dusk>0){const sg=g.createLinearGradient(0,0,0,H);sg.addColorStop(0,`rgba(255,130,70,${.45*dl.dusk})`);sg.addColorStop(.5,`rgba(120,70,140,${.28*dl.dusk})`);sg.addColorStop(1,`rgba(30,20,60,${.4*dl.dusk})`);g.fillStyle=sg;g.fillRect(0,0,W,H);}
+  if(dl.night>0){g.fillStyle=`rgba(18,24,64,${.34*dl.night})`;g.fillRect(0,0,W,H);const mg=g.createRadialGradient(980,80,0,980,80,900);mg.addColorStop(0,`rgba(120,150,255,${.16*dl.night})`);mg.addColorStop(1,'rgba(0,0,0,0)');g.fillStyle=mg;g.fillRect(0,0,W,H);}
+  g.globalCompositeOperation='lighter';
+  const amb=.14+.5*Math.max(dl.night,dl.dusk*.7);
+  const glow=(x,y,r,c,a)=>{if(a<=0.01||FX===0)return;const gr=g.createRadialGradient(x,y,0,x,y,r);gr.addColorStop(0,c.replace('A',a));gr.addColorStop(1,c.replace('A',0));g.fillStyle=gr;g.fillRect(x-r,y-r,2*r,2*r);};
+  for(const p of Object.values(PLACES)){if(!p.wins||!p.wins.length)continue;const on=lit(p.id);for(const w of p.wins){R(g,w[0]-6,w[1]-8,12,18,on?'rgba(255,200,110,.5)':'rgba(0,0,0,0)');glow(w[0],w[1],54,'rgba(255,170,80,A)',on?amb:0);}}
+  for(const l of LAMPS)glow(l[0],l[1]-36,58,'rgba(255,200,110,A)',amb*.8);
+  if([...S.actors.values()].some(a=>a.role==='builder'&&a.state==='working'))glow(315,660,80,'rgba(255,120,50,A)',.35+amb*.4);
+  if(S.esc.size)glow(65,70,70,'rgba(255,90,60,A)',.35+.3*Math.sin(t*4)*(REDUCED?0:1));
+  glow(120,600,60,'rgba(120,200,255,A)',.25+amb*.3);
+  if(S.gate.flash>0)glow(985,620,80,S.gate.ok?'rgba(120,255,120,A)':'rgba(255,80,60,A)',.4);
+  g.globalCompositeOperation='source-over';
+  if(!REDUCED){g.fillStyle='rgba(255,220,160,.55)';for(let i=0;i<24;i++){const x=(i*173+t*9)%W,y=(i*97+Math.sin(t+i)*20)%H;g.globalAlpha=.2+.5*Math.abs(Math.sin(t*1.3+i));g.fillRect(x,y,2,2);}g.globalAlpha=1;}
+
+  // ---- to screen with tilt-shift and vignette
+  const dpr=cv._dpr;ctx.setTransform(dpr,0,0,dpr,0,0);ctx.fillStyle='#07060f';ctx.fillRect(0,0,cv.width,cv.height);ctx.translate(ox,oy);ctx.scale(scale,scale);ctx.imageSmoothingEnabled=false;
+  ctx.drawImage(wc,0,0);
+  if(!REDUCED&&FX>=2){ctx.save();ctx.filter='blur(1.6px)';ctx.drawImage(wc,0,0,W,56,0,0,W,56);ctx.drawImage(wc,0,H-60,W,60,0,H-60,W,60);ctx.filter='blur(.8px)';ctx.drawImage(wc,0,56,W,30,0,56,W,30);ctx.drawImage(wc,0,H-90,W,30,0,H-90,W,30);ctx.restore();}
+  const v=ctx.createRadialGradient(W/2,H/2,H*.4,W/2,H/2,H*1.05);v.addColorStop(0,'rgba(0,0,0,0)');v.addColorStop(1,'rgba(6,4,16,.42)');ctx.fillStyle=v;ctx.fillRect(0,0,W,H);
+  ctx.setTransform(1,0,0,1,0,0);
+  hud();placeBubble();
+}
+function hud(){
+  $('h-clock').textContent=fmt(S.now)+' Z';$('h-clock-l').textContent=LIVE&&S.playing?'live · now':'replay';const md=$('mode');if(stream){const ok=pollTimer?true:stream.readyState===1;md.textContent=LIVE&&S.playing?(ok?'LIVE':'RECONNECTING'):'REPLAY · LIVE PAUSED';md.className='mode '+(ok?(LIVE&&S.playing?'live':''):'off');}else if(REMOTE){const age=lastPush?Date.now()-toMs(lastPush):0;md.textContent=LIVE&&S.playing?('LIVE · PUSHED '+fmtAge(age)+' AGO'):'REPLAY';md.className='mode '+(LIVE&&S.playing?(age>180000?'off':'live'):'');}else{md.textContent='SNAPSHOT';md.className='mode';}
+  const ex=$('h-exec');if(S.lastTick){const m=(S.now-S.lastTick)/60000;ex.firstElementChild.textContent=m<1?'RINGING':fmtAge(S.now-S.lastTick)+' AGO';ex.className='stat '+(m>5?'bad':m>3?'warn':'good');}else ex.firstElementChild.textContent='—';
+  $('h-lane').firstElementChild.textContent=S.lane??'—';
+  $('h-flight').firstElementChild.textContent=[...S.actors.values()].filter(a=>!a.done).length;
+  const sh=$('h-shelf');let oldest=0;for(const ms of S.shelf.values())oldest=Math.max(oldest,S.now-ms);sh.firstElementChild.textContent=S.shelf.size+(S.shelf.size?' · '+fmtAge(oldest):'');sh.className='stat '+(oldest>4*3600000?'bad':oldest>3600000?'warn':'');
+  const es=$('h-esc');let eo=0;for(const l of S.esc.values())eo=Math.max(eo,S.now-l[0].ms);es.firstElementChild.textContent=S.esc.size+(S.esc.size?' · '+fmtAge(eo):'');es.className='stat '+(eo>4*3600000?'bad':S.esc.size?'warn':'');
+  $('h-ship').firstElementChild.textContent=S.shipped;$('h-ship').className='stat good';
+  const fa=$('h-fail');fa.firstElementChild.textContent=S.fails+' / '+(S.done+S.fails);fa.className='stat '+(S.fails>(S.done+S.fails)*.2?'bad':'warn');
+  if(!scrubbing)$('scrub').value=Math.round(1000*(S.now-T0)/Math.max(1,(T1-T0)));
+  $('b-play').textContent=S.playing?(!LIVE&&S.now>=T1?'END':'PAUSE'):'PLAY';$('b-live').classList.toggle('on',LIVE&&S.playing);$('s-b').textContent=fmt(T1);
+}
+let last=performance.now();function loop(now){const dt=Math.min(.1,(now-last)/1000);last=now;const t0=performance.now();try{frame(dt,now/1000);}catch(err){status('SOMETHING BROKE',err.message,true);console.error(err);return;}adaptFX(performance.now()-t0);requestAnimationFrame(loop);}
+
+/* ---------------- input, bubble, panel ---------------- */
+function worldPt(ev){const r=cv.getBoundingClientRect();return{x:(ev.clientX-r.left-ox)/scale,y:(ev.clientY-r.top-oy)/scale};}
+function hit(pt){for(const a of [...S.actors.values()].reverse())if(pt.x>=a.x+4&&pt.x<=a.x+SW-4&&pt.y>=a.y-10&&pt.y<=a.y+SH)return{kind:'actor',id:a.sp,name:a.sp+' · '+(a.subject||'')};
+  for(const e of S.effects)if(e.kind==='monster'&&e.bx!=null&&pt.x>=e.bx&&pt.x<=e.bx+40&&pt.y>=e.by&&pt.y<=e.by+40)return{kind:'monster',id:e.m,name:MON[e.m].name};
+  for(const s of standing)if(pt.x>=s.x+4&&pt.x<=s.x+SW-4&&pt.y>=s.y&&pt.y<=s.y+SH)return{kind:'role',id:s.role,name:ROLE_NAME[s.role]};
+  for(const p of Object.values(PLACES))if(pt.x>=p.x-10&&pt.x<=p.x+p.w+10&&pt.y>=p.y-30&&pt.y<=p.y+p.h+20)return{kind:'place',id:p.id,name:p.n};return null;}
+cv.addEventListener('mousemove',ev=>{const h=hit(worldPt(ev));hover=h;cv.classList.toggle('hand',!!h);const tip=$('tip');const r=cv.getBoundingClientRect();if(h){tip.style.display='block';tip.textContent=h.name;tip.style.left=(ev.clientX-r.left)+'px';tip.style.top=(ev.clientY-r.top)+'px';}else tip.style.display='none';});
+cv.addEventListener('mouseleave',()=>{hover=null;$('tip').style.display='none';});
+let bubbleAnchor=null;
+cv.addEventListener('click',ev=>{const h=hit(worldPt(ev));if(!h){hideBubble();return;}
+  if(h.kind==='actor'){const a=S.actors.get(h.id);showBubble(h.id,`<b>${ROLE_NAME[a.role].toUpperCase()} · ${MODEL[a.role].toUpperCase()}</b><br>${esc(CX[a.role].quest)}<br><span class="tiny">${esc(a.subject||'')} · ${a.state} · ${fmtDur(S.now-a.start)} of ${CAP[a.role]||'—'} min</span><br><a data-open="actor:${h.id}">Open the codex ▸</a>`,()=>{const a=S.actors.get(h.id);return a?{x:a.x+SW/2,y:a.y-14}:null;});}
+  else if(h.kind==='role'){const s=standing.find(s=>s.role===h.id);showBubble(ROLE_NAME[h.id],`<b>${MODEL[h.id].toUpperCase()}</b><br>${esc(CX[h.id].quest)}<br><a data-open="role:${h.id}">Open the codex ▸</a>`,()=>{const s=standing.find(s=>s.role===h.id);return s?{x:s.x+SW/2,y:s.y-14}:null;});}
+  else if(h.kind==='place'){const p=PLACES[h.id],x=PX[h.id];showBubble(p.n,`${x.body}<br><a data-open="place:${h.id}">Open the codex ▸</a>`,()=>({x:p.x+p.w/2,y:p.y-8}));}
+  else if(h.kind==='monster'){showBubble(MON[h.id].name,`${MX[h.id].body}<br><a data-open="monster:${h.id}">Open the codex ▸</a>`,()=>{const e=S.effects.find(e=>e.kind==='monster'&&e.m===h.id);return e?{x:e.bx+20,y:e.by-6}:null;});}
+});
+function showBubble(tag,html,anchor){$('bb-tag').textContent=tag;$('bb-box').innerHTML=html;$('bubble').style.display='block';bubbleAnchor=anchor;placeBubble();for(const a of document.querySelectorAll('#bb-box a[data-open]'))a.onclick=()=>{const [k,id]=a.dataset.open.split(':');({actor:openActor,role:openRole,place:openPlace,monster:openMonster})[k](id);};}
+function hideBubble(){$('bubble').style.display='none';bubbleAnchor=null;}
+function placeBubble(){if(!bubbleAnchor)return;const p=bubbleAnchor();if(!p){hideBubble();return;}const b=$('bubble');const vw=cv.parentElement.clientWidth;let sx=ox+p.x*scale,sy=oy+p.y*scale;sx=Math.max(160,Math.min(vw-160,sx));b.style.left=sx+'px';b.style.top=Math.max(90,sy)+'px';}
+function openPanel(html){$('p-body').innerHTML=html;$('panel').classList.add('open');$('app').classList.remove('nopanel');$('panel').scrollTop=0;}
+$('p-close').onclick=()=>{$('panel').classList.remove('open');if(innerWidth>900)$('app').classList.add('nopanel');};$('reopen').onclick=()=>{$('app').classList.remove('nopanel');};
+function spritePix(role,monster){const c=monster?monsterSprite(role):makeSprite(role,0);return `<canvas class="pix" width="${c.width}" height="${c.height}" data-src="${monster?'m:':'r:'}${role}" style="width:${c.width*1.6}px;height:${c.height*1.6}px"></canvas>`;}
+function bindPix(){for(const c of document.querySelectorAll('canvas.pix')){const [k,id]=c.dataset.src.split(':');c.getContext('2d').drawImage(k==='m'?monsterSprite(id):makeSprite(id,0),0,0);}}
+function roleStats(r){const s=DATA&&DATA.stats[r];if(!s)return '<p class="tiny">Not dispatched as a seat spawn in this ledger (standing pane or human).</p>';const tot=s.done+s.failed;const fails=Object.entries(s.fails).map(([k,v])=>`<span class="pill ${k==='refused'?'':'bad'}">${k} ${v}</span>`).join('');
+  return `<div class="kv"><b>runs</b><span>${s.done} done · ${s.failed} failed (${tot?Math.round(100*s.failed/tot):0}%)</span><b>time</b><span>median ${s.med_min??'?'} min · p90 ${s.p90_min??'?'} min · cap ${CAP[r]??'—'} min</span><b>tokens</b><span>median ${kTok(s.med_tok)} blended per run</span></div><div class="bar"><i style="width:${tot?100*s.failed/tot:0}%"></i></div>${fails?'<p>'+fails+'</p>':''}<p class="tiny">On screen since the window opened: ${S.spawnsBy[r]||0} set out · ${S.doneBy[r]||0} returned · ${S.failsBy[r]||0} fell.</p>`;}
+function roleHtml(r,extra=''){const c=CX[r];if(!c)return '';return `<h2>${ROLE_NAME[r]}</h2><div class="cls">${MODEL[r]} · ${WORK[r]?PLACES[WORK[r]].n:''}</div>${spritePix(r)}${extra}<h4>QUEST</h4><p>${c.quest}</p><h4>WHY IT EXISTS</h4><p>${c.why}</p><h4>HOW: PACKET IN, CARD OUT</h4><ul>${c.how.map(x=>`<li>${x}</li>`).join('')}</ul><h4>SEES</h4><p>${c.sees}</p><h4>BLIND TO</h4><p>${c.blind}</p><h4>FOR THE DRIVER</h4><p>${c.tip}</p><h4>IN THE LEDGER</h4>${roleStats(r)}<p class="tiny">${c.ref}</p>`;}
+function openRole(r){openPanel(roleHtml(r));bindPix();}
+function openPlace(id){const p=PX[id];if(!p)return;const who=Object.keys(WORK).filter(r=>WORK[r]===id);openPanel(`<h2>${p.title}</h2><div class="cls">a place in the realm</div><p>${p.body}</p><h4>FOR THE DRIVER</h4><p>${p.driver}</p>${who.length?'<h4>WHO WORKS HERE</h4><p>'+who.map(r=>`<a class="link" data-role="${r}">${ROLE_NAME[r]}</a>`).join(' · ')+'</p>':''}${id==='chronicle'?chronicleHtml():''}${id==='tower'?shelfHtml():''}${id==='keep'?keepHtml():''}${id==='docks'?docksHtml():''}`);bindLinks();}
+function openMonster(id){const m=MX[id];openPanel(`<h2>${MON[id].name}</h2><div class="cls">a way to die</div>${spritePix(id,true)}<p>${m.body}</p><h4>FOR THE DRIVER</h4><p>${m.driver}</p><p class="tiny">Fallen to it on screen: ${S.failsBy['_'+id]||0}.</p>`);bindPix();}
+function openActor(sp){const a=S.actors.get(sp);if(!a)return;const el=S.now-a.start;const st={queued:'waiting at the ferry for a pane to claim the packet',walking:'walking to work',working:'working',leaving:'returning, stamped',dying:'fallen'}[a.state];const pk=PACKET[a.role]||[];const ev=S.subjectEvents.get(a.subject)||[];
+  openPanel(`<h2>${sp}</h2><div class="cls">${ROLE_NAME[a.role]} · ${MODEL[a.role]} · ${a.prj||''}</div>${spritePix(a.role)}<div class="kv"><b>subject</b><span><a class="link" data-subj="${esc(a.subject)}">${esc(a.subject)}</a></span><b>state</b><span>${st}</span><b>set out</b><span>${fmt(a.start)} Z</span><b>elapsed</b><span>${fmtDur(el)} of a ${CAP[a.role]||'—'} min cap</span>${a.claimed?`<b>claimed</b><span>${fmt(a.claimed)} Z (${fmtDur(Math.max(0,a.claimed-a.start))} at the ferry)</span>`:''}</div><h4>THE PACKET CARRIES</h4><ul>${pk.map(x=>`<li>${x}</li>`).join('')}</ul><h4>THE SUBJECT'S STORY</h4>${timelineHtml(ev)}<h4>ABOUT THIS ROLE</h4><p>${CX[a.role].quest}</p><p><a class="link" data-role="${a.role}">Open the full codex entry</a></p>`);bindPix();bindLinks();}
+function openSubject(s){if(!s)return;const ev=S.subjectEvents.get(s)||[];const final=((DATA&&DATA.states)||[]).find(r=>r[0]===s);const title=DATA&&DATA.titles[s];const esc_=S.esc.get(s);
+  openPanel(`<h2>${esc(s)}</h2><div class="cls">${final?'derived state now: '+final[1]:'subject'}</div>${title?`<p>${esc(title)}</p>`:''}${esc_?`<h4>WAITING ON A RULING</h4>${esc_.map(x=>`<p><b>${esc(x.a)}</b> asked: ${esc(x.why)}<br><span class="tiny">default: ${esc(x.df||'—')} · deadline ${esc((x.dl||'—').slice(0,16))}</span></p>`).join('')}`:''}<h4>STORY</h4>${timelineHtml(ev)}<p class="tiny">Every row is a ledger event on this subject. States are derived by the fold, never stamped.</p>`);bindLinks();}
+function timelineHtml(ev){if(!ev.length)return '<p class="tiny">Nothing yet.</p>';return '<ul class="tl">'+ev.slice(-40).map(e=>{const n=narrate(e);return `<li class="${n.cls}"><time>${fmt(e.ms)}</time><span>${esc(n.text)}</span></li>`;}).join('')+'</ul>';}
+function narrate(e){switch(e.ty){case 'spawn-started':return{cls:'',text:`${e.sp} dispatched (${e.r})`};case 'build-started':return{cls:'',text:`${e.sp} started the build`};case 'spawn-done':return{cls:'good',text:`${e.sp} done in ${e.dur?fmtDur(e.dur):'?'}, ${kTok(e.tok)} tokens${e.st?', '+e.st:''}`};case 'spawn-failed':return{cls:'bad',text:`${e.sp} failed: ${e.why}`};case 'build-done':return{cls:e.st==='DONE'?'good':'bad',text:`build ${e.st}, verify exit ${e.vx}`};case 'build-blocked':return{cls:'bad',text:`builder blocked: ${e.why}`};case 'verdict':return{cls:e.ok?'good':'bad',text:`grader: ${e.ok?'confirmed':'not confirmed'}, ${e.n} criteria${e.ca?', '+e.ca+' could not assess':''}`};case 'review':return{cls:e.nb?'bad':'good',text:`review depth ${e.d}, ${e.nb} blocking`};case 'merge-gate-clean':return{cls:'good',text:'merge gate clean'};case 'merge-gate-rework':return{cls:'bad',text:`merge gate rework: ${e.why||''}`};case 'shipped':return{cls:'good',text:`shipped ${e.sha||''}`};case 'escalation-blocking':return{cls:'esc',text:`escalation by ${e.a}: ${e.why} (default: ${e.df||'—'}, by ${(e.dl||'—').slice(0,16)})`};case 'question':return{cls:'esc',text:`question by ${e.a}: ${e.why} (default: ${e.df||'—'})`};case 'decision':return{cls:'esc',text:`decision by ${e.a}: ${e.why}`};case 'spec-written':return{cls:'',text:`spec written: ${e.ac} criteria, ${e.fp} files, charter ${e.ch||'?'}`};case 'spec-killed':return{cls:'bad',text:`killed: ${e.why||''}`};case 'charter-filed':return{cls:'',text:`charter filed: ${e.ti}`};case 'plan-written':return{cls:'',text:'plan written'};case 'deploy-failed':return{cls:'bad',text:'deploy failed'};default:return{cls:'',text:e.ty};}}
+function bindLinks(){for(const a of document.querySelectorAll('a.link[data-role]'))a.onclick=()=>openRole(a.dataset.role);for(const a of document.querySelectorAll('a.link[data-subj]'))a.onclick=()=>openSubject(a.dataset.subj);for(const a of document.querySelectorAll('a.link[data-mon]'))a.onclick=()=>openMonster(a.dataset.mon);}
+function chronicleHtml(){const c=DATA.counts;return `<h4>EVENT TYPES</h4><table><tr><th>type</th><th>count</th></tr>${Object.entries(c).slice(0,24).map(([k,v])=>`<tr><td>${k}</td><td>${v}</td></tr>`).join('')}</table><p class="tiny">Ledger from ${(DATA.ledger_start||'').slice(0,16)}, ${DATA.n_events.toLocaleString()} events. ${LIVE?'Live from '+esc(DATA.root)+'.':'Snapshot.'}</p>`;}
+function shelfHtml(){const rows=[...S.shelf.entries()].sort((a,b)=>a[1]-b[1]);return `<h4>ON THE SHELF NOW (${rows.length})</h4>${rows.length?'<table><tr><th>spec</th><th>waiting</th></tr>'+rows.slice(0,30).map(([s,ms])=>`<tr><td><a class="link" data-subj="${s}">${s}</a></td><td>${fmtDur(S.now-ms)}</td></tr>`).join('')+'</table>':'<p class="tiny">Empty.</p>'}<p class="tiny">Written, not yet taken by a builder, as of the clock. Killed specs leave the shelf.</p>`;}
+function keepHtml(){const rows=[...S.esc.entries()];return `<h4>RAVENS WAITING (${rows.length})</h4>${rows.length?rows.slice(0,20).map(([s,l])=>`<p><a class="link" data-subj="${s}">${s}</a> · ${fmtDur(S.now-l[0].ms)} · ${esc(l[l.length-1].why)}</p>`).join(''):'<p class="tiny">None. The keep is quiet.</p>'}`;}
+function docksHtml(){const q=DATA.queue;const w=[...S.actors.values()].filter(a=>a.state==='queued');return `<h4>CLAIM LATENCY (seat files)</h4><div class="kv"><b>spawns</b><span>${q.n} with a .claimed file</span><b>median</b><span>${q.med_min} min</span><b>p90</b><span>${q.p90_min} min</span><b>worst</b><span>${q.max_min} min</span></div><p class="tiny">Waiting at the ferry now: ${w.length}. Seat directory holds ${DATA.seat.packets} packets, ${DATA.seat.served} served, ${DATA.seat.unclaimed} never claimed.</p>`;}
+const charterId=v=>{const m=/L-charter-\d+/.exec(String(v||''));return m?m[0]:null;};
+const BUCKET=[['accepted',/^accepted$/,'#8fe08f','accepted'],['shipped',/^shipped$/,'#7fc4ff','shipped'],['owed',/owed/,'#ffc46b','shipped, owes evidence'],['flight',/^(building|built|graded|reviewing|grading|dispatched)$/,'#a97cff','in flight'],['written',/^written$/,'#b8b0c8','on the shelf'],['dead',/killed|void|dropped/,'#6a4a52','killed or void'],['other',/.*/,'#4a4660','other']];
+const bucketOf=st=>BUCKET.find(b=>b[1].test(st||''))[0];
+function specCharter(s){if(!s)return null;if(DATA&&DATA.spec_charter[s])return DATA.spec_charter[s];const ev=S.subjectEvents.get(s)||[];for(const e of ev)if(e.ty==='spec-written'&&e.ch){const c=charterId(e.ch);if(c)return c;}return null;}
+function stateMap(){return new Map((DATA&&DATA.states||[]).map(r=>[r[0],r[1]]));}
+function charterRows(){const st=stateMap();const rows={};for(const [s,state] of st){if(!s.startsWith('L-spec-'))continue;const c=specCharter(s)||'free-standing';(rows[c]=rows[c]||{specs:[]}).specs.push({s,state,b:bucketOf(state)});}
+  for(const c of Object.keys(DATA&&DATA.charters||{}))rows[c]=rows[c]||{specs:[]};
+  for(const c in rows){const r=rows[c];const meta=(DATA&&DATA.charters[c])||{};r.id=c;r.title=meta.title||S.charters.get(c)||(c==='free-standing'?'Specs that name no charter (charter: null, D15): inbound and maintenance work that stands on its own.':'');r.project=meta.project||'';r.state=st.get(c)||(meta.retracted?'retracted':meta.filed?'open':'');r.n={};for(const b of BUCKET)r.n[b[0]]=0;for(const x of r.specs)r.n[x.b]++;
+    r.ravens=[...S.esc.keys()].filter(s=>specCharter(s)===c||s===c);let oldestShelf=0;for(const x of r.specs)if(x.b==='written'&&S.shelf.has(x.s))oldestShelf=Math.max(oldestShelf,S.now-S.shelf.get(x.s));r.oldestShelf=oldestShelf;
+    r.last=0;for(const x of r.specs){const ev=S.subjectEvents.get(x.s)||[];if(ev.length)r.last=Math.max(r.last,ev[ev.length-1].ms);}const cev=S.subjectEvents.get(c)||[];if(cev.length)r.last=Math.max(r.last,cev[cev.length-1].ms);
+    r.hold=holding(r);}
+  return Object.values(rows).sort((a,b)=>(b.last||0)-(a.last||0));}
+function holding(r){const live=r.n.flight+r.n.written+r.n.owed;const total=r.specs.length;
+  if(r.state==='retracted')return{cls:'bad',text:'Retracted.'};
+  if(r.ravens.length)return{cls:'bad',text:`Waiting on ${r.ravens.length} ruling${r.ravens.length>1?'s':''}: ${r.ravens.slice(0,3).join(', ')}`};
+  if(r.n.written)return{cls:r.oldestShelf>2*3600000?'bad':'',text:`${r.n.written} spec${r.n.written>1?'s':''} on the shelf, oldest ${fmtDur(r.oldestShelf)}. Waiting on the Executor to dispatch a builder.`};
+  if(r.n.flight)return{cls:'',text:`${r.n.flight} in flight: being built, graded or reviewed.`};
+  if(r.n.owed)return{cls:'',text:`${r.n.owed} shipped but owing prod evidence. The charter cannot close until a reviewer observes them live.`};
+  if(total&&r.n.accepted+r.n.shipped===total-r.n.dead)return{cls:'ok',text:'Every live spec accepted or shipped. Ready for charter review.'};
+  if(!total)return{cls:'',text:r.state==='open'?'Filed, no specs cut yet. Waiting on the Planner.':'No specs on the ledger.'};
+  return{cls:'',text:'Mixed.'};}
+function segHtml(r){const t=r.specs.length||1;return '<div class="seg">'+BUCKET.map(b=>r.n[b[0]]?`<i style="width:${100*r.n[b[0]]/t}%;background:${b[2]}" title="${b[3]}: ${r.n[b[0]]}"></i>`:'').join('')+'</div>';}
+function chartersHtml(){const rows=charterRows();const byProj={};for(const r of rows)(byProj[r.project||'—']=byProj[r.project||'—']||[]).push(r);
+  const key='<div class="key">'+BUCKET.filter(b=>b[0]!=='other').map(b=>`<span><i style="background:${b[2]}"></i>${b[3]}</span>`).join('')+'</div>';
+  return `<h2>Charters</h2><div class="cls">what is being built, and where each one is holding</div>${key}`+Object.entries(byProj).map(([p,list])=>`<div class="proj">${esc(p.toUpperCase())} · ${list.length}</div>`+list.map(r=>`<div class="cb" data-ch="${r.id}"><span class="id">${esc(r.id)}${r.state?' · '+esc(r.state):''}</span><div class="lead">${esc(intentLine(r.id)||(r.id==='free-standing'?'Free-standing specs: no charter above them.':r.title||'(no charter file on the ledger)'))}</div>${intentLine(r.id)?`<div class="ti">Done when: ${esc(r.title||'')}</div>`:''}${segHtml(r)}<div class="cnt">${BUCKET.filter(b=>r.n[b[0]]).map(b=>`<span style="color:${b[2]}">${r.n[b[0]]} ${b[3]}</span>`).join('')}${r.last?`<span>last event ${fmt(r.last)}</span>`:''}</div><div class="hold ${r.hold.cls}">${esc(r.hold.text)}</div></div>`).join('')).join('')+`<p class="tiny">Specs are grouped by the charter their spec-written event names. States come from <code>doit states</code>${LIVE?', re-derived after every tick':''}.</p>`;}
+function openCharters(){openPanel(chartersHtml());for(const d of document.querySelectorAll('.cb[data-ch]'))d.onclick=()=>openDossier(d.dataset.ch);}
+function intentLine(cid){const m=DATA&&DATA.charters[cid];if(!m||!m.intent)return '';const sents=m.intent.split(/(?<=[.!?])\s+/);let out=sents[0]||'';if(out.length<90&&sents[1])out+=' '+sents[1];return out.length>220?out.slice(0,217)+'…':out;}
+function openCharter(c){return openDossier(c);}
+function openCharterPanel(c){const r=charterRows().find(x=>x.id===c);if(!r)return openSubject(c);const meta=(DATA&&DATA.charters[c])||{};const ev=S.subjectEvents.get(c)||[];
+  const order=['written','flight','owed','shipped','accepted','dead','other'];const specs=r.specs.slice().sort((a,b)=>order.indexOf(a.b)-order.indexOf(b.b)||a.s.localeCompare(b.s));
+  openPanel(`<h2>${esc(c)}</h2><div class="cls">${esc(r.project||'')}${r.state?' · '+esc(r.state):''}${meta.filed?' · filed '+esc(fmt(toMs(meta.filed))):''}</div><p>${esc(r.title||'')}</p>${segHtml(r)}<div class="hold ${r.hold.cls}" style="font-size:13.5px;margin:4px 0 8px">${esc(r.hold.text)}</div>
+  ${r.ravens.length?`<h4>RAVENS OPEN</h4>${r.ravens.map(s=>{const l=S.esc.get(s);return `<p><a class="link" data-subj="${s}">${s}</a> · ${fmtDur(S.now-l[0].ms)} · ${esc(l[l.length-1].why)}</p>`;}).join('')}`:''}
+  <h4>SPECS (${specs.length})</h4><table><tr><th>spec</th><th>state</th><th>last</th></tr>${specs.map(x=>{const e=(S.subjectEvents.get(x.s)||[]).slice(-1)[0];const bk=BUCKET.find(b=>b[0]===x.b);return `<tr><td><a class="link" data-subj="${x.s}">${x.s.replace('L-spec-','')}</a></td><td style="color:${bk[2]}">${esc(x.state)}</td><td class="tiny">${e?esc(narrate(e).text).slice(0,60):''}</td></tr>`;}).join('')}</table>
+  <h4>CHARTER EVENTS</h4>${timelineHtml(ev)}<p><a class="link" id="back-ch">◂ all charters</a></p>`);bindLinks();$('back-ch').onclick=openCharters;}
+/* ---------------- the charter dossier: how it got here, where it holds, what to do ---------------- */
+const histCache=new Map();
+async function charterHistory(cid){const c=histCache.get(cid);if(c&&Date.now()-c.at<60000)return c.v;let v;
+  if(REMOTE&&!stream){try{const hd=await remoteFetch('history');if(hd&&hd.events){const specs=Object.entries(hd.spec_charter||{}).filter(([s,c])=>c===cid).map(([s])=>s);const mine=new Set([cid,...specs]);v={meta:{...(DATA.charters[cid]||{}),...((hd.charters||{})[cid]||{})},specs:specs.sort(),rows:hd.events.filter(e=>mine.has(e.s)).map(e=>({...e,ms:toMs(e.t)})).filter(e=>e.ms).sort((a,b)=>a.ms-b.ms)};}}catch(_){}}
+  if(!v&&stream){try{const r=await fetch(api('/api/charter?id='+encodeURIComponent(cid)),{cache:'no-store'});if(r.ok){const d=await r.json();v={meta:{...(DATA.charters[cid]||{}),...d.meta},specs:d.specs,rows:d.rows.map(e=>({...e,ms:toMs(e.t)})).filter(e=>e.ms).sort((a,b)=>a.ms-b.ms)};if(DATA)DATA.charters[cid]=v.meta;}}catch(_){}}
+  if(!v){const specs=Object.entries(DATA.spec_charter||{}).filter(([s,c])=>c===cid).map(([s])=>s);const mine=new Set([cid,...specs]);v={meta:DATA.charters[cid]||{},specs:specs.sort(),rows:EVENTS.filter(e=>mine.has(e.s))};}
+  histCache.set(cid,{at:Date.now(),v});return v;}
+const STAGE={shelf:['#5e5878','on the shelf, waiting for a builder'],audit:['#9a844a','spec audit'],write:['#4a7ce0','spec being written or reworked'],build:['#b8763a','building'],await:['#302c44','waiting for the next role'],grade:['#6b4bb8','grading'],review:['#48b062','review on prod'],gate:['#7fc4ff','merge and deploy'],owed:['#ffc46b','shipped, owes prod evidence'],done:['#8fe08f','accepted'],killed:['#6a4a52','killed']};
+function specJourney(rows,s,finalState){const ev=rows.filter(e=>e.s===s);if(!ev.length)return null;const segs=[],ticks=[];let st=null,from=ev[0].ms;const open=(k,ms)=>{if(st)segs.push({k:st,a:from,b:ms});st=k;from=ms;};
+  for(const e of ev){switch(e.ty){case 'spec-written':open(st==='write'?'shelf':'shelf',e.ms);break;case 'spawn-started':if(e.r==='spec-auditor')open('audit',e.ms);else if(e.r==='spec-writer')open('write',e.ms);else if(e.r==='grader')open('grade',e.ms);else if(e.r==='reviewer')open('review',e.ms);break;
+    case 'build-started':open('build',e.ms);break;case 'build-done':open('await',e.ms);if(e.st!=='DONE')ticks.push({ms:e.ms,k:'bad',t:'build '+e.st});break;case 'build-blocked':open('await',e.ms);ticks.push({ms:e.ms,k:'bad',t:'blocked'});break;
+    case 'spawn-done':if(['spec-auditor','spec-writer'].includes(e.r))open('shelf',e.ms);else if(['grader','reviewer'].includes(e.r))open(st==='grade'||st==='review'?'await':st,e.ms);break;
+    case 'spawn-failed':ticks.push({ms:e.ms,k:'bad',t:MON[monsterFor(e.why)].name});if(['spec-auditor','spec-writer'].includes(e.r))open('shelf',e.ms);else if(['grader','reviewer','builder'].includes(e.r))open('await',e.ms);break;
+    case 'verdict':open('await',e.ms);if(!e.ok)ticks.push({ms:e.ms,k:'bad',t:'not confirmed'});break;case 'review':open('await',e.ms);break;case 'merge-gate-clean':open('gate',e.ms);break;case 'merge-gate-rework':ticks.push({ms:e.ms,k:'bad',t:'gate rework'});break;
+    case 'shipped':open(/accepted/.test(finalState||'')?'done':/owed/.test(finalState||'')?'owed':'gate',e.ms);break;case 'spec-killed':open('killed',e.ms);break;
+    case 'escalation-blocking':case 'question':ticks.push({ms:e.ms,k:'esc',t:'raven'});break;case 'decision':ticks.push({ms:e.ms,k:'dec',t:'ruling'});break;}}
+  if(st)segs.push({k:st,a:from,b:null});return{s,segs,ticks,first:ev[0].ms,state:finalState};}
+function drawJourney(cv,J,cticks,t0,t1){const dpr=Math.min(2,devicePixelRatio||1);const Wc=cv.clientWidth||900,rowH=16,L=92,top=26,Hc=top+rowH*(J.length+1)+8;cv.width=Wc*dpr;cv.height=Hc*dpr;cv.style.height=Hc+'px';const c=cv.getContext('2d');c.scale(dpr,dpr);c.fillStyle='rgba(0,0,0,0)';c.clearRect(0,0,Wc,Hc);
+  const X=ms=>L+(Wc-L-8)*Math.max(0,Math.min(1,(ms-t0)/Math.max(1,t1-t0)));c.font='11px Noto Sans';
+  // time grid
+  const span=t1-t0;const step=span>3*86400000?86400000:span>36*3600000?6*3600000:span>8*3600000?2*3600000:3600000;const first=Math.ceil(t0/step)*step;
+  for(let ms=first;ms<=t1;ms+=step){const x=X(ms);c.strokeStyle='rgba(255,255,255,.08)';c.beginPath();c.moveTo(x,top-6);c.lineTo(x,Hc-4);c.stroke();c.fillStyle='rgba(255,255,255,.5)';c.fillText(fmt(ms).slice(step>=86400000?0:6),x-14,12);}
+  c.strokeStyle='rgba(255,196,107,.7)';c.beginPath();c.moveTo(X(S.now),top-6);c.lineTo(X(S.now),Hc-4);c.stroke();
+  // charter row
+  c.fillStyle='#e6c46a';c.font='700 10px Cinzel';c.fillText('CHARTER',4,top+11);for(const t of cticks){const x=X(t.ms);c.fillStyle=t.k==='bad'?'#ff6a5c':t.k==='good'?'#8fe08f':t.k==='esc'?'#ffc46b':'#fff';c.beginPath();c.moveTo(x,top+2);c.lineTo(x+5,top+12);c.lineTo(x-5,top+12);c.closePath();c.fill();}
+  c.font='11px Noto Sans';J.forEach((j,i)=>{const y=top+rowH*(i+1);const bk=BUCKET.find(b=>b[1].test(j.state||''));c.fillStyle=bk?bk[2]:'#b8b0c8';c.fillText(j.s.replace('L-spec-',''),4,y+11);c.fillStyle='rgba(255,255,255,.35)';c.fillText((j.state||'').slice(0,12),34,y+11);
+    for(const sg of j.segs){const a=X(sg.a),b=X(sg.b==null?S.now:sg.b);c.fillStyle=STAGE[sg.k]?STAGE[sg.k][0]:'#444';c.fillRect(a,y+3,Math.max(2,b-a),rowH-6);}
+    for(const t of j.ticks){const x=X(t.ms);c.fillStyle=t.k==='bad'?'#ff6a5c':t.k==='esc'?'#ffc46b':'#fff';if(t.k==='dec'){c.fillRect(x-1,y+2,2,rowH-4);}else{c.beginPath();c.moveTo(x,y+1);c.lineTo(x+4,y+rowH/2);c.lineTo(x,y+rowH-1);c.lineTo(x-4,y+rowH/2);c.closePath();c.fill();}}});}
+function dossierHtml(cid,H){const meta=H.meta||{};const st=stateMap();const r=charterRows().find(x=>x.id===cid)||{id:cid,specs:[],n:{},ravens:[],hold:{cls:'',text:''},state:st.get(cid)||''};
+  const rows=H.rows;const now=S.now;const by=ty=>rows.filter(e=>e.ty===ty);const filed=toMs(meta.filed)||(by('charter-filed')[0]||rows[0]||{}).ms||T0;
+  const specs=H.specs.map(s=>({s,state:st.get(s)||'',b:bucketOf(st.get(s)||'')}));const J=specs.map(x=>specJourney(rows,x.s,x.state)).filter(Boolean).sort((a,b)=>a.first-b.first);
+  // milestones
+  const M=[];const add=(ms,cls,text)=>ms&&M.push({ms,cls,text});
+  add(filed,'good',`Charter filed${meta.project?' for '+meta.project:''}${meta.n_req?', '+meta.n_req+' requirements':''}.`);
+  for(const e of by('probe-run'))add(e.ms,'',`Probe ran: ${e.why||e.k||''}`);
+  for(const e of by('planner-started'))add(e.ms,'','Planner took the charter.');
+  const pw=by('plan-written')[0];if(pw)add(pw.ms,'good',`Plan written, ${fmtDur(pw.ms-filed)} after filing.`);
+  for(const e of by('cut-written'))add(e.ms,'',`Cut written${e.why?': '+e.why:''}`);
+  for(const e of rows.filter(e=>e.ty==='spawn-done'&&e.r==='plan-auditor'))add(e.ms,e.st&&/bad/.test(e.st)?'bad':'',`Plan audit returned${e.st?' '+e.st:''} (${e.dur?fmtDur(e.dur):'?'}).`);
+  for(const e of by('seam-undefined'))add(e.ms,'bad',`Seam nobody owns: ${e.why||''}`);
+  const sw=by('spec-written');if(sw.length)add(sw[0].ms,'',`First spec written (${sw.length} written in all, last ${fmt(sw[sw.length-1].ms)}).`);
+  const killed=by('spec-killed');if(killed.length)add(killed[0].ms,'bad',`${killed.length} spec${killed.length>1?'s':''} killed: ${killed.slice(0,3).map(e=>e.s.replace('L-spec-','')+(e.why?' ('+e.why.slice(0,60)+')':'')).join('; ')}${killed.length>3?'…':''}`);
+  const bs=by('build-started');if(bs.length)add(bs[0].ms,'',`First build started, ${fmtDur(bs[0].ms-filed)} after filing (${bs.length} builds since).`);
+  const bd=by('build-done');const blk=bd.filter(e=>e.st!=='DONE').length+by('build-blocked').length;if(blk)add((bd.find(e=>e.st!=='DONE')||by('build-blocked')[0]).ms,'bad',`${blk} build${blk>1?'s':''} came back BLOCKED or needing context.`);
+  const fails=by('spawn-failed');if(fails.length){const cnt={};for(const e of fails){const k=MON[monsterFor(e.why)].name;cnt[k]=(cnt[k]||0)+1;}add(fails[0].ms,'bad',`${fails.length} runs fell: ${Object.entries(cnt).map(([k,v])=>v+' to the '+k).join(', ')}.`);}
+  const vd=by('verdict');if(vd.length)add(vd[0].ms,'',`First grader verdict (${vd.filter(e=>e.ok).length} of ${vd.length} confirmed overall).`);
+  const rv=by('review');if(rv.length)add(rv[0].ms,'',`First prod review (${rv.filter(e=>e.d==='full').length} full, ${rv.filter(e=>e.d!=='full').length} gates-only overall).`);
+  const sh=by('shipped');if(sh.length)add(sh[0].ms,'good',`First spec shipped, ${fmtDur(sh[0].ms-filed)} after filing (${sh.length} shipped in all).`);
+  const esc_=rows.filter(e=>e.ty==='escalation-blocking'||e.ty==='question');const dec=by('decision');if(esc_.length)add(esc_[0].ms,'esc',`${esc_.length} raven${esc_.length>1?'s':''} sent to the Keep; ${dec.length} ruling${dec.length!==1?'s':''} recorded.`);
+  for(const e of rows.filter(e=>e.ty==='spawn-done'&&e.r==='charter-reviewer'))add(e.ms,/not/.test(e.st||'')?'bad':'good',`Charter review returned ${e.st||'?'}.`);
+  const af=by('audit-finding');if(af.length)add(af[0].ms,'bad',`${af.length} audit finding${af.length>1?'s':''} on the charter: ${[...new Set(af.map(e=>e.k).filter(Boolean))].slice(0,4).join(', ')}.`);
+  for(const e of by('charter-gap'))add(e.ms,'bad',`Gap: ${e.why||''}`);
+  for(const e of by('sweep-fixpoint'))add(e.ms,'',`Sweep reached fixpoint${e.why?': '+e.why:''}.`);
+  for(const e of by('l1-complete'))add(e.ms,'good','L1-complete: every spec accepted or owing evidence.');
+  for(const e of by('charter-retracted'))add(e.ms,'bad',`Retracted: ${e.why||''}`);
+  M.sort((a,b)=>a.ms-b.ms);
+  const cticks=[{ms:filed,k:'good'},...(pw?[{ms:pw.ms,k:'good'}]:[]),...esc_.map(e=>({ms:e.ms,k:'esc'})),...dec.map(e=>({ms:e.ms,k:'dec'})),...af.map(e=>({ms:e.ms,k:'bad'})),...by('l1-complete').map(e=>({ms:e.ms,k:'good'}))];
+  // now
+  const inflight=[...S.actors.values()].filter(a=>!a.done&&(H.specs.includes(a.subject)||a.subject===cid));
+  const shelfRows=specs.filter(x=>x.b==='written').map(x=>({s:x.s,ms:S.shelf.get(x.s)})).sort((a,b)=>(a.ms||0)-(b.ms||0));
+  // next
+  const next=[];const n=r.n||{};if(r.ravens&&r.ravens.length)next.push(`A ruling on ${r.ravens.join(', ')}. Until then those specs cannot move.`);
+  if(n.written)next.push(`The Executor dispatches a builder for each of the ${n.written} shelf spec${n.written>1?'s':''} on a tick.`);
+  if(n.flight)next.push(`In-flight specs finish their stage: build → grade → prod review → merge gate → deploy.`);
+  if(n.owed)next.push(`${n.owed} shipped spec${n.owed>1?'s':''} need a reviewer to observe them on prod before they count as accepted.`);
+  if(!n.written&&!n.flight&&!n.owed&&specs.length&&!/complete/.test(r.state||''))next.push('Charter review: the charter-reviewer drives the done-condition on prod and reads every card\'s not-built half.');
+  if(/L1-complete|l1-complete/i.test(r.state||''))next.push('L1 is complete. What remains is the charter review on prod and tree cleanup.');
+  if(!specs.length)next.push('The Planner has to write the plan and cut specs.');
+  // act on
+  const acts=[];for(const s of (r.ravens||[])){const l=S.esc.get(s)||[];const x=l[l.length-1]||{};acts.push({cls:'',b:`Rule on ${s}`,t:x.why||'',tiny:`If nobody rules: ${x.df||'no default recorded'}${x.dl?' · fires '+String(x.dl).slice(0,16):''}`});}
+  for(const a of S.alarms){if(a.subjects.some(s=>H.specs.includes(s)||s===cid)){acts.push({cls:a.sev===2?'bad':'',b:a.title,t:a.detail,tiny:(OMEN_HELP[a.kind]||{}).fix||''});}}
+  const lastBlk=bd.filter(e=>e.st!=='DONE').slice(-1)[0];if(lastBlk&&!bd.some(e=>e.s===lastBlk.s&&e.st==='DONE'&&e.ms>lastBlk.ms))acts.push({cls:'bad',b:`${lastBlk.s} came back ${lastBlk.st}`,t:'A builder could not start or finish; it is a dispatch problem more often than a code problem.',tiny:'Read the card, fix the base or repo, re-dispatch.'});
+  if(killed.length>=3)acts.push({cls:'bad',b:'This looks like a bad cut',t:`${killed.length} specs were killed. The design doc reads that as the plan being wrong, not the builders.`,tiny:'Re-plan rather than rework one spec at a time.'});
+  if(n.owed>=5)acts.push({cls:'',b:`${n.owed} specs owe prod evidence`,t:'Shipped is not accepted. The charter cannot close over more than K owed criteria.',tiny:'Dispatch reviewers with drivable review_paths, or re-date the owed criteria.'});
+  const vcls=r.hold.cls==='ok'?'ok':r.hold.cls==='bad'?'bad':'warn';
+  return `<div class="top"><div><div class="id">${esc(cid)} · ${esc(meta.project||'')} · ${esc(r.state||'')}${meta.filed?' · filed '+fmt(filed):''}</div><h2>${esc(intentLine(cid)||meta.title||'')}</h2>${meta.done?`<p class="done"><b>Done when:</b> ${esc(meta.done)}</p>`:meta.title?`<p class="done"><b>Done when:</b> ${esc(meta.title)}</p>`:''}</div><div class="btns"><button class="btn" id="d-replay">▶ REPLAY ON MAP</button><button class="btn" id="d-close">CLOSE</button></div></div>
+  <div class="verdict"><span class="big ${vcls}">${vcls==='ok'?'MOVING':vcls==='bad'?'STUCK':'HOLDING'}</span><span>${esc(r.hold.text)}</span></div>
+  ${segHtml(r)}<div class="cnt" style="font-size:12px;color:var(--mute);display:flex;gap:12px;flex-wrap:wrap">${BUCKET.filter(b=>n[b[0]]).map(b=>`<span style="color:${b[2]}">${n[b[0]]} ${b[3]}</span>`).join('')}<span>${specs.length} specs · ${rows.length} events</span></div>
+  <div class="jkey" style="margin-top:10px">${Object.entries(STAGE).map(([k,v])=>`<span><i style="background:${v[0]}"></i>${v[1]}</span>`).join('')}<span><i style="background:#ff6a5c"></i>failure</span><span><i style="background:#ffc46b"></i>raven</span><span><i style="background:#fff"></i>ruling</span></div>
+  <canvas id="journey"></canvas><p class="tiny">Each row is one spec from the moment it was written until now. Long grey is time on the shelf. The amber line is now.</p>
+  <div class="cols"><div class="col"><h4>HOW WE GOT HERE</h4><ul class="ms">${M.map(m=>`<li class="${m.cls}"><time>${fmt(m.ms)}</time><span>${esc(m.text)}</span></li>`).join('')}</ul></div>
+  <div class="col"><h4>NOW</h4>${inflight.length?'<ul>'+inflight.map(a=>`<li><a class="link" data-sp="${a.sp}">${a.sp}</a> ${a.state} on ${a.subject}, ${fmtDur(now-a.start)} of ${CAP[a.role]||'—'} min</li>`).join('')+'</ul>':'<p class="tiny">Nobody is working on this charter at this moment.</p>'}${shelfRows.length?'<h4 style="margin-top:12px">ON THE SHELF</h4><ul>'+shelfRows.map(x=>`<li><a class="link" data-subj="${x.s}">${x.s}</a>${x.ms?' · waiting '+fmtDur(now-x.ms):''}</li>`).join('')+'</ul>':''}<h4 style="margin-top:12px">WHAT HAPPENS NEXT</h4><ul>${next.map(t=>`<li>${esc(t)}</li>`).join('')}</ul></div>
+  <div class="col"><h4>ACT ON</h4>${acts.length?acts.map(a=>`<div class="act ${a.cls}"><b>${esc(a.b)}</b>${esc(a.t)}<span class="tiny">${esc(a.tiny)}</span></div>`).join(''):'<p class="tiny">Nothing needs you. Let it run.</p>'}<h4 style="margin-top:12px">THE INTENT IN FULL</h4><p class="intent-full">${esc(meta.intent||'(no charter file found under content/)')}</p></div></div>`;}
+async function openDossier(cid){const d=$('dossier');d.hidden=false;d.innerHTML=`<div class="id">${esc(cid)}</div><h2>Reading the charter's history…</h2>`;const H=await charterHistory(cid);if(d.hidden)return;d.innerHTML=dossierHtml(cid,H);d.scrollTop=0;
+  const filed=toMs((H.meta||{}).filed)||(H.rows[0]||{}).ms||T0;const J=H.specs.map(s=>specJourney(H.rows,s,stateMap().get(s)||'')).filter(Boolean).sort((a,b)=>a.first-b.first);
+  const cticks=[];drawJourney($('journey'),J,cticksFor(H,filed),filed,Math.max(S.now,filed+3600000));
+  $('d-close').onclick=closeDossier;$('d-replay').onclick=()=>replayCharter(cid,filed);
+  for(const a of d.querySelectorAll('a.link[data-subj]'))a.onclick=()=>{openSubject(a.dataset.subj);};for(const a of d.querySelectorAll('a.link[data-sp]'))a.onclick=()=>{openActor(a.dataset.sp);};}
+function cticksFor(H,filed){const rows=H.rows;const t=[{ms:filed,k:'good'}];for(const e of rows){if(e.s!==H.id&&!String(e.s||'').startsWith('L-charter-'))continue;if(e.ty==='plan-written'||e.ty==='l1-complete')t.push({ms:e.ms,k:'good'});else if(e.ty==='escalation-blocking'||e.ty==='question')t.push({ms:e.ms,k:'esc'});else if(e.ty==='decision')t.push({ms:e.ms,k:'dec'});else if(e.ty==='audit-finding'||e.ty==='charter-gap'||e.ty==='charter-retracted')t.push({ms:e.ms,k:'bad'});}return t;}
+function closeDossier(){$('dossier').hidden=true;}
+async function replayCharter(cid,fromMs){closeDossier();if(REMOTE&&!stream&&fromMs<T0){status('WAKING THE REALM','fetching the whole history for the replay…');try{const hd=await remoteFetch('history');if(hd&&hd.events){hd.live=false;loadData(hd);}}catch(_){}status(null);}
+  if(stream&&fromMs<T0){status('WAKING THE REALM','fetching the charter\'s whole history for the replay…');try{const hours=Math.ceil((Date.now()-fromMs)/3600000)+1;const r=await fetch(api('/api/bootstrap?hours='+hours),{cache:'no-store'});if(r.ok)loadData(await r.json());}catch(_){}status(null);}
+  LIVE=false;S.focus=cid;S.speed=720;document.querySelectorAll('.spd').forEach(x=>x.classList.toggle('on',x.dataset.s==='720'));seek(Math.max(T0,fromMs-60000));S.playing=true;renderFocus();}
+function renderFocus(){let el=document.getElementById('focus');if(!S.focus){if(el)el.remove();return;}if(!el){el=document.createElement('div');el.id='focus';el.className='chip focus';$('legend').prepend(el);}el.innerHTML=`REPLAYING ${esc(S.focus)} <a data-a="d">dossier</a><a data-a="c">clear</a>`;el.querySelector('[data-a=d]').onclick=()=>openDossier(S.focus);el.querySelector('[data-a=c]').onclick=()=>{S.focus=null;renderFocus();};}
+const inFocus=subj=>!S.focus||subj===S.focus||specCharter(subj)===S.focus;
+/* ---------------- a maker's world: the things one inbound author has made ---------------- */
+const RELIC={gear:['....gggg....','..gg.gg.gg..','.gggggggggg.','.gg.gggg.gg.','gggg.gg.gggg','ggg.g..g.ggg','ggg.g..g.ggg','gggg.gg.gggg','.gg.gggg.gg.','.gggggggggg.','..gg.gg.gg..','....gggg....'],
+ coin:['....gggg....','..gggggggg..','.gggg..gggg.','.ggg.gg.ggg.','gggg.gg.gggg','ggg.gggg.ggg','ggg.gggg.ggg','gggg.gg.gggg','.ggg.gg.ggg.','.gggg..gggg.','..gggggggg..','....gggg....'],
+ crate:['............','.gggggggggg.','.g.gggggg.g.','.gg.gggg.gg.','.ggg.gg.ggg.','.gggg..gggg.','.gggg..gggg.','.ggg.gg.ggg.','.gg.gggg.gg.','.g.gggggg.g.','.gggggggggg.','............'],
+ scroll:['.gggggggggg.','g..........g','.gggggggggg.','.g........g.','.g.gggggg.g.','.g........g.','.g.gggg...g.','.g........g.','.g.ggggg..g.','.g........g.','.gggggggggg.','g..........g'],
+ shield:['.gggggggggg.','gg........gg','g..gggggg..g','g..g....g..g','g..g.gg.g..g','g..g.gg.g..g','g..gggggg..g','.g........g.','.gg......gg.','..gg....gg..','...gg..gg...','....gggg....'],
+ book:['.gggggggggg.','.g........g.','.g.ggg.gg.g.','.g........g.','.g.gggggg.g.','.g........g.','.g.ggggg..g.','.g........g.','.g.gggggg.g.','.g........g.','.gggggggggg.','.gggggggggg.'],
+ gate:['gg........gg','gg.gggggg.gg','gggg....gggg','gg.g.gg.g.gg','gg.g.gg.g.gg','gg.g.gg.g.gg','gg.g.gg.g.gg','gg.g.gg.g.gg','gg.g.gg.g.gg','gg.g.gg.g.gg','gg.gggggg.gg','gg........gg'],
+ flask:['....gggg....','....g..g....','....g..g....','...gg..gg...','..gg....gg..','.gg......gg.','.g........g.','.g.gggggg.g.','.g.gggggg.g.','.gg.gggg.gg.','..gggggggg..','............'],
+ parcel:['.gggggggggg.','.g...gg...g.','.g...gg...g.','.gggggggggg.','.g...gg...g.','.g...gg...g.','.g...gg...g.','.g...gg...g.','.g...gg...g.','.g...gg...g.','.gggggggggg.','............']};
+function relicKind(it){const t=((it.title||'')+' '+(it.what||'')).toLowerCase();if(it.state==='pending')return 'parcel';if(/test|ci|guard|gate|drift|lint|check/.test(t))return 'shield';if(/profit|pnl|p&l|cash|settlement|payout|fee|cogs|net/.test(t))return 'coin';if(/order|inventory|feed|collector|marketplace|amazon|sku/.test(t))return 'crate';if(/zod|contract|schema|type|api/.test(t))return 'scroll';if(/portal|page|ui|dashboard|drawer|view/.test(t))return 'gate';if(/ledger|report|provenance|log|audit/.test(t))return 'book';if(/probe|experiment|forecast|model/.test(t))return 'flask';return 'gear';}
+function relicTint(it){const st=it.state||'';if(/accepted/.test(st))return{c:'#ffd76b',cls:'trophy',label:'ACCEPTED'};if(/shipped/.test(st))return{c:'#7fc4ff',cls:'trophy',label:/owed/.test(st)?'SHIPPED · OWES EVIDENCE':'SHIPPED'};if(/building|graded|reviewing|built/.test(st))return{c:'#ff9a5a',cls:'',label:'IN THE FORGE · '+st.toUpperCase()};if(/written/.test(st))return{c:'#b8b0c8',cls:'',label:'ON THE SHELF'};if(/killed|void|dropped/.test(st))return{c:'#7a6a72',cls:'dead',label:st.toUpperCase()};if(st==='pending')return{c:'#c9a86a',cls:'',label:'WAITING AT THE GATE'};return{c:'#9a92ad',cls:'',label:(st||'unknown').toUpperCase()};}
+function relicCanvas(it){const c=document.createElement('canvas');c.width=64;c.height=64;const x=c.getContext('2d');const rows=RELIC[relicKind(it)];const tint=relicTint(it);const S=4,ox=8,oy=8;
+  if(tint.cls==='trophy'){const g=x.createRadialGradient(32,30,4,32,30,32);g.addColorStop(0,'rgba(255,215,107,.45)');g.addColorStop(1,'rgba(255,215,107,0)');x.fillStyle=g;x.fillRect(0,0,64,64);}
+  for(let j=0;j<12;j++)for(let i=0;i<12;i++){if(rows[j][i]!=='g')continue;x.fillStyle=tint.c;x.fillRect(ox+i*S,oy+j*S,S,S);if(i<5)x.fillStyle='rgba(255,255,255,.18)',x.fillRect(ox+i*S,oy+j*S,S,1);}
+  if(tint.cls==='dead'){x.strokeStyle='#ff6a5c';x.lineWidth=2;x.beginPath();x.moveTo(14,50);x.lineTo(30,30);x.lineTo(26,26);x.lineTo(46,12);x.stroke();}
+  if(tint.cls==='trophy'){x.fillStyle='#fff';for(const [px,py] of [[10,14],[52,18],[50,50],[12,46]])x.fillRect(px,py,2,2);}
+  if(/building|graded|reviewing/.test(it.state||'')){x.fillStyle='#ffd36b';for(let k=0;k<5;k++)x.fillRect(46+((k*7)%14),8+((k*11)%16),2,2);}
+  return c;}
+function bannerCanvas(cv,login,items){const dpr=Math.min(2,devicePixelRatio||1);const Wb=cv.clientWidth||1100,Hb=150;cv.width=Wb*dpr;cv.height=Hb*dpr;cv.style.height=Hb+'px';const c=cv.getContext('2d');c.scale(dpr,dpr);c.imageSmoothingEnabled=false;const rnd=mulberry(21);
+  c.fillStyle='#2a1c12';c.fillRect(0,0,Wb,Hb);for(let y=0;y<Hb;y+=14){c.fillStyle=y/14%2?'#33231a':'#2e1f15';c.fillRect(0,y,Wb,13);}for(let i=0;i<Wb;i+=90){c.fillStyle='#1f140c';c.fillRect(i,0,4,Hb);}
+  c.fillStyle='#4a3420';c.fillRect(0,Hb-26,Wb,26);c.fillStyle='#5a4028';for(let i=0;i<Wb;i+=40)c.fillRect(i,Hb-26,36,4);
+  // shelves with relics, sorted trophies first
+  const sorted=items.slice().sort((a,b)=>rank(a)-rank(b));const perShelf=Math.max(6,Math.floor((Wb-220)/44));const shelves=[[Wb*.22,52],[Wb*.22,104]];
+  shelves.forEach(([sx,sy],si)=>{c.fillStyle='#6b4a2a';c.fillRect(sx,sy,Wb-sx-20,6);c.fillStyle='#8a6a3a';c.fillRect(sx,sy,Wb-sx-20,2);const slice=sorted.slice(si*perShelf,(si+1)*perShelf);slice.forEach((it,k)=>{const rc=relicCanvas(it);c.drawImage(rc,sx+8+k*44,sy-40,36,36);});});
+  // lanterns
+  for(const lx of [Wb*.18,Wb*.6,Wb-40]){c.fillStyle='#2a2a30';c.fillRect(lx,10,4,22);c.fillStyle='#ffd36b';c.fillRect(lx-3,30,10,8);const g=c.createRadialGradient(lx+2,34,2,lx+2,34,60);g.addColorStop(0,'rgba(255,190,90,.35)');g.addColorStop(1,'rgba(255,190,90,0)');c.fillStyle=g;c.fillRect(lx-60,0,124,Hb);}
+  // bench, anvil, the maker
+  c.fillStyle='#5a3d22';c.fillRect(30,Hb-60,150,10);c.fillRect(36,Hb-50,8,24);c.fillRect(166,Hb-50,8,24);c.fillStyle='#4a4f6e';c.fillRect(120,Hb-76,40,16);c.fillRect(128,Hb-84,24,8);
+  c.drawImage(makeSprite('maker',0),52,Hb-60-SH+6);c.fillStyle='#ffd36b';for(let k=0;k<6;k++)c.fillRect(126+rnd()*40,Hb-92-rnd()*20,2,2);
+  c.fillStyle='#e6c46a';c.font='700 13px Cinzel';c.fillText((items.length?login.toUpperCase()+"'S WORKSHOP":'AN EMPTY WORKSHOP'),Wb*.22,22);}
+const rank=it=>{const s=it.state||'';return /accepted/.test(s)?0:/shipped/.test(s)?1:/building|graded|reviewing|built/.test(s)?2:/written/.test(s)?3:s==='pending'?4:/killed|void/.test(s)?6:5;};
+function openWorkshop(login){const M=(DATA&&DATA.makers||{})[login];const d=$('dossier');d.hidden=false;if(!M){d.innerHTML=`<div class="top"><div><div class="id">WORKSHOP</div><h2>No maker named ${esc(login)} on this ledger.</h2></div><div class="btns"><button class="btn" id="d-close">CLOSE</button></div></div>`;$('d-close').onclick=closeDossier;return;}
+  const items=M.items.slice().sort((a,b)=>rank(a)-rank(b)||(b.ts||'').localeCompare(a.ts||''));const n=k=>items.filter(it=>k.test(it.state||'')).length;
+  d.innerHTML=`<div class="top"><div><div class="id">${esc(M.name.toUpperCase())}'S WORLD · ${esc(login)}</div><h2>Things ${esc(M.name)} has made: every spec sent in through the inbound gate, and what the realm did with it.</h2></div><div class="btns"><button class="btn" id="d-close">CLOSE</button></div></div>
+  <canvas id="banner"></canvas>
+  <div class="wstats"><span><b>${items.length}</b> sent in</span><span style="color:#ffd76b"><b>${n(/accepted/)}</b> accepted</span><span style="color:#7fc4ff"><b>${n(/^shipped/)}</b> shipped</span><span style="color:#ff9a5a"><b>${n(/building|graded|reviewing|built/)}</b> in the forge</span><span style="color:#b8b0c8"><b>${n(/written/)}</b> on the shelf</span><span style="color:#c9a86a"><b>${items.filter(i=>i.state==='pending').length}</b> waiting at the gate</span><span style="color:#9a8090"><b>${n(/killed|void/)}</b> killed</span></div>
+  <p class="tiny">A relic glows gold once it is accepted, blue once shipped, sparks while it is being built, sits wrapped while it waits for the carry, and cracks if it was killed. Click one for its story.</p>
+  <div class="wsh">${items.map((it,i)=>{const t=relicTint(it);return `<div class="relic ${t.cls}" data-i="${i}"><canvas width="64" height="64" data-r="${i}"></canvas><div><b>${esc((it.title||'untitled').replace(/-/g,' '))}</b><span class="st" style="color:${t.c};border-color:${t.c}">${t.label}</span>${it.spec?`<span class="st">${esc(it.spec)}</span>`:''}<div class="w">${esc(it.what||'')}</div><div class="m">sent ${it.ts?fmt(toMs(it.ts)):'?'}${it.shipped?' · shipped '+fmt(toMs(it.shipped)):''}${it.url?' · PR #'+esc(it.pr):''}</div></div></div>`;}).join('')}</div>`;
+  d.scrollTop=0;$('d-close').onclick=closeDossier;bannerCanvas($('banner'),M.name,items);
+  for(const c of d.querySelectorAll('canvas[data-r]'))c.getContext('2d').drawImage(relicCanvas(items[+c.dataset.r]),0,0);
+  for(const el of d.querySelectorAll('.relic')){const it=items[+el.dataset.i];el.onclick=()=>{if(it.spec){closeDossier();openSubject(it.spec);}else if(it.url)window.open(it.url,'_blank','noopener');};}}
+/* ---------------- omens: the failure modes, derived every two seconds ---------------- */
+const OMEN_HELP={
+ exec:{why:'Nothing moves without the Executor: no dispatch, no grade, no merge, no close. D117 puts a five-minute ceiling on its silence.',fix:'The pane is dead or wedged. The launcher restarts it; check the panes from `doit up`.'},
+ unclaimed:{why:'A seat packet is a sub-agent that has not been born. After 300 s the wrapper gives up and writes spawn-failed, and the subject has to be re-dispatched.',fix:'No pane is serving. Start `doit relay`.'},
+ timeout:{why:'A run past its cap is voided and charged. Graders at 15 min and builders at 90 min are the usual victims.',fix:'Expect a spawn-failed. If it repeats on the same spec, the spec asks for more than one context can do.'},
+ deadlock:{why:'A contaminated run is void, and D120 refuses to retry the identical packet. The subject is stuck until the packet changes.',fix:'Rebuild the packet (the leak is upstream), or set DOIT_DEDUP_OVERRIDE for this one re-dispatch.'},
+ churn:{why:'A spec graded many times without a confirmed verdict is burning grader runs on evidence that will never satisfy the rubric.',fix:'Read the rejected criteria; the fix is usually the review_path or the evidence type, not the code.'},
+ shelf:{why:'Written specs waiting for a builder are the wall-clock you pay. Median was 48 minutes; hours means the lane is starved or the Executor is skipping them.',fix:'Check the lane: a spec with an open spec-writer, a failed spec-shape, or an unserved packet never dispatches.'},
+ ravens:{why:'A reversible escalation fires its default at the deadline; one still open past it is either irreversible or nobody folded it.',fix:'Rule on the oldest first. An irreversible one blocks the whole subject until you do.'},
+ blocked:{why:'A BLOCKED card is a builder that could not start: wrong repo, stale base_sha, missing worktree. It is a dispatch problem, not a code problem.',fix:'Read the reason on the card and re-dispatch against the right base.'},
+ gate:{why:'merge-gate rework stops the merge. "undetermined" means git state the gate could not read, which blocks like a violation but is infra.',fix:'Clean the tree or the ref, then let the next tick retry.'},
+ owed:{why:'Shipped is not accepted. Every owed spec is a promise to observe prod that nobody has kept, and the charter cannot close over more than K of them.',fix:'Dispatch reviewers with drivable review_paths; or re-date the owed criteria if the observation cannot exist yet.'},
+ badcut:{why:'Many killed specs or many escalations on one charter is the design doc\'s bad-cut detector: the plan was wrong, not the builders.',fix:'Re-plan the charter rather than reworking specs one at a time.'},
+ spike:{why:'Most failures are infra, not model quality. A spike in the last hour is a pane, a cap, or a packet builder, and it will keep happening until fixed.',fix:'Open the fallen runs; the monster names the class.'},
+ vanished:{why:'A spawn with no terminal event means a pane died mid-run and nothing recorded it. The ledger is missing a fact.',fix:'Check the pane that served it; re-dispatch the subject.'},
+ lane:{why:'The lane never drained in this ledger; past 60 items the Executor spends its five minutes reading instead of acting.',fix:'Close or kill what is dead; retracted charters keep their specs on the lane until reaped.'},
+};
+function computeOmens(){const now=S.now,A=[];const add=(id,kind,sev,title,detail,anchor,subjects=[])=>A.push({id,kind,sev,title,detail,anchor,subjects});
+  if(S.lastTick){const m=(now-S.lastTick)/60000;if(m>5)add('exec','exec',2,`Executor silent ${Math.round(m)} min`,`No tick since ${fmt(S.lastTick)}. Nothing is dispatched, graded, merged or closed.`,'tower');else if(m>3)add('exec','exec',1,`Executor slow: ${Math.round(m)} min since the last bell`,'The five-minute ceiling is close.','tower');}
+  const q=[...S.actors.values()].filter(a=>a.state==='queued'&&!a.claimed);if(q.length){const old=Math.max(...q.map(a=>now-a.start));const s=old>240000?2:old>60000?1:0;if(s)add('unclaimed','unclaimed',s,`${q.length} packet${q.length>1?'s':''} unclaimed at the ferry`,`Oldest waiting ${fmtDur(old)}; the wrapper gives up at 5 min.`,'docks',q.map(a=>a.sp));}
+  for(const a of S.actors.values()){if(a.state!=='working')continue;const cap=(CAP[a.role]||30)*60000;const k=(now-a.start)/cap;if(k>=.8&&k<3)add('to:'+a.sp,'timeout',k>=.95?2:1,`${a.sp} at ${Math.round(k*100)}% of its ${CAP[a.role]} min cap`,`${a.subject||''}: the Timeout Wraith takes it at ${CAP[a.role]} min.`,a.wp,[a.sp]);}
+  const churn=[],dead=[],blocked=[],gate=[];const H12=now-12*3600000;
+  for(const [s,ev] of S.subjectEvents){if(!s.startsWith('L-spec-'))continue;
+    let cont=0,lastDone=0,lastCont=0,verd=0,lastVerdOk=null,lastBuild=null,lastBuildMs=0,lastGate=null,lastGateMs=0;
+    for(const e of ev){if(e.ty==='spawn-failed'&&/contamin|identical|D120/i.test(e.why||'')){cont++;lastCont=e.ms;}if(e.ty==='spawn-done')lastDone=e.ms;if(e.ty==='verdict'){verd++;lastVerdOk=!!e.ok;}if(e.ty==='build-done'||e.ty==='build-blocked'){lastBuild=e.ty==='build-blocked'?'BLOCKED':e.st;lastBuildMs=e.ms;}if(e.ty==='merge-gate-clean'||e.ty==='merge-gate-rework'){lastGate=e.ty;lastGateMs=e.ms;}}
+    if(cont>=2&&lastDone<lastCont)dead.push(s);if(verd>=3&&lastVerdOk===false)churn.push([s,verd]);if(lastBuild&&lastBuild!=='DONE'&&lastBuildMs>H12)blocked.push([s,lastBuild]);if(lastGate==='merge-gate-rework'&&lastGateMs>H12)gate.push(s);}
+  if(dead.length)add('deadlock','deadlock',2,`${dead.length} spec${dead.length>1?'s':''} deadlocked on contamination`,dead.join(', '),'court',dead);
+  if(churn.length){const worst=churn.sort((a,b)=>b[1]-a[1])[0];add('churn','churn',worst[1]>=5?2:1,`${churn.length} spec${churn.length>1?'s':''} graded again and again`,`${worst[0]} graded ${worst[1]}×, never confirmed.`,'court',churn.map(x=>x[0]));}
+  if(S.shelf.size){let oldest=0,who='';for(const [s,ms] of S.shelf)if(now-ms>oldest){oldest=now-ms;who=s;}if(oldest>2*3600000)add('shelf','shelf',oldest>6*3600000?2:1,`${S.shelf.size} spec${S.shelf.size>1?'s':''} on the shelf, oldest ${fmtDur(oldest)}`,`${who} was written ${fmt(now-oldest)} and no builder has taken it.`,'tower',[...S.shelf.keys()]);}
+  if(S.esc.size){let overdue=[],oldest=0;for(const [s,l] of S.esc){const age=now-l[0].ms;oldest=Math.max(oldest,age);const dl=toMs(l[l.length-1].dl);if((dl&&dl<now)||age>4*3600000)overdue.push(s);}if(overdue.length)add('ravens','ravens',oldest>12*3600000?2:1,`${overdue.length} raven${overdue.length>1?'s':''} past due at the Keep`,`Oldest has waited ${fmtDur(oldest)} without a decision.`,'keep',overdue);}
+  if(blocked.length)add('blocked','blocked',1,`${blocked.length} builder${blocked.length>1?'s':''} came back BLOCKED`,blocked.map(x=>x[0]+' '+x[1]).join(', '),'forge',blocked.map(x=>x[0]));
+  if(gate.length)add('gate','gate',1,`Merge gate holding ${gate.length} branch${gate.length>1?'es':''}`,gate.join(', '),'gate',gate);
+  const owed=[...stateMap()].filter(([s,st])=>/owed/.test(st)).map(x=>x[0]);if(owed.length>=10)add('owed','owed',owed.length>=20?2:1,`${owed.length} shipped specs owe prod evidence`,'Charters cannot close over them; the charter-reviewer keeps returning not-complete.','town',owed);
+  const perCh={};for(const [s,ev] of S.subjectEvents){const c=specCharter(s);if(!c)continue;const p=perCh[c]=perCh[c]||{k:0,e:0};for(const x of ev){if(x.ty==='spec-killed')p.k++;if(x.ty==='escalation-blocking'||x.ty==='question')p.e++;}}
+  for(const [c,p] of Object.entries(perCh))if(p.k>=3||p.e>=6)add('badcut:'+c,'badcut',1,`${c} looks like a bad cut`,`${p.k} specs killed, ${p.e} escalations in the window.`,'maphall',[c]);
+  const H1=now-3600000;const rec=S.recent.filter(r=>r.ms>H1);if(rec.length>=5){const f=rec.filter(r=>!r.ok).length/rec.length;if(f>=.3)add('spike','spike',f>=.5?2:1,`${Math.round(f*100)}% of runs failed in the last hour`,`${rec.filter(r=>!r.ok).length} of ${rec.length}. ${MON[monsterFor((rec.filter(r=>!r.ok).slice(-1)[0]||{}).why)].name} is the usual killer.`,'docks');}
+  const van=S.vanished.filter(v=>v.ms>now-6*3600000);if(van.length>=2)add('vanished','vanished',1,`${van.length} runs vanished without a terminal event`,van.map(v=>v.sp).join(', '),'chronicle',van.map(v=>v.sp));
+  if(S.lane!=null&&S.lane>=60)add('lane','lane',S.lane>=80?2:1,`Lane at ${S.lane} items`,'The Executor cannot drain a lane this long in five-minute passes.','tower');
+  A.sort((a,b)=>b.sev-a.sev);S.alarms=A;renderOmens();}
+function renderOmens(){const el=$('omens');const A=S.alarms;const crit=A.some(a=>a.sev===2);$('app').querySelector('.stage').classList.toggle('alarm',crit);
+  const min=el.classList.contains('min');let html=`<div class="omen head ${A.length?'':'quiet'}" data-toggle="1"><b>${A.length?'OMENS · '+A.length+(min?' · '+A.filter(a=>a.sev===2).length+' CRITICAL':''):'NO OMENS · THE REALM IS QUIET'}</b><small>${min?'show ▾':'hide ▴'}</small></div>`;
+  for(const a of A.slice(0,6))html+=`<div class="omen ${a.sev===2?'crit':'warn'}" data-id="${esc(a.id)}"><b>${esc(a.title)}</b><span>${esc(a.detail)}</span></div>`;
+  if(A.length>6)html+=`<div class="omen warn" data-id="*"><b>+${A.length-6} MORE</b></div>`;
+  el.innerHTML=html;for(const d of el.querySelectorAll('.omen[data-id]'))d.onclick=()=>d.dataset.id==='*'?openOmens():openOmen(d.dataset.id);el.querySelector('[data-toggle]').onclick=()=>{el.classList.toggle('min');try{localStorage.setItem('realm.omens',el.classList.contains('min')?'min':'');}catch(_){}renderOmens();};}
+function openOmen(id){const a=S.alarms.find(x=>x.id===id);if(!a)return openOmens();const hp=OMEN_HELP[a.kind]||{};
+  openPanel(`<h2>${esc(a.title)}</h2><div class="cls">${a.sev===2?'critical':'warning'} · anchored at ${esc(PLACES[a.anchor]?PLACES[a.anchor].n:a.anchor)}</div><p>${esc(a.detail)}</p><h4>WHY IT MATTERS</h4><p>${esc(hp.why||'')}</p><h4>WHAT TO DO</h4><p>${esc(hp.fix||'')}</p>${a.subjects.length?'<h4>SUBJECTS</h4><p>'+a.subjects.slice(0,30).map(s=>`<a class="link" data-subj="${esc(s)}">${esc(s)}</a>`).join(' · ')+'</p>':''}<p><a class="link" id="back-om">◂ all omens</a></p>`);bindLinks();$('back-om').onclick=openOmens;}
+function openOmens(){const A=S.alarms;openPanel(`<h2>Omens</h2><div class="cls">${A.length?A.length+' active':'none active'} · the ways this system fails</div>${A.length?A.map(a=>`<div class="cb" data-om="${esc(a.id)}"><span class="id" style="color:${a.sev===2?'var(--red)':'var(--amber)'}">${a.sev===2?'CRITICAL':'WARNING'}</span><div class="ti">${esc(a.title)}</div><div class="cnt"><span>${esc(a.detail)}</span></div></div>`).join(''):'<p>Nothing is failing right now.</p>'}<h4>WATCHED FOR, ALWAYS</h4><ul>${Object.entries(OMEN_HELP).map(([k,v])=>`<li><b>${k}</b>: ${esc(v.why.split('.')[0])}.</li>`).join('')}</ul>`);for(const d of document.querySelectorAll('.cb[data-om]'))d.onclick=()=>openOmen(d.dataset.om);}
+function drawOmens(t){for(const a of S.alarms){const p=PLACES[a.anchor];if(!p)continue;const cx=p.x+p.w/2,cy=p.y+p.h-10;const col=a.sev===2?'255,90,70':'255,196,107';const k=REDUCED?.5:(t*1.2)%1;g.strokeStyle=`rgba(${col},${1-k})`;g.lineWidth=3;g.beginPath();g.ellipse(cx,cy,30+k*40,12+k*16,0,0,7);g.stroke();g.fillStyle=`rgba(${col},.9)`;g.beginPath();g.moveTo(cx,p.y-26);g.lineTo(cx-9,p.y-40);g.lineTo(cx+9,p.y-40);g.closePath();g.fill();g.fillStyle='#1a1428';g.fillRect(cx-1,p.y-38,2,7);g.fillRect(cx-1,p.y-30,2,2);}}
+function censusHtml(){const by={};for(const [s,st] of (DATA.states||[]))(by[st]=by[st]||[]).push(s);const order=Object.entries(by).sort((a,b)=>b[1].length-a[1].length);const roles=Object.entries(DATA.stats).sort((a,b)=>(b[1].done+b[1].failed)-(a[1].done+a[1].failed));
+  return `<h2>Realm Census</h2><div class="cls">doit states · ${S.lastStates?fmt(S.lastStates)+' Z':(DATA.window[1]||'').slice(0,16)}</div><h4>EVERY SUBJECT BY DERIVED STATE</h4>${order.map(([st,l])=>`<p><span class="pill ${/accepted|shipped$|complete/.test(st)?'good':/killed|void|unknown/.test(st)?'bad':/owed/.test(st)?'warn':''}">${st} · ${l.length}</span><span class="tiny">${l.map(s=>`<a class="link" data-subj="${s}">${s.replace(/^L-/,'')}</a>`).join(', ')}</span></p>`).join('')}<h4>ROLES, WHOLE LEDGER</h4><table><tr><th>role</th><th>done</th><th>fail</th><th>med min</th><th>tokens</th></tr>${roles.map(([r,s])=>`<tr><td><a class="link" data-role="${r}">${r}</a></td><td>${s.done}</td><td>${s.failed}</td><td>${s.med_min??'—'}</td><td>${kTok(s.med_tok)}</td></tr>`).join('')}</table><h4>HOW THEY FALL</h4><p>${Object.keys(MON).map(k=>`<a class="link" data-mon="${k}">${MON[k].name}</a>`).join(' · ')}</p>`;}
+$('b-census').onclick=()=>{openPanel(censusHtml());bindLinks();};$('b-charters').onclick=openCharters;$('b-omens').onclick=openOmens;$('b-yitzy').onclick=()=>openWorkshop('yitzchak-eg');
+function guideHtml(){return `<h2>Realm of DO-IT</h2><div class="cls">${LIVE?'live from the ledger':'a replay of the ledger'}</div><p>Your pipeline as an overworld. Every sprite that walks is a real spawn id; every scroll, raven and boat is a ledger event.${LIVE?' New events arrive as they are appended; the clock is now.':' <b>This copy is a snapshot.</b> The live view is <code>doit realm</code> on the box that holds the ledger, at http://127.0.0.1:8642.'}</p><h4>HOW TO READ IT</h4><ul><li><b>North terrace</b> is thinking: Keep, Observatory, Map Hall, Scriptorium, Chapel. <b>South plaza</b> is building: Forge, Court, Inn, Gate, Harbor, Prod Town.</li><li>Every sub-agent is a seat packet that must cross <b>the Ferry</b>. A sleeping sprite on the quay is a packet nobody has claimed.</li><li>Scrolls stacked at the <b>Watchtower</b> are specs written but not yet dispatched. That stack is the wall-clock you pay.</li><li>A raven flying to the <b>Keep</b> is an escalation. It flies back on a decision. A burning beacon means one is open.</li><li>The bar over a working sprite is elapsed time against its cap. Windows glow where someone is working. Light follows your local clock.</li></ul><h4>OMENS</h4><p>The top-left stack is the failure watch: a dead Executor, unclaimed packets, runs near their cap, contamination deadlocks, grader churn, an aging shelf, overdue ravens, BLOCKED builders, a held merge gate, owed evidence, a bad cut, a failure spike, vanished runs, a swollen lane. Each is anchored on the map with a marker; click it for why and what to do.</p><h4>CHARTERS</h4><p>The CHARTERS button is the work itself: every charter by project, its specs as a bar by state, and one line on where it is holding.</p><h4>CLICK</h4><ul><li>A character or building: a word bubble, then the codex.</li><li>A chronicle line: the subject's whole story.</li><li>Census: every subject by derived state.</li></ul><h4>THE THREE NUMBERS</h4><ul><li><b>Executor</b>: time since the last bell. Over 5 min, the pane is dead.</li><li><b>Shelf</b>: specs waiting for a builder, and the oldest wait.</li><li><b>Fallen</b>: failures over total, and the monster says why.</li></ul><p class="tiny">${LIVE?'Scrub to replay; LIVE returns to now.':'Scrub with the slider; speeds are ledger minutes per real second.'}</p>`;}
+$('b-help').onclick=()=>openPanel(guideHtml());
+try{if(localStorage.getItem('realm.omens')==='min')$('omens').classList.add('min');}catch(_){}
+(function legend(){const L=$('legend');for(const [r,c] of [['builder','#b8763a'],['grader','#6b4bb8'],['reviewer','#48b062'],['spec-writer','#4a7ce0'],['spec-auditor','#7a7a96'],['plan-auditor','#9a844a'],['probe','#c9a25a'],['charter-reviewer','#c4cad8']]){const d=document.createElement('div');d.className='chip';d.innerHTML=`<i style="background:${c}"></i>${ROLE_NAME[r]}`;d.onclick=()=>openRole(r);L.appendChild(d);}})();
+$('b-play').onclick=()=>{if(!LIVE&&S.now>=T1){seek(T0);S.playing=true;}else S.playing=!S.playing;};
+for(const b of document.querySelectorAll('.spd'))b.onclick=()=>{S.speed=+b.dataset.s;document.querySelectorAll('.spd').forEach(x=>x.classList.toggle('on',x===b));if(LIVE){LIVE=false;}};
+let scrubbing=false;const sc=$('scrub');
+sc.addEventListener('input',()=>{scrubbing=true;const t=T0+(T1-T0)*sc.value/1000;$('h-clock').textContent=fmt(t)+' Z';});
+sc.addEventListener('change',()=>{const t=T0+(T1-T0)*sc.value/1000;if(stream||REMOTE)LIVE=false;seek(t);S.playing=true;scrubbing=false;});
+$('b-live').onclick=()=>{if(!stream&&!REMOTE)return;LIVE=true;S.playing=true;T1=Date.now();seek(Date.now());};
+$('log-min').onclick=()=>{const l=$('log');l.classList.toggle('min');$('log-min').textContent=l.classList.contains('min')?'show':'hide';};
+addEventListener('keydown',ev=>{if(ev.target.tagName==='INPUT')return;if(ev.key===' '){ev.preventDefault();$('b-play').click();}if(ev.key==='Escape'){if(!$('dossier').hidden)closeDossier();else{$('p-close').click();hideBubble();}}});
+
+/* ---------------- boot: live stream, or embedded snapshot ---------------- */
+let stream=null;
+/* a key on the address is kept for this browser and sent with every request */
+let KEY='';try{const u=new URL(location.href);if(u.searchParams.get('key')){KEY=u.searchParams.get('key');localStorage.setItem('realm.key',KEY);u.searchParams.delete('key');history.replaceState(null,'',u.pathname+u.hash);}else KEY=localStorage.getItem('realm.key')||'';}catch(_){}
+const BASE=location.pathname.replace(/\/[^/]*$/,'');/* works at / and behind a proxy prefix such as /realm/ */
+const api=path=>BASE+path+(KEY?(path.includes('?')?'&':'?')+'key='+encodeURIComponent(KEY):'');
+function loadData(d){DATA=d;if(d.caps)CAP={...CAP,...d.caps};EVENTS=d.events.map(e=>({...e,ms:toMs(e.t)})).filter(e=>e.ms).sort((a,b)=>a.ms-b.ms);T0=toMs(d.window[0]);T1=d.live?Date.now():toMs(d.window[1])+60000;$('s-a').textContent=fmt(T0);$('s-b').textContent=fmt(T1);}
+function insertEvent(row){const e={...row,ms:toMs(row.t)||Date.now()};let i=EVENTS.length;while(i>0&&EVENTS[i-1].ms>e.ms)i--;EVENTS.splice(i,0,e);if(i<S.cursor)S.cursor++;// arrived out of order behind the cursor: handle now
+  if(i<S.cursor-1){handle(e);}}
+let seq=0,heard=false,pollTimer=null;
+function applyBatch(d){if(d.seq!=null)seq=d.seq;for(const row of d.ledger||[]){insertEvent(row);if(LIVE)T1=Date.now();}for(const c of d.claims||[]){const a=S.actors.get(c.sp);if(a&&!a.claimed){a.claimed=toMs(c.cl);a.until=Math.min(a.until,Math.max(a.start,a.claimed));}}if(d.states&&DATA){DATA.states=d.states;DATA.seat=d.seat||DATA.seat;S.lastStates=Date.now();}}
+async function pollOnce(){try{const r=await fetch(api('/api/since?seq='+seq),{cache:'no-store'});if(!r.ok)return false;applyBatch(await r.json());$('h-clock-l').textContent='live · polling';return true;}catch(_){return false;}}
+function startPolling(why){if(pollTimer)return;console.log('realm: stream '+why+', polling every 4 s instead');if(stream){try{stream.close();}catch(_){}}pollTimer=setInterval(pollOnce,4000);pollOnce();}
+function connect(){stream=new EventSource(api('/api/stream'));
+  setTimeout(()=>{if(!heard)startPolling('delivered nothing in 8 s (a proxy is buffering it)');},8000);
+  stream.addEventListener('hello',ev=>{heard=true;try{const d=JSON.parse(ev.data);if(d.seq!=null&&!seq)seq=d.seq;}catch(_){}});
+  stream.addEventListener('ledger',ev=>{const row=JSON.parse(ev.data);insertEvent(row);if(LIVE)T1=Date.now();});
+  stream.addEventListener('claim',ev=>{const {sp,cl}=JSON.parse(ev.data);const a=S.actors.get(sp);if(a&&!a.claimed){a.claimed=toMs(cl);a.until=Math.min(a.until,Math.max(a.start,a.claimed));}});
+  stream.addEventListener('states',ev=>{const d=JSON.parse(ev.data);if(DATA){DATA.states=d.states;DATA.seat=d.seat;}S.lastStates=Date.now();});
+  stream.addEventListener('heartbeat',()=>{$('h-clock-l').textContent='live · now';});
+  stream.onerror=()=>{$('h-clock-l').textContent='live · reconnecting';if(!heard)startPolling('failed to open');};}
+let REMOTE=false,remoteTimer=null,lastPush='';
+async function remoteFetch(file){const r=await fetch(api('/api/ledger?file='+file),{cache:'no-store'});if(r.status===401)return {auth:false};if(!r.ok)return null;const d=await r.json();d.pushedAt=r.headers.get('X-Pushed-At')||'';return d;}
+function passwordForm(msg){openPanel(`<h2>Realm of DO-IT</h2><div class="cls">this realm is behind a password</div><p>${esc(msg||'Enter the password to open the realm.')}</p><form id="pwf"><input id="pw" type="password" autocomplete="current-password" placeholder="password" style="width:100%;padding:8px 10px;font-family:var(--body);font-size:15px;background:rgba(255,255,255,.06);color:#fff;border:1px solid var(--hair);border-radius:2px"><p style="margin-top:8px"><button class="btn on" type="submit">ENTER</button></p></form>`);status('A PASSWORD IS NEEDED','enter it in the panel');
+  $('pwf').onsubmit=async ev=>{ev.preventDefault();const pw=$('pw').value;try{const r=await fetch(api('/api/login'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pw})});if(r.ok){status('WAKING THE REALM','fetching the last snapshot…');boot();}else passwordForm('That was not it. Try again.');}catch(_){passwordForm('Could not reach the login. Try again.');}};}
+function applySnapshot(d){if(!DATA){return false;}let lastT='';for(const e of EVENTS)if(e.t>lastT)lastT=e.t;let n=0;for(const row of d.events){if(row.t>lastT){insertEvent(row);n++;}}for(const k of ['states','seat','stats','titles','counts','queue','charters','spec_charter','makers','n_events'])if(d[k]!=null)DATA[k]=d[k];S.lastStates=Date.now();lastPush=d.pushedAt||d.now||'';T1=Date.now();return n;}
+async function remotePoll(){const d=await remoteFetch('snapshot');if(!d||d.auth===false)return;applySnapshot(d);}
+let booted=false;
+async function boot(){
+  let d=null;if(!booted){booted=true;requestAnimationFrame(loop);}
+  try{status('WAKING THE REALM','asking the server for the last 24 hours…');const r=await fetch(api('/api/bootstrap'),{cache:'no-store'});if(r.ok){status('WAKING THE REALM','reading the ledger…');d=await r.json();}else if(r.status===401){status('KEY NEEDED','open the address doit realm printed, with ?key= on it',true);openPanel('<h2>Key needed</h2><p>This realm is served with a key. Open the address that <code>doit realm --public</code> printed, which carries <code>?key=…</code>; this browser will remember it.</p>');requestAnimationFrame(loop);return;}}catch(_){}
+  if(!d){try{const rd=await remoteFetch('snapshot');if(rd&&rd.auth===false){passwordForm();return;}if(rd){d=rd;REMOTE=true;}}catch(_){}}
+  if(!d){try{d=JSON.parse(document.getElementById('ledger').textContent);}catch(_){}}
+  if(!d){status('NO LEDGER REACHED','the server did not answer and this copy has no snapshot',true);openPanel('<h2>No ledger</h2><p>Run <code>doit realm</code> on the box that holds <code>~/.do-it</code> and open the address it prints. This copy has no embedded snapshot.</p>');return;}
+  status('WAKING THE REALM',`replaying ${d.events.length.toLocaleString()} events…`);await new Promise(r=>setTimeout(r,20));loadData(d);
+  if(d.live){LIVE=true;seek(Date.now());connect();document.querySelectorAll('.spd').forEach(x=>x.classList.remove('on'));}
+  else if(REMOTE){LIVE=true;lastPush=d.pushedAt||d.now||'';T1=Date.now();seek(Date.now());$('b-live').style.display='';if(!remoteTimer)remoteTimer=setInterval(remotePoll,45000);document.querySelectorAll('.spd').forEach(x=>x.classList.remove('on'));}
+  else{LIVE=false;$('b-live').style.display='none';const dayStart=Date.UTC(new Date(T1).getUTCFullYear(),new Date(T1).getUTCMonth(),new Date(T1).getUTCDate());const t=dayStart>T0&&dayStart<T1?dayStart:T0;seek(t);}
+  computeOmens();openCharters();status(null);
+}
+boot();
+</script>

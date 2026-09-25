@@ -19,6 +19,7 @@ case "${1:-board}" in
   wait)    shift; exec python3 "$SRC/tick.py" wait "$@" ;;
   up)      shift; exec python3 "$SRC/up.py" "$@" ;;
   relay)   shift; exec python3 "$SRC/up.py" --relay "$@" ;;
+  realm)   shift; exec python3 "$SRC/realm.py" "$@" ;;
   launch)  shift; exec python3 "$SRC/launch.py" "$@" ;;
   pane-end) shift; exec python3 "$SRC/pane_end.py" "$@" ;;
   think)   shift; exec python3 "$SRC/think.py" "$@" ;;
@@ -61,6 +62,7 @@ doit — a ledger that derives state, and the guards that read it
 
   doit                                    render the board
   doit states                             every derived state, one per line
+  doit realm [--port N] [--hours H]       the ledger as a lit overworld on localhost, live (read-only)
   doit events <subject>                   one subject's events, oldest first
   doit spend <charter|spec|spawn-id>      per-spawn token table + totals; charter stage wall clock (read-only)
   doit append <type> <subject> [k=v ...]  append one event, then re-fold
