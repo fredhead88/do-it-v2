@@ -279,7 +279,13 @@ def spec_text(sid):
             body = body[end + 4:]
     generic = re.compile(r"^(goal|intent|summary|purpose|what|why|context|background|problem|requirements?|acceptance|verification|writes|boundaries|scope|assumptions|evidence|notes?|done)\b", re.I)
     h1s = [m.group(1).strip() for m in re.finditer(r"^#\s+(.+)$", body, re.M)]
-    title = fm.get("title") or fm.get("spec_id") or next((t for t in h1s if not generic.match(t)), None) or (h1s[0] if h1s else sid)
+    # v2 specs carry `unit:` (and sometimes `title:`) in a plain header block before the first heading
+    head = body[:2500]
+    for key in ("title", "unit"):
+        m = re.search(rf"^{key}\s*:\s*(.+)$", head, re.M)
+        if m and key not in fm:
+            fm[key] = m.group(1).strip().strip('"')
+    title = fm.get("title") or fm.get("unit") or fm.get("spec_id") or next((t for t in h1s if not generic.match(t)), None) or (h1s[0] if h1s else sid)
     title = re.sub(r"^L-spec-\d+\s*[·:-]\s*", "", title)
     title = re.sub(r"^\d+-", "", title).replace("-", " ") if re.match(r"^[a-z0-9-]+$", title) else title
     # the first prose paragraph under a heading that names intent, else the first prose paragraph at all
