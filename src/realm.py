@@ -38,6 +38,10 @@ ROOT = pathlib.Path(os.environ.get("DOIT_ROOT", pathlib.Path.home() / ".do-it"))
 EVENTS, SEAT = ROOT / "events", ROOT / "seat"
 HERE = pathlib.Path(__file__).resolve().parent
 PAGE = HERE / "realm.html"
+# The checkout the panes execute from. The realm may run from its own worktree; states and the
+# "merged, not running" signal must still be judged against the live one.
+LIVE_REPO = pathlib.Path(os.environ.get("DOIT_LIVE_REPO", pathlib.Path.home() / "do-it-v2"))
+FOLD = (LIVE_REPO / "src" / "fold.py") if (LIVE_REPO / "src" / "fold.py").is_file() else (HERE / "fold.py")
 
 KEEP = {
     "spawn-started", "spawn-done", "spawn-failed", "build-started", "build-done", "build-blocked",
@@ -354,7 +358,7 @@ def sys_signals():
     except OSError:
         pass
     try:
-        repo = HERE.parent
+        repo = LIVE_REPO
         behind = subprocess.run(["git", "-C", str(repo), "rev-list", "--count", "HEAD..origin/main"], capture_output=True, text=True, timeout=10)
         head = subprocess.run(["git", "-C", str(repo), "rev-parse", "--short", "HEAD"], capture_output=True, text=True, timeout=10)
         fetched = (repo / ".git" / "FETCH_HEAD")
@@ -610,7 +614,7 @@ def sample_forever():
 def derive_states():
     """`doit states` through fold.py, in a subprocess so a fold error never kills the server."""
     try:
-        p = subprocess.run([sys.executable, str(HERE / "fold.py"), "states"], capture_output=True, text=True,
+        p = subprocess.run([sys.executable, str(FOLD), "states"], capture_output=True, text=True,
                            timeout=120, env={**os.environ, "DOIT_ROOT": str(ROOT)})
         return [l.split("\t") for l in p.stdout.splitlines() if "\t" in l]
     except Exception as ex:  # noqa: BLE001 — the page shows a stale census, never a dead server
