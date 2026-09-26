@@ -1,0 +1,53 @@
+#!/usr/bin/env python3
+"""ro-sql PROJECT SQL — the sweeper's only path to a live read-only DSN
+(L-spec-0386). Runs one statement over a project's SUPABASE_DB_URL_RO inside
+a forced read-only transaction, refusing (exit 2) anything outside its
+envelope, bounding its own wall-clock (exit 3 on timeout), and never firing
+a write. `psql` is invoked as an argv list, never `shell=True`, and only
+after both refusal checks below have passed.
+
+Exit codes: 0 rows-as-TSV on stdout (no header) | 1 psql's own error, its
+stderr passed through | 2 refused, psql never invoked | 3 timed out.
+"""
+import os
+import pathlib
+import subprocess
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent.parent / "src"))
+import sweep_wrappers  # noqa: E402
+
+
+def main(argv):
+    if len(argv) != 2:
+        print("usage: ro-sql PROJECT SQL", file=sys.stderr)
+        return 2
+    project, sql = argv
+    project_checkout = pathlib.Path(os.environ.get("DOIT_ROOT", pathlib.Path.home() / ".do-it")) \
+        / "repos" / project
+    dsn, refusal = sweep_wrappers.resolve_ro_dsn(project_checkout)
+    if refusal is not None:
+        print(refusal, file=sys.stderr)
+        return 2
+    sql_refusal = sweep_wrappers.sql_statement_refusal(sql)
+    if sql_refusal is not None:
+        print(sql_refusal, file=sys.stderr)
+        return 2
+    env = dict(os.environ)
+    env["PGOPTIONS"] = "-c default_transaction_read_only=on -c statement_timeout=30000"
+    cmd = ["psql", dsn, "-X", "--no-psqlrc", "-v", "ON_ERROR_STOP=1", "-A", "-t", "-F", "\t", "-c", sql]
+    try:
+        r = subprocess.run(cmd, env=env, capture_output=True, text=True,
+                            timeout=sweep_wrappers.timeout_seconds())
+    except subprocess.TimeoutExpired:
+        print(f"ro-sql: timed out after {sweep_wrappers.timeout_seconds()}s", file=sys.stderr)
+        return 3
+    if r.returncode == 0:
+        sys.stdout.write(r.stdout)
+        return 0
+    sys.stderr.write(r.stderr)
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
