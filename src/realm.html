@@ -998,7 +998,7 @@ function computeBlockers(){const now=S.now;const B=[];const st=stateMap();
     const w=last['spec-written'],b0=last['build-started'],bd=last['build-done'],vd=last['verdict'],rv=last['review'],mg=last['merge-gate-clean'],sh=last['shipped'];const busy=[...S.actors.values()].some(a=>a.subject===s&&!a.done&&!a.tour);
     if(S.esc.has(s)){const ow=escOwner(S.esc.get(s));add(s,'keep','raven',S.esc.get(s)[0].ms,ow==='you'?'you':'thinker',ow==='you'?`waiting on your ruling`:`waiting on the Thinker's ruling`,ow!=='you');continue;}
     if(busy)continue;
-    const lastFail=[...ev].reverse().find(e=>e.ty==='spawn-failed'||e.ty==='build-blocked');const sib=lastFail&&/ahead of unsettled|unsettle/i.test(lastFail.why||'')?(/(L-spec-\d+)/.exec(lastFail.why||'')||[])[1]:null;const sibBusy=sib&&(!/accepted|^shipped|owed/.test(st.get(sib)||''));
+    const lastFail=[...ev].reverse().find(e=>e.ty==='spawn-failed'||e.ty==='build-blocked');const sib=lastFail&&/ahead of unsettled|unsettle/i.test(lastFail.why||'')?(((/sibling\s+(L-spec-\d+)/i.exec(lastFail.why||'')||[])[1])||((lastFail.why||'').match(/L-spec-\d+/g)||[]).find(x=>x!==s)||null):null;const sibBusy=sib&&(!/accepted|^shipped|owed/.test(st.get(sib)||''));
     const sy=S.sys||(DATA&&DATA.sys);const masterRed=!!(sy&&sy.ci&&sy.ci.red);
     if(state==='written'&&w&&!b0&&now-T(w)>15*60000){if(sibBusy)add(s,'tower','shelf',T(lastFail),'wave',`waiting on wave sibling ${sib.replace('L-spec-','')} (${st.get(sib)||'in flight'})`,false);else add(s,'tower','shelf',T(w),'executor','written, no builder dispatched',true);}
     else if(state==='written'&&sibBusy&&lastFail&&now-T(lastFail)>0)add(s,'tower','shelf',T(lastFail),'wave',`waiting on wave sibling ${sib.replace('L-spec-','')} (${st.get(sib)||'in flight'})`,false);
