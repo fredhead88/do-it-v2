@@ -51,6 +51,7 @@ KEEP = {
     "question", "decision", "spec-written", "charter-filed", "plan-written", "tick", "spec-killed",
     "deploy-landed", "deploy-failed", "deploy-started", "deploy-refused", "charter-retracted", "charter-complete",
     "brief", "brief-answered", "lesson", "spec-carried", "inbound-registered", "inbound-closed", "inbound-covered",
+    "spec-shape-failed", "owed-ac", "owed-met",
 }
 CHARTER_ONLY = {"audit-finding", "charter-gap", "l1-complete", "sweep-fixpoint", "cut-written", "planner-started",
                 "planner-ended", "probe-run", "seam-undefined"}   # kept only on charter subjects
@@ -126,8 +127,8 @@ def compact(e, actor):
     elif ty == "shipped":
         r["sha"] = e.get("sha")
     elif ty == "brief":
-        r.update(pb=e.get("problem"), cond=e.get("condition"), key=e.get("key"), own=e.get("owner"),
-                 why=trunc(e.get("why") or e.get("text"), 220), req=e.get("requirement"))
+        r.update(pb=e.get("problem"), cond=e.get("condition"), key=e.get("key"), own=e.get("owner"), fix=e.get("fix") if re.match(r"^L-(charter|spec)-\d+$", str(e.get("fix") or "")) else None,
+                 why=trunc(e.get("why") or e.get("statement") or e.get("text"), 220), req=e.get("requirement"))
     elif ty == "brief-answered":
         r.update(ref=e.get("ref"), why=trunc(e.get("why"), 160), rs=_ref_subject(e.get("ref")))
     elif ty == "lesson":
@@ -136,6 +137,10 @@ def compact(e, actor):
         r.update(src=e.get("source") or e.get("pr"), why=trunc(e.get("why") or e.get("reason"), 160))
     elif ty == "inbound-registered":
         r.update(au=e.get("author_login"), ti=trunc(e.get("title"), 120), src=e.get("source"))
+    elif ty == "spec-shape-failed":
+        r["why"] = trunc(e.get("why") or e.get("reason") or ", ".join(str(x) for x in (e.get("findings") or [])[:3]), 160)
+    elif ty in ("owed-ac", "owed-met"):
+        r.update(c=e.get("criterion"), dl=e.get("wake_at") or e.get("deadline"))
     return {k: v for k, v in r.items() if v is not None}
 
 
@@ -244,6 +249,10 @@ def charter_text(cid):
     parts = SECTION_RE.split(body)
     secs = {parts[i].strip().lower(): parts[i + 1] for i in range(1, len(parts) - 1, 2)}
     out = {}
+    for key in ("corrects", "target"):
+        m = re.search(rf"^{key}\s*:\s*(.+)$", body[:4000], re.M)
+        if m:
+            out[key] = m.group(1).strip().strip('"')
     for name, text in secs.items():
         paras = [p.strip().replace("\n", " ") for p in re.split(r"\n\s*\n", text) if p.strip()]
         if name.startswith("intent") and paras:
@@ -305,6 +314,10 @@ def spec_text(sid):
         intent = paras[0] if paras else ""
     intent = re.sub(r"\s+", " ", intent)
     out = {"title": trunc(title, 140), "intent": trunc(intent, 600), "charter": charter_of(fm.get("charter"))}
+    for key in ("corrects", "target"):
+        m = re.search(rf"^{key}\s*:\s*(.+)$", head, re.M)
+        if m:
+            out[key] = m.group(1).strip().strip('"')
     _SPEC_CACHE[sid] = (mtime, out)
     return out
 
@@ -570,6 +583,37 @@ def metrics_at(rows, states, claims, at, sys_sig=None, makers=None, spec_ch=None
         if d["gate"] == "merge-gate-rework" and d["gateT"] > H12:
             gate += 1
     m.update(deadlock=dead, churn=churn, blocked=blocked, gate=gate)
+    # shape failures: specs whose latest shape event is a failure with no later spec-written; and their hours lost
+    shape_open = 0; shape_h = 0.0
+    last_shape, last_written = {}, {}
+    for r in rs:
+        if r["ty"] == "spec-shape-failed":
+            last_shape[r["s"]] = r["t"]
+        elif r["ty"] == "spec-written":
+            last_written[r["s"]] = r["t"]
+    for sid, tt in last_shape.items():
+        if last_written.get(sid, "") <= tt:
+            shape_open += 1
+            t0 = _parse(tt)
+            shape_h += (at - t0).total_seconds() / 3600 if t0 else 0
+    m["shape"] = shape_open; m["shape_hours"] = round(shape_h, 1)
+    # merge conflicts: branches with 2+ reworks mentioning conflict in the last day
+    conf = {}
+    for r in rs:
+        if r["ty"] == "merge-gate-rework" and r["t"] > H24 and "conflict" in str(r.get("why") or "").lower():
+            conf[r["s"]] = conf.get(r["s"], 0) + 1
+    m["conflict"] = sum(1 for v in conf.values() if v >= 2)
+    # owed checks per criterion: open (owed-ac without a later owed-met for the same criterion), overdue, close rate
+    ac = {}
+    for r in rs:
+        if r["ty"] == "owed-ac" and r.get("c"):
+            ac[(r["s"], r["c"])] = {"t": r["t"], "dl": r.get("dl"), "met": False}
+        elif r["ty"] == "owed-met" and r.get("c") and (r["s"], r["c"]) in ac:
+            ac[(r["s"], r["c"])]["met"] = True
+    if ac:
+        open_ = [v for v in ac.values() if not v["met"]]
+        over = sum(1 for v in open_ if _parse(v.get("dl") or "") and _parse(v["dl"]) < at)
+        m["owed_checks"] = len(open_); m["owed_overdue"] = over; m["owed_close_rate"] = round(100 * (len(ac) - len(open_)) / len(ac), 1)
     # states-based (now only): owed, closable
     if states:
         st = dict(states)
