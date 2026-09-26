@@ -113,7 +113,9 @@ def compact(e, actor):
     elif ty == "merge-gate-rework":
         r["why"] = trunc(e.get("undetermined") or e.get("why"), 160)
     elif ty in ("escalation-blocking", "question"):
-        r.update(why=trunc(e.get("why") or e.get("asks"), 260), df=trunc(e.get("default"), 200), dl=e.get("deadline") or "")
+        r.update(why=trunc(e.get("why") or e.get("asks"), 260), df=trunc(e.get("default"), 200), dl=e.get("deadline") or "",
+                 irr=trunc(e.get("irreversible"), 160) if e.get("irreversible") and not re.match(r"^\s*(none|no|false)\b", str(e.get("irreversible")), re.I) else None,
+                 bl=", ".join(str(x) for x in (e.get("blocks") or [])[:4]) or None)
     elif ty == "decision":
         r["why"] = trunc(e.get("why"), 260)
     elif ty == "spec-written":
