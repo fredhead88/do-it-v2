@@ -51,7 +51,7 @@ KEEP = {
     "question", "decision", "spec-written", "charter-filed", "plan-written", "tick", "spec-killed",
     "deploy-landed", "deploy-failed", "deploy-started", "deploy-refused", "charter-retracted", "charter-complete",
     "brief", "brief-answered", "lesson", "spec-carried", "inbound-registered", "inbound-closed", "inbound-covered",
-    "spec-shape-failed", "owed-ac", "owed-met",
+    "spec-shape-failed", "owed-ac", "owed-met", "unblocked",
 }
 CHARTER_ONLY = {"audit-finding", "charter-gap", "l1-complete", "sweep-fixpoint", "cut-written", "planner-started",
                 "planner-ended", "probe-run", "seam-undefined"}   # kept only on charter subjects
@@ -118,6 +118,11 @@ def compact(e, actor):
                  bl=", ".join(str(x) for x in (e.get("blocks") or [])[:4]) or None)
     elif ty == "decision":
         r["why"] = trunc(e.get("why"), 260)
+        if e.get("ref"):
+            r["ref"] = e.get("ref")
+            r["rs"] = _ref_subject(e.get("ref"))
+    elif ty == "unblocked":
+        r["why"] = trunc(e.get("why") or e.get("reason"), 200)
     elif ty == "spec-written":
         r.update(ac=e.get("ac_count"), fp=len(e.get("footprint") or []), ch=e.get("charter"))
     elif ty == "charter-filed":
