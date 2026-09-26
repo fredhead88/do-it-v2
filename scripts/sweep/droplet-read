@@ -1,0 +1,51 @@
+#!/usr/bin/env python3
+"""droplet-read PROJECT CMD [ARGS...] — the sweeper's only path to a live
+droplet (L-spec-0386). Looks up the project's `[[prod]]` row in `look.toml`,
+refuses (exit 2) anything outside `sweep_wrappers.ALLOWED_DROPLET_COMMANDS`'s
+envelope, and otherwise runs exactly one allowlisted read command over ssh,
+bounding its own wall-clock (exit 3 on timeout). `ssh` is invoked as an argv
+list; the ONE string it hands the remote shell is
+`sweep_wrappers.quote_remote_command`'s `shlex.join` result, never a
+shell-interpolated string.
+
+Exit codes: 2 refused, ssh never invoked | 3 timed out | else the remote's
+own exit status, passed through exactly (stdout/stderr pass through
+verbatim throughout).
+"""
+import pathlib
+import subprocess
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent.parent / "src"))
+import look  # noqa: E402
+import sweep_wrappers  # noqa: E402
+
+
+def main(argv):
+    if len(argv) < 2:
+        print("usage: droplet-read PROJECT CMD [ARGS...]", file=sys.stderr)
+        return 2
+    project, cmd = argv[0], argv[1]
+    args = argv[2:]
+    cfg = look.load_toml()
+    row = next((r for r in cfg["prod"] if r.get("project") == project), None)
+    if row is None:
+        print(f"no [[prod]] row for project {project}", file=sys.stderr)
+        return 2
+    refusal = sweep_wrappers.droplet_command_refusal(cmd, args)
+    if refusal is not None:
+        print(refusal, file=sys.stderr)
+        return 2
+    remote = sweep_wrappers.quote_remote_command(cmd, args)
+    try:
+        r = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+                             row["ssh_target"], remote],
+                            timeout=sweep_wrappers.timeout_seconds())
+    except subprocess.TimeoutExpired:
+        print(f"droplet-read: timed out after {sweep_wrappers.timeout_seconds()}s", file=sys.stderr)
+        return 3
+    return r.returncode
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
