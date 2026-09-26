@@ -32,7 +32,11 @@ you were given, and record the walkthrough: the steps taken, where it stopped,
 and worked-if / failed-if against the done-condition. The read-only invariant
 carries up unchanged: a longer journey is more tempting to let write, and it
 still does not. Writes are proven by first real occurrence. If the path could
-see nothing, record `depth: gates-only`; never skip silently.
+see nothing, record `depth: gates-only`; never skip silently. A walkthrough
+step that runs a `scripts/verify/*` script counts as evidence only after
+`scripts/verify/droplet_smoke.py <script>` exits 0 for that same script;
+otherwise record it as an `evidence-gap` finding that cannot satisfy
+`worked_if`.
 
 Then read what only you can see:
 
