@@ -17,6 +17,8 @@ ignored (§9.2), which leaves an audit trail of the attempt.
 import collections, json, os, pathlib, sys
 from datetime import datetime, timezone
 
+import owed
+
 ROOT = pathlib.Path(os.environ.get("DOIT_ROOT", pathlib.Path.home() / ".do-it"))
 EVENTS, BOARD = ROOT / "events", ROOT / "board.md"
 # Where the harness writes one json per live session — the directory pane-identity
@@ -136,7 +138,16 @@ EMITS = {"verdict": {"grader"}, "review": {"reviewer"}, "shipped": {"executor"},
          # seat that could stamp this on any shipped spec would walk it to
          # `accepted` alone, which is exactly what the verdict+review pair exists
          # to prevent.
-         "owed-met": {"executor", "operator"},
+         # L-charter-0038/L-spec-0384, SD4: `owed-sweeper` joins the two actors
+         # already trusted to discharge an owed criterion by citing evidence
+         # directly — the sweep's own verdict on a check it ran. The Thinker
+         # still may not (charter, verbatim).
+         "owed-met": {"owed-sweeper", "executor", "operator"},
+         # L-charter-0038/L-spec-0384, SD4: new. Same three actors as
+         # `owed-met` — a failed check is the other half of the same claim, and
+         # the same asymmetry applies: a seat that could fail-then-clear its own
+         # check on any shipped spec would walk it to `expired` alone.
+         "owed-failed": {"owed-sweeper", "executor", "operator"},
          # L-charter-0020 R8: the Planner's own run, opened and closed on the ledger
          # so `relay.planner_attempts` can pair them into a tally and the launcher
          # keeps no state in memory. Restricted to the Planner for the same reason
@@ -216,6 +227,16 @@ EMITS["owed-ac"].add("executor")
 # since either `dispatch.py`'s `spec-written` site or `carry.py`'s
 # `spec-carried` site may append one.
 EMITS["spec-lint-warning"] = {"spec-writer", "executor", "operator", "thinker"}
+# L-charter-0038/L-spec-0384, SD4/SD12 — these four doors land here solely
+# because `fold.py` is this spec's exclusive `Writes:` grant; the call sites
+# that walk through them belong to `look-wallclock-events` and
+# `owed-sweep-driver`, out of this footprint.
+EMITS["pane-paused"] = EMITS["ci-red"] = EMITS["ci-green"] = {"look"}
+# `pane-resumed` is NOT a fresh door: `pane_resume.py:276` already writes it
+# today (actor `tick`, D90) for an unrelated fact. Granting `{"look"}` alone
+# would retroactively un-authorize that live emitter, so both actors are kept.
+EMITS["pane-resumed"] = {"look", "tick"}
+EMITS["message-answered"] = {"look", "planner", "executor", "thinker"}
 # A correction may override anything but these: D90 takes the actor from the
 # FILENAME, and a correction that could rewrite it reopens every check below.
 UNCORRECTABLE = ("actor", "_src")
@@ -231,6 +252,12 @@ DWELL_MIN_N = 3
 # §2.5's `count(owed) <= K`. K is unset in §12.5, so the default denies rather
 # than invents: no owed evidence may ride into a closed charter until K is measured.
 K = int(os.environ.get("DOIT_K", "0"))
+# L-charter-0038/L-spec-0384, R3 (SD1): the ONE predicate for "this spec's
+# owed criteria are held like evidence, not blocking closure" — `_closable`'s
+# `owed_within_k` and `fold()`'s own charter `owed` tally both count against
+# this SAME tuple, so K-comparison and the CHARTER CLOSE render can never
+# drift apart on what counts as owed.
+OWED_TALLY_STATES = ("shipped-owed-evidence", "shipped-owed-expired")
 
 NOW = datetime.now(timezone.utc)
 
@@ -529,7 +556,10 @@ def escalation_ok(e):
 # field list.
 REQUIRED = {"owed-ac": ("criterion",), "spec-carried": ("source", "tier", "audited_at"),
             "inbound-covered": ("source", "covered_by"),
-            "spec-lint-warning": ("finding",)}
+            "spec-lint-warning": ("finding",),
+            # L-charter-0038/L-spec-0384, SD4: a failed check without its own
+            # evidence is a stamp, not a claim.
+            "owed-failed": ("criterion", "evidence")}
 
 
 # L-charter-0033/board-owners, Target 1: who owns each board() row and what
@@ -783,16 +813,22 @@ def _closable(charter_evs, mine):
     L-charter-0033/board-owners, Target 4: `all_accepted` additionally counts a
     `killed` spec as accepted-for-closure when its newest `spec-killed` event
     names a `superseded_by` spec PRESENT IN THIS CHARTER'S OWN `mine` list whose
-    own state is in the SAME five-state done-set — `tick.SPEC_DONE`'s own
-    literal, duplicated here rather than imported (fold.py must not depend on
-    tick.py) — every other spec in `mine` is already checked against. NOT
-    narrowed to `accepted` alone: a supersede whose replacement reached, say,
-    `closed-unbuilt` is exactly as closure-worthy as a plain spec in that state.
-    A `superseded_by` naming a spec absent from `mine`, or whose state is
-    outside that set, does not count — undetermined stays blocking."""
+    own state is in the SAME done-set — related to, but not identical to,
+    `tick.SPEC_DONE`'s own literal (duplicated here rather than imported,
+    fold.py must not depend on tick.py) — every other spec in `mine` is already
+    checked against. NOT narrowed to `accepted` alone: a supersede whose
+    replacement reached, say, `closed-unbuilt` is exactly as closure-worthy as
+    a plain spec in that state. A `superseded_by` naming a spec absent from
+    `mine`, or whose state is outside that set, does not count — undetermined
+    stays blocking.
+
+    L-charter-0038/L-spec-0384, R3: `shipped-owed-expired` joins
+    `shipped-owed-evidence` here — an expired owed criterion is held like
+    evidence (SD1), never a reason to hold a charter open forever over a check
+    that already lapsed."""
     types = {e["type"] for e in charter_evs}
-    done_states = ("accepted", "shipped-owed-evidence", "dropped",
-                  "closed-unbuilt", "closed-shipped")
+    done_states = ("accepted", "shipped-owed-evidence", "shipped-owed-expired",
+                  "dropped", "closed-unbuilt", "closed-shipped")
     by_id = {s["id"]: s for s in mine}
 
     def spec_ok(s):
@@ -807,7 +843,7 @@ def _closable(charter_evs, mine):
     return Closable(
         all_accepted=all(spec_ok(s) for s in mine),
         sweep_derived="sweep-fixpoint" in types,
-        owed_within_k=sum(1 for s in mine if s["state"] == "shipped-owed-evidence") <= K,
+        owed_within_k=sum(1 for s in mine if s["state"] in OWED_TALLY_STATES) <= K,
         no_open_briefs=not open_briefs(charter_evs),
         review_owed=charter_review_owed(charter_evs))
 
@@ -1227,8 +1263,9 @@ def verdict_confirmed(v, owed_criteria):
 
 
 def spec_state(evs, retracted):
-    """killed / accepted / shipped-owed-due / shipped-owed-evidence / dropped /
-    closed-shipped / closed-unbuilt / void, or the pipeline state it is stuck in."""
+    """killed / accepted / shipped-owed-due / shipped-owed-evidence /
+    shipped-owed-expired / dropped / closed-shipped / closed-unbuilt / void, or
+    the pipeline state it is stuck in."""
     types = {e["type"] for e in evs}
     # R3/L-spec-0192: `killed` is TERMINAL the instant a `spec-killed` event
     # exists — checked first and unconditionally, so it survives any later stage
@@ -1249,49 +1286,35 @@ def spec_state(evs, retracted):
     open_rejects = standing_rejects(evs)
     if "shipped" in types and not open_rejects:
         # S15/S33: `owed-ac` now carries the criterion it owes (the schema
-        # requires it), and `owed-met` — the Executor or the operator, citing the
-        # evidence — discharges one without a re-grade spawn. `accepted` needs
-        # every owed criterion met, not merely a confirmed verdict; short of that,
-        # an UNMET owed criterion with a future `wake_at` is `shipped-owed-evidence`
-        # (D25), and one whose `wake_at` has already passed is `shipped-owed-due`
-        # (R7/L-spec-0192) — distinct from, and taking priority over, evidence when
-        # a subject carries both.
+        # requires it), and `owed-met` — the Executor, the operator or the
+        # sweeper, citing the evidence — discharges one without a re-grade
+        # spawn. `accepted` needs every owed criterion `met`, not merely a
+        # confirmed verdict; short of that, an unmet criterion is
+        # `shipped-owed-due`, `shipped-owed-evidence` or (L-charter-0038/
+        # L-spec-0384) `shipped-owed-expired`, in that priority — due beats
+        # waiting beats expired, one notch wider than before this unit.
         #
         # `verdict_owed` (spec-writer/spec-auditor authored ONLY) is what
         # `verdict_confirmed` below widens over — an executor's re-date moves
         # WHEN a criterion is due, never WHICH criteria count as owed (R10,
-        # AC21). `owed_criteria` (any authorized actor) is what decides
-        # unmet/due/evidence: it can never admit a criterion `verdict_owed`
-        # would not also admit, because `fold()`'s own subject-scoped
-        # classification only keeps an executor-authored `owed-ac` when a
-        # matching spec-writer/spec-auditor declaration already sits in `evs`.
+        # AC21).
         verdict_owed = {e.get("criterion") for e in evs if e["type"] == "owed-ac" and e.get("criterion")
                         and e.get("actor") in ("spec-writer", "spec-auditor")}
-        owed_criteria = {e.get("criterion") for e in evs if e["type"] == "owed-ac" and e.get("criterion")}
-        met_criteria = {e.get("criterion") for e in evs if e["type"] == "owed-met" and e.get("criterion")}
         graded = any(e["type"] == "verdict" and verdict_confirmed(e, verdict_owed) for e in evs)
-        if graded and "review" in types and owed_criteria <= met_criteria:
+        # L-charter-0038/L-spec-0384, R3: `accepted` now reads live off
+        # `owed.checks()` (an empty list — no owed criteria — satisfies `all()`
+        # vacuously, matching the old membership test's behavior) rather than a
+        # criterion-ID set, so a MET criterion that is LATER re-dated reopens
+        # `accepted` instead of it standing forever (SD1's reopen case).
+        if graded and "review" in types and all(r["status"] == "met" for r in owed.checks(evs, NOW)):
             return "accepted"                                        # §2.5 accepted()
-        # Due takes priority over evidence (R7). A criterion-bearing owed-ac is
-        # grouped by criterion, and the LATEST one (`evs` is ts-sorted) governs
-        # its due-ness — the re-date rule (R10): an executor's later event
-        # overrides an earlier spec-writer/auditor one for the SAME criterion.
-        # A criterion-less owed-ac (the pre-schema shape, D25) has no grouping
-        # key and is read per event, exactly as before this unit.
-        last_wake, loose = {}, []
-        for e in evs:
-            if e["type"] != "owed-ac":
-                continue
-            c = e.get("criterion")
-            (last_wake.__setitem__(c, e.get("wake_at")) if c else loose.append(e.get("wake_at")))
-
-        def dated(w):
-            return w is not None and str(w).strip() != ""
-        wakes_unmet = [w for c, w in last_wake.items() if c not in met_criteria] + loose
-        if any(dated(w) and ts(w) <= NOW for w in wakes_unmet):
+        unmet = [r for r in owed.checks(evs, NOW) if r["status"] != "met"]
+        if any(r["status"] == "due" for r in unmet):
             return "shipped-owed-due"                                # R7
-        if any(dated(w) and ts(w) > NOW for w in wakes_unmet):
+        if any(r["status"] == "waiting" for r in unmet):
             return "shipped-owed-evidence"                           # D25
+        if unmet:                                                    # all expired, none due/waiting
+            return "shipped-owed-expired"                            # L-charter-0038/L-spec-0384, R3
     if "spec-closed" in types:
         # D112 + S33: the operator's only close instrument used to read
         # `closed-unbuilt` even over a spec that was built, graded, reviewed and
@@ -1361,7 +1384,7 @@ def fold(events):
         # counted FOR it either. It is simply not `mine`.
         mine = [s for s in specs.values() if s["charter"] == cid and s["state"] != "void"]
         types = {e["type"] for e in c["evs"]}
-        owed = sum(1 for s in mine if s["state"] == "shipped-owed-evidence")
+        owed = sum(1 for s in mine if s["state"] in OWED_TALLY_STATES)
         # R11: the predicate lives in `_closable` now, not inline here — one
         # implementation, reachable by a caller that needs to ask before the
         # sweep, and no second copy to drift. Derivation is unchanged, K included.
@@ -1385,32 +1408,27 @@ def fold(events):
 
 
 def owed_due(specs):
-    """R7/L-spec-0192: one `{spec, criterion, due_at, days_overdue, src}` row per
-    due-and-unmet owed criterion, across every spec in `specs` (`fold()`'s own
+    """R7/L-spec-0192, rewired onto `owed.checks` (L-charter-0038/L-spec-0384,
+    R3): one `{spec, criterion, due_at, days_overdue, src}` row per
+    `status == "due"` criterion, across every spec in `specs` (`fold()`'s own
     dict) — the data the board's own `shipped-owed-due` rendering and, later, a
     lane item of its own (agents/executor.md — a later unit's Writes grant, not
-    this one's) both read. Mirrors `spec_state`'s own re-date-governs rule: the
-    LATEST `owed-ac` event per criterion decides due-ness, whichever authorized
-    actor wrote it. A not-yet-due or already-met criterion is not a row."""
+    this one's) both read. `due_at`/`src` come from the row's own `due_at`
+    (ship-anchored, not the raw `wake_at` echoed verbatim as before this unit)
+    and `declared_src`; `due_at` serializes via `.isoformat(timespec="seconds")`
+    — NOT `str()`, whose space-separated default would break
+    `restore.py`'s `owed_due_due_at_fragment` regex (a one-token `\\S+` match).
+    An `expired` row no longer counts as overdue here — that is R3's whole
+    point: expiry stops counting as "due", it becomes its own state."""
     out = []
     for sid, s in specs.items():
-        evs = s["evs"]
-        owed_criteria = {e.get("criterion") for e in evs if e["type"] == "owed-ac" and e.get("criterion")}
-        met_criteria = {e.get("criterion") for e in evs if e["type"] == "owed-met" and e.get("criterion")}
-        last_wake, last_src = {}, {}
-        for e in evs:
-            if e["type"] == "owed-ac" and e.get("criterion"):
-                last_wake[e["criterion"]] = e.get("wake_at")
-                last_src[e["criterion"]] = e.get("_src")
-        for c in owed_criteria - met_criteria:
-            w = last_wake.get(c)
-            if w is None or not str(w).strip():
+        for r in owed.checks(s["evs"], NOW):
+            if r["status"] != "due":
                 continue
-            due_at = ts(w)
-            if due_at <= NOW:
-                out.append({"spec": sid, "criterion": c, "due_at": w,
-                            "days_overdue": (NOW - due_at).total_seconds() / 86400,
-                            "src": last_src.get(c)})
+            out.append({"spec": r["spec"], "criterion": r["criterion"],
+                        "due_at": r["due_at"].isoformat(timespec="seconds"),
+                        "days_overdue": (NOW - r["due_at"]).total_seconds() / 86400,
+                        "src": r["declared_src"]})
     return out
 
 
@@ -1759,14 +1777,15 @@ def render(events, specs, charters, ignored, by_subject):
                   f"last tick: {ago:.0f}m ago" + (f"  ⚠ TICK STALE — over 2×{interval}m; is the cron line installed?"
                                                   if ago > 2 * interval else ""))
 
-    # R7/L-spec-0196 — "due owed: N", naming every criterion overdue more than
-    # 7 days (enumerated, never a truncated "(last: …)").
-    due_fault = [r for r in owed_due_rows if r["days_overdue"] > 7]
-    due_owed_health = f"due owed: {len(owed_due_rows)}"
-    if due_fault:
-        due_owed_health += "  ⚠ OVER 7 DAYS: " + ", ".join(
-            f"{r['spec']} {r['criterion']} {round(r['days_overdue'])}d" for r in due_fault)
-    health.append(due_owed_health)
+    # R7/L-spec-0196 — "due owed: N". L-charter-0038/L-spec-0384, R3: the
+    # OVER-7-DAYS fault fragment is DELETED, not repointed — `owed_due()` can
+    # no longer return a row past 7 days overdue (it reads `status == "expired"`
+    # by then), so no row it returns could ever satisfy `> 7` again. A
+    # `owed.expired()`-backed HEALTH surface in its place was considered and
+    # rejected (Out of scope): SD3's escalation is the charter's actual
+    # surfacing mechanism for expiry, and a second, silent board surface for
+    # the same fact would drift from it.
+    health.append(f"due owed: {len(owed_due_rows)}")
     # R6/L-spec-0196 — "unserved packets: N": a failure keeps it non-zero, the
     # count is never dropped from once it fails (the Plan's own words). The
     # whole line degrades when `relay.unserved` is unavailable/raises, matching

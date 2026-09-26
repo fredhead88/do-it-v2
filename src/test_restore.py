@@ -256,19 +256,25 @@ check(not restore.VOLATILE[[n for n, _p, _m in restore.VOLATILE].index("mirror_p
 os.environ["DOIT_SEAT_CLAIM_SEC"] = "60"       # a real few-minutes-old dispatch counts as pending
 
 
-# AC8's actual pair: root A's `wake_at` is real-now-minus-10-days (CROSSES the
-# 7-day fault line, so `health_due_owed_fault`'s `⚠ OVER 7 DAYS` fragment is
-# real content on this leg), root B's is real-now-minus-3-days (does NOT
-# cross — that HEALTH fragment is wholly ABSENT on this leg, never emitted at
-# all). Each root's `wake_at` is computed fresh against real wall-clock `now`
-# at seed time — never a single shared literal — so `due_at` (owed_due()'s
-# verbatim echo of it) is a genuinely different raw timestamp between the two
-# roots, exactly the case `owed_due_due_at_fragment` exists to mask (see
-# restore.VOLATILE's comment there for the measured defect this closes: prior
-# to that entry, `restore.board_diff` on this exact pair returned a non-empty
-# diff naming the `due_at` mismatch, even though nothing here is a real
-# content difference — both roots carry the SAME spec, SAME criterion, and
-# only the wall-clock-relative wake_at differs).
+# AC8's actual pair: both roots' `wake_at` are real-now-minus-N-days, computed
+# fresh against real wall-clock `now` at seed time — never a single shared
+# literal — so `due_at` (owed_due()'s own computed value, ship-anchored as of
+# L-charter-0038/L-spec-0384) is a genuinely different raw timestamp between
+# the two roots, exactly the case `owed_due_due_at_fragment` exists to mask
+# (see restore.VOLATILE's comment there for the measured defect this closes:
+# prior to that entry, `restore.board_diff` on this exact pair returned a
+# non-empty diff naming the `due_at` mismatch, even though nothing here is a
+# real content difference — both roots carry the SAME spec, SAME criterion,
+# and only the wall-clock-relative wake_at differs). Root A's `wake_days_ago`
+# is 6, root B's is 3 — both UNDER the 7-day expiry line (L-charter-0038/
+# L-spec-0384, R3: a criterion past 7 days overdue now reads `expired`, not
+# `due`, and would surface no OWED DUE row at all — this pair exists to
+# exercise the `due_at` VOLATILE masking, which needs both legs `due`).
+# `owed-ac` alone no longer produces a `due` row without a `shipped` event
+# (an unshipped criterion reads `status == "unshipped"`, R2) — the SAME
+# `L-executor-0001.jsonl` file also carries a `shipped` event, at the SAME
+# literal ts as `spec-written`/`owed-ac`, so `due_at == wake_at` exactly
+# regardless of which side of the "after" pin that tie resolves to.
 def _seed_ac8_root(root, *, owed_criterion, wake_days_ago, unserved_minutes_ago, backup_state):
     (root / "events").mkdir(parents=True)
     wake_at = (datetime.now(timezone.utc)
@@ -284,13 +290,15 @@ def _seed_ac8_root(root, *, owed_criterion, wake_days_ago, unserved_minutes_ago,
     (root / "events" / "L-executor-0001.jsonl").write_text(
         json.dumps({"v": 1, "ts": dispatch_ts, "type": "spawn-started", "subject": "L-spec-0002",
                     "spawn": "L-builder-9001", "role": "builder", "backend": "seat",
-                    "project": "pinned-by-the-suite"}) + "\n")
+                    "project": "pinned-by-the-suite"}) + "\n"
+        + json.dumps({"v": 1, "ts": "2026-09-01T00:00:00+00:00", "type": "shipped",
+                      "subject": "L-spec-0001", "project": "pinned-by-the-suite"}) + "\n")
     if backup_state is not None:
         (root / "backup-state.json").write_text(json.dumps(backup_state))
 
 
 ac8_a, ac8_b = TMP / "l0196-board-a", TMP / "l0196-board-b"
-_seed_ac8_root(ac8_a, owed_criterion="AC1", wake_days_ago=10, unserved_minutes_ago=2,
+_seed_ac8_root(ac8_a, owed_criterion="AC1", wake_days_ago=6, unserved_minutes_ago=2,
                backup_state={"ts": (datetime.now(timezone.utc) - timedelta(seconds=60))
                              .isoformat(timespec="seconds"), "snapshot": "abc123",
                              "remote": "git@example.com:x/y.git", "ok": True})
@@ -306,10 +314,10 @@ check(d_l0196 == [],
       f"{d_l0196}")
 
 # negative case: identical setup to root A in every other respect — SAME
-# wake_days_ago (10, crossing), SAME unserved timing, SAME backup state — with
+# wake_days_ago (6), SAME unserved timing, SAME backup state — with
 # ONLY the criterion changed. A REAL content difference is never normalized away.
 ac8_c = TMP / "l0196-board-c"
-_seed_ac8_root(ac8_c, owed_criterion="AC2", wake_days_ago=10, unserved_minutes_ago=2,
+_seed_ac8_root(ac8_c, owed_criterion="AC2", wake_days_ago=6, unserved_minutes_ago=2,
                backup_state={"ts": (datetime.now(timezone.utc) - timedelta(seconds=60))
                              .isoformat(timespec="seconds"), "snapshot": "abc123",
                              "remote": "git@example.com:x/y.git", "ok": True})
