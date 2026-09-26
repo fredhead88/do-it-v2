@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """One runnable check on the tick. Run: python3 test_tick.py"""
-import contextlib, datetime, fcntl, io, json, os, pathlib, re, sys, tempfile, time, types
+import contextlib, datetime, fcntl, io, json, os, pathlib, re, sys, tempfile, time
 
 TMP = pathlib.Path(tempfile.mkdtemp())
 os.environ["DOIT_ROOT"], os.environ["DOIT_NO_POKE"] = str(TMP), "1"
@@ -24,35 +24,38 @@ NOW = fold.NOW.isoformat(timespec="seconds")
 EV = TMP / "events"
 
 # L-spec-0242 (AC11): `tick._record()` now calls `intake.run(ev)` on EVERY pass —
-# ONE module-level `intake.subprocess = STUB`-shaped assignment, before the
-# FIRST `tick.main()` call below, so all 22 existing fixtures plus every new
-# one route through it; a per-fixture patch that only new fixtures received
-# would leave the 22 existing ones reaching a REAL `gh` (installed on this box).
+# ONE module-level `intake.ghlimit = STUB`-shaped assignment (L-spec-0379 fix 2:
+# `intake.ghlimit`, never `intake.subprocess`), before the FIRST `tick.main()`
+# call below, so all 22 existing fixtures plus every new one route through it;
+# a per-fixture patch that only new fixtures received would leave the 22
+# existing ones reaching a REAL `gh` (installed on this box).
 INTAKE_CALLS = []
 
 
 class _IntakeStub:
     """A healthy rate, empty listings both labels — `intake.run()` contributes
     nothing to any fixture's ledger, so every existing lane/tick assertion
-    below is unaffected by its presence."""
-    def run(self, argv, capture_output=True, text=True, **kw):
+    below is unaffected by its presence. Implements `ghlimit`'s own two real
+    signatures — `.gate(wait=False) -> {"ok": ...}` / `.run(argv, wait=False)
+    -> (rc, out, err)` (a tuple, never `subprocess`'s `SimpleNamespace`)."""
+    def gate(self, wait=False):
+        return {"ok": True, "remaining": 5000, "reset": 0, "waited_s": 0}
+
+    def run(self, argv, wait=False):
         INTAKE_CALLS.append(list(argv))
-        if argv[:3] == ["gh", "api", "rate_limit"]:
-            return types.SimpleNamespace(
-                returncode=0, stdout=json.dumps({"resources": {"core": {"remaining": 5000}}}), stderr="")
         if argv[:3] == ["gh", "pr", "list"]:
-            return types.SimpleNamespace(returncode=0, stdout="[]", stderr="")
+            return (0, "[]", "")
         raise AssertionError(f"test_tick.py's intake stub got an unexpected call: {argv}")
 
 
-intake.subprocess = _IntakeStub()
+intake.ghlimit = _IntakeStub()
 
 # L-spec-0274 (R3): `tick._record()` now calls `pane_resume.run(ev)` on EVERY
 # pass too. Left unpatched, that call reads this BOX's own real
 # `~/.claude/sessions` (pane_resume.run's own default) and could send a real
 # `continue` into a real tmux pane out of this very test file — the one
 # outcome the spec's own Constraints forbid a test suite from ever risking.
-# Stubbed the same way `intake.subprocess` is: one module-level swap, before
+# Stubbed the same way `intake.ghlimit` is: one module-level swap, before
 # the FIRST `tick.main()` below, so every existing fixture and every new one
 # routes through it; `test_pane_resume.py` alone exercises the real function.
 PANE_RESUME_CALLS = []

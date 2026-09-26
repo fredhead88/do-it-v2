@@ -17,20 +17,16 @@ The dedup/precedence read is ALWAYS `carry.scan_events()` — unscoped by
 (§5). `carry.trusted_authors()`/`carry.scan_events()` are consumed, never
 re-implemented.
 """
-import base64, json, os, pathlib, subprocess as _subprocess, sys
+import base64, json, os, pathlib, sys
 from datetime import datetime, timezone
 
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-import carry, dispatch  # noqa: E402 — dispatch.emit is this module's own append path
+import carry, dispatch, ghlimit  # noqa: E402 — dispatch.emit is this module's own append path;
+                                  # ghlimit is the shared gh rate limiter (L-charter-0037 R5)
 
 REPO = "fredhead88/albert-scott-platform"          # A4: the one hardcoded target
-RATE_FLOOR = 200                                   # SD16's own default (Q5, not reopened)
 INBOUND_PREFIX = "docs/do-it/inbound/"
-
-# Read at call time, never at import (carry.py's own idiom) — a test replaces
-# this wholesale before any call reaches `gh`.
-subprocess = _subprocess
 
 root = lambda: pathlib.Path(os.environ.get("DOIT_ROOT") or (pathlib.Path.home() / ".do-it"))
 now = lambda: datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -43,27 +39,22 @@ def ledger_path():
 
 
 def _run(argv):
-    """One `subprocess.run` via the module-level `subprocess` — `(False, "")`
-    on a non-zero exit or any OSError, never a raise."""
-    try:
-        r = subprocess.run(argv, capture_output=True, text=True)
-    except OSError:
-        return False, ""
-    return r.returncode == 0, (r.stdout or "")
+    """The ONLY place in this module that touches `ghlimit.run` — every
+    `gh`-calling function below is an unchanged caller of `_run`, so all six
+    automatically route through the shared limiter with no call-site edits.
+    `wait=False` throughout: a tick is already a scheduled retry (SD8), so
+    this must never block waiting for a reset. Translates `ghlimit.run`'s
+    `(returncode, stdout, stderr)` back to `_run`'s own `(ok, out)` contract —
+    `(returncode == 0, stdout)` — including on the `(75, "", ...)` skip tuple,
+    which becomes `(False, "")` exactly like any other failure."""
+    returncode, stdout, _stderr = ghlimit.run(argv, wait=False)
+    return returncode == 0, stdout
 
 
 def _rate_ok():
-    """Exactly one `gh api rate_limit`-shaped call per `run()`. `True` unless
-    the stub/gh reports `core.remaining < RATE_FLOOR` — a failed or
-    unparsable read fails OPEN (never blocks a tick on a `gh` hiccup)."""
-    ok, out = _run(["gh", "api", "rate_limit"])
-    if not ok:
-        return True
-    try:
-        remaining = json.loads(out)["resources"]["core"]["remaining"]
-    except (ValueError, KeyError, TypeError):
-        return True
-    return remaining >= RATE_FLOOR
+    """Delegates entirely to the shared limiter (charter L-charter-0037 R5).
+    `wait=False`: a tick is already a scheduled retry, so this never blocks."""
+    return ghlimit.gate(wait=False)["ok"]
 
 
 def _head_file(path, head_sha):
