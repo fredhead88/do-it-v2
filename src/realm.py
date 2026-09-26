@@ -47,7 +47,7 @@ KEEP = {
     "spawn-started", "spawn-done", "spawn-failed", "build-started", "build-done", "build-blocked",
     "verdict", "review", "merge-gate-clean", "merge-gate-rework", "shipped", "escalation-blocking",
     "question", "decision", "spec-written", "charter-filed", "plan-written", "tick", "spec-killed",
-    "deploy-landed", "deploy-failed", "charter-retracted", "charter-complete",
+    "deploy-landed", "deploy-failed", "deploy-started", "deploy-refused", "charter-retracted", "charter-complete",
     "brief", "brief-answered", "lesson", "spec-carried", "inbound-registered", "inbound-closed", "inbound-covered",
 }
 CHARTER_ONLY = {"audit-finding", "charter-gap", "l1-complete", "sweep-fixpoint", "cut-written", "planner-started",
@@ -594,6 +594,79 @@ def metrics_at(rows, states, claims, at, sys_sig=None, makers=None, spec_ch=None
     return {k: v for k, v in m.items() if v is not None}
 
 
+def wallclock(rows, states, now):
+    """Where wall-clock goes: the meter running right now (per wait bucket), and the window's burn."""
+    st = dict(states or [])
+    by = {}
+    for r in rows:
+        if str(r.get("s") or "").startswith("L-spec-"):
+            by.setdefault(r["s"], []).append(r)
+    H = lambda a: max(0.0, (now - a).total_seconds() / 3600) if a else 0.0
+    live = {k: {"n": 0, "hours": 0.0, "oldest": 0.0, "specs": []} for k in
+            ("shelf", "await_grade", "await_review", "await_merge", "await_deploy", "owed")}
+    def put(k, sid, since):
+        h = H(since)
+        b = live[k]; b["n"] += 1; b["hours"] += h; b["oldest"] = max(b["oldest"], h); b["specs"].append([sid, round(h, 1)])
+    rework_build = rework_grade = 0.0; rebuilt = regraded = blocked = 0
+    burn = {}; started = {}
+    for sid, ev in by.items():
+        state = st.get(sid, "")
+        last = {}
+        for e in ev:
+            last[e["ty"]] = e
+            if e["ty"] in ("spawn-started", "build-started") and e.get("sp"):
+                started[e["sp"]] = e
+        bl = [e for e in ev if e["ty"] == "spawn-done" and (e.get("r") or role_of(e["sp"])) == "builder" and e.get("dur")]
+        gl = [e for e in ev if e["ty"] == "spawn-done" and (e.get("r") or role_of(e["sp"])) == "grader" and e.get("dur")]
+        if len(bl) > 1:
+            rebuilt += 1; rework_build += sum(x["dur"] for x in bl[1:]) / 3600000
+        if len(gl) > 1:
+            regraded += 1; rework_grade += sum(x["dur"] for x in gl[1:]) / 3600000
+        blocked += max(sum(1 for e in ev if e["ty"] == "build-done" and e.get("st") != "DONE"), sum(1 for e in ev if e["ty"] == "build-blocked"))
+        if re.search(r"killed|void|dropped", state):
+            continue
+        # the meter right now: which wait is this spec sitting in?
+        w = last.get("spec-written"); b0 = last.get("build-started"); bd = last.get("build-done"); vd = last.get("verdict"); rv = last.get("review"); mg = last.get("merge-gate-clean"); sh = last.get("shipped")
+        t = lambda e: _parse(e["t"]) if e else None
+        if state == "written" and w and not b0:
+            put("shelf", sid, t(w))
+        elif state in ("built", "graded", "building") and bd and (not vd or t(vd) < t(bd)) and bd.get("st") == "DONE":
+            put("await_grade", sid, t(bd))
+        elif state == "graded" and vd and (not rv or t(rv) < t(vd)):
+            put("await_review", sid, t(vd))
+        elif state == "reviewing" and rv and (not mg or t(mg) < t(rv)):
+            put("await_merge", sid, t(rv))
+        elif "owed" in state and sh:
+            put("owed", sid, t(sh))
+        elif state == "shipped" and mg and (not sh or t(sh) < t(mg)):
+            put("await_deploy", sid, t(mg))
+    for r in rows:
+        if r["ty"] == "spawn-failed":
+            w = (r.get("why") or "").lower()
+            k = "unserved" if "unserved" in w else "timeout" if "time" in w else "contamination" if "contamin" in w else "refused" if "refus" in w else "other"
+            s0 = started.get(r.get("sp"))
+            hrs = (_parse(r["t"]) - _parse(s0["t"])).total_seconds() / 3600 if s0 and _parse(s0["t"]) else 0
+            b = burn.setdefault(k, {"n": 0, "hours": 0.0}); b["n"] += 1; b["hours"] += max(0, hrs)
+    # the executor: when did it last ACT (not tick), and the longest dispatch gap in the window
+    acts = [r for r in rows if r.get("a") == "executor" and r["ty"] != "tick"]
+    disp = [_parse(r["t"]) for r in rows if r["ty"] in ("spawn-started", "build-started")]
+    gap = (0, None, None)
+    for a, b in zip(disp, disp[1:]):
+        if a and b and (b - a).total_seconds() / 3600 > gap[0]:
+            gap = ((b - a).total_seconds() / 3600, a.isoformat(timespec="seconds"), b.isoformat(timespec="seconds"))
+    for k in live:
+        live[k]["hours"] = round(live[k]["hours"], 1); live[k]["oldest"] = round(live[k]["oldest"], 1)
+        live[k]["specs"].sort(key=lambda x: -x[1]); live[k]["specs"] = live[k]["specs"][:12]
+    for k in burn:
+        burn[k]["hours"] = round(burn[k]["hours"], 1)
+    deploys = collections.Counter(r["ty"] for r in rows if r["ty"].startswith("deploy"))
+    return {"at": now.isoformat(timespec="seconds"), "live": live,
+            "rework": {"rebuilt": rebuilt, "regraded": regraded, "build_hours": round(rework_build, 1), "grade_hours": round(rework_grade, 1), "blocked": blocked},
+            "burn": burn, "executor_last_act": acts[-1]["t"] if acts else None,
+            "dispatch_gap": {"hours": round(gap[0], 1), "from": gap[1], "to": gap[2]},
+            "deploys": dict(deploys)}
+
+
 def history_load():
     global HISTORY
     try:
@@ -659,7 +732,7 @@ def sample_forever():
             now = dt.datetime.now(dt.timezone.utc)
             m = metrics_at(rows, states, seat_claims(), now, sys_signals(), None, spec_ch)
             history_add(m, now)
-            HUB.send("history", {"history": HISTORY, "now": m})
+            HUB.send("history", {"history": HISTORY, "now": m, "wallclock": wallclock(rows, states, now)})
         except Exception as ex:  # noqa: BLE001
             sys.stderr.write(f"realm: sample failed: {ex}\n")
         time.sleep(300)
@@ -741,7 +814,7 @@ def bootstrap(hours, states=None):
             "ledger_start": rows[0]["t"] if rows else None, "n_events": len(raw), "events": window_rows,
             "stats": role_stats(raw), "states": states,
             "seat": seat_summary(), "titles": titles, "counts": dict(counts.most_common(60)),
-            "queue": queue_stats(rows, claims), "caps": ROLE_CAPS_MIN, "charters": charters, "spec_charter": spec_charter, "makers": maker_index(raw, states), "specs": {sid: t for sid in dict(states) if sid.startswith("L-spec-") for t in [spec_text(sid)] if t}, "sys": sys_signals(), "tick_omens": _OMENS_SCRIPT if _OMENS_SCRIPT["at"] else None, "history": HISTORY}
+            "queue": queue_stats(rows, claims), "caps": ROLE_CAPS_MIN, "charters": charters, "spec_charter": spec_charter, "makers": maker_index(raw, states), "specs": {sid: t for sid in dict(states) if sid.startswith("L-spec-") for t in [spec_text(sid)] if t}, "sys": sys_signals(), "tick_omens": _OMENS_SCRIPT if _OMENS_SCRIPT["at"] else None, "history": HISTORY, "wallclock": wallclock(rows, states, now)}
 
 
 # ---------------------------------------------------------------- streaming
