@@ -415,10 +415,80 @@ def maker_index(raw, states):
     return out
 
 
+_CI = {"at": 0.0, "v": None}
+CI_REPO = pathlib.Path(os.environ.get("DOIT_CI_REPO", "/opt/albert-scott"))
+CI_BRANCH = os.environ.get("DOIT_CI_BRANCH", "master")
+
+
+def ci_status():
+    """Master's latest workflow conclusions, via `gh run list` (read-only), cached five minutes."""
+    if time.monotonic() - _CI["at"] < 300 and _CI["v"] is not None:
+        return _CI["v"]
+    v = None
+    try:
+        p = subprocess.run(["gh", "run", "list", "--branch", CI_BRANCH, "--limit", "25", "--json", "name,conclusion,status,updatedAt,headSha"],
+                           capture_output=True, text=True, timeout=40, cwd=str(CI_REPO))
+        runs = json.loads(p.stdout or "[]")
+        if runs:
+            # per workflow, the latest COMPLETED conclusion on the branch: a workflow that last ran red is red
+            # until it runs again, whichever commit it ran on
+            latest = {}
+            for r in sorted(runs, key=lambda r: r.get("updatedAt") or ""):
+                if r.get("status") == "completed":
+                    latest[r["name"]] = r
+            fails = [r for r in latest.values() if r.get("conclusion") == "failure"]
+            v = {"sha": runs[0]["headSha"][:7], "branch": CI_BRANCH, "red": len(fails), "green": bool(latest) and not fails,
+                 "runs": [{"name": r["name"], "conclusion": r.get("conclusion"), "at": r.get("updatedAt"), "sha": r["headSha"][:7]} for r in latest.values()],
+                 "red_since": min((r.get("updatedAt") or "" for r in fails), default=None)}
+    except (OSError, ValueError, subprocess.SubprocessError) as ex:
+        sys.stderr.write(f"realm: gh failed: {ex}\n")
+    _CI.update(at=time.monotonic(), v=v)
+    return v
+
+
+QUOTA_RE = re.compile(r"5h\s+(\d+)%\s*\S?\s*([0-9:]+Z?)?.*?7d\s+(\d+)%\s*\S?\s*([A-Za-z]{3}\s+[0-9:]+Z?)?")
+TMUX_SESSION = os.environ.get("DOIT_TMUX_SESSION", "flow")
+
+
+def quota_status():
+    """The weekly and five-hour usage figures each pane prints on its status line (read-only capture)."""
+    try:
+        p = subprocess.run(["tmux", "list-panes", "-s", "-t", TMUX_SESSION, "-F", "#{pane_id}\t#{window_name}\t#{pane_title}"], capture_output=True, text=True, timeout=10)
+        if p.returncode != 0:
+            return None
+        panes = []
+        for line in p.stdout.splitlines():
+            pid, win, title = (line.split("\t") + ["", ""])[:3]
+            cap = subprocess.run(["tmux", "capture-pane", "-p", "-t", pid, "-S", "-30"], capture_output=True, text=True, timeout=10).stdout
+            m = None
+            for l in cap.splitlines():
+                mm = QUOTA_RE.search(l)
+                if mm:
+                    m = mm
+            if not m:
+                continue
+            name = re.sub(r"^[^A-Za-z]*", "", title or win).strip() or win
+            panes.append({"name": name[:24], "h5": int(m.group(1)), "h5_reset": m.group(2), "d7": int(m.group(3)), "d7_reset": m.group(4)})
+        if not panes:
+            return None
+        worst = max(panes, key=lambda x: max(x["h5"], x["d7"]))
+        mx = max(worst["h5"], worst["d7"])
+        return {"panes": panes, "max_pct": mx, "reset": (worst["h5_reset"] if worst["h5"] >= worst["d7"] else worst["d7_reset"]),
+                "kind": "5h" if worst["h5"] >= worst["d7"] else "7d"}
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
 def sys_signals():
-    """Signals no ledger row carries: the root disk, the live checkout vs origin/main, the tick's own omens."""
+    """Signals no ledger row carries: the root disk, the live checkout vs origin/main, master's CI, the panes' quota."""
     import shutil
     out = {"at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")}
+    ci = ci_status()
+    if ci:
+        out["ci"] = ci
+    q = quota_status()
+    if q:
+        out["quota"] = q
     try:
         u = shutil.disk_usage("/")
         out["disk"] = {"root_pct": round(100 * u.used / u.total, 1), "free_gb": round(u.free / 1e9, 1)}
@@ -632,7 +702,23 @@ def metrics_at(rows, states, claims, at, sys_sig=None, makers=None, spec_ch=None
                 if live and all(re.match(r"^(accepted|shipped)$", v) for v in live) and not any(subj in esc for subj, _ in [(sp, 0) for sp, cc in spec_ch.items() if cc == c]):
                     closable += 1
             m["closable"] = closable
+    # merged, not shipped, for more than 30 minutes
+    mg_open = 0
+    lastmg, lastsh = {}, {}
+    for r in rs:
+        if r["ty"] == "merge-gate-clean":
+            lastmg[r["s"]] = r["t"]
+        elif r["ty"] == "shipped":
+            lastsh[r["s"]] = r["t"]
+    for sid, tt in lastmg.items():
+        if lastsh.get(sid, "") < tt and _parse(tt) and (at - _parse(tt)).total_seconds() > 1800:
+            mg_open += 1
+    m["deploy_wait"] = mg_open
     if sys_sig:
+        if sys_sig.get("ci"):
+            m["ci_red"] = sys_sig["ci"]["red"]
+        if sys_sig.get("quota"):
+            m["quota_pct"] = sys_sig["quota"]["max_pct"]
         if sys_sig.get("disk"):
             m["disk"] = sys_sig["disk"]["root_pct"]
         if sys_sig.get("live") and sys_sig["live"].get("behind") is not None:
