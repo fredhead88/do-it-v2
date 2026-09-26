@@ -253,6 +253,54 @@ def charter_text(cid):
     return out
 
 
+_SPEC_CACHE = {}
+
+
+def spec_text(sid):
+    """A spec's title and one plain paragraph of what it is for, from content/<spec>.md."""
+    f = ROOT / "content" / f"{sid}.md"
+    if not f.is_file():
+        return None
+    try:
+        mtime = f.stat().st_mtime
+        c = _SPEC_CACHE.get(sid)
+        if c and c[0] == mtime:
+            return c[1]
+        body = f.read_text(errors="replace")
+    except OSError:
+        return None
+    body = re.sub(r"<!--.*?-->", "", body, flags=re.S)
+    fm = {}
+    if body.startswith("---"):
+        end = body.find("\n---", 3)
+        if end > 0:
+            for m in re.finditer(r"^(title|spec_id|charter|author|status)\s*:\s*(.+)$", body[3:end], re.M):
+                fm[m.group(1)] = m.group(2).strip().strip('"')
+            body = body[end + 4:]
+    generic = re.compile(r"^(goal|intent|summary|purpose|what|why|context|background|problem|requirements?|acceptance|verification|writes|boundaries|scope|assumptions|evidence|notes?|done)\b", re.I)
+    h1s = [m.group(1).strip() for m in re.finditer(r"^#\s+(.+)$", body, re.M)]
+    title = fm.get("title") or fm.get("spec_id") or next((t for t in h1s if not generic.match(t)), None) or (h1s[0] if h1s else sid)
+    title = re.sub(r"^L-spec-\d+\s*[·:-]\s*", "", title)
+    title = re.sub(r"^\d+-", "", title).replace("-", " ") if re.match(r"^[a-z0-9-]+$", title) else title
+    # the first prose paragraph under a heading that names intent, else the first prose paragraph at all
+    parts = re.split(r"^#{1,3}\s+(.+?)\s*$", body, flags=re.M)
+    intent = None
+    for i in range(1, len(parts) - 1, 2):
+        name = parts[i].lower()
+        if re.search(r"intent|goal|purpose|what\b|why\b|summary|problem|outcome", name):
+            paras = [x.strip() for x in re.split(r"\n\s*\n", parts[i + 1]) if x.strip() and not x.strip().startswith(("|", "```", "-", "*", "<"))]
+            if paras:
+                intent = paras[0]
+                break
+    if not intent:
+        paras = [x.strip() for x in re.split(r"\n\s*\n", body) if x.strip() and not x.strip().startswith(("#", "|", "```", "-", "*", "<", "---"))]
+        intent = paras[0] if paras else ""
+    intent = re.sub(r"\s+", " ", intent)
+    out = {"title": trunc(title, 140), "intent": trunc(intent, 600), "charter": charter_of(fm.get("charter"))}
+    _SPEC_CACHE[sid] = (mtime, out)
+    return out
+
+
 def charter_index(raw):
     """charter → {title, project, filed, planned, retracted, intent, done, n_req}; spec → charter."""
     ch, spec_ch = {}, {}
@@ -687,7 +735,7 @@ def bootstrap(hours, states=None):
             "ledger_start": rows[0]["t"] if rows else None, "n_events": len(raw), "events": window_rows,
             "stats": role_stats(raw), "states": states,
             "seat": seat_summary(), "titles": titles, "counts": dict(counts.most_common(60)),
-            "queue": queue_stats(rows, claims), "caps": ROLE_CAPS_MIN, "charters": charters, "spec_charter": spec_charter, "makers": maker_index(raw, states), "sys": sys_signals(), "tick_omens": _OMENS_SCRIPT if _OMENS_SCRIPT["at"] else None, "history": HISTORY}
+            "queue": queue_stats(rows, claims), "caps": ROLE_CAPS_MIN, "charters": charters, "spec_charter": spec_charter, "makers": maker_index(raw, states), "specs": {sid: t for sid in dict(states) if sid.startswith("L-spec-") for t in [spec_text(sid)] if t}, "sys": sys_signals(), "tick_omens": _OMENS_SCRIPT if _OMENS_SCRIPT["at"] else None, "history": HISTORY}
 
 
 # ---------------------------------------------------------------- streaming
@@ -893,6 +941,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         r = {**r, "cl": claims[r["sp"]]}
                     out.append(r)
             self._json({"id": cid, "meta": charters.get(cid, {}), "specs": sorted(mine - {cid}), "rows": out})
+        elif u.path == "/api/spec":
+            sid = qs.get("id", [""])[0]
+            self._json(spec_text(sid) or {"error": "no file"}, 200)
         elif u.path == "/api/since":
             try:
                 seq = int(qs.get("seq", ["0"])[0])
