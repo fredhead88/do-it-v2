@@ -11,6 +11,8 @@ Server-Sent Events. Never appends, never edits, never touches a repository.
     doit realm --hours 48      replay window handed to the page on open
     doit realm --snapshot F    write the bootstrap JSON to F and exit
                                (what the hosted artifact embeds)
+    doit realm --audit         print the wall-clock audit and the omen metrics as JSON and
+                               exit: what look / omens.py can read without HTTP (read-only)
     doit realm --push URL      also push the last 24 h to the hosted realm at URL
                                every 30 s (and the whole ledger every 10 min), with
                                the token in ~/.do-it/realm.push. Outbound only.
@@ -1067,9 +1069,22 @@ def main(argv=None):
     ap.add_argument("--hours", type=int, default=24, help="replay window handed to the page on open")
     ap.add_argument("--snapshot", help="write bootstrap JSON here and exit (--hours 0 = whole ledger)")
     ap.add_argument("--push", help="hosted realm URL to push snapshots to (token in ~/.do-it/realm.push)")
+    ap.add_argument("--audit", action="store_true", help="print the wall-clock audit + omen metrics as JSON and exit")
     a = ap.parse_args(argv)
     if not EVENTS.is_dir():
         sys.exit(f"realm: no ledger at {EVENTS}")
+    if a.audit:
+        rows, raw, _ = read_all()
+        states = derive_states() or []
+        _, spec_ch = charter_index(raw)
+        now = dt.datetime.now(dt.timezone.utc)
+        history_load()
+        out = {"at": now.isoformat(timespec="seconds"),
+               "metrics": metrics_at(rows, states, seat_claims(), now, sys_signals(), None, spec_ch),
+               "wallclock": wallclock(rows, states, now),
+               "history_tail": {k: v[-13:] for k, v in HISTORY.items()}}   # last hour of 5-min samples
+        print(json.dumps(out, separators=(",", ":")))
+        return
     if a.snapshot:
         history_load()
         snap = bootstrap(a.hours)
