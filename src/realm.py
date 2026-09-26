@@ -446,6 +446,29 @@ def ci_status():
     return v
 
 
+_FIRES = {"at": 0.0, "v": None}
+
+
+def fires_register():
+    """The Thinker's fires register (~/.do-it/fires.py --json, read-only): recurring problem classes and their fixes. Cached ten minutes."""
+    script = ROOT / "fires.py"
+    if not script.is_file():
+        return None
+    if time.monotonic() - _FIRES["at"] < 600 and _FIRES["v"] is not None:
+        return _FIRES["v"]
+    v = None
+    try:
+        p = subprocess.run([sys.executable, str(script), "--json"], capture_output=True, text=True, timeout=180, env={**os.environ, "DOIT_ROOT": str(ROOT)})
+        data = json.loads(p.stdout or "[]")
+        if isinstance(data, list):
+            v = [{"cls": d.get("class"), "n": d.get("n"), "first": d.get("first"), "last": d.get("last"), "fix": d.get("fix"),
+                  "fix_state": d.get("fix_state"), "flag": d.get("flag") or ""} for d in data]
+    except (OSError, ValueError, subprocess.SubprocessError) as ex:
+        sys.stderr.write(f"realm: fires.py failed: {ex}\n")
+    _FIRES.update(at=time.monotonic(), v=v)
+    return v
+
+
 QUOTA_RE = re.compile(r"5h\s+(\d+)%\s*\S?\s*([0-9:]+Z?)?.*?7d\s+(\d+)%\s*\S?\s*([A-Za-z]{3}\s+[0-9:]+Z?)?")
 TMUX_SESSION = os.environ.get("DOIT_TMUX_SESSION", "flow")
 
@@ -489,6 +512,9 @@ def sys_signals():
     q = quota_status()
     if q:
         out["quota"] = q
+    f = fires_register()
+    if f is not None:
+        out["fires"] = f
     try:
         u = shutil.disk_usage("/")
         out["disk"] = {"root_pct": round(100 * u.used / u.total, 1), "free_gb": round(u.free / 1e9, 1)}
@@ -1237,6 +1263,7 @@ def main(argv=None):
     threading.Thread(target=tail_forever, daemon=True).start()
     threading.Thread(target=heartbeat_forever, daemon=True).start()
     threading.Thread(target=tick_omens, daemon=True).start()
+    threading.Thread(target=fires_register, daemon=True).start()
     threading.Thread(target=sample_forever, daemon=True).start()
     if a.push:
         tf = ROOT / "realm.push"
