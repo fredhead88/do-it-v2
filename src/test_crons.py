@@ -25,7 +25,7 @@ def check(cond, msg):
 
 REAL_MANIFEST = pathlib.Path(__file__).resolve().parent.parent / "crons.toml"
 NAMES = {"tick", "look", "tmp-reaper", "lessons-digest", "backup-watch",
-         "ledger-snapshot", "auto-deploy"}
+         "ledger-snapshot", "sweep-owed", "auto-deploy"}
 
 
 def _write_manifest(path, rows_):
@@ -61,11 +61,11 @@ def _exec_manifest(tmpdir, rows_=None, mode=0o755):
     return p, out
 
 
-# ══ AC1 · rows() — 7 rows, all 8 keys, where/project split ══════════════════
+# ══ AC1 · rows() — 8 rows, all 8 keys, where/project split ══════════════════
 d1 = TMP / "ac1"
 d1.mkdir()
 r1 = crons.rows(str(REAL_MANIFEST))
-check(len(r1) == 7, f"AC1: exactly 7 rows: {len(r1)}")
+check(len(r1) == 8, f"AC1: exactly 8 rows: {len(r1)}")
 check({row["name"] for row in r1} == NAMES, f"AC1: name set: {[row['name'] for row in r1]}")
 for row in r1:
     check(set(row.keys()) == set(crons.FIELDS), f"AC1: all 8 keys on {row['name']}: {row.keys()}")
@@ -115,7 +115,7 @@ for row in crons.rows(str(REAL_MANIFEST)):
     check(bool(re.search(row["sig"], line)), f"AC4: {row['name']}'s sig matches its own print_line: "
                                              f"{row['sig']!r} vs {line!r}")
 
-# ══ AC5 · check() against the measured-live fixture — 3 absent, other 4 satisfied ══
+# ══ AC5 · check() against the measured-live fixture — 3 absent, other 5 satisfied ══
 d5 = TMP / "ac5"
 d5.mkdir()
 manifest5, rows5 = _exec_manifest(d5)
@@ -131,6 +131,7 @@ FIXTURE_5 = (
     ">> /home/albert/.do-it/logs/tick.log 2>&1\n"
     "7,37 * * * * /home/albert/.do-it/tmp-reaper.sh\n"
     "* * * * * /home/albert/do-it-v2/doit backup watch --for 60 >> /home/albert/.do-it/backup.log 2>&1\n"
+    "*/30 * * * * /home/albert/do-it-v2/doit sweep-owed >> /home/albert/.do-it/logs/sweep-owed.log 2>&1\n"
 )
 crond5_empty = d5 / "crond-empty"
 crond5_empty.mkdir()

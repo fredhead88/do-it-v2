@@ -77,6 +77,16 @@ owner = "thinker"
 project = "do-it-v2"
 
 [[row]]
+name = "sweep-owed"
+where = "user"
+schedule = "*/30 * * * *"
+command = "{doit} sweep-owed >> {root}/logs/sweep-owed.log 2>&1"
+path = "{doit}"
+sig = '\bdoit sweep-owed\b'
+owner = "thinker"
+project = "do-it-v2"
+
+[[row]]
 name = "auto-deploy"
 where = "cron.d"
 schedule = "*/5 * * * *"
