@@ -30,6 +30,12 @@ import argparse, glob, json, os, pathlib, re, subprocess, sys
 from datetime import datetime, timezone
 
 HERE = pathlib.Path(__file__).resolve().parent
+# Module-level, unaliased (R5/L-charter-0038, Assumptions): a test monkeypatches
+# `carry.shape.check`/`carry.shape.mechanical_fix` the way it already monkeypatches
+# `carry.subprocess` — a bare `import shape` written inside `_do_carry` instead would
+# bind a name local to that function only, never a `carry` module attribute a test
+# (or any other caller) could reach.
+import shape  # noqa: E402
 FIELDS = ("spec_id", "intent", "status", "spec_file", "handed_over_at")
 
 # The trailer the hand path typed, verbatim (em dash U+2014). `carry.py` appends no
@@ -548,6 +554,123 @@ def _append_lint_warnings(spec_id, path, validate):
                            capture_output=True, text=True)
 
 
+def _kv_arg(k, v):
+    """`doit append`'s own convention (`fold.append`): a bare string is `k=v`; a
+    list/dict is `k=<json>` (auto-detected, matching this file's existing
+    `f"footprint={json.dumps(footprint)}"` precedent at the `spec-carried`
+    append below); anything else (an int, a bool) is `k:=<json>`, the ONLY shape
+    `fold.append` parses as non-string JSON for a value that is not already
+    list/dict/string-quoted — a bare digit string parses back as a string
+    otherwise (the `9b7e02d` → `9` class of bug `fold.append`'s own comment
+    documents)."""
+    if isinstance(v, str):
+        return f"{k}={v}"
+    if isinstance(v, (list, dict)):
+        return f"{k}={json.dumps(v)}"
+    return f"{k}:={json.dumps(v)}"
+
+
+def _restamp_spec_written(spec_id, ev):
+    """Finding 1/AC10: a fresh `spec-written` re-stamping `ev`'s own `path`/
+    `footprint`/`ac_count`/`ac_types`/`requirement_ids`/`owed_ac_count`/
+    `unknown_count` — appended right before `spec-carried`, ONLY on the
+    mechanical-fix-alone-sufficed branch. `fold.spec_shape_pending` reads the
+    NEWEST of this subject's {`spec-written`, `spec-shape-failed`} events; the
+    mechanical fix alone never touches whichever `spec-shape-failed`
+    `dispatch.py`'s own `events_for` appended on the first dispatch, so without
+    this a fixed defect would go on permanently refusing a later builder
+    dispatch. A field absent from `ev` is simply omitted, never guessed."""
+    argv = [str(doit_bin()), "append", "spec-written", spec_id]
+    for k in ("path", "footprint", "ac_count", "ac_types", "requirement_ids",
+             "owed_ac_count", "unknown_count"):
+        if ev.get(k) is not None:
+            argv.append(_kv_arg(k, ev[k]))
+    subprocess.run(argv, capture_output=True, text=True)
+
+
+def _append_bounced(spec_id, findings, rework_spawn):
+    """`spec-shape-bounced` — appended exactly once per `_do_carry` call, only on
+    the bounce-then-rework branch (never the clean or mechanical-fix-only
+    branches), whether or not the rework attempt itself went on to succeed.
+    `rework_spawn` is OMITTED — never a placeholder — when neither the
+    packet-build call nor the rework dispatch ever named one (finding 5), this
+    file's usual never-`"null"` encoding for `charter`/`charter_reason`/
+    `trusted_author` applied to this new optional key."""
+    argv = [str(doit_bin()), "append", "spec-shape-bounced", spec_id,
+           f"findings={json.dumps(findings)}"]
+    if rework_spawn is not None:
+        argv.append(f"rework_spawn={rework_spawn}")
+    subprocess.run(argv, capture_output=True, text=True)
+
+
+def _shape_gate(spec_id, path, slot, charter, repo, project, ev):
+    """R5 (charter L-charter-0038): `shape.check` on the just-written spec text —
+    clean, a no-op returning `[]`. A block finding gets exactly one
+    `shape.mechanical_fix` attempt (Target); still blocked, exactly one
+    spec-writer rework round (SD11: one round, never a loop) built from the SAME
+    carry packet `slot` this call already produced, via the `doit packet
+    spec-writer <spec_id> --slot <slot> --project <project>` CLI — never
+    `import packet` (findings 2, 3) — run with `DOIT_PROJECT` set to `project`
+    in that one subprocess's own environment. On success its stdout path
+    replaces `--packet` for a rework `doit dispatch spec-writer` call otherwise
+    identical to `_do_carry`'s own round-one dispatch (same `--path`/`--cwd`/
+    `--project`/`--charter`).
+
+    Returns the repair names `shape.mechanical_fix` applied THIS call (possibly
+    `[]`) — Assumptions: they ride on the eventual `spec-carried` event whether
+    or not the fix alone cleared every finding. Raises `CarryFailed` — never
+    returns — when the spec is still `shape.check`-blocked after both the fix
+    and the rework, or when the packet-build call or the rework dispatch fails
+    outright."""
+    text = pathlib.Path(path).read_text()
+    if not shape.check(text)["block"]:
+        return []
+    repaired_text, repairs = shape.mechanical_fix(text)
+    rechecked = shape.check(repaired_text)
+    if not rechecked["block"]:
+        pathlib.Path(path).write_text(repaired_text)
+        _restamp_spec_written(spec_id, ev)
+        return repairs
+    findings = rechecked["block"]
+    packet_cmd = [str(doit_bin()), "packet", "spec-writer", spec_id,
+                 "--slot", str(slot), "--project", project]
+    pr = subprocess.run(packet_cmd, capture_output=True, text=True,
+                        env={**os.environ, "DOIT_PROJECT": project})
+    if pr.returncode != 0:
+        _append_bounced(spec_id, findings, None)
+        why = (pr.stderr or pr.stdout or "no reason given").strip().splitlines()
+        raise CarryFailed(f"carry: {spec_id} spec-shape rework packet failed — "
+                          f"{why[-1] if why else 'no reason given'}")
+    rework_slot = pr.stdout.strip()
+    rework_cmd = [str(doit_bin()), "dispatch", "spec-writer", spec_id]
+    if charter is not None:
+        rework_cmd += ["--charter", charter]
+    rework_cmd += ["--packet", rework_slot, "--path", path, "--cwd", str(repo), "--project", project]
+    rr = subprocess.run(rework_cmd, capture_output=True, text=True)
+    m = re.search(r"FAILED (\S+):", rr.stderr or "")
+    rework_spawn = m.group(1) if m else None
+    if rr.returncode != 0:
+        _append_bounced(spec_id, findings, rework_spawn)
+        why = next((l for l in (rr.stderr or "").splitlines() if l.startswith("FAILED ")),
+                  (rr.stderr or rr.stdout or "no reason given").strip().splitlines()[-1:] or ["no reason given"])
+        raise CarryFailed(f"carry: {spec_id} spec-shape rework was not written — "
+                          f"{why if isinstance(why, str) else why[0]}")
+    if rework_spawn is None:
+        try:
+            rework_spawn = json.loads(rr.stdout).get("spawn")
+        except ValueError:
+            rework_spawn = None
+    _append_bounced(spec_id, findings, rework_spawn)
+    if spec_written(spec_id) is None:
+        raise CarryFailed(f"carry: {spec_id} rework spawn returned status "
+                          f"{spawn_status(spec_id)} — no spec written")
+    reworked = shape.check(pathlib.Path(path).read_text())
+    if reworked["block"]:
+        raise CarryFailed(f"carry: {spec_id} still fails spec-shape validation after rework — "
+                          f"{'; '.join(reworked['block'])}")
+    return repairs
+
+
 def _do_carry(source, *, repo=None, project=None, force=False, title=None, body=None,
               from_ledger=False):
     """Today's `main()` logic, refactored into a private, importable callable — the
@@ -592,15 +715,25 @@ def _do_carry(source, *, repo=None, project=None, force=False, title=None, body=
     ev = spec_written(spec_id)
     if ev is None:
         raise CarryFailed(f"carry: spawn returned status {spawn_status(spec_id)} — no spec written")
-    # L-spec-0195/AC5: a spec the tools cannot read never reaches `spec-carried` —
-    # named here, in `carry`'s own path, rather than deferred to whatever the
-    # eventual `spec-writer` wrapper does with it, because carry-both-ledgers built
-    # in wave 1, before `validate.spec_shape` existed for it to call.
+    # L-spec-0195/AC5, reshaped by R5 (charter L-charter-0038): a spec the tools
+    # cannot read never reaches `spec-carried` — but a block finding now gets one
+    # `shape.mechanical_fix` attempt, then one spec-writer rework round, before
+    # `CarryFailed`, rather than failing outright on the first `validate.spec_shape`
+    # read (`_shape_gate`, above).
+    shape_fixed = _shape_gate(spec_id, path, slot, charter, repo, project, ev)
+    # Re-derived from the LATEST `spec-written` event on the subject, never the
+    # pre-gate snapshot: the mechanical-fix-only branch re-stamped one of its own,
+    # and a successful rework's own `doit dispatch spec-writer` call supplied one
+    # through `dispatch.py`'s unmodified `events_for` — either way this is the
+    # gate-resolved truth, and for the untouched clean branch it is simply `ev`
+    # again (finding 1; AC4).
+    ev = spec_written(spec_id)
+    if ev is None:
+        raise CarryFailed(f"carry: {spec_id} — the shape gate left no spec-written event")
     import validate                  # here, not at the top: mirrors this file's own
-                                      # lazy `import fold`/`import dispatch` below
-    findings = validate.spec_shape(pathlib.Path(path).read_text())
-    if findings:
-        raise CarryFailed(f"carry: {spec_id} fails spec-shape validation — {'; '.join(findings)}")
+                                      # lazy `import fold`/`import dispatch` below —
+                                      # `_append_lint_warnings` below still needs the
+                                      # module reference a test can monkeypatch
     footprint = ev.get("footprint") or []
     if not footprint:
         raise CarryFailed(f"carry: {spec_id} was written with an empty footprint — no tier stamped")
@@ -610,6 +743,11 @@ def _do_carry(source, *, repo=None, project=None, force=False, title=None, body=
     # afterward — identically to the dispatch-failure and killed-spawn paths above.
     event = {"v": 1, "ts": now(), "type": "spec-carried", "subject": spec_id, "source": source_id,
              "tier": tier, "audited_at": audited_at, "footprint": footprint}
+    # Never `shape_fixed: []` (Produces): present only when `_shape_gate` actually
+    # applied a repair THIS call, whether or not the fix alone cleared every
+    # finding (Assumptions).
+    if shape_fixed:
+        event["shape_fixed"] = shape_fixed
     # Null encoding, pinned (finding 3): each of the three is OMITTED — from the
     # event dict `check_append` sees AND from the append argv — when `None`,
     # never the literal `"null"` and never a `k:=null` forced key.
@@ -631,6 +769,8 @@ def _do_carry(source, *, repo=None, project=None, force=False, title=None, body=
     ap_argv = [str(doit_bin()), "append", "spec-carried", spec_id,
               f"source={source_id}", f"tier={tier}", f"audited_at={audited_at}",
               f"footprint={json.dumps(footprint)}"]
+    if shape_fixed:
+        ap_argv.append(f"shape_fixed={json.dumps(shape_fixed)}")
     for k, v in (("charter", charter), ("charter_reason", charter_reason),
                 ("trusted_author", trusted_author)):
         if v is not None:

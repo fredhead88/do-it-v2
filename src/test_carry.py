@@ -16,7 +16,7 @@ label that matches neither the fixture `spec-carried` event's project nor the
 `spec-written` one's: that is the only arrangement in which the idempotency guard's
 neutralised read is distinguishable from `fold.read_events()`'s filtered one.
 """
-import contextlib, io, json, os, pathlib, sys, tempfile, types
+import contextlib, io, json, os, pathlib, subprocess as real_subprocess, sys, tempfile, types
 
 TMP = pathlib.Path(tempfile.mkdtemp(prefix="carry-test-"))
 os.environ["DOIT_ROOT"] = str(TMP / "root")
@@ -34,7 +34,7 @@ HEAD = "4d1c0ffee4d1c0ffee4d1c0ffee4d1c0ffee1234"
 (REPO / ".git" / "HEAD").write_text(HEAD + "\n")
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import carry, dispatch, fold  # noqa: E402
+import carry, dispatch, fold, shape  # noqa: E402
 
 N = 0
 TICK = [0]
@@ -77,6 +77,42 @@ def inbox(num, stem, text):
 
 # ── the stub: every subprocess `carry` makes, recorded and never run ───────────
 CALLS = []
+# `id(the CALLS entry) -> the env= kwarg that call carried (or None)` — L-spec-
+# 0391/AC3: the packet-build call's DOIT_PROJECT must land in that ONE
+# subprocess's own environment, not the process-wide os.environ. Keyed by
+# `id()`, never a parallel list indexed the same as CALLS: CALLS is reset with
+# `CALLS[:] = []` throughout this file (many sites, none of them this spec's),
+# which would silently misalign a same-length parallel list the very next time
+# any earlier section's calls outnumbered this one's.
+CALL_ENVS = {}
+
+
+def _parse_kv(pairs):
+    """`fold.append`'s own `k=v`/`k:=v` value parsing (`fold.py`'s `append()`),
+    verbatim in effect: a bare digit string stays a string; a `[`/`{`/`"`-led
+    value, or `true`/`false`/`null`, auto-parses as JSON; a `k:` suffix forces
+    JSON regardless. Needed once a stubbed `doit append` carries a list value
+    (`spec-shape-bounced`'s `findings`, `spec-carried`'s `shape_fixed`) a test
+    reads back through `carry.scan_events`/`already_carried` — the naive
+    `dict(x.split("=", 1) for x in pairs)` this replaces stored those as their
+    raw JSON-text STRING, never a real list."""
+    e = {}
+    for kv in pairs:
+        k, _, v = kv.partition("=")
+        if k.endswith(":"):
+            k = k[:-1]
+            try:
+                e[k] = json.loads(v)
+            except ValueError:
+                e[k] = v
+        elif v[:1] in "{[\"" or v in ("true", "false", "null"):
+            try:
+                e[k] = json.loads(v)
+            except ValueError:
+                e[k] = v
+        else:
+            e[k] = v
+    return e
 
 
 class Stub:
@@ -85,9 +121,15 @@ class Stub:
     def __init__(self):
         self.dispatch = lambda argv: (0, "", "")
         self.append = self.record_append
+        # L-spec-0391: the `doit packet spec-writer <id> --slot <FILE> --project
+        # <NAME>` call `_shape_gate` makes on the bounce branch — a THIRD argv
+        # shape, distinct from `dispatch`/`append`, so routing it through
+        # `record_append`'s `k=v` parser (its argv has no `=` tokens at all,
+        # only `--slot FILE --project NAME`) would crash rather than refuse.
+        self.packet = lambda argv, env: (0, "", "")
 
     def record_append(self, argv):
-        kv = dict(x.split("=", 1) for x in argv[4:])
+        kv = _parse_kv(argv[4:])
         # what `doit append` would write — including a `project` label that differs
         # from DOIT_PROJECT, which is the whole point of AC3.
         write_event("L-operator-stub", {"type": argv[2], "subject": argv[3],
@@ -95,8 +137,13 @@ class Stub:
         return 0, "", ""
 
     def run(self, cmd, capture_output=False, text=False, **kw):
-        CALLS.append(list(cmd))
-        rc, out, err = (self.dispatch if cmd[1] == "dispatch" else self.append)(list(cmd))
+        c = list(cmd)
+        CALLS.append(c)
+        CALL_ENVS[id(c)] = kw.get("env")
+        if c[1] == "packet":
+            rc, out, err = self.packet(c, kw.get("env"))
+        else:
+            rc, out, err = (self.dispatch if c[1] == "dispatch" else self.append)(c)
         return types.SimpleNamespace(returncode=rc, stdout=out, stderr=err)
 
 
@@ -149,8 +196,20 @@ WELL_FORMED_SPEC = ("# fixture spec\n## Verification\n```\ntrue\n```\n"
                     "Writes: a.py\n")
 
 
-def writer(footprint, path_written=True, rc=0, stderr="", status=None, spec_text=WELL_FORMED_SPEC):
-    """A `doit dispatch spec-writer` that behaves the way the real one would."""
+def writer(footprint, path_written=True, rc=0, stderr="", status=None, spec_text=WELL_FORMED_SPEC,
+          spawn="L-spec-writer-0099", shape_findings=None):
+    """A `doit dispatch spec-writer` that behaves the way the real one would. `spawn`
+    (L-spec-0391): the real `dispatch.py` prints `{"spawn": spawn, "ok": True, **meta}`
+    on success (`dispatch.py:1125`) — carried here so `_shape_gate`'s `rework_spawn`
+    parse has a real key to read, where the fixture previously only carried `ok`.
+    `shape_findings` (L-spec-0391/AC10): when given, a SECOND event —
+    `spec-shape-failed` — is appended right after `spec-written`, mirroring
+    `dispatch.py`'s own `events_for` (`dispatch.py:650-653`): a real spec-writer
+    dispatch that writes a shape-blocked spec ALSO appends `spec-shape-
+    failed{findings}` on that SAME call, before this file's own gate ever runs
+    (Out of scope) — this harness's plain `writer()` did not reproduce that
+    second event until AC10 needed one to prove `fold.spec_shape_pending`
+    actually clears."""
     def go(argv):
         if rc == 0 and path_written:
             pathlib.Path(argv[argv.index("--path") + 1]).write_text(spec_text)
@@ -158,10 +217,30 @@ def writer(footprint, path_written=True, rc=0, stderr="", status=None, spec_text
                                                "project": "another-project-again",
                                                "path": argv[argv.index("--path") + 1],
                                                "footprint": footprint})
+            if shape_findings is not None:
+                write_event("L-spec-writer-0001", {"type": "spec-shape-failed", "subject": argv[3],
+                                                   "project": "another-project-again",
+                                                   "findings": shape_findings})
         elif rc == 0 and status:
             write_event("L-spec-writer-0001", {"type": "spawn-done", "subject": argv[3],
                                                "project": "another-project-again", "status": status})
-        return rc, "" if rc else json.dumps({"ok": True}), stderr
+        return rc, "" if rc else json.dumps({"spawn": spawn, "ok": True}), stderr
+    return go
+
+
+def two_round(first, second):
+    """A `doit dispatch spec-writer` stub whose behaviour differs by call number —
+    `first` (a `writer(...)`-shaped `go` callable) on the very first call this stub
+    instance ever receives, `second` on every one after. L-spec-0391's rework round
+    needs round-one to succeed (writing the blocked spec `_shape_gate` then acts on)
+    while only the RE­WORK dispatch behaves differently (fails, or writes a
+    different spec text/footprint) — `writer()` alone is call-count-blind, and using
+    it unmodified for both calls of a `carry.subprocess.run` sequence cannot tell
+    round one from the rework."""
+    calls = [0]
+    def go(argv):
+        calls[0] += 1
+        return (first if calls[0] == 1 else second)(argv)
     return go
 
 
@@ -269,11 +348,19 @@ check("--charter" not in d, "★ no --charter anywhere: the carried spec is char
 check(all(c[0] == str(carry.doit_bin()) and c[1] in ("dispatch", "append") for c in CALLS)
       and len(CALLS) == 2, f"★ only the two stubbed doit calls ran — nothing spent: {CALLS}")
 check(ALLOCS[0] == 1, f"exactly one allocation on the happy path: {ALLOCS[0]}")
+# ══ L-spec-0391/AC2 · shape.check finds WELL_FORMED_SPEC clean on the first
+#    check — no packet call (already proven by the len(CALLS) == 2 check above),
+#    no shape_fixed key, no fresh spec-written re-append, no spec-shape-bounced
+check(not shape.check(WELL_FORMED_SPEC)["block"], "fixture sanity: WELL_FORMED_SPEC is clean")
+check(not [e for e in carry.scan_events(lambda e: e.get("type") == "spec-shape-bounced"
+                                        and e.get("subject") == res["spec"])],
+      "★ AC2: no spec-shape-bounced for a spec that was clean on the first check")
 
 # ══ AC5(a) · the spec-carried event, its tier, and its verbatim audited_at ═════
 ap = next(c for c in CALLS if c[1] == "append")
 check(ap[2:4] == ["spec-carried", res["spec"]], f"append spec-carried <the new spec id>: {ap}")
 kv = dict(x.split("=", 1) for x in ap[4:])
+check("shape_fixed" not in kv, f"★ AC2: never `shape_fixed: []` — the key is absent entirely: {kv}")
 check(kv["source"] == "1454", f"source is the v4 id: {kv}")
 check(kv["tier"] == "full" and res["rule"] == "money",
       "★ the tier came from the spec-written event's footprint, not from any markdown")
@@ -300,6 +387,72 @@ check(ALLOCS[0] == 0 and CALLS == [], "the guard refuses before alloc and before
 code, out, err = run(["1454", "--force"] + BASE)
 check(code == 0 and json.loads(out)["spec"] != res["spec"], f"--force carries again: {err!r}")
 check(ALLOCS[0] == 1, "…and allocates exactly once when forced")
+
+# ══ L-spec-0391/AC1/AC10 · a block finding cleared by shape.mechanical_fix
+#    ALONE never reaches the bounce branch — the repaired text lands on disk,
+#    the resulting spec-carried carries shape_fixed, no spec-shape-bounced
+#    fires, and fold.spec_shape_pending clears on the subject's own events ═══
+WRITES_ANNOTATION_SPEC = WELL_FORMED_SPEC.replace("Writes: a.py\n", "Writes: a.py (new)\n")
+check(shape.check(WRITES_ANNOTATION_SPEC)["block"] != []
+      and shape.check(shape.mechanical_fix(WRITES_ANNOTATION_SPEC)[0])["block"] == [],
+      "fixture sanity: the trailing (new) blocks, and the mechanical fix alone clears it")
+record(1486, "writes-annotation-only"), inbox(1486, "writes-annotation-only", "# 1486\n")
+ALLOCS[0], CALLS[:] = 0, []
+STUB.dispatch = writer(["src/1486.py"], spec_text=WRITES_ANNOTATION_SPEC,
+                       shape_findings=shape.check(WRITES_ANNOTATION_SPEC)["block"])
+code, out, err = run(["1486"] + BASE)
+check(code == 0, f"★ AC1: a mechanical-fix-only block finding still carries: {err!r}")
+res1486 = json.loads(out)
+check(not [c for c in CALLS if c[1] == "packet"], "★ AC1: mechanical_fix alone never calls doit packet")
+check((CONTENT / f"{res1486['spec']}.md").read_text() == shape.mechanical_fix(WRITES_ANNOTATION_SPEC)[0],
+      "★ AC1: the repaired text — annotation stripped, nothing else changed — lands on content/<spec>.md")
+ap1486 = next(c for c in CALLS if c[1] == "append" and c[2] == "spec-carried")
+kv1486 = dict(x.split("=", 1) for x in ap1486[4:])
+check(kv1486.get("shape_fixed") == json.dumps(["writes-annotation"]),
+      f"★ AC1: spec-carried carries shape_fixed == ['writes-annotation']: {kv1486}")
+check(not [e for e in carry.scan_events(lambda e: e.get("type") == "spec-shape-bounced"
+                                        and e.get("subject") == res1486["spec"])],
+      "★ AC1: no spec-shape-bounced for the mechanical-fix-only branch")
+check(not [c for c in CALLS if c[1] == "dispatch"][1:],
+      "★ AC1: no second dispatch call either — one round-one dispatch, nothing else")
+# AC10: the subject's own events, TIME-ORDERED (carry.scan_events itself sorts
+# by filename, not ts — a real caller collecting "the subject's events" for
+# fold.spec_shape_pending sorts them chronologically first, the same way
+# fold.read_events() does), now show a spec-written NEWER than the first
+# dispatch's own spec-shape-failed (mirroring dispatch.py's real events_for,
+# which appends both on the very first dispatch — Out of scope).
+evs1486 = sorted(carry.scan_events(lambda e: e.get("subject") == res1486["spec"]),
+                key=lambda e: e.get("ts") or "")
+check(any(e["type"] == "spec-shape-failed" for e in evs1486),
+      "fixture sanity: the first dispatch's own spec-shape-failed is on the ledger")
+check(fold.spec_shape_pending(evs1486) is False,
+      "★ AC10: fold.spec_shape_pending is False — the fixed defect no longer permanently "
+      "refuses a later builder dispatch (finding 1)")
+
+# ...the second mechanical repair, ac-bullet, on its own fixture (no `##
+# Acceptance Criteria` heading — the raw-line fallback scan is what actually
+# fails on a bulleted `AC1 [...]` line; see this spec's own Assumptions/
+# `packet.criteria`, which does not block on a bullet INSIDE a heading).
+AC_BULLET_ONLY_SPEC = ("# fixture spec\n## Verification\n```\ntrue\n```\n"
+                      "- AC1 [backend]: x.\n  review_path: y\n"
+                      "Writes: a.py\n")
+check(shape.check(AC_BULLET_ONLY_SPEC)["block"] != []
+      and shape.check(shape.mechanical_fix(AC_BULLET_ONLY_SPEC)[0])["block"] == [],
+      "fixture sanity: the bare bullet blocks, and the mechanical fix alone clears it")
+record(1487, "ac-bullet-only"), inbox(1487, "ac-bullet-only", "# 1487\n")
+ALLOCS[0], CALLS[:] = 0, []
+STUB.dispatch = writer(["src/1487.py"], spec_text=AC_BULLET_ONLY_SPEC)
+code, out, err = run(["1487"] + BASE)
+check(code == 0, f"★ AC1: the ac-bullet fixture also carries: {err!r}")
+res1487 = json.loads(out)
+check(not [c for c in CALLS if c[1] == "packet"], "★ AC1: mechanical_fix alone never calls doit packet")
+ap1487 = next(c for c in CALLS if c[1] == "append" and c[2] == "spec-carried")
+kv1487 = dict(x.split("=", 1) for x in ap1487[4:])
+check(kv1487.get("shape_fixed") == json.dumps(["ac-bullet"]),
+      f"★ AC1: spec-carried carries shape_fixed == ['ac-bullet']: {kv1487}")
+check(not [e for e in carry.scan_events(lambda e: e.get("type") == "spec-shape-bounced"
+                                        and e.get("subject") == res1487["spec"])],
+      "★ AC1: no spec-shape-bounced for the ac-bullet mechanical-fix-only branch")
 
 # ══ AC5(b) · an empty footprint refuses to stamp ═══════════════════════════════
 record(1480, "empty-footprint"), inbox(1480, "empty-footprint", "# 1480\n")
@@ -334,21 +487,166 @@ STUB.dispatch = writer(["src/ok.py"])
 code, out, err = run(["1482"] + BASE)
 check(code == 0, "a killed spawn is a retry by design, not a permanently burned source")
 
-# ══ L-spec-0195/AC5 · a spec that fails validate.spec_shape never reaches
-#    spec-carried — the refusal names spec-shape and the findings ═════════════
+# ══ L-spec-0195/AC5, reshaped by L-spec-0391 (charter L-charter-0038, R5) · a
+#    spec still `shape.check`-blocked after the mechanical fix AND one rework
+#    round never reaches spec-carried ═══════════════════════════════════════
 record(1483, "malformed-verification"), inbox(1483, "malformed-verification", "# 1483\n")
 BAD_SHAPE_SPEC = "# 1483\nno verification, no acceptance criteria, no writes grant\n"
+BAD_SHAPE_BLOCK = shape.check(BAD_SHAPE_SPEC)["block"]
+check(bool(BAD_SHAPE_BLOCK) and shape.mechanical_fix(BAD_SHAPE_SPEC)[1] == [],
+      "★ fixture sanity: BAD_SHAPE_SPEC is blocked, and mechanical_fix finds nothing "
+      "mechanical to repair in it — the bounce branch is the only one that can fire")
+REWORK_SLOT_1483 = str(TMP / "rework-slot-1483.md")
+pathlib.Path(REWORK_SLOT_1483).write_text("# 1483 rework packet stub\n")
+
+# ══ AC5/AC6(a)/AC8 · the rework ALSO comes back blocked: CarryFailed, no
+#    spec-carried, exactly one packet call and two dispatch calls, one
+#    spec-shape-bounced naming the rework's own spawn ═══════════════════════
 ALLOCS[0], CALLS[:] = 0, []
-STUB.dispatch = writer(["src/ok.py"], spec_text=BAD_SHAPE_SPEC)
+STUB.packet = lambda argv, env: (0, REWORK_SLOT_1483 + "\n", "")
+STUB.dispatch = writer(["src/ok.py"], spec_text=BAD_SHAPE_SPEC)   # both rounds hand back the same bad spec
 code, out, err = run(["1483"] + BASE)
-check(code != 0 and "fails spec-shape validation" in err and "Verification:" in err,
-      f"★ a spec the tools cannot read never reaches spec-carried: {err!r}")
-check(not [c for c in CALLS if c[1] == "append"], "…and nothing was appended")
+check(code != 0 and "still fails spec-shape validation after rework" in err,
+      f"★ AC5: still blocked after both the fix and the rework — CarryFailed: {err!r}")
+check(not [c for c in CALLS if c[1] == "append" and c[2] == "spec-carried"],
+      "…and no spec-carried was appended")
 check(carry.already_carried("1483") is None, "no spec-carried event exists for it")
+pkt_calls_1483 = [c for c in CALLS if c[1] == "packet"]
+dsp_calls_1483 = [c for c in CALLS if c[1] == "dispatch"]
+check(len(pkt_calls_1483) == 1 and len(dsp_calls_1483) == 2,
+      f"★ AC8: exactly one packet call, exactly two dispatch calls (round-one + rework): {CALLS}")
+spec_id_1483 = dsp_calls_1483[0][3]
+check(dsp_calls_1483[1][3] == spec_id_1483, "the rework dispatch names the SAME spec id")
+b1483 = next(e for e in carry.scan_events(
+    lambda e: e.get("type") == "spec-shape-bounced" and e.get("subject") == spec_id_1483))
+check(b1483["findings"] == BAD_SHAPE_BLOCK,
+      f"★ AC6(a): findings is the re-check-after-fix block list, verbatim: {b1483}")
+check(b1483.get("rework_spawn") == "L-spec-writer-0099",
+      f"★ AC6(a): rework_spawn is the spawn id parsed from the rework dispatch's own "
+      f"stdout `spawn` key: {b1483}")
 # ...and the source is not burned: a retry with a well-formed spec carries.
 STUB.dispatch = writer(["src/ok.py"])
 code, out, err = run(["1483"] + BASE)
 check(code == 0, f"★ a spec-shape refusal is a retry, not a permanently burned source: {err!r}")
+
+# ══ AC7/AC6(b) · the packet-build call itself fails: no rework dispatch is
+#    EVER attempted, CarryFailed names the failing call's own stderr, and the
+#    standing spec-shape-bounced still fires — with NO rework_spawn key ══════
+record(1484, "packet-build-fails"), inbox(1484, "packet-build-fails", "# 1484\n")
+ALLOCS[0], CALLS[:] = 0, []
+STUB.packet = lambda argv, env: (1, "", "packet: no audit findings on this subject")
+STUB.dispatch = writer(["src/ok.py"], spec_text=BAD_SHAPE_SPEC)
+code, out, err = run(["1484"] + BASE)
+check(code != 0 and "packet: no audit findings on this subject" in err,
+      f"★ AC7: a failed packet-build call is a normal CarryFailed, never a bare traceback: {err!r}")
+dsp_calls_1484 = [c for c in CALLS if c[1] == "dispatch"]
+check(len(dsp_calls_1484) == 1,
+      f"★ AC7: no rework dispatch was ever attempted after the packet call failed: {CALLS}")
+check(not [c for c in CALLS if c[1] == "append" and c[2] == "spec-carried"],
+      "no spec-carried was appended")
+check(carry.already_carried("1484") is None, "no spec-carried event exists for it")
+spec_id_1484 = dsp_calls_1484[0][3]
+b1484 = next(e for e in carry.scan_events(
+    lambda e: e.get("type") == "spec-shape-bounced" and e.get("subject") == spec_id_1484))
+check(b1484["findings"] == BAD_SHAPE_BLOCK, f"AC6(b): findings is still present: {b1484}")
+check("rework_spawn" not in b1484,
+      f"★ AC6(b): NO rework_spawn key — never null, never \"none\" — the packet call "
+      f"never dispatches: {b1484}")
+
+# ══ AC6(b)/AC7 (other shape) · a pre-allocation dispatch refusal: the rework
+#    packet builds fine, but `dispatch.py`'s own `--packet ... is not a file`
+#    exit names no spawn either — same bounced shape, same CarryFailed shape ══
+record(1485, "rework-dispatch-refuses"), inbox(1485, "rework-dispatch-refuses", "# 1485\n")
+ALLOCS[0], CALLS[:] = 0, []
+STUB.packet = lambda argv, env: (0, REWORK_SLOT_1483 + "\n", "")
+STUB.dispatch = two_round(
+    writer(["src/ok.py"], spec_text=BAD_SHAPE_SPEC),   # round one succeeds and writes the bad spec
+    writer(None, rc=1, stderr="dispatch: --packet '' is not a file — nothing allocated, nothing spent"))
+code, out, err = run(["1485"] + BASE)
+check(code != 0 and "is not a file" in err,
+      f"★ a pre-allocation dispatch refusal is a normal CarryFailed too: {err!r}")
+dsp_calls_1485 = [c for c in CALLS if c[1] == "dispatch"]
+check(len(dsp_calls_1485) == 2, f"AC8: round-one AND the one rework attempt, never a third: {CALLS}")
+check(carry.already_carried("1485") is None, "no spec-carried event exists for it")
+spec_id_1485 = dsp_calls_1485[0][3]
+b1485 = next(e for e in carry.scan_events(
+    lambda e: e.get("type") == "spec-shape-bounced" and e.get("subject") == spec_id_1485))
+check("rework_spawn" not in b1485,
+      f"★ AC6(b)/finding 5: a spawn-less dispatch refusal names no rework_spawn either: {b1485}")
+
+# ══ L-spec-0391/AC3/AC4/AC6(a) · bounce-then-successful-rework: the packet
+#    call's argv/env, the rework dispatch's --packet, and the FINAL spec-
+#    carried using the REWORK's own footprint/tier — never round-one's ══════
+record(1491, "shape-gate-bounce-then-rework"), inbox(1491, "shape-gate-bounce-then-rework", "# 1491\n")
+REWORK_SLOT_1491 = str(TMP / "rework-slot-1491.md")
+pathlib.Path(REWORK_SLOT_1491).write_text("# 1491 rework packet stub\n")
+ALLOCS[0], CALLS[:] = 0, []
+STUB.packet = lambda argv, env: (0, REWORK_SLOT_1491 + "\n", "")
+STUB.dispatch = two_round(
+    writer(["src/gates-only.py"], spec_text=BAD_SHAPE_SPEC),
+    writer(["deploy.sh"], spec_text=WELL_FORMED_SPEC, spawn="L-spec-writer-0177"))
+code, out, err = run(["1491"] + BASE)
+check(code == 0, f"★ AC4: a bounce-then-successful-rework still carries: {err!r}")
+res1491 = json.loads(out)
+pk1491 = next(c for c in CALLS if c[1] == "packet")
+check(pk1491[:4] == [str(carry.doit_bin()), "packet", "spec-writer", res1491["spec"]],
+      f"AC3: one packet call, argv shape: {pk1491}")
+check(pk1491[pk1491.index("--slot") + 1] == res1491["packet"],
+      "★ AC3: --slot is the SAME carry packet path carried_slot already built")
+check(pk1491[pk1491.index("--project") + 1] == "albert-scott", "AC3: --project explicit")
+pk1491_env = CALL_ENVS[id(pk1491)]
+check(pk1491_env is not None and pk1491_env.get("DOIT_PROJECT") == "albert-scott",
+      f"★ AC3: DOIT_PROJECT is set in the packet call's OWN environment: {pk1491_env}")
+ds1491 = [c for c in CALLS if c[1] == "dispatch"]
+check(len(ds1491) == 2, f"AC3/AC8: exactly one round-one + one rework dispatch: {ds1491}")
+check(ds1491[1][ds1491[1].index("--packet") + 1] == REWORK_SLOT_1491,
+      "★ AC3: the rework dispatch's --packet is the packet call's own stdout path, "
+      "distinct from the original carry packet")
+for flag in ("--path", "--cwd", "--project"):
+    check(ds1491[1][ds1491[1].index(flag) + 1] == ds1491[0][ds1491[0].index(flag) + 1],
+          f"AC3: rework dispatch's {flag} matches round-one's own: {ds1491}")
+check("--charter" not in ds1491[1], "the rework dispatch also carries no --charter (free-standing)")
+check(res1491["tier"] == "full" and res1491["rule"] == "production-config",
+      f"★ AC4: spec-carried's tier/rule come from the REWORK's own footprint "
+      f"(deploy.sh), never round-one's (gates-only, none): {res1491}")
+bounced1491 = next(e for e in carry.scan_events(
+    lambda e: e.get("type") == "spec-shape-bounced" and e.get("subject") == res1491["spec"]))
+check(bounced1491["findings"] == shape.check(BAD_SHAPE_SPEC)["block"],
+      f"★ AC6(a): findings is the re-check-after-fix block list: {bounced1491}")
+check(bounced1491.get("rework_spawn") == "L-spec-writer-0177",
+      f"★ AC6(a): rework_spawn is the spawn id the successful rework dispatch named: {bounced1491}")
+ap1491 = next(c for c in CALLS if c[1] == "append" and c[2] == "spec-carried")
+kv1491 = dict(x.split("=", 1) for x in ap1491[4:])
+check("shape_fixed" not in kv1491,
+      "★ shape_fixed is absent — BAD_SHAPE_SPEC's block findings are not mechanical, so "
+      "mechanical_fix (verified clean by the fixture-sanity check above) applied no repair")
+
+# ══ L-spec-0391/AC9 · _append_lint_warnings still runs exactly once, reading
+#    the FINAL gate-clean text — a lint finding present only in the PRE-fix
+#    original never fires, whichever of the three branches produced the final
+#    text (here: the mechanical-fix-only branch) ═════════════════════════════
+import validate as validate391  # noqa: E402
+_orig_warn391 = getattr(validate391, "spec_shape_warnings", None)
+validate391.spec_shape_warnings = lambda text: (
+    ["PL-100: uses a trailing (new) annotation"] if "(new)" in text else [])
+try:
+    record(1493, "ac9-lint-reads-final-text"), inbox(1493, "ac9-lint-reads-final-text", "# 1493\n")
+    ALLOCS[0], CALLS[:] = 0, []
+    STUB.dispatch = writer(["src/1493.py"], spec_text=WRITES_ANNOTATION_SPEC)
+    code, out, err = run(["1493"] + BASE)
+    check(code == 0, f"AC9 fixture carries: {err!r}")
+    res1493 = json.loads(out)
+    check(not [e for e in carry.scan_events(lambda e: e.get("type") == "spec-lint-warning"
+                                            and e.get("subject") == res1493["spec"])],
+          "★ AC9: no stale spec-lint-warning for a finding the mechanical fix already cleared "
+          "from the text — the lint pass reads the repaired text, not the pre-gate original")
+finally:
+    if _orig_warn391 is None:
+        delattr(validate391, "spec_shape_warnings")
+    else:
+        validate391.spec_shape_warnings = _orig_warn391
+
+STUB.packet = lambda argv, env: (0, "", "")   # restored to the harmless default
 
 # ══ AC9 · the PR url: recognized, constructed from flags, never fetched ════════
 URL = "https://github.com/o/r/pull/1"
@@ -391,6 +689,43 @@ try:
     check(False, "a folded intent must not be silently truncated by the fallback")
 except carry.Refusal as e:
     check("folded or block scalar" in str(e), f"★ A9: the fallback refuses a fold, never guesses: {e}")
+
+# ══ L-spec-0391/AC11 · the REAL, unstubbed `doit packet spec-writer <id>
+#    --slot <FILE> --project <NAME>` command — findings 2/3's mechanism proved
+#    against the real packet.py, not only this suite's `STUB.packet` ═════════
+AC11_ROOT = TMP / "ac11"
+(AC11_ROOT / "content").mkdir(parents=True, exist_ok=True)
+(AC11_ROOT / "events").mkdir(parents=True, exist_ok=True)
+os.environ["DOIT_ROOT"] = str(AC11_ROOT)
+AC11_PROJECT = "a-real-project-for-ac11"
+AC11_SPEC = "L-spec-9911"
+AC11_FINDING = "Writes grant: the grant: '(new)' is not a path or a glob — AC11 fixture finding"
+write_event("L-operator-stub", {"type": "spec-shape-failed", "subject": AC11_SPEC,
+                                "project": AC11_PROJECT, "findings": [AC11_FINDING]})
+AC11_SLOT = TMP / "ac11-carry-slot.md"
+AC11_SLOT.write_text("# AC11 fixture carry packet\n\nSome staged material.\n")
+AC11_ROOT = pathlib.Path(os.environ["DOIT_ROOT"])
+check(not (AC11_ROOT / "content" / f"slot-{AC11_SPEC}.md").is_file()
+      and not list((AC11_ROOT / "packets").glob(f"{AC11_SPEC}-spec-writer-*.md")),
+      "fixture sanity: neither convention file exists — the real p_spec_writer must "
+      "take the --slot FILE branch, not round one or a prior rework packet")
+carry.subprocess = real_subprocess       # swapped back to the real module for this one check
+try:
+    r = real_subprocess.run([str(carry.doit_bin()), "packet", "spec-writer", AC11_SPEC,
+                            "--slot", str(AC11_SLOT), "--project", AC11_PROJECT],
+                           capture_output=True, text=True,
+                           env={**os.environ, "DOIT_PROJECT": AC11_PROJECT})
+finally:
+    carry.subprocess = STUB              # restored — every later check runs against the stub again
+    os.environ["DOIT_ROOT"] = str(TMP / "root")   # restored — this is the ONE check with its own root
+check(r.returncode == 0, f"★ AC11: the real `doit packet spec-writer` CLI exits 0: {r.stderr!r}")
+ac11_out_path = pathlib.Path(r.stdout.strip())
+check(ac11_out_path.is_file(), f"AC11: it printed a real packet file's path: {r.stdout!r}")
+ac11_body = ac11_out_path.read_text()
+check("## Fix list" in ac11_body and AC11_FINDING in ac11_body,
+      f"★ AC11: the built packet quotes the spec-shape-failed finding verbatim, under a "
+      f"Fix list — proving findings 2/3's env-scoped `doit packet` call works against the "
+      f"REAL packet.py: {ac11_body[-400:]!r}")
 
 # ══ the dispatcher's three edits, read from the file (AC6) ═════════════════════
 DOIT = (pathlib.Path(__file__).resolve().parent.parent / "doit").read_text()
