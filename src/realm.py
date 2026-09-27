@@ -682,7 +682,7 @@ def metrics_at(rows, states, claims, at, sys_sig=None, makers=None, spec_ch=None
             continue
         if d["cont"] >= 2 and d["lastDone"] < d["lastCont"] and d.get("lastWritten", "") < d["lastCont"]:
             dead += 1
-        if d["verd"] >= 3 and d["lastOk"] is False:
+        if d["verd"] >= 3 and d["lastOk"] is False and not re.match(r"^(shipped|accepted)", stx.get(sid, "")) and not (d["gate"] == "merge-gate-clean"):
             churn += 1
         if d["build"] and d["build"] != "DONE" and d["buildT"] > H12:
             blocked += 1
@@ -1008,7 +1008,9 @@ def bootstrap(hours, states=None):
     counts = collections.Counter(e.get("type") for e in raw)
     if states is None:
         states = derive_states() or []
-    return {"live": True, "now": now.isoformat(timespec="seconds"), "root": str(ROOT),
+    _, spec_ch_now = charter_index(raw)
+    metrics_now = metrics_at(rows, states, claims, now, sys_signals(), None, spec_ch_now)
+    return {"live": True, "now": now.isoformat(timespec="seconds"), "root": str(ROOT), "metrics": metrics_now,
             "window": [window_rows[0]["t"] if window_rows else now.isoformat(timespec="seconds"), now.isoformat(timespec="seconds")],
             "ledger_start": rows[0]["t"] if rows else None, "n_events": len(raw), "events": window_rows,
             "stats": role_stats(raw), "states": states,
