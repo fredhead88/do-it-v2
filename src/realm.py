@@ -124,7 +124,7 @@ def compact(e, actor):
     elif ty == "unblocked":
         r["why"] = trunc(e.get("why") or e.get("reason"), 200)
     elif ty == "spec-written":
-        r.update(ac=e.get("ac_count"), fp=len(e.get("footprint") or []), ch=e.get("charter"))
+        r.update(ac=e.get("ac_count"), fp=len(e.get("footprint") or []), ch=e.get("charter"), re=bool(e.get("reasserted")) or None)
     elif ty == "charter-filed":
         r["ti"] = trunc(e.get("title"), 200)
     elif ty == "tick":
@@ -657,12 +657,14 @@ def metrics_at(rows, states, claims, at, sys_sig=None, makers=None, spec_ch=None
     for r in rs:
         if not str(r.get("s") or "").startswith("L-spec-"):
             continue
-        d = per.setdefault(r["s"], {"cont": 0, "lastCont": "", "lastDone": "", "verd": 0, "lastOk": None, "build": None, "buildT": "", "gate": None, "gateT": "", "last": ""})
+        d = per.setdefault(r["s"], {"cont": 0, "lastCont": "", "lastDone": "", "lastWritten": "", "verd": 0, "lastOk": None, "build": None, "buildT": "", "gate": None, "gateT": "", "last": ""})
         d["last"] = r["t"]
         ty = r["ty"]
-        if ty == "spawn-failed" and re.search(r"contamin|identical|D120", str(r.get("why") or ""), re.I):
+        if ty == "spawn-failed" and re.search(r"contamin", str(r.get("why") or ""), re.I) and not re.search(r"identical packet|D120", str(r.get("why") or ""), re.I):
             d["cont"] += 1
             d["lastCont"] = r["t"]
+        elif ty == "spec-written":
+            d["lastWritten"] = r["t"]
         elif ty == "spawn-done":
             d["lastDone"] = r["t"]
         elif ty == "verdict":
@@ -674,10 +676,11 @@ def metrics_at(rows, states, claims, at, sys_sig=None, makers=None, spec_ch=None
         elif ty in ("merge-gate-clean", "merge-gate-rework"):
             d["gate"] = ty
             d["gateT"] = r["t"]
-    for d in per.values():
-        if d.get("last", "") < H24:
+    stx = dict(states or [])
+    for sid, d in per.items():
+        if d.get("last", "") < H24 or re.search(r"killed|void|dropped", stx.get(sid, "")):
             continue
-        if d["cont"] >= 2 and d["lastDone"] < d["lastCont"]:
+        if d["cont"] >= 2 and d["lastDone"] < d["lastCont"] and d.get("lastWritten", "") < d["lastCont"]:
             dead += 1
         if d["verd"] >= 3 and d["lastOk"] is False:
             churn += 1
@@ -713,6 +716,9 @@ def metrics_at(rows, states, claims, at, sys_sig=None, makers=None, spec_ch=None
             ac[(r["s"], r["c"])] = {"t": r["t"], "dl": r.get("dl"), "met": False}
         elif r["ty"] == "owed-met" and r.get("c") and (r["s"], r["c"]) in ac:
             ac[(r["s"], r["c"])]["met"] = True
+    if ac and states:
+        stx = dict(states)
+        ac = {k: v for k, v in ac.items() if re.match(r"^(shipped|accepted)", stx.get(k[0], ""))}
     if ac:
         open_ = [v for v in ac.values() if not v["met"]]
         over = sum(1 for v in open_ if _parse(v.get("dl") or "") and _parse(v["dl"]) < at)
