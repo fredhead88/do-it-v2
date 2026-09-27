@@ -17,6 +17,7 @@ ignored (§9.2), which leaves an audit trail of the attempt.
 import collections, json, os, pathlib, sys
 from datetime import datetime, timezone
 
+import freeze
 import owed
 
 ROOT = pathlib.Path(os.environ.get("DOIT_ROOT", pathlib.Path.home() / ".do-it"))
@@ -1659,8 +1660,20 @@ def render(events, specs, charters, ignored, by_subject):
     # would forge an extra section here — §8.3's sections (ten, plus the SPEND
     # block added by retro step 9) are positional. Pre-existing on this line; the
     # spend row now carries the same value, so both are collapsed.
+    # L-charter-0042 R3/L-spec-0429: "A freeze is state, not a message." Called
+    # once, before L is built, so the board (the Executor's seed) can open with
+    # it. Absent flag -> `frozen` is None -> L is untouched below -> output is
+    # byte-identical to before this spec. Text is whitespace-collapsed (same
+    # reason `scope` below collapses DOIT_PROJECT): an embedded newline in
+    # operator-written flag text must never forge an extra physical line here.
+    frozen = freeze.state()
+
     scope = f" · project={' '.join(str(PROJECT).split())}" if PROJECT else ""
     L = [f"# board · {NOW.isoformat(timespec='seconds')} · fold @ {len(events)}{scope}", ""]
+    if frozen is not None:
+        cap = frozen["cap"] or "lifted by the Thinker"
+        text = " ".join(frozen["text"].split())
+        L = [f"MERGE FREEZE (building allowed) until {cap} · {text}", ""] + L
 
     # R5/R6: whatever relay-queries' waiting_lines(events, ROOT) returns, verbatim
     # and in order, immediately under the title and above NEEDS YOU. A PURE

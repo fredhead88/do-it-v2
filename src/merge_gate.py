@@ -38,6 +38,7 @@ Runs at the Executor's merge step (§3.9, D17), BEFORE `--no-ff`.
 import collections, json, os, pathlib, re, subprocess, sys, time
 
 import fold
+import freeze
 
 # A removal under a `migrations/` path SEGMENT is always named — grant or not,
 # rename or not. Segment, not prefix: real migrations live at `supabase/migrations/`.
@@ -577,12 +578,12 @@ def main_(argv):
     # Thinker merge freeze (added 2026-09-27 after L-spec-0406 merged into a master frozen for
     # Codex #445): a freeze that lived only in chat messages did not survive the Executor's
     # context. The flag file is the freeze; the gate refuses while it exists.
-    _freeze = pathlib.Path.home() / ".do-it" / "state" / "master-frozen-for-codex"
+    _frozen = freeze.state()
     _here = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True).stdout.strip()
     _remote = subprocess.run(["git", "remote", "get-url", "origin"], capture_output=True, text=True).stdout.strip()
-    if _freeze.exists() and "albert-scott" in (_here + _remote) and "do-it-v2" not in _remote \
+    if _frozen is not None and "albert-scott" in (_here + _remote) and "do-it-v2" not in _remote \
             and os.environ.get("DOIT_IGNORE_FREEZE") != "1":
-        sys.exit(f"merge-gate: REFUSED: master is frozen by the Thinker ({_freeze.read_text().strip()}); "
+        sys.exit(f"merge-gate: REFUSED: master is frozen by the Thinker ({_frozen['text']}); "
                  f"wait for the Thinker to lift it")
     # NOT setdefault: an inherited DOIT_LEDGER_FILE routed the executor's stop
     # into another seat's file, and fold takes the actor from the filename — the
