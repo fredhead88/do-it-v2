@@ -35,7 +35,7 @@ actor (D90: `"-".join(stem.split("-")[1:-1])`) resolve to `sweep` under any
 caller's environment, including a bare cron invocation that never set
 `DOIT_LEDGER_FILE` at all.
 """
-import argparse, json, pathlib, subprocess, sys
+import argparse, json, pathlib, re, subprocess, sys
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
@@ -203,18 +203,30 @@ def dispatch_batch(project, batch, runner, *, dry_run=False):
                 f"({_describe(batch)}) as one detached owed-sweeper dispatch"]
     sweep_path = dispatch.alloc(dispatch.CONTENT, "L-sweep-", ".md")
     sweep_id = sweep_path.stem
-    sweep_path.write_text(_manifest_text(sweep_id, project, cwd, batch))
-    pr = runner.run([str(doit_bin()), "packet", "owed-sweeper", sweep_id])
-    if pr.returncode != 0:
-        return [f"sweep-owed: packet build failed for {sweep_id}: "
-                f"{(pr.stderr or pr.stdout or '').strip()}"]
+    skipped = []
+    while True:
+        sweep_path.write_text(_manifest_text(sweep_id, project, cwd, batch))
+        pr = runner.run([str(doit_bin()), "packet", "owed-sweeper", sweep_id])
+        if pr.returncode == 0:
+            break
+        err = (pr.stderr or pr.stdout or "").strip()
+        # One row whose criterion no longer exists in its spec file must not sink the whole
+        # batch (first live run, 2026-09-27 12:30Z: L-spec-0205 AC6 blocked every due check).
+        m = re.search(r"(L-spec-\d+)'s (\S+) is not in", err)
+        keep = [r for r in batch if not (m and r["spec"] == m.group(1) and r["criterion"] == m.group(2))]
+        if not m or len(keep) == len(batch) or not keep:
+            return [f"sweep-owed: packet build failed for {sweep_id}: {err}"] + [
+                f"sweep-owed: skipped {x} (criterion not in its spec file)" for x in skipped]
+        skipped.append(f"{m.group(1)}/{m.group(2)}")
+        batch = keep
     packet_path = pr.stdout.strip()
     dr = runner.run([str(doit_bin()), "dispatch", "owed-sweeper", sweep_id, "--packet", packet_path,
                      "--cwd", cwd, "--project", project, "--detach"])
     if dr.returncode != 0:
         return [f"sweep-owed: dispatch failed for {sweep_id}: {(dr.stderr or dr.stdout or '').strip()}"]
     return [f"sweep-owed: batched {len(batch)} check(s) in project {project} as {sweep_id} "
-            f"({_describe(batch)})"]
+            f"({_describe(batch)})"] + [f"sweep-owed: skipped {x} (criterion not in its spec file)"
+                                        for x in skipped]
 
 
 # ─────────────────────────────────── driver ──────────────────────────────────
