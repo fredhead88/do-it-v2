@@ -1284,4 +1284,59 @@ assert any(s == DISTINCTIVE_W17 for _, s in strip17), strip17
 refuses("owed-sweeper", DISTINCTIVE_L17, subject=SWEEP17)
 N += 1
 
+# ── AC1/AC2 (L-spec-0435) · p_grader drops an owed-ac criterion's WHOLE block —
+#    anchor AND every wrapped continuation line — from both item 1 and item 2,
+#    every other criterion's block passing through untouched ─────────────────
+SPEC_435 = TMP / "content" / "L-spec-9435.md"
+TOKEN_435 = "PLANTED-TOKEN-ONLY-ON-AC3S-CONTINUATION-LINE-435"
+SPEC_435.write_text(f"""# L-spec-9435
+## Acceptance criteria
+AC1 [backend]: first criterion's anchor line, continuing
+onto a wrapped second physical line naming only AC1.
+review_path: run x. Worked if y. Failed otherwise.
+
+AC2 [backend]: second criterion's anchor line, continuing
+onto a wrapped second physical line naming only AC2.
+review_path: run x. Worked if y. Failed otherwise.
+
+AC3 [backend]: third criterion's anchor line, continuing onto
+a wrapped continuation line carrying {TOKEN_435} right here.
+review_path: run x. Worked if y. Failed otherwise.
+
+AC4 [backend]: fourth criterion's anchor line, continuing
+onto a wrapped second physical line naming only AC4.
+review_path: run x. Worked if y. Failed otherwise.
+""")
+CARD_435 = TMP / "content" / "L-card-9435.md"
+CARD_435.write_text("# L-card-9435 · DONE\n"
+                    "AC1 [backend] built · log · ok\n"
+                    "AC2 [backend] built · log · ok\n"
+                    "AC3 [backend] built · log · ok\n"
+                    "AC4 [backend] built · log · ok\n")
+ev("spec-writer", "spec-written", "L-spec-9435", spec="L-spec-9435", path=str(SPEC_435), footprint=["a.py"])
+ev("builder", "build-done", "L-spec-9435", status="DONE", card=str(CARD_435), ready_sha="9435ready", verify_exit=0)
+
+# AC2 · no owed-ac event at all — unchanged from the pre-existing behavior:
+# every block and every card row present.
+t_ac2 = build("grader", "L-spec-9435", worktree=str(REPO))
+for ac in ("AC1", "AC2", "AC3", "AC4"):
+    assert f"{ac} [backend] built · log · ok" in t_ac2, f"AC2: {ac}'s card row must survive with no owed-ac"
+assert TOKEN_435 in t_ac2, "AC2: AC3's continuation line (and its token) survive with no owed-ac"
+assert "third criterion's anchor line" in t_ac2 and "fourth criterion's anchor line" in t_ac2, t_ac2
+N += 1
+
+# AC1 · AC3 declared owed — its whole block (anchor + continuation + planted
+# token) and its card row vanish; AC1/AC2/AC4 survive whole, blocks intact.
+ev("spec-auditor", "owed-ac", "L-spec-9435", criterion="AC3")
+t_ac1 = build("grader", "L-spec-9435", worktree=str(REPO))
+assert TOKEN_435 not in t_ac1, "AC1: AC3's planted continuation-line token must not leak"
+assert "AC3 [backend]:" not in t_ac1 and "third criterion's anchor line" not in t_ac1, \
+    "AC1: AC3's own anchor line must be dropped whole"
+assert "AC3 [backend] built · log · ok" not in t_ac1, "AC1: AC3's card row must be dropped"
+for ac, phrase in (("AC1", "first criterion's anchor line"), ("AC2", "second criterion's anchor line"),
+                   ("AC4", "fourth criterion's anchor line")):
+    assert phrase in t_ac1, f"AC1: {ac}'s full block must survive"
+    assert f"{ac} [backend] built · log · ok" in t_ac1, f"AC1: {ac}'s card row must survive"
+N += 1
+
 print(f"packet: {N} packets built, eight Blindness lists enforced")

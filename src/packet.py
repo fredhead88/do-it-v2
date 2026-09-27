@@ -1012,10 +1012,38 @@ def p_builder(c):
     return L
 
 
+def _drop_owed_blocks(lines, owed):
+    """L-spec-0435 (R10(a)'s enforcement half): group criteria LINES into
+    AC-anchored blocks — each starts at a line matching `_AC_ANY` and runs
+    through the line before the next such anchor (or end of list); text before
+    the first anchor is its own always-kept block — and drop, WHOLE, every
+    block whose anchor id is in `owed`. Dropping by a per-line id match instead
+    would leak an owed AC's wrapped continuation lines (and any fixture-unique
+    token on them) into the grader's packet. `owed` empty reproduces the input
+    unchanged, line for line (AC2)."""
+    out, cur_id, cur = [], None, []
+
+    def flush():
+        if cur_id not in owed:
+            out.extend(cur)
+    for l in lines:
+        m = _AC_ANY.match(l)
+        if m:
+            flush()
+            cur_id, cur = f"AC{m.group(1)}", [l]
+        else:
+            cur.append(l)
+    flush()
+    return out
+
+
 def p_grader(c):
     spec, card, v = c.spec_file(), c.card_file(), write_verify_script(c)
     body = spec.read_text()
-    crit = criteria(body)
+    # L-spec-0435/R10(a): a criterion typed `owed-ac` at spec-write time is
+    # unobservable outside a real deploy — the grader can never spend on it.
+    owed = {e["criterion"] for e in c.all_of("owed-ac")}
+    crit = _drop_owed_blocks(criteria(body), owed)
     rows = [l for l in card.read_text().splitlines() if AC_ROW.match(l)]
     # Every row, from the card object the wrapper writes beside the rendered card —
     # the fifteen-line render drops rows past its room, and a grader that cannot see
@@ -1025,6 +1053,7 @@ def p_grader(c):
         import json
         rows = [f"{a['id']} [{a['criterion_type']}] {a['disposition']} · {a['evidence_type']} · "
                 f"check: {a['check']} · evidence: {a['evidence']}" for a in json.loads(side.read_text())["acs"]]
+    rows = [r for r in rows if r.split(None, 1)[0] not in owed]
     vline = next((l for l in card.read_text().splitlines() if l.startswith("verify ")), "verify: not reported")
     ver = subprocess.run(["shasum", "-a", "256", str(v)], capture_output=True, text=True).stdout.split()[0][:16] \
         if v else "no script"
@@ -1119,7 +1148,9 @@ def p_charter_reviewer(c):
     ]
 
 
-_AC_ANY = re.compile(r"^\s*\**AC\d+\s*\[")
+_AC_ANY = re.compile(r"^\s*\**AC(\d+)\s*\[")  # group added (L-spec-0435): same
+# anchor shape `criterion_block` already matched — `_drop_owed_blocks` below
+# reuses it to also RECOVER the id, rather than forking a near-identical regex.
 
 
 def parse_sweep_manifest(path):

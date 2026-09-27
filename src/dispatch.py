@@ -23,7 +23,7 @@ appends nothing — every event below is derived from the Output object into thi
 spawn's own file, and the actor is that filename (D90).
 """
 import argparse, atexit, hashlib, json, os, pathlib, re, socket, subprocess, sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 HERE = pathlib.Path(__file__).resolve().parent
 AGENTS = HERE.parent / "agents"
@@ -837,6 +837,55 @@ def provision_worktree_env(worktree, project_checkout):
     return "readonly"
 
 
+def grading_budget(all_ev, subject):
+    """L-charter-0042 R10(b)/(c): a `role=grader` dispatch is refused, before any
+    spend, when (b) some criterion has been rejected by a grader in two-or-more
+    grader verdict rounds since it was last cleared, or (c) a fourth-or-later
+    grader run is attempted with no qualifying regrade newer than the newest
+    prior run. Pure — reads only events whose `subject == subject`; no ledger
+    write. Redefines "same reason" against the ledger's own shape (measured
+    2026-09-25..27) rather than the charter's original why-text-matching draft,
+    which was dead code on the exact case (L-spec-0173: ~10 straight AC1
+    rejections, each `why` distinct, each preceded by its own `build-done`, no
+    `criterion-cleared` ever) it was written to catch — a rework alone never
+    resets either rule."""
+    import fold
+    evs = [e for e in all_ev if e.get("subject") == subject]
+    T = lambda e: fold.ts(e.get("ts"))
+
+    # (b) repeat-rejection:<AC> — the criteria whose 2nd-or-later grader
+    # rejection since their own last `criterion-cleared` finds no fresh
+    # `spec-written`, or `thinker`/`operator` `decision`/`unblocked` (regrade or
+    # not), any newer than it (Assumptions §10 — a `build-done`, anywhere,
+    # changes nothing).
+    by_ac = {}
+    for e in evs:
+        if e.get("type") == "rejected-criterion" and e.get("actor") == "grader" and e.get("criterion"):
+            by_ac.setdefault(e["criterion"], []).append(e)
+    resets = [e for e in evs if e.get("type") == "spec-written"
+              or (e.get("type") in ("decision", "unblocked") and e.get("actor") in ("thinker", "operator"))]
+    for ac in sorted(by_ac):
+        rows = sorted(by_ac[ac], key=T)
+        last_clear = max((T(e) for e in evs if e.get("type") == "criterion-cleared"
+                          and e.get("criterion") == ac), default=None)
+        since = [r for r in rows if last_clear is None or T(r) > last_clear]
+        if len(since) >= 2 and not any(T(e) > T(since[1]) for e in resets):
+            return f"repeat-rejection:{ac}"
+
+    # (c) cap:<n> — n (>=3) prior grader `spawn-started` rows exist (voided
+    # included) and no `decision(regrade=yes, actor thinker|operator)` newer
+    # than the newest of them. Nothing else lifts it (Assumptions §8/§9) — the
+    # rule reapplies past the literal fourth run.
+    starts = [e for e in evs if e.get("type") == "spawn-started" and e.get("role") == "grader"]
+    if len(starts) >= 3:
+        newest = max(T(e) for e in starts)
+        lifted = any(e.get("type") == "decision" and e.get("regrade") == "yes"
+                     and e.get("actor") in ("thinker", "operator") and T(e) > newest for e in evs)
+        if not lifted:
+            return f"cap:{len(starts)}"
+    return None
+
+
 def main(a):
     kind, tmin, usd = ROLES[a.role]
     atexit.register(poke)
@@ -920,6 +969,31 @@ def main(a):
         if fold.spec_shape_pending([e for e in all_ev if e.get("subject") == a.subject]):
             fail(f"{a.subject} fails spec-shape validation — refusing role=builder before any spend",
                  reason="spec-shape")
+    # L-spec-0435 (R10(b)/(c)): the FIRST thing done for role=grader (Assumptions
+    # §6) — ahead of D120, write_path, window_min, spawn-started, any backend.
+    if a.role == "grader":
+        grading_ev = fold.read_events()
+        reason = grading_budget(grading_ev, a.subject)
+        if reason:
+            # The newest matching escalation-blocking, IF no decision/unblocked
+            # (any shape) on the subject is newer than it — Constraints/
+            # Assumptions §7: dedup is scoped to (subject, kind, reason) and
+            # lasts only while unresolved, never forever, so a resolved-but-
+            # not-fixed block re-surfaces instead of wedging silently (AC14).
+            standing = next((e for e in reversed(grading_ev) if e.get("subject") == a.subject
+                              and e.get("type") == "escalation-blocking"
+                              and e.get("kind") == "grading-budget" and e.get("reason") == reason), None)
+            if standing is not None and any(e.get("subject") == a.subject
+                                            and e.get("type") in ("decision", "unblocked")
+                                            and fold.ts(e.get("ts")) > fold.ts(standing.get("ts"))
+                                            for e in grading_ev):
+                standing = None
+            if standing is None:
+                emit(ledger, base, "escalation-blocking", kind="grading-budget", reason=reason,
+                     default="no further grade; rework with the standing reasons, or the Thinker amends the spec",
+                     deadline=(datetime.now(timezone.utc) + timedelta(hours=24)).isoformat(timespec="seconds"),
+                     revert="a decision regrade=yes")
+            fail(f"grading budget: {reason} — refusing role=grader before any spend", reason=reason)
     prior = next((e for e in fold.read_events() if e.get("type") == "spawn-failed"
                   and e.get("packet_sha256") == meta["packet_sha256"]
                   and e.get("contract_sha256") == meta["contract_sha256"]
