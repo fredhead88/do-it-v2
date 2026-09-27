@@ -479,7 +479,8 @@ def window_min(role, subject, events, *, backend="seat"):
     return min(base, 240)
 
 
-def run_seat(spawn, cmd, packet, cwd, timeout, path=None, *, window=None, ledger=None, base=None, role=None):
+def run_seat(spawn, cmd, packet, cwd, timeout, path=None, *, window=None, ledger=None, base=None, role=None,
+             view=None):
     """The seat path (D116 by another route). Where `claude -p` is banned as metered
     — the Albert Scott rule, spec 572 — the spawn runs as an interactive session's
     seat-billed sub-agent instead. This function does not spawn: it writes the
@@ -509,17 +510,32 @@ def run_seat(spawn, cmd, packet, cwd, timeout, path=None, *, window=None, ledger
     `main` before any spend. It rides on `cmd.json["path"]` and, for a writing
     role, prefixes the packet text itself with `WRITE PATH: <path>\\n\\n` — so a
     relay pane or the Planner reads its destination off disk and never asks or
-    infers it (the direct cause of a packet expiring unserved)."""
+    infers it (the direct cause of a packet expiring unserved).
+
+    R8/L-spec-0437: `view`, when not `None`, is the grader-only isolated
+    filesystem view a gated block in `main()` already built. The SAME
+    `packet_text` also lands at `view/seat/<spawn>.packet.md` (a copy, proven
+    byte-identical — AC5), and `cmd.json`'s `"cwd"` — and the status line's own
+    `cwd` — become `view/tree`, never this call's `cwd` parameter: the pane
+    that reads `cmd.json` must land inside the view, not the real worktree.
+    `view=None` (every other role/backend, and the codex->seat fallback)
+    reproduces the prior behaviour byte-for-byte (AC9)."""
     import time
     SEAT.mkdir(parents=True, exist_ok=True)
     packet_text = f"WRITE PATH: {path}\n\n{packet}" if path else packet
     (SEAT / f"{spawn}.packet.md").write_text(packet_text)
-    (SEAT / f"{spawn}.cmd.json").write_text(json.dumps({"cmd": cmd, "cwd": cwd, "path": path}, indent=1))
+    cwd_out = cwd
+    if view is not None:
+        view = pathlib.Path(view)
+        (view / "seat").mkdir(parents=True, exist_ok=True)
+        (view / "seat" / f"{spawn}.packet.md").write_text(packet_text)
+        cwd_out = str(view / "tree")
+    (SEAT / f"{spawn}.cmd.json").write_text(json.dumps({"cmd": cmd, "cwd": cwd_out, "path": path}, indent=1))
     want, bare = SEAT / f"{spawn}.result.json", SEAT / f"{spawn}.output.json"
     window = timeout if window is None else window
     print(json.dumps({"seat": spawn, "packet": str(SEAT / f"{spawn}.packet.md"),
                       "result_expected_at": str(want), "or_output_at": str(bare),
-                      "cwd": cwd, "timeout_s": timeout, "window_s": window}), flush=True)
+                      "cwd": cwd_out, "timeout_s": timeout, "window_s": window}), flush=True)
     # The completion signal is the PANE's stamp — `<spawn>.meta.json` (or a full
     # `result.json`) — never the Output file's existence: a contract iterating on its
     # Output with `doit validate` writes an invalid draft first, and the wrapper read
@@ -978,6 +994,28 @@ def main(a):
     # event, so `dsn_role` on it is never stale by the time the spec's own
     # verify script (packet.verify_script) decides whether to export it.
     dsn_role = None
+    view = None
+    # R8/L-spec-0437: for a grader dispatch landing on the seat backend only, the
+    # spawn's own isolated filesystem view is built HERE — before any spend, before
+    # dsn_role's own provisioning — so a bwrap-sandboxed pane has a bound path to
+    # find its own packet at (sibling `grader-view`'s Produces). Every other
+    # role/backend combination (incl. the codex->seat fallback below) never enters
+    # this block; `view` stays `None` and every later run_seat call is unaffected.
+    if a.role == "grader" and backend == "seat":
+        if not a.project:
+            fail("grader dispatch needs --project to build the view — not spent")
+        grader_view_ev = fold.read_events()
+        build_done = next((e for e in reversed(grader_view_ev)
+                           if e.get("subject") == a.subject and e.get("type") == "build-done"), None)
+        if build_done is None or not build_done.get("ready_sha"):
+            fail(f"{a.subject} has no build-done with a ready_sha — nothing to grade")
+        import grader_view
+        try:
+            view = grader_view.build(a.subject, ROOT / "repos" / a.project,
+                                     build_done.get("base_sha"), build_done["ready_sha"], spawn)
+        except Exception as exc:
+            fail(f"grader-view build failed: {exc}")
+        emit(ledger, base, "grader-view-built", view=str(view), ready_sha=build_done["ready_sha"])
     if a.role in ("builder", "grader"):
         dsn_role = provision_worktree_env(cwd, ROOT / "repos" / a.project) if a.project else "absent"
     # L-spec-0269: every start records the window it was offered under and who
@@ -1020,7 +1058,7 @@ def main(a):
                          path=write_path)
         elif seat:
             r = run_seat(spawn, cmd, packet, cwd, (a.timeout or tmin) * 60, path=write_path,
-                        window=wm * 60, ledger=ledger, base=base, role=a.role)
+                        window=wm * 60, ledger=ledger, base=base, role=a.role, view=view)
         else:
             r = run_claude(cmd, packet, cwd, (a.timeout or tmin) * 60)
     except subprocess.TimeoutExpired:
@@ -1045,7 +1083,7 @@ def main(a):
                     backend_fallback=True, fallback_from="codex")
         try:
             r = run_seat(spawn, cmd, packet, cwd, (a.timeout or tmin) * 60, path=write_path,
-                        window=wm * 60, ledger=ledger, base=base, role=a.role) if seat \
+                        window=wm * 60, ledger=ledger, base=base, role=a.role, view=view) if seat \
                 else run_claude(cmd, packet, cwd, (a.timeout or tmin) * 60)
         except subprocess.TimeoutExpired:
             fail(f"timeout after {a.timeout or tmin} min (on the fallback backend {backend})", reason="timeout")

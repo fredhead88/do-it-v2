@@ -232,6 +232,58 @@ c2 = packet.Ctx(packet.argparse.Namespace(subject="L-spec-0002", charter=None, p
 assert ("the builder's branch", "claude/L-spec-0002-feature") in packet.builder_cues(c2), \
     "a branch that is not the subject is a cue the grader must never see"
 
+# ── AC10/AC13 (L-spec-0437, R8) · item 5 alone gates on
+# models.resolve("grader")["backend"] — only "seat" names the view's own
+# relative layout; every other resolved backend, or no models.toml, stays
+# byte-for-byte base_sha's own worktree line ─────────────────────────────────
+_real_resolve437 = packet.models.resolve
+WT2 = TMP / "worktrees" / "t" / "l-spec-0001-alt"
+WT2.mkdir(parents=True, exist_ok=True)
+c437a = packet.Ctx(packet.argparse.Namespace(subject="L-spec-0001", charter=None, project="t", worktree=str(WT),
+                                             role="grader", base_sha=None))
+c437b = packet.Ctx(packet.argparse.Namespace(subject="L-spec-0001", charter=None, project="t", worktree=str(WT2),
+                                             role="grader", base_sha=None))
+
+
+def _resolve437(backend):
+    return lambda role, *a, **k: {"backend": backend} if role == "grader" else _real_resolve437(role, *a, **k)
+
+
+packet.models.resolve = _resolve437("seat")
+try:
+    p437a, p437b = packet.p_grader(c437a), packet.p_grader(c437b)
+finally:
+    packet.models.resolve = _real_resolve437
+assert p437a == p437b, "AC10: under a seat-resolved backend the worktree never reaches the list at all"
+
+p437_base = packet.p_grader(c437a)                    # real resolve() — no models.toml on this root
+assert len(p437a) == len(p437_base), (p437a, p437_base)
+diffs437 = [i for i, (x, y) in enumerate(zip(p437a, p437_base)) if x != y]
+assert len(diffs437) == 1, "AC10: only item 5 may differ once seat-resolved"
+idx437 = diffs437[0]
+item5_seat = p437a[idx437]
+assert "verify.sh" in item5_seat and "cwd `tree/`" in item5_seat, item5_seat
+assert str(WT) not in item5_seat and str(WT2) not in item5_seat, "AC10: no host-absolute path leaks into item 5"
+N += 1
+
+packet.models.resolve = _resolve437("claude-p")
+try:
+    p437_cp = packet.p_grader(c437a)
+finally:
+    packet.models.resolve = _real_resolve437
+packet.models.resolve = _resolve437(None)
+try:
+    p437_none = packet.p_grader(c437a)
+finally:
+    packet.models.resolve = _real_resolve437
+assert p437_cp == p437_base == p437_none, \
+    "AC13: a claude-p resolution and no-map resolution both reproduce base_sha's own output exactly"
+item5_base = p437_base[idx437]
+assert item5_base.startswith(f"5. Checker: `verify-{c437a.a.subject}`"), item5_base
+assert f"re-run it with cwd `{c437a.worktree()}`." in item5_base, item5_base
+assert "verify.sh" not in item5_base and "cwd `tree/`" not in item5_base, item5_base
+N += 1
+
 # ── 4. spec-writer (rework) ──────────────────────────────────────────────────
 ev("spec-auditor", "audit-finding", "L-spec-0001", list="findings", field="Verification",
    category="unfalsifiable", finding="AC1's review path observes nothing that could fail",

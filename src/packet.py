@@ -16,7 +16,7 @@ Writes `$R/packets/<subject>-<role>-<n>.md` and prints the path.
 import argparse, hashlib, os, pathlib, re, subprocess, sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import audit, fold, merge_gate  # noqa: E402
+import audit, fold, merge_gate, models  # noqa: E402
 
 ROOT = pathlib.Path(os.environ.get("DOIT_ROOT", pathlib.Path.home() / ".do-it"))
 CONTENT, PACKETS = ROOT / "content", ROOT / "packets"
@@ -1029,6 +1029,19 @@ def p_grader(c):
     ver = subprocess.run(["shasum", "-a", "256", str(v)], capture_output=True, text=True).stdout.split()[0][:16] \
         if v else "no script"
     done = done_condition(c, c.charter_id())
+    # R8/L-spec-0437: item 5 alone is gated on whether a view will actually exist
+    # for this grader dispatch — `models.resolve` is the same, backend-blind lookup
+    # `dispatch.main` itself uses, since `doit packet grader` runs before a backend
+    # is chosen and carries no argument naming one (Assumptions §4). Every other
+    # resolved backend, or no `models.toml` at all, keeps base_sha's worktree line
+    # (AC13) — only `backend == "seat"` names the view's own relative layout,
+    # never a host-absolute path (AC10).
+    seat_view = models.resolve("grader")["backend"] == "seat"
+    item5 = (f"5. Checker: `verify.sh` · version {ver} · coverage note "
+             f"\"the spec's Verification block\" · re-run it from this view's own root — "
+             f"cwd `tree/`; no other path is reachable.") if seat_view else (
+             f"5. Checker: `verify-{c.a.subject}` · version {ver} · coverage note "
+             f"\"the spec's Verification block\" · re-run it with cwd `{c.worktree()}`.")
     return [
         "1. The acceptance criteria, verbatim from the spec, typed, each with its evidence obligation:",
         *crit,
@@ -1036,8 +1049,7 @@ def p_grader(c):
         *([f"   {r}" for r in rows] or ["   none"]),
         "3. Evidence-type validator: not installed; no row is pre-failed on its account.",
         f"4. The verify command the spec authored, with the reported exit code and result: {vline}",
-        f"5. Checker: `verify-{c.a.subject}` · version {ver} · coverage note "
-        f"\"the spec's Verification block\" · re-run it with cwd `{c.worktree()}`.",
+        item5,
         f"6. The done-condition: {done}.",
         f"7. Standing verify-waivers applied to this checker: {waiver_line(c)}.",
     ]

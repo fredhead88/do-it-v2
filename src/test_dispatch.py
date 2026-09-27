@@ -13,7 +13,7 @@ os.environ["DOIT_ROOT"], os.environ["DOIT_NO_POKE"] = str(TMP), "1"
 # The seat-route blocks below set and del it around themselves on purpose.
 os.environ.pop("DOIT_SEAT", None)
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
-import dispatch, fold, harness  # noqa: E402
+import dispatch, fold, grader_view, harness  # noqa: E402
 
 REPO = TMP / "repo"
 REPO.mkdir()
@@ -1118,10 +1118,16 @@ N += 1
 # waiter_host/waiter_proc_start under BOTH backends, differing correctly on an
 # observed-data subject ────────────────────────────────────────────────────────
 ac4_subj = "L-spec-0269ac4"
-(TMP / "events" / "L-fixture-0269ac4.jsonl").write_text(json.dumps({
-    "v": 1, "ts": dispatch.now(), "type": "spec-written", "subject": ac4_subj, "spec": ac4_subj,
-    "path": str(TMP / "content" / f"{ac4_subj}.md"), "ac_types": ["observed-data"], "ac_count": 1,
-    "requirement_ids": ["R1"], "owed_ac_count": 0, "unknown_count": 0, "footprint": ["x.py"]}) + "\n")
+# L-spec-0437: role=grader + backend=seat now needs a build-done with a ready_sha
+# on the ledger before it builds a view (AC2) — a synthetic one, same convention
+# as the spec-written line right below it, so this pre-existing window_min/waiter
+# fixture keeps proving what it always proved, unaffected by the new gate.
+(TMP / "events" / "L-fixture-0269ac4.jsonl").write_text(
+    json.dumps({"v": 1, "ts": dispatch.now(), "type": "spec-written", "subject": ac4_subj, "spec": ac4_subj,
+                "path": str(TMP / "content" / f"{ac4_subj}.md"), "ac_types": ["observed-data"], "ac_count": 1,
+                "requirement_ids": ["R1"], "owed_ac_count": 0, "unknown_count": 0, "footprint": ["x.py"]}) + "\n" +
+    json.dumps({"v": 1, "ts": dispatch.now(), "type": "build-done", "subject": ac4_subj,
+                "base_sha": "ac4base", "ready_sha": "ac4ready"}) + "\n")
 
 os.environ.pop("DOIT_SEAT", None)
 PK.write_text("a packet for AC4 claude-p\n")
@@ -1155,13 +1161,20 @@ threading.Thread(target=_ac4_serve, daemon=True).start()
 PK.write_text("a packet for AC4 seat\n")
 a4 = argparse.Namespace(role="grader", subject=ac4_subj, packet=str(PK), path=None, cwd=str(REPO),
                         charter=None, project="t", mcp_config=None, timeout=1, max_usd=None, seat=True)
+# L-spec-0437: this fixture's own point is window_min/waiter fields, not the view
+# build — stubbed to a bare temp dir so it never touches real content files.
+_real_gv_build_ac4, grader_view.build = grader_view.build, lambda *a_, **k_: TMP / "grader-view-ac4"
 try:
     dispatch.main(a4)
 except SystemExit:
     pass
+finally:
+    grader_view.build = _real_gv_build_ac4
 PK.write_text("a packet\n")
 raw4 = [json.loads(l) for l in max((TMP / "events").glob("L-grader-*.jsonl")).read_text().splitlines()]
 ss_seat = raw4[0]
+assert ss_seat["type"] == "grader-view-built", ss_seat
+ss_seat = raw4[1]
 assert ss_seat["type"] == "spawn-started" and ss_seat["backend"] == "seat", ss_seat
 assert ss_seat["window_min"] == 45, "AC4/AC5(b): the seat backend gets the observed-data bump"
 assert ss_seat["waiter_pid"] == os.getpid() and ss_seat["waiter_host"] == socket.gethostname(), ss_seat
@@ -1169,6 +1182,254 @@ assert "waiter_proc_start" in ss_seat, ss_seat
 _rm_seat(raw4[0]["spawn"])
 del os.environ["DOIT_SEAT_CLAIM_SEC"]
 del os.environ["DOIT_SEAT"]
+N += 1
+
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-0437 · grader-dispatch-view (L-charter-0042 R8) — AC1-AC12, AC14
+# No models.toml exists on this root from here on (L-spec-0269 AC5 unlinked it
+# above and nothing rewrites it before this section) — `a.seat=True` alone
+# resolves role=grader onto the seat backend, exactly the combination the gate
+# is scoped to.
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _gv_build_done(subject, base_sha=None, ready_sha=None):
+    kv = {}
+    if base_sha is not None:
+        kv["base_sha"] = base_sha
+    if ready_sha is not None:
+        kv["ready_sha"] = ready_sha
+    (TMP / "events" / f"L-fixture-{subject}.jsonl").write_text(json.dumps(
+        {"v": 1, "ts": dispatch.now(), "type": "build-done", "subject": subject, **kv}) + "\n")
+
+
+def _gv_serve_with(out):
+    def _serve():
+        for _ in range(400):
+            pk = [q for q in (list((TMP / "seat").glob("*.packet.md")) if (TMP / "seat").is_dir() else [])
+                  if not (TMP / "seat" / (q.name.split(".")[0] + ".result.json")).exists()
+                  and not (TMP / "seat" / (q.name.split(".")[0] + ".output.json")).exists()]
+            if pk:
+                sid = max(pk, key=lambda q: q.stat().st_mtime).name.split(".")[0]
+                (TMP / "seat" / f"{sid}.result.json").write_text(json.dumps(
+                    {"is_error": False, "structured_output": out, "num_turns": 1, "usage": {},
+                     "total_cost_usd": None, "modelUsage": {"m": {}}, "session_id": sid, "permission_denials": []}))
+                return
+            time.sleep(0.05)
+    return _serve
+
+
+def _gv_drive(subject, project="t", view_build=None, serve_out=None, timeout=1):
+    """Drives dispatch.main() with role=grader forced onto the seat backend.
+    `view_build`, when given, replaces `grader_view.build` for this one call only.
+    `serve_out`, when given, starts a background thread answering the seat packet
+    — omitted for a fixture that must fail before any spend (nothing to serve)."""
+    _real_build = grader_view.build
+    if view_build is not None:
+        grader_view.build = view_build
+    if serve_out is not None:
+        threading.Thread(target=_gv_serve_with(serve_out), daemon=True).start()
+    a = argparse.Namespace(role="grader", subject=subject, packet=str(PK), path=None, cwd=str(REPO),
+                           charter=None, project=project, mcp_config=None, timeout=timeout, max_usd=None,
+                           seat=True)
+    try:
+        dispatch.main(a)
+        code = 0
+    except SystemExit as e:
+        code = e.code
+    finally:
+        grader_view.build = _real_build
+    files = sorted((TMP / "events").glob("L-grader-*.jsonl"), key=lambda p: p.stat().st_mtime)
+    raw = [json.loads(l) for l in files[-1].read_text().splitlines()]
+    return code, raw
+
+
+def _boom_build(*_a, **_k):
+    raise AssertionError("grader_view.build must not be called here")
+
+
+# ── AC1 · a.project falsy refuses before any spend, before a spawn id spends
+# anything under $R/seat ────────────────────────────────────────────────────
+code, raw = _gv_drive("L-spec-0437ac1", project="")
+assert code == 1 and [e["type"] for e in raw] == ["spawn-failed"], raw
+assert "needs --project" in raw[0]["why"], raw[0]
+sid1 = raw[0]["spawn"]
+assert not (TMP / "seat" / f"{sid1}.packet.md").exists() and not (TMP / "seat" / f"{sid1}.cmd.json").exists()
+N += 1
+
+# ── AC2 · no build-done anywhere on the ledger for the subject ──────────────
+code, raw = _gv_drive("L-spec-0437ac2")
+assert code == 1 and [e["type"] for e in raw] == ["spawn-failed"], raw
+assert "no build-done" in raw[0]["why"], raw[0]
+sid2 = raw[0]["spawn"]
+assert not (TMP / "seat" / f"{sid2}.packet.md").exists()
+N += 1
+
+# ── AC3 · the newest build-done carries no ready_sha ────────────────────────
+_gv_build_done("L-spec-0437ac3", base_sha="B0")
+code, raw = _gv_drive("L-spec-0437ac3")
+assert code == 1 and [e["type"] for e in raw] == ["spawn-failed"], raw
+assert "ready_sha" in raw[0]["why"], raw[0]
+N += 1
+
+# ── AC4/AC5/AC6/AC7 · grader_view.build called once with the right args, the
+# packet copy lands byte-identical under view/seat/, cmd.json's cwd becomes
+# view/tree, and the event order is grader-view-built, spawn-started, ...,
+# spawn-done ─────────────────────────────────────────────────────────────────
+_gv_build_done("L-spec-0437ac4", base_sha="B1", ready_sha="R1")
+_ac4_calls = []
+_ac4_view = pathlib.Path(tempfile.mkdtemp())
+
+
+def _ac4_build(*args):
+    _ac4_calls.append(args)
+    return _ac4_view
+
+
+code, raw = _gv_drive("L-spec-0437ac4", view_build=_ac4_build, serve_out=grade([met]))
+assert code == 0, raw
+assert [e["type"] for e in raw][:2] == ["grader-view-built", "spawn-started"] and raw[-1]["type"] == "spawn-done", raw
+sid4 = raw[0]["spawn"]
+assert len(_ac4_calls) == 1, _ac4_calls
+assert _ac4_calls[0] == ("L-spec-0437ac4", dispatch.ROOT / "repos" / "t", "B1", "R1", sid4), _ac4_calls[0]
+assert raw[0]["view"] == str(_ac4_view) and raw[0]["ready_sha"] == "R1", raw[0]
+assert (_ac4_view / "seat" / f"{sid4}.packet.md").read_text() == (TMP / "seat" / f"{sid4}.packet.md").read_text(), \
+    "AC5: the view copy must be byte-identical to the real seat packet"
+cj4 = json.loads((TMP / "seat" / f"{sid4}.cmd.json").read_text())
+assert cj4["cwd"] == str(_ac4_view / "tree") and cj4["cwd"] != str(REPO), cj4
+_rm_seat(sid4)
+N += 1
+
+# ── AC8 · (a) a non-grader role on seat, (b) grader resolving to claude-p or
+# codex — grader_view.build is never invoked (patched to raise), no
+# grader-view-built appears, cmd.json's cwd is the caller's --cwd unchanged ──
+_real_build_ac8 = grader_view.build
+grader_view.build = _boom_build
+try:
+    threading.Thread(target=_gv_serve_with(card), daemon=True).start()
+    a8a = argparse.Namespace(role="builder", subject="L-spec-0437ac8a", packet=str(PK), path=None, cwd=str(REPO),
+                             charter=None, project="t", mcp_config=None, timeout=1, max_usd=None, seat=True)
+    try:
+        dispatch.main(a8a)
+        code8a = 0
+    except SystemExit as e:
+        code8a = e.code
+    raw8a = [json.loads(l) for l in
+             max((TMP / "events").glob("L-builder-*.jsonl"), key=lambda p: p.stat().st_mtime).read_text().splitlines()]
+    assert code8a == 0 and not any(e["type"] == "grader-view-built" for e in raw8a), raw8a
+    sid8a = raw8a[0]["spawn"]
+    cj8a = json.loads((TMP / "seat" / f"{sid8a}.cmd.json").read_text())
+    assert cj8a["cwd"] == str(REPO), cj8a
+    _rm_seat(sid8a)
+
+    os.environ.pop("DOIT_SEAT", None)
+    _gv_build_done("L-spec-0437ac8b", base_sha="B1", ready_sha="R1")
+    code, types8b, evs8b, _ = spawn("grader", out=grade([met]), subject="L-spec-0437ac8b")
+    assert code == 0 and not any(t == "grader-view-built" for t in types8b), types8b
+    assert spawn.raw[0]["backend"] == "claude-p", spawn.raw[0]
+
+    MT.write_text('[contracts.grader]\nbackend = "codex"\nmodel = "gpt-6-astra"\n')
+    _real_codex_exec_ac8 = dispatch.run_codex_exec
+
+    def _codex_fake_grader(cmd, packet, cwd, timeout):
+        pathlib.Path(cmd[cmd.index("-o") + 1]).write_text(json.dumps(grade([met])))
+        return argparse.Namespace(returncode=0, stderr="", stdout=json.dumps(
+            {"type": "turn.completed", "usage": {"input_tokens": 1, "output_tokens": 1}}))
+    dispatch.run_codex_exec = _codex_fake_grader
+    code, types8c, evs8c, _ = spawn("grader", out=grade([met]), subject="L-spec-0437ac8c")
+    dispatch.run_codex_exec = _real_codex_exec_ac8
+    MT.unlink()
+    assert code == 0 and not any(t == "grader-view-built" for t in types8c), types8c
+    assert spawn.raw[0]["backend"] == "codex", spawn.raw[0]
+finally:
+    grader_view.build = _real_build_ac8
+N += 1
+
+# ── AC9 · run_seat(view=) direct-call: the SAME polling file set under $R/seat
+# in both runs, differing only in the view/seat/ copy and cmd.json's cwd ─────
+os.environ["DOIT_SEAT_CLAIM_SEC"] = "1"
+
+
+def _ac9_serve(spawn_id):
+    def go():
+        time.sleep(0.05)
+        (TMP / "seat" / f"{spawn_id}.result.json").write_text(json.dumps(
+            {"is_error": False, "structured_output": grade([met]), "num_turns": 1, "usage": {},
+             "total_cost_usd": None, "modelUsage": {"m": {}}, "session_id": "s", "permission_denials": []}))
+    threading.Thread(target=go, daemon=True).start()
+
+
+ac9a, ac9b = "L-run-seat-ac9a", "L-run-seat-ac9b"
+_ac9_serve(ac9a)
+dispatch.run_seat(ac9a, ["claude", "-p"], "packet", str(REPO), 6)
+suffixes_a = sorted(p.name.split(".", 1)[1] for p in (TMP / "seat").glob(f"{ac9a}.*"))
+cjA = json.loads((TMP / "seat" / f"{ac9a}.cmd.json").read_text())
+_rm_seat(ac9a)
+
+ac9_view = pathlib.Path(tempfile.mkdtemp())
+_ac9_serve(ac9b)
+dispatch.run_seat(ac9b, ["claude", "-p"], "packet", str(REPO), 6, view=ac9_view)
+suffixes_b = sorted(p.name.split(".", 1)[1] for p in (TMP / "seat").glob(f"{ac9b}.*"))
+cjB = json.loads((TMP / "seat" / f"{ac9b}.cmd.json").read_text())
+_rm_seat(ac9b)
+
+assert suffixes_a == suffixes_b, (suffixes_a, suffixes_b)
+assert cjA["cwd"] == str(REPO) and cjB["cwd"] == str(ac9_view / "tree"), (cjA, cjB)
+assert (ac9_view / "seat" / f"{ac9b}.packet.md").is_file(), "the view copy exists only when view= is given"
+del os.environ["DOIT_SEAT_CLAIM_SEC"]
+N += 1
+
+# ── AC11 · an exception inside grader_view.build is caught, never an unhandled
+# traceback ───────────────────────────────────────────────────────────────────
+_gv_build_done("L-spec-0437ac11", base_sha="B1", ready_sha="R1")
+
+
+def _boom_raise(*_a, **_k):
+    raise RuntimeError("boom")
+
+
+code, raw = _gv_drive("L-spec-0437ac11", view_build=_boom_raise)
+assert code == 1 and [e["type"] for e in raw] == ["spawn-failed"], raw
+assert "boom" in raw[0]["why"], raw[0]
+sid11 = raw[0]["spawn"]
+assert not (TMP / "seat" / f"{sid11}.packet.md").exists() and not (TMP / "seat" / f"{sid11}.cmd.json").exists()
+assert not any(e["type"] == "grader-view-built" for e in raw)
+N += 1
+
+# ── AC12 · a codex-initiated grader dispatch falling back to seat runs with
+# view=None throughout — the gate only ever fires on the INITIAL backend ─────
+MT.write_text('[contracts.grader]\nbackend = "codex"\nmodel = "gpt-6-astra"\n'
+              'fallback = { backend = "seat", model = "claude-sonnet-5" }\n')
+dispatch.run_codex_exec = codex_dead
+grader_view.build = _boom_build
+threading.Thread(target=_gv_serve_with(grade([met])), daemon=True).start()
+a12 = argparse.Namespace(role="grader", subject="L-spec-0437ac12", packet=str(PK), path=None, cwd=str(REPO),
+                         charter=None, project="t", mcp_config=None, timeout=1, max_usd=None, seat=False)
+try:
+    dispatch.main(a12)
+    code12 = 0
+except SystemExit as e:
+    code12 = e.code
+MT.unlink()
+raw12 = [json.loads(l) for l in
+         max((TMP / "events").glob("L-grader-*.jsonl"), key=lambda p: p.stat().st_mtime).read_text().splitlines()]
+assert not any(e["type"] == "grader-view-built" for e in raw12), raw12
+sid12 = next(e["spawn"] for e in raw12 if e["type"] == "spawn-started")
+cj12 = json.loads((TMP / "seat" / f"{sid12}.cmd.json").read_text())
+assert cj12["cwd"] == str(REPO), cj12
+_rm_seat(sid12)
+N += 1
+
+# ── AC14 · relay.pending_packets (unmodified) already surfaces a stalled
+# role=grader seat spawn — a spawn-started with no terminal event and a real
+# packet on disk ─────────────────────────────────────────────────────────────
+ac14_events = [{"type": "spawn-started", "role": "grader", "subject": "L-spec-0437ac14",
+               "spawn": "L-grader-0437ac14", "ts": dispatch.now()}]
+(TMP / "seat").mkdir(parents=True, exist_ok=True)
+(TMP / "seat" / "L-grader-0437ac14.packet.md").write_text("a packet\n")
+pend = relay.pending_packets(ac14_events, root=TMP)
+assert any(p["spawn"] == "L-grader-0437ac14" for p in pend), pend
+(TMP / "seat" / "L-grader-0437ac14.packet.md").unlink()
 N += 1
 
 # ── AC7 (dispatch half) · a REAL wall-clock timeout's `spawn-failed` now
