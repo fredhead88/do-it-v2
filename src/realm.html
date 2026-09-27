@@ -1150,7 +1150,7 @@ const BASE=location.pathname.replace(/\/[^/]*$/,'');/* works at / and behind a p
 const api=path=>BASE+path+(KEY?(path.includes('?')?'&':'?')+'key='+encodeURIComponent(KEY):'');
 function loadData(d){DATA=d;if(d.caps)CAP={...CAP,...d.caps};SEEN.clear();for(const e of d.events){SEEN.add(rowKey(e));if(e.t>lastT)lastT=e.t;}lastHeard=Date.now();EVENTS=d.events.map(e=>({...e,ms:toMs(e.t)})).filter(e=>e.ms).sort((a,b)=>a.ms-b.ms);T0=toMs(d.window[0]);T1=d.live?Date.now():toMs(d.window[1])+60000;$('s-a').textContent=fmt(T0);$('s-b').textContent=fmt(T1);}
 const SEEN=new Set();let lastT='',lastHeard=0;
-const rowKey=r=>r.t+'|'+r.ty+'|'+(r.s||'')+'|'+(r.sp||'')+'|'+(r.a||'');
+const rowKey=r=>r.t+'|'+r.ty+'|'+(r.s||'')+'|'+(r.sp||'')+'|'+(r.a||'')+'|'+(r.c||'')+'|'+String(r.why||r.ti||r.pb||'').slice(0,48);
 function insertEvent(row){const k=rowKey(row);if(SEEN.has(k))return false;SEEN.add(k);if(row.t>lastT)lastT=row.t;const e={...row,ms:toMs(row.t)||Date.now()};let i=EVENTS.length;while(i>0&&EVENTS[i-1].ms>e.ms)i--;EVENTS.splice(i,0,e);if(i<S.cursor)S.cursor++;// arrived out of order behind the cursor: handle now
   if(i<S.cursor-1){handle(e);}return true;}
 let seq=0,heard=false,pollTimer=null;
