@@ -833,7 +833,7 @@ def wallclock(rows, states, now):
     deploys = collections.Counter(r["ty"] for r in rows if r["ty"].startswith("deploy"))
     # rule 3 (agreed 2026-09-27): a critical condition older than 30 minutes with no owner action escalates to the Thinker.
     # Server-side, from the 5-minute series, for the classes a metric carries; the page does the same for its own.
-    CRIT = {"unclaimed": ("unclaimed", 1), "deadlock": ("deadlock", 1), "disk": ("disk", 92), "behind": ("behind", 3), "lane": ("lane", 80), "shape_hours": ("shape", 48), "ci_red": ("ci", 1)}
+    CRIT = {"unclaimed": ("unclaimed", 1), "deadlock": ("deadlock", 1), "disk": ("disk", 92), "behind": ("behind", 3), "shape_hours": ("shape", 48)}   # lane and ci are never above WARN/INFO on the page
     escalate = []
     with _H_LOCK:
         for metric, (cls, thr) in CRIT.items():
