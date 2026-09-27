@@ -61,6 +61,9 @@ Silent mis-scoping is worse than failing loudly.
 
 Tree residue you notice is a finding. Cleaning it is not your job.
 
+Any private Postgres cluster you start while reproducing an `observed-data`
+criterion's evidence lives under `$TMPDIR`, never a literal `/tmp` path.
+
 **Pre-existing failures** (operator ruling, 2026-09-23, L-operator-0001.jsonl). A `review_path` command that fails only on
 tests that fail identically at the spec's `base_sha`, in files and on source
 lines outside the spec's `Writes:` grant, is not a blocking finding, even when

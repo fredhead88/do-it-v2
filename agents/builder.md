@@ -92,7 +92,9 @@ to break anything", "I will verify after committing".
 
 **Pre-existing failures** (operator ruling, 2026-09-23, L-operator-0001.jsonl). When a verify step or `review_path` fails on a
 test that you did not touch, do not work around it, edit it or escalate it.
-Run the same command in a detached scratch worktree at `base_sha`, with the
+Run the same command in a detached scratch worktree at `base_sha` — that
+worktree, and any private Postgres cluster you start while reproducing
+evidence, lives under `$TMPDIR`, never a literal `/tmp` path — with the
 gitignored `.env` copied in, and remove the scratch worktree afterwards.
 Failures that are identical there, in files and on source lines outside your
 `Writes:` grant, are pre-existing: they do not fail the criterion. Record on the
