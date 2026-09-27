@@ -2339,3 +2339,237 @@ assert datetime.fromisoformat(due_rows13[0]["due_at"]) == rows_ac13[0]["due_at"]
     (due_rows13[0]["due_at"], rows_ac13[0]["due_at"])
 assert due_rows13[0]["due_at"] == rows_ac13[0]["due_at"].isoformat(timespec="seconds"), due_rows13
 print("AC13 ok")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-0410 · board-deterministic-order (L-charter-0040 R5)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── AC1 · fold.read_events()'s comparator ───────────────────────────────────
+T410 = stamp(0)
+E410_1 = {"ts": T410, "type": "spec-written", "subject": "L-spec-9410a"}
+E410_2 = {"ts": T410, "type": "spec-written", "subject": "L-spec-9410b"}
+
+# (a) cross-file: content-driven order, never filename-driven. Two layouts —
+# "both events in one file" and "one event per file, reverse-alphabetical
+# file-name pairing" — must agree, driven only by (subject, type, json).
+ev_410a = ledger(**{"L-operator-410a.jsonl": [E410_1, E410_2]})[0]
+order_410a = [e["subject"] for e in ev_410a if e.get("subject") in ("L-spec-9410a", "L-spec-9410b")]
+assert order_410a == ["L-spec-9410a", "L-spec-9410b"], order_410a
+
+ev_410b = ledger(**{"L-aaa-410.jsonl": [E410_2], "L-zzz-410.jsonl": [E410_1]})[0]
+order_410b = [e["subject"] for e in ev_410b if e.get("subject") in ("L-spec-9410a", "L-spec-9410b")]
+assert order_410b == order_410a, \
+    f"★ AC1(a): cross-file same-ts order is content-driven, never filename-driven: {order_410b}"
+
+# an unrelated third file, before AND after in glob order, must not perturb it
+for extra_name410 in ("L-aaa-410x.jsonl", "L-zzz-410x.jsonl"):
+    ev_410c = ledger(**{"L-aaa-410.jsonl": [E410_2], "L-zzz-410.jsonl": [E410_1],
+                        extra_name410: [{"ts": stamp(9), "type": "observed", "subject": "unrelated-410"}]})[0]
+    order_410c = [e["subject"] for e in ev_410c if e.get("subject") in ("L-spec-9410a", "L-spec-9410b")]
+    assert order_410c == order_410a, (extra_name410, order_410c)
+
+# (b) same-file causal order: a deploy-started immediately followed by a
+# deploy-refused for the SAME subject at the IDENTICAL ts, same file — never
+# reordered by content, though "deploy-refused" < "deploy-started"
+# alphabetically (the exact phantom this fix closes).
+DEP_SUBJ_410 = "deploy-9410dep"
+dep_started_410 = {"ts": T410, "type": "deploy-started", "subject": DEP_SUBJ_410, "sha": "abc1234"}
+dep_refused_410 = {"ts": T410, "type": "deploy-refused", "subject": DEP_SUBJ_410}
+ev_410dep = ledger(**{"L-executor-410dep.jsonl": [dep_started_410, dep_refused_410]})[0]
+assert fold.in_flight_deploys(ev_410dep) == [], \
+    "★ AC1(b): same-file same-ts causal order preserved — no phantom in-flight deploy"
+
+for extra_name410b in ("L-aaa-410dep.jsonl", "L-zzz-410dep.jsonl"):
+    ev_410dep2 = ledger(**{"L-executor-410dep.jsonl": [dep_started_410, dep_refused_410],
+                           extra_name410b: [{"ts": stamp(9), "type": "observed",
+                                             "subject": "unrelated-410dep"}]})[0]
+    assert fold.in_flight_deploys(ev_410dep2) == [], \
+        f"★ AC1(b): an unrelated third file ({extra_name410b}) must not perturb same-file causal order"
+print("AC1 ok")
+
+# ── AC2 · fold.BLOCK_ORDER's key set; owed_due(specs) sorts by (due_at, spec,
+# criterion) ─────────────────────────────────────────────────────────────────
+assert set(fold.BLOCK_ORDER) == {
+    "TRIAGE", "NEEDS YOU", "BLOCKED", "WRITTEN, NOT PICKED UP", "IN FLIGHT",
+    "AWAITING VERIFICATION", "OWED EVIDENCE", "OWED DUE", "CHARTER CLOSE",
+    "SHIPPED SINCE YOU LOOKED", "DECIDED WITHOUT YOU", "DEADLINE UNRESOLVABLE",
+}, set(fold.BLOCK_ORDER)
+assert all(isinstance(v, tuple) for v in fold.BLOCK_ORDER.values()), fold.BLOCK_ORDER
+
+# owed_due(specs): three criteria (later/earlier/tied-with-a-different-spec),
+# seeded across files in an order that CONTRADICTS the expected result.
+ev_420, sp_420, _c420, _i420, _b420 = ledger(**{
+    "L-spec-writer-9420z.jsonl": [{"ts": stamp(10), "type": "owed-ac", "subject": "L-spec-9420z",
+                                   "criterion": "AC2", "wake_at": stamp(10)}],
+    "L-executor-9420z.jsonl": [{"ts": stamp(5), "type": "shipped", "subject": "L-spec-9420z"}],
+    "L-spec-writer-9420x.jsonl": [{"ts": stamp(10), "type": "owed-ac", "subject": "L-spec-9420x",
+                                   "criterion": "AC1", "wake_at": stamp(7)}],
+    "L-executor-9420x.jsonl": [{"ts": stamp(5), "type": "shipped", "subject": "L-spec-9420x"}],
+    "L-spec-writer-9420y.jsonl": [{"ts": stamp(10), "type": "owed-ac", "subject": "L-spec-9420y",
+                                   "criterion": "AC1", "wake_at": stamp(10)}],
+    "L-executor-9420y.jsonl": [{"ts": stamp(5), "type": "shipped", "subject": "L-spec-9420y"}],
+})
+due_rows_420 = fold.owed_due(sp_420)
+order_420 = [(r["spec"], r["criterion"]) for r in due_rows_420
+            if r["spec"] in ("L-spec-9420x", "L-spec-9420y", "L-spec-9420z")]
+# y and z tie on due_at (same ship/declare/wake offsets, different spec/criterion);
+# x is less overdue (a later due_at) — ascending (due_at, spec, criterion) puts
+# y before z (spec name) before x (due_at), regardless of specs-dict order.
+assert order_420 == [("L-spec-9420y", "AC1"), ("L-spec-9420z", "AC2"), ("L-spec-9420x", "AC1")], order_420
+print("AC2 ok")
+
+# ── AC3 · fold.render() is byte-identical across two file-name layouts:
+# same-file same-ts pairs keep their line order; the one cross-file same-ts
+# pair reorders identically regardless of which file glob-sorts first ──────
+AC3_S_WRITTEN, AC3_S_BUILDING, AC3_S_GRADED = "L-spec-9440a", "L-spec-9440b", "L-spec-9440c"
+AC3_S_OWED_EV, AC3_S_OWED_DUE = "L-spec-9440d", "L-spec-9440e"
+AC3_C_CLOSE = "L-charter-9440f"
+AC3_DEP_LIVE, AC3_DEP_AC1B = "deploy-9440-live", "deploy-9440-ac1b"
+AC3_PAST = "2020-01-01T00:00:00Z"
+
+triage_a3 = {"ts": stamp(4), "type": "brief", "subject": "triage-9440-a"}
+triage_b3 = {"ts": stamp(4), "type": "brief", "subject": "triage-9440-b"}
+needs_you_q1_3 = {"ts": stamp(4), "type": "question", "subject": "needsyou-9440-a",
+                  "asks": "a?", "default": "d", "deadline": AC3_PAST}
+needs_you_q2_3 = {"ts": stamp(4), "type": "question", "subject": "needsyou-9440-b",
+                  "asks": "b?", "default": "d", "deadline": AC3_PAST}
+dep_live_3 = {"ts": stamp(0), "type": "deploy-started", "subject": AC3_DEP_LIVE, "sha": "1111111"}
+dep_ac1b_started_3 = {"ts": stamp(0), "type": "deploy-started", "subject": AC3_DEP_AC1B, "sha": "2222222"}
+dep_ac1b_refused_3 = {"ts": stamp(0), "type": "deploy-refused", "subject": AC3_DEP_AC1B}
+
+
+def _ac3_fixed_files():
+    """Files that stay byte-identical, same name, same position, in BOTH
+    layouts — no cross-file tie of their own, so their presence just proves
+    every OTHER block still renders (and renders the SAME) while the one
+    deliberately-varied pair below (TRIAGE) is what actually exercises the
+    cross-file half of the fix."""
+    return {
+        "L-spec-writer-9440a.jsonl": [{"ts": stamp(3), "type": "spec-written", "subject": AC3_S_WRITTEN}],
+        "L-spec-writer-9440b.jsonl": [{"ts": stamp(3), "type": "spec-written", "subject": AC3_S_BUILDING}],
+        "L-builder-9440b.jsonl": [{"ts": stamp(2), "type": "build-started", "subject": AC3_S_BUILDING}],
+        "L-spec-writer-9440c.jsonl": [{"ts": stamp(3), "type": "spec-written", "subject": AC3_S_GRADED}],
+        "L-builder-9440c.jsonl": [{"ts": stamp(2), "type": "build-started", "subject": AC3_S_GRADED},
+                                  {"ts": stamp(2), "type": "build-done", "subject": AC3_S_GRADED}],
+        "L-spec-writer-9440d.jsonl": [{"ts": stamp(10), "type": "owed-ac", "subject": AC3_S_OWED_EV,
+                                       "criterion": "AC1", "wake_at": stamp(-5)}],
+        "L-executor-9440d.jsonl": [{"ts": stamp(5), "type": "shipped", "subject": AC3_S_OWED_EV}],
+        "L-spec-writer-9440e.jsonl": [{"ts": stamp(10), "type": "owed-ac", "subject": AC3_S_OWED_DUE,
+                                       "criterion": "AC1", "wake_at": stamp(7)}],
+        "L-executor-9440e.jsonl": [{"ts": stamp(5), "type": "shipped", "subject": AC3_S_OWED_DUE}],
+        "L-operator-9440f.jsonl": [{"ts": stamp(1), "type": "l1-complete", "subject": AC3_C_CLOSE}],
+        "L-operator-9440g.jsonl": [{"ts": stamp(2), "type": "blocked", "subject": "blocked-9440",
+                                    "why": "waiting on x"}],
+        "L-operator-9440h.jsonl": [needs_you_q1_3, needs_you_q2_3],          # SAME file, kept fixed
+        "L-operator-9440i.jsonl": [{"ts": stamp(4), "type": "question", "subject": "deadunresolv-9440",
+                                    "asks": "c?", "default": "d", "deadline": ""}],
+        "L-operator-9440j.jsonl": [{"ts": stamp(6), "type": "observed", "subject": "op-9440"}],
+        "L-executor-9440j.jsonl": [{"ts": stamp(1), "type": "shipped", "subject": "shipsince-9440"}],
+        "L-operator-9440k.jsonl": [{"ts": stamp(1), "type": "decision", "subject": "decided-9440",
+                                    "why": "ruling"}],
+        "L-executor-9440-live.jsonl": [dep_live_3],
+        "L-executor-9440-ac1b.jsonl": [dep_ac1b_started_3, dep_ac1b_refused_3],  # SAME file, kept fixed
+    }
+
+
+layout1_files = dict(_ac3_fixed_files())
+layout1_files["L-thinker-9440-1.jsonl"] = [triage_a3]
+layout1_files["L-thinker-9440-2.jsonl"] = [triage_b3]
+
+layout2_files = dict(_ac3_fixed_files())
+# the ONE deliberate cross-file same-ts perturbation: same two events, same
+# two filenames, CONTENTS SWAPPED — glob order of the two files is unchanged
+# ("…-1" still before "…-2"), but WHICH event physically sits in which file —
+# what the OLD `_src`-keyed comparator was sensitive to — is reversed.
+layout2_files["L-thinker-9440-1.jsonl"] = [triage_b3]
+layout2_files["L-thinker-9440-2.jsonl"] = [triage_a3]
+
+_saved_relay3, _saved_carry3 = sys.modules.get("relay", "‹absent›"), sys.modules.get("carry", "‹absent›")
+try:
+    relay_stub3 = types.ModuleType("relay")
+    relay_stub3.waiting_lines = lambda e, r: ["PLANNER WAITING ON: no open charters"]
+    relay_stub3.unserved = lambda events, root: [
+        {"spawn": "L-builder-9440", "role": "builder", "subject": "L-spec-9440z",
+         "age_min": 12.0, "status": "pending"}]
+    sys.modules["relay"] = relay_stub3
+    carry_stub3 = types.ModuleType("carry")
+    carry_stub3.uncarried = lambda events: [
+        {"source": "9440", "kind": "v4", "registered_at": "2026-09-01T00:00:00Z",
+         "attempts": 0, "last_error": None}]
+    sys.modules["carry"] = carry_stub3
+
+    board_l1 = fold.render(*ledger(**layout1_files))
+    board_l2 = fold.render(*ledger(**layout2_files))
+finally:
+    for _name3, _saved3 in (("relay", _saved_relay3), ("carry", _saved_carry3)):
+        if _saved3 == "‹absent›":
+            sys.modules.pop(_name3, None)
+        else:
+            sys.modules[_name3] = _saved3
+
+# every one of the fourteen blocks actually populated — a byte-equal
+# comparison of two EMPTY renders would prove nothing.
+for _title3 in ("TRIAGE", "NEEDS YOU", "BLOCKED", "WRITTEN, NOT PICKED UP", "IN FLIGHT",
+               "UNSERVED", "AWAITING VERIFICATION", "OWED EVIDENCE", "OWED DUE",
+               "CHARTER CLOSE", "SHIPPED SINCE YOU LOOKED", "DECIDED WITHOUT YOU",
+               "DEADLINE UNRESOLVABLE", "INBOUND"):
+    header3 = [l for l in board_l1.splitlines() if l.startswith(f"## {_title3} (")][0]
+    n3 = int(header3.split("(")[1].split(")")[0])
+    assert n3 >= 1, f"★ AC3: {_title3} must carry at least one row in the fixture: {header3}"
+
+if board_l1 != board_l2:
+    l1_lines, l2_lines = board_l1.splitlines(), board_l2.splitlines()
+    first_diff = next((i for i, (a3, b3) in enumerate(zip(l1_lines, l2_lines)) if a3 != b3), None)
+    raise AssertionError(
+        f"★ AC3: the two layouts must render byte-identically; first differing line "
+        f"{first_diff}: {l1_lines[first_diff] if first_diff is not None else None!r} vs "
+        f"{l2_lines[first_diff] if first_diff is not None else None!r}")
+print("AC3 ok")
+
+# ── AC6 · consumer order-safety beyond AC1(b)'s deploy scenario ────────────
+# (a) owed_line's "wakes" pick, across a spec-writer declaration + a later
+# executor re-date sharing an identical ts in DIFFERENT files. `L-executor-…`
+# and `L-spec-writer-…` have a FIXED relative alphabetical order (role name
+# dominates: 'e' < 's', whatever numeric suffix follows) — under the OLD
+# `(ts, _src)` key the executor's file always sorted first, so `fold()`'s
+# widening check (which requires an already-admitted spec-writer/spec-auditor
+# owed-ac for the SAME criterion already in `by_subject[subj]`) would find
+# nothing yet and drop the re-date — a real, silent loss, independent of
+# content. The fix reads the SAME two events in CONTENT order instead:
+# declare6 lacks "wake_at" and carries "line" (which sorts before "subject"
+# alphabetically — true regardless of the actual values), so declare6's
+# canonical JSON is ALWAYS smaller than redate6's — declare6 is processed
+# first no matter which file glob-sorts first, `by_subject` already carries
+# it when redate6 is processed, and the re-date is admitted.
+AC6_S1 = "L-spec-9451"
+T6a = stamp(4)
+declare6 = {"ts": T6a, "type": "owed-ac", "subject": AC6_S1, "criterion": "AC1",
+           "line": "no instant here"}
+redate6 = {"ts": T6a, "type": "owed-ac", "subject": AC6_S1, "criterion": "AC1", "wake_at": stamp(-5)}
+ship6 = {"ts": stamp(5), "type": "shipped", "subject": AC6_S1}
+
+declare_key6 = fold.event_content_key({**declare6, "_src": "x", "actor": "spec-writer"})
+redate_key6 = fold.event_content_key({**redate6, "_src": "y", "actor": "executor"})
+assert declare_key6 < redate_key6, (declare_key6, redate_key6)
+
+board6a = fold.render(*ledger(**{"L-executor-9451.jsonl": [redate6],
+                                 "L-spec-writer-9451.jsonl": [declare6],
+                                 "L-executor-9451b.jsonl": [ship6]}))
+oe6a = board6a.split("## OWED EVIDENCE")[1].split("## OWED DUE")[0]
+assert AC6_S1 in oe6a and f"wakes {stamp(-5)}" in oe6a, \
+    f"★ AC6(a): the executor's re-date is admitted (content order, not filename order): {oe6a}"
+
+# (b) open_escalations: the same-file causal-order guarantee applied beyond
+# in_flight_deploys — an escalation-blocking immediately followed by a
+# decision for the SAME subject at the IDENTICAL ts, SAME file: the decision
+# (later in the file) wins, and NEEDS YOU shows no row for that subject.
+AC6_S2 = "needsyou-9452"
+T6b = stamp(3)
+esc6 = {"ts": T6b, "type": "escalation-blocking", "subject": AC6_S2, "why": "why?",
+       "default": "d", "deadline": "2099-01-01T00:00:00Z", "revert": "r"}
+dec6 = {"ts": T6b, "type": "decision", "subject": AC6_S2, "why": "resolved"}
+ev6b = ledger(**{"L-operator-9452.jsonl": [esc6, dec6]})[0]           # SAME file, escalation first
+assert fold.open_questions(ev6b) == [], \
+    "★ AC6(b): same-file causal order applies to open_escalations too — the later " \
+    "same-file decision wins, no phantom NEEDS YOU row"
+print("AC6 ok")

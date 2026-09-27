@@ -309,8 +309,73 @@ def apply_corrections(events):
     return events
 
 
+def _src_file(e):
+    """The filename part of `_src` ("name.jsonl:23" -> "name.jsonl") — used ONLY
+    to test same-file membership and, within a file, line order; never to rank
+    two DIFFERENT files by name (R5/L-charter-0040)."""
+    return e["_src"].split(":", 1)[0]
+
+
+def raw_content_json(e):
+    """Canonical JSON (`json.dumps(..., sort_keys=True, default=str)`) of an
+    event's own fields, `_src` and `actor` excluded — deterministic regardless
+    of dict insertion order or which file the event came from. The single
+    content-tiebreak every pure-filter block already inherits for free, and
+    the one an explicitly-sorted block's deploy-row content-tiebreak uses
+    verbatim (Interfaces > Produces)."""
+    raw = {k: v for k, v in e.items() if k not in ("actor", "_src")}
+    return json.dumps(raw, sort_keys=True, default=str)
+
+
+def event_content_key(e):
+    """(subject, type, canonical JSON) of an event — the content-tiebreak
+    `read_events()`'s cross-file same-`ts` comparator uses."""
+    return (e.get("subject", "?"), e.get("type", "?"), raw_content_json(e))
+
+
+def _merge_same_ts(items):
+    """`items` share an identical `str(ts)` and already arrive in original
+    (file-glob, then line) order. Re-order them so that two events from the
+    SAME source file keep their relative order (a file's own append order is
+    the only causal record within it — never overridden) while events from
+    DIFFERENT files order by `event_content_key` — never by which file sorts
+    first alphabetically. A proper stable k-way merge, keyed at each step by
+    the smallest available content key across the per-file queues: this is
+    what makes the same-file guarantee hold even with 3+ files in play,
+    without relying on a pairwise comparator's transitivity."""
+    if len(items) <= 1:
+        return items
+    queues = {}
+    for e in items:
+        queues.setdefault(_src_file(e), []).append(e)
+    out = []
+    while queues:
+        best_file, best_key = None, None
+        for fname, q in queues.items():
+            k = event_content_key(q[0])
+            if best_key is None or k < best_key:
+                best_key, best_file = k, fname
+        q = queues[best_file]
+        out.append(q.pop(0))
+        if not q:
+            del queues[best_file]
+    return out
+
+
 def read_events():
-    """Every event in every file, oldest first. A torn tail never wedges the fold."""
+    """Every event in every file, oldest first. A torn tail never wedges the fold.
+
+    Tie-break on identical `ts` (R5/L-charter-0040): two events from the SAME
+    source file keep that file's own line order — its append order is the only
+    causal record within it. Two events from DIFFERENT files order by content
+    (`event_content_key`) — `_src`'s filename is used only to test same-file
+    membership, never to rank two different files against each other. Fixes a
+    real phantom this file's glob/line order could produce: a same-ts
+    `deploy-started`/`deploy-refused` pair in two files, alphabetically
+    `"deploy-refused" < "deploy-started"`, used to let a stale `deploy-started`
+    win a false "in flight" row (fold.in_flight_deploys); it cannot now, because
+    that pair — WERE it in one file — keeps its true append order, and across
+    files the order is content-derived, never filename-derived."""
     out = []
     for f in sorted(EVENTS.glob("*.jsonl")):
         # L-<role>-<nnnn>: the role may itself carry hyphens (L-spec-writer-0007),
@@ -326,11 +391,24 @@ def read_events():
                 continue
             e["actor"], e["_src"] = actor, f"{f.name}:{n}"
             out.append(e)
+    # Stable sort by ts alone first — ties keep the original (file-glob, then
+    # line) order, which is exactly the per-file substructure `_merge_same_ts`
+    # needs to preserve. Then merge each same-ts run across files by content.
+    out.sort(key=lambda e: str(e.get("ts", "")))
+    merged = []
+    i, n_out = 0, len(out)
+    while i < n_out:
+        j = i + 1
+        cur_ts = str(out[i].get("ts", ""))
+        while j < n_out and str(out[j].get("ts", "")) == cur_ts:
+            j += 1
+        merged.extend(_merge_same_ts(out[i:j]))
+        i = j
     # ★ Corrections apply BEFORE the project filter, never after (D111). The very
     # mis-write that motivated them was a wrong `project` value — filter first and
     # the correction can never reach the event it exists to fix.
-    out = apply_corrections(sorted(out, key=lambda e: (str(e.get("ts", "")), e["_src"])))
-    return [e for e in out if not PROJECT or e.get("project") == PROJECT]
+    merged = apply_corrections(merged)
+    return [e for e in merged if not PROJECT or e.get("project") == PROJECT]
 
 
 def standing_rejects(evs):
@@ -605,6 +683,34 @@ BOARD_OWNERS = {
     # (unresolvable syntax, or an anchor whose event can never fire); closers
     # mirror overdue_questions' own "answered" set.
     "DEADLINE UNRESOLVABLE": ("operator", ("decision", "unblocked")),
+}
+
+
+# R5/L-charter-0040: per-block row sort key, one entry for EXACTLY the twelve
+# `block()`-rendered sections this unit's footprint covers (not the eighteen
+# BOARD_OWNERS names — UNSERVED/NOTES/INBOUND/SPEND/LIVE PANES are out of
+# scope, see the spec's Boundaries). The five PURE-FILTER blocks (their value's
+# third field literal "content", no age proxy) get NO independent sort call in
+# render() below — read_events()'s own comparator already satisfies this key
+# for free, and a naive re-sort risks reversing a same-file same-ts pair the
+# fix protects. The other seven ARE explicitly sorted (dict/subject-collapse
+# construction order is not a meaningful display order) — OWED DUE by its own
+# literal (due_at, spec, criterion); the rest by (age-or-ts proxy DESCENDING/
+# ASCENDING to match, subject, content-tiebreak), documented per-block in
+# render()'s own comments beside each explicit sort call.
+BLOCK_ORDER = {
+    "TRIAGE": ("ts", "subject", "content"),
+    "BLOCKED": ("ts", "subject", "content"),
+    "SHIPPED SINCE YOU LOOKED": ("ts", "subject", "content"),
+    "DECIDED WITHOUT YOU": ("ts", "subject", "content"),
+    "DEADLINE UNRESOLVABLE": ("ts", "subject", "content"),
+    "NEEDS YOU": ("age_days", "subject", "content"),
+    "WRITTEN, NOT PICKED UP": ("age", "id", "content"),
+    "IN FLIGHT": ("age", "id_or_subject", "content"),
+    "AWAITING VERIFICATION": ("age", "id", "content"),
+    "OWED EVIDENCE": ("age", "id", "content"),
+    "OWED DUE": ("due_at", "spec", "criterion"),
+    "CHARTER CLOSE": ("age", "id", "content"),
 }
 
 
@@ -1429,6 +1535,10 @@ def owed_due(specs):
                         "due_at": r["due_at"].isoformat(timespec="seconds"),
                         "days_overdue": (NOW - r["due_at"]).total_seconds() / 86400,
                         "src": r["declared_src"]})
+    # R5/L-charter-0040, BLOCK_ORDER["OWED DUE"]: the literal tuple, ascending —
+    # `due_at` is already a sortable ISO string (ship-anchored, timespec=
+    # "seconds"), so a plain tuple sort is exact, tie included.
+    out.sort(key=lambda r: (r["due_at"], r["spec"], r["criterion"]))
     return out
 
 
@@ -1448,6 +1558,39 @@ def in_flight_deploys(events):
         if e.get("type") in DEPLOY_TYPES and e.get("subject") is not None:
             last[e["subject"]] = e
     return [e for e in last.values() if e["type"] == "deploy-started"]
+
+
+# R5/L-charter-0040 — BLOCK_ORDER's explicit-sort keys. Each block sorts
+# ascending by (ts-or-proxy, subject, content-tiebreak); `s["age"]`/`c["age"]`
+# are BOTH `age_days(evs[-1])` — one common, correctly-signed (days) scale —
+# and sort DESCENDING (older = larger age) to match the ascending-ts columns:
+# negating the proxy lets one `sorted(..., key=...)` ascending call do both.
+# A pair's relative order within ONE render is invariant to `fold.NOW`'s
+# absolute value (age_a - age_b = ts_b - ts_a algebraically), so it stays
+# stable across `board_diff()`'s two subprocess renders. `id` is already
+# unique per spec/charter row, so the content-tiebreak below can never itself
+# be reached to break a tie — it is still computed, per the Interfaces text.
+def _spec_row_sort_key(s):
+    return (-s["age"], s["id"], json.dumps({"id": s["id"], "state": s["state"]}, sort_keys=True, default=str))
+
+
+def _charter_row_sort_key(c):
+    return (-c["age"], c["id"], json.dumps({"id": c["id"], "state": c["state"]}, sort_keys=True, default=str))
+
+
+def _needs_you_sort_key(r):
+    """NEEDS YOU's row key: age_days DESCENDING (proxy for ts ascending),
+    subject, then content-tiebreak = the row MINUS "age_days" AND MINUS "src"
+    (r["src"] is literally e["_src"] attached above — leaving it in would rank
+    by file name, exactly what R5 forbids). Two `overdue_questions` rows that
+    tie on this key AND share a source file are never reordered relative to
+    each other: `sorted()` is stable, and a genuine tie here (identical
+    content once age_days/src are stripped) means their ORIGINAL relative
+    order — already read_events()'s own same-file causal order, since
+    `open_questions()` walks `events` in that order — is exactly what a
+    stable sort preserves."""
+    content = {k: v for k, v in r.items() if k not in ("age_days", "src")}
+    return (-r["age_days"], r.get("subject", "?"), json.dumps(content, sort_keys=True, default=str))
 
 
 def render(events, specs, charters, ignored, by_subject):
@@ -1511,15 +1654,27 @@ def render(events, specs, charters, ignored, by_subject):
     # applied, the deadline, the undo or the irreversible act that is the reason
     # there is no default, and the age. A row that says only "this is blocked"
     # sends the operator to the ledger to find out what blocking means.
-    block("NEEDS YOU", [question_line(r) for r in open_questions(events)])
+    block("NEEDS YOU", [question_line(r) for r in
+                        sorted(open_questions(events), key=_needs_you_sort_key)])
     block("BLOCKED", [f"{e.get('subject','?')} · {e.get('why','?')} · owner "
                       f"{e.get('owner') or '⚠ NOBODY'} · {age_days(e):.1f}d" for e in open_blocks])
-    block("WRITTEN, NOT PICKED UP", [f"{s['id']} · {s['age']:.1f}d{flag(s)}" for s in pick("written")])
+    block("WRITTEN, NOT PICKED UP", [f"{s['id']} · {s['age']:.1f}d{flag(s)}"
+                                     for s in sorted(pick("written"), key=_spec_row_sort_key)])
     # A deploy-started with no landed/failed/refused after it is a wrapper that
-    # may be dead — visible here, not silently lost (S34).
-    block("IN FLIGHT", [f"{s['id']} · {s['age']:.1f}d{flag(s)}" for s in pick("building")]
-          + [f"deploy in flight · {e.get('subject','?')} · {str(e.get('sha',''))[:7]} · "
-             f"{age_days(e):.1f}d" for e in in_flight_deploys(events)])
+    # may be dead — visible here, not silently lost (S34). BLOCK_ORDER["IN
+    # FLIGHT"]: ONE sequence, spec rows and deploy rows interleaved by the same
+    # common (age-proxy, subject/id, content-tiebreak) key — never concatenated
+    # by kind, since neither row kind's construction order is a meaningful
+    # display order on its own.
+    in_flight_rows = (
+        [(_spec_row_sort_key(s), f"{s['id']} · {s['age']:.1f}d{flag(s)}") for s in pick("building")]
+        + [((-age_days(e), e.get("subject", "?"), raw_content_json(e)),
+            f"deploy in flight · {e.get('subject','?')} · {str(e.get('sha',''))[:7]} · "
+            f"{age_days(e):.1f}d")
+           for e in in_flight_deploys(events)]
+    )
+    in_flight_rows.sort(key=lambda t: t[0])
+    block("IN FLIGHT", [line for _key, line in in_flight_rows])
 
     # UNSERVED — R6/L-spec-0196: one row per `relay.unserved()` entry, a
     # dispatched packet nobody claimed (pending) or that failed the claim window
@@ -1559,7 +1714,7 @@ def render(events, specs, charters, ignored, by_subject):
     block("AWAITING VERIFICATION",
           [f"{s['id']} · {s['state']} · {s['age']:.1f}d"
            + (f"  ⚠ {s['rejects']} REJECTED, needs rework" if s["rejects"] else "") + flag(s)
-           for s in pick("graded", "reviewing", "shipped")])
+           for s in sorted(pick("graded", "reviewing", "shipped"), key=_spec_row_sort_key)])
     def owed_line(s):
         wake = str(next((e.get("wake_at") for e in s["evs"]
                          if e["type"] == "owed-ac" and e.get("wake_at")), "?"))
@@ -1573,7 +1728,8 @@ def render(events, specs, charters, ignored, by_subject):
                       if e["type"] == "owed-met" and e.get("criterion")})
         return f"{s['id']} · wakes {wake}" + "".join(f"  ·  {c} met, awaiting fold" for c in met)
 
-    block("OWED EVIDENCE", [owed_line(s) for s in pick("shipped-owed-evidence")])
+    block("OWED EVIDENCE", [owed_line(s) for s in
+                            sorted(pick("shipped-owed-evidence"), key=_spec_row_sort_key)])
 
     # OWED DUE — R7/L-spec-0196: one row per `fold.owed_due(specs)` entry, a
     # due-and-unmet owed criterion. This unit adds no state logic (owed_due()
@@ -1592,11 +1748,13 @@ def render(events, specs, charters, ignored, by_subject):
     # ponytail: on a charter still `open` it is therefore visible nowhere. The
     # sections are fixed and the board answers "what needs you now", which a
     # terminal spec does not. Revisit if a cut spec is ever quietly lost this way.
+    charter_close_rows = sorted(
+        [c for c in charters.values() if c["state"] in ("L1-complete", "L2-complete", "retracted")],
+        key=_charter_row_sort_key)
     block("CHARTER CLOSE", [f"{c['id']} · {c['state']} · {c['owed']} owed (K={K})"
                             + (f" · {c['briefs']} in-scope brief(s) open" if c["briefs"] else "")
                             + (f" · {c['unbuilt']} closed unbuilt" if c["unbuilt"] else "")
-                            for c in charters.values()
-                            if c["state"] in ("L1-complete", "L2-complete", "retracted")])
+                            for c in charter_close_rows])
 
     # NOTES — R4/L-spec-0244: one row per url whose latest tracked state is
     # `inbound-note-listed` (age in hours, `⚑ >48h`), via `notes.board_rows`.
