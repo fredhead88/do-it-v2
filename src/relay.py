@@ -105,7 +105,7 @@ def sequencing(source, events):
 
 # ── landing, the one definition both the after: gate and the throttle use ────
 
-_OUT_OF_FLIGHT = ("accepted", "closed-shipped", "closed-unbuilt", "shipped", "shipped-owed-evidence",
+_OUT_OF_FLIGHT = ("accepted", "closed-shipped", "closed-unbuilt", "shipped", "shipped-owed-evidence", "shipped-owed-expired",
                   "shipped-owed-due", "killed", "void", "dropped")
 
 

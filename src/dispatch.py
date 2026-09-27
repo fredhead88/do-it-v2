@@ -141,7 +141,7 @@ def open_spec_writer_spawn(all_ev, subject):
 # (AC10) — a minimal fixture that never reaches a verdict/review carries no
 # other SPEC_DONE label at all, and the wave-order gate is about merge order,
 # not acceptance order.
-SETTLED_STATES = ("accepted", "shipped", "shipped-owed-evidence", "shipped-owed-due", "dropped", "closed-unbuilt",
+SETTLED_STATES = ("accepted", "shipped", "shipped-owed-evidence", "shipped-owed-due", "shipped-owed-expired", "dropped", "closed-unbuilt",
                   "closed-shipped", "killed", "void")
 
 
