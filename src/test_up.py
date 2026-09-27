@@ -451,6 +451,34 @@ evs = fold.read_events()
 ok(len([e for e in evs if e["type"] == "escalation-blocking"]) == 1,
    "the one escalation-blocking is on the whole ledger too — the same append, not a second one")
 
+# ── L-spec-0433 AC14 · the irreversible= text names the replan=yes release condition ──
+ok("replan=yes" in esc[0]["irreversible"] and "held" in esc[0]["irreversible"],
+   f"AC14: the operator-facing irreversible= text names replan=yes and the word 'held': {esc[0]['irreversible']!r}")
+
+# ── L-spec-0433 AC11 · a `next == "held"` charter starts no pane, escalates nothing,
+# and the SAME cycle still starts the next ready charter ───────────────────────────
+sup_root("ac11-held")
+
+
+def sup_attempts_held(events, charter_id=None, **k):
+    if charter_id == "L-charter-0001":
+        return {"attempts": 2, "last_reason": "exit-1", "next": "held", "held_by": "L-up-0001.jsonl:3"}
+    return {"attempts": 0, "last_reason": "", "next": "start", "held_by": None}
+
+
+sup_relay(plannable=lambda *a, **k: (["L-charter-0001", "L-charter-0002"], []),
+          planner_attempts=sup_attempts_held)
+calls = sup_runs()
+buf = io.StringIO()
+with contextlib.redirect_stdout(buf):
+    up.main(max_cycles=1)
+out = buf.getvalue()
+ok([e for e in sup_rows() if e["type"] == "escalation-blocking"] == [],
+   "AC11: a held charter gets no new escalation-blocking")
+ok([c["cmd"][-1] for c in calls] == ["L-charter-0002"],
+   f"AC11: the held charter starts no pane, and the SAME cycle still starts the next ready charter: {calls}")
+ok("L-up-0001.jsonl:3" in out, f"AC11: the held_by src is printed for the operator: {out!r}")
+
 # ── AC4 · the end row only where the child wrote none ─────────────────────────
 sup_root("ac4-crash")
 sup_relay(plannable=lambda *a, **k: (["L-charter-0001"], []))

@@ -235,8 +235,13 @@ def plannable(events, root=None):
     """(ready, waiting). `ready` is every open charter no check excludes, sorted by
     `(goal_date, set_order, charter_id)`; `waiting` is `[(charter_id, reason)]` for
     every other open charter, ONE reason each — the first check that hit, in this
-    order: standing escalation, the declared block (`after:` then `conflicts:`), the
-    count throttle, the footprint intersection.
+    order: a known-bug hold (`planner_attempts`'s `next == "held"` —
+    planner-attempts-hold, L-charter-0042 R6), standing escalation, the declared
+    block (`after:` then `conflicts:`), the count throttle, the footprint
+    intersection. The held check runs first because `fold.open_escalations` stops
+    naming a subject the moment ANY decision/unblocked answers it — a held charter
+    would otherwise fall straight through to `ready` the instant it is answered,
+    known-bug or not.
 
     **The throttle rule, chosen once.** §3.5's count runs ONLY where `sequencing()`
     returned `None` — no block declared at all. Any declared block skips it, a block
@@ -264,7 +269,10 @@ def plannable(events, root=None):
         set_order = None                    # L-adr-0030: carried, never populated
         tail = _unavailable(goal_date, set_order)
         why = None
-        if cid in escalated:
+        attempts_info = planner_attempts(events, cid)
+        if attempts_info["next"] == "held":
+            why = f"held: known-bug escalation answered by {attempts_info['held_by']} without replan=yes"
+        if why is None and cid in escalated:
             why = f"escalation open: {escalated[cid].get('why', 'escalation')}"
         block = sequencing(next((e for e in reversed(evs) if e["type"] == "charter-filed"), {}), events)
         if why is None and block:
@@ -461,30 +469,77 @@ def unserved(events, root=None, since_h=24):
 
 # ── the Planner's attempt tally ──────────────────────────────────────────────
 
+def _known_bug_escalation(e):
+    """An `escalation-blocking` qualifies as a known-bug hold two ways: the
+    supervisor's own structural escalation (`actor == "up"` carrying an `attempts`
+    key, unchanged), or the hand-written marker (`kind == "known-bug"`). Ordinary
+    escalations on the same subject are tracked identically for `governing`/
+    `latest_answer` but never set `held` or the reset floor (planner-attempts-hold,
+    L-charter-0042 R6)."""
+    return (e.get("actor") == "up" and "attempts" in e) or e.get("kind") == "known-bug"
+
+
 def planner_attempts(events, charter_id):
-    """`{attempts, last_reason, next}` for one charter — R7's at-most-one-restart rule
-    derived from the ledger, so the launcher keeps no state in memory and a restarted
-    launcher cannot forget a failure.
+    """`{attempts, last_reason, next, held_by}` for one charter — R7's at-most-one-
+    restart rule derived from the ledger, so the launcher keeps no state in memory
+    and a restarted launcher cannot forget a failure.
 
     `mode: "serving"` pairs are ignored (a Planner serving an already-cut charter is
     not an attempt at cutting one). An unmatched trailing `planner-started` is the
     run happening NOW: it is never counted as a failure, or a launcher would escalate
     against its own live pane. A pair whose `reason` is `l1-complete` is a success and
-    does not count either."""
-    opened, pairs = None, []
-    for e in events:
-        if e.get("type") not in (PLANNER_STARTED, PLANNER_ENDED):
-            continue
-        if e.get("mode") == "serving":
-            continue
-        if not (e.get("subject") == charter_id or fold.charter_id(e.get("charter")) == charter_id):
-            continue
-        if e["type"] == PLANNER_STARTED:
-            opened = e
-        elif opened is not None:
-            pairs.append((opened, e))
-            opened = None
-    attempts = sum(1 for _, end in pairs if end.get("reason") != "l1-complete")
-    return {"attempts": attempts,
-            "last_reason": pairs[-1][1].get("reason") if pairs else None,
-            "next": "start" if attempts == 0 else "retry" if attempts == 1 else "escalate"}
+    does not count either.
+
+    One left-to-right walk also tracks a **known-bug hold** (planner-attempts-hold,
+    L-charter-0042 R6): `governing` is the most recent `escalation-blocking` on
+    `subject == charter_id` (mirroring `fold.open_escalations`'s "newest of the
+    three types wins" rule, reproduced here rather than imported — the sibling unit
+    owning `fold.answered` is out of this unit's footprint); `latest_answer` is the
+    most recent `decision`/`unblocked` answering that CURRENT `governing`. `held` is
+    true when `governing` is known-bug, an answer exists, and that answer's own
+    `replan` field is not the literal `"yes"`. Whenever a known-bug `governing` is
+    answered with `replan == "yes"`, `reset_at` records that event's POSITION (its
+    index in `events`, never a `ts` compare) as a floor: only `planner-started`s
+    positioned after it count toward `attempts` from then on — pre-reset failures
+    are never recounted, and the floor stands even across a later, unrelated
+    (ordinary) escalation round-trip on the same charter."""
+    opened, opened_pos, pairs = None, None, []
+    governing, latest_answer, reset_at = None, None, None
+    for i, e in enumerate(events):
+        et = e.get("type")
+        if et in (PLANNER_STARTED, PLANNER_ENDED):
+            if e.get("mode") == "serving":
+                continue
+            if not (e.get("subject") == charter_id or fold.charter_id(e.get("charter")) == charter_id):
+                continue
+            if et == PLANNER_STARTED:
+                opened, opened_pos = e, i
+            elif opened is not None:
+                pairs.append((opened, e, opened_pos))
+                opened, opened_pos = None, None
+        elif et in ("escalation-blocking", "decision", "unblocked") and e.get("subject") == charter_id:
+            if et == "escalation-blocking":
+                governing, latest_answer = e, None
+            else:
+                latest_answer = e
+                if governing is not None and _known_bug_escalation(governing) and e.get("replan") == "yes":
+                    reset_at = i
+
+    held = (governing is not None and _known_bug_escalation(governing)
+            and latest_answer is not None and latest_answer.get("replan") != "yes")
+    held_by = latest_answer["_src"] if held else None
+
+    def _summarize(subset):
+        att = sum(1 for _, end, _ in subset if end.get("reason") != "l1-complete")
+        return att, (subset[-1][1].get("reason") if subset else None)
+
+    attempts, last_reason = _summarize(pairs)
+    if held:
+        return {"attempts": attempts, "last_reason": last_reason, "next": "held", "held_by": held_by}
+    if reset_at is not None:
+        attempts, last_reason = _summarize([p for p in pairs if p[2] > reset_at])
+        return {"attempts": attempts, "last_reason": last_reason,
+                "next": "start" if attempts == 0 else "escalate", "held_by": None}
+    return {"attempts": attempts, "last_reason": last_reason,
+            "next": "start" if attempts == 0 else "retry" if attempts == 1 else "escalate",
+            "held_by": None}
