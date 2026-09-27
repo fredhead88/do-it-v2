@@ -39,7 +39,7 @@ project = "do-it-v2"
 [[row]]
 name = "tmp-reaper"
 where = "user"
-schedule = "7,37 * * * *"
+schedule = "*/5 * * * *"
 command = "{doit} reap-tmp"
 path = "{doit}"
 sig = '\bdoit reap-tmp\b'

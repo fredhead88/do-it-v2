@@ -36,6 +36,12 @@ import fold, merge_gate  # noqa: E402
 
 DEPTH = int(os.environ.get("DOIT_REAP_DEPTH", "200"))    # how far back on main patch-ids are read
 CLOSED = ("L2-complete", "retracted")
+# L-spec-0440/R9c: killed, void, or "shipped or later" — a spec in one of these
+# states has genuinely finished its own lifecycle, independent of whether its
+# charter has closed. `closed-unbuilt`/`dropped` are excluded on purpose:
+# nothing was ever built for either, so no worktree exists to reap.
+TERMINAL_SPEC_STATES = {"killed", "void", "accepted", "shipped-owed-due",
+                         "shipped-owed-evidence", "shipped-owed-expired", "closed-shipped"}
 
 
 class Undetermined(Exception):
@@ -135,6 +141,113 @@ def reap(repo, branch, wt, patch_id_proof):
         if not patch_id_proof:
             raise Undetermined(f"git branch -d {branch}: {p.stderr.strip()}")
         git(repo, "branch", "-D", branch)
+
+
+class GroupFailure(Exception):
+    """Raised by `reap_merged_specs` only when >=1 repo group's own
+    `worktrees()`/`patch_ids()` could not be established (missing repo,
+    invalid `.git`, corrupt object store) — and only AFTER every group,
+    healthy or not, has already been judged/reaped/ledgered: a per-group
+    failure never stops the loop from reaching the next group (the one
+    behavioral difference from `main()`, which `sys.exit()`s on its own
+    single repo). `.reaped` carries every branch genuinely reaped across
+    every OTHER, healthy group, so a caller (`reap_tmp.run`, R9b) that
+    catches this still has the real partial result to report alongside the
+    isolated `errors["worktrees"]` text."""
+    def __init__(self, message, reaped):
+        super().__init__(message)
+        self.reaped = reaped
+
+
+def _terminal_groups(events):
+    """project -> [spec ids], for every spec whose `fold.spec_state` is one
+    of R9c's terminal states. `project` is resolved the same way `main()`
+    already resolves it for a whole charter (its own events' `project`
+    field), just per spec via that spec's own charter."""
+    specs, charters, _, _ = fold.fold(events)
+    groups = {}
+    for sid, s in specs.items():
+        if s["state"] not in TERMINAL_SPEC_STATES:
+            continue
+        c = charters.get(s["charter"]) or {"evs": []}
+        project = next((e.get("project") for e in reversed(c["evs"]) if e.get("project")), None)
+        groups.setdefault(project, []).append(sid)
+    return specs, groups
+
+
+def reap_merged_specs(events, *, dry_run=False):
+    """The second, additive entry point (R9c): every spec whose state is
+    terminal is reaped as soon as ITS OWN repo group proves it dead — never
+    gated on the whole charter closing the way `main()` is. One
+    `tree-reaped` event per repo group (not per spec), same shape and same
+    actor technique `main()` already uses, so §4.11's "nothing destroyed
+    silently" holds here too."""
+    specs, groups = _terminal_groups(events)
+    all_reaped, failures = [], []
+    for project in sorted(groups, key=str):
+        spec_ids = sorted(groups[project])
+        repo = fold.ROOT / "repos" / str(project)
+        reaped, retained, reasons = [], [], []
+        try:
+            main_branch = git(repo, "symbolic-ref", "--short", "HEAD").stdout.strip()
+            wts, main_ids = worktrees(repo), patch_ids(repo, "HEAD", DEPTH)
+        except Undetermined as e:
+            reason = str(e)
+            for spec in spec_ids:
+                branch = (build(specs[spec]["evs"]) or {}).get("branch") or spec.lower()
+                retained.append(branch)
+                reasons.append(f"{branch}: {reason}")
+            failures.append(f"{project}: {reason}")
+        else:
+            for spec in spec_ids:
+                branch, wt, dead, why = judge(repo, spec, specs[spec]["evs"], main_branch, wts, main_ids)
+                if dead and not dry_run:
+                    proof = git(repo, "merge-base", "--is-ancestor", branch, main_branch, ok=True).returncode != 0
+                    try:
+                        reap(repo, branch, wt, proof)
+                    except Undetermined as e:
+                        dead, why = False, str(e)
+                if dead:
+                    reaped.append(branch)
+                elif why:
+                    retained.append(branch)
+                    reasons.append(f"{branch}: {why}")
+        all_reaped += reaped
+        if not dry_run and (reaped or retained):
+            os.environ["DOIT_LEDGER_FILE"] = os.environ.get(
+                "DOIT_REAP_LEDGER_FILE", os.environ.get("DOIT_LEDGER_FILE", "L-executor-0001.jsonl"))
+            fold.append(["tree-reaped", str(project), f"reaped:={json.dumps(reaped)}",
+                         f"retained:={json.dumps(retained)}",
+                         f"retained_reason:={json.dumps(reasons)}", f"repo={repo}"])
+    if failures:
+        raise GroupFailure("; ".join(failures), all_reaped)
+    return all_reaped
+
+
+def terminal_worktrees(events):
+    """R9d condition (c): every terminal-state spec's own worktree path,
+    keyed by that (normalized) path — read BEFORE any reap runs, so a
+    worktree this same pass is about to remove is still listed (the caller,
+    `reap_tmp.run`, calls this ahead of `reap_merged_specs`' own mutation).
+    Covers BOTH of R9d's (c) clauses in one lookup: a worktree that gets
+    reaped this pass is, by definition, a terminal spec's worktree too, so a
+    single "under some terminal spec's worktree" test subsumes the
+    just-reaped case. A repo this call cannot establish contributes nothing
+    for its specs — fail-safe, never a false protection."""
+    specs, groups = _terminal_groups(events)
+    out = {}
+    for project, spec_ids in groups.items():
+        repo = fold.ROOT / "repos" / str(project)
+        try:
+            wts = worktrees(repo)
+        except Undetermined:
+            continue
+        for sid in spec_ids:
+            branch = (build(specs[sid]["evs"]) or {}).get("branch") or sid.lower()
+            wt = wts.get(branch)
+            if wt:
+                out[os.path.normpath(wt)] = sid
+    return out
 
 
 def main(argv=None):

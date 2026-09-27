@@ -62,9 +62,17 @@ def write(root, actor, *events):
             fh.write(json.dumps({"v": 1, "ts": f"2026-09-08T10:{i:02d}:00+00:00", **e}) + "\n")
 
 
-def accepted(root, charter, spec, branch, ready):
-    """The event trail that makes one spec derive to `accepted` (§2.5)."""
-    write(root, "L-executor-0001", {"type": "spec-written", "subject": spec, "charter": charter},
+def accepted(root, charter, spec, branch, ready, project=None):
+    """The event trail that makes one spec derive to `accepted` (§2.5).
+    `project` (L-spec-0440) is omitted by default — every pre-existing call
+    site stays byte-identical — and, when given, lands on the FIRST event so
+    `fold.fold()` finds it on the charter's own stream (`reap_merged_specs`/
+    `terminal_worktrees` resolve a spec's repo through its charter's
+    `project`, never the spec's own)."""
+    kv = {"type": "spec-written", "subject": spec, "charter": charter}
+    if project is not None:
+        kv["project"] = project
+    write(root, "L-executor-0001", kv,
           {"type": "build-done", "subject": spec, "branch": branch, "ready_sha": ready},
           {"type": "shipped", "subject": spec, "charter": charter})
     write(root, "L-grader-0001", {"type": "verdict", "subject": spec, "confirmed": True})
@@ -227,5 +235,114 @@ with tempfile.TemporaryDirectory() as d:
         check(False, "an unresolvable sha must not read as covered")
     except tree_cleanup.Undetermined:
         check(True, "★ an unresolvable sha raises Undetermined — it never reads as dead")
+
+# ══════════════════════════════════════════════════════════════════════════
+# L-spec-0440 R9c — `reap_merged_specs`: a second, per-spec entry point that
+# reaps a killed/void/shipped-or-later spec's worktree WITHOUT waiting for
+# its whole charter to close. Each check runs `reap_merged_specs` in a fresh
+# subprocess (its own `DOIT_ROOT`), never the file's own `fold`/`tree_cleanup`
+# import — this file's own module-level `fold.ROOT` is never touched.
+# ══════════════════════════════════════════════════════════════════════════
+
+def repo_for(d, project):
+    r = pathlib.Path(d) / "repos" / project
+    r.mkdir(parents=True)
+    sh(r, "git", "init", "-q", "-b", "main")
+    (r / "seed.txt").write_text("seed\n")
+    sh(r, "git", "add", "-A"); sh(r, "git", "commit", "-qm", "seed")
+    return r
+
+
+def charter_project(d, charter, project):
+    """`reap_merged_specs`/`terminal_worktrees` resolve a spec's repo through
+    its CHARTER's own `project` field (`main()`'s own technique) — never the
+    spec's, so this needs its own event on the charter's subject."""
+    write(d, "L-thinker-0001", {"type": "charter-filed", "subject": charter, "project": project})
+
+
+def run_merged(root, dry_run=False):
+    code = ("import json,sys;"
+            f"sys.path.insert(0, {str(HERE)!r});"
+            "import fold, tree_cleanup;"
+            "evs = fold.read_events();"
+            f"out = tree_cleanup.reap_merged_specs(evs, dry_run={dry_run!r});"
+            "print(json.dumps(out))")
+    env = {k: v for k, v in os.environ.items() if k != "DOIT_PROJECT"} | {"DOIT_ROOT": str(root)}
+    p = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env)
+    assert p.returncode == 0, f"reap_merged_specs subprocess: {p.stderr}"
+    return json.loads(p.stdout.strip().splitlines()[-1])
+
+
+def read_via_fold(d, type_=None):
+    """`fold.read_events()` itself, in a fresh subprocess — the actor it
+    derives is the short role name ("executor"), never the raw filename this
+    file's own `events()` helper uses, and AC12 needs the real one."""
+    code = ("import json,sys;"
+            f"sys.path.insert(0, {str(HERE)!r});"
+            "import fold;"
+            "print(json.dumps(fold.read_events()))")
+    p = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                       env=dict(os.environ, DOIT_ROOT=str(d)))
+    assert p.returncode == 0, p.stderr
+    evs = json.loads(p.stdout)
+    return [e for e in evs if type_ is None or e.get("type") == type_]
+
+
+# ── L0440-AC9 · a spec inside an OPEN charter is reaped early; siblings never judged ──
+with tempfile.TemporaryDirectory() as d:
+    r = repo_for(d, "l0440-proj9")
+    charter_project(d, "L-charter-0440a", "l0440-proj9")
+    b, wt, ready = branchwork(r, d, "L-spec-0001", "x")
+    accepted(d, "L-charter-0440a", "L-spec-0001", b, ready, project="l0440-proj9")
+    write(d, "L-executor-0001", {"type": "spec-written", "subject": "L-spec-0002", "charter": "L-charter-0440a"})
+    write(d, "L-executor-0001", {"type": "spec-written", "subject": "L-spec-0003", "charter": "L-charter-0440a"},
+          {"type": "build-started", "subject": "L-spec-0003", "charter": "L-charter-0440a"})
+    out = run_merged(d)
+    check(out == [b], f"L0440-AC9: A's branch reaped inside an open charter: {out}")
+    check(b not in branches(r) and not pathlib.Path(wt).exists(), "L0440-AC9: worktree+branch gone")
+
+# ── L0440-AC10 · a dirty-worktree sibling is retained; a building sibling is never judged ──
+with tempfile.TemporaryDirectory() as d:
+    r = repo_for(d, "l0440-proj10")
+    charter_project(d, "L-charter-0440b", "l0440-proj10")
+    bA, wtA, readyA = branchwork(r, d, "L-spec-0001", "x")
+    accepted(d, "L-charter-0440b", "L-spec-0001", bA, readyA, project="l0440-proj10")
+    bB, wtB, readyB = branchwork(r, d, "L-spec-0002", "y")
+    (pathlib.Path(wtB) / "dirty.txt").write_text("uncommitted\n")
+    accepted(d, "L-charter-0440b", "L-spec-0002", bB, readyB, project="l0440-proj10")
+    write(d, "L-executor-0001", {"type": "spec-written", "subject": "L-spec-0003", "charter": "L-charter-0440b"},
+          {"type": "build-started", "subject": "L-spec-0003", "charter": "L-charter-0440b"})
+    out = run_merged(d)
+    check(out == [bA], f"L0440-AC10: only A reaped: {out}")
+    check(bB in branches(r) and pathlib.Path(wtB).exists(), "L0440-AC10: B retained, dirty worktree kept")
+
+# ── L0440-AC11 · dry-run reports the same verdict but destroys and ledgers nothing ──
+with tempfile.TemporaryDirectory() as d:
+    r = repo_for(d, "l0440-proj11")
+    charter_project(d, "L-charter-0440c", "l0440-proj11")
+    b, wt, ready = branchwork(r, d, "L-spec-0001", "x")
+    accepted(d, "L-charter-0440c", "L-spec-0001", b, ready, project="l0440-proj11")
+    out = run_merged(d, dry_run=True)
+    check(out == [b], f"L0440-AC11: dry-run reports A as reaped: {out}")
+    check(b in branches(r) and pathlib.Path(wt).exists(), "L0440-AC11: worktree/branch still exist")
+    check(events(d, "tree-reaped") == [], "L0440-AC11: no ledger event on dry-run")
+
+# ── L0440-AC12 · exactly one tree-reaped event, actor executor, reaped+retained shape ──
+with tempfile.TemporaryDirectory() as d:
+    r = repo_for(d, "l0440-proj12")
+    charter_project(d, "L-charter-0440d", "l0440-proj12")
+    bA, wtA, readyA = branchwork(r, d, "L-spec-0001", "x")
+    accepted(d, "L-charter-0440d", "L-spec-0001", bA, readyA, project="l0440-proj12")
+    bB, wtB, readyB = branchwork(r, d, "L-spec-0002", "y")
+    (pathlib.Path(wtB) / "dirty.txt").write_text("uncommitted\n")
+    accepted(d, "L-charter-0440d", "L-spec-0002", bB, readyB, project="l0440-proj12")
+    out = run_merged(d)
+    check(out == [bA], f"L0440-AC12: reaped list: {out}")
+    e = read_via_fold(d, "tree-reaped")
+    check(len(e) == 1, f"L0440-AC12: exactly one tree-reaped event: {e}")
+    check(e[0]["actor"] == "executor", f"L0440-AC12: authoring actor is executor: {e[0]}")
+    check(e[0]["reaped"] == [bA] and e[0]["retained"] == [bB], f"L0440-AC12: shape: {e[0]}")
+    check(any("worktree is not clean" in rr for rr in e[0]["retained_reason"]),
+          f"L0440-AC12: reason names B's dirty worktree: {e[0]['retained_reason']}")
 
 print(f"tree-cleanup: {N} checks pass")
