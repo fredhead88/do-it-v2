@@ -35,7 +35,7 @@ PLANNER_ENDED = "planner-ended"
 # The states a spec is in when it has already committed to a footprint (L-adr-0028).
 HOLDING = ("written", "building")
 # §3.5's count throttle, and the ONE place its number lives.
-THROTTLE_N = 2
+THROTTLE_N = 3   # operator ruling 2026-09-27 ~07:30Z: 2 -> 3
 DRY = "PLANNER WAITING ON: no open charters"
 WAITING_HEAD = "PLANNER WAITING ON"
 
@@ -104,6 +104,17 @@ def sequencing(source, events):
 
 
 # ── landing, the one definition both the after: gate and the throttle use ────
+
+_OUT_OF_FLIGHT = ("accepted", "closed-shipped", "closed-unbuilt", "shipped", "shipped-owed-evidence",
+                  "shipped-owed-due", "killed", "void", "dropped")
+
+
+def _in_flight(cid, specs):
+    """A cut charter still holds a throttle slot while it has no specs yet (still being planned) or any
+    spec not yet merged or dead."""
+    mine = [s for s in specs.values() if s["charter"] == cid]
+    return not mine or any(s["state"] not in _OUT_OF_FLIGHT for s in mine)
+
 
 def _landed(cid, specs, charters):
     """L-charter-0020's `landed`, derived and never stamped: the charter's own state
@@ -237,9 +248,14 @@ def plannable(events, root=None):
     specs, charters, _, by_subject = fold.fold(events)
     escalated = {e.get("subject"): e for e in fold.open_escalations(events)}
     goal_date_of, goal_ids = _goal_context(events)
+    # Operator ruling 2026-09-27 ~07:30Z: only a charter with work still IN FLIGHT counts against the
+    # throttle. A cut charter whose every spec has merged (shipped, owed evidence or checks, accepted)
+    # or is dead no longer holds a slot: owed production checks are the owed sweeper's job, and letting
+    # them hold the intake starved the Planner (14 L1-complete charters held both slots; 0040 refused).
     blocked_count = sorted(cid for cid, c in charters.items()
                            if any(e["type"] == "cut-written" for e in c["evs"])
-                           and not _landed(cid, specs, charters))
+                           and not _landed(cid, specs, charters)
+                           and _in_flight(cid, specs))
 
     ready, waiting = [], []
     for cid in open_charters(events, by_subject):

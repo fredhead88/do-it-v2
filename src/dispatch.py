@@ -141,7 +141,7 @@ def open_spec_writer_spawn(all_ev, subject):
 # (AC10) — a minimal fixture that never reaches a verdict/review carries no
 # other SPEC_DONE label at all, and the wave-order gate is about merge order,
 # not acceptance order.
-SETTLED_STATES = ("accepted", "shipped", "shipped-owed-evidence", "dropped", "closed-unbuilt",
+SETTLED_STATES = ("accepted", "shipped", "shipped-owed-evidence", "shipped-owed-due", "dropped", "closed-unbuilt",
                   "closed-shipped", "killed", "void")
 
 
@@ -208,6 +208,8 @@ def spec_wave(charter, footprint):
         if score > best_score:
             best_score, best_wave = score, wave
     return best_wave if best_score >= 0.5 else None
+# "shipped-owed-due" added by operator ruling 2026-09-27 ~07:30Z: a merged sibling whose post-deploy
+# check is overdue has landed its code; the overdue check is the owed sweeper's, not a reason to hold a wave.
 
 
 def wave_blocker(all_ev, charter, subject, wave):
