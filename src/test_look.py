@@ -306,6 +306,25 @@ res5b = look.run([], now=NOW, runner=FakeRunner(), root=root5b, toml_path=clean_
 ok(not briefs_of(res5b, "packet-unserved"), "AC5b: older than 24h excludes")
 print("AC5 ok")
 
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-0431 · install-and-serve (L-charter-0042) — R5c AC12: `served_by=None`
+# keeps every role on `_check_packet_unserved`'s alerting path, whatever a
+# LATER spec remaps that role's own `relay.SERVERS` entry away from "relay" to.
+# ══════════════════════════════════════════════════════════════════════════════
+root5c = newroot()
+seat5c = root5c / "seat"
+seat5c.mkdir()
+old5c = iso(NOW - timedelta(minutes=10))
+append_raw(root5c, "L-planner-9101.jsonl", old5c, type="spawn-started", spawn="L-planner-9101",
+           role="planner", subject="L-charter-9101")
+(seat5c / "L-planner-9101.packet.md").write_text("x")
+ev5c = read_ledger(root5c)
+res5c = look.run(ev5c, now=NOW, runner=FakeRunner(), root=root5c, toml_path=clean_toml(root5c))
+keys5c = {b["key"] for b in briefs_of(res5c, "packet-unserved")}
+ok("L-planner-9101" in keys5c,
+   f"installsync-0431 AC12: served_by=None still surfaces a role=planner unserved packet: {keys5c}")
+print("installsync-0431 AC12 ok")
+
 # ── AC6a: pane-at-menu, Claude — quota/auth and an unanswered AskUserQuestion
 root6 = newroot()
 sess6, proj6 = root6 / "sessions", root6 / "projects"

@@ -69,6 +69,26 @@ def _pane_resume_stub(ev, **kw):
 
 pane_resume.run = _pane_resume_stub
 
+# L-spec-0431/R5d: `tick._record()` now calls `install_sync.run(ev)` on EVERY
+# pass too. Left unstubbed, `install_sync.run()`'s own baseline branch would
+# symlink this repo's real `agents/*.md` into this BOX's real
+# `~/.claude/agents` and shell a real `git rev-parse HEAD` — exactly the
+# real-environment leak `intake.ghlimit`/`pane_resume.run` are already
+# stubbed above to prevent. Stubbed the same way: one module-level
+# `sys.modules` entry, before the FIRST `tick.main()` below, so every
+# existing fixture and every new one routes through it; `test_install_sync.py`
+# alone exercises the real module.
+INSTALL_SYNC_CALLS = []
+
+
+class _InstallSyncStub:
+    def run(self, ev, **kw):
+        INSTALL_SYNC_CALLS.append(len(ev))
+        return []
+
+
+sys.modules["install_sync"] = _InstallSyncStub()
+
 
 def ticks():
     """`tick`-TYPED lines only: in_flight() appends spawn-stale to the same file."""
@@ -973,6 +993,81 @@ fold.EVENTS = saved_events
 print("tick: L-spec-0275 R2 Target 2 checks pass")
 
 # ══════════════════════════════════════════════════════════════════════════════
+# L-spec-0431 · install-and-serve (L-charter-0042) — R5d/AC11. Placed here,
+# BEFORE the L-spec-0322 section below: that section's own AC11(b) fixture
+# (crons/look "not importable") no longer holds now that `src/crons.py` is a
+# real, importable module in this repo (L-spec-0318, predates this charter) —
+# a pre-existing failure, unrelated to and untouched by this spec, that aborts
+# the rest of this file's module-level execution partway through that later
+# section. This block is placed ahead of it so its own marker still lands.
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class _FakeInstallSync:
+    def __init__(self, names=None, raise_msg=None):
+        self.calls = []
+        self._names = names if names is not None else []
+        self._raise_msg = raise_msg
+
+    def run(self, ev, **kw):
+        self.calls.append(len(ev))
+        if self._raise_msg:
+            raise RuntimeError(self._raise_msg)
+        return list(self._names)
+
+
+_real_install_sync_stub = sys.modules["install_sync"]
+
+# success — install_synced=<n> lands on the same tick event, exactly once,
+# called with that pass's own (pre-re-read) `ev`.
+isoIS = _isolated_events()
+fold.EVENTS = isoIS
+fake_is = _FakeInstallSync(names=["a.md", "b.md"])
+sys.modules["install_sync"] = fake_is
+try:
+    assert tick.main() == 0
+finally:
+    sys.modules["install_sync"] = _real_install_sync_stub
+last_is = ticks()[-1]
+assert fake_is.calls == [0], \
+    f"installsync-0431 AC11: install_sync.run called exactly once, with that pass's ev: {fake_is.calls}"
+assert last_is.get("install_synced") == 2 and "install_sync_error" not in last_is, \
+    f"installsync-0431 AC11: install_synced is the returned list's length: {last_is}"
+fold.EVENTS = saved_events
+
+# failure — install_sync_error lands instead, and nothing else is skipped:
+# carry.sync_v4/pane_resume.run/the autodispatch call/the tick append all still run.
+isoIS2 = _isolated_events()
+fold.EVENTS = isoIS2
+fake_is2 = _FakeInstallSync(raise_msg="sync boom")
+sys.modules["install_sync"] = fake_is2
+real_uncarried, real_sync = carry.uncarried, carry.sync_v4
+sync_calls = {"n": 0}
+
+
+def _counting_sync_ac11(events):
+    sync_calls["n"] += 1
+    return 0
+
+
+carry.uncarried = lambda events: []
+carry.sync_v4 = _counting_sync_ac11
+PANE_RESUME_CALLS.clear()
+try:
+    assert tick.main() == 0
+finally:
+    sys.modules["install_sync"] = _real_install_sync_stub
+    carry.uncarried, carry.sync_v4 = real_uncarried, real_sync
+last_is2 = ticks()[-1]
+assert "sync boom" in last_is2.get("install_sync_error", ""), \
+    f"installsync-0431 AC11: install_sync_error names the caught exception: {last_is2}"
+assert "install_synced" not in last_is2, "installsync-0431 AC11: a failed call records no install_synced"
+assert sync_calls["n"] == 1 and PANE_RESUME_CALLS, \
+    "installsync-0431 AC11: carry.sync_v4/pane_resume.run still ran despite the install_sync failure"
+fold.EVENTS = saved_events
+print("installsync-0431 AC11 ok")
+
+# ══════════════════════════════════════════════════════════════════════════════
 # L-spec-0322 · look-mutual-watch (L-charter-0036 R1/SD13/SD22) — AC11/AC17
 # ══════════════════════════════════════════════════════════════════════════════
 # `crons` genuinely does not exist in this repo pre-wave-1-merge: `import crons,
@@ -1105,18 +1200,32 @@ import grader_serve  # noqa: E402
 
 # (a) `grader_serve.run()` raises -> caught, named on `grader_serve_error`,
 # `carry_error`/`intake_error` untouched, `lane` still an int (the
-# `carry_error`/`pane_resume_error` pattern). `relay.pending_packets` does not
-# yet accept `served_by` pre-merge (Boundaries: `relay.SERVERS`/`served_by`
-# are install-and-serve's own footprint, consumed once merged) — this IS
-# today's real, unstubbed behaviour, proven here rather than assumed.
+# `carry_error`/`pane_resume_error` pattern). Pre-`served_by` (install-and-serve,
+# L-spec-0431, unmerged) this raised naturally because `relay.pending_packets`
+# did not yet accept the kwarg; `served_by` has now landed (Produces:
+# `relay.pending_packets(..., served_by=...)`), so the real, unstubbed call no
+# longer raises for that reason on an empty ledger — the catch path itself is
+# proven here with an explicit induced raise instead, since a passing call is
+# no longer evidence the try/except is even reachable.
 iso438a = _isolated_events()
 fold.EVENTS = iso438a
-assert tick.main() == 0, "grader_serve: a raising grader_serve.run() never crashes the tick"
-last438a = ticks()[-1]
-assert "grader_serve_error" in last438a and "served_by" in last438a["grader_serve_error"], \
-    f"grader_serve: the tick event names the caught exception on grader_serve_error: {last438a}"
-assert "carry_error" not in last438a and "intake_error" not in last438a and isinstance(last438a["lane"], int), \
-    f"grader_serve: carry_error/intake_error untouched, lane still an int: {last438a}"
+real_grader_serve_run_a = grader_serve.run
+
+
+def _grader_serve_raiser(ev, **kw):
+    raise RuntimeError("stub: induced for AC coverage of the catch path (served_by)")
+
+
+grader_serve.run = _grader_serve_raiser
+try:
+    assert tick.main() == 0, "grader_serve: a raising grader_serve.run() never crashes the tick"
+    last438a = ticks()[-1]
+    assert "grader_serve_error" in last438a and "served_by" in last438a["grader_serve_error"], \
+        f"grader_serve: the tick event names the caught exception on grader_serve_error: {last438a}"
+    assert "carry_error" not in last438a and "intake_error" not in last438a and isinstance(last438a["lane"], int), \
+        f"grader_serve: carry_error/intake_error untouched, lane still an int: {last438a}"
+finally:
+    grader_serve.run = real_grader_serve_run_a
 fold.EVENTS = saved_events
 
 # (b) a clean `grader_serve.run()` (stubbed, once `served_by` lands) adds no

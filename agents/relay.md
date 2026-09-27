@@ -28,6 +28,10 @@ fast, on purpose: a packet, a claim, a sub-agent, a stamp, the next packet.
 - `R="${DOIT_ROOT:-$HOME/.do-it}"`. A packet is `$R/seat/<spawn>.packet.md`; its
   command envelope is `$R/seat/<spawn>.cmd.json`.
 - `doit events <subject>` if you need the ledger row a packet claims to answer.
+- The opening prompt's packet list is `relay.SERVERS`-filtered: `up.relay_main`
+  builds it from `relay.pending_packets(events, root, served_by="relay")`, so a
+  role whose `relay.SERVERS[role]` is not `"relay"` never appears on it — it is
+  served by a different mechanism instead.
 
 ## The cycle — one packet at a time, oldest pending packet first
 

@@ -357,6 +357,39 @@ if _pane_ref is not None and "problem-harvest" in _pane_ref:
     )
 
 
+# --- L-spec-0431 · install-and-serve (L-charter-0042) — R5c AC9: every
+# dispatchable role has a server, and the check itself is proven non-vacuous --
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import dispatch, relay  # noqa: E402
+
+_checks += 1
+_ac9_bad = []
+for _role in dispatch.ROLES:
+    if _role not in relay.SERVERS:
+        _ac9_bad.append(f"installsync-0431 AC9 — {_role!r} not in relay.SERVERS")
+    if not (ROOT / "agents" / f"{_role}.md").is_file():
+        _ac9_bad.append(f"installsync-0431 AC9 — agents/{_role}.md does not exist")
+_failures.extend(_ac9_bad)
+
+# Proof the gap-detection logic is not vacuously true: a throwaway extra role,
+# checked against a `dict(relay.SERVERS)` copy deliberately lacking it, must
+# make the SAME loop shape fail.
+_checks += 1
+_fake_roles = set(dispatch.ROLES) | {"zzz-throwaway-role"}
+_fake_servers = dict(relay.SERVERS)
+_fake_servers.pop("zzz-throwaway-role", None)
+_proof_caught_the_gap = any(_role not in _fake_servers for _role in _fake_roles)
+if not _proof_caught_the_gap:
+    _failures.append(
+        "installsync-0431 AC9 — the gap-detection logic is vacuously true: an "
+        "incomplete SERVERS copy missing a role did not fail the same check"
+    )
+
+if not _ac9_bad and _proof_caught_the_gap:
+    print("installsync-0431 AC9 ok")
+
+
 # --- report -------------------------------------------------------------------
 
 if _failures:

@@ -301,6 +301,19 @@ def _record():
         pr_closeout.run(ev, r.get("spec_prs", []))
     except Exception as e:
         intake_errors.append(f"pr_closeout: {e}")
+    # L-spec-0431/L-charter-0042 R5d: the once-per-tick install-sync pass — agent
+    # symlinks, plus any crons.toml row a merged spec's own shipped sha added or
+    # changed. The MIDDLE of the three calls the Plan's Seams name (autodispatch,
+    # install_sync, grader_serve), on this SAME pre-re-read `ev`; its own
+    # try/except never skips anything below it. `grader_serve.run`'s own future
+    # insertion goes immediately after this, still before the re-read below.
+    install_sync_error = None
+    install_synced = None
+    try:
+        import install_sync
+        install_synced = len(install_sync.run(ev))
+    except Exception as e:
+        install_sync_error = f"{e}"
     ev = fold.read_events()
     specs, charters, _, _ = fold.fold(ev)
     reaped = {e.get("subject") for e in ev if e["type"] == "tree-reaped"}
@@ -369,6 +382,10 @@ def _record():
         kv["pane_resume_error"] = pane_resume_error
     if look_error:
         kv["look_error"] = look_error
+    if install_sync_error:
+        kv["install_sync_error"] = install_sync_error
+    elif install_synced is not None:
+        kv["install_synced"] = install_synced
     if grader_serve_error:
         kv["grader_serve_error"] = grader_serve_error
     dispatch.emit(tick_path(), {}, "tick", **kv)
