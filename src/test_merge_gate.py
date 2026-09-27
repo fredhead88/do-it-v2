@@ -32,10 +32,12 @@ def check(name, cond):
     print(("  ok   " if cond else "  FAIL ") + name)
 
 
-def repo():
+def repo(prefix=None):
     """main gains `late.txt` AFTER the branch point — the exact scar shape.
-    Returns (dir, recorded base_sha) — the sha v1's guard would have diffed from."""
-    d = tempfile.mkdtemp()
+    Returns (dir, recorded base_sha) — the sha v1's guard would have diffed from.
+    `prefix`: AC6/AC8 (L-spec-0429) need the repo's own path to control whether
+    it contains the substring `albert-scott` — the freeze refusal's scoping."""
+    d = tempfile.mkdtemp(prefix=prefix) if prefix else tempfile.mkdtemp()
     sh("git", "init", "-q", "-b", "main", d)
     sh("git", "-C", d, "config", "user.email", "t@t"); sh("git", "-C", d, "config", "user.name", "t")
     for f, c in (("keep.txt", "keep"), ("old.txt", "v1"), ("migrations/001.sql", "create")):
@@ -626,6 +628,54 @@ try:
 except mg.Undetermined:
     check("★ out_of_grant raises Undetermined for the same hard stops as gate() "
           "(unresolvable ref)", True)
+
+# ── AC6/AC7/AC8 (L-spec-0429) · the freeze refusal reads through
+# freeze.state() and preserves afc2860's exact conditions/message ───────────
+_FLAG_DEFAULT = mg.freeze.FLAG
+os.environ.pop("DOIT_IGNORE_FREEZE", None)
+
+# AC6 — an `albert-scott`-path repo, flag present, DOIT_IGNORE_FREEZE unset:
+# main_() refuses, message carries the exact flag text, via freeze.state().
+d6, _ = repo(prefix="albert-scott-")
+on(d6, lambda dd: None)
+flag6 = pathlib.Path(TMP) / "flag6"
+flag6.write_text("frozen for Codex #445 — cap 18:00Z")
+mg.freeze.FLAG = flag6
+try:
+    mg.main_(["work", "main"])
+    raised6 = False
+except SystemExit as e:
+    raised6, msg6 = True, str(e)
+check("★ AC6: main_() refuses via freeze.state(), message carries the flag text",
+      raised6 and "frozen for Codex #445 — cap 18:00Z" in msg6)
+
+# AC7 — same frozen albert-scott-path repo; DOIT_IGNORE_FREEZE=1 bypasses the
+# refusal (existing knob preserved unchanged by the refactor).
+os.environ["DOIT_IGNORE_FREEZE"] = "1"
+try:
+    rc7 = mg.main_(["work", "main"])
+    raised7 = False
+except SystemExit:
+    raised7, rc7 = True, None
+check("★ AC7: DOIT_IGNORE_FREEZE=1 bypasses the refusal — an ordinary gate() "
+      "verdict, no SystemExit", not raised7 and rc7 in (0, 1))
+os.environ.pop("DOIT_IGNORE_FREEZE", None)
+
+# AC8 — flag present, but the repo path does NOT contain `albert-scott` (the
+# plain repo()/on() fixtures, unchanged): the existing repo-scoping carve-out
+# is preserved unchanged by the refactor.
+d8, _ = repo()
+on(d8, lambda dd: None)
+mg.freeze.FLAG = flag6           # still exists; only the repo path differs now
+try:
+    rc8 = mg.main_(["work", "main"])
+    raised8 = False
+except SystemExit:
+    raised8, rc8 = True, None
+check("★ AC8: a non-albert-scott repo path bypasses the refusal (existing "
+      "repo-scoping carve-out)", not raised8 and rc8 in (0, 1))
+
+mg.freeze.FLAG = _FLAG_DEFAULT
 
 print(f"merge-gate: {sum(ok)}/{len(ok)} checks pass")
 sys.exit(0 if all(ok) else 1)

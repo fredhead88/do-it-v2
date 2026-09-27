@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """One runnable check on the fold rules. Run: python3 test_fold.py"""
-import json, os, pathlib, shutil, sys, tempfile, types
+import json, os, pathlib, re, shutil, sys, tempfile, types
 from datetime import datetime, timedelta, timezone
 
 TMP = pathlib.Path(tempfile.mkdtemp())
@@ -14,6 +14,7 @@ os.environ["V4_LEDGER_DIR"] = str(TMP / "v4-ledger-absent")
 os.environ["V4_INBOX_DIR"] = str(TMP / "v4-inbox-absent")
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 import fold  # noqa: E402
+import freeze  # noqa: E402
 
 # src/panes.py has landed (L-adr-0044), so every render() below now calls the REAL
 # live_panes() — against the operator's own ~/.claude/sessions unless this is
@@ -35,6 +36,21 @@ def ledger(**files):
             "".join(json.dumps({"v": 1, **e}) + "\n" for e in evs))
     ev = fold.read_events()
     return (ev,) + fold.fold(ev)
+
+
+# ── AC10 (L-spec-0429) · freeze.FLAG resolves under THIS file's own DOIT_ROOT
+# (set above, before `import fold`, which imports `freeze`) — never under the
+# real Path.home() — so a live Thinker freeze on the shared box can never flip
+# this suite's `board.startswith("# board · ")` assertions red. ─────────────
+assert str(freeze.FLAG).startswith(str(TMP)), freeze.FLAG
+assert not str(freeze.FLAG).startswith(str(pathlib.Path.home())), freeze.FLAG
+print("AC10 ok")
+
+# AC5's fourth case (absent) baseline: captured here, before ANY freeze.FLAG
+# override in this file (freeze.FLAG still points under TMP, to a file that
+# does not exist — a fresh tempdir), so later cases can diff against an
+# untouched render().
+B_BEFORE_FREEZE = fold.render(*ledger())
 
 
 S, C = "L-spec-0142", "L-charter-0031"
@@ -2701,3 +2717,66 @@ for drop424c in ("pane", "spawn_ids"):
     assert fold.check_append(dropped424c, "tick") is not None, \
         f"★ AC8: dropping {drop424c} must refuse actor tick"
 print("AC8 ok")
+
+# ── AC5 (L-spec-0429) · fold.render's first line reflects freeze.state(),
+# following the file's existing `fold.SESSIONS = TMP / "sessions"` override
+# pattern for `fold.freeze.FLAG` ─────────────────────────────────────────────
+_FLAG429 = TMP / "freeze-flag-429"
+
+
+def _render_with_flag429(text):
+    _FLAG429.write_text(text)
+    fold.freeze.FLAG = _FLAG429
+    return fold.render(*ledger())
+
+
+b429_cap = _render_with_flag429("frozen — cap 18:00Z")
+l429_cap = b429_cap.splitlines()
+assert l429_cap[0] == "MERGE FREEZE (building allowed) until 18:00Z · frozen — cap 18:00Z", l429_cap[0]
+assert l429_cap[1] == "", l429_cap[1]
+assert l429_cap[2].startswith("# board · "), l429_cap[2]
+
+b429_nocap = _render_with_flag429("frozen for Codex #445")
+l429_nocap = b429_nocap.splitlines()
+assert l429_nocap[0] == "MERGE FREEZE (building allowed) until lifted by the Thinker · frozen for Codex #445", \
+    l429_nocap[0]
+assert l429_nocap[1] == ""
+assert l429_nocap[2].startswith("# board · ")
+
+_FLAG429.unlink()
+fold.freeze.FLAG = _FLAG429                      # now points at an absent path
+b429_absent = fold.render(*ledger())
+assert b429_absent.splitlines()[0] == B_BEFORE_FREEZE.splitlines()[0], \
+    (b429_absent.splitlines()[0], B_BEFORE_FREEZE.splitlines()[0])
+
+b429_nl = _render_with_flag429("a\n## NEEDS YOU")
+l429_nl = b429_nl.splitlines()
+assert l429_nl[0] == "MERGE FREEZE (building allowed) until lifted by the Thinker · a ## NEEDS YOU", l429_nl[0]
+assert l429_nl[1] == ""
+assert l429_nl[2].startswith("# board · ")
+assert sum(1 for l in l429_nl if l.startswith("MERGE FREEZE")) == 1, \
+    "the embedded newline must not forge a second physical freeze line"
+
+fold.freeze.FLAG = freeze.FLAG                   # restore the module default
+print("AC5 ok")
+
+# ── AC9 (L-spec-0429) · no file outside this spec's Writes: gains a new
+# reference to the flag's literal path, to DOIT_IGNORE_FREEZE, or to
+# `import freeze` ────────────────────────────────────────────────────────────
+_WRITES429 = {"src/freeze.py", "src/test_freeze.py", "src/merge_gate.py",
+              "src/test_merge_gate.py", "src/fold.py", "src/test_fold.py"}
+_SRC429 = pathlib.Path(__file__).parent
+_FLAGPAT429 = re.compile(r"master-frozen-for-codex|DOIT_IGNORE_FREEZE")
+_IMPPAT429 = re.compile(r"^import freeze", re.MULTILINE)
+_flag_hits429, _imp_hits429 = set(), set()
+for p429 in sorted(_SRC429.glob("*.py")):
+    t429 = p429.read_text()
+    if _FLAGPAT429.search(t429):
+        _flag_hits429.add(f"src/{p429.name}")
+    if _IMPPAT429.search(t429):
+        _imp_hits429.add(f"src/{p429.name}")
+assert _flag_hits429 <= _WRITES429, _flag_hits429 - _WRITES429
+assert {"src/freeze.py", "src/merge_gate.py"} <= _flag_hits429, _flag_hits429
+assert _imp_hits429 <= _WRITES429, _imp_hits429 - _WRITES429
+assert {"src/fold.py", "src/merge_gate.py"} <= _imp_hits429, _imp_hits429
+print("AC9 ok")
