@@ -71,6 +71,10 @@ model = "claude-haiku-4-5-20251001"
 backend = "seat"
 model = "claude-sonnet-5"
 
+[contracts.owed-sweeper]
+backend = "seat"
+model = "claude-sonnet-5"
+
 # [weights] — retro step 9 (operator ask, 2026-09-15). Same shape and ratios as
 # models.example.toml: see that file's comment for what these mean and why
 # they are the same four numbers for every model named here.

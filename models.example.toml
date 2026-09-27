@@ -95,6 +95,10 @@ model = "claude-haiku-4-5-20251001"
 backend = "seat"
 model = "claude-sonnet-5"
 
+[contracts.owed-sweeper]
+backend = "seat"
+model = "claude-sonnet-5"
+
 # [weights] — retro step 9 (operator ask, 2026-09-15). Price ratios per model,
 # relative to input=1.0, that fold.py's SPEND block and `doit spend` use to
 # render an input-equivalent WEIGHTED TOKEN total (never a dollar figure —

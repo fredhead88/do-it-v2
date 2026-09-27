@@ -142,7 +142,11 @@ class Ctx:
         # the goal, and the charter SET comes from every `charter-filed` event on the
         # ledger, not from this one subject's own stream.
         charter_set = (getattr(a, "role", None) == "plan-auditor" and getattr(a, "stage", None) == "charter-set")
-        if not self.evs and not spec_writer_round_one and not charter_set:
+        # L-charter-0038 R1 / L-spec-0387: an owed-sweeper subject is a sweep id,
+        # never a spec — it legitimately carries no prior events of its own.
+        # `content/<subject>.md` (the manifest) is the packet's real input.
+        owed_sweeper = getattr(a, "role", None) == "owed-sweeper"
+        if not self.evs and not spec_writer_round_one and not charter_set and not owed_sweeper:
             # The one other legitimate exception is spec-writer round one: the spec id
             # was just allocated and nothing has been written about it yet, so the slot
             # IS the input (D7 — the Executor authoring a brief's spec has no other).
@@ -1115,9 +1119,97 @@ def p_charter_reviewer(c):
     ]
 
 
+_AC_ANY = re.compile(r"^\s*\**AC\d+\s*\[")
+
+
+def parse_sweep_manifest(path):
+    """The batch manifest an `owed-sweeper` spawn reads (L-charter-0038 R1 /
+    L-spec-0387 Assumptions §8 — pinned here, since the manifest's WRITER,
+    `owed-sweep-driver`, is a sibling not yet specced): line 1 `# <sweep-id>`;
+    blank; `project: <name>`; `cwd: <absolute path>`; blank; `## Rows`; a
+    fenced ```json array of 1-8 row objects, each `{"spec", "criterion",
+    "declared_src", "line", "spec_path"}`. Every row's `spec_path`, resolved,
+    must equal `dispatch.spec_path(row["spec"])` exactly (fix 6) — a lazy,
+    function-scoped import, matching this file's existing `import
+    fold`/`import validate` convention. A row that fails that check dies
+    naming the offending spec. Returns `{"project", "cwd", "rows"}`, rows
+    exactly as written (never mutated)."""
+    p = pathlib.Path(path)
+    if not p.is_file():
+        die(f"no sweep manifest at {path}")
+    raw = p.read_text()
+    m = re.search(r"^project:\s*(.+)$", raw, re.M)
+    if not m:
+        die(f"{path}: no 'project:' line")
+    project = m.group(1).strip()
+    m = re.search(r"^cwd:\s*(.+)$", raw, re.M)
+    if not m:
+        die(f"{path}: no 'cwd:' line")
+    cwd = m.group(1).strip()
+    sec = section(raw, "Rows")
+    if not sec:
+        die(f"{path}: no '## Rows' section")
+    m = re.search(r"```json\s*\n(.*?)\n```", sec, re.S)
+    if not m:
+        die(f"{path}: no fenced ```json block under '## Rows'")
+    import json
+    try:
+        rows = json.loads(m.group(1))
+    except ValueError as e:
+        die(f"{path}: malformed JSON in the Rows block ({e})")
+    if not isinstance(rows, list) or not (1 <= len(rows) <= 8):
+        die(f"{path}: the Rows block must be a JSON array of 1-8 objects")
+    import dispatch
+    for row in rows:
+        want = dispatch.spec_path(row["spec"])
+        got = pathlib.Path(row["spec_path"]).resolve()
+        if got != want:
+            die(f"{path}: row {row['spec']}'s spec_path {row['spec_path']!r} does not resolve "
+                f"to dispatch.spec_path({row['spec']!r}) == {want}")
+    return {"project": project, "cwd": cwd, "rows": rows}
+
+
+def criterion_block(body, crit_id):
+    """One acceptance criterion's FULL block, verbatim — from its `^\\s*{crit_id}
+    [` line to (not including) the next `^\\s*AC\\d+ [` line, or the Acceptance
+    section's end — so a continuation-line `review_path:` rides along (fix 6,
+    the sweeper's own AC1 precedent). `None` when `crit_id` is absent."""
+    sec = section(body, "Acceptance")
+    lines = sec.splitlines() if sec else body.splitlines()
+    start_pat = re.compile(rf"^\s*\**{re.escape(crit_id)}\s*\[")
+    start = next((i for i in range(len(lines)) if start_pat.match(lines[i])), None)
+    if start is None:
+        return None
+    end = next((i for i in range(start + 1, len(lines)) if _AC_ANY.match(lines[i])), len(lines))
+    return "\n".join(lines[start:end]).strip()
+
+
+def p_owed_sweeper(c):
+    """L-charter-0038 R1 / L-spec-0387 — the read-only sweep packet: blind to any
+    card, grade or audit reasoning (SD5), so this carries only the batch's
+    project/cwd and, per row, the criterion's OWN full block, verbatim, from
+    that row's own spec body — never one line, so a continuation-line
+    `review_path:` rides in."""
+    manifest = parse_sweep_manifest(CONTENT / f"{c.a.subject}.md")
+    L = [f"1. Batch `{c.a.subject}` — project `{manifest['project']}`, cwd `{manifest['cwd']}`.",
+         "2. Every due check in this batch, each the criterion's own full block, verbatim, "
+         "from its own spec — nothing else:"]
+    for row in manifest["rows"]:
+        sp = pathlib.Path(row["spec_path"])
+        if not sp.is_file():
+            die(f"no spec file at {row['spec_path']} for {row['spec']}")
+        block = criterion_block(sp.read_text(), row["criterion"])
+        if block is None:
+            die(f"{row['spec']}'s {row['criterion']} is not in {row['spec_path']}")
+        L += [f"   spec {row['spec']} — criterion {row['criterion']} "
+              f"(declared: {row['declared_src']} @ {row['line']}):"]
+        L += [f"     {ln}" for ln in block.splitlines()]
+    return L
+
+
 BUILD = {"spec-auditor": p_spec_auditor, "spec-writer": p_spec_writer, "builder": p_builder,
          "grader": p_grader, "reviewer": p_reviewer, "charter-reviewer": p_charter_reviewer,
-         "plan-auditor": p_plan_auditor}
+         "plan-auditor": p_plan_auditor, "owed-sweeper": p_owed_sweeper}
 
 
 # ──────────────────────────── Blindness, as a check ────────────────────────────
@@ -1247,6 +1339,27 @@ def strip(c, role):
             for name in ("Rationale", "Why"):
                 sec = section(body, name)
                 out += [(label, l) for l in sec.splitlines() if len(l.strip()) > 50] if sec else []
+        return out
+    if role == "owed-sweeper":
+        # SD5 ("blind to card/grade"), mechanically enforced (fix 4): every row's
+        # OWN spec's card prose and grader/audit reasoning — read off that row's
+        # OWN event stream (`s["evs"]`), never `c.evs` (empty per the Ctx exemption).
+        out = []
+        manifest = parse_sweep_manifest(CONTENT / f"{c.a.subject}.md")
+        for row in manifest["rows"]:
+            s = c.specs.get(row["spec"])
+            if s is None:
+                continue
+            evs = s["evs"]
+            bd = next((e for e in reversed(evs) if e["type"] == "build-done"), None)
+            if bd:
+                card = pathlib.Path(bd.get("card") or "/")
+                if card.is_file():
+                    out += [(f"a row spec's card ({row['spec']})", l) for l in long_lines(card, 30)]
+            out += [(f"a row spec's grader reason ({row['spec']})", e.get("why"))
+                    for e in evs if e["type"] == "rejected-criterion"]
+            out += [(f"a row spec's audit finding ({row['spec']})", e.get("finding"))
+                    for e in evs if e["type"] == "audit-finding"]
         return out
     return []
 
