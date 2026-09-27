@@ -190,6 +190,28 @@ grade = lambda vs, **kw: {"verdicts": vs, "matches_intent": "yes", "card_ok": "y
                           "checkers": [{"id": "gate", "version": "1", "coverage_note": "n1", "result": "pass"}], **kw}
 met, unmet = {"ac": "AC1", "verdict": "met", "reason": "r"}, {"ac": "AC2", "verdict": "unmet", "reason": "no evidence"}
 rejects = lambda: fold.fold(fold.read_events())[0]["L-spec-0001"]["rejects"]
+
+
+def _lift_cap435(subject="L-spec-0001", _n=[0]):
+    """L-spec-0435: this narrative re-dispatches role=grader on the same
+    subject far past the new cap:3 — exactly what a real operator's regrade
+    decision is for, so the fixture supplies one before every dispatch from
+    the 4th on, rather than being quietly exempted from a rule it never tests.
+    Stamped strictly after the subject's own newest event (never bare `now()`,
+    whose 1-second resolution a fast-running suite can tie against the
+    just-written spawn-started it must outrank)."""
+    _n[0] += 1
+    newest = max((fold.ts(e.get("ts")) for e in fold.read_events() if e.get("subject") == subject),
+                default=_dt.now(_timezone.utc))
+    ts = (newest + _timedelta(seconds=5)).isoformat(timespec="seconds")
+    # L-<actor>-<token>.jsonl, no embedded hyphen in <token>: fold.read_events()
+    # derives the actor by splitting the stem on "-" and joining every middle
+    # part — an extra hyphen here reads back as actor "operator-cap435lift0N",
+    # never "operator", and the decision's actor-scoped check silently misses it.
+    f = TMP / "events" / f"L-operator-cap435lift{_n[0]}.jsonl"
+    f.write_text(json.dumps({"v": 1, "ts": ts, "type": "decision", "subject": subject, "regrade": "yes"}) + "\n")
+
+
 code, types, evs, _ = spawn("grader", out=grade([met, unmet]))
 assert types == ["verdict", "rejected-criterion", "checker-coverage-change", "spawn-done"], types
 assert evs[0]["confirmed"] is False and evs[1]["criterion"] == "AC2" and rejects() == 1
@@ -198,10 +220,13 @@ assert evs[0]["confirmed"] is False and "gate-infra" in types and "criterion-cle
 assert "checker-coverage-change" not in types, "same coverage note: no change event"
 code, types, evs, _ = spawn("grader", out=grade([met, {"ac": "AC2", "verdict": "met", "reason": "now evidenced"}]))
 assert "criterion-cleared" in types and evs[0]["confirmed"] is True and rejects() == 0, "a re-grade that names it met clears it"
+_lift_cap435()
 code, types, evs, _ = spawn("grader", out=grade([met, {"ac": "DONE-COND", "verdict": "unmet", "reason": "residue"}]))
 assert rejects() == 1
+_lift_cap435()
 code, types, evs, _ = spawn("grader", out=grade([met], card_ok="no"))
 assert "criterion-cleared" not in types and rejects() == 1, "an unconfirmed verdict clears nothing it did not test"
+_lift_cap435()
 code, types, evs, _ = spawn("grader", out=grade([met]))
 assert [e["criterion"] for e in evs if e["type"] == "criterion-cleared"] == ["DONE-COND"] and rejects() == 0, \
     "a confirmed verdict clears a standing rejection the packet no longer names (first real chain)"
@@ -213,9 +238,11 @@ assert [e["criterion"] for e in evs if e["type"] == "criterion-cleared"] == ["DO
 # that's the fold's job); it only stops hiding which rows those were.
 cannot_assess = {"ac": "AC7", "verdict": "cannot-assess", "reason": "post-merge check-run does not exist yet",
                  "reason_code": "criterion-unevaluable-from-packet"}
+_lift_cap435()
 code, types, evs, _ = spawn("grader", out=grade([met, cannot_assess]))
 assert types[0] == "verdict" and evs[0]["confirmed"] is False and evs[0]["cannot_assess"] == ["AC7"], evs[0]
 assert "rejected-criterion" not in types, "cannot-assess is not unmet — no rejected-criterion for it"
+_lift_cap435()
 code, types, evs, _ = spawn("grader", out=grade([met]))
 assert evs[0]["cannot_assess"] == [], "an all-met grade carries an empty list, not an absent field"
 
@@ -533,6 +560,7 @@ assert code == 0 and ev[-1]["first_on_model"] is False, "the second run on the s
 code, ev = run("research", rp6, seat=True)
 assert code == 1 and [e["type"] for e in ev] == ["spawn-failed"] and "contradicts" in ev[-1]["why"], \
     "a flag that disagrees with the root's map is refused before a start event or a spend"
+_lift_cap435()
 code, types, evs, cmd = spawn("grader", out=grade([met]))
 assert code == 0 and cmd[cmd.index("--model") + 1] == "claude-sonnet-5", "the map's model rides the -p line"
 assert evs[-1]["backend"] == "claude-p" and evs[-1]["model_requested"] == "claude-sonnet-5" and evs[-1]["model_used"] == "m" \
@@ -1996,3 +2024,228 @@ finally:
 
 print(f"dispatch: {N} spawns mocked, every check fired · +L-spec-0276 "
       "(defaults-and-dispatch-order: AC10-AC15)")
+
+# ── L-spec-0435 (R10(b)/(c)) · dispatch.grading_budget, pure, plus the
+#    role=grader pre-spend branch it gates ─────────────────────────────────────
+_GB_BASE = _dt(2026, 1, 1, tzinfo=_timezone.utc)
+
+
+def GT(mins):
+    """A fixture timestamp `mins` minutes off a fixed base — used only by the
+    grading_budget() pure-function tests below, which never compare against a
+    real dispatch.main()-emitted ts, so any monotonic base will do."""
+    return (_GB_BASE + _timedelta(minutes=mins)).isoformat(timespec="seconds")
+
+
+def FT(mins):
+    """A fixture timestamp `mins` real-clock minutes from now — gives a
+    hand-written ledger fixture a well-ordered position relative to the REAL
+    now() a live dispatch.main() drive stamps its own events with."""
+    return (_dt.now(_timezone.utc) + _timedelta(minutes=mins)).isoformat(timespec="seconds")
+
+
+def gb(actor, type_, subject, ts, **kv):
+    """One event dict, shaped exactly as fold.read_events() hands grading_budget
+    one (`actor` present, `ts` an ISO string) — grading_budget takes a plain
+    list, so no ledger file is needed for these."""
+    return {"type": type_, "actor": actor, "subject": subject, "ts": ts, **kv}
+
+
+def raw_ev(actor, tag, type_, subject, ts, **kv):
+    """One raw ledger line, written directly (bypassing dispatch.emit, which
+    always stamps ts=now()) — these tests need exact control over a fixture
+    event's ts to prove the freshness comparisons the budget check makes.
+    `actor` is read back from the filename by fold.read_events() (D90), same
+    as every real event."""
+    f = TMP / "events" / f"L-{actor}-{tag}.jsonl"
+    with open(f, "a") as fh:
+        fh.write(json.dumps({"v": 1, "ts": ts, "type": type_, "subject": subject, **kv}) + "\n")
+    return f
+
+
+# AC3: no rejects, at most 2 grader spawn-started rows -> None.
+ac3_subj435 = "L-spec-9403"
+ev3_435 = [gb("grader", "spawn-started", ac3_subj435, GT(0), role="grader"),
+           gb("grader", "spawn-started", ac3_subj435, GT(1), role="grader")]
+assert dispatch.grading_budget(ev3_435, ac3_subj435) is None, "AC3: <=2 grader spawns, no rejects -> None"
+N += 1
+
+# AC4: two rejected-criterion(AC2) rows, different why, no clearance, no reset
+# newer than the 2nd -> repeat-rejection:AC2 regardless of the why differing.
+ac4_subj435 = "L-spec-9404"
+ev4_435 = [gb("grader", "rejected-criterion", ac4_subj435, GT(0), criterion="AC2",
+              why="Evidence missing for the retry path"),
+           gb("grader", "rejected-criterion", ac4_subj435, GT(10), criterion="AC2",
+              why="the retry-path evidence isn't attached")]
+assert dispatch.grading_budget(ev4_435, ac4_subj435) == "repeat-rejection:AC2", ev4_435
+N += 1
+
+# AC5: a build-done (a) strictly between, (b) strictly after -> unchanged in
+# BOTH cases; a fresh spec-written, or ANY thinker decision (regrade or not),
+# after the 2nd resets it; a builder's regrade=yes decision (wrong actor) does
+# not.
+ac5_subj435 = "L-spec-9405"
+base5_435 = [gb("grader", "rejected-criterion", ac5_subj435, GT(0), criterion="AC2", why="w1"),
+             gb("grader", "rejected-criterion", ac5_subj435, GT(10), criterion="AC2", why="w2")]
+ev5a_435 = [base5_435[0], gb("builder", "build-done", ac5_subj435, GT(5), status="DONE"), base5_435[1]]
+assert dispatch.grading_budget(ev5a_435, ac5_subj435) == "repeat-rejection:AC2", "AC5a: build-done between"
+ev5b_435 = base5_435 + [gb("builder", "build-done", ac5_subj435, GT(20), status="DONE")]
+assert dispatch.grading_budget(ev5b_435, ac5_subj435) == "repeat-rejection:AC2", "AC5b: build-done after"
+ev5c_435 = base5_435 + [gb("spec-writer", "spec-written", ac5_subj435, GT(20))]
+assert dispatch.grading_budget(ev5c_435, ac5_subj435) is None, "AC5: a fresh spec-written after the 2nd resets it"
+ev5d_435 = base5_435 + [gb("thinker", "decision", ac5_subj435, GT(20))]
+assert dispatch.grading_budget(ev5d_435, ac5_subj435) is None, "AC5: any thinker decision resets it, regrade or not"
+ev5e_435 = base5_435 + [gb("builder", "decision", ac5_subj435, GT(20), regrade="yes")]
+assert dispatch.grading_budget(ev5e_435, ac5_subj435) == "repeat-rejection:AC2", \
+    "AC5: a builder's decision (wrong actor) never resets it"
+N += 5
+
+# AC6: L-spec-0173's real shape, replayed verbatim — three grader verdict
+# rounds, each its own build-done, why distinct every round, no
+# criterion-cleared ever -> repeat-rejection:AC1 after the third round (the
+# pre-rewrite why-text-matching definition would return None here).
+ac6_subj435 = "L-spec-9406"
+ev6_435, t6_435 = [], 0
+for why in ("round one's own reason", "a completely different wording", "yet another distinct reason"):
+    ev6_435.append(gb("builder", "build-done", ac6_subj435, GT(t6_435), status="DONE")); t6_435 += 1
+    ev6_435.append(gb("grader", "spawn-started", ac6_subj435, GT(t6_435), role="grader")); t6_435 += 1
+    ev6_435.append(gb("grader", "verdict", ac6_subj435, GT(t6_435), confirmed=False)); t6_435 += 1
+    ev6_435.append(gb("grader", "rejected-criterion", ac6_subj435, GT(t6_435), criterion="AC1", why=why))
+    t6_435 += 1
+assert dispatch.grading_budget(ev6_435, ac6_subj435) == "repeat-rejection:AC1", ev6_435
+N += 1
+
+# AC7: exactly 3 grader spawn-started rows, no qualifying regrade -> cap:3;
+# operator regrade=yes newer than the 3rd -> None; builder regrade=yes (wrong
+# actor), or a thinker decision with no regrade field, never lifts it.
+ac7_subj435 = "L-spec-9407"
+ev7_435 = [gb("grader", "spawn-started", ac7_subj435, GT(i), role="grader") for i in range(3)]
+assert dispatch.grading_budget(ev7_435, ac7_subj435) == "cap:3", "AC7: 3 prior runs, no regrade -> cap:3"
+assert dispatch.grading_budget(ev7_435 + [gb("operator", "decision", ac7_subj435, GT(10), regrade="yes")],
+                               ac7_subj435) is None, "AC7: a qualifying operator regrade lifts it"
+assert dispatch.grading_budget(ev7_435 + [gb("builder", "decision", ac7_subj435, GT(10), regrade="yes")],
+                               ac7_subj435) == "cap:3", "AC7: wrong actor never lifts it"
+assert dispatch.grading_budget(ev7_435 + [gb("thinker", "decision", ac7_subj435, GT(10))],
+                               ac7_subj435) == "cap:3", "AC7: a decision with no regrade field never lifts it"
+N += 4
+
+# AC8: 4 grader spawn-started rows (a regrade already permitted the 4th), no
+# regrade newer than the 4th -> cap:4 — the rule reapplies past the literal
+# fourth run.
+ac8_subj435 = "L-spec-9408"
+ev8_435 = [gb("grader", "spawn-started", ac8_subj435, GT(i), role="grader") for i in range(3)]
+ev8_435.append(gb("operator", "decision", ac8_subj435, GT(3), regrade="yes"))
+ev8_435.append(gb("grader", "spawn-started", ac8_subj435, GT(4), role="grader"))
+assert dispatch.grading_budget(ev8_435, ac8_subj435) == "cap:4", ev8_435
+N += 1
+
+
+def _boom435(*a, **k):
+    raise AssertionError("a backend must not be entered for a refused grading-budget dispatch")
+
+
+def drive_grader435(subject):
+    """Drives dispatch.main() for role=grader with every backend monkeypatched
+    to explode if entered (AC9) — the refusal this proves must land strictly
+    before any of them is ever called. Returns (exit code, this drive's own new
+    ledger file's parsed events, that file's path)."""
+    real = dispatch.run_claude, dispatch.run_seat, dispatch.run_codex
+    dispatch.run_claude = dispatch.run_seat = dispatch.run_codex = _boom435
+    a = argparse.Namespace(role="grader", subject=subject, packet=str(PK), path=None,
+                          cwd=str(REPO), charter=None, project="t", mcp_config=None,
+                          timeout=None, max_usd=None)
+    try:
+        dispatch.main(a)
+        code = 0
+    except SystemExit as e:
+        code = e.code
+    finally:
+        dispatch.run_claude, dispatch.run_seat, dispatch.run_codex = real
+    f = max((TMP / "events").glob("L-grader-[0-9]*.jsonl"))
+    return code, [json.loads(l) for l in f.read_text().splitlines()], f
+
+
+# AC9: a subject with exactly 3 prior grader spawn-started rows, no qualifying
+# regrade -> main() raises SystemExit before any backend, THIS spawn's own
+# newly-allocated ledger file carries exactly [escalation-blocking,
+# spawn-failed], reason=="cap:3", and no other file gains a new event.
+AC9_SUBJ435 = "L-spec-9409"
+_fx9a, _fx9b, _fx9c = (raw_ev("grader", f"fx9409{s}", "spawn-started", AC9_SUBJ435, FT(o), role="grader")
+                       for s, o in (("a", -500), ("b", -499), ("c", -498)))
+_pre9_435 = {f: f.read_text() for f in (_fx9a, _fx9b, _fx9c)}
+code9_435, raw9_435, f9_435 = drive_grader435(AC9_SUBJ435)
+assert code9_435 == 1, raw9_435
+assert [e["type"] for e in raw9_435] == ["escalation-blocking", "spawn-failed"], raw9_435
+assert raw9_435[1]["reason"] == "cap:3", raw9_435[1]
+for f, content in _pre9_435.items():
+    assert f.read_text() == content, f"AC9: {f} must gain no new event"
+N += 1
+
+# AC10: the escalation-blocking's own shape — kind, reason, default, revert, a
+# deadline 23h55m-24h05m after its own ts, actor==grader (from its filename),
+# and fold.escalation_ok() true.
+_full9_435 = fold.read_events()
+e10_435 = next(e for e in _full9_435 if e.get("subject") == AC9_SUBJ435 and e["type"] == "escalation-blocking")
+assert e10_435["actor"] == "grader", e10_435
+assert e10_435["kind"] == "grading-budget" and e10_435["reason"] == "cap:3", e10_435
+assert e10_435["default"] == "no further grade; rework with the standing reasons, or the Thinker amends the spec"
+assert e10_435["revert"] == "a decision regrade=yes"
+_delta_h_435 = (fold.ts(e10_435["deadline"]) - fold.ts(e10_435["ts"])).total_seconds() / 3600
+assert 23 + 55 / 60 <= _delta_h_435 <= 24 + 5 / 60, _delta_h_435
+assert fold.escalation_ok(e10_435), e10_435
+N += 1
+
+# AC11: a SECOND drive on the SAME subject (still cap:3, no qualifying
+# decision) — its own second ledger file appends a second spawn-failed but NO
+# second escalation-blocking; reading the FULL event set (both files
+# together), exactly one escalation-blocking{kind, reason} exists.
+code11_435, raw11_435, f11_435 = drive_grader435(AC9_SUBJ435)
+assert code11_435 == 1 and [e["type"] for e in raw11_435] == ["spawn-failed"], raw11_435
+assert raw11_435[0]["reason"] == "cap:3", raw11_435[0]
+_full11_435 = fold.read_events()
+_esc11_435 = [e for e in _full11_435 if e.get("subject") == AC9_SUBJ435 and e["type"] == "escalation-blocking"
+             and e.get("kind") == "grading-budget" and e.get("reason") == "cap:3"]
+assert len(_esc11_435) == 1, "AC11: exactly one escalation-blocking across both drives"
+N += 1
+
+# AC12: the AC7 "lifted" fixture (a qualifying regrade already permits a 4th
+# run) driven through main() with a normal successful grader response — the
+# spawn completes (spawn-started/verdict/spawn-done), code 0, proving the
+# check does not misfire once the condition is genuinely cleared.
+AC12_SUBJ435 = "L-spec-9412"
+for _s, _o in (("a", -500), ("b", -499), ("c", -498)):
+    raw_ev("grader", f"fx9412{_s}", "spawn-started", AC12_SUBJ435, FT(_o), role="grader")
+raw_ev("operator", "fx9412d", "decision", AC12_SUBJ435, FT(-100), regrade="yes")
+code12_435, types12_435, evs12_435, _ = spawn("grader", out=grade([met]), subject=AC12_SUBJ435)
+assert code12_435 == 0, evs12_435
+assert "verdict" in types12_435 and "spawn-done" in types12_435, types12_435
+assert "spawn-started" in [e["type"] for e in spawn.raw], spawn.raw
+N += 1
+
+# AC14: the AC9 standing escalation-blocking{cap:3}, resolved by an unrelated
+# decision (regrade=no — never lifts the cap itself) newer than it, then a
+# build-done — grading_budget still returns cap:3, AND this THIRD drive's own
+# ledger file carries a SECOND, FRESH escalation-blocking{cap:3} (not
+# suppressed by the first, now-resolved one) — a resolved-but-not-fixed block
+# re-surfaces rather than wedging silent.
+_dec_ts_435 = (fold.ts(e10_435["ts"]) + _timedelta(minutes=5)).isoformat(timespec="seconds")
+_bd_ts_435 = (fold.ts(e10_435["ts"]) + _timedelta(minutes=6)).isoformat(timespec="seconds")
+raw_ev("operator", "fx9414a", "decision", AC9_SUBJ435, _dec_ts_435, regrade="no")
+raw_ev("builder", "fx9414b", "build-done", AC9_SUBJ435, _bd_ts_435, status="DONE")
+code14_435, raw14_435, f14_435 = drive_grader435(AC9_SUBJ435)
+assert code14_435 == 1 and [e["type"] for e in raw14_435] == ["escalation-blocking", "spawn-failed"], raw14_435
+assert raw14_435[0]["kind"] == "grading-budget" and raw14_435[0]["reason"] == "cap:3", raw14_435[0]
+assert raw14_435[1]["reason"] == "cap:3", raw14_435[1]
+N += 1
+
+# AC13: agents/executor.md's spawn-failed/spawn-stale row states both reset
+# paths, verbatim in substance, each naming its own — never the other's.
+_exec_md_435 = (pathlib.Path(__file__).parent.parent / "agents" / "executor.md").read_text()
+_row_435 = next(l for l in _exec_md_435.splitlines() if "spawn-stale" in l and "unserved, timeout" in l)
+assert "repeat-rejection:" in _row_435 and "cap:" in _row_435, _row_435
+assert "fresh `spec-written`" in _row_435 and "thinker`/`operator`" in _row_435 and \
+    "regrade or not" in _row_435, "AC13: repeat-rejection's reset path, stated"
+assert 'decision{regrade: "yes"}' in _row_435, "AC13: cap's own, narrower reset path, stated"
+N += 1
+
+print(f"dispatch: +L-spec-0435 (grading-spend: AC3-AC14)")
