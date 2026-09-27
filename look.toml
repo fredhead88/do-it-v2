@@ -13,6 +13,7 @@ disk_high_clear = 85
 tmp_climbing_slope = 10          # pts/hour, informational — the fill-projection below is what fires
 tmp_climbing_full_within_h = 2
 pass_budget_s = 90               # AC18's hard per-pass wall-clock budget
+tmp_user_quota_pct = 80          # L-spec-0440 R9a/R9f: reap_tmp.user_quota()'s configured-fallback pct
 
 [[prod]]
 project = "albert-scott"
