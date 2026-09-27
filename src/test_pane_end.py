@@ -245,6 +245,11 @@ ended, reason = pane_end.check_and_end(CHARTER, HANDOVER, root=B,
 check(ended is True, f"the real import of {pane_end.RELAY_MODULE} reaches the green path: {reason}")
 check(len(kill2.calls) == 1 and kill2.calls[0][0] == (777, _signal.SIGTERM),
       f"one SIGTERM to the resolved pid, got {kill2.calls}")
+# Cleanup: undo the stub shadow so any LATER fresh `import relay` in this
+# process (grader_serve.py's own module-level import, exercised below) sees
+# the real module and its real `TERMINAL` constant, not this stub.
+sys.path.remove(str(stub))
+sys.modules.pop(pane_end.RELAY_MODULE, None)
 
 # ───── a resolved pid is a precondition too: no pid, no event and no signal ─────
 ledger(B, **{"L-planner-0001.jsonl": l1()})
@@ -448,6 +453,94 @@ check(code_r == 0, f"AC8(c): nothing unclaimed and supervised -> ends: {code_r}"
 import signal as _signal3  # noqa: E402
 check(len(kill_r.calls) == 1 and kill_r.calls[0][0] == (5150, _signal3.SIGTERM),
       f"AC8(c): one SIGTERM to the resolved ancestor pid, and only once: {kill_r.calls}")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-0438 · grader-pane-serve (L-charter-0042 R8) — check_and_end_grader
+# ══════════════════════════════════════════════════════════════════════════════
+GHOME = TMP / "grader-home"
+
+
+def valid_grader_output():
+    return {
+        "verdicts": [{"ac": "AC1", "verdict": "met", "reason": "ok"}],
+        "matches_intent": "yes",
+        "card_ok": "yes",
+        "checkers": [],
+        "could_not_run": False,
+        "contamination": False,
+        "declarations": [{"term": "worked", "line": "ok"}],
+    }
+
+
+def grader_home(**files):
+    """A fresh `home/seat/` holding exactly the named `<name>: text-or-obj`
+    files — never the real `pathlib.Path.home()`."""
+    shutil.rmtree(GHOME, ignore_errors=True)
+    seat = GHOME / "seat"
+    seat.mkdir(parents=True)
+    for name, content in files.items():
+        p = seat / name
+        p.write_text(content if isinstance(content, str) else json.dumps(content))
+    return GHOME
+
+
+# ── AC7 · refuses on zero, 2+, empty, or schema-invalid, and on no ancestor ──
+r = pane_end.check_and_end_grader(home=grader_home(), kill=Spy(), find_ancestor=lambda: 4242)
+check(r == (False, r[1]) and r[0] is False, f"AC7(zero): must refuse: {r}")
+check("exactly one" in r[1] or "found 0" in r[1], f"AC7(zero): reason names the count: {r}")
+
+r = pane_end.check_and_end_grader(
+    home=grader_home(**{"a.output.json": valid_grader_output(), "b.output.json": valid_grader_output()}),
+    kill=Spy(), find_ancestor=lambda: 4242)
+check(r[0] is False, f"AC7(two): must refuse: {r}")
+check("exactly one" in r[1] or "found 2" in r[1], f"AC7(two): reason names the count: {r}")
+
+r = pane_end.check_and_end_grader(
+    home=grader_home(**{"a.output.json": ""}), kill=Spy(), find_ancestor=lambda: 4242)
+check(r[0] is False, f"AC7(empty): must refuse: {r}")
+check("empty" in r[1], f"AC7(empty): reason names it: {r}")
+
+r = pane_end.check_and_end_grader(
+    home=grader_home(**{"a.output.json": {"verdicts": []}}), kill=Spy(), find_ancestor=lambda: 4242)
+check(r[0] is False, f"AC7(schema-invalid): must refuse: {r}")
+
+kill_none, home_ok = Spy(), grader_home(**{"a.output.json": valid_grader_output()})
+r = pane_end.check_and_end_grader(home=home_ok, kill=kill_none, find_ancestor=lambda: None)
+check(r[0] is False, f"AC7(no ancestor): must refuse: {r}")
+check("claude" in r[1], f"AC7(no ancestor): reason names what it could not find: {r}")
+for r_ in (
+    pane_end.check_and_end_grader(home=grader_home(), kill=Spy(), find_ancestor=lambda: 4242),
+    pane_end.check_and_end_grader(home=home_ok, kill=kill_none, find_ancestor=lambda: None),
+):
+    check(r_[0] is False, f"AC7: no case here signals: {r_}")
+check(kill_none.calls == [], "AC7: kill never fires on any refusal")
+
+# ── AC6 · the green path: exactly one valid output.json -> ends and signals ──
+home_good = grader_home(**{"L-grader-9001.output.json": valid_grader_output()})
+kill6 = Spy()
+ended6, reason6 = pane_end.check_and_end_grader(home=home_good, kill=kill6, find_ancestor=lambda: 9191)
+check(ended6 is True, f"AC6: all preconditions hold -> ends: {reason6}")
+check(len(kill6.calls) == 1 and kill6.calls[0][0] == (9191, _signal.SIGTERM),
+      f"AC6: kill fires exactly once with the fake ancestor pid and SIGTERM: {kill6.calls}")
+
+# ── AC8 · the body reads none of fold./up./relay., and DOIT_ROOT is irrelevant ──
+SRC = pathlib.Path(pane_end.__file__).read_text()
+import re as _re
+body = _re.search(r"def check_and_end_grader\(.*?\n(?=def )", SRC, _re.S).group(0)
+check(not _re.search(r"\b(fold|up|relay)\.", body),
+      f"AC8: check_and_end_grader's own body must call none of fold./up./relay.: {body}")
+
+old_droot = os.environ.get("DOIT_ROOT")
+r_before = pane_end.check_and_end_grader(home=home_good, kill=Spy(), find_ancestor=lambda: 9191)
+os.environ["DOIT_ROOT"] = "/nonexistent-do-it-root-ac8"
+try:
+    r_after = pane_end.check_and_end_grader(home=home_good, kill=Spy(), find_ancestor=lambda: 9191)
+finally:
+    if old_droot is None:
+        os.environ.pop("DOIT_ROOT", None)
+    else:
+        os.environ["DOIT_ROOT"] = old_droot
+check(r_before[0] == r_after[0] == True, f"AC8: outcome unchanged by a nonexistent DOIT_ROOT: {r_before}, {r_after}")
 
 shutil.rmtree(TMP, ignore_errors=True)
 print(f"pane_end: {N} checks pass")

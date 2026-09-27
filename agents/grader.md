@@ -138,6 +138,31 @@ the repository. The same object, on the `claude -p` route, goes through the
 StructuredOutput tool instead; the wrapper validates it against the same schema
 either way.
 
+## Seat route (sandboxed pane)
+
+This route applies when the pane was launched as `claude --agent grader`
+directly — not dispatched as an Agent-tool sub-agent (the "Seat route"
+section above). Read the packet at `$HOME/seat/<spawn>.packet.md`; its own
+trailing `spawn_id:` line names `<spawn>`.
+
+This route runs no git command of any kind. In place of the sanctioned
+identifier-resolving commands named above, read `$HOME/view.json`'s
+`ready_sha`/`base_sha` keys — `grader_view.build()`'s own manifest — and
+treat `$HOME/tree/` as already confirmed at `ready_sha` with a clean tree by
+construction: a git archive, not a checkout, has nothing to report a status
+on. In place of a diff command, read the already-computed `$HOME/diff.patch`
+as plain text.
+
+Grade exactly as the rest of this file already says otherwise.
+
+Write the Output object to `$HOME/seat/<spawn>.output.json`. Run `doit
+validate grader $HOME/seat/<spawn>.output.json` until it prints `VALID`.
+Then end with `doit pane-end --grader` —
+never `DONE <spawn>`, which nothing on this route polls for.
+
+Never read under `$DOIT_ROOT` or `~/.claude`: both are absent from this view
+by construction (R8's whole point).
+
 ## Lessons (operator rule, 2026-09-24)
 
 This adds no new write and no new event: you already return the free text that carries this
