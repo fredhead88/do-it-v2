@@ -143,7 +143,7 @@ finally:
     fold.ROOT = _real_fold_root
 
 before_ledger = ledger_count()
-r_allowed = restore.restore("latest", root=non_empty, dry_run=True, remote=str(REMOTE))
+r_allowed = restore.restore("latest", root=non_empty, dry_run=True, remote=str(REMOTE), config_path=CFG)
 check(r_allowed["dry_run"] is True and r_allowed["snapshot_sha"] == SHA,
       f"AC7: non-empty + dry_run=True + explicit --root IS allowed: {r_allowed}")
 check(sorted(p.name for p in non_empty.iterdir()) == ["leftover.txt"],
@@ -151,7 +151,7 @@ check(sorted(p.name for p in non_empty.iterdir()) == ["leftover.txt"],
 check(ledger_count() == before_ledger + 1, "AC7: even a dry run appends restore-verified once")
 
 empty_target = TMP / "ac7-empty"
-r_real = restore.restore("latest", root=empty_target, dry_run=False, remote=str(REMOTE))
+r_real = restore.restore("latest", root=empty_target, dry_run=False, remote=str(REMOTE), config_path=CFG)
 check(r_real["dry_run"] is False and r_real["snapshot_sha"] == SHA, f"AC7: real restore: {r_real}")
 for rel in ("events/L-op.jsonl", "content/README.md", "models.toml", "env.sh"):
     check((empty_target / rel).read_bytes() == (SRC / rel).read_bytes(),
@@ -325,6 +325,43 @@ d_l0196_neg = restore.board_diff(ac8_a, ac8_c)
 check(d_l0196_neg != [], f"L-spec-0196 AC8: a genuinely different criterion is NOT []: {d_l0196_neg}")
 check(any("AC1" in row or "AC2" in row for row in d_l0196_neg),
       f"L-spec-0196 AC8: the diff names the criterion mismatch: {d_l0196_neg}")
+
+# ══ AC4 (L-spec-0410/L-charter-0040 R5) · board_diff proves order-
+# determinism, not just content identity — the exact mechanism the
+# clean-room DR drill's 94 tie-order diffs came from. Same no-git-remote
+# fixture pattern as AC8 above (real `$DOIT_ROOT`-shaped roots, real
+# subprocess `fold.py` renders via `restore.board_diff`, no push/clone at
+# all). ═══════════════════════════════════════════════════════════════════
+ac4_a, ac4_b = TMP / "l0410-board-a", TMP / "l0410-board-b"
+for _r4 in (ac4_a, ac4_b):
+    (_r4 / "events").mkdir(parents=True)
+E4_P = ('{"v": 1, "ts": "2026-09-01T00:00:00+00:00", "type": "spec-written", '
+       '"subject": "L-spec-9410p", "project": "pinned-by-the-suite"}\n')
+E4_Q = ('{"v": 1, "ts": "2026-09-01T00:00:00+00:00", "type": "spec-written", '
+       '"subject": "L-spec-9410q", "project": "pinned-by-the-suite"}\n')
+# root A: file "aaa" holds P, file "zzz" holds Q (natural glob order: P then Q)
+(ac4_a / "events" / "L-aaa-0001.jsonl").write_text(E4_P)
+(ac4_a / "events" / "L-zzz-0001.jsonl").write_text(E4_Q)
+# root B: the SAME two events, SAME two filenames — but contents SWAPPED, so
+# a naive filename-keyed tie-break would read them in the OPPOSITE order.
+(ac4_b / "events" / "L-aaa-0001.jsonl").write_text(E4_Q)
+(ac4_b / "events" / "L-zzz-0001.jsonl").write_text(E4_P)
+
+d4_pos = restore.board_diff(ac4_a, ac4_b)
+check(d4_pos == [],
+     f"AC4: byte-identical events, laid out across files in reversed cross-file "
+     f"order, diff to []: {d4_pos}")
+
+# negative: root C carries a GENUINELY different event (a different subject in
+# the same slot) — determinism must never mask a real difference.
+ac4_c = TMP / "l0410-board-c"
+(ac4_c / "events").mkdir(parents=True)
+(ac4_c / "events" / "L-aaa-0001.jsonl").write_text(E4_Q)
+(ac4_c / "events" / "L-zzz-0001.jsonl").write_text(E4_P.replace("L-spec-9410p", "L-spec-9410pppp"))
+d4_neg = restore.board_diff(ac4_a, ac4_c)
+check(d4_neg != [], f"AC4: a genuinely different event must NOT diff to []: {d4_neg}")
+check(any("9410p" in row for row in d4_neg), f"AC4: the diff names the mismatching spec: {d4_neg}")
+print("AC4 ok")
 
 # ══ §5 · the operator's real ledger is never touched by a fixture-root test ═
 after_sizes = ({p: p.stat().st_size for p in REAL_LEDGER.glob("*.jsonl")}
