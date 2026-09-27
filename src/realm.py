@@ -988,7 +988,8 @@ class Hub:
         self.clients, self.lock = set(), threading.Lock()
         self.states = None
         self.recent = collections.deque(maxlen=6000)   # (kind, data) in arrival order, for /api/since
-        self.seq = 0
+        self.seq = int(time.time() * 1000)             # monotonic across restarts, so an old client's seq is never "ahead"
+        self.started = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
 
     def add(self):
         q = queue.Queue(maxsize=2000)
@@ -1019,12 +1020,25 @@ class Hub:
 HUB = Hub()
 
 
-def since(seq):
-    """Everything the stream would have delivered after sequence number `seq`."""
+def since(seq, t=None):
+    """Everything the stream would have delivered after sequence `seq`, or after ledger time `t`.
+    A client that names a time older than this server's buffer gets the rows from the ledger itself,
+    so a server restart or a dropped connection never leaves a page silently behind."""
     with HUB.lock:
         rows = [(n, k, d) for (n, k, d) in HUB.recent if n > seq]
         top = HUB.seq
-    return {"seq": top, "ledger": [d for (_, k, d) in rows if k == "ledger"], "claims": [d for (_, k, d) in rows if k == "claim"],
+        started = HUB.started
+    ledger = [d for (_, k, d) in rows if k == "ledger"]
+    claims = [d for (_, k, d) in rows if k == "claim"]
+    if t:
+        if t < started:                      # the gap predates this server: read the ledger for it
+            allrows, _, _ = read_all()
+            ledger = [r for r in allrows if r["t"] > t]
+            cl = seat_claims()
+            claims = [{"sp": sp, "cl": ts} for sp, ts in cl.items() if ts > t]
+        else:
+            ledger = [d for d in ledger if d.get("t", "") > t]
+    return {"seq": top, "ledger": ledger, "claims": claims, "started": started,
             "states": HUB.states, "seat": seat_summary(), "now": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")}
 
 
@@ -1193,7 +1207,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 seq = int(qs.get("seq", ["0"])[0])
             except ValueError:
                 seq = 0
-            self._json(since(seq))
+            self._json(since(seq, qs.get("t", [None])[0]))
         elif u.path == "/api/stream":
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
@@ -1207,7 +1221,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.wfile.write(f"{len(b):x}\r\n".encode() + b + b"\r\n")
                 self.wfile.flush()
             try:
-                chunk(f"event: hello\ndata: {json.dumps({'seq': HUB.seq})}\n\n".encode())
+                chunk(f"event: hello\ndata: {json.dumps({'seq': HUB.seq, 'started': HUB.started})}\n\n".encode())
                 while True:
                     try:
                         kind, data = q.get(timeout=20)
