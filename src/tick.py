@@ -344,6 +344,19 @@ def _record():
                 look.emit_once("look-stale", "look-stale", "thinker", {"last_pass": last_pass}, ev)
     except Exception as e:
         look_error = f"{e}"
+    # L-spec-0438/L-charter-0042 R8: `grader_serve.run(ev)` — reap a stale
+    # sandboxed grader pane, start new ones for unclaimed grader-role seat
+    # packets up to capacity, and mirror/stamp a claimed one's own validated
+    # output. Its own try/except, on this SAME re-read `ev` — the
+    # `carry_error`/`look_error` pattern: a raise (an unmerged sibling's
+    # `served_by` kwarg among them) contributes nothing to the lane, and is
+    # named on this SAME `tick` event, never silencing the heartbeat.
+    grader_serve_error = None
+    try:
+        import grader_serve
+        grader_serve.run(ev)
+    except Exception as e:
+        grader_serve_error = f"{e}"
     todo = lane(specs, charters, in_flight(ev), reaped, events=ev, inbound=inbound)
     # The one liveness fact: `fold` reads the newest of these for staleness, and
     # `lane` is the count — the whole record this process leaves behind.
@@ -356,6 +369,8 @@ def _record():
         kv["pane_resume_error"] = pane_resume_error
     if look_error:
         kv["look_error"] = look_error
+    if grader_serve_error:
+        kv["grader_serve_error"] = grader_serve_error
     dispatch.emit(tick_path(), {}, "tick", **kv)
     return todo
 

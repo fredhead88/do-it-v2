@@ -354,6 +354,50 @@ def check_and_end_relay(*, root=None, child_env=None, pending_packets=None,
     return 0
 
 
+def check_and_end_grader(*, home=None, kill=os.kill, find_ancestor=ancestor_claude_pid):
+    """R8b (L-spec-0438, charter L-charter-0042 R8): a sandboxed grader pane's
+    OWN end path — no ledger read, no ledger append, nothing reached outside
+    `home`. There is nothing this path may reach to append to (it never binds
+    `$DOIT_ROOT` or `~/.claude` — both are absent from the sandbox by
+    construction).
+
+    `home` defaults to `pathlib.Path.home()` — this unit's own convention
+    that the pane's `$HOME` IS the grader view `grader_view.build()`
+    returned, so `home/"seat"` is exactly `view/seat/`.
+
+    Refuses, signalling nothing, unless exactly one `home/"seat"/*.output.json`
+    exists, is non-empty, and passes `grader_serve.valid_output` — the SAME
+    pure check R8a's mirror step calls, so there is one validity function,
+    not two. On all three holding: resolves the nearest ancestor `claude`
+    process and SIGTERMs it, returns `(True, ...)`."""
+    import grader_serve                                    # noqa: PLC0415 — local; see AC8
+    home = pathlib.Path.home() if home is None else pathlib.Path(home)
+    seat = home / "seat"
+    try:
+        outputs = sorted(seat.glob("*.output.json"))
+    except OSError as exc:
+        return False, f"refused: {seat} could not be listed ({exc})"
+    if len(outputs) != 1:
+        return False, f"refused: expected exactly one {seat}/*.output.json, found {len(outputs)}"
+    only = outputs[0]
+    try:
+        size = only.stat().st_size
+    except OSError as exc:
+        return False, f"refused: {only} could not be read ({exc})"
+    if size == 0:
+        return False, f"refused: {only} is empty (0 bytes)"
+    if not grader_serve.valid_output(only):
+        return False, f"refused: {only} does not pass grader_serve.valid_output (schema-invalid)"
+
+    pid = find_ancestor()
+    if not pid:
+        return False, (f"refused: no ancestor process named {CLAUDE!r} found above this one "
+                       f"— nothing to signal")
+
+    kill(pid, signal.SIGTERM)
+    return True, f"ended: SIGTERM to {CLAUDE} pid {pid}"
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="pane-end", description=__doc__.splitlines()[0])
     ap.add_argument("charter", nargs="?", default=None,
@@ -362,11 +406,21 @@ def main(argv=None):
                     help="the Executor path: quiet point in place of l1-complete, no charter")
     ap.add_argument("--relay", action="store_true",
                     help="the relay path: end once nothing unclaimed remains — no charter, no handover")
+    ap.add_argument("--grader", action="store_true",
+                    help="the grader path: a sandboxed pane ends once its own output.json "
+                         "validates — no charter, no handover, no ledger read")
     ap.add_argument("--handover", default=None,
                     help="path to the handover file, already written (required on the charter "
-                         "and --executor paths; not read on --relay)")
+                         "and --executor paths; not read on --relay/--grader)")
     ap.add_argument("--root", default=None, help="the do-it root to read and append under")
     a = ap.parse_args(argv)
+    if a.grader:
+        ended, reason = check_and_end_grader()
+        if not ended:
+            print(reason, file=sys.stderr)
+            return 1
+        print(reason)
+        return 0
     if a.relay:
         return check_and_end_relay(root=a.root)
     if a.executor:
@@ -374,7 +428,7 @@ def main(argv=None):
             ap.error("--handover is required for --executor")
         return check_and_end_executor(a.handover, root=a.root)
     if not a.charter:
-        ap.error("a charter (L-charter-NNNN), --executor, or --relay is required")
+        ap.error("a charter (L-charter-NNNN), --executor, --relay, or --grader is required")
     if not a.handover:
         ap.error("--handover is required for a charter")
     ended, reason = check_and_end(a.charter, a.handover, root=a.root)
