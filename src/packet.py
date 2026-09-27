@@ -1272,8 +1272,18 @@ def builder_cues(c):
         branch = bd.get("branch")
         if branch and branch.lower() != c.a.subject.lower():
             out.append(("the builder's branch", branch))
-        out += [("base_sha", bd.get("base_sha")),
-                ("ready_sha", bd.get("ready_sha")), ("a build timestamp", bd.get("ts"))]
+        # A base_sha the SPEC ITSELF cites (frontmatter base_sha, `git diff <base_sha>` in its
+        # Verification) is spec text the grader legitimately holds, not a cue about who built
+        # it; stripping it refused every grader packet for such specs (L-spec-0420/0421,
+        # 2026-09-27).
+        try:
+            _spec_text = c.spec_file().read_text()
+        except Exception:
+            _spec_text = ""
+        _base = bd.get("base_sha")
+        if not (_base and _base in _spec_text):
+            out.append(("base_sha", _base))
+        out += [("ready_sha", bd.get("ready_sha")), ("a build timestamp", bd.get("ts"))]
         out += [("the builder's spawn id", e.get("spawn")) for e in c.all_of("spawn-done")
                 if e.get("actor") == "builder"]
         # is_file, not exists: the "/" fallback for a build-done with no card is a
