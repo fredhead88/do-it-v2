@@ -341,10 +341,14 @@ held.close()
 # L-spec-0192 · fold-states-owed-due-and-killed (L-charter-0028) — R7
 # ══════════════════════════════════════════════════════════════════════════════
 
-# ── AC6/AC7 · shipped-owed-due is ACTIONABLE, but an open escalation still
-# excludes its subject from the lane exactly like any other actionable state.
-assert "shipped-owed-due" in tick.ACTIONABLE and "shipped-owed-due" not in tick.SPEC_DONE, \
-    "AC7: shipped-owed-due is on the lane, and is never counted as done for a charter's L2 conjunct"
+# ── AC6/AC7 (superseded by L-charter-0038/L-spec-0388, R1) · shipped-owed-due
+# LEFT tick.ACTIONABLE — the sweeper works this state now, off the Executor's
+# own lane pass — and it was never counted as done for a charter's L2
+# conjunct either way. The DUE_S fixture below (still carrying an open
+# escalation) is untouched: it stays absent from the lane, now for a second,
+# independent reason on top of the busy-escalation one it originally proved.
+assert "shipped-owed-due" not in tick.ACTIONABLE and "shipped-owed-due" not in tick.SPEC_DONE, \
+    "L-spec-0388 AC12: shipped-owed-due left ACTIONABLE; never counted as done for a charter's L2 conjunct"
 DUE_S = "L-spec-9192"
 old_wake = (fold.NOW - datetime.timedelta(days=7)).isoformat(timespec="seconds")
 write("L-spec-writer-9192.jsonl",
@@ -365,6 +369,72 @@ lanes = tick.lane(specs, charters, busy, events=ev)
 assert not any(l.startswith(DUE_S) for l in lanes), \
     "AC6: an open escalation excludes a shipped-owed-due subject exactly as any other ACTIONABLE state"
 for f in ("L-spec-writer-9192.jsonl", "L-builder-9192.jsonl", "L-executor-9192.jsonl"):
+    (EV / f).unlink()
+
+# ══════════════════════════════════════════════════════════════════════════════
+# L-charter-0038 · owed-sweep-driver (L-spec-0388) — AC12/AC13/AC14/AC18
+# ══════════════════════════════════════════════════════════════════════════════
+
+# AC12/AC13 — pinned as their own value assertions (on top of the inverted
+# AC6/AC7 fixture above): "shipped-owed-due" left ACTIONABLE (the sweeper
+# works it now); "shipped-owed-expired" joined SPEC_DONE (held like evidence,
+# never blocking closure forever over a check that already lapsed).
+assert "shipped-owed-due" not in tick.ACTIONABLE
+print("sweep-owed-0388 AC12 ok")
+assert "shipped-owed-expired" in tick.SPEC_DONE
+print("sweep-owed-0388 AC13 ok")
+
+# AC14 — a FRESH fixture, distinct from DUE_S above: shipped plus a 7-day-past
+# owed-ac, with NO escalation-blocking anywhere on it and no open spawn. Absent
+# from tick.lane() SOLELY because "shipped-owed-due" left tick.ACTIONABLE —
+# nothing else (no busy spawn, no escalation) is available to explain it.
+DUE_S14 = "L-spec-9388"
+old_wake14 = (fold.NOW - datetime.timedelta(days=7)).isoformat(timespec="seconds")
+write("L-spec-writer-9388.jsonl",
+      {"type": "spec-written", "subject": DUE_S14},
+      {"type": "owed-ac", "subject": DUE_S14, "criterion": "AC1", "wake_at": old_wake14})
+write("L-executor-9388.jsonl", {"type": "shipped", "subject": DUE_S14})
+ev14, specs14, charters14 = folded()
+assert specs14[DUE_S14]["state"] == "shipped-owed-due", specs14[DUE_S14]["state"]
+busy14 = tick.in_flight(ev14)
+assert DUE_S14 not in busy14, "AC14: no escalation and no open spawn — must not read busy"
+lanes14 = tick.lane(specs14, charters14, busy14, events=ev14)
+assert not any(l.startswith(DUE_S14) for l in lanes14)
+print("sweep-owed-0388 AC14 ok")
+for f in ("L-spec-writer-9388.jsonl", "L-executor-9388.jsonl"):
+    (EV / f).unlink()
+
+# AC18 — closable_fallback's owed tally counts "shipped-owed-expired" the same
+# as "shipped-owed-evidence" against K. fold.K pinned to 0 (saved/restored,
+# matching test_fold.py's own convention). One charter, one spec, reaching
+# "shipped-owed-expired" via shipped + two owed-failed events after the
+# governing owed-ac (SD2) — otherwise an ordinary SPEC_DONE member.
+S18, C18 = "L-spec-9390", "L-charter-9390"
+old_ac_ts18 = (fold.NOW - datetime.timedelta(days=30)).isoformat(timespec="seconds")
+old_wake18 = (fold.NOW - datetime.timedelta(days=25)).isoformat(timespec="seconds")
+write("L-spec-writer-9390.jsonl",
+      {"ts": old_ac_ts18, "type": "spec-written", "subject": S18, "charter": C18},
+      {"ts": old_ac_ts18, "type": "owed-ac", "subject": S18, "criterion": "AC1", "wake_at": old_wake18})
+write("L-builder-9390.jsonl",
+      {"type": "build-started", "subject": S18}, {"type": "build-done", "subject": S18})
+write("L-executor-9390.jsonl",
+      {"type": "shipped", "subject": S18},
+      {"type": "owed-failed", "subject": S18, "criterion": "AC1", "evidence": "e1", "kind": "unmet"},
+      {"type": "owed-failed", "subject": S18, "criterion": "AC1", "evidence": "e2", "kind": "unmet"})
+write("L-thinker-9390.jsonl", {"type": "charter-filed", "subject": C18})
+ev18, specs18, charters18 = folded()
+assert specs18[S18]["state"] == "shipped-owed-expired", specs18[S18]["state"]
+assert specs18[S18]["charter"] == C18, specs18[S18]["charter"]
+_saved_K18 = fold.K
+fold.K = 0
+try:
+    accepted18, _fixpoint18, _review18 = tick.closable_fallback(ev18, C18)
+finally:
+    fold.K = _saved_K18
+assert accepted18 is False, \
+    f"AC18: an owed criterion in shipped-owed-expired must count against K, same as shipped-owed-evidence: {accepted18}"
+print("sweep-owed-0388 AC18 ok")
+for f in ("L-spec-writer-9390.jsonl", "L-builder-9390.jsonl", "L-executor-9390.jsonl", "L-thinker-9390.jsonl"):
     (EV / f).unlink()
 
 # ══════════════════════════════════════════════════════════════════════════════

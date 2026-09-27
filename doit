@@ -32,6 +32,7 @@ case "${1:-board}" in
   backup)  shift; exec python3 "$SRC/backup.py" "$@" ;;
   restore) shift; exec python3 "$SRC/restore.py" "$@" ;;
   crons)   shift; exec python3 "$SRC/crons.py" "$@" ;;
+  sweep-owed) shift; exec python3 "$SRC/sweep_owed.py" "$@" ;;
   # ★ DISCOVERED, never enumerated. This was a hardcoded && chain of twelve
   # files, so a new src/test_*.py ran nowhere and its guard was advisory until
   # someone remembered to add it. The `· <file>` marker names the file that is
@@ -96,6 +97,8 @@ doit — a ledger that derives state, and the guards that read it
   doit restore <snapshot> [--root D] [--dry-run] [--remote U]  rebuild from the mirror
   doit crons check|print [name]|install <name>   builder-box cron manifest — measure, show, or
                                           install one row from crons.toml (L-charter-0036 R4)
+  doit sweep-owed [--dry-run]             batch due owed checks into detached owed-sweeper
+                                          dispatches; escalate the ones that expired (L-charter-0038 R1)
   doit test                               run every check
   doit help
 

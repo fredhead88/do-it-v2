@@ -18,9 +18,12 @@ import carry, dispatch, fold, intake, notes, pane_resume, panes, tree_cleanup  #
 # `pane_end.py` among them, that only wants `up.quiet_point`'s tick.py half.
 
 # Waiting for the Executor's next durable action. `building` is in flight, not waiting.
-# R7/L-spec-0192: `shipped-owed-due` joins — a due criterion is the Executor's own
-# action to take (owed_met/a re-grade), not merely a state to observe.
-ACTIONABLE = {"written", "graded", "reviewing", "shipped", "shipped-owed-due"}
+# R7/L-spec-0192 put `shipped-owed-due` here — a due criterion was once the
+# Executor's own action to take (owed_met/a re-grade). L-charter-0038/L-spec-0388
+# (R1) takes it back out: a dedicated sweeper (`doit sweep-owed`) now runs every
+# owed observation in batches, off the Executor's own five-minute lane pass, so
+# a due-but-unswept criterion is no longer this lane's to surface.
+ACTIONABLE = {"written", "graded", "reviewing", "shipped"}
 # §10.5's RETIRE list, verbatim — every pane launcher denies it by name (D119).
 # NOT dead with the spawn path: fold.caps(), think.pane_cmd() and up.pane_cmd() read these.
 RETIRE = ("subagent-driven-development", "executing-plans", "writing-plans", "requesting-code-review",
@@ -29,7 +32,12 @@ MINUTES, USD = 20, 5          # the Executor's declared cap, read by fold.caps()
 TICK_NAME = "L-tick-local.jsonl"
 POLL_STEP = 0.05              # tick.wait's poll granularity — fine enough for AC3's <1s wake
 # §3.11's L2 conjunction, quantified over `mine` — a spec in one of these is done for its charter.
-SPEC_DONE = ("accepted", "shipped-owed-evidence", "dropped", "closed-unbuilt", "closed-shipped")
+# L-charter-0038/L-spec-0388 (R2): `shipped-owed-expired` joins — a check the
+# sweeper's own SD3 escalation already surfaced (§4.9's owed<=K, not this
+# conjunct) is held like evidence, not left blocking closure forever over a
+# check that already lapsed.
+SPEC_DONE = ("accepted", "shipped-owed-evidence", "shipped-owed-expired", "dropped",
+             "closed-unbuilt", "closed-shipped")
 
 
 def tick_path():
@@ -151,12 +159,20 @@ def closable_fallback(events, charter):
     an owed criterion over K is exactly what holds a spec short of accepted). A
     fallback missing either would report a charter closable that `fold.fold()` holds
     at `L1-complete` — dropping it off the lane before the Executor's brief-author
-    row can fire, and stranding it short of reap forever."""
+    row can fire, and stranding it short of reap forever.
+
+    L-charter-0038/L-spec-0388 (R2): the owed tally counts `fold.OWED_TALLY_STATES`
+    (`shipped-owed-evidence` AND `shipped-owed-expired`), the SAME tuple `fold()`'s
+    own charter `owed` field and `_closable`'s `owed_within_k` count against — never
+    the bare `"shipped-owed-evidence"` literal alone. `SPEC_DONE` above admits
+    `shipped-owed-expired` too; a tally that stopped at the old literal would let a
+    spec `accepted`-for-closure by the state check sit outside the very `owed<=K`
+    count this docstring's own "mirrors fold.fold() in FULL" claims to hold it to."""
     cid = charter["id"] if isinstance(charter, dict) else charter
     evs = charter["evs"] if isinstance(charter, dict) else [e for e in events if e.get("subject") == cid]
     specs = fold.fold(events)[0] if events else {}
     mine = [s for s in specs.values() if s["charter"] == cid and s["state"] != "void"]
-    owed = sum(1 for s in mine if s["state"] == "shipped-owed-evidence")
+    owed = sum(1 for s in mine if s["state"] in fold.OWED_TALLY_STATES)
     accepted = all(s["state"] in SPEC_DONE for s in mine) and owed <= fold.K
     fixpoint = "sweep-fixpoint" in {e["type"] for e in evs} and not fold.open_briefs(evs)
     return accepted, fixpoint, fold.charter_review(evs) != "charter-review-complete"
