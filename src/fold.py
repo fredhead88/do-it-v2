@@ -56,6 +56,13 @@ EMITS = {"verdict": {"grader"}, "review": {"reviewer"}, "shipped": {"executor"},
          # The builder is kept out of both: otherwise it could clear the
          # rejections against its own build and reach `accepted` from one seat,
          # which is exactly what the verdict and review rows exist to prevent.
+         # L-charter-0042/L-spec-0424, R7: `fold()`'s admission loop below also
+         # lets the builder itself through, but ONLY for criterion
+         # `"COMMIT-SHAPE"` — the dispatch wrapper's own row, written to the
+         # builder's own ledger file and so indistinguishable from the
+         # builder's model turn (D90). Every reason above still holds for every
+         # OTHER criterion; this is the one carve-out (SD7), enforced at fold
+         # time because `EMITS` alone carries no per-criterion granularity.
          "rejected-criterion": {"grader", "reviewer", "executor"},
          "criterion-cleared": {"grader", "reviewer"},
          # D101: the reviewer's blocking event, and it blocks HERE — see standing_rejects.
@@ -237,6 +244,24 @@ EMITS["pane-paused"] = EMITS["ci-red"] = EMITS["ci-green"] = {"look"}
 # would retroactively un-authorize that live emitter, so both actors are kept.
 EMITS["pane-resumed"] = {"look", "tick"}
 EMITS["message-answered"] = {"look", "planner", "executor", "thinker"}
+# L-charter-0042/L-spec-0424 (ledger-vocabulary): the six event types this
+# charter's wave-2 units need, admitted here — one dispatch (this unit) so no
+# wave-2 sibling adds its own EMITS/REQUIRED row (Plan Seams: "Vocabulary →
+# everything"). Each is scoped to exactly the one actor the requirement that
+# creates it names, per §2.5's own rule.
+EMITS["autodispatched"] = {"tick"}          # R1: the tick's own dispatch record
+EMITS["autodispatch-failed"] = {"tick"}     # R1: the tick's own dispatch-skip record
+EMITS["supervisor-code"] = {"up"}           # R2: `up.maybe_reexec`'s own version claim
+EMITS["install-synced"] = {"tick"}          # R5: the tick's own once-per-sha install pass
+EMITS["grader-view-built"] = {"grader"}     # R8: the grader's own view-build record
+EMITS["grader-pane-started"] = {"tick"}     # R8: the tick's own per-cycle pane count
+# R7: widen `rejected-criterion`/`criterion-cleared` to also admit `builder`,
+# on top of every actor already admitted. The bare `EMITS` set carries no
+# per-criterion granularity — reachable behavior is narrowed to
+# `criterion == "COMMIT-SHAPE"` inside `fold()`'s own admission loop below,
+# the same way `owed-ac` is already narrowed there.
+EMITS["rejected-criterion"].add("builder")
+EMITS["criterion-cleared"].add("builder")
 # A correction may override anything but these: D90 takes the actor from the
 # FILENAME, and a correction that could rewrite it reopens every check below.
 UNCORRECTABLE = ("actor", "_src")
@@ -638,6 +663,15 @@ REQUIRED = {"owed-ac": ("criterion",), "spec-carried": ("source", "tier", "audit
             # L-charter-0038/L-spec-0384, SD4: a failed check without its own
             # evidence is a stamp, not a claim.
             "owed-failed": ("criterion", "evidence")}
+# L-charter-0042/L-spec-0424 (ledger-vocabulary): the same six types' required
+# fields, verbatim from the Plan's Produces line. Presence-only, like every
+# other entry above — no value's shape, format, or type is checked here.
+REQUIRED["autodispatched"] = ("spawn", "since")
+REQUIRED["autodispatch-failed"] = ("reason",)
+REQUIRED["supervisor-code"] = ("kind", "sha", "pid")
+REQUIRED["install-synced"] = ("sha",)
+REQUIRED["grader-view-built"] = ("view", "ready_sha")
+REQUIRED["grader-pane-started"] = ("pane", "spawn_ids")
 
 
 # L-charter-0033/board-owners, Target 1: who owns each board() row and what
@@ -1467,6 +1501,22 @@ def fold(events):
             if not prior:
                 ignored.append(e)
                 continue
+        # L-charter-0042/L-spec-0424, R7: `EMITS["rejected-criterion"]`/
+        # `EMITS["criterion-cleared"]` now admit `"builder"` at the bare-dict
+        # level (widened above), but that dict carries no per-criterion
+        # granularity — a caller-side guard could never be trusted anyway,
+        # since the dispatch wrapper's COMMIT-SHAPE row is written to the
+        # builder's own ledger file and so is indistinguishable from the
+        # builder's model turn at every door (D90). `fold()` is the only place
+        # that has both the actor and this subject's own history, so the
+        # narrowing lives here: a builder-authored event of either type
+        # survives ONLY for `criterion == "COMMIT-SHAPE"`; any other criterion
+        # from actor `"builder"` is ignored exactly as it is ignored today
+        # (`test_fold.py`'s `selfclear` case, unchanged).
+        if etype in ("rejected-criterion", "criterion-cleared") and e["actor"] == "builder" \
+                and e.get("criterion") != "COMMIT-SHAPE":
+            ignored.append(e)
+            continue
         by_subject[subj].append(e)
 
     retracted = {s for s, evs in by_subject.items()

@@ -2573,3 +2573,131 @@ assert fold.open_questions(ev6b) == [], \
     "★ AC6(b): same-file causal order applies to open_escalations too — the later " \
     "same-file decision wins, no phantom NEEDS YOU row"
 print("AC6 ok")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-0424 · ledger-vocabulary (L-charter-0042)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── AC1 · fold.EMITS["autodispatched"] = {"tick"};
+# fold.REQUIRED["autodispatched"] = ("spawn", "since") ───────────────────────
+ev424_ad = {"type": "autodispatched", "subject": "L-spec-9401", "spawn": "S1",
+            "since": "2026-01-01T00:00:00+00:00"}
+assert fold.check_append(ev424_ad, "tick") is None, fold.check_append(ev424_ad, "tick")
+for actor424 in ("executor", "operator", "builder"):
+    assert fold.check_append(ev424_ad, actor424) is not None, \
+        f"★ AC1: actor {actor424!r} must not be admitted for autodispatched"
+for missing424 in (
+        {k: v for k, v in ev424_ad.items() if k != "spawn"},
+        {k: v for k, v in ev424_ad.items() if k != "since"},
+        {k: v for k, v in ev424_ad.items() if k not in ("spawn", "since")}):
+    assert fold.check_append(missing424, "tick") is not None, \
+        f"★ AC1: {missing424} must refuse actor tick"
+print("AC1 ok")
+
+# ── AC2 · fold.EMITS["autodispatch-failed"] = {"tick"};
+# fold.REQUIRED["autodispatch-failed"] = ("reason",) ─────────────────────────
+ev424_adf = {"type": "autodispatch-failed", "subject": "L-spec-9401", "reason": "wave-blocked"}
+assert fold.check_append(ev424_adf, "tick") is None, fold.check_append(ev424_adf, "tick")
+for actor424b in ("executor", "operator", "builder"):
+    assert fold.check_append(ev424_adf, actor424b) is not None, \
+        f"★ AC2: actor {actor424b!r} must not be admitted for autodispatch-failed"
+adf_no_reason = {k: v for k, v in ev424_adf.items() if k != "reason"}
+assert fold.check_append(adf_no_reason, "tick") is not None, \
+    "★ AC2: dropping reason must refuse actor tick"
+print("AC2 ok")
+
+# ── AC3 · fold.EMITS["supervisor-code"] = {"up"};
+# fold.REQUIRED["supervisor-code"] = ("kind", "sha", "pid") ──────────────────
+ev424_sc = {"type": "supervisor-code", "subject": "SUPERVISOR", "kind": "planner",
+            "sha": "a" * 40, "pid": 123}
+assert fold.check_append(ev424_sc, "up") is None, fold.check_append(ev424_sc, "up")
+for actor424c in ("executor", "planner", "thinker"):
+    assert fold.check_append(ev424_sc, actor424c) is not None, \
+        f"★ AC3: actor {actor424c!r} must not be admitted for supervisor-code"
+for drop424 in ("kind", "sha", "pid"):
+    dropped424 = {k: v for k, v in ev424_sc.items() if k != drop424}
+    assert fold.check_append(dropped424, "up") is not None, \
+        f"★ AC3: dropping {drop424} must refuse actor up"
+print("AC3 ok")
+
+# ── AC4 · fold.EMITS["install-synced"] = {"tick"};
+# fold.REQUIRED["install-synced"] = ("sha",) ─────────────────────────────────
+ev424_is = {"type": "install-synced", "subject": "L-spec-9402", "sha": "b" * 40}
+assert fold.check_append(ev424_is, "tick") is None, fold.check_append(ev424_is, "tick")
+for actor424d in ("executor", "operator", "builder"):
+    assert fold.check_append(ev424_is, actor424d) is not None, \
+        f"★ AC4: actor {actor424d!r} must not be admitted for install-synced"
+is_no_sha = {k: v for k, v in ev424_is.items() if k != "sha"}
+assert fold.check_append(is_no_sha, "tick") is not None, \
+    "★ AC4: dropping sha must refuse actor tick"
+print("AC4 ok")
+
+# ── AC5 · fold.EMITS["rejected-criterion"]/["criterion-cleared"] each gain
+# "builder", on top of every actor already admitted (no regression) ─────────
+ev424_rc = {"type": "rejected-criterion", "subject": "L-spec-9403",
+            "criterion": "COMMIT-SHAPE", "why": "2 commits above base"}
+assert fold.check_append(ev424_rc, "builder") is None, fold.check_append(ev424_rc, "builder")
+for actor424e in ("grader", "reviewer", "executor"):
+    assert fold.check_append(ev424_rc, actor424e) is None, \
+        f"★ AC5: actor {actor424e!r} must still be admitted for rejected-criterion"
+ev424_cc = {"type": "criterion-cleared", "subject": "L-spec-9403", "criterion": "COMMIT-SHAPE"}
+assert fold.check_append(ev424_cc, "builder") is None, fold.check_append(ev424_cc, "builder")
+for actor424f in ("grader", "reviewer"):
+    assert fold.check_append(ev424_cc, actor424f) is None, \
+        f"★ AC5: actor {actor424f!r} must still be admitted for criterion-cleared"
+for actor424g in ("thinker", "operator"):
+    assert fold.check_append(ev424_rc, actor424g) is not None, \
+        f"★ AC5: actor {actor424g!r} must remain refused on rejected-criterion"
+    assert fold.check_append(ev424_cc, actor424g) is not None, \
+        f"★ AC5: actor {actor424g!r} must remain refused on criterion-cleared"
+print("AC5 ok")
+
+# ── AC6 · the criterion-scoped narrowing lives in fold(), proven through
+# fold()'s own subject state, using ledger()'s existing (a) selfclear shape
+# and (b) the new COMMIT-SHAPE carve-out ─────────────────────────────────────
+S424 = "L-spec-9405"
+selfclear424 = ledger(**{
+    "L-grader-01.jsonl": [{"ts": stamp(1), "type": "rejected-criterion", "subject": S424,
+                           "criterion": "AC1"}],
+    "L-builder-01.jsonl": [{"ts": stamp(0), "type": "criterion-cleared", "subject": S424,
+                            "criterion": "AC1"}]})
+assert selfclear424[1][S424]["rejects"] == 1, \
+    "★ AC6(a): a builder-authored criterion-cleared for a non-COMMIT-SHAPE " \
+    "criterion is ignored — test_fold.py:99-106's selfclear case, re-asserted"
+commitshape424 = ledger(**{
+    "L-grader-01.jsonl": [{"ts": stamp(1), "type": "rejected-criterion", "subject": S424,
+                           "criterion": "COMMIT-SHAPE"}],
+    "L-builder-01.jsonl": [{"ts": stamp(0), "type": "criterion-cleared", "subject": S424,
+                            "criterion": "COMMIT-SHAPE"}]})
+assert commitshape424[1][S424]["rejects"] == 0, \
+    "★ AC6(b): a builder-authored criterion-cleared for COMMIT-SHAPE survives " \
+    "the fold and clears it (rework-base-pinned's SD7 need)"
+print("AC6 ok")
+
+# ── AC7 · fold.EMITS["grader-view-built"] = {"grader"};
+# fold.REQUIRED["grader-view-built"] = ("view", "ready_sha") ─────────────────
+ev424_gvb = {"type": "grader-view-built", "subject": "L-spec-9404", "view": "/scratch/grade/x",
+             "ready_sha": "c" * 40}
+assert fold.check_append(ev424_gvb, "grader") is None, fold.check_append(ev424_gvb, "grader")
+for actor424h in ("tick", "executor", "builder"):
+    assert fold.check_append(ev424_gvb, actor424h) is not None, \
+        f"★ AC7: actor {actor424h!r} must not be admitted for grader-view-built"
+for drop424b in ("view", "ready_sha"):
+    dropped424b = {k: v for k, v in ev424_gvb.items() if k != drop424b}
+    assert fold.check_append(dropped424b, "grader") is not None, \
+        f"★ AC7: dropping {drop424b} must refuse actor grader"
+print("AC7 ok")
+
+# ── AC8 · fold.EMITS["grader-pane-started"] = {"tick"};
+# fold.REQUIRED["grader-pane-started"] = ("pane", "spawn_ids") ───────────────
+ev424_gps = {"type": "grader-pane-started", "subject": "PANE", "pane": "grader-3",
+             "spawn_ids": "L-grader-0500,L-grader-0501"}
+assert fold.check_append(ev424_gps, "tick") is None, fold.check_append(ev424_gps, "tick")
+for actor424i in ("grader", "executor", "operator"):
+    assert fold.check_append(ev424_gps, actor424i) is not None, \
+        f"★ AC8: actor {actor424i!r} must not be admitted for grader-pane-started"
+for drop424c in ("pane", "spawn_ids"):
+    dropped424c = {k: v for k, v in ev424_gps.items() if k != drop424c}
+    assert fold.check_append(dropped424c, "tick") is not None, \
+        f"★ AC8: dropping {drop424c} must refuse actor tick"
+print("AC8 ok")
