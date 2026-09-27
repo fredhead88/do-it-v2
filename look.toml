@@ -28,3 +28,15 @@ codex_patterns = []   # ships empty (Unknowns) — not load-bearing for this cut
 # addition: `codex_patterns` alone has nothing to match against without a
 # target list, and the spec's Produces names only the pattern list.
 codex_targets = []
+
+# L-charter-0038/L-spec-0389: the wall-clock checks (look_wallclock.py).
+[[ci]]
+project = "albert-scott"
+repo = "/opt/albert-scott"
+branch = "master"
+workflows = []   # empty -> every distinct workflow name a push to `branch` ran, completed, trailing 7 days
+
+[classes]
+# condition -> class token, read by look_wallclock.fix_for() to name an
+# in-flight corrective charter on a brief. Ships empty (Assumptions) — no
+# look condition names a class yet.

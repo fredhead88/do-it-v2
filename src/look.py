@@ -16,7 +16,7 @@ Never deploys, restarts, resumes, sends keys, installs, or deletes (SD1).
 import argparse, fcntl, hashlib, json, os, pathlib, re, shutil, subprocess, sys, time
 from datetime import datetime, timedelta, timezone
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import dispatch, fold, pane_resume, panes, relay  # noqa: E402
+import dispatch, fold, look_wallclock, pane_resume, panes, relay  # noqa: E402
 LEDGER_NAME = "L-look-local.jsonl"
 DEFAULT_TOML_PATH = pathlib.Path(__file__).resolve().parent.parent / "look.toml"
 DEFAULTS = {
@@ -25,6 +25,11 @@ DEFAULTS = {
     "prod": [{"project": "albert-scott", "repo": "/opt/albert-scott", "ssh_target": "root@167.71.46.51",
               "base_url": "http://127.0.0.1:8000", "version_path": "/version", "health_path": "/health"}],
     "pane_at_menu": {"codex_patterns": [], "codex_targets": []},  # codex_targets: this builder's own addition
+    # L-charter-0038/L-spec-0389: master-CI polling row and the condition->class
+    # map `fix_for` reads (look_wallclock.py). Both ship with the one default
+    # below / empty (Assumptions) — no look condition names a class yet.
+    "ci": [{"project": "albert-scott", "repo": "/opt/albert-scott", "branch": "master", "workflows": []}],
+    "classes": {},
 }
 _PASS_LOCKED = False   # True only while `run()` holds `look.lock` (skip re-locking, SD22)
 _DRY_RUN = False
@@ -38,7 +43,9 @@ def load_toml(toml_path=None):
         doc = {}
     return {"thresholds": {**DEFAULTS["thresholds"], **(doc.get("thresholds") or {})},
             "prod": doc.get("prod") or DEFAULTS["prod"],
-            "pane_at_menu": {**DEFAULTS["pane_at_menu"], **(doc.get("pane_at_menu") or {})}}
+            "pane_at_menu": {**DEFAULTS["pane_at_menu"], **(doc.get("pane_at_menu") or {})},
+            "ci": doc["ci"] if "ci" in doc else DEFAULTS["ci"],
+            "classes": doc.get("classes") or DEFAULTS["classes"]}
 class Runner:
     """Real subprocess/shutil default; a test swaps the whole boundary (AC1)."""
     def ssh(self, target, cmd, timeout):
@@ -53,6 +60,10 @@ class Runner:
     def disk_usage(self, path, timeout):
         du = shutil.disk_usage(path)
         return {"total": du.total, "used": du.used, "free": du.free}
+    def gh_run_list(self, repo, branch, timeout):
+        return subprocess.run(["gh", "run", "list", "--branch", branch, "--event", "push", "--json",
+                               "name,status,conclusion,headSha,url,updatedAt", "--limit", "100"],
+                              cwd=repo, capture_output=True, text=True, timeout=timeout).stdout
     def clock(self):
         return time.monotonic()
     def sleep(self, seconds):
@@ -103,11 +114,13 @@ def _recently_cleared(root, subject, events, cooldown_min=30):
 def _why(reading):
     if isinstance(reading, dict): return "; ".join(f"{k}={v}" for k, v in list(reading.items())[:4])
     return str(reading)
-def _write_brief(condition, key, owner, reading, events, root):
+def _write_brief(condition, key, owner, reading, events, root, problem=None):
     openkey, subject = f"{condition}|{key}", f"look:{condition}:{key}"
     if _open_ref(root, openkey, subject, events) is not None or _recently_cleared(root, subject, events): return None
-    kv = dict(condition=condition, owner=owner, key=key, problem=f"look-{condition}", reading=reading,
+    kv = dict(condition=condition, owner=owner, key=key, problem=problem or f"look-{condition}", reading=reading,
               measured_at=fold.NOW.isoformat(timespec="seconds"), subject=subject, why=_why(reading))
+    fix = look_wallclock.fix_for(condition, root, events)
+    if fix is not None: kv["fix"] = fix
     if _DRY_RUN: return {**kv, "type": "brief", "_src": "dry-run"}
     dst_dir = root / "events"
     dst_dir.mkdir(parents=True, exist_ok=True)
@@ -394,6 +407,18 @@ def _check_spec_misrouted(events, root, briefs):
         want, have = _resolve(str(spec_path_fn(spec)), root), (_resolve(path, root) if path else None)
         if have is None or have != want:
             brief(spec, {"path": path, "want": str(want)})
+def _check_wallclock(events, runner, now, root, cfg, deadline, dry_run, briefs):
+    """The four wall-clock checks (L-charter-0038 R6), wrapped in the SAME
+    lazily-guarded broad `except Exception` shape `_check_crons` uses around
+    `crons.check()` (Seams) — a raise here degrades to one `reading-undetermined`
+    (key `undetermined:wallclock`) and this pass's own "wallclock" key is `[]`."""
+    try:
+        result = look_wallclock.run(events, runner, now, root, cfg, deadline, _write_brief, dry_run)
+    except Exception:
+        _fire_undetermined("wallclock", events, root, briefs)
+        return []
+    briefs.extend(result["briefs"])
+    return result["events"]
 def run(events, *, now=None, runner=None, root=None, toml_path=None, dry_run=False):
     global _PASS_LOCKED, _DRY_RUN
     now = now or datetime.now(timezone.utc)
@@ -411,7 +436,9 @@ def run(events, *, now=None, runner=None, root=None, toml_path=None, dry_run=Fal
         lockf.close()
         return {"briefs": [], "answered": []}
     _PASS_LOCKED, _DRY_RUN = True, dry_run
+    look_wallclock._CLASSES = cfg.get("classes") or {}
     briefs, answered = [], []
+    wallclock_events = []
     try:
         deadline = runner.clock() + th["pass_budget_s"]
         single = len(cfg["prod"]) == 1
@@ -424,6 +451,7 @@ def run(events, *, now=None, runner=None, root=None, toml_path=None, dry_run=Fal
         _check_disk_tmp(runner, root, th, now, deadline, events, briefs, answered)
         _check_crons(runner, deadline, events, root, briefs)
         _check_spec_misrouted(events, root, briefs)
+        wallclock_events = _check_wallclock(events, runner, now, root, cfg, deadline, dry_run, briefs)
         r = _clear("look-stale", "look-stale", "fresh pass", events, root)
         r and answered.append(r)
         if not dry_run:
@@ -432,11 +460,12 @@ def run(events, *, now=None, runner=None, root=None, toml_path=None, dry_run=Fal
             _write_state(root, st)
     finally:
         _PASS_LOCKED, _DRY_RUN = False, False
+        look_wallclock._CLASSES = {}
         try:
             fcntl.flock(lockf, fcntl.LOCK_UN)
         except OSError: pass
         lockf.close()
-    return {"briefs": briefs, "answered": answered}
+    return {"briefs": briefs, "answered": answered, "wallclock": wallclock_events}
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="doit look")
     ap.add_argument("--dry-run", action="store_true")
