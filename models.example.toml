@@ -139,3 +139,11 @@ input = 1.0
 output = 5.0
 cache_read = 0.1
 cache_creation = 1.25
+
+# [seats] — L-charter-0042/L-spec-0427 R1 (SD2). Builder seats the tick's own
+# `autodispatch.run` may occupy at once, oldest `since` first; anything past
+# capacity classifies `seat-wait`, never blocked. `autodispatch.capacity()`
+# falls back to this same default (4) when the table, the key, or the file
+# itself is absent or unparsable.
+[seats]
+builder = 4

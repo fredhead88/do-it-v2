@@ -159,6 +159,141 @@ def clean_toml(root):
     return write_toml(root, prod=[], pane_at_menu={"codex_patterns": [], "codex_targets": []})
 
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+# L-charter-0042/L-spec-0427 — R1/SD4: spec-dispatchable-stale
+# ══════════════════════════════════════════════════════════════════════════════
+import dispatch as _dispatch  # noqa: E402
+
+CLEAN_SPEC_AD = """# Goal
+
+Fixture spec used only by test_look.py's autodispatch-0427 fixtures.
+
+# Acceptance criteria
+
+AC1 [backend]: trivially true. review_path: n/a.
+
+Writes:
+- fixture/file.py
+
+# Verification
+
+```
+true && echo VERIFIED
+```
+"""
+
+
+def _ad_root_setup(root, project="proj"):
+    """`autodispatch.candidates` reads `fold.ROOT` (repo symlink, capacity) and
+    `dispatch.CONTENT` (spec text) as module globals, never `look.run`'s own
+    `root` argument — production runs both off the SAME DOIT_ROOT; these
+    fixtures line them up by hand, and restore them afterward."""
+    saved = (fold.ROOT, _dispatch.ROOT, _dispatch.EVENTS, _dispatch.CONTENT)
+    fold.ROOT = root
+    _dispatch.ROOT, _dispatch.EVENTS, _dispatch.CONTENT = root, root / "events", root / "content"
+    (root / "content").mkdir(parents=True, exist_ok=True)
+    (root / "repos").mkdir(parents=True, exist_ok=True)
+    bare = root / "bare-repo"
+    bare.mkdir(exist_ok=True)
+    link = root / "repos" / project
+    if not link.exists():
+        link.symlink_to(bare)
+    return saved
+
+
+def _ad_root_restore(saved):
+    fold.ROOT, _dispatch.ROOT, _dispatch.EVENTS, _dispatch.CONTENT = saved
+
+
+# AC20 — a dispatchable spec 40 minutes stale briefs once; 10 minutes briefs nothing.
+root20 = newroot()
+saved20 = _ad_root_setup(root20, project="proj20")
+(root20 / "content" / "L-spec-20001.md").write_text(CLEAN_SPEC_AD)
+append_raw(root20, "L-planner-0001.jsonl", iso(NOW - timedelta(minutes=40)),
+           type="spec-written", subject="L-spec-20001", project="proj20")
+ev20 = read_ledger(root20)
+res20 = look.run(ev20, now=NOW, runner=FakeRunner(), root=root20, toml_path=clean_toml(root20))
+b20 = briefs_of(res20, "spec-dispatchable-stale")
+ok(len(b20) == 1 and b20[0]["key"] == "L-spec-20001" and b20[0]["owner"] == "executor",
+   f"AC20: one brief for a 40-minute-stale dispatchable spec: {b20}")
+_ad_root_restore(saved20)
+
+root20b = newroot()
+saved20b = _ad_root_setup(root20b, project="proj20b")
+(root20b / "content" / "L-spec-20002.md").write_text(CLEAN_SPEC_AD)
+append_raw(root20b, "L-planner-0001.jsonl", iso(NOW - timedelta(minutes=10)),
+           type="spec-written", subject="L-spec-20002", project="proj20b")
+ev20b = read_ledger(root20b)
+res20b = look.run(ev20b, now=NOW, runner=FakeRunner(), root=root20b, toml_path=clean_toml(root20b))
+ok(briefs_of(res20b, "spec-dispatchable-stale") == [], "AC20: a fresh (10-minute) dispatchable spec briefs nothing")
+_ad_root_restore(saved20b)
+print("autodispatch-0427 AC20 ok")
+
+# AC21 — a seat-wait spec (full capacity, otherwise eligible) never alarms, even at 40 minutes.
+root21 = newroot()
+saved21 = _ad_root_setup(root21, project="proj21")
+(root21 / "models.toml").write_text("[seats]\nbuilder = 1\n")
+(root21 / "content" / "L-spec-21001.md").write_text(CLEAN_SPEC_AD)
+(root21 / "content" / "L-spec-21002.md").write_text(CLEAN_SPEC_AD)
+append_raw(root21, "L-planner-0001.jsonl", iso(NOW - timedelta(hours=2)),
+           type="spec-written", subject="L-spec-21001", project="proj21")
+append_raw(root21, "L-planner-0002.jsonl", iso(NOW - timedelta(minutes=40)),
+           type="spec-written", subject="L-spec-21002", project="proj21")
+ev21 = read_ledger(root21)
+res21 = look.run(ev21, now=NOW, runner=FakeRunner(), root=root21, toml_path=clean_toml(root21))
+ok(not any(b["key"] == "L-spec-21002" for b in briefs_of(res21, "spec-dispatchable-stale")),
+   f"AC21: a seat-wait spec never alarms: {res21['briefs']}")
+_ad_root_restore(saved21)
+print("autodispatch-0427 AC21 ok")
+
+# AC22 — reading is dispatch-failed:<reason> for a standing failure, tick-not-running otherwise.
+root22 = newroot()
+saved22 = _ad_root_setup(root22, project="proj22")
+(root22 / "content" / "L-spec-22001.md").write_text(CLEAN_SPEC_AD)
+append_raw(root22, "L-planner-0001.jsonl", iso(NOW - timedelta(minutes=40)),
+           type="spec-written", subject="L-spec-22001", project="proj22")
+append_raw(root22, "L-tick-0001.jsonl", iso(NOW - timedelta(minutes=35)),
+           type="autodispatch-failed", subject="L-spec-22001", reason="boom-22")
+ev22 = read_ledger(root22)
+res22 = look.run(ev22, now=NOW, runner=FakeRunner(), root=root22, toml_path=clean_toml(root22))
+b22 = briefs_of(res22, "spec-dispatchable-stale")
+ok(len(b22) == 1 and b22[0]["reading"] == "dispatch-failed:boom-22", f"AC22a: {b22}")
+_ad_root_restore(saved22)
+
+root22b = newroot()
+saved22b = _ad_root_setup(root22b, project="proj22b")
+(root22b / "content" / "L-spec-22002.md").write_text(CLEAN_SPEC_AD)
+append_raw(root22b, "L-planner-0001.jsonl", iso(NOW - timedelta(minutes=40)),
+           type="spec-written", subject="L-spec-22002", project="proj22b")
+ev22b = read_ledger(root22b)
+res22b = look.run(ev22b, now=NOW, runner=FakeRunner(), root=root22b, toml_path=clean_toml(root22b))
+b22b = briefs_of(res22b, "spec-dispatchable-stale")
+ok(len(b22b) == 1 and b22b[0]["reading"] == "tick-not-running", f"AC22b: {b22b}")
+_ad_root_restore(saved22b)
+print("autodispatch-0427 AC22 ok")
+
+# AC23 — once the spec leaves `written` (a build-started lands), a second pass
+# briefs nothing further and clears the standing one via emit_once/_clear.
+root23 = newroot()
+saved23 = _ad_root_setup(root23, project="proj23")
+(root23 / "content" / "L-spec-23001.md").write_text(CLEAN_SPEC_AD)
+append_raw(root23, "L-planner-0001.jsonl", iso(NOW - timedelta(minutes=40)),
+           type="spec-written", subject="L-spec-23001", project="proj23")
+ev23a = read_ledger(root23)
+res23a = look.run(ev23a, now=NOW, runner=FakeRunner(), root=root23, toml_path=clean_toml(root23))
+ok(len(briefs_of(res23a, "spec-dispatchable-stale")) == 1, f"AC23: seeding a standing brief first: {res23a['briefs']}")
+append_raw(root23, "L-builder-2301.jsonl", iso(NOW - timedelta(minutes=5)),
+           type="build-started", subject="L-spec-23001")
+ev23b = read_ledger(root23)
+res23b = look.run(ev23b, now=NOW, runner=FakeRunner(), root=root23, toml_path=clean_toml(root23))
+ok(briefs_of(res23b, "spec-dispatchable-stale") == [], "AC23: no further brief once off written")
+ev23c = read_ledger(root23)
+ok(any(e.get("type") == "brief-answered" for e in ev23c), "AC23: the standing brief is cleared on the ledger")
+_ad_root_restore(saved23)
+print("autodispatch-0427 AC23 ok")
+
+
 # ── AC1: single injectable Runner; a real-subprocess sentinel proves no leak ─
 root1 = newroot()
 raising = lambda *a, **k: (_ for _ in ()).throw(AssertionError("real subprocess/shutil call leaked past Runner"))
