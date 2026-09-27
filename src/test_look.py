@@ -3,16 +3,25 @@
 (L-charter-0036 R1/R3/R4/R5, L-spec-0322). Run: python3 test_look.py
 
 Every external read goes through a fake `Runner`; nothing here opens a real
-ssh/git/tmux/crontab/df call. `panes`/`pane_resume` reads (local session and
+ssh/git/tmux/crontab/df/gh call. `panes`/`pane_resume` reads (local session and
 transcript files) are pointed at tempdirs explicitly, never the operator's
 real `~/.claude/sessions`. Clocks used for the 90s-budget mechanism (AC18)
 are the fake Runner's own scripted `clock()`/`sleep()` — never a real wait.
+
+`look.run()` now unconditionally runs `look_wallclock`'s own quota check too
+(L-spec-0389), which globs `pane_resume.PROJECTS` by default — module-level
+`pane_resume.PROJECTS`/`panes.SESSIONS` are therefore repointed at fresh empty
+tempdirs immediately below, for every AC in this file, so a `look.run()` call
+that never mentions either directory still never reads the operator's real one.
 """
 import json, os, pathlib, socket, subprocess, sys, tempfile, time
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
-import dispatch, fold, look, panes  # noqa: E402
+import dispatch, fold, look, look_wallclock, pane_resume, panes  # noqa: E402
+
+pane_resume.PROJECTS = pathlib.Path(tempfile.mkdtemp())
+panes.SESSIONS = pathlib.Path(tempfile.mkdtemp())
 
 n = 0
 
@@ -55,6 +64,11 @@ def iso(dt):
 def write_toml(root, **overrides):
     """A minimal look.toml-shaped file the test points `toml_path` at."""
     lines = []
+    # Bare top-level keys MUST precede every table header below, or TOML nests
+    # them inside whichever header came last — an explicit `ci=[]` reads as
+    # "no rows", never DEFAULTS' fallback row (look.load_toml's own "in doc" check).
+    if "ci" in overrides and not (overrides["ci"] or []):
+        lines.append("ci = []")
     th = overrides.get("thresholds") or {}
     if th:
         lines.append("[thresholds]")
@@ -68,6 +82,15 @@ def write_toml(root, **overrides):
     if pam:
         lines.append("[pane_at_menu]")
         for k, v in pam.items():
+            lines.append(f"{k} = {json.dumps(v)}")
+    for row in overrides.get("ci") or []:
+        lines.append("[[ci]]")
+        for k, v in row.items():
+            lines.append(f"{k} = {json.dumps(v)}")
+    cls = overrides.get("classes")
+    if cls:
+        lines.append("[classes]")
+        for k, v in cls.items():
             lines.append(f"{k} = {json.dumps(v)}")
     p = root / "look.toml"
     p.write_text("\n".join(lines) + "\n")
@@ -84,12 +107,13 @@ class FakeRunner:
     """Every call recorded; each behavior swappable per-test. `sleep()` advances
     a SCRIPTED virtual clock — never a real wait (AC18)."""
     def __init__(self, ssh=None, git=None, tmux_capture=None, crontab_text=None,
-                 disk_usage=None, clock_start=0.0):
+                 disk_usage=None, gh_run_list=None, clock_start=0.0):
         self._ssh = ssh or (lambda target, cmd, timeout: "")
         self._git = git or (lambda args, cwd, timeout: "")
         self._tmux = tmux_capture or (lambda target, timeout: "")
         self._crontab = crontab_text or (lambda timeout: "")
         self._disk = disk_usage or (lambda path, timeout: {"total": 100, "used": 10, "free": 90})
+        self._gh = gh_run_list or (lambda repo, branch, timeout: "[]")
         self._t = clock_start
         self.calls = []
 
@@ -112,6 +136,10 @@ class FakeRunner:
     def disk_usage(self, path, timeout):
         self.calls.append(("disk_usage", path, timeout))
         return self._disk(path, timeout)
+
+    def gh_run_list(self, repo, branch, timeout):
+        self.calls.append(("gh_run_list", repo, branch, timeout))
+        return self._gh(repo, branch, timeout)
 
     def clock(self):
         return self._t
@@ -150,7 +178,8 @@ try:
                        git=lambda a, cwd, to: "a" * 7,
                        tmux_capture=lambda t, to: "some codex text\n",
                        crontab_text=lambda to: "")
-    toml1 = write_toml(root1, prod=[prod_row()], pane_at_menu={"codex_patterns": ["nomatch"], "codex_targets": ["t1"]})
+    toml1 = write_toml(root1, prod=[prod_row()], ci=[],
+                       pane_at_menu={"codex_patterns": ["nomatch"], "codex_targets": ["t1"]})
     res1 = look.run([], now=NOW, runner=fake1, root=root1, toml_path=toml1)
     methods1 = {c[0] for c in fake1.calls}
     ok(methods1 == {"ssh", "git", "tmux_capture", "crontab_text", "disk_usage"}, "AC1: every reading used the fixture")
@@ -532,6 +561,101 @@ ok(not any(b["condition"] == "tmp-climbing" for b in res14b["briefs"]), "AC14: a
 ok(any(b["key"] == "undetermined:tmp-climbing" for b in briefs_of(res14b, "reading-undetermined")),
    "AC14: <8min gap reads undetermined, not a false flat/rising slope")
 print("AC14 ok")
+
+# ── L-spec-0389 AC7: fix_for — a configured class + an open charter's own
+# `corrects:` header sets `fix` on a look brief; no class or no naming charter
+# carries `owner` only. Placed BEFORE AC15 on purpose: AC15c's own pre-existing
+# failure (unrelated, confirmed identical at base_sha) halts this script, and
+# this spec's own markers must print regardless.
+root_ac7 = newroot()
+(root_ac7 / "content").mkdir()
+(root_ac7 / "content" / "L-charter-0099.md").write_text("corrects: ops, other\n\nSome charter body.\n")
+append_raw(root_ac7, "L-thinker-0001.jsonl", iso(NOW - timedelta(days=1)), type="charter-filed", subject="L-charter-0099")
+ev_ac7 = read_ledger(root_ac7)
+
+
+class _CronsOneMissing:
+    @staticmethod
+    def check(crontab_text=None):
+        return [{"name": "tmp-reaper"}]
+
+
+toml_ac7 = write_toml(root_ac7, classes={"cron-missing": "ops"})
+sys.modules["crons"] = _CronsOneMissing()
+try:
+    res_ac7a = look.run(ev_ac7, now=NOW, runner=FakeRunner(), root=root_ac7, toml_path=toml_ac7)
+finally:
+    del sys.modules["crons"]
+b_ac7a = next(b for b in briefs_of(res_ac7a, "cron-missing"))
+ok(b_ac7a.get("fix") == "L-charter-0099", "L-spec-0389 AC7: a configured class + a naming open charter sets fix")
+
+root_ac7b = newroot()
+ev_ac7b = read_ledger(root_ac7b)
+toml_ac7b = write_toml(root_ac7b, classes={})   # the shipped default: empty
+sys.modules["crons"] = _CronsOneMissing()
+try:
+    res_ac7b = look.run(ev_ac7b, now=NOW, runner=FakeRunner(), root=root_ac7b, toml_path=toml_ac7b)
+finally:
+    del sys.modules["crons"]
+b_ac7b = next(b for b in briefs_of(res_ac7b, "cron-missing"))
+ok("fix" not in b_ac7b and b_ac7b.get("owner") == "thinker",
+   "L-spec-0389 AC7: empty [classes] (or no open charter naming the class) -> owner only, never fix:null/fix:''")
+print("AC7 ok")
+
+# ── L-spec-0389 AC8: look.run() calls look_wallclock.run() exactly once, BEFORE
+# the look-stale clear, wires "wallclock"/"briefs" apart, and degrades a raise
+# to one reading-undetermined rather than crashing the pass.
+calls_ac8, order_ac8 = [], []
+fake_events_ac8 = [{"type": "ci-red", "repo": "x", "workflow": "y", "sha": "s", "run_url": "u", "since": "t"}]
+fake_briefs_ac8 = [{"type": "brief", "condition": "planner-attempts-stuck", "key": "k", "owner": "thinker",
+                   "problem": "planner-attempts-stuck", "reading": {}, "measured_at": "m", "subject": "s", "why": "w"}]
+
+
+def fake_wallclock_run(events, runner, now, root, cfg, deadline, write_brief, dry_run):
+    calls_ac8.append((events, runner, now, root, cfg, deadline, write_brief, dry_run))
+    order_ac8.append("wallclock")
+    return {"events": list(fake_events_ac8), "briefs": list(fake_briefs_ac8)}
+
+
+real_wallclock_run, real_clear = look_wallclock.run, look._clear
+
+
+def spy_clear(*a, **k):
+    order_ac8.append("clear")
+    return real_clear(*a, **k)
+
+
+look_wallclock.run, look._clear = fake_wallclock_run, spy_clear
+root_ac8 = newroot()
+try:
+    res_ac8a = look.run([], now=NOW, runner=FakeRunner(), root=root_ac8, toml_path=clean_toml(root_ac8), dry_run=True)
+finally:
+    look_wallclock.run, look._clear = real_wallclock_run, real_clear
+ok(len(calls_ac8) == 1, "L-spec-0389 AC8: look_wallclock.run called exactly once per pass")
+ok(calls_ac8[0][6] is look._write_brief, "L-spec-0389 AC8: look.run() passes its OWN _write_brief as write_brief")
+ok(calls_ac8[0][7] is True, "L-spec-0389 AC8: look.run() passes its own dry_run flag through unchanged")
+last_clear_idx = len(order_ac8) - 1 - order_ac8[::-1].index("clear")
+ok(order_ac8.index("wallclock") < last_clear_idx, "L-spec-0389 AC8: look_wallclock.run runs BEFORE the look-stale clear")
+ok(res_ac8a["wallclock"] == fake_events_ac8, "L-spec-0389 AC8: the ci-red dict lands unmodified in wallclock")
+ok(not any(b == fake_events_ac8[0] for b in res_ac8a["briefs"]), "L-spec-0389 AC8: the ci-red dict never lands in briefs")
+ok(any(b == fake_briefs_ac8[0] for b in res_ac8a["briefs"]), "L-spec-0389 AC8: the brief dict lands unmodified in briefs")
+ok(not any(e == fake_briefs_ac8[0] for e in res_ac8a["wallclock"]), "L-spec-0389 AC8: the brief dict never lands in wallclock")
+
+
+def raising_wallclock_run(*a, **k):
+    raise RuntimeError("boom")
+
+
+root_ac8b = newroot()
+look_wallclock.run = raising_wallclock_run
+try:
+    res_ac8b = look.run([], now=NOW, runner=FakeRunner(), root=root_ac8b, toml_path=clean_toml(root_ac8b))
+finally:
+    look_wallclock.run = real_wallclock_run
+ok(res_ac8b["wallclock"] == [], "L-spec-0389 AC8: a raising look_wallclock.run returns wallclock:[] for that pass")
+ok(any(b["key"] == "undetermined:wallclock" for b in briefs_of(res_ac8b, "reading-undetermined")),
+   "L-spec-0389 AC8: a raising look_wallclock.run degrades to one reading-undetermined, never a crashed pass")
+print("AC8 ok")
 
 # ── AC15: cron-missing, per row; crons.Undetermined; unimportable crons ─────
 root15 = newroot()
