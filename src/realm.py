@@ -831,7 +831,23 @@ def wallclock(rows, states, now):
     for k in burn:
         burn[k]["hours"] = round(burn[k]["hours"], 1)
     deploys = collections.Counter(r["ty"] for r in rows if r["ty"].startswith("deploy"))
-    return {"at": now.isoformat(timespec="seconds"), "live": live,
+    # rule 3 (agreed 2026-09-27): a critical condition older than 30 minutes with no owner action escalates to the Thinker.
+    # Server-side, from the 5-minute series, for the classes a metric carries; the page does the same for its own.
+    CRIT = {"unclaimed": ("unclaimed", 1), "deadlock": ("deadlock", 1), "disk": ("disk", 92), "behind": ("behind", 3), "lane": ("lane", 80), "shape_hours": ("shape", 48), "ci_red": ("ci", 1)}
+    escalate = []
+    with _H_LOCK:
+        for metric, (cls, thr) in CRIT.items():
+            ser = HISTORY.get(metric) or []
+            since = None
+            for t, v in reversed(ser):
+                if v is None or v < thr:
+                    break
+                since = t
+            if since and (now - _parse(since)).total_seconds() >= 1800:
+                escalate.append({"class": cls, "since": since, "value": ser[-1][1]})
+    if acts and (now - _parse(acts[-1]["t"])).total_seconds() > 1800:
+        escalate.append({"class": "executor", "since": acts[-1]["t"], "value": round((now - _parse(acts[-1]["t"])).total_seconds() / 60)})
+    return {"at": now.isoformat(timespec="seconds"), "live": live, "escalate": escalate,
             "rework": {"rebuilt": rebuilt, "regraded": regraded, "build_hours": round(rework_build, 1), "grade_hours": round(rework_grade, 1), "blocked": blocked},
             "burn": burn, "executor_last_act": acts[-1]["t"] if acts else None,
             "dispatch_gap": {"hours": round(gap[0], 1), "from": gap[1], "to": gap[2]},
