@@ -168,6 +168,30 @@ the repository. The same object, on the `claude -p` route, goes through the
 StructuredOutput tool instead; the wrapper validates it against the same schema
 either way.
 
+## Owed only when
+
+A criterion is owed only when its proof needs one of three things: elapsed time after a deploy; production data or infrastructure a worktree builder cannot reach; or a destructive write that deletes data or moves money — the class already named in `## Acceptance criteria`, folded in here as a third instance of the same rule rather than a contradiction of it, because a worktree builder cannot safely produce that evidence either, so it too is proven at its first real occurrence rather than at merge.
+
+Everything else is verified at merge.
+
+This section sets a soft cap of 3 owed criteria per spec. A 4th-or-later owed criterion's `line` begins `over-cap:` followed by the reason it could not be avoided.
+
+## Before you return: the shape check
+
+Before returning, run `doit shape` against your own spec file — the sibling `spec-shape-tool` unit's CLI — and fix every `BLOCK:` line it prints, repeating until it exits 0. `--fix` applies the tool's two safe mechanical repairs; anything else is fixed by hand.
+
+The tool checks three shape rules, each with one correct example, drawn verbatim from the Plan's SD10:
+
+Rule one: Verification is one `&&` chain with absolute interpreters. Correct example: `cd /home/albert/do-it-v2 && /usr/bin/python3 src/test_owed.py && ./doit test`.
+
+Rule two: `Writes:` entries are bare paths or globs, one per line, never annotated. Correct example:
+
+- src/owed.py
+
+Never the annotated form: `- src/owed.py (new)`.
+
+Rule three: AC lines sit at the margin, unbulleted, so the criteria extractor can read them. Correct example: `AC3 [backend]: …`.
+
 ## Lessons (operator rule, 2026-09-24)
 
 This adds no new write and no new event: you already return the free text that carries this
