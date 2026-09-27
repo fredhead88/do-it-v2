@@ -161,13 +161,17 @@ _, sp, _, ig, _ = ledger(**{"L-builder-01.jsonl": built + [
     {"ts": stamp(1), "type": "verdict", "subject": S, "confirmed": True, "actor": "grader"}]})
 assert len(ig) == 1, "an actor field in the body is a stamp and is not read"
 
-# D25 shipped-owed-evidence, and D76 retraction. `owed-ac` is on the spec-writer's
+# D76 retraction, and `owed-ac` authorization. `owed-ac` is on the spec-writer's
 # and spec-auditor's May-declare lists and nobody else's — an executor that could
 # declare one could walk any shipped spec into a terminal success state alone.
+# L-charter-0038/L-spec-0384, R2: a criterion-LESS `owed-ac` (this fixture's own
+# shape, pre-dating the schema's `criterion` requirement) now produces no
+# `owed.checks()` row at all — the dead branch that used to read it as
+# `shipped-owed-evidence` is deleted, not ported (0 such events exist live).
 owed = [{"ts": stamp(0), "type": "owed-ac", "subject": S, "wake_at": stamp(-7)}]
 _, sp, _, _, _ = ledger(**{"L-builder-01.jsonl": built, "L-executor-01.jsonl": shipped,
                            "L-spec-writer-01.jsonl": owed})
-assert sp[S]["state"] == "shipped-owed-evidence"
+assert sp[S]["state"] == "shipped", "a criterion-less owed-ac produces no row"
 _, sp, _, ig, _ = ledger(**{"L-builder-01.jsonl": built,
                             "L-executor-01.jsonl": shipped + owed})
 assert sp[S]["state"] == "shipped" and len(ig) == 1, \
@@ -707,7 +711,10 @@ assert sp[S]["state"] == "shipped", \
 
 # 1. An `owed-met` (Executor or operator, citing the evidence) discharges the
 # owed criterion, and `accepted` derives with no new verdict — no re-grade spawn.
-owed_met = [{"ts": stamp(0), "type": "owed-met", "subject": S, "criterion": "AC7",
+# L-charter-0038/L-spec-0384, AC4: `met` is strict-after the governing
+# `owed-ac`, never a tie — `stamp_h(-1)` (an hour after `owed_ac7`'s own
+# `stamp(0)`) keeps this fixture on the non-tie side of that pin.
+owed_met = [{"ts": stamp_h(-1), "type": "owed-met", "subject": S, "criterion": "AC7",
             "evidence": "the post-merge check-run: https://ci/run/42 green"}]
 _, sp, _, _, _ = ledger(**{"L-builder-01.jsonl": built, "L-grader-01.jsonl": cannot_assess_owed,
                            "L-reviewer-01.jsonl": reviewed,
@@ -1306,38 +1313,47 @@ assert SESSIONS_DEFAULT.name == "sessions", SESSIONS_DEFAULT
 # L-spec-0192 · fold-states-owed-due-and-killed (L-charter-0028)
 # ══════════════════════════════════════════════════════════════════════════════
 
-# ── AC1 · a due, unmet owed-ac -> shipped-owed-due, not evidence or plain shipped
-due_ac1 = [{"ts": stamp(0), "type": "owed-ac", "subject": S, "criterion": "AC1", "wake_at": stamp(7)}]
+# ── AC1 · a due, unmet owed-ac -> shipped-owed-due, not evidence or plain
+# shipped. L-charter-0038/L-spec-0384: ship-anchored now, not the raw
+# wake_at — `shipped_early` ships 5 days ago, the owed-ac is declared 10 days
+# ago with `wake_at` 7 days ago (a 3-day interval), landing `due_at` 2 days
+# ago.
+shipped_early = [{"ts": stamp(5), "type": "shipped", "subject": S}]
+due_ac1 = [{"ts": stamp(10), "type": "owed-ac", "subject": S, "criterion": "AC1", "wake_at": stamp(7)}]
 _, sp, _, _, _ = ledger(**{"L-builder-01.jsonl": built, "L-grader-01.jsonl": graded,
-                           "L-reviewer-01.jsonl": reviewed, "L-executor-01.jsonl": shipped,
+                           "L-reviewer-01.jsonl": reviewed, "L-executor-01.jsonl": shipped_early,
                            "L-spec-writer-01.jsonl": due_ac1})
 assert sp[S]["state"] == "shipped-owed-due", sp[S]["state"]
 
-# ── AC2 · same fixture, wake_at 7 days in the FUTURE -> stays shipped-owed-evidence (D25)
-future_ac1 = [{**due_ac1[0], "wake_at": stamp(-7)}]
+# ── AC2 · the SAME 10d-ago declaration, `wake_at` only 2 days ago: the 8-day
+# interval anchored at the 5d-ago ship lands `due_at` 3 days in the FUTURE ->
+# stays shipped-owed-evidence (D25)
+future_ac1 = [{**due_ac1[0], "wake_at": stamp(2)}]
 _, sp, _, _, _ = ledger(**{"L-builder-01.jsonl": built, "L-grader-01.jsonl": graded,
-                           "L-reviewer-01.jsonl": reviewed, "L-executor-01.jsonl": shipped,
+                           "L-reviewer-01.jsonl": reviewed, "L-executor-01.jsonl": shipped_early,
                            "L-spec-writer-01.jsonl": future_ac1})
 assert sp[S]["state"] == "shipped-owed-evidence", sp[S]["state"]
 
 # ── AC3 · a due criterion plus a co-existing NOT-yet-due one -> due wins
-due_plus_pending = due_ac1 + [{"ts": stamp(0), "type": "owed-ac", "subject": S,
-                                "criterion": "AC2", "wake_at": stamp(-7)}]
+due_plus_pending = due_ac1 + [{"ts": stamp(10), "type": "owed-ac", "subject": S,
+                                "criterion": "AC2", "wake_at": stamp(2)}]
 _, sp, _, _, _ = ledger(**{"L-builder-01.jsonl": built, "L-grader-01.jsonl": graded,
-                           "L-reviewer-01.jsonl": reviewed, "L-executor-01.jsonl": shipped,
+                           "L-reviewer-01.jsonl": reviewed, "L-executor-01.jsonl": shipped_early,
                            "L-spec-writer-01.jsonl": due_plus_pending})
 assert sp[S]["state"] == "shipped-owed-due", sp[S]["state"]
 
-# ── AC4 · owed-met after the due owed-ac discharges it -> accepted
+# ── AC4 · owed-met, strictly after the governing owed-ac, discharges it -> accepted
 _, sp, _, _, _ = ledger(**{"L-builder-01.jsonl": built, "L-grader-01.jsonl": graded,
                            "L-reviewer-01.jsonl": reviewed,
-                           "L-executor-01.jsonl": shipped + [{"ts": stamp(0), "type": "owed-met",
+                           "L-executor-01.jsonl": shipped_early + [{"ts": stamp(0), "type": "owed-met",
                                                               "subject": S, "criterion": "AC1",
                                                               "evidence": "checked by hand"}],
                            "L-spec-writer-01.jsonl": due_ac1})
 assert sp[S]["state"] == "accepted", sp[S]["state"]
 
-# ── AC5 · a standing rejected-criterion routes away from shipped-owed-due entirely
+# ── AC5 · a standing rejected-criterion routes away from shipped-owed-due
+# entirely — UNCHANGED: open_rejects short-circuits before any owed-clock
+# logic runs, so the shape of the owed-ac underneath it is immaterial.
 _, sp, _, _, _ = ledger(**{"L-builder-01.jsonl": built, "L-grader-01.jsonl": graded,
                            "L-reviewer-01.jsonl": reviewed,
                            "L-executor-01.jsonl": shipped + [{"ts": stamp(0), "type": "rejected-criterion",
@@ -1345,24 +1361,31 @@ _, sp, _, _, _ = ledger(**{"L-builder-01.jsonl": built, "L-grader-01.jsonl": gra
                            "L-spec-writer-01.jsonl": due_ac1})
 assert sp[S]["state"] == "shipped", sp[S]["state"]
 
-# ── AC8 · owed_due() — one row per due-and-unmet criterion, across every spec
+# ── AC9 (L-charter-0038/L-spec-0384, R3) · owed_due() ship-anchored, across
+# every spec — a FRESH fixture: neither `built`/`graded`/`reviewed`/`shipped`
+# nor `shipped_early` above (both ship "today" relative to their own owed-ac)
+# can, alone, produce a genuinely overdue `due_at` for THIS assertion's own
+# two-spec shape, so `S`/`S2` here ship 5 days ago and declare 10 days ago,
+# `wake_at` 7 days ago — `due_at` 2 days ago, on two specs.
 S2 = "L-spec-0143"
 built_s2 = [{**e, "subject": S2} for e in built]
 graded_s2 = [{**e, "subject": S2} for e in graded]
 reviewed_s2 = [{**e, "subject": S2} for e in reviewed]
-shipped_s2 = [{**e, "subject": S2} for e in shipped]
-due_ac1_s2 = [{"ts": stamp(0), "type": "owed-ac", "subject": S2, "criterion": "AC1", "wake_at": stamp(7)}]
-pending_ac2_s2 = [{"ts": stamp(0), "type": "owed-ac", "subject": S2, "criterion": "AC2", "wake_at": stamp(-7)}]
-_, sp8, _, _, _ = ledger(**{
+shipped_early_s2 = [{**e, "subject": S2} for e in shipped_early]
+due_ac1_s2 = [{"ts": stamp(10), "type": "owed-ac", "subject": S2, "criterion": "AC1", "wake_at": stamp(7)}]
+_, spdue, _, _, _ = ledger(**{
     "L-builder-01.jsonl": built + built_s2, "L-grader-01.jsonl": graded + graded_s2,
-    "L-reviewer-01.jsonl": reviewed + reviewed_s2, "L-executor-01.jsonl": shipped + shipped_s2,
-    "L-spec-writer-01.jsonl": due_ac1 + due_ac1_s2 + pending_ac2_s2})
-rows = fold.owed_due(sp8)
+    "L-reviewer-01.jsonl": reviewed + reviewed_s2,
+    "L-executor-01.jsonl": shipped_early + shipped_early_s2,
+    "L-spec-writer-01.jsonl": due_ac1 + due_ac1_s2})
+rows = fold.owed_due(spdue)
 assert {(r["spec"], r["criterion"]) for r in rows} == {(S, "AC1"), (S2, "AC1")}, rows
 assert all(r["days_overdue"] > 0 for r in rows), rows
 assert all(set(r) == {"spec", "criterion", "due_at", "days_overdue", "src"} for r in rows), rows
+assert all(isinstance(r["due_at"], str) and " " not in r["due_at"] for r in rows), rows
+print("AC9 ok")
 
-# ── AC9 · killed is terminal — survives a LATER stage event on the same subject
+# ── AC9 (L-spec-0192) · killed is terminal — survives a LATER stage event on the same subject
 S3 = "L-spec-0144"
 _, sp9, _, _, _ = ledger(**{
     "L-spec-writer-01.jsonl": [{"ts": stamp(3), "type": "spec-written", "subject": S3},
@@ -1498,7 +1521,7 @@ assert fold.spec_state(hand_evs, set()) != "accepted", fold.spec_state(hand_evs,
 # CHARTER CLOSE — is its one home; L-spec-0192's own AC22 expected the
 # interim "renders under AWAITING VERIFICATION" state pending this unit).
 evs22 = ledger(**{"L-builder-01.jsonl": built, "L-grader-01.jsonl": graded,
-                  "L-reviewer-01.jsonl": reviewed, "L-executor-01.jsonl": shipped,
+                  "L-reviewer-01.jsonl": reviewed, "L-executor-01.jsonl": shipped_early,
                   "L-spec-writer-01.jsonl": due_ac1})
 board22 = fold.render(*evs22)
 av_block = board22.split("## AWAITING VERIFICATION")[1].split("## OWED EVIDENCE")[0]
@@ -1512,46 +1535,51 @@ assert S in od_block, od_block
 # L-spec-0196 · board-shows-each-signal-as-itself (L-charter-0028, wave 3)
 # ══════════════════════════════════════════════════════════════════════════════
 
-# ── AC1 · one due, unmet owed-ac (10d overdue) -> one OWED DUE row; empty stays visible
-due10 = [{"ts": stamp(0), "type": "owed-ac", "subject": S, "criterion": "AC1", "wake_at": stamp(10)}]
+# ── AC1 (L-charter-0038/L-spec-0384, R3/AC14) · one due, unmet owed-ac
+# (2d overdue, AC9's own S/shipped_early/due_ac1 fixture) -> one OWED DUE row
+# naming the row's OWN computed due_at, never the raw wake_at it used to echo
+# verbatim (the bug this unit fixes); empty stays visible.
 ev1 = ledger(**{"L-builder-01.jsonl": built, "L-grader-01.jsonl": graded,
-               "L-reviewer-01.jsonl": reviewed, "L-executor-01.jsonl": shipped,
-               "L-spec-writer-01.jsonl": due10})
+               "L-reviewer-01.jsonl": reviewed, "L-executor-01.jsonl": shipped_early,
+               "L-spec-writer-01.jsonl": due_ac1})
 board1 = fold.render(*ev1)
 assert "## OWED DUE (1)" in board1, board1
 od_block1 = board1.split("## OWED DUE")[1].split("## CHARTER CLOSE")[0]
-assert S in od_block1 and "AC1" in od_block1 and "10d overdue" in od_block1, od_block1
-assert due10[0]["wake_at"] in od_block1, od_block1
+assert S in od_block1 and "AC1" in od_block1 and "2d overdue" in od_block1, od_block1
+assert stamp(2) in od_block1, od_block1
+assert due_ac1[0]["wake_at"] not in od_block1, od_block1
 empty_board1 = fold.render(*ledger(**{"L-operator-local.jsonl": []}))
 assert "## OWED DUE (0)" in empty_board1, empty_board1
 
-# ── AC2 · a 3d and a 9d overdue row: HEALTH names only the 9d row in the fault
-# fragment; zero rows over 7 days renders no fault fragment at all
+# ── AC2 (L-charter-0038/L-spec-0384, R3/AC14) · a due row (S, AC9's fixture)
+# and an EXPIRED-only row (S2, AC6's clamped shape, `shipped_at` 10 days ago)
+# — `owed_due`/HEALTH count only the due one; the expired row is no longer
+# "overdue" at all, and OVER-7-DAYS is gone (deleted, not re-thresholded).
 S2 = "L-spec-0143"
 built2 = [{"ts": stamp(3), "type": "spec-written", "subject": S2, "charter": C},
           {"ts": stamp(2), "type": "build-started", "subject": S2},
           {"ts": stamp(2), "type": "build-done", "subject": S2}]
 graded2 = [{"ts": stamp(1), "type": "verdict", "subject": S2, "confirmed": True}]
 reviewed2 = [{"ts": stamp(1), "type": "review", "subject": S2, "depth": "gates-only"}]
-shipped2 = [{"ts": stamp(0), "type": "shipped", "subject": S2}]
-due3 = [{"ts": stamp(0), "type": "owed-ac", "subject": S, "criterion": "AC1", "wake_at": stamp(3)}]
-due9 = [{"ts": stamp(0), "type": "owed-ac", "subject": S2, "criterion": "AC2", "wake_at": stamp(9)}]
+shipped2 = [{"ts": stamp(10), "type": "shipped", "subject": S2}]
+due3 = due_ac1                                # S, AC1, 2d overdue — due
+same_ts_s2 = stamp(50)
+due9 = [{"ts": same_ts_s2, "type": "owed-ac", "subject": S2, "criterion": "AC2", "wake_at": same_ts_s2}]
 ev2 = ledger(**{"L-builder-01.jsonl": built + built2, "L-grader-01.jsonl": graded + graded2,
                "L-reviewer-01.jsonl": reviewed + reviewed2,
-               "L-executor-01.jsonl": shipped + shipped2,
+               "L-executor-01.jsonl": shipped_early + shipped2,
                "L-spec-writer-01.jsonl": due3 + due9})
 board2 = fold.render(*ev2)
 due_line2 = [l for l in board2.splitlines() if l.strip().startswith("due owed:")][0]
-assert "due owed: 2" in due_line2 and "OVER 7 DAYS" in due_line2, due_line2
-assert S2 in due_line2 and "AC2" in due_line2 and "9d" in due_line2, due_line2
-assert S not in due_line2, due_line2
-
-ev2b = ledger(**{"L-builder-01.jsonl": built, "L-grader-01.jsonl": graded,
-                 "L-reviewer-01.jsonl": reviewed, "L-executor-01.jsonl": shipped,
-                 "L-spec-writer-01.jsonl": due3})
-board2b = fold.render(*ev2b)
-due_line2b = [l for l in board2b.splitlines() if l.strip().startswith("due owed:")][0]
-assert "due owed: 1" in due_line2b and "OVER 7 DAYS" not in due_line2b, due_line2b
+assert "due owed: 1" in due_line2 and "OVER 7 DAYS" not in due_line2, due_line2
+assert S2 not in due_line2 and "AC2" not in due_line2, due_line2
+od_block2 = board2.split("## OWED DUE")[1].split("## CHARTER CLOSE")[0]
+assert S in od_block2 and "AC1" in od_block2, od_block2
+assert S2 not in od_block2 and "AC2" not in od_block2, od_block2
+rows2 = fold.owed_due(ev2[1])
+assert {(r["spec"], r["criterion"]) for r in rows2} == {(S, "AC1")}, rows2
+assert ev2[1][S2]["state"] == "shipped-owed-expired", ev2[1][S2]["state"]
+print("AC14 ok")
 
 # ── AC3 · carry.uncarried: a v4 row with no last_error, a pr row with one
 _saved_carry = sys.modules.get("carry", "‹absent›")
@@ -2189,3 +2217,125 @@ assert fold.check_append(ev_fix18, "thinker") is None, \
 assert fold.EMITS["fix-shipped"] == {"executor", "operator", "thinker"}, fold.EMITS["fix-shipped"]
 assert fold.EMITS["problem-occurred"] == {"tick"}, fold.EMITS["problem-occurred"]
 print("AC18 ok")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-0384 · owed-check-model (L-charter-0038)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── AC10 · fold.EMITS/check_append doors this unit opens or widens ──────────
+ev_met10 = {"type": "owed-met", "subject": "L-spec-9384", "criterion": "AC1",
+           "evidence": "e", "ts": stamp(0)}
+for a in ("owed-sweeper", "executor", "operator"):
+    assert fold.check_append(ev_met10, a) is None, (a, fold.check_append(ev_met10, a))
+assert fold.check_append(ev_met10, "thinker") is not None
+
+ev_failed10 = {"type": "owed-failed", "subject": "L-spec-9384", "criterion": "AC1",
+              "evidence": "e", "kind": "unmet", "ts": stamp(0)}
+for a in ("owed-sweeper", "executor", "operator"):
+    assert fold.check_append(ev_failed10, a) is None, (a, fold.check_append(ev_failed10, a))
+for a in ("thinker", "builder"):
+    assert fold.check_append(ev_failed10, a) is not None, a
+ev_failed10_noev = {"type": "owed-failed", "subject": "L-spec-9384", "criterion": "AC1",
+                    "kind": "unmet", "ts": stamp(0)}
+for a in ("owed-sweeper", "executor", "operator", "thinker", "builder"):
+    assert fold.check_append(ev_failed10_noev, a) is not None, \
+        f"missing evidence must refuse every actor, including {a}"
+
+ev_pp = {"type": "pane-paused", "subject": "x", "ts": stamp(0)}
+assert fold.check_append(ev_pp, "look") is None
+for a in ("executor", "thinker", "operator"):
+    assert fold.check_append(ev_pp, a) is not None, a
+for t in ("ci-red", "ci-green"):
+    ev_t = {"type": t, "subject": "x", "ts": stamp(0)}
+    assert fold.check_append(ev_t, "look") is None
+    for a in ("executor", "thinker", "operator"):
+        assert fold.check_append(ev_t, a) is not None, (t, a)
+
+ev_pr = {"type": "pane-resumed", "subject": "x", "ts": stamp(0)}
+assert fold.check_append(ev_pr, "look") is None
+assert fold.check_append(ev_pr, "tick") is None
+assert fold.check_append(ev_pr, "executor") is not None
+
+ev_ma = {"type": "message-answered", "subject": "x", "ts": stamp(0)}
+for a in ("look", "planner", "executor", "thinker"):
+    assert fold.check_append(ev_ma, a) is None, a
+for a in ("builder", "grader"):
+    assert fold.check_append(ev_ma, a) is not None, a
+print("AC10 ok")
+
+# ── AC11 · shipped-owed-expired, its priority against due/waiting, and the
+# widened owed tally + done_states ───────────────────────────────────────────
+S11 = "L-spec-9386"
+same_ts11 = stamp(50)
+ac11 = {"ts": same_ts11, "type": "owed-ac", "subject": S11, "criterion": "AC1", "wake_at": same_ts11}
+ship11 = {"ts": stamp(10), "type": "shipped", "subject": S11}
+assert fold.spec_state([ac11, ship11], set()) == "shipped-owed-expired", \
+    fold.spec_state([ac11, ship11], set())
+
+ac11_due = {"ts": stamp(15), "type": "owed-ac", "subject": S11, "criterion": "AC2", "wake_at": stamp(8)}
+assert fold.spec_state([ac11, ship11, ac11_due], set()) == "shipped-owed-due", \
+    "a due criterion beats an expired-only one"
+
+ac11_wait = {"ts": stamp(15), "type": "owed-ac", "subject": S11, "criterion": "AC2", "wake_at": stamp(-5)}
+assert fold.spec_state([ac11, ship11, ac11_wait], set()) == "shipped-owed-evidence", \
+    "waiting beats expired-only"
+
+C11 = "L-charter-9386"
+S11c = "L-spec-9386c"
+ac11c = {"ts": stamp(50), "type": "owed-ac", "subject": S11c, "criterion": "AC1",
+        "wake_at": stamp(50), "charter": C11}
+ship11c = {"ts": stamp(10), "type": "shipped", "subject": S11c, "charter": C11}
+charter_filed11 = {"ts": stamp(50), "type": "charter-filed", "subject": C11}
+_K11 = fold.K
+fold.K = 1
+ev11c = ledger(**{"L-spec-writer-01.jsonl": [ac11c], "L-executor-01.jsonl": [ship11c],
+                  "L-thinker-01.jsonl": [charter_filed11]})
+assert ev11c[1][S11c]["state"] == "shipped-owed-expired", ev11c[1][S11c]["state"]
+assert ev11c[2][C11]["owed"] == 1, ev11c[2][C11]["owed"]
+cl11 = fold.closable(ev11c[0], C11)
+assert cl11["owed_within_k"] is True, cl11
+assert cl11["all_accepted"] is True, cl11
+fold.K = 0
+ev11c0 = ledger(**{"L-spec-writer-01.jsonl": [ac11c], "L-executor-01.jsonl": [ship11c],
+                   "L-thinker-01.jsonl": [charter_filed11]})
+assert ev11c0[2][C11]["owed"] == 1, ev11c0[2][C11]["owed"]
+cl11b = fold.closable(ev11c0[0], C11)
+assert cl11b["owed_within_k"] is False, cl11b
+fold.K = _K11
+print("AC11 ok")
+
+# ── AC12 · accepted reads LIVE off owed.checks(), not a criterion-ID
+# membership test — a later re-date reopens it ───────────────────────────────
+S12 = "L-spec-9387"
+built12 = [{**e, "subject": S12} for e in built]
+graded12 = [{**e, "subject": S12} for e in graded]
+reviewed12 = [{**e, "subject": S12} for e in reviewed]
+shipped12 = [{"ts": stamp(9), "type": "shipped", "subject": S12}]
+ac12 = [{"ts": stamp(10), "type": "owed-ac", "subject": S12, "criterion": "AC1", "wake_at": stamp(9)}]
+met12 = [{"ts": stamp(5), "type": "owed-met", "subject": S12, "criterion": "AC1", "evidence": "checked"}]
+ev12 = ledger(**{"L-builder-01.jsonl": built12, "L-grader-01.jsonl": graded12,
+                "L-reviewer-01.jsonl": reviewed12,
+                "L-executor-01.jsonl": shipped12 + met12,
+                "L-spec-writer-01.jsonl": ac12})
+assert ev12[1][S12]["state"] == "accepted", ev12[1][S12]["state"]
+
+redate12 = [{"ts": stamp(1), "type": "owed-ac", "subject": S12, "criterion": "AC1",
+            "wake_at": stamp(-5), "actor": "executor"}]
+ev12b = ledger(**{"L-builder-01.jsonl": built12, "L-grader-01.jsonl": graded12,
+                 "L-reviewer-01.jsonl": reviewed12,
+                 "L-executor-01.jsonl": shipped12 + met12 + redate12,
+                 "L-spec-writer-01.jsonl": ac12})
+assert ev12b[1][S12]["state"] == "shipped-owed-evidence", ev12b[1][S12]["state"]
+print("AC12 ok")
+
+# ── AC13 · owed.checks() returns datetime instances; fold.owed_due()
+# serializes with .isoformat(timespec="seconds"), never str()'s space form ──
+rows_ac13 = fold.owed.checks(shipped_early + due_ac1, fold.NOW)
+assert isinstance(rows_ac13[0]["due_at"], datetime), rows_ac13
+assert isinstance(rows_ac13[0]["shipped_at"], datetime), rows_ac13
+due_rows13 = fold.owed_due({S: {"evs": shipped_early + due_ac1}})
+assert isinstance(due_rows13[0]["due_at"], str) and " " not in due_rows13[0]["due_at"], due_rows13
+assert datetime.fromisoformat(due_rows13[0]["due_at"]) == rows_ac13[0]["due_at"], \
+    (due_rows13[0]["due_at"], rows_ac13[0]["due_at"])
+assert due_rows13[0]["due_at"] == rows_ac13[0]["due_at"].isoformat(timespec="seconds"), due_rows13
+print("AC13 ok")
