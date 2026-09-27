@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """crons — the builder-box cron manifest (L-spec-0318, L-charter-0036 R4/R3).
 
-  crons.py check  [--manifest PATH] [--crontab-file PATH] [--crond-dir PATH]
-  crons.py print  [name] [--manifest PATH]
-  crons.py install <name> [--manifest PATH] [--crontab-file PATH]
+  crons.py check      [--manifest PATH] [--crontab-file PATH] [--crond-dir PATH]
+  crons.py print      [name] [--manifest PATH]
+  crons.py install    <name> [--manifest PATH] [--crontab-file PATH]
+  crons.py ensure-env [--crontab-file PATH]
 
 `crons.toml` (repo root) declares every builder-box job — reaper, lessons
 digest, backup watch, the R1 tick, and friends — the way `REQUIRED_ACTIVATIONS`
@@ -25,7 +26,7 @@ import tomllib
 
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-import fold  # noqa: E402 — fold.ROOT is read live, at call time, never cached (AC2)
+import fold, scratch  # noqa: E402 — fold.ROOT is read live, at call time, never cached (AC2)
 
 MANIFEST = HERE.parent / "crons.toml"
 FIELDS = ("name", "where", "schedule", "command", "sig", "path", "owner", "project")
@@ -221,6 +222,58 @@ def install(name, manifest=None, crontab_path=None):
     return {"ok": True, "action": action, "previous_line": previous_line}
 
 
+def ensure_env(crontab_path=None):
+    """Installs/replaces the fixed, tagged `TMPDIR=` pair as the target's
+    FIRST two lines (R9b). Mirrors `install()`'s own `crontab_path=None` seam:
+    `None` reads/writes the live crontab via `_live_crontab_text()`/
+    `_write_live_crontab()`; a path reads/writes that file instead (`""` when
+    it does not yet exist).
+
+    The pair is always exactly two lines — a tag-comment line
+    `"# doit-cron:tmpdir-env"`, then a BARE value line `f"TMPDIR={scratch.root()}"`
+    with nothing else on it. This split is load-bearing
+    (`problem:cron-env-trailing-comment`): Ubuntu cron 3.0pl1 does not treat a
+    same-line `#` as a comment on an env-assignment line, so a trailing tag on
+    the `TMPDIR=` line itself would make the crontab's actual value the
+    literal string `<root>  # doit-cron:tmpdir-env` — a nonexistent directory.
+
+    When a line exactly equal to the tag already exists, that line AND the
+    line immediately after it (whatever it holds, dropped without inspection)
+    are removed before the fresh pair is written at the top — never a second
+    copy of the tag, or an orphaned old value line, anywhere else in the text.
+    Every other line — job rows, comments, blanks — survives, in the same
+    relative order, merely shifted down by exactly two lines.
+
+    Returns `{"ok": True, "action": "installed" | "replaced", "line": <the
+    value line just written>}` — `"replaced"` when a tagged pair was found and
+    removed, `"installed"` otherwise."""
+    tag = "# doit-cron:tmpdir-env"
+    value_line = f"TMPDIR={scratch.root()}"
+    if crontab_path is None:
+        text = _live_crontab_text()
+    else:
+        p = pathlib.Path(crontab_path)
+        text = p.read_text() if p.exists() else ""
+    lines = text.splitlines()
+    replaced = False
+    kept = []
+    i = 0
+    while i < len(lines):
+        if lines[i] == tag:
+            replaced = True
+            i += 2 if i + 1 < len(lines) else 1  # drop the tag + the line right after it
+            continue
+        kept.append(lines[i])
+        i += 1
+    new_lines = [tag, value_line] + kept
+    new_text = "\n".join(new_lines) + "\n"
+    if crontab_path is None:
+        _write_live_crontab(new_text)
+    else:
+        pathlib.Path(crontab_path).write_text(new_text)
+    return {"ok": True, "action": "replaced" if replaced else "installed", "line": value_line}
+
+
 # ── CLI ────────────────────────────────────────────────────────────────────
 
 def main(argv=None):
@@ -241,6 +294,9 @@ def main(argv=None):
     p_install.add_argument("name")
     p_install.add_argument("--manifest")
     p_install.add_argument("--crontab-file")
+
+    p_ensure_env = sub.add_parser("ensure-env")
+    p_ensure_env.add_argument("--crontab-file")
 
     a = ap.parse_args(argv)
 
@@ -275,6 +331,11 @@ def main(argv=None):
         print(f"action: {res['action']}")
         if res["action"] == "replaced":
             print(f"previous: {res['previous_line']}")
+        return 0
+
+    if a.cmd == "ensure-env":
+        res = ensure_env(crontab_path=a.crontab_file)
+        print(f"action: {res['action']}")
         return 0
 
     ap.print_help(sys.stderr)

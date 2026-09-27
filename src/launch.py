@@ -23,7 +23,7 @@ import hashlib, json, os, pathlib, socket, string, subprocess, sys
 
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-import dispatch, fold, panes  # noqa: E402
+import dispatch, fold, panes, scratch  # noqa: E402
 
 # `account("planner"|"relay"|"executor")`'s source of the live oauth account —
 # a plain module attribute so a test overrides it exactly as `dispatch.AGENTS`
@@ -67,7 +67,17 @@ def child_env(role, base=None):
     """A NEW dict: `base`'s own keys (default `os.environ`), minus every
     `strip` name for `role` actually present, plus `set` pairs expanded
     against `base` — never real `os.environ`. `base` is never mutated. An
-    unknown role raises `ValueError` naming it (AC3)."""
+    unknown role raises `ValueError` naming it (AC3).
+
+    One exception to "never real `os.environ`" (R9a): `TMPDIR` and
+    `CLAUDE_CODE_TMPDIR` are always set to `str(scratch.root())`, for every
+    role that has a `[roles.*]` table — `scratch.root()` reads `$DOIT_SCRATCH`
+    from the REAL process environment regardless of what `base` a caller
+    passes, because `scratch.root()` takes no `base`/override argument of its
+    own. Every other key still derives from `base` alone. Whatever
+    `scratch.root()` raises on a misconfigured `DOIT_SCRATCH` —
+    `scratch.ScratchRootError` — propagates out of here uncaught: no
+    try/except, no fallback dict with `TMPDIR` unset."""
     roles = _roles()
     if role not in roles:
         raise ValueError(f"launch: no [roles.{role}] in {_toml_path()}")
@@ -77,6 +87,9 @@ def child_env(role, base=None):
     out = {k: v for k, v in base.items() if k not in strip}
     for k, v in (cfg.get("set") or {}).items():
         out[k] = string.Template(v).safe_substitute(base)
+    tmp_root = str(scratch.root())
+    out["TMPDIR"] = tmp_root
+    out["CLAUDE_CODE_TMPDIR"] = tmp_root
     return out
 
 

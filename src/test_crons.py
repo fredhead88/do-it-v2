@@ -7,12 +7,17 @@ or writes the real `/etc/cron.d`, and never touches the real `$DOIT_ROOT` —
 every fixture is a temp file/dir passed via `manifest=`/`crontab_path=`/
 `crond_dir=`.
 """
-import contextlib, io, os, pathlib, re, sys, tempfile
+import contextlib, io, os, pathlib, re, subprocess, sys, tempfile
 
 TMP = pathlib.Path(tempfile.mkdtemp(prefix="crons-test-"))
 os.environ["DOIT_ROOT"] = str(TMP / "doit-root-unused")
+# A fresh temp dir under the same TMP filesystem, but NOT nested under
+# DOIT_ROOT above and not inside any git work tree — required (Constraints,
+# "Test hermeticity") so no call to ensure_env()/scratch.root() below touches
+# the REAL $HOME/doit-scratch.
+os.environ["DOIT_SCRATCH"] = str(pathlib.Path(tempfile.mkdtemp(prefix="crons-test-scratch-")))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import backup, crons, fold, up  # noqa: E402
+import backup, crons, fold, scratch, up  # noqa: E402
 
 N = 0
 
@@ -323,5 +328,81 @@ case_lines = [ln for ln in DOIT.splitlines()
              if re.match(r'^\s*crons\)\s+shift;\s+exec python3 "\$SRC/crons\.py"', ln)]
 check(len(case_lines) == 1, f"AC11: exactly one crons) case line: {case_lines}")
 check("doit crons" in DOIT, "AC11: at least one 'doit crons' help mention")
+
+# ══ R9b-AC4 · ensure_env() first install: the fixed tag+value pair becomes ══
+# ══ the fixture's first two lines, nothing else on either line ══════════════
+d_r9b = TMP / "r9b"
+d_r9b.mkdir()
+fixture4 = d_r9b / "crontab4.txt"
+before4 = ["* * * * * some pre-existing untagged job", "# a comment", "*/5 * * * * another job"]
+fixture4.write_text("\n".join(before4) + "\n")
+expected_root1 = str(scratch.root())
+expected_value1 = f"TMPDIR={expected_root1}"
+res4 = crons.ensure_env(crontab_path=str(fixture4))
+text4 = fixture4.read_text()
+lines4 = text4.splitlines()
+check(lines4[0] == "# doit-cron:tmpdir-env" and lines4[1] == expected_value1,
+      f"R9b-AC4: the first two lines are exactly the tag then the value, "
+      f"nothing else on either: {lines4[:2]!r}")
+check(res4 == {"ok": True, "action": "installed", "line": expected_value1},
+      f"R9b-AC4: return value: {res4}")
+print("R9b-AC4 ok")
+
+# ══ R9b-AC5 · a second run, scratch.root() resolving differently, replaces ══
+# ══ the one tagged pair in place at the top, action == 'replaced' ═══════════
+saved_scratch_r9b = os.environ["DOIT_SCRATCH"]
+os.environ["DOIT_SCRATCH"] = str(pathlib.Path(tempfile.mkdtemp(prefix="crons-test-scratch2-")))
+expected_root2 = str(scratch.root())
+expected_value2 = f"TMPDIR={expected_root2}"
+check(expected_root2 != expected_root1,
+      f"R9b-AC5 (fixture sanity): scratch root actually changed between calls: "
+      f"{expected_root1!r} vs {expected_root2!r}")
+res5 = crons.ensure_env(crontab_path=str(fixture4))
+text5 = fixture4.read_text()
+lines5 = text5.splitlines()
+tagged5 = [i for i, l in enumerate(lines5) if l == "# doit-cron:tmpdir-env"]
+check(tagged5 == [0], f"R9b-AC5: exactly one tagged line, still first: {tagged5} in {lines5!r}")
+check(lines5[1] == expected_value2, f"R9b-AC5: the new value line immediately follows: {lines5[1]!r}")
+check(res5 == {"ok": True, "action": "replaced", "line": expected_value2},
+      f"R9b-AC5: return value on the second call: {res5}")
+print("R9b-AC5 ok")
+os.environ["DOIT_SCRATCH"] = saved_scratch_r9b
+
+# ══ R9b-AC6 · every unrelated line survives, same relative order, shifted ══
+# ══ down by exactly two, across both calls ══════════════════════════════════
+check(lines5[2:] == before4,
+      f"R9b-AC6: unrelated lines unchanged, same order, shifted by exactly two: "
+      f"{lines5[2:]!r} vs {before4!r}")
+print("R9b-AC6 ok")
+
+# ══ R9b-AC7 · CLI: `crons.py ensure-env --crontab-file PATH` exits 0, prints ══
+# ══ 'action: ', and the file's first two lines match the direct-call shape ══
+scratch_cli_root = pathlib.Path(tempfile.mkdtemp(prefix="crons-test-scratch-cli-"))
+env7 = {**os.environ, "DOIT_SCRATCH": str(scratch_cli_root)}
+cli_file = d_r9b / "cli-crontab.txt"
+CRONS_PY = pathlib.Path(__file__).resolve().parent / "crons.py"
+p7 = subprocess.run([sys.executable, str(CRONS_PY), "ensure-env", "--crontab-file", str(cli_file)],
+                    capture_output=True, text=True, env=env7)
+check(p7.returncode == 0, f"R9b-AC7: exit code 0: {p7.returncode} / {p7.stderr}")
+check("action: " in p7.stdout, f"R9b-AC7: prints a line starting 'action: ': {p7.stdout!r}")
+cli_lines = cli_file.read_text().splitlines()
+check(cli_lines[0] == "# doit-cron:tmpdir-env", f"R9b-AC7: first line is exactly the tag: {cli_lines[:2]!r}")
+check(re.match(r"^TMPDIR=.*$", cli_lines[1]) is not None,
+      f"R9b-AC7: second line matches ^TMPDIR=.*$ with no trailing text: {cli_lines[1]!r}")
+print("R9b-AC7 ok")
+
+# ══ R9b-AC8 · the value line, read back from on-disk bytes and parsed the ══
+# ══ way cron parses an env-assignment line (split on the FIRST '=' only), ══
+# ══ equals str(scratch.root()) exactly, for both the AC4 and AC5 fixtures ══
+def _cron_env_value(line):
+    return line.split("=", 1)[1]
+
+parsed4 = _cron_env_value(text4.splitlines()[1])
+check(parsed4 == expected_root1, f"R9b-AC8: the AC4 fixture's value line parses to scratch.root(): "
+                                 f"{parsed4!r} vs {expected_root1!r}")
+parsed5 = _cron_env_value(text5.splitlines()[1])
+check(parsed5 == expected_root2, f"R9b-AC8: the AC5 fixture's value line parses to scratch.root(): "
+                                 f"{parsed5!r} vs {expected_root2!r}")
+print("R9b-AC8 ok")
 
 print(f"crons: {N} checks pass")

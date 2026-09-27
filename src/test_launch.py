@@ -10,8 +10,14 @@ import json, os, pathlib, shutil, subprocess, sys, tempfile, textwrap, time, typ
 
 TMP = pathlib.Path(tempfile.mkdtemp())
 os.environ["DOIT_ROOT"] = str(TMP)
+# A fresh temp dir under the same TMP filesystem, but NOT nested under
+# DOIT_ROOT above and not inside any git work tree — required (Constraints,
+# "Test hermeticity") so no pre-existing call to child_env() with no override
+# (including AC11's up._start/relay_main/executor_loop exercises) touches the
+# REAL $HOME/doit-scratch once child_env() sets TMPDIR/CLAUDE_CODE_TMPDIR.
+os.environ["DOIT_SCRATCH"] = str(pathlib.Path(tempfile.mkdtemp()))
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
-import dispatch, fold, launch, models, up  # noqa: E402
+import dispatch, fold, launch, models, scratch, up  # noqa: E402
 
 n = 0
 
@@ -64,6 +70,51 @@ try:
 except ValueError as e:
     ok("no-such-role" in str(e), f"AC3: names the unknown role: {e}")
 print("AC3 ok")
+
+# ══════════════════════════════════════════════════════════════════════════
+# R9a-AC1 — every launch.toml role's child_env carries TMPDIR/CLAUDE_CODE_TMPDIR
+# == str(scratch.root()), individually, for all four roles.
+# ══════════════════════════════════════════════════════════════════════════
+_expected_scratch_root = str(scratch.root())
+for _role in ("planner", "relay", "executor", "codex"):
+    _env = launch.child_env(_role)
+    ok("TMPDIR" in _env and "CLAUDE_CODE_TMPDIR" in _env,
+       f"R9a-AC1: {_role}'s child_env carries both TMPDIR and CLAUDE_CODE_TMPDIR: {_env.keys()}")
+    ok(_env["TMPDIR"] == _expected_scratch_root and _env["CLAUDE_CODE_TMPDIR"] == _expected_scratch_root,
+       f"R9a-AC1: {_role}'s TMPDIR/CLAUDE_CODE_TMPDIR both equal scratch.root(): "
+       f"{_env['TMPDIR']!r} / {_env['CLAUDE_CODE_TMPDIR']!r} vs {_expected_scratch_root!r}")
+print("R9a-AC1 ok")
+
+# ══════════════════════════════════════════════════════════════════════════
+# R9a-AC2 — a fresh, not-yet-existing DOIT_SCRATCH is created as a side
+# effect of the child_env call (via scratch.root()).
+# ══════════════════════════════════════════════════════════════════════════
+_saved_scratch_ac2 = os.environ["DOIT_SCRATCH"]
+_fresh_parent = pathlib.Path(tempfile.mkdtemp())
+_fresh_scratch = _fresh_parent / "not-yet-created"
+ok(not _fresh_scratch.exists(), "R9a-AC2: the fixture directory does not exist before the call")
+os.environ["DOIT_SCRATCH"] = str(_fresh_scratch)
+launch.child_env("planner")
+ok(_fresh_scratch.is_dir(), "R9a-AC2: the directory exists after the call, created by scratch.root()")
+os.environ["DOIT_SCRATCH"] = _saved_scratch_ac2
+print("R9a-AC2 ok")
+
+# ══════════════════════════════════════════════════════════════════════════
+# R9a-AC3 — a DOIT_SCRATCH resolving inside a fixture git work tree lets
+# scratch.ScratchRootError propagate out of child_env unmodified — uncaught,
+# never swallowed into a dict with TMPDIR unset.
+# ══════════════════════════════════════════════════════════════════════════
+_saved_scratch_ac3 = os.environ["DOIT_SCRATCH"]
+_git_fixture = pathlib.Path(tempfile.mkdtemp())
+(_git_fixture / ".git").mkdir()
+os.environ["DOIT_SCRATCH"] = str(_git_fixture / "nested" / "scratch")
+try:
+    _result = launch.child_env("planner")
+    ok(False, f"R9a-AC3: a DOIT_SCRATCH inside a git work tree must raise, not return: {_result}")
+except scratch.ScratchRootError:
+    ok(True, "R9a-AC3: scratch.ScratchRootError propagates out of child_env uncaught")
+os.environ["DOIT_SCRATCH"] = _saved_scratch_ac3
+print("R9a-AC3 ok")
 
 # ══════════════════════════════════════════════════════════════════════════
 # AC4/AC5/AC6 — record()/ended() write role-launched/role-ended, the eleven
