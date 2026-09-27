@@ -1214,6 +1214,17 @@ BUILD = {"spec-auditor": p_spec_auditor, "spec-writer": p_spec_writer, "builder"
 
 # ──────────────────────────── Blindness, as a check ────────────────────────────
 
+def _minus_charter(c, pairs):
+    """A sibling spec line that is also a line of this packet's own charter is the charter's text, which the
+    packet legitimately carries; flagging it made every packet on a charter refuse once any spec quoted the
+    charter verbatim (L-spec-0164 on L-charter-0024's Footprint bound line, 2026-09-27)."""
+    ch = c.charter_file()
+    if not ch or not pathlib.Path(ch).is_file():
+        return pairs
+    text = pathlib.Path(ch).read_text()
+    return [(label, l) for label, l in pairs if l.strip() not in text]
+
+
 def sibling_bodies(c):
     """Every other spec's substantial lines. A packet that pasted one is carrying a
     sibling slot's internals."""
@@ -1296,9 +1307,9 @@ def strip(c, role):
                 if len(l.strip()) > 50] + \
                [("a prior audit finding", e.get("finding")) for e in c.all_of("audit-finding")]
     if role == "spec-writer":
-        return sibling_bodies(c)
+        return _minus_charter(c, sibling_bodies(c))
     if role == "builder":
-        return sibling_bodies(c) + other_cards(c)
+        return _minus_charter(c, sibling_bodies(c)) + other_cards(c)
     if role == "grader":
         return builder_cues(c)
     if role == "reviewer":
