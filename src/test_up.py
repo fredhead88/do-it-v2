@@ -335,10 +335,17 @@ def sup_runs(rc=0, write=None):
     `started` is read at launch time, so AC5's ordering is observed and not
     inferred. `_start`/`relay_main`/`executor_loop` now call `Popen`, not
     `run` (L-spec-0320 R2) — the stand-in routes through the SAME closure so
-    every `calls`-based assertion below sees an identical shape."""
+    every `calls`-based assertion below sees an identical shape.
+
+    R2: `code_sha()` now calls `subprocess.run(["git", ...])` with NO `env`
+    kwarg, at boot and inside every `maybe_reexec` — a `git`-headed `cmd` is
+    special-cased here, ahead of the `env["DOIT_LEDGER_FILE"]` assumption every
+    other fixture already relies on, so that assumption never has to change."""
     calls = []
 
     def run(cmd, env=None, **kw):
+        if cmd and cmd[0] == "git":
+            return types.SimpleNamespace(returncode=0, stdout="a" * 40)
         led = fold.EVENTS / env["DOIT_LEDGER_FILE"]
         calls.append({"cmd": cmd, "env": env, "ledger": led,
                       "started": [l for l in led.read_text().splitlines() if "planner-started" in l]})
@@ -511,6 +518,20 @@ os.environ["DOIT_SUPERVISOR_INTERVAL_SEC"] = "0"
 # ImportError `import relay` raises when the file is not there, and R5 names the
 # EXCEPTION, never the missing file. The guard has to hold either way, or the first
 # root that ships without a sibling wedges the launcher.
+#
+# R2/supervisor-current-code: main() now unconditionally appends one
+# supervisor-code reason="start" row BEFORE its first `_cycle()` — before any
+# relay call is ever attempted — so "starts nothing" below is narrowed, the
+# same way the spec's own Constraints narrow relay_main's AC3(a)/(b): permit
+# exactly that one boot row, and nothing else.
+
+
+def _only_boot_row(kind="planner"):
+    rows = [json.loads(l) for p in fold.EVENTS.glob("*.jsonl") for l in p.read_text().splitlines() if l.strip()]
+    return (len(rows) == 1 and rows[0]["type"] == "supervisor-code"
+            and rows[0]["reason"] == "start" and rows[0]["kind"] == kind)
+
+
 sup_root("ac7-absent")
 sys.modules["relay"] = None
 calls = sup_runs()
@@ -518,8 +539,9 @@ buf = io.StringIO()
 with contextlib.redirect_stdout(buf):
     up.main(max_cycles=2)
 ok(("ImportError" in buf.getvalue() or "ModuleNotFoundError" in buf.getvalue()) and not calls
-   and not any(p.stat().st_size for p in fold.EVENTS.glob("*.jsonl")),
-   f"with src/relay.py absent the loop names the exception and starts nothing: {buf.getvalue()!r}")
+   and _only_boot_row(),
+   f"with src/relay.py absent the loop names the exception and starts no pane, "
+   f"appending only its own boot row: {buf.getvalue()!r}")
 for fn in up.RELAY_FNS:
     sup_root("ac7-" + fn)
     conf = {fn: sup_boom}
@@ -530,9 +552,9 @@ for fn in up.RELAY_FNS:
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         up.main(max_cycles=1)
-    ok("RuntimeError" in buf.getvalue() and not calls
-       and not any(p.stat().st_size for p in fold.EVENTS.glob("*.jsonl")),
-       f"relay.{fn} raising is caught, named, and starts no pane of either mode: {buf.getvalue()!r}")
+    ok("RuntimeError" in buf.getvalue() and not calls and _only_boot_row(),
+       f"relay.{fn} raising is caught, named, and starts no pane of either mode, "
+       f"appending only its own boot row: {buf.getvalue()!r}")
 
 # ── AC8 · the serving pass, and charter work's priority over it ───────────────
 sup_root("ac8")
@@ -662,8 +684,15 @@ with contextlib.redirect_stdout(buf):
     up.relay_main(print_only=False, max_cycles=1)
 ok(up.RELAY_DRY in buf.getvalue(), f"AC3(a): prints RELAY_DRY: {buf.getvalue()!r}")
 ok(calls == [], f"AC3(a): no subprocess.run call: {calls}")
-ok(all(p.stat().st_size == 0 for p in fold.EVENTS.glob("*.jsonl")),
-   "AC3(a): no event appended anywhere")
+# R2/supervisor-current-code: relay_main now unconditionally appends one
+# supervisor-code reason="start" row before checking for pending packets —
+# narrowed (per the spec's own Constraints) to "no L-relay file, and no event
+# anywhere other than this run's own start row."
+ok(not list(fold.EVENTS.glob("L-relay-*.jsonl")), "AC3(a): no L-relay-*.jsonl file")
+starts_3a = [json.loads(l) for p in fold.EVENTS.glob("*.jsonl") for l in p.read_text().splitlines() if l.strip()]
+ok(len(starts_3a) == 1 and starts_3a[0]["type"] == "supervisor-code" and starts_3a[0]["reason"] == "start"
+   and starts_3a[0]["kind"] == "relay",
+   f"AC3(a): no event anywhere other than this run's own reason=start row: {starts_3a}")
 
 sup_root("relay-ac3b")
 (fold.ROOT / "seat").mkdir(parents=True, exist_ok=True)
@@ -676,8 +705,11 @@ with contextlib.redirect_stdout(buf):
 ok(up.RELAY_DRY in buf.getvalue(),
    f"AC3(b): a single already-claimed pending packet still reads as nothing unclaimed: {buf.getvalue()!r}")
 ok(calls == [], f"AC3(b): no subprocess.run call: {calls}")
-ok(all(p.stat().st_size == 0 for p in fold.EVENTS.glob("*.jsonl")),
-   "AC3(b): no event appended anywhere")
+ok(not list(fold.EVENTS.glob("L-relay-*.jsonl")), "AC3(b): no L-relay-*.jsonl file")
+starts_3b = [json.loads(l) for p in fold.EVENTS.glob("*.jsonl") for l in p.read_text().splitlines() if l.strip()]
+ok(len(starts_3b) == 1 and starts_3b[0]["type"] == "supervisor-code" and starts_3b[0]["reason"] == "start"
+   and starts_3b[0]["kind"] == "relay",
+   f"AC3(b): no event anywhere other than this run's own reason=start row: {starts_3b}")
 
 # ── AC4: print-only, nothing unclaimed -> None, zero writes at all ───────────
 sup_root("relay-ac4")
@@ -742,5 +774,277 @@ ok("L-builder-0009" in p7.stdout, f"AC7: names the pending spawn id: {p7.stdout!
 leftover7 = list((AC7_ROOT / "events").glob("L-relay-*.jsonl"))
 ok(bool(leftover7) and all(p.stat().st_size == 0 for p in leftover7),
    f"AC7: any L-relay-*.jsonl left under events/ is 0 bytes: {leftover7}")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-0428 · supervisor-current-code (L-charter-0042 R2) — code_sha,
+# maybe_reexec, the three loops' boot/reexec wiring. AC7-AC12 (doit look's
+# supervisor-stale-code check) live in test_look.py.
+# ══════════════════════════════════════════════════════════════════════════════
+up.subprocess = subprocess          # restore the real module — the last sup_runs() above left a fake one
+real_code_sha, real_execv = up.code_sha, up._EXECV
+
+
+class _Sentinel428(Exception):
+    """`os.execv`'s real 'control never returns here' semantics, reproduced
+    without replacing the test process (AC6/AC13)."""
+
+
+def _sentinel_execv(record):
+    def fn(*a):
+        record.append(a)
+        raise _Sentinel428("boom")
+    return fn
+
+
+# ── AC1: code_sha() is the real, stripped `git rev-parse HEAD` of HERE.parent,
+# and None when HERE points at a non-git directory ───────────────────────────
+real_here = up.HERE
+sha_repo = TMP / "sha-repo"
+(sha_repo / "src").mkdir(parents=True)
+subprocess.run(["git", "init", "-q", str(sha_repo)], check=True)
+subprocess.run(["git", "-C", str(sha_repo), "config", "user.email", "t@t.test"], check=True)
+subprocess.run(["git", "-C", str(sha_repo), "config", "user.name", "t"], check=True)
+(sha_repo / "f.txt").write_text("x")
+subprocess.run(["git", "-C", str(sha_repo), "add", "f.txt"], check=True)
+subprocess.run(["git", "-C", str(sha_repo), "commit", "-q", "-m", "one"], check=True)
+want_sha = subprocess.run(["git", "-C", str(sha_repo), "rev-parse", "HEAD"],
+                          capture_output=True, text=True, check=True).stdout.strip()
+up.HERE = sha_repo / "src"
+ok(up.code_sha() == want_sha, f"AC1: code_sha() is the real, stripped rev-parse HEAD: {up.code_sha()} vs {want_sha}")
+nongit_dir = TMP / "not-a-repo" / "src"
+nongit_dir.mkdir(parents=True)
+up.HERE = nongit_dir
+ok(up.code_sha() is None, "AC1: a non-git directory returns None, never raises")
+up.HERE = real_here
+
+# ── AC2: maybe_reexec — no-op unchanged/None; one reexec row + one _EXECV call
+# on a real change ─────────────────────────────────────────────────────────────
+sup_root("R2-ac2-noop")
+up.code_sha = lambda: "SAME"
+execv_calls = []
+up._EXECV = lambda *a: execv_calls.append(a)
+up._LAST_REEXEC_FAILURE = None
+up.maybe_reexec("planner", "SAME")
+ok(not execv_calls and not list(fold.EVENTS.glob("*.jsonl")),
+   "AC2: an unchanged code_sha calls neither _EXECV nor dispatch.emit, appends no event")
+
+sup_root("R2-ac2-change")
+up.code_sha = lambda: "NEW"
+execv_calls2 = []
+up._EXECV = lambda *a: execv_calls2.append(a)
+up.maybe_reexec("planner", "SAME")
+rows2 = [json.loads(l) for p in fold.EVENTS.glob("*.jsonl") for l in p.read_text().splitlines() if l.strip()]
+ok(len(rows2) == 1 and rows2[0]["type"] == "supervisor-code" and rows2[0]["sha"] == "NEW"
+   and rows2[0]["reason"] == "reexec",
+   f"AC2: a real change appends exactly one supervisor-code reexec row: {rows2}")
+ok(execv_calls2 == [(sys.executable, [sys.executable] + sys.argv)],
+   f"AC2: and calls the monkeypatched _EXECV exactly once, with the real argv: {execv_calls2}")
+
+sup_root("R2-ac2-none")
+up.code_sha = lambda: None
+execv_calls3 = []
+up._EXECV = lambda *a: execv_calls3.append(a)
+up.maybe_reexec("planner", "SAME")
+ok(not execv_calls3 and not list(fold.EVENTS.glob("*.jsonl")),
+   "AC2: code_sha() returning None fires neither _EXECV nor an event")
+up.code_sha, up._EXECV = real_code_sha, real_execv
+
+# ── AC3: main()'s boot supervisor-code row lands BEFORE the first
+# planner-started, and every planner-started (charter AND serving) carries the
+# SAME code_sha; print_only appends none, still ─────────────────────────────
+sup_root("R2-ac3-charter")
+up.code_sha = lambda: "BOOTSHA1"
+sup_relay(plannable=lambda *a, **k: (["L-charter-0001"], []))
+calls = sup_runs()
+emitted = []
+real_emit = dispatch.emit
+
+
+def _spy_emit(dst, base, type_, /, **kv):
+    emitted.append((type_, kv))
+    return real_emit(dst, base, type_, **kv)
+
+
+dispatch.emit = _spy_emit
+try:
+    up.main(max_cycles=1)
+finally:
+    dispatch.emit = real_emit
+types_order = [t for t, _ in emitted]
+boot_i, ps_i = types_order.index("supervisor-code"), types_order.index("planner-started")
+ok(boot_i < ps_i, f"AC3: the boot supervisor-code row precedes the first planner-started: {types_order}")
+boot_kv = emitted[boot_i][1]
+ok(boot_kv["kind"] == "planner" and boot_kv["reason"] == "start" and boot_kv["sha"] == "BOOTSHA1",
+   f"AC3: kind=planner reason=start sha=the stubbed code_sha: {boot_kv}")
+started_kvs = [kv for t, kv in emitted if t == "planner-started"]
+ok(started_kvs and all(kv["code_sha"] == "BOOTSHA1" for kv in started_kvs),
+   f"AC3: every planner-started carries the SAME code_sha as the boot row: {started_kvs}")
+
+sup_root("R2-ac3-serving")
+up.code_sha = lambda: "BOOTSHA2"
+sup_relay(pending_packets=lambda *a, **k: [{"spawn": "L-builder-0001"}])
+calls = sup_runs()
+up.main(max_cycles=1)
+serving_started = [e for e in sup_rows() if e["type"] == "planner-started" and e.get("mode") == "serving"]
+ok(serving_started and all(e["code_sha"] == "BOOTSHA2" for e in serving_started),
+   f"AC3: the serving-mode _start site also carries the SAME code_sha: {serving_started}")
+
+sup_root("R2-ac3-printonly")
+up.code_sha = lambda: "SHOULD-NOT-APPEAR"
+up.main(print_only=True)
+ok(not list(fold.EVENTS.glob("L-up-*.jsonl")), "AC3: print_only allocates no L-up-*.jsonl, still")
+ok(all(p.stat().st_size == 0 for p in fold.EVENTS.glob("*.jsonl")),
+   "AC3: print_only appends no event anywhere, still (the existing AC12 assertion holds)")
+up.code_sha = real_code_sha
+
+# ── AC4: relay_main's own boot row, and its spawn-started's matching code_sha ─
+sup_root("R2-ac4")
+up.code_sha = lambda: "RELAYSHA1"
+sup_relay(pending_packets=lambda *a, **k: [{"spawn": "L-builder-0001", "age_min": 3}])
+calls = sup_runs(rc=0)
+up.relay_main(print_only=False, max_cycles=1)
+rows4 = sup_rows()
+boots4 = [e for e in rows4 if e["type"] == "supervisor-code" and e["kind"] == "relay"]
+ok(len(boots4) == 1 and boots4[0]["reason"] == "start" and boots4[0]["sha"] == "RELAYSHA1",
+   f"AC4: exactly one supervisor-code kind=relay reason=start row: {boots4}")
+spawn_started4 = [e for e in rows4 if e["type"] == "spawn-started" and e.get("role") == "relay"]
+ok(spawn_started4 and all(e["code_sha"] == "RELAYSHA1" for e in spawn_started4),
+   f"AC4: its spawn-started role=relay event carries the matching code_sha: {spawn_started4}")
+up.code_sha = real_code_sha
+
+# ── AC5: executor_loop's boot row lands under root/events, never a DIVERGED
+# fold.EVENTS — proven with fold.ROOT/EVENTS repointed elsewhere before the
+# call (the test_launch.py:291-296/:357 shape); its spawn-started carries the
+# matching code_sha ────────────────────────────────────────────────────────
+sup_root("R2-ac5-divergent")
+up.subprocess = subprocess          # the real module — the claude stub on PATH is a real, harmless process
+up.code_sha = lambda: "EXECSHA1"
+before_up5 = {p.name for p in (TMP / "events").glob("L-up-*.jsonl")}
+before_exec5 = {p.name for p in (TMP / "events").glob("L-executor-*.jsonl")}
+up.executor_loop(TMP, 5, max_cycles=1)
+new_up5 = sorted({p.name for p in (TMP / "events").glob("L-up-*.jsonl")} - before_up5)
+ok(len(new_up5) == 1, f"AC5: exactly one new L-up-*.jsonl under TMP/events: {new_up5}")
+up_rows5 = [json.loads(l) for l in (TMP / "events" / new_up5[0]).read_text().splitlines() if l.strip()]
+ok(len(up_rows5) == 1 and up_rows5[0]["type"] == "supervisor-code" and up_rows5[0]["kind"] == "executor"
+   and up_rows5[0]["reason"] == "start" and up_rows5[0]["sha"] == "EXECSHA1",
+   f"AC5: kind=executor reason=start sha=the stubbed code_sha, under TMP/events: {up_rows5}")
+ok(not list(fold.EVENTS.glob("L-up-*.jsonl")), "AC5: never the diverged fold.EVENTS")
+new_exec5 = sorted({p.name for p in (TMP / "events").glob("L-executor-*.jsonl")} - before_exec5)
+ok(len(new_exec5) == 1, f"AC5: exactly one new L-executor-*.jsonl under TMP/events: {new_exec5}")
+exec_rows5 = [json.loads(l) for l in (TMP / "events" / new_exec5[0]).read_text().splitlines() if l.strip()]
+spawn_started5 = [e for e in exec_rows5 if e["type"] == "spawn-started" and e.get("role") == "executor"]
+ok(spawn_started5 and spawn_started5[0]["code_sha"] == "EXECSHA1",
+   f"AC5: its spawn-started role=executor event carries the matching code_sha: {spawn_started5}")
+up.code_sha = real_code_sha
+
+# ── AC6: code_sha differs starting cycle 2 (a real pane having already
+# launched) — exactly one pane per loop, then the sentinel propagates ────────
+sup_root("R2-ac6-main")
+calls = sup_runs()
+up.code_sha = lambda: ("DIFF" if calls else "SAME")
+sentinel_calls = []
+up._EXECV = _sentinel_execv(sentinel_calls)
+sup_relay(plannable=lambda *a, **k: (["L-charter-0001"], []))
+try:
+    up.main(max_cycles=2)
+    ok(False, "AC6/main: the sentinel must propagate out of main()")
+except _Sentinel428:
+    pass
+ok(len(calls) == 1, f"AC6/main: exactly one child pane launches (cycle 1's): {calls}")
+ok(len(sentinel_calls) == 1, f"AC6/main: _EXECV called exactly once: {sentinel_calls}")
+
+sup_root("R2-ac6-relay")
+calls = sup_runs()
+up.code_sha = lambda: ("DIFF" if calls else "SAME")
+sentinel_calls = []
+up._EXECV = _sentinel_execv(sentinel_calls)
+sup_relay(pending_packets=lambda *a, **k: [{"spawn": "L-builder-0001", "age_min": 3}])
+try:
+    up.relay_main(print_only=False, max_cycles=2)
+    ok(False, "AC6/relay: the sentinel must propagate out of relay_main()")
+except _Sentinel428:
+    pass
+ok(len(calls) == 1, f"AC6/relay: exactly one child pane launches (cycle 1's): {calls}")
+ok(len(sentinel_calls) == 1, f"AC6/relay: _EXECV called exactly once: {sentinel_calls}")
+
+# the executor sub-case: fold.ROOT/EVENTS pointed AT TMP (not diverged) so the
+# generic sup_runs() stub — which assumes fold.EVENTS is the ledger's own dir,
+# true for main()/relay_main() always, but NOT under AC5's deliberate
+# divergence — can read back the ledger it just wrote.
+fold.ROOT, fold.EVENTS, dispatch.EVENTS = TMP, TMP / "events", TMP / "events"
+calls = sup_runs()
+up.code_sha = lambda: ("DIFF" if calls else "SAME")
+sentinel_calls = []
+up._EXECV = _sentinel_execv(sentinel_calls)
+try:
+    up.executor_loop(TMP, 5, max_cycles=2)
+    ok(False, "AC6/executor: the sentinel must propagate out of executor_loop()")
+except _Sentinel428:
+    pass
+ok(len(calls) == 1, f"AC6/executor: exactly one child pane launches (cycle 1's): {calls}")
+ok(len(sentinel_calls) == 1, f"AC6/executor: _EXECV called exactly once: {sentinel_calls}")
+up.code_sha, up._EXECV = real_code_sha, real_execv
+
+# ── AC13: _EXECV fires before EACH charter's own _start, not only once at the
+# top of _cycle() — proven with TWO ready charters in a SINGLE cycle ─────────
+sup_root("R2-ac13")
+calls = sup_runs()
+up.code_sha = lambda: ("DIFF" if calls else "SAME")
+sentinel_calls = []
+up._EXECV = _sentinel_execv(sentinel_calls)
+sup_relay(plannable=lambda *a, **k: (["L-charter-0001", "L-charter-0002"], []))
+try:
+    up.main(max_cycles=1)
+    ok(False, "AC13: the sentinel must propagate out of main()")
+except _Sentinel428:
+    pass
+ok(len(calls) == 1 and calls[0]["cmd"][-1] == "L-charter-0001",
+   f"AC13: exactly one pane starts, charter 1's, before the sentinel fires: {calls}")
+ok(len(sentinel_calls) == 1, f"AC13: _EXECV fires exactly once, before charter 2's _start: {sentinel_calls}")
+up.code_sha, up._EXECV = real_code_sha, real_execv
+
+# ── AC14: a failed reexec appends reexec then reexec-failed and returns
+# without raising; an immediately following identical call is a no-op —
+# _LAST_REEXEC_FAILURE stops the retry storm until code_sha() changes. The
+# argv guard is a no-op before any write, in both its empty and "-c" shapes ──
+sup_root("R2-ac14-failure")
+up.code_sha = lambda: "NEWSHA"
+up._LAST_REEXEC_FAILURE = None
+oserror_calls = []
+
+
+def _oserror_execv(*a):
+    oserror_calls.append(a)
+    raise OSError("boom")
+
+
+up._EXECV = _oserror_execv
+up.maybe_reexec("planner", "OLDSHA")
+rows14 = sup_rows()
+sc_rows14 = [e for e in rows14 if e["type"] == "supervisor-code"]
+ok([e["reason"] for e in sc_rows14] == ["reexec", "reexec-failed"] and all(e["sha"] == "NEWSHA" for e in sc_rows14),
+   f"AC14: a failed reexec appends reexec then reexec-failed, both sha=NEWSHA, without raising: {sc_rows14}")
+ok(len(oserror_calls) == 1, f"AC14: _EXECV called once on the first attempt: {oserror_calls}")
+count_before14 = len(rows14)
+up.maybe_reexec("planner", "OLDSHA")
+rows14b = sup_rows()
+ok(len(rows14b) == count_before14, f"AC14: an immediately following identical call appends NO further event: {rows14b}")
+ok(len(oserror_calls) == 1, f"AC14: and does not call _EXECV again — the retry storm is closed: {oserror_calls}")
+up._LAST_REEXEC_FAILURE = None
+
+sup_root("R2-ac14-argv")
+up.code_sha = lambda: "NEWSHA2"
+argv_execv_calls = []
+up._EXECV = lambda *a: argv_execv_calls.append(a)
+real_argv = sys.argv
+sys.argv = ["-c"]
+up.maybe_reexec("planner", "OLDSHA")
+ok(not argv_execv_calls and not list(fold.EVENTS.glob("*.jsonl")),
+   "AC14: sys.argv == ['-c'] is a no-op, before any write — no _EXECV, no dispatch.emit, no event")
+sys.argv = []
+up.maybe_reexec("planner", "OLDSHA")
+ok(not argv_execv_calls and not list(fold.EVENTS.glob("*.jsonl")), "AC14: empty sys.argv is a no-op too")
+sys.argv = real_argv
+up.code_sha, up._EXECV, up._LAST_REEXEC_FAILURE = real_code_sha, real_execv, None
 
 print(f"up: {n} checks pass")

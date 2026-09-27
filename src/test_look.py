@@ -657,6 +657,142 @@ ok(any(b["key"] == "undetermined:wallclock" for b in briefs_of(res_ac8b, "readin
    "L-spec-0389 AC8: a raising look_wallclock.run degrades to one reading-undetermined, never a crashed pass")
 print("AC8 ok")
 
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-0428 · supervisor-current-code (L-charter-0042 R2) — AC7-AC12:
+# `doit look`'s new `supervisor-stale-code` check. Placed BEFORE AC15 on
+# purpose (the file's own established pattern): AC15c's own pre-existing
+# failure (unrelated, confirmed identical at base_sha) halts this script, and
+# this spec's own markers must print regardless.
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _boot_row(root, kind, sha, age_min, pid=None):
+    append_raw(root, f"L-up-sc-{kind}.jsonl", iso(NOW - timedelta(minutes=age_min)),
+              type="supervisor-code", subject=kind, kind=kind, sha=sha,
+              pid=pid if pid is not None else os.getpid(), reason="start")
+
+
+def _start_row(root, kind, sha, age_min):
+    if kind == "planner":
+        append_raw(root, "L-planner-sc.jsonl", iso(NOW - timedelta(minutes=age_min)),
+                  type="planner-started", subject="L-charter-0001", planner="L-planner-sc",
+                  attempt=1, mode="charter", code_sha=sha)
+    else:
+        append_raw(root, f"L-{kind}-sc.jsonl", iso(NOW - timedelta(minutes=age_min)),
+                  type="spawn-started", subject=f"L-{kind}-sc", spawn=f"L-{kind}-sc",
+                  role=kind, code_sha=sha)
+
+
+# ── R2 AC7: a stale sha (per the FLAGGED --first-parent call, not a bare
+# reconstruction) briefs supervisor-stale-code ────────────────────────────────
+root_r2ac7 = newroot()
+_boot_row(root_r2ac7, "planner", "OLD", 60)
+_start_row(root_r2ac7, "planner", "OLD", 30)
+
+
+def git_r2ac7(args, cwd, timeout):
+    if "--first-parent" in args:
+        return str(int((NOW - timedelta(minutes=45)).timestamp()))   # <= the start row's own ts
+    return str(int((NOW - timedelta(minutes=1)).timestamp()))        # a later, WRONG reconstruction
+
+
+res_r2ac7 = look.run(read_ledger(root_r2ac7), now=NOW, runner=FakeRunner(git=git_r2ac7),
+                     root=root_r2ac7, toml_path=clean_toml(root_r2ac7))
+b_r2ac7 = briefs_of(res_r2ac7, "supervisor-stale-code")
+ok(len(b_r2ac7) == 1 and b_r2ac7[0]["key"] == "planner" and b_r2ac7[0]["owner"] == "thinker",
+   f"R2 AC7: a cycled sha (per the flagged --first-parent call) briefs supervisor-stale-code: {b_r2ac7}")
+print("R2 AC7 ok")
+
+# ── R2 AC8: a sha current at write-time is not flagged only because HEAD has
+# since moved further ─────────────────────────────────────────────────────────
+root_r2ac8 = newroot()
+_boot_row(root_r2ac8, "planner", "OLD", 60)
+_start_row(root_r2ac8, "planner", "OLD", 30)
+git_r2ac8 = lambda args, cwd, to: str(int((NOW - timedelta(minutes=5)).timestamp()))   # strictly AFTER the start row
+res_r2ac8 = look.run(read_ledger(root_r2ac8), now=NOW, runner=FakeRunner(git=git_r2ac8),
+                     root=root_r2ac8, toml_path=clean_toml(root_r2ac8))
+ok(not briefs_of(res_r2ac8, "supervisor-stale-code"),
+   f"R2 AC8: a sha current at write-time is not flagged for a later HEAD move: {res_r2ac8['briefs']}")
+print("R2 AC8 ok")
+
+# ── R2 AC9: wedged is decided by the DIVERGENCE's age, never the row's own ────
+root_r2ac9a = newroot()
+_boot_row(root_r2ac9a, "planner", "SHA_A", 300)
+res_r2ac9a = look.run(read_ledger(root_r2ac9a), now=NOW, runner=FakeRunner(git=lambda a, c, t: ""),
+                      root=root_r2ac9a, toml_path=clean_toml(root_r2ac9a))
+ok(not briefs_of(res_r2ac9a, "supervisor-stale-code"),
+   f"R2 AC9a: sha==HEAD (empty times) never wedges, however old the row: {res_r2ac9a['briefs']}")
+
+root_r2ac9b = newroot()
+_boot_row(root_r2ac9b, "planner", "SHA_B", 300)
+git_r2ac9b = lambda a, c, t: str(int((NOW - timedelta(minutes=2)).timestamp()))
+res_r2ac9b = look.run(read_ledger(root_r2ac9b), now=NOW, runner=FakeRunner(git=git_r2ac9b),
+                      root=root_r2ac9b, toml_path=clean_toml(root_r2ac9b))
+ok(not briefs_of(res_r2ac9b, "supervisor-stale-code"),
+   f"R2 AC9b: a divergence within 5 minutes of now never wedges, however old the row: {res_r2ac9b['briefs']}")
+
+root_r2ac9c = newroot()
+_boot_row(root_r2ac9c, "planner", "SHA_C", 300)
+git_r2ac9c = lambda a, c, t: str(int((NOW - timedelta(hours=4)).timestamp()))
+res_r2ac9c = look.run(read_ledger(root_r2ac9c), now=NOW, runner=FakeRunner(git=git_r2ac9c),
+                      root=root_r2ac9c, toml_path=clean_toml(root_r2ac9c))
+b_r2ac9c = briefs_of(res_r2ac9c, "supervisor-stale-code")
+ok(len(b_r2ac9c) == 1 and b_r2ac9c[0]["key"] == "planner", f"R2 AC9c: a >=3h-old divergence wedges: {b_r2ac9c}")
+print("R2 AC9 ok")
+
+# ── R2 AC10: a dead pid never briefs, however stale its sha/old its ts ────────
+root_r2ac10 = newroot()
+dead_pid_r2 = dead_pid()
+_boot_row(root_r2ac10, "planner", "DEADSHA", 600, pid=dead_pid_r2)
+git_r2ac10 = lambda a, c, t: str(int((NOW - timedelta(hours=5)).timestamp()))
+res_r2ac10 = look.run(read_ledger(root_r2ac10), now=NOW, runner=FakeRunner(git=git_r2ac10),
+                      root=root_r2ac10, toml_path=clean_toml(root_r2ac10))
+ok(not briefs_of(res_r2ac10, "supervisor-stale-code"),
+   f"R2 AC10: a dead pid never briefs, however stale: {res_r2ac10['briefs']}")
+print("R2 AC10 ok")
+
+# ── R2 AC11: a raising --first-parent call degrades to one reading-undetermined,
+# never a supervisor-stale-code brief for any kind ────────────────────────────
+root_r2ac11 = newroot()
+_boot_row(root_r2ac11, "planner", "ANYSHA", 300)
+
+
+def git_r2ac11_raise(a, c, t):
+    raise TimeoutError("git hung")
+
+
+res_r2ac11 = look.run(read_ledger(root_r2ac11), now=NOW, runner=FakeRunner(git=git_r2ac11_raise),
+                      root=root_r2ac11, toml_path=clean_toml(root_r2ac11))
+ok(any(b["key"] == "undetermined:supervisor-stale-code" for b in briefs_of(res_r2ac11, "reading-undetermined")),
+   f"R2 AC11: a raising --first-parent call fires reading-undetermined: {res_r2ac11['briefs']}")
+ok(not briefs_of(res_r2ac11, "supervisor-stale-code"), "R2 AC11: and no supervisor-stale-code brief for any kind")
+print("R2 AC11 ok")
+
+# ── R2 AC12: a stale planner + a current relay, same pass -> exactly one
+# brief, keyed planner ────────────────────────────────────────────────────────
+root_r2ac12 = newroot()
+_boot_row(root_r2ac12, "planner", "OLDP", 60)
+_start_row(root_r2ac12, "planner", "OLDP", 30)
+_boot_row(root_r2ac12, "relay", "OLDR", 60)
+_start_row(root_r2ac12, "relay", "OLDR", 30)
+
+
+def git_r2ac12(args, cwd, timeout):
+    sha_range = args[-1]
+    if sha_range.startswith("OLDP.."):
+        return str(int((NOW - timedelta(minutes=45)).timestamp()))   # <= planner's start ts -> cycled
+    if sha_range.startswith("OLDR.."):
+        return str(int((NOW - timedelta(minutes=5)).timestamp()))    # AFTER relay's start ts -> current
+    return ""
+
+
+res_r2ac12 = look.run(read_ledger(root_r2ac12), now=NOW, runner=FakeRunner(git=git_r2ac12),
+                      root=root_r2ac12, toml_path=clean_toml(root_r2ac12))
+b_r2ac12 = briefs_of(res_r2ac12, "supervisor-stale-code")
+ok(len(b_r2ac12) == 1 and b_r2ac12[0]["key"] == "planner",
+   f"R2 AC12: exactly one supervisor-stale-code brief, keyed planner: {b_r2ac12}")
+print("R2 AC12 ok")
+
 # ── AC15: cron-missing, per row; crons.Undetermined; unimportable crons ─────
 root15 = newroot()
 

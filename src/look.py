@@ -192,6 +192,60 @@ def _merge_status(row, runner, now, deadline, tip, body):
     except Exception: return None, True
     if not times: return False, False
     return (now.timestamp() - min(times)) / 60 >= 15, False
+_CHECKOUT = pathlib.Path(__file__).resolve().parent.parent   # the checkout root `up.HERE.parent` resolves to
+SUPERVISOR_WEDGE_HOURS = 3   # SD6: a literal constant — no look.toml knob names this
+def _merge_after(runner, deadline, checkout, sha):
+    """Sorted-ascending committer epoch-seconds for every first-parent commit
+    strictly after `sha` up to HEAD. Mirrors `_merge_status`'s own contract:
+    `(None, True)` on any failure or elapsed deadline. `--first-parent` is the
+    load-bearing flag: a bare `git log -1 --before=@ts` reconstruction can
+    return a `--no-ff` merge's branch-side commit — whose committer date can
+    predate the merge landing it on HEAD — as "HEAD at ts" when it never was."""
+    out, und = _call(runner, deadline, 10, "git",
+                     ["log", "--first-parent", "--format=%ct", f"{sha}..HEAD"], checkout)
+    if und: return None, True
+    try:
+        times = sorted(int(x) for x in out.split() if x.strip())
+    except Exception: return None, True
+    return times, False
+def _check_supervisor_stale_code(events, now, runner, deadline, root, briefs, answered):
+    """R2 point 7: for each of planner/relay/executor, the newest LIVE-pid
+    `supervisor-code` row (`boot`) is checked two ways — WEDGED (the oldest
+    first-parent commit `boot["sha"]` lacks is itself >= SUPERVISOR_WEDGE_HOURS
+    old: an unchanged sha, however old `boot` is, never wedges) and CYCLED
+    (the newest child-start event at or after `boot["ts"]` already carried a
+    `code_sha` that was ALREADY stale the moment it was written). No live pid
+    for a kind: skipped entirely — neither briefed nor cleared."""
+    for kind in ("planner", "relay", "executor"):
+        rows = [e for e in events if e.get("type") == "supervisor-code" and e.get("kind") == kind]
+        live = [e for e in rows if panes.alive(e.get("pid"))]
+        if not live: continue
+        boot = max(live, key=lambda e: fold.ts(e.get("ts")))
+        times, und = _merge_after(runner, deadline, _CHECKOUT, boot["sha"])
+        if und:
+            _fire_undetermined("supervisor-stale-code", events, root, briefs)
+            continue
+        wedged = bool(times) and (now.timestamp() - times[0]) / 3600 >= SUPERVISOR_WEDGE_HOURS
+        start_type = "planner-started" if kind == "planner" else "spawn-started"
+        boot_ts = fold.ts(boot.get("ts"))
+        starts = [e for e in events if e.get("type") == start_type and "code_sha" in e
+                 and fold.ts(e.get("ts")) >= boot_ts and (kind == "planner" or e.get("role") == kind)]
+        cycled, skip = False, False
+        if starts:
+            start = max(starts, key=lambda e: fold.ts(e.get("ts")))
+            if start["code_sha"] == boot["sha"]:
+                times2, und2 = times, und
+            else:
+                times2, und2 = _merge_after(runner, deadline, _CHECKOUT, start["code_sha"])
+            if und2:
+                _fire_undetermined("supervisor-stale-code", events, root, briefs)
+                skip = True
+            else:
+                cycled = bool(times2) and times2[0] <= fold.ts(start["ts"]).timestamp() + 1
+        if skip: continue
+        reading = {"wedged": wedged, "cycled": cycled, "sha": boot["sha"]}
+        _settle("supervisor-stale-code", kind, "thinker", wedged or cycled, reading,
+               events, root, briefs, answered)
 def _health_status(row, runner, deadline):
     reads = []
     for i in range(3):
@@ -448,6 +502,7 @@ def run(events, *, now=None, runner=None, root=None, toml_path=None, dry_run=Fal
         _check_pane_at_menu_claude(events, root, briefs)
         _check_pane_at_menu_codex(cfg, runner, deadline, events, root, briefs)
         _check_pane_dead(events, now, root, briefs)
+        _check_supervisor_stale_code(events, now, runner, deadline, root, briefs, answered)
         _check_disk_tmp(runner, root, th, now, deadline, events, briefs, answered)
         _check_crons(runner, deadline, events, root, briefs)
         _check_spec_misrouted(events, root, briefs)
