@@ -51,8 +51,20 @@ KEEP = {
     "question", "decision", "spec-written", "charter-filed", "plan-written", "tick", "spec-killed",
     "deploy-landed", "deploy-failed", "deploy-started", "deploy-refused", "charter-retracted", "charter-complete",
     "brief", "brief-answered", "lesson", "spec-carried", "inbound-registered", "inbound-closed", "inbound-covered",
-    "spec-shape-failed", "owed-ac", "owed-met", "unblocked",
+    "spec-shape-failed", "owed-ac", "owed-met", "unblocked", "message-sent",
 }
+EXEC_DISPATCHES = {"builder", "grader", "reviewer", "charter-reviewer", "owed-sweeper"}
+
+
+def is_executor_act(r):
+    """An Executor act: any non-tick row in an L-executor-* file, or a dispatch of a role only the Executor dispatches
+    (build-started, or spawn-started for grader/reviewer/charter-reviewer/owed-sweeper), which the wrapper writes in the
+    spawned role's own file."""
+    if r.get("ty") == "tick":
+        return False
+    if r.get("a") == "executor":
+        return True
+    return r.get("ty") == "build-started" or (r.get("ty") == "spawn-started" and (r.get("r") or role_of(r.get("sp"))) in EXEC_DISPATCHES)
 CHARTER_ONLY = {"audit-finding", "charter-gap", "l1-complete", "sweep-fixpoint", "cut-written", "planner-started",
                 "planner-ended", "probe-run", "seam-undefined"}   # kept only on charter subjects
 ROLE_CAPS_MIN = {"spec-writer": 30, "spec-auditor": 15, "builder": 90, "grader": 15, "reviewer": 30,
@@ -121,6 +133,8 @@ def compact(e, actor):
         if e.get("ref"):
             r["ref"] = e.get("ref")
             r["rs"] = _ref_subject(e.get("ref"))
+    elif ty == "message-sent":
+        r["why"] = trunc(e.get("text") or e.get("why"), 200)
     elif ty == "unblocked":
         r["why"] = trunc(e.get("why") or e.get("reason"), 200)
     elif ty == "spec-written":
@@ -831,7 +845,7 @@ def wallclock(rows, states, now):
             hrs = (_parse(r["t"]) - _parse(s0["t"])).total_seconds() / 3600 if s0 and _parse(s0["t"]) else 0
             b = burn.setdefault(k, {"n": 0, "hours": 0.0}); b["n"] += 1; b["hours"] += max(0, hrs)
     # the executor: when did it last ACT (not tick), and the longest dispatch gap in the window
-    acts = [r for r in rows if r.get("a") == "executor" and r["ty"] != "tick"]
+    acts = [r for r in rows if is_executor_act(r)]
     disp = [_parse(r["t"]) for r in rows if r["ty"] in ("spawn-started", "build-started")]
     gap = (0, None, None)
     for a, b in zip(disp, disp[1:]):

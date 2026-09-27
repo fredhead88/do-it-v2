@@ -457,7 +457,7 @@ function process(until){
   while(S.cursor<EVENTS.length&&EVENTS[S.cursor].ms<=until){handle(EVENTS[S.cursor++]);}
   for(const [sp,a] of S.actors){if(a.done)continue;const cap=(CAP[a.role]||30)*60000;if(until-a.start>cap*3){a.done=true;if(S.quiet){S.actors.delete(sp);releaseSlot(a.wp);}else{a.state='dying';a.bubble='q';a.bubbleT=2.5;addLog({ms:until,s:a.subject,sp},'bad',sp,`vanished: no spawn-done or spawn-failed was ever written for ${a.subject}`);}S.vanished.push({ms:until,sp});}}
 }
-function handle(e){const ty=e.ty;if(ty!=='tick')subjectPush(e.s,e);if(e.a==='executor'&&ty!=='tick')S.lastAct=Math.max(S.lastAct||0,e.ms);if(e.sp&&e.sp!==e.s)subjectPush(e.sp,e);
+function handle(e){const ty=e.ty;if(ty!=='tick')subjectPush(e.s,e);if(ty!=='tick'&&(e.a==='executor'||ty==='build-started'||(ty==='spawn-started'&&['builder','grader','reviewer','charter-reviewer','owed-sweeper'].includes(e.r))))S.lastAct=Math.max(S.lastAct||0,e.ms);if(e.sp&&e.sp!==e.s)subjectPush(e.sp,e);
   const spark=pid=>{if(S.quiet||S.sparks.length>160||REDUCED)return;const p=PLACES[pid];if(!p)return;S.sparks.push({x:p.x+p.w/2,y:p.y+p.h/2,t:0});};
   const roleA=actorRole(e.a);
   switch(ty){
@@ -476,6 +476,7 @@ function handle(e){const ty=e.ty;if(ty!=='tick')subjectPush(e.s,e);if(e.a==='exe
     case 'merge-gate-clean':S.gate={flash:S.quiet?0:2,ok:true};addLog(e,'good','Gate',`opens for ${e.s}`);spark('gate');break;
     case 'merge-gate-rework':S.gate={flash:S.quiet?0:2,ok:false};addLog(e,'bad','Gate',`refuses ${e.s}: ${e.why||'rework'}`);spark('gate');break;
     case 'shipped':S.shipped++;S.shippedList.push({ms:e.ms,s:e.s,sha:e.sha});if(!S.quiet&&!REDUCED)S.boats.push({t:0,dur:3,s:e.s});addLog(e,'ship','Harbor',`${e.s} shipped to Prod Town${e.sha?' ('+e.sha+')':''}`);spark('harbor');break;
+    case 'message-sent':if(e.a==='executor')addLog(e,'',e.a,`says: ${e.why||''}`);break;
     case 'deploy-failed':addLog(e,'bad','Harbor',`deploy failed for ${e.s}`);break;
     case 'escalation-blocking':case 'question':{const list=S.esc.get(e.s)||[];list.push({ms:e.ms,why:e.why,a:e.a,df:e.df,dl:e.dl,irr:e.irr,bl:e.bl,q:e.ty==='question'});S.esc.set(e.s,list);
       if(!S.quiet&&!REDUCED){const from=PLACES[WORK[roleA]||'tower'];S.ravens.push({x:from.x+from.w/2,y:from.y,tx:140,ty:90,t:0,dur:1.8});}
