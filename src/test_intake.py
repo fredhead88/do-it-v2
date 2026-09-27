@@ -2,10 +2,13 @@
 """One runnable check on `intake`. Run: python3 test_intake.py
 
 Everything is a fixture — `DOIT_ROOT` points under a fresh temp dir, and
-`intake.subprocess` is replaced BEFORE any `intake` call fires (AC11), so no
+`intake.ghlimit` is replaced BEFORE any `intake` call fires (AC11), so no
 `gh` process and no network connection is ever reached from this file.
+`DOIT_REAL_GH=/bin/false` (set by the runner, L-spec-0379 fix 9) is a second,
+independent guard: even if this stub failed to intercept, a real exec would
+hit `/bin/false`, never GitHub.
 """
-import base64, json, os, pathlib, sys, tempfile, types
+import base64, json, os, pathlib, sys, tempfile
 
 TMP = pathlib.Path(tempfile.mkdtemp(prefix="intake-test-"))
 os.environ["DOIT_ROOT"] = str(TMP)
@@ -37,23 +40,28 @@ def no_network(*a, **k):
 
 urllib.request.urlopen = no_network
 
-# ── the stub: every subprocess call `intake` makes, recorded and canned ────
+# ── the fake: every `ghlimit.run` call `intake` makes, recorded and canned ──
 CALLS = []
+GATE_CALLS = []
 
 
 def _ok(out=""):
-    return types.SimpleNamespace(returncode=0, stdout=out, stderr="")
+    return (0, out, "")
 
 
 def _fail(err="boom"):
-    return types.SimpleNamespace(returncode=1, stdout="", stderr=err)
+    return (1, "", err)
 
 
-class Stub:
-    """Stands in for `intake.subprocess`. Records argv, returns a canned
-    result, never runs anything real — mirrors `carry.py`'s own `Stub`/`CALLS`
+class GhlimitFake:
+    """Stands in for `intake.ghlimit` (L-spec-0379 fix 2) — its own two real
+    signatures, `.gate(wait=False) -> {"ok": ...}` / `.run(argv, wait=False) ->
+    (rc, out, err)` (a tuple, never `subprocess`'s `SimpleNamespace`). Records
+    every `.run()` argv and every `.gate()` call, returns a canned result,
+    never runs anything real — mirrors `carry.py`'s own `Stub`/`CALLS`
     precedent (`test_carry.py:78-104`)."""
     def __init__(self):
+        self.rate_limit = 5000
         self.rate_remaining = 5000
         self.rate_fail = False
         self.listings = {"inbound-spec": [], "inbound-note": []}
@@ -63,13 +71,22 @@ class Stub:
         self.states = {}            # url -> "OPEN"/"CLOSED"/"MERGED"
         self.comment_fail = False
         self.close_fail = False
+        self.skip_mode = False   # AC17: every .run() call returns ghlimit's own skip tuple
 
-    def run(self, argv, capture_output=True, text=True, **kw):
+    def gate(self, wait=False):
+        """AC18's own boundary: low exactly when remaining < max(100, 5% of
+        limit) — pinned with a limit-bearing fixture, never a bare floor."""
+        GATE_CALLS.append(wait)
+        if self.rate_fail:
+            return {"ok": True, "remaining": None, "reset": None, "waited_s": 0}
+        threshold = max(100, self.rate_limit * 0.05)
+        return {"ok": self.rate_remaining >= threshold, "remaining": self.rate_remaining,
+                "reset": 0, "waited_s": 0}
+
+    def run(self, argv, wait=False):
         CALLS.append(list(argv))
-        if argv[:3] == ["gh", "api", "rate_limit"]:
-            if self.rate_fail:
-                return _fail()
-            return _ok(json.dumps({"resources": {"core": {"remaining": self.rate_remaining}}}))
+        if self.skip_mode:
+            return (75, "", "ghlimit: quota low, skipped")
         if argv[:3] == ["gh", "pr", "list"]:
             label = argv[argv.index("--label") + 1]
             if label in self.listing_fail:
@@ -101,8 +118,8 @@ class Stub:
         raise AssertionError(f"unexpected gh call: {argv}")
 
 
-STUB = Stub()
-intake.subprocess = STUB
+STUB = GhlimitFake()
+intake.ghlimit = STUB
 # `fold.check_append` is not what `intake` calls (it uses `dispatch.emit`, gated
 # by `fold.required_reason` alone) — nothing to stub here.
 
@@ -137,18 +154,28 @@ def reset():
         p.unlink()
     STUB.__init__()
     CALLS.clear()
+    GATE_CALLS.clear()
 
 
-# ══ AC1 · the rate guard: below the floor, zero listing calls, empty return ═══
+# ══ AC1 (L-spec-0379 AC18) · SD8's own floor — max(100, 5% of limit) — pinned
+# at both boundaries against a limit-bearing fixture, replacing the old bare
+# 200/199 pair the audit found untethered to any `limit` field.
+# 249/5000 (threshold 250) skips; 250/5000 proceeds. ════════════════════════
 reset()
-STUB.rate_remaining = 199
+STUB.rate_limit, STUB.rate_remaining = 5000, 249
 out1 = intake.run([])
 check(out1 == {"spec_prs": [], "note_prs": []}, f"AC1: empty return under the rate floor: {out1}")
-check([c for c in CALLS if c[:3] == ["gh", "api", "rate_limit"]] and
-     len([c for c in CALLS if c[:3] == ["gh", "api", "rate_limit"]]) == 1,
-     f"AC1: exactly one rate-limit read: {CALLS}")
+check(len(GATE_CALLS) == 1, f"AC1: exactly one gate check: {GATE_CALLS}")
 check(not [c for c in CALLS if c[:3] == ["gh", "pr", "list"]],
      f"AC1: zero listing calls under the floor: {CALLS}")
+check(events_in("intake") == [], f"AC1: no ledger event when the pass is skipped: {events_in('intake')}")
+
+reset()
+STUB.rate_limit, STUB.rate_remaining = 5000, 250
+out1b = intake.run([])
+check(out1b == {"spec_prs": [], "note_prs": []}, f"AC1: rows shape unchanged at the boundary: {out1b}")
+check(len([c for c in CALLS if c[:3] == ["gh", "pr", "list"]]) == 2,
+     f"AC1: at remaining=250 the pass proceeds — two listing calls: {CALLS}")
 
 # ══ AC2 · a healthy rate: exactly two listing calls, canned rows assembled ═══
 reset()
@@ -280,8 +307,18 @@ check(intake.close(url10) is True, "AC10: a second close() on an already-closed 
 close_calls_after = len([c for c in CALLS if c[:3] == ["gh", "pr", "close"]])
 check(close_calls_after == close_calls_mid, f"AC10: no NEW gh pr close call on the second close(): {close_calls_after} {close_calls_mid}")
 
+# ══ AC17 · a ghlimit.run skip tuple makes comment()/close() return False,
+# with no special-casing in _run ═══════════════════════════════════════════
+reset()
+STUB.skip_mode = True
+url17 = "https://github.com/fredhead88/albert-scott-platform/pull/17017"
+check(intake.comment(url17, "hi <!--m-->", "<!--m-->") is False,
+     "AC17: comment() returns False on a ghlimit.run skip tuple")
+check(intake.close(url17) is False, "AC17: close() returns False on a ghlimit.run skip tuple")
+STUB.skip_mode = False
+
 # ══ AC11/AC12 · every call is stubbed, and ingest_inbound_spec never appears ══
-check(intake.subprocess is STUB, "AC11: intake.subprocess is the recording stub")
+check(intake.ghlimit is STUB, "AC11: intake.ghlimit is the recording fake")
 argv_dump = json.dumps(CALLS)
 check("ingest_inbound_spec" not in argv_dump, f"AC12: no recorded argv names the v4 script: {argv_dump[:200]}")
 check(NET[0] == 0, "AC11: no network call was ever attempted")

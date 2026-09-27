@@ -96,6 +96,7 @@ a pane.
 | `src/deploy.py` · `src/tree_cleanup.py` | serial deploy that proves the sha is live; reaper that proves death by patch-id |
 | `src/think.py` · `src/up.py` · `src/tick.py` | Thinker landing and the charter-set diff; the Planner pane; the Executor tick |
 | `src/validate.py` · `src/paid_call.py` · `scripts/vet-dep.mjs` · `src/backup.sh` | the seat route's StructuredOutput; the paid-call cap; the install gate; the restic push and drill |
+| `src/ghlimit.py` · `scripts/gh/gh` | the shared, flock'd GitHub rate-limit gate every builder-box `gh` caller passes through (`gate()`/`run()`); `scripts/gh/gh` is the drop-in shim, installed at `/usr/local/bin/gh` by the Thinker's own post-merge act (see the plan's `gh-limiter-cron-path` sibling unit for the cron `PATH` fix) — override the shared state file's path with `GH_LIMIT_STATE` (default `~/.local/state/gh-ratelimit.json`) |
 | `agents/*.md` + `*.schema.json` | thirteen contracts, ten Output schemas |
 | `src/test_*.py`, `src/test_vet_dep.mjs` | ~580 checks; `./doit test` runs them all |
 

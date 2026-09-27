@@ -2,11 +2,11 @@
 """One runnable check on `notes`. Run: python3 test_notes.py
 
 Everything is a fixture — `DOIT_ROOT` points under a fresh temp dir, and
-`intake.subprocess` is replaced BEFORE any fixture calls `notes.run`/
+`intake.ghlimit` is replaced BEFORE any fixture calls `notes.run`/
 `notes.note_close` (AC11), so no `gh` process and no network connection is
 ever reached from this file.
 """
-import json, os, pathlib, sys, tempfile, types
+import json, os, pathlib, sys, tempfile
 
 TMP = pathlib.Path(tempfile.mkdtemp(prefix="notes-test-"))
 os.environ["DOIT_ROOT"] = str(TMP)
@@ -40,28 +40,33 @@ urllib.request.urlopen = no_network
 
 
 def _ok(out=""):
-    return types.SimpleNamespace(returncode=0, stdout=out, stderr="")
+    return (0, out, "")
 
 
 def _fail(err="boom"):
-    return types.SimpleNamespace(returncode=1, stdout="", stderr=err)
+    return (1, "", err)
 
 
 CALLS = []
 
 
-class Stub:
-    """Stands in for `intake.subprocess` — the `test_intake.py` pattern
-    (Constraints), recording argv and returning a canned result, never
-    running anything real. Covers only the `gh` shapes `notes.note_close`'s
-    own `intake.comment`/`intake.close` calls reach."""
+class GhlimitFake:
+    """Stands in for `intake.ghlimit` (L-spec-0379 fix 2) — the
+    `test_intake.py` pattern, recording argv against `.run(argv, wait=False)
+    -> (rc, out, err)` (a tuple, never `subprocess`'s `SimpleNamespace`) and
+    returning a canned result, never running anything real. Covers only the
+    `gh` shapes `notes.note_close`'s own `intake.comment`/`intake.close`
+    calls reach; `.gate()` is never exercised from this file."""
     def __init__(self):
         self.comments = {}
         self.states = {}
         self.comment_fail = False
         self.close_fail = False
 
-    def run(self, argv, capture_output=True, text=True, **kw):
+    def gate(self, wait=False):
+        return {"ok": True, "remaining": 5000, "reset": 0, "waited_s": 0}
+
+    def run(self, argv, wait=False):
         CALLS.append(list(argv))
         if argv[:3] == ["gh", "pr", "view"] and "comments" in argv:
             url = argv[3]
@@ -83,8 +88,8 @@ class Stub:
         raise AssertionError(f"unexpected gh call in test_notes.py stub: {argv}")
 
 
-STUB = Stub()
-intake.subprocess = STUB
+STUB = GhlimitFake()
+intake.ghlimit = STUB
 
 
 def reset():
@@ -259,7 +264,7 @@ check("ingest_inbound_spec" not in NOTES_SRC, "AC10: src/notes.py never names in
 print("notes: AC10 check passes")
 
 # ══ AC11 · the stub was installed before any call above, and no real network fired
-check(intake.subprocess is STUB, "AC11: intake.subprocess is the recording stub throughout")
+check(intake.ghlimit is STUB, "AC11: intake.ghlimit is the recording fake throughout")
 check(NET[0] == 0, "AC11: no fixture opened a real network connection")
 
 print("notes: AC11 checks pass")

@@ -1,0 +1,60 @@
+#!/usr/bin/env python3
+"""scripts/gh/gh — a safe drop-in for `gh` (L-charter-0037 R5, L-spec-0379 R2).
+
+Installed at `/usr/local/bin/gh` by the Thinker's own post-merge act (not this
+spec) so it sits ahead of `/usr/bin/gh` on `PATH`. Every non-pass-through
+invocation calls `ghlimit.gate(wait=True)` first — letting a low shared quota
+WAIT for the reset instead of failing — then `os.execv`s the real `gh`,
+inheriting this process's own stdin/stdout/stderr (never a captured
+`subprocess.run`), so TTY-dependent behavior (interactive prompts, pagers,
+colorized output, `gh run watch`'s streaming) matches invoking the real `gh`
+directly. Because `execv` replaces the process and never returns, this shim
+carries none of `ghlimit.run`'s own retry-after-rate-limit behavior — a
+documented tradeoff (spec Boundaries), not a silent gap.
+"""
+import os, pathlib, shutil, sys
+
+SELF = pathlib.Path(__file__).resolve()
+SRC = SELF.parent.parent.parent / "src"
+sys.path.insert(0, str(SRC))
+
+
+def _resolve_target():
+    """The path `$DOIT_REAL_GH` (or its default) resolves to — realpath'd if
+    it is already a path, else looked up on `PATH` first (the exact
+    misconfiguration this guard defends against: `PATH` resolving a bare
+    `gh` back to this very shim)."""
+    val = os.environ.get("DOIT_REAL_GH") or "/usr/bin/gh"
+    if os.sep in val:
+        return pathlib.Path(val)
+    found = shutil.which(val)
+    return pathlib.Path(found) if found else pathlib.Path(val)
+
+
+def main(argv):
+    target = _resolve_target()
+    try:
+        target_real = target.resolve()
+    except OSError:
+        target_real = target
+    # ── self-recursion guard: before ANYTHING else, zero subprocess/exec/gate
+    if target_real == SELF:
+        sys.stderr.write(
+            f"gh: refusing to exec — DOIT_REAL_GH resolves to this shim itself ({SELF})\n")
+        return 1
+
+    gh_argv = ["gh"] + list(argv)
+    import ghlimit  # deferred: the self-recursion guard above must run first
+
+    if not ghlimit._is_passthrough(gh_argv):
+        ghlimit.gate(wait=True)
+    try:
+        os.execv(str(target_real), [str(target_real)] + list(argv))
+    except OSError as e:
+        sys.stderr.write(f"gh: could not exec {target_real}: {e}\n")
+        return 1
+    return 0  # unreachable — execv never returns on success
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

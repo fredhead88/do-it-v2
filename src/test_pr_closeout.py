@@ -5,7 +5,11 @@ Everything is a fixture — `DOIT_ROOT` points under a fresh temp dir, and
 `intake.comment`/`intake.close`/`intake.has_marker`/`intake.run` are all
 replaced with recording fakes BEFORE any fixture calls `pr_closeout.run` or
 `tick._record()` (AC10), so no `gh` process and no network connection is ever
-reached from this file. `carry.scan_events`/`already_carried`/`spec_written`
+reached from this file. `intake.ghlimit` is ALSO replaced with a raising
+tripwire (L-spec-0379 fix 2) — a defense-in-depth guard on the seam actually
+on `intake._run`'s call path, even though the four direct fakes above already
+make that path unreachable in this file's own fixtures.
+`carry.scan_events`/`already_carried`/`spec_written`
 are exercised for REAL, against events this file writes straight to the
 fixture ledger (`carry.py`'s own precedent, mirroring `test_carry.py`'s own
 `write_event`), because the idempotency reads in `pr_closeout.py` ARE the
@@ -50,11 +54,21 @@ def no_network(*a, **k):
 urllib.request.urlopen = no_network
 
 
-def no_subprocess(argv, **kw):
-    raise AssertionError(f"test_pr_closeout.py must never shell out for real: {argv}")
+class _NoGhlimit:
+    """A raising stand-in for `intake.ghlimit` (L-spec-0379 fix 2) — the
+    tripwire moves onto the seam actually on `intake._run`'s call path now
+    that `_run` no longer touches `subprocess` at all. Still a defense-in-
+    depth guard only: this file's own four direct fakes (below) intercept
+    `intake.comment`/`close`/`has_marker`/`run` first, so `_run` is never
+    reached from this file's own fixtures either."""
+    def gate(self, wait=False):
+        raise AssertionError("test_pr_closeout.py must never gate for real")
+
+    def run(self, argv, wait=False):
+        raise AssertionError(f"test_pr_closeout.py must never shell out for real: {argv}")
 
 
-intake.subprocess = no_subprocess
+intake.ghlimit = _NoGhlimit()
 
 # ── the four fakes (AC10): assigned before any fixture calls run() ─────────
 COMMENT_CALLS, CLOSE_CALLS, HAS_MARKER_CALLS = [], [], []
