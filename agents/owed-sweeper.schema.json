@@ -1,0 +1,217 @@
+{
+  "title": "owed-sweeper Output — one verdict per due check, swept in one batch (L-charter-0038 R1, spec 387)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "batch",
+    "results",
+    "contamination",
+    "escalations",
+    "declarations"
+  ],
+  "properties": {
+    "contamination": {
+      "type": "boolean",
+      "description": "true = a stripped item (a card, a verdict, a sibling's reasoning) reached the packet; the run is void"
+    },
+    "batch": {
+      "type": "string",
+      "maxLength": 40,
+      "description": "this spawn's own subject — the sweep id, never a row's spec id"
+    },
+    "results": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 8,
+      "description": "one row per due check in the manifest",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "spec",
+          "criterion",
+          "verdict"
+        ],
+        "properties": {
+          "spec": {
+            "type": "string",
+            "maxLength": 40,
+            "description": "the row's own spec id — never the batch subject"
+          },
+          "criterion": {
+            "type": "string",
+            "maxLength": 20
+          },
+          "verdict": {
+            "type": "string",
+            "enum": [
+              "met",
+              "failed",
+              "cannot-observe"
+            ]
+          },
+          "evidence": {
+            "type": "string",
+            "maxLength": 600,
+            "description": "prose only — never a DSN, token or password"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "unmet",
+              "stale"
+            ],
+            "description": "required when verdict is failed"
+          },
+          "capability": {
+            "type": "string",
+            "enum": [
+              "ro-dsn",
+              "droplet",
+              "browser",
+              "operator-action",
+              "elapsed",
+              "other"
+            ],
+            "description": "required when verdict is cannot-observe"
+          },
+          "why": {
+            "type": "string",
+            "maxLength": 400,
+            "description": "required when verdict is cannot-observe"
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "verdict": {
+                  "const": "met"
+                }
+              },
+              "required": [
+                "verdict"
+              ]
+            },
+            "then": {
+              "required": [
+                "evidence"
+              ]
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "verdict": {
+                  "const": "failed"
+                }
+              },
+              "required": [
+                "verdict"
+              ]
+            },
+            "then": {
+              "required": [
+                "evidence",
+                "kind"
+              ]
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "verdict": {
+                  "const": "cannot-observe"
+                }
+              },
+              "required": [
+                "verdict"
+              ]
+            },
+            "then": {
+              "required": [
+                "capability",
+                "why"
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "escalations": {
+      "type": "array",
+      "maxItems": 10,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "subject",
+          "asks",
+          "blocks",
+          "default",
+          "deadline"
+        ],
+        "properties": {
+          "subject": {
+            "type": "string",
+            "maxLength": 40,
+            "description": "the row's own spec id this escalation concerns — never the batch subject"
+          },
+          "asks": {
+            "type": "string",
+            "maxLength": 300
+          },
+          "blocks": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 10,
+            "items": {
+              "type": "string",
+              "maxLength": 40
+            }
+          },
+          "default": {
+            "type": "string",
+            "maxLength": 300
+          },
+          "deadline": {
+            "type": "string",
+            "maxLength": 40,
+            "description": "ISO-8601"
+          }
+        }
+      }
+    },
+    "declarations": {
+      "type": "array",
+      "maxItems": 10,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "subject",
+          "term",
+          "line"
+        ],
+        "properties": {
+          "subject": {
+            "type": "string",
+            "maxLength": 40,
+            "description": "the row's own spec id this declaration concerns — never the batch subject"
+          },
+          "term": {
+            "type": "string",
+            "enum": [
+              "gate-infra",
+              "worked"
+            ]
+          },
+          "line": {
+            "type": "string",
+            "maxLength": 200
+          }
+        }
+      }
+    }
+  }
+}

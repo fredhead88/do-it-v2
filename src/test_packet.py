@@ -10,7 +10,7 @@ import json, os, pathlib, re, subprocess, sys, tempfile
 TMP = pathlib.Path(tempfile.mkdtemp())
 os.environ["DOIT_ROOT"], os.environ["DOIT_PROJECT"] = str(TMP), "t"
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
-import audit, fold, packet  # noqa: E402
+import audit, dispatch, fold, packet  # noqa: E402
 
 REPO = TMP / "repo"
 (TMP / "content").mkdir(parents=True)
@@ -1189,4 +1189,99 @@ ev("builder", "build-done", "L-spec-0092", status="DONE", card=str(CARD0092),
 tr_und = build("reviewer", subject="L-spec-0092", worktree=str(REPOS_T), repo=str(REPOS_T))
 assert "could not determine" in tr_und, f"AC9: Undetermined renders as prose, never a die(): {tr_und!r}"
 
-print(f"packet: {N} packets built, seven Blindness lists enforced")
+# ── L-spec-0387 · owed-sweeper-role (L-charter-0038 R1) — AC10, AC11, AC17, AC19 ──
+
+
+def _sweep_manifest_387(sweep_id, rows, project="t", cwd=None):
+    cwd = cwd or str(REPOS_T)
+    (TMP / "content" / f"{sweep_id}.md").write_text(
+        f"# {sweep_id}\n\nproject: {project}\ncwd: {cwd}\n\n## Rows\n```json\n{json.dumps(rows)}\n```\n")
+
+
+def _row_387(spec, criterion, declared_src="owed-ac", line="1"):
+    return {"spec": spec, "criterion": criterion, "declared_src": declared_src, "line": line,
+            "spec_path": str(dispatch.spec_path(spec))}
+
+
+# ── AC11 · parse_sweep_manifest on a well-formed 3-row manifest returns exactly
+#          the 3 rows, verbatim, under {"project","cwd","rows"} ────────────────
+SPEC_A11 = TMP / "content" / "L-spec-9811.md"
+SPEC_B11 = TMP / "content" / "L-spec-9812.md"
+SPEC_C11 = TMP / "content" / "L-spec-9813.md"
+for _p in (SPEC_A11, SPEC_B11, SPEC_C11):
+    _p.write_text(f"# {_p.stem}\n## Acceptance criteria\nAC1 [backend]: x. review_path: y.\n")
+SWEEP11 = "L-owed-sweeper-ac11"
+ROWS11 = [_row_387("L-spec-9811", "AC1"), _row_387("L-spec-9812", "AC1"), _row_387("L-spec-9813", "AC1")]
+_sweep_manifest_387(SWEEP11, ROWS11)
+m11 = packet.parse_sweep_manifest(TMP / "content" / f"{SWEEP11}.md")
+assert set(m11) == {"project", "cwd", "rows"} and len(m11["rows"]) == 3, m11
+assert m11["rows"] == ROWS11, "AC11: rows returned verbatim, as written"
+N += 1
+
+# ── AC19 · a row whose spec_path does not resolve to dispatch.spec_path(spec)
+#          raises (SystemExit) naming the offending spec ───────────────────────
+SWEEP19 = "L-owed-sweeper-ac19"
+BAD_ROW19 = {**_row_387("L-spec-9811", "AC1"), "spec_path": "content/../content/wrong-name.md"}
+_sweep_manifest_387(SWEEP19, [BAD_ROW19])
+try:
+    packet.parse_sweep_manifest(TMP / "content" / f"{SWEEP19}.md")
+    raise AssertionError("AC19: a mismatched spec_path must raise")
+except SystemExit as e:
+    assert "L-spec-9811" in str(e.code), e.code
+N += 1
+
+# ── AC10 · BUILD["owed-sweeper"] is p_owed_sweeper; a 2-row manifest whose sweep
+#          subject carries ZERO ledger events (the Ctx exemption), each row's
+#          criterion spanning multiple lines with review_path: on a continuation
+#          line — main() does not die, both full blocks appear verbatim, no
+#          other block appears, and the packet exits 0 against packet_lint ────
+assert packet.BUILD["owed-sweeper"] is packet.p_owed_sweeper
+SPEC_A10 = TMP / "content" / "L-spec-9821.md"
+SPEC_A10.write_text(
+    "# L-spec-9821\n## Acceptance criteria\n"
+    "AC1 [backend]: line one of a multi-line criterion, continuing\n"
+    "onto a second physical line before review_path arrives.\n"
+    "review_path: read the file. Worked if true. Failed otherwise.\n\n"
+    "AC2 [backend]: a different criterion entirely — never in this packet.\n"
+    "  review_path: z.\n")
+SPEC_B10 = TMP / "content" / "L-spec-9822.md"
+SPEC_B10.write_text(
+    "# L-spec-9822\n## Acceptance criteria\n"
+    "AC1 [backend]: this row's own criterion, also spanning two lines before\n"
+    "its review_path continuation arrives.\n"
+    "review_path: read the file. Worked if true. Failed otherwise.\n")
+SWEEP10 = "L-owed-sweeper-ac10"
+ROWS10 = [_row_387("L-spec-9821", "AC1"), _row_387("L-spec-9822", "AC1")]
+_sweep_manifest_387(SWEEP10, ROWS10)
+t10 = build("owed-sweeper", subject=SWEEP10)      # must not die on the empty event stream
+blockA10 = packet.criterion_block(SPEC_A10.read_text(), "AC1")
+blockB10 = packet.criterion_block(SPEC_B10.read_text(), "AC1")
+indentedA10 = "\n".join(f"     {ln}" for ln in blockA10.splitlines()) if blockA10 else None
+indentedB10 = "\n".join(f"     {ln}" for ln in blockB10.splitlines()) if blockB10 else None
+assert blockA10 and "review_path: read the file" in blockA10 and indentedA10 in t10, t10
+assert blockB10 and "review_path: read the file" in blockB10 and indentedB10 in t10, t10
+assert "never in this packet" not in t10, "AC10: no other criterion's block may appear"
+N += 1
+
+# ── AC17 · a row spec's card prose and grader reason are stripped, and main()'s
+#          own Blindness check refuses a leaked card line ─────────────────────
+SPEC_X17 = TMP / "content" / "L-spec-9831.md"
+SPEC_X17.write_text("# L-spec-9831\n## Acceptance criteria\nAC1 [backend]: x. review_path: y.\n")
+ev("spec-writer", "spec-written", "L-spec-9831", spec="L-spec-9831", path=str(SPEC_X17), footprint=["a.py"])
+CARD_X17 = TMP / "content" / "L-card-x17.md"
+DISTINCTIVE_L17 = "a card line distinctive enough that nothing else in this packet could accidentally match it"
+CARD_X17.write_text(f"# L-card-x17 · DONE\n{DISTINCTIVE_L17}\n")
+ev("builder", "build-done", "L-spec-9831", status="DONE", card=str(CARD_X17), branch="l-owsw-x17",
+   base_sha=REPO_HEAD, ready_sha=REPO_HEAD)
+DISTINCTIVE_W17 = "a grader reason distinctive enough that nothing else in this packet could match it"
+ev("grader", "rejected-criterion", "L-spec-9831", criterion="AC1", why=DISTINCTIVE_W17)
+SWEEP17 = "L-owed-sweeper-ac17"
+_sweep_manifest_387(SWEEP17, [_row_387("L-spec-9831", "AC1")])
+c17 = packet.Ctx(packet.argparse.Namespace(role="owed-sweeper", subject=SWEEP17, charter=None, project="t"))
+strip17 = packet.strip(c17, "owed-sweeper")
+assert any(s == DISTINCTIVE_L17 for _, s in strip17), strip17
+assert any(s == DISTINCTIVE_W17 for _, s in strip17), strip17
+refuses("owed-sweeper", DISTINCTIVE_L17, subject=SWEEP17)
+N += 1
+
+print(f"packet: {N} packets built, eight Blindness lists enforced")

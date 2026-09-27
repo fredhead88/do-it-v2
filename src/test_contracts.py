@@ -47,6 +47,7 @@ LESSON_BLIND_FILES = (
     "agents/probe.md",
     "agents/research.md",
     "agents/reuse-scout.md",
+    "agents/owed-sweeper.md",
 )
 LESSON_HEADING = "## Lessons"
 

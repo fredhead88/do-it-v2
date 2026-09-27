@@ -1751,6 +1751,168 @@ for p in _H2:
     harness.cleanup(p)
 
 # ══════════════════════════════════════════════════════════════════════════════
+# L-spec-0387 · owed-sweeper-role (L-charter-0038 R1) — AC6-9, AC12-16
+# ══════════════════════════════════════════════════════════════════════════════
+import jsonschema as _js387  # noqa: E402
+
+OS_SCHEMA = json.loads((REPO_ROOT / "agents" / "owed-sweeper.schema.json").read_text())
+
+
+def _sweep_manifest(sweep_id, rows, project="t", cwd=None):
+    cwd = cwd or str(REPO)
+    (TMP / "content" / f"{sweep_id}.md").write_text(
+        f"# {sweep_id}\n\nproject: {project}\ncwd: {cwd}\n\n## Rows\n```json\n{json.dumps(rows)}\n```\n")
+
+
+def _os_row(spec, criterion, declared_src="owed-ac", line="1"):
+    return {"spec": spec, "criterion": criterion, "declared_src": declared_src, "line": line,
+            "spec_path": str(dispatch.spec_path(spec))}
+
+
+# ── AC6 · schema requires top-level batch/results; each result requires spec/
+#         criterion/verdict; a met/failed row missing evidence, a failed row
+#         missing kind, or a cannot-observe row missing capability/why raises ──
+_os_good = {"batch": "L-owed-sweeper-schema", "contamination": False, "escalations": [], "declarations": [],
+           "results": [{"spec": "L-spec-9001", "criterion": "AC1", "verdict": "met", "evidence": "e"},
+                       {"spec": "L-spec-9002", "criterion": "AC2", "verdict": "failed", "evidence": "e",
+                        "kind": "stale"},
+                       {"spec": "L-spec-9003", "criterion": "AC3", "verdict": "cannot-observe",
+                        "capability": "ro-dsn", "why": "w"}]}
+_js387.validate(_os_good, OS_SCHEMA)      # every valid sample validates
+
+
+def _os_bad_result(row):
+    try:
+        _js387.validate({**_os_good, "results": [row]}, OS_SCHEMA)
+        raise AssertionError(f"AC6: schema accepted an invalid result row: {row!r}")
+    except _js387.ValidationError:
+        pass
+
+
+_os_bad_result({"criterion": "AC1", "verdict": "met", "evidence": "e"})                          # no spec
+_os_bad_result({"spec": "x", "verdict": "met", "evidence": "e"})                                 # no criterion
+_os_bad_result({"spec": "x", "criterion": "AC1", "verdict": "met"})                               # met, no evidence
+_os_bad_result({"spec": "x", "criterion": "AC1", "verdict": "failed", "evidence": "e"})            # failed, no kind
+_os_bad_result({"spec": "x", "criterion": "AC1", "verdict": "cannot-observe", "why": "w"})         # no capability
+_os_bad_result({"spec": "x", "criterion": "AC1", "verdict": "cannot-observe", "capability": "droplet"})  # no why
+try:
+    _js387.validate({k: v for k, v in _os_good.items() if k != "results"}, OS_SCHEMA)
+    raise AssertionError("AC6: a document with no results must be refused")
+except _js387.ValidationError:
+    pass
+try:
+    _js387.validate({k: v for k, v in _os_good.items() if k != "batch"}, OS_SCHEMA)
+    raise AssertionError("AC6: a document with no batch must be refused")
+except _js387.ValidationError:
+    pass
+N += 1
+
+# ── AC7 · a capability outside the enumerated six values fails schema validation
+for cap in ("ro-dsn", "droplet", "browser", "operator-action", "elapsed", "other"):
+    _js387.validate({**_os_good, "results": [{"spec": "x", "criterion": "AC1", "verdict": "cannot-observe",
+                                              "capability": cap, "why": "w"}]}, OS_SCHEMA)
+try:
+    _js387.validate({**_os_good, "results": [{"spec": "x", "criterion": "AC1", "verdict": "cannot-observe",
+                                              "capability": "nonsense", "why": "w"}]}, OS_SCHEMA)
+    raise AssertionError("AC7: an out-of-enum capability must be refused")
+except _js387.ValidationError:
+    pass
+N += 1
+
+# ── AC8 · dispatch.ROLES["owed-sweeper"] == (None, 45, 5) ──────────────────────
+assert dispatch.ROLES["owed-sweeper"] == (None, 45, 5), dispatch.ROLES["owed-sweeper"]
+N += 1
+
+# ── AC9 · both TOML templates carry [contracts.owed-sweeper] backend=seat,
+#         model=claude-sonnet-5, and models.resolve agrees against each ───────
+for _tmpl in ("models.example.toml", "models.claude-only.toml"):
+    _mp = models.load(REPO_ROOT / _tmpl)
+    assert _mp["owed-sweeper"]["backend"] == "seat" and _mp["owed-sweeper"]["model"] == "claude-sonnet-5", \
+        (_tmpl, _mp["owed-sweeper"])
+    _r = models.resolve("owed-sweeper", None, mp=_mp)
+    assert _r["backend"] == "seat" and _r["model"] == "claude-sonnet-5", (_tmpl, _r)
+N += 1
+
+# ── AC12 · a 3-row manifest (A/AC1, B/AC2, C/AC3) drives exactly one owed-met,
+#          one owed-failed, one owed-unobservable — each on its OWN row's spec,
+#          never the batch subject; spawn-started/spawn-done keep the batch ───
+SWEEP12 = "L-owed-sweeper-fx12"
+ROWS12 = [_os_row("L-owsw-a12", "AC1"), _os_row("L-owsw-b12", "AC2"), _os_row("L-owsw-c12", "AC3")]
+_sweep_manifest(SWEEP12, ROWS12)
+OUT12 = {"batch": SWEEP12, "contamination": False, "escalations": [], "declarations": [],
+         "results": [{"spec": "L-owsw-a12", "criterion": "AC1", "verdict": "met", "evidence": "e"},
+                     {"spec": "L-owsw-b12", "criterion": "AC2", "verdict": "failed", "evidence": "e",
+                      "kind": "unmet"},
+                     {"spec": "L-owsw-c12", "criterion": "AC3", "verdict": "cannot-observe",
+                      "capability": "droplet", "why": "w"}]}
+# AC15 rides along on this same drive: provision_worktree_env must never be
+# called for owed-sweeper, and no .env must appear under REPO (the manifest's cwd).
+_real_pwe387 = dispatch.provision_worktree_env
+
+
+def _pwe387_boom(*_a, **_k):
+    raise AssertionError("AC15: provision_worktree_env must never be called for owed-sweeper")
+
+
+dispatch.provision_worktree_env = _pwe387_boom
+try:
+    code12, types12, evs12, _ = spawn("owed-sweeper", out=OUT12, subject=SWEEP12)
+finally:
+    dispatch.provision_worktree_env = _real_pwe387
+assert code12 == 0, evs12
+assert not (REPO / ".env").exists(), "AC15: no .env under the manifest's cwd"
+_om12 = [e for e in evs12 if e["type"] == "owed-met"]
+_of12 = [e for e in evs12 if e["type"] == "owed-failed"]
+_ou12 = [e for e in evs12 if e["type"] == "owed-unobservable"]
+assert len(_om12) == 1 and _om12[0]["subject"] == "L-owsw-a12" and _om12[0]["criterion"] == "AC1" \
+    and _om12[0]["batch"] == SWEEP12, _om12
+assert len(_of12) == 1 and _of12[0]["subject"] == "L-owsw-b12" and _of12[0]["criterion"] == "AC2" \
+    and _of12[0]["kind"] == "unmet" and _of12[0]["batch"] == SWEEP12, _of12
+assert len(_ou12) == 1 and _ou12[0]["subject"] == "L-owsw-c12" and _ou12[0]["criterion"] == "AC3" \
+    and _ou12[0]["capability"] == "droplet" and _ou12[0]["batch"] == SWEEP12, _ou12
+assert spawn.raw[0]["type"] == "spawn-started" and spawn.raw[0]["subject"] == SWEEP12, spawn.raw[0]
+_sd12 = next(e for e in spawn.raw if e["type"] == "spawn-done")
+assert _sd12["subject"] == SWEEP12 and _sd12.get("off_manifest") == 0, _sd12
+N += 1
+
+# ── AC13 · a 4th, off-manifest result is dropped before events_for ever sees
+#          it (no event for it), and counted on spawn-done; AC12's exact drive
+#          re-run carries off_manifest == 0 ────────────────────────────────────
+SWEEP13 = "L-owed-sweeper-fx13"
+_sweep_manifest(SWEEP13, ROWS12)
+OUT13 = {**OUT12, "batch": SWEEP13,
+         "results": OUT12["results"] + [{"spec": "L-owsw-ghost13", "criterion": "AC9",
+                                         "verdict": "met", "evidence": "e"}]}
+code13, types13, evs13, _ = spawn("owed-sweeper", out=OUT13, subject=SWEEP13)
+assert code13 == 0, evs13
+assert not any(e.get("subject") == "L-owsw-ghost13" for e in evs13), \
+    "AC13: an off-manifest row must never become an event"
+_sd13 = next(e for e in spawn.raw if e["type"] == "spawn-done")
+assert _sd13["off_manifest"] == 1, _sd13
+# re-run AC12's exact (on-manifest-only) drive: off_manifest == 0
+SWEEP13b = "L-owed-sweeper-fx13b"
+_sweep_manifest(SWEEP13b, ROWS12)
+code13b, types13b, evs13b, _ = spawn("owed-sweeper", out={**OUT12, "batch": SWEEP13b}, subject=SWEEP13b)
+_sd13b = next(e for e in spawn.raw if e["type"] == "spawn-done")
+assert _sd13b["off_manifest"] == 0, _sd13b
+N += 1
+
+# ── AC14 · role=owed-sweeper with no --path raises no "a writing role needs
+#          --path" failure (kind is None); completes code == 0 given a valid stub
+SWEEP14 = "L-owed-sweeper-fx14"
+_sweep_manifest(SWEEP14, [_os_row("L-owsw-a14", "AC1")])
+OUT14 = {"batch": SWEEP14, "contamination": False, "escalations": [], "declarations": [],
+         "results": [{"spec": "L-owsw-a14", "criterion": "AC1", "verdict": "met", "evidence": "e"}]}
+code14, types14, evs14, _ = spawn("owed-sweeper", out=OUT14, subject=SWEEP14, path=None)
+assert code14 == 0, evs14
+assert not any(e.get("why") == "a writing role needs --path" for e in evs14), evs14
+N += 1
+
+# ── AC16 · "owed-sweeper" carries no codex sandbox grant ───────────────────────
+assert "owed-sweeper" not in dispatch.CODEX_WRITES, dispatch.CODEX_WRITES
+N += 1
+
+# ══════════════════════════════════════════════════════════════════════════════
 # L-spec-0276 · defaults-and-dispatch-order (L-charter-0033) — R3 Target 4, R5
 # ══════════════════════════════════════════════════════════════════════════════
 

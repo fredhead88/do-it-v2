@@ -38,7 +38,11 @@ EVENTS, CONTENT = ROOT / "events", ROOT / "content"
 ROLES = {"spec-writer": ("file", 30, 5), "spec-auditor": (None, 15, 3), "builder": (None, 90, 15),
          "grader": (None, 15, 3), "reviewer": (None, 30, 5), "plan-auditor": (None, 15, 3),
          "research": ("file", 5, 1), "reuse-scout": ("file", 15, 3),
-         "charter-reviewer": (None, 30, 5), "probe": ("dir", 120, 10)}
+         "charter-reviewer": (None, 30, 5), "probe": ("dir", 120, 10),
+         # L-charter-0038 R1 / L-spec-0387 (SD5): a read-only sweep over up to 8 due
+         # owed checks in one batch — $5 matches reviewer/charter-reviewer's
+         # magnitude for a multi-criterion read (Assumptions §7).
+         "owed-sweeper": (None, 45, 5)}
 # The builder's sandbox (§4.6·3). A pattern deny is the only per-command control
 # this CLI has (D119 row U); "commit to main" is the branch layout's job, not a pattern's.
 BUILDER_DENY = ["Bash(git push --force:*)", "Bash(git push -f:*)", "Bash(*--no-verify*)",
@@ -744,6 +748,19 @@ def events_for(role, out, a, base):
         if out["status"] == "BLOCKED":
             ev.append(("build-blocked", dict(reason=next((q["asks"] for q in out["escalations"]), None)
                                              or next((d["line"] for d in out["declarations"]), "unstated"))))
+    elif role == "owed-sweeper":
+        # L-charter-0038 R1 / L-spec-0387: no manifest lookup here — main() has
+        # already filtered `out["results"]` to on-manifest rows before calling
+        # this. Each event lands on that ROW's own spec (`subject=row["spec"]`),
+        # never on the batch subject; `emit()` in main()'s loop below pops it.
+        for row in out["results"]:
+            common = dict(criterion=row["criterion"], batch=a.subject, subject=row["spec"])
+            if row["verdict"] == "met":
+                ev.append(("owed-met", {**common, "evidence": row["evidence"]}))
+            elif row["verdict"] == "failed":
+                ev.append(("owed-failed", {**common, "evidence": row["evidence"], "kind": row["kind"]}))
+            elif row["verdict"] == "cannot-observe":
+                ev.append(("owed-unobservable", {**common, "capability": row["capability"], "why": row["why"]}))
     return ev + qs + decl
 
 
@@ -1112,8 +1129,28 @@ def main(a):
             fail(f"repo identity changed across a non-builder spawn: {before!r} -> {after!r}")
         if after != before:
             moved = repo_moved(before, after, a.role)
-    for t, kv in events_for(a.role, out, a, base):
-        emit(ledger, base, t, **kv)
+    # L-charter-0038 R1 / L-spec-0387: gated on role == "owed-sweeper" only —
+    # every other role's path above and below is byte-for-byte unchanged. The
+    # manifest is the ONE source of which (spec, criterion) rows this batch may
+    # act on; a result naming a row the manifest does not carry is dropped here,
+    # before events_for ever sees it, and counted as off_manifest on this
+    # spawn's own spawn-done (never on a row's subject).
+    off_manifest = None
+    if a.role == "owed-sweeper":
+        import packet
+        manifest = packet.parse_sweep_manifest(CONTENT / f"{a.subject}.md")
+        known = {(r["spec"], r["criterion"]) for r in manifest["rows"]}
+        kept = [r for r in out.get("results", []) if (r["spec"], r["criterion"]) in known]
+        off_manifest = len(out.get("results", [])) - len(kept)
+        events = events_for(a.role, {**out, "results": kept}, a, base)
+    else:
+        events = events_for(a.role, out, a, base)
+    for t, kv in events:
+        # `.pop` only fires here — no other role's `kv` carries `subject`: an
+        # owed-sweeper event lands on that ROW's own spec, never on the batch
+        # subject `base["subject"]` names.
+        row_base = {**base, "subject": kv.pop("subject")} if a.role == "owed-sweeper" else base
+        emit(ledger, row_base, t, **kv)
     scalars = {k: v for k, v in out.items() if isinstance(v, (str, int, float, bool))}
     done = {**scalars, **meta}
     # Emitted whenever the snapshots differ, never gated on lines/paths being
@@ -1121,6 +1158,8 @@ def main(a):
     # derived list must not silently erase it.
     if moved is not None:
         done["repo_moved"] = moved
+    if off_manifest is not None:
+        done["off_manifest"] = off_manifest
     emit(ledger, base, "spawn-done", **done)
     print(json.dumps({"spawn": spawn, "ok": True, **meta}))
 
