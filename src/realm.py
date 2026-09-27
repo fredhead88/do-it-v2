@@ -690,18 +690,30 @@ def metrics_at(rows, states, claims, at, sys_sig=None, makers=None, spec_ch=None
             gate += 1
     m.update(deadlock=dead, churn=churn, blocked=blocked, gate=gate)
     # shape failures: specs whose latest shape event is a failure with no later spec-written; and their hours lost
+    # a spec counts as shape-failed only if its latest shape failure is newer than its latest spec-written
+    # AND it has not moved on: fold state still written/registered (or, when reconstructing the past, no
+    # build, verdict, review or ship after the failure)
     shape_open = 0; shape_h = 0.0
-    last_shape, last_written = {}, {}
+    last_shape, last_written, moved = {}, {}, {}
     for r in rs:
         if r["ty"] == "spec-shape-failed":
             last_shape[r["s"]] = r["t"]
         elif r["ty"] == "spec-written":
             last_written[r["s"]] = r["t"]
+        elif r["ty"] in ("build-started", "build-done", "verdict", "review", "merge-gate-clean", "shipped", "spec-killed"):
+            moved[r["s"]] = max(moved.get(r["s"], ""), r["t"])
+    stx = dict(states or [])
     for sid, tt in last_shape.items():
-        if last_written.get(sid, "") <= tt:
-            shape_open += 1
-            t0 = _parse(tt)
-            shape_h += (at - t0).total_seconds() / 3600 if t0 else 0
+        if last_written.get(sid, "") > tt:
+            continue
+        if states:
+            if stx.get(sid) not in ("written", "registered"):
+                continue
+        elif moved.get(sid, "") > tt:
+            continue
+        shape_open += 1
+        t0 = _parse(tt)
+        shape_h += (at - t0).total_seconds() / 3600 if t0 else 0
     m["shape"] = shape_open; m["shape_hours"] = round(shape_h, 1)
     # merge conflicts: branches with 2+ reworks mentioning conflict in the last day
     conf = {}
