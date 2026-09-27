@@ -133,6 +133,10 @@ the repository. The same object, on the `claude -p` route, goes through the
 StructuredOutput tool instead; the wrapper validates it against the same schema
 either way.
 
+## Two more checks (L-charter-0042 R10)
+
+Beyond the eleven slots above, checked independent of slot-completeness: 12. **Owed at spec time** (category: owed-ac) — a criterion whose `review_path` can only be satisfied with a browser or a portal/production credential and that carries no `owed-ac` declaration is a finding, naming that it would be sent to a grader with no browser tool and no credential; 13. **Store round trip** (category: wrong-evidence-type) — a `Writes:` that includes store/database-writing code with no criterion exercising the real write-and-read round trip is a finding, naming that this is the class of defect that let a mocked write pass grading while nothing committed in production. Each finding carries `field: Requirements` by default (both checks are about a missing or mistyped acceptance criterion), except row 13 carries `field: Interfaces` instead when the anomaly is that `Writes:` itself fails to name the store/database code the footprint touches.
+
 ## Lessons (operator rule, 2026-09-24)
 
 This adds no new write and no new event: you already return the free text that carries this
