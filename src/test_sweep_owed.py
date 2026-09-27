@@ -367,3 +367,206 @@ r17 = subprocess.run([str(DOIT_SCRIPT), "sweep-owed", "--dry-run"],
                      capture_output=True, text=True, env=env17)
 assert r17.returncode == 0, (r17.returncode, r17.stdout, r17.stderr)
 print("sweep-owed-0388 AC17 ok")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-0432 (L-charter-0042 R6/SD13) · sweep_owed.answered_specs and the
+# exclusion it drives in sweep_expired/due_candidates
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── AC7 · SPEC_A answered by a later same-spec decision, no ref=; SPEC_B, an
+# identical unanswered escalation, is not ─────────────────────────────────────
+clear()
+T0_7, T1_7 = iso(hours=-50), iso(hours=-40)
+write("L-owed-sweeper-432g.jsonl",
+      {"ts": T0_7, "type": "escalation-blocking", "subject": "L-spec-432g-a", "kind": "owed-expired",
+       "criteria": json.dumps(["OTHER"]), "evidence": json.dumps([""]),
+       "default": sweep_owed.EXPIRED_DEFAULT, "revert": sweep_owed.EXPIRED_REVERT,
+       "deadline": iso(hours=22)},
+      {"ts": T0_7, "type": "escalation-blocking", "subject": "L-spec-432g-b", "kind": "owed-expired",
+       "criteria": json.dumps(["OTHER"]), "evidence": json.dumps([""]),
+       "default": sweep_owed.EXPIRED_DEFAULT, "revert": sweep_owed.EXPIRED_REVERT,
+       "deadline": iso(hours=22)})
+write("L-spec-writer-432g.jsonl",
+      {"ts": EPOCH, "type": "spec-written", "subject": "L-spec-432g-a", "project": "proj-a"},
+      {"ts": EPOCH, "type": "spec-written", "subject": "L-spec-432g-b", "project": "proj-a"})
+write("L-executor-432g.jsonl",
+      {"ts": EPOCH, "type": "shipped", "subject": "L-spec-432g-a"},
+      {"ts": EPOCH, "type": "shipped", "subject": "L-spec-432g-b"},
+      {"ts": T1_7, "type": "decision", "subject": "L-spec-432g-a", "why": "answers a, no ref"})
+_, specs7_432 = specs_now()
+answered7 = sweep_owed.answered_specs(specs7_432)
+assert "L-spec-432g-a" in answered7 and "L-spec-432g-b" not in answered7, answered7
+print("answered-0432 AC7 ok")
+
+# ── AC8 · a further criterion whose governing owed-ac predates the answer,
+# already expired, is not (re-)escalated ─────────────────────────────────────
+clear()
+T0_8, T1_8 = iso(hours=-50), iso(hours=-40)
+write("L-owed-sweeper-432h.jsonl",
+      {"ts": T0_8, "type": "escalation-blocking", "subject": "L-spec-432h", "kind": "owed-expired",
+       "criteria": json.dumps(["OTHER"]), "evidence": json.dumps([""]),
+       "default": sweep_owed.EXPIRED_DEFAULT, "revert": sweep_owed.EXPIRED_REVERT,
+       "deadline": iso(hours=22)})
+write("L-spec-writer-432h.jsonl",
+      {"ts": EPOCH, "type": "spec-written", "subject": "L-spec-432h", "project": "proj-a"},
+      {"ts": EPOCH, "type": "owed-ac", "subject": "L-spec-432h", "criterion": "C_before",
+       "wake_at": iso(hours=-240), "line": 1})
+write("L-executor-432h.jsonl",
+      {"ts": EPOCH, "type": "shipped", "subject": "L-spec-432h"},
+      {"ts": T1_8, "type": "decision", "subject": "L-spec-432h", "why": "answers, no ref"})
+_, specs8_432 = specs_now()
+rows8_432 = [r for r in owed.checks(specs8_432["L-spec-432h"]["evs"], NOW) if r["criterion"] == "C_before"]
+assert rows8_432 and rows8_432[0]["status"] == "expired", rows8_432
+before8_432 = sweep_ledger.read_text() if sweep_ledger.exists() else ""
+lines8_432 = sweep_owed.sweep_expired(specs8_432, NOW)
+after8_432 = sweep_ledger.read_text() if sweep_ledger.exists() else ""
+assert after8_432 == before8_432, "AC8: no new escalation-blocking appended for C_before"
+assert not any("L-spec-432h" in l for l in lines8_432), lines8_432
+print("answered-0432 AC8 ok")
+
+# ── AC9 · the same criterion re-dated strictly AFTER the answer — expired
+# status unchanged, but IS escalated (a later owed-ac re-date puts it back) ──
+write("L-spec-writer-432h.jsonl",
+      {"ts": EPOCH, "type": "spec-written", "subject": "L-spec-432h", "project": "proj-a"},
+      {"ts": EPOCH, "type": "owed-ac", "subject": "L-spec-432h", "criterion": "C_before",
+       "wake_at": iso(hours=-240), "line": 1},
+      {"ts": iso(hours=-30), "type": "owed-ac", "subject": "L-spec-432h", "criterion": "C_before",
+       "wake_at": iso(hours=-240), "line": 1})
+_, specs9_432 = specs_now()
+rows9_432 = [r for r in owed.checks(specs9_432["L-spec-432h"]["evs"], NOW) if r["criterion"] == "C_before"]
+assert rows9_432 and rows9_432[0]["status"] == "expired", rows9_432
+lines9_432 = sweep_owed.sweep_expired(specs9_432, NOW)
+assert any("L-spec-432h" in l and "C_before" in l for l in lines9_432), lines9_432
+raw9_432 = [json.loads(l) for l in sweep_ledger.read_text().splitlines()]
+esc9_432 = [e for e in raw9_432 if e["type"] == "escalation-blocking" and e.get("subject") == "L-spec-432h"
+           and "C_before" in json.loads(e["criteria"])]
+assert len(esc9_432) == 1, esc9_432
+print("answered-0432 AC9 ok")
+
+# ── AC10 · a `due` (not expired) criterion, governing owed-ac before the
+# answer, is excluded from due_candidates; an unrelated spec is not ─────────
+clear()
+T0_10, T1_10 = iso(hours=-50), iso(hours=-40)
+write("L-owed-sweeper-432i.jsonl",
+      {"ts": T0_10, "type": "escalation-blocking", "subject": "L-spec-432i", "kind": "owed-expired",
+       "criteria": json.dumps(["OTHER"]), "evidence": json.dumps([""]),
+       "default": sweep_owed.EXPIRED_DEFAULT, "revert": sweep_owed.EXPIRED_REVERT,
+       "deadline": iso(hours=22)})
+write("L-spec-writer-432i.jsonl",
+      {"ts": EPOCH, "type": "spec-written", "subject": "L-spec-432i", "project": "proj-a"},
+      {"ts": EPOCH, "type": "owed-ac", "subject": "L-spec-432i", "criterion": "C_due",
+       "wake_at": iso(hours=-1), "line": 1})
+write("L-executor-432i.jsonl",
+      {"ts": EPOCH, "type": "shipped", "subject": "L-spec-432i"},
+      {"ts": T1_10, "type": "decision", "subject": "L-spec-432i", "why": "answers, no ref"})
+write("L-spec-writer-432ic.jsonl",
+      {"ts": EPOCH, "type": "spec-written", "subject": "L-spec-432i-c", "project": "proj-a"},
+      {"ts": EPOCH, "type": "owed-ac", "subject": "L-spec-432i-c", "criterion": "C_due",
+       "wake_at": iso(hours=-1), "line": 1})
+write("L-executor-432ic.jsonl", {"ts": EPOCH, "type": "shipped", "subject": "L-spec-432i-c"})
+_, specs10_432 = specs_now()
+rows10_432 = [r for r in owed.checks(specs10_432["L-spec-432i"]["evs"], NOW) if r["criterion"] == "C_due"]
+assert rows10_432 and rows10_432[0]["status"] == "due", rows10_432
+due10_432 = sweep_owed.due_candidates(specs10_432, NOW)
+assert not any(r["spec"] == "L-spec-432i" for r in due10_432), due10_432
+assert any(r["spec"] == "L-spec-432i-c" for r in due10_432), \
+    "AC10: an unrelated, unanswered spec's due row is present"
+print("answered-0432 AC10 ok")
+
+# ── AC11 · a live (non-dry-run) run: no `escalated SPEC_A` line, no
+# packet/dispatch call naming SPEC_A's criterion; an unrelated due check IS
+# batched and dispatched ─────────────────────────────────────────────────────
+clear()
+T0_11, T1_11 = iso(hours=-50), iso(hours=-40)
+write("L-owed-sweeper-432j.jsonl",
+      {"ts": T0_11, "type": "escalation-blocking", "subject": "L-spec-432j", "kind": "owed-expired",
+       "criteria": json.dumps(["OTHER"]), "evidence": json.dumps([""]),
+       "default": sweep_owed.EXPIRED_DEFAULT, "revert": sweep_owed.EXPIRED_REVERT,
+       "deadline": iso(hours=22)})
+write("L-spec-writer-432j.jsonl",
+      {"ts": EPOCH, "type": "spec-written", "subject": "L-spec-432j", "project": "proj-a"},
+      {"ts": EPOCH, "type": "owed-ac", "subject": "L-spec-432j", "criterion": "C_before",
+       "wake_at": iso(hours=-240), "line": 1})
+write("L-executor-432j.jsonl",
+      {"ts": EPOCH, "type": "shipped", "subject": "L-spec-432j"},
+      {"ts": T1_11, "type": "decision", "subject": "L-spec-432j", "why": "answers, no ref"})
+write("L-spec-writer-432k.jsonl",
+      {"ts": EPOCH, "type": "spec-written", "subject": "L-spec-432k", "project": "proj-a"},
+      {"ts": EPOCH, "type": "owed-ac", "subject": "L-spec-432k", "criterion": "AC1",
+       "wake_at": iso(hours=-1), "line": 1})
+write("L-executor-432k.jsonl", {"ts": EPOCH, "type": "shipped", "subject": "L-spec-432k"})
+before11_432 = set(CONTENT.glob("L-sweep-*.md"))
+runner11_432 = FakeRunner(packet_path=str(CONTENT / "packet-432.md"))
+lines11_432 = sweep_owed.run(dry_run=False, runner=runner11_432, now=NOW)
+assert not any("escalated L-spec-432j" in l for l in lines11_432), lines11_432
+new_manifests11 = set(CONTENT.glob("L-sweep-*.md")) - before11_432
+assert len(new_manifests11) == 1, new_manifests11
+parsed11 = rows_of(new_manifests11.pop())
+assert [r["spec"] for r in parsed11] == ["L-spec-432k"], \
+    f"AC11: the unrelated spec's due check is batched, SPEC_A's C_before is not: {parsed11}"
+assert len(runner11_432.calls) == 2, \
+    f"AC11: exactly one packet+dispatch pair, naming only the unrelated spec: {runner11_432.calls}"
+print("answered-0432 AC11 ok")
+
+# ── AC12 · the regression: SPEC_A answered at t1 via its OWN escalation e_old;
+# a DIFFERENT criterion (C_before) is re-dated after t1 and already escalated,
+# at t3, itself UNANSWERED — SPEC_A's own newest owed-expired escalation is now
+# unanswered, and the naive "newest escalation, then check answered" reading
+# would drop SPEC_A entirely. Two more never-escalated criteria (C_before2
+# expired, C_due due) must stay excluded across TWO sweep runs. ─────────────
+clear()
+T0_12, T1_12, T2_12, T3_12 = iso(hours=-96), iso(hours=-80), iso(hours=-60), iso(hours=-50)
+write("L-owed-sweeper-432m.jsonl",
+      {"ts": T0_12, "type": "escalation-blocking", "subject": "L-spec-432m", "kind": "owed-expired",
+       "criteria": json.dumps(["E_OLD"]), "evidence": json.dumps([""]),
+       "default": sweep_owed.EXPIRED_DEFAULT, "revert": sweep_owed.EXPIRED_REVERT,
+       "deadline": iso(hours=22)})
+write("L-spec-writer-432m.jsonl",
+      {"ts": EPOCH, "type": "spec-written", "subject": "L-spec-432m", "project": "proj-a"},
+      {"ts": EPOCH, "type": "owed-ac", "subject": "L-spec-432m", "criterion": "C_before",
+       "wake_at": iso(hours=-240), "line": 1},
+      {"ts": T2_12, "type": "owed-ac", "subject": "L-spec-432m", "criterion": "C_before",
+       "wake_at": iso(hours=-240), "line": 1},
+      {"ts": EPOCH, "type": "owed-ac", "subject": "L-spec-432m", "criterion": "C_before2",
+       "wake_at": iso(hours=-240), "line": 2},
+      {"ts": EPOCH, "type": "owed-ac", "subject": "L-spec-432m", "criterion": "C_due",
+       "wake_at": iso(hours=-1), "line": 3})
+write("L-executor-432m.jsonl",
+      {"ts": EPOCH, "type": "shipped", "subject": "L-spec-432m"},
+      {"ts": T1_12, "type": "decision", "subject": "L-spec-432m", "why": "answers e_old, no ref"})
+# C_before's own re-date (T2_12 > T1_12) is already expired and already
+# escalated once, at T3_12 (> T2_12), with no later decision on this spec —
+# individually UNANSWERED, and it is SPEC_A's own newest owed-expired escalation.
+write("L-owed-sweeper-432m.jsonl",
+      {"ts": T0_12, "type": "escalation-blocking", "subject": "L-spec-432m", "kind": "owed-expired",
+       "criteria": json.dumps(["E_OLD"]), "evidence": json.dumps([""]),
+       "default": sweep_owed.EXPIRED_DEFAULT, "revert": sweep_owed.EXPIRED_REVERT,
+       "deadline": iso(hours=22)},
+      {"ts": T3_12, "type": "escalation-blocking", "subject": "L-spec-432m", "kind": "owed-expired",
+       "criteria": json.dumps(["C_before"]), "evidence": json.dumps([""]),
+       "default": sweep_owed.EXPIRED_DEFAULT, "revert": sweep_owed.EXPIRED_REVERT,
+       "deadline": iso(hours=22)})
+_, specs12_432 = specs_now()
+rows12_432 = {r["criterion"]: r for r in owed.checks(specs12_432["L-spec-432m"]["evs"], NOW)}
+assert rows12_432["C_before"]["status"] == "expired", rows12_432["C_before"]
+assert rows12_432["C_before2"]["status"] == "expired", rows12_432["C_before2"]
+assert rows12_432["C_due"]["status"] == "due", rows12_432["C_due"]
+answered12_432 = sweep_owed.answered_specs(specs12_432)
+assert "L-spec-432m" in answered12_432, \
+    "★ AC12: SPEC_A stays answered (via e_old) even though its newest owed-expired escalation is not"
+runner12a_432 = FakeRunner()
+lines12a_432 = sweep_owed.sweep_expired(specs12_432, NOW)
+assert not any("C_before2" in l for l in lines12a_432), lines12a_432
+due12a_432 = sweep_owed.due_candidates(specs12_432, NOW)
+assert not any(r["spec"] == "L-spec-432m" and r["criterion"] == "C_due" for r in due12a_432), due12a_432
+# a second run, same ledger plus C_before's own already-landed escalation (no
+# further writes): still no C_before2 escalation, still no C_due row
+_, specs12b_432 = specs_now()
+lines12b_432 = sweep_owed.sweep_expired(specs12b_432, NOW)
+assert not any("C_before2" in l for l in lines12b_432), lines12b_432
+due12b_432 = sweep_owed.due_candidates(specs12b_432, NOW)
+assert not any(r["spec"] == "L-spec-432m" and r["criterion"] == "C_due" for r in due12b_432), due12b_432
+answered12b_432 = sweep_owed.answered_specs(specs12b_432)
+assert "L-spec-432m" in answered12b_432, \
+    "★ AC12: still answered (at t1, via e_old) after the second run"
+print("answered-0432 AC12 ok")
