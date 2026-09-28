@@ -2201,3 +2201,23 @@ if __name__ == "__main__":
         print("owed" if charter_review_owed(by_subject.get(sys.argv[2], [])) else "not-owed")
     else:
         print(render(ev, specs, charters, ignored, by_subject))
+
+
+# ── L-spec-0476/plain-core, R2 items 1-2 ─────────────────────────────────────
+# The 15 literals `spec_state` can return, in lifecycle order, least advanced
+# first. Additive: this unit changes no existing behavior in `spec_state` or
+# `fold()`, it only names, in one place, the literals they already return —
+# `test_fold.py`'s AST-walking completeness test (below) proves this tuple is
+# a superset of every string `spec_state` can actually produce.
+SPEC_STATES = (
+    "unknown", "written", "building", "graded", "reviewing", "shipped",
+    "shipped-owed-evidence", "shipped-owed-due", "shipped-owed-expired",
+    "accepted", "closed-shipped", "closed-unbuilt", "dropped", "killed", "void",
+)
+
+# All 6 charter states this Plan's own SD1 names in advance. `fold()` itself
+# assigns only 4 of these today (`"open"`, `"L1-complete"`, `"L2-complete"`,
+# `"retracted"`) — `"proving"`/`"reopened"` are `fold-proving-state`'s
+# (L-spec-0472), sibling, in flight. Naming all 6 now means this unit and its
+# wave-2 consumers need no later edit when that sibling ships.
+CHARTER_STATES = ("open", "L1-complete", "proving", "reopened", "L2-complete", "retracted")
