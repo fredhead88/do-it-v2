@@ -494,6 +494,32 @@ QUOTA_RE = re.compile(r"5h\s+(\d+)%\s*\S?\s*([0-9:]+Z?)?.*?7d\s+(\d+)%\s*\S?\s*(
 TMUX_SESSION = os.environ.get("DOIT_TMUX_SESSION", "flow")
 
 
+BUSY_RE = re.compile(r"^\s*\S\s+\w[\w' -]*…\s*\((\d+h\s*)?(\d+m\s*)?\d+s\b")   # e.g. "✽ Wrangling… (1m 23s · ↓ 5.7k tokens)"
+
+
+def pane_status():
+    """Which standing panes are working right now: the live spinner line Claude Code prints while a turn runs.
+    Read-only tmux capture; the ledger cannot see a turn in progress, only what it writes when done."""
+    try:
+        p = subprocess.run(["tmux", "list-panes", "-s", "-t", TMUX_SESSION, "-F", "#{pane_id}\t#{pane_title}\t#{window_activity}"],
+                           capture_output=True, text=True, timeout=10)
+        if p.returncode != 0:
+            return None
+        out = {}
+        for line in p.stdout.splitlines():
+            pid, title, act = (line.split("\t") + ["", ""])[:3]
+            m = re.search(r"L-([a-z-]+)-\d+", title)
+            if not m:
+                continue
+            cap = subprocess.run(["tmux", "capture-pane", "-p", "-t", pid, "-S", "-12"], capture_output=True, text=True, timeout=10).stdout
+            busy = any(BUSY_RE.search(l) for l in cap.splitlines())
+            out[m.group(0)] = {"role": m.group(1), "busy": busy,
+                               "activity": dt.datetime.fromtimestamp(int(act), dt.timezone.utc).isoformat(timespec="seconds") if act.isdigit() else None}
+        return out
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
 def quota_status():
     """The weekly and five-hour usage figures each pane prints on its status line (read-only capture)."""
     try:
@@ -533,6 +559,9 @@ def sys_signals():
     q = quota_status()
     if q:
         out["quota"] = q
+    ps = pane_status()
+    if ps is not None:
+        out["panes"] = ps
     f = fires_register()
     if f is not None:
         out["fires"] = f
@@ -1178,7 +1207,7 @@ def heartbeat_forever():
         time.sleep(15)
         n += 1
         HUB.send("heartbeat", {"now": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")})
-        if n % 4 == 0:                       # every minute
+        if n % 2 == 0:                       # every 30 s: panes, disk, CI (cached), quota
             HUB.send("sys", sys_signals())
         if n % 20 == 1:                      # every five minutes, staggered
             o = tick_omens()
