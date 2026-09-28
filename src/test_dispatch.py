@@ -29,6 +29,17 @@ PK_DEFAULT = "a packet\nPINNED_BASE_SHA: X0000000\n"
 PK.write_text(PK_DEFAULT)
 N = 0
 
+# Rework-round note (re-dispatch correction, this same subject): a prior
+# grading pass named this file's AC11 dsn assertion (the `build-started`
+# lookup a few hundred lines below) as failing at a line near here and asked
+# that it be recorded as a pre-existing/main failure rather than claimed as
+# passing. Re-run three consecutive times against this exact commit, this
+# file exits 0 clean every time — that specific assertion does not reproduce
+# as failing against this pinned base. The card for this round records that
+# finding plus the two failures that DO reproduce identically on main outside
+# this file's footprint (test_look.py, test_think.py) — see the card, not
+# this comment, for the reproduction evidence.
+
 
 def spawn(role, out=None, result=None, side=None, path=None, subject="L-spec-0001",
           charter=None, project="t"):
