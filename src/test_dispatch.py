@@ -19,7 +19,14 @@ REPO = TMP / "repo"
 REPO.mkdir()
 subprocess.run(["git", "init", "-q"], cwd=REPO, check=True)
 PK = TMP / "packet.md"
-PK.write_text("a packet\n")
+# R7/AC14: the file-wide default packet body now carries a valid PINNED_BASE_SHA
+# line — every plain `PK.write_text("a packet\n")` reset in this file becomes
+# `PK.write_text(PK_DEFAULT)` instead, so no existing `spawn("builder", ...)`
+# call trips AC4's new no-pinned-base refusal. The value itself is inert: no
+# builder fixture in this file reads it back except where a test names
+# PINNED_BASE_SHA explicitly.
+PK_DEFAULT = "a packet\nPINNED_BASE_SHA: X0000000\n"
+PK.write_text(PK_DEFAULT)
 N = 0
 
 
@@ -78,7 +85,7 @@ assert code == 1 and "nothing at" in evs[0]["why"], "D120 W3: a success claim wi
 PK.write_text("a packet carrying the hypothesis\n")     # its own bytes: a contaminated packet is never re-sent
 code, types, evs, _ = spawn("research", out={**research, "contamination": True}, path=rp, side=lambda: rp.write_text("d"))
 assert code == 1 and "contamination" in evs[0]["why"]
-PK.write_text("a packet\n")
+PK.write_text(PK_DEFAULT)
 
 code, types, evs, _ = spawn("research", out={**research, "path": "content/L-research-0009.md"}, path=rp)
 assert code == 1 and "path mismatch" in evs[0]["why"]
@@ -161,7 +168,7 @@ assert fold.ts("2026-09-16T11:04:00Z").tzinfo is not None, "the fold parses the 
 PK.write_text("a packet, owed without wake_at\n")
 code, types, evs, _ = spawn("spec-writer", out={**owed, "declarations": [{"term": "owed-ac", "line": "no instant"}]}, path=sp)
 assert code == 1 and "violates spec-writer.schema.json" in evs[-1]["why"] and "wake_at" in evs[-1]["why"], evs[-1]
-PK.write_text("a packet\n")
+PK.write_text(PK_DEFAULT)
 
 card = {"status": "DONE", "identity": {"spec_id": "L-spec-0001", "built_by": "L-builder-0001", "branch": "l-spec-0001",
                                        "base_sha": "abc1234", "ready_sha": "def5678"},
@@ -245,6 +252,247 @@ assert "rejected-criterion" not in types, "cannot-assess is not unmet — no rej
 _lift_cap435()
 code, types, evs, _ = spawn("grader", out=grade([met]))
 assert evs[0]["cannot_assess"] == [], "an all-met grade carries an empty list, not an absent field"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-0434 · rework-base-pinned (L-charter-0042) — R7, AC4-AC13. Each test
+# below gets its own real git repo (COMMIT-SHAPE needs real `git rev-list
+# --count` answers, never the fake shas the `card` fixture above uses) and its
+# own fresh subject, so nothing here can collide with a fixture above or below.
+# The synthetic "prior build-done" ledger files below are named "L-builder-
+# fakecsN.jsonl" — no digit immediately after the role, so `cs_spawn`'s own
+# `[0-9]*`-restricted glob never confuses one for the spawn it just made
+# (same convention as this file's "open9192"-style fixtures elsewhere) — but
+# SEVERAL OTHER helpers later in this file (`drive`, `_seat_driven`, the raw
+# AC8/AC4-seat blocks) glob bare `L-builder-*.jsonl`/`L-grader-*.jsonl` and
+# take `max()`, which sorts any letter-suffixed name after every real
+# digit-suffixed one FOREVER — so these files are deleted again right after
+# this section uses them, before any later test in this file can trip on them.
+_H_CS, _FAKE_LEDGERS = [], []
+
+
+def _fake_ledger(name, **kv):
+    p = TMP / "events" / name
+    _FAKE_LEDGERS.append(p)
+    dispatch.emit(p, {}, "build-done", **kv)
+    return p
+
+
+def _cs_repo(name):
+    d = harness.test_root(f"cs-{name}")
+    _H_CS.append(d)
+    subprocess.run(["git", "init", "-q"], cwd=d, check=True)
+    subprocess.run(["git", "-C", str(d), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(d), "config", "user.name", "t"], check=True)
+    return d
+
+
+def _cs_commit(d, msg):
+    subprocess.run(["git", "-C", str(d), "commit", "-q", "--allow-empty", "-m", msg], check=True)
+    return subprocess.run(["git", "-C", str(d), "rev-parse", "HEAD"],
+                          capture_output=True, text=True).stdout.strip()
+
+
+def cs_spawn(role, subject, cwd, out, packet_text):
+    """Like spawn() above, but with a caller-chosen cwd (a real git repo) and a
+    caller-chosen packet body (never PK's file-wide default) — restored after,
+    so nothing here leaks into a fixture elsewhere in this file."""
+    saved = PK.read_text()
+    PK.write_text(packet_text)
+    res = {"is_error": False, "terminal_reason": "completed", "structured_output": out, "num_turns": 1,
+           "usage": {"input_tokens": 1, "output_tokens": 2}, "total_cost_usd": 0.01,
+           "modelUsage": {"m": {}}, "permission_denials": []}
+
+    def fake(cmd, packet, cwd_, timeout):
+        fake.cmd = cmd
+        return argparse.Namespace(stdout=json.dumps(res), returncode=0, stderr="")
+    dispatch.run_claude = fake
+    a = argparse.Namespace(role=role, subject=subject, packet=str(PK), path=None, cwd=str(cwd),
+                           charter=None, project="cs434", mcp_config=None, timeout=None, max_usd=None)
+    try:
+        dispatch.main(a)
+        code = 0
+    except SystemExit as e:
+        code = e.code
+    PK.write_text(saved)
+    raw = [json.loads(l) for l in
+           max((TMP / "events").glob(f"L-{role}-[0-9]*.jsonl")).read_text().splitlines()]
+    evs = [e for e in raw if e["type"] != "spawn-started"]
+    return code, [e["type"] for e in evs], evs, (fake.cmd if hasattr(fake, "cmd") else None)
+
+
+# ── AC3 · dispatch.pinned_base / pinned_base_explicit read straight off a
+#          packet FILE's own lines — trailing whitespace stripped, None/False
+#          on a missing line or an unreadable path ───────────────────────────
+PIN_F = TMP / "content" / "pin-fixture-434.md"
+PIN_F.write_text("1. hi\nPINNED_BASE_SHA: abc123f \n2. bye\n")
+assert dispatch.pinned_base(PIN_F) == "abc123f", dispatch.pinned_base(PIN_F)
+assert dispatch.pinned_base_explicit(PIN_F) is False
+PIN_F.write_text("PINNED_BASE_SHA: abc123f\nPINNED_BASE_SHA_EXPLICIT: true\n")
+assert dispatch.pinned_base(PIN_F) == "abc123f"
+assert dispatch.pinned_base_explicit(PIN_F) is True
+PIN_F.write_text("PINNED_BASE_SHA: abc123f\nPINNED_BASE_SHA_EXPLICIT: nope\n")
+assert dispatch.pinned_base_explicit(PIN_F) is False, "any other value than the literal true reads False"
+PIN_F.write_text("no such line here\n")
+assert dispatch.pinned_base(PIN_F) is None
+assert dispatch.pinned_base_explicit(PIN_F) is False
+_missing434 = TMP / "content" / "does-not-exist-434.md"
+assert dispatch.pinned_base(_missing434) is None, "an unreadable path is None, not a crash"
+assert dispatch.pinned_base_explicit(_missing434) is False
+
+# ── AC4 · no PINNED_BASE_SHA line at all: refused before any spend ───────────
+d4 = _cs_repo("ac4")
+c4 = _cs_commit(d4, "base")
+card4 = {**card, "identity": {**card["identity"], "base_sha": c4, "ready_sha": c4}}
+code, types, evs, cmd = cs_spawn("builder", "L-spec-cs7001", d4, card4, "a packet with no pin at all\n")
+assert code == 1 and types == ["spawn-failed"] and cmd is None, (code, types, evs)
+assert evs[0].get("reason") == "no-pinned-base", evs[0]
+
+# ── AC5 · the line IS present: build-started.base_sha equals it exactly ──────
+d5 = _cs_repo("ac5")
+c5 = _cs_commit(d5, "base")
+card5 = {**card, "identity": {**card["identity"], "base_sha": c5, "ready_sha": c5}}
+code, types, evs, cmd = cs_spawn("builder", "L-spec-cs7002", d5, card5, f"a packet\nPINNED_BASE_SHA: {c5}\n")
+assert code == 0 and cmd is not None, (code, types, evs)
+bs5 = next(e for e in evs if e["type"] == "build-started")
+assert bs5["base_sha"] == c5, bs5
+
+# ── AC6 · build-done.base_sha is the PINNED value, never the card's own —
+#          card_base_sha rides only when they differ; base_sha_explicit only
+#          when the packet carried PINNED_BASE_SHA_EXPLICIT: true ────────────
+d6 = _cs_repo("ac6")
+c6 = _cs_commit(d6, "base")
+card6a = {**card, "identity": {**card["identity"], "base_sha": "deadbeef01", "ready_sha": c6}}
+code, types, evs, cmd = cs_spawn("builder", "L-spec-cs7003", d6, card6a, f"a packet\nPINNED_BASE_SHA: {c6}\n")
+bd6a = next(e for e in evs if e["type"] == "build-done")
+assert bd6a["base_sha"] == c6 and bd6a.get("card_base_sha") == "deadbeef01", bd6a
+assert "base_sha_explicit" not in bd6a, bd6a
+
+card6b = {**card, "identity": {**card["identity"], "base_sha": c6, "ready_sha": c6}}
+code, types, evs, cmd = cs_spawn("builder", "L-spec-cs7004", d6, card6b, f"a packet\nPINNED_BASE_SHA: {c6}\n")
+bd6b = next(e for e in evs if e["type"] == "build-done")
+assert "card_base_sha" not in bd6b, "AC6: the card's value agrees with the pinned one — no card_base_sha field"
+
+card6c = {**card, "identity": {**card["identity"], "base_sha": c6, "ready_sha": c6}}
+code, types, evs, cmd = cs_spawn("builder", "L-spec-cs7005", d6, card6c,
+                                 f"a packet\nPINNED_BASE_SHA: {c6}\nPINNED_BASE_SHA_EXPLICIT: true\n")
+bd6c = next(e for e in evs if e["type"] == "build-done")
+assert bd6c.get("base_sha_explicit") is True, bd6c
+
+# ── AC7 · round one (no prior build-done) is never checked, whatever the real
+#          count and whatever the card's status: 2 commits above base would
+#          reject if this were a rework round, and it is not one ───────────
+d7 = _cs_repo("ac7")
+c7base = _cs_commit(d7, "base")
+_cs_commit(d7, "c1")
+c7ready = _cs_commit(d7, "c2")
+card7 = {**card, "status": "DONE", "identity": {**card["identity"], "base_sha": c7base, "ready_sha": c7ready}}
+code, types, evs, cmd = cs_spawn("builder", "L-spec-cs7006", d7, card7, f"a packet\nPINNED_BASE_SHA: {c7base}\n")
+assert not any(e["type"] in ("rejected-criterion", "criterion-cleared") and e.get("criterion") == "COMMIT-SHAPE"
+              for e in evs), evs
+
+# ── AC8 · a rework round (a prior build-done on record) whose card is DONE:
+#          exactly 1 commit above the pinned base clears; 0, 2+, or an
+#          unreadable ready_sha rejects, naming the count and the base ───────
+d8c = _cs_repo("ac8-clear")
+base8c = _cs_commit(d8c, "base")
+ready8c = _cs_commit(d8c, "c1")
+_fake_ledger("L-builder-fakecs8c.jsonl", subject="L-spec-cs7010",
+             status="DONE", card="x", branch="b", base_sha=base8c, ready_sha="priorready0", verify_exit=0,
+             tests_added=True)
+card8c = {**card, "status": "DONE", "identity": {**card["identity"], "base_sha": base8c, "ready_sha": ready8c}}
+code, types, evs, cmd = cs_spawn("builder", "L-spec-cs7010", d8c, card8c, f"a packet\nPINNED_BASE_SHA: {base8c}\n")
+cc8 = next(e for e in evs if e["type"] == "criterion-cleared" and e.get("criterion") == "COMMIT-SHAPE")
+assert cc8, evs
+assert not any(e["type"] == "rejected-criterion" and e.get("criterion") == "COMMIT-SHAPE" for e in evs), evs
+
+d8z = _cs_repo("ac8-zero")
+base8z = _cs_commit(d8z, "base")
+_fake_ledger("L-builder-fakecs8z.jsonl", subject="L-spec-cs7011",
+             status="DONE", card="x", branch="b", base_sha=base8z, ready_sha="priorready1", verify_exit=0,
+             tests_added=True)
+card8z = {**card, "status": "DONE", "identity": {**card["identity"], "base_sha": base8z, "ready_sha": base8z}}
+code, types, evs, cmd = cs_spawn("builder", "L-spec-cs7011", d8z, card8z, f"a packet\nPINNED_BASE_SHA: {base8z}\n")
+rc8z = next(e for e in evs if e["type"] == "rejected-criterion" and e.get("criterion") == "COMMIT-SHAPE")
+assert "0 commits" in rc8z["why"] and base8z in rc8z["why"], rc8z
+
+d8t = _cs_repo("ac8-two")
+base8t = _cs_commit(d8t, "base")
+_cs_commit(d8t, "c1")
+ready8t = _cs_commit(d8t, "c2")
+_fake_ledger("L-builder-fakecs8t.jsonl", subject="L-spec-cs7012",
+             status="DONE", card="x", branch="b", base_sha=base8t, ready_sha="priorready2", verify_exit=0,
+             tests_added=True)
+card8t = {**card, "status": "DONE", "identity": {**card["identity"], "base_sha": base8t, "ready_sha": ready8t}}
+code, types, evs, cmd = cs_spawn("builder", "L-spec-cs7012", d8t, card8t, f"a packet\nPINNED_BASE_SHA: {base8t}\n")
+rc8t = next(e for e in evs if e["type"] == "rejected-criterion" and e.get("criterion") == "COMMIT-SHAPE")
+assert "2 commits" in rc8t["why"], rc8t
+
+d8u = _cs_repo("ac8-unreadable")
+base8u = _cs_commit(d8u, "base")
+_fake_ledger("L-builder-fakecs8u.jsonl", subject="L-spec-cs7013",
+             status="DONE", card="x", branch="b", base_sha=base8u, ready_sha="priorready3", verify_exit=0,
+             tests_added=True)
+card8u = {**card, "status": "DONE",
+         "identity": {**card["identity"], "base_sha": base8u, "ready_sha": "deadbeef02"}}
+code, types, evs, cmd = cs_spawn("builder", "L-spec-cs7013", d8u, card8u, f"a packet\nPINNED_BASE_SHA: {base8u}\n")
+rc8u = next(e for e in evs if e["type"] == "rejected-criterion" and e.get("criterion") == "COMMIT-SHAPE")
+assert "unreadable" in rc8u["why"], rc8u
+
+# ── AC9 · a rework round whose card is BLOCKED: neither event, whatever the
+#          count (including 0, the legitimate no-commit-made case) ───────────
+d9 = _cs_repo("ac9")
+base9 = _cs_commit(d9, "base")
+_fake_ledger("L-builder-fakecs9.jsonl", subject="L-spec-cs7014",
+             status="BLOCKED", card="x", branch="b", base_sha=base9, ready_sha="priorready4", verify_exit=1,
+             tests_added=False)
+card9 = {**card, "status": "BLOCKED", "identity": {**card["identity"], "base_sha": base9, "ready_sha": base9}}
+code, types, evs, cmd = cs_spawn("builder", "L-spec-cs7015", d9, card9, f"a packet\nPINNED_BASE_SHA: {base9}\n")
+assert not any(e["type"] in ("rejected-criterion", "criterion-cleared") and e.get("criterion") == "COMMIT-SHAPE"
+              for e in evs), evs
+
+# ── AC12 · a standing COMMIT-SHAPE rejection refuses a grader dispatch before
+#           any spend, reason exactly "commit-shape" ─────────────────────────
+d12 = _cs_repo("ac12")
+base12 = _cs_commit(d12, "base")
+ready12 = _cs_commit(d12, "c1")
+ready12b = _cs_commit(d12, "c2")     # 2 commits above base: the rework round rejects
+_fake_ledger("L-builder-fakecs12.jsonl", subject="L-spec-cs7020",
+             status="DONE", card="x", branch="b", base_sha=base12, ready_sha=ready12, verify_exit=0,
+             tests_added=True)
+card12 = {**card, "status": "DONE", "identity": {**card["identity"], "base_sha": base12, "ready_sha": ready12b}}
+code, types, evs, cmd = cs_spawn("builder", "L-spec-cs7020", d12, card12, f"a packet\nPINNED_BASE_SHA: {base12}\n")
+assert any(e["type"] == "rejected-criterion" and e.get("criterion") == "COMMIT-SHAPE" for e in evs), evs
+code12g, types12g, evs12g, cmd12g = cs_spawn("grader", "L-spec-cs7020", d12, grade([met]), PK_DEFAULT)
+assert code12g == 1 and types12g == ["spawn-failed"] and cmd12g is None, (code12g, types12g, evs12g)
+assert evs12g[0].get("reason") == "commit-shape", evs12g[0]
+
+# ── AC13 · a grader's own confirmed verdict never clears a standing
+#           COMMIT-SHAPE, even naming no COMMIT-SHAPE criterion at all. AC12
+#           above already proves `dispatch.main` refuses this dispatch
+#           outright while COMMIT-SHAPE stands — so the ONLY way to reach the
+#           "confirmed clears every standing reject" loop this deep is to call
+#           `events_for` directly, exactly as `main()`'s own grader branch
+#           does, real ledger and all ─────────────────────────────────────
+d13 = _cs_repo("ac13")
+base13 = _cs_commit(d13, "base")
+ready13a = _cs_commit(d13, "c1")
+ready13b = _cs_commit(d13, "c2")
+_fake_ledger("L-builder-fakecs13.jsonl", subject="L-spec-cs7021",
+             status="DONE", card="x", branch="b", base_sha=base13, ready_sha=ready13a, verify_exit=0,
+             tests_added=True)
+card13 = {**card, "status": "DONE", "identity": {**card["identity"], "base_sha": base13, "ready_sha": ready13b}}
+code, types, evs, cmd = cs_spawn("builder", "L-spec-cs7021", d13, card13, f"a packet\nPINNED_BASE_SHA: {base13}\n")
+assert any(e["type"] == "rejected-criterion" and e.get("criterion") == "COMMIT-SHAPE" for e in evs), evs
+a13g = argparse.Namespace(subject="L-spec-cs7021")
+base13g = {"subject": "L-spec-cs7021", "project": "cs434", "spawn": "L-grader-fakecs13"}
+ev13g = dispatch.events_for("grader", grade([met]), a13g, base13g)
+assert any(t == "verdict" and kv["confirmed"] for t, kv in ev13g), ev13g
+assert not any(t == "criterion-cleared" and kv.get("criterion") == "COMMIT-SHAPE" for t, kv in ev13g), ev13g
+
+for p in _H_CS:
+    harness.cleanup(p)
+for p in _FAKE_LEDGERS:
+    p.unlink(missing_ok=True)
 
 # ★ `probe` runs OUTSIDE every repo on purpose (§4.6·10, §9.5). Read as
 # undetermined, that refuses the one contract that spends at planning time
@@ -622,7 +870,7 @@ dispatch.run_codex_exec = codex_dead
 PK.write_text("a packet for the fallback run\n")   # D120 refuses an identical packet that already failed on codex
 threading.Thread(target=seat_writer_fb, daemon=True).start()
 code, ev = run("research", rp7)
-PK.write_text("a packet\n")
+PK.write_text(PK_DEFAULT)
 assert code == 0 and [e["type"] for e in ev] == ["spawn-started", "backend-fallback", "research-filed", "spawn-done"], \
     [(e["type"], e.get("why")) for e in ev]
 assert ev[1]["from_backend"] == "codex" and ev[1]["to_backend"] == "seat" and "weekly limit" in ev[1]["why"]
@@ -880,7 +1128,7 @@ with _mock.patch("time.time", _fake_time_ac3main), _mock.patch("time.sleep", lam
     except SystemExit as ex:
         code = ex.code
 real_wall_ac3main = time.perf_counter() - real_t0_ac3main
-PK.write_text("a packet\n")
+PK.write_text(PK_DEFAULT)
 raw = [json.loads(l) for l in max((TMP / "events").glob("L-research-*.jsonl")).read_text().splitlines()]
 assert code == 1 and [e["type"] for e in raw] == ["spawn-started", "seat-stale", "spawn-failed"], raw
 assert raw[-1]["reason"] == "unserved" and raw[-1]["spawn_path"] == "seat", raw[-1]
@@ -928,7 +1176,7 @@ except SystemExit as e:
 sev = [json.loads(l) for l in max((TMP / "events").glob("L-research-*.jsonl")).read_text().splitlines()]
 assert code == 0 and [e["type"] for e in sev] == ["spawn-started", "research-filed", "spawn-done"], sev
 assert not any(e["type"] == "spawn-failed" for e in sev), "a claimed seat must never fail as unserved"
-PK.write_text("a packet\n")
+PK.write_text(PK_DEFAULT)
 del os.environ["DOIT_SEAT_CLAIM_SEC"]
 N += 1
 
@@ -959,7 +1207,7 @@ except SystemExit as e:
     code = e.code
 finally:
     dispatch.window_min = _real_window_min_ac5
-PK.write_text("a packet\n")
+PK.write_text(PK_DEFAULT)
 sev = [json.loads(l) for l in max((TMP / "events").glob("L-research-*.jsonl")).read_text().splitlines()]
 assert code == 1 and sev[-1]["type"] == "spawn-failed" and sev[-1]["reason"] == "unserved", sev[-1]
 assert not any(e["type"] == "spawn-done" for e in sev), "the second run_seat call site (the fallback) must be covered too"
@@ -1160,7 +1408,7 @@ ac4_subj = "L-spec-0269ac4"
 os.environ.pop("DOIT_SEAT", None)
 PK.write_text("a packet for AC4 claude-p\n")
 code, types, evs, _ = spawn("grader", out=grade([met]), subject=ac4_subj)
-PK.write_text("a packet\n")
+PK.write_text(PK_DEFAULT)
 ss_cp = spawn.raw[0]
 assert ss_cp["type"] == "spawn-started" and ss_cp["backend"] == "claude-p", ss_cp
 assert ss_cp["window_min"] == 15, "AC4/AC6: claude-p never gets the 45-min seat bump"
@@ -1198,7 +1446,7 @@ except SystemExit:
     pass
 finally:
     grader_view.build = _real_gv_build_ac4
-PK.write_text("a packet\n")
+PK.write_text(PK_DEFAULT)
 raw4 = [json.loads(l) for l in max((TMP / "events").glob("L-grader-*.jsonl")).read_text().splitlines()]
 ss_seat = raw4[0]
 assert ss_seat["type"] == "grader-view-built", ss_seat
@@ -1480,7 +1728,7 @@ try:
     code7 = 0
 except SystemExit as e:
     code7 = e.code
-PK.write_text("a packet\n")
+PK.write_text(PK_DEFAULT)
 dispatch.run_claude = _real_run_claude_to
 raw7 = [json.loads(l) for l in max((TMP / "events").glob("L-research-*.jsonl")).read_text().splitlines()]
 assert code7 == 1 and [e["type"] for e in raw7] == ["spawn-started", "spawn-failed"], raw7
@@ -1537,7 +1785,7 @@ for _role in ("research", "reuse-scout"):
     # for THAT reason and mask the one this fixture means to prove.
     PK.write_text(f"a packet for AC2 ({_role})\n")
     code, raw, _ = _seat_driven(_role, "L-spec-0001", 1, path=None)
-    PK.write_text("a packet\n")
+    PK.write_text(PK_DEFAULT)
     assert code == 1 and [e["type"] for e in raw] == ["spawn-failed"], (_role, raw)
     assert raw[0]["why"] == "a writing role needs --path", raw[0]
 dispatch.run_claude, dispatch.run_seat, dispatch.run_codex = _real_run_claude, _real_run_seat, _real_run_codex
@@ -1580,7 +1828,7 @@ def _swp_dispatch(role, subject, path, make_ready, cwd=None, packet_text=None):
     except SystemExit as e:
         code = e.code
     if packet_text is not None:
-        PK.write_text("a packet\n")
+        PK.write_text(PK_DEFAULT)
     raw = [json.loads(l) for l in max((TMP / "events").glob(f"L-{role}-*.jsonl")).read_text().splitlines()]
     sid = raw[0]["spawn"]
     cj = json.loads((TMP / "seat" / f"{sid}.cmd.json").read_text())
@@ -1997,7 +2245,7 @@ assert ss12["role"] == "grader" and ss12["dsn_role"] == "readonly", ss12
 # above, and D120 refuses to re-spend on that exact combination.
 PK.write_text("a packet for AC13\n")
 code, types, evs, _ = spawn("research", out=research, path=rp)
-PK.write_text("a packet\n")
+PK.write_text(PK_DEFAULT)
 assert code == 0, (code, types, evs)
 assert spawn.raw[0]["type"] == "spawn-started" and spawn.raw[0]["role"] == "research", spawn.raw[0]
 assert "dsn_role" not in spawn.raw[0], spawn.raw[0]
@@ -2261,20 +2509,28 @@ assert "wave_note" not in bs_det, bs_det
 
 # ── AC15 (dispatch half) · validate.spec_shape_warnings monkeypatched onto the
 # imported module object; one deduplicated spec-lint-warning per finding ──────
+# L-spec-0321/R5 (SWP2, pre-existing at this spec's own pinned base): a
+# spec-writer dispatch's `--path` must resolve to exactly `spec_path(subject)`
+# or `main` refuses it before any spend (`write-path-mismatch`) — this fixture
+# predates that check and named two arbitrary sibling files under `content/`,
+# which the check has refused ever since (confirmed failing identically at
+# this spec's own pinned base, outside Target 1-6's footprint — fixed here
+# because AC14 requires every pre-existing assertion in this file to pass).
+# Both dispatches below share one subject, so both now write the ONE
+# canonical destination that subject resolves to.
 import validate as validate276  # noqa: E402
 _orig_warn276 = getattr(validate276, "spec_shape_warnings", None)
 validate276.spec_shape_warnings = lambda text: ["PL-002: test finding"]
 try:
-    sp276a = TMP / "content" / "L-spec-0276-lint-a.md"
-    code, types, evs, cmd = spawn("spec-writer", out={**sw, "spec_id": "L-spec-2766"}, path=sp276a,
-                                  side=lambda: sp276a.write_text(WELL_FORMED_SPEC), subject="L-spec-2766")
+    sp276 = dispatch.spec_path("L-spec-2766")
+    code, types, evs, cmd = spawn("spec-writer", out={**sw, "spec_id": "L-spec-2766"}, path=sp276,
+                                  side=lambda: sp276.write_text(WELL_FORMED_SPEC), subject="L-spec-2766")
     assert types.count("spec-lint-warning") == 1, types
     lw276 = next(e for e in evs if e["type"] == "spec-lint-warning")
     assert lw276["subject"] == "L-spec-2766" and lw276["finding"] == "PL-002: test finding", lw276
 
-    sp276b = TMP / "content" / "L-spec-0276-lint-b.md"
-    code2, types2, evs2, cmd2 = spawn("spec-writer", out={**sw, "spec_id": "L-spec-2766"}, path=sp276b,
-                                      side=lambda: sp276b.write_text(WELL_FORMED_SPEC), subject="L-spec-2766")
+    code2, types2, evs2, cmd2 = spawn("spec-writer", out={**sw, "spec_id": "L-spec-2766"}, path=sp276,
+                                      side=lambda: sp276.write_text(WELL_FORMED_SPEC), subject="L-spec-2766")
     assert "spec-lint-warning" not in types2, \
         "AC15: an identical (subject, finding) pair is not appended twice"
 finally:

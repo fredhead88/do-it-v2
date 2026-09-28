@@ -361,22 +361,37 @@ def _interp_violations(segs):
 def verify_base_sha(c):
     """The base a verify script is measured against, pinned ONCE here — never
     re-derived by the running script, which is what a `$(git merge-base …)` inside
-    the block itself would do on every run. Precedence, all five steps (R3d):
-    `--base-sha`, else the EARLIEST recorded `build-done.base_sha` for this
-    subject, else `build-started`, else `spec-written`, else `git merge-base`
-    against the worktree, once, at packet time; `git rev-parse HEAD` is the last
-    resort for a worktree with nothing to diverge from yet.
+    the block itself would do on every run. Precedence, all six steps (R3d, R7
+    Target 2 — this docstring is REVISED, not untouched: an earlier round of this
+    same spec claimed this function was byte-for-byte unchanged; it is not,
+    because Target 2 is a real second `build-done` step, additively before the
+    first one):
+    `--base-sha`, else the LATEST `build-done` carrying `base_sha_explicit: true`
+    for this subject (if any), else the EARLIEST recorded `build-done.base_sha`
+    for this subject, else `build-started`, else `spec-written`, else
+    `git merge-base` against the worktree, once, at packet time; `git rev-parse
+    HEAD` is the last resort for a worktree with nothing to diverge from yet.
 
-    R3d — EARLIEST, never the live worktree HEAD and never a later round's own
-    base_sha: on a rework round (same worktree, same branch, an earlier round's
-    commit already on it) the worktree's live HEAD is that earlier round's own
-    `ready_sha`, not the true pre-round-1 base — third live occurrence, named at
+    R7 Target 2 — the explicit step, additive: a landed merge-conflict/rebase
+    round (`build-done.base_sha_explicit == true`, stamped by `dispatch.main`
+    only when ITS OWN packet carried `PINNED_BASE_SHA_EXPLICIT: true`) pins the
+    main tip it rebased onto — a later, plain rework must keep riding THAT pin,
+    never revert past it to an earlier-recorded base. Byte-for-byte unchanged
+    whenever no `build-done` on this subject's stream ever carries
+    `base_sha_explicit` — every subject built before this spec ships.
+
+    R3d — EARLIEST (the SECOND step, unchanged from before this revision), never
+    the live worktree HEAD and never a later round's own base_sha: on a rework
+    round (same worktree, same branch, an earlier round's commit already on it)
+    the worktree's live HEAD is that earlier round's own `ready_sha`, not the
+    true pre-round-1 base — third live occurrence, named at
     `events/L-executor-0001.jsonl:255`, caught once already at
     `events/L-builder-0207.jsonl:6`. `c.all_of("build-done")` is already scoped to
     THIS subject's own event stream (`Ctx.evs`), so a subject re-cut under a new
     spec id never inherits a killed predecessor's anchor. `build-started`/
     `spec-written` are unchanged — the MOST RECENT of each, same as before — only
-    the `build-done` step moved from most-recent to earliest.
+    the `build-done` step moved from most-recent to earliest (and now carries the
+    explicit sub-step ahead of it).
 
     One further, documented last-resort step, and only then the `die()`: **when the
     worktree path is not a directory**, take `git -C <repo> rev-parse HEAD`, the same
@@ -389,7 +404,11 @@ def verify_base_sha(c):
     the `die()` remains for the case where the repo itself yields nothing."""
     if c.a.base_sha:
         return c.a.base_sha
-    bd = next((e for e in c.all_of("build-done") if e.get("base_sha")), None)
+    bds = c.all_of("build-done")
+    explicit = [e for e in bds if e.get("base_sha") and e.get("base_sha_explicit")]
+    if explicit:
+        return explicit[-1]["base_sha"]
+    bd = next((e for e in bds if e.get("base_sha")), None)
     if bd:
         return bd["base_sha"]
     for t in ("build-started", "spec-written"):
@@ -970,9 +989,13 @@ def p_builder(c):
     hint = hint_block(c)          # refused before anything else is assembled
     spec, v = c.spec_file(), write_verify_script(c)
     repo = c.a.repo or str(ROOT / "repos" / c.project())
-    base_sha = c.a.base_sha or subprocess.run(
-        ["git", "-C", c.worktree(), "rev-parse", "HEAD"],
-        capture_output=True, text=True).stdout.strip() or "UNKNOWN — read it back from the worktree"
+    # R7/Target 1: ONE call, `verify_base_sha(c)` — the exact same value
+    # `write_verify_script` above already pinned into `$BASE` — never a second,
+    # independently computed worktree-HEAD fallback. On a rework round the
+    # worktree's live HEAD is the PRIOR round's own commit, not the true base;
+    # that mismatch between this line and the verify script's own `$BASE` is the
+    # goalpost bug this spec closes (AC2).
+    base_sha = verify_base_sha(c)
     ch = c.charter_file()
     extract = (section(ch.read_text(), "Constraints") or "").splitlines() if ch else []
     rej, fix = c.standing()
@@ -982,6 +1005,10 @@ def p_builder(c):
          "2. The charter extract — binding constraints and product decisions, verbatim:",
          *(extract or ["   none"]),
          f"3. `base_sha` = {base_sha}. Read it back from the worktree and confirm it before the first edit.",
+         # R7/Target 1, AC1/AC3: the machine line `dispatch.pinned_base` reads back
+         # off this same file — unconditional, byte-equal to `base_sha` above.
+         f"PINNED_BASE_SHA: {base_sha}",
+         *(["PINNED_BASE_SHA_EXPLICIT: true"] if c.a.base_sha else []),
          f"4. Verify command: `bash {v}`" if v else
          "4. Verify command: NONE — the spec's Verification block is empty. Declare `spec-ambiguity` and stop.",
          f"   Done-condition: {done}.",
@@ -1509,8 +1536,27 @@ def packet_spec_rework(spec):
 def packet_builder_rework(spec, hint):
     """The builder re-dispatch packet (L-adr-0039) — the identical builder packet for
     that spec's own worktree, plus the hint verbatim and the paths it concerns. A
-    diff-shaped hint is refused, not rendered. Returns the packet path."""
-    return main(["builder", spec, "--hint", hint])
+    diff-shaped hint is refused, not rendered.
+
+    R7/Target 3: this is the Executor's merge-conflict/rebase re-dispatch — the sole
+    non-test caller of this symbol (Assumptions §8) — so it pins the CURRENT main
+    tip here, unconditionally, before calling `main()`: the subject's `project`,
+    read off the ledger (`fold.subject_project` — the same reading `dispatch.main`'s
+    own project fallback uses), then `git -C <ROOT/repos/project> rev-parse HEAD` —
+    the tip of the repo the Executor merges into, i.e. the main tip the builder is
+    about to rebase onto (SD7). An unresolvable project, or a non-zero/empty git
+    result, adds no `--base-sha` at all: this never dies, it falls through to
+    `p_builder`'s own existing `verify_base_sha` precedence unchanged. Keeps its
+    exact two-argument signature — no Executor change, no new CLI flag needed
+    (`--base-sha` already exists). Returns the packet path."""
+    argv = ["builder", spec, "--hint", hint]
+    project = fold.subject_project(spec)
+    if project:
+        r = subprocess.run(["git", "-C", str(ROOT / "repos" / project), "rev-parse", "HEAD"],
+                           capture_output=True, text=True)
+        if r.returncode == 0 and r.stdout.strip():
+            argv += ["--base-sha", r.stdout.strip()]
+    return main(argv)
 
 
 if __name__ == "__main__":
