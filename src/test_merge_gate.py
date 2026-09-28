@@ -7,6 +7,9 @@ TMP = tempfile.mkdtemp()
 os.environ["DOIT_ROOT"] = str(pathlib.Path(TMP) / "ledger")
 os.environ["DOIT_GATE_LEDGER_FILE"] = "L-executor-test.jsonl"
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
+import harness  # noqa: E402 -- L-spec-0430: a real, disposable DOIT_SCRATCH for secret_scan's
+                 # own scratch.sub("gate") calls, never the real $HOME/doit-scratch
+os.environ["DOIT_SCRATCH"] = str(harness.test_root("gate-scratch"))
 import merge_gate as mg
 
 GRANT, ok = ["src/*", "docs/"], []
@@ -676,6 +679,302 @@ check("★ AC8: a non-albert-scott repo path bypasses the refusal (existing "
       "repo-scoping carve-out)", not raised8 and rc8 in (0, 1))
 
 mg.freeze.FLAG = _FLAG_DEFAULT
+
+# ============================================================ L-spec-0430
+# ------------------------------------------- R4/gate-secret-scan: AC1-AC10
+# Every fixture below commits the REAL, already-shipped albert-scott scanner
+# and baseline (sha256s cited in the spec) except where an AC deliberately
+# substitutes a stand-in for its own script (AC4b/AC4d/AC10's branch-side
+# rewrite) — never a mock of detect-secrets itself (AC5/AC6/AC7/AC8/AC9/AC10
+# exec the box's real, already-installed detect-secrets 1.5.0).
+
+REAL_SECRET_SCRIPT = pathlib.Path("/opt/albert-scott/scripts/ci/detect-secrets-changed.sh").read_bytes()
+REAL_SECRET_BASELINE = pathlib.Path("/opt/albert-scott/.secrets.baseline").read_bytes()
+REAL_DETECT_SECRETS_BIN = "/opt/albert-scott/.venv/bin/detect-secrets"
+RESTRICTED_PATH = "/usr/bin:/bin"           # bash/git/mktemp/cp/openssl/python3 live here;
+                                             # detect-secrets deliberately does not
+
+
+def _install_detect_secrets(repo_dir, marker=None):
+    """<repo_dir>/.venv/bin/detect-secrets — a thin wrapper that (optionally)
+    appends one line to `marker` and then execs the box's real, already-
+    installed detect-secrets 1.5.0 with argv unchanged (AC5). Not a stub:
+    scanning behaviour is identical to every other AC."""
+    binp = pathlib.Path(repo_dir, ".venv", "bin", "detect-secrets")
+    binp.parent.mkdir(parents=True, exist_ok=True)
+    marker_line = f'printf \'x\\n\' >> "{marker}"\n' if marker else ""
+    binp.write_text(f"#!/usr/bin/env bash\n{marker_line}exec {REAL_DETECT_SECRETS_BIN} \"$@\"\n")
+    binp.chmod(0o755)
+
+
+def secrets_fixture(secret=False, baseline_on_branch=True, script_bytes=None, install_bin=False, bin_marker=None):
+    """main commits the (real, unless overridden) scanner + baseline; the
+    branch adds exactly one relevant-extension file (`added.py`), with or
+    without a secret-shaped literal. Returns (dir, main_sha, branch_sha)."""
+    d = tempfile.mkdtemp()
+    sh("git", "init", "-q", "-b", "main", d)
+    sh("git", "-C", d, "config", "user.email", "t@t"); sh("git", "-C", d, "config", "user.name", "t")
+    ci = pathlib.Path(d, "scripts", "ci"); ci.mkdir(parents=True)
+    (ci / "detect-secrets-changed.sh").write_bytes(script_bytes if script_bytes is not None else REAL_SECRET_SCRIPT)
+    (ci / "detect-secrets-changed.sh").chmod(0o755)
+    pathlib.Path(d, ".secrets.baseline").write_bytes(REAL_SECRET_BASELINE)
+    sh("git", "-C", d, "add", "-A"); sh("git", "-C", d, "commit", "-qm", "base w/ scanner")
+    main_sha = sh("git", "-C", d, "rev-parse", "HEAD").strip()
+    sh("git", "-C", d, "branch", "work")
+    sh("git", "-C", d, "checkout", "-q", "work")
+    if not baseline_on_branch:
+        sh("git", "-C", d, "rm", "-q", ".secrets.baseline")
+    content = ('API_KEY = "%s"\n' % os.urandom(32).hex()) if secret else "x = 1\n"
+    pathlib.Path(d, "added.py").write_text(content)
+    sh("git", "-C", d, "add", "-A"); sh("git", "-C", d, "commit", "-qm", "branch work")
+    branch_sha = sh("git", "-C", d, "rev-parse", "HEAD").strip()
+    if install_bin:
+        _install_detect_secrets(d, marker=bin_marker)
+    return d, main_sha, branch_sha
+
+
+def _with_restricted_path(fn):
+    """Run fn() with mg.ENV["PATH"] narrowed to RESTRICTED_PATH — so an
+    ambient detect-secrets elsewhere on this dev box's PATH cannot mask a
+    DETECT_SECRETS_BIN precedence check — restoring the original value
+    (present or absent) unconditionally afterward."""
+    had = "PATH" in mg.ENV
+    orig = mg.ENV.get("PATH")
+    mg.ENV["PATH"] = RESTRICTED_PATH
+    try:
+        return fn()
+    finally:
+        if had:
+            mg.ENV["PATH"] = orig
+        else:
+            mg.ENV.pop("PATH", None)
+
+
+# AC1 — not-applicable when main_sha never had any scripts/ci/ path at all.
+d, base = repo()
+os.chdir(d); mg.begin_run(d)
+m_sha, b_sha = sh("git", "-C", d, "rev-parse", "main").strip(), sh("git", "-C", d, "rev-parse", "work").strip()
+check("AC1", mg.secret_scan(d, m_sha, b_sha) == ("not-applicable", []))
+
+# AC2 — a relevant-extension addition with no secret-shaped content is clean,
+# end-to-end through main_ too, with no reason=/findings= keys on the event.
+d, main_sha, branch_sha = secrets_fixture(secret=False, install_bin=True)
+os.chdir(d); mg.begin_run(d)
+check("AC2 secret_scan direct call",
+      _with_restricted_path(lambda: mg.secret_scan(d, main_sha, branch_sha)) == ("clean", []))
+rc = _with_restricted_path(lambda: mg.main_(["work", "main"]))
+check("AC2 main_ exits 0", rc == 0)
+ev = events()[-1]
+check("AC2 merge-gate-clean carries no reason/findings",
+      ev["type"] == "merge-gate-clean" and "reason" not in ev and "findings" not in ev)
+
+# AC3 — a secret-shaped literal with no baseline entry is findings; through
+# main_ it flips clean to rework, carrying reason=secret-scan and findings=,
+# and NO removed/reverted keys.
+d, main_sha, branch_sha = secrets_fixture(secret=True, install_bin=True)
+os.chdir(d); mg.begin_run(d)
+verdict, findings = _with_restricted_path(lambda: mg.secret_scan(d, main_sha, branch_sha))
+check("AC3 secret_scan direct call",
+      verdict == "findings" and findings and all(mg.FINDING_LINE_RE.match(l) for l in findings))
+rc = _with_restricted_path(lambda: mg.main_(["work", "main"]))
+check("AC3 main_ exits 1", rc == 1)
+ev = events()[-1]
+check("AC3 rework carries reason=secret-scan, matching findings, no removed/reverted",
+      ev["type"] == "merge-gate-rework" and ev.get("reason") == "secret-scan"
+      and ev.get("findings") == findings and "removed" not in ev and "reverted" not in ev)
+
+# AC4 — four undetermined triggers, each via mg.main_(["work", "main"]).
+# (a) the committed baseline is absent from the branch tip. The removal is
+# itself granted (--writes covers it) so gate()'s OWN removed-list stays
+# empty and this run reaches secret_scan at all — proving the SCRIPT's own
+# exit-2 baseline check, not gate()'s unrelated out-of-grant-removal path.
+d, main_sha, branch_sha = secrets_fixture(secret=False, baseline_on_branch=False)
+os.chdir(d)
+rc = mg.main_(["work", "main", "--writes", ".secrets.baseline", "--writes", "added.py"])
+ev = events()[-1]
+check("AC4(a) missing baseline -> rework/reason=secret-scan/non-empty findings",
+      rc == 1 and ev["type"] == "merge-gate-rework" and ev.get("reason") == "secret-scan"
+      and bool(ev.get("findings")) and "removed" not in ev)
+
+# (b) the script subprocess hangs past secret_scan's own timeout; the WHOLE
+# process group is killed, not just `bash`.
+SLEEP_SCRIPT = b"#!/usr/bin/env bash\nexec -a L_SPEC_0430_AC4B_MARKER sleep 999999 &\nwait\n"
+d, main_sha, branch_sha = secrets_fixture(secret=False, script_bytes=SLEEP_SCRIPT)
+os.chdir(d)
+_orig_timeout = mg.DETECT_SECRETS_TIMEOUT
+mg.DETECT_SECRETS_TIMEOUT = 1.0
+try:
+    rc = mg.main_(["work", "main"])
+finally:
+    mg.DETECT_SECRETS_TIMEOUT = _orig_timeout
+ev = events()[-1]
+check("AC4(b) timeout -> rework/reason=secret-scan/non-empty findings",
+      rc == 1 and ev["type"] == "merge-gate-rework" and ev.get("reason") == "secret-scan"
+      and bool(ev.get("findings")))
+_ps = subprocess.run(["ps", "-ef"], capture_output=True, text=True).stdout
+check("★ AC4(b) the whole process group was killed, not just bash",
+      "L_SPEC_0430_AC4B_MARKER" not in _ps)
+
+# (c) no detect-secrets anywhere — neither <repo>/.venv/bin/ nor the PATH.
+d, main_sha, branch_sha = secrets_fixture(secret=False, install_bin=False)
+os.chdir(d)
+rc = _with_restricted_path(lambda: mg.main_(["work", "main"]))
+ev = events()[-1]
+check("AC4(c) no detect-secrets binary anywhere -> rework/reason=secret-scan/non-empty findings",
+      rc == 1 and ev["type"] == "merge-gate-rework" and ev.get("reason") == "secret-scan"
+      and bool(ev.get("findings")))
+
+# (d) exit 1 with only banner lines, no line matching the finding shape.
+BANNER_ONLY_SCRIPT = (
+    b"#!/usr/bin/env bash\n"
+    b'echo "\xf0\x9f\x9a\xa8 1 potential secret(s) detected in changed files:"\n'
+    b'echo "If these are false positives, audit them into .secrets.baseline."\n'
+    b'echo "If real: rotate the secret immediately, then remove it from code."\n'
+    b"exit 1\n")
+d, main_sha, branch_sha = secrets_fixture(secret=False, script_bytes=BANNER_ONLY_SCRIPT)
+os.chdir(d)
+rc = mg.main_(["work", "main"])
+ev = events()[-1]
+check("AC4(d) exit 1 with no parseable finding line -> rework/reason=secret-scan/non-empty findings",
+      rc == 1 and ev["type"] == "merge-gate-rework" and ev.get("reason") == "secret-scan"
+      and bool(ev.get("findings")))
+
+# AC5 — DETECT_SECRETS_BIN precedence and invocation count: the repo-local
+# wrapper, never an ambient binary, is invoked exactly twice (the script's
+# own negative-control self-test, then the real scan).
+marker = pathlib.Path(tempfile.mkdtemp()) / "calls.log"
+d, main_sha, branch_sha = secrets_fixture(secret=False, install_bin=True, bin_marker=marker)
+os.chdir(d); mg.begin_run(d)
+verdict, findings = _with_restricted_path(lambda: mg.secret_scan(d, main_sha, branch_sha))
+check("AC5 verdict clean", (verdict, findings) == ("clean", []))
+calls = marker.read_text().splitlines() if marker.exists() else []
+check("★ AC5 the repo-local wrapper was invoked exactly twice", len(calls) == 2)
+check("★ AC5 never runs git worktree add against /opt/albert-scott itself",
+      mg._TOP != "/opt/albert-scott" and not str(d).startswith("/opt/albert-scott"))
+
+# AC6 — worktree lifecycle: clean, findings, and the AC4(b) timeout case,
+# leaving `git worktree list` byte-identical before and after.
+d = tempfile.mkdtemp()
+sh("git", "init", "-q", "-b", "main", d)
+sh("git", "-C", d, "config", "user.email", "t@t"); sh("git", "-C", d, "config", "user.name", "t")
+ci = pathlib.Path(d, "scripts", "ci"); ci.mkdir(parents=True)
+(ci / "detect-secrets-changed.sh").write_bytes(REAL_SECRET_SCRIPT); (ci / "detect-secrets-changed.sh").chmod(0o755)
+pathlib.Path(d, ".secrets.baseline").write_bytes(REAL_SECRET_BASELINE)
+sh("git", "-C", d, "add", "-A"); sh("git", "-C", d, "commit", "-qm", "base w/ real scanner")
+main_sha_a = sh("git", "-C", d, "rev-parse", "HEAD").strip()
+sh("git", "-C", d, "branch", "work-clean")
+sh("git", "-C", d, "checkout", "-q", "work-clean")
+pathlib.Path(d, "added.py").write_text("x = 1\n")
+sh("git", "-C", d, "add", "-A"); sh("git", "-C", d, "commit", "-qm", "clean add")
+branch_sha_clean = sh("git", "-C", d, "rev-parse", "HEAD").strip()
+sh("git", "-C", d, "checkout", "-q", "main")
+sh("git", "-C", d, "branch", "work-findings")
+sh("git", "-C", d, "checkout", "-q", "work-findings")
+pathlib.Path(d, "added.py").write_text('API_KEY = "%s"\n' % os.urandom(32).hex())
+sh("git", "-C", d, "add", "-A"); sh("git", "-C", d, "commit", "-qm", "findings add")
+branch_sha_findings = sh("git", "-C", d, "rev-parse", "HEAD").strip()
+sh("git", "-C", d, "checkout", "-q", "main")
+(ci / "detect-secrets-changed.sh").write_bytes(SLEEP_SCRIPT)
+sh("git", "-C", d, "add", "-A"); sh("git", "-C", d, "commit", "-qm", "swap in a sleep stand-in")
+main_sha_b = sh("git", "-C", d, "rev-parse", "HEAD").strip()
+sh("git", "-C", d, "branch", "work-timeout")
+branch_sha_timeout = sh("git", "-C", d, "rev-parse", "work-timeout").strip()
+_install_detect_secrets(d, marker=None)
+os.chdir(d)
+wt_before = sh("git", "-C", d, "worktree", "list")
+_orig_timeout = mg.DETECT_SECRETS_TIMEOUT
+
+def _ac6():
+    mg.begin_run(d)
+    v1 = mg.secret_scan(d, main_sha_a, branch_sha_clean)
+    mg.begin_run(d)
+    v2 = mg.secret_scan(d, main_sha_a, branch_sha_findings)
+    mg.DETECT_SECRETS_TIMEOUT = 1.0
+    mg.begin_run(d)
+    v3 = mg.secret_scan(d, main_sha_b, branch_sha_timeout)
+    return v1, v2, v3
+
+try:
+    (v1, f1), (v2, f2), (v3, f3) = _with_restricted_path(_ac6)
+finally:
+    mg.DETECT_SECRETS_TIMEOUT = _orig_timeout
+check("AC6 call 1 clean", (v1, f1) == ("clean", []))
+check("AC6 call 2 findings", v2 == "findings" and bool(f2))
+check("AC6 call 3 undetermined (timeout)", v3 == "undetermined" and bool(f3))
+wt_after = sh("git", "-C", d, "worktree", "list")
+check("★ AC6 git worktree list is byte-identical before and after all three verdicts",
+      wt_before == wt_after)
+
+# AC7 — poisoned GIT_DIR/GIT_WORK_TREE must not redirect secret_scan's OWN
+# git calls (ls-tree/show/worktree add) at another repository.
+d, main_sha, branch_sha = secrets_fixture(secret=False, install_bin=True)
+other_d, _, _ = secrets_fixture(secret=False)
+os.chdir(d); mg.begin_run(d)
+os.environ["GIT_DIR"] = str(pathlib.Path(other_d, ".git"))
+os.environ["GIT_WORK_TREE"] = other_d
+try:
+    verdict, findings = mg.secret_scan(d, main_sha, branch_sha)
+    check("AC7 poisoned GIT_DIR/GIT_WORK_TREE cannot redirect secret_scan's own git calls",
+          (verdict, findings) == ("clean", []))
+finally:
+    del os.environ["GIT_DIR"]; del os.environ["GIT_WORK_TREE"]
+
+# AC8 — the same poisoning must not redirect the SCRIPT SUBPROCESS's own
+# internal `git diff` either (its env is dict(ENV, ...), never os.environ).
+d, main_sha, branch_sha = secrets_fixture(secret=True, install_bin=True)
+os.chdir(d); mg.begin_run(d)
+os.environ["GIT_DIR"] = str(pathlib.Path(other_d, ".git"))
+os.environ["GIT_WORK_TREE"] = other_d
+try:
+    verdict, findings = mg.secret_scan(d, main_sha, branch_sha)
+    check("AC8 the script subprocess's own git diff is isolated from ambient GIT_DIR/GIT_WORK_TREE",
+          verdict == "findings" and bool(findings))
+finally:
+    del os.environ["GIT_DIR"]; del os.environ["GIT_WORK_TREE"]
+
+# AC9 — call-site gating: gate() already found a removal outside the grant ->
+# secret_scan is never reached, however secret-shaped the addition is.
+d = tempfile.mkdtemp()
+sh("git", "init", "-q", "-b", "main", d)
+sh("git", "-C", d, "config", "user.email", "t@t"); sh("git", "-C", d, "config", "user.name", "t")
+ci = pathlib.Path(d, "scripts", "ci"); ci.mkdir(parents=True)
+(ci / "detect-secrets-changed.sh").write_bytes(REAL_SECRET_SCRIPT); (ci / "detect-secrets-changed.sh").chmod(0o755)
+pathlib.Path(d, ".secrets.baseline").write_bytes(REAL_SECRET_BASELINE)
+pathlib.Path(d, "keep.txt").write_text("keep")
+sh("git", "-C", d, "add", "-A"); sh("git", "-C", d, "commit", "-qm", "base")
+sh("git", "-C", d, "branch", "work")
+sh("git", "-C", d, "checkout", "-q", "work")
+pathlib.Path(d, "keep.txt").unlink()                       # removal outside --writes docs/
+pathlib.Path(d, "added.py").write_text('API_KEY = "%s"\n' % os.urandom(32).hex())
+sh("git", "-C", d, "add", "-A"); sh("git", "-C", d, "commit", "-qm", "branch work")
+os.chdir(d)
+rc = mg.main_(["work", "main", "--writes", "docs/"])
+ev = events()[-1]
+check("AC9 gate()'s own grant violation short-circuits secret_scan entirely",
+      rc == 1 and ev["type"] == "merge-gate-rework" and ev.get("removed")
+      and "reason" not in ev and "findings" not in ev)
+
+# AC10 — gate-gaming: a branch rewrites its OWN copy of the script to exit 0;
+# secret_scan still executes main_sha's committed bytes and still finds it.
+d = tempfile.mkdtemp()
+sh("git", "init", "-q", "-b", "main", d)
+sh("git", "-C", d, "config", "user.email", "t@t"); sh("git", "-C", d, "config", "user.name", "t")
+ci = pathlib.Path(d, "scripts", "ci"); ci.mkdir(parents=True)
+(ci / "detect-secrets-changed.sh").write_bytes(REAL_SECRET_SCRIPT); (ci / "detect-secrets-changed.sh").chmod(0o755)
+pathlib.Path(d, ".secrets.baseline").write_bytes(REAL_SECRET_BASELINE)
+sh("git", "-C", d, "add", "-A"); sh("git", "-C", d, "commit", "-qm", "base w/ real scanner")
+main_sha = sh("git", "-C", d, "rev-parse", "HEAD").strip()
+sh("git", "-C", d, "branch", "work")
+sh("git", "-C", d, "checkout", "-q", "work")
+(ci / "detect-secrets-changed.sh").write_text("#!/usr/bin/env bash\nexit 0\n")   # branch disarms ITS OWN copy
+pathlib.Path(d, "added.py").write_text('API_KEY = "%s"\n' % os.urandom(32).hex())
+sh("git", "-C", d, "add", "-A"); sh("git", "-C", d, "commit", "-qm", "branch disarms its own scanner")
+branch_sha = sh("git", "-C", d, "rev-parse", "HEAD").strip()
+_install_detect_secrets(d, marker=None)
+os.chdir(d); mg.begin_run(d)
+verdict, findings = _with_restricted_path(lambda: mg.secret_scan(d, main_sha, branch_sha))
+check("AC10 the executed bytes come from main_sha, not the branch's rewritten copy",
+      verdict == "findings" and bool(findings))
 
 print(f"merge-gate: {sum(ok)}/{len(ok)} checks pass")
 sys.exit(0 if all(ok) else 1)

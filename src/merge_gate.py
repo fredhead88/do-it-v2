@@ -35,10 +35,11 @@ REPO AND A MISSING OR UNPARSEABLE `writes:` GRANT ALL READ AS REWORK.
 
 Runs at the Executor's merge step (§3.9, D17), BEFORE `--no-ff`.
 """
-import collections, json, os, pathlib, re, subprocess, sys, time
+import collections, json, os, pathlib, re, signal, subprocess, sys, time
 
 import fold
 import freeze
+import scratch
 
 # A removal under a `migrations/` path SEGMENT is always named — grant or not,
 # rename or not. Segment, not prefix: real migrations live at `supabase/migrations/`.
@@ -75,6 +76,19 @@ MIGRATIONS = re.compile(DEFAULT_MIGRATIONS, re.I)
 PATH_TOKEN_RE = re.compile(r"[A-Za-z0-9_.@+*?\[\]()/-]+")
 GIT_TIMEOUT, DEADLINE, REVERT_DEPTH, REVERT_MAX_PATHS = 20.0, 60.0, 50, 200
 _TOP, _START, _KNOBS = None, time.monotonic(), {}
+
+# R4/gate-secret-scan: the gated repository's own changed-files secret scan,
+# run over a merge that would otherwise be clean. A finding line is recognized
+# ONLY by the script's own documented shape (its `print(f"  {filename}:
+# {item['line_number']} -- {item['type']}")`) — exit 1 with zero matching
+# lines is undetermined, never findings with an empty list (D108/AC4d). The
+# timeout is its own module-level constant, distinct from GIT_TIMEOUT and
+# DEADLINE — no charter/plan text names a number; 45s sits inside the 60s
+# DEADLINE with headroom for the worktree-add overhead run() already accounts
+# for (Assumptions).
+DETECT_SECRETS_SCRIPT = "scripts/ci/detect-secrets-changed.sh"
+DETECT_SECRETS_TIMEOUT = 45.0
+FINDING_LINE_RE = re.compile(r"^  \S+:\d+ -- .+$")
 
 
 def load_config():
@@ -328,6 +342,106 @@ def gate(branch, main, grant):
                    if seen.get(f"{tree}:{p}") is not None
                    and any(seen.get(f"{c}:{p}") == seen[f"{tree}:{p}"] for c in window[p])]
     return Result(removed, reverts, main_sha, branch_sha, tree)
+
+
+def _remove_worktree(path):
+    """Unconditional cleanup on every secret_scan exit path (D108/AC6):
+    `git worktree remove --force`, falling back to `git worktree prune` on
+    that command's own failure — a plain remove refuses a worktree left dirty
+    by a killed subprocess. Reuses PINNED/ENV/GIT_TIMEOUT exactly as run()
+    composes them, but is deliberately EXEMPT from run()'s own DEADLINE check:
+    secret_scan never calls begin_run() (never resets _START), and run()
+    raises Undetermined BEFORE spawning git once the deadline is exceeded — a
+    cleanup gated on that check could raise without ever removing anything."""
+    base = ("git",) + (("-C", _TOP) if _TOP else ()) + PINNED
+    removed = False
+    try:
+        p = subprocess.run(base + ("worktree", "remove", "--force", str(path)),
+                           capture_output=True, timeout=GIT_TIMEOUT, env=ENV)
+        removed = p.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        removed = False
+    if not removed:
+        try:
+            subprocess.run(base + ("worktree", "prune"),
+                          capture_output=True, timeout=GIT_TIMEOUT, env=ENV)
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+
+def secret_scan(repo, main_sha, branch_sha):
+    """R4 — run only when gate()'s own verdict would otherwise be clean.
+    Returns (verdict, finding_lines): verdict is one of clean / findings /
+    not-applicable / undetermined. NEVER RAISES — every internal failure is
+    caught here and folded into ("undetermined", [diagnostic, ...]), because
+    an undetermined rework with no stated reason is the silent-clean failure
+    mode this function exists to prevent (D108).
+
+    Applicability and the executed bytes both come from `main_sha` alone,
+    never from the branch worktree's own copy — a branch is builder-
+    controlled and could otherwise rewrite the script to disarm it (AC10)."""
+    try:
+        try:
+            out = git("ls-tree", "-r", "--name-only", main_sha, "--", DETECT_SECRETS_SCRIPT)
+        except Undetermined as e:
+            return "undetermined", [str(e)]
+        if not out.decode("utf-8", "surrogateescape").strip():
+            return "not-applicable", []
+
+        try:
+            script_bytes = git("show", f"{main_sha}:{DETECT_SECRETS_SCRIPT}")
+        except Undetermined as e:
+            return "undetermined", [str(e)]
+
+        gate_dir = scratch.sub("gate")
+        script_path = gate_dir / f"detect-secrets-changed-{branch_sha}.sh"
+        script_path.write_bytes(script_bytes)
+        script_path.chmod(0o755)
+
+        wt_path = gate_dir / f"wt-{branch_sha}"
+        try:
+            git("worktree", "add", "--detach", str(wt_path), branch_sha)
+        except Undetermined as e:
+            return "undetermined", [str(e)]
+
+        try:
+            sub_env = dict(ENV)                 # never os.environ (D114/AC8)
+            venv_bin = pathlib.Path(repo) / ".venv" / "bin" / "detect-secrets"
+            if venv_bin.exists():
+                sub_env["DETECT_SECRETS_BIN"] = str(venv_bin)
+            try:
+                proc = subprocess.Popen(
+                    ["bash", str(script_path), "scan", main_sha, branch_sha],
+                    cwd=str(wt_path), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    env=sub_env, start_new_session=True)      # own process group (AC4b)
+            except OSError as e:
+                return "undetermined", [f"detect-secrets-changed.sh: {e}"]
+            try:
+                out_b, err_b = proc.communicate(timeout=DETECT_SECRETS_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                # a timeout kills the WHOLE process group, not just `bash`,
+                # so a wedged detect-secrets child cannot outlive the verdict.
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+                proc.communicate()
+                return "undetermined", [f"detect-secrets-changed.sh timed out after "
+                                        f"{DETECT_SECRETS_TIMEOUT:.0f}s"]
+            if proc.returncode == 0:
+                return "clean", []
+            stdout_text = out_b.decode("utf-8", "surrogateescape")
+            lines = [l for l in stdout_text.splitlines() if FINDING_LINE_RE.match(l)]
+            if proc.returncode == 1 and lines:
+                return "findings", lines
+            diag = (err_b.decode("utf-8", "surrogateescape").strip()
+                    or stdout_text.strip()
+                    or f"detect-secrets-changed.sh exited {proc.returncode} with no output")
+            return "undetermined", [diag.splitlines()[-1] if diag.splitlines() else diag]
+        finally:
+            _remove_worktree(wt_path)
+    except Exception as e:      # never raise Undetermined — or anything else (D108)
+        return "undetermined", [f"secret_scan: {type(e).__name__}: {e}"]
 
 
 def out_of_grant(branch, main, spec_id):
@@ -598,6 +712,15 @@ def main_(argv):
         r = gate(branch, main, grant)
         removed, reverts, main_sha, branch_sha, tree = r
         status = "rework" if (removed or reverts) else "clean"
+        # R4/gate-secret-scan: only on a run that would OTHERWISE record clean
+        # — never when gate() itself already found a grant violation (AC9).
+        # A findings/undetermined verdict flips a clean run to rework; a
+        # clean/not-applicable verdict leaves it exactly as today.
+        scan_verdict, scan_findings = None, None
+        if status == "clean":
+            scan_verdict, scan_findings = secret_scan(_TOP, main_sha, branch_sha)
+            if scan_verdict in ("findings", "undetermined"):
+                status = "rework"
         # The shas are the verdict's subject. Without them nothing ties a `clean`
         # to the --no-ff that follows it, and no audit can say what was gated.
         fold.append([f"merge-gate-{status}", subject, f"branch={branch}",
@@ -606,11 +729,17 @@ def main_(argv):
                     # a knob that weakens the gate and leaves no trace makes a
                     # doctored `clean` indistinguishable from an honest one
                     + ([f"knobs:={json.dumps(_KNOBS)}"] if _KNOBS else [])
-                    + ([f"removed={json.dumps(removed)}", f"reverted={json.dumps(reverts)}"]
-                       if status == "rework" else []))
+                    # narrowed from a blanket `if status == "rework"`: a
+                    # secret-scan-triggered rework carries neither key, so it
+                    # never implies a grant violation that did not happen.
+                    + ([f"removed={json.dumps(removed)}"] if removed else [])
+                    + ([f"reverted={json.dumps(reverts)}"] if reverts else [])
+                    + ([f"reason=secret-scan", f"findings={json.dumps(scan_findings)}"]
+                       if scan_verdict in ("findings", "undetermined") else []))
         print(f"merge-gate: {status}  ({main} {main_sha[:7]} + {branch} {branch_sha[:7]})"
               + (f"\n  removed:  {', '.join(removed)}" if removed else "")
-              + (f"\n  reverted: {', '.join(reverts)}" if reverts else ""))
+              + (f"\n  reverted: {', '.join(reverts)}" if reverts else "")
+              + (f"\n  secret-scan: {scan_verdict}" if scan_verdict else ""))
         return 0 if status == "clean" else 1
     except Undetermined as e:
         # ★ ONE Undetermined is not like the others. A real content conflict with a
