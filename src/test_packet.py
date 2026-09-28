@@ -1417,6 +1417,42 @@ assert any(s == DISTINCTIVE_W17 for _, s in strip17), strip17
 refuses("owed-sweeper", DISTINCTIVE_L17, subject=SWEEP17)
 N += 1
 
+# ── L-spec-9004 · owed-sweeper-ro-credentials (L-charter-0042 OC1) — AC10, AC11 ──
+SPEC_9004 = TMP / "content" / "L-spec-99041.md"
+SPEC_9004.write_text("# L-spec-99041\n## Acceptance criteria\nAC1 [backend]: x. review_path: y.\n")
+
+# ── AC10 · a provisioned .env under the manifest's cwd is named, exact path and
+#          the literal string SUPABASE_DB_URL; absent, the line instead states
+#          the credential is not available for this batch, capability=ro-dsn ──
+SWEEP_9004_WITH = "L-owed-sweeper-9004-with"
+CWD_9004_WITH = TMP / "sweepcwd-9004-with"
+CWD_9004_WITH.mkdir()
+(CWD_9004_WITH / ".env").write_text("SUPABASE_DB_URL=ro-value-9004\n")
+_sweep_manifest_387(SWEEP_9004_WITH, [_row_387("L-spec-99041", "AC1")], cwd=str(CWD_9004_WITH))
+t_9004_with = build("owed-sweeper", subject=SWEEP_9004_WITH)
+env_path_with = CWD_9004_WITH / ".env"
+assert str(env_path_with) in t_9004_with and "SUPABASE_DB_URL" in t_9004_with, t_9004_with
+
+SWEEP_9004_WITHOUT = "L-owed-sweeper-9004-without"
+CWD_9004_WITHOUT = TMP / "sweepcwd-9004-without"
+CWD_9004_WITHOUT.mkdir()
+_sweep_manifest_387(SWEEP_9004_WITHOUT, [_row_387("L-spec-99041", "AC1")], cwd=str(CWD_9004_WITHOUT))
+t_9004_without = build("owed-sweeper", subject=SWEEP_9004_WITHOUT)
+assert "not available for this batch" in t_9004_without and "capability=ro-dsn" in t_9004_without, t_9004_without
+assert str(CWD_9004_WITHOUT / ".env") not in t_9004_without, t_9004_without
+assert t_9004_with != t_9004_without, "9004 AC10: the two cases must be distinguishable"
+N += 1
+
+# ── AC11 · a line carries packet.review_account(c)'s exact returned string, and
+#          that same line contains both "never delete" and "never move money" ──
+c_9004 = packet.Ctx(packet.argparse.Namespace(role="owed-sweeper", subject=SWEEP_9004_WITH,
+                                               charter=None, project=None))
+ra_9004 = packet.review_account(c_9004)
+ra_lines_9004 = [ln for ln in t_9004_with.splitlines()
+                 if ra_9004 in ln and "never delete" in ln and "never move money" in ln]
+assert ra_lines_9004, (ra_9004, t_9004_with)
+N += 1
+
 # ── AC1/AC2 (L-spec-0435) · p_grader drops an owed-ac criterion's WHOLE block —
 #    anchor AND every wrapped continuation line — from both item 1 and item 2,
 #    every other criterion's block passing through untouched ─────────────────

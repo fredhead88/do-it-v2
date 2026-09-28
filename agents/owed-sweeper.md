@@ -91,6 +91,19 @@ no external paid call: the wrapper scripts are local reads over `psql`/`ssh`.
 test) · `worked`. Never a rework verdict, never a holistic score: one verdict
 per check, decided in isolation.
 
+## Private per-sweep credentials (L-spec-9004 OC1)
+
+Your `--cwd` is a fresh, private, non-git directory under the shared scratch
+root, allocated for this sweep batch alone — never `$R/repos/<project>`, and
+never a builder/grader worktree. When the project has a read-only DSN, it is
+provisioned into `<cwd>/.env` as `SUPABASE_DB_URL` before your spawn starts;
+your packet names that exact path for a `live_db` observation, or states it is
+not available for this batch (`capability=ro-dsn`) when the project has none.
+Export it yourself before reading it: `set -a; . <cwd>/.env; set +a`. Your
+packet also names a read-only client-portal review account for this app,
+exactly as the reviewer's own packet does: it may never delete and never move
+money — the same rule, never widened by having it.
+
 ## Seat route
 
 When you run as an interactive session's sub-agent — the packet ends with a

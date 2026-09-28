@@ -2461,6 +2461,181 @@ assert "owed-sweeper" not in dispatch.CODEX_WRITES, dispatch.CODEX_WRITES
 N += 1
 
 # ══════════════════════════════════════════════════════════════════════════════
+# L-spec-9004 · owed-sweeper-ro-credentials (L-charter-0042 OC1) — AC1-AC9
+# ══════════════════════════════════════════════════════════════════════════════
+_H9004 = []
+
+
+def _root9004(name):
+    d = harness.test_root(f"9004-{name}")
+    _H9004.append(d)
+    return d
+
+
+def _checkout9004(name, env_text=None):
+    d = _root9004(f"checkout-{name}")
+    if env_text is not None:
+        (d / ".env").write_text(env_text)
+    return d
+
+
+# ── AC1 · no SUPABASE_DB_URL_RO declared (incl. no .env at all) -> "absent",
+#         no .env created ──────────────────────────────────────────────────────
+sw_co_1a = _checkout9004("ac1-a")
+sw_dir_1a = _root9004("ac1-dir-a")
+r = dispatch.provision_sweep_env(sw_dir_1a, sw_co_1a)
+assert r == "absent" and not (sw_dir_1a / ".env").exists(), ("9004 AC1a", r)
+sw_co_1b = _checkout9004("ac1-b", "SUPABASE_DB_URL=rw1\nSUPABASE_DB_URL_DIRECT=rw2\n")
+sw_dir_1b = _root9004("ac1-dir-b")
+r = dispatch.provision_sweep_env(sw_dir_1b, sw_co_1b)
+assert r == "absent" and not (sw_dir_1b / ".env").exists(), ("9004 AC1b", r)
+N += 1
+
+# ── AC2 · RO byte-equals SUPABASE_DB_URL, and separately SUPABASE_DB_URL_DIRECT
+#         -> "refused", nothing written ────────────────────────────────────────
+sw_co_2a = _checkout9004("ac2-a", "SUPABASE_DB_URL=same-value\nSUPABASE_DB_URL_RO=same-value\n")
+sw_dir_2a = _root9004("ac2-dir-a")
+r = dispatch.provision_sweep_env(sw_dir_2a, sw_co_2a)
+assert r == "refused" and not (sw_dir_2a / ".env").exists(), ("9004 AC2a", r)
+sw_co_2b = _checkout9004("ac2-b", "SUPABASE_DB_URL=rw-value\nSUPABASE_DB_URL_DIRECT=direct-value\n"
+                                  "SUPABASE_DB_URL_RO=direct-value\n")
+sw_dir_2b = _root9004("ac2-dir-b")
+r = dispatch.provision_sweep_env(sw_dir_2b, sw_co_2b)
+assert r == "refused" and not (sw_dir_2b / ".env").exists(), ("9004 AC2b", r)
+N += 1
+
+# A checkout with a valid RO DSN distinct from every OTHER DB_URL-named key,
+# reused by AC3-AC5.
+SW_CO_VALID = _checkout9004("valid", "SUPABASE_DB_URL=rw-value\nSUPABASE_DB_URL_DIRECT=direct-value\n"
+                                     "PG_PARITY_DB_URL=parity-value\nSUPABASE_DB_URL_RO=ro-distinct-9004\n")
+SW_RO_LINE = b"SUPABASE_DB_URL=ro-distinct-9004\n"
+
+# ── AC3 · valid distinct RO, plain non-git sweep_dir -> "readonly", exactly one
+#         line, mode 0o600; a repeat call is idempotent, bytes unchanged ──────
+sw_dir_3 = _root9004("ac3-dir")
+r = dispatch.provision_sweep_env(sw_dir_3, SW_CO_VALID)
+env3 = sw_dir_3 / ".env"
+assert r == "readonly" and env3.read_bytes() == SW_RO_LINE, ("9004 AC3", r, env3.read_bytes() if env3.exists() else None)
+assert (env3.stat().st_mode & 0o777) == 0o600, oct(env3.stat().st_mode)
+r2 = dispatch.provision_sweep_env(sw_dir_3, SW_CO_VALID)
+assert r2 == "readonly" and env3.read_bytes() == SW_RO_LINE, ("9004 AC3 idempotent", r2)
+N += 1
+
+# ── AC4 · same valid RO, but sweep_dir sits at/under a .git entry -> "refused",
+#         proving the destination-safety gate fires independently of DSN validity
+sw_dir_4a = _root9004("ac4-dir-self")     # sweep_dir itself holds a .git entry
+(sw_dir_4a / ".git").mkdir()
+r = dispatch.provision_sweep_env(sw_dir_4a, SW_CO_VALID)
+assert r == "refused" and not (sw_dir_4a / ".env").exists(), ("9004 AC4a", r)
+sw_parent_4b = _root9004("ac4-parent")
+(sw_parent_4b / ".git").mkdir()
+sw_dir_4b = sw_parent_4b / "nested" / "sweep"
+sw_dir_4b.mkdir(parents=True)
+r = dispatch.provision_sweep_env(sw_dir_4b, SW_CO_VALID)
+assert r == "refused" and not (sw_dir_4b / ".env").exists(), ("9004 AC4b", r)
+N += 1
+
+# ── AC5 · sweep_dir already holds an .env with DIFFERENT bytes -> "refused",
+#         bytes unchanged ──────────────────────────────────────────────────────
+sw_dir_5 = _root9004("ac5-dir")
+(sw_dir_5 / ".env").write_text("SOME_OTHER_VAR=x\n")
+before5 = (sw_dir_5 / ".env").read_bytes()
+r = dispatch.provision_sweep_env(sw_dir_5, SW_CO_VALID)
+assert r == "refused" and (sw_dir_5 / ".env").read_bytes() == before5, ("9004 AC5", r)
+N += 1
+
+# ── AC6 · dispatch.main() end-to-end for role=owed-sweeper: spawn-started
+#         carries dsn_role=="readonly", and <cwd>/.env exists with the exact
+#         one line already at the moment the mocked spawn is invoked ──────────
+SWEEP9004_6 = "L-owed-sweeper-9004ac6"
+_sweep_manifest(SWEEP9004_6, [_os_row("L-owsw-9004ac6", "AC1")])
+cwd9004_6 = _root9004("ac6-cwd")
+OUT9004_6 = {"batch": SWEEP9004_6, "contamination": False, "escalations": [], "declarations": [],
+             "results": [{"spec": "L-owsw-9004ac6", "criterion": "AC1", "verdict": "met", "evidence": "e"}]}
+code9004_6, raw9004_6, seen9004_6 = drive("owed-sweeper", SWEEP9004_6, cwd9004_6, DSN_PROJECT, OUT9004_6)
+ss9004_6 = next(e for e in raw9004_6 if e["type"] == "spawn-started")
+assert ss9004_6.get("dsn_role") == "readonly", ss9004_6
+assert seen9004_6["env_exists_at_call"] and seen9004_6["env_bytes_at_call"] == E2E_LINE, \
+    ("9004 AC6: not provisioned before the mocked spawn ran", seen9004_6)
+assert (cwd9004_6 / ".env").read_bytes() == E2E_LINE, "9004 AC6: final state"
+N += 1
+
+# ── AC7 · same drive, but the checkout's RO value is byte-identical to its own
+#         SUPABASE_DB_URL (mislabeled read-write): spawn-started carries
+#         dsn_role=="refused", no .env exists under cwd afterward ─────────────
+DSN_PROJECT_9004B = "dsnproj9004b"
+DSN_CHECKOUT_9004B = TMP / "repos" / DSN_PROJECT_9004B
+DSN_CHECKOUT_9004B.mkdir(parents=True)
+(DSN_CHECKOUT_9004B / ".env").write_text("SUPABASE_DB_URL=same-rw-9004\nSUPABASE_DB_URL_RO=same-rw-9004\n")
+SWEEP9004_7 = "L-owed-sweeper-9004ac7"
+_sweep_manifest(SWEEP9004_7, [_os_row("L-owsw-9004ac7", "AC1")])
+cwd9004_7 = _root9004("ac7-cwd")
+OUT9004_7 = {"batch": SWEEP9004_7, "contamination": False, "escalations": [], "declarations": [],
+             "results": [{"spec": "L-owsw-9004ac7", "criterion": "AC1", "verdict": "met", "evidence": "e"}]}
+code9004_7, raw9004_7, seen9004_7 = drive("owed-sweeper", SWEEP9004_7, cwd9004_7, DSN_PROJECT_9004B, OUT9004_7)
+ss9004_7 = next(e for e in raw9004_7 if e["type"] == "spawn-started")
+assert ss9004_7.get("dsn_role") == "refused", ss9004_7
+assert not (cwd9004_7 / ".env").exists(), "9004 AC7: no .env under cwd"
+N += 1
+
+# ── AC8 · five-row shape table: the checkout's own read-write value(s) never
+#         appear in any written .env; exactly row 5 ever writes a non-empty one
+RW_A, RW_B = "table-rw-a-9004", "table-rw-b-9004"
+tbl_co_1 = _checkout9004("ac8-1", f"SUPABASE_DB_URL={RW_A}\nSUPABASE_DB_URL_DIRECT={RW_B}\n")
+tbl_co_2 = _checkout9004("ac8-2", f"SUPABASE_DB_URL={RW_A}\nSUPABASE_DB_URL_RO={RW_A}\n")
+tbl_co_3 = _checkout9004("ac8-3", f"SUPABASE_DB_URL={RW_A}\nSUPABASE_DB_URL_DIRECT={RW_B}\n"
+                                  f"SUPABASE_DB_URL_RO={RW_B}\n")
+tbl_co_45 = _checkout9004("ac8-45", f"SUPABASE_DB_URL={RW_A}\nSUPABASE_DB_URL_DIRECT={RW_B}\n"
+                                    "SUPABASE_DB_URL_RO=table-ro-distinct-9004\n")
+tbl_dir_4 = _root9004("ac8-dir-4")
+(tbl_dir_4 / ".git").mkdir()
+tbl_rows = [
+    ("no-ro", tbl_co_1, _root9004("ac8-dir-1")),
+    ("eq-rw", tbl_co_2, _root9004("ac8-dir-2")),
+    ("eq-direct", tbl_co_3, _root9004("ac8-dir-3")),
+    ("valid-git", tbl_co_45, tbl_dir_4),
+    ("valid-plain", tbl_co_45, _root9004("ac8-dir-5")),
+]
+written_nonempty = []
+for label, co, dest in tbl_rows:
+    r = dispatch.provision_sweep_env(dest, co)
+    env_p = dest / ".env"
+    content = env_p.read_bytes() if env_p.exists() else b""
+    assert RW_A.encode() not in content and RW_B.encode() not in content, ("9004 AC8", label, content)
+    if content:
+        written_nonempty.append(label)
+assert written_nonempty == ["valid-plain"], ("9004 AC8", written_nonempty)
+assert (tbl_rows[4][2] / ".env").read_bytes() == b"SUPABASE_DB_URL=table-ro-distinct-9004\n"
+N += 1
+
+# ── AC9 · provision_worktree_env is never called for owed-sweeper's DSN path ──
+_real_pwe9004 = dispatch.provision_worktree_env
+
+
+def _pwe9004_boom(*_a, **_k):
+    raise AssertionError("9004 AC9: provision_worktree_env must never be called for owed-sweeper")
+
+
+dispatch.provision_worktree_env = _pwe9004_boom
+SWEEP9004_9 = "L-owed-sweeper-9004ac9"
+_sweep_manifest(SWEEP9004_9, [_os_row("L-owsw-9004ac9", "AC1")])
+cwd9004_9 = _root9004("ac9-cwd")
+OUT9004_9 = {"batch": SWEEP9004_9, "contamination": False, "escalations": [], "declarations": [],
+             "results": [{"spec": "L-owsw-9004ac9", "criterion": "AC1", "verdict": "met", "evidence": "e"}]}
+try:
+    code9004_9, raw9004_9, seen9004_9 = drive("owed-sweeper", SWEEP9004_9, cwd9004_9, DSN_PROJECT, OUT9004_9)
+finally:
+    dispatch.provision_worktree_env = _real_pwe9004
+ss9004_9 = next(e for e in raw9004_9 if e["type"] == "spawn-started")
+assert ss9004_9.get("dsn_role") == "readonly", ss9004_9
+N += 1
+
+for p in _H9004:
+    harness.cleanup(p)
+
+print(f"dispatch: +L-spec-9004 (owed-sweeper-ro-credentials: AC1-AC9)")
+
+# ══════════════════════════════════════════════════════════════════════════════
 # L-spec-0276 · defaults-and-dispatch-order (L-charter-0033) — R3 Target 4, R5
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -2533,15 +2708,19 @@ import validate as validate276  # noqa: E402
 _orig_warn276 = getattr(validate276, "spec_shape_warnings", None)
 validate276.spec_shape_warnings = lambda text: ["PL-002: test finding"]
 try:
-    sp276 = dispatch.spec_path("L-spec-2766")
-    code, types, evs, cmd = spawn("spec-writer", out={**sw, "spec_id": "L-spec-2766"}, path=sp276,
-                                  side=lambda: sp276.write_text(WELL_FORMED_SPEC), subject="L-spec-2766")
+    # both writes must resolve to dispatch.spec_path("L-spec-2766") — a distinctly
+    # named fixture path here would now be refused before spend (write-path-mismatch,
+    # L-spec-0321), so both reuse the one canonical destination for this subject.
+    sp276a = dispatch.spec_path("L-spec-2766")
+    code, types, evs, cmd = spawn("spec-writer", out={**sw, "spec_id": "L-spec-2766"}, path=sp276a,
+                                  side=lambda: sp276a.write_text(WELL_FORMED_SPEC), subject="L-spec-2766")
     assert types.count("spec-lint-warning") == 1, types
     lw276 = next(e for e in evs if e["type"] == "spec-lint-warning")
     assert lw276["subject"] == "L-spec-2766" and lw276["finding"] == "PL-002: test finding", lw276
 
-    code2, types2, evs2, cmd2 = spawn("spec-writer", out={**sw, "spec_id": "L-spec-2766"}, path=sp276,
-                                      side=lambda: sp276.write_text(WELL_FORMED_SPEC), subject="L-spec-2766")
+    sp276b = dispatch.spec_path("L-spec-2766")
+    code2, types2, evs2, cmd2 = spawn("spec-writer", out={**sw, "spec_id": "L-spec-2766"}, path=sp276b,
+                                      side=lambda: sp276b.write_text(WELL_FORMED_SPEC), subject="L-spec-2766")
     assert "spec-lint-warning" not in types2, \
         "AC15: an identical (subject, finding) pair is not appended twice"
 finally:

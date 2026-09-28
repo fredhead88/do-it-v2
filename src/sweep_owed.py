@@ -39,7 +39,7 @@ import argparse, json, pathlib, re, subprocess, sys
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import dispatch, fold, owed  # noqa: E402
+import dispatch, fold, owed, scratch  # noqa: E402
 
 LEDGER_NAME = "L-sweep-local.jsonl"
 MAX_BATCH = 8
@@ -291,14 +291,22 @@ def _remember_orphan(key):
 
 def dispatch_batch(project, batch, runner, *, dry_run=False):
     """`doit packet owed-sweeper <id>` then `doit dispatch owed-sweeper <id>
-    --packet <path> --cwd <repo> --project <name> --detach`, in that order,
-    exactly once, via the injectable `runner` (AC3)."""
-    cwd = str(dispatch.ROOT / "repos" / project)
+    --packet <path> --cwd <sweep-dir> --project <name> --detach`, in that
+    order, exactly once, via the injectable `runner` (AC3). `cwd` is a fresh,
+    private, non-git directory under the shared scratch root
+    (`scratch.sub("sweeps") / <sweep-id>`, mode 0o700) — never
+    `$R/repos/<project>` and never a builder/grader worktree (L-spec-9004
+    OC1) — created before the manifest is written, so the manifest's own
+    `cwd:` field and the `--cwd` argv agree, as they did before this change."""
     if dry_run:
         return [f"sweep-owed: DRY RUN would batch {len(batch)} check(s) in project {project} "
                 f"({_describe(batch)}) as one detached owed-sweeper dispatch"]
     sweep_path = dispatch.alloc(dispatch.CONTENT, "L-sweep-", ".md")
     sweep_id = sweep_path.stem
+    cwd_dir = scratch.sub("sweeps") / sweep_id
+    cwd_dir.mkdir(parents=True, exist_ok=True)
+    cwd_dir.chmod(0o700)
+    cwd = str(cwd_dir)
     skipped = []
     while True:
         sweep_path.write_text(_manifest_text(sweep_id, project, cwd, batch))
