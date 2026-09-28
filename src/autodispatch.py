@@ -160,7 +160,14 @@ def candidates(events, specs, now):
     return rows
 
 
+DOIT_BIN = str(pathlib.Path(__file__).resolve().parent.parent / "doit")
+
+
 def _real_runner(argv):
+    # cron's PATH has no `doit`: a bare "doit" raised FileNotFoundError after the
+    # worktree was already added, stranding it (09-28 04:30-05:08Z, 0400/0423/9002).
+    if argv and argv[0] == "doit":
+        argv = [DOIT_BIN] + list(argv[1:])
     r = subprocess.run(argv, capture_output=True, text=True)
     return {"code": r.returncode, "stdout": r.stdout, "stderr": r.stderr}
 
@@ -194,7 +201,16 @@ def run(events, specs, now, *, runner=None, dry_run=False):
             continue
         main_branch = (r1.get("stdout") or "").strip()
         worktree = fold.ROOT / "worktrees" / project / spec.lower()
-        r2 = runner(["git", "-C", str(repo), "worktree", "add", str(worktree), "-b", spec.lower(), main_branch])
+        if worktree.is_dir():
+            # A worktree left by an earlier failed attempt is reused only while it
+            # holds no commits above main; otherwise it is real work and we stop.
+            r2 = runner(["git", "-C", str(worktree), "rev-list", "--count", f"{main_branch}..HEAD"])
+            if r2.get("code", 1) != 0 or (r2.get("stdout") or "").strip() != "0":
+                _fail(f"worktree {worktree} exists with commits above {main_branch}; not reusing")
+                continue
+            r2 = runner(["git", "-C", str(worktree), "merge", "--ff-only", main_branch])
+        else:
+            r2 = runner(["git", "-C", str(repo), "worktree", "add", str(worktree), "-b", spec.lower(), main_branch])
         if r2.get("code", 1) != 0:
             _fail((r2.get("stderr") or r2.get("stdout") or "worktree add failed").strip())
             continue
