@@ -1259,7 +1259,9 @@ def p_owed_sweeper(c):
     card, grade or audit reasoning (SD5), so this carries only the batch's
     project/cwd and, per row, the criterion's OWN full block, verbatim, from
     that row's own spec body — never one line, so a continuation-line
-    `review_path:` rides in."""
+    `review_path:` rides in. L-spec-9004 OC1: two more lines follow the due
+    checks — this batch's own read-only DB credential path (or its absence)
+    for a `live_db` observation, and the read-only portal review account."""
     manifest = parse_sweep_manifest(CONTENT / f"{c.a.subject}.md")
     L = [f"1. Batch `{c.a.subject}` — project `{manifest['project']}`, cwd `{manifest['cwd']}`.",
          "2. Every due check in this batch, each the criterion's own full block, verbatim, "
@@ -1274,6 +1276,16 @@ def p_owed_sweeper(c):
         L += [f"   spec {row['spec']} — criterion {row['criterion']} "
               f"(declared: {row['declared_src']} @ {row['line']}):"]
         L += [f"     {ln}" for ln in block.splitlines()]
+    env_path = pathlib.Path(manifest["cwd"]) / ".env"
+    if env_path.is_file():
+        L.append(f"3. This batch's own read-only DB credential, for a `live_db` observation: "
+                 f"`{env_path}` holds `SUPABASE_DB_URL` — `set -a; . {env_path}; set +a` before "
+                 "reading it.")
+    else:
+        L.append("3. This batch's own read-only DB credential, for a `live_db` observation: "
+                  "not available for this batch (capability=ro-dsn).")
+    L.append(f"4. The review account for this app: {review_account(c)}. It may never delete and "
+             "never move money.")
     return L
 
 

@@ -936,6 +936,48 @@ def provision_worktree_env(worktree, project_checkout):
     return "readonly"
 
 
+def provision_sweep_env(sweep_dir, project_checkout):
+    """L-spec-9004 OC1 — like provision_worktree_env above, but for a private
+    per-sweep-batch scratch directory (`scratch.sub("sweeps") / <sweep-id>`)
+    rather than a builder/grader worktree. Reuses that function's
+    DSN-resolution and DSN-collision refusal byte-for-byte, and replaces only
+    the destination-safety gate: a scratch directory, by scratch.root()'s own
+    invariant, is never inside a git work tree, so provision_worktree_env's
+    require-git-ignored gate would refuse every call here, always (nothing to
+    check-ignore into). The risk for THIS destination class runs the other
+    way — this credential landing in a future `git add -A`/commit — so the
+    gate refuses instead when `sweep_dir` itself, or any ancestor of it, holds
+    a `.git` entry. Returns the same four-string vocabulary:
+      "absent"   — the checkout carries no SUPABASE_DB_URL_RO; nothing written.
+      "refused"  — the RO value byte-equals some OTHER checkout key whose name
+                   contains DB_URL; OR `sweep_dir` (or an ancestor) holds a
+                   `.git` entry; OR `<sweep_dir>/.env` already exists holding
+                   different bytes.
+      "readonly" — `<sweep_dir>/.env` already holds exactly this one line
+                   (idempotent, no rewrite), or now does after writing it,
+                   mode 0o600.
+    A pure filesystem function — no subprocess, no network at all (security_path
+    — more restrictive than provision_worktree_env, which runs exactly one
+    subprocess, `git check-ignore`, that this gate does not need)."""
+    sweep_dir, project_checkout = pathlib.Path(sweep_dir), pathlib.Path(project_checkout)
+    dsn = readonly_dsn(project_checkout)
+    if dsn is None:
+        return "absent"
+    env = _parse_env(project_checkout / ".env")
+    if any(k != "SUPABASE_DB_URL_RO" and "DB_URL" in k and v == dsn for k, v in env.items()):
+        return "refused"
+    line = f"SUPABASE_DB_URL={dsn}\n"
+    dest = sweep_dir / ".env"
+    if dest.exists():
+        return "readonly" if dest.read_bytes() == line.encode() else "refused"
+    if any((p / ".git").exists() for p in (sweep_dir, *sweep_dir.parents)):
+        return "refused"
+    sweep_dir.mkdir(parents=True, exist_ok=True)
+    dest.write_text(line)
+    dest.chmod(0o600)
+    return "readonly"
+
+
 def grading_budget(all_ev, subject):
     """L-charter-0042 R10(b)/(c): a `role=grader` dispatch is refused, before any
     spend, when (b) some criterion has been rejected by a grader in two-or-more
@@ -1201,6 +1243,12 @@ def main(a):
         emit(ledger, base, "grader-view-built", view=str(view), ready_sha=build_done["ready_sha"])
     if a.role in ("builder", "grader"):
         dsn_role = provision_worktree_env(cwd, ROOT / "repos" / a.project) if a.project else "absent"
+    elif a.role == "owed-sweeper":
+        # L-spec-9004 OC1: the sweeper's own private, per-sweep `cwd` (never
+        # the shared checkout) gets a read-only DSN copy through the sibling,
+        # narrower function above — never provision_worktree_env, whose
+        # git-ignore gate cannot apply to a non-git scratch directory.
+        dsn_role = provision_sweep_env(cwd, ROOT / "repos" / a.project) if a.project else "absent"
     # L-spec-0269: every start records the window it was offered under and who
     # is waiting on it — any role, any backend (a flat, unbumped cap for
     # run_claude/run_codex; the full formula, load-bearing, for run_seat).
@@ -1220,7 +1268,7 @@ def main(a):
              base_sha=a.pinned_base_sha, **waiter_kv, **({"wave_note": wave_note} if wave_note else {}))
     else:
         kv = {"role": a.role, "backend": backend, **waiter_kv}
-        if a.role == "grader":
+        if a.role in ("grader", "owed-sweeper"):
             kv["dsn_role"] = dsn_role
         emit(ledger, base, "spawn-started", **kv)
     packet += f"\n\nspawn_id: {spawn}\n"

@@ -15,13 +15,17 @@ from datetime import datetime, timedelta, timezone
 
 TMP = pathlib.Path(tempfile.mkdtemp())
 os.environ["DOIT_ROOT"] = str(TMP)
+# L-spec-9004: a real, disposable DOIT_SCRATCH — never nested under TMP/DOIT_ROOT
+# above (scratch.root() refuses a resolved root at/under DOIT_ROOT) — mirroring
+# test_crons.py's/test_launch.py's own convention.
+os.environ["DOIT_SCRATCH"] = str(pathlib.Path(tempfile.mkdtemp(prefix="sweep-owed-test-scratch-")))
 os.environ.pop("DOIT_PROJECT", None)
 os.environ.pop("DOIT_LEDGER_FILE", None)          # AC8: the driver must not depend on this
 (TMP / "events").mkdir(parents=True, exist_ok=True)
 (TMP / "content").mkdir(parents=True, exist_ok=True)
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
-import crons, dispatch, fold, owed, sweep_owed  # noqa: E402
+import crons, dispatch, fold, owed, scratch, sweep_owed  # noqa: E402
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 NOW = datetime.now(timezone.utc)
@@ -92,13 +96,19 @@ write("L-spec-writer-a1.jsonl",
 write("L-executor-a1.jsonl", {"ts": EPOCH, "type": "shipped", "subject": "L-spec-a1"})
 
 before1 = {p.name: p.read_text() for p in EV.glob("*.jsonl")}
+SCRATCH_ROOT = pathlib.Path(os.environ["DOIT_SCRATCH"])
+before_scratch1 = set(SCRATCH_ROOT.rglob("*")) if SCRATCH_ROOT.exists() else set()
 runner1 = FakeRunner()
 lines1 = sweep_owed.run(dry_run=True, runner=runner1, now=NOW)
 after1 = {p.name: p.read_text() for p in EV.glob("*.jsonl")}
+after_scratch1 = set(SCRATCH_ROOT.rglob("*")) if SCRATCH_ROOT.exists() else set()
 assert len(lines1) == 1, lines1
 assert after1 == before1, "AC1: a dry-run must append nothing to any ledger file"
 assert not runner1.calls, "AC1: a dry-run never calls packet/dispatch"
 assert not list(CONTENT.glob("L-sweep-*.md")), "AC1: a dry-run allocates no manifest"
+# AC14 (L-spec-9004): a --dry-run drive creates no directory under scratch.root()
+# at all — no "sweeps" top-level entry, no per-sweep subdirectory.
+assert after_scratch1 == before_scratch1, "AC14: a dry-run must create no new scratch entry"
 print("sweep-owed-0388 AC1 ok")
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -142,9 +152,18 @@ assert len(runner2.calls) == 2, runner2.calls
 sweep_id2 = manifest2.stem
 assert runner2.calls[0] == [str(sweep_owed.doit_bin()), "packet", "owed-sweeper", sweep_id2], \
     runner2.calls[0]
+# AC13 (L-spec-9004): --cwd is a fresh, private scratch.sub("sweeps")/<sweep-id>
+# directory, mode 0o700, existing on disk — never the shared $R/repos/<project>
+# checkout the manifest's own `cwd:` field agreed with before this change.
+expected_cwd2 = str(scratch.sub("sweeps") / sweep_id2)
+assert expected_cwd2 != str(dispatch.ROOT / "repos" / PROJ_A), \
+    "AC13: never the shared checkout"
+assert pathlib.Path(expected_cwd2).is_dir(), expected_cwd2
+assert (os.stat(expected_cwd2).st_mode & 0o777) == 0o700, oct(os.stat(expected_cwd2).st_mode)
+assert f"cwd: {expected_cwd2}" in manifest2.read_text(), "AC13: manifest cwd: field must agree"
 assert runner2.calls[1] == [
     str(sweep_owed.doit_bin()), "dispatch", "owed-sweeper", sweep_id2,
-    "--packet", runner2.packet_path, "--cwd", str(dispatch.ROOT / "repos" / PROJ_A),
+    "--packet", runner2.packet_path, "--cwd", expected_cwd2,
     "--project", PROJ_A, "--detach",
 ], runner2.calls[1]
 print("sweep-owed-0388 AC3 ok")
@@ -170,7 +189,8 @@ sweep_owed.run(dry_run=False, runner=runner4, now=NOW)
 manifest4 = (set(CONTENT.glob("L-sweep-*.md")) - before4).pop()
 parsed4 = rows_of(manifest4)
 assert [r["spec"] for r in parsed4] == ["L-spec-c1"], parsed4
-assert f"cwd: {dispatch.ROOT / 'repos' / 'proj-x'}" in manifest4.read_text()
+sweep_id4 = manifest4.stem
+assert f"cwd: {scratch.sub('sweeps') / sweep_id4}" in manifest4.read_text()
 print("sweep-owed-0388 AC4 ok")
 
 # ══════════════════════════════════════════════════════════════════════════════
