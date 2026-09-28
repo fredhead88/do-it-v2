@@ -652,6 +652,70 @@ def coverage_changes(checkers):
             for c in checkers if last.get(c["id"]) != c["coverage_note"]]
 
 
+PINNED_BASE_RE = re.compile(r"^PINNED_BASE_SHA: (.+)$", re.M)
+PINNED_BASE_EXPLICIT_RE = re.compile(r"^PINNED_BASE_SHA_EXPLICIT: true$", re.M)
+
+
+def _pinned_base_in(text):
+    m = PINNED_BASE_RE.search(text)
+    return m.group(1).rstrip() if m else None
+
+
+def _pinned_base_explicit_in(text):
+    return bool(PINNED_BASE_EXPLICIT_RE.search(text))
+
+
+def pinned_base(packet_path):
+    """R7/Target 4: the exact bytes following the literal prefix `PINNED_BASE_SHA: `
+    on a packet file's own line (trailing whitespace stripped); `None` against a
+    file carrying no such line, and `None` against an unreadable path."""
+    try:
+        text = pathlib.Path(packet_path).read_text()
+    except OSError:
+        return None
+    return _pinned_base_in(text)
+
+
+def pinned_base_explicit(packet_path):
+    """R7/Target 4: `True` only when the same packet file also carries a line
+    reading exactly `PINNED_BASE_SHA_EXPLICIT: true`; `False` against a file with
+    no such line, a differently-valued one, or an unreadable path."""
+    try:
+        text = pathlib.Path(packet_path).read_text()
+    except OSError:
+        return False
+    return _pinned_base_explicit_in(text)
+
+
+def commit_shape_events(subject, status, pinned, ready_sha, worktree):
+    """R7/Target 5, AC7-AC9: COMMIT-SHAPE, scoped to a rework round — a prior
+    `build-done` already on this subject's own event stream — whose card
+    `status == "DONE"`. Round one (no prior `build-done` at all, whatever this
+    round's status) and a `BLOCKED` round produce neither event. Otherwise counts
+    `git rev-list --count <pinned>..<ready_sha>` in `worktree`: exactly `1`
+    clears; `0`, `2+`, or an unreadable `ready_sha` rejects, naming the count (or
+    `"unreadable"`) and the pinned base. Returns a list of at most one
+    `(type, kv)` tuple — never emitted itself; the caller's own loop does that,
+    same as every other event this function's sibling steps produce."""
+    import fold
+    specs, *_ = fold.fold(fold.read_events())
+    if not any(e["type"] == "build-done" for e in specs.get(subject, {"evs": []})["evs"]):
+        return []
+    if status != "DONE":
+        return []
+    r = subprocess.run(["git", "-C", str(worktree), "rev-list", "--count", f"{pinned}..{ready_sha}"],
+                       capture_output=True, text=True)
+    n = r.stdout.strip()
+    if r.returncode == 0 and n.isdigit():
+        if int(n) == 1:
+            return [("criterion-cleared", dict(criterion="COMMIT-SHAPE"))]
+        count_desc = n
+    else:
+        count_desc = "unreadable"
+    return [("rejected-criterion", dict(criterion="COMMIT-SHAPE",
+                                        why=f"{count_desc} commits above {pinned}"))]
+
+
 def events_for(role, out, a, base):
     """Output object → the events the contract names. Declarations become events typed by the term."""
     decl = [(d["term"], {k: v for k, v in d.items() if k != "term"}) for d in out.get("declarations", [])]
@@ -728,8 +792,10 @@ def events_for(role, out, a, base):
         # A confirmed verdict found everything met, the done-condition included — a
         # rejection the packet no longer names (round one's DONE-COND) cannot outlive
         # it, or the Executor reworks forever. Seen on the first real chain.
+        # R7/Target 6: COMMIT-SHAPE is the one standing rejection this loop never
+        # clears — only a builder's own next conforming rework does (AC13).
         ev += [("criterion-cleared", dict(criterion=c, evidence=met.get(c) or f"confirmed verdict {base['spawn']}"))
-               for c in sorted(standing) if c in met or confirmed]
+               for c in sorted(standing) if c != "COMMIT-SHAPE" and (c in met or confirmed)]
         ev += coverage_changes(out["checkers"])
     elif role == "reviewer":
         ev.append(("review", dict(depth=out["depth"], round=out["round"], n_blocking=len(out["blocking"]))))
@@ -753,9 +819,23 @@ def events_for(role, out, a, base):
                                      n_inputs=out["n_inputs"], spend=out["spend_usd"], complete=out["complete"])))
     elif role == "builder":
         card, i = write_card(out, a.subject, base["spawn"]), out["identity"]
-        ev.append(("build-done", dict(status=out["status"], card=str(card), branch=i["branch"],
-                                      base_sha=i["base_sha"], ready_sha=i["ready_sha"],
-                                      verify_exit=out["verify"]["exit_code"], tests_added=out["tests"]["added"])))
+        # R7/Target 4: the pinned value main() resolved off the packet — never
+        # `i["base_sha"]` (the card's own, self-reported value) — is what
+        # `build-done.base_sha` carries. The card's value rides alongside only as
+        # `card_base_sha`, only when it differs (AC6); `pinned` falls back to the
+        # card's value only for a packet built before this spec shipped (no
+        # `a.pinned_base_sha` at all — main()'s own precheck already refuses every
+        # NEW dispatch that lacks one).
+        pinned = getattr(a, "pinned_base_sha", None) or i["base_sha"]
+        bd_kv = dict(status=out["status"], card=str(card), branch=i["branch"],
+                    base_sha=pinned, ready_sha=i["ready_sha"],
+                    verify_exit=out["verify"]["exit_code"], tests_added=out["tests"]["added"])
+        if i["base_sha"] != pinned:
+            bd_kv["card_base_sha"] = i["base_sha"]
+        if getattr(a, "pinned_base_sha_explicit", False):
+            bd_kv["base_sha_explicit"] = True
+        ev.append(("build-done", bd_kv))
+        ev += commit_shape_events(a.subject, out["status"], pinned, i["ready_sha"], a.cwd)
         for d in out["deviations"]:
             e = dict(deviation=d["type"], what=d["what"])   # `type` is the event's (found on the first real build)
             if d["type"] == "significant":      # owes an ADR; the wrapper files it from `why`
@@ -921,6 +1001,8 @@ def main(a):
     EVENTS.mkdir(parents=True, exist_ok=True), CONTENT.mkdir(parents=True, exist_ok=True)
     ledger = alloc(EVENTS, f"L-{a.role}-", ".jsonl")
     spawn, cwd, builder = ledger.stem, a.cwd or os.getcwd(), a.role == "builder"
+    a.cwd = cwd     # R7: resolved once here — `events_for`'s COMMIT-SHAPE check reads
+                    # this same value later, never a second `a.cwd or os.getcwd()` guess.
     base = {"subject": a.subject, "project": a.project or pathlib.Path(cwd).name, "spawn": spawn}
     if a.charter:
         base["charter"] = a.charter
@@ -950,6 +1032,16 @@ def main(a):
     # (cost_path). Scoped to role="builder" only.
     wave_note = None
     if builder:
+        # R7/Target 4: the base comes from the packet the Executor pinned, never
+        # from anything the builder self-reports later — refused HERE, before any
+        # spend, when the packet carries no `PINNED_BASE_SHA:` line at all (AC4).
+        # Read off the packet TEXT already in memory, never a second file read —
+        # correct for the `--packet -` stdin route too.
+        a.pinned_base_sha = _pinned_base_in(packet)
+        if a.pinned_base_sha is None:
+            fail(f"{a.subject}: builder packet carries no PINNED_BASE_SHA line — "
+                 "refusing role=builder before any spend", reason="no-pinned-base")
+        a.pinned_base_sha_explicit = _pinned_base_explicit_in(packet)
         all_ev = fold.read_events()
         if fold.spec_state([e for e in all_ev if e.get("subject") == a.subject], set()) == "killed":
             fail(f"{a.subject} is killed — refusing role=builder before any spend")
@@ -1016,6 +1108,14 @@ def main(a):
                      deadline=(datetime.now(timezone.utc) + timedelta(hours=24)).isoformat(timespec="seconds"),
                      revert="a decision regrade=yes")
             fail(f"grading budget: {reason} — refusing role=grader before any spend", reason=reason)
+    # R7/Target 6, AC12: a grader dispatch against a subject carrying a standing
+    # COMMIT-SHAPE rejection is refused before any spend — grading a build already
+    # known to need rework is spend the cost_path exists to short-circuit.
+    if a.role == "grader":
+        g_specs, *_ = fold.fold(fold.read_events())
+        if "COMMIT-SHAPE" in fold.standing_rejects(g_specs.get(a.subject, {"evs": []})["evs"]):
+            fail(f"{a.subject}: COMMIT-SHAPE stands — refusing role=grader before any spend",
+                 reason="commit-shape")
     prior = next((e for e in fold.read_events() if e.get("type") == "spawn-failed"
                   and e.get("packet_sha256") == meta["packet_sha256"]
                   and e.get("contract_sha256") == meta["contract_sha256"]
@@ -1111,8 +1211,10 @@ def main(a):
         # determined (Null encoding, mirrors carry.py's own convention).
         # L-spec-0269: every start also records the window it was offered
         # under and who is waiting on it (waiter_kv).
+        # R7/AC5: base_sha is the pinned value read off the packet above —
+        # never a fresh worktree-HEAD guess taken here.
         emit(ledger, base, "build-started", worktree=cwd, dsn_role=dsn_role, backend=backend,
-             **waiter_kv, **({"wave_note": wave_note} if wave_note else {}))
+             base_sha=a.pinned_base_sha, **waiter_kv, **({"wave_note": wave_note} if wave_note else {}))
     else:
         kv = {"role": a.role, "backend": backend, **waiter_kv}
         if a.role == "grader":

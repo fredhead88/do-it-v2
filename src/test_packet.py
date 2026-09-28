@@ -165,6 +165,20 @@ assert "Writes (the merge grant" in t and "src/fold.py" in t, "the footprint is 
 assert "L-spec-0002 · src/fold.py · written" in t, "the conflict list is id, what, state"
 assert "Currency is USD" in t, "the charter EXTRACT — constraints and decisions — is carried verbatim"
 assert "one commit, on that branch" in t
+# R7/AC1-AC2: PINNED_BASE_SHA, unconditional, byte-equal to verify_base_sha(c)'s
+# own return for this same Ctx — proven on a FRESH subject (no build-done on
+# record at all): the human-readable item-3 line must carry the identical value.
+m_pin1 = re.search(r"^PINNED_BASE_SHA: (.+)$", t, re.M)
+assert m_pin1, "AC1: the packet carries the machine line"
+assert len(re.findall(r"^PINNED_BASE_SHA: .+$", t, re.M)) == 1, "AC1: exactly one such line"
+c_vb1 = packet.Ctx(packet.argparse.Namespace(subject="L-spec-0001", charter=None, project="t",
+                                             base_sha=None, worktree=str(REPO)))
+assert m_pin1.group(1) == packet.verify_base_sha(c_vb1), \
+    "AC1: byte-equal to a fresh verify_base_sha(c) call over the same Ctx"
+assert f"`base_sha` = {m_pin1.group(1)}" in t, \
+    "AC2: the human-readable item-3 line carries the SAME value — never a separate worktree-HEAD guess"
+assert "PINNED_BASE_SHA_EXPLICIT" not in t, \
+    "AC6: no explicit line when this packet build itself carried no --base-sha"
 absent(t, packet.strip(c, "builder"))
 refuses("builder", "A sibling slot's internals, which no other role may ever be handed.",
         worktree=str(REPO), repo=str(REPO))
@@ -1055,6 +1069,73 @@ build("spec-auditor", subject="L-spec-0080", worktree=str(REPO))
 btxt = (TMP / "content" / "verify-L-spec-0080-spec-auditor.sh").read_text()
 assert btxt.splitlines()[2] == "BASE=X0000001", \
     f"AC6: the earliest build-done's base_sha wins, never a later round's or the live worktree HEAD: {btxt.splitlines()[:4]!r}"
+
+# ── R7/AC1-AC2 (the R3d fixture case) · a NEW builder packet against the same
+#    two-build-done fixture: PINNED_BASE_SHA and item-3 both read X0000001,
+#    the same value the fixture's own BASE= assertion above already names ────
+t80 = build("builder", subject="L-spec-0080", worktree=str(REPO), repo=str(REPO))
+m_pin80 = re.search(r"^PINNED_BASE_SHA: (.+)$", t80, re.M)
+assert m_pin80 and m_pin80.group(1) == "X0000001", \
+    f"AC1: the R3d fixture's earliest build-done wins here too: {m_pin80}"
+assert len(re.findall(r"^PINNED_BASE_SHA: .+$", t80, re.M)) == 1, "AC1: exactly one such line"
+assert "`base_sha` = X0000001" in t80, "AC2: item-3 and PINNED_BASE_SHA agree on the R3d fixture too"
+assert "PINNED_BASE_SHA_EXPLICIT" not in t80, "AC6: no --base-sha was given to THIS packet build"
+
+# ── R7/AC10 · packet_builder_rework pins the CURRENT repo HEAD (REPOS_T's, via
+#    L-spec-0080's own recorded project "t") — NOT X0000001, the fixture's
+#    earliest recorded base — and the resulting packet carries the EXPLICIT
+#    line too, since packet_builder_rework always supplies --base-sha itself ─
+p_rw80 = pathlib.Path(packet.packet_builder_rework("L-spec-0080", "fix the merge collision"))
+t_rw80 = p_rw80.read_text()
+assert f"PINNED_BASE_SHA: {REPO_HEAD}" in t_rw80 and "X0000001" not in t_rw80, \
+    "AC10: the current main tip wins, never a stale history value while the repo is readable"
+assert "PINNED_BASE_SHA_EXPLICIT: true" in t_rw80, \
+    "AC10: packet_builder_rework's own auto-pin always supplies --base-sha"
+
+# ── R7/AC10 (fall-through half) · an unresolvable project never dies —
+#    L-spec-0083's own spec-written base_sha (an existing, unrelated
+#    precedence step) is what actually resolves it; packet_builder_rework's
+#    own project-repo short-circuit contributes nothing here, silently.
+#    `fold.subject_project` is monkeypatched, not the event's own `project`
+#    field — this whole file runs under DOIT_PROJECT=t, which `fold.
+#    read_events()` uses to FILTER the ledger (§9.1/D93): an event actually
+#    carrying a different project would simply vanish from `fold.fold()`'s
+#    view entirely, refusing the packet for "no events", not for the
+#    unresolvable-repo reason this half of AC10 means to prove ────────────
+SPEC83 = TMP / "content" / "L-spec-0083.md"
+SPEC83.write_text("""# L-spec-0083
+## 8. Verification
+```
+cd src && /usr/bin/python3 test_fold.py
+```
+## Acceptance criteria
+AC1 [backend]: x.
+  review_path: log in as x / go to x / do x / worked if x / failed if x.
+""")
+ev("spec-writer", "spec-written", "L-spec-0083", spec="L-spec-0083", path=str(SPEC83),
+   footprint=["src/fold.py"], base_sha="feed1234ab")
+_real_subject_project434 = fold.subject_project
+fold.subject_project = lambda spec: ("nowhere-project-434" if spec == "L-spec-0083"
+                                     else _real_subject_project434(spec))
+try:
+    p_rw83 = pathlib.Path(packet.packet_builder_rework("L-spec-0083", "fix it"))
+    t_rw83 = p_rw83.read_text()
+finally:
+    fold.subject_project = _real_subject_project434
+assert "PINNED_BASE_SHA: feed1234ab" in t_rw83, \
+    "AC10: unresolvable project/repo falls through to the existing precedence, never dies"
+assert "PINNED_BASE_SHA_EXPLICIT" not in t_rw83, \
+    "AC10: no explicit pin when the project/repo could not be resolved"
+
+# ── R7/AC11 · a landed explicit pin (base_sha_explicit=true) outlives a later
+#    PLAIN rework: extend the R3d fixture with a THIRD build-done and prove a
+#    FOURTH packet build reads Z0000003, never reverting to X0000001 ─────────
+ev("builder", "build-done", "L-spec-0080", status="DONE", base_sha="Z0000003", ready_sha="r3",
+   base_sha_explicit=True)
+build("spec-auditor", subject="L-spec-0080", worktree=str(REPO))
+btxt80b = (TMP / "content" / "verify-L-spec-0080-spec-auditor.sh").read_text()
+assert btxt80b.splitlines()[2] == "BASE=Z0000003", \
+    f"AC11: a later plain rework rides the explicit pin, never reverting to an earlier base: {btxt80b.splitlines()[:4]!r}"
 
 # ══════════════════════════════════════════════════════════════════════════════
 # L-spec-0194 · worktree-readonly-dsn (L-charter-0028) — R3, AC17-AC18
