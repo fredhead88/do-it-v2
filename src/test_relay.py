@@ -196,8 +196,9 @@ ok(self_ref["conflicts"] == ["L-charter-0002", "L-charter-0404"] and self_ref["u
 # ── AC5: the attempt tally ──
 C = "L-charter-0007"
 base = [{"type": relay.PLANNER_STARTED, "subject": C}, {"type": relay.PLANNER_ENDED, "subject": C, "reason": "exit-1"}]
-ok(relay.planner_attempts([], C) == {"attempts": 0, "last_reason": None, "next": "start"}, "nothing yet: start")
-ok(relay.planner_attempts(base, C) == {"attempts": 1, "last_reason": "exit-1", "next": "retry"},
+ok(relay.planner_attempts([], C) == {"attempts": 0, "last_reason": None, "next": "start", "held_by": None},
+   "nothing yet: start")
+ok(relay.planner_attempts(base, C) == {"attempts": 1, "last_reason": "exit-1", "next": "retry", "held_by": None},
    "one failure: R7's single restart")
 ok(relay.planner_attempts(base * 2, C)["next"] == "escalate"
    and relay.planner_attempts(base * 2, C)["attempts"] == 2, "two failures: the operator's")
@@ -207,8 +208,108 @@ serving = base + [{"type": relay.PLANNER_STARTED, "subject": C, "mode": "serving
                   {"type": relay.PLANNER_ENDED, "subject": C, "mode": "serving", "reason": "exit-1"}]
 ok(relay.planner_attempts(serving, C)["attempts"] == 1, "a serving-mode pair is not an attempt at cutting (decision 4)")
 done = [{"type": relay.PLANNER_STARTED, "subject": C}, {"type": relay.PLANNER_ENDED, "subject": C, "reason": "l1-complete"}]
-ok(relay.planner_attempts(done, C) == {"attempts": 0, "last_reason": "l1-complete", "next": "start"},
+ok(relay.planner_attempts(done, C) == {"attempts": 0, "last_reason": "l1-complete", "next": "start", "held_by": None},
    "a completed charter is not a failed attempt")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-0433 · planner-attempts-hold (L-charter-0042) — R6
+# ══════════════════════════════════════════════════════════════════════════════
+# ── AC2 · structural known-bug (actor=up, attempts=N), answered with no replan= ──
+KB = "L-charter-0100"
+kb_base = [{"type": relay.PLANNER_STARTED, "subject": KB}, {"type": relay.PLANNER_ENDED, "subject": KB, "reason": "exit-1"}]
+up_esc = {"type": "escalation-blocking", "subject": KB, "actor": "up", "attempts": 2, "_src": "L-up-0001.jsonl:3"}
+decision_no_replan = {"type": "decision", "subject": KB, "ref": "L-up-0001.jsonl:3", "_src": "L-operator-a.jsonl:1"}
+ac2 = kb_base * 2 + [up_esc, decision_no_replan]
+r = relay.planner_attempts(ac2, KB)
+ok(r["next"] == "held" and r["held_by"] == "L-operator-a.jsonl:1",
+   f"AC2: a structural known-bug escalation, answered without replan=, holds: {r}")
+
+# ── AC3 · same, answered by unblocked with replan=no (explicit) ──
+unblocked_no = {"type": "unblocked", "subject": KB, "replan": "no", "_src": "L-operator-a.jsonl:2"}
+ac3 = kb_base * 2 + [up_esc, unblocked_no]
+r = relay.planner_attempts(ac3, KB)
+ok(r["next"] == "held" and r["held_by"] == "L-operator-a.jsonl:2",
+   f"AC3: unblocked with an explicit replan=no holds identically to an absent field: {r}")
+
+# ── AC4 · the hand-written marker (kind=known-bug, no attempts, any actor) ──
+KB2 = "L-charter-0101"
+marker_esc = {"type": "escalation-blocking", "subject": KB2, "actor": "thinker", "kind": "known-bug",
+             "_src": "L-thinker-0001.jsonl:1"}
+decision2 = {"type": "decision", "subject": KB2, "_src": "L-operator-b.jsonl:1"}
+r = relay.planner_attempts([marker_esc, decision2], KB2)
+ok(r["next"] == "held" and r["held_by"] == "L-operator-b.jsonl:1",
+   f"AC4: the hand-written kind=known-bug marker qualifies exactly like the structural path: {r}")
+
+# ── AC5 · replan=yes lifts the hold; zero post-reset pairs → attempts 0, start ──
+decision_yes = {"type": "decision", "subject": KB, "replan": "yes", "_src": "L-operator-a.jsonl:3"}
+ac5 = kb_base * 2 + [up_esc, decision_yes]
+ok(relay.planner_attempts(ac5, KB) == {"attempts": 0, "last_reason": None, "next": "start", "held_by": None},
+   f"AC5: replan=yes resets the floor; no pair after it counts: {relay.planner_attempts(ac5, KB)}")
+
+# ── AC6 · one pair positioned after the reset counts; no retry once a floor stands ──
+post_pair = [{"type": relay.PLANNER_STARTED, "subject": KB}, {"type": relay.PLANNER_ENDED, "subject": KB, "reason": "exit-2"}]
+ac6 = ac5 + post_pair
+r = relay.planner_attempts(ac6, KB)
+ok(r == {"attempts": 1, "last_reason": "exit-2", "next": "escalate", "held_by": None},
+   f"AC6: only the post-reset pair counts, and the ladder skips retry once a floor stands: {r}")
+
+# ── AC7 · position, not ts, decides "after the reset" ──
+same_ts = "2026-09-27T00:00:00"
+decision_yes_ts = {**decision_yes, "ts": same_ts}
+before_pair = [{"type": relay.PLANNER_STARTED, "subject": KB, "ts": same_ts},
+              {"type": relay.PLANNER_ENDED, "subject": KB, "reason": "exit-before", "ts": same_ts}]
+after_pair = [{"type": relay.PLANNER_STARTED, "subject": KB, "ts": same_ts},
+             {"type": relay.PLANNER_ENDED, "subject": KB, "reason": "exit-after", "ts": same_ts}]
+ac7 = kb_base * 2 + [up_esc, before_pair[0], before_pair[1], decision_yes_ts, after_pair[0], after_pair[1]]
+r = relay.planner_attempts(ac7, KB)
+ok(r["attempts"] == 1 and r["last_reason"] == "exit-after",
+   f"AC7: list POSITION decides after-the-reset, never a ts compare (identical ts on all three): {r}")
+
+# ── AC8 · an ordinary (never-known-bug) escalation is unaffected, even answered ──
+ORD = "L-charter-0102"
+ord_esc = {"type": "escalation-blocking", "subject": ORD, "why": "no repo link", "_src": "L-executor-0001.jsonl:1"}
+ord_decision = {"type": "decision", "subject": ORD, "_src": "L-operator-c.jsonl:1"}
+ord_base = [{"type": relay.PLANNER_STARTED, "subject": ORD}, {"type": relay.PLANNER_ENDED, "subject": ORD, "reason": "exit-1"}]
+r = relay.planner_attempts(ord_base * 2 + [ord_esc, ord_decision], ORD)
+ok(r == {"attempts": 2, "last_reason": "exit-1", "next": "escalate", "held_by": None},
+   f"AC8: an ordinary escalation, answered, is never held and never sets a reset floor: {r}")
+
+# ── AC9 · plannable() excludes a held charter and reports it in waiting ──
+d = scene("known-bug-hold")
+ev(d, "L-operator-j", "charter-filed", KB, covers="none")
+ev(d, "L-up-0001", "escalation-blocking", KB, attempts=2)   # filename "L-up-0001" -> actor "up" (D90)
+ev(d, "L-operator-j", "decision", KB)
+ev(d, "L-operator-j", "charter-filed", "L-charter-0103", covers="none")
+ready, waiting = relay.plannable(read(), d)
+w = dict(waiting)
+held_src = [e["_src"] for e in fold.read_events() if e["type"] == "decision" and e["subject"] == KB][0]
+ok(KB not in ready and "L-charter-0103" in ready,
+   f"AC9: the held charter is absent from ready; the ordinary charter is ready: {ready}")
+ok(w[KB] == f"held: known-bug escalation answered by {held_src} without replan=yes" + TAIL,
+   f"AC9: waiting names the answering event's own _src: {w}")
+
+# ── AC10 · waiting_lines renders the held reason verbatim through the one renderer ──
+lines = relay.waiting_lines(read(), d)
+ok(f"  {KB} · held: known-bug escalation answered by {held_src} without replan=yes" + TAIL in lines,
+   f"AC10: the held line flows through waiting_lines unchanged: {lines}")
+
+# ── AC12 · the NEWEST answer to the still-current escalation governs ──
+decision1 = {"type": "decision", "subject": KB, "_src": "L-operator-a.jsonl:10"}
+decision2_yes = {"type": "decision", "subject": KB, "replan": "yes", "_src": "L-operator-a.jsonl:11"}
+ac12 = kb_base * 2 + [up_esc, decision1, decision2_yes]
+ok(relay.planner_attempts(ac12, KB) == {"attempts": 0, "last_reason": None, "next": "start", "held_by": None},
+   f"AC12: a later replan=yes decision on the SAME still-current escalation lifts an already-held charter: "
+   f"{relay.planner_attempts(ac12, KB)}")
+
+# ── AC13 · the reset floor survives a later, unrelated (ordinary) escalation ──
+ord_esc2 = {"type": "escalation-blocking", "subject": KB, "why": "unrelated", "_src": "L-executor-0002.jsonl:1"}
+ord_decision2 = {"type": "decision", "subject": KB, "_src": "L-operator-a.jsonl:20"}
+one_post_pair = [{"type": relay.PLANNER_STARTED, "subject": KB}, {"type": relay.PLANNER_ENDED, "subject": KB, "reason": "exit-3"}]
+ac13 = ac5 + [ord_esc2, ord_decision2] + one_post_pair
+r = relay.planner_attempts(ac13, KB)
+ok(r["next"] == "escalate" and r["attempts"] == 1,
+   f"AC13: the ordinary escalation's own answer governs `held` (never true), and the known-bug floor "
+   f"from decision_yes persists across it — pre-reset pairs stay uncounted: {r}")
 
 # ── AC6: pending packets and the ledger watermark ──
 d = scene("packets")

@@ -227,6 +227,15 @@ def _charter_pass(state, events, charter):
     if not ok:
         return False
     att = att or {}
+    if att.get("next") == "held":
+        # planner-attempts-hold (L-charter-0042 R6): reachable only if a caller hands
+        # this a charter `relay.plannable` itself would not offer (its own held check
+        # runs ahead of everything else) — a defensive branch, not the normal path.
+        # No pane, no new escalation-blocking: the charter is already held by an
+        # answer that did not carry replan=yes, and re-escalating it here would be
+        # exactly the bug this spec fixes. The cycle continues to the next charter.
+        print(f"# {charter}: held — known-bug escalation answered by {att.get('held_by')} without replan=yes")
+        return True
     if att.get("next") == "escalate":
         led = _launcher(state)
         # R3/L-spec-0192: `escalation_ok` now gates this write (via `emit()`'s
@@ -244,7 +253,8 @@ def _charter_pass(state, events, charter):
                       irreversible=f"{att.get('attempts')} planner attempt(s) on {charter} already ran "
                                    f"and drew their budget; R7's at-most-one-restart rule means this "
                                    f"charter is not retried automatically — an operator must record a "
-                                   f"decision or unblocked on {charter} to resume it")
+                                   f"decision or unblocked on {charter} carrying replan=yes to resume it "
+                                   f"— one without replan=yes leaves {charter} held")
         print(f"# {charter}: escalation-blocking — last {att.get('last_reason')}")
         return True                       # the charter leaves `ready` on relay's own exclusion
     _start(state, subject=charter, mode="charter",
