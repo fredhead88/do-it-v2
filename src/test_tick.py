@@ -123,6 +123,15 @@ assert "spawned" not in ticks()[-1], "nothing spawns, so nothing reports having 
 # A lane with work on it is recorded, not acted on — and the executor contract's
 # presence on disk is no longer this process's business (it used to exit 1 over it).
 write("L-planner-0001.jsonl", {"ts": "2026-09-08T10:00:00+00:00", "type": "spec-written", "subject": "L-spec-0001"})
+# L-charter-0042/L-spec-0427, SD3: a plain `written` spec is now the TICK's own
+# job (`autodispatch.run`), off this lane, unless it carries a standing
+# `autodispatch-failed`. This whole fixture block (through line ~176) tests
+# `in_flight`/busy filtering, orthogonal to SD3 — a far-future standing
+# failure keeps "L-spec-0001" on the lane whenever not busy, exactly as every
+# assertion below already expected, without re-deriving each one under SD3.
+write("L-tick-0001.jsonl", {"ts": (fold.NOW + datetime.timedelta(days=3650)).isoformat(timespec="seconds"),
+                            "type": "autodispatch-failed", "subject": "L-spec-0001",
+                            "reason": "autodispatch-0427: kept standing for this pre-existing busy-filter fixture"})
 assert tick.main() == 0 and ticks()[-1]["lane"] == 1, "a lane of 1 is recorded and the tick exits clean"
 assert len(ticks()) == 2, "AC10: exactly one tick event per run that takes the lock"
 
@@ -136,8 +145,17 @@ ev_file.write_text(json.dumps({"v": 1, "ts": old_ts, "type": "spawn-started", "r
 tick.main()
 stale = [json.loads(l) for l in tick.tick_path().read_text().splitlines() if '"spawn-stale"' in l]
 assert stale and stale[-1]["spawn"] == "L-grader-0009" and ticks()[-1]["lane"] == 1, "past 2× the cap: stale, back on the lane"
+# L-charter-0042/L-spec-0427, R1: `autodispatch.candidates()` calls BOTH
+# `tick.in_flight`/`tick.spawn_in_flight` (Consumes) — each backed by the SAME
+# side-effecting `_spawn_busy`, and `_record()` calls `autodispatch.run` before
+# `lane()`'s own separate `in_flight(ev)` call — so ONE pass that first
+# observes an aged spawn now records `spawn-stale` more than once for it
+# (inherited, "never suppressed", AC14/AC16). The invariant that still holds:
+# it never grows further once that spawn is terminal on a later pass's fresh read.
+count_after_first_pass = len([l for l in tick.tick_path().read_text().splitlines() if '"spawn-stale"' in l])
 tick.main()
-assert len([l for l in tick.tick_path().read_text().splitlines() if '"spawn-stale"' in l]) == 1, "stale is recorded once"
+assert len([l for l in tick.tick_path().read_text().splitlines() if '"spawn-stale"' in l]) == count_after_first_pass, \
+    "stale never grows further once the spawn is terminal on a later pass"
 ev_file.unlink()
 
 # a start with NO spawn id — hand-written, or written before the wrapper existed.
@@ -215,7 +233,12 @@ ch.unlink()
 
 # AC3 (R6) — a free-standing spec is on the lane on its own terms. It names no
 # charter at all, and an unrelated charter sitting at L1-complete cannot touch it.
+# autodispatch-0427/SD3: a standing failure keeps it on the lane (the tick's own
+# job now, otherwise), orthogonal to what this fixture actually tests (R6).
 write("L-planner-0007.jsonl", {"type": "spec-written", "subject": "L-spec-0077"})
+write("L-tick-0002.jsonl", {"ts": (fold.NOW + datetime.timedelta(days=3650)).isoformat(timespec="seconds"),
+                            "type": "autodispatch-failed", "subject": "L-spec-0077",
+                            "reason": "autodispatch-0427: kept standing for this pre-existing R6 fixture"})
 write("L-operator-0007.jsonl",            # l1-complete is EMITS-gated to planner/operator
       {"type": "charter-filed", "subject": "L-charter-0007"},
       {"type": "l1-complete", "subject": "L-charter-0007"})
@@ -315,6 +338,10 @@ write("L-executor-0044.jsonl",
       {"type": "spec-written", "subject": "L-spec-0044"},
       {"type": "blocked", "subject": "L-spec-0044", "id": "L-spec-0044-wait",
        "owner": "executor", "why": "footprint overlap with L-spec-0045"})
+# autodispatch-0427/SD3: a standing failure keeps it on the lane regardless.
+write("L-tick-0003.jsonl", {"ts": (fold.NOW + datetime.timedelta(days=3650)).isoformat(timespec="seconds"),
+                            "type": "autodispatch-failed", "subject": "L-spec-0044",
+                            "reason": "autodispatch-0427: kept standing for this pre-existing AC4 fixture"})
 ev, specs, charters = folded()
 assert specs["L-spec-0044"]["state"] == "written", "a blocked spec is still a written spec"
 assert "L-spec-0044 · written" in tick.lane(specs, charters, tick.in_flight(ev), events=ev), \
@@ -327,6 +354,12 @@ write("L-planner-0055.jsonl",
       {"type": "spec-written", "subject": "L-spec-0056"},
       {"type": "spec-written", "subject": "L-spec-0057"})
 write("L-builder-0055.jsonl", {"type": "build-started", "subject": "L-spec-0057", "spawn": "L-builder-0055"})
+# autodispatch-0427/SD3: standing failures keep both written specs on the lane.
+write("L-tick-0004.jsonl",
+      {"ts": (fold.NOW + datetime.timedelta(days=3650)).isoformat(timespec="seconds"),
+       "type": "autodispatch-failed", "subject": "L-spec-0055", "reason": "autodispatch-0427: AC5 fixture"},
+      {"ts": (fold.NOW + datetime.timedelta(days=3650)).isoformat(timespec="seconds"),
+       "type": "autodispatch-failed", "subject": "L-spec-0056", "reason": "autodispatch-0427: AC5 fixture"})
 ev, specs, charters = folded()
 busy = tick.in_flight(ev)
 lanes = tick.lane(specs, charters, busy, events=ev)
@@ -475,6 +508,128 @@ def write_to(d, name, *events):
     p = d / name
     p.write_text("".join(json.dumps({"v": 1, "ts": NOW, **e}) + "\n" for e in events))
     return p
+
+# ══════════════════════════════════════════════════════════════════════════════
+# L-charter-0042/L-spec-0427 — R1: the tick dispatches (autodispatch)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# AC17 (autodispatch-0427) — a `written` spec with no standing
+# `autodispatch-failed` anywhere is NOT on tick.lane(): the tick dispatches it
+# itself now (SD3); the Executor's job narrows to a standing failure alone.
+iso_ad17 = _isolated_events()
+saved_events = fold.EVENTS
+fold.EVENTS = iso_ad17
+write_to(iso_ad17, "L-planner-0001.jsonl", {"type": "spec-written", "subject": "L-spec-42001"})
+ev = fold.read_events()
+specs, charters, _, _ = fold.fold(ev)
+lanes = tick.lane(specs, charters, tick.in_flight(ev), events=ev)
+assert lanes == [], f"autodispatch-0427 AC17: no standing failure -> off the lane: {lanes}"
+print("autodispatch-0427 AC17 ok")
+fold.EVENTS = saved_events
+
+# AC18 (autodispatch-0427) — the identical spec WITH an `autodispatch-failed`
+# newer than its `spec-written` IS on tick.lane(); a `decision` after that
+# failure removes it again.
+iso_ad18 = _isolated_events()
+fold.EVENTS = iso_ad18
+t0_ad18 = (fold.NOW - datetime.timedelta(hours=2)).isoformat(timespec="seconds")
+t1_ad18 = (fold.NOW - datetime.timedelta(hours=1)).isoformat(timespec="seconds")
+write_to(iso_ad18, "L-planner-0001.jsonl", {"type": "spec-written", "subject": "L-spec-42002", "ts": t0_ad18})
+write_to(iso_ad18, "L-tick-0001.jsonl", {"type": "autodispatch-failed", "subject": "L-spec-42002",
+                                          "reason": "boom", "ts": t1_ad18})
+ev = fold.read_events()
+specs, charters, _, _ = fold.fold(ev)
+lanes = tick.lane(specs, charters, tick.in_flight(ev), events=ev)
+assert lanes == ["L-spec-42002 · written"], f"autodispatch-0427 AC18a: {lanes}"
+t2_ad18 = (fold.NOW - datetime.timedelta(minutes=30)).isoformat(timespec="seconds")
+write_to(iso_ad18, "L-operator-local.jsonl", {"type": "decision", "subject": "L-spec-42002", "ts": t2_ad18})
+ev = fold.read_events()
+specs, charters, _, _ = fold.fold(ev)
+lanes = tick.lane(specs, charters, tick.in_flight(ev), events=ev)
+assert lanes == [], f"autodispatch-0427 AC18b: a later decision clears it again: {lanes}"
+print("autodispatch-0427 AC18 ok")
+fold.EVENTS = saved_events
+
+
+class _FakeAutodispatch:
+    """Substituted into `sys.modules["autodispatch"]` — `tick._record()`'s own
+    lazy `import autodispatch` picks this up instead of the real module."""
+    def __init__(self, raise_error=False, append_failed=False):
+        self.calls = []
+        self.raise_error = raise_error
+        self.append_failed = append_failed
+
+    def run(self, ev, specs, now, **kw):
+        self.calls.append((list(ev), dict(specs), now))
+        if self.raise_error:
+            raise RuntimeError("boom-autodispatch")
+        if self.append_failed:
+            import dispatch as _dispatch
+            _dispatch.emit(tick.tick_path(), {"subject": "L-spec-42005"}, "autodispatch-failed", reason="x")
+        return []
+
+
+# AC25(a) (autodispatch-0427) — `_record()` calls `autodispatch.run` exactly
+# once, with THIS pass's own `ev`/`specs`/`fold.NOW`.
+iso_ad25a = _isolated_events()
+fold.EVENTS = iso_ad25a
+write_to(iso_ad25a, "L-planner-0001.jsonl", {"type": "spec-written", "subject": "L-spec-42003"})
+fake25a = _FakeAutodispatch()
+sys.modules["autodispatch"] = fake25a
+try:
+    assert tick.main() == 0
+finally:
+    del sys.modules["autodispatch"]
+assert len(fake25a.calls) == 1, f"autodispatch-0427 AC25a: exactly one call: {fake25a.calls}"
+called_ev, called_specs, called_now = fake25a.calls[0]
+assert called_now == fold.NOW, "autodispatch-0427 AC25a: now must be fold.NOW"
+assert any(e.get("subject") == "L-spec-42003" for e in called_ev), \
+    "autodispatch-0427 AC25a: ev must be this pass's own events"
+assert "L-spec-42003" in called_specs, "autodispatch-0427 AC25a: specs must be this pass's own folded specs"
+fold.EVENTS = saved_events
+
+# AC25(b) (autodispatch-0427) — a raise leaves `autodispatch_error` on the
+# same `tick` event, and never stops `pane_resume.run` or the `tick` append.
+iso_ad25b = _isolated_events()
+fold.EVENTS = iso_ad25b
+write_to(iso_ad25b, "L-planner-0001.jsonl", {"type": "spec-written", "subject": "L-spec-42004"})
+before_pane_calls = len(PANE_RESUME_CALLS)
+sys.modules["autodispatch"] = _FakeAutodispatch(raise_error=True)
+try:
+    assert tick.main() == 0
+finally:
+    del sys.modules["autodispatch"]
+assert len(PANE_RESUME_CALLS) == before_pane_calls + 1, "autodispatch-0427 AC25b: pane_resume.run still ran"
+lines = [json.loads(l) for l in (iso_ad25b / "L-tick-local.jsonl").read_text().splitlines()]
+tick_events = [e for e in lines if e["type"] == "tick"]
+assert tick_events and tick_events[-1].get("autodispatch_error") == "boom-autodispatch", \
+    f"autodispatch-0427 AC25b: {tick_events}"
+fold.EVENTS = saved_events
+
+# AC25(c) (autodispatch-0427), corollary — a fake `run` that instead APPENDS
+# `autodispatch-failed` does not change THIS pass's own `todo`; it shows only
+# on a SECOND `_record()` call.
+iso_ad25c = _isolated_events()
+fold.EVENTS = iso_ad25c
+write_to(iso_ad25c, "L-planner-0001.jsonl",
+         {"type": "spec-written", "subject": "L-spec-42005",
+          "ts": (fold.NOW - datetime.timedelta(minutes=5)).isoformat(timespec="seconds")})
+sys.modules["autodispatch"] = _FakeAutodispatch(append_failed=True)
+try:
+    todo1 = tick._record()
+finally:
+    del sys.modules["autodispatch"]
+assert todo1 is not None and "L-spec-42005 · written" not in todo1, \
+    f"autodispatch-0427 AC25c: this pass's own todo must not reflect an event run() just appended: {todo1}"
+sys.modules["autodispatch"] = _FakeAutodispatch()
+try:
+    todo2 = tick._record()
+finally:
+    del sys.modules["autodispatch"]
+assert todo2 is not None and "L-spec-42005 · written" in todo2, \
+    f"autodispatch-0427 AC25c: the SECOND pass sees the standing failure: {todo2}"
+print("autodispatch-0427 AC25 ok")
+fold.EVENTS = saved_events
 
 
 # AC1 — tick.lane() gains a 6th, keyword-defaulted `inbound` argument: one
@@ -750,6 +905,10 @@ print("tick: 0187 R3 checks pass")
 iso198 = _isolated_events()
 fold.EVENTS = iso198
 write_to(iso198, "L-spec-writer-9198.jsonl", {"type": "spec-written", "subject": "L-spec-9198"})
+# autodispatch-0427/SD3: a standing failure keeps it on the lane regardless.
+write_to(iso198, "L-tick-0005.jsonl",
+         {"ts": (fold.NOW + datetime.timedelta(days=3650)).isoformat(timespec="seconds"),
+          "type": "autodispatch-failed", "subject": "L-spec-9198", "reason": "autodispatch-0427: AC5(0198) fixture"})
 write_to(iso198, "L-operator-9198.jsonl",
          {"type": "spec-carried", "subject": "L-spec-9198", "source": "9198-src",
           "tier": "gates-only", "audited_at": NOW, "charter": "L-charter-9198",
@@ -897,6 +1056,10 @@ iso8 = _isolated_events()
 fold.EVENTS = iso8
 dead8 = _dead_pid()
 write_to(iso8, "L-planner-8801.jsonl", {"type": "spec-written", "subject": "L-spec-8801"})
+# autodispatch-0427/SD3: a standing failure keeps it on the lane regardless.
+write_to(iso8, "L-tick-0006.jsonl",
+         {"ts": (fold.NOW + datetime.timedelta(days=3650)).isoformat(timespec="seconds"),
+          "type": "autodispatch-failed", "subject": "L-spec-8801", "reason": "autodispatch-0427: AC8(0275) fixture"})
 write_to(iso8, "L-grader-8801.jsonl", {"type": "spawn-started", "role": "grader",
                                        "subject": "L-spec-8801", "spawn": "L-grader-8801",
                                        "waiter_host": HOST, "waiter_pid": dead8})

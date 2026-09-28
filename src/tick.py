@@ -208,6 +208,24 @@ def _carry_packet_busy(busy):
     return out
 
 
+def _dispatchable_stale_note(s):
+    """L-charter-0042/L-spec-0427 R1, SD3: a `written` spec belongs on the
+    lane only when it carries a standing `autodispatch-failed` — newer than
+    its own newest `spec-written`/`decision`/`unblocked` — for the Executor
+    to diagnose; the tick itself dispatches everything else (`autodispatch.
+    run`, called from `_record()` below). A tiny per-spec filter, duplicated
+    here rather than imported from `autodispatch` (which itself imports
+    `tick` — a cycle)."""
+    evs = s.get("evs") or []
+    fails = [e for e in evs if e.get("type") == "autodispatch-failed"]
+    if not fails:
+        return False
+    fail_ts = max(fold.ts(e.get("ts")) for e in fails)
+    clearers = [e for e in evs if e.get("type") in ("spec-written", "decision", "unblocked")]
+    clear_ts = max((fold.ts(e.get("ts")) for e in clearers), default=None)
+    return clear_ts is None or fail_ts > clear_ts
+
+
 def lane(specs, charters, busy=frozenset(), reaped=frozenset(), events=(), inbound=()):
     """A charter that is CLOSED and not yet reaped is still the Executor's.
 
@@ -248,7 +266,8 @@ def lane(specs, charters, busy=frozenset(), reaped=frozenset(), events=(), inbou
         return not (accepted and fixpoint and not review_owed)
     packet_busy = _carry_packet_busy(busy)
     return sorted([f"{s['id']} · {s['state']}" for s in specs.values()
-                   if s["state"] in ACTIONABLE and s["id"] not in busy]
+                   if s["state"] in ACTIONABLE and s["id"] not in busy
+                   and (s["state"] != "written" or _dispatchable_stale_note(s))]
                   + [f"{c['id']} · {c['state']}" for c in charters.values()
                      if c["id"] not in busy and waiting(c)]
                   + [f"inbound:{i['source']} · uncarried" for i in inbound
@@ -370,6 +389,17 @@ def _record():
         grader_serve.run(ev)
     except Exception as e:
         grader_serve_error = f"{e}"
+    # L-charter-0042/L-spec-0427, R1: the tick dispatches. LAST guarded step
+    # before `todo = lane(...)`, on the SAME `ev`/`specs` — no re-read sits
+    # between here and `lane()` (Boundaries), so an event `run()` appends
+    # this pass never changes THIS pass's own `todo`. A raise never stops the
+    # tick's own heartbeat, exactly like `carry_error` above.
+    autodispatch_error = None
+    try:
+        import autodispatch
+        autodispatch.run(ev, specs, fold.NOW)
+    except Exception as e:
+        autodispatch_error = f"{e}"
     todo = lane(specs, charters, in_flight(ev), reaped, events=ev, inbound=inbound)
     # The one liveness fact: `fold` reads the newest of these for staleness, and
     # `lane` is the count — the whole record this process leaves behind.
@@ -388,6 +418,8 @@ def _record():
         kv["install_synced"] = install_synced
     if grader_serve_error:
         kv["grader_serve_error"] = grader_serve_error
+    if autodispatch_error:
+        kv["autodispatch_error"] = autodispatch_error
     dispatch.emit(tick_path(), {}, "tick", **kv)
     return todo
 

@@ -461,6 +461,43 @@ def _check_spec_misrouted(events, root, briefs):
         want, have = _resolve(str(spec_path_fn(spec)), root), (_resolve(path, root) if path else None)
         if have is None or have != want:
             brief(spec, {"path": path, "want": str(want)})
+def _check_dispatchable_stale(events, now, root, briefs):
+    """L-charter-0042/L-spec-0427, SD4: `autodispatch.candidates` folds
+    `events` itself (`look.run` takes none), and anything `dispatchable`, or
+    `blocked` specifically on a standing `autodispatch-failed`, whose `since`
+    is more than 30 minutes old briefs `spec-dispatchable-stale` (owner
+    `executor`) — `seat-wait` never alarms (it is legitimately waiting on
+    capacity, SD2). `reading` is `dispatch-failed:<reason>` for the standing-
+    failure case, `tick-not-running` for a structurally-fine one simply never
+    picked up. Wrapped in the SAME broad `try/except Exception` shape
+    `_check_wallclock` uses: a raise degrades to one `reading-undetermined`
+    (`dispatch-stale`), nothing else."""
+    try:
+        import autodispatch
+        specs, _, _, _ = fold.fold(events)
+        rows = autodispatch.candidates(events, specs, now)
+    except Exception:
+        _fire_undetermined("dispatch-stale", events, root, briefs)
+        return
+    seen = set()
+    for row in rows:
+        sid = row["spec"]
+        seen.add(sid)
+        alarmable = row["status"] == "dispatchable" or (row["status"] == "blocked" and row.get("_dispatch_failed"))
+        since_dt = fold.ts(row["since"])
+        age_min = (now - since_dt).total_seconds() / 60
+        bad = alarmable and age_min > 30
+        reading = (f"dispatch-failed:{row['reason']}" if row.get("_dispatch_failed") else "tick-not-running") \
+            if alarmable else "not-stale"
+        _settle("spec-dispatchable-stale", sid, "executor", bad, reading, events, root, briefs, [])
+    # AC23: a spec whose fold state has moved off `written` no longer appears
+    # among `rows` at all — clear any standing brief it still carries.
+    for sid, s in specs.items():
+        if sid in seen or s.get("state") == "written":
+            continue
+        _clear("spec-dispatchable-stale", sid, "left written", events, root)
+
+
 def _check_wallclock(events, runner, now, root, cfg, deadline, dry_run, briefs):
     """The four wall-clock checks (L-charter-0038 R6), wrapped in the SAME
     lazily-guarded broad `except Exception` shape `_check_crons` uses around
@@ -506,6 +543,7 @@ def run(events, *, now=None, runner=None, root=None, toml_path=None, dry_run=Fal
         _check_disk_tmp(runner, root, th, now, deadline, events, briefs, answered)
         _check_crons(runner, deadline, events, root, briefs)
         _check_spec_misrouted(events, root, briefs)
+        _check_dispatchable_stale(events, now, root, briefs)
         wallclock_events = _check_wallclock(events, runner, now, root, cfg, deadline, dry_run, briefs)
         r = _clear("look-stale", "look-stale", "fresh pass", events, root)
         r and answered.append(r)
