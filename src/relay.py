@@ -8,6 +8,7 @@
   pending_packets(events, root)  -> dispatched seats with no answer yet
   unserved(events, root)         -> seat dispatches nobody claimed in time (R6)
   planner_attempts(events, cid)  -> {attempts, last_reason, next}
+  SERVERS                        -> dict   role -> "relay" | "pane" (L-charter-0042 R5c)
 
 Queries, and nothing else. Nothing here appends an event, opens a pane or spawns
 anything: the launcher, the pane and the board import these and own every side
@@ -24,13 +25,22 @@ computed is never implied.
 import hashlib, os, pathlib, re, sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import audit, fold  # noqa: E402
+import audit, dispatch, fold  # noqa: E402
 
 # R8's two types. The `EMITS` rows that AUTHORIZE them live in fold.py — one
 # authorization table, never a second copy here (§8.2). These constants exist so
 # no caller spells the type as a literal and drifts from the row.
 PLANNER_STARTED = "planner-started"
 PLANNER_ENDED = "planner-ended"
+
+# L-charter-0042 R5c: which mechanism serves a dispatched role's seat packet.
+# All eleven `dispatch.ROLES` keys — `grader` included — map to `"relay"`: this
+# deliberately does NOT carry the Plan's SD11 target value `grader ->
+# "grader-pane"`, since that value is only true once a `grader-pane` server
+# exists; the still-unwritten `grader-pane-serve` unit is the one that builds
+# it and flips this one entry (finding 1). The three standing panes serve
+# themselves.
+SERVERS = {**{r: "relay" for r in dispatch.ROLES}, "planner": "pane", "executor": "pane", "thinker": "pane"}
 
 # The states a spec is in when it has already committed to a footprint (L-adr-0028).
 HOLDING = ("written", "building")
@@ -333,12 +343,18 @@ def ledger_changed(root, watermark=None):
 
 # ── dispatched seats with no answer ──────────────────────────────────────────
 
-def pending_packets(events, root=None):
+def pending_packets(events, root=None, *, served_by="relay"):
     """Seats whose packet was written and whose answer has not come back — the SPAWN
     rule, not the file rule: the packet exists, the `.output.json` does not, and the
     `spawn-started` has no `spawn-done`/`spawn-failed`/`spawn-stale` after it (the
     terminal set `tick.in_flight` already uses). A packet on disk with no
-    `spawn-started` is not pending — nothing was dispatched."""
+    `spawn-started` is not pending — nothing was dispatched.
+
+    `served_by` (L-charter-0042 R5c) filters by `SERVERS`: `None` means no
+    filter — every pending row, whatever its role, exactly today's behaviour
+    before this parameter existed (audit finding 2); any other value (the
+    default, `"relay"`) keeps only rows whose `SERVERS.get(e.get("role", ""),
+    "relay") == served_by`."""
     seat = pathlib.Path(root or fold.ROOT) / "seat"
     started, terminal = {}, {}
     for e in events:
@@ -355,6 +371,8 @@ def pending_packets(events, root=None):
         if t is not None and fold.ts(t.get("ts")) >= fold.ts(e.get("ts")):
             continue
         if not (seat / f"{sid}.packet.md").is_file() or (seat / f"{sid}.output.json").exists():
+            continue
+        if served_by is not None and SERVERS.get(e.get("role", ""), "relay") != served_by:
             continue
         out.append({"spawn": sid,
                     "age_min": (fold.NOW - fold.ts(e.get("ts"))).total_seconds() / 60.0})

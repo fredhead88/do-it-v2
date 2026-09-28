@@ -44,11 +44,15 @@ esac
 
 # The ten contracts are agent files. `--agent <name>` resolves them from
 # ~/.claude/agents/ whatever the cwd (D116); symlinked so the repo stays the
-# source of truth (§9.5).
+# source of truth (§9.5). `install_sync.link_agents` is the one place this
+# linking logic lives (L-charter-0042 R5a) — never a second, bare per-file loop.
 AGENTS="$HOME/.claude/agents"
-mkdir -p "$AGENTS"
-for f in "$HERE"/agents/*.md; do ln -sf "$f" "$AGENTS/$(basename "$f")"; done
-echo "agents:  $AGENTS/<name>.md -> $HERE/agents/"
+linked=$(python3 "$HERE/src/install_sync.py" link-agents)
+if [ -n "$linked" ]; then
+  echo "agents:  $AGENTS/<name>.md -> $HERE/agents/ (linked: $(printf '%s' "$linked" | tr '\n' ' ' | sed 's/ $//'))"
+else
+  echo "agents:  $AGENTS/<name>.md -> $HERE/agents/ (already linked)"
+fi
 
 if ! command -v restic >/dev/null 2>&1; then
   echo "NOTE: restic not installed and DOIT_RESTIC_REPO unset, so the ledger has"

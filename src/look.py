@@ -206,7 +206,7 @@ def _health_status(row, runner, deadline):
     return False, reads
 def _check_packet_unserved(events, root, briefs):
     claim_sec = int(os.environ.get("DOIT_SEAT_CLAIM_SEC", 300))
-    for row in relay.pending_packets(events, root=root):
+    for row in relay.pending_packets(events, root=root, served_by=None):
         sid = row["spawn"]
         if (root / "seat" / f"{sid}.claimed").exists() or row["age_min"] * 60 <= claim_sec: continue
         r = _write_brief("packet-unserved", sid, "relay", row, events, root)

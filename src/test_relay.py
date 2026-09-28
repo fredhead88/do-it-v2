@@ -19,7 +19,7 @@ TMP = pathlib.Path(tempfile.mkdtemp())
 PROJECT = "relay-fixture"
 os.environ["DOIT_ROOT"], os.environ["DOIT_PROJECT"] = str(TMP), PROJECT
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
-import fold, relay  # noqa: E402
+import dispatch, fold, relay  # noqa: E402
 
 N = 0
 CLOCK = [0]
@@ -368,5 +368,41 @@ sev(d, "L-research-0200", "seat-stale", "L-spec-0272", iso(301), role="research"
 rows = relay.unserved(read(), d)
 ok(len(rows) == 1 and rows[0]["status"] == "stale-still-offered"
    and rows[0]["spawn"] == "L-research-0200", rows)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-0431 · install-and-serve (L-charter-0042) — R5c
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── AC8: every dispatchable role serves through relay; the three panes serve themselves ──
+ok(all(relay.SERVERS[role] == "relay" for role in dispatch.ROLES),
+   f"installsync-0431 AC8: every dispatchable role maps to relay: {relay.SERVERS}")
+ok(relay.SERVERS["planner"] == relay.SERVERS["executor"] == relay.SERVERS["thinker"] == "pane",
+   f"installsync-0431 AC8: the three standing panes serve themselves: {relay.SERVERS}")
+print("installsync-0431 AC8 ok")
+
+# ── AC10: served_by filters pending_packets by SERVERS ─────────────────────────
+d = scene("served-by")
+started10 = (fold.NOW - datetime.timedelta(minutes=7)).isoformat(timespec="seconds")
+(d / "seat" / "L-planner-9010.packet.md").write_text("packet")
+(d / "seat" / "L-spec-writer-9011.packet.md").write_text("packet")
+with open(d / "events" / "L-planner-9010.jsonl", "a") as fh:
+    fh.write(json.dumps({"v": 1, "ts": started10, "type": "spawn-started", "subject": "L-spec-0090",
+                         "project": PROJECT, "spawn": "L-planner-9010", "role": "planner"},
+                        sort_keys=True) + "\n")
+with open(d / "events" / "L-spec-writer-9011.jsonl", "a") as fh:
+    fh.write(json.dumps({"v": 1, "ts": started10, "type": "spawn-started", "subject": "L-spec-0091",
+                         "project": PROJECT, "spawn": "L-spec-writer-9011", "role": "spec-writer"},
+                        sort_keys=True) + "\n")
+ev10 = read()
+default10 = relay.pending_packets(ev10, d)
+ok([row["spawn"] for row in default10] == ["L-spec-writer-9011"],
+   f"installsync-0431 AC10: default served_by='relay' excludes the planner row: {default10}")
+pane10 = relay.pending_packets(ev10, d, served_by="pane")
+ok([row["spawn"] for row in pane10] == ["L-planner-9010"],
+   f"installsync-0431 AC10: served_by='pane' returns only the planner row: {pane10}")
+none10 = relay.pending_packets(ev10, d, served_by=None)
+ok(sorted(row["spawn"] for row in none10) == ["L-planner-9010", "L-spec-writer-9011"],
+   f"installsync-0431 AC10: served_by=None is the no-filter sentinel — both rows: {none10}")
+print("installsync-0431 AC10 ok")
 
 print(f"relay: {N} checks pass")
