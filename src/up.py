@@ -21,6 +21,72 @@ import dispatch, fold, launch, models, tick  # noqa: E402
 
 DOIT = HERE.parent / "doit"
 
+_EXECV = os.execv                     # the seam `maybe_reexec` calls — stubbable, `up._SLEEP`'s own shape
+_LAST_REEXEC_FAILURE = None           # the last `current` sha this process already failed to exec into
+
+
+def code_sha():
+    """R2: `git -C <checkout root> rev-parse HEAD`, stripped. `None` on any
+    failure — SD5's "undetermined": never a false "unchanged," the loop keeps
+    running regardless. `HERE.parent` is the checkout root `DOIT`/`install()`
+    already resolve against — read as a module global at call time, so a test
+    that repoints `up.HERE` sees it immediately."""
+    try:
+        out = subprocess.run(["git", "-C", str(HERE.parent), "rev-parse", "HEAD"],
+                             capture_output=True, text=True, timeout=10)
+    except Exception:
+        return None
+    if out.returncode != 0:
+        return None
+    sha = out.stdout.strip()
+    return sha or None
+
+
+def maybe_reexec(kind, started_sha, *, events_dir=None):
+    """R2: re-derive `code_sha()` and, on a real change, replace this OS process
+    with a fresh interpreter running the checkout as it now stands — never mid-
+    pane, only immediately before the next one starts (every call site is at a
+    pane boundary, never inside one). `up._EXECV` is the sole name this calls,
+    so a test can prove the branch fires without actually replacing the test
+    process.
+
+    A no-op — no write, no exec — when `code_sha()` comes back `None` (SD5:
+    undetermined is never treated as unchanged, but nor is it acted on with
+    nothing to compare against), when it equals `started_sha` (nothing moved),
+    or when it equals `up._LAST_REEXEC_FAILURE` (this process already failed to
+    exec into this exact sha; retried only once `code_sha()` differs again — a
+    closed retry storm). Also a no-op, before any write, when `sys.argv` is
+    empty or `sys.argv[0] == "-c"` — a `python3 -c "..."` start's shape, which
+    would otherwise replay into a bare interpreter.
+
+    Otherwise: one fresh `L-up-NNNN.jsonl` in `events_dir` (default
+    `fold.EVENTS`), one `supervisor-code reason="reexec"` row naming the new
+    sha, then `up._EXECV(sys.executable, [sys.executable] + sys.argv)`. Success
+    never returns (the image is replaced). A real `OSError` — the call failed,
+    this process is unchanged — is caught: `up._LAST_REEXEC_FAILURE` is set to
+    `current`, one more `supervisor-code reason="reexec-failed"` row lands on
+    the SAME file, and this returns — the loop keeps cycling on its old code;
+    point 7's `doit look` check is what eventually alarms, never a crash or a
+    retry storm."""
+    global _LAST_REEXEC_FAILURE
+    current = code_sha()
+    if current is None or current == started_sha or current == _LAST_REEXEC_FAILURE:
+        return
+    if not sys.argv or sys.argv[0] == "-c":
+        return
+    events_dir = events_dir if events_dir is not None else fold.EVENTS
+    ledger = dispatch.alloc(events_dir, "L-up-", ".jsonl")
+    dispatch.emit(ledger, {}, "supervisor-code", subject=kind, kind=kind,
+                  sha=current, pid=os.getpid(), reason="reexec")
+    try:
+        _EXECV(sys.executable, [sys.executable] + sys.argv)
+    except OSError as e:
+        _LAST_REEXEC_FAILURE = current
+        dispatch.emit(ledger, {}, "supervisor-code", subject=kind, kind=kind,
+                      sha=current, pid=os.getpid(), reason="reexec-failed",
+                      why=f"{type(e).__name__}: {str(e)[:200]}")
+        return
+
 
 def cron_line():
     """The tick's schedule. DOIT_TICK_MIN is the same variable the fold's
@@ -118,10 +184,14 @@ def main(print_only=False, max_cycles=None):
         cmd = pane_cmd(name=name)
         print(f"# planner pane: {ledger.stem} · {' '.join(cmd)}")
         return cmd, _child_env(ledger)
+    started_sha = code_sha()
     state, cycles = {"up": None, "watermark": None, "said": None}, 0
+    led = _launcher(state)
+    dispatch.emit(led, {}, "supervisor-code", subject="planner", kind="planner",
+                  sha=started_sha or "undetermined", pid=os.getpid(), reason="start")
     while max_cycles is None or cycles < max_cycles:
         cycles += 1
-        _cycle(state)
+        _cycle(state, started_sha)
     return cycles
 
 
@@ -194,16 +264,21 @@ def _ended(ledger):
     return False
 
 
-def _start(state, subject, mode, attempt, prompt, spawn_ids=None):
+def _start(state, subject, mode, attempt, prompt, spawn_ids=None, started_sha=None):
     """Start one pane and wait for it. The start row lands in the CHILD's own file
     before the child exists (L-adr-0027) — a pane that dies in its first second has
     still been recorded as started, which is the whole of planner_attempts' input.
     The end row is appended only where the child wrote none: its own clean
-    `planner-ended` is the better record and is never doubled."""
+    `planner-ended` is the better record and is never doubled.
+
+    `started_sha` (R2): the SAME value `main()`'s own boot `supervisor-code
+    reason="start"` row carries — never a fresh `code_sha()` call here.
+    `maybe_reexec` has already resynced immediately before every call site that
+    reaches this, so `started_sha` is current at the moment this row lands."""
     ledger = dispatch.alloc(fold.EVENTS, "L-planner-", ".jsonl")
     base, ids = {"spawn": ledger.stem}, ({"spawn_ids": spawn_ids} if spawn_ids else {})
     dispatch.emit(ledger, base, "planner-started", subject=subject, planner=ledger.stem,
-                  attempt=attempt, mode=mode, **ids)
+                  attempt=attempt, mode=mode, code_sha=started_sha or "undetermined", **ids)
     name = (_seam("pane_name", "PANE_NAME") or _stem)(ledger.name)
     mp = models.load(fold.ROOT / "models.toml")
     model = launch.model_for("planner")
@@ -221,7 +296,7 @@ def _start(state, subject, mode, attempt, prompt, spawn_ids=None):
     launch.ended(ledger.stem, rc)
 
 
-def _charter_pass(state, events, charter):
+def _charter_pass(state, events, charter, started_sha):
     """One ready charter. False means the relay failed and the cycle holds."""
     ok, att = _guarded("planner_attempts", events, charter_id=charter)
     if not ok:
@@ -257,8 +332,9 @@ def _charter_pass(state, events, charter):
                                    f"— one without replan=yes leaves {charter} held")
         print(f"# {charter}: escalation-blocking — last {att.get('last_reason')}")
         return True                       # the charter leaves `ready` on relay's own exclusion
+    maybe_reexec("planner", started_sha)  # R2 point 5(b): immediately before THIS charter's pane
     _start(state, subject=charter, mode="charter",
-           attempt=int(att.get("attempts") or 0) + 1, prompt=charter)
+           attempt=int(att.get("attempts") or 0) + 1, prompt=charter, started_sha=started_sha)
     return True
 
 
@@ -294,9 +370,16 @@ def _hold(state, lines):
         time.sleep(min(POLL_STEP, max(0.0, end - time.monotonic())))
 
 
-def _cycle(state):
+def _cycle(state, started_sha):
     """One turn of the loop: charter work first, a serving pass only while none is
-    plannable (L-adr-0029), and a hold when there is neither."""
+    plannable (L-adr-0029), and a hold when there is neither.
+
+    `started_sha` (R2): `maybe_reexec` fires once here, at the top — covering
+    the idle/hold path that starts no pane at all — and again inside
+    `_charter_pass` and before the serving branch's own `_start`, so a HEAD
+    move between two panes in the SAME cycle (charter 1 exiting, charter 2
+    starting) is caught too, not only once per cycle."""
+    maybe_reexec("planner", started_sha)
     events = fold.read_events()
     ok, plan = _guarded("plannable", events, fold.ROOT)
     if not ok:
@@ -307,7 +390,7 @@ def _cycle(state):
         return _degrade()
     if ready:
         for charter in ready:
-            if not _charter_pass(state, events, charter):
+            if not _charter_pass(state, events, charter, started_sha):
                 return _degrade()
         return
     todo, skipped = _serving_split(events, pending)
@@ -315,8 +398,9 @@ def _cycle(state):
         print(f"# serving: {spawn} already had a serving pass — skipped")
     if todo:
         ids = ",".join(todo)
+        maybe_reexec("planner", started_sha)
         return _start(state, subject="serving:" + ids, mode="serving",
-                      attempt=1, prompt=ids, spawn_ids=ids)
+                      attempt=1, prompt=ids, spawn_ids=ids, started_sha=started_sha)
     ok, lines = _guarded("waiting_lines", events, fold.ROOT)
     if not ok:
         return _degrade()
@@ -370,9 +454,18 @@ def relay_main(print_only=False, max_cycles=None):
     install(contract)
     (fold.ROOT / "events").mkdir(parents=True, exist_ok=True)
     mp = models.load(fold.ROOT / "models.toml")
+    started_sha = None
+    if not print_only:
+        started_sha = code_sha()
+        led = dispatch.alloc(fold.EVENTS, "L-up-", ".jsonl")
+        dispatch.emit(led, {}, "supervisor-code", subject="relay", kind="relay",
+                      sha=started_sha or "undetermined", pid=os.getpid(), reason="start")
     state, cycles = {"watermark": None, "said": None}, 0
     while max_cycles is None or cycles < max_cycles:
         cycles += 1
+        if not print_only:
+            maybe_reexec("relay", started_sha)   # one call per cycle: this loop starts at
+                                                  # most one pane per iteration (R2 point 5)
         pending = relay.pending_packets(fold.read_events(), fold.ROOT)
         todo = _unclaimed_pending(pending, fold.ROOT)
         if not todo:
@@ -391,7 +484,8 @@ def relay_main(print_only=False, max_cycles=None):
             return cmd, _child_env(ledger)
         base = {"spawn": ledger.stem}
         env = launch.child_env("relay", base=_child_env(ledger, supervised=True))
-        dispatch.emit(ledger, base, "spawn-started", subject=ledger.stem, role="relay")
+        dispatch.emit(ledger, base, "spawn-started", subject=ledger.stem, role="relay",
+                      code_sha=started_sha or "undetermined")
         print(f"# relay pane: {ledger.stem} · serving {ids}")
         try:
             proc = subprocess.Popen(cmd, env=env)
@@ -648,9 +742,18 @@ def executor_loop(root, interval, print_only=False, max_cycles=None):
     (root / "events").mkdir(parents=True, exist_ok=True)
     (root / "logs").mkdir(parents=True, exist_ok=True)
     events_dir = root / "events"
+    started_sha = None
+    if not print_only:
+        started_sha = code_sha()
+        led = dispatch.alloc(events_dir, "L-up-", ".jsonl")
+        dispatch.emit(led, {}, "supervisor-code", subject="executor", kind="executor",
+                      sha=started_sha or "undetermined", pid=os.getpid(), reason="start")
     cycles = 0
     while max_cycles is None or cycles < max_cycles:
         cycles += 1
+        if not print_only:
+            maybe_reexec("executor", started_sha, events_dir=events_dir)   # one call per
+                                                  # cycle: at most one pane per iteration
         ledger = dispatch.alloc(root / "events", "L-executor-", ".jsonl")
         ev = fold.read_events()
         if not print_only:
@@ -671,7 +774,8 @@ def executor_loop(root, interval, print_only=False, max_cycles=None):
         before = _snapshot(root)
         base, t0 = {"spawn": ledger.stem}, time.time()
         dispatch.emit(ledger, base, "spawn-started", subject=ledger.stem, role="executor",
-                      backend="pane", pane=cmd[cmd.index("-n") + 1])
+                      backend="pane", pane=cmd[cmd.index("-n") + 1],
+                      code_sha=started_sha or "undetermined")
         try:
             proc = subprocess.Popen(cmd, env=env, cwd=str(root))
         except OSError as e:
