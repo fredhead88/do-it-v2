@@ -78,8 +78,11 @@ def subject_ids(prefix):
 
 def alloc(d, prefix, suffix):
     """max+1 of a kind (§2.8), claimed with O_EXCL so two concurrent spawns never share a file."""
-    n = max([int(p.stem.rsplit("-", 1)[1]) for p in d.glob(f"{prefix}[0-9]*{suffix}")]
-            + subject_ids(prefix) or [0])
+    # Ids >= 9000 are the test-fixture range (L-spec-9001, L-charter-9101 ...). A fixture event
+    # that leaked into the live ledger on 09-27 made every later alloc start at 9102; the
+    # fixture range never sets the next real number. Thinker 2026-09-28.
+    n = max([i for i in [int(p.stem.rsplit("-", 1)[1]) for p in d.glob(f"{prefix}[0-9]*{suffix}")]
+             + subject_ids(prefix) if i < 9000] or [0])
     while True:
         n += 1
         path = d / f"{prefix}{n:04d}{suffix}"

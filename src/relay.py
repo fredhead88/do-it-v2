@@ -45,7 +45,7 @@ SERVERS = {**{r: "relay" for r in dispatch.ROLES}, "planner": "pane", "executor"
 # The states a spec is in when it has already committed to a footprint (L-adr-0028).
 HOLDING = ("written", "building")
 # §3.5's count throttle, and the ONE place its number lives.
-THROTTLE_N = 3   # operator ruling 2026-09-27 ~07:30Z: 2 -> 3
+THROTTLE_N = 6   # operator ruling 2026-09-28 ~09:35Z: 3 -> 6 (goal L-goal-0002 speed charters start now)
 DRY = "PLANNER WAITING ON: no open charters"
 WAITING_HEAD = "PLANNER WAITING ON"
 

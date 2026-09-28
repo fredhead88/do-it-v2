@@ -94,7 +94,7 @@ ok(relay.sequencing({"after": "L-charter-0099"}, read())["unknown"] == ["L-chart
 
 # ── AC1(c)+(e): the count throttle, and the alongside-only block that skips it ──
 d = scene("throttle")
-for cid in ("L-charter-0010", "L-charter-0011", "L-charter-0012"):  # THROTTLE_N = 3
+for cid in [f"L-charter-{10 + i:04d}" for i in range(relay.THROTTLE_N)]:  # fill every throttle slot
     ev(d, "L-operator-c", "charter-filed", cid, covers="none")
     ev(d, "L-planner-0001", "cut-written", cid)
 ev(d, "L-operator-c", "charter-filed", "L-charter-0020", covers="none")
