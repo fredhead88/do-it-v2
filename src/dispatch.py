@@ -893,6 +893,12 @@ def grading_budget(all_ev, subject):
     # than the newest of them. Nothing else lifts it (Assumptions §8/§9) — the
     # rule reapplies past the literal fourth run.
     starts = [e for e in evs if e.get("type") == "spawn-started" and e.get("role") == "grader"]
+    # A run that failed (wrapper timeout, unserved) with no verdict of its own graded
+    # nothing, so it is not a grade (R10: "grading is spent only where it can find
+    # something"). Thinker 2026-09-28: three specs capped by 15-min timeouts alone.
+    judged = {e.get("spawn") for e in evs if e.get("type") in ("verdict", "void", "voided")}
+    failed = {e.get("spawn") for e in evs if e.get("type") == "spawn-failed"}
+    starts = [e for e in starts if not (e.get("spawn") in failed and e.get("spawn") not in judged)]
     if len(starts) >= 3:
         newest = max(T(e) for e in starts)
         lifted = any(e.get("type") == "decision" and e.get("regrade") == "yes"
