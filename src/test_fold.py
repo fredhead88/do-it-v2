@@ -2780,3 +2780,96 @@ assert {"src/freeze.py", "src/merge_gate.py"} <= _flag_hits429, _flag_hits429
 assert _imp_hits429 <= _WRITES429, _imp_hits429 - _WRITES429
 assert {"src/fold.py", "src/merge_gate.py"} <= _imp_hits429, _imp_hits429
 print("AC9 ok")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-0432 (L-charter-0042 R6) · fold.answered / overdue_questions /
+# unresolvable_deadline_questions / open_questions
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── AC1 · by-`ref`, cross-subject — the existing rule, unbroken by the refactor ──
+ac1_ev, *_ = ledger(**{
+    "L-builder-432a.jsonl": [
+        {"ts": stamp(2), "type": "question", "subject": "L-spec-432-s1",
+         "asks": "a?", "blocks": ["AC1"], "default": "d", "deadline": stamp(1)}],
+    "L-operator-432a.jsonl": [
+        {"ts": stamp(0), "type": "decision", "subject": "OTHER-432-a",
+         "ref": "L-builder-432a.jsonl:1", "why": "answers Q by ref, no matching subject"}]})
+q1_src = "L-builder-432a.jsonl:1"
+assert q1_src in fold.answered(ac1_ev), fold.answered(ac1_ev)
+assert not any(e["_src"] == q1_src for e in fold.overdue_questions(ac1_ev)), \
+    fold.overdue_questions(ac1_ev)
+print("answered-0432 AC1 ok")
+
+# ── AC2 · same-subject, no `ref=`, decision strictly LATER — newly answered ──
+ac2_ev, *_ = ledger(**{
+    "L-builder-432b.jsonl": [
+        {"ts": stamp(3), "type": "question", "subject": "L-spec-432-s2",
+         "asks": "a?", "blocks": ["AC2"], "default": "d", "deadline": stamp(1)}],
+    "L-operator-432b.jsonl": [
+        {"ts": stamp(2), "type": "decision", "subject": "L-spec-432-s2", "why": "later, no ref"}]})
+q2_src = "L-builder-432b.jsonl:1"
+assert q2_src in fold.answered(ac2_ev), fold.answered(ac2_ev)
+assert not any(e["_src"] == q2_src for e in fold.overdue_questions(ac2_ev)), \
+    fold.overdue_questions(ac2_ev)
+print("answered-0432 AC2 ok")
+
+# ── AC3 · same shape, decision strictly EARLIER — still NOT answered ──────────
+ac3_ev, *_ = ledger(**{
+    "L-builder-432c.jsonl": [
+        {"ts": stamp(1), "type": "question", "subject": "L-spec-432-s2b",
+         "asks": "a?", "blocks": ["AC3"], "default": "d", "deadline": stamp(0.5)}],
+    "L-operator-432c.jsonl": [
+        {"ts": stamp(2), "type": "decision", "subject": "L-spec-432-s2b", "why": "earlier, no ref"}]})
+q3_src = "L-builder-432c.jsonl:1"
+assert q3_src not in fold.answered(ac3_ev), fold.answered(ac3_ev)
+assert any(e["_src"] == q3_src for e in fold.overdue_questions(ac3_ev)), \
+    fold.overdue_questions(ac3_ev)
+print("answered-0432 AC3 ok")
+
+# ── AC4 · unresolvable-deadline question, answered same-subject/no-ref ────────
+ac4_ev, *_ = ledger(**{
+    "L-builder-432d.jsonl": [
+        {"ts": stamp(3), "type": "question", "subject": "L-spec-432-s3",
+         "asks": "a?", "blocks": ["AC4"], "default": "d", "deadline": "sometime"}],
+    "L-operator-432d.jsonl": [
+        {"ts": stamp(2), "type": "decision", "subject": "L-spec-432-s3", "why": "later, no ref"}]})
+q4_src = "L-builder-432d.jsonl:1"
+assert not any(e["_src"] == q4_src for e in fold.unresolvable_deadline_questions(ac4_ev)), \
+    fold.unresolvable_deadline_questions(ac4_ev)
+print("answered-0432 AC4 ok")
+
+# ── AC5 · two escalations same subject; a ref answers only the OLDER one ─────
+ac5_ev, *_ = ledger(**{
+    "L-executor-432e.jsonl": [
+        {"ts": stamp(3), "type": "escalation-blocking", "subject": "L-spec-432-s4",
+         "why": "e_old", "default": "d1", "deadline": stamp(-3), "revert": "r1"},
+        {"ts": stamp(1), "type": "escalation-blocking", "subject": "L-spec-432-s4",
+         "why": "e_new", "default": "d2", "deadline": stamp(-3), "revert": "r2"}],
+    "L-operator-432e.jsonl": [
+        {"ts": stamp(2), "type": "decision", "subject": "L-spec-432-s4",
+         "ref": "L-executor-432e.jsonl:1", "why": "answers e_old by ref"}]})
+e_old_src, e_new_src = "L-executor-432e.jsonl:1", "L-executor-432e.jsonl:2"
+ans5 = fold.answered(ac5_ev)
+assert e_old_src in ans5 and e_new_src not in ans5, ans5
+esc_rows5 = [r for r in fold.open_questions(ac5_ev)
+            if r["kind"] == "escalation" and r["subject"] == "L-spec-432-s4"]
+assert len(esc_rows5) == 1 and esc_rows5[0]["src"] == e_new_src, esc_rows5
+print("answered-0432 AC5 ok")
+
+# ── AC6 · one escalation, no same-subject answer; a DIFFERENT subject's ref
+# answers it — open_escalations still returns it, open_questions excludes it ──
+ac6_ev, *_ = ledger(**{
+    "L-executor-432f.jsonl": [
+        {"ts": stamp(2), "type": "escalation-blocking", "subject": "L-spec-432-s5",
+         "why": "E", "default": "d", "deadline": stamp(-3), "revert": "r"}],
+    "L-operator-432f.jsonl": [
+        {"ts": stamp(1), "type": "decision", "subject": "L-spec-432-s6",
+         "ref": "L-executor-432f.jsonl:1", "why": "cross-subject ref answer"}]})
+e_src6 = "L-executor-432f.jsonl:1"
+assert e_src6 in fold.answered(ac6_ev), fold.answered(ac6_ev)
+assert any(e["_src"] == e_src6 for e in fold.open_escalations(ac6_ev)), \
+    "★ AC6: open_escalations itself must still return E, unfiltered"
+assert not any(r["kind"] == "escalation" and r["subject"] == "L-spec-432-s5"
+              for r in fold.open_questions(ac6_ev)), \
+    "★ AC6: open_questions must exclude it via fold.answered, not via open_escalations"
+print("answered-0432 AC6 ok")

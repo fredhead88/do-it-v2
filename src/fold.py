@@ -533,30 +533,59 @@ def deadline_passed(s, events, subject):
     return (d if d.tzinfo else d.replace(tzinfo=timezone.utc)) < NOW
 
 
+def answered(events):
+    """L-charter-0042 R6: the `_src` of every `question`/`escalation-blocking`
+    event answered either by a `decision`/`unblocked` naming it via
+    `ref=<its own _src>` (the pre-existing by-`ref` rule, unchanged), or by ANY
+    `decision`/`unblocked` on the SAME `subject` whose `ts` is strictly LATER
+    than the question/escalation's own `ts` — `fold.open_escalations`'s own
+    "newest of the three types per subject" rule, extended here to questions and
+    made explicit so every reader shares one notion of "answered" instead of
+    each computing (or, for escalations rendered through `open_questions`, never
+    computing) its own. Strict `<`/`>` throughout (Assumptions §3): an identical
+    literal `ts` never counts as later either way."""
+    answerers = [e for e in events if e.get("type") in ("decision", "unblocked")]
+    by_ref = {e.get("ref") for e in answerers if e.get("ref")}
+    out = set()
+    for e in events:
+        if e.get("type") not in ("question", "escalation-blocking"):
+            continue
+        src = e["_src"]
+        if src in by_ref:
+            out.add(src)
+            continue
+        subj = e.get("subject")
+        et = ts(e.get("ts"))
+        if subj and any(a.get("subject") == subj and ts(a.get("ts")) > et for a in answerers):
+            out.add(src)
+    return out
+
+
 def overdue_questions(events):
     """§4.9: "wait indefinitely is a wedge, not a default". A `question` whose
-    deadline has passed with nothing naming it is the operator's. A `decision` or
-    an `unblocked` answers one by `ref` — the `file:line` the fold hands out as
-    `src` on `doit events`, which is the same handle a correction uses (D111)."""
-    answered = {e.get("ref") for e in events if e.get("type") in ("decision", "unblocked")}
+    deadline has passed with nothing naming it is the operator's. Answered
+    means `fold.answered` — by `ref`, as always, or now also by a later
+    same-subject `decision`/`unblocked` with no `ref=` at all (L-charter-0042
+    R6)."""
+    ans = answered(events)
     return [e for e in events if e.get("type") == "question"
-            and e["_src"] not in answered
+            and e["_src"] not in ans
             and deadline_passed(e.get("deadline"), events, e.get("subject"))]
 
 
 def unresolvable_deadline_questions(events):
     """L-spec-0276/R3 Target 2: every unanswered open question (the identical
-    "answered" definition `overdue_questions` already computes) whose deadline
-    is (a) blank/absent, (b) non-blank, fails ISO parsing, and is not (ci)
-    "before merge"/"before deploy", or (c) IS one of those two anchors but the
-    anchor can never fire because the question's own subject is
-    killed/void/dropped (`deadline_passed` already returns `False` for all
-    three — this is the reader that makes each one VISIBLE instead of merely
-    not-overdue)."""
-    answered = {e.get("ref") for e in events if e.get("type") in ("decision", "unblocked")}
+    "answered" definition `overdue_questions` already computes, now
+    `fold.answered`) whose deadline is (a) blank/absent, (b) non-blank, fails
+    ISO parsing, and is not (ci) "before merge"/"before deploy", or (c) IS one
+    of those two anchors but the anchor can never fire because the question's
+    own subject is killed/void/dropped (`deadline_passed` already returns
+    `False` for all three — this is the reader that makes each one VISIBLE
+    instead of merely not-overdue)."""
+    ans = answered(events)
     out = []
     for e in events:
-        if e.get("type") != "question" or e["_src"] in answered:
+        if e.get("type") != "question" or e["_src"] in ans:
             continue
         d = e.get("deadline")
         spelling = "" if d is None else str(d).strip()
@@ -817,8 +846,16 @@ def open_questions(events):
     the `decision` that answers it. So a question row says so in words rather
     than rendering an empty column the reader must interpret, and it is never
     padded with an invented revert."""
+    ans = answered(events)
     rows = []
     for e in open_escalations(events):
+        if e["_src"] in ans:
+            # L-charter-0042 R6: a `ref=`-answered escalation is excluded here,
+            # never in `open_escalations` itself (Boundaries) — it may be its
+            # subject's own newest event (AC6) and still be answered by a
+            # DIFFERENT subject's `ref=`, which `open_escalations`'s own
+            # per-subject selection has no way to see.
+            continue
         rows.append({"kind": "escalation", "subject": e.get("subject", "?"),
                      "asks": e.get("why") or "escalation",
                      "default": e.get("default"), "deadline": e.get("deadline"),

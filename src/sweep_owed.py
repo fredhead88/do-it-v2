@@ -70,6 +70,72 @@ class Runner:
         return subprocess.run(argv, capture_output=True, text=True)
 
 
+# ────────────────── L-charter-0042 R6: a decision answers a spec's owed-expired ──
+
+def _answered_max_ts(evs):
+    """`None` if no `escalation-blocking kind=owed-expired` event on this spec's
+    own `evs` is INDIVIDUALLY answered by a later same-spec `decision`/
+    `unblocked` (subject match to the spec, no `ref=` required — SD13 is
+    spec-level); otherwise the MAXIMUM `ts` among the `decision`/`unblocked`
+    events that answer at least one such escalation. Judged per-escalation,
+    never against "whichever escalation is newest" (SD13): a spec's newest
+    owed-expired escalation may itself be unanswered while an OLDER one on the
+    same spec is individually answered, and that older answer still counts
+    (AC12) — the naive "newest escalation's own answer" reading would drop the
+    spec's answer entirely the instant a fresh, still-unanswered re-escalation
+    lands. Strict `>` throughout (Assumptions §3), same as `fold.answered`."""
+    spec = next((e.get("subject") for e in evs if e.get("subject")), None)
+    escs = [e for e in evs if e.get("type") == "escalation-blocking" and e.get("kind") == "owed-expired"]
+    if not escs:
+        return None
+    answerers = [e for e in evs if e.get("type") in ("decision", "unblocked") and e.get("subject") == spec]
+    if not answerers:
+        return None
+    best = None
+    for esc in escs:
+        et = fold.ts(esc.get("ts"))
+        qualifying = [fold.ts(a.get("ts")) for a in answerers if fold.ts(a.get("ts")) > et]
+        if qualifying:
+            m = max(qualifying)
+            if best is None or m > best:
+                best = m
+    return best
+
+
+def answered_specs(specs):
+    """The ids of every spec carrying at least one INDIVIDUALLY-answered
+    `escalation-blocking kind=owed-expired` (`fold.fold()`'s own `{sid: {"evs":
+    [...], ...}}` dict) — the spec need not be answered by its own NEWEST such
+    escalation; any one qualifying is enough (`_answered_max_ts` above)."""
+    return {sid for sid, s in specs.items() if _answered_max_ts(s["evs"]) is not None}
+
+
+def _governing_owed_ac_ts(evs, criterion):
+    """The governing `owed-ac` event's own `ts` for one criterion — the same
+    last-write-by-position rule `owed.checks()`'s own `last_ac` uses, re-derived
+    directly from `evs` since `owed.checks()`'s row carries no such field
+    (Boundaries: `src/owed.py` is out of this footprint)."""
+    last = None
+    for e in evs:
+        if e.get("type") == "owed-ac" and e.get("criterion") == criterion:
+            last = e
+    return fold.ts(last.get("ts")) if last else None
+
+
+def _excluded_by_answer(specs, answered, spec_id, criterion):
+    """SD13: for a spec in `answered_specs`, a check is excluded unless its own
+    governing `owed-ac` `ts` strictly POSTDATES the spec's max answering
+    instant — a later, still-unanswered re-date "puts that one check back"
+    (AC9), while every already-settled criterion stays excluded across
+    repeated sweep runs (AC12) because the maximum is never re-read off
+    whichever escalation happens to be newest at read time."""
+    if spec_id not in answered:
+        return False
+    max_ts = _answered_max_ts(specs[spec_id]["evs"])
+    governing_ts = _governing_owed_ac_ts(specs[spec_id]["evs"], criterion)
+    return not (governing_ts is not None and max_ts is not None and governing_ts > max_ts)
+
+
 # ─────────────────────────── step 1: expiry escalations (SD3) ───────────────
 
 def _already_escalated(evs):
@@ -89,15 +155,22 @@ def _already_escalated(evs):
 def sweep_expired(specs, now, *, dry_run=False):
     """SD3: one `escalation-blocking kind=owed-expired` per spec, naming only
     the criteria newly expired this run — never re-listing one a prior
-    escalation on the same spec already named. Returns the lines printed;
-    writes nothing when `dry_run`."""
+    escalation on the same spec already named. L-charter-0042 R6/SD13: a
+    criterion whose spec is in `answered_specs` and whose own governing
+    `owed-ac` does not strictly postdate the spec's max answering instant is
+    excluded here too — a decision has already answered this spec's
+    owed-expired state, and re-escalating an un-re-dated criterion under it
+    would re-open what the decision settled. Returns the lines printed; writes
+    nothing when `dry_run`."""
     lines = []
+    answered = answered_specs(specs)
     for sid, s in specs.items():
         rows = [r for r in owed.checks(s["evs"], now) if r["status"] == "expired"]
         if not rows:
             continue
         already = _already_escalated(s["evs"])
-        fresh = sorted({r["criterion"] for r in rows if r["criterion"] not in already})
+        fresh = sorted({r["criterion"] for r in rows if r["criterion"] not in already
+                        and not _excluded_by_answer(specs, answered, sid, r["criterion"])})
         if not fresh:
             continue
         evidence = [next((r.get("evidence") for r in rows if r["criterion"] == c), None) or ""
@@ -157,12 +230,16 @@ def _blocked_pending_retry(row, now):
 
 def due_candidates(specs, now):
     """Every `due` row across every spec, oldest-`due_at` first, minus the two
-    SD2/SD7 exclusions above. One row per (spec, criterion)."""
+    SD2/SD7 exclusions above, plus (L-charter-0042 R6/SD13) any row whose spec
+    is in `answered_specs` and whose own governing `owed-ac` does not strictly
+    postdate that spec's max answering instant. One row per (spec, criterion)."""
     rows = []
     for s in specs.values():
         rows.extend(owed.checks(s["evs"], now))
     due = [r for r in rows if r["status"] == "due"
            and not _blocked_permanently(r) and not _blocked_pending_retry(r, now)]
+    answered = answered_specs(specs)
+    due = [r for r in due if not _excluded_by_answer(specs, answered, r["spec"], r["criterion"])]
     return sorted(due, key=lambda r: r["due_at"])
 
 
