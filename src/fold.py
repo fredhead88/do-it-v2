@@ -263,6 +263,20 @@ EMITS["grader-pane-started"] = {"tick"}     # R8: the tick's own per-cycle pane 
 # the same way `owed-ac` is already narrowed there.
 EMITS["rejected-criterion"].add("builder")
 EMITS["criterion-cleared"].add("builder")
+# L-charter-0046/L-spec-0470 (ledger-vocabulary): Proving's six event types,
+# admitted here — one dispatch (this unit) so no sibling wave-1 unit adds its
+# own EMITS/REQUIRED row (Plan Seams: "ledger-vocabulary -> everything"). Each
+# is scoped to exactly the one actor set the requirement that creates it names.
+EMITS["charter-proving"] = {"tick"}        # R1: the tick's own automatic move into Proving
+EMITS["charter-closed"] = {"tick"}         # R1/R3: the tick's own close, never a hand edit
+EMITS["charter-reopened"] = {"tick"}       # R4: the tick's own reopen, naming the failing check
+# R3: an explicit ledger decision, never a builder or a grading seat (charter
+# constraint, verbatim: "Waivers are explicit ledger decisions with a reason").
+EMITS["owed-waived"] = {"operator", "thinker"}
+# R3: the operator/Thinker accepting a killed spec's absence with no in-charter
+# replacement — subject is always the KILLED SPEC, never the charter.
+EMITS["kill-accepted"] = {"operator", "thinker"}
+EMITS["charter-classified"] = {"executor", "operator"}   # R6: the backfill's own classification record
 # A correction may override anything but these: D90 takes the actor from the
 # FILENAME, and a correction that could rewrite it reopens every check below.
 UNCORRECTABLE = ("actor", "_src")
@@ -702,6 +716,15 @@ REQUIRED["supervisor-code"] = ("kind", "sha", "pid")
 REQUIRED["install-synced"] = ("sha",)
 REQUIRED["grader-view-built"] = ("view", "ready_sha")
 REQUIRED["grader-pane-started"] = ("pane", "spawn_ids")
+# L-charter-0046/L-spec-0470 (ledger-vocabulary): Proving's six required-field
+# tuples, verbatim from the Plan's Produces line. Presence-only, like every
+# other entry above — no value's shape, format, or type is checked here.
+REQUIRED["charter-proving"] = ("reason", "deadline")
+REQUIRED["charter-closed"] = ("reason",)
+REQUIRED["charter-reopened"] = ("spec", "criterion", "failed_src")
+REQUIRED["owed-waived"] = ("criterion", "reason")
+REQUIRED["kill-accepted"] = ("reason",)
+REQUIRED["charter-classified"] = ("klass", "reason")
 
 
 # L-charter-0033/board-owners, Target 1: who owns each board() row and what
@@ -1014,6 +1037,15 @@ def _closable(charter_evs, mine):
             return True
         if s["state"] != "killed":
             return False
+        # L-charter-0046/L-spec-0470 (ledger-vocabulary), R3: an admitted
+        # `kill-accepted` (subject is always the killed spec, never the
+        # charter — `EMITS["kill-accepted"] = {"operator", "thinker"}` already
+        # authorized this by fold time, so no further actor check is needed
+        # here) counts a kill with NO replacement toward closure, unconditionally
+        # — checked BEFORE the superseded_by lookup below, since the operator's
+        # acceptance must not be blocked on a named replacement's own progress.
+        if any(e["type"] == "kill-accepted" for e in s["evs"]):
+            return True
         newest_kill = next((e for e in reversed(s["evs"]) if e["type"] == "spec-killed"), None)
         repl = by_id.get(newest_kill and newest_kill.get("superseded_by"))
         return repl is not None and repl["state"] in done_states
@@ -1484,9 +1516,12 @@ def spec_state(evs, retracted):
         # vacuously, matching the old membership test's behavior) rather than a
         # criterion-ID set, so a MET criterion that is LATER re-dated reopens
         # `accepted` instead of it standing forever (SD1's reopen case).
-        if graded and "review" in types and all(r["status"] == "met" for r in owed.checks(evs, NOW)):
+        # L-charter-0046/L-spec-0470 (ledger-vocabulary), R3: a "waived" row
+        # counts exactly as "met" for acceptance and closure — an explicit
+        # ledger decision, never a silent close (charter constraint, verbatim).
+        if graded and "review" in types and all(r["status"] in ("met", "waived") for r in owed.checks(evs, NOW)):
             return "accepted"                                        # §2.5 accepted()
-        unmet = [r for r in owed.checks(evs, NOW) if r["status"] != "met"]
+        unmet = [r for r in owed.checks(evs, NOW) if r["status"] not in ("met", "waived")]
         if any(r["status"] == "due" for r in unmet):
             return "shipped-owed-due"                                # R7
         if any(r["status"] == "waiting" for r in unmet):
