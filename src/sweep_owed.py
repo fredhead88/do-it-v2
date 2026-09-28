@@ -270,6 +270,25 @@ def _manifest_text(sweep_id, project, cwd, batch):
             + json.dumps(rows, indent=2) + "\n```\n")
 
 
+ORPHANS = pathlib.Path.home() / ".do-it" / "state" / "sweep-owed-orphans.json"
+
+
+def _load_orphans():
+    try:
+        return set(json.loads(ORPHANS.read_text()))
+    except Exception:
+        return set()
+
+
+def _remember_orphan(key):
+    try:
+        known = _load_orphans() | {key}
+        ORPHANS.parent.mkdir(parents=True, exist_ok=True)
+        ORPHANS.write_text(json.dumps(sorted(known)))
+    except Exception:
+        pass
+
+
 def dispatch_batch(project, batch, runner, *, dry_run=False):
     """`doit packet owed-sweeper <id>` then `doit dispatch owed-sweeper <id>
     --packet <path> --cwd <repo> --project <name> --detach`, in that order,
@@ -295,6 +314,7 @@ def dispatch_batch(project, batch, runner, *, dry_run=False):
             return [f"sweep-owed: packet build failed for {sweep_id}: {err}"] + [
                 f"sweep-owed: skipped {x} (criterion not in its spec file)" for x in skipped]
         skipped.append(f"{m.group(1)}/{m.group(2)}")
+        _remember_orphan(skipped[-1])
         batch = keep
     packet_path = pr.stdout.strip()
     dr = runner.run([str(doit_bin()), "dispatch", "owed-sweeper", sweep_id, "--packet", packet_path,
@@ -324,6 +344,17 @@ def run(*, dry_run=False, runner=None, now=None):
         if not due:
             lines.append("sweep-owed: nothing due")
         else:
+            # Rows the packet builder already refused as "criterion not in spec file" are remembered
+            # (ORPHANS file) and dropped BEFORE batching: 8 such rows sat at the head of the due list
+            # and filled every MAX_BATCH=8 batch, so most runs on 2026-09-27/28 dispatched nothing.
+            known = _load_orphans()
+            orphans = [r for r in due if f"{r['spec']}/{r['criterion']}" in known]
+            due = [r for r in due if f"{r['spec']}/{r['criterion']}" not in known]
+            if orphans:
+                lines.append(f"sweep-owed: {len(orphans)} known orphan criterion row(s) left out of the batch")
+            if not due:
+                lines.append("sweep-owed: nothing due")
+                return lines
             project, batch = _batch_for(due)
             lines.extend(dispatch_batch(project, batch, runner, dry_run=dry_run))
 
