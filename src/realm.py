@@ -406,6 +406,18 @@ def maker_index(raw, states):
             m = PR_RE.search(head)
             if m:
                 pr_to_spec.setdefault(m.group(1), f.stem)
+    # the ledger's own carry and close events name the PR in `source` and the spec in `subject`/`spec_id`
+    closed_prs = set()
+    for e in raw:
+        if e.get("type") in ("spec-carried", "inbound-closed", "inbound-covered"):
+            m = PR_RE.search(str(e.get("source") or e.get("subject") or ""))
+            if not m:
+                continue
+            sid = e.get("spec_id") or (e.get("subject") if str(e.get("subject", "")).startswith("L-spec-") else None)
+            if sid:
+                pr_to_spec[m.group(1)] = sid
+            if e.get("type") != "spec-carried":
+                closed_prs.add(m.group(1))
     out = {}
     for login, meta in authors.items():
         items = {}
@@ -423,7 +435,7 @@ def maker_index(raw, states):
         for pr, it in items.items():
             spec = pr_to_spec.get(pr)
             it["spec"] = spec
-            it["state"] = st.get(spec) if spec else "pending"
+            it["state"] = st.get(spec) if spec else ("closed" if pr in closed_prs else "pending")
         specs = {it["spec"] for it in items.values() if it["spec"]}
         for e in raw:
             if e.get("type") == "shipped" and e.get("subject") in specs:
