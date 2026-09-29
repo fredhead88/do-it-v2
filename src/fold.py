@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 
 import freeze
 import owed
+import proving
 
 ROOT = pathlib.Path(os.environ.get("DOIT_ROOT", pathlib.Path.home() / ".do-it"))
 EVENTS, BOARD = ROOT / "events", ROOT / "board.md"
@@ -748,6 +749,10 @@ BOARD_OWNERS = {
     "OWED EVIDENCE": ("executor", ("owed-met", "verdict")),
     "OWED DUE": ("executor", ("owed-met",)),
     "CHARTER CLOSE": ("executor", ("tree-reaped",)),
+    "PROVING": ("operator", "derived: recomputed live every render from each "
+                            "proving/reopened charter's own proving.summary(); a row leaves once "
+                            "fold.fold() no longer derives that charter's state as proving or "
+                            "reopened"),
     "TRIAGE": ("thinker", ("brief-answered", "brief-routed")),
     "NOTES": ("thinker", ("note-answered",)),
     "INBOUND": ("executor", "derived: recomputed each render from carry.uncarried() PLUS "
@@ -1620,16 +1625,32 @@ def fold(events):
         c["closable"] = _closable(c["evs"], mine)
         if cid in retracted:
             c["state"] = "retracted"
+            c["proving"] = None
         # An operational charter (S25/S35: a deploy, a drill) has NO specs — its
         # deliverable is a record. `all()` over an empty set is True, so such a
         # charter closes on the operator's l1-complete + the sweep fixpoint + a
         # complete charter review, exactly the three things that ARE its lane.
         elif l2_complete(c["closable"]):
             c["state"] = "L2-complete"
-        elif "l1-complete" in types:
-            c["state"] = "L1-complete"
+            c["proving"] = None
         else:
-            c["state"] = "open"
+            # L-charter-0046/fold-proving-state (L-spec-0472), R1/SD1: not yet
+            # L2-complete — ask `proving.phase()` (first-match-wins, after the
+            # L2 check, per SD1) before falling back to L1-complete/open.
+            phase = proving.phase(c["evs"], mine)
+            if phase is not None:
+                c["state"] = phase
+                title = next((e.get("title") for e in reversed(c["evs"])
+                              if e.get("type") == "charter-filed" and e.get("title")), cid)
+                c["proving"] = proving.summary(cid, c["evs"], mine, NOW, title=title,
+                                                review_owed=c["closable"]["review_owed"],
+                                                open_briefs=open_briefs(c["evs"]))
+            elif "l1-complete" in types:
+                c["state"] = "L1-complete"
+                c["proving"] = None
+            else:
+                c["state"] = "open"
+                c["proving"] = None
         c["owed"] = owed
         c["briefs"] = len(open_briefs(c["evs"]))
         c["unbuilt"] = sum(1 for s in mine if s["state"] == "closed-unbuilt")
@@ -1890,6 +1911,26 @@ def render(events, specs, charters, ignored, by_subject):
                             + (f" · {c['briefs']} in-scope brief(s) open" if c["briefs"] else "")
                             + (f" · {c['unbuilt']} closed unbuilt" if c["unbuilt"] else "")
                             for c in charter_close_rows])
+
+    # PROVING — L-charter-0046/fold-proving-state (L-spec-0472): one line per
+    # charter whose derived state is "proving" or "reopened", sorted by its own
+    # proving.summary()'s deadline ascending. Carries the same "· N closed
+    # unbuilt" suffix CHARTER CLOSE renders for a closed charter (D112) — a
+    # Proving charter's own closed-unbuilt spec must not go invisible just
+    # because SD2 routes it here instead of CHARTER CLOSE.
+    proving_rows = sorted(
+        [c for c in charters.values() if c["state"] in ("proving", "reopened")],
+        key=lambda c: c["proving"]["deadline"])
+
+    def proving_line(c):
+        p = c["proving"]
+        next_part = (f"next {p['next']['kind']} {p['next']['due_at']}"
+                     if p["next"] else "nothing remaining")
+        return (f"{c['id']} · {p['title']} · {p['remaining']} left · {next_part} · "
+                f"deadline {p['deadline']} · owner {p['owner']} · {p['colour']}"
+                + (f" · {c['unbuilt']} closed unbuilt" if c["unbuilt"] else ""))
+
+    block("PROVING", [proving_line(c) for c in proving_rows])
 
     # NOTES — R4/L-spec-0244: one row per url whose latest tracked state is
     # `inbound-note-listed` (age in hours, `⚑ >48h`), via `notes.board_rows`.
@@ -2250,9 +2291,6 @@ SPEC_STATES = (
     "accepted", "closed-shipped", "closed-unbuilt", "dropped", "killed", "void",
 )
 
-# All 6 charter states this Plan's own SD1 names in advance. `fold()` itself
-# assigns only 4 of these today (`"open"`, `"L1-complete"`, `"L2-complete"`,
-# `"retracted"`) — `"proving"`/`"reopened"` are `fold-proving-state`'s
-# (L-spec-0472), sibling, in flight. Naming all 6 now means this unit and its
-# wave-2 consumers need no later edit when that sibling ships.
+# All 6 charter states this Plan's own SD1 names. `fold()` assigns all six —
+# `"proving"`/`"reopened"` land via `fold-proving-state` (L-spec-0472).
 CHARTER_STATES = ("open", "L1-complete", "proving", "reopened", "L2-complete", "retracted")

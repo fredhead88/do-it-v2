@@ -97,6 +97,13 @@ closed = ledger(**{"L-planner-01.jsonl": [built[0]], "L-operator-01.jsonl": [
      "why": "answered by operator evidence, never built"},
     {"ts": stamp(0), "type": "l1-complete", "subject": C}]})
 assert closed[1][S]["state"] == "closed-unbuilt", closed[1][S]["state"]
+# L-charter-0046/fold-proving-state (L-spec-0472): `closed-unbuilt` is
+# BUILD_DONE, so this charter (l1-complete, one spec) now enters "proving"
+# the instant it folds — it never reaches CHARTER CLOSE.
+assert closed[2][C]["state"] == "proving", closed[2][C]["state"]
+# The substring is unchanged, but it now comes from the new PROVING row's own
+# "closed unbuilt" suffix (D112, AC12) — CHARTER CLOSE no longer lists this
+# charter at all.
 assert "1 closed unbuilt" in fold.render(*closed), "an unbuilt close is visible at charter close"
 notop = ledger(**{"L-planner-01.jsonl": [built[0]], "L-builder-01.jsonl": [
     {"ts": stamp(0), "type": "spec-closed", "subject": S, "charter": C}]})
@@ -233,7 +240,7 @@ L1 = {**done, "L-planner-01.jsonl": [{"ts": stamp(3), "type": "l1-complete", "su
 inscope = [{"ts": stamp(1), "type": "brief", "subject": C, "requirement": "R3",
             "blocked_me": False, "hit_while": S, "fact": "the no-spawn project renders silence"}]
 _, _, ch, _, _ = ledger(**{**L1, "L-grader-02.jsonl": inscope})
-assert ch[C]["state"] == "L1-complete" and ch[C]["briefs"] == 1, \
+assert ch[C]["state"] == "proving" and ch[C]["briefs"] == 1, \
     "an unanswered in-scope brief holds the sweep open (§3.12)"
 
 # ...and the negative, which is the whole reason the citation is the criterion:
@@ -252,21 +259,27 @@ assert ch[C]["state"] == "L2-complete", "brief-answered by ref discharges it"
 
 _, _, ch, _, _ = ledger(**{**L1, "L-grader-02.jsonl": inscope, "L-executor-02.jsonl":
                            [{**answered[0], "ref": "L-grader-02.jsonl:7"}]})
-assert ch[C]["state"] == "L1-complete", "a ref naming nothing answers nothing"
+assert ch[C]["state"] == "proving", "a ref naming nothing answers nothing"
 
 # both new events are L2 conjuncts in all but name, so both are authorized: a
 # builder that may stamp either closes a charter from the seat being judged.
 _, _, ch, ig, _ = ledger(**{**L1, "L-grader-02.jsonl": inscope,
                             "L-builder-02.jsonl": answered})
-assert ch[C]["state"] == "L1-complete" and len(ig) == 1, "only the Executor may answer a brief"
+assert ch[C]["state"] == "proving" and len(ig) == 1, "only the Executor may answer a brief"
 _, _, ch, ig, _ = ledger(**{**L1, "L-executor-01.jsonl": shipped,
                             "L-builder-02.jsonl": [{"ts": stamp(0), "type": "sweep-fixpoint",
                                                     "subject": C}]})
-assert ch[C]["state"] == "L1-complete" and len(ig) == 1, "a builder may not declare the sweep done"
+assert ch[C]["state"] == "proving" and len(ig) == 1, "a builder may not declare the sweep done"
 
-# and the board says so, because a close blocked by something invisible is a wedge
+# and the board says so, because a close blocked by something invisible is a wedge.
+# L-charter-0046/fold-proving-state (L-spec-0472): this charter is now "proving"
+# (not L1-complete), so CHARTER CLOSE no longer lists it and carries no
+# in-scope-brief count — the fact survives on `c["briefs"]` itself, computed
+# unconditionally regardless of state, even though the render string that used
+# to carry it does not.
 evs = ledger(**{**L1, "L-grader-02.jsonl": inscope})
-assert "1 in-scope brief(s) open" in fold.render(*evs), "CHARTER CLOSE names what holds it"
+assert evs[2][C]["state"] == "proving" and evs[2][C]["briefs"] == 1, \
+    "the fact survives even though CHARTER CLOSE no longer names it"
 
 # A `charter` field is sometimes a PATH — that is what the packet hands the role,
 # and the ledger is append-only, so both forms are permanent input to every fold.
@@ -485,7 +498,7 @@ for r in (rows, erows):
 # the NUMBER moves when a section is deliberately added, the check does not.
 # Counted through sections() (the PLANNER WAITING ON pass-through is relay's
 # lines, not a fold.py section) so both rules hold at once.
-assert len(sections(eboard)) == 17, \
+assert len(sections(eboard)) == 18, \
     "an empty ledger under a filter still renders every section, and does not raise"
 
 # ...and that label is now UNVOUCHED: DOIT_PROJECT is operator environment reaching
@@ -498,7 +511,7 @@ try:
     frows, fboard = spend(forged_env), fold.render(*forged_env)
 finally:
     fold.PROJECT = None
-assert len(sections(fboard)) == 17, "sections, always"
+assert len(sections(fboard)) == 18, "sections, always"
 assert len(frows) == 1 and "spend · x ## FORGED (9) · $0.00 · 0 spawns" in frows[0], frows
 
 # a label is a DIRECTORY NAME by default and nothing curates it: a newline in one
@@ -506,7 +519,7 @@ assert len(frows) == 1 and "spend · x ## FORGED (9) · $0.00 · 0 spawns" in fr
 # positional layout is the whole reason that check exists.
 forged = ledger(**{"L-operator-local.jsonl": [sp_ev(project="x\n## FORGED (9)", cost_usd=1.0)]})
 board = fold.render(*forged)
-assert len(sections(board)) == 17, "sections, always"
+assert len(sections(board)) == 18, "sections, always"
 assert len(spend(forged)) == 1 and "spend · x ## FORGED (9) · $1.00 · 1 spawns" in spend(forged)[0], \
     spend(forged)
 
@@ -856,9 +869,9 @@ assert "## PLANNER WAITING ON" not in wb, \
     "fold.py synthesizes no header of its own around a pass-through block"
 assert "PLANNER WAITING ON" not in wb[wb.index("## SPEND"):wb.index("## HEALTH")], \
     "and never in the SPEND/HEALTH gap, which spend_block() slices"
-assert len(sections(wb)) == 17, ("the block is not a section of its own (17 = ten + SPEND + LIVE PANES "
+assert len(sections(wb)) == 18, ("the block is not a section of its own (18 = ten + SPEND + LIVE PANES "
                                  "+ OWED DUE/UNSERVED/INBOUND/NOTES, L-spec-0196/0244 + DEADLINE "
-                                 "UNRESOLVABLE, L-spec-0276)")
+                                 "UNRESOLVABLE, L-spec-0276 + PROVING, L-spec-0472)")
 
 # R6: a dry queue is CONTENT, not a reason to omit the slot.
 assert "PLANNER WAITING ON: no open charters" in with_relay(
@@ -879,7 +892,7 @@ assert gone.count(degrade) == 1 and gone.index(degrade) > gone.index("## HEALTH"
     "a missing producer says so once, under HEALTH"
 assert gone.count("PLANNER WAITING ON") == 1, \
     "and renders no block content it does not have"
-assert len(sections(gone)) == 17, "the degrade line is a HEALTH row, not a section"
+assert len(sections(gone)) == 18, "the degrade line is a HEALTH row, not a section"
 
 # ══════════════════════════════════════════════════════════════════════════════
 # L-charter-0021 · the-fold-and-the-board
@@ -1746,15 +1759,16 @@ finally:
     else:
         sys.modules["backup"] = _saved_backup7
 
-# ── AC9 · 17 sections (16, plus DEADLINE UNRESOLVABLE — L-spec-0276, last),
-# original twelve (plus NOTES, L-spec-0244) in their original relative order,
-# AWAITING VERIFICATION unmoved (only its picked contents narrow, R7), LIVE
-# PANES still between SPEND and HEALTH
+# ── AC9 · 18 sections (16, plus DEADLINE UNRESOLVABLE — L-spec-0276, plus
+# PROVING — L-spec-0472, both last), original twelve (plus NOTES, L-spec-0244)
+# in their original relative order, AWAITING VERIFICATION unmoved (only its
+# picked contents narrow, R7), LIVE PANES still between SPEND and HEALTH
 board9 = fold.render(*ledger(**{"L-executor-01.jsonl": shipped}))
-assert len(sections(board9)) == 17, sections(board9)
+assert len(sections(board9)) == 18, sections(board9)
 expected_order9 = ["## NEEDS YOU", "## BLOCKED", "## WRITTEN, NOT PICKED UP", "## IN FLIGHT",
                    "## UNSERVED", "## AWAITING VERIFICATION", "## OWED EVIDENCE", "## OWED DUE",
-                   "## CHARTER CLOSE", "## NOTES", "## INBOUND", "## SHIPPED SINCE YOU LOOKED",
+                   "## CHARTER CLOSE", "## PROVING", "## NOTES", "## INBOUND",
+                   "## SHIPPED SINCE YOU LOOKED",
                    "## DECIDED WITHOUT YOU", "## SPEND", "## LIVE PANES", "## HEALTH",
                    "## DEADLINE UNRESOLVABLE"]
 got_order9 = [h.split(" (")[0] for h in sections(board9)]
@@ -2440,6 +2454,13 @@ print("AC2 ok")
 AC3_S_WRITTEN, AC3_S_BUILDING, AC3_S_GRADED = "L-spec-9440a", "L-spec-9440b", "L-spec-9440c"
 AC3_S_OWED_EV, AC3_S_OWED_DUE = "L-spec-9440d", "L-spec-9440e"
 AC3_C_CLOSE = "L-charter-9440f"
+# L-charter-0046/fold-proving-state (L-spec-0472): AC3_C_CLOSE (l1-complete,
+# no specs, no sweep-fixpoint) now folds to proving, not L1-complete alone —
+# it moved from CHARTER CLOSE to the new PROVING block. A second, genuinely
+# `retracted` charter keeps CHARTER CLOSE itself populated (a retracted
+# charter is decided BEFORE SD1's proving/reopened branch, so it is
+# unaffected by this move) for the "every block populated" check below.
+AC3_C_RETRACTED = "L-charter-9440n"
 AC3_DEP_LIVE, AC3_DEP_AC1B = "deploy-9440-live", "deploy-9440-ac1b"
 AC3_PAST = "2020-01-01T00:00:00Z"
 
@@ -2474,6 +2495,8 @@ def _ac3_fixed_files():
                                        "criterion": "AC1", "wake_at": stamp(7)}],
         "L-executor-9440e.jsonl": [{"ts": stamp(5), "type": "shipped", "subject": AC3_S_OWED_DUE}],
         "L-operator-9440f.jsonl": [{"ts": stamp(1), "type": "l1-complete", "subject": AC3_C_CLOSE}],
+        "L-operator-9440n.jsonl": [{"ts": stamp(1), "type": "charter-retracted",
+                                    "subject": AC3_C_RETRACTED}],
         "L-operator-9440g.jsonl": [{"ts": stamp(2), "type": "blocked", "subject": "blocked-9440",
                                     "why": "waiting on x"}],
         "L-operator-9440h.jsonl": [needs_you_q1_3, needs_you_q2_3],          # SAME file, kept fixed
@@ -2527,7 +2550,7 @@ finally:
 # comparison of two EMPTY renders would prove nothing.
 for _title3 in ("TRIAGE", "NEEDS YOU", "BLOCKED", "WRITTEN, NOT PICKED UP", "IN FLIGHT",
                "UNSERVED", "AWAITING VERIFICATION", "OWED EVIDENCE", "OWED DUE",
-               "CHARTER CLOSE", "SHIPPED SINCE YOU LOOKED", "DECIDED WITHOUT YOU",
+               "CHARTER CLOSE", "PROVING", "SHIPPED SINCE YOU LOOKED", "DECIDED WITHOUT YOU",
                "DEADLINE UNRESOLVABLE", "INBOUND"):
     header3 = [l for l in board_l1.splitlines() if l.startswith(f"## {_title3} (")][0]
     n3 = int(header3.split("(")[1].split(")")[0])
@@ -3172,3 +3195,215 @@ for drop0470_11 in ("klass", "reason"):
     assert fold.check_append(dropped0470_11, "executor") is not None, \
         f"★ 0470-AC11: dropping {drop0470_11} must refuse actor executor"
 print("0470-AC11 ok")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-0472 · fold-proving-state R1/R5 (L-charter-0046)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── 0472-AC1 · l1-complete + one accepted spec -> "proving"; the identical
+# charter with that spec merely "building" stays at L1-complete alone,
+# c["proving"] is None; a charter-retracted event -> "retracted", c["proving"]
+# is None regardless of any proving-shaped events also present ─────────────
+S0472_1, C0472_1 = "L-spec-9410", "L-charter-9410"
+built0472_1 = [{"ts": stamp(3), "type": "spec-written", "subject": S0472_1, "charter": C0472_1},
+               {"ts": stamp(2), "type": "build-started", "subject": S0472_1},
+               {"ts": stamp(2), "type": "build-done", "subject": S0472_1}]
+graded0472_1 = [{"ts": stamp(1), "type": "verdict", "subject": S0472_1, "confirmed": True}]
+reviewed0472_1 = [{"ts": stamp(1), "type": "review", "subject": S0472_1, "depth": "gates-only"}]
+shipped0472_1 = [{"ts": stamp(0), "type": "shipped", "subject": S0472_1}]
+l1_0472_1 = {"ts": stamp(0), "type": "l1-complete", "subject": C0472_1}
+
+_, specs0472_1a, charters0472_1a, _, _ = ledger(**{
+    "L-builder-9410.jsonl": built0472_1, "L-grader-9410.jsonl": graded0472_1,
+    "L-reviewer-9410.jsonl": reviewed0472_1, "L-executor-9410.jsonl": shipped0472_1,
+    "L-planner-9410.jsonl": [l1_0472_1]})
+assert specs0472_1a[S0472_1]["state"] == "accepted", specs0472_1a[S0472_1]["state"]
+assert charters0472_1a[C0472_1]["state"] == "proving", charters0472_1a[C0472_1]["state"]
+p0472_1a = charters0472_1a[C0472_1]["proving"]
+assert p0472_1a is not None and p0472_1a["id"] == C0472_1 and p0472_1a["phase"] == "proving", p0472_1a
+
+_, specs0472_1b, charters0472_1b, _, _ = ledger(**{
+    "L-builder-9410.jsonl": built0472_1[:2],           # spec-written + build-started only
+    "L-planner-9410.jsonl": [l1_0472_1]})
+assert specs0472_1b[S0472_1]["state"] == "building", specs0472_1b[S0472_1]["state"]
+assert charters0472_1b[C0472_1]["state"] == "L1-complete", charters0472_1b[C0472_1]["state"]
+assert charters0472_1b[C0472_1]["proving"] is None, charters0472_1b[C0472_1]["proving"]
+
+_, _, charters0472_1c, _, _ = ledger(**{
+    "L-builder-9410.jsonl": built0472_1, "L-grader-9410.jsonl": graded0472_1,
+    "L-reviewer-9410.jsonl": reviewed0472_1, "L-executor-9410.jsonl": shipped0472_1,
+    "L-planner-9410.jsonl": [l1_0472_1],
+    "L-operator-9410b.jsonl": [{"ts": stamp(0), "type": "charter-retracted", "subject": C0472_1}],
+    "L-tick-9410b.jsonl": [{"ts": stamp(0), "type": "charter-proving", "subject": C0472_1,
+                           "reason": "entered", "deadline": stamp(-3)}]})
+assert charters0472_1c[C0472_1]["state"] == "retracted", charters0472_1c[C0472_1]["state"]
+assert charters0472_1c[C0472_1]["proving"] is None, charters0472_1c[C0472_1]["proving"]
+print("0472-AC1 ok")
+
+# ── 0472-AC2 · a charter-reopened newer than its newest charter-proving ->
+# "reopened", c["proving"]["phase"] == "reopened" ────────────────────────────
+proving0472_2 = {"ts": stamp(2), "type": "charter-proving", "subject": C0472_1,
+                  "reason": "entered", "deadline": stamp(-3)}
+reopened0472_2 = {"ts": stamp(1), "type": "charter-reopened", "subject": C0472_1,
+                   "spec": S0472_1, "criterion": "AC1",
+                   "failed_src": "L-owed-sweeper-9410.jsonl:1"}
+_, _, charters0472_2, _, _ = ledger(**{
+    "L-builder-9410.jsonl": built0472_1, "L-grader-9410.jsonl": graded0472_1,
+    "L-reviewer-9410.jsonl": reviewed0472_1, "L-executor-9410.jsonl": shipped0472_1,
+    "L-planner-9410.jsonl": [l1_0472_1],
+    "L-tick-9410.jsonl": [proving0472_2, reopened0472_2]})
+assert charters0472_2[C0472_1]["state"] == "reopened", charters0472_2[C0472_1]["state"]
+assert charters0472_2[C0472_1]["proving"]["phase"] == "reopened", charters0472_2[C0472_1]["proving"]
+print("0472-AC2 ok")
+
+# ── 0472-AC3 · an L2-complete charter (L-charter-1101 shape: l1-complete,
+# sweep-fixpoint, one accepted spec, covers: "none") stays L2-complete even
+# carrying a charter-proving event — proving.phase() is never reached ───────
+S0472_3, C0472_3 = "L-spec-9411", "L-charter-9411"
+built0472_3 = [{"ts": stamp(3), "type": "spec-written", "subject": S0472_3, "charter": C0472_3},
+               {"ts": stamp(2), "type": "build-started", "subject": S0472_3},
+               {"ts": stamp(2), "type": "build-done", "subject": S0472_3}]
+graded0472_3 = [{"ts": stamp(1), "type": "verdict", "subject": S0472_3, "confirmed": True}]
+reviewed0472_3 = [{"ts": stamp(1), "type": "review", "subject": S0472_3, "depth": "gates-only"}]
+shipped0472_3 = [{"ts": stamp(0), "type": "shipped", "subject": S0472_3},
+                  {"ts": stamp(0), "type": "sweep-fixpoint", "subject": C0472_3}]
+_, specs0472_3, charters0472_3, _, _ = ledger(**{
+    "L-builder-9411.jsonl": built0472_3, "L-grader-9411.jsonl": graded0472_3,
+    "L-reviewer-9411.jsonl": reviewed0472_3, "L-executor-9411.jsonl": shipped0472_3,
+    "L-operator-9411.jsonl": [{"ts": stamp(3), "type": "charter-filed", "subject": C0472_3,
+                               "covers": "none"},
+                              {"ts": stamp(3), "type": "l1-complete", "subject": C0472_3}],
+    "L-tick-9411.jsonl": [{"ts": stamp(0), "type": "charter-proving", "subject": C0472_3,
+                           "reason": "entered", "deadline": stamp(-3)}]})
+assert specs0472_3[S0472_3]["state"] == "accepted", specs0472_3[S0472_3]["state"]
+assert charters0472_3[C0472_3]["state"] == "L2-complete", charters0472_3[C0472_3]["state"]
+assert charters0472_3[C0472_3]["proving"] is None, charters0472_3[C0472_3]["proving"]
+print("0472-AC3 ok")
+
+# ── 0472-AC4 · set(c["proving"]) is exactly the nine SD6 keys; title reads
+# the charter's own newest charter-filed title, falling back to the charter
+# id when absent (0472-AC1a's fixture carries no charter-filed at all) ──────
+assert set(p0472_1a) == {"id", "title", "phase", "label", "entered_at", "remaining",
+                          "next", "deadline", "owner", "colour", "items"}, set(p0472_1a)
+assert p0472_1a["title"] == C0472_1, p0472_1a["title"]
+
+S0472_4, C0472_4 = "L-spec-9412", "L-charter-9412"
+built0472_4 = [{"ts": stamp(3), "type": "spec-written", "subject": S0472_4, "charter": C0472_4},
+               {"ts": stamp(2), "type": "build-started", "subject": S0472_4},
+               {"ts": stamp(2), "type": "build-done", "subject": S0472_4}]
+graded0472_4 = [{"ts": stamp(1), "type": "verdict", "subject": S0472_4, "confirmed": True}]
+reviewed0472_4 = [{"ts": stamp(1), "type": "review", "subject": S0472_4, "depth": "gates-only"}]
+shipped0472_4 = [{"ts": stamp(0), "type": "shipped", "subject": S0472_4}]
+_, _, charters0472_4, _, _ = ledger(**{
+    "L-builder-9412.jsonl": built0472_4, "L-grader-9412.jsonl": graded0472_4,
+    "L-reviewer-9412.jsonl": reviewed0472_4, "L-executor-9412.jsonl": shipped0472_4,
+    "L-operator-9412.jsonl": [{"ts": stamp(3), "type": "charter-filed", "subject": C0472_4,
+                               "title": "widget onboarding"},
+                              {"ts": stamp(3), "type": "l1-complete", "subject": C0472_4}]})
+assert charters0472_4[C0472_4]["proving"]["title"] == "widget onboarding", \
+    charters0472_4[C0472_4]["proving"]
+print("0472-AC4 ok")
+
+# ── 0472-AC5 · the board-lint AC1 above (unmodified) already proves this;
+# re-asserted directly here with its own marker: PROVING is one of
+# render()'s headers on every render, including an empty ledger ────────────
+board0472_5 = fold.render(*ledger())
+assert "## PROVING (0)" in board0472_5, board0472_5
+assert titles271 == set(fold.BOARD_OWNERS), (titles271, set(fold.BOARD_OWNERS))
+print("0472-AC5 ok")
+
+# ── 0472-AC6 · one proving charter (one shipped-owed-due spec, no
+# sweep-fixpoint, remaining==2) renders its PROVING row field-for-field; a
+# second proving charter with a LATER deadline renders after the first ─────
+S0472_6a, C0472_6a = "L-spec-9413", "L-charter-9413"
+built0472_6a = [{"ts": stamp(3), "type": "spec-written", "subject": S0472_6a, "charter": C0472_6a},
+                {"ts": stamp(2), "type": "build-started", "subject": S0472_6a},
+                {"ts": stamp(2), "type": "build-done", "subject": S0472_6a}]
+graded0472_6a = [{"ts": stamp(1), "type": "verdict", "subject": S0472_6a, "confirmed": True}]
+reviewed0472_6a = [{"ts": stamp(1), "type": "review", "subject": S0472_6a, "depth": "gates-only"}]
+shipped0472_6a = [{"ts": stamp(5), "type": "shipped", "subject": S0472_6a}]
+due0472_6a = [{"ts": stamp(10), "type": "owed-ac", "subject": S0472_6a, "criterion": "AC1",
+               "wake_at": stamp(7)}]
+l1_0472_6a = {"ts": stamp(6), "type": "l1-complete", "subject": C0472_6a}
+
+_, specs0472_6a, charters0472_6a, _, _ = ledger(**{
+    "L-builder-9413.jsonl": built0472_6a, "L-grader-9413.jsonl": graded0472_6a,
+    "L-reviewer-9413.jsonl": reviewed0472_6a, "L-executor-9413.jsonl": shipped0472_6a,
+    "L-spec-writer-9413.jsonl": due0472_6a, "L-planner-9413.jsonl": [l1_0472_6a]})
+assert specs0472_6a[S0472_6a]["state"] == "shipped-owed-due", specs0472_6a[S0472_6a]["state"]
+assert charters0472_6a[C0472_6a]["state"] == "proving", charters0472_6a[C0472_6a]["state"]
+p6a = charters0472_6a[C0472_6a]["proving"]
+assert p6a["remaining"] == 2, p6a
+
+board0472_6a = fold.render(*ledger(**{
+    "L-builder-9413.jsonl": built0472_6a, "L-grader-9413.jsonl": graded0472_6a,
+    "L-reviewer-9413.jsonl": reviewed0472_6a, "L-executor-9413.jsonl": shipped0472_6a,
+    "L-spec-writer-9413.jsonl": due0472_6a, "L-planner-9413.jsonl": [l1_0472_6a]}))
+row0472_6a = (f"{C0472_6a} · {p6a['title']} · {p6a['remaining']} left · "
+              + (f"next {p6a['next']['kind']} {p6a['next']['due_at']}" if p6a["next"]
+                 else "nothing remaining")
+              + f" · deadline {p6a['deadline']} · owner {p6a['owner']} · {p6a['colour']}")
+assert row0472_6a in board0472_6a, (row0472_6a, board0472_6a)
+
+# a second proving charter, its one owed criterion RE-DATED (declared after
+# ship) far into the future -> its own deadline (due_at + GRACE_DAYS) lands
+# well after 0472_6a's (max(NOW, a 2-days-ago due) + GRACE_DAYS)
+S0472_6b, C0472_6b = "L-spec-9414", "L-charter-9414"
+built0472_6b = [{"ts": stamp(3), "type": "spec-written", "subject": S0472_6b, "charter": C0472_6b},
+                {"ts": stamp(2), "type": "build-started", "subject": S0472_6b},
+                {"ts": stamp(2), "type": "build-done", "subject": S0472_6b}]
+graded0472_6b = [{"ts": stamp(1), "type": "verdict", "subject": S0472_6b, "confirmed": True}]
+reviewed0472_6b = [{"ts": stamp(1), "type": "review", "subject": S0472_6b, "depth": "gates-only"}]
+shipped0472_6b = [{"ts": stamp(0), "type": "shipped", "subject": S0472_6b}]
+due0472_6b = [{"ts": stamp(-1), "type": "owed-ac", "subject": S0472_6b, "criterion": "AC1",
+               "wake_at": stamp(-400)}]                        # a re-date: due_at == wake_at
+l1_0472_6b = {"ts": stamp(0), "type": "l1-complete", "subject": C0472_6b}
+
+board0472_6b = fold.render(*ledger(**{
+    "L-builder-9413.jsonl": built0472_6a, "L-grader-9413.jsonl": graded0472_6a,
+    "L-reviewer-9413.jsonl": reviewed0472_6a, "L-executor-9413.jsonl": shipped0472_6a,
+    "L-spec-writer-9413.jsonl": due0472_6a, "L-planner-9413.jsonl": [l1_0472_6a],
+    "L-builder-9414.jsonl": built0472_6b, "L-grader-9414.jsonl": graded0472_6b,
+    "L-reviewer-9414.jsonl": reviewed0472_6b, "L-executor-9414.jsonl": shipped0472_6b,
+    "L-spec-writer-9414.jsonl": due0472_6b, "L-planner-9414.jsonl": [l1_0472_6b]}))
+lines0472_6b = board0472_6b.splitlines()
+rows0472_6a = [i for i, ln in enumerate(lines0472_6b) if ln.strip().startswith(f"{C0472_6a} ·")]
+rows0472_6b = [i for i, ln in enumerate(lines0472_6b) if ln.strip().startswith(f"{C0472_6b} ·")]
+assert len(rows0472_6a) == 1 and len(rows0472_6b) == 1, (rows0472_6a, rows0472_6b, board0472_6b)
+assert rows0472_6a[0] < rows0472_6b[0], \
+    "the later-deadline charter renders after the earlier one"
+print("0472-AC6 ok")
+
+# ── 0472-AC12 · a proving charter's own closed-unbuilt spec still renders
+# its suffix — now on the new PROVING row, not CHARTER CLOSE (D112 survives
+# SD2's move); a proving charter with c["unbuilt"] == 0 renders no suffix ──
+board0472_12 = fold.render(*closed)
+prov_line0472_12 = next(line for line in board0472_12.splitlines()
+                        if line.strip().startswith(C + " ·"))
+assert prov_line0472_12.strip().endswith("1 closed unbuilt"), prov_line0472_12
+assert not row0472_6a.endswith("closed unbuilt"), row0472_6a
+print("0472-AC12 ok")
+
+# ── 0472-AC13 · no bare state-literal comparison in test_fold.py/test_tick.py
+# was left unmigrated by SD2 (fix 1's own regression); `fold.closable` (the
+# real one, `fold.py`'s own `def closable`) is never left deleted by the
+# removed test_tick.py stub sub-block.
+#
+# The needle is built from character codes, never written as a source
+# literal, so this very assertion cannot self-match. Pinned to 3, not the
+# spec's own stale 1 (written against `base_sha` 462a7ad, before
+# `ledger-vocabulary`'s AST-completeness literal at "spec-states-ast" landed,
+# and before this unit's own AC1 needed one legitimate comparison of its
+# own) — the three genuine sources, enumerated so a fourth is never silent:
+# test_fold.py's own line 117 (S `written`, never BUILD_DONE — untouched by
+# SD2, per R5's Target), the AST-lint completeness set two sections up, and
+# 0472-AC1's own "building" sub-case just above ─────────────────────────────
+_needle0472 = chr(34) + "".join(chr(c) for c in
+                                (76, 49, 45, 99, 111, 109, 112, 108, 101, 116, 101)) + chr(34)
+_tf_text0472 = pathlib.Path(__file__).read_text()
+_tt_text0472 = (pathlib.Path(__file__).parent / "test_tick.py").read_text()
+assert _tf_text0472.count(_needle0472) == 3, _tf_text0472.count(_needle0472)
+assert _tt_text0472.count(_needle0472) == 0, _tt_text0472.count(_needle0472)
+assert getattr(fold, "closable", None) is not None, \
+    "the real fold.closable must never be left deleted"
+print("0472-AC13 ok")
