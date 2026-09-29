@@ -1,0 +1,21 @@
+# grading.toml — L-spec-0481, charter L-charter-0042 R12.7. The ONLY source
+# of `db_env`, `db_setup`, `node_dirs`, `venv` for a project's grading
+# capabilities (Constraints) — spec/verify text contributes capability NAMES
+# only, never an argv element, path, or env value. Read relative to
+# `grading_env.py`'s own path (repo root), not $DOIT_ROOT — a versioned
+# default that ships with the code, matching `look.toml`/`problems.toml`'s
+# own precedent. A project absent here gets no `db`/`node_modules`
+# provisioning at all (`grading_env._project_row` returns `{}`).
+#
+# `db_setup.argv` may use the literal token `{venv}`, substituted at
+# preflight time with `<checkout>/<venv>` for the project being graded —
+# never a shared, hardcoded path (the checkout differs per `--project`).
+
+[project.albert-scott]
+db_env = ["SUPABASE_DB_URL", "DATABASE_URL", "PG_PARITY_DB_URL"]
+node_dirs = ["dashboard"]
+venv = ".venv"
+
+[project.albert-scott.db_setup]
+argv = ["{venv}/bin/alembic", "-c", "alembic_supabase.ini", "upgrade", "head"]
+cwd = "api"

@@ -27,7 +27,7 @@ os.environ.pop("DOIT_PROJECT", None)
 (FIXTURE_ROOT / "events").mkdir(parents=True, exist_ok=True)
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import fold, grader_serve, relay, scratch  # noqa: E402
+import fold, grader_serve, grader_view, grading_env, relay, scratch  # noqa: E402
 
 N = 0
 
@@ -269,5 +269,30 @@ events_c = [ev("grader-pane-started", "2026-09-27T00:00:00+00:00", pane=PANE_C, 
 r14c = Runner()
 grader_serve.run(events_c, runner=r14c, now=fold.NOW)
 check(len(r14c.kill_calls()) == 0, "AC14(c): no terminal event -> no kill call")
+
+# ═══════════════════════════ L-spec-0481 AC8 — one environment for proof and grade ═══════════════════════════
+relay.pending_packets = pending_stub([{"spawn": "L-grader-8001", "age_min": 1.0}])
+view8 = scratch.sub("grade") / "L-grader-8001"
+view8.mkdir(parents=True, exist_ok=True)
+(view8 / ".grading_state.json").write_text(json.dumps(
+    {"venv": "", "db_env_names": ["SUPABASE_DB_URL"], "dsn": "postgresql://albert@/scratch?host=/x&port=1"}))
+events8 = [ev("spawn-started", "2026-09-27T00:00:00+00:00", spawn="L-grader-8001",
+              role="grader", project="albert-scott")]
+r8 = Runner()
+grader_serve.run(events8, runner=r8, now=fold.NOW)
+starts8 = r8.pane_start_calls()
+check(len(starts8) == 1, f"AC8: one pane-start call, got {starts8}")
+argv8 = starts8[0][0]
+expect_bwrap = grader_view.bwrap_argv(view8, doit_src=grader_serve.HERE.parent,
+                                       binds=grading_env.sandbox_binds(view8, "albert-scott"))
+new_window_end = argv8.index("--") + 1
+bwrap_segment = argv8[new_window_end:new_window_end + len(expect_bwrap)]
+check(bwrap_segment == expect_bwrap, f"AC8: bwrap segment matches grading_env.sandbox_binds: {bwrap_segment}")
+ei8 = argv8.index("env")
+tail8 = argv8[ei8 + 2:argv8.index("claude", ei8)]
+tail_names = {seg.split("=", 1)[0] for seg in tail8}
+for name in grading_env.pane_env(view8):
+    check(name in tail_names, f"AC8: pane_env name {name!r} present in env -i segment: {tail8}")
+print("L-spec-0481 AC8 ok")
 
 print(f"grader_serve: {N} checks pass")

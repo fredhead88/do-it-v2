@@ -257,6 +257,10 @@ EMITS["supervisor-code"] = {"up"}           # R2: `up.maybe_reexec`'s own versio
 EMITS["install-synced"] = {"tick"}          # R5: the tick's own once-per-sha install pass
 EMITS["grader-view-built"] = {"grader"}     # R8: the grader's own view-build record
 EMITS["grader-pane-started"] = {"tick"}     # R8: the tick's own per-cycle pane count
+# L-spec-0481/R12.3-4: a grader/reviewer's own refusal-before-spend record and
+# the shared/spec-local hold it opens — never any other actor's to write.
+EMITS["grading-preflight-failed"] = {"grader", "reviewer"}
+EMITS["capability-hold"] = {"grader", "reviewer"}
 # R7: widen `rejected-criterion`/`criterion-cleared` to also admit `builder`,
 # on top of every actor already admitted. The bare `EMITS` set carries no
 # per-criterion granularity — reachable behavior is narrowed to
@@ -687,6 +691,60 @@ def _has(e, k):
     return bool(str(e.get(k) or "").strip())
 
 
+_EPOCH = datetime.min.replace(tzinfo=timezone.utc)
+
+
+def capability_holds(events):
+    """L-spec-0481/AC15: open `capability-hold` subjects — `capability:NAME`,
+    `capability:NAME:SPEC`, `capability:unknown:SPEC` — each `{"capability",
+    "specs"}`. Closed only by a `thinker`/`operator` `unblocked`/`decision` on
+    the SAME subject, newer than the newest `capability-hold` row on it; any
+    other actor's close, or one older than a later re-hold, is ignored."""
+    rows, newest_hold, newest_close = {}, {}, {}
+    for e in events:
+        subj = e.get("subject")
+        if not subj or not str(subj).startswith("capability:"):
+            continue
+        et = ts(e.get("ts"))
+        if e.get("type") == "capability-hold":
+            row = rows.setdefault(subj, {"capability": e.get("capability"), "specs": set()})
+            if e.get("spec"):
+                row["specs"].add(e["spec"])
+            newest_hold[subj] = max(newest_hold.get(subj, et), et)
+        elif e.get("type") in ("unblocked", "decision") and e.get("actor") in ("thinker", "operator"):
+            newest_close[subj] = max(newest_close.get(subj, et), et)
+    return {s: row for s, row in rows.items() if newest_close.get(s, _EPOCH) < newest_hold[s]}
+
+
+def held_specs(events, *, content_dir=None, project_of=None):
+    """L-spec-0481/AC15: specs an OPEN `capability-hold` covers right now. The
+    two per-spec subject shapes cover only the spec their own subject names
+    (present even with no content on disk). The shared `capability:NAME`
+    shape covers every spec WITH content whose grader `required()` needs
+    NAME — the one place in `fold` that reads files, never through any other
+    reader here, which still takes `events` alone."""
+    content_dir = pathlib.Path(content_dir) if content_dir else ROOT / "content"
+    if project_of is None:
+        def project_of(spec):
+            rows = [e for e in events if e.get("subject") == spec and e.get("project")]
+            return rows[-1]["project"] if rows else None
+    import grading_env
+    held = set()
+    for subj, row in capability_holds(events).items():
+        parts = subj.split(":")
+        if len(parts) >= 3:
+            held.update(row["specs"] or {parts[2]})
+            continue
+        for f in sorted(content_dir.glob("*.md")):
+            spec = f.stem
+            verify = content_dir / f"verify-{spec}-grader.sh"
+            caps = grading_env.required("grader", f.read_text(),
+                                         verify.read_text() if verify.is_file() else "", project_of(spec))
+            if row["capability"] in caps:
+                held.add(spec)
+    return held
+
+
 def escalation_ok(e):
     """§4.9/R3: an escalation-blocking carries `default`+`deadline`+`revert` — all
     three, because a default with no deadline never fires and a deadline with no
@@ -726,6 +784,12 @@ REQUIRED["charter-reopened"] = ("spec", "criterion", "failed_src")
 REQUIRED["owed-waived"] = ("criterion", "reason")
 REQUIRED["kill-accepted"] = ("reason",)
 REQUIRED["charter-classified"] = ("klass", "reason")
+# L-charter-0042/L-spec-0481 (grading-capabilities): a preflight failure names
+# the capability it could not prove; a hold on it names both the capability
+# and the spec it was raised for (unknown when the shared shape) — presence-only,
+# like every other entry above.
+REQUIRED["grading-preflight-failed"] = ("capability",)
+REQUIRED["capability-hold"] = ("capability", "spec")
 
 
 # L-charter-0033/board-owners, Target 1: who owns each board() row and what

@@ -113,7 +113,18 @@ expect_diff = subprocess.run(
 assert (view / "diff.patch").read_bytes() == expect_diff
 assert (view / "spec.md").read_bytes() == (FIXTURE_ROOT / "content" / f"{SPEC}.md").read_bytes()
 verify_sh = view / "verify.sh"
-assert verify_sh.read_bytes() == (FIXTURE_ROOT / "content" / f"verify-{SPEC}-grader.sh").read_bytes()
+# L-spec-0481/R12.2 (minor deviation, declared — see the output card): build()
+# now ALWAYS inserts one static grading.env-sourcing line right after the
+# shebang (AC9) and rewrites any `REPO`-absolute path (AC6) — this fixture's
+# own verify script names no such path, so only the inserted line differs;
+# the rest of the body is still byte-identical to the input.
+orig = (FIXTURE_ROOT / "content" / f"verify-{SPEC}-grader.sh").read_text()
+got = verify_sh.read_text()
+orig_shebang, orig_rest = orig.split("\n", 1)
+got_lines = got.split("\n")
+assert got_lines[0] == orig_shebang, got_lines[0]
+assert got_lines[1] == f'[ -s "{view}/grading.env" ] && . "{view}/grading.env"', got_lines[1]
+assert "\n".join(got_lines[2:]) == orig_rest, got
 assert verify_sh.stat().st_mode & 0o111, oct(verify_sh.stat().st_mode)
 assert (view / "seat").is_dir()
 assert (view / "view.json").is_file()
@@ -197,6 +208,15 @@ assert "--tmpfs" in argv and argv[argv.index("--tmpfs") + 1] == "/tmp"
 print("AC4 ok")
 
 
+# ── L-spec-0481 AC9 · bwrap_argv(..., binds=...) renders ro, never rw ───────
+extra_src = str(view / "extra-bind-src")
+pathlib.Path(extra_src).mkdir(parents=True, exist_ok=True)
+argv_binds = grader_view.bwrap_argv(view, doit_src=DOIT_SRC, venvs=(), binds=[(extra_src, extra_src)])
+bind_flags = [t[0] for t in bind_triples(argv_binds) if t[1] == extra_src]
+assert bind_flags == ["--ro-bind"], bind_flags
+print("L-spec-0481 AC9 ok")
+
+
 # ── AC5 · smoke() — real bwrap, discriminating checks ───────────────────────
 outside_doit_src = subprocess.run(["git", "-C", str(REPO), "log", "-1"], capture_output=True, text=True)
 outside_doit_root = subprocess.run(
@@ -233,6 +253,83 @@ src_text = (HERE / "grader_view.py").read_text()
 assert "fold" not in src_text and "import carry" not in src_text
 assert not (FIXTURE_ROOT / "events").exists()
 print("AC6 ok")
+
+
+# ── L-spec-0481 AC7 · view-paths rewrite: a REPO-absolute path present in the
+# archived tree is rewritten; /usr/bin/python3 and the project's own venv
+# python stay byte-identical; a symlinked `repo` argument naming the resolved
+# target still rewrites; a checkout path missing from view/tree (and a
+# foreign /tmp path) are left un-rewritten and fail view-paths ─────────────
+AC7_REPO = pathlib.Path(tempfile.mkdtemp(prefix="grader-view-ac7-repo-"))
+(AC7_REPO / "x").write_text("echo hi\n")
+(AC7_REPO / ".venv" / "bin").mkdir(parents=True, exist_ok=True)
+(AC7_REPO / ".venv" / "bin" / "python").write_text("#!/bin/sh\necho fixture-python\n")
+(AC7_REPO / ".venv" / "bin" / "python").chmod(0o755)
+subprocess.run(["git", "init", "-q", str(AC7_REPO)], check=True)
+subprocess.run(["git", "-C", str(AC7_REPO), "config", "user.email", "t@example.com"], check=True)
+subprocess.run(["git", "-C", str(AC7_REPO), "config", "user.name", "t"], check=True)
+subprocess.run(["git", "-C", str(AC7_REPO), "add", "-A"], check=True)
+subprocess.run(["git", "-C", str(AC7_REPO), "commit", "-q", "-m", "fixture"], check=True)
+AC7_SHA = subprocess.run(["git", "-C", str(AC7_REPO), "rev-parse", "HEAD"],
+                          check=True, capture_output=True, text=True).stdout.strip()
+AC7_PROJECT = AC7_REPO.name
+(FIXTURE_ROOT / "grading.toml").write_text(f'[project.{AC7_PROJECT}]\nvenv = ".venv"\n')
+os.environ["DOIT_GRADING_TOML"] = str(FIXTURE_ROOT / "grading.toml")
+
+# (i)/(ii): a checkout path present in the tree rewrites; /usr/bin/python3 and
+# the venv python (present but never in the tree) do not.
+AC7_SPEC = "L-spec-9428"
+(FIXTURE_ROOT / "content" / f"{AC7_SPEC}.md").write_text("# fixture\n")
+ac7_verify = f"#!/usr/bin/env bash\nset -euo pipefail\n{AC7_REPO}/x /usr/bin/python3 {AC7_REPO}/.venv/bin/python\n"
+(FIXTURE_ROOT / "content" / f"verify-{AC7_SPEC}-grader.sh").write_text(ac7_verify)
+ac7_view = grader_view.build(AC7_SPEC, AC7_REPO, AC7_SHA, AC7_SHA, SPAWN + "-ac7")
+ac7_text = (ac7_view / "verify.sh").read_text()
+assert f"{ac7_view}/tree/x" in ac7_text, ac7_text
+assert "/usr/bin/python3" in ac7_text, ac7_text
+assert f"{AC7_REPO}/.venv/bin/python" in ac7_text, ac7_text
+if shutil.which("bwrap"):
+    binds = [(str(AC7_REPO / ".venv"), str(AC7_REPO / ".venv"))]
+    wrap = grader_view.bwrap_argv(ac7_view, doit_src=REPO, binds=binds)
+    r = subprocess.run(wrap + ["--", str(AC7_REPO / ".venv" / "bin" / "python")],
+                       capture_output=True, text=True)
+    assert r.returncode == 0 and "fixture-python" in r.stdout, r
+else:
+    print("SKIP bwrap")  # never a pass
+print("L-spec-0481 AC7 ok (i,ii)")
+
+# (iii): repo argument is a symlink (ROOT/repos/<project> form); verify names
+# the RESOLVED target — the same rewrite still fires.
+AC7_LINK_DIR = FIXTURE_ROOT / "repos"
+AC7_LINK_DIR.mkdir(parents=True, exist_ok=True)
+AC7_LINK = AC7_LINK_DIR / AC7_PROJECT
+if AC7_LINK.exists() or AC7_LINK.is_symlink():
+    AC7_LINK.unlink()
+AC7_LINK.symlink_to(AC7_REPO)
+AC7_SPEC2 = "L-spec-9429"
+(FIXTURE_ROOT / "content" / f"{AC7_SPEC2}.md").write_text("# fixture\n")
+ac7b_verify = f"#!/usr/bin/env bash\nset -euo pipefail\n{AC7_REPO.resolve()}/x\n"
+(FIXTURE_ROOT / "content" / f"verify-{AC7_SPEC2}-grader.sh").write_text(ac7b_verify)
+ac7b_view = grader_view.build(AC7_SPEC2, AC7_LINK, AC7_SHA, AC7_SHA, SPAWN + "-ac7b")
+ac7b_text = (ac7b_view / "verify.sh").read_text()
+assert f"{ac7b_view}/tree/x" in ac7b_text, ac7b_text
+print("L-spec-0481 AC7 ok (iii)")
+
+# (iv): a checkout path missing from view/tree, and /tmp/foreign, are both
+# left un-rewritten and both fail `_prove_view_paths`.
+AC7_SPEC3 = "L-spec-9430"
+(FIXTURE_ROOT / "content" / f"{AC7_SPEC3}.md").write_text("# fixture\n")
+ac7c_verify = f"#!/usr/bin/env bash\nset -euo pipefail\n{AC7_REPO}/does-not-exist /tmp/foreign\n"
+(FIXTURE_ROOT / "content" / f"verify-{AC7_SPEC3}-grader.sh").write_text(ac7c_verify)
+ac7c_view = grader_view.build(AC7_SPEC3, AC7_REPO, AC7_SHA, AC7_SHA, SPAWN + "-ac7c")
+ac7c_text = (ac7c_view / "verify.sh").read_text()
+assert f"{AC7_REPO}/does-not-exist" in ac7c_text, ac7c_text
+assert "/tmp/foreign" in ac7c_text, ac7c_text
+import grading_env as _ge
+ok7c, reason7c = _ge._prove_view_paths(ac7c_view)
+assert ok7c is False, (ok7c, reason7c)
+assert "does-not-exist" in reason7c or "foreign" in reason7c, reason7c
+shutil.rmtree(AC7_REPO, ignore_errors=True)
+print("L-spec-0481 AC7 ok (iv)")
 
 
 shutil.rmtree(FIXTURE_ROOT, ignore_errors=True)

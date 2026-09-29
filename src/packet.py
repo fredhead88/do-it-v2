@@ -1095,7 +1095,8 @@ def p_grader(c):
     seat_view = models.resolve("grader")["backend"] == "seat"
     item5 = (f"5. Checker: `verify.sh` · version {ver} · coverage note "
              f"\"the spec's Verification block\" · re-run it from this view's own root — "
-             f"cwd `tree/`; no other path is reachable.") if seat_view else (
+             f"cwd `tree/`; no other path is reachable · environment `view/grading.env` "
+             f"(sourced by verify.sh's own first line).") if seat_view else (
              f"5. Checker: `verify-{c.a.subject}` · version {ver} · coverage note "
              f"\"the spec's Verification block\" · re-run it with cwd `{c.worktree()}`.")
     return [

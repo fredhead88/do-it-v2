@@ -35,7 +35,7 @@ import json, os, pathlib, subprocess, sys
 
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-import dispatch, fold, grader_view, launch, relay, scratch, tick  # noqa: E402
+import dispatch, fold, grader_view, grading_env, launch, relay, scratch, tick  # noqa: E402
 
 # probe Q3 (Assumptions): the tmux session grader panes land in — created via
 # `runner` if a first check finds it absent, never assumed to pre-exist unchecked.
@@ -94,6 +94,16 @@ def _spawn_pane_map(events):
         for pane, spawn in zip(panes, spawns):
             out[spawn] = pane
     return out
+
+
+def _project_for(events, spawn):
+    """The `project` a `spawn-started` recorded for this spawn — L-spec-0481:
+    `grading_env.sandbox_binds`/`pane_env` need it to bind the right project's
+    own `node_modules`/`venv`, and `run()` itself is handed no such argument."""
+    for e in events:
+        if e.get("type") == "spawn-started" and e.get("spawn") == spawn:
+            return e.get("project")
+    return None
 
 
 def _newest_event(events, spawn):
@@ -182,7 +192,13 @@ def run(events, *, runner=None, now=None):
             session_checked = True
         view = scratch.sub("grade") / spawn
         cfg_dir = grader_view.config_dir()
-        env = {**launch.child_env("grader"), "CLAUDE_CONFIG_DIR": str(cfg_dir)}
+        project = _project_for(events, spawn)
+        # L-spec-0481/R12.2, R12.6: the SAME binds and environment the
+        # preflight proof itself ran with — one environment for proof and
+        # grade (AC8), never a second, independently-guessed set here.
+        binds = grading_env.sandbox_binds(view, project) if project else []
+        env = {**launch.child_env("grader"), "CLAUDE_CONFIG_DIR": str(cfg_dir),
+               **grading_env.pane_env(view)}
         env_argv = [f"{k}={v}" for k, v in sorted(env.items())]
         # `-n <spawn>` (minor deviation, declared): the spec's own literal
         # argv has no room to name an addressable window target for step (0)
@@ -191,7 +207,7 @@ def run(events, *, runner=None, now=None):
         # target, and every OTHER segment of the argv matches the spec's own
         # literal sequence verbatim.
         argv = (["tmux", "new-window", "-d", "-t", TMUX_SESSION, "-n", spawn, "--"]
-                + grader_view.bwrap_argv(view, doit_src=HERE.parent)
+                + grader_view.bwrap_argv(view, doit_src=HERE.parent, binds=binds)
                 + ["env", "-i"] + env_argv
                 + ["claude", "--agent", "grader", "--dangerously-skip-permissions"])
         runner(argv)

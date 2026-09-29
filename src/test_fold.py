@@ -3407,3 +3407,71 @@ assert _tt_text0472.count(_needle0472) == 0, _tt_text0472.count(_needle0472)
 assert getattr(fold, "closable", None) is not None, \
     "the real fold.closable must never be left deleted"
 print("0472-AC13 ok")
+
+# ═══════════════════════ L-spec-0481 AC15 — capability_holds / held_specs ══════════
+assert fold.EMITS["grading-preflight-failed"] == {"grader", "reviewer"}
+assert fold.EMITS["capability-hold"] == {"grader", "reviewer"}
+assert fold.REQUIRED["grading-preflight-failed"] == ("capability",)
+assert fold.REQUIRED["capability-hold"] == ("capability", "spec")
+assert fold.required_reason({"type": "grading-preflight-failed", "subject": "x"}) is not None
+assert fold.required_reason({"type": "capability-hold", "subject": "x", "capability": "tools"}) is not None
+assert fold.required_reason(
+    {"type": "capability-hold", "subject": "x", "capability": "tools", "spec": "L-spec-9701"}) is None
+print("AC15 EMITS/REQUIRED ok")
+
+AC15_SPECS_DIR = TMP / "content-ac15"
+AC15_SPECS_DIR.mkdir(parents=True, exist_ok=True)
+(AC15_SPECS_DIR / "L-spec-9703.md").write_text("# fixture\n\nnothing special here.\n")
+(AC15_SPECS_DIR / "verify-L-spec-9703-grader.sh").write_text("npm run test\n")   # needs node_modules
+(AC15_SPECS_DIR / "L-spec-9704.md").write_text("# fixture\n\nnothing special here.\n")
+(AC15_SPECS_DIR / "verify-L-spec-9704-grader.sh").write_text("echo fine\n")      # needs nothing
+
+ev15, *_ = ledger(**{
+    "L-grader-9701.jsonl": [
+        # (a) shared shape: capability:node_modules, triggered by L-spec-9703's own preflight
+        {"ts": stamp(2), "type": "capability-hold", "subject": "capability:node_modules",
+         "capability": "node_modules", "spec": "L-spec-9703", "source": "preflight"},
+        # (b) spec-local shape: capability:view-paths:L-spec-9701 (no content on disk at all)
+        {"ts": stamp(2), "type": "capability-hold", "subject": "capability:view-paths:L-spec-9701",
+         "capability": "view-paths", "spec": "L-spec-9701", "source": "preflight"},
+        # (c) unknown per-spec shape
+        {"ts": stamp(2), "type": "capability-hold", "subject": "capability:unknown:L-spec-9702",
+         "capability": "unknown", "spec": "L-spec-9702", "source": "preflight"},
+    ],
+    "L-builder-0001.jsonl": [
+        # a non-thinker/operator close of the spec-local hold — must NOT close it
+        {"ts": stamp(1), "type": "unblocked", "subject": "capability:view-paths:L-spec-9701"},
+    ],
+})
+holds15 = fold.capability_holds(ev15)
+assert set(holds15) == {"capability:node_modules", "capability:view-paths:L-spec-9701",
+                         "capability:unknown:L-spec-9702"}, holds15
+assert holds15["capability:node_modules"]["capability"] == "node_modules", holds15
+assert holds15["capability:view-paths:L-spec-9701"]["specs"] == {"L-spec-9701"}, holds15
+print("AC15 three-shape/open ok")
+
+held15 = fold.held_specs(ev15, content_dir=AC15_SPECS_DIR, project_of=lambda s: "testproj")
+assert "L-spec-9703" in held15, held15          # shared hold, needs node_modules
+assert "L-spec-9704" not in held15, held15      # shared hold, does NOT need node_modules
+assert "L-spec-9701" in held15, held15          # spec-local, no content — held anyway
+assert "L-spec-9702" in held15, held15          # unknown per-spec — held anyway
+assert not ({"L-spec-9702"} & fold.held_specs(
+    [e for e in ev15 if e.get("subject") != "capability:unknown:L-spec-9702"],
+    content_dir=AC15_SPECS_DIR, project_of=lambda s: "testproj")), \
+    "a per-spec hold must never cover another spec"
+print("AC15 held_specs/missing-content ok")
+
+# thinker closes the shared hold — it must disappear
+ev15b, *_ = ledger(**{
+    "L-grader-9701.jsonl": [
+        {"ts": stamp(2), "type": "capability-hold", "subject": "capability:node_modules",
+         "capability": "node_modules", "spec": "L-spec-9703", "source": "preflight"},
+    ],
+    "L-thinker-0001.jsonl": [
+        {"ts": stamp(1), "type": "unblocked", "subject": "capability:node_modules"},
+    ],
+})
+assert "capability:node_modules" not in fold.capability_holds(ev15b), fold.capability_holds(ev15b)
+# the spec-local hold from ev15, closed only by a non-thinker/operator actor, stays open
+assert "capability:view-paths:L-spec-9701" in holds15, holds15
+print("AC15 actor-gated close ok")

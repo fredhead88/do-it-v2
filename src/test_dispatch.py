@@ -1588,9 +1588,14 @@ assert cj4["cwd"] == str(_ac4_view / "tree") and cj4["cwd"] != str(REPO), cj4
 _rm_seat(sid4)
 N += 1
 
-# ── AC8 · (a) a non-grader role on seat, (b) grader resolving to claude-p or
-# codex — grader_view.build is never invoked (patched to raise), no
-# grader-view-built appears, cmd.json's cwd is the caller's --cwd unchanged ──
+# ── AC8 · (a) a non-grader role on seat: grader_view.build is never invoked
+# (patched to raise), no grader-view-built appears, cmd.json's cwd is the
+# caller's --cwd unchanged. (b) grader resolving to claude-p, its verify text
+# naming a real capability (`npm` -> node_modules): L-spec-0481 AC12(iii)
+# governs over AC21 for this one fixture (Thinker ruling) — refused
+# preflight:no-view before any spend, grader_view.build still never invoked.
+# (c) grader resolving to codex, empty spec/verify text (nothing required):
+# unaffected, grader_view.build still never invoked ───────────────────────────
 _real_build_ac8 = grader_view.build
 grader_view.build = _boom_build
 try:
@@ -1612,9 +1617,11 @@ try:
 
     os.environ.pop("DOIT_SEAT", None)
     _gv_build_done("L-spec-0437ac8b", base_sha="B1", ready_sha="R1")
+    dispatch.CONTENT.mkdir(parents=True, exist_ok=True)
+    (dispatch.CONTENT / "verify-L-spec-0437ac8b-grader.sh").write_text("npm test\n")
     code, types8b, evs8b, _ = spawn("grader", out=grade([met]), subject="L-spec-0437ac8b")
-    assert code == 0 and not any(t == "grader-view-built" for t in types8b), types8b
-    assert spawn.raw[0]["backend"] == "claude-p", spawn.raw[0]
+    assert code == 1 and types8b == ["spawn-failed"] and not any(t == "grader-view-built" for t in types8b), types8b
+    assert spawn.raw[0]["backend"] == "claude-p" and spawn.raw[0]["reason"] == "preflight:no-view", spawn.raw[0]
 
     MT.write_text('[contracts.grader]\nbackend = "codex"\nmodel = "gpt-6-astra"\n')
     _real_codex_exec_ac8 = dispatch.run_codex_exec
@@ -1718,6 +1725,113 @@ ac14_events = [{"type": "spawn-started", "role": "grader", "subject": "L-spec-04
 pend = relay.pending_packets(ac14_events, root=TMP)
 assert any(p["spawn"] == "L-grader-0437ac14" for p in pend), pend
 (TMP / "seat" / "L-grader-0437ac14.packet.md").unlink()
+N += 1
+
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-0481 · grading-capabilities (L-charter-0042 R12) — AC12-AC14, AC16, AC19
+# Reuses `_gv_drive`/`_gv_build_done`/`_boom_build` above: role=grader forced
+# onto the seat backend, no real Postgres/bwrap needed — `node_modules` (no
+# `grading.toml` row for project "t") and `git` (never provisioned, R8) both
+# fail preflight cheaply and deterministically.
+# ══════════════════════════════════════════════════════════════════════════════
+import grading_env  # noqa: E402
+
+
+def _cap_content(subject, verify_text):
+    (dispatch.CONTENT).mkdir(parents=True, exist_ok=True)
+    (dispatch.CONTENT / f"{subject}.md").write_text(f"# {subject}\n")
+    (dispatch.CONTENT / f"verify-{subject}-grader.sh").write_text(verify_text)
+
+
+def _real_view_build(*_a, **_k):
+    return pathlib.Path(tempfile.mkdtemp(prefix="l0481-view-"))
+
+
+# ── AC12(ii)/AC16 · no hold yet, `node_modules` unprovable -> one
+# grading-preflight-failed, one capability-hold (shared, capability:node_modules),
+# one escalation-blocking(kind=capability-hold), reason preflight:node_modules,
+# NO spawn-started; grading_budget is unmoved by any of it ─────────────────────
+ac12ii_subj = "L-spec-0481ac12ii"
+_cap_content(ac12ii_subj, "npm test\n")
+_gv_build_done(ac12ii_subj, base_sha="B1", ready_sha="R1")
+gb_before = dispatch.grading_budget(fold.read_events(), ac12ii_subj)
+code, raw = _gv_drive(ac12ii_subj, view_build=_real_view_build)
+assert code == 1, raw
+types12ii = [e["type"] for e in raw]
+assert types12ii == ["grader-view-built", "grading-preflight-failed", "capability-hold",
+                     "escalation-blocking", "spawn-failed"], types12ii
+assert not any(t == "spawn-started" for t in types12ii), "AC16: a refusal never appends spawn-started"
+pf12 = next(e for e in raw if e["type"] == "grading-preflight-failed")
+assert pf12["role"] == "grader" and pf12["capability"] == "node_modules", pf12
+ch12 = next(e for e in raw if e["type"] == "capability-hold")
+assert ch12["subject"] == "capability:node_modules" and ch12["capability"] == "node_modules" \
+    and ch12["spec"] == ac12ii_subj, ch12
+esc12 = next(e for e in raw if e["type"] == "escalation-blocking")
+assert esc12["subject"] == "capability:node_modules" and esc12["kind"] == "capability-hold" \
+    and esc12["owner"] == "thinker", esc12
+assert esc12["default"] and esc12["deadline"] and esc12["revert"] == "doit append unblocked capability:node_modules", esc12
+sf12 = raw[-1]
+assert sf12["reason"] == "preflight:node_modules", sf12
+gb_after = dispatch.grading_budget(fold.read_events(), ac12ii_subj)
+assert gb_before == gb_after, "AC16: a preflight refusal never moves grading_budget"
+N += 1
+
+# ── AC13 · the hold really refuses the NEXT dispatch (real write-then-read
+# through fold.read_events(), not the writer's in-memory list); no view built ──
+ac13_subj = "L-spec-0481ac13"
+_cap_content(ac13_subj, "npm test\n")
+_gv_build_done(ac13_subj, base_sha="B1", ready_sha="R1")
+code, raw13 = _gv_drive(ac13_subj, view_build=_boom_build)
+assert code == 1 and [e["type"] for e in raw13] == ["spawn-failed"], raw13
+assert raw13[0]["reason"] == "held:node_modules", raw13[0]
+N += 1
+
+# ── AC14(i) · a spec-local hold (git, on subject A) refuses only A; a clean
+# subject B, unrelated to it, dispatches normally through to spawn-started ─────
+ac14a_subj, ac14b_subj = "L-spec-0481ac14a", "L-spec-0481ac14b"
+_cap_content(ac14a_subj, "git status\n")
+_cap_content(ac14b_subj, "echo hi\n")
+_gv_build_done(ac14a_subj, base_sha="B1", ready_sha="R1")
+_gv_build_done(ac14b_subj, base_sha="B1", ready_sha="R1")
+code, raw14a = _gv_drive(ac14a_subj, view_build=_real_view_build)
+assert code == 1, raw14a
+ch14a = next(e for e in raw14a if e["type"] == "capability-hold")
+assert ch14a["subject"] == f"capability:git:{ac14a_subj}", ch14a
+code, raw14b = _gv_drive(ac14b_subj, view_build=_real_view_build, serve_out=grade([met]))
+assert code == 0 and raw14b[-1]["type"] == "spawn-done", raw14b
+assert not any(e["type"] in ("grading-preflight-failed", "capability-hold") for e in raw14b), \
+    "AC14(i): subject B is not touched by A's spec-local hold"
+_rm_seat(next(e["spawn"] for e in raw14b if e["type"] == "spawn-started"))
+code, raw14a2 = _gv_drive(ac14a_subj, view_build=_boom_build)
+assert code == 1 and raw14a2[0]["reason"] == "held:git", raw14a2
+N += 1
+
+# ── AC14(ii) · reviewer preflight is read-only: porcelain(cwd) of a fixture
+# git worktree is byte-identical before and after preflight(), and it writes
+# no .env/grading.env/pg under it ───────────────────────────────────────────
+rv_wt = harness.test_root("l0481-reviewer-wt")
+subprocess.run(["git", "init", "-q"], cwd=rv_wt, check=True)
+before_rv = dispatch.porcelain(rv_wt)
+rv_failures = grading_env.preflight("reviewer", "L-spec-0481-nonexistent", rv_wt, "t", repo=dispatch.HERE.parent)
+after_rv = dispatch.porcelain(rv_wt)
+assert rv_failures == [], rv_failures    # gates-only, no [[prod]] row for "t" -> nothing required
+assert before_rv == after_rv, (before_rv, after_rv)
+assert not (rv_wt / ".env").exists() and not (rv_wt / "grading.env").exists() and not (rv_wt / "pg").exists()
+harness.cleanup(rv_wt)
+N += 1
+
+# ── AC19 (dispatch-level) · a grader dispatch on the seat backend, `db` never
+# required by its own verify text, gets `sandbox=`+dsn_role="none" on
+# spawn-started, and grader-view-built precedes it (AC12(v) shape) ─────────────
+ac19_subj = "L-spec-0481ac19"
+_cap_content(ac19_subj, "echo hi\n")
+_gv_build_done(ac19_subj, base_sha="B1", ready_sha="R1")
+code, raw19 = _gv_drive(ac19_subj, view_build=_real_view_build, serve_out=grade([met]))
+assert code == 0, raw19
+assert [e["type"] for e in raw19][:2] == ["grader-view-built", "spawn-started"], raw19
+ss19 = raw19[1]
+assert ss19["dsn_role"] == "none" and ss19["sandbox"] in ("bwrap", "host"), ss19
+_rm_seat(ss19["spawn"])
 N += 1
 
 # ── AC7 (dispatch half) · a REAL wall-clock timeout's `spawn-failed` now
@@ -2246,10 +2360,15 @@ assert seen11["env_exists_at_call"] and seen11["env_bytes_at_call"] == E2E_LINE,
 assert (wt11 / ".env").read_bytes() == E2E_LINE, "AC11: final state"
 
 # AC12: the grader's own spawn-started carries role AND dsn_role together.
+# L-spec-0481/AC19/AC21 (sanctioned edit): a grader receives NO production DSN
+# of any kind (SD-R12-3b) — provision_worktree_env is never called for it, so
+# this claude-p grader (no view, no `db` capability computed) is "none", never
+# the L-spec-0194 "readonly" this used to assert.
 wt12 = _dsn_worktree("ac12")
 code, raw12, seen12 = drive("grader", "L-spec-0112", wt12, DSN_PROJECT, grade([met]))
 ss12 = next(e for e in raw12 if e["type"] == "spawn-started")
-assert ss12["role"] == "grader" and ss12["dsn_role"] == "readonly", ss12
+assert ss12["role"] == "grader" and ss12["dsn_role"] == "none", ss12
+assert not (wt12 / ".env").exists(), "AC19: no production DSN reaches a grader's cwd"
 
 # AC13: every OTHER role's spawn-started carries no dsn_role key at all.
 # A fresh packet body, not the file-wide "a packet\n": an identical
