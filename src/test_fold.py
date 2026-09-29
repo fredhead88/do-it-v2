@@ -2873,3 +2873,106 @@ assert not any(r["kind"] == "escalation" and r["subject"] == "L-spec-432-s5"
               for r in fold.open_questions(ac6_ev)), \
     "★ AC6: open_questions must exclude it via fold.answered, not via open_escalations"
 print("answered-0432 AC6 ok")
+
+
+# ── L-spec-0476/plain-core, R2 item 3 / AC7+AC8 · fold.SPEC_STATES/
+# CHARTER_STATES completeness, proved by walking fold.py's own source with the
+# `ast` module. Additive, changes no existing behavior: this only PROVES the
+# two tuples above are supersets of what `spec_state`/`fold()` can actually
+# return/assign — direct string returns, an `IfExp`'s literal branches
+# (nested or not), and a `Name` bound by a `for state, marker in (...)` loop,
+# for `spec_state`; a literal assigned to a `["state"]` subscript on a
+# variable holding a charter dict, for `fold()`. A second, independent
+# count/membership assertion guards against a walker that silently regresses
+# to missing the `IfExp` shape (and so collects neither "closed-shipped" nor
+# "closed-unbuilt") and would otherwise still pass the subset check with an
+# empty offending set. ───────────────────────────────────────────────────────
+import ast as _ast  # noqa: E402
+
+_fold_src = pathlib.Path(fold.__file__).read_text()
+_fold_tree = _ast.parse(_fold_src)
+_spec_state_fn = next(n for n in _fold_tree.body
+                       if isinstance(n, _ast.FunctionDef) and n.name == "spec_state")
+_fold_fn = next(n for n in _fold_tree.body
+                if isinstance(n, _ast.FunctionDef) and n.name == "fold")
+
+
+def _loop_state_values(fn_node):
+    """`state` -> the set of string literals fed to it by any
+    `for state, marker in ((...), (...), ...)` loop inside `fn_node`."""
+    values = {}
+    for node in _ast.walk(fn_node):
+        if not isinstance(node, _ast.For):
+            continue
+        target, it = node.target, node.iter
+        if not (isinstance(target, _ast.Tuple) and len(target.elts) == 2
+                and isinstance(target.elts[0], _ast.Name) and isinstance(it, _ast.Tuple)):
+            continue
+        found = set()
+        for elt in it.elts:
+            if (isinstance(elt, _ast.Tuple) and elt.elts
+                    and isinstance(elt.elts[0], _ast.Constant)
+                    and isinstance(elt.elts[0].value, str)):
+                found.add(elt.elts[0].value)
+        if found:
+            values[target.elts[0].id] = found
+    return values
+
+
+def _expr_literals(expr, loop_vars):
+    """String literals `expr` can evaluate to: a direct string `Constant`
+    (a); an `IfExp`, recursing into both `body` and `orelse` so a chain of
+    conditional returns is fully covered (b); a `Name` bound by a
+    `for state, marker in (...)` loop, yielding every value that loop can
+    bind it to (c)."""
+    if expr is None:
+        return set()
+    if isinstance(expr, _ast.Constant) and isinstance(expr.value, str):
+        return {expr.value}
+    if isinstance(expr, _ast.IfExp):
+        return _expr_literals(expr.body, loop_vars) | _expr_literals(expr.orelse, loop_vars)
+    if isinstance(expr, _ast.Name) and expr.id in loop_vars:
+        return set(loop_vars[expr.id])
+    return set()
+
+
+def _return_literals(fn_node):
+    loop_vars = _loop_state_values(fn_node)
+    out = set()
+    for node in _ast.walk(fn_node):
+        if isinstance(node, _ast.Return):
+            out |= _expr_literals(node.value, loop_vars)
+    return out
+
+
+_collected_spec_states = _return_literals(_spec_state_fn)
+_offending_spec = _collected_spec_states - set(fold.SPEC_STATES)
+assert not _offending_spec, f"spec_state can return {_offending_spec}, not in fold.SPEC_STATES"
+assert len(_collected_spec_states) >= 15, _collected_spec_states
+assert "closed-shipped" in _collected_spec_states, _collected_spec_states
+assert "closed-unbuilt" in _collected_spec_states, _collected_spec_states
+
+
+def _charter_state_literals(fn_node):
+    out = set()
+    for node in _ast.walk(fn_node):
+        if not (isinstance(node, _ast.Assign) and len(node.targets) == 1):
+            continue
+        tgt = node.targets[0]
+        if not isinstance(tgt, _ast.Subscript):
+            continue
+        sl = tgt.slice
+        if not (isinstance(sl, _ast.Constant) and sl.value == "state"):
+            continue
+        if isinstance(node.value, _ast.Constant) and isinstance(node.value.value, str):
+            out.add(node.value.value)
+    return out
+
+
+_collected_charter_states = _charter_state_literals(_fold_fn)
+_offending_charter = _collected_charter_states - set(fold.CHARTER_STATES)
+assert not _offending_charter, \
+    f'a charter["state"] literal is {_offending_charter}, not in fold.CHARTER_STATES'
+assert _collected_charter_states == {"retracted", "L2-complete", "L1-complete", "open"}, \
+    _collected_charter_states
+print("spec-states-ast ok")
