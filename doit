@@ -15,6 +15,7 @@ case "${1:-board}" in
   paid-call) shift; exec python3 "$SRC/paid_call.py" "$@" ;;
   validate) shift; exec python3 "$SRC/validate.py" "$@" ;;
   shape)   shift; exec python3 "$SRC/shape.py" "$@" ;;
+  brief)   shift; exec python3 "$SRC/brief.py" "$@" ;;
   tick)    exec python3 "$SRC/tick.py" ;;
   look)    shift; exec python3 "$SRC/look.py" "$@" ;;
   wait)    shift; exec python3 "$SRC/tick.py" wait "$@" ;;
@@ -75,6 +76,8 @@ doit — a ledger that derives state, and the guards that read it
   doit paid-call <label> -- <cmd...>      run a call that spends, log it, enforce the cap (§10.4)
   doit validate <role> <file>             the seat route's StructuredOutput: an Output object against its schema
   doit shape FILE [--fix]                 the spec-shape gate: one check, plus two mechanical repairs (--fix)
+  doit brief <goal|charter|spec> [--json] | --goals --json
+                                           a dossier generated from the ledger and content files only
   doit deploy <spec> --sha S --target T --cmd C --check C  serial; waits; proves the sha is live (§4.11)
   doit reap <charter> [--repo D] [--dry-run]   reap only the provably dead worktrees at close (§4.11)
   doit dispatch <role> <subject> [...]    spawn one contract, check it, append its events (-h for flags)
