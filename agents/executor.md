@@ -264,6 +264,17 @@ deviation the builder must declare. Rework reuses the worktree. A missing
   `python3 src/proving.py --backfill` (dry-run) that every listed charter
   shows a `klass` and none is missing one — safe to run more than once
   (idempotent), so there is no separate "already done" marker to track.
+- **A grader or reviewer refused before spend is an infrastructure state, not
+  a failure to retry.** `dispatch` refuses a grader/reviewer BEFORE any spend
+  with reason `held:<capability>` (an open `capability-hold` already covers a
+  capability its criteria need) or `preflight:<capability>` (a required
+  capability could not be proven into its own view this round) — neither
+  reason is a grade, and neither counts toward `grading_budget`'s cap. Do not
+  re-dispatch a subject refused this way, and do not treat it as the spec's
+  own failure: wait for a newer `build-done`, `unblocked`, or `decision` on
+  the subject or on the capability's own hold (`capability:<NAME>`) before
+  trying again — one of those three is what actually changes the state a
+  retry would otherwise just reproduce.
 
 ## Output
 

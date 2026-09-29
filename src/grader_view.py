@@ -19,6 +19,7 @@ and `scratch.sub("grader-claude")`.
 import json
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 from datetime import datetime, timezone
@@ -40,6 +41,64 @@ def _scratch_sub(name: str) -> pathlib.Path:
     p = root / name
     p.mkdir(parents=True, exist_ok=True)
     return p
+
+
+_PATH_TOKEN_RE = re.compile(r"(?<![\w.-])(/[^\s'\"]+)")
+
+
+def _rewrite_repo_paths(text: str, repo, tree_dir, venv_rel) -> str:
+    """L-spec-0481/AC7 (SD-R12-3a): rewrites a `repo`-absolute path in the
+    verify script to the view-relative path under `tree_dir` — a
+    checkout-relative absolute path is otherwise unreachable from inside
+    `bwrap_argv`'s sandbox, which never binds the checkout at all. Per
+    occurrence, not a blind substring replace: (a) the `repo` argument's own
+    symlink form AND its resolved target both count (a symlinked
+    `ROOT/repos/<project>` repo argument, verify naming the resolved path);
+    (b) a path under the project's configured `venv` is left byte-identical —
+    it is bound into the sandbox separately, never copied into `tree_dir`;
+    (c) a path that does not actually exist under `tree_dir` (deleted,
+    gitignored, or simply foreign) is left as-is, so `_prove_view_paths`
+    catches it as a failure rather than pointing at nothing."""
+    tree_s = str(pathlib.Path(tree_dir))
+    repo_p = pathlib.Path(repo)
+    variants = [str(repo_p)]
+    try:
+        resolved = str(repo_p.resolve())
+        if resolved not in variants:
+            variants.append(resolved)
+    except OSError:
+        pass
+    venv_prefixes = [f"{v}/{venv_rel}" for v in variants] if venv_rel else []
+
+    def repl(m):
+        token = m.group(1)
+        for v in variants:
+            if token == v or token.startswith(v + "/"):
+                if any(token == vp or token.startswith(vp + "/") for vp in venv_prefixes):
+                    return token
+                candidate = tree_s + token[len(v):]
+                return candidate if pathlib.Path(candidate).exists() else token
+        return token
+
+    return _PATH_TOKEN_RE.sub(repl, text)
+
+
+def _rewrite_verify(text: str, repo, tree_dir, view, venv_rel=None) -> bytes:
+    """Applies `_rewrite_repo_paths` (AC7), then inserts ONE static line,
+    first thing after the shebang and before the script's own `set -e...`
+    (so a `grading.env` not yet written, or written empty, never trips
+    `set -e` on a false `[ -s ... ]`): a conditional source of
+    `<view>/grading.env` when it exists and is non-empty, a no-op otherwise
+    (R12.6/AC9). A verify script naming no checkout-absolute path and run
+    before any `grading.env` exists comes back byte-identical but for that
+    one inserted line."""
+    rewritten = _rewrite_repo_paths(text, repo, tree_dir, venv_rel)
+    lines = rewritten.split("\n", 1)
+    shebang, rest = (lines[0], lines[1]) if rewritten.startswith("#!") else ("", rewritten)
+    source_line = f'[ -s "{view}/grading.env" ] && . "{view}/grading.env"'
+    body = "\n".join([source_line, rest]) if rest else source_line
+    out = f"{shebang}\n{body}" if shebang else body
+    return out.encode()
 
 
 def build(spec: str, repo, base_sha: str, ready_sha: str, spawn: str) -> pathlib.Path:
@@ -76,7 +135,9 @@ def build(spec: str, repo, base_sha: str, ready_sha: str, spawn: str) -> pathlib
     (view / "spec.md").write_bytes(spec_path.read_bytes())
 
     verify_dst = view / "verify.sh"
-    verify_dst.write_bytes(verify_path.read_bytes())
+    import grading_env  # project name = repo's own basename (ROOT/repos/<project> convention)
+    venv_rel = grading_env.project_venv(repo.name)
+    verify_dst.write_bytes(_rewrite_verify(verify_path.read_text(), repo, tree_dir, view, venv_rel=venv_rel))
     verify_dst.chmod(0o755)
 
     seat_dir = view / "seat"
@@ -144,13 +205,15 @@ def _claude_launcher():
     return exe, resolved
 
 
-def bwrap_argv(view, *, doit_src, venvs: tuple = ()) -> list:
+def bwrap_argv(view, *, doit_src, venvs: tuple = (), binds: tuple = ()) -> list:
     """A true allowlist per SD8 (AC4): binds only `/usr`, `/bin`, `/lib`,
     `/lib64`, `/etc`, the claude install dir + launcher, `doit_src`'s own
     `src/`, `agents/`, `scripts/` and `doit` (individually, never the bare
-    checkout root), any path in `venvs`, `view` and `config_dir()`'s own
-    directory (rw) — nothing else. `$HOME`, `~/.claude`, `$DOIT_ROOT` (seat
-    included), any repository, and any `.git` are simply absent."""
+    checkout root), any path in `venvs`, every `(src, dst)` pair in `binds`
+    (L-spec-0481/R12.2 — `grading_env.sandbox_binds`'s own node_modules/venv
+    pairs, always `--ro-bind`, never `--bind`), `view` and `config_dir()`'s
+    own directory (rw) — nothing else. `$HOME`, `~/.claude`, `$DOIT_ROOT`
+    (seat included), any repository, and any `.git` are simply absent."""
     view = pathlib.Path(view)
     doit_src = pathlib.Path(doit_src)
     cfg = config_dir()
@@ -171,6 +234,8 @@ def bwrap_argv(view, *, doit_src, venvs: tuple = ()) -> list:
     ]
     for v in venvs:
         ro_pairs.append((str(v), str(v)))
+    for src, dst in binds:
+        ro_pairs.append((str(src), str(dst)))
 
     seen, ro = set(), []
     for pair in ro_pairs:

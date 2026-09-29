@@ -978,6 +978,23 @@ def provision_sweep_env(sweep_dir, project_checkout):
     return "readonly"
 
 
+def held_capability(all_ev, subject, required):
+    """L-spec-0481/R12.3: the first open hold (`grading_env.CAPABILITIES`
+    order) covering one of `required` for `subject` — its own hold-subject
+    string (`capability:NAME` or `capability:NAME:SUBJECT`, SD-R12-6a: the two
+    spec-local capabilities only cover THIS subject, never another spec's
+    identical failure). `None` when nothing open covers it."""
+    import fold, grading_env
+    holds = fold.capability_holds(all_ev)
+    for cap in grading_env.CAPABILITIES:
+        if cap not in required:
+            continue
+        subj = f"capability:{cap}:{subject}" if cap in grading_env.SPEC_LOCAL else f"capability:{cap}"
+        if subj in holds:
+            return subj
+    return None
+
+
 def grading_budget(all_ev, subject):
     """L-charter-0042 R10(b)/(c): a `role=grader` dispatch is refused, before any
     spend, when (b) some criterion has been rejected by a grader in two-or-more
@@ -1057,12 +1074,18 @@ def main(a):
     flag_seat = bool(getattr(a, "seat", False) or os.environ.get("DOIT_SEAT"))
     backend = mm["backend"] or ("seat" if flag_seat else "claude-p")
     meta.update(backend=backend, spawn_path=backend, model_requested=mm["model"], model_map=mm["source"])
+    grading_view = None  # L-spec-0481/R12.2-R12.3: set once a grader's own view is built; `fail`
+                         # below reads it (closure, late-bound) so a preflight refusal — or any
+                         # LATER failure in this same run — tears the private cluster down at, never
+                         # before, the terminal event it emits (SD-R12-3c).
 
     def fail(why, reason=None):
         kv = {"why": why}
         if reason is not None:
             kv["reason"] = reason
         emit(ledger, base, "spawn-failed", **kv, **meta)
+        if grading_view is not None:
+            grading_env.teardown(grading_view)
         print(f"FAILED {spawn}: {why}", file=sys.stderr)
         sys.exit(1)
 
@@ -1161,6 +1184,78 @@ def main(a):
         if "COMMIT-SHAPE" in fold.standing_rejects(g_specs.get(a.subject, {"evs": []})["evs"]):
             fail(f"{a.subject}: COMMIT-SHAPE stands — refusing role=grader before any spend",
                  reason="commit-shape")
+    # L-spec-0481/R12.3-R12.6: hold-check, then provision+prove in the spawn's OWN
+    # view/cwd, before any spend — scoped to the entry points this unit builds
+    # (Entry points a/b/c): a grader on the seat backend (its view is built here,
+    # before dsn_role, so preflight proves inside the SAME sandbox/env the run
+    # uses); a grader resolving to a non-seat backend (claude-p/codex) whose own
+    # required() is non-empty — there is something to prove and no view anywhere
+    # to prove it in — is refused before any spend (AC12(iii)); a non-seat grader
+    # requiring nothing is untouched (nothing for the missing view to have
+    # blocked); and a reviewer of any backend (read-only, against its cwd — never
+    # a view).
+    import grading_env
+    grader_seat = a.role == "grader" and backend == "seat"
+    if a.role == "grader" and not grader_seat:
+        gsp_nv, gvp_nv = CONTENT / f"{a.subject}.md", CONTENT / f"verify-{a.subject}-grader.sh"
+        g_required_nv = grading_env.required(
+            "grader", gsp_nv.read_text() if gsp_nv.is_file() else "",
+            gvp_nv.read_text() if gvp_nv.is_file() else "", a.project or pathlib.Path(cwd).name)
+        if g_required_nv:
+            fail(f"{a.subject}: backend={backend} builds no view to prove {g_required_nv[0]} in — "
+                 "refusing role=grader before any spend", reason="preflight:no-view")
+    if grader_seat or a.role == "reviewer":
+        gproject = a.project or pathlib.Path(cwd).name
+        if a.role == "grader":
+            gsp, gvp = CONTENT / f"{a.subject}.md", CONTENT / f"verify-{a.subject}-grader.sh"
+            g_required = grading_env.required("grader", gsp.read_text() if gsp.is_file() else "",
+                                              gvp.read_text() if gvp.is_file() else "", gproject)
+        else:
+            g_required = grading_env.required("reviewer", "", "", gproject, mcp_config=bool(a.mcp_config),
+                                              review_account=(ROOT / f"review-account-{gproject}").exists())
+        held_subj = held_capability(fold.read_events(), a.subject, g_required)
+        if held_subj:
+            fail(f"{a.subject}: an open hold covers {held_subj} — refusing role={a.role} before any spend",
+                 reason=f"held:{held_subj.split(':')[1]}")
+        if grader_seat:
+            if not a.project:
+                fail("grader dispatch needs --project to build the view — not spent")
+            build_done = next((e for e in reversed(fold.read_events())
+                               if e.get("subject") == a.subject and e.get("type") == "build-done"), None)
+            if build_done is None or not build_done.get("ready_sha"):
+                fail(f"{a.subject} has no build-done with a ready_sha — nothing to grade")
+            import grader_view
+            try:
+                grading_view = grader_view.build(a.subject, ROOT / "repos" / a.project,
+                                                 build_done.get("base_sha"), build_done["ready_sha"], spawn)
+            except Exception as exc:
+                fail(f"grader-view build failed: {exc}")
+            emit(ledger, base, "grader-view-built", view=str(grading_view), ready_sha=build_done["ready_sha"])
+            pf_view, pf_repo = grading_view, HERE.parent
+        else:
+            pf_view, pf_repo = pathlib.Path(cwd), HERE.parent
+        failures = grading_env.preflight(a.role, a.subject, pf_view, gproject, repo=pf_repo,
+                                         mcp_config=a.mcp_config)
+        if failures:
+            for cap, reason in failures:
+                emit(ledger, base, "grading-preflight-failed", role=a.role, capability=cap, reason=reason)
+            for cap, _ in failures:
+                subj = f"capability:{cap}:{a.subject}" if cap in grading_env.SPEC_LOCAL else f"capability:{cap}"
+                if subj not in fold.capability_holds(fold.read_events()):
+                    cap_base = {**base, "subject": subj}
+                    emit(ledger, cap_base, "capability-hold", capability=cap, spec=a.subject, source="preflight")
+                    emit(ledger, cap_base, "escalation-blocking", kind="capability-hold", owner="thinker",
+                         default=f"hold stays; no grader or reviewer is dispatched for a spec needing {cap}",
+                         deadline=(datetime.now(timezone.utc) + timedelta(hours=24)).isoformat(timespec="seconds"),
+                         revert=f"doit append unblocked {subj}")
+            first_cap = next(c for c in grading_env.CAPABILITIES if c in dict(failures))
+            why = (f"{a.subject}: preflight could not prove {first_cap} — refusing role={a.role} "
+                  "before any spend")
+            emit(ledger, base, "spawn-failed", why=why, reason=f"preflight:{first_cap}", **meta)
+            if grading_view is not None:
+                grading_env.teardown(grading_view)
+            print(f"FAILED {spawn}: {why}", file=sys.stderr)
+            sys.exit(1)
     prior = next((e for e in fold.read_events() if e.get("type") == "spawn-failed"
                   and e.get("packet_sha256") == meta["packet_sha256"]
                   and e.get("contract_sha256") == meta["contract_sha256"]
@@ -1219,30 +1314,19 @@ def main(a):
     # event, so `dsn_role` on it is never stale by the time the spec's own
     # verify script (packet.verify_script) decides whether to export it.
     dsn_role = None
-    view = None
-    # R8/L-spec-0437: for a grader dispatch landing on the seat backend only, the
-    # spawn's own isolated filesystem view is built HERE — before any spend, before
-    # dsn_role's own provisioning — so a bwrap-sandboxed pane has a bound path to
-    # find its own packet at (sibling `grader-view`'s Produces). Every other
-    # role/backend combination (incl. the codex->seat fallback below) never enters
-    # this block; `view` stays `None` and every later run_seat call is unaffected.
-    if a.role == "grader" and backend == "seat":
-        if not a.project:
-            fail("grader dispatch needs --project to build the view — not spent")
-        grader_view_ev = fold.read_events()
-        build_done = next((e for e in reversed(grader_view_ev)
-                           if e.get("subject") == a.subject and e.get("type") == "build-done"), None)
-        if build_done is None or not build_done.get("ready_sha"):
-            fail(f"{a.subject} has no build-done with a ready_sha — nothing to grade")
-        import grader_view
-        try:
-            view = grader_view.build(a.subject, ROOT / "repos" / a.project,
-                                     build_done.get("base_sha"), build_done["ready_sha"], spawn)
-        except Exception as exc:
-            fail(f"grader-view build failed: {exc}")
-        emit(ledger, base, "grader-view-built", view=str(view), ready_sha=build_done["ready_sha"])
-    if a.role in ("builder", "grader"):
+    # R8/L-spec-0437, moved earlier by L-spec-0481/R12.3: `grading_view` (grader,
+    # seat backend) was built and proven above, before this point — carried into
+    # `view` for `run_seat`'s own bound path, unchanged from here down.
+    view = grading_view
+    if builder:
         dsn_role = provision_worktree_env(cwd, ROOT / "repos" / a.project) if a.project else "absent"
+    elif a.role == "grader":
+        # L-spec-0481/R12.6/AC19: a grader receives NO production DSN of any kind
+        # (SD-R12-3b) — `provision_worktree_env` is never called for it. `private`
+        # when `db` was proven into its own view above, `none` otherwise
+        # (Assumption 3); the grader on claude-p/codex (no `g_required` computed
+        # this round — Assumptions §1, see the card) is `none` too.
+        dsn_role = "private" if grader_seat and "db" in g_required else "none"
     elif a.role == "owed-sweeper":
         # L-spec-9004 OC1: the sweeper's own private, per-sweep `cwd` (never
         # the shared checkout) gets a read-only DSN copy through the sibling,
@@ -1270,6 +1354,8 @@ def main(a):
         kv = {"role": a.role, "backend": backend, **waiter_kv}
         if a.role in ("grader", "owed-sweeper"):
             kv["dsn_role"] = dsn_role
+        if grader_seat:  # L-spec-0481/AC10/AC21: which lane just proved this run's own capabilities
+            kv["sandbox"] = grading_env.sandbox_mode()
         emit(ledger, base, "spawn-started", **kv)
     packet += f"\n\nspawn_id: {spawn}\n"
     tools = [t.strip() for t in fm["tools"].split(",") if t.strip() != "StructuredOutput"]
@@ -1434,6 +1520,8 @@ def main(a):
     if off_manifest is not None:
         done["off_manifest"] = off_manifest
     emit(ledger, base, "spawn-done", **done)
+    if grading_view is not None:  # L-spec-0481/SD-R12-3c: after the terminal event, never before
+        grading_env.teardown(grading_view)
     print(json.dumps({"spawn": spawn, "ok": True, **meta}))
 
 

@@ -280,6 +280,11 @@ assert "verify.sh" in item5_seat and "cwd `tree/`" in item5_seat, item5_seat
 assert str(WT) not in item5_seat and str(WT2) not in item5_seat, "AC10: no host-absolute path leaks into item 5"
 N += 1
 
+# L-spec-0481 AC13: the seat item 5 names `grading.env` as the environment
+# every check runs under, no host-absolute path (already asserted above).
+assert "grading.env" in item5_seat, item5_seat
+N += 1
+
 packet.models.resolve = _resolve437("claude-p")
 try:
     p437_cp = packet.p_grader(c437a)
@@ -296,6 +301,10 @@ item5_base = p437_base[idx437]
 assert item5_base.startswith(f"5. Checker: `verify-{c437a.a.subject}`"), item5_base
 assert f"re-run it with cwd `{c437a.worktree()}`." in item5_base, item5_base
 assert "verify.sh" not in item5_base and "cwd `tree/`" not in item5_base, item5_base
+N += 1
+
+# L-spec-0481 AC13: the non-seat item 5 line is unchanged — no grading.env mention.
+assert "grading.env" not in item5_base, item5_base
 N += 1
 
 # ── 4. spec-writer (rework) ──────────────────────────────────────────────────
