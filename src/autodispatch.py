@@ -62,9 +62,22 @@ def _since(events, sid, evs, charter, wave):
     marker_ts = _newest_marker_ts(evs)
     if wave is None or charter is None:
         return marker_ts
+    # Fast path (Thinker 2026-09-29, operator-approved build-speed fix): `wave_blocker` only
+    # ever counts L-spec subjects whose charter stem is `charter`, and its answer can only
+    # change at an event of one of those subjects. So replay just those subjects' events and
+    # re-evaluate only there. Same answer as the full replay; O(sibling events^2) instead of
+    # O(all events^2) per spec (the full replay made each tick take 8+ minutes).
+    siblings = set()
+    for e in events:
+        subj = e.get("subject")
+        if (subj and subj != sid and str(subj).startswith("L-spec-") and e.get("charter")
+                and pathlib.Path(e["charter"]).stem == charter):
+            siblings.add(subj)
     ordered = sorted(events, key=lambda e: str(e.get("ts", "")))
     was_blocked, settle_ts, prefix = False, None, []
     for e in ordered:
+        if e.get("subject") not in siblings:
+            continue
         prefix.append(e)
         now_blocked = dispatch.wave_blocker(prefix, charter, sid, wave) is not None
         if was_blocked and not now_blocked:
