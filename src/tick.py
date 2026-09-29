@@ -38,6 +38,11 @@ POLL_STEP = 0.05              # tick.wait's poll granularity — fine enough for
 # check that already lapsed.
 SPEC_DONE = ("accepted", "shipped-owed-evidence", "shipped-owed-expired", "dropped",
              "closed-unbuilt", "closed-shipped")
+# L-charter-0046/L-spec-0473, R3: the five L2 conjuncts `fold.l2_complete` already
+# required to reach "L2-complete", restated once at the moment of close —
+# invariant across every charter, never computed per-charter (Assumptions).
+PROVING_CLOSE_REASON = ("every owed check discharged; sweep at fixpoint; no open in-scope brief; "
+                        "charter review complete or not owed")
 
 
 def tick_path():
@@ -405,6 +410,55 @@ def _record():
         grader_serve.run(ev)
     except Exception as e:
         grader_serve_error = f"{e}"
+    # L-charter-0046/L-spec-0473, R1/R3/R4: the tick's own Proving bookkeeping —
+    # automatic entry, close, reopen and the two alarms — on this SAME `specs`/
+    # `charters` fold, no extra re-read (Boundaries). Lazily imported and its own
+    # try/except, exactly like `look_error` above: a raise anywhere in this block
+    # never stops the tick's own heartbeat, and is named on this SAME tick event.
+    proving_error = None
+    try:
+        import proving, look  # noqa: PLC0415 — lazy, matches this file's own convention
+        for cid, c in charters.items():
+            if c["state"] in ("proving", "reopened"):
+                mine = [s for s in specs.values() if s["charter"] == cid and s["state"] != "void"]
+                title = next((e.get("title") for e in reversed(c["evs"])
+                              if e.get("type") == "charter-filed" and e.get("title")), cid)
+                review_owed = fold.charter_review_owed(c["evs"])
+                open_briefs = fold.open_briefs(c["evs"])
+                summ = proving.summary(cid, c["evs"], mine, fold.NOW, title=title,
+                                        review_owed=review_owed, open_briefs=open_briefs)
+                if proving.should_enter(c["evs"], mine):
+                    next_text = summ["next"]["text"] if summ["next"] is not None else "nothing remaining"
+                    dispatch.emit(tick_path(), {}, "charter-proving", subject=cid,
+                                  reason=f"{summ['remaining']} item(s) remain; next: {next_text}",
+                                  deadline=summ["deadline"])
+                for item in proving.to_reopen(c["evs"], mine, fold.NOW):
+                    dispatch.emit(tick_path(), {}, "charter-reopened", subject=cid,
+                                  spec=item["spec"], criterion=item["criterion"],
+                                  failed_src=item["failed_src"])
+                    look.emit_once("proving-check-failed",
+                                   f"{cid}|{item['spec']}|{item['criterion']}", "thinker",
+                                   {"spec": item["spec"], "criterion": item["criterion"],
+                                    "failed_src": item["failed_src"]}, ev)
+                if fold.ts(summ["deadline"]) < fold.NOW:
+                    key = f"{cid}|{summ['deadline']}"
+                    fired = any(e.get("type") == "brief" and e.get("condition") == "proving-overdue"
+                               and e.get("key") == key for e in ev)
+                    if not fired:
+                        look.emit_once("proving-overdue", key, "operator",
+                                       {"next": (summ["next"]["text"] if summ["next"] is not None else None),
+                                        "owner": summ["owner"], "deadline": summ["deadline"]}, ev)
+            elif c["state"] == "L2-complete":
+                proving_evs = [e for e in c["evs"] if e["type"] == "charter-proving"]
+                if proving_evs:
+                    newest_proving = max(fold.ts(e["ts"]) for e in proving_evs)
+                    closed_evs = [e for e in c["evs"] if e["type"] == "charter-closed"]
+                    newest_closed = max((fold.ts(e["ts"]) for e in closed_evs), default=None)
+                    if newest_closed is None or newest_closed < newest_proving:
+                        dispatch.emit(tick_path(), {}, "charter-closed", subject=cid,
+                                      reason=PROVING_CLOSE_REASON)
+    except Exception as e:
+        proving_error = f"{e}"
     # L-charter-0042/L-spec-0427, R1: the tick dispatches. LAST guarded step
     # before `todo = lane(...)`, on the SAME `ev`/`specs` — no re-read sits
     # between here and `lane()` (Boundaries), so an event `run()` appends
@@ -436,6 +490,8 @@ def _record():
         kv["grader_serve_error"] = grader_serve_error
     if autodispatch_error:
         kv["autodispatch_error"] = autodispatch_error
+    if proving_error:
+        kv["proving_error"] = proving_error
     dispatch.emit(tick_path(), {}, "tick", **kv)
     return todo
 
