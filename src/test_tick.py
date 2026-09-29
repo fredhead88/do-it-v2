@@ -245,9 +245,16 @@ write("L-operator-0007.jsonl",            # l1-complete is EMITS-gated to planne
 ev, specs, charters = folded()
 assert specs["L-spec-0077"]["state"] == "written" and specs["L-spec-0077"]["charter"] is None, \
     "the fixture is a genuinely free-standing spec, or AC3 proves nothing"
-assert charters["L-charter-0007"]["state"] == "L1-complete", "the fixture charter really is at L1-complete"
+assert charters["L-charter-0007"]["state"] == "proving", \
+    "the fixture charter has no specs, no sweep-fixpoint -> proving (L-spec-0472/SD1/SD2)"
 assert "L-spec-0077 · written" in tick.lane(specs, charters, events=ev), \
     "R6: a spec's presence on the lane never depends on any charter's state"
+# 0472-AC7: 0 non-void specs, l1-complete, no sweep-fixpoint, `covers` unset
+# (so a review is also owed) -> "proving" with an executor-owned "sweep" item
+# sorting before the co-existing "charter-review" one (_KIND_ORDER).
+assert "L-charter-0007 · proving · sweep" in tick.lane(specs, charters, events=ev), \
+    tick.lane(specs, charters, events=ev)
+print("0472-AC7 ok")
 
 # AC8 (L-spec-0125 R11) — a `Covers: none` charter with every other L2 conjunct
 # true, and no `charter-review-complete` event ever appended, still reaches
@@ -283,27 +290,19 @@ for f in ("L-operator-1101.jsonl", "L-builder-1101.jsonl", "L-grader-1101.jsonl"
           "L-reviewer-1101.jsonl", "L-executor-1101.jsonl"):
     (EV / f).unlink()
 
-# AC7/AC8 (R11) — the wave-1 seam decides the L1-complete charter, and only it.
-seen = {}
-
-
-def stub(events, charter):
-    seen.update(n=len(events), cid=charter["id"] if isinstance(charter, dict) else charter)
-    return seen["verdict"]
-
-
-seen["verdict"] = (True, True, False)          # all accepted, fixpoint derived, no review owed
-fold.closable = stub
-lanes = tick.lane(specs, charters, events=ev)
-assert "L-charter-0007 · L1-complete" not in lanes, \
-    "AC7: a fully-accepted charter closes without an Executor decision"
-assert seen["n"] == len(ev) and seen["cid"] == "L-charter-0007", \
-    "closable() is handed the whole ledger, never the charter's own c['evs']"
-assert "L-spec-0077 · written" in lanes, "R6 again: the charter leaving does not take the free spec with it"
-seen["verdict"] = (True, True, True)           # a charter-review is still owed
-assert "L-charter-0007 · L1-complete" in tick.lane(specs, charters, events=ev), \
-    "AC8: a review still owed is the Executor's dispatch to make"
-del fold.closable                              # back to the fallback for everything below
+# L-charter-0046/fold-proving-state (L-spec-0472), fix 5: the AC7/AC8 stub
+# sub-block that used to sit here tested the wave-1 `closable()` seam's
+# L1-complete-only branch of `waiting()` on L-charter-0007 — a branch that
+# charter can no longer reach, since it now folds straight to "proving" the
+# moment SD1/SD2 land (asserted above). The whole sub-block (its
+# `fold.closable = stub` assignment AND its trailing `del fold.closable`,
+# together — never the assignment alone, which would delete the REAL
+# `fold.closable` for every fixture below it) is removed. The two cases it
+# used to prove are re-proven for real, without a stub, by 0472-AC7/AC9 below;
+# the real `fold.closable` (never reassigned above) stays bound for the rest
+# of this file — asserted directly here (0472-AC13's own regression).
+assert getattr(fold, "closable", None) is not None, \
+    "the real fold.closable must never be left deleted"
 
 # AC11 — the fallback mirrors fold.fold()'s FULL L2 conjunction: an open in-scope
 # brief holds the charter at L1-complete, so it must stay on the lane for the
@@ -317,20 +316,94 @@ write("L-operator-0011.jsonl",
 write("L-charter-reviewer-0011.jsonl", {"type": "charter-review-complete", "subject": "L-charter-0011"})
 ev, specs, charters = folded()
 c11 = charters["L-charter-0011"]
-assert c11["state"] == "L1-complete" and c11["briefs"] == 1 and c11["owed"] == 0, \
-    "the fold itself holds this charter at L1 on the brief alone"
+assert c11["state"] == "proving" and c11["briefs"] == 1 and c11["owed"] == 0, \
+    "L-spec-0472/SD1/SD2: sweep-fixpoint + charter-review-complete already present, " \
+    "only the open brief blocks L2 -> proving, not L1-complete"
 assert tick.closable_fallback(ev, c11) == (True, False, False), \
     "AC11: accepted and reviewed, but an open brief means no fixpoint"
-assert "L-charter-0011 · L1-complete" in tick.lane(specs, charters, events=ev), \
-    "AC11: it stays on the lane, or the brief is never authored and reap never comes"
+assert "L-charter-0011 · proving · brief" in tick.lane(specs, charters, events=ev), \
+    "AC11/0472-AC8: it stays on the lane via its own open-brief item, or the brief is " \
+    "never authored and reap never comes"
 brief_src = next(e["_src"] for e in ev if e["type"] == "brief" and e.get("subject") == "L-charter-0011")
 write("L-executor-0011.jsonl", {"type": "brief-answered", "subject": "L-charter-0011", "ref": brief_src})
 ev, specs, charters = folded()
 assert tick.closable_fallback(ev, charters["L-charter-0011"]) == (True, True, False), \
     "answer the brief and the same fallback reports the fixpoint derived"
+# 0472-AC8: answering the brief clears the LAST blocking conjunct — the
+# charter folds straight to L2-complete, never back through "proving" first.
+assert charters["L-charter-0011"]["state"] == "L2-complete", charters["L-charter-0011"]["state"]
+assert "L-charter-0011 · L2-complete" in tick.lane(specs, charters, events=ev), \
+    "0472-AC8: the reap branch, not stuck awaiting anything else"
+print("0472-AC8 ok")
 (EV / "L-operator-0011.jsonl").unlink()
 (EV / "L-charter-reviewer-0011.jsonl").unlink()
 (EV / "L-executor-0011.jsonl").unlink()
+
+# 0472-AC9 — fully accepted, sweep-fixpoint, no open brief, but `covers`
+# UNSET (not "none") and no charter-review-* event: -> "proving",
+# c["proving"]["items"] == [{"kind": "charter-review", ...}] (exactly one,
+# owner "executor") — the direct, non-stubbed replacement for "a review
+# still owed is the Executor's dispatch to make".
+C0472_9, S0472_9 = "L-charter-9415", "L-spec-9415"
+write("L-operator-9415.jsonl",
+      {"type": "charter-filed", "subject": C0472_9},
+      {"type": "l1-complete", "subject": C0472_9})
+write("L-builder-9415.jsonl",
+      {"type": "spec-written", "subject": S0472_9, "charter": C0472_9},
+      {"type": "build-started", "subject": S0472_9},
+      {"type": "build-done", "subject": S0472_9})
+write("L-grader-9415.jsonl", {"type": "verdict", "subject": S0472_9, "confirmed": True})
+write("L-reviewer-9415.jsonl", {"type": "review", "subject": S0472_9, "depth": "gates-only"})
+write("L-executor-9415.jsonl",
+      {"type": "shipped", "subject": S0472_9},
+      {"type": "sweep-fixpoint", "subject": C0472_9})
+ev, specs, charters = folded()
+assert specs[S0472_9]["state"] == "accepted", specs[S0472_9]["state"]
+assert charters[C0472_9]["state"] == "proving", charters[C0472_9]["state"]
+items0472_9 = charters[C0472_9]["proving"]["items"]
+assert (len(items0472_9) == 1 and items0472_9[0]["kind"] == "charter-review"
+        and items0472_9[0]["owner"] == "executor"), items0472_9
+assert f"{C0472_9} · proving · charter-review" in tick.lane(specs, charters, events=ev), \
+    tick.lane(specs, charters, events=ev)
+print("0472-AC9 ok")
+for f0472_9 in ("L-operator-9415.jsonl", "L-builder-9415.jsonl", "L-grader-9415.jsonl",
+                "L-reviewer-9415.jsonl", "L-executor-9415.jsonl"):
+    (EV / f0472_9).unlink()
+
+# 0472-AC10 — a proving charter whose only remaining item is an `owed-check`
+# (owner "owed-sweeper") is ABSENT from tick.lane(...) entirely: no item's
+# owner is "executor". `covers: "none"` + sweep-fixpoint + no open brief
+# keeps this charter's ONLY remaining item the owed one.
+C0472_10, S0472_10 = "L-charter-9416", "L-spec-9416"
+write("L-operator-9416.jsonl",
+      {"type": "charter-filed", "subject": C0472_10, "covers": "none"},
+      {"type": "l1-complete", "subject": C0472_10})
+write("L-builder-9416.jsonl",
+      {"type": "spec-written", "subject": S0472_10, "charter": C0472_10},
+      {"type": "build-started", "subject": S0472_10},
+      {"type": "build-done", "subject": S0472_10})
+write("L-grader-9416.jsonl", {"type": "verdict", "subject": S0472_10, "confirmed": True})
+write("L-reviewer-9416.jsonl", {"type": "review", "subject": S0472_10, "depth": "gates-only"})
+write("L-executor-9416.jsonl",
+      {"type": "shipped", "subject": S0472_10, "ts": (fold.NOW - datetime.timedelta(days=5))
+       .isoformat(timespec="seconds")},
+      {"type": "sweep-fixpoint", "subject": C0472_10})
+write("L-spec-writer-9416.jsonl",
+      {"type": "owed-ac", "subject": S0472_10, "criterion": "AC1",
+       "ts": (fold.NOW - datetime.timedelta(days=10)).isoformat(timespec="seconds"),
+       "wake_at": (fold.NOW - datetime.timedelta(days=7)).isoformat(timespec="seconds")})
+ev, specs, charters = folded()
+assert specs[S0472_10]["state"] == "shipped-owed-due", specs[S0472_10]["state"]
+assert charters[C0472_10]["state"] == "proving", charters[C0472_10]["state"]
+items0472_10 = charters[C0472_10]["proving"]["items"]
+assert (len(items0472_10) == 1 and items0472_10[0]["kind"] == "owed-check"
+        and items0472_10[0]["owner"] == "owed-sweeper"), items0472_10
+lane0472_10 = tick.lane(specs, charters, events=ev)
+assert not any(row.startswith(C0472_10 + " ") for row in lane0472_10), lane0472_10
+print("0472-AC10 ok")
+for f0472_10 in ("L-operator-9416.jsonl", "L-builder-9416.jsonl", "L-grader-9416.jsonl",
+                 "L-reviewer-9416.jsonl", "L-executor-9416.jsonl", "L-spec-writer-9416.jsonl"):
+    (EV / f0472_10).unlink()
 
 # AC4 (R7) — a `blocked` event is a footprint wait, not a lane exclusion. The
 # Executor writes one when two units share a footprint; nothing here reads it.

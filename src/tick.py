@@ -258,17 +258,33 @@ def lane(specs, charters, busy=frozenset(), reaped=frozenset(), events=(), inbou
     def waiting(c):
         if c["state"] in tree_cleanup.CLOSED:
             return c["id"] not in reaped
+        # L-charter-0046/fold-proving-state (L-spec-0472), R5/SD8: a Proving or
+        # Reopened charter stays on the Executor's lane exactly when it has an
+        # executor-owned remaining item (a sweep, a brief, a review, a spec
+        # awaiting grade/review) — never on an owed-sweeper/thinker/operator-
+        # owned one alone.
+        if c["state"] in ("proving", "reopened"):
+            items = (c.get("proving") or {}).get("items", [])
+            return any(i["owner"] == "executor" for i in items)
         if c["state"] != "L1-complete":
             return False
         if not events:
             return True      # nothing to judge closability from: the charter stays the Executor's
         accepted, fixpoint, review_owed = (getattr(fold, "closable", None) or closable_fallback)(events, c)
         return not (accepted and fixpoint and not review_owed)
+
+    def charter_row(c):
+        if c["state"] in ("proving", "reopened"):
+            items = (c.get("proving") or {}).get("items", [])
+            kind = next((i["kind"] for i in items if i["owner"] == "executor"), None)
+            return f"{c['id']} · {c['state']} · {kind}"
+        return f"{c['id']} · {c['state']}"
+
     packet_busy = _carry_packet_busy(busy)
     return sorted([f"{s['id']} · {s['state']}" for s in specs.values()
                    if s["state"] in ACTIONABLE and s["id"] not in busy
                    and (s["state"] != "written" or _dispatchable_stale_note(s))]
-                  + [f"{c['id']} · {c['state']}" for c in charters.values()
+                  + [charter_row(c) for c in charters.values()
                      if c["id"] not in busy and waiting(c)]
                   + [f"inbound:{i['source']} · uncarried" for i in inbound
                      if i.get("source") not in busy and i.get("source") not in packet_busy])

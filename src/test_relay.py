@@ -506,4 +506,32 @@ ok(sorted(row["spawn"] for row in none10) == ["L-planner-9010", "L-spec-writer-9
    f"installsync-0431 AC10: served_by=None is the no-filter sentinel — both rows: {none10}")
 print("installsync-0431 AC10 ok")
 
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-0472 · fold-proving-state (L-charter-0046) — 0472-AC11
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── 0472-AC11: a "proving"-state charter (the 0472-AC1 shape: l1-complete,
+# one accepted spec) is counted by neither `_in_flight` (every BUILD_DONE
+# spec state is already in `_OUT_OF_FLIGHT`) nor `open_charters` (excluded —
+# "l1-complete" is already in its own event types, the existing, unchanged
+# filter). SD12/Boundaries: no behavior in relay.py changes — this is a
+# regression test only. ──────────────────────────────────────────────────────
+d11 = scene("proving-0472")
+ev(d11, "L-builder-a", "spec-written", "L-spec-9420", charter="L-charter-9420")
+ev(d11, "L-builder-a", "build-started", "L-spec-9420")
+ev(d11, "L-builder-a", "build-done", "L-spec-9420")
+ev(d11, "L-grader-a", "verdict", "L-spec-9420", confirmed=True)
+ev(d11, "L-reviewer-a", "review", "L-spec-9420", depth="gates-only")
+ev(d11, "L-executor-a", "shipped", "L-spec-9420")
+ev(d11, "L-planner-a", "l1-complete", "L-charter-9420")
+events0472_11 = read()
+specs0472_11, charters0472_11, _, _ = fold.fold(events0472_11)
+ok(specs0472_11["L-spec-9420"]["state"] == "accepted", specs0472_11["L-spec-9420"]["state"])
+ok(charters0472_11["L-charter-9420"]["state"] == "proving", charters0472_11["L-charter-9420"]["state"])
+ok(relay._in_flight("L-charter-9420", specs0472_11) is False,
+   "0472-AC11: every BUILD_DONE spec state is already in relay._OUT_OF_FLIGHT")
+ok("L-charter-9420" not in relay.open_charters(events0472_11),
+   "0472-AC11: l1-complete already excludes it from relay.open_charters, unchanged")
+print("0472-AC11 ok")
+
 print(f"relay: {N} checks pass")
