@@ -174,9 +174,11 @@ def _prove_db_schema(view, row, project, dsn):
 def _prove_view_paths(view):
     vs = pathlib.Path(view) / "verify.sh"
     text = vs.read_text() if vs.is_file() else ""
-    tree = str(pathlib.Path(view) / "tree")
+    # The whole view counts, not only view/tree: verify.sh sources the view's own
+    # grading.env (AC7/AC11), which lives at the view root.
+    inside = str(pathlib.Path(view)) + "/"
     bad = [t for t in _ABS_PATH_RE.findall(text)
-           if not t.startswith(tree) and not (pathlib.Path(t).is_file() and os.access(t, os.X_OK))]
+           if not t.startswith(inside) and not (pathlib.Path(t).is_file() and os.access(t, os.X_OK))]
     if bad:
         return False, f"absolute path(s) outside the view, not an interpreter: {', '.join(sorted(set(bad))[:3])}"
     return True, None

@@ -14,7 +14,10 @@
 [project.albert-scott]
 db_env = ["SUPABASE_DB_URL", "DATABASE_URL", "PG_PARITY_DB_URL"]
 node_dirs = ["dashboard"]
-venv = ".venv"
+# Absolute: the checkout (~/.do-it/repos/albert-scott) is a symlink to
+# /opt/albert-scott, and the venv's script shebangs name the real path, which is
+# the path the sandbox must bind.
+venv = "/opt/albert-scott/.venv"
 
 [project.albert-scott.db_setup]
 argv = ["{venv}/bin/alembic", "-c", "alembic_supabase.ini", "upgrade", "head"]
