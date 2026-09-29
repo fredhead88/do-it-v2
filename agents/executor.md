@@ -259,6 +259,11 @@ deviation the builder must declare. Rework reuses the worktree. A missing
   revert="n/a — closed by re-measurement, not by choice"`. An escalation with
   no `measure=` is the operator's alone; "touch nothing on that subject" (the
   lane-table row above) still holds for it.
+- **One-time proving backfill**: once this spec ships, on your next pass run
+  `python3 src/proving.py --backfill --apply` once, then confirm with a bare
+  `python3 src/proving.py --backfill` (dry-run) that every listed charter
+  shows a `klass` and none is missing one — safe to run more than once
+  (idempotent), so there is no separate "already done" marker to track.
 
 ## Output
 

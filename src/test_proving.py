@@ -15,6 +15,7 @@ import proving   # noqa: E402
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 DOIT_PATH = str(REPO_ROOT / "doit")
+PROVING_PATH = str(pathlib.Path(__file__).resolve().parent / "proving.py")
 
 NOW = datetime.now(timezone.utc)
 
@@ -431,6 +432,221 @@ def test_ac12():
     print("AC12 ok")
 
 
+# --- 0474-AC1..AC6: proving.backfill() and its CLI (L-spec-0474, R6) ---
+#
+# These fixtures go through the REAL `fold.fold()` (`proving.backfill()`'s own
+# implementation), unlike every `ev()`/`phase()` fixture above which calls
+# `proving.phase()`/`summary()` directly and never folds. `fold.py`'s own
+# per-event admission loop (`EMITS`) drops any actor-gated event whose `actor`
+# does not match — so every `l1-complete`/`charter-proving`/`shipped`/
+# `charter-retracted`/`sweep-fixpoint`/`charter-review-complete`/`verdict`/
+# `review`/`tree-reaped` event below carries the SAME actor `fold.EMITS`
+# admits for that type, or it would silently vanish before `backfill()` ever
+# saw it.
+
+
+def _bev(etype, ts, subject, actor=None, **kw):
+    d = {"type": etype, "ts": ts, "subject": subject, **kw}
+    if actor is not None:
+        d["actor"] = actor
+    return d
+
+
+def _backfill_base_events():
+    """One charter in each of the four population branches: open (an
+    `L1-complete` charter with a `mine` spec stuck at `"building"`), proving
+    (`L1-complete` + `charter-proving` + one build-done `"shipped"` spec —
+    remaining lands at 2: a `spec-review` item plus a `sweep` item, since no
+    `sweep-fixpoint` is seeded), retracted (no `tree-reaped`), and closed —
+    L2-complete (every spec `"accepted"`, a `sweep-fixpoint`, a complete
+    charter review, no `tree-reaped`)."""
+    return [
+        _bev("l1-complete", stamp(10), "L-charter-9302", actor="operator", charter="L-charter-9302"),
+        _bev("build-started", stamp(9), "L-spec-93020001", charter="L-charter-9302"),
+
+        _bev("l1-complete", stamp(20), "L-charter-9304", actor="operator", charter="L-charter-9304"),
+        _bev("charter-proving", stamp(5), "L-charter-9304", actor="tick"),
+        _bev("shipped", stamp(6), "L-spec-93040001", actor="executor", charter="L-charter-9304"),
+
+        _bev("charter-retracted", stamp(3), "L-charter-9301", actor="operator"),
+
+        _bev("sweep-fixpoint", stamp(2), "L-charter-9303", actor="executor"),
+        _bev("charter-review-complete", stamp(1), "L-charter-9303", actor="charter-reviewer"),
+        _bev("shipped", stamp(15), "L-spec-93030001", actor="executor", charter="L-charter-9303"),
+        _bev("verdict", stamp(14), "L-spec-93030001", actor="grader", charter="L-charter-9303",
+             confirmed=True),
+        _bev("review", stamp(13), "L-spec-93030001", actor="reviewer", charter="L-charter-9303"),
+    ]
+
+
+def test_backfill_ac1():
+    rows = proving.backfill(_backfill_base_events(), NOW)
+    assert len(rows) == 4, rows
+    assert all(set(r.keys()) == {"charter", "klass", "reason"} for r in rows), rows
+    assert {r["klass"] for r in rows} == {"open", "proving", "retracted", "closed"}, rows
+    proving_row = next(r for r in rows if r["charter"] == "L-charter-9304")
+    assert proving_row["klass"] == "proving", proving_row
+    open_row = next(r for r in rows if r["charter"] == "L-charter-9302")
+    assert open_row["klass"] == "open", open_row
+    retracted_row = next(r for r in rows if r["charter"] == "L-charter-9301")
+    assert retracted_row["klass"] == "retracted" and retracted_row["reason"] == "retracted", retracted_row
+    closed_row = next(r for r in rows if r["charter"] == "L-charter-9303")
+    assert closed_row["klass"] == "closed" and closed_row["reason"] == "L2 predicate holds", closed_row
+    print("0474-AC1 ok")
+
+
+def test_backfill_ac2():
+    base = _backfill_base_events()
+    rows = proving.backfill(base, NOW)
+    charters_out = [r["charter"] for r in rows]
+    assert charters_out == sorted(charters_out), charters_out
+
+    events5 = base + [
+        # fifth: L2-complete WITH a tree-reaped -- excluded (already closed-and-cleaned)
+        _bev("sweep-fixpoint", stamp(2), "L-charter-9305", actor="executor"),
+        _bev("charter-review-complete", stamp(1), "L-charter-9305", actor="charter-reviewer"),
+        _bev("shipped", stamp(15), "L-spec-93050001", actor="executor", charter="L-charter-9305"),
+        _bev("verdict", stamp(14), "L-spec-93050001", actor="grader", charter="L-charter-9305",
+             confirmed=True),
+        _bev("review", stamp(13), "L-spec-93050001", actor="reviewer", charter="L-charter-9305"),
+        _bev("tree-reaped", stamp(1), "L-charter-9305", actor="executor"),
+        # sixth: plain "open" fold state, no l1-complete at all -- excluded
+        _bev("charter-filed", stamp(1), "L-charter-9306", actor="operator"),
+    ]
+    rows2 = proving.backfill(events5, NOW)
+    assert len(rows2) == 4, rows2
+    assert {r["charter"] for r in rows2} == {"L-charter-9301", "L-charter-9302",
+                                             "L-charter-9303", "L-charter-9304"}, rows2
+    print("0474-AC2 ok")
+
+
+def test_backfill_ac3():
+    p1 = {"remaining": 2, "next": {"kind": "owed-check", "due_at": "2026-10-03T00:00:00+00:00"}}
+    out1 = proving._proving_reason(p1)
+    assert out1 == "2 items remaining, next owed-check 2026-10-03", out1
+
+    p2 = {"remaining": 0, "next": None}
+    out2 = proving._proving_reason(p2)
+    assert out2 == "0 items remaining", out2
+    print("0474-AC3 ok")
+
+
+def test_backfill_ac4():
+    mine1 = [{"id": "L-spec-0011", "state": "building", "rejects": 0},
+             {"id": "L-spec-0012", "state": "accepted", "rejects": 0}]
+    out1 = proving._open_reason(mine1)
+    assert out1 == "L-spec-0011 building", out1
+
+    mine2 = [{"id": "L-spec-0013", "state": "shipped", "rejects": 2}]
+    out2 = proving._open_reason(mine2)
+    assert out2 == "L-spec-0013 shipped", out2
+
+    out3 = proving._open_reason([])
+    assert out3 == "no specs yet", out3
+    print("0474-AC4 ok")
+
+
+def test_backfill_ac5():
+    now5 = datetime.now(timezone.utc)
+
+    def iso5(dt):
+        return dt.isoformat(timespec="seconds")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        (root / "events").mkdir()
+        (root / "events" / "L-operator-9401.jsonl").write_text(json.dumps({
+            "type": "l1-complete", "subject": "L-charter-9401", "charter": "L-charter-9401",
+            "ts": iso5(now5 - timedelta(days=5))}) + "\n")
+        env = {**os.environ, "DOIT_ROOT": str(root), "DOIT_LEDGER_FILE": "L-executor-9999.jsonl"}
+        env.pop("DOIT_PROJECT", None)
+
+        r1 = subprocess.run([sys.executable, PROVING_PATH, "--backfill", "--apply"],
+                            env=env, capture_output=True, text=True)
+        assert r1.returncode == 0, (r1.returncode, r1.stdout, r1.stderr)
+
+        r2 = subprocess.run([DOIT_PATH, "events", "L-charter-9401"], env=env, capture_output=True, text=True)
+        classified = [json.loads(ln) for ln in r2.stdout.splitlines() if ln.strip()]
+        classified = [e for e in classified if e.get("type") == "charter-classified"]
+        assert len(classified) == 1, classified
+        assert classified[0]["actor"] == "executor", classified[0]
+        assert classified[0].get("klass") and classified[0].get("reason"), classified[0]
+
+        r3 = subprocess.run([sys.executable, PROVING_PATH, "--backfill", "--apply"],
+                            env=env, capture_output=True, text=True)
+        assert r3.returncode == 0, (r3.returncode, r3.stdout, r3.stderr)
+        r4 = subprocess.run([DOIT_PATH, "events", "L-charter-9401"], env=env, capture_output=True, text=True)
+        classified2 = [json.loads(ln) for ln in r4.stdout.splitlines() if ln.strip()]
+        classified2 = [e for e in classified2 if e.get("type") == "charter-classified"]
+        assert len(classified2) == 1, classified2          # idempotent: no second write
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        (root / "events").mkdir()
+        (root / "events" / "L-operator-9402.jsonl").write_text(json.dumps({
+            "type": "l1-complete", "subject": "L-charter-9402", "charter": "L-charter-9402",
+            "ts": iso5(now5 - timedelta(days=5))}) + "\n")
+        env = {**os.environ, "DOIT_ROOT": str(root), "DOIT_LEDGER_FILE": "L-thinker-9999.jsonl"}
+        env.pop("DOIT_PROJECT", None)
+        r5 = subprocess.run([sys.executable, PROVING_PATH, "--backfill", "--apply"],
+                            env=env, capture_output=True, text=True)
+        assert r5.returncode != 0, r5.returncode
+        files = list((root / "events").glob("*.jsonl"))
+        assert len(files) == 1, files
+        lines = (root / "events" / "L-operator-9402.jsonl").read_text().strip().splitlines()
+        assert len(lines) == 1, lines                       # byte-for-byte unchanged from seed
+    print("0474-AC5 ok")
+
+
+def test_backfill_ac6():
+    now6 = datetime.now(timezone.utc)
+
+    def iso6(dt):
+        return dt.isoformat(timespec="seconds")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        (root / "events").mkdir()
+        (root / "events" / "L-operator-9501.jsonl").write_text(json.dumps({
+            "type": "l1-complete", "subject": "L-charter-9501", "charter": "L-charter-9501",
+            "ts": iso6(now6 - timedelta(days=5))}) + "\n")
+        env = {**os.environ, "DOIT_ROOT": str(root)}
+        env.pop("DOIT_PROJECT", None)
+
+        r1 = subprocess.run([sys.executable, PROVING_PATH, "--backfill"],
+                            env=env, capture_output=True, text=True)
+        assert r1.returncode == 0, (r1.returncode, r1.stdout, r1.stderr)
+        lines = (root / "events" / "L-operator-9501.jsonl").read_text().strip().splitlines()
+        assert len(lines) == 1, lines                        # unchanged -- no --apply
+        assert len(list((root / "events").glob("*.jsonl"))) == 1
+
+        today = now6.date().isoformat()
+        default_path = root / "content" / f"proving-backfill-{today}.md"
+        assert default_path.exists(), "default report file missing"
+        text = default_path.read_text()
+        first_line = text.splitlines()[0]
+        assert re.match(r"^# Proving backfill — \d{4}-\d{2}-\d{2}$", first_line), first_line
+        assert re.search(r"^- L-charter-\S+ · (open|proving|closed|retracted) · .+$", text,
+                         re.MULTILINE), text
+
+        out_path = root / "custom-out.md"
+        r2 = subprocess.run([sys.executable, PROVING_PATH, "--backfill", "--out", str(out_path)],
+                            env=env, capture_output=True, text=True)
+        assert r2.returncode == 0, (r2.returncode, r2.stdout, r2.stderr)
+        assert out_path.exists()
+        assert out_path.read_text().splitlines()[0] == first_line
+
+        r3 = subprocess.run([sys.executable, PROVING_PATH, "--apply"],
+                            env=env, capture_output=True, text=True)
+        assert r3.returncode == 2, r3.returncode
+        assert r3.stdout == "", r3.stdout
+        assert r3.stderr.strip() != ""
+        lines2 = (root / "events" / "L-operator-9501.jsonl").read_text().strip().splitlines()
+        assert len(lines2) == 1, lines2                      # unchanged
+        assert len(list((root / "events").glob("*.jsonl"))) == 1
+    print("0474-AC6 ok")
+
+
 test_ac1()
 test_ac2()
 test_ac3()
@@ -443,4 +659,10 @@ test_ac9()
 test_ac10()
 test_ac11()
 test_ac12()
+test_backfill_ac1()
+test_backfill_ac2()
+test_backfill_ac3()
+test_backfill_ac4()
+test_backfill_ac5()
+test_backfill_ac6()
 print("proving: all checks pass")
