@@ -16,8 +16,17 @@ fold at module level").
 Name "Proving" is a proposal (charter L-charter-0046): `LABEL` is the one
 place the literal string appears; every branch below compares the literal
 strings `"proving"`/`"reopened"`, so relabeling never touches the rule.
+
+R6 (`L-spec-0474`, proving-backfill): `backfill()` classifies the existing
+population of L1-complete/proving/reopened/not-yet-reaped charters into
+open/proving/closed/retracted, once. It is the one function besides the CLI's
+own `__main__` block that imports `fold` — lazily, inside itself, never at
+module level, for the identical reason (no import cycle with `fold.py`,
+which imports this module's sibling `owed.py`).
 """
 import json
+import os
+import pathlib
 import sys
 from datetime import datetime, timedelta, timezone
 
@@ -341,8 +350,145 @@ def summary(charter_id, charter_evs, mine, now, *, title, review_owed, open_brie
     }
 
 
-if __name__ == "__main__":
+def _proving_reason(p):
+    """R6: the `reason` string for a `"proving"`/`"reopened"` population row.
+    `p` is a `summary()`-shaped dict (or a hand-built two-key stub, AC3) —
+    only `"remaining"` and `"next"` are read, nothing else on `p` is
+    required."""
+    reason = f'{p["remaining"]} items remaining'
+    nxt = p.get("next")
+    if nxt is not None:
+        reason += f', next {nxt["kind"]} {nxt["due_at"][:10]}'
+    return reason
+
+
+def _open_reason(mine):
+    """R6: the `reason` string for an `"open"` population row (an
+    `L1-complete` charter, not yet build-done). `mine` is already sorted by
+    `id` — the first element failing the identical "not build-done" test
+    `phase()` applies (BUILD_DONE membership, plus the shipped-with-rejects
+    rework carve-out) is the reason; `"no specs yet"` when none exists (or
+    `mine` is empty)."""
+    first = next((s for s in mine if s["state"] not in BUILD_DONE
+                  or (s["state"] == "shipped" and s.get("rejects", 0) > 0)), None)
+    if first is None:
+        return "no specs yet"
+    return f'{first["id"]} {first["state"]}'
+
+
+def backfill(events, now):
+    """R6 (`L-spec-0474`): classify every charter currently at `L1-complete`,
+    `proving`, `reopened`, or `L2-complete`/`retracted`-not-yet-reaped into
+    exactly one of `open`/`proving`/`closed`/`retracted`, once. Returns one
+    `{"charter", "klass", "reason"}` dict per population member, sorted by
+    `charter` ascending (determinism) — never a second, hand-maintained list;
+    the population and every field read here come from `fold.fold()`'s own
+    output (charter constraint: "the state is derived from the ledger by
+    fold")."""
     import fold                                              # lazy: never at module level
+
+    specs, charters, ignored, by_subject = fold.fold(events)
+    rows = []
+    for cid in sorted(charters):
+        c = charters[cid]
+        state = c["state"]
+        reaped = any(e.get("type") == "tree-reaped" for e in c.get("evs", []))
+        in_population = (
+            state in ("L1-complete", "proving", "reopened")
+            or (state == "L2-complete" and not reaped)
+            or (state == "retracted" and not reaped)
+        )
+        if not in_population:
+            continue
+        if state in ("proving", "reopened"):
+            klass, reason = "proving", _proving_reason(c["proving"])
+        elif state == "L2-complete":
+            klass, reason = "closed", "L2 predicate holds"
+        elif state == "retracted":
+            klass, reason = "retracted", "retracted"
+        else:                                                # "L1-complete" (or defensively "open")
+            mine = sorted((s for s in specs.values()
+                          if s["charter"] == cid and s["state"] != "void"), key=lambda s: s["id"])
+            klass, reason = "open", _open_reason(mine)
+        rows.append({"charter": cid, "klass": klass, "reason": reason})
+    return rows
+
+
+def _classify_actor():
+    """R6: the SAME actor-from-filename rule `fold.read_events()` already
+    applies — never a second, independently-written rule that could drift."""
+    fname = os.environ.get("DOIT_LEDGER_FILE", "L-operator-local.jsonl")
+    stem = pathlib.Path(fname).stem
+    parts = stem.split("-")
+    return "-".join(parts[1:-1]) if len(parts) >= 3 else stem
+
+
+def _backfill_report(rows, today):
+    o = sum(1 for r in rows if r["klass"] == "open")
+    p = sum(1 for r in rows if r["klass"] == "proving")
+    c = sum(1 for r in rows if r["klass"] == "closed")
+    r_ = sum(1 for r in rows if r["klass"] == "retracted")
+    lines = [f"# Proving backfill — {today}", "",
+             f"{len(rows)} charters classified: {o} open, {p} proving, {c} closed, "
+             f"{r_} retracted.", ""]
+    for row in rows:
+        lines.append(f"- {row['charter']} · {row['klass']} · {row['reason']}")
+    return "\n".join(lines) + "\n"
+
+
+if __name__ == "__main__":
+    _argv = sys.argv[1:]
+
+    # R6 (`L-spec-0474`): `--apply` is additive to `--backfill` only — alone,
+    # it is a usage error. Checked first, before any import/read/fold, so it
+    # never reads the ledger at all.
+    if "--apply" in _argv and "--backfill" not in _argv:
+        print("usage: proving.py --backfill [--apply] [--out PATH]", file=sys.stderr)
+        sys.exit(2)
+
+    import fold                                              # lazy: never at module level
+
+    if "--backfill" in _argv:
+        # No try/except here, same R5 convention as the default board below:
+        # any exception (a torn ledger, a directory where an events/*.jsonl
+        # should be) propagates uncaught, nothing on stdout, non-zero exit.
+        # `rows` is built in full before anything prints or is written.
+        events = fold.read_events()
+        rows = backfill(events, fold.NOW)
+        today = fold.NOW.date().isoformat()
+        report_text = _backfill_report(rows, today)
+
+        out_arg = None
+        if "--out" in _argv:
+            i = _argv.index("--out")
+            if i + 1 < len(_argv):
+                out_arg = _argv[i + 1]
+        out_path = (pathlib.Path(out_arg) if out_arg
+                    else fold.ROOT / "content" / f"proving-backfill-{today}.md")
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(report_text)
+        print(report_text, end="")
+
+        if "--apply" in _argv:
+            actor = _classify_actor()
+            if actor not in fold.EMITS["charter-classified"]:
+                print(f"refused: actor {actor!r} may not append charter-classified "
+                      f"(admitted: {sorted(fold.EMITS['charter-classified'])})", file=sys.stderr)
+                sys.exit(1)
+            _specs2, charters2, _ignored2, _by_subject2 = fold.fold(events)
+            for row in rows:
+                cid = row["charter"]
+                already = any(e.get("type") == "charter-classified"
+                              for e in charters2.get(cid, {}).get("evs", []))
+                if already:
+                    continue
+                try:
+                    fold.append(["charter-classified", cid, f"klass={row['klass']}",
+                                f"reason={row['reason']}"])
+                except SystemExit:
+                    print(cid, file=sys.stderr)
+                    raise
+        sys.exit(0)
 
     # No try/except here: any exception (a torn ledger, a directory where an
     # events/*.jsonl should be) propagates uncaught — Python's default exits
