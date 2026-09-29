@@ -12,9 +12,9 @@ path exists. `tick._record()` calls `run()` once per tick, last, right before
 `candidates()` to alarm on anything left dispatchable (or standing-failed)
 past 30 minutes.
 """
-import json, pathlib, subprocess, sys
+import datetime, json, pathlib, socket, subprocess, sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import dispatch, fold, shape, tick  # noqa: E402
+import dispatch, fold, panes, shape, tick  # noqa: E402
 
 
 def capacity(root=None):
@@ -178,6 +178,165 @@ def candidates(events, specs, now):
     return rows
 
 
+REPLAYABLE_ROLES = ("builder", "grader", "spec-writer", "spec-auditor")
+TERMINAL_STATES = ("accepted", "killed", "void", "dropped", "closed-shipped", "closed-unbuilt")
+
+
+def _grader_trigger(evs):
+    """R13a: the newest of (a) a `build-done` (actor builder) `status=DONE`, or
+    (b) a `decision regrade=yes` from `thinker`/`operator` with no `rework=yes`.
+    Returns `(trigger_event, trigger_name)`, or `(None, None)` when neither
+    exists. `trigger_name` for (a) is `rework` when an OLDER `rejected-criterion`
+    stands, else `build-done`; for (b) it is `regrade`. A `decision regrade=yes
+    rework=yes` is never itself a trigger (SD-R13-1a) — the rework's own next
+    `build-done` re-triggers as (a)."""
+    T = lambda e: fold.ts(e.get("ts"))
+    build_dones = [e for e in evs if e.get("type") == "build-done" and e.get("status") == "DONE"
+                   and e.get("actor") == "builder"]
+    newest_bd = max(build_dones, key=T) if build_dones else None
+    regrades = [e for e in evs if e.get("type") == "decision" and e.get("regrade") == "yes"
+                and e.get("actor") in ("thinker", "operator") and e.get("rework") != "yes"]
+    newest_rg = max(regrades, key=T) if regrades else None
+    if newest_bd is None and newest_rg is None:
+        return None, None
+    if newest_rg is not None and (newest_bd is None or T(newest_rg) > T(newest_bd)):
+        return newest_rg, "regrade"
+    rejects = [e for e in evs if e.get("type") == "rejected-criterion"]
+    older_reject = any(T(e) < T(newest_bd) for e in rejects)
+    return newest_bd, ("rework" if older_reject else "build-done")
+
+
+def grader_candidates(events, specs, now):
+    """R13a: one row `{spec, charter, project, trigger, since}` per spec whose
+    newest trigger (see `_grader_trigger`) has no grader dispatch/refusal of
+    its own since, is not held (`fold.held_specs`), not killed, not shipped."""
+    events = list(events)
+    by_subject = {}
+    for e in events:
+        sid = e.get("subject")
+        if sid:
+            by_subject.setdefault(sid, []).append(e)
+    held = fold.held_specs(events)
+    rows = []
+    for sid, evs in by_subject.items():
+        if not str(sid).startswith("L-spec-"):
+            continue
+        if any(e.get("type") == "spec-killed" for e in evs):
+            continue
+        if any(e.get("type") == "shipped" for e in evs):
+            continue
+        if sid in held:
+            continue
+        trig_event, trigger = _grader_trigger(evs)
+        if trig_event is None:
+            continue
+        t_ts = fold.ts(trig_event.get("ts"))
+        suppressed = any(
+            fold.ts(e.get("ts")) > t_ts and e.get("role") == "grader" and e.get("type") in (
+                "spawn-started", "spawn-failed", "autodispatched", "autodispatch-failed")
+            for e in evs)
+        if suppressed:
+            continue
+        charter = dispatch.resolve_charter(events, sid, None)
+        project = next((e.get("project") for e in reversed(evs) if e.get("project")), None) or "unknown"
+        rows.append({"spec": sid, "charter": charter, "project": project,
+                     "trigger": trigger, "since": t_ts.isoformat(timespec="seconds")})
+    rows.sort(key=lambda r: r["since"])
+    return rows
+
+
+def _own_terminal_event(events, spawn):
+    return any(e.get("spawn") == spawn and e.get("type") in
+               ("verdict", "review", "build-done", "spawn-done", "spawn-failed") for e in events)
+
+
+def dead_spawns(events, now):
+    """R13b: `{spawn, subject, role, visible_at, replaced, replacement_of}` for
+    every dead, unverdicted, recent, non-terminal-subject, replayable-role spawn
+    with no prior handling (replay or escalation) of its own. Dead: a
+    `spawn-stale` names it, or its own `spawn-started`/`build-started` carries a
+    same-host `waiter_pid` `panes._is_live` reports dead."""
+    events = list(events)
+    by_subject = {}
+    for e in events:
+        subj = e.get("subject")
+        if subj:
+            by_subject.setdefault(subj, []).append(e)
+    replaced_spawns = {e.get("replaces") for e in events
+                       if e.get("type") == "autodispatched" and e.get("replaces")}
+    escalated_spawns = {e.get("dead_spawn") for e in events
+                        if e.get("type") == "escalation-blocking" and e.get("dead_spawn")}
+    autodispatched_by_spawn = {e.get("spawn"): e for e in events
+                               if e.get("type") == "autodispatched" and e.get("spawn")}
+    stale_by_spawn = {}
+    for e in events:
+        if e.get("type") == "spawn-stale" and e.get("spawn"):
+            cur = stale_by_spawn.get(e["spawn"])
+            if cur is None or fold.ts(e.get("ts")) > fold.ts(cur.get("ts")):
+                stale_by_spawn[e["spawn"]] = e
+    starts_by_spawn = {}
+    for e in events:
+        if e.get("type") in ("spawn-started", "build-started") and e.get("spawn"):
+            starts_by_spawn.setdefault(e["spawn"], e)
+
+    rows = []
+    for spawn in set(stale_by_spawn) | set(starts_by_spawn):
+        stale = stale_by_spawn.get(spawn)
+        start = starts_by_spawn.get(spawn)
+        if stale is not None:
+            visible_at, subject = fold.ts(stale.get("ts")), stale.get("subject")
+            role = stale.get("role") or ""
+        elif start is not None:
+            waiter_pid = start.get("waiter_pid")
+            if not (waiter_pid and start.get("waiter_host") == socket.gethostname()
+                    and not panes._is_live(waiter_pid, {"procStart": start.get("waiter_proc_start")})):
+                continue
+            visible_at, subject = fold.ts(start.get("ts")), start.get("subject")
+            role = start.get("role") or ("builder" if start.get("type") == "build-started" else "")
+        else:
+            continue
+        if not subject:
+            continue
+        if _own_terminal_event(events, spawn):
+            continue
+        if (now - visible_at).total_seconds() > 2 * 3600:
+            continue
+        subj_evs = by_subject.get(subject, [])
+        if any(e.get("type") == "shipped" for e in subj_evs):
+            continue
+        if fold.spec_state(subj_evs, set()) in TERMINAL_STATES:
+            continue
+        if role not in REPLAYABLE_ROLES:
+            continue
+        # A grader is only ever dispatched after a build-done (R13a); a dead
+        # `role=grader` spawn on a subject with no build-done of its own is not
+        # a real grading step to recover — never a `dead_spawns` row.
+        if role == "grader" and not any(e.get("type") == "build-done" for e in subj_evs):
+            continue
+        if spawn in replaced_spawns or spawn in escalated_spawns:
+            continue
+        replacement_of = autodispatched_by_spawn.get(spawn, {}).get("replaces")
+        rows.append({"spawn": spawn, "subject": subject, "role": role,
+                     "visible_at": visible_at.isoformat(timespec="seconds"),
+                     "replaced": False, "replacement_of": replacement_of})
+    rows.sort(key=lambda r: r["visible_at"])
+    return rows
+
+
+def _strip_replay_packet(text, spawn):
+    """R13b/AC9: the dead packet, minus a leading `WRITE PATH: ...` line (when
+    present) and the trailing `spawn_id: <spawn>` line with the blank line
+    before it — byte-identical otherwise."""
+    lines = text.splitlines(keepends=True)
+    if lines and lines[0].startswith("WRITE PATH:"):
+        lines = lines[1:]
+    out = "".join(lines)
+    trailer = f"\n\nspawn_id: {spawn}\n"
+    if out.endswith(trailer):
+        out = out[: -len(trailer)]
+    return out
+
+
 DOIT_BIN = str(pathlib.Path(__file__).resolve().parent.parent / "doit")
 
 
@@ -250,4 +409,119 @@ def run(events, specs, now, *, runner=None, dry_run=False):
         dispatch.emit(tick.tick_path(), base, "autodispatched", spawn=str(detach.get("detached")),
                       since=since, worktree=str(worktree), log=detach.get("log"))
         out.append(f"dispatched {spec} spawn={detach.get('detached')} worktree={worktree}")
+
+    # R13a: dispatch the grader for every candidate this tick has not already
+    # dispatched/refused a grader for.
+    for row in grader_candidates(events, specs, now):
+        spec, charter, project = row["spec"], row["charter"], row["project"]
+        trigger, since = row["trigger"], row["since"]
+        if dry_run:
+            out.append(f"would dispatch grader {spec} (trigger={trigger})")
+            continue
+        base = {"subject": spec}
+
+        def _gfail(reason):
+            dispatch.emit(tick.tick_path(), base, "autodispatch-failed", role="grader", reason=reason)
+            out.append(f"failed grader {spec}: {reason}")
+
+        worktree = fold.ROOT / "worktrees" / project / spec.lower()
+        if not worktree.is_dir():
+            _gfail(f"worktree {worktree} missing — never created for a grader dispatch")
+            continue
+        r1 = runner(["doit", "packet", "grader", spec, "--worktree", str(worktree)])
+        if r1.get("code", 1) != 0:
+            _gfail((r1.get("stderr") or r1.get("stdout") or "doit packet grader failed").strip())
+            continue
+        packet_path = (r1.get("stdout") or "").strip()
+        r2 = runner(["doit", "dispatch", "--detach", "grader", spec, "--packet", packet_path,
+                     "--cwd", str(worktree), "--charter", charter or "", "--project", project])
+        if r2.get("code", 1) != 0:
+            _gfail((r2.get("stderr") or r2.get("stdout") or "doit dispatch --detach failed").strip())
+            continue
+        try:
+            detach = json.loads(r2.get("stdout") or "")
+        except ValueError:
+            _gfail(f"doit dispatch --detach printed non-JSON: {(r2.get('stdout') or '')!r}")
+            continue
+        dispatch.emit(tick.tick_path(), base, "autodispatched", spawn=str(detach.get("detached")),
+                      role="grader", trigger=trigger, since=since)
+        out.append(f"dispatched grader {spec} spawn={detach.get('detached')} trigger={trigger}")
+
+    # R13b: replay or escalate every dead spawn this tick has not already
+    # handled (replayed or escalated) of its own.
+    for row in dead_spawns(events, now):
+        spawn, subject, role = row["spawn"], row["subject"], row["role"]
+        replacement_of, visible_at = row["replacement_of"], fold.ts(row["visible_at"])
+        if dry_run:
+            out.append(f"would handle dead spawn {spawn} ({role}) on {subject}")
+            continue
+        base = {"subject": subject}
+        deadline = (now + datetime.timedelta(hours=24)).isoformat(timespec="seconds")
+
+        def _escalate(kind):
+            dispatch.emit(tick.tick_path(), base, "escalation-blocking", kind=kind, owner="thinker",
+                          role=role, dead_spawn=spawn,
+                          default=(f"leave {subject} as it stands; an operator decides the next "
+                                   f"step for the dead {role} spawn {spawn}"),
+                          deadline=deadline,
+                          revert=f"no automatic action was taken on {subject} — nothing to revert")
+            out.append(f"escalated {subject} dead_spawn={spawn} kind={kind}")
+
+        if replacement_of:
+            _escalate("spawn-died-twice")
+            continue
+        cmd_json_path, packet_path_seat = dispatch.SEAT / f"{spawn}.cmd.json", dispatch.SEAT / f"{spawn}.packet.md"
+        if not cmd_json_path.is_file() or not packet_path_seat.is_file():
+            _escalate("spawn-died-twice")
+            continue
+        if (now - visible_at).total_seconds() > 600:
+            _escalate("spawn-redispatch-lapsed")
+            continue
+        charter = dispatch.resolve_charter(events, subject, None)
+        subj_evs = [e for e in events if e.get("subject") == subject]
+        project = next((e.get("project") for e in reversed(subj_evs) if e.get("project")), None) or "unknown"
+        if role == "grader":
+            if subject in fold.held_specs(events):
+                out.append(f"no action: {subject} held")
+                continue
+            worktree = fold.ROOT / "worktrees" / project / subject.lower()
+            if not worktree.is_dir():
+                _escalate("spawn-redispatch-failed")
+                continue
+            r1 = runner(["doit", "packet", "grader", subject, "--worktree", str(worktree)])
+            if r1.get("code", 1) != 0:
+                _escalate("spawn-redispatch-failed")
+                continue
+            packet_path = (r1.get("stdout") or "").strip()
+            r2 = runner(["doit", "dispatch", "--detach", "grader", subject, "--packet", packet_path,
+                         "--cwd", str(worktree), "--charter", charter or "", "--project", project])
+            if r2.get("code", 1) != 0:
+                _escalate("spawn-redispatch-failed")
+                continue
+            try:
+                detach = json.loads(r2.get("stdout") or "")
+            except ValueError:
+                _escalate("spawn-redispatch-failed")
+                continue
+        else:
+            cmd_json = json.loads(cmd_json_path.read_text())
+            replay_path = fold.ROOT / "content" / f"replay-{spawn}.md"
+            replay_path.write_text(_strip_replay_packet(packet_path_seat.read_text(), spawn))
+            argv = ["doit", "dispatch", "--detach", role, subject, "--packet", str(replay_path),
+                    "--cwd", cmd_json.get("cwd")]
+            if cmd_json.get("path"):
+                argv += ["--path", cmd_json["path"]]
+            argv += ["--charter", charter or "", "--project", project]
+            r = runner(argv)
+            if r.get("code", 1) != 0:
+                _escalate("spawn-redispatch-failed")
+                continue
+            try:
+                detach = json.loads(r.get("stdout") or "")
+            except ValueError:
+                _escalate("spawn-redispatch-failed")
+                continue
+        dispatch.emit(tick.tick_path(), base, "autodispatched", spawn=str(detach.get("detached")),
+                      role=role, trigger="redispatch", replaces=spawn, since=row["visible_at"])
+        out.append(f"replayed {spawn} as {detach.get('detached')}")
     return out

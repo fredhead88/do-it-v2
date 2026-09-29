@@ -3475,3 +3475,27 @@ assert "capability:node_modules" not in fold.capability_holds(ev15b), fold.capab
 # the spec-local hold from ev15, closed only by a non-thinker/operator actor, stays open
 assert "capability:view-paths:L-spec-9701" in holds15, holds15
 print("AC15 actor-gated close ok")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-0483 · tick-next-step, R13-vocab (L-charter-0042)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── AC14 · `autodispatched`'s `trigger` field: absent is unchanged; each of the
+# four valid triggers (with spawn/since) is admitted; `bogus` and a `redispatch`
+# with no `replaces` are refused; EMITS stays {"tick"} ──────────────────────────
+base483 = {"type": "autodispatched", "subject": "L-spec-9483", "spawn": "S1",
+           "since": "2026-01-01T00:00:00+00:00"}
+assert fold.required_reason(base483) is None, "AC14: no trigger is unchanged"
+for trig483 in ("build-done", "rework", "regrade"):
+    ev483 = dict(base483, trigger=trig483)
+    assert fold.required_reason(ev483) is None, f"AC14: trigger={trig483} must be admitted: {ev483}"
+ev483_redispatch = dict(base483, trigger="redispatch", replaces="L-builder-0001")
+assert fold.required_reason(ev483_redispatch) is None, \
+    f"AC14: trigger=redispatch WITH replaces must be admitted: {ev483_redispatch}"
+ev483_bogus = dict(base483, trigger="bogus")
+assert fold.required_reason(ev483_bogus) is not None, "AC14: trigger=bogus must be refused"
+ev483_no_replaces = dict(base483, trigger="redispatch")
+assert fold.required_reason(ev483_no_replaces) is not None, \
+    "AC14: trigger=redispatch with no replaces must be refused"
+assert fold.EMITS["autodispatched"] == {"tick"}, fold.EMITS["autodispatched"]
+print("fold-0483 AC14 ok")
