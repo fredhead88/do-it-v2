@@ -154,7 +154,8 @@ assert "actor" not in evs[1], "D90: never an actor field"
 # below that expects no `spec-shape-failed` keeps passing unchanged (Assumptions).
 WELL_FORMED_SPEC = ("# fixture spec\n## Verification\n```\ntrue\n```\n"
                     "## Acceptance Criteria\nAC1 [backend]: x.\n  review_path: y\n"
-                    "Writes: a.py\n")
+                    "Writes: a.py\n"
+                    "In plain English: fixture carries a plain line.\n")
 
 sw = {"status": "written", "spec_id": "L-spec-0001", "ac_count": 2, "ac_types": ["backend"], "footprint": ["a.py"],
       "requirement_ids": ["R1"], "owed": 0, "unknowns": 1, "split": [], "weak_dimensions": [],

@@ -193,7 +193,8 @@ def run(argv):
 # (Assumptions).
 WELL_FORMED_SPEC = ("# fixture spec\n## Verification\n```\ntrue\n```\n"
                     "## Acceptance Criteria\nAC1 [backend]: x.\n  review_path: y\n"
-                    "Writes: a.py\n")
+                    "Writes: a.py\n"
+                    "In plain English: fixture carries a plain line.\n")
 
 
 def writer(footprint, path_written=True, rc=0, stderr="", status=None, spec_text=WELL_FORMED_SPEC,
@@ -435,7 +436,8 @@ check(fold.spec_shape_pending(evs1486) is False,
 # `packet.criteria`, which does not block on a bullet INSIDE a heading).
 AC_BULLET_ONLY_SPEC = ("# fixture spec\n## Verification\n```\ntrue\n```\n"
                       "- AC1 [backend]: x.\n  review_path: y\n"
-                      "Writes: a.py\n")
+                      "Writes: a.py\n"
+                      "In plain English: fixture carries a plain line.\n")
 check(shape.check(AC_BULLET_ONLY_SPEC)["block"] != []
       and shape.check(shape.mechanical_fix(AC_BULLET_ONLY_SPEC)[0])["block"] == [],
       "fixture sanity: the bare bullet blocks, and the mechanical fix alone clears it")

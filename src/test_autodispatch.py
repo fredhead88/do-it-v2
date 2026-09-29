@@ -373,3 +373,24 @@ for name in ("models.example.toml", "models.claude-only.toml"):
     doc = tomllib.loads((REPO_ROOT / name).read_text())
     assert doc["seats"]["builder"] == 4, f"AC24: {name} seats.builder != 4: {doc.get('seats')}"
 print("autodispatch-0427 AC24 ok")
+
+# ── L-spec-0478/AC5 · SD9: a `written` spec blocked ONLY by the new "Plain
+# English:" finding is dispatchable (CLEAN_SPEC, unmodified — carries no
+# plain line and no plain-backfill sidecar, standing in for any spec written
+# before this unit shipped); a spec blocked on a DIFFERENT bucket (the
+# existing "not a real spec" fixture, AC3's own text) still blocks — the
+# filter removes only the one named finding ─────────────────────────────────
+root = _fresh("proj478")
+_spec_file(root, "L-spec-47801")  # CLEAN_SPEC, unmodified
+_spec_file(root, "L-spec-47802", text="not a real spec")
+_write(root, "L-planner-0001.jsonl",
+       {"v": 1, "ts": _iso(NOW), "type": "spec-written", "subject": "L-spec-47801", "project": "proj478"},
+       {"v": 1, "ts": _iso(NOW), "type": "spec-written", "subject": "L-spec-47802", "project": "proj478"})
+_, _, rows = _fold_and_candidates(root)
+r_plain = _row(rows, "L-spec-47801")
+assert r_plain["status"] == "dispatchable", \
+    f"AC-plain: a spec blocked only by the missing plain-English line must be dispatchable: {r_plain}"
+r_other = _row(rows, "L-spec-47802")
+assert r_other["status"] == "blocked" and (r_other["reason"] or "").startswith("shape:"), \
+    f"AC-plain: a spec blocked on a different bucket must stay blocked: {r_other}"
+print("autodispatch-0478 AC-plain ok")

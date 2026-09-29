@@ -45,7 +45,8 @@ WELL_FORMED = ("# L-spec-fixture\n"
                "## Acceptance Criteria\n"
                "AC1 [backend]: x.\n"
                "  review_path: y\n"
-               "Writes: a.py\n")
+               "Writes: a.py\n"
+               "In plain English: fixture proves the well-formed case.\n")
 
 BASE_SHA_HEAD = ("# L-spec-fixture\n"
                  "base_sha: HEAD\n"
@@ -56,13 +57,15 @@ BASE_SHA_HEAD = ("# L-spec-fixture\n"
                  "## Acceptance Criteria\n"
                  "AC1 [backend]: x.\n"
                  "  review_path: y\n"
-                 "Writes: a.py\n")
+                 "Writes: a.py\n"
+                 "In plain English: fixture proves the well-formed case.\n")
 
 NO_VERIFICATION = ("# L-spec-fixture\n"
                     "## Acceptance Criteria\n"
                     "AC1 [backend]: x.\n"
                     "  review_path: y\n"
-                    "Writes: a.py\n")
+                    "Writes: a.py\n"
+                    "In plain English: fixture proves the well-formed case.\n")
 
 # ══ AC1 ══════════════════════════════════════════════════════════════════════
 for fx in (WELL_FORMED, BASE_SHA_HEAD, NO_VERIFICATION):
@@ -98,7 +101,9 @@ FIX_A = ("# L-spec-fixture\n"
          "- src/b.py — a helper\n"
          "- src/c.py # temp\n"
          "- app/(dashboard)/[name]/x.tsx\n"
-         "- src/d.py src/e.py\n")
+         "- src/d.py src/e.py\n"
+         "\n"
+         "In plain English: fixture proves the block-form Writes repair.\n")
 
 new_a, repairs_a = shape.mechanical_fix(FIX_A)
 lines_in_a, lines_out_a = FIX_A.split("\n"), new_a.split("\n")
@@ -249,7 +254,8 @@ AC7_FIXTURE = ("# L-spec-fixture\n"
                "## Acceptance Criteria\n"
                "- AC1 [backend]: x.\n"
                "  review_path: y\n"
-               "Writes: a.py\n")
+               "Writes: a.py\n"
+               "In plain English: fixture proves the dash-bulleted AC line case.\n")
 check(shape.check(AC7_FIXTURE) == {"block": [], "warn": []},
       "a dash-bulleted AC line under a real ## Acceptance heading is not a block finding")
 
