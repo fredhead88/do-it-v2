@@ -42,6 +42,19 @@ The wrapper confirms the file exists at `path`, then appends `research-filed`
 (content before event). You declare nothing: you observe a codebase, not the
 system's health, and an empty declaration list is a real answer here.
 
+## Plain-English backfill batch (L-charter-0047, one-time)
+
+A packet whose first line is exactly `kind: plain-english-backfill-batch` is a
+different shape of question: its `specs:` block names one spec id per `- <id>`
+line, each an existing `$R/content/<id>.md`. Per id, read its `## Goal` (whole
+file if none), write one plain-English sentence: 8-30 words, ending in `.`,
+naming no spec/charter id, none of `L1`, `L2`, `owed`, `void`, `fold`; leave a
+spec out rather than guess.
+
+`path` names a JSON Lines file, exactly `{"spec": "<id>", "line": "<sentence>"}`
+per summarized spec, UTF-8 (empty if none). `summary` (≤12 lines) states how
+many got a row; `answered` is `yes`/`partial`/`no`.
+
 ## Budget
 
 Capped hard by the wrapper, in tokens and wall clock, and the cap is the design:
