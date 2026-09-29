@@ -20,8 +20,9 @@ def parse(s):
     return datetime.fromisoformat(s)
 
 
-# ── AC1 · STATUSES is the pinned six-tuple ──────────────────────────────────
-assert owed.STATUSES == ("waiting", "due", "met", "expired", "dropped", "unshipped"), owed.STATUSES
+# ── AC1 · STATUSES is the pinned tuple ───────────────────────────────────────
+assert owed.STATUSES == ("waiting", "due", "met", "waived", "expired", "dropped",
+                          "unshipped"), owed.STATUSES
 print("AC1 ok")
 
 # ── AC2 · a criterion declared well before ship: the ship-anchored interval,
@@ -168,5 +169,82 @@ print("AC8 ok")
 specs = {S6: {"evs": [ac6, ship6a]}, S8k: {"evs": [ac8k, ship8k, killed8k]}}
 exp = owed.expired(specs, NOW)
 assert {r["spec"] for r in exp} == {S6}, exp
+
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-0470 · ledger-vocabulary R3 (L-charter-0046) — the "waived" status
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── 0470-AC5 · owed.STATUSES gains "waived", inserted directly after "met" ───
+assert owed.STATUSES == ("waiting", "due", "met", "waived", "expired", "dropped",
+                          "unshipped"), owed.STATUSES
+print("0470-AC5 ok")
+
+# ── 0470-AC6 · an owed-waived after the governing owed-ac produces a "waived"
+# row: (a) alone; (b) with two prior owed-failed also after governing (waived
+# overrides expiry, unlike an unwaived row at 2 failures); (c) the reverse
+# order — the two owed-failed timestamped AFTER the owed-waived; (d) a later
+# owed-met (also post-governing) added to case (a) makes the row "met", never
+# "waived", whichever of the pair has the later ts ──────────────────────────
+S6w = "L-spec-9016"
+ac6w = {"ts": stamp(10), "type": "owed-ac", "subject": S6w, "criterion": "AC1", "wake_at": stamp(-30)}
+ship6w = {"ts": stamp(5), "type": "shipped", "subject": S6w}
+
+# (a) alone
+waive6a = {"ts": stamp(3), "type": "owed-waived", "subject": S6w, "criterion": "AC1",
+           "reason": "manual review substituted"}
+rows6a = owed.checks([ac6w, ship6w, waive6a], NOW)
+assert rows6a[0]["status"] == "waived", rows6a[0]
+
+# (b) two prior owed-failed (both after governing owed-ac, both BEFORE the waiver)
+fail6b1 = {"ts": stamp(4), "type": "owed-failed", "subject": S6w, "criterion": "AC1",
+           "evidence": "f1", "kind": "unmet"}
+fail6b2 = {"ts": stamp(3.5), "type": "owed-failed", "subject": S6w, "criterion": "AC1",
+           "evidence": "f2", "kind": "unmet"}
+waive6b = {"ts": stamp(3), "type": "owed-waived", "subject": S6w, "criterion": "AC1",
+           "reason": "manual review substituted"}
+rows6b = owed.checks([ac6w, ship6w, fail6b1, fail6b2, waive6b], NOW)
+assert rows6b[0]["status"] == "waived", rows6b[0]
+assert rows6b[0]["failures"] == 2, rows6b[0]
+
+# (c) the reverse order — both owed-failed timestamped AFTER the owed-waived
+waive6c = {"ts": stamp(4), "type": "owed-waived", "subject": S6w, "criterion": "AC1",
+           "reason": "manual review substituted"}
+fail6c1 = {"ts": stamp(3), "type": "owed-failed", "subject": S6w, "criterion": "AC1",
+           "evidence": "f1", "kind": "unmet"}
+fail6c2 = {"ts": stamp(2), "type": "owed-failed", "subject": S6w, "criterion": "AC1",
+           "evidence": "f2", "kind": "unmet"}
+rows6c = owed.checks([ac6w, ship6w, waive6c, fail6c1, fail6c2], NOW)
+assert rows6c[0]["status"] == "waived", rows6c[0]
+
+# (d) precedence — a later owed-met (also post-governing) added to case (a):
+# "met" wins whichever of the met/waived pair has the later ts
+met6d_earlier = {"ts": stamp(4), "type": "owed-met", "subject": S6w, "criterion": "AC1",
+                  "evidence": "m1"}
+rows6d1 = owed.checks([ac6w, ship6w, met6d_earlier, waive6a], NOW)
+assert rows6d1[0]["status"] == "met", rows6d1[0]
+
+met6d_later = {"ts": stamp(2), "type": "owed-met", "subject": S6w, "criterion": "AC1",
+                "evidence": "m2"}
+rows6d2 = owed.checks([ac6w, ship6w, waive6a, met6d_later], NOW)
+assert rows6d2[0]["status"] == "met", rows6d2[0]
+print("0470-AC6 ok")
+
+# ── 0470-AC7 · a later executor re-date for the same criterion, timestamped
+# after a "waived" row's governing owed-waived, makes the row read "waiting"
+# (matching the re-date's own wake_at) again — the redate4-style regression
+# AC4 already proves for "met", reused here for "waived" ───────────────────
+S7w = "L-spec-9017"
+ac7w = {"ts": stamp(10), "type": "owed-ac", "subject": S7w, "criterion": "AC1", "wake_at": stamp(20)}
+ship7w = {"ts": stamp(9), "type": "shipped", "subject": S7w}
+waive7w = {"ts": stamp(5), "type": "owed-waived", "subject": S7w, "criterion": "AC1",
+           "reason": "manual review substituted"}
+rows7w = owed.checks([ac7w, ship7w, waive7w], NOW)
+assert rows7w[0]["status"] == "waived", rows7w[0]
+
+redate7w = {"ts": stamp(1), "type": "owed-ac", "subject": S7w, "criterion": "AC1",
+            "wake_at": stamp(-5), "actor": "executor"}
+rows7wb = owed.checks([ac7w, ship7w, waive7w, redate7w], NOW)
+assert rows7wb[0]["status"] == "waiting", rows7wb[0]
+print("0470-AC7 ok")
 
 print("owed: all checks pass")

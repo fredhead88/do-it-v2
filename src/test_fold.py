@@ -2874,7 +2874,6 @@ assert not any(r["kind"] == "escalation" and r["subject"] == "L-spec-432-s5"
     "★ AC6: open_questions must exclude it via fold.answered, not via open_escalations"
 print("answered-0432 AC6 ok")
 
-
 # ── L-spec-0476/plain-core, R2 item 3 / AC7+AC8 · fold.SPEC_STATES/
 # CHARTER_STATES completeness, proved by walking fold.py's own source with the
 # `ast` module. Additive, changes no existing behavior: this only PROVES the
@@ -2976,3 +2975,200 @@ assert not _offending_charter, \
 assert _collected_charter_states == {"retracted", "L2-complete", "L1-complete", "open"}, \
     _collected_charter_states
 print("spec-states-ast ok")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-0470 · ledger-vocabulary R1/R3/R4/R6 (L-charter-0046)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── 0470-AC1 · fold.EMITS["charter-proving"] = {"tick"};
+# fold.REQUIRED["charter-proving"] = ("reason", "deadline") ──────────────────
+ev0470_1 = {"type": "charter-proving", "subject": "L-charter-9401", "reason": "entered",
+            "deadline": "2026-10-05T00:00:00+00:00"}
+assert fold.check_append(ev0470_1, "tick") is None, fold.check_append(ev0470_1, "tick")
+for actor0470_1 in ("executor", "operator", "builder"):
+    assert fold.check_append(ev0470_1, actor0470_1) is not None, \
+        f"★ 0470-AC1: actor {actor0470_1!r} must not be admitted for charter-proving"
+for missing0470_1 in (
+        {k: v for k, v in ev0470_1.items() if k != "reason"},
+        {k: v for k, v in ev0470_1.items() if k != "deadline"},
+        {k: v for k, v in ev0470_1.items() if k not in ("reason", "deadline")}):
+    assert fold.check_append(missing0470_1, "tick") is not None, \
+        f"★ 0470-AC1: {missing0470_1} must refuse actor tick"
+print("0470-AC1 ok")
+
+# ── 0470-AC2 · fold.EMITS["charter-closed"] = {"tick"};
+# fold.REQUIRED["charter-closed"] = ("reason",) ──────────────────────────────
+ev0470_2 = {"type": "charter-closed", "subject": "L-charter-9401", "reason": "last check met"}
+assert fold.check_append(ev0470_2, "tick") is None, fold.check_append(ev0470_2, "tick")
+for actor0470_2 in ("executor", "operator", "builder"):
+    assert fold.check_append(ev0470_2, actor0470_2) is not None, \
+        f"★ 0470-AC2: actor {actor0470_2!r} must not be admitted for charter-closed"
+missing0470_2 = {k: v for k, v in ev0470_2.items() if k != "reason"}
+assert fold.check_append(missing0470_2, "tick") is not None, \
+    "★ 0470-AC2: dropping reason must refuse actor tick"
+print("0470-AC2 ok")
+
+# ── 0470-AC3 · fold.EMITS["charter-reopened"] = {"tick"};
+# fold.REQUIRED["charter-reopened"] = ("spec", "criterion", "failed_src") ────
+ev0470_3 = {"type": "charter-reopened", "subject": "L-charter-9401", "spec": "L-spec-9402",
+            "criterion": "AC3", "failed_src": "L-owed-sweeper-01.jsonl:9"}
+assert fold.check_append(ev0470_3, "tick") is None, fold.check_append(ev0470_3, "tick")
+for actor0470_3 in ("executor", "operator", "owed-sweeper"):
+    assert fold.check_append(ev0470_3, actor0470_3) is not None, \
+        f"★ 0470-AC3: actor {actor0470_3!r} must not be admitted for charter-reopened"
+for drop0470_3 in ("spec", "criterion", "failed_src"):
+    dropped0470_3 = {k: v for k, v in ev0470_3.items() if k != drop0470_3}
+    assert fold.check_append(dropped0470_3, "tick") is not None, \
+        f"★ 0470-AC3: dropping {drop0470_3} must refuse actor tick"
+print("0470-AC3 ok")
+
+# ── 0470-AC4 · fold.EMITS["owed-waived"] = {"operator", "thinker"};
+# fold.REQUIRED["owed-waived"] = ("criterion", "reason") ─────────────────────
+ev0470_4 = {"type": "owed-waived", "subject": "L-spec-9405", "criterion": "AC2",
+            "reason": "manual review substituted"}
+assert fold.check_append(ev0470_4, "operator") is None, fold.check_append(ev0470_4, "operator")
+assert fold.check_append(ev0470_4, "thinker") is None, fold.check_append(ev0470_4, "thinker")
+for actor0470_4 in ("executor", "grader", "builder"):
+    assert fold.check_append(ev0470_4, actor0470_4) is not None, \
+        f"★ 0470-AC4: actor {actor0470_4!r} must not be admitted for owed-waived"
+for drop0470_4 in ("criterion", "reason"):
+    dropped0470_4 = {k: v for k, v in ev0470_4.items() if k != drop0470_4}
+    assert fold.check_append(dropped0470_4, "operator") is not None, \
+        f"★ 0470-AC4: dropping {drop0470_4} must refuse actor operator"
+print("0470-AC4 ok")
+
+# ── 0470-AC4b · the mirror of AC10(b): a mis-authored owed-waived is inert
+# end-to-end (via fold.fold(), not check_append alone) — using the existing
+# built/graded(confirmed)/reviewed fixture plus one governing owed-ac
+# (criterion AC1) plus one owed-waived for AC1 timestamped after it ─────────
+S0470_4b = "L-spec-9407"
+built0470_4b = [{**e, "subject": S0470_4b} for e in built]
+graded0470_4b = [{**e, "subject": S0470_4b} for e in graded]
+reviewed0470_4b = [{**e, "subject": S0470_4b} for e in reviewed]
+shipped0470_4b = [{"ts": stamp(9), "type": "shipped", "subject": S0470_4b}]
+ac0470_4b = [{"ts": stamp(10), "type": "owed-ac", "subject": S0470_4b, "criterion": "AC1",
+             "wake_at": stamp(9)}]
+waived0470_4b = {"ts": stamp(5), "type": "owed-waived", "subject": S0470_4b, "criterion": "AC1",
+                 "reason": "manual review substituted"}
+
+# authored "builder" — dropped by fold()'s admission loop, state NOT accepted
+ev0470_4b_a = ledger(**{"L-builder-01.jsonl": built0470_4b + [waived0470_4b],
+                        "L-grader-01.jsonl": graded0470_4b,
+                        "L-reviewer-01.jsonl": reviewed0470_4b,
+                        "L-executor-01.jsonl": shipped0470_4b,
+                        "L-spec-writer-01.jsonl": ac0470_4b})
+assert ev0470_4b_a[1][S0470_4b]["state"] != "accepted", ev0470_4b_a[1][S0470_4b]["state"]
+
+# authored "grader" — also dropped, state NOT accepted
+ev0470_4b_b = ledger(**{"L-builder-01.jsonl": built0470_4b,
+                        "L-grader-01.jsonl": graded0470_4b + [waived0470_4b],
+                        "L-reviewer-01.jsonl": reviewed0470_4b,
+                        "L-executor-01.jsonl": shipped0470_4b,
+                        "L-spec-writer-01.jsonl": ac0470_4b})
+assert ev0470_4b_b[1][S0470_4b]["state"] != "accepted", ev0470_4b_b[1][S0470_4b]["state"]
+
+# authored "operator" — admitted, state IS accepted
+ev0470_4b_c = ledger(**{"L-builder-01.jsonl": built0470_4b,
+                        "L-grader-01.jsonl": graded0470_4b,
+                        "L-reviewer-01.jsonl": reviewed0470_4b,
+                        "L-executor-01.jsonl": shipped0470_4b,
+                        "L-spec-writer-01.jsonl": ac0470_4b,
+                        "L-operator-01.jsonl": [waived0470_4b]})
+assert ev0470_4b_c[1][S0470_4b]["state"] == "accepted", ev0470_4b_c[1][S0470_4b]["state"]
+print("0470-AC4b ok")
+
+# ── 0470-AC8 · fold.spec_state() counts a "waived" row exactly as "met" ─────
+S0470_8 = "L-spec-9420"
+shipped0470_8 = {"ts": stamp(9), "type": "shipped", "subject": S0470_8}
+verdict0470_8 = {"ts": stamp(8), "type": "verdict", "subject": S0470_8, "confirmed": True}
+review0470_8 = {"ts": stamp(8), "type": "review", "subject": S0470_8, "depth": "gates-only"}
+
+# a single owed criterion, "waived" — accepted
+ac0470_8_1 = {"ts": stamp(10), "type": "owed-ac", "subject": S0470_8, "criterion": "AC1",
+             "wake_at": stamp(9)}
+waived0470_8_1 = {"ts": stamp(5), "type": "owed-waived", "subject": S0470_8, "criterion": "AC1",
+                  "reason": "manual review substituted"}
+assert fold.spec_state([shipped0470_8, verdict0470_8, review0470_8, ac0470_8_1, waived0470_8_1],
+                       set()) == "accepted"
+
+# two owed criteria, one "met" one "waived" — accepted
+ac0470_8_2a = {"ts": stamp(10), "type": "owed-ac", "subject": S0470_8, "criterion": "AC1",
+              "wake_at": stamp(9)}
+met0470_8_2a = {"ts": stamp(5), "type": "owed-met", "subject": S0470_8, "criterion": "AC1",
+               "evidence": "e"}
+ac0470_8_2b = {"ts": stamp(10), "type": "owed-ac", "subject": S0470_8, "criterion": "AC2",
+              "wake_at": stamp(9)}
+waived0470_8_2b = {"ts": stamp(5), "type": "owed-waived", "subject": S0470_8, "criterion": "AC2",
+                   "reason": "manual review substituted"}
+assert fold.spec_state([shipped0470_8, verdict0470_8, review0470_8, ac0470_8_2a, met0470_8_2a,
+                        ac0470_8_2b, waived0470_8_2b], set()) == "accepted"
+
+# one "waived" plus one still-"waiting" — the waiting row alone blocks accepted
+ac0470_8_3a = {"ts": stamp(10), "type": "owed-ac", "subject": S0470_8, "criterion": "AC1",
+              "wake_at": stamp(9)}
+waived0470_8_3a = {"ts": stamp(5), "type": "owed-waived", "subject": S0470_8, "criterion": "AC1",
+                   "reason": "manual review substituted"}
+ac0470_8_3b = {"ts": stamp(10), "type": "owed-ac", "subject": S0470_8, "criterion": "AC2",
+              "wake_at": stamp(-5)}
+res0470_8_3 = fold.spec_state([shipped0470_8, verdict0470_8, review0470_8, ac0470_8_3a,
+                               waived0470_8_3a, ac0470_8_3b], set())
+assert res0470_8_3 == "shipped-owed-evidence", res0470_8_3
+
+# separating case: shipped + verdict-confirmed, NO review event, one owed
+# criterion "waived" — must return bare "shipped", never any shipped-owed-*
+res0470_8_4 = fold.spec_state([shipped0470_8, verdict0470_8, ac0470_8_3a, waived0470_8_3a], set())
+assert res0470_8_4 == "shipped", res0470_8_4
+print("0470-AC8 ok")
+
+# ── 0470-AC9 · fold.EMITS["kill-accepted"] = {"operator", "thinker"};
+# fold.REQUIRED["kill-accepted"] = ("reason",) — subject always the killed spec
+ev0470_9 = {"type": "kill-accepted", "subject": "L-spec-9406",
+            "reason": "coverage moved to L-spec-9407 outside this charter"}
+assert fold.check_append(ev0470_9, "operator") is None, fold.check_append(ev0470_9, "operator")
+assert fold.check_append(ev0470_9, "thinker") is None, fold.check_append(ev0470_9, "thinker")
+for actor0470_9 in ("executor", "builder", "spec-writer"):
+    assert fold.check_append(ev0470_9, actor0470_9) is not None, \
+        f"★ 0470-AC9: actor {actor0470_9!r} must not be admitted for kill-accepted"
+missing0470_9 = {k: v for k, v in ev0470_9.items() if k != "reason"}
+assert fold.check_append(missing0470_9, "operator") is not None, \
+    "★ 0470-AC9: dropping reason must refuse actor operator"
+print("0470-AC9 ok")
+
+# ── 0470-AC10 · using the existing _kill_fixture271 harness — a spec-killed
+# spec with NO superseded_by at all: (a) an admitted kill-accepted (actor
+# operator) makes closable()["all_accepted"] True and l2_complete True for an
+# otherwise-closable charter; (b) the identical fixture with the kill-accepted
+# authored "builder" instead — dropped by fold()'s admission loop — leaves
+# all_accepted False, unchanged from AC11's existing no-superseded-by baseline
+def _kill_fixture0470(actor):
+    extra0470 = dict(accepted_s2_files271)
+    ka_ev0470 = {"ts": stamp(2), "type": "kill-accepted", "subject": S1_271,
+                 "reason": "no replacement in charter"}
+    extra0470[f"L-{actor}-09.jsonl"] = [ka_ev0470]
+    return _kill_fixture271(extra0470, superseded_by=None)
+
+ev0470_10a, specs0470_10a, charters0470_10a, _, _ = _kill_fixture0470("operator")
+assert specs0470_10a[S1_271]["state"] == "killed", specs0470_10a[S1_271]["state"]
+cl0470_10a = fold.closable(ev0470_10a, CID271)
+assert cl0470_10a["all_accepted"] is True, cl0470_10a
+assert fold.l2_complete(cl0470_10a) is True, cl0470_10a
+
+ev0470_10b, *_ = _kill_fixture0470("builder")
+cl0470_10b = fold.closable(ev0470_10b, CID271)
+assert cl0470_10b["all_accepted"] is False, cl0470_10b
+print("0470-AC10 ok")
+
+# ── 0470-AC11 · fold.EMITS["charter-classified"] = {"executor", "operator"};
+# fold.REQUIRED["charter-classified"] = ("klass", "reason") ─────────────────
+ev0470_11 = {"type": "charter-classified", "subject": "L-charter-9401", "klass": "proving",
+             "reason": "2 items remaining, next owed-check 2026-10-03"}
+assert fold.check_append(ev0470_11, "executor") is None, fold.check_append(ev0470_11, "executor")
+assert fold.check_append(ev0470_11, "operator") is None, fold.check_append(ev0470_11, "operator")
+for actor0470_11 in ("tick", "thinker", "builder"):
+    assert fold.check_append(ev0470_11, actor0470_11) is not None, \
+        f"★ 0470-AC11: actor {actor0470_11!r} must not be admitted for charter-classified"
+for drop0470_11 in ("klass", "reason"):
+    dropped0470_11 = {k: v for k, v in ev0470_11.items() if k != drop0470_11}
+    assert fold.check_append(dropped0470_11, "executor") is not None, \
+        f"★ 0470-AC11: dropping {drop0470_11} must refuse actor executor"
+print("0470-AC11 ok")

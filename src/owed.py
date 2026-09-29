@@ -26,7 +26,7 @@ accepts for `tick.SPEC_DONE`.
 from datetime import timedelta
 from datetime import datetime as _datetime
 
-STATUSES = ("waiting", "due", "met", "expired", "dropped", "unshipped")
+STATUSES = ("waiting", "due", "met", "waived", "expired", "dropped", "unshipped")
 
 
 def _ts(s, now):
@@ -92,6 +92,8 @@ def checks(evs, now):
                    and _ts(e.get("ts"), now) > governing_ts]
         failed_evs = [e for e in evs if e.get("type") == "owed-failed" and e.get("criterion") == c
                       and _ts(e.get("ts"), now) > governing_ts]
+        waived_evs = [e for e in evs if e.get("type") == "owed-waived" and e.get("criterion") == c
+                      and _ts(e.get("ts"), now) > governing_ts]
         post = [e for e in evs if e.get("criterion") == c
                 and e.get("type") in ("owed-failed", "owed-met", "owed-unobservable")
                 and _ts(e.get("ts"), now) > governing_ts]
@@ -113,6 +115,8 @@ def checks(evs, now):
             status = "unshipped"
         elif met:
             status = "met"
+        elif waived_evs:
+            status = "waived"
         elif failures >= 2:
             status = "expired"
         elif due_at is not None and (now - due_at) > timedelta(days=7):
