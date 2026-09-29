@@ -1489,3 +1489,338 @@ finally:
 fold.EVENTS = saved_events
 
 print("tick: L-spec-0438 grader_serve wiring checks pass")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-0473 · tick-proving-records (L-charter-0046) — R1/R3/R4: the tick's
+# own automatic entry into Proving, its close, its reopen, and the two alarms.
+# ══════════════════════════════════════════════════════════════════════════════
+import proving  # noqa: E402
+import look  # noqa: E402
+
+
+def _proving_charter(evdir, cid, sid, *, covers=None, ts=None, owed_ac=None):
+    """The 0472-AC9 shape, reused: one fully accepted spec (builder -> grader
+    -> reviewer -> executor), `sweep-fixpoint`, and `covers` left UNSET (a
+    review owed) unless given explicitly — folds to "proving" with a
+    non-empty `items` list, never straight to "L2-complete". `ts=` stamps
+    every event the same explicit instant (for the overdue fixtures, an
+    old one); left `None`, `write_to`'s own default (module `NOW`) applies,
+    exactly like every other fixture in this file. `owed_ac=` optionally adds
+    one `owed-ac` criterion to the spec before it ships, e.g.
+    `{"criterion": "AC1", "wake_at": "..."}`."""
+    tail = cid[-5:]
+    tsk = {"ts": ts} if ts else {}
+    filed = {"type": "charter-filed", "subject": cid, **tsk}
+    if covers is not None:
+        filed["covers"] = covers
+    write_to(evdir, f"L-operator-{tail}.jsonl", filed, {"type": "l1-complete", "subject": cid, **tsk})
+    sw_evs = [{"type": "spec-written", "subject": sid, "charter": cid, **tsk}]
+    if owed_ac:
+        sw_evs.append({"type": "owed-ac", "subject": sid, "charter": cid, "line": "x", **owed_ac, **tsk})
+    write_to(evdir, f"L-spec-writer-{tail}.jsonl", *sw_evs)
+    write_to(evdir, f"L-builder-{tail}.jsonl",
+             {"type": "build-started", "subject": sid, **tsk}, {"type": "build-done", "subject": sid, **tsk})
+    write_to(evdir, f"L-grader-{tail}.jsonl", {"type": "verdict", "subject": sid, "confirmed": True, **tsk})
+    write_to(evdir, f"L-reviewer-{tail}.jsonl", {"type": "review", "subject": sid, "depth": "gates-only", **tsk})
+    write_to(evdir, f"L-executor-{tail}.jsonl",
+             {"type": "shipped", "subject": sid, **tsk}, {"type": "sweep-fixpoint", "subject": cid, **tsk})
+
+
+def _fresh_bound_root():
+    """A fresh root, both `fold.ROOT` and `fold.EVENTS` rebound together via
+    `tick._bind_root` — this unit's own Fixture isolation convention (binding
+    convention, above): `look.emit_once`'s default `root=fold.ROOT`, and
+    `look/state.json`, resolve off `fold.ROOT`, never `fold.EVENTS` alone."""
+    r = pathlib.Path(tempfile.mkdtemp())
+    (r / "events").mkdir(parents=True, exist_ok=True)
+    tick._bind_root(r)
+    return r
+
+
+# ── AC1 — automatic entry into Proving ───────────────────────────────────────
+iso473_1 = _isolated_events()
+saved_events = fold.EVENTS
+fold.EVENTS = iso473_1
+C1, S1 = "L-charter-90731", "L-spec-90731"
+_proving_charter(iso473_1, C1, S1)
+ev, specs, charters = folded()
+assert charters[C1]["state"] == "proving", charters[C1]["state"]
+mine1 = [s for s in specs.values() if s["charter"] == C1 and s["state"] != "void"]
+summ1 = proving.summary(C1, charters[C1]["evs"], mine1, fold.NOW, title=C1,
+                        review_owed=fold.charter_review_owed(charters[C1]["evs"]),
+                        open_briefs=fold.open_briefs(charters[C1]["evs"]))
+assert tick.main() == 0
+cp1 = [json.loads(l) for l in tick.tick_path().read_text().splitlines() if '"charter-proving"' in l]
+assert len(cp1) == 1, cp1
+assert cp1[0]["subject"] == C1 and cp1[0]["deadline"] == summ1["deadline"], (cp1[0], summ1)
+expected_reason1 = f"{summ1['remaining']} item(s) remain; next: {summ1['next']['text']}"
+assert cp1[0]["reason"] == expected_reason1, (cp1[0]["reason"], expected_reason1)
+assert "\n" not in cp1[0]["reason"], cp1[0]["reason"]
+assert tick.main() == 0
+cp1b = [json.loads(l) for l in tick.tick_path().read_text().splitlines() if '"charter-proving"' in l]
+assert len(cp1b) == 1, "AC1: a second pass on the unchanged ledger appends no second charter-proving"
+print("0473-AC1 ok")
+fold.EVENTS = saved_events
+
+# ── AC2 — recording the close (Gate invariant (a)) ──────────────────────────
+iso473_2 = _isolated_events()
+fold.EVENTS = iso473_2
+C2, S2 = "L-charter-90732", "L-spec-90732"
+_proving_charter(iso473_2, C2, S2, covers="none", owed_ac={"criterion": "AC1", "wake_at": NOW})
+ev, specs, charters = folded()
+assert specs[S2]["state"] == "shipped-owed-due", specs[S2]["state"]
+assert charters[C2]["state"] == "proving", charters[C2]["state"]
+assert tick.main() == 0
+evs2 = fold.read_events()
+assert any(e["type"] == "charter-proving" and e.get("subject") == C2 for e in evs2), evs2
+assert not any(e["type"] == "charter-closed" and e.get("subject") == C2 for e in evs2), \
+    "AC2: not closed while the owed check is still open"
+met_ts2 = (fold.NOW + datetime.timedelta(minutes=1)).isoformat(timespec="seconds")
+write_to(iso473_2, "L-owed-sweeper-90732.jsonl",
+         {"type": "owed-met", "subject": S2, "charter": C2, "criterion": "AC1", "evidence": "e", "ts": met_ts2})
+ev, specs, charters = folded()
+assert specs[S2]["state"] == "accepted", specs[S2]["state"]
+assert charters[C2]["state"] == "L2-complete", charters[C2]["state"]
+assert tick.main() == 0
+evs2b = fold.read_events()
+closed2b = [e for e in evs2b if e["type"] == "charter-closed" and e.get("subject") == C2]
+assert len(closed2b) == 1, closed2b
+assert closed2b[0]["reason"] == tick.PROVING_CLOSE_REASON, closed2b[0]
+assert tick.main() == 0
+evs2c = fold.read_events()
+closed2c = [e for e in evs2c if e["type"] == "charter-closed" and e.get("subject") == C2]
+assert len(closed2c) == 1, "AC2: a third pass on the unchanged (now-closed) ledger appends no second charter-closed"
+fold.EVENTS = saved_events
+
+# AC2(b) — identical, but `covers` set (a review owed): does not close on the
+# same shape until a `charter-review-complete` event also lands.
+iso473_2b = _isolated_events()
+fold.EVENTS = iso473_2b
+C2B, S2B = "L-charter-90733", "L-spec-90733"
+_proving_charter(iso473_2b, C2B, S2B, covers="R1", owed_ac={"criterion": "AC1", "wake_at": NOW})
+met_ts2b = (fold.NOW + datetime.timedelta(minutes=1)).isoformat(timespec="seconds")
+write_to(iso473_2b, "L-owed-sweeper-90733.jsonl",
+         {"type": "owed-met", "subject": S2B, "charter": C2B, "criterion": "AC1", "evidence": "e", "ts": met_ts2b})
+ev, specs, charters = folded()
+assert charters[C2B]["state"] in ("proving", "reopened"), charters[C2B]["state"]
+assert tick.main() == 0
+evs2b_ = fold.read_events()
+assert not any(e["type"] == "charter-closed" and e.get("subject") == C2B for e in evs2b_), \
+    "AC2(b): a review still owed must never close, regardless of the owed check"
+write_to(iso473_2b, "L-charter-reviewer-90733.jsonl", {"type": "charter-review-complete", "subject": C2B})
+ev, specs, charters = folded()
+assert charters[C2B]["state"] == "L2-complete", charters[C2B]["state"]
+assert tick.main() == 0
+evs2b2 = fold.read_events()
+assert any(e["type"] == "charter-closed" and e.get("subject") == C2B for e in evs2b2), \
+    "AC2(b): once the review completes too, the close follows"
+print("0473-AC2 ok")
+fold.EVENTS = saved_events
+
+# ── AC3 — a charter that skips Proving entirely never gains a charter-closed ─
+iso473_3 = _isolated_events()
+fold.EVENTS = iso473_3
+C3, S3 = "L-charter-90734", "L-spec-90734"
+_proving_charter(iso473_3, C3, S3, covers="none")
+ev, specs, charters = folded()
+assert charters[C3]["state"] == "L2-complete", charters[C3]["state"]
+assert tick.main() == 0
+assert tick.main() == 0
+evs3 = fold.read_events()
+assert not any(e["type"] == "charter-proving" and e.get("subject") == C3 for e in evs3), \
+    "AC3: a charter that skips Proving entirely must never gain a charter-proving event"
+assert not any(e["type"] == "charter-closed" and e.get("subject") == C3 for e in evs3), \
+    "AC3: SD7 — no charter-proving ever recorded means no charter-closed either"
+print("0473-AC3 ok")
+fold.EVENTS = saved_events
+
+# ── AC4 — reopen, the Plan's Gate invariant (b) ─────────────────────────────
+root4a = _fresh_bound_root()
+C4A, S4A = "L-charter-90740", "L-spec-90740"
+_proving_charter(fold.EVENTS, C4A, S4A, owed_ac={"criterion": "AC1", "wake_at": NOW})
+ev, specs, charters = folded()
+assert specs[S4A]["state"] == "shipped-owed-due", specs[S4A]["state"]
+assert charters[C4A]["state"] == "proving", charters[C4A]["state"]
+assert tick.main() == 0
+evs4a = fold.read_events()
+assert any(e["type"] == "charter-proving" and e.get("subject") == C4A for e in evs4a), evs4a
+# `dispatch.now()` truncates to whole seconds; the later fold's "reopened"
+# derivation needs the charter-reopened event's own real ts to be STRICTLY
+# after the charter-proving one (`phase()`'s own `reopened_ts > proving_ts`),
+# so a same-second race here is a real, not merely theoretical, flake.
+time.sleep(1.1)
+fail_ts4a = (fold.NOW + datetime.timedelta(minutes=5)).isoformat(timespec="seconds")
+write_to(fold.EVENTS, "L-owed-sweeper-90740.jsonl",
+         {"type": "owed-failed", "subject": S4A, "charter": C4A, "criterion": "AC1", "kind": "unmet",
+          "evidence": "e", "ts": fail_ts4a})
+ev, specs, charters = folded()
+assert charters[C4A]["state"] == "proving", \
+    "AC4: still 'proving' BEFORE the _record() pass that appends the reopen"
+failed_ev4a = next(e for e in ev if e["type"] == "owed-failed" and e.get("subject") == S4A)
+expected_src4a = failed_ev4a["_src"]
+assert tick.main() == 0
+evs4a2 = fold.read_events()
+reopened4a = [e for e in evs4a2 if e["type"] == "charter-reopened" and e.get("subject") == C4A]
+assert len(reopened4a) == 1, reopened4a
+assert reopened4a[0]["spec"] == S4A and reopened4a[0]["criterion"] == "AC1" \
+    and reopened4a[0]["failed_src"] == expected_src4a, (reopened4a[0], expected_src4a)
+briefs4a = [e for e in evs4a2 if e["type"] == "brief" and e.get("condition") == "proving-check-failed"
+            and e.get("key") == f"{C4A}|{S4A}|AC1"]
+assert len(briefs4a) == 1, briefs4a
+_, _, charters4a2 = folded()
+assert charters4a2[C4A]["state"] == "reopened", charters4a2[C4A]["state"]
+
+# AC4, kind="stale" — never reopens, no brief, state stays "proving".
+root4b = _fresh_bound_root()
+C4B, S4B = "L-charter-90741", "L-spec-90741"
+_proving_charter(fold.EVENTS, C4B, S4B, owed_ac={"criterion": "AC1", "wake_at": NOW})
+ev, specs, charters = folded()
+assert charters[C4B]["state"] == "proving", charters[C4B]["state"]
+assert tick.main() == 0
+fail_ts4b = (fold.NOW + datetime.timedelta(minutes=5)).isoformat(timespec="seconds")
+write_to(fold.EVENTS, "L-owed-sweeper-90741.jsonl",
+         {"type": "owed-failed", "subject": S4B, "charter": C4B, "criterion": "AC1", "kind": "stale",
+          "evidence": "e", "ts": fail_ts4b})
+ev, specs, charters = folded()
+assert charters[C4B]["state"] == "proving", charters[C4B]["state"]
+assert tick.main() == 0
+evs4b2 = fold.read_events()
+assert not any(e["type"] == "charter-reopened" and e.get("subject") == C4B for e in evs4b2), \
+    "AC4: kind='stale' never reopens (Q4)"
+assert not any(e["type"] == "brief" and e.get("condition") == "proving-check-failed" for e in evs4b2), \
+    "AC4: kind='stale' fires no proving-check-failed brief"
+_, _, charters4b2 = folded()
+assert charters4b2[C4B]["state"] == "proving", charters4b2[C4B]["state"]
+print("0473-AC4 ok")
+
+# ── AC5 — the reopen is idempotent across a second, event-free pass ────────
+tick._bind_root(root4a)
+assert tick.main() == 0
+evs5 = fold.read_events()
+reopened5 = [e for e in evs5 if e["type"] == "charter-reopened" and e.get("subject") == C4A]
+assert len(reopened5) == 1, "AC5: to_reopen()'s own failed_src dedup — no second charter-reopened"
+briefs5 = [e for e in evs5 if e["type"] == "brief" and e.get("condition") == "proving-check-failed"
+           and e.get("key") == f"{C4A}|{S4A}|AC1"]
+assert len(briefs5) == 1, "AC5: look.emit_once's own open-brief dedup — no second brief"
+print("0473-AC5 ok")
+
+# ── AC6 — the overdue alarm, exactly once per (charter, deadline) ever ──────
+orig_fold_now = fold.NOW
+root6 = _fresh_bound_root()
+C6, S6 = "L-charter-90750", "L-spec-90750"
+t_old6 = (orig_fold_now - datetime.timedelta(days=10)).isoformat(timespec="seconds")
+_proving_charter(fold.EVENTS, C6, S6, ts=t_old6, owed_ac={"criterion": "AC1", "wake_at": t_old6})
+# the charter-proving event itself, backdated to the SAME old instant — EMITS
+# gates it to actor "tick" (D90: the filename), so a "L-tick-*" file is used.
+write_to(fold.EVENTS, "L-tick-90750.jsonl",
+         {"type": "charter-proving", "subject": C6, "reason": "backdated for AC6", "deadline": t_old6,
+          "ts": t_old6})
+ev, specs, charters = folded()
+assert charters[C6]["state"] == "proving", charters[C6]["state"]
+mine6 = [s for s in specs.values() if s["charter"] == C6 and s["state"] != "void"]
+summ6 = proving.summary(C6, charters[C6]["evs"], mine6, fold.NOW, title=C6,
+                        review_owed=fold.charter_review_owed(charters[C6]["evs"]),
+                        open_briefs=fold.open_briefs(charters[C6]["evs"]))
+assert fold.ts(summ6["deadline"]) < fold.NOW, \
+    f"AC6 precondition: the fixture's own deadline must already be in the past: {summ6['deadline']}"
+key6 = f"{C6}|{summ6['deadline']}"
+assert tick.main() == 0
+evs6 = fold.read_events()
+overdue6 = [e for e in evs6 if e["type"] == "brief" and e.get("condition") == "proving-overdue"
+            and e.get("key") == key6]
+assert len(overdue6) == 1, overdue6
+assert overdue6[0]["owner"] == "operator", overdue6[0]
+reading6 = overdue6[0].get("reading") or {}
+expected_next6 = summ6["next"]["text"] if summ6["next"] is not None else None
+assert reading6.get("next") == expected_next6 and reading6.get("owner") == summ6["owner"], \
+    (reading6, summ6)
+
+# isolate the ledger-scan guard from look.emit_once's own 30-minute cooldown:
+# clear the brief directly, advance fold.NOW past the cooldown, and prove via
+# a CONTROL call against a separate scratch root that the cooldown alone
+# would NOT have suppressed a repeat — only this unit's own ledger-scan does.
+look._clear("proving-overdue", key6, "test-clear", evs6, root6)
+fold.NOW = orig_fold_now + datetime.timedelta(minutes=31)
+control_root6 = pathlib.Path(tempfile.mkdtemp())
+control6 = look.emit_once("proving-overdue", key6, "operator", {"next": None, "owner": "operator"},
+                          fold.read_events(), root=control_root6)
+assert control6 is not None, \
+    "AC6 control: a clean scratch root, past the cooldown, must accept the SAME (condition, key) again"
+assert tick.main() == 0
+evs6b = fold.read_events()
+overdue6b = [e for e in evs6b if e["type"] == "brief" and e.get("condition") == "proving-overdue"
+             and e.get("key") == key6]
+assert len(overdue6b) == 1, \
+    f"AC6: the ledger-scan guard suppresses a repeat the cooldown alone would not have: {overdue6b}"
+
+# a re-dated (later) owed-ac shifts the deadline -> exactly one NEW alarm,
+# under a NEW key.
+redate_ts6 = (orig_fold_now + datetime.timedelta(minutes=40)).isoformat(timespec="seconds")
+new_wake6 = (orig_fold_now - datetime.timedelta(days=5)).isoformat(timespec="seconds")
+write_to(fold.EVENTS, "L-executor-90750b.jsonl",
+         {"type": "owed-ac", "subject": S6, "charter": C6, "criterion": "AC1", "wake_at": new_wake6,
+          "line": "x", "ts": redate_ts6})
+ev, specs, charters = folded()
+mine6c = [s for s in specs.values() if s["charter"] == C6 and s["state"] != "void"]
+summ6c = proving.summary(C6, charters[C6]["evs"], mine6c, fold.NOW, title=C6,
+                         review_owed=fold.charter_review_owed(charters[C6]["evs"]),
+                         open_briefs=fold.open_briefs(charters[C6]["evs"]))
+assert summ6c["deadline"] != summ6["deadline"], \
+    f"AC6: the re-date must change the deadline, or this proves nothing: {summ6c['deadline']}"
+assert fold.ts(summ6c["deadline"]) < fold.NOW, \
+    f"AC6: the re-dated deadline must still be overdue, or the new alarm never fires this pass: {summ6c}"
+key6c = f"{C6}|{summ6c['deadline']}"
+assert tick.main() == 0
+evs6c = fold.read_events()
+overdue6c_new = [e for e in evs6c if e["type"] == "brief" and e.get("condition") == "proving-overdue"
+                 and e.get("key") == key6c]
+assert len(overdue6c_new) == 1, overdue6c_new
+overdue6c_old = [e for e in evs6c if e["type"] == "brief" and e.get("condition") == "proving-overdue"
+                 and e.get("key") == key6]
+assert len(overdue6c_old) == 1, "AC6: the OLD key's alarm is untouched — one alarm per key, forever"
+fold.NOW = orig_fold_now
+
+# a charter whose deadline is still in the future -> no alarm at all.
+root6d = _fresh_bound_root()
+C6D, S6D = "L-charter-90751", "L-spec-90751"
+_proving_charter(fold.EVENTS, C6D, S6D)
+ev, specs, charters = folded()
+assert charters[C6D]["state"] == "proving", charters[C6D]["state"]
+assert tick.main() == 0
+evs6d = fold.read_events()
+assert not any(e["type"] == "brief" and e.get("condition") == "proving-overdue" for e in evs6d), \
+    "AC6: a charter whose deadline is still in the future gets no alarm at all"
+print("0473-AC6 ok")
+
+# ── AC8 — a raising per-charter proving loop never stops the tick's own ─────
+# heartbeat; the SAME tick event names it on `proving_error`.
+iso473_8 = _isolated_events()
+fold.EVENTS = iso473_8
+C8, S8 = "L-charter-90748", "L-spec-90748"
+_proving_charter(iso473_8, C8, S8)
+ev, specs, charters = folded()
+assert charters[C8]["state"] == "proving", charters[C8]["state"]
+real_should_enter = proving.should_enter
+
+
+def _raising_should_enter(*a, **kw):
+    raise RuntimeError("induced for 0473-AC8")
+
+
+proving.should_enter = _raising_should_enter
+try:
+    assert tick.main() == 0, "AC8: a raising should_enter() never crashes the tick"
+    last8 = ticks()[-1]
+    assert "proving_error" in last8 and "0473-AC8" in last8["proving_error"], last8
+    assert "carry_error" not in last8 and "intake_error" not in last8 and "look_error" not in last8, last8
+    assert isinstance(last8["lane"], int), last8
+finally:
+    proving.should_enter = real_should_enter
+assert tick.main() == 0
+last8b = ticks()[-1]
+assert "proving_error" not in last8b, last8b
+print("0473-AC8 ok")
+fold.EVENTS = saved_events
+
+print("tick: L-spec-0473 tick-proving-records checks pass")
