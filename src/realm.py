@@ -44,6 +44,7 @@ PAGE = HERE / "realm.html"
 # "merged, not running" signal must still be judged against the live one.
 LIVE_REPO = pathlib.Path(os.environ.get("DOIT_LIVE_REPO", pathlib.Path.home() / "do-it-v2"))
 FOLD = (LIVE_REPO / "src" / "fold.py") if (LIVE_REPO / "src" / "fold.py").is_file() else (HERE / "fold.py")
+PROVING = (LIVE_REPO / "src" / "proving.py") if (LIVE_REPO / "src" / "proving.py").is_file() else (HERE / "proving.py")
 BRIEF = (LIVE_REPO / "src" / "brief.py") if (LIVE_REPO / "src" / "brief.py").is_file() else (HERE / "brief.py")
 
 KEEP = {
@@ -803,7 +804,7 @@ def metrics_at(rows, states, claims, at, sys_sig=None, makers=None, spec_ch=None
             for c, vals in by.items():
                 cs = st.get(c, "")
                 vals = [v for v in vals if v]
-                if not vals or re.search(r"complete|retracted", cs, re.I):
+                if not vals or re.search(r"complete|retracted|proving|reopened", cs, re.I):
                     continue
                 live = [v for v in vals if not re.search(r"killed|void|dropped|unknown", v)]
                 if live and all(re.match(r"^(accepted|shipped)$", v) for v in live) and not any(subj in esc for subj, _ in [(sp, 0) for sp, cc in spec_ch.items() if cc == c]):
@@ -1004,6 +1005,22 @@ def derive_states():
         return None
 
 
+def derive_proving():
+    """`proving.py --json` in a subprocess: the SD6 summary list, or None on any failure (non-zero
+    exit, timeout, malformed JSON, or any exception class derive_states() itself tolerates) — never
+    [], mirroring proving.py's own contract that a fold error never renders as an empty view."""
+    try:
+        p = subprocess.run([sys.executable, str(PROVING), "--json"], capture_output=True, text=True,
+                           timeout=120, env={**os.environ, "DOIT_ROOT": str(ROOT)})
+        if p.returncode != 0:
+            return None
+        data = json.loads(p.stdout)
+        return data if isinstance(data, list) else None
+    except Exception as ex:  # noqa: BLE001 — the page shows "Proving: unavailable", never a dead server
+        sys.stderr.write(f"realm: proving failed: {ex}\n")
+        return None
+
+
 def derive_dossier(item_id):
     """`doit brief <id> --json` in a subprocess: the SD6 dossier dict, {"error":"unknown"} for an id
     brief.py itself exits 2 on with nothing on stdout, {"error":"invalid"} for an id-injection guard hit
@@ -1082,7 +1099,7 @@ def queue_stats(rows, claims):
             "max_min": round(waits[-1], 1) if waits else None}
 
 
-def bootstrap(hours, states=None, goals=None):
+def bootstrap(hours, states=None, goals=None, proving=None):
     rows, raw, _ = read_all()
     claims = seat_claims()
     for r in rows:
@@ -1105,12 +1122,14 @@ def bootstrap(hours, states=None, goals=None):
         states = derive_states() or []
     if goals is None:
         goals = derive_goals() or []
+    if proving is None:
+        proving = derive_proving()
     _, spec_ch_now = charter_index(raw)
     metrics_now = metrics_at(rows, states, claims, now, sys_signals(), None, spec_ch_now)
     return {"live": True, "now": now.isoformat(timespec="seconds"), "root": str(ROOT), "metrics": metrics_now,
             "window": [window_rows[0]["t"] if window_rows else now.isoformat(timespec="seconds"), now.isoformat(timespec="seconds")],
             "ledger_start": rows[0]["t"] if rows else None, "n_events": len(raw), "events": window_rows,
-            "stats": role_stats(raw), "states": states, "goals": goals,
+            "stats": role_stats(raw), "states": states, "goals": goals, "proving": proving,
             "seat": seat_summary(), "titles": titles, "counts": dict(counts.most_common(60)),
             "queue": queue_stats(rows, claims), "caps": ROLE_CAPS_MIN, "charters": charters, "spec_charter": spec_charter, "makers": maker_index(raw, states), "specs": {sid: t for sid in dict(states) if sid.startswith("L-spec-") for t in [spec_text(sid)] if t}, "sys": sys_signals(), "tick_omens": _OMENS_SCRIPT if _OMENS_SCRIPT["at"] else None, "history": HISTORY, "wallclock": wallclock(rows, states, now)}
 
@@ -1121,6 +1140,7 @@ class Hub:
         self.clients, self.lock = set(), threading.Lock()
         self.states = None
         self.goals = None
+        self.proving = None
         self.recent = collections.deque(maxlen=6000)   # (kind, data) in arrival order, for /api/since
         self.seq = int(time.time() * 1000)             # monotonic across restarts, so an old client's seq is never "ahead"
         self.started = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
@@ -1173,7 +1193,7 @@ def since(seq, t=None):
         else:
             ledger = [d for d in ledger if d.get("t", "") > t]
     return {"seq": top, "ledger": ledger, "claims": claims, "started": started,
-            "states": HUB.states, "goals": HUB.goals or [], "seat": seat_summary(),
+            "states": HUB.states, "goals": HUB.goals or [], "proving": HUB.proving, "seat": seat_summary(),
             "now": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")}
 
 
@@ -1223,11 +1243,14 @@ def tail_forever(poll=1.0):
                 want_states, last_states = False, time.monotonic()
                 st = derive_states()
                 gl = derive_goals()
+                pv = derive_proving()
                 if gl is not None:
                     HUB.goals = gl
+                if pv is not None:
+                    HUB.proving = pv
                 if st is not None:
                     HUB.states = st
-                    HUB.send("states", {"states": st, "seat": seat_summary(), "goals": HUB.goals})
+                    HUB.send("states", {"states": st, "seat": seat_summary(), "goals": HUB.goals, "proving": HUB.proving})
         except Exception as ex:  # noqa: BLE001
             sys.stderr.write(f"realm: tail error: {ex}\n")
 
@@ -1238,11 +1261,11 @@ def push_forever(url, token, hours):
     last_history = 0.0
     while True:
         try:
-            snap = bootstrap(hours, HUB.states, goals=HUB.goals)
+            snap = bootstrap(hours, HUB.states, goals=HUB.goals, proving=HUB.proving)
             snap["live"], snap["remote"] = False, True
             _post(f"{url}/api/push?file=snapshot", token, snap)
             if time.monotonic() - last_history > 600:
-                hist = bootstrap(0, HUB.states, goals=HUB.goals)
+                hist = bootstrap(0, HUB.states, goals=HUB.goals, proving=HUB.proving)
                 hist["live"], hist["remote"] = False, True
                 _post(f"{url}/api/push?file=history", token, hist)
                 last_history = time.monotonic()
