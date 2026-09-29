@@ -44,6 +44,7 @@ PAGE = HERE / "realm.html"
 # "merged, not running" signal must still be judged against the live one.
 LIVE_REPO = pathlib.Path(os.environ.get("DOIT_LIVE_REPO", pathlib.Path.home() / "do-it-v2"))
 FOLD = (LIVE_REPO / "src" / "fold.py") if (LIVE_REPO / "src" / "fold.py").is_file() else (HERE / "fold.py")
+BRIEF = (LIVE_REPO / "src" / "brief.py") if (LIVE_REPO / "src" / "brief.py").is_file() else (HERE / "brief.py")
 
 KEEP = {
     "spawn-started", "spawn-done", "spawn-failed", "build-started", "build-done", "build-blocked",
@@ -1003,6 +1004,45 @@ def derive_states():
         return None
 
 
+def derive_dossier(item_id):
+    """`doit brief <id> --json` in a subprocess: the SD6 dossier dict, {"error":"unknown"} for an id
+    brief.py itself exits 2 on with nothing on stdout, {"error":"invalid"} for an id-injection guard hit
+    before any subprocess is ever built, or None for every other failure (never raise, never fake a dict)."""
+    if not item_id or str(item_id).startswith("-"):
+        return {"error": "invalid"}
+    if not BRIEF.is_file():
+        return None
+    try:
+        p = subprocess.run([sys.executable, str(BRIEF), item_id, "--json"], capture_output=True, text=True,
+                           timeout=120, env={**os.environ, "DOIT_ROOT": str(ROOT)})
+        if p.returncode == 0:
+            return json.loads(p.stdout)
+        if p.returncode == 2 and p.stdout.strip() == "":
+            return {"error": "unknown"}
+        return None
+    except Exception as ex:  # noqa: BLE001 — the page shows "unavailable", never a dead server
+        sys.stderr.write(f"realm: brief.py failed: {ex}\n")
+        return None
+
+
+def derive_goals():
+    """`doit brief --goals --json` in a subprocess: the SD6 goal-summary list, or None on any failure
+    (a missing BRIEF, a non-zero exit, a non-list JSON result, or any exception). `[]` is returned only
+    from a real exit-0, real-empty-list response — never invented on a failure branch."""
+    if not BRIEF.is_file():
+        return None
+    try:
+        p = subprocess.run([sys.executable, str(BRIEF), "--goals", "--json"], capture_output=True, text=True,
+                           timeout=120, env={**os.environ, "DOIT_ROOT": str(ROOT)})
+        if p.returncode != 0:
+            return None
+        data = json.loads(p.stdout)
+        return data if isinstance(data, list) else None
+    except Exception as ex:  # noqa: BLE001
+        sys.stderr.write(f"realm: brief.py --goals failed: {ex}\n")
+        return None
+
+
 def seat_claims():
     """spawn → ISO claim time, from the .claimed file mtimes."""
     out = {}
@@ -1042,7 +1082,7 @@ def queue_stats(rows, claims):
             "max_min": round(waits[-1], 1) if waits else None}
 
 
-def bootstrap(hours, states=None):
+def bootstrap(hours, states=None, goals=None):
     rows, raw, _ = read_all()
     claims = seat_claims()
     for r in rows:
@@ -1063,12 +1103,14 @@ def bootstrap(hours, states=None):
     counts = collections.Counter(e.get("type") for e in raw)
     if states is None:
         states = derive_states() or []
+    if goals is None:
+        goals = derive_goals() or []
     _, spec_ch_now = charter_index(raw)
     metrics_now = metrics_at(rows, states, claims, now, sys_signals(), None, spec_ch_now)
     return {"live": True, "now": now.isoformat(timespec="seconds"), "root": str(ROOT), "metrics": metrics_now,
             "window": [window_rows[0]["t"] if window_rows else now.isoformat(timespec="seconds"), now.isoformat(timespec="seconds")],
             "ledger_start": rows[0]["t"] if rows else None, "n_events": len(raw), "events": window_rows,
-            "stats": role_stats(raw), "states": states,
+            "stats": role_stats(raw), "states": states, "goals": goals,
             "seat": seat_summary(), "titles": titles, "counts": dict(counts.most_common(60)),
             "queue": queue_stats(rows, claims), "caps": ROLE_CAPS_MIN, "charters": charters, "spec_charter": spec_charter, "makers": maker_index(raw, states), "specs": {sid: t for sid in dict(states) if sid.startswith("L-spec-") for t in [spec_text(sid)] if t}, "sys": sys_signals(), "tick_omens": _OMENS_SCRIPT if _OMENS_SCRIPT["at"] else None, "history": HISTORY, "wallclock": wallclock(rows, states, now)}
 
@@ -1078,6 +1120,7 @@ class Hub:
     def __init__(self):
         self.clients, self.lock = set(), threading.Lock()
         self.states = None
+        self.goals = None
         self.recent = collections.deque(maxlen=6000)   # (kind, data) in arrival order, for /api/since
         self.seq = int(time.time() * 1000)             # monotonic across restarts, so an old client's seq is never "ahead"
         self.started = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
@@ -1130,7 +1173,8 @@ def since(seq, t=None):
         else:
             ledger = [d for d in ledger if d.get("t", "") > t]
     return {"seq": top, "ledger": ledger, "claims": claims, "started": started,
-            "states": HUB.states, "seat": seat_summary(), "now": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")}
+            "states": HUB.states, "goals": HUB.goals or [], "seat": seat_summary(),
+            "now": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")}
 
 
 def tail_forever(poll=1.0):
@@ -1178,9 +1222,12 @@ def tail_forever(poll=1.0):
             if want_states or time.monotonic() - last_states > 120:
                 want_states, last_states = False, time.monotonic()
                 st = derive_states()
+                gl = derive_goals()
+                if gl is not None:
+                    HUB.goals = gl
                 if st is not None:
                     HUB.states = st
-                    HUB.send("states", {"states": st, "seat": seat_summary()})
+                    HUB.send("states", {"states": st, "seat": seat_summary(), "goals": HUB.goals})
         except Exception as ex:  # noqa: BLE001
             sys.stderr.write(f"realm: tail error: {ex}\n")
 
@@ -1191,11 +1238,11 @@ def push_forever(url, token, hours):
     last_history = 0.0
     while True:
         try:
-            snap = bootstrap(hours, HUB.states)
+            snap = bootstrap(hours, HUB.states, goals=HUB.goals)
             snap["live"], snap["remote"] = False, True
             _post(f"{url}/api/push?file=snapshot", token, snap)
             if time.monotonic() - last_history > 600:
-                hist = bootstrap(0, HUB.states)
+                hist = bootstrap(0, HUB.states, goals=HUB.goals)
                 hist["live"], hist["remote"] = False, True
                 _post(f"{url}/api/push?file=history", token, hist)
                 last_history = time.monotonic()
@@ -1299,6 +1346,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
             except ValueError:
                 seq = 0
             self._json(since(seq, qs.get("t", [None])[0]))
+        elif u.path == "/api/dossier":
+            result = derive_dossier(qs.get("id", [""])[0])
+            if result == {"error": "unknown"}:
+                self._json({"error": "unknown id"}, 404)
+            elif result == {"error": "invalid"}:
+                self._json({"error": "invalid id"}, 400)
+            elif isinstance(result, dict):
+                self._json(result)
+            else:
+                self._json({"error": "dossier unavailable"}, 502)
         elif u.path == "/api/stream":
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
