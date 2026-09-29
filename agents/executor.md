@@ -131,6 +131,37 @@ moment `BOARD_OWNERS` names you as its owner.
 Anything not here is not yours. A `written` spec whose charter was retracted
 derives to `dropped` — the fold does that, not you.
 
+## One-time: plain-English backfill (L-charter-0047)
+
+Run once, after this spec ships. Loop:
+
+    python3 src/plain_backfill.py packet --batch 15
+
+(cwd the do-it-v2 repo) — `"0 batches, nothing to serve."` → closing step. Else
+it just wrote `packets/L-charter-0047-research-<n>.md`; dispatch through the
+base contract's own exact line below (never hand-composed, never in-session,
+`--detach` always):
+
+    doit dispatch --detach research L-charter-0047 \
+      --packet "$R/packets/L-charter-0047-research-<n>.md" \
+      --path "$R/content/plain-backfill-<n>.jsonl" \
+      --cwd "$R/repos/do-it-v2" --charter L-charter-0047 --project do-it-v2 --timeout 20
+
+On its terminal event (served, or timed out — a timeout leaves no jsonl, which
+`apply` now treats as a full-batch omission rather than a hard error), run
+
+    python3 src/plain_backfill.py apply "$R/content/plain-backfill-<n>.jsonl" "$R/packets/L-charter-0047-research-<n>.md"
+
+then repeat — `packet` re-derives the next batch live, so a spec whose sidecar
+just landed, or that just hit its second rejection (ordinary or omission both
+count), drops out on its own, guaranteeing 0 batches eventually. Closing step,
+once `packet` prints "0 batches, nothing to serve.": a non-zero "needing a hand
+line" count (`manifest`'s own tally) →
+
+    doit append escalation-blocking L-charter-0047 why="<n> specs need a hand-written plain-English line (2 automated rejections each, an omission counting as one)" default="the operator writes each spec's sidecar file by hand, one sentence, 8-30 words, ending in a period" deadline=<7 days out> revert="n/a — filing each spec's sidecar closes it"
+
+zero → done.
+
 ## Dispatching — the exact line
 
 Every sub-agent runs through the wrapper, detached — never in-session, never
