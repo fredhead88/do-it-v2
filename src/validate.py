@@ -20,12 +20,13 @@ def spec_shape(spec_text):
     """L-spec-0195/R3, AC1: a spec the tools cannot read is bounced BEFORE a builder
     is ever dispatched against it, never discovered only at dispatch time
     (`fold.py`'s void state). Pure, text-only — composes the same pure checks
-    `packet.verify_script`/`merge_gate.grant_from_text` already perform, in three
-    independently labelled buckets, and NEVER `packet.verify_script(c)` itself
-    (which needs a packet `Ctx`, side-effects, and would `die()` reachable through a
-    `git merge-base` call this function must never make).
+    `packet.verify_script`/`merge_gate.grant_from_text` already perform, plus a
+    fourth, independently labelled "plain" bucket (L-spec-0478), and NEVER
+    `packet.verify_script(c)` itself (which needs a packet `Ctx`, side-effects,
+    and would `die()` reachable through a `git merge-base` call this function
+    must never make).
 
-    Returns `[]` when all three buckets pass ("packetable"); otherwise one non-empty
+    Returns `[]` when all four buckets pass ("packetable"); otherwise one non-empty
     finding per FAILED bucket, each naming which bucket it is."""
     sys.path.insert(0, str(HERE))
     import merge_gate, packet, packet_lint  # noqa: E402 — local, so a CLI-only
@@ -68,6 +69,16 @@ def spec_shape(spec_text):
         merge_gate.grant_from_text(spec_text)
     except merge_gate.Undetermined as e:
         findings.append(f"Writes grant: {e}")
+
+    # Bucket 4 — plain English (L-spec-0478, this unit's own footprint): a spec
+    # needs a line matching `plain.PLAIN_RE` (the `In plain English: <sentence>`
+    # line), reported unconditionally, the same as the other three — `spec_shape`
+    # itself is never caller-aware (SD9); a caller that wants this bucket to be
+    # non-blocking (`autodispatch.py`'s pre-build gate) filters the finding out
+    # of its OWN block list, not here.
+    import plain  # noqa: E402 — lazy, per Seams: plain-core -> plain-line-gate
+    if not plain.PLAIN_RE.search(spec_text):
+        findings.append("Plain English: no line matches `In plain English: <sentence>`")
 
     # L-spec-0273/R5: the append-only checklist, PL-001..009 — only a
     # BLOCK-severity hit ever joins the return above; PL-001..009 ship warn

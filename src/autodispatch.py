@@ -101,8 +101,13 @@ def _blocking_reason(sid, evs, events, project, charter, wave, busy):
     except OSError:
         return "spec file unreadable", False
     shp = shape.check(text)
-    if shp["block"]:
-        return "shape: " + "; ".join(shp["block"]), False
+    # SD9 (L-spec-0478): a missing "In plain English:" line does not make an
+    # already-written spec unbuildable — the pre-build gate's one exception.
+    # `spec_shape` itself stays caller-unaware and reports the finding always;
+    # only this caller strips it before deciding blocked vs dispatchable.
+    block = [b for b in shp["block"] if not b.startswith("Plain English:")]
+    if block:
+        return "shape: " + "; ".join(block), False
     if wave is not None and charter is not None:
         blocker = dispatch.wave_blocker(events, charter, sid, wave)
         if blocker:

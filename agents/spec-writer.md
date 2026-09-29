@@ -71,7 +71,9 @@ Run each. Record what it found in `Assumptions[]`, or kill the spec.
 Three are conditional and fire on a property of the footprint, never on a
 judgment about importance. The rest are unconditional.
 
-1. `Goal` — one sentence: "X changes from A to B."
+1. `Goal` — one sentence: "X changes from A to B." Beneath that sentence, a
+   required `In plain English: <one sentence>` line — `validate.spec_shape`
+   refuses a spec whose Goal section has no line matching that pattern.
 2. `Requirements[]` — stable ID · Current · Target · Acceptance, typed and
    mechanically checkable, each with its `review_path`.
 3. `Boundaries` — `In scope[]` and `Out of scope[]`, both non-empty, each

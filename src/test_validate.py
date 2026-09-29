@@ -25,20 +25,23 @@ WELL_FORMED = ("# L-spec-fixture\n"
                "## Acceptance Criteria\n"
                "AC1 [backend]: x.\n"
                "  review_path: y\n"
-               "Writes: a.py\n")
+               "Writes: a.py\n"
+               "In plain English: fixture proves the well-formed case.\n")
 
 NO_VERIFICATION = ("# L-spec-fixture\n"
                     "## Acceptance Criteria\n"
                     "AC1 [backend]: x.\n"
                     "  review_path: y\n"
-                    "Writes: a.py\n")
+                    "Writes: a.py\n"
+                    "In plain English: fixture proves the well-formed case.\n")
 
 NO_ACCEPTANCE = ("# L-spec-fixture\n"
                   "## Verification\n"
                   "```\n"
                   "true && true\n"
                   "```\n"
-                  "Writes: a.py\n")
+                  "Writes: a.py\n"
+                  "In plain English: fixture proves the well-formed case.\n")
 
 PROSE_WRITES = ("# L-spec-fixture\n"
                 "## Verification\n"
@@ -48,10 +51,29 @@ PROSE_WRITES = ("# L-spec-fixture\n"
                 "## Acceptance Criteria\n"
                 "AC1 [backend]: x.\n"
                 "  review_path: y\n"
-                "Writes: see the table below\n")
+                "Writes: see the table below\n"
+                "In plain English: fixture proves the well-formed case.\n")
+
+# L-spec-0478/AC1: today's WELL_FORMED byte-for-byte, minus the plain line —
+# proves the new "plain" bucket's one-finding case.
+NO_PLAIN_LINE = ("# L-spec-fixture\n"
+                  "## Verification\n"
+                  "```\n"
+                  "true && true\n"
+                  "```\n"
+                  "## Acceptance Criteria\n"
+                  "AC1 [backend]: x.\n"
+                  "  review_path: y\n"
+                  "Writes: a.py\n")
 
 # ── AC1: the well-formed fixture ──────────────────────────────────────────────
 check(validate.spec_shape(WELL_FORMED) == [], "a well-formed spec returns []")
+
+# ── AC1: the byte-identical text minus the plain line names exactly the new
+# "plain" bucket ──────────────────────────────────────────────────────────────
+f = validate.spec_shape(NO_PLAIN_LINE)
+check(len(f) == 1 and f[0].startswith("Plain English:"),
+      f"a spec missing the plain-English line names exactly that bucket: {f}")
 
 # ── AC1(a): Verification block missing entirely ──────────────────────────────
 f = validate.spec_shape(NO_VERIFICATION)
@@ -79,7 +101,8 @@ BASE_SHA_HEAD = ("# L-spec-fixture\n"
                   "## Acceptance Criteria\n"
                   "AC1 [backend]: x.\n"
                   "  review_path: y\n"
-                  "Writes: a.py\n")
+                  "Writes: a.py\n"
+                  "In plain English: fixture proves the well-formed case.\n")
 check(validate.spec_shape(BASE_SHA_HEAD) == [],
       "a warn-severity PL-001 hit (base_sha: HEAD) never blocks spec_shape")
 w = validate.spec_shape_warnings(BASE_SHA_HEAD)
@@ -88,4 +111,4 @@ check(len(w) == 1 and w[0].startswith("PL-001: "),
 check(validate.spec_shape_warnings(WELL_FORMED) == [],
       "a clean spec carries no spec_shape_warnings either")
 
-print(f"validate: {N} checks over spec_shape's four fixtures")
+print(f"validate: {N} checks over spec_shape's five fixtures")
