@@ -33,6 +33,7 @@ case "${1:-board}" in
   backup)  shift; exec python3 "$SRC/backup.py" "$@" ;;
   restore) shift; exec python3 "$SRC/restore.py" "$@" ;;
   crons)   shift; exec python3 "$SRC/crons.py" "$@" ;;
+  cron-run) shift; exec python3 "$SRC/cron_run.py" "$@" ;;
   sweep-owed) shift; exec python3 "$SRC/sweep_owed.py" "$@" ;;
   proving) shift; exec python3 "$SRC/proving.py" "$@" ;;
   # ★ DISCOVERED, never enumerated. This was a hardcoded && chain of twelve
@@ -101,6 +102,8 @@ doit — a ledger that derives state, and the guards that read it
   doit restore <snapshot> [--root D] [--dry-run] [--remote U]  rebuild from the mirror
   doit crons check|print [name]|install <name>   builder-box cron manifest — measure, show, or
                                           install one row from crons.toml (L-charter-0036 R4)
+  doit cron-run NAME -- CMD...            wrap CMD, recording start/outcome/duration per run
+                                          to $R/state/cron-runs/NAME.jsonl (L-charter-0042 R14a)
   doit sweep-owed [--dry-run]             batch due owed checks into detached owed-sweeper
                                           dispatches; escalate the ones that expired (L-charter-0038 R1)
   doit test                               run every check

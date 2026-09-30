@@ -15,12 +15,19 @@
 # `sig` is a regex (TOML literal string — no escape processing) used to detect
 # an already-installed line for this row; it is matched against non-commented
 # lines only.
+#
+# Every command below is wrapped in `{doit} cron-run <name> -- ` (R14a,
+# L-spec-0485): an env-assignment prefix (e.g. `DOIT_ROOT={root}`) stays
+# BEFORE the wrapper so the child still inherits it, and any redirect stays at
+# the line's end, unmoved — `cron-run` inherits CMD's stdout directly and
+# tees its stderr, so the same `>> file 2>&1` still captures the same output
+# it always did.
 
 [[row]]
 name = "tick"
 where = "user"
 schedule = "*/{tick_min} * * * *"
-command = "DOIT_ROOT={root} {doit} tick >> {root}/logs/tick.log 2>&1"
+command = "DOIT_ROOT={root} {doit} cron-run tick -- {doit} tick >> {root}/logs/tick.log 2>&1"
 path = "{doit}"
 sig = '\bdoit tick\b'
 owner = "thinker"
@@ -30,7 +37,7 @@ project = "do-it-v2"
 name = "look"
 where = "user"
 schedule = "*/10 * * * *"
-command = "{doit} look >> {root}/logs/look.log 2>&1"
+command = "{doit} cron-run look -- {doit} look >> {root}/logs/look.log 2>&1"
 path = "{doit}"
 sig = '\bdoit look\b'
 owner = "thinker"
@@ -40,7 +47,7 @@ project = "do-it-v2"
 name = "tmp-reaper"
 where = "user"
 schedule = "*/5 * * * *"
-command = "{doit} reap-tmp"
+command = "{doit} cron-run tmp-reaper -- {doit} reap-tmp"
 path = "{doit}"
 sig = '\bdoit reap-tmp\b'
 owner = "thinker"
@@ -50,7 +57,7 @@ project = "do-it-v2"
 name = "lessons-digest"
 where = "user"
 schedule = "7 * * * *"
-command = "{repo}/scripts/lessons_digest.py >> {root}/lessons-digest.log 2>&1"
+command = "{doit} cron-run lessons-digest -- {repo}/scripts/lessons_digest.py >> {root}/lessons-digest.log 2>&1"
 path = "{repo}/scripts/lessons_digest.py"
 sig = 'lessons_digest\.py\b'
 owner = "thinker"
@@ -60,17 +67,18 @@ project = "do-it-v2"
 name = "backup-watch"
 where = "user"
 schedule = "* * * * *"
-command = "{doit} backup watch --for 60 >> {root}/backup.log 2>&1"
+command = "{doit} cron-run backup-watch -- {doit} backup watch --for 60 >> {root}/backup.log 2>&1"
 path = "{doit}"
 sig = '\bdoit backup watch\b'
 owner = "thinker"
 project = "do-it-v2"
+max_runtime_s = 90
 
 [[row]]
 name = "ledger-snapshot"
 where = "user"
 schedule = "*/10 * * * *"
-command = "/var/backups/do-it/snapshot.sh >/dev/null 2>&1"
+command = "{doit} cron-run ledger-snapshot -- /var/backups/do-it/snapshot.sh >/dev/null 2>&1"
 path = "/var/backups/do-it/snapshot.sh"
 sig = 'snapshot\.sh\b'
 owner = "thinker"
@@ -80,7 +88,7 @@ project = "do-it-v2"
 name = "sweep-owed"
 where = "user"
 schedule = "*/30 * * * *"
-command = "{doit} sweep-owed >> {root}/logs/sweep-owed.log 2>&1"
+command = "{doit} cron-run sweep-owed -- {doit} sweep-owed >> {root}/logs/sweep-owed.log 2>&1"
 path = "{doit}"
 sig = '\bdoit sweep-owed\b'
 owner = "thinker"
@@ -90,7 +98,7 @@ project = "do-it-v2"
 name = "auto-deploy"
 where = "cron.d"
 schedule = "*/5 * * * *"
-command = "albert /opt/albert-scott/venv/bin/python /opt/albert-scott/scripts/ops/auto_deploy.py --once >> /var/log/albert-scott/auto-deploy-run.log 2>&1"
+command = "albert {doit} cron-run auto-deploy -- /opt/albert-scott/venv/bin/python /opt/albert-scott/scripts/ops/auto_deploy.py --once >> /var/log/albert-scott/auto-deploy-run.log 2>&1"
 path = "/opt/albert-scott/venv/bin/python"
 sig = 'auto_deploy\.py\b.*--once\b'
 owner = "deployer"

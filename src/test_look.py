@@ -18,10 +18,21 @@ import json, os, pathlib, socket, subprocess, sys, tempfile, time
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
-import dispatch, fold, look, look_wallclock, pane_resume, panes  # noqa: E402
+import crons, dispatch, fold, look, look_wallclock, pane_resume, panes  # noqa: E402
 
 pane_resume.PROJECTS = pathlib.Path(tempfile.mkdtemp())
 panes.SESSIONS = pathlib.Path(tempfile.mkdtemp())
+# R14a/L-spec-0485: `_check_crons`/`_check_cron_unwrapped` default `crond_dir`
+# to `crons.CROND_DEFAULT` whenever a test doesn't pass one explicitly (most
+# of this file doesn't, since it isn't testing the cron.d row at all) — left
+# at its real "/etc/cron.d", that default would make dozens of unrelated
+# `look.run()` calls below genuinely read the operator's real cron.d
+# directory. Repointed once, here, to an empty real tempdir so every such
+# call degrades to "absent" harmlessly instead. The five `sys.modules
+# ["crons"] = ...` fakes below restore this SAME (already-repointed) real
+# module object in their own `finally`, never `del`, so the patch survives
+# every fake/restore cycle in this file.
+crons.CROND_DEFAULT = str(pathlib.Path(tempfile.mkdtemp()))
 
 n = 0
 
@@ -157,6 +168,36 @@ def clean_toml(root):
     dependency degrades to nothing but disk/tmp/packet/pane-dead/spec-misrouted,
     each of which is itself inert against an empty events list and empty dirs."""
     return write_toml(root, prod=[], pane_at_menu={"codex_patterns": [], "codex_targets": []})
+
+
+def _write_cron_manifest(root, rows_, filename="crons-fixture.toml"):
+    """A synthetic `crons.toml`-shaped manifest (R14a/b/c fixtures): `rows_` is
+    a list of the 8-field row dicts plus an optional `max_runtime_s`. `sig` is
+    written as a single-quoted TOML literal string (no escape processing,
+    matching `crons.toml`/`test_crons.py`'s own convention) so a backslash
+    regex round-trips untouched."""
+    lines = []
+    for r in rows_:
+        lines.append("[[row]]")
+        for k in ("name", "where", "schedule", "command", "sig", "path", "owner", "project"):
+            v = r[k]
+            lines.append(f"{k} = '{v}'" if k == "sig" else f"{k} = {v!r}")
+        if r.get("max_runtime_s") is not None:
+            lines.append(f"max_runtime_s = {int(r['max_runtime_s'])}")
+        lines.append("")
+    p = root / filename
+    p.write_text("\n".join(lines))
+    return p
+
+
+def _write_cron_store(root, name, rows_):
+    """Hand-written `$R/state/cron-runs/<name>.jsonl` rows — the exact shape
+    `cron_run.py` itself writes (tested separately in test_cron_run.py); here
+    only to feed `look._check_cron_runs` a scripted history."""
+    p = root / "state" / "cron-runs" / f"{name}.jsonl"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("\n".join(json.dumps(r) for r in rows_) + "\n")
+    return p
 
 
 
@@ -303,7 +344,15 @@ import shutil as _shutil
 _shutil.disk_usage = raising
 class _CronsAllPresent:
     @staticmethod
-    def check(crontab_text=None):
+    def check(crontab_text=None, manifest=None, crond_dir=None):
+        return []
+
+    @staticmethod
+    def unwrapped(crontab_text=None, manifest=None, crond_dir=None):
+        return []
+
+    @staticmethod
+    def rows(manifest=None):
         return []
 
 
@@ -321,7 +370,7 @@ try:
     ok(sum(1 for c in fake1.calls if c[0] == "ssh" and "-w" in c[2]) == 1, "AC1: one health read (early 200)")
 finally:
     subprocess.run, os.popen, _shutil.disk_usage = real_run, real_popen, real_du
-    del sys.modules["crons"]
+    sys.modules["crons"] = crons  # restore the same, already-repointed, real module (never delete — see top-of-file note)
 print("AC1 ok")
 
 # ── AC2: overlapping fire under the same held flock appends nothing ─────────
@@ -570,7 +619,15 @@ print("AC7 ok")
 # ── AC8: reading-undetermined — 2 failing attempts vs fail-then-succeed ─────
 class _CronsStub:
     @staticmethod
-    def check(crontab_text=None):
+    def check(crontab_text=None, manifest=None, crond_dir=None):
+        return []
+
+    @staticmethod
+    def unwrapped(crontab_text=None, manifest=None, crond_dir=None):
+        return []
+
+    @staticmethod
+    def rows(manifest=None):
         return []
 
 
@@ -588,7 +645,7 @@ sys.modules["crons"] = _CronsStub()
 try:
     res8 = look.run([], now=NOW, runner=fake8, root=root8, toml_path=clean_toml(root8))
 finally:
-    del sys.modules["crons"]
+    sys.modules["crons"] = crons  # restore the same, already-repointed, real module (never delete — see top-of-file note)
 ok(len(calls8) == 2, "AC8: 2 attempts before giving up")
 ok(any(b["key"] == "undetermined:crons" for b in briefs_of(res8, "reading-undetermined")), "AC8: both fail -> undetermined")
 
@@ -608,7 +665,7 @@ sys.modules["crons"] = _CronsStub()
 try:
     res8b = look.run([], now=NOW, runner=fake8b, root=root8b, toml_path=clean_toml(root8b))
 finally:
-    del sys.modules["crons"]
+    sys.modules["crons"] = crons  # restore the same, already-repointed, real module (never delete — see top-of-file note)
 ok(not any(b["key"] == "undetermined:crons" for b in briefs_of(res8b, "reading-undetermined")),
    "AC8: a second-attempt success appends nothing")
 print("AC8 ok")
@@ -730,8 +787,16 @@ ev_ac7 = read_ledger(root_ac7)
 
 class _CronsOneMissing:
     @staticmethod
-    def check(crontab_text=None):
+    def check(crontab_text=None, manifest=None, crond_dir=None):
         return [{"name": "tmp-reaper"}]
+
+    @staticmethod
+    def unwrapped(crontab_text=None, manifest=None, crond_dir=None):
+        return []
+
+    @staticmethod
+    def rows(manifest=None):
+        return []
 
 
 toml_ac7 = write_toml(root_ac7, classes={"cron-missing": "ops"})
@@ -739,7 +804,7 @@ sys.modules["crons"] = _CronsOneMissing()
 try:
     res_ac7a = look.run(ev_ac7, now=NOW, runner=FakeRunner(), root=root_ac7, toml_path=toml_ac7)
 finally:
-    del sys.modules["crons"]
+    sys.modules["crons"] = crons  # restore the same, already-repointed, real module (never delete — see top-of-file note)
 b_ac7a = next(b for b in briefs_of(res_ac7a, "cron-missing"))
 ok(b_ac7a.get("fix") == "L-charter-0099", "L-spec-0389 AC7: a configured class + a naming open charter sets fix")
 
@@ -750,7 +815,7 @@ sys.modules["crons"] = _CronsOneMissing()
 try:
     res_ac7b = look.run(ev_ac7b, now=NOW, runner=FakeRunner(), root=root_ac7b, toml_path=toml_ac7b)
 finally:
-    del sys.modules["crons"]
+    sys.modules["crons"] = crons  # restore the same, already-repointed, real module (never delete — see top-of-file note)
 b_ac7b = next(b for b in briefs_of(res_ac7b, "cron-missing"))
 ok("fix" not in b_ac7b and b_ac7b.get("owner") == "thinker",
    "L-spec-0389 AC7: empty [classes] (or no open charter naming the class) -> owner only, never fix:null/fix:''")
@@ -947,6 +1012,246 @@ ok(len(b_r2ac12) == 1 and b_r2ac12[0]["key"] == "planner",
    f"R2 AC12: exactly one supervisor-stale-code brief, keyed planner: {b_r2ac12}")
 print("R2 AC12 ok")
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+# L-charter-0042/L-spec-0485 — R14: repeat-failure-alarm
+# ══════════════════════════════════════════════════════════════════════════════
+
+ROW_JOB7 = {"name": "job7", "where": "user", "schedule": "*/5 * * * *", "command": "doit job7",
+           "sig": r"\bdoit job7\b", "path": "/bin/true", "owner": "o", "project": "p"}
+
+# ── R14-AC7: three identical failures raise one repeat-failure brief ────────
+root_r14ac7 = newroot()
+manifest_r14ac7 = _write_cron_manifest(root_r14ac7, [ROW_JOB7])
+_write_cron_store(root_r14ac7, "job7", [
+    {"ev": "start", "ts": iso(NOW - timedelta(minutes=15)), "pid": 1},
+    {"ev": "end", "ts": iso(NOW - timedelta(minutes=14)), "rc": 1, "duration_s": 1.0,
+     "error_class": "rc:1:boom", "error_tail": "boom", "start_ts": iso(NOW - timedelta(minutes=15))},
+    {"ev": "start", "ts": iso(NOW - timedelta(minutes=10)), "pid": 2},
+    {"ev": "end", "ts": iso(NOW - timedelta(minutes=9)), "rc": 1, "duration_s": 1.0,
+     "error_class": "rc:1:boom", "error_tail": "boom", "start_ts": iso(NOW - timedelta(minutes=10))},
+    {"ev": "start", "ts": iso(NOW - timedelta(minutes=5)), "pid": 3},
+    {"ev": "end", "ts": iso(NOW - timedelta(minutes=4)), "rc": 1, "duration_s": 1.0,
+     "error_class": "rc:1:boom", "error_tail": "boom", "start_ts": iso(NOW - timedelta(minutes=5))},
+])
+res_r14ac7a = look.run([], now=NOW, runner=FakeRunner(), root=root_r14ac7, toml_path=clean_toml(root_r14ac7),
+                       crons_manifest=str(manifest_r14ac7))
+b_r14ac7a = briefs_of(res_r14ac7a, "repeat-failure")
+ok(len(b_r14ac7a) == 1 and b_r14ac7a[0]["key"] == "job7" and "boom" in str(b_r14ac7a[0].get("why")),
+   f"R14-AC7: three identical failures raise exactly one repeat-failure brief: {b_r14ac7a}")
+
+root_r14ac7b = newroot()
+manifest_r14ac7b = _write_cron_manifest(root_r14ac7b, [ROW_JOB7])
+_write_cron_store(root_r14ac7b, "job7", [
+    {"ev": "end", "ts": iso(NOW - timedelta(minutes=9)), "rc": 1, "duration_s": 1.0,
+     "error_class": "rc:1:boom", "error_tail": "boom"},
+    {"ev": "end", "ts": iso(NOW - timedelta(minutes=4)), "rc": 1, "duration_s": 1.0,
+     "error_class": "rc:1:boom", "error_tail": "boom"},
+])
+res_r14ac7b = look.run([], now=NOW, runner=FakeRunner(), root=root_r14ac7b, toml_path=clean_toml(root_r14ac7b),
+                       crons_manifest=str(manifest_r14ac7b))
+ok(not briefs_of(res_r14ac7b, "repeat-failure"), "R14-AC7: two identical failures raise none")
+
+root_r14ac7c = newroot()
+manifest_r14ac7c = _write_cron_manifest(root_r14ac7c, [ROW_JOB7])
+_write_cron_store(root_r14ac7c, "job7", [
+    {"ev": "end", "ts": iso(NOW - timedelta(minutes=15)), "rc": 1, "duration_s": 1.0,
+     "error_class": "rc:1:boom", "error_tail": "boom"},
+    {"ev": "end", "ts": iso(NOW - timedelta(minutes=9)), "rc": 2, "duration_s": 1.0,
+     "error_class": "rc:2:bang", "error_tail": "bang"},
+    {"ev": "end", "ts": iso(NOW - timedelta(minutes=4)), "rc": 1, "duration_s": 1.0,
+     "error_class": "rc:1:boom", "error_tail": "boom"},
+])
+res_r14ac7c = look.run([], now=NOW, runner=FakeRunner(), root=root_r14ac7c, toml_path=clean_toml(root_r14ac7c),
+                       crons_manifest=str(manifest_r14ac7c))
+ok(not briefs_of(res_r14ac7c, "repeat-failure"), "R14-AC7: three failures with differing classes raise none")
+
+# a second and third pass over the unchanged store still leave exactly one open brief
+ev_r14ac7_2 = read_ledger(root_r14ac7)
+res_r14ac7_2 = look.run(ev_r14ac7_2, now=NOW, runner=FakeRunner(), root=root_r14ac7, toml_path=clean_toml(root_r14ac7),
+                        crons_manifest=str(manifest_r14ac7))
+ok(not briefs_of(res_r14ac7_2, "repeat-failure"), "R14-AC7: second pass over the unchanged store emits no NEW brief")
+ev_r14ac7_3 = read_ledger(root_r14ac7)
+res_r14ac7_3 = look.run(ev_r14ac7_3, now=NOW, runner=FakeRunner(), root=root_r14ac7, toml_path=clean_toml(root_r14ac7),
+                        crons_manifest=str(manifest_r14ac7))
+ok(not briefs_of(res_r14ac7_3, "repeat-failure"), "R14-AC7: third pass still emits no new brief")
+open_count_r14ac7 = sum(1 for e in read_ledger(root_r14ac7)
+                        if e.get("type") == "brief" and e.get("condition") == "repeat-failure")
+ok(open_count_r14ac7 == 1, f"R14-AC7: exactly one open brief across three passes: {open_count_r14ac7}")
+print("R14-AC7 ok")
+
+# ── R14-AC8: a clean run answers; a further failure starts a fresh streak of one ─
+store_r14ac7_path = root_r14ac7 / "state" / "cron-runs" / "job7.jsonl"
+rows_r14ac8 = [json.loads(l) for l in store_r14ac7_path.read_text().splitlines() if l.strip()]
+rows_r14ac8.append({"ev": "end", "ts": iso(NOW), "rc": 0, "duration_s": 1.0, "error_class": "", "error_tail": ""})
+store_r14ac7_path.write_text("\n".join(json.dumps(r) for r in rows_r14ac8) + "\n")
+ev_r14ac8a = read_ledger(root_r14ac7)
+res_r14ac8a = look.run(ev_r14ac8a, now=NOW, runner=FakeRunner(), root=root_r14ac7, toml_path=clean_toml(root_r14ac7),
+                       crons_manifest=str(manifest_r14ac7))
+ok(len(res_r14ac8a["answered"]) >= 1, "R14-AC8: a clean run answers the open brief")
+
+rows_r14ac8.append({"ev": "end", "ts": iso(NOW), "rc": 1, "duration_s": 1.0,
+                    "error_class": "rc:1:boom", "error_tail": "boom"})
+store_r14ac7_path.write_text("\n".join(json.dumps(r) for r in rows_r14ac8) + "\n")
+ev_r14ac8b = read_ledger(root_r14ac7)
+res_r14ac8b = look.run(ev_r14ac8b, now=NOW, runner=FakeRunner(), root=root_r14ac7, toml_path=clean_toml(root_r14ac7),
+                       crons_manifest=str(manifest_r14ac7))
+ok(not briefs_of(res_r14ac8b, "repeat-failure"),
+   "R14-AC8: a single new failure after recovery raises nothing (streak of one)")
+print("R14-AC8 ok")
+
+# ── R14-AC9: cron-overrun — finished run above/at limit, undetermined schedule ─
+ROW_BW9 = {"name": "bw9", "where": "user", "schedule": "* * * * *", "command": "doit bw9",
+          "sig": r"\bdoit bw9\b", "path": "/bin/true", "owner": "o", "project": "p", "max_runtime_s": 90}
+root_r14ac9a = newroot()
+manifest_r14ac9a = _write_cron_manifest(root_r14ac9a, [ROW_BW9])
+_write_cron_store(root_r14ac9a, "bw9", [{"ev": "end", "ts": iso(NOW), "rc": 0, "duration_s": 120,
+                                        "error_class": "", "error_tail": ""}])
+res_r14ac9a = look.run([], now=NOW, runner=FakeRunner(), root=root_r14ac9a, toml_path=clean_toml(root_r14ac9a),
+                       crons_manifest=str(manifest_r14ac9a))
+ok(len(briefs_of(res_r14ac9a, "cron-overrun")) == 1, "R14-AC9: max_runtime_s-based overrun raises one brief")
+
+ROW_TICK9 = {"name": "tick9", "where": "user", "schedule": "*/5 * * * *", "command": "doit tick9",
+            "sig": r"\bdoit tick9\b", "path": "/bin/true", "owner": "o", "project": "p"}
+root_r14ac9b = newroot()
+manifest_r14ac9b = _write_cron_manifest(root_r14ac9b, [ROW_TICK9])
+_write_cron_store(root_r14ac9b, "tick9", [{"ev": "end", "ts": iso(NOW), "rc": 0, "duration_s": 480,
+                                          "error_class": "", "error_tail": ""}])
+res_r14ac9b = look.run([], now=NOW, runner=FakeRunner(), root=root_r14ac9b, toml_path=clean_toml(root_r14ac9b),
+                       crons_manifest=str(manifest_r14ac9b))
+ok(len(briefs_of(res_r14ac9b, "cron-overrun")) == 1,
+   "R14-AC9: interval_s-based overrun (*/5 row, 480s run) raises one brief")
+
+root_r14ac9c = newroot()
+manifest_r14ac9c = _write_cron_manifest(root_r14ac9c, [ROW_BW9])
+_write_cron_store(root_r14ac9c, "bw9", [{"ev": "end", "ts": iso(NOW), "rc": 0, "duration_s": 90,
+                                        "error_class": "", "error_tail": ""}])
+res_r14ac9c = look.run([], now=NOW, runner=FakeRunner(), root=root_r14ac9c, toml_path=clean_toml(root_r14ac9c),
+                       crons_manifest=str(manifest_r14ac9c))
+ok(not briefs_of(res_r14ac9c, "cron-overrun"), "R14-AC9: a run AT the limit raises none")
+
+ROW_WAT9 = {"name": "wat9", "where": "user", "schedule": "@daily", "command": "doit wat9",
+           "sig": r"\bdoit wat9\b", "path": "/bin/true", "owner": "o", "project": "p"}
+root_r14ac9d = newroot()
+manifest_r14ac9d = _write_cron_manifest(root_r14ac9d, [ROW_WAT9])
+_write_cron_store(root_r14ac9d, "wat9", [{"ev": "end", "ts": iso(NOW), "rc": 0, "duration_s": 5,
+                                         "error_class": "", "error_tail": ""}])
+res_r14ac9d = look.run([], now=NOW, runner=FakeRunner(), root=root_r14ac9d, toml_path=clean_toml(root_r14ac9d),
+                       crons_manifest=str(manifest_r14ac9d))
+b_r14ac9d = briefs_of(res_r14ac9d, "cron-overrun")
+ok(len(b_r14ac9d) == 1 and "undetermined" in str(b_r14ac9d[0].get("reading")),
+   f"R14-AC9: unreadable schedule + no max_runtime_s -> one cron-overrun, reading says undetermined: {b_r14ac9d}")
+ev_r14ac9d2 = read_ledger(root_r14ac9d)
+res_r14ac9d2 = look.run(ev_r14ac9d2, now=NOW, runner=FakeRunner(), root=root_r14ac9d, toml_path=clean_toml(root_r14ac9d),
+                        crons_manifest=str(manifest_r14ac9d))
+ok(not res_r14ac9d2["answered"], "R14-AC9: the undetermined overrun never clears while both stay so")
+print("R14-AC9 ok")
+
+# ── R14-AC10: cron-overrun — an open run, above/at limit; only the newest counts ─
+ROW_BW10 = {"name": "bw10", "where": "user", "schedule": "* * * * *", "command": "doit bw10",
+           "sig": r"\bdoit bw10\b", "path": "/bin/true", "owner": "o", "project": "p", "max_runtime_s": 90}
+root_r14ac10a = newroot()
+manifest_r14ac10a = _write_cron_manifest(root_r14ac10a, [ROW_BW10])
+_write_cron_store(root_r14ac10a, "bw10", [{"ev": "start", "ts": iso(NOW - timedelta(seconds=200)), "pid": 1}])
+res_r14ac10a = look.run([], now=NOW, runner=FakeRunner(), root=root_r14ac10a, toml_path=clean_toml(root_r14ac10a),
+                        crons_manifest=str(manifest_r14ac10a))
+ok(len(briefs_of(res_r14ac10a, "cron-overrun")) == 1, "R14-AC10: an open run past its limit raises one brief")
+
+root_r14ac10b = newroot()
+manifest_r14ac10b = _write_cron_manifest(root_r14ac10b, [ROW_BW10])
+_write_cron_store(root_r14ac10b, "bw10", [{"ev": "start", "ts": iso(NOW - timedelta(seconds=30)), "pid": 1}])
+res_r14ac10b = look.run([], now=NOW, runner=FakeRunner(), root=root_r14ac10b, toml_path=clean_toml(root_r14ac10b),
+                        crons_manifest=str(manifest_r14ac10b))
+ok(not briefs_of(res_r14ac10b, "cron-overrun"), "R14-AC10: an open run within its limit raises none")
+
+root_r14ac10c = newroot()
+manifest_r14ac10c = _write_cron_manifest(root_r14ac10c, [ROW_BW10])
+_write_cron_store(root_r14ac10c, "bw10", [
+    {"ev": "start", "ts": iso(NOW - timedelta(seconds=500)), "pid": 1},   # abandoned
+    {"ev": "start", "ts": iso(NOW - timedelta(seconds=30)), "pid": 2},    # the real open run
+])
+res_r14ac10c = look.run([], now=NOW, runner=FakeRunner(), root=root_r14ac10c, toml_path=clean_toml(root_r14ac10c),
+                        crons_manifest=str(manifest_r14ac10c))
+ok(not briefs_of(res_r14ac10c, "cron-overrun"),
+   "R14-AC10: only the newest start row counts as open (an earlier abandoned one is ignored)")
+print("R14-AC10 ok")
+
+# ── R14-AC11b: look — cron-unwrapped brief; the wrapped line clears it ──────
+ROW_U11B = {"name": "u11b", "where": "user", "schedule": "* * * * *", "command": "doit u11b",
+           "sig": r"\bdoit u11b\b", "path": "/bin/true", "owner": "o", "project": "p"}
+root_r14ac11 = newroot()
+manifest_r14ac11 = _write_cron_manifest(root_r14ac11, [ROW_U11B])
+crond_r14ac11 = root_r14ac11 / "crond-empty"
+crond_r14ac11.mkdir()
+res_r14ac11a = look.run([], now=NOW, runner=FakeRunner(crontab_text=lambda to: "* * * * * doit u11b\n"),
+                        root=root_r14ac11, toml_path=clean_toml(root_r14ac11),
+                        crons_manifest=str(manifest_r14ac11), crond_dir=str(crond_r14ac11))
+ok(len(briefs_of(res_r14ac11a, "cron-unwrapped")) == 1,
+   "R14-AC11b: a bare sig-matched row raises one cron-unwrapped brief")
+
+ev_r14ac11b = read_ledger(root_r14ac11)
+res_r14ac11b = look.run(ev_r14ac11b, now=NOW,
+                        runner=FakeRunner(crontab_text=lambda to: "* * * * * /x/doit cron-run u11b -- doit u11b\n"),
+                        root=root_r14ac11, toml_path=clean_toml(root_r14ac11),
+                        crons_manifest=str(manifest_r14ac11), crond_dir=str(crond_r14ac11))
+ok(len(res_r14ac11b["answered"]) >= 1, "R14-AC11b: the wrapped line answers the open brief")
+print("R14-AC11b ok")
+
+# ── R14-AC12: dispatch repeat-failure — builder/grader, refusals skipped ────
+root_r14ac12 = newroot()
+for i in range(1, 4):
+    spawn = f"L-builder-000{i}"
+    append_raw(root_r14ac12, "L-executor-0001.jsonl", iso(NOW - timedelta(minutes=30 - i)),
+              type="build-started", spawn=spawn, subject="L-spec-9")
+    append_raw(root_r14ac12, "L-builder-fail.jsonl", iso(NOW - timedelta(minutes=29 - i)),
+              type="spawn-failed", spawn=spawn, reason="x", why="x: boom")
+ev_r14ac12a = read_ledger(root_r14ac12)
+res_r14ac12a = look.run(ev_r14ac12a, now=NOW, runner=FakeRunner(), root=root_r14ac12, toml_path=clean_toml(root_r14ac12))
+b_r14ac12a = briefs_of(res_r14ac12a, "repeat-failure")
+ok(len(b_r14ac12a) == 1 and b_r14ac12a[0]["key"] == "builder" and "boom" in str(b_r14ac12a[0].get("why")),
+   f"R14-AC12: three build-started/spawn-failed(reason=x) raise one repeat-failure keyed builder: {b_r14ac12a}")
+
+root_r14ac12b = newroot()
+for i in range(1, 4):
+    spawn = f"L-grader-000{i}"
+    append_raw(root_r14ac12b, "L-executor-0001.jsonl", iso(NOW - timedelta(minutes=30 - i)),
+              type="spawn-started", spawn=spawn, role="grader", subject="L-spec-9")
+    append_raw(root_r14ac12b, "L-grader-fail.jsonl", iso(NOW - timedelta(minutes=29 - i)),
+              type="spawn-failed", spawn=spawn, reason="y", why="y: bang")
+ev_r14ac12b = read_ledger(root_r14ac12b)
+res_r14ac12b = look.run(ev_r14ac12b, now=NOW, runner=FakeRunner(), root=root_r14ac12b, toml_path=clean_toml(root_r14ac12b))
+b_r14ac12b = briefs_of(res_r14ac12b, "repeat-failure")
+ok(len(b_r14ac12b) == 1 and b_r14ac12b[0]["key"] == "grader", f"R14-AC12: grader case: {b_r14ac12b}")
+
+root_r14ac12c = newroot()
+for i in range(1, 4):
+    append_raw(root_r14ac12c, "L-ghost-fail.jsonl", iso(NOW - timedelta(minutes=10 - i)),
+              type="spawn-failed", spawn=f"L-ghost-000{i}", why="refused: no seat")
+ev_r14ac12c = read_ledger(root_r14ac12c)
+res_r14ac12c = look.run(ev_r14ac12c, now=NOW, runner=FakeRunner(), root=root_r14ac12c, toml_path=clean_toml(root_r14ac12c))
+ok(not briefs_of(res_r14ac12c, "repeat-failure"), "R14-AC12: three refusals alone (no start of their own spawn) raise none")
+
+# a newer spawn-done (with its own start) answers the open builder brief
+append_raw(root_r14ac12, "L-executor-0001.jsonl", iso(NOW - timedelta(minutes=3)),
+          type="build-started", spawn="L-builder-0004", subject="L-spec-9")
+append_raw(root_r14ac12, "L-builder-done.jsonl", iso(NOW - timedelta(minutes=2)),
+          type="spawn-done", spawn="L-builder-0004")
+ev_r14ac12d = read_ledger(root_r14ac12)
+res_r14ac12d = look.run(ev_r14ac12d, now=NOW, runner=FakeRunner(), root=root_r14ac12, toml_path=clean_toml(root_r14ac12))
+ok(not briefs_of(res_r14ac12d, "repeat-failure"), "R14-AC12: a newer spawn-done breaks the builder streak")
+ok(any(e.get("type") == "brief-answered" for e in read_ledger(root_r14ac12)),
+   "R14-AC12: the open builder brief is answered")
+
+# a later single failure starts a fresh streak of one — raises nothing
+append_raw(root_r14ac12, "L-executor-0001.jsonl", iso(NOW - timedelta(minutes=1)),
+          type="build-started", spawn="L-builder-0005", subject="L-spec-9")
+append_raw(root_r14ac12, "L-builder-fail.jsonl", iso(NOW),
+          type="spawn-failed", spawn="L-builder-0005", reason="x", why="x: boom2")
+ev_r14ac12e = read_ledger(root_r14ac12)
+res_r14ac12e = look.run(ev_r14ac12e, now=NOW, runner=FakeRunner(), root=root_r14ac12, toml_path=clean_toml(root_r14ac12))
+ok(not briefs_of(res_r14ac12e, "repeat-failure"), "R14-AC12: a later single failure starts a fresh streak of one")
+print("R14-AC12 ok")
+
 # ── AC15: cron-missing, per row; crons.Undetermined; unimportable crons ─────
 root15 = newroot()
 
@@ -957,15 +1262,23 @@ class _Undetermined(Exception):
 
 class _CronsMissing:
     @staticmethod
-    def check(crontab_text=None):
+    def check(crontab_text=None, manifest=None, crond_dir=None):
         return [{"name": "tmp-reaper"}, {"name": "lessons-digest"}]
+
+    @staticmethod
+    def unwrapped(crontab_text=None, manifest=None, crond_dir=None):
+        return []
+
+    @staticmethod
+    def rows(manifest=None):
+        return []
 
 
 sys.modules["crons"] = _CronsMissing()
 try:
     res15 = look.run([], now=NOW, runner=FakeRunner(), root=root15, toml_path=clean_toml(root15))
 finally:
-    del sys.modules["crons"]
+    sys.modules["crons"] = crons  # restore the same, already-repointed, real module (never delete — see top-of-file note)
 ok(len(briefs_of(res15, "cron-missing")) == 2, "AC15: two missing rows -> two separate briefs")
 ok({b["owner"] for b in briefs_of(res15, "cron-missing")} == {"thinker"}, "AC15: owner thinker each")
 
@@ -976,15 +1289,23 @@ class _CronsRaises:
     Undetermined = _Undetermined
 
     @staticmethod
-    def check(crontab_text=None):
+    def check(crontab_text=None, manifest=None, crond_dir=None):
         raise _Undetermined("cron state unknown")
+
+    @staticmethod
+    def unwrapped(crontab_text=None, manifest=None, crond_dir=None):
+        return []
+
+    @staticmethod
+    def rows(manifest=None):
+        return []
 
 
 sys.modules["crons"] = _CronsRaises()
 try:
     res15b = look.run([], now=NOW, runner=FakeRunner(), root=root15b, toml_path=clean_toml(root15b))
 finally:
-    del sys.modules["crons"]
+    sys.modules["crons"] = crons  # restore the same, already-repointed, real module (never delete — see top-of-file note)
 ok(not briefs_of(res15b, "cron-missing"), "AC15: Undetermined -> no cron-missing brief")
 ok(any(b["key"] == "undetermined:crons" for b in briefs_of(res15b, "reading-undetermined")),
    "AC15: Undetermined -> exactly one reading-undetermined")
@@ -1108,5 +1429,6 @@ ok(fake18b.calls == [], "AC18b: a clock already past deadline fires no external 
 ok(len(res18b["briefs"]) >= 1 and all(b["condition"] == "reading-undetermined" for b in res18b["briefs"]),
    "AC18b: every reading after the jump comes back reading-undetermined")
 print("AC18 ok")
+
 
 print(f"look: {n} checks passed")

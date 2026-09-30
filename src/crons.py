@@ -64,7 +64,10 @@ def rows(manifest=None):
     """The manifest's rows — `manifest=None` reads `crons.toml` next to this
     repo's `doit`; a path reads that file instead (the test seam). Every
     templated field (`schedule`, `command`, `path`) comes back already
-    substituted; `sig`/`where`/`owner`/`project`/`name` are passed through."""
+    substituted; `sig`/`where`/`owner`/`project`/`name` are passed through.
+    Each row also carries `max_runtime_s` (R14a) — an int when the TOML row
+    sets it, else `None`; it is deliberately NOT one of `FIELDS` (which stays
+    the 8 required-string columns) since it is optional and not a string."""
     p = pathlib.Path(manifest) if manifest else MANIFEST
     doc = tomllib.loads(p.read_text())
     tokens = _tokens()
@@ -73,6 +76,7 @@ def rows(manifest=None):
         row = {k: r[k] for k in FIELDS}
         for f in ("schedule", "command", "path"):
             row[f] = _substitute(row[f], tokens)
+        row["max_runtime_s"] = r.get("max_runtime_s")
         out.append(row)
     return out
 
@@ -124,16 +128,20 @@ def _crond_text(crond_dir):
     return "\n".join(chunks)
 
 
-def _matched(text, sig):
-    """`sig` against non-commented lines only — a line whose first
-    non-whitespace character is `#` never counts, matching or not."""
+def _find_line(text, sig):
+    """The first non-commented line matching `sig`, or `None` — a line whose
+    first non-whitespace character is `#` never counts, matching or not."""
     pat = re.compile(sig)
     for line in text.splitlines():
         if line.lstrip().startswith("#"):
             continue
         if pat.search(line):
-            return True
-    return False
+            return line
+    return None
+
+
+def _matched(text, sig):
+    return _find_line(text, sig) is not None
 
 
 def _executable(path):
@@ -170,6 +178,83 @@ def check(manifest=None, crontab_text=None, crond_dir=None):
     return out
 
 
+def _parse_field(field, lo, hi):
+    """A cron minute/hour field (`*`, `*/N`, `N`, or a comma list of those)
+    expanded to its sorted list of int values within `[lo, hi]`, or `None` for
+    anything else (a range, a step of 0, an out-of-bounds value, `@daily`, …)
+    — R14a's `interval_s` is strict: an unsupported syntax is `None`, never a
+    guess."""
+    if field == "*":
+        return list(range(lo, hi + 1))
+    out = []
+    for part in field.split(","):
+        if part.startswith("*/"):
+            try:
+                step = int(part[2:])
+            except ValueError:
+                return None
+            if step <= 0:
+                return None
+            out.extend(range(lo, hi + 1, step))
+        else:
+            try:
+                v = int(part)
+            except ValueError:
+                return None
+            if not (lo <= v <= hi):
+                return None
+            out.append(v)
+    return sorted(set(out))
+
+
+def interval_s(schedule):
+    """The smallest gap in seconds between consecutive fire times over a 24h
+    day, wrapping midnight (one fire a day gives 86400). Minute/hour accept
+    `*`, `*/N`, `N`, comma lists of those; day-of-month, month, day-of-week
+    must be `*` — anything else (a range, `@daily`, a non-`*` dom/month/dow)
+    returns `None` (R14c: an unreadable schedule, never a guess)."""
+    parts = schedule.split()
+    if len(parts) != 5:
+        return None
+    minute, hour, dom, month, dow = parts
+    if dom != "*" or month != "*" or dow != "*":
+        return None
+    minutes, hours = _parse_field(minute, 0, 59), _parse_field(hour, 0, 23)
+    if not minutes or not hours:
+        return None
+    fires = sorted({h * 60 + m for h in hours for m in minutes})
+    if len(fires) == 1:
+        return 86400
+    gaps = [fires[i + 1] - fires[i] for i in range(len(fires) - 1)]
+    gaps.append(fires[0] + 1440 - fires[-1])
+    return min(gaps) * 60
+
+
+def unwrapped(manifest=None, crontab_text=None, crond_dir=None):
+    """Names of rows whose `sig` matches a non-commented installed line that
+    does NOT also match `\\bcron-run\\s+<name>\\s+--\\s` on that SAME line
+    (R14a/R14c). A row with no matching line at all is not reported here —
+    that absence is `cron-missing`'s (`check()`'s) territory."""
+    the_rows = rows(manifest)
+    user_text = _live_crontab_text() if crontab_text is None else crontab_text
+    crond_cache = {}
+    out = []
+    for row in the_rows:
+        if row["where"] == "cron.d":
+            if "text" not in crond_cache:
+                crond_cache["text"] = _crond_text(crond_dir if crond_dir is not None else CROND_DEFAULT)
+            hay = crond_cache["text"]
+        else:
+            hay = user_text
+        line = _find_line(hay, row["sig"])
+        if line is None:
+            continue
+        wrap_pat = r'\bcron-run\s+' + re.escape(row["name"]) + r'\s+--\s'
+        if not re.search(wrap_pat, line):
+            out.append(row["name"])
+    return out
+
+
 # ── print + install ───────────────────────────────────────────────────────────
 
 def print_line(name, manifest=None):
@@ -188,16 +273,21 @@ def _write_live_crontab(text):
 def install(name, manifest=None, crontab_path=None):
     """Refuses (`ValueError`) an unknown `name` or a `where = "cron.d"` row —
     that write needs root and is not this tool's to make (SD6). Otherwise
-    dedups by the literal substring `# doit-cron:<name>`: a rerun replaces
-    every line already carrying that tag with the one new line, at the FIRST
-    such line's position, and leaves every other line byte-for-byte untouched
-    — it never removes or reorders an unrelated, pre-existing line (SD8)."""
+    dedups by the literal substring `# doit-cron:<name>` OR (R14a) a
+    non-commented line matching the row's own `sig` with no tag yet — a rerun
+    replaces the FIRST such line (tagged or sig-matched) with the one new
+    line, at that line's position, drops every FURTHER tagged-or-sig-matched
+    line, and leaves every other line byte-for-byte untouched — it never
+    removes or reorders an unrelated, pre-existing line (SD8). The sig-match
+    arm is what lets a legacy bare (never-tagged) line be replaced in place
+    instead of leaving it stray alongside a newly appended wrapped one."""
     row = _row(name, manifest)
     if row["where"] == "cron.d":
         raise ValueError(f"crons: {name!r} is a cron.d row — needs root; "
                           f"'doit crons print {name}' shows the line to install by hand")
     line = print_line(name, manifest)
     tag = f"# doit-cron:{name}"
+    sig_pat = re.compile(row["sig"])
     if crontab_path is None:
         text = _live_crontab_text()
     else:
@@ -205,11 +295,13 @@ def install(name, manifest=None, crontab_path=None):
         text = p.read_text() if p.exists() else ""
     previous_line, replaced, new_lines = None, False, []
     for l in text.splitlines():
-        if l.rstrip().endswith(tag):
+        is_tagged = l.rstrip().endswith(tag)
+        is_sig_matched = not is_tagged and not l.lstrip().startswith("#") and bool(sig_pat.search(l))
+        if is_tagged or is_sig_matched:
             if not replaced:
                 previous_line, replaced = l, True
                 new_lines.append(line)
-            continue  # drop any further duplicate-tagged line
+            continue  # drop any further duplicate/matching line
         new_lines.append(l)
     action = "replaced" if replaced else "appended"
     if not replaced:
