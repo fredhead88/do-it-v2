@@ -890,6 +890,20 @@ def required_reason(e):
         if missing:
             return (f"{t} {e.get('subject', '?')} missing required field(s): "
                     + ", ".join(f"{k}=" for k in missing))
+    # L-charter-0042/L-spec-0483 (tick-next-step), R13-vocab: `trigger` is
+    # optional (every builder dispatch today carries none) but, when present,
+    # must be one of the four the tick ever writes, and a redispatch always
+    # names what it replaced.
+    if t == "autodispatched":
+        trig = e.get("trigger")
+        if trig is not None:
+            valid_triggers = ("build-done", "rework", "regrade", "redispatch")
+            if trig not in valid_triggers:
+                return (f"autodispatched {e.get('subject', '?')} trigger={trig!r} not one of "
+                        + ", ".join(valid_triggers))
+            if trig == "redispatch" and not _has(e, "replaces"):
+                return (f"autodispatched {e.get('subject', '?')} trigger=redispatch missing "
+                        "required field: replaces=")
     return None
 
 
