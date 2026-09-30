@@ -242,6 +242,10 @@ def bwrap_argv(view, *, doit_src, venvs: tuple = (), binds: tuple = ()) -> list:
         (str(doit_src / "scripts"), str(doit_src / "scripts")),
         (str(doit_src / "doit"), str(doit_src / "doit")),
     ]
+    # /etc/resolv.conf is a symlink into /run/systemd/resolve on this box; without
+    # it the sandbox has no DNS and claude fails with EAI_AGAIN (2026-09-30).
+    if pathlib.Path("/run/systemd/resolve").is_dir():
+        ro_pairs.append(("/run/systemd/resolve", "/run/systemd/resolve"))
     for v in venvs:
         ro_pairs.append((str(v), str(v)))
     for src, dst in binds:

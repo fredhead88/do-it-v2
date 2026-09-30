@@ -182,6 +182,7 @@ cfg_dir_path = grader_view.config_dir()
 claude_launcher, claude_resolved = grader_view._claude_launcher()
 allow_exact = {
     "/usr", "/bin", "/lib", "/lib64", "/etc",
+    "/run/systemd/resolve",  # DNS: /etc/resolv.conf links here (read-only)
     str(DOIT_SRC / "src"), str(DOIT_SRC / "agents"),
     str(DOIT_SRC / "scripts"), str(DOIT_SRC / "doit"),
     claude_launcher, claude_resolved,
