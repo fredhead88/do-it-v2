@@ -337,7 +337,11 @@ def preflight(role, subject, view, project, *, repo, mcp_config=None):
         ok, reason = _prove_review_account(project)
         if not ok:
             reasons["review-account"] = reason
-    if "deploy" in caps:
+    # A project with no [[prod]] row in look.toml is never deployed, so no
+    # criterion of it can need a live deploy; the reviewer branch of
+    # required() already applies the same rule.
+    if "deploy" in caps and any(p.get("project") == project
+                                for p in _look_toml(DOIT_SRC).get("prod", [])):
         ok, reason = _prove_deploy(project, repo)
         if not ok:
             reasons["deploy"] = reason
