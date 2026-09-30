@@ -15,7 +15,7 @@ in the fold: an event from an actor not permitted to emit it is recorded and
 ignored (§9.2), which leaves an audit trail of the attempt.
 """
 import collections, json, os, pathlib, sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import freeze
 import owed
@@ -1536,6 +1536,55 @@ def dwell_days(by_subject):
     return out
 
 
+def verdict_owed_criteria(events, subject):
+    """L-spec-0482/R12.b,c,d — the ONE shared filter for "which of SUBJECT's
+    criteria are owed", by the same rule `spec_state`'s own `verdict_owed`
+    already used inline: the `criterion` of every `owed-ac` on SUBJECT whose
+    actor is `spec-writer` or `spec-auditor`. `events_for` (a non-owed
+    `cannot-assess` opens a capability-hold), `dispatch.grading_budget` (a
+    non-owed `cannot-assess` run never counts against the cap) and this
+    module's own `spec_state` all call this — none re-reads `owed-ac` with its
+    own, possibly-drifting copy of the actor check. An executor-authored
+    `owed-ac` never counts here: `fold()`'s admission door decides whether
+    such an event SURVIVES into the stream at all (only as a re-date of an
+    EARLIER spec-writer/spec-auditor declaration on the identical criterion);
+    this decides whether a criterion counts as OWED, and only a
+    spec-writer/spec-auditor declaration ever does — so an executor `owed-ac`
+    with no prior declaration is simply not in this set, exactly as if it had
+    never been written."""
+    return {e.get("criterion") for e in events if e.get("type") == "owed-ac" and e.get("subject") == subject
+            and e.get("criterion") and e.get("actor") in ("spec-writer", "spec-auditor")}
+
+
+def grades_per_shipped(events, now, window_h=24):
+    """L-spec-0482/R12.d — `(ratio, specs, runs)`: `specs` are the distinct
+    subjects with a `shipped` in the trailing `window_h` hours, `runs` are
+    every grader `spawn-started` on those subjects at ANY time (the Goal is
+    "grades per shipped spec", not "grades in the window") minus a run that
+    failed with no verdict/void/voided (the same exclusion `grading_budget`
+    applies), and `ratio` is `runs / specs`. `(None, 0, 0)` when nothing
+    shipped in the window. Pure: no ledger write, no clock read beyond the
+    passed `now` (Constraints). Only fold-admitted events count — built over
+    `fold()`'s own `by_subject` (the membership door `EMITS["shipped"] ==
+    {"executor"}` already applies there; a non-executor `shipped` is dropped
+    into `ignored` and never reaches `by_subject` at all)."""
+    _, _, _, by_subject = fold(events)
+    window_start = now - timedelta(hours=window_h)
+    shipped_subjects = {s for s, evs in by_subject.items()
+                        if any(e.get("type") == "shipped" and ts(e.get("ts")) >= window_start for e in evs)}
+    if not shipped_subjects:
+        return None, 0, 0
+    runs = 0
+    for s in shipped_subjects:
+        evs = by_subject[s]
+        judged = {e.get("spawn") for e in evs if e.get("type") in ("verdict", "void", "voided")}
+        failed = {e.get("spawn") for e in evs if e.get("type") == "spawn-failed"}
+        starts = [e for e in evs if e.get("type") == "spawn-started" and e.get("role") == "grader"]
+        starts = [e for e in starts if not (e.get("spawn") in failed and e.get("spawn") not in judged)]
+        runs += len(starts)
+    return runs / len(shipped_subjects), len(shipped_subjects), runs
+
+
 def verdict_confirmed(v, owed_criteria):
     """A `verdict` event's confirmed-ness, but over EVALUABLE rows (S15/S33): a
     `cannot-assess` row whose criterion an `owed-ac` on this subject already named
@@ -1591,8 +1640,7 @@ def spec_state(evs, retracted):
         # `verdict_confirmed` below widens over — an executor's re-date moves
         # WHEN a criterion is due, never WHICH criteria count as owed (R10,
         # AC21).
-        verdict_owed = {e.get("criterion") for e in evs if e["type"] == "owed-ac" and e.get("criterion")
-                        and e.get("actor") in ("spec-writer", "spec-auditor")}
+        verdict_owed = verdict_owed_criteria(evs, evs[0].get("subject"))
         graded = any(e["type"] == "verdict" and verdict_confirmed(e, verdict_owed) for e in evs)
         # L-charter-0038/L-spec-0384, R3: `accepted` now reads live off
         # `owed.checks()` (an empty list — no owed criteria — satisfies `all()`
@@ -2207,6 +2255,12 @@ def render(events, specs, charters, ignored, by_subject):
     # R7/L-spec-0196 — the Goal's "each open escalation … as a row of its own"
     # is already NEEDS YOU's; this is only the missing aggregate.
     health.append(f"open escalations: {len(open_escalations(events))}")
+    # R12.d — grades spent per spec shipped in the trailing 24h, target 1.0
+    # (alarmed above 1.5 by `look`'s `grades-per-shipped-high`); `doit
+    # grades-rate` prints this same line (Produces).
+    gps_ratio, gps_specs, gps_runs = grades_per_shipped(events, NOW)
+    health.append(f"grades/shipped 24h: {'n/a' if gps_ratio is None else f'{gps_ratio:.2f}'} "
+                  f"({gps_runs}/{gps_specs})  target 1.0")
     # R1/L-spec-0196 — the mirror-push line (ADR-0028-4), backup.last_push()'s
     # own three legs: ok (age), failing-since, never-pushed. PANES-idiom degrade.
     def mirror_line(d):
@@ -2353,6 +2407,13 @@ if __name__ == "__main__":
         if len(sys.argv) < 3:
             sys.exit("usage: doit review-owed <charter>")
         print("owed" if charter_review_owed(by_subject.get(sys.argv[2], [])) else "not-owed")
+    elif cmd == "grades-rate":                # R12.d: read-only, never writes the ledger
+        gr_ratio, gr_specs, gr_runs = grades_per_shipped(ev, NOW)
+        if "--json" in sys.argv:
+            print(json.dumps({"ratio": gr_ratio, "specs": gr_specs, "runs": gr_runs, "window_h": 24}))
+        else:
+            print(f"grades/shipped 24h: {'n/a' if gr_ratio is None else f'{gr_ratio:.2f}'} "
+                  f"({gr_runs}/{gr_specs})  target 1.0")
     else:
         print(render(ev, specs, charters, ignored, by_subject))
 

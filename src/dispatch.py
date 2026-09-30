@@ -800,6 +800,43 @@ def events_for(role, out, a, base):
         ev += [("criterion-cleared", dict(criterion=c, evidence=met.get(c) or f"confirmed verdict {base['spawn']}"))
                for c in sorted(standing) if c != "COMMIT-SHAPE" and (c in met or confirmed)]
         ev += coverage_changes(out["checkers"])
+        # L-spec-0482/R12.b: the circuit breaker. A `cannot-assess` row on a
+        # criterion nobody declared owed (the shared `fold.verdict_owed_criteria`
+        # helper — never a second, drifting read of `owed-ac`) rides on the
+        # `verdict` event as `missing_capability`, and opens the SAME
+        # capability-hold the preflight opens (`dispatch.py`'s own
+        # `grading-preflight-failed` branch, `source="preflight"` there,
+        # `source="verdict"` here) — one `escalation-blocking` per capability
+        # with no hold already open. An absent, `"unknown"`, or
+        # out-of-`CAPABILITIES` value all coerce to `capability:unknown:<SPEC>`
+        # (Assumptions): a hold subject is always `capability:<one of ten>` or
+        # `capability:unknown:<SPEC>`, never a raw model string (security_path).
+        import grading_env
+        owed_criteria = fold.verdict_owed_criteria(fold.read_events(), a.subject)
+        missing_capability = []
+        for v in vs:
+            if v["verdict"] != "cannot-assess" or v["ac"] in owed_criteria:
+                continue
+            cap = v.get("missing_capability")
+            if cap not in grading_env.CAPABILITIES:
+                cap = "unknown"
+            missing_capability.append({"ac": v["ac"], "capability": cap})
+        ev[0][1]["missing_capability"] = missing_capability
+        opened_here = set()
+        for row in missing_capability:
+            cap = row["capability"]
+            subj = f"capability:unknown:{a.subject}" if cap == "unknown" else f"capability:{cap}"
+            if subj in opened_here:
+                continue
+            opened_here.add(subj)
+            if subj in fold.capability_holds(fold.read_events()):
+                continue
+            ev.append(("capability-hold", dict(subject=subj, capability=cap, spec=a.subject, source="verdict")))
+            ev.append(("escalation-blocking", dict(
+                subject=subj, kind="capability-hold", owner="thinker",
+                default=f"hold stays; no grader or reviewer is dispatched for a spec needing {cap}",
+                deadline=(datetime.now(timezone.utc) + timedelta(hours=24)).isoformat(timespec="seconds"),
+                revert=f"doit append unblocked {subj}")))
     elif role == "reviewer":
         ev.append(("review", dict(depth=out["depth"], round=out["round"], n_blocking=len(out["blocking"]))))
         for b in out["blocking"]:
@@ -1034,13 +1071,36 @@ def grading_budget(all_ev, subject):
     # included) and no `decision(regrade=yes, actor thinker|operator)` newer
     # than the newest of them. Nothing else lifts it (Assumptions §8/§9) — the
     # rule reapplies past the literal fourth run.
+    #
+    # L-spec-0482/R12.c: counted only among runs started AFTER the subject's
+    # newest `build-done` — a rework resets the cap outright now, not merely
+    # by way of a qualifying regrade decision (R12.e's Executor rule is the
+    # OTHER half of this: it re-dispatches once the reset lands). No
+    # `build-done` at all still counts every run, unchanged.
     starts = [e for e in evs if e.get("type") == "spawn-started" and e.get("role") == "grader"]
+    newest_build_done = max((T(e) for e in evs if e.get("type") == "build-done"), default=None)
+    if newest_build_done is not None:
+        starts = [e for e in starts if T(e) > newest_build_done]
     # A run that failed (wrapper timeout, unserved) with no verdict of its own graded
     # nothing, so it is not a grade (R10: "grading is spent only where it can find
     # something"). Thinker 2026-09-28: three specs capped by 15-min timeouts alone.
     judged = {e.get("spawn") for e in evs if e.get("type") in ("verdict", "void", "voided")}
     failed = {e.get("spawn") for e in evs if e.get("type") == "spawn-failed"}
     starts = [e for e in starts if not (e.get("spawn") in failed and e.get("spawn") not in judged)]
+    # R12.c: a run whose OWN verdict carried a `cannot_assess` row on a
+    # criterion nobody declared owed (the shared `fold.verdict_owed_criteria`
+    # helper, never a second copy of the actor check) found an environment it
+    # could not prove, not a grade — it never counts against the cap, same as
+    # a failed-with-no-verdict run above.
+    owed_criteria = fold.verdict_owed_criteria(evs, subject)
+    verdict_by_spawn = {e.get("spawn"): e for e in evs if e.get("type") == "verdict"}
+    def _gradeable(e):
+        v = verdict_by_spawn.get(e.get("spawn"))
+        if v is None:
+            return True
+        ca = {c for c in (v.get("cannot_assess") or []) if c}
+        return not ca or ca <= owed_criteria
+    starts = [e for e in starts if _gradeable(e)]
     if len(starts) >= 3:
         newest = max(T(e) for e in starts)
         lifted = any(e.get("type") == "decision" and e.get("regrade") == "yes"
@@ -1505,10 +1565,12 @@ def main(a):
     else:
         events = events_for(a.role, out, a, base)
     for t, kv in events:
-        # `.pop` only fires here — no other role's `kv` carries `subject`: an
-        # owed-sweeper event lands on that ROW's own spec, never on the batch
-        # subject `base["subject"]` names.
-        row_base = {**base, "subject": kv.pop("subject")} if a.role == "owed-sweeper" else base
+        # A kv carrying its own `subject` lands there instead of the batch
+        # subject `base["subject"]` names: the owed-sweeper's per-row events,
+        # and (L-spec-0482/R12.b) a grader's `capability-hold`/
+        # `escalation-blocking` pair, whose subject is the hold, never the
+        # graded spec. No other role's `kv` carries `subject`.
+        row_base = {**base, "subject": kv.pop("subject")} if "subject" in kv else base
         emit(ledger, row_base, t, **kv)
     scalars = {k: v for k, v in out.items() if isinstance(v, (str, int, float, bool))}
     done = {**scalars, **meta}

@@ -59,6 +59,23 @@
               "criterion-unevaluable-from-packet",
               "evidence-contradictory"
             ]
+          },
+          "missing_capability": {
+            "type": "string",
+            "description": "L-spec-0482/R12.b: on a cannot-assess row with reason_code tool-failed, the one capability (grading_env.CAPABILITIES) whose absence stopped you, or unknown when none fits. Never schema-required — a required field the grader omits would fail the whole spawn (spawn-failed, no verdict, no hold) instead of opening one (see agents/grader.md).",
+            "enum": [
+              "env-file",
+              "view-paths",
+              "tools",
+              "node_modules",
+              "git",
+              "db",
+              "db-schema",
+              "browser",
+              "review-account",
+              "deploy",
+              "unknown"
+            ]
           }
         }
       }

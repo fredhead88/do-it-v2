@@ -3050,19 +3050,28 @@ assert "spawn-started" in [e["type"] for e in spawn.raw], spawn.raw
 N += 1
 
 # AC14: the AC9 standing escalation-blocking{cap:3}, resolved by an unrelated
-# decision (regrade=no — never lifts the cap itself) newer than it, then a
-# build-done — grading_budget still returns cap:3, AND this THIRD drive's own
-# ledger file carries a SECOND, FRESH escalation-blocking{cap:3} (not
-# suppressed by the first, now-resolved one) — a resolved-but-not-fixed block
-# re-surfaces rather than wedging silent.
+# decision (regrade=no — never lifts the cap itself) newer than it — grading_budget
+# still returns cap:3, AND this THIRD drive's own ledger file carries a SECOND,
+# FRESH escalation-blocking{cap:3} (not suppressed by the first, now-resolved
+# one) — a resolved-but-not-fixed block re-surfaces rather than wedging silent.
+# L-spec-0482/R12.c superseded this block's own prior `fx9414b` build-done (it
+# used to assert a build-done changes nothing here — R12.c's whole point is
+# that it now does): removed, so this drive still sees only the 3 spawn-started
+# rows plus the harmless `decision regrade=no`, and cap:3 still stands.
 _dec_ts_435 = (fold.ts(e10_435["ts"]) + _timedelta(minutes=5)).isoformat(timespec="seconds")
-_bd_ts_435 = (fold.ts(e10_435["ts"]) + _timedelta(minutes=6)).isoformat(timespec="seconds")
 raw_ev("operator", "fx9414a", "decision", AC9_SUBJ435, _dec_ts_435, regrade="no")
-raw_ev("builder", "fx9414b", "build-done", AC9_SUBJ435, _bd_ts_435, status="DONE")
 code14_435, raw14_435, f14_435 = drive_grader435(AC9_SUBJ435)
 assert code14_435 == 1 and [e["type"] for e in raw14_435] == ["escalation-blocking", "spawn-failed"], raw14_435
 assert raw14_435[0]["kind"] == "grading-budget" and raw14_435[0]["reason"] == "cap:3", raw14_435[0]
 assert raw14_435[1]["reason"] == "cap:3", raw14_435[1]
+N += 1
+
+# L-spec-0482/R12.c (new): a build-done newer than every counted run resets the
+# cap outright now — appended strictly after the third drive above, so it
+# changes nothing about the assertions just made.
+raw_ev("builder", "fx9414c482", "build-done", AC9_SUBJ435, FT(1), status="DONE")
+assert dispatch.grading_budget(fold.read_events(), AC9_SUBJ435) is None, \
+    "R12.c: a build-done newer than the newest counted run resets the cap"
 N += 1
 
 # AC13: agents/executor.md's spawn-failed/spawn-stale row states both reset
@@ -3076,3 +3085,265 @@ assert 'decision{regrade: "yes"}' in _row_435, "AC13: cap's own, narrower reset 
 N += 1
 
 print(f"dispatch: +L-spec-0435 (grading-spend: AC3-AC14)")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-0482 (grading-breaker) — R12.b circuit breaker, R12.c cap reset,
+# R12.e executor rule. AC1-AC9, AC15, AC16. `grading_env` already imported
+# above (L-spec-0481 section); `_cap_content` reused for AC3's second spec.
+# ══════════════════════════════════════════════════════════════════════════════
+
+# AC1: schema enum equals grading_env.CAPABILITIES + "unknown"; grader.md states
+# the rule; doit validate grader on four fixtures (met/no-field, tool-failed
+# with a valid cap, tool-failed with the field absent, tool-failed with a
+# bogus value — only the last is INVALID).
+_schema482 = json.loads((pathlib.Path(__file__).parent.parent / "agents" / "grader.schema.json").read_text())
+_cap_enum482 = _schema482["properties"]["verdicts"]["items"]["properties"]["missing_capability"]["enum"]
+assert set(_cap_enum482) == set(grading_env.CAPABILITIES) | {"unknown"}, _cap_enum482
+_grader_md482 = (pathlib.Path(__file__).parent.parent / "agents" / "grader.md").read_text()
+assert "missing_capability" in _grader_md482, "AC1: grader.md must name the field"
+
+import validate as validate482  # noqa: E402
+_VDIR482 = TMP / "content" / "validate-fixtures-482"
+_VDIR482.mkdir(parents=True, exist_ok=True)
+
+
+def _grade_row482(**kw):
+    return {"verdicts": [{"ac": "AC1", "verdict": "met", "reason": "r", **kw}],
+            "matches_intent": "yes", "card_ok": "yes", "could_not_run": False,
+            "contamination": False, "declarations": [], "checkers": []}
+
+
+def _validate482(obj, name):
+    p = _VDIR482 / f"{name}.json"
+    p.write_text(json.dumps(obj))
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            validate482.main(["grader", str(p)])
+        return 0, buf.getvalue()
+    except SystemExit as e:
+        return (e.code if isinstance(e.code, int) else 1), str(e.code)
+
+
+c1_482, o1_482 = _validate482(_grade_row482(), "met-no-field")
+assert "VALID" in o1_482 and c1_482 == 0, (c1_482, o1_482)
+c2_482, o2_482 = _validate482({**_grade_row482(), "verdicts": [
+    {"ac": "AC1", "verdict": "cannot-assess", "reason": "r", "reason_code": "tool-failed",
+     "missing_capability": "db"}]}, "tool-failed-valid")
+assert "VALID" in o2_482 and c2_482 == 0, (c2_482, o2_482)
+c3_482, o3_482 = _validate482({**_grade_row482(), "verdicts": [
+    {"ac": "AC1", "verdict": "cannot-assess", "reason": "r", "reason_code": "tool-failed"}]}, "tool-failed-absent")
+assert "VALID" in o3_482 and c3_482 == 0, (c3_482, o3_482)
+c4_482, o4_482 = _validate482({**_grade_row482(), "verdicts": [
+    {"ac": "AC1", "verdict": "cannot-assess", "reason": "r", "reason_code": "tool-failed",
+     "missing_capability": "nonsense"}]}, "tool-failed-bogus")
+assert c4_482 != 0 and "missing_capability" in o4_482, (c4_482, o4_482)
+print("L-spec-0482 AC1 ok")
+
+# Small fixture-row builders, reused across AC2-AC16 below.
+_ca482 = lambda ac, cap=None, **kw: {"ac": ac, "verdict": "cannot-assess", "reason": "r",
+                                     "reason_code": "tool-failed",
+                                     **({"missing_capability": cap} if cap is not None else {}), **kw}
+
+# AC2: a non-owed cannot-assess row (AC1, capability db) rides on the verdict
+# event; an owed one (AC2, capability browser, declared owed) does not; a `met`
+# row (AC3) is untouched. A second fixture: an executor-authored owed-ac with
+# no prior declaration never suppresses.
+# (uses "env-file"/"browser", never "db" — AC3/AC4 below open and reuse the
+# shared capability:db hold across dispatches, and must start from it closed)
+subj_ac2_482 = "L-spec-9450"
+raw_ev("spec-writer", "fx482ac2", "owed-ac", subj_ac2_482, GT(0), criterion="AC2")
+met_ac3_482 = {"ac": "AC3", "verdict": "met", "reason": "r"}
+code, types, evs, _ = spawn("grader", out=grade([_ca482("AC1", "env-file"), _ca482("AC2", "browser"),
+                                                  met_ac3_482]), subject=subj_ac2_482)
+vev2_482 = next(e for e in evs if e["type"] == "verdict")
+assert vev2_482["missing_capability"] == [{"ac": "AC1", "capability": "env-file"}], vev2_482
+assert set(vev2_482["cannot_assess"]) == {"AC1", "AC2"}, vev2_482
+
+subj_ac2b_482 = "L-spec-9451"
+# A subject's own admitted history must be non-empty before the sole event on
+# it is one `fold()` ignores (a bare executor owed-ac with no prior
+# declaration) — an all-ignored subject is a pre-existing `fold.fold()` crash
+# (IndexError on `evs[-1]`) outside this spec's footprint; sidestepped here by
+# giving the subject one harmless admitted event first.
+raw_ev("spec-writer", "fx482ac2bpre", "spec-written", subj_ac2b_482, GT(-1))
+raw_ev("executor", "fx482ac2b", "owed-ac", subj_ac2b_482, GT(0), criterion="AC4")
+code, types, evs, _ = spawn("grader", out=grade([_ca482("AC4", "env-file")]), subject=subj_ac2b_482)
+vev2b_482 = next(e for e in evs if e["type"] == "verdict")
+assert vev2b_482["missing_capability"] == [{"ac": "AC4", "capability": "env-file"}], \
+    "AC2: an executor-authored owed-ac with no prior declaration never suppresses"
+print("L-spec-0482 AC2 ok")
+
+# AC3: the store round trip, through the production events_for/emit path — a
+# fresh fold.read_events() shows both the hold and the escalation, and a
+# SECOND spec whose content requires `db` is held by the shared shape.
+ac3_second_482 = "L-spec-9452"
+_cap_content(ac3_second_482, "pytest -k live_db\n")
+subj_ac3_482 = "L-spec-9453"
+code, types, evs, _ = spawn("grader", out=grade([_ca482("AC1", "db")]), subject=subj_ac3_482)
+assert "capability-hold" in types and "escalation-blocking" in types, types
+hold3_482 = next(e for e in evs if e["type"] == "capability-hold")
+assert (hold3_482["subject"], hold3_482["capability"], hold3_482["spec"], hold3_482["source"]) == \
+    ("capability:db", "db", subj_ac3_482, "verdict"), hold3_482
+esc3_482 = next(e for e in evs if e["type"] == "escalation-blocking")
+assert esc3_482["subject"] == "capability:db" and esc3_482["kind"] == "capability-hold" \
+    and esc3_482["owner"] == "thinker" and esc3_482["revert"] == "doit append unblocked capability:db", esc3_482
+assert esc3_482.get("default") and esc3_482.get("deadline"), esc3_482
+fresh3_482 = fold.read_events()
+assert any(e["type"] == "capability-hold" and e.get("subject") == "capability:db" for e in fresh3_482)
+assert "capability:db" in fold.capability_holds(fresh3_482), fold.capability_holds(fresh3_482)
+assert ac3_second_482 in fold.held_specs(fresh3_482), fold.held_specs(fresh3_482)
+print("L-spec-0482 AC3 ok")
+
+# AC4: a second non-owed cannot-assess verdict naming an ALREADY-held capability
+# opens nothing further; after `unblocked` the next one opens a fresh hold;
+# two distinct capabilities in one verdict open two holds.
+subj_ac4_482 = "L-spec-9454"
+code, types, evs, _ = spawn("grader", out=grade([_ca482("AC1", "db")]), subject=subj_ac4_482)
+assert "capability-hold" not in types and "escalation-blocking" not in types, \
+    "AC4: an already-open hold gets no second capability-hold/escalation"
+db_holds_482 = [e for e in fold.read_events() if e.get("type") == "capability-hold"
+               and e.get("subject") == "capability:db"]
+assert len(db_holds_482) == 1, db_holds_482
+
+raw_ev("operator", "fx482ac4unblock", "unblocked", "capability:db", FT(1))
+subj_ac4b_482 = "L-spec-9455"
+code, types, evs, _ = spawn("grader", out=grade([_ca482("AC1", "db")]), subject=subj_ac4b_482)
+assert "capability-hold" in types and "escalation-blocking" in types, \
+    "AC4: after an unblocked close, the next non-owed cannot-assess opens a fresh hold"
+db_holds2_482 = [e for e in fold.read_events() if e.get("type") == "capability-hold"
+                and e.get("subject") == "capability:db"]
+assert len(db_holds2_482) == 2, db_holds2_482
+
+subj_ac4c_482 = "L-spec-9456"
+code, types, evs, _ = spawn("grader", out=grade([_ca482("AC1", "browser"), _ca482("AC2", "review-account")]),
+                           subject=subj_ac4c_482)
+hold_subjs_482 = {e["subject"] for e in evs if e["type"] == "capability-hold"}
+assert hold_subjs_482 == {"capability:browser", "capability:review-account"}, \
+    "AC4: two distinct capabilities in one verdict open two holds"
+print("L-spec-0482 AC4 ok")
+
+# AC5: absent / literal "unknown" / an out-of-enum value all coerce to
+# capability:unknown:<SPEC>, spec=<SPEC>; a bogus value fails the grader's own
+# schema well before events_for, so it is exercised directly (same pattern the
+# COMMIT-SHAPE AC13 block above uses for an unreachable-through-main() case).
+subj_ac5a_482 = "L-spec-9460"
+code, types, evs, _ = spawn("grader", out=grade([_ca482("AC1")]), subject=subj_ac5a_482)  # field absent
+hold5a_482 = next(e for e in evs if e["type"] == "capability-hold")
+assert hold5a_482["subject"] == f"capability:unknown:{subj_ac5a_482}" and hold5a_482["spec"] == subj_ac5a_482, hold5a_482
+assert fold.capability_holds(fold.read_events())[hold5a_482["subject"]]["specs"] == {subj_ac5a_482}
+assert subj_ac5a_482 in fold.held_specs(fold.read_events())
+
+subj_ac5b_482 = "L-spec-9461"
+code, types, evs, _ = spawn("grader", out=grade([_ca482("AC1", "unknown")]), subject=subj_ac5b_482)
+hold5b_482 = next(e for e in evs if e["type"] == "capability-hold")
+assert hold5b_482["subject"] == f"capability:unknown:{subj_ac5b_482}", hold5b_482
+
+subj_ac5c_482 = "L-spec-9462"
+a5c_482 = argparse.Namespace(subject=subj_ac5c_482)
+base5c_482 = {"subject": subj_ac5c_482, "project": "t", "spawn": "L-grader-fake5c482"}
+ev5c_482 = dispatch.events_for("grader", grade([_ca482("AC1", "nonsense-cap")]), a5c_482, base5c_482)
+hold5c_482 = next(kv for t, kv in ev5c_482 if t == "capability-hold")
+assert hold5c_482["subject"] == f"capability:unknown:{subj_ac5c_482}" and hold5c_482["spec"] == subj_ac5c_482, hold5c_482
+print("L-spec-0482 AC5 ok")
+
+# AC6: cannot-assess rows that are ALL owed open no hold, missing_capability is
+# [], and verdict_confirmed is unchanged (True when matches_intent/card_ok yes).
+subj_ac6_482 = "L-spec-9470"
+raw_ev("spec-writer", "fx482ac6", "owed-ac", subj_ac6_482, GT(0), criterion="AC1")
+code, types, evs, _ = spawn("grader", out=grade([{"ac": "AC1", "verdict": "cannot-assess", "reason": "r",
+                                                  "reason_code": "criterion-unevaluable-from-packet"}]),
+                          subject=subj_ac6_482)
+assert "capability-hold" not in types and "escalation-blocking" not in types, types
+vev6_482 = next(e for e in evs if e["type"] == "verdict")
+assert vev6_482["missing_capability"] == [], vev6_482
+assert fold.verdict_confirmed(vev6_482, {"AC1"}) is True, vev6_482
+print("L-spec-0482 AC6 ok")
+
+# AC7: grading_budget's build-done-gated window — 3 runs older than the
+# newest build-done never count (None); 3 newer do (cap:3); no build-done at
+# all still counts every run (cap:3, unchanged from before this unit).
+ac7_subj482 = "L-spec-9480"
+ev7a482 = [gb("grader", "spawn-started", ac7_subj482, GT(0), role="grader"),
+          gb("grader", "verdict", ac7_subj482, GT(1), confirmed=False, cannot_assess=[]),
+          gb("grader", "rejected-criterion", ac7_subj482, GT(1), criterion="AC1", why="w"),
+          gb("grader", "spawn-started", ac7_subj482, GT(2), role="grader"),
+          gb("grader", "verdict", ac7_subj482, GT(3), confirmed=False, cannot_assess=[]),
+          gb("grader", "rejected-criterion", ac7_subj482, GT(3), criterion="AC2", why="w"),
+          gb("grader", "spawn-started", ac7_subj482, GT(4), role="grader"),
+          gb("grader", "verdict", ac7_subj482, GT(5), confirmed=False, cannot_assess=[]),
+          gb("grader", "rejected-criterion", ac7_subj482, GT(5), criterion="AC3", why="w"),
+          gb("builder", "build-done", ac7_subj482, GT(10), status="DONE")]
+assert dispatch.grading_budget(ev7a482, ac7_subj482) is None, dispatch.grading_budget(ev7a482, ac7_subj482)
+
+ev7b482 = [gb("builder", "build-done", ac7_subj482, GT(0), status="DONE"),
+          gb("grader", "spawn-started", ac7_subj482, GT(1), role="grader"),
+          gb("grader", "spawn-started", ac7_subj482, GT(2), role="grader"),
+          gb("grader", "spawn-started", ac7_subj482, GT(3), role="grader")]
+assert dispatch.grading_budget(ev7b482, ac7_subj482) == "cap:3", dispatch.grading_budget(ev7b482, ac7_subj482)
+
+ev7c482 = [gb("grader", "spawn-started", ac7_subj482, GT(i), role="grader") for i in range(3)]
+assert dispatch.grading_budget(ev7c482, ac7_subj482) == "cap:3", dispatch.grading_budget(ev7c482, ac7_subj482)
+print("L-spec-0482 AC7 ok")
+
+# AC8: 4 grader runs after the newest build-done, each carrying a non-owed
+# cannot-assess -> None; all 4 owed (spec-writer-declared) -> cap:4; only an
+# executor-authored owed-ac with no prior declaration -> still None.
+ac8_subj482 = "L-spec-9481"
+
+
+def _mk_run482(i, criterion):
+    return [gb("grader", "spawn-started", ac8_subj482, GT(i * 2), role="grader", spawn=f"g482{i}"),
+            gb("grader", "verdict", ac8_subj482, GT(i * 2 + 1), spawn=f"g482{i}", confirmed=False,
+               cannot_assess=[criterion])]
+
+
+_build8_482 = gb("builder", "build-done", ac8_subj482, GT(-1), status="DONE")
+_runs8_482 = [ev for i, c in enumerate(("AC1", "AC2", "AC3", "AC4")) for ev in _mk_run482(i, c)]
+ev8a_482 = [_build8_482] + _runs8_482
+assert dispatch.grading_budget(ev8a_482, ac8_subj482) is None, dispatch.grading_budget(ev8a_482, ac8_subj482)
+
+_owed8_482 = [gb("spec-writer", "owed-ac", ac8_subj482, GT(-2), criterion=c)
+             for c in ("AC1", "AC2", "AC3", "AC4")]
+ev8b_482 = _owed8_482 + ev8a_482
+assert dispatch.grading_budget(ev8b_482, ac8_subj482) == "cap:4", dispatch.grading_budget(ev8b_482, ac8_subj482)
+
+_owed8c_482 = [gb("executor", "owed-ac", ac8_subj482, GT(-2), criterion=c)
+              for c in ("AC1", "AC2", "AC3", "AC4")]
+ev8c_482 = _owed8c_482 + ev8a_482
+assert dispatch.grading_budget(ev8c_482, ac8_subj482) is None, dispatch.grading_budget(ev8c_482, ac8_subj482)
+print("L-spec-0482 AC8 ok")
+
+# AC9: regression — the pre-existing L-spec-0435 suite above (AC3-AC12, AC14's
+# rewritten block) is unmodified in behavior except the one block R12.c names;
+# proved by this whole file exiting 0 (checked by the Verification command)
+# and by `git diff` on this file showing no other pre-existing line touched.
+print("L-spec-0482 AC9 ok (see: this file's own full run, plus git diff of the AC14 block)")
+
+# AC15: agents/executor.md's cap: clause names the build-done reset AND the
+# decision{regrade: "yes"} lift, while still carrying every substring the
+# pre-existing 0435 `# AC13:` block already reads (`_row_435`, computed above).
+assert "fresh `build-done` newer than the newest counted grader run" in _row_435, _row_435
+assert "re-dispatches" in _row_435, _row_435
+assert 'decision{regrade: "yes"}' in _row_435, _row_435
+print("L-spec-0482 AC15 ok")
+
+# AC16: the omitted-field path end to end through dispatch.main — passes
+# schema validation, is not spawn-failed, opens capability:unknown:<SPEC>, and
+# three such runs never count against the cap (grading_budget stays None).
+subj_ac16_482 = "L-spec-9490"
+row16_482 = {"ac": "AC1", "verdict": "cannot-assess", "reason": "r", "reason_code": "tool-failed"}
+code16_482, types16_482, evs16_482, _ = spawn("grader", out=grade([row16_482]), subject=subj_ac16_482)
+assert code16_482 == 0 and "spawn-failed" not in types16_482, (code16_482, types16_482)
+vev16_482 = next(e for e in evs16_482 if e["type"] == "verdict")
+assert vev16_482["missing_capability"] == [{"ac": "AC1", "capability": "unknown"}], vev16_482
+hold16_482 = next(e for e in evs16_482 if e["type"] == "capability-hold")
+assert hold16_482["subject"] == f"capability:unknown:{subj_ac16_482}", hold16_482
+assert "escalation-blocking" in types16_482, types16_482
+for _ in range(2):
+    spawn("grader", out=grade([row16_482]), subject=subj_ac16_482)
+assert dispatch.grading_budget(fold.read_events(), subj_ac16_482) is None, \
+    "AC16: three environment-failure runs never count against the cap"
+print("L-spec-0482 AC16 ok")
+
+print("dispatch: +L-spec-0482 (grading-breaker: AC1-AC9 AC15 AC16)")
