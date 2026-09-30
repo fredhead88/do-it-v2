@@ -267,7 +267,10 @@ def _prove_deploy(project, repo):
     if not ssh_target or not version_path:
         return False, "the [[prod]] row is missing ssh_target/version_path"
     try:
-        r = _run(["ssh", ssh_target, f"curl -fsS {version_path}"], capture_output=True, text=True, timeout=20)
+        # version_path is a path ("/version"); curl needs the host in front of it,
+        # or it exits 3 (malformed URL) on every call.
+        url = f"{row.get('base_url', '').rstrip('/')}{version_path}"
+        r = _run(["ssh", ssh_target, f"curl -fsS {url}"], capture_output=True, text=True, timeout=20)
     except Exception as exc:
         return False, f"deploy check raised: {exc}"
     return (True, None) if r.returncode == 0 else (False, f"deploy version check failed: exit {r.returncode}")
