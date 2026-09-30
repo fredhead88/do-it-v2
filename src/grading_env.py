@@ -187,7 +187,9 @@ def _prove_view_paths(view):
 def _resolve_interp(token, venv_path):
     if venv_path and (pathlib.Path(venv_path) / "bin" / token).is_file():
         return str(pathlib.Path(venv_path) / "bin" / token)
-    return shutil.which(token) or token
+    # With no project venv, resolve against the sandbox's own PATH (pane_env's
+    # /usr/bin:/bin), not the dispatcher's, which may put an unbound venv first.
+    return shutil.which(token, path="/usr/bin:/bin") or token
 
 
 def _bwrap_available():
