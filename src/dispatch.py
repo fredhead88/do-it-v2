@@ -81,8 +81,11 @@ def alloc(d, prefix, suffix):
     # Ids >= 9000 are the test-fixture range (L-spec-9001, L-charter-9101 ...). A fixture event
     # that leaked into the live ledger on 09-27 made every later alloc start at 9102; the
     # fixture range never sets the next real number. Thinker 2026-09-28.
+    # Floor lowered 9000 -> 8000 (operator ruling 2026-09-30): a leaked fixture
+    # L-spec-8026 pushed real specs to 8027-8034. Those keep their ids (above the
+    # floor, so never re-allocated); new ids resume the real sequence.
     n = max([i for i in [int(p.stem.rsplit("-", 1)[1]) for p in d.glob(f"{prefix}[0-9]*{suffix}")]
-             + subject_ids(prefix) if i < 9000] or [0])
+             + subject_ids(prefix) if i < 8000] or [0])
     while True:
         n += 1
         path = d / f"{prefix}{n:04d}{suffix}"
