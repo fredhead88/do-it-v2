@@ -497,7 +497,8 @@ def run(events, specs, now, *, runner=None, dry_run=False):
                 continue
             packet_path = (r1.get("stdout") or "").strip()
             r2 = runner(["doit", "dispatch", "--detach", "grader", subject, "--packet", packet_path,
-                         "--cwd", str(worktree), "--charter", charter or "", "--project", project])
+                         "--cwd", str(worktree), "--charter", charter or "", "--project", project,
+                         "--timeout", "30"])
             if r2.get("code", 1) != 0:
                 _escalate("spawn-redispatch-failed")
                 continue
@@ -515,6 +516,8 @@ def run(events, specs, now, *, runner=None, dry_run=False):
             if cmd_json.get("path"):
                 argv += ["--path", cmd_json["path"]]
             argv += ["--charter", charter or "", "--project", project]
+            if role == "grader":  # same 30-min cap as the fresh-dispatch path
+                argv += ["--timeout", "30"]
             r = runner(argv)
             if r.get("code", 1) != 0:
                 _escalate("spawn-redispatch-failed")
