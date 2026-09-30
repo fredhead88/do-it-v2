@@ -255,4 +255,37 @@ rows7wb = owed.checks([ac7w, ship7w, waive7w, redate7w], NOW)
 assert rows7wb[0]["status"] == "waiting", rows7wb[0]
 print("0470-AC7 ok")
 
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-8034 (capability-routing) · AC10 — to=owed routed criteria are owed checks
+# ══════════════════════════════════════════════════════════════════════════════
+S10 = "L-spec-9010"
+routed10 = {"ts": stamp(3), "type": "criterion-routed", "subject": S10, "actor": "grader",
+           "criterion": "AC2", "capability": "git", "to": "owed"}
+routed10_verify = {"ts": stamp(3), "type": "criterion-routed", "subject": S10, "actor": "grader",
+                   "criterion": "verify", "capability": "git", "to": "owed"}
+routed10_rev = {"ts": stamp(3), "type": "criterion-routed", "subject": S10, "actor": "grader",
+                "criterion": "AC5", "capability": "browser", "to": "reviewer"}
+routed10_none = {"ts": stamp(3), "type": "criterion-routed", "subject": S10, "actor": "grader",
+                 "criterion": "AC9", "capability": "deploy", "to": "none"}
+ship10 = {"ts": stamp(1), "type": "shipped", "subject": S10}
+rows10 = owed.checks([routed10, routed10_verify, routed10_rev, routed10_none, ship10], NOW)
+ids10 = {r["criterion"] for r in rows10}
+assert ids10 == {"AC2", "verify"}, ids10  # to=reviewer and to=none never become owed checks
+for r in rows10:
+    assert r["status"] == "due", r          # due once the spec is shipped (no wait)
+    assert r["declared_src"] == "routing", r
+assert fold.owed_due({S10: {"evs": [routed10, routed10_verify, routed10_rev, routed10_none, ship10]}})
+print("8034-AC10(a) ok")
+
+# an explicit owed-ac on the same criterion is never duplicated
+S10b = "L-spec-9010b"
+ac10b = {"ts": stamp(4), "type": "owed-ac", "subject": S10b, "criterion": "AC2",
+        "wake_at": stamp(4), "actor": "spec-writer", "_src": "f:1"}
+routed10b = {"ts": stamp(3), "type": "criterion-routed", "subject": S10b, "actor": "grader",
+            "criterion": "AC2", "capability": "git", "to": "owed"}
+ship10b = {"ts": stamp(1), "type": "shipped", "subject": S10b}
+rows10b = owed.checks([ac10b, routed10b, ship10b], NOW)
+assert len(rows10b) == 1 and rows10b[0]["declared_src"] == "f:1", rows10b
+print("8034-AC10(b) ok — no duplicate row")
+
 print("owed: all checks pass")

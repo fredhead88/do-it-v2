@@ -16,7 +16,7 @@ Writes `$R/packets/<subject>-<role>-<n>.md` and prints the path.
 import argparse, hashlib, os, pathlib, re, subprocess, sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import audit, fold, merge_gate, models  # noqa: E402
+import audit, fold, merge_gate, models, routing  # noqa: E402
 
 ROOT = pathlib.Path(os.environ.get("DOIT_ROOT", pathlib.Path.home() / ".do-it"))
 CONTENT, PACKETS = ROOT / "content", ROOT / "packets"
@@ -1040,28 +1040,9 @@ def p_builder(c):
 
 
 def _drop_owed_blocks(lines, owed):
-    """L-spec-0435 (R10(a)'s enforcement half): group criteria LINES into
-    AC-anchored blocks — each starts at a line matching `_AC_ANY` and runs
-    through the line before the next such anchor (or end of list); text before
-    the first anchor is its own always-kept block — and drop, WHOLE, every
-    block whose anchor id is in `owed`. Dropping by a per-line id match instead
-    would leak an owed AC's wrapped continuation lines (and any fixture-unique
-    token on them) into the grader's packet. `owed` empty reproduces the input
-    unchanged, line for line (AC2)."""
-    out, cur_id, cur = [], None, []
-
-    def flush():
-        if cur_id not in owed:
-            out.extend(cur)
-    for l in lines:
-        m = _AC_ANY.match(l)
-        if m:
-            flush()
-            cur_id, cur = f"AC{m.group(1)}", [l]
-        else:
-            cur.append(l)
-    flush()
-    return out
+    """L-spec-0435 (R10(a)'s enforcement half); body moved to `routing.drop_blocks`
+    (L-spec-8034, R12 size offset) and re-imported here under the old name."""
+    return routing.drop_blocks(lines, owed)
 
 
 def p_grader(c):
@@ -1069,7 +1050,9 @@ def p_grader(c):
     body = spec.read_text()
     # L-spec-0435/R10(a): a criterion typed `owed-ac` at spec-write time is
     # unobservable outside a real deploy — the grader can never spend on it.
-    owed = {e["criterion"] for e in c.all_of("owed-ac")}
+    # L-spec-8034/R12.h: a routed criterion (reviewer OR owed) is not the
+    # grader's either — dropped whole, the same as an owed one.
+    owed = {e["criterion"] for e in c.all_of("owed-ac")} | set(fold.routed_criteria(c.evs, c.a.subject))
     crit = _drop_owed_blocks(criteria(body), owed)
     rows = [l for l in card.read_text().splitlines() if AC_ROW.match(l)]
     # Every row, from the card object the wrapper writes beside the rendered card —
@@ -1148,6 +1131,13 @@ def p_reviewer(c):
             f"matches_intent={verdict.get('matches_intent', 'unknown')} · "
             f"cannot_assess={verdict.get('cannot_assess', 'unknown')}."
         )
+    # L-spec-8034/R12.i: criteria routed to=reviewer are yours ALONE — a
+    # grader never has the capability, so its packet drops them whole
+    # (p_grader/_drop_owed_blocks) and you report one row for each, by id and
+    # text, and may `cleared` them in any round (agents/reviewer.md).
+    to_reviewer = sorted(cid for cid, to in fold.routed_criteria(c.evs, c.a.subject).items() if to == "reviewer")
+    groups = routing.group_blocks(crit)
+    routed_lines = [f"   {cid}: " + " / ".join(groups.get(cid, [])) for cid in to_reviewer] or ["   none"]
     return [
         f"1. The deployed thing, on its execution host: {where}. Never staging.",
         f"2. The done-condition: {done}.",
@@ -1160,6 +1150,8 @@ def p_reviewer(c):
         f"7. depth: {c.a.depth} · round: {c.a.round}.",
         f"8. Standing verify-waivers applied to this checker: {waiver_line(c)}.",
         f"9. Paths this branch touches outside the spec's Writes grant (ADR-0028-6): {out_of_grant_line(c)}.",
+        "10. Criteria routed to you alone — a grader can never assess these (yours to clear in any round):",
+        *routed_lines,
     ]
 
 

@@ -81,6 +81,12 @@ Round 1 drives every path. Round 2 is scope-pinned to the standing rejected
 criteria only, and may clear them. A third round is not a round; it is an
 escalation.
 
+A criterion routed to you (`to=reviewer`, L-spec-8034/R12.i) is not scope-pinned
+to round 2 — the packet lists it by id and text (item 10) in every round, since
+it carries no prior round of its own. Report one row for it exactly as for any
+spec-of-record criterion, and you may return it in `cleared` in any round, not
+only round 2.
+
 ## Depth
 
 `full` when you drove the paths; `gates-only` when you could see nothing
