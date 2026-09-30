@@ -35,8 +35,9 @@ NAMES = {"tick", "look", "tmp-reaper", "lessons-digest", "backup-watch",
 
 def _write_manifest(path, rows_):
     """Serialize `rows_` (a list of the same 8-field dicts `crons.rows()`
-    returns) as a `[[row]]`-table TOML file, `sig` as a literal (single-quoted)
-    string so a backslash regex round-trips with no escaping."""
+    returns, optionally plus `max_runtime_s`) as a `[[row]]`-table TOML file,
+    `sig` as a literal (single-quoted) string so a backslash regex round-trips
+    with no escaping."""
     lines = []
     for r in rows_:
         lines.append("[[row]]")
@@ -46,6 +47,8 @@ def _write_manifest(path, rows_):
                 lines.append(f"{k} = '{v}'")
             else:
                 lines.append(f"{k} = {v!r}")
+        if r.get("max_runtime_s") is not None:
+            lines.append(f"max_runtime_s = {int(r['max_runtime_s'])}")
         lines.append("")
     pathlib.Path(path).write_text("\n".join(lines))
 
@@ -73,7 +76,10 @@ r1 = crons.rows(str(REAL_MANIFEST))
 check(len(r1) == 8, f"AC1: exactly 8 rows: {len(r1)}")
 check({row["name"] for row in r1} == NAMES, f"AC1: name set: {[row['name'] for row in r1]}")
 for row in r1:
-    check(set(row.keys()) == set(crons.FIELDS), f"AC1: all 8 keys on {row['name']}: {row.keys()}")
+    # R14a: every row also carries `max_runtime_s` now (int|None) — a 9th key,
+    # not one of the 8 required-string FIELDS, so it is checked separately.
+    check(set(row.keys()) == set(crons.FIELDS) | {"max_runtime_s"},
+          f"AC1: all 8 FIELDS keys plus max_runtime_s on {row['name']}: {row.keys()}")
     for k in crons.FIELDS:
         check(isinstance(row[k], str) and row[k], f"AC1: {row['name']}.{k} is a non-empty string: {row[k]!r}")
 auto = [row for row in r1 if row["name"] == "auto-deploy"][0]
@@ -85,11 +91,29 @@ for row in r1:
     check(row["where"] == "user" and row["project"] == "do-it-v2",
           f"AC1: {row['name']} is user/do-it-v2: {row}")
 
-# ══ AC2 · tick matches up.cron_line() byte for byte, default AND monkeypatched ═
+def _wrap_line(line, name, doit_bin):
+    """R14a: insert `<doit_bin> cron-run <name> -- ` right after any leading
+    `VAR=value ` environment-assignment tokens and before the rest of the
+    command — the env prefix stays before the wrapper, and everything after
+    the command tokens (including a trailing redirect) is untouched, exactly
+    as `crons.toml`'s own wrapping does."""
+    parts = line.split(" ", 5)
+    schedule, cmd = " ".join(parts[:5]), parts[5]
+    m = re.match(r'^((?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*)(.*)$', cmd)
+    prefix, rest = m.group(1), m.group(2)
+    return f"{schedule} {prefix}{doit_bin} cron-run {name} -- {rest}"
+
+
+DOIT_BIN = str(crons.HERE.parent / "doit")
+
+# ══ AC2 · tick matches the WRAPPED up.cron_line(), byte for byte, default ═══
+# ══ AND monkeypatched (R14a: crons.toml's own command is now cron-run-wrapped,
+# ══ so the single-source-of-truth check is against the wrapped rendering) ══
 tick = [row for row in crons.rows(str(REAL_MANIFEST)) if row["name"] == "tick"][0]
-check(f"{tick['schedule']} {tick['command']}" == up.cron_line(),
-      f"AC2(a): tick's rendered line == up.cron_line() at defaults:\n"
-      f"{tick['schedule']} {tick['command']}\nvs\n{up.cron_line()}")
+expected_tick1 = _wrap_line(up.cron_line(), "tick", DOIT_BIN)
+check(f"{tick['schedule']} {tick['command']}" == expected_tick1,
+      f"AC2(a): tick's rendered line == the wrapped up.cron_line() at defaults:\n"
+      f"{tick['schedule']} {tick['command']}\nvs\n{expected_tick1}")
 real_root, real_tick_min = fold.ROOT, os.environ.get("DOIT_TICK_MIN")
 try:
     patched_root = TMP / "patched-root"
@@ -97,8 +121,9 @@ try:
     os.environ["DOIT_TICK_MIN"] = "13"
     tick2 = [row for row in crons.rows(str(REAL_MANIFEST)) if row["name"] == "tick"][0]
     line2 = f"{tick2['schedule']} {tick2['command']}"
-    check(line2 == up.cron_line(), f"AC2(b): patched fold.ROOT/DOIT_TICK_MIN, still byte-identical to "
-                                   f"up.cron_line():\n{line2}\nvs\n{up.cron_line()}")
+    expected_tick2 = _wrap_line(up.cron_line(), "tick", DOIT_BIN)
+    check(line2 == expected_tick2, f"AC2(b): patched fold.ROOT/DOIT_TICK_MIN, still byte-identical to "
+                                   f"the wrapped up.cron_line():\n{line2}\nvs\n{expected_tick2}")
     check(str(patched_root) in line2, f"AC2(b): the patched temp path actually appears in the line "
                                       f"(the non-default arm is exercised): {line2}")
 finally:
@@ -108,11 +133,12 @@ finally:
     else:
         os.environ["DOIT_TICK_MIN"] = real_tick_min
 
-# ══ AC3 · backup-watch matches backup.cron_line() byte for byte ═════════════
+# ══ AC3 · backup-watch matches the WRAPPED backup.cron_line(), byte for byte ═
 bw = [row for row in crons.rows(str(REAL_MANIFEST)) if row["name"] == "backup-watch"][0]
-check(f"{bw['schedule']} {bw['command']}" == backup.cron_line(),
-      f"AC3: backup-watch's rendered line == backup.cron_line():\n"
-      f"{bw['schedule']} {bw['command']}\nvs\n{backup.cron_line()}")
+expected_bw = _wrap_line(backup.cron_line(), "backup-watch", DOIT_BIN)
+check(f"{bw['schedule']} {bw['command']}" == expected_bw,
+      f"AC3: backup-watch's rendered line == the wrapped backup.cron_line():\n"
+      f"{bw['schedule']} {bw['command']}\nvs\n{expected_bw}")
 
 # ══ AC4 · every row's sig matches its own print_line() ══════════════════════
 for row in crons.rows(str(REAL_MANIFEST)):
@@ -404,5 +430,102 @@ parsed5 = _cron_env_value(text5.splitlines()[1])
 check(parsed5 == expected_root2, f"R9b-AC8: the AC5 fixture's value line parses to scratch.root(): "
                                  f"{parsed5!r} vs {expected_root2!r}")
 print("R9b-AC8 ok")
+
+
+# ══ R14-AC5 · crons.interval_s ═══════════════════════════════════════════════
+CASES_R14AC5 = [
+    ("* * * * *", 60), ("*/5 * * * *", 300), ("*/10 * * * *", 600),
+    ("7 * * * *", 3600), ("*/30 * * * *", 1800), ("0 3 * * *", 86400),
+    ("0 2,6,10,14,18,22 * * *", 14400), ("5,35 * * * *", 1800), ("*/7 * * * *", 240),
+    ("0 3 * * 1", None), ("0 3 1 * *", None), ("1-5 * * * *", None),
+    ("@daily", None), ("*/0 * * * *", None),
+]
+for sched, expect in CASES_R14AC5:
+    got = crons.interval_s(sched)
+    check(got == expect, f"R14-AC5: interval_s({sched!r}) == {expect}, got {got}")
+print("R14-AC5 ok")
+
+# ══ R14-AC6 · crons.toml — every row wrapped; sigs still match; max_runtime_s ═
+rows6 = crons.rows(str(REAL_MANIFEST))
+check({row["name"] for row in rows6} == NAMES, f"R14-AC6: name set unchanged: {[r['name'] for r in rows6]}")
+any_bare = False
+for row in rows6:
+    wrapped = f"cron-run {row['name']} --" in row["command"]
+    print(f"{row['name']} {'wrapped' if wrapped else 'bare'}")
+    any_bare = any_bare or not wrapped
+    line = crons.print_line(row["name"], str(REAL_MANIFEST))
+    check(bool(re.search(row["sig"], line)),
+          f"R14-AC6: {row['name']}'s sig still matches its own wrapped line: {row['sig']!r} vs {line!r}")
+check(not any_bare, "R14-AC6: none of the eight rows prints bare")
+bw6 = next(r for r in rows6 if r["name"] == "backup-watch")
+check(bw6["max_runtime_s"] == 90, f"R14-AC6: backup-watch max_runtime_s == 90: {bw6['max_runtime_s']}")
+for r in rows6:
+    if r["name"] != "backup-watch":
+        check(r["max_runtime_s"] is None, f"R14-AC6: {r['name']} max_runtime_s is None: {r['max_runtime_s']}")
+buf6 = io.StringIO()
+with contextlib.redirect_stdout(buf6):
+    rc6 = crons.main(["print"])
+check(rc6 == 0, f"R14-AC6: 'doit crons print' exits 0: {rc6}")
+auto6 = next(r for r in rows6 if r["name"] == "auto-deploy")
+tokens6 = auto6["command"].split()
+check(tokens6[0] == "albert", f"R14-AC6: auto-deploy's first token is albert: {tokens6[:4]}")
+check(tokens6[1] == str(crons.HERE.parent / "doit"), f"R14-AC6: auto-deploy's second token is the doit path: {tokens6[:4]}")
+check(tokens6[2:5] == ["cron-run", "auto-deploy", "--"],
+      f"R14-AC6: auto-deploy's third..fifth tokens are 'cron-run auto-deploy --': {tokens6[:5]}")
+print("R14-AC6 ok")
+
+# ══ R14-AC11a · crons.unwrapped — bare, wrapped, commented, absent ══════════
+row_r14ac11 = {"name": "u11", "where": "user", "schedule": "* * * * *", "command": "doit u11",
+              "sig": r"\bdoit u11\b", "path": "/bin/echo", "owner": "o", "project": "p"}
+manifest_r14ac11 = TMP / "r14ac11-manifest.toml"
+_write_manifest(manifest_r14ac11, [row_r14ac11])
+crond_r14ac11 = TMP / "r14ac11-unused-crond"
+crond_r14ac11.mkdir(exist_ok=True)
+
+res_bare_r14ac11 = crons.unwrapped(manifest=str(manifest_r14ac11), crontab_text="* * * * * doit u11\n",
+                                   crond_dir=str(crond_r14ac11))
+check(res_bare_r14ac11 == ["u11"], f"R14-AC11a: a bare sig-matched line is reported unwrapped: {res_bare_r14ac11}")
+
+res_wrapped_r14ac11 = crons.unwrapped(manifest=str(manifest_r14ac11),
+                                      crontab_text="* * * * * /x/doit cron-run u11 -- doit u11\n",
+                                      crond_dir=str(crond_r14ac11))
+check(res_wrapped_r14ac11 == [], f"R14-AC11a: a wrapped line reports nothing: {res_wrapped_r14ac11}")
+
+res_commented_r14ac11 = crons.unwrapped(manifest=str(manifest_r14ac11), crontab_text="# * * * * * doit u11\n",
+                                        crond_dir=str(crond_r14ac11))
+check(res_commented_r14ac11 == [], f"R14-AC11a: a commented line is not reported: {res_commented_r14ac11}")
+
+res_absent_r14ac11 = crons.unwrapped(manifest=str(manifest_r14ac11), crontab_text="* * * * * doit other\n",
+                                     crond_dir=str(crond_r14ac11))
+check(res_absent_r14ac11 == [], f"R14-AC11a: an absent line is not reported (that's cron-missing's): {res_absent_r14ac11}")
+print("R14-AC11a ok")
+
+# ══ R14-AC16 · install() replaces an untagged, sig-matched legacy line ══════
+d_r14ac16 = TMP / "r14ac16"
+d_r14ac16.mkdir()
+f_r14ac16 = d_r14ac16 / "crontab.txt"
+legacy_tick_r14ac16 = ("*/5 * * * * DOIT_ROOT=/home/albert/.do-it /home/albert/do-it-v2/doit tick "
+                       ">> /home/albert/.do-it/logs/tick.log 2>&1")
+unrelated_r14ac16 = "* * * * * some unrelated job"
+commented_r14ac16 = "# */5 * * * * doit tick (paused)"
+f_r14ac16.write_text(unrelated_r14ac16 + "\n" + legacy_tick_r14ac16 + "\n" + commented_r14ac16 + "\n")
+r_r14ac16 = crons.install("tick", crontab_path=str(f_r14ac16))
+check(r_r14ac16["ok"] is True and r_r14ac16["action"] == "replaced"
+     and r_r14ac16["previous_line"] == legacy_tick_r14ac16,
+      f"R14-AC16: install() replaces the legacy bare line: {r_r14ac16}")
+text_r14ac16 = f_r14ac16.read_text()
+lines_r14ac16 = text_r14ac16.splitlines()
+tick_sig_r14ac16 = [row for row in crons.rows() if row["name"] == "tick"][0]["sig"]
+matching_r14ac16 = [l for l in lines_r14ac16 if not l.lstrip().startswith("#") and re.search(tick_sig_r14ac16, l)]
+check(len(matching_r14ac16) == 1, f"R14-AC16: exactly one non-commented matching line: {lines_r14ac16!r}")
+check(matching_r14ac16[0].endswith("# doit-cron:tick"), f"R14-AC16: it carries the tag: {matching_r14ac16[0]!r}")
+check("cron-run tick -- " in matching_r14ac16[0], f"R14-AC16: it carries the wrapper: {matching_r14ac16[0]!r}")
+check(unrelated_r14ac16 in lines_r14ac16, "R14-AC16: the unrelated line survives, byte-identical")
+check(commented_r14ac16 in lines_r14ac16, "R14-AC16: a commented sig-matching line is left untouched")
+crond_r14ac16 = d_r14ac16 / "unused-crond2"
+crond_r14ac16.mkdir()
+unwrapped_r14ac16 = crons.unwrapped(crontab_text=text_r14ac16, crond_dir=str(crond_r14ac16))
+check("tick" not in unwrapped_r14ac16, f"R14-AC16: tick is no longer reported unwrapped: {unwrapped_r14ac16}")
+print("R14-AC16 ok")
 
 print(f"crons: {N} checks pass")

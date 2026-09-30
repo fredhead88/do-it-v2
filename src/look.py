@@ -33,6 +33,8 @@ DEFAULTS = {
 }
 _PASS_LOCKED = False   # True only while `run()` holds `look.lock` (skip re-locking, SD22)
 _DRY_RUN = False
+STREAK = 3   # R14b/R14c: three identical consecutive failures/refusals; a module
+             # constant, not a look.toml knob (Boundaries: avoids a shared-file merge)
 def load_toml(toml_path=None):
     path = pathlib.Path(toml_path) if toml_path is not None else DEFAULT_TOML_PATH
     try:
@@ -397,18 +399,21 @@ def _save_readings(root, readings):
     st = _read_state(root) or {}
     st["readings"] = readings
     _write_state(root, st)
-def _check_crons(runner, deadline, events, root, briefs):
+def _check_crons(text, und, events, root, briefs, crons_manifest=None, crond_dir=None):
+    """`text`/`und` are the ONE shared `runner.crontab_text()` read `run()`
+    performs (via `_call`) for both this check and `_check_cron_unwrapped` —
+    neither re-reads it, so the "2 attempts before giving up" retry contract
+    stays a single pair of attempts per pass, not one pair per cron check."""
     try:
         import crons
     except ImportError:
         _fire_undetermined("crons", events, root, briefs)
         return
-    text, und = _call(runner, deadline, 5, "crontab_text")
     if und:
         _fire_undetermined("crons", events, root, briefs)
         return
     try:
-        missing = crons.check(crontab_text=text) or []
+        missing = crons.check(manifest=crons_manifest, crontab_text=text, crond_dir=crond_dir) or []
     except Exception:
         _fire_undetermined("crons", events, root, briefs)
         return
@@ -416,6 +421,155 @@ def _check_crons(runner, deadline, events, root, briefs):
         name = row.get("name") if isinstance(row, dict) else str(row)
         r = _write_brief("cron-missing", name, "thinker", row, events, root)
         r and briefs.append(r)
+
+
+def _check_cron_unwrapped(text, und, events, root, briefs, answered, crons_manifest=None, crond_dir=None):
+    """R14a/R14c: a row whose installed line is not wrapped through `cron-run`
+    briefs `cron-unwrapped`; a row that clears (wrapped, or no longer matched —
+    absence is `cron-missing`'s, not this brief's to hold open) is cleared.
+    Mirrors `_check_crons`'s own degrade-to-undetermined shape: a raise here
+    (import failure, a fake `crons` lacking the new API, a bad read) never
+    reads as clean. Shares `_check_crons`'s own `text`/`und` read (see there)."""
+    if und:
+        _fire_undetermined("cron-unwrapped", events, root, briefs)
+        return
+    try:
+        import crons
+        names = set(crons.unwrapped(manifest=crons_manifest, crontab_text=text, crond_dir=crond_dir) or [])
+        all_rows = crons.rows(crons_manifest)
+    except Exception:
+        _fire_undetermined("cron-unwrapped", events, root, briefs)
+        return
+    for row in all_rows:
+        name = row["name"]
+        if name in names:
+            r = _write_brief("cron-unwrapped", name, "thinker", {"name": name}, events, root)
+            r and briefs.append(r)
+        else:
+            r = _clear("cron-unwrapped", name, "wrapped", events, root)
+            r and answered.append(r)
+
+
+def _read_cron_store(path):
+    """The store's rows, oldest first — `None` when the store file is absent
+    (the job has never run, or never wrapped yet) so the caller can skip it
+    entirely, distinct from `[]` (a readable-but-empty store)."""
+    try:
+        text = path.read_text()
+    except OSError:
+        return None
+    out = []
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return out
+
+
+def _check_cron_runs(now, events, root, briefs, answered, crons_manifest=None):
+    """R14b/R14c, per cron row (`crons.rows(crons_manifest)`; the repo's own
+    `crons.toml` when `None`): `repeat-failure` on the newest `STREAK` `end`
+    rows all sharing one non-empty `error_class`; `cron-overrun` on the newest
+    row (an `end` above its limit, or a `start` — an open run — older than its
+    limit) — limit is `max_runtime_s`, else `crons.interval_s(schedule)`;
+    neither readable makes the row permanently `bad` (`reading: "undetermined"`,
+    R14c: never clean). A store file whose name has no manifest row is never
+    read (we only iterate manifest rows); a manifest row with no store file
+    yet is skipped, not briefed."""
+    try:
+        import crons, cron_run
+        the_rows = crons.rows(crons_manifest)
+    except Exception:
+        _fire_undetermined("cron-runs", events, root, briefs)
+        return
+    for row in the_rows:
+        name = row["name"]
+        rows_ = _read_cron_store(cron_run.store_path(name, root))
+        if not rows_:
+            continue
+        ends = [r for r in rows_ if r.get("ev") == "end"]
+        last3 = ends[-STREAK:]
+        classes = {r.get("error_class") for r in last3}
+        bad_fail = (len(last3) == STREAK and len(classes) == 1
+                   and next(iter(classes)) not in (None, ""))
+        reading_fail = {"name": name, "error_class": last3[-1].get("error_class") if last3 else None,
+                        "consecutive": len(last3), "error_tail": last3[-1].get("error_tail", "") if last3 else ""}
+        _settle("repeat-failure", name, "thinker", bool(bad_fail), reading_fail, events, root, briefs, answered)
+        last = rows_[-1]
+        limit = row.get("max_runtime_s")
+        if limit is None:
+            try:
+                limit = crons.interval_s(row["schedule"])
+            except Exception:
+                limit = None
+        if last.get("ev") == "end":
+            duration, open_run = last.get("duration_s") or 0, False
+        else:
+            try:
+                duration = now.timestamp() - fold.ts(last.get("ts")).timestamp()
+            except Exception:
+                duration = 0
+            open_run = True
+        if limit is None:
+            bad_over, reading_over = True, {"name": name, "reading": "undetermined", "open": open_run}
+        else:
+            bad_over = duration > limit
+            reading_over = {"name": name, "duration_s": duration, "limit": limit, "open": open_run}
+        _settle("cron-overrun", name, "thinker", bad_over, reading_over, events, root, briefs, answered)
+
+
+def _dispatch_role_of_start(e):
+    """`build-started` never carries `role` (it IS the builder's own start
+    event); every other start event names its role directly."""
+    if e.get("type") == "build-started":
+        return "builder"
+    if e.get("type") == "spawn-started":
+        return e.get("role")
+    return None
+
+
+def _dispatch_class(e):
+    """`reason` when present; else the `why` text up to the first `:`, at most
+    40 characters, with digits removed (SD-R14-1's dispatch analogue)."""
+    reason = e.get("reason")
+    if reason:
+        return reason
+    why = (e.get("why") or "").split(":", 1)[0]
+    return re.sub(r"\d+", "", why)[:40]
+
+
+def _check_dispatch_failures(events, root, briefs, answered):
+    """R14b for dispatch roles: the newest `STREAK` terminal events
+    (`spawn-done`/`spawn-failed`) of a role — found by joining each terminal's
+    `spawn` to the start event of the SAME `spawn` (never a `role` field on the
+    terminal itself) — alarm `repeat-failure` (keyed by role) when all
+    `STREAK` are `spawn-failed` with the same class. A terminal with no start
+    of its own `spawn` is a refusal: skipped, never counted, never
+    streak-breaking."""
+    starts = {}
+    for e in events:
+        role = _dispatch_role_of_start(e)
+        if role:
+            starts[e.get("spawn")] = role
+    by_role = {}
+    for e in events:
+        if e.get("type") not in ("spawn-done", "spawn-failed"):
+            continue
+        role = starts.get(e.get("spawn"))
+        if role is None:
+            continue  # a refusal — no start of its own spawn
+        by_role.setdefault(role, []).append(e)
+    for role, evs in by_role.items():
+        newest = sorted(evs, key=lambda e: fold.ts(e.get("ts")))[-STREAK:]
+        bad = len(newest) == STREAK and all(e.get("type") == "spawn-failed" for e in newest)
+        classes = {_dispatch_class(e) for e in newest} if bad else set()
+        bad = bad and len(classes) == 1
+        reading = {"role": role, "consecutive": len(newest),
+                  "class": next(iter(classes), None), "why": newest[-1].get("why") if newest else None}
+        _settle("repeat-failure", role, "thinker", bad, reading, events, root, briefs, answered)
 def _is_spec_writer_spawn(sid):
     parts = sid.split("-")
     return len(parts) >= 3 and "-".join(parts[1:-1]) == "spec-writer"
@@ -510,7 +664,8 @@ def _check_wallclock(events, runner, now, root, cfg, deadline, dry_run, briefs):
         return []
     briefs.extend(result["briefs"])
     return result["events"]
-def run(events, *, now=None, runner=None, root=None, toml_path=None, dry_run=False):
+def run(events, *, now=None, runner=None, root=None, toml_path=None, dry_run=False,
+        crons_manifest=None, crond_dir=None):
     global _PASS_LOCKED, _DRY_RUN
     now = now or datetime.now(timezone.utc)
     root = pathlib.Path(root) if root is not None else fold.ROOT
@@ -541,7 +696,11 @@ def run(events, *, now=None, runner=None, root=None, toml_path=None, dry_run=Fal
         _check_pane_dead(events, now, root, briefs)
         _check_supervisor_stale_code(events, now, runner, deadline, root, briefs, answered)
         _check_disk_tmp(runner, root, th, now, deadline, events, briefs, answered)
-        _check_crons(runner, deadline, events, root, briefs)
+        crontab_text, crontab_und = _call(runner, deadline, 5, "crontab_text")
+        _check_crons(crontab_text, crontab_und, events, root, briefs, crons_manifest, crond_dir)
+        _check_cron_unwrapped(crontab_text, crontab_und, events, root, briefs, answered, crons_manifest, crond_dir)
+        _check_cron_runs(now, events, root, briefs, answered, crons_manifest)
+        _check_dispatch_failures(events, root, briefs, answered)
         _check_spec_misrouted(events, root, briefs)
         _check_dispatchable_stale(events, now, root, briefs)
         wallclock_events = _check_wallclock(events, runner, now, root, cfg, deadline, dry_run, briefs)
