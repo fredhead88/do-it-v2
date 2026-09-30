@@ -44,6 +44,7 @@ Every subprocess/tmux call goes through the injected `runner` (default
 `subprocess.run`), never bare — so a test proves every call this function
 makes with no real tmux, bwrap, or login anywhere.
 """
+import shutil
 import json, os, pathlib, subprocess, sys
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -246,6 +247,13 @@ def run(events, *, runner=None, now=None):
             binds = grading_env.sandbox_binds(view, project) if project else []
             env = {**launch.child_env("grader"), "CLAUDE_CONFIG_DIR": str(cfg_dir),
                    **grading_env.pane_env(view)}
+            # `env -i` leaves pane_env's PATH (/usr/bin:/bin), but the claude
+            # binary lives in ~/.local/bin (bound by bwrap_argv). Without its dir
+            # on PATH, "claude" exits 127 and the pane dies before grading, which
+            # is how every grader timed out after 8033 shipped (2026-09-30).
+            _claude = shutil.which("claude")
+            if _claude:
+                env["PATH"] = os.path.dirname(_claude) + ":" + env.get("PATH", "/usr/bin:/bin")
             env_argv = [f"{k}={v}" for k, v in sorted(env.items())]
             # `-n <spawn>` (minor deviation, declared): the spec's own literal
             # argv has no room to name an addressable window target for step (0)
