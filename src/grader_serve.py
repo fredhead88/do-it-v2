@@ -251,7 +251,9 @@ def run(events, *, runner=None, now=None):
             # binary lives in ~/.local/bin (bound by bwrap_argv). Without its dir
             # on PATH, "claude" exits 127 and the pane dies before grading, which
             # is how every grader timed out after 8033 shipped (2026-09-30).
-            _claude = shutil.which("claude")
+            # cron's PATH has no ~/.local/bin, so shutil.which alone returns None
+            # there; fall back to the same path grader_view binds.
+            _claude = shutil.which("claude") or str(pathlib.Path.home() / ".local" / "bin" / "claude")
             if _claude:
                 env["PATH"] = os.path.dirname(_claude) + ":" + env.get("PATH", "/usr/bin:/bin")
             env_argv = [f"{k}={v}" for k, v in sorted(env.items())]
