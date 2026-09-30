@@ -334,11 +334,15 @@ def preflight(role, subject, view, project, *, repo, mcp_config=None):
             reasons["tools"] = reason
     if "git" in caps:  # SD-R12-3: detected, never provisioned (R8 git-less invariant) — always a failure
         reasons["git"] = "git is never provisioned into a grader view (R8 git-less invariant)"
-    if "browser" in caps:
+    # Browser and review-account proofs apply only to a project with a
+    # [[prod]] row: a project with no deployed site has no page for any
+    # criterion to open (the same rule as deploy below).
+    has_prod = any(p.get("project") == project for p in _look_toml(DOIT_SRC).get("prod", []))
+    if "browser" in caps and has_prod:
         ok, reason = _prove_browser(mcp_config)
         if not ok:
             reasons["browser"] = reason
-    if "review-account" in caps:
+    if "review-account" in caps and has_prod:
         ok, reason = _prove_review_account(project)
         if not ok:
             reasons["review-account"] = reason
