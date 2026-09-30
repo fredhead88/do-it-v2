@@ -21,7 +21,8 @@ LEDGER_NAME = "L-look-local.jsonl"
 DEFAULT_TOML_PATH = pathlib.Path(__file__).resolve().parent.parent / "look.toml"
 DEFAULTS = {
     "thresholds": {"tmp_high": 85, "tmp_high_clear": 75, "disk_high": 90, "disk_high_clear": 85,
-                   "tmp_climbing_slope": 10, "tmp_climbing_full_within_h": 2, "pass_budget_s": 90},
+                   "tmp_climbing_slope": 10, "tmp_climbing_full_within_h": 2, "pass_budget_s": 90,
+                   "grades_per_shipped_high": 1.5},
     "prod": [{"project": "albert-scott", "repo": "/opt/albert-scott", "ssh_target": "root@167.71.46.51",
               "base_url": "http://127.0.0.1:8000", "version_path": "/version", "health_path": "/health"}],
     "pane_at_menu": {"codex_patterns": [], "codex_targets": []},  # codex_targets: this builder's own addition
@@ -652,6 +653,16 @@ def _check_dispatchable_stale(events, now, root, briefs):
         _clear("spec-dispatchable-stale", sid, "left written", events, root)
 
 
+def _check_grades_per_shipped(events, now, root, briefs, answered, th):
+    """L-spec-0482/R12.d: `fold.grades_per_shipped`'s trailing-24h ratio above
+    `[thresholds] grades_per_shipped_high` (default 1.5) briefs
+    `grades-per-shipped-high`, owner `thinker` — the same fire/quiet/clear
+    shape `_settle` already gives every other threshold check here. `None`
+    (nothing shipped in the window) is never bad."""
+    ratio, specs_n, runs_n = fold.grades_per_shipped(events, now)
+    bad = ratio is not None and ratio > th["grades_per_shipped_high"]
+    _settle("grades-per-shipped-high", "grades-per-shipped", "thinker", bad,
+            {"ratio": ratio, "specs": specs_n, "runs": runs_n}, events, root, briefs, answered)
 def _check_wallclock(events, runner, now, root, cfg, deadline, dry_run, briefs):
     """The four wall-clock checks (L-charter-0038 R6), wrapped in the SAME
     lazily-guarded broad `except Exception` shape `_check_crons` uses around
@@ -703,6 +714,7 @@ def run(events, *, now=None, runner=None, root=None, toml_path=None, dry_run=Fal
         _check_dispatch_failures(events, root, briefs, answered)
         _check_spec_misrouted(events, root, briefs)
         _check_dispatchable_stale(events, now, root, briefs)
+        _check_grades_per_shipped(events, now, root, briefs, answered, th)
         wallclock_events = _check_wallclock(events, runner, now, root, cfg, deadline, dry_run, briefs)
         r = _clear("look-stale", "look-stale", "fresh pass", events, root)
         r and answered.append(r)

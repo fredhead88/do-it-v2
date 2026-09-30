@@ -3499,3 +3499,74 @@ assert fold.required_reason(ev483_no_replaces) is not None, \
     "AC14: trigger=redispatch with no replaces must be refused"
 assert fold.EMITS["autodispatched"] == {"tick"}, fold.EMITS["autodispatched"]
 print("fold-0483 AC14 ok")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-0482/R12.d — fold.grades_per_shipped() and its board.md HEALTH line ──
+
+S482 = "L-spec-9420"
+gstart = lambda spawn_id, subj=S482: {"ts": stamp(0), "type": "spawn-started", "subject": subj,
+                                      "role": "grader", "spawn": spawn_id}
+
+# Fixture 1: 4 grader runs on one shipped spec -> (4.0, 1, 4).
+ev482a, *_ = ledger(**{
+    "L-executor-0001.jsonl": [{"ts": stamp(0), "type": "shipped", "subject": S482}],
+    "L-grader-9420.jsonl": [gstart("g1")], "L-grader-9421.jsonl": [gstart("g2")],
+    "L-grader-9422.jsonl": [gstart("g3")], "L-grader-9423.jsonl": [gstart("g4")],
+})
+assert fold.grades_per_shipped(ev482a, T) == (4.0, 1, 4), fold.grades_per_shipped(ev482a, T)
+
+# Fixture 2: a shipment 25 hours old is excluded entirely -> (None, 0, 0).
+ev482b, *_ = ledger(**{
+    "L-executor-0001.jsonl": [{"ts": stamp(25 / 24), "type": "shipped", "subject": S482}],
+    "L-grader-9420.jsonl": [gstart("g1")],
+})
+assert fold.grades_per_shipped(ev482b, T) == (None, 0, 0), fold.grades_per_shipped(ev482b, T)
+
+# Fixture 3: two `shipped` on the one spec count once -> (2.0, 1, 2).
+ev482c, *_ = ledger(**{
+    "L-executor-0001.jsonl": [{"ts": stamp(0), "type": "shipped", "subject": S482},
+                             {"ts": stamp(0.1), "type": "shipped", "subject": S482}],
+    "L-grader-9420.jsonl": [gstart("g1")], "L-grader-9421.jsonl": [gstart("g2")],
+})
+assert fold.grades_per_shipped(ev482c, T) == (2.0, 1, 2), fold.grades_per_shipped(ev482c, T)
+
+# Fixture 4: a failed-with-no-verdict run is excluded, a judged one counts -> (1.0, 1, 1).
+ev482d, *_ = ledger(**{
+    "L-executor-0001.jsonl": [{"ts": stamp(0), "type": "shipped", "subject": S482}],
+    "L-grader-9420.jsonl": [gstart("g1"), {"ts": stamp(0), "type": "spawn-failed", "subject": S482, "spawn": "g1"}],
+    "L-grader-9421.jsonl": [gstart("g2"), {"ts": stamp(0), "type": "verdict", "subject": S482, "spawn": "g2",
+                                          "confirmed": True}],
+})
+assert fold.grades_per_shipped(ev482d, T) == (1.0, 1, 1), fold.grades_per_shipped(ev482d, T)
+
+# Fixture 5: a `shipped` authored by a non-executor actor (fold's own EMITS door
+# drops it before by_subject ever sees it) on a SECOND spec is excluded — the 4
+# runs on the one executor-shipped spec still give (4.0, 1, 4).
+S482b = "L-spec-9430"
+ev482e, *_ = ledger(**{
+    "L-executor-0001.jsonl": [{"ts": stamp(0), "type": "shipped", "subject": S482}],
+    "L-grader-9420.jsonl": [gstart("g1")], "L-grader-9421.jsonl": [gstart("g2")],
+    "L-grader-9422.jsonl": [gstart("g3")], "L-grader-9423.jsonl": [gstart("g4")],
+    "L-builder-0001.jsonl": [{"ts": stamp(0), "type": "shipped", "subject": S482b}],
+})
+assert fold.grades_per_shipped(ev482e, T) == (4.0, 1, 4), fold.grades_per_shipped(ev482e, T)
+print("L-spec-0482 AC10 ok")
+
+# AC11: the board's own HEALTH line, both the populated and the "nothing shipped" case.
+ev482f, sp482f, ch482f, ig482f, bs482f = ledger(**{
+    "L-executor-0001.jsonl": [{"ts": stamp(0), "type": "shipped", "subject": "L-spec-9440"},
+                             {"ts": stamp(0), "type": "shipped", "subject": "L-spec-9441"},
+                             {"ts": stamp(0), "type": "shipped", "subject": "L-spec-9442"},
+                             {"ts": stamp(0), "type": "shipped", "subject": "L-spec-9443"}],
+    "L-grader-9440.jsonl": [gstart("h1", "L-spec-9440")],
+    "L-grader-9441.jsonl": [gstart("h2", "L-spec-9441")],
+    "L-grader-9442.jsonl": [gstart("h3", "L-spec-9442")],
+    "L-grader-9443.jsonl": [gstart("h4", "L-spec-9443"), gstart("h5", "L-spec-9443")],
+})
+board482f = fold.render(ev482f, sp482f, ch482f, ig482f, bs482f)
+assert "## HEALTH" in board482f and "grades/shipped 24h: 1.25 (5/4)  target 1.0" in board482f, board482f
+
+ev482g, sp482g, ch482g, ig482g, bs482g = ledger()
+board482g = fold.render(ev482g, sp482g, ch482g, ig482g, bs482g)
+assert "grades/shipped 24h: n/a (0/0)  target 1.0" in board482g, board482g
+print("L-spec-0482 AC11 ok")

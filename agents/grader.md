@@ -76,7 +76,12 @@ If a stripped item appears anyway — a rationale, a name, a timestamp — set
 3. Decide `met`, `unmet` or `cannot-assess`, with a reason on every path
    including `met`. `cannot-assess` is the honest third state, not a hedge: use
    it when the packet cannot answer the question, and say why with a
-   `reason_code`.
+   `reason_code`. On every `cannot-assess` row whose `reason_code` is
+   `tool-failed`, also set `missing_capability` to the one capability
+   (`grading_env.CAPABILITIES`, or `unknown` when none of the ten names it)
+   whose absence stopped you — this is what opens the hold that keeps the next
+   tick from re-spending on an environment that still cannot run the check,
+   rather than regrading it forever (L-spec-0482/R12.b).
 
 Then the two roll-ups, each three-valued: `matches_intent` — does what was
 built do what the done-condition says — and `card_ok` — are the card's claims

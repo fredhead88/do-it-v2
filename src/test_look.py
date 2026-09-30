@@ -1430,5 +1430,59 @@ ok(len(res18b["briefs"]) >= 1 and all(b["condition"] == "reading-undetermined" f
    "AC18b: every reading after the jump comes back reading-undetermined")
 print("AC18 ok")
 
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-0482/R12.d — the `grades-per-shipped-high` alarm ────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+ok(look.DEFAULTS["thresholds"]["grades_per_shipped_high"] == 1.5, "AC12: DEFAULTS carries 1.5")
+_committed_toml482 = look.load_toml(look.DEFAULT_TOML_PATH)
+ok(_committed_toml482["thresholds"]["grades_per_shipped_high"] == 1.5, "AC12: the committed look.toml carries 1.5 too")
+
+
+def _gps_root482(root, n_specs, extra_runs_on_first=0):
+    """`n_specs` shipped specs (recent, within the window), one grader
+    `spawn-started` each, plus `extra_runs_on_first` more on the first one —
+    ratio = (n_specs + extra_runs_on_first) / n_specs."""
+    for i in range(n_specs):
+        sid = f"L-spec-9482{i}"
+        append_raw(root, "L-executor-0001.jsonl", iso(NOW), type="shipped", subject=sid)
+        for j in range(1 + (extra_runs_on_first if i == 0 else 0)):
+            append_raw(root, f"L-grader-9482{i}{j}.jsonl", iso(NOW), type="spawn-started",
+                      subject=sid, role="grader", spawn=f"g482{i}{j}")
+    return read_ledger(root)
+
+
+# ratio 1.6 (8 runs / 5 specs) fires.
+root12_482 = newroot()
+ev12a_482 = _gps_root482(root12_482, n_specs=5, extra_runs_on_first=3)
+res12a_482 = look.run(ev12a_482, now=NOW, runner=FakeRunner(), root=root12_482, toml_path=clean_toml(root12_482))
+b12a_482 = briefs_of(res12a_482, "grades-per-shipped-high")
+ok(len(b12a_482) == 1 and b12a_482[0]["owner"] == "thinker", f"AC12: ratio 1.6 fires: {b12a_482}")
+
+# ratio exactly 1.5 (6/4) stays quiet — a fresh root, no prior state.
+root12b_482 = newroot()
+ev12b_482 = _gps_root482(root12b_482, n_specs=4, extra_runs_on_first=2)
+res12b_482 = look.run(ev12b_482, now=NOW, runner=FakeRunner(), root=root12b_482, toml_path=clean_toml(root12b_482))
+ok(briefs_of(res12b_482, "grades-per-shipped-high") == [], "AC12: ratio exactly 1.5 stays quiet")
+
+# nothing shipped (ratio None) stays quiet.
+root12c_482 = newroot()
+res12c_482 = look.run([], now=NOW, runner=FakeRunner(), root=root12c_482, toml_path=clean_toml(root12c_482))
+ok(briefs_of(res12c_482, "grades-per-shipped-high") == [], "AC12: ratio None stays quiet")
+
+# a later pass observing ratio 1.0, against the SAME standing state as the
+# 1.6 fire above, clears it (the "ref" ties the clear to that exact brief).
+root12d_events_482 = newroot()
+ev12d_482 = _gps_root482(root12d_events_482, n_specs=3, extra_runs_on_first=0)   # 3/3 = 1.0
+res12d_482 = look.run(ev12d_482, now=NOW, runner=FakeRunner(), root=root12_482, toml_path=clean_toml(root12_482))
+ok(any(a.get("ref") == b12a_482[0]["_src"] for a in res12d_482["answered"]),
+   f"AC12: a later ratio-1.0 pass clears the standing 1.6 brief: {res12d_482['answered']}")
+
+# a raised toml threshold (2.0) keeps a 1.6 fixture quiet.
+root12e_482 = newroot()
+ev12e_482 = _gps_root482(root12e_482, n_specs=5, extra_runs_on_first=3)
+res12e_482 = look.run(ev12e_482, now=NOW, runner=FakeRunner(), root=root12e_482,
+                      toml_path=write_toml(root12e_482, prod=[], thresholds={"grades_per_shipped_high": 2.0}))
+ok(briefs_of(res12e_482, "grades-per-shipped-high") == [], "AC12: a raised toml threshold (2.0) keeps 1.6 quiet")
+print("L-spec-0482 AC12 ok")
 
 print(f"look: {n} checks passed")
