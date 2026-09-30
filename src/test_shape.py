@@ -5,7 +5,14 @@ AC1-AC7, one block apiece, each printing "AC<n> ok" to stdout on success
 (L-spec-0385 Verification). Hermetic (SD13): no network, no ledger, no
 droplet — only a local `tempfile` scratch dir and, for AC6, a real
 subprocess of the repo's own `./doit shape`."""
-import contextlib, io, pathlib, subprocess, sys, tempfile
+import contextlib, io, os, pathlib, subprocess, sys, tempfile
+
+# R8.2: HOME/DOIT_ROOT isolation, set before any project module is imported —
+# `shape` imports `merge_gate`, which imports `fold` at module level, so a
+# direct `python3 test_shape.py` must never resolve fold.ROOT to ~/.do-it.
+_TMP8027 = pathlib.Path(tempfile.mkdtemp(prefix="doit-test-iso-"))
+os.environ["HOME"] = str(_TMP8027 / "home")
+os.environ["DOIT_ROOT"] = str(_TMP8027 / "root")
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import shape  # noqa: E402

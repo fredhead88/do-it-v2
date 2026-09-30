@@ -136,7 +136,15 @@ def relay_pane_cmd(prompt=None, name=None, model=None):
     return cmd + [prompt] if prompt else cmd
 
 
-AGENTS_HOME = pathlib.Path.home() / ".claude" / "agents"
+AGENTS_HOME = pathlib.Path.home() / ".claude" / "agents"  # deprecated alias, kept for one release (R8.4) — up.agents_home() is live; this is computed once, at import time, and a caller that reassigns it no longer redirects anything
+
+
+def agents_home():
+    """`~/.claude/agents`, HOME read at CALL time (R8.4) — never import time, so a
+    test (or a pane) that changes HOME after this module is imported is honoured
+    immediately, and a test's own temp HOME can never leak into whatever HOME this
+    process started with."""
+    return pathlib.Path(os.environ["HOME"]) / ".claude" / "agents"
 
 
 def install(contract):
@@ -146,7 +154,7 @@ def install(contract):
     are symlinked there already; this is the eleventh link, made idempotently and
     never over somebody else's file. `think.py` links the twelfth through this same
     function, because the hole is the launcher's and not the Planner's."""
-    link = AGENTS_HOME / contract.name
+    link = agents_home() / contract.name
     if link.is_symlink() and link.resolve() == contract.resolve():
         return
     if link.exists() or link.is_symlink():

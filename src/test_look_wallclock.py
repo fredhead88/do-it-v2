@@ -10,6 +10,11 @@ sessions}`, never a real `gh`/network call, never `claude -p` (SD13).
 import json, os, pathlib, subprocess, sys, tempfile
 from datetime import datetime, timedelta, timezone
 
+# R8.2: HOME/DOIT_ROOT isolation, set before any project module is imported —
+# a direct `python3 test_look_wallclock.py` must never resolve fold.ROOT to ~/.do-it.
+_TMP8027 = pathlib.Path(tempfile.mkdtemp(prefix="doit-test-iso-"))
+os.environ["HOME"] = str(_TMP8027 / "home")
+os.environ["DOIT_ROOT"] = str(_TMP8027 / "root")
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 import dispatch, fold, look, look_wallclock, pane_resume, panes, relay  # noqa: E402
 

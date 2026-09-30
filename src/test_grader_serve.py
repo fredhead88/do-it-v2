@@ -295,4 +295,50 @@ for name in grading_env.pane_env(view8):
     check(name in tail_names, f"AC8: pane_env name {name!r} present in env -i segment: {tail8}")
 print("L-spec-0481 AC8 ok")
 
+
+# ═══════════════════════════ L-spec-8027 AC10 — pane env carries HOME=<view>, ═══
+# ═══════════════════════════ seat is read/mirrored from the view, never HOME ════
+SPAWN10 = "L-grader-10001"
+VIEW10 = scratch.sub("grade") / SPAWN10
+(VIEW10 / "seat").mkdir(parents=True, exist_ok=True)
+(VIEW10 / "seat" / f"{SPAWN10}.packet.md").write_text(f"packet body\nspawn_id: {SPAWN10}\n")
+
+# the invoker's own HOME (this test process) must differ from <view>, so a
+# pane env HOME that leaked the invoker's HOME instead of <view> would be caught
+check(os.environ["HOME"] == str(FIXTURE_HOME) and str(VIEW10) != str(FIXTURE_HOME),
+      "L-spec-8027 AC10 setup: the invoker's own HOME differs from the fixture view")
+
+relay.pending_packets = pending_stub([{"spawn": SPAWN10, "age_min": 1.0}])
+r10 = Runner()
+grader_serve.run([], runner=r10, now=fold.NOW)
+starts10 = r10.pane_start_calls()
+check(len(starts10) == 1, f"L-spec-8027 AC10: one pane-start call, got {starts10}")
+argv10 = starts10[0][0]
+ei10 = argv10.index("env")
+tail10 = argv10[ei10 + 2:argv10.index("claude", ei10)]
+home_entries10 = [seg for seg in tail10 if seg.startswith("HOME=")]
+check(len(home_entries10) == 1, f"L-spec-8027 AC10: exactly one HOME= entry in env -i: {tail10}")
+check(home_entries10[0] == f"HOME={VIEW10}",
+      f"L-spec-8027 AC10: the pane's env HOME equals <view> exactly — not the invoker's "
+      f"HOME and not <view>/home (R8.5's own new dir is for verify.sh checks only): {home_entries10[0]}")
+check((VIEW10 / "seat" / f"{SPAWN10}.packet.md").is_file(),
+      "L-spec-8027 AC10: the packet is present at <view>/seat/<spawn>.packet.md")
+
+# the mirror half: claim it (as the started pane would be), write its own
+# output at <view>/seat/<spawn>.output.json, and confirm it mirrors out to
+# $R/seat — read from the VIEW's own seat dir, never from HOME
+touch_claimed(SPAWN10)
+out10 = write_view_output(SPAWN10, valid_output_obj())
+check(out10 == VIEW10 / "seat" / f"{SPAWN10}.output.json",
+      "L-spec-8027 AC10 setup: the fixture output lands at <view>/seat, matching grader_serve's own read path")
+relay.pending_packets = pending_stub([{"spawn": SPAWN10, "age_min": 1.0}])
+r10b = Runner()
+grader_serve.run([], runner=r10b, now=fold.NOW)
+mirrored10 = FIXTURE_ROOT / "seat" / f"{SPAWN10}.output.json"
+check(mirrored10.is_file() and mirrored10.read_bytes() == out10.read_bytes(),
+      "L-spec-8027 AC10: the view's own output.json is mirrored to $R/seat, byte-identical")
+check(not (pathlib.Path(FIXTURE_HOME) / "seat").exists(),
+      "L-spec-8027 AC10: nothing is ever read from or written to the invoker's own HOME/seat")
+print("L-spec-8027 AC10 ok")
+
 print(f"grader_serve: {N} checks pass")

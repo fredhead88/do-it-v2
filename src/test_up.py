@@ -67,8 +67,10 @@ except SystemExit as e:
 # ── the contract is linked where `--agent` looks, or the pane dies after the ──
 # ── cron line has printed, which reads like success (measured 2026-09-08) ─────
 (dispatch.AGENTS / "planner.md").write_text((real_agents / "planner.md").read_text())
-up.AGENTS_HOME = TMP / "claude-agents"
-LINK = up.AGENTS_HOME / "planner.md"
+# R8.4: up.agents_home() reads HOME at call time, not up.AGENTS_HOME — a fresh
+# dir OUTSIDE TMP/DOIT_ROOT (scratch.root() refuses a HOME nested under DOIT_ROOT)
+os.environ["HOME"] = str(pathlib.Path(tempfile.mkdtemp(prefix="doit-test-home-")))
+LINK = up.agents_home() / "planner.md"
 _, env = up.main(print_only=True)
 ok(LINK.is_symlink() and LINK.resolve() == (dispatch.AGENTS / "planner.md").resolve(),
    "up links the contract into ~/.claude/agents — `--agent planner` resolves nowhere else")
@@ -640,8 +642,10 @@ ok("-n" not in up.pane_cmd() and "-n" not in up.pane_cmd("L-charter-0001"),
    f"and no pane name is added when `name` is omitted from either call — AC1's name=None default "
    f"is byte-identical to today's argv; R12 itself is what the two named call sites above rely "
    f"on: {up.pane_cmd('x')}")
-ok(callable(up.cron_line) and callable(up.install) and up.AGENTS_HOME.name == "claude-agents",
-   "cron_line, install and AGENTS_HOME are untouched by this spec")
+ok(callable(up.cron_line) and callable(up.install) and isinstance(up.AGENTS_HOME, pathlib.Path)
+   and callable(up.agents_home),
+   "cron_line and install are untouched, and AGENTS_HOME survives as R8.4's deprecated alias "
+   "alongside the live up.agents_home()")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # L-spec-0187 · executor-runs-unattended (L-charter-0028) — R3

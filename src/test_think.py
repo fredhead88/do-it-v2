@@ -190,9 +190,11 @@ try:
 except SystemExit as e:
     ok("no thinker contract" in str(e), f"and name itself: {e}")
 (dispatch.AGENTS / "thinker.md").write_text((real_agents / "thinker.md").read_text())
-up.AGENTS_HOME = TMP / "claude-agents"
+# R8.4: up.agents_home() reads HOME at call time, not up.AGENTS_HOME — a fresh
+# dir OUTSIDE TMP/DOIT_ROOT (scratch.root() refuses a HOME nested under DOIT_ROOT)
+os.environ["HOME"] = str(pathlib.Path(tempfile.mkdtemp(prefix="doit-test-home-")))
 cmd, env = think.open_session("spend", print_only=True)
-ok((up.AGENTS_HOME / "thinker.md").is_symlink(),
+ok((up.agents_home() / "thinker.md").is_symlink(),
    "the contract is linked into ~/.claude/agents — `--agent thinker` resolves nowhere else (AP15)")
 ok(env["DOIT_LEDGER_FILE"] == "L-thinker-0002.jsonl",
    f"the session writes as itself, and never over the last one's file (D90): {env['DOIT_LEDGER_FILE']}")

@@ -17,8 +17,15 @@ Run:  cd src && python3 test_contracts.py
   or: python3 src/test_contracts.py
 """
 
-import sys
+import os, sys, tempfile
 from pathlib import Path
+
+# R8.2: HOME/DOIT_ROOT isolation, set before any project module is imported
+# (line 364's `import dispatch, relay` pulls in fold transitively) — a direct
+# `python3 test_contracts.py` must never resolve fold.ROOT to the real ~/.do-it.
+_TMP8027 = Path(tempfile.mkdtemp(prefix="doit-test-iso-"))
+os.environ["HOME"] = str(_TMP8027 / "home")
+os.environ["DOIT_ROOT"] = str(_TMP8027 / "root")
 
 ROOT = Path(__file__).resolve().parent.parent
 

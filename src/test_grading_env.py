@@ -7,6 +7,13 @@ directory and DOIT_GRADING_TOML to a fixture `grading.toml` — never the
 live `$R`, never the real repo-root `grading.toml`. A fixture project
 checkout (`node_modules`, `.venv`) and a fixture `look.toml` (for the
 `deploy` capability) live under `DOIT_ROOT/repos/testproj`.
+
+R8.2 (this spec): HOME and DOIT_SCRATCH are ALSO fixture-isolated, before
+`import grading_env` — AC10's real `grader_view.bwrap_argv(...)` call (even
+with `grading_env._run` stubbed) still runs `grader_view.config_dir()` for
+its argv, which writes real files under `$HOME/doit-scratch/grader-claude`
+by default; a direct `python3 test_grading_env.py`, run exactly as the
+verify chain runs it, must never write there for real.
 """
 import json
 import os
@@ -21,6 +28,10 @@ DOIT_SRC = HERE.parent
 
 FIXTURE_ROOT = pathlib.Path(tempfile.mkdtemp(prefix="grading-env-root-"))
 os.environ["DOIT_ROOT"] = str(FIXTURE_ROOT)
+FIXTURE_HOME = pathlib.Path(tempfile.mkdtemp(prefix="grading-env-home-"))
+os.environ["HOME"] = str(FIXTURE_HOME)
+FIXTURE_SCRATCH = pathlib.Path(tempfile.mkdtemp(prefix="grading-env-scratch-"))
+os.environ["DOIT_SCRATCH"] = str(FIXTURE_SCRATCH)
 FIXTURE_TOML = FIXTURE_ROOT / "grading.toml"
 os.environ["DOIT_GRADING_TOML"] = str(FIXTURE_TOML)
 
@@ -358,6 +369,36 @@ for line in r9.stdout.splitlines():
     k, _, v = line.partition("=")
     check(env9.get(k) == v, f"AC11: sourcing round-trips {k}: {env9.get(k)!r} vs {v!r}")
 print("AC11 ok")
+
+
+# ═══════════════ L-spec-8027 AC8 — pane_env(view) is UNCHANGED: HOME == <view>, ═
+# ═══════════════ PATH and DB keys as before, and no DOIT_ROOT key ══════════════
+view8027 = FIXTURE_ROOT / "grade" / "l-spec-8027-ac8"
+(view8027 / "tree").mkdir(parents=True, exist_ok=True)
+grading_env._write_state(view8027, venv=str(CHECKOUT / ".venv"),
+                          db_env_names=["SUPABASE_DB_URL"],
+                          dsn="postgresql://u:p@dbhost:5433/mydb?host=/y&port=5433")
+env8027 = grading_env.pane_env(view8027)
+check(env8027["HOME"] == str(view8027),
+      f"L-spec-8027 AC8: HOME == <view>, exactly as before this spec: {env8027}")
+check(env8027["PATH"] == f"{CHECKOUT / '.venv'}/bin:/usr/bin:/bin",
+      f"L-spec-8027 AC8: PATH is unchanged (venv-prefixed when a venv is recorded): {env8027}")
+check(env8027.get("SUPABASE_DB_URL") == "postgresql://u:p@dbhost:5433/mydb?host=/y&port=5433"
+      and env8027.get("PGDATABASE") == "mydb",
+      f"L-spec-8027 AC8: the DB keys are unchanged: {env8027}")
+check("DOIT_ROOT" not in env8027,
+      f"L-spec-8027 AC8: pane_env gains no DOIT_ROOT key: {env8027}")
+
+# a view carrying `.grading_state.json` with a dsn but no venv, still no DOIT_ROOT
+view8027b = FIXTURE_ROOT / "grade" / "l-spec-8027-ac8b"
+(view8027b / "tree").mkdir(parents=True, exist_ok=True)
+grading_env._write_state(view8027b, venv="", db_env_names=["DATABASE_URL"],
+                          dsn="postgresql://x:y@z:5432/w")
+env8027b = grading_env.pane_env(view8027b)
+check(env8027b["HOME"] == str(view8027b) and env8027b["PATH"] == "/usr/bin:/bin"
+      and "DOIT_ROOT" not in env8027b,
+      f"L-spec-8027 AC8: no venv -> bare PATH, HOME still <view>, still no DOIT_ROOT: {env8027b}")
+print("L-spec-8027 AC8 ok")
 
 
 shutil.rmtree(FIXTURE_ROOT, ignore_errors=True)

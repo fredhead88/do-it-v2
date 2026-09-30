@@ -44,7 +44,18 @@ case "${1:-board}" in
   # failure after the first. One PASS/FAIL line per file, its output kept (a
   # swallowed traceback is an undiagnosable failure), non-zero if any failed.
   # The glob covers test_*.mjs too, so test_vet_dep.mjs needs no tail call.
+  # R8.1: every runner starts under a fresh, throwaway HOME/DOIT_ROOT/
+  # XDG_CONFIG_HOME — all under ONE mktemp -d, removed on exit (the trap fires
+  # on the failure path too, via `exit "$rc"`) — and DOIT_LEDGER_FILE unset, so
+  # `doit test` can never scribble over the real agent links or the real
+  # ledger, however a test file gets there.
   test)    cd "$SRC"
+           DOIT_TEST_ISO=$(mktemp -d)
+           trap 'rm -rf "$DOIT_TEST_ISO"' EXIT
+           mkdir -p "$DOIT_TEST_ISO/home" "$DOIT_TEST_ISO/root" "$DOIT_TEST_ISO/xdg"
+           export HOME="$DOIT_TEST_ISO/home" DOIT_ROOT="$DOIT_TEST_ISO/root" \
+                  XDG_CONFIG_HOME="$DOIT_TEST_ISO/xdg"
+           unset DOIT_LEDGER_FILE
            rc=0
            for f in test_*.py test_*.mjs; do
              [ -e "$f" ] || continue

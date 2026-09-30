@@ -117,14 +117,19 @@ verify_sh = view / "verify.sh"
 # now ALWAYS inserts one static grading.env-sourcing line right after the
 # shebang (AC9) and rewrites any `REPO`-absolute path (AC6) — this fixture's
 # own verify script names no such path, so only the inserted line differs;
-# the rest of the body is still byte-identical to the input.
+# the rest of the body is still byte-identical to the input. L-spec-8027/R8.5
+# extends that SAME one line with an unconditional HOME/DOIT_ROOT export
+# (AC9 of THIS spec) — still one line, still right after the shebang.
 orig = (FIXTURE_ROOT / "content" / f"verify-{SPEC}-grader.sh").read_text()
 got = verify_sh.read_text()
 orig_shebang, orig_rest = orig.split("\n", 1)
 got_lines = got.split("\n")
 assert got_lines[0] == orig_shebang, got_lines[0]
-assert got_lines[1] == f'[ -s "{view}/grading.env" ] && . "{view}/grading.env"', got_lines[1]
+assert got_lines[1] == (f'[ -s "{view}/grading.env" ] && . "{view}/grading.env"; '
+                        f'export HOME="{view}/home" DOIT_ROOT="{view}/.doit"'), got_lines[1]
 assert "\n".join(got_lines[2:]) == orig_rest, got
+assert (view / "home").is_dir(), "L-spec-8027 AC9: build() creates <view>/home"
+assert (view / ".doit").is_dir(), "L-spec-8027 AC9: build() creates <view>/.doit"
 assert verify_sh.stat().st_mode & 0o111, oct(verify_sh.stat().st_mode)
 assert (view / "seat").is_dir()
 assert (view / "view.json").is_file()
@@ -330,6 +335,38 @@ assert ok7c is False, (ok7c, reason7c)
 assert "does-not-exist" in reason7c or "foreign" in reason7c, reason7c
 shutil.rmtree(AC7_REPO, ignore_errors=True)
 print("L-spec-0481 AC7 ok (iv)")
+
+
+# ── L-spec-8027 AC9 · verify.sh always sees the VIEW's own HOME/DOIT_ROOT — ──
+# ── the invoker's, and NOT with a grading.env present either ────────────────
+AC9_8027_SPEC = "L-spec-9431"
+(FIXTURE_ROOT / "content" / f"{AC9_8027_SPEC}.md").write_text("# fixture\n")
+ac9_8027_verify = '#!/usr/bin/env bash\nset -euo pipefail\necho "HOME=$HOME"\necho "DOIT_ROOT=$DOIT_ROOT"\n'
+(FIXTURE_ROOT / "content" / f"verify-{AC9_8027_SPEC}-grader.sh").write_text(ac9_8027_verify)
+ac9_8027_view = grader_view.build(AC9_8027_SPEC, REPO, BASE_SHA, READY_SHA, SPAWN + "-8027ac9")
+assert (ac9_8027_view / "home").is_dir(), "L-spec-8027 AC9: build() creates <view>/home"
+assert (ac9_8027_view / ".doit").is_dir(), "L-spec-8027 AC9: build() creates <view>/.doit"
+
+CALLER_ENV_8027 = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                   "HOME": "/not-the-view/caller-home", "DOIT_ROOT": "/not-the-view/caller-root"}
+
+# (a) no grading.env present at all
+assert not (ac9_8027_view / "grading.env").exists()
+r9a = subprocess.run([str(ac9_8027_view / "verify.sh")], capture_output=True, text=True,
+                     env=CALLER_ENV_8027, check=True)
+assert f"HOME={ac9_8027_view}/home" in r9a.stdout.splitlines(), r9a.stdout
+assert f"DOIT_ROOT={ac9_8027_view}/.doit" in r9a.stdout.splitlines(), r9a.stdout
+print("L-spec-8027 AC9 ok (a: no grading.env)")
+
+# (b) a grading.env present, itself setting DIFFERENT HOME/DOIT_ROOT values —
+# the unconditional export runs AFTER the conditional source, so it still wins
+(ac9_8027_view / "grading.env").write_text(
+    'export HOME="/from-grading-env/home"\nexport DOIT_ROOT="/from-grading-env/root"\n')
+r9b = subprocess.run([str(ac9_8027_view / "verify.sh")], capture_output=True, text=True,
+                     env=CALLER_ENV_8027, check=True)
+assert f"HOME={ac9_8027_view}/home" in r9b.stdout.splitlines(), r9b.stdout
+assert f"DOIT_ROOT={ac9_8027_view}/.doit" in r9b.stdout.splitlines(), r9b.stdout
+print("L-spec-8027 AC9 ok (b: grading.env present, still overridden)")
 
 
 shutil.rmtree(FIXTURE_ROOT, ignore_errors=True)

@@ -88,14 +88,19 @@ def _rewrite_verify(text: str, repo, tree_dir, view, venv_rel=None) -> bytes:
     first thing after the shebang and before the script's own `set -e...`
     (so a `grading.env` not yet written, or written empty, never trips
     `set -e` on a false `[ -s ... ]`): a conditional source of
-    `<view>/grading.env` when it exists and is non-empty, a no-op otherwise
-    (R12.6/AC9). A verify script naming no checkout-absolute path and run
-    before any `grading.env` exists comes back byte-identical but for that
-    one inserted line."""
+    `<view>/grading.env` when it exists and is non-empty (R12.6/AC9), THEN an
+    unconditional `export HOME=<view>/home DOIT_ROOT=<view>/.doit` (R8.5/
+    AC9) — so every check `verify.sh` runs sees the VIEW's own HOME/DOIT_ROOT,
+    never the caller's, whether or not `grading.env` is present, and whether
+    or not it sets its own HOME/DOIT_ROOT (this export runs after the
+    conditional source, so it always wins). A verify script naming no
+    checkout-absolute path and run before any `grading.env` exists comes back
+    byte-identical but for that one inserted line."""
     rewritten = _rewrite_repo_paths(text, repo, tree_dir, venv_rel)
     lines = rewritten.split("\n", 1)
     shebang, rest = (lines[0], lines[1]) if rewritten.startswith("#!") else ("", rewritten)
-    source_line = f'[ -s "{view}/grading.env" ] && . "{view}/grading.env"'
+    source_line = (f'[ -s "{view}/grading.env" ] && . "{view}/grading.env"; '
+                   f'export HOME="{view}/home" DOIT_ROOT="{view}/.doit"')
     body = "\n".join([source_line, rest]) if rest else source_line
     out = f"{shebang}\n{body}" if shebang else body
     return out.encode()
@@ -115,6 +120,11 @@ def build(spec: str, repo, base_sha: str, ready_sha: str, spawn: str) -> pathlib
     repo = pathlib.Path(repo)
     view = _scratch_sub("grade") / spawn
     view.mkdir(parents=True, exist_ok=True)
+
+    # R8.5/AC9: the isolated HOME/DOIT_ROOT every `verify.sh` check runs
+    # under — `_rewrite_verify`'s inserted line exports these two paths.
+    (view / "home").mkdir(parents=True, exist_ok=True)
+    (view / ".doit").mkdir(parents=True, exist_ok=True)
 
     tree_dir = view / "tree"
     if tree_dir.exists():
