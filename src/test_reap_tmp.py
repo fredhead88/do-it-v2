@@ -23,7 +23,7 @@ proving — by the fact that every AC below still runs to completion — that
 outside L0440-AC22's own bracket, which is the only place that installs (and
 then removes) a real stand-in.
 """
-import collections, os, pathlib, re, shutil, signal, subprocess, sys, tempfile, tomllib
+import collections, json, os, pathlib, re, shutil, signal, subprocess, sys, tempfile, tomllib
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
@@ -861,15 +861,408 @@ finally:
     reap_tmp.run = orig_run
     reap_tmp.ROOT = orig_root
     scratch.root, fold.read_events = _forbidden, _forbidden
+# L-spec-0486/R15c: `main()` (via the new `reap_tmp.reap_now`) now ALSO
+# resolves its own live `pg_fn` (a fresh closure each call, so it is checked
+# for callability, never `==` identity, and popped before the rest of the
+# eight original keys are compared unchanged).
+pg_fn22_0 = calls22[0].pop("pg_fn", None)
+pg_fn22_1 = calls22[1].pop("pg_fn", None)
+ok(callable(pg_fn22_0) and callable(pg_fn22_1),
+   f"L0440-AC22 (R15c): main() resolves its own psql pg_fn too: {pg_fn22_0!r} {pg_fn22_1!r}")
 ok(calls22[0] == {"root": "/tmp", "uid": os.getuid(), "min_age_min": 30, "dry_run": True, "proc_root": "/proc",
                   "scratch_root": fixture_scratch22, "events": fixture_events22, "kill_fn": os.kill},
-   f"L0440-AC22: --dry-run --min-age 30 carries all eight keys: {calls22[0]}")
+   f"L0440-AC22: --dry-run --min-age 30 carries all eight original keys: {calls22[0]}")
 ok(calls22[1] == {"root": "/tmp", "uid": os.getuid(), "min_age_min": 120, "dry_run": False, "proc_root": "/proc",
                   "scratch_root": fixture_scratch22, "events": fixture_events22, "kill_fn": os.kill},
-   f"L0440-AC22: no flags carries the defaults across all eight keys: {calls22[1]}")
+   f"L0440-AC22: no flags carries the defaults across all eight original keys: {calls22[1]}")
 print("L0440-AC22 ok")
 
 # L0440-AC23: every AC above ran to completion with the raising `scratch.root`/
 # `fold.read_events` patches in place except inside AC22's own bracket — this
 # literal last line is itself the mechanical proof.
 print("L0440-AC-guard ok")
+
+# ══════════════════════════════════════════════════════════════════════════
+# L-spec-0486 · cleanup-on-finish (L-charter-0042)
+# ══════════════════════════════════════════════════════════════════════════
+import grading_env as _grading_env486  # noqa: E402
+
+
+def _pg_fixture_root(name):
+    r = TMP / f"{name}-root"
+    r.mkdir(parents=True, exist_ok=True)
+    p = TMP / f"{name}-proc"
+    (p / "net").mkdir(parents=True, exist_ok=True)
+    (p / "net" / "unix").write_text("Num RefCount Protocol Flags Type St Inode Path\n")
+    return r, p
+
+
+def _write_cmdline486(proc_root, pid, tokens):
+    d = proc_root / str(pid)
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "cmdline").write_bytes(("\0".join(tokens) + "\0").encode())
+    return d
+
+
+def _write_stat486(proc_root, pid, ppid, uptime_val, age_s, clk=None):
+    clk = clk or os.sysconf("SC_CLK_TCK")
+    d = proc_root / str(pid)
+    d.mkdir(parents=True, exist_ok=True)
+    tok = ["0"] * 20
+    tok[0], tok[1] = "S", str(ppid)
+    tok[19] = str(int((uptime_val - age_s) * clk))
+    (d / "stat").write_text(f"{pid} (fake proc) " + " ".join(tok) + "\n")
+
+
+def _sleeper486():
+    return subprocess.Popen(["/bin/sleep", "600"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def _reap486(pid):
+    pid.terminate()
+    pid.wait(timeout=5)
+
+
+# ── L0486-AC8 · a grade/<spawn>/ view goes the instant its spawn is terminal ───
+ac8_scratch = TMP / "l0486-ac8-scratch"
+grade8 = ac8_scratch / "grade"
+for name8 in ("L-grader-0001", "L-grader-0002", "L-reviewer-0003"):
+    (grade8 / name8).mkdir(parents=True)
+(ac8_scratch / "grader-claude").mkdir()
+(ac8_scratch / "grader-claude" / "keep.txt").write_text("keep\n")
+
+events8 = [
+    {"type": "spawn-done", "subject": "L-spec-9800", "spawn": "L-grader-0001", "actor": "grader"},
+    {"type": "spawn-failed", "subject": "L-spec-9801", "spawn": "L-reviewer-0003", "actor": "reviewer"},
+    {"type": "spawn-started", "subject": "L-spec-9802", "spawn": "L-grader-0002", "role": "grader",
+     "actor": "grader"},
+    {"type": "spawn-stale", "spawn": "L-grader-9999", "actor": "tick"},   # the tick's own shape
+]
+ok("L-grader-9999" in fold.terminal_spawns(events8) and "L-grader-0001" in fold.terminal_spawns(events8)
+   and "L-reviewer-0003" in fold.terminal_spawns(events8) and "L-grader-0002" not in fold.terminal_spawns(events8),
+   f"L0486-AC8: terminal_spawns keys on spawn=, incl. the tick's own subject-less shape: {fold.terminal_spawns(events8)}")
+
+seq8 = []
+orig_teardown8, orig_rmtree8 = _grading_env486.teardown, reap_tmp.shutil.rmtree
+
+
+def _teardown_stub8(view):
+    seq8.append(("teardown", str(view)))
+
+
+def _rmtree_stub8(path, *a, **kw):
+    seq8.append(("rmtree", str(path)))
+    return orig_rmtree8(path, *a, **kw)
+
+
+_grading_env486.teardown, reap_tmp.shutil.rmtree = _teardown_stub8, _rmtree_stub8
+ac8_root, ac8_proc = _pg_fixture_root("l0486-ac8")
+try:
+    res8 = reap_tmp.run(root=str(ac8_root), uid=UID, proc_root=str(ac8_proc), scratch_root=str(ac8_scratch),
+                        events=events8)
+finally:
+    _grading_env486.teardown, reap_tmp.shutil.rmtree = orig_teardown8, orig_rmtree8
+
+ok(not (grade8 / "L-grader-0001").exists() and not (grade8 / "L-reviewer-0003").exists(),
+   "L0486-AC8: both terminal spawns' views are gone")
+ok((grade8 / "L-grader-0002").exists(), "L0486-AC8: the non-terminal spawn's view remains")
+ok((ac8_scratch / "grader-claude").exists() and (ac8_scratch / "grader-claude" / "keep.txt").exists(),
+   "L0486-AC8: grader-claude/ (the shared config dir) is untouched")
+td_views8 = [v for k, v in seq8 if k == "teardown"]
+ok(str(grade8 / "L-grader-0001") in td_views8 and str(grade8 / "L-reviewer-0003") in td_views8,
+   f"L0486-AC8: teardown was called for both terminal views: {td_views8}")
+ok(str(grade8 / "L-grader-0002") not in td_views8,
+   f"L0486-AC8: teardown was NOT called for the non-terminal view: {td_views8}")
+ok(seq8.index(("teardown", str(grade8 / "L-grader-0001"))) < seq8.index(("rmtree", str(grade8 / "L-grader-0001"))),
+   f"L0486-AC8: teardown happens BEFORE removal (sequence log): {seq8}")
+ok(set(res8["removed_scratch"]) == {str(grade8 / "L-grader-0001"), str(grade8 / "L-reviewer-0003")},
+   f"L0486-AC8: removed_scratch names exactly the two removed views: {res8['removed_scratch']}")
+
+# a live pid whose cwd is under a terminal view keeps it
+ac8b_scratch = TMP / "l0486-ac8b-scratch"
+(ac8b_scratch / "grade" / "L-reviewer-0099").mkdir(parents=True)
+ac8b_root, ac8b_proc = _pg_fixture_root("l0486-ac8b")
+live8b = _sleeper486()
+d8b = ac8b_proc / str(live8b.pid)
+d8b.mkdir(parents=True)
+(d8b / "cwd").symlink_to(ac8b_scratch / "grade" / "L-reviewer-0099")
+(d8b / "cmdline").write_bytes(b"\0")
+events8b = [{"type": "spawn-done", "subject": "L-spec-9803", "spawn": "L-reviewer-0099", "actor": "reviewer"}]
+try:
+    res8b = reap_tmp.run(root=str(ac8b_root), uid=UID, proc_root=str(ac8b_proc), scratch_root=str(ac8b_scratch),
+                         events=events8b)
+finally:
+    _reap486(live8b)
+ok((ac8b_scratch / "grade" / "L-reviewer-0099").exists(),
+   f"L0486-AC8: a live pid whose cwd is under it keeps the view: {res8b['removed_scratch']}")
+
+# dry_run tears down and removes nothing
+ac8c_scratch = TMP / "l0486-ac8c-scratch"
+(ac8c_scratch / "grade" / "L-grader-0077").mkdir(parents=True)
+events8c = [{"type": "spawn-done", "subject": "L-spec-9804", "spawn": "L-grader-0077", "actor": "grader"}]
+td_calls8c = []
+_grading_env486.teardown = lambda v: td_calls8c.append(v)
+try:
+    reap_tmp.run(root=str(ac8_root), uid=UID, proc_root=str(ac8_proc), scratch_root=str(ac8c_scratch),
+                 events=events8c, dry_run=True)
+finally:
+    _grading_env486.teardown = orig_teardown8
+ok((ac8c_scratch / "grade" / "L-grader-0077").exists(), "L0486-AC8: dry_run removes nothing")
+ok(td_calls8c == [], "L0486-AC8: dry_run tears down nothing")
+print("L0486-AC8 ok")
+
+# ── L0486-AC9 · a spawn-owned cluster stops, waits for the pid, then reaps ─────
+# Driven directly against `_reap_clusters` (R15c's own unit), not the full
+# `run()` — R15b's OWN pass over the SAME `grade/<spawn>/` tree already has a
+# stronger, synchronous mechanism (`grading_env.teardown`'s blocking `pg_ctl
+# stop`) for a REAL cluster; this file's fixture "postmaster" is a bare
+# `/bin/sleep`, which a real `pg_ctl -D <fake dir> stop` predictably fails
+# against without touching, so routing this specific mechanics-level proof
+# through the full `run()` would really be proving R15b's unrelated
+# `_refs_c`-only gate, not R15c's stop/wait/remove state machine.
+def _clusters486(proc_root, scratch_root, events, state_path, stop_fn, wait_s=0):
+    return reap_tmp._reap_clusters(proc_root, UID, scratch_root, events, None, state_path,
+                                   stop_fn, lambda *a: None, wait_s, False)
+
+
+ac9_scratch = TMP / "l0486-ac9-scratch"
+ac9_pg = ac9_scratch / "grade" / "L-grader-0001" / "pg"
+ac9_pg.mkdir(parents=True)
+ac9_proc = _pg_fixture_root("l0486-ac9")[1]
+pm9 = _sleeper486()
+_write_cmdline486(ac9_proc, pm9.pid, ["/usr/lib/postgresql/17/bin/postgres", "-D", str(ac9_pg)])
+(ac9_pg / "postmaster.pid").write_text(f"{pm9.pid}\n")
+events9 = [{"type": "spawn-done", "subject": "L-spec-9486b", "spawn": "L-grader-0001", "actor": "grader"}]
+rec9 = []
+state9 = TMP / "l0486-ac9-state.json"
+sc9a = _clusters486(ac9_proc, ac9_scratch, events9, state9, rec9.append)
+ok(rec9 == [str(ac9_pg)], f"L0486-AC9: stop_fn called exactly once, on the cluster dir: {rec9}")
+sc9a_row = [c for c in sc9a if c["dir"] == str(ac9_pg)]
+ok(len(sc9a_row) == 1 and sc9a_row[0]["owner"] == "L-grader-0001" and sc9a_row[0]["why"] == "stopping",
+   f"L0486-AC9: still alive -> kept, why=stopping, owner is the spawn: {sc9a_row}")
+ok(ac9_pg.exists(), "L0486-AC9: the pg dir is kept while the pid is still alive")
+
+_reap486(pm9)
+sc9b = _clusters486(ac9_proc, ac9_scratch, events9, state9, rec9.append)
+sc9b_row = [c for c in sc9b if c["dir"] == str(ac9_pg)]
+ok(len(sc9b_row) == 1 and sc9b_row[0]["why"] == "stopped",
+   f"L0486-AC9: a second pass removes it once the pid is dead: {sc9b_row}")
+ok(not ac9_pg.exists(), "L0486-AC9: the pg dir is really gone")
+shutil.rmtree(ac9_proc / str(pm9.pid), ignore_errors=True)
+
+# not yet terminal — nothing stopped
+ac9b_scratch = TMP / "l0486-ac9b-scratch"
+ac9b_pg = ac9b_scratch / "grade" / "L-grader-0002" / "pg"
+ac9b_pg.mkdir(parents=True)
+pm9b = _sleeper486()
+_write_cmdline486(ac9_proc, pm9b.pid, ["/usr/lib/postgresql/17/bin/postgres", "-D", str(ac9b_pg)])
+events9c = [{"type": "spawn-started", "subject": "L-spec-9486c", "spawn": "L-grader-0002", "role": "grader",
+             "actor": "grader"}]
+try:
+    sc9c = _clusters486(ac9_proc, ac9b_scratch, events9c, TMP / "l0486-ac9c-state.json", rec9.append)
+finally:
+    _reap486(pm9b)
+ok([c for c in sc9c if c["dir"] == str(ac9b_pg)] == [],
+   f"L0486-AC9: a spawn only spawn-started is not terminal — nothing stopped: {sc9c}")
+ok(ac9b_pg.exists(), "L0486-AC9: its pg dir is untouched")
+shutil.rmtree(ac9_proc / str(pm9b.pid), ignore_errors=True)
+
+# outside the allowed roots, or under /var/lib/postgresql -> never even considered
+pm9d = _sleeper486()
+_write_cmdline486(ac9_proc, pm9d.pid, ["/usr/lib/postgresql/17/bin/postgres", "-D", "/opt/l0486-fake-pg"])
+pm9e = _sleeper486()
+_write_cmdline486(ac9_proc, pm9e.pid, ["/usr/lib/postgresql/17/bin/postgres", "-D", "/var/lib/postgresql/l0486-fake"])
+try:
+    sc9d = _clusters486(ac9_proc, ac9_scratch, events9, TMP / "l0486-ac9d-state.json", rec9.append)
+finally:
+    _reap486(pm9d); _reap486(pm9e)
+ok(not any(c["dir"] in ("/opt/l0486-fake-pg", "/var/lib/postgresql/l0486-fake") for c in sc9d),
+   f"L0486-AC9: outside-allowed-roots and under-/var/lib/postgresql are never touched: {sc9d}")
+
+# a bare `postgres` argv[0] also matches; an unrelated binary does not
+ac9_pg2 = ac9_scratch / "grade" / "L-grader-0005" / "pg"
+ac9_pg2.mkdir(parents=True)
+pm9f = _sleeper486()
+_write_cmdline486(ac9_proc, pm9f.pid, ["postgres", "-D", str(ac9_pg2)])
+pm9g = _sleeper486()
+_write_cmdline486(ac9_proc, pm9g.pid, ["/usr/bin/postgres-exporter", "-D", str(ac9_pg2)])
+events9f = [{"type": "spawn-done", "subject": "L-spec-9486f", "spawn": "L-grader-0005", "actor": "grader"}]
+try:
+    sc9f = _clusters486(ac9_proc, ac9_scratch, events9f, TMP / "l0486-ac9f-state.json", rec9.append)
+finally:
+    _reap486(pm9f); _reap486(pm9g)
+matched9f = [c for c in sc9f if c["dir"] == str(ac9_pg2)]
+ok(len(matched9f) == 1, f"L0486-AC9: a bare `postgres` argv[0] matches by basename too: {sc9f}")
+ok(str(ac9_pg2) in rec9, "L0486-AC9: the bare-postgres postmaster was matched (only one stop_fn call for that dir)")
+ok(rec9.count(str(ac9_pg2)) == 1, "L0486-AC9: `postgres-exporter` was NOT matched — only one stop for this dir")
+
+# a cluster under a terminal SPEC's own worktree (never a grade/<spawn> path) stops the same way
+with tempfile.TemporaryDirectory() as ac9g_base:
+    r9g = _git_repo(ac9g_base, "l0486-ac9g")
+    b9g, wt9g, ready9g = _git_branch(r9g, ac9g_base, "L-spec-9486g", "x")
+    ev9g = _killed_spec_events("L-charter-9486g", "L-spec-9486g", b9g, ready9g, "l0486-ac9g")
+    pg9g = wt9g / "pg"
+    pg9g.mkdir()
+    pm9h = _sleeper486()
+    _write_cmdline486(ac9_proc, pm9h.pid, ["/usr/lib/postgresql/17/bin/postgres", "-D", str(pg9g)])
+    orig_env9g = _patch_fold_root(ac9g_base)
+    try:
+        sc9g = _clusters486(ac9_proc, ac9g_base, ev9g, TMP / "l0486-ac9g-state.json", rec9.append)
+    finally:
+        _restore_fold_root(orig_env9g)
+        _reap486(pm9h)
+    matched9g = [c for c in sc9g if c["dir"] == str(pg9g)]
+    ok(len(matched9g) == 1 and matched9g[0]["owner"] == "L-spec-9486g" and matched9g[0]["why"] == "stopping",
+       f"L0486-AC9: a cluster under a terminal spec's own worktree stops the same way: {matched9g}")
+print("L0486-AC9 ok")
+
+# ── L0486-AC10 · unresolved owner: 6h+ AND two consecutive idle passes ─────────
+ac10_scratch = TMP / "l0486-ac10-scratch"; ac10_scratch.mkdir()
+ac10_root, ac10_proc = _pg_fixture_root("l0486-ac10")
+uptime10 = 10_000_000.0
+(ac10_proc / "uptime").write_text(f"{uptime10} 0\n")
+state10 = TMP / "l0486-ac10-state.json"
+
+# young (< 6h): never orphaned regardless of pass count
+ac10_young = ac10_scratch / "young-pg"; ac10_young.mkdir()
+pm10y = _sleeper486()
+_write_cmdline486(ac10_proc, pm10y.pid, ["/usr/lib/postgresql/17/bin/postgres", "-D", str(ac10_young)])
+_write_stat486(ac10_proc, pm10y.pid, 1, uptime10, 5 * HOUR)
+try:
+    for _ in range(3):
+        res10y = reap_tmp.run(root=str(ac10_root), uid=UID, proc_root=str(ac10_proc), scratch_root=str(ac10_scratch),
+                              events=[], kill_fn=lambda *a: None, stop_fn=lambda d: None, wait_s=0,
+                              state_path=state10)
+        ok([c for c in res10y["stopped_clusters"] if c["dir"] == str(ac10_young)] == [],
+           f"L0486-AC10: under 6h old is NEVER orphaned, however many passes: {res10y['stopped_clusters']}")
+finally:
+    _reap486(pm10y)
+shutil.rmtree(ac10_proc / str(pm10y.pid), ignore_errors=True)
+
+# old (6.5h): kept on pass 1, orphaned (identified) on pass 2
+ac10_old = ac10_scratch / "old-pg"; ac10_old.mkdir()
+pm10o = _sleeper486()
+_write_cmdline486(ac10_proc, pm10o.pid, ["/usr/lib/postgresql/17/bin/postgres", "-D", str(ac10_old)])
+_write_stat486(ac10_proc, pm10o.pid, 1, uptime10, 6.5 * HOUR)
+res10_p1 = reap_tmp.run(root=str(ac10_root), uid=UID, proc_root=str(ac10_proc), scratch_root=str(ac10_scratch),
+                        events=[], kill_fn=lambda *a: None, stop_fn=lambda d: None, wait_s=0, state_path=state10)
+ok([c for c in res10_p1["stopped_clusters"] if c["dir"] == str(ac10_old)] == [],
+   f"L0486-AC10: 6h+ old but only ONE pass observed — kept: {res10_p1['stopped_clusters']}")
+ok(ac10_old.exists(), "L0486-AC10: kept after pass 1")
+state_after1 = json.loads(state10.read_text())
+ok(state_after1.get(str(ac10_old), {}).get("idle_passes") == 1,
+   f"L0486-AC10: idle_passes is 1 after the first no-client pass — read from the real state file: {state_after1}")
+
+_reap486(pm10o)   # dead before pass 2, so the second pass both identifies and stops it
+res10_p2 = reap_tmp.run(root=str(ac10_root), uid=UID, proc_root=str(ac10_proc), scratch_root=str(ac10_scratch),
+                        events=[], kill_fn=lambda *a: None, stop_fn=lambda d: None, wait_s=0, state_path=state10)
+sc10_2 = [c for c in res10_p2["stopped_clusters"] if c["dir"] == str(ac10_old)]
+ok(len(sc10_2) == 1, f"L0486-AC10: two consecutive idle passes at 6h+ -> orphaned and stopped on the second: {sc10_2}")
+# security_path: removal is narrower than the stop — an unresolved-owner dir
+# outside scratch_root/grade/ and outside any worktree is stopped but its
+# directory is NEVER removed, even once genuinely dead.
+ok("not removed" in sc10_2[0]["why"], f"L0486-AC10: stopped, but removal stays scoped to grade/ or a worktree: {sc10_2}")
+ok(ac10_old.exists(), "L0486-AC10: the directory itself is never removed outside those two zones")
+shutil.rmtree(ac10_proc / str(pm10o.pid), ignore_errors=True)
+
+# a client backend keeps it AND resets the idle count
+ac10_cli = ac10_scratch / "client-pg"; ac10_cli.mkdir()
+pm10c = _sleeper486()
+_write_cmdline486(ac10_proc, pm10c.pid, ["/usr/lib/postgresql/17/bin/postgres", "-D", str(ac10_cli)])
+_write_stat486(ac10_proc, pm10c.pid, 1, uptime10, 6.5 * HOUR)
+res10c_p1 = reap_tmp.run(root=str(ac10_root), uid=UID, proc_root=str(ac10_proc), scratch_root=str(ac10_scratch),
+                         events=[], kill_fn=lambda *a: None, stop_fn=lambda d: None, wait_s=0, state_path=state10)
+ok(json.loads(state10.read_text()).get(str(ac10_cli), {}).get("idle_passes") == 1,
+   f"L0486-AC10: first pass with no client -> idle_passes=1: {json.loads(state10.read_text())}")
+client_pid10 = dead_pid() + 500     # need not be a real process — only ITS ppid field/cmdline are read
+_write_stat486(ac10_proc, client_pid10, pm10c.pid, uptime10, 0)
+_write_cmdline486(ac10_proc, client_pid10, ["postgres: someuser somedb [local] idle"])
+res10c_p2 = reap_tmp.run(root=str(ac10_root), uid=UID, proc_root=str(ac10_proc), scratch_root=str(ac10_scratch),
+                         events=[], kill_fn=lambda *a: None, stop_fn=lambda d: None, wait_s=0, state_path=state10)
+ok([c for c in res10c_p2["stopped_clusters"] if c["dir"] == str(ac10_cli)] == [],
+   f"L0486-AC10: a client backend keeps it: {res10c_p2['stopped_clusters']}")
+ok(str(ac10_cli) not in json.loads(state10.read_text()),
+   f"L0486-AC10: idle_passes is reset (entry cleared) when a client backend is seen: {json.loads(state10.read_text())}")
+_reap486(pm10c)
+shutil.rmtree(ac10_proc / str(pm10c.pid), ignore_errors=True)
+shutil.rmtree(ac10_proc / str(client_pid10), ignore_errors=True)
+
+# the pass count is proven through the REAL state file: two SEPARATE `run()` calls,
+# the second reading what the first wrote to `state_path` from disk.
+ok(json.loads(state10.read_text()) == {}, f"L0486-AC10: the state file itself, read fresh, is empty once every "
+   f"tracked cluster resolved one way or the other: {json.loads(state10.read_text())}")
+print("L0486-AC10 ok")
+
+# ── L0486-AC11 · test-database reaping: pid-anchored pattern, sessions, no injection ──
+for shape_nm, shape_pid in (("as_authority_runtime_v3_111_0", "111"), ("as_943_111_a1", "111"),
+                            ("as_1058_test_111_ab", "111")):
+    m11 = reap_tmp._TEST_DB_RE.match(shape_nm)
+    ok(bool(m11) and m11.group(1) == shape_pid, f"L0486-AC11: the live shape {shape_nm!r} matches, pid={shape_pid}")
+
+alive_proc11 = _sleeper486()
+dead11a, dead11b, dead11c = dead_pid(), dead_pid() + 1, dead_pid() + 2
+name_a11 = f"as_authority_runtime_v3_{dead11a}_0"
+name_b11 = f"as_943_{dead11a}_a1"
+name_c11 = f"as_1058_test_{dead11a}_ab"
+name_alive11 = f"as_1_test_{alive_proc11.pid}_0"
+name_sessions11 = f"as_1_test_{dead11b}_1"
+name_badhex11 = f"as_x_test_{dead11c}_zz"
+name_injection11 = f'as_1_test_{dead11a}_0"; DROP DATABASE prod; --'
+listing11 = "\n".join([name_a11, name_b11, name_c11, name_alive11, name_sessions11, name_badhex11,
+                       "postgres", "albert_prod", name_injection11])
+sql_log11 = []
+
+
+def pg_fn11(sql):
+    sql_log11.append(sql)
+    if sql.startswith("SELECT datname"):
+        return listing11 + "\n"
+    if "pg_stat_activity" in sql:
+        return "2\n" if f"'{name_sessions11}'" in sql else "0\n"
+    if sql.startswith("DROP DATABASE"):
+        return ""
+    raise AssertionError(f"L0486-AC11: unexpected sql: {sql}")
+
+
+try:
+    dropped11 = reap_tmp._reap_databases(pg_fn11, dry_run=False)
+finally:
+    _reap486(alive_proc11)
+ok(set(dropped11) == {name_a11, name_b11, name_c11},
+   f"L0486-AC11: exactly the three dead/zero-session names are dropped: {dropped11}")
+drop_sql11 = [s for s in sql_log11 if s.startswith("DROP DATABASE")]
+ok(all(any(nm in s for nm in (name_a11, name_b11, name_c11)) for s in drop_sql11),
+   f"L0486-AC11: nothing but the three legitimate names was ever handed to DROP: {drop_sql11}")
+ok(not any(name_injection11 in s for s in drop_sql11) and not any("prod" in s.lower() for s in drop_sql11),
+   f"L0486-AC11: the injection-shaped name never reached a DROP: {drop_sql11}")
+print("L0486-AC11 ok (drop set)")
+
+# main()/reap_now's own psql argv + scrubbed environment
+captured11 = {}
+
+
+def _fake_run11(argv, **kw):
+    captured11["argv"], captured11["env"] = argv, kw.get("env")
+
+    class _R:
+        returncode = 0
+        stdout = "postgres\n"
+        stderr = ""
+    return _R()
+
+
+orig_sp_run11 = reap_tmp.subprocess.run
+reap_tmp.subprocess.run = _fake_run11
+os.environ["SUPABASE_DB_URL"], os.environ["PGPASSWORD"] = "postgresql://evil", "hunter2"
+try:
+    reap_tmp._psql_pg_fn()("SELECT 1")
+finally:
+    reap_tmp.subprocess.run = orig_sp_run11
+    os.environ.pop("SUPABASE_DB_URL", None)
+    os.environ.pop("PGPASSWORD", None)
+ok("-d" in captured11["argv"] and captured11["argv"][captured11["argv"].index("-d") + 1] == "postgres",
+   f"L0486-AC11: the psql argv carries -d postgres: {captured11['argv']}")
+ok("-h" not in captured11["argv"], f"L0486-AC11: no -h/TCP argument: {captured11['argv']}")
+ok(not any(re.search(r"DB_URL|DATABASE_URL|^PG", k) for k in captured11["env"]),
+   f"L0486-AC11: the environment carries no DB_URL/DATABASE_URL/PG* key: {sorted(captured11['env'])}")
+print("L0486-AC11 ok")

@@ -60,7 +60,7 @@ pidfile's contents. R9d never uses `panes.proc_start` — it hardcodes real
 `/proc` and would break hermetic fixtures — parsing field 22 itself, under the
 injectable `proc_root`, the identical way.
 """
-import argparse, os, pathlib, shutil, signal, stat, sys
+import argparse, json, os, pathlib, re, shutil, signal, stat, subprocess, sys, time
 from datetime import datetime, timezone
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
@@ -70,6 +70,14 @@ ROOT = pathlib.Path(os.environ.get("DOIT_ROOT", str(pathlib.Path.home() / ".do-i
 
 # R9d condition (d) — SD17's closed list. Nothing else ever matches.
 _SD17_SIGNATURES = (("next", "dev"), ("vite",), ("uvicorn", "--reload"), ("npm", "run", "dev"))
+
+# R15c/SD-R15-2b — the closed pattern, pid-anchored (group 1 = the pid, the
+# second-to-last underscore-separated segment). Observed 2026-09-29 on the
+# box's own local cluster (33 `as_*` databases): `as_authority_runtime_v3_
+# <pid>_<n>`, `as_943_<pid>_<n>`, `as_1058_test_<pid>_<hex>` — every one of
+# these shapes matches; the old `^as_[0-9]+_test_[0-9]+_[0-9]+$` matched none
+# of them and deleted nothing.
+_TEST_DB_RE = re.compile(r"^as_[a-z0-9_]+_([0-9]+)_[0-9a-f]+$")
 
 
 class Undetermined(Exception):
@@ -443,8 +451,306 @@ def _orphan_servers(proc_root, uid, scratch_root, terminal_paths, kill_fn, dry_r
     return stopped
 
 
+def _reap_grade_views(scratch_root, events, proc_root, dry_run):
+    """L-charter-0042/L-spec-0486 (cleanup-on-finish), R15b: a grader/reviewer's
+    own `grade/<spawn>/` scratch copy goes the instant its spawn is terminal
+    (`fold.terminal_spawns`) — never age-gated like `_scan_dir`'s own rule, and
+    covering any spawn id (`L-grader-*`, `L-reviewer-*`: a reviewer today has
+    no separate scratch copy, so this covers whatever `grade/<spawn>/` a
+    reviewer is given). `grader-claude/` (the shared config dir) is a SIBLING
+    of `grade/` and is never even listed here — only `grade/`'s own immediate
+    children are considered. A terminal entry's own private cluster is asked
+    to stop FIRST, unconditionally (a live reference never blocks the ask,
+    only the final removal) — the postgres process under it, if any, must not
+    survive its own owning spawn regardless of who else's `cwd` still sits
+    there. An entry whose spawn is not terminal, unknown, or not a directory
+    is left exactly alone — not even looked at for liveness."""
+    grade_dir = pathlib.Path(scratch_root) / "grade"
+    try:
+        names = sorted(os.listdir(grade_dir))
+    except OSError:
+        return [], {}
+    terminal = fold.terminal_spawns(events)
+    removed, errors = [], {}
+    for name in names:
+        if name not in terminal:
+            continue
+        path = grade_dir / name
+        try:
+            st = os.lstat(path)
+        except OSError:
+            continue
+        if not stat.S_ISDIR(st.st_mode):
+            continue
+        if not dry_run:
+            try:
+                import grading_env
+                grading_env.teardown(str(path))
+            except ImportError:
+                pass
+            except Exception as e:
+                errors["teardown"] = str(e)
+        if _refs_c(proc_root, str(path)):
+            continue
+        if not dry_run:
+            try:
+                shutil.rmtree(path)
+            except OSError as e:
+                errors["scratch_grade"] = str(e)
+                continue
+        removed.append(str(path))
+    return removed, errors
+
+
+def _postmaster_candidates(proc_root, uid):
+    """R15c/SD-R15-2a: every pid under `proc_root` matching a real postmaster —
+    `os.path.basename(argv[0]) == "postgres"` (a live postmaster carries the
+    full path, `/usr/lib/postgresql/18/bin/postgres`; a bare `postgres`
+    argv[0] matches too — the basename is identical either way), carrying its
+    own `-D <dir>`, owned by `uid`. `_matches_sd17`'s `"postgres" in tokens`
+    exact-token test is NOT reused — it matches none of the full-path shape.
+    Returns `[(pid, dir)]`."""
+    out = []
+    for name in _pid_dir_names(proc_root):
+        pid = int(name)
+        tokens = _cmdline_tokens(proc_root, pid)
+        if not tokens or os.path.basename(tokens[0]) != "postgres" or "-D" not in tokens:
+            continue
+        i = tokens.index("-D")
+        if i + 1 >= len(tokens):
+            continue
+        try:
+            if os.lstat(pathlib.Path(proc_root) / name).st_uid != uid:
+                continue
+        except OSError:
+            continue
+        out.append((pid, tokens[i + 1]))
+    return out
+
+
+def _cluster_owner(d, scratch_root, terminal_worktrees):
+    """`<scratch_root>/grade/<spawn>/...` -> `("spawn", spawn)`; a path under a
+    TERMINAL-state spec's own worktree (`tree_cleanup.terminal_worktrees`,
+    already scoped to terminal specs only) -> `("spec", spec)`; else
+    `(None, None)` — unresolved."""
+    if scratch_root is not None:
+        grade_root = os.path.normpath(str(pathlib.Path(scratch_root) / "grade"))
+        nd = os.path.normpath(d)
+        if nd == grade_root or nd.startswith(grade_root + os.sep):
+            rest = nd[len(grade_root) + 1:]
+            spawn = rest.split(os.sep, 1)[0] if rest else None
+            if spawn:
+                return "spawn", spawn
+    for wt_path, spec in terminal_worktrees.items():
+        if _under(d, wt_path):
+            return "spec", spec
+    return None, None
+
+
+def _has_client_backend(proc_root, ppid):
+    """A CHILD of `ppid` whose own cmdline text starts `postgres:` and carries
+    a `[local]` or `host(port)` token — a pure `/proc` read, no connection, no
+    credential (Assumption 5). Read as ONE joined string, never per-token: a
+    real postmaster child's title-rewritten cmdline is often a single blob
+    with no embedded NUL at all."""
+    for name in _pid_dir_names(proc_root):
+        pid = int(name)
+        try:
+            raw = (pathlib.Path(proc_root) / name / "stat").read_text()
+            fields = raw[raw.rindex(")") + 2:].split()
+            cppid = int(fields[1])
+        except (OSError, ValueError, IndexError):
+            continue
+        if cppid != ppid:
+            continue
+        text = " ".join(_cmdline_tokens(proc_root, pid))
+        if text.startswith("postgres:") and ("[local]" in text or re.search(r"\(\d+\)", text)):
+            return True
+    return False
+
+
+def _default_stop_cluster(d):
+    pg_ctl = shutil.which("pg_ctl")
+    if pg_ctl is None:
+        raise FileNotFoundError("pg_ctl")
+    subprocess.run([pg_ctl, "-D", str(d), "stop", "-m", "fast"], capture_output=True, timeout=30)
+
+
+def _stop_cluster(d, stop_fn, kill_fn):
+    """`pg_ctl -D <dir> stop -m fast` (injectable `stop_fn`), falling back to
+    `kill_fn(<pid from <dir>/postmaster.pid>, SIGINT)` only when `pg_ctl` is
+    genuinely absent (`stop_fn` raising `FileNotFoundError`) — never on any
+    other failure, which is `stop_fn`'s own business to report."""
+    fn = stop_fn or _default_stop_cluster
+    try:
+        fn(d)
+        return
+    except FileNotFoundError:
+        pass
+    try:
+        pid = int(pathlib.Path(d, "postmaster.pid").read_text().splitlines()[0].strip())
+    except (OSError, ValueError, IndexError):
+        return
+    kill_fn(pid, signal.SIGINT)
+
+
+_CLUSTER_STATE_DEFAULT = lambda: ROOT / "state" / "reap-tmp-clusters.json"
+
+
+def _reap_clusters(proc_root, uid, scratch_root, events, now, state_path, stop_fn, kill_fn,
+                    wait_s, dry_run):
+    """R15c/SD-R15-2a: an orphaned private Postgres cluster — a postmaster
+    whose owning spawn/spec has already ended, or (no resolvable owner) one
+    idle 6h+ across two consecutive passes with no client backend — is
+    stopped and, once its pid is genuinely gone, its directory removed.
+    Never touches `/var/lib/postgresql` or anything outside `/tmp`, `/dev/shm`,
+    `$HOME` (the scratch root included) or `<ROOT>/worktrees`."""
+    state_path = pathlib.Path(state_path) if state_path is not None else _CLUSTER_STATE_DEFAULT()
+    try:
+        state = json.loads(state_path.read_text())
+    except (OSError, ValueError):
+        state = {}
+
+    terminal_worktrees = tree_cleanup.terminal_worktrees(events) if events is not None else {}
+    terminal_spawns = fold.terminal_spawns(events) if events is not None else set()
+    try:
+        uptime_now = float((pathlib.Path(proc_root) / "uptime").read_text().split()[0])
+    except (OSError, ValueError, IndexError):
+        uptime_now = None
+    clk_tck = os.sysconf("SC_CLK_TCK")
+
+    allowed_bases = ["/tmp", "/dev/shm", str(pathlib.Path.home())]
+    if scratch_root is not None:
+        allowed_bases.append(str(scratch_root))
+    allowed_bases.append(str(ROOT / "worktrees"))
+
+    stopped, seen = [], set()
+    for pid, d in _postmaster_candidates(proc_root, uid):
+        nd = os.path.normpath(d)
+        if nd in seen:
+            continue
+        seen.add(nd)
+        if _under(nd, "/var/lib/postgresql") or not any(_under(nd, b) for b in allowed_bases):
+            continue
+
+        kind, owner = _cluster_owner(nd, scratch_root, terminal_worktrees)
+        if kind == "spawn":
+            orphaned = owner in terminal_spawns
+        elif kind == "spec":
+            orphaned = True
+        else:
+            owner = "unresolved"
+            has_client = _has_client_backend(proc_root, pid)
+            age_s = None
+            if uptime_now is not None:
+                try:
+                    raw = (pathlib.Path(proc_root) / str(pid) / "stat").read_text()
+                    fields = raw[raw.rindex(")") + 2:].split()
+                    age_s = uptime_now - int(fields[19]) / clk_tck
+                except (OSError, ValueError, IndexError):
+                    age_s = None
+            if has_client or age_s is None or age_s < 6 * 3600:
+                state.pop(nd, None)
+                continue
+            idle_passes = state.get(nd, {}).get("idle_passes", 0) + 1
+            state[nd] = {"idle_passes": idle_passes}
+            orphaned = idle_passes >= 2
+        if not orphaned:
+            continue
+
+        # security_path: the STOP is asked for any orphaned cluster this
+        # allowed_bases gate admitted (a stray postmaster must not survive its
+        # own owning spawn/spec wherever it sits), but REMOVAL is narrower —
+        # only `<dir>` under `scratch_root/grade/` or itself under a worktree,
+        # never any other path, even once genuinely dead.
+        grade_root = os.path.normpath(str(pathlib.Path(scratch_root) / "grade")) \
+            if scratch_root is not None else None
+        removable = (grade_root is not None and (nd == grade_root or nd.startswith(grade_root + os.sep))) \
+            or any(_under(nd, wt) for wt in terminal_worktrees)
+
+        if not dry_run:
+            try:
+                _stop_cluster(nd, stop_fn, kill_fn)
+            except Exception:
+                pass
+            deadline = time.monotonic() + wait_s
+            while panes.alive(pid) and time.monotonic() < deadline:
+                time.sleep(0.05)
+        if panes.alive(pid):
+            stopped.append({"dir": nd, "owner": owner, "why": "stopping"})
+            continue
+        if not removable:
+            stopped.append({"dir": nd, "owner": owner,
+                            "why": "stopped, not removed (outside scratch_root/grade/ and no worktree)"})
+            continue
+        if not dry_run:
+            try:
+                shutil.rmtree(nd)
+            except OSError:
+                stopped.append({"dir": nd, "owner": owner, "why": "stop-failed"})
+                continue
+        stopped.append({"dir": nd, "owner": owner, "why": "stopped"})
+
+    for k in list(state):
+        if k not in seen:
+            state.pop(k, None)
+    try:
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(json.dumps(state))
+    except OSError:
+        pass
+    return stopped
+
+
+def _reap_databases(pg_fn, dry_run):
+    """R15c/SD-R15-2b: a test database is dropped only when its name FULLY
+    matches the closed, pid-anchored pattern, that pid is not alive, and
+    `pg_stat_activity` shows zero sessions on it — the name is validated
+    BEFORE it ever reaches a `DROP DATABASE` statement, so an injection-shaped
+    name never gets near one."""
+    dropped = []
+    for name in pg_fn("SELECT datname FROM pg_database").splitlines():
+        name = name.strip()
+        m = _TEST_DB_RE.match(name)
+        if not m:
+            continue
+        if panes.alive(int(m.group(1))):
+            continue
+        try:
+            count = int(pg_fn(
+                f"SELECT count(*) FROM pg_stat_activity WHERE datname = '{name}'").strip().splitlines()[0])
+        except (ValueError, IndexError):
+            continue
+        if count != 0:
+            continue
+        if not dry_run:
+            pg_fn(f'DROP DATABASE "{name}"')
+        dropped.append(name)
+    return dropped
+
+
+def _psql_pg_fn():
+    """`main()`/`reap_now`'s own live `pg_fn`: the local Unix socket only (no
+    `-h`/TCP), database `postgres` always named (`-d postgres` — without it
+    `psql` targets db `albert`, which does not exist, and `errors["pg"]` would
+    fire every run), and the environment scrubbed of every secret a production
+    DSN could ride in on."""
+    env = {k: v for k, v in os.environ.items()
+           if "DB_URL" not in k and k != "DATABASE_URL" and not k.startswith("PG")}
+
+    def fn(sql):
+        p = subprocess.run(["psql", "-d", "postgres", "-Atc", sql], capture_output=True,
+                           text=True, env=env, timeout=30)
+        if p.returncode != 0:
+            raise RuntimeError(p.stderr.strip() or f"psql exited {p.returncode}")
+        return p.stdout
+
+    return fn
+
+
 def run(root="/tmp", uid=None, min_age_min=120, dry_run=False, now=None, proc_root="/proc",
-        scratch_root=None, events=None, kill_fn=None):
+        scratch_root=None, events=None, kill_fn=None, state_path=None, pg_fn=None,
+        stop_fn=None, wait_s=10):
     """SD7's decision, applied to `root` (and, opted in, `scratch_root`), plus
     R9's three additive surfaces. `scratch_root`/`events`/`kill_fn` do NOT
     resolve a live default when `None` — that means the caller has not opted
@@ -493,6 +799,39 @@ def run(root="/tmp", uid=None, min_age_min=120, dry_run=False, now=None, proc_ro
         except Exception as e:
             errors["worktrees"] = str(e)
 
+    # L-charter-0042/L-spec-0486, R15b: a grader/reviewer's own `grade/<spawn>/`
+    # scratch copy, removed the instant its spawn is terminal — both `scratch_root`
+    # and `events` opted in (the same two surfaces R9c's worktree reap already
+    # requires), never gated on `kill_fn`.
+    removed_scratch = []
+    if scratch_root is not None and events is not None:
+        try:
+            removed_scratch, g_errors = _reap_grade_views(scratch_root, events, proc_root, dry_run)
+            removed += removed_scratch
+            errors.update(g_errors)
+        except Exception as e:
+            errors["scratch_grade"] = str(e)
+
+    # L-charter-0042/L-spec-0486, R15c: orphaned private Postgres clusters and
+    # test databases with no live owner — opted in independently: clusters via
+    # `kill_fn` (the same surface R9d's orphan-server stop already requires,
+    # since both are "stop something SD17/SD-R15-2a decided is dead"), test
+    # databases via `pg_fn` alone.
+    stopped_clusters = []
+    if kill_fn is not None:
+        try:
+            stopped_clusters = _reap_clusters(proc_root, uid, scratch_root, events, now,
+                                              state_path, stop_fn, kill_fn, wait_s, dry_run)
+        except Exception as e:
+            errors["clusters"] = str(e)
+
+    dropped_databases = []
+    if pg_fn is not None:
+        try:
+            dropped_databases = _reap_databases(pg_fn, dry_run)
+        except Exception as e:
+            errors["pg"] = str(e)
+
     if frac >= 0.85:
         look.emit_once("tmp-quota-high", str(uid), "thinker",
                         {"used_bytes": quota["used_bytes"], "limit_bytes": quota["limit_bytes"],
@@ -500,7 +839,19 @@ def run(root="/tmp", uid=None, min_age_min=120, dry_run=False, now=None, proc_ro
 
     return {"removed": removed, "kept": kept, "before_pct": before_pct, "after_pct": _disk_pct(root),
             "quota": quota, "mode": mode, "reaped_worktrees": reaped_worktrees,
-            "stopped_servers": stopped_servers, "errors": errors}
+            "stopped_servers": stopped_servers, "removed_scratch": removed_scratch,
+            "stopped_clusters": stopped_clusters, "dropped_databases": dropped_databases, "errors": errors}
+
+
+def reap_now(dry_run=False, min_age_min=120):
+    """The live-value resolver `main()` already was, extracted so `main()` and
+    `dispatch.ensure_room` share one path: `scratch.root()`, `fold.read_events()`,
+    `os.kill`, live `/proc`, and `main()`'s own new `_psql_pg_fn()` (R15c) — all
+    resolved HERE, never by any hermetic caller. Raises exactly as `run()` does
+    when `root` itself cannot be scanned; the caller decides what that means."""
+    return run(root="/tmp", uid=os.getuid(), min_age_min=min_age_min, dry_run=dry_run,
+              proc_root="/proc", scratch_root=scratch.root(), events=fold.read_events(),
+              kill_fn=os.kill, pg_fn=_psql_pg_fn())
 
 
 def main(argv=None):
@@ -510,9 +861,7 @@ def main(argv=None):
     a = ap.parse_args(argv)
 
     try:
-        result = run(root="/tmp", uid=os.getuid(), min_age_min=a.min_age, dry_run=a.dry_run,
-                     proc_root="/proc", scratch_root=scratch.root(), events=fold.read_events(),
-                     kill_fn=os.kill)
+        result = reap_now(dry_run=a.dry_run, min_age_min=a.min_age)
     except Exception as e:
         sys.stderr.write(f"reap-tmp: could not scan /tmp: {e}\n")
         return 1

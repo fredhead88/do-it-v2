@@ -3680,3 +3680,38 @@ res_rejected = fold.spec_state(
     [shipped_11, verdict_11, review_11, routed_11, cleared_by_reviewer, rejected_after], set())
 assert res_rejected != "accepted", res_rejected
 print("8034-AC11 ok")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-0486 · cleanup-on-finish (L-charter-0042), R15a (record)
+# ══════════════════════════════════════════════════════════════════════════════
+
+assert fold.EMITS["worktree-reaped"] == {"tick"}, fold.EMITS["worktree-reaped"]
+ev486_wr = {"type": "worktree-reaped", "subject": "L-spec-9486", "path": "/tmp/x", "proof": "origin-merged"}
+assert fold.check_append(ev486_wr, "tick") is None, fold.check_append(ev486_wr, "tick")
+for actor486 in ("executor", "operator", "builder", "grader"):
+    assert fold.check_append(ev486_wr, actor486) is not None, \
+        f"L0486-AC6: actor {actor486!r} must not be admitted for worktree-reaped"
+for missing486 in (
+        {k: v for k, v in ev486_wr.items() if k != "path"},
+        {k: v for k, v in ev486_wr.items() if k != "proof"},
+        {k: v for k, v in ev486_wr.items() if k not in ("path", "proof")}):
+    assert fold.check_append(missing486, "tick") is not None, \
+        f"L0486-AC6: {missing486} must refuse actor tick — exactly as autodispatched missing spawn is today"
+
+ev486, specs486, charters486, ignored486, by_subject486 = ledger(**{
+    "L-executor-0001.jsonl": [
+        {"ts": stamp(2), "type": "worktree-reaped", "subject": "L-spec-9486",
+         "path": "/tmp/x", "proof": "origin-merged"},
+    ],
+    "L-tick-local.jsonl": [
+        {"ts": stamp(1), "type": "worktree-reaped", "subject": "L-spec-9486",
+         "path": "/tmp/y", "proof": "origin-branch"},
+    ],
+})
+assert any(e.get("type") == "worktree-reaped" and e.get("path") == "/tmp/x" for e in ignored486), \
+    f"L0486-AC6: actor executor's worktree-reaped lands in the fold's ignored list: {ignored486}"
+assert not any(e.get("type") == "worktree-reaped" and e.get("path") == "/tmp/y" for e in ignored486), \
+    f"L0486-AC6: actor tick's worktree-reaped does not land in ignored: {ignored486}"
+assert any(e.get("type") == "worktree-reaped" and e.get("path") == "/tmp/y"
+           for e in by_subject486.get("L-spec-9486", [])), by_subject486.get("L-spec-9486")
+print("L0486-AC6 ok")

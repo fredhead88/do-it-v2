@@ -2,7 +2,7 @@
 """One runnable check on the dispatch wrapper. Run: python3 test_dispatch.py
 The spawn is mocked; every after-the-fact check is exercised against the
 failure it was written for (D116, D120)."""
-import argparse, json, os, pathlib, subprocess, sys, tempfile
+import argparse, json, os, pathlib, shutil, subprocess, sys, tempfile
 from datetime import datetime as _dt, timedelta as _timedelta, timezone as _timezone
 
 TMP = pathlib.Path(tempfile.mkdtemp())
@@ -14,6 +14,20 @@ os.environ["DOIT_ROOT"], os.environ["DOIT_NO_POKE"] = str(TMP), "1"
 os.environ.pop("DOIT_SEAT", None)
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 import dispatch, fold, grader_view, harness  # noqa: E402
+import scratch as _scratch486  # noqa: E402
+# L-spec-0486/R15d: `dispatch.ensure_room` now runs for EVERY role=builder/
+# grader dispatch, before any backend. Stubbed True here — this file's own
+# hermetic default, mirroring test_tick.py's `intake.ghlimit`/`pane_resume.run`
+# pattern — so the ~120 pre-existing builder/grader drives below never touch
+# the real scratch root or real disk; L-spec-0486's own AC12/AC13 section
+# restores the real function (or installs its own forced stub) around itself
+# only, and always leaves this same True-stub behind when it is done.
+_SCRATCH_FIXTURE_486 = TMP / "scratch"
+_SCRATCH_FIXTURE_486.mkdir(parents=True, exist_ok=True)
+_real_scratch_root_486 = _scratch486.root
+_scratch486.root = lambda: _SCRATCH_FIXTURE_486
+_real_ensure_room_486 = dispatch.ensure_room
+dispatch.ensure_room = lambda path, need_gb: True
 
 REPO = TMP / "repo"
 REPO.mkdir()
@@ -746,6 +760,14 @@ N += 1
 os.environ["DOIT_REPO_VOLATILE"] = "docs/sessions/*"
 import importlib
 importlib.reload(dispatch)
+# L-spec-0486/R15d: a reload re-executes dispatch.py's own top-level code,
+# which wipes this file's file-top `dispatch.ensure_room` hermetic stub (a
+# fresh function object replaces it) — re-applied here, immediately, so every
+# builder/grader spawn() drive for the REST of this file still never touches
+# this shared box's real, genuinely tight disk (measured 2026-09-30: ~32G
+# avail on the orchestration box, with sibling builders concurrently
+# consuming it) instead of the fixture scratch root this file set up.
+dispatch.ensure_room = lambda path, need_gb: True
 dispatch.run_claude = never
 (REPO / "docs" / "sessions").mkdir(parents=True)
 vol = REPO / "docs" / "sessions" / "health.md"
@@ -758,6 +780,7 @@ assert "stray.txt" in dispatch.porcelain(REPO), "an undeclared path is still see
 stray.unlink(), vol.unlink()
 del os.environ["DOIT_REPO_VOLATILE"]
 importlib.reload(dispatch)
+dispatch.ensure_room = lambda path, need_gb: True   # re-applied post-reload, see the comment above
 
 # `doit validate` is the seat route's StructuredOutput: exit 1 names the violation, exit 0 says VALID.
 good, bad = TMP / "good.json", TMP / "bad.json"
@@ -3426,3 +3449,195 @@ ev_for_7 = dispatch.events_for("grader", grade([met_8034]), argparse.Namespace(s
                                {"subject": SUBJ_8034_6})
 assert not any(t == "criterion-routed" for t, _ in ev_for_7), ev_for_7
 print("8034-AC7(events_for) ok")
+
+# ══════════════════════════════════════════════════════════════════════════
+# L-spec-0486 (R15d) · dispatch.ensure_room / _room_need_gb, plus the
+# role=builder/grader pre-spend gate they back
+# ══════════════════════════════════════════════════════════════════════════
+import reap_tmp as _reap_tmp486  # noqa: E402
+
+_orig_du486 = shutil.disk_usage
+_orig_reap_now_486 = _reap_tmp486.reap_now
+
+
+def _du_row486(total_gb, used_gb, free_gb):
+    du = _orig_du486(str(TMP))
+    return type(du)(total=int(total_gb * 2**30), used=int(used_gb * 2**30), free=int(free_gb * 2**30))
+
+
+# AC12a: 0 bytes needed is always enough; the reaper never runs.
+_reap_calls486 = []
+_reap_tmp486.reap_now = lambda dry_run=False: (_reap_calls486.append(dry_run), {})[1]
+try:
+    assert _real_ensure_room_486(str(TMP), 0) is True, "AC12: 0 bytes needed is always enough"
+    assert _reap_calls486 == [], f"AC12: the reaper is not called when there's already enough room: {_reap_calls486}"
+
+    # too little, then enough right after the reaper "runs"
+    _state486 = {"n": 0}
+
+    def _du_low_then_high486(path):
+        _state486["n"] += 1
+        return _du_row486(100, 95, 0 if _state486["n"] == 1 else 10)
+
+    shutil.disk_usage = _du_low_then_high486
+    _reap_calls486.clear()
+    assert _real_ensure_room_486(str(TMP), 5) is True, "AC12: too little then enough after the reaper -> True"
+    assert len(_reap_calls486) == 1, f"AC12: the reaper ran exactly once: {_reap_calls486}"
+
+    # stays too little
+    shutil.disk_usage = lambda path: _du_row486(100, 99, 0)
+    _reap_calls486.clear()
+    assert _real_ensure_room_486(str(TMP), 5) is False, "AC12: stays too little -> False"
+    assert len(_reap_calls486) == 1, f"AC12: exactly one reaper run even on failure: {_reap_calls486}"
+
+    # a reaper that raises
+    def _raising_reap_now486(dry_run=False):
+        raise RuntimeError("L0486-AC12: forced")
+
+    _reap_tmp486.reap_now = _raising_reap_now486
+    assert _real_ensure_room_486(str(TMP), 5) is False, "AC12: a raising reaper yields False, never raises"
+finally:
+    shutil.disk_usage = _orig_du486
+    _reap_tmp486.reap_now = _orig_reap_now_486
+N += 1
+
+# AC12b: DOIT_LEDGER_FILE is saved/restored around the reaper call — set to a
+# distinct value, unset, and when the reaper itself raises after setting it.
+shutil.disk_usage = lambda path: _du_row486(100, 99, 0)
+try:
+    for _prior486 in ("L-something-0001.jsonl", None):
+        if _prior486 is None:
+            os.environ.pop("DOIT_LEDGER_FILE", None)
+        else:
+            os.environ["DOIT_LEDGER_FILE"] = _prior486
+
+        def _reap_now_sets_ledger486(dry_run=False):
+            os.environ["DOIT_LEDGER_FILE"] = "L-executor-0001.jsonl"
+            return {}
+
+        _reap_tmp486.reap_now = _reap_now_sets_ledger486
+        _real_ensure_room_486(str(TMP), 5)
+        assert os.environ.get("DOIT_LEDGER_FILE") == _prior486, \
+            f"AC12: DOIT_LEDGER_FILE restored to {_prior486!r}, got {os.environ.get('DOIT_LEDGER_FILE')!r}"
+
+        if _prior486 is None:
+            os.environ.pop("DOIT_LEDGER_FILE", None)
+        else:
+            os.environ["DOIT_LEDGER_FILE"] = _prior486
+
+        def _reap_now_raises_after_set486(dry_run=False):
+            os.environ["DOIT_LEDGER_FILE"] = "L-executor-0001.jsonl"
+            raise RuntimeError("L0486-AC12: forced after set")
+
+        _reap_tmp486.reap_now = _reap_now_raises_after_set486
+        assert _real_ensure_room_486(str(TMP), 5) is False
+        assert os.environ.get("DOIT_LEDGER_FILE") == _prior486, \
+            f"AC12: restored even when the reaper raises after setting it: {os.environ.get('DOIT_LEDGER_FILE')!r}"
+finally:
+    shutil.disk_usage = _orig_du486
+    _reap_tmp486.reap_now = _orig_reap_now_486
+    os.environ.pop("DOIT_LEDGER_FILE", None)
+N += 1
+
+# AC12c: need_gb resolution — 5/2 defaults, look.toml's room_builder_gb/room_grader_gb override.
+assert dispatch._room_need_gb("builder") == 5, "AC12: default builder need is 5GB"
+assert dispatch._room_need_gb("grader") == 2, "AC12: default grader need is 2GB"
+_fixture_toml_486 = TMP / "l0486-look-fixture.toml"
+_fixture_toml_486.write_text("[thresholds]\nroom_builder_gb = 9\nroom_grader_gb = 4\n")
+assert dispatch._room_need_gb("builder", toml_path=_fixture_toml_486) == 9, "AC12: room_builder_gb overrides to 9"
+assert dispatch._room_need_gb("grader", toml_path=_fixture_toml_486) == 4, "AC12: room_grader_gb overrides to 4"
+N += 1
+print("L0486-AC12 ok")
+
+
+def _boom13(*a, **kw):
+    _boom13.calls.append(a)
+    raise AssertionError("L0486-AC13: a backend must not be entered for a disk-refused dispatch")
+
+
+_boom13.calls = []
+
+
+def _drive_disk486(role, subject, force):
+    """Drives dispatch.main() for role/subject with `ensure_room` forced to
+    `force` and every backend stubbed to explode (AC13 must prove the refusal
+    lands strictly before any of them). Returns (outcome, this drive's own
+    ledger rows, that file's path) — outcome is the real exit code on a clean
+    SystemExit, or the literal "reached-backend" when a stubbed backend fired
+    (proof the dispatch got PAST the disk gate)."""
+    dispatch.ensure_room = lambda path, need_gb: force
+    real = dispatch.run_claude, dispatch.run_seat, dispatch.run_codex
+    dispatch.run_claude = dispatch.run_seat = dispatch.run_codex = _boom13
+    a = argparse.Namespace(role=role, subject=subject, packet=str(PK), path=None, cwd=str(REPO),
+                           charter=None, project="t", mcp_config=None, timeout=None, max_usd=None)
+    try:
+        dispatch.main(a)
+        outcome = 0
+    except SystemExit as e:
+        outcome = e.code
+    except AssertionError:
+        outcome = "reached-backend"
+    finally:
+        dispatch.run_claude, dispatch.run_seat, dispatch.run_codex = real
+    f = max((TMP / "events").glob(f"L-{role}-[0-9]*.jsonl"))
+    return outcome, [json.loads(l) for l in f.read_text().splitlines()], f
+
+
+AC13_BUILDER_SUBJ, AC13_GRADER_SUBJ = "L-spec-9486e1", "L-spec-9486e2"
+code13a, raw13a, _ = _drive_disk486("builder", AC13_BUILDER_SUBJ, False)
+types13a = [e["type"] for e in raw13a]
+assert code13a == 1, raw13a
+assert "build-started" not in types13a and "spawn-started" not in types13a, \
+    f"AC13: no build-started/spawn-started for a disk-refused builder: {types13a}"
+assert any(e["type"] == "spawn-failed" and e.get("reason") == "disk" for e in raw13a), raw13a
+assert _boom13.calls == [], f"AC13: no backend was ever entered: {_boom13.calls}"
+
+code13b, raw13b, _ = _drive_disk486("grader", AC13_GRADER_SUBJ, False)
+types13b = [e["type"] for e in raw13b]
+assert code13b == 1, raw13b
+assert "spawn-started" not in types13b and "grader-view-built" not in types13b, \
+    f"AC13: no spawn-started/grader-view-built for a disk-refused grader: {types13b}"
+assert any(e["type"] == "spawn-failed" and e.get("reason") == "disk" for e in raw13b), raw13b
+assert _boom13.calls == [], f"AC13: no backend/grading call happened for the grader either: {_boom13.calls}"
+
+_all13 = fold.read_events()
+_briefs13 = [e for e in _all13 if e.get("type") == "brief" and e.get("condition") == "disk-room"]
+assert _briefs13, "AC13: a brief for condition disk-room exists"
+assert all(e.get("owner") == "thinker" for e in _briefs13), _briefs13
+assert not any(e.get("type") in ("capability-hold", "escalation-blocking")
+              and e.get("subject") in (AC13_BUILDER_SUBJ, AC13_GRADER_SUBJ) for e in _all13), \
+    "AC13: a disk refusal is never a hold"
+N += 1
+
+# spec-writer/reviewer never call ensure_room at all
+for _role13, _subj13 in (("spec-writer", "L-spec-9486e3"), ("reviewer", "L-spec-9486e4")):
+    _calls13 = []
+    dispatch.ensure_room = lambda path, need_gb: (_calls13.append(1), True)[1]
+    real13 = dispatch.run_claude, dispatch.run_seat, dispatch.run_codex
+    dispatch.run_claude = dispatch.run_seat = dispatch.run_codex = _boom13
+    a13 = argparse.Namespace(role=_role13, subject=_subj13, packet=str(PK), path=None, cwd=str(REPO),
+                             charter=None, project="t", mcp_config=None, timeout=None, max_usd=None)
+    try:
+        dispatch.main(a13)
+    except (SystemExit, AssertionError):
+        pass
+    finally:
+        dispatch.run_claude, dispatch.run_seat, dispatch.run_codex = real13
+    assert _calls13 == [], f"L0486-AC13: {_role13} dispatch never calls ensure_room: {_calls13}"
+N += 1
+
+# a second dispatch, forced True, proceeds past the gate — the SAME subject's
+# open disk-room brief is answered (why starting "cleared:").
+_boom13.calls = []
+code13c, raw13c, _ = _drive_disk486("builder", AC13_BUILDER_SUBJ, True)
+assert code13c == "reached-backend", f"AC13: forced True proceeds to the (stubbed) backend: {code13c} {raw13c}"
+assert "build-started" in [e["type"] for e in raw13c], \
+    f"AC13: it got far enough to write build-started: {raw13c}"
+assert not any(e.get("reason") == "disk" for e in raw13c), raw13c
+_answered13 = [e for e in fold.read_events() if e.get("type") == "brief-answered"]
+_cleared13 = [e for e in _answered13 if str(e.get("why", "")).startswith("cleared:")]
+assert _cleared13, f"L0486-AC13: the disk-room brief is answered, why starting 'cleared:': {_answered13}"
+N += 1
+
+dispatch.ensure_room = lambda path, need_gb: True   # leave this file's own hermetic default in place
+print("L0486-AC13 ok")

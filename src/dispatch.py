@@ -22,7 +22,7 @@ above zero; an unreachable seat is api_error with zero tokens. The contract
 appends nothing — every event below is derived from the Output object into this
 spawn's own file, and the actor is that filename (D90).
 """
-import argparse, atexit, hashlib, json, os, pathlib, re, socket, subprocess, sys
+import argparse, atexit, hashlib, json, os, pathlib, re, shutil, socket, subprocess, sys
 from datetime import datetime, timedelta, timezone
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -1113,6 +1113,47 @@ def grading_budget(all_ev, subject):
     return None
 
 
+def _room_need_gb(role, toml_path=None):
+    """L-charter-0042/L-spec-0486, R15d: 5GB for a builder, 2GB for a grader —
+    `look.toml`'s `[thresholds] room_builder_gb`/`room_grader_gb` override
+    either default; `toml_path` is the same injection point `look.load_toml`
+    already offers, never edited by this spec."""
+    import look
+    th = look.load_toml(toml_path=toml_path).get("thresholds") or {}
+    return th.get(f"room_{role}_gb", 5 if role == "builder" else 2)
+
+
+def ensure_room(path, need_gb):
+    """L-charter-0042/L-spec-0486, R15d: disk is never the reason a builder or
+    grader fails. Already enough free space -> `True`, no reaper run. Otherwise
+    the reaper runs EXACTLY ONCE (`reap_tmp.reap_now`) and the space is
+    re-measured — never a retry loop, never a second reaper pass. Any
+    exception the reaper raises is swallowed here -> `False`, never raised:
+    a caller refusing a spawn over a bug in the reaper itself would be worse
+    than the disk problem it exists to avoid. `DOIT_LEDGER_FILE` is saved and
+    restored around the reaper call, in a `finally` (the way `backup.py`
+    already does around its own call) — `reap_merged_specs` sets it and never
+    restores it, and `run_claude`/`run_codex` pass `os.environ` straight into
+    the spawn they start next."""
+    def free_gb():
+        return shutil.disk_usage(path).free / 2**30
+
+    if free_gb() >= need_gb:
+        return True
+    saved = os.environ.get("DOIT_LEDGER_FILE")
+    try:
+        import reap_tmp
+        reap_tmp.reap_now(dry_run=False)
+    except Exception:
+        return False
+    finally:
+        if saved is None:
+            os.environ.pop("DOIT_LEDGER_FILE", None)
+        else:
+            os.environ["DOIT_LEDGER_FILE"] = saved
+    return free_gb() >= need_gb
+
+
 def main(a):
     kind, tmin, usd = ROLES[a.role]
     atexit.register(poke)
@@ -1247,6 +1288,23 @@ def main(a):
         if "COMMIT-SHAPE" in fold.standing_rejects(g_specs.get(a.subject, {"evs": []})["evs"]):
             fail(f"{a.subject}: COMMIT-SHAPE stands — refusing role=grader before any spend",
                  reason="commit-shape")
+    # L-charter-0042/L-spec-0486, R15d: disk is never the reason a builder or
+    # grader fails — refused BEFORE any spend, after the reaper has already had
+    # one chance to free the room a spawn's own work needs. `spec-writer` and
+    # `reviewer` never call `ensure_room` (scoped to builder/grader only).
+    if a.role in ("builder", "grader"):
+        import look, scratch
+        need_gb = _room_need_gb(a.role)
+        room_path = scratch.root()
+        if ensure_room(room_path, need_gb):
+            look._clear("disk-room", a.role, "room again", fold.read_events(), fold.ROOT)
+        else:
+            free_gb = shutil.disk_usage(room_path).free / 2**30
+            look.emit_once("disk-room", a.role, "thinker",
+                           {"free_gb": free_gb, "need_gb": need_gb, "path": str(room_path)},
+                           fold.read_events())
+            fail(f"no room: {free_gb:.1f}GB free, need {need_gb}GB at {room_path} — "
+                 f"refusing role={a.role} before any spend", reason="disk")
     # L-spec-0481/R12.3-R12.6: hold-check, then provision+prove in the spawn's OWN
     # view/cwd, before any spend — scoped to the entry points this unit builds
     # (Entry points a/b/c): a grader on the seat backend (its view is built here,

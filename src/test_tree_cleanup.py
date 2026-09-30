@@ -345,4 +345,274 @@ with tempfile.TemporaryDirectory() as d:
     check(any("worktree is not clean" in rr for rr in e[0]["retained_reason"]),
           f"L0440-AC12: reason names B's dirty worktree: {e[0]['retained_reason']}")
 
+# ══════════════════════════════════════════════════════════════════════════
+# L-spec-0486 R15a — `reap_worktrees`: a spec's own worktree goes the instant
+# ITS OWN reason to exist ends (shipped-and-on-origin, or killed-and-pushed),
+# never waiting on the whole-charter `judge()`/patch-id path `reap_merged_specs`
+# already had. Every check below drives a REAL bare `origin` remote — the
+# whole point of R15a is a fact `--is-ancestor`/patch-id against local main
+# cannot see.
+# ══════════════════════════════════════════════════════════════════════════
+
+def bare_origin(r):
+    """A real bare `origin` for `r`, with `r`'s current branch pushed to it
+    RIGHT NOW — call this before or after further local commits/merges to
+    control whether origin does or does not carry them."""
+    origin = pathlib.Path(r).parent / (pathlib.Path(r).name + "-origin.git")
+    subprocess.run(["git", "init", "-q", "--bare", str(origin)], check=True)
+    if "origin" not in sh(r, "git", "remote").split():
+        sh(r, "git", "remote", "add", "origin", str(origin))
+    branch = sh(r, "git", "symbolic-ref", "--short", "HEAD")
+    sh(r, "git", "push", "-q", "origin", branch)
+    sh(r, "git", "fetch", "-q", "origin")
+    return origin
+
+
+def branch_only(r, root, spec, content):
+    """A spec's branch and worktree, landed nowhere — the killed-spec shape:
+    real work exists, but it never merged onto main."""
+    b = spec.lower()
+    wt = pathlib.Path(root) / "worktrees" / b
+    sh(r, "git", "worktree", "add", "-q", str(wt), "-b", b, "main")
+    (wt / f"{b}.txt").write_text(content)
+    sh(wt, "git", "add", "-A"); sh(wt, "git", "commit", "-qm", f"build {spec}")
+    return b, str(wt), sh(wt, "git", "rev-parse", "HEAD")
+
+
+def shipped_trail(root, charter, spec, branch, ready, merge_sha, project=None):
+    """The minimal event trail `fold.spec_state` derives bare `shipped` off
+    (no verdict/review — those would derive `accepted`/`shipped-owed-*`
+    instead, all reached THROUGH this same `shipped` event per Assumption 3)."""
+    kv = {"type": "spec-written", "subject": spec, "charter": charter}
+    if project is not None:
+        kv["project"] = project
+    write(root, "L-executor-0001", kv,
+          {"type": "build-done", "subject": spec, "branch": branch, "ready_sha": ready},
+          {"type": "shipped", "subject": spec, "charter": charter, "sha": merge_sha})
+
+
+def run_reap_worktrees(root, dry_run=False):
+    code = ("import json,sys;"
+            f"sys.path.insert(0, {str(HERE)!r});"
+            "import fold, tree_cleanup;"
+            "evs = fold.read_events();"
+            f"reaped, retained = tree_cleanup.reap_worktrees(evs, dry_run={dry_run!r});"
+            "print(json.dumps({'reaped': reaped, 'retained': retained}))")
+    env = {k: v for k, v in os.environ.items() if k != "DOIT_PROJECT"} | {"DOIT_ROOT": str(root)}
+    p = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env)
+    assert p.returncode == 0, f"reap_worktrees subprocess: {p.stderr}"
+    return json.loads(p.stdout.strip().splitlines()[-1])
+
+
+# ── L0486-AC1 · shipped, sha on origin -> reaped, proof origin-merged ──────────
+with tempfile.TemporaryDirectory() as d:
+    r = repo_for(d, "l0486-proj1")
+    charter_project(d, "L-charter-0486a", "l0486-proj1")
+    b, wt, ready = branchwork(r, d, "L-spec-0001", "x")
+    merge_sha = sh(r, "git", "rev-parse", "HEAD")
+    bare_origin(r)  # pushed AFTER the merge — origin has the merge sha
+    shipped_trail(d, "L-charter-0486a", "L-spec-0001", b, ready, merge_sha, project="l0486-proj1")
+    out = run_reap_worktrees(d)
+    row = next((x for x in out["reaped"] if x["spec"] == "L-spec-0001"), None)
+    check(row is not None and row["proof"] == "origin-merged",
+          f"L0486-AC1: shipped-on-origin spec is reaped with proof origin-merged: {out}")
+    check(not pathlib.Path(wt).exists(), "L0486-AC1: the worktree directory no longer exists")
+    check(wt not in sh(r, "git", "worktree", "list"), "L0486-AC1: git worktree list no longer names it")
+    check(b in branches(r), "L0486-AC1: the local branch still exists — reap_worktrees never deletes it")
+print("L0486-AC1 ok")
+
+# ── L0486-AC2 · not on origin retains; standing rework retains; reviewing/open absent ──
+with tempfile.TemporaryDirectory() as d:
+    r = repo_for(d, "l0486-proj2")
+    charter_project(d, "L-charter-0486b", "l0486-proj2")
+    bare_origin(r)  # pushed BEFORE the merge — origin never sees it
+    b, wt, ready = branchwork(r, d, "L-spec-0001", "x")
+    merge_sha = sh(r, "git", "rev-parse", "HEAD")
+    shipped_trail(d, "L-charter-0486b", "L-spec-0001", b, ready, merge_sha, project="l0486-proj2")
+    out = run_reap_worktrees(d)
+    row = next((x for x in out["retained"] if x["spec"] == "L-spec-0001"), None)
+    check(row is not None and "origin/main does not contain" in row["why"],
+          f"L0486-AC2: a sha only on local main is retained, not reaped: {out}")
+    check(pathlib.Path(wt).exists(), "L0486-AC2: the worktree directory still exists")
+
+with tempfile.TemporaryDirectory() as d:
+    r = repo_for(d, "l0486-proj2b")
+    charter_project(d, "L-charter-0486b2", "l0486-proj2b")
+    b, wt, ready = branchwork(r, d, "L-spec-0001", "x")
+    merge_sha = sh(r, "git", "rev-parse", "HEAD")
+    bare_origin(r)
+    shipped_trail(d, "L-charter-0486b2", "L-spec-0001", b, ready, merge_sha, project="l0486-proj2b")
+    write(d, "L-grader-0001", {"type": "rejected-criterion", "subject": "L-spec-0001", "criterion": "AC1"})
+    out = run_reap_worktrees(d)
+    row = next((x for x in out["retained"] if x["spec"] == "L-spec-0001"), None)
+    check(row is not None and row["why"] == "standing rejection",
+          f"L0486-AC2: a standing rejected-criterion retains before origin is even checked: {out}")
+    check(pathlib.Path(wt).exists(), "L0486-AC2: the Executor's rework reuses this worktree")
+    write(d, "L-grader-0002", {"type": "criterion-cleared", "subject": "L-spec-0001", "criterion": "AC1"})
+    out2 = run_reap_worktrees(d)
+    row2 = next((x for x in out2["reaped"] if x["spec"] == "L-spec-0001"), None)
+    check(row2 is not None and row2["proof"] == "origin-merged",
+          f"L0486-AC2: once cleared, the SAME worktree becomes reapable on a later pass: {out2}")
+
+with tempfile.TemporaryDirectory() as d:
+    r = repo_for(d, "l0486-proj2c")
+    charter_project(d, "L-charter-0486b3", "l0486-proj2c")
+    b, wt, ready = branchwork(r, d, "L-spec-0001", "x")
+    merge_sha = sh(r, "git", "rev-parse", "HEAD")
+    bare_origin(r)
+    shipped_trail(d, "L-charter-0486b3", "L-spec-0001", b, ready, merge_sha, project="l0486-proj2c")
+    write(d, "L-reviewer-0001", {"type": "must-fix", "subject": "L-spec-0001", "criterion": "AC2"})
+    out = run_reap_worktrees(d)
+    row = next((x for x in out["retained"] if x["spec"] == "L-spec-0001"), None)
+    check(row is not None and row["why"] == "standing rejection",
+          f"L0486-AC2: a standing must-fix retains too — D101's own rule: {out}")
+
+with tempfile.TemporaryDirectory() as d:
+    r = repo_for(d, "l0486-proj2d")
+    charter_project(d, "L-charter-0486b4", "l0486-proj2d")
+    b1, wt1, ready1 = branchwork(r, d, "L-spec-0001", "x")
+    write(d, "L-executor-0001", {"type": "spec-written", "subject": "L-spec-0001",
+                                 "charter": "L-charter-0486b4", "project": "l0486-proj2d"},
+          {"type": "build-done", "subject": "L-spec-0001", "branch": b1, "ready_sha": ready1})
+    write(d, "L-grader-0001", {"type": "verdict", "subject": "L-spec-0001", "confirmed": False})
+    wt2 = pathlib.Path(d) / "worktrees" / "l-spec-0002"
+    sh(r, "git", "worktree", "add", "-q", str(wt2), "-b", "l-spec-0002", "main")
+    write(d, "L-executor-0001", {"type": "spec-written", "subject": "L-spec-0002",
+                                 "charter": "L-charter-0486b4", "project": "l0486-proj2d"})
+    out = run_reap_worktrees(d)
+    seen = {x["spec"] for x in out["reaped"]} | {x["spec"] for x in out["retained"]}
+    check("L-spec-0001" not in seen and "L-spec-0002" not in seen,
+          f"L0486-AC2: a reviewing spec (no shipped) and an open spec are absent from both lists: {out}")
+print("L0486-AC2 ok")
+
+# ── L0486-AC3 · killed, branch pushed+confirmed -> reaped, proof origin-branch ──
+with tempfile.TemporaryDirectory() as d:
+    r = repo_for(d, "l0486-proj3")
+    charter_project(d, "L-charter-0486c", "l0486-proj3")
+    bare_origin(r)
+    b, wt, ready = branch_only(r, d, "L-spec-0001", "x")
+    write(d, "L-executor-0001", {"type": "spec-written", "subject": "L-spec-0001",
+                                 "charter": "L-charter-0486c", "project": "l0486-proj3"},
+          {"type": "build-done", "subject": "L-spec-0001", "branch": b, "ready_sha": ready})
+    write(d, "L-thinker-0001", {"type": "spec-killed", "subject": "L-spec-0001", "charter": "L-charter-0486c"})
+    out = run_reap_worktrees(d)
+    row = next((x for x in out["reaped"] if x["spec"] == "L-spec-0001"), None)
+    check(row is not None and row["proof"] == "origin-branch",
+          f"L0486-AC3: a killed spec's branch, pushed and confirmed, is reaped: {out}")
+    check(not pathlib.Path(wt).exists(), "L0486-AC3: the worktree is gone")
+    p = subprocess.run(["git", "-C", str(r), "ls-remote", "--exit-code", "origin", f"refs/heads/{b}"],
+                       capture_output=True, text=True)
+    check(p.returncode == 0 and b in p.stdout,
+          f"L0486-AC3: a SEPARATE ls-remote, run after the function returned, lists the branch: {p.stdout}")
+
+with tempfile.TemporaryDirectory() as d:
+    r = repo_for(d, "l0486-proj3b")
+    charter_project(d, "L-charter-0486c2", "l0486-proj3b")
+    b, wt, ready = branch_only(r, d, "L-spec-0001", "x")
+    write(d, "L-executor-0001", {"type": "spec-written", "subject": "L-spec-0001",
+                                 "charter": "L-charter-0486c2", "project": "l0486-proj3b"},
+          {"type": "build-done", "subject": "L-spec-0001", "branch": b, "ready_sha": ready})
+    write(d, "L-thinker-0001", {"type": "spec-killed", "subject": "L-spec-0001", "charter": "L-charter-0486c2"})
+    # no `origin` remote at all
+    out = run_reap_worktrees(d)
+    row = next((x for x in out["retained"] if x["spec"] == "L-spec-0001"), None)
+    check(row is not None and row["why"], f"L0486-AC3: no origin remote -> retained with a non-empty why: {out}")
+    check(pathlib.Path(wt).exists(), "L0486-AC3: the worktree still exists")
+print("L0486-AC3 ok")
+
+# ── L0486-AC4 · uncommitted changes retain; never removed, never pushed ────────
+with tempfile.TemporaryDirectory() as d:
+    r = repo_for(d, "l0486-proj4")
+    charter_project(d, "L-charter-0486d", "l0486-proj4")
+    b, wt, ready = branchwork(r, d, "L-spec-0001", "x")
+    merge_sha = sh(r, "git", "rev-parse", "HEAD")
+    bare_origin(r)
+    shipped_trail(d, "L-charter-0486d", "L-spec-0001", b, ready, merge_sha, project="l0486-proj4")
+    (pathlib.Path(wt) / "tracked.txt").write_text("original\n")
+    sh(wt, "git", "add", "-A"); sh(wt, "git", "commit", "-qm", "tracked file")
+    (pathlib.Path(wt) / "tracked.txt").write_text("modified\n")
+    out = run_reap_worktrees(d)
+    row = next((x for x in out["retained"] if x["spec"] == "L-spec-0001"), None)
+    check(row is not None and row["why"] == "uncommitted changes",
+          f"L0486-AC4: a modified tracked file retains a shipped-on-origin worktree: {out}")
+    check((pathlib.Path(wt) / "tracked.txt").read_text() == "modified\n", "L0486-AC4: the edit is intact")
+
+with tempfile.TemporaryDirectory() as d:
+    r = repo_for(d, "l0486-proj4b")
+    charter_project(d, "L-charter-0486d2", "l0486-proj4b")
+    b, wt, ready = branchwork(r, d, "L-spec-0001", "x")
+    merge_sha = sh(r, "git", "rev-parse", "HEAD")
+    bare_origin(r)
+    shipped_trail(d, "L-charter-0486d2", "L-spec-0001", b, ready, merge_sha, project="l0486-proj4b")
+    (pathlib.Path(wt) / "untracked.txt").write_text("stray\n")
+    out = run_reap_worktrees(d)
+    row = next((x for x in out["retained"] if x["spec"] == "L-spec-0001"), None)
+    check(row is not None and row["why"] == "uncommitted changes",
+          f"L0486-AC4: an untracked file also retains: {out}")
+
+with tempfile.TemporaryDirectory() as d:
+    r = repo_for(d, "l0486-proj4c")
+    charter_project(d, "L-charter-0486d3", "l0486-proj4c")
+    bare_origin(r)
+    b, wt, ready = branch_only(r, d, "L-spec-0001", "x")
+    write(d, "L-executor-0001", {"type": "spec-written", "subject": "L-spec-0001",
+                                 "charter": "L-charter-0486d3", "project": "l0486-proj4c"},
+          {"type": "build-done", "subject": "L-spec-0001", "branch": b, "ready_sha": ready})
+    write(d, "L-thinker-0001", {"type": "spec-killed", "subject": "L-spec-0001", "charter": "L-charter-0486d3"})
+    (pathlib.Path(wt) / "dirty.txt").write_text("uncommitted\n")
+    out = run_reap_worktrees(d)
+    row = next((x for x in out["retained"] if x["spec"] == "L-spec-0001"), None)
+    check(row is not None and row["why"] == "uncommitted changes",
+          f"L0486-AC4: a killed spec with an uncommitted change also retains: {out}")
+    p = subprocess.run(["git", "-C", str(r), "ls-remote", "origin", f"refs/heads/{b}"],
+                       capture_output=True, text=True)
+    check(p.stdout.strip() == "", f"L0486-AC4: nothing was pushed for the dirty killed worktree: {p.stdout!r}")
+print("L0486-AC4 ok")
+
+# ── L0486-AC5 · dry-run judges only; reap_merged_specs composes with reap_worktrees ──
+with tempfile.TemporaryDirectory() as d:
+    r = repo_for(d, "l0486-proj5")
+    charter_project(d, "L-charter-0486e", "l0486-proj5")
+    b, wt, ready = branchwork(r, d, "L-spec-0001", "x")
+    merge_sha = sh(r, "git", "rev-parse", "HEAD")
+    bare_origin(r)
+    shipped_trail(d, "L-charter-0486e", "L-spec-0001", b, ready, merge_sha, project="l0486-proj5")
+    out = run_reap_worktrees(d, dry_run=True)
+    row = next((x for x in out["reaped"] if x["spec"] == "L-spec-0001"), None)
+    check(row is not None and row["proof"] == "origin-merged", f"L0486-AC5: dry-run reports the would-reap row: {out}")
+    check(pathlib.Path(wt).exists(), "L0486-AC5: dry-run destroys nothing")
+    p = subprocess.run(["git", "-C", str(r), "ls-remote", "origin"], capture_output=True, text=True)
+    check(b not in p.stdout, "L0486-AC5: dry-run pushes nothing (killed path untested here, but never pushes either)")
+
+    # a PLAIN shipped spec is not in TERMINAL_SPEC_STATES — `reap_merged_specs`'s
+    # OWN judge()/branch list is untouched by it, but it still removes the
+    # worktree (via `reap_worktrees`), and writes NO tree-reaped for it (no
+    # terminal group exists in this project) and no worktree-reaped of its own.
+    out2 = run_merged(d)
+    check(out2 == [], f"L0486-AC5: reap_merged_specs's own branch-judge list is untouched: {out2}")
+    check(not pathlib.Path(wt).exists(), "L0486-AC5: reap_merged_specs removed the worktree via reap_worktrees")
+    check(events(d, "tree-reaped") == [], "L0486-AC5: no tree-reaped for a shipped-only spec (no terminal group)")
+    check(events(d, "worktree-reaped") == [], "L0486-AC5: tree_cleanup itself never writes worktree-reaped")
+
+with tempfile.TemporaryDirectory() as d:
+    r = repo_for(d, "l0486-proj5b")
+    charter_project(d, "L-charter-0486f", "l0486-proj5b")
+    b, wt, ready = branchwork(r, d, "L-spec-0001", "x")
+    merge_sha = sh(r, "git", "rev-parse", "HEAD")
+    bare_origin(r)
+    write(d, "L-executor-0001", {"type": "spec-written", "subject": "L-spec-0001",
+                                 "charter": "L-charter-0486f", "project": "l0486-proj5b"},
+          {"type": "build-done", "subject": "L-spec-0001", "branch": b, "ready_sha": ready},
+          {"type": "shipped", "subject": "L-spec-0001", "charter": "L-charter-0486f", "sha": merge_sha})
+    write(d, "L-grader-0001", {"type": "verdict", "subject": "L-spec-0001", "confirmed": True})
+    write(d, "L-reviewer-0001", {"type": "review", "subject": "L-spec-0001", "depth": "gates-only"})
+    out = run_merged(d)
+    check(out == [b], f"L0486-AC5: this spec IS in a terminal state (accepted) — its own judge()/patch-id "
+                       f"path (already merged locally) reaps the branch too: {out}")
+    e = events(d, "tree-reaped")
+    check(len(e) == 1, f"L0486-AC5: one tree-reaped for the terminal group: {e}")
+    check(e[0].get("worktrees") == [wt], f"L0486-AC5: its worktrees field names the path reap_worktrees removed: {e[0]}")
+    check(events(d, "worktree-reaped") == [], "L0486-AC5: reap_merged_specs itself still appends no worktree-reaped")
+print("L0486-AC5 ok")
+
 print(f"tree-cleanup: {N} checks pass")

@@ -470,6 +470,22 @@ def _record():
         autodispatch.run(ev, specs, fold.NOW)
     except Exception as e:
         autodispatch_error = f"{e}"
+    # L-charter-0042/L-spec-0486 (cleanup-on-finish), R15a (record): the tick's own
+    # per-spec worktree reap, on this SAME `ev` — its own try/except, exactly like
+    # `autodispatch_error` above: a raise never stops the tick's own heartbeat, and
+    # is named on this SAME `tick` event. The `reaped` set that feeds `lane` above
+    # is untouched — `worktree-reaped` never marks a charter reaped.
+    worktree_reap_error = None
+    worktrees_retained = None
+    try:
+        wt_reaped, wt_retained = tree_cleanup.reap_worktrees(ev)
+        for row in wt_reaped:
+            dispatch.emit(tick_path(), {}, "worktree-reaped", subject=row["spec"],
+                          path=row["path"], proof=row["proof"])
+        if wt_retained:
+            worktrees_retained = len(wt_retained)
+    except Exception as e:
+        worktree_reap_error = f"{e}"
     todo = lane(specs, charters, in_flight(ev), reaped, events=ev, inbound=inbound)
     # The one liveness fact: `fold` reads the newest of these for staleness, and
     # `lane` is the count — the whole record this process leaves behind.
@@ -490,6 +506,10 @@ def _record():
         kv["grader_serve_error"] = grader_serve_error
     if autodispatch_error:
         kv["autodispatch_error"] = autodispatch_error
+    if worktree_reap_error:
+        kv["worktree_reap_error"] = worktree_reap_error
+    if worktrees_retained is not None:
+        kv["worktrees_retained"] = worktrees_retained
     if proving_error:
         kv["proving_error"] = proving_error
     dispatch.emit(tick_path(), {}, "tick", **kv)
