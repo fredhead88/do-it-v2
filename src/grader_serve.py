@@ -27,6 +27,19 @@ Each call, in order:
       byte-for-byte to `$R/seat/<spawn>.output.json` and stamps it exactly
       once.
 
+  (3) Alarm (L-spec-8033/R8.3) — steps (0)-(2) run in a `try`; this step runs
+      in the paired `finally`, so it fires even when one of them raised.
+      Recomputes its OWN unserved set independently of step (1)
+      (`relay.pending_packets(events, root=None, served_by="grader-pane")`
+      filtered to unclaimed and older than `relay.GRADER_PANE_UNSERVED_MIN`
+      minutes) and raises a `look` alarm `grader-pane-unserved` (owner
+      `thinker`, key = the spawn id) for each, through `look.emit_once` — the
+      SAME dedupe-and-append path `doit look` itself uses, never a second
+      write path. Clears the alarm for any spawn no longer in that set
+      (claimed, or resolved to a terminal event) via `look._clear`. An
+      exception raised BY this step is itself swallowed — it never masks the
+      original exception from steps (0)-(2), and never blocks a grade.
+
 Every subprocess/tmux call goes through the injected `runner` (default
 `subprocess.run`), never bare — so a test proves every call this function
 makes with no real tmux, bwrap, or login anywhere.
@@ -35,7 +48,7 @@ import json, os, pathlib, subprocess, sys
 
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-import dispatch, fold, grader_view, grading_env, launch, relay, scratch, tick  # noqa: E402
+import dispatch, fold, grader_view, grading_env, launch, look, relay, scratch, tick  # noqa: E402
 
 # probe Q3 (Assumptions): the tmux session grader panes land in — created via
 # `runner` if a first check finds it absent, never assumed to pre-exist unchecked.
@@ -137,107 +150,148 @@ def _start_ts_for(events, spawn):
     return None
 
 
+def _alarm_grader_pane_unserved(events):
+    """R8.3 (L-spec-8033): raise `look` alarm `grader-pane-unserved` (owner
+    `thinker`, key = the spawn id) for every grader packet
+    `relay.pending_packets(..., served_by="grader-pane")` still lists,
+    unclaimed, past `relay.GRADER_PANE_UNSERVED_MIN` minutes — recomputed
+    HERE, independently of step (1) above, so it fires whether the cause was
+    a full pane cap, a failing `claim.sh`, or step (1) itself raising before
+    finishing. Clears any OPEN alarm for a spawn no longer in that set
+    (claimed, or resolved to a terminal event) — `look._clear` is a no-op
+    when nothing is open, so a spawn that never alarmed costs nothing here.
+    Called only from `run`'s `finally`, itself wrapped there so a raise in
+    THIS function never masks the original exception from steps (0)-(2)."""
+    seat_dir = fold.ROOT / "seat"
+    pending = relay.pending_packets(events, root=None, served_by="grader-pane")
+    unserved = {}
+    for p in pending:
+        spawn = p["spawn"]
+        if (seat_dir / f"{spawn}.claimed").exists():
+            continue
+        if p.get("age_min", 0) > relay.GRADER_PANE_UNSERVED_MIN:
+            unserved[spawn] = p
+    for spawn, p in unserved.items():
+        reading = {"spawn": spawn, "age_min": p.get("age_min")}
+        look.emit_once("grader-pane-unserved", spawn, "thinker", reading, events)
+    for e in events:
+        if e.get("type") != "brief" or e.get("condition") != "grader-pane-unserved":
+            continue
+        key = e.get("key")
+        if key is not None and key not in unserved:
+            look._clear("grader-pane-unserved", key, "claimed or terminal", events, fold.ROOT)
+
+
 def run(events, *, runner=None, now=None):
-    """See module docstring for the three steps, in order. Returns the list
-    of reap lines this call produced (`"reaped stale pane <pane> for
-    <spawn>"`) — the reap step's only evidence beside the `runner` calls
-    themselves (Assumptions: no new ledger event for step (0))."""
+    """See module docstring for the three steps, in order, plus the R8.3
+    alarm step (4th, paired with them in a `finally`). Returns the list of
+    reap lines this call produced (`"reaped stale pane <pane> for <spawn>"`)
+    — the reap step's only evidence beside the `runner` calls themselves
+    (Assumptions: no new ledger event for step (0))."""
     events = list(events)
     runner = runner or subprocess.run
     now = now or fold.NOW
     out = []
 
-    pane_of = _spawn_pane_map(events)
-    seat_dir = fold.ROOT / "seat"
+    try:
+        pane_of = _spawn_pane_map(events)
+        seat_dir = fold.ROOT / "seat"
 
-    # ── (0) Reap ─────────────────────────────────────────────────────────
-    for spawn, pane in pane_of.items():
-        if (seat_dir / f"{spawn}.output.json").exists():
-            continue
-        newest = _newest_event(events, spawn)
-        if newest is None or newest.get("type") not in TERMINAL:
-            continue
+        # ── (0) Reap ─────────────────────────────────────────────────────
+        for spawn, pane in pane_of.items():
+            if (seat_dir / f"{spawn}.output.json").exists():
+                continue
+            newest = _newest_event(events, spawn)
+            if newest is None or newest.get("type") not in TERMINAL:
+                continue
+            try:
+                runner(["tmux", "kill-window", "-t", pane])
+            except Exception:
+                pass
+            out.append(f"reaped stale pane {pane} for {spawn}")
+
+        # ── (1) Start ────────────────────────────────────────────────────
+        pending = relay.pending_packets(events, root=None, served_by="grader-pane")
+        running, unclaimed = [], []
+        for p in pending:
+            spawn = p["spawn"]
+            if (seat_dir / f"{spawn}.claimed").exists():
+                running.append(p)
+            else:
+                unclaimed.append(p)
+        unclaimed.sort(key=lambda p: p.get("age_min", 0), reverse=True)   # oldest (largest age_min) first
+
+        cap = max_panes(root=None)
+        started, started_panes = [], []
+        session_checked = False
+        for p in unclaimed:
+            if len(running) >= cap:
+                break
+            spawn = p["spawn"]
+            claim_argv = [str(HERE.parent / "scripts" / "seat" / "claim.sh"), spawn]
+            claim = runner(claim_argv)
+            if getattr(claim, "returncode", 1) != 0:
+                continue
+            if not session_checked:
+                has = runner(["tmux", "has-session", "-t", TMUX_SESSION])
+                if getattr(has, "returncode", 1) != 0:
+                    runner(["tmux", "new-session", "-d", "-s", TMUX_SESSION])
+                session_checked = True
+            view = scratch.sub("grade") / spawn
+            cfg_dir = grader_view.config_dir()
+            project = _project_for(events, spawn)
+            # L-spec-0481/R12.2, R12.6: the SAME binds and environment the
+            # preflight proof itself ran with — one environment for proof and
+            # grade (AC8), never a second, independently-guessed set here.
+            binds = grading_env.sandbox_binds(view, project) if project else []
+            env = {**launch.child_env("grader"), "CLAUDE_CONFIG_DIR": str(cfg_dir),
+                   **grading_env.pane_env(view)}
+            env_argv = [f"{k}={v}" for k, v in sorted(env.items())]
+            # `-n <spawn>` (minor deviation, declared): the spec's own literal
+            # argv has no room to name an addressable window target for step (0)
+            # to kill later, so the window is named after its own spawn id —
+            # `<session>:<spawn>` is then always a valid, unique kill-window
+            # target, and every OTHER segment of the argv matches the spec's own
+            # literal sequence verbatim.
+            argv = (["tmux", "new-window", "-d", "-t", TMUX_SESSION, "-n", spawn, "--"]
+                    + grader_view.bwrap_argv(view, doit_src=HERE.parent, binds=binds)
+                    + ["env", "-i"] + env_argv
+                    + ["claude", "--agent", "grader", "--dangerously-skip-permissions"])
+            runner(argv)
+            running.append(p)
+            started.append(spawn)
+            started_panes.append(f"{TMUX_SESSION}:{spawn}")
+
+        if started:
+            unix_ts = int(now.timestamp())
+            dispatch.emit(tick.tick_path(),
+                          {"pane": ",".join(started_panes), "spawn_ids": ",".join(started)},
+                          "grader-pane-started", subject=f"grader-panes-{unix_ts}")
+
+        # ── (2) Mirror + stamp ───────────────────────────────────────────
+        for p in running:
+            spawn = p["spawn"]
+            seat_out = seat_dir / f"{spawn}.output.json"
+            if seat_out.exists():
+                continue
+            view_out = scratch.sub("grade") / spawn / "seat" / f"{spawn}.output.json"
+            if not view_out.is_file() or not valid_output(view_out):
+                continue
+            seat_dir.mkdir(parents=True, exist_ok=True)
+            seat_out.write_bytes(view_out.read_bytes())
+            model = launch.model_for("grader") or "unpinned"
+            start_ts = _start_ts_for(events, spawn)
+            duration_ms = round((now - start_ts).total_seconds() * 1000) if start_ts is not None else "-"
+            stamp_argv = [str(HERE.parent / "scripts" / "seat" / "stamp.sh"),
+                         spawn, model, spawn, "-", str(duration_ms), "0"]
+            stamp_env = {**os.environ, "DOIT_CLAUDE_PROJECTS": str(grader_view.config_dir() / "projects")}
+            runner(stamp_argv, env=stamp_env)
+    finally:
+        # ── (3) Alarm — R8.3: fires even when a step above raised, never
+        # masking that exception, and never itself allowed to block a grade.
         try:
-            runner(["tmux", "kill-window", "-t", pane])
+            _alarm_grader_pane_unserved(events)
         except Exception:
             pass
-        out.append(f"reaped stale pane {pane} for {spawn}")
-
-    # ── (1) Start ────────────────────────────────────────────────────────
-    pending = relay.pending_packets(events, root=None, served_by="grader-pane")
-    running, unclaimed = [], []
-    for p in pending:
-        spawn = p["spawn"]
-        if (seat_dir / f"{spawn}.claimed").exists():
-            running.append(p)
-        else:
-            unclaimed.append(p)
-    unclaimed.sort(key=lambda p: p.get("age_min", 0), reverse=True)   # oldest (largest age_min) first
-
-    cap = max_panes(root=None)
-    started, started_panes = [], []
-    session_checked = False
-    for p in unclaimed:
-        if len(running) >= cap:
-            break
-        spawn = p["spawn"]
-        claim_argv = [str(HERE.parent / "scripts" / "seat" / "claim.sh"), spawn]
-        claim = runner(claim_argv)
-        if getattr(claim, "returncode", 1) != 0:
-            continue
-        if not session_checked:
-            has = runner(["tmux", "has-session", "-t", TMUX_SESSION])
-            if getattr(has, "returncode", 1) != 0:
-                runner(["tmux", "new-session", "-d", "-s", TMUX_SESSION])
-            session_checked = True
-        view = scratch.sub("grade") / spawn
-        cfg_dir = grader_view.config_dir()
-        project = _project_for(events, spawn)
-        # L-spec-0481/R12.2, R12.6: the SAME binds and environment the
-        # preflight proof itself ran with — one environment for proof and
-        # grade (AC8), never a second, independently-guessed set here.
-        binds = grading_env.sandbox_binds(view, project) if project else []
-        env = {**launch.child_env("grader"), "CLAUDE_CONFIG_DIR": str(cfg_dir),
-               **grading_env.pane_env(view)}
-        env_argv = [f"{k}={v}" for k, v in sorted(env.items())]
-        # `-n <spawn>` (minor deviation, declared): the spec's own literal
-        # argv has no room to name an addressable window target for step (0)
-        # to kill later, so the window is named after its own spawn id —
-        # `<session>:<spawn>` is then always a valid, unique kill-window
-        # target, and every OTHER segment of the argv matches the spec's own
-        # literal sequence verbatim.
-        argv = (["tmux", "new-window", "-d", "-t", TMUX_SESSION, "-n", spawn, "--"]
-                + grader_view.bwrap_argv(view, doit_src=HERE.parent, binds=binds)
-                + ["env", "-i"] + env_argv
-                + ["claude", "--agent", "grader", "--dangerously-skip-permissions"])
-        runner(argv)
-        running.append(p)
-        started.append(spawn)
-        started_panes.append(f"{TMUX_SESSION}:{spawn}")
-
-    if started:
-        unix_ts = int(now.timestamp())
-        dispatch.emit(tick.tick_path(),
-                      {"pane": ",".join(started_panes), "spawn_ids": ",".join(started)},
-                      "grader-pane-started", subject=f"grader-panes-{unix_ts}")
-
-    # ── (2) Mirror + stamp ───────────────────────────────────────────────
-    for p in running:
-        spawn = p["spawn"]
-        seat_out = seat_dir / f"{spawn}.output.json"
-        if seat_out.exists():
-            continue
-        view_out = scratch.sub("grade") / spawn / "seat" / f"{spawn}.output.json"
-        if not view_out.is_file() or not valid_output(view_out):
-            continue
-        seat_dir.mkdir(parents=True, exist_ok=True)
-        seat_out.write_bytes(view_out.read_bytes())
-        model = launch.model_for("grader") or "unpinned"
-        start_ts = _start_ts_for(events, spawn)
-        duration_ms = round((now - start_ts).total_seconds() * 1000) if start_ts is not None else "-"
-        stamp_argv = [str(HERE.parent / "scripts" / "seat" / "stamp.sh"),
-                     spawn, model, spawn, "-", str(duration_ms), "0"]
-        stamp_env = {**os.environ, "DOIT_CLAUDE_PROJECTS": str(grader_view.config_dir() / "projects")}
-        runner(stamp_argv, env=stamp_env)
 
     return out

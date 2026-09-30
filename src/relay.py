@@ -8,7 +8,8 @@
   pending_packets(events, root)  -> dispatched seats with no answer yet
   unserved(events, root)         -> seat dispatches nobody claimed in time (R6)
   planner_attempts(events, cid)  -> {attempts, last_reason, next}
-  SERVERS                        -> dict   role -> "relay" | "pane" (L-charter-0042 R5c)
+  SERVERS                        -> dict   role -> "relay" | "pane" | "grader-pane" (L-charter-0042 R5c/R8)
+  GRADER_PANE_UNSERVED_MIN       -> int     minutes before an unclaimed grader packet alarms (R8.3)
 
 Queries, and nothing else. Nothing here appends an event, opens a pane or spawns
 anything: the launcher, the pane and the board import these and own every side
@@ -33,14 +34,21 @@ import audit, dispatch, fold  # noqa: E402
 PLANNER_STARTED = "planner-started"
 PLANNER_ENDED = "planner-ended"
 
-# L-charter-0042 R5c: which mechanism serves a dispatched role's seat packet.
-# All eleven `dispatch.ROLES` keys — `grader` included — map to `"relay"`: this
-# deliberately does NOT carry the Plan's SD11 target value `grader ->
-# "grader-pane"`, since that value is only true once a `grader-pane` server
-# exists; the still-unwritten `grader-pane-serve` unit is the one that builds
-# it and flips this one entry (finding 1). The three standing panes serve
-# themselves.
-SERVERS = {**{r: "relay" for r in dispatch.ROLES}, "planner": "pane", "executor": "pane", "thinker": "pane"}
+# L-charter-0042 R5c/R8: which mechanism serves a dispatched role's seat packet.
+# Every `dispatch.ROLES` key maps to `"relay"` EXCEPT `grader`, which the
+# sandboxed grader pane (`grader_serve.run`, `served_by="grader-pane"`) serves
+# instead — flipped here by L-spec-8033/R8.1, now that the `grader-pane`
+# server actually exists (a prior comment here named that unit as still
+# unwritten; it is written and this is the flip it described). The three
+# standing panes serve themselves.
+SERVERS = {**{r: "relay" for r in dispatch.ROLES}, "grader": "grader-pane",
+           "planner": "pane", "executor": "pane", "thinker": "pane"}
+
+# R8.3 (L-spec-8033): minutes an unclaimed grader-pane packet may sit before
+# `grader_serve.run` raises a `grader-pane-unserved` look alarm for it. A
+# module constant, like THROTTLE_N below — not a launch.toml knob, since
+# nothing else in this file's footprint reads launch.toml.
+GRADER_PANE_UNSERVED_MIN = 10
 
 # The states a spec is in when it has already committed to a footprint (L-adr-0028).
 HOLDING = ("written", "building")

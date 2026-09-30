@@ -19,7 +19,7 @@ TMP = pathlib.Path(tempfile.mkdtemp())
 PROJECT = "relay-fixture"
 os.environ["DOIT_ROOT"], os.environ["DOIT_PROJECT"] = str(TMP), PROJECT
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
-import dispatch, fold, relay  # noqa: E402
+import dispatch, fold, pane_end, relay, up  # noqa: E402
 
 N = 0
 CLOCK = [0]
@@ -474,9 +474,12 @@ ok(len(rows) == 1 and rows[0]["status"] == "stale-still-offered"
 # L-spec-0431 · install-and-serve (L-charter-0042) — R5c
 # ══════════════════════════════════════════════════════════════════════════════
 
-# ── AC8: every dispatchable role serves through relay; the three panes serve themselves ──
-ok(all(relay.SERVERS[role] == "relay" for role in dispatch.ROLES),
-   f"installsync-0431 AC8: every dispatchable role maps to relay: {relay.SERVERS}")
+# ── AC8: every dispatchable role serves through relay, EXCEPT grader (flipped
+# to grader-pane by L-spec-8033/R8.1); the three panes serve themselves ──
+ok(all(relay.SERVERS[role] == "relay" for role in dispatch.ROLES if role != "grader"),
+   f"installsync-0431 AC8: every non-grader dispatchable role maps to relay: {relay.SERVERS}")
+ok(relay.SERVERS["grader"] == "grader-pane",
+   f"L-spec-8033/R8.1: grader maps to grader-pane, not relay: {relay.SERVERS}")
 ok(relay.SERVERS["planner"] == relay.SERVERS["executor"] == relay.SERVERS["thinker"] == "pane",
    f"installsync-0431 AC8: the three standing panes serve themselves: {relay.SERVERS}")
 print("installsync-0431 AC8 ok")
@@ -533,5 +536,113 @@ ok(relay._in_flight("L-charter-9420", specs0472_11) is False,
 ok("L-charter-9420" not in relay.open_charters(events0472_11),
    "0472-AC11: l1-complete already excludes it from relay.open_charters, unchanged")
 print("0472-AC11 ok")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-8033 · grader-pane-route (L-charter-0042 R8) — AC2
+#
+# One pending grader packet, one pending spec-writer packet, one pending
+# planner packet, over the SAME fixture ledger: `served_by="relay"` returns
+# only the spec-writer spawn, `served_by="grader-pane"` returns exactly the
+# grader spawn, `served_by="pane"` only the planner spawn, and `served_by=None`
+# all three.
+# ══════════════════════════════════════════════════════════════════════════════
+d_ac2 = scene("ac2-three-roles")
+sid_ac2 = {"grader": "L-grader-9200", "spec-writer": "L-spec-writer-9201", "planner": "L-planner-9202"}
+for role, sid in sid_ac2.items():
+    (d_ac2 / "seat" / f"{sid}.packet.md").write_text("packet")
+    ev(d_ac2, sid, "spawn-started", f"L-spec-92{list(sid_ac2).index(role):02d}", role=role, spawn=sid)
+events_ac2 = read()
+relay_ac2 = {p["spawn"] for p in relay.pending_packets(events_ac2, d_ac2, served_by="relay")}
+grader_pane_ac2 = {p["spawn"] for p in relay.pending_packets(events_ac2, d_ac2, served_by="grader-pane")}
+pane_ac2 = {p["spawn"] for p in relay.pending_packets(events_ac2, d_ac2, served_by="pane")}
+none_ac2 = {p["spawn"] for p in relay.pending_packets(events_ac2, d_ac2, served_by=None)}
+ok(relay_ac2 == {sid_ac2["spec-writer"]},
+   f"L-spec-8033 AC2: served_by='relay' returns only the spec-writer spawn: {relay_ac2}")
+ok(grader_pane_ac2 == {sid_ac2["grader"]},
+   f"L-spec-8033 AC2: served_by='grader-pane' returns exactly the grader spawn: {grader_pane_ac2}")
+ok(pane_ac2 == {sid_ac2["planner"]},
+   f"L-spec-8033 AC2: served_by='pane' returns only the planner spawn: {pane_ac2}")
+ok(none_ac2 == set(sid_ac2.values()),
+   f"L-spec-8033 AC2: served_by=None returns all three spawns: {none_ac2}")
+print("L-spec-8033 AC2 ok")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-8033 · grader-pane-route (L-charter-0042 R8) — AC3
+#
+# `served_by` partitions every dispatchable role, not just grader: one pending
+# packet per `dispatch.ROLES` key, and exactly one of `served_by="relay"` /
+# `served_by="grader-pane"` must return it.
+# ══════════════════════════════════════════════════════════════════════════════
+d_ac3 = scene("ac3-partition")
+roles_ac3 = sorted(dispatch.ROLES)
+sid_of_ac3 = {role: f"L-{role}-90{i:02d}" for i, role in enumerate(roles_ac3)}
+for role, sid in sid_of_ac3.items():
+    (d_ac3 / "seat" / f"{sid}.packet.md").write_text("packet")
+    ev(d_ac3, sid, "spawn-started", f"L-spec-{sid}", role=role, spawn=sid)
+events_ac3 = read()
+relay_rows_ac3 = {p["spawn"] for p in relay.pending_packets(events_ac3, d_ac3, served_by="relay")}
+pane_rows_ac3 = {p["spawn"] for p in relay.pending_packets(events_ac3, d_ac3, served_by="grader-pane")}
+table_ac3 = {role: [name for name, rows in (("relay", relay_rows_ac3), ("grader-pane", pane_rows_ac3))
+                    if sid in rows]
+            for role, sid in sid_of_ac3.items()}
+display_ac3 = {role: (servers[0] if servers else "NONE") for role, servers in table_ac3.items()}
+print(f"L-spec-8033 AC3 role -> server table: {display_ac3}")
+ok(all(len(v) == 1 for v in table_ac3.values()),
+   f"AC3: every dispatchable role has exactly one server (grader -> grader-pane, every other -> relay): {table_ac3}")
+print("L-spec-8033 AC3 ok")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-8033 · grader-pane-route (L-charter-0042 R8) — AC10
+#
+# The default-filter consumers of `relay.pending_packets` — `up._unclaimed_pending`
+# (which `up.relay_main` and `pane_end.check_and_end_relay` both use) — stop
+# counting grader packets now that R8.1 flips `SERVERS["grader"]` to
+# `"grader-pane"`: a Planner or relay pane must not be held alive by, or
+# refuse to end over, a grader packet it neither dispatched nor serves (R8.4,
+# intended and pinned, not a regression). An ordinary role's packet still
+# counts exactly as before.
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class _KillRecorder:
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, pid, sig):
+        self.calls.append((pid, sig))
+
+
+# ── grader-only: invisible to the default filter, never blocks a pane-end ────
+d10a = scene("ac10-grader-only")
+(d10a / "seat" / "L-grader-9500.packet.md").write_text("packet")
+ev(d10a, "L-grader-9500", "spawn-started", "L-spec-9500", role="grader", spawn="L-grader-9500")
+events10a = read()
+pending10a = relay.pending_packets(events10a, d10a)
+ok(up._unclaimed_pending(pending10a, d10a) == [],
+   f"AC10: a lone unclaimed grader packet is invisible to the default (relay) filter: {pending10a}")
+rec_a = _KillRecorder()
+code_a = pane_end.check_and_end_relay(root=d10a, child_env={"DOIT_SUPERVISED": "1"},
+                                      kill=rec_a, find_ancestor=lambda: 4242)
+ok(code_a == 0 and len(rec_a.calls) == 1,
+   f"AC10: check_and_end_relay ends over the grader-only fixture — not refused with "
+   f"'unclaimed seat packet(s) outstanding': code={code_a} calls={rec_a.calls}")
+
+# ── grader + an ordinary (spec-writer) packet: the ordinary one still blocks ──
+d10b = scene("ac10-grader-plus-spec-writer")
+(d10b / "seat" / "L-grader-9501.packet.md").write_text("packet")
+ev(d10b, "L-grader-9501", "spawn-started", "L-spec-9501", role="grader", spawn="L-grader-9501")
+(d10b / "seat" / "L-spec-writer-9502.packet.md").write_text("packet")
+ev(d10b, "L-spec-writer-9502", "spawn-started", "L-spec-9502", role="spec-writer", spawn="L-spec-writer-9502")
+events10b = read()
+pending10b = relay.pending_packets(events10b, d10b)
+outstanding10b = up._unclaimed_pending(pending10b, d10b)
+ok([p["spawn"] for p in outstanding10b] == ["L-spec-writer-9502"],
+   f"AC10: the spec-writer packet still blocks; the grader packet still does not: {outstanding10b}")
+rec_b = _KillRecorder()
+code_b = pane_end.check_and_end_relay(root=d10b, child_env={"DOIT_SUPERVISED": "1"},
+                                      kill=rec_b, find_ancestor=lambda: 4242)
+ok(code_b == 1 and rec_b.calls == [],
+   f"AC10: check_and_end_relay refuses while the spec-writer packet is outstanding: code={code_b}")
+print("L-spec-8033 AC10 ok")
 
 print(f"relay: {N} checks pass")

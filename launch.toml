@@ -32,8 +32,10 @@ cwd = "/opt/albert-scott"
 # carve-out (SD15): the grader keeps its sandbox's own private tmpfs `/tmp`,
 # never the shared scratch root. `max_panes` is this file's OWN concurrency
 # cap for sandboxed grader panes — a different capacity from `models.toml`'s
-# `[seats]` (builder concurrency).
+# `[seats]` (builder concurrency). Raised 2 -> 4 by L-spec-8033/R8.2, now that
+# the relay no longer serves graders at all (R8.1) and every grader packet
+# funnels through this one cap.
 [roles.grader]
 strip = ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"]
 rules = "agents/grader.md"
-max_panes = 2
+max_panes = 4
