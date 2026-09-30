@@ -189,7 +189,10 @@ def _resolve_interp(token, venv_path):
         return str(pathlib.Path(venv_path) / "bin" / token)
     # With no project venv, resolve against the sandbox's own PATH (pane_env's
     # /usr/bin:/bin), not the dispatcher's, which may put an unbound venv first.
-    return shutil.which(token, path="/usr/bin:/bin") or token
+    found = shutil.which(token, path="/usr/bin:/bin")
+    if not found and token == "python":  # no bare `python` on this box; verify uses python3
+        found = shutil.which("python3", path="/usr/bin:/bin")
+    return found or token
 
 
 def _bwrap_available():
