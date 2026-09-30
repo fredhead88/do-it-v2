@@ -433,8 +433,11 @@ def run(events, specs, now, *, runner=None, dry_run=False):
             _gfail((r1.get("stderr") or r1.get("stdout") or "doit packet grader failed").strip())
             continue
         packet_path = (r1.get("stdout") or "").strip()
+        # --timeout 30: the grader cap counts relay-queue wait, which alone ate the
+        # 15-min default on 6+ graders on 2026-09-29/30 (Thinker standing rule).
         r2 = runner(["doit", "dispatch", "--detach", "grader", spec, "--packet", packet_path,
-                     "--cwd", str(worktree), "--charter", charter or "", "--project", project])
+                     "--cwd", str(worktree), "--charter", charter or "", "--project", project,
+                     "--timeout", "30"])
         if r2.get("code", 1) != 0:
             _gfail((r2.get("stderr") or r2.get("stdout") or "doit dispatch --detach failed").strip())
             continue
