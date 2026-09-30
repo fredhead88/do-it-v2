@@ -1788,24 +1788,43 @@ assert code == 1 and [e["type"] for e in raw13] == ["spawn-failed"], raw13
 assert raw13[0]["reason"] == "held:node_modules", raw13[0]
 N += 1
 
-# ── AC14(i) · a spec-local hold (git, on subject A) refuses only A; a clean
+# ── AC14(i) · a spec-local hold (on subject A) refuses only A; a clean
 # subject B, unrelated to it, dispatches normally through to spawn-started ─────
+# L-spec-8034/AC6: a bare `git` need (unattributed to any criterion) now
+# ROUTES to owed instead of holding the dispatch — git is a GRADER_NEVER
+# capability, excluded from `required()` before the held-capability/preflight
+# checks ever run. `view-paths` (the one remaining SPEC_LOCAL capability
+# routing never touches) preserves this fixture's original intent: a
+# spec-local hold that isolates one subject without touching a sibling's.
 ac14a_subj, ac14b_subj = "L-spec-0481ac14a", "L-spec-0481ac14b"
-_cap_content(ac14a_subj, "git status\n")
+_cap_content(ac14a_subj, "/some/foreign/absolute/path\n")
 _cap_content(ac14b_subj, "echo hi\n")
 _gv_build_done(ac14a_subj, base_sha="B1", ready_sha="R1")
 _gv_build_done(ac14b_subj, base_sha="B1", ready_sha="R1")
-code, raw14a = _gv_drive(ac14a_subj, view_build=_real_view_build)
+
+
+def _view_build_foreign_path(*_a, **_k):
+    """`_real_view_build`'s stub carries no `verify.sh` of its own, so
+    `_prove_view_paths` (which reads THIS view's `verify.sh`, not the
+    content-dir's verify script) trivially passed with an empty file — this
+    populates it with the same foreign path `required()` already saw, so the
+    proof genuinely fails the way a real grader_view.build() would."""
+    v = pathlib.Path(tempfile.mkdtemp(prefix="l0481-view-"))
+    (v / "verify.sh").write_text("#!/bin/bash\n/some/foreign/absolute/path\n")
+    return v
+
+
+code, raw14a = _gv_drive(ac14a_subj, view_build=_view_build_foreign_path)
 assert code == 1, raw14a
 ch14a = next(e for e in raw14a if e["type"] == "capability-hold")
-assert ch14a["subject"] == f"capability:git:{ac14a_subj}", ch14a
+assert ch14a["subject"] == f"capability:view-paths:{ac14a_subj}", ch14a
 code, raw14b = _gv_drive(ac14b_subj, view_build=_real_view_build, serve_out=grade([met]))
 assert code == 0 and raw14b[-1]["type"] == "spawn-done", raw14b
 assert not any(e["type"] in ("grading-preflight-failed", "capability-hold") for e in raw14b), \
     "AC14(i): subject B is not touched by A's spec-local hold"
 _rm_seat(next(e["spawn"] for e in raw14b if e["type"] == "spawn-started"))
 code, raw14a2 = _gv_drive(ac14a_subj, view_build=_boom_build)
-assert code == 1 and raw14a2[0]["reason"] == "held:git", raw14a2
+assert code == 1 and raw14a2[0]["reason"] == "held:view-paths", raw14a2
 N += 1
 
 # ── AC14(ii) · reviewer preflight is read-only: porcelain(cwd) of a fixture
@@ -3349,3 +3368,61 @@ assert dispatch.grading_budget(fold.read_events(), subj_ac16_482) is None, \
 print("L-spec-0482 AC16 ok")
 
 print("dispatch: +L-spec-0482 (grading-breaker: AC1-AC9 AC15 AC16)")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-8034 (capability-routing) — AC6 (dispatch records routing before spend,
+# actor grader, non-seat grader route; never refused for a routed capability)
+# and AC7 (events_for never derives criterion-routed from a grader Output)
+# ══════════════════════════════════════════════════════════════════════════════
+SUBJ_8034_6 = "L-spec-9472"
+dispatch.CONTENT.mkdir(parents=True, exist_ok=True)
+SPEC_8034_6 = dispatch.CONTENT / f"{SUBJ_8034_6}.md"
+SPEC_8034_6.write_text(
+    "## Acceptance criteria\n\nAC1 [ui]: browser criterion.\nreview_path: log in as x, go to /y\n\n"
+    "AC2 [backend]: plain criterion.\nreview_path: nothing special here.\n")
+met_8034 = {"ac": "AC2", "verdict": "met", "reason": "r"}
+
+code6a, types6a, evs6a, _ = spawn("grader", out=grade([met_8034]), subject=SUBJ_8034_6)
+assert code6a == 0 and "spawn-failed" not in types6a, (code6a, types6a, evs6a)
+routed6a = [e for e in evs6a if e["type"] == "criterion-routed"]
+assert len(routed6a) == 1 and routed6a[0]["criterion"] == "AC1" and routed6a[0]["capability"] == "browser" \
+    and routed6a[0]["to"] == "owed", routed6a
+raw6a_types = [e["type"] for e in spawn.raw]
+assert raw6a_types.index("criterion-routed") < raw6a_types.index("spawn-started"), raw6a_types
+N += 1
+
+# a second, unchanged dispatch appends no new criterion-routed row
+code6b, types6b, evs6b, _ = spawn("grader", out=grade([met_8034]), subject=SUBJ_8034_6)
+assert code6b == 0 and not any(t == "criterion-routed" for t in types6b), types6b
+N += 1
+
+# rework: the browser criterion is dropped -> the next dispatch appends to=none
+SPEC_8034_6.write_text(
+    "## Acceptance criteria\n\nAC2 [backend]: plain criterion.\nreview_path: nothing special here.\n")
+code6c, types6c, evs6c, _ = spawn("grader", out=grade([met_8034]), subject=SUBJ_8034_6)
+routed6c = [e for e in evs6c if e["type"] == "criterion-routed"]
+assert len(routed6c) == 1 and routed6c[0]["criterion"] == "AC1" and routed6c[0]["to"] == "none", routed6c
+print("8034-AC6 ok (non-seat grader route)")
+
+# AC6, seat route: the same routing computation runs before either grader
+# refusal branch (dispatch.main's top `if a.role == "grader":` block, outside
+# the grader_seat/non-seat split) — proven end to end via the seat backend too.
+SUBJ_8034_6S = "L-spec-9471"
+_gv_build_done(SUBJ_8034_6S, base_sha="B1", ready_sha="R1")
+(dispatch.CONTENT / f"{SUBJ_8034_6S}.md").write_text(
+    "## Acceptance criteria\n\nAC1 [ui]: browser criterion.\nreview_path: log in as x, go to /y\n\n"
+    "AC2 [backend]: plain criterion.\nreview_path: nothing special here.\n")
+_seat_view_6 = pathlib.Path(tempfile.mkdtemp())
+code6s, raw6s = _gv_drive(SUBJ_8034_6S, view_build=lambda *a: _seat_view_6, serve_out=grade([met_8034]))
+assert code6s == 0 and not any(e["type"] == "spawn-failed" for e in raw6s), raw6s
+routed6s = [e for e in raw6s if e["type"] == "criterion-routed"]
+assert len(routed6s) == 1 and routed6s[0]["criterion"] == "AC1" and routed6s[0]["to"] == "owed", raw6s
+assert not any(e["type"] in ("grading-preflight-failed", "capability-hold") for e in raw6s), raw6s
+print("8034-AC6 ok (seat grader route)")
+
+# AC7 (events_for half): dispatch never derives a criterion-routed from a
+# grader Output, whatever its fields look like.
+ev_for_7 = dispatch.events_for("grader", grade([met_8034]), argparse.Namespace(subject=SUBJ_8034_6),
+                               {"subject": SUBJ_8034_6})
+assert not any(t == "criterion-routed" for t, _ in ev_for_7), ev_for_7
+print("8034-AC7(events_for) ok")

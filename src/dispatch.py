@@ -1257,25 +1257,25 @@ def main(a):
     # requiring nothing is untouched (nothing for the missing view to have
     # blocked); and a reviewer of any backend (read-only, against its cwd — never
     # a view).
-    import grading_env
+    import grading_env, routing
     grader_seat = a.role == "grader" and backend == "seat"
-    if a.role == "grader" and not grader_seat:
-        gsp_nv, gvp_nv = CONTENT / f"{a.subject}.md", CONTENT / f"verify-{a.subject}-grader.sh"
-        g_required_nv = grading_env.required(
-            "grader", gsp_nv.read_text() if gsp_nv.is_file() else "",
-            gvp_nv.read_text() if gvp_nv.is_file() else "", a.project or pathlib.Path(cwd).name)
-        if g_required_nv:
-            fail(f"{a.subject}: backend={backend} builds no view to prove {g_required_nv[0]} in — "
-                 "refusing role=grader before any spend", reason="preflight:no-view")
+    gproject = a.project or pathlib.Path(cwd).name
+    g_routed = set()
+    if a.role == "grader":  # L-spec-8034/R12.g: route before either refusal check (AC6); owed-ac wins (Assumption 8)
+        g_spec_text, g_verify_text = [p.read_text() if p.is_file() else "" for p in (
+            CONTENT / f"{a.subject}.md", CONTENT / f"verify-{a.subject}-grader.sh")]
+        g_explicit_owed = routing.explicit_owed_ids(fold.read_events(), a.subject)
+        g_computed_routes = {c: v for c, v in grading_env.route(g_spec_text, g_verify_text, gproject).items() if c not in g_explicit_owed}
+        for crit, cap, to in routing.diff_routes(g_computed_routes, routing.latest_routed_events(fold.read_events(), a.subject)):
+            emit(ledger, base, "criterion-routed", criterion=crit, capability=cap, to=to)
+        g_routed = set(g_computed_routes)
+        g_required_grader = grading_env.required("grader", g_spec_text, g_verify_text, gproject, owed=g_explicit_owed, routed=g_routed)
+    if a.role == "grader" and not grader_seat and g_required_grader:
+        fail(f"{a.subject}: backend={backend} builds no view to prove {g_required_grader[0]} in — "
+             "refusing role=grader before any spend", reason="preflight:no-view")
     if grader_seat or a.role == "reviewer":
-        gproject = a.project or pathlib.Path(cwd).name
-        if a.role == "grader":
-            gsp, gvp = CONTENT / f"{a.subject}.md", CONTENT / f"verify-{a.subject}-grader.sh"
-            g_required = grading_env.required("grader", gsp.read_text() if gsp.is_file() else "",
-                                              gvp.read_text() if gvp.is_file() else "", gproject)
-        else:
-            g_required = grading_env.required("reviewer", "", "", gproject, mcp_config=bool(a.mcp_config),
-                                              review_account=(ROOT / f"review-account-{gproject}").exists())
+        g_required = g_required_grader if a.role == "grader" else grading_env.required(
+            "reviewer", "", "", gproject, mcp_config=bool(a.mcp_config), review_account=(ROOT / f"review-account-{gproject}").exists())
         held_subj = held_capability(fold.read_events(), a.subject, g_required)
         if held_subj:
             fail(f"{a.subject}: an open hold covers {held_subj} — refusing role={a.role} before any spend",
@@ -1297,8 +1297,8 @@ def main(a):
             pf_view, pf_repo = grading_view, HERE.parent
         else:
             pf_view, pf_repo = pathlib.Path(cwd), HERE.parent
-        failures = grading_env.preflight(a.role, a.subject, pf_view, gproject, repo=pf_repo,
-                                         mcp_config=a.mcp_config)
+        failures = grading_env.preflight(a.role, a.subject, pf_view, gproject, repo=pf_repo, mcp_config=a.mcp_config,
+                                         owed=(g_explicit_owed if a.role == "grader" else frozenset()), routed=g_routed)
         if failures:
             for cap, reason in failures:
                 emit(ledger, base, "grading-preflight-failed", role=a.role, capability=cap, reason=reason)

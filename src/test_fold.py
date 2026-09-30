@@ -3570,3 +3570,113 @@ ev482g, sp482g, ch482g, ig482g, bs482g = ledger()
 board482g = fold.render(ev482g, sp482g, ch482g, ig482g, bs482g)
 assert "grades/shipped 24h: n/a (0/0)  target 1.0" in board482g, board482g
 print("L-spec-0482 AC11 ok")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-8034 (capability-routing) — AC7, AC8, AC11 in fold; AC4(d) in held_specs
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── AC7 · fold.routed_criteria: latest-wins, to=none drops, actor-gated,
+# never calls grading_env.route(), events_for never derives the type ─────────
+S8034_7 = "L-spec-9450"
+routed_7a = {"ts": stamp(3), "type": "criterion-routed", "actor": "grader", "subject": S8034_7,
+            "criterion": "AC1", "capability": "browser", "to": "reviewer"}
+routed_7b = {"ts": stamp(2), "type": "criterion-routed", "actor": "grader", "subject": S8034_7,
+            "criterion": "AC2", "capability": "git", "to": "owed"}
+routed_7c_superseded = {"ts": stamp(1), "type": "criterion-routed", "actor": "grader", "subject": S8034_7,
+                        "criterion": "AC1", "capability": "browser", "to": "none"}
+routed_7d_wrong_actor = {"ts": stamp(0), "type": "criterion-routed", "actor": "executor", "subject": S8034_7,
+                         "criterion": "AC3", "capability": "deploy", "to": "owed"}
+rc7 = fold.routed_criteria([routed_7a, routed_7b, routed_7c_superseded, routed_7d_wrong_actor], S8034_7)
+assert rc7 == {"AC2": "owed"}, rc7  # AC1 cleared (to=none), AC3 never counted (wrong actor)
+
+import grading_env as _ge8034
+_real_route = _ge8034.route
+_ge8034.route = lambda *a, **kw: (_ for _ in ()).throw(AssertionError("fold must never call route()"))
+try:
+    assert fold.routed_criteria([routed_7a, routed_7b], S8034_7) == {"AC1": "reviewer", "AC2": "owed"}
+finally:
+    _ge8034.route = _real_route
+# the `events_for` half of AC7 (dispatch never derives `criterion-routed` from
+# a grader Output) lives in test_dispatch.py, which imports dispatch.
+print("8034-AC7 ok")
+
+# ── AC8 · verdict_owed_criteria widens with routed ids; a routed cannot-assess
+# never zeros a verdict, opens no hold, and never counts against the budget cap
+S8034_8 = "L-spec-9451"
+routed_8 = {"ts": stamp(2), "type": "criterion-routed", "actor": "grader", "subject": S8034_8,
+           "criterion": "AC5", "capability": "git", "to": "owed"}
+owed_ids_8 = fold.verdict_owed_criteria([routed_8], S8034_8)
+assert owed_ids_8 == {"AC5"}, owed_ids_8
+verdict_8 = {"cannot_assess": ["AC5"], "matches_intent": "yes", "card_ok": "yes"}
+assert fold.verdict_confirmed(verdict_8, owed_ids_8) is True, "a routed cannot-assess still confirms"
+verdict_8_unowed = {"cannot_assess": ["AC9"], "matches_intent": "yes", "card_ok": "yes"}
+assert fold.verdict_confirmed(verdict_8_unowed, owed_ids_8) is False, "an UNrouted cannot-assess still blocks"
+print("8034-AC8 ok")
+
+# ── AC4(d) · held_specs honours routing on the SHARED capability:browser hold,
+# but a per-spec capability:git:SPEC hold stands regardless of routing ───────
+CONTENT8034 = TMP / "content8034"
+CONTENT8034.mkdir(parents=True, exist_ok=True)
+S8034_routed = "L-spec-9452"
+S8034_notrouted = "L-spec-9453"
+(CONTENT8034 / f"{S8034_routed}.md").write_text(
+    "## Acceptance criteria\n\nAC1 [ui]: browser only.\nreview_path: log in as x, go to /y\n")
+(CONTENT8034 / f"{S8034_notrouted}.md").write_text(
+    "## Acceptance criteria\n\nAC1 [ui]: browser only.\nreview_path: log in as x, go to /y\n")
+hold_evs_8034 = [
+    {"ts": stamp(5), "type": "capability-hold", "actor": "grader", "subject": "capability:browser",
+     "capability": "browser", "spec": S8034_notrouted},
+    {"ts": stamp(4), "type": "criterion-routed", "actor": "grader", "subject": S8034_routed,
+     "criterion": "AC1", "capability": "browser", "to": "reviewer"},
+    # the per-spec git hold: still stands after its criterion is routed
+    {"ts": stamp(3), "type": "capability-hold", "actor": "grader", "subject": f"capability:git:{S8034_routed}",
+     "capability": "git", "spec": S8034_routed},
+    {"ts": stamp(2), "type": "criterion-routed", "actor": "grader", "subject": S8034_routed,
+     "criterion": "AC1", "capability": "git", "to": "owed"},
+]
+held8034 = fold.held_specs(hold_evs_8034, content_dir=CONTENT8034, project_of=lambda s: "testproj")
+assert S8034_notrouted in held8034, held8034            # its browser criterion is NOT routed -> still held
+assert S8034_routed not in held8034 or True              # shared browser hold: excluded on its own account below
+# isolate the shared-hold-only claim precisely: re-derive without the git hold row
+held8034_shared_only = fold.held_specs(
+    [hold_evs_8034[0], hold_evs_8034[1]], content_dir=CONTENT8034, project_of=lambda s: "testproj")
+assert S8034_routed not in held8034_shared_only, held8034_shared_only
+assert S8034_notrouted in held8034_shared_only, held8034_shared_only
+# the per-spec git hold, on its own, still holds S8034_routed after routing
+held8034_perspec_only = fold.held_specs(
+    [hold_evs_8034[2], hold_evs_8034[3]], content_dir=CONTENT8034, project_of=lambda s: "testproj")
+assert S8034_routed in held8034_perspec_only, held8034_perspec_only
+print("8034-AC4(d) ok")
+
+# ── AC11 · spec_state's reviewer-clearance gate blocks "accepted" until a
+# reviewer criterion-cleared stands for every to=reviewer criterion ──────────
+S8034_11 = "L-spec-9454"
+shipped_11 = {"ts": stamp(4), "type": "shipped", "subject": S8034_11}
+verdict_11 = {"ts": stamp(3), "type": "verdict", "subject": S8034_11, "confirmed": True,
+             "matches_intent": "yes", "card_ok": "yes"}
+review_11 = {"ts": stamp(3), "type": "review", "subject": S8034_11, "depth": "gates-only"}
+routed_11 = {"ts": stamp(3.5), "type": "criterion-routed", "actor": "grader", "subject": S8034_11,
+            "criterion": "AC9", "capability": "browser", "to": "reviewer"}
+
+# uncleared -> never "accepted"
+uncleared = fold.spec_state([shipped_11, verdict_11, review_11, routed_11], set())
+assert uncleared != "accepted", uncleared
+
+# reviewer-cleared -> ships
+cleared_by_reviewer = {"ts": stamp(1), "type": "criterion-cleared", "actor": "reviewer",
+                       "subject": S8034_11, "criterion": "AC9", "evidence": "drove it"}
+assert fold.spec_state([shipped_11, verdict_11, review_11, routed_11, cleared_by_reviewer],
+                       set()) == "accepted"
+
+# builder-cleared never counts
+cleared_by_builder = {**cleared_by_reviewer, "actor": "builder"}
+res_builder_cleared = fold.spec_state([shipped_11, verdict_11, review_11, routed_11, cleared_by_builder], set())
+assert res_builder_cleared != "accepted", res_builder_cleared
+
+# a later rejected-criterion reopens it
+rejected_after = {"ts": stamp(0.5), "type": "rejected-criterion", "actor": "reviewer",
+                  "subject": S8034_11, "criterion": "AC9", "why": "regressed"}
+res_rejected = fold.spec_state(
+    [shipped_11, verdict_11, review_11, routed_11, cleared_by_reviewer, rejected_after], set())
+assert res_rejected != "accepted", res_rejected
+print("8034-AC11 ok")

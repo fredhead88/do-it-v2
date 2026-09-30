@@ -67,6 +67,13 @@ or not — has voided its own run.
 If a stripped item appears anyway — a rationale, a name, a timestamp — set
 `contamination: true` and return. You cannot un-see a cue, so the run is void.
 
+A criterion the packet has already dropped as **routed** (L-spec-8034/R12.h) —
+its block does not appear in item 1 above — is neither graded nor reported as
+`cannot-assess`: it belongs to the reviewer or to the owed sweep, not to you.
+Likewise, a failure of a verify-script segment whose only need is a routed
+`verify` capability (no criterion names it) is neither a verdict nor a
+`cannot-assess` — its proof is the owed check, not your run.
+
 ## What you do, per criterion, in order
 
 1. Apply the validator's result. A fail is decided before you reason.

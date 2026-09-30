@@ -23,6 +23,10 @@ CAPABILITIES = ("env-file", "view-paths", "tools", "node_modules", "git",
                 "db", "db-schema", "browser", "review-account", "deploy")
 # SD-R12-6a: the two capabilities whose hold is scoped to one spec, never shared.
 SPEC_LOCAL = frozenset({"view-paths", "git"})
+# L-spec-8034/R12.g: capabilities a grader never has, by construction (R8's
+# git-less invariant, no browser, no deploy target) — a criterion needing one
+# of these routes to the reviewer or to owed instead of holding the grade.
+GRADER_NEVER = ("browser", "deploy", "git")
 
 # Unset in the environment of every process this module starts (Constraints).
 PROD_DSN_VARS = ("SUPABASE_DB_URL", "SUPABASE_DB_URL_DIRECT",
@@ -35,26 +39,161 @@ _TOOL_TOKENS = {"python3", "python", "bash", "node", "alembic", "pytest"}
 _NODE_TOKENS = {"npm", "npx", "node", "vitest", "tsc"}
 _ABS_PATH_RE = re.compile(r'(?<![\w.-])(/[^\s\'"]+)')
 _GIT_RE = re.compile(r'(?<![\w-])git(?![\w-])')
+_GIT_HISTORY_RE = re.compile(r'\bgit\b[^\n]*\b(merge-base|log|show|rev-list|diff|blame|cat-file|--is-ancestor)\b')
 _DB_TOKENS = ("live_db", "DB_URL")
-_DEPLOY_TOKENS = ("/version", "deployed", "origin")
+# L-spec-8034/R12.j: narrowed to tokens that NAME the deployed system — never
+# the bare prose words `origin`/`deployed`, which a Constraints paragraph or a
+# rollback note uses without meaning "this criterion needs a live deploy".
+_DEPLOY_TOKENS = ("/version", "deployed at")
 _BROWSER_TOKENS = ("log in as", "go to /")
+_AC_ANCHOR = re.compile(r"^\s*\**AC(\d+)\s*\[")  # same shape packet._AC_ANY matches
+_HEADING_RE = re.compile(r'^\s*#+\s')  # a `##` section heading always closes the current block
 
 
-def _verify_git(verify_text):
-    """SD-R12-3a: a bare `git` word in a `&&`-segment, after `$BASE` subst."""
-    text = (verify_text or "").replace("$BASE", "BASE")
-    return any(_GIT_RE.search(seg) for seg in text.split("&&"))
+def _git_need(text):
+    """Assumption 4: `"git"` (the builder branch's own history/ancestry — `git`
+    followed by `merge-base`/`log`/`show`/`rev-list`/`diff`/`blame`/`cat-file`/
+    `--is-ancestor`, or any `$BASE`/`BASE` reference in a segment that also
+    names `git`) vs `"tools"` (the bare program, e.g. a test's own `git init`
+    in a tmp dir) vs `None` (no `git` word at all) for one block of text."""
+    if not _GIT_RE.search(text):
+        return None
+    based = text.replace("$BASE", "BASE")
+    if _GIT_HISTORY_RE.search(based) or re.search(r'\bgit\b[^\n]*\bBASE\b', based):
+        return "git"
+    return "tools"
 
 
-def _review_path_git(spec_text):
-    """A `git` word on a `review_path:` line only — never `rollback_path` prose."""
-    return any(_GIT_RE.search(line) for line in (spec_text or "").splitlines()
-               if "review_path:" in line)
+def _tokens_tools_node(text):
+    tokens = re.findall(r"[A-Za-z0-9_./-]+", text)
+    basenames = {t.rsplit("/", 1)[-1] for t in tokens}
+    found = set()
+    if basenames & _TOOL_TOKENS:
+        found.add("tools")
+    if basenames & _NODE_TOKENS:  # returned regardless of node_dirs (Assumption 2)
+        found.add("node_modules")
+    return found
 
 
-def required(role, spec_text, verify_text, project, *, mcp_config=False, review_account=False):
+def _caps_plain(text):
+    """`env-file`/`view-paths`/`tools`/`node_modules`/`db`/`db-schema`/
+    `browser`/`review-account` — the non-git, non-deploy token rules, applied
+    to ONE block of text (Assumption 7): a criterion's own block, or one
+    `&&`-split verify-script segment."""
+    found = _tokens_tools_node(text)
+    if ".env" in text:
+        found.add("env-file")
+    if _ABS_PATH_RE.search(text):
+        found.add("view-paths")
+    if any(tok in text for tok in _DB_TOKENS):
+        found.update(("db", "db-schema"))
+    if any(tok in text for tok in _BROWSER_TOKENS):
+        found.update(("browser", "review-account"))
+    return found
+
+
+def _deploy_match(text, project):
+    """R12.j: `/version`, `"deployed at"`, or the project's own `[[prod]]
+    base_url` — never the bare words `origin`/`deployed` alone."""
+    if any(tok in text for tok in _DEPLOY_TOKENS):
+        return True
+    base_url = next((p.get("base_url") for p in _look_toml(DOIT_SRC).get("prod", [])
+                     if p.get("project") == project), None)
+    return bool(base_url and base_url in text)
+
+
+def _criterion_blocks(spec_text):
+    """`{criterion_id: block_text}` — the same `AC<n> [` anchor/grouping
+    `routing.group_blocks`/`packet._drop_owed_blocks` use (Assumption 3): a
+    block runs from its anchor line through the line before the next anchor;
+    text before the first anchor (and any Constraints/rollback_path/
+    security_path prose after the last one, since nothing there re-anchors)
+    belongs to no criterion and contributes nothing."""
+    lines = (spec_text or "").splitlines()
+    blocks, cur_id, cur = {}, None, []
+
+    def flush():
+        if cur_id is not None:
+            blocks[cur_id] = "\n".join(cur)
+    for l in lines:
+        m = _AC_ANCHOR.match(l)
+        if m:
+            flush()
+            cur_id, cur = f"AC{m.group(1)}", [l]
+        elif _HEADING_RE.match(l):  # a `##` heading (Constraints/rollback_path/
+            flush()                # security_path/…) always closes the block —
+            cur_id, cur = None, []  # nothing after it re-anchors without a fresh AC<n>
+        elif cur_id is not None:
+            cur.append(l)
+    flush()
+    return blocks
+
+
+def criterion_caps(spec_text, verify_text, project):
+    """R12.f: `{criterion_id or "verify": [capabilities, CAPABILITIES order]}`,
+    derived from each criterion's own block (git scoped to its `review_path:`
+    line(s), matching the old spec-level `_review_path_git` rule but now
+    per-criterion) plus verify-script segments (split on `&&`, Assumption 5)
+    attributed to the `AC<n>` they name, else to the pseudo-criterion
+    `"verify"` — present only when a segment actually yields a capability.
+    Pure: no subprocess; `look.toml` read only for the project's own
+    `[[prod]] base_url`."""
+    out = {}
+    for cid, text in _criterion_blocks(spec_text).items():
+        found = _caps_plain(text)
+        git = _git_need(text)
+        if git and any(_GIT_RE.search(l) for l in text.splitlines() if "review_path:" in l):
+            found.add(git)
+        if _deploy_match(text, project):
+            found.add("deploy")
+        if found:
+            out[cid] = found
+
+    vtext = (verify_text or "").replace("$BASE", "BASE")
+    for seg in (vtext.split("&&") if vtext else []):
+        found = _caps_plain(seg)
+        git = _git_need(seg)
+        if git:
+            found.add(git)
+        if _deploy_match(seg, project):
+            found.add("deploy")
+        if not found:
+            continue
+        m = re.search(r'\bAC(\d+)\b', seg)
+        target = f"AC{m.group(1)}" if m else "verify"
+        out[target] = out.get(target, set()) | found
+
+    return {cid: [c for c in CAPABILITIES if c in caps] for cid, caps in out.items()}
+
+
+def route(spec_text, verify_text, project):
+    """R12.g/AC5: `{criterion_id: (capability, "reviewer"|"owed")}` for every
+    grader criterion (or the pseudo-criterion `"verify"`) whose block needs a
+    `GRADER_NEVER` capability. Browser and deploy route to `"reviewer"` when
+    the project has a `[[prod]]` row, to `"owed"` when it has none; `git`
+    always routes to `"owed"` (nothing is deployed to drive a git-less grader
+    into having history). A criterion needing several `GRADER_NEVER`
+    capabilities routes on the first in `GRADER_NEVER` order (Assumption 6).
+    Pure: text and `look.toml` only."""
+    has_prod = any(p.get("project") == project for p in _look_toml(DOIT_SRC).get("prod", []))
+    out = {}
+    for cid, caps in criterion_caps(spec_text, verify_text, project).items():
+        hit = next((c for c in GRADER_NEVER if c in caps), None)
+        if hit is None:
+            continue
+        to = "owed" if hit == "git" else ("reviewer" if has_prod else "owed")
+        out[cid] = (hit, to)
+    return out
+
+
+def required(role, spec_text, verify_text, project, *, owed=frozenset(), routed=frozenset(),
+             mcp_config=False, review_account=False):
     """Pure/textual subsequence of `CAPABILITIES`. Reviewer needs are
-    conditional (SD-R12-2a/Assumption 10) — never a blanket three."""
+    conditional (SD-R12-2a/Assumption 10) — never a blanket three; the
+    reviewer branch is unchanged by this unit. The grader branch is now the
+    union over the role's criteria (`criterion_caps`, including the pseudo-
+    criterion `"verify"`) minus any criterion id in `owed` or `routed` —
+    spec-level derivation is gone (R12.f)."""
     if role == "reviewer":
         found = set()
         if mcp_config:
@@ -64,27 +203,12 @@ def required(role, spec_text, verify_text, project, *, mcp_config=False, review_
         if any(p.get("project") == project for p in _look_toml(DOIT_SRC).get("prod", [])):
             found.add("deploy")
         return [c for c in CAPABILITIES if c in found]
-    spec_text, verify_text = spec_text or "", verify_text or ""
-    text = f"{spec_text}\n{verify_text}"
+    skip = set(owed) | set(routed)
     found = set()
-    if ".env" in text:
-        found.add("env-file")
-    if _ABS_PATH_RE.search(text):
-        found.add("view-paths")
-    tokens = re.findall(r"[A-Za-z0-9_./-]+", text)
-    basenames = {t.rsplit("/", 1)[-1] for t in tokens}
-    if basenames & _TOOL_TOKENS:
-        found.add("tools")
-    if basenames & _NODE_TOKENS:  # returned regardless of node_dirs (Assumption 2)
-        found.add("node_modules")
-    if _verify_git(verify_text) or _review_path_git(spec_text):
-        found.add("git")
-    if any(tok in text for tok in _DB_TOKENS):
-        found.update(("db", "db-schema"))
-    if any(tok in spec_text for tok in _BROWSER_TOKENS):
-        found.update(("browser", "review-account"))
-    if any(tok in text for tok in _DEPLOY_TOKENS):
-        found.add("deploy")
+    for cid, caps in criterion_caps(spec_text or "", verify_text or "", project).items():
+        if cid in skip:
+            continue
+        found.update(caps)
     return [c for c in CAPABILITIES if c in found]
 
 
@@ -294,13 +418,15 @@ def _write_state(view, **kv):
     path.write_text(json.dumps(state))
 
 
-def preflight(role, subject, view, project, *, repo, mcp_config=None):
+def preflight(role, subject, view, project, *, repo, mcp_config=None, owed=frozenset(), routed=frozenset()):
     """Provisions/proves every capability `required()` needs, in `view/` only.
-    Returns `(capability, reason)` FAILURES only, in `CAPABILITIES` order."""
+    Returns `(capability, reason)` FAILURES only, in `CAPABILITIES` order.
+    `owed`/`routed` (criterion ids) pass straight through to `required()`
+    (R12.g/i) — this function reads no ledger itself; dispatch computes them."""
     view = pathlib.Path(view)
     tree = view / "tree"
     spec_text, verify_text = _spec_verify_text(subject, role)
-    caps = required(role, spec_text, verify_text, project)
+    caps = required(role, spec_text, verify_text, project, owed=owed, routed=routed)
     row = _project_row(project)
     reasons = {}
 

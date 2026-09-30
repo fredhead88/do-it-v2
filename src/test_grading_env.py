@@ -90,6 +90,13 @@ def _raising(*a, **kw):
 _real_run, _real_system = subprocess.run, os.system
 subprocess.run, os.system, grading_env._run = _raising, _raising, _raising
 try:
+    # L-spec-8034/R12.f: `required()` is now per-criterion (`criterion_caps`),
+    # not spec-level — a capability found only in spec_text prose OUTSIDE an
+    # `AC<n> [` block contributes nothing (Assumption 3). Rows whose signal
+    # lives in verify_text alone (an unattributed `&&`-segment always becomes
+    # the pseudo-criterion `"verify"`, counted by default) are unaffected; a
+    # row whose old signal lived in un-anchored spec_text prose now carries an
+    # `AC1 [...]`/`review_path:` anchor so the same intent still counts.
     TABLE = [
         ("grader", "spec", "export .env something", "testproj", ["env-file"]),
         ("grader", "spec", "/opt/albert-scott/x /usr/bin/python3", "testproj", ["view-paths", "tools"]),
@@ -97,11 +104,14 @@ try:
         ("grader", "spec", "npm run test", "testproj", ["node_modules"]),
         ("grader", "spec", "git log -1", "testproj", ["git"]),
         ("grader", "spec has a live_db criterion", "checks DB_URL too", "testproj", ["db", "db-schema"]),
-        ("grader", "log in as operator, go to /", "verify", "testproj", ["browser", "review-account"]),
-        ("grader", "spec", "check deployed state against origin", "testproj", ["deploy"]),
+        ("grader", "AC1 [ui]: browser check.\nreview_path: log in as operator, go to /",
+         "verify", "testproj", ["browser", "review-account"]),
+        # R12.j: "check deployed state against origin" names neither `/version`
+        # nor `deployed at` nor a project base_url — no longer `deploy` (AC12).
+        ("grader", "spec", "check deployed state against origin", "testproj", []),
         ("grader", "nothing special here", "nothing special here either", "testproj", []),
         ("reviewer", "anything at all", "anything at all", "testproj", []),
-        ("grader", "criterion:\nreview_path: git log -1\nrollback_path: git revert HEAD",
+        ("grader", "AC1 [backend]: x\nreview_path: git log -1\nrollback_path: git revert HEAD",
          "/usr/bin/python3 t.py", "testproj", ["view-paths", "tools", "git"]),
     ]
     for role, spec_text, verify_text, project, expect in TABLE:
@@ -252,7 +262,11 @@ print("AC7 (support) ok")
 
 
 # ═══════════════════════════ AC8 — git: derived, never provisioned (SD-R12-3a) ═════
-write_spec_verify("L-spec-9601", "grader", "spec", "git status")
+# L-spec-8034/Assumption 4: "git status" names no history verb (merge-base/log/
+# show/rev-list/diff/blame/cat-file/--is-ancestor) and no $BASE — it is a
+# `tools` need, not `git`. Use a real history verb so this still exercises the
+# git-preflight-always-fails path (AC8(i)).
+write_spec_verify("L-spec-9601", "grader", "spec", "git log -1")
 failures6 = grading_env.preflight("grader", "L-spec-9601", view6, "testproj", repo=str(REPO))
 gitfail = dict(failures6).get("git")
 check(gitfail is not None and "never provisioned" in gitfail, f"AC8(i): git always fails preflight: {failures6}")
@@ -261,7 +275,8 @@ check("git" in grading_env.required("grader", "spec", "cd $BASE && git diff --st
 check("git" not in grading_env.required(
     "grader", "rollback_path: git revert HEAD is safe", "nothing relevant here", "testproj"),
     "AC8(ii): rollback_path prose ('git revert') never requires git")
-check("git" in grading_env.required("grader", "criterion:\nreview_path: run `git log -1`", "nothing relevant here",
+check("git" in grading_env.required("grader", "AC1 [backend]: x\nreview_path: run `git log -1`",
+                                     "nothing relevant here",
                                      "testproj"), "AC8(iii): a review_path: line running git")
 check("git" not in grading_env.required(
     "grader", "prose says the git history matters here, outside review_path", "nothing relevant here", "testproj"),
@@ -399,6 +414,252 @@ check(env8027b["HOME"] == str(view8027b) and env8027b["PATH"] == "/usr/bin:/bin"
       and "DOIT_ROOT" not in env8027b,
       f"L-spec-8027 AC8: no venv -> bare PATH, HOME still <view>, still no DOIT_ROOT: {env8027b}")
 print("L-spec-8027 AC8 ok")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# L-spec-8034 (capability-routing) — AC1-AC5, AC12 below. AC13's size/purity
+# assertions live in test_routing.py (needs no git); AC6-AC11/AC14 (dispatch,
+# fold, packet, agents/*.md, the live post-deploy observation) live in
+# test_dispatch.py/test_fold.py/test_packet.py.
+# ═══════════════════════════════════════════════════════════════════════════
+
+REPO_NOPROD = FIXTURE_ROOT / "repo-no-look-toml"
+REPO_NOPROD.mkdir(parents=True, exist_ok=True)  # no look.toml at all -> no [[prod]] row
+
+SPEC8034 = """## Acceptance criteria
+
+AC1 [backend]: plain python, no GRADER_NEVER need.
+review_path: run `/usr/bin/python3 check.py`
+
+AC2 [backend]: needs git history via a review_path.
+review_path: run `git merge-base HEAD $BASE`
+
+AC3 [backend]: a temp-repo test — the git PROGRAM only, never history.
+review_path: run a suite that does `git init` in a tmp dir
+
+AC4 [ui]: a browser path.
+review_path: log in as operator, go to /dashboard
+
+AC5 [backend]: a deploy path.
+review_path: curl /version
+
+AC6 [observed-data]: a live-db path.
+review_path: checks DB_URL
+
+## Constraints
+No money, no credentials. Mentions git log, origin, deployed, and .env here —
+none of it inside a criterion block.
+
+## rollback_path
+git revert HEAD is safe; nothing here is a criterion either.
+"""
+
+
+# ═══════════════════════════ AC1 — criterion_caps: pure, per-criterion, git split
+caps8034 = grading_env.criterion_caps(SPEC8034, "", "testproj")
+print("AC1 (8034) criterion_caps table:")
+for cid in sorted(caps8034):
+    print("  ", cid, "->", caps8034[cid])
+check(caps8034.get("AC1") == ["view-paths", "tools"], f"AC1(8034): plain python: {caps8034.get('AC1')}")
+check(caps8034.get("AC2") == ["git"], f"AC1(8034): git-history review_path: {caps8034.get('AC2')}")
+check(caps8034.get("AC3") == ["tools"], f"AC1(8034): temp-repo test carries no git: {caps8034.get('AC3')}")
+check("git" not in (caps8034.get("AC3") or []), "AC1(8034): AC3 must not carry git")
+check(set(caps8034.get("AC4") or []) >= {"browser", "review-account"}, caps8034.get("AC4"))
+check("deploy" in (caps8034.get("AC5") or []), caps8034.get("AC5"))
+check(set(caps8034.get("AC6") or []) == {"db", "db-schema"}, caps8034.get("AC6"))
+check("AC-CONSTRAINTS-PROSE" not in json.dumps(caps8034), "sanity: no stray key")
+for cid, cs in caps8034.items():
+    idx = [grading_env.CAPABILITIES.index(c) for c in cs]
+    check(idx == sorted(idx), f"AC1(8034): {cid} caps not in CAPABILITIES order: {cs}")
+# prose outside any criterion block (Constraints/rollback_path) yields nothing:
+# confirmed by the fact that no extra key beyond AC1-AC6 exists and none of
+# AC1-AC6's own lists were inflated by "git log"/"origin"/".env"/"deployed"
+# sitting in those two sections (git only appears on AC2/AC3's own lines;
+# env-file/deploy tokens from Constraints never surface on any id above).
+check("env-file" not in sum(caps8034.values(), []), "AC1(8034): Constraints' '.env' contributes nothing")
+print("AC1 (8034) ok")
+
+
+# ═══════════════════════════ AC2 — required(): union minus owed/routed ══════
+req_all = grading_env.required("grader", SPEC8034, "", "testproj")
+check(set(req_all) >= {"git", "browser", "deploy"}, f"AC2(8034): empty owed/routed includes all three: {req_all}")
+req_routed = grading_env.required("grader", SPEC8034, "", "testproj", routed={"AC2", "AC4", "AC5"})
+check("git" not in req_routed and "browser" not in req_routed and "deploy" not in req_routed,
+      f"AC2(8034): routing AC2/AC4/AC5 drops git/browser/deploy: {req_routed}")
+req_owed_git = grading_env.required("grader", SPEC8034, "", "testproj", owed={"AC2"})
+check("git" not in req_owed_git, f"AC2(8034): owed={{'AC2'}} drops git alone: {req_owed_git}")
+check("browser" in req_owed_git and "deploy" in req_owed_git, req_owed_git)
+# spec-level derivation is gone: a fixture whose only `git` sits in a
+# rollback_path (outside any AC block) returns no git at all.
+ROLLBACK_ONLY = "## Acceptance criteria\n\nAC1 [backend]: plain.\nreview_path: run `/usr/bin/python3 x.py`\n\n" \
+                "## rollback_path\ngit log -1 is safe to revert\n"
+check("git" not in grading_env.required("grader", ROLLBACK_ONLY, "", "testproj"),
+      "AC2(8034): rollback_path git contributes nothing to required()")
+# reviewer branch unchanged (an L-spec-0481 reviewer row, replayed)
+check(grading_env.required("reviewer", "x", "x", "albert-scott", mcp_config=True, review_account=True)
+      == ["browser", "review-account", "deploy"], "AC2(8034): reviewer branch unchanged")
+_pf_calls = []
+_real_required = grading_env.required
+
+
+def _recording_required(*a, **kw):
+    _pf_calls.append((a, kw))
+    return _real_required(*a, **kw)
+
+
+grading_env.required = _recording_required
+try:
+    write_spec_verify("L-spec-9700", "grader", SPEC8034, "")
+    view_pf = FIXTURE_ROOT / "grade" / "ac2-8034"
+    (view_pf / "tree").mkdir(parents=True, exist_ok=True)
+    grading_env.preflight("grader", "L-spec-9700", view_pf, "testproj", repo=str(REPO_NOPROD),
+                          owed=frozenset({"AC2"}), routed=frozenset({"AC4"}))
+finally:
+    grading_env.required = _real_required
+check(_pf_calls and _pf_calls[-1][1].get("owed") == frozenset({"AC2"})
+      and _pf_calls[-1][1].get("routed") == frozenset({"AC4"}),
+      f"AC2(8034): preflight passes owed/routed straight through: {_pf_calls[-1] if _pf_calls else None}")
+print("AC2 (8034) ok")
+
+
+# ═══════════════════════════ AC3 — verify-script git is never silently dropped ══
+VERIFY_0469 = 'run_checks.sh && BASE_LINES=$(git show $BASE:deploy.sh | wc -l)'
+caps_0469 = grading_env.criterion_caps("", VERIFY_0469, "testproj")
+check(caps_0469.get("verify") == ["git"], f"AC3(8034): unattributed verify git -> pseudo-criterion 'verify': {caps_0469}")
+route_0469 = grading_env.route("", VERIFY_0469, "testproj")
+check(route_0469.get("verify") == ("git", "owed"), f"AC3(8034): route()['verify']: {route_0469}")
+check("git" in grading_env.required("grader", "", VERIFY_0469, "testproj"),
+      "AC3(8034): required() with routed empty still includes the verify-only git")
+check("git" not in grading_env.required("grader", "", VERIFY_0469, "testproj", routed={"verify"}),
+      "AC3(8034): routed={'verify'} drops it")
+# a segment naming AC3 attributes git to AC3, not to the pseudo-criterion
+# (Assumption 5: the SAME segment both needs git and names the AC<n>)
+VERIFY_NAMED = 'echo running AC3 && cd . && git show $BASE:x.py | wc -l # for AC3'
+caps_named = grading_env.criterion_caps("", VERIFY_NAMED, "testproj")
+check(caps_named.get("AC3") == ["git"] and "verify" not in caps_named, f"AC3(8034): named attribution: {caps_named}")
+# a bare `git init` (temp repo) verify segment yields tools, never git
+VERIFY_TMPREPO = 'cd "$(mktemp -d)" && git init -q && python3 -m pytest'
+caps_tmp = grading_env.criterion_caps("", VERIFY_TMPREPO, "testproj")
+check(caps_tmp.get("verify") and "git" not in caps_tmp["verify"] and "tools" in caps_tmp["verify"],
+      f"AC3(8034): git-init-only verify segment yields tools, never git: {caps_tmp}")
+print("AC3 (8034) ok")
+
+
+# ═══════════════════════════ AC4 — over-holding is gone in real-shaped fixtures ═
+# (a) 0469-shaped: one browser criterion, one deploy criterion, five plain
+# ones, plus the AC3-style unattributed verify git line -- routing all three
+# GRADER_NEVER needs leaves only the plain criteria's capabilities.
+SPEC_0469SHAPE = """## Acceptance criteria
+
+AC1 [backend]: plain.
+review_path: run `/usr/bin/python3 a.py`
+
+AC2 [ui]: browser.
+review_path: log in as operator, go to /x
+
+AC3 [backend]: deploy.
+review_path: curl /version
+"""
+routes_0469 = grading_env.route(SPEC_0469SHAPE, VERIFY_0469, "testproj")
+check(set(routes_0469) >= {"AC2", "AC3", "verify"}, routes_0469)
+req_0469_routed = grading_env.required("grader", SPEC_0469SHAPE, VERIFY_0469, "testproj",
+                                       routed=set(routes_0469))
+check(not ({"git", "browser", "deploy"} & set(req_0469_routed)), req_0469_routed)
+check("tools" in req_0469_routed, req_0469_routed)  # AC1's plain python need survives
+
+# (b) 0484-shaped: three [backend] criteria whose review_path is a temp-repo
+# suite -- route() is empty, required() includes tools and no git.
+SPEC_0484SHAPE = """## Acceptance criteria
+
+AC4 [backend]: temp-repo suite one.
+review_path: run a suite that does `git init` in a tmp dir
+
+AC8 [backend]: temp-repo suite two.
+review_path: run a suite that does `git commit` in a tmp dir
+
+AC11 [backend]: temp-repo suite three.
+review_path: run a suite that does `git init` in a tmp dir
+"""
+check(grading_env.route(SPEC_0484SHAPE, "", "testproj") == {}, "AC4(8034)(b): no GRADER_NEVER need at all")
+req_0484 = grading_env.required("grader", SPEC_0484SHAPE, "", "testproj")
+check("tools" in req_0484 and "git" not in req_0484, f"AC4(8034)(b): {req_0484}")
+
+# (c) 0486-shaped: temp-repo criteria + a DB_URL criterion -- db/db-schema
+# survive unless AC11 itself is owed.
+SPEC_0486SHAPE = """## Acceptance criteria
+
+AC1 [backend]: temp-repo one.
+review_path: run a suite that does `git init` in a tmp dir
+
+AC3 [backend]: temp-repo two.
+review_path: run a suite that does `git init` in a tmp dir
+
+AC7 [backend]: temp-repo three.
+review_path: run a suite that does `git init` in a tmp dir
+
+AC11 [observed-data]: db criterion.
+review_path: checks DB_URL
+"""
+req_0486 = grading_env.required("grader", SPEC_0486SHAPE, "", "testproj")
+check({"db", "db-schema"} <= set(req_0486), f"AC4(8034)(c): db survives when AC11 is not owed: {req_0486}")
+req_0486_owed = grading_env.required("grader", SPEC_0486SHAPE, "", "testproj", owed={"AC11"})
+check(not ({"db", "db-schema"} & set(req_0486_owed)), f"AC4(8034)(c): owed={{'AC11'}} drops both: {req_0486_owed}")
+print("AC4 (8034)(a)(b)(c) ok — (d) (fold.held_specs) lives in test_fold.py")
+
+
+# ═══════════════════════════ AC5 — route()/GRADER_NEVER exact table ═════════
+check(grading_env.GRADER_NEVER == ("browser", "deploy", "git"), grading_env.GRADER_NEVER)
+
+# `_look_toml(DOIT_SRC)` reads the REAL repo-root look.toml, not the fixture
+# REPO above (route()/required() always resolve `[[prod]]` against
+# `DOIT_SRC`/`look.toml` — Assumptions/Constraints: "the project's own
+# `[[prod]] base_url`"). Monkeypatch `_look_toml` for a clean, hermetic table.
+_real_look_toml = grading_env._look_toml
+def _fake_look_toml(repo):
+    if str(repo) == str(grading_env.DOIT_SRC):
+        return {"prod": [{"project": "hasprod", "base_url": "https://x.example"}]}
+    return _real_look_toml(repo)
+
+
+grading_env._look_toml = _fake_look_toml
+try:
+    r_hasprod = grading_env.route(SPEC8034, "", "hasprod")
+    r_gone = grading_env.route(SPEC8034, "", "noprod")
+    check(r_hasprod.get("AC4") == ("browser", "reviewer"), r_hasprod)
+    check(r_hasprod.get("AC5") == ("deploy", "reviewer"), r_hasprod)
+    check(r_hasprod.get("AC2") == ("git", "owed"), r_hasprod)  # git always owed
+    check(r_gone.get("AC4") == ("browser", "owed"), r_gone)
+    check(r_gone.get("AC5") == ("deploy", "owed"), r_gone)
+    check(r_gone.get("AC2") == ("git", "owed"), r_gone)
+    # several GRADER_NEVER needs -> first in GRADER_NEVER order (browser, deploy, git)
+    multi = grading_env.criterion_caps(
+        "## Acceptance criteria\n\nAC9 [ui]: multi.\nreview_path: git log -1, log in as x, go to /, curl /version\n",
+        "", "hasprod")
+    check(set(multi.get("AC9") or []) >= {"browser", "deploy", "git"}, multi)
+    r_multi = grading_env.route(
+        "## Acceptance criteria\n\nAC9 [ui]: multi.\nreview_path: git log -1, log in as x, go to /, curl /version\n",
+        "", "hasprod")
+    check(r_multi.get("AC9") == ("browser", "reviewer"), f"AC5(8034): first-in-GRADER_NEVER-order: {r_multi}")
+    print("AC5 (8034) full table ok")
+finally:
+    grading_env._look_toml = _real_look_toml
+
+
+# ═══════════════════════════ AC12 — deploy tokens no longer match prose ═════
+check(grading_env._deploy_match("the branch origin", "testproj") is False, "AC12: bare 'origin' never matches")
+check(grading_env._deploy_match("already deployed", "testproj") is False, "AC12: bare 'deployed' never matches")
+check(grading_env._deploy_match("deployed by hand", "testproj") is False, "AC12: 'deployed by hand' never matches")
+check(grading_env._deploy_match("curl /version", "testproj") is True, "AC12: '/version' matches")
+check(grading_env._deploy_match("deployed at 03:00 UTC", "testproj") is True, "AC12: 'deployed at' matches")
+grading_env._look_toml = _fake_look_toml
+try:
+    check(grading_env._deploy_match("hit https://x.example/health", "hasprod") is True,
+          "AC12: the project's own [[prod]] base_url matches")
+finally:
+    grading_env._look_toml = _real_look_toml
+check("origin" not in grading_env._DEPLOY_TOKENS and "deployed" not in grading_env._DEPLOY_TOKENS,
+      grading_env._DEPLOY_TOKENS)
+print("AC12 (8034) ok")
 
 
 shutil.rmtree(FIXTURE_ROOT, ignore_errors=True)

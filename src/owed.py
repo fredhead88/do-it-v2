@@ -22,9 +22,19 @@ reverse would cycle — so the three terminal shapes (killed / void /
 closed-unbuilt) that force a row to `dropped` are duplicated here from
 `fold.spec_state`'s own tests, the same duplication `fold.py` already
 accepts for `tick.SPEC_DONE`.
+
+L-spec-8034/R12.i: a `to=="owed"` `criterion-routed` criterion (a capability
+the grader never has, routed away rather than held) is synthesized into
+`last_ac` exactly like a real `owed-ac` would be — `routing.owed_rows_for_
+routed` reads the same `evs`, never `fold`, so this stays a leaf module. Its
+governing ts and `wake_at` are both the routing event's own `ts`, so `due_at`
+lands at ship time with no wait (Assumption/R12.i: "due at once"); an explicit
+`owed-ac` on the identical criterion always wins (checked first, so the
+synthetic row never overwrites it).
 """
 from datetime import timedelta
 from datetime import datetime as _datetime
+import routing
 
 STATUSES = ("waiting", "due", "met", "waived", "expired", "dropped", "unshipped")
 
@@ -76,6 +86,13 @@ def checks(evs, now):
     for e in evs:
         if e.get("type") == "owed-ac" and e.get("criterion"):
             last_ac[e["criterion"]] = e             # last-write-by-position
+    for row in routing.owed_rows_for_routed(evs, spec):
+        cid = row["criterion"]
+        if cid in last_ac:
+            continue  # an explicit owed-ac on the same criterion always wins
+        last_ac[cid] = {"type": "owed-ac", "criterion": cid, "ts": row["ts"], "wake_at": row["ts"],
+                        "_src": "routing",
+                        "line": f"grader capability {row['capability']!r} has no grader — routed to owed"}
 
     out = []
     for c, ac in last_ac.items():

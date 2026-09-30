@@ -18,7 +18,7 @@ import collections, json, os, pathlib, sys
 from datetime import datetime, timedelta, timezone
 
 import freeze
-import owed
+import owed, routing
 import proving
 
 ROOT = pathlib.Path(os.environ.get("DOIT_ROOT", pathlib.Path.home() / ".do-it"))
@@ -261,6 +261,7 @@ EMITS["grader-pane-started"] = {"tick"}     # R8: the tick's own per-cycle pane 
 # the shared/spec-local hold it opens — never any other actor's to write.
 EMITS["grading-preflight-failed"] = {"grader", "reviewer"}
 EMITS["capability-hold"] = {"grader", "reviewer"}
+EMITS["criterion-routed"] = {"grader"}
 # R7: widen `rejected-criterion`/`criterion-cleared` to also admit `builder`,
 # on top of every actor already admitted. The bare `EMITS` set carries no
 # per-criterion granularity — reachable behavior is narrowed to
@@ -717,12 +718,7 @@ def capability_holds(events):
 
 
 def held_specs(events, *, content_dir=None, project_of=None):
-    """L-spec-0481/AC15: specs an OPEN `capability-hold` covers right now. The
-    two per-spec subject shapes cover only the spec their own subject names
-    (present even with no content on disk). The shared `capability:NAME`
-    shape covers every spec WITH content whose grader `required()` needs
-    NAME — the one place in `fold` that reads files, never through any other
-    reader here, which still takes `events` alone."""
+    """L-spec-0481/AC15: OPEN `capability-hold` specs now (per-spec holds never release by routing, L-spec-8034/Assumption 11)."""
     content_dir = pathlib.Path(content_dir) if content_dir else ROOT / "content"
     if project_of is None:
         def project_of(spec):
@@ -738,12 +734,14 @@ def held_specs(events, *, content_dir=None, project_of=None):
         for f in sorted(content_dir.glob("*.md")):
             spec = f.stem
             verify = content_dir / f"verify-{spec}-grader.sh"
-            caps = grading_env.required("grader", f.read_text(),
-                                         verify.read_text() if verify.is_file() else "", project_of(spec))
+            caps = grading_env.required("grader", f.read_text(), verify.read_text() if verify.is_file() else "",
+                                         project_of(spec), routed=set(routing.routed_to(events, spec)))
             if row["capability"] in caps:
                 held.add(spec)
     return held
 
+def routed_criteria(events, spec):
+    return routing.routed_to(events, spec)  # L-spec-8034: {criterion: "reviewer"|"owed"}; no route() here (SD-R16-4)
 
 def escalation_ok(e):
     """§4.9/R3: an escalation-blocking carries `default`+`deadline`+`revert` — all
@@ -790,6 +788,7 @@ REQUIRED["charter-classified"] = ("klass", "reason")
 # like every other entry above.
 REQUIRED["grading-preflight-failed"] = ("capability",)
 REQUIRED["capability-hold"] = ("capability", "spec")
+REQUIRED["criterion-routed"] = ("criterion", "capability", "to")  # L-spec-8034/SD-V
 
 
 # L-charter-0033/board-owners, Target 1: who owns each board() row and what
@@ -1551,9 +1550,9 @@ def verdict_owed_criteria(events, subject):
     this decides whether a criterion counts as OWED, and only a
     spec-writer/spec-auditor declaration ever does — so an executor `owed-ac`
     with no prior declaration is simply not in this set, exactly as if it had
-    never been written."""
+    never been written. L-spec-8034: also returns every ROUTED criterion."""
     return {e.get("criterion") for e in events if e.get("type") == "owed-ac" and e.get("subject") == subject
-            and e.get("criterion") and e.get("actor") in ("spec-writer", "spec-auditor")}
+            and e.get("criterion") and e.get("actor") in ("spec-writer", "spec-auditor")} | set(routed_criteria(events, subject))
 
 
 def grades_per_shipped(events, now, window_h=24):
@@ -1642,6 +1641,7 @@ def spec_state(evs, retracted):
         # AC21).
         verdict_owed = verdict_owed_criteria(evs, evs[0].get("subject"))
         graded = any(e["type"] == "verdict" and verdict_confirmed(e, verdict_owed) for e in evs)
+        reviewer_gate = routing.reviewer_gate_clear(evs, evs[0].get("subject"), {c for c, to in routed_criteria(evs, evs[0].get("subject")).items() if to == "reviewer"})
         # L-charter-0038/L-spec-0384, R3: `accepted` now reads live off
         # `owed.checks()` (an empty list — no owed criteria — satisfies `all()`
         # vacuously, matching the old membership test's behavior) rather than a
@@ -1650,7 +1650,7 @@ def spec_state(evs, retracted):
         # L-charter-0046/L-spec-0470 (ledger-vocabulary), R3: a "waived" row
         # counts exactly as "met" for acceptance and closure — an explicit
         # ledger decision, never a silent close (charter constraint, verbatim).
-        if graded and "review" in types and all(r["status"] in ("met", "waived") for r in owed.checks(evs, NOW)):
+        if graded and reviewer_gate and "review" in types and all(r["status"] in ("met", "waived") for r in owed.checks(evs, NOW)):
             return "accepted"                                        # §2.5 accepted()
         unmet = [r for r in owed.checks(evs, NOW) if r["status"] not in ("met", "waived")]
         if any(r["status"] == "due" for r in unmet):

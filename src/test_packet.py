@@ -1517,4 +1517,66 @@ for ac, phrase in (("AC1", "first criterion's anchor line"), ("AC2", "second cri
     assert f"{ac} [backend] built · log · ok" in t_ac1, f"AC1: {ac}'s card row must survive"
 N += 1
 
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-8034 (capability-routing) — AC9 (p_grader drops routed blocks whole,
+# grader.md's two sentences) and AC11 (p_reviewer lists to=reviewer criteria,
+# reviewer.md's any-round sentence)
+# ══════════════════════════════════════════════════════════════════════════════
+SPEC_8034P = TMP / "content" / "L-spec-9460.md"
+TOKEN_8034P = "PLANTED-TOKEN-ONLY-ON-AC2-8034-CONTINUATION-LINE"
+SPEC_8034P.write_text(f"""# L-spec-9460
+## Acceptance criteria
+AC1 [backend]: first criterion, continuing
+onto a wrapped line naming only AC1.
+review_path: run x. Worked if y. Failed otherwise.
+
+AC2 [ui]: routed browser criterion, continuing onto
+a wrapped continuation line carrying {TOKEN_8034P} right here.
+review_path: log in as x, go to /y. Worked if y. Failed otherwise.
+
+AC3 [backend]: third criterion, continuing
+onto a wrapped line naming only AC3.
+review_path: run x. Worked if y. Failed otherwise.
+""")
+CARD_8034P = TMP / "content" / "L-card-9460.md"
+CARD_8034P.write_text("# L-card-9460 · DONE\n"
+                      "AC1 [backend] built · log · ok\n"
+                      "AC2 [ui] built · log · ok\n"
+                      "AC3 [backend] built · log · ok\n")
+ev("spec-writer", "spec-written", "L-spec-9460", spec="L-spec-9460", path=str(SPEC_8034P), footprint=["a.py"])
+ev("builder", "build-done", "L-spec-9460", status="DONE", card=str(CARD_8034P), ready_sha="9460ready", verify_exit=0)
+ev("grader", "criterion-routed", "L-spec-9460", criterion="AC2", capability="browser", to="reviewer")
+
+t_8034_grader = build("grader", "L-spec-9460", worktree=str(REPO))
+assert TOKEN_8034P not in t_8034_grader, "AC9: AC2's planted continuation-line token must not leak to the grader"
+assert "AC2 [ui]:" not in t_8034_grader and "routed browser criterion" not in t_8034_grader, \
+    "AC9: AC2's own anchor line must be dropped whole from the grader's packet"
+assert "AC2 [ui] built · log · ok" not in t_8034_grader, "AC9: AC2's card row must be dropped"
+for ac, phrase in (("AC1", "first criterion, continuing"), ("AC3", "third criterion, continuing")):
+    assert phrase in t_8034_grader, f"AC9: {ac}'s full block must survive"
+    assert f"{ac} [backend] built · log · ok" in t_8034_grader, f"AC9: {ac}'s card row must survive"
+N += 1
+
+GRADER_MD = pathlib.Path(__file__).resolve().parent.parent / "agents" / "grader.md"
+grader_md_text = GRADER_MD.read_text()
+assert "neither graded nor reported as" in grader_md_text and "cannot-assess" in grader_md_text, \
+    "AC9: grader.md must say a routed criterion is neither graded nor reported as cannot-assess"
+assert "is neither a verdict nor a" in grader_md_text and "cannot-assess" in grader_md_text, \
+    "AC9: grader.md must say a routed-verify-only failure is neither a verdict nor a cannot-assess"
+print("8034-AC9 ok")
+
+# AC11 · p_reviewer lists the to=reviewer criterion by id and text (item 10)
+t_8034_reviewer = build("reviewer", subject="L-spec-9460", worktree=str(REPO))
+assert "10. Criteria routed to you alone" in t_8034_reviewer, t_8034_reviewer
+assert "AC2:" in t_8034_reviewer.split("10. Criteria routed to you alone", 1)[1], t_8034_reviewer
+assert TOKEN_8034P not in t_8034_reviewer or True  # the reviewer's item 3 already carries every criterion verbatim
+assert "AC2 [ui]:" in t_8034_reviewer, "AC11: the reviewer's own item 3 still carries every criterion, routed or not"
+N += 1
+
+REVIEWER_MD = pathlib.Path(__file__).resolve().parent.parent / "agents" / "reviewer.md"
+reviewer_md_text = REVIEWER_MD.read_text()
+assert "cleared" in reviewer_md_text and "any round" in reviewer_md_text, \
+    "AC11: reviewer.md must allow `cleared` in any round for a routed criterion"
+print("8034-AC11 ok")
+
 print(f"packet: {N} packets built, eight Blindness lists enforced")
