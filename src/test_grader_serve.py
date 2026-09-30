@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""One runnable check on grader_serve.py's AC1-AC5, AC13, AC14. Run:
-python3 test_grader_serve.py
+"""One runnable check on grader_serve.py's AC1-AC5, AC13, AC14, plus
+L-spec-8033's own R8.2-R8.3 cases (AC4-AC9). Run: python3 test_grader_serve.py
 
 Before importing `grader_serve`, this sets DOIT_ROOT, DOIT_SCRATCH and HOME to
 fresh temp-directory fixtures — never the live `$R/seat`, never the real
@@ -10,6 +10,7 @@ tmux/claim.sh/stamp.sh call goes through an injected `runner` that records
 its own calls and returns a fake `CompletedProcess` — no real tmux, bwrap or
 login anywhere in this file.
 """
+import datetime
 import json
 import os
 import pathlib
@@ -27,7 +28,12 @@ os.environ.pop("DOIT_PROJECT", None)
 (FIXTURE_ROOT / "events").mkdir(parents=True, exist_ok=True)
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import fold, grader_serve, grader_view, grading_env, relay, scratch  # noqa: E402
+import fold, grader_serve, grader_view, grading_env, look, relay, scratch  # noqa: E402
+
+# L-spec-8033/AC5-AC9: the REAL `relay.pending_packets`, captured before the
+# first `pending_stub` monkeypatch below overwrites the module attribute —
+# those cases restore this rather than exercising the stub (Assumptions).
+REAL_PENDING = relay.pending_packets
 
 N = 0
 
@@ -115,18 +121,23 @@ def ev(type_, ts, **kw):
 
 
 # ═══════════════════════════ AC1 — start, oldest first, capped ═══════════════════════════
+# 5 candidates against a cap of 4 (L-spec-8033/R8.2 raised max_panes 2 -> 4,
+# read straight off THIS repo's own launch.toml — the same read AC4 below
+# checks explicitly) — one excluded (youngest) proves the cap still bites.
 relay.pending_packets = pending_stub([
-    {"spawn": "L-grader-1001", "age_min": 5.0},
+    {"spawn": "L-grader-1001", "age_min": 5.0},    # youngest: excluded once capacity fills
     {"spawn": "L-grader-1002", "age_min": 50.0},   # oldest
     {"spawn": "L-grader-1003", "age_min": 20.0},
+    {"spawn": "L-grader-1004", "age_min": 40.0},
+    {"spawn": "L-grader-1005", "age_min": 30.0},
 ])
 r1 = Runner()
 grader_serve.run([], runner=r1, now=fold.NOW)
-check(len(r1.claim_calls()) == 2, f"AC1: exactly 2 claim.sh calls, got {len(r1.claim_calls())}")
-check(len(r1.pane_start_calls()) == 2, f"AC1: exactly 2 pane-start calls, got {len(r1.pane_start_calls())}")
+check(len(r1.claim_calls()) == 4, f"AC1: exactly 4 claim.sh calls (cap), got {len(r1.claim_calls())}")
+check(len(r1.pane_start_calls()) == 4, f"AC1: exactly 4 pane-start calls, got {len(r1.pane_start_calls())}")
 claimed_spawns = [c[0][1] for c in r1.claim_calls()]
-check(set(claimed_spawns) == {"L-grader-1002", "L-grader-1003"},
-      f"AC1: the 2 OLDEST spawns are claimed, got {claimed_spawns}")
+check(set(claimed_spawns) == {"L-grader-1002", "L-grader-1003", "L-grader-1004", "L-grader-1005"},
+      f"AC1: the 4 OLDEST of 5 spawns are claimed, youngest (1001) is not: {claimed_spawns}")
 # claim before start, each: for every claim call, the very next matching-spawn
 # pane-start call must come strictly after it in the recorded call order.
 idx = {id(c): i for i, c in enumerate(r1.calls)}
@@ -135,18 +146,32 @@ for spawn in claimed_spawns:
     start_i = next(i for i, c in enumerate(r1.calls) if "claude" in c[0] and spawn in c[0])
     check(claim_i < start_i, f"AC1: claim must precede start for {spawn}: claim@{claim_i} start@{start_i}")
 
+# ═══════════════════════════ L-spec-8033/R8.2 · AC4 — max_panes() reads launch.toml's 4 ═══════════════════════════
+check(grader_serve.max_panes() == 4,
+      f"AC4: max_panes() (default root, this repo's own launch.toml) == 4, got {grader_serve.max_panes()}")
+check(grader_serve.max_panes(root=grader_serve.HERE.parent) == 4,
+      f"AC4: and explicitly against the repo root's launch.toml: "
+      f"{grader_serve.max_panes(root=grader_serve.HERE.parent)}")
+print("L-spec-8033 AC4 ok")
+
 # ═══════════════════════════ AC2 — capacity accounts for running panes ═══════════════════════════
+# 1 already-running + 4 unclaimed against a cap of 4 leaves room for exactly 3.
 touch_claimed("L-grader-2000")
 relay.pending_packets = pending_stub([
     {"spawn": "L-grader-2000", "age_min": 999.0},   # already claimed-and-running
-    {"spawn": "L-grader-2001", "age_min": 10.0},
-    {"spawn": "L-grader-2002", "age_min": 30.0},    # older of the two unclaimed
+    {"spawn": "L-grader-2001", "age_min": 10.0},    # youngest unclaimed: excluded once capacity fills
+    {"spawn": "L-grader-2002", "age_min": 30.0},
+    {"spawn": "L-grader-2003", "age_min": 20.0},
+    {"spawn": "L-grader-2004", "age_min": 40.0},    # oldest unclaimed
 ])
 r2 = Runner()
 grader_serve.run([], runner=r2, now=fold.NOW)
-check(len(r2.pane_start_calls()) == 1, f"AC2: exactly 1 new pane starts, got {len(r2.pane_start_calls())}")
-check(any("L-grader-2002" in c[0] for c in r2.pane_start_calls()),
-      "AC2: the older unclaimed spawn (2002) is the one that starts")
+check(len(r2.pane_start_calls()) == 3,
+      f"AC2: 1 already running + cap 4 leaves exactly 3 new starts, got {len(r2.pane_start_calls())}")
+check(all(any(sp in c[0] for c in r2.pane_start_calls()) for sp in ("L-grader-2002", "L-grader-2003", "L-grader-2004")),
+      "AC2: the 3 oldest unclaimed spawns start")
+check(not any("L-grader-2001" in c[0] for c in r2.pane_start_calls()),
+      "AC2: the youngest unclaimed (2001) does not, once capacity fills")
 
 # ═══════════════════════════ AC3 — mirror + stamp, byte-identical, duration_ms ═══════════════════════════
 SPAWN3 = "L-grader-3001"
@@ -340,5 +365,163 @@ check(mirrored10.is_file() and mirrored10.read_bytes() == out10.read_bytes(),
 check(not (pathlib.Path(FIXTURE_HOME) / "seat").exists(),
       "L-spec-8027 AC10: nothing is ever read from or written to the invoker's own HOME/seat")
 print("L-spec-8027 AC10 ok")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-8033 · grader-pane-route (L-charter-0042 R8.3) — AC5-AC9
+#
+# These run against the REAL `relay.pending_packets` (restored from
+# `REAL_PENDING`, captured before the first `pending_stub` above) over the
+# real `FIXTURE_ROOT` ledger on disk — a "terminal" spawn under the stub is
+# simply absent from it, which would make the terminal-clears-the-alarm case
+# vacuous (Assumptions). Each case appends real `spawn-started`/`.packet.md`
+# fixtures and reads the ledger back with `fold.read_events()`, the same
+# round trip `tick._record` performs between calls.
+# ══════════════════════════════════════════════════════════════════════════════
+relay.pending_packets = REAL_PENDING
+
+
+def iso(delta_min):
+    return (fold.NOW - datetime.timedelta(minutes=delta_min)).isoformat(timespec="seconds")
+
+
+def write_ev(sid, type_, ts, **kw):
+    """One REAL ledger line under FIXTURE_ROOT/events — unlike `ev()` above (an
+    in-memory dict fed through `pending_stub`), this lands on disk so the REAL
+    `relay.pending_packets` and `fold.read_events()` see it."""
+    p = FIXTURE_ROOT / "events" / f"{sid}.jsonl"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with open(p, "a") as fh:
+        fh.write(json.dumps({"v": 1, "ts": ts, "type": type_, "spawn": sid, **kw}, sort_keys=True) + "\n")
+
+
+def write_packet(spawn):
+    (FIXTURE_ROOT / "seat").mkdir(parents=True, exist_ok=True)
+    (FIXTURE_ROOT / "seat" / f"{spawn}.packet.md").write_text("packet")
+
+
+def is_open(spawn):
+    """Whether a `grader-pane-unserved` alarm for `spawn` is still open —
+    `look`'s own notion (`_open_ref`), not a hand-rolled brief/brief-answered
+    count."""
+    return look._open_ref(FIXTURE_ROOT, f"grader-pane-unserved|{spawn}",
+                          f"look:grader-pane-unserved:{spawn}", fold.read_events()) is not None
+
+
+# ── AC5: GRADER_PANE_UNSERVED_MIN == 10, and the alarm fires past it ──────────
+check(relay.GRADER_PANE_UNSERVED_MIN == 10,
+      f"AC5: relay.GRADER_PANE_UNSERVED_MIN == 10, got {relay.GRADER_PANE_UNSERVED_MIN}")
+SPAWN5 = "L-grader-9001"
+write_packet(SPAWN5)
+write_ev(SPAWN5, "spawn-started", iso(11), role="grader")
+grader_serve.run(fold.read_events(), runner=Runner(), now=fold.NOW)
+briefs5 = [e for e in fold.read_events()
+          if e.get("type") == "brief" and e.get("condition") == "grader-pane-unserved" and e.get("key") == SPAWN5]
+check(len(briefs5) == 1, f"AC5: exactly one grader-pane-unserved brief for {SPAWN5}: {briefs5}")
+check(briefs5[0].get("owner") == "thinker", f"AC5: owner is thinker: {briefs5[0]}")
+check(str(briefs5[0].get("reading", {}).get("spawn")) == SPAWN5 and "age_min" in briefs5[0].get("reading", {}),
+      f"AC5: the reading names the spawn and carries its age_min: {briefs5[0]}")
+print("L-spec-8033 AC5 ok")
+
+# ── AC6: no alarm — too young, claimed, or already terminal ───────────────────
+SPAWN6A = "L-grader-9002"   # unclaimed, age 9 < GRADER_PANE_UNSERVED_MIN
+write_packet(SPAWN6A)
+write_ev(SPAWN6A, "spawn-started", iso(9), role="grader")
+
+SPAWN6B = "L-grader-9003"   # claimed, age 60
+write_packet(SPAWN6B)
+write_ev(SPAWN6B, "spawn-started", iso(60), role="grader")
+(FIXTURE_ROOT / "seat" / f"{SPAWN6B}.claimed").write_text("")
+
+SPAWN6C = "L-grader-9004"   # terminal (spawn-done), age 60
+write_packet(SPAWN6C)
+write_ev(SPAWN6C, "spawn-started", iso(60), role="grader")
+write_ev(SPAWN6C, "spawn-done", iso(1))
+
+grader_serve.run(fold.read_events(), runner=Runner(), now=fold.NOW)
+for spawn, why in ((SPAWN6A, "too young"), (SPAWN6B, "claimed"), (SPAWN6C, "terminal")):
+    check(not is_open(spawn), f"AC6: no alarm for {spawn} ({why})")
+print("L-spec-8033 AC6 ok")
+
+# ── AC7: clear on claim, clear on terminal, no duplicate while still open ─────
+SPAWN7A = "L-grader-9010"
+write_packet(SPAWN7A)
+write_ev(SPAWN7A, "spawn-started", iso(11), role="grader")
+grader_serve.run(fold.read_events(), runner=Runner(), now=fold.NOW)
+check(is_open(SPAWN7A), f"AC7: alarm opens for unclaimed {SPAWN7A}")
+(FIXTURE_ROOT / "seat" / f"{SPAWN7A}.claimed").write_text("")
+grader_serve.run(fold.read_events(), runner=Runner(), now=fold.NOW)
+check(not is_open(SPAWN7A), f"AC7: claiming {SPAWN7A} clears its alarm on the next run")
+
+SPAWN7B = "L-grader-9011"
+write_packet(SPAWN7B)
+write_ev(SPAWN7B, "spawn-started", iso(11), role="grader")
+grader_serve.run(fold.read_events(), runner=Runner(), now=fold.NOW)
+check(is_open(SPAWN7B), f"AC7: alarm opens for unclaimed {SPAWN7B}")
+write_ev(SPAWN7B, "spawn-done", iso(1))
+grader_serve.run(fold.read_events(), runner=Runner(), now=fold.NOW)
+check(not is_open(SPAWN7B), f"AC7: a spawn-done for {SPAWN7B} clears its alarm on the next run")
+
+SPAWN7C = "L-grader-9012"
+write_packet(SPAWN7C)
+write_ev(SPAWN7C, "spawn-started", iso(11), role="grader")
+grader_serve.run(fold.read_events(), runner=Runner(), now=fold.NOW)
+check(is_open(SPAWN7C), f"AC7: alarm opens for unclaimed {SPAWN7C}")
+grader_serve.run(fold.read_events(), runner=Runner(), now=fold.NOW)   # still unclaimed, non-terminal
+briefs7c = [e for e in fold.read_events()
+           if e.get("type") == "brief" and e.get("condition") == "grader-pane-unserved" and e.get("key") == SPAWN7C]
+check(len(briefs7c) == 1, f"AC7: a still-open, still-unserved alarm is never duplicated: {briefs7c}")
+check(is_open(SPAWN7C), f"AC7: and stays open: {SPAWN7C}")
+print("L-spec-8033 AC7 ok")
+
+# ── AC8: the alarm fires even when the start step raises; the exception still
+# propagates to the caller ────────────────────────────────────────────────────
+SPAWN8A = "L-grader-9020"
+write_packet(SPAWN8A)
+write_ev(SPAWN8A, "spawn-started", iso(11), role="grader")
+orig_pane_env = grading_env.pane_env
+grading_env.pane_env = lambda view: (_ for _ in ()).throw(RuntimeError("boom-pane-env"))
+raised8a = False
+try:
+    grader_serve.run(fold.read_events(), runner=Runner(), now=fold.NOW)
+except RuntimeError as exc:
+    raised8a = "boom-pane-env" in str(exc)
+finally:
+    grading_env.pane_env = orig_pane_env
+check(raised8a, "AC8(a): the original exception (from a raising start step) propagates to the caller")
+check(is_open(SPAWN8A), f"AC8(a): the alarm still fires for {SPAWN8A} despite the raise")
+
+SPAWN8B = "L-grader-9021"
+write_packet(SPAWN8B)
+write_ev(SPAWN8B, "spawn-started", iso(11), role="grader")
+
+
+class RaisingRunner(Runner):
+    def __call__(self, argv, **kw):
+        if len(argv) >= 2 and argv[0] == "tmux" and argv[1] == "new-window":
+            raise RuntimeError("boom-tmux")
+        return super().__call__(argv, **kw)
+
+
+raised8b = False
+try:
+    grader_serve.run(fold.read_events(), runner=RaisingRunner(), now=fold.NOW)
+except RuntimeError as exc:
+    raised8b = "boom-tmux" in str(exc)
+check(raised8b, "AC8(b): the original exception (from the injected runner) propagates to the caller")
+check(is_open(SPAWN8B), f"AC8(b): the alarm still fires for {SPAWN8B} despite the raise")
+print("L-spec-8033 AC8 ok")
+
+# ── AC9: the alarm's write really round-trips through disk ───────────────────
+SPAWN9 = "L-grader-9030"
+write_packet(SPAWN9)
+write_ev(SPAWN9, "spawn-started", iso(11), role="grader")
+grader_serve.run(fold.read_events(), runner=Runner(), now=fold.NOW)
+reread9 = fold.read_events()   # a fresh, separate open of events/L-look-local.jsonl
+briefs9 = [e for e in reread9
+          if e.get("type") == "brief" and e.get("condition") == "grader-pane-unserved" and e.get("key") == SPAWN9]
+check(len(briefs9) == 1, f"AC9: the brief is found on a fresh disk re-read, not only in memory: {briefs9}")
+check((FIXTURE_ROOT / "events" / "L-look-local.jsonl").is_file(),
+      "AC9: the write landed through look.emit_once's own production path (L-look-local.jsonl)")
+print("L-spec-8033 AC9 ok")
 
 print(f"grader_serve: {N} checks pass")
