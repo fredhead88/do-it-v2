@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """One runnable check on the sub-agent transcript resolver. Run: python3 test_usage.py"""
-import json, pathlib, sys, tempfile, time
+import json, os, pathlib, sys, tempfile, time
 
 TMP = pathlib.Path(tempfile.mkdtemp())
+# R8.2: HOME/DOIT_ROOT isolation, set before any project module is imported —
+# a direct `python3 test_usage.py` must never resolve fold.ROOT to ~/.do-it.
+os.environ["HOME"] = str(TMP / "home")
+os.environ["DOIT_ROOT"] = str(TMP / "root")
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 import usage  # noqa: E402
 

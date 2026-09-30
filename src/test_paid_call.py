@@ -7,6 +7,12 @@ planning-time run and an overnight bill.
 """
 import json, os, pathlib, subprocess, sys, tempfile
 
+# R8.2: HOME/DOIT_ROOT isolation, set before any project module is imported —
+# a direct `python3 test_paid_call.py` must never resolve fold.ROOT to ~/.do-it.
+_TMP8027 = pathlib.Path(tempfile.mkdtemp(prefix="doit-test-iso-"))
+os.environ["HOME"] = str(_TMP8027 / "home")
+os.environ["DOIT_ROOT"] = str(_TMP8027 / "root")
+
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import paid_call  # noqa: E402
 

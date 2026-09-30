@@ -284,7 +284,9 @@ real_agents_dir = pathlib.Path(up.HERE.parent) / "agents"
 for role in ("planner", "relay", "executor"):
     shutil.copyfile(real_agents_dir / f"{role}.md", AGENTS11 / f"{role}.md")
 dispatch.AGENTS = AGENTS11
-up.AGENTS_HOME = TMP / "claude-agents11"
+# R8.4: up.agents_home() reads HOME at call time, not up.AGENTS_HOME — a fresh
+# dir OUTSIDE TMP/DOIT_ROOT (scratch.root() refuses a HOME nested under DOIT_ROOT)
+os.environ["HOME"] = str(pathlib.Path(tempfile.mkdtemp(prefix="doit-test-home11-")))
 BIN11 = TMP / "bin11"
 BIN11.mkdir()
 STUB11 = BIN11 / "claude"

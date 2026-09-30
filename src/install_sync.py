@@ -20,7 +20,7 @@ whatever `crons.toml` row that commit added or changed — `crons.install`'s own
 contract installs HEAD's current text, never the historical one, so
 `changed_rows` only NAMES which rows to act on.
 """
-import pathlib, subprocess, sys
+import os, pathlib, pwd, subprocess, sys
 import tomllib
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -28,18 +28,54 @@ sys.path.insert(0, str(HERE))
 import fold  # noqa: E402 — fold.ROOT/fold.ts/fold.NOW read live, at call time (crons.py's own precedent)
 
 
+class LinkRefused(Exception):
+    """Raised by `link_agents(agents_dir=None)` when `source` is not the
+    canonical do-it-v2 checkout (R8.3). Refuse, never redirect (SD-R16-2):
+    nothing is created or linked before this is raised."""
+
+
+# ── R8.3: the one place that decides whether a checkout may hijack the real ──
+# ── agent links ────────────────────────────────────────────────────────────
+
+def _canonical(source):
+    """True only when the resolved `source` equals the resolved canonical
+    do-it-v2 tree: `<passwd home>/.do-it/repos/do-it-v2`, or the resolved
+    `DOIT_CANONICAL_REPO` when that is set explicitly. The passwd home comes
+    from `pwd.getpwuid(os.getuid()).pw_dir` — NEVER `HOME` or `DOIT_ROOT`
+    (SD-R16-1 as amended) — so a test's own temp HOME or a temp `DOIT_ROOT`
+    that happens to hold a `repos/do-it-v2` subtree cannot satisfy this. Pure:
+    resolves both sides (symlinks followed), reads passwd and one env var,
+    touches nothing."""
+    resolved_source = pathlib.Path(source).resolve()
+    override = os.environ.get("DOIT_CANONICAL_REPO")
+    if override:
+        return resolved_source == pathlib.Path(override).resolve()
+    passwd_home = pathlib.Path(pwd.getpwuid(os.getuid()).pw_dir)
+    canonical = (passwd_home / ".do-it" / "repos" / "do-it-v2").resolve()
+    return resolved_source == canonical
+
+
 # ── R5a: the one place agent-linking exists ──────────────────────────────────
 
-def link_agents(agents_dir=None):
-    """Symlink every `agents/*.md` in THIS repo into `agents_dir` (default
-    `~/.claude/agents`). Creates `agents_dir` if absent. For each source file:
-    an already-correct symlink (present, a symlink, resolving to that exact
-    source) is left alone and uncounted; anything else (absent, not a
-    symlink, or resolving elsewhere) is (re)linked. Returns the sorted names
-    actually (re)linked."""
+def link_agents(agents_dir=None, *, source=None):
+    """Symlink every `agents/*.md` in `source` (default `HERE.parent`, i.e.
+    THIS repo) into `agents_dir` (default `~/.claude/agents`). With
+    `agents_dir=None` — the real destination — refuses before creating
+    anything (`LinkRefused`) unless `_canonical(source)` is true; an explicit
+    `agents_dir` is never refused (R8.3). Creates `agents_dir` if absent. For
+    each source file: an already-correct symlink (present, a symlink,
+    resolving to that exact source) is left alone and uncounted; anything
+    else (absent, not a symlink, or resolving elsewhere) is (re)linked.
+    Returns the sorted names actually (re)linked."""
+    source = HERE.parent if source is None else source
+    if agents_dir is None and not _canonical(source):
+        raise LinkRefused(
+            f"install_sync: refusing to link {pathlib.Path(source).resolve()} "
+            f"into ~/.claude/agents — not the canonical do-it-v2 checkout "
+            f"(pass agents_dir= explicitly, or set DOIT_CANONICAL_REPO)")
     dest_dir = pathlib.Path(agents_dir) if agents_dir is not None else (pathlib.Path.home() / ".claude" / "agents")
     dest_dir.mkdir(parents=True, exist_ok=True)
-    src_dir = HERE.parent / "agents"
+    src_dir = pathlib.Path(source) / "agents"
     linked = []
     for src in sorted(src_dir.glob("*.md")):
         dest = dest_dir / src.name
@@ -158,8 +194,12 @@ def run(events, *, now=None, root=None, repo=None, agents_dir=None, manifest=Non
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     if argv and argv[0] == "link-agents":
-        for name in link_agents():
-            print(name)
+        try:
+            for name in link_agents():
+                print(name)
+        except LinkRefused as e:
+            print(str(e), file=sys.stderr)
+            return 1
         return 0
     print("usage: install_sync.py link-agents", file=sys.stderr)
     return 2

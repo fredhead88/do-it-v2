@@ -9,7 +9,7 @@ real `$DOIT_ROOT` ledger. `link_agents`'s own AC2 fixtures are the one
 exception by design — they exercise the REAL repo's `agents/*.md` as SOURCE,
 symlinked into a fresh, throwaway destination dir.
 """
-import json, pathlib, subprocess, sys, tempfile
+import json, os, pathlib, subprocess, sys, tempfile, types
 from datetime import datetime, timedelta, timezone
 
 TMP = pathlib.Path(tempfile.mkdtemp(prefix="install-sync-test-"))
@@ -302,6 +302,134 @@ ok(ev7.get("failed") and ev7["failed"][0]["name"] == "A" and "boom-A" in ev7["fa
    f"installsync-0431 AC7: failed names the row and its error text: {ev7}")
 ok(ev7["installed"] == ["D"], f"installsync-0431 AC7: the second row still installs: {ev7}")
 print("installsync-0431 AC7 ok")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-8027 AC5 · install_sync._canonical: true only for the resolved
+# canonical tree (passwd home, never HOME/DOIT_ROOT) or an explicit
+# DOIT_CANONICAL_REPO; link_agents(agents_dir=None) refuses anything else
+# before creating anything
+# ══════════════════════════════════════════════════════════════════════════════
+_orig_getpwuid = install_sync.pwd.getpwuid
+_fake_passwd_home = pathlib.Path(tempfile.mkdtemp(dir=TMP))
+install_sync.pwd.getpwuid = lambda uid: types.SimpleNamespace(pw_dir=str(_fake_passwd_home))
+canonical_tree8027 = _fake_passwd_home / ".do-it" / "repos" / "do-it-v2"
+(canonical_tree8027 / "agents").mkdir(parents=True)
+(canonical_tree8027 / "agents" / "fixture.md").write_text("x")
+
+_real_doit_root = os.environ.get("DOIT_ROOT")
+_real_home = os.environ.get("HOME")
+try:
+    other_checkout8027 = pathlib.Path(tempfile.mkdtemp(dir=TMP))
+    ok(install_sync._canonical(other_checkout8027) is False,
+       "L-spec-8027 AC5: a temp checkout, unrelated to the canonical tree, is not canonical")
+
+    # a temp DOIT_ROOT that happens to CONTAIN repos/do-it-v2: still false —
+    # DOIT_ROOT is never the anchor (SD-R16-1 as amended)
+    fake_root8027 = pathlib.Path(tempfile.mkdtemp(dir=TMP))
+    fake_root_tree8027 = fake_root8027 / "repos" / "do-it-v2"
+    fake_root_tree8027.mkdir(parents=True)
+    os.environ["DOIT_ROOT"] = str(fake_root8027)
+    ok(install_sync._canonical(fake_root_tree8027) is False,
+       "L-spec-8027 AC5: a temp DOIT_ROOT holding repos/do-it-v2 cannot satisfy the check")
+    if _real_doit_root is None:
+        os.environ.pop("DOIT_ROOT", None)
+    else:
+        os.environ["DOIT_ROOT"] = _real_doit_root
+
+    # a symlink resolving to the canonical tree: true
+    symlink_checkout8027 = TMP / "symlink-to-canonical-8027"
+    symlink_checkout8027.symlink_to(canonical_tree8027)
+    ok(install_sync._canonical(symlink_checkout8027) is True,
+       "L-spec-8027 AC5: a symlink resolving to the canonical tree is true")
+    ok(install_sync._canonical(canonical_tree8027) is True,
+       "L-spec-8027 AC5: the canonical tree itself, straight from the fake passwd home, is true")
+
+    # DOIT_CANONICAL_REPO pointing at a fixture: true — an explicit override
+    override_tree8027 = pathlib.Path(tempfile.mkdtemp(dir=TMP))
+    os.environ["DOIT_CANONICAL_REPO"] = str(override_tree8027)
+    ok(install_sync._canonical(override_tree8027) is True,
+       "L-spec-8027 AC5: an explicit DOIT_CANONICAL_REPO is honoured")
+    ok(install_sync._canonical(other_checkout8027) is False,
+       "L-spec-8027 AC5: and a non-matching source is still refused with the override set")
+    del os.environ["DOIT_CANONICAL_REPO"]
+
+    # HOME set to a temp dir changes no answer — the anchor is passwd, not HOME
+    os.environ["HOME"] = str(pathlib.Path(tempfile.mkdtemp(dir=TMP)))
+    ok(install_sync._canonical(canonical_tree8027) is True,
+       "L-spec-8027 AC5: HOME is never consulted — the canonical tree still qualifies")
+    ok(install_sync._canonical(other_checkout8027) is False,
+       "L-spec-8027 AC5: HOME is never consulted — a non-canonical tree still doesn't")
+    if _real_home is None:
+        os.environ.pop("HOME", None)
+    else:
+        os.environ["HOME"] = _real_home
+
+    # the refusal case: link_agents(agents_dir=None) raises before creating
+    # anything, and the sentinel HOME stays empty
+    sentinel_home8027 = pathlib.Path(tempfile.mkdtemp(dir=TMP))
+    os.environ["HOME"] = str(sentinel_home8027)
+    try:
+        install_sync.link_agents(agents_dir=None, source=other_checkout8027)
+        ok(False, "L-spec-8027 AC5: a non-canonical source must raise LinkRefused")
+    except install_sync.LinkRefused as e:
+        ok("not the canonical" in str(e), f"L-spec-8027 AC5: the refusal names the reason: {e}")
+    ok(not any(sentinel_home8027.iterdir()),
+       "L-spec-8027 AC5: the refusal leaves the sentinel HOME empty — nothing created")
+    if _real_home is None:
+        os.environ.pop("HOME", None)
+    else:
+        os.environ["HOME"] = _real_home
+finally:
+    install_sync.pwd.getpwuid = _orig_getpwuid
+    if _real_doit_root is None:
+        os.environ.pop("DOIT_ROOT", None)
+    else:
+        os.environ["DOIT_ROOT"] = _real_doit_root
+    if _real_home is None:
+        os.environ.pop("HOME", None)
+    else:
+        os.environ["HOME"] = _real_home
+    os.environ.pop("DOIT_CANONICAL_REPO", None)
+print("L-spec-8027 AC5 ok")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-8027 AC6 · an explicit agents_dir is never refused, even from a
+# non-canonical source, and links/counts/skips exactly as before (AC2 already
+# covers this with the real repo as source); run(..., agents_dir=fixture) and
+# the link-agents CLI follow AC5 when agents_dir is unset
+# ══════════════════════════════════════════════════════════════════════════════
+noncanonical_src8027 = pathlib.Path(tempfile.mkdtemp(dir=TMP))
+(noncanonical_src8027 / "agents").mkdir()
+(noncanonical_src8027 / "agents" / "explicit-fixture.md").write_text("x")
+dest8027 = pathlib.Path(tempfile.mkdtemp(dir=TMP))
+linked8027 = install_sync.link_agents(agents_dir=dest8027, source=noncanonical_src8027)
+ok(linked8027 == ["explicit-fixture.md"],
+   f"L-spec-8027 AC6: an explicit agents_dir links even from a non-canonical source: {linked8027}")
+ok((dest8027 / "explicit-fixture.md").is_symlink() and
+   (dest8027 / "explicit-fixture.md").resolve() == (noncanonical_src8027 / "agents" / "explicit-fixture.md").resolve(),
+   "L-spec-8027 AC6: and the link is real, pointing at that source")
+linked8027b = install_sync.link_agents(agents_dir=dest8027, source=noncanonical_src8027)
+ok(linked8027b == [], f"L-spec-8027 AC6: a second call on the same dir relinks nothing: {linked8027b}")
+
+# `install_sync.run(..., agents_dir=fixture)` is exactly AC3/AC4's own fixture
+# shape above — already exercised with an explicit agents_dir throughout this
+# file, never refused.
+
+# the link-agents CLI, invoked with none of that — run() and main() both
+# default to HERE.parent as source, which THIS worktree checkout is not, so
+# it must follow AC5: refuse, print why, exit non-zero, write nothing
+_cli_env = {k: v for k, v in os.environ.items() if k != "DOIT_CANONICAL_REPO"}
+proc_cli8027 = subprocess.run(
+    [sys.executable, str(REPO_ROOT / "src" / "install_sync.py"), "link-agents"],
+    capture_output=True, text=True, env=_cli_env)
+ok(proc_cli8027.returncode == 1,
+   f"L-spec-8027 AC6: the CLI, run from this non-canonical worktree, refuses: "
+   f"rc={proc_cli8027.returncode} stderr={proc_cli8027.stderr!r}")
+ok("not the canonical" in proc_cli8027.stderr,
+   f"L-spec-8027 AC6: and names why on stderr: {proc_cli8027.stderr!r}")
+print("L-spec-8027 AC6 ok")
 
 
 print(f"install_sync: {N} checks pass")

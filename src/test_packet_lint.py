@@ -6,7 +6,14 @@ read (finding 4) — AC1, AC4-AC10, AC12, AC14, AC15. AC2/AC3 (the `validate`
 wiring) live in test_validate.py; AC11 (the merge_gate regex fix itself)
 lives in test_merge_gate.py; AC13 (the `packet.py` builder-packet wiring)
 lives in test_packet.py."""
-import pathlib, re, sys, tempfile
+import os, pathlib, re, sys, tempfile
+
+# R8.2: HOME/DOIT_ROOT isolation, set before any project module is imported —
+# `merge_gate` imports `fold` at module level, so a direct
+# `python3 test_packet_lint.py` must never resolve fold.ROOT to ~/.do-it.
+_TMP8027 = pathlib.Path(tempfile.mkdtemp(prefix="doit-test-iso-"))
+os.environ["HOME"] = str(_TMP8027 / "home")
+os.environ["DOIT_ROOT"] = str(_TMP8027 / "root")
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import merge_gate as mg  # noqa: E402

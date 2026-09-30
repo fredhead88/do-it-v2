@@ -12,6 +12,11 @@ local stub script — never a real GitHub call.
 import json, os, pathlib, pty, subprocess as real_sp, sys, tempfile, threading, time, types
 
 HERE = pathlib.Path(__file__).resolve().parent
+# R8.2: HOME/DOIT_ROOT isolation, set before any project module is imported —
+# a direct `python3 test_ghlimit.py` must never resolve fold.ROOT to ~/.do-it.
+_TMP8027 = pathlib.Path(tempfile.mkdtemp(prefix="doit-test-iso-"))
+os.environ["HOME"] = str(_TMP8027 / "home")
+os.environ["DOIT_ROOT"] = str(_TMP8027 / "root")
 sys.path.insert(0, str(HERE))
 import ghlimit  # noqa: E402
 
