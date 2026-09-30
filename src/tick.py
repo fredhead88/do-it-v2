@@ -369,6 +369,18 @@ def _record():
         install_synced = len(install_sync.run(ev))
     except Exception as e:
         install_sync_error = f"{e}"
+    # L-charter-0042/L-spec-0484, R13(c): the tick's own push pass — "a merge
+    # is not complete until origin carries it" — on this SAME pre-re-read
+    # `ev`, right after install_sync above (Boundaries) and before the
+    # re-read just below. Its own try/except, exactly like `install_sync`'s:
+    # a raise never stops the tick's own heartbeat, and is named on this SAME
+    # tick event, never silencing anything below it.
+    push_origin_error = None
+    try:
+        import push_origin
+        push_origin.run(ev)
+    except Exception as e:
+        push_origin_error = f"{e}"
     ev = fold.read_events()
     specs, charters, _, _ = fold.fold(ev)
     reaped = {e.get("subject") for e in ev if e["type"] == "tree-reaped"}
@@ -517,6 +529,8 @@ def _record():
         kv["install_sync_error"] = install_sync_error
     elif install_synced is not None:
         kv["install_synced"] = install_synced
+    if push_origin_error:
+        kv["push_origin_error"] = push_origin_error
     if grader_serve_error:
         kv["grader_serve_error"] = grader_serve_error
     if autodispatch_error:

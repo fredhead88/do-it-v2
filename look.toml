@@ -42,3 +42,14 @@ workflows = []   # empty -> every distinct workflow name a push to `branch` ran,
 # condition -> class token, read by look_wallclock.fix_for() to name an
 # in-flight corrective charter on a brief. Ships empty (Assumptions) — no
 # look condition names a class yet.
+
+# L-charter-0042/L-spec-0484, R13(c): the tick's push pass (push_origin.py)
+# and look's own origin-behind alarm. `main` maps a project name to the
+# branch a `shipped` sha is pushed onto; a project with no entry here
+# resolves it from `origin/HEAD` at push time instead (push_origin.targets).
+[push]
+projects = ["do-it-v2", "albert-scott"]
+
+[push.main]
+do-it-v2 = "main"
+albert-scott = "master"
