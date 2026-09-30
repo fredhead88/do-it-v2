@@ -306,7 +306,9 @@ def preflight(role, subject, view, project, *, repo, mcp_config=None):
             reasons["db"] = reason
     if "env-file" in caps:
         _write_env_file(tree, row, None if "db" in reasons else dsn)
-    if "db-schema" in caps:
+    # A project with no db_setup row in grading.toml has no schema to migrate,
+    # so no criterion of it can need a schema proof (same rule as deploy below).
+    if "db-schema" in caps and row.get("db_setup"):
         if "db" in reasons:
             reasons["db-schema"] = f"db was not proven: {reasons['db']}"
         else:
