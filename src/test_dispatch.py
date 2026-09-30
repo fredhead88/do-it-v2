@@ -1722,7 +1722,9 @@ ac14_events = [{"type": "spawn-started", "role": "grader", "subject": "L-spec-04
                "spawn": "L-grader-0437ac14", "ts": dispatch.now()}]
 (TMP / "seat").mkdir(parents=True, exist_ok=True)
 (TMP / "seat" / "L-grader-0437ac14.packet.md").write_text("a packet\n")
-pend = relay.pending_packets(ac14_events, root=TMP)
+# served_by=None: since L-spec-8033 graders are served by "grader-pane", not the
+# relay; this assertion is about the stalled spawn surfacing at all.
+pend = relay.pending_packets(ac14_events, root=TMP, served_by=None)
 assert any(p["spawn"] == "L-grader-0437ac14" for p in pend), pend
 (TMP / "seat" / "L-grader-0437ac14.packet.md").unlink()
 N += 1
