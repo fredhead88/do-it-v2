@@ -361,10 +361,12 @@ def run(*, dry_run=False, runner=None, now=None):
             if orphans:
                 lines.append(f"sweep-owed: {len(orphans)} known orphan criterion row(s) left out of the batch")
             if not due:
-                lines.append("sweep-owed: nothing due")
-                return lines
-            project, batch = _batch_for(due)
-            lines.extend(dispatch_batch(project, batch, runner, dry_run=dry_run))
+                # Fall through to the print below: a bare `return lines` here made an
+                # all-orphan run exit silently, hiding a 7-hour stall (2026-10-04).
+                lines.append(f"sweep-owed: nothing due once {len(orphans)} known orphan row(s) are left out")
+            else:
+                project, batch = _batch_for(due)
+                lines.extend(dispatch_batch(project, batch, runner, dry_run=dry_run))
 
     for line in lines:
         print(line)
