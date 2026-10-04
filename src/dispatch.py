@@ -828,7 +828,11 @@ def events_for(role, out, a, base):
         opened_here = set()
         for row in missing_capability:
             cap = row["capability"]
-            subj = f"capability:unknown:{a.subject}" if cap == "unknown" else f"capability:{cap}"
+            # A grader's cannot-assess is about THIS spec's criteria (e.g. live_db
+            # legs needing production data), not proof the box lacks the capability:
+            # a verdict-sourced hold is always spec-local (operator 2026-10-04) — a
+            # global `capability:db` from one verdict had frozen every db grader.
+            subj = f"capability:{cap}:{a.subject}"
             if subj in opened_here:
                 continue
             opened_here.add(subj)
@@ -1029,9 +1033,12 @@ def held_capability(all_ev, subject, required):
     for cap in grading_env.CAPABILITIES:
         if cap not in required:
             continue
-        subj = f"capability:{cap}:{subject}" if cap in grading_env.SPEC_LOCAL else f"capability:{cap}"
+        local = f"capability:{cap}:{subject}"
+        subj = local if cap in grading_env.SPEC_LOCAL else f"capability:{cap}"
         if subj in holds:
             return subj
+        if local in holds:  # a verdict-sourced hold is spec-local for every capability
+            return local
     return None
 
 

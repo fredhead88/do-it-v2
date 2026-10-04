@@ -3204,45 +3204,39 @@ subj_ac3_482 = "L-spec-9453"
 code, types, evs, _ = spawn("grader", out=grade([_ca482("AC1", "db")]), subject=subj_ac3_482)
 assert "capability-hold" in types and "escalation-blocking" in types, types
 hold3_482 = next(e for e in evs if e["type"] == "capability-hold")
+# Operator ruling 2026-10-04: a verdict-sourced hold is spec-local for every
+# capability — one grader's cannot-assess never holds another spec's grade.
+L3 = f"capability:db:{subj_ac3_482}"
 assert (hold3_482["subject"], hold3_482["capability"], hold3_482["spec"], hold3_482["source"]) == \
-    ("capability:db", "db", subj_ac3_482, "verdict"), hold3_482
+    (L3, "db", subj_ac3_482, "verdict"), hold3_482
 esc3_482 = next(e for e in evs if e["type"] == "escalation-blocking")
-assert esc3_482["subject"] == "capability:db" and esc3_482["kind"] == "capability-hold" \
-    and esc3_482["owner"] == "thinker" and esc3_482["revert"] == "doit append unblocked capability:db", esc3_482
+assert esc3_482["subject"] == L3 and esc3_482["kind"] == "capability-hold" \
+    and esc3_482["owner"] == "thinker" and esc3_482["revert"] == f"doit append unblocked {L3}", esc3_482
 assert esc3_482.get("default") and esc3_482.get("deadline"), esc3_482
 fresh3_482 = fold.read_events()
-assert any(e["type"] == "capability-hold" and e.get("subject") == "capability:db" for e in fresh3_482)
-assert "capability:db" in fold.capability_holds(fresh3_482), fold.capability_holds(fresh3_482)
-assert ac3_second_482 in fold.held_specs(fresh3_482), fold.held_specs(fresh3_482)
-print("L-spec-0482 AC3 ok")
+assert L3 in fold.capability_holds(fresh3_482), fold.capability_holds(fresh3_482)
+assert "capability:db" not in fold.capability_holds(fresh3_482), fold.capability_holds(fresh3_482)
+assert ac3_second_482 not in fold.held_specs(fresh3_482), \
+    "a sibling spec needing db is NOT held by another spec's verdict"
+print("L-spec-0482 AC3 ok (spec-local)")
 
-# AC4: a second non-owed cannot-assess verdict naming an ALREADY-held capability
-# opens nothing further; after `unblocked` the next one opens a fresh hold;
-# two distinct capabilities in one verdict open two holds.
-subj_ac4_482 = "L-spec-9454"
-code, types, evs, _ = spawn("grader", out=grade([_ca482("AC1", "db")]), subject=subj_ac4_482)
+# AC4: the SAME spec's second cannot-assess on an already-held capability opens
+# nothing further; after `unblocked` the next one opens a fresh hold; two distinct
+# capabilities in one verdict open two (spec-local) holds.
+code, types, evs, _ = spawn("grader", out=grade([_ca482("AC1", "db")]), subject=subj_ac3_482)
 assert "capability-hold" not in types and "escalation-blocking" not in types, \
-    "AC4: an already-open hold gets no second capability-hold/escalation"
-db_holds_482 = [e for e in fold.read_events() if e.get("type") == "capability-hold"
-               and e.get("subject") == "capability:db"]
-assert len(db_holds_482) == 1, db_holds_482
-
-raw_ev("operator", "fx482ac4unblock", "unblocked", "capability:db", FT(1))
-subj_ac4b_482 = "L-spec-9455"
-code, types, evs, _ = spawn("grader", out=grade([_ca482("AC1", "db")]), subject=subj_ac4b_482)
+    "AC4: an already-open hold on this spec gets no second capability-hold/escalation"
+raw_ev("operator", "fx482ac4unblock", "unblocked", L3, FT(1))
+code, types, evs, _ = spawn("grader", out=grade([_ca482("AC1", "db")]), subject=subj_ac3_482)
 assert "capability-hold" in types and "escalation-blocking" in types, \
     "AC4: after an unblocked close, the next non-owed cannot-assess opens a fresh hold"
-db_holds2_482 = [e for e in fold.read_events() if e.get("type") == "capability-hold"
-                and e.get("subject") == "capability:db"]
-assert len(db_holds2_482) == 2, db_holds2_482
-
 subj_ac4c_482 = "L-spec-9456"
 code, types, evs, _ = spawn("grader", out=grade([_ca482("AC1", "browser"), _ca482("AC2", "review-account")]),
                            subject=subj_ac4c_482)
 hold_subjs_482 = {e["subject"] for e in evs if e["type"] == "capability-hold"}
-assert hold_subjs_482 == {"capability:browser", "capability:review-account"}, \
-    "AC4: two distinct capabilities in one verdict open two holds"
-print("L-spec-0482 AC4 ok")
+assert hold_subjs_482 == {f"capability:browser:{subj_ac4c_482}", f"capability:review-account:{subj_ac4c_482}"}, \
+    hold_subjs_482
+print("L-spec-0482 AC4 ok (spec-local)")
 
 # AC5: absent / literal "unknown" / an out-of-enum value all coerce to
 # capability:unknown:<SPEC>, spec=<SPEC>; a bogus value fails the grader's own
