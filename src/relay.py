@@ -41,7 +41,11 @@ PLANNER_ENDED = "planner-ended"
 # server actually exists (a prior comment here named that unit as still
 # unwritten; it is written and this is the flip it described). The three
 # standing panes serve themselves.
-SERVERS = {**{r: "relay" for r in dispatch.ROLES}, "grader": "grader-pane",
+# Operator ruling 2026-10-04: graders go back to relay-served sub-agents. The
+# sandboxed pane hit a new first-run trap on every CLI update (PATH, DNS, theme,
+# login, trust); blindness is to be restored by a path-guard hook on the relay
+# route (brief filed to L-charter-0042), not by a separate CLI process.
+SERVERS = {**{r: "relay" for r in dispatch.ROLES},
            "planner": "pane", "executor": "pane", "thinker": "pane"}
 
 # R8.3 (L-spec-8033): minutes an unclaimed grader-pane packet may sit before

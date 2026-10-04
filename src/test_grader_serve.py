@@ -33,6 +33,10 @@ import fold, grader_serve, grader_view, grading_env, look, relay, scratch  # noq
 # L-spec-8033/AC5-AC9: the REAL `relay.pending_packets`, captured before the
 # first `pending_stub` monkeypatch below overwrites the module attribute —
 # those cases restore this rather than exercising the stub (Assumptions).
+# The grader-pane route is dormant since the 2026-10-04 operator ruling (graders
+# are relay-served again); these cases still exercise grader_serve as written, so
+# pin the mapping it was written against.
+relay.SERVERS = {**relay.SERVERS, "grader": "grader-pane"}
 REAL_PENDING = relay.pending_packets
 
 N = 0

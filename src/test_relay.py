@@ -478,8 +478,8 @@ ok(len(rows) == 1 and rows[0]["status"] == "stale-still-offered"
 # to grader-pane by L-spec-8033/R8.1); the three panes serve themselves ──
 ok(all(relay.SERVERS[role] == "relay" for role in dispatch.ROLES if role != "grader"),
    f"installsync-0431 AC8: every non-grader dispatchable role maps to relay: {relay.SERVERS}")
-ok(relay.SERVERS["grader"] == "grader-pane",
-   f"L-spec-8033/R8.1: grader maps to grader-pane, not relay: {relay.SERVERS}")
+ok(relay.SERVERS["grader"] == "relay",
+   f"operator 2026-10-04 (supersedes L-spec-8033/R8.1): grader maps back to relay: {relay.SERVERS}")
 ok(relay.SERVERS["planner"] == relay.SERVERS["executor"] == relay.SERVERS["thinker"] == "pane",
    f"installsync-0431 AC8: the three standing panes serve themselves: {relay.SERVERS}")
 print("installsync-0431 AC8 ok")
@@ -556,10 +556,12 @@ relay_ac2 = {p["spawn"] for p in relay.pending_packets(events_ac2, d_ac2, served
 grader_pane_ac2 = {p["spawn"] for p in relay.pending_packets(events_ac2, d_ac2, served_by="grader-pane")}
 pane_ac2 = {p["spawn"] for p in relay.pending_packets(events_ac2, d_ac2, served_by="pane")}
 none_ac2 = {p["spawn"] for p in relay.pending_packets(events_ac2, d_ac2, served_by=None)}
-ok(relay_ac2 == {sid_ac2["spec-writer"]},
-   f"L-spec-8033 AC2: served_by='relay' returns only the spec-writer spawn: {relay_ac2}")
-ok(grader_pane_ac2 == {sid_ac2["grader"]},
-   f"L-spec-8033 AC2: served_by='grader-pane' returns exactly the grader spawn: {grader_pane_ac2}")
+# operator 2026-10-04: graders are relay-served again, so the relay lists both and
+# the dormant grader-pane route lists nothing.
+ok(relay_ac2 == {sid_ac2["spec-writer"], sid_ac2["grader"]},
+   f"served_by='relay' returns the spec-writer and grader spawns: {relay_ac2}")
+ok(grader_pane_ac2 == set(),
+   f"served_by='grader-pane' returns nothing while the pane route is dormant: {grader_pane_ac2}")
 ok(pane_ac2 == {sid_ac2["planner"]},
    f"L-spec-8033 AC2: served_by='pane' returns only the planner spawn: {pane_ac2}")
 ok(none_ac2 == set(sid_ac2.values()),
@@ -618,14 +620,14 @@ d10a = scene("ac10-grader-only")
 ev(d10a, "L-grader-9500", "spawn-started", "L-spec-9500", role="grader", spawn="L-grader-9500")
 events10a = read()
 pending10a = relay.pending_packets(events10a, d10a)
-ok(up._unclaimed_pending(pending10a, d10a) == [],
-   f"AC10: a lone unclaimed grader packet is invisible to the default (relay) filter: {pending10a}")
+ok([p["spawn"] for p in up._unclaimed_pending(pending10a, d10a)] == ["L-grader-9500"],
+   f"operator 2026-10-04: a lone unclaimed grader packet is the relay's to serve again: {pending10a}")
 rec_a = _KillRecorder()
 code_a = pane_end.check_and_end_relay(root=d10a, child_env={"DOIT_SUPERVISED": "1"},
                                       kill=rec_a, find_ancestor=lambda: 4242)
-ok(code_a == 0 and len(rec_a.calls) == 1,
-   f"AC10: check_and_end_relay ends over the grader-only fixture — not refused with "
-   f"'unclaimed seat packet(s) outstanding': code={code_a} calls={rec_a.calls}")
+ok(code_a != 0 and rec_a.calls == [],
+   f"operator 2026-10-04: the relay may NOT end over an unclaimed grader packet, it serves it: "
+   f"code={code_a} calls={rec_a.calls}")
 
 # ── grader + an ordinary (spec-writer) packet: the ordinary one still blocks ──
 d10b = scene("ac10-grader-plus-spec-writer")
@@ -636,8 +638,8 @@ ev(d10b, "L-spec-writer-9502", "spawn-started", "L-spec-9502", role="spec-writer
 events10b = read()
 pending10b = relay.pending_packets(events10b, d10b)
 outstanding10b = up._unclaimed_pending(pending10b, d10b)
-ok([p["spawn"] for p in outstanding10b] == ["L-spec-writer-9502"],
-   f"AC10: the spec-writer packet still blocks; the grader packet still does not: {outstanding10b}")
+ok(sorted(p["spawn"] for p in outstanding10b) == ["L-grader-9501", "L-spec-writer-9502"],
+   f"operator 2026-10-04: both packets are the relay's and both block: {outstanding10b}")
 rec_b = _KillRecorder()
 code_b = pane_end.check_and_end_relay(root=d10b, child_env={"DOIT_SUPERVISED": "1"},
                                       kill=rec_b, find_ancestor=lambda: 4242)
