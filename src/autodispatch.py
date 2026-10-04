@@ -246,8 +246,17 @@ def grader_candidates(events, specs, now):
 
 
 def _own_terminal_event(events, spawn):
-    return any(e.get("spawn") == spawn and e.get("type") in
-               ("verdict", "review", "build-done", "spawn-done", "spawn-failed") for e in events)
+    if any(e.get("spawn") == spawn and e.get("type") in
+           ("verdict", "review", "build-done", "spawn-done", "spawn-failed") for e in events):
+        return True
+    # Re-read the spawn's own ledger file: a waiter that wrote spawn-done and exited
+    # after `events` was read looked dead and was escalated as spawn-redispatch-lapsed
+    # (L-builder-0902, L-builder-0914, 2026-10-04).
+    try:
+        text = (fold.EVENTS / f"{spawn}.jsonl").read_text()
+    except (OSError, TypeError):
+        return False
+    return any(f'"{t}"' in text for t in ("spawn-done", "spawn-failed", "build-done", "verdict"))
 
 
 def dead_spawns(events, now):
