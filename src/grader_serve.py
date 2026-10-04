@@ -53,7 +53,7 @@ import dispatch, fold, grader_view, grading_env, launch, look, relay, scratch, t
 
 # probe Q3 (Assumptions): the tmux session grader panes land in — created via
 # `runner` if a first check finds it absent, never assumed to pre-exist unchecked.
-TMUX_SESSION = "flow"
+TMUX_SESSION = "graders"  # its own session: grader windows stay out of the operator's flow layout (2026-10-04)
 # The terminal set `tick._spawn_busy`/`relay.pending_packets` already use —
 # named here from `relay`, never a second copy.
 TERMINAL = relay.TERMINAL
