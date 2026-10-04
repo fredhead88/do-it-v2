@@ -143,6 +143,109 @@ def reap(repo, branch, wt, patch_id_proof):
         git(repo, "branch", "-D", branch)
 
 
+def _shipped_event(evs):
+    return next((e for e in reversed(evs) if e.get("type") == "shipped"), None)
+
+
+def reap_worktrees(events, *, dry_run=False):
+    """R15a: a spec's worktree goes the instant ITS OWN reason to exist ends —
+    it shipped and origin/<main> already holds the merge sha, or it was
+    killed and its branch is confirmed pushed to origin — never waiting on
+    `reap_merged_specs`'s whole-charter-state judge()/patch-id path, and never
+    consulting local main's own ancestry (that stays `judge()`'s job). Scope:
+    every spec carrying its own `shipped` event (`shipped` itself, and every
+    TERMINAL_SPEC_STATES state reached through one — accepted, the three
+    shipped-owed-* states, closed-shipped, per Assumption 3), OR in state
+    `killed` (which carries no `shipped` event) — `void` carries neither and
+    is deliberately untouched here (Assumption 3: "nothing shipped").
+    Returns (reaped, retained): `reaped` rows `{spec, project, path, proof}`,
+    `retained` rows `{spec, project, path, why}` — never destroyed silently,
+    never retained silently."""
+    specs, charters, _, _ = fold.fold(events)
+    groups = {}
+    for sid, s in specs.items():
+        if not (_shipped_event(s["evs"]) or s["state"] == "killed"):
+            continue
+        c = charters.get(s["charter"]) or {"evs": []}
+        project = next((e.get("project") for e in reversed(c["evs"]) if e.get("project")), None)
+        groups.setdefault(project, []).append(sid)
+
+    reaped, retained = [], []
+    for project in sorted(groups, key=str):
+        repo = fold.ROOT / "repos" / str(project)
+        try:
+            main_branch = git(repo, "symbolic-ref", "--short", "HEAD").stdout.strip()
+            wts = worktrees(repo)
+        except Undetermined as e:
+            for sid in sorted(groups[project]):
+                retained.append({"spec": sid, "project": project, "path": None, "why": str(e)})
+            continue
+        for sid in sorted(groups[project]):
+            s = specs[sid]
+            branch = (build(s["evs"]) or {}).get("branch") or sid.lower()
+            wt = wts.get(branch)
+            if not wt:
+                continue  # nothing to reap for this spec right now
+            row = {"spec": sid, "project": project, "path": wt}
+            # 0 — SD-R15-1a: standing rework reuses this worktree/branch; never removed.
+            if fold.standing_rejects(s["evs"]):
+                retained.append({**row, "why": "standing rejection"})
+                continue
+            # 1 — uncommitted changes, tracked or not: never removed, never pushed.
+            try:
+                dirty = git(wt, "status", "--porcelain").stdout.strip()
+            except Undetermined as e:
+                retained.append({**row, "why": str(e)})
+                continue
+            if dirty:
+                retained.append({**row, "why": "uncommitted changes"})
+                continue
+            shipped = _shipped_event(s["evs"])
+            if shipped is not None:
+                sha = shipped.get("sha")
+                if not sha:
+                    retained.append({**row, "why": "shipped event carries no sha"})
+                    continue
+                try:
+                    on_origin = git(repo, "merge-base", "--is-ancestor", sha,
+                                    f"refs/remotes/origin/{main_branch}", ok=True).returncode == 0
+                except Undetermined as e:
+                    retained.append({**row, "why": str(e)})
+                    continue
+                if not on_origin:
+                    retained.append({**row, "why": f"origin/{main_branch} does not contain {sha[:12]}"})
+                    continue
+                proof = "origin-merged"
+            else:
+                # killed: push the branch (never --force, never any other ref), then
+                # remove only once origin itself confirms it — never in dry_run.
+                try:
+                    if not dry_run:
+                        p = git(repo, "push", "origin", f"refs/heads/{branch}", ok=True)
+                        if p.returncode != 0:
+                            retained.append({**row, "why": p.stderr.strip() or "git push origin failed"})
+                            continue
+                    confirmed = git(repo, "ls-remote", "--exit-code", "origin",
+                                    f"refs/heads/{branch}", ok=True).returncode == 0
+                except Undetermined as e:
+                    retained.append({**row, "why": str(e)})
+                    continue
+                if not confirmed:
+                    retained.append({**row, "why": f"{branch} is not (yet) confirmed on origin"})
+                    continue
+                proof = "origin-branch"
+            if dry_run:
+                reaped.append({**row, "proof": proof})
+                continue
+            try:
+                git(repo, "worktree", "remove", wt)
+            except Undetermined as e:
+                retained.append({**row, "why": str(e)})
+                continue
+            reaped.append({**row, "proof": proof})
+    return reaped, retained
+
+
 class GroupFailure(Exception):
     """Raised by `reap_merged_specs` only when >=1 repo group's own
     `worktrees()`/`patch_ids()` could not be established (missing repo,
@@ -182,6 +285,11 @@ def reap_merged_specs(events, *, dry_run=False):
     `tree-reaped` event per repo group (not per spec), same shape and same
     actor technique `main()` already uses, so §4.11's "nothing destroyed
     silently" holds here too."""
+    wt_reaped, _wt_retained = reap_worktrees(events, dry_run=dry_run)
+    wt_paths_by_project = {}
+    for row in wt_reaped:
+        wt_paths_by_project.setdefault(str(row["project"]), []).append(row["path"])
+
     specs, groups = _terminal_groups(events)
     all_reaped, failures = [], []
     for project in sorted(groups, key=str):
@@ -216,9 +324,13 @@ def reap_merged_specs(events, *, dry_run=False):
         if not dry_run and (reaped or retained):
             os.environ["DOIT_LEDGER_FILE"] = os.environ.get(
                 "DOIT_REAP_LEDGER_FILE", os.environ.get("DOIT_LEDGER_FILE", "L-executor-0001.jsonl"))
+            # R15a: the paths `reap_worktrees` removed for THIS project — scoped to
+            # project, not to this group's own spec set (the requirement's own
+            # shape); empty when it removed nothing here.
             fold.append(["tree-reaped", str(project), f"reaped:={json.dumps(reaped)}",
                          f"retained:={json.dumps(retained)}",
-                         f"retained_reason:={json.dumps(reasons)}", f"repo={repo}"])
+                         f"retained_reason:={json.dumps(reasons)}", f"repo={repo}",
+                         f"worktrees:={json.dumps(wt_paths_by_project.get(str(project), []))}"])
     if failures:
         raise GroupFailure("; ".join(failures), all_reaped)
     return all_reaped

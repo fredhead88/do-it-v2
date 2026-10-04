@@ -1824,3 +1824,81 @@ print("0473-AC8 ok")
 fold.EVENTS = saved_events
 
 print("tick: L-spec-0473 tick-proving-records checks pass")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-0486 · cleanup-on-finish (L-charter-0042), R15a (record) — AC7
+# ══════════════════════════════════════════════════════════════════════════════
+import subprocess as _sp486, tree_cleanup as _tc486  # noqa: E402
+
+
+def _sh486(cwd, *cmd):
+    p = _sp486.run(cmd, cwd=str(cwd), capture_output=True, text=True,
+                   env=dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
+                            GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t"))
+    assert p.returncode == 0, f"{cmd}: {p.stderr}"
+    return p.stdout.strip()
+
+
+R486 = pathlib.Path(tempfile.mkdtemp())
+(R486 / "events").mkdir(parents=True)
+repo486 = R486 / "repos" / "l0486-tick-proj"
+repo486.mkdir(parents=True)
+_sh486(repo486, "git", "init", "-q", "-b", "main")
+(repo486 / "seed.txt").write_text("seed\n")
+_sh486(repo486, "git", "add", "-A"); _sh486(repo486, "git", "commit", "-qm", "seed")
+wt486 = R486 / "worktrees" / "l-spec-9486a"
+_sh486(repo486, "git", "worktree", "add", "-q", str(wt486), "-b", "l-spec-9486a", "main")
+(wt486 / "x.txt").write_text("x\n")
+_sh486(wt486, "git", "add", "-A"); _sh486(wt486, "git", "commit", "-qm", "build")
+_sh486(repo486, "git", "merge", "-q", "--no-ff", "l-spec-9486a", "-m", "merge")
+merge_sha486 = _sh486(repo486, "git", "rev-parse", "HEAD")
+origin486 = R486 / "repos" / "l0486-tick-proj-origin.git"
+_sp486.run(["git", "init", "-q", "--bare", str(origin486)], check=True)
+_sh486(repo486, "git", "remote", "add", "origin", str(origin486))
+_sh486(repo486, "git", "push", "-q", "origin", "main")
+_sh486(repo486, "git", "fetch", "-q", "origin")
+
+(R486 / "events" / "L-thinker-0001.jsonl").write_text(
+    json.dumps({"v": 1, "ts": NOW, "type": "charter-filed", "subject": "L-charter-9486",
+               "project": "l0486-tick-proj"}) + "\n")
+(R486 / "events" / "L-executor-0001.jsonl").write_text(
+    "\n".join(json.dumps({"v": 1, "ts": NOW, **e}) for e in [
+        {"type": "spec-written", "subject": "L-spec-9486a", "charter": "L-charter-9486"},
+        {"type": "build-done", "subject": "L-spec-9486a", "branch": "l-spec-9486a", "ready_sha": merge_sha486},
+        {"type": "shipped", "subject": "L-spec-9486a", "charter": "L-charter-9486", "sha": merge_sha486},
+    ]) + "\n")
+
+saved_root486, saved_events486 = fold.ROOT, fold.EVENTS
+fold.ROOT, fold.EVENTS = R486, R486 / "events"
+try:
+    assert tick._record() is not None, "L0486-AC7: the tick's own lock is free here"
+
+    def _wrs():
+        return [json.loads(l) for l in tick.tick_path().read_text().splitlines()
+                if json.loads(l).get("type") == "worktree-reaped"]
+
+    wr486 = _wrs()
+    assert len(wr486) == 1, f"L0486-AC7: exactly one worktree-reaped: {wr486}"
+    assert wr486[0]["subject"] == "L-spec-9486a" and wr486[0]["proof"] == "origin-merged" \
+        and wr486[0]["path"] == str(wt486), f"L0486-AC7: shape: {wr486[0]}"
+    assert not wt486.exists(), "L0486-AC7: the worktree really is gone"
+
+    assert tick._record() is not None
+    assert len(_wrs()) == 1, f"L0486-AC7: a second _record() appends none — idempotent: {_wrs()}"
+
+    real_reap_worktrees486 = _tc486.reap_worktrees
+
+    def _raising_reap486(*a, **kw):
+        raise RuntimeError("L0486-AC7: forced")
+
+    _tc486.reap_worktrees = _raising_reap486
+    try:
+        assert tick._record() is not None, "L0486-AC7: a raising reap_worktrees never stops the heartbeat"
+        last486 = [json.loads(l) for l in tick.tick_path().read_text().splitlines()
+                   if json.loads(l).get("type") == "tick"][-1]
+        assert "L0486-AC7: forced" in last486.get("worktree_reap_error", ""), last486
+    finally:
+        _tc486.reap_worktrees = real_reap_worktrees486
+finally:
+    fold.ROOT, fold.EVENTS = saved_root486, saved_events486
+print("L0486-AC7 ok")

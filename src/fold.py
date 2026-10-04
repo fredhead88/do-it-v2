@@ -283,6 +283,10 @@ EMITS["owed-waived"] = {"operator", "thinker"}
 # replacement — subject is always the KILLED SPEC, never the charter.
 EMITS["kill-accepted"] = {"operator", "thinker"}
 EMITS["charter-classified"] = {"executor", "operator"}   # R6: the backfill's own classification record
+# L-charter-0042/L-spec-0486 (cleanup-on-finish), R15a: the tick's own per-spec
+# worktree reap record — never `tree-reaped`'s actor set (executor/operator, the
+# closing seat's claim), because this fires mid-charter, off the tick's own pass.
+EMITS["worktree-reaped"] = {"tick"}
 # A correction may override anything but these: D90 takes the actor from the
 # FILENAME, and a correction that could rewrite it reopens every check below.
 UNCORRECTABLE = ("actor", "_src")
@@ -717,6 +721,19 @@ def capability_holds(events):
     return {s: row for s, row in rows.items() if newest_close.get(s, _EPOCH) < newest_hold[s]}
 
 
+def terminal_spawns(events):
+    """L-charter-0042/L-spec-0486 (cleanup-on-finish), R15b: every spawn id that
+    has genuinely ended — `spawn-done`, `spawn-failed` or `spawn-stale` —
+    keyed on the event's own `spawn` field, never `subject` (on a live spawn's
+    own ledger, `subject` is the spec/subject it was dispatched for, and the
+    tick's own `spawn-stale` carries base `{"spawn": sid}` with no `subject`
+    of its own kind either). Used to decide whether a grader/reviewer's
+    `grade/<spawn>/` scratch copy may be removed — never age-gated here, that
+    stays `reap_tmp`'s own call."""
+    return {e["spawn"] for e in events if e.get("type") in ("spawn-done", "spawn-failed", "spawn-stale")
+            and e.get("spawn")}
+
+
 def held_specs(events, *, content_dir=None, project_of=None):
     """L-spec-0481/AC15: OPEN `capability-hold` specs now (per-spec holds never release by routing, L-spec-8034/Assumption 11)."""
     content_dir = pathlib.Path(content_dir) if content_dir else ROOT / "content"
@@ -782,6 +799,9 @@ REQUIRED["charter-reopened"] = ("spec", "criterion", "failed_src")
 REQUIRED["owed-waived"] = ("criterion", "reason")
 REQUIRED["kill-accepted"] = ("reason",)
 REQUIRED["charter-classified"] = ("klass", "reason")
+# L-charter-0042/L-spec-0486 (cleanup-on-finish), R15a: presence-only, like every
+# other entry above — no value's shape, format, or type is checked here.
+REQUIRED["worktree-reaped"] = ("path", "proof")
 # L-charter-0042/L-spec-0481 (grading-capabilities): a preflight failure names
 # the capability it could not prove; a hold on it names both the capability
 # and the spec it was raised for (unknown when the shared shape) — presence-only,
