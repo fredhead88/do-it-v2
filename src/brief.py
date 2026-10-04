@@ -256,6 +256,8 @@ def _charter_next(cid, state, mine, now, briefs):
         if entry is not None:
             nxt = entry.get("next")
             if nxt:
+                if isinstance(nxt, dict):  # proving.py emits {text, due_at, kind}; owner is a sibling field
+                    return nxt.get("text"), entry.get("owner")
                 return tuple(nxt)
             return "final checks and close", entry.get("owner")
         del err  # steps 2-4 run below
