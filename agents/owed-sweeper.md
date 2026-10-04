@@ -2,7 +2,7 @@
 name: owed-sweeper
 description: DO-IT §4.6 — L-charter-0038 R1: a dedicated, read-only role that closes owed checks in batches. Served through the relay like the other blind roles, never through the Executor. Takes every due check in one sweep manifest, runs each check's declared observation, and records one verdict per check. Dispatched per sweep batch.
 tools: Read, Glob, Grep, Bash, StructuredOutput, Write
-model: claude-sonnet-5
+model: claude-sonnet-5-5
 ---
 
 # owed-sweeper

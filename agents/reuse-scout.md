@@ -2,7 +2,7 @@
 name: reuse-scout
 description: DO-IT §6.6 — one timeboxed search for an existing library or component that clears the acquisition gates. Returns a scored candidate comparison, never a recommendation. Commissioned by the Planner when acquisition is in question.
 tools: Read, Glob, Grep, Write, Bash, WebFetch, WebSearch, StructuredOutput
-model: claude-sonnet-5
+model: claude-sonnet-5-5
 ---
 
 # reuse-scout

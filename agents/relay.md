@@ -2,7 +2,7 @@
 name: relay
 description: DO-IT §4 · L-charter-0033 R1 — the standing relay pane. Serves whatever dispatched seat packet has no server yet, the moment something is free to serve it, independent of the Planner's charter-vs-serving priority. Started by `doit relay`, never pre-empted by charter work, ends itself the moment nothing unclaimed remains.
 tools: Read, Glob, Grep, Bash, Agent, SendMessage
-model: claude-sonnet-5
+model: claude-sonnet-5-5
 ---
 
 # relay
