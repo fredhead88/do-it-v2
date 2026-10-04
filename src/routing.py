@@ -53,7 +53,7 @@ def explicit_owed_ids(events, spec):
     `fold.verdict_owed_criteria` (which, after this spec, also folds in
     routed ids) — that would be circular for exactly this use."""
     return {e.get("criterion") for e in events if e.get("type") == "owed-ac" and e.get("subject") == spec
-            and e.get("criterion") and e.get("actor") in ("spec-writer", "spec-auditor")}
+            and e.get("criterion") and e.get("actor") in ("spec-writer", "spec-auditor", "thinker", "operator")}
 
 
 def diff_routes(computed, prior):

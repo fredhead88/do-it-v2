@@ -229,6 +229,11 @@ for _role, _terms in DECLARES.items():
 # `EMITS` membership alone only gets an executor-authored `owed-ac` as far as
 # that second gate.
 EMITS["owed-ac"].add("executor")
+# Operator ruling 2026-10-04: the Thinker and the operator may DECLARE a criterion
+# owed (post-deploy) when a grader cannot assess it in a view — e.g. a live_db leg
+# that needs production data. Declaring is no longer spec-writer/spec-auditor only.
+EMITS["owed-ac"].update({"thinker", "operator"})
+OWED_DECLARERS = ("spec-writer", "spec-auditor", "thinker", "operator")
 # L-spec-0276/R5 (SD25): a packet-lint `warn` finding becomes one visible,
 # deduplicated event. The same four actors already admitted for
 # `spec-carried`/`spec-written` (widened by the two more either hook site may
@@ -1572,7 +1577,7 @@ def verdict_owed_criteria(events, subject):
     with no prior declaration is simply not in this set, exactly as if it had
     never been written. L-spec-8034: also returns every ROUTED criterion."""
     return {e.get("criterion") for e in events if e.get("type") == "owed-ac" and e.get("subject") == subject
-            and e.get("criterion") and e.get("actor") in ("spec-writer", "spec-auditor")} | set(routed_criteria(events, subject))
+            and e.get("criterion") and e.get("actor") in OWED_DECLARERS} | set(routed_criteria(events, subject))
 
 
 def grades_per_shipped(events, now, window_h=24):
@@ -1717,11 +1722,11 @@ def fold(events):
         # `by_subject[subj]`") spec-writer/spec-auditor `owed-ac` for the
         # IDENTICAL criterion. Any other criterion is ignored exactly like any
         # other unauthorized emit.
-        if etype == "owed-ac" and e["actor"] not in ("spec-writer", "spec-auditor"):
+        if etype == "owed-ac" and e["actor"] not in OWED_DECLARERS:
             crit = e.get("criterion")
             prior = bool(crit) and any(
                 x["type"] == "owed-ac" and x.get("criterion") == crit
-                and x["actor"] in ("spec-writer", "spec-auditor") for x in by_subject[subj])
+                and x["actor"] in OWED_DECLARERS for x in by_subject[subj])
             if not prior:
                 ignored.append(e)
                 continue
