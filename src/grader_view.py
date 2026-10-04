@@ -231,6 +231,37 @@ def config_dir() -> pathlib.Path:
     return d
 
 
+def trust_view(cfg_dir, view) -> None:
+    """Pre-accept the CLI's per-directory trust dialog for `view` (the grader's
+    `--chdir`) in `<cfg_dir>/.claude.json`. Without it a self-updated CLI parks
+    every grader pane on the directory-trust prompt until the stale cap kills
+    it (2026-10-04). Several panes start at once, so the read-modify-write is
+    serialized with an flock on a sibling lock file."""
+    import fcntl
+    cfg_dir = pathlib.Path(cfg_dir)
+    state_path = cfg_dir / ".claude.json"
+    with open(cfg_dir / ".claude.json.lock", "w") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        try:
+            state = json.loads(state_path.read_text()) if state_path.is_file() else {}
+        except (OSError, ValueError):
+            state = {}
+        if not isinstance(state, dict):
+            state = {}
+        projects = state.get("projects")
+        if not isinstance(projects, dict):
+            projects = {}
+        for key in (str(view), str(pathlib.Path(view).parent)):
+            entry = projects.get(key) if isinstance(projects.get(key), dict) else {}
+            entry.update({"hasTrustDialogAccepted": True, "hasCompletedProjectOnboarding": True})
+            projects[key] = entry
+        state["projects"] = projects
+        tmp = state_path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(state) + "\n")
+        tmp.chmod(0o600)
+        os.replace(tmp, state_path)
+
+
 def _claude_launcher():
     """The `claude` launcher path and the real file it resolves to (on this
     box, `/home/albert/.local/bin/claude` -> a versioned single-file build

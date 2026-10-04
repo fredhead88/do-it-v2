@@ -240,6 +240,7 @@ def run(events, *, runner=None, now=None):
                 session_checked = True
             view = scratch.sub("grade") / spawn
             cfg_dir = grader_view.config_dir()
+            grader_view.trust_view(cfg_dir, view)
             project = _project_for(events, spawn)
             # L-spec-0481/R12.2, R12.6: the SAME binds and environment the
             # preflight proof itself ran with — one environment for proof and
