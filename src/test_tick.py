@@ -1902,3 +1902,69 @@ try:
 finally:
     fold.ROOT, fold.EVENTS = saved_root486, saved_events486
 print("L0486-AC7 ok")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-0484 · merge-reaches-origin R13(c) (L-charter-0042)
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class _FakePushOrigin:
+    """Substituted into `sys.modules["push_origin"]` — `tick._record()`'s own
+    lazy `import push_origin` picks this up instead of the real module."""
+    def __init__(self, raise_error=False):
+        self.calls = []
+        self.raise_error = raise_error
+
+    def run(self, ev, **kw):
+        self.calls.append(list(ev))
+        if self.raise_error:
+            raise RuntimeError("boom-push-origin")
+        return []
+
+
+# merge-origin-0484 AC17(a) — `tick._record()` calls `push_origin.run(ev)`
+# exactly once per tick; a healthy run adds no `push_origin_error` field to
+# the SAME `tick` event.
+iso_po17a = _isolated_events()
+fold.EVENTS = iso_po17a
+write_to(iso_po17a, "L-planner-0001.jsonl", {"type": "spec-written", "subject": "L-spec-48401"})
+fake_po17a = _FakePushOrigin()
+sys.modules["push_origin"] = fake_po17a
+try:
+    assert tick.main() == 0
+finally:
+    del sys.modules["push_origin"]
+assert len(fake_po17a.calls) == 1, f"merge-origin-0484 AC17: exactly one call: {fake_po17a.calls}"
+lines_po17a = [json.loads(l) for l in (iso_po17a / "L-tick-local.jsonl").read_text().splitlines()]
+tick_events_po17a = [e for e in lines_po17a if e["type"] == "tick"]
+assert tick_events_po17a and "push_origin_error" not in tick_events_po17a[-1], \
+    f"merge-origin-0484 AC17: a healthy run adds no push_origin_error: {tick_events_po17a}"
+fold.EVENTS = saved_events
+
+# merge-origin-0484 AC17(b) — a raising `push_origin.run` leaves
+# `push_origin_error` naming it on the SAME `tick` event, and does not stop
+# `autodispatch.run`, `pane_resume.run`, or the `tick` append itself (`lane`
+# still an int). The tick still starts no Executor and merges nothing — this
+# fake proves it by never touching git or a worktree at all.
+iso_po17b = _isolated_events()
+fold.EVENTS = iso_po17b
+write_to(iso_po17b, "L-planner-0001.jsonl", {"type": "spec-written", "subject": "L-spec-48402"})
+before_pane_calls_po17 = len(PANE_RESUME_CALLS)
+fake_ad_po17b = _FakeAutodispatch()
+sys.modules["autodispatch"] = fake_ad_po17b
+sys.modules["push_origin"] = _FakePushOrigin(raise_error=True)
+try:
+    assert tick.main() == 0
+finally:
+    del sys.modules["push_origin"]
+    del sys.modules["autodispatch"]
+assert len(fake_ad_po17b.calls) == 1, "merge-origin-0484 AC17: autodispatch still ran after a push_origin raise"
+assert len(PANE_RESUME_CALLS) == before_pane_calls_po17 + 1, "merge-origin-0484 AC17: pane_resume.run still ran"
+lines_po17b = [json.loads(l) for l in (iso_po17b / "L-tick-local.jsonl").read_text().splitlines()]
+tick_events_po17b = [e for e in lines_po17b if e["type"] == "tick"]
+assert tick_events_po17b and tick_events_po17b[-1].get("push_origin_error") == "boom-push-origin", \
+    f"merge-origin-0484 AC17: {tick_events_po17b}"
+assert isinstance(tick_events_po17b[-1].get("lane"), int), \
+    f"merge-origin-0484 AC17: the tick's own append still happened: {tick_events_po17b[-1]}"
+fold.EVENTS = saved_events
+print("merge-origin-0484 AC17 ok")

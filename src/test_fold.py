@@ -3715,3 +3715,38 @@ assert not any(e.get("type") == "worktree-reaped" and e.get("path") == "/tmp/y" 
 assert any(e.get("type") == "worktree-reaped" and e.get("path") == "/tmp/y"
            for e in by_subject486.get("L-spec-9486", [])), by_subject486.get("L-spec-9486")
 print("L0486-AC6 ok")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-0484 · merge-reaches-origin R13(c) (L-charter-0042)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── merge-origin-0484 AC16 · fold.EMITS["origin-pushed"] == {"tick"};
+# fold.REQUIRED["origin-pushed"] == ("sha",): admitted with a sha from
+# `tick`, refused with no `sha` for any actor, ignored at fold time from any
+# other actor (executor/builder/look/operator enumerated) ──────────────────
+assert fold.EMITS["origin-pushed"] == {"tick"}, fold.EMITS["origin-pushed"]
+assert fold.REQUIRED["origin-pushed"] == ("sha",), fold.REQUIRED["origin-pushed"]
+
+ev0484_16 = {"type": "origin-pushed", "subject": "albert-scott", "sha": "a" * 40, "branch": "master"}
+assert fold.required_reason(ev0484_16) is None, fold.required_reason(ev0484_16)
+assert fold.check_append(ev0484_16, "tick") is None, fold.check_append(ev0484_16, "tick")
+for actor0484_16 in ("executor", "builder", "look", "operator"):
+    assert fold.check_append(ev0484_16, actor0484_16) is not None, \
+        f"merge-origin-0484 AC16: actor {actor0484_16!r} must not be admitted for origin-pushed"
+
+no_sha0484_16 = {k: v for k, v in ev0484_16.items() if k != "sha"}
+assert fold.required_reason(no_sha0484_16) is not None, "merge-origin-0484 AC16: missing sha must be refused"
+assert fold.check_append(no_sha0484_16, "tick") is not None, \
+    "merge-origin-0484 AC16: missing sha refused even for the right actor"
+
+_, _, _, ignored0484_16, _ = ledger(**{
+    "L-tick-0001.jsonl": [{"ts": stamp(0), "type": "origin-pushed", "subject": "albert-scott",
+                          "sha": "b" * 40, "branch": "master"}],
+    "L-look-local.jsonl": [{"ts": stamp(0), "type": "origin-pushed", "subject": "albert-scott",
+                            "sha": "c" * 40, "branch": "master"}],
+})
+assert any(e["type"] == "origin-pushed" and e["actor"] == "look" for e in ignored0484_16), \
+    f"merge-origin-0484 AC16: a look-authored origin-pushed must be ignored at fold time: {ignored0484_16}"
+assert not any(e["type"] == "origin-pushed" and e["actor"] == "tick" for e in ignored0484_16), \
+    f"merge-origin-0484 AC16: a tick-authored origin-pushed must NOT be ignored: {ignored0484_16}"
+print("merge-origin-0484 AC16 ok")

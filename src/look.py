@@ -31,6 +31,13 @@ DEFAULTS = {
     # below / empty (Assumptions) — no look condition names a class yet.
     "ci": [{"project": "albert-scott", "repo": "/opt/albert-scott", "branch": "master", "workflows": []}],
     "classes": {},
+    # L-charter-0042/L-spec-0484, R13(c): the same `[push]` table
+    # `push_origin.targets()` reads — kept here too (not only in
+    # `push_origin.py`) so `_check_origin_behind` shares the identical
+    # defaults without importing `push_origin` at module scope (Constraints:
+    # `push_origin` imports `look`, so the reverse import stays lazy).
+    "push": {"projects": ["do-it-v2", "albert-scott"],
+             "main": {"do-it-v2": "main", "albert-scott": "master"}},
 }
 _PASS_LOCKED = False   # True only while `run()` holds `look.lock` (skip re-locking, SD22)
 _DRY_RUN = False
@@ -44,11 +51,14 @@ def load_toml(toml_path=None):
             doc = tomllib.load(f)
     except (OSError, ValueError, ImportError):
         doc = {}
+    push_doc = doc.get("push") or {}
     return {"thresholds": {**DEFAULTS["thresholds"], **(doc.get("thresholds") or {})},
             "prod": doc.get("prod") or DEFAULTS["prod"],
             "pane_at_menu": {**DEFAULTS["pane_at_menu"], **(doc.get("pane_at_menu") or {})},
             "ci": doc["ci"] if "ci" in doc else DEFAULTS["ci"],
-            "classes": doc.get("classes") or DEFAULTS["classes"]}
+            "classes": doc.get("classes") or DEFAULTS["classes"],
+            "push": {"projects": push_doc.get("projects") or DEFAULTS["push"]["projects"],
+                     "main": {**DEFAULTS["push"]["main"], **(push_doc.get("main") or {})}}}
 class Runner:
     """Real subprocess/shutil default; a test swaps the whole boundary (AC1)."""
     def ssh(self, target, cmd, timeout):
@@ -663,6 +673,153 @@ def _check_grades_per_shipped(events, now, root, briefs, answered, th):
     bad = ratio is not None and ratio > th["grades_per_shipped_high"]
     _settle("grades-per-shipped-high", "grades-per-shipped", "thinker", bad,
             {"ratio": ratio, "specs": specs_n, "runs": runs_n}, events, root, briefs, answered)
+
+
+def _origin_behind_reading(runner, now, deadline, repo, branch):
+    """One project/branch pair. Returns `(bad, reading, undetermined)`:
+    `bad` is True for "ahead 10+ minutes" or "diverged" (fires), False for
+    "equal" or "strictly behind" (never fires, never alarms a pull the tick
+    never does) — `None`/`None`/`True` on anything unparseable, including an
+    absent `origin/<branch>` ref or an elapsed deadline. Read-only: never a
+    fetch, never a push (Constraints)."""
+    exists, und = _call(runner, deadline, 10, "git",
+                        ["rev-parse", "--verify", "--quiet", f"origin/{branch}"], repo)
+    if und or not str(exists or "").strip():
+        return None, None, True
+    counts, und2 = _call(runner, deadline, 10, "git",
+                         ["rev-list", "--left-right", "--count", f"origin/{branch}...refs/heads/{branch}"], repo)
+    if und2:
+        return None, None, True
+    parts = str(counts or "").split()
+    if len(parts) != 2:
+        return None, None, True
+    try:
+        behind_n, ahead_n = int(parts[0]), int(parts[1])
+    except ValueError:
+        return None, None, True
+    if ahead_n == 0:
+        return False, {"branch": branch, "unpushed": 0}, False   # equal, or strictly behind
+    if behind_n > 0:
+        return True, {"branch": branch, "diverged": True, "unpushed": ahead_n}, False   # fires at once
+    log, und3 = _call(runner, deadline, 10, "git",
+                      ["log", "--format=%ct", f"origin/{branch}..refs/heads/{branch}"], repo)
+    if und3:
+        return None, None, True
+    try:
+        times = [int(x) for x in str(log or "").split() if x.strip()]
+    except ValueError:
+        return None, None, True
+    if not times:
+        return None, None, True
+    age_min = (now.timestamp() - min(times)) / 60
+    return age_min >= 10, {"branch": branch, "unpushed": ahead_n, "age_min": age_min}, False
+
+
+def _check_origin_behind(cfg, runner, now, deadline, events, root, briefs, answered):
+    """L-charter-0042/L-spec-0484 R13(c): "local-ahead-of-origin for 10+
+    minutes is an alarm." One reading per `[push]` project; a project with no
+    configured `main` is silently skipped here (`push_origin.targets`'s own
+    `origin/HEAD` fallback is a PUSH-time resolution, not this read-only
+    alarm's job)."""
+    push = cfg.get("push") or {}
+    projects = push.get("projects") or []
+    mains = push.get("main") or {}
+    for project in projects:
+        branch = mains.get(project)
+        if not branch:
+            continue
+        repo = fold.ROOT / "repos" / project
+        bad, details, und = _origin_behind_reading(runner, now, deadline, repo, branch)
+        if und:
+            _fire_undetermined("origin-behind", events, root, briefs)
+            continue
+        reading = {"project": project, **(details or {})}
+        _settle("origin-behind", project, "executor", bad, reading, events, root, briefs, answered)
+
+
+_SPEC_ID_RE = re.compile(r"^L-spec-\d{4}$")
+
+
+def _spec_idle_busy_spawn(evs, events, now):
+    """An unterminated `spawn-started` on this subject younger than twice its
+    role's cap in minutes (`dispatch.ROLES[role][1]`, default 60 for an
+    unknown/absent role) — Assumption 9's last exclusion."""
+    ended = {e.get("spawn") for e in events if e.get("type") in ("spawn-done", "spawn-failed", "spawn-stale")}
+    for e in evs:
+        if e.get("type") != "spawn-started":
+            continue
+        spawn_id = e.get("spawn")
+        if spawn_id and spawn_id in ended:
+            continue
+        cap = dispatch.ROLES.get(e.get("role"), (None, 60, 0))[1]
+        age_min = (now - fold.ts(e.get("ts"))).total_seconds() / 60
+        if age_min < 2 * cap:
+            return True
+    return False
+
+
+def _spec_idle_bad(sid, s, evs, events, cand_rows, held, answered_ids, now):
+    """Assumptions 6-9: idle means "60+ minutes since this subject's own
+    newest event, with nothing legitimately holding it" — every exclusion is
+    checked BEFORE the age (a young-but-otherwise-excluded spec never reaches
+    the age check, but the age check is what makes an otherwise-eligible one
+    a non-event)."""
+    if s["state"] in dispatch.SETTLED_STATES:
+        return False
+    row = cand_rows.get(sid)
+    if row is not None and (row["status"] in ("seat-wait", "dispatchable")
+                            or (row["status"] == "blocked" and row.get("_dispatch_failed"))):
+        return False   # owned elsewhere: seat-dispatchable-stale's row, or legitimately waiting
+    if sid in held:
+        return False
+    charter = dispatch.resolve_charter(events, sid, None)
+    footprint = next((e.get("footprint") for e in reversed(evs)
+                      if e.get("type") == "spec-written" and e.get("footprint")), None)
+    wave = dispatch.spec_wave(charter, footprint) if (charter and footprint) else None
+    if dispatch.wave_blocker(events, charter, sid, wave) is not None:
+        return False
+    if any(e.get("subject") == sid for e in fold.open_escalations(events)):
+        return False
+    if any(e.get("type") == "question" and e.get("subject") == sid and e["_src"] not in answered_ids
+          for e in events):
+        return False
+    if _spec_idle_busy_spawn(evs, events, now):
+        return False
+    newest = max((fold.ts(e.get("ts")) for e in evs), default=None)
+    if newest is None:
+        return False
+    return (now - newest).total_seconds() / 60 >= 60
+
+
+def _check_spec_idle(events, now, root, briefs, answered):
+    """L-charter-0042/L-spec-0484 R13(d): "any spec whose newest event is
+    older than 60 minutes while not wave-held or awaiting a human is
+    surfaced by name." Population and exclusions: Assumptions 6-9. Wrapped in
+    the SAME broad `except Exception` shape `_check_dispatchable_stale` uses:
+    a raise anywhere in here — including `fold.held_specs` itself being
+    absent pre-wave-3, though `getattr` alone already covers that case —
+    degrades to one `reading-undetermined`, never a half-finished sweep."""
+    try:
+        specs, _charters, _, _ = fold.fold(events)
+        import autodispatch
+        cand_rows = {r["spec"]: r for r in autodispatch.candidates(events, specs, now)}
+        held_fn = getattr(fold, "held_specs", None)
+        held = held_fn(events) if held_fn is not None else set()
+        answered_ids = fold.answered(events)
+        for sid, s in specs.items():
+            if not _SPEC_ID_RE.match(sid) or s["state"] == "unknown":
+                continue
+            evs = s.get("evs") or [e for e in events if e.get("subject") == sid]
+            if not any(e.get("type") == "spec-written" for e in evs):
+                continue
+            bad = _spec_idle_bad(sid, s, evs, events, cand_rows, held, answered_ids, now)
+            idle_min = (now - max(fold.ts(e.get("ts")) for e in evs)).total_seconds() / 60
+            _settle("spec-idle", sid, "executor", bad, {"spec": sid, "idle_min": idle_min},
+                   events, root, briefs, answered)
+    except Exception:
+        _fire_undetermined("spec-idle", events, root, briefs)
+
+
 def _check_wallclock(events, runner, now, root, cfg, deadline, dry_run, briefs):
     """The four wall-clock checks (L-charter-0038 R6), wrapped in the SAME
     lazily-guarded broad `except Exception` shape `_check_crons` uses around
@@ -715,6 +872,8 @@ def run(events, *, now=None, runner=None, root=None, toml_path=None, dry_run=Fal
         _check_spec_misrouted(events, root, briefs)
         _check_dispatchable_stale(events, now, root, briefs)
         _check_grades_per_shipped(events, now, root, briefs, answered, th)
+        _check_origin_behind(cfg, runner, now, deadline, events, root, briefs, answered)
+        _check_spec_idle(events, now, root, briefs, answered)
         wallclock_events = _check_wallclock(events, runner, now, root, cfg, deadline, dry_run, briefs)
         r = _clear("look-stale", "look-stale", "fresh pass", events, root)
         r and answered.append(r)

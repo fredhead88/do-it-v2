@@ -292,6 +292,10 @@ EMITS["charter-classified"] = {"executor", "operator"}   # R6: the backfill's ow
 # worktree reap record — never `tree-reaped`'s actor set (executor/operator, the
 # closing seat's claim), because this fires mid-charter, off the tick's own pass.
 EMITS["worktree-reaped"] = {"tick"}
+# L-charter-0042/L-spec-0484, R13(c): "a merge is not complete until origin
+# carries it" — the tick's own push-pass record, never any other actor's
+# (the actor is `L-tick-originpush.jsonl`'s own filename-derived "tick", D90).
+EMITS["origin-pushed"] = {"tick"}
 # A correction may override anything but these: D90 takes the actor from the
 # FILENAME, and a correction that could rewrite it reopens every check below.
 UNCORRECTABLE = ("actor", "_src")
@@ -807,6 +811,7 @@ REQUIRED["charter-classified"] = ("klass", "reason")
 # L-charter-0042/L-spec-0486 (cleanup-on-finish), R15a: presence-only, like every
 # other entry above — no value's shape, format, or type is checked here.
 REQUIRED["worktree-reaped"] = ("path", "proof")
+REQUIRED["origin-pushed"] = ("sha",)   # L-charter-0042/L-spec-0484 R13(c)
 # L-charter-0042/L-spec-0481 (grading-capabilities): a preflight failure names
 # the capability it could not prove; a hold on it names both the capability
 # and the spec it was raised for (unknown when the shared shape) — presence-only,

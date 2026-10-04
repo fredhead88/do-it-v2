@@ -1318,7 +1318,11 @@ ok(any(b["key"] == "undetermined:crons" for b in briefs_of(res15b, "reading-unde
    "AC15: Undetermined -> exactly one reading-undetermined")
 
 root15c = newroot()
-res15c = look.run([], now=NOW, runner=FakeRunner(), root=root15c, toml_path=clean_toml(root15c))
+sys.modules["crons"] = None  # a None entry makes `import crons` raise ImportError, whatever the host has
+try:
+    res15c = look.run([], now=NOW, runner=FakeRunner(), root=root15c, toml_path=clean_toml(root15c))
+finally:
+    del sys.modules["crons"]
 ok(any(b["key"] == "undetermined:crons" for b in briefs_of(res15c, "reading-undetermined")),
    "AC15: crons unimportable -> the same reading lands")
 ok(not briefs_of(res15c, "cron-missing"), "AC15: crons unimportable -> no cron-missing brief")
@@ -1331,6 +1335,7 @@ seat16.mkdir()
 (seat16 / "L-spec-writer-0099.cmd.json").write_text(json.dumps({"cmd": ["x"], "cwd": "/x", "path": "/wrong/path.md"}))
 append_raw(root16, "L-executor-0001.jsonl", iso(NOW - timedelta(hours=1)),
           type="spawn-started", spawn="L-spec-writer-0099", subject="L-spec-0400", role="spec-writer")
+_orig_spec_path16 = dispatch.spec_path
 dispatch.spec_path = lambda subject: pathlib.Path("/content") / f"{subject}.md"
 try:
     ev16 = read_ledger(root16)
@@ -1368,7 +1373,7 @@ try:
     ok(not briefs_of(res16d, "spec-misrouted"), "AC16: older than 24h with a genuine mismatch appends nothing")
 
     root16e = newroot()
-    append_raw(root16e, "L-planner-0001.jsonl", iso(NOW - timedelta(hours=1)),
+    append_raw(root16e, "L-planner-0001.jsonl", iso(datetime.now(timezone.utc) - timedelta(hours=1)),  # the check's window is real-clock
               type="spec-written", spec="L-spec-0402", path="/bad/path.md")
     ev16e = read_ledger(root16e)
     res16e = look.run(ev16e, now=NOW, runner=FakeRunner(), root=root16e, toml_path=clean_toml(root16e))
@@ -1376,25 +1381,38 @@ try:
        "AC16: a spec-written path mismatch briefs, keyed by spec")
 
     root16f = newroot()
-    append_raw(root16f, "L-planner-0001.jsonl", iso(NOW - timedelta(hours=1)),
+    append_raw(root16f, "L-planner-0001.jsonl", iso(datetime.now(timezone.utc) - timedelta(hours=1)),  # the check's window is real-clock
               type="spec-written", spec="L-spec-0403")
     ev16f = read_ledger(root16f)
     res16f = look.run(ev16f, now=NOW, runner=FakeRunner(), root=root16f, toml_path=clean_toml(root16f))
     ok(any(b["key"] == "L-spec-0403" for b in briefs_of(res16f, "spec-misrouted")),
        "AC16: a missing path, within the window, also briefs")
 finally:
-    del dispatch.spec_path
+    dispatch.spec_path = _orig_spec_path16
 
-ok(getattr(dispatch, "spec_path", None) is None, "sanity: dispatch.spec_path restored to absent")
+ok(dispatch.spec_path is _orig_spec_path16,
+   "sanity: dispatch.spec_path restored to its original real function, not left deleted")
+
+# A separate, scoped probe of the AC16 no-spec_path degrade path: delete only
+# for this one `look.run`, then restore immediately in its own finally, so no
+# later test in this file (AC12-15's `_check_spec_idle`, which reaches
+# `dispatch.spec_path` transitively via `autodispatch.candidates`) ever sees
+# `dispatch.spec_path` missing.
 root16g = newroot()
 seat16g = root16g / "seat"
 seat16g.mkdir()
 (seat16g / "L-spec-writer-0199.cmd.json").write_text(json.dumps({"cmd": ["x"], "cwd": "/x", "path": "/wrong.md"}))
 ev16g = read_ledger(root16g)
-res16g = look.run(ev16g, now=NOW, runner=FakeRunner(), root=root16g, toml_path=clean_toml(root16g))
+del dispatch.spec_path
+try:
+    res16g = look.run(ev16g, now=NOW, runner=FakeRunner(), root=root16g, toml_path=clean_toml(root16g))
+finally:
+    dispatch.spec_path = _orig_spec_path16
 ok(not briefs_of(res16g, "spec-misrouted"), "AC16: with dispatch.spec_path absent, no spec-misrouted brief fires")
 ok(any(b["key"] == "undetermined:spec-misrouted" for b in briefs_of(res16g, "reading-undetermined")),
    "AC16: absent spec_path -> exactly one reading-undetermined instead")
+ok(dispatch.spec_path is _orig_spec_path16,
+   "sanity: dispatch.spec_path restored to its original real function after the absent-spec_path probe")
 print("AC16 ok")
 
 # ── AC18: the 90s pass-budget deadline, scripted clock, no real sleep ───────
@@ -1491,5 +1509,416 @@ res12e_482 = look.run(ev12e_482, now=NOW, runner=FakeRunner(), root=root12e_482,
                       toml_path=write_toml(root12e_482, prod=[], thresholds={"grades_per_shipped_high": 2.0}))
 ok(briefs_of(res12e_482, "grades-per-shipped-high") == [], "AC12: a raised toml threshold (2.0) keeps 1.6 quiet")
 print("L-spec-0482 AC12 ok")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# L-spec-0484 · merge-reaches-origin R13(c)/R13(d) (L-charter-0042)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── merge-origin-0484 AC10 · look.load_toml()'s [push] table ────────────────
+cfg0484_10 = look.load_toml()   # the shipped look.toml, no override
+ok(cfg0484_10["push"]["projects"] == ["do-it-v2", "albert-scott"], f"AC10: default projects: {cfg0484_10['push']}")
+ok(cfg0484_10["push"]["main"] == {"do-it-v2": "main", "albert-scott": "master"},
+   f"AC10: default mains: {cfg0484_10['push']}")
+ok(cfg0484_10["thresholds"]["pass_budget_s"] == 90, "AC10: pre-existing thresholds key unchanged")
+ok(bool(cfg0484_10["prod"]) and cfg0484_10["prod"][0]["project"] == "albert-scott",
+   "AC10: pre-existing prod key unchanged")
+ok(cfg0484_10["pane_at_menu"] == {"codex_patterns": [], "codex_targets": []},
+   "AC10: pre-existing pane_at_menu key unchanged")
+ok(bool(cfg0484_10["ci"]) and cfg0484_10["ci"][0]["project"] == "albert-scott", "AC10: pre-existing ci key unchanged")
+ok(cfg0484_10["classes"] == {}, "AC10: pre-existing classes key unchanged")
+
+cfg0484_10b = look.load_toml(pathlib.Path("/nonexistent-do-it-fixture/no-such-look.toml"))
+ok(cfg0484_10b["push"]["projects"] == ["do-it-v2", "albert-scott"], "AC10: a missing file returns the defaults")
+ok(cfg0484_10b["push"]["main"] == {"do-it-v2": "main", "albert-scott": "master"},
+   "AC10: a missing file returns the defaults (main)")
+
+root0484_10c = newroot()
+badtoml0484_10c = root0484_10c / "bad.toml"
+badtoml0484_10c.write_text("this is not [[[ valid toml")
+cfg0484_10c = look.load_toml(badtoml0484_10c)
+ok(cfg0484_10c["push"]["projects"] == ["do-it-v2", "albert-scott"], "AC10: a malformed file returns the defaults")
+
+root0484_10d = newroot()
+cfg0484_10d = look.load_toml(clean_toml(root0484_10d))   # a real file with no [push] table at all
+ok(cfg0484_10d["push"]["projects"] == ["do-it-v2", "albert-scott"], "AC10: no [push] table returns the defaults")
+print("merge-origin-0484 AC10 ok")
+
+
+def push_toml(root, projects, main):
+    """`clean_toml`'s own shape, plus a `[push]`/`[push.main]` table appended
+    at the end — a fresh top-level table never collides with the bare keys
+    `write_toml` already wrote (Constraints noted on `write_toml` apply only
+    to bare keys preceding a table header, not to a later table)."""
+    p = clean_toml(root)
+    lines = [p.read_text().rstrip("\n"), "", "[push]", "projects = " + json.dumps(list(projects))]
+    if main:
+        lines.append("[push.main]")
+        for k, v in main.items():
+            lines.append(f'{k} = "{v}"')
+    p.write_text("\n".join(lines) + "\n")
+    return p
+
+
+def _origin_git(rev_parse_out="abc123def0", counts_out="0 3", log_out=""):
+    """A `git`-shaped fake dispatching on the subcommand alone — `cwd` is
+    never inspected, so no real repo needs to exist on disk for this."""
+    def _git(args, cwd, timeout):
+        if args[0] == "rev-parse":
+            return rev_parse_out
+        if args[0] == "rev-list":
+            return counts_out
+        if args[0] == "log":
+            return log_out
+        return ""
+    return _git
+
+
+# ── merge-origin-0484 AC11 · origin-behind ───────────────────────────────────
+old15min = str(int((NOW - timedelta(minutes=15)).timestamp()))
+old9min = str(int((NOW - timedelta(minutes=9)).timestamp()))
+
+root0484_11a = newroot()
+res0484_11a = look.run([], now=NOW, runner=FakeRunner(git=_origin_git(counts_out="0 3", log_out=old15min)),
+                       root=root0484_11a, toml_path=push_toml(root0484_11a, ["proj"], {"proj": "main"}))
+b0484_11a = briefs_of(res0484_11a, "origin-behind")
+ok(len(b0484_11a) == 1 and b0484_11a[0]["key"] == "proj" and b0484_11a[0]["owner"] == "executor",
+   f"AC11a: 15-minute-ahead fires, owner executor, key=project: {b0484_11a}")
+ok(b0484_11a[0]["reading"]["branch"] == "main" and b0484_11a[0]["reading"]["unpushed"] == 3,
+   f"AC11a: reading names branch and unpushed count: {b0484_11a}")
+
+root0484_11b = newroot()
+res0484_11b = look.run([], now=NOW, runner=FakeRunner(git=_origin_git(counts_out="0 3", log_out=old9min)),
+                       root=root0484_11b, toml_path=push_toml(root0484_11b, ["proj"], {"proj": "main"}))
+ok(not briefs_of(res0484_11b, "origin-behind"), "AC11b: 9 minutes ahead does not fire")
+
+root0484_11c = newroot()
+res0484_11c = look.run([], now=NOW, runner=FakeRunner(git=_origin_git(counts_out="2 3")),
+                       root=root0484_11c, toml_path=push_toml(root0484_11c, ["proj"], {"proj": "main"}))
+b0484_11c = briefs_of(res0484_11c, "origin-behind")
+ok(len(b0484_11c) == 1 and b0484_11c[0]["reading"].get("diverged") is True,
+   f"AC11c: diverged fires at once (no log read needed): {b0484_11c}")
+
+root0484_11d = newroot()
+res0484_11d = look.run([], now=NOW, runner=FakeRunner(git=_origin_git(counts_out="0 0")),
+                       root=root0484_11d, toml_path=push_toml(root0484_11d, ["proj"], {"proj": "main"}))
+ok(not briefs_of(res0484_11d, "origin-behind"), "AC11d: equal does not fire")
+
+root0484_11e = newroot()
+res0484_11e = look.run([], now=NOW, runner=FakeRunner(git=_origin_git(counts_out="5 0")),
+                       root=root0484_11e, toml_path=push_toml(root0484_11e, ["proj"], {"proj": "main"}))
+ok(not briefs_of(res0484_11e, "origin-behind"), "AC11e: strictly behind does not fire")
+
+root0484_11f = newroot()
+toml0484_11f = push_toml(root0484_11f, ["proj"], {"proj": "main"})
+res0484_11f1 = look.run([], now=NOW, runner=FakeRunner(git=_origin_git(counts_out="0 3", log_out=old15min)),
+                        root=root0484_11f, toml_path=toml0484_11f)
+ok(bool(briefs_of(res0484_11f1, "origin-behind")), "AC11f: seed the alarm first")
+ev0484_11f = read_ledger(root0484_11f)
+res0484_11f2 = look.run(ev0484_11f, now=NOW, runner=FakeRunner(git=_origin_git(counts_out="0 0")),
+                        root=root0484_11f, toml_path=toml0484_11f)
+ok(not briefs_of(res0484_11f2, "origin-behind"), "AC11f: no re-fire on the pass that clears it")
+ok(bool(res0484_11f2["answered"]), f"AC11f: it clears (brief-answered) once local equals origin: {res0484_11f2}")
+
+root0484_11g = newroot()
+res0484_11g = look.run([], now=NOW, runner=FakeRunner(), root=root0484_11g,
+                       toml_path=push_toml(root0484_11g, ["proj"], {"proj": "main"}))
+ok(not briefs_of(res0484_11g, "origin-behind"), "AC11g: the real Runner's own empty-string failure shape never fires")
+ok(any(b["key"] == "undetermined:origin-behind" for b in briefs_of(res0484_11g, "reading-undetermined")),
+   f"AC11g: ...and reads undetermined instead: {res0484_11g}")
+
+
+def _raising_origin_git(args, cwd, timeout):
+    raise RuntimeError("boom-origin-behind")
+
+
+root0484_11h = newroot()
+res0484_11h = look.run([], now=NOW, runner=FakeRunner(git=_raising_origin_git), root=root0484_11h,
+                       toml_path=push_toml(root0484_11h, ["proj"], {"proj": "main"}))
+ok(any(b["key"] == "undetermined:origin-behind" for b in briefs_of(res0484_11h, "reading-undetermined")),
+   f"AC11h: a raising runner reads undetermined: {res0484_11h}")
+
+root0484_11i = newroot()
+res0484_11i = look.run([], now=NOW, runner=FakeRunner(git=_origin_git(counts_out="not-a-count")),
+                       root=root0484_11i, toml_path=push_toml(root0484_11i, ["proj"], {"proj": "main"}))
+ok(any(b["key"] == "undetermined:origin-behind" for b in briefs_of(res0484_11i, "reading-undetermined")),
+   f"AC11i: unparseable rev-list output reads undetermined: {res0484_11i}")
+
+root0484_11j = newroot()
+fake0484_11j = JumpingRunner(git=_origin_git(counts_out="0 3", log_out=old15min))
+res0484_11j = look.run([], now=NOW, runner=fake0484_11j, root=root0484_11j,
+                       toml_path=push_toml(root0484_11j, ["proj"], {"proj": "main"}))
+ok(fake0484_11j.calls == [], "AC11j: an elapsed deadline fires no external call")
+ok(all(b["condition"] == "reading-undetermined" for b in res0484_11j["briefs"]),
+   f"AC11j: every reading past the deadline is reading-undetermined: {res0484_11j}")
+
+root0484_11k = newroot()
+res0484_11k = look.run([], now=NOW, runner=FakeRunner(git=_origin_git(rev_parse_out="")), root=root0484_11k,
+                       toml_path=push_toml(root0484_11k, ["proj"], {"proj": "main"}))
+ok(any(b["key"] == "undetermined:origin-behind" for b in briefs_of(res0484_11k, "reading-undetermined")),
+   f"AC11k: a missing origin/<branch> ref reads undetermined: {res0484_11k}")
+print("merge-origin-0484 AC11 ok")
+
+
+# ══ spec-idle (AC12-AC15) — a lighter sibling of `_ad_root_setup` above: sets
+# the same three `fold`/`dispatch` globals, but never links a `repos/<project>`
+# symlink and never writes spec content, so an otherwise-idle "written" spec
+# reads `_blocking_reason` -> ("spec file unreadable", False) — `blocked`,
+# never `_dispatch_failed` — the cleanest "not owned elsewhere" fixture. The
+# seat-wait/dispatchable cases below use `_ad_root_setup`/`CLEAN_SPEC_AD`
+# instead, exactly where capacity-slotting behavior is the point. ══════════
+def _si_setup(root):
+    saved = (fold.ROOT, _dispatch.ROOT, _dispatch.EVENTS, _dispatch.CONTENT)
+    fold.ROOT = root
+    _dispatch.ROOT, _dispatch.EVENTS, _dispatch.CONTENT = root, root / "events", root / "content"
+    (root / "content").mkdir(parents=True, exist_ok=True)
+    return saved
+
+
+def _si_restore(saved):
+    fold.ROOT, _dispatch.ROOT, _dispatch.EVENTS, _dispatch.CONTENT = saved
+
+
+# ── merge-origin-0484 AC12 · two idle written specs fire, keyed by id; a
+# second pass appends no duplicate; 59 minutes does not fire ────────────────
+root0484_12 = newroot()
+saved0484_12 = _si_setup(root0484_12)
+append_raw(root0484_12, "L-planner-0001.jsonl", iso(NOW - timedelta(minutes=61)),
+           type="spec-written", subject="L-spec-8001", project="proj12")
+append_raw(root0484_12, "L-planner-0002.jsonl", iso(NOW - timedelta(minutes=61)),
+           type="spec-written", subject="L-spec-8002", project="proj12")
+ev0484_12 = read_ledger(root0484_12)
+res0484_12 = look.run(ev0484_12, now=NOW, runner=FakeRunner(), root=root0484_12, toml_path=clean_toml(root0484_12))
+b0484_12 = briefs_of(res0484_12, "spec-idle")
+ok({b["key"] for b in b0484_12} == {"L-spec-8001", "L-spec-8002"}, f"AC12: two idle specs, two keys: {b0484_12}")
+ok(all(b["owner"] == "executor" for b in b0484_12), f"AC12: owner executor: {b0484_12}")
+ok(all(b["reading"].get("spec") == b["key"] and "idle_min" in b["reading"] for b in b0484_12),
+   f"AC12: reading names spec and idle minutes: {b0484_12}")
+ev0484_12b = read_ledger(root0484_12)
+res0484_12b = look.run(ev0484_12b, now=NOW, runner=FakeRunner(), root=root0484_12, toml_path=clean_toml(root0484_12))
+ok(briefs_of(res0484_12b, "spec-idle") == [], f"AC12: a second pass appends no duplicate: {res0484_12b}")
+_si_restore(saved0484_12)
+
+root0484_12c = newroot()
+saved0484_12c = _si_setup(root0484_12c)
+append_raw(root0484_12c, "L-planner-0001.jsonl", iso(NOW - timedelta(minutes=59)),
+           type="spec-written", subject="L-spec-8003", project="proj12c")
+ev0484_12c = read_ledger(root0484_12c)
+res0484_12c = look.run(ev0484_12c, now=NOW, runner=FakeRunner(), root=root0484_12c, toml_path=clean_toml(root0484_12c))
+ok(not briefs_of(res0484_12c, "spec-idle"), "AC12: 59 minutes does not fire")
+_si_restore(saved0484_12c)
+print("merge-origin-0484 AC12 ok")
+
+# ── merge-origin-0484 AC13 · exclusions, one otherwise-idle spec per case ───
+OLD61 = lambda: iso(NOW - timedelta(minutes=61))
+RECENT5 = lambda: iso(NOW - timedelta(minutes=5))
+
+# terminal: a spec-killed event is terminal the instant it exists (fold.spec_state),
+# and "killed" is a member of dispatch.SETTLED_STATES — the single membership
+# check this exclusion is. The other four labels SETTLED_STATES also carries
+# (shipped/dropped/accepted/void, plus every shipped-owed-* variant) share this
+# exact line; `spec_state`'s own derivation of each is proved by `test_fold.py`.
+root0484_13a = newroot()
+saved0484_13a = _si_setup(root0484_13a)
+append_raw(root0484_13a, "L-planner-0001.jsonl", OLD61(), type="spec-written", subject="L-spec-8020", project="p")
+append_raw(root0484_13a, "L-thinker-0001.jsonl", RECENT5(), type="spec-killed", subject="L-spec-8020")
+ev0484_13a = read_ledger(root0484_13a)
+res0484_13a = look.run(ev0484_13a, now=NOW, runner=FakeRunner(), root=root0484_13a, toml_path=clean_toml(root0484_13a))
+ok(not briefs_of(res0484_13a, "spec-idle"), "AC13: terminal (killed) never fires")
+_si_restore(saved0484_13a)
+
+# wave-held: sibling on an earlier wave, same charter, not settled.
+root0484_13b = newroot()
+saved0484_13b = _si_setup(root0484_13b)
+C13B = "L-charter-94840"
+(root0484_13b / "content" / f"plan-{C13B}.md").write_text(
+    "## Unit A\nFootprint:\n- y.py\nWave: 2\n\n## Unit B\nFootprint:\n- x.py\nWave: 1\n")
+append_raw(root0484_13b, "L-planner-0001.jsonl", OLD61(), type="spec-written", subject="L-spec-8021",
+           project="p", charter=C13B, footprint=["y.py"])
+append_raw(root0484_13b, "L-planner-0002.jsonl", RECENT5(), type="spec-written", subject="L-spec-8022",
+           project="p", charter=C13B, footprint=["x.py"])
+ev0484_13b = read_ledger(root0484_13b)
+res0484_13b = look.run(ev0484_13b, now=NOW, runner=FakeRunner(), root=root0484_13b, toml_path=clean_toml(root0484_13b))
+ok(not any(b["key"] == "L-spec-8021" for b in briefs_of(res0484_13b, "spec-idle")), "AC13: wave-held never fires")
+_si_restore(saved0484_13b)
+
+# in fold.held_specs (stubbed).
+root0484_13c = newroot()
+saved0484_13c = _si_setup(root0484_13c)
+append_raw(root0484_13c, "L-planner-0001.jsonl", OLD61(), type="spec-written", subject="L-spec-8023", project="p")
+ev0484_13c = read_ledger(root0484_13c)
+real_held_13c = fold.held_specs
+fold.held_specs = lambda events, **kw: {"L-spec-8023"}
+try:
+    res0484_13c = look.run(ev0484_13c, now=NOW, runner=FakeRunner(), root=root0484_13c,
+                           toml_path=clean_toml(root0484_13c))
+finally:
+    fold.held_specs = real_held_13c
+ok(not briefs_of(res0484_13c, "spec-idle"), "AC13: a held spec never fires")
+_si_restore(saved0484_13c)
+
+# open escalation-blocking.
+root0484_13d = newroot()
+saved0484_13d = _si_setup(root0484_13d)
+append_raw(root0484_13d, "L-planner-0001.jsonl", OLD61(), type="spec-written", subject="L-spec-8024", project="p")
+append_raw(root0484_13d, "L-executor-0001.jsonl", RECENT5(), type="escalation-blocking", subject="L-spec-8024",
+           why="w", default="d", deadline="2099-01-01", revert="r")
+ev0484_13d = read_ledger(root0484_13d)
+res0484_13d = look.run(ev0484_13d, now=NOW, runner=FakeRunner(), root=root0484_13d, toml_path=clean_toml(root0484_13d))
+ok(not briefs_of(res0484_13d, "spec-idle"), "AC13: an open escalation-blocking never fires")
+_si_restore(saved0484_13d)
+
+# unanswered question.
+root0484_13e = newroot()
+saved0484_13e = _si_setup(root0484_13e)
+append_raw(root0484_13e, "L-planner-0001.jsonl", OLD61(), type="spec-written", subject="L-spec-8025", project="p")
+append_raw(root0484_13e, "L-executor-0001.jsonl", RECENT5(), type="question", subject="L-spec-8025",
+           deadline="2099-01-01")
+ev0484_13e = read_ledger(root0484_13e)
+res0484_13e = look.run(ev0484_13e, now=NOW, runner=FakeRunner(), root=root0484_13e, toml_path=clean_toml(root0484_13e))
+ok(not briefs_of(res0484_13e, "spec-idle"), "AC13: an unanswered question never fires")
+_si_restore(saved0484_13e)
+
+# a live young spawn-started.
+root0484_13f = newroot()
+saved0484_13f = _si_setup(root0484_13f)
+append_raw(root0484_13f, "L-planner-0001.jsonl", OLD61(), type="spec-written", subject="L-spec-8026", project="p")
+append_raw(root0484_13f, "L-executor-0001.jsonl", RECENT5(), type="spawn-started", subject="L-spec-8026",
+           spawn="L-builder-30026", role="builder")
+ev0484_13f = read_ledger(root0484_13f)
+res0484_13f = look.run(ev0484_13f, now=NOW, runner=FakeRunner(), root=root0484_13f, toml_path=clean_toml(root0484_13f))
+ok(not briefs_of(res0484_13f, "spec-idle"), "AC13: a live young spawn-started never fires")
+_si_restore(saved0484_13f)
+
+# a written spec blocked with _dispatch_failed.
+root0484_13g = newroot()
+saved0484_13g = _si_setup(root0484_13g)
+append_raw(root0484_13g, "L-planner-0001.jsonl", OLD61(), type="spec-written", subject="L-spec-8027", project="p")
+append_raw(root0484_13g, "L-tick-0001.jsonl", RECENT5(), type="autodispatch-failed", subject="L-spec-8027",
+           reason="boom")
+ev0484_13g = read_ledger(root0484_13g)
+res0484_13g = look.run(ev0484_13g, now=NOW, runner=FakeRunner(), root=root0484_13g, toml_path=clean_toml(root0484_13g))
+ok(not briefs_of(res0484_13g, "spec-idle"), "AC13: a standing autodispatch-failed never fires")
+_si_restore(saved0484_13g)
+
+# a written spec whose candidates row is seat-wait, and one that is dispatchable.
+root0484_13h = newroot()
+saved0484_13h = _ad_root_setup(root0484_13h, project="proj13h")
+(root0484_13h / "models.toml").write_text("[seats]\nbuilder = 1\n")
+(root0484_13h / "content" / "L-spec-8028.md").write_text(CLEAN_SPEC_AD)
+(root0484_13h / "content" / "L-spec-8029.md").write_text(CLEAN_SPEC_AD)
+append_raw(root0484_13h, "L-planner-0001.jsonl", iso(NOW - timedelta(minutes=120)),
+           type="spec-written", subject="L-spec-8028", project="proj13h")
+append_raw(root0484_13h, "L-planner-0002.jsonl", OLD61(), type="spec-written", subject="L-spec-8029",
+           project="proj13h")
+ev0484_13h = read_ledger(root0484_13h)
+res0484_13h = look.run(ev0484_13h, now=NOW, runner=FakeRunner(), root=root0484_13h, toml_path=clean_toml(root0484_13h))
+b0484_13h = briefs_of(res0484_13h, "spec-idle")
+ok(not any(b["key"] in ("L-spec-8028", "L-spec-8029") for b in b0484_13h),
+   f"AC13: a dispatchable row and a seat-wait row never fire: {b0484_13h}")
+_ad_root_restore(saved0484_13h)
+
+# an event newer than 60 minutes (any type) also yields none.
+root0484_13i = newroot()
+saved0484_13i = _si_setup(root0484_13i)
+append_raw(root0484_13i, "L-planner-0001.jsonl", OLD61(), type="spec-written", subject="L-spec-8030", project="p")
+append_raw(root0484_13i, "L-thinker-0001.jsonl", RECENT5(), type="observed", subject="L-spec-8030")
+ev0484_13i = read_ledger(root0484_13i)
+res0484_13i = look.run(ev0484_13i, now=NOW, runner=FakeRunner(), root=root0484_13i, toml_path=clean_toml(root0484_13i))
+ok(not briefs_of(res0484_13i, "spec-idle"), "AC13: any recent event resets the idle clock")
+_si_restore(saved0484_13i)
+print("merge-origin-0484 AC13 ok")
+
+# ── merge-origin-0484 AC14 · live-shaped population fixture ─────────────────
+root0484_14 = newroot()
+saved0484_14 = _ad_root_setup(root0484_14, project="proj14")
+(root0484_14 / "models.toml").write_text("[seats]\nbuilder = 1\n")
+(root0484_14 / "content" / "L-spec-8040.md").write_text(CLEAN_SPEC_AD)
+(root0484_14 / "content" / "L-spec-8041.md").write_text(CLEAN_SPEC_AD)
+append_raw(root0484_14, "L-planner-0001.jsonl", OLD61(), type="spec-written", subject="L-spec-8040",
+           project="proj14")   # older -> dispatchable
+append_raw(root0484_14, "L-planner-0002.jsonl", OLD61(), type="spec-written", subject="L-spec-8041",
+           project="proj14")   # -> seat-wait (capacity 1)
+append_raw(root0484_14, "L-planner-0004.jsonl", iso(NOW - timedelta(minutes=90)),
+           type="spec-written", subject="L-spec-0501", project="proj14")
+append_raw(root0484_14, "L-builder-0001.jsonl", OLD61(), type="build-started", subject="L-spec-0501")
+append_raw(root0484_14, "L-planner-0003.jsonl", OLD61(), type="spec-written", subject="L-spec-0179-ac12-x")
+append_raw(root0484_14, "L-planner-0003.jsonl", OLD61(), type="spec-written", subject="L-spec-0700-")
+append_raw(root0484_14, "L-spec-writer-0515.jsonl", OLD61(), type="spec-written", subject="L-spec-writer-0515")
+append_raw(root0484_14, "L-spec-reviewer-0516.jsonl", OLD61(), type="verdict", subject="L-spec-reviewer-0516")
+append_raw(root0484_14, "L-thinker-0001.jsonl", OLD61(), type="observed", subject="L-spec-0777")
+ev0484_14 = read_ledger(root0484_14)
+res0484_14 = look.run(ev0484_14, now=NOW, runner=FakeRunner(), root=root0484_14, toml_path=clean_toml(root0484_14))
+b0484_14 = {b["key"] for b in briefs_of(res0484_14, "spec-idle")}
+ok(b0484_14 == {"L-spec-0501"}, f"AC14: exactly the one real unsettled building spec fires: {b0484_14}")
+_ad_root_restore(saved0484_14)
+print("merge-origin-0484 AC14 ok")
+
+# ── merge-origin-0484 AC15 · self-clears; held_specs absent; a raise ────────
+root0484_15 = newroot()
+saved0484_15 = _si_setup(root0484_15)
+append_raw(root0484_15, "L-planner-0001.jsonl", OLD61(), type="spec-written", subject="L-spec-8099", project="p")
+ev0484_15a = read_ledger(root0484_15)
+res0484_15a = look.run(ev0484_15a, now=NOW, runner=FakeRunner(), root=root0484_15, toml_path=clean_toml(root0484_15))
+ok(any(b["key"] == "L-spec-8099" for b in briefs_of(res0484_15a, "spec-idle")), "AC15: seed the alarm")
+ev0484_15b = read_ledger(root0484_15)
+brief0484_15 = next(e for e in ev0484_15b if e.get("type") == "brief" and e.get("condition") == "spec-idle"
+                    and e.get("key") == "L-spec-8099")
+res0484_15b = look.run(ev0484_15b, now=NOW + timedelta(minutes=10), runner=FakeRunner(), root=root0484_15,
+                       toml_path=clean_toml(root0484_15))
+ev0484_15c = read_ledger(root0484_15)
+ok(not any(e.get("type") == "brief-answered" and e.get("ref") == brief0484_15["_src"] for e in ev0484_15c),
+   "AC15: the alarm's own brief never resets its subject's clock, so it is never spuriously cleared")
+_si_restore(saved0484_15)
+
+# a newer event, becoming settled, or becoming held DOES clear it.
+root0484_15d = newroot()
+saved0484_15d = _si_setup(root0484_15d)
+append_raw(root0484_15d, "L-planner-0001.jsonl", OLD61(), type="spec-written", subject="L-spec-8098", project="p")
+ev0484_15d1 = read_ledger(root0484_15d)
+res0484_15d1 = look.run(ev0484_15d1, now=NOW, runner=FakeRunner(), root=root0484_15d, toml_path=clean_toml(root0484_15d))
+ok(any(b["key"] == "L-spec-8098" for b in briefs_of(res0484_15d1, "spec-idle")), "AC15: seed the alarm")
+append_raw(root0484_15d, "L-executor-0001.jsonl", iso(NOW - timedelta(minutes=1)),
+           type="shipped", subject="L-spec-8098")
+ev0484_15d2 = read_ledger(root0484_15d)
+res0484_15d2 = look.run(ev0484_15d2, now=NOW, runner=FakeRunner(), root=root0484_15d, toml_path=clean_toml(root0484_15d))
+ok(not briefs_of(res0484_15d2, "spec-idle"), "AC15: becoming settled clears/never re-fires")
+ok(bool(res0484_15d2["answered"]), f"AC15: a settled subject clears the standing alarm: {res0484_15d2}")
+_si_restore(saved0484_15d)
+
+# fold.held_specs absent (attribute removed) — the check still runs with an
+# empty held set, never crashing the pass.
+root0484_15e = newroot()
+saved0484_15e = _si_setup(root0484_15e)
+append_raw(root0484_15e, "L-planner-0001.jsonl", OLD61(), type="spec-written", subject="L-spec-8097", project="p")
+ev0484_15e = read_ledger(root0484_15e)
+real_held_15e = fold.held_specs
+del fold.held_specs
+try:
+    res0484_15e = look.run(ev0484_15e, now=NOW, runner=FakeRunner(), root=root0484_15e,
+                           toml_path=clean_toml(root0484_15e))
+finally:
+    fold.held_specs = real_held_15e
+ok(any(b["key"] == "L-spec-8097" for b in briefs_of(res0484_15e, "spec-idle")),
+   f"AC15: fold.held_specs absent -> empty held set, check still fires normally: {res0484_15e}")
+_si_restore(saved0484_15e)
+
+# a raise inside the check yields one reading-undetermined, never a crash and
+# never a spec-idle brief.
+root0484_15f = newroot()
+saved0484_15f = _si_setup(root0484_15f)
+append_raw(root0484_15f, "L-planner-0001.jsonl", OLD61(), type="spec-written", subject="L-spec-8096", project="p")
+ev0484_15f = read_ledger(root0484_15f)
+real_answered_15f = fold.answered
+fold.answered = lambda events: (_ for _ in ()).throw(RuntimeError("induced for AC15"))
+try:
+    res0484_15f = look.run(ev0484_15f, now=NOW, runner=FakeRunner(), root=root0484_15f,
+                           toml_path=clean_toml(root0484_15f))
+finally:
+    fold.answered = real_answered_15f
+ok(not briefs_of(res0484_15f, "spec-idle"), "AC15: a raise never yields a spec-idle brief")
+ok(any(b["key"] == "undetermined:spec-idle" for b in briefs_of(res0484_15f, "reading-undetermined")),
+   f"AC15: ...and reads undetermined instead: {res0484_15f}")
+_si_restore(saved0484_15f)
+print("merge-origin-0484 AC15 ok")
 
 print(f"look: {n} checks passed")
