@@ -1239,11 +1239,16 @@ def criterion_block(body, crit_id):
     the sweeper's own AC1 precedent). `None` when `crit_id` is absent."""
     sec = section(body, "Acceptance")
     lines = sec.splitlines() if sec else body.splitlines()
-    start_pat = re.compile(rf"^\s*\**{re.escape(crit_id)}\s*\[")
+    # Specs write a criterion as `**AC5 [`, `- **AC5 [`, `  - **AC5 [`, `| AC5 [` (a table
+    # row) or `- Acceptance: AC5 [`. The bare `**AC5 [` shape alone orphaned every due
+    # check of 53 (spec, criterion) pairs from the owed sweep (2026-10-04).
+    lead = r"^\s*(?:[-*|]\s*)*(?:Acceptance:\s*)?\**"
+    start_pat = re.compile(lead + re.escape(crit_id) + r"\**\s*\[")
+    any_pat = re.compile(lead + r"AC\d+[a-z]?\**\s*\[")
     start = next((i for i in range(len(lines)) if start_pat.match(lines[i])), None)
     if start is None:
         return None
-    end = next((i for i in range(start + 1, len(lines)) if _AC_ANY.match(lines[i])), len(lines))
+    end = next((i for i in range(start + 1, len(lines)) if any_pat.match(lines[i])), len(lines))
     return "\n".join(lines[start:end]).strip()
 
 
