@@ -584,7 +584,12 @@ def write_verify_script(c):
         block = apply_waivers(block, standing_waivers(c))
     bs = c.last("build-started")
     dsn_line = "set -a; . ./.env; set +a\n" if bs and bs.get("dsn_role") == "readonly" else ""
-    text = f"{shebang}\n{set_e}\nBASE={base}\n" + dsn_line + block
+    # A blind role (grader/reviewer) gets the BASE line only when its block uses it:
+    # a short block is inlined into the packet, and an unused BASE=<base_sha> there
+    # tripped the grader's own Blindness check (L-spec-0484, 2026-10-04).
+    uses_base = re.search(r"\$\{?BASE\b", block) is not None
+    base_line = f"BASE={base}\n" if (uses_base or c.a.role not in ("grader", "reviewer")) else ""
+    text = f"{shebang}\n{set_e}\n" + base_line + dsn_line + block
     p = CONTENT / f"verify-{c.a.subject}-{c.a.role}.sh"
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(text)
