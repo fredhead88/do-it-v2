@@ -139,7 +139,7 @@ assert len(ticks()) == 2, "AC10: exactly one tick event per run that takes the l
 ev_file = write("L-grader-0009.jsonl", {"type": "spawn-started", "role": "grader",
                                         "subject": "L-spec-0001", "spawn": "L-grader-0009"})
 assert tick.main() == 0 and ticks()[-1]["lane"] == 0, "an in-flight grader keeps its subject off the lane"
-old_ts = (fold.NOW - datetime.timedelta(minutes=45)).isoformat(timespec="seconds")
+old_ts = (fold.NOW - datetime.timedelta(minutes=75)).isoformat(timespec="seconds")
 ev_file.write_text(json.dumps({"v": 1, "ts": old_ts, "type": "spawn-started", "role": "grader",
                                "subject": "L-spec-0001", "spawn": "L-grader-0009"}) + "\n")
 tick.main()
@@ -191,12 +191,12 @@ ev269a_file.unlink()
 # A `claude-p`-backend grader on an observed-data subject records window_min as
 # the FLAT role cap (15) — never the 45-minute bump — so it is stale at 31
 # minutes exactly like the pre-existing no-window_min fixture above.
-ev269b_file = write("L-grader-0269b.jsonl", {"ts": (fold.NOW - datetime.timedelta(minutes=31)).isoformat(timespec="seconds"),
+ev269b_file = write("L-grader-0269b.jsonl", {"ts": (fold.NOW - datetime.timedelta(minutes=46)).isoformat(timespec="seconds"),
                                              "type": "spawn-started", "role": "grader", "subject": "L-spec-0269b",
                                              "spawn": "L-grader-0269b", "window_min": 15, "backend": "claude-p"})
 ev269b = fold.read_events()
 busy269b = tick.in_flight(ev269b)
-assert "L-spec-0269b" not in busy269b, "31 min > 15+15=30: aged out, stale, exactly as the no-bump case"
+assert "L-spec-0269b" not in busy269b, "46 min > 15+30=45: aged out, stale, exactly as the no-bump case"
 stale269b = [json.loads(l) for l in tick.tick_path().read_text().splitlines() if '"spawn-stale"' in l]
 assert any(s["spawn"] == "L-grader-0269b" for s in stale269b), stale269b
 ev269b_file.unlink()

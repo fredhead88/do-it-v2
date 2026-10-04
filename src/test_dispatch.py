@@ -1386,7 +1386,7 @@ import socket  # noqa: E402 — waiter_host comparisons below
 (TMP / "content").mkdir(parents=True, exist_ok=True)
 assert dispatch.window_min("builder", "L-spec-0269a5-nonseat", [], backend="claude-p") == 90, \
     "a non-seat backend always gets the flat, unbumped role cap"
-assert dispatch.window_min("grader", "L-spec-0269a5a", [], backend="seat") == 15, \
+assert dispatch.window_min("grader", "L-spec-0269a5a", [], backend="seat") == 30, \
     "(a) plain grader, no observed-data event -> the role's own cap"
 ev_a5b = [{"type": "spec-written", "spec": "L-spec-0269a5b", "ac_types": ["observed-data"], "ts": dispatch.now()}]
 assert dispatch.window_min("grader", "L-spec-0269a5b", ev_a5b, backend="seat") == 45, \
@@ -1423,7 +1423,7 @@ code, types, evs, _ = spawn("grader", out=grade([met]), subject=ac4_subj)
 PK.write_text(PK_DEFAULT)
 ss_cp = spawn.raw[0]
 assert ss_cp["type"] == "spawn-started" and ss_cp["backend"] == "claude-p", ss_cp
-assert ss_cp["window_min"] == 15, "AC4/AC6: claude-p never gets the 45-min seat bump"
+assert ss_cp["window_min"] == 30, "AC4/AC6: claude-p never gets the 45-min seat bump (grader cap is 30 since 2026-10-04)"
 assert ss_cp["waiter_pid"] == os.getpid() and ss_cp["waiter_host"] == socket.gethostname(), ss_cp
 assert "waiter_proc_start" in ss_cp, ss_cp
 

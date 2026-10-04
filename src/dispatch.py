@@ -36,7 +36,7 @@ EVENTS, CONTENT = ROOT / "events", ROOT / "content"
 # (what must exist at --path afterwards, wall-clock minutes, dollar cap). Never
 # uncapped (§4.4 correction 9) — a Budget the fold cannot compare is decoration.
 ROLES = {"spec-writer": ("file", 30, 5), "spec-auditor": (None, 15, 3), "builder": (None, 90, 15),
-         "grader": (None, 15, 3), "reviewer": (None, 30, 5), "plan-auditor": (None, 15, 3),
+         "grader": (None, 30, 3), "reviewer": (None, 30, 5), "plan-auditor": (None, 15, 3),
          "research": ("file", 5, 1), "reuse-scout": ("file", 15, 3),
          "charter-reviewer": (None, 30, 5), "probe": ("dir", 120, 10),
          # L-charter-0038 R1 / L-spec-0387 (SD5): a read-only sweep over up to 8 due
