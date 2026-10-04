@@ -13,7 +13,8 @@ only, never an argv element. `_run` is the one subprocess indirection every
 call here goes through; tests monkeypatch it (mirrors `grader_serve.py`'s
 own injected `runner`).
 """
-import json, os, pathlib, re, shutil, subprocess, tomllib, urllib.parse  # noqa: E401
+import json
+import shlex, os, pathlib, re, shutil, subprocess, tomllib, urllib.parse  # noqa: E401
 HERE = pathlib.Path(__file__).resolve().parent
 DOIT_SRC = HERE.parent
 ROOT = pathlib.Path(os.environ.get("DOIT_ROOT", pathlib.Path.home() / ".do-it"))
@@ -530,6 +531,21 @@ def pane_env(view):
         env["PGUSER"] = parsed.username or "albert"
         env["PGDATABASE"] = parsed.path.lstrip("/") or "scratch"
     return env
+
+
+def write_grading_env(view):
+    """Write `<view>/grading.env` from `pane_env(view)` — the file every view's
+    verify.sh already sources (grader_view's source line) and the grader packet
+    names. The sandboxed pane got these values injected into its process; a
+    relay-served grader sub-agent (operator ruling 2026-10-04) only sees them
+    through this file, so without it a proven scratch DB was invisible and every
+    live_db criterion came back cannot-assess. Mode 0600; returns the path."""
+    view = pathlib.Path(view)
+    env = pane_env(view)
+    path = view / "grading.env"
+    path.write_text("".join(f"export {k}={shlex.quote(str(v))}\n" for k, v in env.items() if v != ""))
+    path.chmod(0o600)
+    return path
 
 
 def teardown(view):

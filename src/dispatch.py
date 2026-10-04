@@ -1319,6 +1319,8 @@ def main(a):
                 grading_env.teardown(grading_view)
             print(f"FAILED {spawn}: {why}", file=sys.stderr)
             sys.exit(1)
+        if grading_view is not None:
+            grading_env.write_grading_env(grading_view)
     prior = next((e for e in fold.read_events() if e.get("type") == "spawn-failed"
                   and e.get("packet_sha256") == meta["packet_sha256"]
                   and e.get("contract_sha256") == meta["contract_sha256"]
