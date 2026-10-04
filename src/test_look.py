@@ -17,6 +17,13 @@ that never mentions either directory still never reads the operator's real one.
 import json, os, pathlib, socket, subprocess, sys, tempfile, time
 from datetime import datetime, timedelta, timezone
 
+# Never the real ledger: without this, cases that reach tick's stale-spawn sweep
+# appended `spawn-stale L-grader-9001` to the live L-tick-local.jsonl on every run
+# (780 rows by 2026-10-04).
+_FIXTURE_ROOT = pathlib.Path(tempfile.mkdtemp(prefix="test-look-root-"))
+(_FIXTURE_ROOT / "events").mkdir(parents=True, exist_ok=True)
+os.environ["DOIT_ROOT"] = str(_FIXTURE_ROOT)
+
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 import crons, dispatch, fold, look, look_wallclock, pane_resume, panes  # noqa: E402
 
