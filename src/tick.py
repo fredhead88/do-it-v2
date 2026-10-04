@@ -68,6 +68,21 @@ def _bind_root(root):
     return fold.EVENTS
 
 
+def _ended_since_read(sid):
+    """Re-read the spawn's OWN ledger file just before calling it stale: the waiter
+    writes `spawn-done` and exits, and a tick that read the stream a moment earlier
+    then saw a dead waiter and emitted `spawn-stale` after a finished spawn
+    (L-grader-0746/0733, L-builder-0893, 2026-10-04) — which re-dispatched work
+    that had already finished."""
+    if not sid:
+        return False
+    try:
+        text = (fold.EVENTS / f"{sid}.jsonl").read_text()
+    except OSError:
+        return False
+    return any(f'"{t}"' in text for t in ("spawn-done", "spawn-failed"))
+
+
 def _spawn_busy(ev):
     """Subjects with a REAL spawn started and not ended — never escalation-busy.
     A start older than twice its role's cap with no terminal event is a dead
@@ -100,7 +115,7 @@ def _spawn_busy(ev):
         waiter_pid = e.get("waiter_pid")
         if waiter_pid and e.get("waiter_host") == socket.gethostname() and \
                 not panes._is_live(waiter_pid, {"procStart": e.get("waiter_proc_start")}):
-            sid and dispatch.emit(tick_path(), {"spawn": sid}, "spawn-stale",
+            sid and not _ended_since_read(sid) and dispatch.emit(tick_path(), {"spawn": sid}, "spawn-stale",
                                   subject=e.get("subject"), role=role, cap_min=cap, reason="waiter-dead")
             continue
         # L-spec-0269/R1: the subject's own recorded `window_min` (its offered
@@ -112,7 +127,7 @@ def _spawn_busy(ev):
         # `2 * cap` exactly.
         window = e.get("window_min") or cap
         if (fold.NOW - fold.ts(e.get("ts"))).total_seconds() / 60 > window + cap:
-            sid and dispatch.emit(tick_path(), {"spawn": sid}, "spawn-stale",
+            sid and not _ended_since_read(sid) and dispatch.emit(tick_path(), {"spawn": sid}, "spawn-stale",
                                   subject=e.get("subject"), role=role, cap_min=cap)
         else:
             busy.add(e.get("subject"))
