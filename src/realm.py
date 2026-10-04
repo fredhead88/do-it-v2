@@ -1298,6 +1298,58 @@ def heartbeat_forever():
 
 
 # ---------------------------------------------------------------- http
+# ── Ask the Thinker (operator button, 2026-10-04) ───────────────────────────
+# A panel button POSTs its current list; the realm appends a `realm-ask` event
+# (actor operator, via the canonical `doit append`) that the Thinker's watcher
+# picks up. The Thinker answers with a `realm-answer` (ref = the ask's src).
+ASK_PANELS = ("stuck", "omens", "proving")
+
+
+def ask_thinker(panel, items, note=""):
+    if panel not in ASK_PANELS:
+        return {"error": "unknown panel"}, 400
+    items = [str(i)[:300] for i in (items or [])][:60]
+    env = {**os.environ, "DOIT_ROOT": str(ROOT), "DOIT_LEDGER_FILE": "L-operator-realm.jsonl"}
+    argv = [str(LIVE_REPO / "doit"), "append", "realm-ask", f"realm:{panel}", f"panel={panel}",
+            "items:=" + json.dumps(items), "why=" + (str(note)[:300] or f"Operator asks the Thinker to work the {panel} list")]
+    try:
+        p = subprocess.run(argv, capture_output=True, text=True, timeout=30, env=env)
+    except Exception as ex:  # noqa: BLE001
+        return {"error": f"append failed: {ex}"}, 502
+    if p.returncode != 0:
+        return {"error": "append failed", "detail": (p.stderr or "")[-300:]}, 502
+    return {"ok": True, "asked_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")}, 200
+
+
+def asks_state():
+    """Newest ask and newest answer per panel, read straight off the ledger files."""
+    out = {p: {"ask": None, "answer": None} for p in ASK_PANELS}
+    for f in sorted(EVENTS.glob("*.jsonl")):
+        try:
+            lines = f.read_text().splitlines()
+        except OSError:
+            continue
+        for n, line in enumerate(lines, 1):
+            if '"realm-ask"' not in line and '"realm-answer"' not in line:
+                continue
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            panel = e.get("panel")
+            if panel not in out:
+                continue
+            slot = "ask" if e.get("type") == "realm-ask" else "answer" if e.get("type") == "realm-answer" else None
+            if slot is None:
+                continue
+            cur = out[panel][slot]
+            if cur is None or e.get("ts", "") > cur.get("ts", ""):
+                keep = {k: e.get(k) for k in ("ts", "why", "text", "ref", "items")}
+                keep["src"] = f"{f.name}:{n}"
+                out[panel][slot] = keep
+    return out
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     hours = 24
     protocol_version = "HTTP/1.1"   # every response below sets Content-Length or streams chunked
@@ -1321,6 +1373,27 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
+
+    def do_POST(self):
+        u = urllib.parse.urlparse(self.path)
+        qs = urllib.parse.parse_qs(u.query)
+        if not self._authorized(qs):
+            self._json({"error": "key required"}, 401)
+            return
+        if u.path != "/api/ask-thinker":
+            self._json({"error": "not found"}, 404)
+            return
+        try:
+            n = min(int(self.headers.get("Content-Length") or 0), 200_000)
+            body = json.loads(self.rfile.read(n) or b"{}")
+        except (ValueError, OSError):
+            self._json({"error": "bad body"}, 400)
+            return
+        if not isinstance(body, dict):
+            self._json({"error": "bad body"}, 400)
+            return
+        res, status = ask_thinker(body.get("panel"), body.get("items") if isinstance(body.get("items"), list) else [], body.get("note") or "")
+        self._json(res, status)
 
     def do_GET(self):
         u = urllib.parse.urlparse(self.path)
@@ -1379,6 +1452,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._json(result)
             else:
                 self._json({"error": "dossier unavailable"}, 502)
+        elif u.path == "/api/asks":
+            self._json(asks_state())
         elif u.path == "/api/stream":
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
