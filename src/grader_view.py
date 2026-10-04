@@ -202,6 +202,31 @@ def config_dir() -> pathlib.Path:
     # launch (grader-pane-serve, wave 2) does not block on onboarding.
     settings_path = d / "settings.json"
     settings_path.write_text(json.dumps({"hasCompletedOnboarding": True}) + "\n")
+    # The CLI reads first-run state from <CLAUDE_CONFIG_DIR>/.claude.json, not
+    # settings.json: without these keys a self-updated CLI parks every grader on
+    # the theme picker (2026-10-04, 2.1.289). Merge, never clobber the file.
+    state_path = d / ".claude.json"
+    try:
+        state = json.loads(state_path.read_text()) if state_path.is_file() else {}
+    except (OSError, ValueError):
+        state = {}
+    if not isinstance(state, dict):
+        state = {}
+    state.update({"hasCompletedOnboarding": True, "theme": state.get("theme") or "dark"})
+    # The copied credentials belong to whichever account the operator's own CLI
+    # is logged into; a stale `oauthAccount` from a previous login makes the CLI
+    # reject them and park on the login picker (2026-10-04 account switch). Mirror
+    # the operator's account record (identity metadata only, no token).
+    try:
+        main = json.loads((pathlib.Path.home() / ".claude.json").read_text())
+    except (OSError, ValueError):
+        main = {}
+    if isinstance(main, dict):
+        for k in ("oauthAccount", "userID"):
+            if main.get(k):
+                state[k] = main[k]
+    state_path.write_text(json.dumps(state) + "\n")
+    state_path.chmod(0o600)
 
     return d
 
