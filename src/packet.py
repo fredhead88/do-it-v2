@@ -1317,6 +1317,10 @@ def sibling_bodies(c):
     for sid, s in c.specs.items():
         if sid == c.a.subject:
             continue
+        # A killed sibling is not a slot anyone builds; a duplicate-carried twin killed in favour
+        # of this spec must not refuse this spec's packet (L-spec-0657 vs killed 0658, 2026-10-05).
+        if any(x["type"] == "spec-killed" for x in s["evs"]):
+            continue
         # A `spec-written` need not carry a path: the three from the pre-wrapper era
         # do not, and one of them crashed the first real rework dispatch. A sibling
         # with no file on disk has no body to leak — it is skipped, never guessed at.
