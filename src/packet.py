@@ -1323,8 +1323,14 @@ def sibling_bodies(c):
         e = next((x for x in reversed(s["evs"])
                   if x["type"] == "spec-written" and pathlib.Path(x.get("path") or "/").is_file()), None)
         if e:
-            out += [(f"a sibling spec's body ({sid})", l) for l in long_lines(pathlib.Path(e["path"]))[:20]]
+            out += [(f"a sibling spec's body ({sid})", l) for l in long_lines(pathlib.Path(e["path"]))[:20]
+                    if not _PATH_ONLY_RE.match(l)]
     return out
+
+
+# A line that is only a repo path (optionally bulleted/backticked) names a file, not a sibling's
+# internals; two specs touching the same file must both be able to list it (L-spec-0664 vs 0290, 2026-10-05).
+_PATH_ONLY_RE = re.compile(r"^\s*[-*]?\s*`?[\w.-]*/[\w./-]+`?\s*$")
 
 
 def other_cards(c):
