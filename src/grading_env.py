@@ -38,7 +38,7 @@ def _run(argv, **kw): return subprocess.run(argv, **kw)
 
 _TOOL_TOKENS = {"python3", "python", "bash", "node", "alembic", "pytest"}
 _NODE_TOKENS = {"npm", "npx", "node", "vitest", "tsc"}
-_ABS_PATH_RE = re.compile(r'(?<![\w.:/\]})-])(/[^\s\'"]+)')  # ':' '/' ']' '}' ')' excluded: a URL's //host or a route dir like [...proxy]/x is not a path
+_ABS_PATH_RE = re.compile(r'(?<![\w.:/\]})-])(/[^\s\'":]+)')  # ':' '/' ']' '}' ')' excluded: a URL's //host or a route dir like [...proxy]/x is not a path
 _GIT_RE = re.compile(r'(?<![\w-])git(?![\w-])')
 _GIT_HISTORY_RE = re.compile(r'\bgit\b[^\n]*\b(merge-base|log|show|rev-list|diff|blame|cat-file|--is-ancestor)\b')
 _DB_TOKENS = ("live_db", "DB_URL")

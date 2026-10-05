@@ -43,7 +43,7 @@ def _scratch_sub(name: str) -> pathlib.Path:
     return p
 
 
-_PATH_TOKEN_RE = re.compile(r"(?<![\w.-])(/[^\s'\"]+)")
+_PATH_TOKEN_RE = re.compile(r"(?<![\w.-])(/[^\s'\":]+)")  # ":" ends a token: PYTHONPATH-style lists rewrite per element
 
 
 def _rewrite_repo_paths(text: str, repo, tree_dir, venv_rel) -> str:
