@@ -229,6 +229,38 @@ refuses("grader", "L-card-0001 · DONE · built by L-builder-0007", worktree=str
 refuses("grader", "renamed the helper because the twin check found a near-identical one already",
         worktree=str(REPO))
 
+# ── 3b. a builder's own evidence prose names its own spawn id verbatim
+# ("Re-run in worktree by L-builder-0973: ..."), via the card's `.json`
+# sidecar (L-card-0668, 2026-10-05) — ordinary card content, not a cue, but
+# still what builder_cues flags as "the builder's spawn id" the instant it is
+# quoted into item 2. The fix redacts the token rather than refusing the
+# whole packet before any spend.
+SPEC99 = TMP / "content" / "L-spec-0099.md"
+SPEC99.write_text(SPEC.read_text().replace("L-spec-0001", "L-spec-0099"))
+ev("planner", "spec-written", "L-spec-0099", path=str(SPEC99))
+CARD99 = TMP / "content" / "L-card-0099.md"
+CARD99.write_text("# L-card-0099 · DONE · built by L-builder-0973\n"
+                  "branch l-spec-0099 · base abc1234 · ready def5678\n"
+                  "verify `bash verify.sh` → exit 0 · all green\n"
+                  "AC1 [backend] built · log · the column renders for two projects\n")
+CARD99.with_suffix(".json").write_text(json.dumps({
+    "built_by": "L-builder-0973",
+    "acs": [{"id": "AC1", "criterion_type": "backend", "disposition": "done",
+             "evidence_type": "command-output",
+             "check": "pytest -q",
+             "evidence": "Re-run in worktree by L-builder-0973: 7 passed"}],
+}))
+ev("builder", "build-done", "L-spec-0099", status="DONE", card=str(CARD99), branch="l-spec-0099",
+   base_sha="abc1234deadbeef", ready_sha="def5678deadbeef", verify_exit=0, tests_added=True,
+   spawn="L-builder-0973")
+c99 = packet.Ctx(packet.argparse.Namespace(subject="L-spec-0099", charter=None, project="t"))
+t99 = build("grader", "L-spec-0099", worktree=str(REPO))
+assert "L-builder-0973" not in t99, f"the grader must never see the builder's own spawn id: {t99!r}"
+assert "[this build]" in t99, "the evidence text survives, with the spawn id redacted in place"
+assert "7 passed" in t99, "redaction removes only the id, not the surrounding evidence prose"
+absent(t99, packet.strip(c99, "grader"))
+N += 1
+
 # The Executor's cut recipe names the worktree directory for the branch and the
 # branch for the spec, so the grader packet — the one packet that must carry the
 # worktree path — carried the builder's branch and was refused: every spec built
@@ -548,7 +580,8 @@ assert ps == {"L-charter-0001-charter-reviewer-1.md", "L-spec-0001-builder-1.md"
               "L-spec-0027-spec-auditor-1.md",
               "L-charter-0001-plan-auditor-1.md", "L-charter-0001-plan-auditor-2.md",
               "not-a-real-charter-subject-plan-auditor-1.md",
-              "L-spec-0030-spec-writer-1.md", "L-spec-0031-spec-writer-1.md"}, ps
+              "L-spec-0030-spec-writer-1.md", "L-spec-0031-spec-writer-1.md",
+              "L-spec-0099-grader-1.md"}, ps
 assert "REFUSED" not in "".join(p.read_text() for p in (TMP / "packets").glob("*.md")), \
     "a refused packet is never written to disk"
 first = (TMP / "packets" / "L-spec-0001-spec-auditor-1.md").read_text()

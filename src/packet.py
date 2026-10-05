@@ -1087,7 +1087,7 @@ def p_grader(c):
              f"(sourced by verify.sh's own first line).") if seat_view else (
              f"5. Checker: `verify-{c.a.subject}` · version {ver} · coverage note "
              f"\"the spec's Verification block\" · re-run it with cwd `{c.worktree()}`.")
-    return [
+    out = [
         "1. The acceptance criteria, verbatim from the spec, typed, each with its evidence obligation:",
         *crit,
         "2. The output card's per-criterion rows. These are claims to test, not facts:",
@@ -1098,6 +1098,22 @@ def p_grader(c):
         f"6. The done-condition: {done}.",
         f"7. Standing verify-waivers applied to this checker: {waiver_line(c)}.",
     ]
+    # L-spec-0668, 2026-10-05: a builder's own evidence/check prose sometimes names
+    # its own spawn id verbatim ("Re-run in worktree by L-builder-0973: ...") — a
+    # row the output card legitimately carries (AC1/AC2 "claims to test"), but one
+    # that trips builder_cues's "the builder's spawn id" Blindness line the moment
+    # it is quoted into item 2 above. Redact the token rather than refuse the whole
+    # packet before any spend — the same shape of fix as _minus_charter (strip a
+    # false cue) applied on the producing side instead: the text stays, the id
+    # does not.
+    return [_redact_builder_spawn(l) for l in out]
+
+
+_BUILDER_SPAWN_RE = re.compile(r"\bL-builder-\d+\b")
+
+
+def _redact_builder_spawn(text):
+    return _BUILDER_SPAWN_RE.sub("[this build]", text)
 
 
 def p_reviewer(c):
