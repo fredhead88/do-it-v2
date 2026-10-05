@@ -45,6 +45,26 @@ def _scratch_sub(name: str) -> pathlib.Path:
 
 _PATH_TOKEN_RE = re.compile(r"(?<![\w.-])(/[^\s'\":]+)")  # ":" ends a token: PYTHONPATH-style lists rewrite per element
 
+# L-spec-0653/0667, 2026-10-05: shell command-substitution syntax around a path
+# token (`test "$(wc -l < /path/to/file)" -le N`) is not excluded by
+# `_PATH_TOKEN_RE`'s character class, so a trailing `)`/`]`/`}` with no
+# matching opener inside the token rides along as if it were part of the
+# path — the candidate built from it then never exists, so the real path is
+# left un-rewritten and fails the view-paths preflight even though the path
+# itself is fine. `_trim_unmatched_closer` strips only an unbalanced trailing
+# closer (a route dir like `[name]`, or a literal `file(2).txt` — both
+# balanced — are left intact).
+_CLOSERS = {")": "(", "]": "[", "}": "{"}
+
+
+def _trim_unmatched_closer(token):
+    while token and token[-1] in _CLOSERS:
+        closer = token[-1]
+        if token.count(closer) <= token.count(_CLOSERS[closer]):
+            break
+        token = token[:-1]
+    return token
+
 
 def _rewrite_repo_paths(text: str, repo, tree_dir, venv_rel) -> str:
     """L-spec-0481/AC7 (SD-R12-3a): rewrites a `repo`-absolute path in the
@@ -58,7 +78,10 @@ def _rewrite_repo_paths(text: str, repo, tree_dir, venv_rel) -> str:
     it is bound into the sandbox separately, never copied into `tree_dir`;
     (c) a path that does not actually exist under `tree_dir` (deleted,
     gitignored, or simply foreign) is left as-is, so `_prove_view_paths`
-    catches it as a failure rather than pointing at nothing."""
+    catches it as a failure rather than pointing at nothing; (d) a trailing
+    unbalanced closing bracket from the surrounding shell syntax is trimmed
+    off the path before the existence check and reattached to whatever comes
+    back, rewritten or not (`_trim_unmatched_closer`)."""
     tree_s = str(pathlib.Path(tree_dir))
     repo_p = pathlib.Path(repo)
     variants = [str(repo_p)]
@@ -72,12 +95,14 @@ def _rewrite_repo_paths(text: str, repo, tree_dir, venv_rel) -> str:
 
     def repl(m):
         token = m.group(1)
+        core = _trim_unmatched_closer(token)
+        suffix = token[len(core):]
         for v in variants:
-            if token == v or token.startswith(v + "/"):
-                if any(token == vp or token.startswith(vp + "/") for vp in venv_prefixes):
+            if core == v or core.startswith(v + "/"):
+                if any(core == vp or core.startswith(vp + "/") for vp in venv_prefixes):
                     return token
-                candidate = tree_s + token[len(v):]
-                return candidate if pathlib.Path(candidate).exists() else token
+                candidate = tree_s + core[len(v):]
+                return candidate + suffix if pathlib.Path(candidate).exists() else token
         return token
 
     return _PATH_TOKEN_RE.sub(repl, text)

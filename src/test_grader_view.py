@@ -338,6 +338,59 @@ shutil.rmtree(AC7_REPO, ignore_errors=True)
 print("L-spec-0481 AC7 ok (iv)")
 
 
+# ── L-spec-0653/0667 · view-paths false positives fixed 2026-10-05 ─────────
+# (v) a PYTHONPATH-style colon list of two checkout-absolute paths in one
+#     token rewrites each element — the bug 752c2ba fixed, left uncovered.
+# (vi) a checkout-absolute path immediately followed by shell syntax the path
+#     regex does not stop at (`$(wc -l < PATH)PATH)"`) still rewrites, with
+#     the trailing `)` reattached outside the rewritten path — the bug this
+#     session fixed (L-spec-0667's grader preflight refusal).
+AC_PUNCT_REPO = pathlib.Path(tempfile.mkdtemp(prefix="grader-view-punct-repo-"))
+(AC_PUNCT_REPO / "api" / "lib").mkdir(parents=True, exist_ok=True)
+(AC_PUNCT_REPO / "api" / "lib" / "cross_validation.py").write_text("x = 1\n")
+subprocess.run(["git", "init", "-q", str(AC_PUNCT_REPO)], check=True)
+subprocess.run(["git", "-C", str(AC_PUNCT_REPO), "config", "user.email", "t@example.com"], check=True)
+subprocess.run(["git", "-C", str(AC_PUNCT_REPO), "config", "user.name", "t"], check=True)
+subprocess.run(["git", "-C", str(AC_PUNCT_REPO), "add", "-A"], check=True)
+subprocess.run(["git", "-C", str(AC_PUNCT_REPO), "commit", "-q", "-m", "fixture"], check=True)
+AC_PUNCT_SHA = subprocess.run(["git", "-C", str(AC_PUNCT_REPO), "rev-parse", "HEAD"],
+                              check=True, capture_output=True, text=True).stdout.strip()
+
+AC_COLON_SPEC = "L-spec-9432"
+(FIXTURE_ROOT / "content" / f"{AC_COLON_SPEC}.md").write_text("# fixture\n")
+colon_verify = (f"#!/usr/bin/env bash\nset -euo pipefail\n"
+                f"PYTHONPATH={AC_PUNCT_REPO}:{AC_PUNCT_REPO}/api echo hi\n")
+(FIXTURE_ROOT / "content" / f"verify-{AC_COLON_SPEC}-grader.sh").write_text(colon_verify)
+colon_view = grader_view.build(AC_COLON_SPEC, AC_PUNCT_REPO, AC_PUNCT_SHA, AC_PUNCT_SHA, SPAWN + "-colon")
+colon_text = (colon_view / "verify.sh").read_text()
+assert f"PYTHONPATH={colon_view}/tree:{colon_view}/tree/api" in colon_text, colon_text
+ok_colon, reason_colon = _ge._prove_view_paths(colon_view)
+assert ok_colon is True, (ok_colon, reason_colon)
+print("L-spec-0653 AC(colon-list) ok")
+
+AC_PAREN_SPEC = "L-spec-9433"
+(FIXTURE_ROOT / "content" / f"{AC_PAREN_SPEC}.md").write_text("# fixture\n")
+paren_verify = (f'#!/usr/bin/env bash\nset -euo pipefail\n'
+                f'test "$(wc -l < {AC_PUNCT_REPO}/api/lib/cross_validation.py)" -le 5 && echo VERIFY_OK\n')
+(FIXTURE_ROOT / "content" / f"verify-{AC_PAREN_SPEC}-grader.sh").write_text(paren_verify)
+paren_view = grader_view.build(AC_PAREN_SPEC, AC_PUNCT_REPO, AC_PUNCT_SHA, AC_PUNCT_SHA, SPAWN + "-paren")
+paren_text = (paren_view / "verify.sh").read_text()
+assert f"{paren_view}/tree/api/lib/cross_validation.py)" in paren_text, paren_text
+# the path itself, without the trailing shell paren, must have actually moved into the tree
+assert (paren_view / "tree" / "api" / "lib" / "cross_validation.py").is_file()
+ok_paren, reason_paren = _ge._prove_view_paths(paren_view)
+assert ok_paren is True, (ok_paren, reason_paren)
+print("L-spec-0667 AC(trailing-closer) ok")
+
+# A balanced bracket in a path (a route dir like `[name]`) is never trimmed.
+assert grader_view._trim_unmatched_closer("/x/[name]") == "/x/[name]"
+assert grader_view._trim_unmatched_closer("/x/cross_validation.py)") == "/x/cross_validation.py"
+assert grader_view._trim_unmatched_closer("/x/file(2).txt") == "/x/file(2).txt"
+print("L-spec-0667 _trim_unmatched_closer ok")
+
+shutil.rmtree(AC_PUNCT_REPO, ignore_errors=True)
+
+
 # ── L-spec-8027 AC9 · verify.sh always sees the VIEW's own HOME/DOIT_ROOT — ──
 # ── the invoker's, and NOT with a grading.env present either ────────────────
 AC9_8027_SPEC = "L-spec-9431"

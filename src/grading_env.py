@@ -296,13 +296,35 @@ def _prove_db_schema(view, row, project, dsn):
     return (False, f"db_setup exit {r.returncode}: {(r.stderr or '')[-200:]}") if r.returncode else (True, None)
 
 
+# L-spec-0667, 2026-10-05: shell command-substitution syntax around a path
+# token (`test "$(wc -l < /path/to/file)" -le N`) is not excluded by
+# `_ABS_PATH_RE`'s character class, so a trailing `)`/`]`/`}` with no
+# matching opener inside the token rides along as if it were part of the
+# path — a real interpreter path caught this way would fail the
+# is_file()/X_OK check on account of a character the shell, not the path,
+# put there. Same trim as `grader_view._trim_unmatched_closer` (duplicated,
+# not imported, to avoid the mutual-import `grading_env`/`grader_view`
+# already has elsewhere — `_sandboxed_run` imports `grader_view` lazily for
+# the same reason).
+_CLOSERS = {")": "(", "]": "[", "}": "{"}
+
+
+def _trim_unmatched_closer(token):
+    while token and token[-1] in _CLOSERS:
+        closer = token[-1]
+        if token.count(closer) <= token.count(_CLOSERS[closer]):
+            break
+        token = token[:-1]
+    return token
+
+
 def _prove_view_paths(view):
     vs = pathlib.Path(view) / "verify.sh"
     text = vs.read_text() if vs.is_file() else ""
     # The whole view counts, not only view/tree: verify.sh sources the view's own
     # grading.env (AC7/AC11), which lives at the view root.
     inside = str(pathlib.Path(view)) + "/"
-    bad = [t for t in _ABS_PATH_RE.findall(text)
+    bad = [t for t in (_trim_unmatched_closer(m) for m in _ABS_PATH_RE.findall(text))
            if not t.startswith(inside) and not (pathlib.Path(t).is_file() and os.access(t, os.X_OK))]
     if bad:
         return False, f"absolute path(s) outside the view, not an interpreter: {', '.join(sorted(set(bad))[:3])}"
