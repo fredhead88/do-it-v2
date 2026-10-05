@@ -1106,7 +1106,22 @@ def p_grader(c):
     # packet before any spend — the same shape of fix as _minus_charter (strip a
     # false cue) applied on the producing side instead: the text stays, the id
     # does not.
-    return [_redact_builder_spawn(l) for l in out]
+    # L-spec-0673, 2026-10-05: same family — a card quoting the build's base_sha (e.g. after a squash
+    # rework) tripped the base_sha Blindness cue. Redact every recorded base_sha of this subject.
+    shas = _subject_base_shas(c)
+    return [_redact_base_shas(_redact_builder_spawn(l), shas) for l in out]
+
+
+def _subject_base_shas(c):
+    s = (getattr(c, "specs", {}) or {}).get(c.a.subject) or {}
+    return {e["base_sha"] for e in s.get("evs", [])
+            if e.get("type") == "build-done" and re.fullmatch(r"[0-9a-f]{40}", e.get("base_sha") or "")}
+
+
+def _redact_base_shas(text, shas):
+    for sha in shas:
+        text = re.sub(r"\b" + sha[:7] + r"[0-9a-f]{0,33}\b", "[base commit]", text)
+    return text
 
 
 _BUILDER_SPAWN_RE = re.compile(r"\bL-builder-\d+\b")
