@@ -311,19 +311,9 @@ assert changed8 == [sweep_owed.LEDGER_NAME], \
     f"AC8: exactly one events/*.jsonl file changes — the driver's own hardcoded ledger: {changed8}"
 raw8 = [json.loads(l) for l in sweep_ledger.read_text().splitlines()]
 esc8 = [e for e in raw8 if e["type"] == "escalation-blocking" and e.get("subject") == "L-spec-g1"]
-assert len(esc8) == 1, esc8
-e8 = esc8[0]
-assert e8["kind"] == "owed-expired", e8
-assert json.loads(e8["criteria"]) == ["AC1"], e8
-assert isinstance(json.loads(e8["evidence"]), list), e8
-assert e8["default"] == sweep_owed.EXPIRED_DEFAULT, e8
-assert e8["revert"] == sweep_owed.EXPIRED_REVERT, e8
-deadline8 = datetime.fromisoformat(e8["deadline"])
-assert abs((deadline8 - (NOW + timedelta(hours=72))).total_seconds()) < 60, e8
-folded_esc8 = next(e for e in fold.read_events()
-                   if e["type"] == "escalation-blocking" and e.get("subject") == "L-spec-g1")
-assert folded_esc8["actor"] == "sweep", \
-    f"AC8: the fold-derived (filename-only) actor of L-sweep-local.jsonl must be 'sweep': {folded_esc8}"
+assert esc8 == [], "0682: an open operator ask prevents an expiry escalation"
+assert [(r["spec"], r["criterion"]) for r in __import__("owed_asks").queue(fold.read_events(), NOW)] == [
+    ("L-spec-g1", "AC1")], "0682: the waiting check remains visible as an operator ask"
 print("sweep-owed-0388 AC8 ok")
 
 before9 = sweep_ledger.read_text()
@@ -349,10 +339,10 @@ write(sweep_owed.LEDGER_NAME,
 sweep_owed.run(dry_run=False, runner=FakeRunner(), now=NOW)
 raw10 = [json.loads(l) for l in sweep_ledger.read_text().splitlines()]
 esc10 = [e for e in raw10 if e["type"] == "escalation-blocking" and e.get("subject") == "L-spec-h1"]
-assert len(esc10) == 2, esc10
+assert len(esc10) == 1, esc10
 assert json.loads(esc10[0]["criteria"]) == ["A"], "AC10: the pre-existing A escalation is untouched"
-assert json.loads(esc10[1]["criteria"]) == ["B"], \
-    f"AC10: exactly one new escalation, naming only the newly-expired B, never re-listing A: {esc10[1]}"
+assert {r["criterion"] for r in __import__("owed_asks").queue(fold.read_events(), NOW)} == {"A", "B"}, \
+    "0682: both checks keep their asks; neither adds an expiry escalation"
 print("sweep-owed-0388 AC10 ok")
 
 clear()
@@ -487,10 +477,12 @@ rows9_432 = [r for r in owed.checks(specs9_432["L-spec-432h"]["evs"], NOW) if r[
 assert rows9_432 and rows9_432[0]["status"] == "expired", rows9_432
 lines9_432 = sweep_owed.sweep_expired(specs9_432, NOW)
 assert any("L-spec-432h" in l and "C_before" in l for l in lines9_432), lines9_432
-raw9_432 = [json.loads(l) for l in sweep_ledger.read_text().splitlines()]
+raw9_432 = [json.loads(l) for l in sweep_ledger.read_text().splitlines()] if sweep_ledger.exists() else []
 esc9_432 = [e for e in raw9_432 if e["type"] == "escalation-blocking" and e.get("subject") == "L-spec-432h"
            and "C_before" in json.loads(e["criteria"])]
-assert len(esc9_432) == 1, esc9_432
+assert esc9_432 == [], "0682: re-dating an open ask does not remove its expiry protection"
+assert any(r["spec"] == "L-spec-432h" and r["criterion"] == "C_before"
+           for r in __import__("owed_asks").queue(fold.read_events(), NOW)), "the re-dated ask stays visible"
 print("answered-0432 AC9 ok")
 
 # ── AC10 · a `due` (not expired) criterion, governing owed-ac before the
@@ -848,10 +840,10 @@ write("L-executor-expired.jsonl",
        "criterion": "AC1", "capability": "unknown", "why": "unavailable"})
 _, expired_specs = specs_now()
 sweep_owed.sweep_expired(expired_specs, NOW)
-expired_event = next(e for e in fold.read_events() if e.get("kind") == "owed-expired")
-assert expired_event["default"] == (
-    "the check stays expired and listed in the daily digest; an owed-ac re-date, "
-    "an owed-waived with a reason, or a corrective puts it back")
+assert not any(e.get("kind") == "owed-expired" for e in fold.read_events()), \
+    "0682: a check waiting on an operator act must not expire silently"
+assert [(r["spec"], r["criterion"]) for r in __import__("owed_asks").queue(fold.read_events(), NOW)] == [
+    ("L-spec-9905", "AC1")], "0682: the waiting check remains an explicit ask"
 assert sweep_owed.EXPIRED_REVERT == "an owed-met (waive) or an Executor re-date puts a check back"
 print("L1005 AC5 AC6 ok")
 

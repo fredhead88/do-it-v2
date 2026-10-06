@@ -95,6 +95,16 @@ owner = "thinker"
 project = "do-it-v2"
 
 [[row]]
+name = "verify-owed"
+where = "user"
+schedule = "0 */2 * * *"
+command = "{doit} cron-run verify-owed -- {doit} verify-owed >> {root}/logs/verify-owed.log 2>&1"
+path = "{doit}"
+sig = '\bdoit verify-owed\b'
+owner = "thinker"
+project = "do-it-v2"
+
+[[row]]
 name = "auto-deploy"
 where = "cron.d"
 schedule = "*/5 * * * *"

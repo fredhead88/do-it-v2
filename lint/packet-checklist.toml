@@ -99,3 +99,11 @@ severity = "block"
 id = "PL-003"
 promoted_at = "2026-10-18"
 reason = "Verification must run in the dispatched worktree, not a live checkout"
+
+[[entry]]
+id = "PL-011"
+since = "2026-10-18"
+applies_to = "spec"
+check = "check_owed_environment"
+message = "An owed check must name prod read, verifier portal session, local stack, or CI"
+severity = "warn"

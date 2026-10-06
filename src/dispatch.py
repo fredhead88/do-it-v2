@@ -19,7 +19,7 @@ ROLES = {"spec-writer": ("file", 30, 5), "spec-auditor": (None, 15, 3), "builder
          "research": ("file", 5, 1), "reuse-scout": ("file", 15, 3),
          "charter-reviewer": (None, 30, 5), "probe": ("dir", 120, 10),
          # L-charter-0038 R1 / L-spec-0387 (SD5): a read-only sweep over up to 8 due owed checks in one batch — $5 matches reviewer/charter-reviewer's magnitude for a multi-criterion read (Assumptions §7).
-         "owed-sweeper": (None, 45, 5)}
+         "owed-sweeper": (None, 45, 5), "owed-verifier": (None, 90, 8)}
 # The builder's sandbox (§4.6·3). A pattern deny is the only per-command control
 # this CLI has (D119 row U); "commit to main" is the branch layout's job, not a pattern's.
 BUILDER_DENY = ["Bash(git push --force:*)", "Bash(git push -f:*)", "Bash(*--no-verify*)",
@@ -66,6 +66,10 @@ def alloc(d, prefix, suffix):
 
 def emit(dst, base, type_, /, **kv):
     """Never trust the write — re-read (§9.2 rule 4). Never an actor field (D90). R3/L-spec-0192: gated by `fold.required_reason` — the required-fields door ONLY (an actor/type mismatch is never refused here, only recorded-and- ignored at fold time, ADR-0028-3). Returns `None` once the line has landed; else the refusal, and nothing is written."""
+    if type_ == "escalation-blocking" and kv.get("kind") == "owed-expired":
+        kv, refused = __import__("owed_asks").guard_expiry(base.get("subject"), kv)
+        if refused:
+            return refused
     e = {**kv, **base, "v": 1, "ts": now(), "type": type_}
     e.pop("actor", None)
     import fold                                  # lazy: see fold.py's own alloc() note
@@ -789,7 +793,7 @@ def events_for(role, out, a, base):
         if out["status"] == "BLOCKED":
             ev.append(("build-blocked", dict(reason=next((q["asks"] for q in out["escalations"]), None)
                                              or next((d["line"] for d in out["declarations"]), "unstated"))))
-    elif role == "owed-sweeper":
+    elif role in ("owed-sweeper", "owed-verifier"):
         # L-charter-0038 R1 / L-spec-0387: no manifest lookup here — main() has already filtered `out["results"]` to on-manifest rows before calling this. Each event lands on that ROW's own spec (`subject=row["spec"]`), never on the batch subject; `emit()` in main()'s loop below pops it.
         for row in out["results"]:
             common = dict(criterion=row["criterion"], batch=a.subject, subject=row["spec"])
@@ -1262,7 +1266,7 @@ def _main(a):
     elif a.role == "grader":
         # A grader's stamp reflects its proven view, including an admin-only cluster; backends with no view carry none.
         dsn_role = grading_env.dsn_role(grading_view) if grader_seat else "none"
-    elif a.role == "owed-sweeper":
+    elif a.role in ("owed-sweeper", "owed-verifier"):
         # L-spec-9004 OC1: the sweeper's own private, per-sweep `cwd` (never the shared checkout) gets a read-only DSN copy through the sibling, narrower function above — never provision_worktree_env, whose git-ignore gate cannot apply to a non-git scratch directory.
         dsn_role = provision_sweep_env(cwd, ROOT / "repos" / a.project) if a.project else "absent"
     # L-spec-0269: every start records the window it was offered under and who is waiting on it — any role, any backend (a flat, unbumped cap for run_claude/run_codex; the full formula, load-bearing, for run_seat).
@@ -1276,7 +1280,7 @@ def _main(a):
              base_sha=a.pinned_base_sha, **waiter_kv, **({"wave_note": wave_note} if wave_note else {}))
     else:
         kv = {"role": a.role, "backend": backend, **waiter_kv}
-        if a.role in ("grader", "owed-sweeper"):
+        if a.role in ("grader", "owed-sweeper", "owed-verifier"):
             kv["dsn_role"] = dsn_role
         if grader_seat:  # L-spec-0481/AC10/AC21: which lane just proved this run's own capabilities
             kv["sandbox"] = grading_env.sandbox_mode()
@@ -1401,7 +1405,7 @@ def _main(a):
             moved = repo_moved(before, after, a.role)
     # L-charter-0038 R1 / L-spec-0387: gated on role == "owed-sweeper" only — every other role's path above and below is byte-for-byte unchanged. The manifest is the ONE source of which (spec, criterion) rows this batch may act on; a result naming a row the manifest does not carry is dropped here, before events_for ever sees it, and counted as off_manifest on this spawn's own spawn-done (never on a row's subject).
     off_manifest = None
-    if a.role == "owed-sweeper":
+    if a.role in ("owed-sweeper", "owed-verifier"):
         import packet
         manifest = packet.parse_sweep_manifest(CONTENT / f"{a.subject}.md")
         known = {(r["spec"], r["criterion"]) for r in manifest["rows"]}

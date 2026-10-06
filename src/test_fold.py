@@ -4163,7 +4163,7 @@ def test_ledger_vocabulary_1104():
     assert missing_cases == 13
     print("1104-AC2 missing-field cases:", missing_cases)
 
-    verdict_actors = {"owed-sweeper", "executor", "operator", "thinker", "prod-runner"}
+    verdict_actors = {"owed-sweeper", "executor", "operator", "thinker", "prod-runner", "owed-verifier", "verifier"}
     for kind in ("owed-met", "owed-failed"):
         assert fold.EMITS[kind] == verdict_actors
         event = {"type": kind, "criterion": "AC1", "evidence": "/fixture/evidence", "kind": "unmet"}
