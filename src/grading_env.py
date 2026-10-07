@@ -318,6 +318,11 @@ def _trim_unmatched_closer(token):
     return token
 
 
+# Thinker 2026-10-07: `/dev/null` (a redirect sink, e.g. `>/dev/null 2>&1`)
+# reads nothing outside the view; refusing it wedged L-spec-0696 for 17 h.
+_NEUTRAL_DEVICES = {"/dev/null"}
+
+
 def _prove_view_paths(view):
     vs = pathlib.Path(view) / "verify.sh"
     text = vs.read_text() if vs.is_file() else ""
@@ -325,7 +330,8 @@ def _prove_view_paths(view):
     # grading.env (AC7/AC11), which lives at the view root.
     inside = str(pathlib.Path(view)) + "/"
     bad = [t for t in (_trim_unmatched_closer(m) for m in _ABS_PATH_RE.findall(text))
-           if not t.startswith(inside) and not (pathlib.Path(t).is_file() and os.access(t, os.X_OK))]
+           if not t.startswith(inside) and t not in _NEUTRAL_DEVICES
+           and not (pathlib.Path(t).is_file() and os.access(t, os.X_OK))]
     if bad:
         return False, f"absolute path(s) outside the view, not an interpreter: {', '.join(sorted(set(bad))[:3])}"
     return True, None

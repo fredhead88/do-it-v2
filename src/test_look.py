@@ -602,8 +602,10 @@ old_launch = iso(NOW - timedelta(minutes=5))
 dpid = dead_pid()
 ev7 = [{"type": "role-launched", "pane": "codex-1", "pid": dpid, "host": "h", "proc_start": None, "ts": old_launch, "_src": "x:1"}]
 briefs7 = []
+look._check_pane_dead(ev7, NOW - timedelta(minutes=2), root7, briefs7)
+ok(not briefs7, "AC7: the first dead reading only marks the pane (planner-ended race)")
 look._check_pane_dead(ev7, NOW, root7, briefs7)
-ok(len(briefs7) == 1 and briefs7[0]["key"] == "codex-1", "AC7: a dead pid, no end event, >60s old briefs")
+ok(len(briefs7) == 1 and briefs7[0]["key"] == "codex-1", "AC7: a dead pid, no end event, >60s old briefs on a later reading")
 
 ev7b = ev7 + [{"type": "role-ended", "pane": "codex-1", "ts": iso(NOW), "_src": "x:2"}]
 briefs7b = []

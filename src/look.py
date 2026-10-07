@@ -348,6 +348,17 @@ def _check_pane_at_menu_codex(cfg, runner, deadline, events, root, briefs):
                 r = _write_brief("pane-at-menu", key, "thinker", {"line": hit}, events, root)
                 r and briefs.append(r)
                 break
+def _seen_dead_before(root, pane, now):
+    f = pathlib.Path(root) / "look-pane-dead-seen.json"
+    try: seen = json.loads(f.read_text())
+    except Exception: seen = {}
+    first = seen.get(pane)
+    if first is None:
+        seen[pane] = now.isoformat()
+        try: f.write_text(json.dumps(seen))
+        except Exception: pass
+        return False
+    return (now - fold.ts(first)).total_seconds() >= 60
 def _check_pane_dead(events, now, root, briefs):
     ended = {e.get("pane") for e in events if e.get("type") == "role-ended"}
     ended |= {e.get("planner") for e in events if e.get("type") == "planner-ended"}
@@ -359,6 +370,10 @@ def _check_pane_dead(events, now, root, briefs):
             alive = panes._is_live(e.get("pid"), {"procStart": e.get("proc_start")})
         except Exception: continue
         if alive: continue
+        # Thinker 2026-10-07: a planner's process exits ~10 s before its wrapper
+        # writes planner-ended, so a single dead reading raced 47 false briefs.
+        # Brief only when the pane is still dead and un-ended on a later run.
+        if not _seen_dead_before(root, e.get("pane"), now): continue
         r = _write_brief("pane-dead", e.get("pane"), "operator", {"pid": e.get("pid"), "host": e.get("host")}, events, root)
         r and briefs.append(r)
 def _tmp_slope(readings):
