@@ -66,7 +66,7 @@ asking the operator or guessing from the contract file.
 
 Serving pattern (R2: the harness snapshots agent types at pane start, so serve as
 `general-purpose` and name the contract file): Agent(model=<from models.toml>, prompt = "You are the
-DO-IT `<role>` contract, spawn id <id>. 0. Before anything else, run scripts/seat/claim.sh <id> —
+DO-IT `<role>` contract, spawn id <id>. 0. Before anything else, run /home/albert/do-it-v2/scripts/seat/claim.sh <id> —
 if it exits non-zero, stop: someone else already claimed this seat. 1. Read
 /home/albert/do-it-v2/agents/<role>.md (binding, incl. Seat route) and its schema. 2. Read
 /home/albert/.do-it/seat/<id>.packet.md; cwd <repo or worktree>; write nothing under it. 3. Write

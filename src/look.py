@@ -193,18 +193,27 @@ def _check_prod(row, runner, now, deadline, single, events, root, briefs, answer
         _fire_undetermined("prod-unhealthy", events, root, briefs)
     else:
         _settle("prod-unhealthy", hkey, "deployer", not status, {"reads": reads}, events, root, briefs, answered)
+DEPLOY_GRACE_MIN = 90
 def _merge_status(row, runner, now, deadline, tip, body):
     try:
         deployed, tipsha = str(json.loads(body)["sha"]), str(tip).strip()
     except Exception: return None, True
     if tipsha.startswith(deployed) or deployed.startswith(tipsha): return False, False
-    out, und = _call(runner, deadline, 10, "git", ["log", "--format=%ct", f"{deployed}..{tipsha}"], row["repo"])
+    # Thinker 2026-10-07 (21 briefs, all normal operation): deploys run on an
+    # hourly cadence behind a ~25-minute pre-deploy test gate, so a merge can
+    # legitimately sit undeployed for well over the old 15 minutes. The grace
+    # is now per-row (`deploy_grace_min`, default 90), and age is measured from
+    # the MERGE landing on the tip (--first-parent), not from a builder's
+    # branch commit, whose committer date can predate the merge by hours.
+    out, und = _call(runner, deadline, 10, "git",
+                     ["log", "--first-parent", "--format=%ct", f"{deployed}..{tipsha}"], row["repo"])
     if und: return None, True
     try:
         times = [int(x) for x in out.split() if x.strip()]
     except Exception: return None, True
     if not times: return False, False
-    return (now.timestamp() - min(times)) / 60 >= 15, False
+    grace = float(row.get("deploy_grace_min", DEPLOY_GRACE_MIN))
+    return (now.timestamp() - min(times)) / 60 >= grace, False
 _CHECKOUT = pathlib.Path(__file__).resolve().parent.parent   # the checkout root `up.HERE.parent` resolves to
 SUPERVISOR_WEDGE_HOURS = 3   # SD6: a literal constant — no look.toml knob names this
 def _merge_after(runner, deadline, checkout, sha):

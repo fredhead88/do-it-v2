@@ -32,10 +32,10 @@ fiction.
   / b-26, superseding b-23's "the Planner serves everything"): under the seat backend
   `doit dispatch --detach` writes `$R/seat/<spawn>.packet.md` and forks a waiter; the
   FIRST thing you run after that, before the Agent-tool sub-agent starts, is
-  `scripts/seat/claim.sh <spawn>` (R6) — if it exits non-zero, someone else already
+  `/home/albert/do-it-v2/scripts/seat/claim.sh <spawn>` (R6) — if it exits non-zero, someone else already
   claimed this seat and you stop, you never start a sub-agent on a packet claimed
   elsewhere. Only then is the spawn the Agent-tool sub-agent you start, per
-  `scripts/seat/README.md` (general-purpose, the model from `models.toml`, reads the
+  `/home/albert/do-it-v2/scripts/seat/README.md` (general-purpose, the model from `models.toml`, reads the
   contract file and the packet, writes `seat/<spawn>.output.json`; then `stamp.sh` —
   stamp first, investigate second, R45). A packet is pending only while its spawn has
   `spawn-started` and no terminal event (R47); a dead spawn's packet is not yours.

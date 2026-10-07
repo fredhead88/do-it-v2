@@ -400,7 +400,7 @@ print("AC2 ok")
 # ── AC3: merge-undeployed ────────────────────────────────────────────────────
 root3 = newroot()
 toml3 = write_toml(root3, prod=[prod_row(project="albert-scott")])
-old_ts = int((NOW - timedelta(minutes=20)).timestamp())
+old_ts = int((NOW - timedelta(minutes=100)).timestamp())
 
 
 def git3(args, cwd, timeout):
@@ -412,7 +412,7 @@ def ssh3(target, cmd, timeout):
 
 
 res3 = look.run([], now=NOW, runner=FakeRunner(ssh=ssh3, git=git3), root=root3, toml_path=toml3)
-ok(len(briefs_of(res3, "merge-undeployed")) == 1, "AC3: >=15min behind briefs merge-undeployed")
+ok(len(briefs_of(res3, "merge-undeployed")) == 1, "AC3: >=90min (deploy grace) behind briefs merge-undeployed")
 ev3 = read_ledger(root3)
 res3b = look.run(ev3, now=NOW, runner=FakeRunner(ssh=ssh3, git=git3), root=root3, toml_path=toml3)
 ok(not briefs_of(res3b, "merge-undeployed"), "AC3: a second identical pass appends nothing (SD3)")
@@ -422,6 +422,19 @@ recent_ts = int((NOW - timedelta(minutes=5)).timestamp())
 git3c = lambda a, cwd, to: "tip1234" if a[0] == "rev-parse" else str(recent_ts)
 res3c = look.run([], now=NOW, runner=FakeRunner(ssh=ssh3, git=git3c), root=root3c, toml_path=write_toml(root3c, prod=[prod_row()]))
 ok(not briefs_of(res3c, "merge-undeployed"), "AC3: <15min behind briefs nothing")
+
+root3e = newroot()
+hour_ts = int((NOW - timedelta(minutes=60)).timestamp())
+git3e = lambda a, cwd, to: "tip1234" if a[0] == "rev-parse" else str(hour_ts)
+fake3e = FakeRunner(ssh=ssh3, git=git3e)
+res3e = look.run([], now=NOW, runner=fake3e, root=root3e, toml_path=write_toml(root3e, prod=[prod_row()]))
+ok(any(c[0] == "git" and c[1][0] == "log" and "--first-parent" in c[1] for c in fake3e.calls),
+   "AC3: merge age is read along --first-parent (the merge, not a branch commit)")
+ok(not briefs_of(res3e, "merge-undeployed"), "AC3: 60min behind (inside the hourly-deploy grace) briefs nothing")
+root3f = newroot()
+row3f = prod_row(); row3f["deploy_grace_min"] = 30
+res3f = look.run([], now=NOW, runner=FakeRunner(ssh=ssh3, git=git3e), root=root3f, toml_path=write_toml(root3f, prod=[row3f]))
+ok(len(briefs_of(res3f, "merge-undeployed")) == 1, "AC3: a per-row deploy_grace_min overrides the default")
 
 root3d = newroot()
 ssh3d = lambda t, c, to: "200" if "-w" in c else "not json"

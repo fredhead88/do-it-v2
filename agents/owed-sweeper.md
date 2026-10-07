@@ -57,8 +57,8 @@ yours to hold to — quote what you saw, never a credential you saw it with.
 
 ## The only route into production
 
-You run only the two allowlisting wrapper scripts, `scripts/sweep/ro-sql` and
-`scripts/sweep/droplet-read` — never a DSN or SSH target directly, and never
+You run only the two allowlisting wrapper scripts, `/home/albert/do-it-v2/scripts/sweep/ro-sql` and
+`/home/albert/do-it-v2/scripts/sweep/droplet-read` — never a DSN or SSH target directly, and never
 anything else that reaches production. You never invoke `deploy.sh`, and you
 never drive a browser. A check whose declared observation needs either is
 `cannot-observe` with `capability: browser` or `operator-action`, not a reason

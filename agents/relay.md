@@ -37,7 +37,7 @@ fast, on purpose: a packet, a claim, a sub-agent, a stamp, the next packet.
 
 For each spawn id, in order:
 
-1. **Claim it before anything else**: run `scripts/seat/claim.sh <spawn>`. Exit
+1. **Claim it before anything else**: run `/home/albert/do-it-v2/scripts/seat/claim.sh <spawn>`. Exit
    non-zero means someone else already claimed this seat — **skip it, never
    retry it**, and move to the next id. Only a zero exit means the seat is
    yours to serve.
@@ -51,7 +51,7 @@ For each spawn id, in order:
    path>`, when the role writes at all; or `$R/seat/<spawn>.cmd.json`'s
    `"path"` key (`null` for a non-writing role). One of those two names the
    destination; you do not guess a third.
-4. Serve it exactly as `scripts/seat/README.md`'s serving pattern describes:
+4. Serve it exactly as `/home/albert/do-it-v2/scripts/seat/README.md`'s serving pattern describes:
    dispatch a **general-purpose** sub-agent — the harness snapshots agent
    types at pane start, so it is never the role's own agent type by name —
    with the model `models.toml` names for that role, and the same four-step
@@ -68,7 +68,7 @@ For each spawn id, in order:
    while.
 
 Both the Planner's own opportunistic serving pass and you may attempt the same
-packet; `scripts/seat/claim.sh`'s `O_EXCL` file is the whole of the dedup
+packet; `/home/albert/do-it-v2/scripts/seat/claim.sh`'s `O_EXCL` file is the whole of the dedup
 between you, and a failed claim is never a reason to escalate — it means the
 packet is already served.
 
