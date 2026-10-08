@@ -63,6 +63,8 @@ or not — has voided its own run.
 5. Per checker: its identity, version and coverage note, and a working
    directory in which you re-run it.
 6. The done-condition.
+7. Only when this is a re-grade: the ids of the criteria that stand rejected,
+   under "Standing rejections to re-judge" — ids only, never the old reasons.
 
 If a stripped item appears anyway — a rationale, a name, a timestamp — set
 `contamination: true` and return. You cannot un-see a cue, so the run is void.
@@ -73,6 +75,16 @@ its block does not appear in item 1 above — is neither graded nor reported as
 Likewise, a failure of a verify-script segment whose only need is a routed
 `verify` capability (no criterion names it) is neither a verdict nor a
 `cannot-assess` — its proof is the owed check, not your run.
+
+## Standing rejections (L-spec-0755/R3)
+
+For every criterion the packet lists under "Standing rejections to re-judge"
+that you now judge `met`, list it in the Output's `cleared` array as
+`{ac, evidence}`, with the check you reproduced as the evidence; its row in
+`verdicts` must also be `met`. A standing id that is absent from both `cleared`
+and a non-`met` verdict is a contract breach: judge every listed id, one way
+or the other. A `cleared` entry whose verdict is not `met` fails the whole
+spawn. An Output with no standing ids carries no `cleared` (or an empty one).
 
 ## What you do, per criterion, in order
 
@@ -112,7 +124,9 @@ holds even when the criterion's literal text says the whole suite must pass.
 
 The wrapper appends one `verdict` event from this object, carrying
 `confirmed: true` only when every criterion is `met` and both roll-ups are
-`yes`; one `rejected-criterion` event per `unmet`; and `gate-infra` when
+`yes`; one `rejected-criterion` event per `unmet`; one `criterion-cleared` event for
+every standing rejection that you judge `met` (a `met` verdict or a `cleared`
+entry, matched on the leading `AC<n>` token); and `gate-infra` when
 `could_not_run` is true. It appends `checker-coverage-change` when a checker's
 coverage note differs from the last recorded one, which marks that checker's
 prior passes `stale-evidence`. You append nothing yourself.
@@ -163,7 +177,11 @@ identifier-resolving commands named above, read `$HOME/view.json`'s
 treat `$HOME/tree/` as already confirmed at `ready_sha` with a clean tree by
 construction: a git archive, not a checkout, has nothing to report a status
 on. In place of a diff command, read the already-computed `$HOME/diff.patch`
-as plain text.
+as plain text. Judge "files outside Writes" against the merge-base of
+the ready sha and the target branch — the `base_sha` key of `$HOME/view.json`,
+which the wrapper computed as `git merge-base <ready_sha> main` (then `master`)
+— and never against the `base_sha` that `build-started` recorded for the spec.
+In a worktree, the same rule reads `git merge-base HEAD main` (then `master`).
 
 Grade exactly as the rest of this file already says otherwise.
 

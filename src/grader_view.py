@@ -131,6 +131,18 @@ def _rewrite_verify(text: str, repo, tree_dir, view, venv_rel=None) -> bytes:
     return out.encode()
 
 
+def merge_base(repo, ready_sha: str) -> str:
+    """`git merge-base <ready_sha> main`, falling back to `master`, run in `repo`.
+    Raises RuntimeError when neither branch resolves (L-spec-0755/R3(d))."""
+    for branch in ("main", "master"):
+        r = subprocess.run(["git", "-C", str(repo), "merge-base", ready_sha, branch],
+                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        out = r.stdout.strip()
+        if r.returncode == 0 and re.fullmatch(r"[0-9a-f]{7,40}", out):
+            return out
+    raise RuntimeError(f"grader_view.build: no merge-base of {ready_sha} with main or master in {repo}")
+
+
 def build(spec: str, repo, base_sha: str, ready_sha: str, spawn: str) -> pathlib.Path:
     """Populate `scratch.sub("grade")/<spawn>/` per the spec's Boundaries and
     return it. Raises — never writes a placeholder — when the spec/verify
@@ -143,6 +155,8 @@ def build(spec: str, repo, base_sha: str, ready_sha: str, spawn: str) -> pathlib
         raise FileNotFoundError(f"grader_view.build: missing {verify_path}")
 
     repo = pathlib.Path(repo)
+    # L-spec-0755/R3(d): resolved first, so an unresolvable base leaves no view behind.
+    base_sha = merge_base(repo, ready_sha)
     view = _scratch_sub("grade") / spawn
     view.mkdir(parents=True, exist_ok=True)
 
@@ -160,6 +174,9 @@ def build(spec: str, repo, base_sha: str, ready_sha: str, spawn: str) -> pathlib
     )
     subprocess.run(["tar", "-x", "-C", str(tree_dir)], input=archive.stdout, check=True)
 
+    # L-spec-0755/R3(d): the diff base is `base_sha` as computed above — the
+    # merge-base of the ready sha and the target branch, never the spec's original
+    # base (a branch cut off an old master would list every commit master gained).
     diff = subprocess.run(
         ["git", "-C", str(repo), "diff", f"{base_sha}..{ready_sha}"],
         stdout=subprocess.PIPE,

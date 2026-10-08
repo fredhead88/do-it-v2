@@ -1747,8 +1747,8 @@ def fold(events):
         # survives ONLY for `criterion == "COMMIT-SHAPE"`; any other criterion
         # from actor `"builder"` is ignored exactly as it is ignored today
         # (`test_fold.py`'s `selfclear` case, unchanged).
-        if etype in ("rejected-criterion", "criterion-cleared") and e["actor"] == "builder" \
-                and e.get("criterion") != "COMMIT-SHAPE":
+        if (etype in ("rejected-criterion", "criterion-cleared") and e["actor"] == "builder" and e.get("criterion") != "COMMIT-SHAPE") \
+                or (etype == "spawn-failed" and e.get("reason") == "cancelled" and e["actor"] not in ("executor", "operator", "thinker")):  # L-spec-0755/R1
             ignored.append(e)
             continue
         by_subject[subj].append(e)

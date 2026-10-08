@@ -107,10 +107,14 @@ found_git = subprocess.run(
     ["find", str(view / "tree"), "-name", ".git"], capture_output=True, text=True
 ).stdout.strip()
 assert found_git == "", found_git
+# L-spec-0755/R3(d): the diff base is merge-base(ready_sha, main|master), not the
+# `base_sha` argument (kept in the signature, ignored).
+MERGE_BASE = grader_view.merge_base(REPO, READY_SHA)
 expect_diff = subprocess.run(
-    ["git", "-C", str(REPO), "diff", f"{BASE_SHA}..{READY_SHA}"], check=True, stdout=subprocess.PIPE
+    ["git", "-C", str(REPO), "diff", f"{MERGE_BASE}..{READY_SHA}"], check=True, stdout=subprocess.PIPE
 ).stdout
 assert (view / "diff.patch").read_bytes() == expect_diff
+assert json.loads((view / "view.json").read_text())["base_sha"] == MERGE_BASE
 assert (view / "spec.md").read_bytes() == (FIXTURE_ROOT / "content" / f"{SPEC}.md").read_bytes()
 verify_sh = view / "verify.sh"
 # L-spec-0481/R12.2 (minor deviation, declared — see the output card): build()
@@ -421,6 +425,52 @@ r9b = subprocess.run([str(ac9_8027_view / "verify.sh")], capture_output=True, te
 assert f"HOME={ac9_8027_view}/home" in r9b.stdout.splitlines(), r9b.stdout
 assert f"DOIT_ROOT={ac9_8027_view}/.doit" in r9b.stdout.splitlines(), r9b.stdout
 print("L-spec-8027 AC9 ok (b: grading.env present, still overridden)")
+
+
+# ── L-spec-0755 AC7 · the diff base is merge-base(ready_sha, master), not the ──
+# ── stale base_sha handed in; neither main nor master resolving raises ────────
+def _git(repo, *args):
+    return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True).stdout.strip()
+
+
+MB_SPEC = "L-spec-9755"
+(FIXTURE_ROOT / "content" / f"{MB_SPEC}.md").write_text("# fixture\n")
+(FIXTURE_ROOT / "content" / f"verify-{MB_SPEC}-grader.sh").write_text("#!/usr/bin/env bash\nset -euo pipefail\ntrue\n")
+MB_REPO = pathlib.Path(tempfile.mkdtemp(prefix="grader-view-mb-"))
+subprocess.run(["git", "init", "-q", "-b", "master", str(MB_REPO)], check=True)
+for k, v in (("user.email", "t@example.com"), ("user.name", "t")):
+    _git(MB_REPO, "config", k, v)
+(MB_REPO / "old.txt").write_text("old\n")
+_git(MB_REPO, "add", "-A"), _git(MB_REPO, "commit", "-q", "-m", "old master")
+OLD_MASTER = _git(MB_REPO, "rev-parse", "HEAD")
+_git(MB_REPO, "checkout", "-q", "-b", "spec-branch")
+(MB_REPO / "branch_only.txt").write_text("b\n")
+_git(MB_REPO, "add", "-A"), _git(MB_REPO, "commit", "-q", "-m", "spec work")
+MB_READY = _git(MB_REPO, "rev-parse", "HEAD")
+_git(MB_REPO, "checkout", "-q", "master")
+(MB_REPO / "master_only.txt").write_text("m\n")
+_git(MB_REPO, "add", "-A"), _git(MB_REPO, "commit", "-q", "-m", "master moved on")
+(MB_REPO / "master_two.txt").write_text("m2\n")
+_git(MB_REPO, "add", "-A"), _git(MB_REPO, "commit", "-q", "-m", "master moved on again")
+STALE_BASE = _git(MB_REPO, "rev-parse", "HEAD")        # a base that is NOT the merge-base
+mb_view = grader_view.build(MB_SPEC, MB_REPO, STALE_BASE, MB_READY, SPAWN + "-mb")
+assert json.loads((mb_view / "view.json").read_text())["base_sha"] == _git(MB_REPO, "merge-base", MB_READY, "master") == OLD_MASTER
+patch = (mb_view / "diff.patch").read_text()
+assert "branch_only.txt" in patch and "master_only.txt" not in patch and "master_two.txt" not in patch, patch
+print("L-spec-0755 AC7 ok (stale base_sha, merge-base used)")
+
+# `main` is preferred when both exist; a repo with neither raises, and leaves no view.
+_git(MB_REPO, "branch", "main", OLD_MASTER)
+assert grader_view.merge_base(MB_REPO, MB_READY) == OLD_MASTER
+_git(MB_REPO, "branch", "-m", "master", "trunk"), _git(MB_REPO, "branch", "-D", "main")
+raised = False
+try:
+    grader_view.build(MB_SPEC, MB_REPO, STALE_BASE, MB_READY, SPAWN + "-mb-none")
+except Exception:
+    raised = True
+assert raised, "neither main nor master: build() must raise"
+print("L-spec-0755 AC7 ok (neither main nor master raises)")
+shutil.rmtree(MB_REPO, ignore_errors=True)
 
 
 shutil.rmtree(FIXTURE_ROOT, ignore_errors=True)
