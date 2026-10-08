@@ -16,7 +16,7 @@ Writes `$R/packets/<subject>-<role>-<n>.md` and prints the path.
 import argparse, hashlib, os, pathlib, re, subprocess, sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import audit, fold, merge_gate, models, routing  # noqa: E402
+import amends, audit, fold, merge_gate, models, routing  # noqa: E402
 
 ROOT = pathlib.Path(os.environ.get("DOIT_ROOT", pathlib.Path.home() / ".do-it"))
 CONTENT, PACKETS = ROOT / "content", ROOT / "packets"
@@ -161,7 +161,7 @@ class Ctx:
 
     def spec_file(self):
         e = self.last("spec-written") or die(f"{self.a.subject} has no spec-written event")
-        return resolve(e.get("path") or die(f"{self.a.subject}'s spec-written carries no path"))
+        return amends.checked_spec(self.evs, self.a.subject, resolve(e.get("path") or die(f"{self.a.subject}'s spec-written carries no path")), die)  # L-spec-0755/R4
 
     def card_file(self):
         e = self.last("build-done") or die(f"{self.a.subject} has no build-done event")
@@ -1097,7 +1097,7 @@ def p_grader(c):
         item5,
         f"6. The done-condition: {done}.",
         f"7. Standing verify-waivers applied to this checker: {waiver_line(c)}.",
-    ]
+    ] + amends.standing_item(c.evs, owed)       # L-spec-0755/R3(b): ids of standing rejections only
     # L-spec-0668, 2026-10-05: a builder's own evidence/check prose sometimes names
     # its own spawn id verbatim ("Re-run in worktree by L-builder-0973: ...") — a
     # row the output card legitimately carries (AC1/AC2 "claims to test"), but one

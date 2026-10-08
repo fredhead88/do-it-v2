@@ -29,7 +29,7 @@ HERE = pathlib.Path(__file__).resolve().parent
 AGENTS = HERE.parent / "agents"
 sys.path.insert(0, str(HERE))
 import models  # noqa: E402
-import panes  # noqa: E402 — proc_start/alive; no circular import (panes imports nothing of ours)
+import panes, spawns  # noqa: E402 — panes: proc_start/alive (imports nothing of ours); spawns: L-spec-0755 dup-dispatch/cancel/clear helpers
 ROOT = pathlib.Path(os.environ.get("DOIT_ROOT", pathlib.Path.home() / ".do-it"))
 EVENTS, CONTENT = ROOT / "events", ROOT / "content"
 
@@ -554,7 +554,9 @@ def run_seat(spawn, cmd, packet, cwd, timeout, path=None, *, window=None, ledger
     claimed = False
     claim_t = None
     stale_emitted = False
+    prev_term, cancel_p = spawns.arm_cancel(SEAT, spawn)       # L-spec-0755/R1: marker first, then SIGTERM
     while not (want.is_file() or (meta_p.is_file() and bare.is_file())):
+        spawns.raise_if_cancelled(spawn, cancel_p)
         if not claimed and claim_p.is_file():
             claimed, claim_t = True, time.time()
         if not claimed:
@@ -568,6 +570,7 @@ def run_seat(spawn, cmd, packet, cwd, timeout, path=None, *, window=None, ledger
         elif time.time() - claim_t > timeout:
             raise subprocess.TimeoutExpired(cmd, timeout)
         time.sleep(2)
+    spawns.restore_sigterm(prev_term)
     time.sleep(1)                       # a writer that is still writing
     if want.is_file():
         return SeatResult(want.read_text())
@@ -790,18 +793,12 @@ def events_for(role, out, a, base):
             ev.append(("gate-infra", dict(line="could_not_run")))
         # A re-grade that finds a standing rejection met clears it — the grader may
         # clear (fold.EMITS), and without this a rework could never reach accepted.
-        import fold
-        specs, *_ = fold.fold(fold.read_events())
-        standing = fold.standing_rejects(specs.get(a.subject, {"evs": []})["evs"])
-        met = {v["ac"]: v["reason"] for v in vs if v["verdict"] == "met"}
-        confirmed = ev[0][1]["confirmed"]
         # A confirmed verdict found everything met, the done-condition included — a
         # rejection the packet no longer names (round one's DONE-COND) cannot outlive
         # it, or the Executor reworks forever. Seen on the first real chain.
         # R7/Target 6: COMMIT-SHAPE is the one standing rejection this loop never
         # clears — only a builder's own next conforming rework does (AC13).
-        ev += [("criterion-cleared", dict(criterion=c, evidence=met.get(c) or f"confirmed verdict {base['spawn']}"))
-               for c in sorted(standing) if c != "COMMIT-SHAPE" and (c in met or confirmed)]
+        ev += spawns.clear_events(vs, out, a.subject, ev[0][1]["confirmed"], base.get("spawn"))   # L-spec-0755/R3(c)
         ev += coverage_changes(out["checkers"])
         # L-spec-0482/R12.b: the circuit breaker. A `cannot-assess` row on a
         # criterion nobody declared owed (the shared `fold.verdict_owed_criteria`
@@ -814,7 +811,7 @@ def events_for(role, out, a, base):
         # out-of-`CAPABILITIES` value all coerce to `capability:unknown:<SPEC>`
         # (Assumptions): a hold subject is always `capability:<one of ten>` or
         # `capability:unknown:<SPEC>`, never a raw model string (security_path).
-        import grading_env
+        import fold, grading_env
         owed_criteria = fold.verdict_owed_criteria(fold.read_events(), a.subject)
         missing_capability = []
         for v in vs:
@@ -1205,6 +1202,8 @@ def main(a):
     # the one failure that IS retried — after the operator logs in.
     sys.path.insert(0, str(HERE))
     import fold
+    # L-spec-0755/R2: duplicate/conflicting dispatch refused before any spend; lock held until the start event lands.
+    dispatch_lock = spawns.gate(ROOT, a.role, a.subject, cwd, fold.read_events(), fail)
     # R3/L-spec-0192: a builder dispatch against a killed subject, or one still
     # carrying an open spec-writer spawn, is refused HERE — before any
     # subprocess or spend, and before the `build-started` event itself
@@ -1487,6 +1486,7 @@ def main(a):
         if grader_seat:  # L-spec-0481/AC10/AC21: which lane just proved this run's own capabilities
             kv["sandbox"] = grading_env.sandbox_mode()
         emit(ledger, base, "spawn-started", **kv)
+    dispatch_lock and dispatch_lock.close()      # closing the fd releases the flock
     packet += f"\n\nspawn_id: {spawn}\n"
     tools = [t.strip() for t in fm["tools"].split(",") if t.strip() != "StructuredOutput"]
     mcp = json.load(open(a.mcp_config)) if a.mcp_config else {}
@@ -1512,8 +1512,8 @@ def main(a):
             r = run_claude(cmd, packet, cwd, (a.timeout or tmin) * 60)
     except subprocess.TimeoutExpired:
         fail(f"timeout after {a.timeout or tmin} min", reason="timeout")
-    except Unserved as e:
-        fail(f"unserved: {e}", reason="unserved")
+    except (Unserved, spawns.Cancelled) as e:
+        spawns.unserved_or_cancelled(e, fail, spawn, grading_view)
     try:
         res = json.loads(r.stdout)
     except ValueError:
@@ -1536,8 +1536,8 @@ def main(a):
                 else run_claude(cmd, packet, cwd, (a.timeout or tmin) * 60)
         except subprocess.TimeoutExpired:
             fail(f"timeout after {a.timeout or tmin} min (on the fallback backend {backend})", reason="timeout")
-        except Unserved as e:
-            fail(f"unserved: {e}", reason="unserved")
+        except (Unserved, spawns.Cancelled) as e:
+            spawns.unserved_or_cancelled(e, fail, spawn, grading_view)
         try:
             res = json.loads(r.stdout)
         except ValueError:
@@ -1633,7 +1633,7 @@ def main(a):
         off_manifest = len(out.get("results", [])) - len(kept)
         events = events_for(a.role, {**out, "results": kept}, a, base)
     else:
-        events = events_for(a.role, out, a, base)
+        events = spawns.or_fail(fail, events_for, a.role, out, a, base)
     for t, kv in events:
         # A kv carrying its own `subject` lands there instead of the batch
         # subject `base["subject"]` names: the owed-sweeper's per-row events,

@@ -16,6 +16,29 @@
       "type": "boolean",
       "description": "true = a stripped item reached the packet; the run is void"
     },
+    "cleared": {
+      "type": "array",
+      "maxItems": 40,
+      "description": "L-spec-0755/R3: every criterion listed under 'Standing rejections to re-judge' that you now judge met, with the check you reproduced; its verdict row must be met",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "ac",
+          "evidence"
+        ],
+        "properties": {
+          "ac": {
+            "type": "string",
+            "maxLength": 20
+          },
+          "evidence": {
+            "type": "string",
+            "maxLength": 300
+          }
+        }
+      }
+    },
     "could_not_run": {
       "type": "boolean",
       "description": "over budget or the packet could not be graded; appends gate-infra, never a rework verdict"
