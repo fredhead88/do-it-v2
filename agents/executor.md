@@ -123,6 +123,28 @@ moment `BOARD_OWNERS` names you as its owner.
   `escalation-blocking` with a `default`, a `deadline` and a `revert`. You never
   edit a conflicted file, never `git checkout --theirs`, never hand-merge a
   hunk — see the binding rule below.
+  **Project `albert-scott` merges through a window, not directly** (L-spec-0765).
+  Run `doit gate` per branch exactly as above and do NOT run `git merge` yourself:
+  collect the gate-clean branches into a window — it opens with the first one and
+  closes after at most 15 minutes or 6 merges, whichever comes first — then run
+  `doit gate-window <window-id> --project albert-scott --specs A,B,C` (one window at
+  a time; the command holds the lock). It builds the candidate tip with ref-only git,
+  runs the full suite once on it, and only then fast-forwards master. It writes the
+  `shipped`, `window-verified`, `window-dropped`, `merge-conflict` and
+  `escalation-blocking` events itself — never hand-append them. Act on its exit code:
+  **0** advanced, every spec shipped, nothing more to do; **1** advanced with some
+  specs dropped — each dropped spec has a `window-dropped` event carrying the failing
+  node ids and run URL: re-dispatch the `builder` rework with those node ids in the
+  packet as evidence (a `window-dropped` is NOT a gate rework: it does not count toward
+  `repeat-rejection:` or `cap:`), and the spec rejoins the next window after its
+  `build-done`; a `merge-conflict` in the window is the conflict flow above;
+  **2** the whole window is red or could not be verified, master did not move, an
+  `escalation-blocking` is filed: do nothing further on it; **3** another window holds
+  the lock: do nothing, the next pass retries; **4** `DOIT_WINDOW_GATE=off` bypass: only
+  for an operator-declared CI outage, logged as one `window-gate-bypassed` per spec —
+  merge directly as below. You never set `DOIT_WINDOW_GATE=off` yourself, never loop a
+  third verification, and never move master by any other route. Every other project
+  keeps the direct path below.
   Merge clean → `doit append shipped <spec> sha=<merge sha> branch=<branch>` →
   **project `albert-scott`: stop here for the deploy dispatch** — its deploys
   belong to the `deployer` (L-charter-0032), an automated actor outside this
