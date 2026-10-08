@@ -421,6 +421,24 @@ with tempfile.TemporaryDirectory() as d:
     check(b in branches(r), "L0486-AC1: the local branch still exists — reap_worktrees never deletes it")
 print("L0486-AC1 ok")
 
+# ── Thinker 2026-10-08 · shipped sha on origin, but a rework commit on the branch -> retained ──
+with tempfile.TemporaryDirectory() as d:
+    r = repo_for(d, "rework-proj")
+    charter_project(d, "L-charter-rework", "rework-proj")
+    b, wt, ready = branchwork(r, d, "L-spec-0002", "x")
+    merge_sha = sh(r, "git", "rev-parse", "HEAD")
+    bare_origin(r)
+    shipped_trail(d, "L-charter-rework", "L-spec-0002", b, ready, merge_sha, project="rework-proj")
+    (pathlib.Path(wt) / "rework.txt").write_text("rework after a failed owed check")
+    sh(wt, "git", "add", "-A"); sh(wt, "git", "commit", "-qm", "rework L-spec-0002")
+    out = run_reap_worktrees(d)
+    check(not any(x["spec"] == "L-spec-0002" for x in out["reaped"]),
+          f"rework: a shipped spec whose branch has newer unmerged commits is NOT reaped: {out}")
+    row = next((x for x in out["retained"] if x["spec"] == "L-spec-0002"), None)
+    check(row is not None and "rework in flight" in row["why"], f"rework: retained with a rework reason: {out}")
+    check(pathlib.Path(wt).exists(), "rework: the worktree directory still exists")
+print("rework-retained ok")
+
 # ── L0486-AC2 · not on origin retains; standing rework retains; reviewing/open absent ──
 with tempfile.TemporaryDirectory() as d:
     r = repo_for(d, "l0486-proj2")

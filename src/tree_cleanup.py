@@ -215,6 +215,20 @@ def reap_worktrees(events, *, dry_run=False):
                 if not on_origin:
                     retained.append({**row, "why": f"origin/{main_branch} does not contain {sha[:12]}"})
                     continue
+                # Thinker 2026-10-08: a rework of an already-shipped spec (e.g. an owed check
+                # failed -> rebuild) commits ON TOP of the shipped sha. The shipped sha being on
+                # origin says nothing about that newer work; reaping here deleted L-spec-0399's
+                # rework worktree every 5 min and killed four graders. Keep any worktree whose
+                # branch tip is not yet on origin/<main>.
+                try:
+                    tip_on_origin = git(repo, "merge-base", "--is-ancestor", f"refs/heads/{branch}",
+                                        f"refs/remotes/origin/{main_branch}", ok=True).returncode == 0
+                except Undetermined as e:
+                    retained.append({**row, "why": str(e)})
+                    continue
+                if not tip_on_origin:
+                    retained.append({**row, "why": f"{branch} tip holds work not on origin/{main_branch} (rework in flight)"})
+                    continue
                 proof = "origin-merged"
             else:
                 # killed: push the branch (never --force, never any other ref), then
