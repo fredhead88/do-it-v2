@@ -48,7 +48,7 @@ PROVING = (LIVE_REPO / "src" / "proving.py") if (LIVE_REPO / "src" / "proving.py
 BRIEF = (LIVE_REPO / "src" / "brief.py") if (LIVE_REPO / "src" / "brief.py").is_file() else (HERE / "brief.py")
 
 KEEP = {
-    "spawn-started", "spawn-done", "spawn-failed", "build-started", "build-done", "build-blocked",
+    "spawn-started", "spawn-done", "spawn-failed", "spawn-stale", "build-started", "build-done", "build-blocked",
     "verdict", "review", "merge-gate-clean", "merge-gate-rework", "shipped", "escalation-blocking",
     "question", "decision", "spec-written", "charter-filed", "plan-written", "tick", "spec-killed",
     "deploy-landed", "deploy-failed", "deploy-started", "deploy-refused", "charter-retracted", "charter-complete",
@@ -114,6 +114,8 @@ def compact(e, actor):
         r.update(dur=e.get("duration_ms"), tok=e.get("subagent_tokens"), st=e.get("status"), m=e.get("model_used"))
     elif ty == "spawn-failed":
         r["why"] = trunc(e.get("why"), 160)
+    elif ty == "spawn-stale":
+        r["why"] = trunc(e.get("reason") or e.get("why"), 160)
     elif ty == "spawn-started":
         pass
     elif ty == "build-done":
