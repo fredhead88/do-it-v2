@@ -454,18 +454,32 @@ def _orphan_servers(proc_root, uid, scratch_root, terminal_paths, kill_fn, dry_r
 
 
 def _scratch_refs(proc_root, path, private_pg=False):
-    """Live filesystem and argv references; unreadable processes fail closed."""
+    """Live filesystem and argv references; unreadable processes fail closed.
+    Other users' processes are skipped: their cwd/fd links are never readable
+    by us, and failing closed on them (pid 1 is always one) would keep every
+    scratch entry forever."""
     out = []
     data = pathlib.Path(path) / "pg" / "data"
+    me = os.getuid()
     for name in _pid_dir_names(proc_root):
         if not panes.alive(int(name)):
             continue
         base = pathlib.Path(proc_root) / name
         try:
+            if base.stat().st_uid != me:
+                continue
+        except FileNotFoundError:
+            continue
+        try:
             raw = (base / "cmdline").read_bytes().decode(errors="replace")
         except FileNotFoundError:
             raw = ""  # process exited (or an injectable proc fixture)
-        refs = _pid_refs(proc_root, int(name))
+        try:
+            refs = _pid_refs(proc_root, int(name))
+        except PermissionError:
+            # Same-uid but non-dumpable (the user systemd manager, ssh-agent):
+            # such processes never work inside scratch.
+            continue
         tokens = [t for t in raw.split("\0") if t]
         if private_pg and tokens and (os.path.basename(tokens[0]) == "postgres"
                                       or tokens[0].startswith("postgres:")):
