@@ -26,7 +26,8 @@ falls back to a CONFIGURED percentage of the filesystem's total when
 `_quotactl_limit` cannot answer (this box, always). `run()` tightens its own
 safety margin to 30 minutes once usage crosses 70% of that limit ("pressure"),
 alarms once at 85% (`look.emit_once`), and — opted in via `scratch_root`,
-`events`, `kill_fn` — also reaps the scratch root (R9b), reaps worktrees of
+`events`, `kill_fn` — also reaps scratch with fixed retention (6h for sweeps, 12h for
+other entries; claude-1000 is always protected), reaps worktrees of
 any spec that has reached a terminal state (R9c, via
 `tree_cleanup.reap_merged_specs`), and stops orphaned local dev servers left
 behind by finished work (R9d). `None` on any of those three means the caller
@@ -198,8 +199,8 @@ def _refs_d(proc_root, x):
     out = [s for s in _bound_sockets(proc_root) if _under(s, x)]
     for pf in _pidfiles_under(x):
         try:
-            pid = int(pathlib.Path(pf).read_text().strip())
-        except (OSError, ValueError):
+            pid = int(pathlib.Path(pf).read_text().splitlines()[0])
+        except (OSError, ValueError, IndexError):
             continue
         if panes.alive(pid):
             out.append(pf)
@@ -267,8 +268,7 @@ def _delete(path):
 
 def _scan_dir(dirpath, uid, min_age_min, now, proc_root, dry_run):
     """SD7's decision, applied to every top-level entry of `dirpath`. Shared
-    by `root` and (R9b) `scratch_root` — the identical scan, on a different
-    directory. A failure listing `dirpath` itself propagates (the caller
+    by `root`; scratch has its own fixed retention policy. A failure listing `dirpath` itself propagates (the caller
     decides whether that is fatal, per surface)."""
     removed, kept = [], []
     for name in sorted(os.listdir(dirpath)):
@@ -442,6 +442,8 @@ def _orphan_servers(proc_root, uid, scratch_root, terminal_paths, kill_fn, dry_r
         under_scratch = scratch_root is not None and _under(cwd, str(scratch_root))
         if not (under_terminal or under_scratch):
             continue
+        if scratch_root is not None and _under(cwd, pathlib.Path(scratch_root) / "claude-1000"):
+            continue
         tokens = _cmdline_tokens(proc_root, pid)
         if not _matches_sd17(tokens, scratch_root):
             continue
@@ -451,54 +453,110 @@ def _orphan_servers(proc_root, uid, scratch_root, terminal_paths, kill_fn, dry_r
     return stopped
 
 
-def _reap_grade_views(scratch_root, events, proc_root, dry_run):
-    """L-charter-0042/L-spec-0486 (cleanup-on-finish), R15b: a grader/reviewer's
-    own `grade/<spawn>/` scratch copy goes the instant its spawn is terminal
-    (`fold.terminal_spawns`) — never age-gated like `_scan_dir`'s own rule, and
-    covering any spawn id (`L-grader-*`, `L-reviewer-*`: a reviewer today has
-    no separate scratch copy, so this covers whatever `grade/<spawn>/` a
-    reviewer is given). `grader-claude/` (the shared config dir) is a SIBLING
-    of `grade/` and is never even listed here — only `grade/`'s own immediate
-    children are considered. A terminal entry's own private cluster is asked
-    to stop FIRST, unconditionally (a live reference never blocks the ask,
-    only the final removal) — the postgres process under it, if any, must not
-    survive its own owning spawn regardless of who else's `cwd` still sits
-    there. An entry whose spawn is not terminal, unknown, or not a directory
-    is left exactly alone — not even looked at for liveness."""
-    grade_dir = pathlib.Path(scratch_root) / "grade"
+def _scratch_refs(proc_root, path, private_pg=False):
+    """Live filesystem and argv references; unreadable processes fail closed."""
+    out = []
+    data = pathlib.Path(path) / "pg" / "data"
+    for name in _pid_dir_names(proc_root):
+        if not panes.alive(int(name)):
+            continue
+        base = pathlib.Path(proc_root) / name
+        try:
+            raw = (base / "cmdline").read_bytes().decode(errors="replace")
+        except FileNotFoundError:
+            raw = ""  # process exited (or an injectable proc fixture)
+        refs = _pid_refs(proc_root, int(name))
+        tokens = [t for t in raw.split("\0") if t]
+        if private_pg and tokens and (os.path.basename(tokens[0]) == "postgres"
+                                      or tokens[0].startswith("postgres:")):
+            if any(_under(r, data) for r in refs) or str(data) in tokens:
+                continue
+        out.extend(r for r in refs if _under(r, path))
+        # Also catch paths embedded in --option=PATH or shell command strings.
+        if re.search(r"(?<![\w./-])" + re.escape(str(path)) + r"(?=$|[/\s\x00'\"])", raw):
+            out.append(str(path))
+        try:
+            cwd = os.readlink(base / "cwd")
+        except FileNotFoundError:
+            continue
+        for token in tokens:
+            if not token.startswith("-") and _under(os.path.join(cwd, token), path):
+                out.append(token)
+    return out
+
+
+def _scan_scratch(scratch_root, uid, now, proc_root, dry_run):
+    """Fixed scratch retention, with no recursive deletion of live containers."""
+    root = pathlib.Path(scratch_root)
+    if root.is_symlink():
+        raise Undetermined("scratch root is a symlink")
+    removed, kept = [], []
+    candidates = []
+    for path in sorted(root.iterdir()):
+        if path.name in {"claude-1000", "grade"}:
+            kept.append({"path": str(path), "reason": "protected scratch container"})
+        elif path.name == "sweeps" and path.is_dir() and not path.is_symlink():
+            candidates.extend((child, 6 * 3600) for child in sorted(path.iterdir()))
+        else:
+            candidates.append((path, 12 * 3600))
+    for path, max_age in candidates:
+        reason = None
+        try:
+            if path.lstat().st_uid != uid:
+                reason = "owned by another uid"
+            elif now.timestamp() - _newest_mtime(path, 3) <= max_age:
+                reason = "too young"
+            elif _scratch_refs(proc_root, path) or _refs_d(proc_root, path):
+                reason = "a live process or socket references this entry"
+            elif not dry_run:
+                _delete(path)
+        except OSError:
+            reason = "undetermined"
+        if reason:
+            kept.append({"path": str(path), "reason": reason})
+        else:
+            removed.append(str(path))
+    return removed, kept
+
+
+def _reap_grade_views(scratch_root, events, proc_root, dry_run, uid=None, stop_fn=None):
+    """Reap terminal views only after stopping their private PG successfully."""
+    root = pathlib.Path(scratch_root)
+    grade_dir = root / "grade"
+    if root.is_symlink() or grade_dir.is_symlink():
+        return [], {"scratch_grade": "symlinked scratch/grade root"}
     try:
-        names = sorted(os.listdir(grade_dir))
-    except OSError:
+        paths = sorted(grade_dir.iterdir())
+    except FileNotFoundError:
         return [], {}
     terminal = fold.terminal_spawns(events)
+    uid = os.getuid() if uid is None else uid
     removed, errors = [], {}
-    for name in names:
-        if name not in terminal:
+    for path in paths:
+        if path.name not in terminal:
             continue
-        path = grade_dir / name
         try:
-            st = os.lstat(path)
-        except OSError:
-            continue
-        if not stat.S_ISDIR(st.st_mode):
-            continue
-        if not dry_run:
-            try:
-                import grading_env
-                grading_env.teardown(str(path))
-            except ImportError:
-                pass
-            except Exception as e:
-                errors["teardown"] = str(e)
-        if _refs_c(proc_root, str(path)):
-            continue
-        if not dry_run:
-            try:
-                shutil.rmtree(path)
-            except OSError as e:
-                errors["scratch_grade"] = str(e)
+            st = path.lstat()
+            if not stat.S_ISDIR(st.st_mode) or st.st_uid != uid:
                 continue
-        removed.append(str(path))
+            data = path / "pg" / "data"
+            if ((path / "pg").is_symlink() or data.is_symlink()
+                    or (data / "postmaster.pid").is_symlink()):
+                continue
+            if _scratch_refs(proc_root, path, private_pg=True):
+                continue
+            if (data / "postmaster.pid").exists() and not dry_run:
+                (stop_fn or _default_stop_cluster)(data)
+            refs_d = _refs_d(proc_root, path)
+            if dry_run:
+                refs_d = [r for r in refs_d if not _under(r, path / "pg")]
+            if _scratch_refs(proc_root, path, private_pg=dry_run) or refs_d:
+                continue
+            if not dry_run:
+                _delete(path)
+            removed.append(str(path))
+        except (OSError, subprocess.SubprocessError, RuntimeError) as e:
+            errors[str(path)] = str(e)
     return removed, errors
 
 
@@ -570,10 +628,25 @@ def _has_client_backend(proc_root, ppid):
 
 
 def _default_stop_cluster(d):
+    # A leftover data directory/pidfile with no live postmaster needs no stop.
+    try:
+        pid = int((pathlib.Path(d) / "postmaster.pid").read_text().splitlines()[0])
+    except FileNotFoundError:
+        return
+    except (ValueError, IndexError) as e:
+        raise RuntimeError("invalid postmaster pidfile") from e
+    if pid <= 0:
+        raise RuntimeError("invalid postmaster pid")
+    if not panes.alive(pid):
+        return
     pg_ctl = shutil.which("pg_ctl")
     if pg_ctl is None:
+        pg_ctl = next(iter(sorted(pathlib.Path("/usr/lib/postgresql").glob("*/bin/pg_ctl"),
+                                  reverse=True)), None)
+    if pg_ctl is None:
         raise FileNotFoundError("pg_ctl")
-    subprocess.run([pg_ctl, "-D", str(d), "stop", "-m", "fast"], capture_output=True, timeout=30)
+    subprocess.run([pg_ctl, "-D", str(d), "stop", "-m", "fast"],
+                   capture_output=True, timeout=30, check=True)
 
 
 def _stop_cluster(d, stop_fn, kill_fn):
@@ -628,6 +701,8 @@ def _reap_clusters(proc_root, uid, scratch_root, events, now, state_path, stop_f
     for pid, d in _postmaster_candidates(proc_root, uid):
         nd = os.path.normpath(d)
         if nd in seen:
+            continue
+        if scratch_root is not None and _under(nd, pathlib.Path(scratch_root) / "claude-1000"):
             continue
         seen.add(nd)
         if _under(nd, "/var/lib/postgresql") or not any(_under(nd, b) for b in allowed_bases):
@@ -776,7 +851,7 @@ def run(root="/tmp", uid=None, min_age_min=120, dry_run=False, now=None, proc_ro
     errors = {}
     if scratch_root is not None:
         try:
-            s_removed, s_kept = _scan_dir(str(scratch_root), uid, effective_min_age, now, proc_root, dry_run)
+            s_removed, s_kept = _scan_scratch(scratch_root, uid, now, proc_root, dry_run)
             removed += s_removed
             kept += s_kept
         except Exception as e:
@@ -806,7 +881,7 @@ def run(root="/tmp", uid=None, min_age_min=120, dry_run=False, now=None, proc_ro
     removed_scratch = []
     if scratch_root is not None and events is not None:
         try:
-            removed_scratch, g_errors = _reap_grade_views(scratch_root, events, proc_root, dry_run)
+            removed_scratch, g_errors = _reap_grade_views(scratch_root, events, proc_root, dry_run, uid, stop_fn)
             removed += removed_scratch
             errors.update(g_errors)
         except Exception as e:

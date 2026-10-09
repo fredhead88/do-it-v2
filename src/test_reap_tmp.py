@@ -513,8 +513,8 @@ try:
                        scratch_root=str(ac5_scratch))
 finally:
     reap_tmp.user_quota = orig_user_quota
-ok(str(e5r) in res["removed"] and str(e5s) in res["removed"],
-   f"L0440-AC5: pressure's effective 30 removes the 45-minute entry, both roots: {res}")
+ok(str(e5r) in res["removed"] and str(e5s) not in res["removed"],
+   f"L0440-AC5: pressure removes tmp but preserves scratch under 12h: {res}")
 
 ac5n_root, ac5n_proc = root_and_proc("l0440-ac5n")
 ac5n_scratch = TMP / "l0440-ac5n-scratch"
@@ -927,7 +927,8 @@ def _reap486(pid):
 ac8_scratch = TMP / "l0486-ac8-scratch"
 grade8 = ac8_scratch / "grade"
 for name8 in ("L-grader-0001", "L-grader-0002", "L-reviewer-0003"):
-    (grade8 / name8).mkdir(parents=True)
+    (grade8 / name8 / "pg" / "data").mkdir(parents=True)
+    (grade8 / name8 / "pg" / "data" / "postmaster.pid").write_text(str(dead_pid()))
 (ac8_scratch / "grader-claude").mkdir()
 (ac8_scratch / "grader-claude" / "keep.txt").write_text("keep\n")
 
@@ -943,11 +944,11 @@ ok("L-grader-9999" in fold.terminal_spawns(events8) and "L-grader-0001" in fold.
    f"L0486-AC8: terminal_spawns keys on spawn=, incl. the tick's own subject-less shape: {fold.terminal_spawns(events8)}")
 
 seq8 = []
-orig_teardown8, orig_rmtree8 = _grading_env486.teardown, reap_tmp.shutil.rmtree
+orig_teardown8, orig_rmtree8 = reap_tmp._default_stop_cluster, reap_tmp.shutil.rmtree
 
 
 def _teardown_stub8(view):
-    seq8.append(("teardown", str(view)))
+    seq8.append(("teardown", str(pathlib.Path(view).parent.parent)))
 
 
 def _rmtree_stub8(path, *a, **kw):
@@ -955,13 +956,13 @@ def _rmtree_stub8(path, *a, **kw):
     return orig_rmtree8(path, *a, **kw)
 
 
-_grading_env486.teardown, reap_tmp.shutil.rmtree = _teardown_stub8, _rmtree_stub8
+reap_tmp._default_stop_cluster, reap_tmp.shutil.rmtree = _teardown_stub8, _rmtree_stub8
 ac8_root, ac8_proc = _pg_fixture_root("l0486-ac8")
 try:
     res8 = reap_tmp.run(root=str(ac8_root), uid=UID, proc_root=str(ac8_proc), scratch_root=str(ac8_scratch),
                         events=events8)
 finally:
-    _grading_env486.teardown, reap_tmp.shutil.rmtree = orig_teardown8, orig_rmtree8
+    reap_tmp._default_stop_cluster, reap_tmp.shutil.rmtree = orig_teardown8, orig_rmtree8
 
 ok(not (grade8 / "L-grader-0001").exists() and not (grade8 / "L-reviewer-0003").exists(),
    "L0486-AC8: both terminal spawns' views are gone")
