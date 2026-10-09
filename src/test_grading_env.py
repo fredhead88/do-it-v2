@@ -131,7 +131,7 @@ for row in TABLE:
 EXPECT_CAPS = ("env-file", "view-paths", "tools", "node_modules", "git",
                "db", "db-schema", "browser", "review-account", "deploy")
 check(grading_env.CAPABILITIES == EXPECT_CAPS, grading_env.CAPABILITIES)
-check(grading_env.SPEC_LOCAL == {"view-paths", "git"}, grading_env.SPEC_LOCAL)
+check(grading_env.SPEC_LOCAL == set(grading_env.CAPABILITIES), grading_env.SPEC_LOCAL)
 schema = json.loads((DOIT_SRC / "agents" / "grader.schema.json").read_text())
 mc = schema.get("properties", {}).get("missing_capability", {})
 if "enum" in mc:

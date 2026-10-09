@@ -22,8 +22,8 @@ CONTENT = ROOT / "content"
 
 CAPABILITIES = ("env-file", "view-paths", "tools", "node_modules", "git",
                 "db", "db-schema", "browser", "review-account", "deploy")
-# SD-R12-6a: the two capabilities whose hold is scoped to one spec, never shared.
-SPEC_LOCAL = frozenset({"view-paths", "git"})
+# Every preflight gap belongs to the spec whose view failed its proof.
+SPEC_LOCAL = frozenset(CAPABILITIES)
 # L-spec-8034/R12.g: capabilities a grader never has, by construction (R8's
 # git-less invariant, no browser, no deploy target) — a criterion needing one
 # of these routes to the reviewer or to owed instead of holding the grade.
@@ -130,6 +130,45 @@ def _criterion_blocks(spec_text):
     return blocks
 
 
+def _review_paths(text):
+    """Only AC review_path fields (including wrapped continuation lines)."""
+    lines, active = [], False
+    for line in text.splitlines():
+        if re.match(r"^\s*review_paths?:", line):
+            active = True
+        elif re.match(r"^\s*[\w-]+_path:|^\s*#+\s|^\s*AC\d+\s*\[", line):
+            active = False
+        if active:
+            lines.append(line)
+    return "\n".join(lines)
+
+
+def _verification_text(spec_text, verify_text):
+    """The spec's Verification block plus its extracted verification script."""
+    lines, active, fenced = [], False, False
+    for line in (spec_text or "").splitlines():
+        if not active:
+            if re.match(r"^#+\s+Verification\s*$", line, re.IGNORECASE):
+                active = True
+            continue
+        if re.match(r"^\s*(```|~~~)", line):
+            fenced = not fenced
+        elif not fenced and _HEADING_RE.match(line):
+            break
+        lines.append(line)
+    return "\n".join((*lines, verify_text or ""))
+
+
+def _tool_texts(spec_text, verify_text):
+    """Executable capability evidence, attributed exactly like criterion_caps."""
+    out = {cid: _review_paths(text) for cid, text in _criterion_blocks(spec_text).items()}
+    for seg in _verification_text(spec_text, verify_text).split("&&"):
+        match = re.search(r"\bAC(\d+)\b", seg)
+        cid = f"AC{match.group(1)}" if match else "verify"
+        out[cid] = out.get(cid, "") + "\n" + seg
+    return out
+
+
 def criterion_caps(spec_text, verify_text, project):
     """R12.f: `{criterion_id or "verify": [capabilities, CAPABILITIES order]}`,
     derived from each criterion's own block (git scoped to its `review_path:`
@@ -141,7 +180,8 @@ def criterion_caps(spec_text, verify_text, project):
     `[[prod]] base_url`."""
     out = {}
     for cid, text in _criterion_blocks(spec_text).items():
-        found = _caps_plain(text)
+        found = _caps_plain(text) - {"tools", "node_modules"}
+        found.update(_tokens_tools_node(_review_paths(text)))
         git = _git_need(text)
         if git and any(_GIT_RE.search(l) for l in text.splitlines() if "review_path:" in l):
             found.add(git)
@@ -150,7 +190,7 @@ def criterion_caps(spec_text, verify_text, project):
         if found:
             out[cid] = found
 
-    vtext = (verify_text or "").replace("$BASE", "BASE")
+    vtext = _verification_text(spec_text, verify_text).replace("$BASE", "BASE")
     for seg in (vtext.split("&&") if vtext else []):
         found = _caps_plain(seg)
         git = _git_need(seg)
@@ -488,7 +528,8 @@ def preflight(role, subject, view, project, *, repo, mcp_config=None, owed=froze
 
     venv = row.get("venv") or ""
     venv_path = str(_project_checkout(project) / venv) if venv else ""
-    caps_text = f"{spec_text}\n{verify_text}"
+    caps_text = "\n".join(text for cid, text in _tool_texts(spec_text, verify_text).items()
+                          if cid not in set(owed) | set(routed))
 
     if "node_modules" in caps:
         ok, reason = _prove_node_modules(view, row, project)
