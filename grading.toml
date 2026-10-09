@@ -30,3 +30,6 @@ cwd = "api"
 # 10-04, L-spec-0765 on 10-08/09). Absolute path for the same reason as
 # albert-scott's row: ~/.do-it/repos/do-it-v2 is a symlink to /home/albert/do-it-v2.
 venv = "/home/albert/do-it-v2/.venv"
+# Explicit empty list = "no JS in this project": the node_modules proof passes
+# rather than refusing (grading_env._prove_node_modules).
+node_dirs = []

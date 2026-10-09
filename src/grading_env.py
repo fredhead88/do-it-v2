@@ -386,6 +386,12 @@ def _prove_tools(view, project, repo, caps_text, venv_path):
 def _prove_node_modules(view, row, project):
     dirs = row.get("node_dirs") or []
     if not dirs:
+        # Thinker 2026-10-09: an EXPLICIT `node_dirs = []` in grading.toml declares
+        # "this project has no JS", which is satisfied, not a gap. A missing key still
+        # fails (unconfigured project). A spec whose prose merely names node/npm was
+        # otherwise refused forever (L-spec-0765, do-it-v2).
+        if "node_dirs" in row and row["node_dirs"] == []:
+            return True, None
         return False, "no node_dirs configured for this project"
     checkout, tree = _project_checkout(project), pathlib.Path(view) / "tree"
     for d in dirs:
