@@ -12,10 +12,25 @@ stderr passed through | 2 refused, psql never invoked | 3 timed out.
 import os
 import pathlib
 import subprocess
+import urllib.parse
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent.parent / "src"))
 import sweep_wrappers  # noqa: E402
+
+
+def _password_to_env(dsn, env):
+    """Move a URL DSN's password into PGPASSWORD so it never sits in psql's argv,
+    where any `ps` listing on the box shows it. Returns the password-free URL."""
+    u = urllib.parse.urlsplit(dsn)
+    if u.scheme not in ("postgres", "postgresql") or u.password is None:
+        return dsn
+    env["PGPASSWORD"] = urllib.parse.unquote(u.password)
+    host = u.hostname or ""
+    if ":" in host:
+        host = f"[{host}]"
+    netloc = (u.username or "") + "@" + host + (f":{u.port}" if u.port else "")
+    return urllib.parse.urlunsplit((u.scheme, netloc, u.path, u.query, u.fragment))
 
 
 def main(argv):
@@ -35,6 +50,7 @@ def main(argv):
         return 2
     env = dict(os.environ)
     env["PGOPTIONS"] = "-c default_transaction_read_only=on -c statement_timeout=30000"
+    dsn = _password_to_env(dsn, env)
     cmd = ["psql", dsn, "-X", "--no-psqlrc", "-v", "ON_ERROR_STOP=1", "-A", "-t", "-F", "\t", "-c", sql]
     try:
         r = subprocess.run(cmd, env=env, capture_output=True, text=True,
