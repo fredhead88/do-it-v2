@@ -47,12 +47,13 @@ class ScratchTests(unittest.TestCase):
         young = self.entry('sweeps/young', 6)
         protected = self.entry('claude-1000/cache', 48)
         unknown = self.entry('grade/unknown', 48)
+        shared = [self.entry(n + '/x', 48) for n in ('grader-claude', 'gate', 'node-compile-cache')]
         removed, _ = self.scan(True)
         self.assertEqual(set(removed), {str(old), str(sweep)})
         self.assertTrue(old.exists() and sweep.exists())
         self.scan()
         self.assertFalse(old.exists() or sweep.exists())
-        self.assertTrue(all(p.exists() for p in (boundary, young, protected, unknown)))
+        self.assertTrue(all(p.exists() for p in (boundary, young, protected, unknown, *shared)))
 
     def test_cmdline_cwd_and_relative_references(self):
         paths = [self.entry(name, 24) for name in ('argv', 'cwd', 'relative', 'sweeps/busy')]

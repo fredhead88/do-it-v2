@@ -485,6 +485,14 @@ def _scratch_refs(proc_root, path, private_pg=False):
     return out
 
 
+# Named scratch subdirectories the tools reuse across runs (scratch.sub(...) callers,
+# shared caches); age says nothing about whether they are still wanted.
+_SCRATCH_PROTECTED = frozenset({
+    "claude-1000", "grade", "grader-claude", "gate", "data", "log", "tmp",
+    "node-compile-cache", "pytest-of-albert", "playwright-transform-cache-1000",
+})
+
+
 def _scan_scratch(scratch_root, uid, now, proc_root, dry_run):
     """Fixed scratch retention, with no recursive deletion of live containers."""
     root = pathlib.Path(scratch_root)
@@ -493,7 +501,7 @@ def _scan_scratch(scratch_root, uid, now, proc_root, dry_run):
     removed, kept = [], []
     candidates = []
     for path in sorted(root.iterdir()):
-        if path.name in {"claude-1000", "grade"}:
+        if path.name in _SCRATCH_PROTECTED:
             kept.append({"path": str(path), "reason": "protected scratch container"})
         elif path.name == "sweeps" and path.is_dir() and not path.is_symlink():
             candidates.extend((child, 6 * 3600) for child in sorted(path.iterdir()))
