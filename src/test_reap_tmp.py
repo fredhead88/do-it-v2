@@ -784,41 +784,42 @@ print("L0440-AC19 ok")
 # ══════════════════════════════════════════════════════════════════════════
 EXPECTED_CRONS_ROWS = [
     {"name": "tick", "where": "user", "schedule": "*/{tick_min} * * * *",
-     "command": "DOIT_ROOT={root} {doit} tick >> {root}/logs/tick.log 2>&1",
+     "command": "DOIT_ROOT={root} {doit} cron-run tick -- {doit} tick >> {root}/logs/tick.log 2>&1",
      "path": "{doit}", "sig": r"\bdoit tick\b", "owner": "thinker", "project": "do-it-v2"},
     {"name": "look", "where": "user", "schedule": "*/10 * * * *",
-     "command": "{doit} look >> {root}/logs/look.log 2>&1",
+     "command": "{doit} cron-run look -- {doit} look >> {root}/logs/look.log 2>&1",
      "path": "{doit}", "sig": r"\bdoit look\b", "owner": "thinker", "project": "do-it-v2"},
     {"name": "tmp-reaper", "where": "user", "schedule": "*/5 * * * *",
-     "command": "{doit} reap-tmp", "path": "{doit}", "sig": r"\bdoit reap-tmp\b",
+     "command": "{doit} cron-run tmp-reaper -- {doit} reap-tmp", "path": "{doit}", "sig": r"\bdoit reap-tmp\b",
      "owner": "thinker", "project": "do-it-v2"},
     {"name": "lessons-digest", "where": "user", "schedule": "7 * * * *",
-     "command": "{repo}/scripts/lessons_digest.py >> {root}/lessons-digest.log 2>&1",
+     "command": "{doit} cron-run lessons-digest -- {repo}/scripts/lessons_digest.py >> {root}/lessons-digest.log 2>&1",
      "path": "{repo}/scripts/lessons_digest.py", "sig": r"lessons_digest\.py\b",
      "owner": "thinker", "project": "do-it-v2"},
     {"name": "backup-watch", "where": "user", "schedule": "* * * * *",
-     "command": "{doit} backup watch --for 60 >> {root}/backup.log 2>&1",
-     "path": "{doit}", "sig": r"\bdoit backup watch\b", "owner": "thinker", "project": "do-it-v2"},
+     "command": "{doit} cron-run backup-watch -- {doit} backup watch --for 60 >> {root}/backup.log 2>&1",
+     "path": "{doit}", "sig": r"\bdoit backup watch\b", "owner": "thinker", "project": "do-it-v2",
+     "max_runtime_s": 90},
     {"name": "ledger-snapshot", "where": "user", "schedule": "*/10 * * * *",
-     "command": "/var/backups/do-it/snapshot.sh >/dev/null 2>&1",
+     "command": "{doit} cron-run ledger-snapshot -- /var/backups/do-it/snapshot.sh >/dev/null 2>&1",
      "path": "/var/backups/do-it/snapshot.sh", "sig": r"snapshot\.sh\b",
      "owner": "thinker", "project": "do-it-v2"},
     {"name": "sweep-owed", "where": "user", "schedule": "*/30 * * * *",
-     "command": "{doit} sweep-owed >> {root}/logs/sweep-owed.log 2>&1",
+     "command": "{doit} cron-run sweep-owed -- {doit} sweep-owed >> {root}/logs/sweep-owed.log 2>&1",
      "path": "{doit}", "sig": r"\bdoit sweep-owed\b", "owner": "thinker", "project": "do-it-v2"},
     {"name": "auto-deploy", "where": "cron.d", "schedule": "*/5 * * * *",
-     "command": "albert /opt/albert-scott/venv/bin/python /opt/albert-scott/scripts/ops/auto_deploy.py "
+     "command": "albert {doit} cron-run auto-deploy -- /opt/albert-scott/venv/bin/python /opt/albert-scott/scripts/ops/auto_deploy.py "
                 "--once >> /var/log/albert-scott/auto-deploy-run.log 2>&1",
      "path": "/opt/albert-scott/venv/bin/python", "sig": r"auto_deploy\.py\b.*--once\b",
      "owner": "deployer", "project": "albert-scott"},
 ]
 
-# ── L0440-AC20 · tmp-reaper is */5, every other row/field byte-identical ────
+# ── L0440-AC20 · current cron-run commands, runtime bounds and */5 reaper cadence ────
 CRONS_PATH = pathlib.Path(__file__).resolve().parent.parent / "crons.toml"
 with open(CRONS_PATH, "rb") as f:
     crons_doc = tomllib.load(f)
 ok(crons_doc["row"] == EXPECTED_CRONS_ROWS,
-   f"L0440-AC20: tmp-reaper is */5 * * * *, every other row/field unchanged: {crons_doc['row']}")
+   f"L0440-AC20: cron rows match current wrappers, runtime bounds and */5 reaper cadence: {crons_doc['row']}")
 print("L0440-AC20 ok")
 
 # ── L0440-AC21 · look.toml carries the default 80; missing key/table/file still yields 80 ──
