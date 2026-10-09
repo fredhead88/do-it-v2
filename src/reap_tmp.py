@@ -191,12 +191,13 @@ def _pidfiles_under(x):
     return out
 
 
-def _refs_d(proc_root, x):
+def _refs_d(proc_root, x, *, sockets=None):
     """Rule (d): a bound socket under `x`, or a `*.pid`/`postmaster.pid` file
     under `x` naming a pid `panes.alive()` reports live. A pid file naming a
     dead pid contributes nothing — its contents are read only for the
     integer, never as a path (security_path (c))."""
-    out = [s for s in _bound_sockets(proc_root) if _under(s, x)]
+    sockets = _bound_sockets(proc_root) if sockets is None else sockets
+    out = [s for s in sockets if _under(s, x)]
     for pf in _pidfiles_under(x):
         try:
             pid = int(pathlib.Path(pf).read_text().splitlines()[0])
@@ -453,16 +454,13 @@ def _orphan_servers(proc_root, uid, scratch_root, terminal_paths, kill_fn, dry_r
     return stopped
 
 
-def _scratch_refs(proc_root, path, private_pg=False):
-    """Live filesystem and argv references; unreadable processes fail closed.
-    Other users' processes are skipped: their cwd/fd links are never readable
-    by us, and failing closed on them (pid 1 is always one) would keep every
-    scratch entry forever."""
-    out = []
-    data = pathlib.Path(path) / "pg" / "data"
+def _scratch_snapshot(proc_root):
+    """Read live same-uid process evidence once; preserve skip/error rules."""
+    snapshot = {}
     me = os.getuid()
     for name in _pid_dir_names(proc_root):
-        if not panes.alive(int(name)):
+        pid = int(name)
+        if not panes.alive(pid):
             continue
         base = pathlib.Path(proc_root) / name
         try:
@@ -475,12 +473,38 @@ def _scratch_refs(proc_root, path, private_pg=False):
         except FileNotFoundError:
             raw = ""  # process exited (or an injectable proc fixture)
         try:
-            refs = _pid_refs(proc_root, int(name))
+            refs = _pid_refs(proc_root, pid)
+            try:
+                maps = (base / "maps").read_text()
+            except FileNotFoundError:
+                maps = ""
+            for line in maps.splitlines():
+                fields = line.split(maxsplit=5)
+                if len(fields) == 6 and fields[5].startswith("/"):
+                    refs.append(fields[5])
         except PermissionError:
-            # Same-uid but non-dumpable (the user systemd manager, ssh-agent):
-            # such processes never work inside scratch.
+            # Other-uid and same-uid non-dumpable processes never work in scratch.
             continue
-        tokens = [t for t in raw.split("\0") if t]
+        cwd, cwd_error = None, None
+        try:
+            cwd = os.readlink(base / "cwd")
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            # A private PG process may be exempted before cwd is consulted.
+            cwd_error = e
+        snapshot[pid] = {"raw": raw, "tokens": [t for t in raw.split("\0") if t],
+                         "refs": refs, "cwd": cwd, "cwd_error": cwd_error}
+    return snapshot
+
+
+def _scratch_refs(proc_root, path, private_pg=False, *, snapshot=None):
+    """Match cached evidence; standalone/PG callers still take a fresh snapshot."""
+    snapshot = _scratch_snapshot(proc_root) if snapshot is None else snapshot
+    out = []
+    data = pathlib.Path(path) / "pg" / "data"
+    for row in snapshot.values():
+        raw, tokens, refs = row["raw"], row["tokens"], row["refs"]
         if private_pg and tokens and (os.path.basename(tokens[0]) == "postgres"
                                       or tokens[0].startswith("postgres:")):
             if any(_under(r, data) for r in refs) or str(data) in tokens:
@@ -489,9 +513,10 @@ def _scratch_refs(proc_root, path, private_pg=False):
         # Also catch paths embedded in --option=PATH or shell command strings.
         if re.search(r"(?<![\w./-])" + re.escape(str(path)) + r"(?=$|[/\s\x00'\"])", raw):
             out.append(str(path))
-        try:
-            cwd = os.readlink(base / "cwd")
-        except FileNotFoundError:
+        if row["cwd_error"] is not None:
+            raise row["cwd_error"]
+        cwd = row["cwd"]
+        if cwd is None:
             continue
         for token in tokens:
             if not token.startswith("-") and _under(os.path.join(cwd, token), path):
@@ -521,6 +546,7 @@ def _scan_scratch(scratch_root, uid, now, proc_root, dry_run):
             candidates.extend((child, 6 * 3600) for child in sorted(path.iterdir()))
         else:
             candidates.append((path, 12 * 3600))
+    snapshot, sockets, snapshot_error = None, None, None
     for path, max_age in candidates:
         reason = None
         try:
@@ -528,10 +554,22 @@ def _scan_scratch(scratch_root, uid, now, proc_root, dry_run):
                 reason = "owned by another uid"
             elif now.timestamp() - _newest_mtime(path, 3) <= max_age:
                 reason = "too young"
-            elif _scratch_refs(proc_root, path) or _refs_d(proc_root, path):
-                reason = "a live process or socket references this entry"
-            elif not dry_run:
-                _delete(path)
+            else:
+                # Lazy: young/protected/other-uid entries need no process reads.
+                # Cache failures too: every eligible entry still fails closed.
+                if snapshot is None and snapshot_error is None:
+                    try:
+                        snapshot = _scratch_snapshot(proc_root)
+                        sockets = _bound_sockets(proc_root)
+                    except OSError as e:
+                        snapshot_error = e
+                if snapshot_error is not None:
+                    raise snapshot_error
+                if (_scratch_refs(proc_root, path, snapshot=snapshot)
+                        or _refs_d(proc_root, path, sockets=sockets)):
+                    reason = "a live process or socket references this entry"
+                elif not dry_run:
+                    _delete(path)
         except OSError:
             reason = "undetermined"
         if reason:

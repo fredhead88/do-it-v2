@@ -62,6 +62,86 @@ class ScratchTests(unittest.TestCase):
         self.assertEqual(removed, [])
         self.assertTrue(all(p.exists() for p in paths))
 
+    def test_scan_snapshots_processes_and_sockets_once(self):
+        paths = {name: self.entry(name, 24) for name in
+                 ('argv', 'cwd', 'relative', 'fd', 'mapped', 'socket', 'pidfile')}
+        free = [self.entry(f'free-{i}', 24) for i in range(24)]
+        self.process(paths['cwd'], f'bash\0{paths["argv"]}/file\0../relative/file\0'.encode())
+        proc = self.proc / str(os.getpid())
+        (proc / 'fd').mkdir()
+        (proc / 'fd/3').symlink_to(paths['fd'] / 'file')
+        (proc / 'maps').write_text(
+            f'1000-2000 r--p 00000000 00:00 1 {paths["mapped"]}/file\n')
+        (self.proc / 'net').mkdir()
+        (self.proc / 'net/unix').write_text(
+            f'Header\n0: 00000002 00000000 00010000 0001 01 1 {paths["socket"]}/sock\n')
+        pidfile = paths['pidfile'] / 'worker.pid'
+        pidfile.write_text(str(os.getpid()))
+        stamp = self.now.timestamp() - 24 * 3600
+        os.utime(pidfile, (stamp, stamp))
+        os.utime(paths['pidfile'], (stamp, stamp))
+        with patch.object(reap_tmp, '_pid_dir_names', wraps=reap_tmp._pid_dir_names) as listing, \
+                patch.object(reap_tmp, '_pid_refs', wraps=reap_tmp._pid_refs) as refs, \
+                patch.object(Path, 'read_bytes', autospec=True, side_effect=Path.read_bytes) as reads, \
+                patch.object(Path, 'read_text', autospec=True, side_effect=Path.read_text) as texts, \
+                patch.object(reap_tmp, '_bound_sockets', wraps=reap_tmp._bound_sockets) as sockets:
+            removed, kept = self.scan(True)
+        self.assertEqual(set(removed), {str(path) for path in free})
+        self.assertEqual({row['path'] for row in kept}, {str(path) for path in paths.values()})
+        listing.assert_called_once_with(self.proc)
+        refs.assert_called_once_with(self.proc, os.getpid())
+        reads.assert_called_once_with(proc / 'cmdline')
+        sockets.assert_called_once_with(self.proc)
+        self.assertEqual(sum(call.args[0] == proc / 'maps' for call in texts.call_args_list), 1)
+        self.assertEqual(sum(call.args[0] == self.proc / 'net/unix' for call in texts.call_args_list), 1)
+        self.assertTrue(all(path.exists() for path in free))
+        # A subsequent scan refreshes the evidence instead of reusing old rows.
+        (proc / 'cmdline').write_bytes(b'bash\0')
+        removed, _ = self.scan(True)
+        self.assertIn(str(paths['argv']), removed)
+        self.assertIn(str(paths['relative']), removed)
+
+    def test_snapshot_failure_is_cached_and_fails_closed(self):
+        old = [self.entry(f'old-{i}', 24) for i in range(3)]
+        young = self.entry('young')
+        self.process(self.base, b'bash\0')
+        with patch.object(Path, 'read_bytes', side_effect=PermissionError) as reads:
+            removed, kept = self.scan()
+        reads.assert_called_once()
+        self.assertEqual(removed, [])
+        reasons = {row['path']: row['reason'] for row in kept}
+        self.assertTrue(all(reasons[str(path)] == 'undetermined' for path in old))
+        self.assertEqual(reasons[str(young)], 'too young')
+        self.assertTrue(all(path.exists() for path in old))
+        with patch.object(reap_tmp, '_scratch_snapshot', wraps=reap_tmp._scratch_snapshot) as snapshot:
+            # Young-only scans do not consult proc at all.
+            for path in old:
+                reap_tmp._delete(path)
+            self.scan(True)
+        snapshot.assert_not_called()
+
+    def test_snapshot_preserves_other_uid_and_nondumpable_skips(self):
+        for pid in (101, 102, 103):
+            proc = self.proc / str(pid)
+            proc.mkdir()
+            (proc / 'cmdline').write_bytes(b'bash\0')
+        real_stat = Path.stat
+        def stat(path, *args, **kwargs):
+            result = real_stat(path, *args, **kwargs)
+            if path == self.proc / '102':
+                # Only the ownership field is used for proc directories.
+                from types import SimpleNamespace
+                return SimpleNamespace(st_uid=os.getuid() + 1)
+            return result
+        with patch.object(Path, 'stat', autospec=True, side_effect=stat), \
+                patch.object(reap_tmp.panes, 'alive', side_effect=lambda pid: pid != 103), \
+                patch.object(reap_tmp, '_pid_refs', side_effect=PermissionError) as refs, \
+                patch.object(Path, 'read_bytes', autospec=True, side_effect=Path.read_bytes) as reads:
+            snapshot = reap_tmp._scratch_snapshot(self.proc)
+        self.assertEqual(snapshot, {})
+        refs.assert_called_once_with(self.proc, 101)
+        reads.assert_called_once_with(self.proc / '101/cmdline')
+
     def test_symlink_containment(self):
         outside = self.base / 'outside'
         outside.mkdir()
