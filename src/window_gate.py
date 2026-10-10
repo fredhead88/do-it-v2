@@ -190,7 +190,12 @@ def verify(repo, cand, required, window):
             return dict(state="undetermined", nodes=[], url="", doc={}, why=f"verification timed out after {timeout:.0f}s")
         doc, nodes, url = parse_verdict(out)
         checks = doc.get("checks")
-        all_ran = (isinstance(checks, dict) and all(checks.get(c) == "ran" for c in required))
+        # predeploy_gate.sh (L-spec-0764) reports each check as {"state": "ran", "run_id", "url"};
+        # older fixtures use the bare string "ran". Accept both: a shape mismatch here turned
+        # every green CI verdict into a red window with nodes=[] (windows 0101 and 0201, 2026-10-10).
+        def _ran(v):
+            return v == "ran" or (isinstance(v, dict) and v.get("state") == "ran")
+        all_ran = (isinstance(checks, dict) and all(_ran(checks.get(c)) for c in required))
         if proc.returncode == 0 and all_ran and not nodes and doc.get("verdict", "green") == "green":
             return dict(state="green", nodes=[], url=url, doc=doc)
         if proc.returncode == 2 or (proc.returncode == 0 and not doc):

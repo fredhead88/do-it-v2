@@ -139,6 +139,18 @@ def main():
     check(subprocess.run(["git", "-C", str(fx.repo), "rev-parse", "--verify", "-q", "refs/heads/window/w1"]).returncode != 0,
           "window ref removed")
 
+    # Real predeploy_gate.sh verdict shape: each check is {"state": "ran", ...}, not a bare
+    # string. Before the fix this green verdict was read as red with nodes=[] (windows
+    # win-20261010-0101 and -0201 dropped every spec on a green CI run).
+    fx = Fx({"A": "a.txt"})
+    real = json.dumps({"verdict": "green", "sha": "x", "new_failures": [],
+                       "checks": {"pytest": {"state": "ran", "run_id": 38010269666,
+                                             "url": "https://github.com/o/r/actions/runs/3/job/4"}}})
+    fx.run_n(1, 0, real)
+    rc = fx.go()
+    check(rc == 0 and fx.master() != fx.base, f"real-shape green verdict ships (rc={rc})")
+    check(not fx.events("window-dropped"), "real-shape green verdict drops nothing")
+
     # AC2: collection error (no verdict line, gate says red): nothing ships
     fx = Fx({"A": "a.txt", "B": "b.txt"})
     fx.run_n(1, 1, "ERROR collecting api/tests/test_q.py")
