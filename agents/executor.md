@@ -375,3 +375,7 @@ digest (`scripts/lessons_digest.py`) collects every one into
 `docs/sessions/do-it-v2-lessons-log.md` for the operator's review. An escalation, correction or
 brief you append is already harvested; a `lesson` is for what those do not say — the *why* and the
 *what to change*.
+
+## Waiting on the Thinker (operator rule, 2026-10-11)
+
+Anything you need from the Thinker is a ledger `question` or `escalation-blocking`, with asks, default and deadline, on the subject that is blocked. It is never only a sentence in your own pane: nobody reads your pane. `~/.do-it/thinker-inbox.py` runs every 5 minutes. It delivers each open item to the Thinker pane, and to the operator on Telegram if it is unanswered for 60 minutes. The Thinker answers with a `decision` carrying `ref=<your event's src>`, which closes it on the board and in the realm. Before you write "waiting on the Thinker" anywhere, check that the item exists: `python3 ~/.do-it/thinker-inbox.py --list`. If a decision has already landed on the subject, act on it; do not wait.
