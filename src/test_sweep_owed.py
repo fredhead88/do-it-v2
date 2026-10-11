@@ -590,3 +590,28 @@ answered12b_432 = sweep_owed.answered_specs(specs12b_432)
 assert "L-spec-432m" in answered12b_432, \
     "★ AC12: still answered (at t1, via e_old) after the second run"
 print("answered-0432 AC12 ok")
+
+
+# 2026-10-11 regression: the batch's read-only .env must exist BEFORE `doit packet owed-sweeper`
+# runs, or the packet tells the sweeper "not available (capability=ro-dsn)" and the check is
+# retired forever by _blocked_permanently. Uses a disposable checkout, never the real one.
+_co = pathlib.Path(TMP) / "repos" / "proj-dsn"
+_co.mkdir(parents=True, exist_ok=True)
+_co.joinpath(".env").write_text("SUPABASE_DB_URL_RO=postgresql://ro_fixture@127.0.0.1:1/x\n")
+_seen = {}
+
+
+class _OrderRunner:
+    def run(self, argv):
+        if argv[1] == "packet":
+            sid = argv[-1]
+            d = scratch.sub("sweeps") / sid
+            _seen["env_at_packet"] = (d / ".env").is_file()
+            return subprocess.CompletedProcess(argv, 0, stdout=str(d / "packet.md"), stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+
+sweep_owed.dispatch_batch("proj-dsn", [{"spec": "L-spec-432k", "criterion": "AC1", "spec_path": "x",
+                                        "declared_src": "x", "line": 1}], _OrderRunner())
+assert _seen.get("env_at_packet") is True, f"read-only .env not provisioned before packet build: {_seen}"
+print("dsn-before-packet ok")

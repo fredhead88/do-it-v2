@@ -307,6 +307,12 @@ def dispatch_batch(project, batch, runner, *, dry_run=False):
     cwd_dir.mkdir(parents=True, exist_ok=True)
     cwd_dir.chmod(0o700)
     cwd = str(cwd_dir)
+    # Provision the batch's read-only DSN BEFORE the packet is built: packet.p_owed_sweeper
+    # decides "credential available" by checking <cwd>/.env exists, and dispatch's own
+    # provisioning runs only after the packet is already written. In the old order every
+    # sweeper since 2026-09-27 was told "not available (capability=ro-dsn)", recorded the
+    # check unobservable, and _blocked_permanently retired it until it expired (2026-10-11).
+    dispatch.provision_sweep_env(cwd, dispatch.ROOT / "repos" / project)
     skipped = []
     while True:
         sweep_path.write_text(_manifest_text(sweep_id, project, cwd, batch))
