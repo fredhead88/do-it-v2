@@ -1232,6 +1232,19 @@ t18c = (TMP / "content" / f"verify-{S18C}-spec-auditor.sh").read_text()
 assert DSN_LINE not in t18c and t18c == REF_NO_DSN, "AC18c"
 N += 1
 
+# Blind roles: a readonly build-started gives the grader/reviewer a guarded load, never a
+# hard `. ./.env` (their views carry no builder .env; the hard line died before pytest ran).
+GUARDED = "if [ -f ./.env ]; then set -a; . ./.env; set +a; fi"
+S17G = "L-spec-0305"
+_dsn_spec(S17G)
+ev("builder", "build-started", S17G, worktree="/x", dsn_role="readonly")
+ev("builder", "build-done", S17G, status="DONE", card=str(CARD), branch="l-spec-0305",
+   base_sha="abc1234deadbeef", ready_sha="def5678deadbeef", verify_exit=0, tests_added=True)
+build("grader", S17G, worktree=str(REPO))
+t17g = (TMP / "content" / f"verify-{S17G}-grader.sh").read_text()
+assert GUARDED in t17g and DSN_LINE + "\n" not in t17g.replace(GUARDED, ""), t17g.splitlines()[:5]
+N += 1
+
 # ══════════════════════════════════════════════════════════════════════════════
 # L-spec-0195 · spec-shape-checked-before-build (L-charter-0028) — AC2, AC6-AC9
 # ══════════════════════════════════════════════════════════════════════════════

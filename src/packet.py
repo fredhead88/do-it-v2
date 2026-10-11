@@ -584,6 +584,12 @@ def write_verify_script(c):
         block = apply_waivers(block, standing_waivers(c))
     bs = c.last("build-started")
     dsn_line = "set -a; . ./.env; set +a\n" if bs and bs.get("dsn_role") == "readonly" else ""
+    # A blind role's view is built without the builder's worktree .env (a grader seat gets
+    # its own private DSN only when its criteria need a db). A hard `. ./.env` there died at
+    # line 4 before any test ran and raised a false env-file capability hold (L-spec-0725,
+    # 0747, 0827). Blind roles load it only if present (Thinker L-thinker-0004, 2026-10-11).
+    if dsn_line and c.a.role in ("grader", "reviewer"):
+        dsn_line = "if [ -f ./.env ]; then set -a; . ./.env; set +a; fi\n"
     # A blind role (grader/reviewer) gets the BASE line only when its block uses it:
     # a short block is inlined into the packet, and an unused BASE=<base_sha> there
     # tripped the grader's own Blindness check (L-spec-0484, 2026-10-04).
