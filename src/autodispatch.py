@@ -358,6 +358,29 @@ def _real_runner(argv):
     return {"code": r.returncode, "stdout": r.stdout, "stderr": r.stderr}
 
 
+def add_builder_worktree(repo, worktree, branch, base, *, runner=None, reuse_branch=True):
+    """Create a builder checkout, preserving an existing branch on retry."""
+    runner = runner or _real_runner
+    prefix = ["git", "-C", str(repo)]
+    # Remove only this missing checkout's stale registration, never another
+    # checkout or a branch. git refuses removal of a directory still present.
+    if reuse_branch and not pathlib.Path(worktree).exists():
+        listed = runner(prefix + ["worktree", "list", "--porcelain"])
+        registered = [line[9:] for line in listed.get("stdout", "").splitlines()
+                      if line.startswith("worktree ")]
+        if str(pathlib.Path(worktree).resolve()) in registered:
+            removed = runner(prefix + ["worktree", "remove", str(worktree)])
+            if removed.get("code", 1):
+                return removed
+    created = runner(prefix + ["worktree", "add", str(worktree), "-b", branch, base])
+    if created.get("code", 1) == 0 or not reuse_branch:
+        return created
+    exists = runner(prefix + ["show-ref", "--verify", "--quiet", f"refs/heads/{branch}"])
+    if exists.get("code", 1) == 0:
+        return runner(prefix + ["worktree", "add", str(worktree), branch])
+    return created
+
+
 def run(events, specs, now, *, runner=None, dry_run=False):
     """One line per action. `dry_run=True` never calls `runner` and appends
     no `autodispatched`/`autodispatch-failed` event (a `spawn-stale` may
@@ -396,7 +419,8 @@ def run(events, specs, now, *, runner=None, dry_run=False):
                 continue
             r2 = runner(["git", "-C", str(worktree), "merge", "--ff-only", main_branch])
         else:
-            r2 = runner(["git", "-C", str(repo), "worktree", "add", str(worktree), "-b", spec.lower(), main_branch])
+            r2 = add_builder_worktree(repo, worktree, spec.lower(), main_branch,
+                                      runner=runner, reuse_branch=False)
         if r2.get("code", 1) != 0:
             _fail((r2.get("stderr") or r2.get("stdout") or "worktree add failed").strip())
             continue
