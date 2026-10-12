@@ -384,8 +384,19 @@ def _looks_like_fs_path(token):
     `/<<.CRON_SCRIPT.$/{o=NR}` matched the path regex and held a grade. A token is a
     filesystem path when its first component is a real top-level directory or looks
     like one (lowercase name characters); `/BEGIN`, `/#`, `/<<...` do not."""
-    first = token.lstrip("/").split("/", 1)[0]
-    return bool(first) and (os.path.isdir("/" + first) or re.fullmatch(r"[a-z0-9._-]+", first) is not None)
+    parts = token.lstrip("/").split("/")
+    first = parts[0]
+    if not first:
+        return False
+    if os.path.isdir("/" + first):
+        return True
+    # a single nonexistent component (`/rm`, `/BEGIN`) is a regex literal, not a path
+    return len(parts) > 1 and re.fullmatch(r"[a-z0-9._-]+", first) is not None
+
+
+def _clean_path_token(token):
+    """Cut a token at a literal `\\n` (printf text) and drop shell punctuation glued to its end."""
+    return token.split("\\n", 1)[0].rstrip(";,|&")
 
 
 def _prove_view_paths(view):
@@ -394,7 +405,7 @@ def _prove_view_paths(view):
     # The whole view counts, not only view/tree: verify.sh sources the view's own
     # grading.env (AC7/AC11), which lives at the view root.
     inside = str(pathlib.Path(view)) + "/"
-    bad = [t for t in (_trim_unmatched_closer(m) for m in _ABS_PATH_RE.findall(text))
+    bad = [t for t in (_clean_path_token(_trim_unmatched_closer(m)) for m in _ABS_PATH_RE.findall(text))
            if not t.startswith(inside) and t not in _NEUTRAL_DEVICES
            and _looks_like_fs_path(t)
            and not (pathlib.Path(t).is_file() and os.access(t, os.X_OK))]

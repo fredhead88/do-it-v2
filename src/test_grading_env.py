@@ -952,6 +952,8 @@ import tempfile as _tf, pathlib as _pl
 _v = _pl.Path(_tf.mkdtemp())
 (_v / "verify.sh").write_text("awk '/<<.CRON_SCRIPT.$/{o=NR} /BEGIN L-spec-0896/{b=NR} /#/' deploy.sh\n")
 assert grading_env._prove_view_paths(str(_v)) == (True, None), "awk patterns must not count as view-paths"
+(_v / "verify.sh").write_text("awk '/rm -f \\/etc\\/x/' f >/dev/null; printf \"#!/bin/sh\\ncase x in\" > s\n")
+assert grading_env._prove_view_paths(str(_v)) == (True, None), "regex /rm, /dev/null; and /bin/sh\\n must not count"
 (_v / "verify.sh").write_text("cat /home/albert/secret.txt\n")
 assert grading_env._prove_view_paths(str(_v))[0] is False, "a real outside path must still be refused"
 print("view-paths awk-pattern ok")
