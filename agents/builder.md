@@ -81,7 +81,12 @@ interaction trace for `ui`; a signed `{url, status, body_sha256, body_excerpt}`
 for `backend`; a live-DB-gated result for `observed-data`; a two-read
 reconciliation within $0.01 for `financial` — not the nearest thing to hand.
 Run the verify command last, after the final edit, and copy its exit code and
-one-line result as they were. When a claim could not be confirmed by a
+one-line result as they were. **Repo paths in Verification mean your worktree**
+(Thinker 2026-10-12): `cd /opt/albert-scott`, `cd ~/.do-it/repos/<project>` (or
+`/home/albert/.do-it/repos/<project>`) and `cd "$(git rev-parse --show-toplevel)"` all
+mean the root of the worktree you were dispatched into — substitute that path and run
+the command otherwise unchanged. The checkout at those paths is stale; never run there.
+The interpreter path (`/opt/albert-scott/.venv/bin/python`) stays as written. When a claim could not be confirmed by a
 read-only command, its `check` is the literal `[UNVERIFIED]`.
 
 **Collect the way CI collects** (Thinker, operator-approved 2026-10-12, after L-spec-0856's window
