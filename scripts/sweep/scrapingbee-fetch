@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""scrapingbee-fetch OUT_HTML ASIN [--js] — fetch one amazon.com product page through ScrapingBee
+"""scrapingbee-fetch OUT_HTML ASIN [--js] | OUT_HTML --brand-search BRAND PAGE — fetch one amazon.com product page
+(or one page of brand-filtered search results) through ScrapingBee
 into OUT_HTML, without the caller ever seeing the key.
 
 Thinker 2026-10-12 (operator's audit for Dina): workers may not read the project .env.
@@ -22,12 +23,23 @@ def key():
 
 
 def main(argv):
-    if len(argv) < 2 or not re.fullmatch(r"[A-Z0-9]{10}", argv[1].upper()):
+    # search mode: scrapingbee-fetch OUT_HTML --brand-search BRAND PAGE  (Amazon results filtered to one brand)
+    if len(argv) >= 4 and argv[1] == "--brand-search":
+        brand, page = argv[2], argv[3]
+        if not re.fullmatch(r"[A-Za-z0-9 &'.-]{1,40}", brand) or not page.isdigit() or not 1 <= int(page) <= 20:
+            print("refused: brand must be plain text, page 1-20")
+            return 2
+        out, asin, js = pathlib.Path(argv[0]), f"search:{brand}:{page}", True
+        target = ("https://www.amazon.com/s?" + urllib.parse.urlencode(
+            {"k": brand, "rh": f"p_89:{brand}", "page": page}))
+    elif len(argv) < 2 or not re.fullmatch(r"[A-Z0-9]{10}", argv[1].upper()):
         print(__doc__)
         return 2
-    out, asin, js = pathlib.Path(argv[0]), argv[1].upper(), "--js" in argv[2:]
+    else:
+        out, asin, js = pathlib.Path(argv[0]), argv[1].upper(), "--js" in argv[2:]
+        target = f"https://www.amazon.com/dp/{asin}"
     k = key()
-    q = {"api_key": k, "url": f"https://www.amazon.com/dp/{asin}", "premium_proxy": "true",
+    q = {"api_key": k, "url": target, "premium_proxy": "true",
          "country_code": "us", "render_js": "true" if js else "false"}
     url = "https://app.scrapingbee.com/api/v1/?" + urllib.parse.urlencode(q)
     try:
