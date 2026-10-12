@@ -1,5 +1,5 @@
 # grading.toml — L-spec-0481, charter L-charter-0042 R12.7. The ONLY source
-# of `db_env`, `db_setup`, `node_dirs`, `venv` for a project's grading
+# of `db_env`, `admin_env`, `db_setup`, `node_dirs`, `venv` for a project's grading
 # capabilities (Constraints) — spec/verify text contributes capability NAMES
 # only, never an argv element, path, or env value. Read relative to
 # `grading_env.py`'s own path (repo root), not $DOIT_ROOT — a versioned
@@ -12,6 +12,7 @@
 # never a shared, hardcoded path (the checkout differs per `--project`).
 
 [project.albert-scott]
+admin_env = ["AS_LOCAL_PG_ADMIN"]
 db_env = ["SUPABASE_DB_URL", "DATABASE_URL", "PG_PARITY_DB_URL"]
 node_dirs = ["dashboard"]
 # Absolute: the checkout (~/.do-it/repos/albert-scott) is a symlink to

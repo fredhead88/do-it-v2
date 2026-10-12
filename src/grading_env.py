@@ -292,19 +292,35 @@ def _clean_env(extra=None):
     return env
 
 
-def _prove_db(view):
-    """Real private cluster via `scripts/private-pg.sh` -> (ok, reason, dsn)."""
+def _prove_db(view, *, admin=False, avoid_port=None):
+    """Private cluster -> (ok, reason, dsn); admin mode leaves it role-clean."""
     script = DOIT_SRC / "scripts" / "private-pg.sh"
+    prefix = "admin cluster: " if admin else ""
     if not script.is_file():
-        return False, f"missing {script}", None
+        return False, f"{prefix}missing {script}", None
+    argv = ["/bin/bash", str(script), str(pathlib.Path(view) / ("pg-admin" if admin else "pg"))]
+    if admin:
+        argv.append("loopback")
+    env = _clean_env({"PRIVATE_PG_AVOID_PORT": str(avoid_port)} if admin and avoid_port else None)
     try:
-        r = _run(["/bin/bash", str(script), str(pathlib.Path(view) / "pg")],
-                  capture_output=True, text=True, env=_clean_env(), timeout=60)
+        r = _run(argv, capture_output=True, text=True, env=env, timeout=60)
     except Exception as exc:
+        if admin:
+            _stop_cluster(view, "pg-admin")
+            return False, f"{prefix}private-pg.sh raised {type(exc).__name__}", None
         return False, f"private-pg.sh raised: {exc}", None
     if r.returncode != 0:
+        if admin:
+            _stop_cluster(view, "pg-admin")
+            return False, f"{prefix}private-pg.sh exit {r.returncode}", None
         return False, f"private-pg.sh exit {r.returncode}: {(r.stderr or '')[-200:]}", None
-    m = re.search(r"SUPABASE_DB_URL='([^']*)'", r.stdout or "")
+    if admin:
+        m = re.search(r"ADMIN_DSN='(postgresql://albert:[0-9a-f]{32}@127\.0\.0\.1:\d+/postgres)'", r.stdout or "")
+        if not m:
+            _stop_cluster(view, "pg-admin")
+            return False, "admin cluster: no valid ADMIN_DSN in private-pg.sh output", None
+    else:
+        m = re.search(r"SUPABASE_DB_URL='([^']*)'", r.stdout or "")
     return (True, None, m.group(1)) if m else (False, "no SUPABASE_DB_URL in private-pg.sh output", None)
 
 
@@ -490,6 +506,8 @@ def _write_state(view, **kv):
             state = {}
     state.update(kv)
     path.parent.mkdir(parents=True, exist_ok=True)
+    path.touch(mode=0o600, exist_ok=True)
+    path.chmod(0o600)
     path.write_text(json.dumps(state))
 
 
@@ -506,10 +524,16 @@ def preflight(role, subject, view, project, *, repo, mcp_config=None, owed=froze
     reasons = {}
 
     dsn = None
+    admin_dsn = None
     if "db" in caps:
         ok, reason, dsn = _prove_db(view)
         if not ok:
             reasons["db"] = reason
+        elif row.get("admin_env"):
+            first_port = (urllib.parse.parse_qs(urllib.parse.urlparse(dsn).query).get("port") or [None])[0]
+            ok, reason, admin_dsn = _prove_db(view, admin=True, avoid_port=first_port)
+            if not ok:
+                reasons["db"] = reason
     if "env-file" in caps:
         _write_env_file(tree, row, None if "db" in reasons else dsn)
     # A project with no db_setup row in grading.toml has no schema to migrate,
@@ -564,7 +588,9 @@ def preflight(role, subject, view, project, *, repo, mcp_config=None, owed=froze
 
     if role != "reviewer":  # Constraints: a reviewer's cwd is never written to, even this state file
         _write_state(view, venv=venv_path,
-                     db_env_names=(row.get("db_env") or []) if dsn else [], dsn=dsn or "")
+                     db_env_names=(row.get("db_env") or []) if dsn else [], dsn=dsn or "",
+                     admin_env_names=(row.get("admin_env") or []) if admin_dsn else [],
+                     admin_dsn=admin_dsn or "")
     return [(c, reasons[c]) for c in CAPABILITIES if c in reasons]
 
 
@@ -605,6 +631,9 @@ def pane_env(view):
         env["PGPORT"] = (qs.get("port") or [""])[0]
         env["PGUSER"] = parsed.username or "albert"
         env["PGDATABASE"] = parsed.path.lstrip("/") or "scratch"
+    if state.get("admin_dsn"):
+        for name in state.get("admin_env_names") or []:
+            env[name] = state["admin_dsn"]
     return env
 
 
@@ -618,19 +647,26 @@ def write_grading_env(view):
     view = pathlib.Path(view)
     env = pane_env(view)
     path = view / "grading.env"
+    path.touch(mode=0o600, exist_ok=True)
+    path.chmod(0o600)
     path.write_text("".join(f"export {k}={shlex.quote(str(v))}\n" for k, v in env.items() if v != ""))
     path.chmod(0o600)
     return path
 
 
-def teardown(view):
-    """Idempotent, never raises: stops the cluster under `view/pg` if started."""
+def _stop_cluster(view, name):
+    """Stop one view-owned cluster without preventing another one's cleanup."""
     try:
-        data = pathlib.Path(view) / "pg" / "data"
-        if not data.is_dir():
-            return None
-        _run([str(_PG_BIN / "pg_ctl"), "-D", str(data), "-m", "fast", "stop"],
-             capture_output=True, text=True, timeout=30)
+        data = pathlib.Path(view) / name / "data"
+        if data.is_dir():
+            _run([str(_PG_BIN / "pg_ctl"), "-D", str(data), "-m", "fast", "stop"],
+                 capture_output=True, text=True, env=_clean_env(), timeout=30)
     except Exception:
         pass
+
+
+def teardown(view):
+    """Idempotent, never raises: stop both view-owned private clusters."""
+    for name in ("pg", "pg-admin"):
+        _stop_cluster(view, name)
     return None
