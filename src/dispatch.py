@@ -226,6 +226,11 @@ def wave_blocker(all_ev, charter, subject, wave):
     blocks, SD6)."""
     if wave is None:
         return None
+    # Thinker 2026-10-12 (L-spec-0880): wave order sequences FIRST builds. A rework of
+    # a spec that already built (build-done or shipped on record) is fixing existing
+    # work, and holding it behind an unsettled earlier-wave sibling only stalls the lane.
+    if any(e.get("subject") == subject and e.get("type") in ("build-done", "shipped") for e in all_ev):
+        return None
     import fold
     by_subject = {}
     for e in all_ev:
