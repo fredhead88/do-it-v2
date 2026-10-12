@@ -394,6 +394,59 @@ def codex_quota_refusal(quota):
     return None
 
 
+_STRICT_DROP = ("if", "then", "else", "not", "allOf", "dependentRequired", "dependentSchemas",
+                "dependencies", "patternProperties", "default", "$comment", "examples",
+                "unevaluatedProperties", "propertyNames", "contains", "minContains", "maxContains")
+
+
+def strict_schema(s):
+    """OpenAI strict-mode copy of a contract schema (Thinker 2026-10-12): drop
+    conditionals and other keywords strict mode refuses; every object closes
+    (additionalProperties false) and lists every property as required, an
+    originally-optional one becoming nullable. The ORIGINAL schema still
+    validates the card afterwards, after `unnull` strips those nulls."""
+    if isinstance(s, list):
+        return [strict_schema(x) for x in s]
+    if not isinstance(s, dict):
+        return s
+    o = {k: ({n: strict_schema(f) for n, f in v.items()} if k in ("properties", "$defs", "definitions")
+             and isinstance(v, dict) else strict_schema(v))
+         for k, v in s.items() if k not in _STRICT_DROP}
+    if "anyOf" in o or "oneOf" in o:
+        o["anyOf"] = o.pop("anyOf", []) + o.pop("oneOf", [])
+    props = o.get("properties")
+    if isinstance(props, dict) or o.get("type") == "object":
+        props = props or {}
+        req = set(s.get("required") or [])
+        for k, v in props.items():
+            if k not in req and isinstance(v, dict):
+                if "anyOf" in v:
+                    v["anyOf"] = v["anyOf"] + [{"type": "null"}]
+                elif isinstance(v.get("type"), str):
+                    v["type"] = [v["type"], "null"]
+                elif isinstance(v.get("type"), list) and "null" not in v["type"]:
+                    v["type"] = v["type"] + ["null"]
+                if "enum" in v and None not in v["enum"]:
+                    v["enum"] = v["enum"] + [None]
+        o["properties"] = props
+        o["required"] = list(props)
+        o["additionalProperties"] = False
+    return o
+
+
+def unnull(obj, schema):
+    """Drop the nulls `strict_schema` forced onto originally-optional keys."""
+    if not isinstance(schema, dict):
+        return obj
+    if isinstance(obj, dict):
+        req = set(schema.get("required") or [])
+        props = schema.get("properties") or {}
+        return {k: unnull(v, props.get(k, {})) for k, v in obj.items() if not (v is None and k not in req)}
+    if isinstance(obj, list):
+        return [unnull(x, schema.get("items") or {}) for x in obj]
+    return obj
+
+
 def run_codex(spawn, role, model, schema_path, packet, cwd, timeout, path=None, effort=None):
     """The codex backend (pilot S1). `codex exec` reads the packet on stdin, enforces
     the contract's schema itself (`--output-schema`), writes the final object to
@@ -424,8 +477,11 @@ def run_codex(spawn, role, model, schema_path, packet, cwd, timeout, path=None, 
     (SEAT / f"{spawn}.packet.md").write_text(packet_text)
     out, log = SEAT / f"{spawn}.output.json", SEAT / f"{spawn}.codex.jsonl"
     sandbox = "workspace-write" if role in CODEX_WRITES else "read-only"
+    original = json.loads(pathlib.Path(schema_path).read_text())
+    strict_path = SEAT / f"{spawn}.strict-schema.json"
+    strict_path.write_text(json.dumps(strict_schema(original), indent=1))
     cmd = ["codex", "exec", "-C", str(cwd), "-m", model, "--sandbox", sandbox, "--skip-git-repo-check",
-           "--json", "--output-schema", str(schema_path), "-o", str(out), "--add-dir", str(CONTENT)]
+           "--json", "--output-schema", str(strict_path), "-o", str(out), "--add-dir", str(CONTENT)]
     if sandbox == "workspace-write":
         # A builder's cwd is a git worktree whose objects/refs live in the main repo's
         # common dir, outside the sandbox root: without it every commit fails (Thinker
@@ -457,7 +513,7 @@ def run_codex(spawn, role, model, schema_path, packet, cwd, timeout, path=None, 
         elif t in ("error", "turn.failed"):
             errors.append(str(e.get("message") or e)[:200])
     try:
-        structured = json.loads(out.read_text()) if out.is_file() else None
+        structured = unnull(json.loads(out.read_text()), original) if out.is_file() else None
     except ValueError:
         structured = None
     bad = r.returncode != 0 or bool(errors)
