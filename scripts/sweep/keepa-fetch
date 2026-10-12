@@ -1,0 +1,80 @@
+#!/usr/bin/env python3
+"""keepa-fetch DOMAIN OUT_JSON ASIN[,ASIN...] [--param k=v ...] — fetch Keepa product
+records for up to 100 ASINs per call into OUT_JSON, without the caller ever seeing the key.
+
+Thinker 2026-10-12 (L-charter-0048 R2, the operator's pilot): Codex and other workers may not
+read the project .env. KEEPA_API_KEY is read line by line from /opt/albert-scott/.env (never
+sourced), sent only to api.keepa.com, and redacted from everything printed. The response is
+written verbatim to OUT_JSON; a one-line summary (asins, tokensLeft, tokensConsumed) is printed.
+
+DOMAIN: us|ca|mx|uk|de. Allowed extra params (allowlist): stats, rating, buybox, offers,
+history, days, aplus, videos, update. Exit codes: 2 refused | 3 HTTP/network error.
+"""
+import gzip
+import json
+import pathlib
+import re
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+
+ENV = pathlib.Path("/opt/albert-scott/.env")
+DOMAINS = {"us": 1, "uk": 2, "de": 3, "ca": 6, "mx": 11}
+ALLOWED = {"stats", "rating", "buybox", "offers", "history", "days", "aplus", "videos", "update"}
+ASIN_RE = re.compile(r"^[A-Z0-9]{10}$")
+
+
+def key():
+    for line in ENV.read_text().splitlines():
+        k, sep, v = line.partition("=")
+        if sep and k == "KEEPA_API_KEY":
+            return v.strip().strip("\"'")
+    sys.exit("refused: no KEEPA_API_KEY line")  # exit 1 text, no value printed
+
+
+def main(argv):
+    if len(argv) < 3 or argv[0] not in DOMAINS:
+        print(__doc__)
+        return 2
+    out = pathlib.Path(argv[1])
+    asins = [a.strip().upper() for a in argv[2].split(",") if a.strip()]
+    if not asins or len(asins) > 100 or not all(ASIN_RE.match(a) for a in asins):
+        print("refused: 1-100 valid ASINs, comma-separated")
+        return 2
+    params = {"domain": DOMAINS[argv[0]], "asin": ",".join(asins), "stats": "90", "rating": "1"}
+    rest = argv[3:]
+    while rest:
+        if rest[0] != "--param" or len(rest) < 2:
+            print("refused: extra args must be --param k=v")
+            return 2
+        k, _, v = rest[1].partition("=")
+        if k not in ALLOWED or not re.fullmatch(r"[0-9A-Za-z_,-]{1,20}", v):
+            print(f"refused: param {k!r} not allowed")
+            return 2
+        params[k] = v
+        rest = rest[2:]
+    k = key()
+    url = "https://api.keepa.com/product?" + urllib.parse.urlencode({"key": k, **params})
+    try:
+        with urllib.request.urlopen(url, timeout=120) as r:
+            body = r.read()
+        if body[:2] == b"\x1f\x8b":
+            body = gzip.decompress(body)
+    except urllib.error.HTTPError as e:
+        print(f"http error {e.code}: {e.read()[:300].decode('utf8', 'replace').replace(k, '[redacted]')}")
+        return 3
+    except Exception as e:  # network
+        print(f"error: {str(e).replace(k, '[redacted]')}")
+        return 3
+    text = body.decode("utf8", "replace").replace(k, "[redacted]")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(text)
+    d = json.loads(text)
+    print(json.dumps({"asins": len(d.get("products") or []), "tokensLeft": d.get("tokensLeft"),
+                      "tokensConsumed": d.get("tokensConsumed"), "out": str(out)}))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
