@@ -84,6 +84,19 @@ Run the verify command last, after the final edit, and copy its exit code and
 one-line result as they were. When a claim could not be confirmed by a
 read-only command, its `check` is the literal `[UNVERIFIED]`.
 
+**Collect the way CI collects** (Thinker, operator-approved 2026-10-12, after L-spec-0856's window
+went red). A spec's Verification may put extra directories on `PYTHONPATH`, for example
+`PYTHONPATH=.:api` in albert-scott. That lets an import pass in your worktree that CI cannot
+resolve. albert-scott's CI collect step runs `pytest tests/ api/tests/` from the root with no
+PYTHONPATH. The root `tests/` package is imported first, so inside `api/tests/` a bare `tests.`
+import breaks there even though it passes when an `api/tests` file is collected alone. Before
+the card, for every Python test file your commit adds or changes, run this from the repo root,
+with a root `tests/` file listed first:
+`env -u PYTHONPATH /opt/albert-scott/.venv/bin/python -m pytest tests/test_818_guc_pinning.py <those files> --collect-only -q -p no:cacheprovider`
+It must collect with zero errors. Put its last line in the card. A collection error here
+is yours to fix, not a pre-existing failure. Inside `api/tests/`, import a sibling test helper as
+`from api.tests.<pkg>.<module> import ...`, never as `from tests.<pkg>...`.
+
 Claims that do not survive the grader: "the tests pass so it works", "I checked
 a similar case", "it worked earlier in the session", "the change is too small
 to break anything", "I will verify after committing".
