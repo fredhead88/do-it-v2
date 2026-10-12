@@ -1,27 +1,5 @@
 #!/usr/bin/env python3
-"""dispatch — spawn one contract on the D116 line, check after the fact, append events.
-
-  dispatch.py <role> <subject> [--packet FILE|-] [--path P] [--cwd DIR] [--charter ID]
-              [--project NAME] [--mcp-config FILE] [--timeout MIN] [--max-usd N]
-
-The BACKEND — claude-p, seat, or codex — and the MODEL are the ledger root's ruling,
-`$DOIT_ROOT/models.toml` (models.py). `--seat` / DOIT_SEAT may only agree with it.
-Every terminal event stamps `backend`, `model_requested` (the map) beside
-`model_used` (what came back), `model_match`, and `first_on_model` — the D120
-trust run of a (contract, model) pair is then a ledger fact, not a memory.
-Also stamped: the four-way token split (`input_tokens`, `output_tokens`,
-`cache_read`, `cache_creation`) and, on a seat spawn whose stamp.sh resolved
-it, `subagent_tokens` — the route's OLDER blended figure, kept beside the
-split rather than replaced by it (src/usage.py; retro step 9).
-
-Every check here converts a silent failure into a loud one, and each was observed
-before it was written (D116, D120): a tools: line without StructuredOutput comes
-back is_error:false with structured_output:null; a denied Write came back as
-`answered: yes` with no file on disk; a refused spawn is is_error:true with cost
-above zero; an unreachable seat is api_error with zero tokens. The contract
-appends nothing — every event below is derived from the Output object into this
-spawn's own file, and the actor is that filename (D90).
-"""
+"""dispatch — spawn one contract on the D116 line, check after the fact, append events. dispatch.py <role> <subject> [--packet FILE|-] [--path P] [--cwd DIR] [--charter ID] [--project NAME] [--mcp-config FILE] [--timeout MIN] [--max-usd N] The BACKEND — claude-p, seat, or codex — and the MODEL are the ledger root's ruling, `$DOIT_ROOT/models.toml` (models.py). `--seat` / DOIT_SEAT may only agree with it. Every terminal event stamps `backend`, `model_requested` (the map) beside `model_used` (what came back), `model_match`, and `first_on_model` — the D120 trust run of a (contract, model) pair is then a ledger fact, not a memory. Also stamped: the four-way token split (`input_tokens`, `output_tokens`, `cache_read`, `cache_creation`) and, on a seat spawn whose stamp.sh resolved it, `subagent_tokens` — the route's OLDER blended figure, kept beside the split rather than replaced by it (src/usage.py; retro step 9). Every check here converts a silent failure into a loud one, and each was observed before it was written (D116, D120): a tools: line without StructuredOutput comes back is_error:false with structured_output:null; a denied Write came back as `answered: yes` with no file on disk; a refused spawn is is_error:true with cost above zero; an unreachable seat is api_error with zero tokens. The contract appends nothing — every event below is derived from the Output object into this spawn's own file, and the actor is that filename (D90)."""
 import argparse, atexit, hashlib, json, os, pathlib, re, shutil, socket, subprocess, sys
 from datetime import datetime, timedelta, timezone
 
@@ -39,9 +17,7 @@ ROLES = {"spec-writer": ("file", 30, 5), "spec-auditor": (None, 15, 3), "builder
          "grader": (None, 30, 3), "reviewer": (None, 30, 5), "plan-auditor": (None, 15, 3),
          "research": ("file", 5, 1), "reuse-scout": ("file", 15, 3),
          "charter-reviewer": (None, 30, 5), "probe": ("dir", 120, 10),
-         # L-charter-0038 R1 / L-spec-0387 (SD5): a read-only sweep over up to 8 due
-         # owed checks in one batch — $5 matches reviewer/charter-reviewer's
-         # magnitude for a multi-criterion read (Assumptions §7).
+         # L-charter-0038 R1 / L-spec-0387 (SD5): a read-only sweep over up to 8 due owed checks in one batch — $5 matches reviewer/charter-reviewer's magnitude for a multi-criterion read (Assumptions §7).
          "owed-sweeper": (None, 45, 5)}
 # The builder's sandbox (§4.6·3). A pattern deny is the only per-command control
 # this CLI has (D119 row U); "commit to main" is the branch layout's job, not a pattern's.
@@ -61,12 +37,7 @@ def frontmatter(role):
 
 
 def subject_ids(prefix):
-    """The ids of that kind the LEDGER owns. A spec id can exist as a subject with
-    no content file — three did, from a charter whose specs were never written out —
-    and §2.8's max+1 is over the ids that exist, not over the files that happen to.
-    Allocating over files alone re-issues such an id, and the second `spec-written`
-    lands on a subject the fold has already resolved to terminal: it never renders,
-    the Executor never picks it up, and an append-only ledger cannot take it back."""
+    """The ids of that kind the LEDGER owns. A spec id can exist as a subject with no content file — three did, from a charter whose specs were never written out — and §2.8's max+1 is over the ids that exist, not over the files that happen to. Allocating over files alone re-issues such an id, and the second `spec-written` lands on a subject the fold has already resolved to terminal: it never renders, the Executor never picks it up, and an append-only ledger cannot take it back."""
     out = []
     for f in EVENTS.glob("*.jsonl"):
         for line in f.read_text().splitlines():
@@ -78,12 +49,7 @@ def subject_ids(prefix):
 
 def alloc(d, prefix, suffix):
     """max+1 of a kind (§2.8), claimed with O_EXCL so two concurrent spawns never share a file."""
-    # Ids >= 9000 are the test-fixture range (L-spec-9001, L-charter-9101 ...). A fixture event
-    # that leaked into the live ledger on 09-27 made every later alloc start at 9102; the
-    # fixture range never sets the next real number. Thinker 2026-09-28.
-    # Floor lowered 9000 -> 8000 (operator ruling 2026-09-30): a leaked fixture
-    # L-spec-8026 pushed real specs to 8027-8034. Those keep their ids (above the
-    # floor, so never re-allocated); new ids resume the real sequence.
+    # Ids >= 9000 are the test-fixture range (L-spec-9001, L-charter-9101 ...). A fixture event that leaked into the live ledger on 09-27 made every later alloc start at 9102; the fixture range never sets the next real number. Thinker 2026-09-28. Floor lowered 9000 -> 8000 (operator ruling 2026-09-30): a leaked fixture L-spec-8026 pushed real specs to 8027-8034. Those keep their ids (above the floor, so never re-allocated); new ids resume the real sequence.
     n = max([i for i in [int(p.stem.rsplit("-", 1)[1]) for p in d.glob(f"{prefix}[0-9]*{suffix}")]
              + subject_ids(prefix) if i < 8000] or [0])
     while True:
@@ -97,11 +63,7 @@ def alloc(d, prefix, suffix):
 
 
 def emit(dst, base, type_, /, **kv):
-    """Never trust the write — re-read (§9.2 rule 4). Never an actor field (D90).
-    R3/L-spec-0192: gated by `fold.required_reason` — the required-fields door
-    ONLY (an actor/type mismatch is never refused here, only recorded-and-
-    ignored at fold time, ADR-0028-3). Returns `None` once the line has landed;
-    else the refusal, and nothing is written."""
+    """Never trust the write — re-read (§9.2 rule 4). Never an actor field (D90). R3/L-spec-0192: gated by `fold.required_reason` — the required-fields door ONLY (an actor/type mismatch is never refused here, only recorded-and- ignored at fold time, ADR-0028-3). Returns `None` once the line has landed; else the refusal, and nothing is written."""
     e = {**kv, **base, "v": 1, "ts": now(), "type": type_}
     e.pop("actor", None)
     import fold                                  # lazy: see fold.py's own alloc() note
@@ -116,12 +78,7 @@ def emit(dst, base, type_, /, **kv):
 
 
 def open_spec_writer_spawn(all_ev, subject):
-    """R3/L-spec-0192: whether SUBJECT carries a spec-writer `spawn-started` with
-    no matching terminal event — `tick.in_flight`'s own terminal tuple
-    (spawn-done/spawn-failed/spawn-stale) and its own aging rule (busy within
-    twice the role's cap, dispatchable once older, whether or not the start
-    named a spawn id), scoped here to one subject and one role so `dispatch.
-    main()` and the tick can never disagree about what counts as open."""
+    """R3/L-spec-0192: whether SUBJECT carries a spec-writer `spawn-started` with no matching terminal event — `tick.in_flight`'s own terminal tuple (spawn-done/spawn-failed/spawn-stale) and its own aging rule (busy within twice the role's cap, dispatchable once older, whether or not the start named a spawn id), scoped here to one subject and one role so `dispatch. main()` and the tick can never disagree about what counts as open."""
     ended = {e.get("spawn") for e in all_ev if e["type"] in ("spawn-done", "spawn-failed", "spawn-stale")}
     cap = ROLES["spec-writer"][1]
     for e in all_ev:
@@ -138,26 +95,13 @@ def open_spec_writer_spawn(all_ev, subject):
     return False
 
 
-# L-spec-0276/R3 Target 4: the settled states `wave_blocker` treats as "done with
-# this wave, safe to build past" — `tick.SPEC_DONE`'s own five, plus `killed` and
-# `void` (a killed/void sibling never blocks a later wave; `dispatch.py` must not
-# import `tick`, since `tick.py` already imports `dispatch` — Constraints), plus
-# bare `shipped` itself: the Goal's own wording is "an UNMERGED ... wave", and
-# `shipped` is the literal, Executor-only ledger event that records a merge
-# (AC10) — a minimal fixture that never reaches a verdict/review carries no
-# other SPEC_DONE label at all, and the wave-order gate is about merge order,
-# not acceptance order.
+# L-spec-0276/R3 Target 4: the settled states `wave_blocker` treats as "done with this wave, safe to build past" — `tick.SPEC_DONE`'s own five, plus `killed` and `void` (a killed/void sibling never blocks a later wave; `dispatch.py` must not import `tick`, since `tick.py` already imports `dispatch` — Constraints), plus bare `shipped` itself: the Goal's own wording is "an UNMERGED ... wave", and `shipped` is the literal, Executor-only ledger event that records a merge (AC10) — a minimal fixture that never reaches a verdict/review carries no other SPEC_DONE label at all, and the wave-order gate is about merge order, not acceptance order.
 SETTLED_STATES = ("accepted", "shipped", "shipped-owed-evidence", "shipped-owed-due", "shipped-owed-expired", "dropped", "closed-unbuilt",
                   "closed-shipped", "killed", "void")
 
 
 def resolve_charter(all_ev, subject, charter_arg):
-    """L-spec-0276/R3 Target 4: `charter_arg` (`--charter`, bare id or path)
-    normalises via `pathlib.Path(x).stem` (a no-op on a bare id — Assumptions);
-    absent, the NEWEST (by `ts`) of `subject`'s own `spec-written`/`spec-carried`
-    events carrying a non-null `charter` field, normalised the same way. `None`
-    when neither source resolves one — most live `build-started`/`spec-written`
-    events carry no `charter` at all, and this must not crash on that."""
+    """L-spec-0276/R3 Target 4: `charter_arg` (`--charter`, bare id or path) normalises via `pathlib.Path(x).stem` (a no-op on a bare id — Assumptions); absent, the NEWEST (by `ts`) of `subject`'s own `spec-written`/`spec-carried` events carrying a non-null `charter` field, normalised the same way. `None` when neither source resolves one — most live `build-started`/`spec-written` events carry no `charter` at all, and this must not crash on that."""
     if charter_arg:
         return pathlib.Path(charter_arg).stem
     cand = [e for e in all_ev if e.get("subject") == subject
@@ -169,17 +113,12 @@ def resolve_charter(all_ev, subject, charter_arg):
 
 
 def _plan_units(charter):
-    """Yields `(footprint_set, wave)` per `## <name>` unit in
-    `content/plan-<charter>.md` that carries both a `Footprint:` list and a
-    `Wave: N` line — a non-unit section (e.g. `## Research findings`) has
-    neither and is silently skipped, never mismatched to a unit."""
+    """Yields `(footprint_set, wave)` per `## <name>` unit in `content/plan-<charter>.md` that carries both a `Footprint:` list and a `Wave: N` line — a non-unit section (e.g. `## Research findings`) has neither and is silently skipped, never mismatched to a unit."""
     plan_path = CONTENT / f"plan-{charter}.md"
     if not plan_path.is_file():
         return
     lines = plan_path.read_text().splitlines()
-    # Split on top-level `## ` headings by hand (never DOTALL over the whole
-    # file — a greedy `.*` there swallows every later heading too, since `$`
-    # under re.S still permits `.` to cross every line boundary in between).
+    # Split on top-level `## ` headings by hand (never DOTALL over the whole file — a greedy `.*` there swallows every later heading too, since `$` under re.S still permits `.` to cross every line boundary in between).
     starts = [i for i, l in enumerate(lines) if l.startswith("## ")]
     for n, i in enumerate(starts):
         end = starts[n + 1] if n + 1 < len(starts) else len(lines)
@@ -199,11 +138,7 @@ def _plan_units(charter):
 
 
 def spec_wave(charter, footprint):
-    """L-spec-0276/R3 Target 4 (Assumptions): the spec's own footprint (a set of
-    path strings) against each unit's `Footprint:` list — exact set equality
-    wins outright; failing that, the highest-Jaccard-overlap unit at or above
-    0.5; below that bar, or with no plan file at all, `None` ("undetermined" —
-    "the unit boundary is not this check's call", SD6)."""
+    """L-spec-0276/R3 Target 4 (Assumptions): the spec's own footprint (a set of path strings) against each unit's `Footprint:` list — exact set equality wins outright; failing that, the highest-Jaccard-overlap unit at or above 0.5; below that bar, or with no plan file at all, `None` ("undetermined" — "the unit boundary is not this check's call", SD6)."""
     fp_set = set(footprint or [])
     best_wave, best_score = None, 0.0
     for unit_fp, wave in _plan_units(charter):
@@ -219,16 +154,10 @@ def spec_wave(charter, footprint):
 
 
 def wave_blocker(all_ev, charter, subject, wave):
-    """L-spec-0276/R3 Target 4(a): the id of a sibling spec on the SAME charter
-    whose own unit is an EARLIER wave and is not yet SETTLED (Assumptions) — the
-    reason a `role=builder` dispatch on `subject` must refuse; `None` when no
-    such sibling exists (or `wave` is itself `None` — "undetermined" never
-    blocks, SD6)."""
+    """L-spec-0276/R3 Target 4(a): the id of a sibling spec on the SAME charter whose own unit is an EARLIER wave and is not yet SETTLED (Assumptions) — the reason a `role=builder` dispatch on `subject` must refuse; `None` when no such sibling exists (or `wave` is itself `None` — "undetermined" never blocks, SD6)."""
     if wave is None:
         return None
-    # Thinker 2026-10-12 (L-spec-0880): wave order sequences FIRST builds. A rework of
-    # a spec that already built (build-done or shipped on record) is fixing existing
-    # work, and holding it behind an unsettled earlier-wave sibling only stalls the lane.
+    # Thinker 2026-10-12 (L-spec-0880): wave order sequences FIRST builds. A rework of a spec that already built (build-done or shipped on record) is fixing existing work, and holding it behind an unsettled earlier-wave sibling only stalls the lane.
     if any(e.get("subject") == subject and e.get("type") in ("build-done", "shipped") for e in all_ev):
         return None
     import fold
@@ -255,19 +184,11 @@ def wave_blocker(all_ev, charter, subject, wave):
     return None
 
 
-# ★ `probe` runs with its cwd OUTSIDE every repo on purpose (§4.6·10, §9.5): its
-# run directory is under the ledger root so there is no accidental path into the
-# product. "Not a repository" is a definite answer, not an undetermined one, and
-# reading it as undetermined refused the probe before it ever spent.
+# ★ `probe` runs with its cwd OUTSIDE every repo on purpose (§4.6·10, §9.5): its run directory is under the ledger root so there is no accidental path into the product. "Not a repository" is a definite answer, not an undetermined one, and reading it as undetermined refused the probe before it ever spent.
 NOT_A_REPO = "<not a git repository>"
 
 
-# Paths other processes write to while a spawn runs — a cron's health file, a
-# session hook's handoff — declared by the operator, never inferred. The
-# baseline's finding 2 (a $2.19 spawn voided by the driver's own handoff file)
-# fired again on the Albert Scott pilot: a cron rewrote docs/sessions/process-
-# health.md under a 15-minute audit, and the whole spawn was void. The check is
-# still whole-tree by default; this only lets a root declare what it knows moves.
+# Paths other processes write to while a spawn runs — a cron's health file, a session hook's handoff — declared by the operator, never inferred. The baseline's finding 2 (a $2.19 spawn voided by the driver's own handoff file) fired again on the Albert Scott pilot: a cron rewrote docs/sessions/process- health.md under a 15-minute audit, and the whole spawn was void. The check is still whole-tree by default; this only lets a root declare what it knows moves.
 VOLATILE = [g for g in os.environ.get("DOIT_REPO_VOLATILE", "").split() if g]
 
 
@@ -286,27 +207,7 @@ def porcelain(cwd):
 
 
 def repo_moved(before, after, role):
-    """What moved in the repository across a spawn — an observation, never a verdict.
-    Another charter's builder merging into the same shared checkout is not this
-    spawn's misbehaviour, and a read-only audit that ran correctly beside it is
-    recorded as what it was.
-
-    `lines` is the sorted symmetric difference of the two snapshots' whole
-    non-empty porcelain lines, status columns included: diffing lines and not path
-    names is what makes a status-only change visible, since a file staged mid-spawn
-    moves " M a.txt" -> "M  a.txt" and its *path* diff is empty. `paths` is the
-    sorted de-duplicated set those lines name (column 4 onward, quote-stripped —
-    the extraction porcelain()'s own VOLATILE filter uses), a rename split on
-    " -> " so `R  a.txt -> b.txt` contributes both names and never the joined
-    string. `by_this_spawn` is the role fact `role == "builder"`, deliberately not
-    a claim of authorship: outside the builder, write access inside cwd is
-    forbidden by contract prose on seat/claude-p and mechanically *granted* on
-    codex (CODEX_WRITES + --sandbox workspace-write), so the field says which role
-    was dispatched and the event records the movement either way.
-
-    Called only with two real, determinate porcelain strings: the undetermined and
-    NOT_A_REPO-flip cases are decided by main() before this is reached, so it never
-    reads a sentinel as a diff."""
+    """What moved in the repository across a spawn — an observation, never a verdict. Another charter's builder merging into the same shared checkout is not this spawn's misbehaviour, and a read-only audit that ran correctly beside it is recorded as what it was. `lines` is the sorted symmetric difference of the two snapshots' whole non-empty porcelain lines, status columns included: diffing lines and not path names is what makes a status-only change visible, since a file staged mid-spawn moves " M a.txt" -> "M a.txt" and its *path* diff is empty. `paths` is the sorted de-duplicated set those lines name (column 4 onward, quote-stripped — the extraction porcelain()'s own VOLATILE filter uses), a rename split on " -> " so `R a.txt -> b.txt` contributes both names and never the joined string. `by_this_spawn` is the role fact `role == "builder"`, deliberately not a claim of authorship: outside the builder, write access inside cwd is forbidden by contract prose on seat/claude-p and mechanically *granted* on codex (CODEX_WRITES + --sandbox workspace-write), so the field says which role was dispatched and the event records the movement either way. Called only with two real, determinate porcelain strings: the undetermined and NOT_A_REPO-flip cases are decided by main() before this is reached, so it never reads a sentinel as a diff."""
     b, a = ({l for l in (s or "").splitlines() if l.strip()} for s in (before, after))
     lines = sorted(b ^ a)
     paths = set()
@@ -324,19 +225,13 @@ def run_claude(cmd, packet, cwd, timeout):
                           env=env, timeout=timeout)
 
 
-# Roles whose contract writes a file: the Codex sandbox lets them write in the
-# spawn's cwd and under content/; every judging role runs read-only. The
-# builder's BUILDER_DENY patterns have no Codex spelling — the sandbox and the
-# merge gate are the enforcement on that backend. The post-spawn porcelain
-# comparison is not one of them: it records movement on spawn-done (repo_moved)
-# instead of voiding the spawn, because concurrent work is not misbehaviour.
+# Roles whose contract writes a file: the Codex sandbox lets them write in the spawn's cwd and under content/; every judging role runs read-only. The builder's BUILDER_DENY patterns have no Codex spelling — the sandbox and the merge gate are the enforcement on that backend. The post-spawn porcelain comparison is not one of them: it records movement on spawn-done (repo_moved) instead of voiding the spawn, because concurrent work is not misbehaviour.
 CODEX_FULL_ACCESS = ("builder",)
 CODEX_WRITES = ("builder", "spec-writer", "research", "reuse-scout", "probe", "reviewer", "charter-reviewer")
 
 
 def run_codex_exec(cmd, packet, cwd, timeout):
-    """The one subprocess the codex backend runs. Neither vendor's metered key is
-    in the environment: the spawn draws the ChatGPT plan or it fails loudly."""
+    """The one subprocess the codex backend runs. Neither vendor's metered key is in the environment: the spawn draws the ChatGPT plan or it fails loudly."""
     env = {k: v for k, v in os.environ.items() if k not in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY")}
     return subprocess.run(cmd, input=packet, capture_output=True, text=True, cwd=cwd, env=env, timeout=timeout)
 
@@ -351,9 +246,7 @@ standing rulebook; obey it exactly. Codex-specific differences from the contract
 
 
 def codex_quota(now=None):
-    """The ChatGPT plan's weekly window as the newest Codex rollout last reported it:
-    {used_percent, resets_at, credits} or None when no rollout carries rate_limits.
-    A window whose resets_at has passed reads as 0% used (it has rolled over)."""
+    """The ChatGPT plan's weekly window as the newest Codex rollout last reported it: {used_percent, resets_at, credits} or None when no rollout carries rate_limits. A window whose resets_at has passed reads as 0% used (it has rolled over)."""
     import glob
     import time
     files = sorted(glob.glob(os.path.expanduser("~/.codex/sessions/*/*/*/rollout-*.jsonl")),
@@ -391,9 +284,7 @@ def codex_quota(now=None):
 
 
 def codex_quota_refusal(quota):
-    """Why the codex backend must not spend, or None. The cap (default 85% of the weekly
-    window, env DOIT_CODEX_QUOTA_CAP) keeps the plan's overflow credits unspent: past it
-    the spawn refuses BEFORE running, and the contract's seat fallback takes it."""
+    """Why the codex backend must not spend, or None. The cap (default 85% of the weekly window, env DOIT_CODEX_QUOTA_CAP) keeps the plan's overflow credits unspent: past it the spawn refuses BEFORE running, and the contract's seat fallback takes it."""
     cap = float(os.environ.get("DOIT_CODEX_QUOTA_CAP", "85"))
     if quota and quota.get("used_percent") is not None and float(quota["used_percent"]) >= cap:
         return f"codex quota precheck: weekly window {quota['used_percent']}% used >= cap {cap}%"
@@ -406,11 +297,7 @@ _STRICT_DROP = ("if", "then", "else", "not", "allOf", "dependentRequired", "depe
 
 
 def strict_schema(s):
-    """OpenAI strict-mode copy of a contract schema (Thinker 2026-10-12): drop
-    conditionals and other keywords strict mode refuses; every object closes
-    (additionalProperties false) and lists every property as required, an
-    originally-optional one becoming nullable. The ORIGINAL schema still
-    validates the card afterwards, after `unnull` strips those nulls."""
+    """OpenAI strict-mode copy of a contract schema (Thinker 2026-10-12): drop conditionals and other keywords strict mode refuses; every object closes (additionalProperties false) and lists every property as required, an originally-optional one becoming nullable. The ORIGINAL schema still validates the card afterwards, after `unnull` strips those nulls."""
     if isinstance(s, list):
         return [strict_schema(x) for x in s]
     if not isinstance(s, dict):
@@ -454,17 +341,7 @@ def unnull(obj, schema):
 
 
 def run_codex(spawn, role, model, schema_path, packet, cwd, timeout, path=None, effort=None):
-    """The codex backend (pilot S1). `codex exec` reads the packet on stdin, enforces
-    the contract's schema itself (`--output-schema`), writes the final object to
-    `-o` (no `doit validate` loop, no transcription — pilot S18/S28), and streams
-    events as JSONL, from which turns, tokens and the thread id are read. Codex
-    does not echo the model it ran, so `model_used` is the flag it was given and
-    the event says `model_observed: false`. Cost is unpriced on the plan (null).
-
-    L-spec-0262 (SWP2/SWP3): `path` is the writing role's already-resolved,
-    absolute write destination (`None` for a non-writing role) — `main` computes
-    it once, before any spend, and hands it here so nothing serving this seat
-    ever has to ask or infer it."""
+    """The codex backend (pilot S1). `codex exec` reads the packet on stdin, enforces the contract's schema itself (`--output-schema`), writes the final object to `-o` (no `doit validate` loop, no transcription — pilot S18/S28), and streams events as JSONL, from which turns, tokens and the thread id are read. Codex does not echo the model it ran, so `model_used` is the flag it was given and the event says `model_observed: false`. Cost is unpriced on the plan (null). L-spec-0262 (SWP2/SWP3): `path` is the writing role's already-resolved, absolute write destination (`None` for a non-writing role) — `main` computes it once, before any spend, and hands it here so nothing serving this seat ever has to ask or infer it."""
     import time
     SEAT.mkdir(parents=True, exist_ok=True)
     quota = codex_quota()
@@ -484,10 +361,7 @@ def run_codex(spawn, role, model, schema_path, packet, cwd, timeout, path=None, 
     out, log = SEAT / f"{spawn}.output.json", SEAT / f"{spawn}.codex.jsonl"
     sandbox = "workspace-write" if role in CODEX_WRITES else "read-only"
     if role in CODEX_FULL_ACCESS:
-        # Thinker 2026-10-12: workspace-write keeps .git read-only and has no network, so
-        # a builder can neither commit nor reach the read-only DB (L-builder-1640, 0828).
-        # A builder runs in its own throwaway worktree, as the operator's manual codex
-        # workers already do; its contract still forbids reading .env or any secret.
+        # Thinker 2026-10-12: workspace-write keeps .git read-only and has no network, so a builder can neither commit nor reach the read-only DB (L-builder-1640, 0828). A builder runs in its own throwaway worktree, as the operator's manual codex workers already do; its contract still forbids reading .env or any secret.
         sandbox = "danger-full-access"
     original = json.loads(pathlib.Path(schema_path).read_text())
     strict_path = SEAT / f"{spawn}.strict-schema.json"
@@ -495,9 +369,7 @@ def run_codex(spawn, role, model, schema_path, packet, cwd, timeout, path=None, 
     cmd = ["codex", "exec", "-C", str(cwd), "-m", model, "--sandbox", sandbox, "--skip-git-repo-check",
            "--json", "--output-schema", str(strict_path), "-o", str(out), "--add-dir", str(CONTENT)]
     if sandbox == "workspace-write":
-        # A builder's cwd is a git worktree whose objects/refs live in the main repo's
-        # common dir, outside the sandbox root: without it every commit fails (Thinker
-        # 2026-10-12, builders moved to codex).
+        # A builder's cwd is a git worktree whose objects/refs live in the main repo's common dir, outside the sandbox root: without it every commit fails (Thinker 2026-10-12, builders moved to codex).
         gd = subprocess.run(["git", "-C", str(cwd), "rev-parse", "--path-format=absolute", "--git-common-dir"],
                             capture_output=True, text=True)
         if gd.returncode == 0 and gd.stdout.strip():
@@ -550,24 +422,14 @@ class SeatResult:
 
 
 class Unserved(Exception):
-    """R6/L-spec-0189: nobody claimed this seat within DOIT_SEAT_CLAIM_SEC of the
-    packet appearing on disk. Raised only by `run_seat`, and only before the terminal-
-    result wait would otherwise run out the full role timeout — a packet nobody serves
-    must fail loudly long before that, not wait out up to 90 minutes (the builder's own
-    cap) indistinguishable, on the ledger, from a spawn that WAS served and ran long."""
+    """R6/L-spec-0189: nobody claimed this seat within DOIT_SEAT_CLAIM_SEC of the packet appearing on disk. Raised only by `run_seat`, and only before the terminal- result wait would otherwise run out the full role timeout — a packet nobody serves must fail loudly long before that, not wait out up to 90 minutes (the builder's own cap) indistinguishable, on the ledger, from a spawn that WAS served and ran long."""
     def __init__(self, spawn, claim_path, elapsed):
         self.spawn, self.claim_path, self.elapsed = spawn, claim_path, elapsed
         super().__init__(f"{spawn}: unserved after {elapsed:.0f}s — no {claim_path} on disk")
 
 
 def _window_min_override(spec_text):
-    """L-spec-0269, Planner amendment SD22: a spec's own leading `window_min: N`
-    line, read WITHOUT requiring the `---`-delimited block `carry.frontmatter_
-    charter`/`carry._frontmatter_value` demand — no live spec opens that way
-    (§6). Scans only the lines before the first line starting with `## `.
-    Returns the int on the first matching `^window_min:\\s*(\\d+)\\s*$` line, else
-    `None` on no such line, no match, or (defensively) an unparseable value —
-    never an exception."""
+    """L-spec-0269, Planner amendment SD22: a spec's own leading `window_min: N` line, read WITHOUT requiring the `---`-delimited block `carry.frontmatter_ charter`/`carry._frontmatter_value` demand — no live spec opens that way (§6). Scans only the lines before the first line starting with `## `. Returns the int on the first matching `^window_min:\\s*(\\d+)\\s*$` line, else `None` on no such line, no match, or (defensively) an unparseable value — never an exception."""
     if not spec_text:
         return None
     head = []
@@ -586,25 +448,12 @@ def _window_min_override(spec_text):
 
 
 def spec_path(subject):
-    """The one definition of a spec-writer's canonical write destination (R5,
-    L-spec-0321): `window_min`'s fallback and `main`'s spec-writer default both
-    call this instead of repeating the literal. `.absolute()` is defensive, not
-    decorative — a set-but-empty DOIT_ROOT bypasses `os.environ.get`'s default,
-    which would otherwise leave CONTENT (and this) relative."""
+    """The one definition of a spec-writer's canonical write destination (R5, L-spec-0321): `window_min`'s fallback and `main`'s spec-writer default both call this instead of repeating the literal. `.absolute()` is defensive, not decorative — a set-but-empty DOIT_ROOT bypasses `os.environ.get`'s default, which would otherwise leave CONTENT (and this) relative."""
     return (CONTENT / f"{subject}.md").absolute()
 
 
 def window_min(role, subject, events, *, backend="seat"):
-    """L-spec-0269: the window a role's spawn is offered under. A non-`seat`
-    backend (`run_claude`/`run_codex`) always gets the flat, unbumped role cap —
-    `Unserved`/claiming is a seat-only concept. On `backend="seat"`: `grader`/
-    `reviewer` get 45 minutes instead of their own cap when the subject's newest
-    `spec-written` event's `ac_types` names `observed-data` or (reserved)
-    `live-db`; that base is then raised, never lowered, to the subject's own
-    leading `window_min:` line when one is present and larger; the result is
-    capped at 240 regardless. No `spec-written` event and no readable
-    `content/<subject>.md` degrades cleanly to the plain base — never an
-    exception (§4, §6)."""
+    """L-spec-0269: the window a role's spawn is offered under. A non-`seat` backend (`run_claude`/`run_codex`) always gets the flat, unbumped role cap — `Unserved`/claiming is a seat-only concept. On `backend="seat"`: `grader`/ `reviewer` get 45 minutes instead of their own cap when the subject's newest `spec-written` event's `ac_types` names `observed-data` or (reserved) `live-db`; that base is then raised, never lowered, to the subject's own leading `window_min:` line when one is present and larger; the result is capped at 240 regardless. No `spec-written` event and no readable `content/<subject>.md` degrades cleanly to the plain base — never an exception (§4, §6)."""
     if backend != "seat":
         return ROLES.get(role, (None, 240, 0))[1]
     import fold                                  # lazy: see fold.py's own alloc() note
@@ -638,45 +487,7 @@ def window_min(role, subject, events, *, backend="seat"):
 
 def run_seat(spawn, cmd, packet, cwd, timeout, path=None, *, window=None, ledger=None, base=None, role=None,
              view=None):
-    """The seat path (D116 by another route). Where `claude -p` is banned as metered
-    — the Albert Scott rule, spec 572 — the spawn runs as an interactive session's
-    seat-billed sub-agent instead. This function does not spawn: it writes the
-    packet and the line that WOULD have run to `$R/seat/<spawn>.*`, prints where the
-    result is expected, and waits for `<spawn>.result.json` — the same JSON envelope
-    `claude -p --output-format json` prints (is_error, structured_output, usage,
-    total_cost_usd, num_turns, session_id, modelUsage, permission_denials). Every
-    after-the-fact check in main() then runs unchanged, and the ledger records
-    `spawn_path: seat` so the two routes are distinguishable forever.
-
-    R6/L-spec-0269: the same loop also tracks whether `<spawn>.claimed` has ever
-    appeared on disk — written ONLY by `scripts/seat/claim.sh` (O_EXCL; this
-    function never writes it, ADR-0028-2). Two clocks, not one: at
-    `DOIT_SEAT_CLAIM_SEC` (default 300) seconds unclaimed, this function no
-    longer raises — it appends one non-terminal `seat-stale{spawn, role,
-    subject, age_s}` (via `emit`, when `ledger` and `base` are both given; never
-    a second one on the same call) and keeps waiting. It gives up for real —
-    raising `Unserved`, exactly as before — only once `window` seconds have
-    passed with no claim (`window` defaults to `timeout` when omitted, so a
-    caller supplying neither keeps a single-clock, back-compat wait). Once a
-    claim IS observed, the wait-for-result deadline becomes `timeout` seconds
-    counted from the claim instant, not from this call's start — a claim
-    landing at the edge of the window still gets the whole cap to finish.
-
-    L-spec-0262 (SWP2/SWP3): `path` is the writing role's already-resolved,
-    absolute write destination (`None` for a non-writing role), computed once by
-    `main` before any spend. It rides on `cmd.json["path"]` and, for a writing
-    role, prefixes the packet text itself with `WRITE PATH: <path>\\n\\n` — so a
-    relay pane or the Planner reads its destination off disk and never asks or
-    infers it (the direct cause of a packet expiring unserved).
-
-    R8/L-spec-0437: `view`, when not `None`, is the grader-only isolated
-    filesystem view a gated block in `main()` already built. The SAME
-    `packet_text` also lands at `view/seat/<spawn>.packet.md` (a copy, proven
-    byte-identical — AC5), and `cmd.json`'s `"cwd"` — and the status line's own
-    `cwd` — become `view/tree`, never this call's `cwd` parameter: the pane
-    that reads `cmd.json` must land inside the view, not the real worktree.
-    `view=None` (every other role/backend, and the codex->seat fallback)
-    reproduces the prior behaviour byte-for-byte (AC9)."""
+    """The seat path (D116 by another route). Where `claude -p` is banned as metered — the Albert Scott rule, spec 572 — the spawn runs as an interactive session's seat-billed sub-agent instead. This function does not spawn: it writes the packet and the line that WOULD have run to `$R/seat/<spawn>.*`, prints where the result is expected, and waits for `<spawn>.result.json` — the same JSON envelope `claude -p --output-format json` prints (is_error, structured_output, usage, total_cost_usd, num_turns, session_id, modelUsage, permission_denials). Every after-the-fact check in main() then runs unchanged, and the ledger records `spawn_path: seat` so the two routes are distinguishable forever. R6/L-spec-0269: the same loop also tracks whether `<spawn>.claimed` has ever appeared on disk — written ONLY by `scripts/seat/claim.sh` (O_EXCL; this function never writes it, ADR-0028-2). Two clocks, not one: at `DOIT_SEAT_CLAIM_SEC` (default 300) seconds unclaimed, this function no longer raises — it appends one non-terminal `seat-stale{spawn, role, subject, age_s}` (via `emit`, when `ledger` and `base` are both given; never a second one on the same call) and keeps waiting. It gives up for real — raising `Unserved`, exactly as before — only once `window` seconds have passed with no claim (`window` defaults to `timeout` when omitted, so a caller supplying neither keeps a single-clock, back-compat wait). Once a claim IS observed, the wait-for-result deadline becomes `timeout` seconds counted from the claim instant, not from this call's start — a claim landing at the edge of the window still gets the whole cap to finish. L-spec-0262 (SWP2/SWP3): `path` is the writing role's already-resolved, absolute write destination (`None` for a non-writing role), computed once by `main` before any spend. It rides on `cmd.json["path"]` and, for a writing role, prefixes the packet text itself with `WRITE PATH: <path>\n\n` — so a relay pane or the Planner reads its destination off disk and never asks or infers it (the direct cause of a packet expiring unserved). R8/L-spec-0437: `view`, when not `None`, is the grader-only isolated filesystem view a gated block in `main()` already built. The SAME `packet_text` also lands at `view/seat/<spawn>.packet.md` (a copy, proven byte-identical — AC5), and `cmd.json`'s `"cwd"` — and the status line's own `cwd` — become `view/tree`, never this call's `cwd` parameter: the pane that reads `cmd.json` must land inside the view, not the real worktree. `view=None` (every other role/backend, and the codex->seat fallback) reproduces the prior behaviour byte-for-byte (AC9)."""
     import time
     SEAT.mkdir(parents=True, exist_ok=True)
     packet_text = f"WRITE PATH: {path}\n\n{packet}" if path else packet
@@ -693,11 +504,7 @@ def run_seat(spawn, cmd, packet, cwd, timeout, path=None, *, window=None, ledger
     print(json.dumps({"seat": spawn, "packet": str(SEAT / f"{spawn}.packet.md"),
                       "result_expected_at": str(want), "or_output_at": str(bare),
                       "cwd": cwd_out, "timeout_s": timeout, "window_s": window}), flush=True)
-    # The completion signal is the PANE's stamp — `<spawn>.meta.json` (or a full
-    # `result.json`) — never the Output file's existence: a contract iterating on its
-    # Output with `doit validate` writes an invalid draft first, and the wrapper read
-    # that draft on the first real spec-writer spawn and recorded it as failed while
-    # the validated version landed a second later.
+    # The completion signal is the PANE's stamp — `<spawn>.meta.json` (or a full `result.json`) — never the Output file's existence: a contract iterating on its Output with `doit validate` writes an invalid draft first, and the wrapper read that draft on the first real spec-writer spawn and recorded it as failed while the validated version landed a second later.
     meta_p = SEAT / f"{spawn}.meta.json"
     claim_p = SEAT / f"{spawn}.claimed"
     claim_sec = int(os.environ.get("DOIT_SEAT_CLAIM_SEC", 300))
@@ -725,16 +532,9 @@ def run_seat(spawn, cmd, packet, cwd, timeout, path=None, *, window=None, ledger
     time.sleep(1)                       # a writer that is still writing
     if want.is_file():
         return SeatResult(want.read_text())
-    # The bare Output the contract validated with `doit validate`, plus what the pane
-    # recorded beside it (model, session, turns). The envelope is built here so no
-    # hand ever writes one.
+    # The bare Output the contract validated with `doit validate`, plus what the pane recorded beside it (model, session, turns). The envelope is built here so no hand ever writes one.
     m = json.loads(meta_p.read_text())
-    # `model_observed` (usage.py's stamp) is the model the sub-agent's OWN
-    # transcript actually ran on — real evidence, where `model` is only the pane
-    # operator's typed claim. Prefer it as the modelUsage key so `model_used`
-    # downstream reflects what was observed, not assumed, and stamp `model_observed`
-    # true only when that evidence exists (a bare `model` with no transcript match
-    # is exactly as unverified as codex's flag-only guess, and must not default true).
+    # `model_observed` (usage.py's stamp) is the model the sub-agent's OWN transcript actually ran on — real evidence, where `model` is only the pane operator's typed claim. Prefer it as the modelUsage key so `model_used` downstream reflects what was observed, not assumed, and stamp `model_observed` true only when that evidence exists (a bare `model` with no transcript match is exactly as unverified as codex's flag-only guess, and must not default true).
     observed = m.get("model_observed")
     model_for_usage = observed or m.get("model")
     env = {"is_error": False, "terminal_reason": "completed", "structured_output": json.loads(bare.read_text()),
@@ -746,11 +546,7 @@ def run_seat(spawn, cmd, packet, cwd, timeout, path=None, *, window=None, ledger
 
 
 def poke():
-    """D117: every wrapper ends by running one tick, so latency is a poke, not an interval.
-    The ROOT's map rules first: a tick can only spawn a claude-p Executor, and a root
-    whose Executor is a pane must never be poked into `claude -p` (pilot S32 — one
-    wrapper without DOIT_NO_POKE in its shell cost $2.09 metered and three unserved
-    30-minute spawns). The variable stays as the second guard, never the only one."""
+    """D117: every wrapper ends by running one tick, so latency is a poke, not an interval. The ROOT's map rules first: a tick can only spawn a claude-p Executor, and a root whose Executor is a pane must never be poked into `claude -p` (pilot S32 — one wrapper without DOIT_NO_POKE in its shell cost $2.09 metered and three unserved 30-minute spawns). The variable stays as the second guard, never the only one."""
     if os.environ.get("DOIT_NO_POKE"):
         return
     mp = models.load()
@@ -790,11 +586,7 @@ def write_card(out, subject, spawn):
     assert len(L) <= 15, len(L)
     path = CONTENT / (subject.replace("-spec-", "-card-") + ".md")
     path.write_text("\n".join(L) + "\n")
-    # The rendered card is the operator's fifteen lines (§5.10); the grader's packet
-    # needs EVERY per-criterion row, and the first real chain lost rows 7+ to the cap
-    # (baseline: "the card had rows for AC1–AC6 only"). The full card object is the
-    # durable record — minus `deviations[].why`, which is the builder's reasoning and
-    # the one thing the judge must never read.
+    # The rendered card is the operator's fifteen lines (§5.10); the grader's packet needs EVERY per-criterion row, and the first real chain lost rows 7+ to the cap (baseline: "the card had rows for AC1–AC6 only"). The full card object is the durable record — minus `deviations[].why`, which is the builder's reasoning and the one thing the judge must never read.
     full = {k: out[k] for k in ("status", "identity", "acs", "verify", "stubs", "tests",
                                 "not_built", "unknowns", "built_against")}
     full["deviations"] = [{"type": d["type"], "what": d["what"]} for d in out["deviations"]]
@@ -826,9 +618,7 @@ def _pinned_base_explicit_in(text):
 
 
 def pinned_base(packet_path):
-    """R7/Target 4: the exact bytes following the literal prefix `PINNED_BASE_SHA: `
-    on a packet file's own line (trailing whitespace stripped); `None` against a
-    file carrying no such line, and `None` against an unreadable path."""
+    """R7/Target 4: the exact bytes following the literal prefix `PINNED_BASE_SHA: ` on a packet file's own line (trailing whitespace stripped); `None` against a file carrying no such line, and `None` against an unreadable path."""
     try:
         text = pathlib.Path(packet_path).read_text()
     except OSError:
@@ -837,9 +627,7 @@ def pinned_base(packet_path):
 
 
 def pinned_base_explicit(packet_path):
-    """R7/Target 4: `True` only when the same packet file also carries a line
-    reading exactly `PINNED_BASE_SHA_EXPLICIT: true`; `False` against a file with
-    no such line, a differently-valued one, or an unreadable path."""
+    """R7/Target 4: `True` only when the same packet file also carries a line reading exactly `PINNED_BASE_SHA_EXPLICIT: true`; `False` against a file with no such line, a differently-valued one, or an unreadable path."""
     try:
         text = pathlib.Path(packet_path).read_text()
     except OSError:
@@ -848,15 +636,7 @@ def pinned_base_explicit(packet_path):
 
 
 def commit_shape_events(subject, status, pinned, ready_sha, worktree):
-    """R7/Target 5, AC7-AC9: COMMIT-SHAPE, scoped to a rework round — a prior
-    `build-done` already on this subject's own event stream — whose card
-    `status == "DONE"`. Round one (no prior `build-done` at all, whatever this
-    round's status) and a `BLOCKED` round produce neither event. Otherwise counts
-    `git rev-list --count <pinned>..<ready_sha>` in `worktree`: exactly `1`
-    clears; `0`, `2+`, or an unreadable `ready_sha` rejects, naming the count (or
-    `"unreadable"`) and the pinned base. Returns a list of at most one
-    `(type, kv)` tuple — never emitted itself; the caller's own loop does that,
-    same as every other event this function's sibling steps produce."""
+    """R7/Target 5, AC7-AC9: COMMIT-SHAPE, scoped to a rework round — a prior `build-done` already on this subject's own event stream — whose card `status == "DONE"`. Round one (no prior `build-done` at all, whatever this round's status) and a `BLOCKED` round produce neither event. Otherwise counts `git rev-list --count <pinned>..<ready_sha>` in `worktree`: exactly `1` clears; `0`, `2+`, or an unreadable `ready_sha` rejects, naming the count (or `"unreadable"`) and the pinned base. Returns a list of at most one `(type, kv)` tuple — never emitted itself; the caller's own loop does that, same as every other event this function's sibling steps produce."""
     import fold
     specs, *_ = fold.fold(fold.read_events())
     if not any(e["type"] == "build-done" for e in specs.get(subject, {"evs": []})["evs"]):
@@ -887,26 +667,12 @@ def events_for(role, out, a, base):
                                             ac_types=out["ac_types"], requirement_ids=out["requirement_ids"],
                                             owed_ac_count=out["owed"], unknown_count=out["unknowns"],
                                             footprint=out["footprint"])))
-            # L-spec-0195/R3: a spec the tools cannot read is bounced HERE, at write
-            # time — never discovered only when a builder is dispatched against it
-            # (fold.py's `void`, which erased it from its charter). `spec-written`
-            # above is unconditional; this is a SECOND event on the same subject,
-            # never a substitute for it, and never `spawn-failed` (that would read
-            # as `void`, the very bug this closes).
+            # L-spec-0195/R3: a spec the tools cannot read is bounced HERE, at write time — never discovered only when a builder is dispatched against it (fold.py's `void`, which erased it from its charter). `spec-written` above is unconditional; this is a SECOND event on the same subject, never a substitute for it, and never `spawn-failed` (that would read as `void`, the very bug this closes).
             import validate
             findings = validate.spec_shape(pathlib.Path(a.path).read_text())
             if findings:
                 ev.append(("spec-shape-failed", dict(findings=findings)))
-            # L-spec-0276/R5 (SD25): a packet-lint `warn` finding becomes one
-            # visible, deduplicated `spec-lint-warning` event — best-effort by
-            # construction (`emit()` never raises; a refusal just returns a
-            # reason string and the sibling `spec-written` above still lands).
-            # `getattr`, not a bare call: `packet-lint` (wave 1) had not merged at
-            # this spec's own base_sha, so real `validate.py` carries no
-            # `spec_shape_warnings` yet — every OTHER spec-writer dispatch here
-            # (not monkeypatching it, per AC15) must keep working unchanged
-            # rather than crash on an AttributeError from a sibling's not-yet-
-            # landed function (Wave 2 runs after Wave 1 merges — Constraints).
+            # L-spec-0276/R5 (SD25): a packet-lint `warn` finding becomes one visible, deduplicated `spec-lint-warning` event — best-effort by construction (`emit()` never raises; a refusal just returns a reason string and the sibling `spec-written` above still lands). `getattr`, not a bare call: `packet-lint` (wave 1) had not merged at this spec's own base_sha, so real `validate.py` carries no `spec_shape_warnings` yet — every OTHER spec-writer dispatch here (not monkeypatching it, per AC15) must keep working unchanged rather than crash on an AttributeError from a sibling's not-yet- landed function (Wave 2 runs after Wave 1 merges — Constraints).
             warn_fn = getattr(validate, "spec_shape_warnings", None)
             warn_findings = warn_fn(pathlib.Path(a.path).read_text()) if warn_fn else []
             if warn_findings:
@@ -929,12 +695,7 @@ def events_for(role, out, a, base):
         ev += [("audit-finding", f) for f in out["findings"]]
     elif role == "grader":
         vs = out["verdicts"]
-        # S15/S33 (a-6): `confirmed` here stays the LITERAL all-rows-met roll-up —
-        # the model's own claim, computed before this spawn's dispatch could know
-        # which criteria the spec-writer had declared owed. The fold (verdict_
-        # confirmed) is where a `cannot-assess` row on an owed criterion stops
-        # zeroing it; that needs the row-level data this event did not carry
-        # before, so `cannot_assess` rides beside `confirmed` now.
+        # S15/S33 (a-6): `confirmed` here stays the LITERAL all-rows-met roll-up — the model's own claim, computed before this spawn's dispatch could know which criteria the spec-writer had declared owed. The fold (verdict_ confirmed) is where a `cannot-assess` row on an owed criterion stops zeroing it; that needs the row-level data this event did not carry before, so `cannot_assess` rides beside `confirmed` now.
         ev.append(("verdict", dict(confirmed=all(v["verdict"] == "met" for v in vs)
                                    and out["matches_intent"] == "yes" and out["card_ok"] == "yes",
                                    n=len(vs), matches_intent=out["matches_intent"], card_ok=out["card_ok"],
@@ -942,26 +703,10 @@ def events_for(role, out, a, base):
         ev += [("rejected-criterion", dict(criterion=v["ac"], why=v["reason"])) for v in vs if v["verdict"] == "unmet"]
         if out["could_not_run"] and not any(t == "gate-infra" for t, _ in decl):
             ev.append(("gate-infra", dict(line="could_not_run")))
-        # A re-grade that finds a standing rejection met clears it — the grader may
-        # clear (fold.EMITS), and without this a rework could never reach accepted.
-        # A confirmed verdict found everything met, the done-condition included — a
-        # rejection the packet no longer names (round one's DONE-COND) cannot outlive
-        # it, or the Executor reworks forever. Seen on the first real chain.
-        # R7/Target 6: COMMIT-SHAPE is the one standing rejection this loop never
-        # clears — only a builder's own next conforming rework does (AC13).
+        # A re-grade that finds a standing rejection met clears it — the grader may clear (fold.EMITS), and without this a rework could never reach accepted. A confirmed verdict found everything met, the done-condition included — a rejection the packet no longer names (round one's DONE-COND) cannot outlive it, or the Executor reworks forever. Seen on the first real chain. R7/Target 6: COMMIT-SHAPE is the one standing rejection this loop never clears — only a builder's own next conforming rework does (AC13).
         ev += spawns.clear_events(vs, out, a.subject, ev[0][1]["confirmed"], base.get("spawn"))   # L-spec-0755/R3(c)
         ev += coverage_changes(out["checkers"])
-        # L-spec-0482/R12.b: the circuit breaker. A `cannot-assess` row on a
-        # criterion nobody declared owed (the shared `fold.verdict_owed_criteria`
-        # helper — never a second, drifting read of `owed-ac`) rides on the
-        # `verdict` event as `missing_capability`, and opens the SAME
-        # capability-hold the preflight opens (`dispatch.py`'s own
-        # `grading-preflight-failed` branch, `source="preflight"` there,
-        # `source="verdict"` here) — one `escalation-blocking` per capability
-        # with no hold already open. An absent, `"unknown"`, or
-        # out-of-`CAPABILITIES` value all coerce to `capability:unknown:<SPEC>`
-        # (Assumptions): a hold subject is always `capability:<one of ten>` or
-        # `capability:unknown:<SPEC>`, never a raw model string (security_path).
+        # L-spec-0482/R12.b: the circuit breaker. A `cannot-assess` row on a criterion nobody declared owed (the shared `fold.verdict_owed_criteria` helper — never a second, drifting read of `owed-ac`) rides on the `verdict` event as `missing_capability`, and opens the SAME capability-hold the preflight opens (`dispatch.py`'s own `grading-preflight-failed` branch, `source="preflight"` there, `source="verdict"` here) — one `escalation-blocking` per capability with no hold already open. An absent, `"unknown"`, or out-of-`CAPABILITIES` value all coerce to `capability:unknown:<SPEC>` (Assumptions): a hold subject is always `capability:<one of ten>` or `capability:unknown:<SPEC>`, never a raw model string (security_path).
         import fold, grading_env
         owed_criteria = fold.verdict_owed_criteria(fold.read_events(), a.subject)
         missing_capability = []
@@ -976,10 +721,7 @@ def events_for(role, out, a, base):
         opened_here = set()
         for row in missing_capability:
             cap = row["capability"]
-            # A grader's cannot-assess is about THIS spec's criteria (e.g. live_db
-            # legs needing production data), not proof the box lacks the capability:
-            # a verdict-sourced hold is always spec-local (operator 2026-10-04) — a
-            # global `capability:db` from one verdict had frozen every db grader.
+            # A grader's cannot-assess is about THIS spec's criteria (e.g. live_db legs needing production data), not proof the box lacks the capability: a verdict-sourced hold is always spec-local (operator 2026-10-04) — a global `capability:db` from one verdict had frozen every db grader.
             subj = f"capability:{cap}:{a.subject}"
             if subj in opened_here:
                 continue
@@ -1014,13 +756,7 @@ def events_for(role, out, a, base):
                                      n_inputs=out["n_inputs"], spend=out["spend_usd"], complete=out["complete"])))
     elif role == "builder":
         card, i = write_card(out, a.subject, base["spawn"]), out["identity"]
-        # R7/Target 4: the pinned value main() resolved off the packet — never
-        # `i["base_sha"]` (the card's own, self-reported value) — is what
-        # `build-done.base_sha` carries. The card's value rides alongside only as
-        # `card_base_sha`, only when it differs (AC6); `pinned` falls back to the
-        # card's value only for a packet built before this spec shipped (no
-        # `a.pinned_base_sha` at all — main()'s own precheck already refuses every
-        # NEW dispatch that lacks one).
+        # R7/Target 4: the pinned value main() resolved off the packet — never `i["base_sha"]` (the card's own, self-reported value) — is what `build-done.base_sha` carries. The card's value rides alongside only as `card_base_sha`, only when it differs (AC6); `pinned` falls back to the card's value only for a packet built before this spec shipped (no `a.pinned_base_sha` at all — main()'s own precheck already refuses every NEW dispatch that lacks one).
         pinned = getattr(a, "pinned_base_sha", None) or i["base_sha"]
         bd_kv = dict(status=out["status"], card=str(card), branch=i["branch"],
                     base_sha=pinned, ready_sha=i["ready_sha"],
@@ -1042,10 +778,7 @@ def events_for(role, out, a, base):
             ev.append(("build-blocked", dict(reason=next((q["asks"] for q in out["escalations"]), None)
                                              or next((d["line"] for d in out["declarations"]), "unstated"))))
     elif role == "owed-sweeper":
-        # L-charter-0038 R1 / L-spec-0387: no manifest lookup here — main() has
-        # already filtered `out["results"]` to on-manifest rows before calling
-        # this. Each event lands on that ROW's own spec (`subject=row["spec"]`),
-        # never on the batch subject; `emit()` in main()'s loop below pops it.
+        # L-charter-0038 R1 / L-spec-0387: no manifest lookup here — main() has already filtered `out["results"]` to on-manifest rows before calling this. Each event lands on that ROW's own spec (`subject=row["spec"]`), never on the batch subject; `emit()` in main()'s loop below pops it.
         for row in out["results"]:
             common = dict(criterion=row["criterion"], batch=a.subject, subject=row["spec"])
             if row["verdict"] == "met":
@@ -1058,11 +791,7 @@ def events_for(role, out, a, base):
 
 
 def _parse_env(path):
-    """KEY=value pairs from an `.env` file: last occurrence wins, a `#`-prefixed
-    or key-less line is not a declaration, matching outer quotes are stripped.
-    Values are never further trimmed or case-folded (L-spec-0194 Constraints —
-    every byte/value comparison downstream is raw equality). `{}` when `path`
-    is not a file."""
+    """KEY=value pairs from an `.env` file: last occurrence wins, a `#`-prefixed or key-less line is not a declaration, matching outer quotes are stripped. Values are never further trimmed or case-folded (L-spec-0194 Constraints — every byte/value comparison downstream is raw equality). `{}` when `path` is not a file."""
     out = {}
     if not path.is_file():
         return out
@@ -1081,29 +810,12 @@ def _parse_env(path):
 
 
 def readonly_dsn(project_checkout):
-    """The value bound to SUPABASE_DB_URL_RO in <project_checkout>/.env, or
-    None when the file or the key is absent. A local file read only — never a
-    subprocess, never a network call (L-spec-0194 Constraints)."""
+    """The value bound to SUPABASE_DB_URL_RO in <project_checkout>/.env, or None when the file or the key is absent. A local file read only — never a subprocess, never a network call (L-spec-0194 Constraints)."""
     return _parse_env(pathlib.Path(project_checkout) / ".env").get("SUPABASE_DB_URL_RO")
 
 
 def provision_worktree_env(worktree, project_checkout):
-    """Copies the checkout's operator-placed read-only DSN into `<worktree>/.env`
-    under the name every `live_db` test reads, SUPABASE_DB_URL — refusing,
-    never guessing, whenever the value could instead be a mislabeled read-write
-    credential (L-spec-0194 security_path). Returns on the first matching step:
-      "absent"   — the checkout carries no SUPABASE_DB_URL_RO; nothing written.
-      "refused"  — the RO value byte-equals some OTHER checkout key whose name
-                   contains DB_URL; OR `<worktree>/.env` already exists holding
-                   different bytes; OR the worktree's own `.gitignore` does not
-                   cover `.env` (a later `git add -A` there would commit it).
-      "readonly" — `<worktree>/.env` already holds exactly this one line
-                   (idempotent, no write), or now does after writing it, mode
-                   0o600.
-    The one subprocess this runs, `git check-ignore`, decides the last step
-    only; its stdout/stderr are discarded and never logged, and the DSN value
-    is never passed to it (Constraints — the narrow, named subprocess
-    exception)."""
+    """Copies the checkout's operator-placed read-only DSN into `<worktree>/.env` under the name every `live_db` test reads, SUPABASE_DB_URL — refusing, never guessing, whenever the value could instead be a mislabeled read-write credential (L-spec-0194 security_path). Returns on the first matching step: "absent" — the checkout carries no SUPABASE_DB_URL_RO; nothing written. "refused" — the RO value byte-equals some OTHER checkout key whose name contains DB_URL; OR `<worktree>/.env` already exists holding different bytes; OR the worktree's own `.gitignore` does not cover `.env` (a later `git add -A` there would commit it). "readonly" — `<worktree>/.env` already holds exactly this one line (idempotent, no write), or now does after writing it, mode 0o600. The one subprocess this runs, `git check-ignore`, decides the last step only; its stdout/stderr are discarded and never logged, and the DSN value is never passed to it (Constraints — the narrow, named subprocess exception)."""
     worktree, project_checkout = pathlib.Path(worktree), pathlib.Path(project_checkout)
     dsn = readonly_dsn(project_checkout)
     if dsn is None:
@@ -1129,28 +841,7 @@ def provision_worktree_env(worktree, project_checkout):
 
 
 def provision_sweep_env(sweep_dir, project_checkout):
-    """L-spec-9004 OC1 — like provision_worktree_env above, but for a private
-    per-sweep-batch scratch directory (`scratch.sub("sweeps") / <sweep-id>`)
-    rather than a builder/grader worktree. Reuses that function's
-    DSN-resolution and DSN-collision refusal byte-for-byte, and replaces only
-    the destination-safety gate: a scratch directory, by scratch.root()'s own
-    invariant, is never inside a git work tree, so provision_worktree_env's
-    require-git-ignored gate would refuse every call here, always (nothing to
-    check-ignore into). The risk for THIS destination class runs the other
-    way — this credential landing in a future `git add -A`/commit — so the
-    gate refuses instead when `sweep_dir` itself, or any ancestor of it, holds
-    a `.git` entry. Returns the same four-string vocabulary:
-      "absent"   — the checkout carries no SUPABASE_DB_URL_RO; nothing written.
-      "refused"  — the RO value byte-equals some OTHER checkout key whose name
-                   contains DB_URL; OR `sweep_dir` (or an ancestor) holds a
-                   `.git` entry; OR `<sweep_dir>/.env` already exists holding
-                   different bytes.
-      "readonly" — `<sweep_dir>/.env` already holds exactly this one line
-                   (idempotent, no rewrite), or now does after writing it,
-                   mode 0o600.
-    A pure filesystem function — no subprocess, no network at all (security_path
-    — more restrictive than provision_worktree_env, which runs exactly one
-    subprocess, `git check-ignore`, that this gate does not need)."""
+    """L-spec-9004 OC1 — like provision_worktree_env above, but for a private per-sweep-batch scratch directory (`scratch.sub("sweeps") / <sweep-id>`) rather than a builder/grader worktree. Reuses that function's DSN-resolution and DSN-collision refusal byte-for-byte, and replaces only the destination-safety gate: a scratch directory, by scratch.root()'s own invariant, is never inside a git work tree, so provision_worktree_env's require-git-ignored gate would refuse every call here, always (nothing to check-ignore into). The risk for THIS destination class runs the other way — this credential landing in a future `git add -A`/commit — so the gate refuses instead when `sweep_dir` itself, or any ancestor of it, holds a `.git` entry. Returns the same four-string vocabulary: "absent" — the checkout carries no SUPABASE_DB_URL_RO; nothing written. "refused" — the RO value byte-equals some OTHER checkout key whose name contains DB_URL; OR `sweep_dir` (or an ancestor) holds a `.git` entry; OR `<sweep_dir>/.env` already exists holding different bytes. "readonly" — `<sweep_dir>/.env` already holds exactly this one line (idempotent, no rewrite), or now does after writing it, mode 0o600. A pure filesystem function — no subprocess, no network at all (security_path — more restrictive than provision_worktree_env, which runs exactly one subprocess, `git check-ignore`, that this gate does not need)."""
     sweep_dir, project_checkout = pathlib.Path(sweep_dir), pathlib.Path(project_checkout)
     dsn = readonly_dsn(project_checkout)
     if dsn is None:
@@ -1171,11 +862,7 @@ def provision_sweep_env(sweep_dir, project_checkout):
 
 
 def held_capability(all_ev, subject, required):
-    """L-spec-0481/R12.3: the first open hold (`grading_env.CAPABILITIES`
-    order) covering one of `required` for `subject` — its own hold-subject
-    string (`capability:NAME` or `capability:NAME:SUBJECT`, SD-R12-6a: the two
-    spec-local capabilities only cover THIS subject, never another spec's
-    identical failure). `None` when nothing open covers it."""
+    """L-spec-0481/R12.3: the first open hold (`grading_env.CAPABILITIES` order) covering one of `required` for `subject` — its own hold-subject string (`capability:NAME` or `capability:NAME:SUBJECT`, SD-R12-6a: the two spec-local capabilities only cover THIS subject, never another spec's identical failure). `None` when nothing open covers it."""
     import fold, grading_env
     holds = fold.capability_holds(all_ev)
     for cap in grading_env.CAPABILITIES:
@@ -1191,26 +878,12 @@ def held_capability(all_ev, subject, required):
 
 
 def grading_budget(all_ev, subject):
-    """L-charter-0042 R10(b)/(c): a `role=grader` dispatch is refused, before any
-    spend, when (b) some criterion has been rejected by a grader in two-or-more
-    grader verdict rounds since it was last cleared, or (c) a fourth-or-later
-    grader run is attempted with no qualifying regrade newer than the newest
-    prior run. Pure — reads only events whose `subject == subject`; no ledger
-    write. Redefines "same reason" against the ledger's own shape (measured
-    2026-09-25..27) rather than the charter's original why-text-matching draft,
-    which was dead code on the exact case (L-spec-0173: ~10 straight AC1
-    rejections, each `why` distinct, each preceded by its own `build-done`, no
-    `criterion-cleared` ever) it was written to catch — a rework alone never
-    resets either rule."""
+    """L-charter-0042 R10(b)/(c): a `role=grader` dispatch is refused, before any spend, when (b) some criterion has been rejected by a grader in two-or-more grader verdict rounds since it was last cleared, or (c) a fourth-or-later grader run is attempted with no qualifying regrade newer than the newest prior run. Pure — reads only events whose `subject == subject`; no ledger write. Redefines "same reason" against the ledger's own shape (measured 2026-09-25..27) rather than the charter's original why-text-matching draft, which was dead code on the exact case (L-spec-0173: ~10 straight AC1 rejections, each `why` distinct, each preceded by its own `build-done`, no `criterion-cleared` ever) it was written to catch — a rework alone never resets either rule."""
     import fold
     evs = [e for e in all_ev if e.get("subject") == subject]
     T = lambda e: fold.ts(e.get("ts"))
 
-    # (b) repeat-rejection:<AC> — the criteria whose 2nd-or-later grader
-    # rejection since their own last `criterion-cleared` finds no fresh
-    # `spec-written`, or `thinker`/`operator` `decision`/`unblocked` (regrade or
-    # not), any newer than it (Assumptions §10 — a `build-done`, anywhere,
-    # changes nothing).
+    # (b) repeat-rejection:<AC> — the criteria whose 2nd-or-later grader rejection since their own last `criterion-cleared` finds no fresh `spec-written`, or `thinker`/`operator` `decision`/`unblocked` (regrade or not), any newer than it (Assumptions §10 — a `build-done`, anywhere, changes nothing).
     by_ac = {}
     for e in evs:
         if e.get("type") == "rejected-criterion" and e.get("actor") == "grader" and e.get("criterion"):
@@ -1225,31 +898,16 @@ def grading_budget(all_ev, subject):
         if len(since) >= 2 and not any(T(e) > T(since[1]) for e in resets):
             return f"repeat-rejection:{ac}"
 
-    # (c) cap:<n> — n (>=3) prior grader `spawn-started` rows exist (voided
-    # included) and no `decision(regrade=yes, actor thinker|operator)` newer
-    # than the newest of them. Nothing else lifts it (Assumptions §8/§9) — the
-    # rule reapplies past the literal fourth run.
-    #
-    # L-spec-0482/R12.c: counted only among runs started AFTER the subject's
-    # newest `build-done` — a rework resets the cap outright now, not merely
-    # by way of a qualifying regrade decision (R12.e's Executor rule is the
-    # OTHER half of this: it re-dispatches once the reset lands). No
-    # `build-done` at all still counts every run, unchanged.
+    # (c) cap:<n> — n (>=3) prior grader `spawn-started` rows exist (voided included) and no `decision(regrade=yes, actor thinker|operator)` newer than the newest of them. Nothing else lifts it (Assumptions §8/§9) — the rule reapplies past the literal fourth run.  L-spec-0482/R12.c: counted only among runs started AFTER the subject's newest `build-done` — a rework resets the cap outright now, not merely by way of a qualifying regrade decision (R12.e's Executor rule is the OTHER half of this: it re-dispatches once the reset lands). No `build-done` at all still counts every run, unchanged.
     starts = [e for e in evs if e.get("type") == "spawn-started" and e.get("role") == "grader"]
     newest_build_done = max((T(e) for e in evs if e.get("type") == "build-done"), default=None)
     if newest_build_done is not None:
         starts = [e for e in starts if T(e) > newest_build_done]
-    # A run that failed (wrapper timeout, unserved) with no verdict of its own graded
-    # nothing, so it is not a grade (R10: "grading is spent only where it can find
-    # something"). Thinker 2026-09-28: three specs capped by 15-min timeouts alone.
+    # A run that failed (wrapper timeout, unserved) with no verdict of its own graded nothing, so it is not a grade (R10: "grading is spent only where it can find something"). Thinker 2026-09-28: three specs capped by 15-min timeouts alone.
     judged = {e.get("spawn") for e in evs if e.get("type") in ("verdict", "void", "voided")}
     failed = {e.get("spawn") for e in evs if e.get("type") == "spawn-failed"}
     starts = [e for e in starts if not (e.get("spawn") in failed and e.get("spawn") not in judged)]
-    # R12.c: a run whose OWN verdict carried a `cannot_assess` row on a
-    # criterion nobody declared owed (the shared `fold.verdict_owed_criteria`
-    # helper, never a second copy of the actor check) found an environment it
-    # could not prove, not a grade — it never counts against the cap, same as
-    # a failed-with-no-verdict run above.
+    # R12.c: a run whose OWN verdict carried a `cannot_assess` row on a criterion nobody declared owed (the shared `fold.verdict_owed_criteria` helper, never a second copy of the actor check) found an environment it could not prove, not a grade — it never counts against the cap, same as a failed-with-no-verdict run above.
     owed_criteria = fold.verdict_owed_criteria(evs, subject)
     verdict_by_spawn = {e.get("spawn"): e for e in evs if e.get("type") == "verdict"}
     def _gradeable(e):
@@ -1269,27 +927,14 @@ def grading_budget(all_ev, subject):
 
 
 def _room_need_gb(role, toml_path=None):
-    """L-charter-0042/L-spec-0486, R15d: 5GB for a builder, 2GB for a grader —
-    `look.toml`'s `[thresholds] room_builder_gb`/`room_grader_gb` override
-    either default; `toml_path` is the same injection point `look.load_toml`
-    already offers, never edited by this spec."""
+    """L-charter-0042/L-spec-0486, R15d: 5GB for a builder, 2GB for a grader — `look.toml`'s `[thresholds] room_builder_gb`/`room_grader_gb` override either default; `toml_path` is the same injection point `look.load_toml` already offers, never edited by this spec."""
     import look
     th = look.load_toml(toml_path=toml_path).get("thresholds") or {}
     return th.get(f"room_{role}_gb", 5 if role == "builder" else 2)
 
 
 def ensure_room(path, need_gb):
-    """L-charter-0042/L-spec-0486, R15d: disk is never the reason a builder or
-    grader fails. Already enough free space -> `True`, no reaper run. Otherwise
-    the reaper runs EXACTLY ONCE (`reap_tmp.reap_now`) and the space is
-    re-measured — never a retry loop, never a second reaper pass. Any
-    exception the reaper raises is swallowed here -> `False`, never raised:
-    a caller refusing a spawn over a bug in the reaper itself would be worse
-    than the disk problem it exists to avoid. `DOIT_LEDGER_FILE` is saved and
-    restored around the reaper call, in a `finally` (the way `backup.py`
-    already does around its own call) — `reap_merged_specs` sets it and never
-    restores it, and `run_claude`/`run_codex` pass `os.environ` straight into
-    the spawn they start next."""
+    """L-charter-0042/L-spec-0486, R15d: disk is never the reason a builder or grader fails. Already enough free space -> `True`, no reaper run. Otherwise the reaper runs EXACTLY ONCE (`reap_tmp.reap_now`) and the space is re-measured — never a retry loop, never a second reaper pass. Any exception the reaper raises is swallowed here -> `False`, never raised: a caller refusing a spawn over a bug in the reaper itself would be worse than the disk problem it exists to avoid. `DOIT_LEDGER_FILE` is saved and restored around the reaper call, in a `finally` (the way `backup.py` already does around its own call) — `reap_merged_specs` sets it and never restores it, and `run_claude`/`run_codex` pass `os.environ` straight into the spawn they start next."""
     def free_gb():
         return shutil.disk_usage(path).free / 2**30
 
@@ -1309,13 +954,53 @@ def ensure_room(path, need_gb):
     return free_gb() >= need_gb
 
 
+def builder_worktree_preflight(a, cwd, ledger, base, fail):
+    """Recreate conventional missing checkouts, then prove root and branch."""
+    worktree = pathlib.Path(cwd).resolve()
+    conventional = (ROOT / "worktrees" / (a.project or "") / a.subject.lower()).resolve()
+    if not worktree.is_dir():
+        if a.project and worktree == conventional:
+            import autodispatch
+            repo = ROOT / "repos" / a.project
+            try:
+                main = autodispatch._real_runner(["git", "-C", str(repo), "symbolic-ref", "--short", "HEAD"])
+                if main.get("code", 1) == 0:
+                    branch = main.get("stdout", "").strip()
+                    result = autodispatch.add_builder_worktree(repo, worktree, a.subject.lower(), f"origin/{branch}")
+                    if result.get("code", 1) == 0:
+                        emit(ledger, base, "worktree-recreated", worktree=str(worktree), branch=a.subject.lower())
+            except (OSError, subprocess.SubprocessError):
+                fail("builder worktree recreation failed", reason="preflight:worktree-missing")
+        if not worktree.is_dir():
+            fail("builder worktree missing or recreation failed", reason="preflight:worktree-missing")
+    top = subprocess.run(["git", "-C", str(worktree), "rev-parse", "--show-toplevel"],
+                         capture_output=True, text=True)
+    if top.returncode or pathlib.Path(top.stdout.strip()).resolve() != worktree:
+        fail("builder cwd is not a git worktree root", reason="preflight:not-worktree")
+    branch = subprocess.run(["git", "-C", str(worktree), "symbolic-ref", "--short", "HEAD"],
+                            capture_output=True, text=True)
+    if branch.returncode or branch.stdout.strip() != a.subject.lower():
+        fail("builder worktree is not on its expected branch", reason="preflight:wrong-branch")
+
+
 def main(a):
+    """Every unexpected backend-path exception gets a terminal ledger event."""
+    a._dispatch_crash = None
+    try:
+        return _main(a)
+    except Exception as exc:
+        if a._dispatch_crash is not None:
+            a._dispatch_crash(type(exc).__name__)
+        raise
+    finally:
+        a._dispatch_crash = None
+
+
+def _main(a):
     kind, tmin, usd = ROLES[a.role]
     atexit.register(poke)
-    fm, schema_path = frontmatter(a.role), AGENTS / f"{a.role}.schema.json"
-    # An empty or non-file --packet is refused BEFORE a spawn id is allocated: a shell
-    # that captured a failed `doit packet` into a variable hands "" here, which read `.`
-    # as the packet and crashed after the fact (pilot "Smaller" list; hit again on charter 3).
+    schema_path = AGENTS / f"{a.role}.schema.json"
+    # An empty or non-file --packet is refused BEFORE a spawn id is allocated: a shell that captured a failed `doit packet` into a variable hands "" here, which read `.` as the packet and crashed after the fact (pilot "Smaller" list; hit again on charter 3).
     if a.packet != "-" and not (a.packet and pathlib.Path(a.packet).is_file()):
         sys.exit(f"dispatch: --packet {a.packet!r} is not a file — nothing allocated, nothing spent")
     packet = sys.stdin.read() if a.packet == "-" else pathlib.Path(a.packet).read_text()
@@ -1327,16 +1012,9 @@ def main(a):
     base = {"subject": a.subject, "project": a.project or pathlib.Path(cwd).name, "spawn": spawn}
     if a.charter:
         base["charter"] = a.charter
-    meta = dict(model=fm.get("model"), packet_sha256=sha(packet), contract_sha256=sha(
-        (AGENTS / f"{a.role}.md").read_bytes() + schema_path.read_bytes()), cli=CLI)
-    mm = models.resolve(a.role, fm.get("model"))
-    flag_seat = bool(getattr(a, "seat", False) or os.environ.get("DOIT_SEAT"))
-    backend = mm["backend"] or ("seat" if flag_seat else "claude-p")
-    meta.update(backend=backend, spawn_path=backend, model_requested=mm["model"], model_map=mm["source"])
+    meta = dict(packet_sha256=sha(packet), cli=CLI)
     grading_view = None  # L-spec-0481/R12.2-R12.3: set once a grader's own view is built; `fail`
-                         # below reads it (closure, late-bound) so a preflight refusal — or any
-                         # LATER failure in this same run — tears the private cluster down at, never
-                         # before, the terminal event it emits (SD-R12-3c).
+                         # below reads it (closure, late-bound) so a preflight refusal — or any LATER failure in this same run — tears the private cluster down at, never before, the terminal event it emits (SD-R12-3c).
 
     def fail(why, reason=None):
         kv = {"why": why}
@@ -1348,24 +1026,31 @@ def main(a):
         print(f"FAILED {spawn}: {why}", file=sys.stderr)
         sys.exit(1)
 
-    # D120: a refused spawn charged and is deterministic; an identical packet on an
-    # identical contract is refused here, before it charges again. An api_error is
-    # the one failure that IS retried — after the operator logs in.
+    def crash(exception_type):
+        emit(ledger, base, "spawn-failed", reason=f"crash:{exception_type}",
+             why=f"unexpected backend path exception: {exception_type}", **meta)
+        if grading_view is not None:
+            grading_env.teardown(grading_view)
+    a._dispatch_crash = crash
+    if not schema_path.is_file():
+        fail("role schema does not exist", reason="preflight:schema-missing")
+    fm = frontmatter(a.role)
+    meta.update(model=fm.get("model"), contract_sha256=sha(
+        (AGENTS / f"{a.role}.md").read_bytes() + schema_path.read_bytes()))
+    mm = models.resolve(a.role, fm.get("model"))
+    flag_seat = bool(getattr(a, "seat", False) or os.environ.get("DOIT_SEAT"))
+    backend = mm["backend"] or ("seat" if flag_seat else "claude-p")
+    meta.update(backend=backend, spawn_path=backend, model_requested=mm["model"], model_map=mm["source"])
+
+    # D120: a refused spawn charged and is deterministic; an identical packet on an identical contract is refused here, before it charges again. An api_error is the one failure that IS retried — after the operator logs in.
     sys.path.insert(0, str(HERE))
     import fold
     # L-spec-0755/R2: duplicate/conflicting dispatch refused before any spend; lock held until the start event lands.
     dispatch_lock = spawns.gate(ROOT, a.role, a.subject, cwd, fold.read_events(), fail)
-    # R3/L-spec-0192: a builder dispatch against a killed subject, or one still
-    # carrying an open spec-writer spawn, is refused HERE — before any
-    # subprocess or spend, and before the `build-started` event itself
-    # (cost_path). Scoped to role="builder" only.
+    # R3/L-spec-0192: a builder dispatch against a killed subject, or one still carrying an open spec-writer spawn, is refused HERE — before any subprocess or spend, and before the `build-started` event itself (cost_path). Scoped to role="builder" only.
     wave_note = None
     if builder:
-        # R7/Target 4: the base comes from the packet the Executor pinned, never
-        # from anything the builder self-reports later — refused HERE, before any
-        # spend, when the packet carries no `PINNED_BASE_SHA:` line at all (AC4).
-        # Read off the packet TEXT already in memory, never a second file read —
-        # correct for the `--packet -` stdin route too.
+        # R7/Target 4: the base comes from the packet the Executor pinned, never from anything the builder self-reports later — refused HERE, before any spend, when the packet carries no `PINNED_BASE_SHA:` line at all (AC4). Read off the packet TEXT already in memory, never a second file read — correct for the `--packet -` stdin route too.
         a.pinned_base_sha = _pinned_base_in(packet)
         if a.pinned_base_sha is None:
             fail(f"{a.subject}: builder packet carries no PINNED_BASE_SHA line — "
@@ -1374,11 +1059,7 @@ def main(a):
         all_ev = fold.read_events()
         if fold.spec_state([e for e in all_ev if e.get("subject") == a.subject], set()) == "killed":
             fail(f"{a.subject} is killed — refusing role=builder before any spend")
-        # L-spec-0276/R3 Target 4(a): a builder must not run ahead of an
-        # unmerged, unsettled earlier plan wave on the SAME charter. No
-        # resolvable charter, no plan file, or no unit matching this spec's own
-        # footprint is `wave_note="undetermined"` on `build-started` below —
-        # never a refusal (SD6: "the unit boundary is not this check's call").
+        # L-spec-0276/R3 Target 4(a): a builder must not run ahead of an unmerged, unsettled earlier plan wave on the SAME charter. No resolvable charter, no plan file, or no unit matching this spec's own footprint is `wave_note="undetermined"` on `build-started` below — never a refusal (SD6: "the unit boundary is not this check's call").
         wave_charter = resolve_charter(all_ev, a.subject, a.charter)
         if wave_charter is not None:
             own_footprint = next((e.get("footprint") for e in reversed(all_ev)
@@ -1395,9 +1076,7 @@ def main(a):
                          "before any spend", reason="wave-order")
         else:
             wave_note = "undetermined"
-        # L-spec-0276/R3 Target 4(b): the effective project of this dispatch
-        # (--project, else --cwd's basename — already computed as base["project"])
-        # disagrees with `fold.subject_project(subject)`, when the latter is known.
+        # L-spec-0276/R3 Target 4(b): the effective project of this dispatch (--project, else --cwd's basename — already computed as base["project"]) disagrees with `fold.subject_project(subject)`, when the latter is known.
         subj_project = fold.subject_project(a.subject)
         if subj_project is not None and subj_project != base["project"]:
             fail(f"{a.subject} is recorded under project={subj_project!r}; this dispatch is "
@@ -1406,9 +1085,7 @@ def main(a):
         if open_spec_writer_spawn(all_ev, a.subject):
             fail(f"{a.subject} carries an open spec-writer spawn — refusing role=builder before any spend",
                  reason="rework-open")
-        # L-spec-0195/AC4: a spec still standing broken (its most recent of
-        # {spec-written, spec-shape-failed} is spec-shape-failed) is refused here,
-        # before any spend — never discovered only at dispatch (R3's Goal).
+        # L-spec-0195/AC4: a spec still standing broken (its most recent of {spec-written, spec-shape-failed} is spec-shape-failed) is refused here, before any spend — never discovered only at dispatch (R3's Goal).
         if fold.spec_shape_pending([e for e in all_ev if e.get("subject") == a.subject]):
             fail(f"{a.subject} fails spec-shape validation — refusing role=builder before any spend",
                  reason="spec-shape")
@@ -1418,11 +1095,7 @@ def main(a):
         grading_ev = fold.read_events()
         reason = grading_budget(grading_ev, a.subject)
         if reason:
-            # The newest matching escalation-blocking, IF no decision/unblocked
-            # (any shape) on the subject is newer than it — Constraints/
-            # Assumptions §7: dedup is scoped to (subject, kind, reason) and
-            # lasts only while unresolved, never forever, so a resolved-but-
-            # not-fixed block re-surfaces instead of wedging silently (AC14).
+            # The newest matching escalation-blocking, IF no decision/unblocked (any shape) on the subject is newer than it — Constraints/ Assumptions §7: dedup is scoped to (subject, kind, reason) and lasts only while unresolved, never forever, so a resolved-but- not-fixed block re-surfaces instead of wedging silently (AC14).
             standing = next((e for e in reversed(grading_ev) if e.get("subject") == a.subject
                               and e.get("type") == "escalation-blocking"
                               and e.get("kind") == "grading-budget" and e.get("reason") == reason), None)
@@ -1437,18 +1110,13 @@ def main(a):
                      deadline=(datetime.now(timezone.utc) + timedelta(hours=24)).isoformat(timespec="seconds"),
                      revert="a decision regrade=yes")
             fail(f"grading budget: {reason} — refusing role=grader before any spend", reason=reason)
-    # R7/Target 6, AC12: a grader dispatch against a subject carrying a standing
-    # COMMIT-SHAPE rejection is refused before any spend — grading a build already
-    # known to need rework is spend the cost_path exists to short-circuit.
+    # R7/Target 6, AC12: a grader dispatch against a subject carrying a standing COMMIT-SHAPE rejection is refused before any spend — grading a build already known to need rework is spend the cost_path exists to short-circuit.
     if a.role == "grader":
         g_specs, *_ = fold.fold(fold.read_events())
         if "COMMIT-SHAPE" in fold.standing_rejects(g_specs.get(a.subject, {"evs": []})["evs"]):
             fail(f"{a.subject}: COMMIT-SHAPE stands — refusing role=grader before any spend",
                  reason="commit-shape")
-    # L-charter-0042/L-spec-0486, R15d: disk is never the reason a builder or
-    # grader fails — refused BEFORE any spend, after the reaper has already had
-    # one chance to free the room a spawn's own work needs. `spec-writer` and
-    # `reviewer` never call `ensure_room` (scoped to builder/grader only).
+    # L-charter-0042/L-spec-0486, R15d: disk is never the reason a builder or grader fails — refused BEFORE any spend, after the reaper has already had one chance to free the room a spawn's own work needs. `spec-writer` and `reviewer` never call `ensure_room` (scoped to builder/grader only).
     if a.role in ("builder", "grader"):
         import look, scratch
         need_gb = _room_need_gb(a.role)
@@ -1462,16 +1130,7 @@ def main(a):
                            fold.read_events())
             fail(f"no room: {free_gb:.1f}GB free, need {need_gb}GB at {room_path} — "
                  f"refusing role={a.role} before any spend", reason="disk")
-    # L-spec-0481/R12.3-R12.6: hold-check, then provision+prove in the spawn's OWN
-    # view/cwd, before any spend — scoped to the entry points this unit builds
-    # (Entry points a/b/c): a grader on the seat backend (its view is built here,
-    # before dsn_role, so preflight proves inside the SAME sandbox/env the run
-    # uses); a grader resolving to a non-seat backend (claude-p/codex) whose own
-    # required() is non-empty — there is something to prove and no view anywhere
-    # to prove it in — is refused before any spend (AC12(iii)); a non-seat grader
-    # requiring nothing is untouched (nothing for the missing view to have
-    # blocked); and a reviewer of any backend (read-only, against its cwd — never
-    # a view).
+    # L-spec-0481/R12.3-R12.6: hold-check, then provision+prove in the spawn's OWN view/cwd, before any spend — scoped to the entry points this unit builds (Entry points a/b/c): a grader on the seat backend (its view is built here, before dsn_role, so preflight proves inside the SAME sandbox/env the run uses); a grader resolving to a non-seat backend (claude-p/codex) whose own required() is non-empty — there is something to prove and no view anywhere to prove it in — is refused before any spend (AC12(iii)); a non-seat grader requiring nothing is untouched (nothing for the missing view to have blocked); and a reviewer of any backend (read-only, against its cwd — never a view).
     import grading_env, routing
     grader_seat = a.role == "grader" and backend == "seat"
     gproject = a.project or pathlib.Path(cwd).name
@@ -1546,6 +1205,10 @@ def main(a):
     if prior:
         fail(f"identical packet and contract already failed as {prior.get('spawn')} "
              f"({str(prior.get('why'))[:60]}); not retried (D120) — not spent")
+    if builder:
+        builder_worktree_preflight(a, cwd, ledger, base, fail)
+    elif not pathlib.Path(cwd).is_dir():
+        fail("spawn cwd does not exist", reason="preflight:worktree-missing")
     # The map is decided once per root. A flag or variable that disagrees with it is
     # the per-shell ruling S32 measured the cost of; it is refused, not honoured.
     if mm["backend"] == "pane":
@@ -1553,30 +1216,13 @@ def main(a):
     if mm["backend"] and flag_seat and mm["backend"] != "seat":
         fail(f"--seat/DOIT_SEAT contradicts {models.PATH} (backend={mm['backend']} for {a.role}); "
              f"the map is decided once per root — edit the file, not the flag — not spent")
-    # §3.6: most of both fable audits is a script, and the script runs first. A
-    # plan-auditor packet with no pre-pass block asks the model to re-derive six
-    # mechanical checks — and "the script did not run" then reads exactly like
-    # "the script found nothing". Refused before it spends.
+    # §3.6: most of both fable audits is a script, and the script runs first. A plan-auditor packet with no pre-pass block asks the model to re-derive six mechanical checks — and "the script did not run" then reads exactly like "the script found nothing". Refused before it spends.
     import audit
     if a.role == "plan-auditor" and audit.HEADER not in packet:
         fail(f"plan-auditor packet carries no script pre-pass ('{audit.HEADER}') — "
              f"run `doit audit <stage> {a.subject} --cut …` and put its block in the packet "
              f"(§3.6) — not spent")
-    # SWP1 (L-spec-0262): a writing role's write destination is resolved HERE,
-    # before any spend — the same point as the refusals above, and well before
-    # the spawn-started/build-started event. `spec-writer` is the one writing
-    # role whose destination is independently known system-wide: `carry.py`'s
-    # `_do_carry` already computes this identical `root() / "content" /
-    # f"{spec_id}.md"` before it ever calls dispatch, so no --path from it is a
-    # missing value, not an unknown one. Every OTHER writing role (`research`,
-    # `reuse-scout`, `probe`) dispatched with no --path is refused immediately,
-    # with the unchanged message below, before any subprocess runs. A relative
-    # --path for `spec-writer` resolves against ROOT ($DOIT_ROOT), never cwd —
-    # every other writing role keeps resolving relative to this spawn's own cwd,
-    # unchanged. SWP2 (R5/L-spec-0321): a resolved `spec-writer` path that is not
-    # exactly `spec_path(a.subject)` is refused here too, before any seat file
-    # exists — the post-spawn existence/mismatch checks below, and every
-    # seat/codex write, then see only a path already proven canonical.
+    # SWP1 (L-spec-0262): a writing role's write destination is resolved HERE, before any spend — the same point as the refusals above, and well before the spawn-started/build-started event. `spec-writer` is the one writing role whose destination is independently known system-wide: `carry.py`'s `_do_carry` already computes this identical `root() / "content" / f"{spec_id}.md"` before it ever calls dispatch, so no --path from it is a missing value, not an unknown one. Every OTHER writing role (`research`, `reuse-scout`, `probe`) dispatched with no --path is refused immediately, with the unchanged message below, before any subprocess runs. A relative --path for `spec-writer` resolves against ROOT ($DOIT_ROOT), never cwd — every other writing role keeps resolving relative to this spawn's own cwd, unchanged. SWP2 (R5/L-spec-0321): a resolved `spec-writer` path that is not exactly `spec_path(a.subject)` is refused here too, before any seat file exists — the post-spawn existence/mismatch checks below, and every seat/codex write, then see only a path already proven canonical.
     if kind and not a.path:
         if a.role == "spec-writer":
             a.path = str(spec_path(a.subject))
@@ -1591,46 +1237,25 @@ def main(a):
     before = None if builder else porcelain(cwd)
     if not builder and before is None:
         fail(f"repo status undetermined in {cwd} before spawn — not spent")
-    # A start event for every role: the tick reads a start with no terminal event as
-    # in flight and keeps the subject off the lane (found on the first real chain).
-    # L-spec-0194: the worktree's read-only DSN rides in HERE, before the start
-    # event, so `dsn_role` on it is never stale by the time the spec's own
-    # verify script (packet.verify_script) decides whether to export it.
+    # A start event for every role: the tick reads a start with no terminal event as in flight and keeps the subject off the lane (found on the first real chain). L-spec-0194: the worktree's read-only DSN rides in HERE, before the start event, so `dsn_role` on it is never stale by the time the spec's own verify script (packet.verify_script) decides whether to export it.
     dsn_role = None
-    # R8/L-spec-0437, moved earlier by L-spec-0481/R12.3: `grading_view` (grader,
-    # seat backend) was built and proven above, before this point — carried into
-    # `view` for `run_seat`'s own bound path, unchanged from here down.
+    # R8/L-spec-0437, moved earlier by L-spec-0481/R12.3: `grading_view` (grader, seat backend) was built and proven above, before this point — carried into `view` for `run_seat`'s own bound path, unchanged from here down.
     view = grading_view
     if builder:
         dsn_role = provision_worktree_env(cwd, ROOT / "repos" / a.project) if a.project else "absent"
     elif a.role == "grader":
-        # L-spec-0481/R12.6/AC19: a grader receives NO production DSN of any kind
-        # (SD-R12-3b) — `provision_worktree_env` is never called for it. `private`
-        # when `db` was proven into its own view above, `none` otherwise
-        # (Assumption 3); the grader on claude-p/codex (no `g_required` computed
-        # this round — Assumptions §1, see the card) is `none` too.
+        # L-spec-0481/R12.6/AC19: a grader receives NO production DSN of any kind (SD-R12-3b) — `provision_worktree_env` is never called for it. `private` when `db` was proven into its own view above, `none` otherwise (Assumption 3); the grader on claude-p/codex (no `g_required` computed this round — Assumptions §1, see the card) is `none` too.
         dsn_role = "private" if grader_seat and "db" in g_required else "none"
     elif a.role == "owed-sweeper":
-        # L-spec-9004 OC1: the sweeper's own private, per-sweep `cwd` (never
-        # the shared checkout) gets a read-only DSN copy through the sibling,
-        # narrower function above — never provision_worktree_env, whose
-        # git-ignore gate cannot apply to a non-git scratch directory.
+        # L-spec-9004 OC1: the sweeper's own private, per-sweep `cwd` (never the shared checkout) gets a read-only DSN copy through the sibling, narrower function above — never provision_worktree_env, whose git-ignore gate cannot apply to a non-git scratch directory.
         dsn_role = provision_sweep_env(cwd, ROOT / "repos" / a.project) if a.project else "absent"
-    # L-spec-0269: every start records the window it was offered under and who
-    # is waiting on it — any role, any backend (a flat, unbumped cap for
-    # run_claude/run_codex; the full formula, load-bearing, for run_seat).
+    # L-spec-0269: every start records the window it was offered under and who is waiting on it — any role, any backend (a flat, unbumped cap for run_claude/run_codex; the full formula, load-bearing, for run_seat).
     wm = window_min(a.role, a.subject, fold.read_events(), backend=backend)
     waiter_pid = os.getpid()
     waiter_kv = dict(window_min=wm, waiter_pid=waiter_pid, waiter_host=socket.gethostname(),
                      waiter_proc_start=panes.proc_start(waiter_pid))
     if builder:
-        # L-spec-0276/R3 Target 4: `wave_note="undetermined"` only — an
-        # optional field, omitted (not a forced null) whenever the wave WAS
-        # determined (Null encoding, mirrors carry.py's own convention).
-        # L-spec-0269: every start also records the window it was offered
-        # under and who is waiting on it (waiter_kv).
-        # R7/AC5: base_sha is the pinned value read off the packet above —
-        # never a fresh worktree-HEAD guess taken here.
+        # L-spec-0276/R3 Target 4: `wave_note="undetermined"` only — an optional field, omitted (not a forced null) whenever the wave WAS determined (Null encoding, mirrors carry.py's own convention). L-spec-0269: every start also records the window it was offered under and who is waiting on it (waiter_kv). R7/AC5: base_sha is the pinned value read off the packet above — never a fresh worktree-HEAD guess taken here.
         emit(ledger, base, "build-started", worktree=cwd, dsn_role=dsn_role, backend=backend,
              base_sha=a.pinned_base_sha, **waiter_kv, **({"wave_note": wave_note} if wave_note else {}))
     else:
@@ -1672,9 +1297,7 @@ def main(a):
         res = json.loads(r.stdout)
     except ValueError:
         fail(f"exit {r.returncode}, no JSON on stdout: {r.stderr[-300:]!r}")
-    # A codex refusal is the backend's, not the packet's (a weekly limit, a sandbox
-    # denial, a dead CLI): with a `fallback` on the map the spawn runs ONCE more on
-    # that backend, and the event says so. Never a third route, never silently.
+    # A codex refusal is the backend's, not the packet's (a weekly limit, a sandbox denial, a dead CLI): with a `fallback` on the map the spawn runs ONCE more on that backend, and the event says so. Never a third route, never silently.
     if backend == "codex" and res.get("is_error") and mm.get("fallback"):
         fb = mm["fallback"]
         emit(ledger, base, "backend-fallback", from_backend="codex", to_backend=fb["backend"],
@@ -1706,22 +1329,13 @@ def main(a):
     meta.update(model=used, cost_usd=res.get("total_cost_usd"),
                 input_tokens=u.get("input_tokens"), output_tokens=u.get("output_tokens"),
                 cache_read=u.get("cache_read_input_tokens"), cache_creation=u.get("cache_creation_input_tokens"),
-                # The seat route's blended figure (stamp.sh's <subagent_tokens> arg,
-                # pre-dating the four-way split): a single Task-tool token count that
-                # is NOT the sum of the four fields above (caching makes them measure
-                # different things — see src/usage.py). Kept on the event, alongside
-                # the split, never in place of it, so a pre-split spawn's only number
-                # is not lost and the SPEND block can render it honestly as unsplit.
+                # The seat route's blended figure (stamp.sh's <subagent_tokens> arg, pre-dating the four-way split): a single Task-tool token count that is NOT the sum of the four fields above (caching makes them measure different things — see src/usage.py). Kept on the event, alongside the split, never in place of it, so a pre-split spawn's only number is not lost and the SPEND block can render it honestly as unsplit.
                 subagent_tokens=u.get("subagent_tokens"),
                 turns=res.get("num_turns"), duration_ms=res.get("duration_ms"), session=res.get("session_id"),
                 denied=[d.get("tool_name") for d in (res.get("permission_denials") or [])][:10])
     if res.get("is_error"):
         if res.get("terminal_reason") == "api_error" or res.get("api_error_status"):
-            # R3/L-spec-0192: `escalation_ok` now gates this write (via `emit()`'s
-            # `required_reason` door) — the spawn already ran and drew its budget
-            # and is NOT retried automatically (D120), so this names the
-            # irreversible act rather than inventing a default/deadline/revert
-            # for a retry that will never happen on its own.
+            # R3/L-spec-0192: `escalation_ok` now gates this write (via `emit()`'s `required_reason` door) — the spawn already ran and drew its budget and is NOT retried automatically (D120), so this names the irreversible act rather than inventing a default/deadline/revert for a retry that will never happen on its own.
             emit(ledger, base, "escalation-blocking",
                  why=f"seat unreachable ({res.get('api_error_status')}) — /login as the operator; {spawn} is not retried",
                  irreversible=f"{spawn} already ran and drew its budget; it will not be retried "
@@ -1731,9 +1345,7 @@ def main(a):
     out = res.get("structured_output")
     if out is None:
         fail("null structured_output — tools: line lacks StructuredOutput, or the model never called it")
-    # The CLI enforces --json-schema on its own route; the seat route has no CLI, so
-    # the schema is checked here for both — a 440-character finding against a
-    # 400 cap came back from the first seat spawn and nothing refused it.
+    # The CLI enforces --json-schema on its own route; the seat route has no CLI, so the schema is checked here for both — a 440-character finding against a 400 cap came back from the first seat spawn and nothing refused it.
     try:
         import jsonschema
         jsonschema.validate(out, json.loads(schema_path.read_text()))
@@ -1756,12 +1368,7 @@ def main(a):
         if not exists:
             fail(f"nothing at {p} — the model reported {out.get('status') or out.get('answered')} "
                  "with no file on disk (D120 W3)")
-    # Repo movement across a non-builder spawn is an observation, not a verdict:
-    # the Executor merges into the very directory a concurrent spec-writer or
-    # spec-auditor was handed as --cwd, and voiding that audit lost three correct
-    # runs to hand-repair. Two things are still hard failures, because they are a
-    # broken observation rather than concurrency: an after-snapshot that cannot be
-    # read at all, and the repository itself coming or going under --cwd.
+    # Repo movement across a non-builder spawn is an observation, not a verdict: the Executor merges into the very directory a concurrent spec-writer or spec-auditor was handed as --cwd, and voiding that audit lost three correct runs to hand-repair. Two things are still hard failures, because they are a broken observation rather than concurrency: an after-snapshot that cannot be read at all, and the repository itself coming or going under --cwd.
     moved = None
     if not builder:
         after = porcelain(cwd)                    # read exactly once — a second call is a third snapshot
@@ -1772,12 +1379,7 @@ def main(a):
             fail(f"repo identity changed across a non-builder spawn: {before!r} -> {after!r}")
         if after != before:
             moved = repo_moved(before, after, a.role)
-    # L-charter-0038 R1 / L-spec-0387: gated on role == "owed-sweeper" only —
-    # every other role's path above and below is byte-for-byte unchanged. The
-    # manifest is the ONE source of which (spec, criterion) rows this batch may
-    # act on; a result naming a row the manifest does not carry is dropped here,
-    # before events_for ever sees it, and counted as off_manifest on this
-    # spawn's own spawn-done (never on a row's subject).
+    # L-charter-0038 R1 / L-spec-0387: gated on role == "owed-sweeper" only — every other role's path above and below is byte-for-byte unchanged. The manifest is the ONE source of which (spec, criterion) rows this batch may act on; a result naming a row the manifest does not carry is dropped here, before events_for ever sees it, and counted as off_manifest on this spawn's own spawn-done (never on a row's subject).
     off_manifest = None
     if a.role == "owed-sweeper":
         import packet
@@ -1789,18 +1391,12 @@ def main(a):
     else:
         events = spawns.or_fail(fail, events_for, a.role, out, a, base)
     for t, kv in events:
-        # A kv carrying its own `subject` lands there instead of the batch
-        # subject `base["subject"]` names: the owed-sweeper's per-row events,
-        # and (L-spec-0482/R12.b) a grader's `capability-hold`/
-        # `escalation-blocking` pair, whose subject is the hold, never the
-        # graded spec. No other role's `kv` carries `subject`.
+        # A kv carrying its own `subject` lands there instead of the batch subject `base["subject"]` names: the owed-sweeper's per-row events, and (L-spec-0482/R12.b) a grader's `capability-hold`/ `escalation-blocking` pair, whose subject is the hold, never the graded spec. No other role's `kv` carries `subject`.
         row_base = {**base, "subject": kv.pop("subject")} if "subject" in kv else base
         emit(ledger, row_base, t, **kv)
     scalars = {k: v for k, v in out.items() if isinstance(v, (str, int, float, bool))}
     done = {**scalars, **meta}
-    # Emitted whenever the snapshots differ, never gated on lines/paths being
-    # non-empty: the observation is that the repository moved, and an empty
-    # derived list must not silently erase it.
+    # Emitted whenever the snapshots differ, never gated on lines/paths being non-empty: the observation is that the repository moved, and an empty derived list must not silently erase it.
     if moved is not None:
         done["repo_moved"] = moved
     if off_manifest is not None:
@@ -1812,14 +1408,16 @@ def main(a):
 
 
 def cli_version():
-    """Recorded on every terminal event (D120: re-trust on a CLI change). A version
-    that cannot be read is recorded as null, never a crash — the CLI replaces its own
-    binary on auto-update, and one exec during the swap took the whole suite down."""
+    """Recorded on every terminal event (D120: re-trust on a CLI change). A version that cannot be read is recorded as null, never a crash — the CLI replaces its own binary on auto-update, and one exec during the swap took the whole suite down."""
     try:
         return subprocess.run(["claude", "--version"], capture_output=True, text=True, timeout=30).stdout.split()[0]
     except (OSError, subprocess.SubprocessError, IndexError):
         return None
 
+
+import fold
+fold.EMITS["worktree-recreated"] = {"builder"}
+fold.REQUIRED["worktree-recreated"] = ("worktree", "branch")
 
 CLI = cli_version()
 
