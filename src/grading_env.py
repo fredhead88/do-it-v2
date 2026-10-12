@@ -379,6 +379,15 @@ def _trim_unmatched_closer(token):
 _NEUTRAL_DEVICES = {"/dev/null"}
 
 
+def _looks_like_fs_path(token):
+    """Thinker 2026-10-12 (L-spec-0896): awk/sed patterns such as `/BEGIN`, `/#` or
+    `/<<.CRON_SCRIPT.$/{o=NR}` matched the path regex and held a grade. A token is a
+    filesystem path when its first component is a real top-level directory or looks
+    like one (lowercase name characters); `/BEGIN`, `/#`, `/<<...` do not."""
+    first = token.lstrip("/").split("/", 1)[0]
+    return bool(first) and (os.path.isdir("/" + first) or re.fullmatch(r"[a-z0-9._-]+", first) is not None)
+
+
 def _prove_view_paths(view):
     vs = pathlib.Path(view) / "verify.sh"
     text = vs.read_text() if vs.is_file() else ""
@@ -387,6 +396,7 @@ def _prove_view_paths(view):
     inside = str(pathlib.Path(view)) + "/"
     bad = [t for t in (_trim_unmatched_closer(m) for m in _ABS_PATH_RE.findall(text))
            if not t.startswith(inside) and t not in _NEUTRAL_DEVICES
+           and _looks_like_fs_path(t)
            and not (pathlib.Path(t).is_file() and os.access(t, os.X_OK))]
     if bad:
         return False, f"absolute path(s) outside the view, not an interpreter: {', '.join(sorted(set(bad))[:3])}"
