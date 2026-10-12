@@ -57,12 +57,18 @@ yours to hold to — quote what you saw, never a credential you saw it with.
 
 ## The only route into production
 
-You run only the two allowlisting wrapper scripts, `/home/albert/do-it-v2/scripts/sweep/ro-sql` and
-`/home/albert/do-it-v2/scripts/sweep/droplet-read` — never a DSN or SSH target directly, and never
+You run only the three allowlisting wrapper scripts, `/home/albert/do-it-v2/scripts/sweep/ro-sql`,
+`/home/albert/do-it-v2/scripts/sweep/droplet-read` and `/home/albert/do-it-v2/scripts/sweep/portal-e2e` — never a DSN or SSH target directly, and never
 anything else that reaches production. You never invoke `deploy.sh`, and you
-never drive a browser. A check whose declared observation needs either is
-`cannot-observe` with `capability: browser` or `operator-action`, not a reason
-to reach for a route this contract does not grant you.
+never drive a browser yourself. `portal-e2e PROJECT dashboard/e2e/<name>.spec.ts`
+runs one Playwright spec that is already committed on origin/master, as the read-only
+verifier client user, against the live portal unless `E2E_BASE_URL` is set. A check
+whose declared observation is such a committed spec, or is satisfied by one, is
+observable that way: read the pass/fail and the artifacts it names. When no
+committed spec covers it, the check is `cannot-observe` with `capability: browser`
+(Thinker, 2026-10-12, operator-approved). A check that needs `deploy.sh` is
+`cannot-observe` with `capability: operator-action`. Neither is a reason to reach
+for a route this contract does not grant you.
 
 ## Blind to card/grade
 

@@ -1,0 +1,91 @@
+#!/usr/bin/env python3
+"""portal-e2e PROJECT dashboard/e2e/NAME.spec.ts — the sweeper's only path to
+drive the live client portal as the read-only verifier client user
+(Thinker 2026-10-12, operator-approved: portal-user owed checks were expiring
+unobserved because the sweeper may not read the project .env).
+
+It runs exactly one Playwright spec that is COMMITTED on origin/master (never
+an ad-hoc script), from a dedicated clean worktree refreshed to origin/master,
+with only VERIFIER_CLIENT_USER / VERIFIER_CLIENT_PASS exported, read line by
+line from the project .env, never sourced. Their values are redacted from
+everything it prints. E2E_BASE_URL passes through if the caller set it;
+otherwise the spec's own default (production) applies.
+
+Exit codes: 2 refused, nothing run | 3 timed out | else Playwright's own exit.
+"""
+import os
+import pathlib
+import re
+import subprocess
+import sys
+
+PROJECTS = {"albert-scott": pathlib.Path("/opt/albert-scott")}
+RUNNER = pathlib.Path.home() / ".do-it" / "portal-e2e-runner"
+SPEC_RE = re.compile(r"^dashboard/e2e/[A-Za-z0-9._-]+\.spec\.ts$")
+KEYS = ("VERIFIER_CLIENT_USER", "VERIFIER_CLIENT_PASS")
+TIMEOUT_S = 600
+
+
+def read_keys(env_path):
+    out = {}
+    for line in env_path.read_text().splitlines():
+        k, sep, v = line.partition("=")
+        if sep and k in KEYS and k not in out:
+            out[k] = v.strip().strip("\"'")
+    return out
+
+
+def git(repo, *args):
+    return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True)
+
+
+def main(argv):
+    if len(argv) != 2:
+        print("usage: portal-e2e PROJECT dashboard/e2e/NAME.spec.ts", file=sys.stderr)
+        return 2
+    project, spec = argv
+    repo = PROJECTS.get(project)
+    if repo is None:
+        print(f"no portal-e2e project {project}", file=sys.stderr)
+        return 2
+    if not SPEC_RE.match(spec):
+        print("refused: spec must be dashboard/e2e/<name>.spec.ts", file=sys.stderr)
+        return 2
+    git(repo, "fetch", "-q", "origin")
+    if git(repo, "cat-file", "-e", f"origin/master:{spec}").returncode != 0:
+        print(f"refused: {spec} is not committed on origin/master", file=sys.stderr)
+        return 2
+    if not RUNNER.exists():
+        r = git(repo, "worktree", "add", "--detach", str(RUNNER), "origin/master")
+    else:
+        r = git(RUNNER, "checkout", "-q", "--detach", "--force", "origin/master")
+    if r.returncode != 0:
+        print(f"runner worktree refresh failed: {r.stderr.strip()}", file=sys.stderr)
+        return 2
+    nm = RUNNER / "dashboard" / "node_modules"
+    if not nm.exists():
+        nm.symlink_to(repo / "dashboard" / "node_modules")
+    creds = read_keys(repo / ".env")
+    if set(creds) != set(KEYS) or not all(creds.values()):
+        print("refused: verifier client account not configured", file=sys.stderr)
+        return 2
+    env = {k: v for k, v in os.environ.items() if k in ("PATH", "HOME", "LANG", "E2E_BASE_URL")}
+    env.update(creds)
+    try:
+        p = subprocess.run(
+            ["npx", "playwright", "test", spec.removeprefix("dashboard/"), "--reporter=line"],
+            cwd=RUNNER / "dashboard", env=env, capture_output=True, text=True, timeout=TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:
+        print(f"timed out after {TIMEOUT_S}s", file=sys.stderr)
+        return 3
+    text = p.stdout + p.stderr
+    for v in creds.values():
+        text = text.replace(v, "<redacted>")
+    print(text)
+    print(f"artifacts: {RUNNER / 'dashboard' / 'test-results'}")
+    return p.returncode
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
