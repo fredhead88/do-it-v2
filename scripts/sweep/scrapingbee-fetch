@@ -1,0 +1,50 @@
+#!/usr/bin/env python3
+"""scrapingbee-fetch OUT_HTML ASIN [--js] — fetch one amazon.com product page through ScrapingBee
+into OUT_HTML, without the caller ever seeing the key.
+
+Thinker 2026-10-12 (operator's audit for Dina): workers may not read the project .env.
+SCRAPINGBEE_API_KEY is read line by line from /opt/albert-scott/.env (never sourced), sent only
+to app.scrapingbee.com, and redacted from everything printed. Premium proxy, US. --js renders
+JavaScript (more credits). Prints one JSON line: {asin, status, bytes, cost_header, out}.
+Exit: 2 refused | 3 HTTP/network error.
+"""
+import json, pathlib, re, sys, urllib.error, urllib.parse, urllib.request
+
+ENV = pathlib.Path("/opt/albert-scott/.env")
+
+
+def key():
+    for line in ENV.read_text().splitlines():
+        k, sep, v = line.partition("=")
+        if sep and k == "SCRAPINGBEE_API_KEY":
+            return v.strip().strip("\"'")
+    sys.exit("refused: no SCRAPINGBEE_API_KEY line")
+
+
+def main(argv):
+    if len(argv) < 2 or not re.fullmatch(r"[A-Z0-9]{10}", argv[1].upper()):
+        print(__doc__)
+        return 2
+    out, asin, js = pathlib.Path(argv[0]), argv[1].upper(), "--js" in argv[2:]
+    k = key()
+    q = {"api_key": k, "url": f"https://www.amazon.com/dp/{asin}", "premium_proxy": "true",
+         "country_code": "us", "render_js": "true" if js else "false"}
+    url = "https://app.scrapingbee.com/api/v1/?" + urllib.parse.urlencode(q)
+    try:
+        with urllib.request.urlopen(url, timeout=150) as r:
+            body, status, cost = r.read(), r.status, r.headers.get("Spb-cost")
+    except urllib.error.HTTPError as e:
+        print(json.dumps({"asin": asin, "status": e.code,
+                          "error": e.read()[:300].decode("utf8", "replace").replace(k, "[redacted]")}))
+        return 3
+    except Exception as e:
+        print(json.dumps({"asin": asin, "error": str(e).replace(k, "[redacted]")[:300]}))
+        return 3
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_bytes(body)
+    print(json.dumps({"asin": asin, "status": status, "bytes": len(body), "cost_header": cost, "out": str(out)}))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
