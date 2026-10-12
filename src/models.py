@@ -78,8 +78,16 @@ def load(path=None):
             if fb["backend"] in ("pane", b):
                 raise ValueError(f"{p}: contracts.{name}.fallback.backend {fb['backend']!r} — "
                                  f"a fallback is a different, dispatchable backend")
+            if b == "codex" and fb["backend"] == "claude-p":
+                # A Codex refusal (quota, limit) must fall back to the seat, never to the
+                # metered `claude -p` pool (spec 572 ban) — Thinker 2026-10-12.
+                raise ValueError(f"{p}: contracts.{name}.fallback.backend 'claude-p' — a codex "
+                                 f"contract falls back to 'seat', never to metered claude -p")
             fb = {"backend": fb["backend"], "model": fb["model"]}
-        out[name] = {"backend": b, "model": m, "fallback": fb}
+        effort = c.get("effort")
+        if effort is not None and effort not in ("minimal", "low", "medium", "high", "xhigh"):
+            raise ValueError(f"{p}: contracts.{name}.effort {effort!r} is not minimal|low|medium|high|xhigh")
+        out[name] = {"backend": b, "model": m, "fallback": fb, "effort": effort}
     return out
 
 
@@ -107,7 +115,8 @@ def resolve(role, contract_model=None, mp=None, path=None):
     c = mp.get(role)
     if c is None:
         return {"backend": mp["_default"], "model": contract_model, "source": "models.toml-default", "fallback": None}
-    return {"backend": c["backend"], "model": c["model"], "source": "models.toml", "fallback": c.get("fallback")}
+    return {"backend": c["backend"], "model": c["model"], "source": "models.toml", "fallback": c.get("fallback"),
+            "effort": c.get("effort")}
 
 
 PROFILES = {"mixed": "models.example.toml", "claude-only": "models.claude-only.toml"}

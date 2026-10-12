@@ -802,7 +802,13 @@ rp6 = TMP / "content" / "L-research-0006.md"
 
 def fake_codex(cmd, packet, cwd, timeout):
     fake_codex.cmd = cmd
-    assert packet.startswith("a packet") and "spawn_id: L-research-" in packet
+    # Thinker 2026-10-12: the codex packet leads with the codex preamble and the role contract,
+    # then the original packet (a codex spawn used to get the packet alone).
+    # The writing role's WRITE PATH line now reaches codex on stdin too (it used to be on the
+    # saved packet file only).
+    assert packet.startswith("WRITE PATH: ") and dispatch.CODEX_PREAMBLE in packet \
+        and "=== ROLE CONTRACT: research ===" in packet \
+        and "\na packet" in packet and "spawn_id: L-research-" in packet, packet[:300]
     pathlib.Path(cmd[cmd.index("-o") + 1]).write_text(json.dumps({**research, "path": "content/L-research-0006.md"}))
     rp6.write_text("dug")
     return argparse.Namespace(returncode=0, stderr="", stdout="\n".join(json.dumps(e) for e in [
@@ -840,6 +846,38 @@ assert c[:2] == ["codex", "exec"] and c[c.index("-m") + 1] == "gpt-6-astra" and 
 assert (TMP / "seat" / f"{d['spawn']}.codex.jsonl").is_file() and (TMP / "seat" / f"{d['spawn']}.cmd.json").is_file()
 code, ev = run("research", rp6)
 assert code == 0 and ev[-1]["first_on_model"] is False, "the second run on the same (contract, model) is not the trust run"
+assert "-c" not in fake_codex.cmd, "no effort key on the map: no reasoning-effort override"
+
+# Thinker 2026-10-12: a map `effort` reaches codex as `-c model_reasoning_effort=...`.
+MT.write_text('[defaults]\nbackend = "seat"\n'
+              '[contracts.research]\nbackend = "codex"\nmodel = "gpt-6-astra"\neffort = "high"\n'
+              '[contracts.grader]\nbackend = "claude-p"\nmodel = "claude-sonnet-5"\n')
+code, ev = run("research", rp6)
+assert code == 0 and "model_reasoning_effort=high" in fake_codex.cmd, fake_codex.cmd
+
+# Thinker 2026-10-12: past the quota cap the codex spawn refuses BEFORE running codex.
+_real_quota = dispatch.codex_quota
+dispatch.codex_quota = lambda now=None: {"used_percent": 90.0, "resets_at": 9e12, "credits": "1"}
+fake_codex.cmd = None
+code, ev = run("research", rp6)
+assert fake_codex.cmd is None, "the quota precheck must stop the spawn before codex exec runs"
+assert code != 0 and "quota precheck" in json.dumps(ev[-1]), ev[-1]
+dispatch.codex_quota = _real_quota
+MT.write_text('[defaults]\nbackend = "seat"\n'
+              '[contracts.research]\nbackend = "codex"\nmodel = "gpt-6-astra"\n'
+              '[contracts.grader]\nbackend = "claude-p"\nmodel = "claude-sonnet-5"\n')
+assert dispatch.codex_quota_refusal({"used_percent": 84.9}) is None
+assert dispatch.codex_quota_refusal({"used_percent": 85}) and dispatch.codex_quota_refusal(None) is None
+
+# Thinker 2026-10-12: a codex contract may never fall back to metered claude -p.
+_bad = TMP / "models-bad.toml"
+_bad.write_text('[defaults]\nbackend = "seat"\n[contracts.research]\nbackend = "codex"\nmodel = "gpt-6-astra"\n'
+                'fallback = { backend = "claude-p", model = "claude-sonnet-5" }\n')
+try:
+    models.load(_bad)
+    raise AssertionError("a codex->claude-p fallback must be refused")
+except ValueError as e:
+    assert "never to metered claude -p" in str(e), e
 code, ev = run("research", rp6, seat=True)
 assert code == 1 and [e["type"] for e in ev] == ["spawn-failed"] and "contradicts" in ev[-1]["why"], \
     "a flag that disagrees with the root's map is refused before a start event or a spend"

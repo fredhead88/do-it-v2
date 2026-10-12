@@ -335,7 +335,66 @@ def run_codex_exec(cmd, packet, cwd, timeout):
     return subprocess.run(cmd, input=packet, capture_output=True, text=True, cwd=cwd, env=env, timeout=timeout)
 
 
-def run_codex(spawn, role, model, schema_path, packet, cwd, timeout, path=None):
+CODEX_PREAMBLE = """You are running a DO-IT role on the CODEX backend. The role contract below is your
+standing rulebook; obey it exactly. Codex-specific differences from the contract's wording:
+- There is no StructuredOutput tool and no Agent tool. Ignore any "Seat route" instructions
+  about writing $R/seat/<spawn_id>.output.json or running `doit validate`: your FINAL message
+  must be the single JSON object the output schema describes, and it is captured for you.
+- Never print or copy a credential, token, DSN or .env content. Never run `claude -p`.
+"""
+
+
+def codex_quota(now=None):
+    """The ChatGPT plan's weekly window as the newest Codex rollout last reported it:
+    {used_percent, resets_at, credits} or None when no rollout carries rate_limits.
+    A window whose resets_at has passed reads as 0% used (it has rolled over)."""
+    import glob
+    import time
+    files = sorted(glob.glob(os.path.expanduser("~/.codex/sessions/*/*/*/rollout-*.jsonl")),
+                   key=os.path.getmtime, reverse=True)[:5]
+    for f in files:
+        last = None
+        try:
+            for line in open(f, errors="ignore"):
+                if '"rate_limits"' in line:
+                    last = line
+        except OSError:
+            continue
+        if not last:
+            continue
+        try:
+            obj = json.loads(last)
+        except ValueError:
+            continue
+        stack = [obj]
+        while stack:
+            o = stack.pop()
+            if isinstance(o, dict):
+                rl = o.get("rate_limits")
+                if isinstance(rl, dict) and isinstance(rl.get("primary"), dict):
+                    p = rl["primary"]
+                    used, resets = p.get("used_percent"), p.get("resets_at")
+                    if resets and resets < (now or time.time()):
+                        used = 0.0
+                    return {"used_percent": used, "resets_at": resets,
+                            "credits": (rl.get("credits") or {}).get("balance")}
+                stack.extend(o.values())
+            elif isinstance(o, list):
+                stack.extend(o)
+    return None
+
+
+def codex_quota_refusal(quota):
+    """Why the codex backend must not spend, or None. The cap (default 85% of the weekly
+    window, env DOIT_CODEX_QUOTA_CAP) keeps the plan's overflow credits unspent: past it
+    the spawn refuses BEFORE running, and the contract's seat fallback takes it."""
+    cap = float(os.environ.get("DOIT_CODEX_QUOTA_CAP", "85"))
+    if quota and quota.get("used_percent") is not None and float(quota["used_percent"]) >= cap:
+        return f"codex quota precheck: weekly window {quota['used_percent']}% used >= cap {cap}%"
+    return None
+
+
+def run_codex(spawn, role, model, schema_path, packet, cwd, timeout, path=None, effort=None):
     """The codex backend (pilot S1). `codex exec` reads the packet on stdin, enforces
     the contract's schema itself (`--output-schema`), writes the final object to
     `-o` (no `doit validate` loop, no transcription — pilot S18/S28), and streams
@@ -349,15 +408,30 @@ def run_codex(spawn, role, model, schema_path, packet, cwd, timeout, path=None):
     ever has to ask or infer it."""
     import time
     SEAT.mkdir(parents=True, exist_ok=True)
+    quota = codex_quota()
+    refusal = codex_quota_refusal(quota)
+    if refusal:
+        env = {"is_error": True, "terminal_reason": "error", "structured_output": None, "num_turns": None,
+               "duration_ms": 0, "usage": {}, "total_cost_usd": None, "modelUsage": {model: {}},
+               "model_observed": False, "session_id": None, "permission_denials": [], "result": refusal,
+               "codex_quota": quota}
+        return SeatResult(json.dumps(env), 1, refusal)
+    # The role contract is the rulebook (Thinker 2026-10-12): a codex spawn used to get the
+    # packet alone and would have followed the repo's AGENTS.md instead of DO-IT's contract.
+    contract = (AGENTS / f"{role}.md").read_text().split("---", 2)[-1].strip()
+    packet = f"{CODEX_PREAMBLE}\n=== ROLE CONTRACT: {role} ===\n{contract}\n=== END CONTRACT ===\n\n{packet}"
     packet_text = f"WRITE PATH: {path}\n\n{packet}" if path else packet
     (SEAT / f"{spawn}.packet.md").write_text(packet_text)
     out, log = SEAT / f"{spawn}.output.json", SEAT / f"{spawn}.codex.jsonl"
     sandbox = "workspace-write" if role in CODEX_WRITES else "read-only"
     cmd = ["codex", "exec", "-C", str(cwd), "-m", model, "--sandbox", sandbox, "--skip-git-repo-check",
-           "--json", "--output-schema", str(schema_path), "-o", str(out), "--add-dir", str(CONTENT), "-"]
+           "--json", "--output-schema", str(schema_path), "-o", str(out), "--add-dir", str(CONTENT)]
+    if effort:
+        cmd += ["-c", f"model_reasoning_effort={effort}"]
+    cmd += ["-"]
     (SEAT / f"{spawn}.cmd.json").write_text(json.dumps({"cmd": cmd, "cwd": str(cwd), "path": path}, indent=1))
     t0 = time.time()
-    r = run_codex_exec(cmd, packet, str(cwd), timeout)
+    r = run_codex_exec(cmd, packet_text, str(cwd), timeout)
     log.write_text(r.stdout or "")
     thread, turns, usage, errors = None, 0, {}, []
     for line in (r.stdout or "").splitlines():
@@ -385,7 +459,8 @@ def run_codex(spawn, role, model, schema_path, packet, cwd, timeout, path=None):
                      "cache_read_input_tokens": usage.get("cached_input_tokens"),
                      "cache_creation_input_tokens": usage.get("cache_write_input_tokens")},
            "total_cost_usd": None, "modelUsage": {model: {}}, "model_observed": False, "session_id": thread,
-           "permission_denials": [], "result": "; ".join(errors) or (r.stderr or "")[-300:]}
+           "permission_denials": [], "result": "; ".join(errors) or (r.stderr or "")[-300:],
+           "codex_quota": codex_quota() or quota}
     return SeatResult(json.dumps(env), r.returncode, r.stderr)
 
 
@@ -1388,7 +1463,10 @@ def main(a):
     prior = next((e for e in fold.read_events() if e.get("type") == "spawn-failed"
                   and e.get("packet_sha256") == meta["packet_sha256"]
                   and e.get("contract_sha256") == meta["contract_sha256"]
-                  and str(e.get("why", "")).startswith(("is_error", "contamination"))), None)
+                  and str(e.get("why", "")).startswith(("is_error", "contamination"))
+                  # A codex quota precheck refusal never ran and never spent: it must not
+                  # bar the same packet once the window resets (Thinker 2026-10-12).
+                  and "codex quota precheck" not in str(e.get("why", ""))), None)
     if prior:
         fail(f"identical packet and contract already failed as {prior.get('spawn')} "
              f"({str(prior.get('why'))[:60]}); not retried (D120) — not spent")
@@ -1504,7 +1582,7 @@ def main(a):
     try:
         if backend == "codex":
             r = run_codex(spawn, a.role, mm["model"], schema_path, packet, cwd, (a.timeout or tmin) * 60,
-                         path=write_path)
+                         path=write_path, effort=mm.get("effort"))
         elif seat:
             r = run_seat(spawn, cmd, packet, cwd, (a.timeout or tmin) * 60, path=write_path,
                         window=wm * 60, ledger=ledger, base=base, role=a.role, view=view)
