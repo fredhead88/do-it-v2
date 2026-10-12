@@ -426,6 +426,14 @@ def run_codex(spawn, role, model, schema_path, packet, cwd, timeout, path=None, 
     sandbox = "workspace-write" if role in CODEX_WRITES else "read-only"
     cmd = ["codex", "exec", "-C", str(cwd), "-m", model, "--sandbox", sandbox, "--skip-git-repo-check",
            "--json", "--output-schema", str(schema_path), "-o", str(out), "--add-dir", str(CONTENT)]
+    if sandbox == "workspace-write":
+        # A builder's cwd is a git worktree whose objects/refs live in the main repo's
+        # common dir, outside the sandbox root: without it every commit fails (Thinker
+        # 2026-10-12, builders moved to codex).
+        gd = subprocess.run(["git", "-C", str(cwd), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                            capture_output=True, text=True)
+        if gd.returncode == 0 and gd.stdout.strip():
+            cmd += ["--add-dir", gd.stdout.strip()]
     if effort:
         cmd += ["-c", f"model_reasoning_effort={effort}"]
     cmd += ["-"]
