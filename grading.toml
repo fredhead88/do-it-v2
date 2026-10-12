@@ -13,7 +13,7 @@
 
 [project.albert-scott]
 admin_env = ["AS_LOCAL_PG_ADMIN"]
-db_env = ["SUPABASE_DB_URL", "DATABASE_URL", "PG_PARITY_DB_URL"]
+db_env = ["SUPABASE_DB_URL", "DATABASE_URL", "PG_PARITY_DB_URL", "SCRATCH_PG_URL"]
 node_dirs = ["dashboard"]
 # Absolute: the checkout (~/.do-it/repos/albert-scott) is a symlink to
 # /opt/albert-scott, and the venv's script shebangs name the real path, which is
