@@ -111,6 +111,12 @@ _, _, rows = _fold_and_candidates(root)
 r = _row(rows, "L-spec-2002")
 assert r["status"] == "dispatchable", f"wave waiver: expected dispatchable, got {r}"
 print("autodispatch wave-waive ok")
+_write(root, "L-thinker-0001.jsonl",
+       {"v": 1, "ts": _iso(NOW + datetime.timedelta(seconds=1)), "type": "decision", "subject": "L-spec-2002",
+        "project": "proj2", "wave_waive": "no", "why": "revoked"})
+_, _, rows = _fold_and_candidates(root)
+assert _row(rows, "L-spec-2002")["status"] == "blocked", "wave waiver: a later wave_waive=no must restore the hold"
+print("autodispatch wave-waive revoke ok")
 
 # ── AC3: shape.check block non-empty -> blocked, never dispatched ──────────
 root = _fresh("proj3")

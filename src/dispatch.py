@@ -161,7 +161,8 @@ def wave_blocker(all_ev, charter, subject, wave):
     if any(e.get("subject") == subject and e.get("type") in ("build-done", "shipped") for e in all_ev):
         return None
     # Thinker 2026-10-12: wave order is coarse — it holds a spec behind EVERY earlier-wave sibling, not only the ones it depends on. A thinker/operator `decision` on the subject carrying wave_waive=yes (the dependencies it does have are merged) lifts the hold for that subject only; it is on the ledger, never silent.
-    if any(e.get("subject") == subject and e.get("type") == "decision" and e.get("wave_waive") == "yes" for e in all_ev):
+    waives = [e for e in all_ev if e.get("subject") == subject and e.get("type") == "decision" and e.get("wave_waive")]
+    if waives and max(waives, key=lambda e: e.get("ts", ""))["wave_waive"] == "yes":   # the latest one wins, so a waiver can be revoked
         return None
     import fold
     by_subject = {}
