@@ -126,7 +126,14 @@ def _rewrite_verify(text: str, repo, tree_dir, view, venv_rel=None) -> bytes:
     # substitution is resolved here to the view's tree instead of failing every grade.
     for form in ('"$(git rev-parse --show-toplevel)"', "$(git rev-parse --show-toplevel)"):
         text = text.replace(form, f'"{tree_dir}"')
+    # Thinker 2026-10-12: Verification scratch files under /tmp (tee logs, fingerprints)
+    # sit outside the view and fail the view-paths preflight; give them the view's own tmp.
     rewritten = _rewrite_repo_paths(text, repo, tree_dir, venv_rel)
+    keep = (str(view), str(repo), str(pathlib.Path(repo).resolve()), str(tree_dir))
+    rewritten = re.sub(r"(?<![\w./-])/tmp/[^\s'\"|;&)]*",
+                       lambda m: m.group(0) if m.group(0).startswith(keep)
+                       else f"{view}/tmp/" + m.group(0)[len("/tmp/"):], rewritten)
+    (pathlib.Path(view) / "tmp").mkdir(parents=True, exist_ok=True)
     lines = rewritten.split("\n", 1)
     shebang, rest = (lines[0], lines[1]) if rewritten.startswith("#!") else ("", rewritten)
     source_line = (f'[ -s "{view}/grading.env" ] && . "{view}/grading.env"; '
