@@ -103,6 +103,15 @@ r = _row(rows, "L-spec-2002")
 assert r["status"] == "blocked" and "L-spec-2001" in (r["reason"] or ""), f"AC2: {r}"
 print("autodispatch-0427 AC2 ok")
 
+# ── wave waiver: a decision with wave_waive=yes lifts the hold for that subject only
+_write(root, "L-thinker-0001.jsonl",
+       {"v": 1, "ts": _iso(NOW), "type": "decision", "subject": "L-spec-2002",
+        "project": "proj2", "wave_waive": "yes", "why": "its producers merged"})
+_, _, rows = _fold_and_candidates(root)
+r = _row(rows, "L-spec-2002")
+assert r["status"] == "dispatchable", f"wave waiver: expected dispatchable, got {r}"
+print("autodispatch wave-waive ok")
+
 # ── AC3: shape.check block non-empty -> blocked, never dispatched ──────────
 root = _fresh("proj3")
 _spec_file(root, "L-spec-3001", text="not a real spec")
