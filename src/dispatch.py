@@ -325,6 +325,7 @@ def run_claude(cmd, packet, cwd, timeout):
 # merge gate are the enforcement on that backend. The post-spawn porcelain
 # comparison is not one of them: it records movement on spawn-done (repo_moved)
 # instead of voiding the spawn, because concurrent work is not misbehaviour.
+CODEX_FULL_ACCESS = ("builder",)
 CODEX_WRITES = ("builder", "spec-writer", "research", "reuse-scout", "probe", "reviewer", "charter-reviewer")
 
 
@@ -477,6 +478,12 @@ def run_codex(spawn, role, model, schema_path, packet, cwd, timeout, path=None, 
     (SEAT / f"{spawn}.packet.md").write_text(packet_text)
     out, log = SEAT / f"{spawn}.output.json", SEAT / f"{spawn}.codex.jsonl"
     sandbox = "workspace-write" if role in CODEX_WRITES else "read-only"
+    if role in CODEX_FULL_ACCESS:
+        # Thinker 2026-10-12: workspace-write keeps .git read-only and has no network, so
+        # a builder can neither commit nor reach the read-only DB (L-builder-1640, 0828).
+        # A builder runs in its own throwaway worktree, as the operator's manual codex
+        # workers already do; its contract still forbids reading .env or any secret.
+        sandbox = "danger-full-access"
     original = json.loads(pathlib.Path(schema_path).read_text())
     strict_path = SEAT / f"{spawn}.strict-schema.json"
     strict_path.write_text(json.dumps(strict_schema(original), indent=1))
