@@ -88,6 +88,20 @@ def _raising(*a, **kw):
 
 
 _real_run, _real_system = subprocess.run, os.system
+
+# Keep scratch clusters and fixture directories bounded even on assertion failure.
+import atexit
+
+
+def cleanup_grading_fixtures():
+    grading_env._run = _real_run
+    for fixture_view in (FIXTURE_ROOT / "grade").glob("*"):
+        grading_env.teardown(fixture_view)
+    for fixture_dir in (FIXTURE_ROOT, FIXTURE_HOME, FIXTURE_SCRATCH):
+        shutil.rmtree(fixture_dir, ignore_errors=True)
+
+
+atexit.register(cleanup_grading_fixtures)
 subprocess.run, os.system, grading_env._run = _raising, _raising, _raising
 try:
     # L-spec-8034/R12.f: `required()` is now per-criterion (`criterion_caps`),
@@ -661,6 +675,274 @@ check("origin" not in grading_env._DEPLOY_TOKENS and "deployed" not in grading_e
       grading_env._DEPLOY_TOKENS)
 print("AC12 (8034) ok")
 
+
+# L-spec-0897: real collision regression and the private admin endpoint.
+import re
+import urllib.parse
+
+
+def admin_sql(dsn, sql, *, succeeds=True, env=None):
+    result = subprocess.run(["psql", dsn, "-w", "-v", "ON_ERROR_STOP=1", "-tAc", sql],
+                            capture_output=True, text=True, env=env, timeout=15)
+    check((result.returncode == 0) == succeeds, "admin SQL outcome differs")
+    return result
+
+
+def pg_running(view, name):
+    result = subprocess.run([str(grading_env._PG_BIN / "pg_ctl"), "-D",
+                             str(view / name / "data"), "status"], capture_output=True)
+    return result.returncode == 0
+
+
+admin_row = {
+    "db_env": ["SUPABASE_DB_URL", "DATABASE_URL"],
+    "admin_env": ["FAKE_ADMIN_URL"],
+    "db_setup": {"argv": ["/bin/bash", "-c",
+                           'psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "create role fake_cluster_role"'],
+                 "cwd": "."},
+}
+# Exercise the TOML parser, rather than replacing the project-row lookup.
+with FIXTURE_TOML.open("a") as fixture_config:
+    fixture_config.write('\n[project.adminproj]\ndb_env = ["SUPABASE_DB_URL", "DATABASE_URL"]\n'
+                         'admin_env = ["FAKE_ADMIN_URL"]\n[project.adminproj.db_setup]\n'
+                         'argv = ' + json.dumps(admin_row["db_setup"]["argv"]) + '\ncwd = "."\n')
+write_spec_verify("L-spec-9897", "grader", "AC1 [backend]: live_db", "")
+admin_view = FIXTURE_ROOT / "grade" / "admin-endpoint"
+(admin_view / "tree").mkdir(parents=True)
+admin_calls = []
+original_run = grading_env._run
+original_env = {k: os.environ.get(k) for k in SENTINELS}
+
+
+def record_admin_run(argv, **kw):
+    if argv[-1] == "loopback":
+        admin_calls.append(kw["env"])
+    return original_run(argv, **kw)
+
+
+try:
+    os.environ.update(SENTINELS)
+    grading_env._run = record_admin_run
+    failures = grading_env.preflight("grader", "L-spec-9897", admin_view, "adminproj", repo=REPO)
+    check(not failures, "admin preflight failed")
+    state = json.loads((admin_view / ".grading_state.json").read_text())
+    admin_dsn = state["admin_dsn"]
+    db_dsn = state["dsn"]
+    exported = grading_env.pane_env(admin_view)
+    check(re.fullmatch(r"postgresql://albert:[0-9a-f]{32}@127\.0\.0\.1:\d+/postgres", admin_dsn),
+          "admin endpoint DSN shape")
+    check(exported["FAKE_ADMIN_URL"] == admin_dsn and admin_dsn != db_dsn,
+          "distinct exported admin endpoint")
+    check(all(exported[n] == db_dsn for n in admin_row["db_env"]), "db_env preserved")
+    check(urllib.parse.urlparse(admin_dsn).port !=
+          int(urllib.parse.parse_qs(urllib.parse.urlparse(db_dsn).query)["port"][0]),
+          "cluster ports differ")
+    check((admin_view / ".grading_state.json").stat().st_mode & 0o777 == 0o600,
+          "state holding admin password is private")
+    print("admin endpoint provisioned ok")
+
+    env_path = grading_env.write_grading_env(admin_view)
+    env_text = env_path.read_text()
+    check("export FAKE_ADMIN_URL=" in env_text and env_path.stat().st_mode & 0o777 == 0o600,
+          "grading.env exports admin endpoint privately")
+    sourced = subprocess.run(["/bin/bash", "-c",
+                              'source "$1"; /usr/bin/psql "$FAKE_ADMIN_URL" -w -tAc "select 1"',
+                              "round-trip", str(env_path)], capture_output=True, text=True,
+                             env=grading_env._clean_env(), timeout=15)
+    check(sourced.returncode == 0 and sourced.stdout.strip() == "1", "grading.env connection")
+    print("grading.env round-trip ok")
+
+    guard = ("DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='fake_cluster_role') "
+             "THEN RAISE EXCEPTION 'fake role must not preexist'; END IF; "
+             "CREATE ROLE fake_cluster_role; END $$;")
+    admin_sql(exported["FAKE_ADMIN_URL"], guard)
+    check(admin_sql(admin_dsn, "select count(*) from pg_roles where rolname='fake_cluster_role'")
+          .stdout.strip() == "1", "admin role fresh connection read-back")
+    collision = admin_sql(db_dsn, guard, succeeds=False)
+    check("fake role must not preexist" in collision.stderr, "collision guard reproduced")
+    check(admin_sql(db_dsn, "select count(*) from pg_roles where rolname='fake_cluster_role'")
+          .stdout.strip() == "1", "db_setup role remains")
+    print("collision: admin passes, db_env fails, role still in db_env cluster ok")
+    # Count immediately before dropping the scratch role.
+    check(admin_sql(admin_dsn, "select count(*) from pg_roles where rolname='fake_cluster_role'")
+          .stdout.strip() == "1", "scratch role count before drop")
+    admin_sql(admin_dsn, "drop role fake_cluster_role")
+
+    clean_auth_env = grading_env._clean_env()
+    for name in ("PGPASSWORD", "PGPASSFILE", "PGSERVICE", "PGSERVICEFILE"):
+        clean_auth_env.pop(name, None)
+    clean_auth_env.update(HOME=str(FIXTURE_HOME), PGPASSFILE=str(FIXTURE_HOME / "no-pgpass"))
+    parsed_admin = urllib.parse.urlparse(admin_dsn)
+    passwordless = f"postgresql://albert@127.0.0.1:{parsed_admin.port}/postgres"
+    socketless = f"postgresql://albert@/postgres?host={admin_view / 'pg-admin'}&port={parsed_admin.port}"
+    wrong = f"postgresql://albert:wrong@127.0.0.1:{parsed_admin.port}/postgres"
+    for rejected in (passwordless, socketless, wrong):
+        rejected_result = admin_sql(rejected, "select 1", succeeds=False, env=clean_auth_env)
+        check("password" in rejected_result.stderr.lower(), "password auth refusal")
+    check(admin_sql(admin_dsn, "select 1", env=clean_auth_env).stdout.strip() == "1", "password accepted")
+    hba = (admin_view / "pg-admin" / "data" / "pg_hba.conf").read_text()
+    check(not any(line.split()[-1:] == ["trust"] for line in hba.splitlines()
+                  if line.strip() and not line.lstrip().startswith("#")), "no trust auth")
+    check(not list((admin_view / "pg-admin").glob("password.*")), "temporary pwfile removed")
+    print("admin cluster refuses passwordless ok")
+
+    check(admin_calls and all(not set(e) & set(SENTINELS) for e in admin_calls), "no production env")
+    check(all(v not in admin_dsn + env_text + json.dumps(state) for v in SENTINELS.values()),
+          "no production sentinel in exports or state")
+    check(admin_sql(admin_dsn, "show listen_addresses").stdout.strip() == "127.0.0.1", "loopback only")
+    check(admin_sql(admin_dsn, "show unix_socket_directories").stdout.strip() == str(admin_view / "pg-admin"),
+          "view-owned unix socket")
+    print("no prod dsn, loopback only ok")
+
+    for number in (1, 2):
+        fixture_dsn = exported["FAKE_ADMIN_URL"]
+        admin_sql(fixture_dsn, guard)
+        admin_sql(fixture_dsn, f"create database fixture_repeat_{number}")
+        fresh_dsn = fixture_dsn.rsplit("/", 1)[0] + f"/fixture_repeat_{number}"
+        admin_sql(fresh_dsn, "create table probe(x int); insert into probe values (42)")
+        check(admin_sql(fresh_dsn, "select x from probe").stdout.strip() == "42", "fresh row read-back")
+        check(admin_sql(fresh_dsn, "select count(*) from probe").stdout.strip() == "1", "row count before drop")
+        check(admin_sql(fixture_dsn, f"select count(*) from pg_database where datname='fixture_repeat_{number}'")
+              .stdout.strip() == "1", "database count before drop")
+        admin_sql(fixture_dsn, f"drop database fixture_repeat_{number}")
+        check(admin_sql(fixture_dsn, "select count(*) from pg_roles where rolname='fake_cluster_role'")
+              .stdout.strip() == "1", "role count before release")
+        admin_sql(fixture_dsn, "drop role fake_cluster_role")
+        check(admin_sql(fixture_dsn, "select count(*) from pg_roles where rolname='fake_cluster_role'")
+              .stdout.strip() == "0", "role-clean after release")
+    print("admin round trip, role-releasing fixture repeats ok")
+finally:
+    grading_env._run = original_run
+    for k, v in original_env.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
+    grading_env.teardown(admin_view)
+check(not pg_running(admin_view, "pg") and not pg_running(admin_view, "pg-admin"), "both clusters stopped")
+check(grading_env.teardown(admin_view) is None, "second teardown")
+check(grading_env.teardown(FIXTURE_ROOT / "absent") is None, "absent teardown")
+# First cluster absent/stopped must not prevent stopping the admin cluster.
+only_admin = FIXTURE_ROOT / "grade" / "admin-only"
+ok, _, _ = grading_env._prove_db(only_admin, admin=True)
+check(ok and pg_running(only_admin, "pg-admin"), "admin-only starts")
+grading_env.teardown(only_admin)
+check(not pg_running(only_admin, "pg-admin"), "admin-only stops")
+print("both clusters teardown, admin-only, idempotent ok")
+
+no_admin = FIXTURE_ROOT / "grade" / "no-admin"
+(no_admin / "tree").mkdir(parents=True)
+try:
+    check(not grading_env.preflight("grader", "L-spec-9897", no_admin, "testproj", repo=REPO),
+          "no-admin project preflight")
+    check(not (no_admin / "pg-admin").exists() and "FAKE_ADMIN_URL" not in grading_env.pane_env(no_admin),
+          "no second cluster without config")
+finally:
+    grading_env.teardown(no_admin)
+print("no-admin project starts no second cluster ok")
+
+failed_admin = FIXTURE_ROOT / "grade" / "failed-admin"
+(failed_admin / "tree").mkdir(parents=True)
+schema_calls = []
+
+
+def fail_admin_run(argv, **kw):
+    if argv[-1] == "loopback":
+        return subprocess.CompletedProcess(argv, 1, "", "injected startup failure")
+    if "create role fake_cluster_role" in " ".join(argv):
+        schema_calls.append(argv)
+    return original_run(argv, **kw)
+
+
+try:
+    grading_env._run = fail_admin_run
+    failures = grading_env.preflight("grader", "L-spec-9897", failed_admin, "adminproj", repo=REPO)
+    check(any(c == "db" and reason.startswith("admin cluster") for c, reason in failures),
+          "admin failure attributed to db")
+    check(not schema_calls and not pg_running(failed_admin, "pg-admin"), "no schema or orphan on failure")
+    check(not grading_env.pane_env(failed_admin).get("FAKE_ADMIN_URL"), "no failed admin export")
+finally:
+    grading_env._run = original_run
+    grading_env.teardown(failed_admin)
+check(not pg_running(failed_admin, "pg"), "first cluster stops after admin failure")
+print("admin failure prevents schema, no orphan ok")
+
+# Run the actual loopback script with only pg_ctl's bind result injected.
+# initdb remains real; all files and any process stay in the fixture root.
+retry_tools = FIXTURE_ROOT / "retry-tools"
+retry_tools.mkdir()
+(retry_tools / "initdb").symlink_to(grading_env._PG_BIN / "initdb")
+retry_ctl = retry_tools / "pg_ctl"
+retry_ctl.write_text("""#!/bin/bash
+set -eu
+if [ "${!#}" = stop ]; then exit 1; fi
+printf '%s\\n' "$*" >> "$RETRY_ATTEMPTS"
+while [ "$1" != -l ]; do shift; done
+printf 'could not bind IPv4 address: Address already in use\\n' > "$2"
+exit 1
+""")
+retry_ctl.chmod(0o755)
+retry_script = FIXTURE_ROOT / "retry-private-pg.sh"
+retry_script.write_text((DOIT_SRC / "scripts" / "private-pg.sh").read_text().replace(
+    "B=/usr/lib/postgresql/17/bin", f"B={retry_tools}"))
+retry_view = FIXTURE_ROOT / "grade" / "all-ports-busy"
+attempt_file = FIXTURE_ROOT / "retry-attempts"
+retry_result = subprocess.run(["/bin/bash", str(retry_script), str(retry_view / "pg-admin"), "loopback"],
+                              capture_output=True, text=True,
+                              env=grading_env._clean_env({"RETRY_ATTEMPTS": str(attempt_file),
+                                                         "PRIVATE_PG_AVOID_PORT": "20000"}), timeout=30)
+check(retry_result.returncode != 0 and "5 port attempts" in retry_result.stderr,
+      "all bind attempts reported")
+attempts = attempt_file.read_text().splitlines()
+retry_ports = [int(re.search(r"port=(\d+)", line).group(1)) for line in attempts]
+check(len(retry_ports) == len(set(retry_ports)) == 5 and 20000 not in retry_ports,
+      "five distinct ports avoid first cluster")
+check(not pg_running(retry_view, "pg-admin") and not list((retry_view / "pg-admin").glob("password.*")),
+      "all-bind failure cleans up")
+# A single bind collision then a successful real start.
+retry_ctl.write_text("""#!/bin/bash
+set -eu
+if [ "${!#}" = start ] && [ ! -f "$RETRY_ATTEMPTS" ]; then
+  printf 'attempt\\n' > "$RETRY_ATTEMPTS"
+  while [ "$1" != -l ]; do shift; done
+  printf 'could not bind IPv4 address: Address already in use\\n' > "$2"
+  exit 1
+fi
+exec /usr/lib/postgresql/17/bin/pg_ctl "$@"
+""")
+recovered_view = FIXTURE_ROOT / "grade" / "retry-recovers"
+try:
+    retry_result = subprocess.run(["/bin/bash", str(retry_script), str(recovered_view / "pg-admin"), "loopback"],
+                                  capture_output=True, text=True,
+                                  env=grading_env._clean_env({"RETRY_ATTEMPTS": str(FIXTURE_ROOT / "first-bind-failed")}),
+                                  timeout=30)
+    check(retry_result.returncode == 0 and pg_running(recovered_view, "pg-admin"), "bind retry recovers")
+finally:
+    grading_env.teardown(recovered_view)
+check(not pg_running(recovered_view, "pg-admin"), "recovered cluster stops")
+
+raised_view = FIXTURE_ROOT / "grade" / "raised-after-start"
+(raised_view / "tree").mkdir(parents=True)
+
+
+def raise_after_admin_start(argv, **kw):
+    result = original_run(argv, **kw)
+    if argv[-1] == "loopback":
+        check(result.returncode == 0, "exception fixture started admin cluster")
+        raise subprocess.TimeoutExpired(argv, 60)
+    return result
+
+
+try:
+    grading_env._run = raise_after_admin_start
+    failures = grading_env.preflight("grader", "L-spec-9897", raised_view, "adminproj", repo=REPO)
+    check(any(c == "db" and reason.startswith("admin cluster") for c, reason in failures),
+          "startup exception reported")
+    check(not pg_running(raised_view, "pg-admin"), "exception stops partial admin cluster")
+finally:
+    grading_env._run = original_run
+    grading_env.teardown(raised_view)
+print("admin port retries bounded, recovery and exception cleanup ok")
 
 shutil.rmtree(FIXTURE_ROOT, ignore_errors=True)
 print("ALL OK")
