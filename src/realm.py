@@ -36,7 +36,7 @@ import time
 import urllib.parse
 import urllib.request
 
-import realm_omens
+import realm_omens, realm_codex
 
 ROOT = pathlib.Path(os.environ.get("DOIT_ROOT", pathlib.Path.home() / ".do-it"))
 EVENTS, SEAT = ROOT / "events", ROOT / "seat"
@@ -50,7 +50,7 @@ PROVING = (LIVE_REPO / "src" / "proving.py") if (LIVE_REPO / "src" / "proving.py
 BRIEF = (LIVE_REPO / "src" / "brief.py") if (LIVE_REPO / "src" / "brief.py").is_file() else (HERE / "brief.py")
 
 KEEP = {
-    "spawn-started", "spawn-done", "spawn-failed", "spawn-stale", "build-started", "build-done", "build-blocked",
+    "spawn-started", "spawn-done", "spawn-failed", "spawn-stale", "build-started", "build-done", "build-blocked", "backend-fallback",
     "verdict", "review", "merge-gate-clean", "merge-gate-rework", "shipped", "escalation-blocking",
     "question", "decision", "spec-written", "charter-filed", "plan-written", "tick", "spec-killed",
     "deploy-landed", "deploy-failed", "deploy-started", "deploy-refused", "charter-retracted", "charter-complete",
@@ -108,14 +108,14 @@ def compact(e, actor):
         if ty == "spawn-done":
             pass
         return {k: v for k, v in r.items() if v is not None}
-    sp = e.get("spawn")
+    sp = e.get("spawn"); r.update({"backend": e["backend"]} if e.get("backend") == "codex" else {})
     if sp:
         r["sp"] = sp
         r["r"] = e.get("role") or role_of(sp)
     if ty == "spawn-done":
         r.update(dur=e.get("duration_ms"), tok=e.get("subagent_tokens"), st=e.get("status"), m=e.get("model_used"))
-    elif ty == "spawn-failed":
-        r["why"] = trunc(e.get("why"), 160)
+    elif ty in ("spawn-failed", "backend-fallback"):
+        r["why"] = realm_codex.text(e.get("why"), 160) if ty == "backend-fallback" else trunc(e.get("why"), 160)
     elif ty == "spawn-stale":
         r["why"] = trunc(e.get("reason") or e.get("why"), 160)
     elif ty == "spawn-started":
@@ -1147,7 +1147,7 @@ def bootstrap(hours, states=None, goals=None, proving=None):
         proving = derive_proving()
     _, spec_ch_now = charter_index(raw)
     metrics_now = metrics_at(rows, states, claims, now, sys_signals(), None, spec_ch_now)
-    return {"live": True, "now": now.isoformat(timespec="seconds"), "root": str(ROOT), "metrics": metrics_now,
+    return {"codex": realm_codex.payload(raw), "live": True, "now": now.isoformat(timespec="seconds"), "root": str(ROOT), "metrics": metrics_now,
             "window": [window_rows[0]["t"] if window_rows else now.isoformat(timespec="seconds"), now.isoformat(timespec="seconds")],
             "ledger_start": rows[0]["t"] if rows else None, "n_events": len(raw), "events": window_rows,
             "stats": role_stats(raw), "states": states, "goals": goals, "proving": proving,
@@ -1215,7 +1215,7 @@ def since(seq, t=None):
             ledger = [d for d in ledger if d.get("t", "") > t]
     return {"seq": top, "ledger": ledger, "claims": claims, "started": started,
             "states": HUB.states, "goals": HUB.goals or [], "proving": HUB.proving, "seat": seat_summary(),
-            "now": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")}
+            "codex": realm_codex.payload(read_all()[1]), "now": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")}
 
 
 def tail_forever(poll=1.0):
@@ -1428,7 +1428,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if u.path in ("/", "/index.html"):
             # The page holds no ledger data; it is served open so a browser that
             # remembered the key can present it on the API calls that follow.
-            body = PAGE.read_bytes()
+            body = realm_codex.page_bytes(PAGE)
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))

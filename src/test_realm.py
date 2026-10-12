@@ -175,6 +175,58 @@ def test_compute_drops_omens_whose_subjects_are_all_finished_and_counts_needs_yo
     assert [i["id"] for i in out["items"]] == ["rec:disk-full"] and out["needs_you"] == 0 and out["health"] == 1
     assert out["v"] == 2 and out["at"] == _ago(0)
 
+def test_codex_ledger_lifecycle_and_compact():
+    import realm_codex
+    rows = [
+        {"ts": "2026-10-12T10:00:00Z", "type": "build-started", "spawn": "L-builder-7", "subject": "L-spec-7", "backend": "codex"},
+        {"ts": "2026-10-12T10:01:00Z", "type": "backend-fallback", "spawn": "L-builder-7", "why": "weekly limit"},
+        {"ts": "2026-10-12T10:02:00Z", "type": "build-done", "spawn": "L-builder-7", "status": "DONE"},
+    ]
+    with tempfile.TemporaryDirectory() as home:
+        for n, state in [(1, "live"), (2, "fallback"), (3, "ended")]:
+            data = realm_codex.payload(rows[:n], home=pathlib.Path(home), processes=set(), windows={})
+            assert len(data["sessions"]) == 1
+            s = data["sessions"][0]
+            assert (s["kind"], s["state"], s["subject"]) == ("doit-build", state, "L-spec-7")
+            if n > 1:
+                assert s["fell_back"] == "fell back: weekly limit"
+        assert realm.compact(rows[0], "builder")["backend"] == "codex"
+        assert realm.compact(rows[1], "builder")["ty"] == "backend-fallback"
+
+
+def test_codex_workers_allowlist_mtime_quota_and_paths():
+    import realm_codex
+    now = 1791806400
+    with tempfile.TemporaryDirectory() as tmp:
+        home = pathlib.Path(tmp)
+        folder = home / ".codex/sessions/2026/10/12"
+        folder.mkdir(parents=True)
+        worktree = home / ".do-it/worktrees/do-it-v2/audit"
+        for ident, age, cwd in [("live", 10, worktree), ("idle", 600, home / "private"), ("ended", 2000, worktree), ("no-process", 10, worktree), ("old", 24000, worktree)]:
+            rows = [
+                {"type": "session_meta", "payload": {"id": ident, "cwd": str(cwd), "timestamp": "2026-10-12T10:00:00Z"}},
+                {"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "intro\n# Technical audit\nFAKE_TOKEN_SECRET_MARKER\nprivate prompt"}]}},
+                {"type": "turn_context", "payload": {"turn_id": "turn-1"}},
+                {"type": "event_msg", "payload": {"type": "token_count", "info": {"total_token_usage": {"total_tokens": 1234}}, "rate_limits": {"secondary": {"window_minutes": 10080, "used_percent": 71, "resets_at": now + 100}, "credits": {"balance": "20.00"}}}},
+                {"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "# PRIVATE_SECOND_HEADING"}]}},
+            ]
+            f = folder / ("rollout-" + ident + ".jsonl")
+            f.write_text("\n".join(map(json.dumps, rows)) + '\n{"torn":')
+            os.utime(f, (now - age, now - age))
+        data = realm_codex.payload([], home=home, now=now, processes={"live"}, windows={str(worktree): "codex-audit"})
+        by_id = {s["id"]: s for s in data["sessions"]}
+        assert set(by_id) == {"live", "idle", "ended", "no-process"}
+        assert [by_id[x]["state"] for x in ["live", "idle", "ended", "no-process"]] == ["live", "idle", "ended", "idle"]
+        assert by_id["live"]["subject"] == "Technical audit"
+        assert by_id["live"]["cwd"] == "audit" and "cwd" not in by_id["idle"]
+        assert by_id["live"]["tmux"] == "codex-audit"
+        assert by_id["live"]["tokens"] == 1234 and by_id["live"]["turns"] == 1
+        assert data["quota"] == {"weekly_used_pct": 71, "resets_at": now + 100, "credits_balance": "20.00"}
+        serialized = json.dumps(data)
+        for marker in ["FAKE_TOKEN_SECRET_MARKER", "PRIVATE_SECOND_HEADING", "private prompt", str(home)]:
+            assert marker not in serialized
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
