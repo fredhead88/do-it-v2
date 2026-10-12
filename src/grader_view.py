@@ -121,6 +121,11 @@ def _rewrite_verify(text: str, repo, tree_dir, view, venv_rel=None) -> bytes:
     conditional source, so it always wins). A verify script naming no
     checkout-absolute path and run before any `grading.env` exists comes back
     byte-identical but for that one inserted line."""
+    # Thinker 2026-10-12: spec writers routinely open Verification with
+    # `cd "$(git rev-parse --show-toplevel)"`; the view is git-less (R8), so that
+    # substitution is resolved here to the view's tree instead of failing every grade.
+    for form in ('"$(git rev-parse --show-toplevel)"', "$(git rev-parse --show-toplevel)"):
+        text = text.replace(form, f'"{tree_dir}"')
     rewritten = _rewrite_repo_paths(text, repo, tree_dir, venv_rel)
     lines = rewritten.split("\n", 1)
     shebang, rest = (lines[0], lines[1]) if rewritten.startswith("#!") else ("", rewritten)
