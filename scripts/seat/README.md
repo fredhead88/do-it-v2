@@ -71,3 +71,10 @@ if it exits non-zero, stop: someone else already claimed this seat. 1. Read
 /home/albert/do-it-v2/agents/<role>.md (binding, incl. Seat route) and its schema. 2. Read
 /home/albert/.do-it/seat/<id>.packet.md; cwd <repo or worktree>; write nothing under it. 3. Write
 seat/<id>.output.json and run `doit validate <role> <file>` until VALID. 4. End with `DONE <id>`.")
+
+**Grader/reviewer seats: name the view (Thinker 2026-10-13).** A seat grader runs as a plain sub-agent, not inside
+bwrap, so `$HOME` is NOT the view, although `agents/grader.md` says `$HOME/tree`, `$HOME/view.json` and so on. Read
+`$R/seat/<id>.cmd.json["cwd"]` (it ends in `/tree`); its parent is the VIEW ROOT. Add this to the sub-agent prompt:
+"VIEW ROOT = <abs path>. Wherever your contract says $HOME, use VIEW ROOT. `cd <VIEW ROOT>/tree` at the start of EVERY Bash
+call (the shell resets). If <VIEW ROOT>/view.json is unreadable, stop and say so; do not emit could_not_run."
+Five grades on 2026-10-13 failed by reading $HOME literally (L-grader-1285/1301/1303/1307/1317).

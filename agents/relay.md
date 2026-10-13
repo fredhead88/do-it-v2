@@ -51,7 +51,7 @@ For each spawn id, in order:
    path>`, when the role writes at all; or `$R/seat/<spawn>.cmd.json`'s
    `"path"` key (`null` for a non-writing role). One of those two names the
    destination; you do not guess a third.
-4. Serve it exactly as `/home/albert/do-it-v2/scripts/seat/README.md`'s serving pattern describes:
+4. Serve it exactly as `/home/albert/do-it-v2/scripts/seat/README.md`'s serving pattern describes (for grader and reviewer packets, include the VIEW ROOT line from that README, taken from `cmd.json["cwd"]`'s parent):
    dispatch a **general-purpose** sub-agent — the harness snapshots agent
    types at pane start, so it is never the role's own agent type by name —
    with the model `models.toml` names for that role, and the same four-step
