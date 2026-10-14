@@ -7,6 +7,7 @@ squash case is the one that matters — it is the case where git's own answer is
 confidently wrong (§8.11), and a mocked git would agree with the bug.
 """
 import json, os, pathlib, subprocess, sys, tempfile
+from datetime import datetime, timezone
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import fold, tree_cleanup  # noqa: E402
@@ -326,6 +327,8 @@ with tempfile.TemporaryDirectory() as d:
     check(out == [b], f"L0440-AC11: dry-run reports A as reaped: {out}")
     check(b in branches(r) and pathlib.Path(wt).exists(), "L0440-AC11: worktree/branch still exist")
     check(events(d, "tree-reaped") == [], "L0440-AC11: no ledger event on dry-run")
+    check(not (pathlib.Path(d) / "state" / "reap-retained.json").exists(),
+          "L0941: dry-run creates no retained status file")
 
 # ── L0440-AC12 · exactly one tree-reaped event, actor executor, reaped+retained shape ──
 with tempfile.TemporaryDirectory() as d:
@@ -604,12 +607,18 @@ with tempfile.TemporaryDirectory() as d:
 
     # a PLAIN shipped spec is not in TERMINAL_SPEC_STATES — `reap_merged_specs`'s
     # OWN judge()/branch list is untouched by it, but it still removes the
-    # worktree (via `reap_worktrees`), and writes NO tree-reaped for it (no
-    # terminal group exists in this project) and no worktree-reaped of its own.
+    # worktree (via `reap_worktrees`). L0941 records that actual destruction
+    # even though no terminal branch group exists, with no worktree-reaped
+    # of its own.
     out2 = run_merged(d)
     check(out2 == [], f"L0486-AC5: reap_merged_specs's own branch-judge list is untouched: {out2}")
     check(not pathlib.Path(wt).exists(), "L0486-AC5: reap_merged_specs removed the worktree via reap_worktrees")
-    check(events(d, "tree-reaped") == [], "L0486-AC5: no tree-reaped for a shipped-only spec (no terminal group)")
+    e = events(d, "tree-reaped")
+    check(len(e) == 1 and e[0]["reaped"] == [] and e[0]["worktrees"] == [wt],
+          f"L0941: worktree-only destruction writes one tree-reaped event: {e}")
+    run_merged(d)
+    check(len(events(d, "tree-reaped")) == 1,
+          "L0941: a worktree-only follow-up that destroys nothing appends no event")
     check(events(d, "worktree-reaped") == [], "L0486-AC5: tree_cleanup itself never writes worktree-reaped")
 
 with tempfile.TemporaryDirectory() as d:
@@ -632,5 +641,109 @@ with tempfile.TemporaryDirectory() as d:
     check(e[0].get("worktrees") == [wt], f"L0486-AC5: its worktrees field names the path reap_worktrees removed: {e[0]}")
     check(events(d, "worktree-reaped") == [], "L0486-AC5: reap_merged_specs itself still appends no worktree-reaped")
 print("L0486-AC5 ok")
+
+# ── L0941-AC1 · retention is current status, never a destruction event ────────
+with tempfile.TemporaryDirectory() as d:
+    project = "l0941-retained"
+    r = repo_for(d, project)
+    charter_project(d, "L-charter-0941", project)
+    b, wt, ready = branchwork(r, d, "L-spec-0941", "x")
+    dirty = pathlib.Path(wt) / "dirty.txt"
+    dirty.write_text("uncommitted\n")
+    accepted(d, "L-charter-0941", "L-spec-0941", b, ready, project=project)
+    state = pathlib.Path(d) / "state" / "reap-retained.json"
+    for _ in range(2):
+        check(run_merged(d) == [], "L0941: retained-only run reaps nothing")
+        check(events(d, "tree-reaped") == [], "L0941: repeated retention writes ZERO events")
+        snapshot = json.loads(state.read_text())
+        measured = datetime.fromisoformat(snapshot["measured_at"])
+        check(measured.tzinfo == timezone.utc and (datetime.now(timezone.utc) - measured).total_seconds() < 10,
+              "L0941: status includes a current UTC measured_at")
+        check(snapshot["projects"] == [{
+            "project": project, "repo": str(r), "retained": [b],
+            "retained_reason": [f"{b}: worktree is not clean"],
+        }], "L0941: retained branches and reasons are in the status file")
+    sh(wt, "git", "add", "dirty.txt")
+    sh(wt, "git", "commit", "-qm", "unmerged work")
+    run_merged(d)
+    check(json.loads(state.read_text())["projects"][0]["retained_reason"] == [
+        f"{b}: branch tip holds work not on main"],
+          "L0941: changed retention reason overwrites status")
+    check(events(d, "tree-reaped") == [], "L0941: changed reason writes no destruction event")
+    b2, wt2, ready2 = branchwork(r, d, "L-spec-0942", "y", merge=None)
+    accepted(d, "L-charter-0941", "L-spec-0942", b2, ready2, project=project)
+    run_merged(d)
+    check(json.loads(state.read_text())["projects"][0]["retained"] == [b, b2],
+          "L0941: a new retained branch updates status")
+    check(events(d, "tree-reaped") == [], "L0941: changed retention still writes no event")
+    sh(r, "git", "merge", "-q", "--no-ff", b, "-m", "land remaining work")
+    check(run_merged(d) == [b], "L0941: the newly clean merged branch is reaped")
+    e = events(d, "tree-reaped")
+    check(len(e) == 1 and e[0]["reaped"] == [b] and e[0]["retained"] == [b2]
+          and e[0]["subject"] == project and e[0]["repo"] == str(r)
+          and e[0]["retained_reason"] == [f"{b2}: ready_sha holds work not on main"]
+          and e[0]["worktrees"] == [] and e[0]["actor"] == "L-executor-0001",
+          f"L0941: actual branch destruction appends exactly one unchanged-shape event: {e}")
+    check(json.loads(state.read_text())["projects"][0]["retained"] == [b2],
+          "L0941: status overwrites the previous retained list")
+    before = state.read_bytes()
+    run_merged(d, dry_run=True)
+    check(state.read_bytes() == before, "L0941: dry-run leaves existing status untouched")
+
+# The charter-close entry point still records its close marker with no reap.
+with tempfile.TemporaryDirectory() as d:
+    r = repo(d)
+    b, wt, ready = branchwork(r, d, "L-spec-0941", "x")
+    (pathlib.Path(wt) / "dirty.txt").write_text("uncommitted\n")
+    accepted(d, "L-charter-0941", "L-spec-0941", b, ready)
+    close(d, "L-charter-0941")
+    state = pathlib.Path(d) / "state" / "reap-retained.json"
+    for i in range(2):
+        p = reap(d, "L-charter-0941", "--repo", str(r))
+        check(p.returncode == 0, f"L0941: retained charter-close succeeds: {p.stderr}")
+        out = json.loads(p.stdout)
+        e = events(d, "tree-reaped")
+        check(len(e) == i + 1 and e[-1]["subject"] == "L-charter-0941"
+              and e[-1]["reaped"] == [] and e[-1]["retained"] == [b],
+              "L0941: charter-close still emits its no-reap charter marker")
+        check(not state.exists(), "L0941: charter-close does not write periodic status")
+    reap(d, "L-charter-0941", "--repo", str(r), "--dry-run")
+    check(len(events(d, "tree-reaped")) == 2,
+          "L0941: charter-close dry-run still writes no event")
+print("L0941-AC1 ok: retained-only runs emit zero events; one branch emits one; charter close unchanged")
+
+# Status is a snapshot of all repo groups, including failed groups.
+with tempfile.TemporaryDirectory() as d:
+    r = repo_for(d, "z-healthy")
+    charter_project(d, "L-charter-healthy", "z-healthy")
+    b, wt, ready = branchwork(r, d, "L-spec-0941", "x")
+    accepted(d, "L-charter-healthy", "L-spec-0941", b, ready, project="z-healthy")
+    charter_project(d, "L-charter-missing", "a-missing")
+    accepted(d, "L-charter-missing", "L-spec-0942", "l-spec-0942", ready, project="a-missing")
+    code = (f"import sys; sys.path.insert(0, {str(HERE)!r});"
+            "import fold, tree_cleanup; tree_cleanup.reap_merged_specs(fold.read_events())")
+    p = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                       env={k: v for k, v in os.environ.items() if k != "DOIT_PROJECT"}
+                       | {"DOIT_ROOT": d})
+    check(p.returncode != 0 and "GroupFailure" in p.stderr,
+          "L0941: a missing repo still reports GroupFailure")
+    state = json.loads((pathlib.Path(d) / "state" / "reap-retained.json").read_text())["projects"]
+    check([row["project"] for row in state] == ["a-missing", "z-healthy"],
+          "L0941: status covers failed and healthy groups")
+    check(state[0]["retained"] == ["l-spec-0942"] and state[0]["retained_reason"],
+          "L0941: failed repo's branches have retained reasons in status")
+    e = events(d, "tree-reaped")
+    check(len(e) == 1 and e[0]["reaped"] == [b] and e[0]["subject"] == "z-healthy",
+          "L0941: only the healthy repo's actual destruction writes an event")
+
+with tempfile.TemporaryDirectory() as d:
+    state = pathlib.Path(d) / "state" / "reap-retained.json"
+    state.parent.mkdir()
+    state.write_text('[{"retained": ["stale"]}]')
+    check(run_merged(d) == [] and json.loads(state.read_text())["projects"] == [],
+          "L0941: an empty run clears stale retained status")
+    check(datetime.fromisoformat(json.loads(state.read_text())["measured_at"]).tzinfo == timezone.utc,
+          "L0941: even an empty run writes measured_at")
+    check(list(state.parent.iterdir()) == [state], "L0941: atomic write leaves no temporary file")
 
 print(f"tree-cleanup: {N} checks pass")
