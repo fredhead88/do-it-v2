@@ -33,6 +33,7 @@ from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import fold  # noqa: E402
+import rechain
 
 PROJECT = "albert-scott"
 PREDEPLOY = "scripts/ci/predeploy_gate.sh"
@@ -126,6 +127,8 @@ def build_candidate(repo, window, base, entries):
     cur, merged, conflicts = base, [], {}
     for spec, branch, bsha in entries:
         new, paths = merge_into(repo, cur, bsha, f"merge({spec}): window {window}")
+        if new is None and os.environ.get("DOIT_WINDOW_RECHAIN", "off") == "on":
+            new, _ = rechain.resolve(repo, cur, (spec, branch, bsha), window, ev=ev)
         if new is None:
             conflicts[spec] = paths
         else:
@@ -301,11 +304,12 @@ def resolve_entries(repo, spec_args, events):
     return out
 
 
-def advance(repo, main, old, new, window, kept, dropped, runs, urls, entries, dashboard):
+def advance(repo, main, old, new, window, kept, dropped, runs, urls, entries, dashboard, rechained=()):
     git(repo, "update-ref", f"refs/heads/{main}", new, old)       # old value asserted
     branch_of = {s: b for s, b, _ in entries}
     for s in kept:
-        ev("shipped", s, sha=new, branch=branch_of[s], window=window)
+        ev("shipped", s, sha=new, branch=branch_of[s], window=window,
+           **({"rechained": True} if s in rechained else {}))
     ev("window-verified", window, sha=new, runs=urls, kept=kept, dropped=dropped,
        actions_minutes=runs * RUN_MINUTES + (runs * DASHBOARD_MINUTES if dashboard else 0))
 
@@ -321,12 +325,45 @@ def run_window(window, project, spec_args, main):
     if len(entries) > MAX_MERGES:
         sys.exit(f"gate-window: {len(entries)} merges exceeds the window cap of {MAX_MERGES}")
     base = git(repo, "rev-parse", "--verify", f"refs/heads/{main}^{{commit}}").stdout.strip()
+    enabled = os.environ.get("DOIT_WINDOW_RECHAIN", "off") == "on"
+    migrations, deferred = set(), []
+    if enabled:
+        cap = int(os.environ.get("DOIT_WINDOW_MAX_MIGRATIONS", "3"))
+        if cap < 1:
+            raise RuntimeError("DOIT_WINDOW_MAX_MIGRATIONS must be positive")
+        for s, b, sha in entries:
+            if len(rechain.added_versions(repo, base, sha)) == 1:
+                if len(migrations) >= cap:
+                    deferred.append(s)
+                    ev("window-deferred", s, window=window, branch=b, reason="migration-cap", cap=cap)
+                else:
+                    migrations.add(s)
+        entries = [e for e in entries if e[0] not in deferred]
+        if deferred:
+            print(f"gate-window: deferred {len(deferred)} migration(s), reason=migration-cap cap={cap}")
     ev("window-opened", window, specs=[s for s, _, _ in entries], base=base[:12])
     touched = {s: set(git(repo, "diff", "--name-only", f"{base}...{b}").stdout.split()) for s, b, _ in entries}
     dropped, urls, runs, dashboard = [], [], 0, False
     conflicted_all = {}
 
-    cand, merged, conflicts = build_candidate(repo, window, base, entries)
+    def prepare(batch):
+        candidate, kept, clashes = build_candidate(repo, window, base, batch)
+        migration_kept = [s for s in kept if s in migrations]
+        if migration_kept:
+            try:
+                candidate = rechain.fingerprint(repo, candidate, window, ev=ev)
+                git(repo, "update-ref", f"refs/heads/window/{window}", candidate)
+            except (ValueError, OSError, subprocess.SubprocessError):
+                for s in migration_kept:
+                    ev("rechain-declined", s, window=window, why="final-tree fingerprint or private PG failed")
+                    clashes[s] = [rechain.FINGERPRINT]
+                rest = [e for e in batch if e[0] not in migrations]
+                candidate, kept, more = build_candidate(repo, window, base, rest)
+                clashes.update(more)
+                print(f"gate-window: excluded {len(migration_kept)} migration(s), reason=fingerprint-failed")
+        return candidate, kept, clashes
+
+    cand, merged, conflicts = prepare(entries)
     for s, paths in conflicts.items():
         ev("merge-conflict", s, files=paths, window=window)
     conflicted_all.update(conflicts)
@@ -359,8 +396,14 @@ def run_window(window, project, spec_args, main):
             for n in res["nodes"]:
                 drop += [s for s in owners(repo, cand, n, {s: touched[s] for s in live}) if s not in drop]
             drop = drop or list(live)
+        bisected = []
+        if enabled and runs == 1 and any(s in migrations for s in drop):
+            stack = [s for s in live if s in migrations]
+            bisected = stack[1:]
+            drop = [s for s in drop if s not in migrations] + bisected
         for s in drop:
-            ev("window-dropped", s, window=window, nodes=res["nodes"], run_url=res["url"], branch=by_id[s][0])
+            ev("window-dropped", s, window=window, nodes=res["nodes"], run_url=res["url"], branch=by_id[s][0],
+               **({"reason": "migration-bisect"} if s in bisected else {}))
             print(f"gate-window: dropped {s} nodes={json.dumps(res['nodes'])}")
         dropped += drop
         live = [s for s in live if s not in drop]
@@ -368,16 +411,23 @@ def run_window(window, project, spec_args, main):
             escalate(window, f"window {window} is red after {runs} run(s); whole window dropped, master unmoved")
             return 2
         rest = [e for e in entries if e[0] in live]
-        cand, live, more = build_candidate(repo, window, base, rest)
+        cand, live, more = prepare(rest)
         for s, paths in more.items():
             ev("merge-conflict", s, files=paths, window=window)
         dropped += list(more)
         if not live:
             escalate(window, "remaining merges conflict after the drop")
             return 2
-    advance(repo, main, base, cand, window, live, dropped, runs, urls, entries, dashboard)
+    rechained = set()
+    if enabled:
+        # Only merges reachable from the final candidate count as shipped re-chains.
+        for sha in git(repo, "rev-list", "--first-parent", f"{base}..{cand}").stdout.splitlines():
+            message = git(repo, "show", "-s", "--format=%s", sha).stdout.strip()
+            if message.endswith("(mechanical re-chain)"):
+                rechained.update(s for s in live if message.startswith(f"merge({s}):"))
+    advance(repo, main, base, cand, window, live, dropped, runs, urls, entries, dashboard, rechained)
     print(f"gate-window: advanced {main} -> {cand[:12]}  shipped={live} dropped={dropped}")
-    return 1 if dropped else 0
+    return 1 if dropped or deferred else 0
 
 
 def cleanup(repo, window):

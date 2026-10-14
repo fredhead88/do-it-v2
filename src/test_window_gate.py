@@ -260,4 +260,108 @@ def main():
     print("test_window_gate ok")
 
 
+def rechain_checks():
+    """L-spec-0932 ac3f/ac4/ac5/ac6/ac9, preserving the existing checks above."""
+    import shutil
+    from unittest.mock import patch
+    from test_rechain import Fixture, response
+    import rechain
+
+    def fixture(names, extra=False):
+        fx = Fx({})
+        with tempfile.TemporaryDirectory() as seed:
+            sf = Fixture(seed)
+            for path in sh(["ls-tree", "-r", "--name-only", sf.base], sf.repo).splitlines():
+                p = fx.repo / path
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_bytes(rechain.blob(sf.repo, sf.base, path))
+        sh(["add", "."], fx.repo)
+        sh(["commit", "-m", "migration fixture"], fx.repo)
+        fx.base = sh(["rev-parse", "HEAD"], fx.repo)
+        sh(["update-ref", "refs/heads/master", fx.base], fx.repo)
+        sf = Fixture.__new__(Fixture)
+        sf.repo, sf.base, sf.events = fx.repo, fx.base, []
+        for name in names:
+            spec, branch, _ = sf.branch(name)
+            fx.branches[spec] = branch
+        if extra:
+            sh(["checkout", "-b", "br-X", fx.base], fx.repo)
+            (fx.repo / "api/tests/test_x.py").write_text("pass # X\n")
+            sh(["add", "."], fx.repo)
+            sh(["commit", "-m", "X"], fx.repo)
+            fx.branches["X"] = "br-X"
+        sh(["checkout", "live-scratch"], fx.repo)
+        return fx, sf
+
+    cases = ["green", "cap", "cap4", "owner-X", "owner-B", "second-red", "fingerprint-fail", "off", "unset"]
+    for case in cases:
+        names = ["a", "b", "c", "d"] if case in ("cap", "cap4") else ["a", "b", "c"] if case == "green" else ["a", "b"]
+        fx, sf = fixture(names, extra=case in ("cap", "cap4", "owner-X", "owner-B", "second-red", "fingerprint-fail"))
+        env = sf.scripts(fx.tmp, fail=case == "fingerprint-fail")
+        env["DOIT_WINDOW_RECHAIN"] = "off" if case == "off" else "on"
+        if case == "cap4":
+            env["DOIT_WINDOW_MAX_MIGRATIONS"] = "4"
+        before = sh(["status", "--porcelain"], fx.repo)
+        refs = {b: sh(["rev-parse", b], fx.repo) for b in fx.branches.values()}
+        try:
+            with patch.dict(os.environ, env):
+                if case == "unset":
+                    os.environ.pop("DOIT_WINDOW_RECHAIN", None)
+                if case != "cap4":
+                    os.environ.pop("DOIT_WINDOW_MAX_MIGRATIONS", None)
+                fx.run_n(1, 1 if case in ("owner-X", "owner-B", "second-red") else 0,
+                         red(["api/tests/test_x.py::test_x"]) if case == "owner-X" else
+                         red([rechain.TEST + "::test_head"]) if case in ("owner-B", "second-red") else GREEN)
+                fx.run_n(2, 1 if case == "second-red" else 0,
+                         red([rechain.TEST + "::test_head"]) if case == "second-red" else GREEN)
+                rc = fx.go()
+            shipped = [e["subject"] for e in fx.events("shipped")]
+            fps = fx.events("rechain-fingerprint")
+            calls = (fx.tmp / "calls").read_text().splitlines() if (fx.tmp / "calls").exists() else []
+            fp_calls = [c for c in calls if c.startswith("fingerprint ")]
+            if case == "green":
+                check(rc == 0 and shipped == names and len(fx.calls()) == 1, "ac4 three migrations one CI")
+                check(len(fp_calls) == 1 and len(fps) == 1, "ac4 final fingerprint once")
+                check([e["subject"] for e in fx.events("rechained")] == ["b", "c"], "ac4 B C rechained")
+                check([e["subject"] for e in fx.events("shipped") if e.get("rechained")] == ["b", "c"], "ac4 shipped rechain marker")
+                check(rechain.routed_head(fx.repo, fx.master()) == "c", "ac4 one final head C")
+                for child, parent in [("a", "h0"), ("b", "a"), ("c", "b")]:
+                    check(rechain.revision(rechain.text(fx.repo, fx.master(), rechain.VERSIONS + child + ".py")) == (child, parent), "ac4 chain " + child)
+                commits = sh(["rev-list", "--first-parent", fx.base + ".." + fx.master()], fx.repo).splitlines()
+                check(len(commits) == 4 and fps[0]["sha"] == fx.master(), "ac4 three merges one fixup before CI")
+            elif case in ("cap", "cap4"):
+                check(shipped == (["a", "b", "c", "X"] if case == "cap" else names + ["X"]), "ac5 migration cap excludes only fourth")
+                check([e["subject"] for e in fx.events("window-deferred")] == (["d"] if case == "cap" else []), "ac5 deferred event")
+                check(not fx.events("window-dropped"), "ac5 no deferred drop")
+            elif case == "owner-X":
+                check(rc == 1 and shipped == names and len(fx.calls()) == 2, "ac6 X drops migrations stay")
+                check([e["subject"] for e in fx.events("window-dropped")] == ["X"], "ac6 owners mapping")
+            elif case in ("owner-B", "second-red"):
+                check(len(fx.calls()) == 2 and len(fp_calls) == 2, "ac6 two runs two final-tree fingerprints")
+                check(any(e["subject"] == "b" and e.get("reason") == "migration-bisect" for e in fx.events("window-dropped")), "ac6 B migration-bisect")
+                check((rc == 1 and shipped == ["a", "X"] and rechain.routed_head(fx.repo, fx.master()) == "a") if case == "owner-B" else
+                      (rc == 2 and fx.master() == fx.base and not shipped), "ac6 retry outcome " + case)
+            elif case == "fingerprint-fail":
+                check(rc == 1 and shipped == ["X"] and len(fx.calls()) == 1, "ac3f fingerprint failure rebuilds without migrations")
+                check(set(e["subject"] for e in fx.events("rechain-declined")) == set(names), "ac3f all migration declines")
+                check(rechain.routed_head(fx.repo, fx.master()) == "h0", "ac3f unchanged migration candidate")
+            else:
+                check(rc == 1 and shipped == ["a"] and not fps and not fx.events("rechained"), "ac9 disabled behavior " + case)
+                check([e["subject"] for e in fx.events("merge-conflict")] == ["b"], "ac9 disabled migration conflict")
+            check(before == sh(["status", "--porcelain"], fx.repo) == "", "ac8 clean worktree preserved " + case)
+            check(refs == {b: sh(["rev-parse", b], fx.repo) for b in refs}, "ac8 builder refs unchanged " + case)
+            check(all(not pathlib.Path(c.split(" ", 1)[1]).exists() for c in calls), "ac8 disposable resources gone " + case)
+            print("ac3f/ac4/ac5/ac6/ac9", case, "checked")
+            criterion = {"green": "AC4", "cap": "AC5", "cap4": "AC5", "owner-X": "AC6",
+                         "owner-B": "AC6", "second-red": "AC6", "fingerprint-fail": "AC3",
+                         "off": "AC9", "unset": "AC9"}[case]
+            response(criterion, dict(case=case, exit=rc, shipped=shipped, ci_calls=len(fx.calls()),
+                                     fingerprint_calls=len(fp_calls), fixups=len(fps),
+                                     deferred=[e["subject"] for e in fx.events("window-deferred")],
+                                     dropped=[e["subject"] for e in fx.events("window-dropped")]))
+        finally:
+            shutil.rmtree(fx.tmp)
+
+
+rechain_checks()
 main()
