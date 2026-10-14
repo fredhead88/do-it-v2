@@ -25,11 +25,14 @@ prose, because a script the Executor can be reasoned out of calling with the
 wrong charter destroys live worktrees (§7.3: a rule that is not a check did not
 ship).
 
-Nothing is destroyed silently and nothing accumulates silently: every branch left
-standing is on the event with its reason, and the board's oldest-unreaped-worktree
-line (D28, D55) is the backstop against an over-shy reaper.
+Nothing is destroyed silently and nothing accumulates silently: charter-close
+events include branches left standing; periodic cleanup records destruction in
+the ledger and branches left standing in state/reap-retained.json with reasons.
+The board's oldest-unreaped-worktree line (D28, D55) is the backstop against an
+over-shy reaper.
 """
-import argparse, json, os, pathlib, subprocess, sys
+import argparse, json, os, pathlib, subprocess, sys, tempfile
+from datetime import datetime, timezone
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import fold, merge_gate  # noqa: E402
@@ -292,20 +295,39 @@ def _terminal_groups(events):
     return specs, groups
 
 
+def _write_retained(groups):
+    """Replace machine-local status for this run; never append to the ledger."""
+    path = fold.ROOT / "state" / "reap-retained.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as f:
+        tmp = pathlib.Path(f.name)
+        try:
+            json.dump({"measured_at": datetime.now(timezone.utc).isoformat(),
+                       "projects": groups}, f)
+            f.write("\n")
+            f.close()
+            tmp.replace(path)
+        finally:
+            tmp.unlink(missing_ok=True)
+
+
 def reap_merged_specs(events, *, dry_run=False):
     """The second, additive entry point (R9c): every spec whose state is
     terminal is reaped as soon as ITS OWN repo group proves it dead — never
     gated on the whole charter closing the way `main()` is. One
-    `tree-reaped` event per repo group (not per spec), same shape and same
-    actor technique `main()` already uses, so §4.11's "nothing destroyed
-    silently" holds here too."""
+    `tree-reaped` event per repo group that actually destroys something (not
+    per spec), same shape and same actor technique `main()` already uses,
+    so §4.11's "nothing destroyed silently" holds here too. Retained-only
+    groups update machine-local status without a ledger event."""
     wt_reaped, _wt_retained = reap_worktrees(events, dry_run=dry_run)
     wt_paths_by_project = {}
     for row in wt_reaped:
         wt_paths_by_project.setdefault(str(row["project"]), []).append(row["path"])
 
     specs, groups = _terminal_groups(events)
-    all_reaped, failures = [], []
+    for row in wt_reaped:
+        groups.setdefault(row["project"], [])
+    all_reaped, failures, retained_status = [], [], []
     for project in sorted(groups, key=str):
         spec_ids = sorted(groups[project])
         repo = fold.ROOT / "repos" / str(project)
@@ -335,7 +357,9 @@ def reap_merged_specs(events, *, dry_run=False):
                     retained.append(branch)
                     reasons.append(f"{branch}: {why}")
         all_reaped += reaped
-        if not dry_run and (reaped or retained):
+        retained_status.append({"project": project, "repo": str(repo),
+                                "retained": retained, "retained_reason": reasons})
+        if not dry_run and (reaped or wt_paths_by_project.get(str(project))):
             os.environ["DOIT_LEDGER_FILE"] = os.environ.get(
                 "DOIT_REAP_LEDGER_FILE", os.environ.get("DOIT_LEDGER_FILE", "L-executor-0001.jsonl"))
             # R15a: the paths `reap_worktrees` removed for THIS project — scoped to
@@ -345,6 +369,8 @@ def reap_merged_specs(events, *, dry_run=False):
                          f"retained:={json.dumps(retained)}",
                          f"retained_reason:={json.dumps(reasons)}", f"repo={repo}",
                          f"worktrees:={json.dumps(wt_paths_by_project.get(str(project), []))}"])
+    if not dry_run:
+        _write_retained(retained_status)
     if failures:
         raise GroupFailure("; ".join(failures), all_reaped)
     return all_reaped
