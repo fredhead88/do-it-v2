@@ -11,7 +11,7 @@ therefore uses the project names the SHIPPED `look.toml` already lists
 (`do-it-v2`/main, `albert-scott`/master), so the real `[push]` defaults are
 exactly what is under test.
 """
-import json, pathlib, re, subprocess, sys, tempfile
+import json, os, pathlib, re, subprocess, sys, tempfile
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
@@ -68,14 +68,22 @@ class RootCtx:
     `with` block, restoring both after — the one thing every fixture below
     needs, since `push_origin.run` reads both as module globals."""
     def __enter__(self):
-        self.root = pathlib.Path(tempfile.mkdtemp())
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self.tmp.name)
         (self.root / "events").mkdir(parents=True, exist_ok=True)
         self.saved = (fold.ROOT, fold.EVENTS)
+        self.saved_root_env = os.environ.get("DOIT_ROOT")
+        os.environ["DOIT_ROOT"] = str(self.root)
         fold.ROOT, fold.EVENTS = self.root, self.root / "events"
         return self.root
 
     def __exit__(self, *exc):
         fold.ROOT, fold.EVENTS = self.saved
+        if self.saved_root_env is None:
+            os.environ.pop("DOIT_ROOT", None)
+        else:
+            os.environ["DOIT_ROOT"] = self.saved_root_env
+        self.tmp.cleanup()
 
 
 ALL_ARGVS = []   # every argv any RecordingRunner below ever saw — AC6 reads this
@@ -137,6 +145,104 @@ class RacingRunner(push_origin.Runner):
             subprocess.run(["git", "push", "origin", "HEAD"], cwd=str(self.racer_clone),
                            capture_output=True, text=True)
         return rc, out, err
+
+
+# ── L-spec-0995 · ancestry, never event timestamps ────────────────────────
+with RootCtx() as root995:
+    origin995, clone995 = make_pair(root995, "do-it-v2", "main")
+    sha_a995 = sh(["rev-parse", "HEAD"], clone995)
+    sha_b995 = commit(clone995, "B")
+    sha_c995 = commit(clone995, "C")
+    events995 = [
+        {"type": "origin-pushed", "subject": "do-it-v2", "sha": sha_a995, "ts": ts(20)},
+        shipped("do-it-v2", sha_c995, "L-spec-90995", minute=10),
+    ]
+    runner995 = RecordingRunner()
+    assert push_origin.run(events995, runner=runner995) == ["do-it-v2"], \
+        "L0995 AC1: an earlier shipped timestamp must not suppress a push"
+    assert sh(["rev-parse", "main"], origin995) == sha_c995
+    log995 = root995 / "events" / push_origin.EVENT_NAME
+    recorded995 = [json.loads(line) for line in log995.read_text().splitlines()]
+    assert len(recorded995) == 1 and recorded995[0]["sha"] == sha_c995, recorded995
+    before995 = log995.read_bytes()
+    runner995b = RecordingRunner()
+    assert push_origin.run(events995 + recorded995, runner=runner995b) == []
+    assert not any(call[0] == "push" for call in runner995b.calls)
+    assert log995.read_bytes() == before995, "L0995 AC2: no second event for the same sha"
+print("L0995 AC1/AC2 incident and per-sha idempotence ok")
+
+with RootCtx() as root995r:
+    origin995r, clone995r = make_pair(root995r, "do-it-v2", "main")
+    sha_b995r = commit(clone995r, "B-reversed")
+    sha_c995r = commit(clone995r, "C-reversed")
+    events995r = [
+        shipped("do-it-v2", sha_c995r, "L-spec-90995c", minute=1),
+        shipped("do-it-v2", sha_b995r, "L-spec-90995b", minute=30),
+        shipped("do-it-v2", sha_c995r, "L-spec-90995dup", minute=0),
+    ]
+    assert push_origin.run(events995r, runner=RecordingRunner()) == ["do-it-v2"]
+    assert sh(["rev-parse", "main"], origin995r) == sha_c995r, \
+        "L0995 AC2: ancestry wins over reversed timestamps and duplicate shas"
+print("L0995 AC2 reversed shipped timestamps ok")
+
+with RootCtx() as root995h:
+    origin995h, clone995h = make_pair(root995h, "do-it-v2", "main")
+    sha995h = sh(["rev-parse", "HEAD"], clone995h)
+    events995h = [
+        shipped("do-it-v2", sha995h, "L-spec-90995h", minute=30),
+        {"type": "origin-pushed", "subject": "another-project", "sha": sha995h, "ts": ts(40)},
+    ]
+    runner995h = RecordingRunner()
+    assert push_origin.run(events995h, runner=runner995h) == ["do-it-v2"]
+    assert not any(call[0] == "push" for call in runner995h.calls)
+    log995h = root995h / "events" / push_origin.EVENT_NAME
+    recorded995h = [json.loads(line) for line in log995h.read_text().splitlines()]
+    recorded995h[0]["ts"] = ts(-10)  # event timestamp must not affect per-sha identity
+    runner995h2 = RecordingRunner()
+    assert push_origin.run(events995h + recorded995h, runner=runner995h2) == []
+    assert len(log995h.read_text().splitlines()) == 1
+    assert not any(call[0] == "push" for call in runner995h2.calls)
+print("L0995 already-on-origin per-sha recording ok")
+
+with RootCtx() as root995d:
+    origin995d, clone995d = make_pair(root995d, "do-it-v2", "main")
+    sha_a995d = sh(["rev-parse", "HEAD"], clone995d)
+    sh(["checkout", "-b", "dropped-window"], clone995d)
+    dropped995 = commit(clone995d, "dropped")
+    sh(["checkout", "main"], clone995d)
+    sha995d = commit(clone995d, "kept")
+    events995d = [
+        shipped("do-it-v2", sha995d, "L-spec-90995kept", minute=1),
+        shipped("do-it-v2", dropped995, "L-spec-90995dropped", minute=30),
+    ]
+    runner995d = RecordingRunner()
+    assert push_origin.run(events995d[1:], runner=runner995d) == []
+    assert not any(call[0] == "push" for call in runner995d.calls)
+    assert not (root995d / "events" / push_origin.EVENT_NAME).exists()
+    assert sh(["rev-parse", "main"], origin995d) == sha_a995d
+    assert push_origin.run(events995d, runner=RecordingRunner()) == ["do-it-v2"]
+    assert sh(["rev-parse", "main"], origin995d) == sha995d
+print("L0995 dropped-window ancestry filter ok")
+
+with RootCtx() as root995m:
+    origin995m, clone995m = make_pair(root995m, "do-it-v2", "main")
+    sh(["checkout", "-b", "side"], clone995m)
+    sha_side995 = commit(clone995m, "side")
+    sh(["checkout", "main"], clone995m)
+    (clone995m / "main.txt").write_text("main")
+    sh(["add", "main.txt"], clone995m)
+    sh(["-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-m", "main"], clone995m)
+    sha_main995 = sh(["rev-parse", "HEAD"], clone995m)
+    sh(["-c", "user.email=t@example.com", "-c", "user.name=t", "merge", "--no-ff", "side", "-m", "merged"], clone995m)
+    sha_merge995 = sh(["rev-parse", "HEAD"], clone995m)
+    events995m = [shipped("do-it-v2", sha, f"L-spec-90995m{i}", minute=i)
+                  for i, sha in enumerate((sha_merge995, sha_side995, sha_main995))]
+    runner995m = RecordingRunner()
+    assert push_origin.run(events995m, runner=runner995m) == []
+    assert not any(call[0] == "push" for call in runner995m.calls)
+    assert not (root995m / "events" / push_origin.EVENT_NAME).exists(), \
+        "L0995 R2: incomparable candidates skip even when both were later merged"
+print("L0995 unordered shipped candidates skip ok")
 
 
 # ── merge-origin-0484 AC1/AC2/AC3 ────────────────────────────────────────────
@@ -201,6 +307,7 @@ with RootCtx() as root5:
     result5 = push_origin.run(events5, runner=runner5)
     assert result5 == [], result5
     assert not any(c[0] == "push" for c in runner5.calls), runner5.calls
+    assert not (root5 / "events" / push_origin.EVENT_NAME).exists(), "AC5: no event on divergence"
     assert sh(["rev-parse", "main"], origin5) != sha_local5, "AC5: origin's main must be unchanged"
     print("merge-origin-0484 AC5 ok")
 
@@ -231,6 +338,7 @@ with RootCtx() as root7b:
     result7b = push_origin.run(events7b, runner=runner7b)
     assert result7b == [], result7b
     assert not any(c[0] == "push" for c in runner7b.calls), runner7b.calls
+    assert not (root7b / "events" / push_origin.EVENT_NAME).exists(), "AC7b: detached HEAD -> no event"
 
 with RootCtx() as root7c:
     origin7c, clone7c = make_pair(root7c, "do-it-v2", "main")

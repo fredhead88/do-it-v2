@@ -4,9 +4,10 @@
 A merge is not complete until origin carries it: local-ahead-of-origin for
 10+ minutes is an alarm (`look._check_origin_behind`, elsewhere). This module
 is the OTHER half — the thing that keeps origin from falling behind in the
-first place. Once per tick, for each `[push]`-configured project whose newest
-`shipped` sha is newer than its newest `origin-pushed`, fast-forward-push
-that sha onto `refs/heads/<main>` on `origin`.
+first place. Once per tick, for each `[push]`-configured project, find the
+newest `shipped` sha by local main's ancestry and fast-forward-push it onto
+`refs/heads/<main>` on `origin` if origin does not already contain it.
+Event timestamps never determine which commit to publish or skip.
 
 Ref-only, always: `$R/repos/<project>` can be the operator's own shared,
 live, DIRTY working tree (`$R/repos/albert-scott` is a symlink straight to
@@ -81,31 +82,52 @@ def targets(cfg):
     return out
 
 
-def _newest(events, type_, key, value):
-    """Newest (by `fold.ts`) event of `type_` with `event[key] == value` and
-    a truthy `sha` — `None` when there is none."""
-    rows = [e for e in events if e.get("type") == type_ and e.get(key) == value and e.get("sha")]
-    return max(rows, key=lambda e: fold.ts(e.get("ts"))) if rows else None
+def _newest_shipped(events, project, main, repo, runner):
+    """Newest shipped sha in a totally ordered chain on local main.
+
+    Dropped-window commits are excluded. Every remaining pair must be
+    comparable, including older candidates later joined by a merge.
+    """
+    shas = sorted({str(e["sha"]) for e in events
+                   if e.get("type") == "shipped" and e.get("project") == project
+                   and _HEX40.fullmatch(str(e.get("sha", "")))})
+    candidates = []
+    newest = None
+    for sha in shas:
+        rc, _ = _call(runner, ["merge-base", "--is-ancestor", sha, f"refs/heads/{main}"], repo, 10)
+        if rc != 0:
+            continue
+        is_newest = True
+        for previous in candidates:
+            rc, _ = _call(runner, ["merge-base", "--is-ancestor", previous, sha], repo, 10)
+            if rc == 0:
+                continue
+            if rc != 1:
+                return None
+            rc, _ = _call(runner, ["merge-base", "--is-ancestor", sha, previous], repo, 10)
+            if rc != 0:
+                return None   # incomparable candidates or a failed ancestry check
+            is_newest = False
+        if is_newest:
+            newest = sha
+        candidates.append(sha)
+    return newest
 
 
 def _push_one(project, main, events, runner):
     """One project's own five-step state machine (Produces). Returns whether
     `origin-pushed` landed."""
-    shipped = _newest(events, "shipped", "project", project)
-    if shipped is None:
+    if not any(e.get("type") == "shipped" and e.get("project") == project for e in events):
         return False
-    sha = str(shipped["sha"])
-    if not _HEX40.match(sha):
-        return False   # not a real sha (a test fixture's short sha, say) — never used
-    pushed = _newest(events, "origin-pushed", "subject", project)
-    if pushed is not None and fold.ts(pushed.get("ts")) >= fold.ts(shipped.get("ts")):
-        return False   # nothing newer than what is already recorded (idempotence)
     repo = fold.ROOT / "repos" / project
     if not repo.is_dir():
         return False   # no repo at all: skip, no event, no raise
     rc, head = _call(runner, ["symbolic-ref", "--short", "HEAD"], repo, 10)
     if rc != 0 or str(head or "").strip() != main:
         return False   # detached, or checked out on anything but <main>: a human's state
+    sha = _newest_shipped(events, project, main, repo, runner)
+    if sha is None:
+        return False
     rc, _out = _call(runner, ["fetch", "origin"], repo, 30)
     if rc != 0:
         return False   # fetch failed: skip, retried next tick
@@ -113,6 +135,9 @@ def _push_one(project, main, events, runner):
     if rc == 0:
         # Already on origin (a hand push, say) — record it so the trigger
         # clears; push nothing, since there is nothing left to push.
+        if any(e.get("type") == "origin-pushed" and e.get("subject") == project
+               and e.get("sha") == sha for e in events):
+            return False
         return dispatch.emit(fold.EVENTS / EVENT_NAME, {}, "origin-pushed",
                              subject=project, sha=sha, branch=main) is None
     rc_local, _ = _call(runner, ["merge-base", "--is-ancestor", sha, f"refs/heads/{main}"], repo, 10)
