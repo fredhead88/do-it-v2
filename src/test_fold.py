@@ -4015,3 +4015,31 @@ line = f"{row['spec']} · {row['criterion']} · {row['due_at']} · {round(row['d
 board_lines = fold.render(*life_due_folded).split("## OWED DUE")[1].split("## CHARTER CLOSE")[0].splitlines()
 assert f"  {line}" in board_lines, board_lines
 print("owed-lifecycle AC13 ok")
+
+# L-spec-1005 AC9: every criterion needs a later, admitted corrective/waiver.
+failure_esc = {"type": "escalation-blocking", "subject": "L-spec-9905", "kind": "owed-failed",
+               "criteria": ["AC1", "AC2"], "ts": stamp(4), "_src": "L-sweep-local.jsonl:1"}
+failure_fix = {"type": "owed-corrective", "subject": "L-spec-9905", "criterion": "AC1",
+               "corrective": "L-spec-9906", "actor": "operator", "ts": stamp(3)}
+failure_waive = {"type": "owed-waived", "subject": "L-spec-9905", "criterion": "AC2",
+                 "reason": "accepted", "actor": "thinker", "ts": stamp(2)}
+assert fold.open_escalations([failure_esc]) == [failure_esc]
+assert fold.open_escalations([failure_esc, failure_fix]) == [failure_esc]
+assert failure_esc["_src"] not in fold.answered([failure_esc, failure_fix])
+assert fold.open_escalations([failure_esc, failure_fix, failure_waive]) == []
+assert failure_esc["_src"] in fold.answered([failure_esc, failure_fix, failure_waive])
+assert fold.open_questions([failure_esc, failure_fix, failure_waive]) == []
+for invalid in ({**failure_waive, "actor": "builder"},
+                {**failure_waive, "ts": failure_esc["ts"]},
+                {**failure_waive, "ts": stamp(5)},
+                {**failure_waive, "subject": "L-spec-9907"}):
+    assert fold.open_escalations([failure_esc, failure_fix, invalid]) == [failure_esc]
+    assert failure_esc["_src"] not in fold.answered([failure_esc, failure_fix, invalid])
+one_criterion = {**failure_esc, "criteria": '["AC1"]'}
+assert fold.open_escalations([one_criterion, failure_fix]) == []
+assert fold.open_escalations([one_criterion, {**failure_fix, "actor": "builder"}]) == [one_criterion]
+other_kind = {**one_criterion, "kind": "owed-expired"}
+assert fold.open_escalations([other_kind, failure_fix]) == [other_kind]
+assert fold.open_escalations([failure_esc, {"type": "decision", "subject": "L-spec-9905",
+                                           "ts": stamp(1)}]) == []
+print("L1005 AC9 ok")

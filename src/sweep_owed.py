@@ -11,6 +11,8 @@ Every run, in this order:
    deduped against every criterion ANY prior `escalation-blocking
    kind=owed-expired` on that spec already named, resolved or not. This step
    always runs, whether or not step 2 below goes on to skip batching.
+1b. Escalate new failed checks, reopen unanswered fixes after 24 hours, and
+    recheck shipped correctives, via `owed_failures.escalate_failures`.
 2. If one `owed-sweeper` spawn is already open (a `spawn-started` with no
    terminal event, younger than twice the role's own cap — 90 minutes at
    `dispatch.ROLES["owed-sweeper"]`'s 45), stop: no manifest, no dispatch.
@@ -40,15 +42,15 @@ import argparse, hashlib, json, pathlib, re, subprocess, sys
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import dispatch, fold, owed, packet, scratch  # noqa: E402
+import dispatch, fold, owed, owed_failures, packet, scratch  # noqa: E402
 
 LEDGER_NAME = "L-sweep-local.jsonl"
 MAX_BATCH = 8
 RETRY_WINDOW = timedelta(hours=12)
 
 # SD3, verbatim.
-EXPIRED_DEFAULT = ("leave these checks expired and unproven, off the sweep; the charter stays "
-                    "held by owed<=K until an owed-met or a corrective")
+EXPIRED_DEFAULT = ("the check stays expired and listed in the daily digest; an owed-ac re-date, "
+                   "an owed-waived with a reason, or a corrective puts it back")
 EXPIRED_REVERT = "an owed-met (waive) or an Executor re-date puts a check back"
 
 
@@ -439,6 +441,7 @@ def run(*, dry_run=False, runner=None, now=None):
     specs = fold.fold(all_ev)[0]
 
     lines = sweep_expired(specs, now, dry_run=dry_run)
+    lines.extend(owed_failures.escalate_failures(specs, now, dry_run=dry_run))
 
     due, quarantined, resolution_lines = _resolve_candidates(specs, now, dry_run=dry_run)
     lines.extend(resolution_lines)
