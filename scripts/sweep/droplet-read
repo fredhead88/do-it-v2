@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """droplet-read PROJECT CMD [ARGS...] — the sweeper's only path to a live
 droplet (L-spec-0386). Looks up the project's `[[prod]]` row in `look.toml`,
-refuses (exit 2) anything outside `sweep_wrappers.ALLOWED_DROPLET_COMMANDS`'s
-envelope, and otherwise runs exactly one allowlisted read command over ssh,
+refuses (exit 2) anything outside `sweep_wrappers.ALLOWED_DROPLET_COMMANDS`
+and `sweep_wrappers.NAMED_DROPLET_READS`, and otherwise runs one read over ssh,
 bounding its own wall-clock (exit 3 on timeout). `ssh` is invoked as an argv
 list; the ONE string it hands the remote shell is
 `sweep_wrappers.quote_remote_command`'s `shlex.join` result, never a
@@ -32,10 +32,14 @@ def main(argv):
     if row is None:
         print(f"no [[prod]] row for project {project}", file=sys.stderr)
         return 2
-    refusal = sweep_wrappers.droplet_command_refusal(cmd, args)
+    named_read = cmd in sweep_wrappers.NAMED_DROPLET_READS
+    refusal = (sweep_wrappers.named_read_refusal(cmd, args) if named_read
+               else sweep_wrappers.droplet_command_refusal(cmd, args))
     if refusal is not None:
         print(refusal, file=sys.stderr)
         return 2
+    if named_read:
+        cmd, args = sweep_wrappers.named_read_remote(cmd, args, row["repo"])
     remote = sweep_wrappers.quote_remote_command(cmd, args)
     try:
         r = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
