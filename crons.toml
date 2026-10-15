@@ -103,3 +103,23 @@ path = "/opt/albert-scott/venv/bin/python"
 sig = 'auto_deploy\.py\b.*--once\b'
 owner = "deployer"
 project = "albert-scott"
+
+[[row]]
+name = "owed-digest"
+where = "user"
+schedule = "0 6 * * *"
+command = "{doit} cron-run owed-digest -- {doit} owed-digest >> {root}/logs/owed-digest.log 2>&1"
+path = "{doit}"
+sig = '\bdoit owed-digest(?=\s*>>|\s*(?:#.*)?$)'
+owner = "thinker"
+project = "do-it-v2"
+
+[[row]]
+name = "owed-digest-alert"
+where = "user"
+schedule = "*/30 * * * *"
+command = "{doit} cron-run owed-digest-alert -- {doit} owed-digest --alert >> {root}/logs/owed-digest-alert.log 2>&1"
+path = "{doit}"
+sig = '\bdoit owed-digest --alert(?=\s*>>|\s*(?:#.*)?$)'
+owner = "thinker"
+project = "do-it-v2"
