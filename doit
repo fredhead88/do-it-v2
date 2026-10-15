@@ -52,7 +52,22 @@ case "${1:-board}" in
   # on the failure path too, via `exit "$rc"`) — and DOIT_LEDGER_FILE unset, so
   # `doit test` can never scribble over the real agent links or the real
   # ledger, however a test file gets there.
-  test)    cd "$SRC"
+  test)    shift
+           if [ "$#" -eq 1 ]; then
+             if [ "$1" != --live ]; then
+               echo 'usage: doit test [--live]' >&2
+               exit 2
+             fi
+             # Capture the caller's root before replacing HOME/DOIT_ROOT.
+             export DOIT_TEST_LIVE_ROOT
+             DOIT_TEST_LIVE_ROOT=$(python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve())' "${DOIT_ROOT:-$HOME/.do-it}")
+           elif [ "$#" -eq 0 ]; then
+             unset DOIT_TEST_LIVE_ROOT
+           else
+             echo 'usage: doit test [--live]' >&2
+             exit 2
+           fi
+           cd "$SRC"
            DOIT_TEST_ISO=$(mktemp -d)
            trap 'rm -rf "$DOIT_TEST_ISO"' EXIT
            mkdir -p "$DOIT_TEST_ISO/home" "$DOIT_TEST_ISO/root" "$DOIT_TEST_ISO/xdg"
@@ -60,12 +75,80 @@ case "${1:-board}" in
                   XDG_CONFIG_HOME="$DOIT_TEST_ISO/xdg"
            unset DOIT_LEDGER_FILE
            rc=0
+           if [ -n "${DOIT_TEST_LIVE_ROOT:-}" ]; then
+             # No ledger or an unreadable ledger is undetermined, never green.
+             if ! python3 - "$DOIT_TEST_LIVE_ROOT" <<'PY'
+import pathlib, sys
+try:
+    files = [p for p in (pathlib.Path(sys.argv[1]) / "events").iterdir()
+             if p.suffix == ".jsonl"]
+    if not files:
+        sys.exit(3)
+    for path in files:
+        with path.open():
+            pass
+except OSError:
+    sys.exit(3)
+PY
+             then
+               echo 'live: not run'
+               exit 3
+             fi
+             for f in test_harvest.py test_problem_backfill.py; do
+               if [ "$f" = test_harvest.py ]; then
+                 live_check=check_ledger
+               else
+                 live_check=test_real_ledger_ac3_help_and_ac7
+               fi
+               printf 'live-check %s:%s\n' "$f" "$live_check"
+               if python3 "$f" --live; then
+                 :
+               else
+                 s=$?
+                 if [ "$s" -eq 3 ]; then
+                   if [ "$rc" -eq 0 ]; then rc=3; fi
+                 else
+                   rc=1
+                 fi
+               fi
+             done
+             if [ "$rc" -eq 0 ]; then
+               echo 'live: pass'
+             elif [ "$rc" -eq 3 ]; then
+               echo 'live: not run'
+             else
+               echo 'live: fail'
+             fi
+             exit "$rc"
+           fi
+           # grader_view checks archives/diffs against a local main/master.
+           # A branch-only clone has neither. Supply its baseline in a
+           # disposable shared clone, without changing the caller's refs.
+           DOIT_TEST_GRADER_REPO="$HERE"
+           if [ -f "$SRC/test_grader_view.py" ]; then
+             if git -C "$HERE" merge-base HEAD main >/dev/null 2>&1; then
+               :
+             elif git -C "$HERE" merge-base HEAD master >/dev/null 2>&1; then
+               :
+             else
+               DOIT_TEST_GRADER_REPO="$DOIT_TEST_ISO/grader-repo"
+               git clone -q --shared "$HERE" "$DOIT_TEST_GRADER_REPO"
+               grader_base=$(git -C "$HERE" rev-parse --verify origin/main 2>/dev/null || \
+                             git -C "$HERE" rev-parse --verify origin/master 2>/dev/null || \
+                             git -C "$HERE" rev-parse --verify HEAD^)
+               git -C "$DOIT_TEST_GRADER_REPO" branch master "$grader_base"
+             fi
+           fi
            for f in test_*.py test_*.mjs; do
              [ -e "$f" ] || continue
              printf '· %s\n' "$f"
              runner=python3
              if [ "${f%.mjs}" != "$f" ]; then runner=node; fi
-             if out=$("$runner" "$f" 2>&1); then
+             test_file="$f"
+             if [ "$f" = test_grader_view.py ]; then
+               test_file="$DOIT_TEST_GRADER_REPO/src/$f"
+             fi
+             if out=$("$runner" "$test_file" 2>&1); then
                echo "PASS $f"
              else
                s=$?
@@ -125,7 +208,7 @@ doit — a ledger that derives state, and the guards that read it
   doit owed-digest [--alert] [--dry-run]  daily owed digest or operator alert pass
   doit sweep-owed [--dry-run]             batch due owed checks into detached owed-sweeper
                                           dispatches; escalate the ones that expired (L-charter-0038 R1)
-  doit test                               run every check
+  doit test [--live]                      run hermetic checks, or only read-only live-ledger checks
   doit help
 
 Environment

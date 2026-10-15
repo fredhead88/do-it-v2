@@ -7,9 +7,9 @@ and `DOIT_ROOT` (never `DOIT_PROJECT`) -- never by importing `fold` or the
 script in-process and reassigning `DOIT_ROOT` afterward. That is what makes
 these fixtures actually hermetic against the real `~/.do-it` ledger.
 
-Two checks (AC3's `--help` case, AC7) are explicitly *about* the real, live
-ledger per the spec itself, and run against it read-only, via their own
-subprocess with `DOIT_ROOT` pointed at the real default location.
+Only --live runs the real-ledger AC3/AC7 checks. doit supplies the explicit
+DOIT_TEST_LIVE_ROOT before isolating HOME/DOIT_ROOT; without it they print
+SKIP live and exit 3. The default suite never resolves a real ledger root.
 """
 import hashlib
 import json
@@ -20,11 +20,10 @@ import subprocess
 import sys
 import tempfile
 
-PYTHON = "/opt/albert-scott/.venv/bin/python3"
+PYTHON = sys.executable
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / "scripts" / "problem_backfill.py"
 SLUG_RE = re.compile(r"^[a-z0-9-]{3,60}$")
-REAL_DOIT_ROOT = pathlib.Path(os.environ.get("DOIT_ROOT") or (pathlib.Path.home() / ".do-it"))
 
 FAILURES = []
 
@@ -39,9 +38,10 @@ def check(name, cond, detail=""):
 
 def run(doit_root, out=None, extra_args=None):
     """Run the script as its own subprocess against `doit_root`, with a
-    minimal, freshly-built env: only PATH and DOIT_ROOT. DOIT_PROJECT is
+    minimal, freshly-built env: PATH and fixture HOME/DOIT_ROOT. DOIT_PROJECT is
     guaranteed absent because the env dict is built from scratch."""
-    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "DOIT_ROOT": str(doit_root)}
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+           "HOME": str(doit_root), "DOIT_ROOT": str(doit_root)}
     args = [PYTHON, str(SCRIPT)]
     if out is not None:
         args += ["--out", str(out)]
@@ -255,13 +255,16 @@ def test_missing_events_dir_ac5():
 
 
 def test_real_ledger_ac3_help_and_ac7():
-    if not (REAL_DOIT_ROOT / "events").is_dir():
-        check("AC3/AC7 real-ledger check: real ledger present", False, str(REAL_DOIT_ROOT))
-        return
+    live_root = os.environ.get("DOIT_TEST_LIVE_ROOT")
+    if not live_root or not (pathlib.Path(live_root) / "events").is_dir():
+        print("SKIP live: no live ledger root")
+        return 3
     with tempfile.TemporaryDirectory() as tmp:
         out = pathlib.Path(tmp) / "real-out.md"
-        result = run(REAL_DOIT_ROOT, out=out)
+        result = run(live_root, out=out)
         check("real ledger: exit 0", result.returncode == 0, result.stderr)
+        if result.returncode:
+            return 1
         text = out.read_text()
         blocks = parse_groups(text)
 
@@ -288,12 +291,126 @@ def test_real_ledger_ac3_help_and_ac7():
                   thinker_group["members"])
 
 
+def test_live_launcher_contract():
+    """Exercise the real launcher with disposable probes, never the live ledger."""
+    with tempfile.TemporaryDirectory(prefix="doit-live-test-") as tmp:
+        tree = pathlib.Path(tmp)
+        launcher = tree / "doit"
+        launcher.write_bytes((REPO_ROOT / "doit").read_bytes())
+        src = tree / "src"
+        src.mkdir()
+        probe = '''import os, pathlib, sys
+if sys.argv[1:] == ["--live"]:
+    root = pathlib.Path(os.environ["DOIT_TEST_LIVE_ROOT"])
+    assert (root / "events" / "L-fixture.jsonl").is_file()
+    assert os.environ["DOIT_ROOT"] != str(root)
+    assert "DOIT_LEDGER_FILE" not in os.environ
+    print("probe live")
+    sys.exit(int(os.environ.get("DOIT_LIVE_PROBE_RC", "0")))
+assert "DOIT_TEST_LIVE_ROOT" not in os.environ
+print("probe hermetic")
+'''
+        for name in ("test_harvest.py", "test_problem_backfill.py"):
+            (src / name).write_text(probe)
+        (src / "test_probe.py").write_text(
+            'import sys\nassert not sys.argv[1:]\nprint("unmarked hermetic")\n')
+        live_root = tree / "ledger"
+        (live_root / "events").mkdir(parents=True)
+        ledger = live_root / "events" / "L-fixture.jsonl"
+        ledger.write_text('{}\n')
+        before = sha256_tree(live_root / "events")
+        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+               "HOME": str(tree / "home"), "DOIT_ROOT": str(live_root),
+               "DOIT_LEDGER_FILE": "L-sentinel.jsonl"}
+
+        def invoke(*args, **overrides):
+            return subprocess.run(["bash", str(launcher), "test", *args],
+                                  env={**env, **overrides}, cwd=tree,
+                                  capture_output=True, text=True)
+
+        for label, root in (("missing", tree / "absent"), ("empty", tree / "empty")):
+            (tree / "empty" / "events").mkdir(parents=True, exist_ok=True)
+            result = invoke("--live", DOIT_ROOT=str(root))
+            check(f"live launcher: {label} ledger is not run",
+                  result.returncode == 3 and result.stdout.splitlines()[-1:] == ["live: not run"],
+                  (result.returncode, result.stdout, result.stderr))
+            check(f"live launcher: {label} ledger starts no checks", "probe" not in result.stdout)
+
+        for code, label in ((0, "pass"), (1, "fail"), (3, "not run")):
+            result = invoke("--live", DOIT_LIVE_PROBE_RC=str(code))
+            check(f"live launcher: reports {label} and exit {code}",
+                  result.returncode == code and result.stdout.splitlines()[-1:] == [f"live: {label}"],
+                  (result.returncode, result.stdout, result.stderr))
+            check(f"live launcher: {label} runs only the two live checks",
+                  result.stdout.count("probe live") == 2 and "hermetic" not in result.stdout)
+            check(f"live launcher: {label} identifies each live check",
+                  [line for line in result.stdout.splitlines() if line.startswith("live-check ")]
+                  == ["live-check test_harvest.py:check_ledger",
+                      "live-check test_problem_backfill.py:test_real_ledger_ac3_help_and_ac7"])
+            check(f"live launcher: {label} has exactly one result line",
+                  sum(line.startswith("live:") for line in result.stdout.splitlines()) == 1)
+
+        result = invoke(DOIT_TEST_LIVE_ROOT=str(live_root))
+        check("hermetic launcher: clears inherited live root and runs all files",
+              result.returncode == 0 and result.stdout.count("PASS test_") == 3
+              and "probe live" not in result.stdout
+              and not any(line.startswith("live:") for line in result.stdout.splitlines()),
+              (result.returncode, result.stdout, result.stderr))
+        check("live launcher: fixture ledger unchanged", before == sha256_tree(live_root / "events"))
+
+
+def test_branch_clone_launcher_contract():
+    """A branch-only clone gets a disposable grader baseline, never a new ref."""
+    with tempfile.TemporaryDirectory(prefix="doit-branch-clone-test-") as tmp:
+        tree = pathlib.Path(tmp) / "source"
+        (tree / "src").mkdir(parents=True)
+        (tree / "doit").write_bytes((REPO_ROOT / "doit").read_bytes())
+        probe = tree / "src" / "test_grader_view.py"
+        probe.write_text('''import pathlib, subprocess
+repo = pathlib.Path(__file__).resolve().parent.parent
+subprocess.run(["git", "-C", str(repo), "merge-base", "HEAD", "master"],
+               check=True, stdout=subprocess.DEVNULL)
+assert (repo / "sentinel").read_text() == "committed checkout\\n"
+print("branch clone baseline ok")
+''')
+        subprocess.run(["git", "init", "-q", "-b", "fixture-branch", str(tree)], check=True)
+        for key, value in (("user.name", "fixture"), ("user.email", "fixture@example.invalid")):
+            subprocess.run(["git", "-C", str(tree), "config", key, value], check=True)
+        subprocess.run(["git", "-C", str(tree), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(tree), "commit", "-qm", "baseline"], check=True)
+        (tree / "sentinel").write_text("committed checkout\n")
+        subprocess.run(["git", "-C", str(tree), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(tree), "commit", "-qm", "candidate"], check=True)
+        clone = pathlib.Path(tmp) / "clone"
+        subprocess.run(["git", "clone", "-q", "--single-branch", str(tree), str(clone)], check=True)
+        refs = ["git", "-C", str(clone), "show-ref"]
+        before = subprocess.check_output(refs)
+        iso = pathlib.Path(tmp) / "scratch"
+        iso.mkdir()
+        result = subprocess.run(["bash", str(clone / "doit"), "test"], cwd=clone,
+                                env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                                     "TMPDIR": str(iso), "HOME": str(pathlib.Path(tmp) / "home")},
+                                capture_output=True, text=True)
+        check("branch clone launcher: grader check passes with a merge baseline",
+              result.returncode == 0 and "PASS test_grader_view.py" in result.stdout,
+              (result.returncode, result.stdout, result.stderr))
+        check("branch clone launcher: original refs unchanged", before == subprocess.check_output(refs))
+        check("branch clone launcher: scratch checkout removed", not any(iso.iterdir()))
+
+
 def main():
-    test_main_fixture()
-    test_determinism_ac4()
-    test_never_touches_events_ac5()
-    test_missing_events_dir_ac5()
-    test_real_ledger_ac3_help_and_ac7()
+    if sys.argv[1:] == ["--live"]:
+        result = test_real_ledger_ac3_help_and_ac7()
+        if result:
+            return result
+    else:
+        test_main_fixture()
+        test_determinism_ac4()
+        test_never_touches_events_ac5()
+        test_missing_events_dir_ac5()
+        test_live_launcher_contract()
+        test_branch_clone_launcher_contract()
+        print("SKIP live: real-ledger AC3/AC7 require doit test --live")
 
     if FAILURES:
         print(f"\n{len(FAILURES)} FAILURE(S):")

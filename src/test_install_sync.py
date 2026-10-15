@@ -9,7 +9,7 @@ real `$DOIT_ROOT` ledger. `link_agents`'s own AC2 fixtures are the one
 exception by design — they exercise the REAL repo's `agents/*.md` as SOURCE,
 symlinked into a fresh, throwaway destination dir.
 """
-import json, os, pathlib, subprocess, sys, tempfile, types
+import json, os, pathlib, shutil, subprocess, sys, tempfile, types
 from datetime import datetime, timedelta, timezone
 
 TMP = pathlib.Path(tempfile.mkdtemp(prefix="install-sync-test-"))
@@ -417,18 +417,26 @@ ok(linked8027b == [], f"L-spec-8027 AC6: a second call on the same dir relinks n
 # shape above — already exercised with an explicit agents_dir throughout this
 # file, never refused.
 
-# the link-agents CLI, invoked with none of that — run() and main() both
-# default to HERE.parent as source, which THIS worktree checkout is not, so
-# it must follow AC5: refuse, print why, exit non-zero, write nothing
-_cli_env = {k: v for k, v in os.environ.items() if k != "DOIT_CANONICAL_REPO"}
+# The CLI derives its source from its own module path. Give it a disposable
+# checkout so the refusal is independent of this repo's canonical status.
+cli_checkout8027 = pathlib.Path(tempfile.mkdtemp(dir=TMP))
+shutil.copytree(REPO_ROOT / "src", cli_checkout8027 / "src",
+                ignore=shutil.ignore_patterns("__pycache__"))
+(cli_checkout8027 / "agents").mkdir()
+(cli_checkout8027 / "agents" / "fixture.md").write_text("x")
+cli_module8027 = cli_checkout8027 / "src" / "install_sync.py"
+cli_home8027 = pathlib.Path(tempfile.mkdtemp(dir=TMP))
+_cli_env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "HOME": str(cli_home8027), "DOIT_ROOT": str(cli_home8027 / "root")}
 proc_cli8027 = subprocess.run(
-    [sys.executable, str(REPO_ROOT / "src" / "install_sync.py"), "link-agents"],
+    [sys.executable, str(cli_module8027), "link-agents"], cwd=cli_checkout8027,
     capture_output=True, text=True, env=_cli_env)
 ok(proc_cli8027.returncode == 1,
-   f"L-spec-8027 AC6: the CLI, run from this non-canonical worktree, refuses: "
+   f"L-spec-8027 AC6: the CLI, run from a fixture checkout, refuses: "
    f"rc={proc_cli8027.returncode} stderr={proc_cli8027.stderr!r}")
 ok("not the canonical" in proc_cli8027.stderr,
    f"L-spec-8027 AC6: and names why on stderr: {proc_cli8027.stderr!r}")
+ok(not any(cli_home8027.iterdir()), "L-spec-8027 AC6: the CLI refusal writes nothing")
 print("L-spec-8027 AC6 ok")
 
 

@@ -1,28 +1,62 @@
 #!/usr/bin/env python3
 """harvest checks. Run: python3 test_harvest.py
 
-★ AC9 deviation (minor, declared on the output card): the spec's own review_path
-block hardcodes `cd /home/albert/.do-it/repos/do-it-v2` — a fixed, shared
-checkout, not this file's own worktree. Hardcoding that path HERE would make
-AC9 depend on `harvest.py` already being merged into that other checkout,
-which is exactly backwards for a builder proving its OWN new module against
-the real, live ledger before merge. This resolves the review script's cwd to
-this file's own repo root (`pathlib.Path(__file__).resolve().parent.parent`)
-instead — the identical `python3 -c "..."` script, run the identical way
-(`sys.path.insert(0, 'src')` relative to that cwd), so it exercises whichever
-checkout `test_harvest.py` actually lives in: this worktree today, the shared
-checkout once this merges. `env={**os.environ, "DOIT_ROOT": ...}` and the
-script text are otherwise byte-for-byte the spec's own.
+AC9 uses a fixture ledger by default. Only --live checks the real-ledger
+floor; doit supplies DOIT_TEST_LIVE_ROOT before isolating HOME/DOIT_ROOT.
+Without that explicit root a live invocation prints SKIP live and exits 3.
 """
+import json
 import os
 import pathlib
 import subprocess
 import sys
+import tempfile
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 import harvest  # noqa: E402
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
+
+
+def check_ledger(root, minimum=0):
+    """The same subprocess assertions cover fixtures and the live ledger."""
+    script = """
+import sys, re
+sys.path.insert(0, 'src')
+import fold, harvest
+try:
+    events = fold.read_events()
+except OSError:
+    print('SKIP live: ledger is unreadable')
+    sys.exit(3)
+harvested = [e for e in events if e['type'] in ('spawn-failed','build-deviation','rejected-criterion','correction')]
+minimum = int(sys.argv[1])
+if minimum:
+    assert len(harvested) >= minimum, f'floor breached: {len(harvested)} < {minimum}'
+out = harvest.occurrences(harvested, [])
+assert len(out) == len(harvested), f'{len(out)} != {len(harvested)}'
+assert all(re.match(r'^[a-z0-9-]{3,60}$', o['slug']) for o in out)
+unclassified = sum(1 for o in out if o['slug'].startswith('unclassified-'))
+print(f'AC9 ok count={len(out)} unclassified={unclassified}')
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(minimum)], cwd=REPO_ROOT,
+        capture_output=True, text=True,
+        env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+             "HOME": str(root), "DOIT_ROOT": str(root)},
+    )
+    print(result.stdout, end="")
+    if result.returncode:
+        print(result.stderr, end="")
+    return result
+
+
+if __name__ == "__main__" and sys.argv[1:] == ["--live"]:
+    live_root = os.environ.get("DOIT_TEST_LIVE_ROOT")
+    if not live_root or not (pathlib.Path(live_root) / "events").is_dir():
+        print("SKIP live: no live ledger root")
+        sys.exit(3)
+    sys.exit(check_ledger(live_root, minimum=480).returncode)
 
 ok = []
 
@@ -150,31 +184,17 @@ check("AC8: 12 in, 12 out, input order, each row matches its paired expectation"
       len(out8) == 12 and [o["slug"] for o in out8] == expected8)
 print("AC8 ok")
 
-# ── AC9 — read-only, real-ledger, own-subprocess check ──────────────────────
-ac9_script = """
-import sys, re
-sys.path.insert(0, 'src')
-import fold, harvest
-events = fold.read_events()
-harvested = [e for e in events if e['type'] in ('spawn-failed','build-deviation','rejected-criterion','correction')]
-assert len(harvested) >= 480, f'floor breached: {len(harvested)} < 480'
-out = harvest.occurrences(harvested, [])
-assert len(out) == len(harvested), f'{len(out)} != {len(harvested)}'
-assert all(re.match(r'^[a-z0-9-]{3,60}$', o['slug']) for o in out)
-unclassified = sum(1 for o in out if o['slug'].startswith('unclassified-'))
-print(f'AC9 ok count={len(out)} unclassified={unclassified}')
-"""
-ac9 = subprocess.run(
-    ["python3", "-c", ac9_script],
-    cwd=str(REPO_ROOT),
-    capture_output=True, text=True,
-    env={**os.environ, "DOIT_ROOT": os.path.expanduser("~/.do-it")},
-)
-print(ac9.stdout, end="")
-if ac9.returncode != 0:
-    print(ac9.stderr, end="")
-check("AC9: subprocess against the real ledger exits 0 and prints its own marker",
+# ── AC9 — own-subprocess assertions over a mixed fixture ledger ────────────
+with tempfile.TemporaryDirectory(prefix="harvest-ledger-") as fixture:
+    event_dir = pathlib.Path(fixture) / "events"
+    event_dir.mkdir()
+    fixture_events = events8 + [{"type": "lesson"}, {"type": "verdict"}]
+    (event_dir / "L-fixture-0001.jsonl").write_text(
+        "".join(json.dumps(event) + "\n" for event in fixture_events))
+    ac9 = check_ledger(fixture)
+check("AC9: subprocess against the fixture ledger exits 0 and prints its own marker",
       ac9.returncode == 0 and "AC9 ok" in ac9.stdout)
+print("SKIP live: real-ledger floor requires doit test --live")
 
 # ── AC10 — only the four named types are ever harvested ────────────────────
 events = [
@@ -187,7 +207,6 @@ check("AC10: lesson/verdict pass through untouched; exactly the spawn-failed row
 print("AC10 ok")
 
 # ── AC11 — toml_path wholesale replacement, and the no-file default branch ──
-import tempfile
 tmpdir = pathlib.Path(tempfile.mkdtemp())
 toml_file = tmpdir / "problems.toml"
 toml_file.write_text(
@@ -225,4 +244,5 @@ check("AC12: a malformed token falls through to mint over the WHOLE raw text",
 print("AC12 ok")
 
 print(f"harvest: {sum(ok)}/{len(ok)} checks pass")
-sys.exit(0 if all(ok) else 1)
+if __name__ == "__main__":
+    sys.exit(0 if all(ok) else 1)
