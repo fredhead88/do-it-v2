@@ -4,7 +4,7 @@ dispatches, and escalates the ones that expired instead (L-charter-0038 R1/R2).
 
   doit sweep-owed [--dry-run]
 
-Every run, in this order (Plan SD7):
+Every run, in this order:
 
 1. Append one `escalation-blocking kind=owed-expired` per spec for every
    criterion that newly reached `owed.checks()`'s `"expired"` status (SD3) —
@@ -19,7 +19,8 @@ Every run, in this order (Plan SD7):
    event in the last 12h (retry next run) and (b) a check whose latest
    `owed-unobservable` capability is not `elapsed` (SD2 — never re-batched,
    regardless of age).
-4. Batch at most 8 of the OLDEST-due check's own project's checks into one
+4. Resolve all due rows, quarantine unresolved rows, and choose a project
+   never batched or least recently started. Batch at most 8 of its checks into one
    `content/L-sweep-NNNN.md` manifest, and dispatch one detached
    `owed-sweeper` against it, via `doit packet` then `doit dispatch`.
 
@@ -35,11 +36,11 @@ actor (D90: `"-".join(stem.split("-")[1:-1])`) resolve to `sweep` under any
 caller's environment, including a bare cron invocation that never set
 `DOIT_LEDGER_FILE` at all.
 """
-import argparse, json, pathlib, re, subprocess, sys
+import argparse, hashlib, json, pathlib, re, subprocess, sys
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import dispatch, fold, owed, scratch  # noqa: E402
+import dispatch, fold, owed, packet, scratch  # noqa: E402
 
 LEDGER_NAME = "L-sweep-local.jsonl"
 MAX_BATCH = 8
@@ -229,28 +230,35 @@ def _blocked_pending_retry(row, now):
 
 
 def due_candidates(specs, now):
-    """Every `due` row across every spec, oldest-`due_at` first, minus the two
-    SD2/SD7 exclusions above, plus (L-charter-0042 R6/SD13) any row whose spec
-    is in `answered_specs` and whose own governing `owed-ac` does not strictly
-    postdate that spec's max answering instant. One row per (spec, criterion)."""
+    """Due rows, oldest first, retaining the retry and capability exclusions.
+    An answered expiry cannot exclude a due row (SD11)."""
     rows = []
     for s in specs.values():
         rows.extend(owed.checks(s["evs"], now))
     due = [r for r in rows if r["status"] == "due"
            and not _blocked_permanently(r) and not _blocked_pending_retry(r, now)]
-    answered = answered_specs(specs)
-    due = [r for r in due if not _excluded_by_answer(specs, answered, r["spec"], r["criterion"])]
     return sorted(due, key=lambda r: r["due_at"])
 
 
 # ─────────────────────────── step 4: batch + dispatch ───────────────────────
 
-def _batch_for(due):
-    """SD7 step 4: "take one project" — the one owning the oldest due check —
-    then at most `MAX_BATCH` of ITS checks, oldest-first."""
+def _batch_for(due, all_ev=()):
+    """Never-batched projects first, then oldest last start and oldest due row."""
     if not due:
         return None, []
-    project = due[0]["project"]
+    due = sorted(due, key=lambda r: r["due_at"])
+    last_start = {}
+    for e in all_ev:
+        if e.get("type") == "spawn-started" and e.get("role") == "owed-sweeper":
+            project = e.get("project")
+            stamp = fold.ts(e.get("ts"))
+            if project not in last_start or stamp > last_start[project]:
+                last_start[project] = stamp
+    oldest = {}
+    for row in due:
+        oldest.setdefault(row["project"], row["due_at"])
+    project = min(oldest, key=lambda p: (p in last_start,
+                  last_start.get(p, datetime.min.replace(tzinfo=timezone.utc)), oldest[p]))
     return project, [r for r in due if r["project"] == project][:MAX_BATCH]
 
 
@@ -266,27 +274,121 @@ def _manifest_text(sweep_id, project, cwd, batch):
     of a spec's write destination."""
     rows = [{"spec": r["spec"], "criterion": r["criterion"], "declared_src": r["declared_src"],
              "line": r["line"], "spec_path": str(dispatch.spec_path(r["spec"]))} for r in batch]
-    return (f"# {sweep_id}\n\nproject: {project}\ncwd: {cwd}\n\n## Rows\n\n```json\n"
+    return (f"# {sweep_id}\n\nproject: {project}\ncwd: {cwd}\nkind: plain\n\n## Rows\n\n```json\n"
             + json.dumps(rows, indent=2) + "\n```\n")
 
 
-ORPHANS = pathlib.Path.home() / ".do-it" / "state" / "sweep-owed-orphans.json"
+def _spec_file(row):
+    return pathlib.Path(row.get("spec_path") or dispatch.spec_path(row["spec"]))
 
 
-def _load_orphans():
+def resolvable(row):
+    """Resolve the row against its own spec; unreadable is never clean."""
     try:
-        return set(json.loads(ORPHANS.read_text()))
-    except Exception:
-        return set()
+        body = _spec_file(row).read_bytes().decode("utf-8")
+    except (OSError, UnicodeError) as exc:
+        return False, f"spec unreadable: {exc}"[:300]
+    if packet.criterion_block(body, row["criterion"]) is None:
+        return False, f"{row['spec']}'s {row['criterion']} is not in its spec file"[:300]
+    return True, ""
 
 
-def _remember_orphan(key):
+def _spec_hash(row):
     try:
-        known = _load_orphans() | {key}
-        ORPHANS.parent.mkdir(parents=True, exist_ok=True)
-        ORPHANS.write_text(json.dumps(sorted(known)))
-    except Exception:
-        pass
+        return hashlib.sha256(_spec_file(row).read_bytes()).hexdigest()
+    except OSError:
+        # An unavailable hash is deliberately not a hash of invented file bytes.
+        return "unreadable"
+
+
+def _emit(subject, type_, **fields):
+    ledger_path().parent.mkdir(parents=True, exist_ok=True)
+    return dispatch.emit(ledger_path(), {"subject": subject}, type_, **fields)
+
+
+def _resolve_candidates(specs, now, *, dry_run=False):
+    """Retire legacy keys, recheck changed quarantines, and resolve ALL due rows.
+
+    Cache per-row results so a legacy key also present in the due list is
+    resolved and reported only once. All exclusions carry their reason.
+    """
+    lines, results, quarantined = [], {}, 0
+    latest = {}
+    for sid, spec in specs.items():
+        for e in spec["evs"]:
+            if e.get("type") == "owed-quarantined":
+                latest[sid, e["criterion"]] = e
+
+    def resolve(row):
+        nonlocal quarantined
+        key = row["spec"], row["criterion"]
+        if key in results:
+            return results[key]
+        ok, reason = resolvable(row)
+        digest = _spec_hash(row)
+        if digest == "unreadable":
+            ok, reason = False, (reason or "spec hash unavailable")
+        results[key] = ok
+        if not ok:
+            reason = reason[:300]
+            if dry_run:
+                lines.append(f"sweep-owed: DRY RUN would quarantine {key[0]}/{key[1]}: {reason}")
+            elif latest.get(key, {}).get("spec_sha256") != digest:
+                refused = _emit(key[0], "owed-quarantined", criterion=key[1],
+                                reason=reason, spec_sha256=digest)
+                if refused:
+                    lines.append(f"sweep-owed: quarantine {key[0]}/{key[1]} refused: {refused}; left out: {reason}")
+                else:
+                    quarantined += 1
+                    latest[key] = {"spec_sha256": digest}
+                    lines.append(f"sweep-owed: quarantined {key[0]}/{key[1]}: {reason}")
+            else:
+                lines.append(f"sweep-owed: quarantined {key[0]}/{key[1]} left out: {reason}")
+        return ok
+
+    rechecked = []
+    for sid, spec in specs.items():
+        for row in owed.checks(spec["evs"], now):
+            key = sid, row["criterion"]
+            if row["status"] != "quarantined":
+                continue
+            if _spec_hash(row) == latest.get(key, {}).get("spec_sha256"):
+                continue
+            if resolve(row):
+                if dry_run:
+                    lines.append(f"sweep-owed: DRY RUN would recheck {sid}/{row['criterion']}")
+                    rechecked.append({"subject": sid, "type": "owed-routed", "criterion": row["criterion"],
+                                      "route": "recheck", "ts": now.isoformat()})
+                else:
+                    refused = _emit(sid, "owed-routed", criterion=row["criterion"], route="recheck")
+                    if refused:
+                        lines.append(f"sweep-owed: recheck {sid}/{row['criterion']} refused: {refused}")
+
+    if not dry_run:
+        specs = fold.fold(fold.read_events())[0]
+    elif rechecked:
+        # Simulate the same governing-instant change without writing an event.
+        specs = {sid: {**spec, "evs": [*spec["evs"],
+                 *(e for e in rechecked if e["subject"] == sid)]} for sid, spec in specs.items()}
+    due = due_candidates(specs, now)
+
+    legacy = dispatch.ROOT / "state" / "sweep-owed-orphans.json"
+    if legacy.exists():
+        try:
+            keys = json.loads(legacy.read_text())
+            lines.append(f"sweep-owed: retiring {len(keys)} legacy orphan key(s)")
+            for key in keys:
+                sid, sep, criterion = key.partition("/")
+                if sep and sid in specs:
+                    resolve({"spec": sid, "criterion": criterion})
+            if not dry_run:
+                legacy.rename(legacy.with_name("sweep-owed-orphans.retired.json"))
+        except (OSError, ValueError, TypeError) as exc:
+            lines.append(f"sweep-owed: orphan retirement failed: {str(exc)[:300]}")
+
+    resolved = [row for row in due if resolve(row)]
+    lines.append(f"sweep-owed: resolvable: {len(resolved)} resolved, {len(due) - len(resolved)} unresolved")
+    return resolved, quarantined, lines
 
 
 def dispatch_batch(project, batch, runner, *, dry_run=False):
@@ -313,37 +415,24 @@ def dispatch_batch(project, batch, runner, *, dry_run=False):
     # sweeper since 2026-09-27 was told "not available (capability=ro-dsn)", recorded the
     # check unobservable, and _blocked_permanently retired it until it expired (2026-10-11).
     dispatch.provision_sweep_env(cwd, dispatch.ROOT / "repos" / project)
-    skipped = []
-    while True:
-        sweep_path.write_text(_manifest_text(sweep_id, project, cwd, batch))
-        pr = runner.run([str(doit_bin()), "packet", "owed-sweeper", sweep_id])
-        if pr.returncode == 0:
-            break
+    sweep_path.write_text(_manifest_text(sweep_id, project, cwd, batch))
+    pr = runner.run([str(doit_bin()), "packet", "owed-sweeper", sweep_id])
+    if pr.returncode != 0:
         err = (pr.stderr or pr.stdout or "").strip()
-        # One row whose criterion no longer exists in its spec file must not sink the whole
-        # batch (first live run, 2026-09-27 12:30Z: L-spec-0205 AC6 blocked every due check).
-        m = re.search(r"(L-spec-\d+)'s (\S+) is not in", err)
-        keep = [r for r in batch if not (m and r["spec"] == m.group(1) and r["criterion"] == m.group(2))]
-        if not m or len(keep) == len(batch) or not keep:
-            return [f"sweep-owed: packet build failed for {sweep_id}: {err}"] + [
-                f"sweep-owed: skipped {x} (criterion not in its spec file)" for x in skipped]
-        skipped.append(f"{m.group(1)}/{m.group(2)}")
-        _remember_orphan(skipped[-1])
-        batch = keep
+        return [f"sweep-owed: packet build failed for {sweep_id}: {err}"]
     packet_path = pr.stdout.strip()
     dr = runner.run([str(doit_bin()), "dispatch", "owed-sweeper", sweep_id, "--packet", packet_path,
                      "--cwd", cwd, "--project", project, "--detach"])
     if dr.returncode != 0:
         return [f"sweep-owed: dispatch failed for {sweep_id}: {(dr.stderr or dr.stdout or '').strip()}"]
     return [f"sweep-owed: batched {len(batch)} check(s) in project {project} as {sweep_id} "
-            f"({_describe(batch)})"] + [f"sweep-owed: skipped {x} (criterion not in its spec file)"
-                                        for x in skipped]
+            f"({_describe(batch)})"]
 
 
 # ─────────────────────────────────── driver ──────────────────────────────────
 
 def run(*, dry_run=False, runner=None, now=None):
-    """One sweep pass, in SD7's own order. Returns the lines printed."""
+    """One pass: expiry, resolution, project choice, dispatch and run record."""
     runner = runner or Runner()
     now = now or datetime.now(timezone.utc)
     all_ev = fold.read_events()
@@ -351,28 +440,33 @@ def run(*, dry_run=False, runner=None, now=None):
 
     lines = sweep_expired(specs, now, dry_run=dry_run)
 
+    due, quarantined, resolution_lines = _resolve_candidates(specs, now, dry_run=dry_run)
+    lines.extend(resolution_lines)
+    record = {"quarantined": quarantined}
     if open_batch(all_ev, now):
+        record["outcome"] = "open"
         lines.append("sweep-owed: an owed-sweeper batch is already open; nothing dispatched this run")
+    elif not due:
+        record["outcome"] = "nothing-due"
+        lines.append("sweep-owed: nothing due to batch")
     else:
-        due = due_candidates(specs, now)
-        if not due:
-            lines.append("sweep-owed: nothing due")
+        project, batch = _batch_for(due, all_ev)
+        try:
+            batch_lines = dispatch_batch(project, batch, runner, dry_run=dry_run)
+        except (OSError, subprocess.SubprocessError) as exc:
+            batch_lines = [f"sweep-owed: batch failed: {str(exc)[:300]}"]
+        lines.extend(batch_lines)
+        failure = next((line for line in batch_lines if "failed" in line), None)
+        if failure:
+            record.update(outcome="failed", reason=failure[:300])
         else:
-            # Rows the packet builder already refused as "criterion not in spec file" are remembered
-            # (ORPHANS file) and dropped BEFORE batching: 8 such rows sat at the head of the due list
-            # and filled every MAX_BATCH=8 batch, so most runs on 2026-09-27/28 dispatched nothing.
-            known = _load_orphans()
-            orphans = [r for r in due if f"{r['spec']}/{r['criterion']}" in known]
-            due = [r for r in due if f"{r['spec']}/{r['criterion']}" not in known]
-            if orphans:
-                lines.append(f"sweep-owed: {len(orphans)} known orphan criterion row(s) left out of the batch")
-            if not due:
-                # Fall through to the print below: a bare `return lines` here made an
-                # all-orphan run exit silently, hiding a 7-hour stall (2026-10-04).
-                lines.append(f"sweep-owed: nothing due once {len(orphans)} known orphan row(s) are left out")
-            else:
-                project, batch = _batch_for(due)
-                lines.extend(dispatch_batch(project, batch, runner, dry_run=dry_run))
+            record.update(outcome="batched", kind="plain", rows=len(batch))
+            if not dry_run:
+                record["batch"] = batch_lines[0].split(" as ", 1)[1].split()[0]
+    if not dry_run:
+        refused = _emit("sweep-owed", "sweep-run", **record)
+        if refused:
+            lines.append(f"sweep-owed: sweep-run refused: {refused}")
 
     for line in lines:
         print(line)

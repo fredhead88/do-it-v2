@@ -359,49 +359,19 @@ def _interp_violations(segs):
 
 
 def verify_base_sha(c):
-    """The base a verify script is measured against, pinned ONCE here — never
-    re-derived by the running script, which is what a `$(git merge-base …)` inside
-    the block itself would do on every run. Precedence, all six steps (R3d, R7
-    Target 2 — this docstring is REVISED, not untouched: an earlier round of this
-    same spec claimed this function was byte-for-byte unchanged; it is not,
-    because Target 2 is a real second `build-done` step, additively before the
-    first one):
-    `--base-sha`, else the LATEST `build-done` carrying `base_sha_explicit: true`
-    for this subject (if any), else the EARLIEST recorded `build-done.base_sha`
-    for this subject, else `build-started`, else `spec-written`, else
-    `git merge-base` against the worktree, once, at packet time; `git rev-parse
-    HEAD` is the last resort for a worktree with nothing to diverge from yet.
-
-    R7 Target 2 — the explicit step, additive: a landed merge-conflict/rebase
-    round (`build-done.base_sha_explicit == true`, stamped by `dispatch.main`
-    only when ITS OWN packet carried `PINNED_BASE_SHA_EXPLICIT: true`) pins the
-    main tip it rebased onto — a later, plain rework must keep riding THAT pin,
-    never revert past it to an earlier-recorded base. Byte-for-byte unchanged
-    whenever no `build-done` on this subject's stream ever carries
-    `base_sha_explicit` — every subject built before this spec ships.
-
-    R3d — EARLIEST (the SECOND step, unchanged from before this revision), never
-    the live worktree HEAD and never a later round's own base_sha: on a rework
-    round (same worktree, same branch, an earlier round's commit already on it)
-    the worktree's live HEAD is that earlier round's own `ready_sha`, not the
-    true pre-round-1 base — third live occurrence, named at
-    `events/L-executor-0001.jsonl:255`, caught once already at
-    `events/L-builder-0207.jsonl:6`. `c.all_of("build-done")` is already scoped to
-    THIS subject's own event stream (`Ctx.evs`), so a subject re-cut under a new
-    spec id never inherits a killed predecessor's anchor. `build-started`/
-    `spec-written` are unchanged — the MOST RECENT of each, same as before — only
-    the `build-done` step moved from most-recent to earliest (and now carries the
-    explicit sub-step ahead of it).
-
-    One further, documented last-resort step, and only then the `die()`: **when the
-    worktree path is not a directory**, take `git -C <repo> rev-parse HEAD`, the same
-    repo path `_round_one_slot` and `p_builder` already derive (`--repo`, else
-    `$R/repos/<project>`). A spec's audit is dispatched BEFORE any build, so at that
-    moment no `base_sha` is recorded (not one `spec-written` event on the ledger
-    carries one), and the worktree the builder will cut does not exist yet — without
-    this step a bare `packet_spec_auditor(spec)` dies, and the base has to be handed
-    in out of band by whoever dispatches. The existing precedence above is untouched;
-    the `die()` remains for the case where the repo itself yields nothing."""
+    """Pin the verify base once at packet time (R3d, R7 Target 2).
+    Precedence: --base-sha; latest subject build-done with base_sha_explicit;
+    earliest subject build-done.base_sha; latest build-started; latest
+    spec-written; worktree merge-base; worktree HEAD as a last resort.
+    Explicit pins preserve the main tip from a landed rebase on later rework;
+    otherwise the earliest build-done keeps rework anchored before round one,
+    rather than at a prior round's ready_sha. Ctx.evs scopes this to the subject.
+    Subjects with no explicit build-done retain the original precedence.
+    If the worktree is absent, fall back to HEAD in --repo or $R/repos/project
+    (the same repo convention as _round_one_slot and p_builder). This permits
+    spec audits before a worktree or any recorded base exists. Refuse only if
+    the repository also yields no base. Never re-derive the pin at script time.
+    """
     if c.a.base_sha:
         return c.a.base_sha
     bds = c.all_of("build-done")
@@ -542,35 +512,16 @@ def out_of_grant_line(c):
 
 
 def write_verify_script(c):
-    """The orchestration `verify_script` used to do itself: resolve the spec,
-    resolve the real `base_sha` (`verify_base_sha`), inject `BASE=<sha>` right
-    after `set -euo pipefail`, and write the executable `$R/content/verify-
-    <spec>.sh` — the packet hands `bash <that>`, because a multi-step block
-    cannot ride in the card's verify.command, which §5.10 caps at 300
-    characters. A `VerifyLint` from the pure function still refuses the packet
-    here — `die()`, non-zero exit, on stderr — rather than writing a script
-    that lies about what it checks; `None` (no Verification block) passes
-    through unchanged for every caller's own empty-verify line.
-
-    L-spec-0194: right after the injected `BASE=<sha>` line, and before the
-    spec's own block, one further conditional line is inserted when the
-    subject's OWN most recent `build-started` carries `dsn_role == "readonly"`
-    (`dispatch.provision_worktree_env`'s verdict) — meaning `<worktree>/.env`
-    now holds the RO DSN under the name every `live_db` test reads. Exporting
-    it at the OS-process level, before any interpreter in the chain starts, is
-    what stops a `live_db` criterion from self-skipping — a bare `.env` file
-    alone does not, since neither conftest in albert-scott calls
-    `load_dotenv`. No `build-started` event yet, or `dsn_role` reading
-    `absent`/`refused`/missing entirely, adds no line — byte-for-byte what this
-    function produced before this addition.
-
-    L-spec-0195/finding 3: writes a PER-ROLE file, `verify-<subject>-<c.a.role>.sh`
-    — never one file two roles share, because a grader/reviewer waiver and the
-    builder's own real chain must never collide on one path. For `c.a.role` in
-    `("grader", "reviewer")` only, every standing `verify-waiver{step}` on the
-    subject (`standing_waivers`) substitutes a no-op (`true`) for that 1-indexed
-    `&&`-segment of the block, BEFORE the BASE/dsn assembly above — the builder's
-    own script is never touched by a waiver, whatever role dispatched it."""
+    """Resolve the spec and verify_base_sha, then write an executable script.
+    Inject BASE after set -euo pipefail; return None for absent Verification,
+    and die on VerifyLint rather than writing a script that lies about checks.
+    L-spec-0194: when the subject's latest build-started has dsn_role=readonly,
+    export its worktree credential before any interpreter starts so live_db
+    checks cannot silently skip. Absent/refused/missing roles add nothing.
+    L-spec-0195: use verify-<subject>-<role>.sh to avoid cross-role collisions.
+    Only grader/reviewer apply standing_waivers as true at the named 1-indexed
+    && segments, before BASE/credential assembly; builders never apply waivers.
+    """
     spec = c.spec_file()
     try:
         text = verify_script(spec.read_text())
@@ -691,30 +642,14 @@ def _unit_field(block, name):
 
 
 def _unit_field_lines(block, name):
-    """Every entry of a MULTI-LINE unit field (`Footprint:`, `Consumes:`, `Produces:`),
-    in the cut's own order — never re-ordered, never deduplicated.
-
-    The defect this closes, as MEASURED against the real cut and the real packet built
-    from it (`packets/L-spec-0049-spec-writer-1.md`), not as reasoned about: a real cut
-    writes its seam entries on the lines BENEATH a bare label, and `_unit_field` reads
-    the label LINE. It did not render `nothing` there — it rendered the FIRST entry and
-    silently dropped the rest, for the unit's own Seams line and for every sibling's
-    Produces alike, and truncated a multi-line `Footprint:` to its first path,
-    narrowing the merge grant below the audited cut. Where a label has no entry lines
-    at all it was worse still: `\\s*` crosses the newline, so a bare `Produces:` above
-    `Wave: 2` rendered `produces: Wave: 2`. `content/cut-L-charter-0021.md`'s own
-    header tells authors to work around this by keeping footprints on one line; the
-    reader is the thing that was wrong, so the reader is what is fixed here.
-
-    The rule: the remainder of the label line if it carries one, then every non-empty
-    line under it, up to the next field label or the end of the unit block. A label
-    with no entry line beneath it and nothing after the colon yields `[]` — which the
-    callers still render as `nothing`.
-
-    Deliberately NOT `audit.fields()`'s rule, which continues a label only on
-    `-`/`*` bullet lines and so sees no entries at all in a real cut whose seam
-    entries are bare lines. The divergence is declared, not hidden: one cut must not
-    be read two ways, and reconciling it belongs to whoever owns `src/audit.py`."""
+    """Read all entries of a multiline cut field, in order, without deduplication.
+    Include the label's remainder and every nonempty continuation through the
+    next field label or block end; an empty field yields [] (rendered as nothing).
+    Footprint, Consumes and Produces may use bare continuation lines, so reading
+    only the label truncates seams and merge grants. Never cross into Wave:.
+    Deliberately differs from audit.fields(), which accepts only bullet
+    continuations; reconciling that parser belongs to src/audit.py's owner.
+    """
     lines = block.splitlines()
     for i, line in enumerate(lines):
         m = re.match(rf"^{name}:\s*(.*)$", line)
@@ -1237,7 +1172,7 @@ def parse_sweep_manifest(path):
     must equal `dispatch.spec_path(row["spec"])` exactly (fix 6) — a lazy,
     function-scoped import, matching this file's existing `import
     fold`/`import validate` convention. A row that fails that check dies
-    naming the offending spec. Returns `{"project", "cwd", "rows"}`, rows
+    naming the offending spec. Returns `{"project", "cwd", "rows", "kind"}` (plain by default), rows
     exactly as written (never mutated)."""
     p = pathlib.Path(path)
     if not p.is_file():
@@ -1251,6 +1186,10 @@ def parse_sweep_manifest(path):
     if not m:
         die(f"{path}: no 'cwd:' line")
     cwd = m.group(1).strip()
+    kind_match = re.search(r"^kind:[ \t]*(.*)$", raw, re.M)
+    kind = kind_match.group(1).strip() if kind_match else "plain"
+    if kind != "plain":
+        die(f"{path}: unsupported sweep kind {kind!r}")
     sec = section(raw, "Rows")
     if not sec:
         die(f"{path}: no '## Rows' section")
@@ -1271,14 +1210,26 @@ def parse_sweep_manifest(path):
         if got != want:
             die(f"{path}: row {row['spec']}'s spec_path {row['spec_path']!r} does not resolve "
                 f"to dispatch.spec_path({row['spec']!r}) == {want}")
-    return {"project": project, "cwd": cwd, "rows": rows}
+    return {"project": project, "cwd": cwd, "rows": rows, "kind": kind}
 
 
 def criterion_block(body, crit_id):
     """One acceptance criterion's FULL block, verbatim — from its `^\\s*{crit_id}
     [` line to (not including) the next `^\\s*AC\\d+ [` line, or the Acceptance
     section's end — so a continuation-line `review_path:` rides along (fix 6,
-    the sweeper's own AC1 precedent). `None` when `crit_id` is absent."""
+    the sweeper's own AC1 precedent). `verify` returns the heading and body
+    of Verification unchanged. `None` when the requested block is absent."""
+    if crit_id == "verify":
+        lines = body.splitlines(keepends=True)
+        headings = _heading_positions(body)
+        pat = re.compile(r"^#+\s*(\d+\.)?\s*Verification\b", re.I)
+        start = next((i for i in headings if pat.match(lines[i])), None)
+        if start is None:
+            return None
+        end = next((i for i in headings if i > start), len(lines))
+        if not "".join(lines[start + 1:end]).strip():
+            return None
+        return "".join(lines[start:end])
     sec = section(body, "Acceptance")
     lines = sec.splitlines() if sec else body.splitlines()
     # Specs write a criterion as `**AC5 [`, `- **AC5 [`, `  - **AC5 [`, `| AC5 [` (a table
