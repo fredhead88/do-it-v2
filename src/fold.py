@@ -55,16 +55,9 @@ EMITS = {"verdict": {"grader"}, "review": {"reviewer"}, "shipped": {"executor"},
          # rejection costs rework, never a false pass — so any judging or gating
          # seat may do it, the Executor included (its merge gate is a gate).
          # CLEARING is the dangerous direction and is judging seats only.
-         # The builder is kept out of both: otherwise it could clear the
-         # rejections against its own build and reach `accepted` from one seat,
-         # which is exactly what the verdict and review rows exist to prevent.
-         # L-charter-0042/L-spec-0424, R7: `fold()`'s admission loop below also
-         # lets the builder itself through, but ONLY for criterion
-         # `"COMMIT-SHAPE"` — the dispatch wrapper's own row, written to the
-         # builder's own ledger file and so indistinguishable from the
-         # builder's model turn (D90). Every reason above still holds for every
-         # OTHER criterion; this is the one carve-out (SD7), enforced at fold
-         # time because `EMITS` alone carries no per-criterion granularity.
+         # R7/SD7: admits() lets builders through ONLY for COMMIT-SHAPE, the
+         # dispatch wrapper's own row (written to the builder's ledger, D90).
+         # Every other criterion remains restricted to judging/gating seats.
          "rejected-criterion": {"grader", "reviewer", "executor"},
          "criterion-cleared": {"grader", "reviewer"},
          # D101: the reviewer's blocking event, and it blocks HERE — see standing_rejects.
@@ -149,14 +142,14 @@ EMITS = {"verdict": {"grader"}, "review": {"reviewer"}, "shipped": {"executor"},
          # to prevent.
          # L-charter-0038/L-spec-0384, SD4: `owed-sweeper` joins the two actors
          # already trusted to discharge an owed criterion by citing evidence
-         # directly — the sweep's own verdict on a check it ran. The Thinker
-         # still may not (charter, verbatim).
-         "owed-met": {"owed-sweeper", "executor", "operator"},
+         # directly — the sweep's own verdict on a check it ran. L-spec-1002
+         # also admits the Thinker, subject to admits()'s evidence shape check.
+         "owed-met": {"owed-sweeper", "executor", "operator", "thinker"},
          # L-charter-0038/L-spec-0384, SD4: new. Same three actors as
          # `owed-met` — a failed check is the other half of the same claim, and
          # the same asymmetry applies: a seat that could fail-then-clear its own
          # check on any shipped spec would walk it to `expired` alone.
-         "owed-failed": {"owed-sweeper", "executor", "operator"},
+         "owed-failed": {"owed-sweeper", "executor", "operator", "thinker"},
          # L-charter-0020 R8: the Planner's own run, opened and closed on the ledger
          # so `relay.planner_attempts` can pair them into a tally and the launcher
          # keeps no state in memory. Restricted to the Planner for the same reason
@@ -223,11 +216,8 @@ DECLARES = {
 for _role, _terms in DECLARES.items():
     for _term in _terms.split():
         EMITS.setdefault(_term, set()).add(_role)
-# R10/L-spec-0192: the Executor may RE-DATE an already-declared owed criterion
-# (move its `wake_at`), never declare a new one — `fold()` below enforces the
-# narrower grant at fold time (subject-scoped, not `check_append`'s business);
-# `EMITS` membership alone only gets an executor-authored `owed-ac` as far as
-# that second gate.
+# R10/L-spec-0192: admits() lets the Executor re-date an already-declared owed
+# criterion (move its wake_at), never declare one. EMITS alone is insufficient.
 EMITS["owed-ac"].add("executor")
 # Operator ruling 2026-10-04: the Thinker and the operator may DECLARE a criterion
 # owed (post-deploy) when a grader cannot assess it in a view — e.g. a live_db leg
@@ -269,9 +259,7 @@ EMITS["capability-hold"] = {"grader", "reviewer"}
 EMITS["criterion-routed"] = {"grader"}
 # R7: widen `rejected-criterion`/`criterion-cleared` to also admit `builder`,
 # on top of every actor already admitted. The bare `EMITS` set carries no
-# per-criterion granularity — reachable behavior is narrowed to
-# `criterion == "COMMIT-SHAPE"` inside `fold()`'s own admission loop below,
-# the same way `owed-ac` is already narrowed there.
+# per-criterion granularity — admits() narrows builders to COMMIT-SHAPE.
 EMITS["rejected-criterion"].add("builder")
 EMITS["criterion-cleared"].add("builder")
 # L-charter-0046/L-spec-0470 (ledger-vocabulary): Proving's six event types,
@@ -284,6 +272,13 @@ EMITS["charter-reopened"] = {"tick"}       # R4: the tick's own reopen, naming t
 # R3: an explicit ledger decision, never a builder or a grading seat (charter
 # constraint, verbatim: "Waivers are explicit ledger decisions with a reason").
 EMITS["owed-waived"] = {"operator", "thinker"}
+# L-spec-1002 / SD1: vocabulary for the owed lifecycle's writers. Route and
+# Thinker evidence restrictions live in admits(), alongside the older narrowings.
+EMITS["owed-routed"] = {"sweep", "thinker", "operator"}
+EMITS["owed-quarantined"] = {"sweep"}
+EMITS["owed-corrective"] = {"thinker", "operator", "executor"}
+EMITS["sweep-run"] = {"sweep"}
+EMITS["owed-digest"] = {"owed-digest"}
 # R3: the operator/Thinker accepting a killed spec's absence with no in-charter
 # replacement — subject is always the KILLED SPEC, never the charter.
 EMITS["kill-accepted"] = {"operator", "thinker"}
@@ -421,6 +416,13 @@ def _merge_same_ts(items):
     return out
 
 
+def actor_of(filename: str) -> str:
+    """D90: strip one machine prefix and one trailing token, retaining role hyphens."""
+    stem = pathlib.Path(filename).stem
+    parts = stem.split("-")
+    return "-".join(parts[1:-1]) if len(parts) >= 3 else stem
+
+
 def read_events():
     """Every event in every file, oldest first. A torn tail never wedges the fold.
 
@@ -437,10 +439,7 @@ def read_events():
     files the order is content-derived, never filename-derived."""
     out = []
     for f in sorted(EVENTS.glob("*.jsonl")):
-        # L-<role>-<nnnn>: the role may itself carry hyphens (L-spec-writer-0007),
-        # so strip one machine prefix and one trailing token, never split on all.
-        parts = f.stem.split("-")
-        actor = "-".join(parts[1:-1]) if len(parts) >= 3 else f.stem
+        actor = actor_of(f.name)
         for n, line in enumerate(f.read_text().splitlines(), 1):
             if not line.strip():
                 continue
@@ -789,7 +788,7 @@ REQUIRED = {"owed-ac": ("criterion",), "spec-carried": ("source", "tier", "audit
             "spec-lint-warning": ("finding",),
             # L-charter-0038/L-spec-0384, SD4: a failed check without its own
             # evidence is a stamp, not a claim.
-            "owed-failed": ("criterion", "evidence")}
+            "owed-failed": ("criterion", "evidence", "kind")}
 # L-charter-0042/L-spec-0424 (ledger-vocabulary): the same six types' required
 # fields, verbatim from the Plan's Produces line. Presence-only, like every
 # other entry above — no value's shape, format, or type is checked here.
@@ -806,6 +805,11 @@ REQUIRED["charter-proving"] = ("reason", "deadline")
 REQUIRED["charter-closed"] = ("reason",)
 REQUIRED["charter-reopened"] = ("spec", "criterion", "failed_src")
 REQUIRED["owed-waived"] = ("criterion", "reason")
+REQUIRED["owed-routed"] = ("criterion", "route")
+REQUIRED["owed-quarantined"] = ("criterion", "reason", "spec_sha256")
+REQUIRED["owed-corrective"] = ("criterion", "corrective")
+REQUIRED["sweep-run"] = ("outcome",)
+REQUIRED["owed-digest"] = ("path", "counts")
 REQUIRED["kill-accepted"] = ("reason",)
 REQUIRED["charter-classified"] = ("klass", "reason")
 # L-charter-0042/L-spec-0486 (cleanup-on-finish), R15a: presence-only, like every
@@ -903,9 +907,8 @@ def required_reason(e):
     """Field-only, actor-blind: `None` when `e` carries what its type requires (or
     requires nothing — every type outside `REQUIRED` and `escalation-blocking`).
     Never re-reads the ledger, never looks at actor — the actor question is
-    `check_append`'s alone. This is the door `append()` and `dispatch.emit()`
-    both apply: a missing required field is refused, an actor/type mismatch is
-    not (ADR-0028-3) — that stays recorded-and-ignored at fold time."""
+    `admits`'s alone. Both strict and in-process append refuse missing fields;
+    fold deliberately does not apply this check to historical ledger rows."""
     t = e.get("type")
     if t == "escalation-blocking":
         if escalation_ok(e):
@@ -915,7 +918,9 @@ def required_reason(e):
                 "irreversible=<the act that forbids a default> (an irreversible one)")
     fields = REQUIRED.get(t)
     if fields:
-        missing = [k for k in fields if not _has(e, k)]
+        # An empty digest histogram is still a supplied counts field (SD1).
+        missing = [k for k in fields if not (
+            k in e if t == "owed-digest" and k == "counts" else _has(e, k))]
         if missing:
             return (f"{t} {e.get('subject', '?')} missing required field(s): "
                     + ", ".join(f"{k}=" for k in missing))
@@ -936,25 +941,47 @@ def required_reason(e):
     return None
 
 
-def check_append(event, actor):
-    """The one predicate deciding whether a write survives ANY door that calls it
-    with the real actor: `required_reason` above, plus `EMITS` actor membership.
-    Pure — one event dict, one actor string in, a reason string or `None` out;
-    never re-reads the ledger, no side effect (load-bearing: AC16/AC17/AC21 call
-    this, and `spec_state`, directly). `append()`/`emit()` apply `required_reason`
-    alone — an actor/type mismatch is never refused at either door, only
-    recorded-and-ignored at fold time; a caller needing the full any-reason
-    refusal (`carry-both-ledgers`, the Executor's `owed-ac` re-date, `doit
-    restore`) calls THIS directly with the real actor and refuses on any
-    non-`None` return (ADR-0028-3)."""
-    reason = required_reason(event)
-    if reason:
-        return reason
-    allowed = EMITS.get(event.get("type"))
+def admits(event: dict, actor: str, prior: list[dict] | None = None) -> str | None:
+    """Pure keep-or-drop rule. prior is this subject's already-kept history.
+
+    None omits only the owed-ac re-date check for single-event callers. No
+    required-field checks here: old ledger rows retain their original meaning.
+    """
+    kind = event.get("type")
+    allowed = EMITS.get(kind)
     if allowed is not None and actor not in allowed:
-        return (f"actor mismatch: {actor!r} may not emit {event.get('type')!r} "
+        return (f"actor mismatch: {actor!r} may not emit {kind!r} "
                 f"(allowed: {sorted(allowed)})")
+    if kind == "owed-ac" and actor not in OWED_DECLARERS and prior is not None:
+        criterion = event.get("criterion")
+        declared = bool(criterion) and any(
+            e.get("type") == "owed-ac" and e.get("criterion") == criterion
+            and e.get("actor") in OWED_DECLARERS for e in prior)
+        if not declared:
+            return f"owed-ac criterion {criterion!r} has no earlier declarer; {actor!r} may only re-date"
+    if kind in ("rejected-criterion", "criterion-cleared") and actor == "builder":
+        if event.get("criterion") != "COMMIT-SHAPE":
+            return f"builder may emit {kind} only for criterion COMMIT-SHAPE"
+    if kind == "spawn-failed" and event.get("reason") == "cancelled":
+        if actor not in ("executor", "operator", "thinker"):
+            return f"{actor!r} may not emit spawn-failed reason=cancelled"
+    if kind in ("owed-met", "owed-failed") and actor == "thinker":
+        evidence = event.get("evidence")
+        if isinstance(evidence, str):
+            lines = evidence.split("\n")
+            if (evidence.startswith("$ ") and any(line.strip() for line in lines[1:])) \
+                    or (len(lines) == 1 and os.path.isabs(evidence)):
+                return None
+        return f"thinker {kind} requires evidence: '$ command' with output, or a single absolute path"
+    if kind == "owed-routed" and actor in ("thinker", "operator"):
+        if event.get("route") not in ("recheck", "relabel"):
+            return f"{actor!r} may emit owed-routed only with route=recheck or route=relabel"
     return None
+
+
+def check_append(event: dict, actor: str, prior: list[dict] | None = None) -> str | None:
+    """Required fields, then the same pure admission rule used by fold()."""
+    return required_reason(event) or admits(event, actor, prior)
 
 
 def malformed_escalations(events):
@@ -1713,42 +1740,8 @@ def spec_state(evs, retracted):
 def fold(events):
     by_subject, ignored = collections.defaultdict(list), []
     for e in events:
-        etype, subj = e.get("type"), e.get("subject", "")
-        allowed = EMITS.get(etype)
-        if allowed is not None and e["actor"] not in allowed:
-            ignored.append(e)
-            continue
-        # R10/L-spec-0192: `EMITS["owed-ac"]` now admits the executor, but ONLY to
-        # RE-DATE — never to declare. This is `fold()`'s own subject-scoped
-        # classification, not `check_append`'s (which sees one event and never
-        # the rest of the stream): an executor-authored `owed-ac` survives here
-        # ONLY when the subject's stream already carries an EARLIER (by ts — and
-        # `events` arrives here already ts-sorted, so "earlier" is "already in
-        # `by_subject[subj]`") spec-writer/spec-auditor `owed-ac` for the
-        # IDENTICAL criterion. Any other criterion is ignored exactly like any
-        # other unauthorized emit.
-        if etype == "owed-ac" and e["actor"] not in OWED_DECLARERS:
-            crit = e.get("criterion")
-            prior = bool(crit) and any(
-                x["type"] == "owed-ac" and x.get("criterion") == crit
-                and x["actor"] in OWED_DECLARERS for x in by_subject[subj])
-            if not prior:
-                ignored.append(e)
-                continue
-        # L-charter-0042/L-spec-0424, R7: `EMITS["rejected-criterion"]`/
-        # `EMITS["criterion-cleared"]` now admit `"builder"` at the bare-dict
-        # level (widened above), but that dict carries no per-criterion
-        # granularity — a caller-side guard could never be trusted anyway,
-        # since the dispatch wrapper's COMMIT-SHAPE row is written to the
-        # builder's own ledger file and so is indistinguishable from the
-        # builder's model turn at every door (D90). `fold()` is the only place
-        # that has both the actor and this subject's own history, so the
-        # narrowing lives here: a builder-authored event of either type
-        # survives ONLY for `criterion == "COMMIT-SHAPE"`; any other criterion
-        # from actor `"builder"` is ignored exactly as it is ignored today
-        # (`test_fold.py`'s `selfclear` case, unchanged).
-        if (etype in ("rejected-criterion", "criterion-cleared") and e["actor"] == "builder" and e.get("criterion") != "COMMIT-SHAPE") \
-                or (etype == "spawn-failed" and e.get("reason") == "cancelled" and e["actor"] not in ("executor", "operator", "thinker")):  # L-spec-0755/R1
+        subj = e.get("subject", "")
+        if admits(e, e.get("actor", ""), by_subject.get(subj, [])) is not None:
             ignored.append(e)
             continue
         by_subject[subj].append(e)
@@ -2334,7 +2327,7 @@ def subject_project(subject):
                  if e.get("subject") == subject and e.get("project")), None)
 
 
-def append(argv):
+def append(argv: list[str], strict: bool = False) -> dict:
     """Content before event, always (§9.2 rule 3). Never trust the write — re-read (rule 4)."""
     argv = list(argv)
     # L-spec-0279/R3: a literal --inbox token anywhere in argv is a filename-
@@ -2368,6 +2361,21 @@ def append(argv):
                 e[k] = v
         else:
             e[k] = v
+    if "actor" in e:
+        raise SystemExit("refused: actor is derived from the ledger filename, never an actor= field")
+    actor = actor_of(path.name)
+    prior = None
+    if e["type"] == "owed-ac" and actor not in OWED_DECLARERS:
+        prior = fold(read_events())[3].get(e["subject"], [])
+    reason = check_append(e, actor, prior)
+    if reason and (strict or required_reason(e)):
+        raise SystemExit(f"refused: {e['type']} by {actor}: {reason}. Nothing was written. (R3)")
+    if strict and actor == "thinker" and e["type"] in ("owed-met", "owed-failed"):
+        evidence = e.get("evidence")
+        if isinstance(evidence, str) and os.path.isabs(evidence) and not os.path.exists(evidence):
+            raise SystemExit(f"refused: {e['type']} by {actor}: evidence path does not exist: {evidence}")
+    if reason:
+        print(f"fold: recorded-and-ignored {e['type']} by {actor}", file=sys.stderr)
     # L-spec-0279/R3: the type=="lesson" mint hook. Lazy import — mirrors this
     # file's own lazy `import dispatch` at the `alloc` branch below, to avoid a
     # problems.py<->fold.py import cycle (problems.py imports read_events()/EMITS
@@ -2386,15 +2394,6 @@ def append(argv):
             if suggestions:
                 print(f"mint: {slug!r} is new — near-duplicate slug(s): {', '.join(suggestions)}",
                       file=sys.stderr)
-    # ★ R3, and it is CONTENT BEFORE EVENT (§9.2 rule 3) applied to the event's own
-    # fields: `required_reason` is the one required-fields door (`escalation-
-    # blocking`, `owed-ac`, `spec-carried` — L-spec-0192), refused at the door
-    # with the missing requirement NAMED. Nothing is written — the raise precedes
-    # the open(). An actor/type mismatch is never refused here (ADR-0028-3) — it
-    # stays recorded-and-ignored at fold time.
-    reason = required_reason(e)
-    if reason:
-        raise SystemExit(f"refused: {reason}. Nothing was written. (R3)")
     path.parent.mkdir(parents=True, exist_ok=True)
     line = json.dumps(e, sort_keys=True)
     with open(path, "a") as fh:
@@ -2419,7 +2418,7 @@ if __name__ == "__main__":
         print(dispatch.alloc(ROOT / "content", f"L-{sys.argv[2]}-", ".md"))
         sys.exit(0)
     if cmd == "append":
-        append(sys.argv[2:])
+        append(sys.argv[2:], strict=True)
     ev = read_events()
     specs, charters, ignored, by_subject = fold(ev)
     if cmd == "events":                      # one subject's events, oldest first, as the fold read them

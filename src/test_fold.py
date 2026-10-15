@@ -3750,3 +3750,207 @@ assert any(e["type"] == "origin-pushed" and e["actor"] == "look" for e in ignore
 assert not any(e["type"] == "origin-pushed" and e["actor"] == "tick" for e in ignored0484_16), \
     f"merge-origin-0484 AC16: a tick-authored origin-pushed must NOT be ignored: {ignored0484_16}"
 print("merge-origin-0484 AC16 ok")
+
+
+# L-spec-1002: exercise admission through the predicate, store and real CLI.
+def test_owed_vocabulary():
+    import contextlib
+    import io
+    from unittest import mock
+
+    def event(kind, **fields):
+        return {"type": kind, "subject": "L-spec-9998", "ts": stamp(0), **fields}
+
+    def refused(argv, *words):
+        path = fold.EVENTS / os.environ["DOIT_LEDGER_FILE"]
+        before = path.read_bytes() if path.exists() else None
+        try:
+            fold.append(argv, strict=True)
+        except SystemExit as exc:
+            assert all(word in str(exc) for word in words), str(exc)
+        else:
+            raise AssertionError(f"not refused: {argv}")
+        assert (path.read_bytes() if path.exists() else None) == before
+
+    # Pin the project so these counts measure admission reads, independently
+    # of the existing subject_project() lookup when PROJECT is unset.
+    with tempfile.TemporaryDirectory(prefix="owed-vocabulary-") as directory, \
+            mock.patch.object(fold, "ROOT", pathlib.Path(directory)), \
+            mock.patch.object(fold, "EVENTS", pathlib.Path(directory) / "events"), \
+            mock.patch.object(fold, "PROJECT", "do-it-v2"), \
+            mock.patch.dict(os.environ, {"DOIT_ROOT": directory,
+                                         "DOIT_LEDGER_FILE": "L-operator-local.jsonl",
+                                         "DOIT_PROJECT": "do-it-v2"}):
+        declaration = event("owed-ac", criterion="AC1", actor="spec-writer")
+        assert fold.admits(event("verdict"), "grader") is None
+        cases = [(event("verdict"), "operator", None),
+                 (event("owed-ac", criterion="AC1"), "executor", []),
+                 (event("rejected-criterion", criterion="AC1"), "builder", None),
+                 (event("criterion-cleared", criterion="AC1"), "builder", None),
+                 (event("spawn-failed", reason="cancelled"), "builder", None)]
+        for candidate, actor, prior in cases:
+            assert fold.admits(candidate, actor, prior)
+            print("L1002-AC1", candidate["type"], actor, "refused ok")
+        assert fold.admits(event("owed-ac", criterion="AC1"), "executor", [declaration]) is None
+        assert fold.admits(event("owed-ac", criterion="AC1"), "executor") is None
+        assert fold.admits(event("owed-ac", criterion="AC2"), "executor", [declaration])
+        for kind in ("rejected-criterion", "criterion-cleared"):
+            assert fold.admits(event(kind, criterion="COMMIT-SHAPE"), "builder") is None
+        for actor in ("executor", "operator", "thinker"):
+            assert fold.admits(event("spawn-failed", reason="cancelled"), actor) is None
+        print("L1002-AC1 ok")
+        legacy_open_event = event("observed")
+        assert fold.fold([legacy_open_event])[3]["L-spec-9998"] == [legacy_open_event]
+        print("L1002-AC2 ok (pre-existing assertions and actor-less open events)")
+
+        # A refusal preserves an existing file as well as refusing to create one.
+        fold.append(["observed", "L-spec-9999"], strict=True)
+        refused(["verdict", "L-spec-9999", "confirmed=true"], "operator", "verdict", "actor mismatch")
+        os.environ["DOIT_LEDGER_FILE"] = "L-grader-0001.jsonl"
+        fold.append(["verdict", "L-spec-9999", "confirmed=true"], strict=True)
+        assert len((fold.EVENTS / "L-grader-0001.jsonl").read_text().splitlines()) == 1
+        print("L1002-AC3 ok")
+
+        os.environ["DOIT_LEDGER_FILE"] = "L-operator-local.jsonl"
+        fold.append(["owed-corrective", "L-spec-9998", "criterion=AC1", "corrective=L-spec-9999"], strict=True)
+        fresh = fold.read_events()
+        stored = next(e for e in fresh if e["type"] == "owed-corrective")
+        assert stored["actor"] == "operator" and stored["corrective"] == "L-spec-9999"
+        assert all("actor" not in json.loads(line)
+                   for line in (fold.EVENTS / "L-operator-local.jsonl").read_text().splitlines())
+        refused(["observed", "L-spec-9998", "actor=grader"], "actor")
+        with tempfile.TemporaryDirectory(prefix="owed-cli-") as cli_root:
+            cli = subprocess.run(["/usr/bin/python3", str(pathlib.Path(fold.__file__).resolve()),
+                                  "append", "verdict", "L-spec-9999"],
+                                 env={**os.environ, "DOIT_ROOT": cli_root}, capture_output=True, text=True)
+            assert cli.returncode != 0 and "operator" in cli.stderr and "verdict" in cli.stderr
+            assert not list(pathlib.Path(cli_root).rglob("*.jsonl"))
+        print("L1002-AC4 ok")
+
+        evidence_events = []
+        for kind in ("owed-met", "owed-failed"):
+            for evidence in ("$ cmd\noutput", "/abs/path", None, "cmd with no dollar",
+                             "$ cmd", "$ cmd\n", "relative/path"):
+                candidate = event(kind, criterion="AC1", actor="thinker")
+                if evidence is not None:
+                    candidate["evidence"] = evidence
+                expected = evidence in ("$ cmd\noutput", "/abs/path")
+                assert (fold.admits(candidate, "thinker") is None) == expected
+                evidence_events.append(candidate)
+                print("L1002-AC5", kind, repr(evidence), "ok")
+        _, _, ignored, subjects = fold.fold(evidence_events)
+        assert len(ignored) == 10 and len(subjects["L-spec-9998"]) == 4
+        for bad in (42, {}, "/abs/path\n", "$ cmd\n \t"):
+            assert fold.admits(event("owed-met", evidence=bad), "thinker")
+        print("L1002-AC5 ok")
+
+        os.environ["DOIT_LEDGER_FILE"] = "L-thinker-0001.jsonl"
+        missing_path = str(pathlib.Path(directory) / "does-not-exist")
+        refused(["owed-met", "L-spec-9998", "criterion=AC1", f"evidence={missing_path}"], missing_path)
+        proof = pathlib.Path(directory) / "proof.txt"
+        proof.write_text("proof\n")
+        fold.append(["owed-met", "L-spec-9998", "criterion=AC1", f"evidence={proof}"], strict=True)
+        assert len((fold.EVENTS / "L-thinker-0001.jsonl").read_text().splitlines()) == 1
+        command_proof = "$ cmd\nout"
+        fold.append(["owed-met", "L-spec-9998", "criterion=AC1", f"evidence={command_proof}"], strict=True)
+        assert len((fold.EVENTS / "L-thinker-0001.jsonl").read_text().splitlines()) == 2
+        assert any(e.get("evidence") == command_proof for e in fold.read_events())
+        print("L1002-AC6 ok")
+
+        vocabulary = {
+            "owed-routed": ({"sweep", "thinker", "operator"}, {"criterion": "AC1", "route": "recheck"}),
+            "owed-quarantined": ({"sweep"}, {"criterion": "AC1", "reason": "old", "spec_sha256": "digest"}),
+            "owed-corrective": ({"thinker", "operator", "executor"}, {"criterion": "AC1", "corrective": "L-spec-9999"}),
+            "sweep-run": ({"sweep"}, {"outcome": "any"}),
+            "owed-digest": ({"owed-digest"}, {"path": "/report", "counts": {}}),
+            "owed-waived": ({"thinker", "operator"}, {"criterion": "AC1", "reason": "waived"}),
+        }
+        for kind, (actors, fields) in vocabulary.items():
+            assert fold.EMITS[kind] == actors
+            assert set(fold.REQUIRED[kind]) == set(fields)
+            candidate = event(kind, **fields)
+            for actor in sorted(actors | {"builder"}):
+                assert (fold.check_append(candidate, actor) is None) == (actor in actors)
+                print("L1002-AC7", kind, actor, "kept" if actor in actors else "refused", "ok")
+                for field in fields:
+                    assert fold.check_append({k: v for k, v in candidate.items() if k != field}, actor)
+        for actor in ("thinker", "operator", "sweep"):
+            for route in ("recheck", "relabel", "anything"):
+                assert (fold.admits(event("owed-routed", route=route), actor) is None) == (
+                    actor == "sweep" or route in ("recheck", "relabel"))
+        assert fold.check_append(event("owed-waived", criterion="AC1", reason="x"), "executor")
+        print("L1002-AC7 ok")
+
+        old_failure = event("owed-failed", criterion="AC1", evidence="old", actor="executor")
+        assert "kind=" in fold.required_reason(old_failure)
+        assert fold.fold([old_failure])[3]["L-spec-9998"] == [old_failure]
+        assert fold.check_append({**old_failure, "kind": "arbitrary"}, "executor") is None
+        print("L1002-AC8 ok")
+
+        partition = [declaration, event("owed-ac", criterion="AC1", actor="executor"),
+                     event("owed-ac", criterion="AC2", actor="executor"), old_failure,
+                     event("verdict", actor="operator"),
+                     event("rejected-criterion", criterion="AC1", actor="builder"),
+                     event("spawn-failed", reason="cancelled", actor="builder"),
+                     *evidence_events]
+        # Read a real multi-actor ledger, preserving an explicit time order.
+        with mock.patch.object(fold, "EVENTS", pathlib.Path(directory) / "partition"):
+            fold.EVENTS.mkdir()
+            for index, candidate in enumerate(partition):
+                candidate = {**candidate, "ts": stamp(len(partition) - index)}
+                path = fold.EVENTS / f"L-{candidate['actor']}-local.jsonl"
+                with path.open("a") as stream:
+                    stream.write(json.dumps({k: v for k, v in candidate.items() if k != "actor"}) + "\n")
+            partition = fold.read_events()
+        _, _, ignored, subjects = fold.fold(partition)
+        kept = []
+        for candidate in partition:
+            reason = fold.admits(candidate, candidate["actor"], kept)
+            assert (candidate in ignored) == (reason is not None)
+            if reason is None:
+                kept.append(candidate)
+        assert kept == subjects["L-spec-9998"] and len(kept) + len(ignored) == len(partition)
+        print("L1002-AC9 ok")
+
+        os.environ["DOIT_LEDGER_FILE"] = "L-executor-0001.jsonl"
+        warnings = io.StringIO()
+        with contextlib.redirect_stderr(warnings), mock.patch.object(fold, "read_events", wraps=fold.read_events) as reads:
+            fold.append(["worked", "L-spec-9997", "what=deploy"])
+            assert reads.call_count == 0
+        assert warnings.getvalue() == "fold: recorded-and-ignored worked by executor\n"
+        assert len((fold.EVENTS / "L-executor-0001.jsonl").read_text().splitlines()) == 1
+        os.environ["DOIT_LEDGER_FILE"] = "L-spec-writer-0001.jsonl"
+        with mock.patch.object(fold, "read_events", wraps=fold.read_events) as reads:
+            fold.append(["owed-ac", "L-spec-9997", "criterion=AC1"], strict=True)
+            assert reads.call_count == 0
+        os.environ["DOIT_LEDGER_FILE"] = "L-executor-0001.jsonl"
+        with mock.patch.object(fold, "read_events", wraps=fold.read_events) as reads:
+            refused(["owed-ac", "L-spec-9997", "criterion=AC2"], "executor", "owed-ac")
+            assert reads.call_count == 1
+        with mock.patch.object(fold, "read_events", wraps=fold.read_events) as reads:
+            fold.append(["owed-ac", "L-spec-9997", "criterion=AC1"], strict=True)
+            assert reads.call_count == 1
+        assert len((fold.EVENTS / "L-executor-0001.jsonl").read_text().splitlines()) == 2
+        print("L1002-AC10 ok")
+
+        names = {"L-owed-digest-local.jsonl": "owed-digest", "L-sweep-local.jsonl": "sweep",
+                 "L-operator-local.jsonl": "operator", "L-inbox-local.jsonl": "inbox",
+                 "L-spec-writer-0007.jsonl": "spec-writer"}
+        for filename, actor in names.items():
+            assert fold.actor_of(filename) == actor
+            os.environ["DOIT_LEDGER_FILE"] = filename
+            fold.append(["observed", "L-spec-9998"], strict=True)
+            fresh = fold.read_events()
+            assert any(e["_src"].startswith(filename + ":") and e["actor"] == actor for e in fresh)
+        os.environ["DOIT_LEDGER_FILE"] = "L-owed-digest-local.jsonl"
+        fold.append(["owed-digest", "L-spec-9998", "path=/report", "counts:={}"], strict=True)
+        _, _, ignored, subjects = fold.fold(fold.read_events())
+        assert any(e["type"] == "owed-digest" and e["counts"] == {} for e in subjects["L-spec-9998"])
+        assert not any(e["type"] == "owed-digest" for e in ignored)
+        os.environ["DOIT_LEDGER_FILE"] = "L-grader-0001.jsonl"
+        fold.append(["observed", "L-spec-9998", "--inbox"], strict=True)
+        assert any(e["actor"] == "inbox" for e in fold.read_events())
+        print("L1002-AC11 ok")
+
+
+test_owed_vocabulary()
