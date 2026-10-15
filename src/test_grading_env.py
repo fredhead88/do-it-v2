@@ -944,6 +944,137 @@ finally:
     grading_env.teardown(raised_view)
 print("admin port retries bounded, recovery and exception cleanup ok")
 
+# L-spec-1041: admin provisioning is a project invariant, independent of caps.
+write_spec_verify("L-spec-1041-fixture", "grader", "AC1 [backend]: arithmetic", "true")
+check(grading_env.required("grader", "AC1 [backend]: arithmetic", "true", "adminproj") == [],
+      "fixture needs no capabilities")
+no_db_view = FIXTURE_ROOT / "grade" / "admin-without-db"
+(no_db_view / "tree").mkdir(parents=True)
+try:
+    check(grading_env.preflight("grader", "L-spec-1041-fixture", no_db_view,
+                                "adminproj", repo=REPO) == [], "admin-only preflight succeeds")
+    state = json.loads((no_db_view / ".grading_state.json").read_text())
+    check(state.get("admin_dsn") and not state.get("dsn"), "only admin endpoint in state")
+    parsed = urllib.parse.urlparse(state["admin_dsn"])
+    check(parsed.scheme == "postgresql" and parsed.username == "albert"
+          and re.fullmatch(r"[0-9a-f]{32}", parsed.password or "")
+          and parsed.hostname == "127.0.0.1" and parsed.port and parsed.path == "/postgres",
+          "admin endpoint shape")
+    check(pg_running(no_db_view, "pg-admin") and not (no_db_view / "pg").exists(),
+          "only admin cluster starts")
+    check(grading_env.pane_env(no_db_view)["FAKE_ADMIN_URL"] == state["admin_dsn"],
+          "pane receives admin endpoint without db")
+    env_path = grading_env.write_grading_env(no_db_view)
+    check("export FAKE_ADMIN_URL=" in env_path.read_text()
+          and state["admin_dsn"] in env_path.read_text(), "relay file receives admin endpoint")
+    check(all(p.stat().st_mode & 0o777 == 0o600
+              for p in (env_path, no_db_view / ".grading_state.json")), "private state and exports")
+    check(grading_env.dsn_role(no_db_view) == "private-admin", "admin-only stamp")
+finally:
+    grading_env.teardown(no_db_view)
+check(not pg_running(no_db_view, "pg-admin"), "admin-only preflight teardown")
+print("PASS admin without db capability")
+
+for role, project, label in (("grader", "testproj", "project without admin_env"),
+                             ("reviewer", "adminproj", "reviewer with admin_env")):
+    guard_view = FIXTURE_ROOT / "grade" / ("guard-" + role)
+    (guard_view / "tree").mkdir(parents=True)
+    write_spec_verify("L-spec-1041-fixture", role, "AC1 [backend]: arithmetic", "true")
+    check(grading_env.preflight(role, "L-spec-1041-fixture", guard_view, project, repo=REPO) == [],
+          "guard preflight succeeds")
+    check(not (guard_view / "pg-admin").exists() and not (guard_view / "pg").exists(),
+          "guard starts no cluster")
+    check("FAKE_ADMIN_URL" not in grading_env.pane_env(guard_view), "guard exports no admin var")
+    if role == "reviewer":
+        check(not (guard_view / ".grading_state.json").exists(), "reviewer writes no state")
+    print("PASS " + label)
+import tomllib
+shipped_rows = tomllib.loads((DOIT_SRC / "grading.toml").read_text())["project"]
+check({p: row["admin_env"] for p, row in shipped_rows.items() if "admin_env" in row}
+      == {"albert-scott": ["AS_LOCAL_PG_ADMIN"]}, "only albert-scott has shipped admin_env")
+print("PASS shipped admin_env mapping")
+
+
+def fail_after_admin_start(argv, **kw):
+    result = original_run(argv, **kw)
+    if argv[-1] == "loopback":
+        check(result.returncode == 0, "failure fixture really starts admin")
+        return subprocess.CompletedProcess(argv, 1, result.stdout, result.stdout)
+    return result
+
+
+for missing in (False, True):
+    failure_view = FIXTURE_ROOT / "grade" / ("admin-no-db-failure-" + str(missing))
+    (failure_view / "tree").mkdir(parents=True)
+    original_source = grading_env.DOIT_SRC
+    try:
+        if missing:
+            grading_env.DOIT_SRC = FIXTURE_ROOT / "no-script"
+        else:
+            grading_env._run = fail_after_admin_start
+        failures = grading_env.preflight("grader", "L-spec-1041-fixture", failure_view,
+                                         "adminproj", repo=REPO)
+        check(len(failures) == 1 and failures[0][0] == "db"
+              and "private-pg.sh" in failures[0][1], "admin failure named without db cap")
+        check("postgresql://" not in failures[0][1], "failure reason hides endpoint")
+        check(not pg_running(failure_view, "pg-admin"), "failed admin startup leaves no postmaster")
+        check(not json.loads((failure_view / ".grading_state.json").read_text()).get("admin_dsn"),
+              "failed admin state is empty")
+        check("FAKE_ADMIN_URL" not in grading_env.pane_env(failure_view), "failed admin exports nothing")
+    finally:
+        grading_env.DOIT_SRC, grading_env._run = original_source, original_run
+        grading_env.teardown(failure_view)
+print("PASS admin failure is named, not a fallback")
+
+stamp_view = FIXTURE_ROOT / "grade" / "dsn-role"
+stamp_view.mkdir(parents=True)
+stamp_path = stamp_view / ".grading_state.json"
+check(grading_env.dsn_role(stamp_view) == "none", "missing state stamp")
+for fixture_state, expected in (({}, "none"), ({"dsn": "private-fixture"}, "private"),
+                                ({"admin_dsn": "admin-fixture"}, "private-admin"),
+                                ({"dsn": "private-fixture", "admin_dsn": "admin-fixture"}, "private-admin")):
+    stamp_path.write_text(json.dumps(fixture_state))
+    check(grading_env.dsn_role(stamp_view) == expected, "state-derived stamp")
+stamp_path.write_text("not json")
+check(grading_env.dsn_role(stamp_view) == "none", "corrupt state stamp")
+stamp_path.unlink()
+stamp_path.mkdir()
+check(grading_env.dsn_role(stamp_view) == "none", "unreadable state stamp")
+dispatch_source = (HERE / "dispatch.py").read_text()
+check('grading_env.dsn_role(' in dispatch_source, "dispatch uses state-derived stamp")
+check('"private" if grader_seat and "db" in g_required' not in dispatch_source, "old stamp absent")
+print("PASS dsn_role state and dispatch wiring")
+
+rerun_view = FIXTURE_ROOT / "grade" / "plain-rerun"
+script = DOIT_SRC / "scripts" / "private-pg.sh"
+
+
+def run_plain():
+    result = subprocess.run(["bash", str(script), str(rerun_view / "pg")],
+                            capture_output=True, text=True, env=grading_env._clean_env(), timeout=60)
+    check(result.returncode == 0, "plain script succeeds")
+    match = re.search(r"SUPABASE_DB_URL='([^']+)'", result.stdout)
+    check(match is not None, "plain script exports endpoint")
+    check(admin_sql(match[1], "select 1").stdout.strip() == "1", "plain endpoint works")
+    return match[1]
+
+
+try:
+    first_dsn = run_plain()
+    first_pid = (rerun_view / "pg" / "data" / "postmaster.pid").read_text().splitlines()[0]
+    check(run_plain() == first_dsn, "running rerun preserves endpoint")
+    pid_files = list(rerun_view.glob("**/postmaster.pid"))
+    check(len(pid_files) == 1 and pid_files[0].read_text().splitlines()[0] == first_pid,
+          "running rerun preserves one postmaster")
+    os.kill(int(first_pid), 0)
+    grading_env.teardown(rerun_view)
+    check(not pg_running(rerun_view, "pg"), "plain cluster stopped between runs")
+    check(run_plain() == first_dsn and pg_running(rerun_view, "pg"), "stopped rerun works")
+finally:
+    grading_env.teardown(rerun_view)
+check(not pg_running(rerun_view, "pg"), "plain rerun cleanup")
+print("PASS private-pg.sh re-runnable")
+
 shutil.rmtree(FIXTURE_ROOT, ignore_errors=True)
 print("ALL OK")
 
