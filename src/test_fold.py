@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """One runnable check on the fold rules. Run: python3 test_fold.py"""
 import json, os, pathlib, re, shutil, sys, tempfile, types
+from itertools import permutations
 from datetime import datetime, timedelta, timezone
 
 TMP = pathlib.Path(tempfile.mkdtemp())
@@ -2451,6 +2452,42 @@ order_420 = [(r["spec"], r["criterion"]) for r in due_rows_420
 # y before z (spec name) before x (due_at), regardless of specs-dict order.
 assert order_420 == [("L-spec-9420y", "AC1"), ("L-spec-9420z", "AC2"), ("L-spec-9420x", "AC1")], order_420
 print("AC2 ok")
+
+# L-spec-1042 AC1/AC2: retain each declaration as a synthetic spec view so
+# owed.checks' per-criterion collapse cannot erase the tie under test.
+tie1042 = {"ts": stamp(2), "type": "owed-ac", "subject": "L-spec-1042",
+           "criterion": "AC1", "wake_at": stamp(1)}
+fixture1042 = ledger(**{
+    **{f"L-spec-writer-1042{suffix}.jsonl": [tie1042] for suffix in "azbm"},
+    "L-executor-1042.jsonl": [{"ts": stamp(3), "type": "shipped", "subject": "L-spec-1042"}],
+})
+declarations1042 = [e for e in fixture1042[0] if e["type"] == "owed-ac"]
+ship1042 = next(e for e in fixture1042[0] if e["type"] == "shipped")
+assert len(declarations1042) == 4 and len({e["ts"] for e in declarations1042}) == 1
+assert len({e["_src"].split(":")[0] for e in declarations1042}) == 4
+expected1042, blocks1042, count1042 = None, set(), 0
+for order1042 in permutations(declarations1042):
+    specs1042 = {
+        e["_src"]: {**fixture1042[1]["L-spec-1042"], "evs": [ship1042, e]}
+        for e in order1042
+    }
+    rows1042 = fold.owed_due(specs1042)
+    assert len(rows1042) == 4
+    assert [r["src"] for r in rows1042] == sorted(e["_src"] for e in declarations1042), rows1042
+    assert all({k: v for k, v in r.items() if k != "src"}
+               == {k: v for k, v in rows1042[0].items() if k != "src"} for r in rows1042)
+    if expected1042 is None:
+        expected1042 = rows1042
+    assert rows1042 == expected1042, (order1042, rows1042)
+    board1042 = fold.render(fixture1042[0], specs1042, *fixture1042[2:])
+    block1042 = board1042.split("## OWED DUE (", 1)[1].split("\n## ", 1)[0]
+    assert block1042.count("L-spec-1042 · AC1 · ") == 4, block1042
+    assert all(r["src"] not in block1042 for r in rows1042), block1042
+    blocks1042.add(block1042)
+    count1042 += 1
+assert count1042 >= 20 and len(blocks1042) == 1, (count1042, blocks1042)
+assert fold.BLOCK_ORDER["OWED DUE"] == ("due_at", "spec", "criterion", "src")
+print(f"L-spec-1042 AC1/AC2: {count1042} permutations; 1 OWED DUE block; ascending src")
 
 # ── AC3 · fold.render() is byte-identical across two file-name layouts:
 # same-file same-ts pairs keep their line order; the one cross-file same-ts
