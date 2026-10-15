@@ -36,17 +36,44 @@ def _newest_marker_ts(evs):
     return max(times) if times else None
 
 
+def held_by_dependency(spec_evs, all_evs) -> str | None:
+    """The newest hold stands until its dependency ships or an own clearer wins.
+
+    Invalid dependencies fail closed; only a newer decision/unblocked releases
+    them. A dependency that shipped before the hold is already satisfied.
+    """
+    spec_evs = list(spec_evs)
+    holds = [e for e in spec_evs if e.get("type") == "dependency-hold"]
+    if not holds:
+        return None
+    hold = max(holds, key=lambda e: fold.ts(e.get("ts")))
+    hold_ts = fold.ts(hold.get("ts"))
+    if any(e.get("type") in ("unblocked", "decision")
+           and fold.ts(e.get("ts")) > hold_ts for e in spec_evs):
+        return None
+    dependency = hold.get("waits_for")
+    if not dependency:
+        return "held: unresolvable dependency-hold (missing or empty waits_for)"
+    if dependency == hold.get("subject"):
+        return f"held: unresolvable dependency-hold (waits_for is self: {dependency})"
+    if any(e.get("type") == "shipped" and e.get("subject") == dependency for e in all_evs):
+        return None
+    return f"held: waits for {dependency} ({hold.get('why', '')})"
+
+
 def _standing_autodispatch_failed(evs):
     """SD1 condition 4: the newest `autodispatch-failed`, when it is NEWER
     than the newest of this subject's own `spec-written`/`decision`/
-    `unblocked` — else `None` (a later `decision`/`unblocked` clears it,
+    `unblocked`/`dependency-hold` — else `None` (a later marker clears it,
     AC4)."""
     fails = [e for e in evs if e.get("type") == "autodispatch-failed"]
     if not fails:
         return None
     newest_fail = max(fails, key=lambda e: str(e.get("ts", "")))
     fail_ts = fold.ts(newest_fail.get("ts"))
-    clear_ts = _newest_marker_ts(evs)
+    clear_ts = max((fold.ts(e.get("ts")) for e in evs
+                    if e.get("type") in ("spec-written", "decision", "unblocked", "dependency-hold")),
+                   default=None)
     if clear_ts is not None and clear_ts > fail_ts:
         return None
     return newest_fail
@@ -89,10 +116,13 @@ def _since(events, sid, evs, charter, wave):
 
 
 def _blocking_reason(sid, evs, events, project, charter, wave, busy):
-    """The five-condition `dispatchable` gate (SD1), checked in a fixed
+    """The `dispatchable` gate (SD1), with dependency holds checked first in a fixed
     priority order — each acceptance criterion exercises exactly one
     condition at a time, so the order only matters when more than one is
     true at once. Returns `(reason_text_or_None, is_standing_autodispatch_failed)`."""
+    hold_reason = held_by_dependency(evs, events)
+    if hold_reason is not None:
+        return hold_reason, False
     af = _standing_autodispatch_failed(evs)
     if af is not None:
         return (af.get("reason") or "autodispatch-failed"), True

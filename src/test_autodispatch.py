@@ -1101,3 +1101,87 @@ assert "then waits for that rework's own `build-done` before it dispatches." in 
 assert "spawn-stale` carrying no `reason`" not in exec_md_483, \
     "AC15: the old Executor-side spawn-stale re-dispatch instruction must be gone"
 print("autodispatch-0483 AC15 ok")
+
+
+def test_dependency_holds():
+    from unittest import mock
+
+    sid = "L-spec-1043"
+    t0 = NOW - datetime.timedelta(hours=3)
+    t1 = NOW - datetime.timedelta(hours=2)
+    t2 = NOW - datetime.timedelta(hours=1)
+    hold = {"type": "dependency-hold", "subject": sid, "ts": _iso(t1),
+            "waits_for": "L-spec-DEP", "why": "needs producer"}
+    reason = "held: waits for L-spec-DEP (needs producer)"
+    held = autodispatch.held_by_dependency
+    assert held([], []) is None
+    assert held([hold], [hold]) == reason
+    print("dependency-hold AC3 ok")
+
+    for shipped_at in (t0, t2):
+        shipped = {"type": "shipped", "subject": "L-spec-DEP", "ts": _iso(shipped_at)}
+        assert held([hold], [hold, shipped]) is None
+    for kind in ("unblocked", "decision"):
+        for released_at in (t0, t1, t2):
+            release = {"type": kind, "subject": sid, "ts": _iso(released_at)}
+            expected = None if released_at > t1 else reason
+            assert held([hold, release], [hold, release]) == expected
+    other_ship = {"type": "shipped", "subject": "L-spec-OTHER", "ts": _iso(t2)}
+    assert held([hold], [hold, other_ship]) == reason
+    print("dependency-hold AC4 ok")
+
+    self_shipped = {"type": "shipped", "subject": sid, "ts": _iso(t2)}
+    for invalid in ("", None, sid):
+        bad = {**hold, "waits_for": invalid}
+        if invalid is None:
+            del bad["waits_for"]
+        assert held([bad], [bad, self_shipped]).startswith("held: unresolvable dependency-hold")
+        for kind in ("unblocked", "decision"):
+            release = {"type": kind, "subject": sid, "ts": _iso(t2)}
+            assert held([bad, release], [bad, release, self_shipped]) is None
+    older = {**hold, "waits_for": "L-spec-OTHER", "ts": _iso(t0)}
+    # Deliberately reverse ledger order: timestamp alone chooses the hold.
+    assert held([hold, older], [hold, older, other_ship]) == reason
+    assert held([older, hold], [hold, older, other_ship]) == reason
+    # Lexical order differs from time order with these timezone offsets.
+    offset_older = {**older, "ts": "2026-10-15T12:00:00+02:00"}
+    utc_newer = {**hold, "ts": "2026-10-15T11:00:00+00:00"}
+    assert held([utc_newer, offset_older], [other_ship]) == reason
+    print("dependency-hold AC5 ok")
+
+    with mock.patch.multiple(fold, ROOT=fold.ROOT, EVENTS=fold.EVENTS), \
+            mock.patch.multiple(dispatch, ROOT=dispatch.ROOT, EVENTS=dispatch.EVENTS, CONTENT=dispatch.CONTENT):
+        root = _dispatchable_fixture("dependency-hold", sid, "hold-project", t0)
+        _write(root, "L-thinker-0001.jsonl", hold)
+        ev, specs, rows = _fold_and_candidates(root)
+        row = _row(rows, sid)
+        assert row["status"] == "blocked" and row["reason"] == held(specs[sid]["evs"], ev)
+        runner = _FakeRunner()
+        assert autodispatch.run(ev, specs, NOW, runner=runner) == []
+        assert runner.calls == []
+        assert not any(e["type"] in ("autodispatched", "autodispatch-failed")
+                       and e.get("subject") == sid for e in fold.read_events())
+        print("dependency-hold AC7 ok")
+
+        failure = {"type": "autodispatch-failed", "subject": sid, "ts": _iso(t0), "reason": "old failure"}
+        assert autodispatch._standing_autodispatch_failed([failure, hold]) is None
+        newer_failure = {**failure, "ts": _iso(t2)}
+        assert autodispatch._standing_autodispatch_failed([hold, newer_failure]) == newer_failure
+        _write(root, "L-tick-local.jsonl", newer_failure)
+        ev, specs, rows = _fold_and_candidates(root)
+        assert _row(rows, sid)["reason"] == reason
+        assert _row(rows, sid)["_dispatch_failed"] is False
+        print("dependency-hold AC8 autodispatch ok")
+
+        # A hold clears a prior failure without moving the original queue marker.
+        _write(root, "L-tick-local.jsonl", failure)
+        _write(root, "L-executor-0001.jsonl",
+               {"type": "shipped", "subject": "L-spec-DEP", "ts": _iso(t2)})
+        _, _, rows = _fold_and_candidates(root)
+        row = _row(rows, sid)
+        assert row["status"] == "dispatchable" and row["reason"] is None
+        assert row["since"] == _iso(t0)
+        print("dependency-hold AC6 ok")
+
+
+test_dependency_holds()

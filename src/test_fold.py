@@ -4043,3 +4043,45 @@ assert fold.open_escalations([other_kind, failure_fix]) == [other_kind]
 assert fold.open_escalations([failure_esc, {"type": "decision", "subject": "L-spec-9905",
                                            "ts": stamp(1)}]) == []
 print("L1005 AC9 ok")
+
+
+def test_dependency_hold_vocabulary():
+    from unittest import mock
+
+    for actor in ("thinker", "operator", "planner"):
+        assert fold.admits({"type": "dependency-hold"}, actor) is None
+    for actor in ("tick", "builder", "grader", "executor"):
+        assert "actor mismatch" in fold.admits({"type": "dependency-hold"}, actor)
+    assert fold.EMITS["autodispatch-failed"] == {"tick"}
+    assert fold.REQUIRED["dependency-hold"] == ("waits_for", "why")
+    print("dependency-hold AC1 ok")
+
+    with tempfile.TemporaryDirectory(prefix="dependency-hold-") as directory, \
+            mock.patch.object(fold, "ROOT", pathlib.Path(directory)), \
+            mock.patch.object(fold, "EVENTS", pathlib.Path(directory) / "events"), \
+            mock.patch.object(fold, "PROJECT", "do-it-v2"), \
+            mock.patch.dict(os.environ, {"DOIT_ROOT": directory, "DOIT_NO_POKE": "1",
+                                         "DOIT_LEDGER_FILE": "L-thinker-0001.jsonl"}):
+        argv = ["dependency-hold", "L-spec-1043", "waits_for=L-spec-DEP", "why=needs producer"]
+        fold.append(argv)
+        path = fold.EVENTS / "L-thinker-0001.jsonl"
+        before = path.read_bytes()
+        for missing in ("waits_for", "why"):
+            try:
+                fold.append([arg for arg in argv if not arg.startswith(missing + "=")])
+            except SystemExit as exc:
+                assert missing + "=" in str(exc), str(exc)
+            else:
+                raise AssertionError(f"dependency-hold without {missing} was accepted")
+            assert path.read_bytes() == before
+        events = fold.read_events()
+        _, _, ignored, subjects = fold.fold(events)
+        assert len(events) == 1 and ignored == []
+        kept = subjects["L-spec-1043"]
+        assert kept == events and kept[0]["actor"] == "thinker"
+        assert kept[0]["waits_for"] == "L-spec-DEP" and kept[0]["why"] == "needs producer"
+        assert "actor" not in json.loads(path.read_text())
+    print("dependency-hold AC2 ok")
+
+
+test_dependency_hold_vocabulary()

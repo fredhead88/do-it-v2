@@ -231,7 +231,7 @@ def _carry_packet_busy(busy):
 def _dispatchable_stale_note(s):
     """L-charter-0042/L-spec-0427 R1, SD3: a `written` spec belongs on the
     lane only when it carries a standing `autodispatch-failed` — newer than
-    its own newest `spec-written`/`decision`/`unblocked` — for the Executor
+    its own newest `spec-written`/`decision`/`unblocked`/`dependency-hold` — for the Executor
     to diagnose; the tick itself dispatches everything else (`autodispatch.
     run`, called from `_record()` below). A tiny per-spec filter, duplicated
     here rather than imported from `autodispatch` (which itself imports
@@ -241,7 +241,7 @@ def _dispatchable_stale_note(s):
     if not fails:
         return False
     fail_ts = max(fold.ts(e.get("ts")) for e in fails)
-    clearers = [e for e in evs if e.get("type") in ("spec-written", "decision", "unblocked")]
+    clearers = [e for e in evs if e.get("type") in ("spec-written", "decision", "unblocked", "dependency-hold")]
     clear_ts = max((fold.ts(e.get("ts")) for e in clearers), default=None)
     return clear_ts is None or fail_ts > clear_ts
 
@@ -300,10 +300,19 @@ def lane(specs, charters, busy=frozenset(), reaped=frozenset(), events=(), inbou
             return f"{c['id']} · {c['state']} · {kind}"
         return f"{c['id']} · {c['state']}"
 
+    def dependency_held(s):
+        evs = s.get("evs") or []
+        if not any(e.get("type") == "dependency-hold" for e in evs):
+            return False
+        # Import only for holds at call time: autodispatch itself imports tick.
+        from autodispatch import held_by_dependency
+        return held_by_dependency(evs, events) is not None
+
     packet_busy = _carry_packet_busy(busy)
     return sorted([f"{s['id']} · {s['state']}" for s in specs.values()
                    if s["state"] in ACTIONABLE and s["id"] not in busy
-                   and (s["state"] != "written" or _dispatchable_stale_note(s))]
+                   and (s["state"] != "written" or (_dispatchable_stale_note(s)
+                        and not dependency_held(s)))]
                   + [charter_row(c) for c in charters.values()
                      if c["id"] not in busy and waiting(c)]
                   + [f"inbound:{i['source']} · uncarried" for i in inbound

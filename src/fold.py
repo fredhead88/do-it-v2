@@ -248,6 +248,7 @@ EMITS["message-answered"] = {"look", "planner", "executor", "thinker"}
 # creates it names, per §2.5's own rule.
 EMITS["autodispatched"] = {"tick"}          # R1: the tick's own dispatch record
 EMITS["autodispatch-failed"] = {"tick"}     # R1: the tick's own dispatch-skip record
+EMITS["dependency-hold"] = {"thinker", "operator", "planner"}
 EMITS["supervisor-code"] = {"up"}           # R2: `up.maybe_reexec`'s own version claim
 EMITS["install-synced"] = {"tick"}          # R5: the tick's own once-per-sha install pass
 EMITS["grader-view-built"] = {"grader"}     # R8: the grader's own view-build record
@@ -793,10 +794,10 @@ REQUIRED = {"owed-ac": ("criterion",), "spec-carried": ("source", "tier", "audit
             # evidence is a stamp, not a claim.
             "owed-failed": ("criterion", "evidence", "kind")}
 # L-charter-0042/L-spec-0424 (ledger-vocabulary): the same six types' required
-# fields, verbatim from the Plan's Produces line. Presence-only, like every
-# other entry above — no value's shape, format, or type is checked here.
+# fields from the Plan's Produces line. Presence-only, like every entry above.
 REQUIRED["autodispatched"] = ("spawn", "since")
 REQUIRED["autodispatch-failed"] = ("reason",)
+REQUIRED["dependency-hold"] = ("waits_for", "why")
 REQUIRED["supervisor-code"] = ("kind", "sha", "pid")
 REQUIRED["install-synced"] = ("sha",)
 REQUIRED["grader-view-built"] = ("view", "ready_sha")
