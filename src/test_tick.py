@@ -20,6 +20,9 @@ os.environ.pop("DOIT_PROJECT", None)
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 import carry, fold, intake, pane_resume, tick  # noqa: E402
 
+# Rebind cached modules too when several script-style suites are collected.
+tick._bind_root(TMP)
+
 NOW = fold.NOW.isoformat(timespec="seconds")
 EV = TMP / "events"
 
@@ -1968,3 +1971,39 @@ assert isinstance(tick_events_po17b[-1].get("lane"), int), \
     f"merge-origin-0484 AC17: the tick's own append still happened: {tick_events_po17b[-1]}"
 fold.EVENTS = saved_events
 print("merge-origin-0484 AC17 ok")
+
+
+def test_dependency_hold_lane():
+    from unittest import mock
+
+    sid = "L-spec-1043"
+    old = (fold.NOW - datetime.timedelta(hours=2)).isoformat(timespec="seconds")
+    middle = (fold.NOW - datetime.timedelta(hours=1)).isoformat(timespec="seconds")
+    hold = {"type": "dependency-hold", "subject": sid, "ts": middle,
+            "waits_for": "L-spec-DEP", "why": "needs producer"}
+    failure = {"type": "autodispatch-failed", "subject": sid, "ts": old, "reason": "boom"}
+    assert tick._dispatchable_stale_note({"evs": [failure, hold]}) is False
+    failure = {**failure, "ts": NOW}
+    assert tick._dispatchable_stale_note({"evs": [hold, failure]}) is True
+    print("dependency-hold AC8 tick ok")
+
+    with mock.patch.object(fold, "EVENTS", _isolated_events()):
+        write_to(fold.EVENTS, "L-planner-0001.jsonl",
+                 {"type": "spec-written", "subject": sid, "ts": old})
+        write_to(fold.EVENTS, "L-thinker-0001.jsonl", hold)
+        # Held specs stay off the lane even if a newer failure still stands.
+        for failures in ([], [{**failure, "ts": old}], [failure]):
+            write_to(fold.EVENTS, "L-tick-local.jsonl", *failures)
+            ev = fold.read_events()
+            specs, charters, _, _ = fold.fold(ev)
+            assert tick.lane(specs, charters, events=ev) == []
+        write_to(fold.EVENTS, "L-executor-0001.jsonl",
+                 {"type": "shipped", "subject": "L-spec-DEP"})
+        ev = fold.read_events()
+        specs, charters, _, _ = fold.fold(ev)
+        lanes = tick.lane(specs, charters, events=ev)
+        assert f"{sid} · written" in lanes, lanes
+    print("dependency-hold AC7 lane ok")
+
+
+test_dependency_hold_lane()
