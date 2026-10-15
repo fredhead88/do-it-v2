@@ -13,7 +13,7 @@ strips. Both halves are code here, not prose in the Executor's head:
 
 Writes `$R/packets/<subject>-<role>-<n>.md` and prints the path.
 """
-import argparse, hashlib, os, pathlib, re, subprocess, sys
+import argparse, hashlib, os, pathlib, re, shlex, subprocess, sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import amends, audit, fold, merge_gate, models, routing  # noqa: E402
@@ -412,10 +412,8 @@ def verify_script(spec_text):
     calls `sys.exit`. `None` when the spec's Verification fenced block is empty
     or absent (each call site's own "Verify command: NONE" line is unaffected).
     On a lint violation raises `VerifyLint`, the only exception this function
-    raises. Otherwise returns the assembled `#!/usr/bin/env bash\\nset -euo
-    pipefail\\n` + linted block, any `$(git merge-base …)` call rewritten to the
-    LITERAL `$BASE` — this function never resolves one; `write_verify_script`
-    below pins the real value.
+    raises. Otherwise returns the shebang and shell options plus the linted
+    block verbatim, including its runtime merge-base expressions.
 
     Linted (S23/S31a): `bash -n` on the assembled script; the block must be one
     `&&`-gated chain (no bare `;`/`||`, no newline-separated statement outside
@@ -437,7 +435,6 @@ def verify_script(spec_text):
     if bad_interp:
         raise VerifyLint("Verification block names an interpreter by bare word, not an "
                           "absolute path: " + "; ".join(bad_interp[:3]))
-    block = MERGE_BASE_CALL.sub("$BASE", block)
     # -e, because a multi-command block whose last line passes would otherwise exit 0
     # over an earlier failure, and the done-condition is that exit code.
     text = f"#!/usr/bin/env bash\nset -euo pipefail\n" + block
@@ -512,15 +509,9 @@ def out_of_grant_line(c):
 
 
 def write_verify_script(c):
-    """Resolve the spec and verify_base_sha, then write an executable script.
-    Inject BASE after set -euo pipefail; return None for absent Verification,
-    and die on VerifyLint rather than writing a script that lies about checks.
-    L-spec-0194: when the subject's latest build-started has dsn_role=readonly,
-    export its worktree credential before any interpreter starts so live_db
-    checks cannot silently skip. Absent/refused/missing roles add nothing.
-    L-spec-0195: use verify-<subject>-<role>.sh to avoid cross-role collisions.
-    Only grader/reviewer apply standing_waivers as true at the named 1-indexed
-    && segments, before BASE/credential assembly; builders never apply waivers.
+    """Write a per-role wrapper, keeping the linted block verbatim (SD8).
+    Merge-base runs at runtime, falling back to the packet-time pin on failure.
+    Only grader/reviewer apply waivers and guard readonly .env loading.
     """
     spec = c.spec_file()
     try:
@@ -529,24 +520,35 @@ def write_verify_script(c):
         die(f"{c.a.subject}'s {e}")
     if text is None:
         return None
-    base = verify_base_sha(c)
     shebang, set_e, block = text.split("\n", 2)
     if c.a.role in ("grader", "reviewer"):
         block = apply_waivers(block, standing_waivers(c))
     bs = c.last("build-started")
     dsn_line = "set -a; . ./.env; set +a\n" if bs and bs.get("dsn_role") == "readonly" else ""
-    # A blind role's view is built without the builder's worktree .env (a grader seat gets
-    # its own private DSN only when its criteria need a db). A hard `. ./.env` there died at
-    # line 4 before any test ran and raised a false env-file capability hold (L-spec-0725,
-    # 0747, 0827). Blind roles load it only if present (Thinker L-thinker-0004, 2026-10-11).
+    # Blind views may lack .env (Thinker L-thinker-0004, 2026-10-11).
     if dsn_line and c.a.role in ("grader", "reviewer"):
         dsn_line = "if [ -f ./.env ]; then set -a; . ./.env; set +a; fi\n"
-    # A blind role (grader/reviewer) gets the BASE line only when its block uses it:
-    # a short block is inlined into the packet, and an unused BASE=<base_sha> there
-    # tripped the grader's own Blindness check (L-spec-0484, 2026-10-04).
-    uses_base = re.search(r"\$\{?BASE\b", block) is not None
-    base_line = f"BASE={base}\n" if (uses_base or c.a.role not in ("grader", "reviewer")) else ""
-    text = f"{shebang}\n{set_e}\n" + base_line + dsn_line + block
+    calls = [shlex.split(call[2:-1])[1:] for call in MERGE_BASE_CALL.findall(block)]
+    uses_base = re.search(r"\$\{?BASE\b", block) and not re.search(r"(?:^|&&)\s*BASE=", block)
+    base_line, source = "", "no base"
+    if calls or uses_base:
+        base = verify_base_sha(c)
+        base_line, source = f"BASE={base}\n", f"pinned {base}"
+    if calls:
+        import look
+        main = look.load_toml()["push"]["main"].get(c.project(), "master")
+        if not re.fullmatch(r"[A-Za-z0-9._/-]+", main) or not re.fullmatch(r"[0-9a-f]{40}", base):
+            die("invalid verify main or pinned base")
+        wt = c.worktree()
+        repo = wt if pathlib.Path(wt).is_dir() else (c.a.repo or str(ROOT / "repos" / c.project()))
+        if all(subprocess.run(["git", "-C", repo, *call],
+                              capture_output=True).returncode == 0 for call in calls):
+            source = f"merge-base origin/{main}"
+        base_line = (f"BASE_PINNED={base}\n"
+                     'git() { if [[ "${1:-}" == merge-base && "${2:-}" != --is-ancestor ]]; then command git "$@" || { '
+                     'test -n "$BASE_PINNED" && printf \'%s\\n\' "$BASE_PINNED"; }; '
+                     'else command git "$@"; fi; }\n')
+    text = f"{shebang}\n# BASE source: {source}\n{set_e}\n" + base_line + dsn_line + block
     p = CONTENT / f"verify-{c.a.subject}-{c.a.role}.sh"
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(text)
@@ -935,12 +937,8 @@ def p_builder(c):
     hint = hint_block(c)          # refused before anything else is assembled
     spec, v = c.spec_file(), write_verify_script(c)
     repo = c.a.repo or str(ROOT / "repos" / c.project())
-    # R7/Target 1: ONE call, `verify_base_sha(c)` — the exact same value
-    # `write_verify_script` above already pinned into `$BASE` — never a second,
-    # independently computed worktree-HEAD fallback. On a rework round the
-    # worktree's live HEAD is the PRIOR round's own commit, not the true base;
-    # that mismatch between this line and the verify script's own `$BASE` is the
-    # goalpost bug this spec closes (AC2).
+    # R7: the packet pin shares verify_base_sha's precedence with the wrapper's
+    # fallback; runtime merge-base may move forward after a rebase (L-spec-1044).
     base_sha = verify_base_sha(c)
     ch = c.charter_file()
     extract = (section(ch.read_text(), "Constraints") or "").splitlines() if ch else []

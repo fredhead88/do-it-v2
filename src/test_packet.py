@@ -12,6 +12,11 @@ os.environ["DOIT_ROOT"], os.environ["DOIT_PROJECT"] = str(TMP), "t"
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 import audit, dispatch, fold, packet  # noqa: E402
 
+# L-spec-1044 AC1: extraction preserves the spec's merge-base expression.
+VWB_BLOCK = "BASE=$(git merge-base HEAD origin/main) && /usr/bin/python3 -c 'print(1)' && echo $BASE\n"
+assert packet.verify_script("## Verification\n```\n" + VWB_BLOCK + "```\n").endswith(VWB_BLOCK)
+print("verify-wrapper-base AC1 merge-base preserved; lint regression cases follow")
+
 REPO = TMP / "repo"
 (TMP / "content").mkdir(parents=True)
 REPO.mkdir()
@@ -116,8 +121,9 @@ refuses("spec-auditor", "Currency is USD to two places, and the seat's list pric
 V = TMP / "content" / "verify-L-spec-0001-spec-auditor.sh"
 assert V.exists() and "cd src && /usr/bin/python3 test_fold.py" in V.read_text() and os.access(V, os.X_OK)
 assert "set -euo pipefail" in V.read_text(), "a multi-step block must not exit 0 over an earlier failure"
-assert re.match(r"#!/usr/bin/env bash\nset -euo pipefail\nBASE=\S+\n", V.read_text()), \
-    "BASE is pinned once, right after set -euo pipefail (a-5 rule d)"
+assert V.read_text().startswith("#!/usr/bin/env bash\n# BASE source: no base\nset -euo pipefail\n"), \
+    "the source comment precedes shell options; a BASE-free block gets no pin"
+assert not re.search(r"^BASE(?:_PINNED)?=", V.read_text(), re.M)
 
 # ── 1b. verify_script lint (a-5, S23/S31a) ────────────────────────────────────
 def bad_verify(block, want, subject):
@@ -144,7 +150,7 @@ bad_verify("cd src && python3 test_fold.py", "absolute path", "L-spec-0024")
 bad_verify("cd src && /usr/bin/env python3 test_fold.py", "absolute path", "L-spec-0025")
 bad_verify("cd src && /usr/bin/python3 -c \"print('", "fails `bash -n`", "L-spec-0026")
 
-# the merge-base rewrite and the BASE pin, together
+# the verbatim merge-base expression and its fallback pin, together
 MERGE = TMP / "content" / "L-spec-0027.md"
 MERGE.write_text("# L-spec-0027\n## 8. Verification\n```\necho $(git merge-base main HEAD)\n```\n"
                  "## Acceptance criteria\nAC1 [backend]: x.\n"
@@ -153,8 +159,8 @@ ev("spec-writer", "spec-written", "L-spec-0027", path=str(MERGE), footprint=["sr
 build("spec-auditor", subject="L-spec-0027", worktree=str(REPO))
 mtxt = (TMP / "content" / "verify-L-spec-0027-spec-auditor.sh").read_text()
 mlines = mtxt.splitlines()
-assert mlines[1] == "set -euo pipefail" and mlines[2].startswith("BASE="), mlines[:4]
-assert "$(git merge-base" not in mtxt and "echo $BASE" in mtxt, mtxt
+assert mlines[1].startswith("# BASE source: pinned ") and mlines[2] == "set -euo pipefail", mlines[:4]
+assert mlines[3].startswith("BASE_PINNED=") and mtxt.endswith("echo $(git merge-base main HEAD)\n"), mtxt
 N += 1
 
 # ── 2. builder ───────────────────────────────────────────────────────────────
@@ -818,7 +824,7 @@ SPEC60 = TMP / "content" / "L-spec-0060.md"
 SPEC60.write_text("""# L-spec-0060
 ## 8. Verification
 ```
-cd src && /usr/bin/python3 test_fold.py
+echo $BASE && cd src && /usr/bin/python3 test_fold.py
 ```
 ## Acceptance criteria
 AC1 [backend]: x.
@@ -837,7 +843,7 @@ assert f"BASE={REPO_HEAD}\n" in (TMP / "content" / "verify-L-spec-0060-spec-audi
     "with no worktree on disk the base is the project repo's HEAD, pinned once"
 N += 1
 assert pathlib.Path(packet.packet_spec_auditor("L-spec-0060", base_sha="cafe1234")).is_file()
-assert (TMP / "content" / "verify-L-spec-0060-spec-auditor.sh").read_text().splitlines()[2] == "BASE=cafe1234", \
+assert (TMP / "content" / "verify-L-spec-0060-spec-auditor.sh").read_text().splitlines()[3] == "BASE=cafe1234", \
     "an explicit base_sha still wins — the existing precedence above the fallback is untouched"
 
 
@@ -1094,7 +1100,7 @@ SPEC80 = TMP / "content" / "L-spec-0080.md"
 SPEC80.write_text("""# L-spec-0080
 ## 8. Verification
 ```
-cd src && /usr/bin/python3 test_fold.py
+echo $BASE && cd src && /usr/bin/python3 test_fold.py
 ```
 ## Acceptance criteria
 AC1 [backend]: x.
@@ -1109,7 +1115,7 @@ ev("builder", "build-done", "L-spec-0080", status="DONE", base_sha="X0000001", r
 ev("builder", "build-done", "L-spec-0080", status="DONE", base_sha="Y0000002", ready_sha="r2")
 build("spec-auditor", subject="L-spec-0080", worktree=str(REPO))
 btxt = (TMP / "content" / "verify-L-spec-0080-spec-auditor.sh").read_text()
-assert btxt.splitlines()[2] == "BASE=X0000001", \
+assert btxt.splitlines()[3] == "BASE=X0000001", \
     f"AC6: the earliest build-done's base_sha wins, never a later round's or the live worktree HEAD: {btxt.splitlines()[:4]!r}"
 
 # ── R7/AC1-AC2 (the R3d fixture case) · a NEW builder packet against the same
@@ -1176,7 +1182,7 @@ ev("builder", "build-done", "L-spec-0080", status="DONE", base_sha="Z0000003", r
    base_sha_explicit=True)
 build("spec-auditor", subject="L-spec-0080", worktree=str(REPO))
 btxt80b = (TMP / "content" / "verify-L-spec-0080-spec-auditor.sh").read_text()
-assert btxt80b.splitlines()[2] == "BASE=Z0000003", \
+assert btxt80b.splitlines()[3] == "BASE=Z0000003", \
     f"AC11: a later plain rework rides the explicit pin, never reverting to an earlier base: {btxt80b.splitlines()[:4]!r}"
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1203,14 +1209,14 @@ assert DSN_LINE not in REF_NO_DSN, "AC18a: no build-started -> no export line"
 N += 1
 
 # AC17: the subject's most recent build-started carries dsn_role="readonly" —
-# the export line lands immediately after BASE=<sha> and before the block.
+# the export line lands after the header and before the BASE-free block.
 S17 = "L-spec-0302"
 _dsn_spec(S17)
 ev("builder", "build-started", S17, worktree="/x", dsn_role="readonly")
 build("spec-auditor", subject=S17, worktree=str(REPO))
 t17 = (TMP / "content" / f"verify-{S17}-spec-auditor.sh").read_text()
 lines17 = t17.splitlines()
-assert lines17[2].startswith("BASE=") and lines17[3] == DSN_LINE, lines17[:5]
+assert lines17[1] == "# BASE source: no base" and lines17[2] == "set -euo pipefail" and lines17[3] == DSN_LINE, lines17[:5]
 assert "cd src && /usr/bin/python3 test_fold.py" in t17
 N += 1
 
@@ -1656,3 +1662,151 @@ try:
 except SystemExit as e:
     assert "unsupported" in str(e)
 print("sweep-unblock AC7 fixture packet; AC13 kind compatibility/rejection ok")
+
+
+def test_verify_wrapper_base():
+    """L-spec-1044: runtime base selection across rebases and missing refs."""
+    from types import SimpleNamespace
+    import look
+
+    with tempfile.TemporaryDirectory(dir=TMP) as td:
+        root = pathlib.Path(td)
+        origin, seed, clone = (root / name for name in ("origin.git", "seed", "clone"))
+        git_env = {**os.environ, "GIT_AUTHOR_NAME": "fixture", "GIT_AUTHOR_EMAIL": "fixture@example.test",
+                   "GIT_COMMITTER_NAME": "fixture", "GIT_COMMITTER_EMAIL": "fixture@example.test"}
+
+        def git(cwd, *args):
+            return subprocess.run(["git", *args], cwd=cwd, env=git_env, check=True,
+                                  capture_output=True, text=True).stdout.strip()
+
+        git(root, "init", "--bare", "--initial-branch=main", str(origin))
+        git(root, "clone", str(origin), str(seed))
+        (seed / "root.txt").write_text("root\n")
+        git(seed, "add", ".")
+        git(seed, "commit", "-m", "root")
+        git(seed, "push", "origin", "main")
+        git(root, "clone", str(origin), str(clone))
+        old = git(clone, "rev-parse", "HEAD")
+        git(clone, "checkout", "-b", "spec")
+        (clone / "own.txt").write_text("branch change\n")
+        git(clone, "add", ".")
+        git(clone, "commit", "-m", "spec change")
+        (clone / ".env").write_text("")  # No credentials; exercise the existing load lines.
+        spec = root / "spec.md"
+        role, project, worktree = "builder", "do-it-v2", clone
+        readonly = False
+        ctx = SimpleNamespace(
+            a=SimpleNamespace(subject="L-spec-1044-fixture", role=role, base_sha=old, repo=str(clone)),
+            spec_file=lambda: spec, project=lambda: project, worktree=lambda: str(worktree),
+            last=lambda event: {"dsn_role": "readonly"} if readonly and event == "build-started" else None,
+            all_of=lambda event: [])
+
+        def write(block):
+            spec.write_text("## Verification\n```bash\n" + block + "```\n")
+            return packet.write_verify_script(ctx)
+
+        def run(path):
+            return subprocess.run(["bash", str(path)], cwd=worktree, capture_output=True, text=True)
+
+        block = ('BASE=$(git merge-base HEAD origin/main) && printf \'%s\\n\' "$BASE" && '
+                 'git diff --name-only "$BASE" HEAD\n')
+        wrapper = write(block)
+        original = wrapper.read_bytes()
+        assert run(wrapper).stdout.splitlines() == [old, "own.txt"]
+        # Advance main in a second clone; the already-written wrapper keeps its old fallback.
+        (seed / "upstream.txt").write_text("new main\n")
+        git(seed, "add", ".")
+        git(seed, "commit", "-m", "advance main")
+        git(seed, "push", "origin", "main")
+        git(clone, "fetch", "origin")
+        git(clone, "rebase", "origin/main")
+        new = git(clone, "merge-base", "HEAD", "origin/main")
+        assert old != new and wrapper.read_bytes() == original
+        result = run(wrapper)
+        assert result.returncode == 0 and result.stdout.splitlines() == [new, "own.txt"], result
+        print(f"verify-wrapper-base AC2 new merge-base {new}; old pin differs; diff only own.txt")
+        assert write(block).read_bytes() == original  # same subject, role, source and pin
+        assert f"BASE_PINNED={old}\n" in wrapper.read_text()
+        print("verify-wrapper-base AC3 successful call ignores fallback")
+
+        missing = root / "missing-origin"
+        missing.mkdir()
+        git(missing, "init", "--initial-branch=main")
+        git(missing, "commit", "--allow-empty", "-m", "no remote")
+        (missing / ".env").write_text("")
+        worktree = missing
+        fallback_block = 'BASE=$(git merge-base HEAD origin/main) && echo "$BASE"\n'
+        fallback = write(fallback_block)
+        assert fallback.read_text().splitlines()[1] == f"# BASE source: pinned {old}"
+        result = run(fallback)
+        assert result.returncode == 0 and result.stdout.strip() == old, result
+        assert run(write(fallback_block.rstrip() + " && /usr/bin/false\n")).returncode == 1
+        assert run(write(fallback_block.rstrip() + " && git rev-parse --verify refs/heads/absent\n")).returncode != 0
+        # A different merge-base command must retain its own failure status.
+        assert run(write(fallback_block.rstrip() + " && git merge-base --is-ancestor absent HEAD\n")).returncode != 0
+        print("verify-wrapper-base AC3 failed call falls back; block and other git failures preserved")
+
+        worktree = clone
+        for role in ("builder", "grader", "reviewer", "spec-auditor", "owed-sweeper"):
+            ctx.a.role = role
+            for shape in ("echo ready\n", "BASE=local && echo $BASE\n", "echo $BASE\n", "echo ${BASE}\n"):
+                path = write(shape)
+                text = path.read_text()
+                lines = text.splitlines()
+                bare_reference = shape.startswith("echo $")
+                assert lines[:3] == ["#!/usr/bin/env bash", f"# BASE source: {'pinned ' + old if bare_reference else 'no base'}", "set -euo pipefail"]
+                assert bool(re.search(r"^BASE=", text, re.M)) == (bare_reference or shape.startswith("BASE="))
+                assert "BASE_PINNED=" not in text and text.endswith(shape)
+                result = run(path)
+                assert result.returncode == 0, result
+                if bare_reference:
+                    assert result.stdout.strip() == old
+            readonly = True
+            path = write(block)
+            text = path.read_text()
+            env_line = GUARDED if role in ("grader", "reviewer") else DSN_LINE
+            assert text.splitlines()[:4] == ["#!/usr/bin/env bash", "# BASE source: merge-base origin/main", "set -euo pipefail", f"BASE_PINNED={old}"]
+            assert text.endswith(env_line + "\n" + block)
+            assert path.read_bytes() == write(block).read_bytes() and os.access(path, os.X_OK)
+            assert run(path).stdout.splitlines() == [new, "own.txt"]
+            readonly = False
+        print("verify-wrapper-base AC5 all roles: no pin, self-assigned BASE, legacy bare BASE")
+        print("verify-wrapper-base AC6 byte-identical regeneration, verbatim blocks, DSN lines; existing waiver checks passed")
+
+        # Config fallback and a literal ref differing from project main are both intentional.
+        project = "unconfigured-project"
+        git(clone, "update-ref", "refs/remotes/origin/master", new)
+        master_block = block.replace("origin/main", "origin/master")
+        assert write(master_block).read_text().splitlines()[1] == "# BASE source: merge-base origin/master"
+        project = "do-it-v2"
+        assert write(block).read_text().splitlines()[1] == "# BASE source: merge-base origin/main"
+        worktree = root / "not-yet-created"
+        assert write(block).read_text().splitlines()[1] == "# BASE source: merge-base origin/main"
+        assert "origin/not-there" in write(block.replace("origin/main", "origin/not-there")).read_text()
+        print("verify-wrapper-base AC4 configured main, default master, repository fallback, literal refs")
+
+        real_config = look.load_toml
+        try:
+            look.load_toml = lambda: {"push": {"main": {project: "main\ninjected"}}}
+            before = wrapper.read_bytes()
+            try:
+                write(block)
+                raise AssertionError("unsafe configured main accepted")
+            except SystemExit as exc:
+                assert "invalid verify main" in str(exc)
+            assert wrapper.read_bytes() == before
+        finally:
+            look.load_toml = real_config
+        real_base = packet.verify_base_sha
+        try:
+            packet.verify_base_sha = lambda c: ""
+            try:
+                write(block)
+                raise AssertionError("empty fallback accepted")
+            except SystemExit as exc:
+                assert "invalid verify main or pinned base" in str(exc)
+        finally:
+            packet.verify_base_sha = real_base
+
+
+test_verify_wrapper_base()
