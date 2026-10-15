@@ -1710,11 +1710,11 @@ def spec_state(evs, retracted):
         if graded and reviewer_gate and "review" in types and all(r["status"] in ("met", "waived") for r in owed.checks(evs, NOW)):
             return "accepted"                                        # §2.5 accepted()
         unmet = [r for r in owed.checks(evs, NOW) if r["status"] not in ("met", "waived")]
-        if any(r["status"] == "due" for r in unmet):
+        if any(r["status"] in ("due", "blocked", "failed", "correcting", "quarantined") for r in unmet):
             return "shipped-owed-due"                                # R7
         if any(r["status"] == "waiting" for r in unmet):
             return "shipped-owed-evidence"                           # D25
-        if unmet:                                                    # all expired, none due/waiting
+        if unmet and all(r["status"] == "expired" for r in unmet):
             return "shipped-owed-expired"                            # L-charter-0038/L-spec-0384, R3
     if "spec-closed" in types:
         # D112 + S33: the operator's only close instrument used to read
@@ -1807,27 +1807,23 @@ def fold(events):
 
 
 def owed_due(specs):
-    """R7/L-spec-0192, rewired onto `owed.checks` (L-charter-0038/L-spec-0384,
-    R3): one `{spec, criterion, due_at, days_overdue, src}` row per
-    `status == "due"` criterion, across every spec in `specs` (`fold()`'s own
-    dict) — the data the board's own `shipped-owed-due` rendering and, later, a
-    lane item of its own (agents/executor.md — a later unit's Writes grant, not
-    this one's) both read. `due_at`/`src` come from the row's own `due_at`
-    (ship-anchored, not the raw `wake_at` echoed verbatim as before this unit)
-    and `declared_src`; `due_at` serializes via `.isoformat(timespec="seconds")`
-    — NOT `str()`, whose space-separated default would break
-    `restore.py`'s `owed_due_due_at_fragment` regex (a one-token `\\S+` match).
-    An `expired` row no longer counts as overdue here — that is R3's whole
-    point: expiry stops counting as "due", it becomes its own state."""
+    """Board rows for due, blocked, failed, correcting and quarantined checks.
+
+    Each row carries spec, criterion, status, src, due_at and days_overdue.
+    Undated open checks use shipped_at. ISO timestamps contain no spaces,
+    preserving restore.py's owed_due_due_at_fragment match. Expired checks
+    remain excluded; the board and HEALTH count every actionable row.
+    """
     out = []
     for sid, s in specs.items():
         for r in owed.checks(s["evs"], NOW):
-            if r["status"] != "due":
+            if r["status"] not in ("due", "blocked", "failed", "correcting", "quarantined"):
                 continue
+            due_at = r["due_at"] if r["due_at"] is not None else r["shipped_at"]
             out.append({"spec": r["spec"], "criterion": r["criterion"],
-                        "due_at": r["due_at"].isoformat(timespec="seconds"),
-                        "days_overdue": (NOW - r["due_at"]).total_seconds() / 86400,
-                        "src": r["declared_src"]})
+                        "due_at": due_at.isoformat(timespec="seconds"),
+                        "days_overdue": (NOW - due_at).total_seconds() / 86400,
+                        "src": r["declared_src"], "status": r["status"]})
     # R5/L-charter-0040, BLOCK_ORDER["OWED DUE"]: the literal tuple, ascending —
     # `due_at` is already a sortable ISO string (ship-anchored, timespec=
     # "seconds"), so a plain tuple sort is exact, tie included.
@@ -2043,7 +2039,8 @@ def render(events, specs, charters, ignored, by_subject):
     # overdue is named on the HEALTH line, never a truncated "(last: …)".
     def owed_due_line(r):
         return (f"{r['spec']} · {r['criterion']} · {r['due_at']} · "
-                f"{round(r['days_overdue'])}d overdue")
+                f"{round(r['days_overdue'])}d overdue"
+                + (f" · {r['status']}" if r["status"] != "due" else ""))
 
     owed_due_rows = owed_due(specs)
     block("OWED DUE", [owed_due_line(r) for r in owed_due_rows])

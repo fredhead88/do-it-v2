@@ -530,11 +530,11 @@ print("sweep-owed-0388 AC14 ok")
 for f in ("L-spec-writer-9388.jsonl", "L-executor-9388.jsonl"):
     (EV / f).unlink()
 
-# AC18 — closable_fallback's owed tally counts "shipped-owed-expired" the same
+# AC18 — closable_fallback's owed tally counts "shipped-owed-due" the same
 # as "shipped-owed-evidence" against K. fold.K pinned to 0 (saved/restored,
 # matching test_fold.py's own convention). One charter, one spec, reaching
-# "shipped-owed-expired" via shipped + two owed-failed events after the
-# governing owed-ac (SD2) — otherwise an ordinary SPEC_DONE member.
+# "shipped-owed-due" via shipped + two owed-failed events after the
+# governing owed-ac (SD2); failed work stays open.
 S18, C18 = "L-spec-9390", "L-charter-9390"
 old_ac_ts18 = (fold.NOW - datetime.timedelta(days=30)).isoformat(timespec="seconds")
 old_wake18 = (fold.NOW - datetime.timedelta(days=25)).isoformat(timespec="seconds")
@@ -549,7 +549,7 @@ write("L-executor-9390.jsonl",
       {"type": "owed-failed", "subject": S18, "criterion": "AC1", "evidence": "e2", "kind": "unmet"})
 write("L-thinker-9390.jsonl", {"type": "charter-filed", "subject": C18})
 ev18, specs18, charters18 = folded()
-assert specs18[S18]["state"] == "shipped-owed-expired", specs18[S18]["state"]
+assert specs18[S18]["state"] == "shipped-owed-due", specs18[S18]["state"]
 assert specs18[S18]["charter"] == C18, specs18[S18]["charter"]
 _saved_K18 = fold.K
 fold.K = 0
@@ -558,7 +558,7 @@ try:
 finally:
     fold.K = _saved_K18
 assert accepted18 is False, \
-    f"AC18: an owed criterion in shipped-owed-expired must count against K, same as shipped-owed-evidence: {accepted18}"
+    f"AC18: an owed criterion in shipped-owed-due must count against K, same as shipped-owed-evidence: {accepted18}"
 print("sweep-owed-0388 AC18 ok")
 for f in ("L-spec-writer-9390.jsonl", "L-builder-9390.jsonl", "L-executor-9390.jsonl", "L-thinker-9390.jsonl"):
     (EV / f).unlink()

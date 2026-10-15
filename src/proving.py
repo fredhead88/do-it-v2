@@ -120,8 +120,7 @@ def _governing_post(evs, criterion, after_ts, now):
 
 def _governing_event(evs, criterion, now):
     """`_governing_ac` + `_governing_post`, composed — written once and
-    reused by both `to_reopen()` and `summary()`'s `owed-check` owner
-    (Assumptions)."""
+    used by `to_reopen()`. Ownership instead reads the lifecycle row's status."""
     ac = _governing_ac(evs, criterion)
     if ac is None:
         return None
@@ -255,17 +254,16 @@ def summary(charter_id, charter_evs, mine, now, *, title, review_owed, open_brie
 
     for s in mine:                                          # owed-check
         sid = s["id"]
-        s_evs = s.get("evs", [])
         for row in checks_map.get(sid, []):
             if row.get("status") in DISCHARGED:
                 continue
             crit = row.get("criterion")
             text = row.get("line") or f"{sid} {crit}"
             due = row.get("due_at") if row.get("due_at") is not None else default_owed_due
-            gov = _governing_event(s_evs, crit, now)
-            if row.get("status") == "expired" or (gov is not None and gov.get("type") == "owed-unobservable"):
+            if (row.get("status") == "expired"
+                    or (row.get("status") == "blocked" and row.get("capability") == "operator-action")):
                 owner = "operator"
-            elif gov is not None and gov.get("type") == "owed-failed" and gov.get("kind") == "unmet":
+            elif row.get("status") in ("failed", "correcting", "quarantined"):
                 owner = "thinker"
             else:
                 owner = "owed-sweeper"

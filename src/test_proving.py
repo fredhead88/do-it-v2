@@ -287,16 +287,16 @@ def test_ac9():
                     kind="unmet", evidence="e")
     mine_unmet = [spec("S9", "accepted", [ac_ev, fail_unmet], "L-charter-9009")]
     out_unmet = proving.summary("L-charter-9009", charter, mine_unmet, now9, title="t9",
-                                review_owed=False, open_briefs=[], checks={"S9": [row_a, row_b]})
+                                review_owed=False, open_briefs=[], checks={"S9": [{**row_a, "status": "failed"}, row_b]})
     item_ac1 = next(it for it in out_unmet["items"] if it["criterion"] == "AC1")
     assert item_ac1["owner"] == "thinker", item_ac1
 
     fail_stale = {**fail_unmet, "kind": "stale"}
     mine_stale = [spec("S9", "accepted", [ac_ev, fail_stale], "L-charter-9009")]
     out_stale = proving.summary("L-charter-9009", charter, mine_stale, now9, title="t9",
-                                review_owed=False, open_briefs=[], checks={"S9": [row_a, row_b]})
+                                review_owed=False, open_briefs=[], checks={"S9": [{**row_a, "status": "failed"}, row_b]})
     item_ac1_stale = next(it for it in out_stale["items"] if it["criterion"] == "AC1")
-    assert item_ac1_stale["owner"] == "owed-sweeper", item_ac1_stale
+    assert item_ac1_stale["owner"] == "thinker", item_ac1_stale
 
     charter_nosweep = [e for e in charter if e["type"] != "sweep-fixpoint"]
     out_nosweep = proving.summary("L-charter-9009", charter_nosweep, mine, now9, title="t9",
@@ -666,3 +666,23 @@ test_backfill_ac4()
 test_backfill_ac5()
 test_backfill_ac6()
 print("proving: all checks pass")
+
+# L-spec-1003: the lifecycle row is the single authority for ownership.
+for status, capability, owner in (
+        ("waiting", None, "owed-sweeper"), ("due", None, "owed-sweeper"),
+        ("blocked", "ro-dsn", "owed-sweeper"), ("blocked", "operator-action", "operator"),
+        ("failed", "repo", "thinker"), ("correcting", "repo", "thinker"),
+        ("quarantined", "browser", "thinker"), ("expired", "zzz", "operator")):
+    row = {"criterion": "AC1", "status": status, "capability": capability, "due_at": NOW}
+    out = proving.summary("L-charter-lifecycle", [ev("l1-complete", stamp(3))],
+                          [spec("L-spec-lifecycle", "shipped-owed-due", [], "L-charter-lifecycle")],
+                          NOW, title="lifecycle", review_owed=False, open_briefs=[],
+                          checks={"L-spec-lifecycle": [row]})
+    item = next(it for it in out["items"] if it["kind"] == "owed-check")
+    assert item["status"] == status and item["owner"] == owner, item
+assert proving.DISCHARGED == ("met", "waived", "dropped")
+# Changing only derived status cannot create the event-based reopen signal.
+assert proving.to_reopen([ev("charter-proving", stamp(2)), ev("charter-closed", stamp(1))],
+                         [spec("L-spec-lifecycle", "shipped-owed-due", [], "L-charter-lifecycle")],
+                         NOW, checks={"L-spec-lifecycle": [{"criterion": "AC1", "status": "failed"}]}) == []
+print("owed-lifecycle AC11 ok")
