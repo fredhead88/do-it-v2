@@ -36,6 +36,8 @@ import time
 import urllib.parse
 import urllib.request
 
+import realm_omens
+
 ROOT = pathlib.Path(os.environ.get("DOIT_ROOT", pathlib.Path.home() / ".do-it"))
 EVENTS, SEAT = ROOT / "events", ROOT / "seat"
 HERE = pathlib.Path(__file__).resolve().parent
@@ -622,6 +624,23 @@ def tick_omens():
         return None
 
 
+# ---------------------------------------------------------------- omen model (realm_omens.py)
+_OM = {"files": {}, "master": ({}, 0.0), "lock": threading.Lock()}
+
+
+def omens_model(states, now=None):
+    """The ledger-history omens as data: recurring problems (24 h recency, aliased), blocked builders, churn,
+    vanished spawns, and which gate-clean specs were actually merged. Read-only; only changed files are re-parsed."""
+    now = now or dt.datetime.now(dt.timezone.utc)
+    with _OM["lock"]:
+        rows = realm_omens.scan(EVENTS, _OM["files"])
+        merges, at = _OM["master"]
+        if time.monotonic() - at > 120 or not merges:
+            merges = realm_omens.master_merges([p for p in (pathlib.Path("/opt/albert-scott"), LIVE_REPO) if (p / ".git").exists()])
+            _OM["master"] = (merges, time.monotonic())
+        return realm_omens.compute(rows, states or [], now, root=ROOT, master=merges)
+
+
 # ---------------------------------------------------------------- metric history (for trends)
 HISTORY_FILE = ROOT / "realm-history.json"      # the realm's own state, never the ledger
 HISTORY = {}                                     # metric -> [[iso, value], ...], oldest first
@@ -1133,7 +1152,7 @@ def bootstrap(hours, states=None, goals=None, proving=None):
             "ledger_start": rows[0]["t"] if rows else None, "n_events": len(raw), "events": window_rows,
             "stats": role_stats(raw), "states": states, "goals": goals, "proving": proving,
             "seat": seat_summary(), "titles": titles, "counts": dict(counts.most_common(60)),
-            "queue": queue_stats(rows, claims), "caps": ROLE_CAPS_MIN, "charters": charters, "spec_charter": spec_charter, "makers": maker_index(raw, states), "specs": {sid: t for sid in dict(states) if sid.startswith("L-spec-") for t in [spec_text(sid)] if t}, "sys": sys_signals(), "tick_omens": _OMENS_SCRIPT if _OMENS_SCRIPT["at"] else None, "history": HISTORY, "wallclock": wallclock(rows, states, now)}
+            "queue": queue_stats(rows, claims), "caps": ROLE_CAPS_MIN, "charters": charters, "spec_charter": spec_charter, "makers": maker_index(raw, states), "specs": {sid: t for sid in dict(states) if sid.startswith("L-spec-") for t in [spec_text(sid)] if t}, "sys": sys_signals(), "tick_omens": _OMENS_SCRIPT if _OMENS_SCRIPT["at"] else None, "history": HISTORY, "wallclock": wallclock(rows, states, now), "omens": omens_model(states, now)}
 
 
 # ---------------------------------------------------------------- streaming
@@ -1293,6 +1312,12 @@ def heartbeat_forever():
         HUB.send("heartbeat", {"now": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")})
         if n % 2 == 0:                       # every 30 s: panes, disk, CI (cached), quota
             HUB.send("sys", sys_signals())
+        if n % 4 == 2:                       # every minute: the ledger-history omens
+            try:
+                if HUB.states:                 # never compute against an empty census: every finished spec would look live
+                    HUB.send("omens", omens_model(HUB.states))
+            except Exception as ex:  # noqa: BLE001 — a failed refresh keeps the last model on the page
+                sys.stderr.write(f"realm: omens failed: {ex}\n")
         if n % 20 == 1:                      # every five minutes, staggered
             o = tick_omens()
             if o:
@@ -1417,6 +1442,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if u.path == "/api/bootstrap":
             hours = int(qs.get("hours", [self.hours])[0])
             self._json(bootstrap(hours, HUB.states))
+        elif u.path == "/api/omens":
+            if not HUB.states:
+                HUB.states = derive_states() or HUB.states
+            self._json(omens_model(HUB.states))
         elif u.path == "/api/states":
             st = derive_states()
             if st is not None:
