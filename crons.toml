@@ -123,3 +123,13 @@ path = "{doit}"
 sig = '\bdoit owed-digest --alert(?=\s*>>|\s*(?:#.*)?$)'
 owner = "thinker"
 project = "do-it-v2"
+
+[[row]]
+name = "portal-latency-daily"
+where = "cron.d"
+schedule = "30 6 * * *"
+command = "albert {doit} cron-run portal-latency-daily -- /bin/bash /opt/albert-scott/scripts/deploy/portal_check_daily_wrapper.sh"
+path = "/opt/albert-scott/scripts/deploy/portal_check_daily_wrapper.sh"
+sig = 'portal_check_daily_wrapper\.sh\b'
+owner = "albert-scott"
+project = "albert-scott"

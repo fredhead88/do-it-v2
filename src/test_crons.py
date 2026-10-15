@@ -30,7 +30,8 @@ def check(cond, msg):
 
 REAL_MANIFEST = pathlib.Path(__file__).resolve().parent.parent / "crons.toml"
 NAMES = {"tick", "look", "tmp-reaper", "lessons-digest", "backup-watch",
-         "ledger-snapshot", "sweep-owed", "auto-deploy", "owed-digest", "owed-digest-alert"}
+         "ledger-snapshot", "sweep-owed", "auto-deploy", "owed-digest", "owed-digest-alert",
+         "portal-latency-daily"}
 
 
 def _write_manifest(path, rows_):
@@ -69,11 +70,11 @@ def _exec_manifest(tmpdir, rows_=None, mode=0o755):
     return p, out
 
 
-# ══ AC1 · rows() — 10 rows, all 8 keys, where/project split ═════════════════
+# ══ AC1 · rows() — 11 rows, all 8 keys, where/project split ═════════════════
 d1 = TMP / "ac1"
 d1.mkdir()
 r1 = crons.rows(str(REAL_MANIFEST))
-check(len(r1) == 10, f"AC1: exactly 10 rows: {len(r1)}")
+check(len(r1) == 11, f"AC1: exactly 11 rows: {len(r1)}")
 check({row["name"] for row in r1} == NAMES, f"AC1: name set: {[row['name'] for row in r1]}")
 for row in r1:
     # R14a: every row also carries `max_runtime_s` now (int|None) — a 9th key,
@@ -82,14 +83,66 @@ for row in r1:
           f"AC1: all 8 FIELDS keys plus max_runtime_s on {row['name']}: {row.keys()}")
     for k in crons.FIELDS:
         check(isinstance(row[k], str) and row[k], f"AC1: {row['name']}.{k} is a non-empty string: {row[k]!r}")
-auto = [row for row in r1 if row["name"] == "auto-deploy"][0]
-check(auto["where"] == "cron.d" and auto["project"] == "albert-scott",
-      f"AC1: auto-deploy is cron.d/albert-scott: {auto}")
 for row in r1:
-    if row["name"] == "auto-deploy":
-        continue
-    check(row["where"] == "user" and row["project"] == "do-it-v2",
-          f"AC1: {row['name']} is user/do-it-v2: {row}")
+    if row["name"] in {"auto-deploy", "portal-latency-daily"}:
+        check(row["where"] == "cron.d" and row["project"] == "albert-scott",
+              f"AC1: {row['name']} is cron.d/albert-scott: {row}")
+    else:
+        check(row["where"] == "user" and row["project"] == "do-it-v2",
+              f"AC1: {row['name']} is user/do-it-v2: {row}")
+
+# L-spec-1046 AC1–AC3: the daily cron.d job is watched independently of the
+# hourly report. All executable paths and cron.d reads use temp fixtures.
+DAILY_LINE = "30 6 * * * albert /bin/bash /opt/albert-scott/scripts/deploy/portal_check_daily_wrapper.sh"
+HOURLY_LINE = "55 * * * * albert /bin/bash /opt/albert-scott/scripts/deploy/portal_latency_check_wrapper.sh"
+PORTAL_CROND_HEADER = """# Albert Scott — portal-latency before/after report + the daily portal check
+# (L-spec-0393, L-charter-0039 R6).
+SHELL=/bin/bash
+PATH=/usr/bin:/bin
+PYTHONPATH=/opt/albert-scott/api:/opt/albert-scott
+
+"""
+portal = next(row for row in r1 if row["name"] == "portal-latency-daily")
+check(portal["schedule"] == "30 6 * * *" and portal["owner"] == "albert-scott",
+      f"L1046-AC1: daily schedule and owner: {portal}")
+check(portal["path"] == "/opt/albert-scott/scripts/deploy/portal_check_daily_wrapper.sh",
+      f"L1046-AC1: daily wrapper path: {portal}")
+check(sum(bool(re.search(row["sig"], DAILY_LINE)) for row in r1) == 1,
+      "L1046-AC3: exactly one row matches the daily line")
+check(not any(re.search(row["sig"], HOURLY_LINE) for row in r1),
+      "L1046-AC3: no row matches the hourly report")
+d_portal = TMP / "portal-latency"
+d_portal.mkdir()
+portal_manifest, _ = _exec_manifest(d_portal)
+portal_crond = d_portal / "cron.d"
+portal_crond.mkdir()
+portal_cron = portal_crond / "albert-scott-portal-latency-check"
+for label, daily_line, expected in (
+    ("present", DAILY_LINE + "\n", []),
+    ("removed", "", [{"name": "portal-latency-daily", "owner": "albert-scott",
+                       "project": "albert-scott", "reason": "absent"}]),
+    ("commented", "#" + DAILY_LINE + "\n",
+     [{"name": "portal-latency-daily", "owner": "albert-scott",
+       "project": "albert-scott", "reason": "absent"}]),
+):
+    portal_cron.write_text(PORTAL_CROND_HEADER + HOURLY_LINE + "\n" + daily_line)
+    missing = crons.check(manifest=str(portal_manifest), crontab_text="",
+                          crond_dir=str(portal_crond))
+    portal_missing = [row for row in missing if row["name"] == "portal-latency-daily"]
+    check(portal_missing == expected,
+          f"L1046-AC2: {label} daily line, hourly retained: {portal_missing}")
+portal_crontab = d_portal / "crontab"
+portal_crontab.write_bytes(b"# unrelated crontab\r\n* * * * * echo keep\n")
+portal_before = portal_crontab.read_bytes()
+try:
+    crons.install("portal-latency-daily", crontab_path=str(portal_crontab))
+    check(False, "L1046-AC3: installing portal-latency-daily must raise ValueError")
+except ValueError:
+    check(True, "L1046-AC3: cron.d installation refused")
+check(portal_crontab.read_bytes() == portal_before,
+      "L1046-AC3: refused installation leaves crontab byte-unchanged")
+check(crons.interval_s("30 6 * * *") == 86400, "L1046-AC4: daily interval is 86400s")
+print("L1046-AC1–AC4 ok (present, removed, commented, unique signature, install refusal)")
 
 def _wrap_line(line, name, doit_bin):
     """R14a: insert `<doit_bin> cron-run <name> -- ` right after any leading
@@ -172,10 +225,10 @@ crond5_empty.mkdir()
 # `tick`/`backup-watch` lines carry the real `/home/albert/do-it-v2/doit`, which
 # still matches `\bdoit tick\b` / `\bdoit backup watch\b` regardless of path.
 res5 = crons.check(manifest=str(manifest5), crontab_text=FIXTURE_5, crond_dir=str(crond5_empty))
-check({r["name"] for r in res5} == {"look", "tmp-reaper", "auto-deploy", "owed-digest", "owed-digest-alert"},
-      f"AC5: exactly {{look, tmp-reaper, auto-deploy, owed-digest, owed-digest-alert}} missing: {[r['name'] for r in res5]}")
+check({r["name"] for r in res5} == {"look", "tmp-reaper", "auto-deploy", "owed-digest", "owed-digest-alert", "portal-latency-daily"},
+      f"AC5: exactly {{look, tmp-reaper, auto-deploy, owed-digest, owed-digest-alert, portal-latency-daily}} missing: {[r['name'] for r in res5]}")
 check(all(r["reason"] == "absent" for r in res5), f"AC5: every entry is absent: {res5}")
-check(len(res5) == 5, f"AC5: no extra rows: {res5}")
+check(len(res5) == 6, f"AC5: no extra rows: {res5}")
 
 # AC5's second, minimal fixture: the only matching line is commented.
 d5b = TMP / "ac5b"
@@ -288,8 +341,9 @@ f9_all = d9 / "crontab-all.txt"
 f9_all.write_text(crontab9 + "\n")
 crond9 = d9 / "crond"
 crond9.mkdir()
-auto9 = [r for r in rows9 if r["where"] == "cron.d"][0]
-(crond9 / "auto-deploy").write_text(crons.print_line("auto-deploy", str(manifest9)) + "\n")
+for row in rows9:
+    if row["where"] == "cron.d":
+        (crond9 / row["name"]).write_text(crons.print_line(row["name"], str(manifest9)) + "\n")
 
 buf = io.StringIO()
 with contextlib.redirect_stdout(buf):
