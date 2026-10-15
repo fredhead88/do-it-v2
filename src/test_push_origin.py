@@ -92,15 +92,20 @@ ALL_ARGVS = []   # every argv any RecordingRunner below ever saw — AC6 reads t
 class RecordingRunner(push_origin.Runner):
     """Wraps the real `push_origin.Runner` (real git) — records every argv
     (into both its own `.calls` and the shared `ALL_ARGVS`), and can force a
-    named subcommand to fail (`fail=`) or raise `TimeoutExpired` (`raise_on=`)."""
-    def __init__(self, fail=None, raise_on=None):
+    named subcommand to fail (`fail=`) or raise `TimeoutExpired` (`raise_on=`).
+    `max_calls` aborts runaway walks; callers also assert the recorded count,
+    since `run()` catches exceptions raised inside the project pass."""
+    def __init__(self, fail=None, raise_on=None, max_calls=None):
         self.calls = []
         self.fail = fail or set()
         self.raise_on = raise_on or set()
+        self.max_calls = max_calls
 
     def git(self, args, cwd, timeout):
         self.calls.append(list(args))
         ALL_ARGVS.append(list(args))
+        if self.max_calls is not None:
+            assert len(self.calls) <= self.max_calls, "git call budget exceeded"
         sub = args[0]
         if sub in self.raise_on:
             raise subprocess.TimeoutExpired(cmd="git", timeout=timeout)
@@ -145,6 +150,74 @@ class RacingRunner(push_origin.Runner):
             subprocess.run(["git", "push", "origin", "HEAD"], cwd=str(self.racer_clone),
                            capture_output=True, text=True)
         return rc, out, err
+
+
+# ── L-spec-1013 · constant git-call budget over 500 shipped commits ───────
+with RootCtx() as root1013:
+    origin1013, clone1013 = make_pair(root1013, "do-it-v2", "main")
+    tree1013 = sh(["rev-parse", "HEAD^{tree}"], clone1013)
+    parent1013 = sh(["rev-parse", "HEAD"], clone1013)
+    shas1013 = []
+    for i1013 in range(500):
+        parent1013 = sh(["-c", "user.email=t@example.com", "-c", "user.name=t",
+                         "commit-tree", tree1013, "-p", parent1013,
+                         "-m", f"shipped-{i1013}"], clone1013)
+        shas1013.append(parent1013)
+    sh(["update-ref", "refs/heads/main", shas1013[-1]], clone1013)
+    sh(["push", "origin", f"{shas1013[-2]}:refs/heads/main"], clone1013)
+    unshipped1013 = commit(clone1013, "unshipped-after-500")
+    events1013 = [shipped("do-it-v2", sha, f"L-spec-91013-{i}", minute=500-i)
+                  for i, sha in enumerate(shas1013)]
+    runner1013 = RecordingRunner(max_calls=6)
+    result1013 = push_origin.run(events1013, runner=runner1013)
+    assert len(runner1013.calls) <= 6, runner1013.calls
+    assert result1013 == ["do-it-v2"], result1013
+    assert sh(["rev-parse", "main"], origin1013) == shas1013[-1] != unshipped1013
+    recorded1013 = [json.loads(line) for line in
+                    (root1013 / "events" / push_origin.EVENT_NAME).read_text().splitlines()]
+    assert len(recorded1013) == 1 and recorded1013[0]["sha"] == shas1013[-1]
+    assert sum(call[0] == "fetch" for call in runner1013.calls) == 1
+    assert [call for call in runner1013.calls if call[0] == "rev-list"] == [
+        ["rev-list", "origin/main..refs/heads/main"]]
+    assert [call[0] for call in runner1013.calls] == [
+        "symbolic-ref", "fetch", "rev-list", "merge-base", "push"]
+    runner1013b = RecordingRunner(max_calls=6)
+    assert push_origin.run(events1013, runner=runner1013b) == []
+    assert len(runner1013b.calls) <= 6
+    assert not any(call[0] == "push" for call in runner1013b.calls)
+    assert len((root1013 / "events" / push_origin.EVENT_NAME).read_text().splitlines()) == 1
+print(f"L1013 R3: 500 shipped shas, {len(runner1013.calls)} git calls, "
+      f"{len(runner1013b.calls)} on repeat; exact shipped sha pushed")
+
+with RootCtx() as root1013a:
+    origin1013a, clone1013a = make_pair(root1013a, "do-it-v2", "main")
+    local1013a = commit(clone1013a, "shipped-before-origin-advances")
+    sh(["push", "origin", "main"], clone1013a)
+    racer1013a = root1013a / "racer"
+    sh(["clone", str(origin1013a), str(racer1013a)], root1013a)
+    ahead1013a = commit(racer1013a, "origin-ahead")
+    sh(["push", "origin", "HEAD"], racer1013a)
+    runner1013a = RecordingRunner(max_calls=6)
+    assert push_origin.run([shipped("do-it-v2", local1013a, "L-spec-91013a")],
+                           runner=runner1013a) == []
+    assert not any(call[0] == "push" for call in runner1013a.calls)
+    assert not (root1013a / "events" / push_origin.EVENT_NAME).exists()
+    assert sh(["rev-parse", "main"], origin1013a) == ahead1013a
+print("L1013 R2 origin ahead skips with no event ok")
+
+with RootCtx() as root1013f:
+    origin1013f, clone1013f = make_pair(root1013f, "do-it-v2", "main")
+    sha1013f = commit(clone1013f, "walk-failure")
+    for failed1013 in ("rev-list", "merge-base"):
+        for raises1013 in (False, True):
+            runner1013f = RecordingRunner(**{
+                "raise_on" if raises1013 else "fail": {failed1013}})
+            assert push_origin.run([shipped("do-it-v2", sha1013f, "L-spec-91013f")],
+                                   runner=runner1013f) == []
+            assert not any(call[0] == "push" for call in runner1013f.calls)
+            assert not (root1013f / "events" / push_origin.EVENT_NAME).exists()
+    assert sh(["rev-parse", "main"], origin1013f) != sha1013f
+print("L1013 failed or timed-out rev-list/fast-forward check skips safely ok")
 
 
 # ── L-spec-0995 · ancestry, never event timestamps ────────────────────────
@@ -193,16 +266,17 @@ with RootCtx() as root995h:
         {"type": "origin-pushed", "subject": "another-project", "sha": sha995h, "ts": ts(40)},
     ]
     runner995h = RecordingRunner()
-    assert push_origin.run(events995h, runner=runner995h) == ["do-it-v2"]
+    assert push_origin.run(events995h, runner=runner995h) == []
     assert not any(call[0] == "push" for call in runner995h.calls)
     log995h = root995h / "events" / push_origin.EVENT_NAME
-    recorded995h = [json.loads(line) for line in log995h.read_text().splitlines()]
-    recorded995h[0]["ts"] = ts(-10)  # event timestamp must not affect per-sha identity
+    assert not log995h.exists(), "L1013 R1: already on origin emits no event"
+    recorded995h = [{"type": "origin-pushed", "subject": "do-it-v2", "sha": sha995h,
+                    "ts": ts(-10)}]  # event timestamp must not affect per-sha identity
     runner995h2 = RecordingRunner()
     assert push_origin.run(events995h + recorded995h, runner=runner995h2) == []
-    assert len(log995h.read_text().splitlines()) == 1
+    assert not log995h.exists()
     assert not any(call[0] == "push" for call in runner995h2.calls)
-print("L0995 already-on-origin per-sha recording ok")
+print("L1013 already-on-origin skips with no event ok")
 
 with RootCtx() as root995d:
     origin995d, clone995d = make_pair(root995d, "do-it-v2", "main")
@@ -238,11 +312,10 @@ with RootCtx() as root995m:
     events995m = [shipped("do-it-v2", sha, f"L-spec-90995m{i}", minute=i)
                   for i, sha in enumerate((sha_merge995, sha_side995, sha_main995))]
     runner995m = RecordingRunner()
-    assert push_origin.run(events995m, runner=runner995m) == []
-    assert not any(call[0] == "push" for call in runner995m.calls)
-    assert not (root995m / "events" / push_origin.EVENT_NAME).exists(), \
-        "L0995 R2: incomparable candidates skip even when both were later merged"
-print("L0995 unordered shipped candidates skip ok")
+    assert push_origin.run(events995m, runner=runner995m) == ["do-it-v2"]
+    assert sh(["rev-parse", "main"], origin995m) == sha_merge995, \
+        "L1013 R1: the first shipped rev-list entry wins over merged candidates"
+print("L1013 merged shipped candidates use rev-list order ok")
 
 
 # ── merge-origin-0484 AC1/AC2/AC3 ────────────────────────────────────────────
@@ -278,7 +351,7 @@ with RootCtx() as root1:
     print("merge-origin-0484 AC3 ok")
 
 
-# ── merge-origin-0484 AC4 · hand-pushed: record, push nothing ───────────────
+# ── L1013 R1 supersedes merge-origin-0484 AC4 · hand-pushed: no event ──────
 with RootCtx() as root4:
     origin4, clone4 = make_pair(root4, "do-it-v2", "main")
     sha4 = commit(clone4, "hand-pushed")
@@ -286,12 +359,11 @@ with RootCtx() as root4:
     events4 = [shipped("do-it-v2", sha4, "L-spec-90004")]
     runner4 = RecordingRunner()
     result4 = push_origin.run(events4, runner=runner4)
-    assert result4 == ["do-it-v2"], result4
+    assert result4 == [], result4
     assert not any(c[0] == "push" for c in runner4.calls), \
         f"AC4: a hand-pushed sha must never be re-pushed: {runner4.calls}"
-    recorded4 = [json.loads(l) for l in (root4 / "events" / push_origin.EVENT_NAME).read_text().splitlines()]
-    assert len(recorded4) == 1 and recorded4[0]["sha"] == sha4, recorded4
-    print("merge-origin-0484 AC4 ok")
+    assert not (root4 / "events" / push_origin.EVENT_NAME).exists()
+    print("L1013 R1 hand-pushed: no push and no event ok")
 
 
 # ── merge-origin-0484 AC5 · diverged history never pushes ───────────────────
@@ -457,7 +529,7 @@ _SRC_TEXT = (pathlib.Path(__file__).parent / "push_origin.py").read_text()
 for _token in ("--force", "-f ", "--force-with-lease", "--mirror", "--delete", "--all", "--tags", '"+'):
     assert _token not in _SRC_TEXT, f"AC6: forbidden token present in push_origin.py: {_token!r}"
 _subs = {c[0] for c in ALL_ARGVS}
-assert _subs and _subs <= {"fetch", "symbolic-ref", "rev-parse", "merge-base", "push"}, \
+assert _subs and _subs <= {"fetch", "symbolic-ref", "rev-parse", "rev-list", "merge-base", "push"}, \
     f"AC6: an unexpected git subcommand was issued: {_subs}"
 _push_argvs = [c for c in ALL_ARGVS if c[0] == "push"]
 assert _push_argvs, "AC6: at least one push argv was recorded across the ACs above"
