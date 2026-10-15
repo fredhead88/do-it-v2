@@ -86,7 +86,10 @@ def test_recurring_since_is_the_start_of_the_current_spell_and_variants_are_list
 def test_operator_owner_is_needs_you_and_only_those_may_be_critical():
     rows = [_brief(h, "disk-full", own="operator") for h in (5, 4, 3, 2, 1, 1, 1, 1, 1, 1, 1)]
     (a,), _ = om.recurring(rows, [], NOW)
-    assert a["needs_you"] and a["sev"] == 2
+    assert not a["needs_you"] and a["owner"] == "thinker" and a["sev"] == 1    # a look brief naming the operator is NOT a request
+    out = om.compute(rows, [], NOW)
+    assert out["needs_you"] == 0 and out["health"] == 1
+    assert om._item("x", "k", 2, "t", "d", "operator", "n", NOW, NOW)["sev"] == 2
     rows = [_brief(h, "relay-thing", own="thinker") for h in [1] * 30]
     (b,), _ = om.recurring(rows, [], NOW)
     assert not b["needs_you"] and b["sev"] == 1
@@ -107,7 +110,33 @@ def test_blocked_counts_only_a_latest_blocked_with_no_later_start_or_ship():
             _row("build-blocked", 9, "L-spec-0004", why="x")]
     states = [["L-spec-0001", "building"], ["L-spec-0002", "built"], ["L-spec-0003", "shipped"], ["L-spec-0004", "killed"]]
     hits = om.blocked_builders(om._by_spec(rows), states, NOW)
-    assert [s for s, _ in hits] == ["L-spec-0002"]
+    assert [s for s, _, _ in hits] == ["L-spec-0002"] and not hits[0][2]
+
+
+def test_blocked_with_a_later_decision_amendment_rewrite_unblock_or_answer_is_redispatch_pending():
+    for ty in ("decision", "spec-amended", "spec-written", "unblocked", "brief-answered"):
+        rows = [_row("build-done", 9, "L-spec-0050", st="BLOCKED"), _row(ty, 5, "L-spec-0050")]
+        hits = om.blocked_builders(om._by_spec(rows), [["L-spec-0050", "graded"]], NOW)
+        assert [(s, p) for s, _, p in hits] == [("L-spec-0050", True)], ty
+        blocked, pending = om.blocked_items(hits, NOW)
+        assert blocked is None and pending["owner"] == "executor" and pending["sev"] == 0
+    rows = [_row("decision", 12, "L-spec-0051"), _row("build-done", 9, "L-spec-0051", st="BLOCKED")]     # decision came BEFORE the block
+    (h,) = om.blocked_builders(om._by_spec(rows), [["L-spec-0051", "graded"]], NOW)
+    assert h[2] is False
+
+
+def test_needs_you_comes_only_from_operator_action_owed_rows_and_decision_requests():
+    rows = [_row("owed-unobservable", 9, "L-spec-0060", crit="AC1", cap="operator-action", why="needs the operator's login"),
+            _row("owed-unobservable", 9, "L-spec-0061", crit="AC1", cap="ro-sql", why="x"),
+            _row("owed-unobservable", 9, "L-spec-0062", crit="AC1", cap="operator-action", why="y"), _row("owed-met", 5, "L-spec-0062", crit="AC1")]
+    st = [["L-spec-0060", "shipped-owed-expired"], ["L-spec-0061", "shipped-owed-expired"], ["L-spec-0062", "shipped-owed-expired"]]
+    out = om.compute(rows, st, NOW)
+    (it,) = [i for i in out["items"] if i["needs_you"]]
+    assert it["kind"] == "owedop" and it["subjects"] == ["L-spec-0060"]          # not 0061 (other capability), not 0062 (met)
+    rows.append(_row("message-sent", 3, "shlomo", to="operator", why="please rule on X"))
+    assert sum(i["needs_you"] for i in om.compute(rows, st, NOW)["items"]) == 2
+    rows.append(_row("brief-answered", 1, "shlomo"))
+    assert sum(i["needs_you"] for i in om.compute(rows, st, NOW)["items"]) == 1
 
 
 def test_churn_counts_only_unfinished_specs_and_grades_in_the_last_48h():
@@ -143,7 +172,7 @@ def test_gate_clean_is_not_merged_without_a_window_or_a_master_commit():
 def test_compute_drops_omens_whose_subjects_are_all_finished_and_counts_needs_you():
     rows = [_row("build-done", 9, "L-spec-0040", st="BLOCKED")] + [_brief(h, "disk-full", own="operator") for h in (3, 2, 1)]
     out = om.compute(rows, [["L-spec-0040", "killed"]], NOW)
-    assert [i["id"] for i in out["items"]] == ["rec:disk-full"] and out["needs_you"] == 1 and out["health"] == 0
+    assert [i["id"] for i in out["items"]] == ["rec:disk-full"] and out["needs_you"] == 0 and out["health"] == 1
     assert out["v"] == 2 and out["at"] == _ago(0)
 
 if __name__ == "__main__":

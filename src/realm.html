@@ -542,7 +542,7 @@ function handle(e){const ty=e.ty;if(ty!=='tick')subjectPush(e.s,e);if(ty!=='tick
     case 'shipped':S.shipped++;S.shippedList.push({ms:e.ms,s:e.s,sha:e.sha});if(!S.quiet&&!REDUCED)S.boats.push({t:0,dur:3,s:e.s});addLog(e,'ship','Harbor',`${e.s} shipped to Prod Town${e.sha?' ('+e.sha+')':''}`);spark('harbor');break;
     case 'message-sent':if(e.a==='executor')addLog(e,'',e.a,`says: ${e.why||''}`);break;
     case 'deploy-failed':addLog(e,'bad','Harbor',`deploy failed for ${e.s}`);break;
-    case 'escalation-blocking':case 'question':{const list=S.esc.get(e.s)||[];list.push({ms:e.ms,why:e.why,a:e.a,df:e.df,dl:e.dl,irr:e.irr,bl:e.bl,q:e.ty==='question'});S.esc.set(e.s,list);
+    case 'escalation-blocking':case 'question':{const list=S.esc.get(e.s)||[];list.push({ms:e.ms,why:e.why,a:e.a,df:e.df,dl:e.dl,irr:e.irr,ow:e.ow,bl:e.bl,q:e.ty==='question'});S.esc.set(e.s,list);
       if(!S.quiet&&!REDUCED){const from=PLACES[WORK[roleA]||'tower'];S.ravens.push({x:from.x+from.w/2,y:from.y,tx:140,ty:90,t:0,dur:1.8});}
       addLog(e,'esc',e.a,`sends a raven about ${e.s}: ${e.why}`);break;}
     case 'unblocked':for(const k of [e.s,e.rs]){if(k&&S.esc.has(k)){S.decided.set(k,{by:e.a,ms:e.ms,owner:escOwner(S.esc.get(k)),why:e.why});S.esc.delete(k);}}addLog(e,'good',e.a,`unblocks ${e.s}: ${e.why||''}`);break;
@@ -829,7 +829,7 @@ function narrate(e){switch(e.ty){case 'spawn-started':return{cls:'',text:`${e.sp
 const charterOfSubject=s=>!s?null:String(s).startsWith('L-charter-')?s:specCharter(s);
 /* An escalation is the operator's only when it is irreversible: money, credentials, an irreversible production write, or a product call. Everything else the Thinker decides. */
 const OPERATOR_RE=/\b(money|refund|payment|payout|charge|invoice|bill|credential|secret|token|password|api[- ]?key|irreversible|drop (table|column)|delete (data|rows|records)|destroy|truncate|production write|write(s)? to prod|prod(uction)? (data|db|database) (write|change)|downgrade|product (call|decision|choice)|pricing|client[- ]facing|customer[- ]facing|spend|budget|quota|account limit|weekly limit)\b/i;
-function escOwner(list){const x=list[list.length-1]||{};if(x.irr)return 'you';return OPERATOR_RE.test((x.why||'')+' '+(x.df||''))?'you':'thinker';}
+function escOwner(list){const x=list[list.length-1]||{};return String(x.ow||'').toLowerCase()==='operator'?'you':'thinker';}   /* only the escalation event's own owner field says it is the operator's */
 const execBusy=()=>{const sy=S.sys||(DATA&&DATA.sys);if(!sy||!sy.panes||!LIVE)return false;const at=toMs(sy.at);if(!at||Date.now()-at>120000)return false;return Object.values(sy.panes).some(p=>p.role==='executor'&&p.busy);};
 const escOwners=()=>{let you=0,th=0;for(const l of S.esc.values()){if(!isRaven(l))continue;(escOwner(l)==='you'?you++:th++);}return{you,th};};
 const specInfo=s=>(DATA&&DATA.specs&&DATA.specs[s])||null;
@@ -1294,7 +1294,7 @@ const OMEN_HELP={
  conflict:{why:'Migration specs all touch branch_isolation.json; two in one wave conflict forever unless a merge order is declared.',fix:'Declare the merge order in the plan (planner rule PR #2) and widen the Writes grant.'},
 };
 const OM=()=>S.omens||(DATA&&DATA.omens)||null;
-const SERVER_KINDS=new Set(['churn','vanished','blocked','fire','recurring']);   /* computed from the ledger by realm_omens.py: current state only */
+const SERVER_KINDS=new Set(['churn','vanished','blocked','redispatch','fire','recurring','owedop','decide']);   /* computed from the ledger by realm_omens.py: current state only */
 const NO_SELFCHECK=new Set(['owed','owedop','deploy']);                       /* their subjects are shipped by definition */
 const FINISHED_RE=/killed|void|dropped|retracted|^shipped|^accepted/;
 const isOperator=o=>{o=String(o||'').toLowerCase();return o==='you'||o==='operator';};
@@ -1321,8 +1321,6 @@ function computeOmens(){const now=S.now,A=[];const add=(id,kind,sev,title,detail
   /* blocked builders: server-side: latest build is BLOCKED with no later build-started or shipped */
   if(gate.length)add('gate','gate',1,`Merge gate holding ${gate.length} branch${gate.length>1?'es':''}`,gate.join(', '),'gate',gate);
   const owed=[...stateMap()].filter(([s,st])=>/owed/.test(st)).map(x=>x[0]);const oc=lastOf('owed_checks'),oo=lastOf('owed_overdue'),ocr=lastOf('owed_close_rate');if(owed.length>=10)add('owed','owed',1,`${owed.length} shipped specs owe prod evidence${oc!=null?' · '+oc+' checks open, '+oo+' overdue':''}`,`${ocr!=null?'Only '+ocr+'% of owed checks have ever been closed. ':''}Charters cannot close over them.`,'town',owed);
-  {const pv=(DATA&&DATA.proving)||[];const its=[];for(const c of pv)for(const it of (c.items||[]))if(it.owner==='operator'&&((it.kind==='owed-check'&&it.status!=='waiting')||it.kind==='l1-missing'))its.push({c:c.id,it});
-   if(its.length){const cs=[...new Set(its.map(x=>x.c))];const due=its.map(x=>toMs(x.it.due_at)).filter(Boolean);add('owedop','owedop',1,`${its.length} owed check${its.length>1?'s':''} wait on you across ${cs.length} charter${cs.length>1?'s':''}`,`${cs.slice(0,6).join(', ')}${cs.length>6?' +'+(cs.length-6)+' more':''}: production evidence only the operator can produce, or waive.`,'town',[...new Set(its.map(x=>x.it.spec).filter(Boolean))]);const o=A[A.length-1];o.srvSince=due.length?Math.min(...due):now;o.charters=cs;}}
   {const mg=(OM()||{}).merge||{};const stw=stateMap();const un=Object.entries(mg).filter(([sp,m])=>!m.merged&&toMs(m.gate)&&now-toMs(m.gate)>2*3600000&&!FINISHED_RE.test(stw.get(sp)||''));
    if(un.length){const old=Math.max(...un.map(([,m])=>now-toMs(m.gate)));add('unwindowed','unwindowed',old>6*3600000?1:0,`${un.length} spec${un.length>1?'s':''} gate-clean, not windowed`,`${un.slice(0,6).map(x=>x[0]).join(', ')}${un.length>6?' +'+(un.length-6)+' more':''}: merged only counts with a window or a commit on master; none is on record.`,'gate',un.map(x=>x[0]));A[A.length-1].srvSince=Math.min(...un.map(([,m])=>toMs(m.gate)));}}
   {const sh=lastOf('shape'),shh=lastOf('shape_hours');if(sh)add('shape','shape',shh>48?2:1,`${sh} spec${sh>1?'s':''} failed the shape gate and sit unwritten`,`${Math.round(shh)} spec-hours lost so far: bad Verification chain, prose in Writes, unreadable criteria.`,'scriptorium');}

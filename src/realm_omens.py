@@ -74,7 +74,8 @@ def norm_owner(o, default="thinker"):
 # ---- reading the ledger, cheaply -----------------------------------------------------------------------------
 WANT = {"lesson", "brief", "build-started", "build-done", "build-blocked", "verdict", "merge-gate-clean", "shipped",
         "spawn-started", "spawn-done", "spawn-failed", "spawn-stale", "window-verified", "window-merged",
-        "shipped-in-window", "spec-killed", "project-merged"}
+        "shipped-in-window", "spec-killed", "project-merged", "decision", "spec-amended", "spec-written", "unblocked",
+        "brief-answered", "note-answered", "message-sent", "owed-unobservable", "owed-met", "owed-failed", "owed-waived", "owed-ac"}
 _MARKERS = tuple(('"type": "%s"' % t).encode() for t in WANT) + tuple(('"type":"%s"' % t).encode() for t in WANT)
 
 
@@ -102,6 +103,10 @@ def reduce_event(e):
         r["kept"] = [x for x in (e.get("kept") or []) if isinstance(x, str)]
     elif ty in ("window-merged", "shipped-in-window", "project-merged"):
         r["kept"] = [x for x in (e.get("specs") or e.get("kept") or []) if isinstance(x, str)]
+    elif ty == "message-sent":
+        r.update(to=e.get("to"), why=_t(e.get("text") or e.get("why"), 200))
+    elif ty in ("owed-unobservable", "owed-met", "owed-failed", "owed-waived", "owed-ac"):
+        r.update(crit=e.get("criterion"), cap=e.get("capability"), why=_t(e.get("why") or e.get("line"), 200))
     elif ty == "build-blocked":
         r["why"] = _t(e.get("reason"), 200)
     return r
@@ -260,6 +265,8 @@ def recurring(rows, states, now, root=None):
         owner = norm_owner(g["own"], CLASS_OWNER.get(name, "thinker"))
         if name in CLASS_OWNER and norm_owner(g["own"], "") in ("", "thinker"):
             owner = CLASS_OWNER[name]
+        if owner == "operator":
+            owner = "thinker"     # a look brief naming the operator is a claim, not a request: look-*/infra problems are the Thinker's
         variants = sorted(v for v in g["variants"] if v != name)
         trend = f"{g['n24']} in 24h · {g['n7']} in 7d · {n} since {first.strftime('%m-%d')}"
         landed = bool(fix and LANDED_RE.search(fix_state))
@@ -290,7 +297,12 @@ def _by_spec(rows):
     return by
 
 
+MOVED_ON = ("decision", "spec-amended", "spec-written", "unblocked", "brief-answered", "note-answered")
+
+
 def blocked_builders(by, states, now):
+    """[(spec, blocking event, pending)]: pending is True when a decision / amendment / rewrite / unblock / answered
+    escalation came after the block, i.e. the work is waiting to be re-dispatched, not stuck."""
     st = dict(states or [])
     hits = []
     for s, ev in by.items():
@@ -299,22 +311,75 @@ def blocked_builders(by, states, now):
         last = None
         for e in ev:
             if e["ty"] in ("build-started", "shipped", "verdict", "merge-gate-clean"):
-                last = e                                  # work moved on after the block: it is no longer blocked
+                last = None                               # work moved on after the block: no longer blocked
             elif e["ty"] == "build-blocked" or (e["ty"] == "build-done" and e.get("st") not in (None, "DONE")):
                 last = e
-        if last and last["ty"] in ("build-blocked", "build-done"):
-            hits.append((s, last))
+        if last:
+            pending = any(e["ty"] in MOVED_ON and e["t"] > last["t"] for e in ev)
+            hits.append((s, last, pending))
     return hits
 
 
-def blocked_item(hits, now):
+def _blk(e):
+    return (e.get("st") or "BLOCKED") if e["ty"] == "build-done" else "BLOCKED"
+
+
+def blocked_items(hits, now):
+    """(blocked omen, re-dispatch-pending omen); either may be None."""
+    out = []
+    for pending in (False, True):
+        h = [x for x in hits if x[2] == pending]
+        if not h:
+            out.append(None)
+            continue
+        ts = [parse(e["t"]) for _, e, _ in h]
+        n = len(h)
+        if pending:
+            out.append(_item("redispatch", "redispatch", 0, f"{n} spec{'s' if n > 1 else ''} re-dispatch pending",
+                             "A decision, amendment, rewrite or answer followed the block: " + ", ".join(s for s, _, _ in h),
+                             "executor", "re-dispatch " + ", ".join(s for s, _, _ in h[:3]), min(ts), max(ts),
+                             subjects=[s for s, _, _ in h], anchor="forge"))
+        else:
+            out.append(_item("blocked", "blocked", 1, f"{n} builder{'s' if n > 1 else ''} blocked, nothing since",
+                             ", ".join(f"{s} {_blk(e)}" for s, e, _ in h), "executor",
+                             "re-dispatch or kill " + ", ".join(s for s, _, _ in h[:3]) + " (no decision, amendment or unblock on record)",
+                             min(ts), max(ts), subjects=[s for s, _, _ in h], anchor="forge"))
+    return out
+
+
+def operator_action_owed(by_rows, states, now):
+    """NEEDS YOU (b): open owed rows whose latest word is owed-unobservable with capability operator-action."""
+    st = dict(states or [])
+    latest = {}
+    for r in by_rows:
+        if r["ty"].startswith("owed-") and r.get("s"):
+            latest[(r["s"], r.get("crit"))] = r
+    hits = [r for (s, _), r in latest.items() if r["ty"] == "owed-unobservable" and r.get("cap") == "operator-action"
+            and not DEAD_RE.search(st.get(s, ""))]
     if not hits:
         return None
-    ts = [parse(e["t"]) for _, e in hits]
-    return _item("blocked", "blocked", 1, f"{len(hits)} builder{'s' if len(hits) > 1 else ''} blocked, none re-dispatched",
-                 ", ".join(f"{s} {(e.get('st') or 'BLOCKED') if e['ty'] == 'build-done' else 'BLOCKED'}" for s, e in hits),
-                 "executor", "re-dispatch " + ", ".join(s for s, _ in hits[:3]) + " against the right repo and base_sha",
-                 min(ts), max(ts), subjects=[s for s, _ in hits], anchor="forge")
+    ts = [parse(r["t"]) for r in hits]
+    hits.sort(key=lambda r: r["t"])
+    return _item("owedop", "owedop", 1, f"{len(hits)} owed check{'s' if len(hits) > 1 else ''} only you can do",
+                 "; ".join(f"{r['s']} {r.get('crit') or ''}: {r.get('why') or ''}"[:140] for r in hits[:5]), "operator",
+                 "do or waive each (the sweeper marked them operator-action): " + ", ".join(sorted({r["s"] for r in hits})[:3]),
+                 min(ts), max(ts), subjects=sorted({r["s"] for r in hits}), anchor="town")
+
+
+def decision_requests(rows, now):
+    """NEEDS YOU (c): message-sent addressed to the operator, with no brief-answered / note-answered on that subject since."""
+    hits = []
+    for i, r in enumerate(rows):
+        if r["ty"] == "message-sent" and str(r.get("to") or "").lower() in ("operator", "you"):
+            if not any(x["ty"] in ("brief-answered", "note-answered") and x.get("s") == r.get("s") and x["t"] > r["t"] for x in rows[i + 1:]):
+                hits.append(r)
+    if not hits:
+        return None
+    ts = [parse(r["t"]) for r in hits]
+    return _item("decide", "decide", 1, f"{len(hits)} decision request{'s' if len(hits) > 1 else ''} sent to you, unanswered",
+                 "; ".join(f"{r.get('s')}: {r.get('why') or ''}"[:140] for r in hits[:4]), "operator",
+                 "answer " + ", ".join(sorted({str(r.get('s')) for r in hits})[:3]), min(ts), max(ts),
+                 subjects=[], anchor="keep")
 
 
 def churn_item(by, states, now):
@@ -429,12 +494,13 @@ def compute(rows, states, now, root=None, master=None):
     """The whole model, as JSON-able data."""
     by = _by_spec(rows)
     active, resolved = recurring(rows, states, now, root)
-    for it in (blocked_item(blocked_builders(by, states, now), now), churn_item(by, states, now), vanished_item(rows, states, now)):
+    b1, b2 = blocked_items(blocked_builders(by, states, now), now)
+    for it in (b1, b2, churn_item(by, states, now), vanished_item(rows, states, now), operator_action_owed(rows, states, now), decision_requests(rows, now)):
         if it:
             active.append(it)
     # self-check: drop an omen whose subject specs are all finished
     st = dict(states or [])
-    active = [i for i in active if not (i["subjects"] and all(_gone(st.get(s)) for s in i["subjects"]))]
+    active = [i for i in active if i["kind"] == "owedop" or not (i["subjects"] and all(_gone(st.get(s)) for s in i["subjects"]))]   # owed rows live on shipped specs
     active.sort(key=lambda i: (not i["needs_you"], -i["sev"], i["last"] or ""))
     return {"v": 2, "at": iso(now), "items": active, "resolved": resolved, "merge": merge_info(rows, by, states, master or {}),
             "needs_you": sum(1 for i in active if i["needs_you"]), "health": sum(1 for i in active if not i["needs_you"])}
