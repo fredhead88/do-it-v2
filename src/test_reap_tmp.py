@@ -812,6 +812,14 @@ EXPECTED_CRONS_ROWS = [
                 "--once >> /var/log/albert-scott/auto-deploy-run.log 2>&1",
      "path": "/opt/albert-scott/venv/bin/python", "sig": r"auto_deploy\.py\b.*--once\b",
      "owner": "deployer", "project": "albert-scott"},
+    {"name": "owed-digest", "where": "user", "schedule": "0 6 * * *",
+     "command": "{doit} cron-run owed-digest -- {doit} owed-digest >> {root}/logs/owed-digest.log 2>&1",
+     "path": "{doit}", "sig": r"\bdoit owed-digest(?=\s*>>|\s*(?:#.*)?$)",
+     "owner": "thinker", "project": "do-it-v2"},
+    {"name": "owed-digest-alert", "where": "user", "schedule": "*/30 * * * *",
+     "command": "{doit} cron-run owed-digest-alert -- {doit} owed-digest --alert >> {root}/logs/owed-digest-alert.log 2>&1",
+     "path": "{doit}", "sig": r"\bdoit owed-digest --alert(?=\s*>>|\s*(?:#.*)?$)",
+     "owner": "thinker", "project": "do-it-v2"},
 ]
 
 # ── L0440-AC20 · current cron-run commands, runtime bounds and */5 reaper cadence ────
