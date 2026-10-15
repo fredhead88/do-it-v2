@@ -223,8 +223,7 @@ assert set(CONTENT.glob("L-sweep-*.md")) != before5, "AC5: a 100-minute-old spaw
 print("sweep-owed-0388 AC5 ok")
 
 # ══════════════════════════════════════════════════════════════════════════════
-# AC6 · a recent owed-failed (6h ago) excludes a due check; the same shape at
-# 13h ago includes it
+# AC6 · a failed row stays out of the due-only sweep, at 6h and at 13h
 # ══════════════════════════════════════════════════════════════════════════════
 clear()
 write("L-spec-writer-e1.jsonl",
@@ -245,7 +244,8 @@ write("L-executor-e1.jsonl",
        "evidence": "e", "kind": "unmet"})
 _, specs6b = specs_now()
 due6b = sweep_owed.due_candidates(specs6b, NOW)
-assert any(r["spec"] == "L-spec-e1" for r in due6b), "AC6: a 13h-old owed-failed no longer excludes it"
+assert not any(r["spec"] == "L-spec-e1" for r in due6b), "AC6: a 13h-old failure stays failed"
+assert owed.checks(specs6b["L-spec-e1"]["evs"], NOW)[0]["status"] == "failed"
 print("sweep-owed-0388 AC6 ok")
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -263,7 +263,7 @@ write("L-executor-f1.jsonl",
        "capability": "droplet", "why": "no reach"})
 _, specs7 = specs_now()
 rows7 = [r for s in specs7.values() for r in owed.checks(s["evs"], NOW) if r["spec"] == "L-spec-f1"]
-assert rows7 and rows7[0]["status"] == "due", rows7
+assert rows7 and rows7[0]["status"] == "blocked", rows7
 due7 = sweep_owed.due_candidates(specs7, NOW)
 assert not any(r["spec"] == "L-spec-f1" for r in due7), \
     "AC7: a droplet-capability owed-unobservable excludes permanently, regardless of age"
@@ -277,7 +277,9 @@ write("L-spec-writer-g1.jsonl",
       {"ts": EPOCH, "type": "spec-written", "subject": "L-spec-g1", "project": "proj-a"},
       {"ts": EPOCH, "type": "owed-ac", "subject": "L-spec-g1", "criterion": "AC1",
        "wake_at": EPOCH, "line": 1})
-write("L-executor-g1.jsonl", {"ts": EPOCH, "type": "shipped", "subject": "L-spec-g1"})
+write("L-executor-g1.jsonl", {"ts": EPOCH, "type": "shipped", "subject": "L-spec-g1"},
+      {"ts": iso(hours=-1), "type": "owed-unobservable", "subject": "L-spec-g1",
+       "criterion": "AC1", "capability": "zzz", "why": "no route"})
 
 before8 = {p.name: p.stat().st_size for p in EV.glob("*.jsonl")}
 sweep_owed.run(dry_run=False, runner=FakeRunner(), now=NOW)
@@ -314,7 +316,9 @@ write("L-spec-writer-h1.jsonl",
       {"ts": EPOCH, "type": "spec-written", "subject": "L-spec-h1", "project": "proj-a"},
       {"ts": EPOCH, "type": "owed-ac", "subject": "L-spec-h1", "criterion": "A", "wake_at": EPOCH, "line": 1},
       {"ts": EPOCH, "type": "owed-ac", "subject": "L-spec-h1", "criterion": "B", "wake_at": EPOCH, "line": 2})
-write("L-executor-h1.jsonl", {"ts": EPOCH, "type": "shipped", "subject": "L-spec-h1"})
+write("L-executor-h1.jsonl", {"ts": EPOCH, "type": "shipped", "subject": "L-spec-h1"},
+      *[{"ts": iso(hours=-1), "type": "owed-unobservable", "subject": "L-spec-h1",
+         "criterion": c, "capability": "zzz", "why": "no route"} for c in ("A", "B")])
 write(sweep_owed.LEDGER_NAME,
       {"ts": iso(days=-1), "type": "escalation-blocking", "subject": "L-spec-h1", "kind": "owed-expired",
        "criteria": json.dumps(["A"]), "evidence": json.dumps([""]),
@@ -333,7 +337,9 @@ clear()
 write("L-spec-writer-i1.jsonl",
       {"ts": EPOCH, "type": "spec-written", "subject": "L-spec-i1", "project": "proj-a"},
       {"ts": EPOCH, "type": "owed-ac", "subject": "L-spec-i1", "criterion": "AC1", "wake_at": EPOCH, "line": 1})
-write("L-executor-i1.jsonl", {"ts": EPOCH, "type": "shipped", "subject": "L-spec-i1"})
+write("L-executor-i1.jsonl", {"ts": EPOCH, "type": "shipped", "subject": "L-spec-i1"},
+      {"ts": iso(hours=-1), "type": "owed-unobservable", "subject": "L-spec-i1",
+       "criterion": "AC1", "capability": "zzz", "why": "no route"})
 before11 = sweep_ledger.read_text() if sweep_ledger.exists() else ""
 lines11 = sweep_owed.run(dry_run=True, runner=FakeRunner(), now=NOW)
 after11 = sweep_ledger.read_text() if sweep_ledger.exists() else ""
@@ -433,7 +439,9 @@ write("L-spec-writer-432h.jsonl",
        "wake_at": iso(hours=-240), "line": 1})
 write("L-executor-432h.jsonl",
       {"ts": EPOCH, "type": "shipped", "subject": "L-spec-432h"},
-      {"ts": T1_8, "type": "decision", "subject": "L-spec-432h", "why": "answers, no ref"})
+      {"ts": T1_8, "type": "decision", "subject": "L-spec-432h", "why": "answers, no ref"},
+      {"ts": iso(hours=-1), "type": "owed-unobservable", "subject": "L-spec-432h",
+       "criterion": "C_before", "capability": "zzz", "why": "no route"})
 _, specs8_432 = specs_now()
 rows8_432 = [r for r in owed.checks(specs8_432["L-spec-432h"]["evs"], NOW) if r["criterion"] == "C_before"]
 assert rows8_432 and rows8_432[0]["status"] == "expired", rows8_432
@@ -509,7 +517,9 @@ write("L-spec-writer-432j.jsonl",
        "wake_at": iso(hours=-240), "line": 1})
 write("L-executor-432j.jsonl",
       {"ts": EPOCH, "type": "shipped", "subject": "L-spec-432j"},
-      {"ts": T1_11, "type": "decision", "subject": "L-spec-432j", "why": "answers, no ref"})
+      {"ts": T1_11, "type": "decision", "subject": "L-spec-432j", "why": "answers, no ref"},
+      {"ts": iso(hours=-1), "type": "owed-unobservable", "subject": "L-spec-432j",
+       "criterion": "C_before", "capability": "zzz", "why": "no route"})
 write("L-spec-writer-432k.jsonl",
       {"ts": EPOCH, "type": "spec-written", "subject": "L-spec-432k", "project": "proj-a"},
       {"ts": EPOCH, "type": "owed-ac", "subject": "L-spec-432k", "criterion": "AC1",
@@ -553,7 +563,9 @@ write("L-spec-writer-432m.jsonl",
        "wake_at": iso(hours=-1), "line": 3})
 write("L-executor-432m.jsonl",
       {"ts": EPOCH, "type": "shipped", "subject": "L-spec-432m"},
-      {"ts": T1_12, "type": "decision", "subject": "L-spec-432m", "why": "answers e_old, no ref"})
+      {"ts": T1_12, "type": "decision", "subject": "L-spec-432m", "why": "answers e_old, no ref"},
+      *[{"ts": iso(hours=-1), "type": "owed-unobservable", "subject": "L-spec-432m",
+         "criterion": c, "capability": "zzz", "why": "no route"} for c in ("C_before", "C_before2")])
 # C_before's own re-date (T2_12 > T1_12) is already expired and already
 # escalated once, at T3_12 (> T2_12), with no later decision on this spec —
 # individually UNANSWERED, and it is SPEC_A's own newest owed-expired escalation.

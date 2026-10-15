@@ -29,8 +29,8 @@ def parse(s):
 
 
 # ── AC1 · STATUSES is the pinned tuple ───────────────────────────────────────
-assert owed.STATUSES == ("waiting", "due", "met", "waived", "expired", "dropped",
-                          "unshipped"), owed.STATUSES
+assert owed.STATUSES == ("waiting", "due", "blocked", "failed", "correcting", "quarantined",
+                          "met", "waived", "expired", "dropped", "unshipped"), owed.STATUSES
 print("AC1 ok")
 
 # ── AC2 · a criterion declared well before ship: the ship-anchored interval,
@@ -80,8 +80,8 @@ rows_tie = owed.checks([ac_tie, ship_tie, met_tie], NOW)
 assert rows_tie[0]["status"] != "met", rows_tie[0]
 print("AC4 ok")
 
-# ── AC5 · two owed-failed after the governing owed-ac expires it regardless
-# of due_at; one alone does not; a later owed-met flips it back to met ──────
+# ── AC5 · failures remain failed regardless of count or due_at;
+# a later owed-met flips the row back to met ──────
 S5 = "L-spec-9005"
 ac5 = {"ts": stamp(10), "type": "owed-ac", "subject": S5, "criterion": "AC1", "wake_at": stamp(-30)}
 ship5 = {"ts": stamp(5), "type": "shipped", "subject": S5}
@@ -94,7 +94,7 @@ assert rows5a[0]["status"] not in ("expired", "met"), rows5a[0]
 assert rows5a[0]["failures"] == 1, rows5a[0]
 
 rows5b = owed.checks([ac5, ship5, fail1, fail2], NOW)
-assert rows5b[0]["status"] == "expired", rows5b[0]
+assert rows5b[0]["status"] == "failed", rows5b[0]
 assert rows5b[0]["failures"] == 2, rows5b[0]
 
 met5 = {"ts": stamp(0), "type": "owed-met", "subject": S5, "criterion": "AC1", "evidence": "m1"}
@@ -103,14 +103,14 @@ assert rows5c[0]["status"] == "met", rows5c[0]
 print("AC5 ok")
 
 # ── AC6 · a clamped interval (wake_at <= governing ts): due_at == shipped_at
-# exactly; expired past 7 days, due at 6 (exclusive boundary) ───────────────
+# exactly; both old and recent rows remain due ───────────────
 S6 = "L-spec-9006"
 same_ts6 = stamp(50)
 ac6 = {"ts": same_ts6, "type": "owed-ac", "subject": S6, "criterion": "AC1", "wake_at": same_ts6}
 ship6a = {"ts": stamp(10), "type": "shipped", "subject": S6}
 rows6a = owed.checks([ac6, ship6a], NOW)
 assert rows6a[0]["due_at"] == rows6a[0]["shipped_at"], rows6a[0]
-assert rows6a[0]["status"] == "expired", rows6a[0]
+assert rows6a[0]["status"] == "due", rows6a[0]
 
 ship6b = {"ts": stamp(6), "type": "shipped", "subject": S6}
 rows6b = owed.checks([ac6, ship6b], NOW)
@@ -118,7 +118,7 @@ assert rows6b[0]["due_at"] == rows6b[0]["shipped_at"], rows6b[0]
 assert rows6b[0]["status"] == "due", rows6b[0]
 print("AC6 ok")
 
-# ── AC7 · the clamped shape, with owed-unobservable deciding expiry ─────────
+# ── AC7 · unobservable stays blocked; a later failure becomes failed ─────────
 S7 = "L-spec-9007"
 same_ts7 = stamp(60)
 ac7 = {"ts": same_ts7, "type": "owed-ac", "subject": S7, "criterion": "AC1", "wake_at": same_ts7}
@@ -126,21 +126,21 @@ ship7a = {"ts": stamp(2), "type": "shipped", "subject": S7}
 unobs_droplet = {"ts": stamp(1), "type": "owed-unobservable", "subject": S7, "criterion": "AC1",
                  "capability": "droplet", "why": "no reach"}
 rows7a = owed.checks([ac7, ship7a, unobs_droplet], NOW)
-assert rows7a[0]["status"] == "expired", rows7a[0]
+assert rows7a[0]["status"] == "blocked", rows7a[0]
 assert rows7a[0]["last_unobservable_capability"] == "droplet", rows7a[0]
 
 unobs_elapsed = {**unobs_droplet, "capability": "elapsed"}
 rows7b = owed.checks([ac7, ship7a, unobs_elapsed], NOW)
-assert rows7b[0]["status"] == "due", rows7b[0]
+assert rows7b[0]["status"] == "blocked", rows7b[0]
 
 ship7c = {"ts": (NOW - timedelta(hours=12)).isoformat(timespec="seconds"), "type": "shipped", "subject": S7}
 rows7c = owed.checks([ac7, ship7c, unobs_droplet], NOW)
-assert rows7c[0]["status"] == "due", rows7c[0]
+assert rows7c[0]["status"] == "blocked", rows7c[0]
 
 fail7 = {"ts": stamp(0), "type": "owed-failed", "subject": S7, "criterion": "AC1",
         "evidence": "f", "kind": "unmet"}
 rows7d = owed.checks([ac7, ship7a, unobs_droplet, fail7], NOW)
-assert rows7d[0]["status"] == "due", rows7d[0]
+assert rows7d[0]["status"] == "failed", rows7d[0]
 assert rows7d[0]["last_unobservable_capability"] is None, rows7d[0]
 print("AC7 ok")
 
@@ -174,7 +174,9 @@ assert owed.checks([loose8, ship8l], NOW) == []
 print("AC8 ok")
 
 # ── extra: owed.expired() flattens status=="expired" rows across every spec ─
-specs = {S6: {"evs": [ac6, ship6a]}, S8k: {"evs": [ac8k, ship8k, killed8k]}}
+unknown6 = {"ts": stamp(1), "type": "owed-unobservable", "subject": S6,
+            "criterion": "AC1", "capability": "zzz", "why": "no route"}
+specs = {S6: {"evs": [ac6, ship6a, unknown6]}, S8k: {"evs": [ac8k, ship8k, killed8k]}}
 exp = owed.expired(specs, NOW)
 assert {r["spec"] for r in exp} == {S6}, exp
 
@@ -183,8 +185,8 @@ assert {r["spec"] for r in exp} == {S6}, exp
 # ══════════════════════════════════════════════════════════════════════════════
 
 # ── 0470-AC5 · owed.STATUSES gains "waived", inserted directly after "met" ───
-assert owed.STATUSES == ("waiting", "due", "met", "waived", "expired", "dropped",
-                          "unshipped"), owed.STATUSES
+assert owed.STATUSES == ("waiting", "due", "blocked", "failed", "correcting", "quarantined",
+                          "met", "waived", "expired", "dropped", "unshipped"), owed.STATUSES
 print("0470-AC5 ok")
 
 # ── 0470-AC6 · an owed-waived after the governing owed-ac produces a "waived"
@@ -289,3 +291,148 @@ assert len(rows10b) == 1 and rows10b[0]["declared_src"] == "f:1", rows10b
 print("8034-AC10(b) ok — no duplicate row")
 
 print("owed: all checks pass")
+
+# L-spec-1003: lifecycle, governing clock, and pure row contract.
+import ast
+from unittest.mock import patch
+
+assert owed.STATUSES == ("waiting", "due", "blocked", "failed", "correcting",
+                         "quarantined", "met", "waived", "expired", "dropped", "unshipped")
+print("owed-lifecycle AC1 ok")
+
+LIFE = datetime(2026, 10, 15, tzinfo=timezone.utc)
+
+
+def life_event(etype, hour=0, **fields):
+    return {"type": etype, "ts": (LIFE + timedelta(hours=hour)).isoformat(),
+            "subject": "L-spec-lifecycle", "criterion": "AC1", **fields}
+
+
+LIFE_AC = life_event("owed-ac", -48, wake_at=(LIFE - timedelta(hours=48)).isoformat(),
+                     project="do-it-v2", line="check", _src="declaration")
+LIFE_SHIP = life_event("shipped", -24)
+LIFE_BASE = [LIFE_AC, LIFE_SHIP]
+
+
+def life_row(extra=(), now=LIFE, base=LIFE_BASE):
+    return owed.checks(sorted([*base, *extra], key=lambda e: e["ts"]), now)[0]
+
+
+failure = life_event("owed-failed", -12, evidence="failure", kind="unmet")
+unobservable = life_event("owed-unobservable", -10, capability="repo", why="need checkout")
+quarantine = life_event("owed-quarantined", -8, reason="repeated drift", spec_sha256="digest")
+corrective = life_event("owed-corrective", -6, corrective="L-spec-fix")
+met_life = life_event("owed-met", -4, evidence="verified")
+waived_life = life_event("owed-waived", -2, reason="operator decision")
+waiting_base = [{**LIFE_AC, "wake_at": (LIFE + timedelta(hours=24)).isoformat()}, LIFE_SHIP]
+cases_life = [
+    ("waiting", waiting_base, []), ("due", LIFE_BASE, []),
+    ("blocked", LIFE_BASE, [unobservable]), ("failed", LIFE_BASE, [failure]),
+    ("correcting", LIFE_BASE, [failure, corrective]),
+    ("quarantined", LIFE_BASE, [quarantine]), ("met", LIFE_BASE, [met_life]),
+    ("waived", LIFE_BASE, [waived_life]),
+    ("expired", LIFE_BASE, [{**unobservable, "capability": "zzz"}]),
+    ("dropped", LIFE_BASE, [life_event("spec-killed", -1)]),
+    ("unshipped", [LIFE_AC], []),
+    ("failed", LIFE_BASE, [failure, quarantine]),
+    ("correcting", LIFE_BASE, [failure, corrective]),
+    ("met", LIFE_BASE, [failure, met_life]),
+    ("failed", LIFE_BASE, [failure, unobservable]),
+    ("quarantined", LIFE_BASE, [unobservable, quarantine]),
+    ("blocked", LIFE_BASE, [quarantine, {**unobservable, "ts": life_event("unused", -1)["ts"]}]),
+    ("waived", LIFE_BASE, [failure, corrective, waived_life]),
+    ("met", LIFE_BASE, [met_life, failure, waived_life]),
+]
+for expected, base_life, extra_life in cases_life:
+    assert life_row(extra_life, base=base_life)["status"] == expected, (expected, extra_life)
+print("owed-lifecycle AC2 ok")
+
+for days in (1, 8, 60):
+    row = life_row([{**unobservable, "capability": "ro-dsn"}],
+                   now=datetime.fromisoformat(unobservable["ts"]) + timedelta(days=days))
+    assert row["status"] == "blocked", row
+assert life_row([{**unobservable, "capability": "operator-action"}],
+                now=LIFE + timedelta(days=60))["status"] == "blocked"
+assert life_row([{**unobservable, "capability": "zzz"}])["status"] == "expired"
+assert life_row([{**unobservable, "capability": None}])["status"] == "expired"
+attempts = [life_event("owed-routed", -9, route="repo", epoch="one"),
+            life_event("owed-routed", -8, route="repo", epoch="two")]
+assert life_row([unobservable, *attempts])["status"] == "expired"
+assert life_row([{**unobservable, "capability": "other"}, *attempts])["status"] == "expired"
+assert life_row([{**unobservable, "capability": "operator-action"},
+                 *[{**e, "route": "operator-action"} for e in attempts]])["status"] == "blocked"
+status_source = pathlib.Path(owed.__file__).read_text().split("        if dropped:", 1)[1].split("        out.append", 1)[0]
+assert "timedelta(days=" not in status_source
+print("owed-lifecycle AC3 ok")
+
+for count in (1, 2, 3, 10):
+    failures_life = [life_event("owed-failed", -22 + i, evidence=str(i)) for i in range(count)]
+    assert life_row(failures_life, now=LIFE + timedelta(days=365))["status"] == "failed"
+    fixed = [*failures_life, corrective]
+    assert life_row(fixed)["status"] == "correcting"
+    assert life_row(fixed)["corrective"] == "L-spec-fix"
+    assert life_row([*fixed, waived_life])["status"] == "waived"
+    # Rechecks and re-dates discard old verdicts and route attempts alike.
+    for reset in (life_event("owed-ac", -3, wake_at=(LIFE + timedelta(hours=1)).isoformat()),
+                  life_event("owed-routed", -3, route="recheck")):
+        assert life_row([*fixed, reset])["status"] == ("waiting" if reset["type"] == "owed-ac" else "due")
+        for verdict, expected in ((met_life, "met"), (failure, "failed"),
+                                  (unobservable, "blocked"),
+                                  ({**unobservable, "capability": "zzz"}, "expired")):
+            assert life_row([*fixed, reset, {**verdict, "ts": life_event("unused", -1)["ts"]}])["status"] == expected
+assert life_row([failure, {**corrective, "ts": failure["ts"]}])["status"] == "failed"
+assert life_row([corrective, life_event("owed-failed", -1)])["corrective"] is None
+print("owed-lifecycle AC6 ok")
+
+row = life_row([quarantine])
+assert row["status"] == "quarantined" and row["quarantine_reason"] == "repeated drift", row
+recheck = life_event("owed-routed", -1, route="recheck")
+assert life_row([quarantine, recheck])["status"] == "due"
+assert life_row([quarantine, recheck], base=waiting_base)["status"] == "waiting"
+assert life_row([quarantine, {**unobservable, "ts": recheck["ts"]}])["status"] == "blocked"
+assert life_row([{**quarantine, "ts": LIFE_AC["ts"]}])["status"] == "due"
+print("owed-lifecycle AC7 ok")
+
+fields_life = {"spec", "criterion", "project", "declared_src", "line", "wake_at", "shipped_at",
+               "due_at", "status", "failures", "last_failed_at", "last_unobservable_at",
+               "last_unobservable_capability", "evidence", "capability", "last_route_epoch",
+               "route_attempts", "ask", "quarantine_reason", "corrective", "governing_at"}
+relabel = life_event("owed-routed", -7, route="relabel", capability="browser", epoch="ignore")
+row = life_row([failure, unobservable, *attempts, relabel, corrective])
+assert set(row) == fields_life, row
+assert row["capability"] == "browser" and row["ask"] == "need checkout", row
+assert row["last_unobservable_capability"] == "repo", row
+assert row["last_unobservable_at"] == datetime.fromisoformat(unobservable["ts"]), row
+assert row["route_attempts"] == {"repo": 2} and row["last_route_epoch"] == "two", row
+assert row["governing_at"] == datetime.fromisoformat(LIFE_AC["ts"]), row
+assert row["corrective"] == "L-spec-fix" and row["evidence"] == "failure", row
+reset_row = life_row([failure, unobservable, *attempts, relabel, corrective, recheck])
+assert reset_row["route_attempts"] == {} and reset_row["failures"] == 0, reset_row
+assert reset_row["governing_at"] == datetime.fromisoformat(recheck["ts"]), reset_row
+assert life_row([relabel, {**unobservable, "ts": recheck["ts"]}])["capability"] == "repo"
+# A recheck earlier than a re-date cannot move the governing instant backwards.
+redate = life_event("owed-ac", -0.5, wake_at=LIFE.isoformat())
+assert life_row([recheck, redate])["governing_at"] == datetime.fromisoformat(redate["ts"])
+for capability, expected in (("git", "repo"), ("browser", "browser"), ("deploy", "not-live")):
+    routed = {**LIFE_AC, "type": "criterion-routed", "actor": "grader", "to": "owed", "capability": capability}
+    assert life_row(base=[routed, LIFE_SHIP])["capability"] == expected
+    # A fresh grader route replaces capability context from before that route.
+    old_unobservable = {**unobservable, "ts": life_event("unused", -49)["ts"]}
+    assert life_row([old_unobservable], base=[routed, LIFE_SHIP])["capability"] == expected
+    assert life_row([unobservable], base=[routed, LIFE_SHIP])["capability"] == "repo"
+    assert life_row([relabel], base=[routed, LIFE_SHIP])["capability"] == "browser"
+print("owed-lifecycle AC8 ok")
+
+pure_events = [*LIFE_BASE, failure, unobservable, quarantine, corrective]
+first = owed.checks(pure_events, LIFE)
+assert owed.checks(pure_events, LIFE) == first
+with patch("builtins.open", side_effect=AssertionError("checks opened a file")):
+    assert owed.checks(pure_events, LIFE) == first
+imports = ast.parse(pathlib.Path(owed.__file__).read_text())
+project_modules = {p.stem for p in pathlib.Path(owed.__file__).parent.glob("*.py")}
+project_imports = {name.split(".")[0] for node in ast.walk(imports)
+                   for name in ([n.name for n in node.names] if isinstance(node, ast.Import)
+                                else [node.module] if isinstance(node, ast.ImportFrom) and node.module else [])
+                   if name.split(".")[0] in project_modules}
+assert project_imports == {"routing", "owed_routes"}, project_imports
+print("owed-lifecycle AC9 ok")

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""owed — one pure definition of a check, its clock, and its expiry.
+"""owed — one pure definition of a check, its clock, and its lifecycle.
 
 `checks(evs, now)` takes ONE subject's own ts-sorted event list (the same
 per-subject `evs` `fold.spec_state`/`fold.owed_due` already hold) and returns
@@ -35,8 +35,10 @@ synthetic row never overwrites it).
 from datetime import timedelta
 from datetime import datetime as _datetime
 import routing
+import owed_routes
 
-STATUSES = ("waiting", "due", "met", "waived", "expired", "dropped", "unshipped")
+STATUSES = ("waiting", "due", "blocked", "failed", "correcting", "quarantined",
+            "met", "waived", "expired", "dropped", "unshipped")
 
 
 def _ts(s, now):
@@ -71,7 +73,10 @@ def _dropped(evs, types):
 def checks(evs, now):
     """One row per (spec, criterion): `spec criterion project declared_src
     line wake_at shipped_at due_at status failures last_failed_at
-    last_unobservable_at last_unobservable_capability evidence`.
+    last_unobservable_at last_unobservable_capability evidence capability
+    last_route_epoch route_attempts ask quarantine_reason corrective governing_at`.
+    Verdicts and attempts must be strictly after the latest declaration or
+    recheck; capability and route epoch retain the latest routing context.
     `due_at`/`shipped_at` are `datetime.datetime` or `None`; `wake_at` is the
     raw declared string, echoed verbatim. A criterion-less `owed-ac` produces
     no row."""
@@ -91,19 +96,23 @@ def checks(evs, now):
         if cid in last_ac:
             continue  # an explicit owed-ac on the same criterion always wins
         last_ac[cid] = {"type": "owed-ac", "criterion": cid, "ts": row["ts"], "wake_at": row["ts"],
-                        "_src": "routing",
+                        "_src": "routing", "_capability": owed_routes.from_grader(row["capability"]),
                         "line": f"grader capability {row['capability']!r} has no grader — routed to owed"}
 
     out = []
     for c, ac in last_ac.items():
-        governing_ts = _ts(ac.get("ts"), now)
+        ac_ts = _ts(ac.get("ts"), now)
+        criterion_evs = [e for e in evs if e.get("criterion") == c]
+        rechecks = [_ts(e.get("ts"), now) for e in criterion_evs
+                    if e.get("type") == "owed-routed" and e.get("route") == "recheck"]
+        governing_ts = max([ac_ts, *rechecks])
         wake_at = ac.get("wake_at")
         if shipped_at is None or not _dated(wake_at):
             due_at = None
-        elif governing_ts > shipped_at:              # strict "after" — a re-date
+        elif ac_ts > shipped_at:              # strict "after" — a re-date
             due_at = _ts(wake_at, now)
         else:
-            due_at = shipped_at + max(timedelta(0), _ts(wake_at, now) - governing_ts)
+            due_at = shipped_at + max(timedelta(0), _ts(wake_at, now) - ac_ts)
 
         met_evs = [e for e in evs if e.get("type") == "owed-met" and e.get("criterion") == c
                    and _ts(e.get("ts"), now) > governing_ts]
@@ -126,6 +135,32 @@ def checks(evs, now):
         evidence = (met_evs[-1].get("evidence") if met
                     else failed_evs[-1].get("evidence") if failures else None)
 
+        unobservables = [e for e in criterion_evs if e.get("type") == "owed-unobservable"]
+        capability_evs = [e for e in criterion_evs if e.get("type") == "owed-unobservable"
+                          or (e.get("type") == "owed-routed" and e.get("route") == "relabel")]
+        if "_capability" in ac:
+            capability_evs = [e for e in capability_evs if _ts(e.get("ts"), now) > ac_ts]
+        capability = capability_evs[-1].get("capability") if capability_evs else ac.get("_capability")
+        ask = unobservables[-1].get("why") if unobservables else None
+        attempts = [e for e in criterion_evs if e.get("type") == "owed-routed"
+                    and e.get("route") not in ("recheck", "relabel")]
+        route_attempts = {}
+        for e in attempts:
+            if _ts(e.get("ts"), now) > governing_ts:
+                route = e.get("route")
+                route_attempts[route] = route_attempts.get(route, 0) + 1
+        last_route_epoch = attempts[-1].get("epoch") if attempts else None
+        correctives = [e for e in criterion_evs if e.get("type") == "owed-corrective"
+                       and last_failed_at is not None and _ts(e.get("ts"), now) > last_failed_at]
+        corrective = correctives[-1].get("corrective") if correctives else None
+        quarantines = [e for e in criterion_evs if e.get("type") == "owed-quarantined"
+                       and _ts(e.get("ts"), now) > governing_ts]
+        quarantine_reason = quarantines[-1].get("reason") if quarantines else None
+        quarantined = bool(quarantines) and not any(
+            _ts(e.get("ts"), now) > _ts(quarantines[-1].get("ts"), now) for e in post)
+        unobservable = bool(post) and post[-1].get("type") == "owed-unobservable"
+        route = owed_routes.route_for(capability)
+
         if dropped:
             status = "dropped"
         elif shipped_at is None:
@@ -134,13 +169,17 @@ def checks(evs, now):
             status = "met"
         elif waived_evs:
             status = "waived"
-        elif failures >= 2:
+        elif failures and correctives:
+            status = "correcting"
+        elif failures:
+            status = "failed"
+        elif quarantined:
+            status = "quarantined"
+        elif (unobservable and capability != "operator-action"
+              and (route is None or route_attempts.get(route, 0) >= owed_routes.MAX_ATTEMPTS)):
             status = "expired"
-        elif due_at is not None and (now - due_at) > timedelta(days=7):
-            status = "expired"
-        elif (due_at is not None and (now - due_at) > timedelta(days=1)
-              and last_unobservable_capability not in (None, "elapsed")):
-            status = "expired"
+        elif unobservable:
+            status = "blocked"
         elif due_at is not None and due_at <= now:
             status = "due"
         else:
@@ -153,7 +192,10 @@ def checks(evs, now):
                     "last_failed_at": last_failed_at,
                     "last_unobservable_at": last_unobservable_at,
                     "last_unobservable_capability": last_unobservable_capability,
-                    "evidence": evidence})
+                    "evidence": evidence, "capability": capability,
+                    "last_route_epoch": last_route_epoch, "route_attempts": route_attempts,
+                    "ask": ask, "quarantine_reason": quarantine_reason,
+                    "corrective": corrective, "governing_at": governing_ts})
     return out
 
 
