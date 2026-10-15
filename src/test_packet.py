@@ -1402,7 +1402,7 @@ SWEEP11 = "L-owed-sweeper-ac11"
 ROWS11 = [_row_387("L-spec-9811", "AC1"), _row_387("L-spec-9812", "AC1"), _row_387("L-spec-9813", "AC1")]
 _sweep_manifest_387(SWEEP11, ROWS11)
 m11 = packet.parse_sweep_manifest(TMP / "content" / f"{SWEEP11}.md")
-assert set(m11) == {"project", "cwd", "rows"} and len(m11["rows"]) == 3, m11
+assert set(m11) == {"project", "cwd", "rows", "kind"} and len(m11["rows"]) == 3, m11
 assert m11["rows"] == ROWS11, "AC11: rows returned verbatim, as written"
 N += 1
 
@@ -1626,3 +1626,33 @@ assert "cleared" in reviewer_md_text and "any round" in reviewer_md_text, \
 print("8034-AC11 ok")
 
 print(f"packet: {N} packets built, eight Blindness lists enforced")
+
+
+# L-spec-1004: verify resolves to the complete section, preserving fenced headings.
+assert sum(1 for _ in pathlib.Path(packet.__file__).open()) <= 1578, \
+    "sweep-unblock must keep packet.py within its routing size baseline"
+for heading1004 in ("# Verification", "## Verification", "## 8. Verification", "## 9. Verification", "## 10. vErIfIcAtIoN"):
+    section1004 = heading1004 + "\n\n```bash\n# fenced comment\n./doit test\n```\n\n"
+    body1004 = "# Spec\n## Before\ntext\n" + section1004 + "## After\nnot verification\n"
+    assert packet.criterion_block(body1004, "verify") == section1004
+assert packet.criterion_block("## Elsewhere\ntext\n", "verify") is None
+assert packet.criterion_block("## Verification\n\n## After\ntext", "verify") is None
+assert packet.criterion_block("```\n## Verification\nignored\n```\n", "verify") is None
+print("sweep-unblock AC6 Verification headings, fences, empty/absent ok")
+
+verify_sp1004 = dispatch.spec_path("L-spec-1004-verify")
+verify_sp1004.write_text("# Fixture\n## Verification\n```bash\n./doit test\n```\n")
+_sweep_manifest_387("L-sweep-1004-verify", [_row_387(verify_sp1004.stem, "verify")])
+packet1004 = build("owed-sweeper", subject="L-sweep-1004-verify")
+assert "criterion verify" in packet1004 and "./doit test" in packet1004
+manifest1004 = TMP / "content/L-sweep-1004-verify.md"
+assert packet.parse_sweep_manifest(manifest1004)["kind"] == "plain"
+manifest1004.write_text(manifest1004.read_text().replace("\n## Rows", "\nkind: plain\n\n## Rows"))
+assert packet.parse_sweep_manifest(manifest1004)["kind"] == "plain"
+manifest1004.write_text(manifest1004.read_text().replace("kind: plain", "kind: unsupported"))
+try:
+    packet.parse_sweep_manifest(manifest1004)
+    raise AssertionError("unsupported manifest kind accepted")
+except SystemExit as e:
+    assert "unsupported" in str(e)
+print("sweep-unblock AC7 fixture packet; AC13 kind compatibility/rejection ok")

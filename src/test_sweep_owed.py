@@ -10,8 +10,14 @@ files directly, never by swapping roots mid-file. Nothing here calls a real
 dispatch` call goes through an injectable `Runner` (AC3) that records argv
 and returns a canned result.
 """
-import json, os, pathlib, re, subprocess, sys, tempfile
+import hashlib, json, os, pathlib, re, subprocess, sys, tempfile
+from contextlib import ExitStack
+from unittest.mock import patch
 from datetime import datetime, timedelta, timezone
+
+HOME_ORPHANS = pathlib.Path.home() / ".do-it/state/sweep-owed-orphans.json"
+HOME_ORPHANS_BEFORE = ((HOME_ORPHANS.read_bytes(), HOME_ORPHANS.stat().st_mtime_ns)
+                       if HOME_ORPHANS.exists() else None)
 
 TMP = pathlib.Path(tempfile.mkdtemp())
 os.environ["DOIT_ROOT"] = str(TMP)
@@ -27,6 +33,14 @@ os.environ.pop("DOIT_LEDGER_FILE", None)          # AC8: the driver must not dep
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 import crons, dispatch, fold, owed, scratch, sweep_owed  # noqa: E402
 
+# Collection may have already imported these modules for another fixture root.
+ROOT_PATCHES = ExitStack()
+ROOT_PATCHES.enter_context(patch.object(fold, "PROJECT", None))
+for module in (dispatch, fold, sweep_owed.packet):
+    for attr in ("ROOT", "CONTENT", "EVENTS", "PACKETS"):
+        if hasattr(module, attr):
+            ROOT_PATCHES.enter_context(patch.object(module, attr, TMP if attr == "ROOT" else TMP / attr.lower()))
+
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 NOW = datetime.now(timezone.utc)
 EV = TMP / "events"
@@ -39,6 +53,13 @@ def iso(**kw):
 
 
 def write(name, *events):
+    for e in events:
+        if e.get("type") == "spec-written":
+            sp = dispatch.spec_path(e["subject"])
+            if not sp.exists():
+                criteria = [r["criterion"] for r in events if r.get("type") == "owed-ac"] or ["AC1"]
+                sp.write_text("## Acceptance criteria\n" + "".join(
+                    f"{c} [backend]: fixture check\n" for c in criteria))
     p = EV / name
     p.write_text("".join(json.dumps({"v": 1, "ts": NOW.isoformat(timespec="seconds"), **e}) + "\n"
                          for e in events))
@@ -102,7 +123,7 @@ runner1 = FakeRunner()
 lines1 = sweep_owed.run(dry_run=True, runner=runner1, now=NOW)
 after1 = {p.name: p.read_text() for p in EV.glob("*.jsonl")}
 after_scratch1 = set(SCRATCH_ROOT.rglob("*")) if SCRATCH_ROOT.exists() else set()
-assert len(lines1) == 1, lines1
+assert "sweep-owed: resolvable: 1 resolved, 0 unresolved" in lines1, lines1
 assert after1 == before1, "AC1: a dry-run must append nothing to any ledger file"
 assert not runner1.calls, "AC1: a dry-run never calls packet/dispatch"
 assert not list(CONTENT.glob("L-sweep-*.md")), "AC1: a dry-run allocates no manifest"
@@ -308,7 +329,8 @@ print("sweep-owed-0388 AC8 ok")
 before9 = sweep_ledger.read_text()
 sweep_owed.run(dry_run=False, runner=FakeRunner(), now=NOW)
 after9 = sweep_ledger.read_text()
-assert after9 == before9, "AC9: a second run against the same still-expired check appends nothing new"
+assert after9[len(before9):].count('"type": "sweep-run"') == 1
+assert '"escalation-blocking"' not in after9[len(before9):]
 print("sweep-owed-0388 AC9 ok")
 
 clear()
@@ -472,7 +494,7 @@ assert len(esc9_432) == 1, esc9_432
 print("answered-0432 AC9 ok")
 
 # ── AC10 · a `due` (not expired) criterion, governing owed-ac before the
-# answer, is excluded from due_candidates; an unrelated spec is not ─────────
+# answer, stays in due_candidates (SD11); so does an unrelated spec ─────────
 clear()
 T0_10, T1_10 = iso(hours=-50), iso(hours=-40)
 write("L-owed-sweeper-432i.jsonl",
@@ -496,7 +518,7 @@ _, specs10_432 = specs_now()
 rows10_432 = [r for r in owed.checks(specs10_432["L-spec-432i"]["evs"], NOW) if r["criterion"] == "C_due"]
 assert rows10_432 and rows10_432[0]["status"] == "due", rows10_432
 due10_432 = sweep_owed.due_candidates(specs10_432, NOW)
-assert not any(r["spec"] == "L-spec-432i" for r in due10_432), due10_432
+assert any(r["spec"] == "L-spec-432i" for r in due10_432), due10_432
 assert any(r["spec"] == "L-spec-432i-c" for r in due10_432), \
     "AC10: an unrelated, unanswered spec's due row is present"
 print("answered-0432 AC10 ok")
@@ -590,14 +612,14 @@ runner12a_432 = FakeRunner()
 lines12a_432 = sweep_owed.sweep_expired(specs12_432, NOW)
 assert not any("C_before2" in l for l in lines12a_432), lines12a_432
 due12a_432 = sweep_owed.due_candidates(specs12_432, NOW)
-assert not any(r["spec"] == "L-spec-432m" and r["criterion"] == "C_due" for r in due12a_432), due12a_432
+assert any(r["spec"] == "L-spec-432m" and r["criterion"] == "C_due" for r in due12a_432), due12a_432
 # a second run, same ledger plus C_before's own already-landed escalation (no
-# further writes): still no C_before2 escalation, still no C_due row
+# further writes): still no C_before2 escalation; C_due remains eligible
 _, specs12b_432 = specs_now()
 lines12b_432 = sweep_owed.sweep_expired(specs12b_432, NOW)
 assert not any("C_before2" in l for l in lines12b_432), lines12b_432
 due12b_432 = sweep_owed.due_candidates(specs12b_432, NOW)
-assert not any(r["spec"] == "L-spec-432m" and r["criterion"] == "C_due" for r in due12b_432), due12b_432
+assert any(r["spec"] == "L-spec-432m" and r["criterion"] == "C_due" for r in due12b_432), due12b_432
 answered12b_432 = sweep_owed.answered_specs(specs12b_432)
 assert "L-spec-432m" in answered12b_432, \
     "★ AC12: still answered (at t1, via e_old) after the second run"
@@ -627,3 +649,161 @@ sweep_owed.dispatch_batch("proj-dsn", [{"spec": "L-spec-432k", "criterion": "AC1
                                         "declared_src": "x", "line": 1}], _OrderRunner())
 assert _seen.get("env_at_packet") is True, f"read-only .env not provisioned before packet build: {_seen}"
 print("dsn-before-packet ok")
+
+
+# L-spec-1004: regression for one unresolved row blocking an entire batch.
+def fixture_1004(criteria=("AC1", "AC2", "AC3")):
+    clear()
+    write("L-spec-writer-1004.jsonl",
+          {"ts": EPOCH, "type": "spec-written", "subject": "L-spec-1004-fixture", "project": "proj-a"},
+          *[{"ts": EPOCH, "type": "owed-ac", "subject": "L-spec-1004-fixture",
+             "criterion": c, "wake_at": iso(hours=-2), "line": 1} for c in criteria])
+    write("L-executor-1004.jsonl",
+          {"ts": EPOCH, "type": "shipped", "subject": "L-spec-1004-fixture"})
+    sp = dispatch.spec_path("L-spec-1004-fixture")
+    sp.write_text("## Acceptance criteria\nAC1 [backend]: present\nAC3 [backend]: present\n")
+    return sp
+
+
+def records_1004(kind):
+    return [e for e in fold.read_events() if e["type"] == kind]
+
+
+sp1004 = fixture_1004()
+row1004 = {"spec": sp1004.stem, "criterion": "AC1"}
+assert sweep_owed.resolvable(row1004) == (True, "")
+assert not sweep_owed.resolvable({**row1004, "criterion": "AC2"})[0]
+assert not sweep_owed.resolvable({**row1004, "spec_path": str(CONTENT / "missing.md")})[0]
+with patch.object(pathlib.Path, "read_bytes", side_effect=PermissionError("unreadable fixture")):
+    ok, reason = sweep_owed.resolvable(row1004)
+    assert not ok and reason
+print("sweep-unblock AC1 present/absent/missing/unreadable ok")
+
+runner1004 = FakeRunner()
+lines1004 = sweep_owed.run(runner=runner1004, now=NOW)
+q1004 = records_1004("owed-quarantined")
+assert len(q1004) == 1 and q1004[0]["criterion"] == "AC2"
+assert q1004[0]["spec_sha256"] == hashlib.sha256(sp1004.read_bytes()).hexdigest()
+assert len(q1004[0]["reason"]) <= 300
+manifest1004 = next(CONTENT.glob("L-sweep-*.md"))
+assert [r["criterion"] for r in rows_of(manifest1004)] == ["AC1", "AC3"]
+assert len(runner1004.calls) == 2
+assert "kind: plain\n" in manifest1004.read_text()
+raw1004 = [json.loads(l) for l in sweep_ledger.read_text().splitlines()]
+assert all("actor" not in e for e in raw1004)
+runs1004 = records_1004("sweep-run")
+assert len(runs1004) == 1 and runs1004[0]["outcome"] == "batched"
+assert runs1004[0]["rows"] == 2 and runs1004[0]["quarantined"] == 1
+fresh1004 = fold.fold(fold.read_events())[0]
+reread1004 = {r["criterion"]: r for r in owed.checks(fresh1004[sp1004.stem]["evs"], NOW)}
+assert reread1004["AC2"]["status"] == "quarantined"
+assert reread1004["AC2"]["quarantine_reason"] == q1004[0]["reason"]
+print("sweep-unblock AC2 AC11 store round trip; AC10 batched; AC13 writer ok")
+
+with patch.object(sweep_owed, "resolvable", wraps=sweep_owed.resolvable) as resolve1004:
+    sweep_owed.run(runner=FakeRunner(), now=NOW)
+    assert all(c.args[0]["criterion"] != "AC2" for c in resolve1004.call_args_list)
+assert len(records_1004("owed-quarantined")) == 1
+sp1004.write_text(sp1004.read_text() + "\nchanged but AC2 still absent\n")
+sweep_owed.run(runner=FakeRunner(), now=NOW)
+assert len(records_1004("owed-quarantined")) == 2
+sp1004.write_text(sp1004.read_text() + "AC2 [backend]: repaired\n")
+with patch.object(dispatch, "emit", wraps=dispatch.emit) as emit1004:
+    emit1004.side_effect = lambda dst, base, type_, **kw: (
+        "fixture refusal" if type_ == "owed-routed" else emit1004._mock_wraps(dst, base, type_, **kw))
+    refused1004 = sweep_owed.run(runner=FakeRunner(), now=NOW)
+assert any("fixture refusal" in line for line in refused1004)
+assert not records_1004("owed-routed")
+before_recheck1004 = {p.name: p.read_bytes() for p in EV.iterdir()}
+sweep_owed.run(dry_run=True, runner=FakeRunner(), now=NOW)
+assert before_recheck1004 == {p.name: p.read_bytes() for p in EV.iterdir()}
+sweep_owed.run(runner=FakeRunner(), now=NOW)
+assert len(records_1004("owed-routed")) == 1
+fresh1004 = fold.fold(fold.read_events())[0]
+assert next(r for r in owed.checks(fresh1004[sp1004.stem]["evs"], NOW)
+            if r["criterion"] == "AC2")["status"] in ("due", "waiting")
+print("sweep-unblock AC3 dedupe/hash change; AC4 recheck/refusal ok")
+
+fixture_1004(("AC2",))
+solo1004 = sweep_owed.run(runner=FakeRunner(), now=NOW)
+assert len(records_1004("owed-quarantined")) == 1
+assert any("nothing" in line for line in solo1004)
+assert records_1004("sweep-run")[0]["outcome"] == "nothing-due"
+sweep_owed.run(runner=FakeRunner(), now=NOW)
+assert len(records_1004("owed-quarantined")) == 1
+print("sweep-unblock AC2 single row; AC10 nothing-due ok")
+
+state1004 = TMP / "state"
+state1004.mkdir(exist_ok=True)
+legacy1004 = state1004 / "sweep-owed-orphans.json"
+retired1004 = state1004 / "sweep-owed-orphans.retired.json"
+sp1004 = fixture_1004()
+legacy1004.write_text(json.dumps([f"{sp1004.stem}/AC2", f"{sp1004.stem}/AC1", "L-spec-no-events/AC1"]))
+before1004 = {p.name: p.read_bytes() for p in EV.iterdir()}
+state_before1004 = {p.name: p.read_bytes() for p in state1004.iterdir()}
+dry1004 = sweep_owed.run(dry_run=True, runner=FakeRunner(), now=NOW)
+assert "sweep-owed: resolvable: 2 resolved, 1 unresolved" in dry1004
+assert sum("DRY RUN would quarantine" in line for line in dry1004) == 1
+assert not any("AC2" in line for line in dry1004 if "would batch" in line)
+assert before1004 == {p.name: p.read_bytes() for p in EV.iterdir()}
+assert state_before1004 == {p.name: p.read_bytes() for p in state1004.iterdir()}
+assert not retired1004.exists()
+with patch.object(sweep_owed, "resolvable", wraps=sweep_owed.resolvable) as resolve1004:
+    sweep_owed.run(runner=FakeRunner(), now=NOW)
+    keys1004 = [(c.args[0]["spec"], c.args[0]["criterion"]) for c in resolve1004.call_args_list]
+    assert keys1004.count((sp1004.stem, "AC2")) == 1
+assert not legacy1004.exists() and retired1004.exists()
+assert len(records_1004("owed-quarantined")) == 1
+print("sweep-unblock AC5 root isolation/retirement; AC8 counts; AC15 byte-identical dry run ok")
+
+fixture_1004(("AC1",))
+for fail1004 in (0, 1):
+    sweep_owed.run(runner=FakeRunner(fail_at=fail1004), now=NOW)
+    assert records_1004("sweep-run")[-1]["outcome"] == "failed"
+    assert records_1004("sweep-run")[-1]["reason"]
+write("L-sweep-1004-open.jsonl", {"type": "spawn-started", "subject": "L-sweep-open",
+      "role": "owed-sweeper", "spawn": "L-owed-sweeper-open"})
+sweep_owed.run(runner=FakeRunner(), now=NOW)
+assert records_1004("sweep-run")[-1]["outcome"] == "open"
+assert len(records_1004("sweep-run")) == 3
+print("sweep-unblock AC10 packet/dispatch failure and open ok")
+
+candidates1004 = [{"spec": "a", "criterion": f"AC{i}", "project": "A", "due_at": NOW - timedelta(hours=i)}
+                  for i in range(12)]
+candidates1004 += [{"spec": "b", "criterion": "AC1", "project": "B", "due_at": NOW}]
+start1004 = {"type": "spawn-started", "role": "owed-sweeper", "project": "A", "ts": iso(hours=-3)}
+assert sweep_owed._batch_for(candidates1004, [start1004])[0] == "B"
+older1004 = {**start1004, "project": "B", "ts": iso(hours=-5)}
+assert sweep_owed._batch_for(candidates1004, [start1004, older1004])[0] == "B"
+project1004, batch1004 = sweep_owed._batch_for(candidates1004, [])
+assert project1004 == "A" and len(batch1004) == sweep_owed.MAX_BATCH
+assert [r["criterion"] for r in batch1004][:2] == ["AC11", "AC10"]
+assert sweep_owed._batch_for(candidates1004[:-1], [start1004])[0] == "A"
+print("sweep-unblock AC12 fairness, ordering and batch cap ok")
+
+fixture_1004(("AC4", "AC7"))
+write("L-sweep-1004-answer.jsonl", {
+    "ts": iso(hours=-50), "type": "escalation-blocking", "subject": "L-spec-1004-fixture",
+    "kind": "owed-expired", "criteria": json.dumps(["AC4"]), "evidence": json.dumps([""]),
+    "default": sweep_owed.EXPIRED_DEFAULT, "revert": sweep_owed.EXPIRED_REVERT, "deadline": iso(hours=22)})
+write("L-operator-1004-answer.jsonl", {"ts": iso(hours=-40), "type": "decision",
+      "subject": "L-spec-1004-fixture", "why": "answered AC4"})
+_, answer_specs1004 = specs_now()
+assert {r["criterion"] for r in sweep_owed.due_candidates(answer_specs1004, NOW)} == {"AC4", "AC7"}
+write("L-sweep-1004-expired.jsonl", {"ts": iso(hours=-1), "type": "owed-unobservable",
+      "subject": "L-spec-1004-fixture", "criterion": "AC4", "capability": "unknown", "why": "unavailable"})
+_, answer_specs1004 = specs_now()
+assert next(r for r in owed.checks(answer_specs1004["L-spec-1004-fixture"]["evs"], NOW)
+            if r["criterion"] == "AC4")["status"] == "expired"
+assert not sweep_owed.sweep_expired(answer_specs1004, NOW)
+print("sweep-unblock AC9 answered AC4 and unnamed AC7 due; expired AC4 deduped ok")
+
+clear()
+assert "sweep-owed: resolvable: 0 resolved, 0 unresolved" in sweep_owed.run(dry_run=True, now=NOW)
+if HOME_ORPHANS_BEFORE is not None:
+    assert (HOME_ORPHANS.read_bytes(), HOME_ORPHANS.stat().st_mtime_ns) == HOME_ORPHANS_BEFORE
+    print("sweep-unblock home orphans bytes/mtime unchanged")
+else:
+    assert not HOME_ORPHANS.exists()
+    print("sweep-unblock home orphans check skipped: absent")
+ROOT_PATCHES.close()
