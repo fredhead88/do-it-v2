@@ -2,6 +2,7 @@
 """tree-cleanup — reap only what is provably dead, retain the rest, say why (§4.11).
 
   tree_cleanup.py <charter> [--repo DIR] [--dry-run]
+  tree_cleanup.py --all [--dry-run]
 
 *(D33 + D76, narrowed by D88.)* Cleanup runs per charter at close, never per
 merge: on an L2-complete verdict or on `charter-retracted`. Both are terminal
@@ -112,6 +113,63 @@ def build(evs):
     return next((e for e in reversed(evs) if e.get("type") == "build-done"), None)
 
 
+def _valid_project(value):
+    return (isinstance(value, str) and bool(value) and value not in (".", "..")
+            and "/" not in value and "\x00" not in value
+            and (fold.ROOT / "repos" / value).is_dir())
+
+
+def _event_project(spec_evs):
+    """Only the spec's creation and build events can witness its project."""
+    projects = {e["project"] for e in spec_evs
+                if e.get("type") in ("spec-written", "build-done") and _valid_project(e.get("project"))}
+    if len(projects) > 1:
+        return None, "project ambiguous"
+    return next(iter(projects), None), None
+
+
+def _path_project(worktree_path):
+    if worktree_path is not None:
+        try:
+            relative = pathlib.Path(worktree_path).relative_to(fold.ROOT / "worktrees")
+        except ValueError:
+            return None
+        if len(relative.parts) == 2 and _valid_project(relative.parts[0]) and relative.parts[1] != "..":
+            return relative.parts[0]
+    return None
+
+
+def spec_project(spec_evs, charter_evs, worktree_path):
+    """SD4 revision 2: path, corroborated spec events, then charter events."""
+    own, why = _event_project(spec_evs)
+    if why:
+        return None
+    return (_path_project(worktree_path) or own
+            or next((e["project"] for e in reversed(charter_evs) if _valid_project(e.get("project"))), None))
+
+
+def _spec_worktree(spec, evs):
+    """One conventional directory only; duplicate names are undetermined."""
+    branch = (build(evs) or {}).get("branch") or spec.lower()
+    # Compare names rather than interpolating ledger data into a glob pattern.
+    paths = [p for p in (fold.ROOT / "worktrees").glob("*/*")
+             if p.name == branch and p.is_dir()]
+    return str(paths[0]) if len(paths) == 1 else None
+
+
+def _project_resolution(spec, spec_evs, charter_evs):
+    """Keep uncertainty and source disagreement out of every destructive path."""
+    path = _spec_worktree(spec, spec_evs)
+    project = spec_project(spec_evs, charter_evs, path)
+    own, why = _event_project(spec_evs)
+    path_project = _path_project(path)
+    if not why and path_project and own and path_project != own:
+        why = "project mismatch"
+    if why:
+        return None, why, path
+    return project, None if project else "project unresolved", path
+
+
 def judge(repo, spec, evs, main, wts, main_ids):
     """One spec: (branch, worktree, dead?, why-if-not). Every raised Undetermined
     lands as a retention reason — that is the whole point of the three states."""
@@ -165,17 +223,23 @@ def reap_worktrees(events, *, dry_run=False):
     `retained` rows `{spec, project, path, why}` — never destroyed silently,
     never retained silently."""
     specs, charters, _, _ = fold.fold(events)
-    groups = {}
+    groups, resolutions = {}, {}
     for sid, s in specs.items():
         if not (_shipped_event(s["evs"]) or s["state"] == "killed"):
             continue
         c = charters.get(s["charter"]) or {"evs": []}
-        project = next((e.get("project") for e in reversed(c["evs"]) if e.get("project")), None)
+        project, why, path = _project_resolution(sid, s["evs"], c["evs"])
+        resolutions[sid] = (why, path)
         groups.setdefault(project, []).append(sid)
 
     reaped, retained = [], []
     for project in sorted(groups, key=str):
-        repo = fold.ROOT / "repos" / str(project)
+        if project is None:
+            retained.extend({"spec": sid, "project": None,
+                             "path": resolutions[sid][1],
+                             "why": resolutions[sid][0]} for sid in sorted(groups[project]))
+            continue
+        repo = fold.ROOT / "repos" / project
         try:
             main_branch = git(repo, "symbolic-ref", "--short", "HEAD").stdout.strip()
             wts = worktrees(repo)
@@ -281,16 +345,14 @@ class GroupFailure(Exception):
 
 def _terminal_groups(events):
     """project -> [spec ids], for every spec whose `fold.spec_state` is one
-    of R9c's terminal states. `project` is resolved the same way `main()`
-    already resolves it for a whole charter (its own events' `project`
-    field), just per spec via that spec's own charter."""
+    of R9c's terminal states. All entry points share project precedence."""
     specs, charters, _, _ = fold.fold(events)
     groups = {}
     for sid, s in specs.items():
         if s["state"] not in TERMINAL_SPEC_STATES:
             continue
         c = charters.get(s["charter"]) or {"evs": []}
-        project = next((e.get("project") for e in reversed(c["evs"]) if e.get("project")), None)
+        project, _why, _path = _project_resolution(sid, s["evs"], c["evs"])
         groups.setdefault(project, []).append(sid)
     return specs, groups
 
@@ -319,18 +381,25 @@ def reap_merged_specs(events, *, dry_run=False):
     per spec), same shape and same actor technique `main()` already uses,
     so §4.11's "nothing destroyed silently" holds here too. Retained-only
     groups update machine-local status without a ledger event."""
+    # A conventional path may be the only project witness; resolve before removal.
+    specs, groups = _terminal_groups(events)
     wt_reaped, _wt_retained = reap_worktrees(events, dry_run=dry_run)
     wt_paths_by_project = {}
     for row in wt_reaped:
         wt_paths_by_project.setdefault(str(row["project"]), []).append(row["path"])
 
-    specs, groups = _terminal_groups(events)
     for row in wt_reaped:
         groups.setdefault(row["project"], [])
     all_reaped, failures, retained_status = [], [], []
     for project in sorted(groups, key=str):
         spec_ids = sorted(groups[project])
-        repo = fold.ROOT / "repos" / str(project)
+        if project is None:
+            branches = [(build(specs[s]["evs"]) or {}).get("branch") or s.lower() for s in spec_ids]
+            reasons = [_project_resolution(s, specs[s]["evs"], [])[1] for s in spec_ids]
+            retained_status.append({"project": None, "repo": None, "retained": branches,
+                                    "retained_reason": [f"{b}: {why}" for b, why in zip(branches, reasons)]})
+            continue
+        repo = fold.ROOT / "repos" / project
         reaped, retained, reasons = [], [], []
         try:
             main_branch = git(repo, "symbolic-ref", "--short", "HEAD").stdout.strip()
@@ -389,7 +458,9 @@ def terminal_worktrees(events):
     specs, groups = _terminal_groups(events)
     out = {}
     for project, spec_ids in groups.items():
-        repo = fold.ROOT / "repos" / str(project)
+        if project is None:
+            continue
+        repo = fold.ROOT / "repos" / project
         try:
             wts = worktrees(repo)
         except Undetermined:
@@ -405,12 +476,21 @@ def terminal_worktrees(events):
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="doit reap", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("charter", help="the charter being closed — L2-complete or retracted")
+    ap.add_argument("charter", nargs="?", help="the charter being closed — L2-complete or retracted")
+    ap.add_argument("--all", action="store_true", help="reap eligible worktrees across the whole ledger")
     ap.add_argument("--repo", default=None, help="default: $DOIT_ROOT/repos/<the charter's project>")
     ap.add_argument("--dry-run", action="store_true", help="judge and print; destroy nothing, write nothing")
     a = ap.parse_args(argv)
+    if bool(a.charter) == a.all:
+        ap.error("give either a charter or --all")
+    if a.all and a.repo:
+        ap.error("--repo requires a charter")
 
     ev = fold.read_events()
+    if a.all:
+        reaped, retained = reap_worktrees(ev, dry_run=a.dry_run)
+        print(json.dumps({"reaped": reaped, "retained": retained}, indent=1))
+        return 0
     specs, charters, _, _ = fold.fold(ev)
     c = charters.get(a.charter)
     if not c:
@@ -419,8 +499,15 @@ def main(argv=None):
         sys.exit(f"reap: {a.charter} is {c['state']}, not one of {'/'.join(CLOSED)} — "
                  f"cleanup runs per charter AT CLOSE (§4.11, D33). Nothing was touched.")
 
-    project = next((e.get("project") for e in reversed(c["evs"]) if e.get("project")), None)
-    repo = pathlib.Path(a.repo or fold.ROOT / "repos" / str(project))
+    mine = [s for s in specs.values() if s["charter"] == a.charter]
+    project = spec_project([], c["evs"], None)
+    if project is None:
+        projects = {spec_project(s["evs"], [], None) for s in mine}
+        if len(projects) == 1 and None not in projects:
+            project = next(iter(projects))
+    if not a.repo and project is None:
+        sys.exit("reap: project unresolved — nothing was touched")
+    repo = pathlib.Path(a.repo) if a.repo else fold.ROOT / "repos" / project
     if not (repo / ".git").exists() and not repo.is_dir():
         sys.exit(f"reap: no repository at {repo} — ln -s <path> {repo} is the operator's line")
     try:
