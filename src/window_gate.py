@@ -28,7 +28,7 @@ Exit codes (the Executor contract, agents/executor.md, mirrors these):
 
 Env: DOIT_WINDOW_PREDEPLOY (override the script path), DOIT_WINDOW_VERIFY_TIMEOUT_SECS.
 """
-import json, os, pathlib, re, signal, subprocess, sys, time
+import json, math, os, pathlib, re, signal, subprocess, sys, time
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
@@ -37,6 +37,8 @@ import rechain
 
 PROJECT = "albert-scott"
 PREDEPLOY = "scripts/ci/predeploy_gate.sh"
+DEFAULT_TOML_PATH = pathlib.Path(__file__).resolve().parent.parent / "look.toml"
+KILL_MARGIN_MIN = 10
 MAX_MERGES = 6
 PYTEST_CHECK = "pytest"
 DASHBOARD_CHECK = "TypeScript · Biome · Tests · File Sizes"
@@ -140,6 +142,38 @@ def build_candidate(repo, window, base, entries):
 
 
 # ── verification: ONE call into the existing deploy gate ─────────────────────
+def _positive_timeout(value):
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) and number > 0 else None
+
+
+def dispatch_timeout_min(env, toml_path=None):
+    """Resolve a positive finite budget: process env, versioned TOML, then 45."""
+    override = _positive_timeout(env.get("PREDEPLOY_GATE_DISPATCH_TIMEOUT_MIN"))
+    if override is not None:
+        return override
+    path = pathlib.Path(toml_path) if toml_path is not None else DEFAULT_TOML_PATH
+    try:
+        import tomllib
+        with open(path, "rb") as f:
+            table = tomllib.load(f).get("window_gate")
+    except (OSError, ValueError, ImportError):
+        table = None
+    configured = _positive_timeout(table.get("dispatch_timeout_min")) if isinstance(table, dict) else None
+    return configured if configured is not None else 45.0
+
+
+def verify_timeout_secs(env, toml_path=None):
+    """Keep the gate's cancellation deadline inside our process kill deadline."""
+    override = _positive_timeout(env.get("DOIT_WINDOW_VERIFY_TIMEOUT_SECS"))
+    return override if override is not None else (dispatch_timeout_min(env, toml_path) + KILL_MARGIN_MIN) * 60
+
+
 def parse_verdict(out):
     """The gate's JSON verdict line (last line that parses as an object), tolerant
     of shape: node ids from `new_failures`/`failures`, url from `run_url`/`url`."""
@@ -174,8 +208,10 @@ def verify(repo, cand, required, window):
            "PREDEPLOY_GATE_DEPLOY_SHA": cand, "PREDEPLOY_GATE_REPO_ROOT": str(repo),
            "PREDEPLOY_GATE_CI_CHECKS": "\n".join(required),
            "PREDEPLOY_GATE_REQUIRED_CHECKS": "\n".join(required)}
-    timeout = float(os.environ.get("DOIT_WINDOW_VERIFY_TIMEOUT_SECS")
-                    or (float(env.get("PREDEPLOY_GATE_DISPATCH_TIMEOUT_MIN", "45")) + 10) * 60)
+    dispatch_minutes = dispatch_timeout_min(env)
+    env["PREDEPLOY_GATE_DISPATCH_TIMEOUT_MIN"] = (str(int(dispatch_minutes)) if dispatch_minutes.is_integer()
+                                                 else str(dispatch_minutes))
+    timeout = verify_timeout_secs(env)
     pushed = git(repo, "push", "origin", f"{cand}:refs/heads/{ref}", check=False).returncode == 0
     try:
         if not pushed:

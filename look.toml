@@ -5,6 +5,9 @@
 # look.DEFAULTS; a missing, unreadable, or malformed file degrades to those
 # defaults rather than failing the pass (look.load_toml()).
 
+[window_gate]
+dispatch_timeout_min = 70
+
 [thresholds]
 tmp_high = 85
 tmp_high_clear = 75
