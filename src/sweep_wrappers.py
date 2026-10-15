@@ -25,7 +25,26 @@ import dispatch  # noqa: E402 — readonly_dsn, _parse_env (existing, src/dispat
 # The full allowlist (Plan SD6), by base command name. Order-sensitive — AC18
 # checks exact tuple equality, not membership.
 ALLOWED_DROPLET_COMMANDS = ("cat", "head", "tail", "ls", "stat", "grep", "find",
-                            "journalctl", "systemctl", "crontab", "curl")
+                            "journalctl", "systemctl", "crontab", "curl", "ps")
+
+_PS_FIELDS = ("pid", "ppid", "comm", "etime", "args")
+ENV_STATES = ("ABSENT", "PRESENT-EMPTY", "PRESENT-NONEMPTY")
+NAMED_DROPLET_READS = ("env-has",)
+_ENV_KEY_RE = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
+
+# Fixed state-only program: no path, key, or value is evaluated as code.
+_ENV_HAS_AWK = r"""
+/^[ \t]*#/ { next }
+index($0, k "=") == 1 { found = 1; value = substr($0, length(k) + 2) }
+END {
+    if (!found) { print "ABSENT"; exit }
+    first = substr(value, 1, 1)
+    last = substr(value, length(value), 1)
+    if (length(value) >= 2 && first == last && (first == "\"" || first == "'"))
+        value = substr(value, 2, length(value) - 2)
+    print (length(value) ? "PRESENT-NONEMPTY" : "PRESENT-EMPTY")
+}
+"""
 
 # The seven shell metacharacters/sequences that make any droplet-read argument
 # unsafe to hand to a remote shell, whatever command it is attached to.
@@ -158,7 +177,29 @@ def droplet_command_refusal(cmd, args):
             return "crontab: only -l is permitted"
     if cmd == "curl":
         return _curl_refusal(args)
+    if cmd == "ps":
+        if len(args) != 2 or args[0] != "-eo" or any(field not in _PS_FIELDS for field in args[1].split(",")):
+            return "ps: only -eo with a comma list of pid/ppid/comm/etime/args is permitted"
     return None
+
+
+def named_read_refusal(name: str, args: list[str]) -> str | None:
+    """Closed grammar for named reads; refuse before constructing remote argv."""
+    if name not in NAMED_DROPLET_READS:
+        return f"named read {name!r} is not allowlisted"
+    for arg in args:
+        if any(mc in arg for mc in _METACHARS) or "\n" in arg:
+            return "named read argument contains a disallowed shell metacharacter"
+    if name == "env-has" and len(args) == 1 and _ENV_KEY_RE.fullmatch(args[0]):
+        return None
+    return "env-has: exactly one uppercase key matching [A-Z][A-Z0-9_]{0,63} is required"
+
+
+def named_read_remote(name: str, args: list[str], repo: str) -> tuple[str, list[str]]:
+    """Remote argv for an admitted named read, using the configured app root."""
+    if name == "env-has":
+        return "awk", ["-v", "k=" + args[0], _ENV_HAS_AWK, repo + "/.env"]
+    raise ValueError("unknown named read")
 
 
 def quote_remote_command(cmd, args):

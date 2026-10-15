@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Checks on the sweeper's two production wrappers: AC1-AC22 of L-spec-0386.
+"""Checks on the sweeper's two production wrappers: L-spec-0386 and L-spec-1007.
 Run: python3 test_sweep_wrappers.py
 
 Every `.env`/`look.toml` this exercises is either a scratch file under
@@ -11,6 +11,7 @@ SD6 promise ("Tests stub `ssh` and `psql` on `PATH` and never touch the
 network").
 """
 import contextlib
+import json
 import os
 import pathlib
 import stat
@@ -142,7 +143,7 @@ ok(shlex.split(sweep_wrappers.quote_remote_command("grep", ["a b", "/tmp/f"]))
 
 # ── AC18: ALLOWED_DROPLET_COMMANDS ───────────────────────────────────────
 ok(sweep_wrappers.ALLOWED_DROPLET_COMMANDS == ("cat", "head", "tail", "ls", "stat", "grep", "find",
-                                                "journalctl", "systemctl", "crontab", "curl"),
+                                                "journalctl", "systemctl", "crontab", "curl", "ps"),
    f"AC18: allowlist tuple must match exactly: {sweep_wrappers.ALLOWED_DROPLET_COMMANDS}")
 
 # ── AC19: journalctl/tail follow + destructive flags ─────────────────────
@@ -333,7 +334,155 @@ with path_prepended(ssh_bin_dir):
     ok("timed out" in r.stderr, f"AC22: stderr must say timed out: {r.stderr!r}")
     ok(r.stdout == "", f"AC22: stdout must be empty: {r.stdout!r}")
 
-for root in (no_env_root, no_key_root, collide_root, distinct_root, ac11_root, ac13_root, ssh_root):
+# L-spec-1007: closed process reads and value-free environment state reads.
+def checked(cond, why):
+    ok(cond, why)
+    print(why)
+
+
+checked(sweep_wrappers._PS_FIELDS == ("pid", "ppid", "comm", "etime", "args"),
+        "1007 AC1: _PS_FIELDS tuple equality")
+for fields in (*sweep_wrappers._PS_FIELDS, "pid,etime,args", "pid,ppid,comm,etime", "pid,pid"):
+    checked(sweep_wrappers.droplet_command_refusal("ps", ["-eo", fields]) is None,
+            f"1007 AC1: admit ps {['-eo', fields]!r}")
+for args in [[], ["aux"], ["-ef"], ["e"], ["-eo", "args", "-w"],
+             *(["-eo", field] for field in ("environ", "env", "cmd", "command", "ucmd", "user", "uid")),
+             ["-eo", "args;id"], ["-eo", "pid,"], ["-p", "1"], ["-eo", "args,env"],
+             ["-eo", ""], ["-eo", ",pid"], ["-eo", "pid,,args"], ["-eo", "pid\nargs"]]:
+    checked(bool(sweep_wrappers.droplet_command_refusal("ps", args)),
+            f"1007 AC1: refuse ps {args!r}")
+
+for key in ("ADS_BRIDGE_CATALOG_MAP_CLIENTS", "WEBHOOK_SECRET", "A", "A" * 64):
+    checked(sweep_wrappers.named_read_refusal("env-has", [key]) is None,
+            f"1007 AC2: admit env-has {[key]!r}")
+for args in [[], ["a_b"], ["1A"], ["A=b"], ["A", "B"], ["A.*"], ["A;B"],
+             ["A B"], ["A" * 65], [""], ["export A"], ["A\n"], ["A\r"],
+             *(["A" + char + "B"] for char in sweep_wrappers._METACHARS)]:
+    checked(bool(sweep_wrappers.named_read_refusal("env-has", args)),
+            f"1007 AC2: refuse env-has {args!r}")
+checked(bool(sweep_wrappers.named_read_refusal("no-such-read", ["A"])),
+        "1007 AC2: refuse unknown named read")
+
+remote_cmd, remote_args = sweep_wrappers.named_read_remote("env-has", ["WEBHOOK_SECRET"], "/opt/albert-scott")
+checked((remote_cmd, remote_args) == ("awk", ["-v", "k=WEBHOOK_SECRET", sweep_wrappers._ENV_HAS_AWK,
+                                           "/opt/albert-scott/.env"]),
+        "1007 AC3: named_read_remote exact argv")
+remote = sweep_wrappers.quote_remote_command(remote_cmd, remote_args)
+checked(shlex.split(remote) == [remote_cmd, *remote_args], "1007 AC3: remote argv shlex round trip")
+write_stub(ssh_bin_dir / "ssh", """\
+    #!/usr/bin/env python3
+    import json, os, sys
+    with open(os.environ["CAPTURE_FILE"], "w") as capture:
+        json.dump(["ssh", *sys.argv[1:]], capture)
+    """)
+with path_prepended(ssh_bin_dir):
+    for call, expected_remote in [(["env-has", "WEBHOOK_SECRET"], remote),
+                                  (["ps", "-eo", "pid,etime,args"], "ps -eo pid,etime,args")]:
+        r = run_droplet_read(["albert-scott", *call], {"CAPTURE_FILE": str(ssh_capture)})
+        captured = json.loads(ssh_capture.read_text())
+        checked(r.returncode == 0 and captured == ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+                                                   "root@167.71.46.51", expected_remote],
+                f"1007 AC3: captured ssh argv {captured!r}")
+
+checked(sweep_wrappers.ALLOWED_DROPLET_COMMANDS == ("cat", "head", "tail", "ls", "stat", "grep", "find",
+                                                   "journalctl", "systemctl", "crontab", "curl", "ps"),
+        "1007 AC4: ALLOWED_DROPLET_COMMANDS exact tuple equality (only ps added)")
+checked(sweep_wrappers.NAMED_DROPLET_READS == ("env-has",), "1007 AC4: NAMED_DROPLET_READS exact tuple equality")
+checked(sweep_wrappers.ENV_STATES == ("ABSENT", "PRESENT-EMPTY", "PRESENT-NONEMPTY"),
+        "1007 AC9: ENV_STATES exact tuple equality")
+for cmd in ("cat", "head", "tail", "grep"):
+    for secret_path in ("/opt/albert-scott/.env", "/root/.ssh/id_rsa", "/etc/shadow"):
+        checked(bool(sweep_wrappers.droplet_command_refusal(cmd, [secret_path])),
+                f"1007 AC4: refuse {cmd} {secret_path}")
+for cmd, args in [("curl", ["-s", "-X", "POST", "http://127.0.0.1:8000/health"]),
+                  ("curl", ["-s", "-XPOST", "http://127.0.0.1:8000/health"]),
+                  ("find", ["/tmp", "-delete"]), ("systemctl", ["restart", "x"])]:
+    checked(bool(sweep_wrappers.droplet_command_refusal(cmd, args)), f"1007 AC4: refuse {cmd} {args!r}")
+marker = ssh_root / "1007-refused-marker"
+write_stub(ssh_bin_dir / "ssh", f"#!/bin/sh\ntouch '{marker}'\n")
+with path_prepended(ssh_bin_dir):
+    for call in (["ps", "aux"], ["env-has", "a_b"], ["rm", "-rf", "/"]):
+        r = run_droplet_read(["albert-scott", *call])
+        checked(r.returncode == 2 and bool(r.stderr.strip()) and r.stdout == "" and not marker.exists(),
+                f"1007 AC4: refused {call!r}, exit 2, stderr nonempty, ssh marker absent")
+
+for row, cmd, args, admit in [
+    ("L-spec-0305/AC13", "journalctl", ["-u", "bluedot-webhook", "--since", "1 hour ago"], True),
+    ("L-spec-0407/AC7", "curl", ["-s", "http://127.0.0.1:8000/health"], True),
+    ("L-spec-0407/AC7 L-spec-0791/AC4", "journalctl", ["-u", "bluedot-webhook"], True),
+    ("L-spec-0791/AC4", "env-has", ["WEBHOOK_SECRET"], True),
+    ("L-spec-0792/AC4", "ps", ["-eo", "pid,etime,args"], True),
+    ("L-spec-0895/AC6", "env-has", ["ADS_BRIDGE_CATALOG_MAP_CLIENTS"], True),
+    ("L-spec-0393/AC1", "python3", ["-m", "latency_report", "--window-min", "60", "--json"], False),
+    ("L-spec-0393/AC1", "bash", ["-c", "id"], False),
+]:
+    gate = sweep_wrappers.named_read_refusal if cmd in sweep_wrappers.NAMED_DROPLET_READS else sweep_wrappers.droplet_command_refusal
+    checked((gate(cmd, args) is None) == admit,
+            f"1007 AC5: {row}: {'admit' if admit else 'refuse'} {cmd} {args!r}")
+
+with path_prepended(ssh_bin_dir):
+    for key, token, status in [("MISSING_KEY", "ABSENT", 0), ("WEBHOOK_SECRET", "PRESENT-NONEMPTY", 0),
+                               ("WEBHOOK_SECRET", "", 7)]:
+        write_stub(ssh_bin_dir / "ssh", f"#!/bin/sh\nprintf '%s' '{token + chr(10) if token else ''}'\nexit {status}\n")
+        r = run_droplet_read(["albert-scott", "env-has", key])
+        expected = token + "\n" if token else ""
+        checked(r.returncode == status and r.stdout == expected and r.stderr == "",
+                f"1007 AC6: {key}: exit {status}, stdout {expected!r}, stderr empty")
+    write_stub(ssh_bin_dir / "ssh", "#!/bin/sh\nexec sleep 5\n")
+    r = run_droplet_read(["albert-scott", "env-has", "WEBHOOK_SECRET"],
+                         {"SWEEP_SUBPROCESS_TIMEOUT_SECONDS": "1"})
+    checked(r.returncode == 3 and "timed out" in r.stderr and r.stdout == "",
+            "1007 AC6: env-has timeout: exit 3, stderr timed out, stdout empty")
+
+source = DROPLET_READ.read_text()
+for symbol in ("NAMED_DROPLET_READS", "named_read_refusal", "named_read_remote"):
+    checked(symbol in source, f"1007 AC7: droplet-read source contains {symbol}")
+
+
+def deploy_env_state(contents, key):
+    """State-only transcription of deploy.sh's _assert_env_keys_gate."""
+    assignments = [line for line in contents.split("\n")
+                   if not line.lstrip(" \t").startswith("#") and line.startswith(key + "=")]
+    if not assignments:
+        return "ABSENT"
+    value = assignments[-1].split("=", 1)[1]
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+        value = value[1:-1]
+    return "PRESENT-NONEMPTY" if value else "PRESENT-EMPTY"
+
+
+fixture_root = harness.test_root("1007-env-states")
+fixture = fixture_root / "fixture.env"
+for label, contents, expected in [
+    ("unquoted nonempty", "WEBHOOK_SECRET=abc\n", "PRESENT-NONEMPTY"),
+    ("unquoted empty", "WEBHOOK_SECRET=\n", "PRESENT-EMPTY"),
+    ("double-quoted empty", 'WEBHOOK_SECRET=""\n', "PRESENT-EMPTY"),
+    ("single-quoted empty", "WEBHOOK_SECRET=''\n", "PRESENT-EMPTY"),
+    ("quoted nonempty", 'WEBHOOK_SECRET="x"\n', "PRESENT-NONEMPTY"),
+    ("last empty wins", "WEBHOOK_SECRET=abc\nWEBHOOK_SECRET=\n", "PRESENT-EMPTY"),
+    ("last nonempty wins", "WEBHOOK_SECRET=\nWEBHOOK_SECRET=abc\n", "PRESENT-NONEMPTY"),
+    ("export ignored", "export WEBHOOK_SECRET=abc\n", "ABSENT"),
+    ("indent ignored", "  WEBHOOK_SECRET=abc\n", "ABSENT"),
+    ("comment ignored", "# WEBHOOK_SECRET=abc\n", "ABSENT"),
+    ("indented comment ignored", " \t# WEBHOOK_SECRET=abc\n", "ABSENT"),
+    ("exact key only", "WEBHOOK_SECRET_X=abc\n", "ABSENT"),
+    ("absent key", "OTHER=abc\n", "ABSENT"),
+    ("empty file", "", "ABSENT"),
+    ("one quote layer only", "WEBHOOK_SECRET=\"''\"\n", "PRESENT-NONEMPTY"),
+    ("lone quote retained", 'WEBHOOK_SECRET="\n', "PRESENT-NONEMPTY"),
+    ("whitespace retained", "WEBHOOK_SECRET= \n", "PRESENT-NONEMPTY"),
+    ("CRLF retained", "WEBHOOK_SECRET=\r\n", "PRESENT-NONEMPTY"),
+    ("unterminated last line", "WEBHOOK_SECRET=abc", "PRESENT-NONEMPTY"),
+]:
+    fixture.write_bytes(contents.encode())
+    cmd, args = sweep_wrappers.named_read_remote("env-has", ["WEBHOOK_SECRET"], "/unused")
+    args[-1] = str(fixture)
+    result = subprocess.run([cmd, *args], capture_output=True, text=True)
+    checked(result.returncode == 0 and result.stderr == "" and result.stdout == expected + "\n"
+            and expected == deploy_env_state(contents, "WEBHOOK_SECRET"),
+            f"1007 AC9: {label}: {expected}, exact token-only stdout, matches deploy state")
+
+for root in (no_env_root, no_key_root, collide_root, distinct_root, ac11_root, ac13_root, ssh_root, fixture_root):
     harness.cleanup(root)
 
 print(f"sweep_wrappers: {n} checks pass")
