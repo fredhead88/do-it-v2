@@ -806,4 +806,52 @@ if HOME_ORPHANS_BEFORE is not None:
 else:
     assert not HOME_ORPHANS.exists()
     print("sweep-unblock home orphans check skipped: absent")
+# L-spec-1005 AC5/6: failure escalation is step 1b even with an open batch;
+# the production run is inert in dry-run and survives a refused append.
+clear()
+write("L-spec-writer-failures.jsonl",
+      {"ts": EPOCH, "type": "spec-written", "subject": "L-spec-9905"},
+      {"ts": EPOCH, "type": "owed-ac", "subject": "L-spec-9905", "criterion": "AC1",
+       "wake_at": iso(hours=-20)})
+write("L-executor-failures.jsonl",
+      {"ts": EPOCH, "type": "shipped", "subject": "L-spec-9905"},
+      {"ts": iso(hours=-2), "type": "owed-failed", "subject": "L-spec-9905",
+       "criterion": "AC1", "kind": "unmet", "evidence": "fixture failed"})
+write("L-dispatch-failures.jsonl", {"type": "spawn-started", "subject": "L-sweep-9905",
+                                  "role": "owed-sweeper", "spawn": "L-spawn-9905"})
+before_failures = {p.name: p.read_bytes() for p in EV.glob("*.jsonl")}
+failure_lines = sweep_owed.run(dry_run=True, now=NOW, runner=FakeRunner())
+assert "DRY RUN would escalate L-spec-9905 kind=owed-failed" in failure_lines[0]
+assert any("already open" in line for line in failure_lines)
+assert before_failures == {p.name: p.read_bytes() for p in EV.glob("*.jsonl")}
+with patch.object(dispatch, "emit", return_value="fixture refusal"):
+    failure_lines = sweep_owed.run(now=NOW, runner=FakeRunner())
+assert failure_lines[0] == "sweep-owed: escalation for L-spec-9905 refused: fixture refusal"
+assert any("already open" in line for line in failure_lines)
+# Pin the call ordering itself, including the path where batching is allowed.
+for busy in (True, False):
+    order = []
+    with patch.object(sweep_owed, "sweep_expired", side_effect=lambda *a, **kw: order.append("expired") or []), \
+         patch.object(sweep_owed.owed_failures, "escalate_failures",
+                      side_effect=lambda *a, **kw: order.append("failures") or []), \
+         patch.object(sweep_owed, "open_batch", side_effect=lambda *a: order.append("batch") or busy):
+        sweep_owed.run(dry_run=True, now=NOW, runner=FakeRunner())
+    assert order == ["expired", "failures", "batch"]
+clear()
+write("L-spec-writer-expired.jsonl",
+      {"ts": EPOCH, "type": "owed-ac", "subject": "L-spec-9905", "criterion": "AC1",
+       "wake_at": iso(hours=-20)})
+write("L-executor-expired.jsonl",
+      {"ts": EPOCH, "type": "shipped", "subject": "L-spec-9905"},
+      {"ts": iso(hours=-2), "type": "owed-unobservable", "subject": "L-spec-9905",
+       "criterion": "AC1", "capability": "unknown", "why": "unavailable"})
+_, expired_specs = specs_now()
+sweep_owed.sweep_expired(expired_specs, NOW)
+expired_event = next(e for e in fold.read_events() if e.get("kind") == "owed-expired")
+assert expired_event["default"] == (
+    "the check stays expired and listed in the daily digest; an owed-ac re-date, "
+    "an owed-waived with a reason, or a corrective puts it back")
+assert sweep_owed.EXPIRED_REVERT == "an owed-met (waive) or an Executor re-date puts a check back"
+print("L1005 AC5 AC6 ok")
+
 ROOT_PATCHES.close()

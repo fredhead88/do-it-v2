@@ -576,6 +576,7 @@ def answered(events):
     each computing (or, for escalations rendered through `open_questions`, never
     computing) its own. Strict `<`/`>` throughout (Assumptions §3): an identical
     literal `ts` never counts as later either way."""
+    from owed_failures import failure_resolved  # lazy: owed_failures imports fold
     answerers = [e for e in events if e.get("type") in ("decision", "unblocked")]
     by_ref = {e.get("ref") for e in answerers if e.get("ref")}
     out = set()
@@ -583,7 +584,7 @@ def answered(events):
         if e.get("type") not in ("question", "escalation-blocking"):
             continue
         src = e["_src"]
-        if src in by_ref:
+        if src in by_ref or failure_resolved(e, events):
             out.add(src)
             continue
         subj = e.get("subject")
@@ -683,11 +684,13 @@ def open_escalations(events):
     tick's rule verbatim (tick.py's lane filter). A resolved escalation that stays
     under NEEDS YOU while the tick has already put the subject back on the lane is
     two answers to one question, and the board is the one the operator reads."""
+    from owed_failures import failure_resolved  # lazy: owed_failures imports fold
     last = {}
     for e in events:
         if e.get("type") in ("escalation-blocking", "decision", "unblocked") and e.get("subject"):
             last[e["subject"]] = e
-    return [e for e in last.values() if e["type"] == "escalation-blocking"]
+    return [e for e in last.values() if e["type"] == "escalation-blocking"
+            and not failure_resolved(e, events)]
 
 
 # R3's shape, in one place, read by the refusal (append), by the health count
