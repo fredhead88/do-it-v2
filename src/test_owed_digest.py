@@ -25,7 +25,7 @@ import fold
 import owed
 import owed_digest as digest
 
-NOW = datetime(2026, 10, 15, 12, tzinfo=timezone.utc)
+NOW = datetime(2026, 10, 15, 6, tzinfo=timezone.utc)
 ASK = "Please approve the operator check in full."
 
 
@@ -193,6 +193,7 @@ class DigestTests(unittest.TestCase):
     def test_new_alert(self):
         evs, _ = fixture()
         blocked = [e for e in evs if e["subject"] == "L-spec-9002"]
+        blocked[-1] = dict(blocked[-1], ts=ts(1))
         self.install(blocked)
         def sender(argv):
             self.assertEqual(len(self.state()["needs_you"]), 1)
@@ -206,64 +207,93 @@ class DigestTests(unittest.TestCase):
         self.assertEqual(self.sent[0][0], str(self.root / "telegram/tg-send.sh"))
         self.assertEqual(len(self.sent[0]), 2)
         self.assertIn(ASK, self.sent[0][1])
+        self.assertIn("NEEDS YOU:", self.sent[0][1])
         self.assertLessEqual(len(self.sent[0][1]), 1000)
-        self.assertFalse((self.root / "content").exists())
-        self.assertFalse((self.events / digest.LEDGER_NAME).exists())
-        # Leave needs_you, then reopen with a newer unobservable timestamp.
-        self.install([e for e in blocked if e["type"] != "owed-unobservable"])
-        self.assertEqual(self.run_digest(alert=True), 0)
-        reopened = dict(blocked[-1], ts=ts(1))
+        self.assertTrue((self.root / "content/L-owed-digest-2026-10-15.md").exists())
+        self.assertEqual(len([e for e in fold.read_events() if e["type"] == "owed-digest"]), 1)
+        # Reopening on the same day cannot bypass the daily limit.
+        reopened = dict(blocked[-1], ts=(NOW + timedelta(minutes=15)).isoformat())
         self.install(blocked[:-1] + [reopened])
-        self.assertEqual(self.run_digest(alert=True), 0)
+        self.assertEqual(self.run_digest(alert=True, now=NOW + timedelta(minutes=30)), 0)
+        self.assertEqual(len(self.sent), 1)
+        self.assertEqual(self.run_digest(alert=True, now=NOW + timedelta(days=1)), 0)
         self.assertEqual(len(self.sent), 2)
-        print("PASS alert rewrites state; alert writes no md/event; alert new row once; alert re-opened row; only tg-send.sh")
+        self.assertIn(ASK, self.sent[1][1])
+        print("PASS daily merge; one summary per UTC day; reopened row waits until next summary")
+
+    def test_operator_age_owner_and_later_decision_filters(self):
+        all_ev = []
+        for i, (age, owner) in enumerate(((1, "operator"), (2, "operator"), (2.01, "operator"),
+                                         (1, "thinker"), (1, "operator"), (1, "operator"))):
+            spec = f"L-spec-filter{i}"
+            all_ev += [event("owed-ac", spec, 10, criterion="AC1", wake_at=ts(9)),
+                       event("shipped", spec, 9, actor="executor"),
+                       event("owed-unobservable", spec, age, actor="owed-sweeper", criterion="AC1",
+                             capability="operator-action", owner=owner, why=ASK)]
+        all_ev.append(event("decision", "L-spec-filter4", 0.5))
+        # A decision by ref can live on another subject.
+        all_ev.append(event("decision", "elsewhere", 0.5, ref="L-owed-sweeper-fixture.jsonl:6"))
+        self.install(all_ev)
+        self.assertEqual(self.run_digest(alert=True, now=NOW - timedelta(minutes=1)), 0)
+        self.assertEqual(self.sent, [])
+        self.assertEqual(self.run_digest(alert=True), 0)
+        self.assertIn("L-spec-filter0/AC1", self.sent[0][1])
+        self.assertIn("L-spec-filter1/AC1", self.sent[0][1])
+        for i in (2, 3, 4, 5):
+            self.assertNotIn(f"L-spec-filter{i}/AC1", self.sent[0][1])
+        record = json.loads((self.root / "state/owed-alerted.json").read_text())
+        self.assertEqual(len(record["rows"]), 6)
+        self.assertEqual(self.run_digest(alert=True, now=NOW + timedelta(minutes=15)), 0)
+        self.assertEqual(len(self.sent), 1)
+        print("PASS 48h boundary; owner; later decisions by subject/ref; silent backlog; 06Z limit")
 
     def test_send_failure(self):
         evs, _ = fixture()
-        self.install([e for e in evs if e["subject"] == "L-spec-9002"])
+        blocked = [e for e in evs if e["subject"] == "L-spec-9002"]
+        blocked[-1] = dict(blocked[-1], ts=ts(1))
+        self.install(blocked)
         for code, stdout in ((1, "200\n"), (0, "429\n"), (0, ""), (0, "200\n500\n")):
             self.sender = lambda argv: subprocess.CompletedProcess(argv, code, stdout, "")
             self.assertNotEqual(self.run_digest(alert=True), 0)
-            self.assertFalse((self.root / "state/owed-alerted.json").exists())
+            alerted = json.loads((self.root / "state/owed-alerted.json").read_text())
+            self.assertNotIn("sent_date", alerted)
+            self.assertEqual(alerted["rows"], [])
         self.sender = lambda argv: self.send(argv)
         self.assertEqual(self.run_digest(alert=True), 0)
         self.assertEqual(len(self.sent), 1)
-        print("PASS alert retry on send failure; alert 429 is failure")
+        print("PASS daily send retry; 429/empty/multiple HTTP codes fail without marking sent")
 
     def test_streak_alert(self):
-        self.install(sweep(["failed", "failed"]))
-        self.assertEqual(self.run_digest(alert=True), 0)
-        self.assertEqual(self.sent, [])
-        # Failed HTTP responses must leave the streak eligible for retry too.
         self.install(sweep(["failed"] * 3))
-        self.sender = lambda argv: subprocess.CompletedProcess(argv, 0, "429\n", "")
-        self.assertNotEqual(self.run_digest(alert=True), 0)
-        self.sender = lambda argv: self.send(argv)
-        for n in range(3, 7):
+        self.assertEqual(self.run_digest(alert=True, now=NOW + timedelta(hours=1)), 0)
+        self.assertEqual(self.sent, [])
+        self.assertEqual(self.run_digest(alert=True), 0)
+        self.assertEqual(len(self.sent), 1)
+        self.assertIn("Daily owed summary", self.sent[0][1])
+        self.assertIn("SYSTEM HEALTH:", self.sent[0][1])
+        for n in range(4, 7):
             self.install(sweep(["failed"] * n))
             self.assertEqual(self.run_digest(alert=True), 0)
         self.assertEqual(len(self.sent), 1)
-        self.assertIn("3", self.sent[0][1])
-        self.assertIn("dispatch refused", self.sent[0][1])
-        self.install(sweep(["failed"] * 6 + ["open"] + ["failed"] * 3))
-        self.assertEqual(self.run_digest(alert=True), 0)
+        self.assertEqual(self.run_digest(alert=True, now=NOW + timedelta(days=1)), 0)
         self.assertEqual(len(self.sent), 2)
-        print("PASS alert streak 3; alert streak 2 silent; alert streak retry")
+        print("PASS sweep failures only appear in one daily summary")
 
     def test_health_and_empty(self):
         evs, expected = fixture()
         self.install([e for e in evs if expected[e["subject"]] != "blocked"])
         self.assertEqual(self.run_digest(alert=True), 0)
-        self.assertEqual(self.sent, [])
+        self.assertEqual(len(self.sent), 1)
+        self.assertNotIn("NEEDS YOU:", self.sent[0][1])
         self.assertEqual(digest.build([], NOW)["counts"]["sweep"]["runs_24h"], 0)
         with patch.object(fold, "EVENTS", self.root / "empty-owed-ledger"):
             fold.EVENTS.mkdir()
-            empty_file = fold.EVENTS / "L-operator-fixture.jsonl"
-            empty_file.write_text(json.dumps(event("decision", text="no owed rows")) + "\n")
+            (fold.EVENTS / "L-operator-fixture.jsonl").write_text(
+                json.dumps(event("decision", text="no owed rows")) + "\n")
             self.assertEqual(self.run_digest(alert=True), 0)
             self.assertEqual(self.state()["needs_you"], [])
-            self.assertEqual(self.sent, [])
-        print("PASS alert health silent; empty ledger silent")
+            self.assertEqual(len(self.sent), 1)
+        print("PASS health and empty ledger never generate extra messages")
 
     def test_fail_closed(self):
         digest.write_state({"old": True})
@@ -307,27 +337,27 @@ class DigestTests(unittest.TestCase):
 
     def test_large_alert(self):
         evs, _ = fixture()
-        self.install(evs)
         long_ask = "Please review this operator request. " * 8
         for e in evs:
             if e["type"] == "owed-unobservable":
-                e["why"] = long_ask
+                e.update(why=long_ask, ts=ts(0.1))
         self.install(evs)
-        all_keys = set()
         for _ in range(10):
-            if len(all_keys) == 10:
-                break
             self.assertEqual(self.run_digest(alert=True), 0)
-            record = json.loads((self.root / "state/owed-alerted.json").read_text())
-            for key in set(record["rows"]) - all_keys:
-                spec, criterion, _since = key.split("/", 2)
-                self.assertIn(f"{spec}/{criterion}: {long_ask.strip()}", self.sent[-1][1])
-            all_keys = set(record["rows"])
-            self.assertLessEqual(len(self.sent[-1][1]), 1000)
-        self.assertEqual(len(all_keys), 10)
-        self.assertGreater(len(self.sent), 1)
-        self.assertIn("more new rows await the next pass (message limit)", self.sent[0][1])
-        print("PASS capped alerts report deferred row count and retry remaining rows")
+        self.assertEqual(len(self.sent), 1)
+        self.assertLessEqual(len(self.sent[0][1]), 1000)
+        self.assertIn("more operator rows in the daily digest", self.sent[0][1])
+        record = json.loads((self.root / "state/owed-alerted.json").read_text())
+        self.assertGreater(len(record["rows"]), 0)
+        self.assertLess(len(record["rows"]), 10)
+        for key in record["rows"]:
+            spec, criterion, _since = key.split("/", 2)
+            self.assertIn(f"{spec}/{criterion}:", self.sent[0][1])
+        self.assertEqual(self.run_digest(alert=True, now=NOW + timedelta(days=3)), 0)
+        record = json.loads((self.root / "state/owed-alerted.json").read_text())
+        self.assertEqual(len(record["rows"]), 10)
+        self.assertNotIn("NEEDS YOU:", self.sent[-1][1])
+        print("PASS bounded daily merge; deferred count; expired backlog silently retired")
 
     def test_security(self):
         row = {"spec": "L-spec-9001", "criterion": "verify", "since": ts(),
@@ -344,20 +374,19 @@ class DigestTests(unittest.TestCase):
     def test_cron_and_dispatch(self):
         rows = crons.rows()
         jobs = {r["name"]: r for r in rows}
-        for name, schedule, suffix in (("owed-digest", "0 6 * * *", ""),
-                                        ("owed-digest-alert", "*/30 * * * *", " --alert")):
-            row = jobs[name]
-            self.assertEqual(row["schedule"], schedule)
-            self.assertEqual((row["where"], row["owner"], row["project"]), ("user", "thinker", "do-it-v2"))
-            self.assertIn(f"cron-run {name} -- ", row["command"])
-            self.assertIn(f"owed-digest{suffix} >>", row["command"])
-            for other in rows:
-                self.assertEqual(bool(re.search(row["sig"], crons.print_line(other["name"]))), other["name"] == name)
+        self.assertNotIn("owed-digest-alert", jobs)
+        row = jobs["owed-digest"]
+        self.assertEqual(row["schedule"], "0 6 * * *")
+        self.assertEqual((row["where"], row["owner"], row["project"]), ("user", "thinker", "do-it-v2"))
+        self.assertIn("cron-run owed-digest -- ", row["command"])
+        self.assertIn("owed-digest --alert >>", row["command"])
+        for other in rows:
+            self.assertEqual(bool(re.search(row["sig"], crons.print_line(other["name"]))), other["name"] == "owed-digest")
         doit = pathlib.Path(__file__).resolve().parent.parent / "doit"
         self.assertIn('owed-digest) shift; exec python3 "$SRC/owed_digest.py" "$@" ;;', doit.read_text())
         self.assertIn("doit owed-digest", subprocess.check_output([str(doit), "help"], text=True))
         self.assertEqual(subprocess.run([str(doit), "owed-digest", "--dry-run"], capture_output=True).returncode, 0)
-        print("PASS cron rows; doit dispatch line")
+        print("PASS single 06Z cron row; doit dispatch line")
 
 
 if __name__ == "__main__":

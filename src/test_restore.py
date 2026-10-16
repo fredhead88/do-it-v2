@@ -410,6 +410,38 @@ check(bool(diff1042) and any("AC1042_CHANGED" in row for row in diff1042),
 check(count1042 >= 20, f"L-spec-1042 AC3: permutation count {count1042}")
 print(f"L-spec-1042 AC3: {count1042} shuffled layouts give []; reversed gives []; negative names criterion")
 
+# R4: make tied rows visibly different. Earlier source-only permutations
+# rendered four identical lines, which cannot catch an unstable board order.
+# Synthetic views preserve duplicate declarations that owed.checks normally
+# collapses within one spec; all first three sort fields are EXACTLY equal.
+views_r4 = []
+for suffix_r4, post_r4 in (("z", None), ("a", "owed-unobservable"), ("m", "owed-failed"),
+                           ("b", "owed-quarantined")):
+    source_r4 = f"L-spec-writer-r4{suffix_r4}.jsonl:1"
+    evs_r4 = [dict(owed1042[0], _src=source_r4, actor="spec-writer"),
+              dict(type="shipped", subject="L-spec-1042", ts=ts1042, actor="executor")]
+    if post_r4:
+        evs_r4.append(dict(type=post_r4, subject="L-spec-1042", criterion="AC1", ts=due1042,
+                           actor="sweep" if post_r4 == "owed-quarantined" else "owed-sweeper",
+                           capability="operator-action", why="operator act",
+                           reason="fixture quarantine", evidence="fixture failure"))
+    state_r4 = fold.fold(evs_r4)[0]["L-spec-1042"]
+    views_r4.append((source_r4, state_r4))
+blocks_r4 = set()
+for order_r4 in permutations(views_r4):
+    specs_r4 = dict(order_r4)
+    rows_r4 = fold.owed_due(specs_r4)
+    check(len(rows_r4) == 4 and len({(r["due_at"], r["spec"], r["criterion"]) for r in rows_r4}) == 1,
+          "R4: exact due/spec/criterion tie survives the fixture")
+    check([r["src"] for r in rows_r4] == sorted(specs_r4), "R4: source is the final deterministic key")
+    board_r4 = fold.render([], specs_r4, {}, [], {})
+    blocks_r4.add(board_r4.split("## OWED DUE (", 1)[1].split("\n## ", 1)[0])
+check(len(blocks_r4) == 1, "R4: 24 permutations render one identical block with visibly different rows")
+block_r4 = blocks_r4.pop()
+check(block_r4.index(" · blocked") < block_r4.index(" · quarantined") < block_r4.index(" · failed"),
+      "R4: rendered status order witnesses the declaration-source tie-break")
+print("R4: 24 exact-tie permutations with distinct statuses render identically")
+
 # ══ §5 · the operator's real ledger is never touched by a fixture-root test ═
 after_sizes = ({p: p.stat().st_size for p in REAL_LEDGER.glob("*.jsonl")}
               if REAL_LEDGER.is_dir() else {})

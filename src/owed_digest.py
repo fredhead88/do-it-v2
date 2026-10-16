@@ -70,7 +70,14 @@ def build(all_ev, now):
                 cause = capability or "unknown"
                 blocked[cause] = blocked.get(cause, 0) + 1
                 if capability == "operator-action":
-                    needs.append(dict(item, ask=_text(row["ask"])))
+                    request = next((e for e in reversed(evs) if e.get("type") == "owed-unobservable"
+                                    and e.get("criterion") == row["criterion"]), {})
+                    decided = any(e.get("type") == "decision" and _time(since) < _time(e["ts"]) <= now
+                                  and (e.get("ref") in (request.get("_src"), row["declared_src"])
+                                       if e.get("ref") else e.get("subject") == row["spec"]
+                                       and e.get("criterion") in (None, row["criterion"])) for e in all_ev)
+                    needs.append(dict(item, ask=_text(row["ask"]),
+                                      owner=request.get("owner") or "operator", decided=decided))
             if status == "expired" and capability != "operator-action":
                 m1["terminal_unobservable"] += 1
             if status == "quarantined" and row["criterion"] == "verify":
@@ -163,33 +170,35 @@ def _alerted():
     return obj
 
 
+def _row_key(row):
+    return f"{row['spec']}/{row['criterion']}/{row['since']}"
+
+
+def _actionable(row, now):
+    return (row.get("owner", "operator") == "operator" and not row.get("decided")
+            and timedelta(0) <= now - _time(row["since"]) <= timedelta(hours=48))
+
+
 def _alerts(obj, alerted):
-    fresh = [r for r in obj["needs_you"] if f"{r['spec']}/{r['criterion']}/{r['since']}" not in alerted["rows"]]
-    messages = []
-    if fresh:
-        entries = [f"{_text(r['spec'])}/{_text(r['criterion'])}: {_text(r['ask'])}" for r in fresh]
-        # The cap may leave rows for the next pass; record only rows actually shown.
-        text, keys = "NEEDS YOU", []
-        for row, entry in zip(fresh, entries):
-            if len(text) + 1 + len(entry) > 1000:
-                break
-            text += "\n" + entry
-            keys.append(f"{row['spec']}/{row['criterion']}/{row['since']}")
-        remaining = len(fresh) - len(keys)
-        if remaining:
-            suffix = f"\n{remaining} more new rows await the next pass (message limit)."
-            while keys and len(text) + len(suffix) > 1000:
-                text = text.rsplit("\n", 1)[0]
-                keys.pop()
-                remaining += 1
-                suffix = f"\n{remaining} more new rows await the next pass (message limit)."
-            text += suffix
-        messages.append((text, "rows", keys))
-    streak = next((r for r in obj["health"] if r["kind"] == "sweep-failing"), None)
-    if streak and streak["count"] >= 3 and streak["since"] not in alerted["streaks"]:
-        text = f"SYSTEM HEALTH: {streak['count']} consecutive failed sweep runs: {_text(streak['reason'])}"
-        messages.append((text[:1000], "streaks", [streak["since"]]))
-    return messages
+    """One merged summary in the 06Z hour; retries share the same daily key."""
+    now = _time(obj["at"])
+    if now.hour != 6 or alerted.get("sent_date") == now.date().isoformat():
+        return []
+    fresh = [r for r in obj["needs_you"] if _actionable(r, now) and _row_key(r) not in alerted["rows"]]
+    counts = ", ".join(f"{k}={v}" for k, v in obj["counts"]["by_status"].items() if v) or "none"
+    text = f"Daily owed summary — {now.date().isoformat()}\nCounts: {counts}"
+    keys = []
+    for row in sorted(fresh, key=lambda r: (r["spec"], r["criterion"], r["since"])):
+        entry = f"\nNEEDS YOU: {_text(row['spec'])}/{_text(row['criterion'])}: {_text(row['ask'])}"
+        if len(text) + len(entry) > 900:  # reserve room for the omitted count
+            break
+        text += entry
+        keys.append(_row_key(row))
+    if len(keys) < len(fresh):
+        text += f"\n{len(fresh) - len(keys)} more operator rows in the daily digest."
+    if obj["health"]:
+        text += f"\nSYSTEM HEALTH: {len(obj['health'])} rows in the daily digest."
+    return [(text[:1000], "rows", keys)]
 
 
 def run(*, alert=False, now=None, sender=None, dry_run=False):
@@ -207,31 +216,34 @@ def run(*, alert=False, now=None, sender=None, dry_run=False):
         # Daily and alert invocations share dedup state: serialize their writes.
         with (state_dir / "owed-digest.lock").open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            if alert:
-                alerted = _alerted()
-                messages = _alerts(obj, alerted)
-                write_state(obj)  # The realm can read this before any message is sent.
-                for text, field, keys in messages:
-                    argv = [str(fold.ROOT / "telegram/tg-send.sh"), text]
-                    result = sender(argv) if sender else subprocess.run(argv, capture_output=True, text=True)
-                    lines = (result.stdout or "").splitlines()
-                    if result.returncode != 0 or not lines or lines[-1] != "200":
-                        raise OSError("owed digest Telegram send failed")
-                    alerted[field].extend(keys)
-                    _write_json(state_dir / "owed-alerted.json", alerted)
-            else:
-                date = clock.date().isoformat()
-                path = fold.ROOT / "content" / f"L-owed-digest-{date}.md"
-                # Fresh read under the lock prevents concurrent daily duplicate events.
-                current = _read_ledger()
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(render_md(obj))
-                write_state(obj)
-                if not any(e.get("type") == "owed-digest" and e.get("path") == str(path) for e in current):
-                    refusal = dispatch.emit(fold.EVENTS / LEDGER_NAME, {}, "owed-digest",
-                                            path=str(path), counts=obj["counts"])
-                    if refusal:
-                        raise ValueError(refusal)
+            obj = build(_read_ledger(), clock)
+            alerted = _alerted()
+            # Historical, answered and non-operator backlog is retired without
+            # sending it. Recent operator rows remain pending until shown.
+            silent = {_row_key(r) for r in obj["needs_you"] if not _actionable(r, clock)}
+            alerted["rows"] = sorted(set(alerted["rows"]) | silent)
+            messages = _alerts(obj, alerted) if alert else []
+            date = clock.date().isoformat()
+            path = fold.ROOT / "content" / f"L-owed-digest-{date}.md"
+            current = _read_ledger()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(render_md(obj))
+            write_state(obj)
+            if not any(e.get("type") == "owed-digest" and e.get("path") == str(path) for e in current):
+                refusal = dispatch.emit(fold.EVENTS / LEDGER_NAME, {}, "owed-digest", path=str(path), counts=obj["counts"])
+                if refusal:
+                    raise ValueError(refusal)
+            _write_json(state_dir / "owed-alerted.json", alerted)
+            for text, field, keys in messages:
+                argv = [str(fold.ROOT / "telegram/tg-send.sh"), text]
+                result = sender(argv) if sender else subprocess.run(
+                    argv, capture_output=True, text=True, env={**os.environ, "TG_SENDER": "owed-digest"})
+                lines = (result.stdout or "").splitlines()
+                if result.returncode != 0 or not lines or lines[-1] != "200":
+                    raise OSError("owed digest Telegram send failed")
+                alerted[field] = sorted(set(alerted[field]) | set(keys))
+                alerted["sent_date"] = date
+                _write_json(state_dir / "owed-alerted.json", alerted)
         return 0
     except Exception as exc:
         print(f"owed-digest: {type(exc).__name__}: {_text(exc)}", file=sys.stderr)
