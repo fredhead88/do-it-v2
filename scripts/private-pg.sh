@@ -48,9 +48,17 @@ if [ "${2:-}" = loopback ]; then
   echo 'admin cluster could not bind after 5 port attempts' >&2
   exit 1
 fi
-PORT=$(( 20000 + RANDOM % 20000 ))
 [ -f "$D/data/PG_VERSION" ] || "$B/initdb" -D "$D/data" -U albert --auth=trust -E UTF8 >/dev/null
-"$B/pg_ctl" -w -D "$D/data" -o "-c listen_addresses= -c unix_socket_directories=$D -c port=$PORT" -l "$D/pg.log" start >/dev/null
-"$B/createdb" -h "$D" -p $PORT -U albert scratch
+if "$B/pg_ctl" -D "$D/data" status >/dev/null 2>&1; then
+  PORT=$(sed -n '4p' "$D/data/postmaster.pid")
+else
+  PORT=$(cat "$D/port" 2>/dev/null || echo $(( 20000 + RANDOM % 20000 )))
+  "$B/pg_ctl" -w -D "$D/data" -o "-c listen_addresses= -c unix_socket_directories=$D -c port=$PORT" -l "$D/pg.log" start >/dev/null
+fi
+printf '%s\n' "$PORT" > "$D/port"
+SCRATCH_EXISTS=$("$B/psql" -h "$D" -p "$PORT" -U albert -d postgres -tAc "select count(*) from pg_database where datname='scratch'")
+if [ "$SCRATCH_EXISTS" = 0 ]; then
+  "$B/createdb" -h "$D" -p "$PORT" -U albert scratch
+fi
 DSN="postgresql://albert@/scratch?host=$D&port=$PORT"
 echo "export SUPABASE_DB_URL='$DSN' DATABASE_URL='$DSN' PGHOST='$D' PGPORT=$PORT PGUSER=albert PGDATABASE=scratch"

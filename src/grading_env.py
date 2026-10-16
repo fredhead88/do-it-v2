@@ -297,6 +297,8 @@ def _prove_db(view, *, admin=False, avoid_port=None):
     script = DOIT_SRC / "scripts" / "private-pg.sh"
     prefix = "admin cluster: " if admin else ""
     if not script.is_file():
+        if admin:
+            _stop_cluster(view, "pg-admin")
         return False, f"{prefix}missing {script}", None
     argv = ["/bin/bash", str(script), str(pathlib.Path(view) / ("pg-admin" if admin else "pg"))]
     if admin:
@@ -550,11 +552,11 @@ def preflight(role, subject, view, project, *, repo, mcp_config=None, owed=froze
         ok, reason, dsn = _prove_db(view)
         if not ok:
             reasons["db"] = reason
-        elif row.get("admin_env"):
-            first_port = (urllib.parse.parse_qs(urllib.parse.urlparse(dsn).query).get("port") or [None])[0]
-            ok, reason, admin_dsn = _prove_db(view, admin=True, avoid_port=first_port)
-            if not ok:
-                reasons["db"] = reason
+    if role == "grader" and row.get("admin_env") and "db" not in reasons:
+        first_port = (urllib.parse.parse_qs(urllib.parse.urlparse(dsn or "").query).get("port") or [None])[0]
+        ok, reason, admin_dsn = _prove_db(view, admin=True, avoid_port=first_port)
+        if not ok:
+            reasons["db"] = reason
     if "env-file" in caps:
         _write_env_file(tree, row, None if "db" in reasons else dsn)
     # A project with no db_setup row in grading.toml has no schema to migrate,
@@ -628,6 +630,17 @@ def sandbox_binds(view, project):
         vpath = str(_project_checkout(project) / venv)
         binds.append((vpath, vpath))
     return binds
+
+
+def dsn_role(view):
+    """Describe the private endpoints actually provisioned in this view."""
+    try:
+        state = json.loads((pathlib.Path(view) / ".grading_state.json").read_text())
+    except (OSError, ValueError):
+        return "none"
+    if not isinstance(state, dict):
+        return "none"
+    return "private-admin" if state.get("admin_dsn") else "private" if state.get("dsn") else "none"
 
 
 def pane_env(view):

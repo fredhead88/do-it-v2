@@ -1248,8 +1248,8 @@ def _main(a):
     if builder:
         dsn_role = provision_worktree_env(cwd, ROOT / "repos" / a.project) if a.project else "absent"
     elif a.role == "grader":
-        # L-spec-0481/R12.6/AC19: a grader receives NO production DSN of any kind (SD-R12-3b) — `provision_worktree_env` is never called for it. `private` when `db` was proven into its own view above, `none` otherwise (Assumption 3); the grader on claude-p/codex (no `g_required` computed this round — Assumptions §1, see the card) is `none` too.
-        dsn_role = "private" if grader_seat and "db" in g_required else "none"
+        # A grader's stamp reflects its proven view, including an admin-only cluster; backends with no view carry none.
+        dsn_role = grading_env.dsn_role(grading_view) if grader_seat else "none"
     elif a.role == "owed-sweeper":
         # L-spec-9004 OC1: the sweeper's own private, per-sweep `cwd` (never the shared checkout) gets a read-only DSN copy through the sibling, narrower function above — never provision_worktree_env, whose git-ignore gate cannot apply to a non-git scratch directory.
         dsn_role = provision_sweep_env(cwd, ROOT / "repos" / a.project) if a.project else "absent"
