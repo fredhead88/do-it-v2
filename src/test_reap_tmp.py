@@ -820,6 +820,10 @@ EXPECTED_CRONS_ROWS = [
      "command": "{doit} cron-run owed-digest-alert -- {doit} owed-digest --alert >> {root}/logs/owed-digest-alert.log 2>&1",
      "path": "{doit}", "sig": r"\bdoit owed-digest --alert(?=\s*>>|\s*(?:#.*)?$)",
      "owner": "thinker", "project": "do-it-v2"},
+    {"name": "portal-latency-daily", "where": "cron.d", "schedule": "30 6 * * *",
+     "command": "albert {doit} cron-run portal-latency-daily -- /bin/bash /opt/albert-scott/scripts/deploy/portal_check_daily_wrapper.sh",
+     "path": "/opt/albert-scott/scripts/deploy/portal_check_daily_wrapper.sh",
+     "sig": r"portal_check_daily_wrapper\.sh\b", "owner": "albert-scott", "project": "albert-scott"},
 ]
 
 # ── L0440-AC20 · current cron-run commands, runtime bounds and */5 reaper cadence ────
