@@ -12,6 +12,9 @@
 # never a shared, hardcoded path (the checkout differs per `--project`).
 
 [project.albert-scott]
+# A separate role-clean loopback cluster from scripts/private-pg.sh is
+# mandatory for graders, including db_setup. Startup failure blocks grading;
+# inherited AS_LOCAL_PG_ADMIN/PG*/DATABASE_* values never supply a fallback.
 admin_env = ["AS_LOCAL_PG_ADMIN"]
 db_env = ["SUPABASE_DB_URL", "DATABASE_URL", "PG_PARITY_DB_URL", "SCRATCH_PG_URL"]
 node_dirs = ["dashboard"]

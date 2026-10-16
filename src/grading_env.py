@@ -347,7 +347,9 @@ def _spec_verify_text(subject, role):
 
 
 def _clean_env(extra=None):
-    env = {k: v for k, v in os.environ.items() if k not in PROD_DSN_VARS}
+    env = {k: v for k, v in os.environ.items()
+           if not (k in PROD_DSN_VARS or k.startswith("PG") or "DSN" in k or "DATABASE" in k
+                   or k in ("AS_LOCAL_PG_ADMIN", "SCRATCH_PG_URL"))}
     if extra:
         env.update(extra)
     return env
@@ -402,11 +404,15 @@ def _db_setup_argv(row, project):
     return argv, setup.get("cwd", "."), venv_path
 
 
-def _prove_db_schema(view, row, project, dsn):
+def _prove_db_schema(view, row, project, dsn, *, admin_dsn=None):
     argv, cwd_rel, _ = _db_setup_argv(row, project)
     if not argv:
         return False, "no db_setup configured for this project"
-    env = _clean_env({n: dsn for n in (row.get("db_env") or [])})
+    if not dsn or (row.get("admin_env") and not admin_dsn):
+        return False, "private db/admin endpoint was not proven"
+    private_env = {n: dsn for n in (row.get("db_env") or [])}
+    private_env.update({n: admin_dsn for n in (row.get("admin_env") or [])})
+    env = _clean_env(private_env)
     try:
         r = _run(argv, cwd=str(pathlib.Path(view) / "tree" / cwd_rel), env=env,
                   capture_output=True, text=True, timeout=120)
@@ -626,7 +632,7 @@ def preflight(role, subject, view, project, *, repo, mcp_config=None, owed=froze
         if "db" in reasons:
             reasons["db-schema"] = f"db was not proven: {reasons['db']}"
         else:
-            ok, reason = _prove_db_schema(view, row, project, dsn)
+            ok, reason = _prove_db_schema(view, row, project, dsn, admin_dsn=admin_dsn)
             if not ok:
                 reasons["db-schema"] = reason
     if "view-paths" in caps:
