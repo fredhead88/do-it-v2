@@ -9,6 +9,7 @@ import (matching `test_carry.py`), and every `restore-verified` append this file
 causes lands there — never under any `root=` this file passes around.
 """
 import json, os, pathlib, subprocess, sys, tempfile
+from itertools import permutations
 from datetime import datetime, timedelta, timezone
 
 TMP = pathlib.Path(tempfile.mkdtemp(prefix="restore-test-"))
@@ -362,6 +363,52 @@ d4_neg = restore.board_diff(ac4_a, ac4_c)
 check(d4_neg != [], f"AC4: a genuinely different event must NOT diff to []: {d4_neg}")
 check(any("9410p" in row for row in d4_neg), f"AC4: the diff names the mismatching spec: {d4_neg}")
 print("AC4 ok")
+
+# L-spec-1042 AC3: real subprocess renders of same-ts owed declarations,
+# reversed within one file and redistributed between differently sorted files.
+ts1042 = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat(timespec="seconds")
+due1042 = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat(timespec="seconds")
+owed1042 = [{"v": 1, "ts": ts1042, "type": "owed-ac", "subject": "L-spec-1042",
+             "criterion": criterion, "wake_at": due1042, "project": "pinned-by-the-suite"}
+            for criterion in ("AC1", "AC2", "AC3", "AC4")]
+
+
+def _seed_1042(root, groups):
+    events = root / "events"
+    events.mkdir(parents=True)
+    (events / "L-executor-1042.jsonl").write_text(json.dumps({
+        "v": 1, "ts": ts1042, "type": "shipped", "subject": "L-spec-1042",
+        "project": "pinned-by-the-suite"}) + "\n")
+    for name, rows in groups.items():
+        (events / name).write_text("".join(json.dumps(e) + "\n" for e in rows))
+
+
+root1042 = TMP / "l1042-original"
+_seed_1042(root1042, {"L-spec-writer-1042a.jsonl": owed1042})
+board1042 = restore._render(root1042)
+check(board1042.count("L-spec-1042 · AC") == 4,
+      "L-spec-1042 AC3: fixture renders four owed rows, never an empty-board comparison")
+reverse1042 = TMP / "l1042-reversed"
+_seed_1042(reverse1042, {"L-spec-writer-1042a.jsonl": list(reversed(owed1042))})
+check(restore.board_diff(root1042, reverse1042) == [],
+      "L-spec-1042 AC3: reversed within-file event order gives []")
+count1042 = 0
+for index1042, order1042 in enumerate(permutations(owed1042)):
+    shuffled1042 = TMP / f"l1042-shuffled-{index1042}"
+    split1042 = index1042 % 3 + 1
+    _seed_1042(shuffled1042, {"L-spec-writer-1042z.jsonl": order1042[:split1042],
+                             "L-spec-writer-1042a.jsonl": order1042[split1042:]})
+    diff1042 = restore.board_diff(root1042, shuffled1042)
+    check(diff1042 == [], f"L-spec-1042 AC3: shuffled layout {index1042}: {diff1042}")
+    count1042 += 1
+negative1042 = TMP / "l1042-negative"
+_seed_1042(negative1042, {"L-spec-writer-1042a.jsonl": [
+    {**owed1042[0], "criterion": "AC1042_CHANGED"}, *owed1042[1:]]})
+diff1042 = restore.board_diff(root1042, negative1042)
+check(bool(diff1042) and any("AC1042_CHANGED" in row for row in diff1042),
+      f"L-spec-1042 AC3: changed criterion is named in non-empty diff: {diff1042}")
+check(count1042 >= 20, f"L-spec-1042 AC3: permutation count {count1042}")
+print(f"L-spec-1042 AC3: {count1042} shuffled layouts give []; reversed gives []; negative names criterion")
 
 # ══ §5 · the operator's real ledger is never touched by a fixture-root test ═
 after_sizes = ({p: p.stat().st_size for p in REAL_LEDGER.glob("*.jsonl")}

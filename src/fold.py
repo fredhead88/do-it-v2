@@ -888,7 +888,7 @@ BOARD_OWNERS = {
 # for free, and a naive re-sort risks reversing a same-file same-ts pair the
 # fix protects. The other seven ARE explicitly sorted (dict/subject-collapse
 # construction order is not a meaningful display order) — OWED DUE by its own
-# literal (due_at, spec, criterion); the rest by (age-or-ts proxy DESCENDING/
+# literal (due_at, spec, criterion, src); the rest by (age-or-ts proxy DESCENDING/
 # ASCENDING to match, subject, content-tiebreak), documented per-block in
 # render()'s own comments beside each explicit sort call.
 BLOCK_ORDER = {
@@ -902,7 +902,7 @@ BLOCK_ORDER = {
     "IN FLIGHT": ("age", "id_or_subject", "content"),
     "AWAITING VERIFICATION": ("age", "id", "content"),
     "OWED EVIDENCE": ("age", "id", "content"),
-    "OWED DUE": ("due_at", "spec", "criterion"),
+    "OWED DUE": ("due_at", "spec", "criterion", "src"),
     "CHARTER CLOSE": ("age", "id", "content"),
 }
 
@@ -1831,7 +1831,7 @@ def owed_due(specs):
     # R5/L-charter-0040, BLOCK_ORDER["OWED DUE"]: the literal tuple, ascending —
     # `due_at` is already a sortable ISO string (ship-anchored, timespec=
     # "seconds"), so a plain tuple sort is exact, tie included.
-    out.sort(key=lambda r: (r["due_at"], r["spec"], r["criterion"]))
+    out.sort(key=lambda r: (r["due_at"], r["spec"], r["criterion"], r["src"]))
     return out
 
 
