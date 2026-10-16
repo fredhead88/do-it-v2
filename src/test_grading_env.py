@@ -82,6 +82,74 @@ def write_spec_verify(subject, role, spec_text="", verify_text=""):
     (CONTENT / f"verify-{subject}-{role}.sh").write_text(verify_text)
 
 
+# L-spec-1056: quoted descriptions and HTTP targets never need filesystem access.
+for description, spec_text, verify_text, expected in [
+    ("AC prose", "AC1 [backend]: `/api/amazon-roster`, "
+     "`/dashboard/amazon-connect`, `/opt/albert-scott-prev/`.", "true", False),
+    ("unquoted AC prose", "AC1 [backend]: describes /root/secret.", "true", False),
+    ("quoted grep", "", "grep -q '/opt/albert-scott/.venv/bin/python "
+     ".claude/hooks/session-end.py' CLAUDE.md", False),
+    ("double quoted grep", "", 'grep -q "/root/secret" notes.txt', False),
+    ("HTTPS", "", "curl -s https://clients.albertscott.com/api/health", False),
+    ("HTTP", "", "wget http://example.test/api/health", False),
+    ("curl route", "", "curl -s /api/health", False),
+    ("absolute curl", "", "/usr/bin/curl /api/health", False),
+    ("wget route", "", "wget -q /api/health", False),
+    ("gh route", "", "gh api --method GET /repos/example/project", False),
+    ("curl output file", "", "curl -o /root/secret https://example.test/api", True),
+    ("curl redirect", "", "curl /api/health > /root/secret", True),
+    ("later command", "", "curl /api/health; cat /root/secret", True),
+    ("env read", "", "cat /opt/albert-scott/.env", True),
+    ("secret listing", "", "ls /root/secret", True),
+    ("review command", "AC1 [backend]: check\nreview_path: `cat /root/secret`", "", True),
+    ("bare review command", "AC1 [backend]: check\nreview_path: ls /root/secret", "", True),
+    ("review file", "AC1 [backend]: check\nreview_path: /root/secret", "", False),
+    ("browser instructions", "AC1 [ui]: check\nreview_path: go to /dashboard/amazon-connect", "", False),
+    ("review quoted pattern", "AC1 [backend]: check\nreview_path: run `grep -q '/root/secret' notes.txt`", "", False),
+    ("interpreter", "", "/usr/bin/python3 check.py", False),
+    ("project interpreter", "", "/opt/albert-scott/.venv/bin/python check.py", False),
+    ("shell interpreter", "", "/bin/bash check.sh", False),
+    ("neutral device", "", "echo ok >/dev/null", False),
+    ("checkout cd", "", "cd /opt/albert-scott && python3 check.py", False),
+    ("canonical checkout cd", "", "cd /home/albert/.do-it/repos/albert-scott && python3 check.py", False),
+    ("checkout file", "", "cat /home/albert/.do-it/repos/albert-scott/private.txt", True),
+]:
+    caps = grading_env.required("grader", spec_text, verify_text, "albert-scott")
+    check(("view-paths" in caps) == expected, f"1056 {description}: {caps}")
+
+other_caps = grading_env.criterion_caps(
+    "AC1 [backend]: live_db .env deployed at noon; log in as operator, go to /dashboard. "
+    "git log is prose.\nreview_path: python3 check.py", "", "testproj")["AC1"]
+check(set(other_caps) == {"env-file", "tools", "db", "db-schema", "browser", "review-account", "deploy"},
+      f"1056 other prose capabilities survive: {other_caps}")
+
+path_fixtures = HERE / "fixtures" / "preflight_view_paths"
+for number in (1018, 1047, 1029, 1031, 1032, 1033, 1035, 1036):
+    subject = f"L-spec-{number}"
+    caps = grading_env.required(
+        "grader", (path_fixtures / f"{subject}.md").read_text(),
+        (path_fixtures / f"verify-{subject}-grader.sh").read_text(), "albert-scott")
+    check("view-paths" not in caps, f"1056 historical {subject}: {caps}")
+    print(f"1056 {subject}: no view-paths")
+print("PASS L-spec-1056 view-paths regression cases and eight historical fixtures")
+
+with tempfile.TemporaryDirectory(prefix="view-path-proof-") as proof_dir:
+    proof_view = pathlib.Path(proof_dir)
+    for command, expected in [
+        ("grep -q '/root/secret' notes.txt", True),
+        ('grep -q "/root/secret" notes.txt', True),
+        ("curl -s https://example.test/api/health", True),
+        ("gh api /repos/example/project", True),
+        (f"cat {proof_view}/tree/check.txt", True),
+        (f"ls {proof_view}", True),
+        ("cat /opt/albert-scott/.env", False),
+        ("ls /root/secret", False),
+    ]:
+        (proof_view / "verify.sh").write_text(command)
+        check(grading_env._prove_view_paths(proof_view)[0] == expected,
+              f"1056 proof outcome: {expected}")
+
+
 # ═══════════════════════════ AC1 — required() is pure, ordered, never spawns ═══
 def _raising(*a, **kw):
     raise AssertionError("required() must never call a subprocess/system entry point")
@@ -126,7 +194,7 @@ try:
         ("grader", "nothing special here", "nothing special here either", "testproj", []),
         ("reviewer", "anything at all", "anything at all", "testproj", []),
         ("grader", "AC1 [backend]: x\nreview_path: git log -1\nrollback_path: git revert HEAD",
-         "/usr/bin/python3 t.py", "testproj", ["view-paths", "tools", "git"]),
+         "/usr/bin/python3 t.py", "testproj", ["tools", "git"]),
     ]
     for role, spec_text, verify_text, project, expect in TABLE:
         got = grading_env.required(role, spec_text, verify_text, project)
@@ -474,7 +542,7 @@ caps8034 = grading_env.criterion_caps(SPEC8034, "", "testproj")
 print("AC1 (8034) criterion_caps table:")
 for cid in sorted(caps8034):
     print("  ", cid, "->", caps8034[cid])
-check(caps8034.get("AC1") == ["view-paths", "tools"], f"AC1(8034): plain python: {caps8034.get('AC1')}")
+check(caps8034.get("AC1") == ["tools"], f"AC1(8034): plain python: {caps8034.get('AC1')}")
 check(caps8034.get("AC2") == ["git"], f"AC1(8034): git-history review_path: {caps8034.get('AC2')}")
 check(caps8034.get("AC3") == ["tools"], f"AC1(8034): temp-repo test carries no git: {caps8034.get('AC3')}")
 check("git" not in (caps8034.get("AC3") or []), "AC1(8034): AC3 must not carry git")

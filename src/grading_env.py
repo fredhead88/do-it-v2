@@ -77,20 +77,77 @@ def _tokens_tools_node(text):
 
 
 def _caps_plain(text):
-    """`env-file`/`view-paths`/`tools`/`node_modules`/`db`/`db-schema`/
+    """`env-file`/`tools`/`node_modules`/`db`/`db-schema`/
     `browser`/`review-account` — the non-git, non-deploy token rules, applied
     to ONE block of text (Assumption 7): a criterion's own block, or one
     `&&`-split verify-script segment."""
     found = _tokens_tools_node(text)
     if ".env" in text:
         found.add("env-file")
-    if _ABS_PATH_RE.search(text):
-        found.add("view-paths")
     if any(tok in text for tok in _DB_TOKENS):
         found.update(("db", "db-schema"))
     if any(tok in text for tok in _BROWSER_TOKENS):
         found.update(("browser", "review-account"))
     return found
+
+
+def _executed_path_tokens(text):
+    """Paths outside quoted literals and HTTP command endpoint arguments.
+
+    Keep offsets while masking so removing a literal cannot join two tokens.
+    File-valued HTTP options still name filesystem paths, not endpoints.
+    """
+    blank = lambda m: re.sub(r"[^\n]", " ", m.group())
+    text = re.sub(r"'(?:[^']*)'|\"(?:\\.|[^\"\\])*\"", blank, text)
+    text = re.sub(r"https?://[^\s'\"]+", blank, text)
+    file_options = {"-o", "-O", "--output", "--output-document", "--output-file",
+                    "-K", "--config", "-T", "--upload-file", "--cacert",
+                    "--ca-certificate", "--cert", "--key", "--netrc-file",
+                    "--cookie-jar", "--input"}
+
+    def mask_endpoints(match):
+        command = match.group()
+        words = list(re.finditer(r"\S+", command))
+        chars = list(command)
+        previous = None
+        for word in words:
+            token = word.group()
+            if (token.startswith("/") and previous not in file_options
+                    and not re.fullmatch(r"\d*[<>]+", previous or "")):
+                chars[word.start():word.end()] = " " * len(token)
+            previous = token
+        return "".join(chars)
+
+    text = re.sub(r"(?<![\w/-])(?:/[^\s;&|]+/)?(?:curl|wget|gh\s+api)\b[^\n;&|]*",
+                  mask_endpoints, text)
+    return [_clean_path_token(_trim_unmatched_closer(t)) for t in _ABS_PATH_RE.findall(text)]
+
+
+def _needs_view_paths(text, project):
+    # Grader views rewrite a checkout's working directory to their own tree.
+    # Only the exact root used by cd is neutral; files under it still count.
+    roots = (f"/opt/{project}", f"/home/albert/.do-it/repos/{project}",
+             str(_project_checkout(project)))
+    for root in roots:
+        text = re.sub(r"\bcd\s+" + re.escape(root) + r"/?(?=\s|[;&]|$)", "cd .", text)
+    return any(t not in _NEUTRAL_DEVICES and _looks_like_fs_path(t)
+               and not t.startswith(("/usr/bin/", "/bin/", "/opt/albert-scott/.venv/bin/"))
+               for t in _executed_path_tokens(text))
+
+
+def _review_commands(text):
+    """Extract commands from review fields, leaving file references/prose alone."""
+    commands = []
+    for line in _review_paths(text).splitlines():
+        line = re.sub(r"^\s*review_paths?:\s*", "", line).strip()
+        snippets = re.findall(r"`([^`]+)`", line)
+        for candidate in snippets or [line]:
+            candidate = re.sub(r"^run\s+", "", candidate).strip()
+            if re.match(r"(?:log in as|go to|it\b)", candidate):
+                continue
+            if re.match(r"(?:[\w./-]+)\s+\S", candidate):
+                commands.append(candidate)
+    return "\n".join(commands)
 
 
 def _deploy_match(text, project):
@@ -181,6 +238,8 @@ def criterion_caps(spec_text, verify_text, project):
     out = {}
     for cid, text in _criterion_blocks(spec_text).items():
         found = _caps_plain(text) - {"tools", "node_modules"}
+        if _needs_view_paths(_review_commands(text), project):
+            found.add("view-paths")
         found.update(_tokens_tools_node(_review_paths(text)))
         git = _git_need(text)
         if git and any(_GIT_RE.search(l) for l in text.splitlines() if "review_path:" in l):
@@ -193,6 +252,8 @@ def criterion_caps(spec_text, verify_text, project):
     vtext = _verification_text(spec_text, verify_text).replace("$BASE", "BASE")
     for seg in (vtext.split("&&") if vtext else []):
         found = _caps_plain(seg)
+        if _needs_view_paths(seg, project):
+            found.add("view-paths")
         git = _git_need(seg)
         if git:
             found.add(git)
@@ -407,8 +468,8 @@ def _prove_view_paths(view):
     # The whole view counts, not only view/tree: verify.sh sources the view's own
     # grading.env (AC7/AC11), which lives at the view root.
     inside = str(pathlib.Path(view)) + "/"
-    bad = [t for t in (_clean_path_token(_trim_unmatched_closer(m)) for m in _ABS_PATH_RE.findall(text))
-           if not t.startswith(inside) and t not in _NEUTRAL_DEVICES
+    bad = [t for t in _executed_path_tokens(text)
+           if t != str(pathlib.Path(view)) and not t.startswith(inside) and t not in _NEUTRAL_DEVICES
            and _looks_like_fs_path(t)
            and not (pathlib.Path(t).is_file() and os.access(t, os.X_OK))]
     if bad:
