@@ -8,7 +8,8 @@ replays a scripted verdict per call and records each invocation. No network, no
 `gh`, no model call. The fake stands in for the companion interface of
 L-spec-0764 (JSON verdict line + exit 0/1/2); the real script is not exercised.
 """
-import json, os, pathlib, subprocess, sys, tempfile, time
+import hashlib, json, os, pathlib, subprocess, sys, tempfile, time
+from unittest.mock import patch
 
 os.environ["DOIT_NO_POKE"] = "1"
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
@@ -35,6 +36,7 @@ FAKE = """#!/bin/bash
 D="$FAKE_DIR"
 n=$(cat "$D/count" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$D/count"
 echo "$PREDEPLOY_GATE_DEPLOY_SHA|$(echo "$PREDEPLOY_GATE_CI_CHECKS" | tr '\\n' ';')" >> "$D/calls"
+echo "$PREDEPLOY_GATE_DISPATCH_TIMEOUT_MIN" >> "$D/timeouts"
 [ -e "$D/run$n.sleep" ] && sleep "$(cat "$D/run$n.sleep")"
 cat "$D/run$n.out" 2>/dev/null
 exit "$(cat "$D/run$n.rc" 2>/dev/null || echo 2)"
@@ -117,6 +119,79 @@ class Fx:
 
     def origin_refs(self):
         return sh(["for-each-ref", "--format=%(refname)"], self.origin).split()
+
+
+def timeout_checks():
+    """R8: resolve at call time, and pass the same budget to the fake gate."""
+    def response(criterion, body):
+        encoded = json.dumps(body, sort_keys=True).encode()
+        print(json.dumps(dict(criterion=criterion, url="cli://window_gate/" + criterion,
+                              status=0, body_sha256=hashlib.sha256(encoded).hexdigest(),
+                              body_excerpt=body)))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = pathlib.Path(tmp) / "look.toml"
+        absent = pathlib.Path(tmp) / "absent.toml"
+        path.write_text("[window_gate]\ndispatch_timeout_min = 70\n")
+        key = "PREDEPLOY_GATE_DISPATCH_TIMEOUT_MIN"
+        cases = [({key: "30"}, path, 30.0), ({}, path, 70.0),
+                 ({}, absent, 45.0), ({key: "30.5"}, path, 30.5)]
+        actual = [window_gate.dispatch_timeout_min(env, file) for env, file, _ in cases]
+        check(actual == [expected for _, _, expected in cases], "ac-timeout precedence env/toml/default/fraction")
+        print("ac-timeout precedence", actual)
+        response("AC1", actual)
+
+        shipped = window_gate.dispatch_timeout_min({})
+        check(shipped == 70.0, "ac-timeout shipped config")
+        response("AC2", dict(dispatch_timeout_min=shipped))
+
+        bad_env = ["", "abc", "0", "-5", "nan", "inf", "-inf", True, False, None, "1e999"]
+        invalid_env = [window_gate.dispatch_timeout_min({key: value}, path) for value in bad_env]
+        check(invalid_env == [70.0] * len(bad_env), "ac-timeout invalid env falls through")
+        invalid_toml = []
+        for text in ("0", "-5", '"x"', "true", "nan", "inf", "[]", "{}"):
+            path.write_text("[window_gate]\ndispatch_timeout_min = " + text + "\n")
+            invalid_toml.append(window_gate.dispatch_timeout_min({}, path))
+        for text in ("[window_gate]\n", "[other]\ndispatch_timeout_min = 70\n",
+                     "window_gate = 70\n", "[[window_gate]]\ndispatch_timeout_min = 70\n",
+                     "[malformed", "\xff"):
+            path.write_text(text)
+            invalid_toml.append(window_gate.dispatch_timeout_min({}, path))
+        path.write_bytes(b"\xff")
+        invalid_toml.append(window_gate.dispatch_timeout_min({}, path))
+        invalid_toml.append(window_gate.dispatch_timeout_min({}, absent))
+        with patch("builtins.open", side_effect=PermissionError("unreadable")):
+            invalid_toml.append(window_gate.dispatch_timeout_min({}, path))
+        check(invalid_toml == [45.0] * len(invalid_toml), "ac-timeout invalid/unreadable toml falls through")
+        response("AC5", dict(env=invalid_env, toml=invalid_toml))
+
+        kill_times = [window_gate.verify_timeout_secs(env) for env in
+                      ({}, {key: "45"}, {"DOIT_WINDOW_VERIFY_TIMEOUT_SECS": "7"})]
+        check(window_gate.KILL_MARGIN_MIN == 10 and kill_times == [4800.0, 3300.0, 7.0],
+              "ac-timeout kill margin and override")
+        check(all(window_gate.verify_timeout_secs({"DOIT_WINDOW_VERIFY_TIMEOUT_SECS": value}) == 4800.0
+                  for value in bad_env), "ac-timeout invalid kill override falls through")
+        check(window_gate.verify_timeout_secs({}, absent) == 3300.0, "ac-timeout fallback kill margin")
+        response("AC4", dict(kill_times=kill_times, kill_margin_min=window_gate.KILL_MARGIN_MIN))
+
+        # Reuse the existing real-local-git fixture and fake shell script.
+        path.write_text("[window_gate]\ndispatch_timeout_min = 70\n")
+        fx = Fx({})
+        try:
+            recorded = []
+            for env, file, expected in (({}, path, "70"), ({key: "30"}, path, "30"), ({}, absent, "45")):
+                fx.run_n(len(recorded) + 1, 0, GREEN)
+                with patch.dict(os.environ), patch.object(window_gate, "DEFAULT_TOML_PATH", file):
+                    os.environ.pop(key, None)
+                    os.environ.update(env)
+                    result = window_gate.verify(fx.repo, fx.base, ["pytest"], "timeout")
+                recorded.append((fx.fdir / "timeouts").read_text().splitlines()[-1])
+                check(result["state"] == "green" and recorded[-1] == expected,
+                      "ac-timeout child env " + expected)
+            response("AC3", dict(child_env=recorded))
+        finally:
+            import shutil
+            shutil.rmtree(fx.tmp)
 
 
 def main():
@@ -363,5 +438,6 @@ def rechain_checks():
             shutil.rmtree(fx.tmp)
 
 
+timeout_checks()
 rechain_checks()
 main()
