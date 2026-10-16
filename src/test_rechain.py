@@ -1,4 +1,4 @@
-"""Hermetic Git regression fixtures for L-spec-0932; optional read-only replay."""
+"""Hermetic Git regression fixtures for L-spec-0932, including merge-history replay."""
 import ast
 import hashlib
 import json
@@ -299,11 +299,44 @@ class RechainTests(unittest.TestCase):
             replay_semantics(repo, cur, {rechain.MANIFEST: rechain.text(repo, cur, rechain.MANIFEST).replace('"revision": "a"', '"revision": "h0"')})
 
     def test_ac11_real_replay(self):
-        repo = pathlib.Path("/home/albert/.do-it/repos/albert-scott")
-        if not repo.exists():
-            print("ac11 SKIP albert-scott absent")
-            return
-        history = git(repo, "log", "--merges", "--first-parent", "--full-history", "--format=%H", "--", rechain.VERSIONS).splitlines()
+        # Four hand-authored historical merges, each from two real Git parents.
+        # The expected trees do not call mechanical()/resolve(): replay must
+        # reproduce independently authored parent, manifest, tests and authority.
+        repo = self.fx.repo
+        branches = [self.fx.branch(name) for name in ("a", "b", "c", "d")]
+        branches.append(self.fx.branch("e", mutation=lambda fx: fx.write(
+            rechain.TEST, (fx.repo / rechain.TEST).read_text() + "# hand-edited isolation test\n")))
+        cur = branches[0][2]
+        history = []
+        allowed = ["h0", "a"]
+        reason = "Initial. a advances from h0."
+        for name, branch, sha in branches[1:]:
+            old = allowed[-1]
+            allowed.append(name)
+            reason += f" {name} advances from {old}."
+            manifest = {"heads": [{"revision": name, "deployment": "routed",
+                        "allowedCurrentRevisions": list(allowed), "reason": reason}]}
+            tests = rechain.text(repo, cur, rechain.TEST)
+            # Independently spell out the literal updates, including the old
+            # current-head entry retained by the CLI's accepted-input loop.
+            tests = tests.replace(f'"{old} (head)\\n",',
+                                  f'"{old}\\n",\n        "{name} (head)\\n",')
+            tests = tests.replace(f'"{old}"', f'"{name}"')
+            tests = tests.replace(f'"{old} (head)\\n"', f'"{name} (head)\\n"')
+            authority = 'AUTHORITY_REVISIONS = frozenset(\n    {\n' + "".join(
+                f'        "{r}",\n' for r in [*allowed[1:], "h0"]) + '    }\n)\n'
+            changes = {rechain.VERSIONS + name + ".py": f"revision = '{name}'\ndown_revision = '{old}'\n",
+                       rechain.MANIFEST: json.dumps(manifest, indent=2) + "\n",
+                       rechain.TEST: tests, rechain.AUTHORITY: authority}
+            tree = rechain.rewrite_tree(repo, git(repo, "rev-parse", cur + "^{tree}"), changes)
+            merge = git(repo, "commit-tree", tree, "-p", cur, "-p", sha, "-m", "hand merge " + name)
+            history.append(merge)
+            cur = merge
+        git(repo, "update-ref", "refs/heads/master", cur)
+        # Discover the fixtures through the same Git history query as a replay
+        # of a live checkout; never depend on that checkout being installed.
+        history = git(repo, "log", "--merges", "--first-parent", "--full-history", "--format=%H",
+                      "master", "--", rechain.VERSIONS).splitlines()
         outcomes = []
         decline_rules = {
             "unrecognised isolation-test branch change": "R1(c): unrecognised branch-added isolation-test line",
@@ -344,6 +377,7 @@ class RechainTests(unittest.TestCase):
                 break
         self.assertEqual(len(outcomes), 4)
         self.assertTrue(any(o["outcome"] == "RESOLVED" for o in outcomes), "AC11 requires at least one resolved replay")
+        self.assertEqual([o["outcome"] for o in outcomes], ["DECLINED", "RESOLVED", "RESOLVED", "RESOLVED"])
         response("AC11", dict(replays=outcomes))
 
 

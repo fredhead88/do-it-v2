@@ -67,7 +67,10 @@ def canonical_fixture():
 
 def run_hook(cmd, env_overrides=None):
     payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": cmd}})
-    env = dict(os.environ)
+    # The hook only parses strings: these paths are never created or removed.
+    # Pin its protected roots so /home remains an ancestor even when doit test
+    # correctly gives the process a disposable HOME beneath /tmp.
+    env = dict(os.environ, HOME="/home/guard-fixture", DOIT_ROOT="/home/guard-fixture/.do-it")
     if env_overrides:
         env.update(env_overrides)
     return subprocess.run([sys.executable, str(SCRIPT)], input=payload,
@@ -218,7 +221,10 @@ with path_prepended(str(fixture)):
 
     procs_file = harness.test_root("guard-ac8-procs") / "procs.json"
     procs_file.write_text(json.dumps(procs))
-    env = dict(os.environ)
+    # The hook only parses strings: these paths are never created or removed.
+    # Pin its protected roots so /home remains an ancestor even when doit test
+    # correctly gives the process a disposable HOME beneath /tmp.
+    env = dict(os.environ, HOME="/home/guard-fixture", DOIT_ROOT="/home/guard-fixture/.do-it")
     env["PATH"] = os.environ["PATH"]
     env["DOIT_CLAUDE_SETTINGS_PATH"] = str(scratch8)
     env["DOIT_GUARD_PROCS"] = str(procs_file)
