@@ -151,9 +151,12 @@ def spec_project(spec_evs, charter_evs, worktree_path):
 def _spec_worktree(spec, evs):
     """One conventional directory only; duplicate names are undetermined."""
     branch = (build(evs) or {}).get("branch") or spec.lower()
-    # Compare names rather than interpolating ledger data into a glob pattern.
+    # Rebuilds can rename the branch (e.g. l-spec-0475-r2) while keeping the
+    # original spec directory. Both names witness the same spec; duplicates
+    # across projects remain undetermined.
+    names = {branch, spec.lower()}
     paths = [p for p in (fold.ROOT / "worktrees").glob("*/*")
-             if p.name == branch and p.is_dir()]
+             if p.name in names and p.is_dir()]
     return str(paths[0]) if len(paths) == 1 else None
 
 

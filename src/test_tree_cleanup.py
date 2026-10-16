@@ -958,3 +958,31 @@ with tempfile.TemporaryDirectory() as d:
 print("L1040-AC7 ok")
 
 print(f"tree-cleanup: {N} checks pass")
+
+# R2: a legacy rebuild branch may keep the original spec directory. Resolve
+# its project with NO project tags on any event, then prove dry-run ancestry.
+with tempfile.TemporaryDirectory() as d:
+    r, old_branch, wt = conventional_fixture(d)
+    new_branch = old_branch + "-r2"
+    sh(r, "git", "branch", "-m", old_branch, new_branch)
+    trail = pathlib.Path(d) / "events" / "L-executor-0001.jsonl"
+    # Rewrite only the private fixture ledger to model the historical branch.
+    rows = [json.loads(line) for line in trail.read_text().splitlines()]
+    for row in rows:
+        if row.get("type") == "build-done":
+            row["branch"] = new_branch
+    trail.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    before = {str(p): p.read_bytes() for p in (pathlib.Path(d) / "events").glob("*")}
+    out = json.loads(reap(d, "--all", "--dry-run").stdout)
+    check(out["reaped"] == [{"spec": "L-spec-1040", "project": "path-project", "path": wt,
+                             "proof": "origin-merged"}], "R2: legacy rebuild resolved from its spec path")
+    check(pathlib.Path(wt).exists() and new_branch in branches(r), "R2: dry-run preserves branch and tree")
+    check(before == {str(p): p.read_bytes() for p in (pathlib.Path(d) / "events").glob("*")},
+          "R2: dry-run preserves every ledger byte")
+    # The second conventional name must never make project choice arbitrary.
+    duplicate = pathlib.Path(d) / "worktrees" / "other-project" / new_branch
+    duplicate.mkdir(parents=True)
+    with patch.object(fold, "ROOT", pathlib.Path(d)):
+        check(tree_cleanup._spec_worktree("L-spec-1040", rows) is None,
+              "R2: duplicate conventional paths stay unresolved")
+print("R2: renamed legacy branch dry-run and ambiguity checks pass")
