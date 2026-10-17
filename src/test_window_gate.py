@@ -8,7 +8,7 @@ replays a scripted verdict per call and records each invocation. No network, no
 `gh`, no model call. The fake stands in for the companion interface of
 L-spec-0764 (JSON verdict line + exit 0/1/2); the real script is not exercised.
 """
-import hashlib, json, os, pathlib, subprocess, sys, tempfile, time
+import atexit, hashlib, json, os, pathlib, subprocess, sys, tempfile, time
 from unittest.mock import patch
 
 os.environ["DOIT_NO_POKE"] = "1"
@@ -34,15 +34,31 @@ def sh(args, cwd):
 
 FAKE = """#!/bin/bash
 D="$FAKE_DIR"
-n=$(cat "$D/count" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$D/count"
-echo "$PREDEPLOY_GATE_DEPLOY_SHA|$(echo "$PREDEPLOY_GATE_CI_CHECKS" | tr '\\n' ';')" >> "$D/calls"
+if [ "$PREDEPLOY_GATE_DEPLOY_SHA" = "${FAKE_BASE:-}" ]; then
+  n=base
+  echo base >> "$D/base-calls"
+else
+  n=$(cat "$D/count" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$D/count"
+  echo "$PREDEPLOY_GATE_DEPLOY_SHA|$(echo "$PREDEPLOY_GATE_CI_CHECKS" | tr '\\n' ';')" >> "$D/calls"
+fi
 echo "$PREDEPLOY_GATE_DISPATCH_TIMEOUT_MIN" >> "$D/timeouts"
 [ -e "$D/run$n.sleep" ] && sleep "$(cat "$D/run$n.sleep")"
 cat "$D/run$n.out" 2>/dev/null
 exit "$(cat "$D/run$n.rc" 2>/dev/null || echo 2)"
 """
 
-GREEN = ('{"verdict":"green","checks":{"pytest":"ran","TypeScript · Biome · Tests · File Sizes":"ran"},'
+ARRAY = """REQUIRED_CHECKS=(
+  "pytest"
+  'pg-parity (Postgres)'
+  "Auth Coverage · Secret Scan · CVE Check"
+  "lint PR-changed migrations + sql/core freeze + single head"
+  "TypeScript · Biome · Tests · File Sizes"
+  "Repo lint guards"
+)
+"""
+
+
+GREEN = ('{"verdict":"green","checks":{"pytest":"ran","pg-parity (Postgres)":"ran","TypeScript · Biome · Tests · File Sizes":"ran"},'
          '"new_failures":[],"run_url":"https://github.com/o/r/actions/runs/1"}')
 
 
@@ -52,7 +68,9 @@ def red(nodes, url="https://github.com/o/r/actions/runs/2"):
 
 class Fx:
     def __init__(self, specs, dashboard=False, dirty=False):
-        self.tmp = pathlib.Path(tempfile.mkdtemp(prefix="wg", dir="/home/albert/doit-scratch"))
+        self.tempdir = tempfile.TemporaryDirectory(prefix="wg-")
+        atexit.register(self.tempdir.cleanup)
+        self.tmp = pathlib.Path(self.tempdir.name)
         self.root = self.tmp / "r"
         self.origin = self.tmp / "o.git"
         sh(["init", "--bare", str(self.origin)], self.tmp)
@@ -66,6 +84,9 @@ class Fx:
         (self.repo / "api/tests/test_x.py").write_text("from api.app import lib\n")
         (self.repo / "api/tests/test_z.py").write_text("pass\n")
         (self.repo / "base.txt").write_text("b\n")
+        gate = self.repo / window_gate.PREDEPLOY
+        gate.parent.mkdir(parents=True)
+        gate.write_text(ARRAY)
         sh(["add", "-A"], self.repo); sh(["commit", "-m", "init"], self.repo)
         sh(["push", "origin", "master"], self.repo)
         self.base = sh(["rev-parse", "master"], self.repo)
@@ -86,11 +107,25 @@ class Fx:
         self.fake.write_text(FAKE)
         self.fdir = self.tmp / "f"
         self.fdir.mkdir()
+        self.run_n("base", 0, GREEN)
+        # A local gh double supplies only job metadata and logs; no network.
+        bindir = self.tmp / "bin"
+        bindir.mkdir()
+        gh = bindir / "gh"
+        gh.write_text("#!/usr/bin/python3\nimport os, pathlib, sys\n"
+                      "args = sys.argv[1:]\n"
+                      "key = ('log-' + args[args.index('--job') + 1]) if '--job' in args else ('jobs-' + args[2])\n"
+                      "p = pathlib.Path(os.environ['FAKE_DIR']) / key\n"
+                      "if not p.exists(): sys.exit(1)\nprint(p.read_text())\n")
+        gh.chmod(0o755)
+        self.path = str(bindir) + os.pathsep + os.environ.get("PATH", "")
         fold.ROOT = self.root
         fold.EVENTS = self.root / "events"
         fold.EVENTS.mkdir(parents=True)
         os.environ.update(DOIT_ROOT=str(self.root), DOIT_WINDOW_PREDEPLOY=str(self.fake), FAKE_DIR=str(self.fdir),
-                          DOIT_MAIN="master")
+                          DOIT_MAIN="master", DOIT_LEDGER_FILE="L-executor-0001.jsonl",
+                          DOIT_GATE_LEDGER_FILE="L-executor-0001.jsonl")
+        os.environ.pop("FAKE_BASE", None)
         os.environ.pop("DOIT_WINDOW_GATE", None)
         os.environ.pop("DOIT_WINDOW_VERIFY_TIMEOUT_SECS", None)
 
@@ -100,11 +135,26 @@ class Fx:
         if sleep:
             (self.fdir / f"run{n}.sleep").write_text(str(sleep))
 
-    def go(self, specs=None):
+    def pg(self, n, nodes=(), conclusion="failure", message="AssertionError: parity", kind="FAILED"):
+        rid = "100" if n == "base" else str(100 + n)
+        jid = str(int(rid) + 1000)
+        self.run_n(n, 0 if conclusion == "success" else 1, json.dumps({
+            "verdict": "green" if conclusion == "success" else "red",
+            "checks": {"pytest": "ran", window_gate.PG_CHECK: {"state": "ran", "run_id": int(rid)}},
+            "new_failures": [], "run_url": "https://github.com/o/r/actions/runs/" + rid}))
+        (self.fdir / ("jobs-" + rid)).write_text(json.dumps({"jobs": [{
+            "name": window_gate.PG_CHECK, "databaseId": int(jid), "conclusion": conclusion}]}))
+        (self.fdir / ("log-" + jid)).write_text("\n".join(
+            "pg-parity (Postgres)\tRun suite\t2026-10-17T00:00:00Z " + kind + " " + node + " - " + message
+            for node in nodes))
+
+    def go(self, specs=None, fixes_base=False):
         specs = specs or list(self.branches)
         for s in specs:
             fold.append(["merge-gate-clean", s, f"branch={self.branches[s]}", "project=albert-scott"])
-        return window_gate.main_(["w1", "--project", "albert-scott", "--specs", ",".join(specs)])
+        with patch.dict(os.environ, FAKE_BASE=self.base, PATH=self.path):
+            return window_gate.main_(["w1", "--project", "albert-scott", "--specs", ",".join(specs)]
+                                     + (["--fixes-base"] if fixes_base else []))
 
     def calls(self):
         p = self.fdir / "calls"
@@ -194,6 +244,117 @@ def timeout_checks():
             shutil.rmtree(fx.tmp)
 
 
+def parity_checks():
+    def response(ac, body):
+        encoded = json.dumps(body, sort_keys=True).encode()
+        print(json.dumps(dict(criterion=ac, url="cli://window_gate/1057/" + ac,
+                              status=0, body_sha256=hashlib.sha256(encoded).hexdigest(), body_excerpt=body)))
+
+    node = "api/tests/test_x.py::test_y"
+    fx = Fx({"A": "a.txt"})
+    fx.pg(1, [node])
+    rc = fx.go()
+    check(rc == 2 and fx.master() == fx.base and not fx.events("shipped"), "1057 AC1a pytest green pg red blocks")
+    response("AC1a", dict(exit=rc, master_unmoved=fx.master() == fx.base))
+
+    fx = Fx({"A": "a.txt", "B": "api/tests/test_x.py", "C": "c.txt"})
+    fx.pg(1, [node])
+    fx.pg(2, conclusion="success")
+    rc = fx.go()
+    shipped = [e["subject"] for e in fx.events("shipped")]
+    check(rc == 1 and shipped == ["A", "C"] and len(fx.calls()) == 2, "1057 AC1b pg owner only, one retry")
+    check([e["subject"] for e in fx.events("window-dropped")] == ["B"], "1057 AC1b only B dropped")
+    response("AC1b", dict(exit=rc, shipped=shipped, candidate_runs=len(fx.calls())))
+
+    fx = Fx({"A": "api/tests/test_x.py", "B": "b.txt"})
+    fx.pg("base", [node])
+    fx.pg(1, [node])
+    rc = fx.go(fixes_base=True)
+    check(rc == 2 and not fx.events("window-dropped") and fx.master() == fx.base,
+          "1057 AC1c identical base failure pre-existing, no drop or advance")
+    check(len(fx.events("window-pre-existing")) == 1, "1057 AC1c pre-existing count and reason surfaced")
+    response("AC1c", dict(exit=rc, drops=len(fx.events("window-dropped")), pre_existing=1))
+
+    for fixes in (False, True):
+        fx = Fx({"A": "a.txt"})
+        fx.pg("base", [node])
+        fx.pg(1, conclusion="success")
+        rc = fx.go(fixes_base=fixes)
+        check(rc == (0 if fixes else 2), "1057 AC1d red base fixes flag " + str(fixes))
+        check(bool(fx.events("window-opened")) == fixes, "1057 AC1d refused before window opens")
+        check(fixes or (fx.master() == fx.base and not fx.calls()
+                        and fx.events("escalation-blocking")[0]["why"].startswith("base-not-releasable")),
+              "1057 AC1d base-not-releasable escalation")
+        response("AC1d", dict(fixes_base=fixes, exit=rc, opened=bool(fx.events("window-opened"))))
+
+    # Same node but changed failure signature is NEW, not pre-existing.
+    fx = Fx({"A": "api/tests/test_x.py", "B": "b.txt"})
+    fx.pg("base", [node])
+    fx.pg(1, [node], message="ValueError: new regression")
+    fx.pg(2, conclusion="success")
+    check(fx.go(fixes_base=True) == 1 and [e["subject"] for e in fx.events("window-dropped")] == ["A"],
+          "1057 changed pg failure signature drops owner")
+
+    fx = Fx({"A": "api/tests/test_x.py", "B": "b.txt"})
+    fx.pg(1, [node + "[param]"], kind="ERROR")
+    fx.pg(2, conclusion="success")
+    check(fx.go() == 1 and fx.events("window-dropped")[0]["nodes"] == [node + "[param]"],
+          "1057 pg ERROR and parameterized node id retained")
+
+    for broken in ("missing", "invalid-json", "absent-job", "duplicate-job", "cancelled", "missing-log"):
+        fx = Fx({"A": "a.txt"})
+        fx.pg(1, [node])
+        jobs = fx.fdir / "jobs-101"
+        if broken == "missing":
+            jobs.unlink()
+        elif broken == "invalid-json":
+            jobs.write_text("not json")
+        elif broken in ("absent-job", "duplicate-job"):
+            data = json.loads(jobs.read_text())
+            data["jobs"] = [] if broken == "absent-job" else data["jobs"] * 2
+            jobs.write_text(json.dumps(data))
+        elif broken == "cancelled":
+            data = json.loads(jobs.read_text())
+            data["jobs"][0]["conclusion"] = "cancelled"
+            jobs.write_text(json.dumps(data))
+        else:
+            (fx.fdir / "log-1101").unlink()
+        rc = fx.go()
+        check(rc == 2 and fx.master() == fx.base and not fx.events("window-dropped"),
+              "1057 pg evidence fails closed without dropping specs: " + broken)
+
+    for dash in (False, True):
+        fx = Fx({"A": "dashboard/a.ts" if dash else "a.txt"})
+        fx.run_n(1, 0, GREEN)
+        # Read the base blob, never a dirty working-tree edit.
+        (fx.repo / window_gate.PREDEPLOY).write_text("REQUIRED_CHECKS=(unclassified)\n")
+        rc = fx.go()
+        checks = fx.calls()[0].split("|", 1)[1].strip(";").split(";") if fx.calls() else []
+        expected = ["pytest", "pg-parity (Postgres)"] + ([window_gate.DASHBOARD_CHECK] if dash else [])
+        check(rc == 0 and checks == expected, "1057 AC2 exact ci-verify subset " + str(dash))
+        response("AC2", dict(dashboard=dash, checks=checks, exit=rc))
+
+    for text, reason in ((ARRAY.replace('  "Repo lint guards"', '  "New required check"'), "required-checks-unclassified"),
+                         ("REQUIRED_CHECKS=(\n  \"pytest\"\n", "required-checks-unreadable"),
+                         ('REQUIRED_CHECKS=("$DYNAMIC")\n', "required-checks-unreadable"),
+                         ('# no required array\n', "required-checks-unreadable")):
+        fx = Fx({})
+        (fx.repo / window_gate.PREDEPLOY).write_text(text)
+        sh(["add", window_gate.PREDEPLOY], fx.repo)
+        sh(["commit", "-m", "required array fixture"], fx.repo)
+        fx.base = sh(["rev-parse", "HEAD"], fx.repo)
+        sh(["update-ref", "refs/heads/master", fx.base], fx.repo)
+        sh(["checkout", "-b", "br-A"], fx.repo)
+        (fx.repo / "a.txt").write_text("A\n")
+        sh(["add", "."], fx.repo)
+        sh(["commit", "-m", "A"], fx.repo)
+        fx.branches["A"] = "br-A"
+        rc = fx.go()
+        check(rc == 2 and fx.master() == fx.base and not fx.calls()
+              and fx.events("escalation-blocking")[0]["why"].startswith(reason), "1057 AC2 " + reason)
+        response("AC2", dict(reason=reason, exit=rc, master_unmoved=fx.master() == fx.base))
+
+
 def main():
     # AC1 + AC7: green window; dirty live checkout untouched
     fx = Fx({"A": "a.txt", "B": "b.txt", "C": "c.txt"}, dirty=True)
@@ -205,7 +366,7 @@ def main():
     check(cand == fx.master() and cand != fx.base, "AC1 master == candidate sha")
     check(len(fx.events("shipped")) == 3 and all(e["sha"] == cand for e in fx.events("shipped")), "AC1 three shipped events")
     check(len(fx.events("window-verified")) == 1, "AC1 one window-verified")
-    check(len(fx.calls()) == 1 and fx.calls()[0].endswith("|pytest;"), "AC1/AC5 one dispatch, pytest only")
+    check(len(fx.calls()) == 1 and fx.calls()[0].endswith("|pytest;pg-parity (Postgres);"), "AC1/AC5 one candidate dispatch, pytest and pg-parity")
     post = (sh(["status", "--porcelain"], fx.repo), (fx.repo / ".git/index").read_bytes())
     check(pre == post, "AC7 live status and index untouched")
     check((fx.repo / "base.txt").read_text() == "dirty\n", "AC7 dirty file intact")
@@ -219,7 +380,7 @@ def main():
     # win-20261010-0101 and -0201 dropped every spec on a green CI run).
     fx = Fx({"A": "a.txt"})
     real = json.dumps({"verdict": "green", "sha": "x", "new_failures": [],
-                       "checks": {"pytest": {"state": "ran", "run_id": 38010269666,
+                       "checks": {window_gate.PG_CHECK: "ran", "pytest": {"state": "ran", "run_id": 38010269666,
                                              "url": "https://github.com/o/r/actions/runs/3/job/4"}}})
     fx.run_n(1, 0, real)
     rc = fx.go()
@@ -438,6 +599,7 @@ def rechain_checks():
             shutil.rmtree(fx.tmp)
 
 
+parity_checks()
 timeout_checks()
 rechain_checks()
 main()
