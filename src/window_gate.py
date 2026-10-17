@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """window_gate — verify a merge WINDOW's candidate tip before master moves (L-spec-0765).
 
-    doit gate-window <window-id> --project albert-scott [--specs A,B,C] [--main BRANCH]
+    doit gate-window <window-id> --project albert-scott [--specs A,B,C] [--main BRANCH] [--fixes-base]
 
 Today nobody runs the full Python suite until a deploy, so one bad merge hides
 behind twenty-four good ones. For project `albert-scott` the Executor instead
@@ -28,7 +28,7 @@ Exit codes (the Executor contract, agents/executor.md, mirrors these):
 
 Env: DOIT_WINDOW_PREDEPLOY (override the script path), DOIT_WINDOW_VERIFY_TIMEOUT_SECS.
 """
-import json, math, os, pathlib, re, signal, subprocess, sys, time
+import json, math, os, pathlib, re, shlex, signal, subprocess, sys, time
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
@@ -41,6 +41,14 @@ DEFAULT_TOML_PATH = pathlib.Path(__file__).resolve().parent.parent / "look.toml"
 KILL_MARGIN_MIN = 10
 MAX_MERGES = 6
 PYTEST_CHECK = "pytest"
+PG_CHECK = "pg-parity (Postgres)"
+# These workflows only run on master pushes/PRs, not ci-verify dispatches.
+# Every new deploy requirement must be classified here before a window can open.
+CI_VERIFY_EXCLUDED = frozenset({
+    "Auth Coverage · Secret Scan · CVE Check",
+    "lint PR-changed migrations + sql/core freeze + single head",
+    "Repo lint guards",
+})
 DASHBOARD_CHECK = "TypeScript · Biome · Tests · File Sizes"
 RUN_MINUTES, DASHBOARD_MINUTES = 45, 5
 NODE_RE = re.compile(r"[\w./-]+\.py::[^\s\"',\]]+")
@@ -142,6 +150,83 @@ def build_candidate(repo, window, base, entries):
 
 
 # ── verification: ONE call into the existing deploy gate ─────────────────────
+def required_checks(repo, base):
+    """Read literal Bash array data from the base, without executing repo code.
+
+    Only quoted literal entries are supported. Dynamic or malformed Bash is
+    deliberately unreadable rather than a reason to weaken the gate.
+    """
+    source = git(repo, "show", f"{base}:{PREDEPLOY}", check=False)
+    array = re.search(r"(?m)^REQUIRED_CHECKS=\(", source.stdout)
+    if source.returncode or array is None:
+        raise RuntimeError("required-checks-unreadable")
+    lexer = shlex.shlex(source.stdout[array.end():], posix=False, punctuation_chars="();")
+    lexer.whitespace_split = True
+    checks = []
+    try:
+        for token in lexer:
+            if token == ")":
+                break
+            if (len(token) < 2 or token[0] not in "\"'" or token[-1] != token[0]
+                    or any(c in token[1:-1] for c in "$`\\\n")):
+                raise ValueError("non-literal array entry")
+            checks.append(token[1:-1])
+        else:
+            raise ValueError("unterminated array")
+    except ValueError as e:
+        raise RuntimeError("required-checks-unreadable") from e
+    supported = {PYTEST_CHECK, PG_CHECK, DASHBOARD_CHECK}
+    if not checks or len(set(checks)) != len(checks) or any(not c for c in checks):
+        raise RuntimeError("required-checks-unreadable")
+    unknown = set(checks) - supported - CI_VERIFY_EXCLUDED
+    if unknown:
+        raise RuntimeError("required-checks-unclassified: " + ", ".join(sorted(unknown)))
+    if not supported <= set(checks):
+        raise RuntimeError("required-checks-unreadable: missing ci-verify requirements")
+    return [c for c in checks if c in supported]
+
+
+def pg_result(repo, doc):
+    """Read the named job, not the workflow conclusion; retain failure signatures.
+
+    The deploy gate enumerates pytest's baseline-aware NEW nodes, but pg-parity
+    needs its own log. No workflow dispatch/poll mechanism is duplicated here.
+    """
+    check = doc.get("checks", {}).get(PG_CHECK)
+    if check == "ran":                 # legacy verdicts without job metadata
+        return False, {}
+    if not isinstance(check, dict) or not str(check.get("run_id", "")).isdigit():
+        raise RuntimeError("pg-parity job metadata unavailable")
+    rid = str(check["run_id"])
+    def gh(*args):
+        proc = subprocess.run(["gh", "run", "view", *args], cwd=repo,
+                              capture_output=True, text=True, timeout=60)
+        if proc.returncode:
+            raise RuntimeError("pg-parity job evidence unavailable")
+        return proc.stdout
+    try:
+        jobs = json.loads(gh(rid, "--json", "jobs"))["jobs"]
+        matches = [j for j in jobs if j.get("name") == PG_CHECK]
+        if len(matches) != 1 or matches[0].get("conclusion") not in ("success", "failure"):
+            raise RuntimeError("pg-parity job absent, ambiguous or not completed")
+        job = matches[0]
+        if job["conclusion"] == "success":
+            return False, {}
+        jid = str(job.get("databaseId", ""))
+        if not jid.isdigit():
+            raise RuntimeError("pg-parity job id unavailable")
+        log = gh("--job", jid, "--log-failed")
+        failures = {}
+        for line in log.splitlines():
+            line = re.sub(r"\x1b\[[0-9;]*m", "", line)
+            m = re.search(r"\b(FAILED|ERROR)\s+([\w./-]+\.py::\S+)(.*)$", line)
+            if m:
+                failures[m[2]] = m[1] + " " + m[3].strip()
+        return True, failures
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError) as e:
+        raise RuntimeError("pg-parity job evidence unreadable") from e
+
+
 def _positive_timeout(value):
     if isinstance(value, bool):
         return None
@@ -237,13 +322,21 @@ def verify(repo, cand, required, window):
         def _ran(v):
             return v == "ran" or (isinstance(v, dict) and v.get("state") == "ran")
         all_ran = (isinstance(checks, dict) and all(_ran(checks.get(c)) for c in required))
-        if proc.returncode == 0 and all_ran and not nodes and doc.get("verdict", "green") == "green":
-            return dict(state="green", nodes=[], url=url, doc=doc)
+        pg_failed, pg_failures = False, {}
+        if all_ran and PG_CHECK in required:
+            try:
+                pg_failed, pg_failures = pg_result(repo, doc)
+            except RuntimeError as e:
+                return dict(state="undetermined", nodes=[], url=url, doc=doc, why=str(e))
+        detail = dict(pg_failed=pg_failed, pg_failures=pg_failures, other_nodes=list(nodes))
+        nodes = list(dict.fromkeys(nodes + list(pg_failures)))
+        if proc.returncode == 0 and all_ran and not nodes and not pg_failed and doc.get("verdict", "green") == "green":
+            return dict(state="green", nodes=[], url=url, doc=doc, **detail)
         if proc.returncode == 2 or (proc.returncode == 0 and not doc):
             return dict(state="undetermined", nodes=nodes, url=url, doc=doc,
                         why=f"gate exit {proc.returncode}: " + (out.strip().splitlines() or [""])[-1][:200])
         return dict(state="red", nodes=nodes, url=url, doc=doc,
-                    why=f"gate exit {proc.returncode}")
+                    why=f"gate exit {proc.returncode}", **detail)
     finally:
         if pushed:
             git(repo, "push", "--no-verify", "origin", f":refs/heads/{ref}", check=False)
@@ -352,7 +445,7 @@ def advance(repo, main, old, new, window, kept, dropped, runs, urls, entries, da
        actions_minutes=runs * RUN_MINUTES + (runs * DASHBOARD_MINUTES if dashboard else 0))
 
 
-def run_window(window, project, spec_args, main):
+def run_window(window, project, spec_args, main, fixes_base=False):
     repo = fold.ROOT / "repos" / project
     if not repo.is_dir():
         sys.exit(f"gate-window: no repo at {repo}")
@@ -363,6 +456,19 @@ def run_window(window, project, spec_args, main):
     if len(entries) > MAX_MERGES:
         sys.exit(f"gate-window: {len(entries)} merges exceeds the window cap of {MAX_MERGES}")
     base = git(repo, "rev-parse", "--verify", f"refs/heads/{main}^{{commit}}").stdout.strip()
+    try:
+        ci_checks = required_checks(repo, base)
+    except RuntimeError as e:
+        escalate(window, str(e))
+        print("gate-window: " + str(e))
+        return 2
+    baseline = verify(repo, base, [PG_CHECK], window)
+    if baseline["state"] != "green" and not (fixes_base and baseline["state"] == "red"):
+        why = "base-not-releasable: pg-parity is " + baseline["state"]
+        escalate(window, why)
+        print("gate-window: " + why)
+        return 2
+    base_failures = baseline.get("pg_failures", {})
     enabled = os.environ.get("DOIT_WINDOW_RECHAIN", "off") == "on"
     migrations, deferred = set(), []
     if enabled:
@@ -379,7 +485,7 @@ def run_window(window, project, spec_args, main):
         entries = [e for e in entries if e[0] not in deferred]
         if deferred:
             print(f"gate-window: deferred {len(deferred)} migration(s), reason=migration-cap cap={cap}")
-    ev("window-opened", window, specs=[s for s, _, _ in entries], base=base[:12])
+    ev("window-opened", window, specs=[s for s, _, _ in entries], base=base[:12], fixes_base=fixes_base)
     touched = {s: set(git(repo, "diff", "--name-only", f"{base}...{b}").stdout.split()) for s, b, _ in entries}
     dropped, urls, runs, dashboard = [], [], 0, False
     conflicted_all = {}
@@ -415,7 +521,7 @@ def run_window(window, project, spec_args, main):
         changed = git(repo, "diff", "--name-only", f"{base}..{cand}").stdout.split()
         has_dash = any(p.startswith("dashboard/") for p in changed)
         dashboard = dashboard or has_dash
-        required = [PYTEST_CHECK] + ([DASHBOARD_CHECK] if has_dash else [])
+        required = [c for c in ci_checks if c != DASHBOARD_CHECK or has_dash]
         res = verify(repo, cand, required, window)
         runs += 1
         if res["url"]:
@@ -425,6 +531,20 @@ def run_window(window, project, spec_args, main):
         if res["state"] == "undetermined":
             escalate(window, f"window {window} could not be verified ({res.get('why')}); master unmoved, no spec dropped")
             print(f"gate-window: undetermined — {res.get('why')}"); return 2
+        # A red base may be repaired, but never advanced while still red. Matching
+        # signatures are reported and excluded from ownership attribution only.
+        pre_existing = [n for n, signature in res.get("pg_failures", {}).items()
+                        if base_failures.get(n) == signature]
+        if pre_existing:
+            ev("window-pre-existing", window, count=len(pre_existing), nodes=pre_existing,
+               reason="identical-pg-parity-at-base", run_url=res["url"])
+            print(f"gate-window: {len(pre_existing)} pre-existing pg-parity failure(s), reason=identical-pg-parity-at-base")
+            res["nodes"] = [n for n in res["nodes"] if n not in pre_existing or n in res.get("other_nodes", [])]
+            reasons = res.get("doc", {}).get("reasons", [])
+            other_red = any(not str(r).startswith(PG_CHECK + ":") for r in reasons)
+            if not res["nodes"] and not other_red:
+                escalate(window, "base-not-releasable: --fixes-base window has not repaired pg-parity")
+                return 2
         # red
         by_id = {s: (b, sha) for s, b, sha in entries}
         if runs >= 2:
@@ -476,11 +596,13 @@ def main_(argv):
     if not argv or argv[0] in ("-h", "--help"):
         print(__doc__); return 0
     window, project, specs, main = argv[0], None, [], os.environ.get("DOIT_MAIN")
+    fixes_base = False
     it = iter(argv[1:])
     for a in it:
         if a == "--project": project = next(it, None)
         elif a == "--specs": specs = [x for x in (next(it, "") or "").split(",") if x]
         elif a == "--main": main = next(it, None)
+        elif a == "--fixes-base": fixes_base = True
         else: sys.exit(f"gate-window: unknown argument {a!r}\n{__doc__}")
     if not re.fullmatch(r"[A-Za-z0-9._-]+", window):
         sys.exit(f"gate-window: {window!r} is not a window id")
@@ -501,7 +623,7 @@ def main_(argv):
         print("gate-window: another window holds the lock"); return 3
     repo = fold.ROOT / "repos" / project
     try:
-        return run_window(window, project, specs, main)
+        return run_window(window, project, specs, main, fixes_base)
     except RuntimeError as e:
         print(f"gate-window: {e}", file=sys.stderr)
         try:
