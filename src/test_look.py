@@ -27,6 +27,9 @@ os.environ["DOIT_ROOT"] = str(_FIXTURE_ROOT)
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 import crons, dispatch, fold, look, look_wallclock, pane_resume, panes  # noqa: E402
 
+# All watchdog deliveries are local fakes, including pre-existing run fixtures.
+look._send_operator = lambda text, root: 0
+
 pane_resume.PROJECTS = pathlib.Path(tempfile.mkdtemp())
 panes.SESSIONS = pathlib.Path(tempfile.mkdtemp())
 # R14a/L-spec-0485: `_check_crons`/`_check_cron_unwrapped` default `crond_dir`
@@ -1937,3 +1940,323 @@ _si_restore(saved0484_15f)
 print("merge-origin-0484 AC15 ok")
 
 print(f"look: {n} checks passed")
+
+# Watchdog regressions use the same isolated ledger and injected clock.
+from unittest.mock import patch
+import autodispatch, lane_rules, tick
+
+_WNOW = datetime(2031, 3, 1, 12, tzinfo=timezone.utc)
+_WA, _WB = "L-spec-9139", "L-spec-9140"
+
+
+def _wev(kind, sid=_WA, age=120, **fields):
+    return dict(type=kind, subject=sid, ts=iso(_WNOW - timedelta(minutes=age)), **fields)
+
+
+def _widle(events, *, held=()):
+    own = [e for e in events if e["subject"] == _WA]
+    return look._spec_idle_bad(_WA, {"state": "written"}, own, events,
+                               {_WA: {"status": "blocked"}}, held, set(), _WNOW)
+
+
+# First regression: gate-clean but unsettled cannot exempt a hold forever.
+_wevents = [_wev("spec-written"), _wev("spec-written", _WB, 200),
+            _wev("merge-gate-clean", _WB, 70)]
+with patch.object(dispatch, "wave_blocker", return_value=_WB):
+    ok(_widle(_wevents), "watchdog: overdue gate-clean blocker must not exempt A")
+    ok(not _widle(_wevents + [_wev("observed", _WB, 30)]),
+       "watchdog: recent blocker keeps A exempt")
+
+# AC1: an actual temporary rule table controls both brief thresholds.
+_wtable = pathlib.Path(__file__).resolve().parent.parent / "lane_rules.toml"
+for build_limit, idle_limit in ((45, 90), (10, 20)):
+    root = newroot()
+    table = root / "lane_rules.toml"
+    table.write_text(_wtable.read_text().replace('limit_min = 30', f'limit_min = {build_limit}', 1)
+                     .replace('name = "idle"\naction = "none"\nactor = "none"\nlimit_min = 60',
+                              f'name = "idle"\naction = "none"\nactor = "none"\nlimit_min = {idle_limit}'))
+    with patch.dict(os.environ, DOIT_LANE_RULES=str(table)):
+        for age in (40, 50):
+            root_case = newroot()
+            events = [_wev("spec-written", age=age)]
+            row = dict(spec=_WA, status="dispatchable", since=events[0]["ts"], reason="ready")
+            briefs = []
+            with patch.object(autodispatch, "candidates", return_value=[row]):
+                look._check_dispatchable_stale(events, _WNOW, root_case, briefs)
+            ok(bool(briefs) == (age > build_limit), "watchdog: build threshold from table")
+        for age in (80, 100):
+            events = [_wev("spec-written", age=age)]
+            briefs = []
+            with patch.object(autodispatch, "candidates", return_value=[]):
+                look._check_spec_idle(events, _WNOW, newroot(), briefs, [])
+            ok(any(b["condition"] == "spec-idle" for b in briefs) == (age >= idle_limit),
+               "watchdog: idle threshold from table")
+print("watchdog AC1 ok")
+
+# AC2: real wave resolution, plus shipped and every shipped-owed state.
+root = newroot()
+saved = _si_setup(root)
+try:
+    charter = "L-charter-9139"
+    (root / "content" / f"plan-{charter}.md").write_text(
+        "## Unit A\nFootprint:\n- later.py\nWave: 2\n\n## Unit B\nFootprint:\n- first.py\nWave: 1\n")
+    events = [_wev("spec-written", age=500, charter=charter, footprint=["later.py"]),
+              _wev("spec-written", _WB, 200, charter=charter, footprint=["first.py"]),
+              _wev("merge-gate-clean", _WB, 70)]
+    ok(dispatch.wave_blocker(events, charter, _WA, 2) == _WB, "watchdog: actual wave blocker")
+    ok(_widle(events), "watchdog: gate-clean never settled reports A")
+    ok(not _widle(events + [_wev("observed", _WB, 30)]), "watchdog: B age controls exemption")
+    for state in ("shipped", "shipped-owed-evidence", "shipped-owed-due", "shipped-owed-expired"):
+        terminal = events + [_wev("shipped", _WB, 70)]
+        if state != "shipped":
+            terminal += [_wev("owed-ac", _WB, 80, criterion="AC1", line="fixture",
+                              wake_at=iso(_WNOW + timedelta(days=1) if state.endswith("evidence")
+                                          else _WNOW - timedelta(days=1)))]
+        if state.endswith("expired"):
+            terminal += [_wev("owed-unobservable", _WB, 60, criterion="AC1", capability="fixture", why="expired")]
+        with patch.object(fold, "NOW", _WNOW):
+            ok(fold.spec_state([e for e in terminal if e["subject"] == _WB], set()) == state,
+               f"watchdog: fixture really is {state}")
+            ok(dispatch.wave_blocker(terminal, charter, _WA, 2) is None, "watchdog: terminal releases wave")
+            ok(_widle(terminal), "watchdog: terminal blocker never exempts A")
+finally:
+    _si_restore(saved)
+print("watchdog AC2 ok")
+
+# AC3: dependency holds never exempt; capability holds still do.
+for terminal in (None, "spec-killed", "void", "shipped"):
+    events = [_wev("spec-written", age=150), _wev("dependency-hold", age=100, waits_for=_WB, why="fixture"),
+              _wev("spec-written", _WB, 180)]
+    if terminal:
+        events += [_wev(terminal, _WB, 70)]
+    ok(bool(autodispatch.held_by_dependency(events[:2], events)) == (terminal != "shipped"),
+       "watchdog: only shipped dependency lifts hold")
+    ok(_widle(events), "watchdog: dependency held spec is idle")
+    ok(not _widle(events, held={_WA}), "watchdog: capability hold remains exempt")
+for target, attr in ((fold, "answered"), (dispatch, "wave_blocker")):
+    briefs = []
+    events = [_wev("spec-written"), _wev("spec-written", _WB)]
+    # A late raise must not leave A's already-computed brief on disk.
+    values = iter([None, RuntimeError("watchdog-induced")])
+    def _late_raise(*args, **kw):
+        value = next(values)
+        if isinstance(value, Exception):
+            raise value
+        return value
+    kwargs = {"side_effect": RuntimeError("watchdog-induced")} if attr == "answered" else {"side_effect": _late_raise}
+    with patch.object(autodispatch, "candidates", return_value=[]), patch.object(target, attr, **kwargs):
+        look._check_spec_idle(events, _WNOW, newroot(), briefs, [])
+    ok(len(briefs) == 1 and briefs[0]["key"] == "undetermined:spec-idle", "watchdog: whole sweep undetermined")
+print("watchdog AC3 ok")
+
+
+def _wrow(rule="build", **fields):
+    return dict(spec=_WA, rule=rule, since=iso(_WNOW - timedelta(minutes=120)), limit_min=30,
+                overdue=True, reason="fixture", reason_live=False, action="none", **fields)
+
+
+def _wchild(root):
+    code = "import fold,json; e=fold.read_events(); print(json.dumps({'events': e, 'open': fold.open_escalations(e)}))"
+    child = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True,
+                           env={**os.environ, "DOIT_ROOT": str(root), "DOIT_PROJECT": "",
+                                "PYTHONPATH": str(pathlib.Path(__file__).resolve().parent)})
+    return json.loads(child.stdout)
+
+
+# AC4: only inbox, exact key dedupe, and a deadline from the injected clock.
+root = newroot()
+rows = [dict(_wrow(rule), reason=rule) for rule in ("build", "grade", "review", "merge")]
+with patch.object(lane_rules, "due", return_value=rows), \
+     patch.object(lane_rules, "ladder", side_effect=lambda events, row, now: {"build": "inbox", "grade": "act", "review": "retry", "merge": "digest"}[row["rule"]]):
+    look._check_lane_stale([], _WNOW, root, [])
+    look._check_lane_stale([], _WNOW, root, [])  # stale snapshot must also dedupe
+    look._check_lane_stale(read_ledger(root), _WNOW, root, [])
+raw = look._read_jsonl(root / "events" / look.LEDGER_NAME)
+ok(len(raw) == 1, "watchdog: inbox only, no duplicate")
+escalation = raw[0]
+ok(escalation["subject"] == f"lane-stale:{_WA}" and escalation["owner"] == "thinker"
+   and escalation["spec"] == _WA and escalation["rule"] == "build" and escalation["since"] == rows[0]["since"]
+   and escalation["deadline"] == iso(_WNOW + timedelta(hours=24)) and "actor" not in escalation
+   and escalation["default"] and escalation["revert"], "watchdog: complete escalation envelope")
+with patch.object(lane_rules, "due", return_value=[dict(rows[0], since=iso(_WNOW))]), \
+     patch.object(lane_rules, "ladder", return_value="inbox"):
+    look._check_lane_stale([], _WNOW, root, [])
+ok(len(look._read_jsonl(root / "events" / look.LEDGER_NAME)) == 2, "watchdog: new since is a new key")
+print("watchdog AC4 ok")
+
+# AC5: production candidate and retry remain available after escalation.
+root = newroot()
+saved = _ad_root_setup(root, project="watchdog")
+try:
+    (root / "content" / f"{_WA}.md").write_text(CLEAN_SPEC_AD)
+    events = [_wev("spec-written", project="watchdog")]
+    specs = fold.fold(events)[0]
+    before = autodispatch.candidates(events, specs, _WNOW)
+    ok(any(r["spec"] == _WA and r["status"] == "dispatchable" for r in before), "watchdog: build initially dispatchable")
+    row = next(r for r in lane_rules.due(events, specs, _WNOW) if r["rule"] == "build")
+    retry = _wev("autodispatched", age=40, rule="build", since=row["since"], trigger="retry")
+    events += [retry]
+    ok(lane_rules.ladder(events, row, _WNOW) == "inbox", "watchdog: real retry aged to inbox")
+    look._check_lane_stale(events, _WNOW, root, [])
+    after_events = events + read_ledger(root)
+    after = autodispatch.candidates(after_events, fold.fold(after_events)[0], _WNOW)
+    ok(before == after, "watchdog: candidate rows unchanged")
+    ok(_WA not in tick.in_flight(after_events), "watchdog: spec stays on lane")
+    ok([e["subject"] for e in fold.open_escalations(after_events)] == [f"lane-stale:{_WA}"], "watchdog: separate subject only")
+finally:
+    _ad_root_restore(saved)
+print("watchdog AC5 ok")
+
+# AC6: actual emit, then an entirely new fold process reads the disk.
+root = newroot()
+row = dict(_wrow("idle"), reason="undetermined: fixture read failed")
+with patch.object(lane_rules, "due", return_value=[row]):
+    look._check_lane_stale([], _WNOW, root, [])
+    look._check_lane_stale([], _WNOW, root, [])
+child = _wchild(root)
+ok(len(child["open"]) == 1 and child["open"][0]["rule"] == "idle"
+   and child["open"][0]["subject"] == f"lane-stale:{_WA}", "watchdog: child sees undetermined escalation exactly once")
+print("watchdog AC6 ok")
+
+# AC7 follows the binding merged seam: shipped targets lift immediately;
+# remaining overdue holds start at retry, then climb to inbox after one retry.
+for rule in ("wave-held", "dependency-held"):
+    root = newroot()
+    saved = _si_setup(root)
+    try:
+        charter = "L-charter-9139"
+        (root / "content" / f"plan-{charter}.md").write_text(
+            "## Unit A\nFootprint:\n- later.py\nWave: 2\n\n## Unit B\nFootprint:\n- first.py\nWave: 1\n")
+        events = [_wev("spec-written", age=200), _wev("spec-written", _WB, 180),
+                  _wev("merge-gate-clean", _WB, 0)]
+        if rule == "wave-held":
+            events[0].update(charter=charter, footprint=["later.py"])
+            events[1].update(charter=charter, footprint=["first.py"])
+        else:
+            events += [_wev("dependency-hold", age=120, waits_for=_WB, why="fixture")]
+        specs = fold.fold(events)[0]
+        for minutes, overdue, rung in ((9, False, "act"), (11, True, "retry")):
+            now = _WNOW + timedelta(minutes=minutes)
+            row = next(r for r in lane_rules.due(events, specs, now)
+                       if r["spec"] == _WA and r["rule"] == rule)
+            ok(row["overdue"] == overdue and row["limit_min"] == 10,
+               f"watchdog: {rule} actual due boundary at {minutes} minutes")
+            ok(lane_rules.ladder(events, row, now) == rung, f"watchdog: {rule} initial {rung}")
+            look._check_lane_stale(events, now, root, [])
+        ok(not read_ledger(root), f"watchdog: {rule} act/retry never escalate")
+        retry = _wev("autodispatched", age=-11, trigger="retry", rule=rule, since=row["since"])
+        retried = events + [retry]
+        ok(lane_rules.ladder(retried, row, _WNOW + timedelta(minutes=20)) == "retry",
+           f"watchdog: {rule} retry still within limit")
+        now = _WNOW + timedelta(minutes=22)
+        ok(lane_rules.ladder(retried, row, now) == "inbox", f"watchdog: {rule} aged retry reaches inbox")
+        look._check_lane_stale(retried, now, root, [])
+        look._check_lane_stale(retried, now, root, [])
+        alerts = read_ledger(root)
+        ok(len(alerts) == 1 and alerts[0]["rule"] == rule
+           and alerts[0]["subject"] == f"lane-stale:{_WA}", f"watchdog: {rule} escalates once")
+        ok(lane_rules.ladder(retried + alerts, row, now) == "digest", f"watchdog: {rule} digest after inbox")
+        own = [e for e in events if e["subject"] == _WA]
+        ok(look._spec_idle_bad(_WA, {"state": "written"}, own, events,
+                              {_WA: {"status": "blocked"}}, set(), set(),
+                              _WNOW + timedelta(minutes=71)), f"watchdog: {rule} overdue blocker never exempts A")
+        shipped = events + [_wev("shipped", _WB, 0)]
+        shipped_specs = fold.fold(shipped)[0]
+        for minutes in (9, 11):
+            now = _WNOW + timedelta(minutes=minutes)
+            ok(not any(r["spec"] == _WA and r["rule"] == rule
+                       for r in lane_rules.due(shipped, shipped_specs, now)),
+               f"watchdog: {rule} shipped target already released at {minutes} minutes")
+        ok(_widle(shipped), f"watchdog: {rule} shipped target never exempts A")
+    finally:
+        _si_restore(saved)
+print("watchdog AC7 ok")
+
+# AC8: missing and malformed tables, outage recovery, and honest failed sends.
+for broken in ("missing", "malformed"):
+    for result in (0, 1, "raise"):
+        root = newroot()
+        path = root / "bad-rules.toml"
+        if broken == "malformed":
+            path.write_text("[[broken")
+        env = {"DOIT_LANE_RULES": str(path)}
+        events = [_wev("spec-written")]
+        specs = fold.fold(events)[0]
+        baseline = autodispatch.candidates(events, specs, _WNOW)
+        sender_result = {"side_effect": RuntimeError("sender failed")} if result == "raise" else {"return_value": result}
+        with patch.dict(os.environ, env), patch.object(look, "_send_operator", **sender_result):
+            for repeat in range(2):
+                res = look.run(events + read_ledger(root), now=_WNOW, root=root, runner=FakeRunner(), toml_path=clean_toml(root))
+                keys = {b["key"] for b in res["briefs"] if b["condition"] == "reading-undetermined"}
+                if repeat == 0:
+                    ok({"undetermined:dispatch-stale", "undetermined:spec-idle"} <= keys, "watchdog: limits undetermined")
+            alerts = [e for e in look._read_jsonl(root / "events" / look.LEDGER_NAME) if e.get("kind") == "lane-rules-unreadable"]
+            ok(len(alerts) == 1 and alerts[0]["sent"] == ("yes" if result == 0 else "no"), "watchdog: one honest alert per outage")
+            ok(autodispatch.candidates(events, specs, _WNOW) == baseline, "watchdog: broken table never gates dispatch")
+            path.write_text(_wtable.read_text())
+            look.run(read_ledger(root), now=_WNOW, root=root, runner=FakeRunner(), toml_path=clean_toml(root))
+            path.write_text("[[broken")
+            look.run(read_ledger(root), now=_WNOW, root=root, runner=FakeRunner(), toml_path=clean_toml(root))
+            alerts = [e for e in look._read_jsonl(root / "events" / look.LEDGER_NAME) if e.get("kind") == "lane-rules-unreadable"]
+            ok(len(alerts) == 2, "watchdog: successful load re-arms alert independent of emitted ts")
+print("watchdog AC8 ok")
+
+
+def _wstart(root, name, when):
+    import cron_run
+    path = cron_run.store_path(name, root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as stream:
+        stream.write(json.dumps(dict(ev="start", ts=iso(when), pid=1)) + "\n")
+
+
+# AC9: clock gaps, retries, successful dedupe, recovery, absent/unreadable stores.
+with patch.dict(os.environ, DOIT_TICK_MIN="5"):
+    for first in (0, 1, "missing"):
+        root, calls = newroot(), []
+        _wstart(root, "tick", _WNOW - timedelta(minutes=10))
+        def sender(text):
+            calls.append(text)
+            return first if first != "missing" else 1
+        ok(not look.heartbeat_missed("tick", _WNOW, [], root=root, sender=sender), "watchdog: 10 minutes healthy")
+        ok(not calls, "watchdog: healthy heartbeat sends nothing")
+        now = _WNOW + timedelta(minutes=6)
+        if first == "missing":
+            with patch.object(look, "_send_operator", return_value=1):
+                look.heartbeat_missed("tick", now, [], root=root)
+        else:
+            look.heartbeat_missed("tick", now, [], root=root, sender=sender)
+        look.heartbeat_missed("tick", now, [], root=root, sender=sender)
+        for _ in range(2):
+            look.heartbeat_missed("tick", now, [], root=root, sender=lambda text: calls.append(text) or 0)
+        alerts = look._read_jsonl(root / "events" / look.LEDGER_NAME)
+        ok([e["sent"] for e in alerts] == (["yes"] if first == 0 else ["no", "yes"]), "watchdog: at most no then yes")
+        ok(alerts[0]["last_start"] == iso(_WNOW - timedelta(minutes=10))
+           and alerts[0]["measured_at"] == iso(now) and all("actor" not in e for e in alerts), "watchdog: injected time recorded")
+        count = len(calls)
+        _wstart(root, "tick", now)
+        ok(not look.heartbeat_missed("tick", now, [], root=root, sender=sender), "watchdog: fresh start ends outage")
+        look.heartbeat_missed("tick", now + timedelta(minutes=16), [], root=root, sender=lambda text: calls.append(text) or 0)
+        ok(len(calls) == count + 1, "watchdog: newer start permits next outage")
+    for broken in ("absent", "unreadable"):
+        root = newroot()
+        if broken == "unreadable":
+            import cron_run
+            cron_run.store_path("tick", root).mkdir(parents=True)
+        calls = []
+        ok(look.heartbeat_missed("tick", _WNOW, [], root=root, sender=lambda text: calls.append(text) or 0),
+           "watchdog: unknown heartbeat missed")
+        ok(len(calls) == 1, "watchdog: missing/unreadable store alerts")
+    root = newroot()
+    with patch.object(look, "_send_operator", return_value=0) as send:
+        look.run([], now=_WNOW, root=root, runner=FakeRunner(), toml_path=clean_toml(root), dry_run=True)
+        ok(not send.called, "watchdog: dry run never sends")
+        ok(not look._read_jsonl(root / "events" / look.LEDGER_NAME), "watchdog: dry run never appends")
+print("watchdog AC9 ok")
+
+# Signed CLI responses use the repository's backend-evidence convention.
+import hashlib
+for criterion in (1, 2, 3, 4, 5, 6, 7, 8, 9):
+    body = json.dumps({"criterion": f"AC{criterion}", "checks_passed": n}, sort_keys=True)
+    print(json.dumps(dict(url=f"cli://look/watchdog/AC{criterion}", status=0,
+                          body_sha256=hashlib.sha256(body.encode()).hexdigest(), body_excerpt=body)))

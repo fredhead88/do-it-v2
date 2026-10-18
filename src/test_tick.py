@@ -19,6 +19,11 @@ os.environ["V4_STAGING_DIR"] = str(TMP / "v4-staging")
 os.environ.pop("DOIT_PROJECT", None)
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 import carry, fold, intake, pane_resume, tick  # noqa: E402
+import look as _watchdog_look
+_watchdog_look._send_operator = lambda text, root: 0
+_real_heartbeat_missed = _watchdog_look.heartbeat_missed
+# Historical fixtures count every tick-ledger line; keep their cron healthy.
+_watchdog_look.heartbeat_missed = lambda *args, **kw: False
 
 # Rebind cached modules too when several script-style suites are collected.
 tick._bind_root(TMP)
@@ -884,6 +889,10 @@ DOIT_BIN = str(pathlib.Path(__file__).resolve().parent.parent / "doit")
 def _fresh_root(name):
     r = TMP / name
     (r / "events").mkdir(parents=True, exist_ok=True)
+    # CLI subprocesses also need a healthy cron fixture, not an operator send.
+    store = r / "state" / "cron-runs" / "look.jsonl"
+    store.parent.mkdir(parents=True, exist_ok=True)
+    store.write_text(json.dumps({"ev": "start", "ts": NOW, "pid": 1}) + "\n")
     return r
 
 
@@ -1328,6 +1337,9 @@ class _FakeLook:
     def _read_state(self, root):
         return self._state
 
+    def heartbeat_missed(self, *args, **kw):
+        return False
+
 
 class _CronsMissingLook:
     @staticmethod
@@ -1349,7 +1361,8 @@ sys.modules["crons"], sys.modules["look"] = _CronsMissingLook(), fakelook11
 try:
     assert tick.main() == 0, "AC11: a tick with the look row missing still exits clean"
 finally:
-    del sys.modules["crons"], sys.modules["look"]
+    del sys.modules["crons"]
+    sys.modules["look"] = _watchdog_look
 assert fakelook11.calls == [("cron-missing", "look", "thinker")], \
     f"AC11: exactly one cron-missing/look/thinker call via look.emit_once: {fakelook11.calls}"
 assert "look_error" not in ticks()[-1], "AC11: no look_error on a clean (stub-importable) pass"
@@ -1389,7 +1402,8 @@ sys.modules["crons"], sys.modules["look"] = _CronsPresent(), fakelook17
 try:
     assert tick.main() == 0
 finally:
-    del sys.modules["crons"], sys.modules["look"]
+    del sys.modules["crons"]
+    sys.modules["look"] = _watchdog_look
 assert fakelook17.calls == [("look-stale", "look-stale", "thinker")], \
     f"AC17: a stale last_pass (row present) briefs look-stale/thinker: {fakelook17.calls}"
 fold.EVENTS = saved_events
@@ -1403,7 +1417,8 @@ sys.modules["crons"], sys.modules["look"] = _CronsPresent(), fakelook17b
 try:
     assert tick.main() == 0
 finally:
-    del sys.modules["crons"], sys.modules["look"]
+    del sys.modules["crons"]
+    sys.modules["look"] = _watchdog_look
 assert fakelook17b.calls == [], "AC17: within 25 minutes, no look-stale brief"
 fold.EVENTS = saved_events
 
@@ -2007,3 +2022,68 @@ def test_dependency_hold_lane():
 
 
 test_dependency_hold_lane()
+
+# AC10: exercise the real heartbeat write path, keeping prior look-stale
+# assertions unchanged above. Every sender remains a stub.
+from unittest.mock import patch
+import cron_run, subprocess
+
+_watchdog_look.heartbeat_missed = _real_heartbeat_missed
+_wnow = datetime.datetime(2031, 3, 1, 12, tzinfo=datetime.timezone.utc)
+
+
+def _watchdog_start(root, when):
+    store = cron_run.store_path("look", root)
+    store.parent.mkdir(parents=True, exist_ok=True)
+    with store.open("a") as stream:
+        stream.write(json.dumps({"ev": "start", "ts": when.isoformat(timespec="seconds"), "pid": 1}) + "\n")
+
+
+for outcome in (0, 1, "raise"):
+    root = pathlib.Path(tempfile.mkdtemp())
+    calls = []
+    def _watchdog_send(text, root):
+        calls.append(text)
+        if outcome == "raise":
+            raise RuntimeError("watchdog sender exploded")
+        return outcome
+    with patch.object(fold, "ROOT", root), patch.object(fold, "EVENTS", root / "events"), \
+         patch.object(fold, "NOW", _wnow), patch.object(_watchdog_look, "_send_operator", side_effect=_watchdog_send):
+        _watchdog_start(root, _wnow - datetime.timedelta(minutes=29))
+        assert tick._record() is not None
+        assert not calls, "watchdog: 29-minute heartbeat gap stays healthy"
+        with patch.object(fold, "NOW", _wnow + datetime.timedelta(minutes=2)):
+            assert tick._record() is not None
+            assert tick._record() is not None
+        if outcome == "raise":
+            raw = [json.loads(line) for line in tick.tick_path().read_text().splitlines()]
+            assert "watchdog sender exploded" in [e for e in raw if e["type"] == "tick"][-1]["look_error"]
+        with patch.object(_watchdog_look, "_send_operator", return_value=0):
+            with patch.object(fold, "NOW", _wnow + datetime.timedelta(minutes=2)):
+                assert tick._record() is not None
+                assert tick._record() is not None
+        raw = [json.loads(line) for line in tick.tick_path().read_text().splitlines()]
+        alerts = [e for e in raw if e["type"] == "operator-alert"]
+        assert [e["sent"] for e in alerts] == (["yes"] if outcome == 0 else ["no", "yes"]), alerts
+        assert all(e["subject"] == "look" and e["kind"] == "heartbeat-missed" and "actor" not in e for e in alerts)
+        assert alerts[0]["last_start"] == (_wnow - datetime.timedelta(minutes=29)).isoformat(timespec="seconds")
+        assert alerts[0]["measured_at"] == (_wnow + datetime.timedelta(minutes=2)).isoformat(timespec="seconds")
+        child = subprocess.run([sys.executable, "-c",
+            "import fold,json; print(json.dumps([e for e in fold.read_events() if e['type']=='operator-alert']))"],
+            capture_output=True, text=True, check=True, env={**os.environ, "DOIT_ROOT": str(root), "DOIT_PROJECT": "",
+                "PYTHONPATH": str(pathlib.Path(__file__).resolve().parent)})
+        from_disk = json.loads(child.stdout)
+        assert len(from_disk) == len(alerts) and all(e["actor"] == "tick" for e in from_disk), from_disk
+        _watchdog_start(root, _wnow + datetime.timedelta(minutes=3))
+        with patch.object(fold, "NOW", _wnow + datetime.timedelta(minutes=34)), \
+             patch.object(_watchdog_look, "_send_operator", return_value=0):
+            assert tick._record() is not None
+        raw = [json.loads(line) for line in tick.tick_path().read_text().splitlines()]
+        assert len([e for e in raw if e.get("sent") == "yes"]) == 2, "watchdog: second outage sends again"
+print("watchdog AC10 ok")
+
+import hashlib
+_body = json.dumps({"criterion": "AC10", "child_ledger_rows": len(from_disk),
+                    "successful_outages": 2, "sender_exception_completed": True}, sort_keys=True)
+print(json.dumps(dict(url="cli://tick/watchdog/AC10", status=0,
+                      body_sha256=hashlib.sha256(_body.encode()).hexdigest(), body_excerpt=_body)))
