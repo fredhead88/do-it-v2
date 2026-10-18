@@ -396,6 +396,76 @@ def _write_env_file(tree, row, dsn):
     path.chmod(0o600)
 
 
+def _env_file_error(row):
+    names = row.get("env_vars", [])
+    if not isinstance(names, list):
+        return "env_vars must be a list of variable names"
+    forbidden = set(PROD_DSN_VARS) | set(row.get("db_env") or []) | set(row.get("admin_env") or [])
+    for name in names:
+        if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+            return "env_vars contains an invalid variable name"
+        if (re.search(r"KEY|TOKEN|SECRET|PASSWORD", name, re.I)
+                or name in forbidden or name.upper().endswith(("_URL", "_DSN"))):
+            return f"env_vars refuses secret or DSN name {name}"
+    return None
+
+
+def _env_values(text, names):
+    """Read literal dotenv assignments; never expand or execute their values."""
+    values = {}
+    for line in text.splitlines():
+        match = re.fullmatch(r"\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)", line)
+        if not match or match[1] not in names:
+            continue
+        value = match[2].strip()
+        if value.startswith(("'", '"')):
+            try:
+                parts = shlex.split(value, comments=True)
+            except ValueError:
+                continue
+            if len(parts) != 1:
+                continue
+            value = parts[0]
+        else:
+            value = re.split(r"\s+#", value, maxsplit=1)[0].rstrip()
+        values[match[1]] = value
+    return values
+
+
+def _provision_env_file(tree, row, dsn):
+    """Provision only declared names, then prove the destination (no values in reasons)."""
+    error = _env_file_error(row)
+    if error:
+        return False, error, {}
+    if "env_file" not in row:
+        _write_env_file(tree, row, dsn)
+        return True, None, {}
+    source = row["env_file"]
+    if not isinstance(source, str) or not pathlib.Path(source).is_absolute():
+        return False, "env_file must name an absolute source path", {}
+    names = set(row.get("env_vars", []))
+    try:
+        values = _env_values(pathlib.Path(source).read_text(), names)
+    except (OSError, UnicodeError):
+        return False, f"env_file source {source} is missing or unreadable", {}
+    missing = names - values.keys()
+    if missing:
+        return False, f"env_file source {source} lacks env_vars: {', '.join(sorted(missing))}", {}
+    path = pathlib.Path(tree) / ".env"
+    try:
+        path.touch(mode=0o600, exist_ok=True)
+        path.chmod(0o600)
+        path.write_text("".join(f"{name}={shlex.quote(value)}\n" for name, value in values.items())
+                        + ("".join(f"{name}={dsn}\n" for name in row.get("db_env", [])) if dsn else ""))
+        proven = _env_values(path.read_text(), names)
+    except (OSError, UnicodeError):
+        return False, f"env_file destination {path} could not be written or read", {}
+    missing = {name for name in names if name not in proven or proven[name] != values[name]}
+    if missing:
+        return False, f"env_file destination {path} lacks env_vars: {', '.join(sorted(missing))}", {}
+    return True, None, values
+
+
 def _db_setup_argv(row, project):
     setup = row.get("db_setup") or {}
     venv = row.get("venv") or ""
@@ -541,13 +611,20 @@ def _prove_node_modules(view, row, project):
         return False, "no node_dirs configured for this project"
     checkout, tree = _project_checkout(project), pathlib.Path(view) / "tree"
     for d in dirs:
-        src = checkout / d / "node_modules"
-        if not src.is_dir():
-            return False, f"{src} does not exist in the checkout"
+        declared = (row.get("node_modules") or {}).get(d)
+        src = pathlib.Path(declared) if declared is not None else checkout / d / "node_modules"
+        key = f"node_modules.{d}"
+        if not src.is_absolute() or not src.is_dir() or not os.access(src, os.R_OK | os.X_OK):
+            return False, f"{key} source {src} is missing, unreadable or not absolute"
         dst = tree / d / "node_modules"
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        if not (dst.is_symlink() or dst.exists()):
-            dst.symlink_to(src)
+        try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            if not (dst.is_symlink() or dst.exists()):
+                dst.symlink_to(src)
+            if not dst.is_symlink() or not dst.is_dir() or dst.resolve() != src.resolve():
+                return False, f"{key} destination {dst} does not resolve to source {src}"
+        except OSError:
+            return False, f"{key} source {src} could not be linked at {dst}"
     return True, None
 
 
@@ -610,8 +687,16 @@ def preflight(role, subject, view, project, *, repo, mcp_config=None, owed=froze
     tree = view / "tree"
     spec_text, verify_text = _spec_verify_text(subject, role)
     caps = required(role, spec_text, verify_text, project, owed=owed, routed=routed)
+    if role == "grader" and not routed:
+        # Route git on this default entry point too. Keep other capabilities
+        # in a mixed criterion active so a missing dependency is still proved.
+        if any(cap == "git" for cap, _ in route(spec_text, verify_text, project).values()):
+            caps = [cap for cap in caps if cap != "git"]
     row = _project_row(project)
     reasons = {}
+    env_file_vars = {}
+    if role != "reviewer" and (error := _env_file_error(row)):
+        reasons["env-file"] = error
 
     dsn = None
     admin_dsn = None
@@ -624,8 +709,10 @@ def preflight(role, subject, view, project, *, repo, mcp_config=None, owed=froze
         ok, reason, admin_dsn = _prove_db(view, admin=True, avoid_port=first_port)
         if not ok:
             reasons["db"] = reason
-    if "env-file" in caps:
-        _write_env_file(tree, row, None if "db" in reasons else dsn)
+    if "env-file" in caps and "env-file" not in reasons:
+        ok, reason, env_file_vars = _provision_env_file(tree, row, None if "db" in reasons else dsn)
+        if not ok:
+            reasons["env-file"] = reason
     # A project with no db_setup row in grading.toml has no schema to migrate,
     # so no criterion of it can need a schema proof (same rule as deploy below).
     if "db-schema" in caps and row.get("db_setup"):
@@ -653,8 +740,6 @@ def preflight(role, subject, view, project, *, repo, mcp_config=None, owed=froze
         ok, reason = _prove_tools(view, project, repo, caps_text, venv_path)
         if not ok:
             reasons["tools"] = reason
-    if "git" in caps:  # SD-R12-3: detected, never provisioned (R8 git-less invariant) — always a failure
-        reasons["git"] = "git is never provisioned into a grader view (R8 git-less invariant)"
     # Browser and review-account proofs apply only to a project with a
     # [[prod]] row: a project with no deployed site has no page for any
     # criterion to open (the same rule as deploy below).
@@ -680,7 +765,7 @@ def preflight(role, subject, view, project, *, repo, mcp_config=None, owed=froze
         _write_state(view, venv=venv_path,
                      db_env_names=(row.get("db_env") or []) if dsn else [], dsn=dsn or "",
                      admin_env_names=(row.get("admin_env") or []) if admin_dsn else [],
-                     admin_dsn=admin_dsn or "")
+                     admin_dsn=admin_dsn or "", env_file_vars=env_file_vars)
     return [(c, reasons[c]) for c in CAPABILITIES if c in reasons]
 
 
@@ -722,6 +807,7 @@ def pane_env(view):
             state = {}
     venv = state.get("venv") or ""
     env = {"HOME": str(view), "PATH": f"{venv}/bin:/usr/bin:/bin" if venv else "/usr/bin:/bin"}
+    env.update(state.get("env_file_vars") or {})
     dsn = state.get("dsn")
     if dsn:
         for name in state.get("db_env_names") or []:
@@ -750,7 +836,7 @@ def write_grading_env(view):
     path = view / "grading.env"
     path.touch(mode=0o600, exist_ok=True)
     path.chmod(0o600)
-    path.write_text("".join(f"export {k}={shlex.quote(str(v))}\n" for k, v in env.items() if v != ""))
+    path.write_text("".join(f"export {k}={shlex.quote(str(v))}\n" for k, v in env.items()))
     path.chmod(0o600)
     return path
 

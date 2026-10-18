@@ -85,6 +85,23 @@ python3 verify.py
             self.assertEqual(fold.capability_holds(events)[f'capability:{cap}:L-spec-A']['specs'],
                              {'L-spec-A'})
 
+    def test_git_routes_by_default_without_hiding_other_failures(self):
+        git = 'AC1 [backend]: History.\nreview_path: run git log -1\n'
+        for extra, expected in [('', []), (
+                'AC2 [backend]: Dependencies.\nreview_path: npm test', ['node_modules']), (
+                'AC1 [backend]: History and dependencies.\nreview_path: git log -1 && npm test',
+                ['node_modules'])]:
+            spec = git + extra
+            with tempfile.TemporaryDirectory() as tmp:
+                view = Path(tmp)
+                (view / 'tree').mkdir()
+                with patch.object(grading_env, '_spec_verify_text', return_value=(spec, '')), \
+                        patch.object(grading_env, '_project_row', return_value={}), \
+                        patch.object(grading_env, '_look_toml', return_value={}):
+                    self.assertIn('git', grading_env.required('grader', spec, '', 'unknown'))
+                    failures = grading_env.preflight('grader', 'L-spec-A', view, 'unknown', repo=tmp)
+                    self.assertEqual([cap for cap, _ in failures], expected)
+
 
 if __name__ == '__main__':
     unittest.main()
