@@ -134,8 +134,13 @@ moment `BOARD_OWNERS` names you as its owner.
   Run `doit gate` per branch exactly as above and do NOT run `git merge` yourself:
   collect the gate-clean branches into a window — it opens with the first one and
   closes after at most 15 minutes or the configured cap (`[window_gate] max_merges`, default 10) of merges, whichever comes first — then run
-  `doit gate-window <window-id> --project albert-scott --specs A,B,C` (one window at
-  a time; the command holds the lock). It builds the candidate tip with ref-only git,
+  `doit gate-window <window-id> --project albert-scott --specs A,B,C [--after <predecessor>]`.
+  Windows may run up to `[window_gate] train_depth` deep (default 2). Read
+  `window_gate.in_flight(events)` and take its newest entry with exactly one
+  `window-candidate` as the predecessor, passing `--after <that window>`; when
+  `in_flight()` is empty, pass no `--after`. The command holds its slot through
+  cancellation and a single rebuild on master; `window-cancelled` is not terminal.
+  It builds the candidate tip with ref-only git,
   runs the full suite once on it, and only then fast-forwards master. It writes the
   `shipped`, `window-verified`, `window-dropped`, `merge-conflict` and
   `escalation-blocking` events itself — never hand-append them. Act on its exit code:
@@ -146,8 +151,10 @@ moment `BOARD_OWNERS` names you as its owner.
   `repeat-rejection:` or `cap:`), and the spec rejoins the next window after its
   `build-done`; a `merge-conflict` in the window is the conflict flow above;
   **2** the whole window is red or could not be verified, master did not move, an
-  `escalation-blocking` is filed: do nothing further on it; **3** another window holds
-  the lock: do nothing, the next pass retries; **4** `DOIT_WINDOW_GATE=off` bypass: only
+  `escalation-blocking` is filed: do nothing further on it; **3** no slot is free,
+  another window is in flight, or the predecessor is not in flight, not yet a
+  candidate, or past its first verification: do nothing, the next pass retries;
+  **4** `DOIT_WINDOW_GATE=off` bypass: only
   for an operator-declared CI outage, logged as one `window-gate-bypassed` per spec —
   merge directly as below. You never set `DOIT_WINDOW_GATE=off` yourself, never loop a
   third verification, and never move master by any other route. Every other project

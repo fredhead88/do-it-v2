@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """window_gate — verify a merge WINDOW's candidate tip before master moves (L-spec-0765).
 
-    doit gate-window <window-id> --project albert-scott [--specs A,B,C] [--main BRANCH] [--fixes-base]
+    doit gate-window <window-id> --project albert-scott [--specs A,B,C] [--after WINDOW] [--main BRANCH] [--fixes-base]
 
 Today nobody runs the full Python suite until a deploy, so one bad merge hides
 behind twenty-four good ones. For project `albert-scott` the Executor instead
@@ -27,13 +27,14 @@ Exit codes (the Executor contract, agents/executor.md, mirrors these):
   0  advanced: every spec in the window shipped
   1  partially advanced: some specs dropped (window-dropped / merge-conflict), the rest shipped
   2  red or undetermined: master did not move (an escalation-blocking is filed)
-  3  another window holds the lock: do nothing, the next pass retries
+  3  no slot free, predecessor absent/not yet a candidate/past its first verification: retry next pass
   4  DOIT_WINDOW_GATE=off: bypassed, one window-gate-bypassed event per spec;
      use the direct merge path (operator-declared CI outage only)
 
 Env: DOIT_WINDOW_PREDEPLOY (override the script path), DOIT_WINDOW_VERIFY_TIMEOUT_SECS.
 """
-import io, json, math, os, pathlib, posixpath, re, shlex, signal, subprocess, sys, time, zipfile, zlib
+import io, json, math, os, pathlib, posixpath, re, shlex, shutil, signal, subprocess, sys, time, zipfile, zlib
+from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
@@ -61,6 +62,8 @@ NODE_RE = re.compile(r"[\w./-]+\.py::[^\s\"',\]]+")
 IMPORT_RE = re.compile(r"^\s*(?:from\s+([\w.]+)\s+import\s+([\w, ()*]+)|import\s+([\w., ]+))", re.M)
 IMPORT_ROOTS = ("api/", "pipelines/", "agents/", "tests/")
 IDENT = ("-c", "user.name=doit-window", "-c", "user.email=doit-window@localhost")
+TRAIN_POLL_S = 15
+_VERIFY_TRAIN = ContextVar("window_train", default=None)
 
 
 class Red(Exception):
@@ -118,40 +121,220 @@ def ev(typ, subject, **kv):
         fold.NOW = original_now
 
 
-def escalate(window, why):
+def escalate(window, why, outcome=None):
     due = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(timespec="seconds")
-    ev("escalation-blocking", window, why=why,
+    ev("escalation-blocking", window, why=why, outcome=outcome,
        default="master stays where it is; the window's specs stay unshipped until an operator decides",
        deadline=due,
        revert="rerun `doit gate-window` once the cause is fixed, or DOIT_WINDOW_GATE=off for a declared CI outage")
 
 
 # ── lock ────────────────────────────────────────────────────────────────────
-def lock_path():
-    return fold.ROOT / "state" / "window-gate.lock"
+def lock_path(slot=0, root=None):
+    return pathlib.Path(root if root is not None else fold.ROOT) / "state" / f"window-gate.{slot}.lock"
 
 
-def acquire():
-    p = lock_path()
+def lock_holder(slot, root=None):
+    try:
+        words = lock_path(slot, root).read_text().split()
+        pid = int(words[0])
+        if pid <= 0:
+            return None
+        os.kill(pid, 0)
+        return pid, words[1] if len(words) == 2 else None
+    except PermissionError:
+        return (pid, words[1] if len(words) == 2 else None) if 'pid' in locals() else (None, None)
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def acquire(window="", slot=0):
+    p = lock_path(slot)
     p.parent.mkdir(parents=True, exist_ok=True)
     for _ in range(2):
         try:
             fd = os.open(p, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.write(fd, str(os.getpid()).encode()), os.close(fd)
+            try:
+                os.write(fd, f"{os.getpid()} {window}".encode())
+            finally:
+                os.close(fd)
             return True
         except FileExistsError:
-            try:
-                os.kill(int(p.read_text().strip() or 0), 0)
+            if lock_holder(slot) is not None:
                 return False                       # holder alive
-            except (ValueError, ProcessLookupError):
-                p.unlink(missing_ok=True)          # stale: its owner is gone
-            except PermissionError:
-                return False
+            p.unlink(missing_ok=True)              # stale: its owner is gone
     return False
 
 
-def release():
-    lock_path().unlink(missing_ok=True)
+def release(slot=0):
+    lock_path(slot).unlink(missing_ok=True)
+
+
+def in_flight(events, root=None):
+    """Candidates with a live, matching slot holder; cancellation is not terminal."""
+    latest, terminal = {}, set()
+    for event in events:
+        name, kind = event.get("subject"), event.get("type")
+        if kind == "window-candidate":
+            latest[name] = event
+        elif kind in ("window-verified", "escalation-blocking"):
+            terminal.add(name)
+    rows = []
+    for name, event in latest.items():
+        slot = event.get("slot")
+        if name in terminal or type(slot) is not int or slot < 0:
+            continue
+        holder = lock_holder(slot, root)
+        if holder is not None and holder[1] == name:
+            rows.append(dict(window=name, **{key: event.get(key) for key in
+                             ("sha", "verified_on", "after", "specs", "slot")}))
+    return rows
+
+
+def train_events():
+    """A torn or unreadable ledger cannot establish a speculative merge base."""
+    if fold.EVENTS.exists():
+        for path in fold.EVENTS.iterdir():
+            if path.suffix != ".jsonl":
+                continue
+            for line in path.read_text().splitlines():
+                if line.strip():
+                    try:
+                        if not isinstance(json.loads(line), dict):
+                            raise ValueError("event is not an object")
+                    except ValueError as exc:
+                        raise OSError("train ledger unreadable") from exc
+    return fold.read_events()
+
+
+def red_rate(events, now, hours=24):
+    """Distinct terminal windows in the trailing day; a dropped subset is red."""
+    now = datetime.fromisoformat(str(now).replace("Z", "+00:00")) if not isinstance(now, datetime) else now
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    known = {e.get("subject") for e in events if e.get("type") in ("window-opened", "window-candidate", "window-verified")}
+    known.update(e.get("window") for e in events if e.get("type") in ("window-dropped", "merge-conflict"))
+    terminals, reds = {}, set()
+    for event in events:
+        kind, name = event.get("type"), event.get("subject")
+        if kind == "window-dropped" and event.get("nodes"):
+            reds.add(event.get("window"))
+        if kind == "window-verified" or (kind == "escalation-blocking" and
+                (name in known or event.get("outcome") in ("red", "undetermined", "base-not-releasable"))):
+            try:
+                stamp = datetime.fromisoformat(str(event.get("ts")).replace("Z", "+00:00"))
+                if stamp.tzinfo is None:
+                    stamp = stamp.replace(tzinfo=timezone.utc)
+            except (ValueError, TypeError):
+                continue
+            terminals[name] = stamp
+            if event.get("dropped") or event.get("outcome") == "red":
+                reds.add(name)
+    windows = {name for name, stamp in terminals.items() if now - timedelta(hours=hours) <= stamp <= now}
+    red = len(windows & reds)
+    return dict(rate=red / len(windows) if len(windows) >= 5 else None, red=red, windows=len(windows))
+
+
+def train_depth(env, toml_path=None, root=None, events=None, now=None):
+    """Pure configuration/health projection; reading it never emits or notifies."""
+    value = 2
+    try:
+        import tomllib
+        with open(toml_path if toml_path is not None else DEFAULT_TOML_PATH, "rb") as stream:
+            value = tomllib.load(stream).get("window_gate", {}).get("train_depth")
+    except (OSError, ValueError, TypeError, AttributeError, ImportError):
+        value = None
+    value = env.get("DOIT_WINDOW_TRAIN_DEPTH", value)
+    configured = int(value) if ((type(value) is int or isinstance(value, str) and re.fullmatch(r"[0-9]+", value))
+                                and int(value) >= 1) else 1
+    disk_pct, reason, depth = None, "configured", configured
+    try:
+        disk = shutil.disk_usage(pathlib.Path(root if root is not None else env.get("DOIT_ROOT", fold.ROOT)))
+        disk_pct = 100 * disk.used / disk.total
+        if disk_pct > 90:
+            depth, reason = 1, "disk-over-90"
+    except (OSError, ValueError, ZeroDivisionError):
+        depth, reason = 1, "disk-unreadable"
+    try:
+        rate = red_rate(train_events() if events is None else events, now or datetime.now(timezone.utc))["rate"]
+    except (OSError, ValueError, TypeError):
+        rate, depth, reason = None, 1, "ledger-unreadable"
+    if rate is not None and rate > .40:
+        depth, reason = 1, "red-rate-over-0.40" if depth != 1 or reason == "configured" else reason
+    return dict(depth=depth, configured=configured, disk_pct=disk_pct, red_rate=rate, reason=reason)
+
+
+def record_depth(depth_dict, events, env):
+    previous = next((e.get("depth") for e in reversed(events) if e.get("type") == "train-depth"), depth_dict["configured"])
+    if previous == depth_dict["depth"]:
+        return
+    telegram = "sent"
+    try:
+        script = pathlib.Path(env.get("DOIT_ROOT", fold.ROOT)) / "telegram" / "tg-send.sh"
+        text = f"Merge train depth {previous} -> {depth_dict['depth']}: {depth_dict['reason']}"
+        if subprocess.run(["bash", str(script), text], capture_output=True, timeout=30).returncode:
+            telegram = "failed"
+    except (OSError, subprocess.SubprocessError):
+        telegram = "failed"
+    ev("train-depth", "merge-train", depth=depth_dict["depth"], **{"from": previous},
+       reason=depth_dict["reason"], disk_pct=depth_dict["disk_pct"], red_rate=depth_dict["red_rate"], telegram=telegram)
+
+
+class TrainCancelled(Exception):
+    pass
+
+
+def predecessor_state(repo, main, after, verified_on, events=None):
+    """None while pending, empty string when mergeable, otherwise a cancellation reason."""
+    try:
+        events = train_events() if events is None else events
+        related = [e for e in events if e.get("subject") == after or e.get("window") == after]
+        if any(e.get("type") == "window-dropped" and e.get("nodes") for e in related):
+            return "predecessor-red"
+        escalations = [e for e in related if e.get("subject") == after and e.get("type") == "escalation-blocking"]
+        if escalations:
+            return "predecessor-red" if escalations[-1].get("outcome") == "red" else "predecessor-undetermined"
+        verified = [e for e in related if e.get("subject") == after and e.get("type") == "window-verified"]
+        if not verified:
+            return None if any(e["window"] == after for e in in_flight(events)) else "predecessor-dead"
+        if verified[-1].get("dropped") or any(e.get("type") in ("window-deferred", "merge-conflict") for e in related):
+            return "predecessor-partial"
+        if any(e.get("type") == "shipped" and e.get("rechained") for e in related):
+            return "predecessor-rechained"
+        if verified[-1].get("sha") != verified_on:
+            return "base-moved"
+        if git(repo, "rev-parse", f"refs/heads/{main}").stdout.strip() != verified_on:
+            return "base-moved"
+        origin = git(repo, "ls-remote", "origin", f"refs/heads/{main}", check=False)
+        lines = origin.stdout.splitlines()
+        if origin.returncode or len(lines) != 1:
+            return "base-moved"
+        fields = lines[0].split()
+        if len(fields) != 2 or fields[1] != f"refs/heads/{main}" or not re.fullmatch(r"[0-9a-f]{40}", fields[0]):
+            return "base-moved"
+        if fields[0] != verified_on and git(repo, "merge-base", "--is-ancestor", fields[0], verified_on, check=False).returncode:
+            return "base-moved"
+        return ""
+    except (OSError, RuntimeError, ValueError, TypeError, subprocess.SubprocessError):
+        return "base-moved"
+
+
+def train_poll_secs():
+    return _positive_timeout(os.environ.get("DOIT_WINDOW_TRAIN_POLL_S")) or TRAIN_POLL_S
+
+
+def wait_predecessor(train, *, clock=time.monotonic, sleep=time.sleep):
+    deadline = clock() + verify_timeout_secs(os.environ) + 600
+    while True:
+        reason = predecessor_state(**train)
+        if reason is not None:
+            if reason:
+                raise TrainCancelled(reason)
+            return
+        left = deadline - clock()
+        if left <= 0:
+            raise TrainCancelled("predecessor-timeout")
+        sleep(min(train_poll_secs(), left))
 
 
 # ── candidate build (plumbing only) ─────────────────────────────────────────
@@ -367,13 +550,28 @@ def verify(repo, cand, required, window):
         proc = subprocess.Popen(["bash", script], cwd=str(repo), env=env, text=True, start_new_session=True,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         try:
-            out, _ = proc.communicate(timeout=timeout)
+            train = _VERIFY_TRAIN.get()
+            if train is None or train["window"] != window:
+                out, _ = proc.communicate(timeout=timeout)
+            else:
+                deadline = time.monotonic() + timeout
+                while True:
+                    reason = predecessor_state(**{k: v for k, v in train.items() if k != "window"})
+                    if reason:
+                        raise TrainCancelled(reason)
+                    left = deadline - time.monotonic()
+                    if left <= 0:
+                        raise subprocess.TimeoutExpired(proc.args, timeout)
+                    try:
+                        out, _ = proc.communicate(timeout=min(train_poll_secs(), left))
+                        break
+                    except subprocess.TimeoutExpired:
+                        continue
+        except TrainCancelled:
+            stop_verification(proc)
+            raise
         except subprocess.TimeoutExpired:
-            os.killpg(proc.pid, signal.SIGTERM)       # the script's own trap cancels + deletes its ref
-            try:
-                proc.communicate(timeout=30)
-            except subprocess.TimeoutExpired:
-                os.killpg(proc.pid, signal.SIGKILL)
+            stop_verification(proc)
             return dict(state="undetermined", nodes=[], url="", doc={}, why=f"verification timed out after {timeout:.0f}s")
         doc, nodes, url = parse_verdict(out)
         checks = doc.get("checks")
@@ -401,6 +599,19 @@ def verify(repo, cand, required, window):
     finally:
         if pushed:
             git(repo, "push", "--no-verify", "origin", f":refs/heads/{ref}", check=False)
+
+
+def stop_verification(proc):
+    """The gate's SIGTERM trap cancels CI and removes its ref; always reap it."""
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        proc.communicate(timeout=30)
+    except subprocess.TimeoutExpired:
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.communicate()
 
 
 # ── failing node -> owning specs ─────────────────────────────────────────────
@@ -667,13 +878,15 @@ def resolve_entries(repo, spec_args, events):
     return out
 
 
-def advance(repo, main, old, new, window, kept, dropped, runs, urls, entries, dashboard, rechained=(), pre_existing=(), actions_minutes=None):
+def advance(repo, main, old, new, window, kept, dropped, runs, urls, entries, dashboard, rechained=(), pre_existing=(), actions_minutes=None, after=None):
+    replaced = git(repo, "rev-parse", f"refs/heads/{main}").stdout.strip()
     git(repo, "update-ref", f"refs/heads/{main}", new, old)       # old value asserted
     branch_of = {s: b for s, b, _ in entries}
     for s in kept:
         ev("shipped", s, sha=new, branch=branch_of[s], window=window,
            **({"rechained": True} if s in rechained else {}))
-    ev("window-verified", window, sha=new, runs=urls, kept=kept, dropped=dropped,
+    ev("window-verified", window, sha=new, verified_on=old, replaced=replaced,
+       **({"after": after} if after else {}), runs=urls, kept=kept, dropped=dropped,
        pre_existing=list(pre_existing),
        actions_minutes=(runs * RUN_MINUTES + (runs * DASHBOARD_MINUTES if dashboard else 0)
                         if actions_minutes is None else actions_minutes))
@@ -696,7 +909,7 @@ def bisect_window(window, live, prepare, judge, drop, conflict):
             cand, kept, clashes = prepare(half)
             conflict(clashes)
             if not kept:
-                escalate(window, "bisection half has no mergeable specs; half remains pending")
+                escalate(window, "bisection half has no mergeable specs; half remains pending", "undetermined")
                 continue
             result = judge(cand, kept)
             if result["state"] == "green":
@@ -720,29 +933,68 @@ def bisect_window(window, live, prepare, judge, drop, conflict):
     return chosen
 
 
-def run_window(window, project, spec_args, main, fixes_base=False):
+def run_window(window, project, spec_args, main, fixes_base=False, after=None, slot=0):
+    events = train_events()
+    record_depth(train_depth(os.environ, events=events), events, os.environ)
+    repo = fold.ROOT / "repos" / project
+    master = git(repo, "rev-parse", "--verify", f"refs/heads/{main}^{{commit}}").stdout.strip()
+    base, root_base = master, master
+    if after:
+        candidates = {e["subject"]: e for e in events if e.get("type") == "window-candidate"}
+        candidate = candidates.get(after)
+        if candidate is None:
+            print("gate-window: predecessor has no window-candidate yet"); return 3
+        base = candidate["sha"]
+        seen = set()
+        active = {entry["window"] for entry in in_flight(events)}
+        while candidate.get("after") in active:
+            if candidate["subject"] in seen or candidate["after"] not in candidates:
+                raise RuntimeError("train root is unreadable")
+            seen.add(candidate["subject"])
+            candidate = candidates[candidate["after"]]
+        root_base = candidate["verified_on"]
+    for attempt in range(2):
+        train = dict(repo=repo, main=main, after=after, verified_on=base) if after else None
+        token = _VERIFY_TRAIN.set(dict(train, window=window) if train else None)
+        try:
+            return run_attempt(window, project, spec_args, main, fixes_base, base, root_base, after, slot, train,
+                               rebased=bool(attempt))
+        except TrainCancelled as exc:
+            if attempt or not after:
+                escalate(window, "second advance failed; master unmoved", "undetermined")
+                return 2
+            master = git(repo, "rev-parse", f"refs/heads/{main}").stdout.strip()
+            ev("window-cancelled", window, after=after, reason=str(exc), verified_on=base, master=master)
+            print(f"gate-window: cancelled after={after} reason={exc}; rebuilding on master in slot {slot}")
+            base = root_base = master
+            after = None
+        finally:
+            _VERIFY_TRAIN.reset(token)
+    return 2
+
+
+def run_attempt(window, project, spec_args, main, fixes_base, base, root_base, after, slot, train, rebased=False):
     repo = fold.ROOT / "repos" / project
     if not repo.is_dir():
         sys.exit(f"gate-window: no repo at {repo}")
-    events = fold.read_events()
+    events = train_events()
     entries = resolve_entries(repo, spec_args, events)
     if not entries:
         print("gate-window: nothing gate-clean is waiting"); return 2
     cap = max_merges(os.environ)
     if len(entries) > cap:
         sys.exit(f"gate-window: {len(entries)} merges exceeds the window cap of {cap}")
-    base = git(repo, "rev-parse", "--verify", f"refs/heads/{main}^{{commit}}").stdout.strip()
     try:
         ci_checks = required_checks(repo, base)
     except RuntimeError as e:
-        escalate(window, str(e))
+        escalate(window, str(e), "undetermined")
         print("gate-window: " + str(e))
         return 2
-    base_red_answer = base_red_snapshot(project, base)
-    baseline = verify(repo, base, [PG_CHECK], window)
+    base_red_answer = base_red_snapshot(project, root_base)
+    baseline = verify(repo, root_base, [PG_CHECK], window)
     if baseline["state"] != "green" and not (fixes_base and baseline["state"] == "red"):
         why = "base-not-releasable: pg-parity is " + baseline["state"]
-        escalate(window, why)
+        escalate(window, why, "base-not-releasable")
         print("gate-window: " + why)
         return 2
     base_failures = baseline.get("pg_failures", {})
@@ -784,6 +1036,16 @@ def run_window(window, project, spec_args, main, fixes_base=False):
                 candidate, kept, more = build_candidate(repo, window, base, rest)
                 clashes.update(more)
                 print(f"gate-window: excluded {len(migration_kept)} migration(s), reason=fingerprint-failed")
+        if kept:
+            if rebased:
+                # Identical parents, message and second-resolution timestamps can
+                # otherwise recreate the cancelled SHA. Give the fresh attempt
+                # its own identity while retaining exactly the rebuilt tree.
+                candidate = git(repo, *IDENT, "commit-tree", tree_of(repo, candidate), "-p", candidate,
+                                "-m", f"verify({window}): rebuild after train cancellation").stdout.strip()
+                git(repo, "update-ref", f"refs/heads/window/{window}", candidate)
+            ev("window-candidate", window, sha=candidate, verified_on=base, specs=kept, slot=slot,
+               **({"after": after} if after else {}))
         return candidate, kept, clashes
 
     by_id = {s: (b, sha) for s, b, sha in entries}
@@ -826,6 +1088,9 @@ def run_window(window, project, spec_args, main, fixes_base=False):
             print(f"gate-window: tree {tree} already verified in {prior.get('window', prior.get('subject'))}")
             return dict(state="green", nodes=[], url="", doc={})
         res = dict(verify(repo, cand, candidate_required, window), candidate=cand)
+        # No attribution or shipment may escape a verification on an unmerged base.
+        if train:
+            wait_predecessor(train)
         runs += 1
         actions_minutes += RUN_MINUTES + (DASHBOARD_MINUTES if has_dash else 0)
         if res["url"]:
@@ -835,7 +1100,7 @@ def run_window(window, project, spec_args, main, fixes_base=False):
             return res
         if res["state"] == "undetermined":
             outcome = "half remains pending" if half else "master unmoved"
-            escalate(window, f"window {window} could not be verified ({res.get('why')}); {outcome}, no spec dropped")
+            escalate(window, f"window {window} could not be verified ({res.get('why')}); {outcome}, no spec dropped", "undetermined")
             print(f"gate-window: undetermined — {res.get('why')}")
             return res
         try:
@@ -843,24 +1108,24 @@ def run_window(window, project, spec_args, main, fixes_base=False):
         except (OSError, RuntimeError, ValueError, KeyError, TypeError, zipfile.BadZipFile,
                 zipfile.LargeZipFile, zlib.error, subprocess.SubprocessError) as exc:
             outcome = "half remains pending" if half else "master unmoved"
-            escalate(window, f"unnamed new failures: candidate log evidence unavailable ({type(exc).__name__}); named ids={json.dumps(res.get('nodes', []))}; {outcome}, no spec dropped")
+            escalate(window, f"unnamed new failures: candidate log evidence unavailable ({type(exc).__name__}); named ids={json.dumps(res.get('nodes', []))}; {outcome}, no spec dropped", "undetermined")
             if not half:
                 record(res, tree, candidate_required)
             return dict(res, state="undetermined")
         nodes = sorted(set().union(*(failures[k] for k in ("pytest", "pg-parity", "vitest", "suite-error"))))
         if failures["undetermined"] or not nodes:
             outcome = "half remains pending" if half else "master unmoved"
-            escalate(window, f"unnamed new failures: {failures['undetermined']}; NEW ids={json.dumps(nodes)}; {outcome}, no spec dropped")
+            escalate(window, f"unnamed new failures: {failures['undetermined']}; NEW ids={json.dumps(nodes)}; {outcome}, no spec dropped", "undetermined")
             if not half:
                 record(res, tree, candidate_required)
             return dict(res, state="undetermined")
         classification = {"complete": False}
         if base_red_answer.get("complete") and not base_red_answer.get("undetermined"):
             import base_red
-            classification = base_red.classify(project, base, nodes)
+            classification = base_red.classify(project, root_base, nodes)
         if not classification.get("complete"):
             outcome = "half remains pending" if half else "master unmoved"
-            escalate(window, f"base incomplete; NEW ids={json.dumps(nodes)}; {outcome}, no spec dropped")
+            escalate(window, f"base incomplete; NEW ids={json.dumps(nodes)}; {outcome}, no spec dropped", "undetermined")
             if not half:
                 record(res, tree, candidate_required)
             return dict(res, state="undetermined")
@@ -874,7 +1139,7 @@ def run_window(window, project, spec_args, main, fixes_base=False):
                     pre_existing.discard(node)
         pre_existing = sorted(pre_existing)
         if pre_existing:
-            ev("window-pre-existing", window, ids=pre_existing, base_sha=base,
+            ev("window-pre-existing", window, ids=pre_existing, base_sha=root_base,
                count=len(pre_existing), nodes=pre_existing, run_url=res["url"])
             print(f"gate-window: {len(pre_existing)} failure(s) pre-existing at base: {json.dumps(pre_existing)}")
             pre_existing_all.update(pre_existing)
@@ -882,7 +1147,7 @@ def run_window(window, project, spec_args, main, fixes_base=False):
         record(res, tree, candidate_required)
         if not res["nodes"]:
             if fixes_base and res.get("pg_failed"):
-                escalate(window, "base-not-releasable: --fixes-base window has not repaired pg-parity")
+                escalate(window, "base-not-releasable: --fixes-base window has not repaired pg-parity", "base-not-releasable")
                 return dict(res, state="undetermined")
             return dict(res, state="green")  # complete base proves every id pre-existing
         paths = OwnershipPaths({s: touched[s] for s in kept}, failures["pg_files"])
@@ -899,7 +1164,7 @@ def run_window(window, project, spec_args, main, fixes_base=False):
     note_conflicts(conflicts)
     if not merged:
         print("gate-window: every branch conflicts — nothing to verify")
-        escalate(window, "every branch in the window conflicts; builder re-dispatch via the merge-conflict flow")
+        escalate(window, "every branch in the window conflicts; builder re-dispatch via the merge-conflict flow", "undetermined")
         return 2
     live = list(merged)
     while True:
@@ -912,7 +1177,7 @@ def run_window(window, project, spec_args, main, fixes_base=False):
         if runs == 1 and len(live) > 1 and len(unattributed) == len(res["nodes"]):
             chosen = bisect_window(window, live, prepare_half, judge_half, drop_specs, note_conflicts)
             if chosen is None:
-                escalate(window, f"window {window} bisection found no advanceable candidate; dropped specs={json.dumps(dropped)}; master unmoved")
+                escalate(window, f"window {window} bisection found no advanceable candidate; dropped specs={json.dumps(dropped)}; master unmoved", "red")
                 return 2
             cand, live = chosen
             pending = [s for s, _, _ in entries if s not in live and s not in dropped]
@@ -937,13 +1202,13 @@ def run_window(window, project, spec_args, main, fixes_base=False):
         live = [s for s in live if s not in drop]
         if not live or runs >= 2:
             why = "unattributed " + json.dumps(unattributed) if unattributed else "new ids " + json.dumps(res["nodes"])
-            escalate(window, f"window {window} is red after {runs} run(s); {why}; dropped specs={json.dumps(drop)}; whole window dropped, master unmoved")
+            escalate(window, f"window {window} is red after {runs} run(s); {why}; dropped specs={json.dumps(drop)}; whole window dropped, master unmoved", "red")
             return 2
         rest = [e for e in entries if e[0] in live]
         cand, live, more = prepare(rest)
         note_conflicts(more)
         if not live:
-            escalate(window, "remaining merges conflict after the drop")
+            escalate(window, "remaining merges conflict after the drop", "undetermined")
             return 2
     rechained = set()
     if enabled:
@@ -952,8 +1217,15 @@ def run_window(window, project, spec_args, main, fixes_base=False):
             message = git(repo, "show", "-s", "--format=%s", sha).stdout.strip()
             if message.endswith("(mechanical re-chain)"):
                 rechained.update(s for s in live if message.startswith(f"merge({s}):"))
-    advance(repo, main, base, cand, window, live, dropped, runs, urls, entries, dashboard, rechained,
-            pre_existing=sorted(pre_existing_all), actions_minutes=actions_minutes)
+    if train:
+        wait_predecessor(train)
+    try:
+        advance(repo, main, base, cand, window, live, dropped, runs, urls, entries, dashboard, rechained,
+                pre_existing=sorted(pre_existing_all), actions_minutes=actions_minutes, after=after)
+    except RuntimeError:
+        if train:
+            raise TrainCancelled("base-moved")
+        raise
     print(f"gate-window: advanced {main} -> {cand[:12]}  shipped={live} dropped={dropped}")
     return 1 if dropped or deferred or len(live) < len(entries) else 0
 
@@ -966,22 +1238,24 @@ def main_(argv):
     if not argv or argv[0] in ("-h", "--help"):
         print(__doc__); return 0
     window, project, specs, main = argv[0], None, [], os.environ.get("DOIT_MAIN")
-    fixes_base = False
+    fixes_base, after = False, None
     it = iter(argv[1:])
     for a in it:
         if a == "--project": project = next(it, None)
         elif a == "--specs": specs = [x for x in (next(it, "") or "").split(",") if x]
         elif a == "--main": main = next(it, None)
         elif a == "--fixes-base": fixes_base = True
+        elif a == "--after": after = next(it, "")
         else: sys.exit(f"gate-window: unknown argument {a!r}\n{__doc__}")
     if not re.fullmatch(r"[A-Za-z0-9._-]+", window):
         sys.exit(f"gate-window: {window!r} is not a window id")
+    if after is not None and not re.fullmatch(r"[A-Za-z0-9._-]+", after):
+        sys.exit(f"gate-window: {after!r} is not a window id")
     if project != PROJECT:
         sys.exit(f"gate-window: only project {PROJECT} uses merge windows (got {project!r}); other projects merge directly")
-    if os.environ.get("DOIT_WINDOW_GATE") == "off":
-        for s in specs or [s for s, _ in pending_from_ledger(fold.read_events())]:
-            ev("window-gate-bypassed", s, window=window)
-        print("gate-window: DOIT_WINDOW_GATE=off — bypassed; use the direct merge path"); return 4
+    bypass = os.environ.get("DOIT_WINDOW_GATE") == "off"
+    if bypass or fixes_base:
+        after = None
     if not main:
         try:
             import look, push_origin
@@ -989,21 +1263,44 @@ def main_(argv):
         except Exception:
             main = None
     main = main or "master"
-    if not acquire():
-        print("gate-window: another window holds the lock"); return 3
+    try:
+        events = train_events()
+    except (OSError, ValueError):
+        print("gate-window: ledger unreadable; no slot admitted"); return 3
+    flying = in_flight(events)
+    if not after and flying:
+        print("gate-window: another window is in flight"); return 3
+    if after:
+        candidates = [e for e in events if e.get("subject") == after and e.get("type") == "window-candidate"]
+        if len(candidates) > 1 or any(e.get("window") == after and e.get("type") in ("window-dropped", "merge-conflict") for e in events):
+            print("gate-window: predecessor is past its first verification"); return 3
+        if not candidates:
+            print("gate-window: predecessor has no window-candidate yet"); return 3
+        if not any(e["window"] == after for e in flying):
+            print("gate-window: predecessor is not in flight"); return 3
+    depth = train_depth(os.environ, events=events)["depth"]
+    if after and len(flying) >= depth:
+        print("gate-window: no slot free at the effective train depth"); return 3
+    slot = next((k for k in (range(depth) if after else (0,)) if acquire(window, k)), None)
+    if slot is None:
+        print("gate-window: no slot free"); return 3
     repo = fold.ROOT / "repos" / project
     try:
-        return run_window(window, project, specs, main, fixes_base)
+        if bypass:
+            for s in specs or [s for s, _ in pending_from_ledger(fold.read_events())]:
+                ev("window-gate-bypassed", s, window=window)
+            print("gate-window: DOIT_WINDOW_GATE=off — bypassed; use the direct merge path"); return 4
+        return run_window(window, project, specs, main, fixes_base, after, slot)
     except RuntimeError as e:
         print(f"gate-window: {e}", file=sys.stderr)
         try:
-            escalate(window, f"gate-window failed before a verdict: {e}"[:300])
+            escalate(window, f"gate-window failed before a verdict: {e}"[:300], "undetermined")
         except SystemExit:
             pass
         return 2
     finally:
         cleanup(repo, window)
-        release()
+        release(slot)
 
 
 if __name__ == "__main__":
