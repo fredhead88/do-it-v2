@@ -118,12 +118,49 @@ class DigestTests(unittest.TestCase):
     def snapshot(self):
         return {str(p.relative_to(self.root)): p.read_bytes() for p in self.root.rglob("*") if p.is_file()}
 
+    def test_backlog_lines(self):
+        with patch.object(dispatch, "CONTENT", self.root / "content"):
+            dispatch.CONTENT.mkdir()
+            dispatch.spec_path("L-spec-9113").write_text("AC1 [backend]: fixture\nAC2 [backend]: fixture\n")
+            evs = [event("owed-ac", "L-spec-9113", 40, criterion=c,
+                         wake_at=ts(39) if c == "AC1" else None) for c in ("AC1", "AC2")]
+            evs += [event("shipped", "L-spec-9113", 40, actor="executor")]
+            evs += [event("owed-routed", "L-spec-9113", 30, criterion=c,
+                          route="relabel", capability="operator-action") for c in ("AC1", "AC2")]
+            obj = digest.build(evs, NOW)
+            self.assertEqual(set(obj["backlog"]), {"no_runner", "unverifiable"})
+            self.assertEqual(obj["backlog"]["no_runner"], [
+                {"spec": "L-spec-9113", "criterion": "AC1", "due_at": ts(39)},
+                {"spec": "L-spec-9113", "criterion": "AC2", "due_at": None}])
+            md = digest.render_md(obj)
+            for line in [f"OWED NO-RUNNER L-spec-9113 AC1 due {ts(39)}",
+                         "OWED NO-RUNNER L-spec-9113 AC2 due none",
+                         "OWED UNVERIFIABLE 0 closed today, 0.0% of month (cap 10%)",
+                         "OWED UNVERIFIABLE CAPPED 1 rows past 14 days held, closing stopped at cap"]:
+                self.assertIn(line, md.splitlines())
+                print(line)
+            closed = [event("owed-met", "L-spec-9114", criterion=f"AC{i}", evidence="fixture") for i in range(9)]
+            closed += [event("owed-unverifiable", "L-spec-9115", criterion="AC1", reason="fixture")]
+            obj = digest.build(closed, NOW)
+            self.assertEqual(obj["backlog"]["unverifiable"],
+                             {"today": 1, "month": 1, "closed": 10, "pct": 10.0, "capped": 0})
+            md = digest.render_md(obj)
+            self.assertEqual(md.count("OWED UNVERIFIABLE "), 1)
+            self.assertIn("OWED UNVERIFIABLE 1 closed today, 10.0% of month (cap 10%)", md)
+            self.assertNotIn("CAPPED", md)
+            print("OWED UNVERIFIABLE 1 closed today, 10.0% of month (cap 10%)")
+            # Nine ordinary closes permit this candidate; it is not yet held by the cap.
+            self.assertEqual(digest.build(evs + closed[:9], NOW)["backlog"]["unverifiable"]["capped"], 0)
+            empty = digest.render_md(digest.build([], NOW))
+            self.assertEqual(empty.count("OWED UNVERIFIABLE "), 1)
+            self.assertNotIn("CAPPED", empty)
+
     def test_recount(self):
         evs, expected = fixture()
         obj = digest.build(evs, NOW)
         recount = Counter(r["status"] for s in fold.fold(evs)[0].values() for r in owed.checks(s["evs"], NOW))
         self.assertEqual(obj["counts"]["by_status"], {**recount, "unverifiable": 0})
-        self.assertEqual(set(obj), {"at", "counts", "needs_you", "health", "m1"})
+        self.assertEqual(set(obj), {"at", "counts", "needs_you", "health", "m1", "backlog"})
         self.assertEqual(set(obj["counts"]), {"by_status", "blocked_by_capability", "sweep"})
         self.assertEqual(set(obj["counts"]["by_status"]), set(owed.STATUSES))
         self.assertEqual({r["spec"] for r in obj["needs_you"]}, {s for s, v in expected.items() if v == "blocked"})

@@ -15,6 +15,8 @@ from datetime import datetime, timedelta, timezone
 import dispatch
 import fold
 import owed
+import owed_failures
+import sweep_owed
 
 LEDGER_NAME = "L-owed-digest-local.jsonl"
 CORRECTING_STALE_DAYS = 7
@@ -58,12 +60,19 @@ def build(all_ev, now):
     now = _time(now)
     by_status = dict.fromkeys(owed.STATUSES, 0)
     blocked, needs, health = {}, [], []
+    no_runner = []
     m1 = dict(terminal_unobservable=0, verify_unbuildable=0, sweep_failed_one_row_24h=0)
-    for spec in fold.fold(all_ev)[0].values():
+    specs = fold.fold(all_ev)[0]
+    for spec in specs.values():
         evs = spec["evs"]
         for row in owed.checks(evs, now):
             status, capability = row["status"], row["capability"]
             by_status[status] += 1
+            live = (status in ("due", "blocked", "expired")
+                    or status in ("waiting", "unshipped") and row["due_at"] is None
+                    or status == "waiting" and row["due_at"] <= now + timedelta(hours=24))
+            if live and sweep_owed._no_runner(row):
+                no_runner.append(dict(spec=row["spec"], criterion=row["criterion"], due_at=_iso(row["due_at"])))
             since = _iso(row["last_unobservable_at"] or row["governing_at"])
             item = dict(spec=row["spec"], criterion=row["criterion"], since=since)
             if status == "blocked":
@@ -101,8 +110,20 @@ def build(all_ev, now):
     if failed:
         health.append(dict(kind="sweep-failing", count=len(failed), since=failed[-1]["ts"],
                            reason=_text(failed[0].get("reason"))))
+    counts = owed_failures.month_counts(all_ev, now)
+    remaining = len(sweep_owed.unverifiable_candidates(specs, now))
+    simulated = dict(counts)
+    while remaining and owed_failures.cap_allows(simulated):
+        simulated["unverifiable"] += 1
+        simulated["closed"] += 1
+        remaining -= 1
+    backlog = dict(no_runner=sorted(no_runner, key=lambda r: (r["spec"], r["criterion"])),
+                   unverifiable=dict(today=counts["unverifiable_today"], month=counts["unverifiable"],
+                                     closed=counts["closed"],
+                                     pct=100 * counts["unverifiable"] / counts["closed"] if counts["closed"] else 0.0,
+                                     capped=remaining))
     return dict(at=now.isoformat(), counts=dict(by_status=by_status, blocked_by_capability=blocked, sweep=sweep),
-                needs_you=needs, health=health, m1=m1)
+                needs_you=needs, health=health, m1=m1, backlog=backlog)
 
 
 def _write_json(path, obj):
@@ -148,6 +169,13 @@ def render_md(obj):
         lines.append(f"- {subject}{row['kind']}: {_span(row.get('reason'))}")
     if not obj["health"]:
         lines.append("none")
+    lines.append("")
+    for row in obj["backlog"]["no_runner"]:
+        lines.append(f"OWED NO-RUNNER {_text(row['spec'])} {_text(row['criterion'])} due {row['due_at'] or 'none'}")
+    uv = obj["backlog"]["unverifiable"]
+    lines.append(f"OWED UNVERIFIABLE {uv['today']} closed today, {uv['pct']:.1f}% of month (cap 10%)")
+    if uv["capped"]:
+        lines.append(f"OWED UNVERIFIABLE CAPPED {uv['capped']} rows past 14 days held, closing stopped at cap")
     return "\n".join(lines) + "\n"
 
 

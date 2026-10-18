@@ -173,7 +173,8 @@ def sweep_expired(specs, now, *, dry_run=False):
             continue
         already = _already_escalated(s["evs"])
         fresh = sorted({r["criterion"] for r in rows if r["criterion"] not in already
-                        and not _excluded_by_answer(specs, answered, sid, r["criterion"])})
+                        and not _excluded_by_answer(specs, answered, sid, r["criterion"])
+                        and not _no_runner(r)})
         if not fresh:
             continue
         evidence = [next((r.get("evidence") for r in rows if r["criterion"] == c), None) or ""
@@ -238,7 +239,8 @@ def due_candidates(specs, now):
     for s in specs.values():
         rows.extend(owed.checks(s["evs"], now))
     due = [r for r in rows if r["status"] == "due"
-           and not _blocked_permanently(r) and not _blocked_pending_retry(r, now)]
+           and not _blocked_permanently(r) and not _blocked_pending_retry(r, now)
+           and not _no_runner(r)]
     return sorted(due, key=lambda r: r["due_at"])
 
 
@@ -282,6 +284,57 @@ def _manifest_text(sweep_id, project, cwd, batch):
 
 def _spec_file(row):
     return pathlib.Path(row.get("spec_path") or dispatch.spec_path(row["spec"]))
+
+
+def _no_runner(row):
+    """Unreadable or undetermined classification cannot authorize retirement."""
+    try:
+        body = _spec_file(row).read_text(encoding="utf-8")
+    except Exception:
+        return None
+    return owed_failures.no_runner(row, body, row.get("project"))
+
+
+def unverifiable_candidates(specs, now):
+    """Classify only dated open rows; skip undated rows before arithmetic/sorting."""
+    candidates = []
+    for spec in specs.values():
+        for row in owed.checks(spec["evs"], now):
+            if row["status"] not in ("due", "blocked", "expired") or row["due_at"] is None:
+                continue
+            if now - row["due_at"] <= timedelta(days=owed_failures.UNVERIFIABLE_AFTER_DAYS):
+                continue
+            cause = _no_runner(row)
+            if cause:
+                candidates.append((row, cause))
+    return sorted(candidates, key=lambda item: (item[0]["due_at"], item[0]["spec"], item[0]["criterion"]))
+
+
+def close_unverifiable(all_ev, now, *, dry_run=False):
+    """Close oldest established no-runner rows within the monthly allowance."""
+    candidates = unverifiable_candidates(fold.fold(all_ev)[0], now)
+    counts = owed_failures.month_counts(all_ev, now)
+    lines = []
+    for index, (row, cause) in enumerate(candidates):
+        if not owed_failures.cap_allows(counts):
+            lines.append(f"OWED UNVERIFIABLE CAPPED {len(candidates)-index} rows past 14 days held, closing stopped at cap")
+            break
+        due = row["due_at"].isoformat()
+        reason = f"L-operator-0001: {cause}; due {due}; over {owed_failures.UNVERIFIABLE_AFTER_DAYS} days past due"
+        if dry_run:
+            lines.append(f"sweep-owed: DRY RUN would close {row['spec']}/{row['criterion']}: {reason}")
+        else:
+            path = fold.EVENTS / "L-prod-runner-local.jsonl"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            refused = dispatch.emit(path, {"subject": row["spec"]}, "owed-unverifiable",
+                                    criterion=row["criterion"], reason=reason)
+            if refused:
+                lines.append(f"sweep-owed: close {row['spec']}/{row['criterion']} refused: {refused}")
+                continue
+            lines.append(f"sweep-owed: closed unverifiable {row['spec']}/{row['criterion']}: {reason}")
+        counts["unverifiable"] += 1
+        counts["closed"] += 1
+    return lines
 
 
 def resolvable(row):
@@ -442,6 +495,17 @@ def run(*, dry_run=False, runner=None, now=None):
 
     lines = sweep_expired(specs, now, dry_run=dry_run)
     lines.extend(owed_failures.escalate_failures(specs, now, dry_run=dry_run))
+    # Runner observation belongs immediately ahead of this close, before batching.
+    lines.extend(close_unverifiable(all_ev, now, dry_run=dry_run))
+    no_runner_counts = {}
+    for spec in specs.values():
+        for row in owed.checks(spec["evs"], now):
+            if row["status"] in ("due", "blocked", "expired"):
+                cause = _no_runner(row)
+                if cause:
+                    no_runner_counts[cause] = no_runner_counts.get(cause, 0) + 1
+    for cause, count in sorted(no_runner_counts.items()):
+        lines.append(f"sweep-owed: {count} no-runner row(s) excluded from escalation and batching: {cause}; see owed digest")
 
     due, quarantined, resolution_lines = _resolve_candidates(specs, now, dry_run=dry_run)
     lines.extend(resolution_lines)
