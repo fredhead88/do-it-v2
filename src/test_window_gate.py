@@ -9,6 +9,7 @@ replays a scripted verdict per call and records each invocation. No network, no
 L-spec-0764 (JSON verdict line + exit 0/1/2); the real script is not exercised.
 """
 import atexit, hashlib, json, os, pathlib, subprocess, sys, tempfile, time
+import types
 from unittest.mock import patch
 
 os.environ["DOIT_NO_POKE"] = "1"
@@ -128,6 +129,15 @@ class Fx:
         os.environ.pop("FAKE_BASE", None)
         os.environ.pop("DOIT_WINDOW_GATE", None)
         os.environ.pop("DOIT_WINDOW_VERIFY_TIMEOUT_SECS", None)
+        # One default service fixture for every historical red case. No network.
+        import base_red
+        self.known = set()
+        self.base_reader = lambda project, sha: {"sha": sha, "complete": True}
+        self.log_reader = lambda repo, doc: []
+        self.service = types.SimpleNamespace(parse_log=base_red.parse_log,
+            classify=lambda project, sha, ids: {
+                "complete": True, "pre_existing": [n for n in ids if n in self.known],
+                "new": [n for n in ids if n not in self.known]})
 
     def run_n(self, n, rc, out="", sleep=None):
         (self.fdir / f"run{n}.rc").write_text(str(rc))
@@ -152,9 +162,18 @@ class Fx:
         specs = specs or list(self.branches)
         for s in specs:
             fold.append(["merge-gate-clean", s, f"branch={self.branches[s]}", "project=albert-scott"])
-        with patch.dict(os.environ, FAKE_BASE=self.base, PATH=self.path):
-            return window_gate.main_(["w1", "--project", "albert-scott", "--specs", ",".join(specs)]
-                                     + (["--fixes-base"] if fixes_base else []))
+        with patch.dict(os.environ, FAKE_BASE=self.base, PATH=self.path), \
+             patch.dict(sys.modules, base_red=self.service), \
+             patch.object(window_gate, "base_red_snapshot", side_effect=self.base_reader), \
+             patch.object(window_gate, "candidate_logs", side_effect=self.log_reader):
+            result = window_gate.main_(["w1", "--project", "albert-scott", "--specs", ",".join(specs)]
+                                       + (["--fixes-base"] if fixes_base else []))
+        printed = [p.read_text() for p in self.fdir.glob("run*.out")]
+        if any("NEW failed:" in text or "NEW suite-error:" in text or
+               window_gate.parse_verdict(text)[1] for text in printed):
+            check(all(e.get("nodes") for e in self.events("window-dropped")),
+                  "nodes_never_empty across every named red fixture")
+        return result
 
     def calls(self):
         p = self.fdir / "calls"
@@ -599,6 +618,270 @@ def rechain_checks():
             shutil.rmtree(fx.tmp)
 
 
+def attribution_checks():
+    """L1110: real temporary git/ledger, stubbed external evidence only."""
+    import base_red, io, re, zipfile
+    from unittest.mock import Mock
+
+    def response(case, acs, body):
+        encoded = json.dumps(body, sort_keys=True).encode()
+        check(not FAILS, case + " has no failed assertions")
+        print(json.dumps(dict(case=case, criteria=acs, url="cli://window_gate/1110/" + case,
+                              status=0 if not FAILS else 1,
+                              body_sha256=hashlib.sha256(encoded).hexdigest(), body_excerpt=body)))
+
+    v, s, p, pg = ("dashboard/src/a.test.ts::suite > case", "dashboard/src/b.ts",
+                    "api/tests/test_x.py::t", "api/tests/test_pg.py::t")
+    output = f"NEW failed: {v}\nNEW suite-error: {s}\nNEW failed: {p}"
+    step = "pg-parity::Run suite"
+    fx = Fx({"A": "a.txt"})
+    doc = {"checks": {window_gate.PG_CHECK: {"run_id": 10}}}
+    res = dict(output=output, nodes=[], doc=doc, pg_failures={})
+    with patch.object(window_gate, "candidate_logs", return_value=[
+            ("10", "pg-parity\tRun suite\t##[error]failed api/tests/test_pg.py")]), \
+         patch.object(base_red, "parse_log", wraps=base_red.parse_log) as parser:
+        parsed = window_gate.candidate_failures(fx.repo, res)
+    check({k: parsed[k] for k in base_red.KINDS} == {
+        "pytest": {p}, "vitest": {v}, "suite-error": {s}, "pg-parity": {step}}, "ids_all_kinds equality")
+    check(parser.call_count == 2, "ids_all_kinds shared parser consulted for output and zip")
+    response("ids_all_kinds", ["AC1"], {k: sorted(parsed[k]) for k in base_red.KINDS})
+
+    # Canonical identity must survive classification and both event paths.
+    for known in (False, True):
+        fx = Fx({"A": "api/tests/test_pg.py", "B": "b.txt"})
+        fx.pg(1, [pg])
+        # Fx.pg creates a real per-run signature; zip also names the same step.
+        fx.log_reader = lambda repo, doc: [("101", "pg-parity\tRun suite\t##[error]failed")]
+        fx.known = {pg} if known else set()
+        classify = Mock(wraps=fx.service.classify)
+        fx.service.classify = classify
+        fx.run_n(2, 0, GREEN)
+        rc = fx.go()
+        check(classify.call_args_list[0].args[2] == [pg], "pg_dual_source classify canonical node once")
+        events = fx.events("window-pre-existing" if known else "window-dropped")
+        check(events[0]["ids" if known else "nodes"] == [pg], "pg_dual_source event canonical node once")
+        check(rc == (0 if known else 1), "pg_dual_source outcome")
+    response("pg_dual_source", ["AC1"], {"canonical": [pg], "event_paths": ["pre-existing", "dropped"]})
+
+    fx = Fx({"D": "api/tests/test_pg.py", "A": "a.txt"})
+    fx.pg(1)
+    fx.run_n(2, 0, GREEN)
+    fx.log_reader = lambda repo, doc: [("101", "pg-parity\tRun suite\t##[error]failed api/tests/test_pg.py")]
+    check(fx.go() == 1 and fx.events("window-dropped")[0]["subject"] == "D" and
+          fx.events("window-dropped")[0]["nodes"] == [step], "owners_pg_step no finer node retains step")
+    response("owners_pg_step", ["AC1", "AC8"], {"canonical": step, "owner": "D"})
+
+    source = (HERE / "window_gate.py").read_text()
+    check(not re.search(r"NEW (?:failed|suite-error)", source), "no_format_reimpl")
+    response("no_format_reimpl", ["AC1"], {"shared_parser_only": True})
+
+    # Real zip bytes, quota and API arguments: no run-view text fetch fallback.
+    sh(["remote", "set-url", "origin", "https://github.com/o/r.git"], fx.repo)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as archive:
+        archive.writestr("Dashboard/1_Run.txt", output)
+    import ghlimit
+    with patch.object(ghlimit, "gate", return_value={"ok": True}), \
+         patch.object(ghlimit, "real_gh", return_value="fake-gh"), \
+         patch.object(window_gate.subprocess, "run", return_value=types.SimpleNamespace(
+             returncode=0, stdout=buf.getvalue())) as fetch:
+        with patch.object(window_gate, "git", return_value=types.SimpleNamespace(stdout="https://github.com/o/r.git")):
+            logs = window_gate.candidate_logs(fx.repo, {"checks": {"pytest": {"run_id": 12}}})
+    check(logs == [("12", output)] and fetch.call_args.args[0] == [
+        "fake-gh", "api", "repos/o/r/actions/runs/12/logs"], "zip bytes API path")
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as archive:
+        archive.writestr("pg-parity (Postgres)/3_Run suite.txt", "api/tests/test_pg.py\n##[error]failed")
+    with patch.object(ghlimit, "gate", return_value={"ok": True}), \
+         patch.object(ghlimit, "run", return_value=(0, json.dumps({"jobs": [{"name": window_gate.PG_CHECK,
+             "steps": [{"number": 3, "name": "Run suite", "conclusion": "failure"}]}]}), "")), \
+         patch.object(window_gate.subprocess, "run", return_value=types.SimpleNamespace(
+             returncode=0, stdout=buf.getvalue())), \
+         patch.object(window_gate, "git", return_value=types.SimpleNamespace(stdout="https://github.com/o/r.git")):
+        parsed = window_gate.candidate_failures(fx.repo, {"doc": {"checks": {window_gate.PG_CHECK: {"run_id": 12}}}})
+    check(parsed["pg-parity"] == {step} and parsed["pg_files"] == {step: {"api/tests/test_pg.py"}}, "zip pg metadata supplies actual step and files")
+
+    for unnamed in (True, False):
+        fx = Fx({"A": "a.txt"})
+        fx.known = {v}
+        fx.run_n(1, 1, output.splitlines()[0])
+        parser = fx.service.parse_log
+        def parse(text):
+            result = parser(text)
+            if unnamed: result["undetermined"].append("vitest: one unnamed new failure")
+            return result
+        fx.service.parse_log = parse
+        rc = fx.go()
+        check(rc == (2 if unnamed else 0) and not fx.events("window-dropped"), "undetermined_not_clean no drops")
+        check((fx.master() == fx.base) == unnamed, "undetermined_not_clean master")
+        check(bool(fx.events("escalation-blocking")) == unnamed, "undetermined_not_clean escalation")
+    response("undetermined_not_clean", ["AC2"], {"unnamed_blocks": True, "empty_proceeds": True})
+
+    for retry in (False, True):
+        fx = Fx({"A": "a.txt", "B": "dashboard/new.test.ts", "C": "c.txt"})
+        fx.known = {v, s, p}
+        new = "dashboard/new.test.ts::suite > new"
+        fx.run_n(1, 1, output + ("\nNEW failed: " + new if retry else "") + "\n" + red([]))
+        fx.run_n(2, 1, output + "\n" + red([]))
+        rc = fx.go()
+        check(rc == (1 if retry else 0), "all_pre_existing_advances exit")
+        check([e["subject"] for e in fx.events("window-dropped")] == (["B"] if retry else []), "b9 only B drops")
+        check([e["subject"] for e in fx.events("shipped")] == (["A", "C"] if retry else ["A", "B", "C"]), "b9 shipped")
+        pre = fx.events("window-pre-existing")
+        check(len(pre) == (2 if retry else 1) and all(set(e["ids"]) == fx.known and
+            e["base_sha"] == fx.base and re.fullmatch("[a-f0-9]{40}", e["base_sha"]) and e["run_url"] for e in pre), "b9 pre-existing fields")
+        check(set(fx.events("window-verified")[0]["pre_existing"]) == fx.known and
+              fx.master() == fx.calls()[-1].split("|")[0] and not fx.events("escalation-blocking"), "b9 advances run two")
+        response("b9_one_vitest_node_run2_advances" if retry else "all_pre_existing_advances",
+                 ["AC3", "AC7", "AC11"], {"drops": [e["subject"] for e in fx.events("window-dropped")],
+                 "shipped": [e["subject"] for e in fx.events("shipped")], "pre_existing": sorted(fx.known), "runs": len(fx.calls())})
+
+    # Exercise the actual process boundary, including a descendant in the group.
+    reader = window_gate.base_red_snapshot
+    check(window_gate.BASE_RED_MARGIN_SECS >= 600, "shipped margin at least 600")
+    for mode in ("timeout", "exit3", "exit2", "bad-json", "missing"):
+        fx = Fx({"A": "a.txt"})
+        cli = fx.tmp / "bin/doit"
+        cli.write_text("#!/usr/bin/python3\nimport os,sys,json,subprocess,time,pathlib\n"
+            "d=pathlib.Path(os.environ['FAKE_DIR'])\n"
+            "with (d/'base-red-calls').open('a') as f: f.write(json.dumps(sys.argv[1:])+'\\n')\n" +
+            ("child=subprocess.Popen(['sleep','30'])\n(d/'child').write_text(str(child.pid))\ntime.sleep(30)\n" if mode == "timeout" else
+             "print('not json')\n" if mode == "bad-json" else "print('{}')\nsys.exit(" + ("3" if mode == "exit3" else "2") + ")\n"))
+        cli.chmod(0o755)
+        fx.base_reader = reader
+        fx.run_n(1, 1, output)
+        with patch.object(window_gate, "BASE_RED_MARGIN_SECS", .2), \
+             patch.object(window_gate, "verify_timeout_secs", return_value=.2), \
+             patch.object(window_gate, "BASE_RED_COMMAND", str(fx.tmp / "missing") if mode == "missing" else "doit"):
+            rc = fx.go()
+        calls = (fx.fdir / "base-red-calls").read_text().splitlines() if mode != "missing" else []
+        if calls:
+            argv = [json.loads(c) for c in calls]
+            check(sum("--ensure" in a for a in argv) == 1 and len(argv) == 2 and
+                  all(a[:3] == ["base-red", "albert-scott", fx.base] for a in argv), "one ensure then plain read " + mode)
+        check(rc == 2 and fx.master() == fx.base and not fx.events("shipped") and not fx.events("window-dropped"), "base incomplete preserves window " + mode)
+        why = fx.events("escalation-blocking")[0]["why"]
+        check("base incomplete" in why and all(n in why for n in (v, s, p)), "base incomplete names ids " + mode)
+        if mode == "timeout":
+            pid = int((fx.fdir / "child").read_text())
+            stat = pathlib.Path(f"/proc/{pid}/stat")
+            check(not stat.exists() or stat.read_text().split()[2] == "Z", "base_incomplete_timeout child killed")
+        response("base_incomplete_" + mode, ["AC4"], {"ensure_calls": 0 if mode == "missing" else 1, "plain_reads": 0 if mode == "missing" else 1, "why": why})
+
+    # The pg-only trap is order dependent; a killed ensure marker survives.
+    for stale in (False, True):
+        fx = Fx({"A": "a.txt"})
+        order, complete = [], False
+        marker = fx.fdir / "dispatch-marker"
+        if stale: marker.touch()
+        def read(project, sha, ensure):
+            nonlocal complete
+            order.append("ensure" if ensure else "read")
+            if not ensure or not marker.exists(): complete = True
+            marker.touch(exist_ok=True)
+            return {"sha": sha, "complete": complete}
+        fx.base_reader = reader
+        original = window_gate.verify
+        def verify(repo, sha, checks, window):
+            if sha == fx.base:
+                order.append("baseline")
+                check(complete, "base_red_before_baseline avoids pg-only trap")
+            return original(repo, sha, checks, window)
+        fx.known = {v}
+        fx.run_n(1, 1, "NEW failed: " + v)
+        with patch.object(window_gate, "call_base_red", side_effect=read), patch.object(window_gate, "verify", side_effect=verify):
+            rc = fx.go()
+        check(rc == 0 and order == (["ensure", "read", "baseline"] if stale else ["ensure", "baseline"])
+              and marker.exists(), "stale_marker_recovers read without deleting marker")
+        response("stale_marker_recovers" if stale else "base_red_before_baseline", ["AC5"], {"order": order, "marker_retained": marker.exists()})
+
+    # A base id match cannot hide a changed pg signature; no signature uses classify.
+    for signature in ("same", "changed", "none"):
+        fx = Fx({"A": "api/tests/test_x.py", "B": "b.txt"})
+        node = "api/tests/test_x.py::test_y"
+        fx.known = {node}
+        if signature != "none": fx.pg("base", [node])
+        fx.pg(1, [node], message="different" if signature == "changed" else "AssertionError: parity")
+        fx.run_n(2, 0, GREEN)
+        rc = fx.go(fixes_base=signature != "none")
+        check(rc == {"same": 2, "changed": 1, "none": 0}[signature], "pg_signature_new " + signature)
+        check([e["subject"] for e in fx.events("window-dropped")] == (["A"] if signature == "changed" else []), "pg signature owner")
+    response("pg_signature_new_fixes_base_not_advanced", ["AC6", "AC7"], {"same": "base-not-releasable", "changed": "A dropped", "none": "pre-existing advances"})
+
+    # Candidate blobs, relative imports, directory indexes, cycles and path safety.
+    fx = Fx({})
+    files = {"dashboard/src/a.test.ts": "import '../lib';\n", "dashboard/lib/index.ts": "export * from './util';\n",
+             "dashboard/lib/util.ts": "import '../src/a.test';\n", "dashboard/src/b.ts": "pass\n",
+             "api/tests/test_pg.py": "pass\n"}
+    for path, text in files.items():
+        dest = fx.repo / path
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(text)
+    sh(["add", "."], fx.repo); sh(["commit", "-m", "candidate imports"], fx.repo)
+    rev = sh(["rev-parse", "HEAD"], fx.repo)
+    touched = window_gate.OwnershipPaths({"A": {"dashboard/src/a.test.ts"}, "B": {"dashboard/lib/util.ts"},
+        "C": {s}, "D": {"api/tests/test_pg.py"}, "E": {"api/app/lib.py"}}, {step: {"api/tests/test_pg.py"}})
+    cases = [(v, ["A"]), (s, ["C"]), (step, ["D"]), (p, ["E"])]
+    for node, expected in cases:
+        check(window_gate.owners(fx.repo, rev, node, touched) == expected, "owners exact " + node)
+    del touched["A"]
+    check(window_gate.owners(fx.repo, rev, v, touched) == ["B"], "owners_vitest two-hop index")
+    check(window_gate.unattributed_ids(fx.repo, rev, [v, s, step, p], touched) == [], "unattributed_helper known")
+    unknown = "dashboard/absent.test.ts::suite > lost"
+    check(window_gate.unattributed_ids(fx.repo, rev, [unknown], touched) == [unknown], "unattributed_helper missing")
+    check(len(window_gate.js_import_closure(fx.repo, rev, "dashboard/src/a.test.ts")) == 3 and
+          len(window_gate.js_import_closure(fx.repo, rev, "dashboard/src/a.test.ts", limit=2)) == 2, "closure_cycle bounded")
+    with patch.object(window_gate, "git", side_effect=AssertionError("unsafe git read")):
+        for bad in ("../outside.ts", "/absolute.ts", "-option.ts", "dashboard/../outside.ts"):
+            check(window_gate.owners(fx.repo, rev, bad, touched) == [], "owners_path_escape " + bad)
+    response("owners_vitest_suite_error_pg_step_pytest_path_escape_closure", ["AC8", "AC9"], {"direct": ["A"], "two_hop": ["B"], "suite": ["C"], "pg_step": ["D"], "pytest": ["E"], "cycle_size": 3, "bounded_size": 2})
+
+    for mixed in (False, True):
+        fx = Fx({"A": "dashboard/src/a.test.ts", "B": "b.txt"})
+        fx.run_n(1, 1, "NEW failed: " + unknown + ("\nNEW failed: " + v if mixed else ""))
+        rc = fx.go()
+        drops = fx.events("window-dropped")
+        check(rc == 2 and [e["subject"] for e in drops] == ["A", "B"] and all(
+            e["reason"] == "unattributed" and set(e["nodes"]) == ({unknown, v} if mixed else {unknown}) for e in drops), "mixed_ids whole window named")
+        check("unattributed" in fx.events("escalation-blocking")[0]["why"] and unknown in fx.events("escalation-blocking")[0]["why"], "unattributed escalation")
+    response("unattributed_drops_window_mixed_ids", ["AC10", "AC11"], {"dropped": [e["subject"] for e in drops], "nodes": drops[0]["nodes"], "reason": "unattributed"})
+
+    fx = Fx({"A": "api/tests/test_x.py", "B": "api/tests/test_z.py"})
+    fx.run_n(1, 1, red([p])); fx.run_n(2, 1, red(["api/tests/test_z.py::q"]))
+    check(fx.go() == 2 and len(fx.calls()) == 2 and all(e["nodes"] for e in fx.events("window-dropped")) and
+          fx.events("escalation-blocking"), "run2_new_id_cap nodes_never_empty")
+    response("run2_new_id_cap", ["AC11"], {"runs": 2, "nodes": [e["nodes"] for e in fx.events("window-dropped")]})
+
+    paragraph = (HERE.parent / "agents/builder.md").read_text().split("**Pre-existing failures**", 1)[1].split("## Deviations", 1)[0]
+    check("doit base-red" in paragraph and "./doit base-red" not in paragraph and
+          '$(git merge-base HEAD origin/<main>)' in paragraph and "scratch worktree" in paragraph and
+          "non-zero" in paragraph and "127" in paragraph and '"not known"' in paragraph and
+          '"no pre-existing failures"' in paragraph and not re.search(r"\b[a-f0-9]{7,40}\b", paragraph), "builder_contract")
+    response("builder_contract", ["AC12"], {"consult_first": True, "unknown_exit127_falls_back": True})
+
+    # Force a fresh import to fail if it tries to import base_red at module scope.
+    import builtins, importlib.util
+    original_import = builtins.__import__
+    def guard(name, *args, **kwargs):
+        if name == "base_red": raise ImportError("intentionally unavailable")
+        return original_import(name, *args, **kwargs)
+    spec = importlib.util.spec_from_file_location("isolated_window_gate", HERE / "window_gate.py")
+    module = importlib.util.module_from_spec(spec)
+    with patch.dict(sys.modules):
+        sys.modules.pop("base_red", None)
+        with patch("builtins.__import__", side_effect=guard): spec.loader.exec_module(module)
+    fx = Fx({"A": "a.txt"}); fx.run_n(1, 0, GREEN)
+    check(fx.go() == 0, "lazy_import_without_base_red then stubbed window")
+    response("lazy_import_without_base_red", ["AC13"], {"fresh_import": True, "stubbed_window": "shipped"})
+
+
+def test_window_attribution():
+    attribution_checks()
+    assert not FAILS, FAILS
+
+
+test_window_attribution()
 parity_checks()
 timeout_checks()
 rechain_checks()
