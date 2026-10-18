@@ -1532,3 +1532,26 @@ assert grading_env._prove_view_paths(str(_v)) == (True, None), "regex /rm, /dev/
 (_v / "verify.sh").write_text("cat /home/albert/secret.txt\n")
 assert grading_env._prove_view_paths(str(_v))[0] is False, "a real outside path must still be refused"
 print("view-paths awk-pattern ok")
+
+
+# Bundles change execution requirements only; textual routing stays independent.
+for _legacy1109 in (True, False):
+    _body1109 = """## Acceptance criteria
+AC1 [backend]: fixture.
+review_path: run git diff HEAD
+AC2 [backend]: fixture.
+review_path: run npm test
+AC3 [backend]: fixture.
+review_path: run python3 -m pytest /opt/checkout/tests && cat .env
+AC4 [backend]: fixture live_db.
+review_path: run live_db SUPABASE_DB_URL
+"""
+    if not _legacy1109:
+        _body1109 = "---\nproject: fixture\n---\n" + _body1109
+    _before1109 = grading_env.required("grader", _body1109, "", "unknown")
+    check(bool(_before1109), "legacy execution requirements remain present")
+    check(grading_env.required("grader", _body1109, "", "unknown", bundled=True) == [],
+          "bundled mapped/unmapped criteria need no execution capability")
+    check(grading_env.required("grader", _body1109, "", "unknown", bundled=False) == _before1109,
+          "unbundled requirements unchanged")
+print("grader-evidence AC6 bundled legacy/new capability sets passed")

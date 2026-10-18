@@ -118,3 +118,19 @@ check(validate.spec_shape_warnings(WELL_FORMED) == [],
       "a clean spec carries no spec_shape_warnings either")
 
 print(f"validate: {N} checks over spec_shape's five fixtures")
+
+
+# Optional evidence verdict metadata remains backwards compatible.
+import json
+import subprocess
+with tempfile.TemporaryDirectory() as _tmp1109:
+    _output1109 = pathlib.Path(_tmp1109) / "grader.json"
+    _verdict1109 = {"verdicts": [{"ac": "AC1", "verdict": "met", "reason": "evidence"}],
+                    "matches_intent": "yes", "card_ok": "yes", "checkers": [],
+                    "could_not_run": False, "contamination": False, "declarations": []}
+    for _metadata1109 in ({}, {"judgment_only": ["AC1"], "pre_existing": ["known-test"]}):
+        _output1109.write_text(json.dumps({**_verdict1109, **_metadata1109}))
+        _result1109 = subprocess.run([sys.executable, str(pathlib.Path(__file__).with_name("validate.py")),
+                                     "grader", str(_output1109)], capture_output=True, text=True)
+        check(_result1109.returncode == 0 and "VALID" in _result1109.stdout, _result1109.stderr)
+print("grader-evidence AC7 optional grader schema fields and old output passed")

@@ -103,5 +103,30 @@ python3 verify.py
                     self.assertEqual([cap for cap, _ in failures], expected)
 
 
+class BundledPreflightTests(unittest.TestCase):
+    def test_bundle_skips_env_config_validation_but_legacy_still_checks_it(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch.object(grading_env, '_spec_verify_text', return_value=('', '')), \
+                patch.object(grading_env, '_project_row', return_value={'env_vars': ['API_TOKEN']}), \
+                patch.object(grading_env, '_look_toml', return_value={}):
+            failures = grading_env.preflight('grader', 'L-spec-1109', tmp, 'unknown', repo=tmp)
+            self.assertEqual([cap for cap, _ in failures], ['env-file'])
+            self.assertEqual(grading_env.preflight('grader', 'L-spec-1109', tmp, 'unknown',
+                                                  repo=tmp, bundled=True), [])
+
+    def test_bundle_skips_all_execution_proofs_including_admin_db(self):
+        spec = "AC1 [backend]: fixture\nreview_path: run git diff HEAD && npm test && python3 -m pytest /opt/checkout/tests && cat .env\n"
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch.object(grading_env, '_spec_verify_text', return_value=(spec, 'python3 -m pytest')), \
+                patch.object(grading_env, '_project_row', return_value={'admin_env': 'fixture'}), \
+                patch.object(grading_env, '_prove_db', side_effect=AssertionError('DB proof attempted')), \
+                patch.object(grading_env, '_prove_view_paths', side_effect=AssertionError('path proof attempted')), \
+                patch.object(grading_env, '_prove_tools', return_value=(False, 'missing')):
+            self.assertEqual(grading_env.preflight('grader', 'L-spec-1109', tmp, 'unknown',
+                                                  repo=tmp, bundled=True), [])
+        self.assertTrue(grading_env.required('grader', spec, '', 'unknown'))
+        self.assertEqual(grading_env.required('grader', spec, '', 'unknown', bundled=True), [])
+
+
 if __name__ == '__main__':
     unittest.main()

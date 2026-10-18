@@ -7,6 +7,7 @@ HERE = pathlib.Path(__file__).resolve().parent
 AGENTS = HERE.parent / "agents"
 sys.path.insert(0, str(HERE))
 import models  # noqa: E402
+import grader_packet
 import panes, spawns  # noqa: E402 — panes: proc_start/alive (imports nothing of ours); spawns: L-spec-0755 dup-dispatch/cancel/clear helpers
 ROOT = pathlib.Path(os.environ.get("DOIT_ROOT", pathlib.Path.home() / ".do-it"))
 EVENTS, CONTENT = ROOT / "events", ROOT / "content"
@@ -707,6 +708,8 @@ def events_for(role, out, a, base):
         # S15/S33 (a-6): `confirmed` here stays the LITERAL all-rows-met roll-up — the model's own claim, computed before this spawn's dispatch could know which criteria the spec-writer had declared owed. The fold (verdict_ confirmed) is where a `cannot-assess` row on an owed criterion stops zeroing it; that needs the row-level data this event did not carry before, so `cannot_assess` rides beside `confirmed` now.
         ev.append(("verdict", dict(confirmed=all(v["verdict"] == "met" for v in vs)
                                    and out["matches_intent"] == "yes" and out["card_ok"] == "yes",
+                                   judgment_only=out.get("judgment_only", []), pre_existing=out.get("pre_existing", []),
+                                   n_judgment_only=len(out.get("judgment_only", [])),
                                    n=len(vs), matches_intent=out["matches_intent"], card_ok=out["card_ok"],
                                    cannot_assess=[v["ac"] for v in vs if v["verdict"] == "cannot-assess"])))
         ev += [("rejected-criterion", dict(criterion=v["ac"], why=v["reason"])) for v in vs if v["verdict"] == "unmet"]
@@ -1139,6 +1142,10 @@ def _main(a):
                            fold.read_events())
             fail(f"no room: {free_gb:.1f}GB free, need {need_gb}GB at {room_path} — "
                  f"refusing role={a.role} before any spend", reason="disk")
+    g_bundle = None
+    if a.role == "grader":
+        g_bundle = grader_packet.gate(fold.read_events(), a.subject, packet,
+            lambda kind, **kv: emit(ledger, base, kind, **kv), fail)
     # L-spec-0481/R12.3-R12.6: hold-check, then provision+prove in the spawn's OWN view/cwd, before any spend — scoped to the entry points this unit builds (Entry points a/b/c): a grader on the seat backend (its view is built here, before dsn_role, so preflight proves inside the SAME sandbox/env the run uses); a grader resolving to a non-seat backend (claude-p/codex) whose own required() is non-empty — there is something to prove and no view anywhere to prove it in — is refused before any spend (AC12(iii)); a non-seat grader requiring nothing is untouched (nothing for the missing view to have blocked); and a reviewer of any backend (read-only, against its cwd — never a view).
     import grading_env, routing
     grader_seat = a.role == "grader" and backend == "seat"
@@ -1152,7 +1159,7 @@ def _main(a):
         for crit, cap, to in routing.diff_routes(g_computed_routes, routing.latest_routed_events(fold.read_events(), a.subject)):
             emit(ledger, base, "criterion-routed", criterion=crit, capability=cap, to=to)
         g_routed = set(g_computed_routes)
-        g_required_grader = grading_env.required("grader", g_spec_text, g_verify_text, gproject, owed=g_explicit_owed, routed=g_routed)
+        g_required_grader = grading_env.required("grader", g_spec_text, g_verify_text, gproject, owed=g_explicit_owed, routed=g_routed, bundled=g_bundle is not None)
     if a.role == "grader" and not grader_seat and g_required_grader:
         fail(f"{a.subject}: backend={backend} builds no view to prove {g_required_grader[0]} in — "
              "refusing role=grader before any spend", reason="preflight:no-view")
@@ -1181,7 +1188,7 @@ def _main(a):
         else:
             pf_view, pf_repo = pathlib.Path(cwd), HERE.parent
         failures = grading_env.preflight(a.role, a.subject, pf_view, gproject, repo=pf_repo, mcp_config=a.mcp_config,
-                                         owed=(g_explicit_owed if a.role == "grader" else frozenset()), routed=g_routed)
+                                         owed=(g_explicit_owed if a.role == "grader" else frozenset()), routed=g_routed, bundled=g_bundle is not None)
         if failures:
             for cap, reason in failures:
                 emit(ledger, base, "grading-preflight-failed", role=a.role, capability=cap, reason=reason)
@@ -1365,6 +1372,10 @@ def _main(a):
     except jsonschema.ValidationError as e:
         fail(f"structured_output violates {schema_path.name}: {e.message[:200]} at "
              f"{'/'.join(str(x) for x in e.absolute_path) or '<root>'}")
+    if a.role == "grader":
+        error = grader_packet.validate_output(out, g_bundle)
+        if error:
+            fail("structured_output violates grader evidence: " + error)
     if out.get("contamination"):
         fail("contamination: the packet carried what Blindness strips; the run is void")
     if kind and not (a.role == "spec-writer" and out["status"] != "written"):

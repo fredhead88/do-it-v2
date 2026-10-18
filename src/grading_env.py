@@ -294,7 +294,7 @@ def route(spec_text, verify_text, project):
 
 
 def required(role, spec_text, verify_text, project, *, owed=frozenset(), routed=frozenset(),
-             mcp_config=False, review_account=False):
+             mcp_config=False, review_account=False, bundled=False):
     """Pure/textual subsequence of `CAPABILITIES`. Reviewer needs are
     conditional (SD-R12-2a/Assumption 10) — never a blanket three; the
     reviewer branch is unchanged by this unit. The grader branch is now the
@@ -316,6 +316,9 @@ def required(role, spec_text, verify_text, project, *, owed=frozenset(), routed=
         if cid in skip:
             continue
         found.update(caps)
+    if role == "grader" and bundled:
+        from grader_packet import EXECUTION_CAPABILITIES
+        found.difference_update(EXECUTION_CAPABILITIES)
     return [c for c in CAPABILITIES if c in found]
 
 
@@ -751,7 +754,7 @@ def _write_state(view, **kv):
     path.write_text(json.dumps(state))
 
 
-def preflight(role, subject, view, project, *, repo, mcp_config=None, owed=frozenset(), routed=frozenset()):
+def preflight(role, subject, view, project, *, repo, mcp_config=None, owed=frozenset(), routed=frozenset(), bundled=False):
     """Provisions/proves every capability `required()` needs, in `view/` only.
     Returns `(capability, reason)` FAILURES only, in `CAPABILITIES` order.
     `owed`/`routed` (criterion ids) pass straight through to `required()`
@@ -759,7 +762,7 @@ def preflight(role, subject, view, project, *, repo, mcp_config=None, owed=froze
     view = pathlib.Path(view)
     tree = view / "tree"
     spec_text, verify_text = _spec_verify_text(subject, role)
-    caps = required(role, spec_text, verify_text, project, owed=owed, routed=routed)
+    caps = required(role, spec_text, verify_text, project, owed=owed, routed=routed, bundled=bundled)
     if role == "grader" and not routed:
         # Route git on this default entry point too. Keep other capabilities
         # in a mixed criterion active so a missing dependency is still proved.
@@ -768,7 +771,7 @@ def preflight(role, subject, view, project, *, repo, mcp_config=None, owed=froze
     row = _project_row(project)
     reasons = {}
     env_file_vars = {}
-    if role != "reviewer" and (error := _env_file_error(row)):
+    if role != "reviewer" and not (role == "grader" and bundled) and (error := _env_file_error(row)):
         reasons["env-file"] = error
 
     dsn = None
@@ -777,7 +780,7 @@ def preflight(role, subject, view, project, *, repo, mcp_config=None, owed=froze
         ok, reason, dsn = _prove_db(view)
         if not ok:
             reasons["db"] = reason
-    if role == "grader" and row.get("admin_env") and "db" not in reasons:
+    if role == "grader" and not bundled and row.get("admin_env") and "db" not in reasons:
         first_port = (urllib.parse.parse_qs(urllib.parse.urlparse(dsn or "").query).get("port") or [None])[0]
         ok, reason, admin_dsn = _prove_db(view, admin=True, avoid_port=first_port)
         if not ok:
