@@ -4253,3 +4253,17 @@ def test_ledger_vocabulary_1104():
 
 
 test_ledger_vocabulary_1104()
+
+
+def test_suite_run_vocabulary():
+    event = {"type": "suite-run", "subject": "L-charter-0051", "sha": "a" * 40,
+             "rc": 0, "failed": [], "wall_s": 0}
+    assert fold.admits(event, "suite-daily") is None
+    for actor in ("operator", "tick", "thinker", "executor", "look"):
+        assert "actor mismatch" in fold.admits(event, actor), actor
+    assert "sha" in fold.required_reason({k: v for k, v in event.items() if k != "sha"})
+    assert fold.required_reason(event) is None, "rc=0 and wall_s=0 must remain green"
+    print("L1051-AC5 ok (suite-daily only, sha required, green zero fields admitted)")
+
+
+test_suite_run_vocabulary()

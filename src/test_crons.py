@@ -31,7 +31,7 @@ def check(cond, msg):
 REAL_MANIFEST = pathlib.Path(__file__).resolve().parent.parent / "crons.toml"
 NAMES = {"tick", "look", "tmp-reaper", "lessons-digest", "backup-watch",
          "ledger-snapshot", "sweep-owed", "auto-deploy", "owed-digest",
-         "portal-latency-daily"}
+         "portal-latency-daily", "suite-daily"}
 
 
 def _write_manifest(path, rows_):
@@ -70,11 +70,11 @@ def _exec_manifest(tmpdir, rows_=None, mode=0o755):
     return p, out
 
 
-# ══ AC1 · rows() — 10 rows, all 8 keys, where/project split ═════════════════
+# ══ AC1 · rows() — 11 rows, all 8 keys, where/project split ═════════════════
 d1 = TMP / "ac1"
 d1.mkdir()
 r1 = crons.rows(str(REAL_MANIFEST))
-check(len(r1) == 10, f"AC1: exactly 10 rows: {len(r1)}")
+check(len(r1) == 11, f"AC1: exactly 11 rows: {len(r1)}")
 check({row["name"] for row in r1} == NAMES, f"AC1: name set: {[row['name'] for row in r1]}")
 for row in r1:
     # R14a: every row also carries `max_runtime_s` now (int|None) — a 9th key,
@@ -90,6 +90,20 @@ for row in r1:
     else:
         check(row["where"] == "user" and row["project"] == "do-it-v2",
               f"AC1: {row['name']} is user/do-it-v2: {row}")
+
+# L-spec-1051 AC7: exact daily row and token substitution, including its signature.
+suite_daily = next(row for row in r1 if row["name"] == "suite-daily")
+check(suite_daily == {
+    "name": "suite-daily", "where": "user", "schedule": "40 5 * * *",
+    "command": f"{REAL_MANIFEST.parent}/doit cron-run suite-daily -- /usr/bin/python3 "
+               f"{REAL_MANIFEST.parent}/src/suite_run.py >> {fold.ROOT}/logs/suite-daily.log 2>&1",
+    "path": "/usr/bin/python3", "sig": r"suite_run\.py\b", "owner": "thinker",
+    "project": "do-it-v2", "max_runtime_s": 1800,
+}, f"L1051-AC7: suite-daily exact row: {suite_daily}")
+check(crons.interval_s(suite_daily["schedule"]) == 86400, "L1051-AC7: daily interval")
+check(bool(re.search(suite_daily["sig"], suite_daily["command"])),
+      "L1051-AC7: signature matches substituted command")
+print("L1051-AC7 ok")
 
 # L-spec-1046 AC1–AC3: the daily cron.d job is watched independently of the
 # hourly report. All executable paths and cron.d reads use temp fixtures.
@@ -225,10 +239,10 @@ crond5_empty.mkdir()
 # `tick`/`backup-watch` lines carry the real `/home/albert/do-it-v2/doit`, which
 # still matches `\bdoit tick\b` / `\bdoit backup watch\b` regardless of path.
 res5 = crons.check(manifest=str(manifest5), crontab_text=FIXTURE_5, crond_dir=str(crond5_empty))
-check({r["name"] for r in res5} == {"look", "tmp-reaper", "auto-deploy", "owed-digest", "portal-latency-daily"},
-      f"AC5: exactly {{look, tmp-reaper, auto-deploy, owed-digest, portal-latency-daily}} missing: {[r['name'] for r in res5]}")
+check({r["name"] for r in res5} == {"look", "tmp-reaper", "auto-deploy", "owed-digest", "portal-latency-daily", "suite-daily"},
+      f"AC5: exactly {{look, tmp-reaper, auto-deploy, owed-digest, portal-latency-daily, suite-daily}} missing: {[r['name'] for r in res5]}")
 check(all(r["reason"] == "absent" for r in res5), f"AC5: every entry is absent: {res5}")
-check(len(res5) == 5, f"AC5: no extra rows: {res5}")
+check(len(res5) == 6, f"AC5: no extra rows: {res5}")
 
 # AC5's second, minimal fixture: the only matching line is commented.
 d5b = TMP / "ac5b"
@@ -514,7 +528,7 @@ check(not any_bare, "R14-AC6: none of the eight rows prints bare")
 bw6 = next(r for r in rows6 if r["name"] == "backup-watch")
 check(bw6["max_runtime_s"] == 90, f"R14-AC6: backup-watch max_runtime_s == 90: {bw6['max_runtime_s']}")
 for r in rows6:
-    if r["name"] != "backup-watch":
+    if r["name"] not in {"backup-watch", "suite-daily"}:
         check(r["max_runtime_s"] is None, f"R14-AC6: {r['name']} max_runtime_s is None: {r['max_runtime_s']}")
 buf6 = io.StringIO()
 with contextlib.redirect_stdout(buf6):

@@ -32,7 +32,7 @@ SESSIONS = pathlib.Path(os.environ.get("DOIT_SESSIONS_DIR",
 PROJECT = os.environ.get("DOIT_PROJECT")          # §9.1/D93: a filter, not a second read
 
 from fold_emits import EMITS, DECLARES, OWED_DECLARERS
-
+EMITS["suite-run"] = {"suite-daily"}
 # A correction may override anything but these: D90 takes the actor from the
 # FILENAME, and a correction that could rewrite it reopens every check below.
 UNCORRECTABLE = ("actor", "_src")
@@ -529,7 +529,7 @@ def escalation_ok(e):
 # and stays special-cased in `required_reason` below; these two are a plain
 # field list.
 REQUIRED = {"owed-ac": ("criterion",), "spec-carried": ("source", "tier", "audited_at"),
-            "inbound-covered": ("source", "covered_by"),
+            "inbound-covered": ("source", "covered_by"), "suite-run": ("sha",),
             "spec-lint-warning": ("finding",),
             # L-charter-0038/L-spec-0384, SD4: a failed check without its own
             # evidence is a stamp, not a claim.
