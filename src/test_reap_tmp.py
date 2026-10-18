@@ -831,6 +831,9 @@ EXPECTED_CRONS_ROWS = [
     {"name": "ci-shadow", "where": "user", "schedule": "*/10 * * * *",
      "command": "{doit} cron-run ci-shadow -- {doit} ci-shadow >> {root}/logs/ci-shadow.log 2>&1",
      "path": "{doit}", "sig": r"\bdoit ci-shadow\b", "owner": "thinker", "project": "do-it-v2"},
+    {"name": "balance", "where": "user", "schedule": "*/10 * * * *",
+     "command": "{doit} cron-run balance -- {doit} balance >> {root}/logs/balance.log 2>&1",
+     "path": "{doit}", "sig": r"\bdoit balance\b", "owner": "thinker", "project": "do-it-v2"},
 ]
 
 # ── L0440-AC20 · current cron-run commands, runtime bounds and */5 reaper cadence ────
