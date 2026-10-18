@@ -834,6 +834,10 @@ EXPECTED_CRONS_ROWS = [
     {"name": "balance", "where": "user", "schedule": "*/10 * * * *",
      "command": "{doit} cron-run balance -- {doit} balance >> {root}/logs/balance.log 2>&1",
      "path": "{doit}", "sig": r"\bdoit balance\b", "owner": "thinker", "project": "do-it-v2"},
+    {"name": "stuck-digest", "where": "user", "schedule": "15 6 * * *",
+     "command": "{doit} cron-run stuck-digest -- {doit} stuck-digest --send >> {root}/logs/stuck-digest.log 2>&1",
+     "path": "{doit}", "sig": r"\bdoit stuck-digest(?: --send)?(?=\s*>>|\s*(?:#.*)?$)",
+     "owner": "digest", "project": "do-it-v2"},
 ]
 
 # ── L0440-AC20 · current cron-run commands, runtime bounds and */5 reaper cadence ────
