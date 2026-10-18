@@ -1,16 +1,84 @@
 """Turn failed owed checks into replayable escalations and corrective rechecks."""
 import json
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
+import checks
 import dispatch
 import fold
 import owed
+import packet
 
 FAILED_DEFAULT = "the check stays failed and open, the spec stays shipped-owed-due, and the next digest lists it under SYSTEM HEALTH"
 FAILED_REVERT = "an owed-corrective naming a spec, or an owed-waived with a reason, closes it"
 SHIPPED = {"shipped", "shipped-owed-due", "shipped-owed-evidence", "shipped-owed-expired",
            "accepted", "closed-shipped"}
 DEAD = {"killed", "void", "dropped", "closed-unbuilt"}
+
+
+UNVERIFIABLE_AFTER_DAYS = 14
+UNVERIFIABLE_CAP_PCT = 10
+
+
+def no_runner(row, spec_text, project):
+    """Only established operator/permission needs authorize an unverifiable close."""
+    try:
+        if (row.get("status") == "quarantined" or not spec_text
+                or packet.criterion_block(spec_text, row["criterion"]) is None):
+            return None
+        if row.get("last_unobservable_capability") == "ro-dsn-grant":
+            return "ro-dsn-grant"
+        record = checks.record_for_owed(row, spec_text, project)
+        return "needs operator" if "operator" in record["needs"] else None
+    except Exception:
+        return None
+
+
+def month_counts(all_ev, now):
+    """Count admitted distinct closes in the supplied UTC month, including operators."""
+    now = now.astimezone(timezone.utc)
+    keys = {kind: set() for kind in ("met", "waived", "unverifiable")}
+    today = set()
+    admitted = fold.fold(all_ev)[0]
+    for spec in admitted.values():
+        for e in spec["evs"]:
+            kind = str(e.get("type", "")).removeprefix("owed-")
+            if kind not in keys:
+                continue
+            stamp = fold.ts(e.get("ts")).astimezone(timezone.utc)
+            if (stamp.year, stamp.month) != (now.year, now.month):
+                continue
+            key = (e.get("subject"), e.get("criterion"))
+            keys[kind].add(key)
+            if kind == "unverifiable" and stamp.date() == now.date():
+                today.add(key)
+    counts = {kind: len(rows) for kind, rows in keys.items()}
+    return {**counts, "closed": sum(counts.values()), "unverifiable_today": len(today)}
+
+
+def cap_allows(counts):
+    return 100 * (counts["unverifiable"] + 1) <= UNVERIFIABLE_CAP_PCT * (counts["closed"] + 1)
+
+
+def _failure_valid(failure, row, now):
+    """Undetermined failures retain escalation; explicit windows expire at equality."""
+    from sweep_owed import _spec_file
+
+    try:
+        if failure is None:
+            return True
+        if failure.get("valid_until") is not None:
+            return now < datetime.fromisoformat(str(failure["valid_until"]).replace("Z", "+00:00"))
+        body = _spec_file(row).read_text(encoding="utf-8")
+        if packet.criterion_block(body, row["criterion"]) is None:
+            return True
+        record = checks.record_for_owed(row, body, row.get("project"))
+        hours = record["validity_h"]
+        if hours is None:
+            return True
+        observed = datetime.fromisoformat(str(failure.get("observed_at") or failure["ts"]).replace("Z", "+00:00"))
+        return now < observed + timedelta(hours=hours)
+    except Exception:
+        return True
 
 
 def _array(value):
@@ -101,6 +169,8 @@ def escalate_failures(specs, now, *, dry_run=False):
                 failures = [e for e in related if e.get("type") == "owed-failed"
                             and fold.ts(e.get("ts")) > row["governing_at"]]
                 failure = failures[-1] if failures else None
+                if not _failure_valid(failure, {**row, "spec": sid}, now):
+                    continue
                 src = (failure.get("_src") if failure else None) or (
                     "unlocated:" + row["governing_at"].isoformat())
                 failure_at = fold.ts(failure.get("ts")) if failure else row["governing_at"]

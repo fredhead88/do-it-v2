@@ -15,11 +15,11 @@ from contextlib import ExitStack
 from unittest.mock import patch
 from datetime import datetime, timedelta, timezone
 
-HOME_ORPHANS = pathlib.Path.home() / ".do-it/state/sweep-owed-orphans.json"
-HOME_ORPHANS_BEFORE = ((HOME_ORPHANS.read_bytes(), HOME_ORPHANS.stat().st_mtime_ns)
-                       if HOME_ORPHANS.exists() else None)
-
 TMP = pathlib.Path(tempfile.mkdtemp())
+os.environ["HOME"] = str(TMP / "home")
+HOME_ORPHANS = pathlib.Path.home() / ".do-it/state/sweep-owed-orphans.json"
+HOME_ORPHANS_BEFORE = None
+
 os.environ["DOIT_ROOT"] = str(TMP)
 # L-spec-9004: a real, disposable DOIT_SCRATCH — never nested under TMP/DOIT_ROOT
 # above (scratch.root() refuses a resolved root at/under DOIT_ROOT) — mirroring
@@ -42,7 +42,7 @@ for module in (dispatch, fold, sweep_owed.packet):
             ROOT_PATCHES.enter_context(patch.object(module, attr, TMP if attr == "ROOT" else TMP / attr.lower()))
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
-NOW = datetime.now(timezone.utc)
+NOW = datetime.now(timezone.utc).replace(microsecond=0)
 EV = TMP / "events"
 CONTENT = TMP / "content"
 EPOCH = (NOW - timedelta(days=3650)).isoformat(timespec="seconds")
@@ -834,9 +834,10 @@ for busy in (True, False):
     with patch.object(sweep_owed, "sweep_expired", side_effect=lambda *a, **kw: order.append("expired") or []), \
          patch.object(sweep_owed.owed_failures, "escalate_failures",
                       side_effect=lambda *a, **kw: order.append("failures") or []), \
+         patch.object(sweep_owed, "close_unverifiable", side_effect=lambda *a, **kw: order.append("close") or []), \
          patch.object(sweep_owed, "open_batch", side_effect=lambda *a: order.append("batch") or busy):
         sweep_owed.run(dry_run=True, now=NOW, runner=FakeRunner())
-    assert order == ["expired", "failures", "batch"]
+    assert order == ["expired", "failures", "close", "batch"]
 clear()
 write("L-spec-writer-expired.jsonl",
       {"ts": EPOCH, "type": "owed-ac", "subject": "L-spec-9905", "criterion": "AC1",
@@ -853,5 +854,125 @@ assert expired_event["default"] == (
     "an owed-waived with a reason, or a corrective puts it back")
 assert sweep_owed.EXPIRED_REVERT == "an owed-met (waive) or an Executor re-date puts a check back"
 print("L1005 AC5 AC6 ok")
+
+# L1113: real no-runner closes, cap, and fresh-process fold admission.
+def backlog_fixture(sid="L-spec-9913", days=15, capability="operator-action", status="due"):
+    wake = iso(days=-days) if days is not None else None
+    write(f"L-spec-writer-{sid.rsplit('-', 1)[-1]}.jsonl",
+          {"type": "spec-written", "subject": sid, "ts": EPOCH, "project": PROJ_A},
+          {"type": "owed-ac", "subject": sid, "ts": EPOCH,
+           "criterion": "AC1", "wake_at": wake})
+    write(f"L-executor-{sid.rsplit('-', 1)[-1]}.jsonl", {"type": "shipped", "subject": sid, "ts": EPOCH})
+    extras = []
+    if status in ("blocked", "expired"):
+        extras.append({"type": "owed-unobservable", "capability": capability, "why": "fixture"})
+    else:
+        extras.append({"type": "owed-routed", "route": "relabel", "capability": capability})
+    if status == "quarantined":
+        write(f"L-sweep-{sid.rsplit('-', 1)[-1]}.jsonl",
+              {"type": "owed-quarantined", "subject": sid, "criterion": "AC1",
+               "ts": iso(minutes=-30), "reason": "fixture", "spec_sha256": "fixture"})
+    elif status in ("failed", "met", "unverifiable"):
+        extras.append({"type": f"owed-{status}", "evidence": "fixture", "reason": "fixture"})
+    write(f"L-operator-{sid.rsplit('-', 1)[-1]}.jsonl", *({"subject": sid, "criterion": "AC1", "ts": iso(hours=-1), **e}
+                                     for e in extras))
+
+
+def seed_closes(n, unverifiable=0):
+    write("L-operator-month.jsonl", *[
+        {"type": "owed-unverifiable" if i < unverifiable else ("owed-met" if i % 2 else "owed-waived"),
+         "subject": "L-spec-9990", "criterion": f"AC{i}", "reason": "fixture", "evidence": "fixture"}
+        for i in range(n)])
+
+
+clear()
+seed_closes(300)
+for i, (days, status, cap, want) in enumerate([
+        (16, "due", "operator-action", True), (15, "blocked", "operator-action", True),
+        (15, "expired", "ro-dsn-grant", True), (13, "due", "operator-action", False),
+        (14, "due", "operator-action", False), (15, "due", "other", False),
+        (15, "quarantined", "operator-action", False), (15, "failed", "operator-action", False),
+        (15, "met", "operator-action", False), (15, "unverifiable", "operator-action", False),
+        (None, "due", "operator-action", False), (None, "due", "operator-action", False)]):
+    sid = f"L-spec-{9910+i}"
+    backlog_fixture(sid, days, cap, status)
+    print("L1113 AC2", sid, days, status, "close" if want else "skip")
+# An unshipped row is also undated and cannot close.
+write("L-executor-9920.jsonl")
+all_ev, fixture_specs = specs_now()
+assert owed.checks(fixture_specs["L-spec-9920"]["evs"], NOW)[0]["due_at"] is None
+assert owed.checks(fixture_specs["L-spec-9921"]["evs"], NOW)[0]["due_at"] is None
+before = {p.name: p.read_bytes() for p in EV.glob("*.jsonl")}
+preview = sweep_owed.close_unverifiable(all_ev, NOW, dry_run=True)
+assert len([line for line in preview if "DRY RUN would close" in line]) == 3
+assert before == {p.name: p.read_bytes() for p in EV.glob("*.jsonl")}
+with patch.dict(os.environ, {"DOIT_LEDGER_FILE": str(EV / "L-operator-trap.jsonl")}):
+    closed_lines = sweep_owed.close_unverifiable(all_ev, NOW)
+closes = [e for e in fold.read_events() if e["type"] == "owed-unverifiable" and e["actor"] == "prod-runner"]
+assert [e["subject"] for e in closes] == ["L-spec-9910", "L-spec-9911", "L-spec-9912"]
+assert all("L-operator-0001" in e["reason"] and ("needs operator" in e["reason"] or "ro-dsn-grant" in e["reason"])
+           and "due " in e["reason"] for e in closes)
+assert not (EV / "L-operator-trap.jsonl").exists()
+assert sweep_owed.close_unverifiable(fold.read_events(), NOW) == []
+# Copy the same close to an unauthorized actor; a fresh interpreter reads both files.
+raw_close = json.loads((EV / "L-prod-runner-local.jsonl").read_text().splitlines()[0])
+assert "actor" not in raw_close
+write("L-builder-forbidden.jsonl", raw_close)
+reader = """
+import json,sys
+sys.path.insert(0,sys.argv[1])
+import fold,owed
+specs,_,ignored,_=fold.fold(fold.read_events())
+row=owed.checks(specs['L-spec-9910']['evs'],fold.ts(sys.argv[2]))[0]
+e=next(e for e in specs['L-spec-9910']['evs'] if e['type']=='owed-unverifiable')
+print(json.dumps(dict(status=row['status'], actor=e['actor'], source=e['_src'],
+                     dropped=sum(e['type']=='owed-unverifiable' for e in ignored))))
+"""
+readback = json.loads(subprocess.check_output([sys.executable, "-c", reader, str(REPO_ROOT / "src"), NOW.isoformat()],
+                                             env={**os.environ, "DOIT_ROOT": str(TMP)}, text=True))
+assert readback["status"] == "unverifiable" and readback["actor"] == "prod-runner"
+assert "L-prod-runner-local.jsonl" in readback["source"] and readback["dropped"] == 1
+print("L1113 AC4 fresh process read-back", readback)
+
+for other_closes, uv, expected in [(0, 0, 0), (9, 0, 1), (10, 0, 1), (9, 1, 0)]:
+    clear()
+    seed_closes(other_closes, uv)
+    backlog_fixture("L-spec-9913", 15)
+    backlog_fixture("L-spec-9914", 16)
+    output = sweep_owed.close_unverifiable(fold.read_events(), NOW)
+    closes = [e for e in fold.read_events() if e["type"] == "owed-unverifiable" and e["actor"] == "prod-runner"]
+    assert len(closes) == expected
+    if closes:
+        assert closes[0]["subject"] == "L-spec-9914"
+    assert any(f"{2-expected} rows past 14 days held" in line and "cap" in line for line in output)
+    counts = sweep_owed.owed_failures.month_counts(fold.read_events(), NOW)
+    assert counts["unverifiable"] * 10 <= counts["closed"] or expected == 0
+    print("L1113 AC3", other_closes, uv, output)
+
+# No-runner expiry is excluded; runner expiry remains an escalation.
+clear()
+backlog_fixture("L-spec-9913", 15, "ro-dsn-grant", "expired")
+backlog_fixture("L-spec-9914", 15, "unknown", "expired")
+expiry = sweep_owed.sweep_expired(specs_now()[1], NOW)
+assert len(expiry) == 1 and "L-spec-9914" in expiry[0]
+for variant in ("relabel", "redate"):
+    clear()
+    backlog_fixture("L-spec-9913", 1)
+    backlog_fixture("L-spec-9914", 1, "other")
+    backlog_fixture("L-spec-9915", 1, "operator-action", "blocked")
+    if variant == "redate":
+        write("L-operator-9913.jsonl",
+              {"subject": "L-spec-9913", "type": "owed-unobservable", "criterion": "AC1",
+               "capability": "operator-action", "why": "fixture", "ts": iso(hours=-3)},
+              {"subject": "L-spec-9913", "type": "owed-ac", "criterion": "AC1",
+               "wake_at": iso(hours=-1), "ts": iso(hours=-2)})
+    fake = FakeRunner()
+    output = sweep_owed.run(now=NOW, runner=fake)
+    manifests = list(CONTENT.glob("L-sweep-*.md"))
+    assert len(fake.calls) == 2 and len(manifests) == 1
+    assert [r["spec"] for r in rows_of(manifests[0])] == ["L-spec-9914"]
+    assert not any("L-spec-9913" in line and "dispatch" in line for line in output)
+    assert any("needs operator" in line and "2" in line for line in output)
+    print("L1113 AC5 no-runner excluded from manifest", variant)
 
 ROOT_PATCHES.close()
