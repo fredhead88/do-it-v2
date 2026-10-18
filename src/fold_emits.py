@@ -268,6 +268,12 @@ EMITS["evidence-bundle-failed"] = {"build-runner"}
 EMITS["base-red"] = {"base-red"}
 EMITS["health-alarm"] = {"health"}
 EMITS["owed-unverifiable"] = {"prod-runner", "operator"}
+# L-spec-1133: queue, digest and operator-alert writers (SD3).
+EMITS["queue-add"] = {"executor", "tick", "operator"}
+EMITS["queue-remove"] = {"executor", "tick", "operator"}
+EMITS["queue-batch"] = {"executor", "tick"}
+EMITS["stuck-digest"] = {"digest"}
+EMITS["operator-alert"] = {"look", "tick", "digest"}
 EMITS["owed-met"].add("prod-runner")
 EMITS["owed-failed"].add("prod-runner")
 # owed-unobservable stays open to every actor, including prod-runner.

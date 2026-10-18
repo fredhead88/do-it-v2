@@ -575,6 +575,12 @@ REQUIRED["base-red"] = ("project", "sha", "complete")
 REQUIRED["health-alarm"] = ("alarm", "severity", "line")
 REQUIRED["owed-unverifiable"] = ("criterion", "reason")
 REQUIRED.update(REQUIRED_ROWS)
+# L-spec-1133: SD3 queue, digest and alert field presence.
+REQUIRED["queue-add"] = ("project", "branch", "rule")
+REQUIRED["queue-remove"] = ("reason",)
+REQUIRED["queue-batch"] = ("project", "specs")
+REQUIRED["stuck-digest"] = ("date", "stuck_count", "listed", "live_reason_count", "path")
+REQUIRED["operator-alert"] = ("kind", "sent", "detail")
 
 
 # L-charter-0033/board-owners, Target 1: who owns each board() row and what
@@ -670,20 +676,30 @@ def required_reason(e):
                 "irreversible=<the act that forbids a default> (an irreversible one)")
     fields = REQUIRED.get(t)
     if fields:
-        # An empty digest histogram is still a supplied counts field (SD1).
-        missing = [k for k in fields if not (
-            k in e if t == "owed-digest" and k == "counts" else _has(e, k))]
+        missing = []
+        for k in fields:
+            if t == "stuck-digest" and k in ("stuck_count", "listed", "live_reason_count"):
+                # A measured zero is clean; a blank/unknown count never is.
+                value = e.get(k)
+                present = ((isinstance(value, int) and not isinstance(value, bool) and value >= 0)
+                           or (isinstance(value, str) and value.isdecimal())
+                           or (k == "listed" and isinstance(value, list)))
+            else:
+                # An empty owed-digest histogram is still supplied (SD1).
+                present = k in e if t == "owed-digest" and k == "counts" else _has(e, k)
+            if not present:
+                missing.append(k)
         if missing:
             return (f"{t} {e.get('subject', '?')} missing required field(s): "
                     + ", ".join(f"{k}=" for k in missing))
     # L-charter-0042/L-spec-0483 (tick-next-step), R13-vocab: `trigger` is
     # optional (every builder dispatch today carries none) but, when present,
-    # must be one of the four the tick ever writes, and a redispatch always
+    # must be one of the tick's triggers, and a redispatch always
     # names what it replaced.
     if t == "autodispatched":
         trig = e.get("trigger")
         if trig is not None:
-            valid_triggers = ("build-done", "rework", "regrade", "redispatch")
+            valid_triggers = ("build-done", "rework", "regrade", "redispatch", "retry")
             if trig not in valid_triggers:
                 return (f"autodispatched {e.get('subject', '?')} trigger={trig!r} not one of "
                         + ", ".join(valid_triggers))

@@ -4386,3 +4386,151 @@ def test_suite_run_vocabulary():
 
 
 test_suite_run_vocabulary()
+
+
+def test_queue_digest_vocabulary_1133():
+    import fold_emits
+
+    allowed = {
+        "queue-add": {"executor", "tick", "operator"},
+        "queue-remove": {"executor", "tick", "operator"},
+        "queue-batch": {"executor", "tick"},
+        "stuck-digest": {"digest"},
+        "operator-alert": {"look", "tick", "digest"},
+    }
+    values = {
+        "queue-add": {"project": "do-it-v2", "branch": "l-spec-91133", "rule": "enqueue"},
+        "queue-remove": {"reason": "shipped"},
+        "queue-batch": {"project": "do-it-v2", "specs": ["L-spec-91133"]},
+        "stuck-digest": {"date": "2026-10-18", "stuck_count": 0, "listed": 0,
+                         "live_reason_count": 0, "path": "/fixture/digest"},
+        "operator-alert": {"kind": "heartbeat-missed", "sent": "no", "detail": "fixture"},
+    }
+    assert fold.EMITS is fold_emits.EMITS
+    actors = "executor tick operator digest look planner thinker builder grader reviewer owed-digest sweep".split()
+    for kind, writers in allowed.items():
+        assert fold.EMITS[kind] == writers, kind
+        print("1133-AC1", kind, sorted(writers))
+        event = {"type": kind, "subject": "L-spec-91133", **values[kind]}
+        assert fold.REQUIRED[kind] == tuple(values[kind]), kind
+        assert fold.required_reason(event) is None, event
+        for field in values[kind]:
+            reason = fold.required_reason({k: v for k, v in event.items() if k != field})
+            assert reason and field in reason, (kind, field, reason)
+            print("1133-AC2", kind, field, "refused")
+        for actor in actors:
+            kept = fold.admits({"type": kind, "subject": "x"}, actor) is None
+            assert kept == (actor in writers), (kind, actor)
+            print("1133-AC3", kind, actor, "kept" if kept else "refused")
+
+    digest = {"type": "stuck-digest", "subject": "stuck-digest", **values["stuck-digest"]}
+    for counts in ({}, {"listed": []}, {"listed": ["L-spec-91133"]},
+                   {"stuck_count": "0", "listed": "0", "live_reason_count": "0"},
+                   {"stuck_count": 7, "live_reason_count": "3"}):
+        assert fold.required_reason({**digest, **counts}) is None, counts
+        print("1133-AC4", repr(counts), "admitted")
+    invalid_counts = (None, "", "  ", {}, True, False, -1, -0.5, 0.0, "-1", "1.0", " 0", "²")
+    for field in ("stuck_count", "listed", "live_reason_count", "date", "path"):
+        missing = {k: v for k, v in digest.items() if k != field}
+        reason = fold.required_reason(missing)
+        assert reason and field in reason, (field, reason)
+        bad_values = (None, "", "  ") if field in ("date", "path") else invalid_counts
+        if field in ("stuck_count", "live_reason_count"):
+            bad_values += ([], ["L-spec-91133"])
+        for value in bad_values:
+            reason = fold.required_reason({**digest, field: value})
+            assert reason and field in reason, (field, value, reason)
+            print("1133-AC4", field, repr(value), "refused")
+    for value in (0, ""):
+        reason = fold.required_reason({"type": "queue-add", **values["queue-add"], "branch": value})
+        assert reason and "branch" in reason, reason
+    assert fold.required_reason({"type": "owed-digest", "path": "/fixture", "counts": {}}) is None
+
+    dispatch = {"type": "autodispatched", "subject": "L-spec-91133",
+                "spawn": "s", "since": "2026-10-18T00:00:00Z"}
+    good = [{**dispatch, "trigger": trigger, **rule,
+             **({"replaces": "s0"} if trigger == "redispatch" else {})}
+            for trigger in ("build-done", "rework", "regrade", "retry", "redispatch")
+            for rule in ({}, {"rule": "build"})] + [dispatch, {**dispatch, "rule": "grade"}]
+    bad = [{**dispatch, "trigger": "bogus"}, {**dispatch, "trigger": "redispatch"}]
+    assert len(good) == 12 and all(fold.required_reason(e) is None for e in good)
+    assert all(fold.required_reason(e) for e in bad)
+    print("1133-AC6 ok", len(good), len(bad))
+
+    here = pathlib.Path(__file__).resolve().parent
+    reader = ("import json, fold; events = fold.read_events(); "
+              "_, _, ignored, subjects = fold.fold(events); "
+              "print(json.dumps({'events': events, 'kept': subjects.get('L-spec-91133', []), "
+              "'ignored': ignored}))")
+
+    def roundtrip(kind, actor, payload, *, missing=None, wrong=False):
+        with tempfile.TemporaryDirectory(prefix="vocabulary-1133-", dir=TMP) as directory:
+            filename = f"L-{actor}-{'0001' if actor == 'executor' else 'local'}.jsonl"
+            env = {**os.environ, "HOME": directory, "DOIT_ROOT": directory,
+                   "DOIT_LEDGER_FILE": filename, "DOIT_NO_POKE": "1"}
+            path = pathlib.Path(directory) / "events" / filename
+            # A refused append must preserve an existing file, too.
+            path.parent.mkdir()
+            path.write_text("\n")
+            before = path.read_bytes()
+            args = [f"{k}:={json.dumps(v)}" for k, v in payload.items()]
+            if missing:
+                args = [a for a in args if not a.startswith(missing + ":=")]
+                if missing == "stuck_count" and "stuck_count" in payload:
+                    args.append("stuck_count=")
+            command = [str(here.parent / "doit"), "append", kind, "L-spec-91133", *args]
+            written = subprocess.run(command, cwd=here.parent, env=env, capture_output=True, text=True)
+            if missing or wrong:
+                assert written.returncode != 0, (kind, actor, written.stdout)
+                assert path.read_bytes() == before, (kind, actor, "refused write changed file")
+                if missing:
+                    assert "missing required field(s)" in written.stderr and missing in written.stderr, written.stderr
+                    print("1133-AC5", kind, missing, "missing refused")
+                else:
+                    assert "actor mismatch" in written.stderr, written.stderr
+                    print("1133-AC5", kind, actor, "refused")
+                assert not json.loads(subprocess.run(
+                    [sys.executable, "-c", reader], cwd=here, env=env,
+                    check=True, capture_output=True, text=True).stdout)["events"]
+                if missing:
+                    return
+                # Non-strict append preserves the wrong writer's audit line;
+                # the separate reader must then ignore it.
+                written = subprocess.run(
+                    [sys.executable, "-c", "import sys, fold; fold.append(sys.argv[1:], strict=False)",
+                     kind, "L-spec-91133", *args], cwd=here, env=env, capture_output=True, text=True)
+                assert written.returncode == 0 and "recorded-and-ignored" in written.stderr, written.stderr
+            else:
+                assert written.returncode == 0, written.stderr
+            stored = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+            assert len(stored) == 1 and "actor" not in stored[0], stored
+            assert all(stored[0][k] == v for k, v in payload.items()), stored
+            result = json.loads(subprocess.run(
+                [sys.executable, "-c", reader], cwd=here, env=env,
+                check=True, capture_output=True, text=True).stdout)
+            assert len(result["events"]) == 1 and result["events"][0]["actor"] == actor, result
+            if wrong:
+                assert not result["kept"] and len(result["ignored"]) == 1, result
+                assert result["ignored"][0]["type"] == kind, result
+            else:
+                assert len(result["kept"]) == 1 and not result["ignored"], result
+                assert result["kept"][0]["type"] == kind and result["kept"][0]["actor"] == actor, result
+            print("1133-AC5", kind, actor, "ignored" if wrong else "kept")
+
+    for kind, writers in allowed.items():
+        for actor in sorted(writers):
+            roundtrip(kind, actor, values[kind])
+    roundtrip("autodispatched", "tick", {k: v for k, v in {
+        **dispatch, "trigger": "retry", "rule": "build"}.items() if k not in ("type", "subject")})
+    for kind, actor in (("stuck-digest", "tick"), ("queue-add", "thinker")):
+        roundtrip(kind, actor, values[kind], wrong=True)
+    for kind, actor, field in (("queue-add", "executor", "branch"),
+                               ("queue-remove", "executor", "reason"),
+                               ("queue-batch", "tick", "specs"),
+                               ("stuck-digest", "digest", "stuck_count"),
+                               ("operator-alert", "look", "sent")):
+        roundtrip(kind, actor, {k: v for k, v in values[kind].items() if k != field}, missing=field)
+    roundtrip("stuck-digest", "digest", values["stuck-digest"], missing="stuck_count")
+
+
+test_queue_digest_vocabulary_1133()
