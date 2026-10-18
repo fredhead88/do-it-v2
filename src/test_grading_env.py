@@ -18,6 +18,7 @@ verify chain runs it, must never write there for real.
 import json
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -412,6 +413,253 @@ check(not ok7r, "AC9: review-account absent by default")
 ok7r2, _ = grading_env._prove_review_account("testproj")
 check(ok7r2, "AC9: review-account proven once the file exists")
 print("AC9 ok")
+
+
+# L-spec-1118: release signals are read-only; only transient deploy failures wait.
+import contextlib
+import fcntl
+import inspect
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+from unittest.mock import patch
+import fold
+
+check(grading_env.DAILY_RELEASE_LOCK == pathlib.Path("/var/lock/albert-scott-daily-release.lock"),
+      "1118 AC3 daily-release constant")
+check(grading_env.DEPLOY_LOCK == fold.ROOT / "deploy.lock", "1118 AC3 deploy constant")
+print("PASS 1118 AC3 production constants")
+
+
+@contextlib.contextmanager
+def held_release_lock(path, mode="exclusive"):
+    # A child owns the flock: even a momentary probe lock in this process is detectable.
+    child = subprocess.Popen([sys.executable, "-c", """
+import fcntl, sys
+with open(sys.argv[1], 'r') as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX if sys.argv[2] == 'exclusive' else fcntl.LOCK_SH)
+    print('ready', flush=True)
+    sys.stdin.read()
+""", str(path), mode], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    try:
+        check(child.stdout.readline().strip() == "ready", "1118 child lock ready")
+        yield
+    finally:
+        child.communicate(timeout=10)
+        check(child.returncode == 0, "1118 child lock released")
+
+
+with tempfile.TemporaryDirectory(dir=FIXTURE_ROOT, prefix="release-signals-") as release_dir:
+    release_root = pathlib.Path(release_dir)
+    deploy_lock, daily_lock = release_root / "deploy.lock", release_root / "daily.lock"
+    proc_fixture = release_root / "proc-locks"
+    events_dir = release_root / "events"
+    events_dir.mkdir()
+    event_file = events_dir / "fixture.jsonl"
+    now = datetime(2026, 10, 18, 0, 27, 40, tzinfo=timezone.utc)
+
+    def snapshot():
+        return {str(p.relative_to(release_root)): p.read_bytes()
+                for p in release_root.rglob("*") if p.is_file()}
+
+    def probe(expected, label):
+        before = snapshot()
+        check(grading_env.release_in_progress(now) is expected, "1118 " + label)
+        check(snapshot() == before, "1118 AC12 read-only " + label)
+        print("PASS 1118 " + label)
+
+    with patch.multiple(grading_env, ROOT=release_root, DEPLOY_LOCK=deploy_lock,
+                        DAILY_RELEASE_LOCK=daily_lock):
+        probe(False, "AC1/AC2 absent locks")
+        for lock_path in (deploy_lock, daily_lock):
+            lock_path.touch()
+            with held_release_lock(lock_path):
+                real_read = pathlib.Path.read_text
+
+                def observed_read(path, *args, **kwargs):
+                    text = real_read(path, *args, **kwargs)
+                    if path == grading_env.PROC_LOCKS:
+                        check(not any(len(parts := line.split()) >= 6
+                                      and parts[4] == str(os.getpid())
+                                      and parts[5].endswith(":" + str(lock_path.stat().st_ino))
+                                      for line in text.splitlines()), "1118 AC1 probe owns no lock")
+                    return text
+
+                with patch.object(pathlib.Path, "read_text", observed_read):
+                    probe(True, "AC1/AC2 held exclusive " + lock_path.name)
+                observed_read(grading_env.PROC_LOCKS)
+            probe(False, "AC1/AC2 free " + lock_path.name)
+            with lock_path.open() as handle:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(handle, fcntl.LOCK_UN)
+            with held_release_lock(lock_path, "shared"):
+                probe(False, "AC1/AC2 shared " + lock_path.name)
+
+        stat = daily_lock.stat()
+        device = f"{os.major(stat.st_dev):x}:{os.minor(stat.st_dev):x}"
+        line = f"1: FLOCK ADVISORY WRITE 123 {device}:{stat.st_ino} 0 EOF\n"
+        with patch.object(grading_env, "PROC_LOCKS", proc_fixture):
+            for text, expected, label in [
+                (line, True, "matching inode/device"),
+                ("garbage\n" + line, True, "garbage skipped"),
+                (line.replace("WRITE", "READ"), False, "READ ignored"),
+                (line.replace("FLOCK", "POSIX"), False, "POSIX ignored"),
+                (line.replace(str(stat.st_ino), str(stat.st_ino + 1)), False, "other inode"),
+                (line.replace(device + ":", "ffff:ffff:"), False, "other device"),
+                (line.replace("1: ", "1: -> "), False, "waiting lock ignored"),
+            ]:
+                proc_fixture.write_text(text)
+                probe(expected, "AC2 " + label)
+            proc_fixture.unlink()
+            probe(False, "AC2 missing proc locks")
+            proc_fixture.write_text(line)
+            with patch.object(pathlib.Path, "read_text", side_effect=PermissionError):
+                probe(False, "AC2 unreadable proc locks")
+
+        def event(kind, subject="release", instant=now):
+            return {"type": kind, "subject": subject, "ts": instant.isoformat(), "project": "other"}
+
+        def ledger(rows):
+            event_file.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+
+        start = event("deploy-started", instant=now - timedelta(seconds=100))
+        ledger([start])
+        with patch.dict(os.environ, {"DOIT_PROJECT": "unrelated"}):
+            probe(True, "AC4 active cross-project start")
+        for terminal in ("deploy-landed", "deploy-failed", "deploy-refused"):
+            ledger([start, event(terminal)])
+            probe(False, "AC4 terminal " + terminal)
+            ledger([event(terminal, instant=now - timedelta(seconds=100)), start])
+            probe(False, "AC4 same-second " + terminal)
+        ledger([event("deploy-started", instant=now - timedelta(seconds=3601))])
+        probe(False, "AC4 expired start")
+        ledger([event("deploy-started", instant=now - timedelta(seconds=3600))])
+        probe(True, "AC4 cap boundary")
+        ledger([event("deploy-started", instant=now + timedelta(seconds=1))])
+        probe(False, "AC4 future start")
+        ledger([start, event("deploy-landed"), event("deploy-started", "newer")])
+        probe(True, "AC4 independent subjects")
+        ledger([event("deploy-landed", instant=now - timedelta(seconds=200)), start])
+        probe(True, "AC4 older terminal")
+        with event_file.open("a") as handle:
+            handle.write('[1]\n\n{"torn":\n')
+        probe(True, "AC4 invalid lines skipped")
+        real_read = pathlib.Path.read_text
+
+        def unreadable_events(path, *args, **kwargs):
+            if path == event_file:
+                raise PermissionError
+            return real_read(path, *args, **kwargs)
+
+        with patch.object(pathlib.Path, "read_text", unreadable_events):
+            probe(False, "AC4 unreadable events")
+        incident = datetime(2026, 10, 18, 0, 0, 33, tzinfo=timezone.utc)
+        ledger([event("deploy-started", "auto-deploy", incident),
+                event("deploy-failed", "auto-deploy", incident),
+                event("deploy-landed", "auto-deploy", now + timedelta(seconds=19))])
+        with held_release_lock(daily_lock):
+            probe(True, "AC5 replay held true-PASS")
+        probe(False, "AC5 replay free false-PASS")
+
+source = inspect.getsource(grading_env.release_in_progress)
+check(not re.search(r"\b(?:flock|lockf)\s*\(|[\"'](?:w|a|r\+)[\"']", source),
+      "1118 AC12 no locking/writing in release probe")
+print("PASS 1118 AC12 source and true/false snapshots")
+
+
+@contextlib.contextmanager
+def deploy_scenario(results, states=True, elapsed_per_call=0):
+    calls, sleeps, clock = [], [], [0.0]
+    answers = iter(results)
+
+    def run(argv, **kwargs):
+        calls.append(argv)
+        clock[0] += elapsed_per_call
+        answer = next(answers)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        clock[0] += seconds
+
+    with patch.object(grading_env, "_run", run), \
+            patch.object(grading_env, "release_in_progress", **(
+                {"return_value": states} if isinstance(states, bool) else {"side_effect": states})), \
+            patch.object(grading_env.time, "sleep", sleep), \
+            patch.object(grading_env.time, "monotonic", lambda: clock[0]):
+        yield calls, sleeps
+
+
+def failed(code=7, stdout=None):
+    return SimpleNamespace(returncode=code, **({} if stdout is None else {"stdout": stdout}))
+
+
+class BodyMustNotBeRead:
+    returncode = 0
+
+    @property
+    def stdout(self):
+        raise AssertionError("1118 success body was read")
+
+
+for answers, label in [
+    ([failed(), failed(), BodyMustNotBeRead()], "AC6 connect"),
+    ([failed(22, "body\n503"), failed(22, "body\n502"), BodyMustNotBeRead()], "AC7 5xx"),
+]:
+    with deploy_scenario(answers) as (calls, sleeps):
+        ok, reason = grading_env._prove_deploy("testproj", REPO)
+        check(ok and "waited_s=60" in reason and len(calls) == 3 and sleeps == [30, 30], label)
+        check("%{http_code}" in calls[0][2] and "-w" in calls[0][2], "1118 AC7 status marker")
+    print("PASS 1118 " + label + " three calls, two sleeps, waited_s=60")
+
+for answer, release, label in [
+    (failed(), False, "AC9 outage"), (failed(22, "\n404"), True, "AC9 404"),
+    (failed(22, "\n401"), True, "AC9 401"), (failed(3), True, "AC9 malformed URL"),
+    (failed(255), True, "AC9 SSH transport"), (TimeoutError("timeout"), True, "AC9 timeout"),
+    (failed(255, "\n503"), True, "AC9 SSH failure despite status"),
+    (failed(3, "\n500"), True, "AC9 malformed URL despite status"),
+    (RuntimeError("broken"), True, "AC9 exception"), (failed(22), True, "AC7 absent stdout"),
+    (failed(22, ""), True, "AC7 empty stdout"), (failed(22, "body\ninvalid"), True, "AC7 invalid stdout"),
+]:
+    with deploy_scenario([answer], release) as (calls, sleeps):
+        ok, reason = grading_env._prove_deploy("testproj", REPO)
+        check(not ok and len(calls) == 1 and not sleeps and "waited_s=0" in reason, label)
+        if not isinstance(answer, Exception):
+            check(f"exit {answer.returncode}" in reason, label + " last exit")
+    print("PASS 1118 " + label + " one call, no sleep")
+
+for answer in (failed(22, "\n500"), failed(7, ""), failed(7, "\ninvalid")):
+    with deploy_scenario([answer, BodyMustNotBeRead()]) as (calls, sleeps):
+        ok, reason = grading_env._prove_deploy("testproj", REPO)
+        check(ok and len(calls) == 2 and sleeps == [30] and "waited_s=30" in reason,
+              "1118 AC7 status/exit retry")
+print("PASS 1118 AC7 500 and exit-7 missing/invalid status retries")
+
+with deploy_scenario([failed()] * 31) as (calls, sleeps):
+    ok, reason = grading_env._prove_deploy("testproj", REPO)
+    check(not ok and "waited_s=900" in reason and "exit 7" in reason
+          and len(calls) == 31 and sleeps == [30] * 30, "1118 AC8 bounded wait")
+print("PASS 1118 AC8 31 calls, waited_s=900, exit 7")
+with deploy_scenario([failed()] * 31, elapsed_per_call=20) as (calls, sleeps):
+    ok, reason = grading_env._prove_deploy("testproj", REPO)
+    check(not ok and len(calls) < 31 and sum(sleeps) < 900, "1118 AC8 elapsed clock bound")
+print("PASS 1118 AC8 network duration counts toward elapsed bound")
+with deploy_scenario([failed(), failed()], [True, False]) as (calls, sleeps):
+    ok, reason = grading_env._prove_deploy("testproj", REPO)
+    check(not ok and "waited_s=30" in reason and len(calls) == 2 and sleeps == [30],
+          "1118 AC10 re-read release state")
+print("PASS 1118 AC10 release ended, two calls, waited_s=30")
+with deploy_scenario([BodyMustNotBeRead()]) as (calls, sleeps):
+    check(grading_env._prove_deploy("testproj", REPO) == (True, None)
+          and len(calls) == 1 and not sleeps, "1118 AC11 first success")
+write_spec_verify("L-spec-1118-fixture", "reviewer", "AC1 [backend]: curl /version", "")
+with patch.object(grading_env, "_look_toml", return_value={"prod": [
+        {"project": "testproj", "ssh_target": "example-host", "version_path": "/version"}]}):
+    with deploy_scenario([failed(), BodyMustNotBeRead()]) as (calls, sleeps):
+        holds = grading_env.preflight("reviewer", "L-spec-1118-fixture", view7, "testproj", repo=REPO)
+        check(not holds and len(calls) == 2 and sleeps == [30], "1118 AC11 preflight retry")
+print("PASS 1118 AC11 exit-only success and preflight integration")
 
 
 # ═══════════════════════════ AC10 — one environment for proof and grade ════════
