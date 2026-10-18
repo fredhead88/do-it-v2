@@ -181,7 +181,8 @@ STUB.write_text(textwrap.dedent("""\
     # the pane: record the argv it was launched with, hand over on its own ledger
     # file (L-adr-0043's message-sent), and end — exactly what R2 supervises.
     printf '%s\\n' "$1 $2 $3 $4 $5 $6 $7" >> "$DOIT_ROOT/panes.log"
-    printf '%s\\n' "${8:-NO-SEED}" | head -1 >> "$DOIT_ROOT/seed.log"
+    for seed in "$@"; do :; done
+    printf '%s\\n' "${seed:-NO-SEED}" | head -1 >> "$DOIT_ROOT/seed.log"
     # 0187-AC1: what this pane's child env actually carried for DOIT_SUPERVISED.
     printf '%s\\n' "$DOIT_SUPERVISED" >> "$DOIT_ROOT/supervised.log"
     printf '{"v":1,"ts":"%s","type":"message-sent","subject":"%s"}\\n' \\
@@ -691,16 +692,20 @@ else:
 # ══════════════════════════════════════════════════════════════════════════════
 shutil.copyfile(real_agents / "relay.md", dispatch.AGENTS / "relay.md")
 
-# ── AC2: relay_pane_cmd is pane_cmd's byte-identical twin, agent name aside ──
+# ── AC2: relay_pane_cmd shares the argv layout, with role-specific settings ──
+def without_settings(argv):
+    i = argv.index("--settings")
+    return argv[:i] + argv[i + 2:]
+
 bare_p, bare_r = up.pane_cmd(), up.relay_pane_cmd()
-ok(bare_r == ["claude", "--agent", "relay"] + bare_p[3:],
+ok(without_settings(bare_r) == ["claude", "--agent", "relay"] + without_settings(bare_p)[3:],
    f"AC2: byte-identical to pane_cmd() except the agent name: {bare_p} vs {bare_r}")
 named_pp, named_rr = up.pane_cmd(name="L-relay-0001"), up.relay_pane_cmd(name="L-relay-0001")
-ok(named_rr == ["claude", "-n", "L-relay-0001", "--agent", "relay"] + named_pp[5:],
+ok(without_settings(named_rr) == ["claude", "-n", "L-relay-0001", "--agent", "relay"] + without_settings(named_pp)[5:],
    f"AC2: the name= form too: {named_pp} vs {named_rr}")
 prompt_pp = up.pane_cmd(prompt="L-builder-0009")
 prompt_rr = up.relay_pane_cmd(prompt="L-builder-0009")
-ok(prompt_rr == ["claude", "--agent", "relay"] + prompt_pp[3:],
+ok(without_settings(prompt_rr) == ["claude", "--agent", "relay"] + without_settings(prompt_pp)[3:],
    f"AC2: the prompt= form too: {prompt_pp} vs {prompt_rr}")
 BANNED = {"-p", "--json-schema", "--output-format"}
 ok(not (BANNED & set(bare_r)) and not (BANNED & set(named_rr)) and not (BANNED & set(prompt_rr)),
@@ -1078,5 +1083,48 @@ up.maybe_reexec("planner", "OLDSHA")
 ok(not argv_execv_calls and not list(fold.EVENTS.glob("*.jsonl")), "AC14: empty sys.argv is a no-op too")
 sys.argv = real_argv
 up.code_sha, up._EXECV, up._LAST_REEXEC_FAILURE = real_code_sha, real_execv, None
+
+# L-spec-1131: hooks on all supervised launch paths; prompts stay positional.
+from test_ctx_guard import check_hooks
+for ctx_role, ctx_argv, ctx_prompt in [
+    ("planner", up.pane_cmd("L-charter-0001", name="n", model="m"), "L-charter-0001"),
+    ("relay", up.relay_pane_cmd("a,b", name="n", model="m"), "a,b"),
+    ("executor", up._pane_argv("L-executor-0001.jsonl", "board"), None),
+]:
+    check_hooks(ctx_argv, ctx_role)
+    ok(ctx_argv[-2] == "--dangerously-skip-permissions", "prompt follows the final flag")
+    ok(ctx_prompt is None or ctx_argv[-1] == ctx_prompt, "prompt is unchanged")
+    if ctx_role == "executor":
+        ok(ctx_argv[-1] == up.executor_prompt("L-executor-0001.jsonl", "board"), "executor prompt stays last")
+
+ctx_file = TMP / "context handover.md"
+ctx_file.write_text("resume the current step")
+ctx_empty = TMP / "context-empty.md"
+ctx_empty.touch()
+ctx_event = {"type": "planner-ended", "subject": "L-charter-0001", "reason": "ctx", "handover": str(ctx_file)}
+for ctx_events in ([], [{**ctx_event, "subject": "L-charter-0002"}],
+                   [ctx_event, {**ctx_event, "reason": "exit-0"}],
+                   [{**ctx_event, "handover": str(TMP / "missing")}],
+                   [{**ctx_event, "handover": str(ctx_empty)}],
+                   [{**ctx_event, "handover": str(TMP)}],
+                   [{**ctx_event, "handover": ""}]):
+    ok(up.ctx_handover(ctx_events, "L-charter-0001") is None, "only latest usable ctx handover is returned")
+ok(up.ctx_handover([ctx_event], "L-charter-0001") == str(ctx_file), "valid ctx handover survives")
+ctx_saved = up._guarded, up._start, up.maybe_reexec
+ctx_launches = []
+try:
+    up._guarded = lambda *a, **kw: (True, {"next": "start", "attempts": 1})
+    up._start = lambda *a, **kw: ctx_launches.append(kw)
+    up.maybe_reexec = lambda *a, **kw: None
+    up._charter_pass({}, [], "L-charter-0001", "unchanged")
+    ok(ctx_launches[-1]["prompt"] == "L-charter-0001", "no handover prompt is byte-identical")
+    print("1131-AC5 none prompt==charter")
+    up._charter_pass({}, [ctx_event], "L-charter-0001", "unchanged")
+    ctx_prompt = ctx_launches[-1]["prompt"]
+    ok(ctx_prompt.startswith("L-charter-0001") and str(ctx_file) in ctx_prompt, "restart names handover")
+    ok(up.pane_cmd(ctx_prompt)[-1] == ctx_prompt, "handover prompt remains one positional")
+    print("1131-AC5 ctx prompt names handover")
+finally:
+    up._guarded, up._start, up.maybe_reexec = ctx_saved
 
 print(f"up: {n} checks pass")

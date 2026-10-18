@@ -318,4 +318,6 @@ ok(think.check(charter("L-charter-0028.md"))["covers"] == ["G2", "G7"],
    "check() still takes one argument: the ledger it reads defaults inside the function")
 think.sequencing = seam
 
+from test_ctx_guard import check_hooks
+check_hooks(think.pane_cmd("L-thinker-0001"), "thinker")
 print(f"think: {n} checks pass")

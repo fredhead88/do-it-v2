@@ -147,7 +147,7 @@ def _pending(pending_packets, events, root):
     return list(fn(events, root))
 
 
-def check_and_end(charter, handover, *, root=None, child_env=None,
+def check_and_end(charter, handover, *, reason=None, root=None, child_env=None,
                   pending_packets=None, kill=os.kill,
                   find_ancestor=ancestor_claude_pid):
     """(ended, reason). No partial effect on any refusal: nothing is appended
@@ -160,8 +160,14 @@ def check_and_end(charter, handover, *, root=None, child_env=None,
     except OSError as exc:
         return False, f"refused: the ledger under {events_dir} could not be read ({exc})"
 
-    # 1 — an AUTHORIZED l1-complete, or nothing happens.
-    if not authorized_l1(charter, events):
+    # A context restart can skip l1-complete only from the planner's own
+    # ledger: fold.append derives the actor from the environment (D90).
+    if reason == "ctx" and (not _own_stem(child_env).startswith("L-planner-")
+                            or not _own_stem(os.environ).startswith("L-planner-")):
+        return False, "refused: context end requires a planner ledger (L-planner-)"
+
+    # 1 — an AUTHORIZED l1-complete, except on a context restart.
+    if reason != "ctx" and not authorized_l1(charter, events):
         return False, (f"refused: no authorized {L1} for {charter} on the ledger under "
                        f"{events_dir} (authorized actors: "
                        f"{', '.join(sorted(fold.EMITS.get(L1) or {'any'}))})")
@@ -198,7 +204,10 @@ def check_and_end(charter, handover, *, root=None, child_env=None,
         return False, (f"refused: no ancestor process named {CLAUDE!r} found above this one "
                        f"— nothing to signal")
 
-    fold.append([ENDED, str(charter), f"handover={handover}"])   # re-read asserted inside
+    fields = [ENDED, str(charter), f"handover={handover}"]
+    if reason == "ctx":
+        fields.append("reason=ctx")
+    fold.append(fields)   # re-read asserted inside
     kill(pid, signal.SIGTERM)
     return True, f"ended: SIGTERM to {CLAUDE} pid {pid}; {ENDED} appended for {charter}"
 
@@ -413,6 +422,8 @@ def main(argv=None):
                     help="path to the handover file, already written (required on the charter "
                          "and --executor paths; not read on --relay/--grader)")
     ap.add_argument("--root", default=None, help="the do-it root to read and append under")
+    ap.add_argument("--reason", choices=["ctx"], default=None,
+                    help="context restart: skips only the planner's l1-complete check")
     a = ap.parse_args(argv)
     if a.grader:
         ended, reason = check_and_end_grader()
@@ -431,7 +442,7 @@ def main(argv=None):
         ap.error("a charter (L-charter-NNNN), --executor, --relay, or --grader is required")
     if not a.handover:
         ap.error("--handover is required for a charter")
-    ended, reason = check_and_end(a.charter, a.handover, root=a.root)
+    ended, reason = check_and_end(a.charter, a.handover, reason=a.reason, root=a.root)
     if not ended:
         print(reason, file=sys.stderr)
         return 1

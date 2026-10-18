@@ -542,5 +542,53 @@ finally:
         os.environ["DOIT_ROOT"] = old_droot
 check(r_before[0] == r_after[0] == True, f"AC8: outcome unchanged by a nonexistent DOIT_ROOT: {r_before}, {r_after}")
 
+# L-spec-1131: ctx skips only the planner's l1-complete gate.
+ledger(B)
+ctx_kill = Spy(watch=B / "events" / "L-planner-0001.jsonl")
+ended, reason = pane_end.check_and_end(
+    CHARTER, HANDOVER, reason="ctx", root=B, pending_packets=CLEAR,
+    child_env={"DOIT_SUPERVISED": "1"}, kill=ctx_kill, find_ancestor=lambda: 4242)
+check(ended and len(ctx_kill.calls) == 1, "ctx ends once without l1-complete")
+ctx_rows = [json.loads(line) for line in ctx_kill.disk[0].splitlines()]
+check(len(ctx_rows) == 1 and ctx_rows[0]["type"] == "planner-ended", "exactly one end before signal")
+check(ctx_rows[0]["reason"] == "ctx" and ctx_rows[0]["handover"] == str(HANDOVER), "ctx handover recorded")
+check("actor" not in ctx_rows[0], "actor remains filename-derived")
+print("1131-AC4 ctx ended")
+for label, options in [
+    ("missing-handover", {"handover_path": TMP / "no-ctx-handover"}),
+    ("empty-handover", {"handover_path": EMPTY}),
+    ("pending-packet", {"pending_packets": UNCLAIMED}),
+    ("unsupervised", {"child_env": {}}),
+    ("no-ancestor", {"find_ancestor": lambda: None}),
+    ("non-planner-ledger", {"child_env": {"DOIT_SUPERVISED": "1", "DOIT_LEDGER_FILE": "L-thinker-0001.jsonl"}}),
+]:
+    ledger(B)
+    refuses(label, B, reason="ctx", **{"pending_packets": CLEAR, **options})
+    print(f"1131-AC4 {label} refused")
+ledger(B)
+ctx_read = fold.read_events
+try:
+    def ctx_unreadable():
+        raise OSError("unreadable fixture ledger")
+    fold.read_events = ctx_unreadable
+    refuses("unreadable-ledger", B, reason="ctx", pending_packets=CLEAR)
+    print("1131-AC4 unreadable-ledger refused")
+finally:
+    fold.read_events = ctx_read
+refuses("no-l1-without-reason", B, pending_packets=CLEAR)
+print("1131-AC4 no-l1-without-reason refused")
+ctx_other = subprocess.run([DOIT_BIN, "pane-end", CHARTER, "--reason", "other", "--handover", str(HANDOVER)],
+                           capture_output=True, text=True, env={**os.environ, "DOIT_ROOT": str(B)})
+check(ctx_other.returncode == 2, "argparse rejects unsupported reasons")
+print("1131-AC4 other-reason refused")
+for ctx_flag in ("--executor", "--relay"):
+    ctx_plain = subprocess.run([DOIT_BIN, "pane-end", ctx_flag, "--handover", str(HANDOVER)],
+                               capture_output=True, text=True, env={**os.environ, "DOIT_ROOT": str(B), "DOIT_SUPERVISED": ""})
+    ctx_reason = subprocess.run([DOIT_BIN, "pane-end", ctx_flag, "--handover", str(HANDOVER), "--reason", "ctx"],
+                                capture_output=True, text=True, env={**os.environ, "DOIT_ROOT": str(B), "DOIT_SUPERVISED": ""})
+    check((ctx_plain.returncode, ctx_plain.stderr) == (ctx_reason.returncode, ctx_reason.stderr),
+          "ctx leaves existing executor/relay gates unchanged")
+    print(f"1131-AC4 {ctx_flag[2:]}-unchanged refused")
+
 shutil.rmtree(TMP, ignore_errors=True)
 print(f"pane_end: {N} checks pass")

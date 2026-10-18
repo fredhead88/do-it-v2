@@ -24,7 +24,7 @@ import argparse, json, os, pathlib, re, subprocess, sys
 
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-import audit, dispatch, fold, panes, tick, up  # noqa: E402
+import audit, ctx_guard, dispatch, fold, panes, tick, up  # noqa: E402
 # The sequencing seam, bound ONCE and at module level so a verifier can substitute a
 # stand-in by assigning to `think.sequencing`. `relay.sequencing` is the producing
 # unit's declared name, not one picked here — a guessed module would leave this
@@ -71,7 +71,7 @@ def pane_cmd(name):
     operator-typed `think-<topic>` was addressable by nobody."""
     return ["claude", "-n", name, "--agent", "thinker",
             "--disallowedTools", ",".join(f"Skill({s})" for s in tick.RETIRE),
-            "--dangerously-skip-permissions"]
+            *ctx_guard.hook_args("thinker"), "--dangerously-skip-permissions"]
 
 
 def covers(body):
