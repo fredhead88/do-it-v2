@@ -9,20 +9,23 @@ AC1) is a property of what actually lands in a real tree.
 never touched. Every fixture git repo gets its own local identity so a commit
 never depends on (or pollutes) any global git config.
 """
-import json, os, pathlib, re, subprocess, sys, tempfile, threading, time
+import atexit, json, os, pathlib, re, shutil, subprocess, sys, tempfile, threading, time
+from unittest.mock import patch
 
 TMP = pathlib.Path(tempfile.mkdtemp(prefix="backup-test-"))
+atexit.register(shutil.rmtree, TMP)
 os.environ["DOIT_ROOT"] = str(TMP / "doit-root-unused")
 os.environ["DOIT_PROJECT"] = "pinned-by-the-suite"
 os.environ.update(GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
                   GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import backup  # noqa: E402
-
 REAL_LEDGER = pathlib.Path.home() / ".do-it" / "events"
 REAL_LEDGER_BEFORE = sorted(REAL_LEDGER.glob("*.jsonl")) if REAL_LEDGER.is_dir() else []
 REAL_LEDGER_SIZES_BEFORE = {p: p.stat().st_size for p in REAL_LEDGER_BEFORE}
+os.environ["HOME"] = str(TMP / "home")
+(TMP / "home").mkdir()
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import backup  # noqa: E402
 
 N = 0
 
@@ -208,6 +211,217 @@ sh_check = subprocess.run(["bash", str(pathlib.Path(__file__).resolve().parent /
                           capture_output=True, text=True)
 check(sh_check.returncode != 0 and "retired" in sh_check.stderr,
       f"AC10: bash src/backup.sh refuses, naming itself retired: rc={sh_check.returncode} {sh_check.stderr!r}")
+
+# ══ R9 mirror guard · equality, real remote round trips, and failure recovery ═
+MB50 = 52_428_800
+
+
+def sparse(repo, rel, size):
+    p = repo / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with p.open("wb") as f:
+        f.truncate(size)
+    return p
+
+
+def text(repo, rel, value="small\n"):
+    p = repo / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(value)
+    return p
+
+
+def gitlink(repo, rel):
+    sh(repo, "git", "update-index", "--add", "--cacheinfo", f"160000,{head(repo)},{rel}")
+
+
+scan = seed_repo("excluded", DEFAULT_FILES)
+(scan / "content/.git").mkdir()
+sparse(scan, "content/big", MB50 + 1)
+sparse(scan, "content/boundary", MB50)
+text(scan, "content/pg/PG_VERSION", "17\n")
+sparse(scan, "content/pg/deep/big", MB50 + 1)
+text(scan, "content/repo/.git/HEAD", "ref: refs/heads/main\n")
+text(scan, "content/worktree/.git", "gitdir: elsewhere\n")
+(scan / "content/empty/.git").mkdir(parents=True)
+text(scan, "content/empty/ordinary")
+text(scan, "content/invalid/.git", "not a repo\n")
+text(scan, "content/invalid/ordinary")
+text(scan, "content/both/PG_VERSION", "17\n")
+text(scan, "content/both/.git/HEAD", "ref: refs/heads/main\n")
+gitlink(scan, "content/missing-link")
+gitlink(scan, "content/existing-link")
+text(scan, "content/existing-link/.git/HEAD", "ref: refs/heads/main\n")
+sparse(scan, "content/ledger-mirror/large-part", MB50 + 1)
+text(scan, "content/ledger-mirror/pg/PG_VERSION", "17\n")
+text(scan, "content/ledger-mirror/repo/.git/HEAD", "ref: refs/heads/main\n")
+gitlink(scan, "content/ledger-mirror/missing-link")
+outside = sparse(TMP, "outside-big", MB50 + 1)
+(scan / "content/symlink").symlink_to(outside)
+(scan / "content/dir-symlink").symlink_to(scan / "content/pg", target_is_directory=True)
+text(scan, "content/unreadable/small")
+expected = [("content/big", "over-50MB"), ("content/both", "nested-repo"),
+            ("content/existing-link", "gitlink"),
+            ("content/ledger-mirror/missing-link", "gitlink"),
+            ("content/ledger-mirror/pg", "pg-data-dir"),
+            ("content/ledger-mirror/repo", "nested-repo"), ("content/missing-link", "gitlink"),
+            ("content/pg", "pg-data-dir"), ("content/repo", "nested-repo"),
+            ("content/worktree", "nested-repo")]
+check(backup.excluded(scan) == expected, "R9 AC1: exact classes, precedence, boundaries, no .git children")
+real_scan = os.scandir
+
+
+def unreadable(path):
+    if pathlib.Path(path) == scan / "content/unreadable":
+        raise PermissionError("fixture scan denied")
+    return real_scan(path)
+
+
+with patch.object(os, "scandir", unreadable):
+    check(backup.excluded(scan) == sorted(expected + [("content/unreadable", "undetermined")]),
+          "R9 AC1: scan errors are named, never clean")
+real_stat = pathlib.Path.lstat
+
+
+def stat_denied(path):
+    if path == scan / "content/boundary":
+        raise PermissionError("fixture stat denied")
+    return real_stat(path)
+
+
+with patch.object(pathlib.Path, "lstat", stat_denied):
+    check(backup.excluded(scan) == sorted(expected + [("content/boundary", "undetermined")]),
+          "R9 AC1: stat errors are named")
+cap = seed_repo("ledger-cap", DEFAULT_FILES)
+sparse(cap, "content/ledger-mirror/part", 94_371_840)
+check(backup.excluded(cap) == [], "R9 AC1: ledger cap boundary is allowed")
+sparse(cap, "content/ledger-mirror/part", 94_371_841)
+try:
+    backup.excluded(cap)
+except RuntimeError as e:
+    check("90 MB" in str(e), "R9 AC1: oversized ledger copy fails loudly")
+else:
+    check(False, "R9 AC1: ledger cap must raise")
+with patch.object(backup, "_git", return_value=subprocess.CompletedProcess([], 1, "", "index denied")):
+    try:
+        backup.excluded(scan)
+    except RuntimeError as e:
+        check("index denied" in str(e), "R9 AC1: index scan failure raises")
+    else:
+        check(False, "R9 AC1: failed index scan must raise")
+
+
+def guard_fixture(name):
+    repo = seed_repo(name, DEFAULT_FILES)
+    (repo / "content/.git").mkdir()
+    nested = repo / "content/nested/repo"
+    nested.mkdir(parents=True)
+    sh(nested, "git", "init", "-q")
+    text(nested, "ordinary")
+    sh(nested, "git", "add", "--", "ordinary")
+    sh(nested, "git", "commit", "-qm", "nested seed")
+    text(repo, "content/pg/data/PG_VERSION", "17\n")
+    sparse(repo, "content/pg/data/deep/big", MB50 + 1)
+    sparse(repo, "content/oversize/big", MB50 + 1)
+    # Pathspec metacharacters must stay literal, including for excluded files.
+    sparse(repo, "content/odd[1]*", MB50 + 1)
+    text(repo, "content/odd1-ok")
+    for parent in ("nested", "pg", "oversize"):
+        text(repo, f"content/{parent}/sibling.txt")
+    sparse(repo, "content/ledger-mirror/part", 60 * 1024 * 1024)
+    return repo
+
+
+def clone_guard(repo, remote, label):
+    clone = TMP / label
+    sh(TMP, "git", "clone", "-q", "-b", "main", str(remote), str(clone))
+    excluded_paths = ["content/nested/repo", "content/pg/data", "content/oversize/big", "content/odd[1]*"]
+    tree = ls_tree(clone)
+    check(not any(p == x or p.startswith(x + "/") for p in tree for x in excluded_paths),
+          f"R9 AC2/AC3: fresh clone has no excluded paths: {tree}")
+    wanted = list(DEFAULT_FILES) + ["content/.repos-manifest.json", "content/ledger-mirror/part", "content/odd1-ok"]
+    wanted += [f"content/{parent}/sibling.txt" for parent in ("nested", "pg", "oversize")]
+    check(set(wanted) <= set(tree), f"R9 AC2: clone preserves ordinary content and allowlist: {tree}")
+    check((clone / "content/ledger-mirror/part").stat().st_size == 60 * 1024 * 1024,
+          "R9 AC2: ledger part survives the remote round trip")
+    check(all((repo / x).exists() for x in excluded_paths), "R9 AC2/AC3: working files remain")
+    print(f"R9 {label} fresh-clone listing: {tree}")
+    shutil.rmtree(clone)
+
+
+for broken in (False, True):
+    label = "broken-ignore" if broken else "round-trip"
+    guarded = guard_fixture(label)
+    if broken:
+        text(guarded, ".gitignore", "content/ # trailing comment is not an ignore\n")
+    remote = bare_remote(label + "-remote")
+    cfg = config(remote, name=label)
+    for attempt in range(2):
+        text(guarded, "content/README.md", f"attempt {attempt}\n")
+        result = backup.push(root=guarded, config_path=cfg)
+        check(result["ok"], f"R9 AC2: guarded push succeeds: {result}")
+        clone_guard(guarded, remote, f"{label}-{attempt}")
+    text(guarded, "content/README.md", "watch update\n")
+    check(backup.watch(for_s=0, root=guarded, config_path=cfg) == 1, "R9 AC2: watch pushes safely")
+    clone_guard(guarded, remote, label + "-watch")
+    state = json.loads((guarded / "backup-state.json").read_text())
+    check(state["excluded"] == [list(pair) for pair in backup.excluded(guarded)],
+          "R9 AC4: exact sorted JSON exclusion pairs")
+    check(len(state["excluded"]) == 4, "R9 AC4: every skipped path is named")
+    failed = backup.push(root=guarded, config_path=missing_cfg)
+    failed_state = json.loads((guarded / "backup-state.json").read_text())
+    check(not failed["ok"] and failed_state == dict(state, ok=False),
+          "R9 AC4: failed attempt preserves exclusions and successful snapshot fields")
+
+tracked = guard_fixture("untrack_tracked")
+sh(tracked, "git", "add", "--", "content")
+gitlink(tracked, "content/missing-link")
+text(tracked, "content/later-deleted")
+sh(tracked, "git", "add", "--", "content/later-deleted")
+sh(tracked, "git", "commit", "-qm", "pre-guard tracked scratch")
+old_tree = ls_tree(tracked)
+print(f"R9 untrack_tracked pre-guard tracked content count: {len([p for p in old_tree if p.startswith('content/')])}")
+check(all(p in old_tree for p in ["content/nested/repo", "content/pg/data/PG_VERSION", "content/oversize/big"]),
+      "R9 AC3: dangerous entries really were tracked before guard")
+remote_tracked = bare_remote("untrack-remote")
+sh(tracked, "git", "remote", "add", "origin", str(remote_tracked))
+sh(tracked, "git", "push", "-q", "origin", "main")
+(tracked / "content/later-deleted").unlink()
+old_head = head(tracked)
+result = backup.push(root=tracked, config_path=config(remote_tracked, name="untrack"))
+check(result["ok"] and head(tracked) != old_head, "R9 AC3: untracking is a successful new commit")
+clone_guard(tracked, remote_tracked, "untrack-clone")
+check("content/missing-link" not in ls_tree(tracked), "R9 AC3: absent indexed gitlink is untracked")
+index = sh(tracked, "git", "ls-files", "-s", "--", "content")
+check(not any(line.startswith("160000 ") or line.endswith("/PG_VERSION") for line in index.splitlines()),
+      "R9 AC3: index has no gitlinks or PG markers")
+sizes = sh(tracked, "git", "ls-tree", "-rl", "HEAD", "--", "content")
+check(all(int(line.split()[3]) <= MB50 or "\tcontent/ledger-mirror/" in line for line in sizes.splitlines()),
+      "R9 AC3: index has no oversized ordinary blobs")
+
+recover = seed_repo("excluded_raises", DEFAULT_FILES)
+recover_remote = bare_remote("recover-remote")
+recover_cfg = config(recover_remote, name="recover")
+check(backup.push(root=recover, config_path=recover_cfg)["ok"], "R9 AC5: initial push")
+old_local = head(recover)
+old_remote = sh(TMP, "git", "--git-dir", str(recover_remote), "rev-parse", "main")
+old_state = json.loads((recover / "backup-state.json").read_text())
+check(old_state["excluded"] == [], "R9 AC4: clean push records empty exclusions")
+text(recover, "content/pending")
+ledger = backup.fold.EVENTS / "L-backup-local.jsonl"
+events_before = ledger.read_text().splitlines()
+with patch.object(backup, "excluded", side_effect=RuntimeError("fixture exclusion scan failed")):
+    result = backup.push(root=recover, config_path=recover_cfg)
+check(not result["ok"] and "fixture exclusion scan failed" in result["error"], "R9 AC5: named failure")
+check(head(recover) == old_local and sh(TMP, "git", "--git-dir", str(recover_remote), "rev-parse", "main") == old_remote,
+      "R9 AC5: no local commit and no remote change on scan failure")
+check(json.loads((recover / "backup-state.json").read_text()) == dict(old_state, ok=False),
+      "R9 AC5: state preserves last known exclusions on scan failure")
+new_events = [json.loads(line) for line in ledger.read_text().splitlines()[len(events_before):]]
+check(len(new_events) == 1 and new_events[0]["type"] == "backup-failed" and "actor" not in new_events[0],
+      "R9 AC5: exactly one failure through fold in the temp ledger, no actor")
+check(backup.push(root=recover, config_path=recover_cfg)["ok"] and head(recover) != old_local,
+      "R9 AC5: next attempt recovers")
 
 # ══ §5 · the operator's real ledger is never touched by a fixture-root test ═
 after_sizes = ({p: p.stat().st_size for p in REAL_LEDGER.glob("*.jsonl")}
