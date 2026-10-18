@@ -1,0 +1,4 @@
+2026-10-18T00:00:00Z NEW failed: tests/test_a.py::test_failed
+2026-10-18T00:00:00Z NEW error: tests/test_a.py::test_error
+2026-10-18T00:00:00Z CHANGED: tests/test_a.py::test_changed (baseline: passed, now: failed)
+2026-10-18T00:00:00Z SUMMARY pytest_baseline_gate.py check: FAIL skipped=0 baseline=1 known=0 new=2 changed=1 fixed=0

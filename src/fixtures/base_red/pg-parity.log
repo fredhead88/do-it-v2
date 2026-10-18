@@ -1,0 +1,2 @@
+pg-parity (Postgres)	Run spec-839/895/926/949 scratch-database tests (pg_scratch)	2026-10-18T00:00:00Z scratch authority cleanup refused
+pg-parity (Postgres)	Run spec-839/895/926/949 scratch-database tests (pg_scratch)	2026-10-18T00:00:00Z ##[error]Process completed with exit code 1.
