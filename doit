@@ -9,6 +9,7 @@ case "${1:-board}" in
   base-red) shift; exec python3 "$SRC/base_red.py" "$@" ;;
   ci-runner) shift; exec python3 "$SRC/ci_runner.py" "$@" ;;
   run-checks) shift; exec python3 "$SRC/build_runner.py" "$@" ;;
+  ci-shadow) shift; exec python3 "$SRC/ci_shadow.py" "$@" ;;
   dispatch) shift; exec python3 "$SRC/dispatch.py" "$@" ;;
   cancel)  shift; exec python3 "$SRC/cancel.py" "$@" ;;
   packet)  shift; exec python3 "$SRC/packet.py" "$@" ;;
@@ -174,6 +175,7 @@ doit — a ledger that derives state, and the guards that read it
   doit grades-rate [--json]               grades spent per spec shipped, trailing 24h — the board's HEALTH line (read-only)
   doit append <type> <subject> [k=v ...]  append one event, then re-fold
   doit ci-runner status [--json] | doit ci-runner set <CI_SELF_HOSTED|CI_PG_SELF_HOSTED> <true|false> --why TEXT
+  doit ci-shadow [--dry-run] [--json]   compare hosted CI with self-hosted shadows
   doit gate <branch> [main] [--spec ID]   merge guard. exit 1 = DO NOT MERGE
   doit gate-window <id> --project albert-scott [--specs A,B,C]
                                            verify a merge window's candidate tip before master moves (exit 0/1/2/3/4)
