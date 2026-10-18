@@ -16,7 +16,12 @@ gates each branch (`doit gate`, unchanged), collects the window, and calls this:
   3. green  -> fast-forward master to the candidate sha (old value asserted);
      red    -> map the NEW failing node ids to the specs that own them, drop
                exactly those, verify the remainder ONCE more, advance to the green
-               subset. At most two runs per window. A second red drops the window.
+               subset. At most two rounds on this path; a second red drops the window.
+               A first red with only unattributed ids splits into bounded halves,
+               shipping the first verified half and leaving other green halves pending.
+
+Candidate trees with a green ledger result covering the required checks in the
+last seven days reuse that result without another dispatch.
 
 Exit codes (the Executor contract, agents/executor.md, mirrors these):
   0  advanced: every spec in the window shipped
@@ -68,6 +73,36 @@ def git(repo, *args, check=True, env=None, inp=None):
     if check and p.returncode:
         raise RuntimeError(f"git {' '.join(args)}: {p.stderr.strip() or 'failed'}")
     return p
+
+
+def tree_of(repo, sha):
+    """Resolve content identity; an unresolved or malformed tree is undetermined."""
+    tree = git(repo, "rev-parse", f"{sha}^{{tree}}").stdout.strip()
+    if not re.fullmatch(r"[0-9a-f]{40}", tree):
+        raise RuntimeError("candidate tree unavailable")
+    return tree
+
+
+def prior_result(events, tree):
+    """Newest determined result within seven days (ledger order breaks ties)."""
+    now = datetime.now(timezone.utc)
+    newest, newest_ts = None, None
+    for event in events:
+        if (not isinstance(event, dict) or event.get("type") != "window-tree-verified" or event.get("tree") != tree
+                or type(event.get("green")) is not bool):
+            continue
+        try:
+            stamp = fold.ts(event.get("ts"))
+            # fold.ts intentionally defaults malformed timestamps to NOW for other
+            # consumers. A cache entry must have an actual timestamp instead.
+            datetime.fromisoformat(str(event["ts"]).replace("Z", "+00:00"))
+            if not now - timedelta(days=7) <= stamp <= now:
+                continue
+        except (KeyError, TypeError, ValueError):
+            continue
+        if newest_ts is None or stamp >= newest_ts:
+            newest, newest_ts = event, stamp
+    return newest
 
 
 def ev(typ, subject, **kv):
@@ -632,7 +667,7 @@ def resolve_entries(repo, spec_args, events):
     return out
 
 
-def advance(repo, main, old, new, window, kept, dropped, runs, urls, entries, dashboard, rechained=(), pre_existing=()):
+def advance(repo, main, old, new, window, kept, dropped, runs, urls, entries, dashboard, rechained=(), pre_existing=(), actions_minutes=None):
     git(repo, "update-ref", f"refs/heads/{main}", new, old)       # old value asserted
     branch_of = {s: b for s, b, _ in entries}
     for s in kept:
@@ -640,7 +675,49 @@ def advance(repo, main, old, new, window, kept, dropped, runs, urls, entries, da
            **({"rechained": True} if s in rechained else {}))
     ev("window-verified", window, sha=new, runs=urls, kept=kept, dropped=dropped,
        pre_existing=list(pre_existing),
-       actions_minutes=runs * RUN_MINUTES + (runs * DASHBOARD_MINUTES if dashboard else 0))
+       actions_minutes=(runs * RUN_MINUTES + (runs * DASHBOARD_MINUTES if dashboard else 0)
+                        if actions_minutes is None else actions_minutes))
+
+
+def bisect_window(window, live, prepare, judge, drop, conflict):
+    """Visit both halves in entry order, returning the first verified candidate.
+
+    All builds and verdict classification go through run_window's callbacks;
+    a green sibling is never unioned into an unverified candidate.
+    """
+    chosen = None
+
+    def split(batch):
+        nonlocal chosen
+        k = len(batch) // 2
+        halves = [batch[:k], batch[k:]]
+        ev("window-bisected", window, window=window, halves=halves)
+        for half in halves:
+            cand, kept, clashes = prepare(half)
+            conflict(clashes)
+            if not kept:
+                escalate(window, "bisection half has no mergeable specs; half remains pending")
+                continue
+            result = judge(cand, kept)
+            if result["state"] == "green":
+                if chosen is None:
+                    chosen = (cand, kept)
+            elif result["state"] == "undetermined":
+                continue
+            elif len(kept) > 1 and len(result["unattributed"]) == len(result["nodes"]):
+                split(kept)
+            else:
+                if len(kept) == 1:
+                    owners_to_drop, reason = kept, "bisect-single"
+                else:
+                    owners_to_drop = list(dict.fromkeys(
+                        owner for node in result["nodes"]
+                        for owner in owners(result["repo"], cand, node, result["paths"])))
+                    reason = "bisect-owner"
+                drop(owners_to_drop, result, reason)
+
+    split(live)
+    return chosen
 
 
 def run_window(window, project, spec_args, main, fixes_base=False):
@@ -689,6 +766,7 @@ def run_window(window, project, spec_args, main, fixes_base=False):
     touched = {s: set(git(repo, "diff", "--name-only", f"{base}...{b}").stdout.split()) for s, b, _ in entries}
     dropped, urls, runs, dashboard = [], [], 0, False
     pre_existing_all = set()
+    actions_minutes = 0
     conflicted_all = {}
 
     def prepare(batch):
@@ -708,47 +786,84 @@ def run_window(window, project, spec_args, main, fixes_base=False):
                 print(f"gate-window: excluded {len(migration_kept)} migration(s), reason=fingerprint-failed")
         return candidate, kept, clashes
 
-    cand, merged, conflicts = prepare(entries)
-    for s, paths in conflicts.items():
-        ev("merge-conflict", s, files=paths, window=window)
-    conflicted_all.update(conflicts)
-    dropped += list(conflicts)
-    if not merged:
-        print("gate-window: every branch conflicts — nothing to verify")
-        escalate(window, "every branch in the window conflicts; builder re-dispatch via the merge-conflict flow")
-        return 2
-    live = list(merged)
-    while True:
+    by_id = {s: (b, sha) for s, b, sha in entries}
+
+    def note_conflicts(conflicts):
+        for s, paths in conflicts.items():
+            ev("merge-conflict", s, files=paths, window=window)
+        conflicted_all.update(conflicts)
+        dropped.extend(s for s in conflicts if s not in dropped)
+
+    def drop_specs(specs, result, reason):
+        for s in specs:
+            ev("window-dropped", s, window=window, nodes=result["nodes"],
+               run_url=result["url"], branch=by_id[s][0], reason=reason)
+            print(f"gate-window: dropped {s} reason={reason} nodes={json.dumps(result['nodes'])}")
+        dropped.extend(s for s in specs if s not in dropped)
+        print(f"gate-window: dropped {len(specs)} spec(s), reason={reason}")
+
+    def record(res, tree, required):
+        if tree is not None:
+            ev("window-tree-verified", window, window=window, sha=res["candidate"],
+               tree=tree, green=res["state"] == "green", new_ids=res["nodes"], required=required)
+
+    def judge(cand, kept, *, half=False):
+        nonlocal runs, dashboard, actions_minutes
         changed = git(repo, "diff", "--name-only", f"{base}..{cand}").stdout.split()
         has_dash = any(p.startswith("dashboard/") for p in changed)
         dashboard = dashboard or has_dash
-        required = [c for c in ci_checks if c != DASHBOARD_CHECK or has_dash]
-        res = verify(repo, cand, required, window)
+        candidate_required = [c for c in ci_checks if c != DASHBOARD_CHECK or has_dash]
+        tree = None
+        try:
+            tree = tree_of(repo, cand)
+            prior = prior_result(fold.read_events(), tree)
+        except (OSError, RuntimeError, ValueError, TypeError, subprocess.SubprocessError):
+            prior = None
+        if (prior is not None and prior["green"] is True
+                and isinstance(prior.get("required"), list)
+                and all(isinstance(c, str) for c in prior["required"])
+                and set(prior["required"]) >= set(candidate_required)):
+            print(f"gate-window: tree {tree} already verified in {prior.get('window', prior.get('subject'))}")
+            return dict(state="green", nodes=[], url="", doc={})
+        res = dict(verify(repo, cand, candidate_required, window), candidate=cand)
         runs += 1
+        actions_minutes += RUN_MINUTES + (DASHBOARD_MINUTES if has_dash else 0)
         if res["url"]:
             urls.append(res["url"])
         if res["state"] == "green":
-            break
+            record(res, tree, candidate_required)
+            return res
         if res["state"] == "undetermined":
-            escalate(window, f"window {window} could not be verified ({res.get('why')}); master unmoved, no spec dropped")
-            print(f"gate-window: undetermined — {res.get('why')}"); return 2
+            outcome = "half remains pending" if half else "master unmoved"
+            escalate(window, f"window {window} could not be verified ({res.get('why')}); {outcome}, no spec dropped")
+            print(f"gate-window: undetermined — {res.get('why')}")
+            return res
         try:
             failures = candidate_failures(repo, res)
         except (OSError, RuntimeError, ValueError, KeyError, TypeError, zipfile.BadZipFile,
                 zipfile.LargeZipFile, zlib.error, subprocess.SubprocessError) as exc:
-            escalate(window, f"unnamed new failures: candidate log evidence unavailable ({type(exc).__name__}); named ids={json.dumps(res.get('nodes', []))}; master unmoved, no spec dropped")
-            return 2
+            outcome = "half remains pending" if half else "master unmoved"
+            escalate(window, f"unnamed new failures: candidate log evidence unavailable ({type(exc).__name__}); named ids={json.dumps(res.get('nodes', []))}; {outcome}, no spec dropped")
+            if not half:
+                record(res, tree, candidate_required)
+            return dict(res, state="undetermined")
         nodes = sorted(set().union(*(failures[k] for k in ("pytest", "pg-parity", "vitest", "suite-error"))))
         if failures["undetermined"] or not nodes:
-            escalate(window, f"unnamed new failures: {failures['undetermined']}; NEW ids={json.dumps(nodes)}; master unmoved, no spec dropped")
-            return 2
+            outcome = "half remains pending" if half else "master unmoved"
+            escalate(window, f"unnamed new failures: {failures['undetermined']}; NEW ids={json.dumps(nodes)}; {outcome}, no spec dropped")
+            if not half:
+                record(res, tree, candidate_required)
+            return dict(res, state="undetermined")
         classification = {"complete": False}
         if base_red_answer.get("complete") and not base_red_answer.get("undetermined"):
             import base_red
             classification = base_red.classify(project, base, nodes)
         if not classification.get("complete"):
-            escalate(window, f"base incomplete; NEW ids={json.dumps(nodes)}; master unmoved, no spec dropped")
-            return 2
+            outcome = "half remains pending" if half else "master unmoved"
+            escalate(window, f"base incomplete; NEW ids={json.dumps(nodes)}; {outcome}, no spec dropped")
+            if not half:
+                record(res, tree, candidate_required)
+            return dict(res, state="undetermined")
         pre_existing = set(classification["pre_existing"])
         # A red --fixes-base baseline has stronger, signature-level evidence.
         for node, signature in res.get("pg_failures", {}).items():
@@ -764,15 +879,45 @@ def run_window(window, project, spec_args, main, fixes_base=False):
             print(f"gate-window: {len(pre_existing)} failure(s) pre-existing at base: {json.dumps(pre_existing)}")
             pre_existing_all.update(pre_existing)
         res["nodes"] = [n for n in nodes if n not in pre_existing]
+        record(res, tree, candidate_required)
         if not res["nodes"]:
             if fixes_base and res.get("pg_failed"):
                 escalate(window, "base-not-releasable: --fixes-base window has not repaired pg-parity")
-                return 2
-            break  # all-pre-existing takes precedence over the two-run cap
-        # red
-        by_id = {s: (b, sha) for s, b, sha in entries}
-        paths = OwnershipPaths({s: touched[s] for s in live}, failures["pg_files"])
+                return dict(res, state="undetermined")
+            return dict(res, state="green")  # complete base proves every id pre-existing
+        paths = OwnershipPaths({s: touched[s] for s in kept}, failures["pg_files"])
         unattributed = unattributed_ids(repo, cand, res["nodes"], paths)
+        return dict(res, repo=repo, paths=paths, unattributed=unattributed)
+
+    def judge_half(cand, kept):
+        return judge(cand, kept, half=True)
+
+    def prepare_half(specs):
+        return prepare([e for e in entries if e[0] in specs])
+
+    cand, merged, conflicts = prepare(entries)
+    note_conflicts(conflicts)
+    if not merged:
+        print("gate-window: every branch conflicts — nothing to verify")
+        escalate(window, "every branch in the window conflicts; builder re-dispatch via the merge-conflict flow")
+        return 2
+    live = list(merged)
+    while True:
+        res = judge(cand, live)
+        if res["state"] == "green":
+            break
+        if res["state"] == "undetermined":
+            return 2
+        unattributed, paths = res["unattributed"], res["paths"]
+        if runs == 1 and len(live) > 1 and len(unattributed) == len(res["nodes"]):
+            chosen = bisect_window(window, live, prepare_half, judge_half, drop_specs, note_conflicts)
+            if chosen is None:
+                escalate(window, f"window {window} bisection found no advanceable candidate; dropped specs={json.dumps(dropped)}; master unmoved")
+                return 2
+            cand, live = chosen
+            pending = [s for s, _, _ in entries if s not in live and s not in dropped]
+            print(f"gate-window: pending {len(pending)} spec(s), reason=bisection-unselected specs={json.dumps(pending)}")
+            break
         if runs >= 2 or unattributed:
             drop = list(live)
         else:
@@ -796,9 +941,7 @@ def run_window(window, project, spec_args, main, fixes_base=False):
             return 2
         rest = [e for e in entries if e[0] in live]
         cand, live, more = prepare(rest)
-        for s, paths in more.items():
-            ev("merge-conflict", s, files=paths, window=window)
-        dropped += list(more)
+        note_conflicts(more)
         if not live:
             escalate(window, "remaining merges conflict after the drop")
             return 2
@@ -810,9 +953,9 @@ def run_window(window, project, spec_args, main, fixes_base=False):
             if message.endswith("(mechanical re-chain)"):
                 rechained.update(s for s in live if message.startswith(f"merge({s}):"))
     advance(repo, main, base, cand, window, live, dropped, runs, urls, entries, dashboard, rechained,
-            pre_existing=sorted(pre_existing_all))
+            pre_existing=sorted(pre_existing_all), actions_minutes=actions_minutes)
     print(f"gate-window: advanced {main} -> {cand[:12]}  shipped={live} dropped={dropped}")
-    return 1 if dropped or deferred else 0
+    return 1 if dropped or deferred or len(live) < len(entries) else 0
 
 
 def cleanup(repo, window):

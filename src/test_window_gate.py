@@ -555,14 +555,17 @@ def main():
     check(rc == 1 and [e["subject"] for e in fx.events("window-dropped")] == ["B"]
           and [e["subject"] for e in fx.events("shipped")] == ["A"], "AC3b import-closure owner dropped")
 
-    # AC4: no spec owns the failure: whole window dropped + escalation
+    # L-spec-1127 R3.4: bisect unattributed reds; ship the first green half.
     fx = Fx({"A": "a.txt", "B": "b.txt", "C": "c.txt"})
     fx.run_n(1, 1, red(["api/tests/test_z.py::test_q"]))
     fx.run_n(2, 0, GREEN)
     rc = fx.go()
-    check(rc == 2 and fx.master() == fx.base, "AC4 master unmoved")
-    check(sorted(e["subject"] for e in fx.events("window-dropped")) == ["A", "B", "C"], "AC4 all dropped")
-    check(len(fx.events("escalation-blocking")) == 1 and len(fx.calls()) == 1, "AC4 one escalation, one run")
+    check(rc == 1 and fx.master() != fx.base and
+          [e["subject"] for e in fx.events("shipped")] == ["A"], "AC4 first green half ships")
+    check(not fx.events("window-dropped") and
+          [s for s, _ in window_gate.pending_from_ledger(fold.read_events())] == ["B", "C"], "AC4 unresolved half pending")
+    check([e["halves"] for e in fx.events("window-bisected")] == [[["A"], ["B", "C"]]] and
+          len(fx.events("escalation-blocking")) == 1 and len(fx.calls()) == 3, "AC4 bisect with unresolved-half escalation")
 
     # AC4b: second run red -> whole remainder dropped, never a third run
     fx = Fx({"A": "a.txt", "B": "api/tests/test_x.py"})
@@ -960,8 +963,14 @@ def attribution_checks():
     for mixed in (False, True):
         fx = Fx({"A": "dashboard/src/a.test.ts", "B": "b.txt"})
         fx.run_n(1, 1, "NEW failed: " + unknown + ("\nNEW failed: " + v if mixed else ""))
+        if not mixed:
+            fx.run_n(2, 0, GREEN); fx.run_n(3, 0, GREEN)
         rc = fx.go()
         drops = fx.events("window-dropped")
+        if not mixed:
+            check(rc == 1 and not drops and [e["halves"] for e in fx.events("window-bisected")] == [[["A"], ["B"]]] and
+                  [e["subject"] for e in fx.events("shipped")] == ["A"], "unattributed_drops_window now bisects two-spec fixture")
+            continue
         check(rc == 2 and [e["subject"] for e in drops] == ["A", "B"] and all(
             e["reason"] == "unattributed" and set(e["nodes"]) == ({unknown, v} if mixed else {unknown}) for e in drops), "mixed_ids whole window named")
         check("unattributed" in fx.events("escalation-blocking")[0]["why"] and unknown in fx.events("escalation-blocking")[0]["why"], "unattributed escalation")
@@ -996,11 +1005,323 @@ def attribution_checks():
     response("lazy_import_without_base_red", ["AC13"], {"fresh_import": True, "stubbed_window": "shipped"})
 
 
+def rerun_checks():
+    """L1127: real git/strict ledger, with external verify evidence stubbed."""
+    from datetime import datetime, timedelta, timezone
+    import contextlib, io
+
+    def response(case, acs, body):
+        encoded = json.dumps(body, sort_keys=True).encode()
+        check(not FAILS, case + " has no failed assertions")
+        print(json.dumps(dict(case=case, criteria=acs, url="cli://window_gate/1127/" + case,
+                              status=0 if not FAILS else 1,
+                              body_sha256=hashlib.sha256(encoded).hexdigest(), body_excerpt=body)))
+
+    # Tree identity includes an empty commit and a real --no-ff candidate.
+    fx = Fx({"A": "a.txt"})
+    branch = sh(["rev-parse", "br-A"], fx.repo)
+    tree = window_gate.tree_of(fx.repo, branch)
+    sh(["checkout", "-q", "br-A"], fx.repo)
+    sh(["commit", "--allow-empty", "-m", "same content"], fx.repo)
+    empty = sh(["rev-parse", "HEAD"], fx.repo)
+    candidate, _, _ = window_gate.build_candidate(fx.repo, "identity", fx.base,
+                                                  [("A", "br-A", empty)])
+    check(branch != empty and tree == window_gate.tree_of(fx.repo, empty) ==
+          window_gate.tree_of(fx.repo, candidate) == sh(["rev-parse", candidate + "^{tree}"], fx.repo),
+          "tree_of_equal_content")
+    check(len(sh(["rev-list", "--parents", "-1", candidate], fx.repo).split()) == 3,
+          "tree_of real no-ff merge")
+    response("tree_of_equal_content", ["AC1"], {"equal": True, "merge_parents": 2})
+    try:
+        window_gate.tree_of(fx.repo, "nonexistent")
+        check(False, "tree_of_unresolved must raise")
+    except RuntimeError:
+        pass
+    response("tree_of_unresolved", ["AC1"], {"raises": "RuntimeError"})
+
+    now = datetime.now(timezone.utc)
+    def prior(green=True, required=None, **extra):
+        return dict(type="window-tree-verified", tree="a" * 40,
+                    ts=now.isoformat(), green=green, window="prior", **extra,
+                    **({"required": required} if required is not None else {}))
+    older = prior(ts_unused=True)
+    older["ts"] = (now - timedelta(hours=1)).isoformat()
+    newer = prior(False)
+    check(window_gate.prior_result([newer, older], "a" * 40) == newer, "newest timestamp wins")
+    check(window_gate.prior_result([older, newer], "a" * 40) == newer, "newer red wins")
+    check(window_gate.prior_result([newer, prior(True, window_unused=True)], "a" * 40)["green"] is True,
+          "newer green wins ties in ledger order")
+    for value in (None, "true", 1, "missing"):
+        e = prior(value)
+        if value == "missing": e.pop("green")
+        check(window_gate.prior_result([e], "a" * 40) is None, "non-bool not a result")
+    stale = prior(); stale["ts"] = (now - timedelta(days=7, minutes=1)).isoformat()
+    check(window_gate.prior_result([stale], "a" * 40) is None and
+          window_gate.prior_result([prior()], "b" * 40) is None, "stale/different tree ignored")
+    response("prior_result_rules", ["AC3"], {"newest": True, "invalid_ignored": True})
+
+    unknown = "api/tests/absent.py::lost"
+    def verdict(state="green", nodes=()):
+        return dict(state=state, nodes=list(nodes), url="cli://candidate", doc={})
+
+    def exercise(names, bad=(), owner=None, uncertain=(), incomplete=()):
+        fx = Fx({s: f"{s}.py" for s in names})
+        calls, contents = [], []
+        def verify(repo, sha, required, window):
+            if sha == fx.base: return verdict()
+            present = [s for s in names if window_gate.git(repo, "cat-file", "-e", f"{sha}:{s}.py", check=False).returncode == 0]
+            calls.append(present); contents.append(sha)
+            if tuple(present) in incomplete:
+                fx.service.classify = lambda *a: {"complete": False}
+            else:
+                fx.service.classify = lambda project, base, nodes: {"complete": True, "pre_existing": [], "new": nodes}
+            if tuple(present) in uncertain: return verdict("undetermined")
+            if owner and present == owner[0]: return verdict("red", [owner[1]])
+            return verdict("red", [unknown]) if any(s in bad for s in present) else verdict()
+        return fx, calls, contents, verify
+
+    # Exact real-ledger roundtrips: force fold's strict append validation too.
+    append = fold.append
+    for state in ("green", "red", "undetermined"):
+        fx = Fx({"A": "a.txt"})
+        def verify(repo, sha, required, window):
+            return verdict() if sha == fx.base else verdict(state, [unknown] if state == "red" else [])
+        def strict(args): return append(args, strict=True)
+        with patch.object(window_gate, "verify", side_effect=verify), patch.object(fold, "append", side_effect=strict):
+            fx.go()
+        recorded = [e for e in fold.read_events() if e["type"] == "window-tree-verified"]
+        check(len(recorded) == (0 if state == "undetermined" else 1), "tree_verified_roundtrip count " + state)
+        if recorded:
+            e = recorded[0]
+            check(e["window"] == "w1" and len(e["tree"]) == 40 and
+                  e["tree"] == window_gate.tree_of(fx.repo, e["sha"]) and
+                  e["green"] is (state == "green") and e["new_ids"] == ([unknown] if state == "red" else []) and
+                  e["required"] == [window_gate.PYTEST_CHECK, window_gate.PG_CHECK] and
+                  all("actor" not in json.loads(line) for line in (fold.EVENTS / "L-executor-0001.jsonl").read_text().splitlines()) and
+                  window_gate.prior_result(fold.read_events(), e["tree"]) == e, "tree_verified_roundtrip fields " + state)
+    response("tree_verified_roundtrip", ["AC2"], {"green_events": 1, "red_events": 1, "strict": True, "fresh_read": True})
+    response("undetermined_not_recorded", ["AC2", "AC5"], {"events": 0})
+
+    def seed(fx, green=True, required=None, specs=None):
+        specs = specs or list(fx.branches)
+        entries = [(s, fx.branches[s], sh(["rev-parse", fx.branches[s]], fx.repo)) for s in specs]
+        candidate, _, _ = window_gate.build_candidate(fx.repo, "seed", fx.base, entries)
+        kv = dict(window="prior", sha=candidate, tree=window_gate.tree_of(fx.repo, candidate), green=green, new_ids=[])
+        if required is not None: kv["required"] = required
+        window_gate.ev("window-tree-verified", "prior", **kv)
+        return kv["tree"]
+
+    all_checks = [window_gate.PYTEST_CHECK, window_gate.PG_CHECK, window_gate.DASHBOARD_CHECK]
+    for required in (None, [window_gate.PYTEST_CHECK, window_gate.PG_CHECK]):
+        fx = Fx({"A": "dashboard/a.ts"}); seed(fx, required=required)
+        fx.run_n(1, 0, GREEN)
+        check(fx.go() == 0 and len(fx.calls()) == 1, "reuse_requires_superset dispatch")
+    response("reuse_requires_superset", ["AC3"], {"missing_required_dispatches": 1, "narrow_required_dispatches": 1})
+
+    fx = Fx({"A": "a.txt"}); tree = seed(fx, required=all_checks)
+    def no_candidate(repo, sha, required, window):
+        check(sha == fx.base, "green must not dispatch candidate")
+        return verdict()
+    output = io.StringIO()
+    with patch.object(window_gate, "verify", side_effect=no_candidate), contextlib.redirect_stdout(output): rc = fx.go()
+    verified = fx.events("window-verified")[0]
+    check(rc == 0 and verified["actions_minutes"] == 0 and verified["runs"] == [] and verified["sha"] == fx.master() and
+          [e["subject"] for e in fx.events("shipped")] == ["A"] and
+          f"tree {tree} already verified in prior" in output.getvalue(), "reuse_green_no_dispatch")
+    response("reuse_green_no_dispatch", ["AC4"], {"candidate_dispatches": 0, "actions_minutes": verified["actions_minutes"], "advanced": True})
+
+    fx = Fx({"A": "a.txt"}); seed(fx, False, all_checks); fx.run_n(1, 0, GREEN)
+    check(fx.go() == 0 and len(fx.calls()) == 1, "red_never_reused")
+    response("red_never_reused", ["AC4", "AC5"], {"dispatches": 1})
+
+    pg = "api/tests/test_pg.py::old"
+    for fixes_base in (False, True):
+        fx = Fx({"A": "a.txt"}); seed(fx, False, all_checks); fx.known.add(pg)
+        if fixes_base: fx.pg("base", [pg])
+        fx.pg(1, [pg])
+        check(fx.go(fixes_base=fixes_base) == (2 if fixes_base else 0) and len(fx.calls()) == 1 and
+              fx.events("window-pre-existing") and not fx.events("window-dropped"), "red_pre_existing_pg_redispatched")
+        check(fx.events("window-tree-verified")[-1]["new_ids"] == [] and
+              fx.events("window-tree-verified")[-1]["green"] is False, "red audit after pre-existing filter")
+    response("red_pre_existing_pg_redispatched", ["AC4"], {"dispatches": 1, "pre_existing": [pg], "ordinary_base_advances": True, "fixes_base_escalates": True})
+
+    fx = Fx({"A": "api/tests/test_x.py", "B": "b.txt"}); seed(fx, required=all_checks, specs=["B"])
+    fx.run_n(1, 1, red(["api/tests/test_x.py::bad"]))
+    check(fx.go() == 1 and len(fx.calls()) == 1 and fx.events("window-verified")[0]["actions_minutes"] == 45 and
+          len(fx.events("window-verified")[0]["runs"]) == 1, "reuse_cap_terminates")
+    response("reuse_cap_terminates", ["AC5"], {"dispatches": 1, "actions_minutes": 45})
+
+    for state in ("undetermined", "red"):
+        fx = Fx({"A": "a.txt"}); fx.run_n(1, 2 if state == "undetermined" else 1, red([unknown]))
+        check(fx.go() == 2, "initial failed window")
+        fx.run_n(2, 0, GREEN)
+        check(fx.go() == 0 and len(fx.calls()) == 2, "rerun dispatches after " + state)
+        check("rerun `doit gate-window` once the cause is fixed" in fx.events("escalation-blocking")[0]["revert"], "escalate remedy retained")
+    response("undetermined_redispatched", ["AC5"], {"rerun_dispatches": 1})
+    response("rerun_after_red_dispatches", ["AC5"], {"rerun_dispatches": 1, "remedy_retained": True})
+
+    for failure in ("tree", "ledger"):
+        fx = Fx({"A": "a.txt"}); fx.run_n(1, 0, GREEN)
+        real_git, read = window_gate.git, fold.read_events
+        def git(repo, *args, **kw):
+            if args[0] == "rev-parse" and args[-1].endswith("^{tree}"): raise RuntimeError("unresolved")
+            return real_git(repo, *args, **kw)
+        def unreadable():
+            # Fail only the cache read, preserving append validation/initial lookup.
+            import inspect
+            if not fx.events_path_seen and any(f.function == "judge" for f in inspect.stack()):
+                fx.events_path_seen = True
+                raise OSError("ledger unreadable")
+            return read()
+        fx.events_path_seen = False
+        with (patch.object(window_gate, "git", side_effect=git) if failure == "tree" else
+              patch.object(fold, "read_events", side_effect=unreadable)):
+            check(fx.go() == 0 and len(fx.calls()) == 1, "lookup failure dispatches " + failure)
+    response("tree_of_failure_dispatches", ["AC5"], {"tree_failure_dispatches": 1, "ledger_failure_dispatches": 1})
+
+    fx, calls, tips, verify = exercise("ABCDEF", "D")
+    with patch.object(window_gate, "verify", side_effect=verify): rc = fx.go()
+    halves = [e["halves"] for e in fx.events("window-bisected")]
+    drops = fx.events("window-dropped")
+    check(rc == 1 and halves == [[["A", "B", "C"], ["D", "E", "F"]], [["D"], ["E", "F"]]] and
+          calls == [list("ABCDEF"), list("ABC"), list("DEF"), ["D"], list("EF")] and
+          len(drops) == 1 and drops[0]["subject"] == "D" and drops[0]["reason"] == "bisect-single" and drops[0]["nodes"] and
+          [e["subject"] for e in fx.events("shipped")] == list("ABC") and fx.master() == tips[1] and
+          [s for s, _ in window_gate.pending_from_ledger(fold.read_events())] == list("EF"), "bisect_six_one_bad")
+    response("bisect_six_one_bad", ["AC6", "AC10"], {"halves": halves, "calls": calls, "pending": ["E", "F"], "first_green_advanced": True})
+    response("bisect_outside_run_cap", ["AC10"], {"bisect_dispatches": len(calls) - 1})
+
+    fx, calls, _, verify = exercise("AB", "A")
+    with patch.object(window_gate, "verify", side_effect=verify): rc = fx.go()
+    check(rc == 1 and [e["subject"] for e in fx.events("shipped")] == ["B"] and
+          fx.events("window-dropped")[0]["reason"] == "bisect-single", "bisect_two_specs")
+    response("bisect_two_specs", ["AC7"], {"shipped": ["B"], "dropped": ["A"]})
+
+    fx, calls, _, verify = exercise("ABCD", "C", owner=(["C", "D"], "C.py::bad"))
+    with patch.object(window_gate, "verify", side_effect=verify): rc = fx.go()
+    check(rc == 1 and [(e["subject"], e["reason"]) for e in fx.events("window-dropped")] == [("C", "bisect-owner")] and
+          [s for s, _ in window_gate.pending_from_ledger(fold.read_events())] == ["D"], "bisect_owner_half")
+    response("bisect_owner_half", ["AC7"], {"dropped": ["C"], "reason": "bisect-owner", "pending": ["D"]})
+
+    fx, calls, _, verify = exercise("AB", "AB")
+    with patch.object(window_gate, "verify", side_effect=verify): rc = fx.go()
+    check(rc == 2 and fx.master() == fx.base and all(s in fx.events("escalation-blocking")[-1]["why"] for s in "AB"), "bisect_no_green_half")
+    response("bisect_no_green_half", ["AC7"], {"master_unmoved": True, "dropped": ["A", "B"]})
+
+    for mode in ("undetermined", "incomplete"):
+        fx, calls, _, verify = exercise("ABCD", "C", **({"uncertain": [("C", "D")]} if mode == "undetermined" else {"incomplete": [("C", "D")]}))
+        with patch.object(window_gate, "verify", side_effect=verify): rc = fx.go()
+        check(rc == 1 and fx.master() != fx.base and not fx.events("window-dropped") and fx.events("escalation-blocking") and
+              [e["subject"] for e in fx.events("shipped")] == ["A", "B"] and
+              [s for s, _ in window_gate.pending_from_ledger(fold.read_events())] == ["C", "D"] and
+              len(fx.events("window-tree-verified")) == 2, "bisect_undetermined_half " + mode)
+    response("bisect_undetermined_half", ["AC7"], {"undetermined_and_base_incomplete": "escalate; no drops; unresolved half pending; verified half ships"})
+
+    fx, calls, _, verify = exercise("A", "A")
+    with patch.object(window_gate, "verify", side_effect=verify): fx.go()
+    check(not fx.events("window-bisected") and fx.events("window-dropped")[0]["reason"] == "unattributed", "no_bisect_single_or_mixed")
+    response("no_bisect_single_or_mixed", ["AC7"], {"single_unchanged": True, "mixed_covered_by_1110": True})
+
+    fx = Fx({"A": "api/tests/test_x.py", "B": "b.txt", "C": "c.txt"})
+    fx.run_n(1, 1, red(["api/tests/test_x.py::bad"])); fx.run_n(2, 1, red([unknown]))
+    check(fx.go() == 2 and len(fx.calls()) == 2 and not fx.events("window-bisected") and fx.master() == fx.base and
+          [e["subject"] for e in fx.events("window-dropped")] == list("ABC"), "no_bisect_on_second_run")
+    response("no_bisect_on_second_run", ["AC10"], {"dispatches": 2, "bisects": 0, "master_unmoved": True})
+
+    table = []
+    import math
+    for n in range(2, 7):
+        for bad in range(n):
+            names = "ABCDEF"[:n]
+            fx, calls, _, verify = exercise(names, names[bad])
+            with patch.object(window_gate, "verify", side_effect=verify): fx.go()
+            splits = fx.events("window-bisected")
+            limit = math.ceil(math.log2(n))
+            check(len(calls) - 1 <= 2 * limit and all(len(e["halves"]) == 2 and all(e["halves"]) for e in splits), "bisect bound")
+            depth = {tuple(names): 0}
+            for e in splits:
+                parent = tuple(e["halves"][0] + e["halves"][1])
+                for half in e["halves"]: depth[tuple(half)] = depth[parent] + 1
+            check(max(depth.values()) <= limit, "bisect depth bound")
+            table.append([n, bad, len(calls) - 1])
+    # Identical content of two halves exercises the same cache path recursively.
+    fx = Fx({"A": "a.txt", "B": "b.txt"})
+    real_prepare = window_gate.build_candidate
+    shared = [None]
+    def repeat(repo, window, base, entries):
+        tip, kept, clashes = real_prepare(repo, window, base, entries)
+        if len(entries) == 1:
+            if shared[0] is None: shared[0] = tip
+            tip = shared[0]
+        return tip, kept, clashes
+    dispatches = []
+    def verify(repo, sha, required, window):
+        if sha == fx.base: return verdict()
+        dispatches.append(sha)
+        return verdict("red", [unknown]) if len(dispatches) == 1 else verdict()
+    with patch.object(window_gate, "build_candidate", side_effect=repeat), patch.object(window_gate, "verify", side_effect=verify): fx.go()
+    check(len(dispatches) == 2, "bisect repeated tree reused")
+    response("bisect_bounds_table", ["AC8"], {"rows_n_bad_dispatches": table, "max_depth_within_bound": True, "repeated_half_dispatches": 1})
+
+    # Exercise real prepare/fingerprint against a migration-bearing half.
+    from test_rechain import Fixture
+    import rechain
+    for fail_half in (False, True):
+        fx = Fx({})
+        with tempfile.TemporaryDirectory() as seed_root:
+            seed_fx = Fixture(seed_root)
+            for path in sh(["ls-tree", "-r", "--name-only", seed_fx.base], seed_fx.repo).splitlines():
+                target = fx.repo / path; target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(rechain.blob(seed_fx.repo, seed_fx.base, path))
+        sh(["add", "."], fx.repo); sh(["commit", "-m", "migration base"], fx.repo)
+        fx.base = sh(["rev-parse", "HEAD"], fx.repo)
+        sh(["update-ref", "refs/heads/master", fx.base], fx.repo)
+        sf = Fixture.__new__(Fixture); sf.repo, sf.base, sf.events = fx.repo, fx.base, []
+        for name in "ABCD":
+            if name == "C":
+                _, branch, _ = sf.branch(name)
+            else:
+                branch = "br-" + name
+                sh(["checkout", "-b", branch, fx.base], fx.repo)
+                (fx.repo / (name + ".txt")).write_text(name)
+                sh(["add", "."], fx.repo); sh(["commit", "-m", name], fx.repo)
+            fx.branches[name] = branch
+        sh(["checkout", "live-scratch"], fx.repo)
+        env = sf.scripts(fx.tmp); env["DOIT_WINDOW_RECHAIN"] = "on"
+        fp_calls, seen = [], []
+        fingerprint = rechain.fingerprint
+        def fp(repo, sha, window, **kw):
+            fp_calls.append(sha)
+            if fail_half and len(fp_calls) == 2: raise ValueError("half fingerprint failed")
+            return fingerprint(repo, sha, window, **kw)
+        def verify(repo, sha, required, window):
+            if sha == fx.base: return verdict()
+            seen.append(sha)
+            has_c = window_gate.git(repo, "cat-file", "-e", sha + ":" + rechain.VERSIONS + "C.py", check=False).returncode == 0
+            if has_c:
+                check(rechain.text(repo, sha, rechain.FINGERPRINT).startswith("final:"), "half carries actual fingerprint")
+            return verdict("red", [unknown]) if len(seen) == 1 else verdict()
+        with patch.dict(os.environ, env), patch.object(rechain, "fingerprint", side_effect=fp), patch.object(window_gate, "verify", side_effect=verify):
+            check(fx.go() == 1, "bisect migration partially advances")
+        check(len(fp_calls) == 2 and [e["halves"] for e in fx.events("window-bisected")] == [[["A", "B"], ["C", "D"]]] and
+              not any(e.get("reason") == "migration-bisect" for e in fx.events("window-dropped")), "bisect_rechain_half")
+        if fail_half:
+            check([e["subject"] for e in fx.events("rechain-declined")] == ["C"] and
+                  window_gate.git(fx.repo, "cat-file", "-e", seen[-1] + ":" + rechain.VERSIONS + "C.py", check=False).returncode != 0,
+                  "declined C excluded from half candidate")
+    # bisect_window accepts only a prepare callback and must never build directly.
+    import inspect
+    check("build_candidate(" not in inspect.getsource(window_gate.bisect_window), "bisect_window never builds directly")
+    response("bisect_rechain_half", ["AC9"], {"fingerprint_calls": 2, "half_carries_fingerprint": True, "declined_C_excluded": True})
+    response("bisect_vs_migration_bisect", ["AC9"], {"unattributed_bisects": True, "migration_bisect_drops": 0, "owner_red_covered_by_rechain_checks": True})
+
+
 def test_window_attribution():
     attribution_checks()
     assert not FAILS, FAILS
 
 
+rerun_checks()
 test_window_attribution()
 clock_checks()
 cap_checks()
