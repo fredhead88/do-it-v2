@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 
 ROUTES = {"ro-dsn": "plain", "not-live": "plain", "droplet": "plain",
           "elapsed": "plain", "repo": "repo", "browser": "browser",
-          "operator-action": None}
+          "operator-action": None, "ro-dsn-grant": None}
 MAX_ATTEMPTS = 2
 
 

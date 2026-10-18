@@ -42,7 +42,7 @@ import argparse, hashlib, json, pathlib, re, subprocess, sys
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import dispatch, fold, owed, owed_failures, packet, scratch  # noqa: E402
+import dispatch, fold, owed, owed_failures, packet, scratch, prod_runner  # noqa: E402
 
 LEDGER_NAME = "L-sweep-local.jsonl"
 MAX_BATCH = 8
@@ -484,6 +484,36 @@ def dispatch_batch(project, batch, runner, *, dry_run=False):
             f"({_describe(batch)})"]
 
 
+def judgment_rows(rows, observations):
+    """Partition using the runner's single returned hand-off channel."""
+    selected, excluded = [], {}
+    browser = {(r["spec"], r["criterion"]) for r in prod_runner.batch_for_browser(rows)}
+    for row in rows:
+        key = row["spec"], row["criterion"]
+        record = prod_runner.record_for(row)
+        if key in observations["held"]:
+            reason = "runner held"
+        elif row.get("capability") in ("operator-action", "ro-dsn-grant") or "operator" in record["needs"]:
+            reason = "operator or grant required"
+        elif key in browser:
+            reason = "browser hand-off"
+        elif record["runner"] == "judgment":
+            selected.append(row)
+            continue
+        elif record["runner"] == "build" and key in observations["bundle_rows"]:
+            selected.append({**row, "line": f"{row.get('line') or ''}\nevidence bundle: {observations['bundle_rows'][key]}"})
+            continue
+        elif record["runner"] == "prod" and key in observations["to_judgment"]:
+            selected.append(row)
+            continue
+        else:
+            reason = "script observation"
+        excluded[reason] = excluded.get(reason, 0) + 1
+    lines = [f"sweep-owed: {count} row(s) excluded from plain batch: {reason}"
+             for reason, count in sorted(excluded.items())]
+    return selected, lines
+
+
 # ─────────────────────────────────── driver ──────────────────────────────────
 
 def run(*, dry_run=False, runner=None, now=None):
@@ -495,7 +525,10 @@ def run(*, dry_run=False, runner=None, now=None):
 
     lines = sweep_expired(specs, now, dry_run=dry_run)
     lines.extend(owed_failures.escalate_failures(specs, now, dry_run=dry_run))
-    # Runner observation belongs immediately ahead of this close, before batching.
+    observations = prod_runner.run(now, dry_run=dry_run)
+    lines.extend(observations["lines"])
+    all_ev = fold.read_events()
+    specs = fold.fold(all_ev)[0]
     lines.extend(close_unverifiable(all_ev, now, dry_run=dry_run))
     no_runner_counts = {}
     for spec in specs.values():
@@ -509,6 +542,21 @@ def run(*, dry_run=False, runner=None, now=None):
 
     due, quarantined, resolution_lines = _resolve_candidates(specs, now, dry_run=dry_run)
     lines.extend(resolution_lines)
+    # Stale failures are runner candidates even though due_candidates excludes
+    # failed status. Preserve their explicit evidence/judgment hand-off too.
+    routed = set(observations["bundle_rows"]) | observations["to_judgment"]
+    present = {(r["spec"], r["criterion"]) for r in due}
+    for spec in specs.values():
+        for row in owed.checks(spec["evs"], now):
+            key = row["spec"], row["criterion"]
+            if key in routed - present and row["status"] == "failed":
+                ok, reason = resolvable(row)
+                if ok:
+                    due.append(row)
+                else:
+                    lines.append(f"sweep-owed: 1 routed row excluded: {key[0]}/{key[1]}: {reason}")
+    due, partition_lines = judgment_rows(due, observations)
+    lines.extend(partition_lines)
     record = {"quarantined": quarantined}
     if open_batch(all_ev, now):
         record["outcome"] = "open"

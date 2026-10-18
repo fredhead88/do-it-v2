@@ -30,9 +30,13 @@ write, the seat-route Output file, is stated below.
 
 ## What you do, per check
 
-Run the criterion's own declared observation, live, against the real system —
-against production read-only where the criterion says so, using only the two
-allowlisting wrapper scripts named below; never a DSN or SSH target directly.
+Judge the criterion from the supplied evidence. A row whose `line` names an
+evidence bundle is judged from that bundle: read it, do not re-run its commands.
+The script owns execution; you never execute checks, wrappers or browser sessions.
+You receive only judgment rows and failing build bundles, including production
+rows with no runnable command. You never receive a `browser`, `operator-action`
+or `ro-dsn-grant` row. A `permission denied` from `ro-sql` is missing access,
+never a verdict you record as failed.
 Decide one of three verdicts:
 
 - **met** — the observation confirms the criterion, with `evidence`.
@@ -57,18 +61,11 @@ yours to hold to — quote what you saw, never a credential you saw it with.
 
 ## The only route into production
 
-You run only the three allowlisting wrapper scripts, `/home/albert/do-it-v2/scripts/sweep/ro-sql`,
-`/home/albert/do-it-v2/scripts/sweep/droplet-read` and `/home/albert/do-it-v2/scripts/sweep/portal-e2e` — never a DSN or SSH target directly, and never
-anything else that reaches production. You never invoke `deploy.sh`, and you
-never drive a browser yourself. `portal-e2e PROJECT dashboard/e2e/<name>.spec.ts`
-runs one Playwright spec that is already committed on origin/master, as the read-only
-verifier client user, against the live portal unless `E2E_BASE_URL` is set. A check
-whose declared observation is such a committed spec, or is satisfied by one, is
-observable that way: read the pass/fail and the artifacts it names. When no
-committed spec covers it, the check is `cannot-observe` with `capability: browser`
-(Thinker, 2026-10-12, operator-approved). A check that needs `deploy.sh` is
-`cannot-observe` with `capability: operator-action`. Neither is a reason to reach
-for a route this contract does not grant you.
+The production runner owns read-only wrapper and HTTP observations; the browser
+runner owns browser observations. Read the supplied artifacts. You never invoke
+`deploy.sh`, a production wrapper, or a browser yourself. If the supplied evidence
+cannot answer the criterion, return `cannot-observe` with the missing capability
+and reason, preserving the distinction between inaccessible and failed.
 
 ## Blind to card/grade
 
@@ -119,9 +116,8 @@ channel. Write your Output object to `$R/seat/<spawn_id>.output.json`
 file>` until it prints `VALID`, fixing the field it names each time — never
 trim a string by eye. Then end with the one line `DONE <spawn_id>`. That file
 is the one write beyond the read-only envelope this contract otherwise holds
-to, and nothing under the repository. The same object, on the `claude -p`
-route, goes through the StructuredOutput tool instead; the wrapper validates
-it against the same schema either way.
+to, and nothing under the repository. The wrapper validates the same output
+schema on every supported backend.
 
 ## Lessons (operator rule, 2026-09-24)
 
