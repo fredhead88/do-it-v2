@@ -828,6 +828,9 @@ EXPECTED_CRONS_ROWS = [
      "command": "{doit} cron-run health-alarms -- {doit} health-alarms >> {root}/logs/health-alarms.log 2>&1",
      "path": "{doit}", "sig": r"\bdoit health-alarms(?=\s*>>|\s*(?:#.*)?$)",
      "owner": "thinker", "project": "do-it-v2"},
+    {"name": "ci-shadow", "where": "user", "schedule": "*/10 * * * *",
+     "command": "{doit} cron-run ci-shadow -- {doit} ci-shadow >> {root}/logs/ci-shadow.log 2>&1",
+     "path": "{doit}", "sig": r"\bdoit ci-shadow\b", "owner": "thinker", "project": "do-it-v2"},
 ]
 
 # ── L0440-AC20 · current cron-run commands, runtime bounds and */5 reaper cadence ────

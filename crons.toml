@@ -144,3 +144,13 @@ path = "{doit}"
 sig = '\bdoit health-alarms(?=\s*>>|\s*(?:#.*)?$)'
 owner = "thinker"
 project = "do-it-v2"
+
+[[row]]
+name = "ci-shadow"
+where = "user"
+schedule = "*/10 * * * *"
+command = "{doit} cron-run ci-shadow -- {doit} ci-shadow >> {root}/logs/ci-shadow.log 2>&1"
+path = "{doit}"
+sig = '\bdoit ci-shadow\b'
+owner = "thinker"
+project = "do-it-v2"
