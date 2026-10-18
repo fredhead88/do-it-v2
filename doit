@@ -6,6 +6,7 @@ SRC="$HERE/src"
 case "${1:-board}" in
   gate)    shift; exec python3 "$SRC/merge_gate.py" "$@" ;;
   gate-window) shift; exec python3 "$SRC/window_gate.py" "$@" ;;
+  base-red) shift; exec python3 "$SRC/base_red.py" "$@" ;;
   dispatch) shift; exec python3 "$SRC/dispatch.py" "$@" ;;
   cancel)  shift; exec python3 "$SRC/cancel.py" "$@" ;;
   packet)  shift; exec python3 "$SRC/packet.py" "$@" ;;
