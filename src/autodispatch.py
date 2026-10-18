@@ -12,7 +12,7 @@ path exists. `tick._record()` calls `run()` once per tick, last, right before
 `candidates()` to alarm on anything left dispatchable (or standing-failed)
 past 30 minutes.
 """
-import datetime, json, pathlib, socket, subprocess, sys
+import datetime, json, os, pathlib, re, socket, subprocess, sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import dispatch, fold, panes, shape, tick  # noqa: E402
 
@@ -115,7 +115,22 @@ def _since(events, sid, evs, charter, wave):
     return max(marker_ts, settle_ts) if marker_ts is not None else settle_ts
 
 
-def _blocking_reason(sid, evs, events, project, charter, wave, busy):
+def _head_of(project, *, runner=None):
+    """Read the repository's symbolic HEAD; a failed or detached read is unknown."""
+    argv = ["git", "-C", str(fold.ROOT / "repos" / project), "symbolic-ref", "--short", "HEAD"]
+    try:
+        if runner is None:
+            result = subprocess.run(argv, capture_output=True, text=True)
+            code, stdout = result.returncode, result.stdout
+        else:
+            result = runner(argv)
+            code, stdout = result.get("code", 1), result.get("stdout")
+        return ((stdout or "").strip() or None) if code == 0 else None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _blocking_reason(sid, evs, events, project, charter, wave, busy, head_of):
     """The `dispatchable` gate (SD1), with dependency holds checked first in a fixed
     priority order — each acceptance criterion exercises exactly one
     condition at a time, so the order only matters when more than one is
@@ -130,6 +145,9 @@ def _blocking_reason(sid, evs, events, project, charter, wave, busy):
         text = dispatch.spec_path(sid).read_text()
     except OSError:
         return "spec file unreadable", False
+    base = re.search(r"^Base:\s+(\S+)\s*$", text, re.MULTILINE)
+    if base and base[1] != head_of(project):
+        return f"base {base[1]}: the Executor cuts this worktree by hand", False
     shp = shape.check(text)
     # SD9 (L-spec-0478): a missing "In plain English:" line does not make an
     # already-written spec unbuildable — the pre-build gate's one exception.
@@ -167,10 +185,19 @@ def _builder_in_flight_count(events):
     return len(active)
 
 
-def candidates(events, specs, now):
+def candidates(events, specs, now, *, head_of=None):
     """One row per `written` spec: `{spec, charter, project, since, status,
     reason}` — `status` `dispatchable`/`seat-wait`/`blocked`, oldest `since`
-    first (SD1/SD2)."""
+    first (SD1/SD2). `head_of(project)` is read only for a single-token Base
+    declaration, once per project, and defaults to the repository's symbolic HEAD."""
+    reader = head_of if head_of is not None else _head_of
+    heads = {}
+
+    def head_for(project):
+        if project not in heads:
+            heads[project] = reader(project)
+        return heads[project]
+
     events = list(events)
     by_subject = {}
     for e in events:
@@ -188,7 +215,7 @@ def candidates(events, specs, now):
                               if e.get("type") == "spec-written" and e.get("footprint")), None)
         project = next((e.get("project") for e in reversed(evs) if e.get("project")), None) or "unknown"
         wave = dispatch.spec_wave(charter, own_footprint) if (charter and own_footprint) else None
-        reason, is_fail = _blocking_reason(sid, evs, events, project, charter, wave, busy)
+        reason, is_fail = _blocking_reason(sid, evs, events, project, charter, wave, busy, head_for)
         since = _since(events, sid, evs, charter, wave) or now
         rows.append({"spec": sid, "charter": charter, "project": project,
                      "since": since.isoformat(timespec="seconds"),
@@ -384,7 +411,8 @@ def _real_runner(argv):
     # worktree was already added, stranding it (09-28 04:30-05:08Z, 0400/0423/9002).
     if argv and argv[0] == "doit":
         argv = [DOIT_BIN] + list(argv[1:])
-    r = subprocess.run(argv, capture_output=True, text=True)
+    env = dict(os.environ, DOIT_LEDGER_FILE=str(tick.tick_path()))
+    r = subprocess.run(argv, capture_output=True, text=True, env=env)
     return {"code": r.returncode, "stdout": r.stdout, "stderr": r.stderr}
 
 
@@ -418,7 +446,7 @@ def run(events, specs, now, *, runner=None, dry_run=False):
     independent of `dry_run`, AC14)."""
     events = list(events)
     runner = runner or _real_runner
-    rows = candidates(events, specs, now)
+    rows = candidates(events, specs, now, head_of=lambda project: _head_of(project, runner=runner))
     out = []
     for row in rows:
         if row["status"] != "dispatchable":
