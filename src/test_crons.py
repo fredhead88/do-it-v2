@@ -10,6 +10,7 @@ every fixture is a temp file/dir passed via `manifest=`/`crontab_path=`/
 import contextlib, io, os, pathlib, re, subprocess, sys, tempfile
 
 TMP = pathlib.Path(tempfile.mkdtemp(prefix="crons-test-"))
+os.environ["HOME"] = str(TMP / "home")
 os.environ["DOIT_ROOT"] = str(TMP / "doit-root-unused")
 # A fresh temp dir under the same TMP filesystem, but NOT nested under
 # DOIT_ROOT above and not inside any git work tree — required (Constraints,
@@ -29,9 +30,20 @@ def check(cond, msg):
 
 
 REAL_MANIFEST = pathlib.Path(__file__).resolve().parent.parent / "crons.toml"
+# Compare this unit with its inherited manifest, including after its commit
+# has merged. The introduction parent keeps this regression stable on main.
+introduced = subprocess.check_output(
+    ["git", "log", "--diff-filter=A", "--format=%H", "--", "src/seat_usage.py"],
+    cwd=REAL_MANIFEST.parent, text=True).splitlines()
+base = introduced[-1] + "^" if introduced else subprocess.check_output(
+    ["git", "merge-base", "HEAD", "main"], cwd=REAL_MANIFEST.parent, text=True).strip()
+BASE_MANIFEST = TMP / "base-crons.toml"
+BASE_MANIFEST.write_bytes(subprocess.check_output(
+    ["git", "show", f"{base}:crons.toml"], cwd=REAL_MANIFEST.parent))
+BASE_ROWS = crons.rows(str(BASE_MANIFEST))
 NAMES = {"tick", "look", "tmp-reaper", "lessons-digest", "backup-watch",
          "ledger-snapshot", "sweep-owed", "auto-deploy", "owed-digest",
-         "portal-latency-daily", "suite-daily", "health-alarms", "ci-shadow", "balance", "stuck-digest", "verify-owed", "gh-bill"}
+         "portal-latency-daily", "suite-daily", "health-alarms", "ci-shadow", "balance", "stuck-digest", "verify-owed", "gh-bill"} | {"seat-usage"}
 
 
 def _write_manifest(path, rows_):
@@ -70,11 +82,11 @@ def _exec_manifest(tmpdir, rows_=None, mode=0o755):
     return p, out
 
 
-# ══ AC1 · rows() — 17 rows, all 8 keys, where/project split ═════════════════
+# ══ AC1 · rows() — base + one row, all 8 keys, where/project split ═════════════════
 d1 = TMP / "ac1"
 d1.mkdir()
 r1 = crons.rows(str(REAL_MANIFEST))
-check(len(r1) == 17, f"AC1: exactly 17 rows: {len(r1)}")
+check(len(r1) == len(BASE_ROWS) + 1, f"AC1: base + one row: {len(r1)} vs {len(BASE_ROWS)}")
 check({row["name"] for row in r1} == NAMES, f"AC1: name set: {[row['name'] for row in r1]}")
 for row in r1:
     # R14a: every row also carries `max_runtime_s` now (int|None) — a 9th key,
@@ -273,10 +285,32 @@ crond5_empty.mkdir()
 # `tick`/`backup-watch` lines carry the real `/home/albert/do-it-v2/doit`, which
 # still matches `\bdoit tick\b` / `\bdoit backup watch\b` regardless of path.
 res5 = crons.check(manifest=str(manifest5), crontab_text=FIXTURE_5, crond_dir=str(crond5_empty))
-check({r["name"] for r in res5} == {"look", "tmp-reaper", "auto-deploy", "owed-digest", "portal-latency-daily", "suite-daily", "health-alarms", "ci-shadow", "balance", "stuck-digest", "verify-owed", "gh-bill"},
-      f"AC5: exactly {{look, tmp-reaper, auto-deploy, owed-digest, portal-latency-daily, suite-daily, health-alarms, ci-shadow, balance, stuck-digest, verify-owed, gh-bill}} missing: {[r['name'] for r in res5]}")
+base_dir = TMP / "base-check"
+base_dir.mkdir()
+base_manifest, _ = _exec_manifest(base_dir, BASE_ROWS)
+base_missing = crons.check(manifest=str(base_manifest), crontab_text=FIXTURE_5,
+                           crond_dir=str(crond5_empty))
+check({r["name"] for r in res5} == {r["name"] for r in base_missing} | {"seat-usage"},
+      f"AC5: inherited absent rows plus seat-usage: {res5}")
 check(all(r["reason"] == "absent" for r in res5), f"AC5: every entry is absent: {res5}")
-check(len(res5) == 12, f"AC5: no extra rows: {res5}")
+check(len(res5) == len(base_missing) + 1, f"AC5: exactly one more absent: {res5}")
+seat = next(row for row in r1 if row["name"] == "seat-usage")
+check(seat == {
+    "name": "seat-usage", "where": "user", "schedule": "*/15 * * * *",
+    "command": f"{REAL_MANIFEST.parent}/doit cron-run seat-usage -- "
+               f"{REAL_MANIFEST.parent}/doit seat-usage >> {fold.ROOT}/logs/seat-usage.log 2>&1",
+    "path": str(REAL_MANIFEST.parent / "doit"), "sig": r"\bdoit seat-usage\b",
+    "owner": "thinker", "project": "do-it-v2", "max_runtime_s": None,
+}, f"1129-AC9: exact seat-usage row: {seat}")
+seat_crontab = TMP / "seat-crontab"
+seat_crontab.write_text("# keep\n")
+crons.install("seat-usage", crontab_path=str(seat_crontab))
+first_install = seat_crontab.read_bytes()
+check(first_install.count(b"# doit-cron:seat-usage") == 1, "1129-AC9: exactly one installed row")
+crons.install("seat-usage", crontab_path=str(seat_crontab))
+check(seat_crontab.read_bytes() == first_install, "1129-AC9: second install unchanged")
+print(f"1129-AC9 rows {len(r1)} = base {len(BASE_ROWS)} + 1; "
+      f"absent {len(res5)} = base {len(base_missing)} + 1; install idempotent")
 
 # AC5's second, minimal fixture: the only matching line is commented.
 d5b = TMP / "ac5b"

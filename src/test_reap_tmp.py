@@ -844,6 +844,9 @@ EXPECTED_CRONS_ROWS = [
     {"name": "gh-bill", "where": "user", "schedule": "15 6 * * *",
      "command": "{doit} cron-run gh-bill -- {doit} gh-bill >> {root}/logs/gh-bill.log 2>&1",
      "path": "{doit}", "sig": r"\bdoit gh-bill\b", "owner": "thinker", "project": "do-it-v2"},
+    {"name": "seat-usage", "where": "user", "schedule": "*/15 * * * *",
+     "command": "{doit} cron-run seat-usage -- {doit} seat-usage >> {root}/logs/seat-usage.log 2>&1",
+     "path": "{doit}", "sig": r"\bdoit seat-usage\b", "owner": "thinker", "project": "do-it-v2"},
 ]
 
 # ── L0440-AC20 · current cron-run commands, runtime bounds and */5 reaper cadence ────
