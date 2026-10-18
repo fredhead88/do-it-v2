@@ -28,7 +28,7 @@ Exit codes (the Executor contract, agents/executor.md, mirrors these):
 
 Env: DOIT_WINDOW_PREDEPLOY (override the script path), DOIT_WINDOW_VERIFY_TIMEOUT_SECS.
 """
-import json, math, os, pathlib, re, shlex, signal, subprocess, sys, time
+import io, json, math, os, pathlib, posixpath, re, shlex, signal, subprocess, sys, time, zipfile, zlib
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
@@ -39,6 +39,8 @@ PROJECT = "albert-scott"
 PREDEPLOY = "scripts/ci/predeploy_gate.sh"
 DEFAULT_TOML_PATH = pathlib.Path(__file__).resolve().parent.parent / "look.toml"
 KILL_MARGIN_MIN = 10
+BASE_RED_MARGIN_SECS = 600  # nested verify teardown, plus bounded log fetch
+BASE_RED_COMMAND = "doit"
 MAX_MERGES = 6
 PYTEST_CHECK = "pytest"
 PG_CHECK = "pg-parity (Postgres)"
@@ -328,13 +330,13 @@ def verify(repo, cand, required, window):
                 pg_failed, pg_failures = pg_result(repo, doc)
             except RuntimeError as e:
                 return dict(state="undetermined", nodes=[], url=url, doc=doc, why=str(e))
-        detail = dict(pg_failed=pg_failed, pg_failures=pg_failures, other_nodes=list(nodes))
+        detail = dict(pg_failed=pg_failed, pg_failures=pg_failures, other_nodes=list(nodes), output=out)
         nodes = list(dict.fromkeys(nodes + list(pg_failures)))
         if proc.returncode == 0 and all_ran and not nodes and not pg_failed and doc.get("verdict", "green") == "green":
             return dict(state="green", nodes=[], url=url, doc=doc, **detail)
         if proc.returncode == 2 or (proc.returncode == 0 and not doc):
             return dict(state="undetermined", nodes=nodes, url=url, doc=doc,
-                        why=f"gate exit {proc.returncode}: " + (out.strip().splitlines() or [""])[-1][:200])
+                        why=f"gate exit {proc.returncode}: " + (out.strip().splitlines() or [""])[-1][:200], **detail)
         return dict(state="red", nodes=nodes, url=url, doc=doc,
                     why=f"gate exit {proc.returncode}", **detail)
     finally:
@@ -343,8 +345,13 @@ def verify(repo, cand, required, window):
 
 
 # ── failing node -> owning specs ─────────────────────────────────────────────
+def safe_path(path):
+    return bool(path and not path.startswith(("/", "-")) and ".." not in path.split("/")
+                and "\\" not in path and "\x00" not in path)
+
+
 def _exists(repo, rev, path):
-    return git(repo, "cat-file", "-e", f"{rev}:{path}", check=False).returncode == 0
+    return safe_path(path) and git(repo, "cat-file", "-e", f"{rev}:{path}", check=False).returncode == 0
 
 
 def _resolve(repo, rev, mod, here):
@@ -384,16 +391,182 @@ def import_closure(repo, rev, path, limit=400):
     return seen
 
 
+JS_EXTENSIONS = (".ts", ".tsx", ".js", ".jsx", ".mjs")
+JS_IMPORT_RE = re.compile(
+    r"(?:\b(?:import|export)\b[^;\n]*?\bfrom\s*|\bimport\s*(?:\(\s*)?|\brequire\s*\(\s*)"
+    r"[\"'](\.{1,2}/[^\"']+)[\"']")
+
+
+def js_import_closure(repo, rev, path, limit=400):
+    """Relative imports only, bounded and read exclusively from candidate blobs."""
+    seen, todo = set(), [path]
+    while todo and len(seen) < limit:
+        cur = todo.pop()
+        if cur in seen or not _exists(repo, rev, cur):
+            continue
+        seen.add(cur)
+        text = git(repo, "show", f"{rev}:{cur}", check=False).stdout
+        for specifier in JS_IMPORT_RE.findall(text):
+            target = posixpath.normpath(posixpath.join(posixpath.dirname(cur), specifier))
+            if not safe_path(target):
+                continue
+            candidates = ([target] if target.endswith(JS_EXTENSIONS) else
+                          [target + ext for ext in JS_EXTENSIONS] +
+                          [target + "/index" + ext for ext in JS_EXTENSIONS])
+            for candidate in candidates:
+                if _exists(repo, rev, candidate):
+                    todo.append(candidate)
+                    break
+    return seen
+
+
+class OwnershipPaths(dict):
+    """A window's diffs plus run-local pg step file evidence; no global cache."""
+    def __init__(self, touched, pg_files):
+        super().__init__(touched)
+        self.pg_files = pg_files
+
+
 def owners(repo, rev, node, touched):
-    """touched: {spec: set(paths)}. Test file touched by a spec; else a spec touching
-    the node's import closure; else every spec (the safe direction)."""
-    f = node.split("::")[0]
-    direct = [s for s, p in touched.items() if f in p]
+    """Direct file owners, then import owners; an unknown id has no owners."""
+    if node.startswith("pg-parity::"):
+        files = getattr(touched, "pg_files", {}).get(node, set())
+        found = {s for f in files for s in owners(repo, rev, f, touched)}
+        return [s for s in touched if s in found]
+    path = node.split("::")[0]
+    if not safe_path(path) or not path.endswith((".py", *JS_EXTENSIONS)):
+        return []
+    direct = [s for s, paths in touched.items() if path in paths]
     if direct:
         return direct
-    closure = import_closure(repo, rev, f)
-    near = [s for s, p in touched.items() if p & closure]
-    return near or list(touched)
+    closure = (import_closure if path.endswith(".py") else js_import_closure)(repo, rev, path)
+    return [s for s, paths in touched.items() if paths & closure]
+
+
+def unattributed_ids(repo, rev, ids, touched):
+    return [node for node in ids if not owners(repo, rev, node, touched)]
+
+
+def call_base_red(project, base, ensure):
+    """The ensure wait must be killable, including its nested verify children."""
+    argv = [BASE_RED_COMMAND, "base-red", project, base]
+    if ensure:
+        argv.append("--ensure")
+    argv.append("--json")
+    incomplete = {"sha": base, "complete": False}
+    try:
+        proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, start_new_session=True)
+        try:
+            out, _ = proc.communicate(timeout=verify_timeout_secs(os.environ) + BASE_RED_MARGIN_SECS)
+        except subprocess.TimeoutExpired:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.communicate()
+            return incomplete
+        if proc.returncode != 0:
+            return incomplete
+        answer = json.loads(out)
+        if (not isinstance(answer, dict) or answer.get("sha") != base or
+                answer.get("complete") is not True or answer.get("undetermined") or
+                not isinstance(answer.get("ids"), dict)):
+            return incomplete
+        return answer
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return incomplete
+
+
+def base_red_snapshot(project, base):
+    answer = call_base_red(project, base, True)
+    if not answer.get("complete") or answer.get("undetermined"):
+        answer = call_base_red(project, base, False)
+    return answer
+
+
+def candidate_logs(repo, doc):
+    """Fetch unique candidate run zips via the shared quota gate, never log-view."""
+    import ghlimit
+    checks = doc.get("checks", {})
+    runs = {str(c["run_id"]) for c in checks.values()
+            if isinstance(c, dict) and str(c.get("run_id", "")).isdigit()}
+    if not runs:
+        return []
+    remote = git(repo, "remote", "get-url", "origin").stdout.strip()
+    match = re.fullmatch(r"(?:https://github.com/|git@github.com:|ssh://git@github.com/)([\w.-]+/[\w.-]+?)(?:\.git)?/?", remote)
+    if not match:
+        raise RuntimeError("candidate logs repository unavailable")
+    owner, logs = match[1], []
+    for rid in sorted(runs):
+        if not ghlimit.gate()["ok"]:
+            raise RuntimeError("candidate log quota unavailable")
+        proc = subprocess.run([ghlimit.real_gh(), "api", f"repos/{owner}/actions/runs/{rid}/logs"],
+                              capture_output=True, timeout=120)
+        if proc.returncode:
+            raise RuntimeError("candidate logs unavailable")
+        with zipfile.ZipFile(io.BytesIO(proc.stdout)) as archive:
+            members = [(m.filename, archive.read(m).decode("utf-8-sig"))
+                       for m in archive.infolist() if not m.is_dir()]
+        if not members:
+            raise RuntimeError("empty candidate logs zip")
+        # Raw step members need the actual job/step display names for parse_log.
+        pg_members = [name for name, _ in members if "pg-parity" in name.lower()]
+        jobs = []
+        if pg_members:
+            rc, out, _ = ghlimit.run(["gh", "api", f"repos/{owner}/actions/runs/{rid}/jobs?per_page=100"])
+            if rc:
+                raise RuntimeError("candidate step metadata unavailable")
+            jobs = json.loads(out)["jobs"]
+        named_steps = set()
+        for name, text in members:
+            if name in pg_members:
+                number = re.match(r"(\d+)_", pathlib.PurePosixPath(name).name)
+                steps = [step["name"] for job in jobs if "pg-parity" in job["name"].lower()
+                         for step in job.get("steps", []) if number and step["number"] == int(number[1])]
+                if len(steps) == 1:
+                    named_steps.add(steps[0])
+                    text = "\n".join("pg-parity\t" + steps[0] + "\t" + line for line in text.splitlines())
+            logs.append((rid, text))
+        # Some archives contain only aggregate job logs. Metadata still names
+        # failed steps, even when their output cannot safely identify a file.
+        for job in jobs:
+            if "pg-parity" not in job["name"].lower():
+                continue
+            for step in job.get("steps", []):
+                if step.get("conclusion") == "failure" and step["name"] not in named_steps:
+                    logs.append((rid, "pg-parity\t" + step["name"] + "\t##[error]failed step"))
+    return logs
+
+
+def candidate_failures(repo, res):
+    """Canonical typed ids. All log format knowledge belongs to base_red."""
+    import base_red
+    kinds = ("pytest", "pg-parity", "vitest", "suite-error")
+    result = {k: set() for k in kinds}
+    result.update(undetermined=[], pg_files={})
+    pg_check = res.get("doc", {}).get("checks", {}).get(PG_CHECK, {})
+    pg_run = str(pg_check.get("run_id", "")) if isinstance(pg_check, dict) else ""
+    pg_nodes = set(res.get("pg_failures", {}))
+    # Retain structured verdict ids for older gate versions as well as NEW logs.
+    for node in res.get("nodes", []):
+        if node.startswith("pg-parity::") and pg_nodes:
+            continue
+        kind = ("pg-parity" if node.startswith("pg-parity::") else "pytest" if ".py::" in node else
+                "vitest" if "::" in node else "suite-error")
+        result[kind].add(node)
+    texts = [(pg_run, res.get("output", ""))] + candidate_logs(repo, res.get("doc", {}))
+    for rid, text in texts:
+        parsed = base_red.parse_log(text)
+        for kind in kinds:
+            ids = parsed[kind]
+            if kind == "pg-parity" and pg_nodes and rid == pg_run:
+                ids = set()
+            result[kind].update(ids)
+        result["undetermined"].extend(parsed.get("undetermined", []))
+        files = {p for p in re.findall(r"[\w./-]+\.py\b", text) if safe_path(p)
+                 and pathlib.PurePosixPath(p).name.startswith("test")}
+        for step in parsed["pg-parity"]:
+            result["pg_files"].setdefault(step, set()).update(files)
+    result["pytest"].update(pg_nodes)
+    return result
 
 
 # ── orchestration ────────────────────────────────────────────────────────────
@@ -435,13 +608,14 @@ def resolve_entries(repo, spec_args, events):
     return out
 
 
-def advance(repo, main, old, new, window, kept, dropped, runs, urls, entries, dashboard, rechained=()):
+def advance(repo, main, old, new, window, kept, dropped, runs, urls, entries, dashboard, rechained=(), pre_existing=()):
     git(repo, "update-ref", f"refs/heads/{main}", new, old)       # old value asserted
     branch_of = {s: b for s, b, _ in entries}
     for s in kept:
         ev("shipped", s, sha=new, branch=branch_of[s], window=window,
            **({"rechained": True} if s in rechained else {}))
     ev("window-verified", window, sha=new, runs=urls, kept=kept, dropped=dropped,
+       pre_existing=list(pre_existing),
        actions_minutes=runs * RUN_MINUTES + (runs * DASHBOARD_MINUTES if dashboard else 0))
 
 
@@ -462,6 +636,7 @@ def run_window(window, project, spec_args, main, fixes_base=False):
         escalate(window, str(e))
         print("gate-window: " + str(e))
         return 2
+    base_red_answer = base_red_snapshot(project, base)
     baseline = verify(repo, base, [PG_CHECK], window)
     if baseline["state"] != "green" and not (fixes_base and baseline["state"] == "red"):
         why = "base-not-releasable: pg-parity is " + baseline["state"]
@@ -488,6 +663,7 @@ def run_window(window, project, spec_args, main, fixes_base=False):
     ev("window-opened", window, specs=[s for s, _, _ in entries], base=base[:12], fixes_base=fixes_base)
     touched = {s: set(git(repo, "diff", "--name-only", f"{base}...{b}").stdout.split()) for s, b, _ in entries}
     dropped, urls, runs, dashboard = [], [], 0, False
+    pre_existing_all = set()
     conflicted_all = {}
 
     def prepare(batch):
@@ -531,42 +707,67 @@ def run_window(window, project, spec_args, main, fixes_base=False):
         if res["state"] == "undetermined":
             escalate(window, f"window {window} could not be verified ({res.get('why')}); master unmoved, no spec dropped")
             print(f"gate-window: undetermined — {res.get('why')}"); return 2
-        # A red base may be repaired, but never advanced while still red. Matching
-        # signatures are reported and excluded from ownership attribution only.
-        pre_existing = [n for n, signature in res.get("pg_failures", {}).items()
-                        if base_failures.get(n) == signature]
+        try:
+            failures = candidate_failures(repo, res)
+        except (OSError, RuntimeError, ValueError, KeyError, TypeError, zipfile.BadZipFile,
+                zipfile.LargeZipFile, zlib.error, subprocess.SubprocessError) as exc:
+            escalate(window, f"unnamed new failures: candidate log evidence unavailable ({type(exc).__name__}); named ids={json.dumps(res.get('nodes', []))}; master unmoved, no spec dropped")
+            return 2
+        nodes = sorted(set().union(*(failures[k] for k in ("pytest", "pg-parity", "vitest", "suite-error"))))
+        if failures["undetermined"] or not nodes:
+            escalate(window, f"unnamed new failures: {failures['undetermined']}; NEW ids={json.dumps(nodes)}; master unmoved, no spec dropped")
+            return 2
+        classification = {"complete": False}
+        if base_red_answer.get("complete") and not base_red_answer.get("undetermined"):
+            import base_red
+            classification = base_red.classify(project, base, nodes)
+        if not classification.get("complete"):
+            escalate(window, f"base incomplete; NEW ids={json.dumps(nodes)}; master unmoved, no spec dropped")
+            return 2
+        pre_existing = set(classification["pre_existing"])
+        # A red --fixes-base baseline has stronger, signature-level evidence.
+        for node, signature in res.get("pg_failures", {}).items():
+            if node in base_failures:
+                if base_failures[node] == signature:
+                    pre_existing.add(node)
+                else:
+                    pre_existing.discard(node)
+        pre_existing = sorted(pre_existing)
         if pre_existing:
-            ev("window-pre-existing", window, count=len(pre_existing), nodes=pre_existing,
-               reason="identical-pg-parity-at-base", run_url=res["url"])
-            print(f"gate-window: {len(pre_existing)} pre-existing pg-parity failure(s), reason=identical-pg-parity-at-base")
-            res["nodes"] = [n for n in res["nodes"] if n not in pre_existing or n in res.get("other_nodes", [])]
-            reasons = res.get("doc", {}).get("reasons", [])
-            other_red = any(not str(r).startswith(PG_CHECK + ":") for r in reasons)
-            if not res["nodes"] and not other_red:
+            ev("window-pre-existing", window, ids=pre_existing, base_sha=base,
+               count=len(pre_existing), nodes=pre_existing, run_url=res["url"])
+            print(f"gate-window: {len(pre_existing)} failure(s) pre-existing at base: {json.dumps(pre_existing)}")
+            pre_existing_all.update(pre_existing)
+        res["nodes"] = [n for n in nodes if n not in pre_existing]
+        if not res["nodes"]:
+            if fixes_base and res.get("pg_failed"):
                 escalate(window, "base-not-releasable: --fixes-base window has not repaired pg-parity")
                 return 2
+            break  # all-pre-existing takes precedence over the two-run cap
         # red
         by_id = {s: (b, sha) for s, b, sha in entries}
-        if runs >= 2:
+        paths = OwnershipPaths({s: touched[s] for s in live}, failures["pg_files"])
+        unattributed = unattributed_ids(repo, cand, res["nodes"], paths)
+        if runs >= 2 or unattributed:
             drop = list(live)
         else:
             drop = []
             for n in res["nodes"]:
-                drop += [s for s in owners(repo, cand, n, {s: touched[s] for s in live}) if s not in drop]
-            drop = drop or list(live)
+                drop += [s for s in owners(repo, cand, n, paths) if s not in drop]
         bisected = []
-        if enabled and runs == 1 and any(s in migrations for s in drop):
+        if enabled and not unattributed and runs == 1 and any(s in migrations for s in drop):
             stack = [s for s in live if s in migrations]
             bisected = stack[1:]
             drop = [s for s in drop if s not in migrations] + bisected
         for s in drop:
             ev("window-dropped", s, window=window, nodes=res["nodes"], run_url=res["url"], branch=by_id[s][0],
-               **({"reason": "migration-bisect"} if s in bisected else {}))
+               **({"reason": "unattributed"} if unattributed else {"reason": "migration-bisect"} if s in bisected else {}))
             print(f"gate-window: dropped {s} nodes={json.dumps(res['nodes'])}")
         dropped += drop
         live = [s for s in live if s not in drop]
         if not live or runs >= 2:
-            escalate(window, f"window {window} is red after {runs} run(s); whole window dropped, master unmoved")
+            why = "unattributed " + json.dumps(unattributed) if unattributed else "new ids " + json.dumps(res["nodes"])
+            escalate(window, f"window {window} is red after {runs} run(s); {why}; dropped specs={json.dumps(drop)}; whole window dropped, master unmoved")
             return 2
         rest = [e for e in entries if e[0] in live]
         cand, live, more = prepare(rest)
@@ -583,7 +784,8 @@ def run_window(window, project, spec_args, main, fixes_base=False):
             message = git(repo, "show", "-s", "--format=%s", sha).stdout.strip()
             if message.endswith("(mechanical re-chain)"):
                 rechained.update(s for s in live if message.startswith(f"merge({s}):"))
-    advance(repo, main, base, cand, window, live, dropped, runs, urls, entries, dashboard, rechained)
+    advance(repo, main, base, cand, window, live, dropped, runs, urls, entries, dashboard, rechained,
+            pre_existing=sorted(pre_existing_all))
     print(f"gate-window: advanced {main} -> {cand[:12]}  shipped={live} dropped={dropped}")
     return 1 if dropped or deferred else 0
 

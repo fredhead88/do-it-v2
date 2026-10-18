@@ -110,6 +110,13 @@ to break anything", "I will verify after committing".
 
 **Pre-existing failures** (operator ruling, 2026-09-23, L-operator-0001.jsonl). When a verify step or `review_path` fails on a
 test that you did not touch, do not work around it, edit it or escalate it.
+First run `doit base-red <project> "$(git merge-base HEAD origin/<main>)"`
+(use the project's main branch for `<main>`, with `doit` on PATH, without
+`--ensure`). Use a complete answer as the base failing set, retaining the
+outside-`Writes:` and untouched source-line conditions below. Any non-zero
+exit, including 127 (command not found), means "not known"; an incomplete or
+undetermined answer also means "not known", never "no pre-existing failures".
+When the answer is not known, use the scratch-worktree fallback:
 Run the same command in a detached scratch worktree at `base_sha` — that
 worktree, and any private Postgres cluster you start while reproducing
 evidence, lives under `$TMPDIR`, never a literal `/tmp` path — with the
