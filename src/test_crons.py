@@ -31,7 +31,7 @@ def check(cond, msg):
 REAL_MANIFEST = pathlib.Path(__file__).resolve().parent.parent / "crons.toml"
 NAMES = {"tick", "look", "tmp-reaper", "lessons-digest", "backup-watch",
          "ledger-snapshot", "sweep-owed", "auto-deploy", "owed-digest",
-         "portal-latency-daily", "suite-daily"}
+         "portal-latency-daily", "suite-daily", "health-alarms"}
 
 
 def _write_manifest(path, rows_):
@@ -70,11 +70,11 @@ def _exec_manifest(tmpdir, rows_=None, mode=0o755):
     return p, out
 
 
-# ══ AC1 · rows() — 11 rows, all 8 keys, where/project split ═════════════════
+# ══ AC1 · rows() — 12 rows, all 8 keys, where/project split ═════════════════
 d1 = TMP / "ac1"
 d1.mkdir()
 r1 = crons.rows(str(REAL_MANIFEST))
-check(len(r1) == 11, f"AC1: exactly 11 rows: {len(r1)}")
+check(len(r1) == 12, f"AC1: exactly 12 rows: {len(r1)}")
 check({row["name"] for row in r1} == NAMES, f"AC1: name set: {[row['name'] for row in r1]}")
 for row in r1:
     # R14a: every row also carries `max_runtime_s` now (int|None) — a 9th key,
@@ -239,10 +239,10 @@ crond5_empty.mkdir()
 # `tick`/`backup-watch` lines carry the real `/home/albert/do-it-v2/doit`, which
 # still matches `\bdoit tick\b` / `\bdoit backup watch\b` regardless of path.
 res5 = crons.check(manifest=str(manifest5), crontab_text=FIXTURE_5, crond_dir=str(crond5_empty))
-check({r["name"] for r in res5} == {"look", "tmp-reaper", "auto-deploy", "owed-digest", "portal-latency-daily", "suite-daily"},
-      f"AC5: exactly {{look, tmp-reaper, auto-deploy, owed-digest, portal-latency-daily, suite-daily}} missing: {[r['name'] for r in res5]}")
+check({r["name"] for r in res5} == {"look", "tmp-reaper", "auto-deploy", "owed-digest", "portal-latency-daily", "suite-daily", "health-alarms"},
+      f"AC5: exactly {{look, tmp-reaper, auto-deploy, owed-digest, portal-latency-daily, suite-daily, health-alarms}} missing: {[r['name'] for r in res5]}")
 check(all(r["reason"] == "absent" for r in res5), f"AC5: every entry is absent: {res5}")
-check(len(res5) == 6, f"AC5: no extra rows: {res5}")
+check(len(res5) == 7, f"AC5: no extra rows: {res5}")
 
 # AC5's second, minimal fixture: the only matching line is commented.
 d5b = TMP / "ac5b"

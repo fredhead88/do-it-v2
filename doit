@@ -39,6 +39,7 @@ case "${1:-board}" in
   restore) shift; exec python3 "$SRC/restore.py" "$@" ;;
   crons)   shift; exec python3 "$SRC/crons.py" "$@" ;;
   cron-run) shift; exec python3 "$SRC/cron_run.py" "$@" ;;
+  health-alarms) shift; exec python3 "$SRC/health_alarms.py" "$@" ;;
   owed-digest) shift; exec python3 "$SRC/owed_digest.py" "$@" ;;
   sweep-owed) shift; exec python3 "$SRC/sweep_owed.py" "$@" ;;
   proving) shift; exec python3 "$SRC/proving.py" "$@" ;;
@@ -210,6 +211,7 @@ doit — a ledger that derives state, and the guards that read it
                                           install one row from crons.toml (L-charter-0036 R4)
   doit cron-run NAME -- CMD...            wrap CMD, recording start/outcome/duration per run
                                           to $R/state/cron-runs/NAME.jsonl (L-charter-0042 R14a)
+  doit health-alarms [--dry-run]  evaluate and record local health alarms
   doit owed-digest [--alert] [--dry-run]  daily owed digest or operator alert pass
   doit sweep-owed [--dry-run]             batch due owed checks into detached owed-sweeper
                                           dispatches; escalate the ones that expired (L-charter-0038 R1)

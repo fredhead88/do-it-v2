@@ -824,6 +824,10 @@ EXPECTED_CRONS_ROWS = [
      "command": "{doit} cron-run suite-daily -- /usr/bin/python3 {repo}/src/suite_run.py >> {root}/logs/suite-daily.log 2>&1",
      "path": "/usr/bin/python3", "sig": r"suite_run\.py\b", "owner": "thinker", "project": "do-it-v2",
      "max_runtime_s": 1800},
+    {"name": "health-alarms", "where": "user", "schedule": "*/10 * * * *",
+     "command": "{doit} cron-run health-alarms -- {doit} health-alarms >> {root}/logs/health-alarms.log 2>&1",
+     "path": "{doit}", "sig": r"\bdoit health-alarms(?=\s*>>|\s*(?:#.*)?$)",
+     "owner": "thinker", "project": "do-it-v2"},
 ]
 
 # ── L0440-AC20 · current cron-run commands, runtime bounds and */5 reaper cadence ────
