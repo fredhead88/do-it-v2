@@ -223,8 +223,12 @@ def repo_moved(before, after, role):
     return {"lines": lines, "paths": sorted(paths), "by_this_spawn": role == "builder"}
 
 
+def issued_by():
+    return fold.actor_of(os.path.basename(os.environ.get("DOIT_LEDGER_FILE", ""))) or "unknown"
+
+
 def run_claude(cmd, packet, cwd, timeout):
-    env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}   # no meter to fall through to
+    env = {k: v for k, v in os.environ.items() if k not in ("ANTHROPIC_API_KEY", "DOIT_LEDGER_FILE")}   # no meter to fall through to
     return subprocess.run(cmd, input=packet, capture_output=True, text=True, cwd=cwd,
                           env=env, timeout=timeout)
 
@@ -236,7 +240,7 @@ CODEX_WRITES = ("builder", "spec-writer", "research", "reuse-scout", "probe", "r
 
 def run_codex_exec(cmd, packet, cwd, timeout):
     """The one subprocess the codex backend runs. Neither vendor's metered key is in the environment: the spawn draws the ChatGPT plan or it fails loudly."""
-    env = {k: v for k, v in os.environ.items() if k not in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY")}
+    env = {k: v for k, v in os.environ.items() if k not in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "DOIT_LEDGER_FILE")}
     return subprocess.run(cmd, input=packet, capture_output=True, text=True, cwd=cwd, env=env, timeout=timeout)
 
 
@@ -1260,7 +1264,7 @@ def _main(a):
                      waiter_proc_start=panes.proc_start(waiter_pid))
     if builder:
         # L-spec-0276/R3 Target 4: `wave_note="undetermined"` only — an optional field, omitted (not a forced null) whenever the wave WAS determined (Null encoding, mirrors carry.py's own convention). L-spec-0269: every start also records the window it was offered under and who is waiting on it (waiter_kv). R7/AC5: base_sha is the pinned value read off the packet above — never a fresh worktree-HEAD guess taken here.
-        emit(ledger, base, "build-started", worktree=cwd, dsn_role=dsn_role, backend=backend,
+        emit(ledger, base, "build-started", worktree=cwd, dsn_role=dsn_role, backend=backend, issued_by=issued_by(),
              base_sha=a.pinned_base_sha, **waiter_kv, **({"wave_note": wave_note} if wave_note else {}))
     else:
         kv = {"role": a.role, "backend": backend, **waiter_kv}
@@ -1268,7 +1272,7 @@ def _main(a):
             kv["dsn_role"] = dsn_role
         if grader_seat:  # L-spec-0481/AC10/AC21: which lane just proved this run's own capabilities
             kv["sandbox"] = grading_env.sandbox_mode()
-        emit(ledger, base, "spawn-started", **kv)
+        emit(ledger, base, "spawn-started", issued_by=issued_by(), **kv)
     dispatch_lock and dispatch_lock.close()      # closing the fd releases the flock
     packet += f"\n\nspawn_id: {spawn}\n"
     tools = [t.strip() for t in fm["tools"].split(",") if t.strip() != "StructuredOutput"]

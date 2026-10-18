@@ -1185,3 +1185,100 @@ def test_dependency_holds():
 
 
 test_dependency_holds()
+
+
+def test_dispatcher_base_1134():
+    import hashlib
+    from unittest import mock
+
+    def signed(ac, body):
+        print(json.dumps({"criterion": ac, "url": "cli://autodispatch/" + ac, "status": 0,
+                          "body_sha256": hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest(),
+                          "body_excerpt": body}))
+
+    with tempfile.TemporaryDirectory() as temporary:
+        root = pathlib.Path(temporary)
+        (root / "content").mkdir()
+        (root / "events").mkdir()
+        (root / "repos" / "fixture").mkdir(parents=True)
+        with mock.patch.multiple(fold, ROOT=root, EVENTS=root / "events"), \
+                mock.patch.multiple(dispatch, ROOT=root, EVENTS=root / "events", CONTENT=root / "content"):
+            with mock.patch.dict(os.environ):
+                for caller in (None, str(root / "L-executor-0001.jsonl")):
+                    if caller is None:
+                        os.environ.pop("DOIT_LEDGER_FILE", None)
+                    else:
+                        os.environ["DOIT_LEDGER_FILE"] = caller
+                    parent = dict(os.environ)
+                    with mock.patch.object(autodispatch.subprocess, "run") as child:
+                        child.return_value.returncode = 0
+                        child.return_value.stdout = "ok"
+                        child.return_value.stderr = ""
+                        for argv in (["git", "status"], ["doit", "packet", "builder", "L-spec-9134"],
+                                     ["doit", "dispatch", "--detach", "builder", "L-spec-9134"]):
+                            assert autodispatch._real_runner(argv)["code"] == 0
+                            assert child.call_args.kwargs["env"]["DOIT_LEDGER_FILE"] == str(tick.tick_path())
+                            expected = [autodispatch.DOIT_BIN] + argv[1:] if argv[0] == "doit" else argv
+                            assert child.call_args.args[0] == expected
+                    assert dict(os.environ) == parent
+            signed("AC5", {"children": 6, "tick_ledger": True, "parent_unchanged": True})
+            print("base AC5 ok")
+
+            sid = "L-spec-9134"
+            _spec_file(root, sid, CLEAN_SPEC + "\nBase: realm\n")
+            _write(root, "L-planner-0001.jsonl", {"v": 1, "type": "spec-written", "subject": sid,
+                                               "project": "fixture", "ts": _iso(NOW)})
+            events = fold.read_events()
+            specs, *_ = fold.fold(events)
+            head = mock.Mock(return_value="main")
+            row = _row(autodispatch.candidates(events, specs, NOW, head_of=head), sid)
+            reason = "base realm: the Executor cuts this worktree by hand"
+            assert row["status"] == "blocked" and row["reason"] == reason, row
+            head.assert_called_once_with("fixture")
+            runner = _FakeRunner({0: {"code": 0, "stdout": "main\n", "stderr": ""}})
+            assert autodispatch.run(events, specs, NOW, runner=runner) == []
+            assert runner.calls == [["git", "-C", str(root / "repos" / "fixture"), "symbolic-ref", "--short", "HEAD"]]
+            signed("AC6", {"status": row["status"], "reason": row["reason"], "packet_or_dispatch_calls": 0})
+            print("base AC6 ok")
+
+            for text, expected_reads in ((CLEAN_SPEC, 0), (CLEAN_SPEC + "\nBase: main\n", 1),
+                                         (CLEAN_SPEC + "\nBase: SD1 — master after L-spec-0652 and L-spec-0636 merge ...\n", 0)):
+                _spec_file(root, sid, text)
+                head = mock.Mock(return_value="main")
+                row = _row(autodispatch.candidates(events, specs, NOW, head_of=head), sid)
+                assert row["status"] == "dispatchable" and row["reason"] is None, row
+                assert head.call_count == expected_reads
+            _spec_file(root, sid, CLEAN_SPEC + "\nBase: realm\nBase: main\n")
+            row = _row(autodispatch.candidates(events, specs, NOW, head_of=lambda project: None), sid)
+            assert row["status"] == "blocked" and row["reason"] == reason
+            # Multiple specs in the same project share one HEAD read.
+            other = "L-spec-9135"
+            _spec_file(root, other, CLEAN_SPEC + "\nBase: realm\n")
+            specs[other] = {**specs[sid], "id": other}
+            head = mock.Mock(return_value="realm")
+            assert all(row["status"] == "dispatchable" for row in autodispatch.candidates(events, specs, NOW, head_of=head))
+            head.assert_called_once_with("fixture")
+            # The default reader fails closed on git failure or an OS error.
+            for effect in (None, OSError("fixture")):
+                with mock.patch.object(autodispatch.subprocess, "run", side_effect=effect) as git:
+                    git.return_value.returncode = 1
+                    assert all(row["reason"] == reason for row in autodispatch.candidates(events, specs, NOW))
+                    git.assert_called_once_with(["git", "-C", str(root / "repos" / "fixture"),
+                                                 "symbolic-ref", "--short", "HEAD"], capture_output=True, text=True)
+            # Earlier reasons retain priority, without reading HEAD.
+            hold = {"type": "dependency-hold", "subject": sid, "waits_for": "L-spec-DEP", "ts": _iso(NOW)}
+            specs[sid]["evs"] = [*specs[sid]["evs"], hold]
+            with mock.patch.object(autodispatch.subprocess, "run") as git:
+                row = _row(autodispatch.candidates(events + [hold], {sid: specs[sid]}, NOW), sid)
+                assert row["reason"].startswith("held:")
+                git.assert_not_called()
+            (root / "content" / f"{other}.md").unlink()
+            row = _row(autodispatch.candidates(events, {other: specs[other]}, NOW, head_of=head), other)
+            assert row["reason"] == "spec file unreadable"
+            signed("AC7", {"no_base": "dispatchable", "matching_base": "dispatchable", "prose": "dispatchable",
+                           "unknown_head": "blocked", "head_reads_per_project": 1, "earlier_reasons_preserved": True})
+            print("base AC7 ok")
+
+
+if __name__ == "__main__":
+    test_dispatcher_base_1134()
