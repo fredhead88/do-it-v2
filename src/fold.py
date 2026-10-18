@@ -1076,6 +1076,15 @@ def _backup():
         return None, f"src/backup.py not importable ({type(x).__name__}: {x})"
 
 
+def _throughput():
+    """Lazy read-only metrics; an unavailable module leaves HEALTH renderable."""
+    try:
+        import throughput
+        return throughput, None
+    except Exception as x:                                 # noqa: BLE001
+        return None, f"src/throughput.py not importable ({type(x).__name__}: {x})"
+
+
 def caps():
     """(wall-clock minutes, dollars) per role, read from the one place each is
     declared — never a second copy here."""
@@ -2068,6 +2077,28 @@ def render(events, specs, charters, ignored, by_subject):
             health.append(mirror_line(backup_mod.last_push(ROOT)))
         except Exception as x:                             # noqa: BLE001
             health.append(f"mirror: unavailable — backup.last_push raised {type(x).__name__}: {x}")
+
+    # Callers admit events; the pure metrics module never imports fold.
+    import unicodedata
+    def merge_text(value):
+        return ''.join(' ' if unicodedata.category(c).startswith('C') else c
+                       for c in str(value))
+
+    throughput_mod, throughput_err = _throughput()
+    if throughput_mod is None:
+        health.append(f"merge: unavailable — {merge_text(throughput_err)}")
+    else:
+        try:
+            ignored_ids = {id(e) for e in ignored}
+            metrics = throughput_mod.summary([e for e in events if id(e) not in ignored_ids], NOW)
+            def number(key, fmt='d'):
+                value = metrics[key]
+                return '?' if value is None else format(value, fmt)
+            health.append(f"merge: queue {number('queue_depth')} · in flight {len(metrics['in_flight'])} · "
+                          f"wait p50 {number('median_wait_min', '.0f')}m (24h) · "
+                          f"{number('merged_per_hour', '.1f')}/h merged · stale {number('stale_merges')}")
+        except Exception as x:                             # noqa: BLE001
+            health.append(f"merge: unavailable — throughput.summary raised {type(x).__name__}: {merge_text(x)}")
 
     L += ["## HEALTH"] + ["  " + h for h in health] + [""]
 
