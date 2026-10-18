@@ -23,6 +23,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from unittest.mock import patch
 
 HERE = pathlib.Path(__file__).resolve().parent
 DOIT_SRC = HERE.parent
@@ -309,6 +310,132 @@ check((view4c / "tree" / ".env").read_text() == "", "AC5: empty .env for a proje
 print("AC5 ok")
 
 
+# L-spec-1052: all sources, configuration and view state are fixture-owned.
+with tempfile.TemporaryDirectory(prefix="declared-grade-sources-") as tmp:
+    root1052 = pathlib.Path(tmp)
+    source1052 = root1052 / "src.env"
+    source1052.write_text("KEEP=1\nANTHROPIC_API_KEY=x\nSUPABASE_DB_URL=prod-secret\n"
+                          "DATABASE_URL=prod-secret2\n")
+    toml1052 = root1052 / "grading.toml"
+
+    def provision1052(label, *, source=source1052, names=("KEEP",), db=False, node=None):
+        config = {"env_file": str(source), "env_vars": list(names), "db_env": ["DATABASE_URL"]}
+        if node is not None:
+            config.update(node_dirs=["dashboard"], node_modules={"dashboard": str(node)})
+        toml1052.write_text("[project.fixture1052]\n" + "\n".join(
+            f"{key} = " + ("{ dashboard = " + json.dumps(value['dashboard']) + " }"
+                           if key == "node_modules" else json.dumps(value))
+            for key, value in config.items()) + "\n")
+        view = root1052 / label
+        (view / "tree").mkdir(parents=True)
+        spec = "AC1 [backend]: .env" + (" live_db" if db else "")
+        if node is not None:
+            spec += "\nreview_path: npm test"
+        with patch.dict(os.environ, DOIT_GRADING_TOML=str(toml1052)), \
+                patch.object(grading_env, '_spec_verify_text', return_value=(spec, '')), \
+                patch.object(grading_env, '_prove_db', return_value=(True, None, 'scratch-fixture')):
+            failures = grading_env.preflight('grader', 'fixture1052', view, 'fixture1052', repo=REPO)
+        return view, failures
+
+    view, failures = provision1052("allowlist")
+    check(failures == [], "env allowlist preflight succeeds")
+    env_path = view / "tree" / ".env"
+    check(env_path.read_text() == "KEEP=1\n", "env allowlist exact destination")
+    check(env_path.stat().st_mode & 0o777 == 0o600, "env allowlist mode 0600")
+    state = json.loads((view / ".grading_state.json").read_text())
+    check(state['env_file_vars'] == {'KEEP': '1'}, "env allowlist exact state")
+    check((view / ".grading_state.json").stat().st_mode & 0o777 == 0o600, "env state mode 0600")
+    exported = grading_env.write_grading_env(view)
+    pane = grading_env.pane_env(view)
+    check(pane['KEEP'] == '1', "env allowlist pane roundtrip")
+    check('export KEEP=1\n' in exported.read_text(), "env allowlist grading.env roundtrip")
+    for filtered in ('ANTHROPIC_API_KEY', 'SUPABASE_DB_URL', 'DATABASE_URL', 'prod-secret', 'prod-secret2'):
+        check(filtered not in env_path.read_text() and filtered not in exported.read_text()
+              and filtered not in pane, "filtered source stays out of both channels")
+    print("PASS env allowlist copied, filtered, reaches grading.env")
+
+    view, failures = provision1052("scratch", db=True)
+    check(failures == [], "scratch env preflight succeeds")
+    lines = (view / 'tree' / '.env').read_text().splitlines()
+    check(lines == ['KEEP=1', 'DATABASE_URL=scratch-fixture'], "scratch replaces source endpoint exactly once")
+    print("PASS env allowlist with scratch dsn")
+
+    for i, name in enumerate(('ANTHROPIC_API_KEY', 'GH_ADMIN_TOKEN', 'SUPABASE_DB_URL',
+                              'DATABASE_URL', 'CUSTOM_DSN', 'somePassword', 'private_key')):
+        view, failures = provision1052(f"refused-{i}", names=(name,))
+        check(len(failures) == 1 and failures[0][0] == 'env-file'
+              and 'env_vars' in failures[0][1] and name in failures[0][1], "secret name refused with row key")
+        check(not (view / 'tree' / '.env').exists(), "invalid row writes no env file")
+    print("PASS secret-looking env_vars refused")
+
+    view, failures = provision1052("missing", source=root1052 / 'absent')
+    check(len(failures) == 1 and failures[0][0] == 'env-file'
+          and str(root1052 / 'absent') in failures[0][1] and 'env_file' in failures[0][1],
+          "missing env source named")
+    check(not (view / 'tree' / '.env').exists(), "missing source never becomes empty env file")
+    view, failures = provision1052("missing-name", names=('ABSENT',))
+    check(len(failures) == 1 and 'ABSENT' in failures[0][1], "absent allowlisted variable named")
+    check(not (view / 'tree' / '.env').exists(), "missing name writes no env file")
+    print("PASS env_file missing is named")
+
+    nm = root1052 / 'nm'
+    (nm / '.bin').mkdir(parents=True)
+    (nm / '.bin' / 'marker').write_text('x')
+    view, failures = provision1052("node-override", node=nm)
+    check(failures == [], "node override preflight succeeds")
+    link = view / 'tree' / 'dashboard' / 'node_modules'
+    check(link.is_symlink() and (link / '.bin' / 'marker').read_text() == 'x', "node override resolves")
+    default = root1052 / 'node-default'
+    (default / 'tree').mkdir(parents=True)
+    check(grading_env._prove_node_modules(default, {'node_dirs': ['dashboard']}, 'testproj')[0],
+          "node checkout default succeeds")
+    check((default / 'tree' / 'dashboard' / 'node_modules').resolve()
+          == CHECKOUT / 'dashboard' / 'node_modules', "node default unchanged")
+    print("PASS node_modules override and default")
+
+    view, failures = provision1052("node-missing", node=root1052 / 'absent-nm')
+    check(len(failures) == 1 and failures[0][0] == 'node_modules'
+          and str(root1052 / 'absent-nm') in failures[0][1]
+          and 'node_modules.dashboard' in failures[0][1], "missing node source named")
+    link = view / 'tree' / 'dashboard' / 'node_modules'
+    check(not link.exists() and not link.is_symlink(), "missing node source leaves no dangling link")
+    print("PASS node_modules missing source named")
+
+    view, failures = provision1052("empty-allowlist", names=())
+    check(not failures and (view / 'tree' / '.env').read_text() == '', "empty allowlist provisions nothing")
+    omitted = root1052 / 'omitted-allowlist'
+    (omitted / 'tree').mkdir(parents=True)
+    ok, _, values = grading_env._provision_env_file(omitted / 'tree', {'env_file': str(source1052)}, None)
+    check(ok and values == {} and (omitted / 'tree' / '.env').read_text() == '',
+          "omitted env_vars is an empty allowlist")
+    source1052.chmod(0)
+    try:
+        view, failures = provision1052("unreadable")
+        check(len(failures) == 1 and failures[0][0] == 'env-file'
+              and str(source1052) in failures[0][1], "unreadable source named without contents")
+        check(not (view / 'tree' / '.env').exists(), "unreadable source creates no empty substitute")
+    finally:
+        source1052.chmod(0o600)
+    proof_path = root1052 / 'proof' / '.env'
+    proof_path.parent.mkdir()
+    original_read = pathlib.Path.read_text
+
+    def missing_destination_name(path, *args, **kwargs):
+        return '' if path == proof_path else original_read(path, *args, **kwargs)
+
+    with patch.object(pathlib.Path, 'read_text', missing_destination_name):
+        ok, reason, values = grading_env._provision_env_file(
+            proof_path.parent, {'env_file': str(source1052), 'env_vars': ['KEEP']}, None)
+    check(not ok and 'KEEP' in reason and values == {}, "destination reread proves listed names")
+    source1052.write_text("export KEEP='hello world'\nEMPTY=\n")
+    view, failures = provision1052("literal-values", names=('KEEP', 'EMPTY'))
+    check(not failures, "quoted and empty values provisioned")
+    env = grading_env.write_grading_env(view)
+    result = subprocess.run(['/bin/bash', '-c', 'source "$1"; test "$KEEP" = "hello world" && test "${EMPTY+x}" = x',
+                             'fixture', str(env)], capture_output=True)
+    check(result.returncode == 0, "shell roundtrip preserves quoted and empty values")
+
+
 # ═══════════════════════════ AC6 — db-schema: success, failure, real argv ══════
 view5 = FIXTURE_ROOT / "grade" / "ac6"
 (view5 / "tree").mkdir(parents=True, exist_ok=True)
@@ -348,11 +475,12 @@ print("AC7 (support) ok")
 # L-spec-8034/Assumption 4: "git status" names no history verb (merge-base/log/
 # show/rev-list/diff/blame/cat-file/--is-ancestor) and no $BASE — it is a
 # `tools` need, not `git`. Use a real history verb so this still exercises the
-# git-preflight-always-fails path (AC8(i)).
+# default git-routing path (AC8(i)).
 write_spec_verify("L-spec-9601", "grader", "spec", "git log -1")
 failures6 = grading_env.preflight("grader", "L-spec-9601", view6, "testproj", repo=str(REPO))
 gitfail = dict(failures6).get("git")
-check(gitfail is not None and "never provisioned" in gitfail, f"AC8(i): git always fails preflight: {failures6}")
+check(gitfail is None, "AC8(i): git routes instead of failing preflight")
+print("PASS git routed, never a preflight failure")
 check("git" in grading_env.required("grader", "spec", "cd $BASE && git diff --stat && /usr/bin/python3 t.py",
                                      "testproj"), "AC8(i): a git argv word in a &&-segment after $BASE subst")
 check("git" not in grading_env.required(
