@@ -1186,7 +1186,7 @@ def parse_sweep_manifest(path):
     cwd = m.group(1).strip()
     kind_match = re.search(r"^kind:[ \t]*(.*)$", raw, re.M)
     kind = kind_match.group(1).strip() if kind_match else "plain"
-    if kind != "plain":
+    if kind not in ("plain", "browser"):
         die(f"{path}: unsupported sweep kind {kind!r}")
     sec = section(raw, "Rows")
     if not sec:
