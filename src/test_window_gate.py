@@ -158,7 +158,7 @@ class Fx:
             "pg-parity (Postgres)\tRun suite\t2026-10-17T00:00:00Z " + kind + " " + node + " - " + message
             for node in nodes))
 
-    def go(self, specs=None, fixes_base=False):
+    def go(self, specs=None, fixes_base=False, window="w1", after=None):
         specs = specs or list(self.branches)
         for s in specs:
             fold.append(["merge-gate-clean", s, f"branch={self.branches[s]}", "project=albert-scott"])
@@ -166,8 +166,9 @@ class Fx:
              patch.dict(sys.modules, base_red=self.service), \
              patch.object(window_gate, "base_red_snapshot", side_effect=self.base_reader), \
              patch.object(window_gate, "candidate_logs", side_effect=self.log_reader):
-            result = window_gate.main_(["w1", "--project", "albert-scott", "--specs", ",".join(specs)]
-                                       + (["--fixes-base"] if fixes_base else []))
+            result = window_gate.main_([window, "--project", "albert-scott", "--specs", ",".join(specs)]
+                                       + (["--fixes-base"] if fixes_base else [])
+                                       + (["--after", after] if after else []))
         printed = [p.read_text() for p in self.fdir.glob("run*.out")]
         if any("NEW failed:" in text or "NEW suite-error:" in text or
                window_gate.parse_verdict(text)[1] for text in printed):
@@ -1321,6 +1322,354 @@ def test_window_attribution():
     assert not FAILS, FAILS
 
 
+def train_checks():
+    """Hermetic two-window train, including cancellation and exact-base advancement."""
+    import inspect
+    import threading
+    from datetime import datetime, timedelta, timezone
+
+    observations = {}
+
+    def mark(name, condition, body=None):
+        check(condition, "ac-train " + name)
+        if condition:
+            print("ac-train " + name)
+        observations[name] = body if body is not None else condition
+
+    disk = types.SimpleNamespace(total=100, used=50)
+    with tempfile.TemporaryDirectory() as tmp:
+        path = pathlib.Path(tmp) / "look.toml"
+        path.write_text("[window_gate]\ntrain_depth = 2\n")
+        with patch.object(window_gate.shutil, "disk_usage", return_value=disk):
+            answer = window_gate.train_depth({}, path, root=tmp, events=[])
+            cases = [window_gate.train_depth({"DOIT_WINDOW_TRAIN_DEPTH": value}, path, root=tmp, events=[])["configured"]
+                     for value in ("3", "0", "bad", "1.5", True)]
+            missing = window_gate.train_depth({}, pathlib.Path(tmp) / "absent", root=tmp, events=[])
+        mark("depth config", answer["depth"] == answer["configured"] == 2 and cases == [3, 1, 1, 1, 1] and missing["depth"] == 1,
+             dict(default=answer, overrides=cases, missing=missing))
+        depths = []
+        for usage in (types.SimpleNamespace(total=100, used=90), types.SimpleNamespace(total=100, used=91), OSError("unreadable")):
+            kw = dict(side_effect=usage) if isinstance(usage, Exception) else dict(return_value=usage)
+            with patch.object(window_gate.shutil, "disk_usage", **kw):
+                depths.append(window_gate.train_depth({}, path, root=tmp, events=[])["depth"])
+        mark("depth disk", depths == [2, 1, 1], depths)
+
+    fx = Fx({})
+    now = datetime.now(timezone.utc)
+    events = [dict(type="window-verified", subject=f"n{i}", sha=str(i), dropped=["A"] if i < 3 else [], ts=now.isoformat())
+              for i in range(5)]
+    with patch.object(window_gate.shutil, "disk_usage", return_value=disk):
+        rates = [window_gate.red_rate(events[:4], now), window_gate.red_rate(events, now)]
+        high = window_gate.train_depth({}, root=fx.root, events=events, now=now)
+        low = window_gate.train_depth({}, root=fx.root, events=events[1:] + [dict(events[-1], subject="extra")], now=now)
+        old = window_gate.red_rate(events, now + timedelta(days=2))
+        mark("depth red-rate", rates[0]["rate"] is None and rates[1] == dict(rate=.6, red=3, windows=5) and
+             high["depth"] == 1 and low["depth"] == 2 and old["windows"] == 0, dict(rates=rates, high=high, low=low))
+        window_gate.ev("train-depth", "merge-train", depth=2, reason="test")
+        ledger = next(fold.EVENTS.glob("*.jsonl"))
+        before = ledger.read_bytes()
+        with patch.object(window_gate, "ev") as emit, patch.object(window_gate.subprocess, "run") as send:
+            window_gate.train_depth({}, root=fx.root, events=events, now=now)
+        mark("depth pure", ledger.read_bytes() == before and not emit.called and not send.called)
+        with patch.object(window_gate.subprocess, "run", return_value=types.SimpleNamespace(returncode=1)) as send:
+            window_gate.record_depth(high, fx.events(), os.environ)
+            window_gate.record_depth(high, fx.events(), os.environ)
+        changes = fx.events("train-depth")
+        mark("depth event once", len(changes) == 2 and changes[-1].get("telegram") == "failed" and send.call_count == 1, changes)
+
+    # Shared helpers use real git and slot files; only the gate/service is fake.
+    def predecessor(fx):
+        entries = [("A", fx.branches["A"], sh(["rev-parse", fx.branches["A"]], fx.repo))]
+        candidate, kept, clashes = window_gate.build_candidate(fx.repo, "N", fx.base, entries)
+        check(kept == ["A"] and not clashes and window_gate.acquire("N", 0), "predecessor fixture")
+        window_gate.ev("window-candidate", "N", sha=candidate, verified_on=fx.base, specs=["A"], slot=0)
+        return candidate, entries
+
+    def merged(fx, candidate, entries):
+        window_gate.advance(fx.repo, "master", fx.base, candidate, "N", ["A"], [], 1, [], entries, False)
+        window_gate.release(0)
+
+    with patch.object(window_gate.shutil, "disk_usage", return_value=disk), \
+         patch.dict(os.environ, DOIT_WINDOW_TRAIN_DEPTH="2", DOIT_WINDOW_TRAIN_POLL_S="0.02"):
+        fx = Fx({"A": "a.txt", "B": "b.txt"})
+        candidate, entries = predecessor(fx)
+        check(window_gate.acquire("M", 1), "second slot acquired")
+        mark("slots", [p.read_text() for p in (window_gate.lock_path(0), window_gate.lock_path(1))] ==
+             [f"{os.getpid()} N", f"{os.getpid()} M"] and not (fx.root / "state/window-gate.lock").exists())
+        window_gate.ev("window-cancelled", "N", after="old", reason="base-moved")
+        mark("in-flight", [e["window"] for e in window_gate.in_flight(fx.events())] == ["N"])
+        reasons = [fx.go(["B"]), fx.go(["B"], after="absent"), fx.go(["B"], after="N")]
+        window_gate.release(1)
+        window_gate.release(0)
+        check(window_gate.acquire("M", 0), "reclaimed slot")
+        mark("in-flight slot reuse", not window_gate.in_flight(fx.events()) and fx.go(["B"], after="N") == 3)
+        window_gate.release(0)
+        window_gate.lock_path(0).write_text("999999999 N")
+        dead = not window_gate.in_flight(fx.events())
+        window_gate.release(0)
+        window_gate.ev("window-verified", "N", sha=candidate, kept=["A"], dropped=[])
+        terminal = fx.go(["B"], after="N")
+        mark("exit3 reasons", reasons == [3, 3, 3] and terminal == 3 and dead and not list((fx.root / "state").glob("*.lock")), reasons)
+        for bad in ("../N", "", "N with space"):
+            try:
+                window_gate.main_(["w", "--project", "albert-scott", "--after", bad])
+            except SystemExit:
+                pass
+            else:
+                check(False, "invalid after id refused")
+
+        post_drop = []
+        for kind in ("window-dropped", "merge-conflict", "second-candidate"):
+            fx = Fx({"A": "a.txt", "B": "b.txt"})
+            candidate, entries = predecessor(fx)
+            if kind == "second-candidate":
+                window_gate.ev("window-candidate", "N", sha=candidate, verified_on=fx.base, specs=["A"], slot=0)
+            else:
+                window_gate.ev(kind, "A", window="N", nodes=["a.py::test"])
+            post_drop.append(fx.go(["B"], after="N"))
+            window_gate.release(0)
+        mark("after exit3 post-drop", post_drop == [3, 3, 3], post_drop)
+
+        # Success with an origin that legitimately lags the local predecessor tip.
+        fx = Fx({"A": "a.txt", "B": "b.txt"})
+        candidate, entries = predecessor(fx)
+        fx.run_n(1, 0, GREEN)
+        real_verify = window_gate.verify
+        def finish(repo, sha, required, window):
+            result = real_verify(repo, sha, required, window)
+            if sha != fx.base:
+                merged(fx, candidate, entries)
+            return result
+        with patch.object(window_gate, "verify", side_effect=finish):
+            rc = fx.go(["B"], window="N1", after="N")
+        built = [e for e in fx.events("window-candidate") if e["subject"] == "N1"]
+        verified = [e for e in fx.events("window-verified") if e["subject"] == "N1"]
+        mark("candidate event", len(built) == 1 and all(k in built[0] for k in ("sha", "verified_on", "specs", "slot", "after")), built)
+        mark("base from predecessor", built[0]["verified_on"] == candidate and
+             window_gate.git(fx.repo, "merge-base", "--is-ancestor", candidate, built[0]["sha"], check=False).returncode == 0, built)
+        mark("verified fields", verified[0]["after"] == "N" and verified[0]["replaced"] == verified[0]["verified_on"] == candidate, verified)
+        mark("merge when N merged", rc == 0 and fx.master() == built[0]["sha"] and not fx.events("window-cancelled"))
+        mark("origin lags still merges", rc == 0 and sh(["rev-parse", "master"], fx.origin) == fx.base)
+        check(not list((fx.root / "state").glob("*.lock")) and
+              not window_gate.git(fx.repo, "show-ref", "--verify", "refs/heads/window/N1", check=False).stdout, "train cleanup")
+
+        # Every cancellation uses the same held slot and makes exactly one fresh attempt.
+        for reason in ("predecessor-red", "predecessor-partial", "predecessor-rechained", "predecessor-undetermined",
+                       "predecessor-dead", "predecessor-timeout", "base-moved"):
+            fx = Fx({"A": "a.txt", "B": "b.txt"})
+            candidate, entries = predecessor(fx)
+            fx.run_n(1, 0, GREEN); fx.run_n(2, 0, GREEN)
+            seen, slots, blocked = [], [], []
+            real_verify = window_gate.verify
+            real_wait = window_gate.wait_predecessor
+            def finish(repo, sha, required, window):
+                if required == [window_gate.PG_CHECK]:
+                    return dict(state="green", nodes=[], url="", doc={}, pg_failures={})
+                result = real_verify(repo, sha, required, window)
+                seen.append(sha)
+                slots.append(window_gate.lock_path(1).read_text())
+                if len(seen) == 1:
+                    if reason == "predecessor-red":
+                        window_gate.escalate("N", "arbitrary non-red words", "red")
+                    elif reason == "predecessor-undetermined":
+                        window_gate.escalate("N", "red appears in free text but is ignored", "base-not-releasable")
+                    elif reason == "predecessor-dead":
+                        window_gate.release(0)
+                    elif reason == "predecessor-partial":
+                        window_gate.ev("window-verified", "N", sha=candidate, kept=["A"], dropped=["other"])
+                    elif reason == "predecessor-rechained":
+                        merged(fx, candidate, entries)
+                        window_gate.ev("shipped", "A", window="N", sha=candidate, rechained=True)
+                    elif reason == "base-moved":
+                        window_gate.ev("window-verified", "N", sha=fx.base, kept=["A"], dropped=[])
+                else:
+                    # Even with slot 0 free, cancellation leaves N1 in flight.
+                    window_gate.release(0)
+                    blocked.append(fx.go(["A"], window="outsider"))
+                return result
+            def waiting(train):
+                if reason == "predecessor-timeout":
+                    raise window_gate.TrainCancelled(reason)
+                return real_wait(train)
+            with patch.object(window_gate, "verify", side_effect=finish), \
+                 patch.object(window_gate, "wait_predecessor", side_effect=waiting), \
+                 patch.object(window_gate.time, "time", return_value=1700000000):
+                rc = fx.go(["B"], window="N1", after="N")
+            cancellations = fx.events("window-cancelled")
+            builds = [e for e in fx.events("window-candidate") if e["subject"] == "N1"]
+            shipped = [e for e in fx.events("shipped") if e["subject"] == "B"]
+            mark("cancel " + reason, rc == 0 and len(cancellations) == 1 and cancellations[0]["reason"] == reason and
+                 len(builds) == 2 and "after" not in builds[-1] and len(shipped) == 1 and shipped[0]["sha"] != builds[0]["sha"], cancellations)
+            check(blocked == [3] and slots == [f"{os.getpid()} N1"] * 2 and
+                  len({e["verified_on"] for e in builds}) <= 2, "rebase holds same slot and at most two bases")
+            window_gate.release(0)
+        mark("rebase same slot", blocked == [3] and slots == [f"{os.getpid()} N1"] * 2, slots)
+        mark("distinct verified_on", len({e["verified_on"] for e in builds}) == 2, builds)
+        for outcome in ("red", "undetermined", "base-not-releasable"):
+            window_gate.escalate("outcome-test", "irrelevant free text", outcome)
+        mark("escalate outcome", {e.get("outcome") for e in fx.events("escalation-blocking")} ==
+             {"red", "undetermined", "base-not-releasable"}, fx.events("escalation-blocking"))
+
+        # Foreign and unreadable origins cancel; a lagging ancestor was accepted above.
+        for mode in ("foreign", "unreadable"):
+            fx = Fx({"A": "a.txt", "B": "b.txt"})
+            candidate, entries = predecessor(fx)
+            merged(fx, candidate, entries)
+            if mode == "foreign":
+                foreign = sh(["rev-parse", fx.branches["B"]], fx.repo)
+                sh(["push", "origin", foreign + ":refs/heads/foreign"], fx.repo)
+                sh(["update-ref", "refs/heads/master", foreign], fx.origin)
+            else:
+                sh(["remote", "set-url", "origin", str(fx.tmp / "missing")], fx.repo)
+            reason = window_gate.predecessor_state(fx.repo, "master", "N", candidate)
+            mark("origin " + mode + " base-moved", reason == "base-moved", reason)
+
+        # Bound is timeout + ten minutes, with a deterministic injected clock.
+        clock, sleeps = [0.0], []
+        def sleep(seconds):
+            sleeps.append(seconds); clock[0] += seconds
+        with patch.object(window_gate, "predecessor_state", return_value=None), \
+             patch.object(window_gate, "verify_timeout_secs", return_value=8):
+            try:
+                window_gate.wait_predecessor({}, clock=lambda: clock[0], sleep=sleep)
+            except window_gate.TrainCancelled as exc:
+                mark("wait bound", str(exc) == "predecessor-timeout" and abs(sum(sleeps) - 608) < 1e-6, sum(sleeps))
+            else:
+                check(False, "wait must time out")
+
+        fx = Fx({"A": "a.txt", "B": "b.txt"})
+        candidate, entries = predecessor(fx)
+        fx.run_n(1, 0, GREEN); fx.run_n(2, 0, GREEN)
+        fx.fake.write_text(FAKE.replace('cat "$D/run$n.out" 2>/dev/null',
+            'if [ "$n" = 1 ]; then\ntrap \'echo TERM > "$D/term"; exit 2\' TERM\n'
+            'touch "$D/started"\nsleep 30\ntouch "$D/ended"\nfi\ncat "$D/run$n.out" 2>/dev/null'))
+        def turn_red():
+            deadline = time.monotonic() + 5
+            while not (fx.fdir / "started").exists() and time.monotonic() < deadline:
+                time.sleep(.01)
+            window_gate.ev("window-dropped", "A", window="N", nodes=["a.py::test"])
+        thread = threading.Thread(target=turn_red)
+        thread.start()
+        rc = fx.go(["B"], window="N1", after="N")
+        thread.join(timeout=5)
+        mark("early cancel", rc == 0 and (fx.fdir / "term").exists() and not (fx.fdir / "ended").exists() and
+             fx.events("window-cancelled")[0]["reason"] == "predecessor-red")
+        window_gate.release(0)
+
+        fx = Fx({"A": "a.txt"}); fx.run_n(1, 0, GREEN)
+        with patch.object(window_gate, "predecessor_state", side_effect=AssertionError("depth1 must not poll")) as poll:
+            rc = fx.go()
+        mark("no poll depth1", rc == 0 and not poll.called)
+        mark("verify signature unchanged", list(inspect.signature(window_gate.verify).parameters) == ["repo", "cand", "required", "window"])
+
+        # Red attribution waits for the predecessor and asks base-red about the root.
+        node = "api/tests/test_z.py::test_bad"
+        for merges in (True, False):
+            fx = Fx({"A": "a.txt", "B": "api/tests/test_z.py"})
+            candidate, entries = predecessor(fx)
+            requests, owner_calls = [], []
+            fx.base_reader = lambda project, sha: requests.append(sha) or dict(sha=sha, complete=True)
+            fx.run_n(1, 1, red([node])); fx.run_n(2, 0, GREEN)
+            real_verify, real_owners = window_gate.verify, window_gate.owners
+            def finish(repo, sha, required, window):
+                result = real_verify(repo, sha, required, window)
+                if sha != fx.base and not fx.events("window-verified") and not fx.events("escalation-blocking"):
+                    if merges:
+                        merged(fx, candidate, entries)
+                    else:
+                        window_gate.escalate("N", "failed", "red")
+                return result
+            def own(*args):
+                owner_calls.append(window_gate.predecessor_state(fx.repo, "master", "N", candidate))
+                return real_owners(*args)
+            with patch.object(window_gate, "verify", side_effect=finish), patch.object(window_gate, "owners", side_effect=own):
+                rc = fx.go(["B"], window="N1", after="N")
+            drops = [e for e in fx.events("window-dropped") if e.get("window") == "N1"]
+            mark("red after N merged drops" if merges else "red N unmerged drops nothing",
+                 (rc == 2 and len(drops) == 1 and owner_calls and all(v == "" for v in owner_calls)) if merges
+                 else (rc == 0 and not drops and not owner_calls), drops)
+            check(requests and all(sha == fx.base for sha in requests), "base-red root only")
+            window_gate.release(0)
+        mark("base-red sha is root", requests == [fx.base, fx.base], requests)
+
+        # The train can slide forward after the original root window has landed.
+        fx = Fx({"A": "a.txt", "B": "b.txt", "C": "c.txt"})
+        candidate, entries = predecessor(fx)
+        merged(fx, candidate, entries)
+        second_entries = [("B", fx.branches["B"], sh(["rev-parse", fx.branches["B"]], fx.repo))]
+        second, kept, clashes = window_gate.build_candidate(fx.repo, "N1", candidate, second_entries)
+        check(kept == ["B"] and not clashes and window_gate.acquire("N1", 1), "sliding predecessor fixture")
+        window_gate.ev("window-candidate", "N1", sha=second, verified_on=candidate, after="N", specs=["B"], slot=1)
+        requests = []
+        fx.base_reader = lambda project, sha: requests.append(sha) or dict(sha=sha, complete=True)
+        fx.run_n(1, 0, GREEN)
+        real_verify = window_gate.verify
+        def slide(repo, sha, required, window):
+            if required == [window_gate.PG_CHECK]:
+                return dict(state="green", nodes=[], url="", doc={}, pg_failures={})
+            result = real_verify(repo, sha, required, window)
+            window_gate.advance(repo, "master", candidate, second, "N1", ["B"], [], 1, [], second_entries, False, after="N")
+            window_gate.release(1)
+            return result
+        with patch.object(window_gate, "verify", side_effect=slide):
+            rc = fx.go(["C"], window="N2", after="N1")
+        mark("base-red sliding root", rc == 0 and requests == [candidate] and
+             not list((fx.root / "state").glob("*.lock")), requests)
+
+        # A failed guard on the rebuilt attempt cannot start a third verification.
+        fx = Fx({"A": "a.txt", "B": "b.txt"})
+        candidate, entries = predecessor(fx)
+        fx.run_n(1, 0, GREEN); fx.run_n(2, 0, GREEN)
+        real_verify = window_gate.verify
+        def fail_first(repo, sha, required, window):
+            result = real_verify(repo, sha, required, window)
+            if sha != fx.base:
+                window_gate.escalate("N", "not releasable", "undetermined")
+            return result
+        with patch.object(window_gate, "verify", side_effect=fail_first), \
+             patch.object(window_gate, "advance", side_effect=RuntimeError("old-value guard")) as advancing:
+            rc = fx.go(["B"], window="N1", after="N")
+        builds = [e for e in fx.events("window-candidate") if e["subject"] == "N1"]
+        mark("second advance undetermined", rc == 2 and fx.master() == fx.base and len(builds) == 2 and
+             advancing.call_count == 1 and not fx.events("shipped") and
+             fx.events("escalation-blocking")[-1]["outcome"] == "undetermined")
+        window_gate.release(0)
+
+        # A post-drop rebuild keeps the same base and emits exactly one event per build.
+        fx = Fx({"A": "api/tests/test_z.py", "B": "b.txt"})
+        fx.run_n(1, 1, red([node])); fx.run_n(2, 0, GREEN)
+        rc = fx.go()
+        built = fx.events("window-candidate")
+        mark("candidate once per build", rc == 1 and len(built) == 2 and len({e["sha"] for e in built}) == 2 and
+             {e["verified_on"] for e in built} == {fx.base}, built)
+
+        # A held slot is respected even when a disk/red-rate stand-down lowers depth.
+        fx = Fx({"A": "a.txt", "B": "b.txt"})
+        candidate, entries = predecessor(fx)
+        with patch.dict(os.environ, DOIT_WINDOW_TRAIN_DEPTH="1"):
+            check(fx.go(["B"], window="N1", after="N") == 3, "depth1 refuses another train window")
+        window_gate.release(0)
+        torn = fold.EVENTS / "L-executor-0099.jsonl"
+        torn.write_text('{"type":')
+        check(window_gate.train_depth({}, events=None)["depth"] == 1 and fx.go(["B"]) == 3,
+              "unreadable ledger refuses train admission")
+
+    root = HERE.parent
+    executor = (root / "agents/executor.md").read_text()
+    configured = window_gate.train_depth({}, events=[])["configured"]
+    readers = [str(path.relative_to(root)) for folder in (root / "src", root / "agents")
+               for path in folder.rglob("*") if path.suffix in (".py", ".md") and "window-verified" in path.read_text()]
+    harvest = [path for path in (root / "src").glob("harvest*.py") if "window-verified" in path.read_text()]
+    mark("readers config caller", configured == 2 and type(configured) is int and
+         "one window at a time" not in executor and "in_flight()" in executor and "--after" in executor and
+         not harvest, dict(configured=configured, readers=readers, harvest_reads_verified=bool(harvest)))
+
+    body = json.dumps(observations, sort_keys=True)
+    print(json.dumps(dict(url="cli://gate-window/train_checks", status=0 if not FAILS else 1,
+                         body_sha256=hashlib.sha256(body.encode()).hexdigest(), body_excerpt=observations), sort_keys=True))
+
+
+train_checks()
 rerun_checks()
 test_window_attribution()
 clock_checks()
