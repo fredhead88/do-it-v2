@@ -271,3 +271,24 @@ EMITS["owed-unverifiable"] = {"prod-runner", "operator"}
 EMITS["owed-met"].add("prod-runner")
 EMITS["owed-failed"].add("prod-runner")
 # owed-unobservable stays open to every actor, including prod-runner.
+
+# L-spec-1120: admit the charter-0054 services before their emitters land.
+EMITS["seat-usage"] = {"seat-usage"}
+EMITS["balance"] = {"balance"}
+EMITS["ci-shadow"] = {"ci-shadow"}
+EMITS["ci-shadow-passed"] = {"ci-shadow", "operator"}
+EMITS["ci-runner-set"] = {"ci-runner", "operator"}
+EMITS["bill-check"] = {"gh-bill"}
+EMITS["window-tree-verified"] = {"executor", "operator"}
+EMITS["window-bisected"] = {"executor", "operator"}
+
+REQUIRED_ROWS = {
+    "seat-usage": ("five_hour_pct", "seven_day_pct", "five_hour_resets_at"),
+    "balance": ("state_from", "state_to", "codex_pct"),
+    "ci-shadow": ("sha", "tree", "kind"),
+    "ci-shadow-passed": ("kind", "from", "to"),
+    "ci-runner-set": ("variable", "from", "to"),
+    "bill-check": ("date", "yday", "mtd"),
+    "window-tree-verified": ("window", "sha", "tree"),
+    "window-bisected": ("window", "halves"),
+}

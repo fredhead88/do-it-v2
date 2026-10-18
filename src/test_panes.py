@@ -196,6 +196,14 @@ ok("relay" in panes.ROLES, "AC1: the relay contract is a real ledger role, not a
 ok(panes.ledger_role("L-relay-0007") == "relay",
    "AC1: an L-relay-NNNN pane resolves to the relay role, so its ledger file address resolves")
 
+# L-spec-1120/AC7: service writers own events, not panes.
+ok(panes.ROLES == frozenset("builder charter-reviewer executor grader plan-auditor planner probe "
+                            "relay research reviewer spec-auditor spec-writer thinker".split()),
+   "1120-AC7: the existing pane role set is unchanged")
+for service in ("seat-usage", "balance", "ci-shadow", "ci-runner", "gh-bill"):
+    ok(panes.ledger_role(f"L-{service}-0001") is None,
+       f"1120-AC7: {service} cannot fabricate a pane ledger file")
+
 for p in KIDS:
     p.kill()
     p.wait()

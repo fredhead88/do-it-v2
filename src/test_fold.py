@@ -4255,6 +4255,125 @@ def test_ledger_vocabulary_1104():
 test_ledger_vocabulary_1104()
 
 
+def test_ledger_vocabulary_1120():
+    import fold_emits
+
+    here = pathlib.Path(__file__).resolve().parent
+    allowed = {
+        "seat-usage": {"seat-usage"},
+        "balance": {"balance"},
+        "ci-shadow": {"ci-shadow"},
+        "ci-shadow-passed": {"ci-shadow", "operator"},
+        "ci-runner-set": {"ci-runner", "operator"},
+        "bill-check": {"gh-bill"},
+        "window-tree-verified": {"executor", "operator"},
+        "window-bisected": {"executor", "operator"},
+    }
+    fields = {
+        "seat-usage": {"five_hour_pct": "0", "seven_day_pct": "1", "five_hour_resets_at": "later"},
+        "balance": {"state_from": "ready", "state_to": "waiting", "codex_pct": "0"},
+        "ci-shadow": {"sha": "revision", "tree": "tree-id", "kind": "unit"},
+        "ci-shadow-passed": {"kind": "unit", "from": "false", "to": "true"},
+        "ci-runner-set": {"variable": "runner", "from": "unset", "to": "false"},
+        "bill-check": {"date": "2026-10-18", "yday": "0", "mtd": "1"},
+        "window-tree-verified": {"window": "window-id", "sha": "revision", "tree": "tree-id"},
+        "window-bisected": {"window": "window-id", "halves": [["left"], ["right"]]},
+    }
+    assert fold.EMITS is fold_emits.EMITS
+    assert fold_emits.REQUIRED_ROWS == {kind: tuple(values) for kind, values in fields.items()}
+    candidates = set().union(*allowed.values()) | {"builder", "grader", "thinker", "planner", "unknown-actor"}
+    missing_cases = 0
+    for kind, actors in allowed.items():
+        values = fields[kind]
+        event = {"type": kind, "subject": "L-spec-1120", **values}
+        assert fold.EMITS[kind] == actors, kind
+        print("1120-AC1", kind, ",".join(sorted(actors)))
+        assert fold.REQUIRED[kind] == tuple(values), kind
+        print("1120-AC2", kind, fold.REQUIRED[kind])
+        for actor in sorted(candidates):
+            kept = fold.admits(event, actor) is None
+            assert kept == (actor in actors), (kind, actor)
+            print("1120-AC3", kind, actor, "kept" if kept else "refused")
+        assert fold.required_reason(event) is None, kind
+        for field in values:
+            reason = fold.required_reason({key: value for key, value in event.items() if key != field})
+            assert reason and reason.endswith(field + "="), (kind, field, reason)
+            for blank in (None, "", " \t", 0, 0.0, False, []):
+                reason = fold.required_reason({**event, field: blank})
+                assert reason and reason.endswith(field + "="), (kind, field, blank, reason)
+            assert fold.required_reason({**event, field: "0"}) is None, (kind, field)
+            missing_cases += 1
+    assert missing_cases == 23, missing_cases
+    print("1120-AC4 missing-field cases:", missing_cases)
+
+    reader = ("import json, fold; "
+              "_, _, ignored, subjects = fold.fold(fold.read_events()); "
+              "print(json.dumps({'kept': subjects.get('L-spec-1120', []), 'ignored': ignored}))")
+    for kind, values in fields.items():
+        args = [f"{key}:={json.dumps(value)}" for key, value in values.items()]
+        for actor in sorted(allowed[kind] | {"builder", "operator", "ci-shadow"}):
+            with tempfile.TemporaryDirectory(prefix="vocabulary-roundtrip-1120-") as directory:
+                filename = "L-executor-0001.jsonl" if actor == "executor" else f"L-{actor}-local.jsonl"
+                env = {**os.environ, "HOME": directory, "DOIT_ROOT": directory,
+                       "DOIT_LEDGER_FILE": filename, "DOIT_NO_POKE": "1"}
+                path = pathlib.Path(directory) / "events" / filename
+                written = subprocess.run([str(here.parent / "doit"), "append", kind, "L-spec-1120", *args],
+                                         env=env, capture_output=True, text=True)
+                if actor not in allowed[kind]:
+                    assert written.returncode != 0 and "actor mismatch" in written.stderr, written.stderr
+                    assert not path.exists(), path
+                    written = subprocess.run(
+                        [sys.executable, "-c", "import sys, fold; fold.append(sys.argv[1:], strict=False)",
+                         kind, "L-spec-1120", *args], cwd=here, env=env, capture_output=True, text=True)
+                    assert f"recorded-and-ignored {kind} by {actor}" in written.stderr, written.stderr
+                assert written.returncode == 0, written.stderr
+                stored = [json.loads(line) for line in path.read_text().splitlines()]
+                assert len(stored) == 1 and "actor" not in stored[0], stored
+                assert all(stored[0][key] == value for key, value in values.items()), stored
+                readback = subprocess.run([sys.executable, "-c", reader], cwd=here, env=env,
+                                          check=True, capture_output=True, text=True)
+                result = json.loads(readback.stdout)
+                kept = actor in allowed[kind]
+                assert len(result["kept"]) == int(kept) and len(result["ignored"]) == int(not kept), result
+                row = (result["kept"] if kept else result["ignored"])[0]
+                assert row["type"] == kind and row["actor"] == actor, row
+                assert all(row[key] == value for key, value in values.items()), row
+                print("1120-AC5", kind, actor, "kept" if kept else "ignored")
+
+        with tempfile.TemporaryDirectory(prefix="vocabulary-missing-1120-") as directory:
+            actor = sorted(allowed[kind])[0]
+            filename = "L-executor-0001.jsonl" if actor == "executor" else f"L-{actor}-local.jsonl"
+            env = {**os.environ, "HOME": directory, "DOIT_ROOT": directory,
+                   "DOIT_LEDGER_FILE": filename, "DOIT_NO_POKE": "1"}
+            missing_args = ["five_hour_pct=1"] if kind == "seat-usage" else args[:-1]
+            written = subprocess.run(
+                [str(here.parent / "doit"), "append", kind, "L-spec-1120", *missing_args],
+                env=env, capture_output=True, text=True)
+            assert written.returncode != 0 and "missing required field(s)" in written.stderr, written.stderr
+            path = pathlib.Path(directory) / "events" / filename
+            assert not path.exists(), path
+            # The audit-preserving append path must still refuse falsy required values.
+            first = next(iter(values))
+            for blank in (0, 0.0, False, []):
+                blank_args = [f"{key}:={json.dumps(blank if key == first else value)}"
+                              for key, value in values.items()]
+                written = subprocess.run(
+                    [sys.executable, "-c", "import sys, fold; fold.append(sys.argv[1:], strict=False)",
+                     kind, "L-spec-1120", *blank_args], cwd=here, env=env, capture_output=True, text=True)
+                assert written.returncode != 0 and "missing required field(s)" in written.stderr, written.stderr
+                assert not path.exists(), path
+            print("1120-AC5", kind, "missing refused")
+
+    fresh = subprocess.run(
+        ["/usr/bin/python3", "-c", 'import fold; print(fold.REQUIRED["seat-usage"])'],
+        cwd=here, check=True, capture_output=True, text=True)
+    assert fresh.stdout.strip() == repr(tuple(fields["seat-usage"])), fresh.stdout
+    print("1120-AC5 fresh REQUIRED import:", fresh.stdout.strip())
+
+
+test_ledger_vocabulary_1120()
+
+
 def test_suite_run_vocabulary():
     event = {"type": "suite-run", "subject": "L-charter-0051", "sha": "a" * 40,
              "rc": 0, "failed": [], "wall_s": 0}
