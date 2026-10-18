@@ -17,7 +17,7 @@ import importlib, json, os, pathlib, subprocess, sys, time
 
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-import dispatch, fold, launch, models, tick  # noqa: E402
+import ctx_guard, dispatch, fold, launch, models, tick  # noqa: E402
 
 DOIT = HERE.parent / "doit"
 
@@ -118,7 +118,7 @@ def pane_cmd(prompt=None, name=None, model=None):
     cmd = ["claude"] + (["-n", name] if name else []) + [
            "--agent", "planner"] + (["--model", model] if model else []) + [
            "--disallowedTools", ",".join(f"Skill({s})" for s in tick.RETIRE),
-           "--dangerously-skip-permissions"]
+           *ctx_guard.hook_args("planner"), "--dangerously-skip-permissions"]
     return cmd + [prompt] if prompt else cmd
 
 
@@ -132,7 +132,7 @@ def relay_pane_cmd(prompt=None, name=None, model=None):
     cmd = ["claude"] + (["-n", name] if name else []) + [
            "--agent", "relay"] + (["--model", model] if model else []) + [
            "--disallowedTools", ",".join(f"Skill({s})" for s in tick.RETIRE),
-           "--dangerously-skip-permissions"]
+           *ctx_guard.hook_args("relay"), "--dangerously-skip-permissions"]
     return cmd + [prompt] if prompt else cmd
 
 
@@ -304,6 +304,27 @@ def _start(state, subject, mode, attempt, prompt, spawn_ids=None, started_sha=No
     launch.ended(ledger.stem, rc)
 
 
+def ctx_handover(events, charter):
+    """Only the latest end for this charter may supply a restart handover."""
+    latest = next((event for event in reversed(events)
+                   if event.get("type") == "planner-ended"
+                   and event.get("subject") == charter), None)
+    if latest is None or latest.get("reason") != "ctx":
+        return None
+    try:
+        handover = latest.get("handover")
+        if not isinstance(handover, str) or not handover:
+            return None
+        path = pathlib.Path(handover)
+        if path.is_file():
+            with path.open("rb") as stream:
+                if stream.read(1):
+                    return handover
+    except OSError:
+        pass
+    return None
+
+
 def _charter_pass(state, events, charter, started_sha):
     """One ready charter. False means the relay failed and the cycle holds."""
     ok, att = _guarded("planner_attempts", events, charter_id=charter)
@@ -341,8 +362,10 @@ def _charter_pass(state, events, charter, started_sha):
         print(f"# {charter}: escalation-blocking — last {att.get('last_reason')}")
         return True                       # the charter leaves `ready` on relay's own exclusion
     maybe_reexec("planner", started_sha)  # R2 point 5(b): immediately before THIS charter's pane
+    handover = ctx_handover(events, charter)
+    prompt = f"{charter}\nRead the handover file {handover} before continuing." if handover else charter
     _start(state, subject=charter, mode="charter",
-           attempt=int(att.get("attempts") or 0) + 1, prompt=charter, started_sha=started_sha)
+           attempt=int(att.get("attempts") or 0) + 1, prompt=prompt, started_sha=started_sha)
     return True
 
 
@@ -599,6 +622,7 @@ def _pane_argv(ledger_file, board, model=None):
     name = (_seam("pane_name", "PANE_NAME") or _stem)(ledger_file)
     return (["claude", "-n", name, "--agent", "executor"] + (["--model", model] if model else []) +
             ["--disallowedTools", ",".join(executor_deny_list()),
+             *ctx_guard.hook_args("executor"),
              "--dangerously-skip-permissions", executor_prompt(ledger_file, board)])
 
 
