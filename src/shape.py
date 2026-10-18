@@ -1,24 +1,25 @@
 #!/usr/bin/env python3
 """shape — the spec-shape gate as one callable check plus two mechanical repairs.
 
-  shape.check(spec_text) -> {"block": [...], "warn": [...]}
+  shape.check(spec_text, project=None) -> {"block": [...], "warn": [...]}
   shape.mechanical_fix(spec_text) -> (repaired_text, repairs)
-  doit shape FILE [--fix]
+  doit shape FILE [--fix] [--project NAME]
 
 L-spec-0385 (charter L-charter-0038): `validate.spec_shape`/`spec_shape_warnings`
-are the only two things this module ever CALLS to decide pass/fail — no rule of
+remain the sources of shape findings and blocking decisions — no rule of
 theirs is reimplemented or changed here (`src/validate.py` is read-only for this
-unit). `check()` is a thin wrapper. `mechanical_fix()` performs exactly the two
+unit). `check()` also warns on judgment-only checks. `mechanical_fix()` performs exactly the two
 purely-mechanical repairs the charter names (`writes-annotation`, `ac-bullet`)
 and nothing else — a Verification chain is never auto-repaired, because
 rewriting a command changes what the grader runs.
 """
-import pathlib, re, sys
+import argparse, pathlib, re, sys
 
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import merge_gate  # noqa: E402
 import validate  # noqa: E402
+import checks  # noqa: E402
 
 # The label-line test, verbatim from `merge_gate.grant_from_text`'s own match —
 # `writes-annotation` locates the SAME line the merge gate itself would read as
@@ -36,10 +37,14 @@ AC_BULLET_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+(?:AC(\d+)|\*\*AC(\d+)\*\*)"
 _BLOCK_HELD_RE = re.compile(r"^[ \t]*(?:[-*+]\s+)?")
 
 
-def check(spec_text):
-    """`{"block": validate.spec_shape(spec_text), "warn": validate.spec_shape_warnings(spec_text)}`,
-    verbatim — R5/SD9."""
-    return {"block": validate.spec_shape(spec_text), "warn": validate.spec_shape_warnings(spec_text)}
+def check(spec_text, project=None):
+    """Preserve validate's findings, appending only the CK-001 warning."""
+    block = validate.spec_shape(spec_text)
+    warn = list(validate.spec_shape_warnings(spec_text))
+    judgment = checks.coverage(spec_text, project)["judgment"]
+    if judgment:
+        warn.append("CK-001: judgment-only: " + ", ".join(judgment))
+    return {"block": block, "warn": warn}
 
 
 def _token_passes(tok):
@@ -150,24 +155,25 @@ def mechanical_fix(spec_text):
 
 
 def main(argv):
-    fix = "--fix" in argv
-    paths = [a for a in argv if a != "--fix"]
-    if len(paths) != 1:
-        sys.exit("usage: doit shape FILE [--fix]")
-    path = paths[0]
+    parser = argparse.ArgumentParser(prog="doit shape")
+    parser.add_argument("file", metavar="FILE")
+    parser.add_argument("--fix", action="store_true")
+    parser.add_argument("--project", metavar="NAME")
+    args = parser.parse_args(argv)
+    path = args.file
     try:
         text = pathlib.Path(path).read_text()
     except OSError as e:
         sys.stderr.write(f"shape: {path}: {e}\n")
         sys.exit(2)
 
-    if fix:
+    if args.fix:
         new_text, repairs = mechanical_fix(text)
         if repairs:
             pathlib.Path(path).write_text(new_text)
             text = new_text
 
-    result = check(text)
+    result = check(text, args.project)
     for b in result["block"]:
         print(f"BLOCK: {b}")
     for w in result["warn"]:

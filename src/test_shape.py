@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Seven runnable checks on `shape.py`. Run: python3 test_shape.py
+"""Runnable checks on `shape.py`. Run: python3 test_shape.py
 
 AC1-AC7, one block apiece, each printing "AC<n> ok" to stdout on success
 (L-spec-0385 Verification). Hermetic (SD13): no network, no ledger, no
 droplet — only a local `tempfile` scratch dir and, for AC6, a real
 subprocess of the repo's own `./doit shape`."""
 import contextlib, io, os, pathlib, subprocess, sys, tempfile
+from unittest.mock import patch
 
 # R8.2: HOME/DOIT_ROOT isolation, set before any project module is imported —
 # `shape` imports `merge_gate`, which imports `fold` at module level, so a
@@ -17,10 +18,12 @@ os.environ["DOIT_ROOT"] = str(_TMP8027 / "root")
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import shape  # noqa: E402
 import validate  # noqa: E402
+import grading_env  # noqa: E402
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 N = 0
+JUDGMENT_WARNING = "CK-001: judgment-only: AC1"
 
 
 def check(cond, msg):
@@ -77,19 +80,21 @@ NO_VERIFICATION = ("# L-spec-fixture\n"
 # ══ AC1 ══════════════════════════════════════════════════════════════════════
 for fx in (WELL_FORMED, BASE_SHA_HEAD, NO_VERIFICATION):
     check(shape.check(fx) == {"block": validate.spec_shape(fx),
-                               "warn": validate.spec_shape_warnings(fx)},
-          f"shape.check must mirror validate.spec_shape/spec_shape_warnings exactly: {fx!r}")
+                               "warn": validate.spec_shape_warnings(fx) + [JUDGMENT_WARNING]},
+          f"shape.check preserves validate findings before the coverage warning: {fx!r}")
 
-check(shape.check(WELL_FORMED) == {"block": [], "warn": []},
-      "the well-formed fixture gives {block: [], warn: []}")
+check(shape.check(WELL_FORMED) == {"block": [], "warn": [JUDGMENT_WARNING]},
+      "the well-formed judgment fixture has only a coverage warning")
 
 r = shape.check(BASE_SHA_HEAD)
-check(r["block"] == [] and len(r["warn"]) == 1 and r["warn"][0].startswith("PL-001: "),
-      f"BASE_SHA_HEAD gives {{block: [], warn: [w]}} with w starting 'PL-001: ': {r}")
+check(r["block"] == [] and len(r["warn"]) == 2 and r["warn"][0].startswith("PL-001: ")
+      and r["warn"][1] == JUDGMENT_WARNING,
+      f"BASE_SHA_HEAD preserves PL-001 before CK-001: {r}")
 
 r = shape.check(NO_VERIFICATION)
-check(len(r["block"]) == 1 and r["block"][0].startswith("Verification:") and r["warn"] == [],
-      f"the missing-Verification fixture gives {{block: [b], warn: []}} with b starting 'Verification:': {r}")
+check(len(r["block"]) == 1 and r["block"][0].startswith("Verification:")
+      and r["warn"] == [JUDGMENT_WARNING],
+      f"missing Verification still blocks, independently of CK-001: {r}")
 
 print("AC1 ok")
 
@@ -191,12 +196,14 @@ with tempfile.TemporaryDirectory() as td:
 
     code, out, err = run_cli([str(p_warn)])
     lines = [l for l in out.splitlines() if l]
-    check(code == 0 and len(lines) == 1 and lines[0].startswith("WARN: PL-001:"),
+    check(code == 0 and len(lines) == 2 and lines[0].startswith("WARN: PL-001:")
+          and lines[1] == "WARN: " + JUDGMENT_WARNING,
           f"(b) warn-only: exit {code}, lines {lines}")
 
     code, out, err = run_cli([str(p_block)])
     lines = [l for l in out.splitlines() if l]
-    check(code == 1 and len(lines) == 1 and lines[0].startswith("BLOCK: Verification:"),
+    check(code == 1 and len(lines) == 2 and lines[0].startswith("BLOCK: Verification:")
+          and lines[1] == "WARN: " + JUDGMENT_WARNING,
           f"(c) block: exit {code}, lines {lines}")
 
     code, out, err = run_cli([missing])
@@ -285,4 +292,37 @@ with tempfile.TemporaryDirectory() as td:
 
 print("AC7 ok")
 
-print(f"shape: {N} checks over shape.py's seven acceptance criteria")
+# L-spec-1105: warnings name the unmapped criteria in spec order, while the
+# CLI's project flag only supplies context for matching production curl.
+MIXED = WELL_FORMED.replace(
+    "AC1 [backend]: x.\n  review_path: y",
+    "AC1 [backend]: runs.\n  review_path: `pytest x`\n"
+    "AC3 [backend]: judge wording.\nAC7 [backend]: judge layout.")
+finding = "CK-001: judgment-only: AC3, AC7"
+check(shape.check(MIXED) == {"block": validate.spec_shape(MIXED),
+                             "warn": validate.spec_shape_warnings(MIXED) + [finding]},
+      "CK-001 is exact, ordered, and warning-only")
+MAPPED = WELL_FORMED.replace("review_path: y", "review_path: `pytest x`")
+for text in (MAPPED, "# no criteria\n"):
+    check(shape.check(text) == {"block": validate.spec_shape(text),
+                               "warn": validate.spec_shape_warnings(text)},
+          "no coverage finding for all-mapped or no criteria")
+with tempfile.TemporaryDirectory() as td:
+    root = pathlib.Path(td)
+    path = root / "mixed.md"
+    path.write_text(MIXED)
+    code, out, _ = run_cli([str(path)])
+    check(code == 0 and "WARN: " + finding in out, "CK-001 never changes exit zero")
+    (root / "look.toml").write_text('[[prod]]\nproject="fixture"\nbase_url="https://prod.fixture.test"\n')
+    path.write_text(WELL_FORMED.replace("AC1 [backend]: x.", "AC1 [backend]: curl https://prod.fixture.test"))
+    with patch.object(grading_env, "DOIT_SRC", root):
+        code, out, _ = run_cli([str(path)])
+        check(code == 0 and JUDGMENT_WARNING in out, "no CLI project means no curl matching")
+        code, out, _ = run_cli([str(path), "--project", "fixture"])
+        check(code == 0 and "CK-" not in out, "--project enables the correct production host")
+        check(not shape.check(path.read_text(), "fixture")["warn"], "optional API project works")
+        code, out, _ = run_cli(["--project", "missing", str(path), "--fix"])
+        check(code == 0 and JUDGMENT_WARNING in out, "project and fix options compose")
+print("AC8 ok")
+
+print(f"shape: {N} checks over shape.py's acceptance criteria")
