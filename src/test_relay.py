@@ -419,7 +419,7 @@ ok('os.environ.get("DOIT_SEAT_CLAIM_SEC", 300)' in _dispatch_src,
    "src/dispatch.py must carry the same DOIT_SEAT_CLAIM_SEC default reader (300) relay.py does")
 
 # ── AC7: the two EMITS rows, in the file and through the fold ──
-src = (pathlib.Path(__file__).parent / "fold.py").read_text()
+src = (pathlib.Path(__file__).parent / "fold_emits.py").read_text()
 literal = src[src.index("EMITS = {"):src.index("\nDECLARES = {")]
 ok('"planner-started": {"planner"}' in literal and '"planner-ended": {"planner"}' in literal,
    "both rows are IN the static EMITS literal — not reached through the DECLARES loop")

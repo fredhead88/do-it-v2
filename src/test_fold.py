@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 TMP = pathlib.Path(tempfile.mkdtemp())
 os.environ["DOIT_ROOT"] = str(TMP)
+os.environ["HOME"] = str(TMP / "home")
 # INBOUND (R9/L-spec-0196) calls the REAL carry.uncarried() when `carry` is not
 # explicitly stubbed (AC22 and friends). carry.py's own ledger/inbox dirs key off
 # V4_LEDGER_DIR/V4_INBOX_DIR, NOT DOIT_ROOT — pinned here too, or this file would
@@ -4122,3 +4123,133 @@ def test_dependency_hold_vocabulary():
 
 
 test_dependency_hold_vocabulary()
+
+
+def test_ledger_vocabulary_1104():
+    here = pathlib.Path(__file__).resolve().parent
+    allowed = {
+        "evidence-bundle": {"build-runner"},
+        "evidence-bundle-failed": {"build-runner"},
+        "base-red": {"base-red"},
+        "health-alarm": {"health"},
+        "owed-unverifiable": {"prod-runner", "operator"},
+    }
+    fields = {
+        "evidence-bundle": {"path": "bundle.json", "sha": "revision", "bundle_sha256": "digest"},
+        "evidence-bundle-failed": {"sha": "revision", "reason": "failed"},
+        "base-red": {"project": "do-it-v2", "sha": "revision", "complete": True},
+        "health-alarm": {"alarm": "stale", "severity": "warning", "line": "stale reading"},
+        "owed-unverifiable": {"criterion": "AC1", "reason": "cannot observe"},
+    }
+    refused = {"executor", "builder", "grader", "thinker", "operator", "prod-runner", "unknown-actor"}
+    for kind, actors in allowed.items():
+        event = {"type": kind, "subject": "L-spec-1104", **fields[kind]}
+        assert fold.EMITS[kind] == actors
+        for actor in sorted(actors | refused):
+            kept = fold.admits(event, actor) is None
+            assert kept == (actor in actors), (kind, actor)
+            print("1104-AC1", kind, actor, "kept" if kept else "refused")
+
+    missing_cases = 0
+    for kind, values in fields.items():
+        event = {"type": kind, **values}
+        assert fold.REQUIRED[kind] == tuple(values)
+        assert fold.required_reason(event) is None
+        for missing in values:
+            reason = fold.required_reason({k: v for k, v in event.items() if k != missing})
+            assert reason and reason.endswith(missing + "="), (kind, missing, reason)
+            missing_cases += 1
+    assert fold.required_reason({"type": "health-alarm", **fields["health-alarm"], "reading": {}}) is None
+    assert missing_cases == 13
+    print("1104-AC2 missing-field cases:", missing_cases)
+
+    verdict_actors = {"owed-sweeper", "executor", "operator", "thinker", "prod-runner"}
+    for kind in ("owed-met", "owed-failed"):
+        assert fold.EMITS[kind] == verdict_actors
+        event = {"type": kind, "criterion": "AC1", "evidence": "/fixture/evidence", "kind": "unmet"}
+        for actor in sorted(verdict_actors):
+            assert fold.admits(event, actor) is None, (kind, actor)
+        print("1104-AC3", kind, "admitted actors:", ", ".join(sorted(verdict_actors)))
+    # An absent row is the universal admission rule, including future actor names.
+    assert "owed-unobservable" not in fold.EMITS
+    for actor in ("prod-runner", "owed-sweeper", "executor", "operator", "thinker", "planner", "builder"):
+        assert fold.admits({"type": "owed-unobservable"}, actor) is None, actor
+    print("1104-AC3 owed-unobservable remains open, including prod-runner")
+    import fold_emits
+    assert fold.EMITS is fold_emits.EMITS
+    assert fold.DECLARES is fold_emits.DECLARES
+    assert fold.OWED_DECLARERS is fold_emits.OWED_DECLARERS
+    line_count = len((here / "fold.py").read_text().splitlines())
+    assert line_count <= 2465, line_count
+    print("1104-AC6 relocated EMITS, DECLARES and OWED_DECLARERS identities; fold.py lines:", line_count)
+
+    subject = "L-spec-91104"
+    ac = {"ts": stamp(10), "type": "owed-ac", "subject": subject, "criterion": "AC1", "wake_at": stamp(-30)}
+    closure = {"ts": stamp(5), "type": "owed-unverifiable", "subject": subject,
+               "criterion": "AC1", "reason": "cannot observe"}
+    files = {
+        "L-spec-writer-local.jsonl": [ac],
+        "L-executor-local.jsonl": [{"ts": stamp(9), "type": "shipped", "subject": subject}],
+        "L-grader-local.jsonl": [{"ts": stamp(8), "type": "verdict", "subject": subject, "confirmed": True}],
+        "L-reviewer-local.jsonl": [{"ts": stamp(8), "type": "review", "subject": subject, "depth": "gates-only"}],
+        "L-prod-runner-local.jsonl": [closure],
+    }
+    assert ledger(**files)[1][subject]["state"] == "accepted"
+    waived = {**files, "L-prod-runner-local.jsonl": [],
+              "L-operator-local.jsonl": [{**closure, "type": "owed-waived"}]}
+    assert ledger(**waived)[1][subject]["state"] == "accepted"
+    print("1104-AC5 (a) unverifiable and waived: accepted")
+    second = {**ac, "criterion": "AC2"}
+    two = {**files, "L-spec-writer-local.jsonl": [ac, second]}
+    assert ledger(**two)[1][subject]["state"] == "shipped-owed-evidence"
+    print("1104-AC5 (b) unverifiable plus waiting: shipped-owed-evidence")
+    failed = {**closure, "type": "owed-failed", "criterion": "AC2", "evidence": "failure", "kind": "unmet"}
+    two["L-executor-local.jsonl"] = files["L-executor-local.jsonl"] + [failed]
+    assert ledger(**two)[1][subject]["state"] == "shipped-owed-due"
+    print("1104-AC5 (c) unverifiable plus failed: shipped-owed-due")
+    wrong = {**files, "L-prod-runner-local.jsonl": [], "L-thinker-local.jsonl": [closure]}
+    _, specs, _, ignored, by_subject = ledger(**wrong)
+    assert specs[subject]["state"] == "shipped-owed-evidence"
+    assert len(ignored) == 1 and ignored[0]["type"] == "owed-unverifiable" and ignored[0]["actor"] == "thinker"
+    assert ignored[0] not in by_subject[subject]
+    assert fold.spec_state(by_subject[subject], set()) == "shipped-owed-evidence"
+    print("1104-AC5 (d) thinker closure in ignored list; kept history: shipped-owed-evidence")
+
+    reader = ("import json, fold; "
+              "_, _, ignored, subjects = fold.fold(fold.read_events()); "
+              "print(json.dumps({'kept': subjects.get('L-spec-91104', []), 'ignored': ignored}))")
+    for kind, values in fields.items():
+        # One allowed writer per type; AC1 covers both owed-unverifiable writers.
+        writer = "prod-runner" if kind == "owed-unverifiable" else next(iter(allowed[kind]))
+        for actor in (writer, "executor"):
+            with tempfile.TemporaryDirectory(prefix="vocabulary-roundtrip-1104-") as directory:
+                env = {**os.environ, "HOME": directory, "DOIT_ROOT": directory,
+                       "DOIT_LEDGER_FILE": f"L-{actor}-local.jsonl", "DOIT_NO_POKE": "1"}
+                args = [f"{key}:={json.dumps(value)}" for key, value in values.items()]
+                written = subprocess.run([sys.executable, str(here / "fold.py"), "append", kind, subject, *args],
+                                         env=env, capture_output=True, text=True)
+                if actor != writer:
+                    assert written.returncode != 0 and "actor mismatch" in written.stderr, written.stderr
+                    # The CLI is strict; also exercise append's audit-preserving
+                    # path so the fresh fold must reject a real persisted row.
+                    written = subprocess.run(
+                        [sys.executable, "-c", "import sys, fold; fold.append(sys.argv[1:], strict=False)",
+                         kind, subject, *args], cwd=here, env=env, capture_output=True, text=True)
+                    assert written.returncode == 0, written.stderr
+                    assert f"recorded-and-ignored {kind} by {actor}" in written.stderr, written.stderr
+                readback = subprocess.run([sys.executable, "-c", reader], cwd=here, env=env,
+                                          check=True, capture_output=True, text=True)
+                result = json.loads(readback.stdout)
+                if actor == writer:
+                    assert written.returncode == 0, written.stderr
+                    assert len(result["kept"]) == 1 and not result["ignored"], result
+                    assert result["kept"][0]["type"] == kind
+                    print("1104-AC7", kind, actor, "kept")
+                else:
+                    assert not result["kept"] and len(result["ignored"]) == 1, result
+                    assert result["ignored"][0]["type"] == kind and result["ignored"][0]["actor"] == actor
+                    assert all(result["ignored"][0][key] == value for key, value in values.items()), result
+                    print("1104-AC7", kind, actor, "ignored")
+
+
+test_ledger_vocabulary_1104()

@@ -122,14 +122,15 @@ class DigestTests(unittest.TestCase):
         evs, expected = fixture()
         obj = digest.build(evs, NOW)
         recount = Counter(r["status"] for s in fold.fold(evs)[0].values() for r in owed.checks(s["evs"], NOW))
-        self.assertEqual(obj["counts"]["by_status"], dict(recount))
+        self.assertEqual(obj["counts"]["by_status"], {**recount, "unverifiable": 0})
         self.assertEqual(set(obj), {"at", "counts", "needs_you", "health", "m1"})
         self.assertEqual(set(obj["counts"]), {"by_status", "blocked_by_capability", "sweep"})
         self.assertEqual(set(obj["counts"]["by_status"]), set(owed.STATUSES))
         self.assertEqual({r["spec"] for r in obj["needs_you"]}, {s for s, v in expected.items() if v == "blocked"})
         self.assertEqual(obj["counts"]["blocked_by_capability"], {"operator-action": 10})
         # Independent, hand-labelled recount: no owed/checks call in this oracle.
-        self.assertEqual(obj["counts"]["by_status"], dict(Counter(expected.values())))
+        self.assertEqual(obj["counts"]["by_status"],
+                         {**Counter(expected.values()), "unverifiable": 0})
         self.assertEqual(obj["m1"], {"terminal_unobservable": 10, "verify_unbuildable": 10,
                                       "sweep_failed_one_row_24h": 0})
         self.assertEqual(len(expected), 110)

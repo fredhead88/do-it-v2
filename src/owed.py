@@ -38,7 +38,7 @@ import routing
 import owed_routes
 
 STATUSES = ("waiting", "due", "blocked", "failed", "correcting", "quarantined",
-            "met", "waived", "expired", "dropped", "unshipped")
+            "met", "waived", "expired", "dropped", "unshipped", "unverifiable")
 
 
 def _ts(s, now):
@@ -120,6 +120,8 @@ def checks(evs, now):
                       and _ts(e.get("ts"), now) > governing_ts]
         waived_evs = [e for e in evs if e.get("type") == "owed-waived" and e.get("criterion") == c
                       and _ts(e.get("ts"), now) > governing_ts]
+        unverifiable_evs = [e for e in criterion_evs if e.get("type") == "owed-unverifiable"
+                            and _ts(e.get("ts"), now) > governing_ts]
         post = [e for e in evs if e.get("criterion") == c
                 and e.get("type") in ("owed-failed", "owed-met", "owed-unobservable")
                 and _ts(e.get("ts"), now) > governing_ts]
@@ -169,6 +171,8 @@ def checks(evs, now):
             status = "met"
         elif waived_evs:
             status = "waived"
+        elif unverifiable_evs:
+            status = "unverifiable"
         elif failures and correctives:
             status = "correcting"
         elif failures:
