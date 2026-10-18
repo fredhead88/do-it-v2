@@ -14,11 +14,16 @@ call here goes through; tests monkeypatch it (mirrors `grader_serve.py`'s
 own injected `runner`).
 """
 import json
+import time
+from datetime import datetime, timezone
 import shlex, os, pathlib, re, shutil, subprocess, tomllib, urllib.parse  # noqa: E401
 HERE = pathlib.Path(__file__).resolve().parent
 DOIT_SRC = HERE.parent
 ROOT = pathlib.Path(os.environ.get("DOIT_ROOT", pathlib.Path.home() / ".do-it"))
 CONTENT = ROOT / "content"
+DEPLOY_LOCK = ROOT / "deploy.lock"
+DAILY_RELEASE_LOCK = pathlib.Path("/var/lock/albert-scott-daily-release.lock")
+PROC_LOCKS = pathlib.Path("/proc/locks")
 
 CAPABILITIES = ("env-file", "view-paths", "tools", "node_modules", "git",
                 "db", "db-schema", "browser", "review-account", "deploy")
@@ -569,6 +574,57 @@ def _prove_review_account(project):
     return (True, None) if path.exists() else (False, f"{path} does not exist")
 
 
+def _release_lock_held(path):
+    """Observe an exclusive flock by inode; never acquire a probe lock."""
+    try:
+        stat = path.stat()
+        for line in PROC_LOCKS.read_text().splitlines():
+            fields = line.split()
+            if len(fields) < 6 or fields[1] != "FLOCK" or fields[3] != "WRITE":
+                continue
+            try:
+                major, minor, inode = fields[5].split(":")
+                identity = (int(major, 16), int(minor, 16), int(inode))
+            except ValueError:
+                continue
+            if identity == (os.major(stat.st_dev), os.minor(stat.st_dev), stat.st_ino):
+                return True
+    except (OSError, UnicodeError):
+        pass
+    return False
+
+
+def release_in_progress(now=None):
+    """Read the two kernel lock signals, then recent unterminated deploy events."""
+    if _release_lock_held(DAILY_RELEASE_LOCK) or _release_lock_held(DEPLOY_LOCK):
+        return True
+    now = now if now is not None else datetime.now(timezone.utc)
+    starts, terminals = {}, {}
+    try:
+        for path in (ROOT / "events").glob("*.jsonl"):
+            for line in path.read_text().splitlines():
+                try:
+                    event = json.loads(line)
+                    if not isinstance(event, dict) or not isinstance(event.get("subject"), str):
+                        continue
+                    kind, subject = event.get("type"), event["subject"]
+                    if kind not in ("deploy-started", "deploy-landed", "deploy-failed", "deploy-refused"):
+                        continue
+                    ts = datetime.fromisoformat(event["ts"].replace("Z", "+00:00"))
+                    if ts.tzinfo is None:
+                        continue
+                except (ValueError, KeyError, TypeError, AttributeError):
+                    continue
+                bucket = starts if kind == "deploy-started" else terminals
+                if subject not in bucket or ts > bucket[subject]:
+                    bucket[subject] = ts
+    except (OSError, UnicodeError):
+        return False
+    return any(0 <= (now - ts).total_seconds() <= 3600
+               and (subject not in terminals or terminals[subject] < ts)
+               for subject, ts in starts.items())
+
+
 def _prove_deploy(project, repo):
     row = next((p for p in _look_toml(repo).get("prod", []) if p.get("project") == project), None)
     if row is None:
@@ -576,14 +632,31 @@ def _prove_deploy(project, repo):
     ssh_target, version_path = row.get("ssh_target"), row.get("version_path")
     if not ssh_target or not version_path:
         return False, "the [[prod]] row is missing ssh_target/version_path"
-    try:
-        # version_path is a path ("/version"); curl needs the host in front of it,
-        # or it exits 3 (malformed URL) on every call.
-        url = f"{row.get('base_url', '').rstrip('/')}{version_path}"
-        r = _run(["ssh", ssh_target, f"curl -fsS {url}"], capture_output=True, text=True, timeout=20)
-    except Exception as exc:
-        return False, f"deploy check raised: {exc}"
-    return (True, None) if r.returncode == 0 else (False, f"deploy version check failed: exit {r.returncode}")
+    # version_path needs the host in front of it or curl exits 3 (malformed URL).
+    url = f"{row.get('base_url', '').rstrip('/')}{version_path}"
+    started, waited = time.monotonic(), 0
+    while True:
+        try:
+            r = _run(["ssh", ssh_target, f"curl -fsS -w '\\n%{{http_code}}' {shlex.quote(url)}"],
+                     capture_output=True, text=True, timeout=20)
+        except Exception as exc:
+            return False, f"deploy check raised: {exc}; waited_s={int(waited)}"
+        if r.returncode == 0:
+            return True, f"waited_s={int(waited)}" if waited else None
+        try:
+            status = int((getattr(r, "stdout", "") or "").rsplit("\n", 1)[-1])
+        except (ValueError, TypeError):
+            status = 0
+        transient = r.returncode == 7 or (r.returncode == 22 and 500 <= status < 600)
+        if not transient or not release_in_progress():
+            return False, f"deploy version check failed: exit {r.returncode}; waited_s={int(waited)}"
+        remaining = 900 - (time.monotonic() - started)
+        if remaining <= 0:
+            return False, f"deploy version check failed: exit {r.returncode}; waited_s={int(waited)}"
+        delay = min(30, remaining)
+        before_sleep = time.monotonic()
+        time.sleep(delay)
+        waited += time.monotonic() - before_sleep
 
 
 def _write_state(view, **kv):
