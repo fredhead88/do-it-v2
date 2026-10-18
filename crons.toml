@@ -123,3 +123,14 @@ path = "/opt/albert-scott/scripts/deploy/portal_check_daily_wrapper.sh"
 sig = 'portal_check_daily_wrapper\.sh\b'
 owner = "albert-scott"
 project = "albert-scott"
+
+[[row]]
+name = "suite-daily"
+where = "user"
+schedule = "40 5 * * *"
+command = "{doit} cron-run suite-daily -- /usr/bin/python3 {repo}/src/suite_run.py >> {root}/logs/suite-daily.log 2>&1"
+path = "/usr/bin/python3"
+sig = 'suite_run\.py\b'
+owner = "thinker"
+project = "do-it-v2"
+max_runtime_s = 1800

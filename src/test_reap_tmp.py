@@ -820,6 +820,10 @@ EXPECTED_CRONS_ROWS = [
      "command": "albert {doit} cron-run portal-latency-daily -- /bin/bash /opt/albert-scott/scripts/deploy/portal_check_daily_wrapper.sh",
      "path": "/opt/albert-scott/scripts/deploy/portal_check_daily_wrapper.sh",
      "sig": r"portal_check_daily_wrapper\.sh\b", "owner": "albert-scott", "project": "albert-scott"},
+    {"name": "suite-daily", "where": "user", "schedule": "40 5 * * *",
+     "command": "{doit} cron-run suite-daily -- /usr/bin/python3 {repo}/src/suite_run.py >> {root}/logs/suite-daily.log 2>&1",
+     "path": "/usr/bin/python3", "sig": r"suite_run\.py\b", "owner": "thinker", "project": "do-it-v2",
+     "max_runtime_s": 1800},
 ]
 
 # ── L0440-AC20 · current cron-run commands, runtime bounds and */5 reaper cadence ────
