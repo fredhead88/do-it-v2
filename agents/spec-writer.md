@@ -203,7 +203,8 @@ Before returning, run `doit shape` against your own spec file — the sibling `s
 
 The tool checks three shape rules, each with one correct example, drawn verbatim from the Plan's SD10:
 
-Rule one: Verification is one `&&` chain with absolute interpreters. Correct example: `cd /home/albert/do-it-v2 && /usr/bin/python3 src/test_owed.py && ./doit test`.
+Rule one: Verification is one `&&` chain with absolute interpreters. Correct example: `cd "$(git rev-parse --show-toplevel)" && /usr/bin/python3 src/test_owed.py && ./doit test`.
+The Verification block opens with `cd "$(git rev-parse --show-toplevel)"` (or the subdirectory form `cd "$(git rev-parse --show-toplevel)/dashboard"`) because `doit shape` refuses an absolute checkout path as PL-010, which also reads review_path; an owed review_path, run by a sweeper from a fresh non-git scratch directory with no checkout, names the checkout path only in command position, e.g. `/home/albert/do-it-v2/doit shape "$R/content/L-spec-NNNN.md"`.
 
 Rule two: `Writes:` entries are bare paths or globs, one per line, never annotated. Correct example:
 

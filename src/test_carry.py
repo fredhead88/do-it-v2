@@ -246,7 +246,8 @@ def two_round(first, second):
 
 
 TRAILER_LITERAL = ("\n---\nCarry this spec over into v2 form — Writes: line, AC ids, "
-                   "Verification block, under 400 lines. Change nothing substantive. "
+                   "Verification block, under 400 lines. The Verification block opens with "
+                   'cd "$(git rev-parse --show-toplevel)". Change nothing substantive. '
                    "charter: null (free-standing, D15). Source: v4 spec 1454.\n")
 
 # ══ AC4 · review_tier — the four predicates, the no-match case, and the order ══
@@ -530,6 +531,21 @@ check(b1483.get("rework_spawn") == "L-spec-writer-0099",
 STUB.dispatch = writer(["src/ok.py"])
 code, out, err = run(["1483"] + BASE)
 check(code == 0, f"★ a spec-shape refusal is a retry, not a permanently burned source: {err!r}")
+
+# L-spec-1115: wrong-checkout carry uses the same mechanical-fix/rework gate.
+record(1598, "wrong-checkout"), inbox(1598, "wrong-checkout", "# 1598\n")
+WRONG_CWD_SPEC = WELL_FORMED_SPEC.replace("\ntrue\n", "\ncd /opt/albert-scott && true\n")
+ALLOCS[0], CALLS[:] = 0, []
+STUB.dispatch = writer(["src/ok.py"], spec_text=WRONG_CWD_SPEC)
+code, out, err = run(["1598"] + BASE)
+check(code != 0 and "PL-010:" in err and carry.already_carried("1598") is None,
+      f"wrong-checkout carry is refused after rework: {err}")
+check(len([c for c in CALLS if c[1] == "dispatch"]) == 2,
+      "wrong-checkout carry reuses exactly one rework")
+STUB.dispatch = writer(["src/ok.py"], spec_text=WELL_FORMED_SPEC.replace(
+    "\ntrue\n", '\ncd "$(git rev-parse --show-toplevel)" && true\n'))
+code, out, err = run(["1598"] + BASE)
+check(code == 0, f"portable carry is accepted: {err}")
 
 # ══ AC7/AC6(b) · the packet-build call itself fails: no rework dispatch is
 #    EVER attempted, CarryFailed names the failing call's own stderr, and the

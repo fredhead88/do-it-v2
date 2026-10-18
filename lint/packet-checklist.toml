@@ -86,3 +86,16 @@ applies_to = "packet:builder"
 check = "check_missing_stop_section"
 message = "the builder packet is missing its ## STOP section naming the local-box footguns"
 severity = "warn"
+
+[[entry]]
+id = "PL-010"
+since = "2026-10-18"
+applies_to = "spec"
+check = "check_live_checkout_cwd"
+message = "Verification or review_path sets a fixed working directory; use the worktree toplevel"
+severity = "block"
+
+[[promotion]]
+id = "PL-003"
+promoted_at = "2026-10-18"
+reason = "Verification must run in the dispatched worktree, not a live checkout"
