@@ -976,5 +976,274 @@ verdict, findings = _with_restricted_path(lambda: mg.secret_scan(d, main_sha, br
 check("AC10 the executed bytes come from main_sha, not the branch's rewritten copy",
       verdict == "findings" and bool(findings))
 
+# ------------------------------------------------------ R6: append-only grants
+# Kept verbatim from the committed albert-scott list, never branch-controlled.
+APPEND_ENTRIES = [
+    "scratch_listing_authority_cleanup.py::AUTHORITY_REVISIONS",
+    "scripts/ci/collection_parity_allowlist.txt",
+    "scripts/ci/vitest_known_red_baseline.txt",
+    "deploy.sh::REQUIRED_ACTIVATIONS",
+    "scripts/ci/check_declared_imports.py::ALLOWLIST",
+    "tests/test_820_no_abs_test_imports.py::PYTEST_INI_SHA256_HISTORY",
+]
+LIST_PATH = "scripts/ci/append_only_files.txt"
+SHELL_BLOCK = 'REQUIRED_ACTIVATIONS=(\n"old"\n)\necho end\n'
+
+
+def append_repo(files, listing=None, older=None):
+    root = harness.test_root("append-only")
+    import atexit
+    atexit.register(harness.cleanup, root)
+    sh("git", "init", "-q", "-b", "main", str(root))
+    sh("git", "-C", str(root), "config", "user.email", "t@t")
+    sh("git", "-C", str(root), "config", "user.name", "t")
+    def write(items):
+        for name, data in items.items():
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data if isinstance(data, bytes) else data.encode())
+    if older:
+        write(older)
+        sh("git", "-C", str(root), "add", "-A")
+        sh("git", "-C", str(root), "commit", "-qm", "older shared data")
+    write(files)
+    if listing is not None:
+        write({LIST_PATH: listing})
+    sh("git", "-C", str(root), "add", "-A")
+    sh("git", "-C", str(root), "commit", "-qm", "main shared data")
+    sh("git", "-C", str(root), "checkout", "-qb", "work")
+    os.chdir(root)
+    return root
+
+
+def append_commit():
+    sh("git", "add", "-A")
+    sh("git", "commit", "-q", "--allow-empty", "-m", "append fixture")
+    mg.begin_run()
+
+
+def append_case(name, before, after, expected, entry="data.txt", mutate=None):
+    path = entry.split("::")[0]
+    root = append_repo({path: before} if before is not None else {"keep": "keep"})
+    target = root / path
+    if after is None:
+        target.unlink()
+    else:
+        target.write_bytes(after if isinstance(after, bytes) else after.encode())
+    if mutate:
+        mutate(target)
+    append_commit()
+    verdict, detail = mg.append_only_detail(entry, "main", "work")
+    check("append_only " + name, verdict == expected and
+          (detail == "" if expected else detail.startswith(path + ": ")) and
+          mg.append_only(entry, "main", "work") == expected)
+    return root
+
+
+plain_cases = [
+    ("end append", "a\nb\n", "a\nb\nc\n", True),
+    ("middle append", "a\nb\n", "a\nc\nb\n", True),
+    ("line deleted", "a\nb\n", "a\n", False),
+    ("line changed", "a\nb\n", "a\nc\n", False),
+    ("no final newline", "a", "a\nb\n", False),
+    ("deleted file", "a\n", None, False),
+    ("created file", None, "a\n", False),
+    ("binary", b"a\0b\n", b"a\0b\nc\n", False),
+    ("identical", "a\n", "a\n", False),
+    ("CRLF changed to LF", b"a\r\nb\r\n", b"a\nb\r\nc\r\n", False),
+]
+for hostile in (False, True):
+    for name, before, after, expected in plain_cases:
+        def ambient(target):
+            if hostile:
+                script = target.parent / "external.sh"
+                script.write_text("#!/bin/sh\necho useless\n")
+                script.chmod(0o755)
+                for key, value in (("color.ui", "always"), ("diff.external", str(script)),
+                                   ("diff.algorithm", "patience"), ("diff.indentHeuristic", "false"),
+                                   ("diff.unsafe.textconv", str(script)), ("diff.renames", "copies")):
+                    sh("git", "config", key, value)
+                (target.parent / ".gitattributes").write_text("data.txt diff=unsafe\n")
+        append_case(name + (" hostile config" if hostile else ""), before, after, expected,
+                    mutate=ambient)
+    for extra in (False, True):
+        append_case("mode change" + (" and append" if extra else "") + str(hostile),
+                    "a\n", "a\nb\n" if extra else "a\n", False,
+                    mutate=lambda p: (ambient(p), p.chmod(0o755)))
+    append_case("symlink " + str(hostile), "a\n", "a\nb\n", False,
+                mutate=lambda p: (ambient(p), p.unlink(), p.symlink_to("keep")))
+    append_case("rename away " + str(hostile), "a\n", "a\n", False,
+                mutate=lambda p: (ambient(p), p.rename(p.with_name("renamed.txt"))))
+try:
+    mg.append_only("data.txt", "unresolvable-ref", "work")
+    check("append_only bad tree raises Undetermined", False)
+except mg.Undetermined:
+    check("append_only bad tree raises Undetermined", True)
+
+shell_entry = "deploy.sh::REQUIRED_ACTIVATIONS"
+for name, after, expected in [
+    ("shell literal", SHELL_BLOCK.replace('"old"', '"old"\n"new"'), True),
+    ("shell comment", SHELL_BLOCK.replace('"old"', '"old"\n# comment'), True),
+    ("shell blank", SHELL_BLOCK.replace('"old"', '"old"\n'), True),
+    ("shell after close", SHELL_BLOCK + '"new"\n', False),
+    ("shell before open", '"new"\n' + SHELL_BLOCK, False),
+    ("shell duplicate open", SHELL_BLOCK.replace('"old"', 'REQUIRED_ACTIVATIONS=(\n"old"'), False),
+    ("shell wrong opener", 'REQUIRED_ACTIVATIONS_TEXT="\n"old"\n)\n', False),
+    ("shell zero open", 'OTHER=(\n"old"\n"new"\n)\n', False),
+    ("shell inside and outside", SHELL_BLOCK.replace('"old"', '"old"\n"new"') + '# outside\n', False),
+] + [("shell rejects " + payload, SHELL_BLOCK.replace('"old"', '"old"\n' + payload), False)
+     for payload in ('"x" ) ; cmd ; _z=(', '"$(cmd)"', '"`cmd`"', 'word', ')')]:
+    append_case(name, SHELL_BLOCK, after, expected, shell_entry)
+    if name == "shell inside and outside":
+        check("SYMBOL reason names outside line", "line 6" in mg.append_only_detail(shell_entry, "main", "work")[1])
+
+py_tuple = 'X = (\n    "old",\n)\n'
+py_dict = 'ALLOWLIST: dict[str, str] = {\n    "old": """multi\nline""",\n    # interleaved comment\n}\n'
+py_set = 'AUTHORITY_REVISIONS = frozenset(\n    {\n        ("old", "v1"),\n    }\n)\n'
+for name, before, after, symbol, expected in [
+    ("Assign tuple", py_tuple, py_tuple.replace('    "old",', '    "old",\n    ("new", 2),'), "X", True),
+    ("AnnAssign dict multiline", py_dict, py_dict.replace('    #', '    "new": {"literal": 2},\n    #'), "ALLOWLIST", True),
+    ("after statement", py_tuple, py_tuple + 'Y = 2\n', "X", False),
+    ("changed entry", py_tuple, py_tuple.replace('old', 'new'), "X", False),
+    ("one line no interior", 'X = (1,)\n', 'X = (1,)\n# new\n', "X", False),
+    ("nested assignment", 'def f():\n    X = (\n        1,\n    )\n',
+     'def f():\n    X = (\n        1,\n        2,\n    )\n', "X", False),
+    ("unparseable", py_tuple, py_tuple.replace('    "old",', '    "old",\n    broken ?'), "X", False),
+    ("absent name", py_tuple, py_tuple.replace('    "old",', '    "old",\n    2,'), "ABSENT", False),
+    ("dict call", py_dict, py_dict.replace('    #', '    "k": __import__("os").system("x"),\n    #'), "ALLOWLIST", False),
+    ("literal cannot hide same-line call", py_tuple,
+     py_tuple.replace('    "old",', '    "old",\n    "new", cmd(),'), "X", False),
+    ("tuple call", py_tuple, py_tuple.replace('    "old",', '    "old",\n    cmd(),'), "X", False),
+    ("frozenset call gap", py_set, py_set.replace('    }\n', '    }\n    # injected\n'), "AUTHORITY_REVISIONS", False),
+    ("frozenset literal", py_set, py_set.replace('        ("old", "v1"),', '        ("old", "v1"),\n        ("new", "v2"),'), "AUTHORITY_REVISIONS", True),
+]:
+    append_case("SYMBOL " + name, before, after, expected, "data.py::" + symbol)
+for expression in ('1 + 2', '-1', '(lambda: 1)()', 'f"{1}"', '"safe", cmd()'):
+    append_case("SYMBOL nonliteral " + expression, py_tuple,
+                py_tuple.replace('    "old",', '    "old",\n    ' + expression + ','), False, "data.py::X")
+for suffix in ("txt", "md"):
+    append_case("SYMBOL wrong kind " + suffix, py_tuple, py_tuple + '# new\n', False, "data." + suffix + "::X")
+
+root = append_repo({"data.txt": "a\n"}, "# shared files\n\n" + "\n".join(APPEND_ENTRIES) + "\n")
+append_commit()
+check("list six committed entries round-trip in order", mg.append_only_list("main") == APPEND_ENTRIES)
+(root / LIST_PATH).write_text("branch-only.txt\n")
+append_commit()
+check("list ignores branch widening", mg.append_only_list("main") == APPEND_ENTRIES)
+root = append_repo({"data.txt": "a\n"})
+(root / LIST_PATH).parent.mkdir(parents=True, exist_ok=True)
+(root / LIST_PATH).write_text("data.txt\n")
+append_commit()
+check("list absent at main, branch-only ignored", mg.append_only_list("main") == [])
+for invalid in ("deploy.sh (new)", "-deploy.sh", "deploy.sh::", "x.py::A::B", "a b.txt", "some prose",
+                "deploy.sh\ndeploy.sh::REQUIRED_ACTIVATIONS", "x.py::A\nx.py::B"):
+    root = append_repo({"data.txt": "a\nb\n"}, "data.txt\n" + invalid + "\n",
+                       older={"data.txt": "a\n"})
+    (root / "data.txt").write_text("a\n")
+    append_commit()
+    check("list unusable " + invalid.replace("\n", "/"), mg.append_only_list("main") == [] and
+          mg.LAST_LIST_ERROR == invalid.splitlines()[-1])
+    import contextlib, io
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        rc = mg.main_(["work", "main"])
+    check("unusable list exempts nothing and reports first bad line", rc == 1 and
+          "append-only list unusable: " + invalid.splitlines()[-1] in output.getvalue() and
+          events()[-1]["reverted"] == ["data.txt"] and "append_only" not in events()[-1])
+
+(CONTENT / "L-spec-append.md").write_text("Writes: src/*\n")
+for kind in ("append", "revert-shaped", "rewrite-revert", "rewrite-new", "granted", "removed", "unlisted"):
+    older = {"deploy.sh": SHELL_BLOCK.replace('"old"', '"prior"'), "tests/allow.txt": "a\nb\n"}
+    root = append_repo({"deploy.sh": SHELL_BLOCK, "tests/allow.txt": "a\n"},
+                       "deploy.sh::REQUIRED_ACTIVATIONS\ntests/allow.txt\n", older=older)
+    if kind in ("append", "granted", "revert-shaped"):
+        (root / "deploy.sh").write_text(SHELL_BLOCK.replace('"old"', '"old"\n"new"'))
+        (root / "tests/allow.txt").write_text("a\nb\n" if kind == "revert-shaped" else "a\nc\n")
+    elif kind == "removed":
+        (root / "deploy.sh").unlink()
+    elif kind == "unlisted":
+        (root / "unlisted.txt").write_text("new\n")
+    else:
+        (root / "deploy.sh").write_text(SHELL_BLOCK.replace('"old"', '"prior"' if kind == "rewrite-revert" else '"different"'))
+    append_commit()
+    grant = ["deploy.sh", "tests/allow.txt"] if kind == "granted" else []
+    result = mg.gate("work", "main", grant)
+    channel = [dict(row) for row in mg.LAST_APPEND_ONLY]
+    expected_entries = (["deploy.sh::REQUIRED_ACTIVATIONS", "tests/allow.txt"] if kind in
+                        ("append", "revert-shaped") else ["deploy.sh::REQUIRED_ACTIVATIONS"]
+                        if kind.startswith("rewrite") else [])
+    check("gate channel order and reset " + kind, [row["entry"] for row in channel] == expected_entries and
+          mg.LAST_LIST_ERROR is None and len(result) == 5 and
+          all(set(row) == {"entry", "ok", "detail", "revert_shaped"} for row in channel))
+    check("gate verdict " + kind, bool(result.removed) == (kind == "removed") and
+          result.reverted == (["deploy.sh"] if kind == "rewrite-revert" else []))
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        rc = mg.main_(["work", "main"] + (["--writes"] + grant if grant else []))
+    check("gate CLI and event " + kind, rc == (1 if kind in ("removed", "rewrite-revert") else 0) and
+          events()[-1].get("append_only", []) == channel)
+    for row in channel:
+        prefix = "append-only ok (revert-shaped): " if row["ok"] and row["revert_shaped"] else (
+                 "append-only ok: " if row["ok"] else "append-only violated: ")
+        check("gate printed verdict " + row["entry"], prefix + row["entry"] in output.getvalue() and
+              row["ok"] == (not kind.startswith("rewrite")) and
+              (row["detail"] == "" if row["ok"] else "deleted" in row["detail"]))
+    advisory = mg.out_of_grant("work", "main", "L-spec-append")
+    expected = (["tests/allow.txt (append-only ok, revert-shaped)"] if kind == "revert-shaped" else
+                ["deploy.sh"] if kind.startswith("rewrite") else ["unlisted.txt"] if kind == "unlisted" else [])
+    check("out_of_grant append rules " + kind, advisory == expected)
+    if kind == "revert-shaped":
+        check("gate channel marks revert-shaped", channel[1]["revert_shaped"] is True)
+    # main_ must only print the channel: forbid helper/git access after gate returns.
+    real_gate, real_git, real_scan = mg.gate, mg.git, mg.secret_scan
+    def cached_gate(*args):
+        mg.LAST_APPEND_ONLY, mg.LAST_LIST_ERROR = channel, None
+        return result
+    def no_git(*args, **kwargs):
+        raise AssertionError("main_ recomputed append-only verdicts")
+    mg.gate, mg.git, mg.secret_scan = cached_gate, no_git, lambda *args: ("not-applicable", [])
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            mg.main_(["work", "main"])
+        check("main_ only reads append channel " + kind, True)
+    finally:
+        mg.gate, mg.git, mg.secret_scan = real_gate, real_git, real_scan
+    mg.begin_run()
+    check("begin_run resets append channel " + kind, mg.LAST_APPEND_ONLY == [] and mg.LAST_LIST_ERROR is None)
+
+# A later git failure must preserve already-computed diagnostics on rework.
+root = append_repo({"deploy.sh": SHELL_BLOCK}, "deploy.sh::REQUIRED_ACTIVATIONS\n")
+(root / "deploy.sh").write_text(SHELL_BLOCK.replace('"old"', '"old"\n"new"'))
+append_commit()
+real_git = mg.git
+
+def fail_later(*args, **kwargs):
+    if args[:1] == ("diff",) and "--no-ext-diff" in args:
+        raise mg.Undetermined("injected git diff failure")
+    return real_git(*args, **kwargs)
+
+# The first real path is judged; force a subsequent git failure before return.
+real_gate = mg.gate
+
+def partial_gate(*args):
+    real_gate(*args)
+    mg.git = fail_later
+    mg.append_only("deploy.sh::REQUIRED_ACTIVATIONS", "main", "work")
+
+mg.gate = partial_gate
+try:
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        rc = mg.main_(["work", "main"])
+    check("Undetermined preserves judged append event and output", rc == 1 and
+          events()[-1].get("append_only") == mg.LAST_APPEND_ONLY and
+          len(mg.LAST_APPEND_ONLY) == 1 and
+          "append-only ok: deploy.sh::REQUIRED_ACTIVATIONS" in output.getvalue())
+finally:
+    mg.gate, mg.git = real_gate, real_git
+with contextlib.redirect_stdout(io.StringIO()):
+    mg.main_(["work", "main", "--writes", "**"])
+check("pre-gate grant failure cannot reuse old append channel", "append_only" not in events()[-1])
+
 print(f"merge-gate: {sum(ok)}/{len(ok)} checks pass")
 sys.exit(0 if all(ok) else 1)

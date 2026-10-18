@@ -35,7 +35,7 @@ REPO AND A MISSING OR UNPARSEABLE `writes:` GRANT ALL READ AS REWORK.
 
 Runs at the Executor's merge step (§3.9, D17), BEFORE `--no-ff`.
 """
-import collections, json, os, pathlib, re, signal, subprocess, sys, time
+import ast, collections, json, os, pathlib, re, signal, subprocess, sys, time
 
 import fold
 import freeze
@@ -76,6 +76,8 @@ MIGRATIONS = re.compile(DEFAULT_MIGRATIONS, re.I)
 PATH_TOKEN_RE = re.compile(r"[A-Za-z0-9_.@+*?\[\]()/-]+")
 GIT_TIMEOUT, DEADLINE, REVERT_DEPTH, REVERT_MAX_PATHS = 20.0, 60.0, 50, 200
 _TOP, _START, _KNOBS = None, time.monotonic(), {}
+LAST_APPEND_ONLY, LAST_LIST_ERROR = [], None
+APPEND_LIST = "scripts/ci/append_only_files.txt"
 
 # R4/gate-secret-scan: the gated repository's own changed-files secret scan,
 # run over a merge that would otherwise be clean. A finding line is recognized
@@ -259,6 +261,157 @@ def diff_names(a, b):
     return out
 
 
+def _append_entry(entry):
+    parts = entry.split("::")
+    if (len(parts) not in (1, 2) or parts[0].startswith("-") or
+            not PATH_TOKEN_RE.fullmatch(parts[0]) or
+            (len(parts) == 2 and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", parts[1]))):
+        return None
+    return parts[0], parts[1] if len(parts) == 2 else None
+
+
+def append_only_list(main_sha):
+    """Only main can authorize shared paths; malformed lists authorize nothing."""
+    global LAST_LIST_ERROR
+    LAST_LIST_ERROR = None
+    if not git("ls-tree", "-z", main_sha, "--", APPEND_LIST):
+        return []
+    lines = git("show", f"{main_sha}:{APPEND_LIST}").decode("utf-8", "surrogateescape").splitlines()
+    entries, paths = [], set()
+    for line in lines:
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        parsed = _append_entry(line)
+        if parsed is None or parsed[0] in paths:
+            LAST_LIST_ERROR = line
+            return []
+        entries.append(line)
+        paths.add(parsed[0])
+    return entries
+
+
+def _module_assignment(source, symbol):
+    module = ast.parse(source)
+    matches = [node for node in module.body
+               if (isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == symbol
+                                                        for t in node.targets)) or
+               (isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
+                and node.target.id == symbol)]
+    return matches[0] if len(matches) == 1 and matches[0].value is not None else None
+
+
+def _literal(node):
+    if isinstance(node, ast.Constant):
+        return True
+    if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+        return all(_literal(item) for item in node.elts)
+    if isinstance(node, ast.Dict):
+        return all(_literal(k) and _literal(v) for k, v in zip(node.keys, node.values))
+    return False
+
+
+def _symbol_detail(path, symbol, main, branch, added):
+    source = git("show", f"{branch}:{path}")
+    if path.endswith(".sh"):
+        lines = source.decode("utf-8", "surrogateescape").split("\n")
+        opens = [i for i, line in enumerate(lines, 1) if re.match(r"^" + re.escape(symbol) + r"=\(", line)]
+        if len(opens) != 1:
+            return f"cannot resolve {symbol}"
+        start = opens[0]
+        end = next((i for i in range(start + 1, len(lines) + 1) if lines[i - 1] == ")"), None)
+        if end is None:
+            return f"cannot resolve {symbol}"
+        literal = re.compile(r'\s*("[^"$`\\]*"|#.*)?\s*')
+        for number in added:
+            if not start < number < end:
+                return f"added line {number} is outside {symbol}"
+            if not literal.fullmatch(lines[number - 1]):
+                return f"added line {number} is not literal data in {symbol}"
+        return ""
+    if not path.endswith(".py"):
+        return f"unsupported symbol file kind for {symbol}"
+    main_source = git("show", f"{main}:{path}")
+    try:
+        statement = _module_assignment(source, symbol)
+        original = _module_assignment(main_source, symbol)
+        if statement is None or original is None:
+            return f"cannot resolve {symbol}"
+        expressions = [n for n in ast.walk(statement.value) if isinstance(n, ast.expr)]
+        added_set = set(added)
+        for number in added:
+            if not statement.lineno < number < statement.end_lineno:
+                return f"added line {number} is outside {symbol}"
+            covering = [n for n in expressions if n.lineno <= number <= n.end_lineno]
+            # Several disjoint expressions can share one added physical line.
+            # Check every innermost expression so a literal key cannot hide a call.
+            narrowest = [n for n in covering if not any(child is not n and child in covering
+                         for child in ast.walk(n) if isinstance(child, ast.expr))]
+            new_code = any(not _literal(n) and (n.lineno in added_set or n.end_lineno in added_set)
+                           for n in covering)
+            if new_code or not narrowest or not all(_literal(n) for n in narrowest):
+                return f"added line {number} is not literal data in {symbol}"
+        # Compare the remaining value, not an executed/imported Python object.
+        remaining = b"\n".join(line for i, line in enumerate(source.split(b"\n"), 1)
+                               if i not in added_set)
+        restored = _module_assignment(remaining, symbol)
+        if restored is None or ast.dump(restored.value) != ast.dump(original.value):
+            return f"non-added value changed in {symbol}"
+    except (SyntaxError, ValueError, UnicodeError, RecursionError):
+        return f"unparseable Python for {symbol}"
+    return ""
+
+
+def append_only_detail(entry, main, branch):
+    """Prove an exact added-lines-only diff, optionally bounded to literal data."""
+    parsed = _append_entry(entry)
+    if parsed is None:
+        return False, f"{entry.split('::')[0]}: invalid append-only entry"
+    path, symbol = parsed
+    # Resolve both trees even when a file is absent; git failures are never False.
+    ends = [git("ls-tree", "-z", ref, "--", path) for ref in (main, branch)]
+    for side, record in zip(("main", "branch"), ends):
+        rows = record.rstrip(b"\0").split(b"\0")
+        if (len(rows) != 1 or not rows[0] or b"\t" not in rows[0] or
+                rows[0].split(b"\t", 1)[1].decode("utf-8", "surrogateescape") != path or
+                rows[0].split()[0] not in (b"100644", b"100755")):
+            return False, f"{path}: not a regular file at {side}"
+    if ends[0].split()[0] != ends[1].split()[0]:
+        return False, f"{path}: mode changed"
+    diff = git("diff", "--no-ext-diff", "--no-textconv", "--no-color",
+               "--diff-algorithm=myers", "--no-indent-heuristic", "--no-renames",
+               "-U0", main, branch, "--", path)
+    added, old, new, in_hunk = [], 0, 0, False
+    for line in diff.split(b"\n"):
+        hunk = re.match(rb"@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@", line)
+        if hunk:
+            old, new, in_hunk = int(hunk[1]), int(hunk[2]), True
+        elif in_hunk and line.startswith(b"-"):
+            return False, f"{path}: line {old} deleted"
+        elif in_hunk and line.startswith(b"+"):
+            added.append(new)
+            new += 1
+        elif in_hunk and line.startswith(b" "):
+            old, new = old + 1, new + 1
+        elif line.startswith((b"old mode ", b"new mode ", b"rename ", b"Binary files ", b"GIT binary patch")):
+            return False, f"{path}: non-text or mode/rename diff"
+    if not added:
+        return False, f"{path}: no added lines"
+    reason = _symbol_detail(path, symbol, main, branch, added) if symbol else ""
+    return (False, f"{path}: {reason}") if reason else (True, "")
+
+
+def append_only(entry, main, branch):
+    return append_only_detail(entry, main, branch)[0]
+
+
+def _reverted_paths(paths, main, tree):
+    window = revert_window(paths, main)
+    seen = blobs([f"{tree}:{p}" for p in paths]
+                 + [f"{c}:{p}" for p, cs in window.items() for c in cs])
+    return [p for p in paths if seen.get(f"{tree}:{p}") is not None
+            and any(seen.get(f"{c}:{p}") == seen[f"{tree}:{p}"] for c in window[p])]
+
+
 def revert_window(paths, main):
     """path -> the recent revisions of that path on main, for revert detection.
 
@@ -299,7 +452,8 @@ def begin_run(repo=None):
     whole of D113-D115's hardening — the GIT_* strip, the pinned config, the
     shallow/replace-ref/submodule hard stops — and a second hand-rolled prologue
     is exactly how one of them comes to be missing from the other."""
-    global _START
+    global _START, LAST_APPEND_ONLY, LAST_LIST_ERROR
+    LAST_APPEND_ONLY, LAST_LIST_ERROR = [], None
     _START = time.monotonic()          # the budget is per RUN, not per process
     load_config()
     preflight(repo)
@@ -331,16 +485,16 @@ def gate(branch, main, grant):
         elif st[0] == "M" and not granted(path, grant):
             modified.append(path)
 
-    reverts = []
-    if modified:
-        window = revert_window(modified, main_sha)
-        # every lookup in ONE subprocess — the old shape spawned one rev-parse per
-        # revision per path, measured at 1.9s for a single 151-revision file.
-        seen = blobs([f"{tree}:{p}" for p in modified]
-                     + [f"{c}:{p}" for p, cs in window.items() for c in cs])
-        reverts = [p for p in modified
-                   if seen.get(f"{tree}:{p}") is not None
-                   and any(seen.get(f"{c}:{p}") == seen[f"{tree}:{p}"] for c in window[p])]
+    entries = append_only_list(main_sha)
+    reverts = _reverted_paths(modified, main_sha, tree) if modified else []
+    for entry in entries:
+        path = entry.split("::")[0]
+        if path not in modified:
+            continue
+        ok, detail = append_only_detail(entry, main_sha, tree)
+        LAST_APPEND_ONLY.append(dict(entry=entry, ok=ok, detail=detail, revert_shaped=path in reverts))
+    exempt = {row["entry"].split("::")[0] for row in LAST_APPEND_ONLY if row["ok"]}
+    reverts = [path for path in reverts if path not in exempt]
     return Result(removed, reverts, main_sha, branch_sha, tree)
 
 
@@ -470,13 +624,23 @@ def out_of_grant(branch, main, spec_id):
     if p.returncode:
         raise Undetermined("the merge does not apply cleanly — a conflicted merge is not a gated one")
     tree = p.stdout.decode().splitlines()[0].strip()
+    entries = {entry.split("::")[0]: entry for entry in append_only_list(main_sha)}
+    changes = diff_names(main_sha, tree)
+    judged = {path: append_only(entries[path], main_sha, tree) for st, path, _ in changes
+              if st == "M" and path in entries and not granted(path, grant)}
+    accepted = [path for path, ok in judged.items() if ok]
+    reverts = _reverted_paths(accepted, main_sha, tree) if accepted else []
     out = []
-    for st, path, dest in diff_names(main_sha, tree):
+    for st, path, dest in changes:
         code = st[0]
         if code in "DT":
             continue
         target = dest if (code in "RC" and dest) else path
         if not granted(target, grant):
+            if code == "M" and judged.get(target, False):
+                if target not in reverts:
+                    continue
+                target += " (append-only ok, revert-shaped)"
             out.append(target)
     return out
 
@@ -684,6 +848,17 @@ def conflict_event(branch, main, spec):
     return 1
 
 
+def _print_append_only():
+    if LAST_LIST_ERROR is not None:
+        print(f"append-only list unusable: {LAST_LIST_ERROR}")
+    for row in LAST_APPEND_ONLY:
+        if row["ok"]:
+            label = "ok (revert-shaped)" if row["revert_shaped"] else "ok"
+            print(f"append-only {label}: {row['entry']}")
+        else:
+            print(f"append-only violated: {row['entry']}: {row['detail']}")
+
+
 def main_(argv):
     branch = argv[0]
     if branch.startswith("-"):      # `doit gate --help` once appended a rework event with subject "--help"
@@ -704,11 +879,13 @@ def main_(argv):
     # gate's own verdict would be recorded as the grader's.
     os.environ["DOIT_LEDGER_FILE"] = os.environ.get("DOIT_GATE_LEDGER_FILE", "L-executor-0001.jsonl")
     subject = spec or branch
+    gate_started = False
     try:
         if grant:
             check_grant(grant, "--writes")     # the CLI was never checked at all
         if spec:
             grant = grant_for(spec, grant)
+        gate_started = True
         r = gate(branch, main, grant)
         removed, reverts, main_sha, branch_sha, tree = r
         status = "rework" if (removed or reverts) else "clean"
@@ -729,6 +906,7 @@ def main_(argv):
                     # a knob that weakens the gate and leaves no trace makes a
                     # doctored `clean` indistinguishable from an honest one
                     + ([f"knobs:={json.dumps(_KNOBS)}"] if _KNOBS else [])
+                    + ([f"append_only={json.dumps(LAST_APPEND_ONLY)}"] if LAST_APPEND_ONLY else [])
                     # narrowed from a blanket `if status == "rework"`: a
                     # secret-scan-triggered rework carries neither key, so it
                     # never implies a grant violation that did not happen.
@@ -740,6 +918,7 @@ def main_(argv):
               + (f"\n  removed:  {', '.join(removed)}" if removed else "")
               + (f"\n  reverted: {', '.join(reverts)}" if reverts else "")
               + (f"\n  secret-scan: {scan_verdict}" if scan_verdict else ""))
+        _print_append_only()
         return 0 if status == "clean" else 1
     except Undetermined as e:
         # ★ ONE Undetermined is not like the others. A real content conflict with a
@@ -758,8 +937,12 @@ def main_(argv):
             ev = conflict_event(branch, main, spec)
             if ev is not None:
                 return ev
-        fold.append(["merge-gate-rework", subject, f"branch={branch}", f"undetermined={e}"])
+        fold.append(["merge-gate-rework", subject, f"branch={branch}", f"undetermined={e}"]
+                    + ([f"append_only={json.dumps(LAST_APPEND_ONLY)}"]
+                       if gate_started and LAST_APPEND_ONLY else []))
         print(f"merge-gate: rework — could not determine: {e}")
+        if gate_started:
+            _print_append_only()
         return 1
 
 
