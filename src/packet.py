@@ -16,7 +16,7 @@ Writes `$R/packets/<subject>-<role>-<n>.md` and prints the path.
 import argparse, hashlib, os, pathlib, re, shlex, subprocess, sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import amends, audit, fold, merge_gate, models, routing  # noqa: E402
+import amends, audit, fold, merge_gate, models, routing, grader_packet  # noqa: E402
 
 ROOT = pathlib.Path(os.environ.get("DOIT_ROOT", pathlib.Path.home() / ".do-it"))
 CONTENT, PACKETS = ROOT / "content", ROOT / "packets"
@@ -1047,6 +1047,7 @@ def p_grader(c):
     # does not.
     # L-spec-0673, 2026-10-05: same family — a card quoting the build's base_sha (e.g. after a squash
     # rework) tripped the base_sha Blindness cue. Redact every recorded base_sha of this subject.
+    out = grader_packet.packet_items(c, out)
     shas = _subject_base_shas(c)
     return [_redact_base_shas(_redact_builder_spawn(l), shas) for l in out]
 

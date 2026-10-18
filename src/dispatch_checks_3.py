@@ -118,7 +118,182 @@ def check_dispatch_0898():
             dispatch.ROOT, dispatch.EVENTS, dispatch.CONTENT, fold.ROOT, models.resolve, dispatch.ensure_room = saved
             dispatch.run_claude, dispatch.run_seat, dispatch.run_codex = backends
             dispatch.AGENTS = agents
+    check_evidence1109()
     print("L0898 AC2 AC3 AC4 regression checks passed")
+
+def check_evidence1109():
+    import argparse, contextlib, hashlib, io, json, os, pathlib, subprocess, tempfile
+    from unittest import mock
+    import dispatch, fold, grader_packet, grading_env, models, scratch
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        repo = root / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        packet = root / "packet.md"
+        packet.write_text("fixture")
+        subject, ready = "L-spec-1109", "e" * 40
+        eventdir = root / "events"
+        eventdir.mkdir()
+        ledger = eventdir / "L-builder-0001.jsonl"
+        done = {"v": 1, "type": "build-done", "subject": subject, "ready_sha": ready,
+                "ts": "2026-10-18T00:00:00Z", "status": "DONE", "project": "fixture"}
+        ledger.write_text(json.dumps(done) + "\n")
+        directory = root / "content" / "evidence" / subject
+        directory.mkdir(parents=True)
+        tail = directory / "0.tail"
+        tail.write_text("all passed")
+        bundle = {"spec": subject, "sha": ready, "base_sha": "a" * 40,
+                  "commands": [{"criterion": "AC1", "tail": str(tail), "exit": 0}],
+                  "base": [], "comparison": {"pre_existing": ["known"], "new": [], "undetermined": []},
+                  "judgment_only": ["AC2"]}
+        path = directory / "bundle.json"
+        raw = json.dumps(bundle)
+        path.write_text(raw)
+        event = {"v": 1, "type": "evidence-bundle", "subject": subject, "sha": ready,
+                 "path": str(path), "bundle_sha256": hashlib.sha256(raw.encode()).hexdigest(),
+                 "ts": "2026-10-18T00:01:00Z"}
+        out = {"verdicts": [{"ac": "AC1", "verdict": "met", "reason": "bundle"},
+                            {"ac": "AC2", "verdict": "met", "reason": "diff"}],
+               "judgment_only": ["AC2"], "pre_existing": ["known"], "matches_intent": "yes",
+               "card_ok": "yes", "checkers": [], "could_not_run": False,
+               "contamination": False, "declarations": []}
+        calls = []
+        real_popen = subprocess.Popen
+        def popen(argv, *args, **kw):
+            if "run-checks" in argv:
+                calls.append((argv, kw))
+                return mock.Mock()
+            return real_popen(argv, *args, **kw)
+        def backend(*a, **kw):
+            return subprocess.CompletedProcess([], 0, json.dumps({"structured_output": out}))
+        with mock.patch.dict(os.environ, {"DOIT_ROOT": str(root), "HOME": str(root), "DOIT_NO_POKE": "1"}), \
+             mock.patch.multiple(dispatch, ROOT=root, EVENTS=eventdir, CONTENT=root / "content"), \
+             mock.patch.multiple(fold, ROOT=root, EVENTS=eventdir), \
+             mock.patch.object(models, "resolve", return_value={"backend": "codex", "model": "fixture", "source": "fixture"}), \
+             mock.patch.object(dispatch, "ensure_room", return_value=True), \
+             mock.patch.object(dispatch, "run_codex", side_effect=backend), \
+             mock.patch.object(scratch, "root", return_value=root.parent), \
+             mock.patch.object(subprocess, "Popen", side_effect=popen):
+            def drive():
+                a = argparse.Namespace(role="grader", subject=subject, packet=str(packet), path=None,
+                                       cwd=str(repo), charter=None, project="fixture", mcp_config=None,
+                                       timeout=None, max_usd=None, seat=False)
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    try:
+                        dispatch.main(a)
+                    except SystemExit:
+                        pass
+                result = max(eventdir.glob("L-grader-*.jsonl"))
+                return [json.loads(line) for line in result.read_text().splitlines()]
+            def publish(*events):
+                runner = eventdir / "L-build-runner-0001.jsonl"
+                runner.write_text("".join(json.dumps(e) + "\n" for e in events))
+            def signed(ac, rows):
+                body = json.dumps(rows, sort_keys=True)
+                print(json.dumps({"criterion": ac, "url": "cli://grader-evidence/" + ac, "status": 0,
+                                  "body_sha256": hashlib.sha256(body.encode()).hexdigest(),
+                                  "body_excerpt": [{"type": r["type"], "reason": r.get("reason")} for r in rows]}))
+            for _ in range(4):
+                rows = drive()
+                assert [r["type"] for r in rows] == ["spawn-failed"]
+                assert rows[0]["reason"] == "bundle-pending"
+                assert calls[-1][0][1:] == ["run-checks", subject, "--sha", ready]
+                assert calls[-1][1]["start_new_session"] is True
+            assert len(calls) == 4 and dispatch.grading_budget(fold.read_events(), subject) is None
+            publish(event)
+            rows = drive()  # stale packet has no digest
+            assert rows[0]["reason"] == "bundle-pending" and len(calls) == 5
+            packet.write_text("bundle_sha256: `" + event["bundle_sha256"] + "0`")
+            rows = drive()  # a longer digest sharing the prefix is not a match
+            assert [r["type"] for r in rows] == ["spawn-failed"]
+            assert rows[0]["reason"] == "bundle-pending" and len(calls) == 6
+            signed("AC4", rows)
+            packet.write_text("bundle_sha256: `" + event["bundle_sha256"] + "`")
+            rows = drive()
+            verdict = next(r for r in rows if r["type"] == "verdict")
+            assert verdict["pre_existing"] == ["known"] and verdict["judgment_only"] == ["AC2"]
+            assert verdict["n_judgment_only"] == 1
+            signed("AC7", rows)
+            for field, value in (("pre_existing", ["invented"]), ("judgment_only", ["AC1"]),
+                                 ("judgment_only", ["AC9"])):
+                prior = out[field]
+                out[field] = value
+                rows = drive()
+                assert rows[-1]["type"] == "spawn-failed" and field in rows[-1]["why"]
+                assert not any(r["type"] in ("verdict", "capability-hold", "escalation-blocking") for r in rows)
+                out[field] = prior
+            out["verdicts"][0].update(verdict="cannot-assess", reason_code="tool-failed", missing_capability="git")
+            for cap in ("git", "node_modules", "db", "view-paths"):
+                out["verdicts"][0]["missing_capability"] = cap
+                rows = drive()
+                assert rows[-1]["type"] == "spawn-failed"
+                assert not any(r["type"] in ("verdict", "capability-hold", "escalation-blocking") for r in rows)
+            signed("AC8", rows)
+            no_command = {**event}
+            plain = {**bundle, "commands": []}
+            path.write_text(json.dumps(plain))
+            no_command["bundle_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+            publish(no_command)
+            packet.write_text("bundle_sha256: `" + no_command["bundle_sha256"] + "`")
+            rows = drive()
+            assert any(r["type"] == "capability-hold" for r in rows)
+            # Seat dispatch recomputes required() in preflight and ignores old execution holds.
+            import grader_view
+            out["verdicts"][0] = {"ac": "AC1", "verdict": "met", "reason": "bundle"}
+            path.write_text(raw)
+            publish(event)
+            packet.write_text("bundle_sha256: `" + event["bundle_sha256"] + "`")
+            view = root / "view"
+            (view / "tree").mkdir(parents=True)
+            dispatch.emit(eventdir / "L-grader-0000.jsonl",
+                          {"subject": "capability:view-paths:" + subject}, "capability-hold",
+                          capability="view-paths", spec=subject, source="preflight")
+            with mock.patch.object(models, "resolve", return_value={"backend": "seat", "model": "fixture", "source": "fixture"}), \
+                    mock.patch.object(grader_view, "build", return_value=view), \
+                    mock.patch.object(dispatch, "run_seat", side_effect=backend), \
+                    mock.patch.object(grading_env, '_prove_view_paths', side_effect=AssertionError('path proof attempted')), \
+                    mock.patch.object(grading_env, '_prove_tools', side_effect=AssertionError('tool proof attempted')):
+                for command in ("python3 -m pytest /opt/fixture/tests", "git diff HEAD"):
+                    (root / "content" / (subject + ".md")).write_text(
+                        "## Acceptance criteria\nAC1 [backend]: fixture\nreview_path: run " + command + "\n")
+                    rows = drive()
+                    assert any(r["type"] == "verdict" for r in rows), rows
+                    assert not any(r["type"] in ("grading-preflight-failed", "capability-hold") for r in rows)
+            signed("AC6", rows)
+            dispatch.emit(ledger, {"subject": subject, "project": "fixture"}, "build-done",
+                          ready_sha=ready, status="DONE")
+            # Restore good command and use malformed runner publications.
+            path.write_text(raw)
+            publish(event, {"v": 1, "type": "evidence-bundle-failed", "subject": subject,
+                            "sha": ready, "reason": "runner failure", "ts": "2026-10-18T00:02:00Z"})
+            before = len(calls)
+            def refused():
+                rows = drive()
+                assert [r["type"] for r in rows] == ["grading-preflight-failed", "spawn-failed"]
+                assert rows[0]["capability"] == "runner" and rows[1]["reason"] == "preflight:runner"
+                assert len(calls) == before
+                return rows
+            refused()
+            for badpath in (directory / "missing", root / "outside", directory / ".." / "outside"):
+                publish({**event, "path": str(badpath)})
+                real_read = pathlib.Path.read_bytes
+                def checked_read(candidate):
+                    assert candidate != badpath, "outside file opened"
+                    return real_read(candidate)
+                if badpath.name == "missing":
+                    rows = refused()
+                else:
+                    badpath.write_text(raw)  # valid digest still cannot authorize an outside path
+                    with mock.patch.object(pathlib.Path, "read_bytes", autospec=True, side_effect=checked_read):
+                        rows = refused()
+                assert rows[0]["reason"] == "bundle-unreadable"
+            publish({**event, "bundle_sha256": "bad"})
+            rows = refused()
+            signed("AC5", rows)
+            board = subprocess.run([str(dispatch.HERE.parent / "doit")], capture_output=True, text=True)
+            assert board.returncode == 0, board.stderr
+            print("grader-evidence AC4 AC5 AC7 AC8 dispatch ledger round trips passed")
 
 # END L0898 REGRESSIONS
 if __name__ == "__main__":

@@ -154,6 +154,9 @@ def test_dispatch_0898():
 
 _legacy = r"""
 from pathlib import Path
+from unittest.mock import patch
+import sys
+sys.path.insert(0, str(Path(__file__).parent))
 _historical = Path(__file__).with_name("dispatch_checks_3.py").read_text().split("# END L0898 REGRESSIONS\n", 1)[1]
 for _chunk in range(1, 4):
     _path = Path(__file__).with_name(f"dispatch_checks_{_chunk}.py")
@@ -165,7 +168,11 @@ for _chunk in range(1, 4):
         "dispatch.builder_worktree_preflight = lambda *args: None")
     _source = _source.replace("importlib.reload(dispatch)",
         "importlib.reload(dispatch)\ndispatch.builder_worktree_preflight = lambda *args: None")
-    exec(compile(_source, str(_path), "exec"), globals())
+    # These historical graders exercise legacy no-bundle capability and
+    # verdict handling. The real bundle gate is covered in check_evidence1109
+    # above, in its own process; it now refuses these old fixture packets.
+    with patch("grader_packet.gate", return_value=None):
+        exec(compile(_source, str(_path), "exec"), globals())
 """
 if __name__ == "__main__":
     if sys.argv[1:] == ["--alloc-cases"]:

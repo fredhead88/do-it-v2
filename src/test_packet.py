@@ -1810,3 +1810,106 @@ def test_verify_wrapper_base():
 
 
 test_verify_wrapper_base()
+
+
+def test_grader_evidence():
+    import hashlib
+    from unittest.mock import patch
+    import grader_packet as gp
+    subject = "L-spec-1109"
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        repo = root / "repo"
+        repo.mkdir()
+        def git(*args):
+            return subprocess.run(["git", "-C", str(repo), *args], check=True,
+                                  capture_output=True, text=True).stdout.strip()
+        git("init", "-q")
+        git("-c", "user.name=t", "-c", "user.email=t@invalid", "commit", "--allow-empty", "-qm", "base")
+        base = git("rev-parse", "HEAD")
+        (repo / "change").write_text("L-builder-9999\n")
+        git("add", "change")
+        git("-c", "user.name=t", "-c", "user.email=t@invalid", "commit", "-qm", "change")
+        ready = git("rev-parse", "HEAD")
+        directory = root / "content" / "evidence" / subject
+        directory.mkdir(parents=True)
+        tail = directory / "0.tail"
+        tail.write_text("all command output\n")
+        data = {"spec": subject, "sha": ready, "base_sha": base,
+                "commands": [{"criterion": "AC1", "tail": str(tail), "exit": 0}],
+                "base": [], "comparison": {"pre_existing": [], "new": [], "undetermined": []},
+                "judgment_only": []}
+        path = directory / "bundle.json"
+        raw = json.dumps(data, indent=2) + "\n"
+        path.write_text(raw)
+        event = {"type": "evidence-bundle", "subject": subject, "sha": ready,
+                 "path": str(path), "bundle_sha256": hashlib.sha256(raw.encode()).hexdigest()}
+        with patch.object(gp, "root", return_value=root):
+            bundle = gp.bundle_for([event], subject, ready)
+            rendered = "\n".join(gp.sections(bundle, repo))
+            assert "## Evidence bundle" in rendered and "## Diff" in rendered
+            assert event["bundle_sha256"] in rendered and "all command output" in rendered
+            assert raw in rendered and "+L-builder-9999" in rendered
+            assert gp.sections(None, repo) == []
+            assert gp.bundle_for([event], subject, "other") is None
+            assert gp.checker(bundle, "legacy") != "legacy"
+            assert "re-run" not in gp.checker(bundle, "legacy")
+            assert gp.checker(None, "legacy") == "legacy"
+            sections_method = gp.sections
+            from types import SimpleNamespace
+            spec = root / "spec.md"
+            spec.write_text("## Acceptance criteria\nAC1 [backend]: fixture\nreview_path: inspect evidence\n")
+            card = root / "card.md"
+            card.write_text("built by L-builder-9999\nAC1 [backend] done\nprivate card rationale\n")
+            build = {"ready_sha": ready, "base_sha": base, "ts": "2026-10-18T00:00:00Z"}
+            context = SimpleNamespace(evs=[event], a=SimpleNamespace(subject=subject),
+                spec_file=lambda: spec, card_file=lambda: card, all_of=lambda kind: [],
+                charter_id=lambda: None, worktree=lambda: str(repo), project=lambda: "fixture",
+                last=lambda kind: build if kind == "build-done" else None, specs={})
+            with patch.object(packet, "write_verify_script", return_value=None), \
+                    patch.object(packet.models, "resolve", return_value={"backend": "codex"}), \
+                    patch.object(packet, "waiver_line", return_value="none"), \
+                    patch.object(gp, "sections", side_effect=lambda b, checkout: sections_method(b, repo)):
+                rendered_packet = "\n".join(packet.p_grader(context))
+            assert "## Evidence bundle" in rendered_packet and "## Diff" in rendered_packet
+            assert ready not in rendered_packet and base not in rendered_packet
+            assert "L-builder-9999" not in rendered_packet and "private card rationale" not in rendered_packet
+            assert not any(value in rendered_packet for _, value in packet.builder_cues(context) if value)
+            context.evs = []
+            with patch.object(packet, "write_verify_script", return_value=None), \
+                    patch.object(packet.models, "resolve", return_value={"backend": "codex"}), \
+                    patch.object(packet, "waiver_line", return_value="none"):
+                unbundled_packet = "\n".join(packet.p_grader(context))
+            assert "## Evidence bundle" not in unbundled_packet and "## Diff" not in unbundled_packet
+            assert "re-run it with cwd" in unbundled_packet
+            with patch.object(gp.subprocess, "run") as run:
+                run.return_value.returncode = 0
+                for n in (2999, 3000, 3200):
+                    run.return_value.stdout = "\n".join("+line" for _ in range(n)) + "\n"
+                    section = gp.sections(bundle, repo)[-1]
+                    assert section.count("+line") == min(n, 3000)
+                    assert ("cap 3000" in section) == (n >= 3000)
+                    if n >= 3000:
+                        assert str(n) in section
+                run.return_value.returncode = 128
+                try:
+                    gp.sections(bundle, repo)
+                    raise AssertionError("failed diff accepted")
+                except ValueError:
+                    pass
+            text = ready + " " + ready[:12] + " " + base + " L-builder-9999 2026-10-18T00:00:00Z"
+            redacted = gp.redact(text, {"ready_sha": ready, "base_sha": base,
+                                       "ts": "2026-10-18T00:00:00Z"})
+            assert ready not in redacted and ready[:12] not in redacted and base not in redacted
+            assert "L-builder-9999" not in redacted and "2026-10-18" not in redacted
+            assert "[ready commit]" in redacted and "[base commit]" in redacted and "[this build]" in redacted
+            path.write_text("corrupted")
+            assert gp.bundle_for([event], subject, ready) is None
+    contract = (pathlib.Path(__file__).parents[1] / "agents" / "grader.md").read_text()
+    for term in ("## Evidence bundle", "## Diff", "comparison.pre_existing", "comparison.new",
+                 "comparison.undetermined", "evidence-missing", "judgment_only", "runs nothing"):
+        assert term in contract, term
+    print("grader-evidence AC1 AC2 AC3 AC9 packet, diff cap/failure, redaction and contract passed")
+
+
+test_grader_evidence()
