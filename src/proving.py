@@ -35,7 +35,7 @@ import owed
 LABEL = "Proving"
 GRACE_DAYS = 3
 UNDATED_DAYS = 7
-DISCHARGED = ("met", "waived", "dropped")
+DISCHARGED = ("met", "waived", "dropped", "unverifiable")
 BUILD_DONE = ("accepted", "shipped", "shipped-owed-due", "shipped-owed-evidence",
               "shipped-owed-expired", "closed-shipped", "closed-unbuilt", "killed", "dropped")
 
@@ -46,9 +46,9 @@ _KIND_ORDER = ("owed-check", "spec-review", "sweep", "brief", "killed-spec",
 _KIND_RANK = {k: i for i, k in enumerate(_KIND_ORDER)}
 
 # R4's governing post-declaration types — wider than `owed.checks()`'s own
-# internal "post" list (that one omits `owed-waived`; this unit's callers
+# internal "post" list (that one omits the explicit terminal closes; callers
 # need it, per SD9/ledger-vocabulary).
-_POST_TYPES = ("owed-failed", "owed-met", "owed-unobservable", "owed-waived")
+_POST_TYPES = ("owed-failed", "owed-met", "owed-unobservable", "owed-waived", "owed-unverifiable")
 
 
 def _parse_ts(s):
@@ -105,7 +105,7 @@ def _governing_post(evs, criterion, after_ts, now):
     """The newest of `_POST_TYPES` on `criterion` with `ts` strictly after
     `after_ts` (the governing `owed-ac`'s own ts) — `owed.checks()`'s own
     "post" definition, duplicated per-event and widened to include
-    `owed-waived` (R4's docstring, verbatim)."""
+    `owed-waived` and `owed-unverifiable`."""
     candidates = []
     for e in evs:
         if e.get("criterion") != criterion or e.get("type") not in _POST_TYPES:

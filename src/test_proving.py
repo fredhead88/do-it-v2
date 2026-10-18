@@ -45,7 +45,7 @@ def test_ac1():
     assert proving.LABEL == "Proving", proving.LABEL
     assert proving.GRACE_DAYS == 3, proving.GRACE_DAYS
     assert proving.UNDATED_DAYS == 7, proving.UNDATED_DAYS
-    assert proving.DISCHARGED == ("met", "waived", "dropped"), proving.DISCHARGED
+    assert proving.DISCHARGED == ("met", "waived", "dropped", "unverifiable"), proving.DISCHARGED
     assert proving.BUILD_DONE == ("accepted", "shipped", "shipped-owed-due", "shipped-owed-evidence",
                                   "shipped-owed-expired", "closed-shipped", "closed-unbuilt", "killed",
                                   "dropped"), proving.BUILD_DONE
@@ -680,9 +680,50 @@ for status, capability, owner in (
                           checks={"L-spec-lifecycle": [row]})
     item = next(it for it in out["items"] if it["kind"] == "owed-check")
     assert item["status"] == status and item["owner"] == owner, item
-assert proving.DISCHARGED == ("met", "waived", "dropped")
+assert proving.DISCHARGED == ("met", "waived", "dropped", "unverifiable")
 # Changing only derived status cannot create the event-based reopen signal.
 assert proving.to_reopen([ev("charter-proving", stamp(2)), ev("charter-closed", stamp(1))],
                          [spec("L-spec-lifecycle", "shipped-owed-due", [], "L-charter-lifecycle")],
                          NOW, checks={"L-spec-lifecycle": [{"criterion": "AC1", "status": "failed"}]}) == []
 print("owed-lifecycle AC11 ok")
+
+
+def test_unverifiable_discharged_1104():
+    import fold
+
+    assert "owed-unverifiable" in proving._POST_TYPES
+    subject, charter_id = "L-spec-91104", "L-charter-91104"
+    with tempfile.TemporaryDirectory(prefix="proving-unverifiable-") as directory:
+        events_dir = pathlib.Path(directory) / "events"
+        events_dir.mkdir()
+        files = {
+            "spec-writer": [ev("spec-written", stamp(12), charter=charter_id),
+                            ev("owed-ac", stamp(10), criterion="AC1", wake_at=stamp(8))],
+            "executor": [ev("shipped", stamp(9))],
+            "grader": [ev("verdict", stamp(8), confirmed=True)],
+            "reviewer": [ev("review", stamp(8), depth="gates-only")],
+            "prod-runner": [ev("owed-unverifiable", stamp(5), criterion="AC1", reason="cannot observe")],
+        }
+        for actor, rows in files.items():
+            (events_dir / f"L-{actor}-local.jsonl").write_text(
+                "".join(json.dumps({"v": 1, "subject": subject, **row}) + "\n" for row in rows))
+        previous_events = fold.EVENTS
+        try:
+            fold.EVENTS = events_dir
+            specs, _, ignored, by_subject = fold.fold(fold.read_events())
+        finally:
+            fold.EVENTS = previous_events
+        assert not ignored, ignored
+        history = by_subject[subject]
+        assert any(e["type"] == "owed-unverifiable" and e["actor"] == "prod-runner" for e in history)
+        assert owed.checks(history, NOW)[0]["status"] == "unverifiable"
+        charter = [ev("l1-complete", stamp(4)), ev("charter-proving", stamp(3)),
+                   ev("sweep-fixpoint", stamp(2))]
+        result = proving.summary(charter_id, charter, [specs[subject]], NOW,
+                                 title="unverifiable", review_owed=False, open_briefs=[])
+        assert result["remaining"] == 0 and result["items"] == [], result
+        assert proving._governing_event(history, "AC1", NOW)["type"] == "owed-unverifiable"
+    print("1104-AC9 admitted unverifiable owed row discharged: zero remaining")
+
+
+test_unverifiable_discharged_1104()

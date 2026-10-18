@@ -30,7 +30,7 @@ def parse(s):
 
 # ── AC1 · STATUSES is the pinned tuple ───────────────────────────────────────
 assert owed.STATUSES == ("waiting", "due", "blocked", "failed", "correcting", "quarantined",
-                          "met", "waived", "expired", "dropped", "unshipped"), owed.STATUSES
+                          "met", "waived", "expired", "dropped", "unshipped", "unverifiable"), owed.STATUSES
 print("AC1 ok")
 
 # ── AC2 · a criterion declared well before ship: the ship-anchored interval,
@@ -186,7 +186,7 @@ assert {r["spec"] for r in exp} == {S6}, exp
 
 # ── 0470-AC5 · owed.STATUSES gains "waived", inserted directly after "met" ───
 assert owed.STATUSES == ("waiting", "due", "blocked", "failed", "correcting", "quarantined",
-                          "met", "waived", "expired", "dropped", "unshipped"), owed.STATUSES
+                          "met", "waived", "expired", "dropped", "unshipped", "unverifiable"), owed.STATUSES
 print("0470-AC5 ok")
 
 # ── 0470-AC6 · an owed-waived after the governing owed-ac produces a "waived"
@@ -297,7 +297,7 @@ import ast
 from unittest.mock import patch
 
 assert owed.STATUSES == ("waiting", "due", "blocked", "failed", "correcting",
-                         "quarantined", "met", "waived", "expired", "dropped", "unshipped")
+                         "quarantined", "met", "waived", "expired", "dropped", "unshipped", "unverifiable")
 print("owed-lifecycle AC1 ok")
 
 LIFE = datetime(2026, 10, 15, tzinfo=timezone.utc)
@@ -436,3 +436,40 @@ project_imports = {name.split(".")[0] for node in ast.walk(imports)
                    if name.split(".")[0] in project_modules}
 assert project_imports == {"routing", "owed_routes"}, project_imports
 print("owed-lifecycle AC9 ok")
+
+
+# L-spec-1104 AC4: a terminal close survives verdict failures until re-declared.
+U_AC = {"ts": stamp(10), "type": "owed-ac", "subject": "L-spec-91104",
+        "criterion": "AC1", "wake_at": stamp(0)}
+U_SHIP = {"ts": stamp(9), "type": "shipped", "subject": U_AC["subject"]}
+U_CLOSE = {"ts": stamp(5), "type": "owed-unverifiable", "subject": U_AC["subject"],
+           "criterion": "AC1", "reason": "cannot observe"}
+
+
+def unverifiable_row(extra=(), close=U_CLOSE):
+    # Authorization precedes the pure lifecycle calculation, as in fold.fold().
+    assert fold.admits(close, "prod-runner") is None
+    events = sorted([U_AC, U_SHIP, close, *extra], key=lambda e: e["ts"])
+    return owed.checks(events, NOW)[0]
+
+
+assert unverifiable_row()["status"] == "unverifiable"
+print("1104-AC4 (a) admitted close: unverifiable")
+for kind, values in (("owed-failed", {"evidence": "failure", "kind": "unmet"}),
+                     ("owed-unobservable", {"capability": "browser", "why": "no browser"}),
+                     ("owed-quarantined", {"reason": "repeated", "spec_sha256": "digest"})):
+    later = {**U_CLOSE, "ts": stamp(3), "type": kind, **values}
+    assert unverifiable_row([later])["status"] == "unverifiable", kind
+    print("1104-AC4 (b)", kind, "leaves unverifiable")
+later_met = {**U_CLOSE, "ts": stamp(2), "type": "owed-met", "evidence": "observed"}
+assert unverifiable_row([later_met])["status"] == "met"
+print("1104-AC4 (c) later met: met")
+for declaration in ({**U_AC, "ts": stamp(1), "wake_at": stamp(-5)},
+                    {**U_AC, "ts": stamp(1), "type": "owed-routed", "route": "recheck"}):
+    assert unverifiable_row([declaration])["status"] in ("waiting", "due")
+print("1104-AC4 (d) re-date and recheck reopen")
+for when in (stamp(11), U_AC["ts"]):
+    assert unverifiable_row(close={**U_CLOSE, "ts": when})["status"] in ("waiting", "due")
+print("1104-AC4 (e) close before or at declaration ignored")
+assert "unverifiable" in owed.STATUSES
+print("1104-AC4 (f) STATUSES includes unverifiable; digest checked separately")
