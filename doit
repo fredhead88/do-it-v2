@@ -8,6 +8,7 @@ case "${1:-board}" in
   gate-window) shift; exec python3 "$SRC/window_gate.py" "$@" ;;
   base-red) shift; exec python3 "$SRC/base_red.py" "$@" ;;
   ci-runner) shift; exec python3 "$SRC/ci_runner.py" "$@" ;;
+  run-checks) shift; exec python3 "$SRC/build_runner.py" "$@" ;;
   dispatch) shift; exec python3 "$SRC/dispatch.py" "$@" ;;
   cancel)  shift; exec python3 "$SRC/cancel.py" "$@" ;;
   packet)  shift; exec python3 "$SRC/packet.py" "$@" ;;

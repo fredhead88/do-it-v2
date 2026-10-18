@@ -1,0 +1,6 @@
+#!/usr/bin/env python3
+import os
+import sys
+if os.environ.get("FIXTURE_FAIL") == "clone" and "clone" in sys.argv:
+    sys.exit(1)
+os.execv("/usr/bin/git", ["git", *sys.argv[1:]])

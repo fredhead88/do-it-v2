@@ -1,0 +1,5 @@
+#!/usr/bin/env python3
+import os
+import sys
+with open(os.environ["FIXTURE_LOG"], "a") as handle:
+    handle.write("stop " + sys.argv[sys.argv.index("-D") + 1].removesuffix("/data") + "\n")
