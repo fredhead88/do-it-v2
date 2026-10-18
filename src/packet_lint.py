@@ -10,8 +10,8 @@ message, severity}`. `applies_to` is exactly `"spec"` or `"packet:<role>"` —
 one value, never a list. `severity` is `"warn"` or `"block"`. A row's
 EFFECTIVE severity is `"block"` when a `[[promotion]]` row `{id, promoted_at,
 reason}` — an append-only, separate table — names its id, else the row's own
-`severity`. PL-001..PL-009 all ship `severity = "warn"`, no promotions exist,
-so their effective severity is `warn` today (AC2).
+`severity`. PL-001..PL-009 retain `severity = "warn"`; the checklist
+promotes PL-003, and PL-010 blocks fixed working directories.
 
 Adding a tenth defect class costs one toml row plus one check function here;
 promoting an existing one to blocking costs one `[[promotion]]` row.
@@ -22,7 +22,7 @@ security_path: every check function is a pure string/regex scan (plus one
 returning data — never `exec()`/`eval()` of `text` or the toml, and never a
 shell command built from either.
 """
-import pathlib, re, sys, tomllib
+import pathlib, posixpath, re, shlex, sys, tomllib
 
 HERE = pathlib.Path(__file__).resolve().parent
 CHECKLIST = HERE.parent / "lint" / "packet-checklist.toml"
@@ -122,6 +122,93 @@ def check_cd_prefix(text):
     block = _fenced_block(text, "Verification")
     if block and "cd /opt/albert-scott" in block:
         return "cd /opt/albert-scott"
+    return None
+
+
+def _fixed_cwd(target):
+    """Classify text only: never expand variables or inspect the named path."""
+    if target.startswith("/"):
+        path = posixpath.normpath(target)
+        return not any(path == root or path.startswith(root + "/")
+                       for root in ("/tmp", "/var/tmp"))
+    return target.startswith("~") or (target.startswith("$") and
+                                      bool(re.search(r"/repos(?:/|$)", target)))
+
+
+def _shell_cwd(command):
+    """Quote-aware command positions, plus shell -c command strings."""
+    segments, _ = packet._quote_aware_scan(command)
+    for segment in segments:
+        lexer = shlex.shlex(segment, posix=True, punctuation_chars=";&|()\n")
+        lexer.whitespace = " \t\r"
+        lexer.whitespace_split = True
+        tokens = []
+        # Keep a malformed trailing quote from hiding an earlier complete target.
+        try:
+            tokens.extend(lexer)
+        except ValueError:
+            pass
+        cmd, words = None, []
+        for token in tokens + ["\n"]:
+            if token and all(c in ";&|()\n" for c in token):
+                cmd, words = None, []
+                continue
+            if cmd is None:
+                if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", token):
+                    continue
+                if token in ("env", "command", "exec", "do"):
+                    continue
+                cmd = pathlib.PurePosixPath(token).name
+                continue
+            target = None
+            if cmd in ("cd", "pushd") and not words and not token.startswith("-"):
+                target = token
+            if words and (words[-1] == "--root" or
+                          (words[-1] == "-C" and cmd in ("git", "make", "tar"))):
+                target = token
+            if cmd in ("git", "make", "tar") and token.startswith("-C") and len(token) > 2:
+                target = token[2:]
+            if token.startswith("--root=") and cmd not in ("echo", "printf"):
+                target = token[len("--root="):]
+            if target and _fixed_cwd(target):
+                return target
+            if cmd in ("sh", "bash", "dash", "zsh", "ksh") and words and re.fullmatch(r"-[a-z]*c[a-z]*", words[-1]):
+                found = _shell_cwd(token)
+                if found:
+                    return found
+            if cmd not in ("cd", "pushd") or not token.startswith("-"):
+                words.append(token)
+    return None
+
+
+def check_live_checkout_cwd(text):
+    """PL-010: fixed cwd targets in Verification or criterion review paths.
+
+    Criterion anchors follow packet.criterion_block; headings end a block.
+    Review prose can introduce a command with `do`, or quote it in backticks.
+    The Verification block is scanned first, then review paths in file order.
+    """
+    found = _shell_cwd(_fenced_block(text, "Verification") or "")
+    if found:
+        return found
+    active, review, lines = False, False, []
+    for line in text.splitlines() + ["# end"]:
+        anchor = re.match(r"^\s*(?:[-*|]\s*)*(?:Acceptance:\s*)?\**AC\d+[a-z]?\**\s*\[", line)
+        if anchor or re.match(r"^#+\s", line):
+            if lines:
+                # Backticks delimit shell examples; prose's `do` starts a command.
+                for span in re.split(r"`+", "\n".join(lines)):
+                    span = re.sub(r"(?:^| / )do\s+", "\n", span)
+                    found = _shell_cwd(span)
+                    if found:
+                        return found
+            active, review, lines = bool(anchor), False, []
+        marker = re.search(r"\breview_path\b\s*:?", line, re.I) if active else None
+        if marker and not review:
+            review = True
+            line = line[marker.end():].lstrip()
+        if review:
+            lines.append(line)
     return None
 
 

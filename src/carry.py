@@ -44,7 +44,8 @@ FIELDS = ("spec_id", "intent", "status", "spec_file", "handed_over_at")
 # free-standing literal, byte-identical to the precedent, when `charter` is not
 # honored for any reason, or the honored charter's own id (D3) when it is.
 TRAILER = ("\n---\nCarry this spec over into v2 form — Writes: line, AC ids, Verification "
-           "block, under 400 lines. Change nothing substantive. {charter_clause} "
+           "block, under 400 lines. The Verification block opens with "
+           'cd "$(git rev-parse --show-toplevel)". Change nothing substantive. {charter_clause} '
            "Source: v4 spec {source_id}.\n")
 
 

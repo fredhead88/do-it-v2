@@ -6,7 +6,7 @@ read (finding 4) — AC1, AC4-AC10, AC12, AC14, AC15. AC2/AC3 (the `validate`
 wiring) live in test_validate.py; AC11 (the merge_gate regex fix itself)
 lives in test_merge_gate.py; AC13 (the `packet.py` builder-packet wiring)
 lives in test_packet.py."""
-import os, pathlib, re, sys, tempfile
+import os, pathlib, re, subprocess, sys, tempfile
 
 # R8.2: HOME/DOIT_ROOT isolation, set before any project module is imported —
 # `merge_gate` imports `fold` at module level, so a direct
@@ -113,18 +113,18 @@ FIX_DIR = pathlib.Path(tempfile.mkdtemp())
 FIX_TOML = FIX_DIR / "checklist-with-promotion.toml"
 FIX_TOML.write_text(packet_lint.CHECKLIST.read_text() +
                      '\n[[promotion]]\nid = "PL-001"\npromoted_at = "2026-09-24"\nreason = "test"\n')
-MULTI_FIRE = spec_text(base="HEAD", verify="cd /opt/albert-scott && /usr/bin/python3 -m pytest")
+MULTI_FIRE = spec_text(base="HEAD", verify="npx test && /usr/bin/python3 -m pytest")
 findings = packet_lint.run(MULTI_FIRE, FIX_TOML, "spec")
 by_id = {f["id"]: f["severity"] for f in findings}
 check(by_id.get("PL-001") == "block", f"a promoted PL-001 is effectively block: {by_id}")
-check(by_id.get("PL-003") == "warn", f"an unpromoted PL-003 stays warn: {by_id}")
+check(by_id.get("PL-004") == "warn", f"an unpromoted PL-004 stays warn: {by_id}")
 
-# ── AC15: the checklist parses, 9 unique ids, every check resolves, both new
+# ── AC15: the checklist parses, 10 unique ids, every check resolves, both new
 # files stay under the 400-line cap, and install.sh names test_packet_lint.py
 data = packet_lint.load(packet_lint.CHECKLIST)
 eids = [e["id"] for e in data["entry"]]
-check(len(eids) == 9 and len(set(eids)) == 9 and set(eids) == {f"PL-{n:03d}" for n in range(1, 10)},
-      f"nine unique ids PL-001..PL-009: {eids}")
+check(len(eids) == 10 and len(set(eids)) == 10 and set(eids) == {f"PL-{n:03d}" for n in range(1, 11)},
+      f"ten unique ids PL-001..PL-010: {eids}")
 check(all(hasattr(packet_lint, e["check"]) for e in data["entry"]),
       "every entry's check function resolves on packet_lint")
 HERE = pathlib.Path(__file__).resolve().parent
@@ -134,4 +134,38 @@ for f in (HERE / "packet_lint.py", HERE / "test_packet_lint.py"):
 install = (HERE.parent / "install.sh").read_text()
 check("test_packet_lint.py" in install, "install.sh's test line names test_packet_lint.py")
 
+# L-spec-1115 AC4/AC6: exercise the real checklist and the real CLI gate.
+import validate
+ROOT = HERE.parent
+PORTABLE = 'cd "$(git rev-parse --show-toplevel)"'
+severities = {f["id"]: f["severity"] for f in packet_lint.run(CD_PREFIX, packet_lint.CHECKLIST, "spec")}
+check(severities == {"PL-003": "block", "PL-010": "block"}, str(severities))
+check(all(e["severity"] == "warn" for e in data["entry"] if e["id"] != "PL-010"),
+      "all original entry severities remain warn")
+check({p["id"] for p in data["promotion"]} == {"PL-003"}, "only PL-003 is promoted")
+check(packet_lint.run("", packet_lint.CHECKLIST, "packet:builder")[0]["severity"] == "warn",
+      "PL-009 remains warn")
+for opener, blocked in (("cd /opt/albert-scott", True), (PORTABLE, False)):
+    fixture = spec_text(verify=opener + " && /usr/bin/python3 t.py") + "In plain English: fixture.\n"
+    blocks = validate.spec_shape(fixture)
+    for ident in ("PL-003", "PL-010"):
+        check(any(b.startswith(ident + ": ") for b in blocks) == blocked, str(blocks))
+    with tempfile.TemporaryDirectory() as scratch:
+        path = pathlib.Path(scratch) / "fixture.md"
+        path.write_text(fixture)
+        proc = subprocess.run([str(ROOT / "doit"), "shape", str(path)], capture_output=True, text=True)
+        check((proc.returncode != 0) == blocked, proc.stdout + proc.stderr)
+        for ident in ("PL-003", "PL-010"):
+            check(("BLOCK: " + ident + ":" in proc.stdout) == blocked, proc.stdout)
+for fixture in (HEAD_FIXTURE, BARE_NPX):
+    check(not validate.spec_shape(fixture + "In plain English: fixture.\n"), "warnings never block")
+contract = (ROOT / "agents" / "spec-writer.md").read_text()
+example = re.search(r"Rule one:.*?Correct example: `([^`]+)`", contract).group(1)
+check(example == PORTABLE + " && /usr/bin/python3 src/test_owed.py && ./doit test", example)
+example_spec = spec_text(verify=example) + "In plain English: fixture.\n"
+check(not ({"PL-003", "PL-010"} & ids(example_spec)), "Rule one example has no cwd findings")
+check(not validate.spec_shape(example_spec), "Rule one example passes the Verification bucket")
+
+# The overflow fixtures also run through this required entry point.
+import test_packet_lint_cd
 print(f"packet_lint: {N} checks pass")
