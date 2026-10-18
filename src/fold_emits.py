@@ -288,6 +288,12 @@ EMITS["bill-check"] = {"gh-bill"}
 EMITS["window-tree-verified"] = {"executor", "operator"}
 EMITS["window-bisected"] = {"executor", "operator"}
 
+# L-spec-1143: admit the train and batcher before their emitters land.
+EMITS["window-candidate"] = {"executor", "tick", "operator"}
+EMITS["window-cancelled"] = {"executor", "tick", "operator"}
+EMITS["train-depth"] = {"executor", "tick", "operator"}
+EMITS["batch-cap"] = {"executor", "tick", "operator"}
+
 REQUIRED_ROWS = {
     "seat-usage": ("five_hour_pct", "seven_day_pct", "five_hour_resets_at"),
     "balance": ("state_from", "state_to", "codex_pct"),
@@ -297,4 +303,8 @@ REQUIRED_ROWS = {
     "bill-check": ("date", "yday", "mtd"),
     "window-tree-verified": ("window", "sha", "tree"),
     "window-bisected": ("window", "halves"),
+    "window-candidate": ("sha", "verified_on", "specs"),
+    "window-cancelled": ("after", "reason"),
+    "train-depth": ("depth", "reason"),
+    "batch-cap": ("cap", "reason"),
 }

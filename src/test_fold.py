@@ -4280,7 +4280,8 @@ def test_ledger_vocabulary_1120():
         "window-bisected": {"window": "window-id", "halves": [["left"], ["right"]]},
     }
     assert fold.EMITS is fold_emits.EMITS
-    assert fold_emits.REQUIRED_ROWS == {kind: tuple(values) for kind, values in fields.items()}
+    for kind, values in fields.items():
+        assert fold_emits.REQUIRED_ROWS[kind] == tuple(values), kind
     candidates = set().union(*allowed.values()) | {"builder", "grader", "thinker", "planner", "unknown-actor"}
     missing_cases = 0
     for kind, actors in allowed.items():
@@ -4372,6 +4373,125 @@ def test_ledger_vocabulary_1120():
 
 
 test_ledger_vocabulary_1120()
+
+
+def test_ledger_vocabulary_1143():
+    import fold_emits
+
+    here = pathlib.Path(__file__).resolve().parent
+    actors = {"executor", "tick", "operator"}
+    fields = {
+        "window-candidate": {"sha": "revision", "verified_on": "base-revision", "specs": ["L-spec-1143"]},
+        "window-cancelled": {"after": "window-id", "reason": "predecessor-red"},
+        "train-depth": {"depth": 2, "reason": "disk-pressure"},
+        "batch-cap": {"cap": 6, "reason": "red-rate"},
+    }
+    assert fold.EMITS is fold_emits.EMITS
+    missing_cases = 0
+    for kind, values in fields.items():
+        event = {"type": kind, "subject": "L-spec-1143", **values}
+        assert fold.EMITS[kind] == actors, kind
+        print("1143-AC1", kind, ",".join(sorted(actors)))
+        assert fold.REQUIRED[kind] == fold_emits.REQUIRED_ROWS[kind] == tuple(values), kind
+        print("1143-AC2", kind, fold.REQUIRED[kind])
+        for actor in sorted(actors | {"builder", "grader", "thinker", "planner", "unknown-actor"}):
+            kept = fold.admits(event, actor) is None
+            assert kept == (actor in actors), (kind, actor)
+            print("1143-AC3", kind, actor, "kept" if kept else "ignored")
+        assert fold.required_reason(event) is None, kind
+        for field in values:
+            reason = fold.required_reason({key: value for key, value in event.items() if key != field})
+            assert reason and reason.endswith(field + "="), (kind, field, reason)
+            for blank in (None, "", " \t", 0, 0.0, False, []):
+                reason = fold.required_reason({**event, field: blank})
+                assert reason and reason.endswith(field + "="), (kind, field, blank, reason)
+            assert fold.required_reason({**event, field: "0"}) is None, (kind, field)
+            missing_cases += 1
+    assert missing_cases == 9, missing_cases
+    print("1143-AC4 missing-field cases:", missing_cases)
+
+    reader = ("import json, fold; "
+              "_, _, ignored, subjects = fold.fold(fold.read_events()); "
+              "print(json.dumps({'kept': subjects.get('L-spec-1143', []), 'ignored': ignored}))")
+    for kind, values in fields.items():
+        args = [f"{key}:={json.dumps(value)}" for key, value in values.items()]
+        for actor in sorted(actors | {"builder"}):
+            with tempfile.TemporaryDirectory(prefix="vocabulary-roundtrip-1143-") as directory:
+                filename = "L-executor-0001.jsonl" if actor == "executor" else f"L-{actor}-local.jsonl"
+                env = {**os.environ, "HOME": directory, "DOIT_ROOT": directory,
+                       "DOIT_LEDGER_FILE": filename, "DOIT_NO_POKE": "1"}
+                path = pathlib.Path(directory) / "events" / filename
+                written = subprocess.run([str(here.parent / "doit"), "append", kind, "L-spec-1143", *args],
+                                         env=env, capture_output=True, text=True)
+                if actor == "builder":
+                    assert written.returncode != 0 and "actor mismatch" in written.stderr, written.stderr
+                    assert not path.exists(), path
+                    written = subprocess.run(
+                        [sys.executable, "-c", "import sys, fold; fold.append(sys.argv[1:], strict=False)",
+                         kind, "L-spec-1143", *args], cwd=here, env=env, capture_output=True, text=True)
+                    assert f"recorded-and-ignored {kind} by {actor}" in written.stderr, written.stderr
+                assert written.returncode == 0, written.stderr
+                stored = [json.loads(line) for line in path.read_text().splitlines()]
+                assert len(stored) == 1 and "actor" not in stored[0], stored
+                assert all(stored[0][key] == value for key, value in values.items()), stored
+                readback = subprocess.run([sys.executable, "-c", reader], cwd=here, env=env,
+                                          check=True, capture_output=True, text=True)
+                result = json.loads(readback.stdout)
+                kept = actor in actors
+                assert len(result["kept"]) == int(kept) and len(result["ignored"]) == int(not kept), result
+                row = (result["kept"] if kept else result["ignored"])[0]
+                assert row["type"] == kind and row["actor"] == actor, row
+                assert all(row[key] == value for key, value in values.items()), row
+                print("1143-AC5", kind, actor, "kept" if kept else "ignored")
+
+        with tempfile.TemporaryDirectory(prefix="vocabulary-missing-1143-") as directory:
+            env = {**os.environ, "HOME": directory, "DOIT_ROOT": directory,
+                   "DOIT_LEDGER_FILE": "L-executor-0001.jsonl", "DOIT_NO_POKE": "1"}
+            path = pathlib.Path(directory) / "events" / env["DOIT_LEDGER_FILE"]
+            written = subprocess.run([str(here.parent / "doit"), "append", kind, "L-spec-1143", *args[:-1]],
+                                     env=env, capture_output=True, text=True)
+            assert written.returncode != 0 and "missing required field(s)" in written.stderr, written.stderr
+            assert not path.exists(), path
+            # The non-strict append path must refuse falsy fields too, including depth/cap=0.
+            first = next(iter(values))
+            for blank in (None, "", " \t", 0, 0.0, False, []):
+                blank_args = [f"{key}:={json.dumps(blank if key == first else value)}"
+                              for key, value in values.items()]
+                written = subprocess.run(
+                    [sys.executable, "-c", "import sys, fold; fold.append(sys.argv[1:], strict=False)",
+                     kind, "L-spec-1143", *blank_args], cwd=here, env=env, capture_output=True, text=True)
+                assert written.returncode != 0 and "missing required field(s)" in written.stderr, written.stderr
+                assert not path.exists(), path
+            print("1143-AC5", kind, "missing refused")
+
+    assert "window-verified" not in fold.EMITS
+    assert "window-verified" not in fold.REQUIRED
+    old = {"sha": "revision", "runs": ["run-url"], "kept": ["L-spec-1143"],
+           "dropped": [], "actions_minutes": 1}
+    new = {**old, "verified_on": "base-revision", "replaced": "previous-window", "after": "window-id",
+           "scope": "full", "scope_reason": "default", "selfhosted_minutes": 1, "minutes_source": "runs"}
+    for shape, values in (("old", old), ("new", new)):
+        with tempfile.TemporaryDirectory(prefix="vocabulary-compatible-1143-") as directory:
+            env = {**os.environ, "HOME": directory, "DOIT_ROOT": directory,
+                   "DOIT_LEDGER_FILE": "L-executor-0001.jsonl", "DOIT_NO_POKE": "1"}
+            args = [f"{key}:={json.dumps(value)}" for key, value in values.items()]
+            subprocess.run([str(here.parent / "doit"), "append", "window-verified", "L-spec-1143", *args],
+                           env=env, check=True, capture_output=True, text=True)
+            path = pathlib.Path(directory) / "events" / env["DOIT_LEDGER_FILE"]
+            stored = [json.loads(line) for line in path.read_text().splitlines()]
+            assert len(stored) == 1 and "actor" not in stored[0], stored
+            readback = subprocess.run([sys.executable, "-c", reader], cwd=here, env=env,
+                                      check=True, capture_output=True, text=True)
+            result = json.loads(readback.stdout)
+            assert not result["ignored"] and len(result["kept"]) == 1, result
+            row = result["kept"][0]
+            assert row["type"] == "window-verified" and row["actor"] == "executor", row
+            assert all(row[key] == value for key, value in values.items()), row
+            assert {key: value for key, value in row.items() if key not in ("actor", "_src")} == stored[0], row
+            print("1143-AC6 window-verified", shape, "kept")
+
+
+test_ledger_vocabulary_1143()
 
 
 def test_suite_run_vocabulary():
