@@ -1072,7 +1072,7 @@ for phrase in ("evidence bundle", "read it, do not re-run", "never execute check
                "## Output → events", "45-minute"):
     assert phrase in contract, phrase
 assert next(line for line in contract.splitlines() if line.startswith("tools:")) == \
-    "tools: Read, Glob, Grep, Bash, StructuredOutput, Write"
+    "tools: Read, Glob, Grep, Bash, StructuredOutput, Write, mcp__chrome-devtools"
 print("AC9 ok")
 for criterion, body in (("AC7", {"included": sorted(included), "excluded": sorted(set(reasons) - included),
                                  "dry_run_unchanged": dry_run_unchanged}),
@@ -1080,4 +1080,147 @@ for criterion, body in (("AC7", {"included": sorted(included), "excluded": sorte
     print(json.dumps({"url": f"cli://sweep-owed/{criterion}", "status": 0,
         "body_sha256": hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest(), "body_excerpt": body}))
 
+
+# L-spec-1112: browser manifests, real packet round-trip, legacy retries and one slot.
+import prod_browser
+import socket
+
+
+def browser_signature(criterion, body):
+    data = json.dumps(body, sort_keys=True)
+    print(json.dumps(dict(url='fixture://sweep-owed/' + criterion, status=0,
+                         body_sha256=hashlib.sha256(data.encode()).hexdigest(), body_excerpt=body)))
+    print(criterion + ' ok')
+
+
+clear()
+sid = 'L-spec-9998'
+write('L-spec-writer-browser.jsonl',
+      dict(type='spec-written', subject=sid, project='proj-a', ts=EPOCH),
+      *(dict(type='owed-ac', subject=sid, criterion=f'AC{i}', line='browser' if i > 3 else 'fixture',
+             wake_at=iso(hours=-14), ts=EPOCH) for i in range(1, 11)))
+write('L-executor-browser.jsonl', dict(type='shipped', subject=sid, ts=EPOCH))
+write('L-operator-browser.jsonl', dict(type='owed-unobservable', subject=sid, criterion='AC10',
+                                    capability='browser', why='fixture', ts=iso(hours=-13)))
+rows = owed.checks(specs_now()[1][sid]['evs'], NOW)
+assert rows[-1]['status'] == 'blocked'
+handed = sweep_owed.browser_input(specs_now()[1], sweep_owed.due_candidates(specs_now()[1], NOW), NOW)
+assert len(handed) == 10 and len({r['criterion'] for r in handed}) == 10
+for capability, age, expected in [('browser', -2, False), ('browser', -13, True),
+                                  ('browser-review-account', -13, False), ('node_modules', -13, False)]:
+    events = [e for e in specs_now()[1][sid]['evs'] if e['type'] != 'owed-unobservable']
+    events.append(dict(type='owed-unobservable', subject=sid, criterion='AC10',
+                       capability=capability, why='fixture', ts=iso(hours=age)))
+    status = owed.checks(events, NOW)[-1]['status']
+    candidate = sweep_owed.browser_input({sid: {'evs': events}}, [], NOW)
+    assert bool(candidate) is expected
+    assert status == ('blocked' if capability == 'browser' else 'expired')
+    print('browser retry', capability, age, status)
+browser_signature('AC14', {'browser': 'blocked with 12-hour retry',
+                           'browser-review-account': 'expired', 'node_modules': 'expired'})
+
+plain_text = sweep_owed._manifest_text('L-sweep-9998', 'proj-a', str(TMP), rows[:1])
+browser_text = sweep_owed._manifest_text('L-sweep-9998', 'proj-a', str(TMP), rows[:1], kind='browser')
+assert browser_text == plain_text.replace('kind: plain', 'kind: browser')
+manifest = CONTENT / 'L-sweep-9998.md'
+for kind, text in [('plain', plain_text), ('browser', browser_text), ('plain', plain_text.replace('kind: plain\n', ''))]:
+    manifest.write_text(text)
+    parsed = sweep_owed.packet.parse_sweep_manifest(manifest)
+    assert parsed['kind'] == kind and parsed['rows'] == rows_of(manifest)
+    process = subprocess.run([str(REPO_ROOT / 'doit'), 'packet', 'owed-sweeper', manifest.stem],
+                             capture_output=True, text=True, env=dict(os.environ, DOIT_ROOT=str(TMP)))
+    assert process.returncode == 0, process.stderr
+    assert pathlib.Path(process.stdout.strip()).is_file()
+manifest.write_text(plain_text.replace('kind: plain', 'kind: other'))
+try:
+    sweep_owed.packet.parse_sweep_manifest(manifest)
+    raise AssertionError('unknown manifest kind accepted')
+except SystemExit:
+    pass
+manifest.unlink()
+browser_signature('AC13', {'real_packet_browser': 0, 'real_packet_plain': 0, 'unknown_kind_refused': True})
+
+for kind in ('plain', 'browser'):
+    fake = FakeRunner()
+    before = set(CONTENT.glob('L-sweep-*.md'))
+    lines = sweep_owed.dispatch_batch('proj-a', rows[:1], fake, kind=kind)
+    assert len(fake.calls) == 2
+    argv = fake.calls[-1]
+    assert argv.count('--mcp-config') == int(kind == 'browser')
+    assert '--detach' in argv and '--cwd' in argv and '--project' in argv
+    if kind == 'browser':
+        assert argv[-1] == str(REPO_ROOT / 'mcp/chrome-devtools.json')
+    new = (set(CONTENT.glob('L-sweep-*.md')) - before).pop()
+    assert sweep_owed.packet.parse_sweep_manifest(new)['kind'] == kind
+    new.unlink()
+
+empty_observations = dict(lines=[], bundle_rows={}, held=set(), to_judgment=set())
+seen = []
+
+
+def classify(row):
+    return dict(runner='prod-browser' if int(row['criterion'][2:]) > 3 else 'judgment',
+                needs=['browser-review-account'] if int(row['criterion'][2:]) > 3 else ['repo'],
+                validity_h=24, commands=[])
+
+
+def partition(rows):
+    seen.append([r['criterion'] for r in rows])
+    return ([r for r in rows if r['criterion'] in ('AC4', 'AC5', 'AC6')],
+            [r for r in rows if r['criterion'] not in ('AC4', 'AC5', 'AC6')])
+
+
+with patch.object(prod_runner, 'run', return_value=empty_observations), \
+        patch.object(prod_runner, 'record_for', side_effect=classify), \
+        patch.object(prod_browser, 'split', side_effect=partition), \
+        patch.object(socket, 'socket', side_effect=AssertionError('network')), \
+        patch.object(os, 'system', side_effect=AssertionError('shell')), \
+        patch.object(subprocess, 'run', side_effect=AssertionError('process')), \
+        patch.object(subprocess, 'Popen', side_effect=AssertionError('process')):
+    fake = FakeRunner()
+    sweep_owed.run(now=NOW, runner=fake)
+    manifests = list(CONTENT.glob('L-sweep-*.md'))
+    assert len(manifests) == 1 and len(fake.calls) == 2
+    assert {r['criterion'] for r in rows_of(manifests[0])} == {'AC1', 'AC2', 'AC3'}
+    assert set(seen[-1]) == {f'AC{i}' for i in range(4, 11)}
+    manifests[0].unlink()
+    # With no plain project competing, one browser batch owns the slot.
+    with patch.object(sweep_owed, 'judgment_rows', return_value=([], [])):
+        fake = FakeRunner()
+        sweep_owed.run(now=NOW, runner=fake)
+        manifests = list(CONTENT.glob('L-sweep-*.md'))
+        assert len(manifests) == 1 and len(fake.calls) == 2
+        assert {r['criterion'] for r in rows_of(manifests[0])} == {'AC7', 'AC8', 'AC9', 'AC10'}
+        assert sweep_owed.packet.parse_sweep_manifest(manifests[0])['kind'] == 'browser'
+        runs = [e for e in fold.read_events() if e['type'] == 'sweep-run']
+        assert [e['kind'] for e in runs[-2:]] == ['plain', 'browser']
+        write('L-owed-sweeper-browser.jsonl', dict(type='spawn-started', subject=manifests[0].stem,
+             role='owed-sweeper', spawn='L-owed-sweeper-9998', project='proj-a'))
+        fake = FakeRunner()
+        sweep_owed.run(now=NOW, runner=fake)
+        assert not fake.calls
+browser_signature('AC7', {'plain_and_browser_dispatch': True, 'one_open_batch': True})
+browser_signature('AC8', {'plain': 3, 'e2e': 3, 'seat': 4, 'legacy_browser_routed': True})
+
+# The existing runner append path consumes the browser batch exactly once.
+clear()
+write('L-spec-writer-seam.jsonl', dict(type='spec-written', subject=sid, project='proj-a', ts=EPOCH),
+      dict(type='owed-ac', subject=sid, criterion='AC1', line='browser', wake_at=iso(hours=-1), ts=EPOCH))
+write('L-executor-seam.jsonl', dict(type='shipped', subject=sid, ts=EPOCH))
+with patch.object(prod_browser, 'run_batch', return_value=[dict(spec=sid, criterion='AC1', outcome='met',
+        observed_at=NOW.isoformat(), valid_until=iso(hours=24), evidence='clone=/fixture/scratch spec passed')]) as seam:
+    prod_runner.run(NOW)
+    assert seam.call_count == 1 and seam.call_args.args[0][0]['criterion'] == 'AC1'
+    assert owed.checks(specs_now()[1][sid]['evs'], NOW)[0]['status'] == 'met'
+
+# Reverse exactly the three granted edits; all other bytes match the baseline.
+actual = (REPO_ROOT / 'agents/owed-sweeper.md').read_text()
+normalized = re.sub(r'\n### Browser batches\n.*?(?=\n## Blind)', '', actual, flags=re.S)
+normalized = normalized.replace('tools: Read, Glob, Grep, Bash, StructuredOutput, Write, mcp__chrome-devtools\n',
+                                'tools: Read, Glob, Grep, Bash, StructuredOutput, Write\n')
+normalized = normalized.replace('`deploy.sh`, a production wrapper, or a browser yourself, except in a\n`kind: browser` batch, see [Browser batches](#browser-batches).',
+                                '`deploy.sh`, a production wrapper, or a browser yourself.')
+assert hashlib.sha256(normalized.encode()).hexdigest() == '16c522320824ff6899b5fa539b82331226e532cdc54ae0403281dbcb80f798e0'
+assert actual.rsplit('\n## ', 1)[-1].startswith('Lessons (operator rule, 2026-09-24)')
+browser_signature('AC9', {'tools_granted': True, 'untouched_sections_identical': True, 'lessons_last': True})
 ROOT_PATCHES.close()

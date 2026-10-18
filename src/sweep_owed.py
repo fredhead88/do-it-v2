@@ -42,7 +42,7 @@ import argparse, hashlib, json, pathlib, re, subprocess, sys
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import dispatch, fold, owed, owed_failures, packet, scratch, prod_runner  # noqa: E402
+import dispatch, fold, owed, owed_failures, packet, scratch, prod_runner, prod_browser, owed_routes  # noqa: E402
 
 LEDGER_NAME = "L-sweep-local.jsonl"
 MAX_BATCH = 8
@@ -246,6 +246,19 @@ def due_candidates(specs, now):
 
 # ─────────────────────────── step 4: batch + dispatch ───────────────────────
 
+def browser_input(specs, due, now):
+    """Include retry-ready legacy browser rows once, retaining the due rows."""
+    rows = {(r["spec"], r["criterion"]): r for r in due}
+    for spec in specs.values():
+        for row in owed.checks(spec["evs"], now):
+            if (row["status"] == "blocked"
+                    and owed_routes.route_for(row.get("capability")) == "browser"
+                    and row.get("route_attempts", {}).get("browser", 0) < owed_routes.MAX_ATTEMPTS
+                    and not _blocked_pending_retry(row, now) and resolvable(row)[0]):
+                rows.setdefault((row["spec"], row["criterion"]), row)
+    return [{**r, "spec_path": str(_spec_file(r))} for r in rows.values()]
+
+
 def _batch_for(due, all_ev=()):
     """Never-batched projects first, then oldest last start and oldest due row."""
     if not due:
@@ -270,7 +283,7 @@ def _describe(batch):
     return ", ".join(f"{r['spec']}/{r['criterion']}" for r in batch)
 
 
-def _manifest_text(sweep_id, project, cwd, batch):
+def _manifest_text(sweep_id, project, cwd, batch, *, kind="plain"):
     """The Driver→sweeper manifest `packet.parse_sweep_manifest` reads: line 1
     `# <id>`, `project:`/`cwd:` lines, then a fenced ```json array of rows,
     each carrying `spec`, `criterion`, `declared_src`, `line`, `spec_path` —
@@ -278,7 +291,7 @@ def _manifest_text(sweep_id, project, cwd, batch):
     of a spec's write destination."""
     rows = [{"spec": r["spec"], "criterion": r["criterion"], "declared_src": r["declared_src"],
              "line": r["line"], "spec_path": str(dispatch.spec_path(r["spec"]))} for r in batch]
-    return (f"# {sweep_id}\n\nproject: {project}\ncwd: {cwd}\nkind: plain\n\n## Rows\n\n```json\n"
+    return (f"# {sweep_id}\n\nproject: {project}\ncwd: {cwd}\nkind: {kind}\n\n## Rows\n\n```json\n"
             + json.dumps(rows, indent=2) + "\n```\n")
 
 
@@ -446,7 +459,7 @@ def _resolve_candidates(specs, now, *, dry_run=False):
     return resolved, quarantined, lines
 
 
-def dispatch_batch(project, batch, runner, *, dry_run=False):
+def dispatch_batch(project, batch, runner, *, dry_run=False, kind="plain"):
     """`doit packet owed-sweeper <id>` then `doit dispatch owed-sweeper <id>
     --packet <path> --cwd <sweep-dir> --project <name> --detach`, in that
     order, exactly once, via the injectable `runner` (AC3). `cwd` is a fresh,
@@ -470,14 +483,15 @@ def dispatch_batch(project, batch, runner, *, dry_run=False):
     # sweeper since 2026-09-27 was told "not available (capability=ro-dsn)", recorded the
     # check unobservable, and _blocked_permanently retired it until it expired (2026-10-11).
     dispatch.provision_sweep_env(cwd, dispatch.ROOT / "repos" / project)
-    sweep_path.write_text(_manifest_text(sweep_id, project, cwd, batch))
+    sweep_path.write_text(_manifest_text(sweep_id, project, cwd, batch, kind=kind))
     pr = runner.run([str(doit_bin()), "packet", "owed-sweeper", sweep_id])
     if pr.returncode != 0:
         err = (pr.stderr or pr.stdout or "").strip()
         return [f"sweep-owed: packet build failed for {sweep_id}: {err}"]
     packet_path = pr.stdout.strip()
+    browser_args = ["--mcp-config", str(pathlib.Path(__file__).resolve().parent.parent / "mcp/chrome-devtools.json")] if kind == "browser" else []
     dr = runner.run([str(doit_bin()), "dispatch", "owed-sweeper", sweep_id, "--packet", packet_path,
-                     "--cwd", cwd, "--project", project, "--detach"])
+                     "--cwd", cwd, "--project", project, "--detach", *browser_args])
     if dr.returncode != 0:
         return [f"sweep-owed: dispatch failed for {sweep_id}: {(dr.stderr or dr.stdout or '').strip()}"]
     return [f"sweep-owed: batched {len(batch)} check(s) in project {project} as {sweep_id} "
@@ -555,19 +569,27 @@ def run(*, dry_run=False, runner=None, now=None):
                     due.append(row)
                 else:
                     lines.append(f"sweep-owed: 1 routed row excluded: {key[0]}/{key[1]}: {reason}")
+    handed = prod_runner.batch_for_browser(browser_input(specs, due, now))
+    e2e, browser_seat = prod_browser.split(handed)
+    if e2e:
+        lines.append(f"sweep-owed: {len(e2e)} browser row(s) assigned to committed e2e observations")
     due, partition_lines = judgment_rows(due, observations)
     lines.extend(partition_lines)
+    plain_project, _ = _batch_for(due, all_ev)
+    project, _ = _batch_for([*due, *browser_seat], all_ev)
+    kind = "browser" if project is not None and project != plain_project else "plain"
+    candidates = browser_seat if kind == "browser" else due
     record = {"quarantined": quarantined}
     if open_batch(all_ev, now):
         record["outcome"] = "open"
         lines.append("sweep-owed: an owed-sweeper batch is already open; nothing dispatched this run")
-    elif not due:
+    elif not candidates:
         record["outcome"] = "nothing-due"
         lines.append("sweep-owed: nothing due to batch")
     else:
-        project, batch = _batch_for(due, all_ev)
+        project, batch = _batch_for(candidates, all_ev)
         try:
-            batch_lines = dispatch_batch(project, batch, runner, dry_run=dry_run)
+            batch_lines = dispatch_batch(project, batch, runner, dry_run=dry_run, kind=kind)
         except (OSError, subprocess.SubprocessError) as exc:
             batch_lines = [f"sweep-owed: batch failed: {str(exc)[:300]}"]
         lines.extend(batch_lines)
@@ -575,7 +597,7 @@ def run(*, dry_run=False, runner=None, now=None):
         if failure:
             record.update(outcome="failed", reason=failure[:300])
         else:
-            record.update(outcome="batched", kind="plain", rows=len(batch))
+            record.update(outcome="batched", kind=kind, rows=len(batch))
             if not dry_run:
                 record["batch"] = batch_lines[0].split(" as ", 1)[1].split()[0]
     if not dry_run:

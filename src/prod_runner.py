@@ -210,7 +210,9 @@ def _build(row, record, specs, now):
 
 def run(now, *, dry_run=False):
     specs = fold.fold(fold.read_events())[0]
-    rows = _selected(specs, now)
+    import prod_browser
+    import sweep_owed
+    rows = sweep_owed.browser_input(specs, _selected(specs, now), now)
     records = {(r["spec"], r["criterion"]): record_for(r) for r in rows}
     result = {"lines": [], "bundle_rows": {}, "held": set(), "to_judgment": set()}
     started = time.monotonic()
@@ -229,7 +231,7 @@ def run(now, *, dry_run=False):
         path.parent.mkdir(parents=True, exist_ok=True)
         return dispatch.emit(path, {"subject": subject}, type_, **fields)
 
-    active = {key for key, record in records.items() if record["runner"] in ("prod", "build")}
+    active = {key for key, record in records.items() if record["runner"] in ("prod", "build", "prod-browser")}
     if dry_run:
         for key in sorted(active):
             line(f"DRY RUN would observe {key[0]}/{key[1]}")
@@ -251,6 +253,11 @@ def run(now, *, dry_run=False):
             line(f"lock busy; held {len(active)} build/prod row(s)")
             return result
         state = _load_state(state_path, now)
+        browser_rows = [{**r, "validity_h": records[r["spec"], r["criterion"]].get("validity_h", 24),
+                         "spec_path": str(r.get("spec_path") or dispatch.spec_path(r["spec"]))}
+                        for r in rows if records[r["spec"], r["criterion"]]["runner"] == "prod-browser"]
+        browser_results = {(o["spec"], o["criterion"]): o
+                           for o in prod_browser.run_batch(browser_rows, now)}
         builds = 0
         for row in rows:
             key = row["spec"], row["criterion"]
@@ -276,6 +283,11 @@ def run(now, *, dry_run=False):
                     line(f"judgment {key[0]}/{key[1]}: no commands")
                     continue
                 observation = observe(row, record, now=now)
+            elif record["runner"] == "prod-browser":
+                observation = browser_results.get(key)
+                if observation is None:
+                    continue
+                observation = {k: v for k, v in observation.items() if k not in ("spec", "criterion")}
             else:
                 continue
             state_key = "/".join(key)
