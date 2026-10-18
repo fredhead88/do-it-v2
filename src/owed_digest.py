@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 
 import dispatch
 import fold
+import health_alarms
 import owed
 import owed_failures
 import sweep_owed
@@ -123,7 +124,8 @@ def build(all_ev, now):
                                      pct=100 * counts["unverifiable"] / counts["closed"] if counts["closed"] else 0.0,
                                      capped=remaining))
     return dict(at=now.isoformat(), counts=dict(by_status=by_status, blocked_by_capability=blocked, sweep=sweep),
-                needs_you=needs, health=health, m1=m1, backlog=backlog)
+                needs_you=needs, health=health, m1=m1, backlog=backlog,
+                alarms=health_alarms.summary_lines(all_ev, now))
 
 
 def _write_json(path, obj):
@@ -176,6 +178,11 @@ def render_md(obj):
     lines.append(f"OWED UNVERIFIABLE {uv['today']} closed today, {uv['pct']:.1f}% of month (cap 10%)")
     if uv["capped"]:
         lines.append(f"OWED UNVERIFIABLE CAPPED {uv['capped']} rows past 14 days held, closing stopped at cap")
+    lines.extend(["", "## HEALTH ALARMS", ""])
+    alarms = obj.get("alarms", [])
+    lines.extend(f"- {line}" for line in alarms)
+    if not alarms:
+        lines.append("none")
     return "\n".join(lines) + "\n"
 
 

@@ -160,7 +160,7 @@ class DigestTests(unittest.TestCase):
         obj = digest.build(evs, NOW)
         recount = Counter(r["status"] for s in fold.fold(evs)[0].values() for r in owed.checks(s["evs"], NOW))
         self.assertEqual(obj["counts"]["by_status"], {**recount, "unverifiable": 0})
-        self.assertEqual(set(obj), {"at", "counts", "needs_you", "health", "m1", "backlog"})
+        self.assertEqual(set(obj), {"at", "counts", "needs_you", "health", "m1", "backlog", "alarms"})
         self.assertEqual(set(obj["counts"]), {"by_status", "blocked_by_capability", "sweep"})
         self.assertEqual(set(obj["counts"]["by_status"]), set(owed.STATUSES))
         self.assertEqual({r["spec"] for r in obj["needs_you"]}, {s for s, v in expected.items() if v == "blocked"})
@@ -408,6 +408,16 @@ class DigestTests(unittest.TestCase):
         self.assertIn("``unsafe` ", md)
         self.assertNotIn("x" * 301, md)
         print("PASS free-text sanitisation")
+
+    def test_health_alarm_section(self):
+        obj = digest.build([event("health-alarm", alarm="disk-low", severity="summary", line="14 GB")], NOW)
+        self.assertEqual(obj["alarms"], ["HEALTH disk-low summary: 14 GB"])
+        text = digest.render_md(obj)
+        self.assertIn("OWED UNVERIFIABLE 0 closed today, 0.0% of month (cap 10%)", text)
+        self.assertLess(text.index("## SYSTEM HEALTH"), text.index("## HEALTH ALARMS"))
+        self.assertIn("- HEALTH disk-low summary: 14 GB", text)
+        del obj["alarms"]
+        self.assertTrue(digest.render_md(obj).endswith("## HEALTH ALARMS\n\nnone\n"))
 
     def test_cron_and_dispatch(self):
         rows = crons.rows()

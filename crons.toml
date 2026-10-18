@@ -134,3 +134,13 @@ sig = 'suite_run\.py\b'
 owner = "thinker"
 project = "do-it-v2"
 max_runtime_s = 1800
+
+[[row]]
+name = "health-alarms"
+where = "user"
+schedule = "*/10 * * * *"
+command = "{doit} cron-run health-alarms -- {doit} health-alarms >> {root}/logs/health-alarms.log 2>&1"
+path = "{doit}"
+sig = '\bdoit health-alarms(?=\s*>>|\s*(?:#.*)?$)'
+owner = "thinker"
+project = "do-it-v2"
