@@ -338,6 +338,7 @@ def _record():
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
+        lock.close()
         return None
     ev = fold.read_events()
     # SD11 (L-spec-0242, extended by L-spec-0244 and L-spec-0243): `intake.run(ev)`
@@ -433,6 +434,11 @@ def _record():
                 look.emit_once("look-stale", "look-stale", "thinker", {"last_pass": last_pass}, ev)
     except Exception as e:
         look_error = f"{e}"
+    try:
+        import look
+        look.heartbeat_missed("look", fold.NOW, ev, root=fold.ROOT, dst=tick_path())
+    except Exception as e:
+        look_error = f"{look_error}; {e}" if look_error else f"{e}"
     # L-spec-0438/L-charter-0042 R8: `grader_serve.run(ev)` — reap a stale
     # sandboxed grader pane, start new ones for unclaimed grader-role seat
     # packets up to capacity, and mirror/stamp a claimed one's own validated
@@ -551,6 +557,9 @@ def _record():
     if proving_error:
         kv["proving_error"] = proving_error
     dispatch.emit(tick_path(), {}, "tick", **kv)
+    # A caught sender exception can retain its traceback until cyclic GC.
+    # Release the lock explicitly so that traceback cannot drop the next tick.
+    lock.close()
     return todo
 
 

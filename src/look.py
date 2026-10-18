@@ -654,7 +654,7 @@ def _check_dispatchable_stale(events, now, root, briefs):
     """L-charter-0042/L-spec-0427, SD4: `autodispatch.candidates` folds
     `events` itself (`look.run` takes none), and anything `dispatchable`, or
     `blocked` specifically on a standing `autodispatch-failed`, whose `since`
-    is more than 30 minutes old briefs `spec-dispatchable-stale` (owner
+    exceeds the table's build limit briefs `spec-dispatchable-stale` (owner
     `executor`) — `seat-wait` never alarms (it is legitimately waiting on
     capacity, SD2). `reading` is `dispatch-failed:<reason>` for the standing-
     failure case, `tick-not-running` for a structurally-fine one simply never
@@ -662,22 +662,23 @@ def _check_dispatchable_stale(events, now, root, briefs):
     `_check_wallclock` uses: a raise degrades to one `reading-undetermined`
     (`dispatch-stale`), nothing else."""
     try:
-        import autodispatch
+        import autodispatch, lane_rules
+        limit = lane_rules.load()["build"]["limit_min"]
         specs, _, _, _ = fold.fold(events)
         rows = autodispatch.candidates(events, specs, now)
+        readings = []
+        for row in rows:
+            alarmable = row["status"] == "dispatchable" or (row["status"] == "blocked" and row.get("_dispatch_failed"))
+            age_min = (now - fold.ts(row["since"])) / timedelta(minutes=1)
+            reading = (f"dispatch-failed:{row['reason']}" if row.get("_dispatch_failed") else "tick-not-running") \
+                if alarmable else "not-stale"
+            readings.append((row["spec"], bool(alarmable and age_min > limit), reading))
     except Exception:
         _fire_undetermined("dispatch-stale", events, root, briefs)
         return
     seen = set()
-    for row in rows:
-        sid = row["spec"]
+    for sid, bad, reading in readings:
         seen.add(sid)
-        alarmable = row["status"] == "dispatchable" or (row["status"] == "blocked" and row.get("_dispatch_failed"))
-        since_dt = fold.ts(row["since"])
-        age_min = (now - since_dt).total_seconds() / 60
-        bad = alarmable and age_min > 30
-        reading = (f"dispatch-failed:{row['reason']}" if row.get("_dispatch_failed") else "tick-not-running") \
-            if alarmable else "not-stale"
         _settle("spec-dispatchable-stale", sid, "executor", bad, reading, events, root, briefs, [])
     # AC23: a spec whose fold state has moved off `written` no longer appears
     # among `rows` at all — clear any standing brief it still carries.
@@ -783,11 +784,13 @@ def _spec_idle_busy_spawn(evs, events, now):
 
 
 def _spec_idle_bad(sid, s, evs, events, cand_rows, held, answered_ids, now):
-    """Assumptions 6-9: idle means "60+ minutes since this subject's own
+    """Assumptions 6-9: idle means "the table's idle limit since this subject's own
     newest event, with nothing legitimately holding it" — every exclusion is
     checked BEFORE the age (a young-but-otherwise-excluded spec never reaches
     the age check, but the age check is what makes an otherwise-eligible one
     a non-event)."""
+    import lane_rules
+    limit = lane_rules.load()["idle"]["limit_min"]
     if s["state"] in dispatch.SETTLED_STATES:
         return False
     row = cand_rows.get(sid)
@@ -800,8 +803,18 @@ def _spec_idle_bad(sid, s, evs, events, cand_rows, held, answered_ids, now):
     footprint = next((e.get("footprint") for e in reversed(evs)
                       if e.get("type") == "spec-written" and e.get("footprint")), None)
     wave = dispatch.spec_wave(charter, footprint) if (charter and footprint) else None
-    if dispatch.wave_blocker(events, charter, sid, wave) is not None:
-        return False
+    blocker = dispatch.wave_blocker(events, charter, sid, wave)
+    if blocker is not None:
+        blocker_evs = [e for e in events if e.get("subject") == blocker]
+        if fold.spec_state(blocker_evs, set()) not in dispatch.SETTLED_STATES:
+            # Missing/malformed evidence cannot establish a live reason.
+            try:
+                newest_blocker = max(datetime.fromisoformat(e["ts"].replace("Z", "+00:00"))
+                                     for e in blocker_evs)
+                if (now - newest_blocker) / timedelta(minutes=1) <= limit:
+                    return False
+            except (KeyError, TypeError, ValueError):
+                pass
     if any(e.get("subject") == sid for e in fold.open_escalations(events)):
         return False
     if any(e.get("type") == "question" and e.get("subject") == sid and e["_src"] not in answered_ids
@@ -812,24 +825,27 @@ def _spec_idle_bad(sid, s, evs, events, cand_rows, held, answered_ids, now):
     newest = max((fold.ts(e.get("ts")) for e in evs), default=None)
     if newest is None:
         return False
-    return (now - newest).total_seconds() / 60 >= 60
+    return (now - newest) / timedelta(minutes=1) >= limit
 
 
 def _check_spec_idle(events, now, root, briefs, answered):
     """L-charter-0042/L-spec-0484 R13(d): "any spec whose newest event is
-    older than 60 minutes while not wave-held or awaiting a human is
+    older than the idle rule's limit while not held for a live reason or awaiting a human is
     surfaced by name." Population and exclusions: Assumptions 6-9. Wrapped in
     the SAME broad `except Exception` shape `_check_dispatchable_stale` uses:
     a raise anywhere in here — including `fold.held_specs` itself being
     absent pre-wave-3, though `getattr` alone already covers that case —
     degrades to one `reading-undetermined`, never a half-finished sweep."""
     try:
+        import lane_rules
+        lane_rules.load()
         specs, _charters, _, _ = fold.fold(events)
         import autodispatch
         cand_rows = {r["spec"]: r for r in autodispatch.candidates(events, specs, now)}
         held_fn = getattr(fold, "held_specs", None)
         held = held_fn(events) if held_fn is not None else set()
         answered_ids = fold.answered(events)
+        readings = []
         for sid, s in specs.items():
             if not _SPEC_ID_RE.match(sid) or s["state"] == "unknown":
                 continue
@@ -838,10 +854,140 @@ def _check_spec_idle(events, now, root, briefs, answered):
                 continue
             bad = _spec_idle_bad(sid, s, evs, events, cand_rows, held, answered_ids, now)
             idle_min = (now - max(fold.ts(e.get("ts")) for e in evs)).total_seconds() / 60
-            _settle("spec-idle", sid, "executor", bad, {"spec": sid, "idle_min": idle_min},
-                   events, root, briefs, answered)
+            readings.append((sid, bad, idle_min))
     except Exception:
         _fire_undetermined("spec-idle", events, root, briefs)
+        return
+    for sid, bad, idle_min in readings:
+        _settle("spec-idle", sid, "executor", bad, {"spec": sid, "idle_min": idle_min},
+                events, root, briefs, answered)
+
+
+def _send_operator(text, root):
+    """One argument, no shell; callers record a missing sender as sent=no."""
+    try:
+        return subprocess.run([str(root / "telegram" / "tg-send.sh"), text],
+                              capture_output=True, timeout=10).returncode
+    except OSError:
+        return 1
+
+
+def _append_watchdog(root, dst, event_type, **fields):
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    refusal = dispatch.emit(dst, {}, event_type, **fields)
+    if refusal:
+        raise ValueError(refusal)
+
+
+def heartbeat_missed(name, now, events, *, root=None, sender=None, dst=None):
+    """Observe cron starts and deliver at most one successful send per outage.
+
+    Alert identity uses last_start, and ordering uses measured_at. Emitted ts
+    belongs to the writer's clock and is deliberately never used here.
+    """
+    import cron_run
+    root = pathlib.Path(root) if root is not None else fold.ROOT
+    dst = pathlib.Path(dst) if dst is not None else root / "events" / LEDGER_NAME
+    window = 3 * int(os.environ.get("DOIT_TICK_MIN", "5")) if name == "tick" else 30
+    try:
+        rows = _read_cron_store(cron_run.store_path(name, root)) or []
+        starts = [(datetime.fromisoformat(str(r["ts"]).replace("Z", "+00:00")), r["ts"])
+                  for r in rows if isinstance(r, dict) and r.get("ev") == "start"]
+        newest, last_start = max(starts, key=lambda item: item[0], default=(None, "none"))
+        missed = newest is None or (now - newest).total_seconds() > window * 60
+    except (KeyError, TypeError, ValueError, UnicodeError):
+        newest, last_start, missed = None, "none", True
+    if not missed or _DRY_RUN:
+        return missed
+    alerts = [e for e in [*events, *_read_jsonl(dst)]
+              if e.get("type") == "operator-alert" and e.get("kind") == "heartbeat-missed"
+              and e.get("subject") == name]
+    latest = max(alerts, key=lambda e: datetime.fromisoformat(e["measured_at"]), default=None)
+    if latest and latest["last_start"] != "none":
+        previous = datetime.fromisoformat(latest["last_start"].replace("Z", "+00:00"))
+        if newest is None or newest <= previous:
+            last_start = latest["last_start"]
+    same = [e for e in alerts if e.get("last_start") == last_start]
+    if any(e.get("sent") == "yes" for e in same):
+        return True
+    detail = f"{name} heartbeat missed: no cron start within {window} minutes; last_start={last_start}"
+    error = None
+    try:
+        sent = "yes" if (sender(detail) if sender is not None else _send_operator(detail, root)) == 0 else "no"
+    except Exception as exc:
+        sent, error = "no", exc
+    if sent == "yes" or not same:
+        _append_watchdog(root, dst, "operator-alert", subject=name, kind="heartbeat-missed",
+                         sent=sent, detail=detail, last_start=last_start,
+                         measured_at=now.isoformat(timespec="seconds"))
+    if error is not None:
+        raise error
+    return True
+
+
+def _check_heartbeat_missed(events, now, root, briefs):
+    try:
+        heartbeat_missed("tick", now, events, root=root)
+    except Exception:
+        _fire_undetermined("heartbeat-missed", events, root, briefs)
+
+
+def _check_lane_rules(events, now, root, briefs):
+    """Track table outages in state, independently of the wall-clock ledger ts."""
+    try:
+        import lane_rules
+        st = _read_state(root) or {}
+        try:
+            lane_rules.load()
+        except ValueError as exc:
+            if _DRY_RUN or st.get("lane_rules_outage") == "yes":
+                return
+            detail = f"lane rules unreadable: {exc}"
+            try:
+                sent = "yes" if _send_operator(detail, root) == 0 else "no"
+            except Exception:
+                sent = "no"
+            if sent == "yes" or not st.get("lane_rules_outage"):
+                _append_watchdog(root, root / "events" / LEDGER_NAME, "operator-alert",
+                                 subject="lane-rules-unreadable", kind="lane-rules-unreadable",
+                                 sent=sent, detail=detail, measured_at=now.isoformat(timespec="seconds"))
+            st["lane_rules_outage"] = sent
+        else:
+            st.pop("lane_rules_outage", None)
+        if not _DRY_RUN:
+            _write_state(root, st)
+    except Exception:
+        _fire_undetermined("lane-rules-unreadable", events, root, briefs)
+
+
+def _check_lane_stale(events, now, root, briefs):
+    try:
+        import lane_rules
+        specs, _, _, _ = fold.fold(events)
+        dst = root / "events" / LEDGER_NAME
+        seen_events = [*events, *_read_jsonl(dst)]
+        keys = {(e.get("spec"), e.get("rule"), e.get("since")) for e in seen_events
+                if e.get("type") == "escalation-blocking" and e.get("kind") == "lane-stale"}
+        pending = []
+        for row in lane_rules.due(events, specs, now):
+            key = row["spec"], row["rule"], row["since"]
+            if (not _SPEC_ID_RE.fullmatch(row["spec"]) or not row["overdue"] or key in keys
+                    or lane_rules.ladder(seen_events, row, now) != "inbox"):
+                continue
+            keys.add(key)
+            pending.append(row)
+        if _DRY_RUN:
+            return
+        for row in pending:
+            sid, rule = row["spec"], row["rule"]
+            _append_watchdog(root, dst, "escalation-blocking", subject=f"lane-stale:{sid}",
+                             kind="lane-stale", owner="thinker", spec=sid, rule=rule, since=row["since"],
+                             why=row["reason"],
+                             default=f"leave the spec as it stands; the Thinker rules on {rule} for {sid}",
+                             deadline=(now + timedelta(hours=24)).isoformat(timespec="seconds"),
+                             revert="no automatic action was taken - nothing to revert")
+    except Exception:
+        _fire_undetermined("lane-stale", events, root, briefs)
 
 
 def _check_wallclock(events, runner, now, root, cfg, deadline, dry_run, briefs):
@@ -892,12 +1038,15 @@ def run(events, *, now=None, runner=None, root=None, toml_path=None, dry_run=Fal
         _check_crons(crontab_text, crontab_und, events, root, briefs, crons_manifest, crond_dir)
         _check_cron_unwrapped(crontab_text, crontab_und, events, root, briefs, answered, crons_manifest, crond_dir)
         _check_cron_runs(now, events, root, briefs, answered, crons_manifest)
+        _check_heartbeat_missed(events, now, root, briefs)
+        _check_lane_rules(events, now, root, briefs)
         _check_dispatch_failures(events, root, briefs, answered)
         _check_spec_misrouted(events, root, briefs)
         _check_dispatchable_stale(events, now, root, briefs)
         _check_grades_per_shipped(events, now, root, briefs, answered, th)
         _check_origin_behind(cfg, runner, now, deadline, events, root, briefs, answered)
         _check_spec_idle(events, now, root, briefs, answered)
+        _check_lane_stale(events, now, root, briefs)
         wallclock_events = _check_wallclock(events, runner, now, root, cfg, deadline, dry_run, briefs)
         r = _clear("look-stale", "look-stale", "fresh pass", events, root)
         r and answered.append(r)
