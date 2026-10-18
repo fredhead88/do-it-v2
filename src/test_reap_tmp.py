@@ -841,6 +841,9 @@ EXPECTED_CRONS_ROWS = [
      "command": "{doit} cron-run stuck-digest -- {doit} stuck-digest --send >> {root}/logs/stuck-digest.log 2>&1",
      "path": "{doit}", "sig": r"\bdoit stuck-digest(?: --send)?(?=\s*>>|\s*(?:#.*)?$)",
      "owner": "digest", "project": "do-it-v2"},
+    {"name": "gh-bill", "where": "user", "schedule": "15 6 * * *",
+     "command": "{doit} cron-run gh-bill -- {doit} gh-bill >> {root}/logs/gh-bill.log 2>&1",
+     "path": "{doit}", "sig": r"\bdoit gh-bill\b", "owner": "thinker", "project": "do-it-v2"},
 ]
 
 # ── L0440-AC20 · current cron-run commands, runtime bounds and */5 reaper cadence ────

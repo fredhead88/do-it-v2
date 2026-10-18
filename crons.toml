@@ -184,3 +184,13 @@ path = "{doit}"
 sig = '\bdoit stuck-digest(?: --send)?(?=\s*>>|\s*(?:#.*)?$)'
 owner = "digest"
 project = "do-it-v2"
+
+[[row]]
+name = "gh-bill"
+where = "user"
+schedule = "15 6 * * *"
+command = "{doit} cron-run gh-bill -- {doit} gh-bill >> {root}/logs/gh-bill.log 2>&1"
+path = "{doit}"
+sig = '\bdoit gh-bill\b'
+owner = "thinker"
+project = "do-it-v2"
