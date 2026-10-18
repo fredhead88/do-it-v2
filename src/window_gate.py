@@ -41,7 +41,6 @@ DEFAULT_TOML_PATH = pathlib.Path(__file__).resolve().parent.parent / "look.toml"
 KILL_MARGIN_MIN = 10
 BASE_RED_MARGIN_SECS = 600  # nested verify teardown, plus bounded log fetch
 BASE_RED_COMMAND = "doit"
-MAX_MERGES = 6
 PYTEST_CHECK = "pytest"
 PG_CHECK = "pg-parity (Postgres)"
 # These workflows only run on master pushes/PRs, not ci-verify dispatches.
@@ -76,7 +75,12 @@ def ev(typ, subject, **kv):
     list/number/string round-trips exactly. The actor is the filename (D90)."""
     os.environ["DOIT_LEDGER_FILE"] = os.environ.get("DOIT_GATE_LEDGER_FILE", "L-executor-0001.jsonl")
     kv.setdefault("project", PROJECT)
-    fold.append([typ, subject] + [f"{k}:={json.dumps(v)}" for k, v in kv.items()])
+    original_now = fold.NOW
+    try:
+        fold.NOW = datetime.now(timezone.utc)
+        fold.append([typ, subject] + [f"{k}:={json.dumps(v)}" for k, v in kv.items()])
+    finally:
+        fold.NOW = original_now
 
 
 def escalate(window, why):
@@ -259,6 +263,26 @@ def verify_timeout_secs(env, toml_path=None):
     """Keep the gate's cancellation deadline inside our process kill deadline."""
     override = _positive_timeout(env.get("DOIT_WINDOW_VERIFY_TIMEOUT_SECS"))
     return override if override is not None else (dispatch_timeout_min(env, toml_path) + KILL_MARGIN_MIN) * 60
+
+
+def max_merges(env, toml_path=None):
+    """Resolve a positive integer cap: process env, versioned TOML, then 10."""
+    def positive_integer(value):
+        number = _positive_timeout(value)
+        return int(number) if number is not None and number.is_integer() else None
+
+    override = positive_integer(env.get("DOIT_WINDOW_MAX_MERGES"))
+    if override is not None:
+        return override
+    try:
+        import tomllib
+        path = pathlib.Path(toml_path) if toml_path is not None else DEFAULT_TOML_PATH
+        with open(path, "rb") as f:
+            table = tomllib.load(f).get("window_gate")
+    except (OSError, ValueError, TypeError, ImportError):
+        table = None
+    configured = positive_integer(table.get("max_merges")) if isinstance(table, dict) else None
+    return configured if configured is not None else 10
 
 
 def parse_verdict(out):
@@ -627,8 +651,9 @@ def run_window(window, project, spec_args, main, fixes_base=False):
     entries = resolve_entries(repo, spec_args, events)
     if not entries:
         print("gate-window: nothing gate-clean is waiting"); return 2
-    if len(entries) > MAX_MERGES:
-        sys.exit(f"gate-window: {len(entries)} merges exceeds the window cap of {MAX_MERGES}")
+    cap = max_merges(os.environ)
+    if len(entries) > cap:
+        sys.exit(f"gate-window: {len(entries)} merges exceeds the window cap of {cap}")
     base = git(repo, "rev-parse", "--verify", f"refs/heads/{main}^{{commit}}").stdout.strip()
     try:
         ci_checks = required_checks(repo, base)

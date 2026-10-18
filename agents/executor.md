@@ -131,7 +131,7 @@ moment `BOARD_OWNERS` names you as its owner.
   **Project `albert-scott` merges through a window, not directly** (L-spec-0765).
   Run `doit gate` per branch exactly as above and do NOT run `git merge` yourself:
   collect the gate-clean branches into a window — it opens with the first one and
-  closes after at most 15 minutes or 6 merges, whichever comes first — then run
+  closes after at most 15 minutes or the configured cap (`[window_gate] max_merges`, default 10) of merges, whichever comes first — then run
   `doit gate-window <window-id> --project albert-scott --specs A,B,C` (one window at
   a time; the command holds the lock). It builds the candidate tip with ref-only git,
   runs the full suite once on it, and only then fast-forwards master. It writes the

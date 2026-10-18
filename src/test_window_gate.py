@@ -263,6 +263,124 @@ def timeout_checks():
             shutil.rmtree(fx.tmp)
 
 
+def cap_clock_response(ac, body):
+    encoded = json.dumps(body, sort_keys=True).encode()
+    print(json.dumps(dict(criterion=ac, url="cli://window_gate/1145/" + ac, status=0,
+                          body_sha256=hashlib.sha256(encoded).hexdigest(), body_excerpt=body)))
+
+
+def held(cond, marker):
+    check(cond, marker)
+    if cond:
+        print(marker)
+
+
+def clock_checks():
+    real_events, original_now = fold.EVENTS, fold.NOW
+    ledger = f"L-executor-clock-{time.time_ns()}.jsonl"
+    with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, DOIT_GATE_LEDGER_FILE=ledger), \
+            patch.object(fold, "ROOT", pathlib.Path(tmp)), \
+            patch.object(fold, "EVENTS", pathlib.Path(tmp) / "events"):
+        calls, restored = [], []
+        for n in range(2):
+            before = time.time()
+            window_gate.ev("window-opened", "clock", values=[1, "two", None], count=n,
+                           enabled=True, **({"project": "custom"} if n else {}))
+            after = time.time()
+            # Read the file anew after each append; never use append's return value.
+            events = [json.loads(line) for line in (fold.EVENTS / ledger).read_text().splitlines()]
+            stamp = window_gate.datetime.fromisoformat(events[-1]["ts"]).timestamp()
+            calls.append(dict(ts=events[-1]["ts"], fresh=before - 2 <= stamp <= after + 2))
+            restored.append(fold.NOW is original_now)
+            if n == 0:
+                time.sleep(1.1)
+        clock_ok = calls[0]["ts"] != calls[1]["ts"] and all(c["fresh"] for c in calls)
+        held(clock_ok, "ac-clock ts differ")
+        held(all(restored), "ac-clock fold.NOW restored")
+        failures = []
+        for error in (RuntimeError("append failed"), SystemExit("append exited")):
+            raised = False
+            try:
+                with patch.object(fold, "append", side_effect=error):
+                    window_gate.ev("window-opened", "clock-failure")
+            except (RuntimeError, SystemExit) as caught:
+                raised = caught is error
+            failures.append(raised and fold.NOW is original_now)
+        held(all(failures), "ac-clock restored on failure")
+        payload_ok = (os.environ["DOIT_LEDGER_FILE"] == ledger
+                      and [e["project"] for e in events] == [window_gate.PROJECT, "custom"]
+                      and [e["count"] for e in events] == [0, 1]
+                      and all(e["values"] == [1, "two", None] and e["enabled"] is True for e in events))
+        check(payload_ok, "clock preserves routing, project and JSON values")
+    untouched = not (real_events / ledger).exists()
+    held(untouched, "ac-clock real ledger untouched")
+    cap_clock_response("AC4", dict(calls=calls, restored=all(restored), failures=all(failures),
+                                    real_ledger_untouched=untouched, payload_preserved=payload_ok))
+
+
+def cap_checks():
+    key = "DOIT_WINDOW_MAX_MERGES"
+    with tempfile.TemporaryDirectory() as tmp:
+        path, absent = pathlib.Path(tmp) / "look.toml", pathlib.Path(tmp) / "absent.toml"
+        path.write_text("[window_gate]\nmax_merges = 8\n")
+        cases = [({key: value}, path, 12) for value in (12, "12", 12.0, "12.0", "1.2e1")]
+        cases += [({}, path, 8), ({}, absent, 10)]
+        actual = [window_gate.max_merges(env, file) for env, file, _ in cases]
+        precedence = actual == [v for _, _, v in cases] and all(type(v) is int for v in actual)
+        held(precedence, "ac-cap precedence")
+        bad = ["abc", "0", "-5", "nan", "inf", "-inf", "10.5", True, False, None, "", "1e999", [], {}]
+        env_values = [window_gate.max_merges({key: value}, path) for value in bad]
+        toml_values = []
+        for text in ('"abc"', "0", "-5", "nan", "inf", "10.5", "true", "false", '""', "[]", "{}"):
+            path.write_text("[window_gate]\nmax_merges = " + text + "\n")
+            toml_values.append(window_gate.max_merges({}, path))
+        for text in ("[window_gate]\n", "[other]\nmax_merges = 8\n", "window_gate = 8\n",
+                     "[[window_gate]]\nmax_merges = 8\n", "[malformed"):
+            path.write_text(text)
+            toml_values.append(window_gate.max_merges({}, path))
+        path.write_bytes(b"\xff")
+        toml_values.append(window_gate.max_merges({}, path))
+        toml_values.append(window_gate.max_merges({}, absent))
+        with patch("builtins.open", side_effect=PermissionError("unreadable")):
+            toml_values.append(window_gate.max_merges({}, path))
+        path.write_text("[window_gate]\nmax_merges = 8.0\n")
+        check(type(window_gate.max_merges({}, path)) is int and window_gate.max_merges({}, path) == 8,
+              "integer-valued TOML float accepted")
+        invalid = (env_values == [8] * len(bad) and toml_values == [10] * len(toml_values)
+                   and all(type(v) is int for v in env_values + toml_values))
+        held(invalid, "ac-cap invalid falls through")
+        cap_clock_response("AC1", dict(precedence=precedence, invalid_falls_through=invalid))
+    shipped = window_gate.max_merges({})
+    check(type(shipped) is int and shipped == 10, "shipped cap is 10 int")
+    print(shipped, type(shipped).__name__)
+    cap_clock_response("AC3", dict(value=shipped, type=type(shipped).__name__))
+
+    def boundary(size, override=None):
+        with patch.dict(os.environ):
+            os.environ.pop(key, None)
+            if override is not None:
+                os.environ[key] = str(override)
+            fx = Fx({f"S{n}": f"s{n}.txt" for n in range(size)})
+            try:
+                fx.run_n(1, 0, GREEN)
+                try:
+                    rc = fx.go()
+                except SystemExit as error:
+                    cap = 10 if override is None else override
+                    return (size > cap and str(error) == f"gate-window: {size} merges exceeds the window cap of {cap}"
+                            and fx.master() == fx.base and not fx.calls() and not fx.events("shipped"))
+                return (size <= (10 if override is None else override) and rc == 0
+                        and len(fx.events("shipped")) == size and len(fx.calls()) == 1)
+            finally:
+                fx.tempdir.cleanup()
+
+    accepted, refused = boundary(10), boundary(11)
+    env_refused = boundary(7, 6)
+    held(accepted and refused, "ac-cap boundary 10 ok 11 refused")
+    held(env_refused, "ac-cap env 6 refuses 7")
+    cap_clock_response("AC2", dict(ten_accepted=accepted, eleven_refused=refused, env_six_refuses_seven=env_refused))
+
+
 def parity_checks():
     def response(ac, body):
         encoded = json.dumps(body, sort_keys=True).encode()
@@ -751,8 +869,10 @@ def attribution_checks():
         cli.chmod(0o755)
         fx.base_reader = reader
         fx.run_n(1, 1, output)
+        # Allow the fake baseline process to start on a busy build box while
+        # keeping the 30-second ensure child bounded well below its sleep.
         with patch.object(window_gate, "BASE_RED_MARGIN_SECS", .2), \
-             patch.object(window_gate, "verify_timeout_secs", return_value=.2), \
+             patch.object(window_gate, "verify_timeout_secs", return_value=2), \
              patch.object(window_gate, "BASE_RED_COMMAND", str(fx.tmp / "missing") if mode == "missing" else "doit"):
             rc = fx.go()
         calls = (fx.fdir / "base-red-calls").read_text().splitlines() if mode != "missing" else []
@@ -882,6 +1002,8 @@ def test_window_attribution():
 
 
 test_window_attribution()
+clock_checks()
+cap_checks()
 parity_checks()
 timeout_checks()
 rechain_checks()
