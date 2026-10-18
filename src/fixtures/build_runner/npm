@@ -1,0 +1,11 @@
+#!/usr/bin/env python3
+import os
+import pathlib
+import sys
+with open(os.environ["FIXTURE_LOG"], "a") as handle:
+    handle.write("npm " + " ".join(sys.argv[1:]) + "\n")
+if os.environ.get("FIXTURE_FAIL") == "npm":
+    sys.exit(1)
+target = pathlib.Path("node_modules")
+target.mkdir()
+(target / "marker").write_text("cache-original")
