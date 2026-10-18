@@ -114,6 +114,25 @@ output, not a conclusion from a sample. Cite symbols and paths, never line
 numbers. No implementation plan: the builder writes that. No open question
 left as prose: an unresolved one is an `Unknowns[]` entry, counted.
 
+### Verification tags and check coverage
+
+Write one Verification statement per criterion, led by a tag comment line
+`# AC<n>` naming exactly one id. Place the tag after the previous statement's
+`&&` (if any) and before the statement it proves, so both fall in the same
+`&&` segment. The tag leads rather than trails because a comment after a
+statement's own `&&` falls in the next segment, where both readers give it to
+the next statement. For example, for AC1 and AC2:
+
+```bash
+# AC1
+/usr/bin/python3 src/test_checks.py &&
+# AC2
+git diff --check
+```
+
+Read a `CK-001` warning from `doit shape` as the list of criteria to fix before
+returning: give each a command, a tag, or an honest owed declaration.
+
 ## Interview budget
 
 At most six rounds of clarification, through `escalations` — `asks`, `blocks`,
