@@ -1,0 +1,71 @@
+[[rules]]
+name = "build"
+action = "dispatch-builder"
+actor = "tick"
+limit_min = 30
+
+[[rules]]
+name = "grade"
+action = "dispatch-grader"
+actor = "tick"
+limit_min = 15
+
+[[rules]]
+name = "review"
+action = "dispatch-reviewer"
+actor = "tick"
+limit_min = 15
+
+[[rules]]
+name = "gate"
+action = "doit-gate"
+actor = "tick"
+limit_min = 30
+
+[[rules]]
+name = "enqueue"
+action = "queue-add"
+actor = "tick"
+limit_min = 60
+
+[[rules]]
+name = "merge"
+action = "window-run"
+actor = "executor"
+limit_min = 120
+
+[[rules]]
+name = "idle"
+action = "none"
+actor = "none"
+limit_min = 60
+
+[[rules]]
+name = "rebuild"
+action = "dispatch-builder"
+actor = "tick"
+limit_min = 15
+
+[[rules]]
+name = "regrade"
+action = "dispatch-grader"
+actor = "tick"
+limit_min = 15
+
+[[rules]]
+name = "close"
+action = "spec-killed"
+actor = "tick"
+limit_min = 60
+
+[[rules]]
+name = "wave-held"
+action = "none"
+actor = "none"
+limit_min = 10
+
+[[rules]]
+name = "dependency-held"
+action = "none"
+actor = "none"
+limit_min = 10
