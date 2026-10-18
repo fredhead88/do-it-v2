@@ -31,7 +31,7 @@ SESSIONS = pathlib.Path(os.environ.get("DOIT_SESSIONS_DIR",
                                        pathlib.Path.home() / ".claude" / "sessions"))
 PROJECT = os.environ.get("DOIT_PROJECT")          # §9.1/D93: a filter, not a second read
 
-from fold_emits import EMITS, DECLARES, OWED_DECLARERS
+from fold_emits import EMITS, DECLARES, OWED_DECLARERS, REQUIRED_ROWS
 EMITS["suite-run"] = {"suite-daily"}
 # A correction may override anything but these: D90 takes the actor from the
 # FILENAME, and a correction that could rewrite it reopens every check below.
@@ -574,6 +574,7 @@ REQUIRED["evidence-bundle-failed"] = ("sha", "reason")
 REQUIRED["base-red"] = ("project", "sha", "complete")
 REQUIRED["health-alarm"] = ("alarm", "severity", "line")
 REQUIRED["owed-unverifiable"] = ("criterion", "reason")
+REQUIRED.update(REQUIRED_ROWS)
 
 
 # L-charter-0033/board-owners, Target 1: who owns each board() row and what
