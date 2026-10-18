@@ -164,3 +164,13 @@ path = "{doit}"
 sig = '\bdoit balance\b'
 owner = "thinker"
 project = "do-it-v2"
+
+[[row]]
+name = "stuck-digest"
+where = "user"
+schedule = "15 6 * * *"
+command = "{doit} cron-run stuck-digest -- {doit} stuck-digest --send >> {root}/logs/stuck-digest.log 2>&1"
+path = "{doit}"
+sig = '\bdoit stuck-digest(?: --send)?(?=\s*>>|\s*(?:#.*)?$)'
+owner = "digest"
+project = "do-it-v2"
