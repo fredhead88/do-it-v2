@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""R8.1 AC1/AC2 — `doit test`'s own environment isolation, proven end to end
+"""`doit test`'s environment and content isolation, proven end to end
 against a REAL `bash <copy-of-doit> test`, never the real repo's `./doit`.
 Run: python3 test_doit_test.py
 
 A throwaway tree — `<tree>/doit` (a byte-for-byte copy of THIS repo's `doit`)
-and `<tree>/src/test_probe.py` (a one-file fixture, the only test the copy
-ever runs) — is built fresh per case. The fixture writes what it saw straight
+and one or more fixture test files under `<tree>/src/` — is built fresh per
+case. Each fixture writes what it saw straight
 to `DOIT_TEST_PROBE_OUT`, a path the outer harness controls directly and
 `doit test`'s isolation never touches (it only exports HOME/DOIT_ROOT/
 XDG_CONFIG_HOME and unsets DOIT_LEDGER_FILE), so the report survives even
@@ -56,28 +56,58 @@ if os.environ.get("DOIT_TEST_PROBE_FAIL"):
 '''
 
 
-def _build_tree(tmp):
-    """`<tmp>/doit` (copy of the real launcher) + `<tmp>/src/test_probe.py`
-    (the fixture above) — the only test file the copy will ever see."""
+CONTENT_PROBE_SRC = '''\
+import json, os, pathlib
+out = pathlib.Path(os.environ["DOIT_TEST_PROBE_OUT"]).parent
+name = pathlib.Path(__file__).stem
+(out / (name + ".json")).write_text(json.dumps({
+    "fixture": name, "HOME": os.environ["HOME"],
+    "DOIT_ROOT": os.environ["DOIT_ROOT"],
+    "XDG_CONFIG_HOME": os.environ["XDG_CONFIG_HOME"],
+}))
+content = pathlib.Path(os.environ["DOIT_ROOT"]) / "content"
+content.mkdir(parents=True, exist_ok=True)
+(content / "L-charter-9999.md").write_text(name)
+'''
+CONTENT_FIXTURES = {"test_content_a.py", "test_content_b.py"}
+ISOLATION_EXPORTS = ('           export HOME="$DOIT_TEST_ISO/home" DOIT_ROOT="$DOIT_TEST_ISO/root" \\\n'
+                     '                  XDG_CONFIG_HOME="$DOIT_TEST_ISO/xdg"\n')
+
+
+def _build_tree(tmp, *, content=False, isolated=True):
+    """Copy the real launcher with either one env probe or two content probes."""
     tree = pathlib.Path(tempfile.mkdtemp(dir=tmp))
     doit_copy = tree / "doit"
-    doit_copy.write_text(REAL_DOIT.read_text())
+    shutil.copyfile(REAL_DOIT, doit_copy)
+    assert doit_copy.read_bytes() == REAL_DOIT.read_bytes()
+    if not isolated:
+        source = doit_copy.read_text()
+        assert source.count(ISOLATION_EXPORTS) == 1, "negative control must remove the exports"
+        doit_copy.write_text(source.replace(ISOLATION_EXPORTS, ""))
     doit_copy.chmod(doit_copy.stat().st_mode | stat.S_IEXEC)
     (tree / "src").mkdir()
-    (tree / "src" / "test_probe.py").write_text(PROBE_SRC)
+    sources = ({name: CONTENT_PROBE_SRC for name in CONTENT_FIXTURES} if content
+               else {"test_probe.py": PROBE_SRC})
+    for name, source in sources.items():
+        (tree / "src" / name).write_text(source)
     return tree
 
 
-def _run_case(outer_tmp, *, fail=False):
+def _run_case(outer_tmp, *, fail=False, content=False, isolated=True):
     """One full `bash <tree>/doit test` under a scoped sentinel HOME/DOIT_ROOT/
     XDG_CONFIG_HOME/DOIT_LEDGER_FILE/TMPDIR. Returns
-    `(rc, probe, sentinel_home, sentinel_root, sentinel_xdg, iso_tmpdir)`."""
-    tree = _build_tree(outer_tmp)
+    `(proc, probe, sentinel_home, sentinel_root, sentinel_xdg, iso_tmpdir)`,
+    plus the before snapshot for content cases."""
+    tree = _build_tree(outer_tmp, content=content, isolated=isolated)
     sentinel_home = pathlib.Path(tempfile.mkdtemp(dir=outer_tmp, prefix="sentinel-home-"))
     sentinel_root = pathlib.Path(tempfile.mkdtemp(dir=outer_tmp, prefix="sentinel-root-"))
     sentinel_xdg = pathlib.Path(tempfile.mkdtemp(dir=outer_tmp, prefix="sentinel-xdg-"))
     iso_tmpdir = pathlib.Path(tempfile.mkdtemp(dir=outer_tmp, prefix="iso-tmpdir-"))
     probe_out = pathlib.Path(tempfile.mkdtemp(dir=outer_tmp, prefix="probe-out-")) / "probe.json"
+    if content:
+        (sentinel_root / "content").mkdir()
+        (sentinel_root / "content" / "marker").write_bytes(b"sentinel content\x00\xff\n")
+        before = _content_snapshot(sentinel_root)
 
     env = {
         "PATH": os.environ.get("PATH", ""),
@@ -92,12 +122,65 @@ def _run_case(outer_tmp, *, fail=False):
         env["DOIT_TEST_PROBE_FAIL"] = "1"
     proc = subprocess.run(["bash", str(tree / "doit"), "test"], cwd=str(tree),
                           env=env, capture_output=True, text=True, timeout=60)
-    probe = json.loads(probe_out.read_text()) if probe_out.exists() else None
-    return proc, probe, sentinel_home, sentinel_root, sentinel_xdg, iso_tmpdir
+    if content:
+        probe = [json.loads(p.read_text()) for p in sorted(probe_out.parent.glob("*.json"))]
+    else:
+        probe = json.loads(probe_out.read_text()) if probe_out.exists() else None
+    result = proc, probe, sentinel_home, sentinel_root, sentinel_xdg, iso_tmpdir
+    return (*result, before) if content else result
 
 
 def _empty(d):
     return not any(pathlib.Path(d).rglob("*"))
+
+
+def _content_snapshot(root):
+    return {p.name: p.read_bytes() for p in (root / "content").iterdir()}
+
+
+def _content_violations(result):
+    """The identical guard checks both the real launcher and the negative control."""
+    proc, reports, home, root, xdg, tmp, before = result
+    violations = []
+    if proc.returncode:
+        violations.append(f"fixture runner failed: {proc.stdout} {proc.stderr}")
+    if (len(reports) != len(CONTENT_FIXTURES) or
+            {r["fixture"] + ".py" for r in reports} != CONTENT_FIXTURES):
+        violations.append("not every fixture reported")
+    for report in reports:
+        paths = [pathlib.Path(report[key]) for key in ("HOME", "DOIT_ROOT", "XDG_CONFIG_HOME")]
+        if any(p.resolve() == sentinel.resolve() for p, sentinel in zip(paths, (home, root, xdg))):
+            violations.append("fixture saw sentinel roots")
+        # resolve() rejects lexical parent escapes; all roots must be siblings
+        # under the ONE directory created by the launcher's mktemp, inside TMPDIR.
+        parents = {p.resolve().parent for p in paths}
+        if (len(set(paths)) != 3 or len(parents) != 1 or
+                not all(p.is_absolute() and p.resolve().parent.parent == tmp.resolve()
+                        for p in paths)):
+            violations.append("fixture roots escape launcher temp directory or overlap")
+        if any(p.exists() for p in paths) or any(p.exists() for p in parents):
+            violations.append("throwaway roots remain")
+    if _content_snapshot(root) != before:
+        violations.append("sentinel content changed")
+    if not _empty(tmp):
+        violations.append("launcher temp directory remains")
+    return violations
+
+
+def test_multifile_content_isolation():
+    with tempfile.TemporaryDirectory(prefix="doit-test-content-") as outer:
+        isolated = _run_case(outer, content=True)
+        violations = _content_violations(isolated)
+        ok(not violations, f"AC5 multi-file guard: {violations}")
+        print(f"AC5 multi-file guard: {len(isolated[1])} fixtures reported; "
+              "HOME/DOIT_ROOT isolated; sentinel content byte-identical; temp roots gone")
+        unisolated = _run_case(outer, content=True, isolated=False)
+        violations = _content_violations(unisolated)
+        ok(unisolated[0].returncode == 0 and len(unisolated[1]) == len(CONTENT_FIXTURES),
+           "AC6 negative control must run every fixture successfully")
+        ok("fixture saw sentinel roots" in violations and "sentinel content changed" in violations,
+           f"AC6 guard must detect the unisolated content write: {violations}")
+        print(f"AC6 negative control detected: {', '.join(sorted(set(violations)))}")
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -141,4 +224,6 @@ ok(_empty(shome2) and _empty(sroot2),
 print("AC2 ok")
 
 
+if __name__ == "__main__":
+    test_multifile_content_isolation()
 print(f"doit_test: {N} checks pass")

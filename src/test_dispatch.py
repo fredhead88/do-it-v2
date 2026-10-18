@@ -1,7 +1,68 @@
 #!/usr/bin/env python3
 """Run dispatch regressions and the ordered historical fixture chunks."""
 from pathlib import Path
-import subprocess, sys
+import json, os, subprocess, sys, tempfile
+
+
+def _isolated_run(args):
+    # Historical dispatch checks also create HOME/doit-scratch; isolate every
+    # child before imports, including when this script runs without the launcher.
+    with tempfile.TemporaryDirectory(prefix="dispatch-test-") as tmp:
+        for name in ("home", "root", "xdg"):
+            (Path(tmp) / name).mkdir()
+        env = {**os.environ, "HOME": tmp + "/home", "DOIT_ROOT": tmp + "/root",
+               "XDG_CONFIG_HOME": tmp + "/xdg"}
+        env.pop("DOIT_LEDGER_FILE", None)
+        subprocess.run(args, env=env, check=True)
+
+
+def test_alloc_suffix():
+    _isolated_run([sys.executable, __file__, "--alloc-cases"])
+
+
+def _check_alloc_suffix():
+    import dispatch
+
+    def case(names, expected, prefix="L-charter-", suffix=".md"):
+        with tempfile.TemporaryDirectory(dir=dispatch.ROOT) as tmp:
+            d = Path(tmp)
+            originals = {name: ("original: " + name).encode() for name in names}
+            for name, data in originals.items():
+                (d / name).write_bytes(data)
+            claimed = dispatch.alloc(d, prefix, suffix)
+            assert claimed == d / expected and claimed.is_file(), claimed
+            assert all((d / name).read_bytes() == data for name, data in originals.items())
+            print(f"alloc {', '.join(map(repr, names))} -> {claimed.name}; originals unchanged")
+
+    case(["L-charter-0040.md", "L-charter-0041.md", "L-charter-0041-t2.md"],
+         "L-charter-0042.md")
+    case(["L-charter-0041-t2.md"], "L-charter-0001.md")
+    for name in ("L-spec-0100-t2.md", "L-spec-0100.audited-0616.md",
+                 "L-spec-0100.v2.md", "L-spec-0100x.md", "L-spec-0100-.md",
+                 "L-spec-0100\u0661.md", "L-spec-0100\n.md"):
+        case(["L-spec-0007.md", name], "L-spec-0008.md", "L-spec-")
+    case(["L-spec-0007.md", "L-spec-0100.md"], "L-spec-0101.md", "L-spec-")
+    case(["L-builder-0100-t2.jsonl"], "L-builder-0001.jsonl", "L-builder-", ".jsonl")
+    with tempfile.TemporaryDirectory(dir=dispatch.ROOT) as tmp:
+        d = Path(tmp)
+        (d / "L-probe-0003").mkdir()
+        (d / "L-probe-0003-t2").write_bytes(b"original")
+        assert dispatch.alloc(d, "L-probe-", "") == d / "L-probe-0004"
+        assert (d / "L-probe-0003").is_dir()
+        assert (d / "L-probe-0003-t2").read_bytes() == b"original"
+        print("alloc empty suffix: directory 0003 + file 0003-t2 -> L-probe-0004")
+    case(["L-charter-8000.md", "L-charter-9102.md"], "L-charter-0001.md")
+    dispatch.EVENTS.mkdir()
+    (dispatch.EVENTS / "L-planner-0001.jsonl").write_text(json.dumps(
+        {"v": 1, "type": "spec-written", "subject": "L-spec-0007"}) + "\n")
+    with tempfile.TemporaryDirectory(dir=dispatch.ROOT) as tmp:
+        d = Path(tmp)
+        claims = [dispatch.alloc(d, "L-spec-", ".md") for _ in range(2)]
+        assert [p.name for p in claims] == ["L-spec-0008.md", "L-spec-0009.md"]
+        listing = sorted(os.listdir(d))
+        assert listing == [p.name for p in claims] and all(p.is_file() for p in claims)
+        print(f"alloc ledger-only 0007, distinct O_EXCL claims, fresh os.listdir: {listing}")
+    print("alloc-suffix AC1/AC2/AC3 pass (temporary HOME and DOIT_ROOT)")
 
 def test_dispatch_1134():
     import argparse, contextlib, hashlib, io, json, os, tempfile
@@ -88,8 +149,8 @@ def test_dispatch_0898():
     _checks = Path(__file__).with_name("dispatch_checks_3.py")
     _new = _checks.read_text().split("# END L0898 REGRESSIONS\n", 1)[0]
     # Separate processes keep module-level ledger roots hermetic during collection.
-    subprocess.run([sys.executable, "-c", "import sys; sys.path.insert(0, " +
-                    repr(str(_checks.parent)) + "); " + _new + "\ncheck_dispatch_0898()"], check=True)
+    _isolated_run([sys.executable, "-c", "import sys; sys.path.insert(0, " +
+                   repr(str(_checks.parent)) + "); " + _new + "\ncheck_dispatch_0898()"])
 
 _legacy = r"""
 from pathlib import Path
@@ -107,6 +168,12 @@ for _chunk in range(1, 4):
     exec(compile(_source, str(_path), "exec"), globals())
 """
 if __name__ == "__main__":
-    test_dispatch_1134()
-    test_dispatch_0898()
-    subprocess.run([sys.executable, "-c", "__file__ = " + repr(__file__) + "\n" + _legacy], check=True)
+    if sys.argv[1:] == ["--alloc-cases"]:
+        _check_alloc_suffix()
+    elif sys.argv[1:] == ["--issued-by-cases"]:
+        test_dispatch_1134()
+    else:
+        test_alloc_suffix()
+        _isolated_run([sys.executable, __file__, "--issued-by-cases"])
+        test_dispatch_0898()
+        _isolated_run([sys.executable, "-c", "__file__ = " + repr(__file__) + "\n" + _legacy])
