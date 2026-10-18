@@ -19,7 +19,7 @@ destination.
 `watch()` is the cron body (ADR-0028-11): one lock for the whole `--for` window,
 never re-acquired per tick; a run that finds the lock already held exits 0.
 """
-import argparse, fcntl, json, os, pathlib, subprocess, sys, time
+import argparse, fcntl, json, os, pathlib, stat, subprocess, sys, time
 import tomllib
 from datetime import datetime, timezone
 
@@ -89,7 +89,7 @@ def last_push(root=None):
             "age_s": age, "ok": bool(d.get("ok"))}
 
 
-def _write_state(root, ok, remote, snapshot=None, ts=None):
+def _write_state(root, ok, remote, snapshot=None, ts=None, exclusions=()):
     p = _state_path(root)
     prev = {}
     if p.is_file():
@@ -101,6 +101,7 @@ def _write_state(root, ok, remote, snapshot=None, ts=None):
          {"ts": prev.get("ts"), "snapshot": prev.get("snapshot"),
           "remote": remote or prev.get("remote")})
     d["ok"] = ok
+    d["excluded"] = list(exclusions) if ok else prev.get("excluded", [])
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(d))
 
@@ -136,6 +137,108 @@ def _repos_manifest(root):
 
 
 # ── the allow-list operation (AC1) ────────────────────────────────────────────
+def excluded(root):
+    """Sorted content exclusions; never follow links or enter excluded trees.
+
+    Index failures and an unreadable content root abort the scan. Errors on a
+    child name exclude that entire path as undetermined instead of treating it
+    as clean. Ledger parts must remain mirrored, so their 90 MB cap is fatal.
+    """
+    root = pathlib.Path(root)
+    index = _git(["ls-files", "--stage", "-z", "--", "content"], root)
+    if index.returncode:
+        raise RuntimeError(f"git ls-files failed: {index.stderr.strip()}")
+    found = {}
+    for record in index.stdout.split("\0"):
+        if record:
+            meta, path = record.split("\t", 1)
+            if meta.split()[0] == "160000" and path.startswith("content/"):
+                found[path] = "gitlink"
+
+    def walk(path):
+        rel = path.relative_to(root).as_posix()
+        if rel in found:
+            return
+        try:
+            info = path.lstat()
+            if stat.S_ISLNK(info.st_mode):
+                return
+            if stat.S_ISREG(info.st_mode):
+                if rel.startswith("content/ledger-mirror/"):
+                    if info.st_size > 94_371_840:
+                        raise RuntimeError(f"ledger mirror file exceeds 90 MB: {rel}")
+                elif info.st_size > 52_428_800:
+                    found[rel] = "over-50MB"
+                return
+            if not stat.S_ISDIR(info.st_mode):
+                return
+            with os.scandir(path) as scan:
+                entries = {entry.name for entry in scan}
+        except OSError:
+            found[rel] = "undetermined"
+            return
+
+        uncertain = False
+        if ".git" in entries:
+            try:
+                git = path / ".git"
+                mode = git.lstat().st_mode
+                nested = False
+                if stat.S_ISDIR(mode):
+                    try:
+                        nested = stat.S_ISREG((git / "HEAD").lstat().st_mode)
+                    except FileNotFoundError:
+                        pass
+                elif stat.S_ISREG(mode):
+                    with git.open("rb") as f:
+                        nested = f.readline(7).startswith(b"gitdir:")
+                if nested:
+                    found[rel] = "nested-repo"
+                    return
+            except OSError:
+                uncertain = True
+        if "PG_VERSION" in entries:
+            try:
+                if stat.S_ISREG((path / "PG_VERSION").lstat().st_mode):
+                    found[rel] = "pg-data-dir"
+                    return
+            except OSError:
+                uncertain = True
+        if uncertain:
+            found[rel] = "undetermined"
+            return
+        for name in sorted(entries - {".git"}):
+            walk(path / name)
+
+    content = root / "content"
+    try:
+        mode = content.lstat().st_mode
+    except FileNotFoundError:
+        mode = 0
+    if stat.S_ISDIR(mode):
+        # content itself (including its empty .git) is never classified.
+        with os.scandir(content) as scan:
+            names = sorted(entry.name for entry in scan if entry.name != ".git")
+        for name in names:
+            walk(content / name)
+    return [(p, found[p]) for p in sorted(found)
+            if not any(parent.as_posix() in found for parent in pathlib.PurePosixPath(p).parents)]
+
+
+def _untrack_excluded(root, exclusions):
+    paths = [f":(top,literal){path}" for path, _ in exclusions]
+    if not paths:
+        return
+    ls = _git(["ls-files", "-z", "--", *paths], root)
+    if ls.returncode:
+        raise RuntimeError(f"git ls-files failed: {ls.stderr.strip()}")
+    tracked = [f":(top,literal){p}" for p in ls.stdout.split("\0") if p]
+    if tracked:
+        rm = _git(["rm", "-r", "-f", "--cached", "--quiet", "--", *tracked], root)
+        if rm.returncode:
+            raise RuntimeError(f"git rm --cached failed: {rm.stderr.strip()}")
+
+
 def _untrack_outside_allowlist(root):
     ls = _git(["ls-files"], root)
     if ls.returncode != 0:
@@ -147,10 +250,11 @@ def _untrack_outside_allowlist(root):
             raise RuntimeError(f"git rm --cached failed: {rm.stderr.strip()}")
 
 
-def _stage_allowlist(root):
+def _stage_allowlist(root, exclusions=()):
     present = [p for p in ALLOWLIST if (root / p).exists()]
     if present:
-        add = _git(["add"] + present, root)
+        skips = [f":(top,exclude,literal){path}" for path, _ in exclusions]
+        add = _git(["add", "--", *present, *skips], root)
         if add.returncode != 0:
             raise RuntimeError(f"git add failed: {add.stderr.strip()}")
 
@@ -206,14 +310,16 @@ def _push_locked(root=None, config_path=None):
         return {"ts": ts, "snapshot": None, "remote": remote, "ok": False,
                 "error": err, "pushed": False}
     try:
+        exclusions = excluded(r)
         _repos_manifest(r)
         _untrack_outside_allowlist(r)
-        _stage_allowlist(r)
+        _untrack_excluded(r, exclusions)
+        _stage_allowlist(r, exclusions)
         _ensure_remote(r, remote)
         _commit_if_staged(r, ts)
         head = _git(["rev-parse", "HEAD"], r).stdout.strip()
         pushed = _push_if_ahead(r, remote, branch, head)
-        _write_state(r, ok=True, remote=remote, snapshot=head, ts=ts)
+        _write_state(r, ok=True, remote=remote, snapshot=head, ts=ts, exclusions=exclusions)
         return {"ts": ts, "snapshot": head, "remote": remote, "ok": True,
                 "error": None, "pushed": pushed}
     except Exception as e:                                    # noqa: BLE001

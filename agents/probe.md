@@ -20,8 +20,13 @@ nothing you write is the product.
 3. N real inputs from the operator's own data, never synthetic, with N stated.
 4. Credentials scoped to those externals, injected into this spawn only.
 5. Your run directory, `content/L-probe-NNNN/`, allocated for you by
-   `doit alloc probe --dir`. It is your cwd. Everything you write goes there,
-   and it sits outside every repository on purpose.
+   `doit alloc probe --dir`. It is your cwd, inside the mirrored ledger repo.
+   Only small text (run record, raw outputs, `spend.jsonl`, notes) stays there.
+   Every checkout, database cluster and copied ledger goes under the scratch
+   root, named through `scratch.sub(name)` (`src/scratch.py`), never under
+   `content/`. A file over 50 MB, a directory holding `PG_VERSION`, or a nested
+   repository under `content/` is excluded from the mirror and will not
+   survive a restore.
 6. The paid-call wrapper, `doit paid-call <label> -- <command...>`, and your
    spend cap. Every call that spends money goes through it: it writes
    `spend.jsonl` in the run directory and refuses the call after the cap is
@@ -37,9 +42,11 @@ it instead of testing the method.
 Write the smallest amount of code that runs the real path end to end: real
 inputs in, the real external called, the real output captured, for each of the
 N inputs. No security, no robustness, no tests. This cannot become the product:
-it is not a spec, it never dispatches to a builder, and its directory sits
-outside every repo. Capture raw outputs to the run directory as they come
-back, before you look at them. Record spend as you go.
+it is not a spec and it never dispatches to a builder. Its run directory is
+inside the mirrored ledger repo, so only small text belongs there. Keep every
+checkout, cluster and copied ledger under the scratch root via `scratch.sub(name)`.
+Capture small raw outputs to the run directory as they come back, before you
+look at them. Record spend as you go.
 
 Where the method breaks, record which shape broke:
 
