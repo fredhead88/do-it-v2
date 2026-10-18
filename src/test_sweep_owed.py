@@ -975,4 +975,109 @@ for variant in ("relabel", "redate"):
     assert any("needs operator" in line and "2" in line for line in output)
     print("L1113 AC5 no-runner excluded from manifest", variant)
 
+# L-spec-1111: script observations and a fixed hand-off channel govern the batch.
+import prod_runner
+
+clear()
+sid = "L-spec-9997"
+write("L-spec-writer-partition.jsonl",
+      {"type": "spec-written", "subject": sid, "project": "proj-a", "ts": EPOCH},
+      *({"type": "owed-ac", "subject": sid, "criterion": f"AC{i}", "wake_at": iso(hours=-1),
+         "line": f"fixture {i}", "ts": EPOCH} for i in range(1, 14)))
+write("L-executor-partition.jsonl", {"type": "shipped", "subject": sid, "ts": EPOCH})
+write("L-operator-partition.jsonl",
+      {"type": "owed-routed", "subject": sid, "criterion": "AC8", "route": "relabel",
+       "capability": "ro-dsn-grant", "ts": iso(hours=-2)},
+      {"type": "owed-failed", "subject": sid, "criterion": "AC13", "kind": "unmet",
+       "evidence": "old failure", "valid_until": iso(hours=-1), "ts": iso(hours=-2)})
+records = {
+    "AC1": ("build", ["repo"]), "AC2": ("build", ["repo"]),
+    "AC3": ("prod", ["ro-prod-sql"]), "AC4": ("prod", ["droplet-read"]),
+    "AC5": ("prod", ["deployed-site"]), "AC6": ("prod-browser", ["browser-review-account"]),
+    "AC7": ("judgment", ["operator"]), "AC8": ("judgment", ["repo"]),
+    "AC9": ("judgment", ["repo"]), "AC10": ("prod", ["ro-prod-sql"]),
+    "AC11": ("build", ["repo"]), "AC12": ("prod", ["ro-prod-sql"]), "AC13": ("build", ["repo"])}
+
+
+def fixture_record(row):
+    kind, needs = records[row["criterion"]]
+    return {"runner": kind, "needs": needs, "validity_h": 24,
+            "commands": [] if row["criterion"] == "AC10" else ["fixture"]}
+
+
+returned = {"lines": ["prod-runner fixture"], "bundle_rows": {(sid, "AC1"): "/evidence/failure.json",
+            (sid, "AC11"): "/evidence/held.json", (sid, "AC13"): "/evidence/stale-failure.json"},
+            "held": {(sid, "AC11"), (sid, "AC2")},
+            "to_judgment": {(sid, "AC10")}}
+order = []
+real_expired = sweep_owed.sweep_expired
+
+
+def expired_first(*args, **kw):
+    order.append("expiry")
+    return real_expired(*args, **kw)
+
+
+def observe_pass(now, *, dry_run=False):
+    assert order == ["expiry"]
+    order.append("runner")
+    if not dry_run:
+        path = EV / prod_runner.LEDGER_NAME
+        assert dispatch.emit(path, {"subject": sid}, "owed-met", criterion="AC12", evidence="fixture") is None
+    return returned
+
+
+def tree_bytes():
+    return {str(p.relative_to(TMP)): p.read_bytes() for p in TMP.rglob("*") if p.is_file()}
+
+
+with patch.object(prod_runner, "record_for", side_effect=fixture_record), \
+        patch.object(prod_runner, "run", side_effect=observe_pass) as run_stub, \
+        patch.object(sweep_owed, "sweep_expired", side_effect=expired_first), \
+        patch.object(subprocess, "Popen", side_effect=AssertionError("real process")), \
+        patch.object(subprocess, "run", side_effect=AssertionError("real process")):
+    rows = sweep_owed.due_candidates(specs_now()[1], NOW)
+    browser = prod_runner.batch_for_browser(rows)
+    assert browser == [r for r in rows if r["criterion"] == "AC6"]
+    # Full dry run: every file byte remains identical and the flag propagates.
+    before = tree_bytes()
+    sweep_owed.run(now=NOW, dry_run=True, runner=FakeRunner())
+    dry_run_unchanged = tree_bytes() == before
+    assert dry_run_unchanged
+    assert run_stub.call_count == 1 and run_stub.call_args.kwargs["dry_run"] is True
+    print("AC7 dry-run tree hash", hashlib.sha256(repr(sorted(before.items())).encode()).hexdigest())
+    order.clear()
+    run_stub.reset_mock()
+    fake = FakeRunner()
+    sweep_owed.run(now=NOW, runner=fake)
+    run_stub.assert_called_once_with(NOW, dry_run=False)
+    assert order == ["expiry", "runner"] and len(fake.calls) == 2
+    manifest = rows_of(next(CONTENT.glob("L-sweep-*.md")))
+    included = {r["criterion"] for r in manifest}
+    assert included == {"AC1", "AC9", "AC10", "AC13"}, manifest
+    assert "/evidence/failure.json" in next(r["line"] for r in manifest if r["criterion"] == "AC1")
+    reasons = {"AC1": "failing bundle", "AC2": "held undetermined build", "AC3": "script SQL",
+               "AC4": "script droplet", "AC5": "script HTTP", "AC6": "browser hand-off",
+               "AC7": "operator need", "AC8": "grant required", "AC9": "judgment",
+               "AC10": "production no commands", "AC11": "held takes precedence", "AC12": "met on refold",
+               "AC13": "stale-failed build bundle"}
+    for criterion, reason in reasons.items():
+        print("AC7", criterion, "included" if criterion in included else "excluded", reason)
+print("AC6 ok")
+print("AC7 ok")
+
+contract = (REPO_ROOT / "agents/owed-sweeper.md").read_text()
+for phrase in ("evidence bundle", "read it, do not re-run", "never execute checks", "never receive a `browser`",
+               "`operator-action`", "`ro-dsn-grant`", "`permission denied` from `ro-sql`", "never a verdict you record as failed",
+               "## Output → events", "45-minute"):
+    assert phrase in contract, phrase
+assert next(line for line in contract.splitlines() if line.startswith("tools:")) == \
+    "tools: Read, Glob, Grep, Bash, StructuredOutput, Write"
+print("AC9 ok")
+for criterion, body in (("AC7", {"included": sorted(included), "excluded": sorted(set(reasons) - included),
+                                 "dry_run_unchanged": dry_run_unchanged}),
+                        ("AC9", {"phrases_verified": True, "tools_unchanged": True})):
+    print(json.dumps({"url": f"cli://sweep-owed/{criterion}", "status": 0,
+        "body_sha256": hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest(), "body_excerpt": body}))
+
 ROOT_PATCHES.close()

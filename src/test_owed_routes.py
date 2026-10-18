@@ -11,7 +11,7 @@ import owed_routes
 assert owed_routes.MAX_ATTEMPTS == 2
 assert owed_routes.ROUTES == {"ro-dsn": "plain", "not-live": "plain", "droplet": "plain",
                               "elapsed": "plain", "repo": "repo", "browser": "browser",
-                              "operator-action": None}
+                              "operator-action": None, "ro-dsn-grant": None}
 for capability in owed_routes.ROUTES:
     assert owed_routes.route_for(capability) == capability
 assert owed_routes.route_for("other") == "repo"
@@ -56,3 +56,19 @@ for node in ast.walk(module):
     if isinstance(node, ast.ImportFrom):
         assert node.level == 0 and node.module.split(".")[0] in sys.stdlib_module_names
 print("owed-lifecycle AC5 ok")
+
+# A short grant is a permanent blocked route, never an expired unknown route.
+import owed
+import sweep_owed
+for clock in (now, now + timedelta(days=3650)):
+    for epochs in ({}, {"deploy": clock, "droplet-wrapper": "new"}):
+        assert owed_routes.route_for("ro-dsn-grant") == "ro-dsn-grant"
+        assert not owed_routes.ready({"capability": "ro-dsn-grant"}, clock, epochs)
+events = [{"subject": "L-spec-grant", "type": "shipped", "ts": last.isoformat()},
+          {"subject": "L-spec-grant", "type": "owed-ac", "criterion": "AC1",
+           "wake_at": last.isoformat(), "ts": last.isoformat()},
+          {"subject": "L-spec-grant", "type": "owed-unobservable", "criterion": "AC1",
+           "capability": "ro-dsn-grant", "why": "permission denied", "ts": now.isoformat()}]
+assert owed.checks(events, now)[0]["status"] == "blocked"
+assert not sweep_owed.due_candidates({"L-spec-grant": {"evs": events}}, now)
+print("AC3 ok")
