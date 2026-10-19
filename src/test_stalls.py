@@ -245,6 +245,10 @@ class Stalls(unittest.TestCase):
         lane = fold.stall_lane_rows(evs, specs, NOW, by_subject=by)
         self.assertEqual({r['spec'] for r in lane if r['overdue'] and not r['reason_live']},
                          {sid for sid, r in rows.items() if r['bucket'] == 'STUCK'})
+        for sid, row in rows.items():
+            self.assertEqual(fold.wedged(specs[sid], fold.DWELL_DAYS, events=evs,
+                                        specs=specs, by_subject=by, now=NOW),
+                             row['bucket'] == 'STUCK')
         before = {p: p.read_bytes() for p in self.events.iterdir()}
         with patch.object(dispatch, 'emit', side_effect=AssertionError('classifier wrote ledger')):
             board = fold.render(evs, specs, charters, ignored, by)

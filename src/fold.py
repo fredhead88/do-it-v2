@@ -1635,8 +1635,16 @@ def stall_rows(events=(), specs=None, *, now=None, dwell=None, by_subject=None):
     return rows(specs, by_subject, clock, dwell or dwell_days(by_subject))
 
 
-def wedged(spec, dwell=None):
-    """Age is a candidate filter; only an unowned next action is a WEDGE."""
+def wedged(spec, dwell=None, *, events=None, specs=None, by_subject=None, now=None):
+    """Only classified STUCK is a WEDGE; pass ledger context for external holds.
+
+    The two-argument form retains standalone spec checks. Cross-spec wave and
+    capability facts require the same admitted context the board/realm use.
+    """
+    if events is not None or by_subject is not None:
+        found = stall_rows(events or (), specs or {spec['id']: spec}, now=now,
+                           dwell=dwell, by_subject=by_subject)
+        return any(r['spec'] == spec['id'] and r['bucket'] == 'STUCK' for r in found)
     from fold_stalls import rows
     found = rows({spec['id']: spec}, {spec['id']: spec.get('evs', [])}, NOW,
                  dwell or DWELL_DAYS)
