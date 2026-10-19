@@ -4500,6 +4500,139 @@ def test_ledger_vocabulary_1143():
 test_ledger_vocabulary_1143()
 
 
+def test_ledger_vocabulary_1189():
+    import fold_emits
+
+    here = pathlib.Path(__file__).resolve().parent
+    fields = {
+        "prequeue-green": {"spec": "L-spec-1189", "branch_sha": "branch-revision",
+                           "base_sha": "base-revision", "scope": "full"},
+        "prequeue-red": {"spec": "L-spec-1189", "branch_sha": "branch-revision",
+                         "base_sha": "base-revision", "checks": ["unit"]},
+        "prequeue-undetermined": {"spec": "L-spec-1189", "branch_sha": "branch-revision",
+                                  "why": "unavailable"},
+        "window-selection": {"window": "window-id", "mode": "full", "reason": "default"},
+        "selection-shadow": {"window": "window-id", "selected_sha": "selected-revision",
+                             "full_sha": "full-revision"},
+        "selection-cutover": {"windows": ["window-id"]},
+        "selection-miss": {"nightly_sha": "nightly-revision",
+                           "ids": ["test-id"], "windows": ["window-id"]},
+        "window-rerun": {"window": "window-id", "target": "left", "sha": "revision"},
+        "base-red-nightly": {"sha": "nightly-revision"},
+    }
+    candidates = ("executor", "base-red", "operator", "tick", "builder", "grader",
+                  "thinker", "planner", "unknown-actor")
+    assert fold.EMITS is fold_emits.EMITS
+    missing_cases = 0
+    for kind, values in fields.items():
+        actors = {"base-red", "operator"} if kind == "base-red-nightly" else {"executor", "tick", "operator"}
+        event = {"type": kind, "subject": "L-spec-1189", **values}
+        assert fold.EMITS[kind] == actors, kind
+        print("1189-AC1", kind, ",".join(sorted(actors)))
+        assert fold.REQUIRED[kind] == fold_emits.REQUIRED_ROWS[kind] == tuple(values), kind
+        print("1189-AC2", kind, fold.REQUIRED[kind])
+        for actor in candidates:
+            kept = fold.admits(event, actor) is None
+            assert kept == (actor in actors), (kind, actor)
+            print("1189-AC3", kind, actor, "kept" if kept else "refused")
+        assert fold.required_reason(event) is None, kind
+        for field in values:
+            reason = fold.required_reason({key: value for key, value in event.items() if key != field})
+            assert reason and reason.endswith(field + "="), (kind, field, reason)
+            for blank in (None, "", " \t", 0, 0.0, False, []):
+                reason = fold.required_reason({**event, field: blank})
+                assert reason and reason.endswith(field + "="), (kind, field, blank, reason)
+            assert fold.required_reason({**event, field: "0"}) is None, (kind, field)
+            missing_cases += 1
+    assert missing_cases == 25, missing_cases
+    print("1189-AC4 missing-field cases:", missing_cases)
+
+    reader = ("import json, fold; "
+              "_, _, ignored, subjects = fold.fold(fold.read_events()); "
+              "print(json.dumps({'kept': subjects.get('L-spec-1189', []), 'ignored': ignored}))")
+
+    def roundtrip(kind, values, actor, label, *, autofill_project=False):
+        with tempfile.TemporaryDirectory(prefix="vocabulary-roundtrip-1189-") as directory:
+            filename = "L-executor-0001.jsonl" if actor == "executor" else f"L-{actor}-local.jsonl"
+            env = {**os.environ, "HOME": directory, "DOIT_ROOT": directory,
+                   "DOIT_LEDGER_FILE": filename, "DOIT_NO_POKE": "1"}
+            if autofill_project:
+                assert "project" not in values and "project" not in fold.REQUIRED[kind], kind
+                env.pop("DOIT_PROJECT", None)
+            path = pathlib.Path(directory) / "events" / filename
+            args = [f"{key}:={json.dumps(value)}" for key, value in values.items()]
+            written = subprocess.run([str(here.parent / "doit"), "append", kind, "L-spec-1189", *args],
+                                     cwd=here.parent, env=env, capture_output=True, text=True)
+            if actor == "builder":
+                assert written.returncode != 0 and "actor mismatch" in written.stderr, written.stderr
+                assert not path.exists(), path
+                written = subprocess.run(
+                    [sys.executable, "-c", "import sys, fold; fold.append(sys.argv[1:], strict=False)",
+                     kind, "L-spec-1189", *args], cwd=here, env=env, capture_output=True, text=True)
+                assert f"recorded-and-ignored {kind} by builder" in written.stderr, written.stderr
+            assert written.returncode == 0, written.stderr
+            stored = [json.loads(line) for line in path.read_text().splitlines()]
+            assert len(stored) == 1 and "actor" not in stored[0], stored
+            assert all(stored[0][key] == value for key, value in values.items()), stored
+            if autofill_project:
+                assert stored[0]["project"] == here.parent.name, stored
+            readback = subprocess.run([sys.executable, "-c", reader], cwd=here, env=env,
+                                      check=True, capture_output=True, text=True)
+            result = json.loads(readback.stdout)
+            kept = actor != "builder"
+            assert len(result["kept"]) == int(kept) and len(result["ignored"]) == int(not kept), result
+            row = (result["kept"] if kept else result["ignored"])[0]
+            assert row["type"] == kind and row["actor"] == actor, row
+            assert all(row[key] == value for key, value in values.items()), row
+            assert {key: value for key, value in row.items() if key not in ("actor", "_src")} == stored[0], row
+            if autofill_project:
+                assert row["project"] == here.parent.name, row
+                print(label, kind, "project autofilled")
+            else:
+                print(label, kind, "builder ignored" if not kept else actor + " kept")
+
+    for kind, values in fields.items():
+        writer = "base-red" if kind == "base-red-nightly" else "executor"
+        roundtrip(kind, values, writer, "1189-AC5")
+        if writer == "executor":
+            roundtrip(kind, values, "tick", "1189-AC5")
+        roundtrip(kind, values, "builder", "1189-AC5")
+        with tempfile.TemporaryDirectory(prefix="vocabulary-missing-1189-") as directory:
+            filename = "L-executor-0001.jsonl" if writer == "executor" else "L-base-red-local.jsonl"
+            env = {**os.environ, "HOME": directory, "DOIT_ROOT": directory,
+                   "DOIT_LEDGER_FILE": filename, "DOIT_NO_POKE": "1"}
+            # Omit the last V2 field; project is supplied by append and is never required.
+            args = [f"{key}:={json.dumps(value)}" for key, value in list(values.items())[:-1]]
+            written = subprocess.run([str(here.parent / "doit"), "append", kind, "L-spec-1189", *args],
+                                     env=env, capture_output=True, text=True)
+            assert written.returncode != 0 and "missing required field(s)" in written.stderr, written.stderr
+            assert not (pathlib.Path(directory) / "events" / filename).exists(), directory
+            print("1189-AC5", kind, "missing refused")
+
+    optional = {
+        "selection-shadow": {"missed": [], "clean": False},
+        "window-rerun": {"ids": [], "failed": []},
+        "window-selection": {"files": 0},
+        "base-red-nightly": {"ids": [], "complete": False},
+    }
+    for kind, extra in optional.items():
+        writer = "base-red" if kind == "base-red-nightly" else "executor"
+        roundtrip(kind, {**fields[kind], **extra}, writer, "1189-AC6-roundtrip")
+        print("1189-AC6", kind, "empty-optional kept")
+
+    assert fold.EMITS["base-red"] == {"base-red"}
+    assert "window-verified" not in fold.EMITS
+    assert "window-verified" not in fold.REQUIRED
+    print("1189-AC7 base-red and window-verified unchanged")
+
+    for kind in ("selection-cutover", "selection-miss", "base-red-nightly"):
+        writer = "base-red" if kind == "base-red-nightly" else "executor"
+        roundtrip(kind, fields[kind], writer, "1189-AC8", autofill_project=True)
+
+
+test_ledger_vocabulary_1189()
+
+
 def test_suite_run_vocabulary():
     event = {"type": "suite-run", "subject": "L-charter-0051", "sha": "a" * 40,
              "rc": 0, "failed": [], "wall_s": 0}
