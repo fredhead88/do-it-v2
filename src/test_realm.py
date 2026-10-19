@@ -394,6 +394,189 @@ console.log('lane UI: mappings, rendering, unreadable, undetermined, overrides, 
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+
+# ---------------------------------------------------------------- merge throughput (L-spec-1149)
+import contextlib
+import inspect
+import shlex
+import subprocess
+from unittest import mock
+
+THROUGHPUT_SENTINELS = {
+    "queue_depth": 7,
+    "in_flight": [{"window": "win-b", "specs": ["L-spec-b"], "since": "2026-10-19T01:00:00Z"},
+                  {"window": "win-a", "specs": ["L-spec-a"], "since": "2026-10-19T02:00:00Z"}],
+    "median_wait_min": 31.5, "p90_wait_min": 80, "merged_per_hour": 3.2,
+    "busy_hours": 13, "shipped": 29, "stale_merges": 17, "unproven_merges": 19,
+    "minutes_per_spec": 23.5, "selfhosted_minutes_per_spec": 27.5, "reason": "sentinel reason",
+}
+
+
+@contextlib.contextmanager
+def throughput_stub(value=THROUGHPUT_SENTINELS, *, mode="ok"):
+    with tempfile.TemporaryDirectory(prefix="realm-throughput-") as folder, contextlib.ExitStack() as stack:
+        repo = pathlib.Path(folder)
+        log = repo / "calls.jsonl"
+        script = repo / "stub.py"
+        script.write_text("import json, os, sys, time\n"
+                          f"with open({str(log)!r}, 'a') as f:\n"
+                          " f.write(json.dumps(dict(argv=sys.argv[1:], now=os.environ.get('DOIT_NOW'), "
+                          f"stdin=sys.stdin.read(), status={2 if mode == 'exit' else 0}))+'\\n')\n"
+                          + ("time.sleep(2)\n" if mode == "timeout" else "")
+                          + ("print('ledger unreadable', file=sys.stderr)\nsys.exit(2)\n" if mode == "exit" else "")
+                          + f"print({('not JSON' if mode == 'invalid' else json.dumps(value))!r})\n")
+        if mode != "missing":
+            (repo / "doit").write_text(f'#!/bin/sh\nexec /usr/bin/python3 {shlex.quote(str(script))} "$@"\n')
+            (repo / "doit").chmod(0o700)
+        stack.enter_context(mock.patch.multiple(realm, LIVE_REPO=repo, sys_signals=lambda: {},
+                                               maker_index=lambda *a: {}, omens_model=lambda *a: {}))
+        stack.enter_context(mock.patch.object(realm.realm_codex, "payload", return_value={}))
+        stack.enter_context(mock.patch.object(realm.HUB, "throughput", None))
+        yield log
+
+
+def throughput_bootstrap():
+    return realm.bootstrap(0, states=[], goals=[], proving=[])
+
+
+def test_1149_cli_passthrough_and_bootstrap():
+    with throughput_stub() as log:
+        d = throughput_bootstrap()
+        assert d["throughput"] == THROUGHPUT_SENTINELS and d["throughput_error"] is None
+        assert _dt.datetime.fromisoformat(d["throughput_at"]).tzinfo is not None
+        call, = [json.loads(line) for line in log.read_text().splitlines()]
+        assert call == dict(argv=["throughput", "--json"], now=d["throughput_at"], stdin="", status=0)
+        print("1149-AC1 passthrough ok")
+
+
+def test_1149_unavailable_and_admission_boundary():
+    for mode, value, cause in [("missing", {}, "FileNotFoundError"), ("exit", {}, "exit 2"),
+                                ("invalid", {}, "JSONDecodeError"), ("ok", [], "not an object"),
+                                ("timeout", {}, "TimeoutExpired")]:
+        # Leave process startup ample time under load; only this case tests a timeout.
+        timeout = 0.1 if mode == "timeout" else 60
+        with throughput_stub(value, mode=mode) as log, mock.patch.object(realm, "THROUGHPUT_TIMEOUT", timeout):
+            modules, paths = set(sys.modules), list(sys.path)
+            d = throughput_bootstrap()
+            assert d["throughput"] is None and cause in d["throughput_error"], d
+            assert set(sys.modules) == modules and sys.path == paths
+            print(f"1149-AC2 {mode if mode != 'ok' else 'list'} ok")
+    with throughput_stub() as log:
+        w("L-builder-1149.jsonl", [{"ts": "2026-10-19T01:00:00Z", "type": "review",
+                                    "subject": "L-spec-untrusted", "decision": "approve"}])
+        try:
+            throughput_bootstrap()
+            call = json.loads(log.read_text())
+            assert call["stdin"] == "" and call["argv"] == ["throughput", "--json"]
+        finally:
+            (TMP / "events" / "L-builder-1149.jsonl").unlink()
+        print("1149-AC2 cli-only-admission ok")
+
+
+def test_1149_cache_guard_and_sampler():
+    keys = {"throughput", "throughput_error", "throughput_at"}
+    with throughput_stub() as log:
+        p = realm.throughput_payload()
+        assert set(p) == keys
+        assert {k: throughput_bootstrap()[k] for k in keys} == p
+        assert len(log.read_text().splitlines()) == 1
+        realm.HUB.throughput = {**p, "throughput_at": (_dt.datetime.now(_dt.timezone.utc)
+                                                   - _dt.timedelta(minutes=11)).isoformat()}
+        throughput_bootstrap()
+        assert len(log.read_text().splitlines()) == 2
+        print("1149-AC3 cache ok")
+        with mock.patch.object(realm.subprocess, "run", side_effect=RuntimeError("broken")):
+            failed = realm.throughput_payload()
+        assert failed["throughput"] is None and "broken" in failed["throughput_error"]
+        assert realm.HUB.throughput == failed
+        print("1149-AC3 guard ok")
+    assert "sample_once()" in inspect.getsource(realm.sample_forever)
+    assert 'HUB.send("throughput", throughput_payload())' in inspect.getsource(realm.sample_once)
+    assert "throughput" not in inspect.getsource(realm.heartbeat_forever)
+    print("1149-AC3 wiring ok")
+    for failure in (False, True):
+        with throughput_stub() as log, contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(realm, "history_add"))
+            lane = {"lane": [], "lane_error": None, "lane_at": "lane-instant"}
+            stack.enter_context(mock.patch.object(realm, "lane_payload", return_value=lane))
+            stack.enter_context(mock.patch.object(realm, "derive_states", return_value=[]))
+            send = stack.enter_context(mock.patch.object(realm.HUB, "send"))
+            if failure:
+                stack.enter_context(mock.patch.object(realm.subprocess, "run", side_effect=RuntimeError("broken")))
+            realm.sample_once()
+            assert [call.args[0] for call in send.call_args_list] == ["history", "throughput"]
+            history = send.call_args_list[0].args[1]
+            assert all(history[k] == v for k, v in lane.items())
+            assert "history" in history and "wallclock" in history
+            p = send.call_args_list[1].args[1]
+            assert set(p) == keys
+            assert p["throughput"] == (None if failure else THROUGHPUT_SENTINELS)
+            assert bool(p["throughput_error"]) == failure
+            print(f"1149-AC10 {'failure' if failure else 'success'} ok")
+
+
+def test_1149_real_page_under_node():
+    page = realm.PAGE.read_text()
+    merge = page[page.index("function mergeValues()"):page.index("function openPanel(")]
+    snapshot = next(line for line in page.splitlines() if line.startswith("function applySnapshot("))
+    connect = page[page.index("function connect()"):page.index("let REMOTE=")]
+    seek = next(line for line in page.splitlines() if line.startswith("function seek("))
+    esc = next(line for line in page.splitlines() if line.startswith("const esc ="))
+    source = inspect.getsource(realm.throughput_payload) + merge
+    for forbidden in ("statistics.", "median(", "percentile", "merge-gate-clean", "'review'", "'shipped'"):
+        assert forbidden not in source
+    print("1149-AC7 cli-owned ok")
+    assert 'id="h-merge"' in page and "$('h-merge').onclick=" in page
+    assert "renderMerge();" in page[page.index("$('h-flight').firstElementChild"):page.index("let last=performance.now()")]
+    js = r"""
+const assert=require('node:assert/strict');
+let DATA={}, LIVE=true, EVENTS=[], T0=0, T1=0, lastPush='', S={};
+let stream, heard=false,lastHeard=0;
+const header={firstElementChild:{textContent:''},title:''};
+const $=id=>{assert.equal(id,'h-merge');return header;};
+const applyLane=()=>{}, rerenderPanel=()=>{}, insertEvent=()=>{}, Codex={load:()=>{},reset:()=>{}};
+const reset=()=>{},process=()=>{},renderLog=()=>{},computeBlockers=()=>{},computeOmens=()=>{};
+const setTimeout=()=>{},setInterval=()=>{},api=x=>x;
+const listeners={};class EventSource{addEventListener(k,f){listeners[k]=f;}}
+""" + esc + "\n" + merge + "\n" + snapshot + "\n" + connect + "\n" + seek + r"""
+const p=SENTINELS;
+function apply(d){applySnapshot({events:[],...d});return header.firstElementChild.textContent;}
+function includesAll(text){for(const v of ['7','2 windows','31.5','80','3.2'])assert(text.includes(v),text);}
+function unknown(text){assert(text.includes('?'));assert(!(text.includes('<')?/>[0-9]|idle/:/\d|idle/).test(text),text);}
+apply({throughput:p,throughput_error:null});includesAll(header.firstElementChild.textContent);includesAll(mergeHtml());
+console.log('1149-AC4 payload ok');
+apply({throughput:null,throughput_error:'x'});unknown(header.firstElementChild.textContent);assert(mergeHtml().includes('x'));assert.equal(header.title,'x');
+const empty={queue_depth:null,median_wait_min:null,p90_wait_min:null,merged_per_hour:null,reason:'unknown'};
+apply({throughput:empty,throughput_error:null});unknown(header.firstElementChild.textContent);unknown(mergeHtml());assert(mergeHtml().includes('unknown'));
+for(const value of ['9',false,{},NaN,Infinity]){DATA.throughput={...empty,queue_depth:value};assert.equal(mergeValues().queue,'?');}
+console.log('1149-AC5 unavailable ok');
+apply({throughput:p});apply({throughput:null,throughput_error:'boom',throughput_at:null});unknown(header.firstElementChild.textContent);assert.equal(header.title,'boom');assert(mergeHtml().includes('boom'));
+console.log('1149-AC6 snapshot-null ok');
+DATA={};apply({});unknown(header.firstElementChild.textContent);console.log('1149-AC6 absent ok');
+apply({throughput:p});LIVE=false;seek(Date.now());renderMerge();assert.equal(header.firstElementChild.textContent,'merge: live only');assert.equal(mergeHtml(),'<h2>merge: live only</h2>');
+console.log('1149-AC8 scrub ok');
+DATA={throughput:p,live:false};LIVE=DATA.live;renderMerge();assert.equal(header.firstElementChild.textContent,'merge: live only');assert(!mergeHtml().includes('31.5'));
+console.log('1149-AC8 snapshot ok');
+LIVE=true;renderMerge();includesAll(header.firstElementChild.textContent);includesAll(mergeHtml());
+const attack='<img src=x onerror=alert(1)>';
+for(const field of ['reason','window','error','spec']){
+ const bad={...p,in_flight:[{window:field==='window'?attack:'safe',specs:[field==='spec'?attack:'safe']}]};
+ if(field==='reason')bad.reason=attack;
+ apply({throughput:bad,throughput_error:field==='error'?attack:null});
+ assert(mergeHtml().includes('&lt;img'));assert(!mergeHtml().includes('<img'));
+ assert(!header.title.includes('<img'));
+ console.log('1149-AC9 '+field+' ok');
+}
+connect();listeners.throughput({data:JSON.stringify({throughput:p,throughput_error:null,throughput_at:'instant'})});includesAll(header.firstElementChild.textContent);
+listeners.throughput({data:JSON.stringify({throughput:null,throughput_error:'stream boom',throughput_at:'later'})});unknown(header.firstElementChild.textContent);assert.equal(DATA.throughput_at,'later');assert(mergeHtml().includes('stream boom'));
+console.log('1149-AC6 sse-null ok');
+"""
+    js = js.replace("SENTINELS", json.dumps(THROUGHPUT_SENTINELS))
+    proc = subprocess.run(["node", "-e", js], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    print(proc.stdout, end="")
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
