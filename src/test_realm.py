@@ -249,11 +249,16 @@ class EventSource:
     name: str = 'live'
 EVENTS = [{'actor': 'executor', '_src': 'live-reader', 'type': 'tick'}]
 SPECS = {'L-spec-7001': {'state': 'written'}}
+BY_SUBJECT = {}
 def read_events():
     return EVENTS
 def fold(events):
     assert events is EVENTS
-    return SPECS, {'not': 'specs'}, [], {}
+    return SPECS, {'not': 'specs'}, [], BY_SUBJECT
+def stall_lane_rows(events, specs, now, *, by_subject):
+    import lane_rules
+    assert by_subject is BY_SUBJECT
+    return lane_rules.due(events, specs, now)
 ''' + ("\ndef read_events(): raise RuntimeError('read-broken')\n" if case == "read-broken" else "")
                 + ("\ndef fold(events): raise RuntimeError('fold-broken')\n" if case == "fold-broken" else "")
                 + ("\ndef fold(events): return {}, {}\n" if case == "shape-broken" else ""))
@@ -323,7 +328,7 @@ def _page_function(source, name):
     raise AssertionError("unclosed function " + name)
 
 
-def test_lane_page_uses_rows_and_keeps_non_lane_waits():
+def test_lane_page_shows_only_classified_stuck():
     import re
     import subprocess
     page = realm.PAGE.read_text()
@@ -357,16 +362,16 @@ const NO_SELFCHECK=new Set(),FINISHED_RE=/accepted|shipped|killed/,DEFAULT_OWNER
 const isOperator=o=>o==='operator'||o==='you';
 const now=Date.parse('2026-10-15T12:00:00Z'),H=3600000;
 function fresh(lane=[]){S.now=now;S.lane=lane;S.laneAt='2026-10-15T12:00:00Z';S.laneError=null;S.actors.clear();S.subjectEvents.clear();S.esc.clear();S.sys=null;S.wallclock=null;S.lastAct=0;S.lastTick=null;S.recent=[];S.raisedAt.clear();DATA={states:[]};LIVE=true;}
-function row(rule,age=3,extra={}){return {spec:'L-spec-'+rule,rule,actor:'tick',since:new Date(now-age*H).toISOString(),limit_min:17,overdue:true,reason:'because <'+rule+'>',reason_live:false,blocker:'block <'+rule+'>',...extra};}
+function row(rule,age=3,extra={}){return {spec:'L-spec-'+rule,bucket:'STUCK',rule,actor:'tick',since:new Date(now-age*H).toISOString(),limit_min:17,overdue:true,reason:'because <'+rule+'>',reason_live:false,blocker:'block <'+rule+'>',...extra};}
 function has(text,part){assert.ok(text.includes(part),part+' missing in '+text);}
-const rows=[row('build',5),row('grade',2,{actor:'grader'}),row('gate',.5,{actor:'-'}),row('wave-held',3,{reason_live:true}),row('future',1),row('review',1,{overdue:false})];
-fresh(rows);computeBlockers();assert.equal(S.blockers.length,5);
-for(const [rule,place,kind,who,need,sev] of [['build','tower','shelf','executor',true,2],['grade','court','grade','grader',true,1],['gate','gate','merge','executor',true,0],['wave-held','tower','shelf','wave',false,1],['future','tower','lane','executor',true,0]]){
+const rows=[row('build',5),row('grade',2,{actor:'grader'}),row('gate',.5,{actor:'-'}),row('wave-held',3,{bucket:'waiting-on-prereq',overdue:false,reason_live:true}),row('future',1),row('review',1,{bucket:'queued',overdue:false})];
+fresh(rows);computeBlockers();assert.equal(S.blockers.length,4);
+for(const [rule,place,kind,who,need,sev] of [['build','tower','shelf','executor',true,2],['grade','court','grade','grader',true,1],['gate','gate','merge','executor',true,0],['future','tower','lane','executor',true,0]]){
  const b=S.blockers.find(b=>b.lane.rule===rule);assert.deepEqual([b.place,b.kind,b.who,b.need,b.sev],[place,kind,who,need,sev]);assert.equal(b.s,'L-spec-'+rule);assert.equal(b.since,Date.parse(b.lane.since));assert.equal(b.wait,now-b.since);
 }
 const panel=stuckHtml0();for(const r of rows){for(const value of [r.spec,r.rule,String(r.limit_min),r.since,esc(r.reason),esc(r.blocker)])has(panel,value);}
 assert.ok(!panel.includes('because <build>'));assert.ok(!panel.includes('block <build>'));
-assert.ok(!/\d/.test(panel.split('WHAT COUNTS AS STUCK')[1].replace(/<[^>]*>/g,'')));has(panel,'WITHIN LIMITS · 1');
+assert.ok(!/\d/.test(panel.split('WHAT COUNTS AS STUCK')[1].replace(/<[^>]*>/g,'')));has(panel,'WITHIN LIMITS · 2');
 const allRules={rebuild:['tower','shelf'],'dependency-held':['tower','shelf'],regrade:['court','grade'],review:['inn','review'],enqueue:['gate','merge'],merge:['gate','merge'],close:['keep','close'],idle:['tower','idle'],toString:['tower','lane'],constructor:['tower','lane']};
 for(const [rule,mapping] of Object.entries(allRules)){fresh([row(rule)]);computeBlockers();assert.deepEqual([S.blockers[0].place,S.blockers[0].kind],mapping);}
 fresh(null);S.laneError='load <failed>';computeBlockers();for(const text of [$('stuck').innerHTML,stuckHtml0()]){has(text,'rule table unreadable');has(text,'load &lt;failed&gt;');assert.ok(!text.toUpperCase().includes('NOTHING STUCK'));}assert.notEqual($('stuck').className,'calm');assert.equal($('h-stuck').firstElementChild.textContent,'unreadable');
@@ -376,13 +381,13 @@ fresh([row('unrecognized',1,{reason:'undetermined: cannot decide'})]);computeBlo
 fresh([]);for(const [i,ty] of ['spec-written','build-done','verdict','review','merge-gate-clean'].entries()){const s='L-spec-old'+i;DATA.states.push([s,['written','built','graded','reviewing','reviewing'][i]]);S.subjectEvents.set(s,[{ty,ms:now-100*H,st:'DONE',ok:true,nb:0}]);}computeBlockers();assert.deepEqual(S.blockers,[]);
 // A hold, a freeze, a busy subject and red master CI cannot overrule lane rows.
 fresh([row('build',5),row('gate',3)]);S.subjectEvents.set('L-spec-build',[{ty:'decision',a:'operator',ms:now-H,why:'hold L-spec-build until merge'}]);S.subjectEvents.set('L-charter-1',[{ty:'decision',a:'operator',ms:now-H,why:'merge freeze'}]);S.actors.set('busy',{subject:'L-spec-build',state:'working',start:now,tour:false});S.sys={ci:{red:1}};computeBlockers();assert.ok(S.holds.bySpec.has('L-spec-build'));assert.ok(S.holds.freeze);for(const b of S.blockers){assert.equal(b.need,true);assert.equal(b.text,b.lane.reason);}computeOmens();assert.ok(S.alarms.some(a=>a.kind==='shelf'));
-fresh([row('wave-held',3,{reason_live:true})]);computeBlockers();assert.equal(S.blockers[0].need,false);has(S.blockers[0].text,'block <wave-held>');
+for(const bucket of ['queued','held','waiting-on-prereq','waiting-on-human',undefined]){fresh([row('wait',3,{bucket,reason_live:true})]);computeBlockers();assert.deepEqual(S.blockers,[]);}
 function kept(){for(const [s,state] of [['L-spec-raven','written'],['L-spec-owed','shipped-owed']]){DATA.states.push([s,state]);S.subjectEvents.set(s,[{ty:'shipped',ms:now-30*H}]);}S.esc.set('L-spec-raven',[{ms:now-H,ow:'operator'}]);S.actors.set('queued',{sp:'L-builder-q',subject:'L-spec-q',role:'builder',state:'queued',start:now-3*60000,wp:'forge'});S.actors.set('working',{sp:'L-builder-w',subject:'L-spec-w',role:'builder',state:'working',start:now-H,wp:'forge'});}
-fresh([]);kept();computeBlockers();assert.deepEqual(new Set(S.blockers.map(b=>b.kind)),new Set(['raven','owed','unclaimed','cap']));assert.equal(S.blockers.find(b=>b.kind==='raven').who,'you');has($('stuck').innerHTML,'YOUR ruling');
+fresh([]);kept();computeBlockers();assert.deepEqual(S.blockers,[]);has($('stuck').innerHTML,'NOTHING STUCK');
 applyHistory({lane:[row('build')],lane_error:null,lane_at:'updated',history:{},wallclock:{}});assert.equal(S.lane.length,1);assert.equal(S.laneAt,'updated');
 applyHistory({lane:null,lane_error:'refresh failed',lane_at:'failed',history:{}});assert.equal(S.lane,null);assert.equal(S.laneError,'refresh failed');has($('stuck').innerHTML,'rule table unreadable');
-fresh([row('build')]);kept();LIVE=false;S.now=now-1;computeBlockers();assert.ok(S.blockers.every(b=>!b.lane));assert.deepEqual(new Set(S.blockers.map(b=>b.kind)),new Set(['raven','owed','unclaimed','cap']));for(const text of [$('stuck').innerHTML,stuckHtml0()]){has(text,'rule table: live only');assert.ok(!text.toUpperCase().includes('NOTHING STUCK'));}assert.notEqual($('stuck').className,'calm');
-console.log('lane UI: mappings, rendering, unreadable, undetermined, overrides, omens, kept waits, refresh and replay passed');
+fresh([row('build')]);kept();LIVE=false;S.now=now-1;computeBlockers();assert.deepEqual(S.blockers,[]);for(const text of [$('stuck').innerHTML,stuckHtml0()]){has(text,'rule table: live only');assert.ok(!text.toUpperCase().includes('NOTHING STUCK'));}assert.notEqual($('stuck').className,'calm');
+console.log('lane UI: mappings, rendering, unreadable, explicit STUCK, other buckets excluded, refresh and replay passed');
 '''
     # seek/reset must preserve the live result, while tick retains its numeric count separately.
     assert "S.lane=null" not in _page_function(page, "reset")
