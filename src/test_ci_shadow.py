@@ -267,8 +267,11 @@ class PassTests(unittest.TestCase):
         self.commit()
         self.runs = self.runs[:2]
         error = io.StringIO()
-        with contextlib.redirect_stderr(error):
+        # Keep fixture runs inside the 24-hour window while exercising the CLI.
+        with patch.object(cs, "datetime", wraps=datetime) as clock, contextlib.redirect_stderr(error):
+            clock.now.return_value = NOW
             self.assertEqual(cs.main(["--json"]), 1)
+        clock.now.assert_called_once_with(timezone.utc)
         self.assertIn("required-checks-unreadable", error.getvalue())
         self.assertEqual(self.events(), [])
         self.assertFalse(any(c[0] == "git" for c in self.calls))
