@@ -1618,8 +1618,44 @@ def owed_due(specs):
     return out
 
 
-def wedged(spec, dwell=None):
-    return spec["age"] > (dwell or DWELL_DAYS).get(spec["state"], 1e9)
+def stall_rows(events=(), specs=None, *, now=None, dwell=None, by_subject=None):
+    """One classified row per aged spec, shared by board and realm.
+
+    Supply the already-folded by_subject to avoid folding twice. This API only
+    reads ledger facts and prerequisite plans; it never ticks or dispatches.
+    """
+    from fold_stalls import rows
+    if by_subject is None:
+        folded = fold(events)
+        specs = folded[0] if specs is None else specs
+        by_subject = folded[3]
+    clock = now or NOW
+    specs = {sid: {**s, 'age': (clock - ts(s['evs'][-1]['ts'])).total_seconds() / 86400}
+             for sid, s in (specs or {}).items()}
+    return rows(specs, by_subject, clock, dwell or dwell_days(by_subject))
+
+
+def wedged(spec, dwell=None, *, events=None, specs=None, by_subject=None, now=None):
+    """Only classified STUCK is a WEDGE; pass ledger context for external holds.
+
+    The two-argument form retains standalone spec checks. Cross-spec wave and
+    capability facts require the same admitted context the board/realm use.
+    """
+    if events is not None or by_subject is not None:
+        found = stall_rows(events or (), specs or {spec['id']: spec}, now=now,
+                           dwell=dwell, by_subject=by_subject)
+        return any(r['spec'] == spec['id'] and r['bucket'] == 'STUCK' for r in found)
+    from fold_stalls import rows
+    found = rows({spec['id']: spec}, {spec['id']: spec.get('evs', [])}, NOW,
+                 dwell or DWELL_DAYS)
+    return bool(found and found[0]['bucket'] == 'STUCK')
+
+
+def stall_lane_rows(events, specs=None, now=None, *, by_subject=None):
+    """Realm's lane-compatible view; reason_live is never guessed from age."""
+    return [dict(r, rule='stalls', action=r['reason'], actor=r['owner'],
+                 overdue=r['bucket'] == 'STUCK', reason_live=r['bucket'] != 'STUCK')
+            for r in stall_rows(events, specs, now=now, by_subject=by_subject)]
 
 
 def in_flight_deploys(events):
@@ -1678,7 +1714,21 @@ def render(events, specs, charters, ignored, by_subject):
     since = lambda t: [e for e in events if e.get("type") == t and ts(e["ts"]) > looked]
     pick = lambda *st: [s for s in specs.values() if s["state"] in st]
     dwell = dwell_days(by_subject)
-    flag = lambda s: "  ⚠ WEDGE" if wedged(s, dwell) else ""
+    stall_error = None
+    try:
+        stalls = {r['spec']: r for r in stall_rows(events, specs, dwell=dwell, by_subject=by_subject)}
+    except Exception as exc:
+        from fold_stalls import text
+        stall_error, stalls = text(f'{type(exc).__name__}: {exc}'), {}
+    def flag(s):
+        if stall_error and s['age'] > dwell.get(s['state'], 1e9):
+            return f' · classification unavailable · owner executor · {stall_error}'
+        r = stalls.get(s['id'])
+        if r is None:
+            return ""
+        return ("  ⚠ WEDGE" if r['bucket'] == 'STUCK' else "") + (
+            f" · {r['bucket']} · owner {r['owner']} · {r['reason']}"
+            + (f" · deadline {r['deadline']}" if r['deadline'] else ""))
 
     # ★ Same collapse as spend_rows' labels, and for the same reason: DOIT_PROJECT
     # is operator environment with no event vouching for it, and a newline in it
@@ -1962,6 +2012,10 @@ def render(events, specs, charters, ignored, by_subject):
 
     drill = max((ts(e["ts"]) for e in events if e.get("type") == "restore-verified"), default=None)
     health = [f"restore drill: {'never run — the backup is unproven' if not drill else f'{(NOW-drill).days}d ago'}"]
+    from fold_stalls import BUCKETS
+    aged_counts = collections.Counter(r['bucket'] for r in stalls.values())
+    health.append('aged specs: unavailable — ' + stall_error if stall_error else
+                  'aged specs: ' + ' · '.join(f'{bucket}={aged_counts[bucket]}' for bucket in BUCKETS))
     # The degrade half of the block above (L-adr-0033). It lands HERE rather than at
     # the block's own position so that slot stays a pure pass-through of relay's
     # lines and nothing else — same loudness, a surface fold.py already owns. The
