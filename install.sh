@@ -54,6 +54,8 @@ else
   echo "agents:  $AGENTS/<name>.md -> $HERE/agents/ (already linked)"
 fi
 
+python3 "$HERE"/src/seat_usage.py link-statusline
+
 if ! command -v restic >/dev/null 2>&1; then
   echo "NOTE: restic not installed and DOIT_RESTIC_REPO unset, so the ledger has"
   echo "      no copy. The board will say so on every render until you fix it."

@@ -194,3 +194,13 @@ path = "{doit}"
 sig = '\bdoit gh-bill\b'
 owner = "thinker"
 project = "do-it-v2"
+
+[[row]]
+name = "seat-usage"
+where = "user"
+schedule = "*/15 * * * *"
+command = "{doit} cron-run seat-usage -- {doit} seat-usage >> {root}/logs/seat-usage.log 2>&1"
+path = "{doit}"
+sig = '\bdoit seat-usage\b'
+owner = "thinker"
+project = "do-it-v2"

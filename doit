@@ -42,6 +42,7 @@ case "${1:-board}" in
   backup)  shift; exec python3 "$SRC/backup.py" "$@" ;;
   restore) shift; exec python3 "$SRC/restore.py" "$@" ;;
   crons)   shift; exec python3 "$SRC/crons.py" "$@" ;;
+  seat-usage) shift; exec python3 "$SRC/seat_usage.py" "$@" ;;
   cron-run) shift; exec python3 "$SRC/cron_run.py" "$@" ;;
   health-alarms) shift; exec python3 "$SRC/health_alarms.py" "$@" ;;
   lane-rules) shift; exec python3 "$SRC/lane_rules.py" "$@" ;;
@@ -219,6 +220,7 @@ doit — a ledger that derives state, and the guards that read it
   doit restore <snapshot> [--root D] [--dry-run] [--remote U]  rebuild from the mirror
   doit crons check|print [name]|install <name>   builder-box cron manifest — measure, show, or
                                           install one row from crons.toml (L-charter-0036 R4)
+  doit seat-usage [--dry-run] [--json]    record a fresh Claude seat reading
   doit cron-run NAME -- CMD...            wrap CMD, recording start/outcome/duration per run
                                           to $R/state/cron-runs/NAME.jsonl (L-charter-0042 R14a)
   doit health-alarms [--dry-run]  evaluate and record local health alarms
