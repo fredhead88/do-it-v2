@@ -1047,6 +1047,19 @@ def history_payload(rows, states, now, metrics):
             **lane_payload(now)}
 
 
+def sample_once():
+    """One sampler cycle; merge throughput has its own guarded subprocess read."""
+    rows, raw, _ = read_all()
+    states = HUB.states or derive_states() or []
+    HUB.states = states
+    _, spec_ch = charter_index(raw)
+    now = dt.datetime.now(dt.timezone.utc)
+    m = metrics_at(rows, states, seat_claims(), now, sys_signals(), None, spec_ch)
+    history_add(m, now)
+    HUB.send("history", history_payload(rows, states, now, m))
+    HUB.send("throughput", throughput_payload())
+
+
 def sample_forever():
     """Every five minutes: the metrics now, appended to the history and streamed."""
     history_load()
@@ -1059,17 +1072,42 @@ def sample_forever():
         sys.stderr.write(f"realm: backfill failed: {ex}\n")
     while True:
         try:
-            rows, raw, _ = read_all()
-            states = HUB.states or derive_states() or []
-            HUB.states = states
-            _, spec_ch = charter_index(raw)
-            now = dt.datetime.now(dt.timezone.utc)
-            m = metrics_at(rows, states, seat_claims(), now, sys_signals(), None, spec_ch)
-            history_add(m, now)
-            HUB.send("history", history_payload(rows, states, now, m))
+            sample_once()
         except Exception as ex:  # noqa: BLE001
             sys.stderr.write(f"realm: sample failed: {ex}\n")
         time.sleep(300)
+
+
+THROUGHPUT_TIMEOUT = 60
+
+
+def throughput_payload(cached=False):
+    """Pass through the CLI's admitted answer, including unavailable answers."""
+    with HUB.throughput_lock:
+        now = dt.datetime.now(dt.timezone.utc)
+        previous = HUB.throughput
+        if cached and previous:
+            age = (now - dt.datetime.fromisoformat(previous["throughput_at"])).total_seconds()
+            if 0 <= age < 600:
+                return previous
+        result = {"throughput": None, "throughput_error": None,
+                  "throughput_at": now.isoformat()}
+        try:
+            proc = subprocess.run([str(LIVE_REPO / "doit"), "throughput", "--json"],
+                                  cwd=LIVE_REPO, stdin=subprocess.DEVNULL,
+                                  capture_output=True, text=True, timeout=THROUGHPUT_TIMEOUT,
+                                  env={**os.environ, "DOIT_ROOT": str(ROOT),
+                                       "DOIT_NOW": result["throughput_at"]})
+            if proc.returncode:
+                raise ValueError(f"throughput exit {proc.returncode}: {proc.stderr.strip()}")
+            value = json.loads(proc.stdout)
+            if not isinstance(value, dict):
+                raise ValueError("throughput JSON is not an object")
+            result["throughput"] = value
+        except Exception as ex:  # noqa: BLE001 — unknown is never a last-good answer
+            result["throughput_error"] = f"{type(ex).__name__}: {ex}"
+        HUB.throughput = result
+        return result
 
 
 def derive_states():
@@ -1208,6 +1246,7 @@ def bootstrap(hours, states=None, goals=None, proving=None, now=None):
             "window": [window_rows[0]["t"] if window_rows else now.isoformat(timespec="seconds"), now.isoformat(timespec="seconds")],
             "ledger_start": rows[0]["t"] if rows else None, "n_events": len(raw), "events": window_rows,
             "stats": role_stats(raw), "states": states, "goals": goals, "proving": proving,
+            **throughput_payload(cached=True),
             "seat": seat_summary(), "titles": titles, "counts": dict(counts.most_common(60)),
             "queue": queue_stats(rows, claims), "caps": ROLE_CAPS_MIN, "charters": charters, "spec_charter": spec_charter, "makers": maker_index(raw, states), "specs": {sid: t for sid in dict(states) if sid.startswith("L-spec-") for t in [spec_text(sid)] if t}, "sys": sys_signals(), "tick_omens": _OMENS_SCRIPT if _OMENS_SCRIPT["at"] else None, "history": HISTORY, "wallclock": wallclock(rows, states, now), "omens": omens_model(states, now)}
 
@@ -1219,6 +1258,8 @@ class Hub:
         self.states = None
         self.goals = None
         self.proving = None
+        self.throughput = None
+        self.throughput_lock = threading.Lock()
         self.recent = collections.deque(maxlen=6000)   # (kind, data) in arrival order, for /api/since
         self.seq = int(time.time() * 1000)             # monotonic across restarts, so an old client's seq is never "ahead"
         self.started = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")

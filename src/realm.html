@@ -27,6 +27,8 @@ body{margin:0;background:var(--night);color:var(--text);font-family:var(--body);
 .stats{scrollbar-width:none}.stats::-webkit-scrollbar{display:none}
 .hud .stat b{text-overflow:ellipsis;font-family:var(--display);font-weight:800;font-size:14px;color:#fff;font-variant-numeric:tabular-nums;white-space:nowrap;letter-spacing:.02em;overflow:hidden;text-overflow:clip;height:20px;line-height:20px}
 .hud .stat span{font-size:10px;color:var(--mute);text-transform:uppercase;letter-spacing:.16em}
+#h-merge{grid-column:1/-1}
+.hud #h-merge b{white-space:normal;height:auto;min-height:20px}
 .hud .stat.warn b{color:var(--amber)}.hud .stat.bad b{color:var(--red);text-shadow:0 0 10px rgba(255,106,92,.5)}.hud .stat.good b{color:var(--green)}
 .hud .ctl{display:flex;gap:6px;align-items:center;flex:none}
 .btn{font-family:var(--display);font-weight:600;font-size:11px;letter-spacing:.12em;padding:7px 11px;background:linear-gradient(#2a2250,#1a1436);color:var(--text);border:1px solid var(--hair);cursor:pointer;border-radius:2px}
@@ -288,6 +290,7 @@ canvas#map.hand{cursor:pointer}
     <div class="stat click" id="h-close" style="width:100px"><b>—</b><span>to close</span></div>
     <div class="stat click" id="h-proving" style="width:100px"><b>—</b><span>proving</span></div>
     <div class="stat click" id="h-flight"><b>—</b><span>in flight</span></div>
+    <div class="stat click" id="h-merge"><b>?</b><span>merge</span></div>
     <div class="stat click" id="h-stuck" style="width:124px"><b>—</b><span>stuck</span></div>
     <div class="stat click" id="h-shelf"><b>—</b><span>shelf</span></div>
     <div class="stat click" id="h-esc"><b>—</b><span>ravens</span></div>
@@ -757,6 +760,7 @@ function hud(){
   {const pv=DATA&&DATA.proving;const el=$('h-proving');if(pv==null){el.firstElementChild.textContent='unavailable';el.className='stat click';}else{el.firstElementChild.textContent=String(pv.length);const worst=pv.some(x=>x.colour==='overdue')?'bad':pv.some(x=>x.colour==='due-today')?'warn':'';el.className='stat click '+worst;}}
   $('h-flight').firstElementChild.textContent=[...S.actors.values()].filter(a=>!a.done&&!a.tour).length;
   renderStuckTile();
+  renderMerge();
   const sh=$('h-shelf');let oldest=0;for(const ms of S.shelf.values())oldest=Math.max(oldest,S.now-ms);sh.firstElementChild.textContent=S.shelf.size+(S.shelf.size?' · '+fmtAge(oldest):'');sh.className='stat '+(oldest>4*3600000?'bad':oldest>3600000?'warn':'');
   const es=$('h-esc');let eo=0;for(const l of S.esc.values())eo=Math.max(eo,S.now-l[0].ms);{const o=escOwners();const n=o.you+o.th;es.firstElementChild.textContent=n?`${n} · ${o.you} YOU`:'0';es.className='stat '+(o.you?(eo>4*3600000?'bad':'warn'):'');es.lastElementChild.textContent='ravens · yours';}
   $('h-ship').firstElementChild.textContent=S.shipped;$('h-ship').className='stat good';
@@ -808,6 +812,31 @@ function loadAsks(){fetch(api('/api/asks')).then(r=>r.ok?r.json():null).then(j=>
 document.addEventListener('click',e=>{const b=e.target.closest&&e.target.closest('[data-ask]');if(!b)return;e.stopPropagation();const panel=b.dataset.ask;if(askBusy[panel])return;askBusy[panel]=true;b.disabled=true;b.textContent='Sending…';
   fetch(api('/api/ask-thinker'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({panel,items:askItems(panel)})}).then(r=>r.json().then(j=>({ok:r.ok,j}))).then(({ok,j})=>{askBusy[panel]=false;if(!ok){b.textContent='Failed: '+(j.error||'error');b.disabled=false;return;}loadAsks();}).catch(()=>{askBusy[panel]=false;b.textContent='Failed — retry';b.disabled=false;});},true);
 setInterval(loadAsks,15000);setTimeout(loadAsks,1500);
+function mergeValues(){
+  const p=(DATA&&DATA.throughput)||{};
+  const num=v=>typeof v==='number'&&Number.isFinite(v)?String(v):'?';
+  return {queue:num(p.queue_depth),windows:Array.isArray(p.in_flight)?String(p.in_flight.length):'?',p50:num(p.median_wait_min),p90:num(p.p90_wait_min),rate:num(p.merged_per_hour)};
+}
+function mergeText(){
+  if(!LIVE)return 'merge: live only';
+  const v=mergeValues();
+  return `${v.queue} queued · ${v.windows} windows · wait ${v.p50} / ${v.p90} min · ${v.rate}/h`;
+}
+function renderMerge(){
+  const el=$('h-merge');el.firstElementChild.textContent=mergeText();
+  el.title=LIVE?esc((DATA&&DATA.throughput_error)||(DATA&&DATA.throughput&&DATA.throughput.reason)||''):'';
+}
+function mergeHtml(){
+  if(!LIVE)return '<h2>merge: live only</h2>';
+  const p=(DATA&&DATA.throughput)||{},v=mergeValues();
+  const windows=Array.isArray(p.in_flight)?p.in_flight:[];
+  return `<h2>Merge</h2><div class="kv"><b>queue</b><span>${v.queue}</span><b>in flight</b><span>${v.windows} windows</span><b>wait p50</b><span>${v.p50} min</span><b>wait p90</b><span>${v.p90} min</span><b>merged per hour</b><span>${v.rate}</span></div><p>${esc(DATA&&DATA.throughput_error||'')}</p><p>${esc(p.reason||'')}</p><ul>${windows.map(w=>`<li>${esc(w.window)} · ${Array.isArray(w.specs)?w.specs.map(s=>esc(s)).join(', '):''}</li>`).join('')}</ul><p class="tiny">As of ${esc(DATA&&DATA.throughput_at||'?')}</p>`;
+}
+function applyThroughput(d){
+  if(!DATA)return;
+  for(const k of ['throughput','throughput_error','throughput_at'])if(k in d)DATA[k]=d[k];
+  renderMerge();rerenderPanel();
+}
 function openPanel(html,view){$('p-body').innerHTML=html;$('panel').classList.add('open');if(!PHONE.matches)$('app').classList.remove('nopanel');if(view===undefined)panelView=null;else panelView=view;$('panel').scrollTop=0;}
 function rerenderPanel(){if(!panelView||$('app').classList.contains('nopanel'))return;const sc=$('panel').scrollTop;const html=panelView.html();if($('p-body').innerHTML!==html){$('p-body').innerHTML=html;if(panelView.bind)panelView.bind();$('panel').scrollTop=sc;}}
 let rerenderT=0;
@@ -1391,6 +1420,7 @@ $('h-shelf').onclick=()=>listPanel('On the shelf','written, no builder yet · ol
 $('h-fail').onclick=()=>listPanel('Fallen runs',`${S.fails} runs started and failed · ${S.refused} turned back before any spend`,()=>[...S.fallenList.slice().reverse().map(f=>({s:f.s||f.sp,t:f.sp+' · '+fmt(f.ms),why:f.why})),...S.refusedList.slice(-15).reverse().map(f=>({s:f.s||f.sp,t:'turned back · '+f.sp+' · '+fmt(f.ms),why:f.why}))]);
 $('h-ship').onclick=()=>listPanel('Shipped','in this window, newest first',()=>S.shippedList.slice().reverse().map(x=>({s:x.s,t:fmt(x.ms)+(x.sha?' · '+x.sha:'')+' · now '+(stateMap().get(x.s)||'?')})));
 $('h-flight').onclick=()=>listPanel('In flight','runs working or waiting at the ferry right now',()=>[...S.actors.values()].filter(a=>!a.done&&!a.tour).map(a=>({s:a.subject||a.sp,t:a.sp+' · '+a.state+' · '+fmtDur(S.now-a.start)})));
+$('h-merge').onclick=()=>openPanel(mergeHtml(),{html:mergeHtml});
 $('h-pipe').onclick=()=>listPanel('In pipeline','real work: written, building, graded, reviewing',()=>laneSplit().pipe.map(([s,v])=>({s,t:v+' · '+ageOf(s)})));
 $('h-owed').onclick=()=>listPanel('Owed checks due','shipped, production check overdue',()=>laneSplit().owed.map(([s,v])=>({s,t:ageOf(s)})));
 $('h-accept').onclick=()=>listPanel('Awaiting accept','merged and shipped, not yet accepted',()=>laneSplit().accept.map(([s,v])=>({s,t:ageOf(s)})));
@@ -1437,6 +1467,7 @@ function connect(){stream=new EventSource(api('/api/stream'));
   stream.addEventListener('heartbeat',()=>{lastHeard=Date.now();});
   stream.addEventListener('sys',ev=>{S.sys=JSON.parse(ev.data);});
   stream.addEventListener('history',ev=>applyHistory(JSON.parse(ev.data)));
+  stream.addEventListener('throughput',ev=>applyThroughput(JSON.parse(ev.data)));
   stream.addEventListener('tick_omens',ev=>{S.tickOmens=JSON.parse(ev.data);});
   stream.addEventListener('omens',ev=>{S.omens=JSON.parse(ev.data);});
   stream.onerror=()=>{$('h-clock-l').textContent='live · reconnecting';if(!heard)startPolling('failed to open');};}
@@ -1444,7 +1475,7 @@ let REMOTE=false,remoteTimer=null,lastPush='';
 async function remoteFetch(file){const r=await fetch(api('/api/ledger?file='+file),{cache:'no-store'});if(r.status===401)return {auth:false};if(!r.ok)return null;const d=await r.json();d.pushedAt=r.headers.get('X-Pushed-At')||'';return d;}
 function passwordForm(msg){openPanel(`<h2>Realm of DO-IT</h2><div class="cls">this realm is behind a password</div><p>${esc(msg||'Enter the password to open the realm.')}</p><form id="pwf"><input id="pw" type="password" autocomplete="current-password" placeholder="password" style="width:100%;padding:8px 10px;font-family:var(--body);font-size:15px;background:rgba(255,255,255,.06);color:#fff;border:1px solid var(--hair);border-radius:2px"><p style="margin-top:8px"><button class="btn on" type="submit">ENTER</button></p></form>`);status('A PASSWORD IS NEEDED','enter it in the panel');
   $('pwf').onsubmit=async ev=>{ev.preventDefault();const pw=$('pw').value;try{const r=await fetch(api('/api/login'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pw})});if(r.ok){status('WAKING THE REALM','fetching the last snapshot…');boot();}else passwordForm('That was not it. Try again.');}catch(_){passwordForm('Could not reach the login. Try again.');}};}
-function applySnapshot(d){if(!DATA){return false;}applyLane(d);if(d.codex){DATA.codex=d.codex;Codex.load(d.codex);}let lastT='';for(const e of EVENTS)if(e.t>lastT)lastT=e.t;let n=0;for(const row of d.events){if(row.t>lastT){insertEvent(row);n++;}}for(const k of ['states','seat','stats','titles','counts','queue','charters','spec_charter','makers','n_events','sys','tick_omens','history','specs','wallclock','metrics','goals','omens'])if(d[k]!=null)DATA[k]=d[k];if('proving' in d)DATA.proving=d.proving;if(d.wallclock)S.wallclock=d.wallclock;if(d.metrics)S.metricsNow=d.metrics;if(d.history)S.history=d.history;if(d.sys)S.sys=d.sys;if(d.tick_omens)S.tickOmens=d.tick_omens;if(d.omens)S.omens=d.omens;S.lastStates=Date.now();lastPush=d.pushedAt||d.now||'';T1=Date.now();return n;}
+function applySnapshot(d){if(!DATA){return false;}applyLane(d);applyThroughput(d);if(d.codex){DATA.codex=d.codex;Codex.load(d.codex);}let lastT='';for(const e of EVENTS)if(e.t>lastT)lastT=e.t;let n=0;for(const row of d.events){if(row.t>lastT){insertEvent(row);n++;}}for(const k of ['states','seat','stats','titles','counts','queue','charters','spec_charter','makers','n_events','sys','tick_omens','history','specs','wallclock','metrics','goals','omens'])if(d[k]!=null)DATA[k]=d[k];if('proving' in d)DATA.proving=d.proving;if(d.wallclock)S.wallclock=d.wallclock;if(d.metrics)S.metricsNow=d.metrics;if(d.history)S.history=d.history;if(d.sys)S.sys=d.sys;if(d.tick_omens)S.tickOmens=d.tick_omens;if(d.omens)S.omens=d.omens;S.lastStates=Date.now();lastPush=d.pushedAt||d.now||'';T1=Date.now();return n;}
 async function remotePoll(){const d=await remoteFetch('snapshot');if(!d||d.auth===false)return;applySnapshot(d);}
 let booted=false;
 async function boot(){
