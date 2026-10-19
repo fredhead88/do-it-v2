@@ -1,0 +1,4 @@
+# A selected limit is kept for the measured month in state/gh-bill.json.
+default = 450
+after_r1 = 120
+# Optional month override: "2026-10" = 450

@@ -688,6 +688,12 @@ def required_reason(e):
                 present = ((isinstance(value, int) and not isinstance(value, bool) and value >= 0)
                            or (isinstance(value, str) and value.isdecimal())
                            or (k == "listed" and isinstance(value, list)))
+            elif t == "bill-check" and k in ("yday", "mtd"):
+                # Explicit null means unknown; numeric zero is measured spend.
+                value = e.get(k)
+                present = k in e and (value is None or (
+                    isinstance(value, (int, float)) and not isinstance(value, bool)
+                    and 0 <= value < float("inf")))
             else:
                 # An empty owed-digest histogram is still supplied (SD1).
                 present = k in e if t == "owed-digest" and k == "counts" else _has(e, k)

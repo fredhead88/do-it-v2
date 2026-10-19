@@ -31,7 +31,7 @@ def check(cond, msg):
 REAL_MANIFEST = pathlib.Path(__file__).resolve().parent.parent / "crons.toml"
 NAMES = {"tick", "look", "tmp-reaper", "lessons-digest", "backup-watch",
          "ledger-snapshot", "sweep-owed", "auto-deploy", "owed-digest",
-         "portal-latency-daily", "suite-daily", "health-alarms", "ci-shadow", "balance", "stuck-digest", "verify-owed"}
+         "portal-latency-daily", "suite-daily", "health-alarms", "ci-shadow", "balance", "stuck-digest", "verify-owed", "gh-bill"}
 
 
 def _write_manifest(path, rows_):
@@ -70,11 +70,11 @@ def _exec_manifest(tmpdir, rows_=None, mode=0o755):
     return p, out
 
 
-# ══ AC1 · rows() — 16 rows, all 8 keys, where/project split ═════════════════
+# ══ AC1 · rows() — 17 rows, all 8 keys, where/project split ═════════════════
 d1 = TMP / "ac1"
 d1.mkdir()
 r1 = crons.rows(str(REAL_MANIFEST))
-check(len(r1) == 16, f"AC1: exactly 16 rows: {len(r1)}")
+check(len(r1) == 17, f"AC1: exactly 17 rows: {len(r1)}")
 check({row["name"] for row in r1} == NAMES, f"AC1: name set: {[row['name'] for row in r1]}")
 for row in r1:
     # R14a: every row also carries `max_runtime_s` now (int|None) — a 9th key,
@@ -115,6 +115,29 @@ check(ci_shadow == {
 }, f"L1124-AC11: ci-shadow exact row: {ci_shadow}")
 check(crons.interval_s(ci_shadow["schedule"]) == 600, "L1124-AC11: ten-minute interval")
 check(bool(re.search(ci_shadow["sig"], ci_shadow["command"])), "L1124-AC11: signature matches command")
+
+# L-spec-1128 AC8: exact billing row, new signature, and missing detection.
+gh_bill = next(row for row in r1 if row["name"] == "gh-bill")
+check(gh_bill == {
+    "name": "gh-bill", "where": "user", "schedule": "15 6 * * *",
+    "command": f"{REAL_MANIFEST.parent}/doit cron-run gh-bill -- "
+               f"{REAL_MANIFEST.parent}/doit gh-bill >> {fold.ROOT}/logs/gh-bill.log 2>&1",
+    "path": f"{REAL_MANIFEST.parent}/doit", "sig": r"\bdoit gh-bill\b",
+    "owner": "thinker", "project": "do-it-v2", "max_runtime_s": None,
+}, f"L1128-AC8: exact row: {gh_bill}")
+check(bool(re.search(gh_bill["sig"], gh_bill["command"])), "L1128-AC8: new command matches")
+check(not re.search(gh_bill["sig"], "15 6 * * * /home/albert/.do-it/bin/gh-bill-check.py >> /home/albert/.do-it/state/gh-bill.cron.log 2>&1"),
+      "L1128-AC8: legacy command excluded")
+empty_bill_crontab = TMP / "empty-bill-crontab"
+empty_bill_crontab.write_text("")
+empty_bill_crond = TMP / "empty-bill-crond"
+empty_bill_crond.mkdir()
+bill_check = subprocess.run([str(REAL_MANIFEST.parent / "doit"), "crons", "check",
+    "--crontab-file", str(empty_bill_crontab), "--crond-dir", str(empty_bill_crond)],
+    capture_output=True, text=True)
+check(bill_check.returncode == 1 and "gh-bill" in bill_check.stdout,
+      f"L1128-AC8: empty crontab names missing gh-bill: {bill_check.stdout} {bill_check.stderr}")
+print("L1128-AC8 ok (exact row, wrapped command, signature, missing gh-bill)")
 
 # L-spec-1046 AC1–AC3: the daily cron.d job is watched independently of the
 # hourly report. All executable paths and cron.d reads use temp fixtures.
@@ -250,10 +273,10 @@ crond5_empty.mkdir()
 # `tick`/`backup-watch` lines carry the real `/home/albert/do-it-v2/doit`, which
 # still matches `\bdoit tick\b` / `\bdoit backup watch\b` regardless of path.
 res5 = crons.check(manifest=str(manifest5), crontab_text=FIXTURE_5, crond_dir=str(crond5_empty))
-check({r["name"] for r in res5} == {"look", "tmp-reaper", "auto-deploy", "owed-digest", "portal-latency-daily", "suite-daily", "health-alarms", "ci-shadow", "balance", "stuck-digest", "verify-owed"},
-      f"AC5: exactly {{look, tmp-reaper, auto-deploy, owed-digest, portal-latency-daily, suite-daily, health-alarms, ci-shadow, balance, stuck-digest, verify-owed}} missing: {[r['name'] for r in res5]}")
+check({r["name"] for r in res5} == {"look", "tmp-reaper", "auto-deploy", "owed-digest", "portal-latency-daily", "suite-daily", "health-alarms", "ci-shadow", "balance", "stuck-digest", "verify-owed", "gh-bill"},
+      f"AC5: exactly {{look, tmp-reaper, auto-deploy, owed-digest, portal-latency-daily, suite-daily, health-alarms, ci-shadow, balance, stuck-digest, verify-owed, gh-bill}} missing: {[r['name'] for r in res5]}")
 check(all(r["reason"] == "absent" for r in res5), f"AC5: every entry is absent: {res5}")
-check(len(res5) == 11, f"AC5: no extra rows: {res5}")
+check(len(res5) == 12, f"AC5: no extra rows: {res5}")
 
 # AC5's second, minimal fixture: the only matching line is commented.
 d5b = TMP / "ac5b"

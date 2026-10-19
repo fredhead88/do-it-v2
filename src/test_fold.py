@@ -4275,7 +4275,7 @@ def test_ledger_vocabulary_1120():
         "ci-shadow": {"sha": "revision", "tree": "tree-id", "kind": "unit"},
         "ci-shadow-passed": {"kind": "unit", "from": "false", "to": "true"},
         "ci-runner-set": {"variable": "runner", "from": "unset", "to": "false"},
-        "bill-check": {"date": "2026-10-18", "yday": "0", "mtd": "1"},
+        "bill-check": {"date": "2026-10-18", "yday": 0, "mtd": 1},
         "window-tree-verified": {"window": "window-id", "sha": "revision", "tree": "tree-id"},
         "window-bisected": {"window": "window-id", "halves": [["left"], ["right"]]},
     }
@@ -4299,10 +4299,16 @@ def test_ledger_vocabulary_1120():
         for field in values:
             reason = fold.required_reason({key: value for key, value in event.items() if key != field})
             assert reason and reason.endswith(field + "="), (kind, field, reason)
-            for blank in (None, "", " \t", 0, 0.0, False, []):
+            bill_amount = kind == "bill-check" and field in ("yday", "mtd")
+            if bill_amount:
+                for value in (0, 0.0, 1, 1.25, None):
+                    assert fold.required_reason({**event, field: value}) is None, (kind, field, value)
+            blanks = ("", " \t", False, [], "0", -1, -1.5) if bill_amount else (None, "", " \t", 0, 0.0, False, [])
+            for blank in blanks:
                 reason = fold.required_reason({**event, field: blank})
                 assert reason and reason.endswith(field + "="), (kind, field, blank, reason)
-            assert fold.required_reason({**event, field: "0"}) is None, (kind, field)
+            if not bill_amount:
+                assert fold.required_reason({**event, field: "0"}) is None, (kind, field)
             missing_cases += 1
     assert missing_cases == 23, missing_cases
     print("1120-AC4 missing-field cases:", missing_cases)

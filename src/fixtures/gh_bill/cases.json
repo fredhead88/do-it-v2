@@ -1,0 +1,10 @@
+{
+  "none": {"ci": "false", "mtd": 10},
+  "alert": {"ci": "false", "yday": 13},
+  "alert-50": {"ci": "false", "mtd": 225},
+  "alert-75": {"ci": "false", "mtd": 340},
+  "alert-90": {"ci": "true", "mtd": 405},
+  "flip": {"ci": "false", "mtd": 427.5},
+  "flip-refused": {"ci": "false", "health": "false", "mtd": 427.5},
+  "undetermined": {"ci": "false", "mtd": 0}
+}
