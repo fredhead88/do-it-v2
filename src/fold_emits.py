@@ -294,6 +294,17 @@ EMITS["window-cancelled"] = {"executor", "tick", "operator"}
 EMITS["train-depth"] = {"executor", "tick", "operator"}
 EMITS["batch-cap"] = {"executor", "tick", "operator"}
 
+# L-spec-1189: smart-tests writers and the operator, per SD6.
+EMITS["prequeue-green"] = {"executor", "tick", "operator"}
+EMITS["prequeue-red"] = {"executor", "tick", "operator"}
+EMITS["prequeue-undetermined"] = {"executor", "tick", "operator"}
+EMITS["window-selection"] = {"executor", "tick", "operator"}
+EMITS["selection-shadow"] = {"executor", "tick", "operator"}
+EMITS["selection-cutover"] = {"executor", "tick", "operator"}
+EMITS["selection-miss"] = {"executor", "tick", "operator"}
+EMITS["window-rerun"] = {"executor", "tick", "operator"}
+EMITS["base-red-nightly"] = {"base-red", "operator"}
+
 REQUIRED_ROWS = {
     "seat-usage": ("five_hour_pct", "seven_day_pct", "five_hour_resets_at"),
     "balance": ("state_from", "state_to", "codex_pct"),
@@ -307,4 +318,13 @@ REQUIRED_ROWS = {
     "window-cancelled": ("after", "reason"),
     "train-depth": ("depth", "reason"),
     "batch-cap": ("cap", "reason"),
+    "prequeue-green": ("spec", "branch_sha", "base_sha", "scope"),
+    "prequeue-red": ("spec", "branch_sha", "base_sha", "checks"),
+    "prequeue-undetermined": ("spec", "branch_sha", "why"),
+    "window-selection": ("window", "mode", "reason"),
+    "selection-shadow": ("window", "selected_sha", "full_sha"),
+    "selection-cutover": ("windows",),
+    "selection-miss": ("nightly_sha", "ids", "windows"),
+    "window-rerun": ("window", "target", "sha"),
+    "base-red-nightly": ("sha",),
 }
