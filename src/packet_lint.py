@@ -331,3 +331,41 @@ def check_missing_stop_section(text):
     if re.search(r"^## STOP\b", text, re.M) and all(m in text for m in _STOP_MARKERS):
         return None
     return "the ## STOP section (local-box footguns) is missing from the builder packet"
+
+
+# ── PL-011 (L-spec-0682 R5): an owed check must name an environment that exists ─
+
+_OWED_MARK = re.compile(r"\bOWED\b")
+_OWED_ENVS = tuple(re.compile(p, re.I) for p in (
+    r"\bprod(?:uction)?\b[^.\n]{0,30}?\bread\b|\bro-sql\b|\bdroplet-read\b",
+    r"verifier portal|portal session|verifier account|verify@albertscott\.com|prod(?:uction)? portal",
+    r"local stack|private-pg|scratch postgres|local postgres|local uvicorn",
+    r"\bCI\b|GitHub Actions"))
+_LOCAL_DEV = re.compile(r"local dev(?:elopment)? server", re.I)
+_SCREENSHOT = re.compile(r"screenshot", re.I)
+
+
+def check_owed_environment(text):
+    """PL-011: within the Acceptance section, a criterion block whose header line
+    carries the word OWED must name at least one environment an owed check can
+    actually be observed in — a prod read, the verifier portal session, the local
+    stack, or CI — and must not be written against a "local dev server" with
+    screenshots (the verifier has no such environment; write it against the prod
+    portal with the verifier account, `verify@albertscott.com`, by name only).
+    Returns the first offending criterion id with the reason, else `None`."""
+    sec = packet.section(text, "Acceptance")
+    if not sec:
+        return None
+    lines = sec.splitlines()
+    starts = [i for i, l in enumerate(lines) if _AC_MARKER.match(l)]
+    for n, i in enumerate(starts):
+        block = "\n".join(lines[i:starts[n + 1] if n + 1 < len(starts) else len(lines)])
+        if not _OWED_MARK.search(lines[i]):
+            continue
+        cid = (re.search(r"AC\d+[a-z]?", lines[i]) or re.search(r".{0,20}", lines[i])).group(0)
+        if _LOCAL_DEV.search(block) and _SCREENSHOT.search(block):
+            return (f"{cid}: a local dev server with screenshots does not exist for the verifier; write it "
+                    "against the prod portal with the verifier account (verify@albertscott.com)")
+        if not any(p.search(block) for p in _OWED_ENVS):
+            return (f"{cid}: names none of prod read, verifier portal session, local stack, CI")
+    return None

@@ -145,7 +145,7 @@ class Ctx:
         # L-charter-0038 R1 / L-spec-0387: an owed-sweeper subject is a sweep id,
         # never a spec — it legitimately carries no prior events of its own.
         # `content/<subject>.md` (the manifest) is the packet's real input.
-        owed_sweeper = getattr(a, "role", None) == "owed-sweeper"
+        owed_sweeper = getattr(a, "role", None) in ("owed-sweeper", "owed-verifier")
         if not self.evs and not spec_writer_round_one and not charter_set and not owed_sweeper:
             # The one other legitimate exception is spec-writer round one: the spec id
             # was just allocated and nothing has been written about it yet, so the slot
@@ -1281,7 +1281,7 @@ def p_owed_sweeper(c):
 
 BUILD = {"spec-auditor": p_spec_auditor, "spec-writer": p_spec_writer, "builder": p_builder,
          "grader": p_grader, "reviewer": p_reviewer, "charter-reviewer": p_charter_reviewer,
-         "plan-auditor": p_plan_auditor, "owed-sweeper": p_owed_sweeper}
+         "plan-auditor": p_plan_auditor, "owed-sweeper": p_owed_sweeper, "owed-verifier": p_owed_sweeper}
 
 
 # ──────────────────────────── Blindness, as a check ────────────────────────────
@@ -1443,7 +1443,7 @@ def strip(c, role):
                 sec = section(body, name)
                 out += [(label, l) for l in sec.splitlines() if len(l.strip()) > 50] if sec else []
         return out
-    if role == "owed-sweeper":
+    if role in ("owed-sweeper", "owed-verifier"):
         # SD5 ("blind to card/grade"), mechanically enforced (fix 4): every row's
         # OWN spec's card prose and grader/audit reasoning — read off that row's
         # OWN event stream (`s["evs"]`), never `c.evs` (empty per the Ctx exemption).

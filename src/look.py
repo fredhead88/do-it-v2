@@ -740,6 +740,15 @@ def _origin_behind_reading(runner, now, deadline, repo, branch):
     return age_min >= 10, {"branch": branch, "unpushed": ahead_n, "age_min": age_min}, False
 
 
+def _check_owed_overdue(events, now, root, briefs):
+    """L-spec-0682 R6: one brief per owed check due >24h with no verdict, deduped by `emit_once`'s own path."""
+    try:
+        import owed_metrics
+        rows = owed_metrics.summary(events, now)["overdue_24h"]
+    except Exception: return
+    for row in rows:
+        r = _write_brief("owed-overdue", f"{row['spec']}/{row['criterion']}", "executor", row, events, root)
+        r and briefs.append(r)
 def _check_origin_behind(cfg, runner, now, deadline, events, root, briefs, answered):
     """L-charter-0042/L-spec-0484 R13(c): "local-ahead-of-origin for 10+
     minutes is an alarm." One reading per `[push]` project; a project with no
@@ -1047,6 +1056,7 @@ def run(events, *, now=None, runner=None, root=None, toml_path=None, dry_run=Fal
         _check_origin_behind(cfg, runner, now, deadline, events, root, briefs, answered)
         _check_spec_idle(events, now, root, briefs, answered)
         _check_lane_stale(events, now, root, briefs)
+        _check_owed_overdue(events, now, root, briefs)
         wallclock_events = _check_wallclock(events, runner, now, root, cfg, deadline, dry_run, briefs)
         r = _clear("look-stale", "look-stale", "fresh pass", events, root)
         r and answered.append(r)

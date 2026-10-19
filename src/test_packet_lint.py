@@ -123,8 +123,8 @@ check(by_id.get("PL-004") == "warn", f"an unpromoted PL-004 stays warn: {by_id}"
 # files stay under the 400-line cap, and install.sh names test_packet_lint.py
 data = packet_lint.load(packet_lint.CHECKLIST)
 eids = [e["id"] for e in data["entry"]]
-check(len(eids) == 10 and len(set(eids)) == 10 and set(eids) == {f"PL-{n:03d}" for n in range(1, 11)},
-      f"ten unique ids PL-001..PL-010: {eids}")
+check(len(eids) == 11 and len(set(eids)) == 11 and set(eids) == {f"PL-{n:03d}" for n in range(1, 12)},
+      f"eleven unique ids PL-001..PL-011: {eids}")
 check(all(hasattr(packet_lint, e["check"]) for e in data["entry"]),
       "every entry's check function resolves on packet_lint")
 HERE = pathlib.Path(__file__).resolve().parent
@@ -168,4 +168,39 @@ check(not validate.spec_shape(example_spec), "Rule one example passes the Verifi
 
 # The overflow fixtures also run through this required entry point.
 import test_packet_lint_cd
+# ── L-spec-0682 AC13/AC14: PL-011, an OWED check must name an environment that exists ──
+def test_pl011_owed_environment():
+    named = spec_text(accept="AC1 [observed-data]: OWED (prod read via ro-sql; wake_at 2026-10-20).\n"
+                             "  review_path: read the ledger; worked if met.")
+    unnamed = spec_text(accept="AC1 [observed-data]: OWED (someone looks at it by hand later).\n"
+                               "  review_path: look; worked if fine.")
+    not_owed = spec_text(accept="AC1 [backend]: does the thing.\n  review_path: run it; worked if exit 0.")
+    check(packet_lint.check_owed_environment(named) is None, "prod read has an observation environment")
+    check(packet_lint.check_owed_environment(named) is None, "an OWED check naming prod read is not flagged")
+    check(packet_lint.check_owed_environment(unnamed) is not None, "an OWED check naming no environment is flagged")
+    check(packet_lint.check_owed_environment(not_owed) is None, "a criterion that is not OWED is never flagged")
+    check("PL-011" in ids(unnamed) and "PL-011" not in ids(named),
+          "the registered PL-011 rule flags only the missing environment")
+    entry = next(e for e in data["entry"] if e["id"] == "PL-011")
+    check(entry["severity"] == "warn" and entry["applies_to"] == "spec", "PL-011 is warn-only for specs")
+    checkout = next(e for e in data["entry"] if e["id"] == "PL-010")
+    check(checkout["check"] == "check_live_checkout_cwd" and checkout["severity"] == "block",
+          "PL-010 remains the blocking checkout rule")
+    for env in ("verifier portal session", "local stack", "CI"):
+        t = spec_text(accept=f"AC1 [observed-data]: OWED (read through the {env}).\n  review_path: x; worked if met.")
+        check(packet_lint.check_owed_environment(t) is None, f"an OWED check naming {env} is not flagged")
+
+
+def test_pl011_local_dev_server_screenshots():
+    t = spec_text(accept="AC1 [ui]: OWED (prod read of the page; a local dev server + screenshots).\n"
+                         "  review_path: take screenshots; worked if it renders.")
+    hit = packet_lint.check_owed_environment(t)
+    check(hit is not None, "a local dev server with screenshots is flagged even beside a named environment")
+    check("prod portal" in hit and "verify@albertscott.com" in hit,
+          f"the message says to write it against the prod portal with the verifier account: {hit}")
+
+
+test_pl011_owed_environment()
+test_pl011_local_dev_server_screenshots()
+
 print(f"packet_lint: {N} checks pass")

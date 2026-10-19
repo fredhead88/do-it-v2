@@ -33,6 +33,10 @@ PROJECT = os.environ.get("DOIT_PROJECT")          # §9.1/D93: a filter, not a s
 
 from fold_emits import EMITS, DECLARES, OWED_DECLARERS, REQUIRED_ROWS
 EMITS["suite-run"] = {"suite-daily"}
+# L-spec-0682: the full-environment verifier may record verdicts and re-date timed checks.
+for _verdict in ("owed-met", "owed-failed"):
+    EMITS[_verdict].update({"owed-verifier", "verifier"})
+EMITS["owed-ac"].add("verifier")
 # A correction may override anything but these: D90 takes the actor from the
 # FILENAME, and a correction that could rewrite it reopens every check below.
 UNCORRECTABLE = ("actor", "_src")
@@ -2043,6 +2047,7 @@ def render(events, specs, charters, ignored, by_subject):
     # surfacing mechanism for expiry, and a second, silent board surface for
     # the same fact would drift from it.
     health.append(f"due owed: {len(owed_due_rows)}")
+    health.append(__import__("owed_metrics").health_line(by_subject, NOW))
     # R6/L-spec-0196 — "unserved packets: N": a failure keeps it non-zero, the
     # count is never dropped from once it fails (the Plan's own words). The
     # whole line degrades when `relay.unserved` is unavailable/raises, matching
