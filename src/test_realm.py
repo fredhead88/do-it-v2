@@ -227,6 +227,173 @@ def test_codex_workers_allowlist_mtime_quota_and_paths():
             assert marker not in serialized
 
 
+# ---------------------------------------------------------------- live lane (no main-branch module required)
+def test_lane_loads_each_repo_without_import_residue():
+    import itertools
+    from unittest.mock import patch
+    rows = [{"spec": "L-spec-7001", "rule": "build", "limit_min": 7,
+             "since": _ago(3), "overdue": True, "reason": "dispatch <builder>",
+             "reason_live": False, "blocker": "", "actor": "tick", "extra": [1, 2]}]
+    with tempfile.TemporaryDirectory() as tmp:
+        repos = {}
+        for case in ("rows", "absent", "load-broken", "due-broken", "read-broken", "fold-broken", "shape-broken"):
+            root = pathlib.Path(tmp) / case
+            src = root / "src"
+            src.mkdir(parents=True)
+            repos[case] = root
+            if case == "absent":
+                continue
+            (src / "fold.py").write_text('''from dataclasses import dataclass
+@dataclass
+class EventSource:
+    name: str = 'live'
+EVENTS = [{'actor': 'executor', '_src': 'live-reader', 'type': 'tick'}]
+SPECS = {'L-spec-7001': {'state': 'written'}}
+def read_events():
+    return EVENTS
+def fold(events):
+    assert events is EVENTS
+    return SPECS, {'not': 'specs'}, [], {}
+''' + ("\ndef read_events(): raise RuntimeError('read-broken')\n" if case == "read-broken" else "")
+                + ("\ndef fold(events): raise RuntimeError('fold-broken')\n" if case == "fold-broken" else "")
+                + ("\ndef fold(events): return {}, {}\n" if case == "shape-broken" else ""))
+            (src / "lane_rules.py").write_text('''import fold
+from pathlib import Path
+import json
+LOG = Path(__file__).with_name('calls.jsonl')
+def record(value):
+    with LOG.open('a') as stream: stream.write(json.dumps(value) + '\\n')
+def load():
+    record({'case': CASE, 'call': 'load'})
+    if CASE == 'load-broken': raise ValueError(CASE)
+    return {}
+def due(events, specs, now):
+    record({'case': CASE, 'call': 'due', 'events': events, 'specs': specs, 'now': now.isoformat()})
+    assert events is fold.EVENTS and specs is fold.SPECS
+    if CASE == 'due-broken': raise RuntimeError(CASE)
+    return ROWS
+''' + f"\nCASE = {case!r}\nROWS = {rows!r}\n")
+        # Multiple orders in one interpreter detect stale live-module caches.
+        for order in itertools.chain([list(repos), list(reversed(repos))],
+                                     itertools.permutations(("rows", "absent", "load-broken", "due-broken"))):
+            for case in order:
+                root = repos[case]
+                before_path, before_modules = sys.path[:], sys.modules.copy()
+                log = root / "src/calls.jsonl"
+                if log.exists():
+                    log.unlink()
+                with patch.dict(os.environ, {"DOIT_LIVE_REPO": str(root)}):
+                    with patch.object(realm, "read_all", return_value=([], [], {})), \
+                         patch.object(realm, "sys_signals", return_value={}), \
+                         patch.object(realm.realm_codex, "payload", return_value={}), \
+                         patch.object(realm, "omens_model", return_value={}):
+                        payload = realm.bootstrap(0, states=[], goals=[], proving=[], now=NOW)
+                    history = realm.history_payload([], [], NOW, {})
+                assert sys.path == before_path
+                assert sys.modules == before_modules
+                assert payload["lane_at"] == history["lane_at"] == NOW.isoformat(timespec="seconds")
+                assert "wallclock" in history
+                for result in (payload, history):
+                    if case == "rows":
+                        assert result["lane"] == rows and result["lane_error"] is None
+                    else:
+                        assert result["lane"] is None and result["lane_error"]
+                        assert (str(root) if case == "absent" else "invalid four-part" if case == "shape-broken" else case) in result["lane_error"], (case, result)
+                calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+                due = [c for c in calls if c["call"] == "due"]
+                assert len(due) == (2 if case in ("rows", "due-broken") else 0)
+                for call in due:
+                    assert call["case"] == case and call["now"] == NOW.isoformat()
+                    assert all(e["actor"] and e["_src"] == "live-reader" for e in call["events"])
+                    assert call["specs"] == {"L-spec-7001": {"state": "written"}}
+
+
+def _page_function(source, name):
+    """Brace-match a real page function, including balanced template expressions."""
+    start = source.index("function " + name + "(")
+    opening = source.index("{", start)
+    depth = 0
+    for i in range(opening, len(source)):
+        if source[i] == "{":
+            depth += 1
+        elif source[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start:i + 1]
+    raise AssertionError("unclosed function " + name)
+
+
+def test_lane_page_uses_rows_and_keeps_non_lane_waits():
+    import re
+    import subprocess
+    page = realm.PAGE.read_text()
+    body = _page_function(page, "computeBlockers")
+    assert body and _page_function(page, "renderStuck")
+    for lookup in ("spec-written", "build-done", "verdict", "review", "merge-gate-clean"):
+        assert lookup not in body
+    # Evaluate numeric products, so spelling a removed threshold differently cannot hide it.
+    for expr in re.findall(r"(?<![\w.])\d+(?:\.\d+)?(?:\s*\*\s*\d+(?:\.\d+)?)*", body):
+        assert eval(expr, {"__builtins__": {}}, {}) not in (600, 900, 1800, 600000, 900000, 1800000), expr
+    for name in re.findall(r"\b[A-Z][A-Z_]+\b", body):
+        for expr in re.findall(r"(?:const|let)\s+" + name + r"\s*=\s*([\d\s*]+)[;,]", page):
+            assert eval(expr, {"__builtins__": {}}, {}) not in (600, 900, 1800, 600000, 900000, 1800000)
+    functions = ("applyLane", "applyHistory", "laneNotice", "laneDetails", "renderStuckTile",
+                 "stateMap", "laneSplit", "computeHolds", "computeBlockers", "renderStuck", "stuckHtml0",
+                 "escOwner", "computeOmens")
+    constants = ("S", "toMs", "fmt", "fmtDur", "fmtAge", "esc", "LANE_PLACE", "WHO", "HOLD_RE", "LIFT_RE")
+    declarations = []
+    for name in constants:
+        declarations.append(next(line for line in page.splitlines() if line.startswith("const " + name + " ") or "const " + name + "=" in line))
+    # WHO_ shares the HOLD_RE line; LIFT_RE and all page functions are real source.
+    script = "\n".join(declarations + [_page_function(page, n) for n in functions])
+    script += r'''
+const assert=require('node:assert/strict');
+const els=new Map();const $=id=>{if(!els.has(id))els.set(id,{className:'',innerHTML:'',firstElementChild:{textContent:''}});return els.get(id);};
+let LIVE=true, DATA={states:[]}, stream=null, REMOTE=false,lastHeard=0;
+const CAP={builder:5};
+const isRaven=()=>true, knownBug=()=>null, execBusy=()=>false, OM=()=>null,lastOf=()=>null;
+const specCharter=()=>null,charterRows=()=>[],fixFor=()=>null,ownerFor=()=>null,sinceFor=()=>S.now,renderOmens=()=>{};
+const NO_SELFCHECK=new Set(),FINISHED_RE=/accepted|shipped|killed/,DEFAULT_OWNER={shelf:'executor'},NEXT_ACTION={shelf:()=>['executor','dispatch a builder']};
+const isOperator=o=>o==='operator'||o==='you';
+const now=Date.parse('2026-10-15T12:00:00Z'),H=3600000;
+function fresh(lane=[]){S.now=now;S.lane=lane;S.laneAt='2026-10-15T12:00:00Z';S.laneError=null;S.actors.clear();S.subjectEvents.clear();S.esc.clear();S.sys=null;S.wallclock=null;S.lastAct=0;S.lastTick=null;S.recent=[];S.raisedAt.clear();DATA={states:[]};LIVE=true;}
+function row(rule,age=3,extra={}){return {spec:'L-spec-'+rule,rule,actor:'tick',since:new Date(now-age*H).toISOString(),limit_min:17,overdue:true,reason:'because <'+rule+'>',reason_live:false,blocker:'block <'+rule+'>',...extra};}
+function has(text,part){assert.ok(text.includes(part),part+' missing in '+text);}
+const rows=[row('build',5),row('grade',2,{actor:'grader'}),row('gate',.5,{actor:'-'}),row('wave-held',3,{reason_live:true}),row('future',1),row('review',1,{overdue:false})];
+fresh(rows);computeBlockers();assert.equal(S.blockers.length,5);
+for(const [rule,place,kind,who,need,sev] of [['build','tower','shelf','executor',true,2],['grade','court','grade','grader',true,1],['gate','gate','merge','executor',true,0],['wave-held','tower','shelf','wave',false,1],['future','tower','lane','executor',true,0]]){
+ const b=S.blockers.find(b=>b.lane.rule===rule);assert.deepEqual([b.place,b.kind,b.who,b.need,b.sev],[place,kind,who,need,sev]);assert.equal(b.s,'L-spec-'+rule);assert.equal(b.since,Date.parse(b.lane.since));assert.equal(b.wait,now-b.since);
+}
+const panel=stuckHtml0();for(const r of rows){for(const value of [r.spec,r.rule,String(r.limit_min),r.since,esc(r.reason),esc(r.blocker)])has(panel,value);}
+assert.ok(!panel.includes('because <build>'));assert.ok(!panel.includes('block <build>'));
+assert.ok(!/\d/.test(panel.split('WHAT COUNTS AS STUCK')[1].replace(/<[^>]*>/g,'')));has(panel,'WITHIN LIMITS · 1');
+const allRules={rebuild:['tower','shelf'],'dependency-held':['tower','shelf'],regrade:['court','grade'],review:['inn','review'],enqueue:['gate','merge'],merge:['gate','merge'],close:['keep','close'],idle:['tower','idle'],toString:['tower','lane'],constructor:['tower','lane']};
+for(const [rule,mapping] of Object.entries(allRules)){fresh([row(rule)]);computeBlockers();assert.deepEqual([S.blockers[0].place,S.blockers[0].kind],mapping);}
+fresh(null);S.laneError='load <failed>';computeBlockers();for(const text of [$('stuck').innerHTML,stuckHtml0()]){has(text,'rule table unreadable');has(text,'load &lt;failed&gt;');assert.ok(!text.toUpperCase().includes('NOTHING STUCK'));}assert.notEqual($('stuck').className,'calm');assert.equal($('h-stuck').firstElementChild.textContent,'unreadable');
+fresh([]);computeBlockers();has($('stuck').innerHTML,'NOTHING STUCK');assert.equal($('stuck').className,'calm');
+fresh([row('unrecognized',1,{reason:'undetermined: cannot decide'})]);computeBlockers();assert.equal(S.blockers.length,1);assert.equal(S.blockers[0].need,true);has(stuckHtml0(),'undetermined: cannot decide');has($('stuck').innerHTML,'1 spec');has($('h-stuck').firstElementChild.textContent,'1 ·');assert.notEqual($('h-stuck').className,'stat good');
+// Histories far past every removed limit cannot recreate page-side lane waits.
+fresh([]);for(const [i,ty] of ['spec-written','build-done','verdict','review','merge-gate-clean'].entries()){const s='L-spec-old'+i;DATA.states.push([s,['written','built','graded','reviewing','reviewing'][i]]);S.subjectEvents.set(s,[{ty,ms:now-100*H,st:'DONE',ok:true,nb:0}]);}computeBlockers();assert.deepEqual(S.blockers,[]);
+// A hold, a freeze, a busy subject and red master CI cannot overrule lane rows.
+fresh([row('build',5),row('gate',3)]);S.subjectEvents.set('L-spec-build',[{ty:'decision',a:'operator',ms:now-H,why:'hold L-spec-build until merge'}]);S.subjectEvents.set('L-charter-1',[{ty:'decision',a:'operator',ms:now-H,why:'merge freeze'}]);S.actors.set('busy',{subject:'L-spec-build',state:'working',start:now,tour:false});S.sys={ci:{red:1}};computeBlockers();assert.ok(S.holds.bySpec.has('L-spec-build'));assert.ok(S.holds.freeze);for(const b of S.blockers){assert.equal(b.need,true);assert.equal(b.text,b.lane.reason);}computeOmens();assert.ok(S.alarms.some(a=>a.kind==='shelf'));
+fresh([row('wave-held',3,{reason_live:true})]);computeBlockers();assert.equal(S.blockers[0].need,false);has(S.blockers[0].text,'block <wave-held>');
+function kept(){for(const [s,state] of [['L-spec-raven','written'],['L-spec-owed','shipped-owed']]){DATA.states.push([s,state]);S.subjectEvents.set(s,[{ty:'shipped',ms:now-30*H}]);}S.esc.set('L-spec-raven',[{ms:now-H,ow:'operator'}]);S.actors.set('queued',{sp:'L-builder-q',subject:'L-spec-q',role:'builder',state:'queued',start:now-3*60000,wp:'forge'});S.actors.set('working',{sp:'L-builder-w',subject:'L-spec-w',role:'builder',state:'working',start:now-H,wp:'forge'});}
+fresh([]);kept();computeBlockers();assert.deepEqual(new Set(S.blockers.map(b=>b.kind)),new Set(['raven','owed','unclaimed','cap']));assert.equal(S.blockers.find(b=>b.kind==='raven').who,'you');has($('stuck').innerHTML,'YOUR ruling');
+applyHistory({lane:[row('build')],lane_error:null,lane_at:'updated',history:{},wallclock:{}});assert.equal(S.lane.length,1);assert.equal(S.laneAt,'updated');
+applyHistory({lane:null,lane_error:'refresh failed',lane_at:'failed',history:{}});assert.equal(S.lane,null);assert.equal(S.laneError,'refresh failed');has($('stuck').innerHTML,'rule table unreadable');
+fresh([row('build')]);kept();LIVE=false;S.now=now-1;computeBlockers();assert.ok(S.blockers.every(b=>!b.lane));assert.deepEqual(new Set(S.blockers.map(b=>b.kind)),new Set(['raven','owed','unclaimed','cap']));for(const text of [$('stuck').innerHTML,stuckHtml0()]){has(text,'rule table: live only');assert.ok(!text.toUpperCase().includes('NOTHING STUCK'));}assert.notEqual($('stuck').className,'calm');
+console.log('lane UI: mappings, rendering, unreadable, undetermined, overrides, omens, kept waits, refresh and replay passed');
+'''
+    # seek/reset must preserve the live result, while tick retains its numeric count separately.
+    assert "S.lane=null" not in _page_function(page, "reset")
+    assert "S.lane=e.ln" not in _page_function(page, "handle")
+    assert "applyLane(d)" in _page_function(page, "loadData")
+    assert "applyLane(d)" in _page_function(page, "applySnapshot")
+    assert "stream.addEventListener('history',ev=>applyHistory(JSON.parse(ev.data)))" in page
+    result = subprocess.run(["/usr/bin/node", "-e", script], text=True, capture_output=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

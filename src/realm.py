@@ -18,10 +18,12 @@ Server-Sent Events. Never appends, never edits, never touches a repository.
                                the token in ~/.do-it/realm.push. Outbound only.
 """
 import argparse
+import _imp
 import bisect
 import collections
 import datetime as dt
 import http.server
+import importlib.util
 import json
 import os
 import pathlib
@@ -990,6 +992,61 @@ def history_backfill(rows, claims, hours=24, step_min=15):
     return added
 
 
+def lane_payload(now):
+    """Read the live rule table afresh, isolating its bare sibling imports.
+
+    The import lock prevents other importers observing temporary aliases. Both
+    the path and module registry are restored even if a live module fails.
+    """
+    result = {"lane": None, "lane_error": None, "lane_at": now.isoformat(timespec="seconds")}
+    src = pathlib.Path(os.environ.get("DOIT_LIVE_REPO", LIVE_REPO)) / "src"
+    _imp.acquire_lock()
+    path_before, modules_before = sys.path[:], sys.modules.copy()
+    try:
+        sys.path.insert(0, str(src))
+        # A cached realm-branch sibling must not satisfy a live-module import.
+        for file in src.glob("*.py"):
+            sys.modules.pop(file.stem, None)
+        for dirname in src.iterdir():
+            if dirname.is_dir() and (dirname / "__init__.py").is_file():
+                for name in list(sys.modules):
+                    if name == dirname.name or name.startswith(dirname.name + "."):
+                        sys.modules.pop(name, None)
+
+        def read_module(name):
+            private = "_realm_live_" + name
+            spec = importlib.util.spec_from_file_location(private, src / (name + ".py"))
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[private] = module  # dataclasses consult their defining module
+            spec.loader.exec_module(module)
+            return module
+
+        live_fold = read_module("fold")
+        sys.modules["fold"] = live_fold  # live siblings use this alias only within this call
+        rules = read_module("lane_rules")
+        rules.load()  # due() may turn a load failure into rows; unreadable is explicit here
+        events = live_fold.read_events()
+        folded = live_fold.fold(events)
+        if not isinstance(folded, tuple) or len(folded) != 4 or not isinstance(folded[0], dict):
+            raise ValueError("fold returned an invalid four-part spec map")
+        result["lane"] = rules.due(events, folded[0], now)
+    except Exception as ex:  # a broken live checkout must not break the rest of realm
+        result["lane_error"] = f"{type(ex).__name__}: {ex}"
+    finally:
+        sys.path[:] = path_before
+        for name in list(sys.modules):
+            if name not in modules_before:
+                del sys.modules[name]
+        sys.modules.update(modules_before)
+        _imp.release_lock()
+    return result
+
+
+def history_payload(rows, states, now, metrics):
+    return {"history": HISTORY, "now": metrics, "wallclock": wallclock(rows, states, now),
+            **lane_payload(now)}
+
+
 def sample_forever():
     """Every five minutes: the metrics now, appended to the history and streamed."""
     history_load()
@@ -1009,7 +1066,7 @@ def sample_forever():
             now = dt.datetime.now(dt.timezone.utc)
             m = metrics_at(rows, states, seat_claims(), now, sys_signals(), None, spec_ch)
             history_add(m, now)
-            HUB.send("history", {"history": HISTORY, "now": m, "wallclock": wallclock(rows, states, now)})
+            HUB.send("history", history_payload(rows, states, now, m))
         except Exception as ex:  # noqa: BLE001
             sys.stderr.write(f"realm: sample failed: {ex}\n")
         time.sleep(300)
@@ -1120,13 +1177,13 @@ def queue_stats(rows, claims):
             "max_min": round(waits[-1], 1) if waits else None}
 
 
-def bootstrap(hours, states=None, goals=None, proving=None):
+def bootstrap(hours, states=None, goals=None, proving=None, now=None):
     rows, raw, _ = read_all()
     claims = seat_claims()
     for r in rows:
         if r.get("sp") in claims and r["ty"] in ("spawn-started", "build-started"):
             r["cl"] = claims[r["sp"]]
-    now = dt.datetime.now(dt.timezone.utc)
+    now = now if now is not None else dt.datetime.now(dt.timezone.utc)
     since = (now - dt.timedelta(hours=hours)).isoformat(timespec="seconds") if hours else ""
     window_rows = [r for r in rows if r["t"] >= since] if since else rows
     # keep every open spawn's start even if it predates the window, so it can still finish on screen
@@ -1147,7 +1204,7 @@ def bootstrap(hours, states=None, goals=None, proving=None):
         proving = derive_proving()
     _, spec_ch_now = charter_index(raw)
     metrics_now = metrics_at(rows, states, claims, now, sys_signals(), None, spec_ch_now)
-    return {"codex": realm_codex.payload(raw), "live": True, "now": now.isoformat(timespec="seconds"), "root": str(ROOT), "metrics": metrics_now,
+    return {**lane_payload(now), "codex": realm_codex.payload(raw), "live": True, "now": now.isoformat(timespec="seconds"), "root": str(ROOT), "metrics": metrics_now,
             "window": [window_rows[0]["t"] if window_rows else now.isoformat(timespec="seconds"), now.isoformat(timespec="seconds")],
             "ledger_start": rows[0]["t"] if rows else None, "n_events": len(raw), "events": window_rows,
             "stats": role_stats(raw), "states": states, "goals": goals, "proving": proving,
