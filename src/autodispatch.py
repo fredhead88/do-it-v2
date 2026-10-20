@@ -36,7 +36,7 @@ def _newest_marker_ts(evs):
     return max(times) if times else None
 
 
-def held_by_dependency(spec_evs, all_evs) -> str | None:
+def held_by_dependency(spec_evs, all_evs, *, shipped=None) -> str | None:
     """The newest hold stands until its dependency ships or an own clearer wins.
 
     Invalid dependencies fail closed; only a newer decision/unblocked releases
@@ -56,7 +56,8 @@ def held_by_dependency(spec_evs, all_evs) -> str | None:
         return "held: unresolvable dependency-hold (missing or empty waits_for)"
     if dependency == hold.get("subject"):
         return f"held: unresolvable dependency-hold (waits_for is self: {dependency})"
-    if any(e.get("type") == "shipped" and e.get("subject") == dependency for e in all_evs):
+    if (dependency in shipped if shipped is not None else
+            any(e.get("type") == "shipped" and e.get("subject") == dependency for e in all_evs)):
         return None
     return f"held: waits for {dependency} ({hold.get('why', '')})"
 

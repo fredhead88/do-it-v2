@@ -50,8 +50,16 @@ def prepare(by_subject, now):
     for subject in caps:
         for sid in fold.held_specs(by_subject[subject]):
             held.setdefault(sid, []).append(subject)
+    windows = defaultdict(list)
+    for subject, rows in by_subject.items():
+        window = latest(rows, {'window-opened', 'window-candidate', 'window-verified',
+                               'window-dropped', 'escalation-blocking'})
+        if window and window['type'] in ('window-opened', 'window-candidate'):
+            for sid in window.get('specs') or []:
+                windows[sid].append(subject)
     return dict(events=events, answered=fold.answered(events), active=active,
-                capabilities=caps, capability_specs=held)
+                capabilities=caps, capability_specs=held, windows=windows,
+                shipped={e.get('subject') for e in events if e.get('type') == 'shipped'})
 
 
 def classify(spec, specs, by_subject, context, now, dwell):
@@ -69,7 +77,7 @@ def classify(spec, specs, by_subject, context, now, dwell):
     if not evs:
         return result('STUCK', 'no ledger evidence for the next action')
     import autodispatch
-    dependency = autodispatch.held_by_dependency(evs, context['events'])
+    dependency = autodispatch.held_by_dependency(evs, context['events'], shipped=context['shipped'])
     if dependency:
         hold = latest(evs, {'dependency-hold'})
         if 'unresolvable' in dependency:
@@ -138,11 +146,7 @@ def classify(spec, specs, by_subject, context, now, dwell):
     blocking_review = bool(reviews and reviews[-1][1].get('n_blocking') != 0)
     if clean and clean[-1][0] > last_reset and not blocking_review and not fold.standing_rejects(evs):
         ready = clean[-1][1]
-        windows = [subject for subject, rows in by_subject.items()
-                   if (w := latest(rows, {'window-opened', 'window-candidate', 'window-verified',
-                                         'window-dropped', 'escalation-blocking'}))
-                   and w['type'] in ('window-opened', 'window-candidate')
-                   and sid in (w.get('specs') or [])]
+        windows = context['windows'].get(sid, [])
         reason = ('in merge window ' + ', '.join(sorted(windows)) if windows
                   else 'awaiting merge window after ' + ready['type'])
         return result('queued', reason, event=ready)

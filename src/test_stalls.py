@@ -78,6 +78,15 @@ class Stalls(unittest.TestCase):
         self.add('window-opened', 'win-fixture', -2600, 'executor', specs=[SID])
         self.assertIn('win-fixture', self.one()['reason'])
 
+    def test_window_index_preserves_latest_window_state(self):
+        self.clean()
+        self.add('window-opened', 'win-active', -2600, 'executor', specs=[SID])
+        self.add('window-opened', 'win-dropped', -2600, 'executor', specs=[SID])
+        self.add('window-dropped', 'win-dropped', -2500, 'executor', specs=[SID])
+        self.assertEqual(self.one()['reason'], 'in merge window win-active')
+        self.add('window-verified', 'win-active', -2400, 'executor', specs=[SID])
+        self.assertEqual(self.one()['reason'], 'awaiting merge window after review')
+
     def test_new_conflict_invalidates_old_clean_review(self):
         self.clean()
         self.add('conflict-rework', minutes=-2600, role='executor')
