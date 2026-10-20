@@ -503,7 +503,7 @@ def parity_checks():
 
 def inherited_base_pg_checks():
     """Real first-parent history and classifier, with only CI replaced by fixtures."""
-    def fixture(base_path="dashboard/base.ts", intermediate=False):
+    def fixture(base_path="dashboard/base.ts", intermediate=None):
         fx = Fx({})
         classifier = fx.repo / "scripts/ci/actions_changes_gate.sh"
         classifier.write_text("""python3 - <<'PY'
@@ -517,7 +517,7 @@ PY
 """)
         sh(["add", "-A"], fx.repo); sh(["commit", "-m", "path classifier"], fx.repo)
         parent = sh(["rev-parse", "HEAD"], fx.repo)
-        for name in (["dashboard/intermediate.ts", base_path] if intermediate else [base_path]):
+        for name in ([intermediate, base_path] if intermediate else [base_path]):
             path = fx.repo / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("base change\n")
@@ -579,7 +579,7 @@ PY
 
     # A multi-spec scoped window has intermediate merge commits with no CI.
     # Its ledger identifies the prior tested tip, as in the live c32r case.
-    fx, parent = fixture(intermediate=True)
+    fx, parent = fixture(intermediate="dashboard/intermediate.ts")
     window_gate.ev("window-verified", "prior", sha=fx.base, verified_on=parent,
                    scope=[window_gate.PYTEST_CHECK, window_gate.DASHBOARD_CHECK])
     rc = fx.go()
@@ -587,7 +587,7 @@ PY
           fx.events("window-base-pg-inherited")[0]["from_sha"] == parent[:12],
           "inherited PG: scoped window skips its untested intermediate commits")
 
-    fx, parent = fixture(base_path="api/tests/base.py", intermediate=True)
+    fx, parent = fixture(intermediate="api/tests/intermediate.py")
     window_gate.ev("window-verified", "prior", sha=fx.base, verified_on=parent,
                    scope=[window_gate.PYTEST_CHECK, window_gate.DASHBOARD_CHECK])
     rc = fx.go()
