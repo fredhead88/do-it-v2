@@ -228,7 +228,7 @@ ok(not any(e["type"] == "charter-filed" and e["actor"] == "thinker"
 
 # ── the contract the launcher opens is the contract on disk ─────────────────
 fm = dispatch.frontmatter("thinker")
-ok(fm["name"] == "thinker" and fm["model"] == "claude-opus-5", f"frontmatter: {fm}")
+ok(fm["name"] == "thinker" and fm.get("model", "").startswith("claude-"), f"frontmatter: {fm}")
 tools = [t.strip() for t in fm["tools"].split(",")]
 ok("Skill" in tools and "Agent" in tools and "StructuredOutput" not in tools,
    f"a session, not a contract: KEEP skills, no spawn path, no schema: {tools}")

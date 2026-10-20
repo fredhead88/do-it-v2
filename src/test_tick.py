@@ -953,7 +953,11 @@ fold.EVENTS = saved_events
 iso11b = _isolated_events()
 fold.EVENTS = iso11b
 assert "crons" not in sys.modules, "AC11: crons must be genuinely unimportable for this half"
-assert tick.main() == 0, "AC11: an ImportError degrades the tick, never crashes it"
+sys.modules["crons"] = None  # missing module is an explicit fixture
+try:
+    assert tick.main() == 0, "AC11: an ImportError degrades the tick, never crashes it"
+finally:
+    del sys.modules["crons"]
 assert "look_error" in ticks()[-1] and "crons" in ticks()[-1]["look_error"], \
     f"AC11: the same tick event names the import failure: {ticks()[-1]}"
 fold.EVENTS = saved_events

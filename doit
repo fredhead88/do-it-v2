@@ -40,7 +40,14 @@ case "${1:-board}" in
   # failure after the first. One PASS/FAIL line per file, its output kept (a
   # swallowed traceback is an undiagnosable failure), non-zero if any failed.
   # The glob covers test_*.mjs too, so test_vet_dep.mjs needs no tail call.
-  test)    cd "$SRC"
+  test)    shift
+           DOIT_TEST_ISO=$(mktemp -d)
+           trap 'rm -rf "$DOIT_TEST_ISO"' EXIT
+           mkdir -p "$DOIT_TEST_ISO/home" "$DOIT_TEST_ISO/root" "$DOIT_TEST_ISO/xdg"
+           export HOME="$DOIT_TEST_ISO/home" DOIT_ROOT="$DOIT_TEST_ISO/root" \
+                  XDG_CONFIG_HOME="$DOIT_TEST_ISO/xdg" DOIT_LIVE_REPO="$HERE"
+           unset DOIT_LEDGER_FILE
+           cd "$SRC"
            rc=0
            for f in test_*.py test_*.mjs; do
              [ -e "$f" ] || continue

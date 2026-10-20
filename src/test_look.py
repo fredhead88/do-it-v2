@@ -576,7 +576,11 @@ ok(any(b["key"] == "undetermined:crons" for b in briefs_of(res15b, "reading-unde
    "AC15: Undetermined -> exactly one reading-undetermined")
 
 root15c = newroot()
-res15c = look.run([], now=NOW, runner=FakeRunner(), root=root15c, toml_path=clean_toml(root15c))
+sys.modules["crons"] = None  # force ImportError even when crons.py exists
+try:
+    res15c = look.run([], now=NOW, runner=FakeRunner(), root=root15c, toml_path=clean_toml(root15c))
+finally:
+    del sys.modules["crons"]
 ok(any(b["key"] == "undetermined:crons" for b in briefs_of(res15c, "reading-undetermined")),
    "AC15: crons unimportable -> the same reading lands")
 ok(not briefs_of(res15c, "cron-missing"), "AC15: crons unimportable -> no cron-missing brief")
@@ -626,7 +630,7 @@ try:
     ok(not briefs_of(res16d, "spec-misrouted"), "AC16: older than 24h with a genuine mismatch appends nothing")
 
     root16e = newroot()
-    append_raw(root16e, "L-planner-0001.jsonl", iso(NOW - timedelta(hours=1)),
+    append_raw(root16e, "L-planner-0001.jsonl", iso(datetime.now(timezone.utc) - timedelta(hours=1)),
               type="spec-written", spec="L-spec-0402", path="/bad/path.md")
     ev16e = read_ledger(root16e)
     res16e = look.run(ev16e, now=NOW, runner=FakeRunner(), root=root16e, toml_path=clean_toml(root16e))
@@ -634,7 +638,7 @@ try:
        "AC16: a spec-written path mismatch briefs, keyed by spec")
 
     root16f = newroot()
-    append_raw(root16f, "L-planner-0001.jsonl", iso(NOW - timedelta(hours=1)),
+    append_raw(root16f, "L-planner-0001.jsonl", iso(datetime.now(timezone.utc) - timedelta(hours=1)),
               type="spec-written", spec="L-spec-0403")
     ev16f = read_ledger(root16f)
     res16f = look.run(ev16f, now=NOW, runner=FakeRunner(), root=root16f, toml_path=clean_toml(root16f))
