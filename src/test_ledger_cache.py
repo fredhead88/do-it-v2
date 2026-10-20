@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -75,11 +76,11 @@ class CacheTests(unittest.TestCase):
         with (self.events / a).open('a') as fh:
             fh.write('","type":"completed","subject":"tail"}\n')
         self.same()
-        cache = next((self.root / 'cache').glob('*.pickle'))
+        cache = next((self.root / 'cache').glob('*.sqlite3'))
         cache.write_bytes(b'corrupt cache')
         self.same()
-        for cache in (self.root / 'cache').glob('*.pickle'):
-            data = bytearray(cache.read_bytes()); data[-5] ^= 1; cache.write_bytes(data)
+        with sqlite3.connect(cache) as db:
+            db.execute("UPDATE chunks SET data=? WHERE rowid=(SELECT min(rowid) FROM chunks)", (b'broken chunk',))
         self.same()
 
     def test_only_suffix_parsed_and_caller_mutation_not_saved(self):
@@ -94,6 +95,25 @@ class CacheTests(unittest.TestCase):
             self.same()
             self.assertEqual(parse.call_count, 2)  # complete suffix + empty tail
             self.assertNotIn(b'"one"', b''.join(c.args[0] for c in parse.call_args_list))
+
+    def test_append_persists_only_the_new_chunk_and_idle_read_does_not_write(self):
+        name='L-operator-01.jsonl'
+        self.write(name,[dict(ts=str(i),type='row',subject='x') for i in range(700)])
+        self.same()
+        path=next((self.root/'cache').glob('*.sqlite3'))
+        with sqlite3.connect(path) as db:
+            before=db.execute('SELECT seq,data,sha FROM chunks ORDER BY seq').fetchall()
+        stamp=path.stat().st_mtime_ns
+        self.same()
+        self.assertEqual(path.stat().st_mtime_ns,stamp)
+        self.write(name,[dict(ts='new',type='new',subject='x')],'a')
+        with patch.object(ledger_cache,'_pack',wraps=ledger_cache._pack) as pack:
+            self.same()
+            self.assertTrue(pack.call_args_list)
+            self.assertLessEqual(max(len(c.args[0]) for c in pack.call_args_list),1)
+        with sqlite3.connect(path) as db:
+            after=db.execute('SELECT seq,data,sha FROM chunks ORDER BY seq').fetchall()
+        self.assertEqual(after[:-1],before)
 
     def test_heap_merge_matches_legacy_k_way_order(self):
         import random
@@ -117,13 +137,21 @@ class CacheTests(unittest.TestCase):
     def test_malformed_schema_and_executable_pickle_rebuild(self):
         self.write('L-operator-01.jsonl', [dict(ts='1', type='test')])
         self.same()
-        path = next((self.root/'cache').glob('*.pickle'))
-        ledger_cache._save(path, {'version': ledger_cache.VERSION, 'files': []})
+        path = next((self.root/'cache').glob('*.sqlite3'))
+        with sqlite3.connect(path) as db:
+            db.execute('DROP TABLE files')
+            db.execute('CREATE TABLE files (bad TEXT)')
         self.same()
-        ledger_cache._save(path, {'version': ledger_cache.VERSION, 'files': {'bad': {}}})
+        # A valid checksum is insufficient to authorize importing a class.
+        data, digest = ledger_cache._pack(os.system)
+        with sqlite3.connect(path) as db:
+            db.execute('UPDATE chunks SET data=?,sha=?', (data,digest))
         self.same()
-        # A valid checksum is insufficient to authorize importing any class.
-        ledger_cache._save(path, os.system)
+        with sqlite3.connect(path) as db:
+            db.execute('DELETE FROM chunks')
+        self.same()
+        with sqlite3.connect(path) as db:
+            db.execute('UPDATE files SET offset=offset+1')
         self.same()
 
     def test_answered_keeps_ref_subject_strict_time_and_admitted_fixes(self):
@@ -152,7 +180,7 @@ class CacheTests(unittest.TestCase):
 
     def test_unwritable_cache_falls_back(self):
         self.write('L-operator-01.jsonl', [dict(ts='1', type='test')])
-        with patch.object(ledger_cache, '_save', side_effect=PermissionError('read-only')):
+        with patch.object(ledger_cache, '_connect', side_effect=PermissionError('read-only')):
             self.same()
 
     def test_fresh_processes_and_concurrent_readers(self):

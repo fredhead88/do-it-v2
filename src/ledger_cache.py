@@ -1,22 +1,26 @@
-"""Disposable, cross-process parsed JSONL cache. No fold policy lives here.
+"""Disposable cross-process parsed JSONL cache, stored as small SQLite chunks.
 
-Only raw events are saved: corrections, ordering and project filters run in fold.
-The single snapshot is replaced atomically under flock. A checksum and restricted
-unpickler make damage a cache miss, never executable cache content. Set
-DOIT_READ_CACHE=0 (or read_events(use_cache=False)) for the reference reader.
+Only raw events are saved; fold owns ordering, corrections and project filters.
+Transactions publish whole reads atomically under flock. Checksummed, data-only
+pickles avoid JSON reparsing without allowing executable cache content. Any
+cache failure falls back to fold's independent reference parser.
 """
-import contextlib
 import fcntl
 import hashlib
+import io
 import json
 import os
 import pathlib
 import pickle
+import sqlite3
 import sys
-import tempfile
 
-VERSION = 1
-MAGIC = b'DOIT-PARSED-LEDGER-1\n'
+VERSION = 2
+CHUNK_EVENTS = 256
+
+
+class Invalid(ValueError):
+    pass
 
 
 class _DataOnly(pickle.Unpickler):
@@ -24,48 +28,25 @@ class _DataOnly(pickle.Unpickler):
         raise pickle.UnpicklingError('cache may contain data only')
 
 
-def _load(path):
-    with path.open('rb') as fh:
-        if fh.read(len(MAGIC)) != MAGIC:
-            raise ValueError('cache version')
-        digest = fh.read(32)
-        actual = hashlib.sha256()
-        while chunk := fh.read(1024 * 1024):
-            actual.update(chunk)
-        if actual.digest() != digest:
-            raise ValueError('cache checksum')
-        fh.seek(len(MAGIC) + 32)
-        return _DataOnly(fh).load()
+def _pack(value):
+    data = pickle.dumps(value, protocol=5)
+    return data, hashlib.sha256(data).digest()
 
 
-class _HashWriter:
-    def __init__(self, fh):
-        self.fh, self.digest = fh, hashlib.sha256()
-
-    def write(self, data):
-        self.digest.update(data)
-        return self.fh.write(data)
-
-
-def _save(path, value):
-    # A process dying before replace leaves the last complete snapshot usable.
-    name = None
+def _unpack(data, digest):
+    if not isinstance(data, bytes) or hashlib.sha256(data).digest() != digest:
+        raise Invalid('cache checksum')
     try:
-        with tempfile.NamedTemporaryFile(dir=path.parent, prefix='.ledger-', delete=False) as fh:
-            name = fh.name
-            fh.write(MAGIC)
-            fh.write(b'0' * 32)
-            writer = _HashWriter(fh)
-            pickle.dump(value, writer, protocol=5)
-            fh.seek(len(MAGIC))
-            fh.write(writer.digest.digest())
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(name, path)
-    finally:
-        if name:
-            with contextlib.suppress(FileNotFoundError):
-                os.unlink(name)
+        value = _DataOnly(io.BytesIO(data)).load()
+        if not isinstance(value, list) or any(not isinstance(e, dict) for e in value):
+            raise Invalid('cache schema')
+        return value
+    except (EOFError, ValueError, TypeError, pickle.UnpicklingError) as exc:
+        raise Invalid('cache payload') from exc
+
+
+def _record_digest(row):
+    return hashlib.sha256(pickle.dumps(row[:10] + (row[11],), protocol=5)).digest()
 
 
 def _meta(st):
@@ -73,14 +54,17 @@ def _meta(st):
 
 
 def _keys(obj):
-    # JSON's decoder shares keys only WITHIN one json.loads call. Sharing keys
-    # across lines cuts both snapshot size and the heap needed by every reader.
     return {sys.intern(k): v for k, v in obj.items()}
 
 
-def _parse(data, name, actor, first_line):
-    result = []
-    for n, line in enumerate(data.decode('utf-8').splitlines(), first_line):
+def _parse(data, name, actor, first_line, *, with_count=False):
+    result, next_line = [], first_line
+    # Match read_text().splitlines(), including CRLF and Unicode separators,
+    # without retaining a second ledger-sized list of line strings.
+    physical_lines = io.TextIOWrapper(io.BytesIO(data), encoding='utf-8', newline=None)
+    lines = (line for physical in physical_lines for line in physical.splitlines())
+    for n, line in enumerate(lines, first_line):
+        next_line = n + 1
         if not line.strip():
             continue
         try:
@@ -89,66 +73,125 @@ def _parse(data, name, actor, first_line):
             continue
         event['actor'], event['_src'] = actor, f'{name}:{n}'
         result.append(event)
-    return result
+    return (result, next_line) if with_count else result
 
 
 def _file(path, actor, old):
     st = path.stat()
     meta = _meta(st)
-    if old and old['meta'] == meta:
-        return old
     with path.open('rb') as fh:
         data = fh.read(st.st_size)
         if _meta(os.fstat(fh.fileno())) != meta or _meta(path.stat()) != meta:
-            # Never publish metadata for a read that raced a writer/rotation.
             raise OSError('ledger changed during cache read')
-    start, first_line, prefix = 0, 1, []
-    if (old and meta[:2] == old['meta'][:2] and len(data) > old['meta'][2]
-            and hashlib.sha256(data[:old['meta'][2]]).digest() == old['digest']):
-        # Verify the entire old prefix, not just its endpoints: historical
-        # repairs can rewrite AND grow a file without changing its inode.
-        start, first_line, prefix = old['offset'], old['line'], old['events']
+    append = (old is not None and meta[:2] == old['meta'][:2] and len(data) > old['meta'][2]
+              and hashlib.sha256(memoryview(data)[:old['meta'][2]]).digest() == old['digest'])
+    # Verify the ENTIRE old prefix: a historical repair may rewrite AND grow
+    # a file in place. Offset/line exclude any unterminated final line, even
+    # if that line happened to parse as valid JSON on the previous read.
+    start, first_line = (old['offset'], old['line']) if append else (0, 1)
     end = data.rfind(b'\n') + 1
     complete = data[start:end]
-    events = prefix + _parse(complete, path.name, actor, first_line)
-    line = first_line + len(complete.decode('utf-8').splitlines())
-    return {'meta': meta, 'digest': hashlib.sha256(data).digest(),
-            'offset': end, 'line': line, 'events': events,
-            # Reparse an unterminated final line on the next append, even if it
-            # was valid JSON today. It may become invalid once bytes arrive.
-            'tail': _parse(data[end:], path.name, actor, line)}
+    events, line = _parse(complete, path.name, actor, first_line, with_count=True)
+    return dict(meta=meta, digest=hashlib.sha256(data).digest(), offset=end, line=line,
+                events=events, tail=_parse(data[end:], path.name, actor, line), append=append)
+
+
+def _connect(path):
+    db = sqlite3.connect(path, timeout=5)
+    try:
+        # Keep SQLite's page heap bounded. Rollback journal + FULL synchronous
+        # protects commits; an interrupted build leaves a valid older cache.
+        db.execute('PRAGMA cache_size=-2048')
+        version = db.execute('PRAGMA user_version').fetchone()[0]
+        if version not in (0, VERSION):
+            raise Invalid('cache version')
+        db.execute('CREATE TABLE IF NOT EXISTS files (name TEXT PRIMARY KEY, '
+                   'dev INTEGER, ino INTEGER, size INTEGER, mtime INTEGER, ctime INTEGER, '
+                   'offset INTEGER, line INTEGER, digest BLOB, chunks INTEGER, tail BLOB, tail_sha BLOB, record_sha BLOB)')
+        db.execute('CREATE TABLE IF NOT EXISTS chunks (name TEXT, seq INTEGER, data BLOB, sha BLOB, '
+                   'PRIMARY KEY (name, seq))')
+        if version == 0:
+            db.execute(f'PRAGMA user_version={VERSION}')
+        db.commit()
+        return db
+    except BaseException:
+        db.close()
+        raise
+
+
+def _read(db, directory, actor_of):
+    rows = db.execute('SELECT * FROM files').fetchall()
+    if any(len(row) != 13 or _record_digest(row) != row[12] for row in rows):
+        raise Invalid('cache metadata checksum')
+    old = {r[0]: dict(meta=tuple(r[1:6]), offset=r[6], line=r[7], digest=r[8],
+                       chunks=r[9], tail=r[10], tail_sha=r[11]) for r in rows}
+    out, seen = [], set()
+    with db:  # All metadata, prefix chunks and torn tails publish together.
+        for file in sorted(directory.glob('*.jsonl')):
+            name = file.name
+            seen.add(name)
+            previous = old.get(name)
+            if previous is None or previous['meta'] != _meta(file.stat()):
+                current = _file(file, actor_of(name), previous)
+                if not current['append']:
+                    db.execute('DELETE FROM chunks WHERE name=?', (name,))
+                seq = previous['chunks'] if current['append'] else 0
+                for start in range(0, len(current['events']), CHUNK_EVENTS):
+                    data, digest = _pack(current['events'][start:start + CHUNK_EVENTS])
+                    db.execute('INSERT INTO chunks VALUES (?,?,?,?)', (name, seq, data, digest))
+                    seq += 1
+                tail, digest = _pack(current['tail'])
+                record = (name, *current['meta'], current['offset'], current['line'],
+                          current['digest'], seq, tail, digest)
+                db.execute('INSERT OR REPLACE INTO files VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                           (*record, _record_digest(record)))
+                entry = dict(chunks=seq, tail=tail, tail_sha=digest)
+                # Do not retain parsed chunks while deserializing their saved
+                # counterparts, especially on the first, large cache build.
+                del current
+            else:
+                entry = previous
+            count = 0
+            for seq, data, digest in db.execute('SELECT seq,data,sha FROM chunks WHERE name=? ORDER BY seq', (name,)):
+                if seq != count:
+                    raise Invalid('cache chunk sequence')
+                out.extend(_unpack(data, digest))
+                count += 1
+            if count != entry['chunks']:
+                raise Invalid('cache missing chunks')
+            out.extend(_unpack(entry['tail'], entry['tail_sha']))
+        for name in old.keys() - seen:
+            db.execute('DELETE FROM chunks WHERE name=?', (name,))
+            db.execute('DELETE FROM files WHERE name=?', (name,))
+    return out
 
 
 def read(events_dir, cache_dir, actor_of):
-    """Return glob/line-ordered raw events, or raise for the uncached fallback."""
-    events_dir, cache_dir = pathlib.Path(events_dir), pathlib.Path(cache_dir)
+    directory, cache_dir = pathlib.Path(events_dir), pathlib.Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    ident = hashlib.sha256(os.fsencode(events_dir.resolve())).hexdigest()[:16]
-    path = cache_dir / f'ledger-{ident}.pickle'
-    lock = cache_dir / f'ledger-{ident}.lock'
+    ident = hashlib.sha256(os.fsencode(directory.resolve())).hexdigest()[:16]
+    path, lock = cache_dir / f'ledger-{ident}.sqlite3', cache_dir / f'ledger-{ident}.lock'
     with lock.open('a+b') as fh:
         os.chmod(lock, 0o600)
         fcntl.flock(fh, fcntl.LOCK_EX)
-        try:
-            saved = _load(path)
-            if saved['version'] != VERSION or not isinstance(saved['files'], dict):
-                raise ValueError('cache schema')
-            old = saved['files']
-            for entry in old.values():
-                if (not isinstance(entry, dict) or len(entry['meta']) != 5
-                        or not isinstance(entry['events'], list) or not isinstance(entry['tail'], list)
-                        or not isinstance(entry['offset'], int) or not isinstance(entry['line'], int)
-                        or not isinstance(entry['digest'], bytes)):
-                    raise ValueError('cache schema')
-        except (OSError, EOFError, ValueError, KeyError, TypeError, pickle.UnpicklingError):
-            old = {}
-        files, changed = {}, False
-        for file in sorted(events_dir.glob('*.jsonl')):
-            previous = old.get(file.name)
-            current = _file(file, actor_of(file.name), previous)
-            files[file.name] = current
-            changed |= current is not previous
-        changed |= files.keys() != old.keys()
-        if changed:
-            _save(path, {'version': VERSION, 'files': files})
-        return [e for entry in files.values() for part in ('events', 'tail') for e in entry[part]]
+        # Permission is private from creation, including a first writer's DB.
+        fd = os.open(path, os.O_CREAT | os.O_WRONLY, 0o600)
+        os.close(fd)
+        for attempt in range(2):
+            db = None
+            try:
+                db = _connect(path)
+                return _read(db, directory, actor_of)
+            except (sqlite3.DatabaseError, Invalid) as exc:
+                if db is not None:
+                    db.close()
+                    db = None
+                if attempt:
+                    raise OSError('ledger cache unavailable') from exc
+                # Protected by our process lock; no reader can observe a
+                # partially rebuilt DB. The ledger is never touched.
+                path.unlink(missing_ok=True)
+                pathlib.Path(str(path) + '-journal').unlink(missing_ok=True)
+            finally:
+                if db is not None:
+                    db.close()
