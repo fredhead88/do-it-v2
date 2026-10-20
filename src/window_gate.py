@@ -476,6 +476,48 @@ def scope(repo, base, cand, ci_checks, *, fixes_base=False):
         return fallback(type(exc).__name__)
 
 
+def base_pg(repo, root_base, ci_checks, window, events, *, fixes_base=False):
+    """Inherit PG only across classified non-PG changes; a failed run still blocks."""
+    baseline = verify(repo, root_base, [PG_CHECK], window)
+    docs = [baseline.get("doc", {})]
+    if fixes_base or baseline["state"] != "undetermined":
+        return baseline, docs
+    try:
+        ancestors = git(repo, "rev-list", "--first-parent", "--max-count=31", root_base).stdout.splitlines()[1:]
+    except (OSError, RuntimeError, subprocess.SubprocessError):
+        return baseline, docs
+
+    # A scoped window may contain several --no-ff commits, but CI ran only
+    # on its final tip. Its recorded base is the next verification checkpoint.
+    # Do not dispatch PG on intermediate commits that this window never tested.
+    def scoped_checkpoint(sha, older):
+        for event in reversed(events):
+            if event.get("type") == "window-verified" and event.get("sha") == sha:
+                required = event.get("scope")
+                if (isinstance(required, list) and required and all(isinstance(c, str) for c in required)
+                        and PG_CHECK not in required and event.get("verified_on") in older):
+                    return event["verified_on"]
+                break
+        return None
+
+    checkpoint = scoped_checkpoint(root_base, ancestors)
+    for ancestor in ancestors:
+        # This also proves that PG was not required on the root base. Any
+        # classifier failure requires PG and therefore stops inheritance.
+        if PG_CHECK in scope(repo, ancestor, root_base, ci_checks)["checks"]:
+            break
+        if checkpoint is not None and ancestor != checkpoint:
+            continue
+        baseline = verify(repo, ancestor, [PG_CHECK], window)
+        docs.append(baseline.get("doc", {}))
+        if baseline["state"] == "green":
+            ev("window-base-pg-inherited", window, base=root_base[:12], from_sha=ancestor[:12])
+        # A red or undetermined checkpoint is never a reason to search for
+        # an older green result.
+        break
+    return baseline, docs
+
+
 def run_minutes(repo, docs, *, required=None):
     """Measure distinct dispatched runs, or retain the per-verification estimate."""
     estimate = dict(actions_minutes=0, selfhosted_minutes=0, minutes_source="estimate")
@@ -1188,8 +1230,8 @@ def run_attempt(window, project, spec_args, main, fixes_base, base, root_base, a
         except (OSError, RuntimeError, ValueError, TypeError, subprocess.SubprocessError):
             prior = None
         if PG_CHECK in candidate_required and baseline is None:
-            baseline = verify(repo, root_base, [PG_CHECK], window)
-            verdicts.append(baseline.get("doc", {}))
+            baseline, baseline_docs = base_pg(repo, root_base, ci_checks, window, events, fixes_base=fixes_base)
+            verdicts.extend(baseline_docs)
             if baseline["state"] != "green" and not (fixes_base and baseline["state"] == "red"):
                 why = "base-not-releasable: pg-parity is " + baseline["state"]
                 escalate(window, why, "base-not-releasable")

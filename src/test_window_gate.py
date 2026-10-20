@@ -501,7 +501,104 @@ def parity_checks():
         response("AC2", dict(reason=reason, exit=rc, master_unmoved=fx.master() == fx.base))
 
 
+def inherited_base_pg_checks():
+    """Real first-parent history and classifier, with only CI replaced by fixtures."""
+    def fixture(base_path="dashboard/base.ts", intermediate=False):
+        fx = Fx({})
+        classifier = fx.repo / "scripts/ci/actions_changes_gate.sh"
+        classifier.write_text("""python3 - <<'PY'
+import json, os, pathlib
+paths = pathlib.Path(os.environ['CHANGED_PATHS_FILE']).read_bytes().split(b'\\0')
+checks = ['pytest']
+if any(p.startswith(b'api/tests/') for p in paths):
+    checks.append('pg-parity (Postgres)')
+print(json.dumps(dict(checks=checks, unclassified=[], everything=False, reason='fixture paths')))
+PY
+""")
+        sh(["add", "-A"], fx.repo); sh(["commit", "-m", "path classifier"], fx.repo)
+        parent = sh(["rev-parse", "HEAD"], fx.repo)
+        for name in (["dashboard/intermediate.ts", base_path] if intermediate else [base_path]):
+            path = fx.repo / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("base change\n")
+            sh(["add", "-A"], fx.repo); sh(["commit", "-m", name], fx.repo)
+        fx.base = sh(["rev-parse", "HEAD"], fx.repo)
+        sh(["update-ref", "refs/heads/master", fx.base], fx.repo)
+        sh(["checkout", "-b", "br-A"], fx.repo)
+        (fx.repo / "api/tests/new.py").write_text("candidate\n")
+        sh(["add", "-A"], fx.repo); sh(["commit", "-m", "PG-relevant candidate"], fx.repo)
+        fx.branches["A"] = "br-A"
+        sh(["checkout", "live-scratch"], fx.repo)
+        fx.run_n("base", 2, json.dumps(dict(verdict="undetermined", checks={
+            window_gate.PG_CHECK: {"state": "skipped"}})))
+        fx.pg(1, conclusion="success")
+        fx.pg(2, conclusion="success")
+        return fx, parent
+
+    fx, parent = fixture()
+    rc = fx.go()
+    inherited = fx.events("window-base-pg-inherited")
+    check(rc == 0 and len(fx.events("shipped")) == 1 and len(inherited) == 1 and
+          inherited[0]["base"] == fx.base[:12] and inherited[0]["from_sha"] == parent[:12],
+          "inherited PG: skipped base and green parent advance with audit event")
+    check(len(fx.calls()) == 2 and fx.calls()[0] == parent + "|" + window_gate.PG_CHECK + ";",
+          "inherited PG: parent verified with PG only before candidate")
+
+    fx, _ = fixture(base_path="api/tests/base.py")
+    rc = fx.go()
+    check(rc == 2 and fx.master() == fx.base and not fx.calls() and
+          not fx.events("window-base-pg-inherited") and
+          fx.events("escalation-blocking")[0]["why"] == "base-not-releasable: pg-parity is undetermined",
+          "inherited PG: PG-relevant parent-to-base diff blocks before parent verification")
+
+    for state in ("red", "undetermined"):
+        fx, parent = fixture()
+        if state == "red":
+            fx.pg(1, ["api/tests/test_z.py::old"])
+        else:
+            fx.run_n(1, 2, json.dumps(dict(verdict="undetermined", checks={})))
+        rc = fx.go()
+        check(rc == 2 and fx.master() == fx.base and len(fx.calls()) == 1 and
+              not fx.events("window-base-pg-inherited") and not fx.events("window-opened") and
+              fx.events("escalation-blocking")[0]["why"] == "base-not-releasable: pg-parity is " + state,
+              "inherited PG: parent " + state + " blocks without searching older history")
+
+    for state, fixes in (("green", False), ("red", False), ("undetermined", True)):
+        fx, _ = fixture()
+        if state == "green":
+            fx.pg("base", conclusion="success")
+        elif state == "red":
+            fx.pg("base", ["api/tests/test_z.py::old"])
+        real_git = window_gate.git
+        with patch.object(window_gate, "git", wraps=real_git) as calls:
+            rc = fx.go(fixes_base=fixes)
+        check(rc == (0 if state == "green" else 2) and
+              not any("rev-list" in call.args for call in calls.call_args_list) and
+              not fx.events("window-base-pg-inherited"),
+              "inherited PG: no ancestor walk for base " + state + " fixes=" + str(fixes))
+
+    # A multi-spec scoped window has intermediate merge commits with no CI.
+    # Its ledger identifies the prior tested tip, as in the live c32r case.
+    fx, parent = fixture(intermediate=True)
+    window_gate.ev("window-verified", "prior", sha=fx.base, verified_on=parent,
+                   scope=[window_gate.PYTEST_CHECK, window_gate.DASHBOARD_CHECK])
+    rc = fx.go()
+    check(rc == 0 and len(fx.calls()) == 2 and fx.calls()[0].startswith(parent + "|") and
+          fx.events("window-base-pg-inherited")[0]["from_sha"] == parent[:12],
+          "inherited PG: scoped window skips its untested intermediate commits")
+
+    fx, parent = fixture(base_path="api/tests/base.py", intermediate=True)
+    window_gate.ev("window-verified", "prior", sha=fx.base, verified_on=parent,
+                   scope=[window_gate.PYTEST_CHECK, window_gate.DASHBOARD_CHECK])
+    rc = fx.go()
+    check(rc == 2 and not fx.calls() and not fx.events("window-base-pg-inherited"),
+          "inherited PG: ledger omission cannot override PG-relevant classifier result")
+
+    print("inherited_base_pg_checks: complete")
+
+
 def main():
+    inherited_base_pg_checks()
     scope_checks()
     # AC1 + AC7: green window; dirty live checkout untouched
     fx = Fx({"A": "a.txt", "B": "b.txt", "C": "c.txt"}, dirty=True)
