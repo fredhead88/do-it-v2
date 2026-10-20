@@ -18,12 +18,11 @@ Server-Sent Events. Never appends, never edits, never touches a repository.
                                the token in ~/.do-it/realm.push. Outbound only.
 """
 import argparse
-import _imp
 import bisect
 import collections
+import contextlib
 import datetime as dt
 import http.server
-import importlib.util
 import json
 import os
 import pathlib
@@ -38,7 +37,7 @@ import time
 import urllib.parse
 import urllib.request
 
-import realm_omens, realm_codex
+import realm_omens, realm_codex, realm_ledger
 
 ROOT = pathlib.Path(os.environ.get("DOIT_ROOT", pathlib.Path.home() / ".do-it"))
 EVENTS, SEAT = ROOT / "events", ROOT / "seat"
@@ -197,28 +196,58 @@ def _ref_subject(ref):
     return out
 
 
+LEDGER = realm_ledger.Ledger()
+
+
+def live_src():
+    configured = pathlib.Path(os.environ.get("DOIT_LIVE_REPO", LIVE_REPO)) / "src"
+    return configured if configured.is_dir() else HERE
+
+
+@contextlib.contextmanager
+def ledger_snapshot(now=None):
+    now = now or dt.datetime.now(dt.timezone.utc)
+    with LEDGER.live(live_src(), ROOT) as live_fold:
+        events, folded = LEDGER.refresh(live_fold, EVENTS, now)
+        yield live_fold, events, folded
+
+
 def read_all():
-    """Every kept row in every file, oldest first, plus per-file byte offsets."""
-    rows, offsets, raw = [], {}, []
-    for f in sorted(EVENTS.glob("*.jsonl")):
-        actor = actor_of(f)
-        data = f.read_bytes()
-        offsets[f.name] = len(data) - (0 if data.endswith(b"\n") or not data else len(data.split(b"\n")[-1]))
-        for line in data.decode("utf-8", "replace").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                e = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            raw.append(e)
-            c = compact(e, actor)
-            if c:
-                rows.append(c)
-    rows.sort(key=lambda r: r["t"])
-    raw.sort(key=lambda e: str(e.get("ts", "")))
-    return rows, raw, offsets
+    """Shared corrected ledger rows and offsets; parse/fold once per change."""
+    with ledger_snapshot() as (_, raw, _folded):
+        if LEDGER.rows is None:
+            # Resolve references in one pass over this snapshot. Reading a
+            # 100+ MB actor file separately for every decision ref dominates
+            # startup and leaves repeated whole-file allocations in the heap.
+            refs = {e.get('ref') for e in raw if isinstance(e.get('ref'), str)}
+            _REF_CACHE.clear()
+            _REF_CACHE.update(dict.fromkeys(refs))
+            _REF_CACHE.update({e['_src']: e.get('subject') for e in raw if e['_src'] in refs})
+            rows = [c for e in raw for c in [compact(e, e['actor'])] if c]
+            rows.sort(key=lambda r: r['t'])
+            offsets, file_offsets = {}, {}
+            for meta in LEDGER.generation:
+                name, size = meta[0], meta[3]
+                previous = LEDGER.file_offsets.get(name)
+                if previous and previous[0] == meta:
+                    off = previous[1]
+                else:
+                    with (EVENTS / name).open('rb') as fh:
+                        # Search backwards only as far as the final newline.
+                        pos, suffix = size, b''
+                        while pos and b'\n' not in suffix:
+                            start = max(0, pos - 4096)
+                            fh.seek(start)
+                            suffix = fh.read(pos - start) + suffix
+                            pos = start
+                        off = size - len(suffix.rsplit(b'\n', 1)[-1]) if suffix else 0
+                offsets[name] = off
+                file_offsets[name] = (meta, off)
+            LEDGER.file_offsets = file_offsets
+            LEDGER.rows, LEDGER.offsets = rows, offsets
+        # Row dicts are cheap and callers join claim times onto them. Never let
+        # a bootstrap mutate the shared rows seen by another request.
+        return [dict(r) for r in LEDGER.rows], raw, dict(LEDGER.offsets)
 
 
 def role_stats(raw):
@@ -627,7 +656,7 @@ def tick_omens():
 
 
 # ---------------------------------------------------------------- omen model (realm_omens.py)
-_OM = {"files": {}, "master": ({}, 0.0), "lock": threading.Lock()}
+_OM = {"generation": None, "rows": [], "master": ({}, 0.0), "lock": threading.Lock()}
 
 
 def omens_model(states, now=None):
@@ -635,9 +664,16 @@ def omens_model(states, now=None):
     vanished spawns, and which gate-clean specs were actually merged. Read-only; only changed files are re-parsed."""
     now = now or dt.datetime.now(dt.timezone.utc)
     with _OM["lock"]:
-        rows = realm_omens.scan(EVENTS, _OM["files"])
+        with ledger_snapshot() as (_, events, _folded):
+            generation = (LEDGER.key, LEDGER.generation)
+            if _OM["generation"] != generation:
+                _OM["rows"] = [r for e in events
+                               if e.get('subject') != 'operator-ruling' and e.get('problem') != 'operator-ruling'
+                               for r in [realm_omens.reduce_event(e)] if r]
+                _OM["generation"] = generation
+            rows = _OM["rows"]
         merges, at = _OM["master"]
-        if time.monotonic() - at > 120 or not merges:
+        if time.monotonic() - at > 120:
             merges = realm_omens.master_merges([p for p in (pathlib.Path("/opt/albert-scott"), LIVE_REPO) if (p / ".git").exists()])
             _OM["master"] = (merges, time.monotonic())
         return realm_omens.compute(rows, states or [], now, root=ROOT, master=merges)
@@ -993,52 +1029,15 @@ def history_backfill(rows, claims, hours=24, step_min=15):
 
 
 def lane_payload(now):
-    """Read the live rule table afresh, isolating its bare sibling imports.
-
-    The import lock prevents other importers observing temporary aliases. Both
-    the path and module registry are restored even if a live module fails.
-    """
+    """Reclassify deadlines at `now`, reusing the shared live fold snapshot."""
     result = {"lane": None, "lane_error": None, "lane_at": now.isoformat(timespec="seconds")}
-    src = pathlib.Path(os.environ.get("DOIT_LIVE_REPO", LIVE_REPO)) / "src"
-    _imp.acquire_lock()
-    path_before, modules_before = sys.path[:], sys.modules.copy()
     try:
-        sys.path.insert(0, str(src))
-        # A cached realm-branch sibling must not satisfy a live-module import.
-        for file in src.glob("*.py"):
-            sys.modules.pop(file.stem, None)
-        for dirname in src.iterdir():
-            if dirname.is_dir() and (dirname / "__init__.py").is_file():
-                for name in list(sys.modules):
-                    if name == dirname.name or name.startswith(dirname.name + "."):
-                        sys.modules.pop(name, None)
-
-        def read_module(name):
-            private = "_realm_live_" + name
-            spec = importlib.util.spec_from_file_location(private, src / (name + ".py"))
-            module = importlib.util.module_from_spec(spec)
-            sys.modules[private] = module  # dataclasses consult their defining module
-            spec.loader.exec_module(module)
-            return module
-
-        live_fold = read_module("fold")
-        sys.modules["fold"] = live_fold  # live siblings use this alias only within this call
-        rules = read_module("lane_rules")
-        rules.load()  # due() may turn a load failure into rows; unreadable is explicit here
-        events = live_fold.read_events()
-        folded = live_fold.fold(events)
-        if not isinstance(folded, tuple) or len(folded) != 4 or not isinstance(folded[0], dict):
-            raise ValueError("fold returned an invalid four-part spec map")
-        result["lane"] = live_fold.stall_lane_rows(events, folded[0], now, by_subject=folded[3])
-    except Exception as ex:  # a broken live checkout must not break the rest of realm
+        with ledger_snapshot(now) as (live_fold, events, folded):
+            import lane_rules
+            lane_rules.load()
+            result["lane"] = live_fold.stall_lane_rows(events, folded[0], now, by_subject=folded[3])
+    except Exception as ex:
         result["lane_error"] = f"{type(ex).__name__}: {ex}"
-    finally:
-        sys.path[:] = path_before
-        for name in list(sys.modules):
-            if name not in modules_before:
-                del sys.modules[name]
-        sys.modules.update(modules_before)
-        _imp.release_lock()
     return result
 
 
@@ -1065,7 +1064,9 @@ def sample_forever():
     history_load()
     try:
         rows, raw, _ = read_all()
+        del raw, _
         n = history_backfill(rows, seat_claims())
+        del rows
         if n:
             sys.stderr.write(f"realm: backfilled {n} history points\n")
     except Exception as ex:  # noqa: BLE001
@@ -1111,28 +1112,20 @@ def throughput_payload(cached=False):
 
 
 def derive_states():
-    """`doit states` through fold.py, in a subprocess so a fold error never kills the server."""
     try:
-        p = subprocess.run([sys.executable, str(FOLD), "states"], capture_output=True, text=True,
-                           timeout=120, env={**os.environ, "DOIT_ROOT": str(ROOT)})
-        return [l.split("\t") for l in p.stdout.splitlines() if "\t" in l]
-    except Exception as ex:  # noqa: BLE001 — the page shows a stale census, never a dead server
+        with ledger_snapshot() as (_, _events, folded):
+            return [[sid, s['state']] for sid, s in sorted({**folded[0], **folded[1]}.items())]
+    except Exception as ex:
         sys.stderr.write(f"realm: states failed: {ex}\n")
         return None
 
 
 def derive_proving():
-    """`proving.py --json` in a subprocess: the SD6 summary list, or None on any failure (non-zero
-    exit, timeout, malformed JSON, or any exception class derive_states() itself tolerates) — never
-    [], mirroring proving.py's own contract that a fold error never renders as an empty view."""
     try:
-        p = subprocess.run([sys.executable, str(PROVING), "--json"], capture_output=True, text=True,
-                           timeout=120, env={**os.environ, "DOIT_ROOT": str(ROOT)})
-        if p.returncode != 0:
-            return None
-        data = json.loads(p.stdout)
-        return data if isinstance(data, list) else None
-    except Exception as ex:  # noqa: BLE001 — the page shows "Proving: unavailable", never a dead server
+        with ledger_snapshot() as (_, _events, folded):
+            return sorted([c['proving'] for c in folded[1].values() if c.get('proving')],
+                          key=lambda r: r['deadline'])
+    except Exception as ex:
         sys.stderr.write(f"realm: proving failed: {ex}\n")
         return None
 
@@ -1159,19 +1152,16 @@ def derive_dossier(item_id):
 
 
 def derive_goals():
-    """`doit brief --goals --json` in a subprocess: the SD6 goal-summary list, or None on any failure
-    (a missing BRIEF, a non-zero exit, a non-list JSON result, or any exception). `[]` is returned only
-    from a real exit-0, real-empty-list response — never invented on a failure branch."""
-    if not BRIEF.is_file():
-        return None
     try:
-        p = subprocess.run([sys.executable, str(BRIEF), "--goals", "--json"], capture_output=True, text=True,
-                           timeout=120, env={**os.environ, "DOIT_ROOT": str(ROOT)})
-        if p.returncode != 0:
-            return None
-        data = json.loads(p.stdout)
-        return data if isinstance(data, list) else None
-    except Exception as ex:  # noqa: BLE001
+        with ledger_snapshot() as (_, events, folded):
+            import brief
+            # Main's shared-fold API avoids a second fold. Older checkouts
+            # remain readable during the two-branch rollout.
+            import inspect
+            if 'folded' in inspect.signature(brief.goals).parameters:
+                return brief.goals(events, ROOT, folded=folded)
+            return brief.goals(events, ROOT)
+    except Exception as ex:
         sys.stderr.write(f"realm: brief.py --goals failed: {ex}\n")
         return None
 
@@ -1265,7 +1255,7 @@ class Hub:
         self.started = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
 
     def add(self):
-        q = queue.Queue(maxsize=2000)
+        q = queue.Queue(maxsize=64)
         with self.lock:
             self.clients.add(q)
         return q
@@ -1288,6 +1278,12 @@ class Hub:
                     dead.append(q)
             for q in dead:
                 self.clients.discard(q)
+                # A stalled client must reconnect through /api/since rather
+                # than retain hours of superseded state/history snapshots.
+                while not q.empty():
+                    with contextlib.suppress(queue.Empty):
+                        q.get_nowait()
+                q.put_nowait(None)
 
 
 HUB = Hub()
@@ -1316,31 +1312,40 @@ def since(seq, t=None):
             "codex": realm_codex.payload(read_all()[1]), "now": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")}
 
 
+def tail_lines(file, offset):
+    """Consume complete lines only. Keep the suffix on disk, exactly once."""
+    with file.open('rb') as fh:
+        fh.seek(offset)
+        lines = fh.read().split(b'\n')
+    return lines[:-1], offset + sum(len(line) + 1 for line in lines[:-1])
+
+
 def tail_forever(poll=1.0):
     """Follow every events/*.jsonl from its current end; new lines become `ledger` messages."""
-    _, _, offsets = read_all()
-    partial = {}
+    watch = realm_ledger.Changes(EVENTS)
+    rows, raw, offsets = read_all()
+    del rows, raw
     known_claims = seat_claims()
     last_states, want_states = time.monotonic(), False
     while True:
         time.sleep(poll)
         try:
-            for f in sorted(EVENTS.glob("*.jsonl")):
-                size = f.stat().st_size
+            changed = watch.poll()
+            files = sorted(EVENTS.glob("*.jsonl")) if changed is None else [EVENTS / n for n in sorted(changed)]
+            for f in files:
+                try:
+                    size = f.stat().st_size
+                except FileNotFoundError:
+                    offsets.pop(f.name, None)
+                    continue
                 off = offsets.get(f.name, 0)
                 if size < off:            # truncated or rotated: start over on this file, silently
-                    off, partial[f.name] = 0, b""
+                    off = 0
                 if size == off:
                     continue
-                with open(f, "rb") as fh:
-                    fh.seek(off)
-                    chunk = fh.read(size - off)
-                buf = partial.get(f.name, b"") + chunk
-                lines = buf.split(b"\n")
-                partial[f.name] = lines[-1]
-                offsets[f.name] = size - len(lines[-1])
+                lines, offsets[f.name] = tail_lines(f, off)
                 actor = actor_of(f)
-                for line in lines[:-1]:
+                for line in lines:
                     line = line.strip()
                     if not line:
                         continue
@@ -1351,8 +1356,7 @@ def tail_forever(poll=1.0):
                     c = compact(e, actor)
                     if c:
                         HUB.send("ledger", c)
-                        if c["ty"] == "tick":
-                            want_states = True
+                        want_states = True
             claims = seat_claims()
             for sp, ts in claims.items():
                 if sp not in known_claims:
@@ -1599,10 +1603,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 chunk(f"event: hello\ndata: {json.dumps({'seq': HUB.seq, 'started': HUB.started})}\n\n".encode())
                 while True:
                     try:
-                        kind, data = q.get(timeout=20)
+                        msg = q.get(timeout=20)
                     except queue.Empty:
                         chunk(b": keepalive\n\n")
                         continue
+                    if msg is None:
+                        break
+                    kind, data = msg
                     chunk(f"event: {kind}\ndata: {data}\n\n".encode())
             except (BrokenPipeError, ConnectionResetError, OSError):
                 pass
