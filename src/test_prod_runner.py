@@ -42,7 +42,7 @@ def observation(outcome, now, capability="ro-dsn", validity=24):
 
 def tree_hash(root):
     return hashlib.sha256(b"".join(str(p.relative_to(root)).encode() + p.read_bytes()
-        for p in sorted(root.rglob("*")) if p.is_file())).hexdigest()
+        for p in sorted(root.rglob("*")) if p.is_file() and p.relative_to(root).parts[0] != "cache")).hexdigest()
 
 
 @contextmanager

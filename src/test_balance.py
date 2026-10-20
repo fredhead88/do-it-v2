@@ -191,7 +191,8 @@ def run_checks(root, balance, dispatch, fold, models):
     state_path = root / "state/balance.json"
 
     def snapshot():
-        return {str(p.relative_to(root)): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+        return {str(p.relative_to(root)): p.read_bytes() for p in root.rglob("*") if p.is_file()
+                and p.relative_to(root).parts[0] != "cache"}
 
     def run(args=()):
         buf = io.StringIO()

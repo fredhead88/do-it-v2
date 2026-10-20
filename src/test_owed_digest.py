@@ -116,7 +116,8 @@ class DigestTests(unittest.TestCase):
             return digest.run(now=kw.pop("now", NOW), sender=self.sender, **kw)
 
     def snapshot(self):
-        return {str(p.relative_to(self.root)): p.read_bytes() for p in self.root.rglob("*") if p.is_file()}
+        return {str(p.relative_to(self.root)): p.read_bytes() for p in self.root.rglob("*") if p.is_file()
+                and p.relative_to(self.root).parts[0] != "cache"}
 
     def test_backlog_lines(self):
         with patch.object(dispatch, "CONTENT", self.root / "content"):

@@ -148,6 +148,8 @@ def _merge_same_ts(items):
     queues = {}
     for e in items:
         queues.setdefault(_src_file(e), collections.deque()).append(e)
+    if len(queues) == 1:
+        return items  # a single file's causal order cannot change
     # Compute a head's canonical JSON once, rather than once for every other
     # file's pop. The ordinal preserves the legacy stable tie for identical
     # content keys (the queues' original insertion order).
@@ -156,6 +158,9 @@ def _merge_same_ts(items):
     heapq.heapify(heap)
     out = []
     while heap:
+        if len(heap) == 1:
+            out.extend(heap[0][2])
+            break
         _key, ordinal, q = heapq.heappop(heap)
         out.append(q.popleft())
         if q:
