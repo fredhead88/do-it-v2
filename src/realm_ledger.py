@@ -6,6 +6,7 @@ lock, then restore the registry. Reimport only when that checkout changes.
 """
 import _imp
 import contextlib
+import gc
 import importlib.util
 import os
 from pathlib import Path
@@ -33,9 +34,12 @@ class Ledger:
     @contextlib.contextmanager
     def live(self, src, root):
         src, root = Path(src).resolve(), Path(root).resolve()
-        key = (src, root, os.environ.get('DOIT_PROJECT'), fingerprint(src, '*.py'))
+        code = tuple(row for row in fingerprint(src, '*.py')
+                     if not row[0].startswith(('test_', 'dispatch_checks_')))
+        key = (src, root, os.environ.get('DOIT_PROJECT'), code)
         with self.lock:
             if key != self.key:
+                replacing = self.key is not None
                 if self.watch is not None:
                     self.watch.close()
                 self.watch = None
@@ -43,6 +47,11 @@ class Ledger:
                 self.key, self.modules = key, {}
                 self.events = self.folded = self.rows = self.offsets = None
                 self.generation = self.clock_minute = None
+                if replacing:
+                    # Modules contain function/global cycles. Collect a retired
+                    # bundle before allocating the next ledger, not hours later
+                    # after a series of merges has inflated the process heap.
+                    gc.collect()
             _imp.acquire_lock()
             before_path, before = sys.path[:], sys.modules.copy()
             try:
