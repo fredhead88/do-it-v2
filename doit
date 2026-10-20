@@ -178,7 +178,7 @@ doit — a ledger that derives state, and the guards that read it
   doit events <subject>                   one subject's events, oldest first
   doit spend <charter|spec|spawn-id>      per-spawn token table + totals; charter stage wall clock (read-only)
   doit grades-rate [--json]               grades spent per spec shipped, trailing 24h — the board's HEALTH line (read-only)
-  doit append <type> <subject> [k=v ...]  append one event, then re-fold
+  doit append <type> <subject> [k=v ...]  append one event; --board renders, --json prints the event
   doit gh-bill [--usage-file F] [--dry-run]   check GitHub billing policy
   doit ci-runner status [--json] | doit ci-runner set <CI_SELF_HOSTED|CI_PG_SELF_HOSTED> <true|false> --why TEXT
   doit ci-shadow [--dry-run] [--json]   compare hosted CI with self-hosted shadows

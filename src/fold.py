@@ -4,7 +4,7 @@
   fold.py                                    fold, rewrite board.md
   fold.py states                             derived states, one per line
   fold.py events <subject>                   one subject's events, oldest first
-  fold.py append <type> <subject> [k=v ...]  append one event, then re-fold
+  fold.py append <type> <subject> [k=v ...]  append one event (use --board to render)
   fold.py review-owed <charter>              "owed"/"not-owed" — read-only (R11)
 
 The ledger (~/.do-it/events/*.jsonl) is append-only and never edited. The ACTOR
@@ -2214,8 +2214,7 @@ def append(argv: list[str], strict: bool = False) -> dict:
     if inbox:
         argv = [a for a in argv if a != "--inbox"]
     path = EVENTS / ("L-inbox-local.jsonl" if inbox else os.environ.get("DOIT_LEDGER_FILE", "L-operator-local.jsonl"))
-    e = {"v": 1, "ts": NOW.isoformat(timespec="seconds"), "type": argv[0], "subject": argv[1],
-         "project": PROJECT or subject_project(argv[1]) or pathlib.Path.cwd().name}
+    e = {"v": 1, "ts": NOW.isoformat(timespec="seconds"), "type": argv[0], "subject": argv[1]}
     for kv in argv[2:]:
         k, _, v = kv.partition("=")
         # ★ A BARE VALUE IS A STRING unless it is UNAMBIGUOUSLY JSON. Bare numbers
@@ -2237,6 +2236,8 @@ def append(argv: list[str], strict: bool = False) -> dict:
                 e[k] = v
         else:
             e[k] = v
+    if "project" not in e:
+        e["project"] = PROJECT or subject_project(argv[1]) or pathlib.Path.cwd().name
     if "actor" in e:
         raise SystemExit("refused: actor is derived from the ledger filename, never an actor= field")
     actor = actor_of(path.name)
@@ -2272,9 +2273,15 @@ def append(argv: list[str], strict: bool = False) -> dict:
                       file=sys.stderr)
     path.parent.mkdir(parents=True, exist_ok=True)
     line = json.dumps(e, sort_keys=True)
-    with open(path, "a") as fh:
-        fh.write(line + "\n")
-    assert line in path.read_text().splitlines(), f"append to {path} did not land"
+    with open(path, "ab+") as fh:
+        fh.seek(0, 2)
+        offset = fh.tell()
+        encoded = line.encode("utf-8")
+        fh.write(encoded + b"\n")
+        fh.flush()
+        # Re-read the write without splitting a 100+ MB actor file each time.
+        fh.seek(offset)
+        assert encoded in fh.read().splitlines(), f"append to {path} did not land"
     return e
 
 
@@ -2294,7 +2301,15 @@ if __name__ == "__main__":
         print(dispatch.alloc(ROOT / "content", f"L-{sys.argv[2]}-", ".md"))
         sys.exit(0)
     if cmd == "append":
-        append(sys.argv[2:], strict=True)
+        args = sys.argv[2:]
+        show_board, show_json = "--board" in args, "--json" in args
+        if show_board and show_json:
+            sys.exit("usage: doit append TYPE SUBJECT [k=v ...] [--board|--json|--quiet]")
+        event = append([a for a in args if a not in ("--board", "--json", "--quiet")], strict=True)
+        if show_json:
+            print(json.dumps(event, sort_keys=True))
+        if not show_board:
+            sys.exit(0)
     ev = read_events()
     specs, charters, ignored, by_subject = fold(ev)
     if cmd == "events":                      # one subject's events, oldest first, as the fold read them
