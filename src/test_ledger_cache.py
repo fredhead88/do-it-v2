@@ -126,6 +126,21 @@ class CacheTests(unittest.TestCase):
         ledger_cache._save(path, os.system)
         self.same()
 
+    def test_answered_keeps_ref_subject_strict_time_and_admitted_fixes(self):
+        def event(ty, subject, stamp, src, **fields):
+            return dict(type=ty, subject=subject, ts=f'2026-01-01T00:00:{stamp:02}+00:00',
+                        _src=src, actor='operator', **fields)
+        events = [event('question','a',1,'q1'), event('question','a',2,'q2'),
+                  event('question','b',1,'q3'), event('question','c',1,'q4'),
+                  event('decision','a',2,'d1'), event('decision','elsewhere',1,'d2',ref='q3'),
+                  event('escalation-blocking','failed',1,'f1',kind='owed-failed',criteria=['AC1','AC2']),
+                  event('owed-waived','failed',2,'w1',criterion='AC1',why='accepted'),
+                  event('owed-waived','failed',3,'w2',criterion='AC2',why='accepted'),
+                  event('owed-waived','c',4,'w3',criterion='AC1',why='different subject')]
+        self.assertEqual(fold.answered(events),{'q1','q3','f1'})
+        events[7]['actor']='builder'  # unauthorized waiver cannot close f1
+        self.assertEqual(fold.answered(events),{'q1','q3'})
+
     def test_blank_crlf_and_unicode_line_numbers(self):
         (self.events / 'L-operator-01.jsonl').write_bytes(
             b'\r\n\n' + json.dumps(dict(type='first', subject='x', ts='1')).encode() + b'\r\n'

@@ -342,17 +342,24 @@ def answered(events):
     from owed_failures import failure_resolved  # lazy: owed_failures imports fold
     answerers = [e for e in events if e.get("type") in ("decision", "unblocked")]
     by_ref = {e.get("ref") for e in answerers if e.get("ref")}
+    answerers_by_subject = collections.defaultdict(list)
+    fixes_by_subject = collections.defaultdict(list)
+    for e in answerers:
+        answerers_by_subject[e.get("subject")].append(e)
+    for e in events:
+        if e.get("type") in ("owed-corrective", "owed-waived"):
+            fixes_by_subject[e.get("subject")].append(e)
     out = set()
     for e in events:
         if e.get("type") not in ("question", "escalation-blocking"):
             continue
         src = e["_src"]
-        if src in by_ref or failure_resolved(e, events):
+        if src in by_ref or failure_resolved(e, fixes_by_subject.get(e.get("subject"), [])):
             out.add(src)
             continue
         subj = e.get("subject")
         et = ts(e.get("ts"))
-        if subj and any(a.get("subject") == subj and ts(a.get("ts")) > et for a in answerers):
+        if subj and any(a.get("subject") == subj and ts(a.get("ts")) > et for a in answerers_by_subject.get(subj, [])):
             out.add(src)
     return out
 
