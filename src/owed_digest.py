@@ -23,6 +23,7 @@ import sweep_owed
 
 LEDGER_NAME = "L-owed-digest-local.jsonl"
 CORRECTING_STALE_DAYS = 7
+ALERT_STATE_VERSION = 2
 
 
 def _time(value):
@@ -228,10 +229,15 @@ def _read_ledger():
 def _alerted():
     path = fold.ROOT / "state/owed-alerted.json"
     if not path.exists():
-        return dict(rows=[], streaks=[])
+        return dict(rows=[], streaks=[], version=ALERT_STATE_VERSION)
     obj = json.loads(path.read_text())
     if not isinstance(obj.get("rows"), list) or not isinstance(obj.get("streaks"), list):
         raise ValueError("invalid owed alert dedup state")
+    if obj.get('version') != ALERT_STATE_VERSION:
+        # The old list mixed displayed asks with everything silently retired
+        # after 48h. It cannot prove an unanswered action was ever shown.
+        # Preserve today's send limit, then present remaining real asks once.
+        obj = dict(obj, rows=[], version=ALERT_STATE_VERSION)
     return obj
 
 

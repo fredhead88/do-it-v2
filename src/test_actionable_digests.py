@@ -5,6 +5,7 @@ All events are synthetic or static note fixtures. No live sender or runner.
 import contextlib
 import io
 import json
+import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import unittest
@@ -182,6 +183,26 @@ class ActionableTests(unittest.TestCase):
                  contextlib.redirect_stdout(io.StringIO()) as output:
                 self.assertEqual(module.run(now=NOW, dry_run=True), 0)
                 self.assertTrue(json.loads(output.getvalue())['telegrams'])
+
+    def test_legacy_silent_retirement_does_not_hide_remaining_asks(self):
+        obj = owed_digest.build(open_ask(), NOW)
+        key = owed_digest._row_key(obj['needs_you'][0])
+        with tempfile.TemporaryDirectory(prefix='digest-state-') as temporary:
+            root = Path(temporary)
+            (root / 'state').mkdir()
+            state = root / 'state/owed-alerted.json'
+            state.write_text(json.dumps(dict(rows=[key], streaks=[], sent_date=NOW.date().isoformat())))
+            original = state.read_bytes()
+            with patch.object(owed_digest.fold, 'ROOT', root):
+                migrated = owed_digest._alerted()
+                self.assertEqual(migrated['rows'], [])
+                self.assertEqual(migrated['version'], owed_digest.ALERT_STATE_VERSION)
+                self.assertEqual(owed_digest._alerts(obj, migrated), [])  # no second send today
+                tomorrow = dict(obj, at=(NOW+timedelta(days=1)).isoformat())
+                self.assertIn('NEEDS YOU:', owed_digest._alerts(tomorrow, migrated)[0][0])
+                self.assertEqual(state.read_bytes(), original)  # read/dry-run never migrates live state
+                state.write_text(json.dumps(dict(migrated, rows=[key])))
+                self.assertEqual(owed_digest._alerted()['rows'], [key])  # v2 delivery dedup stays authoritative
 
 
 if __name__ == '__main__':
