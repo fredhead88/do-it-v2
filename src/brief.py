@@ -485,11 +485,11 @@ def dossier(item_id, events, root, now):
     return d
 
 
-def goals(events, root):
+def goals(events, root, *, folded=None):
     """`{"id","title","state","phrase"}` per distinct `goal-filed` subject
     (Target R5 item 3). `[]` when none."""
     root = pathlib.Path(root)
-    _specs, charters, _ignored, _by_subject = fold.fold(events)
+    _specs, charters, _ignored, _by_subject = fold.fold(events) if folded is None else folded
     seen = []
     for e in events:
         gid = e.get("subject")
