@@ -36,6 +36,7 @@ Env: DOIT_WINDOW_PREDEPLOY (override the script path), DOIT_WINDOW_VERIFY_TIMEOU
 import io, json, math, os, pathlib, posixpath, re, shlex, shutil, signal, subprocess, sys, time, zipfile, zlib
 from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
+import tempfile
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import fold  # noqa: E402
@@ -408,6 +409,116 @@ def required_checks(repo, base):
     if not supported <= set(checks):
         raise RuntimeError("required-checks-unreadable: missing ci-verify requirements")
     return [c for c in checks if c in supported]
+
+
+def scope(repo, base, cand, ci_checks, *, fixes_base=False):
+    """Classify bytes with the verified base's script; doubt requires all checks."""
+    def fallback(cause):
+        return dict(checks=list(ci_checks), everything=True, reason="scope-fallback: " + cause)
+
+    try:
+        if fixes_base:
+            return fallback("fixes-base")
+        diff = subprocess.run(["git", "-C", str(repo), "diff", "--name-only", "-z", f"{base}..{cand}"],
+                              capture_output=True, timeout=60)
+        if diff.returncode:
+            return fallback("diff failed")
+        if not diff.stdout:
+            return fallback("empty diff")
+        source = subprocess.run(["git", "-C", str(repo), "show", f"{base}:scripts/ci/actions_changes_gate.sh"],
+                                capture_output=True, timeout=60)
+        if source.returncode:
+            return fallback("classifier absent at base")
+        with tempfile.TemporaryDirectory(prefix="window-scope-") as tmp:
+            paths, classifier = pathlib.Path(tmp) / "paths", pathlib.Path(tmp) / "classifier.sh"
+            paths.write_bytes(diff.stdout)
+            classifier.write_bytes(source.stdout)
+            env = dict(PATH=os.environ.get("PATH", os.defpath), EVENT_NAME="window", CHANGED_PATHS_FILE=str(paths))
+            proc = subprocess.Popen(["bash", str(classifier), "--json"], cwd=tmp, env=env,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+            try:
+                out, _ = proc.communicate(timeout=60)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                proc.communicate()
+                return fallback("classifier timeout")
+            if proc.returncode:
+                return fallback("classifier non-zero exit")
+        lines = out.splitlines()
+        if len(lines) != 1:
+            return fallback("classifier output is not one JSON line")
+        try:
+            answer = json.loads(lines[0])
+        except (ValueError, UnicodeError):
+            return fallback("classifier output is not JSON")
+        known = {PYTEST_CHECK, PG_CHECK, DASHBOARD_CHECK} | CI_VERIFY_EXCLUDED
+        if (not isinstance(answer, dict) or not isinstance(answer.get("checks"), list)
+                or any(not isinstance(c, str) or c not in known for c in answer["checks"])
+                or not isinstance(answer.get("unclassified"), list)
+                or any(not isinstance(p, str) for p in answer["unclassified"])
+                or type(answer.get("everything")) is not bool or not isinstance(answer.get("reason"), str)):
+            return fallback("ill-shaped classifier output")
+        if answer["unclassified"] and not answer["everything"]:
+            return fallback("unclassified paths")
+        if answer["everything"]:
+            return dict(checks=list(ci_checks), everything=True, reason=answer["reason"])
+        selected = set(ci_checks) & set(answer["checks"])
+        if not selected:
+            return fallback("empty intersection")
+        selected.add(PYTEST_CHECK)
+        if any(p.startswith(b"dashboard/") for p in diff.stdout.split(b"\0")):
+            selected.add(DASHBOARD_CHECK)
+        return dict(checks=[c for c in ci_checks if c in selected], everything=False, reason=answer["reason"])
+    except Exception as exc:
+        return fallback(type(exc).__name__)
+
+
+def run_minutes(repo, docs, *, required=None):
+    """Measure distinct dispatched runs, or retain the per-verification estimate."""
+    estimate = dict(actions_minutes=0, selfhosted_minutes=0, minutes_source="estimate")
+    try:
+        scopes = required if required is not None else [doc.get("checks", {}) for doc in docs]
+        estimate["actions_minutes"] = sum(RUN_MINUTES + (DASHBOARD_MINUTES if DASHBOARD_CHECK in checks else 0)
+                                          for checks in scopes)
+        ids = set()
+        for doc in docs:
+            checks = doc.get("checks")
+            if not isinstance(checks, dict) or not checks:
+                return estimate
+            for check in checks.values():
+                if not isinstance(check, dict) or not str(check.get("run_id", "")).isdigit():
+                    return estimate
+                ids.add(str(check["run_id"]))
+        totals = dict(actions_minutes=0, selfhosted_minutes=0, minutes_source="measured")
+        for rid in sorted(ids):
+            proc = subprocess.run(["gh", "run", "view", rid, "--json", "jobs"], cwd=repo,
+                                  capture_output=True, text=True, timeout=60)
+            if proc.returncode:
+                return estimate
+            jobs = json.loads(proc.stdout)["jobs"]
+            if not isinstance(jobs, list) or not jobs:
+                return estimate
+            for job in jobs:
+                labels, runner = job.get("labels"), job.get("runnerName")
+                if labels is not None and (not isinstance(labels, list) or any(not isinstance(s, str) for s in labels)):
+                    return estimate
+                if runner is not None and not isinstance(runner, str):
+                    return estimate
+                if not labels and not runner:
+                    return estimate
+                start = datetime.fromisoformat(job["startedAt"].replace("Z", "+00:00"))
+                end = datetime.fromisoformat(job["completedAt"].replace("Z", "+00:00"))
+                if start.tzinfo is None or end.tzinfo is None or end < start:
+                    return estimate
+                minutes = math.ceil((end - start).total_seconds() / 60)
+                hosted = "self-hosted" in (labels or []) or "self-hosted" in (runner or "")
+                totals["selfhosted_minutes" if hosted else "actions_minutes"] += minutes
+        return totals
+    except Exception:
+        return estimate
 
 
 def pg_result(repo, doc):
@@ -878,7 +989,7 @@ def resolve_entries(repo, spec_args, events):
     return out
 
 
-def advance(repo, main, old, new, window, kept, dropped, runs, urls, entries, dashboard, rechained=(), pre_existing=(), actions_minutes=None, after=None):
+def advance(repo, main, old, new, window, kept, dropped, runs, urls, entries, dashboard, rechained=(), pre_existing=(), actions_minutes=None, after=None, *, scope=None, minutes=None):
     replaced = git(repo, "rev-parse", f"refs/heads/{main}").stdout.strip()
     git(repo, "update-ref", f"refs/heads/{main}", new, old)       # old value asserted
     branch_of = {s: b for s, b, _ in entries}
@@ -888,8 +999,11 @@ def advance(repo, main, old, new, window, kept, dropped, runs, urls, entries, da
     ev("window-verified", window, sha=new, verified_on=old, replaced=replaced,
        **({"after": after} if after else {}), runs=urls, kept=kept, dropped=dropped,
        pre_existing=list(pre_existing),
-       actions_minutes=(runs * RUN_MINUTES + (runs * DASHBOARD_MINUTES if dashboard else 0)
-                        if actions_minutes is None else actions_minutes))
+       actions_minutes=(minutes["actions_minutes"] if minutes is not None else
+                        (runs * RUN_MINUTES + (runs * DASHBOARD_MINUTES if dashboard else 0)
+                         if actions_minutes is None else actions_minutes)),
+       **({"scope": scope["checks"], "scope_reason": scope["reason"]} if scope is not None else {}),
+       **({k: minutes[k] for k in ("selfhosted_minutes", "minutes_source")} if minutes is not None else {}))
 
 
 def bisect_window(window, live, prepare, judge, drop, conflict):
@@ -991,13 +1105,7 @@ def run_attempt(window, project, spec_args, main, fixes_base, base, root_base, a
         print("gate-window: " + str(e))
         return 2
     base_red_answer = base_red_snapshot(project, root_base)
-    baseline = verify(repo, root_base, [PG_CHECK], window)
-    if baseline["state"] != "green" and not (fixes_base and baseline["state"] == "red"):
-        why = "base-not-releasable: pg-parity is " + baseline["state"]
-        escalate(window, why, "base-not-releasable")
-        print("gate-window: " + why)
-        return 2
-    base_failures = baseline.get("pg_failures", {})
+    baseline, base_failures = None, {}
     enabled = os.environ.get("DOIT_WINDOW_RECHAIN", "off") == "on"
     migrations, deferred = set(), []
     if enabled:
@@ -1014,11 +1122,12 @@ def run_attempt(window, project, spec_args, main, fixes_base, base, root_base, a
         entries = [e for e in entries if e[0] not in deferred]
         if deferred:
             print(f"gate-window: deferred {len(deferred)} migration(s), reason=migration-cap cap={cap}")
-    ev("window-opened", window, specs=[s for s, _, _ in entries], base=base[:12], fixes_base=fixes_base)
+    opened = False
     touched = {s: set(git(repo, "diff", "--name-only", f"{base}...{b}").stdout.split()) for s, b, _ in entries}
     dropped, urls, runs, dashboard = [], [], 0, False
     pre_existing_all = set()
     actions_minutes = 0
+    verdicts, verification_scopes, candidate_scopes = [], [], {}
     conflicted_all = {}
 
     def prepare(batch):
@@ -1044,8 +1153,6 @@ def run_attempt(window, project, spec_args, main, fixes_base, base, root_base, a
                 candidate = git(repo, *IDENT, "commit-tree", tree_of(repo, candidate), "-p", candidate,
                                 "-m", f"verify({window}): rebuild after train cancellation").stdout.strip()
                 git(repo, "update-ref", f"refs/heads/window/{window}", candidate)
-            ev("window-candidate", window, sha=candidate, verified_on=base, specs=kept, slot=slot,
-               **({"after": after} if after else {}))
         return candidate, kept, clashes
 
     by_id = {s: (b, sha) for s, b, sha in entries}
@@ -1070,17 +1177,30 @@ def run_attempt(window, project, spec_args, main, fixes_base, base, root_base, a
                tree=tree, green=res["state"] == "green", new_ids=res["nodes"], required=required)
 
     def judge(cand, kept, *, half=False):
-        nonlocal runs, dashboard, actions_minutes
-        changed = git(repo, "diff", "--name-only", f"{base}..{cand}").stdout.split()
-        has_dash = any(p.startswith("dashboard/") for p in changed)
-        dashboard = dashboard or has_dash
-        candidate_required = [c for c in ci_checks if c != DASHBOARD_CHECK or has_dash]
+        nonlocal runs, dashboard, actions_minutes, baseline, base_failures, opened
+        candidate_scope = scope(repo, base, cand, ci_checks, fixes_base=fixes_base)
+        candidate_scopes[cand] = candidate_scope
+        candidate_required = candidate_scope["checks"]
         tree = None
         try:
             tree = tree_of(repo, cand)
             prior = prior_result(fold.read_events(), tree)
         except (OSError, RuntimeError, ValueError, TypeError, subprocess.SubprocessError):
             prior = None
+        if PG_CHECK in candidate_required and baseline is None:
+            baseline = verify(repo, root_base, [PG_CHECK], window)
+            verdicts.append(baseline.get("doc", {}))
+            if baseline["state"] != "green" and not (fixes_base and baseline["state"] == "red"):
+                why = "base-not-releasable: pg-parity is " + baseline["state"]
+                escalate(window, why, "base-not-releasable")
+                print("gate-window: " + why)
+                return dict(state="undetermined", nodes=[], url="", doc={})
+            base_failures = baseline.get("pg_failures", {})
+        if not opened:
+            ev("window-opened", window, specs=[s for s, _, _ in entries], base=base[:12], fixes_base=fixes_base)
+            opened = True
+        ev("window-candidate", window, sha=cand, verified_on=base, specs=kept, slot=slot,
+           **({"after": after} if after else {}))
         if (prior is not None and prior["green"] is True
                 and isinstance(prior.get("required"), list)
                 and all(isinstance(c, str) for c in prior["required"])
@@ -1092,7 +1212,10 @@ def run_attempt(window, project, spec_args, main, fixes_base, base, root_base, a
         if train:
             wait_predecessor(train)
         runs += 1
-        actions_minutes += RUN_MINUTES + (DASHBOARD_MINUTES if has_dash else 0)
+        dashboard = dashboard or DASHBOARD_CHECK in candidate_required
+        actions_minutes += RUN_MINUTES + (DASHBOARD_MINUTES if DASHBOARD_CHECK in candidate_required else 0)
+        verdicts.append(res.get("doc", {}))
+        verification_scopes.append(candidate_required)
         if res["url"]:
             urls.append(res["url"])
         if res["state"] == "green":
@@ -1163,6 +1286,7 @@ def run_attempt(window, project, spec_args, main, fixes_base, base, root_base, a
     cand, merged, conflicts = prepare(entries)
     note_conflicts(conflicts)
     if not merged:
+        ev("window-opened", window, specs=[s for s, _, _ in entries], base=base[:12], fixes_base=fixes_base)
         print("gate-window: every branch conflicts — nothing to verify")
         escalate(window, "every branch in the window conflicts; builder re-dispatch via the merge-conflict flow", "undetermined")
         return 2
@@ -1221,7 +1345,8 @@ def run_attempt(window, project, spec_args, main, fixes_base, base, root_base, a
         wait_predecessor(train)
     try:
         advance(repo, main, base, cand, window, live, dropped, runs, urls, entries, dashboard, rechained,
-                pre_existing=sorted(pre_existing_all), actions_minutes=actions_minutes, after=after)
+                pre_existing=sorted(pre_existing_all), actions_minutes=actions_minutes, after=after,
+                scope=candidate_scopes[cand], minutes=run_minutes(repo, verdicts, required=verification_scopes))
     except RuntimeError:
         if train:
             raise TrainCancelled("base-moved")

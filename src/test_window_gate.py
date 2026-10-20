@@ -10,6 +10,7 @@ L-spec-0764 (JSON verdict line + exit 0/1/2); the real script is not exercised.
 """
 import atexit, hashlib, json, os, pathlib, subprocess, sys, tempfile, time
 import types
+import shlex
 from unittest.mock import patch
 
 os.environ["DOIT_NO_POKE"] = "1"
@@ -88,6 +89,10 @@ class Fx:
         gate = self.repo / window_gate.PREDEPLOY
         gate.parent.mkdir(parents=True)
         gate.write_text(ARRAY)
+        classifier = self.repo / "scripts/ci/actions_changes_gate.sh"
+        classifier.write_text("printf '%s\\n' " + shlex.quote(json.dumps({
+            "checks": [window_gate.PYTEST_CHECK, window_gate.PG_CHECK],
+            "unclassified": [], "everything": False, "reason": "fixture scope"})) + "\n")
         sh(["add", "-A"], self.repo); sh(["commit", "-m", "init"], self.repo)
         sh(["push", "origin", "master"], self.repo)
         self.base = sh(["rev-parse", "master"], self.repo)
@@ -154,6 +159,9 @@ class Fx:
             "new_failures": [], "run_url": "https://github.com/o/r/actions/runs/" + rid}))
         (self.fdir / ("jobs-" + rid)).write_text(json.dumps({"jobs": [{
             "name": window_gate.PG_CHECK, "databaseId": int(jid), "conclusion": conclusion}]}))
+        verdict = json.loads((self.fdir / f"run{n}.out").read_text())
+        verdict["checks"][window_gate.DASHBOARD_CHECK] = "ran"
+        self.run_n(n, 0 if conclusion == "success" else 1, json.dumps(verdict))
         (self.fdir / ("log-" + jid)).write_text("\n".join(
             "pg-parity (Postgres)\tRun suite\t2026-10-17T00:00:00Z " + kind + " " + node + " - " + message
             for node in nodes))
@@ -494,6 +502,7 @@ def parity_checks():
 
 
 def main():
+    scope_checks()
     # AC1 + AC7: green window; dirty live checkout untouched
     fx = Fx({"A": "a.txt", "B": "b.txt", "C": "c.txt"}, dirty=True)
     pre = (sh(["status", "--porcelain"], fx.repo), (fx.repo / ".git/index").read_bytes())
@@ -1667,6 +1676,266 @@ def train_checks():
     body = json.dumps(observations, sort_keys=True)
     print(json.dumps(dict(url="cli://gate-window/train_checks", status=0 if not FAILS else 1,
                          body_sha256=hashlib.sha256(body.encode()).hexdigest(), body_excerpt=observations), sort_keys=True))
+
+
+def scope_checks():
+    """Hermetic window-scope contract, including malicious candidates and gh."""
+    import inspect, shlex, signal
+    from datetime import datetime, timezone
+
+    all_checks = [window_gate.PYTEST_CHECK, window_gate.PG_CHECK, window_gate.DASHBOARD_CHECK]
+    records = {}
+
+    def mark(ac, name, ok, value=None):
+        check(ok, "scope " + name)
+        print("ac-scope " + name)
+        records.setdefault(ac, []).append(dict(case=name, passed=bool(ok), value=value))
+
+    def script(answer):
+        return "printf '%s\\n' " + shlex.quote(json.dumps(answer)) + "\n"
+
+    def answer(checks=None, **kw):
+        return dict(checks=["pytest"] if checks is None else checks,
+                    unclassified=[], everything=False, reason="fixture python", **kw)
+
+    def fixture(paths=("api/new.py",), source=None):
+        fx = Fx({})
+        classifier = fx.repo / "scripts/ci/actions_changes_gate.sh"
+        if source is False:
+            classifier.unlink()
+        else:
+            classifier.write_text(script(answer()) if source is None else source)
+        sh(["add", "-A"], fx.repo); sh(["commit", "-m", "classifier base"], fx.repo)
+        fx.base = sh(["rev-parse", "HEAD"], fx.repo)
+        sh(["update-ref", "refs/heads/master", fx.base], fx.repo)
+        sh(["checkout", "-b", "br-A"], fx.repo)
+        for name in paths:
+            path = fx.repo / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("candidate\n")
+        sh(["add", "-A"], fx.repo)
+        sh(["commit", "--allow-empty", "-m", "candidate"], fx.repo)
+        cand = sh(["rev-parse", "HEAD"], fx.repo)
+        fx.branches["A"] = "br-A"
+        sh(["checkout", "live-scratch"], fx.repo)
+        return fx, cand
+
+    fx, cand = fixture()
+    result = window_gate.scope(fx.repo, fx.base, cand, all_checks)
+    mark("AC1", "python-only", result == dict(checks=["pytest"], everything=False, reason="fixture python"), result)
+    seen = []
+    real_popen = subprocess.Popen
+
+    def spy(*args, **kwargs):
+        if args[0][0] == "bash":
+            seen.append(dict(env=kwargs["env"], cwd=kwargs["cwd"], args=args[0],
+                             paths=pathlib.Path(kwargs["env"]["CHANGED_PATHS_FILE"]).read_bytes()))
+        return real_popen(*args, **kwargs)
+
+    with patch.object(subprocess, "Popen", side_effect=spy):
+        result = window_gate.scope(fx.repo, fx.base, cand, all_checks)
+    mark("AC1", "classifier from base", len(seen) == 1 and seen[0]["paths"] == b"api/new.py\0" and
+         set(seen[0]["env"]) == {"PATH", "EVENT_NAME", "CHANGED_PATHS_FILE"} and
+         seen[0]["env"]["EVENT_NAME"] == "window" and seen[0]["args"][-1] == "--json" and
+         str(seen[0]["cwd"]) != str(fx.repo) and not pathlib.Path(seen[0]["cwd"]).exists())
+    malicious = fx.repo / "scripts/ci/actions_changes_gate.sh"
+    marker = fx.tmp / "executed-candidate"
+    sh(["checkout", "br-A"], fx.repo)
+    malicious.write_text("touch " + shlex.quote(str(marker)) + "\nexit 1\n")
+    sh(["add", "-A"], fx.repo); sh(["commit", "-m", "malicious classifier"], fx.repo)
+    cand = sh(["rev-parse", "HEAD"], fx.repo)
+    result = window_gate.scope(fx.repo, fx.base, cand, all_checks)
+    mark("AC1", "candidate script ignored", result["checks"] == ["pytest"] and not marker.exists(), result)
+
+    fx, cand = fixture(source=script(answer([window_gate.PG_CHECK])))
+    result = window_gate.scope(fx.repo, fx.base, cand, all_checks)
+    mark("AC3", "floor pytest", result["checks"] == all_checks[:2], result)
+    fx, cand = fixture(("dashboard/new.ts",))
+    result = window_gate.scope(fx.repo, fx.base, cand, all_checks)
+    mark("AC3", "floor dashboard", result["checks"] == ["pytest", window_gate.DASHBOARD_CHECK], result)
+    result = window_gate.scope(fx.repo, fx.base, cand, all_checks, fixes_base=True)
+    mark("AC3", "floor pg fixes-base", result == dict(checks=all_checks, everything=True, reason="scope-fallback: fixes-base"), result)
+    full_answer = answer(); full_answer["everything"] = True
+    fx, cand = fixture(source=script(full_answer))
+    result = window_gate.scope(fx.repo, fx.base, cand, all_checks)
+    mark("AC3", "everything full", result["checks"] == all_checks and result["everything"], result)
+    fx, cand = fixture(source=script(answer([next(iter(window_gate.CI_VERIFY_EXCLUDED))])))
+    result = window_gate.scope(fx.repo, fx.base, cand, all_checks)
+    mark("AC3", "never empty", result == dict(checks=all_checks, everything=True, reason="scope-fallback: empty intersection"), result)
+
+    def fallback(result):
+        return result["checks"] == all_checks and result["everything"] is True and result["reason"].startswith("scope-fallback:")
+
+    for letter, source in (("a", False), ("b", "exit 7\n"), ("d", script(answer(["unknown check"]))),
+                           ("e", script(dict(answer(), unclassified=["unknown/path"])) )):
+        fx, cand = fixture(source=source)
+        result = window_gate.scope(fx.repo, fx.base, cand, all_checks)
+        mark("AC4", "fallback " + letter, fallback(result), result)
+    malformed = ["", "echo 'run all checks'\n", "printf '{}\\n{}\\n'\n", "echo '[]'\n"]
+    for obj in ({}, {"checks": "pytest"}, dict(answer(), checks=[1]), dict(answer(), unclassified=None),
+                dict(answer(), everything="false"), dict(answer(), reason=None)):
+        malformed.append(script(obj))
+    outputs = []
+    for source in malformed:
+        fx, cand = fixture(source=source)
+        outputs.append(window_gate.scope(fx.repo, fx.base, cand, all_checks))
+    mark("AC4", "fallback c", all(map(fallback, outputs)), outputs)
+    fx, cand = fixture(())
+    results = [window_gate.scope(fx.repo, fx.base, cand, all_checks),
+               window_gate.scope(fx.repo, "missing-ref", cand, all_checks)]
+    mark("AC4", "fallback f", all(map(fallback, results)), results)
+    fx, cand = fixture(source="sleep 120 & wait\n")
+    timeouts = []
+
+    def short_classifier(*args, **kwargs):
+        proc = real_popen(*args, **kwargs)
+        if args[0][0] == "bash":
+            communicate = proc.communicate
+            def bounded(*a, **kw):
+                timeouts.append(kw.get("timeout"))
+                if kw.get("timeout") == 60:
+                    kw["timeout"] = .05
+                return communicate(*a, **kw)
+            proc.communicate = bounded
+        return proc
+
+    with patch.object(subprocess, "Popen", side_effect=short_classifier), \
+         patch.object(os, "killpg", wraps=os.killpg) as kill:
+        result = window_gate.scope(fx.repo, fx.base, cand, all_checks)
+    mark("AC4", "fallback g", fallback(result) and "timeout" in result["reason"] and
+         timeouts[0] == 60 and any(call.args[1] == signal.SIGKILL for call in kill.call_args_list), result)
+    with patch.object(pathlib.Path, "write_bytes", side_effect=PermissionError("fixture")):
+        result = window_gate.scope(fx.repo, fx.base, cand, all_checks)
+    mark("AC4", "fallback h", fallback(result) and "PermissionError" in result["reason"], result)
+    with patch.object(subprocess, "run", side_effect=LookupError("fixture")):
+        result = window_gate.scope(fx.repo, fx.base, cand, all_checks)
+    check(fallback(result) and result["reason"] == "scope-fallback: LookupError", "scope unexpected exception")
+    fx, cand = fixture((os.fsdecode(b"api/non-utf8-\xff.py"),), source=script(full_answer))
+    seen.clear()
+    with patch.object(subprocess, "Popen", side_effect=spy):
+        result = window_gate.scope(fx.repo, fx.base, cand, all_checks)
+    mark("AC4", "non-utf8 path", result["checks"] == all_checks and b"\xff" in seen[0]["paths"], result)
+
+    rows = [("dashboard/a.ts",), ("dashboard/src/a.test.ts",), ("api/a.py",), ("sql/a.sql",),
+            ("scripts/ci/a.sh",), ("docs/a.md",), (), ("unknown/file",), ("README.md",),
+            ("api/a.py", "dashboard/a.ts"), ("sql/a.sql", "docs/a.md"), ("scripts/ci/a.sh", "dashboard/a.ts"),
+            ("docs/a.md", "api/a.py"), ("unknown/file", "dashboard/a.ts"), ("dashboard/a.ts", "sql/a.sql"),
+            ("api/a.py", "sql/a.sql"), ("docs/a.md", "scripts/ci/a.sh"), ("tests/a.py",),
+            ("pipelines/a.py",), ("dashboard/a.ts", "api/a.py", "sql/a.sql")]
+    successes = 0
+    for paths in rows:
+        fx, cand = fixture(paths)
+        required = window_gate.scope(fx.repo, fx.base, cand, all_checks)["checks"]
+        floor = {"pytest"} | ({window_gate.DASHBOARD_CHECK} if any(p.startswith("dashboard/") for p in paths) else set())
+        successes += floor <= set(required)
+    mark("AC5", "monotone 20/20", successes == len(rows) == 20, dict(rows=rows, passed=successes))
+
+    fx, _ = fixture()
+    fx.run_n(1, 0, GREEN)
+    rc = fx.go()
+    event = fx.events("window-verified")[0]
+    mark("AC2", "run_window passes scoped checks", rc == 0 and fx.calls()[0].endswith("|pytest;"), fx.calls())
+    mark("AC2", "python-only no pg dispatch", not (fx.fdir / "base-calls").exists() and
+         all(window_gate.PG_CHECK not in call for call in fx.calls()), fx.calls())
+    mark("AC2", "verify signature unchanged", list(inspect.signature(window_gate.verify).parameters) ==
+         ["repo", "cand", "required", "window"])
+    mark("AC6", "window-verified scope fields", event["scope"] == ["pytest"] and
+         event["scope_reason"] == "fixture python" and event["selfhosted_minutes"] == 0 and
+         event["minutes_source"] == "estimate", {k: event[k] for k in ("scope", "scope_reason", "actions_minutes", "minutes_source")})
+
+    fx = Fx({"A": "api/tests/test_x.py", "B": "b.py"})
+    fx.run_n(1, 1, red(["api/tests/test_x.py::bad"])); fx.run_n(2, 0, GREEN)
+    scopes = [dict(checks=["pytest", window_gate.DASHBOARD_CHECK], everything=False, reason="first"),
+              dict(checks=["pytest", window_gate.PG_CHECK], everything=False, reason="second")]
+    scoped = []
+    def rescope(repo, base, cand, checks, **kw):
+        scoped.append((base, cand))
+        if len(scoped) == 2:
+            check(not (fx.fdir / "base-calls").exists(), "scope baseline lazy before later scope")
+        return scopes[len(scoped) - 1]
+    with patch.object(window_gate, "scope", side_effect=rescope):
+        rc = fx.go()
+    event = fx.events("window-verified")[0]
+    mark("AC2", "rescope after drop", rc == 1 and len(scoped) == 2 and scoped[0][1] != scoped[1][1] and
+         all(base == fx.base for base, _ in scoped), [base == fx.base for base, _ in scoped])
+    mark("AC2", "baseline follows scope", (fx.fdir / "base-calls").read_text().splitlines() == ["base"])
+    mark("AC6", "last verification wins", event["scope"] == scopes[-1]["checks"] and event["scope_reason"] == "second", event["scope"])
+    mark("AC6", "dashboard charge follows dispatch", event["actions_minutes"] == 2 * window_gate.RUN_MINUTES + window_gate.DASHBOARD_MINUTES, event["actions_minutes"])
+
+    fx, _ = fixture(source=False)
+    fx.run_n(1, 0, GREEN); rc = fx.go()
+    event = fx.events("window-verified")[0]
+    mark("AC6", "everything fallback charges dashboard", rc == 0 and event["scope"] == all_checks and
+         event["actions_minutes"] == window_gate.RUN_MINUTES + window_gate.DASHBOARD_MINUTES, event["actions_minutes"])
+    fx, _ = fixture()
+    fx.pg("base", ["api/tests/test_z.py::old"]); fx.run_n(1, 0, GREEN)
+    rc = fx.go(fixes_base=True)
+    check(rc == 0 and window_gate.PG_CHECK in fx.calls()[0] and
+          fx.events("window-verified")[0]["scope"] == all_checks, "scope fixes-base dispatch repairs red base")
+
+    fx = Fx({})
+    window_gate.advance(fx.repo, "master", fx.base, fx.base, "legacy", [], [], 2, ["url"], [], True)
+    event = fx.events("window-verified")[0]
+    expected = dict(v=1, type="window-verified", subject="legacy", project=window_gate.PROJECT,
+                    sha=fx.base, verified_on=fx.base, replaced=fx.base, runs=["url"], kept=[], dropped=[],
+                    pre_existing=[], actions_minutes=100)
+    mark("AC6", "advance without scope unchanged", {k: v for k, v in event.items() if k not in ("ts", "actor", "_src")} == expected,
+         sorted(event))
+
+    def job(seconds, **runner):
+        return dict(startedAt="2026-10-20T00:00:00Z", completedAt=datetime.fromtimestamp(
+            datetime(2026, 10, 20, tzinfo=timezone.utc).timestamp() + seconds, timezone.utc).isoformat(), **runner)
+    docs = [{"checks": {"pytest": {"run_id": 10}, window_gate.DASHBOARD_CHECK: {"run_id": 10}}},
+            {"checks": {window_gate.PG_CHECK: {"run_id": 11}}}]
+    jobs = {"10": [job(61, labels=["ubuntu-latest"]), job(120, runnerName="Hosted Agent")],
+            "11": [job(90, labels=["self-hosted"])]}
+    for rid, data in jobs.items():
+        (fx.fdir / ("jobs-" + rid)).write_text(json.dumps(dict(jobs=data)))
+    with patch.dict(os.environ, PATH=fx.path, FAKE_DIR=str(fx.fdir)), patch.object(subprocess, "run", wraps=subprocess.run) as gh:
+        result = window_gate.run_minutes(fx.repo, docs)
+    mark("AC9", "minutes measured", result == dict(actions_minutes=4, selfhosted_minutes=2, minutes_source="measured"), result)
+    mark("AC9", "minutes selfhosted split", result["actions_minutes"] == 4 and result["selfhosted_minutes"] == 2, result)
+    mark("AC9", "minutes run counted once", gh.call_count == 2, gh.call_count)
+    (fx.fdir / "jobs-11").write_text(json.dumps(dict(jobs=[job(90, runnerName="self-hosted-runner") ])))
+    with patch.dict(os.environ, PATH=fx.path, FAKE_DIR=str(fx.fdir)):
+        check(window_gate.run_minutes(fx.repo, docs) == result, "scope self-hosted runnerName")
+    bad_results = []
+    with patch.dict(os.environ, PATH=fx.path, FAKE_DIR=str(fx.fdir)):
+        for bad in ("missing", "not json", json.dumps(dict(jobs=[{}])),
+                    json.dumps(dict(jobs=[job(61)]))):
+            (fx.fdir / "jobs-10").write_text(bad)
+            bad_results.append(window_gate.run_minutes(fx.repo, docs))
+        bad_results.append(window_gate.run_minutes(fx.repo, [{"checks": {"pytest": "ran"}}]))
+        with patch.object(subprocess, "run", return_value=types.SimpleNamespace(returncode=1, stdout="")):
+            bad_results.append(window_gate.run_minutes(fx.repo, docs))
+    mark("AC9", "minutes estimate fallback", all(r["minutes_source"] == "estimate" and r["selfhosted_minutes"] == 0
+         and r["actions_minutes"] == 95 for r in bad_results[:-2]) and
+         bad_results[-2]["actions_minutes"] == 45 and bad_results[-1]["actions_minutes"] == 95, bad_results)
+    fx, _ = fixture()
+    fx.run_n(1, 0, json.dumps(dict(verdict="green", checks={"pytest": {"state": "ran", "run_id": 77}})))
+    (fx.fdir / "jobs-77").write_text(json.dumps(dict(jobs=jobs["10"] + jobs["11"])))
+    rc = fx.go()
+    event = fx.events("window-verified")[0]
+    mark("AC6", "measured minutes roundtrip", rc == 0 and event["actions_minutes"] == 4 and
+         event["selfhosted_minutes"] == 2 and event["minutes_source"] == "measured",
+         {k: event[k] for k in ("actions_minutes", "selfhosted_minutes", "minutes_source")})
+    fx, _ = fixture(source=script(answer(["pytest", window_gate.PG_CHECK])))
+    fx.run_n("base", 0, json.dumps(dict(verdict="green", checks={window_gate.PG_CHECK: {"state": "ran", "run_id": 76}})))
+    fx.run_n(1, 0, json.dumps(dict(verdict="green", checks={name: {"state": "ran", "run_id": 77}
+                                                        for name in ("pytest", window_gate.PG_CHECK)})))
+    for rid, data in ((76, [job(60, runnerName="Hosted Agent")]), (77, jobs["10"] + jobs["11"])):
+        data[0].update(name=window_gate.PG_CHECK, conclusion="success")
+        (fx.fdir / f"jobs-{rid}").write_text(json.dumps(dict(jobs=data)))
+    rc = fx.go()
+    event = fx.events("window-verified")[0]
+    mark("AC9", "minutes include baseline", rc == 0 and event["actions_minutes"] == 5 and
+         event["selfhosted_minutes"] == 2 and event["minutes_source"] == "measured",
+         {k: event[k] for k in ("actions_minutes", "selfhosted_minutes", "minutes_source")})
+    for ac, cases in records.items():
+        encoded = json.dumps(cases, sort_keys=True).encode()
+        print(json.dumps(dict(criterion=ac, url="cli://window_gate/scope/" + ac,
+                             status=0 if all(c["passed"] for c in cases) else 1,
+                             body_sha256=hashlib.sha256(encoded).hexdigest(), body_excerpt=cases)))
 
 
 train_checks()
