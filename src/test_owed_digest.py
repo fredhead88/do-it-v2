@@ -160,7 +160,7 @@ class DigestTests(unittest.TestCase):
         obj = digest.build(evs, NOW)
         recount = Counter(r["status"] for s in fold.fold(evs)[0].values() for r in owed.checks(s["evs"], NOW))
         self.assertEqual(obj["counts"]["by_status"], {**recount, "unverifiable": 0})
-        self.assertEqual(set(obj), {"at", "counts", "needs_you", "health", "m1", "backlog", "alarms"})
+        self.assertEqual(set(obj), {"at", "counts", "needs_you", "health", "m1", "backlog", "alarms", "trend", "thinker_rows", "answered_asks"})
         self.assertEqual(set(obj["counts"]), {"by_status", "blocked_by_capability", "sweep"})
         self.assertEqual(set(obj["counts"]["by_status"]), set(owed.STATUSES))
         self.assertEqual({r["spec"] for r in obj["needs_you"]}, {s for s, v in expected.items() if v == "blocked"})
@@ -244,7 +244,8 @@ class DigestTests(unittest.TestCase):
         self.assertEqual(len(self.sent), 1)
         self.assertEqual(self.sent[0][0], str(self.root / "telegram/tg-send.sh"))
         self.assertEqual(len(self.sent[0]), 2)
-        self.assertIn(ASK, self.sent[0][1])
+        self.assertIn("Recommend", self.sent[0][1])
+        self.assertIn("No reply:", self.sent[0][1])
         self.assertIn("NEEDS YOU:", self.sent[0][1])
         self.assertLessEqual(len(self.sent[0][1]), 1000)
         self.assertTrue((self.root / "content/L-owed-digest-2026-10-15.md").exists())
@@ -256,7 +257,7 @@ class DigestTests(unittest.TestCase):
         self.assertEqual(len(self.sent), 1)
         self.assertEqual(self.run_digest(alert=True, now=NOW + timedelta(days=1)), 0)
         self.assertEqual(len(self.sent), 2)
-        self.assertIn(ASK, self.sent[1][1])
+        self.assertIn("Recommend", self.sent[1][1])  # the explicitly reopened ask is new
         print("PASS daily merge; one summary per UTC day; reopened row waits until next summary")
 
     def test_operator_age_owner_and_later_decision_filters(self):
@@ -277,10 +278,13 @@ class DigestTests(unittest.TestCase):
         self.assertEqual(self.run_digest(alert=True), 0)
         self.assertIn("L-spec-filter0/AC1", self.sent[0][1])
         self.assertIn("L-spec-filter1/AC1", self.sent[0][1])
-        for i in (2, 3, 4, 5):
+        self.assertIn("L-spec-filter2/AC1", self.sent[0][1])
+        for i in (3, 4, 5):
             self.assertNotIn(f"L-spec-filter{i}/AC1", self.sent[0][1])
         record = json.loads((self.root / "state/owed-alerted.json").read_text())
-        self.assertEqual(len(record["rows"]), 6)
+        self.assertEqual(len(record["rows"]), 3)
+        self.assertEqual(len(self.state()["thinker_rows"]), 1)
+        self.assertEqual(len(self.state()["answered_asks"]), 2)
         self.assertEqual(self.run_digest(alert=True, now=NOW + timedelta(minutes=15)), 0)
         self.assertEqual(len(self.sent), 1)
         print("PASS 48h boundary; owner; later decisions by subject/ref; silent backlog; 06Z limit")
@@ -307,8 +311,8 @@ class DigestTests(unittest.TestCase):
         self.assertEqual(self.sent, [])
         self.assertEqual(self.run_digest(alert=True), 0)
         self.assertEqual(len(self.sent), 1)
-        self.assertIn("Daily owed summary", self.sent[0][1])
-        self.assertIn("SYSTEM HEALTH:", self.sent[0][1])
+        self.assertIn("Nothing needs you today", self.sent[0][1])
+        self.assertIn("Checks:", self.sent[0][1])
         for n in range(4, 7):
             self.install(sweep(["failed"] * n))
             self.assertEqual(self.run_digest(alert=True), 0)
@@ -375,7 +379,7 @@ class DigestTests(unittest.TestCase):
 
     def test_large_alert(self):
         evs, _ = fixture()
-        long_ask = "Please review this operator request. " * 8
+        long_ask = "Please approve this production change. " * 8
         for e in evs:
             if e["type"] == "owed-unobservable":
                 e.update(why=long_ask, ts=ts(0.1))
@@ -384,14 +388,15 @@ class DigestTests(unittest.TestCase):
             self.assertEqual(self.run_digest(alert=True), 0)
         self.assertEqual(len(self.sent), 1)
         self.assertLessEqual(len(self.sent[0][1]), 1000)
-        self.assertIn("more operator rows in the daily digest", self.sent[0][1])
+        self.assertIn("more asks in the full daily report", self.sent[0][1])
         record = json.loads((self.root / "state/owed-alerted.json").read_text())
         self.assertGreater(len(record["rows"]), 0)
         self.assertLess(len(record["rows"]), 10)
         for key in record["rows"]:
             spec, criterion, _since = key.split("/", 2)
-            self.assertIn(f"{spec}/{criterion}:", self.sent[0][1])
-        self.assertEqual(self.run_digest(alert=True, now=NOW + timedelta(days=3)), 0)
+            self.assertIn(f"[{spec}/{criterion}]", self.sent[0][1])
+        for day in range(3, 8):
+            self.assertEqual(self.run_digest(alert=True, now=NOW + timedelta(days=day)), 0)
         record = json.loads((self.root / "state/owed-alerted.json").read_text())
         self.assertEqual(len(record["rows"]), 10)
         self.assertNotIn("NEEDS YOU:", self.sent[-1][1])
@@ -406,7 +411,7 @@ class DigestTests(unittest.TestCase):
         self.assertNotIn("\x00", md)
         self.assertNotIn("\x1b", md)
         self.assertIn("``unsafe` ", md)
-        self.assertNotIn("x" * 301, md)
+        self.assertIn("x" * 400, md)  # audit keeps the complete, sanitized note
         print("PASS free-text sanitisation")
 
     def test_health_alarm_section(self):
