@@ -13,14 +13,17 @@ import unicodedata
 from datetime import datetime, timedelta, timezone
 
 import dispatch
+import digest_actions
 import fold
 import health_alarms
 import owed
 import owed_failures
+import owed_routes
 import sweep_owed
 
 LEDGER_NAME = "L-owed-digest-local.jsonl"
 CORRECTING_STALE_DAYS = 7
+ALERT_STATE_VERSION = 2
 
 
 def _time(value):
@@ -33,13 +36,13 @@ def _iso(value):
     return _time(value).isoformat() if value is not None else None
 
 
-def _text(value):
+def _text(value, limit=300):
     line = " ".join(str(value or "").split())
-    return "".join(c for c in line if not unicodedata.category(c).startswith("C"))[:300]
+    return "".join(c for c in line if not unicodedata.category(c).startswith("C"))[:limit]
 
 
-def _span(value):
-    text = _text(value)
+def _span(value, limit=300):
+    text = _text(value, limit)
     fence = "`" * (max([len(m) for m in re.findall(r"`+", text)] or [0]) + 1)
     padding = " " if text.startswith("`") or text.endswith("`") else ""
     return f"{fence}{padding}{text}{padding}{fence}"
@@ -59,11 +62,20 @@ def _streak(all_ev, now):
 def build(all_ev, now):
     """SD8 snapshot. The clock is supplied by the caller, never read here."""
     now = _time(now)
+    all_ev = digest_actions.as_of(all_ev, now)
     by_status = dict.fromkeys(owed.STATUSES, 0)
     blocked, needs, health = {}, [], []
+    thinker_rows, answered_asks = [], []
     no_runner = []
     m1 = dict(terminal_unobservable=0, verify_unbuildable=0, sweep_failed_one_row_24h=0)
-    specs = fold.fold(all_ev)[0]
+    folded = fold.fold(all_ev)
+    specs = folded[0]
+    admitted = [e for evs in folded[3].values() for e in evs]
+    admitted.extend(e for e in all_ev if e.get('type') in ('thinker-answer', 'operator-approval')
+                    and e.get('actor') in ('thinker', 'operator'))
+    sources = {e['_src']: e for e in admitted if e.get('_src')}
+    answers = [e for e in admitted if e.get('type') in ('decision', 'thinker-answer', 'operator-approval',
+                                                       'owed-met', 'owed-failed', 'owed-waived', 'owed-corrective')]
     for spec in specs.values():
         evs = spec["evs"]
         for row in owed.checks(evs, now):
@@ -79,15 +91,27 @@ def build(all_ev, now):
             if status == "blocked":
                 cause = capability or "unknown"
                 blocked[cause] = blocked.get(cause, 0) + 1
-                if capability == "operator-action":
-                    request = next((e for e in reversed(evs) if e.get("type") == "owed-unobservable"
-                                    and e.get("criterion") == row["criterion"]), {})
-                    decided = any(e.get("type") == "decision" and _time(since) < _time(e["ts"]) <= now
-                                  and (e.get("ref") in (request.get("_src"), row["declared_src"])
-                                       if e.get("ref") else e.get("subject") == row["spec"]
-                                       and e.get("criterion") in (None, row["criterion"])) for e in all_ev)
-                    needs.append(dict(item, ask=_text(row["ask"]),
-                                      owner=request.get("owner") or "operator", decided=decided))
+                requests = [e for e in evs if e.get("type") == "owed-unobservable"
+                            and e.get("criterion") == row["criterion"]
+                            and _time(e['ts']) >= row['governing_at']]
+                request = requests[-1] if requests else {}
+                classification = owed_routes.classify_ask(row['ask'], capability)
+                owner = request.get('owner') or classification['owner']
+                # A seat cannot promote a missing tool into an operator act.
+                if classification['owner'] == 'thinker':
+                    owner = 'thinker'
+                candidate = dict(item, ask=str(row['ask'] or ''), owner=owner,
+                                 kind=classification['kind'], route=classification['capability'],
+                                 declared_src=row['declared_src'])
+                decided = any(digest_actions.answered(
+                    dict(candidate, since=e['ts']), e, answers, now, sources) for e in requests)
+                candidate['decided'] = decided
+                if decided:
+                    answered_asks.append(candidate)
+                elif owner == 'operator':
+                    needs.append(candidate)
+                else:
+                    thinker_rows.append(candidate)
             if status == "expired" and capability != "operator-action":
                 m1["terminal_unobservable"] += 1
             if status == "quarantined" and row["criterion"] == "verify":
@@ -125,7 +149,8 @@ def build(all_ev, now):
                                      capped=remaining))
     return dict(at=now.isoformat(), counts=dict(by_status=by_status, blocked_by_capability=blocked, sweep=sweep),
                 needs_you=needs, health=health, m1=m1, backlog=backlog,
-                alarms=health_alarms.summary_lines(all_ev, now))
+                alarms=health_alarms.summary_lines(all_ev, now), thinker_rows=thinker_rows,
+                answered_asks=answered_asks, trend=digest_actions.trend(all_ev, by_status, now))
 
 
 def _write_json(path, obj):
@@ -162,9 +187,15 @@ def render_md(obj):
     lines.extend(["", "Sweep: " + json.dumps(obj["counts"]["sweep"], sort_keys=True),
                   "M1: " + json.dumps(obj["m1"], sort_keys=True), "", "## NEEDS YOU", ""])
     for row in obj["needs_you"]:
-        lines.append(f"- {_span(row['spec'])} / {_span(row['criterion'])}: {_span(row['ask'])}")
+        lines.append(f"- {_span(row['spec'])} / {_span(row['criterion'])}: {_span(row['ask'], None)}")
     if not obj["needs_you"]:
         lines.append("none")
+    for title, key in (("THINKER FOLLOW-UP", "thinker_rows"), ("ANSWERED ASKS (AUDIT)", "answered_asks")):
+        lines.extend(['', '## ' + title, ''])
+        for row in obj.get(key, []):
+            lines.append(f"- {_span(row['spec'])} / {_span(row['criterion'])}: {_span(row['ask'], None)}")
+        if not obj.get(key):
+            lines.append('none')
     lines.extend(["", "## SYSTEM HEALTH", ""])
     for row in obj["health"]:
         subject = f"{_span(row['spec'])} / {_span(row['criterion'])}: " if "spec" in row else ""
@@ -198,10 +229,15 @@ def _read_ledger():
 def _alerted():
     path = fold.ROOT / "state/owed-alerted.json"
     if not path.exists():
-        return dict(rows=[], streaks=[])
+        return dict(rows=[], streaks=[], version=ALERT_STATE_VERSION)
     obj = json.loads(path.read_text())
     if not isinstance(obj.get("rows"), list) or not isinstance(obj.get("streaks"), list):
         raise ValueError("invalid owed alert dedup state")
+    if obj.get('version') != ALERT_STATE_VERSION:
+        # The old list mixed displayed asks with everything silently retired
+        # after 48h. It cannot prove an unanswered action was ever shown.
+        # Preserve today's send limit, then present remaining real asks once.
+        obj = dict(obj, rows=[], version=ALERT_STATE_VERSION)
     return obj
 
 
@@ -211,7 +247,7 @@ def _row_key(row):
 
 def _actionable(row, now):
     return (row.get("owner", "operator") == "operator" and not row.get("decided")
-            and timedelta(0) <= now - _time(row["since"]) <= timedelta(hours=48))
+            and now >= _time(row["since"]))
 
 
 def _alerts(obj, alerted):
@@ -220,20 +256,13 @@ def _alerts(obj, alerted):
     if now.hour != 6 or alerted.get("sent_date") == now.date().isoformat():
         return []
     fresh = [r for r in obj["needs_you"] if _actionable(r, now) and _row_key(r) not in alerted["rows"]]
-    counts = ", ".join(f"{k}={v}" for k, v in obj["counts"]["by_status"].items() if v) or "none"
-    text = f"Daily owed summary — {now.date().isoformat()}\nCounts: {counts}"
-    keys = []
-    for row in sorted(fresh, key=lambda r: (r["spec"], r["criterion"], r["since"])):
-        entry = f"\nNEEDS YOU: {_text(row['spec'])}/{_text(row['criterion'])}: {_text(row['ask'])}"
-        if len(text) + len(entry) > 900:  # reserve room for the omitted count
-            break
-        text += entry
-        keys.append(_row_key(row))
-    if len(keys) < len(fresh):
-        text += f"\n{len(fresh) - len(keys)} more operator rows in the daily digest."
-    if obj["health"]:
-        text += f"\nSYSTEM HEALTH: {len(obj['health'])} rows in the daily digest."
-    return [(text[:1000], "rows", keys)]
+    fresh.sort(key=lambda r: (r['spec'], r['criterion'], r['since']))
+    if not fresh:
+        return [("Nothing needs you today. " + digest_actions.counts_line(obj), 'rows', [])]
+    text, included = digest_actions.pack(
+        f"Daily checks — {now.date().isoformat()}\n" + digest_actions.counts_line(obj),
+        ['NEEDS YOU: ' + digest_actions.operator_line(r) for r in fresh])
+    return [(text, 'rows', [_row_key(r) for r in fresh[:included]])]
 
 
 def run(*, alert=False, now=None, sender=None, dry_run=False):

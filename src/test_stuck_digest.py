@@ -81,7 +81,7 @@ class DigestTests(unittest.TestCase):
     def test_ac1(self):
         ev = fixture()
         obj = digest.build(ev, NOW)
-        self.assertEqual(set(obj), {'date', 'stuck_count', 'listed', 'live_reason_count', 'rows'})
+        self.assertEqual(set(obj), {'date', 'stuck_count', 'listed', 'live_reason_count', 'rows', 'action_rows', 'waiting_rows'})
         self.assertEqual((obj['stuck_count'], obj['listed'], obj['live_reason_count']), (2, 2, 1))
         rows = lane_rules.due(ev, fold.fold(ev)[0], NOW)
         self.assertEqual(obj['rows'], sorted([r for r in rows if r['overdue']], key=lambda r: (r['spec'], r['rule'])))
@@ -91,7 +91,7 @@ class DigestTests(unittest.TestCase):
                 # The rule table is inherited by due(); build itself reads no files.
                 with patch.object(lane_rules, 'due', return_value=rows):
                     self.assertEqual(digest.build(ev, NOW), obj)
-        self.assertEqual(digest.build([], NOW), dict(date='2026-10-18', stuck_count=0, listed=0, live_reason_count=0, rows=[]))
+        self.assertEqual(digest.build([], NOW), dict(date='2026-10-18', stuck_count=0, listed=0, live_reason_count=0, rows=[], action_rows=[], waiting_rows=[]))
         self.assertEqual(digest.build([], NOW.astimezone(timezone(timedelta(hours=-8))))['date'], obj['date'])
         self.evidence = obj
 
@@ -163,7 +163,7 @@ class DigestTests(unittest.TestCase):
         before = self.snapshot()
         with contextlib.redirect_stdout(io.StringIO()) as out:
             self.assertEqual(self.run_digest(send=True, dry_run=True), 0)
-        self.assertEqual(json.loads(out.getvalue()), digest.build(fold.read_events(), NOW))
+        self.assertEqual(json.loads(out.getvalue())['digest'], digest.build(fold.read_events(), NOW))
         self.assertEqual(self.snapshot(), before)
         self.assertEqual(self.run_digest(), 0)
         self.assertEqual(self.sent, [])
@@ -191,11 +191,10 @@ class DigestTests(unittest.TestCase):
         self.assertEqual(digest.run(now=NOW + timedelta(days=1), send=True, sender=self.sender), 0)
         argv = self.sent[0]
         self.assertEqual(argv[0], str(sender))
-        self.assertTrue(argv[1].startswith('STUCK-DIGEST 2026-10-19:'))
-        self.assertLessEqual(len(argv[1]), 400)
-        self.assertNotIn('\n', argv[1])
+        self.assertIn('Nothing needs you today.', argv[1])
+        self.assertLess(len(argv[1]), 1000)
         for word in ('stuck_count=', 'live_reason_count=', str(self.root / 'content')):
-            self.assertIn(word, argv[1])
+            self.assertNotIn(word, argv[1])
         self.evidence = dict(alerts=self.produced('operator-alert'), sent_argv=argv, dry_run_writes=False)
 
     def test_ac6(self):
@@ -211,7 +210,7 @@ class DigestTests(unittest.TestCase):
         before = self.snapshot()
         result = subprocess.run([str(crons.HERE.parent / 'doit'), 'stuck-digest', '--dry-run'], env={**os.environ, 'DOIT_ROOT': str(self.root)}, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertGreaterEqual(json.loads(result.stdout)['stuck_count'], 2)
+        self.assertGreaterEqual(json.loads(result.stdout)['digest']['stuck_count'], 2)
         self.assertEqual(self.snapshot(), before)
         unknown = subprocess.run([sys.executable, __file__, '-k', 'unknown'], capture_output=True)
         self.assertEqual(unknown.returncode, 2)

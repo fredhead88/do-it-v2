@@ -88,7 +88,7 @@ def test_empty_commands():
     with patch.object(subprocess, "run") as process:
         result = prod_runner.observe({}, {"commands": [], "needs": [], "validity_h": 24})
     assert result["outcome"] == "unobservable"
-    assert result["capability"] == "operator-action" and result["why"] == "no commands"
+    assert result["capability"] == "repo" and result["why"].startswith("no commands")
     process.assert_not_called()
 
 
@@ -132,7 +132,7 @@ def test_allowlist():
     for command in commands:
         with patch.object(subprocess, "run") as stub:
             result = prod_runner.observe({}, record(command))
-        assert result["outcome"] == "unobservable" and result["capability"] == "operator-action"
+        assert result["outcome"] == "unobservable" and result["capability"] == "repo"
         stub.assert_not_called()
         print("refused:", command)
     for command in [f'ro-sql project "{sql}"' for sql in (
@@ -149,7 +149,7 @@ def test_allowlist():
     # Validate the entire row before starting even its first valid command.
     with patch.object(subprocess, "run") as stub:
         assert prod_runner.observe({}, record(commands=['ro-sql project "select 1"', "rm x"]))[
-            "capability"] == "operator-action"
+            "capability"] == "repo"
         stub.assert_not_called()
     print("AC2 ok")
 

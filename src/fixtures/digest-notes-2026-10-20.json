@@ -1,0 +1,187 @@
+[
+  {
+    "spec": "L-spec-0232",
+    "criterion": "AC1",
+    "note": "Evidence file r5-scope-survival.md still reads status: pending, result: pending, measured_at: pending. The live drive was never recorded; no review account or browser is available here to run it. Operator: perform the drive and fill the file."
+  },
+  {
+    "spec": "L-spec-0232",
+    "criterion": "AC7",
+    "note": "AC7 reuses AC5's same live promos_sales_tieout.py run against https://clients.albertscott.com, which needs authenticated HTTP calls to production. No route beyond ro-sql (SQL) and droplet-read (allowlisted SSH reads, curl restricted to 127.0.0.1) is granted to make them."
+  },
+  {
+    "spec": "L-spec-0238",
+    "criterion": "AC6",
+    "note": "The qur_life half (buildable now) already passes: pytest -k reproduces_real_profit_residual is green. The goya May 2026 half is still owed -- no goya fixture exists and the test isn't rewritten to cover it. Producing it needs a live production capture written into a new committed fixture file plus a"
+  },
+  {
+    "spec": "L-spec-0621",
+    "criterion": "AC11",
+    "note": "Needs the R7 step-3 operator cron install and a cron_runs read. Both read-model cron.d files are still renamed .disabled-20261004 (mtime 03:21Z), the sweep log's last write is 03:28Z (pre-merge), and no install event exists. Merge 05:22Z; no ro-dsn."
+  },
+  {
+    "spec": "L-spec-0621",
+    "criterion": "AC12",
+    "note": "Needs the installed live sweep/nightly crons plus cron_runs/pipeline_runs reads. The cron.d files remain .disabled-20261004, so there is no install_time or 30-minute window to read, and no ro-dsn is available for the SELECTs."
+  },
+  {
+    "spec": "L-spec-0624",
+    "criterion": "AC15",
+    "note": "Operator-gated. Read-only ro-sql shows pg_class.reloptions for amazon_financial_events is NULL (scale_factor=0.05 not applied), last_autovacuum 2026-10-05, dead 1149066 / live 23885650. afe_autovacuum_setting.sql not yet run; 7-day check cannot start."
+  },
+  {
+    "spec": "L-spec-0633",
+    "criterion": "AC13",
+    "note": "Needs authenticated curl of production routes (two fetches per window, flag on/off); no review credentials in this batch and flag toggle is a production change. resolves_when: operator supplies the READONLY key and runs the flag-off comparison."
+  },
+  {
+    "spec": "L-spec-0681",
+    "criterion": "AC10",
+    "note": "The check requires running scripts/golden_compare_profit_v2.py between two git revisions against the production DSN and filing results in the repo evidence file. Not doable with the read-only wrappers. Evidence file docs/do-it/evidence/2026-10-prod-instruments-baseline.md is absent."
+  },
+  {
+    "spec": "L-spec-0717",
+    "criterion": "AC8",
+    "note": "ro-sql: cron_runs has zero rows with job_name daily_trouble_report (other jobs on host Albert-Scott-Cloud logged up to 06:30 today). But no albert-scott-daily-trouble-report file exists in /etc/cron.d on this builder box, so the builder-box deploy/installer has not run; the one-day failure clock has"
+  },
+  {
+    "spec": "L-spec-0732",
+    "criterion": "AC7",
+    "note": "The declared observation runs backfill_raw_reports_to_backup.py --dry-run on the droplet. droplet-read allows only read commands (cat, ls, grep, curl and similar), so it cannot run a Python script, and the bucket needs credentials the wrapper blocks."
+  },
+  {
+    "spec": "L-spec-0741",
+    "criterion": "AC12",
+    "note": "droplet-read journal shows only portal/other month-window period-summary rows (misses 27-45 s, hits ~0.4 s); no compare flag, trailing-30 window, deploy marker or checkouts count is logged, and the probe script needs a staff key/DB access not granted here."
+  },
+  {
+    "spec": "L-spec-0756",
+    "criterion": "AC6",
+    "note": "R5 re-enable has not happened: /etc/cron.d holds only albert-scott-db-time-snapshot.disabled-20260930 and the newest snapshot is 2026-09-30T07:11Z. The cron file and a fresh snapshot cannot exist until an operator re-enables the job."
+  },
+  {
+    "spec": "L-spec-0759",
+    "criterion": "AC5",
+    "note": "Not yet deployed: droplet .version.json shows deployed_at 2026-10-07T09:08Z (sha e4173782), before fix commit f5b06cecee (2026-10-08T12:25Z). Latest :47 runs (10:47, 11:47, 12:47 UTC) all have rows_written NULL, which is the old line. Needs integrator deploy, then a later :47 run."
+  },
+  {
+    "spec": "L-spec-0767",
+    "criterion": "AC8",
+    "note": "Merged on master (997008060c, merge f23ae87e9c) but not deployed: droplet .version.json sha 5c452154 (2026-10-08T19:21Z) does not contain it. Also needs the staff key for period-summary. Resolves after merge+deploy and a staff-key run."
+  },
+  {
+    "spec": "L-spec-0772",
+    "criterion": "AC8",
+    "note": "Cron not installed yet: cron_runs has 0 ok rows for job deploy-lag-probe and ~/.claude/deploy-lag-state.json does not exist on this box."
+  },
+  {
+    "spec": "L-spec-0792",
+    "criterion": "AC4",
+    "note": "Requires sampling ps -eo args during a live deploy.sh run; ps is not allowlisted and no deploy is in progress."
+  },
+  {
+    "spec": "L-spec-0796",
+    "criterion": "AC8",
+    "note": "Requires an authorized scratch Supavisor transaction pool and extending/running the isolation test against it; none provided."
+  },
+  {
+    "spec": "L-spec-0806",
+    "criterion": "AC6",
+    "note": "Needs staff-key cold asin/list requests on the deployed API for guylian, goya and qur_life plus the integrator's pre-deploy 'before' captures. This batch has no staff key, only anonymous access, and no before figures exist to compare."
+  },
+  {
+    "spec": "L-spec-0810",
+    "criterion": "AC4",
+    "note": "Droplet runs sha 552208c4 (deployed 2026-10-11T02:58Z), which predates feature commit 737ce80f; no nginx conf mentions api-internal-access and the log file is absent. Deploy has not run; also needs sudo nginx -t, logrotate -d, and a probe request, none permitted. Resolves when the nginx-config hold"
+  },
+  {
+    "spec": "L-spec-0814",
+    "criterion": "AC8",
+    "note": "The checkout at /opt/albert-scott has no deploy-lag wiring in scripts/health/process_health/analyzers.py (grep finds none), and ~/.claude holds no oldest_unlanded_runtime_at state file. The change is not deployed there and spec 01's cron has not run, so the criterion's precondition does not hold."
+  },
+  {
+    "spec": "L-spec-0817",
+    "criterion": "AC6",
+    "note": "Spec 0817 change not deployed yet: droplet .version.json sha 552208c497 (deployed 2026-10-11T02:58Z) is the 00:17 merge of L-spec-0809, which predates feature commit b4f561293a (00:56) and merge 4f1d76273f. Resolves when a deploy ships it; Server-Timing also needs a staff key."
+  },
+  {
+    "spec": "L-spec-0881",
+    "criterion": "AC16",
+    "note": "Merge 2f854d1b02 (2026-10-12T23:09Z) is not an ancestor of the deployed sha 00fb64d (deployed 13:00:43Z), so the node-health change is not live. Also needs the staff key and curl on the droplet, which droplet-read does not allow. Needs a deploy first."
+  },
+  {
+    "spec": "L-spec-0882",
+    "criterion": "AC11",
+    "note": "No evidence the post-deploy Koblenz SP catalog run happened, and no run-start time to anchor the query; the CLI summary (fresh count) lives on the droplet and is not readable via the allowed wrappers. Needs operator to run it."
+  },
+  {
+    "spec": "L-spec-0988",
+    "criterion": "AC13",
+    "note": "Operator-run write round trip: the operator marks an L1 step done on koblenz production, which appends a permanent row. The read-only sweeper may not do this."
+  },
+  {
+    "spec": "L-spec-0989",
+    "criterion": "AC10",
+    "note": "Needs the operator's recorded pre/post-deploy count and max snapshot_date; doit_verifier_ro has no grant on ops_backup and no recorded outputs were supplied. Also, AC9 shows the table is still in public."
+  },
+  {
+    "spec": "L-spec-0990",
+    "criterion": "AC11",
+    "note": "Operator-run admin query. Tried ro-sql on ops_backup.catalog_brand_master_pre_retire_m2_990: permission denied for schema ops_backup. No manifest entry reachable either."
+  },
+  {
+    "spec": "L-spec-0996",
+    "criterion": "AC9",
+    "note": "Needs a written operator ruling in the Thinker inbox plus its citation in the migration docstring and declared_restrictions.py comment; neither is reachable or observable from this read-only seat."
+  },
+  {
+    "spec": "L-spec-0999",
+    "criterion": "AC9",
+    "note": "Criterion is an operator ruling on retiring the 13 guylian_usa_us rows of ingestion 11130, recorded in the Thinker inbox. It is a decision, not an observable system state."
+  },
+  {
+    "spec": "L-spec-1019",
+    "criterion": "AC5",
+    "note": "read-only command refused"
+  },
+  {
+    "spec": "L-spec-1042",
+    "criterion": "AC6",
+    "note": "The restore drill needs sudo unshare -m with a tmpfs over the live DOIT_ROOT, a fresh backup snapshot on the live box, and writing /tmp/drill-root. None is reachable through the three allowed wrappers, and I must not touch the live root."
+  },
+  {
+    "spec": "L-spec-1047",
+    "criterion": "AC6",
+    "note": "read-only command refused"
+  },
+  {
+    "spec": "L-spec-1111",
+    "criterion": "AC11",
+    "note": "read-only command refused"
+  },
+  {
+    "spec": "L-spec-1121",
+    "criterion": "AC8",
+    "note": "./doit ci-runner status --json returned state.CI_SELF_HOSTED null and health.online 0 because the runners API is unreadable: gh api .../actions/runners gives HTTP 403 (token lacks the needed scope). Operator: give the box's gh token Actions/admin read on the repo, then rerun."
+  },
+  {
+    "spec": "L-spec-1122",
+    "criterion": "AC9",
+    "note": "Needs forced workflow_dispatch runs of python-tests.yml (a GitHub write) and read-back of jobs; the sweeper's gh token is read-restricted (HTTP 403 on the workflow) and no wrapper grants dispatch. Workflow source does carry the runner input routing."
+  },
+  {
+    "spec": "L-spec-1134",
+    "criterion": "AC9",
+    "note": "read-only command refused"
+  },
+  {
+    "spec": "L-spec-1140",
+    "criterion": "AC7",
+    "note": "read-only command refused"
+  },
+  {
+    "spec": "L-spec-1158",
+    "criterion": "AC10",
+    "note": "read-only command refused"
+  }
+]

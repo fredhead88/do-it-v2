@@ -46,7 +46,7 @@ def _instant(value):
 
 
 def _capability(record):
-    return next((NEED_ROUTES[n] for n in record.get("needs", []) if n in NEED_ROUTES), "operator-action")
+    return next((NEED_ROUTES[n] for n in record.get("needs", []) if n in NEED_ROUTES), "repo")
 
 
 def _curl(args):
@@ -108,11 +108,11 @@ def observe(row, record, *, now=None):
 
     commands = record.get("commands", [])
     if not commands:
-        return unavailable("operator-action", "no commands")
+        return unavailable("repo", "no commands; Thinker must choose an observation route")
     try:
         argvs = [_argv(command) for command in commands]
     except (ValueError, TypeError):
-        return unavailable("operator-action", "read-only command refused")
+        return unavailable("repo", "read-only command refused; Thinker must review the observation route")
     evidence, failed = [], False
     for argv in argvs:
         try:
