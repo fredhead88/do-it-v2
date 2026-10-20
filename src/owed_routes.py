@@ -22,7 +22,9 @@ def classify_ask(note, capability=None):
     # A denied SELECT proves only that this reporting seat cannot read it.
     # The Thinker may already have an approved route; do not demand a new grant.
     if (re.search(r'(?:operator|you)\s*:\s*(?:please\s+)?(?:give|grant|provide)\b', text)
-            and not re.search(r'grant a batch|no (?:review account|browser).*here', text)
+            and not re.search(r'grant a batch|\bno (?:ro[ -]*dsn|review account)\b|'
+                              r'grant (?:a |one |the )?(?:read-only )?dsn|'
+                              r'provide the review account|no browser.*here', text)
             or 'authorized scratch supavisor' in text):
         return dict(owner='operator', kind='access', capability='ro-dsn-grant')
     if re.search(r'operator-gated|operator cron install|operator re-enables|operator-run write|'

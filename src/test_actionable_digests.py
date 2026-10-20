@@ -61,7 +61,9 @@ class ActionableTests(unittest.TestCase):
     def test_refusals_do_not_become_operator_asks(self):
         for note in ('read-only command refused', 'no commands', 'no granted wrapper runs pytest',
                      'The local script is permission denied; choose a repository command',
-                     'ro-sql returned permission denied for the batch read-only role'):
+                     'ro-sql returned permission denied for the batch read-only role',
+                     'No RO DSN is granted to this batch. Operator: grant one, or supply the query output.',
+                     'No review account is provided. Operator: provide the review account.'):
             for cap in ('operator-action', 'ro-dsn-grant', 'repo'):
                 self.assertEqual(owed_routes.classify_ask(note, cap)['owner'], 'thinker')
         self.assertEqual(owed_routes.classify_ask(
