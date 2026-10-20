@@ -57,6 +57,13 @@ class ActionableTests(unittest.TestCase):
                     for jargon in ('L-spec-', 'ro-dsn', 'droplet', 'capability', 'cron_runs', 'owed-'):
                         self.assertNotIn(jargon, prose)
                     self.assertEqual(ref, f"{row['spec']}/{row['criterion']}]")
+        # The old daily file truncated this real note before its approval gate.
+        note = 'Resolves when the nginx-config hold is approved and deploy.sh runs, then integrator runs AC4 commands.'
+        classified = owed_routes.classify_ask(note)
+        self.assertEqual(classified['owner'], 'operator')
+        line = actions.operator_line(dict(spec='L-spec-0810', criterion='AC4', ask=note, **classified))
+        self.assertIn('API server access configuration', line)
+        self.assertNotIn('nginx', line)
 
     def test_refusals_do_not_become_operator_asks(self):
         for note in ('read-only command refused', 'no commands', 'no granted wrapper runs pytest',

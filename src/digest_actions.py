@@ -78,11 +78,15 @@ def operator_line(row):
         elif 'flag' in text:
             ask = 'Approve temporarily switching the production feature off to compare results'
             advice = 'Recommend yes, in a quiet test window. No reply: flag unchanged.'
+        elif 'nginx' in text:
+            ask = 'Approve the API server access configuration so we can verify its new access rules'
+            advice = 'Recommend review before enabling. No reply: server unchanged.'
         elif 'restore' in text or 'tmpfs' in text or 'unshare' in text:
             ask = 'Approve an isolated live backup-restore drill so recovery can be checked'
             advice = 'Recommend yes, with supervision in a quiet window. No reply: drill waits.'
         elif 'write' in text or 'marks' in text:
-            ask = 'Approve the live completion test that saves a permanent record so we can verify it'
+            target = 'Koblenz' if 'koblenz' in text else 'live'
+            ask = f'Approve one {target} completion test that saves a permanent record so we can verify it'
             advice = 'Recommend one supervised test. No reply: no record is written.'
         else:
             ask = 'Approve the requested production check so verification can continue'
