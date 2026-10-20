@@ -22,6 +22,7 @@ import checks
 import fold
 import grader_view
 import grading_env
+import node_modules
 import scratch
 
 SOURCE = pathlib.Path(__file__).resolve().parent.parent
@@ -171,6 +172,10 @@ def _node(tree, row, env, deadline):
                               env=env, deadline=deadline, cwd=work)
                     if not (work / "node_modules").is_dir():
                         raise Undetermined("npm ci produced no node_modules")
+                    try:
+                        node_modules.validate(work / "node_modules")
+                    except node_modules.UnsafeNodeModules as exc:
+                        raise Undetermined(str(exc)) from None
                     ready = stage / "ready"
                     ready.mkdir()
                     shutil.move(str(work / "node_modules"), ready / "node_modules")
@@ -179,7 +184,10 @@ def _node(tree, row, env, deadline):
         if target.exists() or target.is_symlink():
             raise Undetermined("node_modules present in committed tree")
         # A private copy: caches and live checkouts cannot receive test writes.
-        shutil.copytree(cache / "node_modules", target)
+        try:
+            node_modules.copy_tree(cache / "node_modules", target)
+        except node_modules.UnsafeNodeModules as exc:
+            raise Undetermined(str(exc)) from None
     return "cache:" + ",".join(keys) if keys else "none"
 
 

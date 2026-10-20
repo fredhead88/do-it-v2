@@ -13,6 +13,7 @@ import tempfile
 
 import fold
 import grading_env
+import node_modules
 import scratch
 
 SOURCE = pathlib.Path(__file__).resolve().parent.parent
@@ -142,7 +143,10 @@ def _node(dashboard, runner, env):
             with tempfile.TemporaryDirectory(dir=root, prefix=key + '-') as tmp:
                 ready = pathlib.Path(tmp) / 'ready'
                 ready.mkdir()
-                shutil.copytree(dashboard / 'node_modules', ready / 'node_modules')
+                try:
+                    node_modules.copy_tree(dashboard / 'node_modules', ready / 'node_modules')
+                except node_modules.UnsafeNodeModules as exc:
+                    raise Unobservable(str(exc)) from None
                 if cache.exists():
                     shutil.rmtree(cache)
                 ready.rename(cache)
@@ -150,12 +154,16 @@ def _node(dashboard, runner, env):
         if target.is_symlink():
             raise Unobservable('unsafe node_modules symlink')
         if not target.exists():
-            shutil.copytree(cache / 'node_modules', target)
+            try:
+                node_modules.copy_tree(cache / 'node_modules', target)
+            except node_modules.UnsafeNodeModules as exc:
+                raise Unobservable(str(exc)) from None
         # Reject symlinks that escape either private dependency tree.
-        for base in (cache / 'node_modules', target):
-            for link in base.rglob('*'):
-                if link.is_symlink() and not link.resolve().is_relative_to(base.resolve()):
-                    raise Unobservable('node_modules symlink escapes private tree')
+        try:
+            for base in (cache / 'node_modules', target):
+                node_modules.validate(base)
+        except node_modules.UnsafeNodeModules as exc:
+            raise Unobservable(str(exc)) from None
 
 
 def _report_specs(report):

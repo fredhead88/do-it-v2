@@ -8,7 +8,12 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
+from unittest.mock import patch
+
+import build_runner
+import node_modules
 
 HERE = pathlib.Path(__file__).resolve().parent
 FIX = HERE / "fixtures" / "build_runner"
@@ -459,6 +464,111 @@ class BuildRunnerTests(unittest.TestCase):
                     self.assertTrue(pidfile.exists(), "cap must interrupt the hanging command")
                     self.assertFalse(pathlib.Path("/proc", pidfile.read_text()).exists())
                 print(case, result.returncode, events[-1]["reason"])
+
+
+class NodeModulesTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="node-modules-test-")
+        self.addCleanup(self.temp.cleanup)
+        self.top = pathlib.Path(self.temp.name)
+        self.source = self.top / "source" / "node_modules"
+        (self.source / ".bin").mkdir(parents=True)
+        (self.source / "probe" / "dist").mkdir(parents=True)
+        (self.source / "probe" / "cli.mjs").write_text(
+            "import { message } from './dist/cli.mjs'; console.log(message);\n")
+        (self.source / "probe" / "dist" / "cli.mjs").write_text(
+            "export const message = 'private bin works';\n")
+        (self.source / ".bin" / "probe").symlink_to("../probe/cli.mjs")
+        (self.source / "probe-alias").symlink_to("probe", target_is_directory=True)
+        self.target = self.top / "private" / "node_modules"
+
+    def test_relative_bin_import_and_private_copy(self):
+        node_modules.copy_tree(self.source, self.target)
+        binary = self.target / ".bin" / "probe"
+        self.assertTrue(binary.is_symlink())
+        self.assertTrue((self.target / "probe-alias").is_symlink())
+        self.assertEqual(binary.resolve(), self.target / "probe" / "cli.mjs")
+        # Node is optional in the hermetic suite; containment is always tested.
+        node = shutil.which("node")
+        if node:
+            broken = self.top / "dereferenced"
+            shutil.copytree(self.source, broken)
+            failure = subprocess.run([node, str(broken / ".bin" / "probe")],
+                                     capture_output=True, text=True, timeout=10)
+            self.assertNotEqual(failure.returncode, 0)
+            self.assertIn("ERR_MODULE_NOT_FOUND", failure.stderr)
+            result = subprocess.run([node, str(binary)], capture_output=True,
+                                    text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), "private bin works")
+        private = self.target / "probe" / "dist" / "cli.mjs"
+        original = self.source / "probe" / "dist" / "cli.mjs"
+        self.assertNotEqual(private.stat().st_ino, original.stat().st_ino)
+        private.write_text("private mutation")
+        self.assertIn("private bin works", original.read_text())
+
+    def test_escaping_absolute_and_cyclic_links_are_rejected(self):
+        outside = self.top / "source" / "outside"
+        outside.write_text("must not be copied")
+        for destination in ("../outside", "../outside-directory", str(outside),
+                            str(self.source / "probe"), "escape"):
+            with self.subTest(destination=destination):
+                link = self.source / "escape"
+                link.symlink_to(destination)
+                try:
+                    with self.assertRaises(node_modules.UnsafeNodeModules):
+                        node_modules.copy_tree(self.source, self.target)
+                    self.assertFalse(self.target.exists())
+                finally:
+                    link.unlink()
+
+    def test_root_symlinks_are_rejected_without_changing_target(self):
+        source_link = self.top / "source-link"
+        source_link.symlink_to(self.source, target_is_directory=True)
+        with self.assertRaises(node_modules.UnsafeNodeModules):
+            node_modules.copy_tree(source_link, self.target)
+        self.target.parent.mkdir()
+        self.target.symlink_to(self.source, target_is_directory=True)
+        with self.assertRaises(node_modules.UnsafeNodeModules):
+            node_modules.copy_tree(self.source, self.target)
+        self.assertTrue(self.target.is_symlink())
+        self.assertTrue((self.source / "probe" / "cli.mjs").exists())
+
+    def test_late_escape_removes_the_private_copy(self):
+        copytree = shutil.copytree
+        def changed_copy(source, target, *args, **kwargs):
+            copytree(source, target, *args, **kwargs)
+            if pathlib.Path(target) == self.target:
+                (pathlib.Path(target) / "escape").symlink_to(self.top / "outside")
+        with patch.object(node_modules.shutil, "copytree", side_effect=changed_copy):
+            with self.assertRaises(node_modules.UnsafeNodeModules):
+                node_modules.copy_tree(self.source, self.target)
+        self.assertFalse(self.target.exists())
+
+    def test_build_runner_cache_hit_preserves_bins_and_rejects_escape(self):
+        dashboard = self.top / "tree" / "dashboard"
+        dashboard.mkdir(parents=True)
+        lock = dashboard / "package-lock.json"
+        lock.write_text('{"lockfileVersion":3}')
+        key = hashlib.sha256(lock.read_bytes()).hexdigest()[:16]
+        cache_root = self.top / "cache"
+        cache_root.mkdir()
+        cached = cache_root / key / "node_modules"
+        shutil.copytree(self.source, cached, symlinks=True)
+        with patch.object(build_runner.scratch, "sub", return_value=cache_root), \
+                patch.object(build_runner, "_required", side_effect=AssertionError("npm called")):
+            result = build_runner._node(dashboard.parent, {"node_dirs": ["dashboard"]},
+                                        {}, time.monotonic() + 10)
+            self.assertEqual(result, "cache:" + key)
+            binary = dashboard / "node_modules" / ".bin" / "probe"
+            self.assertTrue(binary.is_symlink())
+            self.assertTrue(binary.resolve().is_relative_to(dashboard / "node_modules"))
+            shutil.rmtree(dashboard / "node_modules")
+            (cached / "escape").symlink_to(self.top / "outside")
+            with self.assertRaisesRegex(build_runner.Undetermined, "escapes private tree"):
+                build_runner._node(dashboard.parent, {"node_dirs": ["dashboard"]},
+                                   {}, time.monotonic() + 10)
+            self.assertFalse((dashboard / "node_modules").exists())
 
 
 if __name__ == "__main__":

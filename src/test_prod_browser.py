@@ -43,7 +43,11 @@ class Runner:
         if argv[:2] == ['git', 'clone']:
             shutil.copytree(self.repo, pathlib.Path(argv[-1]), dirs_exist_ok=True)
         if argv[0] == 'npm':
-            (pathlib.Path(kw['cwd']) / 'node_modules').mkdir()
+            modules = pathlib.Path(kw['cwd']) / 'node_modules'
+            (modules / '.bin').mkdir(parents=True)
+            (modules / 'probe').mkdir()
+            (modules / 'probe' / 'cli.mjs').write_text('// fixture\n')
+            (modules / '.bin' / 'probe').symlink_to('../probe/cli.mjs')
         output = json.dumps(self.report) if 'test' in argv else ''
         if 'cat-file' in argv:
             return subprocess.CompletedProcess(argv, int('missing.spec.ts' in argv[-1]), '', '')
@@ -126,6 +130,24 @@ def main():
             assert all('e2e/' + name + '.spec.ts' in plays[0][0] for name in ('one', 'two'))
             assert '--reporter=json' in plays[0][0]
             assert not (sub('node-cache') / hashlib.sha256(b'{}').hexdigest()[:16] / 'node_modules').is_symlink()
+            cached = sub('node-cache') / hashlib.sha256(b'{}').hexdigest()[:16] / 'node_modules'
+            assert (cached / '.bin' / 'probe').is_symlink()
+            reused = top / 'reuse'
+            reused.mkdir()
+            (reused / 'package-lock.json').write_text('{}')
+            browser._node(reused, fake, {})
+            assert (reused / 'node_modules' / '.bin' / 'probe').is_symlink()
+            assert (reused / 'node_modules' / '.bin' / 'probe').resolve().is_relative_to(reused)
+            # A cache link must be rejected before a private tree is created.
+            shutil.rmtree(reused / 'node_modules')
+            (cached / 'escape').symlink_to(top / 'outside')
+            try:
+                browser._node(reused, fake, {})
+                raise AssertionError('escaping cache link accepted')
+            except browser.Unobservable as exc:
+                assert 'escapes private tree' in str(exc)
+            assert not (reused / 'node_modules').exists()
+            (cached / 'escape').unlink()
             # Different deployed revisions stay in separate execution groups.
             with patch.object(browser, '_target', side_effect=[(repo, sha), (repo, '1' * 40)]):
                 grouped = Runner(repo)
