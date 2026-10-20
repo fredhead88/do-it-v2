@@ -25,6 +25,7 @@ class Ledger:
         self.key = None
         self.modules = {}
         self.events = self.folded = self.rows = self.offsets = None
+        self.codex_sessions = None
         self.generation = None
         self.clock_minute = None
         self.watch = None
@@ -46,6 +47,7 @@ class Ledger:
                 self.file_offsets = {}
                 self.key, self.modules = key, {}
                 self.events = self.folded = self.rows = self.offsets = None
+                self.codex_sessions = None
                 self.generation = self.clock_minute = None
                 if replacing:
                     # Modules contain function/global cycles. Collect a retired
@@ -93,6 +95,7 @@ class Ledger:
             # Drop this owner's old snapshot before allocating the next one.
             # Request threads may finish with the previous immutable snapshot.
             self.events = self.folded = self.rows = self.offsets = None
+            self.codex_sessions = None
             events = fold.read_events()
             self.reads += 1
             fold.NOW = now

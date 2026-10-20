@@ -250,6 +250,23 @@ def read_all():
         return [dict(r) for r in LEDGER.rows], raw, dict(LEDGER.offsets)
 
 
+def codex_payload(raw=None):
+    """Reuse the ledger-only projection; worker/process/quota readings stay live."""
+    if raw is None:
+        with ledger_snapshot() as (_, events, _folded):
+            raw = events
+    with LEDGER.lock:
+        if raw is LEDGER.events:
+            if LEDGER.codex_sessions is None:
+                LEDGER.codex_sessions = realm_codex.ledger_sessions(raw)
+            sessions = LEDGER.codex_sessions
+        else:
+            sessions = None
+    if sessions is None:
+        return realm_codex.payload(raw)
+    return realm_codex.payload(raw, ledger_projection=sessions)
+
+
 def role_stats(raw):
     roles = collections.defaultdict(lambda: {"done": 0, "failed": 0, "ms": [], "tok": [], "fails": collections.Counter()})
     for e in raw:
@@ -1232,7 +1249,7 @@ def bootstrap(hours, states=None, goals=None, proving=None, now=None):
         proving = derive_proving()
     _, spec_ch_now = charter_index(raw)
     metrics_now = metrics_at(rows, states, claims, now, sys_signals(), None, spec_ch_now)
-    return {**lane_payload(now), "codex": realm_codex.payload(raw), "live": True, "now": now.isoformat(timespec="seconds"), "root": str(ROOT), "metrics": metrics_now,
+    return {**lane_payload(now), "codex": codex_payload(raw), "live": True, "now": now.isoformat(timespec="seconds"), "root": str(ROOT), "metrics": metrics_now,
             "window": [window_rows[0]["t"] if window_rows else now.isoformat(timespec="seconds"), now.isoformat(timespec="seconds")],
             "ledger_start": rows[0]["t"] if rows else None, "n_events": len(raw), "events": window_rows,
             "stats": role_stats(raw), "states": states, "goals": goals, "proving": proving,
@@ -1309,7 +1326,7 @@ def since(seq, t=None):
             ledger = [d for d in ledger if d.get("t", "") > t]
     return {"seq": top, "ledger": ledger, "claims": claims, "started": started,
             "states": HUB.states, "goals": HUB.goals or [], "proving": HUB.proving, "seat": seat_summary(),
-            "codex": realm_codex.payload(read_all()[1]), "now": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")}
+            "codex": codex_payload(), "now": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")}
 
 
 def tail_lines(file, offset):

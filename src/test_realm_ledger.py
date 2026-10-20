@@ -48,7 +48,7 @@ def stall_lane_rows(events, specs, now, *, by_subject):
         self.ledger = realm_ledger.Ledger()
         patcher = patch.multiple(realm, LEDGER=self.ledger, ROOT=self.root, EVENTS=self.events)
         patcher.start(); self.addCleanup(patcher.stop)
-        env = patch.dict(os.environ, DOIT_ROOT=str(self.root), DOIT_LIVE_REPO=str(self.root))
+        env = patch.dict(os.environ, DOIT_ROOT=str(self.root), DOIT_LIVE_REPO=str(self.root), HOME=str(self.root/'home'))
         env.start(); self.addCleanup(env.stop)
 
     def test_shared_fold_deadline_refresh_and_replacement(self):
@@ -129,6 +129,25 @@ def stall_lane_rows(events, specs, now, *, by_subject):
         self.assertIn(moved.name,watch.poll())
         watch.close()
         self.assertIsNone(watch.poll())
+
+    def test_codex_projection_reused_without_copying_compact_rows(self):
+        with patch.object(realm.realm_codex,'ledger_sessions',wraps=realm.realm_codex.ledger_sessions) as project, \
+             patch.object(realm.realm_codex,'process_sessions',return_value=set()), \
+             patch.object(realm.realm_codex,'tmux_windows',return_value={}):
+            first=realm.codex_payload()
+            second=realm.codex_payload()
+            self.assertEqual(first,second)
+            self.assertEqual(project.call_count,1)
+            self.assertEqual(self.ledger.reads,1)
+            self.assertIsNone(self.ledger.rows)  # no read_all / full row copies
+            with self.file.open('a') as stream:
+                stream.write(json.dumps(dict(type='spawn-started',ts=NOW.isoformat(),subject='L-spec-1',
+                    actor='executor',_src=self.file.name+':2',spawn='L-builder-01',backend='codex'))+'\n')
+            third=realm.codex_payload()
+            self.assertEqual(project.call_count,2)
+            self.assertEqual(third['sessions'][0]['id'],'L-builder-01')
+            third['sessions'][0]['state']='caller mutation'
+            self.assertEqual(realm.codex_payload()['sessions'][0]['state'],'live')
 
 
 if __name__=='__main__': unittest.main()

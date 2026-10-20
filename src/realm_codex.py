@@ -162,7 +162,7 @@ def read_worker(path, home, now, processes, windows):
     return session, quota, quota_time
 
 
-def payload(rows, *, home=None, now=None, processes=None, windows=None):
+def payload(rows, *, home=None, now=None, processes=None, windows=None, ledger_projection=None):
     home = pathlib.Path(home) if home is not None else pathlib.Path.home()
     now = time.time() if now is None else now
     files = []
@@ -175,7 +175,8 @@ def payload(rows, *, home=None, now=None, processes=None, windows=None):
     files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
     processes = process_sessions(files) if processes is None else processes
     windows = tmux_windows() if windows is None else windows
-    sessions, quota, quota_at = ledger_sessions(rows), {}, ""
+    sessions = [dict(s) for s in ledger_projection] if ledger_projection is not None else ledger_sessions(rows)
+    quota, quota_at = {}, ""
     for path in files:
         try:
             session, limits, at = read_worker(path, home, now, processes, windows)
