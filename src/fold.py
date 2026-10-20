@@ -14,7 +14,7 @@ derives every state precisely so nothing is stamped. Authorization lives here,
 in the fold: an event from an actor not permitted to emit it is recorded and
 ignored (§9.2), which leaves an audit trail of the attempt.
 """
-import collections, json, os, pathlib, sys
+import collections, heapq, json, os, pathlib, sys
 from datetime import datetime, timedelta, timezone
 
 import freeze
@@ -147,18 +147,20 @@ def _merge_same_ts(items):
         return items
     queues = {}
     for e in items:
-        queues.setdefault(_src_file(e), []).append(e)
+        queues.setdefault(_src_file(e), collections.deque()).append(e)
+    # Compute a head's canonical JSON once, rather than once for every other
+    # file's pop. The ordinal preserves the legacy stable tie for identical
+    # content keys (the queues' original insertion order).
+    heap = [(event_content_key(q[0]), ordinal, q)
+            for ordinal, q in enumerate(queues.values())]
+    heapq.heapify(heap)
     out = []
-    while queues:
-        best_file, best_key = None, None
-        for fname, q in queues.items():
-            k = event_content_key(q[0])
-            if best_key is None or k < best_key:
-                best_key, best_file = k, fname
-        q = queues[best_file]
-        out.append(q.pop(0))
-        if not q:
-            del queues[best_file]
+    while heap:
+        _key, ordinal, q = heapq.heappop(heap)
+        out.append(q.popleft())
+        if q:
+            heapq.heappush(heap, (event_content_key(q[0]), ordinal, q))
+
     return out
 
 

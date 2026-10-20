@@ -131,9 +131,15 @@ def read(events_dir, cache_dir, actor_of):
         fcntl.flock(fh, fcntl.LOCK_EX)
         try:
             saved = _load(path)
-            if saved['version'] != VERSION:
+            if saved['version'] != VERSION or not isinstance(saved['files'], dict):
                 raise ValueError('cache schema')
             old = saved['files']
+            for entry in old.values():
+                if (not isinstance(entry, dict) or len(entry['meta']) != 5
+                        or not isinstance(entry['events'], list) or not isinstance(entry['tail'], list)
+                        or not isinstance(entry['offset'], int) or not isinstance(entry['line'], int)
+                        or not isinstance(entry['digest'], bytes)):
+                    raise ValueError('cache schema')
         except (OSError, EOFError, ValueError, KeyError, TypeError, pickle.UnpicklingError):
             old = {}
         files, changed = {}, False

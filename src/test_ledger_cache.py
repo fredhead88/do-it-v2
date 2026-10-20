@@ -95,6 +95,37 @@ class CacheTests(unittest.TestCase):
             self.assertEqual(parse.call_count, 2)  # complete suffix + empty tail
             self.assertNotIn(b'"one"', b''.join(c.args[0] for c in parse.call_args_list))
 
+    def test_heap_merge_matches_legacy_k_way_order(self):
+        import random
+        def legacy(items):
+            queues = {}
+            for event in items:
+                queues.setdefault(fold._src_file(event), []).append(event)
+            out = []
+            while queues:
+                name = min(queues, key=lambda k: fold.event_content_key(queues[k][0]))
+                out.append(queues[name].pop(0))
+                if not queues[name]: del queues[name]
+            return out
+        rng = random.Random(35)
+        for _ in range(300):
+            items = [dict(ts='same', type=rng.choice(['a','b','c']), subject=rng.choice(['x','y']),
+                          nested={'v': rng.randrange(3)}, _src=f'{actor}.jsonl:{n}')
+                     for actor in range(rng.randrange(1, 12)) for n in range(rng.randrange(1, 15))]
+            self.assertEqual(fold._merge_same_ts(items), legacy(items))
+
+    def test_malformed_schema_and_executable_pickle_rebuild(self):
+        self.write('L-operator-01.jsonl', [dict(ts='1', type='test')])
+        self.same()
+        path = next((self.root/'cache').glob('*.pickle'))
+        ledger_cache._save(path, {'version': ledger_cache.VERSION, 'files': []})
+        self.same()
+        ledger_cache._save(path, {'version': ledger_cache.VERSION, 'files': {'bad': {}}})
+        self.same()
+        # A valid checksum is insufficient to authorize importing any class.
+        ledger_cache._save(path, os.system)
+        self.same()
+
     def test_blank_crlf_and_unicode_line_numbers(self):
         (self.events / 'L-operator-01.jsonl').write_bytes(
             b'\r\n\n' + json.dumps(dict(type='first', subject='x', ts='1')).encode() + b'\r\n'
