@@ -140,6 +140,13 @@ class ActionableTests(unittest.TestCase):
         events += [event('window-opened', 'win-fixture', actor='executor', specs=ids),
                    event('spec-written', 'L-spec-9002', hours=5, project='fixture'),
                    event('dependency-hold', 'L-spec-9002', waits_for=ids[0], why='wait for that merge')]
+        # Real 06:15 case: these four had queue-ahead rulings, not a gate event.
+        legacy = {'L-spec-1250', 'L-spec-1252', 'L-spec-1253', 'L-spec-1255'}
+        events = [e for e in events if not (e['type'] == 'merge-gate-clean' and e['subject'] in legacy)]
+        for sid in sorted(legacy):
+            events.append(event('decision', 'lane-stale:' + sid, actor='thinker',
+                                why=f'Not stuck: {sid} is reviewed and already enqueued in window c31; '
+                                    'it waits only for the queue ahead.'))
         rows = [dict(spec=sid, rule='idle', action='none', actor='thinker', overdue=True,
                      reason_live=False, reason='condition met', since=events[0]['ts'], limit_min=60)
                 for sid in ids + ['L-spec-9002']]
@@ -154,6 +161,10 @@ class ActionableTests(unittest.TestCase):
             # A later failed gate invalidates the queued classification.
             failed = event('merge-gate-failed', ids[0], hours=0.1, actor='executor', why='failed')
             self.assertIn(ids[0], {r['spec'] for r in stuck_digest.build(events + [failed], NOW)['action_rows']})
+            failed_legacy = event('merge-gate-failed', 'L-spec-1250', hours=0.1, actor='executor', why='failed')
+            self.assertIn('L-spec-1250', {r['spec'] for r in stuck_digest.build(events + [failed_legacy], NOW)['action_rows']})
+            blocking_review = event('review', ids[0], hours=0.1, actor='reviewer', depth='full', n_blocking=1)
+            self.assertIn(ids[0], {r['spec'] for r in stuck_digest.build(events + [blocking_review], NOW)['action_rows']})
             question = event('question', ids[1], hours=0.1, asks='Please approve the production change.',
                              deadline=(NOW+timedelta(hours=1)).isoformat(), _src='L-operator-fixture.jsonl:1')
             needs = stuck_digest.build(events + [question], NOW)

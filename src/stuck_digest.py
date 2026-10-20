@@ -4,6 +4,7 @@ import argparse
 import fcntl
 import json
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -39,8 +40,19 @@ def build(events, now):
         held = autodispatch.held_by_dependency(evs, events)
         gate = fold_stalls.latest(evs, {'merge-gate-clean'})
         resets = [e for e in evs if e['type'] in fold_stalls.RESETS - {'merge-gate-clean'}
+                  or e['type'] == 'review' and e.get('n_blocking') != 0
                   or e['type'] == 'decision' and (e.get('rework') == 'yes' or e.get('regrade') == 'yes')]
         queued = gate and (not resets or gate['ts'] > resets[-1]['ts']) and not fold.standing_rejects(evs)
+        # Some queued windows were recorded as scoped Thinker rulings before
+        # the gate emitted its own event. An explicit queue-ahead ruling is
+        # evidence; an old clean review alone is not proof of a queued window.
+        ruling = next((e for e in reversed(folded[3].get('lane-stale:' + row['spec'], []))
+                       if e['type'] == 'decision' and e.get('actor') in ('thinker', 'operator')), None)
+        if (ruling and re.search(r'^not stuck:.*enqueued in window', str(ruling.get('why', '')), re.I)
+                and 'queue ahead' in str(ruling.get('why', '')).lower()
+                and (not resets or ruling['ts'] > resets[-1]['ts'])
+                and not fold.standing_rejects(evs)):
+            queued = True
         question = next((e for e in reversed(evs)
                          if e['type'] in ('question', 'escalation-blocking')
                          and not digest_actions.answered(
