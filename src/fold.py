@@ -169,7 +169,24 @@ def actor_of(filename: str) -> str:
     return "-".join(parts[1:-1]) if len(parts) >= 3 else stem
 
 
-def read_events():
+def _read_events_uncached():
+    """Reference parser and safe fallback; kept independent of the cache."""
+    out = []
+    for f in sorted(EVENTS.glob("*.jsonl")):
+        actor = actor_of(f.name)
+        for n, line in enumerate(f.read_text().splitlines(), 1):
+            if not line.strip():
+                continue
+            try:
+                e = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            e["actor"], e["_src"] = actor, f"{f.name}:{n}"
+            out.append(e)
+    return out
+
+
+def read_events(use_cache=True):
     """Every event in every file, oldest first. A torn tail never wedges the fold.
 
     Tie-break on identical `ts` (R5/L-charter-0040): two events from the SAME
@@ -183,18 +200,16 @@ def read_events():
     win a false "in flight" row (fold.in_flight_deploys); it cannot now, because
     that pair — WERE it in one file — keeps its true append order, and across
     files the order is content-derived, never filename-derived."""
-    out = []
-    for f in sorted(EVENTS.glob("*.jsonl")):
-        actor = actor_of(f.name)
-        for n, line in enumerate(f.read_text().splitlines(), 1):
-            if not line.strip():
-                continue
-            try:
-                e = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            e["actor"], e["_src"] = actor, f"{f.name}:{n}"
-            out.append(e)
+    if use_cache and os.environ.get("DOIT_READ_CACHE", "1") != "0":
+        try:
+            import ledger_cache
+            out = ledger_cache.read(EVENTS, ROOT / "cache", actor_of)
+        except (OSError, ValueError, EOFError, KeyError, TypeError):
+            # A read-only root, a corrupt cache or a racing writer is harmless.
+            # The ledger remains the only authority.
+            out = _read_events_uncached()
+    else:
+        out = _read_events_uncached()
     # Stable sort by ts alone first — ties keep the original (file-glob, then
     # line) order, which is exactly the per-file substructure `_merge_same_ts`
     # needs to preserve. Then merge each same-ts run across files by content.

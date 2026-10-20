@@ -347,7 +347,8 @@ true && echo VERIFIED
 
     def hashes(self):
         return {str(p.relative_to(self.root)): hashlib.sha256(p.read_bytes()).hexdigest()
-                for p in self.root.rglob('*') if p.is_file() and not p.is_symlink() and 'repos' not in p.parts}
+                for p in self.root.rglob('*') if p.is_file() and not p.is_symlink() and 'repos' not in p.parts
+                and 'cache' not in p.relative_to(self.root).parts}
 
     def test_cli_read_only(self):
         self.ledger()
