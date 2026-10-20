@@ -19,8 +19,8 @@ import stuck_digest
 NOW = datetime(2026, 10, 20, 6, 5, tzinfo=timezone.utc)
 
 
-def event(kind, subject='L-spec-9001', hours=1, actor='operator', **kv):
-    return dict(type=kind, subject=subject, actor=actor,
+def event(event_type, subject='L-spec-9001', hours=1, actor='operator', **kv):
+    return dict(type=event_type, subject=subject, actor=actor,
                 ts=(NOW - timedelta(hours=hours)).isoformat(), **kv)
 
 
@@ -105,6 +105,21 @@ class ActionableTests(unittest.TestCase):
         future = event('owed-met', hours=-1, criterion='verify', evidence='future proof')
         self.assertEqual(owed_digest.build(events + [future], NOW), owed_digest.build(events, NOW))
         self.assertEqual(owed_digest.build(events + [future], NOW + timedelta(hours=2))['needs_you'], [])
+
+    def test_rulings_linked_to_earlier_expiry_and_historical_operator_consent(self):
+        events = open_ask()
+        expiry = event('escalation-blocking', hours=3, criteria='["verify"]',
+                       kind='owed-expired', deadline=(NOW+timedelta(days=1)).isoformat(),
+                       default='wait', _src='L-operator-fixture.jsonl:10')
+        ruling = event('decision', hours=2.5, actor='thinker', ref=expiry['_src'], why='Keep it paused.')
+        self.assertEqual(owed_digest.build(events + [expiry, ruling], NOW)['needs_you'], [])
+        unrelated = dict(expiry, criteria='["AC2"]')
+        self.assertEqual(len(owed_digest.build(events + [unrelated, ruling], NOW)['needs_you']), 1)
+        approved = event('decision', hours=3, why="Operator Telegram: all yes, retire the duplicate rows.")
+        self.assertEqual(owed_digest.build(events + [approved], NOW)['needs_you'], [])
+        # An ordinary earlier build decision does not answer a later approval ask.
+        ordinary = event('decision', hours=3, why='Restart the builder.')
+        self.assertEqual(len(owed_digest.build(events + [ordinary], NOW)['needs_you']), 1)
 
     def test_trend_uses_yesterdays_latest_event_not_todays(self):
         counts = {'met': 972, 'failed': 35, 'blocked': 305}

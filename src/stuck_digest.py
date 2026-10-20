@@ -28,8 +28,12 @@ def build(events, now):
     rows = sorted((r for r in lane_rules.due(events, folded[0], now) if r['overdue']),
                   key=lambda r: (r['spec'], r['rule']))
     actions, waiting = [], []
-    answers = [e for e in events if e.get('type') in ('decision', 'thinker-answer', 'operator-approval',
+    admitted = [e for evs in folded[3].values() for e in evs]
+    admitted.extend(e for e in events if e.get('type') in ('thinker-answer', 'operator-approval')
+                    and e.get('actor') in ('thinker', 'operator'))
+    answers = [e for e in admitted if e.get('type') in ('decision', 'thinker-answer', 'operator-approval',
                                                      'owed-met', 'owed-failed', 'owed-waived', 'owed-corrective')]
+    sources = {e['_src']: e for e in admitted if e.get('_src')}
     for row in rows:
         evs = folded[3].get(row['spec'], [])
         held = autodispatch.held_by_dependency(evs, events)
@@ -41,7 +45,7 @@ def build(events, now):
                          if e['type'] in ('question', 'escalation-blocking')
                          and not digest_actions.answered(
                              dict(spec=row['spec'], criterion=e.get('criterion') or 'next step', since=e['ts']),
-                             e, answers, now)), {})
+                             e, answers, now, sources)), {})
         note = question.get('asks') or question.get('why') or ''
         classification = owed_routes.classify_ask(note)
         action = dict(row, owner=classification['owner'], ask=note,

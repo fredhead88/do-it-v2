@@ -72,6 +72,9 @@ def build(all_ev, now):
     admitted = [e for evs in folded[3].values() for e in evs]
     admitted.extend(e for e in all_ev if e.get('type') in ('thinker-answer', 'operator-approval')
                     and e.get('actor') in ('thinker', 'operator'))
+    sources = {e['_src']: e for e in admitted if e.get('_src')}
+    answers = [e for e in admitted if e.get('type') in ('decision', 'thinker-answer', 'operator-approval',
+                                                       'owed-met', 'owed-failed', 'owed-waived', 'owed-corrective')]
     for spec in specs.values():
         evs = spec["evs"]
         for row in owed.checks(evs, now):
@@ -100,7 +103,7 @@ def build(all_ev, now):
                                  kind=classification['kind'], route=classification['capability'],
                                  declared_src=row['declared_src'])
                 decided = any(digest_actions.answered(
-                    dict(candidate, since=e['ts']), e, admitted, now) for e in requests)
+                    dict(candidate, since=e['ts']), e, answers, now, sources) for e in requests)
                 candidate['decided'] = decided
                 if decided:
                     answered_asks.append(candidate)

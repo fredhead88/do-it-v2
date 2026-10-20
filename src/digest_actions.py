@@ -1,5 +1,7 @@
 """Phone-sized digest presentation and answer matching; no I/O or sends."""
 from datetime import datetime, timedelta
+import json
+import re
 
 import owed_routes
 
@@ -12,7 +14,7 @@ def as_of(events, now):
     return [e for e in events if instant(e['ts']) <= now]
 
 
-def answered(row, request, events, now):
+def answered(row, request, events, now, sources=None):
     """A later answer closes the ask, including answers on another subject.
 
     Criterion-specific answers never close siblings. An explicit ref identifies
@@ -20,20 +22,45 @@ def answered(row, request, events, now):
     """
     since = instant(row['since'])
     refs = {r for r in (request.get('_src'), row.get('declared_src')) if r}
+    sources = sources if sources is not None else {e['_src']: e for e in events if e.get('_src')}
     for e in events:
         kind = e.get('type')
         if kind not in {'decision', 'thinker-answer', 'owed-corrective', 'owed-met',
                         'owed-waived', 'owed-failed', 'operator-approval'}:
             continue
-        if not since < instant(e['ts']) <= now:
+        if instant(e['ts']) > now:
             continue
         if kind in {'decision', 'thinker-answer', 'operator-approval'} and e.get('actor') not in ('thinker', 'operator'):
             continue
         if e.get('ref'):
-            if e['ref'] in refs:
+            if e['ref'] in refs and instant(e['ts']) > since:
+                return True
+            # A ruling may answer the expiry/question for this check rather
+            # than its most recent seat note. Keep that typed reference chain.
+            target = sources.get(e['ref'], {})
+            criteria = target.get('criteria') or []
+            if isinstance(criteria, str):
+                try:
+                    criteria = json.loads(criteria)
+                except ValueError:
+                    criteria = []
+            if target.get('criterion'):
+                criteria = [target['criterion']]
+            if target.get('type') == 'question' and not criteria:
+                criteria = re.findall(r'\bAC\d+\b', str(target.get('asks', '')))
+            if (target.get('subject') == row['spec'] and row['criterion'] in criteria
+                    and instant(target['ts']) < instant(e['ts'])
+                    and e.get('criterion') in (None, row['criterion'])):
                 return True
             continue
-        if e.get('subject') == row['spec'] and e.get('criterion') in (None, row['criterion']):
+        # Explicit operator consent does not expire when a seat repeats a note.
+        consent = (e.get('actor') == 'operator' and e.get('type') in ('decision', 'operator-approval')
+                   and (e.get('type') == 'operator-approval'
+                        or re.search(r'\ball yes\b|\bapproval granted\b|\bapproved\b',
+                                     str(e.get('why') or e.get('text') or ''), re.I))
+                   and not re.search(r'not approved|awaiting approval', str(e.get('why', '')), re.I))
+        if ((instant(e['ts']) > since or consent)
+                and e.get('subject') == row['spec'] and e.get('criterion') in (None, row['criterion'])):
             return True
     return False
 
