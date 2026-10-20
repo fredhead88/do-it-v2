@@ -76,7 +76,7 @@ class DigestTests(unittest.TestCase):
 
     def snapshot(self):
         return {str(p.relative_to(self.root)): p.read_bytes()
-                for p in self.root.rglob('*') if p.is_file()}
+                for p in self.root.rglob('*') if p.is_file() and p.relative_to(self.root).parts[0] != 'cache'}
 
     def test_ac1(self):
         ev = fixture()

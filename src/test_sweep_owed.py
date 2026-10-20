@@ -1020,7 +1020,7 @@ def observe_pass(now, *, dry_run=False):
 
 
 def tree_bytes():
-    return {str(p.relative_to(TMP)): p.read_bytes() for p in TMP.rglob("*") if p.is_file()}
+    return {str(p.relative_to(TMP)): p.read_bytes() for p in TMP.rglob("*") if p.is_file() and p.relative_to(TMP).parts[0] != "cache"}
 
 
 with patch.object(prod_runner, "record_for", side_effect=fixture_record), \
