@@ -1414,6 +1414,30 @@ def owed_due(specs):
     return out
 
 
+def stall_rows(events=(), specs=None, *, now=None, dwell=None, by_subject=None):
+    """One classified row per aged spec, shared by board and realm.
+
+    Supply the already-folded by_subject to avoid folding twice. This API only
+    reads ledger facts and prerequisite plans; it never ticks or dispatches.
+    """
+    from fold_stalls import rows
+    if by_subject is None:
+        folded = fold(events)
+        specs = folded[0] if specs is None else specs
+        by_subject = folded[3]
+    clock = now or NOW
+    specs = {sid: {**s, 'age': (clock - ts(s['evs'][-1]['ts'])).total_seconds() / 86400}
+             for sid, s in (specs or {}).items()}
+    return rows(specs, by_subject, clock, dwell or dwell_days(by_subject))
+
+
+def stall_lane_rows(events, specs=None, now=None, *, by_subject=None):
+    """Realm's lane-compatible view; reason_live is never guessed from age."""
+    return [dict(r, rule='stalls', action=r['reason'], actor=r['owner'],
+                 overdue=r['bucket'] == 'STUCK', reason_live=r['bucket'] != 'STUCK')
+            for r in stall_rows(events, specs, now=now, by_subject=by_subject)]
+
+
 def wedged(spec, dwell=None):
     return spec["age"] > (dwell or DWELL_DAYS).get(spec["state"], 1e9)
 

@@ -1029,7 +1029,7 @@ def lane_payload(now):
         folded = live_fold.fold(events)
         if not isinstance(folded, tuple) or len(folded) != 4 or not isinstance(folded[0], dict):
             raise ValueError("fold returned an invalid four-part spec map")
-        result["lane"] = rules.due(events, folded[0], now)
+        result["lane"] = live_fold.stall_lane_rows(events, folded[0], now, by_subject=folded[3])
     except Exception as ex:  # a broken live checkout must not break the rest of realm
         result["lane_error"] = f"{type(ex).__name__}: {ex}"
     finally:
