@@ -19,8 +19,10 @@ def classify_ask(note, capability=None):
     text = ' '.join(str(note or '').lower().split())
     if re.search(r'operator(?:\W+\w+){0,3}\W+ruling|written operator ruling|decision, not an observable', text):
         return dict(owner='operator', kind='decision', capability='operator-action')
-    if (re.search(r'\bno grants?\b|lacks (?:the )?needed scope|token lacks|access grant', text)
-            or 'permission denied' in text and re.search(r'ro.sql|role|schema|table|view|database|dsn', text)
+    # A denied SELECT proves only that this reporting seat cannot read it.
+    # The Thinker may already have an approved route; do not demand a new grant.
+    if (re.search(r'(?:operator|you)\s*:\s*(?:please\s+)?(?:give|grant|provide)\b', text)
+            and not re.search(r'grant a batch|no (?:review account|browser).*here', text)
             or 'authorized scratch supavisor' in text):
         return dict(owner='operator', kind='access', capability='ro-dsn-grant')
     if re.search(r'operator-gated|operator cron install|operator re-enables|operator-run write|'

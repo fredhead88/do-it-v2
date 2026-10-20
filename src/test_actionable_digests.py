@@ -37,7 +37,7 @@ class ActionableTests(unittest.TestCase):
         # Hand-reviewed acts: approvals, genuine grants and rulings. Everything
         # else is a Thinker task, irrespective of the old capability label.
         operator = {('0621', 'AC11'), ('0624', 'AC15'), ('0633', 'AC13'), ('0756', 'AC6'),
-                    ('0796', 'AC8'), ('0988', 'AC13'), ('0989', 'AC10'), ('0990', 'AC11'),
+                    ('0796', 'AC8'), ('0988', 'AC13'),
                     ('0996', 'AC9'), ('0999', 'AC9'), ('1042', 'AC6'), ('1121', 'AC8')}
         self.assertEqual(len(rows), 37)
         for row in rows:
@@ -60,9 +60,12 @@ class ActionableTests(unittest.TestCase):
 
     def test_refusals_do_not_become_operator_asks(self):
         for note in ('read-only command refused', 'no commands', 'no granted wrapper runs pytest',
-                     'The local script is permission denied; choose a repository command'):
+                     'The local script is permission denied; choose a repository command',
+                     'ro-sql returned permission denied for the batch read-only role'):
             for cap in ('operator-action', 'ro-dsn-grant', 'repo'):
                 self.assertEqual(owed_routes.classify_ask(note, cap)['owner'], 'thinker')
+        self.assertEqual(owed_routes.classify_ask(
+            'Operator: grant read access to the protected production table.')['owner'], 'operator')
         with patch.object(prod_runner.subprocess, 'run', side_effect=AssertionError('executed')):
             for record in ({'commands': [], 'needs': [], 'validity_h': 24},
                            {'commands': ['rm dangerous'], 'needs': ['repo'], 'validity_h': 24}):
