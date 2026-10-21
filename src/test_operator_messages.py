@@ -37,7 +37,7 @@ class WaitingMessages(unittest.TestCase):
         self.assertEqual(obj['action_rows'], [])
         self.assertEqual([r['waiting_for'] for r in obj['waiting_rows']], ['merge'])
         self.assertEqual(obj['rows'], [row()])
-        self.assertIn('1 finished spec is waiting their turn to merge.', digest.render_telegram(obj))
+        self.assertIn('1 finished spec is waiting its turn to merge.', digest.render_telegram(obj))
         self.assertIn(SID, digest.next_steps(obj))
         self.assertNotIn('Thinker:', digest.next_steps(obj))
 
@@ -45,12 +45,13 @@ class WaitingMessages(unittest.TestCase):
         obj = self.build(events)
         self.assertEqual([r['spec'] for r in obj['action_rows']], [SID])
         self.assertEqual(obj['waiting_rows'], [])
-        self.assertIn('1 spec is stuck and the Thinker is on them.', digest.render_telegram(obj))
+        self.assertIn('1 spec is stuck and the Thinker is on it.', digest.render_telegram(obj))
 
     def test_latest_clean_review_and_harmless_later_events(self):
         self.assert_merge(clean())  # confirmed is absent in real legacy reviews
         self.assert_merge(clean() + [event('spawn-done', 90, actor='reviewer'),
                                     event('decision', 60, why='Keep waiting for the queue.')])
+        self.assert_merge(clean() + [event('decision', -60, rework='yes')])
         self.assert_stuck(clean()[:-1])
         for blocking in (1, None, False, '0'):
             self.assert_stuck(clean()[:-1] + [event('review', 120, actor='reviewer',
@@ -126,6 +127,7 @@ class WaitingMessages(unittest.TestCase):
         self.assert_stuck(base + [held, event('shipped', 60, subject=target, actor='executor')])
         self.assert_stuck(base + [dict(held, waits_for=SID)])
         self.assert_stuck(base + [dict(held, waits_for='')])
+        self.assert_stuck(clean() + [dict(held, waits_for=SID, ts=event('x', 60)['ts'])])
 
     def test_mixed_classes_and_full_next_steps(self):
         waiting = [dict(row('L-spec-9002'), waiting_for='merge'),
@@ -134,10 +136,10 @@ class WaitingMessages(unittest.TestCase):
         obj = dict(rows=[row()], action_rows=[dict(row(), owner='thinker')], waiting_rows=waiting)
         self.assertEqual(digest.render_telegram(obj),
                          'Nothing needs you today.\n'
-                         '1 finished spec is waiting their turn to merge.\n'
+                         '1 finished spec is waiting its turn to merge.\n'
                          '1 spec is waiting for other work to merge first.\n'
                          '1 spec is waiting on work already in progress.\n'
-                         '1 spec is stuck and the Thinker is on them.')
+                         '1 spec is stuck and the Thinker is on it.')
         message = digest.render_telegram(obj)
         for jargon in ('with the Thinker', '{', '"', 'L-spec-', 'idle', 'regrade'):
             self.assertNotIn(jargon, message)
@@ -153,6 +155,21 @@ class WaitingMessages(unittest.TestCase):
                    waiting_rows=[dict(row(), waiting_for='merge')])
         self.assertNotIn('finished', digest.render_telegram(obj))
         self.assertIn('1 spec is stuck', digest.render_telegram(obj))
+
+    def test_plural_counts_and_markdown_keep_the_full_list(self):
+        waiting = [dict(row(f'L-spec-{i:04d}'), waiting_for='merge') for i in range(9000, 9064)]
+        actions = [dict(row(f'L-spec-{i:04d}'), owner='thinker') for i in range(9100, 9118)]
+        obj = dict(rows=waiting + actions, action_rows=actions, waiting_rows=waiting)
+        self.assertEqual(digest.render_telegram(obj),
+                         'Nothing needs you today.\n'
+                         '64 finished specs are waiting their turn to merge.\n'
+                         '18 specs are stuck and the Thinker is on them.')
+        real = self.build(clean())
+        with patch('health_alarms.summary_lines', return_value=[]):
+            markdown = digest.render_md(real, clean(), NOW)
+        self.assertIn('spec: ' + SID, markdown)  # original timer row
+        self.assertIn('Waiting their turn to merge. No reply needed from you. [' + SID + ']', markdown)
+        self.assertIn('Waiting to merge, on a dependency, or on work in progress: 1 rows.', markdown)
 
 
 if __name__ == '__main__':

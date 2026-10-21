@@ -76,7 +76,7 @@ def build(events, now):
         # Dependency holds retain their existing waiting behavior.
         if action['owner'] != 'operator' and held and 'unresolvable' not in held:
             waiting.append(dict(row, waiting_for='dependency'))
-        elif not question and queued:
+        elif not held and not question and queued:
             waiting.append(dict(row, waiting_for='merge'))
         elif action['owner'] != 'operator' and row.get('reason_live'):
             waiting.append(dict(row, waiting_for='active'))
@@ -99,17 +99,19 @@ def render_telegram(obj):
     lines = [header]
     seen = {r['spec'] for r in rows}
     for kind, description in (
-            ('merge', 'finished {noun} {verb} waiting their turn to merge'),
+            ('merge', 'finished {noun} {verb} waiting {possessive} turn to merge'),
             ('dependency', '{noun} {verb} waiting for other work to merge first'),
             ('active', '{noun} {verb} waiting on work already in progress')):
         specs = {r['spec'] for r in obj.get('waiting_rows', []) if r.get('waiting_for') == kind} - seen
         seen.update(specs)
         if specs:
             lines.append(f"{len(specs)} " + description.format(
-                noun='spec' if len(specs) == 1 else 'specs', verb='is' if len(specs) == 1 else 'are') + '.')
+                noun='spec' if len(specs) == 1 else 'specs', verb='is' if len(specs) == 1 else 'are',
+                possessive='its' if len(specs) == 1 else 'their') + '.')
     count = len({r['spec'] for r in rows if r.get('owner') != 'operator'} - {r['spec'] for r in operator})
     if count:
-        lines.append(f'{count} {"spec is" if count == 1 else "specs are"} stuck and the Thinker is on them.')
+        lines.append(f'{count} {"spec is" if count == 1 else "specs are"} stuck '
+                     f'and the Thinker is on {"it" if count == 1 else "them"}.')
     elif len(lines) == 1 and not operator:
         lines[0] += ' No stalled work needs intervention.'
     return '\n'.join(lines)
@@ -160,7 +162,7 @@ def render_md(obj, events, now):
     counts = owed.split('## Counts by status and cause\n', 1)[1].split('## NEEDS YOU', 1)[0].strip()
     lines = [f"# Stuck digest — {obj['date']}", '', '## STUCK',
              f"stuck: {obj['stuck_count']} (live reason: {obj['live_reason_count']})",
-             'Raw overdue timers for audit; queued and held work is excluded from NEXT ACTIONS.']
+             'Raw overdue timers for audit; waiting and stalled work are listed separately below.']
     for row in obj['rows']:
         fields = '; '.join(f'{key}: {_line(row[key])}' for key in
                            ('spec', 'rule', 'action', 'since', 'limit_min', 'reason'))
@@ -169,7 +171,7 @@ def render_md(obj, events, now):
         lines.append('none')
     lines.extend(['', '## NEXT ACTIONS', ''])
     lines.append(next_steps(obj))
-    lines.append(f"Waiting their turn or on a recorded dependency: {len(obj.get('waiting_rows', []))} rows.")
+    lines.append(f"Waiting to merge, on a dependency, or on work in progress: {len(obj.get('waiting_rows', []))} rows.")
     lines.extend(['', '## OWED', counts, '', '## HEALTH ALARMS'])
     try:
         import health_alarms
