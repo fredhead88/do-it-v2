@@ -88,7 +88,9 @@ def test_operator_owner_is_needs_you_and_only_those_may_be_critical():
     (a,), _ = om.recurring(rows, [], NOW)
     assert not a["needs_you"] and a["owner"] == "thinker" and a["sev"] == 1    # a look brief naming the operator is NOT a request
     out = om.compute(rows, [], NOW)
-    assert out["needs_you"] == 0 and out["health"] == 1
+    assert out["needs_you"] == 0 and out["health"] == 2
+    missing, = [i for i in out["items"] if i["id"] == "owed-digest-missing"]
+    assert "no root" in missing["detail"]
     assert om._item("x", "k", 2, "t", "d", "operator", "n", NOW, NOW)["sev"] == 2
     rows = [_brief(h, "relay-thing", own="thinker") for h in [1] * 30]
     (b,), _ = om.recurring(rows, [], NOW)
@@ -125,18 +127,19 @@ def test_blocked_with_a_later_decision_amendment_rewrite_unblock_or_answer_is_re
     assert h[2] is False
 
 
-def test_needs_you_comes_only_from_operator_action_owed_rows_and_decision_requests():
-    rows = [_row("owed-unobservable", 9, "L-spec-0060", crit="AC1", cap="operator-action", why="needs the operator's login"),
-            _row("owed-unobservable", 9, "L-spec-0061", crit="AC1", cap="ro-sql", why="x"),
-            _row("owed-unobservable", 9, "L-spec-0062", crit="AC1", cap="operator-action", why="y"), _row("owed-met", 5, "L-spec-0062", crit="AC1")]
-    st = [["L-spec-0060", "shipped-owed-expired"], ["L-spec-0061", "shipped-owed-expired"], ["L-spec-0062", "shipped-owed-expired"]]
-    out = om.compute(rows, st, NOW)
-    (it,) = [i for i in out["items"] if i["needs_you"]]
-    assert it["kind"] == "owedop" and it["subjects"] == ["L-spec-0060"]          # not 0061 (other capability), not 0062 (met)
-    rows.append(_row("message-sent", 3, "shlomo", to="operator", why="please rule on X"))
-    assert sum(i["needs_you"] for i in om.compute(rows, st, NOW)["items"]) == 2
-    rows.append(_row("brief-answered", 1, "shlomo"))
-    assert sum(i["needs_you"] for i in om.compute(rows, st, NOW)["items"]) == 1
+def test_needs_you_comes_from_digest_and_decision_requests():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        _write_digest(root, needs_you=[dict(spec="L-spec-0060", criterion="AC1", ask="please act", since=_ago(9))])
+        rows = []
+        st = [["L-spec-0060", "shipped-owed-expired"]]
+        out = om.compute(rows, st, NOW, root=root)
+        (it,) = [i for i in out["items"] if i["needs_you"]]
+        assert it["kind"] == "owedop" and it["subjects"] == ["L-spec-0060"]
+        rows.append(_row("message-sent", 3, "shlomo", to="operator", why="please rule on X"))
+        assert om.compute(rows, st, NOW, root=root)["needs_you"] == 2
+        rows.append(_row("brief-answered", 1, "shlomo"))
+        assert om.compute(rows, st, NOW, root=root)["needs_you"] == 1
 
 
 def test_churn_counts_only_unfinished_specs_and_grades_in_the_last_48h():
@@ -172,8 +175,9 @@ def test_gate_clean_is_not_merged_without_a_window_or_a_master_commit():
 def test_compute_drops_omens_whose_subjects_are_all_finished_and_counts_needs_you():
     rows = [_row("build-done", 9, "L-spec-0040", st="BLOCKED")] + [_brief(h, "disk-full", own="operator") for h in (3, 2, 1)]
     out = om.compute(rows, [["L-spec-0040", "killed"]], NOW)
-    assert [i["id"] for i in out["items"]] == ["rec:disk-full"] and out["needs_you"] == 0 and out["health"] == 1
+    assert [i["id"] for i in out["items"]] == ["owed-digest-missing", "rec:disk-full"] and out["needs_you"] == 0 and out["health"] == 2
     assert out["v"] == 2 and out["at"] == _ago(0)
+    assert "no root" in out["items"][0]["detail"]
 
 def test_codex_ledger_lifecycle_and_compact():
     import realm_codex
@@ -578,6 +582,209 @@ console.log('1149-AC6 sse-null ok');
 """
     js = js.replace("SENTINELS", json.dumps(THROUGHPUT_SENTINELS))
     proc = subprocess.run(["node", "-e", js], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    print(proc.stdout, end="")
+
+
+def _write_digest(root, **kw):
+    data = dict(at=NOW.isoformat(), needs_you=[], health=[])
+    data.update(kw)
+    path = root / "state" / "owed-digest.json"
+    path.parent.mkdir(exist_ok=True)
+    path.write_text(json.dumps(data))
+    return path
+
+
+def test_digest_needs_you_exact_ask():
+    asks = ['please "act"\n<b>' + 'long ask ' * 50, "second action", "third action"]
+    rows = [dict(spec=f"L-spec-{i}", criterion="AC1", ask=ask,
+                 since="2026-10-15T09:00:00.123Z", route="ro-dsn-grant", owner="thinker")
+            for i, ask in enumerate(asks)]
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        _write_digest(root, needs_you=rows, extra="ignored")
+        out = om.compute([], [[r["spec"], st] for r, st in zip(rows, ["killed", "void", "dropped"])], NOW, root=root)
+        assert len(out["items"]) == out["needs_you"] == 3 and out["health"] == 0
+        for row in rows:
+            it, = [i for i in out["items"] if i["subjects"] == [row["spec"]]]
+            assert it["detail"] == row["ask"] and it["since"] == row["since"]
+            assert it["needs_you"] is True and it["owner"] == "operator" and it["kind"] == "owedop"
+        assert len({i["id"] for i in out["items"]}) == 3
+    print("owed digest needs_you exact ask ok")
+
+
+def test_digest_health_rows():
+    kinds = ["quarantined", "quarantined", "failed", "expired", "sweep-failing", "future-kind"]
+    rows = [dict(kind=k, spec=f"L-spec-{i}", criterion=f"AC{i}", since=_ago(3),
+                 **({"text": f"text {i}"} if i < 4 else {"reason": "reason fallback"} if i == 4 else {}))
+            for i, k in enumerate(kinds)]
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        _write_digest(root, health=rows)
+        states = [[r["spec"], "killed" if i == 0 else "shipped-owed-expired"] for i, r in enumerate(rows)]
+        first = om.compute([], [], NOW, root=root)
+        second = om.compute([], states, NOW, root=root)
+        assert first == second
+        assert first["needs_you"] == 0 and first["health"] == 5 and len(first["items"]) == 5
+        for kind in set(kinds):
+            it, = [i for i in first["items"] if i["id"] == "owedhealth:" + kind]
+            grouped = [r for r in rows if r["kind"] == kind]
+            assert it["sev"] == 1 and it["owner"] == "thinker" and it["needs_you"] is False
+            assert str(len(grouped)) in it["title"]
+            for row in grouped:
+                for text in (row["spec"], row["criterion"], row.get("text", row.get("reason", kind))):
+                    assert text in it["detail"]
+        # Groups are not capped at the legacy five rows.
+        many = [dict(rows[0], spec=f"L-spec-many-{i}") for i in range(20)]
+        _write_digest(root, health=many)
+        it, = om.compute([], [], NOW, root=root)["items"]
+        assert "20" in it["title"] and all(r["spec"] in it["detail"] for r in many)
+        _write_digest(root, health=rows, at=_ago(3))
+        stale = om.compute([], states, NOW, root=root)
+        assert stale["health"] == 6
+        assert {i["id"] for i in stale["items"]} == {i["id"] for i in first["items"]} | {"owed-digest-stale"}
+    print("owed digest health rows ok")
+
+
+def test_digest_missing_and_stale():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        cases = ["missing", "unreadable", "empty", "json", "list", "needs_you", "health",
+                 "at missing", "at invalid", "at null", "future", "stale", "no root"]
+        for case in cases:
+            path = _write_digest(root)
+            if case == "missing":
+                path.unlink()
+            elif case == "unreadable":
+                path.chmod(0o000)
+                if os.geteuid() == 0:
+                    path.chmod(0o600)
+                    print("owed digest missing and stale unreadable SKIPPED: process is root")
+                    continue
+            elif case in ("empty", "json", "list"):
+                path.write_text({"empty": "", "json": "{bad", "list": "[]"}[case])
+            elif case in ("needs_you", "health"):
+                _write_digest(root, **{case: {}})
+            elif case.startswith("at "):
+                data = json.loads(path.read_text())
+                if case == "at missing":
+                    del data["at"]
+                else:
+                    data["at"] = None if case == "at null" else "unparseable"
+                path.write_text(json.dumps(data))
+            elif case == "future":
+                _write_digest(root, at=(NOW + _dt.timedelta(minutes=10)).isoformat())
+            elif case == "stale":
+                _write_digest(root, at=(NOW - _dt.timedelta(minutes=121)).isoformat())
+            try:
+                it, = om.compute([], [], NOW, root=None if case == "no root" else root)["items"]
+                assert it["id"] == ("owed-digest-stale" if case == "stale" else "owed-digest-missing"), case
+                assert it["kind"] == "owedhealth" and it["owner"] == "executor" and it["sev"] == 1
+                assert it["needs_you"] is False and "owed-digest.json" in it["detail"]
+                assert ("no root" if case == "no root" else str(path)) in it["detail"]
+                assert ": " in it["detail"] and it["detail"].split(": ", 1)[1]
+                if case == "stale":
+                    assert "stale" in it["title"].lower()
+            finally:
+                if path.exists():
+                    path.chmod(0o600)
+            print(f"owed digest missing and stale {case} ok")
+        for minutes in (119, 120, -5):
+            _write_digest(root, at=(NOW - _dt.timedelta(minutes=minutes)).isoformat())
+            assert om.compute([], [], NOW, root=root)["items"] == []
+        _write_digest(root, at=_ago(3), needs_you=[dict(spec="L-spec-1", ask="still visible", since=_ago(4))])
+        out = om.compute([], [["L-spec-1", "shipped"]], NOW, root=root)
+        assert out["needs_you"] == 1 and out["health"] == 1
+        assert any(i["detail"] == "still visible" for i in out["items"])
+
+
+def test_no_owed_derivation_in_realm():
+    import re
+    assert not hasattr(om, "operator_action_owed")
+    assert not any(t.startswith("owed-") for t in om.WANT)
+    event = dict(type="owed-unobservable", ts=_ago(1), subject="L-spec-1", capability="operator-action")
+    assert om.reduce_event(event) is None
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        (root / "events").mkdir()
+        (root / "events" / "ledger.jsonl").write_text(json.dumps(event) + "\n")
+        rows = om.scan(root / "events", {})
+        out = om.compute(rows, [["L-spec-1", "shipped"]], NOW, root=root)
+        assert [i["id"] for i in out["items"]] == ["owed-digest-missing"]
+    allow = {
+        "realm_omens.py": "followed windowed owed- owed-sweep owed-sweeper owedop owedhealth owed-digest owed-digest-missing owed-digest-stale owed_digest_items",
+        "realm.py": "owed owed-ac owed-met owed_checks owed_close_rate owed_overdue owed-sweeper owed-digest",
+        "realm.html": "followed windowed unwindowed shadowed h-owed owed owed-ac owed-met owed-check owed-checks owed_checks owed_close_rate owed_overdue owed-due owed-evidence owed-expired owed-waiting owed-sweeper owedop owedhealth shipped-owed-due",
+    }
+    for filename, allowed in allow.items():
+        source = realm.PAGE.with_name(filename).read_text()
+        tokens = set(re.findall(r"[a-z0-9_-]*owed[a-z0-9_-]*", source))
+        assert tokens <= set(allowed.split()), (filename, tokens - set(allowed.split()))
+        forbidden = {"operator_action_owed", "owed-unobservable", "owed-failed", "owed-waived"}
+        if filename == "realm_omens.py":
+            forbidden |= {"owed-ac", "owed-met"}
+        assert not tokens & forbidden
+    print("no owed derivation in realm ok")
+
+
+def test_omens_model_rereads_digest():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        (root / "events").mkdir()
+        rows = [dict(spec=f"L-spec-{i}", ask=f"act {i}", since=_ago(3)) for i in range(3)]
+        _write_digest(root, needs_you=rows)
+        with mock.patch.object(realm, "ROOT", root), mock.patch.dict(realm._OM, master=({}, realm.time.monotonic())):
+            first = realm.omens_model([], NOW)
+            generation, cached = realm._OM["generation"], realm._OM["rows"]
+            _write_digest(root, at=_ago(0.01), needs_you=rows[1:])
+            second = realm.omens_model([], NOW)
+            assert first["needs_you"] == 3 and second["needs_you"] == 2
+            assert {i["detail"] for i in second["items"]} == {"act 1", "act 2"}
+            assert realm._OM["generation"] == generation and realm._OM["rows"] is cached
+    assert 'HUB.send("omens", omens_model(HUB.states))' in inspect.getsource(realm.heartbeat_forever)
+    handler = inspect.getsource(realm.Handler.do_GET)
+    assert 'u.path == "/api/omens"' in handler and 'self._json(omens_model(HUB.states))' in handler
+    print("omens_model rereads the digest ok")
+
+
+def test_owed_omens_render_by_section():
+    page = realm.PAGE.read_text()
+    names = ("computeOmens", "stateMap", "omensTopHtml", "omenFoot")
+    constants = ("SERVER_KINDS", "NO_SELFCHECK", "FINISHED_RE", "DEFAULT_OWNER", "OMEN_HELP", "NEXT_ACTION", "S", "esc", "toMs")
+    declarations = []
+    for name in constants:
+        start = page.index("const " + name + (" =" if name in ("esc", "toMs", "S") else "="))
+        end = page.index("\n};", start) + 3 if name in ("OMEN_HELP", "NEXT_ACTION") else page.index("\n", start)
+        declarations.append(page[start:end])
+    script = "\n".join(declarations + [_page_function(page, n) for n in names])
+    script += r'''
+const assert=require('node:assert/strict');
+let DATA={states:[['L-spec-1','shipped'],['L-spec-2','shipped']]},LIVE=true,REMOTE=false,stream=null,lastHeard=0;
+const CAP={},execBusy=()=>false,lastOf=()=>null,knownBug=()=>null,specCharter=()=>null,charterRows=()=>[];
+const laneSplit=()=>({close:[]}),renderOmens=()=>{},fixFor=()=>null,ownerFor=()=>null,sinceFor=a=>a.srvSince;
+const loopState=()=>({badge:{cls:'open',text:'open'}}),omenWhen=()=>'',hhmm=()=>'';
+const isOperator=o=>o==='operator'||o==='you';
+const ask='please "act"\n<b>'+('long action '.repeat(40));
+const OM=()=>({items:[
+ {id:'owedop:1',kind:'owedop',sev:1,owner:'operator',title:'operator action',detail:ask,subjects:['L-spec-1'],since:'2026-10-15T10:00:00Z'},
+ {id:'owedhealth:failed',kind:'owedhealth',sev:1,owner:'thinker',title:'1 failed check',detail:'health detail',subjects:['L-spec-2'],since:'2026-10-15T10:00:00Z'}]});
+S.now=Date.parse('2026-10-15T12:00:00Z');computeOmens();
+assert.equal(S.alarms.length,2);
+assert.equal(S.alarms.find(a=>a.kind==='owedop').needs,true);
+assert.equal(S.alarms.find(a=>a.kind==='owedhealth').needs,false);
+const html=omensTopHtml(),need=html.split('<h4>NEEDS YOU (1)</h4>')[1].split('<h4>SYSTEM HEALTH (1)</h4>')[0];
+const health=html.split('<h4>SYSTEM HEALTH (1)</h4>')[1];
+assert(need.includes(esc(ask)));assert(!need.includes('<b>'+('long action')));assert(!need.includes(ask));
+assert(health.includes('health detail'));assert(!need.includes('health detail'));assert(!health.includes(esc(ask)));
+for(const kind of ['owedop','owedhealth']){
+ assert(SERVER_KINDS.has(kind));assert(NO_SELFCHECK.has(kind));assert(DEFAULT_OWNER[kind]);assert(OMEN_HELP[kind]);
+ assert(!JSON.stringify(OMEN_HELP[kind]).includes('expired production checks'));
+}
+assert(NEXT_ACTION.owedop);assert(!NEXT_ACTION.owedop.toString().includes('expired production checks'));
+assert(!DEFAULT_OWNER.owedop.includes('expired production checks'));
+console.log('owed omens render by section ok');
+'''
+    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=30)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     print(proc.stdout, end="")
 

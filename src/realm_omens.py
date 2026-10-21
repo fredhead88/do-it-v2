@@ -22,6 +22,8 @@ import subprocess
 
 RECENT_H = 24            # a recurring problem is current only if it occurred this recently
 CHURN_H = 48
+DIGEST_MAX_AGE = dt.timedelta(hours=2)
+DIGEST_FUTURE_SKEW = dt.timedelta(minutes=5)
 SPELL_GAP_H = 24         # occurrences closer than this belong to one active spell
 MIN_RECURRENCE = 3       # lifetime occurrences before a problem counts as "recurring"
 
@@ -75,7 +77,7 @@ def norm_owner(o, default="thinker"):
 WANT = {"lesson", "brief", "build-started", "build-done", "build-blocked", "verdict", "merge-gate-clean", "shipped",
         "spawn-started", "spawn-done", "spawn-failed", "spawn-stale", "window-verified", "window-merged",
         "shipped-in-window", "spec-killed", "project-merged", "decision", "spec-amended", "spec-written", "unblocked",
-        "brief-answered", "note-answered", "message-sent", "owed-unobservable", "owed-met", "owed-failed", "owed-waived", "owed-ac"}
+        "brief-answered", "note-answered", "message-sent"}
 _MARKERS = tuple(('"type": "%s"' % t).encode() for t in WANT) + tuple(('"type":"%s"' % t).encode() for t in WANT)
 
 
@@ -105,8 +107,6 @@ def reduce_event(e):
         r["kept"] = [x for x in (e.get("specs") or e.get("kept") or []) if isinstance(x, str)]
     elif ty == "message-sent":
         r.update(to=e.get("to"), why=_t(e.get("text") or e.get("why"), 200))
-    elif ty in ("owed-unobservable", "owed-met", "owed-failed", "owed-waived", "owed-ac"):
-        r.update(crit=e.get("criterion"), cap=e.get("capability"), why=_t(e.get("why") or e.get("line"), 200))
     elif ty == "build-blocked":
         r["why"] = _t(e.get("reason"), 200)
     return r
@@ -347,23 +347,50 @@ def blocked_items(hits, now):
     return out
 
 
-def operator_action_owed(by_rows, states, now):
-    """NEEDS YOU (b): open owed rows whose latest word is owed-unobservable with capability operator-action."""
-    st = dict(states or [])
-    latest = {}
-    for r in by_rows:
-        if r["ty"].startswith("owed-") and r.get("s"):
-            latest[(r["s"], r.get("crit"))] = r
-    hits = [r for (s, _), r in latest.items() if r["ty"] == "owed-unobservable" and r.get("cap") == "operator-action"
-            and not DEAD_RE.search(st.get(s, ""))]
-    if not hits:
-        return None
-    ts = [parse(r["t"]) for r in hits]
-    hits.sort(key=lambda r: r["t"])
-    return _item("owedop", "owedop", 1, f"{len(hits)} owed check{'s' if len(hits) > 1 else ''} only you can do",
-                 "; ".join(f"{r['s']} {r.get('crit') or ''}: {r.get('why') or ''}"[:140] for r in hits[:5]), "operator",
-                 "do or waive each (the sweeper marked them operator-action): " + ", ".join(sorted({r["s"] for r in hits})[:3]),
-                 min(ts), max(ts), subjects=sorted({r["s"] for r in hits}), anchor="town")
+def owed_digest_items(root, now):
+    """Read the digest on every call; its rows own classification and inclusion."""
+    path = pathlib.Path(root) / "state" / "owed-digest.json" if root is not None else None
+
+    def warning(reason, stale=False):
+        return _item("owed-digest-stale" if stale else "owed-digest-missing", "owedhealth", 1,
+                     "Digest rows are stale" if stale else "Digest unavailable",
+                     f"{path if path is not None else 'state/owed-digest.json'}: {reason}", "executor",
+                     "refresh the digest and check its scheduled reader", now, now, anchor="town")
+
+    if path is None:
+        return [warning("no root")]
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError) as exc:
+        return [warning(f"cannot read digest ({type(exc).__name__}): {exc}")]
+    if not isinstance(data, dict) or not all(isinstance(data.get(k), list) for k in ("needs_you", "health")):
+        return [warning("expected an object with list-valued needs_you and health")]
+    at = parse(data.get("at"))
+    if at is None:
+        return [warning("at is missing or unparseable")]
+    if at - now > DIGEST_FUTURE_SKEW:
+        return [warning("at is more than 5 minutes in the future")]
+    if not all(isinstance(row, dict) for key in ("needs_you", "health") for row in data[key]):
+        return [warning("digest rows must be objects")]
+    items = [warning("at is older than 2 hours; displayed rows are stale", stale=True)] if now - at > DIGEST_MAX_AGE else []
+    for index, row in enumerate(data["needs_you"]):
+        spec = row.get("spec")
+        item = _item(f"owedop:{index}", "owedop", 1,
+                     f"{spec} {row.get('criterion') or ''}: operator action", row.get("ask", ""), "operator",
+                     "carry out the digest's ask", parse(row.get("since")), at, subjects=[spec], anchor="town")
+        item["since"] = row.get("since")
+        items.append(item)
+    groups = {}
+    for row in data["health"]:
+        groups.setdefault(str(row.get("kind") or "unknown"), []).append(row)
+    for kind, rows in groups.items():
+        detail = "\n".join(f"{row.get('spec') or '-'} {row.get('criterion') or '-'}: "
+                           + str(row.get("text") or row.get("reason") or kind) for row in rows)
+        times = [t for row in rows if (t := parse(row.get("since"))) is not None]
+        items.append(_item(f"owedhealth:{kind}", "owedhealth", 1, f"{len(rows)} {kind} digest rows", detail,
+                           "thinker", "resolve the checks listed in the digest", min(times) if times else at, at,
+                           subjects=[row["spec"] for row in rows if row.get("spec")], anchor="town"))
+    return items
 
 
 def decision_requests(rows, now):
@@ -495,12 +522,13 @@ def compute(rows, states, now, root=None, master=None):
     by = _by_spec(rows)
     active, resolved = recurring(rows, states, now, root)
     b1, b2 = blocked_items(blocked_builders(by, states, now), now)
-    for it in (b1, b2, churn_item(by, states, now), vanished_item(rows, states, now), operator_action_owed(rows, states, now), decision_requests(rows, now)):
+    for it in (b1, b2, churn_item(by, states, now), vanished_item(rows, states, now), decision_requests(rows, now)):
         if it:
             active.append(it)
+    active.extend(owed_digest_items(root, now))
     # self-check: drop an omen whose subject specs are all finished
     st = dict(states or [])
-    active = [i for i in active if i["kind"] == "owedop" or not (i["subjects"] and all(_gone(st.get(s)) for s in i["subjects"]))]   # owed rows live on shipped specs
+    active = [i for i in active if i["kind"] in ("owedop", "owedhealth") or not (i["subjects"] and all(_gone(st.get(s)) for s in i["subjects"]))]   # digest rows live on shipped specs
     active.sort(key=lambda i: (not i["needs_you"], -i["sev"], i["last"] or ""))
     return {"v": 2, "at": iso(now), "items": active, "resolved": resolved, "merge": merge_info(rows, by, states, master or {}),
             "needs_you": sum(1 for i in active if i["needs_you"]), "health": sum(1 for i in active if not i["needs_you"])}

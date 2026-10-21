@@ -1093,7 +1093,7 @@ const FIRE_KIND={'spec-shape':'shape','grader-contamination':'deadlock','migrati
 const FIRE_ANCHOR={'portal-latency':'town','pane-idle-no-wake':'maphall','unclassified':'chronicle','pane-dead-or-quota':'tower','look-packet-unserved':'docks','prod-outage':'town','recipe-defective':'scriptorium','deploy-manual-or-drift':'harbor','look-merge-undeployed':'harbor','look-tmp-climbing':'forge'};
 const fireKind=cls=>FIRE_KIND[cls]!==undefined?FIRE_KIND[cls]:kindForProblem(cls);
 const DEFAULT_OWNER_RAVENS=()=>escOwners().you?'YOU':'thinker';
-const DEFAULT_OWNER={owedop:'operator',unwindowed:'executor',recurring:'thinker',knownbug:'nobody',reasserted:'nobody',fire:'thinker',deploy:'deployer',ci:'operator',quota:'operator',shelf:'executor',unclaimed:'relay',timeout:'the wrapper',deadlock:'executor',churn:'executor',ravens:'operator',blocked:'executor',gate:'executor',owed:'deployer',badcut:'planner',spike:'relay',vanished:'relay',lane:'executor',disk:'operator',notlive:'operator',inbound:'thinker',closable:'executor',exec:'launcher',shape:'planner',conflict:'planner'};
+const DEFAULT_OWNER={owedop:'operator',owedhealth:'thinker',unwindowed:'executor',recurring:'thinker',knownbug:'nobody',reasserted:'nobody',fire:'thinker',deploy:'deployer',ci:'operator',quota:'operator',shelf:'executor',unclaimed:'relay',timeout:'the wrapper',deadlock:'executor',churn:'executor',ravens:'operator',blocked:'executor',gate:'executor',owed:'deployer',badcut:'planner',spike:'relay',vanished:'relay',lane:'executor',disk:'operator',notlive:'operator',inbound:'thinker',closable:'executor',exec:'launcher',shape:'planner',conflict:'planner'};
 function fixFor(a){if(a.kind==='quota'||a.kind==='stale')return null;if(a.kind==='knownbug'){const kb=KNOWN_BUGS.find(k=>a.id.endsWith(k.name))||KNOWN_BUGS[0];const st=stateMap().get(kb.fix)||'';return{id:kb.fix+' R6',state:st,done:false};}let fix=null;const isId=v=>/^L-(charter|spec)-\d+$/.test(String(v||''));for(const b of [...S.look.values(),...S.handled]){const k=b.pb?kindForProblem(b.pb):(b.cond?kindFor(b):null);if(isId(b.fix)&&(k===a.kind||(b.s&&a.subjects.includes(b.s))))fix=b.fix;}const corrects=v=>String(v||'').split(',').map(x=>kindForProblem(x.trim())).filter(Boolean);if(!fix&&DATA){for(const [cid,meta] of Object.entries(DATA.charters||{}))if(meta.corrects&&corrects(meta.corrects).includes(a.kind))fix=cid;for(const [sid,t] of Object.entries(DATA.specs||{}))if(t.corrects&&corrects(t.corrects).includes(a.kind))fix=sid;}if(!fix){const sy=S.sys||(DATA&&DATA.sys);for(const f of (sy&&sy.fires)||[]){const k=fireKind(f.cls);if(k===a.kind&&f.fix&&isId(String(f.fix).split(':')[0]))fix=String(f.fix).split(':')[0];}}if(!fix)return null;const st=stateMap().get(fix)||'';return{id:fix,state:st,done:/accepted|shipped|complete/.test(st)};}
 function ownerFor(a){const now=S.now,H24=now-24*3600000;let best=null;const consider=(ms,who,what,why)=>{if(ms>=H24&&(!best||ms>best.ms))best={ms,who,what,why};};
   for(const hnd of S.handled){const k=hnd.pb?kindForProblem(hnd.pb):(hnd.kind==='decision'?kindForProblem(hnd.why):null);if(k===a.kind||(hnd.s&&a.subjects.includes(hnd.s)&&hnd.kind!=='decision'))consider(hnd.ms,'thinker',hnd.kind+(hnd.pb?' on '+hnd.pb:''),hnd.why);}
@@ -1288,12 +1288,13 @@ const NEXT_ACTION={
  fire:a=>['thinker','file the corrective unit for this class, or record in writing that its cost is accepted'],
  knownbug:a=>null, reasserted:a=>null,
  stale:a=>['you','reload this tab; it has lost the ledger'],
- owedop:a=>['you','run or waive the expired production checks (Proving lists each): start with '+(a.charters||[]).slice(0,2).join(', ')],
+ owedop:a=>['you',a.detail||"carry out the digest's ask"],
  unwindowed:a=>['executor','open a window that merges '+a.subjects.slice(0,3).join(', ')+'; gate-clean is not merged'],
 };
 const OMEN_HELP={
  recurring:{why:'A problem the ledger keeps recording. It shows here only while it is still happening: it leaves the list 24 h after its last occurrence.',fix:'Read the trend line, then either file the corrective unit or record that the cost is accepted.'},
- owedop:{why:'These checks need production evidence that only the operator can produce. Charters cannot close over them.',fix:'Run the check against prod and record it, or waive it with a reason. Proving lists each one.'},
+ owedop:{why:'The digest lists this operator action under NEEDS YOU. The card shows its full ask.',fix:'Carry out the ask shown on the card.'},
+ owedhealth:{why:'The digest reports checks needing system attention, or the digest is missing or stale.',fix:'Resolve every listed check; the executor restores a missing or stale digest.'},
  unwindowed:{why:'The merge gate passed, but no window or commit has put the branch on master. Nothing is merged until one has.',fix:'The Executor opens a window that carries these branches.'},
  exec:{why:'Nothing moves without the Executor: no dispatch, no grade, no merge, no close. D117 puts a five-minute ceiling on its silence.',fix:'The pane is dead or wedged. The launcher restarts it; check the panes from `doit up`.'},
  unclaimed:{why:'A seat packet is a sub-agent that has not been born. After 300 s the wrapper gives up and writes spawn-failed, and the subject has to be re-dispatched.',fix:'No pane is serving. Start `doit relay`.'},
@@ -1324,8 +1325,8 @@ const OMEN_HELP={
  conflict:{why:'Migration specs all touch branch_isolation.json; two in one wave conflict forever unless a merge order is declared.',fix:'Declare the merge order in the plan (planner rule PR #2) and widen the Writes grant.'},
 };
 const OM=()=>S.omens||(DATA&&DATA.omens)||null;
-const SERVER_KINDS=new Set(['churn','vanished','blocked','redispatch','fire','recurring','owedop','decide']);   /* computed from the ledger by realm_omens.py: current state only */
-const NO_SELFCHECK=new Set(['owed','owedop','deploy']);                       /* their subjects are shipped by definition */
+const SERVER_KINDS=new Set(['churn','vanished','blocked','redispatch','fire','recurring','owedop','owedhealth','decide']);   /* computed from the ledger by realm_omens.py: current state only */
+const NO_SELFCHECK=new Set(['owed','owedop','owedhealth','deploy']);                       /* their subjects are shipped by definition */
 const FINISHED_RE=/killed|void|dropped|retracted|^shipped|^accepted/;
 const isOperator=o=>{o=String(o||'').toLowerCase();return o==='you'||o==='operator';};
 const hhmm=ms=>new Date(ms).toISOString().slice(11,16);
