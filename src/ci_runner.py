@@ -44,14 +44,17 @@ def state():
 
 
 def _rows(path, key):
-    rc, out, _ = _gh("api", path, "--paginate", "--slurp")
+    rc, out, _ = _gh("api", path, "--paginate")
     if rc:
         raise ValueError(f"{key} API unreadable (exit {rc})")
     try:
-        pages = json.loads(out)
-        if isinstance(pages, dict):
-            pages = [pages]
-        if not isinstance(pages, list) or not pages:
+        source = out.lstrip()
+        decoder, pages = json.JSONDecoder(), []
+        while source:
+            page, end = decoder.raw_decode(source)
+            pages.append(page)
+            source = source[end:].lstrip()
+        if not pages:
             raise ValueError("missing pages")
         rows = []
         for page in pages:
@@ -77,12 +80,17 @@ def healthy(now=None):
     now = now if now is not None else datetime.now(timezone.utc)
     try:
         online = 0
+        runners = []
         for runner in _rows(f"repos/{_repo()}/actions/runners?per_page=100", "runners"):
             labels = runner["labels"]
-            if not isinstance(labels, list) or not isinstance(runner["status"], str):
-                raise ValueError("invalid runner labels or status")
-            if runner["status"] == "online" and any(label["name"] == "as-ci" for label in labels):
-                online += 1
+            if (not isinstance(labels, list) or not isinstance(runner["name"], str)
+                    or not isinstance(runner["status"], str) or not isinstance(runner["busy"], bool)
+                    or any(not isinstance(label, dict) or not isinstance(label.get("name"), str)
+                           for label in labels)):
+                raise ValueError("invalid runner name, labels, status or busy")
+            if any(label["name"] == "as-ci" for label in labels):
+                runners.append({key: runner[key] for key in ("name", "status", "busy")})
+                online += runner["status"] == "online"
         stuck = 0
         runs = _rows(f"repos/{_repo()}/actions/runs?status=queued&per_page=100", "workflow_runs")
         for run in runs:
@@ -104,10 +112,11 @@ def healthy(now=None):
         if stuck:
             reasons.append(f"{stuck} self-hosted job(s) queued over 15 minutes")
         return {"healthy": bool(online and not stuck), "online": online, "stuck_queued": stuck,
-                "reason": "; ".join(reasons) or "as-ci runner online; no stuck queued self-hosted jobs"}
+                "reason": "; ".join(reasons) or "as-ci runner online; no stuck queued self-hosted jobs",
+                "runners": runners}
     except (ValueError, KeyError, TypeError, AttributeError) as exc:
         return {"healthy": None, "online": 0, "stuck_queued": 0,
-                "reason": f"runner health undetermined: {exc}"}
+                "reason": f"runner health undetermined: {exc}", "runners": []}
 
 
 def shadow_passed(events, kind):
@@ -181,6 +190,8 @@ def main(argv=None):
             health = result["health"]
             label = "undetermined" if health["healthy"] is None else str(health["healthy"]).lower()
             print(f"healthy: {label}; online: {health['online']}; stuck_queued: {health['stuck_queued']}; {health['reason']}")
+            for runner in health["runners"]:
+                print(f"runner {runner['name']} {runner['status']} busy={runner['busy']}")
         return 0
     result = set(args.variable, args.value, why=args.why, trigger="manual")
     print(json.dumps(result), file=sys.stdout if result["ok"] else sys.stderr)
