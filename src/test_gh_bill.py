@@ -86,6 +86,37 @@ class Decisions(unittest.TestCase):
             receipt("AC4-limit", {"ci": ci, "age": age, "prior": prior, "limit": expected})
         self.assertEqual(gh_bill.limit_for({**cfg, "2026-10": 450}, "2026-10", "true", 10, None), 450)
 
+    def test_plain_english_for_every_action(self):
+        expected = {
+            'none': 'No action needed.', 'alert': 'Yesterday cost more than usual.',
+            'alert-50': 'Half the monthly limit is spent.',
+            'alert-75': 'Most of the monthly limit is spent.',
+            'alert-90': 'The monthly limit is nearly used up.',
+            'flip': 'Builds have switched to our own verified machine',
+            'flip-refused': 'NEEDS YOU:', 'undetermined': 'could not be checked reliably',
+        }
+        decision = dict(date='2026-10-21', mtd=356.578, yday=32.1,
+                        pct_of_limit=79.239, limit=450, projection=618.9,
+                        reason='raw error {"internal": "details"}')
+        for action, sentence in expected.items():
+            with self.subTest(action=action):
+                message = gh_bill.render_telegram(dict(decision, action=action))
+                self.assertIn(sentence, message)
+                self.assertIn('$357 spent so far in October (79% of the $450 limit)', message)
+                self.assertIn('Yesterday $32; at the recent pace October ends near $619.', message)
+                for raw in ('{', '"', 'internal', '356.578'):
+                    self.assertNotIn(raw, message)
+                if action != 'none':
+                    self.assertIn('Recommend', message)
+        missing = self.decide(None)
+        message = gh_bill.render_telegram(dict(missing, date='2026-11-01'))
+        self.assertIn('spending figures are unavailable', message)
+        self.assertIn('Recommend restoring', message)
+        self.assertNotIn('{', message)
+        # On the first of a month, the bill still describes the previous month.
+        boundary = gh_bill.render_telegram(dict(decision, action='none', date='2026-11-01'))
+        self.assertIn('so far in October', boundary)
+
 
 STUB = '''import json, os, sys
 from pathlib import Path
@@ -176,6 +207,11 @@ class Command(unittest.TestCase):
                 decision = self.run_bill(items)
                 self.assertEqual(decision["action"], name)
                 self.assertEqual(len(self.lines("messages")) - before_messages, name != "none")
+                if name != 'none':
+                    message = self.lines('messages')[-1][0]
+                    self.assertEqual(message, gh_bill.render_telegram(decision))
+                    self.assertNotIn('{', message)
+                    self.assertNotIn('"', message)
                 sets = [r for r in self.lines("runner-log") if r["kind"] == "set"]
                 self.assertEqual(len(sets) - before_sets, name == "flip")
                 if name == "flip":
@@ -266,7 +302,7 @@ class Command(unittest.TestCase):
         result = self.run_bill([{"date": (date.today() - timedelta(days=1)).replace(day=1).isoformat(), "netAmount": 427.5}])
         self.assertEqual(result["action"], "flip-refused")
         self.assertIn("stub refusal", result["reason"])
-        self.assertIn("NEEDS-YOU", self.lines("messages")[-1][0])
+        self.assertIn("NEEDS YOU", self.lines("messages")[-1][0])
         self.assertEqual(self.fresh_fold()["kept"][-1]["action"], "flip-refused")
         receipt("AC5-set-refusal", result)
 

@@ -79,6 +79,28 @@ def decide(usage_items, today, limits, runner_state, healthy, shadow):
     return result
 
 
+def render_telegram(decision):
+    """Explain the logged decision without exposing its raw data or errors."""
+    month = (date.fromisoformat(decision['date']) - timedelta(days=1)).strftime('%B')
+    advice = {
+        'none': 'Spending is within the current limits. No action needed.',
+        'alert': 'Yesterday cost more than usual. Recommend checking recent workflow runs for avoidable costs.',
+        'alert-50': 'Half the monthly limit is spent. Recommend keeping an eye on spending before adding more runs.',
+        'alert-75': 'Most of the monthly limit is spent. Recommend reducing optional runs to stay within it.',
+        'alert-90': 'The monthly limit is nearly used up. Recommend pausing optional runs and checking what still uses paid machines.',
+        'flip': 'Builds have switched to our own verified machine to reduce costs. Recommend watching the next runs before adding paid capacity.',
+        'flip-refused': 'NEEDS YOU: builds could not switch to our own machine. Recommend fixing and verifying that machine before raising the spending limit.',
+        'undetermined': 'The bill could not be checked reliably. Recommend restoring the billing and build-machine checks before changing the spending limit.',
+    }[decision['action']]
+    amounts = ('mtd', 'pct_of_limit', 'limit', 'yday', 'projection')
+    if any(decision.get(key) is None for key in amounts):
+        return 'GitHub Actions bill: spending figures are unavailable.\n' + advice
+    return (f"GitHub Actions bill: ${decision['mtd']:,.0f} spent so far in {month} "
+            f"({decision['pct_of_limit']:.0f}% of the ${decision['limit']:,.0f} limit). "
+            f"Yesterday ${decision['yday']:,.0f}; at the recent pace {month} ends near "
+            f"${decision['projection']:,.0f}.\n" + advice)
+
+
 def load_limits(path=CONFIG):
     try:
         cfg = tomllib.loads(Path(path).read_text())
@@ -225,11 +247,11 @@ def main(argv=None):
         previous_month = (yesterday.replace(day=1) - timedelta(days=1)).strftime("%Y-%m")
         previous_limit = months.get(previous_month, {}).get("limit")
         if not state_error and limit is not None and month not in months and previous_limit != limit:
-            _send(f"GitHub monthly limit for {month}: set ${limit:g} in GitHub's billing UI.")
+            _send(f"GitHub Actions spending limit for {yesterday:%B}: "
+                  f"recommend setting it to ${limit:,.0f} in GitHub billing settings.")
         action = decision["action"]
         if action != "none":
-            prefix = "NEEDS-YOU: raise the limit or resolve runner readiness. " if action == "flip-refused" else ""
-            _send(prefix + "GitHub bill: " + json.dumps(decision))
+            _send(render_telegram(decision))
         if not state_error and limit is not None:
             sent = list(saved.get("sent", []))
             level = 90 if action == "flip" else int(action[6:]) if action.startswith("alert-") else None
