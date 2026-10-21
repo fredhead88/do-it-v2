@@ -119,10 +119,10 @@ def _valid_project(value):
             and (fold.ROOT / "repos" / value).is_dir())
 
 
-def _event_project(spec_evs):
-    """Only the spec's creation and build events can witness its project."""
+def _event_project(spec_evs, kinds=("spec-written", "build-done")):
+    """Only valid, agreeing projects in this event group are witnesses."""
     projects = {e["project"] for e in spec_evs
-                if e.get("type") in ("spec-written", "build-done") and _valid_project(e.get("project"))}
+                if e.get("type") in kinds and _valid_project(e.get("project"))}
     if len(projects) > 1:
         return None, "project ambiguous"
     return next(iter(projects), None), None
@@ -140,23 +140,34 @@ def _path_project(worktree_path):
 
 
 def spec_project(spec_evs, charter_evs, worktree_path):
-    """SD4 revision 2: path, corroborated spec events, then charter events."""
+    """SD1: own shipped events, conventional path, build metadata, charter."""
     own, why = _event_project(spec_evs)
+    path_project = _path_project(worktree_path)
+    shipped, _ = _event_project(spec_evs, ("shipped",))
+    if shipped:
+        return shipped if not path_project or path_project == shipped else None
+    if path_project:
+        return path_project
     if why:
         return None
-    return (_path_project(worktree_path) or own
+    return (own
             or next((e["project"] for e in reversed(charter_evs) if _valid_project(e.get("project"))), None))
 
 
-def _spec_worktree(spec, evs):
-    """One conventional directory only; duplicate names are undetermined."""
+def _spec_worktree_paths(spec, evs):
+    """All matching directories, including ones whose project is invalid."""
     branch = (build(evs) or {}).get("branch") or spec.lower()
     # Rebuilds can rename the branch (e.g. l-spec-0475-r2) while keeping the
     # original spec directory. Both names witness the same spec; duplicates
     # across projects remain undetermined.
     names = {branch, spec.lower()}
-    paths = [p for p in (fold.ROOT / "worktrees").glob("*/*")
-             if p.name in names and p.is_dir()]
+    return [p for p in (fold.ROOT / "worktrees").glob("*/*")
+            if p.name in names and p.is_dir()]
+
+
+def _spec_worktree(spec, evs):
+    """One conventional directory only; duplicate names are undetermined."""
+    paths = _spec_worktree_paths(spec, evs)
     return str(paths[0]) if len(paths) == 1 else None
 
 
@@ -164,10 +175,13 @@ def _project_resolution(spec, spec_evs, charter_evs):
     """Keep uncertainty and source disagreement out of every destructive path."""
     path = _spec_worktree(spec, spec_evs)
     project = spec_project(spec_evs, charter_evs, path)
-    own, why = _event_project(spec_evs)
+    _own, why = _event_project(spec_evs)
     path_project = _path_project(path)
-    if not why and path_project and own and path_project != own:
+    shipped, _ = _event_project(spec_evs, ("shipped",))
+    if shipped and path_project and path_project != shipped:
         why = "project mismatch"
+    elif shipped or path_project:
+        why = None
     if why:
         return None, why, path
     return project, None if project else "project unresolved", path
@@ -226,12 +240,22 @@ def reap_worktrees(events, *, dry_run=False):
     `retained` rows `{spec, project, path, why}` — never destroyed silently,
     never retained silently."""
     specs, charters, _, _ = fold.fold(events)
+    ended = fold.terminal_spawns(events)
+    live_builders = {e.get("subject") for e in events
+                     if e.get("spawn") and e["spawn"] not in ended
+                     and (e.get("type") == "build-started"
+                          or (e.get("type") == "spawn-started"
+                              and "-".join(e["spawn"].split("-")[1:-1]) == "builder"))}
     groups, resolutions = {}, {}
     for sid, s in specs.items():
         if not (_shipped_event(s["evs"]) or s["state"] == "killed"):
             continue
         c = charters.get(s["charter"]) or {"evs": []}
         project, why, path = _project_resolution(sid, s["evs"], c["evs"])
+        if project is None and not _spec_worktree_paths(sid, s["evs"]):
+            continue  # no project to query and no directory to remove
+        if sid in live_builders:
+            why = "builder spawn live"
         resolutions[sid] = (why, path)
         groups.setdefault(project, []).append(sid)
 
@@ -248,7 +272,8 @@ def reap_worktrees(events, *, dry_run=False):
             wts = worktrees(repo)
         except Undetermined as e:
             for sid in sorted(groups[project]):
-                retained.append({"spec": sid, "project": project, "path": None, "why": str(e)})
+                retained.append({"spec": sid, "project": project, "path": resolutions[sid][1],
+                                 "why": "builder spawn live" if sid in live_builders else str(e)})
             continue
         for sid in sorted(groups[project]):
             s = specs[sid]
@@ -257,8 +282,12 @@ def reap_worktrees(events, *, dry_run=False):
             if not wt:
                 continue  # nothing to reap for this spec right now
             row = {"spec": sid, "project": project, "path": wt}
-            # 0 — SD-R15-1a: standing rework reuses this worktree/branch; never removed.
-            if fold.standing_rejects(s["evs"]):
+            if sid in live_builders:
+                retained.append({**row, "why": "builder spawn live"})
+                continue
+            # Preflight only recreates the default branch, so renamed rework
+            # still needs its existing checkout until dispatch supports it.
+            if branch != sid.lower() and fold.standing_rejects(s["evs"]):
                 retained.append({**row, "why": "standing rejection"})
                 continue
             # 1 — uncommitted changes, tracked or not: never removed, never pushed.
@@ -397,6 +426,10 @@ def reap_merged_specs(events, *, dry_run=False):
     for project in sorted(groups, key=str):
         spec_ids = sorted(groups[project])
         if project is None:
+            spec_ids = [s for s in spec_ids if build(specs[s]["evs"])
+                        or _spec_worktree_paths(s, specs[s]["evs"])]
+            if not spec_ids:
+                continue
             branches = [(build(specs[s]["evs"]) or {}).get("branch") or s.lower() for s in spec_ids]
             reasons = [_project_resolution(s, specs[s]["evs"], [])[1] for s in spec_ids]
             retained_status.append({"project": None, "repo": None, "retained": branches,
@@ -503,11 +536,13 @@ def main(argv=None):
                  f"cleanup runs per charter AT CLOSE (§4.11, D33). Nothing was touched.")
 
     mine = [s for s in specs.values() if s["charter"] == a.charter]
-    project = spec_project([], c["evs"], None)
-    if project is None:
-        projects = {spec_project(s["evs"], [], None) for s in mine}
-        if len(projects) == 1 and None not in projects:
-            project = next(iter(projects))
+    resolutions = [_project_resolution(s["id"], s["evs"], c["evs"]) for s in mine]
+    projects = {project for project, _why, _path in resolutions}
+    if any(why in ("project mismatch", "project ambiguous") for _project, why, _path in resolutions):
+        sys.exit("reap: project unresolved — nothing was touched")
+    project = (next(iter(projects)) if len(projects) == 1 else None)
+    if not mine:
+        project = spec_project([], c["evs"], None)
     if not a.repo and project is None:
         sys.exit("reap: project unresolved — nothing was touched")
     repo = pathlib.Path(a.repo) if a.repo else fold.ROOT / "repos" / project
