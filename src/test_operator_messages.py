@@ -56,6 +56,8 @@ class WaitingMessages(unittest.TestCase):
         for blocking in (1, None, False, '0'):
             self.assert_stuck(clean()[:-1] + [event('review', 120, actor='reviewer',
                                                   n_blocking=blocking, depth='full')])
+            self.assert_stuck(clean() + [event('merge-gate-clean', 90, actor='executor'),
+                                        event('review', 60, actor='reviewer', n_blocking=blocking)])
         # Exercise the real due rules as well as the classification boundary.
         obj = digest.build(clean(), NOW)
         self.assertTrue(obj['rows'])

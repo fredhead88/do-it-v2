@@ -43,7 +43,8 @@ def build(events, now):
         resets = [e for e in evs if e['type'] in fold_stalls.RESETS - {'merge-gate-clean'}
                   or e['type'] in {'spec-shape-failed', 'spawn-started', 'autodispatched',
                                    'spawn-failed', 'autodispatch-failed', 'queue-remove'}
-                  or e['type'] == 'review' and e.get('n_blocking') != 0
+                  or e['type'] == 'review' and not (type(e.get('n_blocking')) is int
+                                                   and e['n_blocking'] == 0)
                   or e['type'] == 'decision' and (e.get('rework') == 'yes' or e.get('regrade') == 'yes'
                                                 or e.get('close'))]
         def current(e):
