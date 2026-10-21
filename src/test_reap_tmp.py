@@ -1303,3 +1303,177 @@ ok("-h" not in captured11["argv"], f"L0486-AC11: no -h/TCP argument: {captured11
 ok(not any(re.search(r"DB_URL|DATABASE_URL|^PG", k) for k in captured11["env"]),
    f"L0486-AC11: the environment carries no DB_URL/DATABASE_URL/PG* key: {sorted(captured11['env'])}")
 print("L0486-AC11 ok")
+
+# ── L1366 · terminal-spawn ownership of suffixed grade entries and files ──
+def _grade1366(base):
+    grade = base / "scratch" / "grade"
+    grade.mkdir(parents=True)
+    proc = base / "proc"
+    (proc / "net").mkdir(parents=True)
+    (proc / "net" / "unix").write_text("Num RefCount Protocol Flags Type St Inode Path\n")
+    events = [{"type": event, "spawn": spawn} for event, spawn in (
+        ("spawn-done", "L-grader-1166"),
+        ("spawn-failed", "L-grader-1171"),
+        ("spawn-stale", "L-grader-0873"),
+    )]
+    names = ("L-grader-1166-aside", "L-grader-1171-envaside", "L-grader-0873-head.txt")
+    for name in names:
+        path = grade / name
+        if name.endswith(".txt"):
+            path.write_text("grader output\n")
+        else:
+            path.mkdir()
+    return grade, proc, events, sorted(str(grade / name) for name in names)
+
+
+with tempfile.TemporaryDirectory(prefix="l1366-") as _base1366:
+    base1366 = pathlib.Path(_base1366)
+    grade1366, proc1366, events1366, expected1366 = _grade1366(base1366 / "ownership")
+    kept1366 = ("X", "probe", "envaside-1112", ".envaside-1078", "run.sh", "run_base.sh",
+                "g1073-verify.log", "L-grader-11660", "L-grader-1166x", "L-grader-9999-aside",
+                "L-grader-2409-aside", "pg-aside")
+    for name1366 in kept1366:
+        (grade1366 / name1366).mkdir()
+    events1366 += [{"type": "spawn-started", "spawn": "L-grader-2409"},
+                   {"type": "spawn-done", "spawn": "pg"}]
+    # Count the fixture before the destructive call; the three attributable entries
+    # must be the only difference between this snapshot and the surviving names.
+    before1366 = {p.name for p in grade1366.iterdir()}
+    ok(len(before1366) == 15, "L1366: fixture has exactly three candidates and twelve protected entries")
+    dry1366, errors1366 = reap_tmp._reap_grade_views(
+        grade1366.parent, events1366, proc1366, True, uid=UID)
+    ok(dry1366 == expected1366 and errors1366 == {}, "L1366-AC5: dry-run reports dirs and file")
+    ok({p.name for p in grade1366.iterdir()} == before1366, "L1366-AC5: dry-run deletes nothing")
+    removed1366, errors1366 = reap_tmp._reap_grade_views(
+        grade1366.parent, events1366, proc1366, False, uid=UID)
+    ok(removed1366 == expected1366 and errors1366 == {}, "L1366-AC1: exact sorted removal set")
+    ok(all(not pathlib.Path(p).exists() for p in expected1366), "L1366-AC1: both dirs and file are gone")
+    print("L1366-AC1 ok")
+    ok({p.name for p in grade1366.iterdir()} == set(kept1366), "L1366-AC2: unattributable and live names survive")
+    print("L1366-AC2 ok")
+    ok(removed1366 == dry1366, "L1366-AC5: real and dry-run removal lists agree")
+    print("L1366-AC5 ok")
+
+    # Exact recorded ids take precedence over shorter conforming prefixes.
+    # Any event records an id; multiword roles are not grader-specific.
+    extra1366 = ("L-grader-1166-aside", "L-grader-1166-aside-child",
+                 "L-grader-1166-aside.txt", "L-spec-writer-1456-report", "pg")
+    for name1366 in extra1366:
+        (grade1366 / name1366).write_text("keep unless terminal owner\n")
+    events1366 += [{"type": "note", "spawn": "L-grader-1166-aside"},
+                   {"type": "note", "spawn": "L-spec-writer-1456"},
+                   {"type": "spawn-done", "spawn": "L-spec-writer-1456"}]
+    removed1366, errors1366 = reap_tmp._reap_grade_views(
+        grade1366.parent, events1366, proc1366, False, uid=UID)
+    ok(removed1366 == sorted(str(grade1366 / name) for name in extra1366 if name != extra1366[0])
+       and errors1366 == {}, "L1366: exact recorded owner wins, conforming terminal prefixes remove suffixes")
+    ok((grade1366 / extra1366[0]).exists(), "L1366: exact nonterminal id is kept")
+    from unittest.mock import patch
+    safety1366, safeproc1366, safeevents1366, safeexpected1366 = _grade1366(base1366 / "safety")
+    outside1366 = base1366 / "outside"
+    outside1366.mkdir()
+    (outside1366 / "valuable").write_text("keep")
+    (safety1366 / "L-grader-1166-link").symlink_to(outside1366, target_is_directory=True)
+    held1366 = safety1366 / "L-grader-0873-held.txt"
+    held1366.write_text("held")
+    live1366 = safety1366 / "L-grader-1171-view"
+    live1366.mkdir()
+    # The snapshot reads only this fake proc tree; the pid is our current,
+    # already-live process, so no child or real process tree is needed here.
+    _write_cmdline486(safeproc1366, os.getpid(), ["python3", str(live1366 / "file"), str(held1366)])
+    uidpath1366 = safety1366 / "L-grader-1166-other-uid"
+    uidpath1366.mkdir()
+    real_lstat1366 = pathlib.Path.lstat
+
+    def _lstat1366(path, *args, **kwargs):
+        st = real_lstat1366(path, *args, **kwargs)
+        if path == uidpath1366:
+            fields = list(st)
+            fields[4] = UID + 1
+            return os.stat_result(fields)
+        return st
+
+    symlinked1366 = []
+    for component1366 in ("pg", "pg/data", "pg/data/postmaster.pid"):
+        path1366 = safety1366 / ("L-grader-1166-" + component1366.replace("/", "-"))
+        target1366 = path1366 / component1366
+        target1366.parent.mkdir(parents=True)
+        target1366.symlink_to(outside1366)
+        symlinked1366.append(path1366)
+    stops1366 = []
+    with patch.object(pathlib.Path, "lstat", _lstat1366):
+        removed1366, errors1366 = reap_tmp._reap_grade_views(
+            safety1366.parent, safeevents1366, safeproc1366, False, uid=UID, stop_fn=stops1366.append)
+    ok(removed1366 == safeexpected1366 and errors1366 == {}, "L1366-AC3: only idle sibling entries removed")
+    ok(not stops1366 and all(p.exists() for p in [uidpath1366, held1366, live1366] + symlinked1366),
+       "L1366-AC3: safety checks keep entries without calling stop")
+    ok((safety1366 / "L-grader-1166-link").is_symlink() and
+       (outside1366 / "valuable").read_text() == "keep", "L1366-AC3: external symlink target intact")
+    for rootlink1366 in (False, True):
+        alias1366 = base1366 / ("root-link" if rootlink1366 else "grade-link")
+        if rootlink1366:
+            alias1366.symlink_to(safety1366.parent, target_is_directory=True)
+        else:
+            alias1366.mkdir()
+            (alias1366 / "grade").symlink_to(safety1366, target_is_directory=True)
+        removed1366, errors1366 = reap_tmp._reap_grade_views(
+            alias1366, safeevents1366, safeproc1366, False, stop_fn=stops1366.append)
+        ok(removed1366 == [] and set(errors1366) == {"scratch_grade"}, "L1366-AC3: symlinked roots refused")
+    # Read failures must keep attributable entries and name the failure.
+    for operation1366 in ("lstat", "read_bytes"):
+        def _unreadable_lstat1366(path, *args, **kwargs):
+            if path == held1366:
+                raise PermissionError("unreadable fixture")
+            return _lstat1366(path, *args, **kwargs)
+
+        failure1366 = ({"new": _unreadable_lstat1366} if operation1366 == "lstat" else
+                       {"side_effect": PermissionError("unreadable fixture")})
+        with patch.object(pathlib.Path, operation1366, **failure1366):
+            removed1366, errors1366 = reap_tmp._reap_grade_views(
+                safety1366.parent, safeevents1366, safeproc1366, False, uid=UID, stop_fn=stops1366.append)
+        ok(not removed1366 and str(held1366) in errors1366 and held1366.exists(),
+           "L1366-AC3: undetermined metadata/process reads keep files and report errors")
+    ok(not stops1366, "L1366-AC3: no safety failure called stop")
+    print("L1366-AC3 ok")
+
+    pggrade1366, pgproc1366, pgevents1366, _ = _grade1366(base1366 / "private-pg")
+    pgview1366 = pggrade1366 / "L-grader-1166-aside"
+    data1366 = pgview1366 / "pg" / "data"
+    data1366.mkdir(parents=True)
+    (data1366 / "postmaster.pid").write_text("999999999\n")
+    pgcalls1366 = []
+
+    def _stop1366(data):
+        ok(data == data1366 and pgview1366.exists(), "L1366-AC4: stop precedes removal")
+        pgcalls1366.append(data)
+
+    removed1366, errors1366 = reap_tmp._reap_grade_views(
+        pggrade1366.parent, pgevents1366, pgproc1366, True, uid=UID, stop_fn=_stop1366)
+    ok(str(pgview1366) in removed1366 and not errors1366 and not pgcalls1366 and pgview1366.exists(),
+       "L1366-AC4: dry-run reports private PG view without stopping or deleting")
+
+    def _fail_stop1366(data):
+        raise RuntimeError("fixture stop failed")
+
+    removed1366, errors1366 = reap_tmp._reap_grade_views(
+        pggrade1366.parent, pgevents1366, pgproc1366, False, uid=UID, stop_fn=_fail_stop1366)
+    ok(str(pgview1366) not in removed1366 and errors1366 == {str(pgview1366): "fixture stop failed"}
+       and pgview1366.exists(), "L1366-AC4: failed stop keeps directory and reports its path")
+    removed1366, errors1366 = reap_tmp._reap_grade_views(
+        pggrade1366.parent, pgevents1366, pgproc1366, False, uid=UID, stop_fn=_stop1366)
+    ok(removed1366 == [str(pgview1366)] and not errors1366 and pgcalls1366 == [data1366]
+       and not pgview1366.exists(), "L1366-AC4: stop called once, then directory removed")
+    print("L1366-AC4 ok")
+
+    import inspect
+    ok(str(inspect.signature(reap_tmp._reap_grade_views)) ==
+       "(scratch_root, events, proc_root, dry_run, uid=None, stop_fn=None)", "L1366-AC6: unchanged seam")
+    rungrade1366, runproc1366, runevents1366, runexpected1366 = _grade1366(base1366 / "run")
+    runroot1366 = base1366 / "run-root"
+    runroot1366.mkdir()
+    result1366 = reap_tmp.run(root=runroot1366, uid=UID, proc_root=runproc1366,
+                             scratch_root=rungrade1366.parent, events=runevents1366)
+    ok(result1366["removed_scratch"] == runexpected1366 and result1366["errors"] == {},
+       "L1366-AC6: run exposes all suffixed entries in removed_scratch")
+    ok(all(not pathlib.Path(p).exists() for p in runexpected1366), "L1366-AC6: run removes entries")
+    print("L1366-AC6 ok")
