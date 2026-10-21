@@ -39,19 +39,29 @@ def build(events, now):
         evs = folded[3].get(row['spec'], [])
         held = autodispatch.held_by_dependency(evs, events)
         gate = fold_stalls.latest(evs, {'merge-gate-clean'})
+        review = fold_stalls.latest(evs, {'review'})
         resets = [e for e in evs if e['type'] in fold_stalls.RESETS - {'merge-gate-clean'}
+                  or e['type'] in {'spec-shape-failed', 'spawn-started', 'autodispatched',
+                                   'spawn-failed', 'autodispatch-failed', 'queue-remove'}
                   or e['type'] == 'review' and e.get('n_blocking') != 0
-                  or e['type'] == 'decision' and (e.get('rework') == 'yes' or e.get('regrade') == 'yes')]
-        queued = gate and (not resets or gate['ts'] > resets[-1]['ts']) and not fold.standing_rejects(evs)
+                  or e['type'] == 'decision' and (e.get('rework') == 'yes' or e.get('regrade') == 'yes'
+                                                or e.get('close'))]
+        def current(e):
+            return e and not any(digest_actions.instant(r['ts']) >= digest_actions.instant(e['ts'])
+                                 for r in resets) and not fold.standing_rejects(evs)
+
+        queued = current(gate) or (review and type(review.get('n_blocking')) is int
+                                  and review['n_blocking'] == 0 and current(review))
         # Some queued windows were recorded as scoped Thinker rulings before
-        # the gate emitted its own event. An explicit queue-ahead ruling is
-        # evidence; an old clean review alone is not proof of a queued window.
+        # the gate emitted its own event. Accept both recorded phrasings, but
+        # never let a ruling hide a later failure or a standing rejection.
         ruling = next((e for e in reversed(folded[3].get('lane-stale:' + row['spec'], []))
                        if e['type'] == 'decision' and e.get('actor') in ('thinker', 'operator')), None)
-        if (ruling and re.search(r'^not stuck:.*enqueued in window', str(ruling.get('why', '')), re.I)
-                and 'queue ahead' in str(ruling.get('why', '')).lower()
-                and (not resets or ruling['ts'] > resets[-1]['ts'])
-                and not fold.standing_rejects(evs)):
+        why = str((ruling or {}).get('why', ''))
+        if (re.match(r'^not stuck:', why, re.I)
+                and (re.search(r'\bmerge window\b', why, re.I)
+                     or re.search(r'enqueued in window', why, re.I) and 'queue ahead' in why.lower())
+                and current(ruling)):
             queued = True
         question = next((e for e in reversed(evs)
                          if e['type'] in ('question', 'escalation-blocking')
@@ -62,8 +72,14 @@ def build(events, now):
         classification = owed_routes.classify_ask(note)
         action = dict(row, owner=classification['owner'], ask=note,
                       kind=classification['kind'], criterion=question.get('criterion') or 'next step')
-        if action['owner'] != 'operator' and ((held and 'unresolvable' not in held) or queued or row.get('reason_live')):
-            waiting.append(row)
+        # An unanswered question needs a next action even after a clean review.
+        # Dependency holds retain their existing waiting behavior.
+        if action['owner'] != 'operator' and held and 'unresolvable' not in held:
+            waiting.append(dict(row, waiting_for='dependency'))
+        elif not question and queued:
+            waiting.append(dict(row, waiting_for='merge'))
+        elif action['owner'] != 'operator' and row.get('reason_live'):
+            waiting.append(dict(row, waiting_for='active'))
         else:
             actions.append(action)
     return dict(date=now.date().isoformat(), stuck_count=len(rows), listed=len(rows),
@@ -75,13 +91,28 @@ def render_telegram(obj):
     """Name an owner and a concrete next step; preserve full rows in Markdown."""
     rows = obj.get('action_rows', obj['rows'])
     operator = [r for r in rows if r.get('owner') == 'operator']
-    if not operator:
-        count = len({r['spec'] for r in rows})
-        if not count:
-            return 'Nothing needs you today. No stalled work needs intervention.'
-        return f'Nothing needs you today. {count} stalled {"item is" if count == 1 else "items are"} with the Thinker.'
-    entries = ['NEEDS YOU: ' + digest_actions.operator_line(r) for r in operator]
-    return digest_actions.pack('Work needing your answer:', entries)[0]
+    if operator:
+        entries = ['NEEDS YOU: ' + digest_actions.operator_line(r) for r in operator]
+        header = digest_actions.pack('Work needing your answer:', entries)[0]
+    else:
+        header = 'Nothing needs you today.'
+    lines = [header]
+    seen = {r['spec'] for r in rows}
+    for kind, description in (
+            ('merge', 'finished {noun} {verb} waiting their turn to merge'),
+            ('dependency', '{noun} {verb} waiting for other work to merge first'),
+            ('active', '{noun} {verb} waiting on work already in progress')):
+        specs = {r['spec'] for r in obj.get('waiting_rows', []) if r.get('waiting_for') == kind} - seen
+        seen.update(specs)
+        if specs:
+            lines.append(f"{len(specs)} " + description.format(
+                noun='spec' if len(specs) == 1 else 'specs', verb='is' if len(specs) == 1 else 'are') + '.')
+    count = len({r['spec'] for r in rows if r.get('owner') != 'operator'} - {r['spec'] for r in operator})
+    if count:
+        lines.append(f'{count} {"spec is" if count == 1 else "specs are"} stuck and the Thinker is on them.')
+    elif len(lines) == 1 and not operator:
+        lines[0] += ' No stalled work needs intervention.'
+    return '\n'.join(lines)
 
 
 def next_steps(obj):
@@ -97,7 +128,7 @@ def next_steps(obj):
              'dependency-held': 'repair the unresolved prerequisite',
              'undetermined': 'repair the missing evidence for the next step'}
     rows = obj.get('action_rows', obj['rows'])
-    if not rows:
+    if not rows and not obj.get('waiting_rows'):
         return 'Nothing needs you today. No stalled work needs intervention.'
     entries, seen = [], set()
     for row in rows:
@@ -109,6 +140,14 @@ def next_steps(obj):
         else:
             step = steps.get(row['rule'], 'inspect the missing next action')
             entries.append(f"Thinker: {step}. No reply needed from you. [{row['spec']}]")
+    for row in obj.get('waiting_rows', []):
+        if row['spec'] in seen:
+            continue
+        seen.add(row['spec'])
+        status = {'merge': 'Waiting their turn to merge',
+                  'dependency': 'Waiting for other work to merge first',
+                  'active': 'Waiting on work already in progress'}[row['waiting_for']]
+        entries.append(f"{status}. No reply needed from you. [{row['spec']}]")
     return '\n'.join(entries)
 
 
