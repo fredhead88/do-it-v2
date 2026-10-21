@@ -6,12 +6,11 @@ the configured git mirror, and prove two roots derive "the same board".
 
 `snapshot` is "latest" or a sha on the configured branch (ADR-0028-4/10). A
 non-empty target is refused unless `dry_run` is true AND an explicit `--root`
-was given — never the bare `$DOIT_ROOT` default (Assumption 5). On an EMPTY
-target the four paths are written for real regardless of `--dry-run` (there is
-nothing destructive to protect against); on a NON-empty target the only allowed
-case never touches it — it clones to scratch, proves the clone works, and
-leaves the target exactly as it was, so the weekly drill's own scratch
-directory is reusable call after call (design §9.9, Boundaries).
+was given — never the bare `$DOIT_ROOT` default (Assumption 5). `--dry-run`
+validates a scratch clone and reports the ledgers it would reassemble, without
+writing to the target or appending a verification event. Real restores rebuild
+line-split ledgers from content/ledger-mirror/ unless events/ already contains
+the corresponding ledger.
 
 `board_diff()` never calls `fold` in-process against a foreign root — §5's
 cross-root isolation rule — it always shells out with `DOIT_ROOT=<root>` set.
@@ -38,6 +37,74 @@ def _is_empty(path):
     if not p.exists():
         return True
     return not any(p.iterdir())
+
+
+def reassemble_ledgers(root, dry_run=False):
+    """Validate numbered JSONL parts and atomically restore missing ledgers.
+
+    Stream bytes unchanged: decoding/re-encoding would lose the original
+    ledger's whitespace and non-ASCII representation. A failed group never
+    leaves a partial events file. In dry-run mode even temp files are avoided.
+    """
+    root = pathlib.Path(root)
+    mirror = root / "content" / "ledger-mirror"
+    rebuilt = []
+    try:
+        if (root / "content").is_symlink() or mirror.is_symlink():
+            raise Refusal("restore: ledger-mirror must be a directory under the restore root")
+        if not mirror.exists():
+            return rebuilt
+        groups = {}
+        for part in sorted(mirror.iterdir()):
+            match = re.fullmatch(r"(.+)\.part-([0-9]{3})\.jsonl", part.name)
+            if match:
+                groups.setdefault(match[1], []).append((int(match[2]), part))
+        for name, numbered in sorted(groups.items()):
+            destination = root / "events" / f"{name}.jsonl"
+            if destination.parent.is_symlink() or destination.is_symlink():
+                raise Refusal(f"restore: ledger destination must stay under the restore root: {destination}")
+            if destination.is_file():
+                continue  # The directly backed-up ledger is authoritative.
+            numbered.sort()
+            for expected, (number, part) in enumerate(numbered):
+                if number != expected:
+                    raise Refusal(f"restore: ledger {name}: missing part {expected:03d} "
+                                  f"before {part.name}")
+            temporary = None
+            try:
+                if not dry_run:
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    temporary = tempfile.NamedTemporaryFile(
+                        mode="wb", prefix=f".{name}.", suffix=".tmp",
+                        dir=destination.parent, delete=False)
+                for _, part in numbered:
+                    if part.is_symlink() or not part.is_file():
+                        raise Refusal(f"restore: ledger part must be a regular file: {part}")
+                    line_number = 0
+                    with part.open("rb") as source:
+                        for line_number, line in enumerate(source, 1):
+                            if not line.endswith(b"\n"):
+                                raise Refusal(f"restore: {part.name}:{line_number}: "
+                                              "incomplete JSON line (missing newline)")
+                            try:
+                                json.loads(line.decode("utf-8"))
+                            except (ValueError, UnicodeError) as e:
+                                raise Refusal(f"restore: {part.name}:{line_number}: invalid JSON: {e}") from e
+                            if temporary is not None:
+                                temporary.write(line)
+                    if not line_number:
+                        raise Refusal(f"restore: {part.name}: empty ledger part")
+                if temporary is not None:
+                    temporary.close()
+                    os.replace(temporary.name, destination)
+                rebuilt.append(destination.relative_to(root).as_posix())
+            finally:
+                if temporary is not None:
+                    temporary.close()
+                    pathlib.Path(temporary.name).unlink(missing_ok=True)
+        return rebuilt
+    except OSError as e:
+        raise Refusal(f"restore: cannot reassemble ledger mirror: {e}") from e
 
 
 def recreate_repo_links(root):
@@ -114,13 +181,17 @@ def restore(snapshot, root=None, dry_run=False, remote=None, config_path=None):
         sha = _git(["rev-parse", "HEAD"], clone_dir).stdout.strip()
         tree = _git(["ls-tree", "-r", "--name-only", "HEAD"], clone_dir).stdout.splitlines()
         event_count = len([p for p in tree if p.startswith("events/")])
-        if empty:
+        # Reject invalid snapshots before moving anything into the target.
+        planned = reassemble_ledgers(clone_dir, dry_run=True)
+        if not dry_run:
             target.mkdir(parents=True, exist_ok=True)
             for item in clone_dir.iterdir():
                 shutil.move(str(item), str(target / item.name))
+            reassemble_ledgers(target)
             recreate_repo_links(target)
-        _append_restore_verified(sha, event_count)
-        return {"root": str(target), "snapshot_sha": sha, "dry_run": dry_run}
+            _append_restore_verified(sha, event_count + len(planned))
+        return {"root": str(target), "snapshot_sha": sha, "dry_run": dry_run,
+                "would_reassemble" if dry_run else "reassembled": planned}
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
 

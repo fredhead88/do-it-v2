@@ -8,9 +8,10 @@ an in-process call against a foreign root).
 import (matching `test_carry.py`), and every `restore-verified` append this file
 causes lands there — never under any `root=` this file passes around.
 """
-import json, os, pathlib, subprocess, sys, tempfile
+import contextlib, io, json, os, pathlib, subprocess, sys, tempfile
 from itertools import permutations
 from datetime import datetime, timedelta, timezone
+from unittest import mock
 
 TMP = pathlib.Path(tempfile.mkdtemp(prefix="restore-test-"))
 os.environ["DOIT_ROOT"] = str(TMP / "doit-root-unused")
@@ -149,7 +150,7 @@ check(r_allowed["dry_run"] is True and r_allowed["snapshot_sha"] == SHA,
       f"AC7: non-empty + dry_run=True + explicit --root IS allowed: {r_allowed}")
 check(sorted(p.name for p in non_empty.iterdir()) == ["leftover.txt"],
       "AC7: a dry-run against a non-empty root never touches it — reusable call after call")
-check(ledger_count() == before_ledger + 1, "AC7: even a dry run appends restore-verified once")
+check(ledger_count() == before_ledger, "AC7: a dry run never appends restore-verified")
 
 empty_target = TMP / "ac7-empty"
 r_real = restore.restore("latest", root=empty_target, dry_run=False, remote=str(REMOTE), config_path=CFG)
@@ -177,7 +178,7 @@ check(push_after["ok"] is True and push_after["pushed"] is True,
       f"AC7: backup.push(root=root) right after succeeds and advances the remote: {push_after}")
 check(sh(TMP, "git", "--git-dir", str(REMOTE), "rev-parse", "main") == push_after["snapshot"],
       "AC7: the remote's HEAD actually advanced")
-check(ledger_count() == before_ledger + 2, "AC7: the real restore appended restore-verified too")
+check(ledger_count() == before_ledger + 1, "AC7: the real restore appended restore-verified once")
 check(not any((TMP / "doit-root-unused" / "events").glob("*restore*")) or True,
       "AC7: restore-verified never lands under `root` — checked structurally below")
 own_ledger = pathlib.Path(os.environ["DOIT_ROOT"]) / "events" / os.environ["DOIT_LEDGER_FILE"]
@@ -185,6 +186,92 @@ check(own_ledger.is_file() and "restore-verified" in own_ledger.read_text(),
       "AC7: restore-verified landed on the calling process's OWN live ledger")
 check(not any((empty_target / "events").glob("*drill*")),
       "AC7: …and never under the restored root itself")
+
+# W40: use local git sources so restore exercises the complete clone/copy path.
+MIRROR_PREFIX = "content/ledger-mirror/L-executor-0001.part-"
+mirror_chunks = [json.dumps({"index": i, "text": "café"}, ensure_ascii=False) +
+                 ("\r\n" if i % 2 else "\n") for i in range(12)]
+mirror_files = {f"{MIRROR_PREFIX}{i:03d}.jsonl": chunk
+                for i, chunk in enumerate(mirror_chunks)}
+mirror_files["content/ledger-mirror/L-other.part-000.jsonl"] = '{ "second": true }\n'
+mirror_source = seed_repo("mirror-source", mirror_files)
+mirror_target = TMP / "mirror-restored"
+mirror_result = restore.restore("latest", root=mirror_target, remote=str(mirror_source),
+                                config_path=missing_cfg)
+check((mirror_target / "events/L-executor-0001.jsonl").read_bytes() ==
+      "".join(mirror_chunks).encode("utf-8"),
+      "W40: twelve ordered parts preserve exact UTF-8, whitespace and newline bytes")
+check((mirror_target / "events/L-other.jsonl").read_bytes() == b'{ "second": true }\n',
+      "W40: every ledger group is restored")
+check(mirror_result["reassembled"] == ["events/L-executor-0001.jsonl", "events/L-other.jsonl"],
+      f"W40: real restore reports both reassembled ledgers: {mirror_result}")
+check(not list((mirror_target / "events").glob("*.tmp")),
+      "W40: successful atomic reassembly leaves no temporary files")
+
+before_dry = ledger_count()
+for dry_name, existing in (("absent", False), ("empty", True), ("nonempty", True)):
+    dry_target = TMP / f"mirror-dry-{dry_name}"
+    if existing:
+        dry_target.mkdir()
+    if dry_name == "nonempty":
+        (dry_target / "sentinel").write_bytes(b"untouched\n")
+    dry_before = ({p.relative_to(dry_target): p.read_bytes() for p in dry_target.rglob("*")}
+                  if existing else None)
+    dry_result = restore.restore("latest", root=dry_target, dry_run=True,
+                                 remote=str(mirror_source), config_path=missing_cfg)
+    check(dry_result["would_reassemble"] == mirror_result["reassembled"],
+          f"W40: dry-run reports planned ledgers for {dry_name} target")
+    dry_after = ({p.relative_to(dry_target): p.read_bytes() for p in dry_target.rglob("*")}
+                 if dry_target.exists() else None)
+    check(dry_after == dry_before, f"W40: dry-run writes nothing to {dry_name} target")
+check(ledger_count() == before_dry, "W40: all dry-runs leave the calling ledger unchanged")
+
+direct_bytes = '{"direct": "authoritative"}\n'
+direct_source = seed_repo("mirror-direct", {
+    f"{MIRROR_PREFIX}000.jsonl": "malformed unused mirror\n",
+    "events/L-executor-0001.jsonl": direct_bytes,
+})
+direct_target = TMP / "mirror-direct-restored"
+direct_result = restore.restore("latest", root=direct_target, remote=str(direct_source),
+                                config_path=missing_cfg)
+check((direct_target / "events/L-executor-0001.jsonl").read_bytes() == direct_bytes.encode(),
+      "W40: a directly restored ledger wins even over an invalid unused mirror")
+check(direct_result["reassembled"] == [], "W40: direct ledger is not reported as reassembled")
+
+bad_mirrors = {
+    "gap": ({f"{MIRROR_PREFIX}000.jsonl": '{}\n',
+             f"{MIRROR_PREFIX}002.jsonl": '{}\n'}, "missing part 001"),
+    "start": ({f"{MIRROR_PREFIX}001.jsonl": '{}\n'}, "missing part 000"),
+    "malformed": ({f"{MIRROR_PREFIX}000.jsonl": '{}\n',
+                   f"{MIRROR_PREFIX}001.jsonl": '{}\n{"broken":}\n'}, "invalid JSON"),
+    "unterminated": ({f"{MIRROR_PREFIX}000.jsonl": '{}\n',
+                      f"{MIRROR_PREFIX}001.jsonl": '{}'}, "missing newline"),
+    "empty": ({f"{MIRROR_PREFIX}000.jsonl": ''}, "empty ledger part"),
+}
+for bad_name, (bad_files, expected_error) in bad_mirrors.items():
+    bad_source = seed_repo(f"mirror-bad-{bad_name}", bad_files)
+    bad_target = TMP / f"mirror-bad-target-{bad_name}"
+    before_bad = ledger_count()
+    for dry in (False, True):
+        errors = io.StringIO()
+        args = ["latest", "--root", str(bad_target), "--remote", str(bad_source)]
+        if dry:
+            args.append("--dry-run")
+        with contextlib.redirect_stderr(errors), mock.patch.object(
+                backup, "load_config", return_value={"branch": "main"}):
+            status = restore.main(args)
+        check(status == 2 and expected_error in errors.getvalue(),
+              f"W40: {bad_name}, dry={dry}: nonzero CLI and clear error: {errors.getvalue()}")
+        check(not bad_target.exists(), f"W40: {bad_name} never leaves a partial restore")
+    check(ledger_count() == before_bad, f"W40: {bad_name} never records restore success")
+    # Also exercise a failure after the atomic output temp file has been opened.
+    try:
+        restore.reassemble_ledgers(bad_source)
+        check(False, f"W40: helper must reject {bad_name}")
+    except restore.Refusal as e:
+        check(expected_error in str(e), f"W40: helper names {bad_name}: {e}")
+    check(not list((bad_source / "events").glob("*")),
+          f"W40: {bad_name} leaves neither a partial ledger nor temporary files")
 
 # ══ AC8 · board_diff, both directions, and process isolation ═══════════════
 fixture_ds = os.environ["DOIT_ROOT"]
