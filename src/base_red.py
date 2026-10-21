@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """The shared, offline-by-default base CI failure service (L-spec-1106).
 
-Only --ensure may dispatch CI. An undetermined result never enters the cache.
+Only --ensure and nightly may dispatch CI. Uncertain evidence is never cached.
 """
 import argparse
 import collections
+from datetime import datetime, timedelta, timezone
 import fcntl
 import io
 import json
@@ -12,6 +13,7 @@ import os
 import pathlib
 import re
 import subprocess
+import sys
 import tempfile
 import zipfile
 import zlib
@@ -22,6 +24,8 @@ import window_gate
 
 KINDS = ("pytest", "pg-parity", "vitest", "suite-error")
 WORKFLOWS = {"Python Tests", "Dashboard PR Quality"}
+WORKFLOW_FILES = {"Python Tests": "python-tests.yml",
+                  "Dashboard PR Quality": "dashboard-pr-quality.yml"}
 DOIT = pathlib.Path(__file__).resolve().parent.parent / "doit"
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 NEW = re.compile(r"\bNEW (failed|error|suite-error): (.+)$")
@@ -96,12 +100,17 @@ def _result(sha, reasons=()):
             "sources": [], "undetermined": list(reasons)}
 
 
-def _project(project, sha):
+def _repo(project):
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", project):
         raise ValueError("unknown project")
     repo = fold.ROOT / "repos" / project
     if not repo.is_dir():
         raise ValueError("unknown project")
+    return repo
+
+
+def _project(project, sha):
+    repo = _repo(project)
     if not re.fullmatch(r"[a-fA-F0-9]{7,40}", sha):
         raise ValueError("sha must be 7 to 40 hex characters")
     full = window_gate.git(repo, "rev-parse", "--verify", sha + "^{commit}").stdout.strip()
@@ -143,10 +152,33 @@ def _logs(owner, rid):
     return members
 
 
-def _snapshot(repo, sha):
+def _selection(repo, sha, run, members):
+    declarations = set()
+    for _, text in members:
+        for raw in text.splitlines():
+            line = ANSI.sub("", raw).strip().split("\t")[-1].strip()
+            line = re.sub(r"^\d{4}-\d\d-\d\dT\S+\s+", "", line)
+            if not line.startswith("CI-SELECTION"):
+                continue
+            if not re.fullmatch(r"CI-SELECTION mode=(full|selected|rerun) reason=[\w-]+ files=\d+", line):
+                raise ValueError("unreadable CI selection")
+            declarations.add(line)
+    if len(declarations) > 1:
+        raise ValueError("conflicting CI selection")
+    if declarations:
+        return next(iter(declarations)).split()[1].split("=")[1]
+    filename = WORKFLOW_FILES.get(run["name"])
+    if filename is None:
+        raise ValueError("workflow selection cannot be classified")
+    source = window_gate.git(repo, "show", f"{sha}:.github/workflows/{filename}")
+    return "selected" if re.search(r"(?m)^\s*select_base\s*:", source.stdout) else "full"
+
+
+def _snapshot(repo, sha, *, runs=None, covered=None):
     result = _result(sha)
     owner = _owner(repo)
-    runs = _api(f"repos/{owner}/actions/runs?head_sha={sha}&per_page=100", "workflow_runs")
+    if runs is None:
+        runs = _api(f"repos/{owner}/actions/runs?head_sha={sha}&per_page=100", "workflow_runs")
     complete_runs = [r for r in runs if r["head_sha"] == sha and r["status"] == "completed"
                      and r.get("conclusion") != "cancelled"]
     workflows, seen = set(), set()
@@ -165,8 +197,17 @@ def _snapshot(repo, sha):
         if rid in seen:
             continue
         seen.add(rid)
-        workflows.add(run["name"])
+        if run["name"] not in WORKFLOWS:
+            continue
         members = _logs(owner, rid)
+        try:
+            mode = _selection(repo, sha, run, members)
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
+            result["undetermined"].append("workflow selection could not be established")
+            continue
+        if mode != "full":
+            continue
+        workflows.add(run["name"])
         # Step metadata supplies display names for zip members, which otherwise
         # contain only timestamped command output. Never invent a command name.
         pg_jobs = []
@@ -198,6 +239,8 @@ def _snapshot(repo, sha):
         result["sources"].append(run["html_url"])
     result["ids"] = {k: sorted(v) for k, v in ids.items()}
     result["complete"] = WORKFLOWS <= workflows and not result["undetermined"]
+    if covered is not None:
+        covered.update(workflows)
     return result, bool(complete_runs)
 
 
@@ -263,15 +306,178 @@ def failing(project, sha, *, ensure=False):
         return result
 
 
-def classify(project, base_sha, ids):
+def _time(value):
+    value = value if isinstance(value, datetime) else datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if value.tzinfo is None:
+        raise ValueError("timestamp must include timezone")
+    return value.astimezone(timezone.utc)
+
+
+def _rows(project):
+    _repo(project)
+    try:
+        lines = (fold.ROOT / "events" / "L-base-red-local.jsonl").read_text().splitlines()
+    except (OSError, UnicodeError):
+        return []
+    rows = []
+    for line in lines:
+        try:
+            row = json.loads(line)
+            if (row.get("project") == project and isinstance(row.get("ids"), list)
+                    and all(isinstance(i, str) for i in row["ids"])
+                    and re.fullmatch(r"[a-fA-F0-9]{7,40}", row.get("sha", ""))):
+                _time(row["ts"])
+                rows.append(row)
+        except (ValueError, TypeError, KeyError, AttributeError):
+            continue
+    return rows
+
+
+def _known_state(project):
+    rows = sorted(_rows(project), key=lambda row: _time(row["ts"]))
+    nightlies = [r for r in rows if r.get("type") == "base-red-nightly" and r.get("complete") is True]
+    nightly = nightlies[-1] if nightlies else None
+    known = {}
+    if nightly:
+        known.update({i: {"sha": nightly["sha"], "source": "nightly", "since": nightly["ts"]}
+                      for i in nightly["ids"]})
+    for row in rows:
+        if (row.get("type") == "base-red" and row.get("source") == "rerun"
+                and row.get("complete") is False
+                and (nightly is None or _time(row["ts"]) >= _time(nightly["ts"]))):
+            known.update({i: {"sha": row["sha"], "source": "rerun", "since": row["ts"]}
+                          for i in row["ids"]})
+    return known, nightly
+
+
+def known_red(project):
+    """Newest complete nightly plus subsequent base-attributed reruns."""
+    return _known_state(project)[0]
+
+
+def _append(event, project, sha, *, complete, ids, **fields):
+    argv = [str(DOIT), "append", event, "base-" + project, "project=" + project,
+            "sha=" + sha, "complete:=" + json.dumps(complete), "ids:=" + json.dumps(ids)]
+    argv.extend(key + ":=" + json.dumps(value) for key, value in fields.items())
+    proc = subprocess.run(argv, env={**os.environ, "DOIT_ROOT": str(fold.ROOT),
+                                    "DOIT_LEDGER_FILE": "L-base-red-local.jsonl"},
+                          capture_output=True, text=True, timeout=30)
+    if proc.returncode:
+        raise ValueError("base-red ledger append failed")
+
+
+def record(project, sha, ids, source):
+    """Record attributable ids without claiming a complete base run."""
+    if source not in ("nightly", "rerun"):
+        raise ValueError("source must be nightly or rerun")
+    _, sha = _project(project, sha)
+    ids = list(ids)
+    if not all(isinstance(i, str) for i in ids):
+        raise ValueError("ids must be strings")
+    _append("base-red", project, sha, complete=False, ids=sorted(set(ids)), source=source)
+
+
+def classify(project, base_sha, ids, *, known_red=False, now=None):
     base = failing(project, base_sha)
     complete = bool(base["complete"] and not base.get("undetermined"))
     known = set().union(*(set(v) for v in base["ids"].values())) if complete else set()
-    return {"pre_existing": [i for i in ids if i in known],
-            "new": [i for i in ids if i not in known], "complete": complete}
+    recorded = {}
+    if known_red:
+        recorded, nightly = _known_state(project)
+        known.update(recorded)
+        current = _time(now) if now is not None else datetime.now(timezone.utc)
+        fresh = nightly is not None and timedelta(0) <= current - _time(nightly["ts"]) < timedelta(hours=36)
+        complete = complete or fresh
+    result = {"pre_existing": [i for i in ids if i in known],
+              "new": [i for i in ids if i not in known], "complete": complete}
+    if known_red:
+        result["known_red"] = [i for i in ids if i in recorded]
+    return result
+
+
+def nightly(project):
+    """Fetch master, dispatch missing full workflows once, and record evidence."""
+    result = _result("")
+    try:
+        repo = _repo(project)
+        window_gate.git(repo, "fetch", "origin", "master")
+        tip = window_gate.git(repo, "rev-parse", "origin/master").stdout.strip()
+        repo, sha = _project(project, tip)
+        result["sha"] = sha
+        directory = fold.ROOT / "base-red" / project
+        directory.mkdir(parents=True, exist_ok=True)
+        with (directory / (sha + ".nightly.lock")).open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            previous = [r for r in _rows(project) if r.get("type") == "base-red-nightly"
+                        and r.get("complete") is True and r["sha"] == sha]
+            if previous:
+                result["complete"] = True
+                return result
+            if not ghlimit.gate(wait=False)["ok"]:
+                raise ValueError("GitHub quota unavailable")
+            owner = _owner(repo)
+            endpoint = f"repos/{owner}/actions/runs?head_sha={sha}&per_page=100"
+            runs = _api(endpoint, "workflow_runs")
+            covered = set()
+            result, _ = _snapshot(repo, sha, runs=runs, covered=covered)
+            if result["undetermined"]:
+                return result
+            needed = WORKFLOWS - covered
+            if any(r["head_sha"] == sha and r.get("name") in needed
+                   and r["status"] != "completed" for r in runs):
+                result["undetermined"].append("needed workflow is queued or in progress")
+                return result
+            for name in sorted(needed):
+                filename = WORKFLOW_FILES[name]
+                if not ghlimit.gate(wait=False)["ok"]:
+                    raise ValueError("GitHub quota unavailable")
+                marker = directory / (sha + "." + filename + ".dispatched")
+                try:
+                    fd = os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                except FileExistsError:
+                    continue
+                os.close(fd)
+                # Dispatch accepts a branch/tag ref. Evidence remains pinned to
+                # the fetched sha, so a concurrent master advance cannot certify it.
+                argv = ["gh", "workflow", "run", filename, "--repo", owner, "--ref", "master"]
+                if name == "Python Tests":
+                    argv.extend(["-f", "full_run=true"])
+                rc, _, _ = ghlimit.run(argv, wait=False)
+                if rc:
+                    raise ValueError("nightly dispatch unavailable")
+            if needed:
+                runs = _api(endpoint, "workflow_runs")
+                if any(r["head_sha"] == sha and r.get("name") in needed
+                       and r["status"] != "completed" for r in runs):
+                    result["undetermined"].append("dispatched workflow is queued or in progress")
+                    return result
+                result, _ = _snapshot(repo, sha, runs=runs)
+            if not result["undetermined"]:
+                ids = sorted({i for values in result["ids"].values() for i in values})
+                _append("base-red-nightly", project, sha, complete=result["complete"], ids=ids,
+                        url=next(iter(result["sources"]), ""))
+        return result
+    except (OSError, RuntimeError, ValueError, KeyError, TypeError, EOFError,
+            zipfile.BadZipFile, zipfile.LargeZipFile, zlib.error, subprocess.SubprocessError):
+        result["complete"] = False
+        result["undetermined"].append("nightly could not establish evidence")
+        return result
 
 
 def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:1] == ["nightly"]:
+        parser = argparse.ArgumentParser(description="Record full master CI evidence")
+        parser.add_argument("project")
+        args = parser.parse_args(argv[1:])
+        result = nightly(args.project)
+        state = "undetermined" if result["undetermined"] else "complete" if result["complete"] else "incomplete"
+        print(f"{args.project} nightly: {state}")
+        for reason in result["undetermined"]:
+            print(reason)
+        if not result["complete"] and not result["undetermined"]:
+            print("required full workflow evidence is missing after dispatch")
+        return 2 if result["undetermined"] else 0 if result["complete"] else 3
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("project")
     parser.add_argument("sha")

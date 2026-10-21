@@ -44,6 +44,11 @@ class BaseRedTests(unittest.TestCase):
         def git(*args):
             return subprocess.check_output(["git", "-C", str(self.repo), *args], text=True).strip()
         git("init", "-q")
+        workflows = self.repo / ".github" / "workflows"
+        workflows.mkdir(parents=True)
+        for filename in ("python-tests.yml", "dashboard-pr-quality.yml"):
+            (workflows / filename).write_text("on: workflow_dispatch\n")
+        git("add", ".github")
         git("-c", "user.name=test", "-c", "user.email=test@localhost", "commit", "-qm", "fixture", "--allow-empty")
         git("remote", "add", "origin", "git@github.com:example/demo.git")
         self.sha = git("rev-parse", "HEAD")
@@ -279,6 +284,276 @@ class BaseRedTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(br.main(["demo", self.sha, "--json"]), 2)
         self.assertFalse(self.cache.exists())
+
+    def test_ac4_selected_never_evidence(self):
+        self.zips[1] = archive(log="CI-SELECTION mode=selected reason=paths files=1\nNEW failed: tests/selected.py::x")
+        result = br.failing("demo", self.sha)
+        self.assertFalse(result["complete"])
+        self.assertEqual(result["ids"]["pytest"], [])
+        self.assertEqual(result["undetermined"], [])
+        self.assertFalse(self.cache.exists())
+        print("ac4 selection selected-not-evidence")
+
+    def ledger_fixture(self, rows, filename="L-base-red-local.jsonl"):
+        path = self.root / "events" / filename
+        path.parent.mkdir(exist_ok=True)
+        path.write_text("\n".join(json.dumps(r) for r in rows) + "\nmalformed\n")
+        return path
+
+    def ledger_row(self, kind="base-red-nightly", at="2026-10-21T00:00:00Z", **kw):
+        return dict(type=kind, project="demo", sha=self.sha, ts=at,
+                    complete=True, ids=["nightly"], **kw)
+
+    def test_ac1_newest_and_exclusions(self):
+        old = self.ledger_row(at="2026-10-20T00:00:00Z")
+        old["ids"] = ["old"]
+        current = self.ledger_row()
+        rerun = self.ledger_row("base-red", source="rerun")
+        rerun.update(complete=False, ids=["rerun"])
+        stale = dict(rerun, ts="2026-10-20T12:00:00Z", ids=["stale"])
+        cases = [old, dict(current, complete=False, ids=["incomplete"]), stale,
+                 dict(current, project="other", ids=["foreign"]),
+                 dict(current, type="base-red", ids=["cached"]),
+                 dict(current, ts="bad", ids=["bad-time"]),
+                 dict(current, ids={"pytest": ["bad-shape"]})]
+        for excluded in cases:
+            with self.subTest(excluded=excluded):
+                self.ledger_fixture([excluded, current, rerun])
+                self.assertEqual(br.known_red("demo"), {
+                    "nightly": {"sha": self.sha, "source": "nightly", "since": current["ts"]},
+                    "rerun": {"sha": self.sha, "source": "rerun", "since": rerun["ts"]}})
+        print("ac1 known_red newest-complete")
+        print("ac1 known_red rerun-since")
+        print("ac1 known_red exclusions")
+        self.ledger_fixture([dict(current, ids=["intruder"])], "L-other-local.jsonl")
+        self.assertNotIn("intruder", br.known_red("demo"))
+        print("ac1 known_red other-ledger-ignored")
+        path = self.root / "events" / "L-base-red-local.jsonl"
+        path.unlink()
+        self.assertEqual(br.known_red("demo"), {})
+        path.mkdir()
+        self.assertEqual(br.known_red("demo"), {})
+
+    def fresh_read(self):
+        code = """
+import base_red, health_alarms, json
+from datetime import datetime, timezone
+from pathlib import Path
+rows = [json.loads(s) for s in (base_red.fold.ROOT / 'events/L-base-red-local.jsonl').read_text().splitlines() if s.startswith('{')]
+print(json.dumps({'known': base_red.known_red('demo'),
+                  'health': health_alarms.summary_lines(rows, datetime.now(timezone.utc))}))
+"""
+        proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                              env={**os.environ, "PYTHONPATH": str(HERE)}, timeout=15)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return json.loads(proc.stdout)
+
+    def test_ac2_record_roundtrip(self):
+        ids = ["tests/a.py::broken", "dashboard/t.ts::case"]
+        br.record("demo", self.sha, ids, "rerun")
+        event, = self.events()
+        self.assertIs(event["complete"], False)
+        self.assertEqual(event["ids"], sorted(ids))
+        self.assertNotIn("actor", event)
+        read = self.fresh_read()
+        self.assertEqual(set(read["known"]), set(ids))
+        self.assertTrue(all(v["source"] == "rerun" for v in read["known"].values()))
+        self.assertEqual(read["health"], [])
+        self.runs = []
+        self.assertFalse(br.failing("demo", self.sha)["complete"])
+        self.assertFalse(self.cache.exists())
+        self.assertEqual(len(self.events()), 1)
+        before = (self.root / "events/L-base-red-local.jsonl").read_bytes()
+        for project, sha, source in (("demo", self.sha, "bad"), ("demo", "bad-sha", "rerun"),
+                                     ("unknown", self.sha, "rerun"), ("../demo", self.sha, "rerun")):
+            with self.assertRaises(ValueError):
+                br.record(project, sha, ids, source)
+        self.assertEqual((self.root / "events/L-base-red-local.jsonl").read_bytes(), before)
+        br.record("demo", self.sha, [], "nightly")
+        self.assertIs(self.events()[-1]["complete"], False)
+        print("ac2 record roundtrip fresh-process")
+        print("ac2 record never complete")
+        print("ac2 record refuses bad source")
+
+    def test_ac3_classification_and_freshness(self):
+        from datetime import datetime, timedelta, timezone
+        now = datetime(2026, 10, 21, tzinfo=timezone.utc)
+        ids = ["nightly", "base", "new"]
+        for complete in (False, True):
+            base = {"complete": complete, "ids": {"pytest": ["base"]}}
+            for age in (0, 35.999, 36, 37, None):
+                path = self.root / "events/L-base-red-local.jsonl"
+                if age is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    self.ledger_fixture([self.ledger_row(at=(now - timedelta(hours=age)).isoformat())])
+                with patch.object(br, "failing", return_value=base):
+                    default = br.classify("demo", self.sha, ids)
+                    self.assertEqual(default, {"pre_existing": ["base"] if complete else [],
+                                               "new": ["nightly", "new"] if complete else ids,
+                                               "complete": complete})
+                    actual = br.classify("demo", self.sha, ids, known_red=True, now=now)
+                    expected = (["nightly"] if age is not None else []) + (["base"] if complete else [])
+                    self.assertEqual(actual["pre_existing"], expected)
+                    self.assertEqual(actual["known_red"], ["nightly"] if age is not None else [])
+                    self.assertEqual(actual["complete"], complete or (age is not None and age < 36))
+        print("ac3 classify default unchanged")
+        print("ac3 classify known_red")
+        print("ac3 classify fresh nightly 36h")
+
+    def test_ac4_selection_modes(self):
+        for mode in ("selected", "rerun"):
+            self.zips[1] = archive(log=f"2026-10-21T03:20:00.000Z CI-SELECTION mode={mode} reason=paths files=1\nNEW failed: tests/partial.py::x")
+            result, _ = br._snapshot(self.repo, self.sha)
+            self.assertFalse(result["complete"])
+            self.assertEqual(result["undetermined"], [])
+            self.assertEqual(result["ids"]["pytest"], [])
+        print("ac4 selection rerun-not-evidence")
+        self.runs.append(self.run_doc(3, "Python Tests"))
+        self.zips[3] = archive(log="CI-SELECTION mode=full reason=nightly files=0\nNEW failed: tests/full.py::x")
+        result = br.failing("demo", self.sha)
+        self.assertTrue(result["complete"])
+        self.assertEqual(result["ids"]["pytest"], ["tests/full.py::x"])
+        self.assertEqual(json.loads(self.cache.read_text())["ids"]["pytest"], ["tests/full.py::x"])
+        print("ac4 selection selected-plus-full-complete")
+
+    def test_ac4_absent_and_garbled(self):
+        original = br.window_gate.git
+        for declared, readable, expected in ((False, True, "complete"), (True, True, "skipped"),
+                                              (False, False, "undetermined")):
+            def git(repo, *args, **kw):
+                if args[0] == "show":
+                    if not readable:
+                        raise RuntimeError("fixture unreadable workflow")
+                    return subprocess.CompletedProcess(args, 0, "select_base: {}" if declared else "on: push", "")
+                return original(repo, *args, **kw)
+            with patch.object(br.window_gate, "git", side_effect=git):
+                result = br.failing("demo", self.sha)
+            self.assertEqual(bool(result["undetermined"]), expected == "undetermined")
+            self.assertEqual(result["complete"], expected == "complete")
+            if self.cache.exists():
+                self.cache.unlink()
+        print("ac4 selection absent-declared-skipped")
+        print("ac4 selection absent-undeclared-full")
+        for text in ("CI-SELECTION mode=unknown reason=paths files=0",
+                     "CI-SELECTION mode=full reason=paths files=0\nCI-SELECTION mode=rerun reason=paths files=0",
+                     "CI-SELECTION mode=full"):
+            self.zips[1] = archive(log=text)
+            result = br.failing("demo", self.sha)
+            self.assertTrue(result["undetermined"])
+            self.assertFalse(self.cache.exists())
+        print("ac4 selection garbled-undetermined")
+
+    def nightly_fixture(self, *, finish=True):
+        # Real local fetch; only the GitHub identity/listing/log/dispatch seam is faked.
+        subprocess.run(["git", "-C", str(self.repo), "branch", "-M", "master"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "remote", "set-url", "origin", str(self.repo)], check=True)
+        self.dispatched = []
+        def gh(argv, **kw):
+            if argv[1:3] != ["workflow", "run"]:
+                return self.gh(argv)
+            self.dispatched.append(argv)
+            filename = argv[3]
+            name = {"python-tests.yml": "Python Tests", "dashboard-pr-quality.yml": "Dashboard PR Quality"}[filename]
+            if finish:
+                rid = 1 if name == "Python Tests" else 2
+                self.runs.append(self.run_doc(rid, name))
+                self.zips[rid] = archive(log="CI-SELECTION mode=full reason=nightly files=0\n" +
+                                            "\n".join(p.read_text() for p in sorted(FIX.glob("*.log"))))
+            return 0, "", ""
+        stack = contextlib.ExitStack()
+        self.addCleanup(stack.close)
+        stack.enter_context(patch.object(br, "_owner", return_value="example/demo"))
+        stack.enter_context(patch.object(br.ghlimit, "run", side_effect=gh))
+
+    def test_ac5_nightly_complete_and_idempotent(self):
+        self.nightly_fixture()
+        self.runs = []
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(br.main(["nightly", "demo"]), 0)
+        self.assertEqual(len(self.dispatched), 2)
+        row, = self.events()
+        self.assertEqual(row["type"], "base-red-nightly")
+        self.assertIs(row["complete"], True)
+        self.assertEqual(set(row["ids"]), {i for values in self.expected().values() for i in values})
+        self.assertEqual(set(self.fresh_read()["known"]), set(row["ids"]))
+        self.assertNotIn("actor", row)
+        self.calls.clear()
+        self.dispatched.clear()
+        self.assertTrue(br.nightly("demo")["complete"])
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.dispatched, [])
+        self.assertEqual(len(self.events()), 1)
+        print("ac5 nightly complete")
+        print("ac5 nightly idempotent")
+
+    def test_ac5_dashboard_only_and_selected(self):
+        self.nightly_fixture()
+        self.runs = [self.run_doc(2, "Dashboard PR Quality")]
+        result = br.nightly("demo")
+        self.assertTrue(result["complete"])
+        self.assertEqual([a[3] for a in self.dispatched], ["python-tests.yml"])
+        self.assertIn("full_run=true", self.dispatched[0])
+        print("ac5 nightly dashboard-only-tip dispatches python")
+        (self.root / "events/L-base-red-local.jsonl").unlink()
+        for path in (self.root / "base-red/demo").glob("*.dispatched"):
+            path.unlink()
+        self.dispatched.clear()
+        self.runs = [self.run_doc(2, "Dashboard PR Quality"), self.run_doc(3, "Python Tests")]
+        self.zips[3] = archive(log="CI-SELECTION mode=selected reason=paths files=1")
+        self.assertTrue(br.nightly("demo")["complete"])
+        self.assertEqual([a[3] for a in self.dispatched], ["python-tests.yml"])
+
+    def test_ac5_incomplete(self):
+        self.nightly_fixture(finish=False)
+        self.runs = []
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(br.main(["nightly", "demo"]), 3)
+        self.assertIn("missing", out.getvalue())
+        self.assertIs(self.events()[0]["complete"], False)
+        self.assertEqual(self.fresh_read()["known"], {})
+        self.assertEqual(len(self.dispatched), 2)
+        br.nightly("demo")
+        self.assertEqual(len(self.dispatched), 2, "per-workflow markers prevent repeated paid dispatch")
+        print("ac5 nightly incomplete")
+
+    def test_ac5_undetermined_and_active(self):
+        self.nightly_fixture()
+        for status in ("queued", "in_progress"):
+            self.runs = [dict(self.run_doc(1, "Python Tests"), status=status)]
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(br.main(["nightly", "demo"]), 2)
+            self.assertEqual(self.events(), [])
+            self.assertEqual(self.dispatched, [])
+        print("ac5 nightly in-progress waits")
+        self.runs = [self.run_doc(1, "Python Tests")]
+        self.zips[1] = archive(log="CI-SELECTION mode=unknown reason=paths files=0")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(br.main(["nightly", "demo"]), 2)
+        self.assertEqual(self.events(), [])
+        self.assertEqual(self.dispatched, [])
+        with patch.object(br.ghlimit, "gate", return_value={"ok": False}):
+            self.assertTrue(br.nightly("demo")["undetermined"])
+        self.assertEqual(self.events(), [])
+        print("ac5 nightly undetermined appends nothing")
+
+    def test_ac6_cron(self):
+        import crons
+        rows = crons.rows()
+        row, = [r for r in rows if r["name"] == "base-red-nightly"]
+        self.assertEqual(row["where"], "user")
+        self.assertEqual(row["schedule"], "20 3 * * *")
+        self.assertEqual(row["path"], "/usr/bin/python3")
+        self.assertEqual(row["owner"], "thinker")
+        self.assertEqual(row["project"], "albert-scott")
+        self.assertEqual(row["max_runtime_s"], 5400)
+        self.assertEqual(row["command"], f"{HERE.parent}/doit cron-run base-red-nightly -- "
+                         f"/usr/bin/python3 {HERE}/base_red.py nightly albert-scott "
+                         f">> {self.root}/logs/base-red-nightly.log 2>&1")
+        self.assertEqual([r["name"] for r in rows if br.re.search(row["sig"], r["command"])],
+                         ["base-red-nightly"])
 
 
 if __name__ == "__main__":

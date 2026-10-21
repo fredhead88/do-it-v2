@@ -214,3 +214,14 @@ path = "{doit}"
 sig = '\bdoit seat-usage\b'
 owner = "thinker"
 project = "do-it-v2"
+
+[[row]]
+name = "base-red-nightly"
+where = "user"
+schedule = "20 3 * * *"
+command = "{doit} cron-run base-red-nightly -- /usr/bin/python3 {repo}/src/base_red.py nightly albert-scott >> {root}/logs/base-red-nightly.log 2>&1"
+path = "/usr/bin/python3"
+sig = 'base_red\.py\s+nightly\s+albert-scott\b'
+owner = "thinker"
+project = "albert-scott"
+max_runtime_s = 5400

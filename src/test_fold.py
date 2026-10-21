@@ -4793,3 +4793,15 @@ def test_queue_digest_vocabulary_1133():
 
 
 test_queue_digest_vocabulary_1133()
+
+
+def test_base_red_incomplete_presence_1196():
+    event = {"type": "base-red", "project": "demo", "sha": "revision", "complete": False}
+    assert fold.check_append(event, "base-red") is None
+    absent = {k: v for k, v in event.items() if k != "complete"}
+    reason = fold.check_append(absent, "base-red")
+    assert reason and reason.endswith("complete="), reason
+    print("1196 base-red complete=False present; complete absent refused")
+
+
+test_base_red_incomplete_presence_1196()
