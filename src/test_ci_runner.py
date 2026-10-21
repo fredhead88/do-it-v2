@@ -27,6 +27,9 @@ config_path = pathlib.Path(os.environ["FAKE_GH_CONFIG"])
 config = json.loads(config_path.read_text())
 with open(os.environ["FAKE_GH_CALLS"], "a") as log:
     log.write(json.dumps(args) + "\n")
+if "--slurp" in args:
+    print("unknown flag: --slurp", file=sys.stderr)
+    sys.exit(1)
 if args == ["api", "rate_limit"]:
     print(json.dumps({"resources": {k: {"limit": 5000, "remaining": 5000,
         "reset": time.time() + 3600} for k in ("core", "graphql")}}))
@@ -48,9 +51,9 @@ elif args[0] == "api":
             print("unexpected endpoint: " + endpoint, file=sys.stderr)
             sys.exit(9)
         if isinstance(response, dict) and "rc" not in response:
-            response = json.dumps([response] if "--slurp" in args else response)
-        elif isinstance(response, list):
             response = json.dumps(response)
+        elif isinstance(response, list):
+            response = "\n".join(json.dumps(page) for page in response)
     if isinstance(response, dict):
         print(response.get("out", ""), end="")
         print(response.get("err", ""), file=sys.stderr, end="")
@@ -90,7 +93,7 @@ class RunnerSwitchTests(unittest.TestCase):
         self.addCleanup(fold_patch.stop)
         self.config = {"variables": {VARIABLE: "true", PG_VARIABLE: "false"}, "api": {
             f"repos/{SLUG}/actions/runners": {"runners": [
-                {"status": "online", "labels": [{"name": "as-ci"}]}]},
+                {"name": "as-ci-1", "busy": False, "status": "online", "labels": [{"name": "as-ci"}]}]},
             f"repos/{SLUG}/actions/runs": {"workflow_runs": []}}}
         self.save()
         self.quota()
@@ -158,8 +161,8 @@ class RunnerSwitchTests(unittest.TestCase):
         result = self.runner.healthy(NOW)
         self.assertEqual((result["healthy"], result["online"], result["stuck_queued"]), (True, 1, 0))
         self.report("AC2(a)", result)
-        for case, runner in (("b", {"status": "offline", "labels": [{"name": "as-ci"}]}),
-                             ("c", {"status": "online", "labels": [{"name": "other"}]})):
+        for case, runner in (("b", {"name": "as-ci-1", "busy": False, "status": "offline", "labels": [{"name": "as-ci"}]}),
+                             ("c", {"name": "as-ci-1", "busy": False, "status": "online", "labels": [{"name": "other"}]})):
             self.config["api"][runners] = {"runners": [runner]}
             self.save()
             result = self.runner.healthy(NOW)
@@ -168,7 +171,7 @@ class RunnerSwitchTests(unittest.TestCase):
             self.assertIn("as-ci", result["reason"])
             self.report(f"AC2({case})", result)
         self.config["api"][runners] = [{"runners": []}, {"runners": [
-            {"status": "online", "labels": [{"name": "as-ci"}]}]}]
+            {"name": "as-ci-1", "busy": False, "status": "online", "labels": [{"name": "as-ci"}]}]}]
         self.config["api"][runs] = [{"workflow_runs": []}, {"workflow_runs": [{"id": 42}]}]
         jobs = f"repos/{SLUG}/actions/runs/42/jobs"
         for minutes, expected in ((16, False), (15, True), (14, True)):
@@ -188,7 +191,7 @@ class RunnerSwitchTests(unittest.TestCase):
             result = self.runner.healthy(NOW)
             self.assertEqual((result["healthy"], result["online"], result["stuck_queued"]), (None, 0, 0))
             self.report("AC2(e)", result)
-        self.config["api"][runners] = {"runners": [{"status": "online", "labels": [{"name": "as-ci"}]}]}
+        self.config["api"][runners] = {"runners": [{"name": "as-ci-1", "busy": False, "status": "online", "labels": [{"name": "as-ci"}]}]}
         for endpoint in (runs, jobs):
             prior = self.config["api"][endpoint]
             self.config["api"][endpoint] = {"rc": 1, "err": "unreadable"}
@@ -197,6 +200,154 @@ class RunnerSwitchTests(unittest.TestCase):
             self.assertIsNone(result["healthy"])
             self.report("AC2(f)", result)
             self.config["api"][endpoint] = prior
+
+    def test_ac1_runner_pages_and_paginated_calls(self):
+        a = {"name": "as-ci-A", "status": "online", "busy": True}
+        b = {"name": "as-ci-B", "status": "offline", "busy": False}
+        self.config["api"][f"repos/{SLUG}/actions/runners"] = [
+            {"runners": [{**a, "labels": [{"name": "as-ci"}]}]},
+            {"runners": [{**b, "labels": [{"name": "as-ci"}]},
+                         {"name": "other", "status": "online", "busy": False,
+                          "labels": [{"name": "other"}]}]}]
+        self.config["api"][f"repos/{SLUG}/actions/runs"] = {"workflow_runs": [{"id": 42}]}
+        self.config["api"][f"repos/{SLUG}/actions/runs/42/jobs"] = [{"jobs": []}, {"jobs": []}]
+        self.save()
+        result = self.runner.healthy(NOW)
+        self.assertEqual(result["runners"], [a, b])
+        self.assertEqual((result["healthy"], result["online"], result["stuck_queued"]), (True, 1, 0))
+        calls = self.calls()
+        self.assertEqual(len(calls), 3)
+        self.assertEqual([args[1].split("?", 1)[0] for args in calls], [
+            f"repos/{SLUG}/actions/runners", f"repos/{SLUG}/actions/runs",
+            f"repos/{SLUG}/actions/runs/42/jobs"])
+        for args in calls:
+            self.assertIn("--paginate", args)
+            self.assertNotIn("--slurp", args)
+        self.report("ac1-runner-pages", {"health": result, "calls": calls})
+        rejected = subprocess.run([str(self.fake), "api", "unused", "--slurp"],
+                                  capture_output=True, text=True)
+        self.assertEqual(rejected.returncode, 1)
+        self.assertIn("unknown flag: --slurp", rejected.stderr)
+
+    def test_ac1_queued_run_and_job_pages(self):
+        self.config["api"][f"repos/{SLUG}/actions/runs"] = [
+            {"workflow_runs": [{"id": 41}]}, {"workflow_runs": [{"id": 42}]}]
+        self.config["api"][f"repos/{SLUG}/actions/runs/41/jobs"] = {"jobs": []}
+        self.config["api"][f"repos/{SLUG}/actions/runs/42/jobs"] = [
+            {"jobs": []}, {"jobs": [{"status": "queued", "labels": ["self-hosted"],
+                "created_at": (NOW - timedelta(minutes=16)).isoformat()}]}]
+        self.save()
+        result = self.runner.healthy(NOW)
+        self.assertIs(result["healthy"], False)
+        self.assertEqual(result["stuck_queued"], 1)
+        for args in self.calls():
+            self.assertIn("--paginate", args)
+            self.assertNotIn("--slurp", args)
+        self.report("ac1-queued-pages", result)
+
+    def test_ac2_malformed_runners(self):
+        good = self.config["api"][f"repos/{SLUG}/actions/runners"]["runners"][0]
+        other = {"name": "other", "status": "online", "busy": False,
+                 "labels": [{"name": "other"}]}
+        cases = {"exit": {"rc": 1}, "empty": "  ", "missing-key": {},
+                 "non-list": {"runners": {}}, "trailing-garbage": '{"runners": []} garbage',
+                 "non-object-page": "null", "non-object-row": {"runners": [None]},
+                 "missing-later-page-key": [{"runners": [good]}, {}]}
+        for field, value in (("name", None), ("status", 1), ("busy", 0)):
+            bad = dict(other)
+            if field == "name":
+                del bad[field]
+            else:
+                bad[field] = value
+            cases[field] = {"runners": [good, bad]}
+        for case, response in cases.items():
+            with self.subTest(case=case):
+                self.config["api"][f"repos/{SLUG}/actions/runners"] = response
+                self.save()
+                result = self.runner.healthy(NOW)
+                self.assertIsNone(result["healthy"])
+                self.assertEqual((result["online"], result["stuck_queued"], result["runners"]), (0, 0, []))
+                self.assertTrue(result["reason"].startswith("runner health undetermined"))
+                self.report("ac2-" + case, result)
+
+    def test_ac2_unreadable_runs_and_jobs(self):
+        runs, jobs = f"repos/{SLUG}/actions/runs", f"repos/{SLUG}/actions/runs/42/jobs"
+        for endpoint, key in ((runs, "workflow_runs"), (jobs, "jobs")):
+            for response in ({"rc": 1}, "", {}, {key: None}, '{"' + key + '": []} garbage'):
+                with self.subTest(endpoint=endpoint, response=response):
+                    self.config["api"][runs] = {"workflow_runs": [{"id": 42}]}
+                    self.config["api"][jobs] = {"jobs": []}
+                    self.config["api"][endpoint] = response
+                    self.save()
+                    result = self.runner.healthy(NOW)
+                    self.assertIsNone(result["healthy"])
+                    self.assertEqual((result["online"], result["stuck_queued"], result["runners"]), (0, 0, []))
+                    self.assertTrue(result["reason"].startswith("runner health undetermined"))
+                    self.report("ac2-" + key, result)
+
+    def test_ac3_health_and_queue_boundary(self):
+        runners = f"repos/{SLUG}/actions/runners"
+        result = self.runner.healthy(NOW)
+        self.assertEqual((result["healthy"], result["online"], result["stuck_queued"]), (True, 1, 0))
+        self.report("ac3-online", result)
+        self.config["api"][runners]["runners"][0]["status"] = "offline"
+        self.save()
+        result = self.runner.healthy(NOW)
+        self.assertIs(result["healthy"], False)
+        self.assertEqual((result["online"], result["stuck_queued"]), (0, 0))
+        self.assertIn("as-ci", result["reason"])
+        self.assertEqual(result["runners"], [{"name": "as-ci-1", "status": "offline", "busy": False}])
+        self.report("ac3-offline", result)
+        self.config["api"][runners]["runners"][0]["status"] = "online"
+        self.config["api"][f"repos/{SLUG}/actions/runs"] = {"workflow_runs": [{"id": 42}]}
+        for minutes, expected in ((16, False), (15, True), (14, True)):
+            self.config["api"][f"repos/{SLUG}/actions/runs/42/jobs"] = {"jobs": [{
+                "status": "queued", "labels": ["self-hosted"],
+                "created_at": (NOW - timedelta(minutes=minutes)).isoformat()}]}
+            self.save()
+            result = self.runner.healthy(NOW)
+            self.assertIs(result["healthy"], expected)
+            self.assertEqual((result["online"], result["stuck_queued"]), (1, int(not expected)))
+            self.report(f"ac3-{minutes}-minutes", result)
+
+    def test_ac3_billing_health_consumer(self):
+        import gh_bill
+        with patch.dict(os.environ, {"GH_BILL_CI_RUNNER": ""}):
+            for status, expected in (("online", True), ("offline", False), (None, None)):
+                if status is None:
+                    self.config["api"][f"repos/{SLUG}/actions/runners"] = {"rc": 1}
+                else:
+                    self.config["api"][f"repos/{SLUG}/actions/runners"]["runners"][0]["status"] = status
+                self.save()
+                result = gh_bill._runner_inputs(NOW.date())
+                self.assertIs(result[0], self.runner)
+                self.assertIs(result[2], expected)
+                self.assertEqual(result[-1], "")
+                self.report("ac3-billing-" + str(status), {"health": result[2]})
+
+    def test_ac4_status_text_json_and_quota(self):
+        expected = [{"name": "as-ci-A", "status": "online", "busy": True},
+                    {"name": "as-ci-B", "status": "offline", "busy": False}]
+        self.config["api"][f"repos/{SLUG}/actions/runners"] = {
+            "runners": [{**runner, "labels": [{"name": "as-ci"}]} for runner in expected]}
+        self.save()
+        for exhausted in (False, True):
+            with self.subTest(exhausted=exhausted):
+                if exhausted:
+                    self.quota(0)
+                text = subprocess.run([str(DOIT), "ci-runner", "status"], capture_output=True, text=True)
+                self.assertEqual(text.returncode, 0, text.stderr)
+                lines = text.stdout.splitlines()
+                self.assertTrue(lines[2].startswith("healthy: "))
+                self.assertEqual(lines[3:], [] if exhausted else [
+                    "runner as-ci-A online busy=True", "runner as-ci-B offline busy=False"])
+                status = subprocess.run([str(DOIT), "ci-runner", "status", "--json"],
+                                        capture_output=True, text=True)
+                self.assertEqual(status.returncode, 0, status.stderr)
+                health = json.loads(status.stdout)["health"]
+                self.assertEqual(health["runners"], [] if exhausted else expected)
+                self.assertIs(health["healthy"], None if exhausted else True)
+                self.report("ac4-quota-" + str(exhausted), {"text": text.stdout, "health": health})
 
     def test_shadow_selection(self):
         events = [{"type": "ci-shadow-passed", "kind": kind, "ts": ts, "subject": "ci-shadow"}
