@@ -1282,3 +1282,49 @@ def test_dispatcher_base_1134():
 
 if __name__ == "__main__":
     test_dispatcher_base_1134()
+
+# L-spec-1137 AC10/AC13/AC16: released waves use the ordinary builder recipe,
+# independent of whether their first action is already past the hold limit.
+from unittest.mock import patch
+import lane_rules
+for released_minutes in (11, 5):
+    root = _fresh('released')
+    sid, blocker = 'L-spec-1137', 'L-spec-1136'
+    charter = 'L-charter-0052'
+    (root / 'content' / f'plan-{charter}.md').write_text(
+        '## Unit A\nFootprint:\n- src/producer.py\nWave: 1\n\n'
+        '## Unit B\nFootprint:\n- src/consumer.py\nWave: 2\n')
+    _spec_file(root, sid)
+    _spec_file(root, blocker)
+    _write(root, 'L-planner-local.jsonl', *[
+        dict(v=1, type='spec-written', ts=_iso(NOW - datetime.timedelta(hours=2)),
+             subject=subject, charter=charter, project='released', footprint=[footprint])
+        for subject, footprint in ((blocker, 'src/producer.py'), (sid, 'src/consumer.py'))])
+    _write(root, 'L-executor-local.jsonl',
+           dict(v=1, type='shipped', subject=blocker,
+                ts=_iso(NOW - datetime.timedelta(minutes=released_minutes))))
+    ev = fold.read_events(use_cache=False)
+    specs = fold.fold(ev)[0]
+    table = root / 'limits.toml'
+    table.write_text(lane_rules.DEFAULT_TABLE.read_text().replace('limit_min = 30', 'limit_min = 45'))
+    calls = []
+    def released_runner(argv):
+        calls.append(argv)
+        if argv[:2] == ['doit', 'packet']:
+            stdout = '/packet.md'
+        elif argv[:2] == ['doit', 'dispatch']:
+            stdout = json.dumps({'detached': 'L-builder-9999'})
+        else:
+            stdout = 'master'
+        return dict(code=0, stdout=stdout, stderr='')
+    with patch.dict(os.environ, {'DOIT_LANE_RULES': str(table)}):
+        rows = autodispatch.candidates(ev, specs, NOW, head_of=lambda _: 'master')
+        assert _row(rows, sid)['limit_min'] == 45, rows
+        out = autodispatch.run(ev, specs, NOW, runner=released_runner)
+    dispatches = [argv for argv in calls if argv[:2] == ['doit', 'dispatch']]
+    assert len(dispatches) == 1 and dispatches[0][3:5] == ['builder', sid], calls
+    written = [json.loads(line) for line in tick.tick_path().read_text().splitlines()]
+    assert len(written) == 1 and written[0]['type'] == 'autodispatched', written
+    assert 'rule' not in written[0] and 'trigger' not in written[0], written
+    assert len(out) == 1 and out[0].startswith('dispatched '), out
+print('lane-driver-1137 AC10 AC13 AC16 released-wave first builds ok')

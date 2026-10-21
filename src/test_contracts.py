@@ -166,7 +166,7 @@ ok(
 ok(
     "AC7",
     "R5 · a carried spec's review tier is read off its event, not derived",
-    present=[(EXECUTOR, "spec-carried"), (EXECUTOR, "review_tier")],
+    present=[(EXECUTOR, "spec-carried"), (EXECUTOR, "`tier`")],
 )
 
 ok(

@@ -186,6 +186,14 @@ def _builder_in_flight_count(events):
     return len(active)
 
 
+def _lane_limit(rule):
+    import lane_rules
+    try:
+        return lane_rules.load()[rule]["limit_min"]
+    except ValueError:
+        return {"build": 30, "grade": 15}[rule]
+
+
 def candidates(events, specs, now, *, head_of=None):
     """One row per `written` spec: `{spec, charter, project, since, status,
     reason}` — `status` `dispatchable`/`seat-wait`/`blocked`, oldest `since`
@@ -208,6 +216,7 @@ def candidates(events, specs, now, *, head_of=None):
     busy = tick.in_flight(events)
     written = [s for s in specs.values() if s.get("state") == "written"]
     rows = []
+    limit_min = _lane_limit("build")
     for s in written:
         sid = s["id"]
         evs = s.get("evs") or by_subject.get(sid, [])
@@ -219,7 +228,7 @@ def candidates(events, specs, now, *, head_of=None):
         reason, is_fail = _blocking_reason(sid, evs, events, project, charter, wave, busy, head_for)
         since = _since(events, sid, evs, charter, wave) or now
         rows.append({"spec": sid, "charter": charter, "project": project,
-                     "since": since.isoformat(timespec="seconds"),
+                     "since": since.isoformat(timespec="seconds"), "limit_min": limit_min,
                      "status": "blocked" if reason else None, "reason": reason,
                      "_dispatch_failed": is_fail, "_since_dt": since})
     rows.sort(key=lambda r: r["_since_dt"])
@@ -276,6 +285,7 @@ def grader_candidates(events, specs, now):
             by_subject.setdefault(sid, []).append(e)
     held = fold.held_specs(events)
     rows = []
+    limit_min = _lane_limit("grade")
     for sid, evs in by_subject.items():
         if not str(sid).startswith("L-spec-"):
             continue
@@ -298,7 +308,7 @@ def grader_candidates(events, specs, now):
         charter = dispatch.resolve_charter(events, sid, None)
         project = next((e.get("project") for e in reversed(evs) if e.get("project")), None) or "unknown"
         rows.append({"spec": sid, "charter": charter, "project": project,
-                     "trigger": trigger, "since": t_ts.isoformat(timespec="seconds")})
+                     "trigger": trigger, "since": t_ts.isoformat(timespec="seconds"), "limit_min": limit_min})
     rows.sort(key=lambda r: r["since"])
     return rows
 
@@ -449,10 +459,12 @@ def run(events, specs, now, *, runner=None, dry_run=False):
     runner = runner or _real_runner
     rows = candidates(events, specs, now, head_of=lambda project: _head_of(project, runner=runner))
     out = []
+    handled = set()
     for row in rows:
         if row["status"] != "dispatchable":
             continue
         spec, charter, project, since = row["spec"], row["charter"], row["project"], row["since"]
+        handled.add(spec)
         if dry_run:
             out.append(f"would dispatch {spec} (charter={charter}, project={project})")
             continue
@@ -506,6 +518,9 @@ def run(events, specs, now, *, runner=None, dry_run=False):
     # dispatched/refused a grader for.
     for row in grader_candidates(events, specs, now):
         spec, charter, project = row["spec"], row["charter"], row["project"]
+        if spec in handled:
+            continue
+        handled.add(spec)
         trigger, since = row["trigger"], row["since"]
         if dry_run:
             out.append(f"would dispatch grader {spec} (trigger={trigger})")
@@ -546,6 +561,9 @@ def run(events, specs, now, *, runner=None, dry_run=False):
     # handled (replayed or escalated) of its own.
     for row in dead_spawns(events, now):
         spawn, subject, role = row["spawn"], row["subject"], row["role"]
+        if subject in handled:
+            continue
+        handled.add(subject)
         replacement_of, visible_at = row["replacement_of"], fold.ts(row["visible_at"])
         if dry_run:
             out.append(f"would handle dead spawn {spawn} ({role}) on {subject}")
@@ -577,6 +595,7 @@ def run(events, specs, now, *, runner=None, dry_run=False):
         project = next((e.get("project") for e in reversed(subj_evs) if e.get("project")), None) or "unknown"
         if role == "grader":
             if subject in fold.held_specs(events):
+                handled.discard(subject)
                 out.append(f"no action: {subject} held")
                 continue
             worktree = fold.ROOT / "worktrees" / project / subject.lower()
@@ -622,4 +641,6 @@ def run(events, specs, now, *, runner=None, dry_run=False):
         dispatch.emit(tick.tick_path(), base, "autodispatched", spawn=str(detach.get("detached")),
                       role=role, trigger="redispatch", replaces=spawn, since=row["visible_at"])
         out.append(f"replayed {spawn} as {detach.get('detached')}")
+    import lane_driver
+    out.extend(lane_driver.run(events, specs, now, runner=runner, dry_run=dry_run, handled=handled))
     return out

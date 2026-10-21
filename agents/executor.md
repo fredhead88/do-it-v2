@@ -58,7 +58,7 @@ moment `BOARD_OWNERS` names you as its owner.
 | **a `question` with no `decision` naming it** (a decision's `ref` is the question's `src`, as `doit events` prints it) | reversible, with a `default`, past its `deadline`? | reversible → decide: `doit append decision <subject> ref=<the question's src> why="…" revert="…"`. Irreversible, or no default → `doit append escalation-blocking <subject> why="…"`. Before the deadline: nothing — the builder is working on the default. |
 | **a `spawn-failed` or `spawn-stale`** on the subject with no later `spawn-done` from the same role | its `why`/`reason` | `api_error` → nothing; already escalated. A refusal (`is_error`) or `contamination` → `escalation-blocking` naming the contract: the packet or the contract text is wrong (D120). `reason` in `{unserved, timeout}` (L-charter-0033) → counted exactly as `carry-failed`'s own row: re-dispatch on the first and second such failure on this subject (`doit events <subject>` for the prior count), `escalation-blocking` naming the contract only on the third. This never manufactures a round: a `reviewer` re-dispatched here after an `unserved`/`timeout` failure goes back at the SAME round (1 or 2) it was already at — this rule never extends a reviewer past its existing round-2 cap, regardless of failure reason. `reason=commit-shape` (or `reason` starting with `commit-shape`) → never retried as a grader and never escalated on first sight — it routes to the same `COMMIT-SHAPE` builder rework the `build-done` bullet above dispatches (`packet_builder_rework`, hint `squash to exactly one commit above PINNED_BASE_SHA`), and it clears only when that rework's own `build-done` yields `criterion-cleared criterion=COMMIT-SHAPE`; a repeated standing `COMMIT-SHAPE` on the same subject follows that bullet's loop guard — one further such rework, `escalation-blocking` naming the contract on the third occurrence — and no merge, no gate and no grader dispatch happens meanwhile, nor does the Executor itself ever squash, edit or merge on this path. `reason` starting with `repeat-rejection:` (L-spec-0435, R10(b)) → never re-dispatch: it clears only on a fresh `spec-written` or ANY `thinker`/`operator` `decision`/`unblocked` on the subject (regrade or not) — a rework/`build-done` alone changes nothing, so touch nothing until one of those two lands. `reason` starting with `cap:` (R10(c)) → also never re-dispatch, and its reset path is narrower still: only a `decision{regrade: "yes"}` from `thinker`/`operator`, or a fresh `build-done` newer than the newest counted grader run (L-spec-0482/R12.c — a rework resets the cap outright, and the Executor re-dispatches then), clears it — not a fresh `spec-written`, not any other `decision`. Null output, missing file, or changed repo → re-dispatch once with the same packet; a second failure → `escalation-blocking`. A `spawn-stale` is the tick's, not this row's (L-charter-0042 R13b): `autodispatch.run` re-dispatches it once, within ten minutes of the death becoming visible, and escalates on the second death — nothing here re-dispatches a `spawn-stale`. |
 | **`inbound:<source> · uncarried`** (L-spec-0190, R9) | is `<source>` a PR url? `doit events <source>` for a prior `inbound-registered` naming it | Run `doit carry <source> --project albert-scott --repo "$R/repos/albert-scott"` — **backgrounded**, the one bounded exception to "never awaited": `doit carry` itself dispatches `spec-writer` un-detached and blocks in-process on the seat result, so start it in the background and keep serving the lane while it runs, bounded by the `spec-writer` role's own dispatch timeout (`dispatch.ROLES["spec-writer"][1]`, 30 minutes at HEAD — the row names the mechanism, not a hardcoded number). A v4 source needs no prior registration (its ledger record's own `status: registered` is its registration); a PR source does — add `--from-ledger` to the same command (it resolves `title`/`body` from the newest `inbound-registered` event naming `<source>` in-process, never a shell); refuse to dispatch a PR source with no such event (the human ingest gate, ADR-0028-5, stays human except for authors in `trusted_inbound_authors.toml`, whose PRs the `intake` actor registers (L-charter-0031)). On exit: a stderr containing the literal substring `timeout after` is not counted at all — evidence the seat was not served in time, not evidence the source is bad — leave it for the next tick. Any other non-zero exit → `doit append carry-failed <source> attempt=<n> error="<the last stderr line>"`, where `<n>` is one more than the count of prior `carry-failed` events on this subject (`doit events <source>`). The **third** such failure additionally → `doit append escalation-blocking <source> why="three carry attempts failed" default="leave <source> uncarried; no further carry attempt until an operator decides" deadline=<one business day out> revert="an operator doit append decision <source> ref=<the escalation's src> …, or a corrected v4 record/PR clears the root cause and the next carry.uncarried() pass offers it again"` — escalation fires on the third failure only, never earlier. |
-| **`written`** | a `spec-carried` event on this subject? a footprint shared with a `building` spec in the same wave? | **The spec reaching you is already audited** — the Planner dispatches each spec's `spec-auditor` and its rewrite before `l1-complete` (§3.5), so there is no audit for you to run and none to wait for. A spec carrying a **`spec-carried`** event **skips the v2 spec-audit entirely** and is reviewed later at the tier landed on that event — read `review_tier` (`full` / `gates-only`) **verbatim off the event**, never re-derived. A shared footprint is **advisory**: note it, never block and never wait on it — a merge conflict is a re-dispatch, below. The tick dispatches every eligible `written` spec on its own (`autodispatch.run`, `doit tick` — L-charter-0042 R1): act only on a `written` spec with an `autodispatch-failed` newer than its `spec-written`, on that failure's reason. |
+| **`written`** | a `spec-carried` event on this subject? a footprint shared with a `building` spec in the same wave? | **The spec reaching you is already audited** — the Planner dispatches each spec's `spec-auditor` and its rewrite before `l1-complete` (§3.5), so there is no audit for you to run and none to wait for. A spec carrying a **`spec-carried`** event **skips the v2 spec-audit entirely** and is reviewed later at the tier landed on that event — read `tier` (`full` / `gates-only`) **verbatim off the event**, never re-derived. A shared footprint is **advisory**: note it, never block and never wait on it — a merge conflict is a re-dispatch, below. The tick dispatches every eligible `written` spec on its own (`autodispatch.run`, `doit tick` — L-charter-0042 R1): act only on a `written` spec with an `autodispatch-failed` newer than its `spec-written`, on that failure's reason. |
 | **`graded` / `reviewing` / `shipped`-not-accepted** — the pipeline after a build | **the newest** of `build-done`, `verdict`, `review` on the subject | see the block below; act on that one event only. |
 | **`building`** | — | nothing; in flight. |
 | **`shipped-owed-evidence`, an owed criterion's `wake_at` passed** | owed checks are swept by `owed-sweeper` (`doit sweep-owed`); not yours to run. You may still record `owed-met` from evidence you already hold, and you may re-date. | Evidence already in hand → `doit append owed-met <spec> criterion=<AC id> evidence=<the path, or the quoted observation>`. The fold derives `accepted` once every owed criterion on the spec has one — no re-grade spawn (S15/S33). A wrong or stale `wake_at` → re-date it (`doit append owed-ac <spec> criterion=<AC id> wake_at=<ISO>`), never a corrective for a check that simply has not run yet. A criterion the sweeper has already reported failing → the restore decision first (§5.8), then a corrective; the closed spec is never reopened. |
@@ -91,26 +91,16 @@ moment `BOARD_OWNERS` names you as its owner.
   path — only the builder squashes.
   `BLOCKED` / `NEEDS_CONTEXT` → its `question`
   rows are yours, and a build already blocked on a question does not wait for
-  the deadline: decide now if it is reversible. Every question decided (a
-  `decision` whose `ref` names it) → re-dispatch `builder` on the same
-  worktree with each decision's `why` in the packet as a binding constraint;
+  the deadline: decide now if it is reversible. An answered question is tick-owned (see below);
   an undecidable one → `escalation-blocking` with the `build-blocked` reason.
 - **newest is a `verdict`**: a `rejected-criterion` standing (none
   `criterion-cleared` since) → **rework**: dispatch `builder` on the same
   worktree and branch, the packet carrying every standing criterion with its
   `why` and every `must-fix` `reverify` line. Never bounce to the Planner
-  (D5). Nothing standing and `confirmed` → dispatch `reviewer` (round 1, or
-  round 2 when a `review` sent it back earlier). **Depth**: a spec carrying a
-  `spec-carried` event is reviewed at the `review_tier` that event names, read
-  verbatim — that is the whole decision for a carried spec, and the v2
-  spec-audit it skipped is never re-run to recover one. Otherwise depth `full`
-  when a `ui` review path exists and `$R/review-mcp.json` does, else
-  `gates-only`; `ui`
-  criteria and no browser → `escalation-blocking` (the review account is the
-  operator's). Not confirmed with nothing standing: `could_not_run` → confirm
+  (D5). Not confirmed with nothing standing: `could_not_run` → confirm
   the checker runs from the worktree and re-dispatch the grader once, again →
-  `escalation-blocking` (infra, not a deficiency — §5.3); only `cannot-assess`
-  → dispatch the reviewer at `gates-only`; the review decides.
+  `escalation-blocking` (infra, not a deficiency — §5.3). Only `cannot-assess`
+  is tick-owned (see below).
 - **newest is a `review`**: a `must-fix` standing → **rework** as above (the
   reverify lines are the packet's centre); the rework re-enters at
   `build-done`. Nothing standing and the verdict confirmed → **merge**:
@@ -325,11 +315,15 @@ deviation the builder must declare. Rework reuses the worktree. A missing
   capability its criteria need) or `preflight:<capability>` (a required
   capability could not be proven into its own view this round) — neither
   reason is a grade, and neither counts toward `grading_budget`'s cap. Do not
-  re-dispatch a subject refused this way, and do not treat it as the spec's
-  own failure: wait for a newer `build-done`, `unblocked`, or `decision` on
-  the subject or on the capability's own hold (`capability:<NAME>`) before
-  trying again — one of those three is what actually changes the state a
-  retry would otherwise just reproduce.
+  treat it as the spec's own failure. A newer authorized unblock on the same capability subject lets the tick regrade. A standing reviewer refusal is not automatically retried; it needs a newer qualifying review trigger or an operator's action.
+
+Tick-owned: review — confirmed verdicts and cannot-assess-only verdicts dispatch through lane_driver, using the carried tier and at most two rounds; missing browser capability escalates.
+Tick-owned: rebuild — answered build blocks dispatch on the same worktree with every deciding decision's why as a binding constraint.
+Tick-owned: regrade — a newer unblocked on the same capability hold permits the tick's first regrade action.
+Tick-owned: close — explicit thinker/operator close rulings kill unshipped specs; shipped specs require an operator decision.
+
+A standing driver `autodispatch-failed` needs Executor/operator handling or a newer qualifying trigger; elapsed time alone never retries it.
+
 
 ## Output
 
