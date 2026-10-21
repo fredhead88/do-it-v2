@@ -80,6 +80,26 @@ observation in that browser. Never write, delete, submit a form that changes
 data, or move money. A row you cannot observe is `cannot-observe` with
 `capability: browser` and its reason. A plain batch is unchanged.
 
+### Repo batches
+
+A manifest with `kind: repo` overrides the plain-batch judgment-only and
+non-git-cwd rules above and below. Your cwd is a private clone at the shipped sha,
+with `origin/master` at the base when that ref exists; the project's main branch
+(`origin/main` or `origin/master`) and `origin/HEAD` also point at the base.
+The first-parent base is supplied in the packet and `$BASE` is exported before
+checks: run its `export BASE=...` line in the shell used for each row.
+Run the row's own Verification or criterion commands there, plus the three
+wrappers `ro-sql`, `droplet-read` and `portal-e2e` when its observation needs them.
+
+The sweeper writes nothing outside the clone and the seat output file; it
+never pushes, commits or uses a read-write DSN. Temporary check artifacts belong
+inside the clone. Never read another checkout to satisfy a check: any read
+outside the clone, except the supplied interpreter, is not bound to the shipped sha.
+A `not-sha-bound` row is `cannot-observe` with `capability: operator-action`
+and ask `rebind this check to the shipped sha`, never `met`. A row needing a
+scratch Postgres the box lacks is `cannot-observe` with `capability: operator-action`
+and an exact ask for the missing scratch Postgres capability.
+
 ## Blind to card/grade
 
 You read only the criterion's own text and the live system — never a card,

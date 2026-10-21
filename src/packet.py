@@ -1,17 +1,6 @@
 #!/usr/bin/env python3
-"""doit packet <role> <subject> — build one role's packet from the ledger.
-
-A packet is the role's **Input** list, in order, and nothing its **Blindness**
-strips. Both halves are code here, not prose in the Executor's head:
-
-- the Input list is the per-role builder below;
-- the strip list is `strip()`, which pulls the *real* strings this subject's
-  packet must not contain — the builder's spawn id and branch, the grader's
-  reasons, a sibling spec's body, the Plan's rationale — out of the ledger and
-  the content dir, and **refuses the packet before it is written** if one is
-  present. A contaminated packet costs a whole spawn (D120); this is cheaper.
-
-Writes `$R/packets/<subject>-<role>-<n>.md` and prints the path.
+"""Build each role's Input packet from the ledger; refuse Blindness leaks.
+Write `$R/packets/<subject>-<role>-<n>.md` and print its path.
 """
 import argparse, hashlib, os, pathlib, re, shlex, subprocess, sys
 
@@ -1161,18 +1150,26 @@ _AC_ANY = re.compile(r"^\s*\**AC(\d+)\s*\[")  # group added (L-spec-0435): same
 # reuses it to also RECOVER the id, rather than forking a near-identical regex.
 
 
+def not_sha_bound(block, project):
+    """Find checkout paths; invalid shell quoting is never clean."""
+    try:
+        tokens = shlex.split(block.replace("`", " "), comments=False)
+    except ValueError:
+        return ["<unparsed>"]
+    root = f"/opt/{project}"
+    paths = []
+    for token in tokens:
+        for match in re.finditer(r"(?<![\w/.-])" + re.escape(root) + r"(?:/[^;|&<>\"'`,)\]}]*)?(?![\w.-])", token):
+            path = match.group().rstrip(".,:")
+            if path.startswith(root + "/.venv/"):
+                continue
+            if path not in paths:
+                paths.append(path)
+    return paths
+
+
 def parse_sweep_manifest(path):
-    """The batch manifest an `owed-sweeper` spawn reads (L-charter-0038 R1 /
-    L-spec-0387 Assumptions §8 — pinned here, since the manifest's WRITER,
-    `owed-sweep-driver`, is a sibling not yet specced): line 1 `# <sweep-id>`;
-    blank; `project: <name>`; `cwd: <absolute path>`; blank; `## Rows`; a
-    fenced ```json array of 1-8 row objects, each `{"spec", "criterion",
-    "declared_src", "line", "spec_path"}`. Every row's `spec_path`, resolved,
-    must equal `dispatch.spec_path(row["spec"])` exactly (fix 6) — a lazy,
-    function-scoped import, matching this file's existing `import
-    fold`/`import validate` convention. A row that fails that check dies
-    naming the offending spec. Returns `{"project", "cwd", "rows", "kind"}` (plain by default), rows
-    exactly as written (never mutated)."""
+    """Parse canonical spec rows unchanged; repo rows require shipped/base/clone keys."""
     p = pathlib.Path(path)
     if not p.is_file():
         die(f"no sweep manifest at {path}")
@@ -1187,7 +1184,7 @@ def parse_sweep_manifest(path):
     cwd = m.group(1).strip()
     kind_match = re.search(r"^kind:[ \t]*(.*)$", raw, re.M)
     kind = kind_match.group(1).strip() if kind_match else "plain"
-    if kind not in ("plain", "browser"):
+    if kind not in ("plain", "repo", "browser"):
         die(f"{path}: unsupported sweep kind {kind!r}")
     sec = section(raw, "Rows")
     if not sec:
@@ -1204,6 +1201,8 @@ def parse_sweep_manifest(path):
         die(f"{path}: the Rows block must be a JSON array of 1-8 objects")
     import dispatch
     for row in rows:
+        if kind == "repo" and any(not row.get(key) for key in ("shipped_sha", "base_sha", "clone")):
+            die(f"{path}: repo row requires shipped_sha, base_sha and clone")
         want = dispatch.spec_path(row["spec"])
         got = pathlib.Path(row["spec_path"]).resolve()
         if got != want:
@@ -1245,17 +1244,15 @@ def criterion_block(body, crit_id):
 
 
 def p_owed_sweeper(c):
-    """L-charter-0038 R1 / L-spec-0387 — the read-only sweep packet: blind to any
-    card, grade or audit reasoning (SD5), so this carries only the batch's
-    project/cwd and, per row, the criterion's OWN full block, verbatim, from
-    that row's own spec body — never one line, so a continuation-line
-    `review_path:` rides in. L-spec-9004 OC1: two more lines follow the due
-    checks — this batch's own read-only DB credential path (or its absence)
-    for a `live_db` observation, and the read-only portal review account."""
+    """Blind packet: own criterion/Verification and credential availability, never values."""
     manifest = parse_sweep_manifest(CONTENT / f"{c.a.subject}.md")
     L = [f"1. Batch `{c.a.subject}` — project `{manifest['project']}`, cwd `{manifest['cwd']}`.",
          "2. Every due check in this batch, each the criterion's own full block, verbatim, "
          "from its own spec — nothing else:"]
+    if manifest["kind"] == "repo":
+        L += ["   kind: repo — run each row's own Verification or criterion commands in the clone.",
+              "   Any read outside the clone is cannot-observe, capability operator-action; "
+              "ask: rebind this check to the shipped sha. Never mark that row met."]
     for row in manifest["rows"]:
         sp = pathlib.Path(row["spec_path"])
         if not sp.is_file():
@@ -1265,6 +1262,12 @@ def p_owed_sweeper(c):
             die(f"{row['spec']}'s {row['criterion']} is not in {row['spec_path']}")
         L += [f"   spec {row['spec']} — criterion {row['criterion']} "
               f"(declared: {row['declared_src']} @ {row['line']}):"]
+        if manifest["kind"] == "repo":
+            L += [f"     shipped_sha: {row['shipped_sha']}; base_sha: {row['base_sha']}; clone: {row['clone']}",
+                  f"     export BASE={shlex.quote(row['base_sha'])}"]
+            paths = not_sha_bound(block, manifest["project"])
+            if paths:
+                L.append("     not-sha-bound: " + ", ".join(paths))
         L += [f"     {ln}" for ln in block.splitlines()]
     env_path = pathlib.Path(manifest["cwd"]) / ".env"
     if env_path.is_file():

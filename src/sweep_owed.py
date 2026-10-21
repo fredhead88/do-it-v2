@@ -38,11 +38,11 @@ actor (D90: `"-".join(stem.split("-")[1:-1])`) resolve to `sweep` under any
 caller's environment, including a bare cron invocation that never set
 `DOIT_LEDGER_FILE` at all.
 """
-import argparse, hashlib, json, pathlib, re, subprocess, sys
+import argparse, hashlib, json, os, pathlib, re, shutil, subprocess, sys, time
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import dispatch, fold, owed, owed_failures, packet, scratch, prod_runner, prod_browser, owed_routes  # noqa: E402
+import build_runner, dispatch, fold, owed, owed_failures, packet, scratch, prod_runner, prod_browser, owed_routes  # noqa: E402
 
 LEDGER_NAME = "L-sweep-local.jsonl"
 MAX_BATCH = 8
@@ -197,7 +197,16 @@ def sweep_expired(specs, now, *, dry_run=False):
 
 # ─────────────────────────── step 2: one open batch at a time ───────────────
 
-def open_batch(all_ev, now):
+def _sweep_kind(subject):
+    try:
+        raw = (dispatch.CONTENT / f"{subject}.md").read_text()
+    except (OSError, UnicodeError):
+        return "plain"
+    match = re.search(r"^kind:[ \t]*(.*)$", raw, re.M)
+    return match.group(1).strip() if match else "plain"
+
+
+def open_batch(all_ev, now, kind=None):
     """SD7 step 2: a `spawn-started` with `role=owed-sweeper` and no terminal
     event, younger than twice the role's own cap (`dispatch.ROLES`) — the same
     aging rule `tick._spawn_busy` applies to every other role (Assumptions §6:
@@ -209,6 +218,8 @@ def open_batch(all_ev, now):
             continue
         sid = e.get("spawn")
         if sid and sid in ended:
+            continue
+        if kind is not None and _sweep_kind(e.get("subject")) != kind:
             continue
         age_min = (now - fold.ts(e.get("ts"))).total_seconds() / 60
         if age_min <= 2 * cap:
@@ -291,6 +302,9 @@ def _manifest_text(sweep_id, project, cwd, batch, *, kind="plain"):
     of a spec's write destination."""
     rows = [{"spec": r["spec"], "criterion": r["criterion"], "declared_src": r["declared_src"],
              "line": r["line"], "spec_path": str(dispatch.spec_path(r["spec"]))} for r in batch]
+    if kind == "repo":
+        for row, source in zip(rows, batch):
+            row.update(shipped_sha=source["shipped_sha"], base_sha=source["base_sha"], clone=cwd)
     return (f"# {sweep_id}\n\nproject: {project}\ncwd: {cwd}\nkind: {kind}\n\n## Rows\n\n```json\n"
             + json.dumps(rows, indent=2) + "\n```\n")
 
@@ -459,6 +473,64 @@ def _resolve_candidates(specs, now, *, dry_run=False):
     return resolved, quarantined, lines
 
 
+def make_repo_cwd(project, sha, base, sweep_id):
+    """Clone shipped code privately; never modify refs or worktrees in the source."""
+    parent = scratch.sub("sweeps") / sweep_id
+    parent.mkdir(mode=0o700)
+    parent.chmod(0o700)
+    tree = parent / "tree"
+    repo = dispatch.ROOT / "repos" / project
+    env, deadline = os.environ.copy(), time.monotonic() + build_runner.WALL_CAP
+    try:
+        build_runner._required(["git", "clone", "--shared", "--no-checkout", str(repo), str(tree)],
+                               phase="repo clone", env=env, deadline=deadline)
+        requested_sha = sha
+        sha = build_runner._resolve(tree, sha, env, deadline)
+        # The public helper also accepts the literal first-parent expression.
+        if base == requested_sha + "^1":
+            base = build_runner._required(["git", "-C", str(tree), "rev-parse", "--verify", sha + "^1"],
+                                          phase="repo first parent", env=env, deadline=deadline)
+        base = build_runner._resolve(tree, base, env, deadline)
+        branch = build_runner._main_branch(tree, project, env, deadline)
+        refs = build_runner._required(["git", "-C", str(tree), "for-each-ref", "--format=%(refname)",
+                                       "refs/remotes/origin/"], phase="repo refs", env=env, deadline=deadline).splitlines()
+        main_ref = f"refs/remotes/origin/{branch}"
+        if main_ref not in refs:
+            raise build_runner.Undetermined("unresolvable main branch")
+        build_runner._required(["git", "-C", str(tree), "checkout", "--detach", sha],
+                               phase="repo checkout", env=env, deadline=deadline)
+        for ref in dict.fromkeys([main_ref, "refs/remotes/origin/main", "refs/remotes/origin/master"]):
+            if ref in refs:
+                build_runner._required(["git", "-C", str(tree), "update-ref", ref, base],
+                                       phase="repo base ref", env=env, deadline=deadline)
+        build_runner._required(["git", "-C", str(tree), "symbolic-ref", "refs/remotes/origin/HEAD", main_ref],
+                               phase="repo origin HEAD", env=env, deadline=deadline)
+        dispatch.provision_worktree_env(tree, repo)
+        return tree
+    except BaseException:
+        shutil.rmtree(parent)
+        raise
+
+
+def reap_repo_cwds(all_ev):
+    """Remove only trees whose owed-sweeper spawn has a terminal event."""
+    ended = {e.get("spawn") for e in all_ev
+             if e.get("type") in ("spawn-done", "spawn-failed", "spawn-stale")}
+    removed = []
+    for event in all_ev:
+        if (event.get("type") != "spawn-started" or event.get("role") != "owed-sweeper"
+                or event.get("spawn") not in ended):
+            continue
+        subject = event.get("subject", "")
+        if not re.fullmatch(r"L-sweep-\d+", subject):
+            continue
+        tree = scratch.sub("sweeps") / subject / "tree"
+        if tree.is_dir() and not tree.is_symlink():
+            shutil.rmtree(tree)
+            removed.append(str(tree))
+    return removed
+
+
 def dispatch_batch(project, batch, runner, *, dry_run=False, kind="plain"):
     """`doit packet owed-sweeper <id>` then `doit dispatch owed-sweeper <id>
     --packet <path> --cwd <sweep-dir> --project <name> --detach`, in that
@@ -467,22 +539,40 @@ def dispatch_batch(project, batch, runner, *, dry_run=False, kind="plain"):
     (`scratch.sub("sweeps") / <sweep-id>`, mode 0o700) — never
     `$R/repos/<project>` and never a builder/grader worktree (L-spec-9004
     OC1) — created before the manifest is written, so the manifest's own
-    `cwd:` field and the `--cwd` argv agree, as they did before this change."""
+    `cwd:` field and the `--cwd` argv agree, as they did before this change.
+    For kind=repo only, cwd is a clone at the shipped sha instead, provisioned
+    by make_repo_cwd before the manifest or packet is written."""
     if dry_run:
         return [f"sweep-owed: DRY RUN would batch {len(batch)} check(s) in project {project} "
                 f"({_describe(batch)}) as one detached owed-sweeper dispatch"]
     sweep_path = dispatch.alloc(dispatch.CONTENT, "L-sweep-", ".md")
     sweep_id = sweep_path.stem
-    cwd_dir = scratch.sub("sweeps") / sweep_id
-    cwd_dir.mkdir(parents=True, exist_ok=True)
-    cwd_dir.chmod(0o700)
-    cwd = str(cwd_dir)
+    if kind == "repo":
+        try:
+            cwd = str(make_repo_cwd(project, batch[0]["shipped_sha"], batch[0]["base_sha"], sweep_id))
+            # Resolve the first-parent expression to the actual base for the manifest.
+            base = build_runner._required(["git", "-C", cwd, "rev-parse", "HEAD^1"],
+                                          phase="repo base", env=os.environ.copy(),
+                                          deadline=time.monotonic() + 30)
+            batch = [{**row, "base_sha": base} for row in batch]
+        except (build_runner.Undetermined, OSError, subprocess.SubprocessError):
+            sweep_path.unlink(missing_ok=True)
+            parent = scratch.sub("sweeps") / sweep_id
+            if parent.exists():
+                shutil.rmtree(parent)
+            return [f"sweep-owed: repo clone failed for {sweep_id}"]
+    else:
+        cwd_dir = scratch.sub("sweeps") / sweep_id
+        cwd_dir.mkdir(parents=True, exist_ok=True)
+        cwd_dir.chmod(0o700)
+        cwd = str(cwd_dir)
     # Provision the batch's read-only DSN BEFORE the packet is built: packet.p_owed_sweeper
     # decides "credential available" by checking <cwd>/.env exists, and dispatch's own
     # provisioning runs only after the packet is already written. In the old order every
     # sweeper since 2026-09-27 was told "not available (capability=ro-dsn)", recorded the
     # check unobservable, and _blocked_permanently retired it until it expired (2026-10-11).
-    dispatch.provision_sweep_env(cwd, dispatch.ROOT / "repos" / project)
+    if kind != "repo":
+        dispatch.provision_sweep_env(cwd, dispatch.ROOT / "repos" / project)
     sweep_path.write_text(_manifest_text(sweep_id, project, cwd, batch, kind=kind))
     pr = runner.run([str(doit_bin()), "packet", "owed-sweeper", sweep_id])
     if pr.returncode != 0:
@@ -536,6 +626,8 @@ def run(*, dry_run=False, runner=None, now=None):
     now = now or datetime.now(timezone.utc)
     all_ev = fold.read_events()
     specs = fold.fold(all_ev)[0]
+    if not dry_run:
+        reap_repo_cwds(all_ev)
 
     lines = sweep_expired(specs, now, dry_run=dry_run)
     lines.extend(owed_failures.escalate_failures(specs, now, dry_run=dry_run))
@@ -575,12 +667,32 @@ def run(*, dry_run=False, runner=None, now=None):
         lines.append(f"sweep-owed: {len(e2e)} browser row(s) assigned to committed e2e observations")
     due, partition_lines = judgment_rows(due, observations)
     lines.extend(partition_lines)
+    repo_rows, plain_rows = [], []
+    for row in due:
+        if (prod_runner.record_for(row)["runner"] == "judgment"
+                and owed_routes.ROUTES.get(owed_routes.route_for(row.get("capability"))) == "repo"):
+            if row["status"] != "due":
+                lines.append(f"sweep-owed: 1 repo row excluded: {row['spec']}/{row['criterion']}: not due")
+                continue
+            sha = next((e.get("sha") for e in reversed(specs[row["spec"]]["evs"])
+                        if e.get("type") == "shipped"), None)
+            if not sha:
+                lines.append(f"sweep-owed: 1 repo row excluded: {row['spec']}/{row['criterion']}: shipped sha undetermined")
+                continue
+            repo_rows.append({**row, "shipped_sha": sha, "base_sha": sha + "^1"})
+        else:
+            plain_rows.append(row)
+    due = plain_rows
     plain_project, _ = _batch_for(due, all_ev)
     project, _ = _batch_for([*due, *browser_seat], all_ev)
     kind = "browser" if project is not None and project != plain_project else "plain"
     candidates = browser_seat if kind == "browser" else due
     record = {"quarantined": quarantined}
-    if open_batch(all_ev, now):
+    plain_open = open_batch(all_ev, now, "plain") or open_batch(all_ev, now, "browser")
+    repo_open = open_batch(all_ev, now, "repo")
+    if (not candidates or plain_open) and repo_rows and not repo_open:
+        candidates, kind = repo_rows, "repo"
+    if (repo_open if kind == "repo" else plain_open) or (not candidates and repo_rows and repo_open):
         record["outcome"] = "open"
         lines.append("sweep-owed: an owed-sweeper batch is already open; nothing dispatched this run")
     elif not candidates:
@@ -588,6 +700,12 @@ def run(*, dry_run=False, runner=None, now=None):
         lines.append("sweep-owed: nothing due to batch")
     else:
         project, batch = _batch_for(candidates, all_ev)
+        if kind == "repo":
+            sha = batch[0]["shipped_sha"]
+            batch = [row for row in candidates if row["project"] == project and row["shipped_sha"] == sha][:MAX_BATCH]
+            deferred = sum(row["project"] == project for row in candidates) - len(batch)
+            if deferred:
+                lines.append(f"sweep-owed: {deferred} repo row(s) deferred: one shipped sha and at most {MAX_BATCH} rows per batch")
         try:
             batch_lines = dispatch_batch(project, batch, runner, dry_run=dry_run, kind=kind)
         except (OSError, subprocess.SubprocessError) as exc:

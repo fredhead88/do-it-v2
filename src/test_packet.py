@@ -8,6 +8,7 @@ builder is then made to leak one and the refusal must fire."""
 import json, os, pathlib, re, subprocess, sys, tempfile
 
 TMP = pathlib.Path(tempfile.mkdtemp())
+os.environ["HOME"] = str(TMP / "home")
 os.environ["DOIT_ROOT"], os.environ["DOIT_PROJECT"] = str(TMP), "t"
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 import audit, dispatch, fold, packet  # noqa: E402
@@ -1913,3 +1914,78 @@ def test_grader_evidence():
 
 
 test_grader_evidence()
+
+
+# L-spec-1368: repo binding is conservative; plain packets retain their bytes.
+def test_repo_packet():
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    cases = [
+        ("cat /opt/albert-scott/src/x.py", ["/opt/albert-scott/src/x.py"]),
+        ("/opt/albert-scott/.venv/bin/python src/x.py", []),
+        ("cat src/x.py /opt/other-project/x /opt/albert-scottish/x", []),
+        ("cat /opt/albert-scott /opt/albert-scott/a /opt/albert-scott", ["/opt/albert-scott", "/opt/albert-scott/a"]),
+        ('cat "/opt/albert-scott/src/x.py', ["<unparsed>"]),
+        ("```bash\ncat '/opt/albert-scott/a b.py'\n```", ["/opt/albert-scott/a b.py"]),
+    ]
+    for block, expected in cases:
+        assert packet.not_sha_bound(block, "albert-scott") == expected, block
+    print("repo-batch AC1 path binding passed")
+    sp = dispatch.spec_path("L-spec-1368-fixture")
+    sp.write_text("## Verification\n```bash\ncat /opt/albert-scott/src/x.py\n```\n")
+    row = _row_387(sp.stem, "verify")
+    path = TMP / "content/L-sweep-1368.md"
+    def manifest(kind, rows):
+        path.write_text("# L-sweep-1368\nproject: albert-scott\ncwd: /fixture/clone\n" +
+                        (f"kind: {kind}\n" if kind else "") +
+                        "\n## Rows\n```json\n" + json.dumps(rows) + "\n```\n")
+    c = SimpleNamespace(a=SimpleNamespace(subject="L-sweep-1368"))
+    with patch.object(packet, "review_account", return_value="fixture account"):
+        manifest(None, [row])
+        assert packet.parse_sweep_manifest(path)["kind"] == "plain"
+        plain = packet.p_owed_sweeper(c)
+        assert plain == [
+            "1. Batch `L-sweep-1368` — project `albert-scott`, cwd `/fixture/clone`.",
+            "2. Every due check in this batch, each the criterion's own full block, verbatim, from its own spec — nothing else:",
+            f"   spec {sp.stem} — criterion verify (declared: owed-ac @ 1):",
+            "     ## Verification", "     ```bash", "     cat /opt/albert-scott/src/x.py", "     ```",
+            "3. This batch's own read-only DB credential, for a `live_db` observation: not available for this batch (capability=ro-dsn).",
+            "4. The review account for this app: fixture account. It may never delete and never move money.",
+        ]
+        repo_row = dict(row, shipped_sha="shipped-fixture", base_sha="base-fixture", clone="/fixture/clone")
+        manifest("repo", [repo_row])
+        parsed = packet.parse_sweep_manifest(path)
+        assert parsed["kind"] == "repo" and parsed["rows"] == [repo_row]
+        rendered = "\n".join(packet.p_owed_sweeper(c))
+        for term in ("kind: repo", "shipped-fixture", "base-fixture", "/fixture/clone", "## Verification",
+                     "not-sha-bound: /opt/albert-scott/src/x.py", "export BASE=", "rebind this check to the shipped sha"):
+            assert term in rendered, term
+        sp.write_text("## Verification\n```bash\ngit diff --name-only $BASE\n```\n")
+        assert "not-sha-bound:" not in "\n".join(packet.p_owed_sweeper(c))
+        for key in ("shipped_sha", "base_sha", "clone"):
+            manifest("repo", [{k: v for k, v in repo_row.items() if k != key}])
+            try:
+                packet.parse_sweep_manifest(path)
+                raise AssertionError("missing repo key accepted: " + key)
+            except SystemExit:
+                pass
+        manifest("other", [row])
+        try:
+            packet.parse_sweep_manifest(path)
+            raise AssertionError("unknown kind accepted")
+        except SystemExit:
+            pass
+    print("repo-batch AC4 repo manifest/packet and plain fixture passed")
+    contract = (pathlib.Path(__file__).parents[1] / "agents/owed-sweeper.md").read_text()
+    sec = contract.split("### Repo batches\n", 1)[1].split("\n## ", 1)[0]
+    for term in ("clone at the shipped sha", "origin/master", "$BASE", "Verification", "criterion commands",
+                 "ro-sql", "droplet-read", "portal-e2e", "seat output file", "never pushes", "commits",
+                 "read-write DSN", "not-sha-bound", "cannot-observe", "operator-action",
+                 "rebind this check to the shipped sha", "never `met`", "scratch Postgres", "exact ask"):
+        assert term in sec, term
+    outside = re.sub(r"\n### Repo batches\n.*?(?=\n## )", "", contract, flags=re.S)
+    assert __import__("hashlib").sha256(outside.encode()).hexdigest() == "7063bfccbf09289ac6ff85881054e750b4a75ac83f129f8c66c96bfdb3124566"
+    print("repo-batch AC6 contract and unchanged plain text passed")
+
+
+test_repo_packet()
