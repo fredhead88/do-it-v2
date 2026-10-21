@@ -63,8 +63,8 @@ def fixture(rule):
         'enqueue': [event('review', -70, actor='reviewer', confirmed=True, n_blocking=0),
                     event('merge-gate-clean', -60, actor='executor')],
         'merge': [event('queue-add', -60, actor='executor')],
-        'rebuild': [event('build-blocked', -70, actor='builder'),
-                    event('decision', -60, actor='thinker')],
+        'rebuild': [event('build-blocked', -70, actor='builder', _src='builder:1'),
+                    event('decision', -60, actor='thinker', ref='builder:1')],
         'regrade': [event('capability-hold', -70, subject='capability:db:' + SID),
                     event('unblocked', -60, subject='capability:db:' + SID)],
         'close': [event('decision', -60, actor='thinker', close='superseded')],
@@ -161,6 +161,52 @@ class LaneRulesTests(unittest.TestCase):
                                  ('gate', event('must-fix', -20, criterion='AC1'))]:
             self.assertFalse(any(r['rule'] == rule for r in self.rows(fixture(rule) + [suppressor])))
         self.row([written(), event('build-blocked', -70), event('spec-written', -60)], 'rebuild')
+
+    def test_rebuild_requires_answer_to_current_block(self):
+        blocked = event('build-blocked', -70, actor='builder', _src='builder:1',
+                        spawn='L-builder-9001')
+        question = event('question', -69, actor='builder', _src='builder:2',
+                         spawn=blocked['spawn'])
+        base = [written(), blocked, question]
+        for actor in ('thinker', 'operator'):
+            for ref in (blocked['_src'], question['_src']):
+                with self.subTest(actor=actor, ref=ref):
+                    answer = event('decision', -60, actor=actor, ref=ref,
+                                   why='Use the smaller scope', revert='Re-raise the question')
+                    self.assertEqual(self.row(base + [answer], 'rebuild')['since'], answer['ts'])
+        for answer in (event('decision', -60, actor='thinker', why='AC7 met'),
+                       event('decision', -60, actor='thinker', ref='grader:1'),
+                       event('decision', -70, actor='thinker', ref=blocked['_src']),
+                       event('decision', -80, actor='thinker', ref=blocked['_src']),
+                       event('decision', -60, actor='builder', ref=blocked['_src'])):
+            with self.subTest(answer=answer):
+                self.assertFalse(any(r['rule'] == 'rebuild' for r in self.rows(base + [answer])))
+        answer = event('decision', -60, actor='thinker', ref=question['_src'])
+        for fields in (dict(spawn='L-builder-9000'), dict(actor='grader')):
+            unrelated = dict(question, **fields)
+            self.assertFalse(any(r['rule'] == 'rebuild' for r in self.rows([written(), blocked, unrelated, answer])))
+        newer_block = event('build-blocked', -65, actor='builder', _src='builder:3',
+                            spawn='L-builder-9002')
+        self.assertFalse(any(r['rule'] == 'rebuild' for r in self.rows(base + [newer_block, answer])))
+        legacy = [written(), dict(blocked), dict(question), answer]
+        legacy[1].pop('spawn')
+        legacy[2].pop('spawn')
+        self.row(legacy, 'rebuild')
+        legacy[2]['ts'] = event('question', -80)['ts']
+        self.assertFalse(any(r['rule'] == 'rebuild' for r in self.rows(legacy)))
+        self.row([written(), event('decision', -60, actor='thinker', rework='yes')], 'rebuild')
+
+    def test_rebuild_never_reopens_shipped_or_settled_specs(self):
+        for minute in (-65, -55):
+            ev = fixture('rebuild') + [event('shipped', minute, actor='executor')]
+            self.assertFalse(any(r['rule'] == 'rebuild' for r in self.rows(ev)))
+            self.assertIsNone(lr._rebuild(dict(evs=ev, spec={'state': 'reviewing'})))
+        for state in dispatch.SETTLED_STATES:
+            with self.subTest(state=state):
+                ev = fixture('rebuild')
+                s = {SID: dict(state=state, evs=ev)}
+                self.assertFalse(any(r['rule'] == 'rebuild' for r in lr.due(ev, s, NOW)))
+                self.assertIsNone(lr._rebuild(dict(evs=ev, spec=s[SID])))
 
     def test_states_not_from_fold(self):
         for rule in ('gate', 'enqueue', 'rebuild'):

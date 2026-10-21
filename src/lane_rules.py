@@ -99,10 +99,25 @@ def _result(trigger, reason='condition met', **fields):
 
 def _rebuild(c):
     evs = c['evs']
+    # Settled fold states include shipped (and all shipped-owed-* states),
+    # accepted, closed-shipped, closed-unbuilt, dropped, killed and void.
+    if _terminal(evs, c['spec']):
+        return None
     blocked = _latest(evs, {'build-blocked'})
+    # thinker-answer refs the builder's question, not the build-blocked row.
+    # A spawn ties that question to this blocked build; legacy rows without a
+    # spawn must at least belong to the current block's time interval.
+    questions = [e for e in evs if blocked and e.get('type') == 'question'
+                 and e.get('actor') == 'builder' and e.get('_src')
+                 and (e.get('spawn') == blocked['spawn'] if blocked.get('spawn')
+                      else _time(e['ts']) >= _time(blocked['ts']))]
     decisions = [e for e in evs if e.get('type') == 'decision' and e.get('actor') in ('thinker', 'operator')
                  and not e.get('close') and e.get('regrade') != 'yes' and not e.get('wave_waive')
-                 and (blocked or e.get('rework') == 'yes')]
+                 and (blocked and _time(e['ts']) > _time(blocked['ts']) and e.get('ref')
+                      and (e['ref'] == blocked.get('_src')
+                           or any(e['ref'] == q['_src'] and _time(e['ts']) > _time(q['ts'])
+                                  for q in questions))
+                      or not blocked and e.get('rework') == 'yes')]
     rewrites = [e for e in evs if blocked and e.get('type') == 'spec-written'
                 and _time(e['ts']) > _time(blocked['ts'])]
     trigger = max(decisions + rewrites, key=lambda e: _time(e['ts']), default=None)

@@ -145,13 +145,51 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(self.appended(), [])
 
     def test_rebuild_answer_and_wrong_actor(self):
-        self.events = [self.events[0], self.event('build-blocked', 20),
-                       self.event('decision', 1, actor='builder', why='not binding')]
+        self.events = [self.events[0], self.event('build-blocked', 20, _src='builder:1'),
+                       self.event('decision', 1, actor='builder', ref='builder:1', why='not binding')]
         self.assertEqual(self.run_driver(), [])
-        self.events[-1] = self.event('decision', 1, actor='thinker', why='Use the smaller scope')
+        self.events[-1] = self.event('decision', 1, actor='thinker', ref='builder:1', why='Use the smaller scope')
         self.run_driver()
         self.assertEqual(self.calls[0][:4], ['doit', 'packet', 'builder', self.sid])
         self.assertEqual(self.appended()[0]['rule'], 'rebuild')
+
+    def test_rebuild_thinker_answer_question_ref(self):
+        self.events = [self.events[0],
+                       self.event('build-blocked', 20, actor='builder', spawn='L-builder-9001', _src='builder:1'),
+                       self.event('question', 19, actor='builder', spawn='L-builder-9001', _src='builder:2'),
+                       self.event('decision', 1, actor='thinker', ref='builder:2',
+                                  project='proj', why='Use the smaller scope', revert='Re-raise the escalation')]
+        self.run_driver()
+        self.assertEqual(self.calls[0][:4], ['doit', 'packet', 'builder', self.sid])
+        self.assertEqual(self.appended()[0]['rule'], 'rebuild')
+        self.events.extend(fold.read_events())
+        self.calls.clear()
+        self.assertEqual(self.run_driver(), [])
+        self.assertEqual(self.calls, [])
+
+    def test_rebuild_ignores_unrelated_ruling(self):
+        for fields in ({}, dict(ref='grader:1')):
+            with self.subTest(fields=fields):
+                self.events = [self.events[0], self.event('build-blocked', 20, _src='builder:1'),
+                               self.event('decision', 1, actor='thinker', why='AC7 met', **fields)]
+                self.assertEqual(self.run_driver(), [])
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.appended(), [])
+
+    def test_rebuild_ignores_shipped_and_settled_specs(self):
+        base = [self.events[0], self.event('build-blocked', 20, _src='builder:1'),
+                self.event('decision', 1, actor='thinker', ref='builder:1', why='answer')]
+        for minutes in (5, 0):
+            with self.subTest(shipped_minutes=minutes):
+                self.events = base + [self.event('shipped', minutes, actor='executor')]
+                self.assertEqual(self.run_driver(), [])
+        self.events = base
+        for state in dispatch.SETTLED_STATES:
+            with self.subTest(state=state):
+                self.specs[self.sid]['state'] = state
+                self.assertEqual(self.run_driver(), [])
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.appended(), [])
 
     def test_regrade_capability_forms_and_subject(self):
         for kind in ('capability-hold', 'escalation-blocking'):
@@ -259,8 +297,8 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(self.appended(), [])
 
     def test_legacy_builder_records_suppress_answered_rebuild(self):
-        self.events = [self.events[0], self.event('build-blocked', 20),
-                       self.event('decision', 10, actor='operator', why='answer')]
+        self.events = [self.events[0], self.event('build-blocked', 20, _src='builder:1'),
+                       self.event('decision', 10, actor='operator', ref='builder:1', why='answer')]
         for kind in ('spawn-started', 'spawn-failed', 'autodispatched',
                      'autodispatch-failed', 'build-started'):
             with self.subTest(kind=kind):
