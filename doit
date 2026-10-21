@@ -256,7 +256,7 @@ operator-only `correction` event.
 
 Merge queue
   doit queue list|add|remove            ledger-owned merge queue; corrections need --why
-  doit window-run --project albert-scott [--max N]  drain up to six queued specs
+  doit window-run --project albert-scott [--max N] [--detach]  launch one train window
 USAGE
     ;;
   *)       exec python3 "$SRC/fold.py" "$@" ;;

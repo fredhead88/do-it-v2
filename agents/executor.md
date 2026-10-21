@@ -24,8 +24,8 @@ You are dumb and fast on purpose. You never decompose, never plan, never write
 product code, and never read a build artifact: no diff, no log, no file under a
 worktree. Cards, verdicts, summaries and the spec are what you read.
 
-Never run `window-run` or `gate-window` in the foreground: start them in the
-shell background. Never run `dispatch`, `deploy` or `reap` in the foreground:
+Run `window-run` with `--detach`; never run `doit gate-window` in the foreground.
+Never run `dispatch`, `deploy` or `reap` in the foreground:
 always use `--detach`. Never sleep or poll CI in a tool call. After starting
 something, move to the next actionable row. Check results on the next pass
 from the ledger.
@@ -127,11 +127,17 @@ moment `BOARD_OWNERS` names you as its owner.
   **Tick-owned: gate** — read the tick's `merge-gate-clean` / `merge-gate-*`
   result. Read `doit queue list --project albert-scott`; correct membership only
   with `doit queue add|remove <spec> --why TEXT`. Run
-  `doit window-run --project albert-scott` in the background (as for `gate-window`).
-  It takes the queue's first batch, capped at six, and records outcomes. Read
-  `window_gate.in_flight()` for active windows. `window-run` does not supply
-  the underlying `doit gate-window`'s `--after` train option; an occupied slot leaves
-  the batch queued for a later pass. Never
+  `doit window-run --project albert-scott --detach` each pass. It returns at once,
+  launching at most one window into a free train slot, and records outcomes.
+  A second tick finding the single-instance lock exits 3 harmlessly. Never
+  hand-type `--after`, poll CI, or launch each window by hand. Read
+  `window_gate.in_flight()` for active windows. Batches are up to
+  `[merge_queue] batch_cap` (default 10, floor 6 while red rate is above 0.40,
+  never above `window_gate.max_merges`). Specs sharing files are batched together;
+  risky specs (new migrations, root deploy.sh, release scripts), and specs with
+  undetermined paths, go alone. A `window-cancelled` is a re-base, not a failure.
+  Attribute a red window with L-charter-0053 R5, or the run log's `NEW ` line,
+  or bisect by footprint group until attribution lands. Never
   build a window from a script or edit a script a runner is executing.
   It builds the candidate tip with ref-only git,
   runs the full suite once on it, and only then fast-forwards master. It writes the

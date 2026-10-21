@@ -13,6 +13,12 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+# Abort before importing any module that could append to the ledger.
+_test_root = os.environ.get('DOIT_ROOT')
+assert _test_root, 'DOIT_ROOT must be set'
+assert Path(_test_root).resolve() != (Path.home() / '.do-it').resolve()
+assert Path(_test_root).resolve().is_relative_to(Path(tempfile.gettempdir()).resolve()), 'temporary DOIT_ROOT required'
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import autodispatch
 import dispatch
@@ -302,29 +308,20 @@ class QueueTests(unittest.TestCase):
         self.seed(events)
 
     def test_window_launch_and_exit_codes(self):
-        self.window_seed(7)
         for code in (0, 1, 2, 3, 4):
+            self.window_seed(7)
             def runner(argv):
-                events = fold.read_events()
-                batch = [e for e in events if e['type'] == 'queue-batch'][-1]
-                self.assertEqual(batch['subject'], argv[2])
-                self.assertRegex(argv[2], r'^[A-Za-z0-9._-]+$')
-                self.assertEqual(argv, ['doit', 'gate-window', batch['subject'], '--project',
-                                        'albert-scott', '--specs', ','.join(f'L-spec-{9001+i}' for i in range(6))])
+                batch = [e for e in fold.read_events() if e['type'] == 'queue-batch'][-1]
+                self.assertEqual(argv[2], batch['subject'])
+                self.assertEqual(len(batch['specs'].split(',')), 7)
                 return dict(code=code)
-            with redirect_stdout(io.StringIO()) as output:
-                self.assertEqual(mq.window_run('albert-scott', runner=runner), code)
-            if code == 3:
-                self.assertIn('window-run: another window holds the lock', output.getvalue())
+            with patch.object(mq, '_repository', return_value=(self.root, 'main')), \
+                 patch.object(mq, 'spec_paths', return_value=[('M', 'file.py')]):
+                self.assertEqual(mq.window_run('albert-scott', runner=runner, now=self.now), code)
             self.assertEqual(len(mq.queue(fold.read_events())), 7)
-        before = sum(len(p.read_text().splitlines()) for p in (self.root / 'events').glob('*.jsonl'))
-        self.assertEqual(mq.window_run('other', runner=self.fake), 1)
-        self.assertEqual(mq.window_run('albert-scott', 7, runner=self.fake), 1)
-        self.assertEqual(sum(len(p.read_text().splitlines()) for p in (self.root / 'events').glob('*.jsonl')), before)
         self.seed([])
-        self.assertEqual(mq.window_run('albert-scott', runner=self.fake), 0)
-        self.assertEqual(self.calls, [])
-        self.mark(7, 'batch-before-gate', 'empty', 'wrong-project', 'exit-3 keeps queue', 'max-cap', 'exit passthrough')
+        self.assertEqual(mq.window_run('albert-scott', runner=self.fake), 3)
+        self.assertEqual(mq.window_run('../unsafe', runner=self.fake), 2)
 
     def test_window_outcomes_and_mid_run_add(self):
         self.window_seed(4)
@@ -339,13 +336,14 @@ class QueueTests(unittest.TestCase):
                 stream.write(json.dumps(dict(self.event('queue-add', -20, project='albert-scott',
                                                         branch='new', rule='operator'), subject='L-spec-9010')) + '\n')
             return dict(code=1)
-        self.assertEqual(mq.window_run('albert-scott', runner=runner), 1)
+        with patch.object(mq, '_repository', return_value=(self.root, 'main')), patch.object(mq, 'spec_paths', return_value=[('M', 'file.py')]):
+            self.assertEqual(mq.window_run('albert-scott', runner=runner), 1)
         evs = fold.read_events()
         removes = [e for e in evs if e['type'] == 'queue-remove']
         self.assertEqual(len(removes), 3)
         self.assertEqual({e['subject']: e['reason'] for e in removes},
                          {'L-spec-9001': 'shipped', 'L-spec-9002': 'window-dropped', 'L-spec-9003': 'merge-conflict'})
-        self.assertTrue(all(e.get('window', '').startswith('window-') for e in removes))
+        self.assertTrue(all(e['reason'] in mq.OUTCOMES for e in removes))
         self.assertEqual({r['spec'] for r in mq.queue(evs)}, {'L-spec-9004', 'L-spec-9010'})
         self.mark(8, 'shipped removed', 'dropped removed', 'conflict removed', 'no outcome stays')
 
@@ -474,6 +472,366 @@ class QueueTests(unittest.TestCase):
         self.assertIn('doit window-run', result.stdout)
         self.assertIn('doit queue', result.stdout)
         self.mark(11, 'executor tick ownership ok', 'queue and window help ok')
+
+
+    def train_mark(self, ac, *cases):
+        body = '\n'.join(f'1154-AC{ac} {case} ok' for case in cases)
+        print(body)
+        print(json.dumps(dict(url=f'cli://doit-v2/merge-queue/1154/AC{ac}', status=0,
+                              body_sha256=hashlib.sha256(body.encode()).hexdigest(), body_excerpt=body)))
+
+    def test_train_batches(self):
+        rows = [dict(spec=s) for s in ('A', 'C', 'X', 'B', 'R')]
+        paths = dict(A={'a'}, B={'a', 'b'}, C={'b'}, X={'x'}, R={'a'})
+        before = json.dumps([rows, {k: sorted(v) for k, v in paths.items()}])
+        self.assertEqual(mq.form_batch(rows, paths, 10, {'R'}), ['A', 'C', 'B', 'X'])
+        self.assertEqual(mq.form_batch(rows, paths, 2, {'R'}), ['A', 'C'])
+        self.assertEqual(mq.form_batch(rows, paths, 0, set()), ['A'])
+        self.assertEqual(mq.form_batch([], {}, 10, set()), [])
+        self.assertEqual(mq.form_batch(rows + rows, paths, 10, {'R'}), ['A', 'C', 'B', 'X'])
+        self.assertEqual(before, json.dumps([rows, {k: sorted(v) for k, v in paths.items()}]))
+        import ast
+        node = next(n for n in ast.parse(Path(mq.__file__).read_text()).body
+                    if isinstance(n, ast.FunctionDef) and n.name == 'form_batch')
+        self.assertFalse(any(isinstance(n, ast.Name) and n.id in ('open', 'os', 'fold', 'datetime', 'dispatch')
+                             for n in ast.walk(node)))
+        self.assertEqual(mq.form_batch([dict(spec='rename'), dict(spec='old')],
+                                      {'rename': {'a.py', 'b.py'}, 'old': {'a.py'}}, 2, []), ['rename', 'old'])
+        self.train_mark(1, 'head first', 'overlap transitive', 'rest in order', 'cap truncates',
+                        'empty', 'pure', 'rename old path overlaps', 'cap below 1')
+        self.assertEqual(mq.form_batch(rows, paths, 10, {'A'}), ['A'])
+        first = mq.form_batch(rows, paths, 10, {'R'})
+        self.assertNotIn('R', first)
+        self.assertEqual(mq.form_batch([r for r in rows if r['spec'] not in first], paths, 10, {'R'}), ['R'])
+        unknown = dict(paths, A=None, B=None)
+        self.assertEqual(mq.form_batch(rows, unknown, 10, set()), ['A'])
+        self.assertNotIn('B', mq.form_batch(rows, dict(paths, B=None), 10, set()))
+        dozen = [dict(spec=str(i)) for i in range(12)]
+        result = mq.form_batch(dozen, {str(i): set() for i in range(12)}, 10, {'2'})
+        self.assertEqual(result, ['0', '1', *map(str, range(3, 11))])
+        self.train_mark(2, 'risky head solo', 'risky non-head excluded', 'risky next as head',
+                        'undetermined solo', 'undetermined excluded', 'twelve spec fixture')
+
+    def test_train_paths(self):
+        self.fixture()
+        self.assertEqual(mq.spec_paths(self.repo, 'main', self.sid.lower()), [('M', 'allowed.txt')])
+        self.assertIsNone(mq.spec_paths(self.repo, 'main', 'absent'))
+        self.assertTrue(mq.is_risky(None))
+        cases = [([('A', 'alembic/versions/1.py')], True, 'new migration risky'),
+                 ([('A', 'api/alembic_alt/versions/1.py')], True, None),
+                 ([('M', 'alembic/versions/1.py')], False, 'edited migration not risky'),
+                 ([('D', 'deploy.sh')], True, 'deploy risky'),
+                 ([('M', 'infra/lambda/lwa-rotation/deploy.sh'),
+                   ('M', 'infra/lambda/telegram-alerter/deploy.sh')], False, 'nested lambda deploy not risky'),
+                 ([('A', 'deploy/cron/anything')], False, 'deploy cron not risky'),
+                 ([('M', 'scripts/release/x')], True, 'release dir risky'),
+                 ([('D', 'scripts/release_kit.sh')], True, 'release_kit risky'),
+                 ([('M', 'scripts/release_notes.md')], False, 'lookalike not risky'),
+                 ([('A', 'alembic/env.py')], False, 'alembic env not risky')]
+        for paths, expected, label in cases:
+            self.assertEqual(mq.is_risky(paths), expected, paths)
+            if label:
+                self.train_mark(3, label)
+        self.git('checkout', '-q', self.sid.lower())
+        self.git('mv', 'allowed.txt', 'renamed file.py')
+        odd = 'odd space-' + chr(0xdcff)
+        (self.repo / odd).write_bytes(b'odd')
+        self.git('add', '.')
+        self.git('commit', '-qm', 'rename and odd name')
+        paths = mq.spec_paths(self.repo, 'main', self.sid.lower())
+        self.assertIn(('D', 'allowed.txt'), paths)
+        self.assertIn(('A', 'renamed file.py'), paths)
+        self.assertIn(('A', odd), paths)
+        seen = []
+        def runner(argv, **kw):
+            seen.append(argv)
+            return subprocess.CompletedProcess(argv, 1, b'', b'failed')
+        self.assertIsNone(mq.spec_paths(self.repo, 'main', 'branch', runner))
+        self.assertIsInstance(seen[0], list)
+        self.assertIn('--no-renames', seen[0])
+        self.train_mark(3, 'real git paths', 'git failure undetermined', 'odd path roundtrip', 'rename both paths')
+
+    def fresh_events(self):
+        env = dict(os.environ, DOIT_ROOT=str(self.root), DOIT_READ_CACHE='0')
+        result = subprocess.run([sys.executable, '-c',
+                                 'import fold,json; print(json.dumps(fold.read_events()))'],
+                                cwd=Path(mq.__file__).parent, env=env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def test_train_caps(self):
+        config = self.root / 'look.toml'
+        config.write_text('[merge_queue]\nbatch_cap = 9\nbatch_cap_floor = 6\n')
+        def cap(rate=None, windows=0, events=(), path=config, env=None):
+            with patch.object(mq.window_gate, 'red_rate', return_value=dict(rate=rate, windows=windows)):
+                return mq.effective_cap(list(events), self.now, env={} if env is None else env, toml_path=path)
+        self.assertEqual(cap()['configured'], 9)
+        self.assertEqual(cap(path=self.root / 'missing')['cap'], 6)
+        self.assertEqual(cap(path='')['cap'], 6)
+        self.assertEqual(cap(None, 5)['cap'], 6)
+        latest = [self.event('batch-cap', 2, cap=8, reason='operator'), self.event('batch-cap', 1, cap=7, reason='operator')]
+        self.assertEqual(cap(events=latest)['cap'], 7)
+        self.assertEqual(cap()['cap'], 9)
+        self.assertEqual(cap(.41, 5)['cap'], 6)
+        self.assertEqual(cap(.40, 5)['cap'], 9)
+        self.assertEqual(cap(.2, 5)['cap'], 9)
+        self.assertEqual(cap(.1, 5, env={'DOIT_WINDOW_MAX_MERGES': '3'})['cap'], 3)
+        with patch.object(mq.window_gate, 'red_rate', side_effect=OSError('unreadable')):
+            self.assertEqual(mq.effective_cap([], self.now, {}, config)['cap'], 6)
+        for text, expected, floor in [('', 10, 6), ('batch_cap = "bad"', 10, 6),
+                                      ('batch_cap = 0', 10, 6), ('batch_cap = 3\nbatch_cap_floor = 7', 3, 3),
+                                      ('batch_cap = true\nbatch_cap_floor = -1', 10, 6)]:
+            config.write_text('[merge_queue]\n' + text + '\n')
+            value = cap()
+            self.assertEqual((value['configured'], value['floor']), (expected, floor))
+        config.write_text('[merge_queue]\nbatch_cap = 10\nbatch_cap_floor = 6\n')
+        value = cap(.6, 5)
+        for filename in ('L-executor-0001.jsonl', 'L-tick-local.jsonl'):
+            mq.record_cap(value, [], filename)
+            raw = (self.root / 'events' / filename).read_text()
+            self.assertEqual(len(raw.splitlines()), 1)
+            event = json.loads(raw)
+            self.assertEqual(event['subject'], 'merge-train')
+            self.assertNotIn('actor', event)
+            self.assertEqual(event['from'], 10)
+            self.assertEqual(cap(events=self.fresh_events())['cap'], 6)
+            mq.record_cap(value, self.fresh_events(), filename)
+            self.assertEqual((self.root / 'events' / filename).read_text(), raw)
+        wrong = dict(self.event('batch-cap', -1, cap=99, reason='bad'), subject='merge-train')
+        self.seed([wrong], 'L-builder-9999.jsonl')
+        wrong_read = next(e for e in self.fresh_events() if e.get('cap') == 99)
+        self.assertIsNotNone(fold.admits(wrong_read, wrong_read['actor']))
+        self.assertEqual(cap(events=self.fresh_events())['cap'], 6)
+        with self.assertRaises(ValueError):
+            mq._train_emit('L-operator-local.jsonl', 'window-test', 'queue-batch', project='p', specs=self.sid)
+        import fold_emits
+        self.assertEqual(fold_emits.EMITS['batch-cap'], {'executor', 'tick', 'operator'})
+        import tomllib
+        table = tomllib.loads((Path(DOIT).parent / 'look.toml').read_text())['merge_queue']
+        self.assertEqual(table, dict(batch_cap=10, batch_cap_floor=6))
+        self.train_mark(4, 'config', 'unreadable floor', 'rate none many windows floor',
+                        'few windows keep newest', 'few windows configured', 'floor on red', 'boundary 0.40',
+                        'configured when calm', 'max_merges clamp', 'record once', 'unchanged silent',
+                        'roundtrip fresh process', 'wrong actor ignored', 'emits row', 'look.toml keys')
+
+    def train_call(self, *, flying=(), depth=2, code=0, **kwargs):
+        calls = []
+        def runner(argv):
+            self.assertTrue(any(e['type'] == 'queue-batch' and e['subject'] == argv[2] for e in fold.read_events()))
+            calls.append(argv)
+            return dict(code=code)
+        with patch.object(mq.window_gate, 'in_flight', return_value=list(flying)), \
+             patch.object(mq.window_gate, 'train_depth', return_value=dict(depth=depth)), \
+             patch.object(mq, '_repository', return_value=(self.root, 'main')), \
+             patch.object(mq, 'spec_paths', return_value=[('M', 'shared.py')]):
+            result = mq.window_run('albert-scott', runner=runner, now=self.now, **kwargs)
+        return result, calls
+
+    def test_train_step(self):
+        self.window_seed(12)
+        self.assertEqual(self.train_call()[0], 0)
+        batch = [e for e in fold.read_events() if e['type'] == 'queue-batch'][-1]
+        first_specs = batch['specs'].split(',')
+        self.assertEqual(len(first_specs), 10)
+        self.assertNotIn('--after', self.train_call()[1][0])
+        candidate = dict(self.event('window-candidate', -1, sha='tree', verified_on='base',
+                                    specs=first_specs), subject=batch['subject'])
+        with (self.root / 'events' / 'L-executor-0001.jsonl').open('a') as stream:
+            stream.write(json.dumps(candidate) + '\n')
+        flying = [dict(window=batch['subject'], specs=first_specs)]
+        result, calls = self.train_call(flying=flying)
+        self.assertEqual(result, 0)
+        self.assertEqual(calls[0][-2:], ['--after', batch['subject']])
+        self.assertTrue(set(calls[0][calls[0].index('--specs') + 1].split(',')).isdisjoint(first_specs))
+        self.assertEqual(self.train_call(flying=flying, depth=1), (3, []))
+        result, launched = self.train_call(flying=flying, code=3)
+        self.assertEqual((result, len(launched)), (3, 1))
+        with (self.root / 'events' / 'L-executor-0001.jsonl').open('a') as stream:
+            stream.write(json.dumps(candidate) + '\n')
+        self.assertEqual(self.train_call(flying=flying), (3, []))
+        # A predecessor rebase must not make an older launch the newest window.
+        self.window_seed(12)
+        history = [dict(self.event('queue-batch', 4, project='albert-scott', specs=self.sid), subject='window-old'),
+                   dict(self.event('window-candidate', 3, specs=[self.sid], sha='one', verified_on='base'), subject='window-old'),
+                   dict(self.event('queue-batch', 2, project='albert-scott', specs='L-spec-9002'), subject='window-new'),
+                   dict(self.event('window-candidate', 1, specs=['L-spec-9002'], sha='two', verified_on='one'), subject='window-new'),
+                   dict(self.event('window-candidate', 0, specs=[self.sid], sha='rebased', verified_on='base'), subject='window-old')]
+        with (self.root / 'events' / 'L-executor-0001.jsonl').open('a') as stream:
+            stream.write(''.join(json.dumps(e) + '\n' for e in history))
+        result, launched = self.train_call(depth=3, flying=[dict(window='window-old', specs=[self.sid]),
+                                                         dict(window='window-new', specs=['L-spec-9002'])])
+        self.assertEqual(result, 0)
+        self.assertEqual(launched[0][-2:], ['--after', 'window-new'])
+        # Before any candidate, a known launch reserves the slot and cannot be chained.
+        self.window_seed()
+        pending = dict(self.event('queue-batch', 0, project='albert-scott', specs=self.sid), subject='window-pending')
+        with (self.root / 'events' / 'L-executor-0001.jsonl').open('a') as stream:
+            stream.write(json.dumps(pending) + '\n')
+        state = self.root / 'state'
+        state.mkdir(exist_ok=True)
+        (state / 'window-run.window-pending.pid').write_text(str(os.getpid()))
+        self.assertEqual(self.train_call(), (3, []))
+        (state / 'window-run.window-pending.pid').unlink()
+        # A cap change must use the requested actor file, once across passes.
+        self.window_seed()
+        with patch.dict(os.environ, {'DOIT_WINDOW_MAX_MERGES': '3', 'DOIT_LEDGER_FILE': 'L-tick-local.jsonl'}):
+            self.assertEqual(self.train_call()[0], 0)
+            self.assertEqual(self.train_call()[0], 0)
+        caps = [e for e in self.fresh_events() if e['type'] == 'batch-cap']
+        self.assertEqual(len(caps), 1)
+        self.assertEqual(caps[0]['cap'], 3)
+        self.assertIn('batch-cap', (self.root / 'events' / 'L-tick-local.jsonl').read_text())
+        import ast
+        tree = ast.parse(Path(mq.__file__).read_text())
+        forbidden = {'acquire', 'release', 'build_candidate', 'advance'}
+        for node in ast.walk(tree):
+            self.assertFalse(isinstance(node, ast.Name) and node.id in forbidden)
+            self.assertFalse(isinstance(node, ast.Attribute) and node.attr in forbidden)
+            if isinstance(node, ast.ImportFrom):
+                self.assertTrue(forbidden.isdisjoint(alias.name for alias in node.names))
+            if isinstance(node, ast.Import):
+                self.assertTrue(all(alias.name.split('.')[-1] not in forbidden for alias in node.names))
+        self.train_mark(5, 'first no after', 'second after first', 'depth 1 serial', 'no candidate yet waits',
+                        'exit 3 not retried', 'in-flight specs excluded', 'batch before gate', 'loop records cap change',
+                        'loop cap unchanged silent', 'loop cap fresh process', 'no gate internals')
+
+    def test_train_lock_and_detach(self):
+        self.window_seed()
+        state = self.root / 'state'
+        state.mkdir()
+        lock = state / 'window-run.albert-scott.lock'
+        lock.write_text(str(os.getpid()))
+        before = (self.root / 'events' / 'L-executor-0001.jsonl').read_bytes()
+        self.assertEqual(self.train_call(), (3, []))
+        self.assertEqual((self.root / 'events' / 'L-executor-0001.jsonl').read_bytes(), before)
+        lock.write_text('2147483647')
+        calls = []
+        child = None
+        def launcher(argv, **kw):
+            nonlocal child
+            self.assertTrue(lock.exists())
+            self.assertTrue(kw['start_new_session'])
+            self.assertEqual(kw['stderr'], subprocess.STDOUT)
+            self.assertIn('window-run.window-', str(kw['stdout'].name))
+            calls.append(argv)
+            child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
+            return child
+        try:
+            with patch.object(mq, '_repository', return_value=(self.root, 'main')), \
+                 patch.object(mq, 'spec_paths', return_value=[('M', 'a.py')]):
+                self.assertEqual(mq.window_run('albert-scott', detach=True, launcher=launcher, now=self.now), 0)
+            self.assertIsNone(child.poll())
+            self.assertFalse(lock.exists())
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(self.train_call(), (3, []))
+        finally:
+            if child:
+                child.terminate()
+                child.wait(timeout=5)
+        with tempfile.TemporaryDirectory() as empty_root:
+            result = subprocess.run(['bash', DOIT, 'window-run', '--project', 'none-such', '--detach'],
+                                    env=dict(os.environ, DOIT_ROOT=empty_root), capture_output=True, text=True)
+            self.assertEqual(result.returncode, 3, result.stderr)
+            self.assertFalse(list((Path(empty_root) / 'events').glob('*.jsonl')))
+        self.assertFalse(lock.exists())
+        self.train_mark(6, 'detach returns at once', 'lock held exits 3', 'lock held no events',
+                        'stale lock taken', 'lock released after launch', 'cli detach arm')
+
+    def test_train_concurrent(self):
+        self.window_seed(12)
+        # First child pauses inside the lock; second contends while it is held.
+        # Its injected launcher starts a real living process, reserving the batch
+        # before window-candidate exists, including on a later invocation.
+        script = r'''import sys,os,time,subprocess
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import merge_queue as m
+root = Path(os.environ['DOIT_ROOT'])
+def depth(*a, **kw):
+    (root/'entered').touch()
+    while not (root/'continue').exists(): time.sleep(.01)
+    return {'depth':2}
+m.window_gate.train_depth=depth
+m._repository=lambda p:(root,'main')
+m.spec_paths=lambda *a:[('M','same.py')]
+def launch(*a,**kw):
+    proc=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)'])
+    (root/'child-pid').write_text(str(proc.pid))
+    return proc
+sys.exit(m.window_run('albert-scott', detach=True, launcher=launch))
+'''
+        env = dict(os.environ, DOIT_READ_CACHE='0')
+        with (self.root / 'child.log').open('wb') as log:
+            first = subprocess.Popen([sys.executable, '-c', script, str(Path(mq.__file__).parent)],
+                                     env=env, stdout=log, stderr=log)
+            import time
+            deadline = time.monotonic() + 5
+            while not (self.root / 'entered').exists() and time.monotonic() < deadline:
+                time.sleep(.01)
+            try:
+                self.assertTrue((self.root / 'entered').exists())
+                second = subprocess.run([sys.executable, '-c', script, str(Path(mq.__file__).parent)],
+                                        env=env, capture_output=True, timeout=5)
+                self.assertEqual(second.returncode, 3, second.stderr)
+                (self.root / 'continue').touch()
+                self.assertEqual(first.wait(timeout=5), 0, (self.root / 'child.log').read_text())
+                # Lock is now free but no candidate exists: reservation must hold.
+                third = subprocess.run([sys.executable, '-c', script, str(Path(mq.__file__).parent)],
+                                       env=env, capture_output=True, timeout=5)
+                self.assertEqual(third.returncode, 3, third.stderr)
+                batches = [e['specs'].split(',') for e in self.fresh_events() if e['type'] == 'queue-batch']
+                self.assertEqual(len(batches), 1)
+                self.assertEqual(len([s for b in batches for s in b]), len({s for b in batches for s in b}))
+            finally:
+                (self.root / 'continue').touch()
+                if first.poll() is None:
+                    first.terminate()
+                first.wait(timeout=5)
+                if (self.root / 'child-pid').exists():
+                    os.kill(int((self.root / 'child-pid').read_text()), 15)
+        self.train_mark(6, 'two concurrent no shared spec')
+
+    def test_train_reconcile(self):
+        self.window_seed(4)
+        events = fold.read_events()
+        events += [dict(self.event(kind, 1), subject=f'L-spec-{9001+i}')
+                   for i, kind in enumerate(('shipped', 'window-dropped', 'merge-conflict'))]
+        self.seed([{k: v for k, v in e.items() if k not in ('actor', '_src')} for e in events])
+        self.train_call()
+        self.train_call()
+        removes = [e for e in fold.read_events() if e['type'] == 'queue-remove']
+        self.assertEqual(len(removes), 3)
+        self.assertEqual({e['subject'] for e in removes}, {'L-spec-9001', 'L-spec-9002', 'L-spec-9003'})
+        self.window_seed()
+        events = fold.read_events()
+        events += [dict(self.event('window-candidate', 1, specs=[self.sid], sha='x', verified_on='b'), subject='window-c'),
+                   dict(self.event('window-cancelled', 0, after='window-p', reason='rebase'), subject='window-c')]
+        self.seed([{k: v for k, v in e.items() if k not in ('actor', '_src')} for e in events])
+        self.assertEqual(self.train_call(flying=[dict(window='window-c', specs=[self.sid])], depth=1), (3, []))
+        self.assertEqual(len(mq.queue(fold.read_events())), 2)
+        # Terminal gate escalation without a spec outcome requeues all specs.
+        events.append(dict(self.event('escalation-blocking', -1, reason='undetermined',
+                                      default='retry', deadline='2099-01-01', revert='none'), subject='window-c'))
+        self.seed([{k: v for k, v in e.items() if k not in ('actor', '_src')} for e in events])
+        self.assertEqual(self.train_call()[0], 0)
+        for code in (0, 1, 2, 3, 4):
+            result, calls = self.train_call(code=code)
+            self.assertEqual(result, code)
+            self.assertEqual(len(calls), 1)
+        self.seed([])
+        self.assertEqual(self.train_call(), (3, []))
+        self.train_mark(7, 'reconcile once', 'cancelled not outcome', 'undetermined requeued',
+                        'exit passthrough', 'exit 3 only if none ran')
+
+    def test_train_executor(self):
+        text = (Path(DOIT).parent / 'agents' / 'executor.md').read_text()
+        for phrase in ('doit window-run --project albert-scott --detach', 'Tick-owned: gate',
+                       'doit queue list', 'batch_cap', 'risky', 'window-cancelled', 'train',
+                       'NEW ', 'L-charter-0053 R5', 'footprint group'):
+            self.assertIn(phrase, text)
+        for phrase in ('at most 6', '--specs A,B,C', 'seq-'):
+            self.assertNotIn(phrase, text)
+        self.train_mark(8, 'executor train contract')
 
 
 if __name__ == '__main__':
