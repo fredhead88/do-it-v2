@@ -125,10 +125,58 @@ def test_verifier_never_waives():
           f"no check was waived, dropped or closed by a blocked pass: {after}")
 
 
+def test_exhausted_route_escalates_once():
+    import owed_routes
+    sid = "L-spec-7369"
+    spec(sid, "AC1", shipped_ago_d=3, cap="browser")
+    write("sweep", [{"ts": iso(hours=-20 + n), "type": "owed-routed", "subject": sid,
+                     "criterion": "AC1", "route": "browser", "capability": "browser", "epoch": ""}
+                    for n in range(owed_routes.MAX_ATTEMPTS)])
+    evs = fold.fold(fold.read_events())[0][sid]["evs"]
+    check(owed.checks(evs, NOW)[0]["status"] == "expired", "route exhausted after final unobservable")
+    check(not owed_asks.open_ask_criteria(evs, NOW), "an exhausted route has no open ask")
+    check(not any(r["spec"] == sid for r in owed_asks.queue(fold.read_events(), NOW)),
+          "an exhausted route is absent from the operator queue")
+    lines = sweep_owed.sweep_expired({sid: {"evs": evs}}, NOW)
+    check(len(lines) == 1 and "escalated" in lines[0], f"exhaustion escalates: {lines}")
+    specs = fold.fold(fold.read_events())[0]
+    check(not sweep_owed.sweep_expired({sid: specs[sid]}, NOW), "exhaustion never escalates twice")
+    escalations = [e for e in fold.read_events() if e.get("subject") == sid
+                   and e.get("type") == "escalation-blocking" and e.get("kind") == "owed-expired"]
+    check(len(escalations) == 1, "exactly one exhaustion escalation was written")
+
+
+def test_non_exhausted_open_ask_still_stripped():
+    import owed_routes
+    sid = "L-spec-7370"
+    spec(sid, "AC1", shipped_ago_d=3, cap="browser")
+    write("sweep", [{"ts": iso(hours=-20 + n), "type": "owed-routed", "subject": sid,
+                     "criterion": "AC1", "route": "browser", "capability": "browser", "epoch": ""}
+                    for n in range(owed_routes.MAX_ATTEMPTS - 1)])
+    evs = fold.fold(fold.read_events())[0][sid]["evs"]
+    check(owed_asks.open_ask_criteria(evs, NOW) == {"AC1"}, "a non-exhausted route keeps its ask")
+    kv = {"criteria": json.dumps(["AC1", "AC2"]), "evidence": json.dumps(["open", "expired"])}
+    kept, refusal = owed_asks.guard_expiry(sid, kv, now=NOW, events=fold.read_events())
+    check(refusal is None and json.loads(kept["criteria"]) == ["AC2"]
+          and json.loads(kept["evidence"]) == ["expired"], "open criterion and aligned evidence still stripped")
+    _, refusal = owed_asks.guard_expiry(sid, {"criteria": '["AC1"]'}, now=NOW, events=fold.read_events())
+    check(bool(refusal), "an escalation naming only the live ask is still refused")
+    operator_sid = "L-spec-7371"
+    spec(operator_sid, "AC1", shipped_ago_d=3, cap="operator-action")
+    write("sweep", [{"ts": iso(hours=-20 + n), "type": "owed-routed", "subject": operator_sid,
+                     "criterion": "AC1", "route": "operator-action", "capability": "operator-action", "epoch": ""}
+                    for n in range(owed_routes.MAX_ATTEMPTS)])
+    evs = fold.fold(fold.read_events())[0][operator_sid]["evs"]
+    check(owed.checks(evs, NOW)[0]["status"] == "blocked"
+          and owed_asks.open_ask_criteria(evs, NOW) == {"AC1"}, "operator asks never expire on attempts")
+
+
 import owed  # noqa: E402
 
 test_one_ask_per_waiting_check_and_no_silent_expiry()
 test_verifier_never_waives()
+test_exhausted_route_escalates_once()
+test_non_exhausted_open_ask_still_stripped()
 import shutil
 shutil.rmtree(str(TMP), ignore_errors=True)
 print(f"owed_asks: {N} checks pass")

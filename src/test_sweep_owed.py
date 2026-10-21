@@ -1098,7 +1098,7 @@ rows = owed.checks(specs_now()[1][sid]['evs'], NOW)
 assert rows[-1]['status'] == 'blocked'
 handed = sweep_owed.browser_input(specs_now()[1], sweep_owed.due_candidates(specs_now()[1], NOW), NOW)
 assert len(handed) == 10 and len({r['criterion'] for r in handed}) == 10
-for capability, age, expected in [('browser', -2, False), ('browser', -13, True),
+for capability, age, expected in [('browser', -2, True), ('browser', -13, True),
                                   ('browser-review-account', -13, False), ('node_modules', -13, False)]:
     events = [e for e in specs_now()[1][sid]['evs'] if e['type'] != 'owed-unobservable']
     events.append(dict(type='owed-unobservable', subject=sid, criterion='AC10',
@@ -1212,7 +1212,7 @@ normalized = normalized.replace('tools: Read, Glob, Grep, Bash, StructuredOutput
                                 'tools: Read, Glob, Grep, Bash, StructuredOutput, Write\n')
 normalized = normalized.replace('`deploy.sh`, a production wrapper, or a browser yourself, except in a\n`kind: browser` batch, see [Browser batches](#browser-batches).',
                                 '`deploy.sh`, a production wrapper, or a browser yourself.')
-assert hashlib.sha256(normalized.encode()).hexdigest() == '16c522320824ff6899b5fa539b82331226e532cdc54ae0403281dbcb80f798e0'
+assert hashlib.sha256(normalized.replace("elapsed | repo | not-live | ro-dsn-grant", "elapsed | other").encode()).hexdigest() == '16c522320824ff6899b5fa539b82331226e532cdc54ae0403281dbcb80f798e0'
 assert actual.rsplit('\n## ', 1)[-1].startswith('Lessons (operator rule, 2026-09-24)')
 browser_signature('AC9', {'tools_granted': True, 'untouched_sections_identical': True, 'lessons_last': True})
 
@@ -1447,7 +1447,7 @@ def test_repo_batches():
         for capability, criterion, blocked, shipped, routed, expected in (
                 ("repo", "verify", False, sha, True, "repo"),
                 ("other", "AC1", False, sha, False, "repo"),
-                ("repo", "AC1", True, sha, False, None),
+                ("repo", "AC1", True, sha, False, "repo"),
                 ("repo", "AC1", False, None, False, None),
                 ("elapsed", "verify", False, sha, True, "plain"),
                 ("elapsed", "AC1", False, sha, False, "plain"),
@@ -1486,4 +1486,12 @@ def test_repo_batches():
 
 
 test_repo_batches()
+
+
+def test_capability_readmission():
+    from test_dispatch import check_capability_readmission
+    check_capability_readmission(fixture_root=TMP, now=NOW, epoch=EPOCH, iso=iso, clear=clear,
+                                write=write, specs_now=specs_now, runner_type=FakeRunner)
+test_capability_readmission()
+
 ROOT_PATCHES.close()

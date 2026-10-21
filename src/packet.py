@@ -1279,8 +1279,8 @@ def p_owed_sweeper(c):
                   "not available for this batch (capability=ro-dsn).")
     L.append(f"4. The review account for this app: {review_account(c)}. It may never delete and "
              "never move money.")
+    L.append("5. Cannot-observe capabilities: " + " | ".join(__import__("owed_routes").ROUTES) + ".")
     return L
-
 
 BUILD = {"spec-auditor": p_spec_auditor, "spec-writer": p_spec_writer, "builder": p_builder,
          "grader": p_grader, "reviewer": p_reviewer, "charter-reviewer": p_charter_reviewer,

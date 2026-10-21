@@ -46,6 +46,7 @@ import build_runner, dispatch, fold, owed, owed_failures, packet, scratch, prod_
 
 LEDGER_NAME = "L-sweep-local.jsonl"
 MAX_BATCH = 8
+READMIT_CAP = 16
 RETRY_WINDOW = timedelta(hours=12)
 
 # SD3, verbatim.
@@ -174,7 +175,7 @@ def sweep_expired(specs, now, *, dry_run=False):
         already = _already_escalated(s["evs"])
         fresh = sorted({r["criterion"] for r in rows if r["criterion"] not in already
                         and not _excluded_by_answer(specs, answered, sid, r["criterion"])
-                        and not _no_runner(r)})
+                        and not _no_runner(r) and not _attempt_in_flight(r, s["evs"], now)})
         if not fresh:
             continue
         evidence = [next((r.get("evidence") for r in rows if r["criterion"] == c), None) or ""
@@ -257,24 +258,77 @@ def due_candidates(specs, now):
 
 # ─────────────────────────── step 4: batch + dispatch ───────────────────────
 
-def browser_input(specs, due, now):
-    """Include retry-ready legacy browser rows once, retaining the due rows."""
-    rows = {(r["spec"], r["criterion"]): r for r in due}
+def route_epochs(all_ev, project):
+    """Only a landed deploy for this target and readable wrapper prove epochs."""
+    deploys = [e["ts"] for e in all_ev if e.get("type") == "deploy-landed"
+               and e.get("target") == project and e.get("ts")]
+    epochs = {"deploy": max(deploys, key=fold.ts) if deploys else None}
+    try:
+        wrapper = doit_bin().parent / "scripts/sweep/droplet-read"
+        epochs["droplet-wrapper"] = hashlib.sha256(wrapper.read_bytes()).hexdigest()
+    except OSError:
+        pass
+    return epochs
+
+
+def _attempt_in_flight(row, evs, now):
+    attempts = [e for e in evs if e.get("type") == "owed-routed"
+                and e.get("criterion") == row["criterion"]
+                and e.get("route") not in ("recheck", "relabel")]
+    if not attempts:
+        return False
+    try:
+        last = datetime.fromisoformat(str(attempts[-1].get("ts")).replace("Z", "+00:00"))
+        result = row.get("last_unobservable_at")
+        return (result is None or last > result) and now - last < RETRY_WINDOW
+    except (TypeError, ValueError):
+        return True  # An undetermined attempt cannot authorize another try.
+
+
+def readmitted(specs, now, epochs_for, *, exclude=frozenset()):
+    """Oldest ready blocked rows, excluding transient holds before the cap."""
+    rows = []
     for spec in specs.values():
         for row in owed.checks(spec["evs"], now):
-            if (row["status"] == "blocked"
-                    and owed_routes.route_for(row.get("capability")) == "browser"
-                    and row.get("route_attempts", {}).get("browser", 0) < owed_routes.MAX_ATTEMPTS
-                    and not _blocked_pending_retry(row, now) and resolvable(row)[0]):
-                rows.setdefault((row["spec"], row["criterion"]), row)
+            route = owed_routes.route_for(row.get("capability"))
+            if (row["status"] != "blocked" or (row["spec"], row["criterion"]) in exclude
+                    or route is None
+                    or row.get("route_attempts", {}).get(route, 0) >= owed_routes.MAX_ATTEMPTS
+                    or _attempt_in_flight(row, spec["evs"], now)
+                    or not owed_routes.ready(row, now, epochs_for(row["project"]))
+                    or not resolvable(row)[0]
+                    or "operator" in prod_runner.record_for(row)["needs"]):
+                continue
+            rows.append(row)
+    return sorted(rows, key=lambda r: r["last_unobservable_at"])[:READMIT_CAP]
+
+
+def browser_input(specs, due, now):
+    """The model-free runner consumes every ready capability, once per key."""
+    rows = {(r["spec"], r["criterion"]): r for r in due}
+    events = fold.read_events()
+    for row in readmitted(specs, now, lambda p: route_epochs(events, p)):
+        rows.setdefault((row["spec"], row["criterion"]), row)
     return [{**r, "spec_path": str(_spec_file(r))} for r in rows.values()]
+
+
+def _record_attempt(row, epochs, now, *, batch=None):
+    route = owed_routes.route_for(row["capability"])
+    epoch = (epochs.get("deploy") or "" if route in ("ro-dsn", "not-live")
+             else epochs.get("droplet-wrapper", "") if route == "droplet" else "")
+    fields = dict(criterion=row["criterion"], route=route, capability=route, epoch=epoch,
+                  ts=now.isoformat())
+    if batch is not None:
+        fields["batch"] = batch
+    return _emit(row["spec"], "owed-routed", **fields)
 
 
 def _batch_for(due, all_ev=()):
     """Never-batched projects first, then oldest last start and oldest due row."""
     if not due:
         return None, []
-    due = sorted(due, key=lambda r: r["due_at"])
+    due = sorted(due, key=lambda r: (r.get("status", "due") != "due", r["due_at"]))
+    priority = [r for r in due if r.get("status", "due") == "due"] or due
     last_start = {}
     for e in all_ev:
         if e.get("type") == "spawn-started" and e.get("role") == "owed-sweeper":
@@ -283,7 +337,7 @@ def _batch_for(due, all_ev=()):
             if project not in last_start or stamp > last_start[project]:
                 last_start[project] = stamp
     oldest = {}
-    for row in due:
+    for row in priority:
         oldest.setdefault(row["project"], row["due_at"])
     project = min(oldest, key=lambda p: (p in last_start,
                   last_start.get(p, datetime.min.replace(tzinfo=timezone.utc)), oldest[p]))
@@ -385,7 +439,7 @@ def _spec_hash(row):
 
 def _emit(subject, type_, **fields):
     ledger_path().parent.mkdir(parents=True, exist_ok=True)
-    return dispatch.emit(ledger_path(), {"subject": subject}, type_, **fields)
+    return dispatch.emit(ledger_path(), {"subject": subject}, type_, strict=True, **fields)
 
 
 def _resolve_candidates(specs, now, *, dry_run=False):
@@ -631,6 +685,12 @@ def run(*, dry_run=False, runner=None, now=None):
 
     lines = sweep_expired(specs, now, dry_run=dry_run)
     lines.extend(owed_failures.escalate_failures(specs, now, dry_run=dry_run))
+    # Preserve pre-observation rows: a runner verdict may change their status.
+    retry_specs = specs
+    epochs_for = lambda project: route_epochs(all_ev, project)
+    runner_keys = {(r["spec"], r["criterion"]) for r in readmitted(specs, now, epochs_for)}
+    retry_epochs = {r["project"]: epochs_for(r["project"])
+                    for r in readmitted(specs, now, epochs_for)}
     observations = prod_runner.run(now, dry_run=dry_run)
     lines.extend(observations["lines"])
     all_ev = fold.read_events()
@@ -661,19 +721,38 @@ def run(*, dry_run=False, runner=None, now=None):
                     due.append(row)
                 else:
                     lines.append(f"sweep-owed: 1 routed row excluded: {key[0]}/{key[1]}: {reason}")
-    handed = prod_runner.batch_for_browser(browser_input(specs, due, now))
+    retries = readmitted(retry_specs, now, lambda p: retry_epochs.get(p, route_epochs(all_ev, p)),
+                         exclude=observations["held"])
+    retry_epochs.update({r["project"]: route_epochs(all_ev, r["project"]) for r in retries
+                         if r["project"] not in retry_epochs})
+    retry_keys = {(r["spec"], r["criterion"]) for r in retries}
+    due_keys = {(r["spec"], r["criterion"]) for r in due}
+    due.extend(r for r in retries if (r["spec"], r["criterion"]) not in due_keys)
+    # Capability browser always goes to the browser seat, even for judgment rows.
+    handed = prod_runner.batch_for_browser(due)
+    handed_keys = {(r["spec"], r["criterion"]) for r in handed}
+    handed.extend(r for r in retries if owed_routes.route_for(r["capability"]) == "browser"
+                  and (r["spec"], r["criterion"]) not in handed_keys)
     e2e, browser_seat = prod_browser.split(handed)
     if e2e:
         lines.append(f"sweep-owed: {len(e2e)} browser row(s) assigned to committed e2e observations")
+    seat_keys = {(r["spec"], r["criterion"]) for r in browser_seat}
+    for row in retries:
+        key = row["spec"], row["criterion"]
+        if (key in runner_keys and key not in seat_keys
+                and key not in observations["bundle_rows"] and key not in observations["to_judgment"]
+                and prod_runner.record_for(row)["runner"] in ("build", "prod", "prod-browser")):
+            if not dry_run:
+                refused = _record_attempt(row, retry_epochs[row["project"]], now)
+                if refused:
+                    lines.append(f"sweep-owed: attempt for {key[0]}/{key[1]} refused: {refused}")
+    due = [r for r in due if (r["spec"], r["criterion"]) not in seat_keys]
     due, partition_lines = judgment_rows(due, observations)
     lines.extend(partition_lines)
     repo_rows, plain_rows = [], []
     for row in due:
         if (prod_runner.record_for(row)["runner"] == "judgment"
                 and owed_routes.ROUTES.get(owed_routes.route_for(row.get("capability"))) == "repo"):
-            if row["status"] != "due":
-                lines.append(f"sweep-owed: 1 repo row excluded: {row['spec']}/{row['criterion']}: not due")
-                continue
             sha = next((e.get("sha") for e in reversed(specs[row["spec"]]["evs"])
                         if e.get("type") == "shipped"), None)
             if not sha:
@@ -702,7 +781,8 @@ def run(*, dry_run=False, runner=None, now=None):
         project, batch = _batch_for(candidates, all_ev)
         if kind == "repo":
             sha = batch[0]["shipped_sha"]
-            batch = [row for row in candidates if row["project"] == project and row["shipped_sha"] == sha][:MAX_BATCH]
+            batch = sorted([row for row in candidates if row["project"] == project and row["shipped_sha"] == sha],
+                           key=lambda r: (r.get("status", "due") != "due", r["due_at"]))[:MAX_BATCH]
             deferred = sum(row["project"] == project for row in candidates) - len(batch)
             if deferred:
                 lines.append(f"sweep-owed: {deferred} repo row(s) deferred: one shipped sha and at most {MAX_BATCH} rows per batch")
@@ -718,6 +798,11 @@ def run(*, dry_run=False, runner=None, now=None):
             record.update(outcome="batched", kind=kind, rows=len(batch))
             if not dry_run:
                 record["batch"] = batch_lines[0].split(" as ", 1)[1].split()[0]
+                for row in batch:
+                    if (row["spec"], row["criterion"]) in retry_keys:
+                        refused = _record_attempt(row, retry_epochs[row["project"]], now, batch=record["batch"])
+                        if refused:
+                            lines.append(f"sweep-owed: attempt for {row['spec']}/{row['criterion']} refused: {refused}")
     if not dry_run:
         refused = _emit("sweep-owed", "sweep-run", **record)
         if refused:
