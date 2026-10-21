@@ -42,7 +42,7 @@ BASE_MANIFEST.write_bytes(subprocess.check_output(
     ["git", "show", f"{base}:crons.toml"], cwd=REAL_MANIFEST.parent))
 BASE_ROWS = crons.rows(str(BASE_MANIFEST))
 NAMES = {"tick", "look", "tmp-reaper", "lessons-digest", "backup-watch",
-         "ledger-snapshot", "sweep-owed", "auto-deploy", "owed-digest",
+         "ledger-snapshot", "sweep-owed", "auto-deploy", "owed-digest", "owed-digest-json",
          "portal-latency-daily", "suite-daily", "health-alarms", "ci-shadow", "balance", "stuck-digest", "verify-owed", "gh-bill"} | {"seat-usage"}
 
 
@@ -86,7 +86,7 @@ def _exec_manifest(tmpdir, rows_=None, mode=0o755):
 d1 = TMP / "ac1"
 d1.mkdir()
 r1 = crons.rows(str(REAL_MANIFEST))
-check(len(r1) == len(BASE_ROWS) + 1, f"AC1: base + one row: {len(r1)} vs {len(BASE_ROWS)}")
+check(len(r1) == len(BASE_ROWS) + 2, f"AC1: base + seat-usage + owed-digest-json: {len(r1)} vs {len(BASE_ROWS)}")
 check({row["name"] for row in r1} == NAMES, f"AC1: name set: {[row['name'] for row in r1]}")
 for row in r1:
     # R14a: every row also carries `max_runtime_s` now (int|None) — a 9th key,
@@ -290,10 +290,10 @@ base_dir.mkdir()
 base_manifest, _ = _exec_manifest(base_dir, BASE_ROWS)
 base_missing = crons.check(manifest=str(base_manifest), crontab_text=FIXTURE_5,
                            crond_dir=str(crond5_empty))
-check({r["name"] for r in res5} == {r["name"] for r in base_missing} | {"seat-usage"},
-      f"AC5: inherited absent rows plus seat-usage: {res5}")
+check({r["name"] for r in res5} == {r["name"] for r in base_missing} | {"seat-usage", "owed-digest-json"},
+      f"AC5: inherited absent rows plus seat-usage and owed-digest-json: {res5}")
 check(all(r["reason"] == "absent" for r in res5), f"AC5: every entry is absent: {res5}")
-check(len(res5) == len(base_missing) + 1, f"AC5: exactly one more absent: {res5}")
+check(len(res5) == len(base_missing) + 2, f"AC5: exactly two more absent: {res5}")
 seat = next(row for row in r1 if row["name"] == "seat-usage")
 check(seat == {
     "name": "seat-usage", "where": "user", "schedule": "*/15 * * * *",
@@ -309,8 +309,8 @@ first_install = seat_crontab.read_bytes()
 check(first_install.count(b"# doit-cron:seat-usage") == 1, "1129-AC9: exactly one installed row")
 crons.install("seat-usage", crontab_path=str(seat_crontab))
 check(seat_crontab.read_bytes() == first_install, "1129-AC9: second install unchanged")
-print(f"1129-AC9 rows {len(r1)} = base {len(BASE_ROWS)} + 1; "
-      f"absent {len(res5)} = base {len(base_missing)} + 1; install idempotent")
+print(f"1129-AC9 rows {len(r1)} = base {len(BASE_ROWS)} + 2; "
+      f"absent {len(res5)} = base {len(base_missing)} + 2; install idempotent")
 
 # AC5's second, minimal fixture: the only matching line is commented.
 d5b = TMP / "ac5b"
