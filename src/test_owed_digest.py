@@ -425,6 +425,27 @@ class DigestTests(unittest.TestCase):
         del obj["alarms"]
         self.assertTrue(digest.render_md(obj).endswith("## HEALTH ALARMS\n\nnone\n"))
 
+    def test_json_only(self):
+        self.install(fixture()[0])
+        state_dir = self.root / 'state'
+        state_dir.mkdir(exist_ok=True)
+        (state_dir / 'owed-digest.lock').touch()
+        digest.write_state({'old': True})
+        (state_dir / 'owed-alerted.json').write_text('{"invalid": "must not read"}')
+        before = {str(p.relative_to(self.root)): p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
+        self.assertEqual(self.run_digest(json_only=True), 0)
+        after = {str(p.relative_to(self.root)): p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
+        self.assertEqual(set(before), set(after))
+        self.assertEqual({k for k in before if before[k] != after[k]}, {'state/owed-digest.json'})
+        self.assertEqual(self.state(), digest.build(fold.read_events(use_cache=False), NOW))
+        self.assertEqual((state_dir / 'owed-digest.json').stat().st_mode & 0o777, 0o600)
+        self.assertEqual(self.sent, [])
+        doit = pathlib.Path(__file__).resolve().parent.parent / 'doit'
+        for incompatible in ('--alert', '--dry-run'):
+            result = subprocess.run([str(doit), 'owed-digest', '--json-only', incompatible], capture_output=True)
+            self.assertEqual(result.returncode, 2)
+        print('json-only writes only the snapshot ok')
+
     def test_cron_and_dispatch(self):
         rows = crons.rows()
         jobs = {r["name"]: r for r in rows}
@@ -436,6 +457,15 @@ class DigestTests(unittest.TestCase):
         self.assertIn("owed-digest --alert >>", row["command"])
         for other in rows:
             self.assertEqual(bool(re.search(row["sig"], crons.print_line(other["name"]))), other["name"] == "owed-digest")
+        json_row = jobs['owed-digest-json']
+        self.assertEqual(json_row['schedule'], '*/30 * * * *')
+        self.assertEqual((json_row['where'], json_row['owner'], json_row['project']), ('user', 'thinker', 'do-it-v2'))
+        self.assertIn('owed-digest --json-only >>', json_row['command'])
+        for other in rows:
+            self.assertEqual(bool(re.search(json_row['sig'], crons.print_line(other['name']))), other['name'] == 'owed-digest-json')
+        self.assertEqual(sum(r['name'] == 'owed-digest' for r in rows), 1)
+        self.assertEqual(sum(r['name'] == 'owed-digest-json' for r in rows), 1)
+        print('owed-digest sigs are exclusive ok')
         doit = pathlib.Path(__file__).resolve().parent.parent / "doit"
         self.assertIn('owed-digest) shift; exec python3 "$SRC/owed_digest.py" "$@" ;;', doit.read_text())
         self.assertIn("doit owed-digest", subprocess.check_output([str(doit), "help"], text=True))

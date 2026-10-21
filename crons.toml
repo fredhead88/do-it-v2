@@ -125,6 +125,16 @@ owner = "thinker"
 project = "do-it-v2"
 
 [[row]]
+name = "owed-digest-json"
+where = "user"
+schedule = "*/30 * * * *"
+command = "{doit} cron-run owed-digest-json -- {doit} owed-digest --json-only >> {root}/logs/owed-digest-json.log 2>&1"
+path = "{doit}"
+sig = '\bdoit owed-digest --json-only(?=\s*>>|\s*(?:#.*)?$)'
+owner = "thinker"
+project = "do-it-v2"
+
+[[row]]
 name = "portal-latency-daily"
 where = "cron.d"
 schedule = "30 6 * * *"

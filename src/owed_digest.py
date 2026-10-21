@@ -217,13 +217,13 @@ def render_md(obj):
     return "\n".join(lines) + "\n"
 
 
-def _read_ledger():
+def _read_ledger(*, use_cache=True):
     events = fold.EVENTS
     if (not events.is_dir() or not os.access(events, os.R_OK | os.X_OK)
             or not events.stat().st_mode & 0o444 or not events.stat().st_mode & 0o111
             or not any(events.glob("*.jsonl"))):
         raise OSError("owed digest ledger is unavailable")
-    return fold.read_events()
+    return fold.read_events(use_cache=use_cache)
 
 
 def _alerted():
@@ -265,11 +265,13 @@ def _alerts(obj, alerted):
     return [(text, 'rows', [_row_key(r) for r in fresh[:included]])]
 
 
-def run(*, alert=False, now=None, sender=None, dry_run=False):
+def run(*, alert=False, now=None, sender=None, dry_run=False, json_only=False):
     """Read before writing; dry runs use the same snapshot and alert planner."""
     try:
+        if json_only and (alert or dry_run):
+            raise ValueError("--json-only cannot be combined with --alert or --dry-run")
         clock = _time(now or datetime.now(timezone.utc))
-        all_ev = _read_ledger()
+        all_ev = _read_ledger(use_cache=not json_only)
         obj = build(all_ev, clock)
         if dry_run:
             messages = _alerts(obj, _alerted())
@@ -280,7 +282,10 @@ def run(*, alert=False, now=None, sender=None, dry_run=False):
         # Daily and alert invocations share dedup state: serialize their writes.
         with (state_dir / "owed-digest.lock").open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            obj = build(_read_ledger(), clock)
+            obj = build(_read_ledger(use_cache=not json_only), clock)
+            if json_only:
+                write_state(obj)
+                return 0
             alerted = _alerted()
             # Historical, answered and non-operator backlog is retired without
             # sending it. Recent operator rows remain pending until shown.
@@ -318,8 +323,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--alert", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--json-only", action="store_true")
     args = parser.parse_args()
-    return run(alert=args.alert, dry_run=args.dry_run)
+    if args.json_only and (args.alert or args.dry_run):
+        parser.error("--json-only cannot be combined with --alert or --dry-run")
+    return run(alert=args.alert, dry_run=args.dry_run, json_only=args.json_only)
 
 
 if __name__ == "__main__":
