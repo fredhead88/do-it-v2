@@ -851,6 +851,10 @@ EXPECTED_CRONS_ROWS = [
     {"name": "seat-usage", "where": "user", "schedule": "*/15 * * * *",
      "command": "{doit} cron-run seat-usage -- {doit} seat-usage >> {root}/logs/seat-usage.log 2>&1",
      "path": "{doit}", "sig": r"\bdoit seat-usage\b", "owner": "thinker", "project": "do-it-v2"},
+    {"name": "base-red-nightly", "where": "user", "schedule": "20 3 * * *",
+     "command": "{doit} cron-run base-red-nightly -- /usr/bin/python3 {repo}/src/base_red.py nightly albert-scott >> {root}/logs/base-red-nightly.log 2>&1",
+     "path": "/usr/bin/python3", "sig": r"base_red\.py\s+nightly\s+albert-scott\b",
+     "owner": "thinker", "project": "albert-scott", "max_runtime_s": 5400},
 ]
 
 # ── L0440-AC20 · current cron-run commands, runtime bounds and */5 reaper cadence ────

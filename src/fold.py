@@ -723,6 +723,9 @@ def required_reason(e):
                 present = k in e and (value is None or (
                     isinstance(value, (int, float)) and not isinstance(value, bool)
                     and 0 <= value < float("inf")))
+            elif t == "base-red" and k == "complete":
+                # Incomplete rerun evidence still supplies the required boolean.
+                present = isinstance(e.get(k), bool)
             else:
                 # An empty owed-digest histogram is still supplied (SD1).
                 present = k in e if t == "owed-digest" and k == "counts" else _has(e, k)
