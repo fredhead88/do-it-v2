@@ -556,14 +556,14 @@ def run(*, dry_run=False, runner=None, now=None):
 
     due, quarantined, resolution_lines = _resolve_candidates(specs, now, dry_run=dry_run)
     lines.extend(resolution_lines)
-    # Stale failures are runner candidates even though due_candidates excludes
-    # failed status. Preserve their explicit evidence/judgment hand-off too.
+    # Re-admit stale failure hand-offs only under the same guards as observation,
+    # using the fresh fold in case a corrective landed during the runner pass.
     routed = set(observations["bundle_rows"]) | observations["to_judgment"]
     present = {(r["spec"], r["criterion"]) for r in due}
     for spec in specs.values():
         for row in owed.checks(spec["evs"], now):
             key = row["spec"], row["criterion"]
-            if key in routed - present and row["status"] == "failed":
+            if key in routed - present and prod_runner.stale_failure_ready(row, spec["evs"], now):
                 ok, reason = resolvable(row)
                 if ok:
                     due.append(row)

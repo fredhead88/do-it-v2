@@ -149,17 +149,34 @@ def batch_for_browser(rows):
     return [row for row in rows if record_for(row)["runner"] == "prod-browser"]
 
 
+def stale_failure_ready(row, evs, now):
+    """Retry expired failure evidence only after 12h and without an owned fix.
+
+    A corrective anywhere after this row's governing declaration/recheck owns
+    the fix, even when a later failure makes the folded status failed again.
+    Missing or malformed validity never establishes expired evidence.
+    """
+    import sweep_owed
+    failed_at = row.get("last_failed_at")
+    governing_at = row.get("governing_at")
+    if (row["status"] != "failed" or failed_at is None or governing_at is None
+            or now - failed_at < sweep_owed.RETRY_WINDOW):
+        return False
+    related = [e for e in evs if e.get("criterion") == row["criterion"]]
+    failure = next((e for e in reversed(related) if e.get("type") == "owed-failed"), {})
+    until = _instant(failure.get("valid_until"))
+    return (until is not None and until < now
+            and not any(e.get("type") == "owed-corrective"
+                        and fold.ts(e.get("ts")) > governing_at for e in related))
+
+
 def _selected(specs, now):
+    """Due rows plus retry-ready stale failures without a standing corrective."""
     import sweep_owed
     rows = {(r["spec"], r["criterion"]): r for r in sweep_owed.due_candidates(specs, now)}
     for spec in specs.values():
         for row in owed.checks(spec["evs"], now):
-            if row["status"] != "failed":
-                continue
-            last = next((e for e in reversed(spec["evs"]) if e.get("type") == "owed-failed"
-                         and e.get("criterion") == row["criterion"]), {})
-            until = _instant(last.get("valid_until"))
-            if until is None or until <= now:
+            if stale_failure_ready(row, spec["evs"], now):
                 rows[row["spec"], row["criterion"]] = row
     return sorted(rows.values(), key=lambda r: r["due_at"])
 

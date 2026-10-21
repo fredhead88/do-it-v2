@@ -1046,13 +1046,13 @@ with patch.object(prod_runner, "record_for", side_effect=fixture_record), \
     assert order == ["expiry", "runner"] and len(fake.calls) == 2
     manifest = rows_of(next(CONTENT.glob("L-sweep-*.md")))
     included = {r["criterion"] for r in manifest}
-    assert included == {"AC1", "AC9", "AC10", "AC13"}, manifest
+    assert included == {"AC1", "AC9", "AC10"}, manifest
     assert "/evidence/failure.json" in next(r["line"] for r in manifest if r["criterion"] == "AC1")
     reasons = {"AC1": "failing bundle", "AC2": "held undetermined build", "AC3": "script SQL",
                "AC4": "script droplet", "AC5": "script HTTP", "AC6": "browser hand-off",
                "AC7": "operator need", "AC8": "grant required", "AC9": "judgment",
                "AC10": "production no commands", "AC11": "held takes precedence", "AC12": "met on refold",
-               "AC13": "stale-failed build bundle"}
+               "AC13": "failed row excluded despite build bundle hand-off"}
     for criterion, reason in reasons.items():
         print("AC7", criterion, "included" if criterion in included else "excluded", reason)
 print("AC6 ok")
@@ -1215,4 +1215,74 @@ normalized = normalized.replace('`deploy.sh`, a production wrapper, or a browser
 assert hashlib.sha256(normalized.encode()).hexdigest() == '16c522320824ff6899b5fa539b82331226e532cdc54ae0403281dbcb80f798e0'
 assert actual.rsplit('\n## ', 1)[-1].startswith('Lessons (operator rule, 2026-09-24)')
 browser_signature('AC9', {'tools_granted': True, 'untouched_sections_identical': True, 'lessons_last': True})
+
+# W38: exercise the real prod-runner/no-command judgment path, not just the
+# due-only helper. Expired failures retry only after 12h without an owned fix.
+for case, age, validity, terminal, expected, should_batch in (
+        ('recent undated failure', 1, None, None, 'failed', False),
+        ('recent expired evidence', 2, -1, None, 'failed', False),
+        ('recent valid evidence', 1, 1, None, 'failed', False),
+        ('old failure', 13, None, None, 'failed', False),
+        ('old expired evidence', 13, -12, None, 'failed', True),
+        ('retry boundary', 12, -1, None, 'failed', True),
+        ('validity boundary', 13, 0, None, 'failed', False),
+        ('standing corrective', 13, -1, 'owed-corrective', 'correcting', False),
+        ('standing corrective before failure', 13, -1, 'standing', 'failed', False),
+        ('corrective before governing event', 13, -1, 'historical', 'failed', True),
+        ('waived', 13, -1, 'owed-waived', 'waived', False),
+        ('met', 13, -1, 'owed-met', 'met', False),
+        ('explicit recheck', 1, None, 'owed-routed', 'due', True),
+        ('genuinely due', None, None, None, 'due', True)):
+    clear()
+    sid = 'L-spec-9938'
+    write('L-spec-writer-w38.jsonl',
+          dict(type='spec-written', subject=sid, project='proj-a', ts=EPOCH),
+          dict(type='owed-ac', subject=sid, criterion='AC1', line='fixture',
+               wake_at=iso(hours=-24), ts=EPOCH))
+    write('L-executor-w38.jsonl', dict(type='shipped', subject=sid, ts=EPOCH))
+    lifecycle = []
+    if age is not None:
+        failure = dict(type='owed-failed', subject=sid, criterion='AC1',
+                       kind='unmet', evidence='known miss', ts=iso(hours=-age))
+        if validity is not None:
+            failure['valid_until'] = iso(hours=validity)
+        lifecycle.append(failure)
+    if terminal:
+        terminal_type = 'owed-corrective' if terminal in ('standing', 'historical') else terminal
+        terminal_ts = (iso(hours=-14) if terminal == 'standing' else
+                       (NOW - timedelta(days=3651)).isoformat() if terminal == 'historical' else iso(minutes=-30))
+        lifecycle.append(dict(type=terminal_type, subject=sid, criterion='AC1',
+                              ts=terminal_ts, corrective='L-spec-9939',
+                              reason='fixture waiver', evidence='fixture met', route='recheck'))
+    write('L-operator-w38.jsonl', *lifecycle)
+    specs = specs_now()[1]
+    assert owed.checks(specs[sid]['evs'], NOW)[0]['status'] == expected, case
+    assert bool(prod_runner._selected(specs, NOW)) == should_batch, case
+    with patch.object(prod_runner, 'record_for', return_value=dict(
+            runner='prod', needs=['deployed-site'], commands=[], validity_h=24)), \
+            patch.object(prod_runner, 'observe', side_effect=AssertionError('unexpected observation')), \
+            patch.object(prod_runner, '_build', side_effect=AssertionError('unexpected build')), \
+            patch.object(subprocess, 'run', side_effect=AssertionError('real process')), \
+            patch.object(subprocess, 'Popen', side_effect=AssertionError('real process')):
+        preview = sweep_owed.run(now=NOW, dry_run=True, runner=FakeRunner())
+        assert any(f'would observe {sid}/AC1' in line for line in preview) == should_batch, case
+        # Dry-run holds active prod observations; the real no-command pass below
+        # must hand due/retry-ready rows on to judgment and create their manifest.
+        assert not any('would batch' in line for line in preview), case
+        for forced_handoff in (False, True):
+            # Inject even ineligible hand-offs to exercise the routed-row guard
+            # independently of the runner's upstream selection.
+            with ExitStack() as handoff:
+                if forced_handoff:
+                    handoff.enter_context(patch.object(prod_runner, 'run', return_value=dict(
+                        lines=[], held=set(), bundle_rows={}, to_judgment={(sid, 'AC1')})))
+                fake = FakeRunner()
+                output = sweep_owed.run(now=NOW, runner=fake)
+                manifests = list(CONTENT.glob('L-sweep-*.md'))
+                assert len(fake.calls) == (2 if should_batch else 0), (case, forced_handoff, output)
+                assert len(manifests) == int(should_batch), (case, forced_handoff)
+                if should_batch:
+                    assert [(r['spec'], r['criterion']) for r in rows_of(manifests[0])] == [(sid, 'AC1')]
+                    manifests[0].unlink()
+    print('W38 lifecycle:', case, expected, 'batched' if should_batch else 'excluded')
 ROOT_PATCHES.close()

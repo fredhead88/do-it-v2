@@ -234,11 +234,51 @@ def test_strikes():
         specs = fold.fold(fold.read_events())[0]
         for _ in range(2):
             selected = prod_runner._selected(specs, NOW)
-            assert {r["criterion"] for r in selected} == {"AC1", "AC3", "AC4"}
-        print("AC4 (i) stale and undated failures retried; valid failure held")
+            assert {r["criterion"] for r in selected} == {"AC4"}
+        print("AC4 (i) recent failures held regardless of evidence validity")
         assert {r["criterion"] for r in sweep_owed.due_candidates(specs, NOW)} == {"AC4"}
-        print("AC4 (j) exact due plus stale-failed union")
+        print("AC4 (j) no failed rows added inside the retry window")
     print("AC4 ok")
+
+
+def test_stale_failure_selection():
+    for case, age, validity, corrective_age, selected in (
+            ("missing validity", 13, None, None, False),
+            ("invalid validity", 13, "invalid", None, False),
+            ("recent expired failure", 2, -1, None, False),
+            ("expired 13h failure", 13, -1, None, True),
+            ("standing corrective before failure", 13, -1, 14, False),
+            ("correcting", 13, -1, 12, False),
+            ("corrective before governing event", 13, -1, 49, True),
+            ("retry boundary", 12, -1, None, True),
+            ("inside retry boundary", 11.99, -1, None, False),
+            ("validity boundary", 13, 0, None, False),
+            ("valid evidence", 13, 1, None, False)):
+        with fixture() as (root, write):
+            earlier = (NOW - timedelta(hours=48)).isoformat()
+            write("L-spec-writer-fixture.jsonl", [
+                dict(type="spec-written", project="project", ts=earlier),
+                dict(type="owed-ac", criterion="AC1", wake_at=earlier, line="fixture", ts=earlier)])
+            write("L-executor-fixture.jsonl", [dict(type="shipped", sha=SHA, ts=earlier)])
+            failure = dict(type="owed-failed", criterion="AC1", kind="unmet", evidence="known miss",
+                           ts=(NOW - timedelta(hours=age)).isoformat())
+            if validity is not None:
+                failure["valid_until"] = ((NOW + timedelta(hours=validity)).isoformat()
+                                           if isinstance(validity, (int, float)) else validity)
+            # An older expired failure must not supply a missing validity
+            # window for the latest failure.
+            lifecycle = [{**failure, "ts": (NOW - timedelta(hours=age + 1)).isoformat(),
+                          "valid_until": (NOW - timedelta(hours=2)).isoformat()}, failure]
+            if corrective_age is not None:
+                lifecycle.append(dict(type="owed-corrective", criterion="AC1", corrective="L-spec-9999",
+                                      ts=(NOW - timedelta(hours=corrective_age)).isoformat()))
+            write("L-operator-failures.jsonl", lifecycle)
+            specs = fold.fold(fold.read_events())[0]
+            assert bool(prod_runner._selected(specs, NOW)) == selected, case
+            with patch.object(subprocess, "run", side_effect=AssertionError("real process")):
+                run_at(NOW, "met")
+            assert [e["type"] for e in events(root)] == (["owed-met"] if selected else []), case
+            print("W38 stale observation:", case, "re-observed" if selected else "excluded")
 
 
 def test_events():
@@ -383,7 +423,7 @@ def test_hermetic():
 
 if __name__ == "__main__":
     for test in (test_empty_commands, test_observe, test_allowlist, test_permissions, test_strikes,
-                 test_events, test_build, test_ledger_and_hooks, test_hermetic):
+                 test_stale_failure_selection, test_events, test_build, test_ledger_and_hooks, test_hermetic):
         test()
     for criterion in (1, 2, 3, 4, 5, 6, 8, 10):
         body = {"criterion": f"AC{criterion}", "result": "ok", "suite": "test_prod_runner.py"}
