@@ -296,6 +296,11 @@ def check_evidence1109():
             print("grader-evidence AC4 AC5 AC7 AC8 dispatch ledger round trips passed")
 
 # END L0898 REGRESSIONS
+# This chunk consumes setup from chunks 1/2; standalone runs use their driver.
+if __name__ == "__main__" and "_js387" not in globals():
+    import pathlib, subprocess, sys
+    raise SystemExit(subprocess.call([sys.executable, str(pathlib.Path(__file__).with_name("test_dispatch.py"))]))
+
 if __name__ == "__main__":
 
 
@@ -325,13 +330,13 @@ if __name__ == "__main__":
         pass
     N += 1
 
-    # ── AC7 · a capability outside the enumerated six values fails schema validation
-    for cap in ("ro-dsn", "droplet", "browser", "operator-action", "elapsed", "other"):
+    # ── AC7 · a capability outside the route vocabulary fails schema validation
+    for cap in sorted(__import__("owed_routes").ROUTES):
         _js387.validate({**_os_good, "results": [{"spec": "x", "criterion": "AC1", "verdict": "cannot-observe",
                                                   "capability": cap, "why": "w"}]}, OS_SCHEMA)
     try:
         _js387.validate({**_os_good, "results": [{"spec": "x", "criterion": "AC1", "verdict": "cannot-observe",
-                                                  "capability": "nonsense", "why": "w"}]}, OS_SCHEMA)
+                                                  "capability": "other", "why": "w"}]}, OS_SCHEMA)
         raise AssertionError("AC7: an out-of-enum capability must be refused")
     except _js387.ValidationError:
         pass

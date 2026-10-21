@@ -1951,6 +1951,7 @@ def test_repo_packet():
             "     ## Verification", "     ```bash", "     cat /opt/albert-scott/src/x.py", "     ```",
             "3. This batch's own read-only DB credential, for a `live_db` observation: not available for this batch (capability=ro-dsn).",
             "4. The review account for this app: fixture account. It may never delete and never move money.",
+            "5. Cannot-observe capabilities: " + " | ".join(__import__("owed_routes").ROUTES) + ".",
         ]
         repo_row = dict(row, shipped_sha="shipped-fixture", base_sha="base-fixture", clone="/fixture/clone")
         manifest("repo", [repo_row])
@@ -1984,8 +1985,12 @@ def test_repo_packet():
                  "rebind this check to the shipped sha", "never `met`", "scratch Postgres", "exact ask"):
         assert term in sec, term
     outside = re.sub(r"\n### Repo batches\n.*?(?=\n## )", "", contract, flags=re.S)
+    outside = outside.replace("elapsed | repo | not-live | ro-dsn-grant", "elapsed | other")
     assert __import__("hashlib").sha256(outside.encode()).hexdigest() == "7063bfccbf09289ac6ff85881054e750b4a75ac83f129f8c66c96bfdb3124566"
     print("repo-batch AC6 contract and unchanged plain text passed")
 
 
 test_repo_packet()
+
+assert set(__import__("owed_routes").ROUTES) == set(json.loads((pathlib.Path(__file__).parents[1] / "agents/owed-sweeper.schema.json").read_text())["properties"]["results"]["items"]["properties"]["capability"]["enum"])
+print("AC7 ok packet capability list uses route vocabulary")

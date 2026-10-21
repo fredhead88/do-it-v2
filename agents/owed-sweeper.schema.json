@@ -71,7 +71,9 @@
               "browser",
               "operator-action",
               "elapsed",
-              "other"
+              "repo",
+              "not-live",
+              "ro-dsn-grant"
             ],
             "description": "required when verdict is cannot-observe"
           },

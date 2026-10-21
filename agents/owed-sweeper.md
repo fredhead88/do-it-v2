@@ -44,7 +44,7 @@ Decide one of three verdicts:
   `unmet` (never held) or `stale` (held once, no longer does).
 - **cannot-observe** — the check cannot be run from here, with a `capability`
   naming what is missing (`ro-dsn | droplet | browser | operator-action |
-  elapsed | other`) and a `why`. `cannot-observe` discharges nothing — it is
+  elapsed | repo | not-live | ro-dsn-grant`) and a `why`. `cannot-observe` discharges nothing — it is
   the honest third state, not a hedge.
 
 ## The 45-minute cap

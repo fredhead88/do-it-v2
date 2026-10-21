@@ -18,7 +18,8 @@ A check is "waiting on an act" when its LATEST verdict-shaped event is an
 time wait needs no one): `operator-action` is an explicit operator act, and
 `ro-dsn` / `droplet` / `browser` / `other` name an environment only an operator
 can stand up. It is an ask for as long as the check is neither met, waived,
-dropped nor unshipped.
+dropped nor unshipped, and its current route has attempts remaining.
+`operator-action` asks never expire on attempts.
 
 `guard_expiry` is the one seam that stops an open ask expiring silently:
 `dispatch.emit` calls it for an `escalation-blocking kind=owed-expired`, so
@@ -32,7 +33,7 @@ owed-failed, owed-unobservable and brief; nothing here waives or drops a check.
 import json, pathlib, re, sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import owed  # noqa: E402
+import owed, owed_routes  # noqa: E402
 
 OPEN_STATUSES = ("waiting", "due", "blocked", "expired", "quarantined")
 
@@ -77,6 +78,10 @@ def _asks_for(spec_evs, now):
     for r in owed.checks(spec_evs, now):
         cap = r.get("last_unobservable_capability")
         if cap in (None, "elapsed") or r["status"] not in OPEN_STATUSES:
+            continue
+        route = owed_routes.route_for(r.get("capability"))
+        if (route is not None and route != "operator-action"
+                and r.get("route_attempts", {}).get(route, 0) >= owed_routes.MAX_ATTEMPTS):
             continue
         out.append((r, cap))
     return out

@@ -64,8 +64,8 @@ def alloc(d, prefix, suffix):
             pass
 
 
-def emit(dst, base, type_, /, **kv):
-    """Never trust the write — re-read (§9.2 rule 4). Never an actor field (D90). R3/L-spec-0192: gated by `fold.required_reason` — the required-fields door ONLY (an actor/type mismatch is never refused here, only recorded-and- ignored at fold time, ADR-0028-3). Returns `None` once the line has landed; else the refusal, and nothing is written."""
+def emit(dst, base, type_, /, *, strict=False, **kv):
+    """Append and re-read; strict callers refuse events the fold would ignore."""
     if type_ == "escalation-blocking" and kv.get("kind") == "owed-expired":
         kv, refused = __import__("owed_asks").guard_expiry(base.get("subject"), kv)
         if refused:
@@ -76,6 +76,12 @@ def emit(dst, base, type_, /, **kv):
     reason = fold.required_reason(e)
     if reason:
         return reason
+    actor = fold.actor_of(dst.name) if len(dst.stem.split("-")) >= 3 else None
+    ignored = fold.admits(e, actor) if actor else None
+    if ignored and strict:
+        return ignored
+    if ignored:
+        print(f"fold: recorded-and-ignored {type_} by {actor}", file=sys.stderr)
     line = json.dumps(e, sort_keys=True, default=str)
     with open(dst, "a") as fh:
         fh.write(line + "\n")
