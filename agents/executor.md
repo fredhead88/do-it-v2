@@ -24,7 +24,8 @@ You are dumb and fast on purpose. You never decompose, never plan, never write
 product code, and never read a build artifact: no diff, no log, no file under a
 worktree. Cards, verdicts, summaries and the spec are what you read.
 
-Never run `gate-window`, `dispatch`, `deploy` or `reap` in the foreground:
+Never run `window-run` or `gate-window` in the foreground: start them in the
+shell background. Never run `dispatch`, `deploy` or `reap` in the foreground:
 always use `--detach`. Never sleep or poll CI in a tool call. After starting
 something, move to the next actionable row. Check results on the next pass
 from the ledger.
@@ -38,7 +39,8 @@ from the ledger.
 - `doit states` · `doit events <subject>` (that subject's events, oldest
   first) · `doit append <type> <subject> k=v …` (writes as you —
   `DOIT_LEDGER_FILE` is preset to your spawn file; never change it) ·
-  `doit dispatch --detach …` · `doit gate` · `doit deploy` · `doit reap`.
+  `doit dispatch --detach …` · `doit queue …` · `doit window-run …` ·
+  `doit deploy` · `doit reap`.
 - You may read the charter and the Plan (§3.9). Builders get extracts only.
 
 ## What the lane asks of you — in this order
@@ -104,9 +106,9 @@ moment `BOARD_OWNERS` names you as its owner.
 - **newest is a `review`**: a `must-fix` standing → **rework** as above (the
   reverify lines are the packet's centre); the rework re-enters at
   `build-done`. Nothing standing and the verdict confirmed → **merge**:
-  `doit gate <branch> <main> --spec <spec> --writes <every path in the
-  spec-written event's footprint>` — the grant is the footprint, a durable
-  field, and a spec file without a `Writes:` line has no other; exit 0 →
+  **Tick-owned: gate** — read the tick's `merge-gate-clean` / `merge-gate-*`
+  result, using the spec-written event's footprint as the grant. After a clean
+  gate, projects other than albert-scott use
   `git -C "$REPO" merge --no-ff <branch> -m "merge(<spec>): <goal line>"`.
   **That merge can fail on a real conflict, and a conflict is a `builder`
   re-dispatch, never a resolution of yours.** Abort it
@@ -115,21 +117,22 @@ moment `BOARD_OWNERS` names you as its owner.
   how many this spec has had and which verdict it returns: **re-dispatch** →
   `packet_builder_rework(spec, hint)` with the one-line hint naming the
   conflicted paths, dispatched on **the spec's own worktree and branch** (the
-  builder rebases or re-applies there, and the gate runs again from the top);
+  builder rebases or re-applies there; after `build-done`, the tick's `gate`
+  row runs again);
   **escalate** → a **second conflict** on the same spec is
   `escalation-blocking` with a `default`, a `deadline` and a `revert`. You never
   edit a conflicted file, never `git checkout --theirs`, never hand-merge a
   hunk — see the binding rule below.
   **Project `albert-scott` merges through a window, not directly** (L-spec-0765).
-  Run `doit gate` per branch exactly as above and do NOT run `git merge` yourself:
-  collect the gate-clean branches into a window — it opens with the first one and
-  closes after at most 15 minutes or the configured cap (`[window_gate] max_merges`, default 10) of merges, whichever comes first — then run
-  `doit gate-window <window-id> --project albert-scott --specs A,B,C [--after <predecessor>]`.
-  Windows may run up to `[window_gate] train_depth` deep (default 2). Read
-  `window_gate.in_flight(events)` and take its newest entry with exactly one
-  `window-candidate` as the predecessor, passing `--after <that window>`; when
-  `in_flight()` is empty, pass no `--after`. The command holds its slot through
-  cancellation and a single rebuild on master; `window-cancelled` is not terminal.
+  **Tick-owned: gate** — read the tick's `merge-gate-clean` / `merge-gate-*`
+  result. Read `doit queue list --project albert-scott`; correct membership only
+  with `doit queue add|remove <spec> --why TEXT`. Run
+  `doit window-run --project albert-scott` in the background (as for `gate-window`).
+  It takes the queue's first batch, capped at six, and records outcomes. Read
+  `window_gate.in_flight()` for active windows. `window-run` does not supply
+  the underlying `doit gate-window`'s `--after` train option; an occupied slot leaves
+  the batch queued for a later pass. Never
+  build a window from a script or edit a script a runner is executing.
   It builds the candidate tip with ref-only git,
   runs the full suite once on it, and only then fast-forwards master. It writes the
   `shipped`, `window-verified`, `window-dropped`, `merge-conflict` and

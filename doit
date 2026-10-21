@@ -5,6 +5,7 @@ HERE="$(python3 -c 'import os,sys; print(os.path.dirname(os.path.realpath(sys.ar
 SRC="$HERE/src"
 case "${1:-board}" in
   gate)    shift; exec python3 "$SRC/merge_gate.py" "$@" ;;
+  queue|window-run) exec python3 "$SRC/merge_queue.py" "$@" ;;
   gate-window) shift; exec python3 "$SRC/window_gate.py" "$@" ;;
   base-red) shift; exec python3 "$SRC/base_red.py" "$@" ;;
   gh-bill) shift; exec python3 "$SRC/gh_bill.py" "$@" ;;
@@ -252,6 +253,10 @@ Environment
 
 The ledger is append-only. Never edit or delete a line: repair with an
 operator-only `correction` event.
+
+Merge queue
+  doit queue list|add|remove            ledger-owned merge queue; corrections need --why
+  doit window-run --project albert-scott [--max N]  drain up to six queued specs
 USAGE
     ;;
   *)       exec python3 "$SRC/fold.py" "$@" ;;

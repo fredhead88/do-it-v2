@@ -417,13 +417,13 @@ def _strip_replay_packet(text, spawn):
 DOIT_BIN = str(pathlib.Path(__file__).resolve().parent.parent / "doit")
 
 
-def _real_runner(argv):
+def _real_runner(argv, *, cwd=None, env=None):
     # cron's PATH has no `doit`: a bare "doit" raised FileNotFoundError after the
     # worktree was already added, stranding it (09-28 04:30-05:08Z, 0400/0423/9002).
     if argv and argv[0] == "doit":
         argv = [DOIT_BIN] + list(argv[1:])
-    env = dict(os.environ, DOIT_LEDGER_FILE=str(tick.tick_path()))
-    r = subprocess.run(argv, capture_output=True, text=True, env=env)
+    env = dict(os.environ if env is None else env, DOIT_LEDGER_FILE=str(tick.tick_path()))
+    r = subprocess.run(argv, capture_output=True, text=True, cwd=cwd, env=env)
     return {"code": r.returncode, "stdout": r.stdout, "stderr": r.stderr}
 
 
@@ -643,4 +643,12 @@ def run(events, specs, now, *, runner=None, dry_run=False):
         out.append(f"replayed {spawn} as {detach.get('detached')}")
     import lane_driver
     out.extend(lane_driver.run(events, specs, now, runner=runner, dry_run=dry_run, handled=handled))
+    import merge_queue
+    try:
+        out.extend(merge_queue.enqueue_due(events, now, runner=runner, dry_run=dry_run))
+    except Exception as exc:
+        if not dry_run:
+            dispatch.emit(tick.tick_path(), {"subject": "queue"}, "autodispatch-failed",
+                          role="queue", reason=str(exc))
+        out.append(f"queue failed: {exc}")
     return out
