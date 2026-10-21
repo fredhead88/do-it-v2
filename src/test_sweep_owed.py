@@ -829,7 +829,7 @@ for busy in (True, False):
          patch.object(sweep_owed, "close_unverifiable", side_effect=lambda *a, **kw: order.append("close") or []), \
          patch.object(sweep_owed, "open_batch", side_effect=lambda *a: order.append("batch") or busy):
         sweep_owed.run(dry_run=True, now=NOW, runner=FakeRunner())
-    assert order == ["expired", "failures", "close", "batch"]
+    assert order == ["expired", "failures", "close", *(["batch"] * (2 if busy else 3))]
 clear()
 write("L-spec-writer-expired.jsonl",
       {"ts": EPOCH, "type": "owed-ac", "subject": "L-spec-9905", "criterion": "AC1",
@@ -950,7 +950,7 @@ assert len(expiry) == 1 and "L-spec-9914" in expiry[0]
 for variant in ("relabel", "redate"):
     clear()
     backlog_fixture("L-spec-9913", 1)
-    backlog_fixture("L-spec-9914", 1, "other")
+    backlog_fixture("L-spec-9914", 1, "elapsed")
     backlog_fixture("L-spec-9915", 1, "operator-action", "blocked")
     if variant == "redate":
         write("L-operator-9913.jsonl",
@@ -1285,4 +1285,205 @@ for case, age, validity, terminal, expected, should_batch in (
                     assert [(r['spec'], r['criterion']) for r in rows_of(manifests[0])] == [(sid, 'AC1')]
                     manifests[0].unlink()
     print('W38 lifecycle:', case, expected, 'batched' if should_batch else 'excluded')
+
+
+# L-spec-1368: production clone helper, real git commands, isolated ledger.
+def test_repo_batches():
+    import shutil
+    import build_runner
+
+    def git(repo, *args):
+        return subprocess.check_output(["git", "-C", str(repo), *args], text=True,
+            env=dict(os.environ, GIT_AUTHOR_NAME="fixture", GIT_AUTHOR_EMAIL="fixture@example.test",
+                     GIT_COMMITTER_NAME="fixture", GIT_COMMITTER_EMAIL="fixture@example.test")).strip()
+
+    def source_snapshot(repo):
+        return (git(repo, "for-each-ref"), git(repo, "worktree", "list", "--porcelain"),
+                (repo / ".git/config").read_bytes())
+
+    sources = {}
+    with patch.dict(os.environ):
+        os.environ.pop("DOIT_MAIN", None)
+        for branch in ("master", "main"):
+            project = "repo-fixture-" + branch
+            repo = TMP / "repos" / project
+            repo.mkdir(parents=True)
+            git(repo, "init", "-q", "-b", branch)
+            (repo / ".gitignore").write_text(".env\n")
+            git(repo, "add", ".gitignore")
+            git(repo, "commit", "-qm", "base")
+            base = git(repo, "rev-parse", "HEAD")
+            (repo / "shipped.txt").write_text("shipped\n")
+            git(repo, "add", "shipped.txt")
+            git(repo, "commit", "-qm", "ship")
+            sha = git(repo, "rev-parse", "HEAD")
+            if branch == "main":
+                (repo / "later.txt").write_text("later\n")
+                git(repo, "add", "later.txt")
+                git(repo, "commit", "-qm", "later")
+                # Both common remote names must be pinned if present.
+                git(repo, "branch", "master")
+            before = source_snapshot(repo)
+            with patch.object(dispatch, "provision_worktree_env", wraps=dispatch.provision_worktree_env) as provision:
+                tree = sweep_owed.make_repo_cwd(project, sha, base, "L-sweep-970" + str(len(sources)))
+                provision.assert_called_once_with(tree, repo)
+            assert tree.parent.stat().st_mode & 0o777 == 0o700
+            assert git(tree, "rev-parse", "HEAD") == sha
+            assert git(tree, "merge-base", "HEAD", "origin/" + branch) == base
+            assert git(tree, "diff", "--name-only", base) == "shipped.txt"
+            assert git(tree, "symbolic-ref", "--short", "refs/remotes/origin/HEAD") == "origin/" + branch
+            assert not (tree / ".env").exists()
+            assert source_snapshot(repo) == before
+            sources[branch] = (project, repo, sha, base)
+            for ref in (("main", "master") if branch == "main" else ("master",)):
+                verification = f'BASE=$(git merge-base HEAD origin/{ref}) && git diff --name-only "$BASE"'
+                observed = subprocess.run(["bash", "-c", verification], cwd=tree, capture_output=True, text=True)
+                assert observed.returncode == 0 and observed.stdout.strip() == "shipped.txt"
+                outside = subprocess.run(["bash", "-c", verification], cwd=TMP, capture_output=True, text=True)
+                assert outside.returncode != 0 and not outside.stdout.strip()
+            print("repo-batch AC2", branch, "clone/base/diff/source unchanged; AC7 real Verification passed")
+        project, repo, sha, base = sources["main"]
+        for bad_sha, bad_base in (("0" * 40, base), (sha, "0" * 40)):
+            try:
+                sweep_owed.make_repo_cwd(project, bad_sha, bad_base, "L-sweep-9799")
+                raise AssertionError("unresolvable revision accepted")
+            except build_runner.Undetermined:
+                assert not (SCRATCH_ROOT / "sweeps/L-sweep-9799").exists()
+        with patch.dict(os.environ, DOIT_MAIN="missing"):
+            try:
+                sweep_owed.make_repo_cwd(project, sha, base, "L-sweep-9799")
+                raise AssertionError("unresolvable main branch accepted")
+            except build_runner.Undetermined:
+                assert not (SCRATCH_ROOT / "sweeps/L-sweep-9799").exists()
+
+        # Three terminal trees and one open tree; count before removal is four.
+        events, trees = [], []
+        for i, terminal in enumerate(("spawn-done", "spawn-failed", "spawn-stale", None)):
+            subject, spawn = f"L-sweep-978{i}", f"L-owed-sweeper-978{i}"
+            tree = SCRATCH_ROOT / "sweeps" / subject / "tree"
+            tree.mkdir(parents=True)
+            trees.append(str(tree))
+            events.append(dict(type="spawn-started", role="owed-sweeper", subject=subject, spawn=spawn))
+            if terminal:
+                events.append(dict(type=terminal, spawn=spawn))
+        assert sum(pathlib.Path(t).is_dir() for t in trees) == 4
+        assert sweep_owed.reap_repo_cwds(events) == trees[:3]
+        assert pathlib.Path(trees[-1]).is_dir() and sweep_owed.reap_repo_cwds(events) == []
+        print("repo-batch AC3 counted 4 trees; reaped 3 terminal trees; open tree preserved; idempotent")
+
+        def reset():
+            clear()
+            shutil.rmtree(SCRATCH_ROOT / "sweeps")
+            (SCRATCH_ROOT / "sweeps").mkdir()
+
+        empty_observations = dict(lines=[], held=set(), bundle_rows={}, to_judgment=set())
+        judgment = dict(runner="judgment", needs=["repo"], commands=[], validity_h=24)
+        def seed(suffix, project=project, shipped=sha, capability="repo", criterion="AC1", blocked=False, routed=False):
+            sid = "L-spec-1368-" + suffix
+            suffix = suffix.replace("-", "")  # Keep filename-derived ledger actors canonical.
+            write(f"L-spec-writer-{suffix}.jsonl",
+                  dict(type="spec-written", subject=sid, project=project, ts=EPOCH),
+                  *([] if routed else [dict(type="owed-ac", subject=sid, criterion=criterion,
+                       line="fixture", wake_at=iso(hours=-24), ts=EPOCH)]))
+            dispatch.spec_path(sid).write_text("## Acceptance criteria\nAC1 [backend]: fixture\n"
+                                                "## Verification\n```bash\ngit diff --name-only $BASE\n```\n")
+            write(f"L-executor-{suffix}.jsonl", dict(type="shipped", subject=sid, sha=shipped, ts=EPOCH))
+            if routed:
+                write(f"L-grader-{suffix}.jsonl", dict(type="criterion-routed", subject=sid, criterion=criterion,
+                      capability="git", to="owed", ts=iso(hours=-23)))
+            if not routed or capability != "repo":
+                write(f"L-operator-{suffix}.jsonl", dict(type="owed-routed", subject=sid, criterion=criterion,
+                      capability=capability, route="relabel", ts=iso(hours=-22)))
+            if blocked:
+                write(f"L-owed-sweeper-{suffix}.jsonl", dict(type="owed-unobservable", subject=sid,
+                      criterion=criterion, capability=capability, why="fixture", ts=iso(hours=-20)))
+            return sid
+
+        def drive(*, dry_run=False):
+            fake = FakeRunner()
+            with patch.object(prod_runner, "run", return_value=empty_observations), \
+                    patch.object(prod_runner, "record_for", return_value=judgment), \
+                    patch.object(sweep_owed, "reap_repo_cwds", wraps=sweep_owed.reap_repo_cwds) as reaper, \
+                    patch.object(sweep_owed, "make_repo_cwd", wraps=sweep_owed.make_repo_cwd) as maker:
+                lines = sweep_owed.run(now=NOW, runner=fake, dry_run=dry_run)
+                assert reaper.call_count == int(not dry_run)
+            return fake, lines, maker.call_count
+
+        reset()
+        sids = [seed("a1"), seed("a2"), seed("a3", shipped=base),
+                seed("b1", project=sources["master"][0], shipped=sources["master"][2])]
+        fake, lines, calls = drive(dry_run=True)
+        assert not fake.calls and calls == 0 and not list(CONTENT.glob("L-sweep-*.md"))
+        fake, lines, calls = drive()
+        manifests = list(CONTENT.glob("L-sweep-*.md"))
+        assert any("1 repo row(s) deferred: one shipped sha" in line for line in lines)
+        assert len(manifests) == 1 and calls == 1 and len(fake.calls) == 2
+        parsed = sweep_owed.packet.parse_sweep_manifest(manifests[0])
+        assert parsed["kind"] == "repo"
+        assert {r["spec"] for r in parsed["rows"]} == set(sids[:2])
+        assert {r["shipped_sha"] for r in parsed["rows"]} == {sha}
+        assert {r["base_sha"] for r in parsed["rows"]} == {base}
+        assert {r["clone"] for r in parsed["rows"]} == {parsed["cwd"]}
+        assert fake.calls[-1][fake.calls[-1].index("--cwd") + 1] == parsed["cwd"]
+        assert git(pathlib.Path(parsed["cwd"]), "rev-parse", "HEAD") == sha
+        records = [e for e in fold.read_events() if e["type"] == "sweep-run"]
+        assert len(records) == 1 and records[0]["kind"] == "repo" and records[0]["outcome"] == "batched"
+
+        for open_kind, expected in (("plain", "batched"), ("browser", "batched"), ("repo", "open")):
+            reset()
+            seed("open-" + open_kind)
+            open_path = CONTENT / "L-sweep-9777.md"
+            open_path.write_text(f"# L-sweep-9777\nkind: {open_kind}\n")
+            write("L-owed-sweeper-open.jsonl", dict(type="spawn-started", subject=open_path.stem,
+                  spawn="L-owed-sweeper-9777", role="owed-sweeper", project=project))
+            ev = fold.read_events()
+            assert sweep_owed.open_batch(ev, NOW)
+            assert sweep_owed.open_batch(ev, NOW, open_kind)
+            fake, lines, calls = drive()
+            records = [e for e in fold.read_events() if e["type"] == "sweep-run"]
+            assert len(records) == 1 and records[0]["outcome"] == expected
+            assert bool(fake.calls) == (expected == "batched")
+
+        for capability, criterion, blocked, shipped, routed, expected in (
+                ("repo", "verify", False, sha, True, "repo"),
+                ("other", "AC1", False, sha, False, "repo"),
+                ("repo", "AC1", True, sha, False, None),
+                ("repo", "AC1", False, None, False, None),
+                ("elapsed", "verify", False, sha, True, "plain"),
+                ("elapsed", "AC1", False, sha, False, "plain"),
+                ("unknown-capability", "AC1", False, sha, False, "plain")):
+            reset()
+            seed("route", capability=capability, criterion=criterion, blocked=blocked, shipped=shipped, routed=routed)
+            fake, lines, calls = drive()
+            manifests = list(CONTENT.glob("L-sweep-*.md"))
+            assert bool(manifests) == bool(expected), (capability, criterion, lines)
+            if expected:
+                assert sweep_owed.packet.parse_sweep_manifest(manifests[0])["kind"] == expected
+            assert calls == int(expected == "repo")
+
+        reset()
+        seed("priority-repo")
+        plain_sid = seed("priority-plain", capability="elapsed")
+        fake, lines, calls = drive()
+        assert calls == 0
+        assert [r["spec"] for r in rows_of(next(CONTENT.glob("L-sweep-*.md")))] == [plain_sid]
+
+        for failure in (build_runner.Undetermined("fixture"), OSError("fixture"), subprocess.SubprocessError("fixture")):
+            reset()
+            seed("failure")
+            with patch.object(sweep_owed, "make_repo_cwd", side_effect=failure):
+                fake, lines, calls = drive()
+            assert not fake.calls and any("failed" in line for line in lines)
+            assert not list(CONTENT.glob("L-sweep-*.md"))
+            assert not list((SCRATCH_ROOT / "sweeps").glob("*/tree"))
+            records = [e for e in fold.read_events() if e["type"] == "sweep-run"]
+            assert len(records) == 1 and records[0]["outcome"] == "failed"
+        print("repo-batch AC5 grouping, dispatch cwd, kind slots, legacy/verify routes, missing sha, blocked and failures passed")
+        # The source checkout remains untouched after all dispatches too.
+        assert git(repo, "rev-parse", "HEAD") != sha
+        for tree in (SCRATCH_ROOT / "sweeps").glob("*/tree"):
+            shutil.rmtree(tree)
+
+
+test_repo_batches()
 ROOT_PATCHES.close()
