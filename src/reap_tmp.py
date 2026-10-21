@@ -580,7 +580,7 @@ def _scan_scratch(scratch_root, uid, now, proc_root, dry_run):
 
 
 def _reap_grade_views(scratch_root, events, proc_root, dry_run, uid=None, stop_fn=None):
-    """Reap terminal views only after stopping their private PG successfully."""
+    """Reap terminal spawns' entries after stopping any private PG successfully."""
     root = pathlib.Path(scratch_root)
     grade_dir = root / "grade"
     if root.is_symlink() or grade_dir.is_symlink():
@@ -590,27 +590,34 @@ def _reap_grade_views(scratch_root, events, proc_root, dry_run, uid=None, stop_f
     except FileNotFoundError:
         return [], {}
     terminal = fold.terminal_spawns(events)
+    recorded = {e["spawn"] for e in events if e.get("spawn")}
+    prefix_owners = sorted((spawn for spawn in recorded
+                            if re.fullmatch(r"L-[A-Za-z-]+-[0-9]+", spawn)),
+                           key=len, reverse=True)
     uid = os.getuid() if uid is None else uid
     removed, errors = [], {}
     for path in paths:
-        if path.name not in terminal:
+        owner = path.name if path.name in recorded else next(
+            (spawn for spawn in prefix_owners if path.name.startswith(spawn + "-")), None)
+        if owner not in terminal:
             continue
         try:
             st = path.lstat()
-            if not stat.S_ISDIR(st.st_mode) or st.st_uid != uid:
+            is_dir = stat.S_ISDIR(st.st_mode)
+            if not (is_dir or stat.S_ISREG(st.st_mode)) or st.st_uid != uid:
                 continue
             data = path / "pg" / "data"
-            if ((path / "pg").is_symlink() or data.is_symlink()
-                    or (data / "postmaster.pid").is_symlink()):
+            if is_dir and ((path / "pg").is_symlink() or data.is_symlink()
+                           or (data / "postmaster.pid").is_symlink()):
                 continue
-            if _scratch_refs(proc_root, path, private_pg=True):
+            if _scratch_refs(proc_root, path, private_pg=is_dir):
                 continue
-            if (data / "postmaster.pid").exists() and not dry_run:
+            if is_dir and (data / "postmaster.pid").exists() and not dry_run:
                 (stop_fn or _default_stop_cluster)(data)
             refs_d = _refs_d(proc_root, path)
-            if dry_run:
+            if dry_run and is_dir:
                 refs_d = [r for r in refs_d if not _under(r, path / "pg")]
-            if _scratch_refs(proc_root, path, private_pg=dry_run) or refs_d:
+            if _scratch_refs(proc_root, path, private_pg=dry_run and is_dir) or refs_d:
                 continue
             if not dry_run:
                 _delete(path)
