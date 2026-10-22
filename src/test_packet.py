@@ -2061,8 +2061,11 @@ def test_repo_packet():
         assert term in sec, term
     outside = re.sub(r"\n### Repo batches\n.*?(?=\n## )", "", contract, flags=re.S)
     outside = outside.replace("elapsed | repo | not-live | ro-dsn-grant", "elapsed | other")
-    assert __import__("hashlib").sha256(outside.encode()).hexdigest() == "7063bfccbf09289ac6ff85881054e750b4a75ac83f129f8c66c96bfdb3124566"
-    print("repo-batch AC6 contract and unchanged plain text passed")
+    for term in ("env.pg: private", "missing DB provenance", "cannot-observe",
+                 "never `failed`", "env.pg: none", "env.required_pg: prod_ro"):
+        assert term in outside, term
+    assert __import__("hashlib").sha256(outside.encode()).hexdigest() == "eb6149ae2cf8a39f19cc94d98773d7c588b137f5a9c9b2070f91c389d07b9dcc"
+    print("repo-batch AC6 contract and W55 live-data provenance policy passed")
 
 
 test_repo_packet()
