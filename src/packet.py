@@ -1243,7 +1243,11 @@ def p_owed_sweeper(c):
          "from its own spec — nothing else:"]
     if manifest["kind"] == "repo":
         L += ["   kind: repo — run each row's own Verification or criterion commands in the clone.",
-              "   Any read outside the clone is cannot-observe, capability operator-action; "
+              "   Use each row's check_runner with the commands on stdin (a quoted shell heredoc). "
+              "It exports BASE, clears production DSNs, and provisions and cleans scratch Postgres "
+              "only when the commands mention pg_scratch, live_db or AS_LOCAL_PG_ADMIN. "
+              "The supplied harness and lock-matched node_modules are permitted dependencies.",
+              "   Any other read outside the clone is cannot-observe, capability operator-action; "
               "ask: rebind this check to the shipped sha. Never mark that row met."]
     for row in manifest["rows"]:
         sp = pathlib.Path(row["spec_path"])
@@ -1257,12 +1261,16 @@ def p_owed_sweeper(c):
         if manifest["kind"] == "repo":
             L += [f"     shipped_sha: {row['shipped_sha']}; base_sha: {row['base_sha']}; clone: {row['clone']}",
                   f"     export BASE={shlex.quote(row['base_sha'])}"]
+            L += __import__("sweep_provision").packet_row(row)
             paths = not_sha_bound(block, manifest["project"])
             if paths:
                 L.append("     not-sha-bound: " + ", ".join(paths))
         L += [f"     {ln}" for ln in block.splitlines()]
     env_path = pathlib.Path(manifest["cwd"]) / ".env"
-    if env_path.is_file():
+    if manifest["kind"] == "repo":
+        L.append("3. Production DSNs stay unset for repo checks. The check_runner supplies "
+                 "AS_LOCAL_PG_ADMIN only for a check needing scratch Postgres; never source an env file.")
+    elif env_path.is_file():
         L.append(f"3. This batch's own read-only DB credential, for a `live_db` observation: "
                  f"`{env_path}` holds `SUPABASE_DB_URL` — `set -a; . {env_path}; set +a` before "
                  "reading it.")

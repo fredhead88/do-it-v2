@@ -1980,6 +1980,15 @@ def test_repo_packet():
             assert term in rendered, term
         sp.write_text("## Verification\n```bash\ngit diff --name-only $BASE\n```\n")
         assert "not-sha-bound:" not in "\n".join(packet.p_owed_sweeper(c))
+        provisioned = dict(repo_row, provisioning={"node_modules": "cache:fixture", "prod_dsns": "unset"},
+                           check_runner="python3 /fixture/sweep_provision.py --clone /fixture/clone",
+                           provisioning_record="/fixture/check-0.provisioning.json")
+        manifest("repo", [provisioned])
+        rendered = "\n".join(packet.p_owed_sweeper(c))
+        for term in ("cache:fixture", "check_runner", "<<'OWED_CHECK'", "Production DSNs stay unset",
+                     "AS_LOCAL_PG_ADMIN", "/fixture/check-0.provisioning.json"):
+            assert term in rendered, term
+        assert "set -a; ." not in rendered
         for key in ("shipped_sha", "base_sha", "clone"):
             manifest("repo", [{k: v for k, v in repo_row.items() if k != key}])
             try:

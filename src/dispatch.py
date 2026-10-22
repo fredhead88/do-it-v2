@@ -1275,8 +1275,12 @@ def _main(a):
         # A grader's stamp reflects its proven view, including an admin-only cluster; backends with no view carry none.
         dsn_role = grading_env.dsn_role(grading_view) if grader_seat else "none"
     elif a.role in ("owed-sweeper", "owed-verifier"):
-        # L-spec-9004 OC1: the sweeper's own private, per-sweep `cwd` (never the shared checkout) gets a read-only DSN copy through the sibling, narrower function above — never provision_worktree_env, whose git-ignore gate cannot apply to a non-git scratch directory.
-        dsn_role = provision_sweep_env(cwd, ROOT / "repos" / a.project) if a.project else "absent"
+        # Plain/browser sweeps receive a private RO DSN. Repo checks use only
+        # the per-check scratch endpoint supplied by sweep_provision.
+        import packet
+        sweep_manifest = packet.parse_sweep_manifest(CONTENT / f"{a.subject}.md")
+        dsn_role = ("none" if sweep_manifest["kind"] == "repo" else
+                    provision_sweep_env(cwd, ROOT / "repos" / a.project) if a.project else "absent")
     # L-spec-0269: every start records the window it was offered under and who is waiting on it — any role, any backend (a flat, unbumped cap for run_claude/run_codex; the full formula, load-bearing, for run_seat).
     wm = window_min(a.role, a.subject, fold.read_events(), backend=backend)
     waiter_pid = os.getpid()

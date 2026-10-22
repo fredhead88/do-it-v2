@@ -42,7 +42,7 @@ import argparse, hashlib, json, os, pathlib, re, shutil, subprocess, sys, time
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import build_runner, dispatch, fold, owed, owed_failures, packet, scratch, prod_runner, prod_browser, owed_routes  # noqa: E402
+import build_runner, dispatch, fold, grading_env, owed, owed_failures, packet, scratch, prod_runner, prod_browser, owed_routes, sweep_provision  # noqa: E402
 
 LEDGER_NAME = "L-sweep-local.jsonl"
 MAX_BATCH = 8
@@ -359,6 +359,9 @@ def _manifest_text(sweep_id, project, cwd, batch, *, kind="plain"):
     if kind == "repo":
         for row, source in zip(rows, batch):
             row.update(shipped_sha=source["shipped_sha"], base_sha=source["base_sha"], clone=cwd)
+            for key in ("provisioning", "check_runner", "provisioning_record"):
+                if key in source:
+                    row[key] = source[key]
     return (f"# {sweep_id}\n\nproject: {project}\ncwd: {cwd}\nkind: {kind}\n\n## Rows\n\n```json\n"
             + json.dumps(rows, indent=2) + "\n```\n")
 
@@ -534,7 +537,7 @@ def make_repo_cwd(project, sha, base, sweep_id):
     parent.chmod(0o700)
     tree = parent / "tree"
     repo = dispatch.ROOT / "repos" / project
-    env, deadline = os.environ.copy(), time.monotonic() + build_runner.WALL_CAP
+    env, deadline = grading_env._clean_env(), time.monotonic() + build_runner.WALL_CAP
     try:
         build_runner._required(["git", "clone", "--shared", "--no-checkout", str(repo), str(tree)],
                                phase="repo clone", env=env, deadline=deadline)
@@ -559,7 +562,8 @@ def make_repo_cwd(project, sha, base, sweep_id):
                                        phase="repo base ref", env=env, deadline=deadline)
         build_runner._required(["git", "-C", str(tree), "symbolic-ref", "refs/remotes/origin/HEAD", main_ref],
                                phase="repo origin HEAD", env=env, deadline=deadline)
-        dispatch.provision_worktree_env(tree, repo)
+        summary = {"node_modules": sweep_provision.dashboard(tree, dispatch.ROOT), "prod_dsns": "unset"}
+        (parent / "provisioning.json").write_text(json.dumps(summary) + "\n")
         return tree
     except BaseException:
         shutil.rmtree(parent)
@@ -608,7 +612,15 @@ def dispatch_batch(project, batch, runner, *, dry_run=False, kind="plain"):
             base = build_runner._required(["git", "-C", cwd, "rev-parse", "HEAD^1"],
                                           phase="repo base", env=os.environ.copy(),
                                           deadline=time.monotonic() + 30)
-            batch = [{**row, "base_sha": base} for row in batch]
+            summary = json.loads((pathlib.Path(cwd).parent / "provisioning.json").read_text())
+            provisioned = []
+            for index, row in enumerate(batch):
+                record = pathlib.Path(cwd).parent / f"check-{index}.provisioning.json"
+                record.write_text(json.dumps(summary) + "\n")
+                provisioned.append({**row, "base_sha": base, "provisioning": summary,
+                    "check_runner": sweep_provision.check_command(cwd, base, record),
+                    "provisioning_record": str(record)})
+            batch = provisioned
         except (build_runner.Undetermined, OSError, subprocess.SubprocessError):
             sweep_path.unlink(missing_ok=True)
             parent = scratch.sub("sweeps") / sweep_id

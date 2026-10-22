@@ -88,13 +88,24 @@ with `origin/master` at the base when that ref exists; the project's main branch
 (`origin/main` or `origin/master`) and `origin/HEAD` also point at the base.
 The first-parent base is supplied in the packet and `$BASE` is exported before
 checks: run its `export BASE=...` line in the shell used for each row.
-Run the row's own Verification or criterion commands there, plus the three
+Run the row's own Verification or criterion commands there through its supplied
+`check_runner`: pass the exact shell commands on stdin using a quoted heredoc.
+The harness exports `$BASE`, keeps production DSNs unset, and, when those
+commands mention `pg_scratch`, `live_db` or `AS_LOCAL_PG_ADMIN`, starts a private
+loopback admin cluster, exports `AS_LOCAL_PG_ADMIN` for that check only, and stops
+and removes its own cluster afterward. Never source an env file for repo checks.
+The row records the lock-matched dashboard dependency source; its provisioning
+record also records whether scratch Postgres ran, without credential values.
+Use the three
 wrappers `ro-sql`, `droplet-read` and `portal-e2e` when its observation needs them.
 
 The sweeper writes nothing outside the clone and the seat output file; it
 never pushes, commits or uses a read-write DSN. Temporary check artifacts belong
-inside the clone. Never read another checkout to satisfy a check: any read
-outside the clone, except the supplied interpreter, is not bound to the shipped sha.
+inside the clone. The supplied harness may write its provisioning record and
+its private scratch Postgres directory under `/var/tmp`, and may read its
+lock-matched node_modules dependency tree. Never read another checkout to
+satisfy a check: any other read outside the clone, except the supplied
+interpreter, is not bound to the shipped sha.
 A `not-sha-bound` row is `cannot-observe` with `capability: operator-action`
 and ask `rebind this check to the shipped sha`, never `met`. A row needing a
 scratch Postgres the box lacks is `cannot-observe` with `capability: operator-action`
