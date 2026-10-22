@@ -278,11 +278,28 @@ canvas#map.hand{cursor:pointer}
 .pvflag{position:absolute;top:-2px;width:2px;height:20px;background:var(--gold,#e6c46a)}
 .pvstep{border-left:4px solid;padding:4px 10px;margin:8px 0;display:flex;flex-direction:column;gap:2px}
 .pvstep ul{margin:4px 0 0;padding-left:16px}.pvstep li{margin:2px 0;font-size:12.5px}
+
+.hud{grid-template-columns:1fr;grid-template-areas:"title" "know" "details" "row";gap:5px;max-height:65vh;overflow-y:auto}
+#operator-summary{grid-area:know;min-width:0;border:1px solid var(--hair);border-radius:8px;padding:7px 12px;background:rgba(255,255,255,.025)}
+#know-title{font:600 14px var(--body);color:var(--gold);margin:0 0 4px;display:flex;gap:14px;align-items:center}
+.know-row{font-size:13px;line-height:24px;white-space:nowrap;overflow-x:auto;scrollbar-width:thin;min-width:0}
+.know-row a{color:var(--text);text-decoration:underline;text-decoration-color:var(--gold2);cursor:pointer}
+.know-row b{font-weight:600}.next-merges a{display:inline-block;max-width:20ch;overflow:hidden;text-overflow:ellipsis;vertical-align:bottom}.view #stuck{display:none}.priority-group{display:inline-block;margin-right:24px}
+.summary-link{font:600 13px var(--body);padding:0;border:0;background:none;color:var(--gold);cursor:pointer;text-decoration:underline}
+.realm-details{grid-area:details;min-width:0}.realm-details summary{font-size:12px;color:var(--mute);cursor:pointer}
+.realm-details .stats{margin-top:8px}.detail-actions{margin-top:6px}
+#app.nopanel .hud{grid-template-columns:1fr}
+@media(max-width:700px){.hud{grid-template-areas:"title" "know" "details"}.realm-details .stats{display:grid}.realm-details{max-height:25vh;overflow:auto}#operator-summary{padding:6px 8px}.know-row{font-size:12px;line-height:23px}#know-title{font-size:13px;gap:10px}}
 </style>
 
 <div id="app">
   <header class="hud">
     <h1>REALM OF DO-IT <span class="mode" id="mode">…</span></h1>
+    <section id="operator-summary" aria-labelledby="know-title">
+      <h2 id="know-title">What you should know <button class="summary-link" id="b-operator-shelf">Shelf</button><button class="summary-link" id="b-operator-codex">Codex (OpenAI)</button></h2>
+      <div id="operator-lines"><div class="know-row">Reading the operator summary…</div></div>
+    </section>
+    <details class="realm-details"><summary>Details — counts, checks and census</summary>
     <div class="stats">
     <div class="stat" style="grid-column:span 2" title="Shows the time being viewed; in replay mode this can be earlier than now."><b id="h-clock">—</b><span id="h-clock-l">chronicle time</span></div>
     <div class="stat click" id="h-exec" title="Shows when the coordinator last moved work forward, so you can tell whether work is being managed."><b>—</b><span>executor</span></div>
@@ -301,6 +318,8 @@ canvas#map.hand{cursor:pointer}
     <div class="stat click" id="h-fail" title="Counts worker runs that failed out of all finished runs during the time shown."><b>—</b><span>fallen</span></div>
     <div class="stat click" id="h-disk" title="Shows storage used on the worker computer and how much space is left." style="width:96px"><b>—</b><span>root disk</span></div>
     </div>
+    <div class="detail-actions"><button class="btn" id="b-census">CENSUS</button></div>
+    </details>
     <div class="row">
     <div class="ctl">
       <button class="btn live" id="b-live" aria-label="Return to live">LIVE</button>
@@ -312,7 +331,6 @@ canvas#map.hand{cursor:pointer}
       <button class="btn" id="b-yitzy" style="border-color:#7fc4ff;color:#bfe2ff">YITZY'S WORLD</button>
       <button class="btn" id="b-omens">OMENS</button>
       <button class="btn" id="b-clock" style="border-color:var(--amber);color:var(--amber)">WALL CLOCK</button>
-      <button class="btn" id="b-census">CENSUS</button>
       <button class="btn" id="b-tour" style="border-color:var(--gold);color:var(--gold)">TOUR</button>
       <button class="btn" id="b-help">GUIDE</button>
     </div>
@@ -764,7 +782,7 @@ function hud(){
   $('h-flight').firstElementChild.textContent=[...S.actors.values()].filter(a=>!a.done&&!a.tour).length;
   renderStuckTile();
   renderMerge();
-  const sh=$('h-shelf');let oldest=0;for(const ms of S.shelf.values())oldest=Math.max(oldest,S.now-ms);sh.firstElementChild.textContent=shelfText(S.shelf.size,oldest);sh.className='stat '+(oldest>4*3600000?'bad':oldest>3600000?'warn':'');
+  const sh=$('h-shelf');let oldest=0;for(const ms of S.shelf.values())oldest=Math.max(oldest,S.now-ms);sh.firstElementChild.textContent=shelfText(S.shelf.size,oldest);sh.className='stat '+(oldest>4*3600000?'bad':oldest>3600000?'warn':'');if(typeof Operator!=='undefined')Operator.renderShelfTile();
   const es=$('h-esc');let eo=0;for(const l of S.esc.values())eo=Math.max(eo,S.now-l[0].ms);{const o=escOwners();const n=o.you+o.th;es.firstElementChild.textContent=n?`${n} · ${o.you} YOU`:'0';es.className='stat '+(o.you?(eo>4*3600000?'bad':'warn'):'');es.lastElementChild.textContent='ravens · yours';}
   $('h-ship').firstElementChild.textContent=S.shipped;$('h-ship').className='stat good';
   const fa=$('h-fail');fa.firstElementChild.textContent=S.fails+' / '+(S.done+S.fails);fa.className='stat '+(S.fails>(S.done+S.fails)*.2?'bad':S.fails?'warn':'good');fa.lastElementChild.textContent=S.refused?`fallen · ${S.refused} turned back`:'fallen';
@@ -891,7 +909,7 @@ async function ensureSpec(s){if(!s||!String(s).startsWith('L-spec-')||specInfo(s
 function specBlurb(s){const i=specInfo(s);if(!i)return '';return `<b>${esc(i.title)}</b><br>${esc(i.intent||'')}`;}
 function bindLinks(){for(const a of document.querySelectorAll('a.link[data-ch]'))a.onclick=()=>openDossier(a.dataset.ch);for(const a of document.querySelectorAll('a.link[data-role]'))a.onclick=()=>openRole(a.dataset.role);for(const a of document.querySelectorAll('a.link[data-subj]'))a.onclick=()=>openSubject(a.dataset.subj);for(const a of document.querySelectorAll('a.link[data-mon]'))a.onclick=()=>openMonster(a.dataset.mon);}
 function chronicleHtml(){const c=DATA.counts;return `<h4>EVENT TYPES</h4><table><tr><th>type</th><th>count</th></tr>${Object.entries(c).slice(0,24).map(([k,v])=>`<tr><td>${k}</td><td>${v}</td></tr>`).join('')}</table><p class="tiny">Ledger from ${(DATA.ledger_start||'').slice(0,16)}, ${DATA.n_events.toLocaleString()} events. ${LIVE?'Live from '+esc(DATA.root)+'.':'Snapshot.'}</p>`;}
-function shelfHtml(){const rows=[...S.shelf.entries()].sort((a,b)=>a[1]-b[1]);return `<h4>ON THE SHELF NOW (${rows.length})</h4>${rows.length?'<table><tr><th>spec</th><th>waiting</th></tr>'+rows.slice(0,30).map(([s,ms])=>`<tr><td><a class="link" data-subj="${s}">${s}</a></td><td>${fmtDur(S.now-ms)}</td></tr>`).join('')+'</table>':'<p class="tiny">Empty.</p>'}<p class="tiny">Written, not yet taken by a builder, as of the clock. Killed specs leave the shelf.</p>`;}
+function shelfHtml(){return Operator.shelfHtml();}
 function keepHtml(){const all=[...S.esc.entries()];const rows=all.filter(([s,l])=>isRaven(l)).sort((a,b)=>(escOwner(b[1])==='you')-(escOwner(a[1])==='you'));const other=all.filter(([s,l])=>!isRaven(l));const dec=[...S.decided.entries()].filter(([s,d])=>S.now-d.ms<6*3600000).sort((a,b)=>b[1].ms-a[1].ms);return `<h4>RAVENS WAITING (${rows.length}) · the same list as fold.open_questions</h4><p class="tiny">Yours only when the ask names money, credentials, an irreversible production write or a product call. The rest the Thinker decides.</p>${rows.length?rows.slice(0,20).map(([s,l])=>{const ow=escOwner(l);const x=l[l.length-1];const kb=knownBug((x.why||'')+' '+(x.irr||''));return `<div class="act ${ow==='you'&&!kb?'':'' }" style="border-left-color:${kb?'var(--mute)':ow==='you'?'var(--amber)':'var(--blue)'}"><b>${kb?'KNOWN BUG · nobody':ow==='you'?'YOU':'THINKER'} · <a class="link" data-subj="${s}">${s}</a> · waiting ${fmtDur(S.now-l[0].ms)}</b>${esc(x.why||'')}<span class="tiny">${kb?esc(kb.note)+'<br>':''}Default: ${esc(x.df||'none recorded')}<br>Deadline: ${esc((x.dl||'none').slice(0,16).replace('T',' '))}${x.dl&&toMs(x.dl)<S.now?' (passed)':''}${x.bl?' · blocks '+esc(x.bl):''}${x.irr?' · irreversible':''}</span></div>`;}).join(''):'<p class="tiny">None. The keep is quiet.</p>'}${other.length?`<h4>NOT RAVENS (${other.length})</h4>${other.map(([s,l])=>{const x=l[l.length-1];const kb=knownBug((x.why||'')+' '+(x.irr||''));return `<p><span class="pill">${kb?'known bug':'question, default pending'}</span> <a class="link" data-subj="${s}">${s}</a> · ${esc((x.why||'').slice(0,140))}<br><span class="tiny">${kb?esc(kb.note):'If nobody answers, the default applies at '+esc((x.dl||'').slice(0,16).replace('T',' '))+': '+esc(x.df||'none recorded')}</span></p>`;}).join('')}`:''}${dec.length?`<h4>DECIDED IN THE LAST 6 H</h4>${dec.slice(0,12).map(([s,d])=>`<p><a class="link" data-subj="${s}">${s}</a> · decided by <b>${esc(d.by)}</b> ${fmtAge(S.now-d.ms)} ago${d.owner==='you'&&d.by!=='operator'?' <span class="tiny">(was marked yours)</span>':''}<br><span class="tiny">${esc((d.why||'').slice(0,160))}</span></p>`).join('')}`:''}`;}
 function docksHtml(){const q=DATA.queue;const w=[...S.actors.values()].filter(a=>a.state==='queued');return `<h4>CLAIM LATENCY (seat files)</h4><div class="kv"><b>spawns</b><span>${q.n} with a .claimed file</span><b>median</b><span>${q.med_min} min</span><b>p90</b><span>${q.p90_min} min</span><b>worst</b><span>${q.max_min} min</span></div><p class="tiny">Waiting at the ferry now: ${w.length}. Seat directory holds ${DATA.seat.packets} packets, ${DATA.seat.served} served, ${DATA.seat.unclaimed} never claimed.</p>`;}
 const charterId=v=>{const m=/L-charter-\d+/.exec(String(v||''));return m?m[0]:null;};
@@ -1266,9 +1284,9 @@ function drawClocks_unused(t){const w=S.wallclock||(DATA&&DATA.wallclock);if(!w|
 const PHONE=matchMedia('(max-width:700px)');let mTab='now';
 const M_TILES=[['h-exec','executor'],['h-quota','weekly quota'],['h-stuck','stuck'],['h-esc','ravens · yours'],['h-pipe','in pipeline'],['h-owed','owed checks'],['h-proving','proving'],['h-shelf','ready, waiting for a builder'],['h-merge','merge'],['h-ship','shipped'],['h-fail','fallen'],['h-disk','root disk']];
 function mNowHtml(){const st=$('stuck');const calm=st.classList.contains('calm');const live=S.alarms.filter(a=>a.needs);
-  return `<div class="m-strip ${calm?'calm':''}">${st.innerHTML}</div>
-  <div class="m-tiles">${M_TILES.map(([id,label])=>{const c=$(id);if(!c)return '';const cls=(c.className.match(/\b(bad|warn|good)\b/)||[''])[0];return `<div class="m-tile ${cls}" data-cell="${id}" title="${esc(c.title)}"><b>${esc(c.firstElementChild.textContent)}</b><span>${esc(label)}</span></div>`;}).join('')}</div>
-  <div class="m-h">NEEDS YOU · ${live.length}</div>${live.slice(0,4).map(mOmen).join('')||'<p class="tiny">Nothing needs you right now.</p>'}${live.length>4?`<p><a class="link" data-mtab="omens">all ${live.length} omens ▸</a></p>`:''}`;}
+  return `<details><summary>Diagnostics — counts and alerts</summary><div class="m-strip ${calm?'calm':''}">${st.innerHTML}</div>
+  <details><summary>Details — counts and checks</summary><div class="m-tiles">${M_TILES.map(([id,label])=>{const c=$(id);if(!c)return '';const cls=(c.className.match(/\b(bad|warn|good)\b/)||[''])[0];return `<div class="m-tile ${cls}" data-cell="${id}" title="${esc(c.title)}"><b>${esc(c.firstElementChild.textContent)}</b><span>${esc(label)}</span></div>`;}).join('')}</div></details>
+  <div class="m-h">NEEDS YOU · ${live.length}</div>${live.slice(0,4).map(mOmen).join('')||'<p class="tiny">Nothing needs you right now.</p>'}${live.length>4?`<p><a class="link" data-mtab="omens">all ${live.length} omens ▸</a></p>`:''}</details>`;}
 function mOmen(a){return `<div class="m-omen ${a.sev===2?'crit':a.sev===1?'':'info'}" data-om="${esc(a.id)}"><b>${esc(a.title)}</b><span>${esc(a.owner||'')} → ${esc(a.next||'')}</span><small>${a.sev===2?'critical':a.sev===1?'warning':'info'} · since ${fmtAge(S.now-sinceFor(a))}${a.escalate?' · escalate':''}</small></div>`;}
 function mOmensHtml(){const A=S.alarms;const n=A.filter(a=>a.needs),h=A.filter(a=>!a.needs);return `<div class="m-h">NEEDS YOU · ${n.length}</div>${n.map(mOmen).join('')||'<p class="tiny">Nothing needs you.</p>'}<div class="m-h">SYSTEM HEALTH · ${h.length}</div>${h.map(mOmen).join('')}<p class="tiny">${esc(omenFoot())}</p>`;}
 function mRender(){if(!PHONE.matches||mTab==='map')return;const v=$('mview');const sc=v.scrollTop;const html=mTab==='now'?mNowHtml():mTab==='omens'?mOmensHtml():chartersHtml();if(v.innerHTML!==html){v.innerHTML=html;v.scrollTop=sc;
@@ -1514,9 +1532,12 @@ async function boot(){
   if(d.live){LIVE=true;seek(Date.now());connect();document.querySelectorAll('.spd').forEach(x=>x.classList.remove('on'));}
   else if(REMOTE){LIVE=true;lastPush=d.pushedAt||d.now||'';T1=Date.now();seek(Date.now());$('b-live').style.display='';if(!remoteTimer)remoteTimer=setInterval(remotePoll,45000);document.querySelectorAll('.spd').forEach(x=>x.classList.remove('on'));}
   else{LIVE=false;$('b-live').style.display='none';const dayStart=Date.UTC(new Date(T1).getUTCFullYear(),new Date(T1).getUTCMonth(),new Date(T1).getUTCDate());const t=dayStart>T0&&dayStart<T1?dayStart:T0;seek(t);}
-  computeBlockers();computeOmens();mApply();if(!PHONE.matches)openCharters();status(null);
+  computeBlockers();computeOmens();mApply();Operator.start();if(!PHONE.matches)openCharters();status(null);
 }
 /*__CODEX_JS__*/
+/*__OPERATOR_JS__*/
+$('b-operator-shelf').onclick=()=>Operator.inspect('shelf');
+$('b-operator-codex').onclick=()=>Codex.inspect();
 boot();
 
 const provingHtml=withAsk('proving',()=>provingHtml0()),stuckHtml=withAsk('stuck',()=>stuckHtml0()),omensHtml=withAsk('omens',()=>omensHtml0());

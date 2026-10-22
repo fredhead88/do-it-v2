@@ -14,7 +14,7 @@ const Codex = (() => {
     .codex-target:focus-visible{outline:2px solid var(--codex-cyan);outline-offset:4px;border-radius:50%}
     .codex-inspector{font-family:monospace}.codex-inspector h2{color:var(--codex-cyan);text-shadow:0 0 12px var(--codex-violet)}
     .codex-inspector dt{color:var(--codex-violet);margin-top:12px}.codex-inspector dd{margin:3px 0;overflow-wrap:anywhere}
-    .codex-swatch{background:linear-gradient(135deg,var(--codex-cyan),var(--codex-violet))!important;transform:rotate(45deg);box-shadow:0 0 8px var(--codex-cyan)}`;
+    .codex-inspector article{border-top:1px solid var(--hair);padding:8px 0}.codex-inspector h3{font:600 14px var(--body);overflow-wrap:anywhere}.codex-inspector p{font:13px/1.5 var(--body)}\n    .codex-swatch{background:linear-gradient(135deg,var(--codex-cyan),var(--codex-violet))!important;transform:rotate(45deg);box-shadow:0 0 8px var(--codex-cyan)}`;
   document.head.appendChild(style);
   const chip = document.createElement('button');chip.className='chip btn';
   chip.innerHTML='<i class="codex-swatch"></i>Codex (OpenAI)';chip.onclick=()=>inspect();$('legend').appendChild(chip);
@@ -30,7 +30,7 @@ const Codex = (() => {
       if(session.kind==='doit-build'){
         const old=builds.get(session.id);
         if(!old)builds.set(session.id,node(session));
-        else {old.session.tokens=session.tokens;old.session.turns=session.turns;}
+        else {old.session={...session};}
         continue;
       }
       seen.add(session.id);
@@ -72,25 +72,34 @@ const Codex = (() => {
     const e=n.fallbackEvent||{sp:n.session.id,s:n.session.subject,r:n.session.role,ms:S.now,t:n.session.fallback_at};
     spawnActor({...e,backend:null,cl:e.t},n.session.role||'builder');
   }
+  let inspecting=false;
   function inspect(id){
     const html=()=>{
-      const n=builds.get(id)||workers.get(id),s=n?n.session:null,q=source.quota||{};
-      const fields=s?[
-        ['Kind',s.kind],['Subject / title',s.subject],['Tmux window',s.tmux||'—'],['State',s.state],
-        ['Started',s.started],['Last activity',s.last],['Turns',s.turns??0],['Tokens',s.tokens??0],
-        ['Fallback history',s.fell_back||'none'],['Worktree',s.cwd||'—']
-      ]:[['Sessions',source.sessions.length],['Presence',[...builds.values(),...workers.values()].filter(n=>n.session.state==='live').length+' live']];
-      fields.push(['Weekly quota',q.weekly_used_pct==null?'unavailable':q.weekly_used_pct+'% used'],
-        ['Resets',q.resets_at?new Date(q.resets_at*1000).toISOString():'—']);
-      if(q.credits_balance!=null)fields.push(['Credits balance',q.credits_balance]);
-      return `<div class="codex-inspector"><h2>${esc(s?s.subject:'Codex Gate')}</h2><div class="cls">CODEX · OPENAI</div><dl>${fields.map(([k,v])=>`<dt>${esc(k)}</dt><dd>${esc(v??'—')}</dd>`).join('')}</dl>${!s?'<p>Live constructs hover at the forge or orbit this gate. Idle workers dim; ended workers depart.</p>':''}</div>`;
-    };openPanel(html(),{html});
+      const s=meta(id),q=source.quota||{};
+      const seats=source.seats_today||[],workers=source.workers||[];
+      const selected=s.id?`<h4>Selected marker</h4><p><b>${esc(s.subject)}</b> · ${esc(s.role)} · ${esc(s.outcome||s.state)}<br>Started ${esc(s.started)}${s.fell_back?'<br>'+esc(s.fell_back):''}</p>`:'';
+      return `<div class="codex-inspector"><h2>Codex (OpenAI)</h2><div class="cls">Read-only · today is UTC · as of ${esc(source.at||'awaiting server')}</div>${selected}
+        <h4>Ledger seats today (${seats.length})</h4>
+        ${seats.length?`<table><tr><th>Role</th><th>Spec</th><th>Start (UTC)</th><th>Outcome</th></tr>${seats.map(s=>`<tr><td>${esc(s.role)}</td><td><a class="link" data-subj="${esc(s.subject)}" title="${esc(s.subject)}">${esc((specInfo(s.subject)||{}).title||s.subject)}</a><br><small>${esc(s.id)}</small></td><td>${esc((s.started||'').slice(11,16))}</td><td>${esc(s.outcome||s.state)}</td></tr>`).join('')}</table>`:'<p>No Codex-backed ledger seats started today.</p>'}
+        <h4>Burn-down workers (${workers.length})</h4><p class="tiny">Done means REPORT.md exists; running means no report yet. This is not a process health check.</p>
+        ${workers.map(w=>`<article><h3>${esc(w.name)} · ${esc(w.title)}</h3><b>${esc(w.state)}</b><p>${esc(w.summary||'Report has no prose paragraph yet.')}</p></article>`).join('')||'<p>No worker directories with a matching brief.</p>'}
+        ${source.error?`<p>${esc(source.error)}</p>`:''}
+        <h4>Weekly quota</h4><p>${q.weekly_used_pct==null?'Unavailable':esc(q.weekly_used_pct)+'% used'}</p></div>`;
+    };
+    openPanel(html(),{html,bind:bindLinks});bindLinks();
+    if(!inspecting&&DATA&&DATA.live){
+      inspecting=true;
+      fetch(api('/api/codex'),{cache:'no-store'}).then(r=>{if(!r.ok)throw Error('unavailable');return r.json();})
+        .then(d=>{load(d);rerenderPanel();}).catch(()=>{source.error='Codex information could not be refreshed.';rerenderPanel();})
+        .finally(()=>{inspecting=false;});
+    }
   }
+
   function target(id,x,y,size,label){
     visibleTargets.add(id);
     let b=buttons.get(id);
     if(!b){b=document.createElement('button');b.className='codex-target';b.dataset.codex=id;
-      b.onclick=()=>inspect(id==='gate'?undefined:id);
+      b.onclick=()=>inspect(['gate','ship'].includes(id)?undefined:id);
       b.addEventListener('keydown',ev=>{if(ev.key===' '||ev.key==='Enter')ev.stopPropagation();});
       cv.parentElement.appendChild(b);buttons.set(id,b);}
     b.setAttribute('aria-label',label);
@@ -118,6 +127,7 @@ const Codex = (() => {
   }
   function ship(t){
     const x=gate.x+(REDUCED?0:Math.sin(t*.18)*7),y=73+(REDUCED?0:Math.cos(t*.23)*4);
+    target('ship',x,y,56,'Codex OpenAI — seats and burn-down workers');
     light.save();light.translate(x,y);glow(0,0,62,.8);light.strokeStyle=palette.cyan;
     light.shadowColor=palette.violet;light.shadowBlur=12;light.lineWidth=1.4;
     light.fillStyle='rgba(167,123,255,.15)';light.beginPath();light.moveTo(-57,0);light.lineTo(-34,18);light.lineTo(30,18);light.lineTo(55,-6);light.lineTo(-57,0);light.fill();light.stroke();

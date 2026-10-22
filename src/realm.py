@@ -278,6 +278,12 @@ def operator_payload(now=None):
         try:
             priorities_path = HERE.parent / "realm_priorities.json"
             priorities = realm_operator.load_priorities(priorities_path)
+            context = (str(ROOT), str(live_src()), priorities_path.stat().st_mtime_ns)
+            previous = _OPERATOR['value']
+            if previous and _OPERATOR.get('context') == context:
+                age = (now - dt.datetime.fromisoformat(previous['at'])).total_seconds()
+                if 0 <= age < 60:
+                    return previous
             with ledger_snapshot(now) as (live_fold, events, folded):
                 key = (LEDGER.key, LEDGER.generation, int(now.timestamp() // 30), priorities_path.stat().st_mtime_ns)
                 if key == _OPERATOR["key"]:
@@ -296,7 +302,7 @@ def operator_payload(now=None):
                 value = realm_operator.shape(events, [(s, v['state']) for s, v in specs.items()], queue_rows,
                                              rules, classified, priorities, now, titles=titles,
                                              answered=live_fold.answered(events))
-            _OPERATOR.update(key=key, value=value)
+            _OPERATOR.update(key=key, value=value, context=context)
             return value
         except Exception as ex:
             return {"at": now.isoformat(timespec="seconds"), "error": f"Operator information unavailable ({type(ex).__name__})"}
@@ -384,7 +390,8 @@ def spec_text(sid):
         return None
     try:
         mtime = f.stat().st_mtime
-        c = _SPEC_CACHE.get(sid)
+        cache_key = (str(ROOT), sid)
+        c = _SPEC_CACHE.get(cache_key)
         if c and c[0] == mtime:
             return c[1]
         body = f.read_text(errors="replace")
@@ -406,8 +413,9 @@ def spec_text(sid):
         m = re.search(rf"^{key}\s*:\s*(.+)$", head, re.M)
         if m and key not in fm:
             fm[key] = m.group(1).strip().strip('"')
-    title = fm.get("title") or fm.get("unit") or fm.get("spec_id") or next((t for t in h1s if not generic.match(t)), None) or (h1s[0] if h1s else sid)
-    title = re.sub(r"^L-spec-\d+\s*[·:-]\s*", "", title)
+    descriptive = next((t for t in h1s if not generic.match(t) and not re.fullmatch(r"L-spec-\d+[a-z]?", t)), None)
+    title = fm.get("title") or descriptive or fm.get("unit") or (h1s[0] if h1s else sid)
+    title = re.sub(r"^(?:spec:\s*|L-spec-\d+[a-z]?\s*[—–·:-]\s*)", "", title, flags=re.I)
     title = re.sub(r"^\d+-", "", title).replace("-", " ") if re.match(r"^[a-z0-9-]+$", title) else title
     # the first prose paragraph under a heading that names intent, else the first prose paragraph at all
     parts = re.split(r"^#{1,3}\s+(.+?)\s*$", body, flags=re.M)
@@ -428,7 +436,7 @@ def spec_text(sid):
         m = re.search(rf"^{key}\s*:\s*(.+)$", head, re.M)
         if m:
             out[key] = m.group(1).strip().strip('"')
-    _SPEC_CACHE[sid] = (mtime, out)
+    _SPEC_CACHE[cache_key] = (mtime, out)
     return out
 
 
