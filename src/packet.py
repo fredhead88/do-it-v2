@@ -6,6 +6,7 @@ import argparse, hashlib, os, pathlib, re, shlex, subprocess, sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import amends, audit, fold, merge_gate, models, routing, grader_packet  # noqa: E402
+import verification
 
 ROOT = pathlib.Path(os.environ.get("DOIT_ROOT", pathlib.Path.home() / ".do-it"))
 CONTENT, PACKETS = ROOT / "content", ROOT / "packets"
@@ -409,11 +410,9 @@ def verify_script(spec_text):
     it, once backslash-continuation lines are joined into their one logical
     line — R3a/R3b); an interpreter named by a bare word instead of an
     absolute path."""
-    sec = section(spec_text, "Verification")
-    blk = re.search(r"```[a-z]*\n(.*?)```", sec or "", re.S)
-    if not blk or not blk.group(1).strip():
+    block = verification.block(spec_text)
+    if not block or not block.strip():
         return None
-    block = blk.group(1)
     joined = _join_continuations(block)
     segs, bad = _quote_aware_scan(joined)
     bad += [f"a newline-separated statement — `{l}` does not end in `&&`"
@@ -1216,18 +1215,11 @@ def criterion_block(body, crit_id):
     [` line to (not including) the next `^\\s*AC\\d+ [` line, or the Acceptance
     section's end — so a continuation-line `review_path:` rides along (fix 6,
     the sweeper's own AC1 precedent). `verify` returns the heading and body
-    of Verification unchanged. `None` when the requested block is absent."""
+    of Verification through its closing fence. `None` when absent."""
     if crit_id == "verify":
-        lines = body.splitlines(keepends=True)
-        headings = _heading_positions(body)
-        pat = re.compile(r"^#+\s*(\d+\.)?\s*Verification\b", re.I)
-        start = next((i for i in headings if pat.match(lines[i])), None)
-        if start is None:
+        if not (verification.block(body) or "").strip():
             return None
-        end = next((i for i in headings if i > start), len(lines))
-        if not "".join(lines[start + 1:end]).strip():
-            return None
-        return "".join(lines[start:end])
+        return verification.section(body)
     sec = section(body, "Acceptance")
     lines = sec.splitlines() if sec else body.splitlines()
     # Specs write a criterion as `**AC5 [`, `- **AC5 [`, `  - **AC5 [`, `| AC5 [` (a table

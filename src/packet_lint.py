@@ -29,6 +29,7 @@ CHECKLIST = HERE.parent / "lint" / "packet-checklist.toml"
 
 sys.path.insert(0, str(HERE))
 import merge_gate, packet  # noqa: E402 — local, same convention as validate.py
+import verification
 
 
 def load(checklist_path):
@@ -107,19 +108,11 @@ def check_ac_truncated(text):
     return m.group(0) if m else lines[starts[-1]].strip()[:40]
 
 
-def _fenced_block(text, section_name):
-    sec = packet.section(text, section_name)
-    if not sec:
-        return None
-    m = re.search(r"```[a-z]*\n(.*?)```", sec, re.S)
-    return m.group(1) if m else None
-
-
 def check_cd_prefix(text):
     """PL-003: the Verification fenced block shells into a relative `cd
     /opt/albert-scott` instead of using absolute interpreter paths. Literal
     scope, per SD9's own wording — not a pattern, not case-insensitive."""
-    block = _fenced_block(text, "Verification")
+    block = verification.block(text)
     if block and "cd /opt/albert-scott" in block:
         return "cd /opt/albert-scott"
     return None
@@ -188,7 +181,7 @@ def check_live_checkout_cwd(text):
     Review prose can introduce a command with `do`, or quote it in backticks.
     The Verification block is scanned first, then review paths in file order.
     """
-    found = _shell_cwd(_fenced_block(text, "Verification") or "")
+    found = _shell_cwd(verification.block(text) or "")
     if found:
         return found
     active, review, lines = False, False, []
@@ -221,7 +214,7 @@ def check_bare_node_tools(text):
     not `/`-prefixed resolves through PATH, which a worktree with no
     activated venv does not carry the same way twice (same rule as
     `packet._interp_violations`, independently scoped to these three names)."""
-    block = _fenced_block(text, "Verification")
+    block = verification.block(text)
     if not block:
         return None
     segs, _bad = packet._quote_aware_scan(block)
@@ -258,6 +251,12 @@ def check_sibling_heading(text):
                 if mm.group(0) != own:
                     return mm.group(0)
     return None
+
+
+def check_verification_trailing_prose(text):
+    """PL-012: only blank lines may follow the Verification closing fence."""
+    trailing = verification.trailing_text(text).strip()
+    return trailing.splitlines()[0][:80] if trailing else None
 
 
 _QUOTED_SPAN = re.compile(r"`[^`]*`|\"[^\"]*\"|'[^']*'")

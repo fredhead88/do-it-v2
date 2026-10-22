@@ -24,6 +24,7 @@ import grader_view
 import grading_env
 import node_modules
 import scratch
+import verification
 
 SOURCE = pathlib.Path(__file__).resolve().parent.parent
 PRIVATE_PG = SOURCE / "scripts" / "private-pg.sh"
@@ -119,10 +120,9 @@ def _commands(text, project, criteria):
         for command in record["commands"]:
             prefix = prefixes.get((criterion, command), [])
             commands.append((criterion, " &&\n".join([*prefix, command])))
-    verification = "\n".join(line for line in grading_env._verification_text(text, "").splitlines()
-                             if not re.match(r"^\s*(```|~~~)", line)).strip()
-    if criteria is None and verification:
-        commands.append((None, verification))
+    chain = (verification.block(text) or "").strip()
+    if criteria is None and chain:
+        commands.append((None, chain))
     if not commands:
         raise Undetermined("no build command or Verification block")
     return commands, judgment

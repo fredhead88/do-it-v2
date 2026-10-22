@@ -11,6 +11,7 @@ running as a sub-agent writes its object to `$R/seat/<spawn>.output.json` and ru
 this until it prints VALID.
 """
 import json, pathlib, re, sys
+import verification
 
 HERE = pathlib.Path(__file__).resolve().parent
 AGENTS = HERE.parent / "agents"
@@ -39,15 +40,14 @@ def spec_shape(spec_text):
     # fenced command block that is one gated `&&` chain, naming no bare
     # interpreter — the same three lint rules `packet.verify_script` applies,
     # composed here directly over the pure functions it delegates to.
-    sec = packet.section(spec_text, "Verification")
+    sec = verification.section(spec_text)
     if sec is None:
         findings.append("Verification: no `## Verification` section in the spec")
     else:
-        blk = re.search(r"```[a-z]*\n(.*?)```", sec, re.S)
-        if not blk or not blk.group(1).strip():
+        block = verification.block(spec_text)
+        if not block or not block.strip():
             findings.append("Verification: the section carries no non-empty fenced command block")
         else:
-            block = blk.group(1)
             segs, bad = packet._quote_aware_scan(block)
             bad = list(bad) + [f"a newline-separated statement — `{l}` does not end in `&&`"
                                 for l in packet._newline_violations(block)]

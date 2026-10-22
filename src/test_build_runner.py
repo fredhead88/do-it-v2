@@ -255,6 +255,31 @@ class BuildRunnerTests(unittest.TestCase):
         self.assertEqual([r["criterion"] for r in selected["commands"]], ["AC1", "AC2"])
         self.assertEqual(self.tail(selected["commands"][0]).decode().strip(), selected["commands"][0]["cwd"])
 
+    def test_verification_prose_never_runs_or_gets_tagged(self):
+        (self.repo / "dashboard").mkdir()
+        (self.repo / "dashboard" / "pin").touch()
+        self.sha = self.commit("dashboard verification fixture")
+        self.build_done()
+        marker = self.top / "prose-executed"
+        code = 'cd dashboard &&\n# AC1\n/usr/bin/test -f pin &&\n# AC2\n/usr/bin/test -d .\n'
+        clean = ('## Acceptance criteria\nAC1 [backend]: first.\nAC2 [backend]: second.\n'
+                 '## Verification\n```bash\n' + code + '```\n')
+        prose = f'/usr/bin/touch {marker}\nThese notes mention AC99 and must not run.\n'
+        for suffix in (prose, '&&\n' + prose, '## 9b. Notes on the checks\n' + prose):
+            with self.subTest(suffix=suffix):
+                self.spec(text=clean + suffix)
+                bundle, _ = self.bundle()
+                rows = bundle["commands"]
+                self.assertEqual([row["criterion"] for row in rows], ["AC1", "AC2", None])
+                self.assertEqual([row["exit"] for row in rows], [0, 0, 0])
+                self.assertEqual(rows[-1]["cmd"], code.strip())
+                self.assertTrue(all("touch" not in row["cmd"] for row in rows))
+                self.assertFalse(marker.exists())
+                selected, _ = self.bundle("--criteria", "AC2")
+                self.assertEqual([row["criterion"] for row in selected["commands"]], ["AC2"])
+                self.assertEqual(selected["commands"][0]["exit"], 0)
+                self.assertIn("cd dashboard &&", selected["commands"][0]["cmd"])
+
     def test_compare_split_base_from_build_done_classify_merge(self):
         (self.repo / "probe.py").write_text("print('NEW failed: tests/a.py::same'); raise SystemExit(1)\n")
         self.base = self.commit("base failure")

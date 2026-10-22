@@ -107,3 +107,11 @@ applies_to = "spec"
 check = "check_owed_environment"
 message = "An owed check must name prod read, verifier portal session, local stack, or CI"
 severity = "warn"
+
+[[entry]]
+id = "PL-012"
+since = "2026-10-22"
+applies_to = "spec"
+check = "check_verification_trailing_prose"
+message = "Move text after the Verification closing fence under a notes heading, such as ## 9b. Notes on the checks"
+severity = "block"

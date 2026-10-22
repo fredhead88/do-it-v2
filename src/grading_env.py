@@ -17,6 +17,7 @@ import json
 import time
 from datetime import datetime, timezone
 import shlex, os, pathlib, re, shutil, subprocess, tomllib, urllib.parse  # noqa: E401
+import verification
 HERE = pathlib.Path(__file__).resolve().parent
 DOIT_SRC = HERE.parent
 ROOT = pathlib.Path(os.environ.get("DOIT_ROOT", pathlib.Path.home() / ".do-it"))
@@ -207,18 +208,7 @@ def _review_paths(text):
 
 def _verification_text(spec_text, verify_text):
     """The spec's Verification block plus its extracted verification script."""
-    lines, active, fenced = [], False, False
-    for line in (spec_text or "").splitlines():
-        if not active:
-            if re.match(r"^#+\s+Verification\s*$", line, re.IGNORECASE):
-                active = True
-            continue
-        if re.match(r"^\s*(```|~~~)", line):
-            fenced = not fenced
-        elif not fenced and _HEADING_RE.match(line):
-            break
-        lines.append(line)
-    return "\n".join((*lines, verify_text or ""))
+    return "\n".join((verification.block(spec_text) or "", verify_text or ""))
 
 
 def _tool_texts(spec_text, verify_text):

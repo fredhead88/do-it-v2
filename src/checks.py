@@ -3,6 +3,7 @@ import re
 import urllib.parse
 
 import grading_env
+import verification
 
 NEEDS = ("repo", "node_modules", "scratch-pg", "ro-prod-sql", "droplet-read",
          "deployed-site", "browser-review-account", "elapsed-time", "operator")
@@ -43,10 +44,9 @@ def _validity(text, timing):
 
 def _verification_statements(spec_text):
     # Keep the same segment boundaries and first-id attribution as _tool_texts.
-    for segment in grading_env._verification_text(spec_text, "").split("&&"):
+    for segment in (verification.block(spec_text) or "").split("&&"):
         tag = re.search(r"\bAC(\d+)\b", segment)
-        lines = [line.split("#", 1)[0] for line in segment.splitlines()
-                 if not re.match(r"^\s*(```|~~~)", line)]
+        lines = [line.split("#", 1)[0] for line in segment.splitlines()]
         statement = "\n".join(lines).strip()
         if statement:
             yield f"AC{tag[1]}" if tag else None, statement

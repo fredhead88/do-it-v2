@@ -123,8 +123,8 @@ check(by_id.get("PL-004") == "warn", f"an unpromoted PL-004 stays warn: {by_id}"
 # files stay under the 400-line cap, and install.sh names test_packet_lint.py
 data = packet_lint.load(packet_lint.CHECKLIST)
 eids = [e["id"] for e in data["entry"]]
-check(len(eids) == 11 and len(set(eids)) == 11 and set(eids) == {f"PL-{n:03d}" for n in range(1, 12)},
-      f"eleven unique ids PL-001..PL-011: {eids}")
+check(len(eids) == 12 and len(set(eids)) == 12 and set(eids) == {f"PL-{n:03d}" for n in range(1, 13)},
+      f"twelve unique ids PL-001..PL-012: {eids}")
 check(all(hasattr(packet_lint, e["check"]) for e in data["entry"]),
       "every entry's check function resolves on packet_lint")
 HERE = pathlib.Path(__file__).resolve().parent
@@ -140,7 +140,7 @@ ROOT = HERE.parent
 PORTABLE = 'cd "$(git rev-parse --show-toplevel)"'
 severities = {f["id"]: f["severity"] for f in packet_lint.run(CD_PREFIX, packet_lint.CHECKLIST, "spec")}
 check(severities == {"PL-003": "block", "PL-010": "block"}, str(severities))
-check(all(e["severity"] == "warn" for e in data["entry"] if e["id"] != "PL-010"),
+check(all(e["severity"] == "warn" for e in data["entry"] if e["id"] not in ("PL-010", "PL-012")),
       "all original entry severities remain warn")
 check({p["id"] for p in data["promotion"]} == {"PL-003"}, "only PL-003 is promoted")
 check(packet_lint.run("", packet_lint.CHECKLIST, "packet:builder")[0]["severity"] == "warn",
