@@ -109,6 +109,21 @@ def _proves(criterion, block):
     return " ".join(value.strip("* ").split())[:200] or criterion
 
 
+def production_data(block, commands):
+    """Fail closed for executable observations which scratch data cannot prove.
+
+    Include review prose, not just the extracted command: a production review
+    may invoke a generic script whose filename says nothing about its DB.
+    Underscores delimit test/path names as well as pytest marker expressions.
+    """
+    if not commands:
+        return False
+    review = grading_env._review_paths(re.sub(r"(?<=\S)[ \t]+(?=review_paths?:)", "\n", block))
+    return bool(re.search(r"\[[^]\n]*\bobserved-data\b", block, re.I)
+                or re.search(r"(?<![a-z0-9])(?:live_db|production|prod)(?![a-z0-9])",
+                             "\n".join([review, *commands]), re.I))
+
+
 def records(spec_text, project):
     """One SD1 record per existing grading_env criterion anchor, in order."""
     tagged = _tagged_commands(spec_text)
@@ -124,13 +139,19 @@ def records(spec_text, project):
         tag = re.search(r"AC\d+\s*\[([^]]*)\]", block.splitlines()[0])
         tags = set(re.split(r"[\s,]+", tag[1].lower())) if tag else set()
         needs = set()
-        if commands:
+        if production_data(block, commands):
+            # Arbitrary pytest/shell commands are outside the production
+            # read-only wrapper boundary. The prod runner returns unobservable
+            # rather than executing these against an empty private database.
+            runner = "prod"
+            needs.update(("repo", "ro-prod-sql"))
+        elif commands:
             runner = "build"
             needs.add("repo")
             command_text = "\n".join(commands)
             if _names(command_text, ("vitest", "npm", "npx", "node")):
                 needs.add("node_modules")
-            if _names(command_text, ("private-pg", "pg_scratch", "psql", "alembic", "live_db")):
+            if _names(command_text, ("private-pg", "pg_scratch", "psql", "alembic")):
                 needs.add("scratch-pg")
         elif _names(routing_text, _UNSAFE_WRAPPERS):
             runner = "judgment"
@@ -185,7 +206,16 @@ def record_for_owed(row, spec_text, project):
     if not unknown and (_names(line, ("elapsed", "elapsed-time")) or capability == "elapsed"):
         needs.add("elapsed-time")
     commands = own["commands"] if own else []
-    if unknown or "operator" in needs:
+    live = commands and ("ro-prod-sql" in own["needs"] or production_data(line, commands))
+    if live:
+        # A legacy repo/other capability must never erase a live-data need.
+        needs.discard("scratch-pg")
+        needs.update(("repo", "ro-prod-sql"))
+    if "operator" in needs:
+        runner = "judgment"
+    elif live:
+        runner = "prod"
+    elif unknown:
         runner = "judgment"
     elif "browser-review-account" in needs:
         runner = "prod-browser"

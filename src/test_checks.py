@@ -86,7 +86,8 @@ def test_ac2():
                 verification="# AC1\npytest two &&\n# AC1\npytest one &&\n# AC2\npytest two &&\n# AC3\n/usr/bin/test -f x")
     a, b, c = checks.records(text, None)
     assert a["commands"] == ["pytest two", "pytest one"]
-    assert b["runner"] == "build" and b["commands"] == ["pytest two"]
+    assert b["runner"] == "prod" and b["commands"] == ["pytest two"]
+    assert b["needs"] == ["repo", "ro-prod-sql"]
     assert c["commands"] == ["/usr/bin/test -f x"]
     assert checks.records(spec("AC1 [backend]: x.", verification="pytest x # AC1"), None)[0]["commands"] == ["pytest x"]
     for verification in ("cd r &&\n# AC3\n/usr/bin/test -f x",
@@ -146,7 +147,7 @@ def test_ac4():
         row = record(f"AC1 [backend]: x.\nreview_path: `{word} test`")
         assert row["needs"] == ["repo", "node_modules"]
         assert row["timing"] == "pre-merge" and row["validity_h"] is None
-    for word in ("private-pg", "pg_scratch", "psql", "alembic", "live_db"):
+    for word in ("private-pg", "pg_scratch", "psql", "alembic"):
         row = record(f"AC1 [backend]: x.\nreview_path: `bash {word}`")
         assert row["needs"] == ["repo", "scratch-pg"]
     assert record("AC1 [backend]: judge.")["commands"] == []
@@ -305,7 +306,35 @@ def test_ac10():
         assert len((root / path).read_text().splitlines()) <= 1500, path
 
 
+def test_live_db_routing():
+    cases = (
+        "AC3 [observed-data]: fixed window contains ASIN rows.\n"
+        "review_path: run `python -m pytest tests/test_1026.py -m live_db`",
+        "AC3 [observed-data]: rows exist.\nreview_path: `pytest tests/test_window.py`",
+        "AC3 [backend, observed-data]: rows exist.\nreview_path: `pytest tests/test_window.py`",
+        "AC3 [backend]: rows exist.\nreview_path: `pytest tests/test_window.py -m 'live_db and slow'`",
+        "AC3 [backend]: rows exist.\nreview_path: `pytest tests/test_window.py -m=live_db`",
+        "AC3 [backend]: rows exist.\nreview_path: production: run `pytest tests/test_window.py`",
+        "AC3 [backend]: rows exist. review_path: production: run `pytest tests/test_window.py`",
+        "AC3 [backend]: rows exist.\nreview_path: `pytest tests/test_production_window.py`",
+    )
+    for block in cases:
+        text = spec(block)
+        own = checks.records(text, None)[0]
+        assert own["runner"] == "prod" and own["needs"] == ["repo", "ro-prod-sql"], own
+        for capability in (None, "repo", "other", "elapsed", "browser", "unknown"):
+            row = checks.record_for_owed({"criterion": "AC3", "capability": capability}, text, None)
+            assert row["runner"] == "prod" and "ro-prod-sql" in row["needs"], row
+            assert "scratch-pg" not in row["needs"]
+    ordinary = record("AC1 [backend]: schema.\nreview_path: `pytest tests/test_product.py`")
+    assert ordinary["runner"] == "build" and "ro-prod-sql" not in ordinary["needs"]
+    tagged = spec("AC3 [backend]: rows exist.", verification="# AC3\npytest tests/test_window.py -m live_db")
+    assert checks.records(tagged, None)[0]["needs"] == ["repo", "ro-prod-sql"]
+    print("W55 live-data routes override legacy capabilities; backend checks stay private")
+
+
 if __name__ == "__main__":
+    test_live_db_routing()
     for ac in (1, 2, 3, 4, 5, 6, 7, 9, 10, 12):
         globals()[f"test_ac{ac}"]()
         print(f"AC{ac} ok")
