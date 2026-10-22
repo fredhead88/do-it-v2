@@ -1291,6 +1291,29 @@ if __name__ == "__main__":
     assert not any(t == "criterion-routed" for t, _ in ev_for_7), ev_for_7
     print("8034-AC7(events_for) ok")
 
+    # W52: initial routing may coexist with a rejection from that grade.
+    # After rework, the next dispatch revokes only the standing rejection's
+    # route, reaches the grader without impossible browser preflight, and clears.
+    s52 = "L-spec-9952"
+    (dispatch.CONTENT / f"{s52}.md").write_text(
+        "## Acceptance criteria\nAC07 [ui]: contract.\nreview_path: log in as x, go to /y\n"
+        "AC08 [ui]: unrejected.\nreview_path: log in as x, go to /y\n"
+        "AC15 [backend]: plain contract.\nreview_path: inspect contract\n")
+    unmet52 = {"ac": "AC07", "verdict": "unmet", "reason": "contract not built"}
+    code52, _, evs52, _ = spawn("grader", out=grade([unmet52]), subject=s52)
+    assert code52 == 0 and {e["criterion"] for e in evs52 if e["type"] == "criterion-routed"} == {"AC07", "AC08"}, evs52
+    assert any(e["type"] == "rejected-criterion" and e["criterion"] == "AC07" for e in evs52), evs52
+    _gv_build_done(s52, ready_sha="rework52")
+    code52, _, evs52, _ = spawn("grader", out=grade([
+        {"ac": "AC07", "verdict": "met", "reason": "contract now built"}]), subject=s52)
+    assert code52 == 0 and any(e["type"] == "criterion-cleared" and e["criterion"] == "AC07" for e in evs52), evs52
+    assert [(e["criterion"], e["to"]) for e in evs52 if e["type"] == "criterion-routed"] == [("AC07", "none")], evs52
+    assert not fold.standing_rejects([e for e in fold.read_events() if e.get("subject") == s52])
+    code52, _, evs52, _ = spawn("grader", out=grade([
+        {"ac": "AC15", "verdict": "met", "reason": "r"}]), subject=s52)
+    assert code52 == 0 and [(e["criterion"], e["to"]) for e in evs52 if e["type"] == "criterion-routed"] == [("AC07", "owed")], evs52
+    print("W52: route + reject, rework, revoke, clear, normal routing restored")
+
     # ══════════════════════════════════════════════════════════════════════════
     # L-spec-0486 (R15d) · dispatch.ensure_room / _room_need_gb, plus the
     # role=builder/grader pre-spend gate they back
