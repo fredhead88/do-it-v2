@@ -205,6 +205,96 @@ class BuildRunnerTests(unittest.TestCase):
         self.assertEqual(self.lines(), [])
         self.assert_clean()
 
+    def live_fixture(self, relative, source):
+        self.provisioned()
+        path = self.repo / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(source)
+        self.sha = self.commit("live_db fixture source")
+        self.build_done()
+        # Execute the real shell argv/environment without requiring app pytest
+        # dependencies or connecting to any database in this regression suite.
+        executable = self.bin / "pytest"
+        executable.write_text("#!" + sys.executable + "\n"
+            "import json, os, sys\n"
+            "assert os.environ['SUPABASE_DB_URL'] == 'private-db-fixture'\n"
+            "assert os.environ['AS_LOCAL_PG_ADMIN'] == 'private-admin-fixture'\n"
+            "assert not os.environ.get('SUPABASE_DB_URL_RO')\n"
+            "print(json.dumps({'args': sys.argv[1:], 'pg': 'private', 'admin_pg': 'loopback'}))\n")
+        executable.chmod(0o755)
+        return path
+
+    def test_1418_genesis_live_db_verification_uses_private_pg(self):
+        self.live_fixture("api/tests/test_562_genesis_drift.py",
+                          'import os\nadmin = os.environ.get("AS_LOCAL_PG_ADMIN")\n')
+        line = ("pytest api/tests/test_562_genesis_drift.py -m live_db "
+                "-k rebuild_fingerprint_equals_committed")
+        self.spec(verification="# AC1\n" + line)
+        for args in ((), ("--criteria", "AC1")):
+            bundle, _ = self.bundle(*args, driver=True)
+            self.assertEqual(bundle["env"]["pg"], "private")
+            self.assertEqual(bundle["env"]["admin_pg"], "loopback")
+            self.assertEqual(bundle["env"]["prod_dsns"], "unset")
+            self.assertTrue(all(row["exit"] == 0 for row in bundle["commands"]))
+            output = json.loads(self.tail(bundle["commands"][0]))
+            self.assertEqual(output["args"], line.split()[1:])
+        self.assert_clean()
+
+    def test_admin_live_db_suite_allowed_even_for_observed_data(self):
+        self.live_fixture("api/tests/test_admin.py",
+                          'import os\nadmin = os.environ.get("AS_LOCAL_PG_ADMIN")\n')
+        self.spec(text="## Acceptance criteria\nAC1 [observed-data]: scratch schema.\n"
+                       "review_path: `pytest api/tests/test_admin.py -m live_db`\n")
+        bundle, _ = self.bundle("--criteria", "AC1", driver=True)
+        self.assertEqual(bundle["env"]["pg"], "private")
+        self.assertEqual(bundle["env"]["admin_pg"], "loopback")
+        self.assertEqual(bundle["commands"][0]["exit"], 0)
+        self.assert_clean()
+
+    def test_1026_observed_data_refused_before_private_pg_or_cached_evidence(self):
+        relative = "api/tests/profit_v2/test_cash_cogs_live_crosscheck_0050.py"
+        source = ('def _resolve_dsn(environ):\n'
+                  ' for name in ("SUPABASE_DB_URL_RO", "SUPABASE_DB_URL"):\n'
+                  '  if environ.get(name): return environ[name]\n')
+        path = self.live_fixture(relative, source)
+        command = ("cd \"$(git rev-parse --show-toplevel)/api\" && "
+                   "pytest tests/profit_v2/test_cash_cogs_live_crosscheck_0050.py "
+                   "-m live_db -k mouthwatchers_april -rA")
+        # The same test file can contain hermetic backend checks too.
+        self.spec(text="## Acceptance criteria\nAC3 [backend]: hermetic resolver test.\n"
+                       f"review_path: `{command}`\n")
+        _, cached = self.bundle("--criteria", "AC3", driver=True)
+        before = self.lines()
+        self.spec(text="## Acceptance criteria\nAC3 [observed-data]: mouthwatchers April 2026 ASIN rows.\n"
+                       f"review_path: go to `{command}`; failed if it fails or skips.\n")
+        # Inspect the requested commit, not a modified live working copy.
+        path.write_text('admin = "AS_LOCAL_PG_ADMIN"\n')
+        result = self.cli("--criteria", "AC3", driver=True,
+                          SUPABASE_DB_URL="WRITE_DSN_SENTINEL", SUPABASE_DB_URL_RO="RO_DSN_SENTINEL")
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertEqual(result.stderr.strip(), "run-checks: " + build_runner.PROD_DATA_UNAVAILABLE)
+        self.assertEqual(self.lines(), before)
+        self.assertTrue(cached.exists())
+        self.assertEqual(self.events()[-1]["env"], build_runner.NO_PROD_ENV)
+        self.assertNotIn("DSN_SENTINEL", json.dumps(self.events()))
+        self.assert_clean()
+
+    def test_full_verification_never_hits_production_guard_and_ro_provenance_counts(self):
+        text = ("## Acceptance criteria\nAC3 [observed-data]: rows.\n"
+                "## Verification\n```bash\n# AC3\n"
+                'SUPABASE_DB_URL="$SUPABASE_DB_URL" pytest tests/test_live.py -m live_db\n```\n')
+        with patch.object(build_runner, "_process", side_effect=AssertionError("unexpected process")):
+            self.assertFalse(build_runner._missing_production_data(
+                text, "demo", None, self.repo, self.sha, {}, time.monotonic() + 10))
+            self.assertFalse(build_runner._missing_production_data(
+                text, "demo", {"AC3"}, self.repo, self.sha,
+                {"SUPABASE_DB_URL_RO": "ro-fixture"}, time.monotonic() + 10, db_target="prod_ro"))
+            self.assertTrue(build_runner._missing_production_data(
+                text, "demo", {"AC3"}, self.repo, self.sha,
+                {"SUPABASE_DB_URL": "private-fixture"}, time.monotonic() + 10, db_target="private"))
+        commands, _ = build_runner._commands(text, "demo", None)
+        self.assertTrue(any(criterion is None and "-m live_db" in command for criterion, command in commands))
+
     def test_chain_uses_configured_venv_bin_before_inherited_path(self):
         for relative in (False, True):
             with self.subTest(relative=relative):

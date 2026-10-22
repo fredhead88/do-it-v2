@@ -32,6 +32,8 @@ WALL_CAP = 30 * 60
 VERSION = "1"
 TAIL_CAP = 65536
 DIRECTORY_CAP = 5 * 1024 * 1024
+PROD_DATA_UNAVAILABLE = "cannot-observe: observed-data check needs a production read-only DSN; none supplied"
+NO_PROD_ENV = {"pg": "none", "prod_dsns": "unset", "required_pg": "prod_ro"}
 
 
 class Undetermined(Exception):
@@ -39,6 +41,10 @@ class Undetermined(Exception):
 
 
 class WallCap(Undetermined):
+    pass
+
+
+class ProductionDataUnavailable(Undetermined):
     pass
 
 
@@ -126,6 +132,56 @@ def _commands(text, project, criteria):
     if not commands:
         raise Undetermined("no build command or Verification block")
     return commands, judgment
+
+
+def _source_paths(command):
+    """Only tracked Python source, bound to the command's repo-relative cwd."""
+    try:
+        words = shlex.split(command.replace("$(git rev-parse --show-toplevel)", "."))
+    except ValueError:
+        return []
+    directory, paths = pathlib.PurePosixPath("."), []
+    for index, word in enumerate(words):
+        if word == "cd" and index + 1 < len(words):
+            directory = directory / words[index + 1]
+        target = word.split("::", 1)[0]
+        if not re.fullmatch(r"[\w./-]+\.py", target):
+            continue
+        path = directory / target
+        if not path.is_absolute() and ".." not in path.parts:
+            paths.append(str(path))
+    return list(dict.fromkeys(paths))
+
+
+def _missing_production_data(text, project, criteria, repo, sha, env, deadline, *, db_target="none"):
+    # Full build Verification chains deliberately keep their existing behavior.
+    # Only a criterion-selected owed observation can require production data.
+    if criteria is None:
+        return False
+    # A private SUPABASE_DB_URL is not supplied production data. Future audited
+    # RO execution must supply both a RO variable and explicit provenance.
+    if db_target == "prod_ro" and env.get("SUPABASE_DB_URL_RO"):
+        return False
+    blocks = grading_env._criterion_blocks(text)
+    sources = {}
+    for criterion in criteria:
+        block = blocks.get(criterion, "")
+        anchor = block.splitlines()[0] if block else ""
+        if not re.search(r"\[[^]]*\bobserved-data\b", anchor, re.I):
+            continue
+        commands, _ = _commands(text, project, {criterion})
+        commands = [command for _, command in commands]
+        if checks.production_data(block, commands):
+            return True
+        for command in commands:
+            for path in _source_paths(command):
+                if path not in sources:
+                    code, output = _process(["git", "-C", str(repo), "show", f"{sha}:{path}"],
+                                            env=env, deadline=deadline)
+                    sources[path] = output.decode("utf-8", "replace") if code == 0 else ""
+        if checks.production_data(block, commands, sources.values()):
+            return True
+    return False
 
 
 def _rewrite(command, repo, tree, venv):
@@ -343,6 +399,10 @@ def run(spec, requested_sha=None, criteria=None):
         sha = _resolve(repo, requested_sha or done.get("ready_sha"), env, deadline)
         key = "all" if criteria is None else hashlib.sha256(",".join(sorted(criteria)).encode()).hexdigest()[:8]
         path = fold.ROOT / "content" / "evidence" / spec / f"{sha[:12]}-{key}.json"
+        if criteria is not None:
+            text = (fold.ROOT / "content" / f"{spec}.md").read_text()
+            if _missing_production_data(text, project, criteria, repo, sha, env, deadline):
+                raise ProductionDataUnavailable(PROD_DATA_UNAVAILABLE)
         locks = fold.ROOT / "evidence" / "locks"
         locks.mkdir(parents=True, exist_ok=True)
         lock = resources.enter_context((locks / f"{spec}-{sha}.lock").open("a"))
@@ -400,7 +460,8 @@ def run(spec, requested_sha=None, criteria=None):
         # The evidence deadline must not interrupt recording its own failure.
         signal.setitimer(signal.ITIMER_REAL, 0)
         reason = str(exc) if isinstance(exc, Undetermined) else "runner could not establish evidence (" + type(exc).__name__ + ")"
-        _event(spec, project, "evidence-bundle-failed", sha=sha, reason=reason)
+        fields = {"env": NO_PROD_ENV} if isinstance(exc, ProductionDataUnavailable) else {}
+        _event(spec, project, "evidence-bundle-failed", sha=sha, reason=reason, **fields)
         raise Undetermined(reason) from None
     finally:
         resources.close()

@@ -380,6 +380,21 @@ def test_ledger_and_hooks():
     print("AC8 ok")
 
 
+def test_observed_data_build_refusal_is_unobservable():
+    with fixture(build=True) as (root, _), patch.object(subprocess, "run", return_value=process(
+            2, stderr="run-checks: " + prod_runner.build_runner.PROD_DATA_UNAVAILABLE)):
+        for minutes in (0, 5):
+            clock = NOW + timedelta(minutes=minutes)
+            with patch.object(dispatch, "now", return_value=clock.isoformat()):
+                result = prod_runner.run(clock)
+            assert not result["bundle_rows"] and not result["to_judgment"]
+        event, = events(root)
+        assert event["type"] == "owed-unobservable" and event["capability"] == "ro-dsn", event
+        assert event["env"] == {"pg": "none", "prod_dsns": "unset", "required_pg": "prod_ro"}
+        assert not fold.required_reason(event)
+    print("W55 revised: missing production data becomes owed-unobservable, never failing evidence")
+
+
 def test_hermetic():
     with fixture() as (root, _), patch.object(socket, "socket", side_effect=AssertionError("network")), \
             patch.object(subprocess, "Popen", side_effect=AssertionError("real process")), \
@@ -423,7 +438,8 @@ def test_hermetic():
 
 if __name__ == "__main__":
     for test in (test_empty_commands, test_observe, test_allowlist, test_permissions, test_strikes,
-                 test_stale_failure_selection, test_events, test_build, test_ledger_and_hooks, test_hermetic):
+                 test_stale_failure_selection, test_events, test_build, test_ledger_and_hooks,
+                 test_observed_data_build_refusal_is_unobservable, test_hermetic):
         test()
     for criterion in (1, 2, 3, 4, 5, 6, 8, 10):
         body = {"criterion": f"AC{criterion}", "result": "ok", "suite": "test_prod_runner.py"}
