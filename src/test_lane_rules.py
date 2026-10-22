@@ -208,6 +208,67 @@ class LaneRulesTests(unittest.TestCase):
                 self.assertFalse(any(r['rule'] == 'rebuild' for r in lr.due(ev, s, NOW)))
                 self.assertIsNone(lr._rebuild(dict(evs=ev, spec=s[SID])))
 
+    def test_dependency_hold_suppresses_builder_and_grader_rules_until_released(self):
+        blocked = event('build-blocked', -70, actor='builder', _src='builder:1',
+                        spawn='L-builder-9001')
+        question = event('question', -69, actor='builder', _src='builder:2',
+                         spawn=blocked['spawn'])
+        hold = event('dependency-hold', -65, waits_for=TARGET, why='needs producer',
+                     _src='thinker:1')
+        cases = [('build', [written()]), ('grade', fixture('grade')),
+                 ('regrade', fixture('regrade'))]
+        for actor in ('thinker', 'operator'):
+            for ref in (blocked['_src'], question['_src']):
+                cases.append(('rebuild', [written(), blocked, question,
+                              event('decision', -60, actor=actor, ref=ref)]))
+        cases += [('rebuild', [written(), blocked, event('spec-written', -60)]),
+                  ('rebuild', [written(), event('decision', -60, actor='thinker',
+                                               rework='yes', ref=question['_src'])]),
+                  ('regrade', [written(), event('decision', -60, actor='thinker',
+                                               regrade='yes', ref='grader:1')])]
+        for rule, base in cases:
+            with self.subTest(rule=rule, trigger=base[-1]):
+                expected = self.row(base, rule)
+                held = base + [hold]
+                self.assertFalse(any(r['spec'] == SID and r['action'] in
+                                     ('dispatch-builder', 'dispatch-grader')
+                                     for r in self.rows(held)))
+                self.assertEqual(self.row(held, 'dependency-held')['blocker'], TARGET)
+                for release in (event('unblocked', -55),
+                                event('shipped', -55, subject=TARGET, actor='executor')):
+                    released = held + [release]
+                    self.assertEqual(self.row(released, rule), expected)
+                # An earlier release cannot clear the newest hold.
+                reheld = held + [event('unblocked', -55), dict(hold, ts=event('x', -50)['ts'])]
+                self.assertFalse(any(r['spec'] == SID and r['rule'] == rule
+                                     for r in self.rows(reheld)))
+
+    def test_dependency_hold_decision_release_distinguishes_answers(self):
+        hold = event('dependency-hold', -65, waits_for=TARGET, why='needs producer',
+                     _src='thinker:1')
+        for fields, clears in ((dict(ref='builder:2'), False), ({}, True),
+                               (dict(ref=hold['_src']), True)):
+            with self.subTest(fields=fields):
+                answer = event('decision', -60, actor='thinker', **fields)
+                self.assertEqual(autodispatch.held_by_dependency([hold, answer], []),
+                                 None if clears else 'held: waits for ' + TARGET + ' (needs producer)')
+
+    def test_legacy_grader_and_dead_builder_grader_respect_dependency_hold(self):
+        hold = event('dependency-hold', -65, waits_for=TARGET, why='needs producer')
+        base = fixture('grade') + [event('decision', -60, actor='thinker', ref='builder:2')]
+        self.assertEqual(len(autodispatch.grader_candidates(base, specs(base), NOW)), 1)
+        self.assertEqual(autodispatch.grader_candidates(base + [hold], specs(base), NOW), [])
+        self.assertEqual(len(autodispatch.grader_candidates(
+            base + [hold, event('unblocked', -55)], specs(base), NOW)), 1)
+        for role in ('builder', 'grader'):
+            with self.subTest(role=role):
+                spawn = 'L-' + role + '-9001'
+                dead = base + [event('spawn-stale', -5, role=role, spawn=spawn)]
+                self.assertEqual(len(autodispatch.dead_spawns(dead, NOW)), 1)
+                self.assertEqual(autodispatch.dead_spawns(dead + [hold], NOW), [])
+                self.assertEqual(len(autodispatch.dead_spawns(
+                    dead + [hold, event('unblocked', -1)], NOW)), 1)
+
     def test_states_not_from_fold(self):
         for rule in ('gate', 'enqueue', 'rebuild'):
             ev = [written(), event('build-done', -85, actor='builder', status='DONE'),

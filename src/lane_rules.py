@@ -101,7 +101,7 @@ def _rebuild(c):
     evs = c['evs']
     # Settled fold states include shipped (and all shipped-owed-* states),
     # accepted, closed-shipped, closed-unbuilt, dropped, killed and void.
-    if _terminal(evs, c['spec']):
+    if _terminal(evs, c['spec']) or c['dependency']:
         return None
     blocked = _latest(evs, {'build-blocked'})
     # thinker-answer refs the builder's question, not the build-blocked row.
@@ -132,6 +132,8 @@ def _close(c):
 
 
 def _regrade(c):
+    if c['dependency']:
+        return None
     triggers = []
     for subject, evs in c['by_subject'].items():
         if not subject.startswith('capability:') or subject.split(':', 2)[-1] != c['sid']:
@@ -162,6 +164,8 @@ def _build(c):
 
 
 def _grade(c):
+    if c['dependency']:
+        return None
     trigger, kind = autodispatch._grader_trigger(c['evs'])
     if not trigger or kind == 'regrade' or _rebuild(c) or _regrade(c) or _close(c):
         return None

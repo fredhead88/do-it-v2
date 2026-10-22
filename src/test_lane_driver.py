@@ -176,6 +176,36 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(self.calls, [])
         self.assertEqual(self.appended(), [])
 
+    def test_rebuild_question_answer_waits_for_dependency_unblock(self):
+        self.events = [self.events[0],
+                       self.event('build-blocked', 20, actor='builder', spawn='L-builder-9001', _src='builder:1'),
+                       self.event('question', 19, actor='builder', spawn='L-builder-9001', _src='builder:2'),
+                       self.event('dependency-hold', 2, waits_for='L-spec-9998', why='needs producer'),
+                       self.event('decision', 1, actor='thinker', ref='builder:2', why='Wait for the producer')]
+        answer = self.events[-1]
+        self.assertEqual(self.run_driver(), [])
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.appended(), [])
+        self.assertFalse(any(r['rule'] == 'rebuild' for r in
+                             lane_driver._rows(self.events, self.specs, self.now)))
+        self.events.append(self.event('unblocked'))
+        self.run_driver()
+        self.assertEqual(self.calls[0][:4], ['doit', 'packet', 'builder', self.sid])
+        self.assertEqual((self.appended()[0]['rule'], self.appended()[0]['since']),
+                         ('rebuild', answer['ts']))
+
+    def test_regrade_waits_for_dependency_unblock(self):
+        self.events = [self.events[0],
+                       self.event('dependency-hold', 2, waits_for='L-spec-9998', why='needs producer'),
+                       self.event('decision', 1, actor='thinker', regrade='yes', ref='grader:1')]
+        self.assertEqual(self.run_driver(), [])
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.appended(), [])
+        self.events.append(self.event('unblocked'))
+        self.run_driver()
+        self.assertEqual(self.calls[0][:4], ['doit', 'packet', 'grader', self.sid])
+        self.assertEqual(self.appended()[0]['rule'], 'regrade')
+
     def test_rebuild_ignores_shipped_and_settled_specs(self):
         base = [self.events[0], self.event('build-blocked', 20, _src='builder:1'),
                 self.event('decision', 1, actor='thinker', ref='builder:1', why='answer')]

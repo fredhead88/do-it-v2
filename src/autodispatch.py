@@ -39,8 +39,9 @@ def _newest_marker_ts(evs):
 def held_by_dependency(spec_evs, all_evs, *, shipped=None) -> str | None:
     """The newest hold stands until its dependency ships or an own clearer wins.
 
-    Invalid dependencies fail closed; only a newer decision/unblocked releases
-    them. A dependency that shipped before the hold is already satisfied.
+    Invalid dependencies fail closed. A newer unblocked, an unreferenced
+    decision, or a decision referring to the hold releases it; answers to other
+    questions do not. A dependency shipped before the hold is already satisfied.
     """
     spec_evs = list(spec_evs)
     holds = [e for e in spec_evs if e.get("type") == "dependency-hold"]
@@ -48,7 +49,9 @@ def held_by_dependency(spec_evs, all_evs, *, shipped=None) -> str | None:
         return None
     hold = max(holds, key=lambda e: fold.ts(e.get("ts")))
     hold_ts = fold.ts(hold.get("ts"))
-    if any(e.get("type") in ("unblocked", "decision")
+    if any((e.get("type") == "unblocked" or
+            e.get("type") == "decision" and
+            (not e.get("ref") or e.get("ref") == hold.get("_src")))
            and fold.ts(e.get("ts")) > hold_ts for e in spec_evs):
         return None
     dependency = hold.get("waits_for")
@@ -276,7 +279,7 @@ def _grader_trigger(evs):
 def grader_candidates(events, specs, now):
     """R13a: one row `{spec, charter, project, trigger, since}` per spec whose
     newest trigger (see `_grader_trigger`) has no grader dispatch/refusal of
-    its own since, is not held (`fold.held_specs`), not killed, not shipped."""
+    its own since, is not capability/dependency held, not killed, not shipped."""
     events = list(events)
     by_subject = {}
     for e in events:
@@ -293,7 +296,7 @@ def grader_candidates(events, specs, now):
             continue
         if any(e.get("type") == "shipped" for e in evs):
             continue
-        if sid in held:
+        if sid in held or held_by_dependency(evs, events):
             continue
         trig_event, trigger = _grader_trigger(evs)
         if trig_event is None:
@@ -384,6 +387,8 @@ def dead_spawns(events, now):
         if fold.spec_state(subj_evs, set()) in TERMINAL_STATES:
             continue
         if role not in REPLAYABLE_ROLES:
+            continue
+        if role in ("builder", "grader") and held_by_dependency(subj_evs, events):
             continue
         # A grader is only ever dispatched after a build-done (R13a); a dead
         # `role=grader` spawn on a subject with no build-done of its own is not
