@@ -10,6 +10,10 @@ dispatch_timeout_min = 70
 train_depth = 2
 max_merges = 10
 
+[merge_queue]
+batch_cap = 10
+batch_cap_floor = 6
+
 [thresholds]
 tmp_high = 85
 tmp_high_clear = 75

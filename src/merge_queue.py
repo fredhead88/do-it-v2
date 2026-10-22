@@ -1,5 +1,8 @@
 """Ledger-owned merge queue and the tick's gate/enqueue actions."""
 import argparse
+from contextlib import contextmanager
+from datetime import datetime, timezone
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -12,6 +15,7 @@ import dispatch
 import fold
 import lane_rules
 import tick
+import window_gate
 
 DOIT = str(Path(__file__).resolve().parent.parent / 'doit')
 OUTCOMES = {'shipped', 'window-dropped', 'merge-conflict'}
@@ -97,18 +101,21 @@ def _base_blocks(written, sid, repo, head):
     return None
 
 
-def _reconcile(events, *, dry_run=False):
+def _reconcile(events, *, dry_run=False, ledger_file=None):
     out = []
     for row in queue(events):
         evs = [e for e in events if e.get('subject') == row['spec']]
         added = _latest(evs, {'queue-add'})
-        outcome = _latest(evs, TERMINALS)
+        outcome = _latest(evs, TERMINALS if ledger_file is None else OUTCOMES)
         if not outcome or evs.index(outcome) <= evs.index(added):
             continue
         reason = outcome['type'] if outcome['type'] in OUTCOMES else 'killed'
         out.append(f"{'would remove' if dry_run else 'removed'} 1 spec {row['spec']} reason={reason}")
         if not dry_run:
-            _emit(row['spec'], 'queue-remove', project=row['project'], reason=reason)
+            if ledger_file is None:
+                _emit(row['spec'], 'queue-remove', project=row['project'], reason=reason)
+            else:
+                _train_emit(ledger_file, row['spec'], 'queue-remove', project=row['project'], reason=reason)
     return out
 
 
@@ -202,48 +209,295 @@ def _append(sid, kind, **fields):
         raise ValueError((result.stderr or result.stdout).strip())
 
 
-def window_run(project, maximum=6, *, runner=None):
-    if project != 'albert-scott' or not 1 <= maximum <= 6:
-        print('window-run: only albert-scott is supported; --max must be 1..6')
-        return 1
-    entries = queue(_ordered(fold.read_events()), project)[:maximum]
-    if not entries:
-        print('window-run: queue empty')
+def form_batch(queue_rows, footprints, cap, risky):
+    """Group exact-path connected specs, preserving queue order within the group."""
+    ids = list(dict.fromkeys(row['spec'] for row in queue_rows))
+    if not ids:
+        return []
+    head, cap = ids[0], max(1, cap)
+    if head in risky or footprints.get(head) is None:
+        return [head]
+    eligible = [sid for sid in ids if sid not in risky and footprints.get(sid) is not None]
+    group, paths = {head}, set(footprints[head])
+    while True:
+        before = len(group)
+        for sid in eligible:
+            if sid not in group and paths.intersection(footprints[sid]):
+                group.add(sid)
+                paths.update(footprints[sid])
+        if len(group) == before:
+            break
+    return ([sid for sid in eligible if sid in group] +
+            [sid for sid in eligible if sid not in group])[:cap]
+
+
+def spec_paths(repo, master, branch, runner=None):
+    """No rename detection: both names remain in the footprint, including odd bytes."""
+    try:
+        result = (runner or subprocess.run)(
+            ['git', 'diff', '--name-status', '--no-renames', '-z', f'{master}...{branch}'],
+            cwd=repo, capture_output=True)
+        if result.returncode:
+            return None
+        raw = result.stdout
+        if isinstance(raw, bytes):
+            raw = raw.decode('utf-8', 'surrogateescape')
+        if not raw:
+            return []
+        parts = raw.split('\0')
+        if parts.pop() != '' or len(parts) % 2:
+            return None
+        return list(zip(parts[::2], parts[1::2]))
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
+
+
+def is_risky(paths):
+    if paths is None:
+        return True
+    for status, path in paths:
+        parts = path.split('/')
+        if (path in ('deploy.sh', 'scripts/release_kit.sh') or
+                path.startswith('scripts/release/') or
+                status == 'A' and any(part.startswith('alembic') and
+                                     parts[i + 1] == 'versions'
+                                     for i, part in enumerate(parts[:-2]))):
+            return True
+    return False
+
+
+def effective_cap(events, now, env=None, toml_path=None):
+    events = _ordered(events)
+    configured, floor, unreadable = 10, 6, False
+    try:
+        import tomllib
+        with open(Path(DOIT).parent / 'look.toml' if toml_path is None else toml_path, 'rb') as stream:
+            config = tomllib.load(stream).get('merge_queue', {})
+        def positive(key, default):
+            value = config.get(key)
+            return value if type(value) is int and value >= 1 else default
+        configured, floor = positive('batch_cap', 10), positive('batch_cap_floor', 6)
+    except (OSError, ValueError, TypeError, AttributeError, ImportError):
+        unreadable = True
+    floor = min(floor, configured)
+    try:
+        rate = window_gate.red_rate(events, now)
+        red, windows = rate['rate'], rate['windows']
+    except (OSError, ValueError, TypeError, KeyError):
+        red, windows, unreadable = None, 0, True
+    previous = _latest(events, {'batch-cap'})
+    if unreadable or red is None and windows >= 5:
+        cap, reason = floor, 'undetermined'
+    elif windows < 5:
+        cap, reason = previous.get('cap', configured) if previous else configured, 'few-windows'
+    elif red > .40:
+        cap, reason = floor, 'red-rate-over-0.40'
+    else:
+        cap, reason = configured, 'configured'
+    if type(cap) is not int or cap < 1:
+        cap, reason = floor, 'undetermined'
+    cap = max(1, min(cap, window_gate.max_merges(os.environ if env is None else env)))
+    return dict(cap=cap, configured=configured, floor=floor, red_rate=red,
+                windows=windows, reason=reason)
+
+
+def batch_cap(events, now, toml_path=None):
+    return effective_cap(events, now, toml_path=toml_path)
+
+
+def _train_emit(ledger_file, subject, kind, **fields):
+    if Path(ledger_file).name != ledger_file:
+        raise ValueError('ledger filename required')
+    actor = fold.actor_of(ledger_file)
+    allowed = ('executor', 'tick', 'operator') if kind == 'batch-cap' else ('executor', 'tick')
+    if actor not in allowed:
+        raise ValueError('unsupported train ledger actor')
+    dst = fold.ROOT / 'events' / ledger_file
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    reason = dispatch.emit(dst, {'subject': subject}, kind, **fields)
+    if reason:
+        raise ValueError(reason)
+
+
+def record_cap(result, events, ledger_file):
+    previous = _latest(_ordered(events), {'batch-cap'})
+    old = previous['cap'] if previous else result['configured']
+    if result['cap'] != old:
+        _train_emit(ledger_file, 'merge-train', 'batch-cap',
+                    **{key: result[key] for key in ('cap', 'red_rate', 'windows', 'reason')},
+                    **{'from': old})
+
+
+def _alive(pid):
+    if type(pid) is not int or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+@contextmanager
+def _run_lock(project):
+    state = fold.ROOT / 'state'
+    state.mkdir(parents=True, exist_ok=True)
+    path = state / f'window-run.{project}.lock'
+    # Serialize stale takeover and the tiny O_EXCL/write interval. The directory
+    # mutex is unrelated to gate slots and is never held while running a gate.
+    directory = os.open(state, os.O_RDONLY)
+    owned = False
+    try:
+        fcntl.flock(directory, fcntl.LOCK_EX)
+        try:
+            if path.exists():
+                try:
+                    pid = int(path.read_text().strip())
+                except (ValueError, OSError):
+                    pid = None
+                if pid is None or _alive(pid):
+                    pass  # unreadable ownership is never a free slot
+                else:
+                    path.unlink()
+            if not path.exists():
+                fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                with os.fdopen(fd, 'w') as stream:
+                    stream.write(str(os.getpid()))
+                owned = True
+        finally:
+            fcntl.flock(directory, fcntl.LOCK_UN)
+        yield owned
+    finally:
+        if owned:
+            fcntl.flock(directory, fcntl.LOCK_EX)
+            try:
+                path.unlink(missing_ok=True)
+            finally:
+                fcntl.flock(directory, fcntl.LOCK_UN)
+        os.close(directory)
+
+
+def _launching(events, project, flying):
+    """Reserve a launched process before its first candidate reaches the ledger."""
+    rows = {row['window']: row for row in flying}
+    terminal = {e['subject'] for e in events if e['type'] in ('window-verified', 'escalation-blocking')}
+    for event in events:
+        if event['type'] != 'queue-batch' or event.get('project') != project:
+            continue
+        name = event['subject']
+        if name in terminal or name in rows:
+            continue
+        path = fold.ROOT / 'state' / f'window-run.{name}.pid'
+        try:
+            pid = int(path.read_text())
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError):
+            raise ValueError('launch state unreadable')
+        if _alive(pid):
+            rows[name] = dict(window=name, specs=event['specs'])
+        else:
+            path.unlink(missing_ok=True)
+    return list(rows.values())
+
+
+def _window_reconcile(events, ledger_file):
+    removed = _reconcile(events, ledger_file=ledger_file)
+    print(f"window-run: removed {len(removed)} spec(s); outcomes={' | '.join(removed) or 'none'}")
+
+
+def window_run(project, maximum=None, *, runner=None, launcher=None, detach=False, now=None):
+    if not re.fullmatch(r'[A-Za-z0-9._-]+', project) or project in ('.', '..'):
+        return 2
+    if maximum is not None and maximum < 1:
+        return 2
+    ledger_file = os.environ.get('DOIT_LEDGER_FILE', 'L-executor-0001.jsonl')
+    now = now if now is not None else datetime.now(timezone.utc)
+    process = None
+    with _run_lock(project) as owned:
+        if not owned:
+            print('window-run: lock held; no batch formed')
+            return 3
+        try:
+            events = _ordered(window_gate.train_events())
+            _window_reconcile(events, ledger_file)
+            events = _ordered(window_gate.train_events())
+            try:
+                depth = window_gate.train_depth(os.environ, root=fold.ROOT, events=events, now=now)['depth']
+                if type(depth) is not int or depth < 1:
+                    depth = 1
+            except (OSError, ValueError, KeyError, TypeError):
+                depth = 1
+            flying = _launching(events, project, window_gate.in_flight(events, root=fold.ROOT))
+            cap = effective_cap(events, now)
+            record_cap(cap, events, ledger_file)
+            if len(flying) >= depth:
+                print(f'window-run: {len(flying)} windows in flight; depth={depth}; no slot')
+                return 3
+            after = None
+            if flying:
+                names = {row['window'] for row in flying}
+                # A later candidate can be a rebase of an older launch. Order
+                # windows by their first batch/candidate, not their last update.
+                first_seen = {}
+                for pos, event in enumerate(events):
+                    if event['subject'] in names and event['type'] in ('queue-batch', 'window-candidate'):
+                        first_seen.setdefault(event['subject'], pos)
+                after = max(names, key=lambda name: first_seen.get(name, -1))
+                candidates = [e for e in events if e['subject'] == after and e['type'] == 'window-candidate']
+                past_first = any(e.get('window') == after and e['type'] in ('window-dropped', 'merge-conflict') for e in events)
+                if len(candidates) != 1 or past_first:
+                    print('window-run: predecessor not in first verification; waiting')
+                    return 3
+            busy = {sid for row in flying for sid in
+                    (row['specs'].split(',') if isinstance(row['specs'], str) else row['specs'])}
+            waiting = queue(events, project)
+            entries = [row for row in waiting if row['spec'] not in busy]
+            if not entries:
+                print(f'window-run: no eligible specs; {len(waiting)} queued in live windows')
+                return 3
+            repo, master = _repository(project)
+            footprints, risky = {}, set()
+            for row in entries:
+                paths = spec_paths(repo, master, row['branch'])
+                footprints[row['spec']] = None if paths is None else {path for _, path in paths}
+                if is_risky(paths):
+                    risky.add(row['spec'])
+            specs = form_batch(entries, footprints, min(maximum or cap['cap'], cap['cap']), risky)
+            print(f'window-run: selected {len(specs)}; deferred {len(waiting) - len(specs)} '
+                  f'(live={len(waiting) - len(entries)}, risky/undetermined={len(risky - set(specs))}; cap/footprint order)')
+            window = 'window-' + uuid.uuid4().hex
+            _train_emit(ledger_file, window, 'queue-batch', project=project, specs=','.join(specs))
+            argv = ['doit', 'gate-window', window, '--project', project, '--specs', ','.join(specs)]
+            if after:
+                argv += ['--after', after]
+            if runner is not None:
+                if detach:
+                    raise ValueError('detached calls require a process launcher')
+                result = runner(argv)
+            else:
+                log = fold.ROOT / 'state' / f'window-run.{window}.log'
+                with log.open('ab') as stream:
+                    process = (launcher or subprocess.Popen)(
+                        [DOIT, *argv[1:]], start_new_session=True,
+                        stdout=stream, stderr=subprocess.STDOUT)
+                (fold.ROOT / 'state' / f'window-run.{window}.pid').write_text(str(process.pid))
+                print(f'window-run: launched {window}; log={log}')
+        except (OSError, ValueError, KeyError, TypeError, StopIteration) as exc:
+            print(f'window-run: undetermined; {exc}', file=sys.stderr)
+            return 3
+    if detach:
         return 0
-    window = 'window-' + uuid.uuid4().hex
-    specs = ','.join(row['spec'] for row in entries)
-    _append(window, 'queue-batch', project=project, specs=specs)
-    # Read back the batch timestamp; wall-clock guesses cannot delimit outcomes.
-    batch = _latest([e for e in _ordered(fold.read_events()) if e.get('subject') == window], {'queue-batch'})
-    if batch is None:
-        raise ValueError('queue-batch append not admitted')
-    if runner is None:
-        from autodispatch import _real_runner
-        runner = _real_runner
-    result = runner(['doit', 'gate-window', window, '--project', project, '--specs', specs])
-    code = result.get('code', 1)
-    if result.get('stdout'):
-        print(result['stdout'].rstrip())
-    if result.get('stderr'):
-        print(result['stderr'].rstrip(), file=sys.stderr)
-    meanings = {0: 'advanced; every spec shipped', 1: 'advanced with dropped specs',
-                2: 'window red or unverified', 3: 'another window holds the lock',
-                4: 'operator-declared gate bypass'}
-    print(f"window-run: {meanings.get(code, f'gate-window exited {code}')}")
-    if code != 3:
-        fresh = _ordered(fold.read_events())
-        still_queued = {r['spec'] for r in queue(fresh)}
-        removed = []
-        for row in entries:
-            if row['spec'] not in still_queued:
-                continue
-            outcomes = [e for e in fresh if e.get('subject') == row['spec'] and
-                        e.get('type') in OUTCOMES and lane_rules._time(e['ts']) > lane_rules._time(batch['ts'])]
-            if outcomes:
-                reason = outcomes[-1]['type']
-                _append(row['spec'], 'queue-remove', project=project, reason=reason, window=window)
-                removed.append(f"{row['spec']}={reason}")
-        print(f"window-run: removed {len(removed)} spec(s); outcomes={','.join(removed) or 'none'}")
+    code = process.wait() if process is not None else result.get('code', 1)
+    # Reconcile once more for synchronous callers; detached outcomes land next pass.
+    with _run_lock(project) as owned:
+        if owned:
+            try:
+                _window_reconcile(_ordered(window_gate.train_events()), ledger_file)
+            except (OSError, ValueError) as exc:
+                print(f'window-run: outcome reconciliation deferred; {exc}', file=sys.stderr)
     return code
 
 
@@ -255,9 +509,10 @@ def main(argv=None):
         if args.command == 'window-run':
             p = argparse.ArgumentParser()
             p.add_argument('--project', required=True)
-            p.add_argument('--max', type=int, default=6)
+            p.add_argument('--max', type=int)
+            p.add_argument('--detach', action='store_true')
             a = p.parse_args(rest)
-            return window_run(a.project, a.max)
+            return window_run(a.project, a.max, detach=a.detach)
         p = argparse.ArgumentParser()
         p.add_argument('action', choices=('list', 'add', 'remove'))
         p.add_argument('spec', nargs='?')
