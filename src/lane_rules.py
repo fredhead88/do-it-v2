@@ -12,6 +12,7 @@ import tomllib
 import autodispatch
 import dispatch
 import fold
+import routing
 import tick
 
 
@@ -140,7 +141,10 @@ def _regrade(c):
             continue
         hold = _latest(evs, {'capability-hold'})
         unblocked = _latest(evs, {'unblocked'})
-        if hold and unblocked and _time(unblocked['ts']) > _time(hold['ts']):
+        if (hold and unblocked and unblocked.get('actor') in ('thinker', 'operator')
+                and unblocked.get('regrade') != 'no'
+                and _time(unblocked['ts']) > _time(hold['ts'])
+                and not routing.hold_ruled(c['events'], hold, c['sid'])):
             triggers.append(unblocked)
     decision, kind = autodispatch._grader_trigger(c['evs'])
     if decision and kind == 'regrade':

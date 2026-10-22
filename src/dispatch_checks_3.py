@@ -1109,6 +1109,27 @@ if __name__ == "__main__":
     assert fold.verdict_confirmed(vev6_482, {"AC1"}) is True, vev6_482
     print("L-spec-0482 AC6 ok")
 
+    # W44: after a ruling and release, even a stale grader output cannot
+    # reopen the hold. A mixed output still holds on its unruled AC alone.
+    subj44 = "L-spec-9444"
+    code, types, rows44, _ = spawn("grader", out=grade([_ca482("AC9"), _ca482("AC10")]), subject=subj44)
+    hold44 = next(e for e in rows44 if e['type'] == 'capability-hold')
+    assert hold44['criteria'] == ['AC9', 'AC10'], hold44
+    raw_ev('thinker', 'w44ruling9', 'decision', subj44, FT(1), criterion='AC9',
+           why='AC9 met: failure is identical at base.', evidence='fixture/base.json')
+    raw_ev('operator', 'w44ruling10', 'decision', subj44, FT(2),
+           why='AC10 is ruled met: amended verification exits 0.', evidence='fixture/all.json')
+    raw_ev('thinker', 'w44release', 'unblocked', hold44['subject'], FT(3))
+    code, types, rows44, _ = spawn("grader", out=grade([_ca482("AC9"), _ca482("AC10")]), subject=subj44)
+    assert code == 0 and 'verdict' in types, (code, types)
+    assert not {'capability-hold', 'escalation-blocking'} & set(types), types
+    assert next(e for e in rows44 if e['type'] == 'verdict')['missing_capability'] == []
+    assert hold44['subject'] not in fold.capability_holds(fold.read_events())
+    code, types, rows44, _ = spawn("grader", out=grade([_ca482("AC9"), _ca482("AC10"), _ca482("AC11")]), subject=subj44)
+    assert code == 0 and 'capability-hold' in types, (code, types)
+    assert next(e for e in rows44 if e['type'] == 'capability-hold')['criteria'] == ['AC11']
+    print('W44 ruled release stays released across stale regrade; unruled AC still holds')
+
     # AC7: grading_budget's build-done-gated window — 3 runs older than the
     # newest build-done never count (None); 3 newer do (cap:3); no build-done at
     # all still counts every run (cap:3, unchanged from before this unit).

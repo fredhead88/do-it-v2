@@ -87,7 +87,7 @@ def hold_criteria(events, hold, spec):
     if verdict is None:
         return set()
     if "missing_capability" in verdict:
-        cap = hold.get("capability") or hold.get("subject", "").split(":")[1]
+        cap = hold.get("capability") or hold.get("subject", "").partition(":")[2].partition(":")[0]
         return {row["ac"] for row in verdict["missing_capability"]
                 if row.get("ac") and row.get("capability") == cap}
     return criterion_ids(verdict.get("cannot_assess"))
