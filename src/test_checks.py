@@ -305,7 +305,26 @@ def test_ac10():
         assert len((root / path).read_text().splitlines()) <= 1500, path
 
 
+def test_production_data():
+    observed = "AC3 [observed-data]: fixed live window has ASIN rows."
+    backend = "AC9 [backend]: rebuild genesis in a scratch database."
+    genesis = "pytest api/tests/test_562_genesis_drift.py -m live_db -k rebuild_fingerprint_equals_committed"
+    resolver = 'def resolve(environ):\n for key in ("SUPABASE_DB_URL_RO", "SUPABASE_DB_URL"):\n  if environ.get(key): return environ[key]\n'
+    admin = 'import os\nadmin = os.environ.get("AS_LOCAL_PG_ADMIN")\n'
+    assert not checks.production_data(backend, [genesis], [resolver])
+    assert not checks.production_data(observed, [genesis])
+    assert not checks.production_data(observed, [genesis], [admin])
+    assert not checks.production_data(observed, [genesis], ['# never SUPABASE_DB_URL\n' + admin])
+    assert not checks.production_data(observed + " production", ["pytest tests/test_product.py"])
+    assert checks.production_data(observed, ["pytest tests/test_1026.py -m live_db"], [resolver])
+    assert checks.production_data(observed, ['SUPABASE_DB_URL_RO="$RO_DSN" pytest tests/test_1026.py'])
+    assert checks.production_data(observed, ["psql postgresql://read-only.fixture.test/db"])
+    assert not checks.production_data(observed, ["psql postgresql://localhost/scratch"])
+    print("W55 revised: observed-data AND DSN dependency; live_db/admin/backend alone allowed")
+
+
 if __name__ == "__main__":
+    test_production_data()
     for ac in (1, 2, 3, 4, 5, 6, 7, 9, 10, 12):
         globals()[f"test_ac{ac}"]()
         print(f"AC{ac} ok")

@@ -10,6 +10,7 @@ import shlex
 import subprocess
 import time
 
+import build_runner
 import checks
 import dispatch
 import fold
@@ -205,6 +206,13 @@ def _build(row, record, specs, now):
             "--criteria", row["criterion"]]
     try:
         process = subprocess.run(argv, capture_output=True, text=True, timeout=BUILD_TIMEOUT_S)
+        if (process.returncode == 2 and (process.stderr or "").strip()
+                == "run-checks: " + build_runner.PROD_DATA_UNAVAILABLE):
+            return {"outcome": "unobservable", "capability": "ro-dsn",
+                    "observed_at": now.isoformat(),
+                    "valid_until": (now + timedelta(hours=record.get("validity_h", 24))).isoformat(),
+                    "evidence": "", "why": build_runner.PROD_DATA_UNAVAILABLE,
+                    "env": dict(build_runner.NO_PROD_ENV)}, None
         if process.returncode != 0:
             return None, None
         path = pathlib.Path(process.stdout.strip())

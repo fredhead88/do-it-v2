@@ -1,4 +1,5 @@
 """Pure classification of criterion and owed checks; never executes a check."""
+import ast
 import re
 import urllib.parse
 
@@ -107,6 +108,48 @@ def _proves(criterion, block):
     value = re.sub(r"^\s*\**AC\d+\s*\[[^]]*\]\s*[:—-]?\s*", "", anchor)
     value = re.split(r"\breview_paths?:", value, maxsplit=1)[0]
     return " ".join(value.strip("* ").split())[:200] or criterion
+
+
+def production_data(block, commands, sources=()):
+    """An observed-data check with a production DSN dependency, not a marker.
+
+    Source strings are supplied by the runner from the requested git tree.
+    Comments and prose mentioning production/live_db are not DSN resolution.
+    Backend tests may set SUPABASE_DB_URL to their own scratch database.
+    """
+    anchor = block.splitlines()[0] if block else ""
+    tag = re.search(r"AC\d+\s*\[([^]]*)\]", anchor, re.I)
+    if not tag or "observed-data" not in re.split(r"[\s,]+", tag[1].lower()):
+        return False
+    variable = r"(?:SUPABASE_DB_URL(?:_RO|_DIRECT|_MIGRATIONS)?|[A-Z_]*PROD[A-Z_]*(?:DSN|DB_URL))"
+
+    def dependency(value):
+        if re.fullmatch(variable, value):
+            return True
+        if value.startswith(("postgres://", "postgresql://")):
+            try:
+                host = urllib.parse.urlsplit(value).hostname
+            except ValueError:
+                return False
+            return bool(host and host not in ("localhost", "127.0.0.1", "::1"))
+        return False
+
+    for command in commands:
+        if re.search(r"\b" + variable + r"\b", command):
+            return True
+        if any(dependency(value) for value in re.findall(r'''postgres(?:ql)?://[^\s'";]+''', command)):
+            return True
+    for source in sources:
+        try:
+            nodes = ast.walk(ast.parse(source))
+            for node in nodes:
+                value = (node.value if isinstance(node, ast.Constant) else
+                         node.id if isinstance(node, ast.Name) else None)
+                if isinstance(value, str) and dependency(value):
+                    return True
+        except (SyntaxError, ValueError):
+            continue
+    return False
 
 
 def records(spec_text, project):
