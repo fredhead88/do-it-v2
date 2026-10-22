@@ -46,6 +46,7 @@ NO_ACCEPTANCE = ("# L-spec-fixture\n"
                   "```\n"
                   "true && true\n"
                   "```\n"
+                  "## Metadata\n"
                   "Writes: a.py\n"
                   "In plain English: fixture proves the well-formed case.\n")
 
