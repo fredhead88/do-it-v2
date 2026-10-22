@@ -205,6 +205,63 @@ class BuildRunnerTests(unittest.TestCase):
         self.assertEqual(self.lines(), [])
         self.assert_clean()
 
+    def test_chain_uses_configured_venv_bin_before_inherited_path(self):
+        for relative in (False, True):
+            with self.subTest(relative=relative):
+                configured = ".venv" if relative else str(self.top / "project-venv")
+                venv = self.repo / configured
+                (venv / "bin").mkdir(parents=True)
+                for name in ("alembic", "python"):
+                    for directory, marker in ((venv / "bin", "venv"), (self.bin, "inherited")):
+                        binary = directory / name
+                        binary.write_text(f"#!/bin/sh\nprintf '%s\\n' '{marker}-{name}'\n")
+                        binary.chmod(0o755)
+                (self.repo / "venv-fixture").write_text(str(relative))
+                self.base = self.commit("venv command fixtures")
+                (self.repo / "venv-tip").write_text(str(relative))
+                self.sha = self.commit("venv command tip")
+                self.build_done()
+                config = self.top / "grading.toml"
+                config.write_text('[project.demo]\nvenv = ' + json.dumps(configured) + '\n')
+                self.env["DOIT_GRADING_TOML"] = str(config)
+                self.spec(None, 'cd / &&\ncommand -v alembic &&\ncommand -v python &&\n'
+                          'alembic &&\npython &&\nprintf "%s\\n" "$PATH" "$TMPDIR"')
+                bundle, path = self.bundle()
+                for row in bundle["commands"] + bundle["base"]:
+                    # Relative venvs follow db_setup's disposable-tree resolution.
+                    expected = pathlib.Path(row["cwd"]) / configured / "bin"
+                    self.assertEqual(row["exit"], 0)
+                    self.assertEqual(self.tail(row).decode().splitlines(), [
+                        str(expected / "alembic"), str(expected / "python"),
+                        "venv-alembic", "venv-python",
+                        str(expected) + os.pathsep + self.env["PATH"],
+                        self.env.get("TMPDIR", "")])
+                # The next config must run again even if its git tip is unchanged.
+                path.unlink()
+                shutil.rmtree(path.with_suffix(""))
+                self.assert_clean()
+
+    def test_chain_without_configured_venv_keeps_inherited_path(self):
+        for name in ("alembic", "python"):
+            binary = self.bin / name
+            binary.write_text("#!/bin/sh\nexit 0\n")
+            binary.chmod(0o755)
+        self.spec(None, 'command -v alembic &&\ncommand -v python &&\nprintf "%s\\n" "$PATH"')
+        for config_text in ("", '[project.demo]\nnode_dirs = []\n',
+                            '[project.demo]\nvenv = ""\n'):
+            with self.subTest(config=config_text):
+                config = self.top / "grading.toml"
+                config.write_text(config_text)
+                self.env["DOIT_GRADING_TOML"] = str(config)
+                bundle, path = self.bundle()
+                for row in bundle["commands"] + bundle["base"]:
+                    self.assertEqual(row["exit"], 0)
+                    self.assertEqual(self.tail(row).decode().splitlines(), [
+                        str(self.bin / "alembic"), str(self.bin / "python"), self.env["PATH"]])
+                path.unlink()
+                shutil.rmtree(path.with_suffix(""))
+                self.assert_clean()
+
     def test_rewrite_live_path_missing_left_venv_kept(self):
         actual = self.top / "actual"
         self.repo.rename(actual)

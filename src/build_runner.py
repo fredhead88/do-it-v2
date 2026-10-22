@@ -246,6 +246,10 @@ def _run_tree(spec, sha, repo, row, commands, tail_dir, offset, tail_limit, dead
         raise Undetermined("runner scratch already exists")
     auxiliary.mkdir()
     env = grading_env._clean_env()
+    if row.get("venv"):
+        # Match db_setup's venv resolution for absolute and tree-relative paths.
+        venv_bin = tree / row["venv"] / "bin"
+        env["PATH"] = str(venv_bin) + os.pathsep + env.get("PATH", os.defpath)
     for name in ("DOIT_LEDGER_FILE", "DOIT_SUPERVISED"):
         env.pop(name, None)
     for name, relative in (("HOME", "home"), ("DOIT_ROOT", "root")):
