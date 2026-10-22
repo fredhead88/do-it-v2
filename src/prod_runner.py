@@ -109,18 +109,10 @@ def observe(row, record, *, now=None):
     commands = record.get("commands", [])
     if not commands:
         return unavailable("repo", "no commands; Thinker must choose an observation route")
-    if {"repo", "ro-prod-sql"} <= set(record.get("needs", [])):
-        # Do not hand arbitrary repo code a production credential or substitute
-        # scratch data. Only the audited ro-sql wrapper can observe production.
-        result["env"] = {"pg": "none", "prod_dsns": "unset", "required_pg": "prod_ro"}
-        return unavailable("ro-dsn", "production-data command requires a read-only observation route; "
-                           "not executed against private PG; no database used")
     try:
         argvs = [_argv(command) for command in commands]
     except (ValueError, TypeError):
         return unavailable("repo", "read-only command refused; Thinker must review the observation route")
-    if any(pathlib.Path(argv[0]).name == "ro-sql" for argv in argvs):
-        result["env"] = {"pg": "prod_ro", "prod_dsns": "wrapper-only"}
     evidence, failed = [], False
     for argv in argvs:
         try:
@@ -205,8 +197,6 @@ def _load_state(path, now):
 
 
 def _build(row, record, specs, now):
-    if {"repo", "ro-prod-sql"} <= set(record.get("needs", [])):
-        return observe(row, record, now=now), None
     sha = next((e.get("sha") for e in reversed(specs[row["spec"]]["evs"])
                 if e.get("type") == "shipped"), None)
     if not sha:

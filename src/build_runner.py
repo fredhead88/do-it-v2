@@ -42,10 +42,6 @@ class WallCap(Undetermined):
     pass
 
 
-class ProductionDataUnavailable(Undetermined):
-    """No production observation was attempted, including on a cache hit."""
-
-
 def _expired(*_):
     raise WallCap("wall cap exceeded")
 
@@ -118,8 +114,6 @@ def _commands(text, project, criteria):
         criterion = record["criterion"]
         if criteria is not None and criterion not in criteria:
             continue
-        if record["commands"] and "ro-prod-sql" in record["needs"]:
-            raise ProductionDataUnavailable("cannot-observe: production data requires a read-only observation route; no database used")
         if record["runner"] != "build":
             judgment.append(criterion)
             continue
@@ -128,8 +122,6 @@ def _commands(text, project, criteria):
             commands.append((criterion, " &&\n".join([*prefix, command])))
     chain = (verification.block(text) or "").strip()
     if criteria is None and chain:
-        if checks.production_data("", [chain]):
-            raise ProductionDataUnavailable("cannot-observe: live Verification requires a read-only observation route; no database used")
         commands.append((None, chain))
     if not commands:
         raise Undetermined("no build command or Verification block")
@@ -351,10 +343,6 @@ def run(spec, requested_sha=None, criteria=None):
         sha = _resolve(repo, requested_sha or done.get("ready_sha"), env, deadline)
         key = "all" if criteria is None else hashlib.sha256(",".join(sorted(criteria)).encode()).hexdigest()[:8]
         path = fold.ROOT / "content" / "evidence" / spec / f"{sha[:12]}-{key}.json"
-        # Validate today's DB requirements before returning any cached bundle.
-        # Legacy live_db evidence may have been collected against scratch PG.
-        text = (fold.ROOT / "content" / f"{spec}.md").read_text()
-        commands, judgment = _commands(text, project, criteria)
         locks = fold.ROOT / "evidence" / "locks"
         locks.mkdir(parents=True, exist_ok=True)
         lock = resources.enter_context((locks / f"{spec}-{sha}.lock").open("a"))
@@ -368,6 +356,8 @@ def run(spec, requested_sha=None, criteria=None):
             base_sha = _required(["git", "-C", str(repo), "merge-base", sha, "origin/" + main],
                                  phase="merge base", env=env, deadline=deadline)
             base_sha = _resolve(repo, base_sha, env, deadline)
+        text = (fold.ROOT / "content" / f"{spec}.md").read_text()
+        commands, judgment = _commands(text, project, criteria)
         row = grading_env._project_row(project)
         tails = path.with_suffix("")
         tails.mkdir(parents=True)
@@ -410,9 +400,7 @@ def run(spec, requested_sha=None, criteria=None):
         # The evidence deadline must not interrupt recording its own failure.
         signal.setitimer(signal.ITIMER_REAL, 0)
         reason = str(exc) if isinstance(exc, Undetermined) else "runner could not establish evidence (" + type(exc).__name__ + ")"
-        fields = {"env": {"pg": "none", "prod_dsns": "unset", "required_pg": "prod_ro"}} \
-            if isinstance(exc, ProductionDataUnavailable) else {}
-        _event(spec, project, "evidence-bundle-failed", sha=sha, reason=reason, **fields)
+        _event(spec, project, "evidence-bundle-failed", sha=sha, reason=reason)
         raise Undetermined(reason) from None
     finally:
         resources.close()

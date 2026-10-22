@@ -33,11 +33,6 @@ write, the seat-route Output file, is stated below.
 Judge the criterion from the supplied evidence. A row whose `line` names an
 evidence bundle is judged from that bundle: read it, do not re-run its commands.
 The script owns execution; you never execute checks, wrappers or browser sessions.
-An observed-data command, `live_db` test, or production review requires production
-read-only data. A bundle with `env.pg: private` or missing DB provenance cannot
-prove that check: return `cannot-observe`, capability `ro-dsn`, never `failed` or
-`met`. The script refuses these repo commands until a read-only observation route
-exists, recording `env.pg: none` and `env.required_pg: prod_ro`; no DB was used.
 You receive only judgment rows and failing build bundles, including production
 rows with no runnable command. You never receive a `browser`, `operator-action`
 or `ro-dsn-grant` row. A `permission denied` from `ro-sql` is missing access,

@@ -105,8 +105,6 @@ def test_observe():
             assert datetime.fromisoformat(result["valid_until"]) - datetime.fromisoformat(
                 result["observed_at"]) == timedelta(hours=6)
             assert isinstance(stub.call_args.args[0], list)
-            if "ro-sql" in command:
-                assert result["env"] == {"pg": "prod_ro", "prod_dsns": "wrapper-only"}
             assert not stub.call_args.kwargs.get("shell")
             assert stub.call_args.kwargs["timeout"] == 60
             if expected == "unobservable":
@@ -355,49 +353,6 @@ def test_build():
     print("AC6 ok")
 
 
-def test_live_data_cannot_observe():
-    actual_record_for = prod_runner.record_for
-    for capability in (None, "repo", "other"):
-        with fixture() as (root, write):
-            text = ("## Acceptance criteria\n"
-                    "AC1 [observed-data]: Fixed live window contains ASIN rows.\n"
-                    "review_path: run `python -m pytest tests/test_1026.py -m live_db`\n")
-            (root / "content" / f"{SPEC}.md").write_text(text)
-            if capability:
-                write("L-operator-route.jsonl", [dict(type="owed-routed", criterion="AC1",
-                    route="relabel", capability=capability, ts=(NOW - timedelta(hours=1)).isoformat())])
-            # Even a stale failing private bundle must never reach judgment.
-            bundle_file(root, code=1)
-            with patch.object(prod_runner, "record_for", side_effect=actual_record_for), \
-                    patch.object(prod_runner, "_build", side_effect=AssertionError("build invoked")), \
-                    patch.object(subprocess, "run", side_effect=AssertionError("process invoked")), \
-                    patch.object(subprocess, "Popen", side_effect=AssertionError("process invoked")), \
-                    patch.object(socket, "socket", side_effect=AssertionError("network")), \
-                    patch.dict(os.environ, {"SUPABASE_DB_URL": "WRITE_DSN_SENTINEL",
-                                           "SUPABASE_DB_URL_RO": "RO_DSN_SENTINEL"}):
-                for minutes in (0, 5):
-                    clock = NOW + timedelta(minutes=minutes)
-                    with patch.object(dispatch, "now", return_value=clock.isoformat()):
-                        result = prod_runner.run(clock)
-                    assert not result["bundle_rows"] and not result["to_judgment"]
-                rows = owed.checks(fold.fold(fold.read_events())[0][SPEC]["evs"], clock)
-                selected, _ = sweep_owed.judgment_rows(rows, result)
-                assert selected == []
-            event, = events(root)
-            assert event["type"] == "owed-unobservable" and event["capability"] == "ro-dsn", event
-            assert event["env"] == {"pg": "none", "prod_dsns": "unset", "required_pg": "prod_ro"}
-            assert not fold.required_reason(event)
-            for path in (root / "events" / prod_runner.LEDGER_NAME, root / "state/prod-runner.json"):
-                raw = path.read_text()
-                assert "WRITE_DSN_SENTINEL" not in raw and "RO_DSN_SENTINEL" not in raw
-    # A caller retaining the old build route is also refused before subprocesses.
-    with patch.object(subprocess, "run", side_effect=AssertionError("process invoked")):
-        observation_, bundle = prod_runner._build({}, record("pytest tests/test_1026.py -m live_db",
-            runner="build", needs=["repo", "ro-prod-sql"]), {}, NOW)
-    assert observation_["outcome"] == "unobservable" and bundle is None
-    print("W55 observed-data live_db: cannot-observe; no PG, credentials, subprocess, or failing bundle handoff")
-
-
 def test_ledger_and_hooks():
     assert prod_runner.PASSES == []
     with fixture() as (root, _):
@@ -468,8 +423,7 @@ def test_hermetic():
 
 if __name__ == "__main__":
     for test in (test_empty_commands, test_observe, test_allowlist, test_permissions, test_strikes,
-                 test_stale_failure_selection, test_events, test_build, test_live_data_cannot_observe,
-                 test_ledger_and_hooks, test_hermetic):
+                 test_stale_failure_selection, test_events, test_build, test_ledger_and_hooks, test_hermetic):
         test()
     for criterion in (1, 2, 3, 4, 5, 6, 8, 10):
         body = {"criterion": f"AC{criterion}", "result": "ok", "suite": "test_prod_runner.py"}

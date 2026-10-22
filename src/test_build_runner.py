@@ -261,38 +261,6 @@ class BuildRunnerTests(unittest.TestCase):
                 path.unlink()
                 shutil.rmtree(path.with_suffix(""))
                 self.assert_clean()
-    def test_live_observations_never_provision_or_reuse_private_bundle(self):
-        self.provisioned()
-        _, cached = self.bundle("--criteria", "AC1", driver=True)
-        before = self.lines()
-        marker = self.top / "live-command-executed"
-        command = f'python3 -c \'import pathlib; pathlib.Path("{marker}").touch()\''
-        for block in (
-                f"AC1 [observed-data]: fixed live window has ASIN rows.\nreview_path: `{command}`",
-                "AC1 [backend]: fixed window.\nreview_path: `pytest tests/test_1026.py -m live_db`",
-                f"AC1 [backend]: fixed window.\nreview_path: production: run `{command}`"):
-            self.spec(text="## Acceptance criteria\n" + block + "\n")
-            for args in (("--criteria", "AC1"), ()):
-                result = self.cli(*args, driver=True)
-                self.assertEqual(result.returncode, 2, result.stderr)
-                self.assertIn("cannot-observe: production data", result.stderr)
-                self.assertIn("no database used", result.stderr)
-                self.assertEqual(result.stdout, "")
-                self.assertFalse(marker.exists())
-                self.assertEqual(self.lines(), before)
-                self.assertTrue(cached.exists())
-                self.assertEqual(self.events()[-1]["env"],
-                                 {"pg": "none", "prod_dsns": "unset", "required_pg": "prod_ro"})
-        self.assert_clean()
-
-    def test_untagged_live_verification_never_runs(self):
-        self.provisioned()
-        self.spec(verification="pytest tests/test_window.py -m live_db")
-        result = self.cli(driver=True)
-        self.assertEqual(result.returncode, 2, result.stderr)
-        self.assertIn("cannot-observe: live Verification", result.stderr)
-        self.assertEqual(self.lines(), [])
-        self.assert_clean()
 
     def test_rewrite_live_path_missing_left_venv_kept(self):
         actual = self.top / "actual"
