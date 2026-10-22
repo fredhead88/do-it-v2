@@ -1277,8 +1277,8 @@ def _main(a):
     elif a.role in ("owed-sweeper", "owed-verifier"):
         # Plain/browser sweeps receive a private RO DSN. Repo checks use only
         # the per-check scratch endpoint supplied by sweep_provision.
-        import packet
-        sweep_manifest = packet.parse_sweep_manifest(CONTENT / f"{a.subject}.md")
+        import packet as packet_module
+        sweep_manifest = packet_module.parse_sweep_manifest(CONTENT / f"{a.subject}.md")
         dsn_role = ("none" if sweep_manifest["kind"] == "repo" else
                     provision_sweep_env(cwd, ROOT / "repos" / a.project) if a.project else "absent")
     # L-spec-0269: every start records the window it was offered under and who is waiting on it — any role, any backend (a flat, unbumped cap for run_claude/run_codex; the full formula, load-bearing, for run_seat).

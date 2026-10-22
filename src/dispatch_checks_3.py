@@ -398,6 +398,21 @@ if __name__ == "__main__":
     assert _sd12["subject"] == SWEEP12 and _sd12.get("off_manifest") == 0, _sd12
     N += 1
 
+    # Repo batches must never copy a production credential, even with a project.
+    from unittest.mock import patch as _patch_w45
+    _repo_sweep_w45 = "L-owed-sweeper-w45"
+    _repo_rows_w45 = [dict(row, shipped_sha="a" * 40, base_sha="b" * 40, clone=str(REPO))
+                      for row in ROWS12]
+    _sweep_manifest(_repo_sweep_w45, _repo_rows_w45)
+    _manifest_w45 = dispatch.CONTENT / f"{_repo_sweep_w45}.md"
+    _manifest_w45.write_text(_manifest_w45.read_text().replace("## Rows", "kind: repo\n\n## Rows"))
+    with _patch_w45.object(dispatch, "provision_sweep_env", side_effect=AssertionError("repo DSN copy")):
+        _code_w45, _, _evs_w45, _ = spawn("owed-sweeper", out={**OUT12, "batch": _repo_sweep_w45},
+                                        subject=_repo_sweep_w45)
+    assert _code_w45 == 0, _evs_w45
+    assert spawn.raw[0]["dsn_role"] == "none", spawn.raw[0]
+    print("W45 repo dispatch skips production credential provisioning")
+
     # ── AC13 · a 4th, off-manifest result is dropped before events_for ever sees
     #          it (no event for it), and counted on spawn-done; AC12's exact drive
     #          re-run carries off_manifest == 0 ────────────────────────────────────
