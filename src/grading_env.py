@@ -271,7 +271,9 @@ def route(spec_text, verify_text, project):
     always routes to `"owed"` (nothing is deployed to drive a git-less grader
     into having history). A criterion needing several `GRADER_NEVER`
     capabilities routes on the first in `GRADER_NEVER` order (Assumption 6).
-    Pure: text and `look.toml` only."""
+    Pure: text and `look.toml` only. These are capability routes; dispatch uses
+    routing.diff_routes with standing rejections to decide actual ownership.
+    Re-judging a rejection does not grant the grader new capabilities."""
     has_prod = any(p.get("project") == project for p in _look_toml(DOIT_SRC).get("prod", []))
     out = {}
     for cid, caps in criterion_caps(spec_text, verify_text, project).items():

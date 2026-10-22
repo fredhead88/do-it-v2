@@ -1168,8 +1168,12 @@ def _main(a):
             CONTENT / f"{a.subject}.md", CONTENT / f"verify-{a.subject}-grader.sh")]
         g_explicit_owed = routing.explicit_owed_ids(fold.read_events(), a.subject)
         g_computed_routes = {c: v for c, v in grading_env.route(g_spec_text, g_verify_text, gproject).items() if c not in g_explicit_owed}
-        for crit, cap, to in routing.diff_routes(g_computed_routes, routing.latest_routed_events(fold.read_events(), a.subject)):
+        g_events = fold.read_events()
+        g_rejected = fold.standing_rejects([e for e in g_events if e.get("subject") == a.subject])
+        for crit, cap, to in routing.diff_routes(g_computed_routes, routing.latest_routed_events(g_events, a.subject), standing_rejects=g_rejected):
             emit(ledger, base, "criterion-routed", criterion=crit, capability=cap, to=to)
+        # Capability exclusions are separate from ownership: re-judge a rejected
+        # routed criterion from the bundle, without demanding impossible access.
         g_routed = set(g_computed_routes)
         g_required_grader = grading_env.required("grader", g_spec_text, g_verify_text, gproject, owed=g_explicit_owed, routed=g_routed, bundled=g_bundle is not None)
     if a.role == "grader" and not grader_seat and g_required_grader:

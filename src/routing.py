@@ -59,8 +59,8 @@ def ruled_criteria(events, spec):
     return out
 
 
-def ruling_packet_items(events, spec):
-    rulings = ruled_criteria(events, spec)
+def ruling_packet_items(events, spec, *, exclude=frozenset()):
+    rulings = {cid: e for cid, e in ruled_criteria(events, spec).items() if cid not in exclude}
     if not rulings:
         return []
     return ["Standing criterion rulings (report these as met; do not re-assess):"] + [
@@ -135,7 +135,7 @@ def explicit_owed_ids(events, spec):
             and e.get("criterion") and e.get("actor") in ("spec-writer", "spec-auditor", "thinker", "operator")}
 
 
-def diff_routes(computed, prior):
+def diff_routes(computed, prior, *, standing_rejects=frozenset()):
     """`computed`: `{criterion: (capability, to)}`, freshly derived this
     dispatch by `grading_env.route()` (already filtered against
     `explicit_owed_ids`, R12.g). `prior`: `latest_routed_events(...)` — the
@@ -145,7 +145,11 @@ def diff_routes(computed, prior):
     from its latest recorded `to`, plus a `to="none"` row (capability = the
     prior row's own) for every previously-routed id no longer present in
     `computed`. An unchanged spec (computed == what was last recorded)
-    produces an empty list (AC6's "second dispatch appends none")."""
+    produces an empty list (AC6's "second dispatch appends none"). Standing
+    rejections stay with the grader: suppress new routes and revoke old ones.
+    The caller supplies the subject's fold.standing_rejects; no ledger read here.
+    """
+    computed = {cid: route for cid, route in computed.items() if cid not in standing_rejects}
     rows = []
     for cid in sorted(computed):
         cap, to = computed[cid]

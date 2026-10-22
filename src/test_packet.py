@@ -1570,6 +1570,55 @@ for ac, phrase in (("AC1", "first criterion's anchor line"), ("AC2", "second cri
     assert f"{ac} [backend] built · log · ok" in t_ac1, f"AC1: {ac}'s card row must survive"
 N += 1
 
+# W52: reproduce 1430's same-grade owed routing and hollow rejections, then
+# a newer rework. Exercise full packet rendering and the complete card sidecar.
+S52 = "L-spec-9452"
+SP52, CARD52 = TMP / "content" / f"{S52}.md", TMP / "content" / "L-card-9452.md"
+IDS52 = [f"AC{i:02}" for i in range(1, 17)]
+REJECT52 = {"AC07", "AC08", "AC09", "AC11"}
+SP52.write_text("## Acceptance criteria\n" + "\n".join(
+    f"{cid} [backend]: contract {cid}.\n  review_path: inspect CONTRACT-{cid}-DETAIL."
+    for cid in IDS52))
+CARD52.write_text("# Reworked card\nAC15 [backend] built · log · truncated-render\n")
+CARD52.with_suffix(".json").write_text(json.dumps({"acs": [
+    dict(id=cid, criterion_type="backend", disposition="built", evidence_type="log",
+         check="inspect", evidence=f"CLAIM-{cid}") for cid in IDS52]}))
+ev("spec-writer", "spec-written", S52, path=str(SP52), footprint=["contract.py"], ts="2026-10-22T10:00:00Z")
+ev("builder", "build-done", S52, card=str(CARD52), status="DONE", ready_sha="before52", ts="2026-10-22T10:40:00Z")
+for cid in IDS52:
+    if cid != "AC15":
+        ev("grader", "criterion-routed", S52, criterion=cid, capability="git",
+           to="reviewer" if cid in {"AC10", "AC16"} else "owed", spawn="L-grader-2642",
+           ts="2026-10-22T10:42:00Z")
+for cid in sorted(REJECT52):
+    ev("grader", "rejected-criterion", S52, criterion=cid, why="HOLLOW-REJECTION-52",
+       spawn="L-grader-2642", ts="2026-10-22T10:48:00Z")
+ev("builder", "build-done", S52, card=str(CARD52), status="DONE", ready_sha="rework52", ts="2026-10-22T11:00:00Z")
+
+def packet52(expected):
+    text = build("grader", S52, worktree=str(REPO))
+    for cid in IDS52:
+        for token in (f"{cid} [backend]:", f"CONTRACT-{cid}-DETAIL", f"CLAIM-{cid}"):
+            assert (token in text) == (cid in expected), (cid, token, expected)
+    assert "HOLLOW-REJECTION-52" not in text, "regrade must remain blind to old rejection reasons"
+    return text
+
+text52 = packet52(REJECT52 | {"AC15"})
+assert "8. Standing rejections to re-judge" in text52
+assert all(cid in text52.split("8. Standing rejections to re-judge", 1)[1] for cid in REJECT52)
+ev("grader", "criterion-cleared", S52, criterion="AC07", ts="2026-10-22T11:10:00Z")
+packet52((REJECT52 - {"AC07"}) | {"AC15"})  # cleared + still routed drops again
+
+# Precedence also applies to explicit owed, reviewer routes and ruled criteria.
+ev("spec-auditor", "owed-ac", S52, criterion="AC06", ts="2026-10-22T11:11:00Z")
+ev("thinker", "decision", S52, criterion="AC08", why="AC08 is met", ts="2026-10-22T11:12:00Z")
+for cid in ("AC06", "AC10"):
+    ev("grader", "rejected-criterion", S52, criterion=cid, why="HOLLOW-REJECTION-52", ts="2026-10-22T11:13:00Z")
+text52 = packet52((REJECT52 - {"AC07"}) | {"AC06", "AC10", "AC15"})
+assert "AC08: ruled met" not in text52, "standing rejection cannot be pre-passed by a ruling"
+N += 1
+print("W52: rejected routed/owed/ruled blocks and claims survive rework; cleared and unrejected routes stay out")
+
 # ══════════════════════════════════════════════════════════════════════════════
 # L-spec-8034 (capability-routing) — AC9 (p_grader drops routed blocks whole,
 # grader.md's two sentences) and AC11 (p_reviewer lists to=reviewer criteria,

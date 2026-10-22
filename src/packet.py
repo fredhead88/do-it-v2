@@ -980,10 +980,9 @@ def _drop_owed_blocks(lines, owed):
 def p_grader(c):
     spec, card, v = c.spec_file(), c.card_file(), write_verify_script(c)
     body = spec.read_text()
-    # L-spec-0435/R10(a): a criterion typed `owed-ac` at spec-write time is
-    # unobservable outside a real deploy. Routed and ruled criteria also
-    # have their whole blocks and card claims omitted from the grader's work.
-    owed = {e["criterion"] for e in c.all_of("owed-ac")} | set(fold.routed_criteria(c.evs, c.a.subject)) | set(routing.ruled_criteria(c.evs, c.a.subject))
+    # Standing rejections override owed, routed and ruled omissions until cleared.
+    rejected = fold.standing_rejects(c.evs)
+    owed = ({e["criterion"] for e in c.all_of("owed-ac")} | set(fold.routed_criteria(c.evs, c.a.subject)) | set(routing.ruled_criteria(c.evs, c.a.subject))) - rejected
     crit = _drop_owed_blocks(criteria(body), owed)
     rows = [l for l in card.read_text().splitlines() if AC_ROW.match(l)]
     # Every row, from the card object the wrapper writes beside the rendered card —
@@ -1016,7 +1015,7 @@ def p_grader(c):
     out = [
         "1. The acceptance criteria, verbatim from the spec, typed, each with its evidence obligation:",
         *crit,
-        *routing.ruling_packet_items(c.evs, c.a.subject),
+        *routing.ruling_packet_items(c.evs, c.a.subject, exclude=rejected),
         "2. The output card's per-criterion rows. These are claims to test, not facts:",
         *([f"   {r}" for r in rows] or ["   none"]),
         "3. Evidence-type validator: not installed; no row is pre-failed on its account.",

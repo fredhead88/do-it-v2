@@ -101,6 +101,26 @@ check(routing.diff_routes({}, prior_already_none) == [],
       "diff_routes: an already-none prior id is not re-emitted")
 print("diff_routes ok")
 
+# W52: a standing rejection wins over either destination, including an
+# unchanged prior route. Revocation happens once; clearing permits routing again.
+reject_routes = {"AC07": ("git", "owed"), "AC08": ("browser", "reviewer"),
+                 "AC09": ("deploy", "owed")}
+reject_prior = {cid: {"capability": cap, "to": to}
+                for cid, (cap, to) in reject_routes.items()}
+rejected = {"AC07", "AC08"}
+check(routing.diff_routes(reject_routes, {}, standing_rejects=rejected)
+      == [("AC09", "deploy", "owed")], "W52: never route a standing rejection")
+revocations = routing.diff_routes(reject_routes, reject_prior, standing_rejects=rejected)
+check(revocations == [("AC07", "git", "none"), ("AC08", "browser", "none")],
+      "W52: revoke owed and reviewer routes while preserving unrejected routes")
+after = {**reject_prior, **{cid: {"capability": cap, "to": to} for cid, cap, to in revocations}}
+check(routing.diff_routes(reject_routes, after, standing_rejects=rejected) == [],
+      "W52: repeated dispatch cannot reroute or repeat revocations")
+check(routing.diff_routes(reject_routes, after)
+      == [("AC07", "git", "owed"), ("AC08", "browser", "reviewer")],
+      "W52: clearance restores normal routing")
+check(reject_routes["AC07"] == ("git", "owed"), "W52: route diff does not mutate inputs")
+
 
 # ═══ group_blocks / drop_blocks — AC-anchor grouping, whole-block drop ═════
 LINES = [

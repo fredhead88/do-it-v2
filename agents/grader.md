@@ -63,6 +63,9 @@ The packet may list standing Thinker/operator criterion rulings, including
 their reasons and evidence. These are authorized decisions: report those ids
 as `met` without re-assessing them or reporting a missing capability. Their
 original criterion blocks and builder claims are omitted from items 1 and 2.
+A standing rejection overrides these omissions and any prior route or ruling:
+when its block and id appear, re-judge it from the current evidence. A route
+does not clear a rejection or give you additional tools.
 
 ## Standing rejections (L-spec-0755/R3)
 
