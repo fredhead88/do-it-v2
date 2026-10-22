@@ -5,7 +5,7 @@ const Operator = (() => {
   function duration(minutes){
     if(typeof minutes!=='number'||!Number.isFinite(minutes))return 'ETA unavailable';
     if(minutes<60)return 'about '+Math.max(1,Math.round(minutes/5)*5)+' min';
-    if(minutes<48*60)return 'about '+Math.round(minutes/60)+' h';
+    if(minutes<48*60)return 'about '+(Math.round(minutes/30)/2)+' h';
     return 'about '+Math.round(minutes/1440)+' days';
   }
   function wait(minutes){
@@ -17,7 +17,7 @@ const Operator = (() => {
   function valid(){return source&&!source.error&&LIVE&&Date.now()-Date.parse(source.at)<120000;}
   function summaryHtml(d){
     const next=d.next.map(s=>`${label(s)} (${duration(s.eta_min)})`).join(' → ')||'nothing queued';
-    const priorities=d.priorities.map(g=>`<span class="priority-group"><b>${esc(g.name)}:</b> ${g.specs.map(s=>`<a class="link" data-subj="${esc(s.spec)}" title="${esc(s.spec)} · ${esc(s.title)}">${esc(s.stage)}</a>`).join('; ')}</span>`).join('');
+    const priorities=d.priorities.map(g=>`<span class="priority-group"><b>${esc(g.name)}:</b> ${g.specs.map(s=>`<a class="link" data-subj="${esc(s.spec)}" title="${esc(s.spec)} · ${esc(s.title)}">${esc(s.stage)}</a>`).join('; ')}</span>`).join(' · ');
     const needs=d.needs_you.map(s=>`${label(s)} — ${esc(s.asks)}`).join('; ')||'nothing';
     const stuck=d.stuck.map(s=>`${label(s)} — idle ${wait(s.idle_min)}, limit ${wait(s.limit_min)}`).join('; ')||'nothing';
     const held=d.held.length?` · <button class="summary-link" data-operator="held">${d.held.length} deliberately waiting</button>`:'';
@@ -33,7 +33,7 @@ const Operator = (() => {
     let html;
     if(!LIVE)html='<div class="know-row">Switch to LIVE for current priorities, queue and operator decisions.</div>';
     else if(valid())html=summaryHtml(source);
-    else html=`<div class="know-row">${esc(source&&source.error||'Operator information unavailable — waiting for a fresh server reading.')}</div>`;
+    else html=`<div class="know-row">${esc(source&&source.error||(pending&&!source?'Reading your priorities and merge queue…':'Operator information unavailable — waiting for a fresh server reading.'))}</div>`;
     if(target.innerHTML!==html){target.innerHTML=html;bind(target);}
   }
   function bind(target){
