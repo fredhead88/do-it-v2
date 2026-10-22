@@ -27,8 +27,9 @@ body{margin:0;background:var(--night);color:var(--text);font-family:var(--body);
 .stats{scrollbar-width:none}.stats::-webkit-scrollbar{display:none}
 .hud .stat b{text-overflow:ellipsis;font-family:var(--display);font-weight:800;font-size:14px;color:#fff;font-variant-numeric:tabular-nums;white-space:nowrap;letter-spacing:.02em;overflow:hidden;text-overflow:clip;height:20px;line-height:20px}
 .hud .stat span{font-size:10px;color:var(--mute);text-transform:uppercase;letter-spacing:.16em}
-#h-merge{grid-column:1/-1}
-.hud #h-merge b{white-space:normal;height:auto;min-height:20px}
+#h-merge,#h-shelf{grid-column:1/-1}
+.hud #h-merge b,.hud #h-shelf b{font-family:var(--body);font-size:13px;font-weight:600;letter-spacing:normal;white-space:normal;height:auto;min-height:20px;overflow-wrap:anywhere}
+.hud #h-shelf span{white-space:normal;text-transform:none;letter-spacing:normal}
 .hud .stat.warn b{color:var(--amber)}.hud .stat.bad b{color:var(--red);text-shadow:0 0 10px rgba(255,106,92,.5)}.hud .stat.good b{color:var(--green)}
 .hud .ctl{display:flex;gap:6px;align-items:center;flex:none}
 .btn{font-family:var(--display);font-weight:600;font-size:11px;letter-spacing:.12em;padding:7px 11px;background:linear-gradient(#2a2250,#1a1436);color:var(--text);border:1px solid var(--hair);cursor:pointer;border-radius:2px}
@@ -242,6 +243,8 @@ canvas#map.hand{cursor:pointer}
   .m-tiles{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin:0 0 16px}
   .m-tile{border:1px solid var(--hair);border-radius:3px;padding:10px 12px;background:rgba(255,255,255,.03);cursor:pointer;min-height:64px;display:flex;flex-direction:column;justify-content:space-between}
   .m-tile b{font-family:var(--display);font-size:18px;color:#fff;font-variant-numeric:tabular-nums}.m-tile span{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--mute)}
+  .m-tile[data-cell="h-shelf"],.m-tile[data-cell="h-merge"]{grid-column:1/-1}
+  .m-tile[data-cell="h-shelf"] b,.m-tile[data-cell="h-merge"] b{font-family:var(--body);font-size:14px}
   .m-tile.bad b{color:var(--red)}.m-tile.warn b{color:var(--amber)}.m-tile.good b{color:var(--green)}
   .m-h{font-family:var(--display);font-size:10px;letter-spacing:.22em;color:var(--gold);margin:16px 0 8px;border-bottom:1px solid var(--hair);padding-bottom:4px}
   .m-omen{border:1px solid var(--hair);border-left:4px solid var(--amber);border-radius:3px;padding:10px 12px;margin:0 0 8px;cursor:pointer;background:rgba(255,255,255,.03)}
@@ -281,22 +284,22 @@ canvas#map.hand{cursor:pointer}
   <header class="hud">
     <h1>REALM OF DO-IT <span class="mode" id="mode">…</span></h1>
     <div class="stats">
-    <div class="stat" style="grid-column:span 2"><b id="h-clock">—</b><span id="h-clock-l">chronicle time</span></div>
-    <div class="stat click" id="h-exec"><b>—</b><span>executor</span></div>
-    <div class="stat click" id="h-quota" style="width:96px"><b>—</b><span>weekly quota</span></div>
-    <div class="stat click" id="h-pipe" style="width:92px"><b>—</b><span>in pipeline</span></div>
-    <div class="stat click" id="h-owed" style="width:92px"><b>—</b><span>owed checks</span></div>
-    <div class="stat click" id="h-accept" style="width:100px"><b>—</b><span>to accept</span></div>
-    <div class="stat click" id="h-close" style="width:100px"><b>—</b><span>to close</span></div>
-    <div class="stat click" id="h-proving" style="width:100px"><b>—</b><span>proving</span></div>
-    <div class="stat click" id="h-flight"><b>—</b><span>in flight</span></div>
-    <div class="stat click" id="h-merge"><b>?</b><span>merge</span></div>
-    <div class="stat click" id="h-stuck" style="width:124px"><b>—</b><span>stuck</span></div>
-    <div class="stat click" id="h-shelf"><b>—</b><span>shelf</span></div>
-    <div class="stat click" id="h-esc"><b>—</b><span>ravens</span></div>
-    <div class="stat click" id="h-ship"><b>—</b><span>shipped</span></div>
-    <div class="stat click" id="h-fail"><b>—</b><span>fallen</span></div>
-    <div class="stat click" id="h-disk" style="width:96px"><b>—</b><span>root disk</span></div>
+    <div class="stat" style="grid-column:span 2" title="Shows the time being viewed; in replay mode this can be earlier than now."><b id="h-clock">—</b><span id="h-clock-l">chronicle time</span></div>
+    <div class="stat click" id="h-exec" title="Shows when the coordinator last moved work forward, so you can tell whether work is being managed."><b>—</b><span>executor</span></div>
+    <div class="stat click" id="h-quota" title="Shows how much of the weekly AI allowance has been used; work pauses when an allowance runs out." style="width:96px"><b>—</b><span>weekly quota</span></div>
+    <div class="stat click" id="h-pipe" title="Counts specs that are ready or being built, checked, or reviewed." style="width:92px"><b>—</b><span>in pipeline</span></div>
+    <div class="stat click" id="h-owed" title="Counts delivered changes whose promised checks on the live site are overdue." style="width:92px"><b>—</b><span>owed checks</span></div>
+    <div class="stat click" id="h-accept" title="Counts delivered changes still waiting for final acceptance." style="width:100px"><b>—</b><span>to accept</span></div>
+    <div class="stat click" id="h-close" title="Counts completed groups of work waiting for their remaining live checks before they can be closed." style="width:100px"><b>—</b><span>to close</span></div>
+    <div class="stat click" id="h-proving" title="Counts groups of work being watched on the live site to confirm they keep working." style="width:100px"><b>—</b><span>proving</span></div>
+    <div class="stat click" id="h-flight" title="Counts worker runs currently working or waiting to start."><b>—</b><span>in flight</span></div>
+    <div class="stat click" id="h-merge" title="Shows finished specs waiting to join the main code, active merge batches, recent wait times, and the merge rate."><b>?</b><span>merge</span></div>
+    <div class="stat click" id="h-stuck" title="Counts specs that could move forward but are waiting without a valid reason." style="width:124px"><b>—</b><span>stuck</span></div>
+    <div class="stat click" id="h-shelf" title="Counts written specs that no builder has started yet, and shows how long the oldest has waited."><b>—</b><span>ready, waiting for a builder</span></div>
+    <div class="stat click" id="h-esc" title="Counts unanswered requests for a decision, including how many need your decision."><b>—</b><span>ravens</span></div>
+    <div class="stat click" id="h-ship" title="Counts changes delivered to the live site during the time shown."><b>—</b><span>shipped</span></div>
+    <div class="stat click" id="h-fail" title="Counts worker runs that failed out of all finished runs during the time shown."><b>—</b><span>fallen</span></div>
+    <div class="stat click" id="h-disk" title="Shows storage used on the worker computer and how much space is left." style="width:96px"><b>—</b><span>root disk</span></div>
     </div>
     <div class="row">
     <div class="ctl">
@@ -761,11 +764,11 @@ function hud(){
   $('h-flight').firstElementChild.textContent=[...S.actors.values()].filter(a=>!a.done&&!a.tour).length;
   renderStuckTile();
   renderMerge();
-  const sh=$('h-shelf');let oldest=0;for(const ms of S.shelf.values())oldest=Math.max(oldest,S.now-ms);sh.firstElementChild.textContent=S.shelf.size+(S.shelf.size?' · '+fmtAge(oldest):'');sh.className='stat '+(oldest>4*3600000?'bad':oldest>3600000?'warn':'');
+  const sh=$('h-shelf');let oldest=0;for(const ms of S.shelf.values())oldest=Math.max(oldest,S.now-ms);sh.firstElementChild.textContent=shelfText(S.shelf.size,oldest);sh.className='stat '+(oldest>4*3600000?'bad':oldest>3600000?'warn':'');
   const es=$('h-esc');let eo=0;for(const l of S.esc.values())eo=Math.max(eo,S.now-l[0].ms);{const o=escOwners();const n=o.you+o.th;es.firstElementChild.textContent=n?`${n} · ${o.you} YOU`:'0';es.className='stat '+(o.you?(eo>4*3600000?'bad':'warn'):'');es.lastElementChild.textContent='ravens · yours';}
   $('h-ship').firstElementChild.textContent=S.shipped;$('h-ship').className='stat good';
   const fa=$('h-fail');fa.firstElementChild.textContent=S.fails+' / '+(S.done+S.fails);fa.className='stat '+(S.fails>(S.done+S.fails)*.2?'bad':S.fails?'warn':'good');fa.lastElementChild.textContent=S.refused?`fallen · ${S.refused} turned back`:'fallen';
-  {const q=(S.sys||(DATA&&DATA.sys)||{}).quota;const qc=$('h-quota');if(q&&q.panes&&q.panes.length){const d7=Math.max(...q.panes.map(p=>p.d7)),h5=Math.max(...q.panes.map(p=>p.h5));const r=(q.panes.find(p=>p.d7===d7)||{}).d7_reset||'';qc.firstElementChild.textContent=d7+'%';qc.lastElementChild.textContent='weekly quota';qc.title='weekly '+d7+'%'+(r?', resets '+r:'')+' · five-hour '+h5+'%';qc.className='stat click '+(d7>=95||h5>=95?'bad':d7>=80||h5>=80?'warn':'good');}else{qc.firstElementChild.textContent='—';qc.lastElementChild.textContent='weekly quota';}}
+  {const q=(S.sys||(DATA&&DATA.sys)||{}).quota;const qc=$('h-quota');if(q&&q.panes&&q.panes.length){const d7=Math.max(...q.panes.map(p=>p.d7)),h5=Math.max(...q.panes.map(p=>p.h5));const r=(q.panes.find(p=>p.d7===d7)||{}).d7_reset||'';qc.firstElementChild.textContent=d7+'%';qc.lastElementChild.textContent='weekly quota';qc.title='Shows how much of the weekly AI allowance has been used; work pauses when an allowance runs out. Weekly '+d7+'%'+(r?', resets '+r:'')+' · five-hour '+h5+'%';qc.className='stat click '+(d7>=95||h5>=95?'bad':d7>=80||h5>=80?'warn':'good');}else{qc.firstElementChild.textContent='—';qc.lastElementChild.textContent='weekly quota';}}
   const dk=$('h-disk');const sy=S.sys||(DATA&&DATA.sys);if(sy&&sy.disk){dk.firstElementChild.textContent=Math.round(sy.disk.root_pct)+'% · '+Math.round(sy.disk.free_gb)+'G';dk.className='stat '+(sy.disk.root_pct>=92?'bad':sy.disk.root_pct>=80?'warn':'good');}else dk.firstElementChild.textContent='—';
   if(!scrubbing)$('scrub').value=Math.round(1000*(S.now-T0)/Math.max(1,(T1-T0)));
   $('b-play').textContent=S.playing?(!LIVE&&S.now>=T1?'END':'PAUSE'):'PLAY';$('b-live').classList.toggle('on',LIVE&&S.playing);$('s-b').textContent=fmt(T1);
@@ -812,25 +815,47 @@ function loadAsks(){fetch(api('/api/asks')).then(r=>r.ok?r.json():null).then(j=>
 document.addEventListener('click',e=>{const b=e.target.closest&&e.target.closest('[data-ask]');if(!b)return;e.stopPropagation();const panel=b.dataset.ask;if(askBusy[panel])return;askBusy[panel]=true;b.disabled=true;b.textContent='Sending…';
   fetch(api('/api/ask-thinker'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({panel,items:askItems(panel)})}).then(r=>r.json().then(j=>({ok:r.ok,j}))).then(({ok,j})=>{askBusy[panel]=false;if(!ok){b.textContent='Failed: '+(j.error||'error');b.disabled=false;return;}loadAsks();}).catch(()=>{askBusy[panel]=false;b.textContent='Failed — retry';b.disabled=false;});},true);
 setInterval(loadAsks,15000);setTimeout(loadAsks,1500);
+// Format only CLI-provided metrics; queue and wait calculations stay in the CLI.
+const knownMetric=v=>typeof v==='number'&&Number.isFinite(v)&&v>=0;
+const roundedMetric=v=>String(Number(v.toFixed(1)));
+function humanWait(minutes){
+  if(!knownMetric(minutes))return 'unavailable';
+  if(minutes<90)return Math.round(minutes)+' min';
+  if(minutes<=48*60)return roundedMetric(minutes/60)+' h';
+  return roundedMetric(minutes/(24*60))+' days';
+}
+function shelfText(count,ageMs){
+  if(!count)return '0 specs';
+  const minutes=Math.max(0,Math.round(ageMs/60000));
+  const days=minutes>48*60?Math.floor(minutes/(24*60)):0;
+  const hours=Math.floor(minutes/60)-days*24;
+  const age=[days?days+' d':'',hours?hours+' h':'',minutes%60||!hours&&!days?(minutes%60)+' m':''].filter(Boolean).join(' ');
+  return `${count} spec${count===1?'':'s'} · oldest waiting ${age}`;
+}
 function mergeValues(){
   const p=(DATA&&DATA.throughput)||{};
-  const num=v=>typeof v==='number'&&Number.isFinite(v)?String(v):'?';
-  return {queue:num(p.queue_depth),windows:Array.isArray(p.in_flight)?String(p.in_flight.length):'?',p50:num(p.median_wait_min),p90:num(p.p90_wait_min),rate:num(p.merged_per_hour)};
+  const count=v=>Number.isSafeInteger(v)&&v>=0?String(v):'?';
+  return {queue:count(p.queue_depth),windows:Array.isArray(p.in_flight)?String(p.in_flight.length):'?',p50:humanWait(p.median_wait_min),p90:humanWait(p.p90_wait_min),rate:knownMetric(p.merged_per_hour)?roundedMetric(p.merged_per_hour):'unavailable'};
 }
 function mergeText(){
-  if(!LIVE)return 'merge: live only';
+  if(!LIVE)return 'Merge information is available in live mode';
   const v=mergeValues();
-  return `${v.queue} queued · ${v.windows} windows · wait ${v.p50} / ${v.p90} min · ${v.rate}/h`;
+  const queue=v.queue==='?'?'merge queue unavailable':`${v.queue} spec${v.queue==='1'?'':'s'} waiting to merge`;
+  const merging=v.windows==='?'?'active merges unavailable':v.windows==='0'?'none merging right now':`${v.windows} batch${v.windows==='1'?'':'es'} merging right now`;
+  const wait=`typical wait ${v.p50} (slowest 1 in 10: ${v.p90})`;
+  const rate=v.rate==='unavailable'?'merge rate unavailable':`about ${v.rate} merged per hour`;
+  return `${queue} · ${merging} · ${wait} · ${rate}`;
 }
 function renderMerge(){
   const el=$('h-merge');el.firstElementChild.textContent=mergeText();
-  el.title=LIVE?esc((DATA&&DATA.throughput_error)||(DATA&&DATA.throughput&&DATA.throughput.reason)||''):'';
+  const note=LIVE&&((DATA&&DATA.throughput_error)||(DATA&&DATA.throughput&&DATA.throughput.reason));
+  el.title='Shows finished specs waiting to join the main code, active merge batches, recent wait times, and the merge rate.'+(note?' '+note:'');
 }
 function mergeHtml(){
-  if(!LIVE)return '<h2>merge: live only</h2>';
+  if(!LIVE)return '<h2>Merge information is available in live mode</h2>';
   const p=(DATA&&DATA.throughput)||{},v=mergeValues();
   const windows=Array.isArray(p.in_flight)?p.in_flight:[];
-  return `<h2>Merge</h2><div class="kv"><b>queue</b><span>${v.queue}</span><b>in flight</b><span>${v.windows} windows</span><b>wait p50</b><span>${v.p50} min</span><b>wait p90</b><span>${v.p90} min</span><b>merged per hour</b><span>${v.rate}</span></div><p>${esc(DATA&&DATA.throughput_error||'')}</p><p>${esc(p.reason||'')}</p><ul>${windows.map(w=>`<li>${esc(w.window)} · ${Array.isArray(w.specs)?w.specs.map(s=>esc(s)).join(', '):''}</li>`).join('')}</ul><p class="tiny">As of ${esc(DATA&&DATA.throughput_at||'?')}</p>`;
+  return `<h2>Merge</h2><div class="kv"><b>specs waiting to merge</b><span>${v.queue==='?'?'unavailable':v.queue}</span><b>batches merging now</b><span>${v.windows==='?'?'unavailable':v.windows}</span><b>typical wait</b><span>${v.p50}</span><b>slowest 1 in 10</b><span>${v.p90}</span><b>merged per hour</b><span>${v.rate}</span></div><p class="tiny">Half of recent merges waited up to the typical wait; one in ten waited at least the longer wait shown.</p><p>${esc(DATA&&DATA.throughput_error||'')}</p><p>${esc(p.reason||'')}</p><ul>${windows.map(w=>`<li>${esc(w.window)} · ${Array.isArray(w.specs)?w.specs.map(s=>esc(s)).join(', '):''}</li>`).join('')}</ul><p class="tiny">As of ${esc(DATA&&DATA.throughput_at||'?')}</p>`;
 }
 function applyThroughput(d){
   if(!DATA)return;
@@ -1239,10 +1264,10 @@ function drawClocks_unused(t){const w=S.wallclock||(DATA&&DATA.wallclock);if(!w|
     g.fillStyle=col;g.font='700 10px Cinzel';g.fillText(`${b.n} · ${Math.round(b.hours)}h`,x+12,y+10);}}
 /* ---------------- phone layout ---------------- */
 const PHONE=matchMedia('(max-width:700px)');let mTab='now';
-const M_TILES=[['h-exec','executor'],['h-quota','weekly quota'],['h-stuck','stuck'],['h-esc','ravens · yours'],['h-pipe','in pipeline'],['h-owed','owed checks'],['h-proving','proving'],['h-shelf','shelf'],['h-ship','shipped'],['h-fail','fallen'],['h-disk','root disk']];
+const M_TILES=[['h-exec','executor'],['h-quota','weekly quota'],['h-stuck','stuck'],['h-esc','ravens · yours'],['h-pipe','in pipeline'],['h-owed','owed checks'],['h-proving','proving'],['h-shelf','ready, waiting for a builder'],['h-merge','merge'],['h-ship','shipped'],['h-fail','fallen'],['h-disk','root disk']];
 function mNowHtml(){const st=$('stuck');const calm=st.classList.contains('calm');const live=S.alarms.filter(a=>a.needs);
   return `<div class="m-strip ${calm?'calm':''}">${st.innerHTML}</div>
-  <div class="m-tiles">${M_TILES.map(([id,label])=>{const c=$(id);if(!c)return '';const cls=(c.className.match(/\b(bad|warn|good)\b/)||[''])[0];return `<div class="m-tile ${cls}" data-cell="${id}"><b>${esc(c.firstElementChild.textContent)}</b><span>${esc(label)}</span></div>`;}).join('')}</div>
+  <div class="m-tiles">${M_TILES.map(([id,label])=>{const c=$(id);if(!c)return '';const cls=(c.className.match(/\b(bad|warn|good)\b/)||[''])[0];return `<div class="m-tile ${cls}" data-cell="${id}" title="${esc(c.title)}"><b>${esc(c.firstElementChild.textContent)}</b><span>${esc(label)}</span></div>`;}).join('')}</div>
   <div class="m-h">NEEDS YOU · ${live.length}</div>${live.slice(0,4).map(mOmen).join('')||'<p class="tiny">Nothing needs you right now.</p>'}${live.length>4?`<p><a class="link" data-mtab="omens">all ${live.length} omens ▸</a></p>`:''}`;}
 function mOmen(a){return `<div class="m-omen ${a.sev===2?'crit':a.sev===1?'':'info'}" data-om="${esc(a.id)}"><b>${esc(a.title)}</b><span>${esc(a.owner||'')} → ${esc(a.next||'')}</span><small>${a.sev===2?'critical':a.sev===1?'warning':'info'} · since ${fmtAge(S.now-sinceFor(a))}${a.escalate?' · escalate':''}</small></div>`;}
 function mOmensHtml(){const A=S.alarms;const n=A.filter(a=>a.needs),h=A.filter(a=>!a.needs);return `<div class="m-h">NEEDS YOU · ${n.length}</div>${n.map(mOmen).join('')||'<p class="tiny">Nothing needs you.</p>'}<div class="m-h">SYSTEM HEALTH · ${h.length}</div>${h.map(mOmen).join('')}<p class="tiny">${esc(omenFoot())}</p>`;}
@@ -1417,7 +1442,7 @@ function censusHtml(){const by={};for(const [s,st] of (DATA.states||[]))(by[st]=
   return `<h2>Realm Census</h2><div class="cls">doit states · ${S.lastStates?fmt(S.lastStates)+' Z':(DATA.window[1]||'').slice(0,16)}</div><h4>EVERY SUBJECT BY DERIVED STATE</h4>${order.map(([st,l])=>`<p><span class="pill ${/accepted|shipped$|complete/.test(st)?'good':/killed|void|unknown/.test(st)?'bad':/owed/.test(st)?'warn':''}">${st} · ${l.length}</span><span class="tiny">${l.map(s=>`<a class="link" data-subj="${s}">${s.replace(/^L-/,'')}</a>`).join(', ')}</span></p>`).join('')}<h4>ROLES, WHOLE LEDGER</h4><table><tr><th>role</th><th>done</th><th>fail</th><th>med min</th><th>tokens</th></tr>${roles.map(([r,s])=>`<tr><td><a class="link" data-role="${r}">${r}</a></td><td>${s.done}</td><td>${s.failed}</td><td>${s.med_min??'—'}</td><td>${kTok(s.med_tok)}</td></tr>`).join('')}</table><h4>HOW THEY FALL</h4><p>${Object.keys(MON).map(k=>`<a class="link" data-mon="${k}">${MON[k].name}</a>`).join(' · ')}</p>`;}
 $('b-census').onclick=()=>{openPanel(censusHtml());bindLinks();};
 $('h-esc').onclick=()=>openPlace('keep');$('h-stuck').onclick=()=>openStuck();
-$('h-shelf').onclick=()=>listPanel('On the shelf','written, no builder yet · oldest first',()=>[...S.shelf.entries()].sort((a,b)=>a[1]-b[1]).map(([s,ms])=>{const b=S.blockers.find(x=>x.s===s);return{s,t:'waiting '+fmtDur(S.now-ms),why:b&&!b.need?b.text:''};}));
+$('h-shelf').onclick=()=>listPanel('Ready, waiting for a builder','written specs no builder has started · oldest first',()=>[...S.shelf.entries()].sort((a,b)=>a[1]-b[1]).map(([s,ms])=>{const b=S.blockers.find(x=>x.s===s);return{s,t:'waiting '+fmtDur(S.now-ms),why:b&&!b.need?b.text:''};}));
 $('h-fail').onclick=()=>listPanel('Fallen runs',`${S.fails} runs started and failed · ${S.refused} turned back before any spend`,()=>[...S.fallenList.slice().reverse().map(f=>({s:f.s||f.sp,t:f.sp+' · '+fmt(f.ms),why:f.why})),...S.refusedList.slice(-15).reverse().map(f=>({s:f.s||f.sp,t:'turned back · '+f.sp+' · '+fmt(f.ms),why:f.why}))]);
 $('h-ship').onclick=()=>listPanel('Shipped','in this window, newest first',()=>S.shippedList.slice().reverse().map(x=>({s:x.s,t:fmt(x.ms)+(x.sha?' · '+x.sha:'')+' · now '+(stateMap().get(x.s)||'?')})));
 $('h-flight').onclick=()=>listPanel('In flight','runs working or waiting at the ferry right now',()=>[...S.actors.values()].filter(a=>!a.done&&!a.tour).map(a=>({s:a.subject||a.sp,t:a.sp+' · '+a.state+' · '+fmtDur(S.now-a.start)})));

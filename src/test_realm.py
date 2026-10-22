@@ -526,7 +526,7 @@ def test_1149_cache_guard_and_sampler():
 
 def test_1149_real_page_under_node():
     page = realm.PAGE.read_text()
-    merge = page[page.index("function mergeValues()"):page.index("function openPanel(")]
+    merge = page[page.index("// Format only CLI-provided metrics;"):page.index("function openPanel(")]
     snapshot = next(line for line in page.splitlines() if line.startswith("function applySnapshot("))
     connect = page[page.index("function connect()"):page.index("let REMOTE=")]
     seek = next(line for line in page.splitlines() if line.startswith("function seek("))
@@ -550,21 +550,21 @@ const listeners={};class EventSource{addEventListener(k,f){listeners[k]=f;}}
 """ + esc + "\n" + merge + "\n" + snapshot + "\n" + connect + "\n" + seek + r"""
 const p=SENTINELS;
 function apply(d){applySnapshot({events:[],...d});return header.firstElementChild.textContent;}
-function includesAll(text){for(const v of ['7','2 windows','31.5','80','3.2'])assert(text.includes(v),text);}
-function unknown(text){assert(text.includes('?'));assert(!(text.includes('<')?/>[0-9]|idle/:/\d|idle/).test(text),text);}
+function includesAll(text){for(const v of ['7','2','32 min','80 min','3.2'])assert(text.includes(v),text);}
+function unknown(text){assert(text.includes('unavailable'));assert(!/0 specs|none merging|0 min|about 0|idle|>[0-9]/.test(text),text);}
 apply({throughput:p,throughput_error:null});includesAll(header.firstElementChild.textContent);includesAll(mergeHtml());
 console.log('1149-AC4 payload ok');
-apply({throughput:null,throughput_error:'x'});unknown(header.firstElementChild.textContent);assert(mergeHtml().includes('x'));assert.equal(header.title,'x');
+apply({throughput:null,throughput_error:'x'});unknown(header.firstElementChild.textContent);assert(mergeHtml().includes('x'));assert(header.title.endsWith(' x'));
 const empty={queue_depth:null,median_wait_min:null,p90_wait_min:null,merged_per_hour:null,reason:'unknown'};
 apply({throughput:empty,throughput_error:null});unknown(header.firstElementChild.textContent);unknown(mergeHtml());assert(mergeHtml().includes('unknown'));
 for(const value of ['9',false,{},NaN,Infinity]){DATA.throughput={...empty,queue_depth:value};assert.equal(mergeValues().queue,'?');}
 console.log('1149-AC5 unavailable ok');
-apply({throughput:p});apply({throughput:null,throughput_error:'boom',throughput_at:null});unknown(header.firstElementChild.textContent);assert.equal(header.title,'boom');assert(mergeHtml().includes('boom'));
+apply({throughput:p});apply({throughput:null,throughput_error:'boom',throughput_at:null});unknown(header.firstElementChild.textContent);assert(header.title.endsWith(' boom'));assert(mergeHtml().includes('boom'));
 console.log('1149-AC6 snapshot-null ok');
 DATA={};apply({});unknown(header.firstElementChild.textContent);console.log('1149-AC6 absent ok');
-apply({throughput:p});LIVE=false;seek(Date.now());renderMerge();assert.equal(header.firstElementChild.textContent,'merge: live only');assert.equal(mergeHtml(),'<h2>merge: live only</h2>');
+apply({throughput:p});LIVE=false;seek(Date.now());renderMerge();assert.equal(header.firstElementChild.textContent,'Merge information is available in live mode');assert.equal(mergeHtml(),'<h2>Merge information is available in live mode</h2>');
 console.log('1149-AC8 scrub ok');
-DATA={throughput:p,live:false};LIVE=DATA.live;renderMerge();assert.equal(header.firstElementChild.textContent,'merge: live only');assert(!mergeHtml().includes('31.5'));
+DATA={throughput:p,live:false};LIVE=DATA.live;renderMerge();assert.equal(header.firstElementChild.textContent,'Merge information is available in live mode');assert(!mergeHtml().includes('31.5'));
 console.log('1149-AC8 snapshot ok');
 LIVE=true;renderMerge();includesAll(header.firstElementChild.textContent);includesAll(mergeHtml());
 const attack='<img src=x onerror=alert(1)>';
@@ -573,7 +573,7 @@ for(const field of ['reason','window','error','spec']){
  if(field==='reason')bad.reason=attack;
  apply({throughput:bad,throughput_error:field==='error'?attack:null});
  assert(mergeHtml().includes('&lt;img'));assert(!mergeHtml().includes('<img'));
- assert(!header.title.includes('<img'));
+ assert(header.title.startsWith('Shows finished specs')); // title is assigned as plain text, never HTML
  console.log('1149-AC9 '+field+' ok');
 }
 connect();listeners.throughput({data:JSON.stringify({throughput:p,throughput_error:null,throughput_at:'instant'})});includesAll(header.firstElementChild.textContent);
@@ -787,6 +787,71 @@ console.log('owed omens render by section ok');
     proc = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=30)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     print(proc.stdout, end="")
+
+
+def test_operator_header_rounding_units_zero_and_tooltips():
+    from html.parser import HTMLParser
+
+    class HeaderTiles(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.tiles = []
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            if tag == "div" and "stat" in attrs.get("class", "").split():
+                self.tiles.append(attrs)
+
+    page = realm.PAGE.read_text()
+    parser = HeaderTiles()
+    parser.feed(page)
+    assert len(parser.tiles) == 16
+    for tile in parser.tiles:
+        assert tile.get("title", "").endswith("."), tile
+    tiles = {tile["id"]: tile for tile in parser.tiles if "id" in tile}
+    assert "no builder has started" in tiles["h-shelf"]["title"]
+    assert '<span>ready, waiting for a builder</span>' in page
+    assert 'sh.firstElementChild.textContent=shelfText(S.shelf.size,oldest)' in page
+    helpers = page[page.index("// Format only CLI-provided metrics;"):page.index("function openPanel(")]
+    mobile = page[page.index("const M_TILES="):page.index("function mOmensHtml(")]
+    esc = next(line for line in page.splitlines() if line.startswith("const esc ="))
+    script = r"""
+const assert=require('node:assert/strict');
+let DATA={},LIVE=true,S={alarms:[]};
+const cells=TILES;
+for(const cell of Object.values(cells))Object.assign(cell,{firstElementChild:{textContent:''},className:'stat click'});
+cells.stuck={classList:{contains:()=>true},innerHTML:'No work stuck'};
+const $=id=>cells[id],rerenderPanel=()=>{};
+""" + helpers + "\n" + esc + "\n" + mobile + r"""
+for(const [value,want] of [[0,'0 min'],[0.49,'0 min'],[0.5,'1 min'],[31.5,'32 min'],[89,'89 min'],[89.99,'90 min'],[90,'1.5 h'],[120,'2 h'],[502.05,'8.4 h'],[2003.0333333333,'33.4 h'],[2880,'48 h'],[2880.01,'2 days'],[3024,'2.1 days'],[4320,'3 days']]){
+ assert.equal(humanWait(value),want);
+}
+for(const v of [null,undefined,'90',false,{},NaN,Infinity,-1])assert.equal(humanWait(v),'unavailable');
+const minute=60000;
+for(const [n,age,want] of [[0,0,'0 specs'],[1,0,'1 spec · oldest waiting 0 m'],[7,563*minute,'7 specs · oldest waiting 9 h 23 m'],[1,59.6*minute,'1 spec · oldest waiting 1 h'],[2,-minute,'2 specs · oldest waiting 0 m'],[2,2880*minute,'2 specs · oldest waiting 48 h'],[2,2963*minute,'2 specs · oldest waiting 2 d 1 h 23 m']])assert.equal(shelfText(n,age),want);
+DATA.throughput={queue_depth:84,in_flight:[],median_wait_min:502.05,p90_wait_min:2003.0333333333,merged_per_hour:1.56};
+const expected='84 specs waiting to merge · none merging right now · typical wait 8.4 h (slowest 1 in 10: 33.4 h) · about 1.6 merged per hour';
+renderMerge();assert.equal(cells['h-merge'].firstElementChild.textContent,expected);
+const panel=mergeHtml();for(const v of ['8.4 h','33.4 h','1.6'])assert(panel.includes(v));
+for(const raw of ['502.05','2003.0333333333','1.56']){assert(!mergeText().includes(raw));assert(!panel.includes(raw));}
+console.log('HEADER RENDER: MERGE: '+mergeText());
+console.log('HEADER RENDER: READY, WAITING FOR A BUILDER: '+shelfText(7,563*minute));
+const phone=mNowHtml();assert(phone.includes(expected));assert(phone.includes('ready, waiting for a builder'));assert(!phone.includes('<span>shelf</span>'));
+for(const title of [cells['h-merge'].title,cells['h-shelf'].title])assert(phone.includes(title));
+DATA.throughput={queue_depth:0,in_flight:[],median_wait_min:0,p90_wait_min:0,merged_per_hour:0};
+assert.equal(mergeText(),'0 specs waiting to merge · none merging right now · typical wait 0 min (slowest 1 in 10: 0 min) · about 0 merged per hour');
+DATA.throughput={queue_depth:1,in_flight:[{}],median_wait_min:90,p90_wait_min:3000,merged_per_hour:2};
+assert.equal(mergeText(),'1 spec waiting to merge · 1 batch merging right now · typical wait 1.5 h (slowest 1 in 10: 2.1 days) · about 2 merged per hour');
+for(const v of [-1,1.25,NaN,Infinity,'84',null]){DATA.throughput.queue_depth=v;assert.equal(mergeValues().queue,'?');}
+for(const v of [-1,NaN,Infinity,'1.56',null]){DATA.throughput.merged_per_hour=v;assert.equal(mergeValues().rate,'unavailable');}
+DATA.throughput=null;renderMerge();assert(mergeText().includes('merge queue unavailable'));assert(cells['h-merge'].title.startsWith('Shows finished specs'));
+LIVE=false;renderMerge();assert.equal(mergeText(),'Merge information is available in live mode');assert(cells['h-merge'].title.startsWith('Shows finished specs'));
+console.log('operator header: duration boundaries, rounding, singulars, zeros, unknowns, panel, phone, and tooltips ok');
+"""
+    script = script.replace("TILES", json.dumps(tiles), 1)
+    result = subprocess.run(["node", "-e", script], text=True, capture_output=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+    print(result.stdout, end="")
 
 
 if __name__ == "__main__":
