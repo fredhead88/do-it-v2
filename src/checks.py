@@ -119,9 +119,17 @@ def production_data(block, commands):
     if not commands:
         return False
     review = grading_env._review_paths(re.sub(r"(?<=\S)[ \t]+(?=review_paths?:)", "\n", block))
+    # A hermetic review may explicitly say "no -m live_db" after its command,
+    # and the companion suite commonly selects exactly "not live_db".
+    # Only executable marker references count; production review prose still
+    # names the required data source even when the script has a generic name.
+    executable = "\n".join(commands)
+    live_selection = re.sub(r'''(?<![\w-])-m(?:\s+|=)(["'])\s*not\s+live_db\s*\1''',
+                            "", executable, flags=re.I)
     return bool(re.search(r"\[[^]\n]*\bobserved-data\b", block, re.I)
-                or re.search(r"(?<![a-z0-9])(?:live_db|production|prod)(?![a-z0-9])",
-                             "\n".join([review, *commands]), re.I))
+                or re.search(r"(?<![a-z0-9])live_db(?![a-z0-9])", live_selection, re.I)
+                or re.search(r"(?<![a-z0-9])(?:production|prod)(?![a-z0-9])",
+                             review + "\n" + executable, re.I))
 
 
 def records(spec_text, project):

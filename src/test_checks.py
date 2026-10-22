@@ -328,6 +328,11 @@ def test_live_db_routing():
             assert "scratch-pg" not in row["needs"]
     ordinary = record("AC1 [backend]: schema.\nreview_path: `pytest tests/test_product.py`")
     assert ordinary["runner"] == "build" and "ro-prod-sql" not in ordinary["needs"]
+    for command, prose in (("pytest tests/test_window.py", " (no `-m live_db`)"),
+                           ('pytest tests/test_window.py -m "not live_db"', ""),
+                           ("pytest tests/test_window.py -m='not live_db'", "")):
+        ordinary = record(f"AC1 [backend]: hermetic.\nreview_path: `{command}`{prose}")
+        assert ordinary["runner"] == "build" and "ro-prod-sql" not in ordinary["needs"], ordinary
     tagged = spec("AC3 [backend]: rows exist.", verification="# AC3\npytest tests/test_window.py -m live_db")
     assert checks.records(tagged, None)[0]["needs"] == ["repo", "ro-prod-sql"]
     print("W55 live-data routes override legacy capabilities; backend checks stay private")
