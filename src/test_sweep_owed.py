@@ -1205,14 +1205,15 @@ with patch.object(prod_browser, 'run_batch', return_value=[dict(spec=sid, criter
     assert seam.call_count == 1 and seam.call_args.args[0][0]['criterion'] == 'AC1'
     assert owed.checks(specs_now()[1][sid]['evs'], NOW)[0]['status'] == 'met'
 
-# Reverse exactly the three granted edits; all other bytes match the baseline.
+# Reverse the browser edits; pin the baseline including W55's provenance rule.
 actual = (REPO_ROOT / 'agents/owed-sweeper.md').read_text()
 normalized = re.sub(r'\n### Browser batches\n.*?(?=\n## Blind)', '', actual, flags=re.S)
 normalized = normalized.replace('tools: Read, Glob, Grep, Bash, StructuredOutput, Write, mcp__chrome-devtools\n',
                                 'tools: Read, Glob, Grep, Bash, StructuredOutput, Write\n')
 normalized = normalized.replace('`deploy.sh`, a production wrapper, or a browser yourself, except in a\n`kind: browser` batch, see [Browser batches](#browser-batches).',
                                 '`deploy.sh`, a production wrapper, or a browser yourself.')
-assert hashlib.sha256(normalized.replace("elapsed | repo | not-live | ro-dsn-grant", "elapsed | other").encode()).hexdigest() == '16c522320824ff6899b5fa539b82331226e532cdc54ae0403281dbcb80f798e0'
+assert 'env.required_pg: prod_ro' in normalized and 'missing DB provenance' in normalized
+assert hashlib.sha256(normalized.replace("elapsed | repo | not-live | ro-dsn-grant", "elapsed | other").encode()).hexdigest() == '95c9364879d33c8a086745be8058b94d49f9f9a5fe0f5fcea6f6c57ec1e7df52'
 assert actual.rsplit('\n## ', 1)[-1].startswith('Lessons (operator rule, 2026-09-24)')
 browser_signature('AC9', {'tools_granted': True, 'untouched_sections_identical': True, 'lessons_last': True})
 
