@@ -13,6 +13,17 @@ import build_runner
 import sweep_provision as provision
 
 
+def check_manifest_rows(rows, base):
+    """Shared integration assertions for the driver's real git-clone fixture."""
+    for row in rows:
+        assert row["provisioning"] == {"node_modules": "none", "prod_dsns": "unset"}
+        assert "sweep_provision.py" in row["check_runner"]
+        observed = subprocess.run(__import__("shlex").split(row["check_runner"]),
+            input='test "$BASE" = ' + base + '\nprintf "wrapper passed\\n"',
+            capture_output=True, text=True)
+        assert observed.returncode == 0 and observed.stdout == "wrapper passed\n", observed.stderr
+
+
 class ProvisionTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()

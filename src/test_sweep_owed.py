@@ -1424,13 +1424,8 @@ def test_repo_batches():
         assert {r["shipped_sha"] for r in parsed["rows"]} == {sha}
         assert {r["base_sha"] for r in parsed["rows"]} == {base}
         assert {r["clone"] for r in parsed["rows"]} == {parsed["cwd"]}
-        for row in parsed["rows"]:
-            assert row["provisioning"] == {"node_modules": "none", "prod_dsns": "unset"}
-            assert "sweep_provision.py" in row["check_runner"]
-            observed = subprocess.run(__import__("shlex").split(row["check_runner"]),
-                input='test "$BASE" = ' + base + '\nprintf "wrapper passed\\n"',
-                capture_output=True, text=True)
-            assert observed.returncode == 0 and observed.stdout == "wrapper passed\n", observed.stderr
+        from test_sweep_provision import check_manifest_rows
+        check_manifest_rows(parsed["rows"], base)
         assert fake.calls[-1][fake.calls[-1].index("--cwd") + 1] == parsed["cwd"]
         assert git(pathlib.Path(parsed["cwd"]), "rev-parse", "HEAD") == sha
         records = [e for e in fold.read_events() if e["type"] == "sweep-run"]
