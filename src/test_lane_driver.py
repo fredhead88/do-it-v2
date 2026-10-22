@@ -269,6 +269,17 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(self.calls, [])
         self.assertEqual(self.appended(), [])
 
+    def test_answered_rebuild_waits_for_a_seat_without_consuming_answer(self):
+        self.events = [self.events[0], self.event('build-blocked', 20, _src='builder:3'),
+                       self.event('decision', 1, actor='thinker', ref='builder:3')]
+        with patch.object(autodispatch, 'capacity', return_value=0):
+            self.assertEqual(self.run_driver(), [f'seat-wait {self.sid} rebuild'])
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.appended(), [])
+        with patch.object(autodispatch, 'capacity', return_value=1):
+            self.assertEqual(self.run_driver(), [f'acted {self.sid} rebuild spawn=L-builder-9999'])
+        self.assertEqual(len(self.calls), 2)
+
     def test_rework_after_resolved_block_dispatches_builder_once(self):
         self.events = self.rework_events()
         self.assertEqual(self.run_driver(dry_run=True), [f'would act {self.sid} rebuild'])

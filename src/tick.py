@@ -43,6 +43,23 @@ SPEC_DONE = ("accepted", "shipped-owed-evidence", "shipped-owed-expired", "dropp
 # invariant across every charter, never computed per-charter (Assumptions).
 PROVING_CLOSE_REASON = ("every owed check discharged; sweep at fixpoint; no open in-scope brief; "
                         "charter review complete or not owed")
+LANE_LOG_BYTES = 1024 * 1024
+
+
+def _log_lane_driver(lines, snapshot):
+    """Keep two bounded files; record both the snapshot and observation clock."""
+    from datetime import datetime, timezone
+    path = fold.ROOT / "logs" / "lane-driver.log"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    for line in lines:
+        prefix = f"{datetime.now(timezone.utc).isoformat()} snapshot={snapshot.isoformat()} "
+        message = str(line).replace("\r", "\\r").replace("\n", "\\n")
+        data = (prefix + message).encode('utf-8')[:min(8191, LANE_LOG_BYTES - 1)]
+        data = data.decode('utf-8', errors='ignore').encode('utf-8') + b'\n'
+        if path.exists() and path.stat().st_size + len(data) > LANE_LOG_BYTES:
+            path.replace(path.with_suffix('.log.1'))
+        with path.open('ab') as stream:
+            stream.write(data)
 
 
 def tick_path():
@@ -507,11 +524,23 @@ def _record():
     # this pass never changes THIS pass's own `todo`. A raise never stops the
     # tick's own heartbeat, exactly like `carry_error` above.
     autodispatch_error = None
+    lane_driver_log_error = None
+    dispatch_started = time.monotonic()
+    def log_outcomes(lines):
+        nonlocal lane_driver_log_error
+        try:
+            _log_lane_driver(lines, fold.NOW)
+        except OSError as exc:
+            lane_driver_log_error = str(exc)
+    log_outcomes(['start autodispatch'])
     try:
         import autodispatch
-        autodispatch.run(ev, specs, fold.NOW)
+        outcomes = autodispatch.run(ev, specs, fold.NOW)
+        log_outcomes(outcomes or [])
     except Exception as e:
         autodispatch_error = f"{e}"
+        log_outcomes([f'failed autodispatch: {e}'])
+    log_outcomes([f'finished autodispatch elapsed_s={time.monotonic() - dispatch_started:.3f}'])
     # L-charter-0042/L-spec-0486 (cleanup-on-finish), R15a (record): the tick's own
     # per-spec worktree reap, on this SAME `ev` — its own try/except, exactly like
     # `autodispatch_error` above: a raise never stops the tick's own heartbeat, and
@@ -550,6 +579,8 @@ def _record():
         kv["grader_serve_error"] = grader_serve_error
     if autodispatch_error:
         kv["autodispatch_error"] = autodispatch_error
+    if lane_driver_log_error:
+        kv["lane_driver_log_error"] = lane_driver_log_error
     if worktree_reap_error:
         kv["worktree_reap_error"] = worktree_reap_error
     if worktrees_retained is not None:
