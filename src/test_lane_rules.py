@@ -72,6 +72,20 @@ def fixture(rule):
     return ev + trigger
 
 
+def rework_fixture():
+    """An answered block, successful rebuild, grade, then a fresh rework ruling."""
+    return [written(),
+            event('build-blocked', -85, actor='builder', spawn='L-builder-3014', _src='builder:1'),
+            event('question', -84, actor='builder', spawn='L-builder-3014', _src='builder:2'),
+            event('decision', -80, actor='thinker', ref='builder:2'),
+            event('spawn-started', -78, role='builder', spawn='L-builder-3015'),
+            event('build-started', -77, spawn='L-builder-3015'),
+            event('build-done', -70, actor='builder', spawn='L-builder-3015', status='DONE'),
+            event('spawn-done', -69, role='builder', spawn='L-builder-3015'),
+            event('verdict', -65, actor='grader', confirmed=False, _src='grader:17'),
+            event('decision', -60, actor='thinker', rework='yes', ref='grader:17')]
+
+
 class LaneRulesTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -221,6 +235,59 @@ class LaneRulesTests(unittest.TestCase):
         legacy[2]['ts'] = event('question', -80)['ts']
         self.assertFalse(any(r['rule'] == 'rebuild' for r in self.rows(legacy)))
         self.row([written(), event('decision', -60, actor='thinker', rework='yes')], 'rebuild')
+
+    def test_rework_after_resolved_block_triggers_rebuild(self):
+        for actor in ('thinker', 'operator'):
+            with self.subTest(actor=actor):
+                ev = rework_fixture()
+                ev[-1]['actor'] = actor
+                self.assertEqual(self.row(ev, 'rebuild')['since'], ev[-1]['ts'])
+                self.assertEqual([r['rule'] for r in self.rows(ev) if r['rule'] in ACTING],
+                                 ['rebuild'])
+
+    def test_rework_must_be_newer_than_latest_builder_outcome(self):
+        for historical_block in (False, True):
+            base = rework_fixture() if historical_block else [written()] + rework_fixture()[6:]
+            for kind in ('build-done', 'build-blocked'):
+                for minute in (-60, -55):
+                    with self.subTest(block=historical_block, kind=kind, minute=minute):
+                        ev = base + [event(kind, minute, actor='builder')]
+                        self.assertFalse(any(r['rule'] == 'rebuild' for r in self.rows(ev)))
+            for ref in ('grader:17', 'builder:1', 'builder:2'):
+                with self.subTest(block=historical_block, stale_ref=ref):
+                    stale = base[:-1] + [dict(base[-1], ts=event('decision', -75)['ts'], ref=ref)]
+                    self.assertFalse(any(r['rule'] == 'rebuild' for r in self.rows(stale)))
+
+    def test_rework_dispatch_suppression_is_builder_specific(self):
+        base = rework_fixture()
+        for kind in sorted(lr.DISPATCH_EVENTS | {'build-started'}):
+            for fields in (dict(role='builder'), dict(spawn='L-builder-3016'), {}):
+                with self.subTest(kind=kind, fields=fields):
+                    self.assertFalse(any(r['rule'] == 'rebuild' for r in
+                                         self.rows(base + [event(kind, -55, **fields)])))
+        for kind in sorted(lr.DISPATCH_EVENTS):
+            for fields in (dict(role='reviewer'), dict(spawn='L-reviewer-3016')):
+                with self.subTest(kind=kind, fields=fields):
+                    ev = base + [event(kind, -55, reason='cancelled', **fields)]
+                    self.assertEqual(self.row(ev, 'rebuild')['since'], base[-1]['ts'])
+
+    def test_rework_preserves_rebuild_guards(self):
+        base = rework_fixture()
+        for fields in (dict(actor='builder'), dict(close='superseded'),
+                       dict(regrade='yes'), dict(wave_waive='yes')):
+            with self.subTest(fields=fields):
+                ev = base[:-1] + [dict(base[-1], **fields)]
+                self.assertFalse(any(r['rule'] == 'rebuild' for r in self.rows(ev)))
+        for kind in sorted(lr.TERMINAL_EVENTS):
+            self.assertFalse(any(r['rule'] == 'rebuild' for r in
+                                 self.rows(base + [event(kind, -55)])))
+        for state in dispatch.SETTLED_STATES:
+            self.assertFalse(any(r['rule'] == 'rebuild' for r in
+                                 lr.due(base, {SID: dict(state=state)}, NOW)))
+        held = base + [event('dependency-hold', -62, waits_for=TARGET, why='needs producer')]
+        self.assertFalse(any(r['rule'] == 'rebuild' for r in self.rows(held)))
+        self.assertEqual(self.row(held + [event('unblocked', -55)], 'rebuild')['since'],
+                         base[-1]['ts'])
 
     def test_rebuild_answered_question_without_build_blocked(self):
         spawn = 'L-builder-2992'

@@ -98,13 +98,17 @@ def _result(trigger, reason='condition met', **fields):
     return dict(since=trigger['ts'], reason=reason, **fields)
 
 
+def _builder_dispatch(e):
+    return (e.get('type') in DISPATCH_EVENTS and
+            (e.get('role') or '-'.join(str(e.get('spawn') or '').split('-')[1:-1])
+             or 'builder') == 'builder')
+
+
 def _builder_question(evs):
     """The latest builder attempt must still end at this question."""
     activity = [e for e in evs if e.get('type') in {'build-started', 'build-blocked', 'build-done'}
                 or e.get('type') == 'question' and e.get('actor') == 'builder'
-                or e.get('type') in DISPATCH_EVENTS and
-                (e.get('role') or '-'.join(str(e.get('spawn') or '').split('-')[1:-1])
-                 or 'builder') == 'builder']
+                or _builder_dispatch(e)]
     question = _latest(activity, {'question', 'build-blocked', 'build-done'})
     if not question or question['type'] != 'question' or not question.get('_src'):
         return None
@@ -122,6 +126,7 @@ def _rebuild(c):
     if _terminal(evs, c['spec']) or c['dependency']:
         return None
     blocked = _latest(evs, {'build-blocked'})
+    outcome = _latest(evs, {'build-done', 'build-blocked'})
     # thinker-answer refs the builder's question, not the build-blocked row.
     # A spawn ties that question to this blocked build; legacy rows without a
     # spawn must at least belong to the current block's time interval.
@@ -134,15 +139,21 @@ def _rebuild(c):
         questions.append(question)
     decisions = [e for e in evs if e.get('type') == 'decision' and e.get('actor') in ('thinker', 'operator')
                  and not e.get('close') and e.get('regrade') != 'yes' and not e.get('wave_waive')
+                 # Explicit rework belongs to the latest completed builder attempt,
+                 # even when its ref also answers a historical blocked build.
+                 and (e.get('rework') != 'yes' or not outcome or _time(e['ts']) > _time(outcome['ts']))
                  and (blocked and _time(e['ts']) > _time(blocked['ts']) and e.get('ref')
                       and e['ref'] == blocked.get('_src')
                       or any(e.get('ref') == q['_src'] and _time(e['ts']) > _time(q['ts'])
                              for q in questions)
-                      or not blocked and e.get('rework') == 'yes')]
+                      or e.get('rework') == 'yes')]
     rewrites = [e for e in evs if blocked and e.get('type') == 'spec-written'
                 and _time(e['ts']) > _time(blocked['ts'])]
     trigger = max(decisions + rewrites, key=lambda e: _time(e['ts']), default=None)
-    if trigger and (not blocked or _time(trigger['ts']) > _time(blocked['ts'])) and not _after(evs, trigger, DISPATCH_EVENTS, 'builder') and not _after(evs, trigger, {'build-started'}):
+    dispatched = [e for e in evs if _builder_dispatch(e)]
+    if (trigger and (not blocked or _time(trigger['ts']) > _time(blocked['ts']))
+            and not _after(dispatched, trigger, DISPATCH_EVENTS)
+            and not _after(evs, trigger, {'build-started'})):
         return _result(trigger)
 
 

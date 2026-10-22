@@ -65,6 +65,21 @@ class DriverTests(unittest.TestCase):
         path = tick.tick_path()
         return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
 
+    def rework_events(self):
+        cap = 'capability:db:' + self.sid
+        return [self.events[0],
+                self.event('build-blocked', 35, actor='builder', spawn='L-builder-3014', _src='builder:1'),
+                self.event('question', 34, actor='builder', spawn='L-builder-3014', _src='builder:2'),
+                self.event('decision', 33, actor='thinker', ref='builder:2'),
+                self.event('spawn-started', 32, role='builder', spawn='L-builder-3015'),
+                self.event('build-started', 31, spawn='L-builder-3015'),
+                self.event('build-done', 25, actor='builder', spawn='L-builder-3015', status='DONE'),
+                self.event('spawn-done', 24, role='builder', spawn='L-builder-3015'),
+                self.event('verdict', 20, actor='grader', confirmed=False, cannot_assess=['AC1']),
+                dict(self.event('capability-hold', 20, spec=self.sid, capability='db'), subject=cap),
+                dict(self.event('unblocked', 10, actor='thinker', regrade='no'), subject=cap),
+                self.event('decision', 1, actor='thinker', rework='yes', ref='L-grader-2643.jsonl:17')]
+
     def test_review_exact_argv_and_repeat(self):
         out = self.run_driver()
         self.assertEqual(self.calls, [
@@ -191,6 +206,64 @@ class DriverTests(unittest.TestCase):
         self.calls.clear()
         self.assertEqual(self.run_driver(), [])
         self.assertEqual(self.calls, [])
+
+    def test_rework_after_resolved_block_dispatches_builder_once(self):
+        self.events = self.rework_events()
+        self.assertEqual(self.run_driver(dry_run=True), [f'would act {self.sid} rebuild'])
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.run_driver(), [f'acted {self.sid} rebuild spawn=L-builder-9999'])
+        self.assertEqual(self.calls[0][:4], ['doit', 'packet', 'builder', self.sid])
+        self.assertEqual((self.appended()[0]['rule'], self.appended()[0]['since']),
+                         ('rebuild', self.events[-1]['ts']))
+        self.events.extend(fold.read_events())
+        self.calls.clear()
+        self.assertNotIn(f'would act {self.sid} rebuild', self.run_driver(dry_run=True))
+        self.assertEqual(self.calls, [])
+        self.assertEqual(len(self.appended()), 1)
+
+    def test_rework_ignores_stale_decisions_and_later_builder_dispatches(self):
+        base = self.rework_events()
+        cases = [base[:-1] + [dict(base[-1], ts=self.event('decision', 26)['ts'])]]
+        for kind in ('build-done', 'build-blocked'):
+            cases.append(base + [self.event(kind, actor='builder')])
+        for kind in sorted(lane_rules.DISPATCH_EVENTS | {'build-started'}):
+            for fields in (dict(role='builder'), dict(spawn='L-builder-3016'), {}):
+                cases.append(base + [self.event(kind, **fields)])
+        for events in cases:
+            with self.subTest(last=events[-1]):
+                self.events = events
+                self.assertNotIn(f'would act {self.sid} rebuild', self.run_driver(dry_run=True))
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.appended(), [])
+
+    def test_reviewer_dispatch_and_cancel_do_not_consume_rework(self):
+        base = self.rework_events()
+        for role in (dict(role='reviewer'), {}):
+            with self.subTest(role=role):
+                self.events = base + [
+                    self.event('spawn-started', 0.5, spawn='L-reviewer-3016', **role),
+                    self.event('spawn-failed', actor='operator', spawn='L-reviewer-3016',
+                               reason='cancelled', **role)]
+                self.assertEqual(self.run_driver(dry_run=True), [f'would act {self.sid} rebuild'])
+        self.run_driver()
+        self.assertEqual(self.calls[0][:4], ['doit', 'packet', 'builder', self.sid])
+        self.assertEqual(self.appended()[0]['rule'], 'rebuild')
+
+    def test_rework_waits_for_holds_and_never_reopens_shipped(self):
+        base = self.rework_events()
+        cases = [base + [self.event('shipped')],
+                 base + [self.event('dependency-hold', 2, waits_for='L-spec-9998')],
+                 [e for e in base if e['type'] != 'unblocked']]
+        for events in cases:
+            with self.subTest(events=events):
+                self.events = events
+                self.assertEqual(self.run_driver(), [])
+        self.events = base
+        for state in dispatch.SETTLED_STATES:
+            self.specs[self.sid]['state'] = state
+            self.assertEqual(self.run_driver(), [])
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.appended(), [])
 
     def test_question_only_answer_dispatches_builder_once(self):
         spawn = 'L-builder-2992'
