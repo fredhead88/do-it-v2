@@ -67,6 +67,14 @@ class EvaluationTests(unittest.TestCase):
         self.assertTrue(resolve.called)
         self.assertTrue(all(e['subject'] == sid for e in resolve.call_args.args[0]))
 
+    def test_malformed_subject_in_index_is_reported_as_undetermined(self):
+        sid = 'L-spec-1455'
+        events = [self.event('spec-written', sid, 40), self.event('note', None, 10)]
+        rows = lane_driver._rows(events, {sid: dict(state='written')}, self.now)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['spec'], sid)
+        self.assertTrue(rows[0]['reason'].startswith('undetermined:'))
+
 
 if __name__ == '__main__':
     unittest.main()

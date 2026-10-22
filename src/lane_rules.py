@@ -68,7 +68,7 @@ def _busy(events, now):
 
 def _wave(c):
     """Match dispatch.wave_blocker without its clock-dependent spec_state call."""
-    evs, events, sid = c['evs'], c['events'], c['sid']
+    evs, sid = c['evs'], c['sid']
     if any(e.get('type') in ('build-done', 'shipped') for e in evs):
         return None
     waiver = next((e for e in reversed(evs) if e.get('type') == 'decision' and e.get('wave_waive')), None)
@@ -363,6 +363,11 @@ def _undetermined(sid, name, rule, now, exc):
 
 
 def due(events, specs, now, table=None, *, only=None):
+    """Evaluate a snapshot; the driver can select only its owned predicates.
+
+    Diagnostic idle/held rows depend on acting rows, so watchdog callers use
+    the default full evaluation. All memoized work is local to this call.
+    """
     try:
         rules = load(table)
     except ValueError as exc:
@@ -373,11 +378,11 @@ def due(events, specs, now, table=None, *, only=None):
     for e in events:
         by_subject.setdefault(e.get('subject', ''), []).append(e)
     capabilities = {}
-    for subject, evs in by_subject.items():
-        if subject.startswith('capability:'):
-            capabilities.setdefault(subject.split(':', 2)[-1], []).append(evs)
-    shipped = {e.get('subject') for e in events if e.get('type') == 'shipped'}
     try:
+        for subject, evs in by_subject.items():
+            if subject.startswith('capability:'):
+                capabilities.setdefault(subject.split(':', 2)[-1], []).append(evs)
+        shipped = {e.get('subject') for e in events if e.get('type') == 'shipped'}
         # Validate before calling any inherited helper: fold.ts falls back to
         # a global clock for malformed input. Such input is undetermined here.
         for e in events:
