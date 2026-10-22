@@ -65,6 +65,9 @@ Run the focused checks from the repository root:
 python3 src/test_realm.py
 python3 src/test_realm_ledger.py
 python3 src/test_realm_operator.py
-python3 src/test_stalls.py
-python3 src/test_lane_rules.py
+# Realm uses fold/lane rules from the live executor checkout. Those suites
+# live there rather than on the separate realm branch (override if needed).
+live_repo="${DOIT_LIVE_REPO:-$HOME/do-it-v2}"
+PYTHONDONTWRITEBYTECODE=1 python3 "$live_repo/src/test_stalls.py"
+PYTHONDONTWRITEBYTECODE=1 python3 "$live_repo/src/test_lane_rules.py"
 ```

@@ -185,13 +185,16 @@ def test_operator_payload_reads_real_fold_and_configured_rule_limit_in_an_isolat
     import os
     import realm
     import realm_ledger
+    # Realm runs from its own branch; fold and rule configuration come from
+    # the live executor checkout, just as they do in operator_payload().
+    live_repo = realm.live_src().parent
     with tempfile.TemporaryDirectory() as folder, contextlib.ExitStack() as stack:
         root=pathlib.Path(folder);(root/'events').mkdir();(root/'content').mkdir()
         (root/'events/L-planner-fixture.jsonl').write_text(''.join(json.dumps(event('spec-written', -15, sid))+'\n' for sid in ('L-spec-9001','L-spec-9002')))
         (root/'events/L-thinker-fixture.jsonl').write_text(json.dumps(event('dependency-hold', -14, 'L-spec-9002', waits_for='L-spec-9001', why='Migration sequence'))+'\n')
         (root/'content/L-spec-9001.md').write_text('# Human title\n\nUseful feature.')
-        rules=root/'rules.toml';rules.write_text((realm.HERE.parent/'lane_rules.toml').read_text().replace('limit_min = 30','limit_min = 7'))
-        stack.enter_context(mock.patch.dict(os.environ, {'DOIT_ROOT':str(root),'DOIT_LIVE_REPO':str(realm.HERE.parent),'DOIT_LANE_RULES':str(rules)}))
+        rules=root/'rules.toml';rules.write_text((live_repo/'lane_rules.toml').read_text().replace('limit_min = 30','limit_min = 7'))
+        stack.enter_context(mock.patch.dict(os.environ, {'DOIT_ROOT':str(root),'DOIT_LIVE_REPO':str(live_repo),'DOIT_LANE_RULES':str(rules)}))
         stack.enter_context(mock.patch.object(realm,'ROOT',root))
         stack.enter_context(mock.patch.object(realm,'EVENTS',root/'events'))
         stack.enter_context(mock.patch.object(realm,'LEDGER',realm_ledger.Ledger()))
