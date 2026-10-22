@@ -729,8 +729,9 @@ def events_for(role, out, a, base):
         ev += spawns.clear_events(vs, out, a.subject, ev[0][1]["confirmed"], base.get("spawn"))   # L-spec-0755/R3(c)
         ev += coverage_changes(out["checkers"])
         # L-spec-0482/R12.b: the circuit breaker. A `cannot-assess` row on a criterion nobody declared owed (the shared `fold.verdict_owed_criteria` helper — never a second, drifting read of `owed-ac`) rides on the `verdict` event as `missing_capability`, and opens the SAME capability-hold the preflight opens (`dispatch.py`'s own `grading-preflight-failed` branch, `source="preflight"` there, `source="verdict"` here) — one `escalation-blocking` per capability with no hold already open. An absent, `"unknown"`, or out-of-`CAPABILITIES` value all coerce to `capability:unknown:<SPEC>` (Assumptions): a hold subject is always `capability:<one of ten>` or `capability:unknown:<SPEC>`, never a raw model string (security_path).
-        import fold, grading_env
-        owed_criteria = fold.verdict_owed_criteria(fold.read_events(), a.subject)
+        import fold, grading_env, routing
+        events = fold.read_events()
+        owed_criteria = fold.verdict_owed_criteria(events, a.subject) | set(routing.ruled_criteria(events, a.subject))
         missing_capability = []
         for v in vs:
             if v["verdict"] != "cannot-assess" or v["ac"] in owed_criteria:
@@ -748,9 +749,10 @@ def events_for(role, out, a, base):
             if subj in opened_here:
                 continue
             opened_here.add(subj)
-            if subj in fold.capability_holds(fold.read_events()):
+            if subj in fold.capability_holds(events):
                 continue
-            ev.append(("capability-hold", dict(subject=subj, capability=cap, spec=a.subject, source="verdict")))
+            ev.append(("capability-hold", dict(subject=subj, capability=cap, spec=a.subject, source="verdict",
+                                               criteria=[r['ac'] for r in missing_capability if r['capability'] == cap])))
             ev.append(("escalation-blocking", dict(
                 subject=subj, kind="capability-hold", owner="thinker",
                 default=f"hold stays; no grader or reviewer is dispatched for a spec needing {cap}",

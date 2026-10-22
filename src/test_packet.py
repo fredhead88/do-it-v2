@@ -1618,6 +1618,23 @@ assert "is neither a verdict nor a" in grader_md_text and "cannot-assess" in gra
     "AC9: grader.md must say a routed-verify-only failure is neither a verdict nor a cannot-assess"
 print("8034-AC9 ok")
 
+# W44: the route remains, but a later ruling is visible as an authoritative
+# disposition instead of the dropped criterion/card text.
+ev("thinker", "decision", "L-spec-9460", criterion="AC2",
+   why="AC2 is ruled met: browser evidence accepted.", evidence="evidence/9460-browser.json",
+   ts=(fold.NOW + fold.timedelta(seconds=1)).isoformat())
+t_44_grader = build("grader", "L-spec-9460", worktree=str(REPO))
+assert "AC2: ruled met by the Thinker: AC2 is ruled met: browser evidence accepted., evidence evidence/9460-browser.json" in t_44_grader, t_44_grader
+assert TOKEN_8034P not in t_44_grader and "AC2 [ui] built" not in t_44_grader
+assert "AC1 [backend] built" in t_44_grader and "AC3 [backend] built" in t_44_grader
+ev("operator", "decision", "L-spec-9460", criteria="AC1, AC3", why="Evidence accepted.", evidence="evidence/9460-all.json",
+   ts=(fold.NOW + fold.timedelta(seconds=2)).isoformat())
+t_44_all = build("grader", "L-spec-9460", worktree=str(REPO))
+for cid in ("AC1", "AC3"):
+    assert f"{cid}: ruled met by the operator: Evidence accepted., evidence evidence/9460-all.json" in t_44_all
+    assert f"{cid} [backend] built" not in t_44_all
+print("W44 ruled packet carries decisions and evidence; unruled blocks unchanged")
+
 # AC11 · p_reviewer lists the to=reviewer criterion by id and text (item 10)
 t_8034_reviewer = build("reviewer", subject="L-spec-9460", worktree=str(REPO))
 assert "10. Criteria routed to you alone" in t_8034_reviewer, t_8034_reviewer

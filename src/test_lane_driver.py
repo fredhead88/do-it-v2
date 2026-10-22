@@ -153,6 +153,31 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(self.calls[0][:4], ['doit', 'packet', 'builder', self.sid])
         self.assertEqual(self.appended()[0]['rule'], 'rebuild')
 
+    def test_ruled_release_survives_verdict_and_escalation_projection(self):
+        cap = 'capability:unknown:' + self.sid
+        self.events = [self.events[0],
+            self.event('verdict', 20, actor='grader', spawn='L-grader-2594', confirmed=False,
+                       cannot_assess=['AC01', 'AC04', 'AC09', 'AC11'],
+                       missing_capability=[dict(ac=c, capability='unknown') for c in ('AC01', 'AC04', 'AC11')]),
+            dict(self.event('capability-hold', 20, actor='grader', spawn='L-grader-2594',
+                            spec=self.sid, capability='unknown', source='verdict'), subject=cap),
+            dict(self.event('escalation-blocking', 20, actor='grader', spawn='L-grader-2594'),
+                 subject=cap, kind='capability-hold'),
+            self.event('decision', 10, actor='thinker',
+                       why='AC01, AC04, AC09 and AC11 met on build a8d0e22f4c.', evidence='fixture/all.json'),
+            dict(self.event('unblocked', 9, actor='thinker'), subject=cap)]
+        self.assertFalse(any(row['rule'] == 'regrade' for row in lane_driver._rows(self.events, self.specs, self.now)))
+        # A normal review may proceed; only the released hold's regrade stops.
+        self.run_driver()
+        self.assertFalse(any(call[:4] == ['doit', 'packet', 'grader', self.sid] for call in self.calls))
+        self.calls.clear()
+        tick.tick_path().unlink(missing_ok=True)
+        # Removing the ruling restores the original regrade dispatch.
+        self.events = [e for e in self.events if e['type'] != 'decision']
+        self.run_driver()
+        self.assertEqual(self.calls[0][:4], ['doit', 'packet', 'grader', self.sid])
+        self.assertEqual(self.appended()[0]['rule'], 'regrade')
+
     def test_rebuild_thinker_answer_question_ref(self):
         self.events = [self.events[0],
                        self.event('build-blocked', 20, actor='builder', spawn='L-builder-9001', _src='builder:1'),

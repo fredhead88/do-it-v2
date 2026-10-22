@@ -132,6 +132,32 @@ class LaneRulesTests(unittest.TestCase):
                 lr.load()
         print('ValueError predicate without row')
 
+    def test_ruled_capability_release_does_not_regrade(self):
+        cap = 'capability:unknown:' + SID
+        ev = [written(),
+              event('verdict', -75, actor='grader', spawn='L-grader-2593', confirmed=False,
+                    cannot_assess=['AC9', 'AC10'], missing_capability=[dict(ac='AC9', capability='unknown')]),
+              event('capability-hold', -70, subject=cap, actor='grader', spawn='L-grader-2593',
+                    spec=SID, capability='unknown', source='verdict'),
+              event('unblocked', -60, subject=cap, actor='thinker')]
+        self.assertEqual(self.row(ev, 'regrade')['since'], ev[-1]['ts'])
+        ruled = event('decision', -65, actor='thinker', criterion='AC9',
+                      why='AC9 met: the red test fails identically at base.', evidence='fixture/base.json')
+        self.assertFalse(any(r['rule'] == 'regrade' for r in self.rows(ev + [ruled])))
+        # One remaining unruled AC still requires the ordinary regrade.
+        mixed = dict(ev[2], criteria=['AC9', 'AC10'])
+        partial = [ev[0], ev[1], mixed, ev[3], ruled]
+        self.assertEqual(self.row(partial, 'regrade')['since'], ev[3]['ts'])
+        all_ruled = partial + [event('decision', -64, actor='operator', criteria='AC10', why='Evidence accepted.')]
+        self.assertFalse(any(r['rule'] == 'regrade' for r in self.rows(all_ruled)))
+        # Explicit operator regrade requests still work, independently of releases.
+        self.assertEqual(self.row(all_ruled + [event('decision', -50, actor='operator', regrade='yes')],
+                                  'regrade')['since'], event('x', -50)['ts'])
+        for actor in ('thinker', 'operator'):
+            suppressed = ev[:-1] + [dict(ev[-1], actor=actor, regrade='no')]
+            self.assertFalse(any(r['rule'] == 'regrade' for r in self.rows(suppressed)))
+        self.assertFalse(any(r['rule'] == 'regrade' for r in self.rows(ev[:-1] + [dict(ev[-1], actor='builder')])))
+
     def test_conditions_from_events(self):
         suppressors = {
             'build': event('build-started', -30, actor='builder', role='builder'),
