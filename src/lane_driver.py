@@ -56,15 +56,20 @@ def _projection(events):
 
 
 def _rows(events, specs, now, table=None):
-    rows = lane_rules.due(_projection(events), specs, now, table=table)
+    # The driver owns these four actions. Idle/merge diagnostics belong to the
+    # watchdog and can otherwise delay every answered build behind a full scan.
+    rows = lane_rules.due(_projection(events), specs, now, table=table, only=ROLES)
     # Never turn a malformed fold into an actionable supplemental close row.
     undetermined = {r['spec'] for r in rows if r['reason'].startswith('undetermined:')}
     keys = {(r['spec'], r['rule']) for r in rows}
     rules = lane_rules.load(table)
+    by_subject = {}
+    for e in events:
+        by_subject.setdefault(e.get('subject'), []).append(e)
     for sid in specs:
         if sid in undetermined or (sid, 'close') in keys:
             continue
-        evs = [e for e in events if e.get('subject') == sid]
+        evs = by_subject.get(sid, [])
         ruling = next((e for e in reversed(evs) if e['type'] == 'decision'
                        and e.get('actor') in ('thinker', 'operator') and e.get('close')), None)
         if (ruling and any(e['type'] == 'shipped' for e in evs)
@@ -167,6 +172,9 @@ def _act(events, specs, now, rows, runner, dry_run, handled):
     rows = [r for r in rows if r['spec'] not in undetermined]
     if not rows:
         return out
+    by_subject = {}
+    for e in events:
+        by_subject.setdefault(e.get('subject'), []).append(e)
     busy, held = _busy(events, now), _held(events)
     slots = max(0, capacity() - _in_flight_role(events, now, 'reviewer'))
     build_slots = max(0, autodispatch.capacity() - _in_flight_role(events, now, 'builder')
@@ -177,11 +185,22 @@ def _act(events, specs, now, rows, runner, dry_run, handled):
             continue
         if rule not in ROLES:
             continue
-        evs = [e for e in events if e.get('subject') == sid]
-        if (sid in busy or sid in held or _suppressed(evs, row)
-                or autodispatch.held_by_dependency(evs, events)):
+        evs = by_subject.get(sid, [])
+        if sid in busy:
+            out.append(f'busy {sid} {rule}')
+            continue
+        if sid in held:
+            out.append(f'held {sid} {rule}: capability hold')
+            continue
+        if _suppressed(evs, row):
+            out.append(f'suppressed {sid} {rule}: already attempted since {row["since"]}')
+            continue
+        dependency = autodispatch.held_by_dependency(evs, events)
+        if dependency:
+            out.append(f'held {sid} {rule}: {dependency}')
             continue
         if rule != 'close' and any(e['type'] in lane_rules.TERMINAL_EVENTS for e in evs):
+            out.append(f'suppressed {sid} {rule}: terminal')
             continue
         role = ROLES[rule]
         if role == 'builder' and build_slots <= 0:
@@ -193,9 +212,11 @@ def _act(events, specs, now, rows, runner, dry_run, handled):
         if rule == 'close' and any(e['type'] in ('spec-killed', 'spec-closed') or
                 e['type'] == 'escalation-blocking' and e.get('kind') == 'close-needs-operator'
                 and _time(e) >= lane_rules._time(row['since']) for e in evs):
+            out.append(f'suppressed {sid} close: already closed or escalated')
             continue
         if dry_run:
             if rule == 'review' and _review_options(evs, sid) is None:
+                out.append(f'suppressed {sid} review: round limit')
                 continue
             out.append(f'would act {sid} {rule}')
             handled.add(sid)
@@ -234,7 +255,7 @@ def _act(events, specs, now, rows, runner, dry_run, handled):
                     out.append(f'closed ruling {sid}')
                 continue
             project = next((e['project'] for e in reversed(evs) if e.get('project')), 'unknown')
-            charter = dispatch.resolve_charter(events, sid, None)
+            charter = dispatch.resolve_charter(evs, sid, None)
             spawn = 'none'
             if rule == 'review':
                 options = _review_options(evs, sid)
@@ -250,6 +271,7 @@ def _act(events, specs, now, rows, runner, dry_run, handled):
             else:
                 spawn = _dispatch(role, sid, project, charter, runner)
             if spawn == 'none':
+                out.append(f'suppressed {sid} {rule}: round limit')
                 continue
             fields = dict(role=role, rule=rule, since=row['since'], spawn=str(spawn))
             if record('autodispatched', **fields):

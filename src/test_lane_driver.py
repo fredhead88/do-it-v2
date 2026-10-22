@@ -132,8 +132,12 @@ class DriverTests(unittest.TestCase):
                 event = self.event(kind, **fields)
                 if kind == 'capability-hold':
                     event['subject'] = 'capability:db:' + self.sid
-                self.assertEqual(lane_driver.run(self.events + [event], self.specs,
-                                                 self.now, runner=self.runner), [])
+                out = lane_driver.run(self.events + [event], self.specs,
+                                      self.now, runner=self.runner)
+                if kind in ('dependency-hold', 'capability-hold'):
+                    self.assertTrue(out[0].startswith('held ' + self.sid + ' review:'))
+                else:
+                    self.assertEqual(out, [])
         self.assertEqual(self.calls, [])
         self.assertEqual(self.appended(), [])
 
@@ -207,6 +211,75 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(self.run_driver(), [])
         self.assertEqual(self.calls, [])
 
+    def test_w56_answer_shapes_from_real_ledger_files(self):
+        # Preserve the actual blocked/question line numbers and shared timestamps.
+        cases = [('1417', '3012', 3, 4), ('1451', '3038', 3, None),
+                 ('1455', '3058', 5, 6), ('1422', '3042', 3, 4),
+                 ('1410', '3014', 5, 6)]
+        for number, attempt, block_line, question_line in cases:
+            with self.subTest(spec=number):
+                for path in (self.root / 'events').glob('*.jsonl'):
+                    path.unlink()
+                self.calls.clear()
+                self.sid = 'L-spec-' + number
+                self.worktree = self.root / 'worktrees/proj' / self.sid.lower()
+                self.worktree.mkdir()
+                spawn = 'L-builder-' + attempt
+                rows = [self.event('build-started', 30, spawn=spawn),
+                        self.event('build-done', 20, spawn=spawn, status='BLOCKED')]
+                while len(rows) < block_line - 1:
+                    rows.append(self.event('build-deviation', 20, spawn=spawn))
+                rows.append(self.event('build-blocked', 20, spawn=spawn, reason='needs ruling'))
+                if question_line:
+                    rows.append(self.event('question', 20, spawn=spawn, asks='allow scope?'))
+                rows.append(self.event('spawn-done', 20, spawn=spawn))
+                (self.root / 'events' / (spawn + '.jsonl')).write_text(
+                    ''.join(json.dumps(e) + '\n' for e in rows))
+                ref = f'{spawn}.jsonl:{question_line or block_line}'
+                answer = self.event('decision', 1, ref=ref, why='Granted')
+                (self.root / 'events/L-thinker-0004.jsonl').write_text(json.dumps(answer) + '\n')
+                written = self.event('spec-written', 40, project='proj')
+                (self.root / 'events/L-spec-writer-0001.jsonl').write_text(json.dumps(written) + '\n')
+                self.events = fold.read_events(use_cache=False)
+                self.specs, _, ignored, _ = fold.fold(self.events)
+                self.assertEqual(ignored, [])
+                row = next(r for r in lane_rules.due(self.events, self.specs, self.now)
+                           if r['spec'] == self.sid and r['rule'] == 'rebuild')
+                self.assertEqual(row['since'], answer['ts'])
+                self.assertEqual(self.run_driver(dry_run=True), [f'would act {self.sid} rebuild'])
+                self.assertEqual(self.run_driver(), [f'acted {self.sid} rebuild spawn=L-builder-9999'])
+                self.assertEqual(len(self.calls), 2)
+                self.events = fold.read_events(use_cache=False)
+                self.assertEqual(self.run_driver(), [])
+                self.assertEqual(len(self.calls), 2)
+
+    def test_skipped_action_reports_its_branch_without_dispatching(self):
+        row = next(r for r in lane_rules.due(self.events, self.specs, self.now) if r['rule'] == 'review')
+        variants = [
+            (self.event('spawn-started', role='builder', spawn='L-builder-8888'), 'busy'),
+            (dict(self.event('capability-hold', spec=self.sid, capability='db'),
+                  subject='capability:db:' + self.sid), 'held'),
+            (self.event('autodispatch-failed', role='reviewer', reason='refused'), 'suppressed'),
+            (self.event('dependency-hold', waits_for='L-spec-9998'), 'held')]
+        for event, outcome in variants:
+            with self.subTest(outcome=outcome):
+                lines = lane_driver._act(self.events + [event], self.specs, self.now,
+                                         [row], self.runner, False, set())
+                self.assertTrue(lines[0].startswith(f'{outcome} {self.sid} review'), lines)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.appended(), [])
+
+    def test_answered_rebuild_waits_for_a_seat_without_consuming_answer(self):
+        self.events = [self.events[0], self.event('build-blocked', 20, _src='builder:3'),
+                       self.event('decision', 1, actor='thinker', ref='builder:3')]
+        with patch.object(autodispatch, 'capacity', return_value=0):
+            self.assertEqual(self.run_driver(), [f'seat-wait {self.sid} rebuild'])
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.appended(), [])
+        with patch.object(autodispatch, 'capacity', return_value=1):
+            self.assertEqual(self.run_driver(), [f'acted {self.sid} rebuild spawn=L-builder-9999'])
+        self.assertEqual(len(self.calls), 2)
+
     def test_rework_after_resolved_block_dispatches_builder_once(self):
         self.events = self.rework_events()
         self.assertEqual(self.run_driver(dry_run=True), [f'would act {self.sid} rebuild'])
@@ -257,7 +330,8 @@ class DriverTests(unittest.TestCase):
         for events in cases:
             with self.subTest(events=events):
                 self.events = events
-                self.assertEqual(self.run_driver(), [])
+                out = self.run_driver()
+                self.assertTrue(all(line.startswith('held ') for line in out), out)
         self.events = base
         for state in dispatch.SETTLED_STATES:
             self.specs[self.sid]['state'] = state
@@ -406,7 +480,7 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(e['default'], 'leave the spec open')
         self.assertEqual(dt.datetime.fromisoformat(e['deadline']), self.now + dt.timedelta(hours=72))
         self.events += [e, self.event('decision', 0, actor='operator', ref=e['_src'])]
-        self.assertEqual(self.run_driver(), [])
+        self.assertEqual(self.run_driver(), [f'suppressed {self.sid} close: already closed or escalated'])
         self.assertEqual(len(self.appended()), 1)
 
     def test_invalid_close_actors_prose_and_terminal(self):
@@ -504,7 +578,7 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(self.calls[0][-2:], ['--round', '2'])
         self.events.insert(2, self.event('review', 10, confirmed=False, round=2))
         self.calls.clear()
-        self.assertEqual(self.run_driver(), [])
+        self.assertEqual(self.run_driver(), [f'suppressed {self.sid} review: round limit'])
         self.assertEqual(self.calls, [])
         self.assertEqual(len(self.appended()), 1)
 

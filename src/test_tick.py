@@ -635,10 +635,11 @@ fold.EVENTS = saved_events
 class _FakeAutodispatch:
     """Substituted into `sys.modules["autodispatch"]` — `tick._record()`'s own
     lazy `import autodispatch` picks this up instead of the real module."""
-    def __init__(self, raise_error=False, append_failed=False):
+    def __init__(self, raise_error=False, append_failed=False, outcomes=()):
         self.calls = []
         self.raise_error = raise_error
         self.append_failed = append_failed
+        self.outcomes = list(outcomes)
 
     def run(self, ev, specs, now, **kw):
         self.calls.append((list(ev), dict(specs), now))
@@ -647,7 +648,7 @@ class _FakeAutodispatch:
         if self.append_failed:
             import dispatch as _dispatch
             _dispatch.emit(tick.tick_path(), {"subject": "L-spec-42005"}, "autodispatch-failed", reason="x")
-        return []
+        return self.outcomes
 
 
 # AC25(a) (autodispatch-0427) — `_record()` calls `autodispatch.run` exactly
@@ -655,7 +656,8 @@ class _FakeAutodispatch:
 iso_ad25a = _isolated_events()
 fold.EVENTS = iso_ad25a
 write_to(iso_ad25a, "L-planner-0001.jsonl", {"type": "spec-written", "subject": "L-spec-42003"})
-fake25a = _FakeAutodispatch()
+fake25a = _FakeAutodispatch(outcomes=['acted L-spec-42003 rebuild spawn=42',
+                                    'seat-wait L-spec-42004 rebuild'])
 sys.modules["autodispatch"] = fake25a
 try:
     assert tick.main() == 0
@@ -667,6 +669,21 @@ assert called_now == fold.NOW, "autodispatch-0427 AC25a: now must be fold.NOW"
 assert any(e.get("subject") == "L-spec-42003" for e in called_ev), \
     "autodispatch-0427 AC25a: ev must be this pass's own events"
 assert "L-spec-42003" in called_specs, "autodispatch-0427 AC25a: specs must be this pass's own folded specs"
+lane_log = (fold.ROOT / 'logs/lane-driver.log').read_text()
+assert 'acted L-spec-42003 rebuild spawn=42' in lane_log
+assert 'seat-wait L-spec-42004 rebuild' in lane_log
+assert f'snapshot={fold.NOW.isoformat()}' in lane_log
+assert 'finished autodispatch elapsed_s=' in lane_log
+# A full or read-only log path must not prevent dispatch or the tick heartbeat.
+from unittest.mock import patch as _patch_lane_log
+sys.modules['autodispatch'] = fake25a
+try:
+    with _patch_lane_log.object(tick, '_log_lane_driver', side_effect=OSError('log unavailable')):
+        assert tick.main() == 0
+finally:
+    del sys.modules['autodispatch']
+assert len(fake25a.calls) == 2
+assert ticks()[-1]['lane_driver_log_error'] == 'log unavailable'
 fold.EVENTS = saved_events
 
 # AC25(b) (autodispatch-0427) — a raise leaves `autodispatch_error` on the
@@ -1758,8 +1775,13 @@ assert reading6.get("next") == expected_next6 and reading6.get("owner") == summ6
 # clear the brief directly, advance fold.NOW past the cooldown, and prove via
 # a CONTROL call against a separate scratch root that the cooldown alone
 # would NOT have suppressed a repeat — only this unit's own ledger-scan does.
-look._clear("proving-overdue", key6, "test-clear", evs6, root6)
-fold.NOW = orig_fold_now + datetime.timedelta(minutes=31)
+cleared6 = look._clear("proving-overdue", key6, "test-clear", evs6, root6)
+assert cleared6 is not None
+# The suite may take over a minute on a busy build box. The clear is stamped
+# at emission time, so advance from that event rather than the import clock.
+clear_event6 = next(e for e in reversed(fold.read_events())
+                    if e.get('type') == 'brief-answered' and e.get('ref') == cleared6['ref'])
+fold.NOW = fold.ts(clear_event6['ts']) + datetime.timedelta(minutes=31)
 control_root6 = pathlib.Path(tempfile.mkdtemp())
 control6 = look.emit_once("proving-overdue", key6, "operator", {"next": None, "owner": "operator"},
                           fold.read_events(), root=control_root6)

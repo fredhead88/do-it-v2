@@ -68,13 +68,13 @@ def _busy(events, now):
 
 def _wave(c):
     """Match dispatch.wave_blocker without its clock-dependent spec_state call."""
-    evs, events, sid = c['evs'], c['events'], c['sid']
+    evs, sid = c['evs'], c['sid']
     if any(e.get('type') in ('build-done', 'shipped') for e in evs):
         return None
     waiver = next((e for e in reversed(evs) if e.get('type') == 'decision' and e.get('wave_waive')), None)
     if waiver and waiver['wave_waive'] == 'yes':
         return None
-    charter = dispatch.resolve_charter(events, sid, None)
+    charter = dispatch.resolve_charter(evs, sid, None)
     written = next((e for e in reversed(evs) if e.get('type') == 'spec-written' and e.get('footprint')), None)
     wave = dispatch.spec_wave(charter, written['footprint']) if charter and written else None
     if wave is None:
@@ -167,15 +167,13 @@ def _regrade(c):
     if c['dependency']:
         return None
     triggers = []
-    for subject, evs in c['by_subject'].items():
-        if not subject.startswith('capability:') or subject.split(':', 2)[-1] != c['sid']:
-            continue
+    for evs in c['capabilities'].get(c['sid'], []):
         hold = _latest(evs, {'capability-hold'})
         unblocked = _latest(evs, {'unblocked'})
         if (hold and unblocked and unblocked.get('actor') in ('thinker', 'operator')
                 and unblocked.get('regrade') != 'no'
                 and _time(unblocked['ts']) > _time(hold['ts'])
-                and not routing.hold_ruled(c['events'], hold, c['sid'])):
+                and not routing.hold_ruled(c['evs'], hold, c['sid'])):
             triggers.append(unblocked)
     decision, kind = autodispatch._grader_trigger(c['evs'])
     if decision and kind == 'regrade':
@@ -303,12 +301,15 @@ def _idle(c):
     marker = _latest(c['evs'], {'spec-written', 'decision', 'unblocked', 'dependency-hold'})
     if fail and (not marker or _time(fail['ts']) > _time(marker['ts'])):
         return None
-    for subject, evs in c['by_subject'].items():
-        if subject.startswith('capability:') and subject.split(':', 2)[-1] == c['sid']:
-            last = _latest(evs, {'capability-hold', 'unblocked'})
-            if last and last['type'] == 'capability-hold':
-                return None
-    answered = fold.answered(c['events'])
+    for evs in c['capabilities'].get(c['sid'], []):
+        last = _latest(evs, {'capability-hold', 'unblocked'})
+        if last and last['type'] == 'capability-hold':
+            return None
+    # This is a ledger-wide query, including cross-subject refs. Share it for
+    # this one due() call rather than rescanning the ledger for every idle spec.
+    if 'answered' not in c['memo']:
+        c['memo']['answered'] = fold.answered(c['events'])
+    answered = c['memo']['answered']
     if any(e.get('type') == 'question' and e.get('_src') not in answered for e in c['evs']):
         return None
     trigger = c['evs'][-1] if c['evs'] else None
@@ -361,7 +362,12 @@ def _undetermined(sid, name, rule, now, exc):
                 reason=f'undetermined: {exc}'), now)
 
 
-def due(events, specs, now, table=None):
+def due(events, specs, now, table=None, *, only=None):
+    """Evaluate a snapshot; the driver can select only its owned predicates.
+
+    Diagnostic idle/held rows depend on acting rows, so watchdog callers use
+    the default full evaluation. All memoized work is local to this call.
+    """
     try:
         rules = load(table)
     except ValueError as exc:
@@ -371,7 +377,12 @@ def due(events, specs, now, table=None):
     by_subject = {}
     for e in events:
         by_subject.setdefault(e.get('subject', ''), []).append(e)
+    capabilities = {}
     try:
+        for subject, evs in by_subject.items():
+            if subject.startswith('capability:'):
+                capabilities.setdefault(subject.split(':', 2)[-1], []).append(evs)
+        shipped = {e.get('subject') for e in events if e.get('type') == 'shipped'}
         # Validate before calling any inherited helper: fold.ts falls back to
         # a global clock for malformed input. Such input is undetermined here.
         for e in events:
@@ -381,15 +392,16 @@ def due(events, specs, now, table=None):
     except Exception as exc:
         return [_undetermined(sid, 'undetermined', dict(action='none', actor='none', limit_min=0), now, exc)
                 for sid in sorted(specs)]
-    rows, contexts = [], []
+    rows, contexts, memo = [], [], {}
     for sid, spec in sorted(specs.items()):
         evs = by_subject.get(sid, spec.get('evs', []))
         if _terminal(evs, spec):
             continue
         try:
             c = dict(sid=sid, spec=spec, specs=specs, events=events, evs=evs,
-                     by_subject=by_subject, now=now, table=rules, busy=busy, live=spawns | future)
-            c['dependency'] = autodispatch.held_by_dependency(evs, events)
+                     by_subject=by_subject, now=now, table=rules, busy=busy, live=spawns | future,
+                     capabilities=capabilities, memo=memo)
+            c['dependency'] = autodispatch.held_by_dependency(evs, events, shipped=shipped)
             c['wave'] = _wave(c)
             contexts.append(c)
         except Exception as exc:
@@ -399,6 +411,8 @@ def due(events, specs, now, table=None):
         for c in contexts:
             c['acting_rows'] = rows
             for name in names:
+                if only is not None and name not in only:
+                    continue
                 try:
                     result = PREDICATES[name](c)
                     if result is not None:
