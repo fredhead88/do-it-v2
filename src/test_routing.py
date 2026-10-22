@@ -154,5 +154,47 @@ check({r["criterion"] for r in rows} == {"AC1", "verify"}, f"owed_rows_for_route
 check(all(r["ts"] for r in rows), "owed_rows_for_routed: carries the governing event's own ts")
 print("owed_rows_for_routed ok")
 
+# W44: exact real decision shapes, authorization, revocation, and legacy holds.
+S44 = "L-spec-1387"
+def decision44(**fields):
+    return dict(type="decision", subject=S44, actor="thinker", **fields)
+
+explicit44 = decision44(criterion="AC9", why="Pre-existing baseline failure.", evidence="evidence/base.json")
+prose44 = decision44(why="AC01, AC04, AC09 and AC11 met on build a8d0e22f4c. "
+                        "AC04: Thinker rerun gives 3 passed and 0 skipped.", evidence="evidence/all.json")
+rulings44 = [explicit44, prose44]
+check(set(routing.ruled_criteria(rulings44, S44)) == {"AC9", "AC01", "AC04", "AC09", "AC11"},
+      "W44: explicit and why-only multi-AC rulings preserve zero-padded ids")
+for actor in ("builder", "grader", "executor"):
+    check(not routing.ruled_criteria([dict(prose44, actor=actor)], S44), "W44: actor gate")
+check(not routing.ruled_criteria(rulings44, "L-spec-other"), "W44: spec isolation")
+check(not routing.ruled_criteria([decision44(why="Inspect AC1. AC10 is met.")], S44).get("AC1"),
+      "W44: unrelated mention and AC1/AC10 collision are not rulings")
+check(set(routing.ruled_criteria([decision44(criteria=["AC1", "AC2"], why="Operator evidence accepted.")], S44))
+      == {"AC1", "AC2"}, "W44: structured criteria list")
+check(set(routing.ruled_criteria([decision44(criteria="AC1, AC2", why="Evidence accepted.")], S44))
+      == {"AC1", "AC2"}, "W44: structured criteria text")
+check("AC9" not in routing.ruled_criteria(rulings44 + [decision44(criterion="AC9", why="AC9 is not met")], S44),
+      "W44: later negative decision revokes a ruling")
+check(not routing.ruled_criteria(rulings44 + [dict(type="spec-written", subject=S44)], S44),
+      "W44: a replacement spec invalidates old rulings")
+hold44 = dict(type="capability-hold", subject="capability:unknown:" + S44, spec=S44,
+              source="verdict", capability="unknown", spawn="L-grader-2594")
+verdict44 = dict(type="verdict", subject=S44, spawn="L-grader-2594",
+                 cannot_assess=["AC01", "AC04", "AC09", "AC11"],
+                 missing_capability=[dict(ac=cid, capability="unknown") for cid in ("AC01", "AC04", "AC11")])
+check(routing.hold_ruled(rulings44 + [verdict44], hold44, S44), "W44: legacy hold joins its own verdict")
+check(not routing.hold_ruled([explicit44, verdict44], hold44, S44), "W44: unruled hold stays")
+check(not routing.hold_ruled(rulings44 + [dict(verdict44, spawn="unrelated")], hold44, S44),
+      "W44: never borrow an unrelated verdict")
+check(not routing.hold_ruled(rulings44, hold44, S44), "W44: absent ids remain unknown")
+check(not routing.hold_ruled(rulings44 + [verdict44], dict(hold44, source="preflight"), S44),
+      "W44: preflight hold is not a criterion ruling")
+check(routing.hold_ruled(rulings44, dict(hold44, criteria=["AC01", "AC04"]), S44),
+      "W44: explicit hold criteria need no verdict lookup")
+check(not routing.hold_ruled(rulings44, dict(hold44, criteria=["AC01", "AC99"]), S44),
+      "W44: one ruled criterion cannot clear a mixed hold")
+print("W44 criterion rulings and hold association ok")
+
 shutil_needed = False  # no tempdir cleanup needed — this file writes nothing to disk
 print(f"ALL OK ({N} checks)")

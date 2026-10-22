@@ -17,6 +17,85 @@ that follows from those reads."""
 import re
 
 _AC_ANY = re.compile(r"^\s*\**AC(\d+)\s*\[")  # same anchor shape packet._AC_ANY matches
+_AC_ID = re.compile(r"\bAC[0-9]+\b")
+_AC_LIST = r"\bAC[0-9]+(?:\s*(?:,\s*(?:and\s+)?|and\s+|&\s*)AC[0-9]+)*"
+_RULING = re.compile(r"(" + _AC_LIST + r")\s+(?:(?:is|are|was|were)\s+)?"
+                     r"(?:(?:already\s+)?ruled\s+)?(not\s+met|unmet|met)\b", re.I)
+
+
+def criterion_ids(value):
+    """Read exact ids (preserving AC01 vs AC1) from a string or criteria list."""
+    if isinstance(value, (list, tuple)):
+        return {cid for item in value for cid in criterion_ids(item)}
+    return set(_AC_ID.findall(str(value or "")))
+
+
+def ruled_criteria(events, spec):
+    """Standing per-AC thinker/operator decisions on SPEC, with their evidence.
+
+    Explicit criterion=/criteria= fields name the ruling. Legacy why-only
+    decisions must affirm `ACn [and ACm] [are ruled] met`; a passing mention
+    is insufficient. A later negative ruling revokes those ids; a new spec
+    resets all rulings. Route refreshes and regrades do not erase a ruling.
+    Events use ledger order, like latest_routed_events.
+    """
+    out = {}
+    for e in events:
+        if e.get("subject") != spec:
+            continue
+        if e.get("type") == "spec-written":
+            out.clear()
+        if e.get("type") != "decision" or e.get("actor") not in ("thinker", "operator"):
+            continue
+        met = criterion_ids(e.get("criterion")) | criterion_ids(e.get("criteria"))
+        negative = set()
+        for match in _RULING.finditer(e.get("why") or ""):
+            ids = criterion_ids(match[1])
+            (met if match[2].lower() == "met" else negative).update(ids)
+        for cid in met - negative:
+            out[cid] = e
+        for cid in negative:
+            out.pop(cid, None)
+    return out
+
+
+def ruling_packet_items(events, spec):
+    rulings = ruled_criteria(events, spec)
+    if not rulings:
+        return []
+    return ["Standing criterion rulings (report these as met; do not re-assess):"] + [
+        f"   {cid}: ruled met by the {'Thinker' if e['actor'] == 'thinker' else 'operator'}: "
+        f"{e.get('why') or 'per-criterion decision'}, evidence {e.get('evidence') or 'not recorded'}"
+        for cid, e in sorted(rulings.items())]
+
+
+def hold_criteria(events, hold, spec):
+    """Named hold ids, or the originating verdict's ids for legacy holds.
+
+    Never infer from an unrelated verdict or a preflight failure. Empty means
+    unknown, so callers must keep the normal hold/regrade behavior.
+    """
+    ids = criterion_ids(hold.get("criterion")) | criterion_ids(hold.get("criteria"))
+    if ids:
+        return ids
+    if hold.get("source") == "preflight" or not hold.get("spawn"):
+        return set()
+    # lane_driver's read-only projection calls an unconfirmed verdict
+    # `cannot-assess` and projects the hold's escalation without source/capability.
+    verdict = next((e for e in reversed(events) if e.get("type") in ("verdict", "cannot-assess")
+                    and e.get("subject") == spec and e.get("spawn") == hold["spawn"]), None)
+    if verdict is None:
+        return set()
+    if "missing_capability" in verdict:
+        cap = hold.get("capability") or hold.get("subject", "").split(":")[1]
+        return {row["ac"] for row in verdict["missing_capability"]
+                if row.get("ac") and row.get("capability") == cap}
+    return criterion_ids(verdict.get("cannot_assess"))
+
+
+def hold_ruled(events, hold, spec):
+    ids = hold_criteria(events, hold, spec)
+    return bool(ids) and ids <= ruled_criteria(events, spec).keys()
 
 
 def latest_routed_events(events, spec):

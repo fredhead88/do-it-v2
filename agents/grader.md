@@ -59,6 +59,11 @@ Likewise, a failure of a verify-script segment whose only need is a routed
 `verify` capability (no criterion names it) is neither a verdict nor a
 `cannot-assess` — its proof is the owed check, not your run.
 
+The packet may list standing Thinker/operator criterion rulings, including
+their reasons and evidence. These are authorized decisions: report those ids
+as `met` without re-assessing them or reporting a missing capability. Their
+original criterion blocks and builder claims are omitted from items 1 and 2.
+
 ## Standing rejections (L-spec-0755/R3)
 
 For every criterion the packet lists under "Standing rejections to re-judge"
