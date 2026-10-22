@@ -222,6 +222,53 @@ class LaneRulesTests(unittest.TestCase):
         self.assertFalse(any(r['rule'] == 'rebuild' for r in self.rows(legacy)))
         self.row([written(), event('decision', -60, actor='thinker', rework='yes')], 'rebuild')
 
+    def test_rebuild_answered_question_without_build_blocked(self):
+        spawn = 'L-builder-2992'
+        question = event('question', -69, actor='builder', spawn=spawn,
+                         _src=spawn + '.jsonl:3')
+        base = [written(), event('build-started', -75, spawn=spawn), question,
+                event('spawn-done', -68, role='builder', spawn=spawn)]
+        answer = event('decision', -60, actor='thinker', ref=question['_src'])
+        for actor in ('thinker', 'operator'):
+            with self.subTest(actor=actor):
+                self.assertEqual(self.row(base + [dict(answer, actor=actor)], 'rebuild')['since'],
+                                 answer['ts'])
+        for fields in (dict(ref='grader:1'), dict(ref=None), dict(actor='builder'),
+                       dict(ts=question['ts']), dict(ts=event('x', -80)['ts']),
+                       dict(close='superseded'), dict(regrade='yes'), dict(wave_waive='yes')):
+            with self.subTest(fields=fields):
+                self.assertFalse(any(r['rule'] == 'rebuild'
+                                     for r in self.rows(base + [dict(answer, **fields)])))
+        self.assertFalse(any(r['rule'] == 'rebuild' for r in self.rows(base)))
+        for fields in (dict(actor='grader'), dict(_src=None), dict(spawn='L-builder-2991')):
+            changed = [dict(e, **fields) if e is question else e for e in base]
+            self.assertFalse(any(r['rule'] == 'rebuild' for r in self.rows(changed + [answer])))
+        for state in dispatch.SETTLED_STATES:
+            self.assertFalse(any(r['rule'] == 'rebuild' for r in
+                                 lr.due(base + [answer], {SID: dict(state=state)}, NOW)))
+        for minute in (-65, -55):
+            self.assertFalse(any(r['rule'] == 'rebuild' for r in
+                                 self.rows(base + [answer, event('shipped', minute)])))
+        # A previous blocked attempt must not prevent answering the latest one.
+        older = event('build-blocked', -80, actor='builder', spawn='L-builder-2991')
+        self.assertEqual(self.row(base + [older, answer], 'rebuild')['since'], answer['ts'])
+
+    def test_question_answer_does_not_reopen_a_later_builder_attempt(self):
+        spawn = 'L-builder-2992'
+        question = event('question', -70, actor='builder', spawn=spawn,
+                         _src=spawn + '.jsonl:3')
+        answer = event('decision', -60, actor='thinker', ref=question['_src'])
+        base = [written(), question, answer]
+        for minute in (-65, -55):
+            for kind in sorted(lr.DISPATCH_EVENTS | {'build-started', 'build-done', 'build-blocked'}):
+                for role in (dict(role='builder'), dict(spawn='L-builder-2993')):
+                    with self.subTest(minute=minute, kind=kind, role=role):
+                        later = event(kind, minute, **role)
+                        self.assertFalse(any(r['rule'] == 'rebuild' for r in self.rows(base + [later])))
+        newer = event('question', -65, actor='builder', spawn=spawn, _src=spawn + '.jsonl:4')
+        self.assertFalse(any(r['rule'] == 'rebuild' for r in self.rows(base + [newer])))
+        self.row(base + [event('spawn-started', -65, role='grader')], 'rebuild')
+
     def test_rebuild_never_reopens_shipped_or_settled_specs(self):
         for minute in (-65, -55):
             ev = fixture('rebuild') + [event('shipped', minute, actor='executor')]
@@ -247,6 +294,8 @@ class LaneRulesTests(unittest.TestCase):
             for ref in (blocked['_src'], question['_src']):
                 cases.append(('rebuild', [written(), blocked, question,
                               event('decision', -60, actor=actor, ref=ref)]))
+            cases.append(('rebuild', [written(), question,
+                          event('decision', -60, actor=actor, ref=question['_src'])]))
         cases += [('rebuild', [written(), blocked, event('spec-written', -60)]),
                   ('rebuild', [written(), event('decision', -60, actor='thinker',
                                                rework='yes', ref=question['_src'])]),

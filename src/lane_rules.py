@@ -98,6 +98,23 @@ def _result(trigger, reason='condition met', **fields):
     return dict(since=trigger['ts'], reason=reason, **fields)
 
 
+def _builder_question(evs):
+    """The latest builder attempt must still end at this question."""
+    activity = [e for e in evs if e.get('type') in {'build-started', 'build-blocked', 'build-done'}
+                or e.get('type') == 'question' and e.get('actor') == 'builder'
+                or e.get('type') in DISPATCH_EVENTS and
+                (e.get('role') or '-'.join(str(e.get('spawn') or '').split('-')[1:-1])
+                 or 'builder') == 'builder']
+    question = _latest(activity, {'question', 'build-blocked', 'build-done'})
+    if not question or question['type'] != 'question' or not question.get('_src'):
+        return None
+    attempt = _latest(activity, DISPATCH_EVENTS | {'build-started', 'build-blocked'})
+    if attempt and (_time(attempt['ts']) >= _time(question['ts'])
+                    or attempt.get('spawn') and attempt['spawn'] != question.get('spawn')):
+        return None
+    return question
+
+
 def _rebuild(c):
     evs = c['evs']
     # Settled fold states include shipped (and all shipped-owed-* states),
@@ -112,12 +129,15 @@ def _rebuild(c):
                  and e.get('actor') == 'builder' and e.get('_src')
                  and (e.get('spawn') == blocked['spawn'] if blocked.get('spawn')
                       else _time(e['ts']) >= _time(blocked['ts']))]
+    question = _builder_question(evs)
+    if question and question not in questions:
+        questions.append(question)
     decisions = [e for e in evs if e.get('type') == 'decision' and e.get('actor') in ('thinker', 'operator')
                  and not e.get('close') and e.get('regrade') != 'yes' and not e.get('wave_waive')
                  and (blocked and _time(e['ts']) > _time(blocked['ts']) and e.get('ref')
-                      and (e['ref'] == blocked.get('_src')
-                           or any(e['ref'] == q['_src'] and _time(e['ts']) > _time(q['ts'])
-                                  for q in questions))
+                      and e['ref'] == blocked.get('_src')
+                      or any(e.get('ref') == q['_src'] and _time(e['ts']) > _time(q['ts'])
+                             for q in questions)
                       or not blocked and e.get('rework') == 'yes')]
     rewrites = [e for e in evs if blocked and e.get('type') == 'spec-written'
                 and _time(e['ts']) > _time(blocked['ts'])]

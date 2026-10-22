@@ -192,6 +192,61 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(self.run_driver(), [])
         self.assertEqual(self.calls, [])
 
+    def test_question_only_answer_dispatches_builder_once(self):
+        spawn = 'L-builder-2992'
+        self.events = [self.events[0], self.event('build-started', 30, spawn=spawn),
+                       self.event('question', 20, actor='builder', spawn=spawn,
+                                  _src=spawn + '.jsonl:3'),
+                       self.event('spawn-done', 19, role='builder', spawn=spawn),
+                       self.event('decision', 1, actor='thinker', ref=spawn + '.jsonl:3',
+                                  why='Use the smaller scope')]
+        self.assertEqual(self.run_driver(dry_run=True), [f'would act {self.sid} rebuild'])
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.run_driver(), [f'acted {self.sid} rebuild spawn=L-builder-9999'])
+        self.assertEqual(self.calls[0][:4], ['doit', 'packet', 'builder', self.sid])
+        self.assertEqual((self.appended()[0]['rule'], self.appended()[0]['since']),
+                         ('rebuild', self.events[-1]['ts']))
+        self.events.extend(fold.read_events())
+        self.calls.clear()
+        self.assertEqual(self.run_driver(), [])
+        self.assertEqual(self.calls, [])
+        self.assertEqual(len(self.appended()), 1)
+
+    def test_question_only_requires_current_answer_and_open_spec(self):
+        question = self.event('question', 20, actor='builder', spawn='L-builder-2992',
+                              _src='L-builder-2992.jsonl:3')
+        answer = self.event('decision', 1, actor='thinker', ref=question['_src'])
+        base = [self.events[0], question]
+        cases = [base, base + [dict(answer, ref='grader:1')],
+                 base + [dict(answer, actor='builder')],
+                 base + [answer, self.event('shipped')]]
+        for kind in sorted(lane_rules.DISPATCH_EVENTS | {'build-started'}):
+            cases.append(base + [self.event(kind, 10, spawn='L-builder-2993'), answer])
+        for events in cases:
+            with self.subTest(events=events):
+                self.events = events
+                self.assertEqual(self.run_driver(), [])
+        self.events = base + [answer]
+        for state in dispatch.SETTLED_STATES:
+            self.specs[self.sid]['state'] = state
+            self.assertEqual(self.run_driver(), [])
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.appended(), [])
+
+    def test_question_only_answer_waits_for_dependency_release(self):
+        self.events = [self.events[0],
+                       self.event('question', 20, actor='builder', spawn='L-builder-2992',
+                                  _src='L-builder-2992.jsonl:3'),
+                       self.event('dependency-hold', 2, waits_for='L-spec-9998'),
+                       self.event('decision', 1, actor='operator', ref='L-builder-2992.jsonl:3')]
+        self.assertEqual(self.run_driver(), [])
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.appended(), [])
+        self.events.append(self.event('unblocked', actor='operator'))
+        self.run_driver()
+        self.assertEqual(self.calls[0][:4], ['doit', 'packet', 'builder', self.sid])
+        self.assertEqual(self.appended()[0]['rule'], 'rebuild')
+
     def test_rebuild_ignores_unrelated_ruling(self):
         for fields in ({}, dict(ref='grader:1')):
             with self.subTest(fields=fields):
