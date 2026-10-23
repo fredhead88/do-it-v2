@@ -261,17 +261,18 @@ class RegistryTests(unittest.TestCase):
         self.assertIn("0 present, 0 undetermined, 1 unarmed, 1 provisional", proc.stdout)
 
     def test_ac6_real_registry_documentation(self):
-        rows = retired.load(str(REPO / "retired.d"))
-        required = {"upload-archive-once", "realm-views"}
-        self.assertTrue(required <= {r.name for r in rows})
-        self.assertTrue(all(Path(r.repo).is_absolute() for r in rows if r.repo is not None))
-        text = (REPO / "retired.d/README.md").read_text()
-        self.assertTrue(next(r for r in rows if r.name == "upload-archive-once").provisional)
-        for field in ["name", "kind", "pattern", "paths", "repo", "regex", "provisional", "armed_when_path", "armed_when_contains"]:
-            self.assertIn(field, text)
-        for code in [0, 1, 2]:
-            self.assertIn(f"exit {code}", text)
-        print("name kind pattern paths repo regex armed_when_path armed_when_contains; exits 0/1/2")
+        with patch.dict(os.environ, DOIT_ROOT=str(self.repo)):
+            rows = retired.load(str(REPO / "retired.d"))
+            required = {"upload-archive-once", "realm-views"}
+            self.assertTrue(required <= {r.name for r in rows})
+            self.assertTrue(all(Path(r.repo).is_absolute() for r in rows if r.repo is not None))
+            text = (REPO / "retired.d/README.md").read_text()
+            self.assertTrue(next(r for r in rows if r.name == "upload-archive-once").provisional)
+            for field in ["name", "kind", "pattern", "paths", "repo", "regex", "provisional", "armed_when_path", "armed_when_contains"]:
+                self.assertIn(field, text)
+            for code in [0, 1, 2]:
+                self.assertIn(f"exit {code}", text)
+            print("name kind pattern paths repo regex armed_when_path armed_when_contains; exits 0/1/2")
 
     def test_ac7_test_runner_gate(self):
         # A complete disposable launcher fixture proves the test-loop gate,

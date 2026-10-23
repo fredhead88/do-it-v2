@@ -7,6 +7,7 @@ import argparse
 import fcntl
 import hashlib
 import json
+import os
 import pathlib
 import re
 import shlex
@@ -111,6 +112,28 @@ def run_check(tree, base, commands, record, *, timeout=build_runner.WALL_CAP):
         pathlib.Path(record).write_text(json.dumps(summary, indent=2) + "\n")
         return build_runner._process(["/bin/bash", "-euo", "pipefail", "-c", commands],
                                      cwd=tree, env=env, deadline=deadline)
+    except (build_runner.Undetermined, OSError, subprocess.SubprocessError) as exc:
+        category = getattr(exc, "category", None)
+        if category is None and grading_env.failure_kind(str(exc)) == "infra":
+            category = grading_env.infra_class(str(exc))
+        if not category:
+            raise
+        import fold
+        subject = summary.get("subject") or pathlib.Path(tree).parent.name
+        fields = grading_env.infra_fields(pathlib.Path(record).stem, "owed-sweeper", "")
+        fields.update({"class": category, "project": summary.get("project") or os.environ.get("DOIT_PROJECT", "unknown")})
+        original = os.environ.get("DOIT_LEDGER_FILE")
+        try:
+            # Provisioning belongs to the sweep, even when called from a shell.
+            os.environ["DOIT_LEDGER_FILE"] = (original if original and fold.actor_of(pathlib.Path(original).name) == "owed-sweeper"
+                                              else "L-owed-sweeper-provision.jsonl")
+            fold.append(["infra-failure", subject] + [f"{key}:={json.dumps(value)}" for key, value in fields.items()])
+        finally:
+            if original is None:
+                os.environ.pop("DOIT_LEDGER_FILE", None)
+            else:
+                os.environ["DOIT_LEDGER_FILE"] = original
+        return 2, ("infra:" + category + "\n").encode()
     finally:
         # A second termination signal must not interrupt the bounded cleanup.
         for sig in previous:

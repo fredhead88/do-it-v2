@@ -89,6 +89,74 @@ def emit(dst, base, type_, /, *, strict=False, **kv):
     return None
 
 
+RETRY_MINUTES = (5, 15, 45, 120)
+
+
+def _retry_events(events, subject, role):
+    rows = []
+    for event in events:
+        event_role = event.get("role") or spawns._role(event)
+        if event.get("subject") != subject or event_role != role:
+            continue
+        if event.get("type") == "spawn-done":
+            rows = []
+        elif event.get("type") == "infra-failure":
+            if event.get("actor") is None or fold.admits(event, event["actor"]) is None:
+                rows.append(event)
+    return rows
+
+
+def retry_at(events, subject, role, now):
+    """Four bounded delays from each failure; a successful role resets the ladder."""
+    rows = _retry_events(events, subject, role)
+    if not rows or len(rows) > len(RETRY_MINUTES):
+        return None
+    try:
+        stamp = datetime.fromisoformat(rows[-1]["ts"].replace("Z", "+00:00"))
+        if stamp.tzinfo is None:
+            return None
+        return (stamp + timedelta(minutes=RETRY_MINUTES[len(rows) - 1])).isoformat(timespec="seconds")
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
+def infra_gate(events, subject, role, now):
+    if _machine_hold(events, subject, role):
+        return "hold"
+    rows = _retry_events(events, subject, role)
+    if not rows:
+        return "run"
+    allowed = retry_at(events, subject, role, now)
+    if allowed is None:
+        return "hold"
+    try:
+        return "wait" if now < datetime.fromisoformat(allowed) else "run"
+    except (ValueError, TypeError):
+        return "hold"
+
+
+def _machine_hold(events, subject, role):
+    hold = None
+    for event in events:
+        if event.get("subject") != subject:
+            continue
+        event_role = event.get("role") or spawns._role(event)
+        if event.get("type") in ("decision", "unblocked") or (event.get("type") == "spawn-done" and event_role == role):
+            hold = None
+        elif (event.get("type") == "escalation-blocking" and event_role == role
+              and event.get("kind") in ("failure-unknown", "infra-exhausted")):
+            hold = event
+    return hold
+
+
+def relay_serving(clock):
+    try:
+        import relay
+        return relay.serving(clock) is True
+    except Exception:
+        return False
+
+
 def open_spec_writer_spawn(all_ev, subject):
     """R3/L-spec-0192: whether SUBJECT carries a spec-writer `spawn-started` with no matching terminal event — `tick.in_flight`'s own terminal tuple (spawn-done/spawn-failed/spawn-stale) and its own aging rule (busy within twice the role's cap, dispatchable once older, whether or not the start named a spawn id), scoped here to one subject and one role so `dispatch. main()` and the tick can never disagree about what counts as open."""
     ended = {e.get("spawn") for e in all_ev if e["type"] in ("spawn-done", "spawn-failed", "spawn-stale")}
@@ -506,9 +574,11 @@ def window_min(role, subject, events, *, backend="seat"):
 
 
 def run_seat(spawn, cmd, packet, cwd, timeout, path=None, *, window=None, ledger=None, base=None, role=None,
-             view=None):
+             view=None, clock=None, sleep=None):
     """The seat path (D116 by another route). Where `claude -p` is banned as metered — the Albert Scott rule, spec 572 — the spawn runs as an interactive session's seat-billed sub-agent instead. This function does not spawn: it writes the packet and the line that WOULD have run to `$R/seat/<spawn>.*`, prints where the result is expected, and waits for `<spawn>.result.json` — the same JSON envelope `claude -p --output-format json` prints (is_error, structured_output, usage, total_cost_usd, num_turns, session_id, modelUsage, permission_denials). Every after-the-fact check in main() then runs unchanged, and the ledger records `spawn_path: seat` so the two routes are distinguishable forever. R6/L-spec-0269: the same loop also tracks whether `<spawn>.claimed` has ever appeared on disk — written ONLY by `scripts/seat/claim.sh` (O_EXCL; this function never writes it, ADR-0028-2). Two clocks, not one: at `DOIT_SEAT_CLAIM_SEC` (default 300) seconds unclaimed, this function no longer raises — it appends one non-terminal `seat-stale{spawn, role, subject, age_s}` (via `emit`, when `ledger` and `base` are both given; never a second one on the same call) and keeps waiting. It gives up for real — raising `Unserved`, exactly as before — only once `window` seconds have passed with no claim (`window` defaults to `timeout` when omitted, so a caller supplying neither keeps a single-clock, back-compat wait). Once a claim IS observed, the wait-for-result deadline becomes `timeout` seconds counted from the claim instant, not from this call's start — a claim landing at the edge of the window still gets the whole cap to finish. L-spec-0262 (SWP2/SWP3): `path` is the writing role's already-resolved, absolute write destination (`None` for a non-writing role), computed once by `main` before any spend. It rides on `cmd.json["path"]` and, for a writing role, prefixes the packet text itself with `WRITE PATH: <path>\n\n` — so a relay pane or the Planner reads its destination off disk and never asks or infers it (the direct cause of a packet expiring unserved). R8/L-spec-0437: `view`, when not `None`, is the grader-only isolated filesystem view a gated block in `main()` already built. The SAME `packet_text` also lands at `view/seat/<spawn>.packet.md` (a copy, proven byte-identical — AC5), and `cmd.json`'s `"cwd"` — and the status line's own `cwd` — become `view/tree`, never this call's `cwd` parameter: the pane that reads `cmd.json` must land inside the view, not the real worktree. `view=None` (every other role/backend, and the codex->seat fallback) reproduces the prior behaviour byte-for-byte (AC9)."""
     import time
+    clock = clock or time.time
+    sleep = sleep or time.sleep
     SEAT.mkdir(parents=True, exist_ok=True)
     packet_text = f"WRITE PATH: {path}\n\n{packet}" if path else packet
     (SEAT / f"{spawn}.packet.md").write_text(packet_text)
@@ -528,7 +598,7 @@ def run_seat(spawn, cmd, packet, cwd, timeout, path=None, *, window=None, ledger
     meta_p = SEAT / f"{spawn}.meta.json"
     claim_p = SEAT / f"{spawn}.claimed"
     claim_sec = int(os.environ.get("DOIT_SEAT_CLAIM_SEC", 300))
-    t0 = time.time()
+    t0 = clock()
     claimed = False
     claim_t = None
     stale_emitted = False
@@ -536,20 +606,20 @@ def run_seat(spawn, cmd, packet, cwd, timeout, path=None, *, window=None, ledger
     while not (want.is_file() or (meta_p.is_file() and bare.is_file())):
         spawns.raise_if_cancelled(spawn, cancel_p)
         if not claimed and claim_p.is_file():
-            claimed, claim_t = True, time.time()
+            claimed, claim_t = True, clock()
         if not claimed:
-            elapsed = time.time() - t0
+            elapsed = clock() - t0
             if not stale_emitted and elapsed > claim_sec:
                 stale_emitted = True
                 if ledger is not None and base is not None:
                     emit(ledger, base, "seat-stale", role=role, age_s=elapsed)
             if elapsed > window:
                 raise Unserved(spawn, claim_p, elapsed)
-        elif time.time() - claim_t > timeout:
+        elif clock() - claim_t > timeout:
             raise subprocess.TimeoutExpired(cmd, timeout)
-        time.sleep(2)
+        sleep(2)
     spawns.restore_sigterm(prev_term)
-    time.sleep(1)                       # a writer that is still writing
+    sleep(1)                           # a writer that is still writing
     if want.is_file():
         return SeatResult(want.read_text())
     # The bare Output the contract validated with `doit validate`, plus what the pane recorded beside it (model, session, turns). The envelope is built here so no hand ever writes one.
@@ -1014,7 +1084,8 @@ def main(a):
         return _main(a)
     except Exception as exc:
         if a._dispatch_crash is not None:
-            a._dispatch_crash(type(exc).__name__)
+            if a._dispatch_crash(exc):
+                sys.exit(2)
         raise
     finally:
         a._dispatch_crash = None
@@ -1040,7 +1111,43 @@ def _main(a):
     grading_view = None  # L-spec-0481/R12.2-R12.3: set once a grader's own view is built; `fail`
                          # below reads it (closure, late-bound) so a preflight refusal — or any LATER failure in this same run — tears the private cluster down at, never before, the terminal event it emits (SD-R12-3c).
 
-    def fail(why, reason=None):
+    def machine_failure(text, exit_code=1, category=None):
+        import grading_env
+        classification = "infra" if category else grading_env.failure_kind(text, exit_code)
+        if classification == "work":
+            return False
+        import fold
+        clock = datetime.fromisoformat(now())
+        events = fold.read_events()
+        fields = dict(role=a.role, backend=meta.get("backend", "unknown"), attempt=spawn)
+        if classification == "infra":
+            # A fifth failure ends the ladder; it never advertises a sixth attempt.
+            rows = _retry_events(events, a.subject, a.role)
+            if len(rows) < len(RETRY_MINUTES):
+                emit(ledger, base, "infra-failure", **fields,
+                     **{"class": category or grading_env.infra_class(text)},
+                     retry_at=(clock + timedelta(minutes=RETRY_MINUTES[len(rows)])).isoformat(timespec="seconds"))
+            else:
+                emit(ledger, base, "escalation-blocking", **fields,
+                     kind="infra-exhausted", owner="executor", why="infra: retry ladder exhausted",
+                     default="hold; Executor investigates before retrying", deadline=(clock + timedelta(hours=24)).isoformat(),
+                     revert="Executor records a decision or unblocked")
+        else:
+            emit(ledger, base, "escalation-blocking", **fields,
+                 kind="failure-unknown", owner="executor", why="unknown: failure could not be classified",
+                 default="hold; Executor classifies the failure", deadline=(clock + timedelta(hours=24)).isoformat(),
+                 revert="Executor records a decision or unblocked")
+        if grading_view is not None:
+            grading_env.teardown(grading_view)
+        print(f"dispatch: {classification} hold {spawn}", file=sys.stderr)
+        return True
+
+    def fail(why, reason=None, exit_code=1, backend_failure=False):
+        import grading_env
+        # Deterministic packet/output guard failures are work; process failures
+        # need the classifier, and infra setup diagnostics always take the hold.
+        if (backend_failure or grading_env.failure_kind(why, exit_code) == "infra") and machine_failure(why, exit_code):
+            sys.exit(2)
         kv = {"why": why}
         if reason is not None:
             kv["reason"] = reason
@@ -1050,7 +1157,11 @@ def _main(a):
         print(f"FAILED {spawn}: {why}", file=sys.stderr)
         sys.exit(1)
 
-    def crash(exception_type):
+    def crash(exc):
+        if machine_failure(str(exc), 124 if isinstance(exc, subprocess.TimeoutExpired) else 1,
+                           getattr(exc, "category", None)):
+            return True
+        exception_type = type(exc).__name__
         emit(ledger, base, "spawn-failed", reason=f"crash:{exception_type}",
              why=f"unexpected backend path exception: {exception_type}", **meta)
         if grading_view is not None:
@@ -1070,7 +1181,30 @@ def _main(a):
     sys.path.insert(0, str(HERE))
     import fold
     # L-spec-0755/R2: duplicate/conflicting dispatch refused before any spend; lock held until the start event lands.
-    dispatch_lock = spawns.gate(ROOT, a.role, a.subject, cwd, fold.read_events(), fail)
+    inherited = fold.read_events()
+    clock = datetime.fromisoformat(now())
+    retry_state = infra_gate(inherited, a.subject, a.role, clock)
+    unknown_hold = _machine_hold(inherited, a.subject, a.role)
+    previous = _retry_events(inherited, a.subject, a.role)
+    # A serving-gated fallback became the failed attempt's backend. Resume
+    # there directly rather than spending another codex call or switching it.
+    fallback = mm.get("fallback") or {}
+    if (previous and previous[-1].get("backend") == "seat" and backend == "codex"
+            and fallback.get("backend") == "seat" and relay_serving(clock)):
+        backend = "seat"
+        mm = {**mm, "model": fallback["model"]}
+        meta.update(backend=backend, spawn_path=backend, model_requested=mm["model"],
+                    backend_fallback=True, fallback_from="codex")
+    if retry_state != "run" or unknown_hold or (previous and previous[-1].get("backend") != backend):
+        state = retry_state if retry_state != "run" else "hold"
+        print(f"dispatch: infra {state}; retry_at="
+              f"{retry_at(inherited, a.subject, a.role, clock)}", file=sys.stderr)
+        sys.exit(2)
+    ended = {e.get("attempt") for e in inherited if e.get("type") == "infra-failure"
+             or e.get("type") == "escalation-blocking" and e.get("kind") in ("failure-unknown", "infra-exhausted")}
+    dispatch_lock = spawns.gate(ROOT, a.role, a.subject, cwd,
+                               [e for e in inherited if not (e.get("type") in spawns.START_TYPES
+                                                            and e.get("spawn") in ended)], fail)
     # R3/L-spec-0192: a builder dispatch against a killed subject, or one still carrying an open spec-writer spawn, is refused HERE — before any subprocess or spend, and before the `build-started` event itself (cost_path). Scoped to role="builder" only.
     wave_note = None
     if builder:
@@ -1203,9 +1337,17 @@ def _main(a):
             pf_view, pf_repo = grading_view, HERE.parent
         else:
             pf_view, pf_repo = pathlib.Path(cwd), HERE.parent
-        failures = grading_env.preflight(a.role, a.subject, pf_view, gproject, repo=pf_repo, mcp_config=a.mcp_config,
-                                         owed=(g_explicit_owed if a.role == "grader" else frozenset()), routed=g_routed, bundled=g_bundle is not None)
+        try:
+            failures = grading_env.preflight(a.role, a.subject, pf_view, gproject, repo=pf_repo, mcp_config=a.mcp_config,
+                                            owed=(g_explicit_owed if a.role == "grader" else frozenset()), routed=g_routed, bundled=g_bundle is not None)
+        except grading_env.InfraFailure as exc:
+            machine_failure(str(exc), category=exc.category)
+            sys.exit(2)
         if failures:
+            infra_reason = next((reason for _, reason in failures if grading_env.failure_kind(reason) == "infra"), None)
+            if infra_reason:
+                machine_failure(infra_reason)
+                sys.exit(2)
             for cap, reason in failures:
                 emit(ledger, base, "grading-preflight-failed", role=a.role, capability=cap, reason=reason)
             for cap, _ in failures:
@@ -1326,15 +1468,17 @@ def _main(a):
         else:
             r = run_claude(cmd, packet, cwd, (a.timeout or tmin) * 60)
     except subprocess.TimeoutExpired:
-        fail(f"timeout after {a.timeout or tmin} min", reason="timeout")
+        fail(f"timeout after {a.timeout or tmin} min", reason="timeout", backend_failure=True, exit_code=124)
     except (Unserved, spawns.Cancelled) as e:
-        spawns.unserved_or_cancelled(e, fail, spawn, grading_view)
+        spawns.unserved_or_cancelled(e, lambda why, reason=None: fail(why, reason=reason, backend_failure=True),
+                                    spawn, grading_view)
     try:
         res = json.loads(r.stdout)
     except ValueError:
-        fail(f"exit {r.returncode}, no JSON on stdout: {r.stderr[-300:]!r}")
+        fail(f"exit {r.returncode}, no JSON on stdout: {r.stderr[-300:]!r}", exit_code=r.returncode, backend_failure=True)
     # A codex refusal is the backend's, not the packet's (a weekly limit, a sandbox denial, a dead CLI): with a `fallback` on the map the spawn runs ONCE more on that backend, and the event says so. Never a third route, never silently.
-    if backend == "codex" and res.get("is_error") and mm.get("fallback"):
+    if (backend == "codex" and mm.get("fallback") and res.get("is_error")
+            and relay_serving(datetime.fromisoformat(now()))):
         fb = mm["fallback"]
         emit(ledger, base, "backend-fallback", from_backend="codex", to_backend=fb["backend"],
              to_model=fb["model"], why=str(res.get("result"))[:200])
@@ -1348,13 +1492,14 @@ def _main(a):
                         window=wm * 60, ledger=ledger, base=base, role=a.role, view=view) if seat \
                 else run_claude(cmd, packet, cwd, (a.timeout or tmin) * 60)
         except subprocess.TimeoutExpired:
-            fail(f"timeout after {a.timeout or tmin} min (on the fallback backend {backend})", reason="timeout")
+            fail(f"timeout after {a.timeout or tmin} min (on the fallback backend {backend})", reason="timeout", backend_failure=True, exit_code=124)
         except (Unserved, spawns.Cancelled) as e:
-            spawns.unserved_or_cancelled(e, fail, spawn, grading_view)
+            spawns.unserved_or_cancelled(e, lambda why, reason=None: fail(why, reason=reason, backend_failure=True),
+                                        spawn, grading_view)
         try:
             res = json.loads(r.stdout)
         except ValueError:
-            fail(f"fallback {backend}: exit {r.returncode}, no JSON on stdout: {r.stderr[-300:]!r}")
+            fail(f"fallback {backend}: exit {r.returncode}, no JSON on stdout: {r.stderr[-300:]!r}", exit_code=r.returncode, backend_failure=True)
     u = res.get("usage") or {}
     # What came back is the record; the contract's line is never written in its place
     # (pilot S5: the ledger said Fable for a day of Opus). Unobserved is null.
@@ -1372,12 +1517,14 @@ def _main(a):
     if res.get("is_error"):
         if res.get("terminal_reason") == "api_error" or res.get("api_error_status"):
             # R3/L-spec-0192: `escalation_ok` now gates this write (via `emit()`'s `required_reason` door) — the spawn already ran and drew its budget and is NOT retried automatically (D120), so this names the irreversible act rather than inventing a default/deadline/revert for a retry that will never happen on its own.
-            emit(ledger, base, "escalation-blocking",
-                 why=f"seat unreachable ({res.get('api_error_status')}) — /login as the operator; {spawn} is not retried",
-                 irreversible=f"{spawn} already ran and drew its budget; it will not be retried "
-                              "automatically — the operator must /login and re-dispatch")
-            fail(f"api_error {res.get('api_error_status')}: {str(res.get('result'))[:300]}")
-        fail(f"is_error: {str(res.get('result'))[:300]}")
+            if grading_env.failure_kind(str(res.get("result")), r.returncode or 1) == "work":
+                emit(ledger, base, "escalation-blocking",
+                     why=f"seat unreachable ({res.get('api_error_status')}) — /login as the operator; {spawn} is not retried",
+                     irreversible=f"{spawn} already ran and drew its budget; it will not be retried "
+                                  "automatically — the operator must /login and re-dispatch")
+            fail(f"api_error {res.get('api_error_status')}: {str(res.get('result'))[:300]}", backend_failure=True)
+        fail(f"is_error: {str(res.get('result'))[:300]}", exit_code=r.returncode or 1,
+             backend_failure="codex quota precheck" not in str(res.get("result")))
     out = res.get("structured_output")
     if out is None:
         fail("null structured_output — tools: line lacks StructuredOutput, or the model never called it")
@@ -1435,7 +1582,7 @@ def _main(a):
         row_base = {**base, "subject": kv.pop("subject")} if "subject" in kv else base
         emit(ledger, row_base, t, **kv)
     scalars = {k: v for k, v in out.items() if isinstance(v, (str, int, float, bool))}
-    done = {**scalars, **meta}
+    done = {**scalars, **meta, "role": a.role}
     # Emitted whenever the snapshots differ, never gated on lines/paths being non-empty: the observation is that the repository moved, and an empty derived list must not silently erase it.
     if moved is not None:
         done["repo_moved"] = moved

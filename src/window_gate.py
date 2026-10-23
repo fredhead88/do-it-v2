@@ -696,10 +696,11 @@ def verify(repo, cand, required, window):
     timeout = verify_timeout_secs(env)
     # Ephemeral ci-verify ref: skip the repo pre-push guardrails (fix-the-fix breaker walks every
     # pushed fix: commit and exceeded the 60s git timeout on multi-branch windows, 2026-10-16).
-    pushed = git(repo, "push", "--no-verify", "origin", f"{cand}:refs/heads/{ref}", check=False).returncode == 0
+    push = git(repo, "push", "--no-verify", "origin", f"{cand}:refs/heads/{ref}", check=False)
+    pushed = push.returncode == 0
     try:
         if not pushed:
-            return dict(state="undetermined", nodes=[], url="", doc={}, why="could not push the ci-verify ref")
+            return dict(state="undetermined", nodes=[], url="", doc={}, why="could not push the ci-verify ref: " + push.stderr[:200])
         proc = subprocess.Popen(["bash", script], cwd=str(repo), env=env, text=True, start_new_session=True,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         try:
@@ -1129,7 +1130,26 @@ def run_window(window, project, spec_args, main, fixes_base=False, after=None, s
     return 2
 
 
-def run_attempt(window, project, spec_args, main, fixes_base, base, root_base, after, slot, train, rebased=False):
+def infra_failure(window, project, text, code=1):
+    import grading_env
+    if grading_env.failure_kind(text, code) != "infra":
+        return False
+    fields = grading_env.infra_fields(window, "window-gate", text)
+    ev("infra-failure", window, project=project, **fields)
+    print("gate-window: infra hold — " + fields["class"])
+    return True
+
+
+def run_attempt(window, project, *args, **kwargs):
+    try:
+        return _run_attempt(window, project, *args, **kwargs)
+    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+        if infra_failure(window, project, str(exc), 124 if isinstance(exc, subprocess.TimeoutExpired) else 1):
+            return 2
+        raise
+
+
+def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, after, slot, train, rebased=False):
     repo = fold.ROOT / "repos" / project
     if not repo.is_dir():
         sys.exit(f"gate-window: no repo at {repo}")
@@ -1143,6 +1163,8 @@ def run_attempt(window, project, spec_args, main, fixes_base, base, root_base, a
     try:
         ci_checks = required_checks(repo, base)
     except RuntimeError as e:
+        if infra_failure(window, project, str(e)):
+            return 2
         escalate(window, str(e), "undetermined")
         print("gate-window: " + str(e))
         return 2
@@ -1179,7 +1201,10 @@ def run_attempt(window, project, spec_args, main, fixes_base, base, root_base, a
             try:
                 candidate = rechain.fingerprint(repo, candidate, window, ev=ev)
                 git(repo, "update-ref", f"refs/heads/window/{window}", candidate)
-            except (ValueError, OSError, subprocess.SubprocessError):
+            except (ValueError, OSError, subprocess.SubprocessError) as exc:
+                import grading_env
+                if grading_env.failure_kind(str(exc)) == "infra":
+                    raise
                 for s in migration_kept:
                     ev("rechain-declined", s, window=window, why="final-tree fingerprint or private PG failed")
                     clashes[s] = [rechain.FINGERPRINT]
@@ -1250,6 +1275,8 @@ def run_attempt(window, project, spec_args, main, fixes_base, base, root_base, a
             print(f"gate-window: tree {tree} already verified in {prior.get('window', prior.get('subject'))}")
             return dict(state="green", nodes=[], url="", doc={})
         res = dict(verify(repo, cand, candidate_required, window), candidate=cand)
+        if res["state"] != "green" and infra_failure(window, project, res.get("output", "") + "\n" + res.get("why", "")):
+            return dict(res, state="undetermined", why="infra: verification unavailable")
         # No attribution or shipment may escape a verification on an unmerged base.
         if train:
             wait_predecessor(train)
