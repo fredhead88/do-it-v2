@@ -284,17 +284,6 @@ def _act(events, specs, now, rows, runner, dry_run, handled):
 
 
 def run(events, specs, now, *, runner=None, dry_run=False, handled=frozenset()):
-    events = sorted(events, key=lambda e: e.get('ts', ''))
-    runner = runner or autodispatch._real_runner
-    try:
-        lane_rules.load()
-    except ValueError as exc:
-        warning = ['lane-rules unreadable: ' + str(exc).replace('\n', ' ')]
-        # due(table=...) accepts a path, not a dict. A private transient table
-        # preserves its predicate implementation even if the packaged file broke.
-        with tempfile.TemporaryDirectory(prefix='lane-driver-rules-') as directory:
-            table = Path(directory) / 'rules.toml'
-            table.write_text('\n'.join(f'[[rules]]\nname = "{name}"\naction = "none"\nactor = "tick"\nlimit_min = {limit}\n'
-                                       for name, limit in DEFAULT_LIMITS.items()))
-            return warning + _act(events, specs, now, _rows(events, specs, now, table), runner, dry_run, handled)
-    return _act(events, specs, now, _rows(events, specs, now), runner, dry_run, handled)
+    """Compatibility entry point; tick alone launches routine Steps."""
+    return tick.run_steps(events, specs, now, dispatcher=runner or autodispatch._real_runner,
+                          dry_run=dry_run, handled=handled)

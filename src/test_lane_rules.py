@@ -430,6 +430,15 @@ class LaneRulesTests(unittest.TestCase):
         for row in rows:
             print(row['spec'], row['rule'], specs(ev)[row['spec']]['state'])
 
+    def test_due_adapter(self):
+        ev = [event('spec-written')]
+        rows = self.rows(ev)
+        self.assertTrue(rows)
+        self.assertTrue(all(set(row) == KEYS for row in rows))
+        body = json.dumps(dict(row_keys=sorted(KEYS), rows=len(rows)), sort_keys=True)
+        print(json.dumps(dict(url='cli://lane-rules/AC11', status=0,
+                              body_sha256=hashlib.sha256(body.encode()).hexdigest(), body_excerpt=body)))
+
     def test_row_contract(self):
         ev = fixture('grade')
         since = dt.datetime.fromisoformat(ev[-1]['ts'])

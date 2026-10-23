@@ -1,16 +1,8 @@
 #!/usr/bin/env python3
-"""autodispatch — R1 (L-charter-0042): the tick dispatches.
+"""Dispatch transport, health recovery, and legacy read-only eligibility views.
 
-Classifies every `written` spec as `dispatchable` / `seat-wait` / `blocked`
-(`candidates`), and cuts a worktree + dispatches `builder` for each
-`dispatchable` row, oldest `since` first, up to seat capacity (`run`) — the
-SAME recipe the Executor's `agents/executor.md` "Cutting a worktree" ran by
-hand (`git worktree add`, `doit packet builder`, `doit dispatch --detach
-builder`), issued through one injectable `runner` so no new dispatch code
-path exists. `tick._record()` calls `run()` once per tick, last, right before
-`todo = lane(...)`. `look.py`'s `_check_dispatchable_stale` calls
-`candidates()` to alarm on anything left dispatchable (or standing-failed)
-past 30 minutes.
+Routine launches delegate to tick's Step consumer. candidates and the predicate
+helpers remain unchanged until L-spec-1495 migrates their outside readers.
 """
 import datetime, json, os, pathlib, re, socket, subprocess, sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
@@ -446,122 +438,28 @@ def add_builder_worktree(repo, worktree, branch, base, *, runner=None, reuse_bra
             removed = runner(prefix + ["worktree", "remove", str(worktree)])
             if removed.get("code", 1):
                 return removed
+    if pathlib.Path(worktree).is_dir():
+        return dict(code=0, stdout='', stderr='')
     created = runner(prefix + ["worktree", "add", str(worktree), "-b", branch, base])
+    def recorded(result):
+        if result.get("code", 1) == 0:
+            import resources
+            subject = "L-spec-" + branch.removeprefix("l-spec-")
+            resources.record("worktree", str(worktree), lane="build", subject=subject)
+        return result
+
     if created.get("code", 1) == 0 or not reuse_branch:
-        return created
+        return recorded(created)
     exists = runner(prefix + ["show-ref", "--verify", "--quiet", f"refs/heads/{branch}"])
     if exists.get("code", 1) == 0:
-        return runner(prefix + ["worktree", "add", str(worktree), branch])
+        return recorded(runner(prefix + ["worktree", "add", str(worktree), branch]))
     return created
 
 
-def run(events, specs, now, *, runner=None, dry_run=False):
-    """One line per action. `dry_run=True` never calls `runner` and appends
-    no `autodispatched`/`autodispatch-failed` event (a `spawn-stale` may
-    still land, from `candidates()`'s own `tick.spawn_in_flight` call —
-    independent of `dry_run`, AC14)."""
-    events = list(events)
+def redispatch_dead(events, specs, now, *, runner=None, dry_run=False, handled=frozenset()):
+    """Recover dead spawns without classifying routine item eligibility."""
     runner = runner or _real_runner
-    rows = candidates(events, specs, now, head_of=lambda project: _head_of(project, runner=runner))
-    out = []
-    handled = set()
-    for row in rows:
-        if row["status"] != "dispatchable":
-            continue
-        spec, charter, project, since = row["spec"], row["charter"], row["project"], row["since"]
-        handled.add(spec)
-        if dry_run:
-            out.append(f"would dispatch {spec} (charter={charter}, project={project})")
-            continue
-        repo = fold.ROOT / "repos" / project
-        base = {"subject": spec}
-
-        def _fail(reason):
-            dispatch.emit(tick.tick_path(), base, "autodispatch-failed", reason=reason)
-            out.append(f"failed {spec}: {reason}")
-
-        r1 = runner(["git", "-C", str(repo), "symbolic-ref", "--short", "HEAD"])
-        if r1.get("code", 1) != 0:
-            _fail((r1.get("stderr") or r1.get("stdout") or "symbolic-ref failed").strip())
-            continue
-        main_branch = (r1.get("stdout") or "").strip()
-        worktree = fold.ROOT / "worktrees" / project / spec.lower()
-        if worktree.is_dir():
-            # A worktree left by an earlier failed attempt is reused only while it
-            # holds no commits above main; otherwise it is real work and we stop.
-            r2 = runner(["git", "-C", str(worktree), "rev-list", "--count", f"{main_branch}..HEAD"])
-            if r2.get("code", 1) != 0 or (r2.get("stdout") or "").strip() != "0":
-                _fail(f"worktree {worktree} exists with commits above {main_branch}; not reusing")
-                continue
-            r2 = runner(["git", "-C", str(worktree), "merge", "--ff-only", main_branch])
-        else:
-            r2 = add_builder_worktree(repo, worktree, spec.lower(), main_branch,
-                                      runner=runner, reuse_branch=False)
-        if r2.get("code", 1) != 0:
-            _fail((r2.get("stderr") or r2.get("stdout") or "worktree add failed").strip())
-            continue
-        r3 = runner(["doit", "packet", "builder", spec, "--worktree", str(worktree), "--repo", str(repo)])
-        if r3.get("code", 1) != 0:
-            _fail((r3.get("stderr") or r3.get("stdout") or "doit packet builder failed").strip())
-            continue
-        packet_path = (r3.get("stdout") or "").strip()
-        r4 = runner(["doit", "dispatch", "--detach", "builder", spec, "--packet", packet_path,
-                     "--cwd", str(worktree), "--charter", charter or "", "--project", project])
-        if r4.get("code", 1) != 0:
-            _fail((r4.get("stderr") or r4.get("stdout") or "doit dispatch --detach failed").strip())
-            continue
-        try:
-            detach = json.loads(r4.get("stdout") or "")
-        except ValueError:
-            _fail(f"doit dispatch --detach printed non-JSON: {(r4.get('stdout') or '')!r}")
-            continue
-        dispatch.emit(tick.tick_path(), base, "autodispatched", spawn=str(detach.get("detached")),
-                      since=since, worktree=str(worktree), log=detach.get("log"))
-        out.append(f"dispatched {spec} spawn={detach.get('detached')} worktree={worktree}")
-
-    # R13a: dispatch the grader for every candidate this tick has not already
-    # dispatched/refused a grader for.
-    for row in grader_candidates(events, specs, now):
-        spec, charter, project = row["spec"], row["charter"], row["project"]
-        if spec in handled:
-            continue
-        handled.add(spec)
-        trigger, since = row["trigger"], row["since"]
-        if dry_run:
-            out.append(f"would dispatch grader {spec} (trigger={trigger})")
-            continue
-        base = {"subject": spec}
-
-        def _gfail(reason):
-            dispatch.emit(tick.tick_path(), base, "autodispatch-failed", role="grader", reason=reason)
-            out.append(f"failed grader {spec}: {reason}")
-
-        worktree = fold.ROOT / "worktrees" / project / spec.lower()
-        if not worktree.is_dir():
-            _gfail(f"worktree {worktree} missing — never created for a grader dispatch")
-            continue
-        r1 = runner(["doit", "packet", "grader", spec, "--worktree", str(worktree)])
-        if r1.get("code", 1) != 0:
-            _gfail((r1.get("stderr") or r1.get("stdout") or "doit packet grader failed").strip())
-            continue
-        packet_path = (r1.get("stdout") or "").strip()
-        # --timeout 30: the grader cap counts relay-queue wait, which alone ate the
-        # 15-min default on 6+ graders on 2026-09-29/30 (Thinker standing rule).
-        r2 = runner(["doit", "dispatch", "--detach", "grader", spec, "--packet", packet_path,
-                     "--cwd", str(worktree), "--charter", charter or "", "--project", project,
-                     "--timeout", "30"])
-        if r2.get("code", 1) != 0:
-            _gfail((r2.get("stderr") or r2.get("stdout") or "doit dispatch --detach failed").strip())
-            continue
-        try:
-            detach = json.loads(r2.get("stdout") or "")
-        except ValueError:
-            _gfail(f"doit dispatch --detach printed non-JSON: {(r2.get('stdout') or '')!r}")
-            continue
-        dispatch.emit(tick.tick_path(), base, "autodispatched", spawn=str(detach.get("detached")),
-                      role="grader", trigger=trigger, since=since)
-        out.append(f"dispatched grader {spec} spawn={detach.get('detached')} trigger={trigger}")
-
+    out, handled = [], set(handled)
     # R13b: replay or escalate every dead spawn this tick has not already
     # handled (replayed or escalated) of its own.
     for row in dead_spawns(events, now):
@@ -646,14 +544,10 @@ def run(events, specs, now, *, runner=None, dry_run=False):
         dispatch.emit(tick.tick_path(), base, "autodispatched", spawn=str(detach.get("detached")),
                       role=role, trigger="redispatch", replaces=spawn, since=row["visible_at"])
         out.append(f"replayed {spawn} as {detach.get('detached')}")
-    import lane_driver
-    out.extend(lane_driver.run(events, specs, now, runner=runner, dry_run=dry_run, handled=handled))
-    import merge_queue
-    try:
-        out.extend(merge_queue.enqueue_due(events, now, runner=runner, dry_run=dry_run))
-    except Exception as exc:
-        if not dry_run:
-            dispatch.emit(tick.tick_path(), {"subject": "queue"}, "autodispatch-failed",
-                          role="queue", reason=str(exc))
-        out.append(f"queue failed: {exc}")
     return out
+
+
+def run(events, specs, now, *, runner=None, dry_run=False):
+    """Compatibility entry point; tick owns routine Step launches."""
+    return tick.run_steps(events, specs, now, dispatcher=runner or _real_runner,
+                          dry_run=dry_run)

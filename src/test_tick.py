@@ -19,6 +19,191 @@ os.environ["V4_STAGING_DIR"] = str(TMP / "v4-staging")
 os.environ.pop("DOIT_PROJECT", None)
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 import carry, fold, intake, pane_resume, tick  # noqa: E402
+import unittest
+from dataclasses import replace
+from unittest.mock import patch
+import autodispatch, dispatch, lane_driver, lane_rules, merge_queue, nextstep
+
+
+def _launcher_evidence(criterion, body):
+    import hashlib
+    payload = json.dumps(body, sort_keys=True)
+    print(json.dumps(dict(url='cli://tick/' + criterion, status=0,
+                          body_sha256=hashlib.sha256(payload.encode()).hexdigest(),
+                          body_excerpt=payload)))
+
+
+class LauncherTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix='sole-launcher-')
+        self.addCleanup(self.tmp.cleanup)
+        self.root = pathlib.Path(self.tmp.name)
+        self.now = fold.NOW
+        self.events = []
+        for module, key, value in ((fold, 'ROOT', self.root), (fold, 'EVENTS', self.root / 'events'),
+                                   (dispatch, 'ROOT', self.root), (dispatch, 'EVENTS', self.root / 'events'),
+                                   (dispatch, 'CONTENT', self.root / 'content')):
+            swap = patch.object(module, key, value)
+            swap.start()
+            self.addCleanup(swap.stop)
+        (self.root / 'events').mkdir()
+        (self.root / 'content').mkdir()
+        self.calls = []
+        self.runner = tick._PassDispatcher(self.dispatcher, self.events, {}, self.now, False)
+
+    def step(self, action='review', **kw):
+        return replace(nextstep.Step('L-spec-9001', 'spec', 'checking', 'action', action or 'review',
+                                     'tick', 'fixture:1', 'condition met', None,
+                                     self.now.isoformat()), action=action, **kw)
+
+    def prepare(self, sid):
+        (self.root / 'worktrees/proj' / sid.lower()).mkdir(parents=True)
+        (self.root / 'content' / (sid + '.md')).write_text('AC1 [backend]: fixture.\n')
+        self.events.append(dict(type='spec-written', subject=sid, project='proj',
+                                ts=(self.now - datetime.timedelta(hours=1)).isoformat()))
+
+    def dispatcher(self, argv):
+        self.calls.append(argv)
+        if argv[:2] == ['doit', 'dispatch']:
+            return dict(code=0, stdout=json.dumps(dict(detached='L-' + argv[3] + '-9001')), stderr='')
+        return dict(code=0, stdout='/packet.md' if argv[:2] == ['doit', 'packet']
+                    else '0' if 'rev-list' in argv else 'master', stderr='')
+
+    def rows(self):
+        return [json.loads(line) for line in tick.tick_path().read_text().splitlines()]
+
+    def test_launch_exact_set(self):
+        steps = []
+        for n, action in enumerate(sorted(tick.ROUTINE_ACTIONS), 9001):
+            sid = f'L-spec-{n}'
+            self.prepare(sid)
+            steps.append(self.step(action, item=sid))
+        steps += [self.step(state='hold', action=None, clears='decision'),
+                  self.step(owner='executor'), self.step('gate'),
+                  self.step('enqueue'), self.step('merge')]
+        out = tick.run_steps(self.events, {}, self.now, dispatcher=self.dispatcher, steps=steps)
+        actual = [(a[4], a[3]) for a in self.calls if a[:2] == ['doit', 'dispatch']]
+        expected = [(s.item, tick.ROUTINE_ROLES[s.action]) for s in steps
+                    if s.state == 'action' and s.owner == 'tick' and s.action in tick.ROUTINE_ACTIONS]
+        self.assertCountEqual(actual, expected)
+        before = len(self.calls)
+        for step in steps[5:]:
+            self.assertIsNone(tick.launch(step, dispatcher=self.runner))
+        self.assertEqual(len(self.calls), before)
+        _launcher_evidence('AC1', dict(dispatches=actual, expected=expected, lines=out))
+
+    def test_launch_real_snapshot(self):
+        self.prepare('L-spec-9001')
+        self.events[0]['_src'] = 'L-planner-fixture.jsonl:1'
+        specs = {'L-spec-9001': dict(id='L-spec-9001', state='written', evs=self.events)}
+        expected = [step for step in tick._steps(self.events, specs, self.now)
+                    if step.state == 'action' and step.owner == 'tick'
+                    and step.action in tick.ROUTINE_ACTIONS]
+        self.assertEqual([(step.item, step.action) for step in expected], [('L-spec-9001', 'build')])
+        tick.run_steps(self.events, specs, self.now, dispatcher=self.dispatcher)
+        actual = [(a[4], a[3]) for a in self.calls if a[:2] == ['doit', 'dispatch']]
+        self.assertEqual(actual, [(step.item, tick.ROUTINE_ROLES[step.action]) for step in expected])
+        _launcher_evidence('AC1-replay', dict(expected=[step.action for step in expected], dispatches=actual))
+
+    def test_launch_failure(self):
+        self.prepare('L-spec-9001')
+        for step in (self.step(state='hold', action=None, clears='decision'),
+                     self.step(reason='undetermined: missing input')):
+            out = tick.run_steps(self.events, {}, self.now, dispatcher=self.dispatcher, steps=[step])
+            self.assertTrue(out[0].startswith(('hold ', 'undetermined ')))
+        self.assertEqual(self.calls, [])
+        for failure in (RuntimeError('packet raised'), dict(code=2, stdout='', stderr='packet refused')):
+            tick.tick_path().unlink(missing_ok=True)
+            with patch.object(self.runner, 'runner', side_effect=failure if isinstance(failure, Exception) else None,
+                              return_value=failure):
+                with self.assertRaises(ValueError):
+                    tick.launch(self.step(), dispatcher=self.runner)
+            rows = self.rows()
+            self.assertEqual([e['type'] for e in rows], ['autodispatch-failed'])
+            self.runner.events = self.events + rows
+            before = len(self.calls)
+            self.assertIsNone(tick.launch(self.step(), dispatcher=self.runner))
+            self.assertEqual(len(self.calls), before)
+            self.runner.events = self.events
+        with self.assertRaises(ValueError):
+            tick.launch(object(), dispatcher=self.runner)
+        self.assertTrue(self.rows()[-1]['reason'].startswith('undetermined:'))
+        _launcher_evidence('AC8', dict(hold_dispatches=0, undetermined_dispatches=0,
+                                      failed_dispatch_successes=0, standing_retry_dispatches=0))
+
+    def test_manual_routine(self):
+        since = self.now - datetime.timedelta(hours=1)
+        events = []
+        for role in ('builder', 'grader', 'reviewer', 'planner', 'spec-writer', 'probe'):
+            for issuer in ('tick', 'executor', None, ['tick']):
+                events.append(dict(type='build-started' if role == 'builder' else 'spawn-started',
+                                   role=role, spawn=f'{role}-{len(events)}', issued_by=issuer,
+                                   ts=self.now.isoformat()))
+        events += [dict(type='build-started', spawn='old', ts=(since - datetime.timedelta(seconds=1)).isoformat()),
+                   dict(type='merge-gate-clean', spawn='gate', ts=self.now.isoformat()),
+                   dict(type='build-started', spawn='missing-issuer', ts=since.isoformat())]
+        expected = [e['spawn'] for e in events[:12] if e['issued_by'] != 'tick'] + ['missing-issuer']
+        self.assertEqual(nextstep.manual_routine_dispatches(events, since), expected)
+        self.assertEqual(nextstep.manual_routine_dispatches([], since), [])
+        _launcher_evidence('AC3', dict(manual=expected, boundary_included=True, gate_ignored=True))
+
+    def test_sole_launcher(self):
+        # Exercise the real pass. Other tick services stay hermetic through the
+        # existing file's stubs and empty private filesystem.
+        with patch.object(nextstep, 'next_steps', return_value=[]) as steps, \
+             patch.object(autodispatch, 'grader_candidates', side_effect=AssertionError('legacy grader')), \
+             patch.object(autodispatch, '_blocking_reason', side_effect=AssertionError('legacy build')), \
+             patch.object(lane_driver, '_rows', side_effect=AssertionError('legacy rows')), \
+             patch.object(autodispatch, 'redispatch_dead', return_value=[]), \
+             patch.object(merge_queue, 'enqueue_due', return_value=[]), \
+             patch.object(tick, 'run_steps', return_value=['failed L-spec-9001 review: packet refused']), \
+             patch.object(tick, '_log_lane_driver') as logged:
+            tick._record()
+        self.assertEqual(steps.call_count, 1)
+        self.assertEqual(steps.call_args.args[2], self.now)
+        self.assertTrue(logged.called)
+        event = next(e for e in reversed(self.rows()) if e['type'] == 'tick')
+        self.assertIn('packet refused', event['autodispatch_error'])
+        _launcher_evidence('AC2', dict(next_steps_calls=steps.call_count, legacy_calls=0,
+                                      logged=True, error=event['autodispatch_error']))
+
+    def test_no_double_gate(self):
+        gate_steps = [self.step(action) for action in ('gate', 'enqueue', 'merge')]
+        sid = 'L-spec-9001'
+        events = [dict(v=1, type='spec-written', subject=sid, project='proj', footprint=['allowed.txt'],
+                       ts=(self.now - datetime.timedelta(minutes=10)).isoformat()),
+                  dict(v=1, type='review', subject=sid, confirmed=True, n_blocking=0,
+                       ts=(self.now - datetime.timedelta(minutes=1)).isoformat())]
+        row = dict(spec=sid, rule='gate', since=events[-1]['ts'], limit_min=60,
+                   overdue=False, reason='condition met', reason_live=False)
+        real_enqueue = merge_queue.enqueue_due
+        gate_calls = []
+
+        def gate_runner(argv, **kw):
+            gate_calls.append(argv)
+            return dict(code=0, stdout='', stderr='')
+
+        def enqueue_pass(ev, now):
+            return real_enqueue(events, now, runner=gate_runner)
+
+        with patch.object(nextstep, 'next_steps', return_value=gate_steps), \
+             patch.object(autodispatch, 'redispatch_dead', return_value=[]), \
+             patch.object(lane_rules, 'due', return_value=[row]), \
+             patch.object(merge_queue, '_repository', return_value=(self.root / 'repos/proj', 'seed')), \
+             patch.object(merge_queue, 'enqueue_due', side_effect=enqueue_pass) as enqueue, \
+             patch.object(tick, 'launch', side_effect=AssertionError('gate launched twice')) as launch:
+            tick._record()
+        self.assertEqual(enqueue.call_count, 1)
+        self.assertEqual(launch.call_count, 0)
+        self.assertEqual(len(gate_calls), 1)
+        gate_events = [e for e in self.rows() if e['type'] == 'autodispatched' and e.get('rule') == 'gate']
+        self.assertEqual(len(gate_events), 1)
+        with patch.object(merge_queue, 'enqueue_due', side_effect=AssertionError('legacy queue')):
+            autodispatch.run([], {}, self.now, runner=self.dispatcher)
+        _launcher_evidence('AC10', dict(enqueue_due_calls=1, gate_calls=len(gate_calls),
+                                       gate_events=len(gate_events), routine_gate_launches=0))
+
+
 import look as _watchdog_look
 _watchdog_look._send_operator = lambda text, root: 0
 _real_heartbeat_missed = _watchdog_look.heartbeat_missed
@@ -122,6 +307,12 @@ def folded():
 SRC = (pathlib.Path(__file__).parent / "tick.py").read_text()
 assert not re.search(r"run_claude|--agent|executor\.schema\.json|models\.|dispatch\.alloc", SRC), \
     "tick.py must contain no code path that starts an Executor process (L-adr-0035)"
+
+# These script suites predate unittest. Respect the authored targeted checks
+# before running the historical script assertions; unfiltered CI still runs both.
+if __name__ == '__main__' and '-k' in sys.argv and sys.argv[-1] in {
+        'launch', 'sole_launcher', 'manual_routine', 'launch_failure', 'no_double_gate'}:
+    unittest.main()
 
 # An idle tick: one tick event, lane 0, nothing spawned and no `spawned` key to report it.
 assert tick.main() == 0, "a tick is a fold-and-record; it is never an error"
@@ -632,6 +823,9 @@ print("autodispatch-0427 AC18 ok")
 fold.EVENTS = saved_events
 
 
+_real_run_steps = tick.run_steps
+
+
 class _FakeAutodispatch:
     """Substituted into `sys.modules["autodispatch"]` — `tick._record()`'s own
     lazy `import autodispatch` picks this up instead of the real module."""
@@ -658,11 +852,11 @@ fold.EVENTS = iso_ad25a
 write_to(iso_ad25a, "L-planner-0001.jsonl", {"type": "spec-written", "subject": "L-spec-42003"})
 fake25a = _FakeAutodispatch(outcomes=['acted L-spec-42003 rebuild spawn=42',
                                     'seat-wait L-spec-42004 rebuild'])
-sys.modules["autodispatch"] = fake25a
+tick.run_steps = fake25a.run
 try:
     assert tick.main() == 0
 finally:
-    del sys.modules["autodispatch"]
+    tick.run_steps = _real_run_steps
 assert len(fake25a.calls) == 1, f"autodispatch-0427 AC25a: exactly one call: {fake25a.calls}"
 called_ev, called_specs, called_now = fake25a.calls[0]
 assert called_now == fold.NOW, "autodispatch-0427 AC25a: now must be fold.NOW"
@@ -676,12 +870,12 @@ assert f'snapshot={fold.NOW.isoformat()}' in lane_log
 assert 'finished autodispatch elapsed_s=' in lane_log
 # A full or read-only log path must not prevent dispatch or the tick heartbeat.
 from unittest.mock import patch as _patch_lane_log
-sys.modules['autodispatch'] = fake25a
+tick.run_steps = fake25a.run
 try:
     with _patch_lane_log.object(tick, '_log_lane_driver', side_effect=OSError('log unavailable')):
         assert tick.main() == 0
 finally:
-    del sys.modules['autodispatch']
+    tick.run_steps = _real_run_steps
 assert len(fake25a.calls) == 2
 assert ticks()[-1]['lane_driver_log_error'] == 'log unavailable'
 fold.EVENTS = saved_events
@@ -692,11 +886,11 @@ iso_ad25b = _isolated_events()
 fold.EVENTS = iso_ad25b
 write_to(iso_ad25b, "L-planner-0001.jsonl", {"type": "spec-written", "subject": "L-spec-42004"})
 before_pane_calls = len(PANE_RESUME_CALLS)
-sys.modules["autodispatch"] = _FakeAutodispatch(raise_error=True)
+tick.run_steps = _FakeAutodispatch(raise_error=True).run
 try:
     assert tick.main() == 0
 finally:
-    del sys.modules["autodispatch"]
+    tick.run_steps = _real_run_steps
 assert len(PANE_RESUME_CALLS) == before_pane_calls + 1, "autodispatch-0427 AC25b: pane_resume.run still ran"
 lines = [json.loads(l) for l in (iso_ad25b / "L-tick-local.jsonl").read_text().splitlines()]
 tick_events = [e for e in lines if e["type"] == "tick"]
@@ -712,18 +906,18 @@ fold.EVENTS = iso_ad25c
 write_to(iso_ad25c, "L-planner-0001.jsonl",
          {"type": "spec-written", "subject": "L-spec-42005",
           "ts": (fold.NOW - datetime.timedelta(minutes=5)).isoformat(timespec="seconds")})
-sys.modules["autodispatch"] = _FakeAutodispatch(append_failed=True)
+tick.run_steps = _FakeAutodispatch(append_failed=True).run
 try:
     todo1 = tick._record()
 finally:
-    del sys.modules["autodispatch"]
+    tick.run_steps = _real_run_steps
 assert todo1 is not None and "L-spec-42005 · written" not in todo1, \
     f"autodispatch-0427 AC25c: this pass's own todo must not reflect an event run() just appended: {todo1}"
-sys.modules["autodispatch"] = _FakeAutodispatch()
+tick.run_steps = _FakeAutodispatch().run
 try:
     todo2 = tick._record()
 finally:
-    del sys.modules["autodispatch"]
+    tick.run_steps = _real_run_steps
 assert todo2 is not None and "L-spec-42005 · written" in todo2, \
     f"autodispatch-0427 AC25c: the SECOND pass sees the standing failure: {todo2}"
 print("autodispatch-0427 AC25 ok")
@@ -956,7 +1150,8 @@ th4 = _th.Thread(target=_late_write4)
 th4.start()
 tick.wait(r4, max_s=5)                          # call 2: woken
 th4.join()
-lines4 = [json.loads(l) for l in tick.tick_path().read_text().splitlines() if l.strip()]
+lines4 = [json.loads(l) for l in tick.tick_path().read_text().splitlines()
+          if l.strip() and json.loads(l)["type"] == "tick"]
 assert len(lines4) == 2 and all(e["type"] == "tick" and isinstance(e.get("lane"), int) for e in lines4), \
     f"0187-AC4: exactly one tick event per returning call, each carrying an int lane=: {lines4}"
 
@@ -1991,13 +2186,13 @@ fold.EVENTS = iso_po17b
 write_to(iso_po17b, "L-planner-0001.jsonl", {"type": "spec-written", "subject": "L-spec-48402"})
 before_pane_calls_po17 = len(PANE_RESUME_CALLS)
 fake_ad_po17b = _FakeAutodispatch()
-sys.modules["autodispatch"] = fake_ad_po17b
+tick.run_steps = fake_ad_po17b.run
 sys.modules["push_origin"] = _FakePushOrigin(raise_error=True)
 try:
     assert tick.main() == 0
 finally:
     del sys.modules["push_origin"]
-    del sys.modules["autodispatch"]
+    tick.run_steps = _real_run_steps
 assert len(fake_ad_po17b.calls) == 1, "merge-origin-0484 AC17: autodispatch still ran after a push_origin raise"
 assert len(PANE_RESUME_CALLS) == before_pane_calls_po17 + 1, "merge-origin-0484 AC17: pane_resume.run still ran"
 lines_po17b = [json.loads(l) for l in (iso_po17b / "L-tick-local.jsonl").read_text().splitlines()]
@@ -2109,3 +2304,6 @@ _body = json.dumps({"criterion": "AC10", "child_ledger_rows": len(from_disk),
                     "successful_outages": 2, "sender_exception_completed": True}, sort_keys=True)
 print(json.dumps(dict(url="cli://tick/watchdog/AC10", status=0,
                       body_sha256=hashlib.sha256(_body.encode()).hexdigest(), body_excerpt=_body)))
+
+if __name__ == '__main__':
+    unittest.main(argv=[sys.argv[0]])
