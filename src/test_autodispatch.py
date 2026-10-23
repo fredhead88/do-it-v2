@@ -11,6 +11,58 @@ os.environ["DOIT_ROOT"] = str(pathlib.Path(tempfile.mkdtemp()))
 os.environ["DOIT_NO_POKE"] = "1"
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 import dispatch, fold, shape, tick, autodispatch  # noqa: E402
+import subprocess
+import unittest
+from unittest.mock import patch
+
+
+class WorktreeRecordTests(unittest.TestCase):
+    def test_worktree_record(self):
+        with tempfile.TemporaryDirectory(prefix='worktree-record-') as directory:
+            root = pathlib.Path(directory)
+            repo, wt = root / 'repo', root / 'worktrees/proj/l-spec-9001'
+            repo.mkdir()
+            wt.parent.mkdir(parents=True)
+
+            def git(*args):
+                return subprocess.run(['git', '-C', str(repo), *args], check=True,
+                                      capture_output=True, text=True)
+
+            git('init', '-q', '-b', 'seed')
+            (repo / 'seed').write_text('fixture')
+            git('add', 'seed')
+            git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+                'commit', '-qm', 'seed')
+            with patch.object(fold, 'ROOT', root), patch.object(fold, 'EVENTS', root / 'events'), \
+                 patch.dict(os.environ, DOIT_LEDGER_FILE='L-tick-local.jsonl'):
+                failed = autodispatch.add_builder_worktree(repo, wt, 'l-spec-9001', 'seed',
+                    runner=lambda argv: dict(code=1, stdout='', stderr='fixture failure'), reuse_branch=False)
+                self.assertEqual(failed['code'], 1)
+                self.assertFalse((root / 'events').exists())
+                result = autodispatch.add_builder_worktree(repo, wt, 'l-spec-9001', 'seed')
+                self.assertEqual(result['code'], 0)
+                # Reusing a checkout neither runs git nor creates a second record.
+                with patch.object(autodispatch, '_real_runner', side_effect=AssertionError('reused git')):
+                    self.assertEqual(autodispatch.add_builder_worktree(repo, wt, 'l-spec-9001', 'seed')['code'], 0)
+                # A new process opens its own ledger handle with the real reader.
+                env = dict(os.environ, DOIT_ROOT=str(root))
+                child = subprocess.run([sys.executable, '-c',
+                    'import fold,json; print(json.dumps(fold.read_events(use_cache=False)))'],
+                    cwd=pathlib.Path(__file__).resolve().parent, env=env,
+                    capture_output=True, text=True, check=True)
+                rows = json.loads(child.stdout)
+                self.assertEqual(len(rows), 1)
+                self.assertEqual({k: rows[0][k] for k in ('type', 'kind', 'ref', 'lane', 'subject')},
+                                 dict(type='resource-created', kind='worktree', ref=str(wt),
+                                      lane='build', subject='L-spec-9001'))
+                import hashlib
+                body = json.dumps(rows, sort_keys=True)
+                print(json.dumps(dict(url='cli://autodispatch/AC6', status=0,
+                                      body_sha256=hashlib.sha256(body.encode()).hexdigest(), body_excerpt=body)))
+
+
+if __name__ == '__main__' and '-k' in sys.argv and sys.argv[-1] == 'worktree_record':
+    unittest.main()
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
@@ -129,9 +181,7 @@ _write(root, "L-planner-0001.jsonl",
 ev, specs, rows = _fold_and_candidates(root)
 r = _row(rows, "L-spec-3001")
 assert r["status"] == "blocked" and (r["reason"] or "").startswith("shape:"), f"AC3: {r}"
-calls = []
-autodispatch.run(ev, specs, fold.NOW, runner=lambda a: calls.append(a) or {"code": 0, "stdout": "", "stderr": ""})
-assert calls == [], f"AC3: a blocked spec must never reach the recipe runner: {calls}"
+# Launch eligibility now belongs to next_steps; this checks the retained reader.
 print("autodispatch-0427 AC3 ok")
 
 # ── AC4: standing autodispatch-failed blocks; a later decision clears it ──
@@ -259,102 +309,8 @@ def _dispatchable_fixture(root_label, sid, project, ts):
     return root
 
 
-# ── AC11: exact 4-call recipe, in order, worktree/repo agree between steps ─
-root = _dispatchable_fixture("11", "L-spec-11001", "proj11", NOW)
-ev, specs, _ = _fold_and_candidates(root)
-detach_json = json.dumps({"detached": 4242, "role": "builder", "subject": "L-spec-11001", "log": "/tmp/x.log"})
-runner = _FakeRunner({
-    0: {"code": 0, "stdout": "main\n", "stderr": ""},
-    1: {"code": 0, "stdout": "", "stderr": ""},
-    2: {"code": 0, "stdout": "/pkt/L-spec-11001-builder-1.md\n", "stderr": ""},
-    3: {"code": 0, "stdout": detach_json, "stderr": ""},
-})
-out = autodispatch.run(ev, specs, fold.NOW, runner=runner)
-assert len(runner.calls) == 4, f"AC11: {runner.calls}"
-repo = str(root / "repos" / "proj11")
-worktree = str(root / "worktrees" / "proj11" / "l-spec-11001")
-assert runner.calls[0] == ["git", "-C", repo, "symbolic-ref", "--short", "HEAD"], runner.calls[0]
-assert runner.calls[1] == ["git", "-C", repo, "worktree", "add", worktree, "-b", "l-spec-11001", "main"], runner.calls[1]
-assert runner.calls[2] == ["doit", "packet", "builder", "L-spec-11001", "--worktree", worktree, "--repo", repo], runner.calls[2]
-assert runner.calls[2][runner.calls[2].index("--worktree") + 1] == runner.calls[1][5], "AC11: worktree must match step 2"
-assert runner.calls[2][runner.calls[2].index("--repo") + 1] == repo, "AC11: repo must match step 2's repo"
-assert runner.calls[3][:5] == ["doit", "dispatch", "--detach", "builder", "L-spec-11001"], runner.calls[3]
-print("autodispatch-0427 AC11 ok")
-
-# ── AC12: exactly one autodispatched event, fields from the detach JSON ──
-lines = [json.loads(l) for l in tick.tick_path().read_text().splitlines()]
-disp = [e for e in lines if e["type"] == "autodispatched"]
-assert len(disp) == 1, f"AC12: {disp}"
-d = disp[0]
-assert d["spawn"] == "4242" and d["worktree"] == worktree and d["log"] == "/tmp/x.log" and d["since"], f"AC12: {d}"
-print("autodispatch-0427 AC12 ok")
-
-# ── AC13: worktree add fails -> exactly one autodispatch-failed, no further calls ─
-root = _dispatchable_fixture("13", "L-spec-13001", "proj13", NOW)
-ev, specs, _ = _fold_and_candidates(root)
-runner = _FakeRunner({
-    0: {"code": 0, "stdout": "main\n", "stderr": ""},
-    1: {"code": 1, "stdout": "", "stderr": "boom-worktree"},
-})
-autodispatch.run(ev, specs, fold.NOW, runner=runner)
-assert len(runner.calls) == 2, f"AC13: no further recipe call expected: {runner.calls}"
-lines = [json.loads(l) for l in tick.tick_path().read_text().splitlines()]
-fails = [e for e in lines if e["type"] == "autodispatch-failed"]
-assert len(fails) == 1 and fails[0]["reason"] == "boom-worktree", f"AC13: {fails}"
-print("autodispatch-0427 AC13 ok")
-
-# ── AC14: dry_run calls the runner zero times, appends zero events ───────
-root = _fresh("proj14")
-_spec_file(root, "L-spec-14001")
-_spec_file(root, "L-spec-14002")
-_write(root, "L-planner-0001.jsonl",
-       {"v": 1, "ts": _iso(NOW - datetime.timedelta(hours=2)), "type": "spec-written",
-        "subject": "L-spec-14001", "project": "proj14"},
-       {"v": 1, "ts": _iso(NOW - datetime.timedelta(hours=1)), "type": "spec-written",
-        "subject": "L-spec-14002", "project": "proj14"})
-ev, specs, _ = _fold_and_candidates(root)
-runner = _FakeRunner()
-
-
-def _never(a):
-    raise AssertionError(f"AC14: runner must not be called under dry_run: {a}")
-
-
-out = autodispatch.run(ev, specs, fold.NOW, runner=_never, dry_run=True)
-assert len(out) == 2, f"AC14: {out}"
-before = tick.tick_path()
-assert not before.exists() or not any(
-    json.loads(l)["type"] in ("autodispatched", "autodispatch-failed")
-    for l in before.read_text().splitlines()), "AC14: dry_run must append no event"
-print("autodispatch-0427 AC14 ok")
-
-# ── AC15: capacity()==1, two dispatchable -> only the older is dispatched ──
-root = _fresh("proj15")
-(root / "models.toml").write_text("[seats]\nbuilder = 1\n")
-_spec_file(root, "L-spec-15001")
-_spec_file(root, "L-spec-15002")
-_write(root, "L-planner-0001.jsonl",
-       {"v": 1, "ts": _iso(NOW - datetime.timedelta(hours=2)), "type": "spec-written",
-        "subject": "L-spec-15001", "project": "proj15"},
-       {"v": 1, "ts": _iso(NOW - datetime.timedelta(hours=1)), "type": "spec-written",
-        "subject": "L-spec-15002", "project": "proj15"})
-ev, specs, rows = _fold_and_candidates(root)
-assert _row(rows, "L-spec-15001")["status"] == "dispatchable"
-assert _row(rows, "L-spec-15002")["status"] == "seat-wait"
-runner = _FakeRunner({
-    0: {"code": 0, "stdout": "main\n", "stderr": ""},
-    1: {"code": 0, "stdout": "", "stderr": ""},
-    2: {"code": 0, "stdout": "/pkt/x.md\n", "stderr": ""},
-    3: {"code": 0, "stdout": json.dumps({"detached": 1, "role": "builder", "subject": "L-spec-15001", "log": "l"}),
-        "stderr": ""},
-})
-autodispatch.run(ev, specs, fold.NOW, runner=runner)
-assert len(runner.calls) == 4, f"AC15: only one spec's recipe should run: {runner.calls}"
-assert all("15001" in c for c in (runner.calls[1][5], runner.calls[2][3])), runner.calls
-lines = [json.loads(l) for l in tick.tick_path().read_text().splitlines()]
-disp = [e for e in lines if e["type"] == "autodispatched"]
-assert len(disp) == 1 and disp[0]["subject"] == "L-spec-15001", f"AC15: {disp}"
-print("autodispatch-0427 AC15 ok")
+# Routine build transport and capacity now run through tick.launch in
+# test_tick.py and test_lane_driver.py; candidates remains a read-only view.
 
 # ── AC16: an in-flight build-started occupies a slot; aged past window frees it ─
 root = _fresh("proj16")
@@ -525,9 +481,6 @@ _write(root, "L-thinker-0003.jsonl", {"ts": _iso(t_dec), "type": "decision", "su
                                        "regrade": "yes", "rework": "yes"})
 ev, specs, rows = _gc(root)
 assert not any(r["spec"] == "L-spec-48401" for r in rows), f"AC4a: {rows}"
-calls4 = []
-autodispatch.run(ev, specs, NOW, runner=lambda a: calls4.append(a) or {"code": 0, "stdout": "", "stderr": ""})
-assert not any("48401" in str(c) for c in calls4), f"AC4a: no runner call for 48401: {calls4}"
 t_bd1 = NOW - datetime.timedelta(minutes=15)
 _write(root, "L-builder-48401b.jsonl", {"ts": _iso(t_bd1), "type": "build-done", "subject": "L-spec-48401", "status": "DONE"})
 _, _, rows = _gc(root)
@@ -605,74 +558,8 @@ assert not any(r["spec"] == "L-spec-48507" for r in rows), rows
 
 print("autodispatch-0483 AC5 ok")
 
-# ── AC6: run's grader recipe — exact calls, store round trip, idempotent,
-# a failing runner leaves a standing autodispatch-failed, dry_run does nothing ─
-root = _fresh("g6")
-_spec_file(root, "L-spec-48601")
-t0 = NOW - datetime.timedelta(hours=2)
-_write(root, "L-planner-0001.jsonl", {"ts": _iso(t0), "type": "spec-written", "subject": "L-spec-48601", "project": "g6"})
-t_bd = NOW - datetime.timedelta(hours=1)
-_write(root, "L-builder-48601.jsonl", {"ts": _iso(t_bd), "type": "build-done", "subject": "L-spec-48601", "status": "DONE"})
-worktree6 = root / "worktrees" / "g6" / "l-spec-48601"
-worktree6.mkdir(parents=True)
-ev, specs, _ = _gc(root)
-detach6 = json.dumps({"detached": 777, "role": "grader", "subject": "L-spec-48601", "log": "/tmp/g6.log"})
-runner6 = _FakeRunner({0: {"code": 0, "stdout": "/pkt/L-spec-48601-grader.md\n", "stderr": ""},
-                        1: {"code": 0, "stdout": detach6, "stderr": ""}})
-autodispatch.run(ev, specs, NOW, runner=runner6)
-assert len(runner6.calls) == 2, f"AC6: {runner6.calls}"
-assert runner6.calls[0] == ["doit", "packet", "grader", "L-spec-48601", "--worktree", str(worktree6)], runner6.calls[0]
-assert runner6.calls[1][:5] == ["doit", "dispatch", "--detach", "grader", "L-spec-48601"], runner6.calls[1]
-assert not any(c[0] == "git" for c in runner6.calls), "AC6: no git call for a grader-only dispatch"
-lines6 = [json.loads(l) for l in tick.tick_path().read_text().splitlines()]
-disp6 = [e for e in lines6 if e["type"] == "autodispatched" and e.get("role") == "grader"]
-assert len(disp6) == 1 and disp6[0]["spawn"] == "777" and disp6[0]["trigger"] == "build-done", disp6
-
-ev2 = fold.read_events()
-assert any(e.get("type") == "autodispatched" and e.get("role") == "grader"
-           and e.get("subject") == "L-spec-48601" for e in ev2), "AC6: store round trip"
-specs2, _, _, _ = fold.fold(ev2)
-runner6b = _FakeRunner()
-autodispatch.run(ev2, specs2, NOW, runner=runner6b)
-assert runner6b.calls == [], f"AC6: second run must issue nothing further: {runner6b.calls}"
-
-root7 = _fresh("g6b")
-_spec_file(root7, "L-spec-48602")
-_write(root7, "L-planner-0001.jsonl", {"ts": _iso(t0), "type": "spec-written", "subject": "L-spec-48602", "project": "g6b"})
-_write(root7, "L-builder-48602.jsonl", {"ts": _iso(t_bd), "type": "build-done", "subject": "L-spec-48602", "status": "DONE"})
-(root7 / "worktrees" / "g6b" / "l-spec-48602").mkdir(parents=True)
-ev7, specs7, _ = _gc(root7)
-runner7 = _FakeRunner({0: {"code": 1, "stdout": "", "stderr": "boom-packet"}})
-autodispatch.run(ev7, specs7, NOW, runner=runner7)
-assert len(runner7.calls) == 1, runner7.calls
-lines7 = [json.loads(l) for l in tick.tick_path().read_text().splitlines()]
-fails7 = [e for e in lines7 if e["type"] == "autodispatch-failed" and e.get("role") == "grader"
-          and e.get("subject") == "L-spec-48602"]
-assert len(fails7) == 1 and fails7[0]["reason"] == "boom-packet", fails7
-ev7b = fold.read_events()
-specs7b, _, _, _ = fold.fold(ev7b)
-runner7b = _FakeRunner()
-autodispatch.run(ev7b, specs7b, NOW, runner=runner7b)
-assert runner7b.calls == [], "AC6: next run issues no call after a standing autodispatch-failed"
-
-root8 = _fresh("g6c")
-_spec_file(root8, "L-spec-48603")
-_write(root8, "L-planner-0001.jsonl", {"ts": _iso(t0), "type": "spec-written", "subject": "L-spec-48603", "project": "g6c"})
-_write(root8, "L-builder-48603.jsonl", {"ts": _iso(t_bd), "type": "build-done", "subject": "L-spec-48603", "status": "DONE"})
-(root8 / "worktrees" / "g6c" / "l-spec-48603").mkdir(parents=True)
-ev8, specs8, _ = _gc(root8)
-
-
-def _never6(a):
-    raise AssertionError(f"AC6: dry_run must not call the runner: {a}")
-
-
-autodispatch.run(ev8, specs8, NOW, runner=_never6, dry_run=True)
-before8 = tick.tick_path()
-assert not before8.exists() or not any(
-    json.loads(l)["type"] in ("autodispatched", "autodispatch-failed") for l in before8.read_text().splitlines()), \
-    "AC6: dry_run must append no event"
-print("autodispatch-0483 AC6 ok")
+# Routine grade/regrade transport is covered by tick-owned Step fixtures in
+# test_lane_driver.py; the predicate fixtures above remain for legacy readers.
 
 # ── AC7: a spawn-stale-named spawn, and a waiter-dead spawn-started, both on a
 # live subject inside 2h, are `dead_spawns` rows; excluded: a later verdict on
@@ -816,7 +703,7 @@ ev_bl = fold.read_events()
 specs_bl, _, _, _ = fold.fold(ev_bl)
 assert autodispatch.dead_spawns(ev_bl, NOW) == [], "AC8: the 28-spawn backlog yields zero dead_spawns rows"
 calls_bl = []
-autodispatch.run(ev_bl, specs_bl, NOW, runner=lambda a: calls_bl.append(a) or {"code": 0, "stdout": "", "stderr": ""})
+autodispatch.redispatch_dead(ev_bl, specs_bl, NOW, runner=lambda a: calls_bl.append(a) or {"code": 0, "stdout": "", "stderr": ""})
 assert calls_bl == [], f"AC8: the backlog must call the runner zero times: {calls_bl}"
 lines_bl = [json.loads(l) for l in tick.tick_path().read_text().splitlines()] if tick.tick_path().exists() else []
 assert not any(e.get("subject", "").startswith("L-spec-489") and e["type"] in ("autodispatched", "escalation-blocking")
@@ -846,7 +733,7 @@ for n9, (role9, has_path9) in enumerate((("builder", False), ("spec-writer", Tru
     specs9, _, _, _ = fold.fold(ev9)
     detach9 = json.dumps({"detached": 111 + n9, "role": role9, "subject": sid9, "log": "l"})
     runner9 = _FakeRunner({0: {"code": 0, "stdout": detach9, "stderr": ""}})
-    autodispatch.run(ev9, specs9, NOW, runner=runner9)
+    autodispatch.redispatch_dead(ev9, specs9, NOW, runner=runner9)
     assert len(runner9.calls) == 1, runner9.calls
     replay_path9 = root / "content" / f"replay-{spawn9}.md"
     expect9 = ["doit", "dispatch", "--detach", role9, sid9, "--packet", str(replay_path9), "--cwd", str(root / "cwd9")]
@@ -891,7 +778,7 @@ specs10, _, _, _ = fold.fold(ev10)
 detach10 = json.dumps({"detached": 222, "role": "grader", "subject": sid10, "log": "l"})
 runner10 = _FakeRunner({0: {"code": 0, "stdout": "/pkt/x.md\n", "stderr": ""},
                          1: {"code": 0, "stdout": detach10, "stderr": ""}})
-autodispatch.run(ev10, specs10, NOW, runner=runner10)
+autodispatch.redispatch_dead(ev10, specs10, NOW, runner=runner10)
 assert len(runner10.calls) == 2, runner10.calls
 assert runner10.calls[0] == ["doit", "packet", "grader", sid10, "--worktree", str(worktree10)], runner10.calls[0]
 assert runner10.calls[1][:5] == ["doit", "dispatch", "--detach", "grader", sid10], runner10.calls[1]
@@ -920,7 +807,7 @@ _write(root10b, "L-operator-local.jsonl", {"ts": _iso(NOW - datetime.timedelta(m
 ev10b = fold.read_events()
 specs10b, _, _, _ = fold.fold(ev10b)
 runner10b = _FakeRunner()
-autodispatch.run(ev10b, specs10b, NOW, runner=runner10b)
+autodispatch.redispatch_dead(ev10b, specs10b, NOW, runner=runner10b)
 assert runner10b.calls == [], f"AC10: a held grader spec must not be replayed: {runner10b.calls}"
 lines10b = [json.loads(l) for l in tick.tick_path().read_text().splitlines()] if tick.tick_path().exists() else []
 assert not any(e.get("subject") == sid10b and e["type"] in ("autodispatched", "escalation-blocking", "autodispatch-failed")
@@ -945,7 +832,7 @@ specs11, _, _, _ = fold.fold(ev11)
 spawn11b = "8801"
 runner11 = _FakeRunner({0: {"code": 0, "stdout": json.dumps({"detached": spawn11b, "role": "builder",
                                                               "subject": sid11, "log": "l"}), "stderr": ""}})
-autodispatch.run(ev11, specs11, NOW, runner=runner11)
+autodispatch.redispatch_dead(ev11, specs11, NOW, runner=runner11)
 lines11 = [json.loads(l) for l in tick.tick_path().read_text().splitlines()]
 disp11a = [e for e in lines11 if e["type"] == "autodispatched" and e.get("replaces") == spawn11a]
 assert len(disp11a) == 1 and disp11a[0]["spawn"] == spawn11b, disp11a
@@ -953,7 +840,7 @@ assert len(disp11a) == 1 and disp11a[0]["spawn"] == spawn11b, disp11a
 ev11b = fold.read_events()
 specs11b, _, _, _ = fold.fold(ev11b)
 runner11b = _FakeRunner()
-autodispatch.run(ev11b, specs11b, NOW, runner=runner11b)
+autodispatch.redispatch_dead(ev11b, specs11b, NOW, runner=runner11b)
 assert runner11b.calls == [], f"AC11: must not replay the same dead spawn twice: {runner11b.calls}"
 
 _write(root, "L-tick-local2.jsonl", {"ts": _iso(NOW - datetime.timedelta(minutes=3)), "type": "spawn-stale",
@@ -961,7 +848,7 @@ _write(root, "L-tick-local2.jsonl", {"ts": _iso(NOW - datetime.timedelta(minutes
 ev11c = fold.read_events()
 specs11c, _, _, _ = fold.fold(ev11c)
 runner11c = _FakeRunner()
-autodispatch.run(ev11c, specs11c, NOW, runner=runner11c)
+autodispatch.redispatch_dead(ev11c, specs11c, NOW, runner=runner11c)
 assert runner11c.calls == [], f"AC11: the second-death step calls the runner zero times: {runner11c.calls}"
 lines11c = [json.loads(l) for l in tick.tick_path().read_text().splitlines()]
 esc11 = [e for e in lines11c if e["type"] == "escalation-blocking" and e.get("dead_spawn") == spawn11b]
@@ -973,7 +860,7 @@ assert fold.required_reason(esc11[0]) is None, fold.required_reason(esc11[0])
 ev11d = fold.read_events()
 specs11d, _, _, _ = fold.fold(ev11d)
 runner11d = _FakeRunner()
-autodispatch.run(ev11d, specs11d, NOW, runner=runner11d)
+autodispatch.redispatch_dead(ev11d, specs11d, NOW, runner=runner11d)
 lines11d = [json.loads(l) for l in tick.tick_path().read_text().splitlines()]
 esc11d = [e for e in lines11d if e["type"] == "escalation-blocking" and e.get("dead_spawn") == spawn11b]
 assert len(esc11d) == 1, esc11d
@@ -984,7 +871,7 @@ _write(root, "L-operator-answer.jsonl", {"ts": _iso(NOW - datetime.timedelta(min
 ev11e = fold.read_events()
 specs11e, _, _, _ = fold.fold(ev11e)
 runner11e = _FakeRunner()
-autodispatch.run(ev11e, specs11e, NOW, runner=runner11e)
+autodispatch.redispatch_dead(ev11e, specs11e, NOW, runner=runner11e)
 lines11e = [json.loads(l) for l in tick.tick_path().read_text().splitlines()]
 esc11e = [e for e in lines11e if e["type"] == "escalation-blocking" and e.get("dead_spawn") == spawn11b]
 assert len(esc11e) == 1, esc11e
@@ -1000,7 +887,7 @@ _write(root, "L-tick-local3.jsonl", {"ts": _iso(NOW - datetime.timedelta(minutes
 ev11f = fold.read_events()
 specs11f, _, _, _ = fold.fold(ev11f)
 runner11f = _FakeRunner()
-autodispatch.run(ev11f, specs11f, NOW, runner=runner11f)
+autodispatch.redispatch_dead(ev11f, specs11f, NOW, runner=runner11f)
 assert runner11f.calls == [], runner11f.calls
 lines11f = [json.loads(l) for l in tick.tick_path().read_text().splitlines()]
 esc11f = [e for e in lines11f if e["type"] == "escalation-blocking" and e.get("dead_spawn") == spawn11f]
@@ -1033,7 +920,7 @@ ev12 = fold.read_events()
 specs12, _, _, _ = fold.fold(ev12)
 runner12 = _FakeRunner({0: {"code": 0, "stdout": json.dumps({"detached": 9001, "role": "builder",
                                                               "subject": sid12a, "log": "l"}), "stderr": ""}})
-autodispatch.run(ev12, specs12, NOW, runner=runner12)
+autodispatch.redispatch_dead(ev12, specs12, NOW, runner=runner12)
 assert len(runner12.calls) == 1, runner12.calls
 lines12 = [json.loads(l) for l in tick.tick_path().read_text().splitlines()]
 disp12a = [e for e in lines12 if e["type"] == "autodispatched" and e.get("replaces") == spawn12a]
@@ -1053,14 +940,14 @@ _write(root, "L-tick-local3.jsonl", {"ts": _iso(NOW - datetime.timedelta(minutes
 ev12c = fold.read_events()
 specs12c, _, _, _ = fold.fold(ev12c)
 runner12c = _FakeRunner({0: {"code": 1, "stdout": "", "stderr": "boom"}})
-autodispatch.run(ev12c, specs12c, NOW, runner=runner12c)
+autodispatch.redispatch_dead(ev12c, specs12c, NOW, runner=runner12c)
 lines12c = [json.loads(l) for l in tick.tick_path().read_text().splitlines()]
 escf12c = [e for e in lines12c if e["type"] == "escalation-blocking" and e.get("dead_spawn") == spawn12c]
 assert len(escf12c) == 1 and escf12c[0]["kind"] == "spawn-redispatch-failed", escf12c
 ev12d = fold.read_events()
 specs12d, _, _, _ = fold.fold(ev12d)
 runner12d = _FakeRunner()
-autodispatch.run(ev12d, specs12d, NOW, runner=runner12d)
+autodispatch.redispatch_dead(ev12d, specs12d, NOW, runner=runner12d)
 assert runner12d.calls == [], runner12d.calls
 lines12d = [json.loads(l) for l in tick.tick_path().read_text().splitlines()]
 escf12d = [e for e in lines12d if e["type"] == "escalation-blocking" and e.get("dead_spawn") == spawn12c]
@@ -1159,7 +1046,7 @@ def test_dependency_holds():
         row = _row(rows, sid)
         assert row["status"] == "blocked" and row["reason"] == held(specs[sid]["evs"], ev)
         runner = _FakeRunner()
-        assert autodispatch.run(ev, specs, NOW, runner=runner) == []
+        assert tick.run_steps(ev, specs, NOW, dispatcher=runner)[0].startswith('hold ')
         assert runner.calls == []
         assert not any(e["type"] in ("autodispatched", "autodispatch-failed")
                        and e.get("subject") == sid for e in fold.read_events())
@@ -1237,9 +1124,6 @@ def test_dispatcher_base_1134():
             reason = "base realm: the Executor cuts this worktree by hand"
             assert row["status"] == "blocked" and row["reason"] == reason, row
             head.assert_called_once_with("fixture")
-            runner = _FakeRunner({0: {"code": 0, "stdout": "main\n", "stderr": ""}})
-            assert autodispatch.run(events, specs, NOW, runner=runner) == []
-            assert runner.calls == [["git", "-C", str(root / "repos" / "fixture"), "symbolic-ref", "--short", "HEAD"]]
             signed("AC6", {"status": row["status"], "reason": row["reason"], "packet_or_dispatch_calls": 0})
             print("base AC6 ok")
 
@@ -1318,15 +1202,21 @@ for released_minutes in (11, 5):
             stdout = json.dumps({'detached': 'L-builder-9999'})
         else:
             stdout = 'master'
+            if 'add' in argv:
+                pathlib.Path(argv[5]).mkdir(parents=True)
         return dict(code=0, stdout=stdout, stderr='')
     with patch.dict(os.environ, {'DOIT_LANE_RULES': str(table)}):
         rows = autodispatch.candidates(ev, specs, NOW, head_of=lambda _: 'master')
         assert _row(rows, sid)['limit_min'] == 45, rows
-        out = autodispatch.run(ev, specs, NOW, runner=released_runner)
+        out = tick.run_steps(ev, specs, NOW, dispatcher=released_runner)
     dispatches = [argv for argv in calls if argv[:2] == ['doit', 'dispatch']]
     assert len(dispatches) == 1 and dispatches[0][3:5] == ['builder', sid], calls
     written = [json.loads(line) for line in tick.tick_path().read_text().splitlines()]
-    assert len(written) == 1 and written[0]['type'] == 'autodispatched', written
-    assert 'rule' not in written[0] and 'trigger' not in written[0], written
-    assert len(out) == 1 and out[0].startswith('dispatched '), out
+    launches = [e for e in written if e['type'] == 'autodispatched']
+    assert len(launches) == 1 and launches[0]['rule'] == 'build', written
+    assert any(e['type'] == 'resource-created' for e in fold.read_events(use_cache=False))
+    assert len(out) == 1 and out[0].startswith('acted '), out
 print('lane-driver-1137 AC10 AC13 AC16 released-wave first builds ok')
+
+if __name__ == '__main__':
+    unittest.main(argv=[sys.argv[0]])

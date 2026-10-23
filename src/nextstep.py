@@ -421,5 +421,15 @@ def main(argv=None):
     return 0
 
 
+
+
+def manual_routine_dispatches(events, since):
+    """Return routine spawn ids with missing, malformed, or manual provenance."""
+    return [e.get('spawn') for e in events
+            if (e.get('type') == 'build-started' or
+                e.get('type') == 'spawn-started' and e.get('role') in {'grader', 'reviewer'})
+            and _time(e.get('ts')) >= since and e.get('issued_by') != 'tick']
+
+
 if __name__ == '__main__':
     sys.exit(main())

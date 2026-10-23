@@ -336,6 +336,140 @@ def lane(specs, charters, busy=frozenset(), reaped=frozenset(), events=(), inbou
                      if i.get("source") not in busy and i.get("source") not in packet_busy])
 
 
+ROUTINE_ROLES = dict(build='builder', grade='grader', review='reviewer',
+                     rebuild='builder', regrade='grader')
+ROUTINE_ACTIONS = set(ROUTINE_ROLES)
+
+
+class _PassDispatcher:
+    def __init__(self, runner, events, specs, now, dry_run):
+        self.runner, self.events, self.specs = runner, events, specs
+        self.now, self.dry_run = now, dry_run
+
+    def __call__(self, argv):
+        return self.runner(argv)
+
+
+def launch(step, *, dispatcher):
+    """Launch precisely one tick-owned routine Step; failures remain standing."""
+    import autodispatch
+    import lane_driver
+    import nextstep
+    import dispatch
+    if not isinstance(step, nextstep.Step):
+        reason = 'undetermined: unreadable Step'
+        dispatch.emit(tick_path(), {'subject': getattr(step, 'item', 'tick')},
+                      'autodispatch-failed', reason=reason)
+        raise ValueError(reason)
+    if step.state != 'action' or step.owner != 'tick' or step.action not in ROUTINE_ACTIONS:
+        return None
+    if step.reason.startswith('undetermined:'):
+        return None
+    events = getattr(dispatcher, 'events', None)
+    if events is None:
+        events = fold.read_events()
+    evs = [e for e in events if e.get('subject') == step.item]
+    if autodispatch._standing_autodispatch_failed(evs):
+        return None
+    if getattr(dispatcher, 'dry_run', False):
+        return None
+    role = ROUTINE_ROLES[step.action]
+    try:
+        project = next((e['project'] for e in reversed(evs) if e.get('project')), 'unknown')
+        charter = dispatch.resolve_charter(evs, step.item, None)
+        wt = fold.ROOT / 'worktrees' / project / step.item.lower()
+        if step.action == 'build':
+            repo = fold.ROOT / 'repos' / project
+            result = dispatcher(['git', '-C', str(repo), 'symbolic-ref', '--short', 'HEAD'])
+            if result.get('code', 1) or not result.get('stdout', '').strip():
+                raise ValueError(result.get('stderr') or 'symbolic-ref failed')
+            main = result['stdout'].strip()
+            if wt.is_dir():
+                result = dispatcher(['git', '-C', str(wt), 'rev-list', '--count', main + '..HEAD'])
+                if result.get('code', 1) or result.get('stdout', '').strip() != '0':
+                    raise ValueError(f'worktree {wt} exists with commits above {main}; not reusing')
+                result = dispatcher(['git', '-C', str(wt), 'merge', '--ff-only', main])
+            else:
+                result = autodispatch.add_builder_worktree(repo, wt, step.item.lower(), main,
+                                                          runner=dispatcher)
+            if result.get('code', 1):
+                raise ValueError(result.get('stderr') or result.get('stdout') or 'worktree add failed')
+        options = lane_driver._review_options(evs, step.item) if step.action == 'review' else None
+        if step.action == 'review' and options is None:
+            raise ValueError('review round limit')
+        if options and options[0] == 'needs-browser':
+            raise ValueError('ui review requires review-mcp.json')
+        spawn = lane_driver._dispatch(role, step.item, project, charter, dispatcher, options)
+        if not isinstance(spawn, str) or not spawn:
+            raise ValueError('undetermined: missing spawn id')
+        refusal = dispatch.emit(tick_path(), {'subject': step.item}, 'autodispatched',
+                                role=role, rule=step.action, since=step.since, spawn=spawn)
+        if refusal is not None:
+            raise ValueError('autodispatched record refused: ' + str(refusal))
+        return spawn
+    except Exception as exc:
+        refusal = dispatch.emit(tick_path(), {'subject': step.item}, 'autodispatch-failed',
+                                role=role, rule=step.action, reason=str(exc))
+        raise ValueError(str(exc) + (f'; failure record refused: {refusal}' if refusal else '')) from exc
+
+
+def _steps(events, specs, now):
+    """Load the caller-owned table/wave inputs and evaluate one snapshot."""
+    import dispatch
+    import lane_rules
+    import nextstep
+    waves = {}
+    for sid, spec in specs.items():
+        evs = spec.get('evs', [])
+        written = next((e for e in reversed(evs)
+                        if e.get('type') == 'spec-written' and e.get('footprint')), None)
+        charter = dispatch.resolve_charter(evs, sid, None)
+        if written and charter:
+            waves[sid] = dispatch.spec_wave(charter, written['footprint'])
+    return nextstep.next_steps(events, specs, now, lane_rules.load(), waves)
+
+
+def run_steps(events, specs, now, *, dispatcher=None, dry_run=False, handled=frozenset(), steps=None):
+    """Shared entry point; a tick pass supplies its single computed snapshot."""
+    import autodispatch
+    import lane_driver
+    events = list(events)
+    if steps is None:
+        steps = _steps(events, specs, now)
+    runner = _PassDispatcher(dispatcher or autodispatch._real_runner, events, specs, now, dry_run)
+    slots = dict(builder=max(0, autodispatch.capacity() - lane_driver._in_flight_role(events, now, 'builder')),
+                 reviewer=max(0, lane_driver.capacity() - lane_driver._in_flight_role(events, now, 'reviewer')))
+    out = []
+    for step in sorted(steps, key=lambda s: (s.since, s.item)):
+        if step.item in handled:
+            continue
+        if step.reason.startswith('undetermined:') or step.state == 'hold':
+            out.append(f"{'undetermined' if step.reason.startswith('undetermined:') else 'hold'} {step.item}: {step.reason}")
+            continue
+        if step.owner != 'tick' or step.action not in ROUTINE_ACTIONS:
+            continue
+        role = ROUTINE_ROLES[step.action]
+        if role in slots and slots[role] <= 0:
+            out.append(f'seat-wait {step.item} {step.action}')
+            continue
+        if dry_run:
+            out.append(f'would act {step.item} {step.action}')
+            if role in slots:
+                slots[role] -= 1
+            continue
+        try:
+            spawn = launch(step, dispatcher=runner)
+            if spawn:
+                out.append(f'acted {step.item} {step.action} spawn={spawn}')
+                if role in slots:
+                    slots[role] -= 1
+            else:
+                out.append(f'hold {step.item}: standing dispatch failure')
+        except ValueError as exc:
+            out.append(f'failed {step.item} {step.action}: {exc}')
+    return out
+
+
 def _record():
     """One flock-guarded fold+lane+append — the shared core `main()` and
     `wait()` both run under the IDENTICAL non-blocking lock (this module's own
@@ -535,8 +669,17 @@ def _record():
     log_outcomes(['start autodispatch'])
     try:
         import autodispatch
-        outcomes = autodispatch.run(ev, specs, fold.NOW)
+        import merge_queue
+        steps = _steps(ev, specs, fold.NOW)
+        outcomes = run_steps(ev, specs, fold.NOW, steps=steps)
+        outcomes.extend(autodispatch.redispatch_dead(ev, specs, fold.NOW,
+                        handled={s.item for s in steps if s.state == 'action' and s.owner == 'tick'
+                                 and s.action in ROUTINE_ACTIONS}))
+        outcomes.extend(merge_queue.enqueue_due(ev, fold.NOW))
         log_outcomes(outcomes or [])
+        failures = [line for line in outcomes if line.startswith('failed ')]
+        if failures:
+            autodispatch_error = '; '.join(failures)
     except Exception as e:
         autodispatch_error = f"{e}"
         log_outcomes([f'failed autodispatch: {e}'])

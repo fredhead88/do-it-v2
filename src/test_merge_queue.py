@@ -410,33 +410,49 @@ class QueueTests(unittest.TestCase):
         self.mark(9, 'list', 'list json', 'add', 'add refused', 'remove', 'remove refused', 'no actor field')
 
     def test_autodispatch_integration(self):
+        from contextlib import ExitStack
+
         sequence = []
         def driver(*a, **kw):
             sequence.append('driver')
             return ['driver line']
         def queue(*a, **kw):
             sequence.append('queue')
-            self.assertIs(kw['runner'], self.fake_runner)
-            self.assertTrue(kw['dry_run'])
+            self.assertEqual(a, ([], self.now))
+            self.assertEqual(kw, {})
             return ['queue line']
-        self.fake_runner = self.fake
-        with patch.object(autodispatch, 'candidates', return_value=[]), \
-             patch.object(autodispatch, 'grader_candidates', return_value=[]), \
-             patch.object(autodispatch, 'dead_spawns', side_effect=lambda *a: sequence.append('replay') or []), \
-             patch('lane_driver.run', side_effect=driver), patch.object(mq, 'enqueue_due', side_effect=queue) as call:
-            out = autodispatch.run([], {}, self.now, runner=self.fake_runner, dry_run=True)
-            self.assertEqual(out, ['driver line', 'queue line'])
-            self.assertEqual(sequence, ['replay', 'driver', 'queue'])
+        with ExitStack() as stack:
+            # Isolate the pass's unrelated services from machine state and I/O.
+            for target, result in (
+                ('intake.run', {}), ('notes.run', None), ('pr_closeout.run', None),
+                ('install_sync.run', []), ('push_origin.run', None),
+                ('carry.uncarried', []), ('carry.sync_v4', None),
+                ('pane_resume.run', None), ('crons.check', []),
+                ('look._read_state', {'last_pass': self.now.isoformat()}),
+                ('look.heartbeat_missed', False), ('grader_serve.run', None),
+                ('tree_cleanup.reap_worktrees', ([], []))):
+                stack.enter_context(patch(target, return_value=result))
+            stack.enter_context(patch.object(tick, 'lane', return_value=[]))
+            steps = stack.enter_context(patch.object(tick, '_steps', return_value=[]))
+            stack.enter_context(patch.object(tick, 'run_steps', side_effect=driver))
+            stack.enter_context(patch.object(autodispatch, 'redispatch_dead',
+                side_effect=lambda *a, **kw: sequence.append('replay') or []))
+            logged = stack.enter_context(patch.object(tick, '_log_lane_driver'))
+            call = stack.enter_context(patch.object(mq, 'enqueue_due', side_effect=queue))
+            tick._record()
+            self.assertEqual(sequence, ['driver', 'replay', 'queue'])
             self.assertEqual(call.call_count, 1)
-        with patch.object(autodispatch, 'candidates', return_value=[]), \
-             patch.object(autodispatch, 'grader_candidates', return_value=[]), \
-             patch.object(autodispatch, 'dead_spawns', return_value=[]), \
-             patch('lane_driver.run', return_value=['earlier']), \
-             patch.object(mq, 'enqueue_due', side_effect=ValueError('fixture failure')):
-            out = autodispatch.run([], {}, self.now, runner=self.fake)
-            self.assertEqual(out[0], 'earlier')
-            self.assertEqual(self.landed()[-1]['role'], 'queue')
-        self.mark(10, 'called once after driver', 'same runner', 'dry-run propagated', 'queue error contained')
+            self.assertEqual(steps.call_count, 1)
+            logged.assert_any_call(['driver line', 'queue line'], self.now)
+            self.assertNotIn('autodispatch_error', self.landed()[-1])
+            call.reset_mock(side_effect=True)
+            call.side_effect = ValueError('fixture failure')
+            tick._record()
+            self.assertEqual(call.call_count, 1)
+            self.assertEqual(self.landed()[-1]['type'], 'tick')
+            self.assertEqual(self.landed()[-1]['autodispatch_error'], 'fixture failure')
+        self.mark(10, 'tick called once after driver', 'pass snapshot and clock',
+                  'outcomes logged', 'queue error contained')
 
     def test_due_failure_and_unreadable_table(self):
         self.fixture()
