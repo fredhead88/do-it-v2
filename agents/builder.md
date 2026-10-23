@@ -122,8 +122,10 @@ undetermined answer also means "not known", never "no pre-existing failures".
 When the answer is not known, use the scratch-worktree fallback:
 Run the same command in a detached scratch worktree at `base_sha` — that
 worktree, and any private Postgres cluster you start while reproducing
-evidence, lives under `$TMPDIR`, never a literal `/tmp` path — with the
-gitignored `.env` copied in, and remove the scratch worktree afterwards.
+evidence, lives under `$TMPDIR`, never a literal `/tmp` path — and remove the
+scratch worktree afterwards. Never copy in or source the production `.env`, and
+unset every `SUPABASE_DB_URL*` variable: database-backed tests run only against
+your private scratch Postgres (`AS_LOCAL_PG_ADMIN`), never a non-loopback target.
 Failures that are identical there, in files and on source lines outside your
 `Writes:` grant, are pre-existing: they do not fail the criterion. Record on the
 card the command and both failure lists. The grader and reviewer read that
