@@ -267,6 +267,7 @@ def codex_payload(raw=None):
     return realm_codex.payload(raw, ledger_projection=sessions)
 
 
+
 _OPERATOR = {"key": None, "value": None, "lock": threading.Lock()}
 
 
@@ -1444,12 +1445,10 @@ def push_forever(url, token, hours):
     while True:
         try:
             snap = bootstrap(hours, HUB.states, goals=HUB.goals, proving=HUB.proving)
-            snap["operator"] = operator_payload()
             snap["live"], snap["remote"] = False, True
             _post(f"{url}/api/push?file=snapshot", token, snap)
             if time.monotonic() - last_history > 600:
                 hist = bootstrap(0, HUB.states, goals=HUB.goals, proving=HUB.proving)
-                hist["operator"] = snap["operator"]
                 hist["live"], hist["remote"] = False, True
                 _post(f"{url}/api/push?file=history", token, hist)
                 last_history = time.monotonic()
@@ -1712,7 +1711,6 @@ def main(argv=None):
     if a.snapshot:
         history_load()
         snap = bootstrap(a.hours)
-        snap["operator"] = operator_payload()
         snap["live"] = False
         pathlib.Path(a.snapshot).write_text(json.dumps(snap, separators=(",", ":")))
         print(f"{a.snapshot}: {len(snap['events'])} rows, {len(snap['states'])} states")

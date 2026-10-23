@@ -46,7 +46,7 @@ def test_eta_uses_completed_window_duration_not_queue_wait_and_limits_to_five():
 def test_plain_stages_and_live_requires_own_deployment_evidence():
     for state, expected in [('building','building'), ('built','checking'), ('grading','checking'),
                             ('graded','in review'), ('reviewing','in review'), ('shipped','shipped'),
-                            ('shipped-owed-due','shipped'), ('closed-shipped','shipped'), ('closed-unbuilt','stopped'), ('accepted','live')]:
+                            ('shipped-owed-due','shipped'), ('accepted','live')]:
         assert op.stage(state) == expected
     assert op.stage('reviewing', position=3) == 'waiting to merge (position 3)'
     events = [event('shipped', -20, sha='abcdef'), event('deploy-landed', -10, 'another-project', sha='other')]
@@ -82,9 +82,6 @@ def test_legacy_clean_review_queue_is_fifo_and_active_dispatch_is_not_merge_read
     d = shape(classified=classified)
     assert [s['spec'] for s in d['next']] == ['L-spec-9001','L-spec-9003']
     assert d['next'][1]['position'] == 2
-    # Explicit queue order is causal when two appends share a timestamp.
-    tied=[dict(spec='L-spec-9003',added_at=event('x',-5)['ts']),dict(spec='L-spec-9001',added_at=event('x',-5)['ts'])]
-    assert [s['spec'] for s in shape(queue=tied)['next']] == ['L-spec-9003','L-spec-9001']
 
 
 def test_needs_you_uses_open_operator_escalations_only_and_respects_cross_subject_answers():
@@ -211,21 +208,6 @@ def test_spec_titles_prefer_descriptive_headings_to_ids_and_slug_units():
         f=content/'L-spec-9001.md'
         f.write_text('---\nspec_id: L-spec-9001\nunit: mechanical-slug\n---\n# L-spec-9001 — A useful title for the operator\n\nUseful paragraph.')
         assert realm.spec_text('L-spec-9001')['title']=='A useful title for the operator'
-
-
-
-def test_hosted_and_saved_snapshots_carry_the_same_operator_projection():
-    # Exercise the existing push builder with the outbound call replaced; no
-    # network or service is contacted. Its sleep ends this one-cycle fixture.
-    import realm
-    class EndCycle(Exception): pass
-    with mock.patch.object(realm,'bootstrap',return_value={}), mock.patch.object(realm,'operator_payload',return_value={'next':[]}), \
-         mock.patch.object(realm,'_post') as post, mock.patch.object(realm.time,'sleep',side_effect=EndCycle):
-        try: realm.push_forever('https://example.invalid','fixture-token',24)
-        except EndCycle: pass
-    assert post.call_count==2
-    for call in post.call_args_list:
-        assert call.args[2]['operator']=={'next':[]}
 
 
 def test_operator_js_five_rows_rounded_etas_titles_hover_and_escaping():

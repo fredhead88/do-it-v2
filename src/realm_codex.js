@@ -10,7 +10,7 @@ const Codex = (() => {
   const light = layer.getContext('2d');
   const style = document.createElement('style');
   style.textContent = `:root,[data-theme="light"],[data-theme="dark"]{--codex-cyan:#5ef2ff;--codex-violet:#a77bff}
-    .legend{z-index:3}\n    .codex-target{position:absolute;background:transparent;border:0;cursor:pointer;padding:0;color:transparent;z-index:2}
+    .codex-target{position:absolute;background:transparent;border:0;cursor:pointer;padding:0;color:transparent;z-index:2}
     .codex-target:focus-visible{outline:2px solid var(--codex-cyan);outline-offset:4px;border-radius:50%}
     .codex-inspector{font-family:monospace}.codex-inspector h2{color:var(--codex-cyan);text-shadow:0 0 12px var(--codex-violet)}
     .codex-inspector dt{color:var(--codex-violet);margin-top:12px}.codex-inspector dd{margin:3px 0;overflow-wrap:anywhere}
@@ -80,7 +80,7 @@ const Codex = (() => {
       const selected=s.id?`<h4>Selected marker</h4><p><b>${esc(s.subject)}</b> · ${esc(s.role)} · ${esc(s.outcome||s.state)}<br>Started ${esc(s.started)}${s.fell_back?'<br>'+esc(s.fell_back):''}</p>`:'';
       return `<div class="codex-inspector"><h2>Codex (OpenAI)</h2><div class="cls">Read-only · today is UTC · as of ${esc(source.at||'awaiting server')}</div>${selected}
         <h4>Ledger seats today (${seats.length})</h4>
-        ${seats.length?`<table><tr><th>Role</th><th>Spec</th><th>Start (UTC)</th><th>Outcome</th></tr>${seats.map(s=>`<tr><td>${esc(s.role)}</td><td><a class="link" data-subj="${esc(s.subject)}" title="${esc((specInfo(s.subject)||{}).title||s.subject)}">${esc(s.subject)}</a><br><small>${esc(s.id)}</small></td><td>${esc((s.started||'').slice(11,16))}</td><td>${esc(s.outcome||s.state)}</td></tr>`).join('')}</table>`:'<p>No Codex-backed ledger seats started today.</p>'}
+        ${seats.length?`<table><tr><th>Role</th><th>Spec</th><th>Start (UTC)</th><th>Outcome</th></tr>${seats.map(s=>`<tr><td>${esc(s.role)}</td><td><a class="link" data-subj="${esc(s.subject)}" title="${esc(s.subject)}">${esc((specInfo(s.subject)||{}).title||s.subject)}</a><br><small>${esc(s.id)}</small></td><td>${esc((s.started||'').slice(11,16))}</td><td>${esc(s.outcome||s.state)}</td></tr>`).join('')}</table>`:'<p>No Codex-backed ledger seats started today.</p>'}
         <h4>Burn-down workers (${workers.length})</h4><p class="tiny">Done means REPORT.md exists; running means no report yet. This is not a process health check.</p>
         ${workers.map(w=>`<article><h3>${esc(w.name)} · ${esc(w.title)}</h3><b>${esc(w.state)}</b><p>${esc(w.summary||'Report has no prose paragraph yet.')}</p></article>`).join('')||'<p>No worker directories with a matching brief.</p>'}
         ${source.error?`<p>${esc(source.error)}</p>`:''}
@@ -123,11 +123,11 @@ const Codex = (() => {
       light.fillStyle=i%2?palette.cyan:palette.violet;light.beginPath();light.arc(gate.x+Math.sin(i*13)*38,gate.y+60-phase*140,1.2,0,7);light.fill();
     }
     light.globalAlpha=active?.9:.4;light.shadowBlur=0;light.fillStyle=palette.cyan;light.font='11px monospace';light.textAlign='center';light.fillText('CODEX GATE',gate.x,gate.y+85);light.restore();
-    target('gate',gate.x,gate.y,132,'Codex Gate, OpenAI sessions and weekly quota');
+    target('gate',gate.x,gate.y,68,'Codex Gate, OpenAI sessions and weekly quota');
   }
   function ship(t){
     const x=gate.x+(REDUCED?0:Math.sin(t*.18)*7),y=73+(REDUCED?0:Math.cos(t*.23)*4);
-    target('ship',x,y,112,'Codex OpenAI — seats and burn-down workers');
+    target('ship',x,y,56,'Codex OpenAI — seats and burn-down workers');
     light.save();light.translate(x,y);glow(0,0,62,.8);light.strokeStyle=palette.cyan;
     light.shadowColor=palette.violet;light.shadowBlur=12;light.lineWidth=1.4;
     light.fillStyle='rgba(167,123,255,.15)';light.beginPath();light.moveTo(-57,0);light.lineTo(-34,18);light.lineTo(30,18);light.lineTo(55,-6);light.lineTo(-57,0);light.fill();light.stroke();

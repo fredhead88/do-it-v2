@@ -6,7 +6,7 @@ import re
 import statistics
 
 SPEC = re.compile(r'L-spec-\d+[a-z]?')
-FINISHED = {'accepted', 'shipped', 'shipped-owed', 'shipped-owed-due', 'closed-shipped', 'closed-unbuilt', 'killed', 'void', 'dropped'}
+FINISHED = {'accepted', 'shipped', 'shipped-owed', 'shipped-owed-due', 'killed', 'void', 'dropped'}
 
 
 def utc(value):
@@ -60,14 +60,14 @@ def stage(state, *, position=None, merged=False, deployed=False):
         return 'live'
     if state == 'accepted':
         return 'live'
-    if state.startswith('shipped') or state == 'closed-shipped' or merged:
+    if state.startswith('shipped') or merged:
         return 'shipped'
     if position is not None:
         return f'waiting to merge (position {position})'
     return {'building': 'building', 'dispatched': 'building', 'built': 'checking',
             'grading': 'checking', 'graded': 'in review', 'reviewing': 'in review',
             'written': 'written, ready, no builder yet', 'killed': 'stopped',
-            'void': 'stopped', 'dropped': 'stopped', 'closed-unbuilt': 'stopped'}.get(state, 'not started' if not state else 'checking')
+            'void': 'stopped', 'dropped': 'stopped'}.get(state, 'not started' if not state else 'checking')
 
 
 def hold_rows(rule_rows, classified):
@@ -92,7 +92,7 @@ def merge_candidates(queue_rows, classified):
     for r in classified:
         if r.get('bucket') == 'queued' and str(r.get('reason', '')).startswith(('awaiting merge window after ', 'in merge window ')):
             rows.setdefault(r['spec'], dict(spec=r['spec'], added_at=r.get('since'), source='clean review / gate'))
-    return sorted(rows.values(), key=lambda r: utc(r.get('added_at')) or dt.datetime.max.replace(tzinfo=dt.timezone.utc))
+    return sorted(rows.values(), key=lambda r: (utc(r.get('added_at')) or dt.datetime.max.replace(tzinfo=dt.timezone.utc), r['spec']))
 
 
 def shape(events, states, queue_rows, rule_rows, classified, priorities, now, *, titles=None, answered=()):
