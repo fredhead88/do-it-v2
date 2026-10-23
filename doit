@@ -42,6 +42,7 @@ case "${1:-board}" in
   version) cat "$HERE/VERSION" ;;
   backup)  shift; exec python3 "$SRC/backup.py" "$@" ;;
   restore) shift; exec python3 "$SRC/restore.py" "$@" ;;
+  retired) shift; exec python3 "$SRC/retired.py" "$@" ;;
   crons)   shift; exec python3 "$SRC/crons.py" "$@" ;;
   seat-usage) shift; exec python3 "$SRC/seat_usage.py" "$@" ;;
   cron-run) shift; exec python3 "$SRC/cron_run.py" "$@" ;;
@@ -171,6 +172,14 @@ PY
              fi
              printf '%s\n' "$out"
            done
+           if out=$(python3 "$SRC/retired.py" check --root "$HERE/retired.d" --repo "$HERE" 2>&1); then
+             echo "PASS retired check"
+           else
+             s=$?
+             echo "FAIL retired check (exit $s)"
+             rc=1
+           fi
+           printf '%s\n' "$out"
            exit "$rc" ;;
   help|-h|--help) cat <<'USAGE'
 doit — a ledger that derives state, and the guards that read it
@@ -216,6 +225,8 @@ doit — a ledger that derives state, and the guards that read it
   doit note-close <pr> --response FILE   post FILE as the closing comment on an inbound-note PR, close it, record it
   doit balance [--dry-run] | hold | resume   move managed roles using weekly quota readings
   doit models show | use <mixed|claude-only>   the root's model map: print it, or install a profile
+  doit retired check [--root DIR] [--repo PATH] [--crontab-file FILE]
+                                           prove registered mechanisms absent (exit 0/1/2)
   doit version                            print the release version (VERSION; CHANGELOG.md has the history)
   doit alloc <kind> [--dir]               claim the next L-<kind>-NNNN under content and print its path (§2.8)
   doit backup push | watch --for N | status | cron   replicate the ledger (§9.9)

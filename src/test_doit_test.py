@@ -86,10 +86,18 @@ def _build_tree(tmp, *, content=False, isolated=True):
         doit_copy.write_text(source.replace(ISOLATION_EXPORTS, ""))
     doit_copy.chmod(doit_copy.stat().st_mode | stat.S_IEXEC)
     (tree / "src").mkdir()
+    # The copied launcher's retirement gate needs its own tracked-file registry.
+    shutil.copyfile(REPO_ROOT / "src" / "retired.py", tree / "src" / "retired.py")
+    (tree / "retired.d").mkdir()
+    (tree / "retired.d" / "fixture.toml").write_text(
+        '[[retired]]\nname="fixture-clean"\nkind="code"\n'
+        'pattern="removed fixture mechanism"\npaths=["src/test_*.py"]\n')
+    subprocess.run(["git", "init", "-q", str(tree)], check=True)
     sources = ({name: CONTENT_PROBE_SRC for name in CONTENT_FIXTURES} if content
                else {"test_probe.py": PROBE_SRC})
     for name, source in sources.items():
         (tree / "src" / name).write_text(source)
+    subprocess.run(["git", "-C", str(tree), "add", "src", "retired.d"], check=True)
     return tree
 
 
