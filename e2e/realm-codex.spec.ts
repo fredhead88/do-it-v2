@@ -31,11 +31,9 @@ rollout = [
 f = folder / 'rollout-live.jsonl'
 f.write_text('\n'.join(map(json.dumps,rollout)))
 original = realm_codex.payload
-realm_codex.payload = lambda rows, **kw: original(rows,home=home,now=now,processes={'worker-live'},windows={rollout[0]['payload']['cwd']:'codex-audit'},**kw)
+realm_codex.payload = lambda rows: original(rows,home=home,now=now,processes={'worker-live'},windows={rollout[0]['payload']['cwd']:'codex-audit'})
 realm.sys_signals = lambda: {}
 realm.maker_index = lambda *a: {}
-realm.throughput_payload = lambda **kw: {'throughput':None}
-realm.omens_model = lambda *a: {}
 def data(phase):
  rows = [] if phase=='empty' else [start]
  if phase in ('fallback','ended'): rows.append(fallback)
@@ -63,12 +61,7 @@ let server, base, baseline;
 test.beforeAll(async () => {
   baseline = join(evidence, 'baseline.html');
   const ref=process.env.CODEX_BASE_REF || execFileSync('git',['rev-parse','HEAD^'],{cwd:root}).toString().trim();
-  let baselinePage=execFileSync('git',['show',ref+':src/realm.html'],{cwd:root}).toString();
-  for(const name of ['codex','operator']){
-    const seam='/*__'+name.toUpperCase()+'_JS__*/';
-    if(baselinePage.includes(seam))baselinePage=baselinePage.replace(seam,()=>execFileSync('git',['show',ref+':src/realm_'+name+'.js'],{cwd:root}).toString());
-  }
-  writeFileSync(baseline,baselinePage);
+  writeFileSync(baseline,execFileSync('git',['show',ref+':src/realm.html'],{cwd:root}));
   server = spawn('/usr/bin/python3',['-u','-c',python,baseline],{cwd:root,stdio:['ignore','pipe','pipe']});
   base = await new Promise((done,fail)=>{
     let output='';server.stdout.on('data',chunk=>{output+=chunk;const match=/^(\d+)\n/.exec(output);if(match)done('http://127.0.0.1:'+match[1]);});
@@ -123,7 +116,7 @@ for(const width of [1440,400]){
     const box=await page.locator('[data-codex="L-builder-7"]').boundingBox();
     await page.mouse.click(box.x+box.width/2,box.y+box.height/2);
     const inspectorText=await page.locator('.codex-inspector').innerText();
-    for(const label of ['Codex (OpenAI)','Selected marker','L-spec-7','builder','running','Started','Ledger seats today (1)','Burn-down workers (0)','Weekly quota'])expect(inspectorText).toContain(label);
+    for(const label of ['Kind','Subject / title','Tmux window','State','Started','Last activity','Turns','Tokens','Fallback history','Weekly quota','Resets'])expect(inspectorText).toContain(label);
     await shot(page,'inspector-'+width);await page.locator('#p-close').click();
     // Hold each handover phase while screenshots are captured, even under load.
     await page.clock.pauseAt(Date.now()+3600000);
@@ -140,7 +133,7 @@ test('reduced motion is steady, focusable, and departures finish',async ({page})
   await page.emulateMedia({reducedMotion:'reduce'});await page.context().tracing.start({screenshots:true,snapshots:true});await open(page);
   const pixels=()=>page.evaluate(()=>document.querySelector('#codex-light').toDataURL());
   const first=await pixels();await page.waitForTimeout(200);expect(await pixels()).toEqual(first);
-  await page.locator('[data-codex="worker-live"]').focus();await page.keyboard.press('Enter');await expect(page.locator('.codex-inspector')).toContainText('Technical audit');
+  await page.locator('[data-codex="worker-live"]').focus();await page.keyboard.press('Enter');await expect(page.locator('.codex-inspector')).toContainText('codex-audit');
   await shot(page,'reduced-motion');await page.locator('#p-close').click();
   await page.evaluate(()=>handle({ty:'build-done',sp:'L-builder-7',s:'L-spec-7',st:'DONE',t:new Date(S.now).toISOString(),ms:S.now}));
   await expect(page.locator('[data-codex="L-builder-7"]')).toBeHidden();
