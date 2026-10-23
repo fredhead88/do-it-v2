@@ -97,6 +97,30 @@ def test_collapsed_and_config():
 
 
 
+
+def test_terminal_check_failure_is_visible_until_repair_or_new_window():
+    opened = event('window-opened', 'solo', specs=['L-spec-1430'])
+    failed = event('escalation-blocking', 'solo', outcome='undetermined')
+    red = event('window-tree-verified', 'solo', green=False)
+    d = project([opened, failed, red])
+    assert not d['merging']
+    assert d['groups'][1]['status'] == 'checks need repair'
+    assert d['check_issues'] == ['L-spec-1430']
+    assert 'checks need attention' in d['attention']
+    assert not project([opened, failed, red], states=[('L-spec-1430','accepted')])['check_issues']
+    assert not project([opened, failed, red], classified=[dict(spec='L-spec-1430',bucket='held')])['check_issues']
+    for progress in [event('build-started'), opened, event('shipped')]:
+        assert not project([opened, failed, red, progress])['check_issues']
+
+
+def test_ready_for_review_and_ready_to_merge_are_not_active_review():
+    assert project(states=[('L-spec-1430','graded')])['groups'][1]['status'] == 'ready for review'
+    assert project([event('review',n_blocking=0)], states=[('L-spec-1430','graded')])['groups'][1]['status'] == 'ready to merge'
+    assert project([event('review',n_blocking=1)])['groups'][1]['status'] == 'changes requested'
+    active = [dict(spec='L-spec-1430',owner='builder',bucket='queued',reason='builder owns active dispatch rework')]
+    assert project(states=[('L-spec-1430','graded')],classified=active)['groups'][1]['status'] == 'building'
+
+
 def test_server_cache_and_unavailable_answer():
     import contextlib
     import sys

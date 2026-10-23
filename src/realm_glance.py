@@ -37,9 +37,11 @@ def window_facts(events):
     means checks failed; green still waits for promotion. A per-spec drop must
     not close other specs in the same window. Reopening a name starts a new run.
     """
-    windows, shipped = {}, {}
+    windows, shipped, failures, members = {}, {}, {}, {}
     for e in events:
         kind, sid = e.get('type'), e.get('subject')
+        if kind in {'shipped', 'build-started', 'spec-written', 'spec-killed', 'spec-closed'}:
+            failures.pop(sid, None)
         if kind == 'shipped':
             shipped[sid] = e
             for row in windows.values():
@@ -47,16 +49,26 @@ def window_facts(events):
         if e.get('actor') != 'executor':
             continue
         if kind == 'window-opened':
-            members = ids(e.get('specs'))
+            current = ids(e.get('specs'))
+            members[sid] = current
+            for spec in current:
+                failures.pop(spec, None)
             for row in windows.values():
-                row['specs'] = [s for s in row['specs'] if s not in members]
-            windows[sid] = {'specs': members, 'phase': 'merging now'}
+                row['specs'] = [s for s in row['specs'] if s not in current]
+            windows[sid] = {'specs': current, 'phase': 'merging now'}
         elif kind == 'window-candidate' and sid in windows:
             windows[sid].update(specs=ids(e.get('specs')), phase='merging now')
         elif kind == 'window-tree-verified' and sid in windows:
             windows[sid]['phase'] = 'checks failed; waiting for repair' if e.get('green') is False else 'merging now'
+        elif kind == 'window-tree-verified' and e.get('green') is False:
+            for spec in members.get(sid, []):
+                if failures.get(spec, {}).get('window') == sid:
+                    failures[spec]['phase'] = 'checks need repair'
         elif kind in {'window-verified', 'window-cancelled', 'escalation-blocking'}:
-            windows.pop(sid, None)
+            row = windows.pop(sid, None)
+            if kind == 'escalation-blocking' and row:
+                for spec in row['specs']:
+                    failures[spec] = {'window': sid, 'phase': 'checks need repair' if e.get('outcome') == 'red' else 'checks need attention'}
         elif kind in {'shipped', 'window-dropped', 'window-deferred', 'merge-conflict'}:
             name = e.get('window')
             if name in windows:
@@ -64,13 +76,18 @@ def window_facts(events):
             if kind == 'shipped':
                 shipped[sid] = e
     active = {s: row['phase'] for row in windows.values() for s in row['specs']}
-    return active, shipped
+    return active, shipped, {s: row['phase'] for s, row in failures.items()}
 
 
 def shape(events, states, rules, classified, priorities, now, *, needs=(), answered=()):
     events = sorted((e for e in events if utc(e.get('ts')) and utc(e['ts']) <= now), key=lambda e: utc(e['ts']))
     states = dict(states)
-    active, shipped = window_facts(events)
+    active, shipped, failed = window_facts(events)
+    work = {}
+    for e in events:
+        if e.get('type') in {'spec-written', 'build-started', 'build-done', 'build-blocked', 'verdict', 'review', 'merge-gate-clean'}:
+            work[e.get('subject')] = e
+    running = {r['spec']: r.get('owner') for r in classified if 'owns active dispatch' in str(r.get('reason', ''))}
     # The live classifier understands migration sequencing, recorded rulings,
     # dependency and wave holds. Read it even before a wait is overdue.
     held = {r['spec'] for r in [*classified, *rules] if r.get('rule') in HELD_RULES
@@ -93,6 +110,8 @@ def shape(events, states, rules, classified, priorities, now, *, needs=(), answe
     for sid in list(held):
         if sid in shipped or states.get(sid) in FINISHED:
             held.discard(sid)
+    failed = {s: phase for s, phase in failed.items() if s not in shipped and s not in held
+              and states.get(s) not in FINISHED and not states.get(s, '').startswith('shipped')}
     deployed = set()
     for e in events:
         if e.get('type') != 'deploy-landed':
@@ -112,8 +131,17 @@ def shape(events, states, rules, classified, priorities, now, *, needs=(), answe
             return 'shipped'
         if s in held:
             return 'held on purpose'
+        if s in failed:
+            return failed[s]
+        if s in running:
+            return {'builder':'building', 'grader':'being checked', 'reviewer':'in review'}.get(running[s], 'being checked')
+        marker = work.get(s, {})
+        if marker.get('type') == 'merge-gate-clean' or marker.get('type') == 'review' and marker.get('n_blocking') == 0:
+            return 'ready to merge'
+        if marker.get('type') == 'review' and marker.get('n_blocking', 0):
+            return 'changes requested'
         return {'building': 'building', 'dispatched': 'building', 'built': 'being checked',
-                'grading': 'being checked', 'graded': 'in review', 'reviewing': 'in review',
+                'grading': 'being checked', 'graded': 'ready for review', 'reviewing': 'in review',
                 'written': 'ready to build', 'blocked': 'waiting for repair',
                 'killed': 'stopped', 'void': 'stopped', 'dropped': 'stopped'}.get(state, 'status unconfirmed')
 
@@ -124,8 +152,8 @@ def shape(events, states, rules, classified, priorities, now, *, needs=(), answe
             status = stage(sid)
             counts[status] = counts.get(status, 0) + 1
         # Surface active work before completed work, preserving a short sentence.
-        order = ['merging now', 'checks failed; waiting for repair', 'held on purpose', 'waiting for repair',
-                 'building', 'being checked', 'in review', 'ready to build', 'live', 'shipped', 'stopped', 'status unconfirmed']
+        order = ['merging now', 'checks failed; waiting for repair', 'held on purpose', 'checks need repair', 'checks need attention', 'waiting for repair',
+                 'changes requested', 'building', 'being checked', 'in review', 'ready for review', 'ready to merge', 'ready to build', 'live', 'shipped', 'stopped', 'status unconfirmed']
         status = next(iter(counts)) if len(counts) == 1 else ', '.join(f'{counts[k]} {k}' for k in order if k in counts)
         lead = next(k for k in order if k in counts)
         short = {'checks failed; waiting for repair':'checks need repair', 'waiting for repair':'needs repair',
@@ -138,9 +166,9 @@ def shape(events, states, rules, classified, priorities, now, *, needs=(), answe
              and e.get('_src') not in answered]
     failures = sorted({r['spec'] for r in rules if r.get('overdue') and not r.get('reason_live')
                        and r.get('spec') not in held and r.get('spec') not in in_progress and r.get('spec') not in active
-                       and r.get('spec') not in shipped and states.get(r.get('spec')) not in FINISHED
+                       and r.get('spec') not in shipped and r.get('spec') not in failed and states.get(r.get('spec')) not in FINISHED
                        and r.get('rule') not in HELD_RULES and not str(r.get('reason', '')).startswith('undetermined:')})
-    broken = sum(p == 'checks failed; waiting for repair' for p in active.values())
+    broken = sum(p == 'checks failed; waiting for repair' for p in active.values()) + len(failed)
     attention = []
     if needs:
         attention.append(f'{len(needs)} {"thing needs" if len(needs) == 1 else "things need"} you')
@@ -149,7 +177,7 @@ def shape(events, states, rules, classified, priorities, now, *, needs=(), answe
     if failures:
         attention.append(f'{len(failures)} {"step is" if len(failures) == 1 else "steps are"} overdue')
     if broken:
-        attention.append('Merge checks need repair')
+        attention.append('Merge checks need attention')
     # Lead with active merging, then the first priorities and required action.
     # Expansion shows all five groups; never shrink the font to fit a phone.
     ordered = sorted(groups, key=lambda g: 'merging now' not in g['status'])
@@ -158,5 +186,5 @@ def shape(events, states, rules, classified, priorities, now, *, needs=(), answe
     return {'at': now.isoformat(timespec='seconds'), 'error': None, 'groups': groups,
             'collapsed': collapsed, 'attention': ' · '.join(attention) + '.',
             'needs_you': [{'spec': e.get('subject'), 'ask': ' '.join(str(e.get('why') or e.get('asks') or 'Decision requested').split())[:200]} for e in needs],
-            'overdue': failures, 'held': sorted(held), 'merging': sorted(active),
+            'overdue': failures, 'check_issues': sorted(failed), 'held': sorted(held), 'merging': sorted(active),
             'queue_available': False}

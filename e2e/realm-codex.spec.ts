@@ -31,7 +31,7 @@ rollout = [
 f = folder / 'rollout-live.jsonl'
 f.write_text('\n'.join(map(json.dumps,rollout)))
 original = realm_codex.payload
-realm_codex.payload = lambda rows: original(rows,home=home,now=now,processes={'worker-live'},windows={rollout[0]['payload']['cwd']:'codex-audit'})
+realm_codex.payload = lambda rows, **kw: original(rows,home=home,now=now,processes={'worker-live'},windows={rollout[0]['payload']['cwd']:'codex-audit'})
 realm.sys_signals = lambda: {}
 realm.maker_index = lambda *a: {}
 def data(phase):
