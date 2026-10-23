@@ -306,6 +306,8 @@ EMITS["window-rerun"] = {"executor", "tick", "operator"}
 EMITS["base-red-nightly"] = {"base-red", "operator"}
 
 REQUIRED_ROWS = {
+    "resource-created": ("kind", "ref", "lane"),
+    "resource-reaped": ("ref", "reason"),
     "seat-usage": ("five_hour_pct", "seven_day_pct", "five_hour_resets_at"),
     "balance": ("state_from", "state_to", "codex_pct"),
     "ci-shadow": ("sha", "tree", "kind"),
@@ -328,3 +330,6 @@ REQUIRED_ROWS = {
     "window-rerun": ("window", "target", "sha"),
     "base-red-nightly": ("sha",),
 }
+
+# resource-created intentionally stays open: every lane records its resources.
+EMITS["resource-reaped"] = {"tick", "executor", "operator"}
