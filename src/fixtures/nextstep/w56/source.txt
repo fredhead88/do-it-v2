@@ -1,0 +1,26 @@
+Case: w56; item: L-spec-1417; cut: 2026-10-22T10:15:00+00:00
+Real ledger excerpts. Free text is redacted; provenance and IDs are retained.
+L-spec-writer-1519.jsonl:1 2026-10-22T07:23:12+00:00 L-spec-1417 spawn-started
+L-spec-writer-1519.jsonl:3 2026-10-22T07:28:14+00:00 L-spec-1417 spec-written
+L-spec-writer-1519.jsonl:7 2026-10-22T07:28:14+00:00 L-spec-1417 spawn-done
+L-spec-auditor-0394.jsonl:1 2026-10-22T07:28:41+00:00 L-spec-1417 spawn-started
+L-spec-auditor-0394.jsonl:16 2026-10-22T07:34:32+00:00 L-spec-1417 spawn-done
+L-spec-writer-1535.jsonl:1 2026-10-22T07:34:57+00:00 L-spec-1417 spawn-started
+L-spec-writer-1535.jsonl:3 2026-10-22T07:43:15+00:00 L-spec-1417 spec-written
+L-spec-writer-1535.jsonl:7 2026-10-22T07:43:15+00:00 L-spec-1417 spawn-done
+L-builder-2992.jsonl:1 2026-10-22T07:46:55+00:00 L-spec-1417 build-started
+L-builder-2992.jsonl:2 2026-10-22T07:49:43+00:00 L-spec-1417 build-done
+L-builder-2992.jsonl:3 2026-10-22T07:49:43+00:00 L-spec-1417 question
+L-builder-2992.jsonl:5 2026-10-22T07:49:43+00:00 L-spec-1417 spawn-done
+L-thinker-0004.jsonl:6138 2026-10-22T07:51:01+00:00 L-spec-1417 decision
+L-builder-3007.jsonl:1 2026-10-22T09:07:19+00:00 L-spec-1417 build-started
+L-builder-3007.jsonl:2 2026-10-22T09:28:54+00:00 L-spec-1417 build-done
+L-builder-3007.jsonl:4 2026-10-22T09:28:54+00:00 L-spec-1417 build-blocked
+L-builder-3007.jsonl:6 2026-10-22T09:28:54+00:00 L-spec-1417 spawn-done
+L-builder-3012.jsonl:1 2026-10-22T09:32:07+00:00 L-spec-1417 build-started
+L-builder-3012.jsonl:2 2026-10-22T10:01:00+00:00 L-spec-1417 build-done
+L-builder-3012.jsonl:3 2026-10-22T10:01:00+00:00 L-spec-1417 build-blocked
+L-builder-3012.jsonl:4 2026-10-22T10:01:00+00:00 L-spec-1417 question
+L-builder-3012.jsonl:6 2026-10-22T10:01:00+00:00 L-spec-1417 spawn-done
+L-thinker-0004.jsonl:6180 2026-10-22T10:05:20+00:00 L-spec-1417 decision
+L-builder-3018.jsonl:1 2026-10-22T10:14:59+00:00 L-spec-1417 build-started

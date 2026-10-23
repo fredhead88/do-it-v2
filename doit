@@ -48,6 +48,7 @@ case "${1:-board}" in
   cron-run) shift; exec python3 "$SRC/cron_run.py" "$@" ;;
   health-alarms) shift; exec python3 "$SRC/health_alarms.py" "$@" ;;
   lane-rules) shift; exec python3 "$SRC/lane_rules.py" "$@" ;;
+  next) shift; exec python3 "$SRC/nextstep.py" "$@" ;;
   stuck-digest) shift; exec python3 "$SRC/stuck_digest.py" "$@" ;;
   owed-backfill) shift; exec python3 "$SRC/owed_backfill.py" "$@" ;;
   owed-digest) shift; exec python3 "$SRC/owed_digest.py" "$@" ;;

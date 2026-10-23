@@ -1,0 +1,17 @@
+Case: w50; item: L-spec-1418; cut: 2026-10-22T07:55:20+00:00
+Real ledger excerpts. Free text is redacted; provenance and IDs are retained.
+L-spec-writer-1520.jsonl:1 2026-10-22T07:23:13+00:00 L-spec-1418 spawn-started
+L-spec-writer-1520.jsonl:3 2026-10-22T07:29:16+00:00 L-spec-1418 spec-written
+L-spec-writer-1520.jsonl:4 2026-10-22T07:29:16+00:00 L-spec-1418 question
+L-spec-writer-1520.jsonl:9 2026-10-22T07:29:16+00:00 L-spec-1418 spawn-done
+L-spec-auditor-0401.jsonl:1 2026-10-22T07:29:40+00:00 L-spec-1418 spawn-started
+L-thinker-0004.jsonl:6136 2026-10-22T07:31:11+00:00 L-spec-1418 decision
+L-spec-auditor-0401.jsonl:22 2026-10-22T07:35:46+00:00 L-spec-1418 spawn-done
+L-spec-writer-1538.jsonl:1 2026-10-22T07:36:03+00:00 L-spec-1418 spawn-started
+L-spec-writer-1538.jsonl:3 2026-10-22T07:41:32+00:00 L-spec-1418 spec-written
+L-spec-writer-1538.jsonl:6 2026-10-22T07:41:32+00:00 L-spec-1418 spawn-done
+L-builder-2991.jsonl:1 2026-10-22T07:46:49+00:00 L-spec-1418 build-started
+L-builder-2991.jsonl:2 2026-10-22T07:50:25+00:00 L-spec-1418 build-done
+L-builder-2991.jsonl:3 2026-10-22T07:50:25+00:00 L-spec-1418 question
+L-builder-2991.jsonl:5 2026-10-22T07:50:25+00:00 L-spec-1418 spawn-done
+L-thinker-0004.jsonl:6139 2026-10-22T07:55:19+00:00 L-spec-1418 decision
