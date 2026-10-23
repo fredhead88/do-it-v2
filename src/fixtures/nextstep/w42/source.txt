@@ -1,0 +1,13 @@
+Case: w42; item: L-spec-1459; cut: 2026-10-22T17:35:53+00:00
+Real ledger excerpts. Free text is redacted; provenance and IDs are retained.
+L-spec-writer-1570.jsonl:3 2026-10-22T16:42:29+00:00 L-spec-1457 spec-written
+L-spec-writer-1572.jsonl:1 2026-10-22T17:23:34+00:00 L-spec-1459 spawn-started
+L-spec-writer-1572.jsonl:3 2026-10-22T17:27:30+00:00 L-spec-1459 spec-written
+L-spec-writer-1572.jsonl:5 2026-10-22T17:27:30+00:00 L-spec-1459 spawn-done
+L-builder-3073.jsonl:1 2026-10-22T17:30:22+00:00 L-spec-1459 build-started
+L-builder-3073.jsonl:2 2026-10-22T17:31:42+00:00 L-spec-1459 build-done
+L-builder-3073.jsonl:3 2026-10-22T17:31:42+00:00 L-spec-1459 build-blocked
+L-builder-3073.jsonl:4 2026-10-22T17:31:42+00:00 L-spec-1459 question
+L-builder-3073.jsonl:6 2026-10-22T17:31:42+00:00 L-spec-1459 spawn-done
+L-thinker-0004.jsonl:6352 2026-10-22T17:35:28+00:00 L-spec-1459 dependency-hold
+L-thinker-0004.jsonl:6353 2026-10-22T17:35:52+00:00 L-spec-1459 decision

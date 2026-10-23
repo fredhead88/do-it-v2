@@ -1,0 +1,11 @@
+{"_src": "L-spec-writer-1570.jsonl:3", "spawn": "L-spec-writer-1570", "subject": "L-spec-1457", "ts": "2026-10-22T16:42:29+00:00", "type": "spec-written", "v": 1}
+{"_src": "L-spec-writer-1572.jsonl:1", "backend": "codex", "issued_by": "executor", "role": "spec-writer", "spawn": "L-spec-writer-1572", "subject": "L-spec-1459", "ts": "2026-10-22T17:23:34+00:00", "type": "spawn-started", "v": 1}
+{"_src": "L-spec-writer-1572.jsonl:3", "spawn": "L-spec-writer-1572", "subject": "L-spec-1459", "ts": "2026-10-22T17:27:30+00:00", "type": "spec-written", "v": 1}
+{"_src": "L-spec-writer-1572.jsonl:5", "backend": "seat", "spawn": "L-spec-writer-1572", "status": "written", "subject": "L-spec-1459", "ts": "2026-10-22T17:27:30+00:00", "type": "spawn-done", "v": 1}
+{"_src": "L-builder-3073.jsonl:1", "backend": "codex", "issued_by": "tick", "spawn": "L-builder-3073", "subject": "L-spec-1459", "ts": "2026-10-22T17:30:22+00:00", "type": "build-started", "v": 1}
+{"_src": "L-builder-3073.jsonl:2", "branch": "l-spec-1459", "spawn": "L-builder-3073", "status": "BLOCKED", "subject": "L-spec-1459", "ts": "2026-10-22T17:31:42+00:00", "type": "build-done", "v": 1}
+{"_src": "L-builder-3073.jsonl:3", "reason": "redacted", "spawn": "L-builder-3073", "subject": "L-spec-1459", "ts": "2026-10-22T17:31:42+00:00", "type": "build-blocked", "v": 1}
+{"_src": "L-builder-3073.jsonl:4", "spawn": "L-builder-3073", "subject": "L-spec-1459", "ts": "2026-10-22T17:31:42+00:00", "type": "question", "v": 1}
+{"_src": "L-builder-3073.jsonl:6", "backend": "codex", "spawn": "L-builder-3073", "status": "BLOCKED", "subject": "L-spec-1459", "ts": "2026-10-22T17:31:42+00:00", "type": "spawn-done", "v": 1}
+{"_src": "L-thinker-0004.jsonl:6352", "subject": "L-spec-1459", "ts": "2026-10-22T17:35:28+00:00", "type": "dependency-hold", "v": 1, "waits_for": "L-spec-1457", "why": "redacted"}
+{"_src": "L-thinker-0004.jsonl:6353", "ref": "L-builder-3073.jsonl:4", "subject": "L-spec-1459", "ts": "2026-10-22T17:35:52+00:00", "type": "decision", "v": 1, "why": "redacted"}
