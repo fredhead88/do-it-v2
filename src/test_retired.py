@@ -264,7 +264,7 @@ class RegistryTests(unittest.TestCase):
         rows = retired.load(str(REPO / "retired.d"))
         required = {"upload-archive-once", "realm-views"}
         self.assertTrue(required <= {r.name for r in rows})
-        self.assertTrue(all(Path(r.repo).is_absolute() for r in rows if r.name in required))
+        self.assertTrue(all(Path(r.repo).is_absolute() for r in rows if r.repo is not None))
         text = (REPO / "retired.d/README.md").read_text()
         self.assertTrue(next(r for r in rows if r.name == "upload-archive-once").provisional)
         for field in ["name", "kind", "pattern", "paths", "repo", "regex", "provisional", "armed_when_path", "armed_when_contains"]:
@@ -298,13 +298,29 @@ class RegistryTests(unittest.TestCase):
         self.assertIn("FAIL retired check (exit 2)", proc.stdout)
 
     def test_ac7_cli_defaults_independent_of_root_and_cwd(self):
-        proc = subprocess.run([str(REPO / "doit"), "retired", "check"], cwd=self.repo,
-                              capture_output=True, text=True)
-        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        self.assertIn("0 present, 0 undetermined", proc.stdout)
+        # Default paths belong to the launcher's checkout, never a live registry.
+        tree = self.repo / "launcher"
+        (tree / "src").mkdir(parents=True)
+        (tree / "retired.d").mkdir()
+        subprocess.run(["git", "init", "-q", str(tree)], check=True)
+        shutil.copy(REPO / "doit", tree / "doit")
+        shutil.copy(REPO / "src/retired.py", tree / "src/retired.py")
+        self.write("launcher/src/merge_gate.py", "def granted():\n    pass\n")
+        self.write("launcher/retired.d/clean.toml", '[[retired]]\nname="gone"\nkind="code"\npattern="removed"\npaths=["src/merge_gate.py"]\n')
         self.manifest('[[retired]]\nname="granted"\nkind="code"\npattern="def granted"\npaths=["src/merge_gate.py"]\n')
-        proc = subprocess.run([str(REPO / "doit"), "retired", "check", "--root", str(self.root)],
-                              cwd=self.repo, capture_output=True, text=True)
+        env = dict(os.environ, DOIT_ROOT=str(self.repo))
+        outputs = []
+        for cwd in (self.repo, tree / "src"):
+            proc = subprocess.run([str(tree / "doit"), "retired", "check",
+                                   "--crontab-file", str(self.crontab)],
+                                  cwd=cwd, env=env, capture_output=True, text=True)
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertIn("0 present, 0 undetermined", proc.stdout)
+            outputs.append(proc.stdout)
+        self.assertEqual(outputs[0], outputs[1])
+        proc = subprocess.run([str(tree / "doit"), "retired", "check", "--root", str(self.root),
+                               "--crontab-file", str(self.crontab)],
+                              cwd=self.repo, env=env, capture_output=True, text=True)
         self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
         self.assertIn("src/merge_gate.py", proc.stdout)
 

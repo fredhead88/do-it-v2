@@ -39,6 +39,7 @@ case "${1:-board}" in
   problems) shift; exec python3 "$SRC/problems.py" "$@" ;;
   balance) shift; exec python3 "$SRC/balance.py" "$@" ;;
   models)  shift; exec python3 "$SRC/models.py" "$@" ;;
+  howto)   shift; exec python3 "$SRC/howto.py" "$@" ;;
   version) cat "$HERE/VERSION" ;;
   backup)  shift; exec python3 "$SRC/backup.py" "$@" ;;
   restore) shift; exec python3 "$SRC/restore.py" "$@" ;;
@@ -226,6 +227,7 @@ doit — a ledger that derives state, and the guards that read it
   doit note-close <pr> --response FILE   post FILE as the closing comment on an inbound-note PR, close it, record it
   doit balance [--dry-run] | hold | resume   move managed roles using weekly quota readings
   doit models show | use <mixed|claude-only>   the root's model map: print it, or install a profile
+  doit howto [--check]                    regenerate docs/HOW-IT-WORKS.md; check exits 0/1/2
   doit retired check [--root DIR] [--repo PATH] [--crontab-file FILE]
                                            prove registered mechanisms absent (exit 0/1/2)
   doit version                            print the release version (VERSION; CHANGELOG.md has the history)

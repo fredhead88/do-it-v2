@@ -1,3 +1,4 @@
+> history; see docs/HOW-IT-WORKS.md
 # System Design v2
 
 The process by which software gets built here. This document is what gets
