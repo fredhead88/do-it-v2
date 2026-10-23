@@ -44,6 +44,7 @@ case "${1:-board}" in
   restore) shift; exec python3 "$SRC/restore.py" "$@" ;;
   retired) shift; exec python3 "$SRC/retired.py" "$@" ;;
   crons)   shift; exec python3 "$SRC/crons.py" "$@" ;;
+  machine) shift; exec python3 "$SRC/machine.py" "$@" ;;
   seat-usage) shift; exec python3 "$SRC/seat_usage.py" "$@" ;;
   cron-run) shift; exec python3 "$SRC/cron_run.py" "$@" ;;
   health-alarms) shift; exec python3 "$SRC/health_alarms.py" "$@" ;;
@@ -69,6 +70,7 @@ case "${1:-board}" in
   # `doit test` can never scribble over the real agent links or the real
   # ledger, however a test file gets there.
   test)    shift
+           DOIT_TEST_MACHINE_ROOT=$(python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve())' "${DOIT_ROOT:-$HOME/.do-it}")
            if [ "$#" -eq 1 ]; then
              if [ "$1" != --live ]; then
                echo 'usage: doit test [--live]' >&2
@@ -181,6 +183,12 @@ PY
              rc=1
            fi
            printf '%s\n' "$out"
+           if DOIT_ROOT="$DOIT_TEST_MACHINE_ROOT" python3 "$SRC/machine.py" check --gate; then
+             echo "PASS machine check"
+           else
+             echo "FAIL machine check"
+             rc=1
+           fi
            exit "$rc" ;;
   help|-h|--help) cat <<'USAGE'
 doit — a ledger that derives state, and the guards that read it
@@ -232,8 +240,9 @@ doit — a ledger that derives state, and the guards that read it
   doit alloc <kind> [--dir]               claim the next L-<kind>-NNNN under content and print its path (§2.8)
   doit backup push | watch --for N | status | cron   replicate the ledger (§9.9)
   doit restore <snapshot> [--root D] [--dry-run] [--remote U]  rebuild from the mirror
-  doit crons check|print [name]|install <name>   builder-box cron manifest — measure, show, or
-                                          install one row from crons.toml (L-charter-0036 R4)
+  doit crons check|print [name]|install <name>   manifest check, show, or install one row
+                                          machine-vs-repo answer: doit machine check
+  doit machine check|snapshot [--models FILE] [--crontab FILE | --crontab-cmd CMD] [--repo P]
   doit seat-usage [--dry-run] [--json]    record a fresh Claude seat reading
   doit cron-run NAME -- CMD...            wrap CMD, recording start/outcome/duration per run
                                           to $R/state/cron-runs/NAME.jsonl (L-charter-0042 R14a)

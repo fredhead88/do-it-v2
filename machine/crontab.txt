@@ -1,0 +1,89 @@
+# Albert Scott — user crontab (RESTORED by integrator 2026-07-13T08:4x after an accidental wipe)
+# Reconstructed from session records (First-Moves scan + verifier/474 greps + /tmp/cron.bak Jun25).
+0 3 * * 0 find /opt/albert-scott/.uploads -type f -mtime +14 -delete
+# --- DO-IT relay watch (per role) ---
+# PAUSED-2026-09-14 * * * * * /opt/albert-scott/scripts/orc-relay-watch.sh >> /tmp/orc-relay-watch.log 2>&1
+# PAUSED-2026-09-14 * * * * * ROLE=rev /opt/albert-scott/scripts/orc-relay-watch.sh >> /tmp/rev-relay-watch.log 2>&1
+# --- DO-IT review-loop v2 (verifier + liveness) ---
+# DISABLED by integrator 2026-07-13 (445 rework: verifier renders LOGIN page not authed prod; was writing false ledger verdicts). Re-arm only after 445 reworked (auth solved + escalate-on-ambiguous-count):
+*/30 * * * * /opt/albert-scott/scripts/run-verifier-tick.sh
+# PAUSED-2026-09-14 */5 * * * * VL_RUNS_DIR=/home/albert/.claude/verification-loop/runs /opt/albert-scott/scripts/liveness.sh verifier
+# --- liveness (pane + hook) per role ---
+# PAUSED-2026-09-14 */5 * * * * /opt/albert-scott/scripts/liveness.sh pane orc
+# PAUSED-2026-09-14 */5 * * * * /opt/albert-scott/scripts/liveness.sh pane rev
+# --- DO-IT nudges (per role) ---
+# PAUSED-2026-09-14 * * * * * ROLE=rev /opt/albert-scott/scripts/doit-nudge.sh >> /tmp/rev-nudge.log 2>&1
+# PAUSED-2026-09-14 * * * * * ROLE=orc NUDGE_ORC_IDLE_SECS=150 /opt/albert-scott/scripts/doit-nudge.sh >> /tmp/orc-nudge.log 2>&1
+# PAUSED-2026-09-14 */2 * * * * ROLE=orc PYTHONPATH=/opt/albert-scott /opt/albert-scott/.venv/bin/python -m scripts.ops.cron_attest --job orc_idle_watch -- /bin/bash /opt/albert-scott/scripts/orc-idle-watch.sh >> /tmp/orc-idle-watch.log 2>&1
+# PAUSED-2026-09-14 * * * * * ROLE=builder /opt/albert-scott/scripts/doit-nudge.sh >> /tmp/builder-nudge.log 2>&1
+# --- standing-role heartbeats + reconcilers ---
+# PAUSED-2026-09-14 */5 * * * * /opt/albert-scott/scripts/gating-watch.sh >> /tmp/gating-watch.log 2>&1
+# PAUSED-2026-09-14 */30 * * * * /opt/albert-scott/scripts/watcher_sweep_liveness.sh >> /tmp/watcher-sweep-liveness.log 2>&1
+# PAUSED-2026-09-14 */5 * * * * /opt/albert-scott/scripts/liveness.sh pane grader
+# PAUSED-2026-09-14 */5 * * * * cd /opt/albert-scott && ROLE=orc PYTHONPATH=/opt/albert-scott/api:/opt/albert-scott /opt/albert-scott/venv/bin/python -m scripts.ops.cron_attest --job hook_orc -- /opt/albert-scott/scripts/liveness.sh hook orc /opt/albert-scott/.claude/settings.json >> /tmp/hook-liveness-orc.log 2>&1
+# PAUSED-2026-09-14 */5 * * * * cd /opt/albert-scott && ROLE=rev PYTHONPATH=/opt/albert-scott/api:/opt/albert-scott /opt/albert-scott/venv/bin/python -m scripts.ops.cron_attest --job hook_rev -- /opt/albert-scott/scripts/liveness.sh hook rev /opt/albert-scott/.claude/settings.json >> /tmp/hook-liveness-rev.log 2>&1
+# PAUSED-2026-09-14 */5 * * * * cd /opt/albert-scott && ROLE=watcher PYTHONPATH=/opt/albert-scott/api:/opt/albert-scott /opt/albert-scott/venv/bin/python -m scripts.ops.cron_attest --job hook_watcher -- /opt/albert-scott/scripts/liveness.sh hook watcher /opt/albert-scott/.claude/settings.json >> /tmp/hook-liveness-watcher.log 2>&1
+# PAUSED-2026-09-14 */5 * * * * ROLE=grader PYTHONPATH=/opt/albert-scott /opt/albert-scott/.venv/bin/python -m scripts.ops.cron_attest --job hook_grader -- /opt/albert-scott/scripts/liveness.sh hook grader /opt/albert-scott/.claude/settings.json >> /tmp/hook-liveness-grader.log 2>&1
+# PAUSED-2026-09-14 */30 * * * * /opt/albert-scott/scripts/loop_observe_liveness.sh >> /tmp/loop-observe-liveness.log 2>&1
+# orc 2026-08-16: wedge-poke markers are keyed per-spec with NO expiry, so a builder
+# that goes idle once can never be re-poked (doit-nudge.sh:189 "marker exists").
+# Expire them so an idle builder is re-poked ~every 20m. Data fix; no code change.
+# PAUSED-2026-09-14 */10 * * * * find /tmp -maxdepth 1 -name 'builder-nudge-wedge-*' -mmin +20 -delete >/dev/null 2>&1
+*/10 * * * * /home/albert/do-it-v2/doit cron-run ledger-snapshot -- /var/backups/do-it/snapshot.sh >/dev/null 2>&1  # doit-cron:ledger-snapshot
+7 * * * * /home/albert/do-it-v2/doit cron-run lessons-digest -- /home/albert/do-it-v2/scripts/lessons_digest.py >> /home/albert/.do-it/lessons-digest.log 2>&1  # doit-cron:lessons-digest
+# doit tick (Q9 immediate pickup) — installed 2026-09-23T10:37:46Z by L-thinker-0004 on operator request; line printed by do-it-v2 src/up.py cron_line()
+*/5 * * * * DOIT_ROOT=/home/albert/.do-it PREDEPLOY_GATE_DISPATCH_TIMEOUT_MIN=70 /home/albert/do-it-v2/doit cron-run tick -- /home/albert/do-it-v2/doit tick >> /home/albert/.do-it/logs/tick.log 2>&1  # doit-cron:tick
+# tmp-reaper (keeps /tmp quota from filling) — installed 2026-09-23T18:15:02Z by L-thinker-0004 on operator request
+7,37 * * * * /home/albert/.do-it/tmp-reaper.sh
+# doit backup watch (L-spec-0186) — replaces backup-to-git.sh; operator-approved 2026-09-23T19:59:17Z via L-thinker-0004
+* * * * * /home/albert/do-it-v2/doit cron-run backup-watch -- /home/albert/do-it-v2/doit backup watch --for 60 >> /home/albert/.do-it/backup.log 2>&1  # doit-cron:backup-watch
+# look (L-charter-0036 R1): babysitter check as a script; owner thinker; installed 2026-09-25 by L-thinker-0004
+*/10 * * * * /home/albert/do-it-v2/doit cron-run look -- /home/albert/do-it-v2/doit look >> /home/albert/.do-it/logs/look.log 2>&1  # doit-cron:look
+# executor-wake (Thinker 2026-09-26 overnight stopgap): wake the Executor pane when idle 5+ min
+*/5 * * * * /home/albert/.do-it/executor-wake.sh
+*/10 * * * * /home/albert/do-it-v2/doit cron-run sweep-owed -- /home/albert/do-it-v2/doit sweep-owed >> /home/albert/.do-it/logs/sweep-owed.log 2>&1  # doit-cron:sweep-owed
+# doit reap-tmp (L-spec-0440 AC24) — installed 2026-09-29T02:38:55Z by L-thinker-0004: owner/age/liveness scratch reaper every 5 min
+*/5 * * * * /home/albert/do-it-v2/doit cron-run tmp-reaper -- /home/albert/do-it-v2/doit reap-tmp  # doit-cron:tmp-reaper
+# telegram relay keepalive (operator 2026-09-29): restart tg-poll if not running
+*/5 * * * * /home/albert/.do-it/bin/tg-keepalive.sh  # fixed 2026-10-15: anchored match (old one matched itself)
+*/5 * * * * /home/albert/.do-it/bin/agents-link-guard.sh
+# L-spec-0460 db-time done-bar gate (installed by Thinker 2026-09-30, owed AC20)
+10 3 * * * /opt/albert-scott/scripts/deploy/db_time_gate_wrapper.sh
+*/10 * * * * python3 /home/albert/.do-it/bin/reap-grader-views.py >> /home/albert/.do-it/logs/reap-grader-views.log 2>&1  # Thinker stopgap 2026-10-04, until 0042 R15 covers relay graders
+# disabled 2026-10-21 (Thinker: temporary 10-04 rule outlived its purpose; auto-converted 1369/1370 capability holds with project=albert-scott) */5 * * * * python3 /home/albert/.do-it/bin/regrade-owed-rule.py >> /home/albert/.do-it/logs/regrade-owed-rule.log 2>&1  # Thinker 2026-10-04: operator A-ruling re-grades, remove once the 13 are graded
+7,22,37,52 * * * * /home/albert/.do-it/bin/auto-carry.sh >> /home/albert/.do-it/logs/auto-carry.log 2>&1  # Thinker 2026-10-05: auto-carry inbound (operator)
+*/5 * * * * /home/albert/do-it-v2/doit cron-run thinker-inbox -- /usr/bin/python3 /home/albert/.do-it/thinker-inbox.py >> /home/albert/.do-it/logs/thinker-inbox.log 2>&1  # doit-cron:thinker-inbox
+# L-spec-0832 twice-daily release (3AM/3PM Israel). Pause: touch ~/.do-it/state/release-hold
+*/15 * * * * /home/albert/.do-it/bin/release-tick.sh
+*/10 * * * * flock -w 120 /home/albert/.do-it/backup.lock bash /home/albert/.do-it/bin/ledger-mirror-fix.sh refresh-only >> /home/albert/.do-it/logs/ledger-mirror.log 2>&1  # Thinker 2026-10-14: >100MB executor ledger mirrored as 40MB parts; remove when ledger rotation ships
+# disabled 2026-10-20 (superseded by doit gh-bill) 15 6 * * * /home/albert/.do-it/bin/gh-bill-check.py >> /home/albert/.do-it/state/gh-bill.cron.log 2>&1  # thinker: daily GitHub bill check
+# reboot recovery (Thinker 2026-10-15): rebuild the flow panes, resuming saved sessions, and start telegram
+@reboot sleep 45 && /home/albert/flow.sh --no-attach >> /home/albert/.do-it/logs/flow-reboot.log 2>&1
+@reboot sleep 60 && /home/albert/.do-it/bin/tg-keepalive.sh
+*/5 * * * * /home/albert/.do-it/bin/flow-snapshot.sh  # records each pane session id for flow.sh
+0 6 * * * /home/albert/do-it-v2/doit cron-run owed-digest -- /home/albert/do-it-v2/doit owed-digest >> /home/albert/.do-it/logs/owed-digest.log 2>&1  # doit-cron:owed-digest
+5 6 * * * /home/albert/do-it-v2/doit cron-run owed-digest-alert -- /home/albert/do-it-v2/doit owed-digest --alert >> /home/albert/.do-it/logs/owed-digest-alert.log 2>&1  # doit-cron:owed-digest-alert
+*/5 * * * * /home/albert/.do-it/bin/sync-integrator-worktree.sh
+40 5 * * * /home/albert/do-it-v2/doit cron-run suite-daily -- /usr/bin/python3 /home/albert/do-it-v2/src/suite_run.py >> /home/albert/.do-it/logs/suite-daily.log 2>&1  # doit-cron:suite-daily
+*/10 * * * * /home/albert/.do-it/worktrees/do-it-v2/l-spec-1109/doit cron-run health-alarms -- /home/albert/.do-it/worktrees/do-it-v2/l-spec-1109/doit health-alarms >> /home/albert/.do-it/logs/health-alarms.log 2>&1  # doit-cron:health-alarms
+# PAUSED by Thinker 2026-10-19 00:2xZ (shadows on master shas break the predeploy gate; disk): */10 * * * * /home/albert/do-it-v2/doit cron-run ci-shadow -- /home/albert/do-it-v2/doit ci-shadow >> /home/albert/.do-it/logs/ci-shadow.log 2>&1  # doit-cron:ci-shadow
+0 */2 * * * /home/albert/do-it-v2/doit cron-run verify-owed -- /home/albert/do-it-v2/doit verify-owed >> /home/albert/.do-it/logs/verify-owed.log 2>&1  # doit-cron:verify-owed
+*/10 * * * * /home/albert/do-it-v2/doit cron-run balance -- /home/albert/do-it-v2/doit balance >> /home/albert/.do-it/logs/balance.log 2>&1  # doit-cron:balance
+15 6 * * * /home/albert/do-it-v2/doit cron-run stuck-digest -- /home/albert/do-it-v2/doit stuck-digest --send >> /home/albert/.do-it/logs/stuck-digest.log 2>&1  # doit-cron:stuck-digest
+15 6 * * * /home/albert/do-it-v2/doit cron-run gh-bill -- /home/albert/do-it-v2/doit gh-bill >> /home/albert/.do-it/logs/gh-bill.log 2>&1  # doit-cron:gh-bill
+*/15 * * * * /home/albert/do-it-v2/doit cron-run seat-usage -- /home/albert/do-it-v2/doit seat-usage >> /home/albert/.do-it/logs/seat-usage.log 2>&1  # doit-cron:seat-usage
+* * * * * /home/albert/.do-it/bin/scratch-dotgit-watch.sh  # Thinker 2026-10-21: remove stray empty doit-scratch/.git (problem scratch-root-stray-dotgit); remove when scratch.root ignores empty .git
+*/30 * * * * /home/albert/do-it-v2/doit cron-run owed-digest-json -- /home/albert/do-it-v2/doit owed-digest --json-only >> /home/albert/.do-it/logs/owed-digest-json.log 2>&1  # doit-cron:owed-digest-json
+20 3 * * * /home/albert/do-it-v2/doit cron-run base-red-nightly -- /usr/bin/python3 /home/albert/do-it-v2/src/base_red.py nightly albert-scott >> /home/albert/.do-it/logs/base-red-nightly.log 2>&1  # doit-cron:base-red-nightly
+# TEMPORARY (expires 2026-10-29, self-disables): /tmp inode cleanup, operator-approved via Telegram 2026-10-22 05:50Z "Approve tmp cleanup". Remove once tests use on-disk TMPDIR.
+*/30 * * * * /home/albert/.do-it/bin/tmp-inode-cleanup.sh
+* * * * * /opt/albert-scott/scripts/builder_lifecycle_reconcile.sh >> /tmp/builder-reconcile.log 2>&1
+* * * * * ROLE=builder /opt/albert-scott/scripts/orc-relay-watch.sh >> /tmp/builder-relay-watch.log 2>&1
+0 6 * * * cd /opt/albert-scott && PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin" PYTHONPATH=/opt/albert-scott /opt/albert-scott/.venv/bin/python -m scripts.ops.cron_attest --job daily_trouble_report --schedule "0 6 * * *" -- /opt/albert-scott/.venv/bin/python -m scripts.health.daily_trouble_report --once >> /tmp/daily-trouble-report.log 2>&1
+* * * * * ROLE=grader /opt/albert-scott/scripts/orc-relay-watch.sh >> /tmp/grader-relay-watch.log 2>&1
+*/30 * * * * ROLE=watcher /opt/albert-scott/scripts/standing-role-heartbeat.sh >> /tmp/watcher-heartbeat.log 2>&1
+*/30 * * * * ROLE=builder /opt/albert-scott/scripts/standing-role-heartbeat.sh >> /tmp/builder-heartbeat.log 2>&1
+*/30 * * * * ROLE=grader /opt/albert-scott/scripts/standing-role-heartbeat.sh >> /tmp/grader-heartbeat.log 2>&1
+*/5 * * * * ROLE=orc HEARTBEAT_THRESHOLD=300 /opt/albert-scott/scripts/standing-role-heartbeat.sh >> /tmp/orc-heartbeat.log 2>&1
+*/5 * * * * ROLE=rev HEARTBEAT_THRESHOLD=300 /opt/albert-scott/scripts/standing-role-heartbeat.sh >> /tmp/rev-heartbeat.log 2>&1
+* * * * * /opt/albert-scott/scripts/reset-queue-drain.sh >> /tmp/reset-queue-drain.log 2>&1

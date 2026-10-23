@@ -79,7 +79,10 @@ class Runner:
         return subprocess.run(["tmux", "capture-pane", "-e", "-p", "-t", target], capture_output=True,
                               text=True, timeout=timeout).stdout
     def crontab_text(self, timeout):
-        return subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=timeout).stdout
+        proc = subprocess.run(["crontab", "-l"], capture_output=True, timeout=timeout)
+        if proc.returncode:
+            raise subprocess.CalledProcessError(proc.returncode, proc.args)
+        return proc.stdout.decode("utf-8")
     def disk_usage(self, path, timeout):
         du = shutil.disk_usage(path)
         return {"total": du.total, "used": du.used, "free": du.free}
@@ -493,6 +496,28 @@ def _check_cron_unwrapped(text, und, events, root, briefs, answered, crons_manif
         else:
             r = _clear("cron-unwrapped", name, "wrapped", events, root)
             r and answered.append(r)
+
+
+def _check_machine(text, und, events, root, briefs, answered, repo=_CHECKOUT):
+    if und:
+        _fire_undetermined("machine", events, root, briefs)
+        return
+    try:
+        import machine
+        drifts = machine.check(live_models=machine.read_text(pathlib.Path(root) / "models.toml"),
+                               live_crontab=text, repo=str(repo))
+    except Exception:
+        _fire_undetermined("machine", events, root, briefs)
+        return
+    if any(d.kind == "undetermined" for d in drifts):
+        _fire_undetermined("machine", events, root, briefs)
+        return
+    by_subject = {d.subject: d for d in drifts}
+    for subject in machine.NAMES:
+        drift = by_subject.get(subject)
+        reading = {"subject": subject, "kind": drift.kind, "detail": drift.detail} if drift else {"subject": subject, "status": "equal"}
+        _settle("machine-drift", subject, "thinker", drift is not None,
+                reading, events, root, briefs, answered)
 
 
 def _read_cron_store(path):
@@ -1022,7 +1047,7 @@ def _check_wallclock(events, runner, now, root, cfg, deadline, dry_run, briefs):
     briefs.extend(result["briefs"])
     return result["events"]
 def run(events, *, now=None, runner=None, root=None, toml_path=None, dry_run=False,
-        crons_manifest=None, crond_dir=None):
+        crons_manifest=None, crond_dir=None, repo=None):
     global _PASS_LOCKED, _DRY_RUN
     now = now or datetime.now(timezone.utc)
     root = pathlib.Path(root) if root is not None else fold.ROOT
@@ -1056,6 +1081,8 @@ def run(events, *, now=None, runner=None, root=None, toml_path=None, dry_run=Fal
         crontab_text, crontab_und = _call(runner, deadline, 5, "crontab_text")
         _check_crons(crontab_text, crontab_und, events, root, briefs, crons_manifest, crond_dir)
         _check_cron_unwrapped(crontab_text, crontab_und, events, root, briefs, answered, crons_manifest, crond_dir)
+        _check_machine(crontab_text, crontab_und, events, root, briefs, answered,
+                       repo=_CHECKOUT if repo is None else repo)
         _check_cron_runs(now, events, root, briefs, answered, crons_manifest)
         _check_heartbeat_missed(events, now, root, briefs)
         _check_lane_rules(events, now, root, briefs)

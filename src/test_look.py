@@ -2260,3 +2260,66 @@ for criterion in (1, 2, 3, 4, 5, 6, 7, 8, 9):
     body = json.dumps({"criterion": f"AC{criterion}", "checks_passed": n}, sort_keys=True)
     print(json.dumps(dict(url=f"cli://look/watchdog/AC{criterion}", status=0,
                           body_sha256=hashlib.sha256(body.encode()).hexdigest(), body_excerpt=body)))
+
+# Machine uses the shared crontab read, the explicit repository and the real ledger.
+def machine_look_signed(ac, checks):
+    body = json.dumps({"criterion": f"AC{ac}", "checks": checks}, sort_keys=True)
+    print(json.dumps(dict(url=f"cli://look/machine/AC{ac}", status=0,
+                          body_sha256=hashlib.sha256(body.encode()).hexdigest(), body_excerpt=body)))
+    print(f"machine AC{ac} ok")
+
+
+root_m = newroot()
+repo_m = root_m / "repo"
+(repo_m / "machine").mkdir(parents=True)
+models_m, cron_m = 'route = "codex"\n', "@reboot echo machine\n"
+(root_m / "models.toml").write_text(models_m)
+(repo_m / "machine/models.toml").write_text(models_m + "# repo-only\n")
+(repo_m / "machine/crontab.txt").write_text(cron_m)
+runner_m = FakeRunner(crontab_text=lambda timeout: cron_m)
+res_m = look.run([], now=NOW, root=root_m, repo=repo_m, runner=runner_m, toml_path=clean_toml(root_m))
+brief_m = briefs_of(res_m, "machine-drift")
+assert len(brief_m) == 1 and brief_m[0]["owner"] == "thinker" and brief_m[0]["key"] == "models.toml"
+assert len([c for c in runner_m.calls if c[0] == "crontab_text"]) == 1
+briefs_m, answered_m = [], []
+look._check_machine(cron_m, False, read_ledger(root_m), root_m, briefs_m, answered_m, repo=repo_m)
+assert not briefs_m and not answered_m
+(repo_m / "machine/models.toml").write_text(models_m)
+look._check_machine(cron_m, False, read_ledger(root_m), root_m, briefs_m, answered_m, repo=repo_m)
+assert len(answered_m) == 1 and answered_m[0]["ref"] == brief_m[0]["_src"]
+machine_look_signed(8, "explicit repo; one shared read; thinker drift brief dedupes and clears")
+
+for missing_models_m in (False, True):
+    root_m = newroot()
+    repo_m = root_m / "repo"
+    (repo_m / "machine").mkdir(parents=True)
+    (repo_m / "machine/models.toml").write_text(models_m)
+    (repo_m / "machine/crontab.txt").write_text(cron_m)
+    if not missing_models_m: (root_m / "models.toml").write_text(models_m)
+    seeded_m = look.emit_once("machine-drift", "crontab.txt", "thinker", {"drift": "fixture"}, [], root=root_m)
+    assert seeded_m
+    def fail_crontab_m(timeout):
+        raise OSError("fixture unreadable")
+    runner_m = FakeRunner(crontab_text=(lambda timeout: cron_m) if missing_models_m else fail_crontab_m)
+    res_m = look.run(read_ledger(root_m), now=NOW, root=root_m, repo=repo_m, runner=runner_m, toml_path=clean_toml(root_m))
+    und_m = [b for b in briefs_of(res_m, "reading-undetermined") if b["key"] == "undetermined:machine"]
+    assert len(und_m) == 1
+    assert all(e.get("ref") != seeded_m["_src"] for e in res_m["answered"])
+    assert len([c for c in runner_m.calls if c[0] == "crontab_text"]) == (1 if missing_models_m else 2)
+    assert not briefs_of(res_m, "machine-drift")
+# A fresh interpreter also works when test_cron_run runs this script under
+# its in-process Runner seam recorder. The child's subprocess seam is mocked.
+reader_code_m = r'''
+import subprocess
+from unittest.mock import patch
+import look
+with patch.object(look.subprocess, "run", return_value=subprocess.CompletedProcess(["crontab", "-l"], 1, b"", b"unreadable")):
+    try: look.Runner().crontab_text(5)
+    except subprocess.CalledProcessError: pass
+    else: raise AssertionError("failed crontab read accepted")
+with patch.object(look.subprocess, "run", return_value=subprocess.CompletedProcess(["crontab", "-l"], 0, b"@reboot echo machine\r\n", b"")):
+    assert look.Runner().crontab_text(5) == "@reboot echo machine\r\n"
+'''
+subprocess.run([sys.executable, "-c", reader_code_m], cwd=pathlib.Path(look.__file__).parent,
+               capture_output=True, check=True)
+machine_look_signed(9, "missing models or two failed attempts stays undetermined and never clears drift")

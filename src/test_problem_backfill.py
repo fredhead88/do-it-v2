@@ -301,6 +301,10 @@ def test_live_launcher_contract():
         src.mkdir()
         # The copied launcher runs the real retirement check after its probes.
         (src / "retired.py").write_bytes((REPO_ROOT / "src" / "retired.py").read_bytes())
+        # The copied launcher also runs the machine gate with real dependencies.
+        for module in (REPO_ROOT / "src").glob("*.py"):
+            if not module.name.startswith("test_"):
+                (src / module.name).write_bytes(module.read_bytes())
         (tree / "retired.d").mkdir()
         (tree / "retired.d" / "fixture.toml").write_text(
             '[[retired]]\nname="fixture-clean"\nkind="code"\n'
@@ -374,6 +378,9 @@ def test_branch_clone_launcher_contract():
         (tree / "src").mkdir(parents=True)
         (tree / "doit").write_bytes((REPO_ROOT / "doit").read_bytes())
         (tree / "src" / "retired.py").write_bytes((REPO_ROOT / "src" / "retired.py").read_bytes())
+        for module in (REPO_ROOT / "src").glob("*.py"):
+            if not module.name.startswith("test_"):
+                (tree / "src" / module.name).write_bytes(module.read_bytes())
         (tree / "retired.d").mkdir()
         (tree / "retired.d" / "fixture.toml").write_text(
             '[[retired]]\nname="fixture-clean"\nkind="code"\n'

@@ -441,3 +441,137 @@ print("L-spec-8027 AC6 ok")
 
 
 print(f"install_sync: {N} checks pass")
+
+# Machine installation: real file writes, isolated destinations, preflight refusal.
+from unittest.mock import patch
+import hashlib
+import machine
+
+
+def machine_signed(ac, checks):
+    body = json.dumps({"criterion": f"AC{ac}", "checks": checks}, sort_keys=True)
+    print(json.dumps(dict(url=f"cli://install-machine/AC{ac}", status=0,
+                          body_sha256=hashlib.sha256(body.encode()).hexdigest(), body_excerpt=body)))
+    print(f"install_machine AC{ac} ok")
+
+
+def machine_fixture():
+    base = pathlib.Path(tempfile.mkdtemp(dir=TMP))
+    repo, root, cron = base / "repo", base / "root", base / "cron"
+    (repo / "machine").mkdir(parents=True)
+    (root / "machine-last").mkdir(parents=True)
+    for name, text in (("models.toml", 'model = "new"\n'), ("crontab.txt", "@reboot echo new\n")):
+        (repo / "machine" / name).write_text(text)
+        old = text.replace("new", "old")
+        (root / name if name == "models.toml" else cron).write_text(old)
+        (root / "machine-last" / name).write_text(old)
+    return repo, root, cron
+
+
+repo_m, root_m, cron_m = machine_fixture()
+assert install_sync.install_machine(repo_m, root=root_m, crontab_path=cron_m) == ["crontab.txt", "models.toml"]
+for name, dest in (("models.toml", root_m / "models.toml"), ("crontab.txt", cron_m)):
+    assert dest.read_bytes() == (repo_m / "machine" / name).read_bytes()
+    assert (root_m / "machine-last" / name).read_bytes() == dest.read_bytes()
+    assert (root_m / (name + ".bak")).read_text() == dest.read_text().replace("new", "old")
+backups_m = {p.name: p.read_bytes() for p in root_m.glob("*.bak")}
+assert install_sync.install_machine(repo_m, root=root_m, crontab_path=cron_m) == []
+assert backups_m == {p.name: p.read_bytes() for p in root_m.glob("*.bak")}
+p_m = subprocess.run([str(REPO_ROOT / "doit"), "machine", "check", "--models", str(root_m / "models.toml"),
+                      "--crontab", str(cron_m), "--repo", str(repo_m)], capture_output=True)
+assert p_m.returncode == 0
+
+
+def tree_m(path):
+    return {str(p.relative_to(path)): machine.read_text(p) for p in path.rglob("*") if p.is_file()}
+
+
+def refused_m(repo, root, cron):
+    before = tree_m(root.parent)
+    try:
+        install_sync.install_machine(repo, root=root, crontab_path=cron)
+    except install_sync.MachineInstallRefused as exc:
+        assert exc.name in machine.NAMES and exc.name in str(exc)
+    else:
+        raise AssertionError("machine installation should refuse")
+    assert tree_m(root.parent) == before
+
+
+for bad in ("missing", "secret", "unreadable"):
+    repo_m, root_m, cron_m = machine_fixture()
+    path_m = repo_m / "machine/models.toml"
+    if bad == "missing": path_m.unlink()
+    elif bad == "secret": path_m.write_text('api_key = "' + 'fixture"\n')
+    elif os.geteuid() != 0: path_m.chmod(0)
+    else: continue
+    try: refused_m(repo_m, root_m, cron_m)
+    finally:
+        if path_m.exists(): path_m.chmod(0o600)
+for bad_m in (None, 'api_key = "' + 'fixture"\n'):
+    repo_m, root_m, cron_m = machine_fixture()
+    if bad_m is None: (root_m / "models.toml").unlink()
+    else: (root_m / "models.toml").write_text(bad_m)
+    refused_m(repo_m, root_m, cron_m)
+repo_m, root_m, cron_m = machine_fixture()
+with patch.dict(os.environ, {"DOIT_CANONICAL_REPO": str(root_m / "elsewhere")}):
+    import models
+    for r, c in ((root_m, None), (models.PATH.parent, cron_m)):
+        with patch.object(machine, "read_text", side_effect=AssertionError("guard must precede reads")):
+            try: install_sync.install_machine(repo_m, root=r, crontab_path=c)
+            except install_sync.MachineInstallRefused: pass
+            else: raise AssertionError("noncanonical real destination accepted")
+machine_signed(6, "whole-file writes; backup; idempotence; child check; preflight; resolved real guard")
+machine_signed(3, "secret repo refuses before writing any file")
+
+# Ledger events are read by a fresh interpreter, rather than the emitter's return.
+def reread_m(root):
+    code = 'import json,pathlib,sys; print(json.dumps([json.loads(x) for p in (pathlib.Path(sys.argv[1])/"events").glob("*.jsonl") for x in p.read_text().splitlines()]))'
+    return json.loads(subprocess.check_output([sys.executable, "-c", code, str(root)]))
+
+
+def shipped_tick_m(count, refuse=False):
+    repo, root, cron = machine_fixture()
+    (root / "events").mkdir()
+    events = [{"type": "install-synced", "sha": "baseline", "ts": "2026-10-01T00:00:00+00:00"}]
+    events += [{"type": "shipped", "project": "do-it-v2", "sha": f"fixture-{i}",
+                "ts": f"2026-10-01T00:0{i+1}:00+00:00"} for i in range(count)]
+    effect = install_sync.MachineInstallRefused("crontab.txt", "live differs from marker and repo") if refuse else None
+    with patch.object(install_sync, "install_machine", return_value=["models.toml"], side_effect=effect) as install, \
+         patch.object(install_sync, "changed_rows", return_value=["A"]), \
+         patch.object(install_sync, "_row_where", return_value="user"), \
+         patch.object(crons, "install") as row_install:
+        install_sync.run(events, root=root, repo=repo, crontab_path=cron)
+        assert install.call_count == (1 if count else 0)
+        assert row_install.call_count == count
+    return reread_m(root)
+
+
+for count_m in (0, 1, 2):
+    rows_m = [e for e in shipped_tick_m(count_m) if e["type"] == "install-synced"]
+    assert len(rows_m) == count_m
+    if count_m:
+        assert rows_m[-1]["machine"] == ["models.toml"]
+        assert all("machine" not in row for row in rows_m[:-1])
+with patch.object(install_sync, "install_machine", side_effect=AssertionError("baseline install")):
+    repo_m = _git_repo()
+    _commit_crons(repo_m, [], "baseline")
+    root_m = _newroot()
+    install_sync.run([], root=root_m, repo=repo_m, agents_dir=TMP / "baseline-agents")
+    assert "machine" not in reread_m(root_m)[-1]
+machine_signed(7, "once per shipped tick; newest sha only; baseline never installs; fresh-process ledger read")
+
+for absent_m in (False, True):
+    repo_m, root_m, cron_m = machine_fixture()
+    if absent_m: (root_m / "machine-last/crontab.txt").unlink()
+    cron_m.write_text("@reboot echo outside\n")
+    refused_m(repo_m, root_m, cron_m)
+repo_m, root_m, cron_m = machine_fixture()
+for name_m, dest_m in (("models.toml", root_m / "models.toml"), ("crontab.txt", cron_m)):
+    (root_m / "machine-last" / name_m).unlink()
+    dest_m.write_bytes((repo_m / "machine" / name_m).read_bytes())
+assert install_sync.install_machine(repo_m, root=root_m, crontab_path=cron_m) == []
+assert all((root_m / "machine-last" / name).exists() for name in machine.NAMES)
+rows_m = shipped_tick_m(2, refuse=True)
+assert all("machine" not in row for row in rows_m if row["type"] == "install-synced")
+assert len([row for row in rows_m if row.get("condition") == "machine-install-refused"]) == 1
+machine_signed(14, "out-of-band and missing-marker refusal is write-free; bootstrap; operator brief; per-row loop preserved")
