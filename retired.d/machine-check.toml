@@ -1,0 +1,5 @@
+[[retired]]
+name = "crons-check-as-machine-answer"
+kind = "code"
+pattern = "builder-box cron manifest — measure"
+paths = ["doit"]

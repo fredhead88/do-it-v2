@@ -88,6 +88,10 @@ def _build_tree(tmp, *, content=False, isolated=True):
     (tree / "src").mkdir()
     # The copied launcher's retirement gate needs its own tracked-file registry.
     shutil.copyfile(REPO_ROOT / "src" / "retired.py", tree / "src" / "retired.py")
+    # Supply the machine gate and its real import dependencies in this checkout.
+    for module in (REPO_ROOT / "src").glob("*.py"):
+        if not module.name.startswith("test_"):
+            shutil.copyfile(module, tree / "src" / module.name)
     (tree / "retired.d").mkdir()
     (tree / "retired.d" / "fixture.toml").write_text(
         '[[retired]]\nname="fixture-clean"\nkind="code"\n'

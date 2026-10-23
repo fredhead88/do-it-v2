@@ -55,6 +55,57 @@ def _canonical(source):
     return resolved_source == canonical
 
 
+class MachineInstallRefused(Exception):
+    """A whole-machine preflight failed; no file may be installed."""
+
+    def __init__(self, name, detail):
+        self.name = name
+        super().__init__(f"{name}: {detail}")
+
+
+def install_machine(repo: str, *, root=None, crontab_path=None) -> list[str]:
+    import machine, models
+    root = pathlib.Path(root) if root is not None else models.PATH.parent
+    if (crontab_path is None or root.resolve() == models.PATH.parent.resolve()) and not _canonical(repo):
+        raise MachineInstallRefused("crontab.txt" if crontab_path is None else "models.toml",
+                                    "real destination requires the canonical checkout")
+    prepared = []
+    # Validate BOTH files before creating even a directory or refreshing a marker.
+    for name in sorted(machine.NAMES):
+        saved = machine.read_text(pathlib.Path(repo) / "machine" / name)
+        problem = machine.input_problem(saved, name)
+        if problem:
+            raise MachineInstallRefused(name, f"repo {problem.kind}: {problem.detail}")
+        dest = root / "models.toml" if name == "models.toml" else crontab_path
+        live = machine.read_text(dest) if dest is not None else machine.crontab_text()
+        problem = machine.input_problem(live, name)
+        if problem:
+            raise MachineInstallRefused(name, f"live {problem.kind}: {problem.detail}")
+        marker = root / "machine-last" / name
+        previous = machine.read_text(marker)
+        if live != saved and (previous is None or live != previous):
+            raise MachineInstallRefused(name, "live differs from repo and " +
+                                        ("last-installed marker is absent or unreadable" if previous is None
+                                         else "live differs from last-installed marker"))
+        prepared.append((name, dest, live, saved, marker))
+    changed = []
+    for name, dest, live, saved, marker in prepared:
+        if live != saved:
+            (root / (name + ".bak")).write_bytes(live.encode("utf-8"))
+            if dest is not None:
+                pathlib.Path(dest).write_bytes(saved.encode("utf-8"))
+            else:
+                import tempfile
+                with tempfile.NamedTemporaryFile(prefix="machine-crontab-", dir=root) as staged:
+                    staged.write(saved.encode("utf-8"))
+                    staged.flush()
+                    subprocess.run(["crontab", staged.name], check=True, capture_output=True)
+            changed.append(name)
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_bytes(saved.encode("utf-8"))
+    return changed
+
+
 # ── R5a: the one place agent-linking exists ──────────────────────────────────
 
 def link_agents(agents_dir=None, *, source=None):
@@ -164,6 +215,13 @@ def run(events, *, now=None, root=None, repo=None, agents_dir=None, manifest=Non
          and fold.ts(e.get("ts")) > newest_ts and e.get("sha") not in known_shas],
         key=lambda e: fold.ts(e.get("ts")))
 
+    machine_changes = None
+    if shipped:
+        try:
+            machine_changes = install_machine(repo, root=root, crontab_path=crontab_path)
+        except MachineInstallRefused as exc:
+            look.emit_once("machine-install-refused", exc.name, "operator",
+                           {"file": exc.name, "reason": str(exc)}, events, root=root)
     touched = []
     for e in shipped:
         sha = e.get("sha")
@@ -182,6 +240,8 @@ def run(events, *, now=None, root=None, repo=None, agents_dir=None, manifest=Non
                 except Exception as exc:
                     failed.append({"name": name, "error": str(exc)})
         kv = dict(sha=sha, linked=[], installed=installed, print_only=print_only, subject="do-it-v2")
+        if e is shipped[-1] and machine_changes is not None:
+            kv["machine"] = machine_changes
         if failed:
             kv["failed"] = failed
         dispatch.emit(dst, {}, "install-synced", **kv)

@@ -282,6 +282,10 @@ class RegistryTests(unittest.TestCase):
         subprocess.run(["git", "init", "-q", str(tree)], check=True)
         shutil.copy(REPO / "doit", tree / "doit")
         shutil.copy(REPO / "src/retired.py", tree / "src/retired.py")
+        # Keep the launcher's machine gate executable in this disposable tree.
+        for module in (REPO / "src").glob("*.py"):
+            if not module.name.startswith("test_"):
+                shutil.copy(module, tree / "src" / module.name)
         self.write("launcher/src/test_probe.py", "print('probe')\n")
         self.write("launcher/retired.d/clean.toml", '[[retired]]\nname="gone"\nkind="code"\npattern="removed"\npaths=["src/test_probe.py"]\n')
         bindir = self.repo / "bin"
