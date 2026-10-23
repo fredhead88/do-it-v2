@@ -1,0 +1,9 @@
+[[retired]]
+name = "upload-archive-once"
+kind = "code"
+pattern = "uuid"
+provisional = true
+paths = ["scripts/capture_uploads.py", "scripts/backup-upload-archive.sh"]
+repo = "/home/albert/.do-it/repos/albert-scott"
+armed_when_path = "scripts/capture_uploads.py"
+armed_when_contains = "upload-copy"

@@ -299,6 +299,12 @@ def test_live_launcher_contract():
         launcher.write_bytes((REPO_ROOT / "doit").read_bytes())
         src = tree / "src"
         src.mkdir()
+        # The copied launcher runs the real retirement check after its probes.
+        (src / "retired.py").write_bytes((REPO_ROOT / "src" / "retired.py").read_bytes())
+        (tree / "retired.d").mkdir()
+        (tree / "retired.d" / "fixture.toml").write_text(
+            '[[retired]]\nname="fixture-clean"\nkind="code"\n'
+            'pattern="removed fixture mechanism"\npaths=["src/test_*.py"]\n')
         probe = '''import os, pathlib, sys
 if sys.argv[1:] == ["--live"]:
     root = pathlib.Path(os.environ["DOIT_TEST_LIVE_ROOT"])
@@ -314,6 +320,8 @@ print("probe hermetic")
             (src / name).write_text(probe)
         (src / "test_probe.py").write_text(
             'import sys\nassert not sys.argv[1:]\nprint("unmarked hermetic")\n')
+        subprocess.run(["git", "init", "-q", str(tree)], check=True)
+        subprocess.run(["git", "-C", str(tree), "add", "src", "retired.d"], check=True)
         live_root = tree / "ledger"
         (live_root / "events").mkdir(parents=True)
         ledger = live_root / "events" / "L-fixture.jsonl"
@@ -365,6 +373,11 @@ def test_branch_clone_launcher_contract():
         tree = pathlib.Path(tmp) / "source"
         (tree / "src").mkdir(parents=True)
         (tree / "doit").write_bytes((REPO_ROOT / "doit").read_bytes())
+        (tree / "src" / "retired.py").write_bytes((REPO_ROOT / "src" / "retired.py").read_bytes())
+        (tree / "retired.d").mkdir()
+        (tree / "retired.d" / "fixture.toml").write_text(
+            '[[retired]]\nname="fixture-clean"\nkind="code"\n'
+            'pattern="removed fixture mechanism"\npaths=["src/test_*.py"]\n')
         probe = tree / "src" / "test_grader_view.py"
         probe.write_text('''import pathlib, subprocess
 repo = pathlib.Path(__file__).resolve().parent.parent
