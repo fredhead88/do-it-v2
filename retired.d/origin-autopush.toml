@@ -1,0 +1,12 @@
+[[retired]]
+name = "origin-push-shipped-selector"
+kind = "code"
+pattern = "_newest_shipped"
+paths = ["src/**/*.py"]
+
+[[retired]]
+name = "origin-push-shipped-precondition"
+kind = "code"
+pattern = 'if not any\(e\.get\("type"\) == "shipped" and e\.get\("project"\) == project for e in events\):'
+regex = true
+paths = ["src/**/*.py"]

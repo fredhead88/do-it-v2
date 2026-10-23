@@ -4,15 +4,15 @@
 A merge is not complete until origin carries it: local-ahead-of-origin for
 10+ minutes is an alarm (`look._check_origin_behind`, elsewhere). This module
 is the OTHER half — the thing that keeps origin from falling behind in the
-first place. Once per tick, for each `[push]`-configured project, find the
-newest `shipped` sha in origin's missing local commits and fast-forward-push
-it onto `refs/heads/<main>` on `origin` if origin does not already contain it.
-Event timestamps never determine which commit to publish or skip.
+first place. Once per tick, for each `[push]`-configured project, fast-forward
+origin to the local branch tip when it is strictly ahead. The comparison is
+ref-only and independent of ledger events. Confirmed divergence is recorded
+once per local/origin sha pair, with the ledger itself supplying dedupe.
 
 Ref-only, always: `$R/repos/<project>` can be the operator's own shared,
 live, DIRTY working tree (`$R/repos/albert-scott` is a symlink straight to
 `/opt/albert-scott`), so this module never reads or writes the working tree
-or the index — only `fetch`, `symbolic-ref`, `rev-list`,
+or the index — only `fetch`, `symbolic-ref`, `rev-parse`, `rev-list`,
 `merge-base --is-ancestor` and a single explicit-refspec `push`.
 Never forced, never mirrored, never a bulk
 or wildcard destination, never HEAD or a branch name as the push source — a
@@ -61,7 +61,7 @@ def targets(cfg):
     """`cfg["push"]["projects"]` paired with `cfg["push"]["main"][name]`. A
     project with no `main` entry resolves it from
     `git symbolic-ref --short refs/remotes/origin/HEAD` (minus the `origin/`
-    prefix) run against `fold.ROOT/"repos"/<name>`; if that cannot be
+    prefix) run against `checkout(cfg, name)`; if that cannot be
     resolved either, the project is dropped rather than guessed at."""
     push = cfg.get("push") or {}
     names = push.get("projects") or []
@@ -71,7 +71,7 @@ def targets(cfg):
     for name in names:
         main = mains.get(name)
         if not main:
-            repo = fold.ROOT / "repos" / name
+            repo = checkout(cfg, name)
             rc, text = _call(runner, ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], repo, 10)
             if rc != 0 or not text:
                 continue
@@ -83,27 +83,28 @@ def targets(cfg):
     return out
 
 
-def _newest_shipped(events, project, main, repo, runner):
-    """First shipped sha in rev-list order, after the caller fetches origin.
-
-    One git walk excludes commits absent from local main or already on origin,
-    regardless of how many historical shipped events the project has.
-    """
-    shas = {str(e["sha"]) for e in events
-            if e.get("type") == "shipped" and e.get("project") == project
-            and _HEX40.fullmatch(str(e.get("sha", "")))}
-    rc, commits = _call(runner, ["rev-list", f"origin/{main}..refs/heads/{main}"], repo, 10)
-    if rc != 0:
-        return None
-    return next((sha for sha in commits.splitlines() if sha in shas), None)
+def checkout(cfg, name):
+    """Use the same checkout resolver as the origin-behind alarm."""
+    return look.push_checkout(cfg, name)
 
 
-def _push_one(project, main, events, runner):
-    """One project's own five-step state machine (Produces). Returns whether
+def _record_diverged(project, main, sha, origin_sha):
+    """An unreadable ledger is undetermined, never permission to append."""
+    try:
+        events = fold.read_events()
+    except Exception:
+        return
+    if any(e.get("type") == "origin-diverged" and e.get("subject") == project
+           and e.get("sha") == sha and e.get("origin_sha") == origin_sha for e in events):
+        return
+    dispatch.emit(fold.EVENTS / EVENT_NAME, {}, "origin-diverged",
+                  subject=project, sha=sha, branch=main, origin_sha=origin_sha)
+
+
+def _push_one(project, main, cfg, runner):
+    """One project's ref-only state machine. Returns whether
     `origin-pushed` landed."""
-    if not any(e.get("type") == "shipped" and e.get("project") == project for e in events):
-        return False
-    repo = fold.ROOT / "repos" / project
+    repo = checkout(cfg, project)
     if not repo.is_dir():
         return False   # no repo at all: skip, no event, no raise
     rc, head = _call(runner, ["symbolic-ref", "--short", "HEAD"], repo, 10)
@@ -112,12 +113,30 @@ def _push_one(project, main, events, runner):
     rc, _out = _call(runner, ["fetch", "origin"], repo, 30)
     if rc != 0:
         return False   # fetch failed: skip, retried next tick
-    sha = _newest_shipped(events, project, main, repo, runner)
-    if sha is None:
-        return False   # nothing shipped that origin lacks, or the walk failed
-    rc_origin, _ = _call(runner, ["merge-base", "--is-ancestor", f"origin/{main}", sha], repo, 10)
+    rc, refs = _call(runner, ["rev-parse", f"refs/heads/{main}", f"refs/remotes/origin/{main}"], repo, 10)
+    tips = str(refs or "").split()
+    if rc != 0 or len(tips) != 2 or not all(_HEX40.fullmatch(tip) for tip in tips):
+        return False
+    sha, origin_sha = tips
+    # Freeze both tips before comparing them, including the pushed source and
+    # the divergence dedupe key.
+    rc, refs = _call(runner, ["rev-list", "--left-right", "--count",
+                             f"{origin_sha}...{sha}"], repo, 10)
+    if rc != 0:
+        return False
+    try:
+        behind, ahead = map(int, refs.split())
+    except (AttributeError, TypeError, ValueError):
+        return False
+    if ahead <= 0 or behind < 0:
+        return False   # equal/behind, or malformed reading
+    rc_origin, _ = _call(runner, ["merge-base", "--is-ancestor", origin_sha, sha], repo, 10)
     if rc_origin != 0:
-        return False   # origin ahead/diverged, or chosen sha is not a fast-forward
+        if rc_origin == 1 and behind > 0:
+            _record_diverged(project, main, sha, origin_sha)
+        return False   # divergence, or undetermined ancestry: never push
+    if behind != 0:
+        return False
     rc, _out = _call(runner, ["push", "origin", f"{sha}:refs/heads/{main}"], repo, 30)
     if rc != 0:
         return False   # failed push (a race, a non-ff): no event, retried next tick
@@ -129,12 +148,11 @@ def run(events, *, runner=None):
     """One pass over every `[push]` target. Never raises; a bad target is a
     skip, not an abort of the others."""
     runner = runner or Runner()
-    events = list(events or ())
     cfg = look.load_toml()
     pushed = []
     for project, main in targets(cfg):
         try:
-            if _push_one(project, main, events, runner):
+            if _push_one(project, main, cfg, runner):
                 pushed.append(project)
         except Exception:
             continue

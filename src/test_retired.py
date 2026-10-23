@@ -262,8 +262,9 @@ class RegistryTests(unittest.TestCase):
 
     def test_ac6_real_registry_documentation(self):
         rows = retired.load(str(REPO / "retired.d"))
-        self.assertEqual({r.name for r in rows}, {"upload-archive-once", "realm-views"})
-        self.assertTrue(all(Path(r.repo).is_absolute() for r in rows))
+        required = {"upload-archive-once", "realm-views"}
+        self.assertTrue(required <= {r.name for r in rows})
+        self.assertTrue(all(Path(r.repo).is_absolute() for r in rows if r.name in required))
         text = (REPO / "retired.d/README.md").read_text()
         self.assertTrue(next(r for r in rows if r.name == "upload-archive-once").provisional)
         for field in ["name", "kind", "pattern", "paths", "repo", "regex", "provisional", "armed_when_path", "armed_when_contains"]:
