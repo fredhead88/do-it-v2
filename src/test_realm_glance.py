@@ -31,7 +31,7 @@ def test_real_open_window_beats_ledger_queue_position():
         assert not project([*events, event(terminal, 'solo')])['merging']
     for kind in ['shipped', 'window-dropped', 'window-deferred', 'merge-conflict']:
         assert not project([*events, event(kind, window='solo')])['merging']
-    assert not project([*events, event('shipped', actor_unused='x') | {'actor': 'tick'}])['merging']
+    assert not project([*events, event('shipped') | {'actor': 'tick'}])['merging']
     reopened = [*events, event('window-verified', 'solo'), events[1]]
     assert project(reopened)['merging'] == ['L-spec-1430']
 
@@ -57,7 +57,7 @@ def test_holds_and_active_rework_never_become_overdue():
     assert 'held on purpose' in d['groups'][3]['text']
     unrelated = ruling | {'subject':'realm-operator-panel'}
     assert 'L-spec-1417' not in project([unrelated])['held']
-    release = event('unblocked', 'L-spec-1417', ts_unused='x') | {'ts':'2026-10-23T07:01:00Z'}
+    release = event('unblocked', 'L-spec-1417') | {'ts':'2026-10-23T07:01:00Z'}
     assert 'L-spec-1417' not in project([ruling, release])['held']
 
 
@@ -74,7 +74,8 @@ def test_only_unanswered_operator_owned_escalations_need_you():
     d = project(needs=needs, answered={'you'})
     assert len(d['needs_you']) == 1
     assert '1 thing needs you' in d['collapsed']
-    assert 'Approve the access change' in d['attention']
+    assert d['needs_you'][0]['ask'] == 'Approve the access change'
+    assert d['collapsed'].startswith('1 thing needs you')
     assert 'No operator decisions waiting' in project(needs=needs, answered={'operator', 'you'})['collapsed']
 
 
@@ -93,6 +94,30 @@ def test_collapsed_and_config():
         except ValueError:
             pass
     assert not project([event('window-opened','future',specs=['L-spec-1430']) | {'ts':'2027-01-01T00:00:00Z'}])['merging']
+
+
+
+def test_server_cache_and_unavailable_answer():
+    import contextlib
+    import sys
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    import realm
+    fake_rules = SimpleNamespace(due=lambda *a: [])
+    fake_fold = SimpleNamespace(stall_rows=lambda *a, **k: [], admits=lambda *a: None,
+                                open_escalations=lambda *a: [], answered=lambda *a: set())
+    @contextlib.contextmanager
+    def snapshot(*a):
+        yield fake_fold, [], ({}, {}, [], {})
+    with patch.dict(sys.modules, {'lane_rules':fake_rules}), patch.object(realm, 'ledger_snapshot', snapshot), \
+         patch.dict(realm._GLANCE, {'key':None, 'value':None}):
+        first = realm.glance_payload(NOW)
+        assert first['error'] is None and len(first['groups']) == 5
+        with patch.object(realm, 'ledger_snapshot', side_effect=AssertionError('cached call read ledger')):
+            assert realm.glance_payload(NOW + dt.timedelta(seconds=1)) is first
+        with patch.object(realm, 'ledger_snapshot', side_effect=OSError('fixture read failure')):
+            failed = realm.glance_payload(NOW + dt.timedelta(seconds=31))
+            assert failed['error'] and 'collapsed' not in failed
 
 
 if __name__ == '__main__':

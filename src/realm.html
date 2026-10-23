@@ -278,6 +278,20 @@ canvas#map.hand{cursor:pointer}
 .pvflag{position:absolute;top:-2px;width:2px;height:20px;background:var(--gold,#e6c46a)}
 .pvstep{border-left:4px solid;padding:4px 10px;margin:8px 0;display:flex;flex-direction:column;gap:2px}
 .pvstep ul{margin:4px 0 0;padding-left:16px}.pvstep li{margin:2px 0;font-size:12.5px}
+/* What matters overlays the existing stage; it owns no grid height. */
+.glance-anchor{grid-area:stage;align-self:start;position:relative;height:0;min-width:0;z-index:7}
+#glance{position:absolute;top:8px;left:12px;right:12px;border:1px solid #4b435c;border-radius:4px;background:#1a1530;color:#e3dfeb;font-size:15px;line-height:1.65;box-shadow:0 3px 12px #0003}
+#glance-toggle{display:flex;align-items:center;gap:12px;width:100%;min-width:0;border:0;background:none;color:inherit;font:inherit;text-align:left;padding:7px 12px;cursor:pointer}
+#glance-sentence{overflow:hidden;white-space:nowrap;text-overflow:ellipsis;min-width:0;flex:1}
+#glance-more{flex:none;font-size:13px;color:#bbb4c9}
+#glance-toggle:focus-visible{outline:2px solid #bcb1d3;outline-offset:2px}
+#glance-lines{border-top:1px solid #4b435c;padding:8px 12px 12px}
+#glance-lines p{margin:0;padding:4px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#glance-lines button{font:inherit;color:inherit;background:none;border:0;padding:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer;text-align:left}
+#glance-lines button:focus-visible{outline:2px solid #bcb1d3;outline-offset:1px}
+#glance-lines[hidden]{display:none}
+#stuck{display:none} /* superseded by the fact-checked glance sentences */
+@media(max-width:700px){#mview{padding-top:66px}#glance{left:8px;right:8px;font-size:15px}#glance-toggle{padding:7px 10px}#glance-lines{padding:6px 10px 10px}}
 </style>
 
 <div id="app">
@@ -319,6 +333,7 @@ canvas#map.hand{cursor:pointer}
     <div class="scrub"><small id="s-a">—</small><input type="range" id="scrub" min="0" max="1000" value="0" aria-label="Scrub chronicle time"><small id="s-b">—</small></div>
     </div>
   </header>
+  <div class="glance-anchor"><section id="glance" aria-label="What matters"><button id="glance-toggle" aria-expanded="false" aria-controls="glance-lines"><span id="glance-sentence">Reading what matters…</span><span id="glance-more">more ⌄</span></button><div id="glance-lines" hidden></div></section></div>
   <div class="stage">
     <div class="view"><canvas id="map"></canvas><div id="status">WAKING THE REALM<small>fetching the ledger…</small></div><div id="tip"></div><div class="legend" id="legend"></div><div class="omens" id="omens"></div><div id="stuck" class="calm"><b>STUCK NOW</b>…</div>
       <button class="btn" id="reopen">CODEX ▸</button><div id="bubble"><span class="tag" id="bb-tag"></span><div class="box" id="bb-box"></div></div><div id="dossier" hidden></div><div id="tourcap"><span class="tag" id="tc-tag"></span><div class="box" id="tc-box"></div></div></div>
@@ -754,7 +769,31 @@ function frame(dt,t){
   ctx.setTransform(1,0,0,1,0,0);
   hud();placeBubble();
 }
+/* Read-only operator summary. Storage failure must never prevent rendering. */
+let glanceOpen=false,glanceSignature='';
+try{glanceOpen=localStorage.getItem('realm.glance.expanded')==='true';}catch(_){}
+function setGlanceOpen(open){glanceOpen=open;$('glance-toggle').setAttribute('aria-expanded',String(open));$('glance-lines').hidden=!open;$('glance-more').textContent=open?'less ⌃':'more ⌄';}
+$('glance-toggle').onclick=()=>{setGlanceOpen(!glanceOpen);try{localStorage.setItem('realm.glance.expanded',String(glanceOpen));}catch(_){}};
+setGlanceOpen(glanceOpen);
+function renderGlance(){
+  const d=DATA&&DATA.glance;const replay=DATA&&!LIVE&&!REMOTE;
+  const stale=d&&Date.now()-toMs(d.at)>120000;
+  const signature=JSON.stringify([d,replay,stale]);if(signature===glanceSignature)return;glanceSignature=signature;
+  let sentence,lines;
+  if(replay){sentence='What matters is available in live mode';lines=['Return to live mode to see current priorities.'];}
+  else if(!d||d.error){sentence=d&&d.error||'What matters is unavailable';lines=['Current priority information could not be read.'];}
+  else if(stale){sentence='What matters needs a fresh update';lines=['Current priority information is more than two minutes old.'];}
+  else{sentence=d.collapsed;lines=[...(d.groups||[]).slice(0,5).map(g=>g.text),d.attention];}
+  $('glance-sentence').textContent=sentence;$('glance-toggle').title=sentence;
+  const box=$('glance-lines');box.replaceChildren();for(const [i,text] of lines.filter(Boolean).slice(0,6).entries()){const p=document.createElement('p');p.textContent=text;p.title=d&&d.groups&&d.groups[i]?d.groups[i].detail||text:text;
+    if(i===5&&d&&((d.needs_you||[]).length||(d.overdue||[]).length)){const b=document.createElement('button');b.textContent=text+' ›';b.setAttribute('aria-label',text+' Read details');b.onclick=()=>openPanel('<h2>What needs attention</h2>'+((d.needs_you||[]).map(x=>'<p>'+esc(x.spec)+': '+esc(x.ask)+'</p>').join('')||'<p>No operator decisions waiting.</p>')+((d.overdue||[]).length?'<p>Steps overdue: '+d.overdue.map(esc).join(', ')+'.</p>':''));p.replaceChildren(b);}
+    box.appendChild(p);}
+}
+async function refreshGlance(){if(!LIVE||REMOTE)return;try{const r=await fetch(api('/api/glance'),{cache:'no-store'});if(!r.ok)throw Error('unavailable');const d=await r.json();if(DATA)DATA.glance=d;}catch(_){if(DATA)DATA.glance={error:'What matters is unavailable'};}renderGlance();}
+setInterval(refreshGlance,30000);
+
 function hud(){
+  renderGlance();
   const stale=(stream||REMOTE)&&lastHeard&&Date.now()-lastHeard>150000;if(stale&&!catchingUp&&Date.now()-lastHeard>180000)catchUp();
   $('h-clock').textContent=fmt(S.now)+' Z';{const cl=$('h-clock');const age=lastHeard?Date.now()-lastHeard:null;const ageTxt=age==null?'':age<60000?'data '+Math.round(age/1000)+'s old':'data '+fmtAge(age)+' old';$('h-clock-l').textContent=(stream||REMOTE)?((LIVE&&S.playing?'live · ':'replay · ')+ageTxt):'snapshot';cl.parentElement.className='stat '+(age==null?'':age>300000?'bad':age>150000?'warn':'good');}
   const md=$('mode');if(stream){const ok=pollTimer?true:stream.readyState===1;md.textContent=stale?('STALE · NOTHING HEARD FOR '+fmtAge(Date.now()-lastHeard).toUpperCase()):(LIVE&&S.playing?(ok?'LIVE':'RECONNECTING'):'REPLAY · LIVE PAUSED');md.className='mode '+(stale?'off':(ok?(LIVE&&S.playing?'live':''):'off'));}else if(REMOTE){const age=lastPush?Date.now()-toMs(lastPush):0;md.textContent=LIVE&&S.playing?('LIVE · PUSHED '+fmtAge(age)+' AGO'):'REPLAY';md.className='mode '+(LIVE&&S.playing?(age>180000?'off':'live'):'');}else{md.textContent='SNAPSHOT';md.className='mode';}
@@ -1501,7 +1540,7 @@ let REMOTE=false,remoteTimer=null,lastPush='';
 async function remoteFetch(file){const r=await fetch(api('/api/ledger?file='+file),{cache:'no-store'});if(r.status===401)return {auth:false};if(!r.ok)return null;const d=await r.json();d.pushedAt=r.headers.get('X-Pushed-At')||'';return d;}
 function passwordForm(msg){openPanel(`<h2>Realm of DO-IT</h2><div class="cls">this realm is behind a password</div><p>${esc(msg||'Enter the password to open the realm.')}</p><form id="pwf"><input id="pw" type="password" autocomplete="current-password" placeholder="password" style="width:100%;padding:8px 10px;font-family:var(--body);font-size:15px;background:rgba(255,255,255,.06);color:#fff;border:1px solid var(--hair);border-radius:2px"><p style="margin-top:8px"><button class="btn on" type="submit">ENTER</button></p></form>`);status('A PASSWORD IS NEEDED','enter it in the panel');
   $('pwf').onsubmit=async ev=>{ev.preventDefault();const pw=$('pw').value;try{const r=await fetch(api('/api/login'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pw})});if(r.ok){status('WAKING THE REALM','fetching the last snapshot…');boot();}else passwordForm('That was not it. Try again.');}catch(_){passwordForm('Could not reach the login. Try again.');}};}
-function applySnapshot(d){if(!DATA){return false;}applyLane(d);applyThroughput(d);if(d.codex){DATA.codex=d.codex;Codex.load(d.codex);}let lastT='';for(const e of EVENTS)if(e.t>lastT)lastT=e.t;let n=0;for(const row of d.events){if(row.t>lastT){insertEvent(row);n++;}}for(const k of ['states','seat','stats','titles','counts','queue','charters','spec_charter','makers','n_events','sys','tick_omens','history','specs','wallclock','metrics','goals','omens'])if(d[k]!=null)DATA[k]=d[k];if('proving' in d)DATA.proving=d.proving;if(d.wallclock)S.wallclock=d.wallclock;if(d.metrics)S.metricsNow=d.metrics;if(d.history)S.history=d.history;if(d.sys)S.sys=d.sys;if(d.tick_omens)S.tickOmens=d.tick_omens;if(d.omens)S.omens=d.omens;S.lastStates=Date.now();lastPush=d.pushedAt||d.now||'';T1=Date.now();return n;}
+function applySnapshot(d){if(!DATA){return false;}applyLane(d);applyThroughput(d);if('glance' in d)DATA.glance=d.glance;else DATA.glance=null;if(d.codex){DATA.codex=d.codex;Codex.load(d.codex);}let lastT='';for(const e of EVENTS)if(e.t>lastT)lastT=e.t;let n=0;for(const row of d.events){if(row.t>lastT){insertEvent(row);n++;}}for(const k of ['states','seat','stats','titles','counts','queue','charters','spec_charter','makers','n_events','sys','tick_omens','history','specs','wallclock','metrics','goals','omens'])if(d[k]!=null)DATA[k]=d[k];if('proving' in d)DATA.proving=d.proving;if(d.wallclock)S.wallclock=d.wallclock;if(d.metrics)S.metricsNow=d.metrics;if(d.history)S.history=d.history;if(d.sys)S.sys=d.sys;if(d.tick_omens)S.tickOmens=d.tick_omens;if(d.omens)S.omens=d.omens;S.lastStates=Date.now();lastPush=d.pushedAt||d.now||'';T1=Date.now();return n;}
 async function remotePoll(){const d=await remoteFetch('snapshot');if(!d||d.auth===false)return;applySnapshot(d);}
 let booted=false;
 async function boot(){

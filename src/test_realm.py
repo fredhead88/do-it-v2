@@ -295,7 +295,8 @@ def due(events, specs, now):
                     with patch.object(realm, "read_all", return_value=([], [], {})), \
                          patch.object(realm, "sys_signals", return_value={}), \
                          patch.object(realm.realm_codex, "payload", return_value={}), \
-                         patch.object(realm, "omens_model", return_value={}):
+                         patch.object(realm, "omens_model", return_value={}), \
+                         patch.object(realm, "glance_payload", return_value={}):
                         payload = realm.bootstrap(0, states=[], goals=[], proving=[], now=NOW)
                     history = realm.history_payload([], [], NOW, {})
                 assert sys.path == before_path

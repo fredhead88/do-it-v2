@@ -113,7 +113,7 @@ def shape(events, states, rules, classified, priorities, now, *, needs=(), answe
         if s in held:
             return 'held on purpose'
         return {'building': 'building', 'dispatched': 'building', 'built': 'being checked',
-                'grading': 'being checked', 'graded': 'being reviewed', 'reviewing': 'being reviewed',
+                'grading': 'being checked', 'graded': 'in review', 'reviewing': 'in review',
                 'written': 'ready to build', 'blocked': 'waiting for repair',
                 'killed': 'stopped', 'void': 'stopped', 'dropped': 'stopped'}.get(state, 'status unconfirmed')
 
@@ -125,10 +125,13 @@ def shape(events, states, rules, classified, priorities, now, *, needs=(), answe
             counts[status] = counts.get(status, 0) + 1
         # Surface active work before completed work, preserving a short sentence.
         order = ['merging now', 'checks failed; waiting for repair', 'held on purpose', 'waiting for repair',
-                 'building', 'being checked', 'being reviewed', 'ready to build', 'live', 'shipped', 'stopped', 'status unconfirmed']
+                 'building', 'being checked', 'in review', 'ready to build', 'live', 'shipped', 'stopped', 'status unconfirmed']
         status = next(iter(counts)) if len(counts) == 1 else ', '.join(f'{counts[k]} {k}' for k in order if k in counts)
         lead = next(k for k in order if k in counts)
-        short = status if len(counts) == 1 else f'{counts[lead]} {lead}'
+        short = {'checks failed; waiting for repair':'checks need repair', 'waiting for repair':'needs repair',
+                 'being checked':'checking', 'status unconfirmed':'unconfirmed'}.get(lead, lead)
+        if len(counts) > 1 and lead in {'live', 'shipped'}:
+            short = 'partly ' + lead
         groups.append({'name': name, 'specs': specs, 'status': status,
                        'text': f'{name}: {short}.', 'detail': f'{name}: {status}.'})
     needs = [e for e in needs if str(e.get('owner', '')).strip().lower() in {'operator', 'you'}
@@ -150,9 +153,10 @@ def shape(events, states, rules, classified, priorities, now, *, needs=(), answe
     # Lead with active merging, then the first priorities and required action.
     # Expansion shows all five groups; never shrink the font to fit a phone.
     ordered = sorted(groups, key=lambda g: 'merging now' not in g['status'])
-    collapsed = ' · '.join(g['text'].rstrip('.').replace(': ', ' ', 1) for g in ordered[:3]) + ' · ' + ' · '.join(attention)
+    clauses = [g['text'].rstrip('.').replace(': ', ' ', 1) for g in ordered[:3]]
+    collapsed = ' · '.join([*attention, *clauses] if needs else [*clauses, *attention])
     return {'at': now.isoformat(timespec='seconds'), 'error': None, 'groups': groups,
-            'collapsed': collapsed, 'attention': ' · '.join(attention) + (': ' + ' '.join(str(needs[0].get('why') or needs[0].get('asks') or 'Decision requested').split())[:100] if needs else '') + '.',
+            'collapsed': collapsed, 'attention': ' · '.join(attention) + '.',
             'needs_you': [{'spec': e.get('subject'), 'ask': ' '.join(str(e.get('why') or e.get('asks') or 'Decision requested').split())[:200]} for e in needs],
             'overdue': failures, 'held': sorted(held), 'merging': sorted(active),
             'queue_available': False}

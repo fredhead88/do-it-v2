@@ -49,7 +49,7 @@ class Handler(realm.Handler):
   phase=q.get('phase',['live'])[0]
   if u.path in ('/api/bootstrap','/fixture/backend'): self._json(data(phase));return
   if u.path=='/baseline':
-   body=pathlib.Path(sys.argv[1]).read_bytes();self.send_response(200);self.send_header('Content-Type','text/html');self.send_header('Content-Length',str(len(body)));self.end_headers();self.wfile.write(body);return
+   body=pathlib.Path(sys.argv[1]).read_bytes().replace(b'/*__CODEX_JS__*/',pathlib.Path('src/realm_codex.js').read_bytes());self.send_response(200);self.send_header('Content-Type','text/html');self.send_header('Content-Length',str(len(body)));self.end_headers();self.wfile.write(body);return
   if u.path=='/api/since': self._json({'seq':0,'ledger':[],'claims':[]});return
   if u.path.startswith('/api/'): self._json({});return
   super().do_GET()

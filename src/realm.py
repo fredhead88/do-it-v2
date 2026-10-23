@@ -276,11 +276,11 @@ def glance_payload(now=None):
     with _GLANCE["lock"]:
         try:
             config = HERE.parent / "realm_priorities.json"
+            key = (live_src(), ROOT, os.environ.get("DOIT_PROJECT"), int(now.timestamp() // 30), config.stat().st_mtime_ns)
+            if key == _GLANCE["key"]:
+                return _GLANCE["value"]
             priorities = realm_glance.load_priorities(config)
             with ledger_snapshot(now) as (live_fold, events, folded):
-                key = (LEDGER.key, LEDGER.generation, int(now.timestamp() // 30), config.stat().st_mtime_ns)
-                if key == _GLANCE["key"]:
-                    return _GLANCE["value"]
                 import lane_rules
                 specs, by_subject = folded[0], folded[3]
                 rules = lane_rules.due(events, specs, now)
