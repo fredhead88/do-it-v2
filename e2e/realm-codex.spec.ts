@@ -80,6 +80,7 @@ async function open(page, phase='live', path='/') {
   });
   const errors=[];page.on('pageerror',e=>errors.push(e.message));
   await page.goto(base+path);
+  await page.waitForFunction(()=>typeof DATA!=='undefined'&&DATA&&DATA.now);
   await expect(page.locator('#status')).toBeHidden();
   if(page.viewportSize().width<=700)await page.locator('#mnav [data-t="map"]').click();
   await page.evaluate(()=>{LIVE=false;seek(toMs(DATA.now));S.playing=false;});
@@ -119,7 +120,7 @@ for(const width of [1440,400]){
     for(const label of ['Kind','Subject / title','Tmux window','State','Started','Last activity','Turns','Tokens','Fallback history','Weekly quota','Resets'])expect(inspectorText).toContain(label);
     await shot(page,'inspector-'+width);await page.locator('#p-close').click();
     // Hold each handover phase while screenshots are captured, even under load.
-    await page.clock.pauseAt(Date.now()+3600000);
+    await page.clock.pauseAt(await page.evaluate(()=>Date.now())+1000);
     await page.evaluate(()=>{const e={ty:'backend-fallback',sp:'L-builder-7',s:'L-spec-7',why:'weekly limit',r:'builder',t:new Date(S.now).toISOString(),ms:S.now};handle(e);});
     await page.clock.fastForward(250);expect(await page.evaluate(()=>S.actors.has('L-builder-7'))).toBe(false);
     await shot(page,'dissolve-'+width);
