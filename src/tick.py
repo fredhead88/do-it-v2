@@ -400,6 +400,9 @@ def launch(step, *, dispatcher):
         if options and options[0] == 'needs-browser':
             raise ValueError('ui review requires review-mcp.json')
         spawn = lane_driver._dispatch(role, step.item, project, charter, dispatcher, options)
+        # `doit dispatch --detach` reports the detached pid as an int; a missing one is undetermined.
+        if isinstance(spawn, int) and not isinstance(spawn, bool) and spawn > 0:
+            spawn = str(spawn)
         if not isinstance(spawn, str) or not spawn:
             raise ValueError('undetermined: missing spawn id')
         refusal = dispatch.emit(tick_path(), {'subject': step.item}, 'autodispatched',
