@@ -37,7 +37,7 @@ import time
 import urllib.parse
 import urllib.request
 
-import realm_omens, realm_codex, realm_ledger, realm_operator
+import realm_omens, realm_codex, realm_ledger
 
 ROOT = pathlib.Path(os.environ.get("DOIT_ROOT", pathlib.Path.home() / ".do-it"))
 EVENTS, SEAT = ROOT / "events", ROOT / "seat"
@@ -265,41 +265,6 @@ def codex_payload(raw=None):
     if sessions is None:
         return realm_codex.payload(raw)
     return realm_codex.payload(raw, ledger_projection=sessions)
-
-
-
-_OPERATOR = {"key": None, "value": None, "lock": threading.Lock()}
-
-
-def operator_payload(now=None):
-    """Read the admitted live ledger once; no worker dispatch or ledger writes."""
-    now = now or dt.datetime.now(dt.timezone.utc)
-    with _OPERATOR["lock"]:
-        try:
-            priorities_path = HERE.parent / "realm_priorities.json"
-            priorities = realm_operator.load_priorities(priorities_path)
-            with ledger_snapshot(now) as (live_fold, events, folded):
-                key = (LEDGER.key, LEDGER.generation, int(now.timestamp() // 30), priorities_path.stat().st_mtime_ns)
-                if key == _OPERATOR["key"]:
-                    return _OPERATOR["value"]
-                import lane_rules, merge_queue
-                specs, by_subject = folded[0], folded[3]
-                rules = lane_rules.due(events, specs, now)
-                # Classify every unfinished spec to discover holds BEFORE its age
-                # limit. Only lane_rules decides whether idle time is overdue.
-                active = {s: v for s, v in specs.items() if v['state'] not in realm_operator.FINISHED}
-                classified = live_fold.stall_rows(events, active, now=now, by_subject=by_subject,
-                                                  dwell={v['state']: -1 for v in active.values()})
-                queue_rows = merge_queue.queue(events)
-                wanted = set(specs) | {s for ids in priorities.values() for s in ids}
-                titles = {s: t['title'] for s in wanted for t in [spec_text(s)] if t}
-                value = realm_operator.shape(events, [(s, v['state']) for s, v in specs.items()], queue_rows,
-                                             rules, classified, priorities, now, titles=titles,
-                                             answered=live_fold.answered(events))
-            _OPERATOR.update(key=key, value=value)
-            return value
-        except Exception as ex:
-            return {"at": now.isoformat(timespec="seconds"), "error": f"Operator information unavailable ({type(ex).__name__})"}
 
 
 def role_stats(raw):
@@ -1596,10 +1561,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if u.path == "/api/bootstrap":
             hours = int(qs.get("hours", [self.hours])[0])
             self._json(bootstrap(hours, HUB.states))
-        elif u.path == "/api/operator":
-            self._json(operator_payload())
-        elif u.path == "/api/codex":
-            self._json(codex_payload())
         elif u.path == "/api/omens":
             if not HUB.states:
                 HUB.states = derive_states() or HUB.states
