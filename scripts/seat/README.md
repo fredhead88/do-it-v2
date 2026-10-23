@@ -64,13 +64,28 @@ for a writing role, `null` for a non-writing one). A relay pane or the Planner
 serving a writing-role seat reads its destination off one of those two, not by
 asking the operator or guessing from the contract file.
 
+Builders are different from content-writing roles: their `path` is null, and
+their repository write destination is the exact worktree in `cmd.json["cwd"]`,
+limited by the packet's footprint and `agents/builder.md`. Pass that cwd to the
+sub-agent and require it to `cd` there at the start of every Bash call. Builder
+sub-agents need Write, Edit and Bash; the relay contract exposes those tools so
+they can build. The relay itself must never edit repository files.
+
 Serving pattern (R2: the harness snapshots agent types at pane start, so serve as
-`general-purpose` and name the contract file): Agent(model=<from models.toml>, prompt = "You are the
+`general-purpose` and name the contract file): Agent(model=<cmd.json cmd --model value>, prompt = "You are the
 DO-IT `<role>` contract, spawn id <id>. 0. Before anything else, run /home/albert/do-it-v2/scripts/seat/claim.sh <id> —
 if it exits non-zero, stop: someone else already claimed this seat. 1. Read
 /home/albert/do-it-v2/agents/<role>.md (binding, incl. Seat route) and its schema. 2. Read
 /home/albert/.do-it/seat/<id>.packet.md; cwd <repo or worktree>; write nothing under it. 3. Write
-seat/<id>.output.json and run `doit validate <role> <file>` until VALID. 4. End with `DONE <id>`.")
+$R/seat/<id>.output.json and run `doit validate <role> <file>` until VALID. 4. End with `DONE <id>`.")
+
+Read the model from the `--model` argument in `cmd.json["cmd"]`: a codex-to-seat
+fallback records its seat model there, while models.toml's primary model may
+still name Codex. Use `cmd.json["cwd"]` as the cwd above. For a builder, replace
+"write nothing under it" with "build and commit within the packet's footprint
+in this worktree, following the builder contract". Other roles keep their own
+write restrictions. When the serving pane already claimed the packet, replace
+step 0 with "the serving pane already holds this claim; do not claim again".
 
 **Grader/reviewer seats: name the view (Thinker 2026-10-13).** A seat grader runs as a plain sub-agent, not inside
 bwrap, so `$HOME` is NOT the view, although `agents/grader.md` says `$HOME/tree`, `$HOME/view.json` and so on. Read

@@ -125,6 +125,14 @@ if __name__ == "__main__":
         data = (HERE.parent / path).read_bytes()
         base = subprocess.run(["git", "show", f"{base_ref}:{path}"], cwd=HERE.parent,
                               capture_output=True, check=True).stdout
+        if role == "relay":
+            # W62: builder-seat children need Write/Edit. Preserve the guard
+            # against every other frontmatter change, including removed tools.
+            old_tools = next(line for line in base.splitlines() if line.startswith(b"tools:"))
+            new_tools = next(line for line in data.splitlines() if line.startswith(b"tools:"))
+            tool_set = lambda line: {t.strip() for t in line.split(b":", 1)[1].split(b",")}
+            assert tool_set(new_tools) == tool_set(old_tools) | {b"Write", b"Edit"}
+            data = data.replace(new_tools, old_tools, 1)
         assert data.split(b"---", 2)[:2] == base.split(b"---", 2)[:2], role
         lines = [line for line in data.decode().splitlines() if line.startswith("Context rule:")]
         assert len(lines) == 1 and all(word in lines[0] for word in ["50%", "doit pane-end", "--reason ctx"])

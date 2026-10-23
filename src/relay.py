@@ -363,36 +363,64 @@ def ledger_changed(root, watermark=None):
 
 # ── dispatched seats with no answer ──────────────────────────────────────────
 
-def pending_packets(events, root=None, *, served_by="relay"):
-    """Seats whose packet was written and whose answer has not come back — the SPAWN
-    rule, not the file rule: the packet exists, the `.output.json` does not, and the
-    `spawn-started` has no `spawn-done`/`spawn-failed`/`spawn-stale` after it (the
-    terminal set `tick.in_flight` already uses). A packet on disk with no
-    `spawn-started` is not pending — nothing was dispatched.
+# Wrapper terminal events, matching tick._spawn_busy and spawns.TERMINAL.
+# A builder's build-done is its output, followed by the wrapper's spawn-done.
+TERMINAL = {"spawn-done", "spawn-failed", "spawn-stale"}
 
-    `served_by` (L-charter-0042 R5c) filters by `SERVERS`: `None` means no
-    filter — every pending row, whatever its role, exactly today's behaviour
-    before this parameter existed (audit finding 2); any other value (the
-    default, `"relay"`) keeps only rows whose `SERVERS.get(e.get("role", ""),
-    "relay") == served_by`."""
-    seat = pathlib.Path(root or fold.ROOT) / "seat"
-    started, terminal = {}, {}
+
+def _packet_starts(events):
+    """Seat builders and legacy spawn starts, including a codex -> seat fallback.
+
+    dispatch records a fallback separately; it does not rewrite the start event.
+    Keep the original timestamp and infer the builder role from build-started.
+    """
+    starts, fallbacks = {}, {}
     for e in events:
         sid = e.get("spawn")
         if not sid:
             continue
-        if e.get("type") == "spawn-started":
-            started[sid] = e
-        elif e.get("type") in ("spawn-done", "spawn-failed", "spawn-stale"):
+        if e.get("type") in ("spawn-started", "build-started"):
+            starts[sid] = e
+        elif e.get("type") == "backend-fallback":
+            fallbacks[sid] = e
+    for sid, e in starts.items():
+        fb = fallbacks.get(sid)
+        if fb is not None and fold.ts(fb.get("ts")) >= fold.ts(e.get("ts")):
+            e = {**e, "backend": fb.get("to_backend")}
+        if e["type"] == "spawn-started" or e.get("backend") == "seat":
+            yield sid, e
+
+
+def pending_packets(events, root=None, *, served_by="relay"):
+    """Seats whose packet was written and whose answer has not come back — the SPAWN
+    rule, not the file rule: the packet exists, the `.output.json` does not, and the
+    start has no wrapper TERMINAL event after it (the set tick.in_flight uses).
+    Starts include spawn-started and build-started on the seat backend, including
+    backend-fallback to seat. Claimed packets are already being served. A packet
+    on disk with no start is not pending — nothing was dispatched.
+
+    `served_by` (L-charter-0042 R5c) filters by `SERVERS`: `None` means no
+    filter — every pending row, whatever its role; any other value (the default,
+    `"relay"`) keeps only rows whose SERVERS entry matches. build-started has
+    the implicit role builder; spawn-started carries its own role field."""
+    seat = pathlib.Path(root or fold.ROOT) / "seat"
+    started, terminal = dict(_packet_starts(events)), {}
+    for e in events:
+        sid = e.get("spawn")
+        if not sid:
+            continue
+        if e.get("type") in TERMINAL:
             terminal[sid] = e
     out = []
     for sid, e in sorted(started.items()):
         t = terminal.get(sid)
         if t is not None and fold.ts(t.get("ts")) >= fold.ts(e.get("ts")):
             continue
-        if not (seat / f"{sid}.packet.md").is_file() or (seat / f"{sid}.output.json").exists():
+        if not (seat / f"{sid}.packet.md").is_file() or (seat / f"{sid}.output.json").exists() \
+                or (seat / f"{sid}.claimed").exists():
             continue
-        if served_by is not None and SERVERS.get(e.get("role", ""), "relay") != served_by:
+        role = "builder" if e["type"] == "build-started" else e.get("role", "")
+        if served_by is not None and SERVERS.get(role, "relay") != served_by:
             continue
         out.append({"spawn": sid,
                     "age_min": (fold.NOW - fold.ts(e.get("ts"))).total_seconds() / 60.0})
@@ -401,15 +429,11 @@ def pending_packets(events, root=None, *, served_by="relay"):
 
 # ── unserved seats: a dispatched packet nobody claimed ───────────────────────
 
-# The terminal set `pending_packets` and `tick.in_flight` already use — named here
-# rather than re-derived, so a fourth definition of "resolved" never appears.
-TERMINAL = {"spawn-done", "spawn-failed", "spawn-stale"}
-
-
 def unserved(events, root=None, since_h=24):
     """R6/L-spec-0189: one `{spawn, role, subject, age_min, status}` row per
     seat-backend start event (`spawn-started{backend:"seat"}` for every role but the
-    builder, `build-started{backend:"seat"}` for it — `role` is read off the event's
+    builder, `build-started{backend:"seat"}` for it, including backend-fallback to
+    seat — `role` is read off the event's
     own `role` field for the former, and is the literal `"builder"` for the latter,
     the only role `main()` ever emits `build-started` for) whose claim window has
     elapsed with no claim file ever landing on disk.
@@ -441,15 +465,14 @@ def unserved(events, root=None, since_h=24):
     `"stale-still-offered"` instead."""
     root = pathlib.Path(root or fold.ROOT)
     claim_sec = int(os.environ.get("DOIT_SEAT_CLAIM_SEC", 300))
-    starts, terminal, seat_stale = {}, {}, {}
+    starts = {sid: e for sid, e in _packet_starts(events) if e.get("backend") == "seat"}
+    terminal, seat_stale = {}, {}
     for e in events:
         sid = e.get("spawn")
         if not sid:
             continue
         t = e.get("type")
-        if t in ("spawn-started", "build-started") and e.get("backend") == "seat":
-            starts[sid] = e
-        elif t in TERMINAL:
+        if t in TERMINAL:
             terminal[sid] = e
         elif t == "seat-stale":
             seat_stale[sid] = e
