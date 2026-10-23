@@ -152,7 +152,6 @@ def shape(events, states, queue_rows, rule_rows, classified, priorities, now, *,
         since = utc(row.get('since'))
         stuck.append(dict(item(sid), rule=row['rule'], reason=plain(row.get('action') if row.get('reason') == 'condition met' else row.get('reason')), limit_min=row['limit_min'],
                           idle_min=max(0, (now - since).total_seconds() / 60) if since else None))
-    active_roles = {r['spec']: r.get('owner', 'worker') for r in classified if r.get('bucket') == 'queued' and 'owns active dispatch' in r.get('reason', '')}
     shelf = {'held': [], 'ready': [], 'other': []}
     for sid, state in states.items():
         if state != 'written':
@@ -162,26 +161,22 @@ def shape(events, states, queue_rows, rule_rows, classified, priorities, now, *,
             shelf['held'].append(row)
         elif sid in waiting_human:
             shelf['other'].append(dict(row, stage='waiting on a ruling'))
-        elif sid in active_roles:
-            shelf['other'].append(dict(row, stage=active_roles[sid] + ' already dispatched'))
         else:
             shelf['ready'].append(row)
     midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
     # Queue occupancy is reconstructed at midnight and now; removals/requeues
     # affect trend even if the number of merges/intakes happens to be equal.
-    start_queue, end_queue = set(), set()
+    start_queue = set()
     for e in events:
-        before = utc(e['ts']) < midnight
+        if utc(e['ts']) >= midnight:
+            break
         if e.get('type') == 'queue-add' or e.get('type') == 'merge-gate-clean' or e.get('type') == 'review' and e.get('n_blocking') == 0:
-            end_queue.add(e['subject'])
-            if before: start_queue.add(e['subject'])
+            start_queue.add(e['subject'])
         elif e.get('type') in {'queue-remove', 'shipped', 'spec-killed', 'spec-closed', 'build-started', 'build-blocked', 'merge-conflict', 'window-dropped'} or e.get('type') == 'review' and e.get('n_blocking') != 0:
-            end_queue.discard(e['subject'])
-            if before: start_queue.discard(e['subject'])
+            start_queue.discard(e['subject'])
         elif e.get('type') == 'window-verified':
-            end_queue.difference_update(e.get('kept') or [])
-            if before: start_queue.difference_update(e.get('kept') or [])
-    delta = len(end_queue) - len(start_queue)
+            start_queue.difference_update(e.get('kept') or [])
+    delta = len(queued) - len(start_queue)
     return dict(at=now.isoformat(timespec='seconds'), error=None, next=next_merges, median_window_min=median,
                 eta_note='Rough merge ETA = queue position × median completed window in the last 24 h; deployment is additional.',
                 priorities=[dict(name=name, specs=[item(s) for s in ids]) for name, ids in priorities.items()],
