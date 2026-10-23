@@ -36,8 +36,9 @@ DEFAULTS = {
     # `push_origin.py`) so `_check_origin_behind` shares the identical
     # defaults without importing `push_origin` at module scope (Constraints:
     # `push_origin` imports `look`, so the reverse import stays lazy).
-    "push": {"projects": ["do-it-v2", "albert-scott"],
-             "main": {"do-it-v2": "main", "albert-scott": "master"}},
+    "push": {"projects": ["do-it-v2", "albert-scott", "do-it-v2-realm"],
+             "main": {"do-it-v2": "main", "albert-scott": "master", "do-it-v2-realm": "realm"},
+             "path": {}},
 }
 _PASS_LOCKED = False   # True only while `run()` holds `look.lock` (skip re-locking, SD22)
 _DRY_RUN = False
@@ -58,7 +59,16 @@ def load_toml(toml_path=None):
             "ci": doc["ci"] if "ci" in doc else DEFAULTS["ci"],
             "classes": doc.get("classes") or DEFAULTS["classes"],
             "push": {"projects": push_doc.get("projects") or DEFAULTS["push"]["projects"],
-                     "main": {**DEFAULTS["push"]["main"], **(push_doc.get("main") or {})}}}
+                     "main": {**DEFAULTS["push"]["main"], **(push_doc.get("main") or {})},
+                     "path": push_doc.get("path") or {}}}
+
+
+def push_checkout(cfg, name):
+    """Resolve the checkout shared by the push pass and origin-behind alarm."""
+    path = ((cfg.get("push") or {}).get("path") or {}).get(name)
+    return pathlib.Path(path) if path else fold.ROOT / "repos" / name
+
+
 class Runner:
     """Real subprocess/shutil default; a test swaps the whole boundary (AC1)."""
     def ssh(self, target, cmd, timeout):
@@ -762,7 +772,7 @@ def _check_origin_behind(cfg, runner, now, deadline, events, root, briefs, answe
         branch = mains.get(project)
         if not branch:
             continue
-        repo = fold.ROOT / "repos" / project
+        repo = push_checkout(cfg, project)
         bad, details, und = _origin_behind_reading(runner, now, deadline, repo, branch)
         if und:
             _fire_undetermined("origin-behind", events, root, briefs)

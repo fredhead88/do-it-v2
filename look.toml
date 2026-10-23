@@ -54,11 +54,15 @@ workflows = []   # empty -> every distinct workflow name a push to `branch` ran,
 
 # L-charter-0042/L-spec-0484, R13(c): the tick's push pass (push_origin.py)
 # and look's own origin-behind alarm. `main` maps a project name to the
-# branch a `shipped` sha is pushed onto; a project with no entry here
+# branch the local tip is pushed onto; a project with no entry here
 # resolves it from `origin/HEAD` at push time instead (push_origin.targets).
 [push]
-projects = ["do-it-v2", "albert-scott"]
+projects = ["do-it-v2", "albert-scott", "do-it-v2-realm"]
 
 [push.main]
 do-it-v2 = "main"
 albert-scott = "master"
+do-it-v2-realm = "realm"
+
+[push.path]
+do-it-v2-realm = "/home/albert/do-it-v2-realm"
