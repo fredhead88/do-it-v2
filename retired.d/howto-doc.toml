@@ -1,0 +1,6 @@
+[[retired]]
+name = "hand-maintained system counts"
+kind = "doc"
+pattern = 'thirteen contracts, ten Output schemas|thirteen role contracts|~580 checks'
+regex = true
+paths = ["README.md", "docs/**/*.md", "agents/*.md"]
