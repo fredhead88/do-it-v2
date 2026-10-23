@@ -37,7 +37,7 @@ import time
 import urllib.parse
 import urllib.request
 
-import realm_omens, realm_codex, realm_ledger
+import realm_omens, realm_codex, realm_ledger, realm_glance
 
 ROOT = pathlib.Path(os.environ.get("DOIT_ROOT", pathlib.Path.home() / ".do-it"))
 EVENTS, SEAT = ROOT / "events", ROOT / "seat"
@@ -265,6 +265,37 @@ def codex_payload(raw=None):
     if sessions is None:
         return realm_codex.payload(raw)
     return realm_codex.payload(raw, ledger_projection=sessions)
+
+
+_GLANCE = {"key": None, "value": None, "lock": threading.Lock()}
+
+
+def glance_payload(now=None):
+    """Cached read-only projection, using the live checkout's hold/answer rules."""
+    now = now or dt.datetime.now(dt.timezone.utc)
+    with _GLANCE["lock"]:
+        try:
+            config = HERE.parent / "realm_priorities.json"
+            priorities = realm_glance.load_priorities(config)
+            with ledger_snapshot(now) as (live_fold, events, folded):
+                key = (LEDGER.key, LEDGER.generation, int(now.timestamp() // 30), config.stat().st_mtime_ns)
+                if key == _GLANCE["key"]:
+                    return _GLANCE["value"]
+                import lane_rules
+                specs, by_subject = folded[0], folded[3]
+                rules = lane_rules.due(events, specs, now)
+                active = {s: v for s, v in specs.items() if v['state'] not in realm_glance.FINISHED
+                          and not v['state'].startswith('shipped')}
+                classified = live_fold.stall_rows(events, active, now=now, by_subject=by_subject,
+                                                  dwell={v['state']: -1 for v in active.values()})
+                admitted = [e for e in events if live_fold.admits(e, e.get('actor', '')) is None]
+                value = realm_glance.shape(admitted, [(s, v['state']) for s, v in specs.items()],
+                                           rules, classified, priorities, now,
+                                           needs=live_fold.open_escalations(events), answered=live_fold.answered(events))
+            _GLANCE.update(key=key, value=value)
+            return value
+        except Exception as ex:
+            return {"at": now.isoformat(timespec="seconds"), "error": "What matters is unavailable (" + type(ex).__name__ + ")"}
 
 
 def role_stats(raw):
@@ -1249,7 +1280,7 @@ def bootstrap(hours, states=None, goals=None, proving=None, now=None):
         proving = derive_proving()
     _, spec_ch_now = charter_index(raw)
     metrics_now = metrics_at(rows, states, claims, now, sys_signals(), None, spec_ch_now)
-    return {**lane_payload(now), "codex": codex_payload(raw), "live": True, "now": now.isoformat(timespec="seconds"), "root": str(ROOT), "metrics": metrics_now,
+    return {"glance": glance_payload(now), **lane_payload(now), "codex": codex_payload(raw), "live": True, "now": now.isoformat(timespec="seconds"), "root": str(ROOT), "metrics": metrics_now,
             "window": [window_rows[0]["t"] if window_rows else now.isoformat(timespec="seconds"), now.isoformat(timespec="seconds")],
             "ledger_start": rows[0]["t"] if rows else None, "n_events": len(raw), "events": window_rows,
             "stats": role_stats(raw), "states": states, "goals": goals, "proving": proving,
@@ -1565,6 +1596,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not HUB.states:
                 HUB.states = derive_states() or HUB.states
             self._json(omens_model(HUB.states))
+        elif u.path == "/api/glance":
+            self._json(glance_payload())
         elif u.path == "/api/states":
             st = derive_states()
             if st is not None:
