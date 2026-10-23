@@ -627,6 +627,7 @@ REQUIRED["operator-alert"] = ("kind", "sent", "detail")
 # equals the rendered title set exactly — the ratchet against a future block()
 # call with no matching entry.
 BOARD_OWNERS = {
+    "NEXT": ("executor", "derived: nextstep.next_steps recomputes each item and its owner"),
     "NEEDS YOU": ("executor", ("decision", "unblocked")),
     "BLOCKED": ("operator", ("unblocked",)),
     "WRITTEN, NOT PICKED UP": ("executor", ("build-started", "spec-killed")),
@@ -923,7 +924,7 @@ class Closable(dict):
     in `fold`". Landing a bare 5-key dict there does not raise a shape error a
     reader could act on — it either unpacks to three KEY STRINGS (every one
     truthy: a charter would silently leave the lane) or dies with a ValueError in
-    `tick.lane()`. Neither is a report.
+    the Step reader. Neither is a report.
 
     So the positional read exists and is FOLDED EXACTLY as `closable_fallback`
     folds it — `owed_within_k` rides with `all_accepted`, `no_open_briefs` rides
@@ -1020,8 +1021,8 @@ def closable(events, charter):
     state through the same `_closable`, so this can never drift from the board.
 
     `charter` is the charter ID, matching every other id-taking function in this
-    file — or one of `fold()`'s own charter dicts, which is what the landed
-    `tick.lane()` passes and what `tick.closable_fallback` already accepts
+    file — or one of `fold()`'s own charter dicts, which is what the Step
+    reader accepts and what `tick.closable_fallback` already accepts
     (`charter["id"] if isinstance(charter, dict) else charter`). Taking both is
     the reconciliation, not a second signature: an unhashable dict reaching
     `charter in charters` is a TypeError inside the fold, which is the least
@@ -1737,6 +1738,33 @@ def _needs_you_sort_key(r):
     return (-r["age_days"], r.get("subject", "?"), json.dumps(content, sort_keys=True, default=str))
 
 
+def step_row(step, limits, now):
+    """Map a Step to the legacy dwell row; an unknown age is always overdue."""
+    import lane_rules
+    reason = step.reason
+    if step.state == 'hold':
+        rule = ('undetermined' if reason.startswith('undetermined:') else
+                'dependency-held' if reason.startswith('held:') else
+                'wave-held' if reason.startswith('wave') else 'idle')
+    else:
+        rule = 'gate' if step.action == 'merge-gate' else step.action
+    limit = 0 if rule == 'undetermined' else limits[rule]['limit_min']
+    try:
+        overdue = (now - lane_rules._time(step.since)).total_seconds() > limit * 60
+    except (ValueError, TypeError, OverflowError):
+        rule, limit, overdue = 'undetermined', 0, True
+    return dict(spec=step.item, rule=rule, since=step.since, reason=reason,
+                action=step.action or 'none', limit_min=limit, overdue=overdue,
+                reason_live=step.owner in {'tick', 'relay', 'sweeper'} and step.trigger is not None)
+
+
+def _step_line(value):
+    """Ledger text cannot add a physical board line or a field separator."""
+    import unicodedata
+    return ' '.join(''.join(' ' if unicodedata.category(c).startswith('C') else c
+                            for c in str(value)).replace(' · ', ' / ').split())
+
+
 def render(events, specs, charters, ignored, by_subject):
     looked = max((ts(e["ts"]) for e in events if e.get("type") == "observed"),
                  default=datetime.min.replace(tzinfo=timezone.utc))
@@ -1806,6 +1834,16 @@ def render(events, specs, charters, ignored, by_subject):
         L.append(f"## {title} ({len(rows)}){note}")
         L.extend("  " + r for r in rows)
         L.append("")
+
+    try:
+        import tick
+        steps = tick._steps(events, specs, NOW)
+        next_rows = [' · '.join(_step_line(value) for value in
+                     (step.item, step.action if step.state == 'action' else 'hold', step.owner, step.reason))
+                     for step in steps]
+    except Exception as exc:
+        next_rows = ['undetermined: next_steps failed: ' + type(exc).__name__]
+    block('NEXT', next_rows)
 
     # TRIAGE — L-charter-0033/board-owners, Target 2: a requirement-less brief
     # (the Thinker's inbox, not a charter's — the mirror of open_briefs' in-scope

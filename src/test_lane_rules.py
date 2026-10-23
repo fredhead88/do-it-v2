@@ -22,6 +22,7 @@ import dispatch
 import fold
 import tick
 import lane_rules as lr
+import nextstep as ns
 
 ROOT = Path(__file__).resolve().parent.parent
 NOW = dt.datetime(2026, 10, 18, 14, tzinfo=dt.timezone.utc)
@@ -125,15 +126,17 @@ class LaneRulesTests(unittest.TestCase):
 
     def test_table_load(self):
         table = lr.load()
-        self.assertEqual(set(table), set(NAMES))
-        self.assertEqual(len(table), len(lr.PREDICATES))
+        self.assertEqual(set(table), set(NAMES) | {'sweep-check'})
+        self.assertEqual(len(table), len(ns.PREDICATES) + 1)
+        self.assertEqual(table['sweep-check'], dict(name='sweep-check', action='sweep-check',
+                                                  actor='tick', limit_min=120))
         for name, actor, limit, action in zip(NAMES, ACTORS, LIMITS, ACTIONS):
             self.assertEqual(table[name], dict(name=name, actor=actor, limit_min=limit, action=action))
             print(name, actor, limit)
         original = (ROOT / 'lane_rules.toml').read_text()
         bads = [None, 'bad = [', original.replace('limit_min = 30', '', 1),
                 original.replace('limit_min = 30', 'limit_min = "30"', 1),
-                original.replace('name = "build"', 'name = "unknown"', 1)]
+                original.replace('name = "build"', 'name = "bogus"', 1)]
         for i, body in enumerate(bads):
             path = self.root / f'bad-{i}.toml'
             if body is not None:
@@ -141,10 +144,16 @@ class LaneRulesTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 lr.load(path)
             print('ValueError', path.name)
-        with patch.dict(lr.PREDICATES, extra=lambda c: None):
-            with self.assertRaises(ValueError):
-                lr.load()
-        print('ValueError predicate without row')
+        path = self.root / 'unknown-key.toml'
+        path.write_text(original.replace('limit_min = 30', 'limit_min = 30\nextra = true', 1))
+        with self.assertRaises(ValueError):
+            lr.load(path)
+        self.assertEqual(set(table), lr.NAMES)
+        self.assertFalse(any(hasattr(lr, name) for name in
+                             ('_build', '_grade', '_review', '_rebuild', '_regrade',
+                              '_gate', '_enqueue', '_merge', '_hold', '_idle',
+                              '_close', '_clean_review', '_wave_held', '_dependency_held')))
+        print('ValueError unknown key; eligibility retired')
 
     def test_ruled_capability_release_does_not_regrade(self):
         cap = 'capability:unknown:' + SID
@@ -340,13 +349,13 @@ class LaneRulesTests(unittest.TestCase):
         for minute in (-65, -55):
             ev = fixture('rebuild') + [event('shipped', minute, actor='executor')]
             self.assertFalse(any(r['rule'] == 'rebuild' for r in self.rows(ev)))
-            self.assertIsNone(lr._rebuild(dict(evs=ev, spec={'state': 'reviewing'})))
+            self.assertIsNone(ns._rebuild(dict(evs=ev, spec={'state': 'reviewing'})))
         for state in dispatch.SETTLED_STATES:
             with self.subTest(state=state):
                 ev = fixture('rebuild')
                 s = {SID: dict(state=state, evs=ev)}
                 self.assertFalse(any(r['rule'] == 'rebuild' for r in lr.due(ev, s, NOW)))
-                self.assertIsNone(lr._rebuild(dict(evs=ev, spec=s[SID])))
+                self.assertIsNone(ns._rebuild(dict(evs=ev, spec=s[SID])))
 
     def test_dependency_hold_suppresses_builder_and_grader_rules_until_released(self):
         blocked = event('build-blocked', -70, actor='builder', _src='builder:1',
@@ -398,10 +407,6 @@ class LaneRulesTests(unittest.TestCase):
     def test_legacy_grader_and_dead_builder_grader_respect_dependency_hold(self):
         hold = event('dependency-hold', -65, waits_for=TARGET, why='needs producer')
         base = fixture('grade') + [event('decision', -60, actor='thinker', ref='builder:2')]
-        self.assertEqual(len(autodispatch.grader_candidates(base, specs(base), NOW)), 1)
-        self.assertEqual(autodispatch.grader_candidates(base + [hold], specs(base), NOW), [])
-        self.assertEqual(len(autodispatch.grader_candidates(
-            base + [hold, event('unblocked', -55)], specs(base), NOW)), 1)
         for role in ('builder', 'grader'):
             with self.subTest(role=role):
                 spawn = 'L-' + role + '-9001'
@@ -446,7 +451,7 @@ class LaneRulesTests(unittest.TestCase):
             row = self.row(ev, 'grade', now=since + dt.timedelta(seconds=seconds))
             self.assertEqual(row['overdue'], overdue)
             print('boundary', seconds, overdue)
-        with patch.dict(lr.PREDICATES, grade=lambda c: 1 / 0):
+        with patch.dict(ns.PREDICATES, grade=lambda c: 1 / 0):
             row = self.row(ev, 'grade')
             self.assertTrue(row['overdue'])
             self.assertFalse(row['reason_live'])

@@ -147,10 +147,21 @@ class ActionableTests(unittest.TestCase):
             events.append(event('decision', 'lane-stale:' + sid, actor='thinker',
                                 why=f'Not stuck: {sid} is reviewed and already enqueued in window c31; '
                                     'it waits only for the queue ahead.'))
-        rows = [dict(spec=sid, rule='idle', action='none', actor='thinker', overdue=True,
-                     reason_live=False, reason='condition met', since=events[0]['ts'], limit_min=60)
-                for sid in ids + ['L-spec-9002']]
-        with patch.object(stuck_digest.lane_rules, 'due', return_value=rows):
+        from dataclasses import replace
+        from nextstep import Step
+        steps = [Step(sid, 'spec', 'merging', 'action', 'merge', 'tick',
+                      'fixture:1', 'waiting to merge', None, events[0]['ts']) for sid in ids]
+        steps.append(Step('L-spec-9002', 'spec', 'planned', 'hold', None, 'tick',
+                          'fixture:2', 'held: prerequisite', 'prerequisite shipped', events[0]['ts']))
+        rows = [stuck_digest.fold.step_row(step, stuck_digest.lane_rules.load(), NOW) for step in steps]
+
+        def held(sid, owner='executor', reason='judgment required'):
+            return [replace(step, state='hold', action=None, owner=owner, trigger=None,
+                            reason=reason, clears='decision') if step.item == sid else step for step in steps]
+
+        snapshots = [steps, held(ids[0]), held('L-spec-1250'), held(ids[0]),
+                     held(ids[1], 'operator', 'Please approve the production change.'), steps]
+        with patch.object(stuck_digest.tick, '_steps', side_effect=snapshots):
             obj = stuck_digest.build(events, NOW)
             self.assertEqual(obj['rows'], rows)  # raw audit evidence retained
             self.assertEqual(obj['action_rows'], [])

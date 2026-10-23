@@ -19,6 +19,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import crons
 import fold
 import lane_rules
+import nextstep
+import tick
 import owed_digest
 import stuck_digest as digest
 
@@ -28,7 +30,8 @@ NOW = datetime(2026, 10, 18, 6, 15, tzinfo=timezone.utc)
 def fixture():
     def ev(kind, spec, minutes, actor='planner', **kv):
         return dict(type=kind, subject=spec, actor=actor,
-                    ts=(NOW - timedelta(minutes=minutes)).isoformat(), **kv)
+                    ts=(NOW - timedelta(minutes=minutes)).isoformat(),
+                    _src=f'L-{actor}-fixture.jsonl:{spec}:{kind}', **kv)
     return [ev('spec-written', 'L-spec-9001', 90, project='fixture'),
             ev('build-done', 'L-spec-9001', 89, actor='builder', status='DONE'),
             ev('escalation-blocking', 'L-spec-9001', 80, actor='operator',
@@ -83,24 +86,46 @@ class DigestTests(unittest.TestCase):
         obj = digest.build(ev, NOW)
         self.assertEqual(set(obj), {'date', 'stuck_count', 'listed', 'live_reason_count', 'rows', 'action_rows', 'waiting_rows'})
         self.assertEqual((obj['stuck_count'], obj['listed'], obj['live_reason_count']), (2, 2, 1))
-        rows = lane_rules.due(ev, fold.fold(ev)[0], NOW)
+        steps = tick._steps(ev, fold.fold(ev)[0], NOW)
+        rows = [fold.step_row(step, lane_rules.load(), NOW) for step in steps]
         self.assertEqual(obj['rows'], sorted([r for r in rows if r['overdue']], key=lambda r: (r['spec'], r['rule'])))
+        limits = lane_rules.load()
         with patch.object(digest, 'datetime') as wall:
             wall.now.side_effect = AssertionError('wall clock read')
             with patch('pathlib.Path.open', side_effect=AssertionError('file read')), patch.dict(os.environ, {}, clear=True):
                 # The rule table is inherited by due(); build itself reads no files.
-                with patch.object(lane_rules, 'due', return_value=rows):
+                with patch.object(tick, '_steps', return_value=steps), patch.object(lane_rules, 'load', return_value=limits):
                     self.assertEqual(digest.build(ev, NOW), obj)
         self.assertEqual(digest.build([], NOW), dict(date='2026-10-18', stuck_count=0, listed=0, live_reason_count=0, rows=[], action_rows=[], waiting_rows=[]))
         self.assertEqual(digest.build([], NOW.astimezone(timezone(timedelta(hours=-8))))['date'], obj['date'])
+        from dataclasses import replace
+        base = nextstep.Step('L-spec-9495:AC1', 'check', 'live', 'action', 'sweep-check',
+                             'tick', 'fixture:1', 'owed check due', None,
+                             (NOW - timedelta(minutes=121)).isoformat())
+        owned = [replace(base, item=f'item-{owner}', owner=owner) for owner in
+                 ('operator', 'thinker', 'executor', 'tick', 'relay', 'sweeper')]
+        owned += [replace(base, item='fresh', since=NOW.isoformat()),
+                  replace(base, item='bad-age', since='bad', owner='executor')]
+        with patch.object(tick, '_steps', return_value=owned):
+            classified = digest.build([], NOW)
+        self.assertEqual(classified['stuck_count'], 7)
+        self.assertEqual({r['owner'] for r in classified['action_rows']}, {'operator', 'thinker', 'executor'})
+        self.assertEqual(len(classified['waiting_rows']), 3)
+        self.assertTrue(all(r['waiting_for'] == 'active' for r in classified['waiting_rows']))
+        self.assertEqual(next(r for r in classified['rows'] if r['spec'] == 'bad-age')['rule'], 'undetermined')
         self.evidence = obj
 
     def test_ac2(self):
         with patch.object(lane_rules, 'DEFAULT_TABLE', self.root / 'unreadable.toml'):
+            with self.assertRaises(ValueError):
+                digest.build(fixture(), NOW)
+        with patch.object(nextstep, 'next_steps', return_value=[nextstep.Step(
+                f'L-spec-{n}', 'spec', 'planned', 'hold', None, 'executor', None,
+                'undetermined: table unavailable', 'valid rules', '') for n in range(3)]):
             obj = digest.build(fixture(), NOW)
         self.assertEqual(obj['stuck_count'], 3)
         self.assertTrue(all(r['reason'].startswith('undetermined:') and not r['reason_live'] for r in obj['rows']))
-        for module, name in [(lane_rules, 'due'), (fold, 'read_events')]:
+        for module, name in [(tick, '_steps'), (fold, 'read_events')]:
             before = self.snapshot()
             with patch.object(module, name, side_effect=RuntimeError('read unavailable')), contextlib.redirect_stderr(io.StringIO()) as err:
                 self.assertNotEqual(self.run_digest(send=True), 0)
@@ -112,10 +137,61 @@ class DigestTests(unittest.TestCase):
         self.evidence = dict(undetermined=obj, failure_side_effects=False, telegrams=self.sent)
 
     def test_ac3(self):
+        # Captured from the pre-migration renderer on this equivalent row set.
+        pinned_md = '''# Stuck digest — 2026-10-18
+
+## STUCK
+stuck: 2 (live reason: 1)
+Raw overdue timers for audit; waiting and stalled work are listed separately below.
+- spec: L-spec-9401; rule: idle; action: none; since: 2026-10-18T03:15:00+00:00; limit_min: 60; reason: judgment required; not-live
+- spec: L-spec-9402; rule: merge; action: merge; since: 2026-10-18T03:15:00+00:00; limit_min: 120; reason: merge in progress; live
+
+## NEXT ACTIONS
+
+Thinker: choose and start the next step. No reply needed from you. [L-spec-9401]
+Waiting their turn to merge. No reply needed from you. [L-spec-9402]
+Waiting to merge, on a dependency, or on work in progress: 1 rows.
+
+## OWED
+- waiting: 0
+- due: 0
+- blocked: 0
+- failed: 0
+- correcting: 0
+- quarantined: 0
+- met: 0
+- waived: 0
+- expired: 0
+- dropped: 0
+- unshipped: 0
+- unverifiable: 0
+
+Blocked causes: none
+
+Sweep: {"consecutive_failed": 0, "failed_24h": 0, "last_batched_at": null, "runs_24h": 0}
+M1: {"sweep_failed_one_row_24h": 0, "terminal_unobservable": 0, "verify_unbuildable": 0}
+
+## HEALTH ALARMS
+none
+'''
+        pinned_telegram = ('Nothing needs you today.\n'
+                           '1 finished spec is waiting its turn to merge.\n'
+                           '1 spec is stuck and the Thinker is on it.')
+        steps = [nextstep.Step('L-spec-9401', 'spec', 'planned', 'hold', None,
+                              'executor', None, 'judgment required', 'decision', '2026-10-18T03:15:00+00:00'),
+                 nextstep.Step('L-spec-9402', 'spec', 'merging', 'action', 'merge',
+                              'tick', 'fixture:1', 'merge in progress', None, '2026-10-18T03:15:00+00:00')]
+        with patch.object(tick, '_steps', return_value=steps), patch('health_alarms.summary_lines', return_value=[]):
+            pinned = digest.build([], NOW)
+            self.assertEqual(digest.render_md(pinned, [], NOW), pinned_md)
+            self.assertEqual(digest.render_telegram(pinned), pinned_telegram)
         ev = fixture()
-        rows = digest.build(ev, NOW)['rows']
-        rows[0] = dict(rows[0], reason='first\nsecond\rthird')
-        with patch.object(lane_rules, 'due', return_value=rows), patch('health_alarms.summary_lines', return_value=['alarm\nline']):
+        from dataclasses import replace
+        steps = tick._steps(ev, fold.fold(ev)[0], NOW)
+        steps[0] = replace(steps[0], reason='first\nsecond\rthird')
+        rows = [fold.step_row(step, lane_rules.load(), NOW) for step in steps
+                if step.state == 'hold' or fold.step_row(step, lane_rules.load(), NOW)['overdue']]
+        with patch.object(tick, '_steps', return_value=steps), patch('health_alarms.summary_lines', return_value=['alarm\nline']):
             self.assertEqual(self.run_digest(), 0)
             path = self.root / 'content/L-stuck-digest-2026-10-18.md'
             text = path.read_text()

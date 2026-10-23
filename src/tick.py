@@ -23,7 +23,6 @@ import carry, dispatch, fold, intake, notes, pane_resume, panes, tree_cleanup  #
 # (R1) takes it back out: a dedicated sweeper (`doit sweep-owed`) now runs every
 # owed observation in batches, off the Executor's own five-minute lane pass, so
 # a due-but-unswept criterion is no longer this lane's to surface.
-ACTIONABLE = {"written", "graded", "reviewing", "shipped"}
 # §10.5's RETIRE list, verbatim — every pane launcher denies it by name (D119).
 # NOT dead with the spawn path: fold.caps(), think.pane_cmd() and up.pane_cmd() read these.
 RETIRE = ("subagent-driven-development", "executing-plans", "writing-plans", "requesting-code-review",
@@ -243,97 +242,6 @@ def _carry_packet_busy(busy):
         if m:
             out.add(m.group(1).strip())
     return out
-
-
-def _dispatchable_stale_note(s):
-    """L-charter-0042/L-spec-0427 R1, SD3: a `written` spec belongs on the
-    lane only when it carries a standing `autodispatch-failed` — newer than
-    its own newest `spec-written`/`decision`/`unblocked`/`dependency-hold` — for the Executor
-    to diagnose; the tick itself dispatches everything else (`autodispatch.
-    run`, called from `_record()` below). A tiny per-spec filter, duplicated
-    here rather than imported from `autodispatch` (which itself imports
-    `tick` — a cycle)."""
-    evs = s.get("evs") or []
-    fails = [e for e in evs if e.get("type") == "autodispatch-failed"]
-    if not fails:
-        return False
-    fail_ts = max(fold.ts(e.get("ts")) for e in fails)
-    clearers = [e for e in evs if e.get("type") in ("spec-written", "decision", "unblocked", "dependency-hold")]
-    clear_ts = max((fold.ts(e.get("ts")) for e in clearers), default=None)
-    return clear_ts is None or fail_ts > clear_ts
-
-
-def lane(specs, charters, busy=frozenset(), reaped=frozenset(), events=(), inbound=()):
-    """A charter that is CLOSED and not yet reaped is still the Executor's.
-
-    §4.11's reaper refuses any charter that is not `L2-complete` or `retracted`,
-    and this lane admitted only `L1-complete` — so the moment a charter became
-    reapable it left the lane, and `doit reap` was unreachable by any tick. Found
-    closing L-charter-0002 (2026-09-08): the charter-reviewer returned complete,
-    the fold derived L2 in the same fold, and the tick went idle with two
-    worktrees standing. L-charter-0001 had been `retracted` since August with its
-    worktree still on disk for the same reason — the sixth defect invisible to a
-    passing suite, because nothing tested the lane past L1.
-
-    A charter at `L1-complete` whose `closable()` reads all-accepted, fixpoint
-    derived and no review owed is NOT on the lane (R11): there is no decision left
-    for the Executor to take, the fold moves it to `L2-complete` on its own, and it
-    comes back here once — for the reap. One with a review still owed appears
-    exactly as before, because dispatching the charter-reviewer IS the Executor's
-    judgment to make.
-
-    A spec's presence never depends on any charter (R6): a `charter: null` spec is
-    on the lane on its own terms, and no charter's state, closability or absence
-    from `charters` can take it off.
-
-    L-spec-0190 R9: `inbound` is `carry.uncarried()`'s own list of
-    `{source, kind, registered_at, attempts, last_error}` dicts. One
-    `"inbound:<source> · uncarried"` row lands per item whose `source` is
-    neither in `busy` (a direct subject match on an open `escalation-blocking`
-    — `in_flight()`'s existing behavior, unchanged) nor the target of a
-    packet-detected in-flight carry (`_carry_packet_busy`, fix 5)."""
-    def waiting(c):
-        if c["state"] in tree_cleanup.CLOSED:
-            return c["id"] not in reaped
-        # L-charter-0046/fold-proving-state (L-spec-0472), R5/SD8: a Proving or
-        # Reopened charter stays on the Executor's lane exactly when it has an
-        # executor-owned remaining item (a sweep, a brief, a review, a spec
-        # awaiting grade/review) — never on an owed-sweeper/thinker/operator-
-        # owned one alone.
-        if c["state"] in ("proving", "reopened"):
-            items = (c.get("proving") or {}).get("items", [])
-            return any(i["owner"] == "executor" for i in items)
-        if c["state"] != "L1-complete":
-            return False
-        if not events:
-            return True      # nothing to judge closability from: the charter stays the Executor's
-        accepted, fixpoint, review_owed = (getattr(fold, "closable", None) or closable_fallback)(events, c)
-        return not (accepted and fixpoint and not review_owed)
-
-    def charter_row(c):
-        if c["state"] in ("proving", "reopened"):
-            items = (c.get("proving") or {}).get("items", [])
-            kind = next((i["kind"] for i in items if i["owner"] == "executor"), None)
-            return f"{c['id']} · {c['state']} · {kind}"
-        return f"{c['id']} · {c['state']}"
-
-    def dependency_held(s):
-        evs = s.get("evs") or []
-        if not any(e.get("type") == "dependency-hold" for e in evs):
-            return False
-        # Import only for holds at call time: autodispatch itself imports tick.
-        from autodispatch import held_by_dependency
-        return held_by_dependency(evs, events) is not None
-
-    packet_busy = _carry_packet_busy(busy)
-    return sorted([f"{s['id']} · {s['state']}" for s in specs.values()
-                   if s["state"] in ACTIONABLE and s["id"] not in busy
-                   and (s["state"] != "written" or (_dispatchable_stale_note(s)
-                        and not dependency_held(s)))]
-                  + [charter_row(c) for c in charters.values()
-                     if c["id"] not in busy and waiting(c)]
-                  + [f"inbound:{i['source']} · uncarried" for i in inbound
-                     if i.get("source") not in busy and i.get("source") not in packet_busy])
 
 
 ROUTINE_ROLES = dict(build='builder', grade='grader', review='reviewer',
@@ -656,8 +564,8 @@ def _record():
     except Exception as e:
         proving_error = f"{e}"
     # L-charter-0042/L-spec-0427, R1: the tick dispatches. LAST guarded step
-    # before `todo = lane(...)`, on the SAME `ev`/`specs` — no re-read sits
-    # between here and `lane()` (Boundaries), so an event `run()` appends
+    # before the Executor rows are read, on the SAME `ev`/`specs` — no re-read sits
+    # between here and Steps (Boundaries), so an event `run()` appends
     # this pass never changes THIS pass's own `todo`. A raise never stops the
     # tick's own heartbeat, exactly like `carry_error` above.
     autodispatch_error = None
@@ -703,7 +611,16 @@ def _record():
             worktrees_retained = len(wt_retained)
     except Exception as e:
         worktree_reap_error = f"{e}"
-    todo = lane(specs, charters, in_flight(ev), reaped, events=ev, inbound=inbound)
+    try:
+        todo = [f"{step.item} · {step.action or 'hold'} · {step.owner} · {fold._step_line(step.reason)}"
+                for step in _steps(ev, specs, fold.NOW) if step.owner == 'executor']
+    except Exception as exc:
+        todo = [f"undetermined: next_steps failed: {type(exc).__name__}"]
+    busy = in_flight(ev)
+    packet_busy = _carry_packet_busy(busy)
+    todo.extend(f"inbound:{item['source']} · uncarried" for item in inbound
+                if item.get('source') not in busy and item.get('source') not in packet_busy)
+    todo.sort()
     # The one liveness fact: `fold` reads the newest of these for staleness, and
     # `lane` is the count — the whole record this process leaves behind.
     kv = {"lane": len(todo)}

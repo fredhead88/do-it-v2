@@ -10,11 +10,10 @@ import sys
 from datetime import datetime, timezone
 
 import dispatch
-import autodispatch
 import digest_actions
 import fold
-import fold_stalls
 import lane_rules
+import tick
 import owed_digest
 import owed_routes
 
@@ -26,63 +25,22 @@ def build(events, now):
     now = owed_digest._time(now)
     events = digest_actions.as_of(events, now)
     folded = fold.fold(events)
-    rows = sorted((r for r in lane_rules.due(events, folded[0], now) if r['overdue']),
-                  key=lambda r: (r['spec'], r['rule']))
-    actions, waiting = [], []
-    admitted = [e for evs in folded[3].values() for e in evs]
-    admitted.extend(e for e in events if e.get('type') in ('thinker-answer', 'operator-approval')
-                    and e.get('actor') in ('thinker', 'operator'))
-    answers = [e for e in admitted if e.get('type') in ('decision', 'thinker-answer', 'operator-approval',
-                                                     'owed-met', 'owed-failed', 'owed-waived', 'owed-corrective')]
-    sources = {e['_src']: e for e in admitted if e.get('_src')}
-    for row in rows:
-        evs = folded[3].get(row['spec'], [])
-        held = autodispatch.held_by_dependency(evs, events)
-        gate = fold_stalls.latest(evs, {'merge-gate-clean'})
-        review = fold_stalls.latest(evs, {'review'})
-        resets = [e for e in evs if e['type'] in fold_stalls.RESETS - {'merge-gate-clean'}
-                  or e['type'] in {'spec-shape-failed', 'spawn-started', 'autodispatched',
-                                   'spawn-failed', 'autodispatch-failed', 'queue-remove'}
-                  or e['type'] == 'review' and not (type(e.get('n_blocking')) is int
-                                                   and e['n_blocking'] == 0)
-                  or e['type'] == 'decision' and (e.get('rework') == 'yes' or e.get('regrade') == 'yes'
-                                                or e.get('close'))]
-        def current(e):
-            return e and not any(digest_actions.instant(r['ts']) >= digest_actions.instant(e['ts'])
-                                 for r in resets) and not fold.standing_rejects(evs)
-
-        queued = current(gate) or (review and type(review.get('n_blocking')) is int
-                                  and review['n_blocking'] == 0 and current(review))
-        # Some queued windows were recorded as scoped Thinker rulings before
-        # the gate emitted its own event. Accept both recorded phrasings, but
-        # never let a ruling hide a later failure or a standing rejection.
-        ruling = next((e for e in reversed(folded[3].get('lane-stale:' + row['spec'], []))
-                       if e['type'] == 'decision' and e.get('actor') in ('thinker', 'operator')), None)
-        why = str((ruling or {}).get('why', ''))
-        if (re.match(r'^not stuck:', why, re.I)
-                and (re.search(r'\bmerge window\b', why, re.I)
-                     or re.search(r'enqueued in window', why, re.I) and 'queue ahead' in why.lower())
-                and current(ruling)):
-            queued = True
-        question = next((e for e in reversed(evs)
-                         if e['type'] in ('question', 'escalation-blocking')
-                         and not digest_actions.answered(
-                             dict(spec=row['spec'], criterion=e.get('criterion') or 'next step', since=e['ts']),
-                             e, answers, now, sources)), {})
-        note = question.get('asks') or question.get('why') or ''
-        classification = owed_routes.classify_ask(note)
-        action = dict(row, owner=classification['owner'], ask=note,
-                      kind=classification['kind'], criterion=question.get('criterion') or 'next step')
-        # An unanswered question needs a next action even after a clean review.
-        # Dependency holds retain their existing waiting behavior.
-        if action['owner'] != 'operator' and held and 'unresolvable' not in held:
-            waiting.append(dict(row, waiting_for='dependency'))
-        elif not held and not question and queued:
-            waiting.append(dict(row, waiting_for='merge'))
-        elif action['owner'] != 'operator' and row.get('reason_live'):
-            waiting.append(dict(row, waiting_for='active'))
-        else:
-            actions.append(action)
+    limits = lane_rules.load()
+    rows, actions, waiting = [], [], []
+    for step in tick._steps(events, folded[0], now):
+        row = fold.step_row(step, limits, now)
+        if step.state != 'hold' and not row['overdue']:
+            continue
+        rows.append(row)
+        if step.owner in {'operator', 'thinker', 'executor'}:
+            actions.append(dict(row, owner=step.owner, ask=step.reason,
+                                kind='judgment', criterion='next step'))
+        elif row['reason_live']:
+            waiting.append(dict(row, waiting_for='dependency' if row['rule'] == 'dependency-held'
+                                else 'merge' if step.stage == 'merging' else 'active'))
+    rows.sort(key=lambda row: (row['spec'], row['rule']))
+    actions.sort(key=lambda row: (row['spec'], row['rule']))
+    waiting.sort(key=lambda row: (row['spec'], row['rule']))
     return dict(date=now.date().isoformat(), stuck_count=len(rows), listed=len(rows),
                 live_reason_count=sum(bool(r['reason_live']) for r in rows), rows=rows,
                 action_rows=actions, waiting_rows=waiting)

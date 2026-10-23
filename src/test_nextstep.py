@@ -103,8 +103,8 @@ class NextStepTests(unittest.TestCase):
         self.assertEqual(baseline, self.steps(events, specs))
 
     def selected(self, results, rules=None):
-        predicates = {n: (lambda c, n=n: results.get(n)) for n in lr.PREDICATES}
-        with patch.dict(lr.PREDICATES, predicates, clear=True):
+        predicates = {n: (lambda c, n=n: results.get(n)) for n in ns.PREDICATES}
+        with patch.dict(ns.PREDICATES, predicates, clear=True):
             return self.one([event('spec-written')], rules=rules)
 
     def test_ac3_predicate_precedence_and_conflicts(self):
@@ -262,7 +262,7 @@ class NextStepTests(unittest.TestCase):
             self.assertEqual(self.selected({action: row}).stage, stage)
         for kind, stage in [('spec-written', 'planned'), ('build-started', 'building'),
                             ('build-done', 'checking'), ('verdict', 'checking'), ('queue-add', 'merging')]:
-            with patch.dict(lr.PREDICATES, {n: lambda c: None for n in lr.PREDICATES}):
+            with patch.dict(ns.PREDICATES, {n: lambda c: None for n in ns.PREDICATES}):
                 self.assertEqual(self.one([event('spec-written', -60), event(kind)]).stage, stage)
 
     def test_ac9_real_replay_shapes(self):
@@ -337,7 +337,7 @@ class NextStepTests(unittest.TestCase):
                 self.assertEqual((step.state, step.owner), ('hold', 'executor'))
                 self.assertTrue(step.reason.startswith(prefix))
             failure = event(kind, -30, findings='FAILED')
-            with patch.dict(lr.PREDICATES, {'rebuild': lambda c: dict(
+            with patch.dict(ns.PREDICATES, {'rebuild': lambda c: dict(
                     since=events[-1]['ts'], reason='table evaluated')}):
                 self.assertEqual(self.one(events + [failure]).action, 'rebuild')
             retry = event('decision', -20, actor='thinker', rework='yes')

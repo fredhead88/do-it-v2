@@ -1,0 +1,35 @@
+[[retired]]
+name = "Executor lane computation"
+kind = "code"
+pattern = 'def lane('
+paths = ["src/tick.py"]
+
+[[retired]]
+name = "Executor actionable state registry"
+kind = "code"
+pattern = 'ACTIONABLE'
+paths = ["src/*.py"]
+
+[[retired]]
+name = "look lane eligibility"
+kind = "code"
+pattern = 'lane_rules.due'
+paths = ["src/look.py"]
+
+[[retired]]
+name = "stuck digest stall classifier"
+kind = "code"
+pattern = 'fold_stalls'
+paths = ["src/stuck_digest.py"]
+
+[[retired]]
+name = "stuck digest dependency classifier"
+kind = "code"
+pattern = 'held_by_dependency'
+paths = ["src/stuck_digest.py"]
+
+[[retired]]
+name = "routine review redispatch instruction"
+kind = "doc"
+pattern = 'a `must-fix` standing → **rework** as above'
+paths = ["agents/executor.md"]

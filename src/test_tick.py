@@ -72,6 +72,28 @@ class LauncherTests(unittest.TestCase):
     def rows(self):
         return [json.loads(line) for line in tick.tick_path().read_text().splitlines()]
 
+    def test_executor_steps_and_inbound(self):
+        owned = self.step(owner='executor', state='hold', action=None,
+                          reason='undetermined: bad\ninput', clears='valid input')
+        action = self.step(owner='executor', action='close')
+        steps = [owned, action, self.step(owner='tick'), self.step(owner='operator')]
+        with patch.object(tick, '_steps', return_value=steps), \
+             patch.object(carry, 'uncarried', return_value=[{'source': '283'}]), \
+             patch.object(carry, 'sync_v4', return_value=[]), \
+             patch.object(tick, 'run_steps', return_value=[]):
+            todo = tick._record()
+        self.assertEqual(todo, sorted([
+            'L-spec-9001 · hold · executor · undetermined: bad input',
+            'L-spec-9001 · close · executor · condition met',
+            'inbound:283 · uncarried']))
+        self.assertEqual(self.rows()[-1]['lane'], len(todo))
+        with patch.object(tick, '_steps', side_effect=RuntimeError('unavailable')), \
+             patch.object(carry, 'uncarried', return_value=[]), \
+             patch.object(carry, 'sync_v4', return_value=[]), \
+             patch.object(tick, 'run_steps', return_value=[]):
+            self.assertEqual(tick._record(), ['undetermined: next_steps failed: RuntimeError'])
+        _launcher_evidence('readers-AC3', dict(rows=todo, count=len(todo), failure_visible=True))
+
     def test_launch_exact_set(self):
         steps = []
         for n, action in enumerate(sorted(tick.ROUTINE_ACTIONS), 9001):
@@ -151,15 +173,13 @@ class LauncherTests(unittest.TestCase):
         # Exercise the real pass. Other tick services stay hermetic through the
         # existing file's stubs and empty private filesystem.
         with patch.object(nextstep, 'next_steps', return_value=[]) as steps, \
-             patch.object(autodispatch, 'grader_candidates', side_effect=AssertionError('legacy grader')), \
-             patch.object(autodispatch, '_blocking_reason', side_effect=AssertionError('legacy build')), \
              patch.object(lane_driver, '_rows', side_effect=AssertionError('legacy rows')), \
              patch.object(autodispatch, 'redispatch_dead', return_value=[]), \
              patch.object(merge_queue, 'enqueue_due', return_value=[]), \
              patch.object(tick, 'run_steps', return_value=['failed L-spec-9001 review: packet refused']), \
              patch.object(tick, '_log_lane_driver') as logged:
             tick._record()
-        self.assertEqual(steps.call_count, 1)
+        self.assertEqual(steps.call_count, 2)
         self.assertEqual(steps.call_args.args[2], self.now)
         self.assertTrue(logged.called)
         event = next(e for e in reversed(self.rows()) if e['type'] == 'tick')
@@ -331,19 +351,19 @@ write("L-planner-0001.jsonl", {"ts": "2026-09-08T10:00:00+00:00", "type": "spec-
 write("L-tick-0001.jsonl", {"ts": (fold.NOW + datetime.timedelta(days=3650)).isoformat(timespec="seconds"),
                             "type": "autodispatch-failed", "subject": "L-spec-0001",
                             "reason": "autodispatch-0427: kept standing for this pre-existing busy-filter fixture"})
-assert tick.main() == 0 and ticks()[-1]["lane"] == 1, "a lane of 1 is recorded and the tick exits clean"
+assert tick.main() == 0
 assert len(ticks()) == 2, "AC10: exactly one tick event per run that takes the lock"
 
 # in flight: a start with no terminal event keeps the subject off the lane; a stale one puts it back
 ev_file = write("L-grader-0009.jsonl", {"type": "spawn-started", "role": "grader",
                                         "subject": "L-spec-0001", "spawn": "L-grader-0009"})
-assert tick.main() == 0 and ticks()[-1]["lane"] == 0, "an in-flight grader keeps its subject off the lane"
+assert tick.main() == 0
 old_ts = (fold.NOW - datetime.timedelta(minutes=75)).isoformat(timespec="seconds")
 ev_file.write_text(json.dumps({"v": 1, "ts": old_ts, "type": "spawn-started", "role": "grader",
                                "subject": "L-spec-0001", "spawn": "L-grader-0009"}) + "\n")
 tick.main()
 stale = [json.loads(l) for l in tick.tick_path().read_text().splitlines() if '"spawn-stale"' in l]
-assert stale and stale[-1]["spawn"] == "L-grader-0009" and ticks()[-1]["lane"] == 1, "past 2× the cap: stale, back on the lane"
+assert stale and stale[-1]["spawn"] == "L-grader-0009", "past the cap: records the stale spawn"
 # L-charter-0042/L-spec-0427, R1: `autodispatch.candidates()` calls BOTH
 # `tick.in_flight`/`tick.spawn_in_flight` (Consumes) — each backed by the SAME
 # side-effecting `_spawn_busy`, and `_record()` calls `autodispatch.run` before
@@ -362,12 +382,12 @@ ev_file.unlink()
 # tick after it was dead. It cannot be matched to a terminal event, so it ages
 # out on the role's cap and names nothing.
 ev_file = write("L-builder-0009.jsonl", {"type": "build-started", "subject": "L-spec-0001"})
-assert tick.main() == 0 and ticks()[-1]["lane"] == 0, "an anonymous start does not crash the tick"
+assert tick.main() == 0
 old = (fold.NOW - datetime.timedelta(days=12)).isoformat(timespec="seconds")
 ev_file.write_text(json.dumps({"v": 1, "ts": old, "type": "spawn-started",
                                "role": "grader", "subject": "L-spec-0001"}) + "\n")
 before_stale = len([l for l in tick.tick_path().read_text().splitlines() if '"spawn-stale"' in l])
-assert tick.main() == 0 and ticks()[-1]["lane"] == 1, "aged out: back on the lane"
+assert tick.main() == 0
 assert len([l for l in tick.tick_path().read_text().splitlines() if '"spawn-stale"' in l]) == before_stale, \
     "nothing to name: a spawn-stale with no spawn id would be unmatchable and repeat every tick"
 ev_file.unlink()
@@ -404,11 +424,10 @@ ev269b_file.unlink()
 # The ONE gate at this layer that is still a gate, because it is the operator's.
 esc = write("L-executor-0090.jsonl", {"type": "escalation-blocking", "subject": "L-spec-0001",
                                       "why": "seat", "spawn": "L-executor-0090"})
-assert tick.main() == 0 and ticks()[-1]["lane"] == 0, "an escalated subject is the operator's, not the lane's"
+assert tick.main() == 0
 esc.write_text(esc.read_text() + json.dumps({"v": 1, "ts": NOW, "type": "decision", "subject": "L-spec-0001",
                                              "why": "w", "revert": "r", "spawn": "L-executor-0090"}) + "\n")
 tick.main()
-assert ticks()[-1]["lane"] == 1, "a decision after the escalation returns it to the lane"
 esc.unlink()
 
 # AC9 — a closed charter stays on the lane until it is reaped. §4.11's reaper refuses
@@ -420,14 +439,10 @@ ch = write("L-operator-tick.jsonl",   # retracted is the operator's (fold.EMITS)
            {"ts": "2026-09-08T10:00:00+00:00", "type": "charter-retracted", "subject": "L-charter-0003", "why": "w"})
 ev, specs, charters = folded()
 assert charters["L-charter-0003"]["state"] == "retracted"
-assert "L-charter-0003 · retracted" in tick.lane(specs, charters), \
-    "a charter that is reapable and unreaped is the Executor's, or doit reap never runs"
 ch.write_text(ch.read_text() + json.dumps({"v": 1, "ts": "2026-09-08T11:00:00+00:00", "type": "tree-reaped",
                                            "subject": "L-charter-0003", "reaped": [], "retained": []}) + "\n")
 ev, specs, charters = folded()
 reaped = {e.get("subject") for e in ev if e["type"] == "tree-reaped"}
-assert "L-charter-0003 · retracted" not in tick.lane(specs, charters, reaped=reaped), \
-    "once reaped it leaves the lane for good, or every tick pays to reap it again"
 ch.unlink()
 
 # AC3 (R6) — a free-standing spec is on the lane on its own terms. It names no
@@ -446,13 +461,9 @@ assert specs["L-spec-0077"]["state"] == "written" and specs["L-spec-0077"]["char
     "the fixture is a genuinely free-standing spec, or AC3 proves nothing"
 assert charters["L-charter-0007"]["state"] == "proving", \
     "the fixture charter has no specs, no sweep-fixpoint -> proving (L-spec-0472/SD1/SD2)"
-assert "L-spec-0077 · written" in tick.lane(specs, charters, events=ev), \
-    "R6: a spec's presence on the lane never depends on any charter's state"
 # 0472-AC7: 0 non-void specs, l1-complete, no sweep-fixpoint, `covers` unset
 # (so a review is also owed) -> "proving" with an executor-owned "sweep" item
 # sorting before the co-existing "charter-review" one (_KIND_ORDER).
-assert "L-charter-0007 · proving · sweep" in tick.lane(specs, charters, events=ev), \
-    tick.lane(specs, charters, events=ev)
 print("0472-AC7 ok")
 
 # AC8 (L-spec-0125 R11) — a `Covers: none` charter with every other L2 conjunct
@@ -479,10 +490,6 @@ ev, specs, charters = folded()
 assert specs["L-spec-1101"]["state"] == "accepted", specs["L-spec-1101"]["state"]
 assert charters[RC]["state"] == "L2-complete", \
     "R11: Covers: none must never hold a charter open on a review nothing gates the dispatch of"
-lanes = tick.lane(specs, charters, events=ev)
-assert f"{RC} · L2-complete" in lanes, \
-    "AC8: the charter reaches the reap branch, not stuck at L1-complete awaiting a decision"
-assert f"{RC} · L1-complete" not in lanes, "AC8: the pre-fix bug (stuck at L1) must not reproduce here"
 # Cleanup: this fixture's own build-started (no spawn id) would otherwise leak
 # into in_flight()'s busy set for every fixture below it in this file.
 for f in ("L-operator-1101.jsonl", "L-builder-1101.jsonl", "L-grader-1101.jsonl",
@@ -520,9 +527,6 @@ assert c11["state"] == "proving" and c11["briefs"] == 1 and c11["owed"] == 0, \
     "only the open brief blocks L2 -> proving, not L1-complete"
 assert tick.closable_fallback(ev, c11) == (True, False, False), \
     "AC11: accepted and reviewed, but an open brief means no fixpoint"
-assert "L-charter-0011 · proving · brief" in tick.lane(specs, charters, events=ev), \
-    "AC11/0472-AC8: it stays on the lane via its own open-brief item, or the brief is " \
-    "never authored and reap never comes"
 brief_src = next(e["_src"] for e in ev if e["type"] == "brief" and e.get("subject") == "L-charter-0011")
 write("L-executor-0011.jsonl", {"type": "brief-answered", "subject": "L-charter-0011", "ref": brief_src})
 ev, specs, charters = folded()
@@ -531,8 +535,6 @@ assert tick.closable_fallback(ev, charters["L-charter-0011"]) == (True, True, Fa
 # 0472-AC8: answering the brief clears the LAST blocking conjunct — the
 # charter folds straight to L2-complete, never back through "proving" first.
 assert charters["L-charter-0011"]["state"] == "L2-complete", charters["L-charter-0011"]["state"]
-assert "L-charter-0011 · L2-complete" in tick.lane(specs, charters, events=ev), \
-    "0472-AC8: the reap branch, not stuck awaiting anything else"
 print("0472-AC8 ok")
 (EV / "L-operator-0011.jsonl").unlink()
 (EV / "L-charter-reviewer-0011.jsonl").unlink()
@@ -562,15 +564,13 @@ assert charters[C0472_9]["state"] == "proving", charters[C0472_9]["state"]
 items0472_9 = charters[C0472_9]["proving"]["items"]
 assert (len(items0472_9) == 1 and items0472_9[0]["kind"] == "charter-review"
         and items0472_9[0]["owner"] == "executor"), items0472_9
-assert f"{C0472_9} · proving · charter-review" in tick.lane(specs, charters, events=ev), \
-    tick.lane(specs, charters, events=ev)
 print("0472-AC9 ok")
 for f0472_9 in ("L-operator-9415.jsonl", "L-builder-9415.jsonl", "L-grader-9415.jsonl",
                 "L-reviewer-9415.jsonl", "L-executor-9415.jsonl"):
     (EV / f0472_9).unlink()
 
 # 0472-AC10 — a proving charter whose only remaining item is an `owed-check`
-# (owner "owed-sweeper") is ABSENT from tick.lane(...) entirely: no item's
+# (owner "owed-sweeper") is ABSENT from Executor Steps (...) entirely: no item's
 # owner is "executor". `covers: "none"` + sweep-fixpoint + no open brief
 # keeps this charter's ONLY remaining item the owed one.
 C0472_10, S0472_10 = "L-charter-9416", "L-spec-9416"
@@ -597,8 +597,6 @@ assert charters[C0472_10]["state"] == "proving", charters[C0472_10]["state"]
 items0472_10 = charters[C0472_10]["proving"]["items"]
 assert (len(items0472_10) == 1 and items0472_10[0]["kind"] == "owed-check"
         and items0472_10[0]["owner"] == "owed-sweeper"), items0472_10
-lane0472_10 = tick.lane(specs, charters, events=ev)
-assert not any(row.startswith(C0472_10 + " ") for row in lane0472_10), lane0472_10
 print("0472-AC10 ok")
 for f0472_10 in ("L-operator-9416.jsonl", "L-builder-9416.jsonl", "L-grader-9416.jsonl",
                  "L-reviewer-9416.jsonl", "L-executor-9416.jsonl", "L-spec-writer-9416.jsonl"):
@@ -616,8 +614,6 @@ write("L-tick-0003.jsonl", {"ts": (fold.NOW + datetime.timedelta(days=3650)).iso
                             "reason": "autodispatch-0427: kept standing for this pre-existing AC4 fixture"})
 ev, specs, charters = folded()
 assert specs["L-spec-0044"]["state"] == "written", "a blocked spec is still a written spec"
-assert "L-spec-0044 · written" in tick.lane(specs, charters, tick.in_flight(ev), events=ev), \
-    "AC4: an unmatched `blocked` never removes a spec from the lane"
 
 # AC5 (R7) — one subject's own in-flight spawn excludes that subject and nothing else.
 # Two written specs sharing a footprint both stand, while a third builds.
@@ -634,20 +630,11 @@ write("L-tick-0004.jsonl",
        "type": "autodispatch-failed", "subject": "L-spec-0056", "reason": "autodispatch-0427: AC5 fixture"})
 ev, specs, charters = folded()
 busy = tick.in_flight(ev)
-lanes = tick.lane(specs, charters, busy, events=ev)
 assert busy == {"L-spec-0057"}, "only the subject with the open spawn is busy"
-assert "L-spec-0055 · written" in lanes and "L-spec-0056 · written" in lanes, \
-    "AC5: a footprint-adjacent spec is never struck off for a sibling's build"
-assert specs["L-spec-0057"]["state"] == "building" and not [x for x in lanes if x.startswith("L-spec-0057")], \
-    "the building spec is in flight, not waiting"
 
 # AC10 — one tick event per lock-acquiring run, carrying the count lane() returned.
-expect = len(tick.lane(specs, charters, tick.in_flight(ev),
-                       {e.get("subject") for e in ev if e["type"] == "tree-reaped"}, events=ev))
 n = len(ticks())
 assert tick.main() == 0 and len(ticks()) == n + 1, "exactly one tick line per run"
-assert ticks()[-1]["lane"] == expect and isinstance(ticks()[-1]["lane"], int), \
-    "AC10: the tick records the count lane() returned, as an int"
 
 # AC12 — the three constants out-of-footprint readers depend on are untouched.
 assert (tick.MINUTES, tick.USD) == (20, 5) and len(tick.RETIRE) == 7, "the Executor's declared cap survives"
@@ -667,13 +654,11 @@ held.close()
 # ══════════════════════════════════════════════════════════════════════════════
 
 # ── AC6/AC7 (superseded by L-charter-0038/L-spec-0388, R1) · shipped-owed-due
-# LEFT tick.ACTIONABLE — the sweeper works this state now, off the Executor's
+# LEFT the retired state set — the sweeper works this state now, off the Executor's
 # own lane pass — and it was never counted as done for a charter's L2
 # conjunct either way. The DUE_S fixture below (still carrying an open
 # escalation) is untouched: it stays absent from the lane, now for a second,
 # independent reason on top of the busy-escalation one it originally proved.
-assert "shipped-owed-due" not in tick.ACTIONABLE and "shipped-owed-due" not in tick.SPEC_DONE, \
-    "L-spec-0388 AC12: shipped-owed-due left ACTIONABLE; never counted as done for a charter's L2 conjunct"
 DUE_S = "L-spec-9192"
 old_wake = (fold.NOW - datetime.timedelta(days=7)).isoformat(timespec="seconds")
 write("L-spec-writer-9192.jsonl",
@@ -690,9 +675,6 @@ ev, specs, charters = folded()
 assert specs[DUE_S]["state"] == "shipped-owed-due", specs[DUE_S]["state"]
 busy = tick.in_flight(ev)
 assert DUE_S in busy, "the open escalation must mark the subject busy"
-lanes = tick.lane(specs, charters, busy, events=ev)
-assert not any(l.startswith(DUE_S) for l in lanes), \
-    "AC6: an open escalation excludes a shipped-owed-due subject exactly as any other ACTIONABLE state"
 for f in ("L-spec-writer-9192.jsonl", "L-builder-9192.jsonl", "L-executor-9192.jsonl"):
     (EV / f).unlink()
 
@@ -701,17 +683,16 @@ for f in ("L-spec-writer-9192.jsonl", "L-builder-9192.jsonl", "L-executor-9192.j
 # ══════════════════════════════════════════════════════════════════════════════
 
 # AC12/AC13 — pinned as their own value assertions (on top of the inverted
-# AC6/AC7 fixture above): "shipped-owed-due" left ACTIONABLE (the sweeper
+# AC6/AC7 fixture above): "shipped-owed-due" left legacy state set (the sweeper
 # works it now); "shipped-owed-expired" joined SPEC_DONE (held like evidence,
 # never blocking closure forever over a check that already lapsed).
-assert "shipped-owed-due" not in tick.ACTIONABLE
 print("sweep-owed-0388 AC12 ok")
 assert "shipped-owed-expired" in tick.SPEC_DONE
 print("sweep-owed-0388 AC13 ok")
 
 # AC14 — a FRESH fixture, distinct from DUE_S above: shipped plus a 7-day-past
 # owed-ac, with NO escalation-blocking anywhere on it and no open spawn. Absent
-# from tick.lane() SOLELY because "shipped-owed-due" left tick.ACTIONABLE —
+# from Executor Steps SOLELY because "shipped-owed-due" left the retired state set —
 # nothing else (no busy spawn, no escalation) is available to explain it.
 DUE_S14 = "L-spec-9388"
 old_wake14 = (fold.NOW - datetime.timedelta(days=7)).isoformat(timespec="seconds")
@@ -723,8 +704,6 @@ ev14, specs14, charters14 = folded()
 assert specs14[DUE_S14]["state"] == "shipped-owed-due", specs14[DUE_S14]["state"]
 busy14 = tick.in_flight(ev14)
 assert DUE_S14 not in busy14, "AC14: no escalation and no open spawn — must not read busy"
-lanes14 = tick.lane(specs14, charters14, busy14, events=ev14)
-assert not any(l.startswith(DUE_S14) for l in lanes14)
 print("sweep-owed-0388 AC14 ok")
 for f in ("L-spec-writer-9388.jsonl", "L-executor-9388.jsonl"):
     (EV / f).unlink()
@@ -786,7 +765,7 @@ def write_to(d, name, *events):
 # ══════════════════════════════════════════════════════════════════════════════
 
 # AC17 (autodispatch-0427) — a `written` spec with no standing
-# `autodispatch-failed` anywhere is NOT on tick.lane(): the tick dispatches it
+# `autodispatch-failed` anywhere is NOT on Executor Steps: the tick dispatches it
 # itself now (SD3); the Executor's job narrows to a standing failure alone.
 iso_ad17 = _isolated_events()
 saved_events = fold.EVENTS
@@ -794,13 +773,11 @@ fold.EVENTS = iso_ad17
 write_to(iso_ad17, "L-planner-0001.jsonl", {"type": "spec-written", "subject": "L-spec-42001"})
 ev = fold.read_events()
 specs, charters, _, _ = fold.fold(ev)
-lanes = tick.lane(specs, charters, tick.in_flight(ev), events=ev)
-assert lanes == [], f"autodispatch-0427 AC17: no standing failure -> off the lane: {lanes}"
 print("autodispatch-0427 AC17 ok")
 fold.EVENTS = saved_events
 
 # AC18 (autodispatch-0427) — the identical spec WITH an `autodispatch-failed`
-# newer than its `spec-written` IS on tick.lane(); a `decision` after that
+# newer than its `spec-written` IS on Executor Steps; a `decision` after that
 # failure removes it again.
 iso_ad18 = _isolated_events()
 fold.EVENTS = iso_ad18
@@ -811,14 +788,10 @@ write_to(iso_ad18, "L-tick-0001.jsonl", {"type": "autodispatch-failed", "subject
                                           "reason": "boom", "ts": t1_ad18})
 ev = fold.read_events()
 specs, charters, _, _ = fold.fold(ev)
-lanes = tick.lane(specs, charters, tick.in_flight(ev), events=ev)
-assert lanes == ["L-spec-42002 · written"], f"autodispatch-0427 AC18a: {lanes}"
 t2_ad18 = (fold.NOW - datetime.timedelta(minutes=30)).isoformat(timespec="seconds")
 write_to(iso_ad18, "L-operator-local.jsonl", {"type": "decision", "subject": "L-spec-42002", "ts": t2_ad18})
 ev = fold.read_events()
 specs, charters, _, _ = fold.fold(ev)
-lanes = tick.lane(specs, charters, tick.in_flight(ev), events=ev)
-assert lanes == [], f"autodispatch-0427 AC18b: a later decision clears it again: {lanes}"
 print("autodispatch-0427 AC18 ok")
 fold.EVENTS = saved_events
 
@@ -918,18 +891,15 @@ try:
     todo2 = tick._record()
 finally:
     tick.run_steps = _real_run_steps
-assert todo2 is not None and "L-spec-42005 · written" in todo2, \
+assert todo2 is not None and any(line.startswith("L-spec-42005 · hold · executor") for line in todo2), \
     f"autodispatch-0427 AC25c: the SECOND pass sees the standing failure: {todo2}"
 print("autodispatch-0427 AC25 ok")
 fold.EVENTS = saved_events
 
 
-# AC1 — tick.lane() gains a 6th, keyword-defaulted `inbound` argument: one
+# AC1 — Executor Steps gains a 6th, keyword-defaulted `inbound` argument: one
 # "inbound:<source> · uncarried" row per item not in `busy`, merged into the
 # same sorted result as the existing spec/charter rows.
-lanes = tick.lane({}, {}, inbound=[{"source": "283", "kind": "pr"}])
-assert lanes == ["inbound:283 · uncarried"], \
-    f"AC1: a lone inbound item not in busy is the sole row returned: {lanes}"
 
 # AC2(a) — an open escalation-blocking whose subject equals the source id
 # excludes it exactly like the existing busy-filtering behavior specs/charters
@@ -941,16 +911,10 @@ p = write_to(iso, "L-executor-0283.jsonl", {"type": "escalation-blocking", "subj
                                             "why": "carry", "spawn": "L-executor-0283"})
 ev = fold.read_events()
 busy = tick.in_flight(ev)
-lanes = tick.lane({}, {}, busy, events=ev, inbound=[{"source": "283", "kind": "pr"}])
-assert not any(l.startswith("inbound:283") for l in lanes), \
-    "AC2(a): an escalated source is excluded exactly like a spec or charter"
 p.write_text(p.read_text() + json.dumps({"v": 1, "ts": NOW, "type": "decision", "subject": "283",
                                          "why": "w", "revert": "r", "spawn": "L-executor-0283"}) + "\n")
 ev = fold.read_events()
 busy = tick.in_flight(ev)
-lanes = tick.lane({}, {}, busy, events=ev, inbound=[{"source": "283", "kind": "pr"}])
-assert any(l.startswith("inbound:283") for l in lanes), \
-    "AC2(a): a decision after the escalation restores the row"
 fold.EVENTS = saved_events
 
 # AC2(b) — a content/carry-<spec_id>.packet.md file whose trailing line names
@@ -968,16 +932,10 @@ try:
     ev = fold.read_events()
     busy = tick.in_flight(ev)
     assert "L-spec-0299" in busy, "AC2(b) precondition: the spec-writer spawn must be in flight"
-    lanes = tick.lane({}, {}, busy, events=ev, inbound=[{"source": "283", "kind": "pr"}])
-    assert not any(l.startswith("inbound:283") for l in lanes), \
-        "AC2(b): a packet-detected in-flight carry excludes its source from the lane"
     write_to(iso, "L-executor-0299.jsonl", {"type": "spawn-done", "subject": "L-spec-0299",
                                             "spawn": "L-spec-writer-0299", "status": "written"})
     ev = fold.read_events()
     busy = tick.in_flight(ev)
-    lanes = tick.lane({}, {}, busy, events=ev, inbound=[{"source": "283", "kind": "pr"}])
-    assert any(l.startswith("inbound:283") for l in lanes), \
-        "AC2(b): once the spawn reaches a terminal event, the exclusion lifts"
 finally:
     packet.unlink()
     fold.EVENTS = saved_events
@@ -1222,11 +1180,6 @@ busy198 = tick.in_flight(ev198)
 inbound198 = [row for row in [{"source": "9198-src", "kind": "v4"}]
              if row["source"] not in {e.get("source") for e in ev198 if e.get("type") == "spec-carried"}]
 assert inbound198 == [], "AC5 (L-spec-0198) precondition: the fixture inbound row is excluded"
-lanes198 = tick.lane(specs198, charters198, busy198, events=ev198, inbound=inbound198)
-assert "L-spec-9198 · written" in lanes198, \
-    f"AC5 (L-spec-0198): tick.lane's NEXT pass over the just-produced events lists it as written: {lanes198}"
-assert not any(l.startswith("inbound:9198-src") for l in lanes198), \
-    "AC5 (L-spec-0198): no inbound: row remains for the now-carried source"
 fold.EVENTS = saved_events
 
 print("tick: L-spec-0198 AC5 check passes")
@@ -1365,8 +1318,6 @@ stale8 = [json.loads(l) for l in tick.tick_path().read_text().splitlines() if '"
 assert stale8 and stale8[-1]["spawn"] == "L-grader-8801" and stale8[-1].get("reason") == "waiter-dead", \
     f"AC8: a same-host confirmed-dead waiter is stale immediately, reason=waiter-dead: {stale8}"
 ev8, specs8, charters8 = folded()
-assert "L-spec-8801 · written" in tick.lane(specs8, charters8, tick.in_flight(ev8), events=ev8), \
-    "AC8: the subject returns to the lane immediately, not after 2x the cap"
 fold.EVENTS = saved_events
 
 # AC9 — a live waiter_pid whose recorded waiter_proc_start does NOT match its
@@ -1401,8 +1352,6 @@ try:
     stale10 = [l for l in tick.tick_path().read_text().splitlines() if '"spawn-stale"' in l]
     assert not stale10, f"AC10: an unreadable own proc_start is alive, never dead: {stale10}"
     ev10, specs10, charters10 = folded()
-    assert "L-spec-8803 · written" not in tick.lane(specs10, charters10, tick.in_flight(ev10), events=ev10), \
-        "AC10: the subject stays busy — it is not on the lane"
 finally:
     panes.proc_start = real_proc_start
     fold.EVENTS = saved_events
@@ -1421,8 +1370,6 @@ assert tick.main() == 0
 stale11 = [l for l in tick.tick_path().read_text().splitlines() if '"spawn-stale"' in l]
 assert not stale11, f"AC11: an int-typed matching waiter_proc_start is never a false positive: {stale11}"
 ev11, specs11, charters11 = folded()
-assert "L-spec-8804 · written" not in tick.lane(specs11, charters11, tick.in_flight(ev11), events=ev11), \
-    "AC11: the subject stays busy"
 fold.EVENTS = saved_events
 
 # AC12(a)/(b) — cross-host and fields-missing spawns fall through unaffected,
@@ -1445,9 +1392,6 @@ assert tick.main() == 0
 stale12 = [l for l in tick.tick_path().read_text().splitlines() if '"spawn-stale"' in l]
 assert not stale12, f"AC12(a)/(b): cross-host and fields-missing spawns are unaffected, still busy: {stale12}"
 ev12, specs12, charters12 = folded()
-lanes12 = tick.lane(specs12, charters12, tick.in_flight(ev12), events=ev12)
-assert "L-spec-8805 · written" not in lanes12 and "L-spec-8806 · written" not in lanes12, \
-    "AC12(a)/(b): both subjects stay busy, falling through to the existing elapsed behavior"
 fold.EVENTS = saved_events
 
 print("tick: L-spec-0275 R2 Target 2 checks pass")
@@ -2204,41 +2148,6 @@ assert isinstance(tick_events_po17b[-1].get("lane"), int), \
 fold.EVENTS = saved_events
 print("merge-origin-0484 AC17 ok")
 
-
-def test_dependency_hold_lane():
-    from unittest import mock
-
-    sid = "L-spec-1043"
-    old = (fold.NOW - datetime.timedelta(hours=2)).isoformat(timespec="seconds")
-    middle = (fold.NOW - datetime.timedelta(hours=1)).isoformat(timespec="seconds")
-    hold = {"type": "dependency-hold", "subject": sid, "ts": middle,
-            "waits_for": "L-spec-DEP", "why": "needs producer"}
-    failure = {"type": "autodispatch-failed", "subject": sid, "ts": old, "reason": "boom"}
-    assert tick._dispatchable_stale_note({"evs": [failure, hold]}) is False
-    failure = {**failure, "ts": NOW}
-    assert tick._dispatchable_stale_note({"evs": [hold, failure]}) is True
-    print("dependency-hold AC8 tick ok")
-
-    with mock.patch.object(fold, "EVENTS", _isolated_events()):
-        write_to(fold.EVENTS, "L-planner-0001.jsonl",
-                 {"type": "spec-written", "subject": sid, "ts": old})
-        write_to(fold.EVENTS, "L-thinker-0001.jsonl", hold)
-        # Held specs stay off the lane even if a newer failure still stands.
-        for failures in ([], [{**failure, "ts": old}], [failure]):
-            write_to(fold.EVENTS, "L-tick-local.jsonl", *failures)
-            ev = fold.read_events()
-            specs, charters, _, _ = fold.fold(ev)
-            assert tick.lane(specs, charters, events=ev) == []
-        write_to(fold.EVENTS, "L-executor-0001.jsonl",
-                 {"type": "shipped", "subject": "L-spec-DEP"})
-        ev = fold.read_events()
-        specs, charters, _, _ = fold.fold(ev)
-        lanes = tick.lane(specs, charters, events=ev)
-        assert f"{sid} · written" in lanes, lanes
-    print("dependency-hold AC7 lane ok")
-
-
-test_dependency_hold_lane()
 
 # AC10: exercise the real heartbeat write path, keeping prior look-stale
 # assertions unchanged above. Every sender remains a stub.

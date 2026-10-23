@@ -1680,7 +1680,7 @@ print("merge-origin-0484 AC11 ok")
 # ══ spec-idle (AC12-AC15) — a lighter sibling of `_ad_root_setup` above: sets
 # the same three `fold`/`dispatch` globals, but never links a `repos/<project>`
 # symlink and never writes spec content, so an otherwise-idle "written" spec
-# reads `_blocking_reason` -> ("spec file unreadable", False) — `blocked`,
+# reads the legacy candidate diagnostic -> ("spec file unreadable", False) — `blocked`,
 # never `_dispatch_failed` — the cleanest "not owned elsewhere" fixture. The
 # seat-wait/dispatchable cases below use `_ad_root_setup`/`CLEAN_SPEC_AD`
 # instead, exactly where capacity-slotting behavior is the point. ══════════
@@ -2063,10 +2063,20 @@ def _wchild(root):
     return json.loads(child.stdout)
 
 
+def _wsteps(rows):
+    from nextstep import Step
+    return [Step(r['spec'], 'spec', 'merging' if r['rule'] == 'merge' else 'planned',
+                 'hold' if r['rule'] in {'idle', 'undetermined'} else 'action',
+                 None if r['rule'] in {'idle', 'undetermined'} else
+                 'merge-gate' if r['rule'] == 'gate' else r['rule'],
+                 'executor' if r['rule'] in {'idle', 'undetermined'} else 'tick',
+                 None, r['reason'], 'decision', r['since']) for r in rows]
+
+
 # AC4: only inbox, exact key dedupe, and a deadline from the injected clock.
 root = newroot()
 rows = [dict(_wrow(rule), reason=rule) for rule in ("build", "grade", "review", "merge")]
-with patch.object(lane_rules, "due", return_value=rows), \
+with patch.object(tick, "_steps", return_value=_wsteps(rows)), \
      patch.object(lane_rules, "ladder", side_effect=lambda events, row, now: {"build": "inbox", "grade": "act", "review": "retry", "merge": "digest"}[row["rule"]]):
     look._check_lane_stale([], _WNOW, root, [])
     look._check_lane_stale([], _WNOW, root, [])  # stale snapshot must also dedupe
@@ -2078,7 +2088,7 @@ ok(escalation["subject"] == f"lane-stale:{_WA}" and escalation["owner"] == "thin
    and escalation["spec"] == _WA and escalation["rule"] == "build" and escalation["since"] == rows[0]["since"]
    and escalation["deadline"] == iso(_WNOW + timedelta(hours=24)) and "actor" not in escalation
    and escalation["default"] and escalation["revert"], "watchdog: complete escalation envelope")
-with patch.object(lane_rules, "due", return_value=[dict(rows[0], since=iso(_WNOW))]), \
+with patch.object(tick, "_steps", return_value=_wsteps([dict(rows[0], since=iso(_WNOW - timedelta(minutes=61)))])), \
      patch.object(lane_rules, "ladder", return_value="inbox"):
     look._check_lane_stale([], _WNOW, root, [])
 ok(len(look._read_jsonl(root / "events" / look.LEDGER_NAME)) == 2, "watchdog: new since is a new key")
@@ -2109,8 +2119,8 @@ print("watchdog AC5 ok")
 
 # AC6: actual emit, then an entirely new fold process reads the disk.
 root = newroot()
-row = dict(_wrow("idle"), reason="undetermined: fixture read failed")
-with patch.object(lane_rules, "due", return_value=[row]):
+row = dict(_wrow("idle"), reason="fixture needs judgment")
+with patch.object(tick, "_steps", return_value=_wsteps([row])):
     look._check_lane_stale([], _WNOW, root, [])
     look._check_lane_stale([], _WNOW, root, [])
 child = _wchild(root)
@@ -2142,7 +2152,8 @@ for rule in ("wave-held", "dependency-held"):
             ok(row["overdue"] == overdue and row["limit_min"] == 10,
                f"watchdog: {rule} actual due boundary at {minutes} minutes")
             ok(lane_rules.ladder(events, row, now) == rung, f"watchdog: {rule} initial {rung}")
-            look._check_lane_stale(events, now, root, [])
+            with patch.object(tick, "_steps", return_value=_wsteps([row])):
+                look._check_lane_stale(events, now, root, [])
         ok(not read_ledger(root), f"watchdog: {rule} act/retry never escalate")
         retry = _wev("autodispatched", age=-11, trigger="retry", rule=rule, since=row["since"])
         retried = events + [retry]
@@ -2150,8 +2161,9 @@ for rule in ("wave-held", "dependency-held"):
            f"watchdog: {rule} retry still within limit")
         now = _WNOW + timedelta(minutes=22)
         ok(lane_rules.ladder(retried, row, now) == "inbox", f"watchdog: {rule} aged retry reaches inbox")
-        look._check_lane_stale(retried, now, root, [])
-        look._check_lane_stale(retried, now, root, [])
+        with patch.object(tick, "_steps", return_value=_wsteps([row])):
+            look._check_lane_stale(retried, now, root, [])
+            look._check_lane_stale(retried, now, root, [])
         alerts = read_ledger(root)
         ok(len(alerts) == 1 and alerts[0]["rule"] == rule
            and alerts[0]["subject"] == f"lane-stale:{_WA}", f"watchdog: {rule} escalates once")
@@ -2323,3 +2335,32 @@ with patch.object(look.subprocess, "run", return_value=subprocess.CompletedProce
 subprocess.run([sys.executable, "-c", reader_code_m], cwd=pathlib.Path(look.__file__).parent,
                capture_output=True, check=True)
 machine_look_signed(9, "missing models or two failed attempts stays undetermined and never clears drift")
+
+# Readers-on-nextstep: old row keys still suppress an escalation; unknown age alarms.
+root = newroot()
+row = dict(_wrow('merge'), since=iso(_WNOW - timedelta(minutes=181)))
+old = dict(type='escalation-blocking', subject='lane-stale:' + _WA,
+           kind='lane-stale', spec=_WA, rule='merge', since=row['since'],
+           owner='thinker', why='already raised', default='leave',
+           deadline=iso(_WNOW + timedelta(hours=24)), revert='none', ts=iso(_WNOW))
+look._append_watchdog(root, root / 'events' / look.LEDGER_NAME, **{k: v for k, v in old.items() if k != 'type'}, event_type=old['type'])
+with patch.object(tick, '_steps', return_value=_wsteps([row])):
+    look._check_lane_stale([], _WNOW, root, [])
+ok(len(read_ledger(root)) == 1, '1495 old-shape key deduped')
+briefs = []
+with patch.object(tick, '_steps', return_value=_wsteps([dict(row, since='bad')])):
+    look._check_lane_stale([], _WNOW, newroot(), briefs)
+ok(len(briefs) == 1 and briefs[0]['key'] == 'undetermined:lane-stale', '1495 unknown age alarms')
+root = newroot()
+from dataclasses import replace
+sweep = replace(_wsteps([row])[0], item='L-spec-9495:AC1', item_kind='check',
+                action='sweep-check', stage='live', trigger='fixture:1')
+with patch.object(tick, '_steps', return_value=[sweep]), patch.object(lane_rules, 'ladder', return_value='inbox'):
+    look._check_lane_stale([], _WNOW, root, [])
+    look._check_lane_stale([], _WNOW, root, [])
+ok(len(read_ledger(root)) == 1 and read_ledger(root)[0]['rule'] == 'sweep-check',
+   '1495 sweep-check uses the same watchdog and dedupe path')
+body = json.dumps(dict(old_shape_deduped=True, unknown_age_alarm=True,
+                       sweep_check_escalations=len(read_ledger(root))), sort_keys=True)
+print(json.dumps(dict(url='cli://look/readers-1495', status=0,
+                      body_sha256=hashlib.sha256(body.encode()).hexdigest(), body_excerpt=body)))

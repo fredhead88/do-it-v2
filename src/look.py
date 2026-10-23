@@ -1013,9 +1013,15 @@ def _check_lane_stale(events, now, root, briefs):
         keys = {(e.get("spec"), e.get("rule"), e.get("since")) for e in seen_events
                 if e.get("type") == "escalation-blocking" and e.get("kind") == "lane-stale"}
         pending = []
-        for row in lane_rules.due(events, specs, now):
+        import tick
+        limits = lane_rules.load()
+        for step in tick._steps(events, specs, now):
+            row = fold.step_row(step, limits, now)
+            if row['rule'] == 'undetermined':
+                _fire_undetermined("lane-stale", events, root, briefs)
+                continue
             key = row["spec"], row["rule"], row["since"]
-            if (not _SPEC_ID_RE.fullmatch(row["spec"]) or not row["overdue"] or key in keys
+            if (not row["overdue"] or key in keys
                     or lane_rules.ladder(seen_events, row, now) != "inbox"):
                 continue
             keys.add(key)

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Dispatch transport, health recovery, and legacy read-only eligibility views.
 
-Routine launches delegate to tick's Step consumer. candidates and the predicate
-helpers remain unchanged until L-spec-1495 migrates their outside readers.
+Routine launches delegate to tick's Step consumer. candidates remains a legacy
+read-only filesystem preparation diagnostic.
 """
 import datetime, json, os, pathlib, re, socket, subprocess, sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
@@ -126,43 +126,6 @@ def _head_of(project, *, runner=None):
         return None
 
 
-def _blocking_reason(sid, evs, events, project, charter, wave, busy, head_of):
-    """The `dispatchable` gate (SD1), with dependency holds checked first in a fixed
-    priority order — each acceptance criterion exercises exactly one
-    condition at a time, so the order only matters when more than one is
-    true at once. Returns `(reason_text_or_None, is_standing_autodispatch_failed)`."""
-    hold_reason = held_by_dependency(evs, events)
-    if hold_reason is not None:
-        return hold_reason, False
-    af = _standing_autodispatch_failed(evs)
-    if af is not None:
-        return (af.get("reason") or "autodispatch-failed"), True
-    try:
-        text = dispatch.spec_path(sid).read_text()
-    except OSError:
-        return "spec file unreadable", False
-    base = re.search(r"^Base:\s+(\S+)\s*$", text, re.MULTILINE)
-    if base and base[1] != head_of(project):
-        return f"base {base[1]}: the Executor cuts this worktree by hand", False
-    shp = shape.check(text)
-    # SD9 (L-spec-0478): a missing "In plain English:" line does not make an
-    # already-written spec unbuildable — the pre-build gate's one exception.
-    # `spec_shape` itself stays caller-unaware and reports the finding always;
-    # only this caller strips it before deciding blocked vs dispatchable.
-    block = [b for b in shp["block"] if not b.startswith("Plain English:")]
-    if block:
-        return "shape: " + "; ".join(block), False
-    if wave is not None and charter is not None:
-        blocker = dispatch.wave_blocker(events, charter, sid, wave)
-        if blocker:
-            return f"wave-blocked by {blocker}", False
-    if sid in busy:
-        return "busy (open escalation or spawn)", False
-    if not (fold.ROOT / "repos" / project).exists():
-        return f"no $R/repos/{project} symlink", False
-    return None, False
-
-
 def _builder_in_flight_count(events):
     """Seats occupied right now: a `build-started` (role=builder — the only
     role that ever writes one) with no terminal event, on a subject
@@ -220,7 +183,34 @@ def candidates(events, specs, now, *, head_of=None):
                               if e.get("type") == "spec-written" and e.get("footprint")), None)
         project = next((e.get("project") for e in reversed(evs) if e.get("project")), None) or "unknown"
         wave = dispatch.spec_wave(charter, own_footprint) if (charter and own_footprint) else None
-        reason, is_fail = _blocking_reason(sid, evs, events, project, charter, wave, busy, head_for)
+        # This diagnostic still reports filesystem preparation failures; all
+        # routine launch eligibility belongs to nextstep.
+        reason = held_by_dependency(evs, events)
+        failure = _standing_autodispatch_failed(evs) if reason is None else None
+        is_fail = failure is not None
+        if failure is not None:
+            reason = failure.get('reason') or 'autodispatch-failed'
+        if reason is None:
+            try:
+                text = dispatch.spec_path(sid).read_text()
+            except OSError:
+                reason = 'spec file unreadable'
+            else:
+                base = re.search(r'^Base:\s+(\S+)\s*$', text, re.MULTILINE)
+                if base and base[1] != head_for(project):
+                    reason = f"base {base[1]}: the Executor cuts this worktree by hand"
+                if reason is None:
+                    block = [b for b in shape.check(text)['block'] if not b.startswith('Plain English:')]
+                    if block:
+                        reason = 'shape: ' + '; '.join(block)
+        if reason is None and wave is not None and charter is not None:
+            blocker = dispatch.wave_blocker(events, charter, sid, wave)
+            if blocker:
+                reason = f'wave-blocked by {blocker}'
+        if reason is None and sid in busy:
+            reason = 'busy (open escalation or spawn)'
+        if reason is None and not (fold.ROOT / 'repos' / project).exists():
+            reason = f'no $R/repos/{project} symlink'
         since = _since(events, sid, evs, charter, wave) or now
         rows.append({"spec": sid, "charter": charter, "project": project,
                      "since": since.isoformat(timespec="seconds"), "limit_min": limit_min,
@@ -266,46 +256,6 @@ def _grader_trigger(evs):
     rejects = [e for e in evs if e.get("type") == "rejected-criterion"]
     older_reject = any(T(e) < T(newest_bd) for e in rejects)
     return newest_bd, ("rework" if older_reject else "build-done")
-
-
-def grader_candidates(events, specs, now):
-    """R13a: one row `{spec, charter, project, trigger, since}` per spec whose
-    newest trigger (see `_grader_trigger`) has no grader dispatch/refusal of
-    its own since, is not capability/dependency held, not killed, not shipped."""
-    events = list(events)
-    by_subject = {}
-    for e in events:
-        sid = e.get("subject")
-        if sid:
-            by_subject.setdefault(sid, []).append(e)
-    held = fold.held_specs(events)
-    rows = []
-    limit_min = _lane_limit("grade")
-    for sid, evs in by_subject.items():
-        if not str(sid).startswith("L-spec-"):
-            continue
-        if any(e.get("type") == "spec-killed" for e in evs):
-            continue
-        if any(e.get("type") == "shipped" for e in evs):
-            continue
-        if sid in held or held_by_dependency(evs, events):
-            continue
-        trig_event, trigger = _grader_trigger(evs)
-        if trig_event is None:
-            continue
-        t_ts = fold.ts(trig_event.get("ts"))
-        suppressed = any(
-            fold.ts(e.get("ts")) > t_ts and e.get("role") == "grader" and e.get("type") in (
-                "spawn-started", "spawn-failed", "autodispatched", "autodispatch-failed")
-            for e in evs)
-        if suppressed:
-            continue
-        charter = dispatch.resolve_charter(events, sid, None)
-        project = next((e.get("project") for e in reversed(evs) if e.get("project")), None) or "unknown"
-        rows.append({"spec": sid, "charter": charter, "project": project,
-                     "trigger": trigger, "since": t_ts.isoformat(timespec="seconds"), "limit_min": limit_min})
-    rows.sort(key=lambda r: r["since"])
-    return rows
 
 
 def _own_terminal_event(events, spawn):
