@@ -1,6 +1,9 @@
 """Pure classification of criterion and owed checks; never executes a check."""
 import ast
+from dataclasses import asdict, dataclass, fields
+from datetime import datetime
 import re
+import shlex
 import urllib.parse
 
 import grading_env
@@ -19,6 +22,96 @@ _OWED_NEEDS = {"ro-dsn": ("ro-prod-sql",), "droplet": ("droplet-read",),
 _WRAPPERS = frozenset(("ro-sql", "droplet-read", "portal-e2e", "keepa-fetch", "scrapingbee-fetch"))
 _UNSAFE_WRAPPERS = _WRAPPERS - {"ro-sql", "droplet-read"}
 _WINDOW = re.compile(r"\bwithin\s+(?:the\s+)?(\d+)\s+(hours|h|days|d)\b", re.I)
+
+
+@dataclass(frozen=True)
+class CheckRecord:
+    check_id: str
+    spec: str
+    criterion: str
+    argv: list[str]
+    sha: str
+    data_source: str
+    customer_data: bool
+    profile: str
+    timing: str
+    answered_by: str
+
+    def __post_init__(self):
+        for field in fields(self):
+            if field.name not in ("argv", "customer_data") and not isinstance(getattr(self, field.name), str):
+                raise ValueError(f"{field.name} must be a string")
+        if self.data_source not in ("scratch", "production"):
+            raise ValueError("invalid data_source")
+        if self.answered_by not in ("script", "model"):
+            raise ValueError("invalid answered_by")
+        if type(self.customer_data) is not bool:
+            raise ValueError("customer_data must be a bool")
+        if not isinstance(self.argv, list) or not all(isinstance(arg, str) for arg in self.argv):
+            raise ValueError("argv must be a list of str")
+        if self.timing not in ("pre-merge", "post-deploy"):
+            instant = self.timing.removeprefix("due:")
+            try:
+                if not self.timing.startswith("due:") or not re.match(r"\d{4}-\d\d-\d\dT", instant):
+                    raise ValueError("invalid timing")
+                if datetime.fromisoformat(instant.replace("Z", "+00:00")).utcoffset() is None:
+                    raise ValueError("due timing requires an ISO-8601 instant")
+            except ValueError as error:
+                raise ValueError("invalid timing") from error
+
+    def to_event(self):
+        return asdict(self)
+
+    @classmethod
+    def from_event(cls, body):
+        if not isinstance(body, dict) or set(body) != {field.name for field in fields(cls)}:
+            raise ValueError("CheckRecord requires exactly its ten fields")
+        return cls(**body)
+
+
+def declared(spec_text, spec, sha):
+    """Parse explicit declarations only; never infer a check's data source."""
+    keys = ("data_source", "customer_data", "profile", "timing", "answered_by")
+    tagged = _tagged_commands(spec_text)
+    result = []
+    for criterion, block in grading_env._criterion_blocks(spec_text).items():
+        lines = block.splitlines()
+        declarations = [i for i, line in enumerate(lines) if re.match(r"\s*check:", line)]
+        if not declarations:
+            continue
+        try:
+            if declarations != [1] or not re.match(r"^(?:  )?check: ", lines[1]):
+                raise ValueError("check: must sit directly below the AC line")
+            pairs = [token.split("=", 1) for token in shlex.split(lines[1].strip()[7:])]
+            if any(len(pair) != 2 for pair in pairs) or [pair[0] for pair in pairs] != list(keys):
+                raise ValueError("check: requires each declaration key once, in order")
+            body = dict(pairs)
+            if body["customer_data"] not in ("true", "false"):
+                raise ValueError("customer_data must be true or false")
+            body["customer_data"] = body["customer_data"] == "true"
+            statements = tagged.get(criterion, [])
+            argv = (["/bin/sh", "-c", " && ".join(statements)] if len(statements) > 1
+                    else shlex.split(statements[0]) if statements else [])
+            result.append(CheckRecord(check_id=f"{spec}:{criterion}", spec=spec, criterion=criterion,
+                                      argv=argv, sha=sha, **body))
+        except ValueError as error:
+            raise ValueError(f"{criterion}: {error}") from error
+    return result
+
+
+def record_for(events, spec, criterion):
+    """Latest declaration by position, with malformed latest meaning unknown."""
+    envelope = {"ts", "type", "subject", "v", "spawn", "ref", "project", "why", "actor", "_src"}
+    latest = next((event for event in reversed(events)
+                   if event.get("type") == "check-declared" and event.get("criterion") == criterion
+                   and (event.get("spec") == spec or event.get("subject") == spec)), None)
+    if latest is None or latest.get("subject") != spec:
+        return None
+    try:
+        record = CheckRecord.from_event({key: value for key, value in latest.items() if key not in envelope})
+    except ValueError:
+        return None
+    return record if record.spec == spec else None
 
 
 def _names(text, words):
@@ -218,14 +311,8 @@ def record_for_owed(row, spec_text, project):
     elif capability:
         needs.update(_OWED_NEEDS[capability])
     else:
-        for word, entries in (("ro-dsn", ("ro-prod-sql",)), ("droplet", ("droplet-read",)),
-                              ("browser", ("deployed-site", "browser-review-account")),
-                              ("elapsed", ("elapsed-time",)), ("deploy", ("deployed-site",))):
-            if _names(line, (word,)):
-                needs.update(entries)
-        if not needs:
-            needs.update(own["needs"])
-    if not unknown and (_names(line, ("elapsed", "elapsed-time")) or capability == "elapsed"):
+        needs.update(own["needs"])
+    if not unknown and capability and (_names(line, ("elapsed", "elapsed-time")) or capability == "elapsed"):
         needs.add("elapsed-time")
     commands = own["commands"] if own else []
     if unknown or "operator" in needs:

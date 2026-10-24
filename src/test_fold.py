@@ -1434,7 +1434,7 @@ _, spdue, _, _, _ = ledger(**{
 rows = fold.owed_due(spdue)
 assert {(r["spec"], r["criterion"]) for r in rows} == {(S, "AC1"), (S2, "AC1")}, rows
 assert all(r["days_overdue"] > 0 for r in rows), rows
-assert all(set(r) == {"spec", "criterion", "due_at", "days_overdue", "src", "status"} for r in rows), rows
+assert all(set(r) == {"spec", "criterion", "due_at", "days_overdue", "src", "status", "data_source"} for r in rows), rows
 assert all(isinstance(r["due_at"], str) and " " not in r["due_at"] for r in rows), rows
 print("AC9 ok")
 
@@ -1540,7 +1540,7 @@ sw_ac7 = [{"ts": stamp(3), "type": "spec-written", "subject": S4, "charter": C},
           {"ts": stamp(2), "type": "owed-ac", "subject": S4, "criterion": "AC7", "wake_at": stamp(-7)}]
 built4 = [{"ts": stamp(2), "type": "build-started", "subject": S4},
           {"ts": stamp(2), "type": "build-done", "subject": S4}]
-shipped4 = [{"ts": stamp(0), "type": "shipped", "subject": S4}]
+shipped4 = [{"ts": stamp(1), "type": "shipped", "subject": S4}]
 redate_due = [{"ts": stamp(0), "type": "owed-ac", "subject": S4, "criterion": "AC7", "wake_at": stamp(7)}]
 _, sp20, _, _, by20 = ledger(**{"L-spec-writer-01.jsonl": sw_ac7, "L-builder-01.jsonl": built4,
                                 "L-executor-01.jsonl": shipped4 + redate_due})
@@ -4058,7 +4058,7 @@ life_block = life_board.split("## OWED DUE")[1].split("## CHARTER CLOSE")[0]
 assert "## OWED DUE (2)" in life_board and "due owed: 2" in life_board
 for row in life_rows:
     expected = (f"{row['spec']} · {row['criterion']} · {row['due_at']} · "
-                f"{round(row['days_overdue'])}d overdue · {row['status']}")
+                f"{round(row['days_overdue'])}d overdue · {row['status']} · {row['data_source']}")
     assert expected in life_block, (expected, life_block)
     assert row["due_at"] == life_ship["ts"]
     assert row["days_overdue"] == (fold.NOW - datetime.fromisoformat(life_ship["ts"])).total_seconds() / 86400
@@ -4067,11 +4067,12 @@ for extras, status in (([], "due"), ([life_unobs], "blocked"), ([life_fail], "fa
     rows = fold.owed_due({life_sid: {"evs": [life_decl, life_ship, *extras]}})
     assert len(rows) == 1 and rows[0]["status"] == status, rows
 assert fold.owed_due({life_sid: {"evs": [life_decl, life_ship, life_expired]}}) == []
-# Existing due formatting remains byte-for-byte intact, without a status suffix.
+# Due rows append the declared source without a status suffix.
 life_due_folded = ledger(**{"L-spec-writer-lifecycle.jsonl": [life_decl],
                             "L-executor-lifecycle.jsonl": [life_ship]})
 row = fold.owed_due(life_due_folded[1])[0]
-line = f"{row['spec']} · {row['criterion']} · {row['due_at']} · {round(row['days_overdue'])}d overdue"
+line = (f"{row['spec']} · {row['criterion']} · {row['due_at']} · "
+        f"{round(row['days_overdue'])}d overdue · {row['data_source']}")
 board_lines = fold.render(*life_due_folded).split("## OWED DUE")[1].split("## CHARTER CLOSE")[0].splitlines()
 assert f"  {line}" in board_lines, board_lines
 print("owed-lifecycle AC13 ok")

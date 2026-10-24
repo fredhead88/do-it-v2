@@ -36,6 +36,20 @@ REAL_LEDGER = pathlib.Path.home() / ".do-it" / "events"
 REAL_LEDGER_SIZES_BEFORE = ({p: p.stat().st_size for p in REAL_LEDGER.glob("*.jsonl")}
                             if REAL_LEDGER.is_dir() else {})
 
+# Check-record: mask the due clock, preserving source and criterion identity.
+for suffix in ("", " · scratch", " · production", " · data-source-unknown"):
+    earlier = "  L-spec-fixture · AC1 · 2026-10-23T10:00:00Z · 1d overdue" + suffix
+    later = "  L-spec-fixture · AC1 · 2026-10-24T10:00:00Z · 0d overdue" + suffix
+    with mock.patch.object(restore, "_states", return_value={}), \
+            mock.patch.object(restore, "_render", side_effect=[earlier, later]):
+        assert restore.board_diff(TMP / "left", TMP / "right") == []
+    for different in (later.replace("AC1", "AC2"),
+                      later + " · scratch" if not suffix else later.replace(suffix, " · changed")):
+        with mock.patch.object(restore, "_states", return_value={}), \
+                mock.patch.object(restore, "_render", side_effect=[earlier, different]):
+            assert restore.board_diff(TMP / "left", TMP / "right")
+print("cr_ac5 restore normalization ok")
+
 N = 0
 
 

@@ -396,7 +396,8 @@ print("owed-lifecycle AC7 ok")
 fields_life = {"spec", "criterion", "project", "declared_src", "line", "wake_at", "shipped_at",
                "due_at", "status", "failures", "last_failed_at", "last_unobservable_at",
                "last_unobservable_capability", "evidence", "capability", "last_route_epoch",
-               "route_attempts", "ask", "quarantine_reason", "corrective", "governing_at"}
+               "route_attempts", "ask", "quarantine_reason", "corrective", "governing_at",
+               "data_source", "customer_data", "answered_by"}
 relabel = life_event("owed-routed", -7, route="relabel", capability="browser", epoch="ignore")
 row = life_row([failure, unobservable, *attempts, relabel, corrective])
 assert set(row) == fields_life, row
@@ -434,7 +435,7 @@ project_imports = {name.split(".")[0] for node in ast.walk(imports)
                    for name in ([n.name for n in node.names] if isinstance(node, ast.Import)
                                 else [node.module] if isinstance(node, ast.ImportFrom) and node.module else [])
                    if name.split(".")[0] in project_modules}
-assert project_imports == {"routing", "owed_routes"}, project_imports
+assert project_imports == {"routing", "owed_routes", "checks"}, project_imports
 print("owed-lifecycle AC9 ok")
 
 
@@ -473,3 +474,64 @@ for when in (stamp(11), U_AC["ts"]):
 print("1104-AC4 (e) close before or at declaration ignored")
 assert "unverifiable" in owed.STATUSES
 print("1104-AC4 (f) STATUSES includes unverifiable; digest checked separately")
+
+
+def cr_declaration(criterion="AC1", **changes):
+    import checks
+    record = checks.CheckRecord(check_id=f"L-spec-lifecycle:{criterion}", spec="L-spec-lifecycle",
+                                criterion=criterion, argv=["/usr/bin/true"], sha="",
+                                data_source="production", customer_data=True, profile="prod-readonly",
+                                timing="post-deploy", answered_by="script")
+    return dict(type="check-declared", subject=record.spec, ts=LIFE.isoformat(), v=1,
+                spawn="fixture", **record.to_event()) | changes
+
+
+def cr_ac4():
+    for expected, base, extra in cases_life:
+        events = [*base, *extra]
+        before = owed.checks(events, LIFE)
+        after = owed.checks([*events, cr_declaration()], LIFE)
+        assert len(before) == len(after) == 1
+        assert before[0]["data_source"] == "data-source-unknown"
+        assert before[0]["customer_data"] is None and before[0]["answered_by"] is None
+        assert after[0]["data_source"] == "production" and after[0]["customer_data"] is True
+        assert after[0]["answered_by"] == "script"
+        metadata = {"data_source", "customer_data", "answered_by"}
+        assert {k: v for k, v in before[0].items() if k not in metadata} == {
+            k: v for k, v in after[0].items() if k not in metadata}
+    for bad in (cr_declaration(subject="other"), cr_declaration(extra=True),
+                cr_declaration(data_source="unknown")):
+        result = owed.checks([*LIFE_BASE, cr_declaration(), bad], LIFE)[0]
+        assert result["data_source"] == "data-source-unknown", result
+    assert owed.checks([*LIFE_BASE, cr_declaration("AC2")], LIFE)[0]["data_source"] == "data-source-unknown"
+    print("cr_ac4 ok")
+
+
+def cr_ac5():
+    assert fold.EMITS.get("check-declared") == {"spec-writer", "executor", "operator"}
+    declaration = cr_declaration(data_source="scratch", customer_data=False, profile="repo-venv")
+    for actor in ("spec-writer", "executor", "operator"):
+        assert fold.admits(declaration, actor) is None
+    for actor in ("builder", "grader", "reviewer", "sweep", "alien"):
+        assert fold.admits(declaration, actor) is not None
+    second = LIFE_AC | {"criterion": "AC2"}
+    events = [*LIFE_BASE, second, declaration]
+    rows = fold.owed_due({"L-spec-lifecycle": {"evs": events}})
+    assert {r["criterion"]: r["data_source"] for r in rows} == {
+        "AC1": "scratch", "AC2": "data-source-unknown"}
+    # Exercise the same actor/source metadata the ledger reader attaches.
+    fixture = [dict(event, actor="executor" if event["type"] == "shipped" else "spec-writer",
+                    _src=f"fixture:{index}") for index, event in enumerate(events, 1)]
+    board = fold.render(fixture, *fold.fold(fixture))
+    lines = board.split("## OWED DUE (", 1)[1].split("\n## ", 1)[0].splitlines()
+    assert any(line.endswith(" · scratch") for line in lines)
+    assert any(line.endswith(" · data-source-unknown") for line in lines)
+    print("cr_ac5 ok")
+
+
+if __name__ == "__main__":
+    if len(sys.argv) > 1:
+        globals()[sys.argv[1]]()
+    else:
+        cr_ac4()
+        cr_ac5()

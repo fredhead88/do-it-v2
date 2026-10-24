@@ -36,6 +36,7 @@ from datetime import timedelta
 from datetime import datetime as _datetime
 import routing
 import owed_routes
+import checks as check_records
 
 STATUSES = ("waiting", "due", "blocked", "failed", "correcting", "quarantined",
             "met", "waived", "expired", "dropped", "unshipped", "unverifiable")
@@ -189,7 +190,11 @@ def checks(evs, now):
         else:
             status = "waiting"
 
+        record = check_records.record_for(evs, spec, c)
         out.append({"spec": spec, "criterion": c, "project": project,
+                    "data_source": record.data_source if record else "data-source-unknown",
+                    "customer_data": record.customer_data if record else None,
+                    "answered_by": record.answered_by if record else None,
                     "declared_src": ac.get("_src"), "line": ac.get("line"),
                     "wake_at": wake_at, "shipped_at": shipped_at, "due_at": due_at,
                     "status": status, "failures": failures,
