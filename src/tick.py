@@ -578,8 +578,17 @@ def _record():
                     closed_evs = [e for e in c["evs"] if e["type"] == "charter-closed"]
                     newest_closed = max((fold.ts(e["ts"]) for e in closed_evs), default=None)
                     if newest_closed is None or newest_closed < newest_proving:
+                        label = fold.close_label(ev, cid)
+                        if label == "accepted":
+                            reason = PROVING_CLOSE_REASON
+                        else:
+                            pending = ("non-blocking owed checks remain unproven"
+                                       if label == "closed-unproven" else
+                                       "blocking owed checks remain within configured allowance")
+                            reason = (f"{pending}; sweep at fixpoint; no open in-scope brief; "
+                                      "charter review complete or not owed")
                         dispatch.emit(tick_path(), {}, "charter-closed", subject=cid,
-                                      reason=PROVING_CLOSE_REASON)
+                                      label=label, reason=reason)
     except Exception as e:
         proving_error = f"{e}"
     # L-charter-0042/L-spec-0427, R1: the tick dispatches. LAST guarded step

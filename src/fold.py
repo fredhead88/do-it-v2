@@ -50,14 +50,9 @@ DWELL_DAYS = {"written": 1, "building": 1, "graded": 1, "reviewing": 1}
 STAGES = {"written": ("spec-written", "build-started"), "building": ("build-started", "build-done"),
           "graded": ("build-done", "verdict"), "reviewing": ("verdict", "review")}
 DWELL_MIN_N = 3
-# §2.5's `count(owed) <= K`. K is unset in §12.5, so the default denies rather
-# than invents: no owed evidence may ride into a closed charter until K is measured.
+# §2.5's `count(blocking specs) <= K`; undetermined checks remain blocking.
 K = int(os.environ.get("DOIT_K", "0"))
-# L-charter-0038/L-spec-0384, R3 (SD1): the ONE predicate for "this spec's
-# owed criteria are held like evidence, not blocking closure" — `_closable`'s
-# `owed_within_k` and `fold()`'s own charter `owed` tally both count against
-# this SAME tuple, so K-comparison and the CHARTER CLOSE render can never
-# drift apart on what counts as owed.
+# The charter's visible owed tally stays independent of closure blockers.
 OWED_TALLY_STATES = ("shipped-owed-evidence", "shipped-owed-expired")
 
 NOW = datetime.now(timezone.utc)
@@ -982,10 +977,13 @@ def _closable(charter_evs, mine):
     done_states = ("accepted", "shipped-owed-evidence", "shipped-owed-expired",
                   "dropped", "closed-unbuilt", "closed-shipped")
     by_id = {s["id"]: s for s in mine}
+    blocking_specs = {row["spec"] for row in proving.unproven_checks(mine, NOW) if row["blocks"]}
 
     def spec_ok(s):
         if s["state"] in done_states:
             return True
+        if s["state"] == "shipped-owed-due":
+            return s["id"] not in blocking_specs
         if s["state"] != "killed":
             return False
         # L-charter-0046/L-spec-0470 (ledger-vocabulary), R3: an admitted
@@ -1004,9 +1002,29 @@ def _closable(charter_evs, mine):
     return Closable(
         all_accepted=all(spec_ok(s) for s in mine),
         sweep_derived="sweep-fixpoint" in types,
-        owed_within_k=sum(1 for s in mine if s["state"] in OWED_TALLY_STATES) <= K,
+        owed_within_k=len(blocking_specs) <= K,
         no_open_briefs=not open_briefs(charter_evs),
         review_owed=charter_review_owed(charter_evs))
+
+
+def close_blockers(events, charter):
+    """Sorted, distinct ids of this charter's blocking unproven owed checks."""
+    specs, _, _, _ = fold(events)
+    mine = [s for s in specs.values() if s["charter"] == charter and s["state"] != "void"]
+    return sorted({row["check_id"] for row in proving.unproven_checks(mine, NOW) if row["blocks"]})
+
+
+def _close_label(unproven):
+    if any(row["blocks"] for row in unproven):
+        return None
+    return "closed-unproven" if unproven else "accepted"
+
+
+def close_label(events, charter):
+    """The honest close label, independent of the other closure conjuncts."""
+    specs, _, _, _ = fold(events)
+    mine = [s for s in specs.values() if s["charter"] == charter and s["state"] != "void"]
+    return _close_label(proving.unproven_checks(mine, NOW))
 
 
 def l2_complete(c):
@@ -1593,6 +1611,7 @@ def fold(events):
         # implementation, reachable by a caller that needs to ask before the
         # sweep, and no second copy to drift. Derivation is unchanged, K included.
         c["closable"] = _closable(c["evs"], mine)
+        c["close_label"] = _close_label(proving.unproven_checks(mine, NOW))
         if cid in retracted:
             c["state"] = "retracted"
             c["proving"] = None

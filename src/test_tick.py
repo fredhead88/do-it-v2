@@ -1699,6 +1699,7 @@ evs2b = fold.read_events()
 closed2b = [e for e in evs2b if e["type"] == "charter-closed" and e.get("subject") == C2]
 assert len(closed2b) == 1, closed2b
 assert closed2b[0]["reason"] == tick.PROVING_CLOSE_REASON, closed2b[0]
+assert closed2b[0]["label"] == "accepted", closed2b[0]
 assert tick.main() == 0
 evs2c = fold.read_events()
 closed2c = [e for e in evs2c if e["type"] == "charter-closed" and e.get("subject") == C2]
@@ -2151,6 +2152,44 @@ _body = json.dumps({"criterion": "AC10", "child_ledger_rows": len(from_disk),
                     "successful_outages": 2, "sender_exception_completed": True}, sort_keys=True)
 print(json.dumps(dict(url="cli://tick/watchdog/AC10", status=0,
                       body_sha256=hashlib.sha256(_body.encode()).hexdigest(), body_excerpt=_body)))
+
+
+
+# L-spec-1506: tick records an honest label/reason, including a fresh reader.
+def test_close_rule_emission_1506():
+    import checks
+    saved_root, saved_events = fold.ROOT, fold.EVENTS
+    try:
+        with tempfile.TemporaryDirectory(prefix='close-rule-tick-') as directory:
+            root = pathlib.Path(directory)
+            (root / 'events').mkdir()
+            tick._bind_root(root)
+            cid, sid = 'L-charter-91506', 'L-spec-91506'
+            _proving_charter(fold.EVENTS, cid, sid, covers='none',
+                             owed_ac={'criterion': 'AC1', 'wake_at': NOW})
+            record = checks.CheckRecord('tick-close-check', sid, 'AC1', ['true'], 'fixture',
+                                        'scratch', False, 'fixture', 'post-deploy', 'script')
+            write_to(fold.EVENTS, 'L-spec-writer-1506.jsonl',
+                     dict(type='check-declared', subject=sid, **record.to_event()))
+            write_to(fold.EVENTS, 'L-tick-1506.jsonl',
+                     dict(type='charter-proving', subject=cid, reason='fixture', deadline=NOW))
+            with patch.object(tick, 'run_steps', return_value=[]):
+                assert tick.main() == 0
+                assert tick.main() == 0
+            closed = [e for e in fold.read_events(use_cache=False)
+                      if e['type'] == 'charter-closed' and e['subject'] == cid]
+            assert len(closed) == 1, closed
+            assert closed[0]['label'] == 'closed-unproven'
+            assert closed[0]['reason'] != tick.PROVING_CLOSE_REASON
+            assert 'remain unproven' in closed[0]['reason']
+            _launcher_evidence('close-rule-1506', dict(label=closed[0]['label'],
+                                                      reason=closed[0]['reason'], count=len(closed)))
+    finally:
+        tick._bind_root(saved_root)
+        fold.EVENTS = saved_events
+
+
+test_close_rule_emission_1506()
 
 if __name__ == '__main__':
     unittest.main(argv=[sys.argv[0]])
