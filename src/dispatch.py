@@ -1113,6 +1113,8 @@ def _main(a):
     if a.charter:
         base["charter"] = a.charter
     meta = dict(packet_sha256=sha(packet), cli=CLI)
+    backend_ran = False
+    from usage import tokens_for_spawn
     grading_view = None  # L-spec-0481/R12.2-R12.3: set once a grader's own view is built; `fail`
                          # below reads it (closure, late-bound) so a preflight refusal — or any LATER failure in this same run — tears the private cluster down at, never before, the terminal event it emits (SD-R12-3c).
 
@@ -1156,6 +1158,9 @@ def _main(a):
         kv = {"why": why}
         if reason is not None:
             kv["reason"] = reason
+        kv["tokens"] = tokens_for_spawn(spawn, ROOT, meta.get("spawn_path")) if backend_ran else None
+        if backend_ran:
+            kv["backend_ran"] = True
         emit(ledger, base, "spawn-failed", **kv, **meta)
         if grading_view is not None:
             grading_env.teardown(grading_view)
@@ -1168,7 +1173,7 @@ def _main(a):
             return True
         exception_type = type(exc).__name__
         emit(ledger, base, "spawn-failed", reason=f"crash:{exception_type}",
-             why=f"unexpected backend path exception: {exception_type}", **meta)
+             why=f"unexpected backend path exception: {exception_type}", tokens=None, **meta)
         if grading_view is not None:
             grading_env.teardown(grading_view)
     a._dispatch_crash = crash
@@ -1367,7 +1372,7 @@ def _main(a):
             first_cap = next(c for c in grading_env.CAPABILITIES if c in dict(failures))
             why = (f"{a.subject}: preflight could not prove {first_cap} — refusing role={a.role} "
                   "before any spend")
-            emit(ledger, base, "spawn-failed", why=why, reason=f"preflight:{first_cap}", **meta)
+            emit(ledger, base, "spawn-failed", why=why, reason=f"preflight:{first_cap}", tokens=None, **meta)
             if grading_view is not None:
                 grading_env.teardown(grading_view)
             print(f"FAILED {spawn}: {why}", file=sys.stderr)
@@ -1463,6 +1468,7 @@ def _main(a):
     if a.mcp_config:
         cmd += ["--mcp-config", a.mcp_config]
     seat = backend == "seat"
+    backend_ran = True
     try:
         if backend == "codex":
             r = run_codex(spawn, a.role, mm["model"], schema_path, packet, cwd, (a.timeout or tmin) * 60,
@@ -1593,6 +1599,7 @@ def _main(a):
         done["repo_moved"] = moved
     if off_manifest is not None:
         done["off_manifest"] = off_manifest
+    done.update(tokens=tokens_for_spawn(spawn, ROOT, backend), backend_ran=True)
     emit(ledger, base, "spawn-done", **done)
     if grading_view is not None:  # L-spec-0481/SD-R12-3c: after the terminal event, never before
         grading_env.teardown(grading_view)

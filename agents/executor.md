@@ -332,6 +332,14 @@ Tick-owned: close — explicit thinker/operator close rulings kill unshipped spe
 A standing driver `autodispatch-failed` needs Executor/operator handling or a newer qualifying trigger; elapsed time alone never retries it.
 
 
+## Sonnet trial
+
+The Executor runs on `claude-sonnet-5-5`.
+A judgment call (a hold whose reason starts `undetermined:`, a merge ruling, or a question needing a decision) goes to an Opus seat sub-agent (`claude-opus-5-5`), and its outcome is appended as a `lesson ... axis=K`.
+The trial is measured by `doit health --json` using `tokens_per_live_spec.claude`, read at trial start and again 14 days later, with both readings in a `lesson` line.
+A measured rise in Claude tokens per live spec ends the trial.
+
+
 ## Output
 
 The object the StructuredOutput tool describes: `actions[]`, one row per durable

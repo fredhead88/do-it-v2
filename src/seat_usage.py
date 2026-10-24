@@ -66,6 +66,15 @@ def latest(root=None, now=None, max_age_s=900):
     return _reading(root, now, max_age_s)[0]
 
 
+def usage_view(root: str | None, now: dt.datetime) -> dict:
+    """Read-only SD16 percentage meters; absent readings remain unknown."""
+    import dispatch
+    claude = latest(root, now)
+    codex = dispatch.codex_quota()
+    return dict(codex=dict(used=codex.get("used_percent") if codex else None, limit=100),
+                claude=dict(used=claude["seven_day_pct"] if claude else None, limit=100))
+
+
 def record(dry_run=False, now=None):
     """Append changes immediately, or an unchanged reading after 14 minutes."""
     now = now if now is not None else dt.datetime.now(UTC)

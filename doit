@@ -35,6 +35,7 @@ case "${1:-board}" in
   carry)   shift; exec python3 "$SRC/carry.py" "$@" ;;
   note-close) shift; exec python3 "$SRC/notes.py" "$@" ;;
   guard)   shift; exec python3 "$SRC/guard.py" "$@" ;;
+  health) shift; exec python3 "$SRC/throughput.py" health "$@" ;;
   throughput) shift; exec python3 "$SRC/throughput.py" "$@" ;;
   problems) shift; exec python3 "$SRC/problems.py" "$@" ;;
   balance) shift; exec python3 "$SRC/balance.py" "$@" ;;

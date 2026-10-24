@@ -23,6 +23,16 @@ Source: `agents/*.md` and `machine/models.toml`.
 - spec-writer: codex
 - thinker: pane
 
+SD10 records `tokens = {vendor, input, cached_input, output, reasoning}` on terminal events.
+Vendors are `codex` or `claude`; input includes cached input; absent usage is unknown.
+`doit health [--json]` reports finishing, intake, usage percentages, disk and tokens_per_live_spec.
+Tokens per live spec average uncached input plus output for measured specs shipped in seven days.
+unmeasured_specs counts excluded specs; spawn-stale has no usage and understates spend.
+The vendor routing above assigns authors to Codex and judging roles to Claude seats.
+The Executor uses claude-sonnet-5-5; judgment calls go to a claude-opus-5-5 seat sub-agent.
+Sonnet trial: log tokens_per_live_spec.claude via doit health --json at start and 14 days later;
+record both readings and judgment outcomes in lesson lines (axis=K); a measured rise ends it.
+
 ## Lane rules
 
 Source: `lane_rules.toml`. Name | action | actor | limit_min.
