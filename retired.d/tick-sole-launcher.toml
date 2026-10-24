@@ -1,0 +1,24 @@
+[[retired]]
+name = "legacy grader candidates"
+kind = "code"
+pattern = 'grader_candidates'
+paths = ["src/**", "agents/**", "docs/**", "README.md"]
+
+[[retired]]
+name = "autodispatch blocking helper"
+kind = "code"
+pattern = '_blocking_reason'
+paths = ["src/**", "agents/**", "docs/**", "README.md"]
+
+[[retired]]
+name = "lane rule eligibility predicates"
+kind = "code"
+pattern = '^def _(build|grade|review|rebuild|regrade|gate|enqueue|merge|hold|idle|close|clean_review|wave_held|dependency_held)\('
+regex = true
+paths = ["src/lane_rules.py", "src/lane_driver.py", "src/autodispatch.py"]
+
+[[retired]]
+name = "lane rule predicate description"
+kind = "doc"
+pattern = 'lane_rules.PREDICATES'
+paths = ["agents/**", "docs/**", "README.md"]

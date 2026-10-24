@@ -69,3 +69,9 @@ name = "dependency-held"
 action = "none"
 actor = "none"
 limit_min = 10
+
+[[rules]]
+name = "sweep-check"
+action = "sweep-check"
+actor = "tick"
+limit_min = 120

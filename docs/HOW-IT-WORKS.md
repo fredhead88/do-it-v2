@@ -39,6 +39,7 @@ Source: `lane_rules.toml`. Name | action | actor | limit_min.
 - close | spec-killed | tick | 60
 - wave-held | none | none | 10
 - dependency-held | none | none | 10
+- sweep-check | sweep-check | tick | 120
 
 ## Cron manifest
 
@@ -100,5 +101,5 @@ plus every action in `lane_rules.toml`.
 
 - autodispatch-failed; autodispatched; charter-closed; charter-proving; charter-reopened;
   cron-missing; dispatch-builder; dispatch-grader; dispatch-reviewer; doit-gate; look-stale; none;
-  proving-check-failed; proving-overdue; queue-add; spawn-stale; spec-killed; tick; window-run;
-  worktree-reaped
+  proving-check-failed; proving-overdue; queue-add; spawn-stale; spec-killed; sweep-check; tick;
+  window-run; worktree-reaped

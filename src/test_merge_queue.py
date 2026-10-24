@@ -432,7 +432,6 @@ class QueueTests(unittest.TestCase):
                 ('look.heartbeat_missed', False), ('grader_serve.run', None),
                 ('tree_cleanup.reap_worktrees', ([], []))):
                 stack.enter_context(patch(target, return_value=result))
-            stack.enter_context(patch.object(tick, 'lane', return_value=[]))
             steps = stack.enter_context(patch.object(tick, '_steps', return_value=[]))
             stack.enter_context(patch.object(tick, 'run_steps', side_effect=driver))
             stack.enter_context(patch.object(autodispatch, 'redispatch_dead',
@@ -442,7 +441,7 @@ class QueueTests(unittest.TestCase):
             tick._record()
             self.assertEqual(sequence, ['driver', 'replay', 'queue'])
             self.assertEqual(call.call_count, 1)
-            self.assertEqual(steps.call_count, 1)
+            self.assertEqual(steps.call_count, 2)
             logged.assert_any_call(['driver line', 'queue line'], self.now)
             self.assertNotIn('autodispatch_error', self.landed()[-1])
             call.reset_mock(side_effect=True)

@@ -38,59 +38,14 @@ def _latest(events, types):
     return next((e for e in reversed(events) if e['type'] in types), None)
 
 
-def _projection(events):
-    """Normalize only the two event shapes absent from the shipped predicates.
-
-    Keep dispatch and failure events: a standing refusal stays authoritative.
-    This is a read-only view; the input fold and ledger are never changed.
-    """
-    result = []
-    for e in events:
-        if e['type'] == 'escalation-blocking' and e.get('kind') == 'capability-hold':
-            e = dict(e, type='capability-hold')
-        if (e['type'] == 'verdict' and e.get('confirmed') is False
-                and e.get('cannot_assess') and not e.get('could_not_run')):
-            e = dict(e, type='cannot-assess')
-        result.append(e)
-    return result
-
-
 def _rows(events, specs, now, table=None):
-    # The driver owns these four actions. Idle/merge diagnostics belong to the
-    # watchdog and can otherwise delay every answered build behind a full scan.
-    rows = lane_rules.due(_projection(events), specs, now, table=table, only=ROLES)
-    # Never turn a malformed fold into an actionable supplemental close row.
-    undetermined = {r['spec'] for r in rows if r['reason'].startswith('undetermined:')}
-    keys = {(r['spec'], r['rule']) for r in rows}
+    """Compatibility row view of tick-owned Steps, with no eligibility table."""
+    import nextstep
     rules = lane_rules.load(table)
-    by_subject = {}
-    for e in events:
-        by_subject.setdefault(e.get('subject'), []).append(e)
-    for sid in specs:
-        if sid in undetermined or (sid, 'close') in keys:
-            continue
-        evs = by_subject.get(sid, [])
-        ruling = next((e for e in reversed(evs) if e['type'] == 'decision'
-                       and e.get('actor') in ('thinker', 'operator') and e.get('close')), None)
-        if (ruling and any(e['type'] == 'shipped' for e in evs)
-                and not any(e['type'] in ('spec-killed', 'spec-closed') for e in evs)):
-            rows.append(lane_rules._row(sid, 'close', rules['close'],
-                                        dict(since=ruling['ts']), now))
-    return rows
-
-
-def _held(events):
-    normalized = [dict(e, type='capability-hold')
-                  if e['type'] == 'escalation-blocking' and e.get('kind') == 'capability-hold'
-                  else e for e in events]
-    return fold.held_specs(normalized)
-
-
-def _busy(events, now):
-    # The shipped pure busy predicate uses the injected clock and, unlike
-    # tick.in_flight, cannot write spawn-stale during a dry run.
-    spawns, _, escalations = lane_rules._busy(events, now)
-    return spawns | escalations
+    steps = (tick._steps(events, specs, now) if table is None else
+             nextstep.next_steps(events, specs, now, rules))
+    return [fold.step_row(step, rules, now) for step in steps
+            if step.owner == 'tick' and step.action in ROLES]
 
 
 def _in_flight_role(events, now, wanted):
@@ -106,21 +61,6 @@ def _in_flight_role(events, now, wanted):
         if role == wanted and (now - _time(e)).total_seconds() <= ((e.get('window_min') or cap) + cap) * 60:
             active.add(spawn or e['subject'])
     return len(active)
-
-
-def _suppressed(evs, row):
-    since = lane_rules._time(row['since'])
-    role = ROLES[row['rule']]
-    for e in evs:
-        if _time(e) < since:
-            continue
-        if e['type'] == 'autodispatched' and e.get('rule') == row['rule']:
-            return True
-        event_role = (e.get('role') or '-'.join(str(e.get('spawn') or '').split('-')[1:-1])
-                      or ('builder' if e['type'] in lane_rules.DISPATCH_EVENTS | {'build-started'} else None))
-        if e['type'] in lane_rules.DISPATCH_EVENTS | {'build-started'} and event_role == role:
-            return True
-    return False
 
 
 def _review_options(evs, sid):
@@ -162,125 +102,6 @@ def _dispatch(role, sid, project, charter, runner, options=None):
     if result.get('code', 1):
         raise ValueError(result.get('stderr') or result.get('stdout') or 'dispatch failed')
     return json.loads(result.get('stdout') or '')['detached']
-
-
-def _act(events, specs, now, rows, runner, dry_run, handled):
-    out, handled = [], set(handled)
-    undetermined = {r['spec'] for r in rows if r['reason'].startswith('undetermined:')}
-    out.extend(f"undetermined {r['spec']} {r['rule']}: {r['reason']}"
-               for r in rows if r['spec'] not in handled and r['reason'].startswith('undetermined:'))
-    rows = [r for r in rows if r['spec'] not in undetermined]
-    if not rows:
-        return out
-    by_subject = {}
-    for e in events:
-        by_subject.setdefault(e.get('subject'), []).append(e)
-    busy, held = _busy(events, now), _held(events)
-    slots = max(0, capacity() - _in_flight_role(events, now, 'reviewer'))
-    build_slots = max(0, autodispatch.capacity() - _in_flight_role(events, now, 'builder')
-                      - sum(specs.get(sid, {}).get('state') == 'written' for sid in handled))
-    for row in sorted(rows, key=lambda r: (r['since'], r['spec'])):
-        sid, rule = row['spec'], row['rule']
-        if sid in handled:
-            continue
-        if rule not in ROLES:
-            continue
-        evs = by_subject.get(sid, [])
-        if sid in busy:
-            out.append(f'busy {sid} {rule}')
-            continue
-        if sid in held:
-            out.append(f'held {sid} {rule}: capability hold')
-            continue
-        if _suppressed(evs, row):
-            out.append(f'suppressed {sid} {rule}: already attempted since {row["since"]}')
-            continue
-        dependency = autodispatch.held_by_dependency(evs, events)
-        if dependency:
-            out.append(f'held {sid} {rule}: {dependency}')
-            continue
-        if rule != 'close' and any(e['type'] in lane_rules.TERMINAL_EVENTS for e in evs):
-            out.append(f'suppressed {sid} {rule}: terminal')
-            continue
-        role = ROLES[rule]
-        if role == 'builder' and build_slots <= 0:
-            out.append(f'seat-wait {sid} {rule}')
-            continue
-        if rule == 'review' and slots <= 0:
-            out.append(f'seat-wait {sid} review')
-            continue
-        if rule == 'close' and any(e['type'] in ('spec-killed', 'spec-closed') or
-                e['type'] == 'escalation-blocking' and e.get('kind') == 'close-needs-operator'
-                and _time(e) >= lane_rules._time(row['since']) for e in evs):
-            out.append(f'suppressed {sid} close: already closed or escalated')
-            continue
-        if dry_run:
-            if rule == 'review' and _review_options(evs, sid) is None:
-                out.append(f'suppressed {sid} review: round limit')
-                continue
-            out.append(f'would act {sid} {rule}')
-            handled.add(sid)
-            if rule == 'review':
-                slots -= 1
-            if rule == 'rebuild':
-                build_slots -= 1
-            continue
-        handled.add(sid)
-        base = {'subject': sid}
-
-        def fail(reason):
-            refusal = dispatch.emit(tick.tick_path(), base, 'autodispatch-failed',
-                                    role=role, rule=rule, reason=str(reason))
-            out.append(f'failed {sid} {rule}: {reason}' + (f'; failure record refused: {refusal}' if refusal is not None else ''))
-
-        def record(event_type, **fields):
-            refusal = dispatch.emit(tick.tick_path(), base, event_type, **fields)
-            if refusal is not None:
-                fail(f'{event_type} record refused: {refusal}')
-                return False
-            return True
-
-        try:
-            if rule == 'close':
-                ruling = next(e for e in evs if e['type'] == 'decision' and e['ts'] == row['since']
-                              and e.get('actor') in ('thinker', 'operator') and e.get('close'))
-                if any(e['type'] == 'shipped' for e in evs):
-                    landed = record('escalation-blocking', kind='close-needs-operator', owner='operator',
-                                    why=f"ruling {ruling.get('_src')}: {ruling['close']}",
-                                    default='leave the spec open', deadline=(now + timedelta(hours=72)).isoformat(),
-                                    revert='nothing changed')
-                else:
-                    landed = record('spec-killed', why=f"ruling {ruling.get('_src')}: {ruling['close']}")
-                if landed:
-                    out.append(f'closed ruling {sid}')
-                continue
-            project = next((e['project'] for e in reversed(evs) if e.get('project')), 'unknown')
-            charter = dispatch.resolve_charter(evs, sid, None)
-            spawn = 'none'
-            if rule == 'review':
-                options = _review_options(evs, sid)
-                if options and options[0] == 'needs-browser':
-                    if record('escalation-blocking', kind='review-needs-browser', owner='operator',
-                              why='ui review requires review-mcp.json', default='leave review pending',
-                              deadline=(now + timedelta(hours=72)).isoformat(), revert='nothing changed'):
-                        out.append(f'escalated {sid} review needs browser')
-                    continue
-                if options:
-                    spawn = _dispatch(role, sid, project, charter, runner, options)
-                    slots -= 1
-            else:
-                spawn = _dispatch(role, sid, project, charter, runner)
-            if spawn == 'none':
-                out.append(f'suppressed {sid} {rule}: round limit')
-                continue
-            fields = dict(role=role, rule=rule, since=row['since'], spawn=str(spawn))
-            if record('autodispatched', **fields):
-                out.append(f'acted {sid} {rule} spawn={spawn}')
-            if role == 'builder' and spawn != 'none':
-                build_slots -= 1
-        except (OSError, ValueError, KeyError, TypeError) as exc:
-            fail(exc)
-    return out
 
 
 def run(events, specs, now, *, runner=None, dry_run=False, handled=frozenset()):

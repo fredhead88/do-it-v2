@@ -1122,7 +1122,7 @@ for name, files in (("L2", done),
                               "no_open_briefs", "review_owed"}, (name, cl)
     if fx[2][C]["state"] != "retracted":             # retraction pre-empts the predicate
         assert (fx[2][C]["state"] == "L2-complete") == fold.l2_complete(cl), (name, fx[2][C]["state"], cl)
-    # ★ L-adr-0044 reconciliation: the landed tick.lane() unpacks a 3-tuple and
+    # ★ L-adr-0044 reconciliation: the landed the Step reader unpacks a 3-tuple and
     # ANDs it as `accepted and fixpoint and not review_owed`. That projection must
     # agree with l2_complete() on every fixture — and must LOSE no conjunct: K and
     # the open-brief ride with the fact each belongs to, exactly as
@@ -1134,7 +1134,7 @@ for name, files in (("L2", done),
                                     cl["review_owed"]), (name, cl)
     assert (acc and fix and not owed_rev) == fold.l2_complete(cl), (name, cl)
     assert dict(fold.closable(fx[0], fx[2][C])) == dict(cl), \
-        "a charter dict reads the same as its id — tick.lane() passes the dict"
+        "a charter dict reads the same as its id — the Step reader passes the dict"
 
 # (iii) the `owed <= K` conjunct, which nothing exercised before: a charter whose
 # specs are OTHERWISE all accepted, with the fixpoint, no open brief and a complete
@@ -3408,7 +3408,7 @@ board0472_6b = fold.render(*ledger(**{
     "L-builder-9414.jsonl": built0472_6b, "L-grader-9414.jsonl": graded0472_6b,
     "L-reviewer-9414.jsonl": reviewed0472_6b, "L-executor-9414.jsonl": shipped0472_6b,
     "L-spec-writer-9414.jsonl": due0472_6b, "L-planner-9414.jsonl": [l1_0472_6b]}))
-lines0472_6b = board0472_6b.splitlines()
+lines0472_6b = board0472_6b.split("## PROVING", 1)[1].split("\n## ", 1)[0].splitlines()
 rows0472_6a = [i for i, ln in enumerate(lines0472_6b) if ln.strip().startswith(f"{C0472_6a} ·")]
 rows0472_6b = [i for i, ln in enumerate(lines0472_6b) if ln.strip().startswith(f"{C0472_6b} ·")]
 assert len(rows0472_6a) == 1 and len(rows0472_6b) == 1, (rows0472_6a, rows0472_6b, board0472_6b)
@@ -3420,7 +3420,7 @@ print("0472-AC6 ok")
 # its suffix — now on the new PROVING row, not CHARTER CLOSE (D112 survives
 # SD2's move); a proving charter with c["unbuilt"] == 0 renders no suffix ──
 board0472_12 = fold.render(*closed)
-prov_line0472_12 = next(line for line in board0472_12.splitlines()
+prov_line0472_12 = next(line for line in board0472_12.split("## PROVING", 1)[1].split("\n## ", 1)[0].splitlines()
                         if line.strip().startswith(C + " ·"))
 assert prov_line0472_12.strip().endswith("1 closed unbuilt"), prov_line0472_12
 assert not row0472_6a.endswith("closed unbuilt"), row0472_6a
@@ -4805,3 +4805,60 @@ def test_base_red_incomplete_presence_1196():
 
 
 test_base_red_incomplete_presence_1196()
+
+# Readers consume the same Steps; malformed input must remain visible.
+def test_next_board_1495():
+    import hashlib
+    from dataclasses import replace
+    from unittest.mock import patch
+    import lane_rules
+    import nextstep
+    step = nextstep.Step('L-spec-9495', 'spec', 'planned', 'hold', None,
+                         'executor', 'fixture:1', 'undetermined: bad\nreason\x00here',
+                         'valid input', fold.NOW.isoformat())
+    fixture = ledger()
+    with patch.object(nextstep, 'next_steps', return_value=[step]) as evaluate:
+        board = fold.render(*fixture)
+        assert evaluate.call_count == 1
+    section = board.split('## NEXT (1)\n', 1)[1].split('\n## ', 1)[0]
+    lines = [line.strip() for line in section.splitlines() if line.strip()]
+    assert lines == ['L-spec-9495 · hold · executor · undetermined: bad reason here'], lines
+    assert all(len(line.split(' · ')) == 4 for line in lines)
+    with patch.object(nextstep, 'next_steps', side_effect=RuntimeError('unavailable')):
+        failed = fold.render(*fixture)
+    assert 'undetermined: next_steps failed: RuntimeError' in failed and '## HEALTH' in failed
+    limits = lane_rules.load()
+    action = replace(step, state='action', action='merge-gate', owner='tick',
+                     reason='condition met', since=(fold.NOW - timedelta(minutes=31)).isoformat())
+    row = fold.step_row(action, limits, fold.NOW)
+    assert row['rule'] == 'gate' and row['overdue'] and row['reason_live']
+    for reason, rule in [('undetermined: bad', 'undetermined'), ('held: upstream', 'dependency-held'),
+                         ('wave 2 waiting', 'wave-held'), ('judgment required', 'idle')]:
+        assert fold.step_row(replace(step, reason=reason), limits, fold.NOW)['rule'] == rule
+    for since in (None, '', 'bad', '2026-10-23'):
+        row = fold.step_row(replace(action, since=since), limits, fold.NOW)
+        assert row['rule'] == 'undetermined' and row['overdue'] and row['limit_min'] == 0
+    assert not fold.step_row(replace(action, trigger=None), limits, fold.NOW)['reason_live']
+    sweep = replace(action, item='L-check-9495', action='sweep-check', stage='live',
+                    since=(fold.NOW - timedelta(minutes=121)).isoformat())
+    sweep_row = fold.step_row(sweep, limits, fold.NOW)
+    assert sweep_row['rule'] == 'sweep-check' and sweep_row['limit_min'] == 120
+    assert sweep_row['overdue'] and sweep_row['reason_live']
+    fixture = ledger(**{'L-planner-9495.jsonl': [
+        dict(type='spec-written', subject='L-spec-9495', ts=stamp(1)),
+        dict(type='spec-written', subject='L-spec-9496', ts=stamp(1))],
+        'L-operator-9495.jsonl': [dict(type='spec-killed', subject='L-spec-9496', ts=stamp())]})
+    events, specs = fixture[:2]
+    import tick
+    expected = tick._steps(events, specs, fold.NOW)
+    board = fold.render(*fixture)
+    actual = [line.strip() for line in board.split('## NEXT (', 1)[1].split('\n', 1)[1]
+              .split('\n## ', 1)[0].splitlines() if line.strip()]
+    assert len(actual) == len(expected) == 1 and actual[0].startswith('L-spec-9495 · '), actual
+    assert all(len(line.split(' · ')) == 4 for line in actual)
+    body = json.dumps(dict(lines=lines, live=actual, health='## HEALTH' in failed, mapping='ok'), sort_keys=True)
+    print(json.dumps(dict(url='cli://board/NEXT', status=0,
+                         body_sha256=hashlib.sha256(body.encode()).hexdigest(), body_excerpt=body)))
+
+
+test_next_board_1495()

@@ -30,6 +30,8 @@ always use `--detach`. Never sleep or poll CI in a tool call. After starting
 something, move to the next actionable row. Check results on the next pass
 from the ledger.
 
+The Executor handles judgment and exceptions only; it never re-dispatches routine work (`build`, `grade`, `review`, `rebuild`, `regrade`, `merge-gate`, `merge`) on a tick-owned Step.
+
 ## Input
 
 - The prompt: your spawn id, the lane (one line per actionable subject with its
@@ -58,7 +60,7 @@ moment `BOARD_OWNERS` names you as its owner.
 | Lane says | You check | You do |
 |---|---|---|
 | **a `question` with no `decision` naming it** (a decision's `ref` is the question's `src`, as `doit events` prints it) | reversible, with a `default`, past its `deadline`? | reversible → decide: `doit append decision <subject> ref=<the question's src> why="…" revert="…"`. Irreversible, or no default → `doit append escalation-blocking <subject> why="…"`. Before the deadline: nothing — the builder is working on the default. |
-| **a `spawn-failed` or `spawn-stale`** on the subject with no later `spawn-done` from the same role | its `why`/`reason` | `api_error` → nothing; already escalated. A refusal (`is_error`) or `contamination` → `escalation-blocking` naming the contract: the packet or the contract text is wrong (D120). `reason` in `{unserved, timeout}` (L-charter-0033) → counted exactly as `carry-failed`'s own row: re-dispatch on the first and second such failure on this subject (`doit events <subject>` for the prior count), `escalation-blocking` naming the contract only on the third. This never manufactures a round: a `reviewer` re-dispatched here after an `unserved`/`timeout` failure goes back at the SAME round (1 or 2) it was already at — this rule never extends a reviewer past its existing round-2 cap, regardless of failure reason. `reason=commit-shape` (or `reason` starting with `commit-shape`) → never retried as a grader and never escalated on first sight — it routes to the same `COMMIT-SHAPE` builder rework the `build-done` bullet above dispatches (`packet_builder_rework`, hint `squash to exactly one commit above PINNED_BASE_SHA`), and it clears only when that rework's own `build-done` yields `criterion-cleared criterion=COMMIT-SHAPE`; a repeated standing `COMMIT-SHAPE` on the same subject follows that bullet's loop guard — one further such rework, `escalation-blocking` naming the contract on the third occurrence — and no merge, no gate and no grader dispatch happens meanwhile, nor does the Executor itself ever squash, edit or merge on this path. `reason` starting with `repeat-rejection:` (L-spec-0435, R10(b)) → never re-dispatch: it clears only on a fresh `spec-written` or ANY `thinker`/`operator` `decision`/`unblocked` on the subject (regrade or not) — a rework/`build-done` alone changes nothing, so touch nothing until one of those two lands. `reason` starting with `cap:` (R10(c)) → also never re-dispatch, and its reset path is narrower still: only a `decision{regrade: "yes"}` from `thinker`/`operator`, or a fresh `build-done` newer than the newest counted grader run (L-spec-0482/R12.c — a rework resets the cap outright, and the Executor re-dispatches then), clears it — not a fresh `spec-written`, not any other `decision`. Null output, missing file, or changed repo → re-dispatch once with the same packet; a second failure → `escalation-blocking`. A `spawn-stale` is the tick's, not this row's (L-charter-0042 R13b): `autodispatch.run` re-dispatches it once, within ten minutes of the death becoming visible, and escalates on the second death — nothing here re-dispatches a `spawn-stale`. |
+| **a `spawn-failed` or `spawn-stale`** on the subject with no later `spawn-done` from the same role | its `why`/`reason` | `api_error` → nothing; already escalated. A refusal (`is_error`) or `contamination` → `escalation-blocking` naming the contract: the packet or the contract text is wrong (D120). `reason` in `{unserved, timeout}` (L-charter-0033) → counted exactly as `carry-failed`'s own row: re-dispatch on the first and second such failure on this subject (`doit events <subject>` for the prior count), `escalation-blocking` naming the contract only on the third. This never manufactures a round: a `reviewer` re-dispatched here after an `unserved`/`timeout` failure goes back at the SAME round (1 or 2) it was already at — this rule never extends a reviewer past its existing round-2 cap, regardless of failure reason. `reason=commit-shape` (or `reason` starting with `commit-shape`) → never retried as a grader and never escalated on first sight — it routes to the same `COMMIT-SHAPE` builder rework the `build-done` bullet above dispatches (`packet_builder_rework`, hint `squash to exactly one commit above PINNED_BASE_SHA`), and it clears only when that rework's own `build-done` yields `criterion-cleared criterion=COMMIT-SHAPE`; a repeated standing `COMMIT-SHAPE` on the same subject follows that bullet's loop guard — one further such rework, `escalation-blocking` naming the contract on the third occurrence — and no merge, no gate and no grader dispatch happens meanwhile, nor does the Executor itself ever squash, edit or merge on this path. `reason` starting with `repeat-rejection:` (L-spec-0435, R10(b)) → never re-dispatch: it clears only on a fresh `spec-written` or ANY `thinker`/`operator` `decision`/`unblocked` on the subject (regrade or not) — a rework/`build-done` alone changes nothing, so touch nothing until one of those two lands. `reason` starting with `cap:` (R10(c)) → also never re-dispatch, and its reset path is narrower still: only a `decision{regrade: "yes"}` from `thinker`/`operator`, or a fresh `build-done` newer than the newest counted grader run (L-spec-0482/R12.c — a rework resets the cap outright, and the tick resumes then), clears it — not a fresh `spec-written`, not any other `decision`. Null output, missing file, or changed repo → re-dispatch once with the same packet; a second failure → `escalation-blocking`. A `spawn-stale` is the tick's, not this row's (L-charter-0042 R13b): `autodispatch.run` re-dispatches it once, within ten minutes of the death becoming visible, and escalates on the second death — nothing here re-dispatches a `spawn-stale`. |
 | **`inbound:<source> · uncarried`** (L-spec-0190, R9) | is `<source>` a PR url? `doit events <source>` for a prior `inbound-registered` naming it | Run `doit carry <source> --project albert-scott --repo "$R/repos/albert-scott"` — **backgrounded**, the one bounded exception to "never awaited": `doit carry` itself dispatches `spec-writer` un-detached and blocks in-process on the seat result, so start it in the background and keep serving the lane while it runs, bounded by the `spec-writer` role's own dispatch timeout (`dispatch.ROLES["spec-writer"][1]`, 30 minutes at HEAD — the row names the mechanism, not a hardcoded number). A v4 source needs no prior registration (its ledger record's own `status: registered` is its registration); a PR source does — add `--from-ledger` to the same command (it resolves `title`/`body` from the newest `inbound-registered` event naming `<source>` in-process, never a shell); refuse to dispatch a PR source with no such event (the human ingest gate, ADR-0028-5, stays human except for authors in `trusted_inbound_authors.toml`, whose PRs the `intake` actor registers (L-charter-0031)). On exit: a stderr containing the literal substring `timeout after` is not counted at all — evidence the seat was not served in time, not evidence the source is bad — leave it for the next tick. Any other non-zero exit → `doit append carry-failed <source> attempt=<n> error="<the last stderr line>"`, where `<n>` is one more than the count of prior `carry-failed` events on this subject (`doit events <source>`). The **third** such failure additionally → `doit append escalation-blocking <source> why="three carry attempts failed" default="leave <source> uncarried; no further carry attempt until an operator decides" deadline=<one business day out> revert="an operator doit append decision <source> ref=<the escalation's src> …, or a corrected v4 record/PR clears the root cause and the next carry.uncarried() pass offers it again"` — escalation fires on the third failure only, never earlier. |
 | **`written`** | a `spec-carried` event on this subject? a footprint shared with a `building` spec in the same wave? | **The spec reaching you is already audited** — the Planner dispatches each spec's `spec-auditor` and its rewrite before `l1-complete` (§3.5), so there is no audit for you to run and none to wait for. A spec carrying a **`spec-carried`** event **skips the v2 spec-audit entirely** and is reviewed later at the tier landed on that event — read `tier` (`full` / `gates-only`) **verbatim off the event**, never re-derived. A shared footprint is **advisory**: note it, never block and never wait on it — a merge conflict is a re-dispatch, below. The tick dispatches every eligible `written` spec on its own (`autodispatch.run`, `doit tick` — L-charter-0042 R1): act only on a `written` spec with an `autodispatch-failed` newer than its `spec-written`, on that failure's reason. |
 | **`graded` / `reviewing` / `shipped`-not-accepted** — the pipeline after a build | **the newest** of `build-done`, `verdict`, `review` on the subject | see the block below; act on that one event only. |
@@ -95,21 +97,14 @@ moment `BOARD_OWNERS` names you as its owner.
   rows are yours, and a build already blocked on a question does not wait for
   the deadline: decide now if it is reversible. An answered question is tick-owned (see below);
   an undecidable one → `escalation-blocking` with the `build-blocked` reason.
-- **newest is a `verdict`**: a `rejected-criterion` standing (none
-  `criterion-cleared` since) → **rework**: dispatch `builder` on the same
-  worktree and branch, the packet carrying every standing criterion with its
-  `why` and every `must-fix` `reverify` line. Never bounce to the Planner
-  (D5). Not confirmed with nothing standing: `could_not_run` → confirm
-  the checker runs from the worktree and re-dispatch the grader once, again →
-  `escalation-blocking` (infra, not a deficiency — §5.3). Only `cannot-assess`
-  is tick-owned (see below).
-- **newest is a `review`**: a `must-fix` standing → **rework** as above (the
-  reverify lines are the packet's centre); the rework re-enters at
-  `build-done`. Nothing standing and the verdict confirmed → **merge**:
-  **Tick-owned: gate** — read the tick's `merge-gate-clean` / `merge-gate-*`
-  result, using the spec-written event's footprint as the grant. After a clean
-  gate, projects other than albert-scott use
-  `git -C "$REPO" merge --no-ff <branch> -m "merge(<spec>): <goal line>"`.
+- **newest is a `verdict`**: standing rejected criteria and review findings
+  are tick-owned rebuild/regrade/review Steps. Read NEXT; act only on an
+  executor-owned hold or a transport failure requiring judgment. `could_not_run`
+  is an infrastructure exception: confirm the checker runs from the worktree;
+  an executor-owned failure may retry the grader once, then escalate (§5.3).
+- **newest is a `review`**: routine gate and merge work belongs to the tick.
+  **Tick-owned: gate** — read its `merge-gate-clean` / `merge-gate-*` result
+  and NEXT. An executor-owned merge conflict follows the exception below.
   **That merge can fail on a real conflict, and a conflict is a `builder`
   re-dispatch, never a resolution of yours.** Abort it
   (`git -C "$REPO" merge --abort`), append `merge-conflict <spec>
@@ -126,7 +121,7 @@ moment `BOARD_OWNERS` names you as its owner.
   **Project `albert-scott` merges through a window, not directly** (L-spec-0765).
   **Tick-owned: gate** — read the tick's `merge-gate-clean` / `merge-gate-*`
   result. Read `doit queue list --project albert-scott`; correct membership only
-  with `doit queue add|remove <spec> --why TEXT`. Run
+  with `doit queue add|remove <spec> --why TEXT`. The tick runs
   `doit window-run --project albert-scott --detach` each pass. It returns at once,
   launching at most one window into a free train slot, and records outcomes.
   A second tick finding the single-instance lock exits 3 harmlessly. Never
@@ -158,7 +153,7 @@ moment `BOARD_OWNERS` names you as its owner.
   merge directly as below. You never set `DOIT_WINDOW_GATE=off` yourself, never loop a
   third verification, and never move master by any other route. Every other project
   keeps the direct path below.
-  Merge clean → `doit append shipped <spec> sha=<merge sha> branch=<branch>` →
+  Read the tick's shipped result →
   **project `albert-scott`: stop here for the deploy dispatch** — its deploys
   belong to the `deployer` (L-charter-0032), an automated actor outside this
   pane; never run `doit deploy` for an albert-scott spec. A failed auto-deploy
@@ -179,7 +174,7 @@ moment `BOARD_OWNERS` names you as its owner.
   quoting the `deploy-failed` event's `why` (rollback first, §5.8 — revert before
   you diagnose). Exit 3 → another deploy holds the lock; do nothing, the next pass
   retries. Gate exit 1 with `removed[]` / `reverted[]` →
-  rework with them in the packet; "could not determine" → `escalation-blocking`
+  read the tick-owned rework Step; "could not determine" → `escalation-blocking`
   quoting it — undetermined is never clean, and it is never yours to force.
 
 Anything not here is not yours. A `written` spec whose charter was retracted
