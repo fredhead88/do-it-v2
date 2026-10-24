@@ -428,7 +428,10 @@ def infra_provision_checks():
             code, output = sweep_provision.run_check(root / "tree", "fixture", "# pg_scratch\ntrue", record)
             assert code == 2 and output == b"infra:no-space\n"
         rows = fold.read_events(use_cache=False)
-        assert len(rows) == 1 and rows[0]["type"] == "infra-failure" and rows[0]["actor"] == "owed-sweeper"
+        assert [row["type"] for row in rows] == ["resource-created", "infra-failure", "resource-reaped"]
+        assert all(row["actor"] == "owed-sweeper" for row in rows)
+        assert rows[0]["ref"] == rows[2]["ref"] == str(root / "pg")
+        assert rows[0]["kind"] == "tmpdir" and rows[2]["reason"] == "creator-finally"
         responses.extend(rows)
         with patch.object(build_runner, "_process", return_value=(7, b"FAILED fixture assertion")):
             assert sweep_provision.run_check(root / "tree", "fixture", "exit 7", record) == (7, b"FAILED fixture assertion")

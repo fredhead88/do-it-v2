@@ -267,13 +267,48 @@ def _delete(path):
         shutil.rmtree(path)
 
 
-def _scan_dir(dirpath, uid, min_age_min, now, proc_root, dry_run):
+def _recorded_overlap(path, refs):
+    path = pathlib.Path(os.path.realpath(path))
+    return any(path == ref or path in ref.parents or ref in path.parents for ref in refs)
+
+
+def _reap_recorded(events, *, dry_run=False, scratch_root=None, proc_root="/proc"):
+    """Resolve untrusted refs before delegating to the registry's existing proofs."""
+    import resources
+    if not resources.live(events):
+        return []
+    roots = [pathlib.Path("/tmp"), pathlib.Path("/var/tmp"), fold.ROOT / "worktrees"]
+    if scratch_root is not None:
+        roots.append(pathlib.Path(scratch_root))
+    else:
+        roots.append(scratch.root())
+    roots = [p.resolve() for p in roots]
+    refused, unsafe = [], set()
+    for resource in resources.live(events):
+        ref = resource.ref
+        if not ref or not pathlib.Path(ref).is_absolute():
+            why = "undetermined: malformed ref"
+        else:
+            path = pathlib.Path(os.path.realpath(ref))
+            why = None if any(path != root and root in path.parents for root in roots) else "undetermined: ref outside allowed roots"
+        if why:
+            unsafe.add(ref)
+            refused.append(resources.ReapResult(ref, resource.kind, "refused", why))
+    safe_events = [e for e in events if not (e.get("type") == "resource-created" and (not isinstance(e.get("ref"), str) or not e.get("ref") or e.get("ref") in unsafe))]
+    return refused + resources.reap(safe_events, dry_run=dry_run,
+        safety=lambda r, e: resources._default_safety(r, e, proc_root=proc_root))
+
+
+def _scan_dir(dirpath, uid, min_age_min, now, proc_root, dry_run, recorded_refs=()):
     """SD7's decision, applied to every top-level entry of `dirpath`. Shared
     by `root`; scratch has its own fixed retention policy. A failure listing `dirpath` itself propagates (the caller
     decides whether that is fatal, per surface)."""
     removed, kept = [], []
     for name in sorted(os.listdir(dirpath)):
         path = os.path.join(dirpath, name)
+        if _recorded_overlap(path, recorded_refs):
+            kept.append({"path": path, "reason": "recorded resource; registry owns cleanup"})
+            continue
         try:
             kind, reason = _decide(path, uid, min_age_min, now, proc_root, True)
         except Undetermined:
@@ -293,6 +328,9 @@ def _scan_dir(dirpath, uid, min_age_min, now, proc_root, dry_run):
                 continue
             for cname in child_names:
                 cpath = os.path.join(path, cname)
+                if _recorded_overlap(cpath, recorded_refs):
+                    kept.append({"path": cpath, "reason": "recorded resource; registry owns cleanup"})
+                    continue
                 try:
                     ckind, creason = _decide(cpath, uid, min_age_min, now, proc_root, False)
                 except Undetermined:
@@ -532,7 +570,7 @@ _SCRATCH_PROTECTED = frozenset({
 })
 
 
-def _scan_scratch(scratch_root, uid, now, proc_root, dry_run):
+def _scan_scratch(scratch_root, uid, now, proc_root, dry_run, recorded_refs=()):
     """Fixed scratch retention, with no recursive deletion of live containers."""
     root = pathlib.Path(scratch_root)
     if root.is_symlink():
@@ -548,6 +586,9 @@ def _scan_scratch(scratch_root, uid, now, proc_root, dry_run):
             candidates.append((path, 12 * 3600))
     snapshot, sockets, snapshot_error = None, None, None
     for path, max_age in candidates:
+        if _recorded_overlap(path, recorded_refs):
+            kept.append({"path": str(path), "reason": "recorded resource; registry owns cleanup"})
+            continue
         reason = None
         try:
             if path.lstat().st_uid != uid:
@@ -913,16 +954,29 @@ def run(root="/tmp", uid=None, min_age_min=120, dry_run=False, now=None, proc_ro
     mode = "pressure" if frac >= 0.70 else "normal"
     effective_min_age = 30 if mode == "pressure" else min_age_min
 
-    removed, kept = _scan_dir(root, uid, effective_min_age, now, proc_root, dry_run)
+    import resources
+    recorded_refs = {pathlib.Path(os.path.realpath(r.ref)) for r in resources.live(events or [])
+                     if pathlib.Path(r.ref).is_absolute()}
+    removed, kept = _scan_dir(root, uid, effective_min_age, now, proc_root, dry_run, recorded_refs)
 
     errors = {}
     if scratch_root is not None:
         try:
-            s_removed, s_kept = _scan_scratch(scratch_root, uid, now, proc_root, dry_run)
+            s_removed, s_kept = _scan_scratch(scratch_root, uid, now, proc_root, dry_run, recorded_refs)
             removed += s_removed
             kept += s_kept
         except Exception as e:
             errors["scratch"] = str(e)
+
+    if events is not None:
+        try:
+            for row in _reap_recorded(events, dry_run=dry_run, scratch_root=scratch_root, proc_root=proc_root):
+                if row.action in ("reaped", "would-reap"):
+                    removed.append(row.ref)
+                else:
+                    kept.append({"path": row.ref, "reason": row.reason})
+        except Exception as exc:
+            errors["recorded"] = "undetermined: " + str(exc)
 
     stopped_servers = []
     if kill_fn is not None:
@@ -1013,6 +1067,8 @@ def main(argv=None):
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     with open(log_path, "a") as f:
         f.write(f"{ts} /tmp {result['before_pct']}% -> {result['after_pct']}%\n")
+    print(json.dumps({"removed": len(result["removed"]), "kept_count": len(result["kept"]),
+                      "kept": result["kept"], "errors": result.get("errors", {})}, sort_keys=True))
     return 0
 
 

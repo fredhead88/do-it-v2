@@ -51,6 +51,7 @@ def make_git(path, as_file):
         git.write_text("gitdir: /nowhere\n")
     else:
         git.mkdir()
+        (git / "HEAD").write_text("ref: refs/heads/main\n")
 
 
 def raises(exc_type, fn, *a, **kw):
@@ -181,3 +182,32 @@ check(e6 is not None, "AC6: sub() must raise ScratchRootError, identical to root
 print("AC6 ok")
 
 print(f"scratch: {N} checks pass")
+
+from unittest.mock import patch
+import hashlib, json
+base1496 = harness.test_root("empty-dotgit-1496")
+set_env(DOIT_ROOT=base1496 / "ledger", DOIT_SCRATCH=base1496 / "empty" / "child")
+(base1496 / "empty" / ".git").mkdir(parents=True)
+check(scratch.root() == (base1496 / "empty" / "child").resolve(), "empty git directory accepted")
+for kind1496 in ("nonempty", "file", "unreadable"):
+    parent1496 = base1496 / kind1496
+    parent1496.mkdir()
+    git1496 = parent1496 / ".git"
+    if kind1496 == "file":
+        git1496.write_text("gitdir: fixture")
+    else:
+        git1496.mkdir()
+        if kind1496 == "nonempty":
+            (git1496 / "HEAD").write_text("fixture")
+    set_env(DOIT_SCRATCH=parent1496 / "child")
+    real_iter1496 = pathlib.Path.iterdir
+    def iter1496(path):
+        if kind1496 == "unreadable" and path == git1496:
+            raise PermissionError("fixture unreadable")
+        return real_iter1496(path)
+    with patch.object(pathlib.Path, "iterdir", iter1496):
+        check(raises(scratch.ScratchRootError, scratch.root) is not None, kind1496 + " refused")
+    check(not (parent1496 / "child").exists(), "refused creates nothing")
+body1496 = json.dumps(dict(empty="accepted", nonempty="refused", file="refused", unreadable="refused"), sort_keys=True)
+print(json.dumps(dict(url="cli://scratch/AC7", status=0, body_sha256=hashlib.sha256(body1496.encode()).hexdigest(), body_excerpt=body1496)))
+print("L1496-AC7 ok")

@@ -332,7 +332,7 @@ REQUIRED_ROWS = {
 }
 
 # resource-created intentionally stays open: every lane records its resources.
-EMITS["resource-reaped"] = {"tick", "executor", "operator"}
+EMITS["resource-reaped"] = {"tick", "executor", "operator", "owed-sweeper"}
 
 # L-spec-1494 A3 (amended): only the failure-producing ledgers own this stamp.
 EMITS["infra-failure"] = {"builder", "grader", "reviewer", "spec-writer", "research",

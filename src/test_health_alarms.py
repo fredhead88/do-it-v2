@@ -29,7 +29,7 @@ def event(kind, age=0, **fields):
 
 
 def healthy():
-    return dict(backup=dict(ts=NOW.isoformat(), age_s=0, ok=True), mirror_ahead_s=0,
+    return dict(used_fraction=0.5, backup=dict(ts=NOW.isoformat(), age_s=0, ok=True), mirror_ahead_s=0,
                 release_log_failed=[], locks={k: dict(held=False, since=None)
                                               for k in ("deploy", "release")},
                 disk_free_gb={"/": 100, "scratch": 100})
@@ -213,7 +213,7 @@ class HealthTests(unittest.TestCase):
              patch.object(health, "release_log", return_value=([], None)), \
              patch.object(fold, "read_events", return_value=[event("deploy-started", 1700)]), \
              patch.object(health.scratch, "root", return_value=pathlib.Path(_ISO.name)), \
-             patch.object(health.shutil, "disk_usage", return_value=type("Disk", (), {"free": 100 * 1024**3})()):
+             patch.object(health.shutil, "disk_usage", return_value=type("Disk", (), {"free": 100 * 1024**3, "used": 100 * 1024**3, "total": 200 * 1024**3})()):
             probes = health.live_probes(NOW)
             self.assertEqual(probes["locks"]["deploy"]["since"], event("deploy-started", 1700)["ts"])
             self.assertEqual(health.evaluate([], NOW, probes=probes), [])
@@ -339,7 +339,7 @@ class RunTests(unittest.TestCase):
         (hooks / "sitecustomize.py").write_text("""import backup, pathlib, scratch, shutil, subprocess, types
 scratch.root = lambda: pathlib.Path("unused-scratch")
 backup.last_push = lambda root: dict(age_s=0, ts=None, ok=True)
-shutil.disk_usage = lambda path: types.SimpleNamespace(free=100 * 1024**3)
+shutil.disk_usage = lambda path: types.SimpleNamespace(free=100 * 1024**3, used=100 * 1024**3, total=200 * 1024**3)
 _read = pathlib.Path.read_text
 def read(path, *args, **kwargs):
     if str(path) in ('/proc/locks', '/var/log/albert-scott/daily-release.log'):
@@ -361,6 +361,55 @@ subprocess.run = run
         self.assertEqual(list(self.events.iterdir()), [])
         self.assertIn("doit health-alarms [--dry-run]", subprocess.check_output([str(DOIT), "help"], text=True))
         print("AC11 ok")
+
+
+    def test_disk_boundaries_1496(self):
+        import hashlib
+        table = []
+        for value in (0.0, 0.5, 0.8999, 0.90, 0.95, 1.0, None, "x", float("nan"), -0.1, 1.5):
+            row = health.disk_alarm(value)
+            valid = isinstance(value, (int, float)) and value == value and 0 <= value <= 1
+            if valid and value < .9:
+                self.assertIsNone(row)
+                outcome = "none"
+            else:
+                self.assertEqual(row["alarm"], "disk-used")
+                if not valid:
+                    self.assertTrue(row["reading"]["undetermined"])
+                outcome = "alarm" if valid else "undetermined"
+            table.append([str(value), outcome])
+        self.assertIn("disk-used", health.ALARMS)
+        body = json.dumps(table)
+        print(json.dumps(dict(url="cli://health/AC8", status=0, body_sha256=hashlib.sha256(body.encode()).hexdigest(), body_excerpt=body)))
+        print("L1496-AC8 ok")
+
+    def test_disk_window_1496(self):
+        import hashlib
+        p = healthy()
+        p["used_fraction"] = .93
+        calls = []
+        def sender(argv):
+            calls.append(argv)
+            return subprocess.CompletedProcess(argv, 0, "200\n", "")
+        table = []
+        for minutes, count in ((0, 1), (360, 1), (720, 1), (1439, 1), (1441, 2)):
+            self.assertEqual(health.run(now=NOW + timedelta(minutes=minutes), probes=p, sender=sender), 0)
+            ev = [e for e in fold.read_events(use_cache=False) if e["type"] == "health-alarm" and e["alarm"] == "disk-used"]
+            self.assertEqual(len(ev), count)
+            self.assertEqual(len(calls), count)
+            table.append([minutes, len(ev), len(calls)])
+        p["used_fraction"] = .5
+        p["disk_free_gb"]["/"] = 10
+        for minutes in (0, 361):
+            self.assertEqual(health.run(now=NOW + timedelta(minutes=minutes), probes=p, sender=sender), 0)
+        self.assertEqual(len([e for e in fold.read_events(use_cache=False) if e.get("alarm") == "disk-low"]), 2)
+        alarm = dict(alarm="release-failed", severity="immediate", reading={"key": "same"})
+        prior = dict(type="health-alarm", ts=NOW.isoformat(), telegram="sent", **alarm)
+        self.assertEqual(health._plan(alarm, [prior], NOW + timedelta(hours=12)), (False, False))
+        self.assertEqual(health._plan(alarm, [prior], NOW + timedelta(minutes=1441)), (True, True))
+        body = json.dumps(dict(disk_used=table, disk_low="again at 361 minutes", release_failed="86400 seconds"))
+        print(json.dumps(dict(url="cli://health/AC9", status=0, body_sha256=hashlib.sha256(body.encode()).hexdigest(), body_excerpt=body)))
+        print("L1496-AC9 ok")
 
 
 if __name__ == "__main__":

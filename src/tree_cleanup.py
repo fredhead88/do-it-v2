@@ -225,6 +225,11 @@ def _shipped_event(evs):
     return next((e for e in reversed(evs) if e.get("type") == "shipped"), None)
 
 
+def _recorded_worktree(path, events):
+    import resources
+    return any(r.ref == str(path) for r in resources.live(events))
+
+
 def reap_worktrees(events, *, dry_run=False):
     """R15a: a spec's worktree goes the instant ITS OWN reason to exist ends —
     it shipped and origin/<main> already holds the merge sha, or it was
@@ -282,6 +287,9 @@ def reap_worktrees(events, *, dry_run=False):
             if not wt:
                 continue  # nothing to reap for this spec right now
             row = {"spec": sid, "project": project, "path": wt}
+            if _recorded_worktree(wt, events):
+                retained.append({**row, "why": "recorded resource; registry owns cleanup"})
+                continue
             if sid in live_builders:
                 retained.append({**row, "why": "builder spawn live"})
                 continue
@@ -450,6 +458,8 @@ def reap_merged_specs(events, *, dry_run=False):
         else:
             for spec in spec_ids:
                 branch, wt, dead, why = judge(repo, spec, specs[spec]["evs"], main_branch, wts, main_ids)
+                if wt and _recorded_worktree(wt, events):
+                    dead, why = False, "recorded resource; registry owns cleanup"
                 if dead and not dry_run:
                     proof = git(repo, "merge-base", "--is-ancestor", branch, main_branch, ok=True).returncode != 0
                     try:
@@ -557,6 +567,8 @@ def main(argv=None):
     reaped, retained, reasons = [], [], []
     for spec in sorted(s["id"] for s in specs.values() if s["charter"] == a.charter):
         branch, wt, dead, why = judge(repo, spec, specs[spec]["evs"], main_branch, wts, main_ids)
+        if wt and _recorded_worktree(wt, ev):
+            dead, why = False, "recorded resource; registry owns cleanup"
         if dead and not a.dry_run:
             proof = git(repo, "merge-base", "--is-ancestor", branch, main_branch, ok=True).returncode != 0
             try:

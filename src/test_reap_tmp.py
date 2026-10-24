@@ -107,6 +107,7 @@ def _forbidden(*a, **kw):
                           "hermetic test — only main() may, and only L0440-AC22 exercises that")
 
 
+_read_events1496 = fold.read_events
 scratch.root, fold.read_events = _forbidden, _forbidden
 
 
@@ -1485,3 +1486,210 @@ with tempfile.TemporaryDirectory(prefix="l1366-") as _base1366:
        "L1366-AC6: run exposes all suffixed entries in removed_scratch")
     ok(all(not pathlib.Path(p).exists() for p in runexpected1366), "L1366-AC6: run removes entries")
     print("L1366-AC6 ok")
+
+# L1496: exercise the real ledger and lifecycle APIs, with isolated process reads.
+import contextlib, hashlib
+from unittest.mock import patch
+from types import SimpleNamespace
+import resources, rechain, sweep_provision, dispatch
+
+
+def response1496(ac, body):
+    body = json.dumps(body, sort_keys=True)
+    print(json.dumps(dict(url="cli://reap-tmp/" + ac, status=0,
+                          body_sha256=hashlib.sha256(body.encode()).hexdigest(), body_excerpt=body)))
+    print("L1496-" + ac + " ok")
+
+
+@contextlib.contextmanager
+def fixture1496():
+    with tempfile.TemporaryDirectory(prefix="reaper-1496-") as d:
+        top = pathlib.Path(d)
+        ledger = top / "ledger"
+        proc = top / "proc"
+        (proc / "net").mkdir(parents=True)
+        (proc / "net/unix").write_text("Num RefCount Protocol Flags Type St Inode Path\n")
+        scr = top / "scratch"
+        scr.mkdir()
+        with (patch.object(fold, "read_events", _read_events1496),
+              patch.object(fold, "ROOT", ledger), patch.object(fold, "EVENTS", ledger / "events"),
+              patch.object(fold, "BOARD", ledger / "board.md"),
+              patch.object(resources, "PROC_ROOT", proc),
+              patch.object(scratch, "root", return_value=scr),
+              patch.dict(os.environ, DOIT_ROOT=str(ledger), DOIT_LEDGER_FILE="L-executor-1496.jsonl")):
+            yield top, ledger, proc, scr
+
+
+def fresh1496():
+    source = str(pathlib.Path(__file__).resolve().parent)
+    reader = "import sys,json; sys.path.insert(0,sys.argv[1]); import fold; print(json.dumps(fold.read_events(use_cache=False)))"
+    p = subprocess.run(["/usr/bin/python3", "-I", "-c", reader, source],
+                       env=os.environ.copy(), capture_output=True, text=True, check=True)
+    return json.loads(p.stdout)
+
+
+def terminal1496(subject="L-spec-1496"):
+    fold.append(["spec-written", subject], strict=True)
+    fold.append(["spec-killed", subject], strict=True)
+
+
+with fixture1496() as (top1496, ledger1496, proc1496, scr1496):
+    repo1496 = top1496 / "repo"
+    repo1496.mkdir()
+    def git1496(*args):
+        return rechain.out(repo1496, *args)
+    git1496("init", "-q", "-b", "main")
+    fp1496 = repo1496 / rechain.FINGERPRINT
+    fp1496.parent.mkdir(parents=True)
+    fp1496.write_text("before")
+    git1496("add", ".")
+    git1496(*rechain.IDENT, "commit", "-qm", "fixture")
+    pg1496 = top1496 / "pg.py"
+    pg1496.write_text("import sys\nif sys.argv[2] == 'loopback':\n print(\"ADMIN_DSN='\" + 'postgre' + 'sql://albert:' + '0'*32 + '@127.0.0.1:23456/postgres' + \"'\")\n")
+    regen1496 = top1496 / "fp.py"
+    regen1496.write_text("import pathlib,sys; pathlib.Path(sys.argv[2]).write_text('after')\n")
+    with patch.dict(os.environ, DOIT_RECHAIN_PG_CMD=f"/usr/bin/python3 {pg1496}",
+                    DOIT_RECHAIN_FINGERPRINT_CMD=f"/usr/bin/python3 {regen1496}"):
+        rechain.fingerprint(repo1496, git1496("rev-parse", "HEAD"), "fixture-window", ev=lambda *a, **k: None)
+    tree1496 = top1496 / "clone"
+    dash1496 = tree1496 / "dashboard"
+    dash1496.mkdir(parents=True)
+    (dash1496 / "package-lock.json").write_text('{"lockfileVersion":3}')
+    def required1496(argv, **kwargs):
+        if argv[0] == "npm":
+            (pathlib.Path(kwargs["cwd"]) / "node_modules").mkdir()
+            return ""
+        return "ADMIN_DSN='" + "postgre" + "sql://albert:" + "0"*32 + "@127.0.0.1:23456/postgres'\n"
+    with patch.object(sweep_provision.build_runner, "_required", side_effect=required1496):
+        sweep_provision.dashboard(tree1496, ledger1496, live=top1496 / "no-live")
+        (dash1496 / "node_modules").unlink()
+        (dash1496 / "package-lock.json").write_text('{"lockfileVersion":3,"different":true}')
+        with patch.object(sweep_provision.build_runner, "_required", side_effect=RuntimeError("fixture npm failure")):
+            try:
+                sweep_provision.dashboard(tree1496, ledger1496, live=top1496 / "no-live")
+                raise AssertionError("expected install failure")
+            except RuntimeError:
+                pass
+        record1496 = top1496 / "provisioning.json"
+        record1496.write_text('{"subject":"L-spec-1496"}')
+        with patch.object(sweep_provision.build_runner, "_process", return_value=(0, b"fixture")):
+            assert sweep_provision.run_check(tree1496, "base", "AS_LOCAL_PG_ADMIN", record1496) == (0, b"fixture")
+    rows1496 = fresh1496()
+    created1496 = [e for e in rows1496 if e["type"] == "resource-created"]
+    closed1496 = [e for e in rows1496 if e["type"] == "resource-reaped"]
+    assert len(created1496) == len(closed1496) == 5, (created1496, closed1496)
+    assert collections.Counter(e["kind"] for e in created1496) == {"worktree":1, "scratch-db":1, "tmpdir":3}
+    assert all(e["lane"] and e["subject"] for e in created1496)
+    assert collections.Counter(e["ref"] for e in created1496) == collections.Counter(e["ref"] for e in closed1496)
+    assert sum(e["reason"] == "promoted-to-cache" for e in closed1496) == 1
+    assert not resources.live(rows1496)
+    response1496("AC1", dict(created=5, reaped=5, kinds=dict(collections.Counter(e["kind"] for e in created1496)), promoted=1))
+
+with fixture1496() as (top1496, ledger1496, proc1496, scr1496):
+    terminal1496()
+    path1496 = scr1496 / "roundtrip"
+    path1496.mkdir()
+    resources.record("tmpdir", str(path1496), lane="check", subject="L-spec-1496")
+    assert len(list(scr1496.iterdir())) == 1  # deletion preflight census
+    assert resources.reap(fresh1496(), dry_run=False)[0].action == "reaped"
+    rows1496 = fresh1496()
+    assert len([e for e in rows1496 if e["type"] == "resource-reaped"]) == 1
+    raw1496 = [json.loads(line) for p in fold.EVENTS.glob("*.jsonl") for line in p.read_text().splitlines()]
+    assert all("actor" not in e for e in raw1496)
+    assert all(e.get(k) for e in rows1496 if e["type"] == "resource-created" for k in ("kind", "ref", "lane", "subject"))
+    response1496("AC2", dict(created=1, reaped=1, fresh_process=True, raw_actor_fields=0))
+
+survivors1496 = []
+for pressure1496 in (False, True):
+    with fixture1496() as (top1496, ledger1496, proc1496, scr1496):
+        tmp1496 = top1496 / "tmp"
+        tmp1496.mkdir()
+        fold.append(["spec-written", "L-spec-1496"], strict=True)
+        for parent1496 in (tmp1496, scr1496):
+            for j1496 in range(20):
+                p1496 = parent1496 / ("recorded-" + str(j1496))
+                p1496.mkdir()
+                resources.record("tmpdir", str(p1496), lane="build", subject="L-spec-1496")
+            for j1496 in range(5):
+                (parent1496 / ("legacy-" + str(j1496))).mkdir()
+            age_all(parent1496, NOW - timedelta(hours=25))
+        young1496 = tmp1496 / "young"
+        young1496.mkdir()
+        touch(young1496, NOW)
+        quota1496 = dict(used_bytes=75 if pressure1496 else 1, limit_bytes=100, limit_source="fixture")
+        with patch.object(reap_tmp, "user_quota", return_value=quota1496):
+            result1496 = reap_tmp.run(root=tmp1496, scratch_root=scr1496, events=fresh1496(), proc_root=proc1496, now=NOW)
+        alive1496 = [p for parent in (tmp1496, scr1496) for p in parent.glob("recorded-*")]
+        assert len(alive1496) == 40 and len(result1496["removed"]) == 10, result1496
+        assert all(any(k["path"] == str(p) for k in result1496["kept"]) for p in alive1496)
+        assert young1496.exists() and not result1496["errors"], result1496
+        survivors1496.append(dict(mode=result1496["mode"], recorded_survived=40, legacy_removed=10,
+                                  effective_min_age=30 if pressure1496 else 120, young="kept"))
+response1496("AC4", survivors1496)
+
+rooms1496 = []
+for case1496 in ("unrecorded", "terminal-worktree", "live-owner"):
+    with fixture1496() as (top1496, ledger1496, proc1496, scr1496):
+        tmp1496 = top1496 / "tmp"
+        tmp1496.mkdir()
+        path1496 = tmp1496 / "tmp-old"
+        path1496.mkdir()
+        age_all(tmp1496, NOW - timedelta(hours=25))
+        if case1496 == "live-owner":
+            fold.append(["spec-written", "L-spec-1496"], strict=True)
+            resources.record("tmpdir", str(path1496), lane="build", subject="L-spec-1496")
+        elif case1496 == "terminal-worktree":
+            path1496.rmdir()
+            repo1496 = top1496 / "repo"
+            repo1496.mkdir()
+            for argv1496 in (("init", "-q", "-b", "main"), ("-c", "user.name=t", "-c", "user.email=t@t", "commit", "--allow-empty", "-qm", "seed")):
+                rechain.out(repo1496, *argv1496)
+            path1496 = ledger1496 / "worktrees/l-spec-1496"
+            rechain.out(repo1496, "worktree", "add", "-b", "l-spec-1496", str(path1496))
+            fold.append(["spec-written", "L-spec-1496"], strict=True)
+            fold.append(["build-done", "L-spec-1496", "branch=l-spec-1496", "ready_sha=" + rechain.out(repo1496, "rev-parse", "HEAD")], strict=True)
+            fold.append(["spec-killed", "L-spec-1496"], strict=True)
+            resources.record("worktree", str(path1496), lane="build", subject="L-spec-1496")
+        original_run1496 = reap_tmp.run
+        def run1496(**kwargs):
+            return original_run1496(root=tmp1496, scratch_root=scr1496, events=fresh1496(), proc_root=proc1496, now=NOW)
+        disk1496 = lambda _: SimpleNamespace(free=(0 if path1496.exists() else 10 * 2**30), used=90 * 2**30, total=100 * 2**30)
+        with (patch.object(reap_tmp, "run", side_effect=run1496),
+              patch.object(reap_tmp, "reap_now", wraps=reap_tmp.reap_now) as call1496,
+              patch.object(reap_tmp, "_psql_pg_fn", return_value=None),
+              patch.object(fold, "read_events", wraps=fold.read_events) if fold.read_events is not _forbidden else patch.object(fold, "read_events", side_effect=lambda **kw: []),
+              patch.object(dispatch.shutil, "disk_usage", side_effect=disk1496)):
+            # run1496 reads the fixture in an isolated process, independent of the legacy guard.
+            result1496 = dispatch.ensure_room(tmp1496, 1)
+            assert call1496.call_count == 1
+        assert result1496 == (case1496 != "live-owner"), (case1496, result1496)
+        rooms1496.append([case1496, result1496])
+response1496("AC5", rooms1496)
+
+with fixture1496() as (top1496, ledger1496, proc1496, scr1496), tempfile.TemporaryDirectory(prefix="outside-1496-", dir="/dev/shm") as outside_name1496:
+    terminal1496()
+    good1496 = scr1496 / "good"
+    good1496.mkdir()
+    outside1496 = pathlib.Path(outside_name1496)
+    link1496 = scr1496 / "escape"
+    link1496.symlink_to(outside1496, target_is_directory=True)
+    resources.record("tmpdir", str(good1496), lane="check", subject="L-spec-1496")
+    events1496 = fresh1496()
+    for ref1496 in (str(outside1496), str(link1496), "", "relative"):
+        events1496.append(dict(type="resource-created", kind="tmpdir", ref=ref1496, lane="check", subject="L-spec-1496"))
+    result1496 = reap_tmp._reap_recorded(events1496, scratch_root=scr1496, proc_root=proc1496)
+    assert len(result1496) == 5, result1496
+    assert sum(row.action == "reaped" for row in result1496) == 1
+    assert all(row.reason.startswith("undetermined:") for row in result1496 if row.action == "refused")
+    assert outside1496.exists() and link1496.is_symlink() and not good1496.exists()
+    assert [e["ref"] for e in fresh1496() if e["type"] == "resource-reaped"] == [str(good1496)]
+    response1496("AC6", dict(unsafe_refused=4, targets_survive=True, valid_removed=1))
+
+# The retirement guard must fire before its passing production-file check is claimed.
+with tempfile.TemporaryDirectory(prefix="retired-negative-") as d1496:
+    fixture1496path = pathlib.Path(d1496) / "crontab"
+    manifest1496 = tomllib.loads((pathlib.Path(__file__).resolve().parents[1] / "retired.d/reaper-cutover.toml").read_text())
+    fixture1496path.write_text(manifest1496["retired"][0]["pattern"] + "\n")
+    checked1496 = subprocess.run([str(pathlib.Path(__file__).resolve().parents[1] / "doit"), "retired", "check", "--crontab-file", str(fixture1496path)], capture_output=True, text=True)
+    assert checked1496.returncode == 1, checked1496.stderr
+    response1496("AC10-negative", dict(retired_line_present=True, exit_code=1))

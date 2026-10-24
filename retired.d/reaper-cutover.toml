@@ -1,0 +1,17 @@
+[[retired]]
+name = "grader-view reaper"
+kind = "cron"
+paths = []
+pattern = '*/10 * * * * python3 /home/albert/.do-it/bin/reap-grader-views.py >> /home/albert/.do-it/logs/reap-grader-views.log 2>&1  # Thinker stopgap 2026-10-04, until 0042 R15 covers relay graders'
+
+[[retired]]
+name = "scratch-dotgit watch"
+kind = "cron"
+paths = []
+pattern = '* * * * * /home/albert/.do-it/bin/scratch-dotgit-watch.sh  # Thinker 2026-10-21: remove stray empty doit-scratch/.git (problem scratch-root-stray-dotgit); remove when scratch.root ignores empty .git'
+
+[[retired]]
+name = "self-deleting rechain and provision directories"
+kind = "code"
+pattern = 'TemporaryDirectory'
+paths = ["src/rechain.py", "src/sweep_provision.py"]

@@ -602,7 +602,10 @@ def _record():
     # is untouched — `worktree-reaped` never marks a charter reaped.
     worktree_reap_error = None
     worktrees_retained = None
+    recorded_reap = []
     try:
+        import reap_tmp
+        recorded_reap = [vars(row) for row in reap_tmp._reap_recorded(ev)]
         wt_reaped, wt_retained = tree_cleanup.reap_worktrees(ev)
         for row in wt_reaped:
             dispatch.emit(tick_path(), {}, "worktree-reaped", subject=row["spec"],
@@ -644,6 +647,8 @@ def _record():
         kv["autodispatch_error"] = autodispatch_error
     if lane_driver_log_error:
         kv["lane_driver_log_error"] = lane_driver_log_error
+    if recorded_reap:
+        kv["recorded_reap"] = recorded_reap
     if worktree_reap_error:
         kv["worktree_reap_error"] = worktree_reap_error
     if worktrees_retained is not None:

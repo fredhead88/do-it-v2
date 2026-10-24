@@ -66,3 +66,6 @@ do-it-v2-realm = "realm"
 
 [push.path]
 do-it-v2-realm = "/home/albert/do-it-v2-realm"
+
+[resources]
+upload_manifest = "/opt/albert-scott/docs/do-it/ledger/upload-manifest.jsonl"

@@ -4862,3 +4862,24 @@ def test_next_board_1495():
 
 
 test_next_board_1495()
+
+
+def test_resource_creator_actors_1496():
+    import subprocess, hashlib
+    assert fold.EMITS["resource-reaped"] == {"tick", "executor", "operator", "owed-sweeper"}
+    source = str(pathlib.Path(__file__).resolve().parent)
+    reader = "import sys,json; sys.path.insert(0,sys.argv[1]); import fold; print(json.dumps(fold.read_events(use_cache=False)))"
+    for actor in ("executor", "owed-sweeper", "builder"):
+        with tempfile.TemporaryDirectory(prefix="creator-actors-") as directory:
+            env = dict(os.environ, DOIT_ROOT=directory, DOIT_LEDGER_FILE=f"L-{actor}-1496.jsonl")
+            writer = subprocess.run([sys.executable, "-I", "-c",
+                "import sys; sys.path.insert(0,sys.argv[1]); import fold; fold.append(['resource-reaped','fixture','ref=/var/tmp/fixture','reason=creator-finally'],strict=True)", source],
+                env=env, capture_output=True, text=True)
+            assert (writer.returncode == 0) == (actor != "builder"), actor
+            result = subprocess.run([sys.executable, "-I", "-c", reader, source], env=env, capture_output=True, text=True, check=True)
+            rows = json.loads(result.stdout)
+            assert len(rows) == int(actor != "builder"), rows
+    print("L1496 creator actor admission ok")
+
+
+test_resource_creator_actors_1496()
