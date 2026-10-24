@@ -32,6 +32,9 @@ from the ledger.
 
 The Executor handles judgment and exceptions only; it never re-dispatches routine work (`build`, `grade`, `review`, `rebuild`, `regrade`, `merge-gate`, `merge`) on a tick-owned Step.
 
+The relay claims and serves all dispatched seat packets. Never claim a seat,
+serve its packet, or start an Agent sub-agent; keep driving the lane through dispatch.
+
 ## Input
 
 - The prompt: your spawn id, the lane (one line per actionable subject with its

@@ -144,6 +144,24 @@ class RegistryTests(unittest.TestCase):
         expected = [self.write(p, "old-doc") for p in ["docs/nested/a.md", "agents/a.md", "README.md"]]
         self.assertEqual({h.where for h in self.check(doc)}, {str(p) for p in expected})
 
+    def test_doc_explicit_paths_override_default_globs(self):
+        selected = self.write("agents/planner.md", "old-doc")
+        self.write("agents/relay.md", "old-doc")
+        self.write("docs/current.md", "old-doc")
+        self.write("README.md", "old-doc")
+        outside_defaults = self.write("scripts/seat/README.md", "old-doc")
+        row = self.row(kind="doc", pattern="old-doc", paths=["agents/planner.md"])
+        self.assertEqual([h.where for h in self.check(row)], [str(selected)])
+        selected.write_text("relay serves packets")
+        self.assertEqual(self.check(row), [])
+        row = dataclasses.replace(row, paths=["scripts/seat/*.md"])
+        self.assertEqual([h.where for h in self.check(row)], [str(outside_defaults)])
+        # An empty path list retains the established docs/agents/README scope.
+        row = dataclasses.replace(row, paths=[])
+        expected = {str(self.repo / p) for p in
+                    ("agents/relay.md", "docs/current.md", "README.md")}
+        self.assertEqual({h.where for h in self.check(row)}, expected)
+
     def test_ac4_undetermined_and_cli_status(self):
         self.manifest()
         self.assertEqual(self.cli().returncode, 0)

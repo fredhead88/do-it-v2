@@ -208,7 +208,7 @@ SUPERVISED = "DOIT_SUPERVISED"            # presence-only, on every child this s
 INTERVAL_ENV, INTERVAL_DEFAULT = "DOIT_SUPERVISOR_INTERVAL_SEC", 30.0
 POLL_STEP = 0.5                           # how finely a hold notices a ledger write
 RELAY_FNS = ("plannable", "waiting_lines", "ledger_changed",
-             "pending_packets", "planner_attempts")
+             "planner_attempts")
 
 
 def _interval():
@@ -369,19 +369,7 @@ def _charter_pass(state, events, charter, started_sha):
     return True
 
 
-def _serving_split(events, pending):
-    """Pending spawn ids, minus the ones a serving pass already took. The record is
-    this spec's own `spawn_ids=` field on a serving `planner-ended` — an id served
-    once is not served again, and one that is skipped is said out loud."""
-    ids = sorted({(p.get("spawn") if isinstance(p, dict) else p) for p in (pending or [])})
-    served = set()
-    for e in events:
-        if e.get("type") == "planner-ended" and e.get("mode") == "serving":
-            served |= {s for s in str(e.get("spawn_ids") or "").split(",") if s}
-    return [i for i in ids if i not in served], [i for i in ids if i in served]
-
-
-def _hold(state, lines):
+def _hold(state, lines, *, relay_only=False):
     """A dry queue holds the loop open (R6). The waiting text is the board's own
     (L-adr-0032) and is re-printed only when it changes, so an idle night does not
     scroll the pane. A ledger write ends the hold immediately; otherwise the
@@ -392,6 +380,8 @@ def _hold(state, lines):
         state["said"] = lines
     end = time.monotonic() + _interval()
     while True:
+        if relay_only:
+            _relay_heartbeat()
         ok, res = _guarded("ledger_changed", fold.ROOT, state["watermark"])
         if not ok:
             return
@@ -402,44 +392,25 @@ def _hold(state, lines):
 
 
 def _cycle(state, started_sha):
-    """One turn of the loop: charter work first, a serving pass only while none is
-    plannable (L-adr-0029), and a hold when there is neither.
-
-    `started_sha` (R2): `maybe_reexec` fires once here, at the top — covering
-    the idle/hold path that starts no pane at all — and again inside
-    `_charter_pass` and before the serving branch's own `_start`, so a HEAD
-    move between two panes in the SAME cycle (charter 1 exiting, charter 2
-    starting) is caught too, not only once per cycle."""
+    """Plan every ready charter, otherwise hold; seat serving belongs to the relay."""
     maybe_reexec("planner", started_sha)
     events = fold.read_events()
     ok, plan = _guarded("plannable", events, fold.ROOT)
     if not ok:
         return _degrade()
     ready = list(plan[0])
-    ok, pending = _guarded("pending_packets", events, fold.ROOT)   # derived every cycle
-    if not ok:
-        return _degrade()
     if ready:
         for charter in ready:
             if not _charter_pass(state, events, charter, started_sha):
                 return _degrade()
         return
-    todo, skipped = _serving_split(events, pending)
-    for spawn in skipped:
-        print(f"# serving: {spawn} already had a serving pass — skipped")
-    if todo:
-        ids = ",".join(todo)
-        maybe_reexec("planner", started_sha)
-        return _start(state, subject="serving:" + ids, mode="serving",
-                      attempt=1, prompt=ids, spawn_ids=ids, started_sha=started_sha)
     ok, lines = _guarded("waiting_lines", events, fold.ROOT)
     if not ok:
         return _degrade()
     _hold(state, list(lines))
 
 
-# ── the relay: a second, standing loop, independent of the charter/serving
-# priority above (L-spec-0270 R1) ─────────────────────────────────────────────
+# ── the relay: the sole seat-serving loop (L-spec-1497) ─────────────────────────────────────────────
 RELAY_DRY = "RELAY WAITING: no pending packets"
 
 
@@ -457,6 +428,68 @@ def _unclaimed_pending(pending, root):
         if not (seat / f"{sid}.claimed").exists():
             out.append(p)
     return out
+
+
+def _relay_heartbeat():
+    """Only relay_main and its hold/poll paths may call this writer."""
+    (fold.ROOT / "relay.heartbeat").touch()
+
+
+def default_launcher(argv, *, runner=None):
+    """Give cron's relay a terminal in a dedicated tmux session."""
+    runner = runner or subprocess.run
+    session = "do-it-relay"
+    present = runner(["tmux", "has-session", "-t", session], capture_output=True)
+    if present.returncode == 1:
+        runner(["tmux", "new-session", "-d", "-s", session], check=True, capture_output=True)
+    elif present.returncode != 0:
+        raise OSError("tmux session state undetermined")
+    runner(["tmux", "new-window", "-d", "-t", session, *argv], check=True, capture_output=True)
+
+
+def ensure_relay(events, now, *, launcher=None):
+    """Restart only with readable inputs and an unclaimed packet; deduplicate ticks."""
+    import relay
+    try:
+        if events is None:
+            return "undetermined"
+        # fold.read_events tolerates an absent directory; a restart decision cannot.
+        for path in fold.EVENTS.iterdir():
+            if path.suffix == ".jsonl":
+                path.read_bytes()
+        heartbeat = fold.ROOT / "relay.heartbeat"
+        try:
+            with heartbeat.open("rb") as stream:
+                stream.read(1)
+            heartbeat.stat()
+        except FileNotFoundError:
+            pass
+        if relay.serving(now):
+            return "serving"
+        pending = relay.pending_packets(events, fold.ROOT, served_by="relay")
+        if not _unclaimed_pending(pending, fold.ROOT):
+            return "idle"
+        window = float(os.environ.get("DOIT_TICK_MIN", "5")) * 60
+        lock = fold.ROOT / "relay.starting"
+        # O_EXCL admits one launcher. Retry once if a concurrent tick won the race.
+        for _ in range(2):
+            try:
+                fd = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            except FileExistsError:
+                age = now.timestamp() - lock.stat().st_mtime
+                if age < 0:
+                    return "undetermined"
+                if age <= window:
+                    return "serving"
+                lock.unlink()
+            else:
+                os.close(fd)
+                os.utime(lock, (now.timestamp(), now.timestamp()))
+                (launcher or default_launcher)([str(DOIT), "relay"])
+                return "started"
+        return "serving"
+    except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+        return "undetermined"
 
 
 def relay_main(print_only=False, max_cycles=None):
@@ -495,6 +528,7 @@ def relay_main(print_only=False, max_cycles=None):
     while max_cycles is None or cycles < max_cycles:
         cycles += 1
         if not print_only:
+            _relay_heartbeat()
             maybe_reexec("relay", started_sha)   # one call per cycle: this loop starts at
                                                   # most one pane per iteration (R2 point 5)
         pending = relay.pending_packets(fold.read_events(), fold.ROOT)
@@ -503,7 +537,7 @@ def relay_main(print_only=False, max_cycles=None):
             if print_only:
                 print(RELAY_DRY)
                 return None
-            _hold(state, [RELAY_DRY])
+            _hold(state, [RELAY_DRY], relay_only=True)
             continue
         ledger = dispatch.alloc(fold.EVENTS, "L-relay-", ".jsonl")
         ids = ",".join(str(p.get("spawn") if isinstance(p, dict) else p) for p in todo)
@@ -526,7 +560,12 @@ def relay_main(print_only=False, max_cycles=None):
             continue
         launch.record("relay", ledger.stem, proc.pid, model or "unpinned",
                       str(dispatch.AGENTS / "relay.md"), model_configured=model_configured)
-        rc = proc.wait()
+        while True:
+            try:
+                rc = proc.wait(timeout=max(0.1, _interval()))
+                break
+            except subprocess.TimeoutExpired:
+                _relay_heartbeat()
         launch.ended(ledger.stem, rc)
         dispatch.emit(ledger, base, "spawn-done", subject=ledger.stem, role="relay", exit_code=rc)
     return None

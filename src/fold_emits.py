@@ -2,6 +2,12 @@
 
 # Who may emit what. A type absent here is open to any actor (§2.5).
 EMITS = {"verdict": {"grader"}, "review": {"reviewer"}, "shipped": {"executor"},
+         # SD8: packet authors queue seats; only the relay records service.
+         # Static so a standalone fold reader enforces these without dispatch.
+         "seat-queued": {"spec-writer", "spec-auditor", "builder", "grader", "reviewer",
+                         "plan-auditor", "research", "reuse-scout", "charter-reviewer",
+                         "probe", "owed-sweeper", "owed-verifier"},
+         "seat-claimed": {"relay"}, "seat-started": {"relay"}, "seat-finished": {"relay"},
          "charter-retracted": {"operator"},
          # R10/L-spec-0192: `doit restore` may run as the operator or the executor;
          # `"drill"` (the automated proof run) stays exactly as it was.

@@ -429,7 +429,7 @@ class QueueTests(unittest.TestCase):
                 ('carry.uncarried', []), ('carry.sync_v4', None),
                 ('pane_resume.run', None), ('crons.check', []),
                 ('look._read_state', {'last_pass': self.now.isoformat()}),
-                ('look.heartbeat_missed', False), ('grader_serve.run', None),
+                ('look.heartbeat_missed', False),
                 ('tree_cleanup.reap_worktrees', ([], []))):
                 stack.enter_context(patch(target, return_value=result))
             steps = stack.enter_context(patch.object(tick, '_steps', return_value=[]))

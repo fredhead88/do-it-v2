@@ -636,7 +636,7 @@ except SystemExit as e:
     code = e.code
 sev = [json.loads(l) for l in max((TMP / "events").glob("L-research-*.jsonl")).read_text().splitlines()]
 assert code == 0, [e.get("why") for e in sev]
-assert [e["type"] for e in sev] == ["spawn-started", "research-filed", "spawn-done"], [e["type"] for e in sev]
+assert [e["type"] for e in sev] == ["spawn-started", "seat-queued", "research-filed", "spawn-done"], [e["type"] for e in sev]
 assert sev[-1]["spawn_path"] == "seat" and sev[-1]["session"] == "seat-1" and sev[-1]["model"] == "seat-model", sev[-1]
 assert sev[-1]["cost_usd"] is None, "a seat spawn has no list-price figure and must not read as free"
 N += 1
@@ -944,7 +944,7 @@ PK.write_text("a packet for the fallback run\n")   # D120 refuses an identical p
 threading.Thread(target=seat_writer_fb, daemon=True).start()
 code, ev = run("research", rp7)
 PK.write_text(PK_DEFAULT)
-assert code == 0 and [e["type"] for e in ev] == ["spawn-started", "backend-fallback", "research-filed", "spawn-done"], \
+assert code == 0 and [e["type"] for e in ev] == ["spawn-started", "backend-fallback", "seat-queued", "research-filed", "spawn-done"], \
     [(e["type"], e.get("why")) for e in ev]
 assert ev[1]["from_backend"] == "codex" and ev[1]["to_backend"] == "seat" and "weekly limit" in ev[1]["why"]
 d = ev[-1]
@@ -1061,9 +1061,9 @@ ac1_th.start()
 ac1_th.join(3.5)
 assert "exc" not in ac1_holder, f"AC1: run_seat must not raise within the claim window's own ping: {ac1_holder.get('exc')}"
 ac1_lines = [json.loads(l) for l in ac1_ledger.read_text().splitlines() if l.strip()]
-assert len(ac1_lines) == 1 and ac1_lines[0]["type"] == "seat-stale", ac1_lines
-assert ac1_lines[0]["spawn"] == ac1_spawn and ac1_lines[0]["role"] == "grader" and \
-    ac1_lines[0]["subject"] == "L-spec-0269ac1" and ac1_lines[0]["age_s"] >= 1, ac1_lines[0]
+assert [e["type"] for e in ac1_lines] == ["seat-queued", "seat-stale"], ac1_lines
+assert ac1_lines[1]["spawn"] == ac1_spawn and ac1_lines[1]["role"] == "grader" and \
+    ac1_lines[1]["subject"] == "L-spec-0269ac1" and ac1_lines[1]["age_s"] >= 1, ac1_lines[1]
 _rm_seat(ac1_spawn)
 N += 1
 
@@ -1203,7 +1203,7 @@ with _mock.patch("time.time", _fake_time_ac3main), _mock.patch("time.sleep", lam
 real_wall_ac3main = time.perf_counter() - real_t0_ac3main
 PK.write_text(PK_DEFAULT)
 raw = [json.loads(l) for l in max((TMP / "events").glob("L-research-*.jsonl")).read_text().splitlines()]
-assert code == 1 and [e["type"] for e in raw] == ["spawn-started", "seat-stale", "spawn-failed"], raw
+assert code == 1 and [e["type"] for e in raw] == ["spawn-started", "seat-queued", "seat-stale", "spawn-failed"], raw
 assert raw[-1]["reason"] == "unserved" and raw[-1]["spawn_path"] == "seat", raw[-1]
 assert real_wall_ac3main < 15, real_wall_ac3main
 _rm_seat(raw[0]["spawn"])
@@ -1247,7 +1247,7 @@ try:
 except SystemExit as e:
     code = e.code
 sev = [json.loads(l) for l in max((TMP / "events").glob("L-research-*.jsonl")).read_text().splitlines()]
-assert code == 0 and [e["type"] for e in sev] == ["spawn-started", "research-filed", "spawn-done"], sev
+assert code == 0 and [e["type"] for e in sev] == ["spawn-started", "seat-queued", "research-filed", "spawn-done"], sev
 assert not any(e["type"] == "spawn-failed" for e in sev), "a claimed seat must never fail as unserved"
 PK.write_text(PK_DEFAULT)
 del os.environ["DOIT_SEAT_CLAIM_SEC"]

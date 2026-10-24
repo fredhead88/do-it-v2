@@ -1,0 +1,29 @@
+[[retired]]
+name = "sandboxed grader route"
+kind = "code"
+pattern = 'grader_serve.run'
+paths = ["src/*.py", "agents/*.md", "scripts/**/*", "launch.toml"]
+
+[[retired]]
+name = "Planner opportunistic serving split"
+kind = "code"
+pattern = '_serving_split'
+paths = ["src/up.py"]
+
+[[retired]]
+name = "sandboxed grader packet server"
+kind = "code"
+pattern = 'served_by="grader-pane"'
+paths = ["src/*.py", "agents/*.md", "scripts/**/*"]
+
+[[retired]]
+name = "non-relay packet claiming instructions"
+kind = "doc"
+pattern = 'scripts/seat/claim.sh'
+paths = ["agents/planner.md", "agents/thinker.md", "agents/executor.md"]
+
+[[retired]]
+name = "Planner self-serving instruction"
+kind = "doc"
+pattern = 'You serve every seat packet you dispatch'
+paths = ["agents/planner.md", "agents/thinker.md", "agents/executor.md"]

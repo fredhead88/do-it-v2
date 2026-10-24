@@ -5,7 +5,7 @@ N += 1
 # ── AC6 · scripts/seat/claim.sh: O_EXCL semantics, all three sub-cases ─────────
 claim_root = TMP / "claimtest"
 (claim_root / "seat").mkdir(parents=True)
-spawn_c = "L-research-claimtest1"
+spawn_c = "L-research-9901"
 (claim_root / "seat" / f"{spawn_c}.packet.md").write_text("packet\n")
 env_c = {**os.environ, "DOIT_ROOT": str(claim_root)}
 r1 = subprocess.run(["bash", "scripts/seat/claim.sh", spawn_c], cwd=str(REPO_ROOT), env=env_c,
@@ -20,14 +20,14 @@ assert r2.returncode != 0, "a second claim on the same spawn must be refused"
 after_stat = claimed_p.stat()
 assert before_stat.st_mtime_ns == after_stat.st_mtime_ns and claimed_p.read_text() == "", \
     "the second call must not touch the first invocation's file"
-spawn_nopkt = "L-research-claimtest-nopacket"
+spawn_nopkt = "L-research-9902"
 r3 = subprocess.run(["bash", "scripts/seat/claim.sh", spawn_nopkt], cwd=str(REPO_ROOT), env=env_c,
                     capture_output=True, text=True)
 assert r3.returncode != 0
 assert not (claim_root / "seat" / f"{spawn_nopkt}.claimed").is_file()
 N += 1
 
-# ── AC7 · all three serving-pattern texts name claim.sh as a first/before step ─
+# ── AC7 · only the relay's serving texts name claim.sh as a first/before step ─
 def _claim_first(text):
     lines = text.splitlines()
     low = [l.lower() for l in lines]
@@ -39,9 +39,11 @@ def _claim_first(text):
     return False
 
 
-for relpath in ("scripts/seat/README.md", "agents/planner.md", "agents/thinker.md"):
+for relpath in ("scripts/seat/README.md", "agents/relay.md"):
     fp = REPO_ROOT / relpath
     assert _claim_first(fp.read_text()), f"{relpath} must name claim.sh as its first/before serving step"
+for relpath in ("agents/planner.md", "agents/thinker.md", "agents/executor.md"):
+    assert "claim.sh" not in (REPO_ROOT / relpath).read_text(), f"{relpath} must leave claiming to the relay"
 N += 1
 
 # ── AC8 · the builder case, driven for real (not fabricated) ───────────────────
@@ -51,7 +53,7 @@ os.environ["DOIT_SEAT_CLAIM_SEC"] = "1"
 # at minimum), not DOIT_SEAT_CLAIM_SEC — shrunk to 0 so this pre-existing
 # fixture (whose own point is the terminal shape, not window timing) still
 # raises `Unserved` before its own claim-window log would ever fire, keeping
-# the event list exactly `["build-started", "spawn-failed"]`, no `seat-stale`.
+# the event list exactly `["build-started", "seat-queued", "spawn-failed"]`, no `seat-stale`.
 _real_window_min_ac8 = dispatch.window_min
 dispatch.window_min = lambda *a_, **k_: 0
 a = argparse.Namespace(role="builder", subject="L-spec-0001", packet=str(PK), path=None, cwd=str(REPO),
@@ -64,7 +66,7 @@ except SystemExit as e:
 finally:
     dispatch.window_min = _real_window_min_ac8
 bev = [json.loads(l) for l in max((TMP / "events").glob("L-builder-*.jsonl")).read_text().splitlines()]
-assert code == 1 and [e["type"] for e in bev] == ["build-started", "spawn-failed"], bev
+assert code == 1 and [e["type"] for e in bev] == ["build-started", "seat-queued", "spawn-failed"], bev
 assert bev[0]["backend"] == "seat", bev[0]
 assert bev[-1]["reason"] == "unserved", bev[-1]
 _rm_seat(bev[0]["spawn"])
@@ -798,7 +800,7 @@ N += 1
 swp_sub1 = "L-spec-0261a"
 swp_dest1 = dispatch.CONTENT / f"{swp_sub1}.md"
 code, raw1, sid1, cj1, pkt1 = _swp_dispatch("spec-writer", swp_sub1, None, _mk_spec(swp_dest1, swp_sub1), cwd=TMP)
-assert code == 0 and [e["type"] for e in raw1] == ["spawn-started", "spec-written", "spawn-done"], raw1
+assert code == 0 and [e["type"] for e in raw1] == ["spawn-started", "seat-queued", "spec-written", "spawn-done"], raw1
 assert not any(e["type"] == "spawn-failed" for e in raw1), "AC1: no needs-path failure for a defaulted spec-writer"
 
 # ── AC3·SWP2 · cmd.json["path"] for that same spawn: absolute, the CONTENT
@@ -883,7 +885,7 @@ swp_match_subj = "L-spec-0261h"
 swp_match_path = str(dispatch.spec_path(swp_match_subj))
 code_m, raw_m, _, cj_m, _ = _swp_dispatch("spec-writer", swp_match_subj, swp_match_path,
                                           _mk_spec(dispatch.spec_path(swp_match_subj), swp_match_subj))
-assert code_m == 0 and [e["type"] for e in raw_m] == ["spawn-started", "spec-written", "spawn-done"], raw_m
+assert code_m == 0 and [e["type"] for e in raw_m] == ["spawn-started", "seat-queued", "spec-written", "spawn-done"], raw_m
 assert cj_m["path"] == swp_match_path, cj_m
 N += 1
 

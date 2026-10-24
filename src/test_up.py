@@ -14,6 +14,146 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent))
 import dispatch, fold, tick, up  # noqa: E402
 import panes as panes_mod  # noqa: E402 — aliased: `panes` is reused below as a local variable name
 
+# L-spec-1497: restart and heartbeat regressions use real queries and injected children.
+import datetime
+import json
+import types
+import unittest
+from contextlib import ExitStack
+from unittest.mock import patch
+import relay
+
+
+class RelayRestartTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory(prefix="relay-restart-")
+        self.addCleanup(tmp.cleanup)
+        self.root = pathlib.Path(tmp.name)
+        (self.root / "events").mkdir()
+        (self.root / "seat").mkdir()
+        for obj, key, value in ((fold, "ROOT", self.root), (fold, "EVENTS", self.root / "events"),
+                                (dispatch, "EVENTS", self.root / "events")):
+            swap = patch.object(obj, key, value)
+            swap.start()
+            self.addCleanup(swap.stop)
+        swap = patch.dict(os.environ, {"DOIT_SUPERVISOR_INTERVAL_SEC": "30", "DOIT_TICK_MIN": "5"})
+        swap.start()
+        self.addCleanup(swap.stop)
+        self.now = datetime.datetime.now(datetime.timezone.utc)
+        self.sid = "L-plan-auditor-9991"
+        (self.root / "seat" / f"{self.sid}.packet.md").touch()
+        self.events = [{"type": "spawn-started", "spawn": self.sid, "role": "plan-auditor",
+                        "backend": "seat", "ts": self.now.isoformat()}]
+        self.launches = []
+
+    def ensure(self):
+        return up.ensure_relay(self.events, self.now, launcher=self.launches.append)
+
+    def test_start_once_lock_and_idle(self):
+        self.assertEqual(self.ensure(), "started")
+        self.assertEqual(self.launches, [[str(up.DOIT), "relay"]])
+        self.assertEqual(self.ensure(), "serving")
+        self.assertEqual(len(self.launches), 1)
+        t = self.now.timestamp() - 301
+        os.utime(self.root / "relay.starting", (t, t))
+        self.assertEqual(self.ensure(), "started")
+        self.assertEqual(len(self.launches), 2)
+        (self.root / "seat" / f"{self.sid}.claimed").touch()
+        self.assertEqual(self.ensure(), "idle")
+        self.events = []
+        self.assertEqual(self.ensure(), "idle")
+
+    def test_fresh_and_unreadable_inputs(self):
+        heartbeat = self.root / "relay.heartbeat"
+        heartbeat.touch()
+        os.utime(heartbeat, (self.now.timestamp(), self.now.timestamp()))
+        self.assertEqual(self.ensure(), "serving")
+        self.assertFalse(self.launches)
+        with patch.object(pathlib.Path, "open", side_effect=PermissionError):
+            self.assertEqual(self.ensure(), "undetermined")
+        heartbeat.unlink()
+        (self.root / "events/L-relay-9999.jsonl").touch()
+        with patch.object(pathlib.Path, "read_bytes", side_effect=PermissionError):
+            self.assertEqual(self.ensure(), "undetermined")
+        self.assertFalse(self.launches)
+        (self.root / "events/L-relay-9999.jsonl").unlink()
+        (self.root / "events").rmdir()
+        self.assertEqual(self.ensure(), "undetermined")
+
+    def test_planner_hold_and_relay_hold(self):
+        with patch.object(up, "_guarded", return_value=(True, (True, "mark"))):
+            up._hold({"said": None, "watermark": None}, [])
+            self.assertFalse(relay.serving(self.now))
+            self.assertEqual(self.ensure(), "started")
+            up._hold({"said": None, "watermark": None}, [], relay_only=True)
+        self.assertTrue(relay.serving(datetime.datetime.now(datetime.timezone.utc)))
+
+    def test_child_poll_keeps_relay_alive(self):
+        parent = self
+        class Child:
+            pid = 999999
+            polls = 0
+            def wait(self, timeout):
+                self.polls += 1
+                if self.polls == 1:
+                    # A long child outlives the last cycle-top touch.
+                    old = parent.now.timestamp() - 400
+                    os.utime(parent.root / "relay.heartbeat", (old, old))
+                    raise subprocess.TimeoutExpired("relay-pane", timeout)
+                clock = datetime.datetime.now(datetime.timezone.utc)
+                parent.assertTrue(relay.serving(clock))
+                parent.assertEqual(up.ensure_relay(parent.events, clock, launcher=parent.launches.append), "serving")
+                return 0
+        child = Child()
+        with patch.object(up, "install"), patch.object(up, "maybe_reexec"), \
+             patch.object(up, "code_sha", return_value=None), patch.object(up.launch, "model_for", return_value=None), \
+             patch.object(up.launch, "record"), patch.object(up.launch, "ended"), \
+             patch.object(up.launch, "child_env", side_effect=lambda role, base: base), \
+             patch.object(up.models, "load", return_value=None), \
+             patch.object(fold, "read_events", return_value=self.events), \
+             patch.object(up.subprocess, "Popen", return_value=child):
+            up.relay_main(max_cycles=1)
+        self.assertEqual(child.polls, 2)
+        self.assertFalse(self.launches)
+
+    def test_default_tmux_launcher(self):
+        for present in (True, False):
+            calls = []
+            def runner(argv, **kw):
+                calls.append(argv)
+                return types.SimpleNamespace(returncode=0 if present or argv[1] != "has-session" else 1)
+            up.default_launcher([str(up.DOIT), "relay"], runner=runner)
+            self.assertEqual(calls[0], ["tmux", "has-session", "-t", "do-it-relay"])
+            self.assertEqual(calls[-1], ["tmux", "new-window", "-d", "-t", "do-it-relay", str(up.DOIT), "relay"])
+            self.assertEqual(len(calls), 2 if present else 3)
+            if not present:
+                self.assertEqual(calls[1], ["tmux", "new-session", "-d", "-s", "do-it-relay"])
+
+    def test_tick_records_each_restart_result(self):
+        with ExitStack() as stack:
+            for target, result in (("intake.run", {}), ("notes.run", None), ("pr_closeout.run", None),
+                ("install_sync.run", []), ("push_origin.run", None), ("carry.uncarried", []),
+                ("carry.sync_v4", None), ("pane_resume.run", None), ("crons.check", []),
+                ("look._read_state", {"last_pass": fold.NOW.isoformat()}), ("look.heartbeat_missed", False),
+                ("tree_cleanup.reap_worktrees", ([], [])), ("autodispatch.redispatch_dead", []),
+                ("merge_queue.enqueue_due", [])):
+                stack.enter_context(patch(target, return_value=result))
+            stack.enter_context(patch.object(tick, "_steps", return_value=[]))
+            stack.enter_context(patch.object(tick, "run_steps", return_value=[]))
+            stack.enter_context(patch.object(fold, "read_events", return_value=[]))
+            for result in ("started", "serving", "idle", "undetermined"):
+                with patch.object(up, "ensure_relay", return_value=result) as ensure:
+                    tick._record()
+                    ensure.assert_called_once_with([], fold.NOW)
+                rows = [json.loads(line) for file in fold.EVENTS.glob("*.jsonl") for line in file.read_text().splitlines()]
+                self.assertEqual([r for r in rows if r["type"] == "tick"][-1]["relay"], result)
+        print("1497 AC4/AC11: restart states, child polls, tmux argv and tick field pass")
+
+
+_suite = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(RelayRestartTests))
+if not _suite.wasSuccessful():
+    sys.exit(1)
+
 n = 0
 
 
@@ -357,7 +497,7 @@ def sup_runs(rc=0, write=None):
 
     def popen(cmd, env=None, **kw):
         run(cmd, env=env, **kw)
-        return types.SimpleNamespace(pid=999999, wait=lambda: rc)
+        return types.SimpleNamespace(pid=999999, wait=lambda **kw: rc)
     up.subprocess = types.SimpleNamespace(run=run, Popen=popen)
     return calls
 
@@ -587,44 +727,12 @@ for fn in up.RELAY_FNS:
        f"relay.{fn} raising is caught, named, and starts no pane of either mode, "
        f"appending only its own boot row: {buf.getvalue()!r}")
 
-# ── AC8 · the serving pass, and charter work's priority over it ───────────────
-sup_root("ac8")
-PEND = [{"spawn": "L-builder-0009", "age": 3}, {"spawn": "L-grader-0002", "age": 1}]
-IDS = "L-builder-0009,L-grader-0002"
-sup_relay(pending_packets=lambda *a, **k: PEND)
-calls = sup_runs()
-up.main(max_cycles=1)
-ok(len(calls) == 1 and calls[0]["cmd"][-1] == IDS,
-   f"a pending packet is served on the FIRST cycle with nothing plannable: {calls}")
-rows = sup_rows(calls[0]["ledger"])
-ok([e["mode"] for e in rows] == ["serving", "serving"] and rows[0]["subject"] == "serving:" + IDS
-   and rows[0]["spawn_ids"] == IDS and rows[0]["attempt"] == 1,
-   f"both rows carry mode=serving, the serving subject and the sorted ids: {rows}")
-ok(rows[-1]["type"] == "planner-ended" and rows[-1]["spawn_ids"] == IDS and rows[-1]["reason"] == "exit-0",
-   f"and the end row carries the ids the next cycle's already-attempted check reads: {rows[-1]}")
-ok(named_ok(calls), f"AC2: the serving pass names its pane too — it reuses _start's own naming: "
-                    f"{calls[0]['cmd'][:3]}")
-sup_root("ac8-priority")
-sup_relay(plannable=lambda *a, **k: (["L-charter-0005"], []), pending_packets=lambda *a, **k: PEND)
-calls = sup_runs()
-up.main(max_cycles=1)
-ok(len(calls) == 1 and calls[0]["cmd"][-1] == "L-charter-0005"
-   and all(e["mode"] == "charter" for e in sup_rows(calls[0]["ledger"])),
-   f"a ready charter pre-empts the serving pass entirely that cycle (L-adr-0029): {calls}")
-
-# ── AC9 · at most one serving pass per spawn id, and the skip is said out loud ─
-sup_root("ac9")
-seed = fold.EVENTS / "L-planner-0001.jsonl"
-dispatch.emit(seed, {"spawn": seed.stem}, "planner-ended", subject="serving:L-builder-0009",
-              planner=seed.stem, mode="serving", spawn_ids="L-builder-0009", reason="exit-0")
+# L-spec-1497: pending seats never start a Planner serving pass.
+sup_root("sole-relay-planner")
 sup_relay(pending_packets=lambda *a, **k: [{"spawn": "L-builder-0009"}])
 calls = sup_runs()
-buf = io.StringIO()
-with contextlib.redirect_stdout(buf):
-    up.main(max_cycles=1)
-ok(not calls, f"a spawn a serving pass already took is never taken a second time: {calls}")
-ok("L-builder-0009" in buf.getvalue() and "skipped" in buf.getvalue(),
-   f"and the skip is printed, never a silent drop: {buf.getvalue()!r}")
+up.main(max_cycles=1)
+ok(not calls, "Planner holds even with pending seats; only the relay serves them")
 
 # ── AC14 · the other half of this file belongs to L-spec-0045 (A2) ────────────
 # A2 called the merge order and it held the other way round: L-spec-0045 landed on
@@ -916,15 +1024,6 @@ ok(boot_kv["kind"] == "planner" and boot_kv["reason"] == "start" and boot_kv["sh
 started_kvs = [kv for t, kv in emitted if t == "planner-started"]
 ok(started_kvs and all(kv["code_sha"] == "BOOTSHA1" for kv in started_kvs),
    f"AC3: every planner-started carries the SAME code_sha as the boot row: {started_kvs}")
-
-sup_root("R2-ac3-serving")
-up.code_sha = lambda: "BOOTSHA2"
-sup_relay(pending_packets=lambda *a, **k: [{"spawn": "L-builder-0001"}])
-calls = sup_runs()
-up.main(max_cycles=1)
-serving_started = [e for e in sup_rows() if e["type"] == "planner-started" and e.get("mode") == "serving"]
-ok(serving_started and all(e["code_sha"] == "BOOTSHA2" for e in serving_started),
-   f"AC3: the serving-mode _start site also carries the SAME code_sha: {serving_started}")
 
 sup_root("R2-ac3-printonly")
 up.code_sha = lambda: "SHOULD-NOT-APPEAR"

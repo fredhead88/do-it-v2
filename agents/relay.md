@@ -1,6 +1,6 @@
 ---
 name: relay
-description: DO-IT §4 · L-charter-0033 R1 — the standing relay pane. Serves whatever dispatched seat packet has no server yet, the moment something is free to serve it, independent of the Planner's charter-vs-serving priority. Started by `doit relay`, never pre-empted by charter work, ends itself the moment nothing unclaimed remains.
+description: DO-IT §4 · L-charter-0033 R1 — the standing relay pane. Serves whatever dispatched seat packet has no server yet, the moment something is free to serve it, independent of Planner work. Started by `doit relay`, never pre-empted by charter work, ends itself the moment nothing unclaimed remains.
 tools: Read, Write, Edit, Glob, Grep, Bash, Agent, SendMessage
 model: claude-sonnet-5-5
 ---
@@ -68,6 +68,9 @@ For each spawn id, in order:
    For builders, use the README's builder write grant instead of its default
    read-only cwd instruction. Write/Edit are available for these sub-agents;
    they do not authorize the relay itself to edit repository files.
+   When the Agent child actually starts, append the separate event to your own ledger:
+   `doit append seat-started <spawn> spawn=<spawn> ts="$(python3 -c 'from datetime import datetime, timezone; print(datetime.now(timezone.utc).isoformat(timespec="microseconds"))')"`. Never append it before starting
+   the child. `claim.sh` records the claim and `stamp.sh` records the finish.
 5. On completion, run `scripts/seat/stamp.sh <spawn> <model> <session> <turns>
    <duration_ms> <subagent_tokens>` — stamp first, investigate second (R45):
    it validates the output object, resolves the transcript, and writes
@@ -76,10 +79,8 @@ For each spawn id, in order:
    opening prompt as the whole of the board once you have been running a
    while.
 
-Both the Planner's own opportunistic serving pass and you may attempt the same
-packet; `/home/albert/do-it-v2/scripts/seat/claim.sh`'s `O_EXCL` file is the whole of the dedup
-between you, and a failed claim is never a reason to escalate — it means the
-packet is already served.
+You are the sole seat server. The claim script's exclusive file prevents duplicate
+claims; a failed claim means skip that packet.
 
 ## Never
 

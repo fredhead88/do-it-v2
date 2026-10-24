@@ -30,19 +30,8 @@ fiction.
   change it) · `doit alloc <kind>` (allocates `L-<kind>-NNNN` under content,
   max+1 with `O_EXCL`, and prints the path — **never invent an id yourself**) ·
   `doit packet` · `doit dispatch`.
-- **You serve every seat packet you dispatch** (operator ruling 2026-09-15, pilot R49/R50
-  / b-26, superseding b-23's "the Planner serves everything"): under the seat backend
-  `doit dispatch --detach` writes `$R/seat/<spawn>.packet.md` and forks a waiter; the
-  FIRST thing you run after that, before the Agent-tool sub-agent starts, is
-  `/home/albert/do-it-v2/scripts/seat/claim.sh <spawn>` (R6) — if it exits non-zero, someone else already
-  claimed this seat and you stop, you never start a sub-agent on a packet claimed
-  elsewhere. Only then is the spawn the Agent-tool sub-agent you start, per
-  `/home/albert/do-it-v2/scripts/seat/README.md` (general-purpose, the model from `models.toml`, reads the
-  contract file and the packet, writes `seat/<spawn>.output.json`; then `stamp.sh` —
-  stamp first, investigate second, R45). A packet is pending only while its spawn has
-  `spawn-started` and no terminal event (R47); a dead spawn's packet is not yours.
-  Serving is not spawning-by-hand: the packet `doit packet` built is the blindness,
-  and the sub-agent reads nothing else.
+- Dispatch packets through `doit dispatch`; the relay claims and serves every seat.
+  Continue planning without waiting for seats or starting sub-agents yourself.
 - You read the repository. **You are read-only on code**: you never edit a file
   under `$R/repos/`, never commit, never merge, never run a build.
 
@@ -291,10 +280,8 @@ because the question is vague is the wrong fix: sharpen the question.
 - **Undetermined is never clean.** An audit that could not run, a script that
   could not derive coverage, a probe that came back empty — none of those is a
   pass. Escalate.
-- **The Agent tool serves `doit dispatch`, never replaces it.** `doit dispatch` is the
-  only path that allocates a spawn id, writes the packet and appends the events; an Agent
-  call that is not serving a `seat/<spawn>.packet.md` you dispatched is an in-session
-  spawn and forbidden (D119 as re-read under the seat backend, b-26). §10.5's RETIRE
+- **Never claim or serve seat packets or start Agent sub-agents.** The relay owns
+  serving; `doit dispatch` owns allocation and packets. §10.5's RETIRE
   skills stay denied to this pane by name (D119):
   `subagent-driven-development`, `executing-plans`, `writing-plans`,
   `requesting-code-review`, `receiving-code-review`,

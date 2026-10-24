@@ -6,12 +6,17 @@
 # exits non-zero and touches nothing. `dispatch.py` itself never writes this file
 # (ADR-0028-2: "the wrapper never creates it") — this script is the whole
 # mechanism. Run it BEFORE anything else in the serving pattern
-# (scripts/seat/README.md, agents/planner.md, agents/thinker.md) — a claim run
+# (scripts/seat/README.md, agents/relay.md) — a claim run
 # after work has already started defeats the point of the claim.
 set -euo pipefail
 
 R="${DOIT_ROOT:-$HOME/.do-it}"
 spawn="${1:?usage: claim.sh <spawn>}"
+if [[ ! "$spawn" =~ ^L-[a-z-]+-[0-9]+$ ]]; then
+    echo "claim.sh: invalid spawn id" >&2
+    exit 1
+fi
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 seat="$R/seat"
 packet="$seat/$spawn.packet.md"
 claimed="$seat/$spawn.claimed"
@@ -23,6 +28,10 @@ fi
 
 mkdir -p "$seat"
 if ( set -o noclobber; : > "$claimed" ) 2>/dev/null; then
+    if [[ "${DOIT_LEDGER_FILE:-}" =~ ^L-relay-[0-9]+\.jsonl$ ]]; then
+        "$HERE/../../doit" append seat-claimed "$spawn" "spawn=$spawn" server=relay "ts=$(python3 -c 'from datetime import datetime, timezone; print(datetime.now(timezone.utc).isoformat(timespec="microseconds"))')" ||
+            echo "claim.sh: seat-claimed append failed" >&2
+    fi
     exit 0
 fi
 echo "claim.sh: $spawn is already claimed ($claimed exists) — someone else has this seat" >&2

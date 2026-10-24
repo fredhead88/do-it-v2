@@ -71,6 +71,14 @@ sub-agent and require it to `cd` there at the start of every Bash call. Builder
 sub-agents need Write, Edit and Bash; the relay contract exposes those tools so
 they can build. The relay itself must never edit repository files.
 
+The relay is the only seat server; Planner, Executor and Thinker only dispatch.
+After starting each Agent child, append `doit append seat-started <spawn> spawn=<spawn> ts="$(python3 -c 'from datetime import datetime, timezone; print(datetime.now(timezone.utc).isoformat(timespec="microseconds"))')"`
+to the relay ledger. Dispatch records `seat-queued`, claim.sh records `seat-claimed`
+with `server=relay`, and stamp.sh records `seat-finished` with `outcome=ok`,
+`invalid-output` or `undetermined`. Failed validation still stamps metadata and records
+the outcome before returning the validator status. Event append failures never undo
+a claim or prevent the completion stamp.
+
 Serving pattern (R2: the harness snapshots agent types at pane start, so serve as
 `general-purpose` and name the contract file): Agent(model=<cmd.json cmd --model value>, prompt = "You are the
 DO-IT `<role>` contract, spawn id <id>. 0. Before anything else, run /home/albert/do-it-v2/scripts/seat/claim.sh <id> —

@@ -431,8 +431,8 @@ def _record():
     # L-spec-0431/L-charter-0042 R5d: the once-per-tick install-sync pass — agent
     # symlinks, plus any crons.toml row a merged spec's own shipped sha added or
     # changed. The MIDDLE of the three calls the Plan's Seams name (autodispatch,
-    # install_sync, grader_serve), on this SAME pre-re-read `ev`; its own
-    # try/except never skips anything below it. `grader_serve.run`'s own future
+    # install_sync, relay restart), on this SAME pre-re-read `ev`; its own
+    # try/except never skips anything below it. relay restart's own future
     # insertion goes immediately after this, still before the re-read below.
     install_sync_error = None
     install_synced = None
@@ -501,19 +501,11 @@ def _record():
         look.heartbeat_missed("look", fold.NOW, ev, root=fold.ROOT, dst=tick_path())
     except Exception as e:
         look_error = f"{look_error}; {e}" if look_error else f"{e}"
-    # L-spec-0438/L-charter-0042 R8: `grader_serve.run(ev)` — reap a stale
-    # sandboxed grader pane, start new ones for unclaimed grader-role seat
-    # packets up to capacity, and mirror/stamp a claimed one's own validated
-    # output. Its own try/except, on this SAME re-read `ev` — the
-    # `carry_error`/`look_error` pattern: a raise (an unmerged sibling's
-    # `served_by` kwarg among them) contributes nothing to the lane, and is
-    # named on this SAME `tick` event, never silencing the heartbeat.
-    grader_serve_error = None
     try:
-        import grader_serve
-        grader_serve.run(ev)
-    except Exception as e:
-        grader_serve_error = f"{e}"
+        import up
+        relay_status = up.ensure_relay(ev, fold.NOW)
+    except Exception:
+        relay_status = "undetermined"
     # L-charter-0046/L-spec-0473, R1/R3/R4: the tick's own Proving bookkeeping —
     # automatic entry, close, reopen and the two alarms — on this SAME `specs`/
     # `charters` fold, no extra re-read (Boundaries). Lazily imported and its own
@@ -623,7 +615,7 @@ def _record():
     todo.sort()
     # The one liveness fact: `fold` reads the newest of these for staleness, and
     # `lane` is the count — the whole record this process leaves behind.
-    kv = {"lane": len(todo)}
+    kv = {"lane": len(todo), "relay": relay_status}
     if errors:
         kv["carry_error"] = "; ".join(errors)
     if intake_errors:
@@ -638,8 +630,6 @@ def _record():
         kv["install_synced"] = install_synced
     if push_origin_error:
         kv["push_origin_error"] = push_origin_error
-    if grader_serve_error:
-        kv["grader_serve_error"] = grader_serve_error
     if autodispatch_error:
         kv["autodispatch_error"] = autodispatch_error
     if lane_driver_log_error:

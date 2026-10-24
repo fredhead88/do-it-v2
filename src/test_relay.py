@@ -21,6 +21,165 @@ os.environ["DOIT_ROOT"], os.environ["DOIT_PROJECT"] = str(TMP), PROJECT
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 import dispatch, fold, pane_end, relay, up  # noqa: E402
 
+# L-spec-1497: production seat scripts and a fresh-process ledger read-back.
+import subprocess
+import unittest
+from unittest.mock import patch
+
+
+class SoleRelayTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="sole-relay-")
+        self.addCleanup(self.tmp.cleanup)
+        self.root = pathlib.Path(self.tmp.name)
+        (self.root / "events").mkdir()
+        (self.root / "seat").mkdir()
+        self.env = {**os.environ, "DOIT_ROOT": str(self.root), "DOIT_PROJECT": PROJECT,
+                    "DOIT_LEDGER_FILE": "L-relay-9999.jsonl", "DOIT_NO_POKE": "1",
+                    "HOME": str(self.root), "PATH": f"{dispatch.HERE.parent}:{os.environ['PATH']}"}
+        self.now = datetime.datetime.now(datetime.timezone.utc)
+        self.repo = dispatch.HERE.parent
+
+    def script(self, name, spawn, *args, env=None):
+        return subprocess.run([str(self.repo / "scripts/seat" / name), spawn, *args],
+                              env=env or self.env, capture_output=True, text=True)
+
+    def readback(self):
+        result = subprocess.run([sys.executable, "-c",
+            "import fold,json; e=fold.read_events(use_cache=False); "
+            "print(json.dumps([e,fold.fold(e)[2]]))"], cwd=dispatch.HERE,
+            env=self.env, capture_output=True, text=True, check=True)
+        return json.loads(result.stdout)
+
+    def test_serving_heartbeat_cases(self):
+        with patch.object(fold, "ROOT", self.root), patch.dict(os.environ, {"DOIT_SUPERVISOR_INTERVAL_SEC": "30"}):
+            heartbeat = self.root / "relay.heartbeat"
+            self.assertFalse(relay.serving(self.now))
+            heartbeat.touch()
+            for age, expected in [(0, True), (59, True), (61, False), (-1, False)]:
+                t = self.now.timestamp() - age
+                os.utime(heartbeat, (t, t))
+                self.assertEqual(relay.serving(self.now), expected, age)
+            with patch.object(pathlib.Path, "stat", side_effect=PermissionError):
+                self.assertFalse(relay.serving(self.now))
+            heartbeat.unlink()
+            with patch.object(up, "_guarded", return_value=(True, (True, "mark"))):
+                up._hold({"said": None, "watermark": None}, ["planner dry"])
+            self.assertFalse(relay.serving(self.now))
+        print("1497 AC1: serving fresh/stale/missing/unreadable/future and Planner hold pass")
+
+    def test_all_roles_have_one_server(self):
+        self.assertEqual(relay.SERVERS, {**dict.fromkeys(dispatch.ROLES, "relay"),
+                                       **dict.fromkeys(("planner", "executor", "thinker"), "pane")})
+        self.assertEqual(fold.EMITS["seat-queued"], set(dispatch.ROLES))
+        events = []
+        for i, role in enumerate(dispatch.ROLES):
+            sid = f"L-{role}-{i + 1}"
+            (self.root / "seat" / f"{sid}.packet.md").touch()
+            events.append({"type": "build-started" if role == "builder" else "spawn-started",
+                           "spawn": sid, "role": role, "backend": "seat", "ts": self.now.isoformat()})
+        self.assertEqual(len(relay.pending_packets(events, self.root, served_by="relay")), len(dispatch.ROLES))
+        self.assertEqual(relay.pending_packets(events, self.root, served_by="pane"), [])
+
+    def queue(self, sid):
+        # Exercise the packet write, without a waiter or external child.
+        with patch.object(dispatch, "SEAT", self.root / "seat"):
+            with self.assertRaises(dispatch.Unserved):
+                dispatch.run_seat(sid, [], "packet", str(self.root), 0, window=0,
+                                  ledger=self.root / "events" / f"{sid}.jsonl",
+                                  base={"spawn": sid, "subject": "L-spec-9999", "project": PROJECT},
+                                  role="plan-auditor", sleep=lambda _: None)
+
+    def test_round_trip_and_invalid_stamp(self):
+        sid = "L-plan-auditor-9991"
+        self.queue(sid)
+        self.assertEqual(self.script("claim.sh", sid).returncode, 0)
+        self.assertNotEqual(self.script("claim.sh", sid).returncode, 0)
+        self.assertTrue((self.root / "seat" / f"{sid}.claimed").exists())
+        subprocess.run([str(self.repo / "doit"), "append", "seat-started", sid, f"spawn={sid}", f"ts={datetime.datetime.now(datetime.timezone.utc).isoformat()}"],
+                       env=self.env, check=True, capture_output=True)
+        # A small real role schema (not a validator stub).
+        output = self.valid_audit()
+        (self.root / "seat" / f"{sid}.output.json").write_text(json.dumps(output))
+        stamped = self.script("stamp.sh", sid, "test", "absent", "1", "1", "0")
+        self.assertEqual(stamped.returncode, 0, stamped.stderr)
+        events, ignored = self.readback()
+        rows = [e for e in events if e.get("spawn") == sid and e["type"].startswith("seat-")]
+        self.assertEqual([e["type"] for e in rows], ["seat-queued", "seat-claimed", "seat-started", "seat-finished"])
+        self.assertEqual(len({(e["ts"], e["type"]) for e in rows}), 4)
+        for event in rows:
+            self.assertRegex(event["ts"], r"\.\d{6}\+00:00$")
+        self.assertEqual(rows[0]["actor"], "plan-auditor")
+        self.assertTrue(all(e["actor"] == "relay" for e in rows[1:]))
+        self.assertEqual(rows[1]["server"], "relay")
+        self.assertEqual(rows[-1]["outcome"], "ok")
+        self.assertFalse(ignored)
+        (self.root / "seat" / f"{sid}.output.json").write_text("{}")
+        bad = self.script("stamp.sh", sid, "test", "absent", "1", "1", "0")
+        self.assertEqual(bad.returncode, 1, bad.stderr)
+        self.assertTrue((self.root / "seat" / f"{sid}.meta.json").exists())
+        self.assertEqual(self.readback()[0][-1]["outcome"], "invalid-output")
+        print("1497 AC5: real dispatch/claim/start/stamp quartet admitted in fresh process; invalid-output recorded")
+
+    @staticmethod
+    def valid_audit():
+        return {"stage": "cut", "findings": [], "bad_cut": False, "contamination": False, "declarations": []}
+
+    def test_unrunnable_validator_and_failed_append_still_stamp(self):
+        import shutil
+        sid = "L-plan-auditor-9993"
+        self.queue(sid)
+        (self.root / "seat" / f"{sid}.output.json").write_text(json.dumps(self.valid_audit()))
+        checkout = self.root / "checkout"
+        (checkout / "scripts/seat").mkdir(parents=True)
+        (checkout / "src").mkdir()
+        shutil.copy(self.repo / "scripts/seat/stamp.sh", checkout / "scripts/seat/stamp.sh")
+        shutil.copy(self.repo / "src/usage.py", checkout / "src/usage.py")
+        # The validator is unavailable; append still uses the real production CLI.
+        shim = checkout / "doit"
+        shim.write_text('#!/usr/bin/env bash\nif [[ "$1" == validate ]]; then exit 2; fi\nexec ' +
+                        str(self.repo / "doit") + ' "$@"\n')
+        shim.chmod(0o755)
+        result = subprocess.run([str(checkout / "scripts/seat/stamp.sh"), sid, "test", "absent", "1", "1", "0"],
+                                env=self.env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertTrue((self.root / "seat" / f"{sid}.meta.json").exists())
+        self.assertEqual(self.readback()[0][-1]["outcome"], "undetermined")
+        # An unreadable append destination cannot undo a claim or block metadata.
+        (self.root / "events/L-relay-9999.jsonl").unlink()
+        (self.root / "events/L-relay-9999.jsonl").mkdir()
+        self.assertEqual(self.script("claim.sh", sid).returncode, 0)
+        self.assertTrue((self.root / "seat" / f"{sid}.claimed").exists())
+        self.assertEqual(self.script("stamp.sh", sid, "test", "absent", "1", "1", "0").returncode, 0)
+        self.assertTrue((self.root / "seat" / f"{sid}.meta.json").exists())
+
+    def test_script_authorization_and_bad_ids(self):
+        sid = "L-plan-auditor-9992"
+        self.queue(sid)
+        env = {**self.env, "DOIT_LEDGER_FILE": "L-planner-9999.jsonl"}
+        self.assertEqual(self.script("claim.sh", sid, env=env).returncode, 0)
+        (self.root / "seat" / f"{sid}.output.json").write_text(json.dumps(self.valid_audit()))
+        self.assertEqual(self.script("stamp.sh", sid, "test", "absent", "1", "1", "0", env=env).returncode, 0)
+        self.assertTrue((self.root / "seat" / f"{sid}.meta.json").exists())
+        self.assertEqual([e["type"] for e in self.readback()[0]], ["seat-queued"])
+        before = set(self.root.rglob("*"))
+        for bad in ("../escape", "L-builder-x", "L-builder-1/../../escape", ""):
+            self.assertNotEqual(self.script("claim.sh", bad).returncode, 0)
+            self.assertNotEqual(self.script("stamp.sh", bad, "test", "absent", "1", "1", "0").returncode, 0)
+        self.assertEqual(set(self.root.rglob("*")), before)
+        # Production emit writes unauthorized attempts; the fold must reject all four.
+        with patch.object(dispatch, "now", side_effect=lambda: self.now.isoformat()):
+            for kind in ("seat-queued", "seat-claimed", "seat-started", "seat-finished"):
+                dispatch.emit(self.root / "events/L-operator-9999.jsonl", {"spawn": sid, "project": PROJECT}, kind, subject=sid)
+        events, ignored = self.readback()
+        self.assertEqual(len(ignored), 4)
+        print("1497 AC6: unauthorized actors ignored; scripts skip appends and reject unsafe ids")
+
+
+_suite = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(SoleRelayTests))
+if not _suite.wasSuccessful():
+    sys.exit(1)
+
 N = 0
 CLOCK = [0]
 
@@ -542,7 +701,7 @@ print("0472-AC11 ok")
 #
 # One pending grader packet, one pending spec-writer packet, one pending
 # planner packet, over the SAME fixture ledger: `served_by="relay"` returns
-# only the spec-writer spawn, `served_by="grader-pane"` returns exactly the
+# only the spec-writer spawn, `served_by="unused-server"` returns exactly the
 # grader spawn, `served_by="pane"` only the planner spawn, and `served_by=None`
 # all three.
 # ══════════════════════════════════════════════════════════════════════════════
@@ -553,7 +712,7 @@ for role, sid in sid_ac2.items():
     ev(d_ac2, sid, "spawn-started", f"L-spec-92{list(sid_ac2).index(role):02d}", role=role, spawn=sid)
 events_ac2 = read()
 relay_ac2 = {p["spawn"] for p in relay.pending_packets(events_ac2, d_ac2, served_by="relay")}
-grader_pane_ac2 = {p["spawn"] for p in relay.pending_packets(events_ac2, d_ac2, served_by="grader-pane")}
+grader_pane_ac2 = {p["spawn"] for p in relay.pending_packets(events_ac2, d_ac2, served_by="unused-server")}
 pane_ac2 = {p["spawn"] for p in relay.pending_packets(events_ac2, d_ac2, served_by="pane")}
 none_ac2 = {p["spawn"] for p in relay.pending_packets(events_ac2, d_ac2, served_by=None)}
 # operator 2026-10-04: graders are relay-served again, so the relay lists both and
@@ -573,7 +732,7 @@ print("L-spec-8033 AC2 ok")
 #
 # `served_by` partitions every dispatchable role, not just grader: one pending
 # packet per `dispatch.ROLES` key, and exactly one of `served_by="relay"` /
-# `served_by="grader-pane"` must return it.
+# `served_by="unused-server"` must return it.
 # ══════════════════════════════════════════════════════════════════════════════
 d_ac3 = scene("ac3-partition")
 roles_ac3 = sorted(dispatch.ROLES)
@@ -583,7 +742,7 @@ for role, sid in sid_of_ac3.items():
     ev(d_ac3, sid, "spawn-started", f"L-spec-{sid}", role=role, spawn=sid)
 events_ac3 = read()
 relay_rows_ac3 = {p["spawn"] for p in relay.pending_packets(events_ac3, d_ac3, served_by="relay")}
-pane_rows_ac3 = {p["spawn"] for p in relay.pending_packets(events_ac3, d_ac3, served_by="grader-pane")}
+pane_rows_ac3 = {p["spawn"] for p in relay.pending_packets(events_ac3, d_ac3, served_by="unused-server")}
 table_ac3 = {role: [name for name, rows in (("relay", relay_rows_ac3), ("grader-pane", pane_rows_ac3))
                     if sid in rows]
             for role, sid in sid_of_ac3.items()}

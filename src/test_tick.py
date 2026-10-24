@@ -1604,68 +1604,6 @@ assert any(a.get("ref") for a in res17c["answered"]), \
 print("AC17 ok")
 
 # ══════════════════════════════════════════════════════════════════════════════
-# L-spec-0438 · grader-pane-serve (L-charter-0042 R8) — grader_serve wiring
-# ══════════════════════════════════════════════════════════════════════════════
-import grader_serve  # noqa: E402
-
-# (a) `grader_serve.run()` raises -> caught, named on `grader_serve_error`,
-# `carry_error`/`intake_error` untouched, `lane` still an int (the
-# `carry_error`/`pane_resume_error` pattern). Pre-`served_by` (install-and-serve,
-# L-spec-0431, unmerged) this raised naturally because `relay.pending_packets`
-# did not yet accept the kwarg; `served_by` has now landed (Produces:
-# `relay.pending_packets(..., served_by=...)`), so the real, unstubbed call no
-# longer raises for that reason on an empty ledger — the catch path itself is
-# proven here with an explicit induced raise instead, since a passing call is
-# no longer evidence the try/except is even reachable.
-iso438a = _isolated_events()
-fold.EVENTS = iso438a
-real_grader_serve_run_a = grader_serve.run
-
-
-def _grader_serve_raiser(ev, **kw):
-    raise RuntimeError("stub: induced for AC coverage of the catch path (served_by)")
-
-
-grader_serve.run = _grader_serve_raiser
-try:
-    assert tick.main() == 0, "grader_serve: a raising grader_serve.run() never crashes the tick"
-    last438a = ticks()[-1]
-    assert "grader_serve_error" in last438a and "served_by" in last438a["grader_serve_error"], \
-        f"grader_serve: the tick event names the caught exception on grader_serve_error: {last438a}"
-    assert "carry_error" not in last438a and "intake_error" not in last438a and isinstance(last438a["lane"], int), \
-        f"grader_serve: carry_error/intake_error untouched, lane still an int: {last438a}"
-finally:
-    grader_serve.run = real_grader_serve_run_a
-fold.EVENTS = saved_events
-
-# (b) a clean `grader_serve.run()` (stubbed, once `served_by` lands) adds no
-# `grader_serve_error` field, and is called on every pass.
-GRADER_SERVE_CALLS = []
-real_grader_serve_run = grader_serve.run
-
-
-def _grader_serve_stub(ev, **kw):
-    GRADER_SERVE_CALLS.append(len(ev))
-    return []
-
-
-grader_serve.run = _grader_serve_stub
-iso438b = _isolated_events()
-fold.EVENTS = iso438b
-try:
-    assert tick.main() == 0
-    last438b = ticks()[-1]
-    assert "grader_serve_error" not in last438b, \
-        f"grader_serve: a clean run adds no grader_serve_error field: {last438b}"
-    assert GRADER_SERVE_CALLS, "grader_serve: tick._record() calls grader_serve.run() on every pass"
-finally:
-    grader_serve.run = real_grader_serve_run
-fold.EVENTS = saved_events
-
-print("tick: L-spec-0438 grader_serve wiring checks pass")
-
-
-# ══════════════════════════════════════════════════════════════════════════════
 # L-spec-0473 · tick-proving-records (L-charter-0046) — R1/R3/R4: the tick's
 # own automatic entry into Proving, its close, its reopen, and the two alarms.
 # ══════════════════════════════════════════════════════════════════════════════
