@@ -20,6 +20,10 @@ destination.
 never re-acquired per tick; a run that finds the lock already held exits 0.
 """
 import argparse, fcntl, json, os, pathlib, stat, subprocess, sys, time
+import shutil
+import signal
+import tempfile
+import traceback
 import tomllib
 from datetime import datetime, timezone
 
@@ -358,6 +362,314 @@ class _Lock:
             self.fh.close()
         return False
 
+    def acquire_blocking(self, seconds):
+        """Wait on the same lock, with a raising alarm (PEP 475 retries EINTR)."""
+        def expired(*_):
+            raise _MaintainLockTimeout()
+
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.fh = open(self.path, "w")
+        previous = signal.signal(signal.SIGALRM, expired)
+        try:
+            signal.alarm(max(1, int(seconds)))
+            fcntl.flock(self.fh, fcntl.LOCK_EX)
+            self.acquired = True
+        except _MaintainLockTimeout:
+            self.fh.close()
+            self.fh = None
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, previous)
+        return self.acquired
+
+
+class _MaintainLockTimeout(Exception):
+    pass
+
+
+class _MaintainStop(Exception):
+    def __init__(self, reason):
+        self.reason = reason
+
+
+class _MaintainGitError(Exception):
+    pass
+
+
+def _maintain_test_path(name):
+    if os.environ.get("DOIT_BACKUP_MAINTAIN_TEST") == "1":
+        value = os.environ.get("DOIT_BACKUP_MAINTAIN_TEST_" + name)
+        if value:
+            return pathlib.Path(value)
+    return None
+
+
+def _maintain_number(name, default):
+    return int(os.environ.get("DOIT_BACKUP_MAINTAIN_" + name, default))
+
+
+class _MaintainRun:
+    """One budget and process supervisor for all maintenance git commands."""
+    CAPS = ("pack.windowMemory=256m", "pack.threads=1",
+            "pack.deltaCacheSize=64m", "core.packedGitLimit=256m")
+
+    def __init__(self, root):
+        self.root = _root(root).resolve()
+        self.packdir = self.root / ".git/objects/pack"
+        self.path = self.root / "backup-maintain-state.json"
+        self.state = json.loads(self.path.read_text()) if self.path.exists() else {}
+        self.default_n = _maintain_number("CHUNK", 20_000)
+        self.default_b = _maintain_number("CHUNK_BYTES", 1024**3)
+        self.n = int(self.state.get("chunk", self.default_n))
+        self.b = int(self.state.get("chunk_bytes", self.default_b))
+        if min(self.n, self.b, self.default_n, self.default_b) <= 0:
+            raise ValueError("chunk bounds must be positive")
+        self.history = self.state.get("history", [])[-3:]
+        self.budget = float(os.environ.get("DOIT_BACKUP_MAINTAIN_TIMEOUT_S", 2400))
+        self.started = None
+        self.done = 0
+        self.left = []
+        self.chunks_left = 0
+        self.before = self.after = 0
+        self.behind = "unknown"
+        self.stopped = "none"
+        self.nothing = False
+        self.halve = False
+
+    def clock(self):
+        path = _maintain_test_path("CLOCK")
+        return float(path.read_text()) if path else time.monotonic()
+
+    def remaining(self):
+        return self.budget - (self.clock() - self.started)
+
+    def memory_ok(self):
+        path = _maintain_test_path("MEMINFO") or pathlib.Path("/proc/meminfo")
+        for line in path.read_text().splitlines():
+            if line.startswith("MemAvailable:"):
+                return int(line.split()[1]) * 1024 >= _maintain_number("MEM_MIN", 4 * 1024**3)
+        raise ValueError("MemAvailable missing")
+
+    def rss(self, pgid):
+        path = _maintain_test_path("RSS")
+        if path:
+            return int(path.read_text())
+        return sum(int(fields[21]) for fields in self.group_members(pgid)) * os.sysconf("SC_PAGE_SIZE")
+
+    @staticmethod
+    def group_members(pgid):
+        for proc in pathlib.Path("/proc").iterdir():
+            if not proc.name.isdigit():
+                continue
+            try:
+                # comm may contain spaces and parentheses; fields after its last
+                # ')' start with state, ppid, pgrp, ... rss (proc_pid_stat(5)).
+                fields = (proc / "stat").read_text().rsplit(")", 1)[1].split()
+                if int(fields[2]) == pgid and fields[0] not in {"Z", "X"}:
+                    yield fields
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+
+    def kill_group(self, proc):
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.wait()
+        # wait() reaps only the direct child. SIGKILL delivery to descendants
+        # is asynchronous; do not snapshot/remove their files while they exit.
+        deadline = time.monotonic() + 150
+        while any(self.group_members(proc.pid)):
+            if time.monotonic() >= deadline:
+                raise TimeoutError("process group did not exit after SIGKILL")
+            time.sleep(.01)
+
+    def git(self, args, stopped="listing", data=None, chunk=False):
+        if self.remaining() <= 0:
+            raise _MaintainStop(stopped)
+        argv = ["git", "-C", str(self.root)]
+        for cap in self.CAPS:
+            argv.extend(["-c", cap])
+        argv.extend(args)
+        if chunk:
+            argv = ["nice", "-n", "19", *argv]
+        # Files avoid pipe backpressure during a large listing or batch-check.
+        with tempfile.TemporaryFile(mode="w+") as inp, tempfile.TemporaryFile(mode="w+") as out, tempfile.TemporaryFile(mode="w+") as err:
+            inp.write(data or "")
+            inp.seek(0)
+            proc = subprocess.Popen(argv, stdin=inp, stdout=out, stderr=err, start_new_session=True)
+            sample_at = time.monotonic() + 1
+            try:
+                while proc.poll() is None:
+                    remaining = self.remaining()
+                    if remaining <= 0:
+                        raise _MaintainStop(stopped)
+                    if chunk and time.monotonic() >= sample_at:
+                        sample_at = time.monotonic() + 1
+                        if self.rss(proc.pid) > _maintain_number("RSS_MAX", 1536 * 1024**2):
+                            raise _MaintainStop("rss")
+                    try:
+                        proc.wait(timeout=min(.1, remaining))
+                    except subprocess.TimeoutExpired:
+                        pass
+                if proc.returncode:
+                    raise _MaintainGitError(f"{args[0]} failed rc={proc.returncode}")
+                out.seek(0)
+                return out.read()
+            finally:
+                # Always reap the entire group on exceptional exits, including
+                # Python errors in resource sampling; children inherit this pgid.
+                if sys.exc_info()[0] is not None or proc.poll() is None:
+                    self.kill_group(proc)
+                err.seek(0)
+                sys.stdout.write(err.read())
+
+    def loose_count(self):
+        objects = self.root / ".git/objects"
+        return sum(1 for directory in objects.iterdir()
+                   if len(directory.name) == 2 and all(c in "0123456789abcdef" for c in directory.name)
+                   and directory.is_dir() for p in directory.iterdir()
+                   if len(p.name) in (38, 62) and all(c in "0123456789abcdef" for c in p.name) and p.is_file())
+
+    def chunk(self, work):
+        size = 0
+        end = 0
+        for _, byte_count in work:
+            if end and (end >= self.n or size + byte_count > self.b):
+                break
+            end += 1
+            size += byte_count
+        return work[:end], size
+
+    def save(self):
+        self.state.update(chunk=self.n, chunk_bytes=self.b, history=self.history)
+        tmp = self.path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(self.state) + "\n")
+        tmp.replace(self.path)
+
+    def count_chunks_left(self):
+        chunks = count = size = 0
+        for _, byte_count in self.left:
+            if count and (count >= self.n or size + byte_count > self.b):
+                chunks += 1
+                count = size = 0
+            count += 1
+            size += byte_count
+        return chunks + bool(count)
+
+
+def _maintain_locked(run):
+    run.started = run.clock()
+    if not run.memory_ok():
+        raise _MaintainStop("memory")
+    run.git(["prune-packed"], "prune")
+    counts = dict(line.split(": ", 1) for line in run.git(["count-objects", "-v"]).splitlines())
+    run.before = int(counts["count"])
+    if run.before < int(os.environ.get("DOIT_BACKUP_LOOSE_MAX", 20_000)):
+        run.nothing = True
+        return
+    if not run.memory_ok():
+        raise _MaintainStop("memory")
+    listing = run.git(["rev-list", "--objects", "--all", "--reflog", "--indexed-objects", "--unpacked"])
+    oids = list(dict.fromkeys(line.split()[0] for line in listing.splitlines()))
+    print(f"unlisted_loose={max(0, run.before - len(oids))} "
+          "reason=outside reachable-unpacked listing; left untouched")
+    run.behind = ("yes" if all(a < b for a, b in zip(run.history, run.history[1:] + [len(oids)]))
+                  else "no") if len(run.history) == 3 else "unknown"
+    run.history = (run.history + [len(oids)])[-3:]
+    if not oids:
+        run.nothing = True
+        return
+    sizes = {oid: (run.root / ".git/objects" / oid[:2] / oid[2:]).stat().st_size for oid in oids}
+    run.left = [(oid, sizes[oid]) for oid in oids]
+    typed = run.git(["cat-file", "--batch-check=%(objectname) %(objecttype)"], data="\n".join(oids) + "\n")
+    rows = [line.split() for line in typed.splitlines()]
+    if len(rows) != len(oids) or any(len(row) != 2 or row[1] not in {"blob", "tree", "tag", "commit"} for row in rows):
+        raise ValueError("incomplete object typing")
+    ordered = [oid for oid, kind in rows if kind != "commit"] + [oid for oid, kind in rows if kind == "commit"]
+    run.left = [(oid, sizes[oid]) for oid in ordered]
+    run.packdir.mkdir(exist_ok=True)
+    while run.left:
+        if run.remaining() <= 0:
+            raise _MaintainStop("budget")
+        if not run.memory_ok():
+            raise _MaintainStop("memory")
+        work, size = run.chunk(run.left)
+        free_path = _maintain_test_path("FREE")
+        free = int(free_path.read_text()) if free_path else shutil.disk_usage(run.root).free
+        need = size + 2 * 1024**3
+        if free < need:
+            print(f"insufficient free space ({free} < {need} bytes)")
+            run.halve = True
+            raise _MaintainStop("space")
+        existing = set(run.packdir.iterdir())
+        chunk_started = run.clock()
+        try:
+            run.git(["pack-objects", "-q", str(run.packdir / "pack")], "killed",
+                    data="\n".join(oid for oid, _ in work) + "\n", chunk=True)
+        except BaseException:
+            # The group is dead before we take this second directory snapshot.
+            # Count the exact deletion candidates; never infer ownership by mtime.
+            created = set(run.packdir.iterdir()) - existing
+            print(f"backup-maintain cleanup: created_files={len(created)} reason=incomplete-chunk")
+            for path in created:
+                path.unlink()
+            reason = sys.exc_info()[1]
+            run.halve = isinstance(reason, _MaintainStop) and (
+                reason.reason == "rss" or (reason.reason == "killed" and run.clock() - chunk_started > run.budget / 2))
+            raise
+        run.done += 1
+        run.left = run.left[len(work):]
+        run.git(["prune-packed"], "prune")
+
+
+def maintain(root=None):
+    """Bounded, resumable packing; normal backup writers use this same lock."""
+    run = None
+    error = None
+    lock = _Lock(root)
+    started = time.monotonic()
+    try:
+        # Read state only after acquiring the lock: another maintenance may have
+        # updated the adaptive bounds while this caller was waiting.
+        if not lock.acquire_blocking(_maintain_number("LOCK_WAIT_S", 120)):
+            run = _MaintainRun(root)
+            run.stopped = "lock"
+        else:
+            run = _MaintainRun(root)
+            try:
+                _maintain_locked(run)
+            except _MaintainStop as stop:
+                run.stopped = stop.reason
+            except _MaintainGitError as exc:
+                error = str(exc)
+            # Count without starting a git process after the budget expires.
+            run.after = run.loose_count()
+            run.chunks_left = run.count_chunks_left()
+            if run.halve:
+                run.n = max(min(run.n, _maintain_number("CHUNK_MIN", 1000)), run.n // 2)
+                run.b = max(min(run.b, 64 * 1024**2), run.b // 2)
+            elif run.done and run.stopped in {"none", "budget"} and error is None:
+                run.n = min(run.default_n, run.n * 2)
+                run.b = min(run.default_b, run.b * 2)
+            run.save()
+    except Exception as exc:
+        traceback.print_exc(file=sys.stdout)
+        error = f"internal error {type(exc).__name__}"
+    finally:
+        lock.__exit__()
+    if run is not None:
+        print(f"backup-maintain: loose_before={run.before} loose_after={run.after} "
+              f"chunks_done={run.done} chunks_left={run.chunks_left} chunk={run.n} chunk_bytes={run.b} "
+              f"stopped={run.stopped} behind={run.behind} seconds={time.monotonic() - started:.2f}")
+    if error:
+        print(f"backup-maintain: {error}", file=sys.stderr)
+        return 5
+    if run.stopped == "lock" or (not run.nothing and not run.done) or run.behind == "yes":
+        print("backup-maintain: not keeping up (see ledger-repack.log)", file=sys.stderr)
+        return 3
+    return 0
+
 
 def push(root=None, config_path=None):
     """The public wrapper (Interfaces): acquires the lock once, then the
@@ -409,9 +721,12 @@ def main(argv=None):
     p_watch.add_argument("--poll", dest="poll_s", type=float, default=10.0)
     p_watch.add_argument("--config")
     sub.add_parser("status")
+    sub.add_parser("maintain")
     p_cron = sub.add_parser("cron")
     p_cron.add_argument("--doit-bin")
     a = ap.parse_args(argv)
+    if a.cmd == "maintain":
+        return maintain()
     if a.cmd == "push":
         r = push(config_path=a.config)
         print(json.dumps(r))

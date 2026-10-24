@@ -66,6 +66,8 @@ Source: `crons.toml`. Name | schedule | where | path; command on following lines
   2>&1
 - backup-watch | * * * * * | user | {doit}
   {doit} cron-run backup-watch -- {doit} backup watch --for 60 >> {root}/backup.log 2>&1
+- ledger-repack | 47 4 * * * | user | {doit}
+  {doit} cron-run ledger-repack -- {doit} backup maintain >> {root}/logs/ledger-repack.log 2>&1
 - ledger-snapshot | */10 * * * * | user | /var/backups/do-it/snapshot.sh
   {doit} cron-run ledger-snapshot -- /var/backups/do-it/snapshot.sh >/dev/null 2>&1
 - sweep-owed | */30 * * * * | user | {doit}

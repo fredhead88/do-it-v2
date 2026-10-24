@@ -37,6 +37,7 @@
 7,37 * * * * /home/albert/.do-it/tmp-reaper.sh
 # doit backup watch (L-spec-0186) — replaces backup-to-git.sh; operator-approved 2026-09-23T19:59:17Z via L-thinker-0004
 * * * * * /home/albert/do-it-v2/doit cron-run backup-watch -- /home/albert/do-it-v2/doit backup watch --for 60 >> /home/albert/.do-it/backup.log 2>&1  # doit-cron:backup-watch
+47 4 * * * /home/albert/do-it-v2/doit cron-run ledger-repack -- /home/albert/do-it-v2/doit backup maintain >> /home/albert/.do-it/logs/ledger-repack.log 2>&1  # doit-cron:ledger-repack
 # look (L-charter-0036 R1): babysitter check as a script; owner thinker; installed 2026-09-25 by L-thinker-0004
 */10 * * * * /home/albert/do-it-v2/doit cron-run look -- /home/albert/do-it-v2/doit look >> /home/albert/.do-it/logs/look.log 2>&1  # doit-cron:look
 # executor-wake (Thinker 2026-09-26 overnight stopgap): wake the Executor pane when idle 5+ min
