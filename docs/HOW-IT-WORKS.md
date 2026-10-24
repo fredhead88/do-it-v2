@@ -4,21 +4,21 @@ Generated from repository code and config by `doit howto`; regenerate when sourc
 
 ## Roles
 
-Source: `agents/*.md` and `models.example.toml`.
+Source: `agents/*.md` and `machine/models.toml`.
 
 - builder: codex
-- charter-reviewer: codex
+- charter-reviewer: seat
 - executor: pane
 - grader: seat
-- owed-sweeper: seat
+- owed-sweeper: seat (default)
 - owed-verifier: seat (default)
 - plan-auditor: seat
 - planner: pane
 - probe: codex
 - relay: seat (default)
-- research: seat
+- research: codex
 - reuse-scout: seat
-- reviewer: codex
+- reviewer: seat
 - spec-auditor: seat
 - spec-writer: codex
 - thinker: pane
@@ -98,6 +98,7 @@ Source: `crons.toml`. Name | schedule | where | path; command on following lines
 Source: literal `dispatch.emit` and `look.emit_once` calls in `src/tick.py`,
 plus every action in `lane_rules.toml`.
 
-- charter-closed; charter-proving; charter-reopened; cron-missing; dispatch-builder;
-  dispatch-grader; dispatch-reviewer; doit-gate; look-stale; none; proving-check-failed;
-  proving-overdue; queue-add; spawn-stale; spec-killed; tick; window-run; worktree-reaped
+- autodispatch-failed; autodispatched; charter-closed; charter-proving; charter-reopened;
+  cron-missing; dispatch-builder; dispatch-grader; dispatch-reviewer; doit-gate; look-stale; none;
+  proving-check-failed; proving-overdue; queue-add; spawn-stale; spec-killed; tick; window-run;
+  worktree-reaped
