@@ -316,3 +316,10 @@ test_scratch_reset_refuses_prod_and_non_scratch()
 test_dispatch_path_builds_a_real_verifier_packet()
 shutil.rmtree(str(BASE), ignore_errors=True)
 print(f"verifier: {N} checks pass")
+
+# L-spec-1504: declared scripts use real ledger appends and never model seats.
+import unittest
+from test_provision import ProvisionTests
+_lane_result = unittest.TextTestRunner(verbosity=2).run(unittest.TestSuite([
+    ProvisionTests("test_script_lanes_emit_real_verdicts_without_dispatch")]))
+assert _lane_result.wasSuccessful(), "shared check-runner lane regression"

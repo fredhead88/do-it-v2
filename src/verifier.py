@@ -39,7 +39,7 @@ from datetime import datetime, timedelta, timezone
 
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-import dispatch, fold, owed, owed_timed, scratch  # noqa: E402
+import dispatch, fold, owed, owed_timed, scratch, provision  # noqa: E402
 
 LEDGER_NAME = "L-verifier-local.jsonl"
 ALLOWED_TYPES = frozenset({"owed-met", "owed-failed", "owed-unobservable", "brief"})
@@ -312,6 +312,10 @@ def run(*, dry_run=False, observe=None, now=None, only=None, runner=None, reader
         events = fold.read_events()
         by = fold.fold(events)[3]
     cands = candidates(by, now, set(only) if only else None)
+    if observe is None:
+        cands, script_lines = provision.script_rows(cands, events, ledger_path(),
+                                                   lane="verifier", dry_run=dry_run)
+        lines.extend(script_lines)
     if not cands:
         lines.append("verify-owed: nothing to observe")
     elif dry_run:

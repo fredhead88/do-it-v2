@@ -1,0 +1,20 @@
+[[retired]]
+name = "sweep_provision.run_check private-pg start and dashboard npm setup"
+kind = "code"
+pattern = 'build_runner._required\(|mkdtemp\(|npm.*ci'
+regex = true
+paths = ["src/sweep_provision.py"]
+
+[[retired]]
+name = "build_runner._provision and _node private-pg npm ci db_setup implementation"
+kind = "code"
+pattern = "private-pg.sh produced|npm ci produced|phase='db_setup'|phase=\"db_setup\""
+regex = true
+paths = ["src/build_runner.py"]
+
+[[retired]]
+name = "grading_env scratch-DB provision and node population"
+kind = "code"
+pattern = 'ADMIN_DSN=|dst.symlink_to|argv = \[.*private-pg'
+regex = true
+paths = ["src/grading_env.py"]
