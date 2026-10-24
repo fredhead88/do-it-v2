@@ -29,7 +29,7 @@
 # that goes idle once can never be re-poked (doit-nudge.sh:189 "marker exists").
 # Expire them so an idle builder is re-poked ~every 20m. Data fix; no code change.
 # PAUSED-2026-09-14 */10 * * * * find /tmp -maxdepth 1 -name 'builder-nudge-wedge-*' -mmin +20 -delete >/dev/null 2>&1
-*/10 * * * * /home/albert/do-it-v2/doit cron-run ledger-snapshot -- /var/backups/do-it/snapshot.sh >/dev/null 2>&1  # doit-cron:ledger-snapshot
+*/10 * * * * /home/albert/do-it-v2/doit cron-run ledger-snapshot -- /home/albert/do-it-v2/scripts/snapshot.sh >/dev/null 2>&1  # doit-cron:ledger-snapshot
 7 * * * * /home/albert/do-it-v2/doit cron-run lessons-digest -- /home/albert/do-it-v2/scripts/lessons_digest.py >> /home/albert/.do-it/lessons-digest.log 2>&1  # doit-cron:lessons-digest
 # doit tick (Q9 immediate pickup) — installed 2026-09-23T10:37:46Z by L-thinker-0004 on operator request; line printed by do-it-v2 src/up.py cron_line()
 */5 * * * * DOIT_ROOT=/home/albert/.do-it PREDEPLOY_GATE_DISPATCH_TIMEOUT_MIN=70 /home/albert/do-it-v2/doit cron-run tick -- /home/albert/do-it-v2/doit tick >> /home/albert/.do-it/logs/tick.log 2>&1  # doit-cron:tick

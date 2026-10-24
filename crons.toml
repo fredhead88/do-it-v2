@@ -87,11 +87,12 @@ max_runtime_s = 2820
 
 [[row]]
 name = "ledger-snapshot"
+max_runtime_s = 14400
 where = "user"
 schedule = "*/10 * * * *"
-command = "{doit} cron-run ledger-snapshot -- /var/backups/do-it/snapshot.sh >/dev/null 2>&1"
-path = "/var/backups/do-it/snapshot.sh"
-sig = 'snapshot\.sh\b'
+command = "{doit} cron-run ledger-snapshot -- {repo}/scripts/snapshot.sh >/dev/null 2>&1"
+path = "{repo}/scripts/snapshot.sh"
+sig = 'scripts/snapshot\.sh\b'
 owner = "thinker"
 project = "do-it-v2"
 

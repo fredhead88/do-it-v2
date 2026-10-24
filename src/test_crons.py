@@ -311,10 +311,10 @@ base_dir.mkdir()
 base_manifest, _ = _exec_manifest(base_dir, BASE_ROWS)
 base_missing = crons.check(manifest=str(base_manifest), crontab_text=FIXTURE_5,
                            crond_dir=str(crond5_empty))
-check({r["name"] for r in res5} == ({r["name"] for r in base_missing} - {"verify-owed"}) | {"seat-usage", "owed-digest-json", "base-red-nightly", "ledger-repack"},
-      f"AC5: inherited absent rows plus seat-usage, owed-digest-json, base-red-nightly and ledger-repack: {res5}")
+check({r["name"] for r in res5} == ({r["name"] for r in base_missing} - {"verify-owed"}) | {"seat-usage", "owed-digest-json", "base-red-nightly", "ledger-repack", "ledger-snapshot"},
+      f"AC5: inherited absent rows plus seat-usage, owed-digest-json, base-red-nightly, ledger-repack and ledger-snapshot: {res5}")
 check(all(r["reason"] == "absent" for r in res5), f"AC5: every entry is absent: {res5}")
-check(len(res5) == len(base_missing) + 3, f"AC5: four additions and verify-owed retired: {res5}")
+check(len(res5) == len(base_missing) + 4, f"AC5: five additions and verify-owed retired: {res5}")
 seat = next(row for row in r1 if row["name"] == "seat-usage")
 check(seat == {
     "name": "seat-usage", "where": "user", "schedule": "*/15 * * * *",
@@ -617,7 +617,7 @@ check(not any_bare, "R14-AC6: none of the eight rows prints bare")
 bw6 = next(r for r in rows6 if r["name"] == "backup-watch")
 check(bw6["max_runtime_s"] == 90, f"R14-AC6: backup-watch max_runtime_s == 90: {bw6['max_runtime_s']}")
 for r in rows6:
-    if r["name"] not in {"backup-watch", "ledger-repack", "suite-daily", "base-red-nightly"}:
+    if r["name"] not in {"backup-watch", "ledger-repack", "suite-daily", "base-red-nightly", "ledger-snapshot"}:
         check(r["max_runtime_s"] is None, f"R14-AC6: {r['name']} max_runtime_s is None: {r['max_runtime_s']}")
 buf6 = io.StringIO()
 with contextlib.redirect_stdout(buf6):
