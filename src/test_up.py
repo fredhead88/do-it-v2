@@ -16,7 +16,9 @@ import panes as panes_mod  # noqa: E402 — aliased: `panes` is reused below as 
 
 # L-spec-1497: restart and heartbeat regressions use real queries and injected children.
 import datetime
+import fcntl
 import json
+import multiprocessing
 import types
 import unittest
 from contextlib import ExitStack
@@ -36,9 +38,15 @@ class RelayRestartTests(unittest.TestCase):
             swap = patch.object(obj, key, value)
             swap.start()
             self.addCleanup(swap.stop)
-        swap = patch.dict(os.environ, {"DOIT_SUPERVISOR_INTERVAL_SEC": "30", "DOIT_TICK_MIN": "5"})
+        cli = self.root / "bin/claude"
+        cli.parent.mkdir()
+        cli.write_text("#!/bin/sh\nexit 0\n")
+        cli.chmod(0o755)
+        swap = patch.dict(os.environ, {"DOIT_SUPERVISOR_INTERVAL_SEC": "30", "DOIT_TICK_MIN": "5",
+                                       "PATH": str(cli.parent), "DOIT_RELAY_WEDGED_MIN": "30"})
         swap.start()
         self.addCleanup(swap.stop)
+        os.environ.pop("DOIT_CLAUDE_BIN", None)
         self.now = datetime.datetime.now(datetime.timezone.utc)
         self.sid = "L-plan-auditor-9991"
         (self.root / "seat" / f"{self.sid}.packet.md").touch()
@@ -67,9 +75,16 @@ class RelayRestartTests(unittest.TestCase):
         heartbeat = self.root / "relay.heartbeat"
         heartbeat.touch()
         os.utime(heartbeat, (self.now.timestamp(), self.now.timestamp()))
-        self.assertEqual(self.ensure(), "serving")
+        fd = os.open(self.root / "relay.lock", os.O_RDONLY | os.O_CREAT, 0o644)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            self.assertEqual(self.ensure(), "serving")
+            with patch.object(pathlib.Path, "stat", side_effect=PermissionError):
+                self.assertEqual(self.ensure(), "serving")
+        finally:
+            os.close(fd)
         self.assertFalse(self.launches)
-        with patch.object(pathlib.Path, "open", side_effect=PermissionError):
+        with patch.object(up.os, "open", side_effect=PermissionError):
             self.assertEqual(self.ensure(), "undetermined")
         heartbeat.unlink()
         (self.root / "events/L-relay-9999.jsonl").touch()
@@ -77,6 +92,8 @@ class RelayRestartTests(unittest.TestCase):
             self.assertEqual(self.ensure(), "undetermined")
         self.assertFalse(self.launches)
         (self.root / "events/L-relay-9999.jsonl").unlink()
+        # An absent heartbeat no longer prevents a restart when ownership is free.
+        self.assertEqual(self.ensure(), "started")
         (self.root / "events").rmdir()
         self.assertEqual(self.ensure(), "undetermined")
 
@@ -85,8 +102,36 @@ class RelayRestartTests(unittest.TestCase):
             up._hold({"said": None, "watermark": None}, [])
             self.assertFalse(relay.serving(self.now))
             self.assertEqual(self.ensure(), "started")
-            up._hold({"said": None, "watermark": None}, [], relay_only=True)
-        self.assertTrue(relay.serving(datetime.datetime.now(datetime.timezone.utc)))
+        (self.root / "relay.starting").unlink()
+        ctx = multiprocessing.get_context("fork")
+        reader, writer = ctx.Pipe(duplex=False)
+        release = ctx.Event()
+        def child_main():
+            def hold(*args, **kwargs):
+                writer.send_bytes(b"1")
+                release.wait(10)
+            with patch.object(up, "install"), patch.object(up, "maybe_reexec"), \
+                 patch.object(up, "code_sha", return_value=None), \
+                 patch.object(up.models, "load", return_value=None), \
+                 patch.object(fold, "read_events", return_value=[]), \
+                 patch.object(up, "_hold", side_effect=hold):
+                up.relay_main(max_cycles=1)
+        child = ctx.Process(target=child_main)
+        child.start()
+        try:
+            self.assertTrue(reader.poll(10), "relay never entered hold")
+            self.assertEqual(reader.recv_bytes(), b"1")
+            self.assertEqual(self.ensure(), "serving")
+            self.assertEqual(len(self.launches), 1)
+        finally:
+            release.set()
+            child.join(10)
+            if child.is_alive():
+                child.kill()
+                child.join(10)
+            reader.close()
+            writer.close()
+        self.assertEqual(child.exitcode, 0)
 
     def test_child_poll_keeps_relay_alive(self):
         parent = self
@@ -94,6 +139,7 @@ class RelayRestartTests(unittest.TestCase):
             pid = 999999
             polls = 0
             def wait(self, timeout):
+                parent.assertLessEqual(timeout, 60)
                 self.polls += 1
                 if self.polls == 1:
                     # A long child outlives the last cycle-top touch.
@@ -105,6 +151,7 @@ class RelayRestartTests(unittest.TestCase):
                 parent.assertEqual(up.ensure_relay(parent.events, clock, launcher=parent.launches.append), "serving")
                 return 0
         child = Child()
+        os.environ["DOIT_SUPERVISOR_INTERVAL_SEC"] = "1000"
         with patch.object(up, "install"), patch.object(up, "maybe_reexec"), \
              patch.object(up, "code_sha", return_value=None), patch.object(up.launch, "model_for", return_value=None), \
              patch.object(up.launch, "record"), patch.object(up.launch, "ended"), \
@@ -141,10 +188,14 @@ class RelayRestartTests(unittest.TestCase):
             stack.enter_context(patch.object(tick, "_steps", return_value=[]))
             stack.enter_context(patch.object(tick, "run_steps", return_value=[]))
             stack.enter_context(patch.object(fold, "read_events", return_value=[]))
-            for result in ("started", "serving", "idle", "undetermined"):
+            for result in ("started", "serving", "idle", "undetermined", "wedged"):
                 with patch.object(up, "ensure_relay", return_value=result) as ensure:
                     tick._record()
-                    ensure.assert_called_once_with([], fold.NOW)
+                    ensure.assert_called_once()
+                    events, now = ensure.call_args.args
+                    self.assertEqual(events, [])
+                    self.assertEqual(now.tzinfo, datetime.timezone.utc)
+                    self.assertLess(abs((now - datetime.datetime.now(datetime.timezone.utc)).total_seconds()), 5)
                 rows = [json.loads(line) for file in fold.EVENTS.glob("*.jsonl") for line in file.read_text().splitlines()]
                 self.assertEqual([r for r in rows if r["type"] == "tick"][-1]["relay"], result)
         print("1497 AC4/AC11: restart states, child polls, tmux argv and tick field pass")

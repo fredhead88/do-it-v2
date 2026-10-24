@@ -13,11 +13,11 @@ system, and §4.9 routes those to a human rather than to an unattended process.
 `test_up.py` holds that as a check, because it is exactly the rule a later edit
 would helpfully break.
 """
-import importlib, json, os, pathlib, subprocess, sys, time
+import fcntl, importlib, json, math, os, pathlib, subprocess, sys, time
 
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-import ctx_guard, dispatch, fold, launch, models, tick  # noqa: E402
+import cli_path, ctx_guard, dispatch, fold, launch, models, scratch, tick  # noqa: E402
 
 DOIT = HERE.parent / "doit"
 
@@ -241,9 +241,20 @@ def _degrade():
 
 def _child_env(ledger, supervised=False):
     """The pane writes as itself (D90) and resolves `doit` from this repo. The marker
-    is presence-only: the pane reads it to know it may end itself."""
+    is presence-only: the pane reads it to know it may end itself. CLI resolution
+    is optional here; a rejected pin is reported by the relay spawn path."""
     env = {**os.environ, "DOIT_LEDGER_FILE": ledger.name,
            "PATH": f"{HERE.parent}:{os.environ.get('PATH', '')}"}
+    binary = cli_path.claude_bin()
+    if binary is not None:
+        # Keep the launcher directory, not a versioned symlink target.
+        directory = os.path.dirname(os.path.abspath(binary))
+        parts = env["PATH"].split(os.pathsep)
+        if "DOIT_CLAUDE_BIN" in os.environ:
+            parts = [parts[0], directory, *(p for p in parts[1:] if p != directory)]
+        elif directory not in parts:
+            parts.append(directory)
+        env["PATH"] = os.pathsep.join(parts)
     if supervised:
         env[SUPERVISED] = "1"
     return env
@@ -457,15 +468,24 @@ def ensure_relay(events, now, *, launcher=None):
         for path in fold.EVENTS.iterdir():
             if path.suffix == ".jsonl":
                 path.read_bytes()
-        heartbeat = fold.ROOT / "relay.heartbeat"
+        fd = os.open(fold.ROOT / "relay.lock", os.O_RDONLY | os.O_CREAT, 0o644)
         try:
-            with heartbeat.open("rb") as stream:
-                stream.read(1)
-            heartbeat.stat()
-        except FileNotFoundError:
-            pass
-        if relay.serving(now):
-            return "serving"
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                try:
+                    minutes = float(os.environ.get("DOIT_RELAY_WEDGED_MIN", "30"))
+                    if not math.isfinite(minutes) or minutes <= 0:
+                        minutes = 30
+                except ValueError:
+                    minutes = 30
+                try:
+                    age = now.timestamp() - (fold.ROOT / "relay.heartbeat").stat().st_mtime
+                except OSError:
+                    return "serving"
+                return "wedged" if age > minutes * 60 else "serving"
+        finally:
+            os.close(fd)
         pending = relay.pending_packets(events, fold.ROOT, served_by="relay")
         if not _unclaimed_pending(pending, fold.ROOT):
             return "idle"
@@ -510,65 +530,98 @@ def relay_main(print_only=False, max_cycles=None):
     write, still empty); otherwise run the pane in the foreground and wait for
     it — it ends ITSELF via `doit pane-end --relay`, this loop never signals
     it — recording `spawn-started`/`spawn-done` (or `spawn-failed` on an
-    `OSError` starting it)."""
-    import relay
-    contract = dispatch.AGENTS / "relay.md"
-    if not contract.exists():
-        sys.exit(f"up: no relay contract at {contract} — the pane is the contract (D116)")
-    install(contract)
-    (fold.ROOT / "events").mkdir(parents=True, exist_ok=True)
-    mp = models.load(fold.ROOT / "models.toml")
-    started_sha = None
-    if not print_only:
-        started_sha = code_sha()
-        led = dispatch.alloc(fold.EVENTS, "L-up-", ".jsonl")
-        dispatch.emit(led, {}, "supervisor-code", subject="relay", kind="relay",
-                      sha=started_sha or "undetermined", pid=os.getpid(), reason="start")
-    state, cycles = {"watermark": None, "said": None}, 0
-    while max_cycles is None or cycles < max_cycles:
-        cycles += 1
+    environment or resolution error starting it). One lifetime lock covers all
+    holds, pane waits and failure backoffs; every exit releases ownership."""
+    fd = None
+    try:
         if not print_only:
+            fold.ROOT.mkdir(parents=True, exist_ok=True)
+            fd = os.open(fold.ROOT / "relay.lock", os.O_RDONLY | os.O_CREAT, 0o644)
+            deadline = time.monotonic() + 2
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        print("relay: another relay holds relay.lock; exiting")
+                        return None
+                    time.sleep(0.1)
             _relay_heartbeat()
-            maybe_reexec("relay", started_sha)   # one call per cycle: this loop starts at
-                                                  # most one pane per iteration (R2 point 5)
-        pending = relay.pending_packets(fold.read_events(), fold.ROOT)
-        todo = _unclaimed_pending(pending, fold.ROOT)
-        if not todo:
-            if print_only:
-                print(RELAY_DRY)
-                return None
-            _hold(state, [RELAY_DRY], relay_only=True)
-            continue
-        ledger = dispatch.alloc(fold.EVENTS, "L-relay-", ".jsonl")
-        ids = ",".join(str(p.get("spawn") if isinstance(p, dict) else p) for p in todo)
-        model = launch.model_for("relay")
-        model_configured = models.resolve("relay", mp=mp).get("model") if mp is not None else None
-        cmd = relay_pane_cmd(prompt=ids, name=ledger.stem, model=model)
-        if print_only:
-            print(f"# relay pane: {ledger.stem} · {' '.join(cmd)}")
-            return cmd, _child_env(ledger)
-        base = {"spawn": ledger.stem}
-        env = launch.child_env("relay", base=_child_env(ledger, supervised=True))
-        dispatch.emit(ledger, base, "spawn-started", subject=ledger.stem, role="relay",
-                      code_sha=started_sha or "undetermined")
-        print(f"# relay pane: {ledger.stem} · serving {ids}")
-        try:
-            proc = subprocess.Popen(cmd, env=env)
-        except OSError as e:
-            dispatch.emit(ledger, base, "spawn-failed", subject=ledger.stem, role="relay",
-                          why=f"{type(e).__name__}: {str(e)[:200]}")
-            continue
-        launch.record("relay", ledger.stem, proc.pid, model or "unpinned",
-                      str(dispatch.AGENTS / "relay.md"), model_configured=model_configured)
-        while True:
-            try:
-                rc = proc.wait(timeout=max(0.1, _interval()))
-                break
-            except subprocess.TimeoutExpired:
+        import relay
+        contract = dispatch.AGENTS / "relay.md"
+        if not contract.exists():
+            sys.exit(f"up: no relay contract at {contract} — the pane is the contract (D116)")
+        install(contract)
+        (fold.ROOT / "events").mkdir(parents=True, exist_ok=True)
+        mp = models.load(fold.ROOT / "models.toml")
+        started_sha = None
+        if not print_only:
+            started_sha = code_sha()
+            led = dispatch.alloc(fold.EVENTS, "L-up-", ".jsonl")
+            dispatch.emit(led, {}, "supervisor-code", subject="relay", kind="relay",
+                          sha=started_sha or "undetermined", pid=os.getpid(), reason="start")
+        failure_class, failures = None, 0
+        state, cycles = {"watermark": None, "said": None}, 0
+        while max_cycles is None or cycles < max_cycles:
+            cycles += 1
+            if not print_only:
                 _relay_heartbeat()
-        launch.ended(ledger.stem, rc)
-        dispatch.emit(ledger, base, "spawn-done", subject=ledger.stem, role="relay", exit_code=rc)
-    return None
+                maybe_reexec("relay", started_sha)   # one call per cycle: this loop starts at
+                                                      # most one pane per iteration (R2 point 5)
+            pending = relay.pending_packets(fold.read_events(), fold.ROOT)
+            todo = _unclaimed_pending(pending, fold.ROOT)
+            if not todo:
+                if print_only:
+                    print(RELAY_DRY)
+                    return None
+                _hold(state, [RELAY_DRY], relay_only=True)
+                continue
+            ledger = dispatch.alloc(fold.EVENTS, "L-relay-", ".jsonl")
+            ids = ",".join(str(p.get("spawn") if isinstance(p, dict) else p) for p in todo)
+            model = launch.model_for("relay")
+            model_configured = models.resolve("relay", mp=mp).get("model") if mp is not None else None
+            cmd = relay_pane_cmd(prompt=ids, name=ledger.stem, model=model)
+            if print_only:
+                print(f"# relay pane: {ledger.stem} · {' '.join(cmd)}")
+                return cmd, _child_env(ledger)
+            base = {"spawn": ledger.stem}
+            print(f"# relay pane: {ledger.stem} · serving {ids}")
+            try:
+                dispatch.emit(ledger, base, "spawn-started", subject=ledger.stem, role="relay",
+                              code_sha=started_sha or "undetermined")
+                env = launch.child_env("relay", base=_child_env(ledger, supervised=True))
+                cli_path.claude_bin_or_raise()
+                proc = subprocess.Popen(cmd, env=env)
+            except (OSError, ValueError, scratch.ScratchRootError) as e:
+                dispatch.emit(ledger, base, "spawn-failed", subject=ledger.stem, role="relay",
+                              why=f"{type(e).__name__}: {str(e)[:200]}")
+                failures = failures + 1 if failure_class is type(e) else 1
+                failure_class = type(e)
+                # The 30-second floor reaches the cap by the third failure.
+                remaining = min(max(_interval(), 30) * 2 ** min(failures - 1, 2), 120)
+                while remaining > 0:
+                    _relay_heartbeat()
+                    step = min(POLL_STEP, remaining)
+                    _SLEEP(step)
+                    remaining -= step
+                continue
+            failure_class, failures = None, 0
+            launch.record("relay", ledger.stem, proc.pid, model or "unpinned",
+                          str(dispatch.AGENTS / "relay.md"), model_configured=model_configured)
+            while True:
+                try:
+                    rc = proc.wait(timeout=max(0.1, min(_interval(), 60)))
+                    break
+                except subprocess.TimeoutExpired:
+                    _relay_heartbeat()
+            launch.ended(ledger.stem, rc)
+            dispatch.emit(ledger, base, "spawn-done", subject=ledger.stem, role="relay", exit_code=rc)
+        return None
+
+    finally:
+        if fd is not None:
+            os.close(fd)
 
 
 # ── the Executor's own supervising loop (L-charter-0021 R1/R2/R12/R15) ───────
