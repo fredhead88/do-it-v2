@@ -1,0 +1,5 @@
+[[retired]]
+name = "owed-line-keyword-guess"
+kind = "code"
+pattern = 'for word, entries in (("ro-dsn", ("ro-prod-sql",)), ("droplet", ("droplet-read",)),'
+paths = ["src/checks.py"]

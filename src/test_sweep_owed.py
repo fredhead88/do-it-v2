@@ -1198,7 +1198,8 @@ browser_signature('AC8', {'plain': 3, 'e2e': 3, 'seat': 4, 'legacy_browser_route
 clear()
 write('L-spec-writer-seam.jsonl', dict(type='spec-written', subject=sid, project='proj-a', ts=EPOCH),
       dict(type='owed-ac', subject=sid, criterion='AC1', line='browser', wake_at=iso(hours=-1), ts=EPOCH))
-write('L-executor-seam.jsonl', dict(type='shipped', subject=sid, ts=EPOCH))
+write('L-executor-seam.jsonl', dict(type='shipped', subject=sid, ts=EPOCH),
+      dict(type='owed-unobservable', subject=sid, criterion='AC1', capability='browser', ts=iso(hours=-1)))
 with patch.object(prod_browser, 'run_batch', return_value=[dict(spec=sid, criterion='AC1', outcome='met',
         observed_at=NOW.isoformat(), valid_until=iso(hours=24), evidence='clone=/fixture/scratch spec passed')]) as seam:
     prod_runner.run(NOW)

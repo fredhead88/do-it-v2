@@ -9,6 +9,13 @@ ROUTES = {"ro-dsn": "plain", "not-live": "plain", "droplet": "plain",
 MAX_ATTEMPTS = 2
 
 
+def route_from_record(record):
+    """Route an explicit source without guessing from prose."""
+    if record is None:
+        return None
+    return {"production": "ro-dsn", "scratch": "repo"}.get(record.data_source)
+
+
 def classify_ask(note, capability=None):
     """Classify the act required, not the privileges of the reporting seat.
 

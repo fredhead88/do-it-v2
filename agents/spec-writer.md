@@ -109,6 +109,13 @@ a write that deletes data or moves money is an owed criterion, proven by its
 first real occurrence. A criterion with no review path is an internal-surface
 criterion, and review depth derives from that.
 
+Every AC block carries a `check:` line directly below the AC line, before
+`review_path`, margin-aligned or indented two spaces. Its exact key order is
+`data_source customer_data profile timing answered_by`:
+`check: data_source=<scratch|production> customer_data=<true|false> profile=<name> timing=<pre-merge|post-deploy|due:<ISO-8601 instant>> answered_by=<script|model>`.
+SD11 profile names are `repo-scratch-pg`, `repo-venv`, `prod-readonly`, and
+`browser-review`. An undeclared check is shown as `data-source-unknown`.
+
 Enumerate before writing "all", "every" or "identical": paste the loop's
 output, not a conclusion from a sample. Cite symbols and paths, never line
 numbers. No implementation plan: the builder writes that. No open question

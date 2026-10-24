@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """Hermetic regression fixtures for the check registry (L-spec-1105)."""
 import builtins
+import dataclasses
 import importlib
 import os
 import pathlib
 import re
+import shlex
 import socket
 import subprocess
 import sys
 import tempfile
+import tomllib
 from unittest.mock import patch
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
@@ -209,11 +212,6 @@ def test_ac6():
         assert row["criterion"] == "AC1" and row["commands"] == ["pytest one"]
         assert row["timing"] == ("scheduled" if capability == "elapsed" else "post-deploy")
         assert row["validity_h"] == 48
-    for word, need in (("ro-dsn", "ro-prod-sql"), ("droplet", "droplet-read"),
-                       ("browser", "browser-review-account"), ("elapsed", "elapsed-time"),
-                       ("deploy", "deployed-site")):
-        row = checks.record_for_owed({"criterion": "AC1", "line": f"requires {word}"}, text, None)
-        assert need in row["needs"]
     row = checks.record_for_owed({"criterion": "AC2", "capability": None, "line": None}, text, None)
     assert row["runner"] == "prod-browser"
     row = checks.record_for_owed({"criterion": "AC1", "capability": "browser", "line": "elapsed"}, text, None)
@@ -222,8 +220,6 @@ def test_ac6():
     row = checks.record_for_owed({"criterion": "AC2", "capability": "browser", "line": "elapsed-time"}, text, None)
     assert row["needs"] == ["deployed-site", "browser-review-account", "elapsed-time"]
     assert row["timing"] == "scheduled"
-    row = checks.record_for_owed({"criterion": "AC1", "line": "operator-action browser ro-dsn elapsed"}, text, None)
-    assert row["runner"] == "prod-browser" and row["timing"] == "scheduled"
     for data in ({"criterion": "AC99", "capability": "browser"},
                  {"criterion": "AC3", "capability": "alien", "line": "browser elapsed"}):
         row = checks.record_for_owed(data, text, None)
@@ -323,8 +319,162 @@ def test_production_data():
     print("W55 revised: observed-data AND DSN dependency; live_db/admin/backend alone allowed")
 
 
-if __name__ == "__main__":
+def cr_record(**changes):
+    fields = dict(check_id="L-spec-fixture:AC1", spec="L-spec-fixture", criterion="AC1",
+                  argv=["/usr/bin/python3", "test.py"], sha="", data_source="scratch",
+                  customer_data=False, profile="repo-venv", timing="pre-merge", answered_by="script")
+    return checks.CheckRecord(**(fields | changes))
+
+
+def raises_value_error(call, criterion=None):
+    try:
+        call()
+    except ValueError as error:
+        if criterion:
+            assert criterion in str(error), str(error)
+    else:
+        raise AssertionError("invalid declaration accepted")
+
+
+def cr_ac1():
+    assert [field.name for field in dataclasses.fields(checks.CheckRecord)] == (
+        "check_id spec criterion argv sha data_source customer_data profile timing answered_by".split())
+    row = cr_record()
+    assert checks.CheckRecord.from_event(row.to_event()) == row
+    for field, values in {"data_source": ["unknown", None, []], "answered_by": ["human", None],
+                          "customer_data": [0, 1, None, "false"],
+                          "argv": ["echo hi", ("echo",), [1], None],
+                          "timing": ["scheduled", "due:bad", "due:2026-10-24", "due:2026-10-24T10:00:00", None]}.items():
+        for value in values:
+            raises_value_error(lambda: cr_record(**{field: value}))
+    for timing in ("post-deploy", "due:2026-10-24T10:00:00Z", "due:2026-10-24T10:00:00+00:00"):
+        assert cr_record(timing=timing).timing == timing
+    try:
+        row.sha = "changed"
+    except dataclasses.FrozenInstanceError:
+        pass
+    else:
+        raise AssertionError("record is mutable")
+    for field in row.to_event():
+        body = row.to_event()
+        del body[field]
+        raises_value_error(lambda: checks.CheckRecord.from_event(body))
+    raises_value_error(lambda: checks.CheckRecord.from_event(row.to_event() | {"extra": True}))
+    print("cr_ac1 ok")
+
+
+CHECK_LINE = "check: data_source=scratch customer_data=false profile=repo-venv timing=pre-merge answered_by=script"
+
+
+def cr_ac2():
+    text = spec("AC1 [backend]: first.\n" + CHECK_LINE + "\nreview_path: read only",
+                "AC2 [backend]: second.\n  " + CHECK_LINE.replace("scratch", "production").replace(
+                    "false", "true").replace("repo-venv", "prod-readonly").replace(
+                    "pre-merge", "post-deploy").replace("script", "model") + "\nreview_path: read only",
+                "AC3 [backend]: undeclared.",
+                verification='# AC1\n/usr/bin/python3 "a b.py" &&\n# AC2\n/usr/bin/true &&\n'
+                             '# AC2\n/usr/bin/echo two &&\n# untagged comment\n/usr/bin/echo untagged')
+    a, b = checks.declared(text, "L-spec-fixture", "candidate")
+    assert a == cr_record(argv=shlex.split('/usr/bin/python3 "a b.py"'), sha="candidate")
+    assert b == cr_record(check_id="L-spec-fixture:AC2", criterion="AC2", sha="candidate",
+                          argv=["/bin/sh", "-c", "/usr/bin/true && /usr/bin/echo two"],
+                          data_source="production", customer_data=True, profile="prod-readonly",
+                          timing="post-deploy", answered_by="model")
+    for line in (CHECK_LINE + " extra=value", CHECK_LINE + " data_source=scratch",
+                 CHECK_LINE.replace(" customer_data=false", ""),
+                 CHECK_LINE.replace("false", "maybe"), CHECK_LINE.replace("pre-merge", "due:bad")):
+        raises_value_error(lambda: checks.declared(text.replace(CHECK_LINE, line, 1), "L-spec-fixture", ""), "AC1")
+    print("cr_ac2 ok")
+
+
+def cr_ac3():
+    row = cr_record()
+    first = dict(ts="2026-10-24T10:00:00Z", type="check-declared", subject=row.spec,
+                 v=1, spawn="fixture", **row.to_event())
+    last = first | cr_record(data_source="production", customer_data=True).to_event()
+    with patch("builtins.open", forbidden), patch("io.open", forbidden), \
+            patch.object(socket, "socket", forbidden), patch.object(subprocess, "run", forbidden), \
+            patch.object(subprocess, "Popen", forbidden), patch.object(os, "system", forbidden), \
+            patch("time.time", forbidden):
+        assert checks.record_for([], row.spec, "AC1") is None
+        assert checks.record_for([first], "other", "AC1") is None
+        assert checks.record_for([first], row.spec, "AC2") is None
+        assert checks.record_for([first], row.spec, "AC1") == row
+        assert checks.record_for([first | {"actor": "spec-writer", "_src": "fixture:1"}],
+                                 row.spec, "AC1") == row
+        assert checks.record_for([last, first], row.spec, "AC1") == row
+        assert checks.record_for([first, last], row.spec, "AC1") == checks.CheckRecord.from_event(
+            {key: last[key] for key in row.to_event()})
+        for bad in (last | {"subject": "other"}, last | {"extra": True},
+                    last | {"data_source": "unknown"},
+                    {key: value for key, value in last.items() if key not in ("subject", "argv")}):
+            assert checks.record_for([first, bad], row.spec, "AC1") is None
+    print("cr_ac3 ok")
+
+
+def cr_ac6():
+    import owed_routes
+    assert owed_routes.route_from_record(None) is None
+    for source, route in (("production", "ro-dsn"), ("scratch", "repo")):
+        assert owed_routes.route_from_record(cr_record(data_source=source)) == route
+        assert route in owed_routes.ROUTES
+    text = spec("AC1 [backend]: run.\nreview_path: `pytest one`", "AC2 [ui]: page.",
+                "AC3 [backend]: elapsed time.")
+    for own in checks.records(text, None):
+        for line in ("ro-dsn", "droplet", "browser", "elapsed", "deploy", "operator-action",
+                     "operator-action browser ro-dsn elapsed"):
+            row = checks.record_for_owed({"criterion": own["criterion"], "line": line}, text, None)
+            assert row["needs"] == own["needs"], row
+            assert row["runner"] == own["runner"], row
+            assert row["timing"] == ("scheduled" if "elapsed-time" in own["needs"] else "post-deploy")
+    test_ac6()  # All capability-bearing regressions remain in force.
+    print("cr_ac6 ok")
+
+
+def cr_ac7():
+    import shape
+    plain = spec(*(f"AC{i} [backend]: run.\nreview_path: run `/usr/bin/true`" for i in (1, 2, 3)),
+                 verification='cd "$(git rev-parse --show-toplevel)" &&\n# AC1\n/usr/bin/true &&\n'
+                              '# AC2\n/usr/bin/true &&\n# AC3\n/usr/bin/true')
+    plain = ("# Fixture\n## Goal\nA changes from B to C.\nIn plain English: checks declare their source.\n"
+             "## Requirements\nR1: execute.\n## Boundaries\nIn scope: checks.\nOut of scope: writes.\n"
+             "## Interfaces\nConsumes: none.\nProduces: fixture.\nWrites:\nsrc/checks.py\n" + plain)
+    annotated = re.sub(r"(AC\d+ \[backend\]: run\.)", lambda m: m[0] + "\n" + CHECK_LINE, plain)
+    assert not shape.check(annotated)["block"], shape.check(annotated)
+    assert [(r["runner"], r["commands"]) for r in checks.records(plain, None)] == [
+        (r["runner"], r["commands"]) for r in checks.records(annotated, None)]
+    assert grading_env.criterion_caps(plain, "", "fixture") == grading_env.criterion_caps(annotated, "", "fixture")
+    assert grading_env._tool_texts(plain, "") == grading_env._tool_texts(annotated, "")
+    contract = (pathlib.Path(__file__).resolve().parent.parent / "agents/spec-writer.md").read_text()
+    assert contract.count("Every AC block carries a `check:` line") == 1
+    assert "data_source customer_data profile timing answered_by" in contract
+    for name in ("repo-scratch-pg", "repo-venv", "prod-readonly", "browser-review", "data-source-unknown"):
+        assert name in contract
+    print("cr_ac7 ok")
+
+
+def cr_ac8():
+    root = pathlib.Path(__file__).resolve().parent.parent
+    rows = tomllib.loads((root / "retired.d/check-record.toml").read_text())["retired"]
+    assert len(rows) == 1
+    row = rows[0]
+    old = '''        for word, entries in (("ro-dsn", ("ro-prod-sql",)), ("droplet", ("droplet-read",)),
+                              ("browser", ("deployed-site", "browser-review-account")),
+                              ("elapsed", ("elapsed-time",)), ("deploy", ("deployed-site",))):
+            if _names(line, (word,)):
+                needs.update(entries)'''
+    assert row["name"] and row["kind"] == "code" and row["paths"] == ["src/checks.py"]
+    assert row["pattern"] in old
+    assert row["pattern"] not in (root / "src/checks.py").read_text()
+    print("cr_ac8 ok")
+
+
+if __name__ == "__main__" and len(sys.argv) > 1:
+    globals()[sys.argv[1]]()
+elif __name__ == "__main__":
     test_production_data()
     for ac in (1, 2, 3, 4, 5, 6, 7, 9, 10, 12):
         globals()[f"test_ac{ac}"]()
         print(f"AC{ac} ok")
+    for number in (1, 2, 3, 6, 7, 8):
+        globals()[f"cr_ac{number}"]()

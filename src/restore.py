@@ -246,8 +246,8 @@ VOLATILE = (
     # and a genuinely different criterion (AC8's negative-case leg) still
     # surfaces; only the volatile timestamp between them is masked.
     ("owed_due_due_at_fragment",
-     re.compile(r"^(  \S+ · \S+ · )\S+( · \d+d overdue)$"),
-     r"normalize:\1<DUE_AT>\2"),
+     re.compile(r"^(  \S+ · \S+ · )\S+( · \d+d overdue)( · \S+)?$"),
+     r"normalize:\1<DUE_AT>\2\3"),
     # OWED DUE's `Nd overdue` fragment — the day-count text only.
     ("owed_due_days_fragment", re.compile(r"\d+d overdue"), "normalize:<N>d overdue"),
     # `due owed: N`'s fault fragment only — the count itself (`N`) stays and

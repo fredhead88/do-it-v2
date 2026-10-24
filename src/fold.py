@@ -33,6 +33,7 @@ PROJECT = os.environ.get("DOIT_PROJECT")          # §9.1/D93: a filter, not a s
 
 from fold_emits import EMITS, DECLARES, OWED_DECLARERS, REQUIRED_ROWS
 EMITS["suite-run"] = {"suite-daily"}
+EMITS["check-declared"] = {"spec-writer", "executor", "operator"}
 # L-spec-0682: the full-environment verifier may record verdicts and re-date timed checks.
 for _verdict in ("owed-met", "owed-failed"):
     EMITS[_verdict].update({"owed-verifier", "verifier"})
@@ -1629,7 +1630,7 @@ def fold(events):
 def owed_due(specs):
     """Board rows for due, blocked, failed, correcting and quarantined checks.
 
-    Each row carries spec, criterion, status, src, due_at and days_overdue.
+    Each row carries spec, criterion, status, src, due_at, days_overdue and data_source.
     Undated open checks use shipped_at. ISO timestamps contain no spaces,
     preserving restore.py's owed_due_due_at_fragment match. Expired checks
     remain excluded; the board and HEALTH count every actionable row.
@@ -1643,7 +1644,8 @@ def owed_due(specs):
             out.append({"spec": r["spec"], "criterion": r["criterion"],
                         "due_at": due_at.isoformat(timespec="seconds"),
                         "days_overdue": (NOW - due_at).total_seconds() / 86400,
-                        "src": r["declared_src"], "status": r["status"]})
+                        "src": r["declared_src"], "status": r["status"],
+                        "data_source": r["data_source"]})
     # R5/L-charter-0040, BLOCK_ORDER["OWED DUE"]: the literal tuple, ascending —
     # `due_at` is already a sortable ISO string (ship-anchored, timespec=
     # "seconds"), so a plain tuple sort is exact, tie included.
@@ -1947,7 +1949,8 @@ def render(events, specs, charters, ignored, by_subject):
     def owed_due_line(r):
         return (f"{r['spec']} · {r['criterion']} · {r['due_at']} · "
                 f"{round(r['days_overdue'])}d overdue"
-                + (f" · {r['status']}" if r["status"] != "due" else ""))
+                + (f" · {r['status']}" if r["status"] != "due" else "")
+                + f" · {r['data_source']}")
 
     owed_due_rows = owed_due(specs)
     block("OWED DUE", [owed_due_line(r) for r in owed_due_rows])
