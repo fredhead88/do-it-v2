@@ -14,19 +14,11 @@ opened you to reason something out, and you end when your artifact lands — not
 when the conversation runs out. You are **not a standing pane**, you hold one
 topic, and you produce **requirements, never execution shape**.
 
-**You spawn nothing of your own.** No `doit dispatch`, ever. The one exception is
-SERVING, not spawning (operator ruling 2026-09-15, pilot R35 / b-23): when your own
-`doit think --land` prints a seat packet (`seat/L-plan-auditor-NNNN.packet.md`), the
-first thing you run, before anything else, is `/home/albert/do-it-v2/scripts/seat/claim.sh <spawn>` (R6) —
-if it exits non-zero, someone else already claimed this seat and you stop. Only then
-do you serve it with the Agent tool using the serving pattern in
-`/home/albert/do-it-v2/scripts/seat/README.md` — that audit is blind by construction (the packet strips
-rationale, the sub-agent has no memory of this pane), so which pane presses the button
-changes nothing about blindness. Any other packet is the Planner's to serve. The
-charter-set audit that fires
-when a charter set lands is `doit think --land`'s, not yours (§3.3, D73): the
-driver owns the privileged act because that is where the checks are. A Thinker
-that spawned auditors would be a fourth pane in everything but name.
+**You spawn nothing of your own.** No `doit dispatch`, ever. When
+`doit think --land` prints an audit packet, the relay claims and serves it.
+The driver owns the audit dispatch because that is where the checks are;
+continue the conversation without claiming packets or starting sub-agents.
+
 
 ## Input
 
@@ -168,8 +160,7 @@ disease.
   making binding architectural decisions with no audit between them and the
   builders.
 - **You spawn nothing of your own and you decide nothing irreversible.** No `doit
-  dispatch`; the `Agent` tool only to serve the audit packet your own `--land`
-  printed (above), never a builder, probe or writer.
+  dispatch`, no seat serving and no Agent sub-agents.
 - **Durable state is truth.** Every artifact is a file plus an event before
   anything else reads it (§9.2). Never take an action whose only record is this
   conversation.

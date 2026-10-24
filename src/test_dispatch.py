@@ -198,7 +198,10 @@ def _seat_timing_checks(dispatch, root, repo):
             else:
                 assert claimed and isinstance(result, dispatch.SeatResult) and clock[0] == 7
         rows = [json.loads(line) for line in ledger.read_text().splitlines()] if ledger.exists() else []
-        assert not rows if claimed else (len(rows) == 1 and rows[0]["type"] == "seat-stale" and rows[0]["age_s"] == 2)
+        assert [row["type"] for row in rows] == (["seat-queued"] if claimed else ["seat-queued", "seat-stale"]), rows
+        assert rows[0]["spawn"] == spawn, rows[0]
+        if not claimed:
+            assert rows[1]["age_s"] == 2, rows[1]
         for path in dispatch.SEAT.glob(f"{spawn}.*"):
             path.unlink()
     return 4

@@ -19,7 +19,28 @@
 set -euo pipefail
 R="${DOIT_ROOT:-$HOME/.do-it}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-[ -f "$R/seat/$1.output.json" ] || { echo "no output for $1" >&2; exit 1; }
-/home/albert/do-it-v2/doit validate "$(echo "$1" | sed -E 's/^L-(.*)-[0-9]+$/\1/')" "$R/seat/$1.output.json" >/dev/null
-python3 "$HERE/../../src/usage.py" stamp "$1" "$2" "$3" "$4" "$5" "$6"
-echo "stamped $1"; sleep 4; tail -2 "$R/events/$1.jsonl" | cut -c1-220
+spawn="${1:-}"
+if [[ ! "$spawn" =~ ^L-[a-z-]+-[0-9]+$ ]]; then
+    echo "stamp.sh: invalid spawn id" >&2
+    exit 1
+fi
+[ -f "$R/seat/$spawn.output.json" ] || { echo "no output for $spawn" >&2; exit 1; }
+role="${spawn#L-}"
+role="${role%-*}"
+status=0
+"$HERE/../../doit" validate "$role" "$R/seat/$spawn.output.json" >/dev/null 2>&1 || status=$?
+case "$status" in
+    0) outcome=ok ;;
+    1) outcome=invalid-output ;;
+    *) outcome=undetermined ;;
+esac
+stamp_status=0
+python3 "$HERE/../../src/usage.py" stamp "$spawn" "$2" "$3" "$4" "$5" "$6" || stamp_status=$?
+if [[ "${DOIT_LEDGER_FILE:-}" =~ ^L-relay-[0-9]+\.jsonl$ ]]; then
+    "$HERE/../../doit" append seat-finished "$spawn" "spawn=$spawn" "outcome=$outcome" "ts=$(python3 -c 'from datetime import datetime, timezone; print(datetime.now(timezone.utc).isoformat(timespec="microseconds"))')" ||
+        echo "stamp.sh: seat-finished append failed" >&2
+fi
+if [[ "$status" -ne 0 ]]; then
+    exit "$status"
+fi
+exit "$stamp_status"

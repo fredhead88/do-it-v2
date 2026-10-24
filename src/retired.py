@@ -152,7 +152,7 @@ def check(rows: list[Retired], *, repo: str, crontab_text: str | None) -> list[P
                 emit("crontab", "present")
             patterns = ["crons.toml"]
         elif row.kind == "doc":
-            patterns = ["docs/**/*", "agents/**/*", "README.md"]
+            patterns = row.paths or ["docs/**/*", "agents/**/*", "README.md"]
         else:
             patterns = row.paths
         try:

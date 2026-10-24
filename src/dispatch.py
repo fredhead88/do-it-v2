@@ -71,6 +71,9 @@ def emit(dst, base, type_, /, *, strict=False, **kv):
         if refused:
             return refused
     e = {**kv, **base, "v": 1, "ts": now(), "type": type_}
+    if type_ == "seat-queued":
+        # Seat stages cross ledger files; second-resolution ties reorder by content.
+        e["ts"] = datetime.now(timezone.utc).isoformat(timespec="microseconds")
     e.pop("actor", None)
     import fold                                  # lazy: see fold.py's own alloc() note
     reason = fold.required_reason(e)
@@ -582,6 +585,8 @@ def run_seat(spawn, cmd, packet, cwd, timeout, path=None, *, window=None, ledger
     SEAT.mkdir(parents=True, exist_ok=True)
     packet_text = f"WRITE PATH: {path}\n\n{packet}" if path else packet
     (SEAT / f"{spawn}.packet.md").write_text(packet_text)
+    if ledger is not None and base is not None:
+        emit(ledger, {**base, "spawn": spawn}, "seat-queued")
     cwd_out = cwd
     if view is not None:
         view = pathlib.Path(view)

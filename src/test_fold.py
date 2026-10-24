@@ -18,6 +18,28 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent))
 import fold  # noqa: E402
 import freeze  # noqa: E402
 
+# Seat authorization must hold in a standalone reader before dispatch is imported.
+import subprocess
+subprocess.run([sys.executable, "-c", """
+import fold, sys
+assert 'dispatch' not in sys.modules
+roles = {'spec-writer', 'spec-auditor', 'builder', 'grader', 'reviewer',
+         'plan-auditor', 'research', 'reuse-scout', 'charter-reviewer',
+         'probe', 'owed-sweeper', 'owed-verifier'}
+assert fold.EMITS.get('seat-queued') == roles
+event = {'type': 'seat-queued', 'subject': 'L-spec-9999', 'spawn': 'L-builder-9999'}
+for actor in roles:
+    assert fold.admits(event, actor) is None, actor
+assert fold.admits(event, 'operator') is not None
+for kind in ('seat-claimed', 'seat-started', 'seat-finished'):
+    assert fold.EMITS.get(kind) == {'relay'}, kind
+    event['type'] = kind
+    assert fold.admits(event, 'relay') is None, kind
+    for actor in roles | {'operator', 'planner', 'executor', 'thinker'}:
+        assert fold.admits(event, actor) is not None, (kind, actor)
+print('1497: standalone fold enforces all four seat authorizations')
+"""], cwd=pathlib.Path(__file__).parent, check=True)
+
 # src/panes.py has landed (L-adr-0044), so every render() below now calls the REAL
 # live_panes() — against the operator's own ~/.claude/sessions unless this is
 # pinned. A check that reads live machine state is not a check. Pinned to an empty
