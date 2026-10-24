@@ -1686,6 +1686,53 @@ with fixture1496() as (top1496, ledger1496, proc1496, scr1496), tempfile.Tempora
     assert [e["ref"] for e in fresh1496() if e["type"] == "resource-reaped"] == [str(good1496)]
     response1496("AC6", dict(unsafe_refused=4, targets_survive=True, valid_removed=1))
 
+# L1515: legacy/rootless rows leave the walk; malformed rows retain one refusal.
+reap1515_evidence = []
+for dry1515 in (True, False):
+    with fixture1496() as (top1515, ledger1515, proc1515, scr1515), tempfile.TemporaryDirectory(prefix="outside-1515-", dir="/dev/shm") as outside1515:
+        outside1515 = pathlib.Path(outside1515)
+        manifest1515 = outside1515 / "manifest.jsonl"
+        config1515 = ledger1515 / "repos/do-it-v2/look.toml"
+        config1515.parent.mkdir(parents=True)
+        config1515.write_text('[resources]\nupload_manifest = ' + json.dumps(str(manifest1515)) + '\n')
+        good1515 = outside1515 / "archive"
+        good1515.mkdir()
+        valid1515 = dict(kind="upload-copy", ref=str(good1515), lane="archive", subject="L-spec-1496")
+        no_kind1515 = dict(ref=str(outside1515 / "missing-kind"), lane="archive", subject="L-spec-1496")
+        manifest_rows1515 = [{"archived_to": "legacy"}, {}, {"sha": "legacy"}, valid1515,
+                             valid1515 | {"ref": ""}, no_kind1515]
+        manifest1515.write_text("\n".join(json.dumps(r) for r in manifest_rows1515))
+        terminal1496()
+        worktree1515 = ledger1515 / "worktrees/fixture"
+        worktree1515.mkdir(parents=True)
+        resources.record("worktree", str(worktree1515), lane="check", subject="L-spec-1496")
+        events1515 = fresh1496()
+        with (patch.object(resources, "_remove") as remove1515,
+              patch.object(resources, "_default_safety", return_value=None)):
+            rows1515 = reap_tmp._reap_recorded(events1515, dry_run=dry1515, scratch_root=scr1515, proc_root=proc1515)
+            assert len(rows1515) == 3, rows1515
+            assert len({r.ref for r in rows1515}) == 3
+            uploads1515 = [r for r in rows1515 if r.kind == "upload-copy"]
+            assert len(uploads1515) == 2 and all(r.action == "refused" for r in uploads1515)
+            assert {r.reason for r in uploads1515} == {"undetermined: missing or invalid ref", "undetermined: missing or invalid kind"}
+            assert str(good1515) not in {r.ref for r in rows1515}
+            assert [(r.ref, r.action) for r in rows1515 if r.kind == "worktree"] == [(str(worktree1515), "would-reap" if dry1515 else "reaped")]
+            assert resources.not_reapable_counts(events1515) == {"upload-copy": 1}
+            assert remove1515.call_count == (0 if dry1515 else 1)
+            assert good1515.exists()
+            reap1515_evidence.append(dict(dry_run=dry1515, rows=[vars(r) for r in rows1515], not_reapable=resources.not_reapable_counts(events1515)))
+            manifest1515.write_text("broken manifest")
+            broken1515 = reap_tmp._reap_recorded(events1515, dry_run=dry1515, scratch_root=scr1515, proc_root=proc1515)
+            assert len(broken1515) == 2, broken1515
+            error1515 = [r for r in broken1515 if r.kind == "upload-copy"]
+            assert len(error1515) == 1 and error1515[0].action == "refused" and "upload manifest:" in error1515[0].reason
+            assert resources.not_reapable_counts(events1515) == {}
+            assert len([r for r in broken1515 if r.kind == "worktree"]) == 1
+            excluded1515 = resources.reap(events1515, exclude=frozenset({str(worktree1515)}))
+            assert [r.ref for r in excluded1515] == [str(manifest1515)]
+            assert len(resources.reap(events1515)) == 2
+response1496("AC3-1515", reap1515_evidence)
+
 # The retirement guard must fire before its passing production-file check is claimed.
 with tempfile.TemporaryDirectory(prefix="retired-negative-") as d1496:
     fixture1496path = pathlib.Path(d1496) / "crontab"

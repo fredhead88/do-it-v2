@@ -116,30 +116,54 @@ def _resource(row, fallback):
                     undetermined=_field_reason(row))
 
 
-def _uploads():
+def _upload_path():
     # Match the live root's project checkout, rather than another root's config.
     config = fold.ROOT / "repos/do-it-v2/look.toml"
     if not config.exists():
-        return []
+        return None
+    configured = tomllib.loads(config.read_text()).get("resources", {}).get("upload_manifest")
+    if configured is not None and (not isinstance(configured, str) or not Path(configured).is_absolute()):
+        raise ValueError("upload manifest path must be absolute")
+    return configured
+
+
+def _upload_rows(path):
+    rows = [(n, json.loads(line)) for n, line in enumerate(Path(path).read_text().splitlines()) if line.strip()]
+    if any(not isinstance(row, dict) for _, row in rows):
+        raise ValueError("invalid upload manifest row")
+    return rows
+
+
+def manifest_counts():
+    """Count legacy and declared rows in an independent, all-or-error read."""
+    counts = {"legacy": 0, "declared": 0}
+    try:
+        path = _upload_path()
+        if path is None:
+            return counts
+        for _, row in _upload_rows(path):
+            counts["declared" if any(k in row for k in ("kind", "ref", "lane", "subject")) else "legacy"] += 1
+        return counts
+    except (OSError, ValueError, TypeError, AttributeError):
+        return {"legacy": 0, "declared": 0, "unreadable": True}
+
+
+def _uploads():
     ref = "upload-manifest:unknown"
     try:
-        configured = tomllib.loads(config.read_text()).get("resources", {}).get("upload_manifest")
+        configured = _upload_path()
         if configured is None:
             return []
-        if not isinstance(configured, str) or not Path(configured).is_absolute():
-            raise ValueError("upload manifest path must be absolute")
         ref = configured
         result = []
-        for n, line in enumerate(Path(configured).read_text().splitlines()):
-            if not line.strip():
+        for n, row in _upload_rows(configured):
+            if not any(k in row for k in ("kind", "ref", "lane", "subject")):
                 continue
-            row = json.loads(line)
-            if not isinstance(row, dict):
-                raise ValueError("invalid upload manifest row")
             why = _field_reason(row)
-            if row.get("kind") != "upload-copy":
+            if why is None and row.get("kind") != "upload-copy":
                 why = "invalid upload manifest kind"
-            result.append(Resource("upload-copy", row.get("ref") or f"upload-manifest:{n}",
+            ref_value = row.get("ref")
+            result.append(Resource("upload-copy", ref_value if isinstance(ref_value, str) and ref_value else f"upload-manifest:{n}",
                                    row.get("lane", ""), row.get("subject", ""),
                                    source="upload-manifest", undetermined=why))
         return result
@@ -162,6 +186,24 @@ def live(events: list[dict]) -> list[Resource]:
     for resource in _uploads():
         active.setdefault(resource.ref, resource)
     return list(active.values())
+
+
+def reapable(resource) -> bool:
+    """Keep uncertain resources visible, including failures to resolve roots."""
+    if resource.undetermined is not None:
+        return True
+    try:
+        return bool(ROOTS.get(resource.kind, lambda: ())())
+    except Exception:
+        return True
+
+
+def not_reapable_counts(events):
+    counts = {}
+    for resource in live(events):
+        if not reapable(resource):
+            counts[resource.kind] = counts.get(resource.kind, 0) + 1
+    return counts
 
 
 def _owner_reason(resource, events):
@@ -260,12 +302,15 @@ def _remove(resource, events):
         raise RuntimeError("removal not confirmed")
 
 
-def reap(events: list[dict], *, dry_run: bool = True, safety=None) -> list[ReapResult]:
+def reap(events: list[dict], *, dry_run: bool = True, safety=None,
+         exclude: frozenset[str] = frozenset()) -> list[ReapResult]:
     safety = _default_safety if safety is None else safety
     results = []
     filename = os.environ.get("DOIT_LEDGER_FILE", "L-operator-local.jsonl")
     denied = not dry_run and fold.admits({"type": "resource-reaped"}, fold.actor_of(filename)) is not None
     for resource in live(events):
+        if resource.ref in exclude or not reapable(resource):
+            continue
         try:
             reason = ("actor-not-admitted" if denied else None)
             reason = reason or ("undetermined: " + resource.undetermined if resource.undetermined else

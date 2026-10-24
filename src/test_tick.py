@@ -2191,5 +2191,52 @@ def test_close_rule_emission_1506():
 
 test_close_rule_emission_1506()
 
+
+def test_recorded_reap_counts_1515():
+    import reap_tmp, resources
+    rows = [resources.ReapResult("/fixture/" + str(i), "worktree", "refused",
+                               "undetermined: pid " + str(i) + " /fixture/" + str(i))
+            for i in range(1500)]
+    evidence = []
+    for failed in (None, "not_reapable_counts", "manifest_counts", "both"):
+        with tempfile.TemporaryDirectory(prefix="tick-reap-1515-") as directory, contextlib.ExitStack() as stack:
+            root = pathlib.Path(directory)
+            stack.enter_context(patch.object(fold, "ROOT", root))
+            stack.enter_context(patch.object(fold, "EVENTS", root / "events"))
+            stack.enter_context(patch.object(fold, "read_events", return_value=[]))
+            stack.enter_context(patch.object(tick, "run_steps", return_value=[]))
+            recorded = stack.enter_context(patch.object(reap_tmp, "_reap_recorded", return_value=rows))
+            trees = stack.enter_context(patch.object(tick.tree_cleanup, "reap_worktrees", return_value=([], [])))
+            for helper, result in (("not_reapable_counts", {"upload-copy": 3}),
+                                   ("manifest_counts", {"legacy": 3, "declared": 3})):
+                stack.enter_context(patch.object(resources, helper, return_value=result,
+                    side_effect=RuntimeError("fixture helper failure") if failed in (helper, "both") else None))
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                assert tick._record() is not None
+            recorded.assert_called_once_with([])
+            trees.assert_called_once_with([])
+            event = [json.loads(line) for line in tick.tick_path().read_text().splitlines()
+                     if json.loads(line)["type"] == "tick"][-1]
+            summary = event["recorded_reap_counts"]
+            assert isinstance(summary, dict) and len(json.dumps(summary).encode()) < 4096
+            assert summary["n"] == 1500 and summary["by_action"] == {"refused": 1500}
+            assert "recorded_reap" not in event
+            assert not output.getvalue(), output.getvalue()
+            for helper, component in (("not_reapable_counts", "not_reapable"), ("manifest_counts", "manifest")):
+                if failed in (helper, "both"):
+                    assert helper in event["recorded_reap_counts_error"]
+                    assert component not in summary
+                else:
+                    assert summary[component]
+            if failed is None:
+                assert "recorded_reap_counts_error" not in event
+            evidence.append(dict(failed=failed, event=event, worktree_reap_calls=trees.call_count,
+                                 stdout=output.getvalue()))
+    _launcher_evidence("AC4-1515", evidence)
+
+
+test_recorded_reap_counts_1515()
+
 if __name__ == '__main__':
     unittest.main(argv=[sys.argv[0]])
