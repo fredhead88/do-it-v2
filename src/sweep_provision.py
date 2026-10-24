@@ -44,52 +44,12 @@ def _resource_ledger():
 
 
 def dashboard(tree, root, *, live=LIVE_DASHBOARD):
-    """Prefer the lock-keyed cache; use the live tree only with identical locks."""
-    directory = pathlib.Path(tree) / "dashboard"
-    lock = directory / "package-lock.json"
-    if not lock.is_file():
-        return "none"
-    target = directory / "node_modules"
-    if target.exists() or target.is_symlink():
-        raise build_runner.Undetermined("node_modules present in committed tree")
-    digest = hashlib.sha256(lock.read_bytes()).hexdigest()
-    cache_root = pathlib.Path(root) / "cache/node_modules"
-    cache_root.mkdir(parents=True, exist_ok=True)
-    cache = cache_root / digest
-    with (cache_root / (digest + ".lock")).open("a") as handle:
-        fcntl.flock(handle, fcntl.LOCK_EX)
-        if cache.exists():
-            if (not (cache / "node_modules").is_dir()
-                    or not (cache / "package-lock.json").is_file()
-                    or (cache / "package-lock.json").read_bytes() != lock.read_bytes()):
-                raise build_runner.Undetermined("node cache lock mismatch or incomplete cache")
-            source, used = cache / "node_modules", "cache:" + digest
-        elif ((live / "node_modules").is_dir() and (live / "package-lock.json").is_file()
-              and (live / "package-lock.json").read_bytes() == lock.read_bytes()):
-            source, used = live / "node_modules", "matching-lock:" + str(live)
-        else:
-            # Stage atomically: a failed install must never become a cache hit.
-            stage = pathlib.Path(tempfile.mkdtemp(prefix=digest[:12] + "-", dir=cache_root))
-            with _resource_ledger():
-                row = resources.record("tmpdir", str(stage), lane="owed", subject=pathlib.Path(tree).parent.name)
-            promoted = False
-            try:
-                for name in ("package.json", "package-lock.json"):
-                    if (directory / name).is_file():
-                        shutil.copyfile(directory / name, stage / name)
-                build_runner._required(["npm", "ci", "--prefer-offline"], phase="dashboard npm ci",
-                    env=grading_env._clean_env(), deadline=time.monotonic() + build_runner.WALL_CAP,
-                    cwd=stage)
-                if not (stage / "node_modules").is_dir() or (stage / "package-lock.json").read_bytes() != lock.read_bytes():
-                    raise build_runner.Undetermined("npm ci produced no lock-matched node_modules")
-                stage.rename(cache)
-                promoted = True
-            finally:
-                with _resource_ledger():
-                    resources.release(row, reason="promoted-to-cache" if promoted else "creator-finally")
-            source, used = cache / "node_modules", "cache:" + digest
-        target.symlink_to(source.resolve(), target_is_directory=True)
-    return used
+    import checks
+    import provision
+    record = checks.CheckRecord("sweep:setup", pathlib.Path(tree).parent.name, "setup", [], "",
+                                "scratch", False, "repo-venv", "pre-merge", "model")
+    with _resource_ledger(), provision.context(tree=tree, dashboard=(root, live)):
+        return provision.prepare(record, lane="owed").summary["node_modules"]
 
 
 def _pg_path(path):
@@ -101,72 +61,50 @@ def _pg_path(path):
 
 
 def _stop_pg(path, env):
-    """Stop only this invocation's literal, validated directory before removal."""
-    path = _pg_path(path)
-    if (path / "data").exists():
-        result = subprocess.run([PG_CTL, "-w", "-t", "15", "-D", str(path / "data"),
-                                 "-m", "fast", "stop"], env=env,
-                                capture_output=True, timeout=20)
-        if result.returncode and (path / "data/postmaster.pid").exists():
-            raise build_runner.Undetermined("scratch Postgres stop failed; directory retained")
+    import provision
+    return provision._stop_pg(_pg_path(path), env, PG_CTL)
 
 
 def run_check(tree, base, commands, record, *, timeout=build_runner.WALL_CAP):
-    """One clean child environment and optional loopback admin per invocation."""
-    env = grading_env._clean_env({"BASE": base})
+    """Execute in a shared profile, retaining bounded signal-safe cleanup."""
+    import checks
+    import provision
     summary = json.loads(pathlib.Path(record).read_text())
-    summary.update(pg="none", prod_dsns="unset")
-    pg = pg_row = None
+    subject = summary.get("subject") or pathlib.Path(tree).parent.name
+    profile = "repo-scratch-pg" if PG_MARKERS.search(commands) else "repo-venv"
+    check = checks.CheckRecord("sweep:check", subject, "check", [], base,
+                               "scratch", False, profile, "pre-merge", "model")
     previous = {sig: signal.signal(sig, build_runner._interrupted)
                 for sig in (signal.SIGINT, signal.SIGTERM)}
+    prepared = None
     try:
         deadline = time.monotonic() + timeout
-        if PG_MARKERS.search(commands):
-            pg = _pg_path(pathlib.Path(tempfile.mkdtemp(prefix="owed-pg-", dir="/var/tmp")))
-            with _resource_ledger():
-                pg_row = resources.record("tmpdir", str(pg), lane="owed", subject=summary.get("subject") or pathlib.Path(tree).parent.name)
-            output = build_runner._required(["/bin/bash", str(PRIVATE_PG), str(pg), "loopback"],
-                phase="scratch Postgres", env=env, deadline=deadline)
-            match = re.search(r"^ADMIN_DSN='(postgresql://albert:[0-9a-f]{32}@127\.0\.0\.1:\d+/postgres)'$",
-                              output, re.M)
-            if not match:
-                raise build_runner.Undetermined("scratch Postgres produced no loopback admin endpoint")
-            env["AS_LOCAL_PG_ADMIN"] = match[1]
-            summary["pg"] = "loopback"
+        with _resource_ledger(), provision.context(tree=tree, env=grading_env._clean_env({"BASE": base}),
+                pg_script=PRIVATE_PG, pg_ctl=PG_CTL, pg_deadline=deadline, pg_prefix="owed-pg-", pg_parent="/var/tmp"):
+            prepared = provision.prepare(check, lane="owed")
+        summary.update(pg=prepared.summary.get("pg", "none"), prod_dsns="unset")
         pathlib.Path(record).write_text(json.dumps(summary, indent=2) + "\n")
         return build_runner._process(["/bin/bash", "-euo", "pipefail", "-c", commands],
-                                     cwd=tree, env=env, deadline=deadline)
+                                     cwd=tree, env=prepared.env, deadline=deadline)
+    except provision.Undetermined as exc:
+        raise build_runner.Undetermined(str(exc)) from None
     except (build_runner.Undetermined, OSError, subprocess.SubprocessError) as exc:
         category = getattr(exc, "category", None)
         if category is None and grading_env.failure_kind(str(exc)) == "infra":
             category = grading_env.infra_class(str(exc))
         if not category:
             raise
-        import fold
-        subject = summary.get("subject") or pathlib.Path(tree).parent.name
         fields = grading_env.infra_fields(pathlib.Path(record).stem, "owed-sweeper", "")
         fields.update({"class": category, "project": summary.get("project") or os.environ.get("DOIT_PROJECT", "unknown")})
-        original = os.environ.get("DOIT_LEDGER_FILE")
-        try:
-            # Provisioning belongs to the sweep, even when called from a shell.
-            os.environ["DOIT_LEDGER_FILE"] = (original if original and fold.actor_of(pathlib.Path(original).name) == "owed-sweeper"
-                                              else "L-owed-sweeper-provision.jsonl")
+        with _resource_ledger():
             fold.append(["infra-failure", subject] + [f"{key}:={json.dumps(value)}" for key, value in fields.items()])
-        finally:
-            if original is None:
-                os.environ.pop("DOIT_LEDGER_FILE", None)
-            else:
-                os.environ["DOIT_LEDGER_FILE"] = original
         return 2, ("infra:" + category + "\n").encode()
     finally:
-        # A second termination signal must not interrupt the bounded cleanup.
         for sig in previous:
             signal.signal(sig, signal.SIG_IGN)
         try:
-            if pg is not None:
-                _stop_pg(pg, grading_env._clean_env())
-                with _resource_ledger():
-                    resources.release(pg_row, reason="creator-finally")
+            if prepared is not None:
+                prepared.cleanup()
         finally:
             for sig, handler in previous.items():
                 signal.signal(sig, handler)

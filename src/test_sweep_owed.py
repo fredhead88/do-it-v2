@@ -35,6 +35,7 @@ import crons, dispatch, fold, owed, scratch, sweep_owed  # noqa: E402
 
 # Collection may have already imported these modules for another fixture root.
 ROOT_PATCHES = ExitStack()
+ROOT_PATCHES.enter_context(patch.object(sweep_owed.verifier, "run", return_value=[]))
 ROOT_PATCHES.enter_context(patch.object(fold, "PROJECT", None))
 for module in (dispatch, fold, sweep_owed.packet):
     for attr in ("ROOT", "CONTENT", "EVENTS", "PACKETS"):
@@ -47,10 +48,8 @@ EV = TMP / "events"
 CONTENT = TMP / "content"
 EPOCH = (NOW - timedelta(days=3650)).isoformat(timespec="seconds")
 
-
 def iso(**kw):
     return (NOW + timedelta(**kw)).isoformat(timespec="seconds")
-
 
 def write(name, *events):
     for e in events:
@@ -65,7 +64,6 @@ def write(name, *events):
                          for e in events))
     return p
 
-
 def clear():
     for f in EV.glob("*.jsonl"):
         f.unlink()
@@ -73,11 +71,9 @@ def clear():
         if f.is_file():
             f.unlink()
 
-
 def specs_now():
     ev = fold.read_events()
     return ev, fold.fold(ev)[0]
-
 
 class FakeRunner:
     """Records every argv it is called with; `packet` calls return
@@ -97,12 +93,10 @@ class FakeRunner:
             return subprocess.CompletedProcess(argv, 0, stdout=self.packet_path + "\n", stderr="")
         return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
-
 def rows_of(manifest_path):
     text = manifest_path.read_text()
     body = text.split("```json\n", 1)[1].rsplit("\n```", 1)[0]
     return json.loads(body)
-
 
 sweep_ledger = fold.EVENTS / sweep_owed.LEDGER_NAME
 
@@ -616,7 +610,6 @@ answered12b_432 = sweep_owed.answered_specs(specs12b_432)
 assert "L-spec-432m" in answered12b_432, \
     "★ AC12: still answered (at t1, via e_old) after the second run"
 print("answered-0432 AC12 ok")
-
 
 # 2026-10-11 regression: the batch's read-only .env must exist BEFORE `doit packet owed-sweeper`
 # runs, or the packet tells the sweeper "not available (capability=ro-dsn)" and the check is
@@ -1498,3 +1491,10 @@ def test_capability_readmission():
 test_capability_readmission()
 
 ROOT_PATCHES.close()
+
+# L-spec-1504: declared scripts use real ledger appends and never model seats.
+import unittest
+from test_provision import ProvisionTests
+_lane_result = unittest.TextTestRunner(verbosity=2).run(unittest.TestSuite([
+    ProvisionTests("test_script_lanes_emit_real_verdicts_without_dispatch")]))
+assert _lane_result.wasSuccessful(), "shared check-runner lane regression"

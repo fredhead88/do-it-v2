@@ -70,8 +70,6 @@ Source: `crons.toml`. Name | schedule | where | path; command on following lines
   {doit} cron-run ledger-snapshot -- /var/backups/do-it/snapshot.sh >/dev/null 2>&1
 - sweep-owed | */30 * * * * | user | {doit}
   {doit} cron-run sweep-owed -- {doit} sweep-owed >> {root}/logs/sweep-owed.log 2>&1
-- verify-owed | 0 */2 * * * | user | {doit}
-  {doit} cron-run verify-owed -- {doit} verify-owed >> {root}/logs/verify-owed.log 2>&1
 - auto-deploy | */5 * * * * | cron.d | /opt/albert-scott/venv/bin/python
   albert {doit} cron-run auto-deploy -- /opt/albert-scott/venv/bin/python
   /opt/albert-scott/scripts/ops/auto_deploy.py --once >> /var/log/albert-scott/auto-deploy-run.log

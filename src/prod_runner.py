@@ -114,36 +114,40 @@ def observe(row, record, *, now=None):
         argvs = [_argv(command) for command in commands]
     except (ValueError, TypeError):
         return unavailable("repo", "read-only command refused; Thinker must review the observation route")
+    import provision
     evidence, failed = [], False
-    for argv in argvs:
-        try:
-            process = subprocess.run(argv, capture_output=True, text=True, timeout=CMD_TIMEOUT_S)
-        except subprocess.TimeoutExpired:
-            return unavailable(_capability(record), "command timeout")
-        except OSError:
-            return unavailable(_capability(record), "command unavailable")
-        output = (process.stdout or "") + "\n" + (process.stderr or "")
-        lower = output.lower()
-        if pathlib.Path(argv[0]).name == "ro-sql" and "permission denied" in lower:
-            return unavailable("ro-dsn-grant", "read-only database permission denied")
-        if process.returncode in (2, 3) or (process.returncode and any(
-                token in lower for token in ("connection refused", "could not connect", "couldn't connect",
-                    "could not resolve", "timed out", "timeout", "connection reset", "network is unreachable"))):
-            return unavailable(_capability(record), f"command could not answer (exit {process.returncode})")
-        # curl transport failures do not observe the endpoint; HTTP -f's 22 does.
-        if argv[0] == "curl" and process.returncode not in (0, 22):
-            return unavailable(_capability(record), f"curl could not answer (exit {process.returncode})")
-        failed |= process.returncode != 0
-        evidence.append(f"{pathlib.Path(argv[0]).name} exit {process.returncode}: {redact(output)}")
+    for index, argv in enumerate(argvs):
+        # Legacy endpoint observations retain their read-only curl contract.
+        check = checks.CheckRecord("observe:check", row.get("spec", "observation"),
+            row.get("criterion", "check"), (shlex.split(commands[index]) if isinstance(commands[index], str)
+                                          else list(commands[index])), "", "production", False,
+            "repo-venv" if argv[0] == "curl" else "prod-readonly", "post-deploy", "script")
+        with provision.context(tree=SOURCE):
+            prepared = provision.prepare(check, lane="production")
+            try:
+                verdict = provision.run_script_check(check, prepared)
+            finally:
+                prepared.cleanup()
+        if verdict.outcome == "unobservable":
+            return unavailable(verdict.capability if verdict.capability == "ro-dsn-grant" else _capability(record), verdict.reason)
+        failed |= verdict.outcome == "failed"
+        evidence.append(verdict.evidence)
     return {**result, "outcome": "failed" if failed else "met", "evidence": redact("; ".join(evidence))}
 
 
 def record_for(row):
-    try:
-        body = pathlib.Path(row.get("spec_path") or dispatch.spec_path(row["spec"])).read_text()
-    except (OSError, UnicodeError):
-        body = ""
-    return checks.record_for_owed({**row, "line": str(row.get("line") or "")}, body, row.get("project"))
+    """Adapt the authoritative declaration for existing model-lane routing."""
+    record = checks.record_for(fold.read_events(), row["spec"], row["criterion"])
+    if record is None:
+        browser = row.get("capability") == "browser"
+        return {"runner": "prod-browser" if browser else "judgment",
+                "needs": ["browser-review-account"] if browser else [], "commands": [],
+                "validity_h": 24, "unknown": "data-source-unknown"}
+    needs = (["ro-prod-sql"] if record.profile == "prod-readonly" else
+             ["browser-review-account"] if record.profile == "browser-review" else ["repo"])
+    return {"runner": "script" if record.answered_by == "script" else
+            "prod-browser" if record.profile == "browser-review" else "judgment",
+            "needs": needs, "commands": [record.argv] if record.argv else [], "validity_h": 24}
 
 
 def batch_for_browser(rows):
@@ -238,6 +242,10 @@ def run(now, *, dry_run=False):
     import prod_browser
     import sweep_owed
     rows = sweep_owed.browser_input(specs, _selected(specs, now), now)
+    events = fold.read_events()
+    total_rows = len(rows)
+    rows = [r for r in rows if not ((declared := checks.record_for(events, r["spec"], r["criterion"]))
+                                  and declared.answered_by == "script")]
     records = {(r["spec"], r["criterion"]): record_for(r) for r in rows}
     result = {"lines": [], "bundle_rows": {}, "held": set(), "to_judgment": set()}
     started = time.monotonic()
@@ -256,6 +264,8 @@ def run(now, *, dry_run=False):
         path.parent.mkdir(parents=True, exist_ok=True)
         return dispatch.emit(path, {"subject": subject}, type_, **fields)
 
+    if total_rows != len(rows):
+        line(f"{total_rows - len(rows)} script-answered row(s) delegated to inline sweep/verifier checks")
     active = {key for key, record in records.items() if record["runner"] in ("prod", "build", "prod-browser")}
     if dry_run:
         for key in sorted(active):

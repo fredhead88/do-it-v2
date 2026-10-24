@@ -381,7 +381,7 @@ def _spec_verify_text(subject, role):
 
 def _clean_env(extra=None):
     env = {k: v for k, v in os.environ.items()
-           if not (k in PROD_DSN_VARS or k.startswith("PG") or "DSN" in k or "DATABASE" in k
+           if not (k.startswith("SUPABASE_DB_URL") or k.startswith("PG") or "DSN" in k or "DATABASE" in k
                    or k in ("AS_LOCAL_PG_ADMIN", "SCRATCH_PG_URL"))}
     if extra:
         env.update(extra)
@@ -389,41 +389,8 @@ def _clean_env(extra=None):
 
 
 def _prove_db(view, *, admin=False, avoid_port=None):
-    """Private cluster -> (ok, reason, dsn); admin mode leaves it role-clean."""
-    script = DOIT_SRC / "scripts" / "private-pg.sh"
-    prefix = "admin cluster: " if admin else ""
-    if not script.is_file():
-        if admin:
-            _stop_cluster(view, "pg-admin")
-        return False, f"{prefix}missing {script}", None
-    argv = ["/bin/bash", str(script), str(pathlib.Path(view) / ("pg-admin" if admin else "pg"))]
-    if admin:
-        argv.append("loopback")
-    env = _clean_env({"PRIVATE_PG_AVOID_PORT": str(avoid_port)} if admin and avoid_port else None)
-    try:
-        r = _run(argv, capture_output=True, text=True, env=env, timeout=60)
-    except Exception as exc:
-        if failure_kind(str(exc), 124 if isinstance(exc, subprocess.TimeoutExpired) else 1) == "infra":
-            raise InfraFailure(infra_class(str(exc))) from None
-        if admin:
-            _stop_cluster(view, "pg-admin")
-            return False, f"{prefix}private-pg.sh raised {type(exc).__name__}", None
-        return False, f"private-pg.sh raised: {exc}", None
-    if r.returncode != 0:
-        if failure_kind((r.stderr or "") + (r.stdout or ""), r.returncode) == "infra":
-            raise InfraFailure(infra_class((r.stderr or "") + (r.stdout or "")))
-        if admin:
-            _stop_cluster(view, "pg-admin")
-            return False, f"{prefix}private-pg.sh exit {r.returncode}", None
-        return False, f"private-pg.sh exit {r.returncode}: {(r.stderr or '')[-200:]}", None
-    if admin:
-        m = re.search(r"ADMIN_DSN='(postgresql://albert:[0-9a-f]{32}@127\.0\.0\.1:\d+/postgres)'", r.stdout or "")
-        if not m:
-            _stop_cluster(view, "pg-admin")
-            return False, "admin cluster: no valid ADMIN_DSN in private-pg.sh output", None
-    else:
-        m = re.search(r"SUPABASE_DB_URL='([^']*)'", r.stdout or "")
-    return (True, None, m.group(1)) if m else (False, "no SUPABASE_DB_URL in private-pg.sh output", None)
+    import provision
+    return provision._grading_db(view, admin=admin, avoid_port=avoid_port)
 
 
 def _write_env_file(tree, row, dsn):
@@ -514,20 +481,8 @@ def _db_setup_argv(row, project):
 
 
 def _prove_db_schema(view, row, project, dsn, *, admin_dsn=None):
-    argv, cwd_rel, _ = _db_setup_argv(row, project)
-    if not argv:
-        return False, "no db_setup configured for this project"
-    if not dsn or (row.get("admin_env") and not admin_dsn):
-        return False, "private db/admin endpoint was not proven"
-    private_env = {n: dsn for n in (row.get("db_env") or [])}
-    private_env.update({n: admin_dsn for n in (row.get("admin_env") or [])})
-    env = _clean_env(private_env)
-    try:
-        r = _run(argv, cwd=str(pathlib.Path(view) / "tree" / cwd_rel), env=env,
-                  capture_output=True, text=True, timeout=120)
-    except Exception as exc:
-        return False, f"db_setup raised: {exc}"
-    return (False, f"db_setup exit {r.returncode}: {(r.stderr or '')[-200:]}") if r.returncode else (True, None)
+    import provision
+    return provision._grading_schema(view, row, project, dsn, admin_dsn=admin_dsn)
 
 
 # L-spec-0667, 2026-10-05: shell command-substitution syntax around a path
@@ -639,34 +594,8 @@ def _prove_tools(view, project, repo, caps_text, venv_path):
 
 
 def _prove_node_modules(view, row, project):
-    dirs = row.get("node_dirs") or []
-    if not dirs:
-        # Thinker 2026-10-09: an EXPLICIT `node_dirs = []` in grading.toml declares
-        # "this project has no JS", which is satisfied, not a gap. A missing key still
-        # fails (unconfigured project). A spec whose prose merely names node/npm was
-        # otherwise refused forever (L-spec-0765, do-it-v2).
-        if "node_dirs" in row and row["node_dirs"] == []:
-            return True, None
-        return False, "no node_dirs configured for this project"
-    checkout, tree = _project_checkout(project), pathlib.Path(view) / "tree"
-    for d in dirs:
-        declared = (row.get("node_modules") or {}).get(d)
-        src = pathlib.Path(declared) if declared is not None else checkout / d / "node_modules"
-        key = f"node_modules.{d}"
-        if not src.is_absolute() or not src.is_dir() or not os.access(src, os.R_OK | os.X_OK):
-            return False, f"{key} source {src} is missing, unreadable or not absolute"
-        dst = tree / d / "node_modules"
-        try:
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            if not (dst.is_symlink() or dst.exists()):
-                dst.symlink_to(src)
-            if not dst.is_symlink() or not dst.is_dir() or dst.resolve() != src.resolve():
-                return False, f"{key} destination {dst} does not resolve to source {src}"
-        except OSError as exc:
-            if failure_kind(str(exc)) == "infra":
-                raise InfraFailure(infra_class(str(exc))) from None
-            return False, f"{key} source {src} could not be linked at {dst}"
-    return True, None
+    import provision
+    return provision._grading_node(view, row, project)
 
 
 def _prove_browser(mcp_config):
@@ -790,97 +719,15 @@ def _write_state(view, **kv):
 
 
 def preflight(role, subject, view, project, *, repo, mcp_config=None, owed=frozenset(), routed=frozenset(), bundled=False):
-    """Provisions/proves every capability `required()` needs, in `view/` only.
-    Returns `(capability, reason)` FAILURES only, in `CAPABILITIES` order.
-    `owed`/`routed` (criterion ids) pass straight through to `required()`
-    (R12.g/i) — this function reads no ledger itself; dispatch computes them."""
-    view = pathlib.Path(view)
-    tree = view / "tree"
-    spec_text, verify_text = _spec_verify_text(subject, role)
-    caps = required(role, spec_text, verify_text, project, owed=owed, routed=routed, bundled=bundled)
-    if role == "grader" and not routed:
-        # Route git on this default entry point too. Keep other capabilities
-        # in a mixed criterion active so a missing dependency is still proved.
-        if any(cap == "git" for cap, _ in route(spec_text, verify_text, project).values()):
-            caps = [cap for cap in caps if cap != "git"]
-    row = _project_row(project)
-    reasons = {}
-    env_file_vars = {}
-    if role != "reviewer" and not (role == "grader" and bundled) and (error := _env_file_error(row)):
-        reasons["env-file"] = error
-
-    dsn = None
-    admin_dsn = None
-    if "db" in caps:
-        ok, reason, dsn = _prove_db(view)
-        if not ok:
-            reasons["db"] = reason
-    if role == "grader" and not bundled and row.get("admin_env") and "db" not in reasons:
-        first_port = (urllib.parse.parse_qs(urllib.parse.urlparse(dsn or "").query).get("port") or [None])[0]
-        ok, reason, admin_dsn = _prove_db(view, admin=True, avoid_port=first_port)
-        if not ok:
-            reasons["db"] = reason
-    if "env-file" in caps and "env-file" not in reasons:
-        ok, reason, env_file_vars = _provision_env_file(tree, row, None if "db" in reasons else dsn)
-        if not ok:
-            reasons["env-file"] = reason
-    # A project with no db_setup row in grading.toml has no schema to migrate,
-    # so no criterion of it can need a schema proof (same rule as deploy below).
-    if "db-schema" in caps and row.get("db_setup"):
-        if "db" in reasons:
-            reasons["db-schema"] = f"db was not proven: {reasons['db']}"
-        else:
-            ok, reason = _prove_db_schema(view, row, project, dsn, admin_dsn=admin_dsn)
-            if not ok:
-                reasons["db-schema"] = reason
-    if "view-paths" in caps:
-        ok, reason = _prove_view_paths(view)
-        if not ok:
-            reasons["view-paths"] = reason
-
-    venv = row.get("venv") or ""
-    venv_path = str(_project_checkout(project) / venv) if venv else ""
-    caps_text = "\n".join(text for cid, text in _tool_texts(spec_text, verify_text).items()
-                          if cid not in set(owed) | set(routed))
-
-    if "node_modules" in caps:
-        ok, reason = _prove_node_modules(view, row, project)
-        if not ok:
-            reasons["node_modules"] = reason
-    if "tools" in caps:
-        ok, reason = _prove_tools(view, project, repo, caps_text, venv_path)
-        if not ok:
-            reasons["tools"] = reason
-    # Browser and review-account proofs apply only to a project with a
-    # [[prod]] row: a project with no deployed site has no page for any
-    # criterion to open (the same rule as deploy below).
-    has_prod = any(p.get("project") == project for p in _look_toml(DOIT_SRC).get("prod", []))
-    if "browser" in caps and has_prod:
-        ok, reason = _prove_browser(mcp_config)
-        if not ok:
-            reasons["browser"] = reason
-    if "review-account" in caps and has_prod:
-        ok, reason = _prove_review_account(project)
-        if not ok:
-            reasons["review-account"] = reason
-    # A project with no [[prod]] row in look.toml is never deployed, so no
-    # criterion of it can need a live deploy; the reviewer branch of
-    # required() already applies the same rule.
-    if "deploy" in caps and any(p.get("project") == project
-                                for p in _look_toml(DOIT_SRC).get("prod", [])):
-        ok, reason = _prove_deploy(project, repo)
-        if not ok:
-            reasons["deploy"] = reason
-
-    if role != "reviewer":  # Constraints: a reviewer's cwd is never written to, even this state file
-        _write_state(view, venv=venv_path,
-                     db_env_names=(row.get("db_env") or []) if dsn else [], dsn=dsn or "",
-                     admin_env_names=(row.get("admin_env") or []) if admin_dsn else [],
-                     admin_dsn=admin_dsn or "", env_file_vars=env_file_vars)
-    for reason in reasons.values():
-        if failure_kind(reason) == "infra":
-            raise InfraFailure(infra_class(reason))
-    return [(c, reasons[c]) for c in CAPABILITIES if c in reasons]
+    import checks
+    import provision
+    record = checks.CheckRecord(subject + ":preflight", subject, "preflight", [], "",
+        "scratch", False, "repo-scratch-pg", "pre-merge", "model")
+    args = (role, subject, view, project)
+    kwargs = dict(repo=repo, mcp_config=mcp_config, owed=owed, routed=routed, bundled=bundled)
+    with provision.context(tree=pathlib.Path(view) / "tree", grading=(args, kwargs)):
+        prepared = provision.prepare(record, lane="grading")
+    return prepared.failures
 
 
 def sandbox_binds(view, project):

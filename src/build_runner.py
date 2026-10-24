@@ -217,72 +217,24 @@ def _rewrite(command, repo, tree, venv):
 
 
 def _node(tree, row, env, deadline):
-    keys = []
-    for relative in row.get("node_dirs") or []:
-        directory = tree / relative
-        lock = directory / "package-lock.json"
-        if not lock.is_file():
-            raise Undetermined("node lockfile missing")
-        key = hashlib.sha256(lock.read_bytes()).hexdigest()[:16]
-        keys.append(key)
-        root = scratch.sub("node-cache")
-        cache = root / key
-        with (root / (key + ".lock")).open("a") as handle:
-            fcntl.flock(handle, fcntl.LOCK_EX)
-            if not (cache / "node_modules").is_dir():
-                with tempfile.TemporaryDirectory(prefix=key + "-", dir=root) as tmp:
-                    stage = pathlib.Path(tmp)
-                    work = stage / "work"
-                    shutil.copytree(directory, work, ignore=shutil.ignore_patterns("node_modules", ".git"))
-                    _required(["npm", "ci", "--prefer-offline"], phase="npm ci",
-                              env=env, deadline=deadline, cwd=work)
-                    if not (work / "node_modules").is_dir():
-                        raise Undetermined("npm ci produced no node_modules")
-                    try:
-                        node_modules.validate(work / "node_modules")
-                    except node_modules.UnsafeNodeModules as exc:
-                        raise Undetermined(str(exc)) from None
-                    ready = stage / "ready"
-                    ready.mkdir()
-                    shutil.move(str(work / "node_modules"), ready / "node_modules")
-                    ready.rename(cache)
-        target = directory / "node_modules"
-        if target.exists() or target.is_symlink():
-            raise Undetermined("node_modules present in committed tree")
-        # A private copy: caches and live checkouts cannot receive test writes.
-        try:
-            node_modules.copy_tree(cache / "node_modules", target)
-        except node_modules.UnsafeNodeModules as exc:
-            raise Undetermined(str(exc)) from None
-    return "cache:" + ",".join(keys) if keys else "none"
+    import provision
+    if provision._ACTIVE.get() is not None:
+        return provision._build_node(tree, row, env, deadline)
+    record = checks.CheckRecord("node:setup", "node-setup", "setup", [], "", "scratch",
+                                False, "repo-venv", "pre-merge", "model")
+    with provision.context(tree=tree, env=env, node=(row, deadline)):
+        prepared = provision.prepare(record, lane="build")
+    return prepared.summary["node_modules"]
 
 
 def _provision(tree, auxiliary, row, env, deadline):
-    summary = {"node_modules": "none", "pg": "none", "admin_pg": "none", "prod_dsns": "unset"}
-    summary["node_modules"] = _node(tree, row, env, deadline)
-    if row.get("db_setup"):
-        for name, admin in (("pg", False), ("pg-admin", True)):
-            if admin and not row.get("admin_env"):
-                continue
-            argv = ["/bin/bash", str(PRIVATE_PG), str(auxiliary / name)]
-            if admin:
-                argv.append("loopback")
-            output = _required(argv, phase="private-pg.sh", env=env, deadline=deadline)
-            field = "ADMIN_DSN" if admin else "SUPABASE_DB_URL"
-            match = re.search(r"\b" + field + r"='([^']+)'", output)
-            if not match:
-                raise Undetermined("private-pg.sh produced no private endpoint")
-            for variable in row.get("admin_env" if admin else "db_env") or []:
-                env[variable] = match[1]
-            summary["admin_pg" if admin else "pg"] = "loopback" if admin else "private"
-        setup = row["db_setup"]
-        venv = str(tree / row.get("venv", ""))
-        argv = [arg.replace("{venv}", venv) for arg in setup.get("argv", [])]
-        if not argv:
-            raise Undetermined("db_setup has no argv")
-        _required(argv, phase="db_setup", env=env, deadline=deadline,
-                  cwd=tree / setup.get("cwd", "."))
-    return summary
+    import provision
+    record = checks.CheckRecord("build:setup", tree.name, "setup", [], "", "scratch", False,
+        "repo-scratch-pg" if row.get("db_setup") else "repo-venv", "pre-merge", "script")
+    with provision.context(tree=tree, env=env, build=(auxiliary, row, deadline)):
+        prepared = provision.prepare(record, lane="build")
+    env.update(prepared.env)
+    return prepared.summary
 
 
 def _targets_missing(command, tree):

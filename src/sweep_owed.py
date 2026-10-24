@@ -42,6 +42,7 @@ import argparse, hashlib, json, os, pathlib, re, shutil, subprocess, sys, time
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import provision, verifier
 import build_runner, dispatch, fold, grading_env, owed, owed_failures, packet, scratch, prod_runner, prod_browser, owed_routes, sweep_provision  # noqa: E402
 
 LEDGER_NAME = "L-sweep-local.jsonl"
@@ -740,6 +741,9 @@ def run(*, dry_run=False, runner=None, now=None):
     retry_keys = {(r["spec"], r["criterion"]) for r in retries}
     due_keys = {(r["spec"], r["criterion"]) for r in due}
     due.extend(r for r in retries if (r["spec"], r["criterion"]) not in due_keys)
+    due, script_lines = provision.script_rows(due, all_ev, fold.EVENTS / "L-owed-sweeper-script.jsonl",
+                                              lane="sweep", dry_run=dry_run)
+    lines.extend(script_lines)
     # Capability browser always goes to the browser seat, even for judgment rows.
     handed = prod_runner.batch_for_browser(due)
     handed_keys = {(r["spec"], r["criterion"]) for r in handed}
@@ -820,6 +824,7 @@ def run(*, dry_run=False, runner=None, now=None):
         if refused:
             lines.append(f"sweep-owed: sweep-run refused: {refused}")
 
+    lines.extend(verifier.run(dry_run=dry_run, now=now, runner=runner))
     for line in lines:
         print(line)
     return lines

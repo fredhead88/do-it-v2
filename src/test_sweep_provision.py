@@ -148,7 +148,7 @@ class ProvisionTests(unittest.TestCase):
                     SUPABASE_DB_URL="forbidden", AS_LOCAL_PG_ADMIN="forbidden", PGHOST="forbidden"):
                 command = f'# {marker}\npython3 -c \'import os; '
                 command += 'assert os.environ["AS_LOCAL_" + "PG_ADMIN"].startswith("postgresql://albert:"); '
-                command += 'assert "DATABASE_URL" not in os.environ and "SUPABASE_DB_URL" not in os.environ\''
+                command += 'assert os.environ["DATABASE_URL"] == os.environ["SUPABASE_DB_URL"] == os.environ["AS_LOCAL_" + "PG_ADMIN"]\''
                 code, output = self.run_check(command)
                 self.assertEqual((code, output), (0, b""))
                 self.assertEqual(os.environ["AS_LOCAL_PG_ADMIN"], "forbidden")

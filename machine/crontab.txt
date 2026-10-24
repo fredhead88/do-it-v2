@@ -66,7 +66,6 @@
 40 5 * * * /home/albert/do-it-v2/doit cron-run suite-daily -- /usr/bin/python3 /home/albert/do-it-v2/src/suite_run.py >> /home/albert/.do-it/logs/suite-daily.log 2>&1  # doit-cron:suite-daily
 */10 * * * * /home/albert/.do-it/worktrees/do-it-v2/l-spec-1109/doit cron-run health-alarms -- /home/albert/.do-it/worktrees/do-it-v2/l-spec-1109/doit health-alarms >> /home/albert/.do-it/logs/health-alarms.log 2>&1  # doit-cron:health-alarms
 # PAUSED by Thinker 2026-10-19 00:2xZ (shadows on master shas break the predeploy gate; disk): */10 * * * * /home/albert/do-it-v2/doit cron-run ci-shadow -- /home/albert/do-it-v2/doit ci-shadow >> /home/albert/.do-it/logs/ci-shadow.log 2>&1  # doit-cron:ci-shadow
-0 */2 * * * /home/albert/do-it-v2/doit cron-run verify-owed -- /home/albert/do-it-v2/doit verify-owed >> /home/albert/.do-it/logs/verify-owed.log 2>&1  # doit-cron:verify-owed
 */10 * * * * /home/albert/do-it-v2/doit cron-run balance -- /home/albert/do-it-v2/doit balance >> /home/albert/.do-it/logs/balance.log 2>&1  # doit-cron:balance
 15 6 * * * /home/albert/do-it-v2/doit cron-run stuck-digest -- /home/albert/do-it-v2/doit stuck-digest --send >> /home/albert/.do-it/logs/stuck-digest.log 2>&1  # doit-cron:stuck-digest
 15 6 * * * /home/albert/do-it-v2/doit cron-run gh-bill -- /home/albert/do-it-v2/doit gh-bill >> /home/albert/.do-it/logs/gh-bill.log 2>&1  # doit-cron:gh-bill
