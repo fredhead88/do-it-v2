@@ -247,6 +247,7 @@ def _carry_packet_busy(busy):
 ROUTINE_ROLES = dict(build='builder', grade='grader', review='reviewer',
                      rebuild='builder', regrade='grader')
 ROUTINE_ACTIONS = set(ROUTINE_ROLES)
+LAUNCH_ACTIONS = ROUTINE_ACTIONS | {'merge'}
 
 
 class _PassDispatcher:
@@ -269,7 +270,7 @@ def launch(step, *, dispatcher):
         dispatch.emit(tick_path(), {'subject': getattr(step, 'item', 'tick')},
                       'autodispatch-failed', reason=reason)
         raise ValueError(reason)
-    if step.state != 'action' or step.owner != 'tick' or step.action not in ROUTINE_ACTIONS:
+    if step.state != 'action' or step.owner != 'tick' or step.action not in LAUNCH_ACTIONS:
         return None
     if step.reason.startswith('undetermined:'):
         return None
@@ -281,6 +282,21 @@ def launch(step, *, dispatcher):
         return None
     if getattr(dispatcher, 'dry_run', False):
         return None
+    if step.action == 'merge':
+        import merge_queue
+        try:
+            head = merge_queue.next_candidate(events)
+        except (ValueError, OSError) as exc:
+            print(f'hold undetermined: {exc}')
+            return None
+        if head is None or step.item_kind == 'spec' and step.item != head:
+            print('hold undetermined: merge Step item differs from queue head'
+                  if head is not None else 'hold undetermined: no merge candidate')
+            return None
+        result = dispatcher(['doit', 'window-run', '--project', 'albert-scott', '--detach'])
+        if result.get('code', 1):
+            raise ValueError(result.get('stderr') or result.get('stdout') or 'merge launch failed')
+        return head
     role = ROUTINE_ROLES[step.action]
     try:
         project = next((e['project'] for e in reversed(evs) if e.get('project')), 'unknown')
@@ -357,9 +373,20 @@ def run_steps(events, specs, now, *, dispatcher=None, dry_run=False, handled=fro
         if step.reason.startswith('undetermined:') or step.state == 'hold':
             out.append(f"{'undetermined' if step.reason.startswith('undetermined:') else 'hold'} {step.item}: {step.reason}")
             continue
-        if step.owner != 'tick' or step.action not in ROUTINE_ACTIONS:
+        if step.owner != 'tick' or step.action not in LAUNCH_ACTIONS:
             continue
-        role = ROUTINE_ROLES[step.action]
+        if step.action == 'merge':
+            import merge_queue
+            try:
+                head = merge_queue.next_candidate(events)
+            except (ValueError, OSError) as exc:
+                out.append(f'hold undetermined: {exc}')
+                continue
+            if head is None or step.item_kind == 'spec' and step.item != head:
+                out.append('hold undetermined: merge Step item differs from queue head'
+                           if head is not None else 'hold undetermined: no merge candidate')
+                continue
+        role = ROUTINE_ROLES.get(step.action)
         if role in slots and slots[role] <= 0:
             out.append(f'seat-wait {step.item} {step.action}')
             continue

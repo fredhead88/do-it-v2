@@ -1,5 +1,6 @@
 """Hermetic Git regression fixtures for L-spec-0932, including merge-history replay."""
 import ast
+import atexit
 import hashlib
 import json
 import os
@@ -11,6 +12,11 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+# Standalone verification must never inherit the live resource ledger.
+_ledger_root = tempfile.TemporaryDirectory(prefix="rechain-ledger-")
+atexit.register(_ledger_root.cleanup)
+os.environ["DOIT_ROOT"] = _ledger_root.name
+os.environ["DOIT_NO_POKE"] = "1"
 import rechain
 import window_gate
 
@@ -206,6 +212,60 @@ class RechainTests(unittest.TestCase):
                              pure=rechain.is_pure(repo, sha)))
         response("AC7", dict(pure=rechain.is_pure(repo, sha), extra_file_pure=rechain.is_pure(repo, bad)))
         print("ac1 ac7 OK")
+
+    def test_merge_simple_migration_order(self):
+        import dispatch, fold, merge_queue
+        from datetime import datetime, timedelta, timezone
+        a, b = self.fx.branch("a"), self.fx.branch("b")
+        root = self.fx.repo.parent / "queue-root"
+        events_dir = root / "events"
+        events_dir.mkdir(parents=True)
+        ledger = events_dir / "L-executor-local.jsonl"
+        now = datetime.now(timezone.utc)
+        launches = []
+        def emit(kind, sid, **fields):
+            reason = dispatch.emit(ledger, {"subject": sid}, kind, **fields)
+            self.assertIsNone(reason)
+        def runner(argv):
+            selected = argv[argv.index('--specs') + 1].split(',')
+            launches.append(selected)
+            self.assertEqual(len(selected), 1)
+            entry = {"a": a, "b": b}[selected[0]]
+            old = git(self.fx.repo, 'rev-parse', 'refs/heads/master')
+            candidate, kept, clashes = window_gate.build_candidate(self.fx.repo, argv[2], old, [entry])
+            self.assertEqual(kept, selected)
+            self.assertFalse(clashes)
+            window_gate.advance(self.fx.repo, 'master', old, candidate, argv[2], kept, [], 1, [], [entry], False)
+            return dict(code=0)
+        self.assertEqual(merge_queue.MIGRATION_ORDER_SOURCE, 'queue')
+        with patch.object(fold, 'ROOT', root), patch.object(fold, 'EVENTS', events_dir), \
+             patch.dict(os.environ, DOIT_ROOT=str(root), DOIT_LEDGER_FILE=ledger.name), \
+             patch.object(window_gate, 'ev', side_effect=emit):
+            os.environ.pop('DOIT_WINDOW_RECHAIN', None)
+            for i, entry in enumerate((a, b)):
+                with patch.object(dispatch, 'now', return_value=(now + timedelta(seconds=i-10)).isoformat()):
+                    emit('queue-add', entry[0], project='albert-scott', branch=entry[1], rule='operator')
+            self.assertEqual(merge_queue.next_candidate(fold.read_events(use_cache=False)), 'a')
+            self.assertEqual(merge_queue.window_run('albert-scott', runner=runner), 0)
+            first = git(self.fx.repo, 'rev-parse', 'master')
+            # The explicit opt-out leaves the conflicting second migration unmerged.
+            with patch.dict(os.environ, DOIT_WINDOW_RECHAIN='off'):
+                unchanged, kept, clashes = window_gate.build_candidate(self.fx.repo, 'off', first, [b])
+            self.assertEqual(unchanged, first)
+            self.assertFalse(kept)
+            self.assertIn('b', clashes)
+            self.assertNotIn('DOIT_WINDOW_RECHAIN', os.environ)
+            self.assertEqual(merge_queue.next_candidate(fold.read_events(use_cache=False)), 'b')
+            self.assertEqual(merge_queue.window_run('albert-scott', runner=runner), 0)
+            final = git(self.fx.repo, 'rev-parse', 'master')
+            self.assertNotEqual(first, final)
+            self.assertEqual(rechain.routed_head(self.fx.repo, final), 'b')
+            self.assertEqual(rechain.revision(rechain.text(self.fx.repo, final, rechain.VERSIONS + 'b.py')), ('b', 'a'))
+            self.assertEqual(launches, [['a'], ['b']])
+            self.assertEqual([e['subject'] for e in fold.read_events(use_cache=False) if e['type'] == 'shipped'], ['a', 'b'])
+        response('merge-simple/AC6', dict(launches=launches, single_head='b', parent='a',
+                                         unset_default=True, off_skips_rechain=True))
+        print('merge-simple AC6 status=0')
 
     def test_ac2(self):
         b = self.fx.branch("b")

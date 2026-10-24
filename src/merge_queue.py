@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 import fcntl
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -20,9 +21,17 @@ import window_gate
 DOIT = str(Path(__file__).resolve().parent.parent / 'doit')
 OUTCOMES = {'shipped', 'window-dropped', 'merge-conflict'}
 TERMINALS = OUTCOMES | {'spec-killed', 'spec-closed'}
+BATCH_MIN_QUEUE = 5
+MIGRATION_ORDER_SOURCE = 'queue'
 
 
 def _ordered(events):
+    # Validate even events that admission would subsequently exclude.
+    for event in events:
+        try:
+            lane_rules._time(event.get('ts'))
+        except (ValueError, TypeError, KeyError) as exc:
+            raise ValueError('event timestamp undetermined') from exc
     # Stable sorting preserves ledger position at equal timestamps.
     return sorted((e for e in events if 'actor' not in e or
                    fold.admits(e, e['actor']) is None), key=lambda e: lane_rules._time(e['ts']))
@@ -32,7 +41,7 @@ def _latest(events, kinds):
     return next((e for e in reversed(events) if e.get('type') in kinds), None)
 
 
-def queue(events, project=None):
+def queue(events, project=None, *, _include_terminal=False):
     """Fold corrections without consulting a mutable script or the wall clock."""
     live, batches = {}, {}
     for pos, e in enumerate(_ordered(events)):
@@ -42,7 +51,7 @@ def queue(events, project=None):
             if e.get('branch'):
                 live[sid] = (pos, dict(spec=sid, project=e.get('project'), branch=e['branch'],
                                       added_at=e['ts'], batch=None))
-        elif kind == 'queue-remove':
+        elif kind == 'queue-remove' or (kind in TERMINALS and not _include_terminal):
             live.pop(sid, None)
         elif kind == 'queue-batch':
             for spec in e.get('specs', '').split(','):
@@ -50,6 +59,33 @@ def queue(events, project=None):
     return [dict(row, batch=batches.get(sid)) for sid, (_, row) in
             sorted(live.items(), key=lambda item: item[1][0])
             if project is None or row['project'] == project]
+
+
+def next_candidate(events):
+    """The head of the sole ready fold, with one outstanding window at most."""
+    events = _ordered(events)
+    if _launching(events, window_gate.PROJECT, window_gate.in_flight(events, root=fold.ROOT)):
+        return None
+    rows = queue(events)
+    return rows[0]['spec'] if rows else None
+
+
+def batching_allowed(events, queue_len):
+    """Only an authorised, equal-input improvement can enable batching."""
+    if queue_len < BATCH_MIN_QUEUE:
+        return False
+    try:
+        latest = next((e for e in reversed(_ordered(events))
+                       if e.get('type') == 'merge-measurement' and
+                       e.get('actor') in {'operator', 'executor'}), None)
+        if latest is None or latest.get('equal_input') is not True:
+            return False
+        single, batched = latest.get('single_p50_s'), latest.get('batched_p50_s')
+        return (type(single) in (int, float) and type(batched) in (int, float)
+                and math.isfinite(single) and math.isfinite(batched)
+                and 0 <= batched < single)
+    except (ValueError, TypeError, OverflowError):
+        return False
 
 
 def _emit(sid, kind, **fields):
@@ -103,7 +139,7 @@ def _base_blocks(written, sid, repo, head):
 
 def _reconcile(events, *, dry_run=False, ledger_file=None):
     out = []
-    for row in queue(events):
+    for row in queue(events, _include_terminal=True):
         evs = [e for e in events if e.get('subject') == row['spec']]
         added = _latest(evs, {'queue-add'})
         outcome = _latest(evs, TERMINALS if ledger_file is None else OUTCOMES)
@@ -408,10 +444,8 @@ def _window_reconcile(events, ledger_file):
     print(f"window-run: removed {len(removed)} spec(s); outcomes={' | '.join(removed) or 'none'}")
 
 
-def window_run(project, maximum=None, *, runner=None, launcher=None, detach=False, now=None):
+def window_run(project, *, runner=None, launcher=None, detach=False, now=None):
     if not re.fullmatch(r'[A-Za-z0-9._-]+', project) or project in ('.', '..'):
-        return 2
-    if maximum is not None and maximum < 1:
         return 2
     ledger_file = os.environ.get('DOIT_LEDGER_FILE', 'L-executor-0001.jsonl')
     now = now if now is not None else datetime.now(timezone.utc)
@@ -424,55 +458,31 @@ def window_run(project, maximum=None, *, runner=None, launcher=None, detach=Fals
             events = _ordered(window_gate.train_events())
             _window_reconcile(events, ledger_file)
             events = _ordered(window_gate.train_events())
-            try:
-                depth = window_gate.train_depth(os.environ, root=fold.ROOT, events=events, now=now)['depth']
-                if type(depth) is not int or depth < 1:
-                    depth = 1
-            except (OSError, ValueError, KeyError, TypeError):
-                depth = 1
-            flying = _launching(events, project, window_gate.in_flight(events, root=fold.ROOT))
-            cap = effective_cap(events, now)
-            record_cap(cap, events, ledger_file)
-            if len(flying) >= depth:
-                print(f'window-run: {len(flying)} windows in flight; depth={depth}; no slot')
+            head = next_candidate(events)
+            if head is None:
+                print('window-run: no candidate; queue empty or one window in flight')
                 return 3
-            after = None
-            if flying:
-                names = {row['window'] for row in flying}
-                # A later candidate can be a rebase of an older launch. Order
-                # windows by their first batch/candidate, not their last update.
-                first_seen = {}
-                for pos, event in enumerate(events):
-                    if event['subject'] in names and event['type'] in ('queue-batch', 'window-candidate'):
-                        first_seen.setdefault(event['subject'], pos)
-                after = max(names, key=lambda name: first_seen.get(name, -1))
-                candidates = [e for e in events if e['subject'] == after and e['type'] == 'window-candidate']
-                past_first = any(e.get('window') == after and e['type'] in ('window-dropped', 'merge-conflict') for e in events)
-                if len(candidates) != 1 or past_first:
-                    print('window-run: predecessor not in first verification; waiting')
-                    return 3
-            busy = {sid for row in flying for sid in
-                    (row['specs'].split(',') if isinstance(row['specs'], str) else row['specs'])}
-            waiting = queue(events, project)
-            entries = [row for row in waiting if row['spec'] not in busy]
-            if not entries:
-                print(f'window-run: no eligible specs; {len(waiting)} queued in live windows')
-                return 3
-            repo, master = _repository(project)
-            footprints, risky = {}, set()
-            for row in entries:
-                paths = spec_paths(repo, master, row['branch'])
-                footprints[row['spec']] = None if paths is None else {path for _, path in paths}
-                if is_risky(paths):
-                    risky.add(row['spec'])
-            specs = form_batch(entries, footprints, min(maximum or cap['cap'], cap['cap']), risky)
+            waiting = queue(events)
+            if waiting[0]['project'] != project:
+                raise ValueError('queue head project undetermined or differs from launch')
+            entries = queue(events, project)
+            specs = [head]
+            if batching_allowed(events, len(entries)):
+                cap = effective_cap(events, now)
+                record_cap(cap, events, ledger_file)
+                repo, master = _repository(project)
+                footprints, risky = {}, set()
+                for row in entries:
+                    paths = spec_paths(repo, master, row['branch'])
+                    footprints[row['spec']] = None if paths is None else {path for _, path in paths}
+                    if is_risky(paths):
+                        risky.add(row['spec'])
+                specs = form_batch(entries, footprints, cap['cap'], risky)
             print(f'window-run: selected {len(specs)}; deferred {len(waiting) - len(specs)} '
-                  f'(live={len(waiting) - len(entries)}, risky/undetermined={len(risky - set(specs))}; cap/footprint order)')
+                  '(reason=single queue head unless authorised measurement enables cap/footprint batching)')
             window = 'window-' + uuid.uuid4().hex
             _train_emit(ledger_file, window, 'queue-batch', project=project, specs=','.join(specs))
             argv = ['doit', 'gate-window', window, '--project', project, '--specs', ','.join(specs)]
-            if after:
-                argv += ['--after', after]
             if runner is not None:
                 if detach:
                     raise ValueError('detached calls require a process launcher')
@@ -509,10 +519,9 @@ def main(argv=None):
         if args.command == 'window-run':
             p = argparse.ArgumentParser()
             p.add_argument('--project', required=True)
-            p.add_argument('--max', type=int)
             p.add_argument('--detach', action='store_true')
             a = p.parse_args(rest)
-            return window_run(a.project, a.max, detach=a.detach)
+            return window_run(a.project, detach=a.detach)
         p = argparse.ArgumentParser()
         p.add_argument('action', choices=('list', 'add', 'remove'))
         p.add_argument('spec', nargs='?')
@@ -523,6 +532,13 @@ def main(argv=None):
         events = _ordered(fold.read_events())
         entries = queue(events, a.project if a.action == 'list' else None)
         if a.action == 'list':
+            omitted = [row['spec'] for row in queue(events, a.project, _include_terminal=True)
+                       if row['spec'] not in {entry['spec'] for entry in entries}]
+            if omitted:
+                reasons = {sid: _latest([e for e in events if e.get('subject') == sid], TERMINALS)['type']
+                           for sid in omitted}
+                print(f"queue: omitted {len(omitted)} spec(s); reason=terminal outcome; specs={reasons}",
+                      file=sys.stderr)
             corrections = {}
             for event in events:
                 if event.get('type') in ('queue-add', 'queue-remove'):

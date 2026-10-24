@@ -14,6 +14,10 @@ import unittest
 from unittest.mock import patch
 
 # Abort before importing any module that could append to the ledger.
+_standalone_root = tempfile.TemporaryDirectory(prefix='merge-queue-root-')
+import atexit
+atexit.register(_standalone_root.cleanup)
+os.environ['DOIT_ROOT'] = _standalone_root.name
 _test_root = os.environ.get('DOIT_ROOT')
 assert _test_root, 'DOIT_ROOT must be set'
 assert Path(_test_root).resolve() != (Path.home() / '.do-it').resolve()
@@ -313,7 +317,7 @@ class QueueTests(unittest.TestCase):
             def runner(argv):
                 batch = [e for e in fold.read_events() if e['type'] == 'queue-batch'][-1]
                 self.assertEqual(argv[2], batch['subject'])
-                self.assertEqual(len(batch['specs'].split(',')), 7)
+                self.assertEqual(len(batch['specs'].split(',')), 1)
                 return dict(code=code)
             with patch.object(mq, '_repository', return_value=(self.root, 'main')), \
                  patch.object(mq, 'spec_paths', return_value=[('M', 'file.py')]):
@@ -361,15 +365,12 @@ class QueueTests(unittest.TestCase):
                 mq.enqueue_due(evs, self.now, runner=self.fake)
             self.assertEqual(len(self.landed()), count)
         clean = self.event('merge-gate-clean', 30, project='albert-scott', branch='branch')
-        self.assertEqual({r['spec'] for r in mq.queue([clean, add])},
-                         {s for s, b in window_gate.pending_from_ledger([clean, add])})
+        self.assertEqual([r['spec'] for r in mq.queue([clean, add])], [self.sid])
         self.assertEqual(mq.queue([clean]), [])
-        self.assertTrue(window_gate.pending_from_ledger([clean]))
         conflict = [clean, add, self.event('merge-conflict', 1)]
         with patch.object(lane_rules, 'due', return_value=[]):
             mq.enqueue_due(conflict, self.now)
         self.assertEqual(mq.queue(conflict + self.landed()[-1:]), [])
-        self.assertTrue(window_gate.pending_from_ledger(conflict))
         self.fixture()
         self.git('branch', 'realm')
         (self.root / 'content' / (self.sid + '.md')).write_text('Base: realm\n')
@@ -378,7 +379,7 @@ class QueueTests(unittest.TestCase):
         before = len(self.landed())
         self.due('enqueue')
         self.assertFalse(any(e['type'] == 'queue-add' for e in self.landed()[before:]))
-        self.assertTrue(window_gate.pending_from_ledger(self.events))
+        self.assertEqual(mq.queue(self.events), [])
         self.mark(8, 'killed reconciled', 'parity plain', 'parity differs conflict', 'parity differs no add', 'parity differs base')
 
     def test_queue_cli(self):
@@ -478,7 +479,7 @@ class QueueTests(unittest.TestCase):
 
     def test_executor_and_help(self):
         text = (Path(DOIT).parent / 'agents' / 'executor.md').read_text()
-        for phrase in ('Tick-owned: gate', 'doit window-run --project albert-scott', 'doit queue list'):
+        for phrase in ('Tick-owned: gate', 'one window at a time', 'doit queue list'):
             self.assertIn(phrase, text)
         for phrase in ('--specs A,B,C', 'Run `doit gate` per branch', 'doit gate <branch> <main> --spec', 'seq-'):
             self.assertNotIn(phrase, text)
@@ -636,7 +637,6 @@ class QueueTests(unittest.TestCase):
             calls.append(argv)
             return dict(code=code)
         with patch.object(mq.window_gate, 'in_flight', return_value=list(flying)), \
-             patch.object(mq.window_gate, 'train_depth', return_value=dict(depth=depth)), \
              patch.object(mq, '_repository', return_value=(self.root, 'main')), \
              patch.object(mq, 'spec_paths', return_value=[('M', 'shared.py')]):
             result = mq.window_run('albert-scott', runner=runner, now=self.now, **kwargs)
@@ -644,41 +644,11 @@ class QueueTests(unittest.TestCase):
 
     def test_train_step(self):
         self.window_seed(12)
-        self.assertEqual(self.train_call()[0], 0)
+        with patch.object(mq.window_gate, 'train_depth', side_effect=AssertionError('depth called')):
+            self.assertEqual(self.train_call()[0], 0)
         batch = [e for e in fold.read_events() if e['type'] == 'queue-batch'][-1]
-        first_specs = batch['specs'].split(',')
-        self.assertEqual(len(first_specs), 10)
-        self.assertNotIn('--after', self.train_call()[1][0])
-        candidate = dict(self.event('window-candidate', -1, sha='tree', verified_on='base',
-                                    specs=first_specs), subject=batch['subject'])
-        with (self.root / 'events' / 'L-executor-0001.jsonl').open('a') as stream:
-            stream.write(json.dumps(candidate) + '\n')
-        flying = [dict(window=batch['subject'], specs=first_specs)]
-        result, calls = self.train_call(flying=flying)
-        self.assertEqual(result, 0)
-        self.assertEqual(calls[0][-2:], ['--after', batch['subject']])
-        self.assertTrue(set(calls[0][calls[0].index('--specs') + 1].split(',')).isdisjoint(first_specs))
-        self.assertEqual(self.train_call(flying=flying, depth=1), (3, []))
-        result, launched = self.train_call(flying=flying, code=3)
-        self.assertEqual((result, len(launched)), (3, 1))
-        with (self.root / 'events' / 'L-executor-0001.jsonl').open('a') as stream:
-            stream.write(json.dumps(candidate) + '\n')
-        self.assertEqual(self.train_call(flying=flying), (3, []))
-        # A predecessor rebase must not make an older launch the newest window.
-        self.window_seed(12)
-        history = [dict(self.event('queue-batch', 4, project='albert-scott', specs=self.sid), subject='window-old'),
-                   dict(self.event('window-candidate', 3, specs=[self.sid], sha='one', verified_on='base'), subject='window-old'),
-                   dict(self.event('queue-batch', 2, project='albert-scott', specs='L-spec-9002'), subject='window-new'),
-                   dict(self.event('window-candidate', 1, specs=['L-spec-9002'], sha='two', verified_on='one'), subject='window-new'),
-                   dict(self.event('window-candidate', 0, specs=[self.sid], sha='rebased', verified_on='base'), subject='window-old')]
-        with (self.root / 'events' / 'L-executor-0001.jsonl').open('a') as stream:
-            stream.write(''.join(json.dumps(e) + '\n' for e in history))
-        result, launched = self.train_call(depth=3, flying=[dict(window='window-old', specs=[self.sid]),
-                                                         dict(window='window-new', specs=['L-spec-9002'])])
-        self.assertEqual(result, 0)
-        self.assertEqual(launched[0][-2:], ['--after', 'window-new'])
-        # Before any candidate, a known launch reserves the slot and cannot be chained.
-        self.window_seed()
+        self.assertEqual(batch['specs'], self.sid)
+        self.assertEqual(self.train_call(flying=[dict(window='active', specs=[self.sid])]), (3, []))
         pending = dict(self.event('queue-batch', 0, project='albert-scott', specs=self.sid), subject='window-pending')
         with (self.root / 'events' / 'L-executor-0001.jsonl').open('a') as stream:
             stream.write(json.dumps(pending) + '\n')
@@ -687,28 +657,13 @@ class QueueTests(unittest.TestCase):
         (state / 'window-run.window-pending.pid').write_text(str(os.getpid()))
         self.assertEqual(self.train_call(), (3, []))
         (state / 'window-run.window-pending.pid').unlink()
-        # A cap change must use the requested actor file, once across passes.
-        self.window_seed()
-        with patch.dict(os.environ, {'DOIT_WINDOW_MAX_MERGES': '3', 'DOIT_LEDGER_FILE': 'L-tick-local.jsonl'}):
-            self.assertEqual(self.train_call()[0], 0)
-            self.assertEqual(self.train_call()[0], 0)
-        caps = [e for e in self.fresh_events() if e['type'] == 'batch-cap']
-        self.assertEqual(len(caps), 1)
-        self.assertEqual(caps[0]['cap'], 3)
-        self.assertIn('batch-cap', (self.root / 'events' / 'L-tick-local.jsonl').read_text())
         import ast
         tree = ast.parse(Path(mq.__file__).read_text())
         forbidden = {'acquire', 'release', 'build_candidate', 'advance'}
         for node in ast.walk(tree):
             self.assertFalse(isinstance(node, ast.Name) and node.id in forbidden)
             self.assertFalse(isinstance(node, ast.Attribute) and node.attr in forbidden)
-            if isinstance(node, ast.ImportFrom):
-                self.assertTrue(forbidden.isdisjoint(alias.name for alias in node.names))
-            if isinstance(node, ast.Import):
-                self.assertTrue(all(alias.name.split('.')[-1] not in forbidden for alias in node.names))
-        self.train_mark(5, 'first no after', 'second after first', 'depth 1 serial', 'no candidate yet waits',
-                        'exit 3 not retried', 'in-flight specs excluded', 'batch before gate', 'loop records cap change',
-                        'loop cap unchanged silent', 'loop cap fresh process', 'no gate internals')
+        self.train_mark(5, 'single head', 'in flight waits', 'reservation holds', 'no gate internals')
 
     def test_train_lock_and_detach(self):
         self.window_seed()
@@ -766,7 +721,11 @@ def depth(*a, **kw):
     (root/'entered').touch()
     while not (root/'continue').exists(): time.sleep(.01)
     return {'depth':2}
-m.window_gate.train_depth=depth
+original=m.next_candidate
+def head(events):
+    depth()
+    return original(events)
+m.next_candidate=head
 m._repository=lambda p:(root,'main')
 m.spec_paths=lambda *a:[('M','same.py')]
 def launch(*a,**kw):
@@ -840,13 +799,195 @@ sys.exit(m.window_run('albert-scott', detach=True, launcher=launch))
 
     def test_train_executor(self):
         text = (Path(DOIT).parent / 'agents' / 'executor.md').read_text()
-        for phrase in ('doit window-run --project albert-scott --detach', 'Tick-owned: gate',
-                       'doit queue list', 'batch_cap', 'risky', 'window-cancelled', 'train',
+        for phrase in ('one window at a time', 'Tick-owned: gate',
+                       'doit queue list', 'batch_cap', 'risky', 'window-cancelled', 'queue head',
                        'NEW ', 'L-charter-0053 R5', 'footprint group'):
             self.assertIn(phrase, text)
         for phrase in ('at most 6', '--specs A,B,C', 'seq-'):
             self.assertNotIn(phrase, text)
         self.train_mark(8, 'executor train contract')
+
+
+    def simple_mark(self, ac, body):
+        encoded = json.dumps(body, sort_keys=True)
+        print(json.dumps(dict(url=f'cli://merge-simple/AC{ac}', status=0,
+                              body_sha256=hashlib.sha256(encoded.encode()).hexdigest(),
+                              body_excerpt=body)))
+        print(f'merge-simple AC{ac} status=0')
+
+    def simple_emit(self, kind, subject=None, actor='executor', **fields):
+        self.now += timedelta(seconds=1)
+        dst = self.root / 'events' / f'L-{actor}-local.jsonl'
+        self.assertIsNone(dispatch.emit(dst, {'subject': subject or self.sid}, kind, **fields))
+        return self.fresh_events()
+
+    def simple_add(self, sid, project='albert-scott'):
+        return self.simple_emit('queue-add', sid, project=project, branch=sid.lower(), rule='operator')
+
+    def test_next_candidate(self):
+        self.assertIsNone(mq.next_candidate(self.fresh_events()))
+        self.simple_add(self.sid)
+        self.simple_add('L-spec-9002')
+        events = self.simple_add('L-spec-9003')
+        self.assertEqual(mq.next_candidate(events), self.sid)
+        events = self.simple_emit('queue-remove', reason='operator', project='albert-scott')
+        self.assertEqual(mq.next_candidate(events), 'L-spec-9002')
+        events = self.simple_emit('shipped', 'L-spec-9002', sha='candidate')
+        self.assertEqual(mq.next_candidate(events), 'L-spec-9003')
+        with patch.object(mq.window_gate, 'in_flight', return_value=[dict(window='busy', specs=['L-spec-9003'])]):
+            self.assertIsNone(mq.next_candidate(events))
+        events = self.simple_emit('window-dropped', 'L-spec-9003', reason='new failure', window='w')
+        self.assertIsNone(mq.next_candidate(events))
+        listing = self.cli('queue', 'list', '--json')
+        self.assertEqual(listing.returncode, 0)
+        self.assertEqual(json.loads(listing.stdout), [])
+        self.assertIn('omitted 2 spec(s)', listing.stderr)
+        self.assertIn('shipped', listing.stderr)
+        self.assertIn('window-dropped', listing.stderr)
+        # Still round-trip through the writer and a separate reader; corrupt the
+        # writer's clock, not an in-memory event supplied to the function.
+        with patch.object(dispatch, 'now', return_value='not-a-time'):
+            self.simple_add('L-spec-9004')
+        with self.assertRaises(ValueError):
+            mq.next_candidate(self.fresh_events())
+        self.simple_mark(1, dict(empty=True, head=True, removed=True, shipped=True,
+                                 dropped=True, in_flight=True, malformed_raises=True))
+
+    def test_single_candidate(self):
+        for sid in (self.sid, 'L-spec-9002', 'L-spec-9003'):
+            self.simple_add(sid)
+        head = mq.next_candidate(self.fresh_events())
+        with patch.object(mq.window_gate, 'train_depth', side_effect=AssertionError('depth used')), \
+             patch.object(mq, 'effective_cap', side_effect=AssertionError('cap used')), \
+             patch.object(mq, 'form_batch', side_effect=AssertionError('batch used')):
+            code, calls = self.train_call()
+        self.assertEqual(code, 0)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][calls[0].index('--specs') + 1], head)
+        self.assertNotIn('--after', calls[0])
+        self.assertEqual(self.train_call(flying=[dict(window='busy', specs=[head])]), (3, []))
+        with self.assertRaises(TypeError):
+            mq.window_run('albert-scott', maximum=2)
+        cli = self.cli('window-run', '--project', 'albert-scott', '--max', '2')
+        self.assertNotEqual(cli.returncode, 0)
+        self.assertIn('unrecognized arguments', cli.stderr)
+        self.simple_mark(2, dict(argv=calls[0], in_flight_launches=0, maximum_rejected=True))
+
+    def test_batching_allowed(self):
+        self.assertFalse(mq.batching_allowed(self.fresh_events(), 5))
+        measurement = dict(single_p50_s=20, batched_p50_s=10, equal_input=True)
+        for actor in ('builder', 'grader'):
+            events = self.simple_emit('merge-measurement', actor=actor, **measurement)
+            self.assertFalse(mq.batching_allowed(events, 5))
+        for fields in (dict(measurement, equal_input=False), dict(measurement, batched_p50_s=20),
+                       dict(measurement, batched_p50_s=30), dict(single_p50_s=20, equal_input=True),
+                       dict(measurement, single_p50_s='20'), dict(measurement, single_p50_s=True),
+                       dict(measurement, batched_p50_s=-1), dict(measurement, batched_p50_s=float('nan'))):
+            events = self.simple_emit('merge-measurement', actor='operator', **fields)
+            self.assertFalse(mq.batching_allowed(events, 5))
+        events = self.simple_emit('merge-measurement', actor='operator', **measurement)
+        self.assertFalse(mq.batching_allowed(events, mq.BATCH_MIN_QUEUE - 1))
+        self.assertTrue(mq.batching_allowed(events, mq.BATCH_MIN_QUEUE))
+        events = self.simple_emit('merge-measurement', actor='executor', **dict(measurement, equal_input=False))
+        self.assertFalse(mq.batching_allowed(events, 5))
+        self.simple_emit('merge-measurement', actor='executor', **measurement)
+        for actor in ('builder', 'grader'):
+            events = self.simple_emit('merge-measurement', actor=actor, **dict(measurement, batched_p50_s=1))
+            self.assertTrue(mq.batching_allowed(events, 5))
+        for i in range(5):
+            self.simple_add(f'L-spec-{9001+i}')
+        expected = [self.sid, 'L-spec-9002', 'L-spec-9003']
+        with patch.dict(os.environ, DOIT_WINDOW_MAX_MERGES='3'), \
+             patch.object(mq, 'form_batch', wraps=mq.form_batch) as form:
+            code, calls = self.train_call()
+        self.assertEqual(code, 0)
+        self.assertTrue(form.called)
+        self.assertEqual(calls[0][calls[0].index('--specs') + 1].split(','), expected)
+        self.assertEqual([e['cap'] for e in self.fresh_events() if e['type'] == 'batch-cap'], [3])
+        self.simple_mark(3, dict(authorised=True, untrusted_ignored=True, invalid_disabled=True,
+                                 minimum=mq.BATCH_MIN_QUEUE, selected=expected, cap_recorded=True))
+
+    def test_tick_launch(self):
+        import nextstep
+        events = self.simple_add(self.sid)
+        step = nextstep.Step(self.sid, 'spec', 'merging', 'action', 'merge', 'tick',
+                             None, 'ready', None, events[-1]['ts'])
+        calls = []
+        def dispatcher(argv):
+            calls.append(argv)
+            return dict(code=0, stdout='', stderr='')
+        dispatcher.events = events
+        before = self.fresh_events()
+        self.assertEqual(tick.launch(step, dispatcher=dispatcher), self.sid)
+        self.assertEqual(calls, [['doit', 'window-run', '--project', 'albert-scott', '--detach']])
+        self.assertEqual(before, self.fresh_events())
+        calls.clear()
+        outcomes = tick.run_steps(events, {}, self.now, dispatcher=dispatcher, steps=[step])
+        self.assertEqual(calls, [['doit', 'window-run', '--project', 'albert-scott', '--detach']])
+        self.assertTrue(any(line.startswith('acted ') for line in outcomes))
+        with patch.object(tick, 'launch', side_effect=AssertionError('empty queue reached launcher')):
+            outcomes = tick.run_steps([], {}, self.now, dispatcher=dispatcher, steps=[step])
+        self.assertTrue(any('hold undetermined:' in line for line in outcomes))
+        from dataclasses import replace
+        calls.clear()
+        log = io.StringIO()
+        with redirect_stdout(log):
+            self.assertIsNone(tick.launch(replace(step, item='L-spec-9999'), dispatcher=dispatcher))
+            dispatcher.events = []
+            self.assertIsNone(tick.launch(step, dispatcher=dispatcher))
+        self.assertFalse(calls)
+        self.assertIn('hold undetermined:', log.getvalue())
+        for project in ('other', None, 'albert-scott'):
+            if project is None:
+                self.now += timedelta(seconds=1)
+                with (self.root / 'events' / 'L-executor-local.jsonl').open('a') as stream:
+                    stream.write(json.dumps(self.event('queue-add', branch=self.sid.lower(), rule='operator')) + '\n')
+                evs = self.fresh_events()
+            else:
+                evs = self.simple_add(self.sid, project)
+            specs = {self.sid: dict(state='reviewing', evs=evs)}
+            steps = nextstep.next_steps(evs, specs, self.now, lane_rules.load())
+            own = next(s for s in steps if s.item == self.sid)
+            if project == 'albert-scott':
+                self.assertEqual((own.action, own.owner), ('merge', 'tick'))
+                self.assertEqual(nextstep.ACTIONS['merge'], 'tick')
+            else:
+                self.assertEqual(own.state, 'hold')
+                self.assertTrue(own.reason.startswith('undetermined: project'), own)
+        self.simple_mark(7, dict(argv=['doit', 'window-run', '--project', 'albert-scott', '--detach'],
+                                 mismatch_launches=0, empty_launches=0, project_holds=True))
+
+    def test_simple_retirement(self):
+        for args in (('retired', 'check'), ('howto', '--check')):
+            result = self.cli(*args)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        repo = Path(DOIT).parent
+        original = subprocess.run(['git', 'show', 'main:machine/crontab.txt'], cwd=repo,
+                                  capture_output=True, text=True, check=True).stdout
+        current = (repo / 'machine/crontab.txt').read_text()
+        release = lambda text: [line for line in text.splitlines() if 'release-tick.sh' in line]
+        self.assertTrue(release(current))
+        self.assertEqual(release(current), release(original))
+        self.assertNotIn('window-run', current)
+        self.simple_mark(8, dict(retired_clean=True, howto_current=True, release_unchanged=True,
+                                 cron_window_launches=0))
+
+    def test_explicit_candidate_and_bypass(self):
+        import window_gate
+        with patch.object(window_gate, 'train_events', side_effect=AssertionError('ready read')):
+            self.assertEqual(window_gate.main_(['w', '--project', 'albert-scott']), 2)
+        with self.assertRaisesRegex(RuntimeError, 'missing candidate'):
+            window_gate.resolve_entries(self.root, [], [])
+        self.simple_add(self.sid)
+        self.simple_add('L-spec-9002')
+        with patch.dict(os.environ, DOIT_WINDOW_GATE='off'), \
+             patch.object(window_gate, 'cleanup'), patch.object(window_gate, 'ev') as emit:
+            self.assertEqual(window_gate.main_(['w', '--project', 'albert-scott']), 4)
+            emit.assert_called_once_with('window-gate-bypassed', self.sid, window='w')
+            emit.reset_mock()
+            self.assertEqual(window_gate.main_(['w2', '--project', 'albert-scott', '--specs', 'explicit:branch']), 4)
+            emit.assert_called_once_with('window-gate-bypassed', 'explicit', window='w2')
+        self.simple_mark(5, dict(missing_refused=True, no_ledger_read=True, bypass_head=self.sid))
 
 
 if __name__ == '__main__':

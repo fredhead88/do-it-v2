@@ -1,0 +1,30 @@
+[[retired]]
+name = "alternate ready derivation"
+kind = "code"
+pattern = "pending_from_ledger"
+paths = ["src/window_gate.py", "src/merge_queue.py", "src/merge_gate.py", "src/tick.py"]
+
+[[retired]]
+name = "migration-cap deferral"
+kind = "code"
+pattern = "DOIT_WINDOW_MAX_MIGRATIONS"
+paths = ["src/window_gate.py"]
+
+[[retired]]
+name = "queue train depth selection"
+kind = "code"
+pattern = "train_depth("
+paths = ["src/merge_queue.py"]
+
+[[retired]]
+name = "manual window maximum"
+kind = "code"
+pattern = 'window-run.*--max'
+regex = true
+paths = ["src/merge_queue.py", "doit", "agents/executor.md"]
+
+[[retired]]
+name = "executor window launch"
+kind = "doc"
+pattern = "doit window-run --project albert-scott --detach"
+paths = ["agents/executor.md", "docs/**", "machine/crontab.txt"]

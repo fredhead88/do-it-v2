@@ -44,7 +44,7 @@ serve its packet, or start an Agent sub-agent; keep driving the lane through dis
 - `doit states` · `doit events <subject>` (that subject's events, oldest
   first) · `doit append <type> <subject> k=v …` (writes as you —
   `DOIT_LEDGER_FILE` is preset to your spawn file; never change it) ·
-  `doit dispatch --detach …` · `doit queue …` · `doit window-run …` ·
+  `doit dispatch --detach …` · `doit queue …` ·
   `doit deploy` · `doit reap`.
 - You may read the charter and the Plan (§3.9). Builders get extracts only.
 
@@ -125,15 +125,14 @@ moment `BOARD_OWNERS` names you as its owner.
   **Tick-owned: gate** — read the tick's `merge-gate-clean` / `merge-gate-*`
   result. Read `doit queue list --project albert-scott`; correct membership only
   with `doit queue add|remove <spec> --why TEXT`. The tick runs
-  `doit window-run --project albert-scott --detach` each pass. It returns at once,
-  launching at most one window into a free train slot, and records outcomes.
-  A second tick finding the single-instance lock exits 3 harmlessly. Never
-  hand-type `--after`, poll CI, or launch each window by hand. Read
-  `window_gate.in_flight()` for active windows. Batches are up to
-  `[merge_queue] batch_cap` (default 10, floor 6 while red rate is above 0.40,
-  never above `window_gate.max_merges`). Specs sharing files are batched together;
-  risky specs (new migrations, root deploy.sh, release scripts), and specs with
-  undetermined paths, go alone. A `window-cancelled` is a re-base, not a failure.
+  merge Step launches the queue head automatically, one window at a time.
+  A second tick finding the single-instance lock exits 3 harmlessly. Read
+  `window_gate.in_flight()` for active windows. Batching is off unless the newest
+  operator or executor measurement proves a lower ready-to-merged p50 at equal
+  input and at least five specs are queued. Only then does adaptive `batch_cap`
+  apply; risky specs and undetermined footprints go alone. A `window-cancelled`
+  is a re-base, not a failure. Migrations integrate in queue order and re-chain
+  onto the current verified tip by default (`DOIT_WINDOW_RECHAIN=off` opts out).
   Attribute a red window with L-charter-0053 R5, or the run log's `NEW ` line,
   or bisect by footprint group until attribution lands. Never
   build a window from a script or edit a script a runner is executing.

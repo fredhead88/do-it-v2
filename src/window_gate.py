@@ -362,7 +362,7 @@ def build_candidate(repo, window, base, entries):
     cur, merged, conflicts = base, [], {}
     for spec, branch, bsha in entries:
         new, paths = merge_into(repo, cur, bsha, f"merge({spec}): window {window}")
-        if new is None and os.environ.get("DOIT_WINDOW_RECHAIN", "off") == "on":
+        if new is None and os.environ.get("DOIT_WINDOW_RECHAIN", "on") == "on":
             new, _ = rechain.resolve(repo, cur, (spec, branch, bsha), window, ev=ev)
         if new is None:
             conflicts[spec] = paths
@@ -994,23 +994,10 @@ def candidate_failures(repo, res):
 
 
 # ── orchestration ────────────────────────────────────────────────────────────
-def pending_from_ledger(events):
-    """Specs whose newest merge-gate-clean is newer than their newest shipped/window-dropped."""
-    clean, done = {}, {}
-    for e in events:
-        if e.get("project") not in (PROJECT, None):
-            continue
-        s, t = e.get("subject"), fold.ts(e.get("ts"))
-        if e.get("type") == "merge-gate-clean" and e.get("branch"):
-            clean[s] = (t, e["branch"])
-        elif e.get("type") in ("shipped", "window-dropped"):
-            done[s] = max(done.get(s, t), t)
-    rows = sorted((v[0], s, v[1]) for s, v in clean.items() if s not in done or v[0] > done[s])
-    return [(s, b) for _, s, b in rows]
-
-
 def resolve_entries(repo, spec_args, events):
     pairs = []
+    if not spec_args:
+        raise RuntimeError("missing candidate: explicit --specs required")
     if spec_args:
         newest = {}
         for e in events:
@@ -1021,8 +1008,6 @@ def resolve_entries(repo, spec_args, events):
             if not (b or newest.get(s)):
                 raise RuntimeError(f"{s}: no merge-gate-clean branch on file (pass {s}:<branch>)")
             pairs.append((s, b or newest[s]))
-    else:
-        pairs = pending_from_ledger(events)
     out = []
     for s, b in pairs:
         p = git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{b}^{{commit}}", check=False)
@@ -1170,22 +1155,9 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
         return 2
     base_red_answer = base_red_snapshot(project, root_base)
     baseline, base_failures = None, {}
-    enabled = os.environ.get("DOIT_WINDOW_RECHAIN", "off") == "on"
-    migrations, deferred = set(), []
-    if enabled:
-        cap = int(os.environ.get("DOIT_WINDOW_MAX_MIGRATIONS", "3"))
-        if cap < 1:
-            raise RuntimeError("DOIT_WINDOW_MAX_MIGRATIONS must be positive")
-        for s, b, sha in entries:
-            if len(rechain.added_versions(repo, base, sha)) == 1:
-                if len(migrations) >= cap:
-                    deferred.append(s)
-                    ev("window-deferred", s, window=window, branch=b, reason="migration-cap", cap=cap)
-                else:
-                    migrations.add(s)
-        entries = [e for e in entries if e[0] not in deferred]
-        if deferred:
-            print(f"gate-window: deferred {len(deferred)} migration(s), reason=migration-cap cap={cap}")
+    enabled = os.environ.get("DOIT_WINDOW_RECHAIN", "on") == "on"
+    migrations = {s for s, b, sha in entries
+                  if enabled and len(rechain.added_versions(repo, base, sha)) == 1}
     opened = False
     touched = {s: set(git(repo, "diff", "--name-only", f"{base}...{b}").stdout.split()) for s, b, _ in entries}
     dropped, urls, runs, dashboard = [], [], 0, False
@@ -1421,7 +1393,7 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
             raise TrainCancelled("base-moved")
         raise
     print(f"gate-window: advanced {main} -> {cand[:12]}  shipped={live} dropped={dropped}")
-    return 1 if dropped or deferred or len(live) < len(entries) else 0
+    return 1 if dropped or len(live) < len(entries) else 0
 
 
 def cleanup(repo, window):
@@ -1448,6 +1420,9 @@ def main_(argv):
     if project != PROJECT:
         sys.exit(f"gate-window: only project {PROJECT} uses merge windows (got {project!r}); other projects merge directly")
     bypass = os.environ.get("DOIT_WINDOW_GATE") == "off"
+    if not specs and not bypass:
+        print("gate-window: missing candidate: explicit --specs required", file=sys.stderr)
+        return 2
     if bypass or fixes_base:
         after = None
     if not main:
@@ -1481,8 +1456,11 @@ def main_(argv):
     repo = fold.ROOT / "repos" / project
     try:
         if bypass:
-            for s in specs or [s for s, _ in pending_from_ledger(fold.read_events())]:
-                ev("window-gate-bypassed", s, window=window)
+            import merge_queue
+            head = merge_queue.next_candidate(events) if not specs else None
+            selected = specs or ([head] if head else [])
+            for s in selected:
+                ev("window-gate-bypassed", s.partition(":")[0], window=window)
             print("gate-window: DOIT_WINDOW_GATE=off — bypassed; use the direct merge path"); return 4
         return run_window(window, project, specs, main, fixes_base, after, slot)
     except RuntimeError as e:

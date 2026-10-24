@@ -299,6 +299,8 @@ def _merge(c):
     from merge_queue import queue
     live = next((r for r in queue(c['events']) if r.get('spec') == c['sid']), None)
     if live is not None:
+        if live.get('project') != merge_queue.window_gate.PROJECT:
+            return _result(dict(ts=live['added_at']), 'undetermined: project')
         return _result(dict(ts=live['added_at']))
 
 
@@ -489,7 +491,12 @@ def next_steps(events, specs, now, rules, waves=None):
     rule_error = None
     try:
         owners = _owners(rules)
-        # Export the supplied table, never a second hardcoded owner list.
+        # The window launcher owns albert-scott merges. Other projects retain
+        # their table owner and direct merge path; there is no global table edit.
+        if any(row.get('project') == merge_queue.window_gate.PROJECT
+               for row in merge_queue.queue(events)):
+            owners['merge'] = 'tick'
+        # Export effective owners, including the supported window launcher.
         ACTIONS.clear()
         ACTIONS.update(owners)
     except (ValueError, TypeError, KeyError) as exc:
