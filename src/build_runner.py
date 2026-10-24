@@ -40,6 +40,12 @@ class Undetermined(Exception):
     pass
 
 
+class InfraFailure(Undetermined):
+    def __init__(self, category):
+        self.category = category
+        super().__init__("infra:" + category)
+
+
 class WallCap(Undetermined):
     pass
 
@@ -77,9 +83,13 @@ def _process(argv, *, env, deadline, cwd=None):
 def _required(argv, *, phase, **kw):
     try:
         code, output = _process(argv, **kw)
-    except OSError:
+    except OSError as exc:
+        if grading_env.failure_kind(str(exc)) == "infra":
+            raise InfraFailure(grading_env.infra_class(str(exc))) from None
         raise Undetermined(phase + " unavailable") from None
     if code:
+        if grading_env.failure_kind(output.decode("utf-8", "replace"), code) == "infra":
+            raise InfraFailure(grading_env.infra_class(output.decode("utf-8", "replace")))
         # Never include potentially credential-bearing external output in errors.
         raise Undetermined(phase + " failed")
     return output.decode("utf-8", "replace").strip()
@@ -428,7 +438,7 @@ def run(spec, requested_sha=None, criteria=None):
             base, base_logs, missing, base_rewrites, _ = _run_tree(
                 spec, base_sha, repo, row, commands, tails, len(commands), limit, deadline)
             rewrites.extend(base_rewrites)
-        except WallCap:
+        except (WallCap, InfraFailure):
             raise
         except Undetermined:
             # AC7: a base which could not provision supplies no clean ids.
@@ -459,7 +469,15 @@ def run(spec, requested_sha=None, criteria=None):
             path.with_suffix(".pending").unlink(missing_ok=True)
         # The evidence deadline must not interrupt recording its own failure.
         signal.setitimer(signal.ITIMER_REAL, 0)
-        reason = str(exc) if isinstance(exc, Undetermined) else "runner could not establish evidence (" + type(exc).__name__ + ")"
+        category = getattr(exc, "category", None)
+        if category is None and grading_env.failure_kind(str(exc)) == "infra":
+            category = grading_env.infra_class(str(exc))
+        if category:
+            fields = grading_env.infra_fields(spec + ":" + sha, "build-runner", "")
+            fields["class"] = category
+            _event(spec, project, "infra-failure", **fields)
+        reason = "infra:" + category if category else (str(exc) if isinstance(exc, Undetermined)
+                  else "runner could not establish evidence (" + type(exc).__name__ + ")")
         fields = {"env": NO_PROD_ENV} if isinstance(exc, ProductionDataUnavailable) else {}
         _event(spec, project, "evidence-bundle-failed", sha=sha, reason=reason, **fields)
         raise Undetermined(reason) from None

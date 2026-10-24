@@ -1,0 +1,5 @@
+[[retired]]
+name = "unconditional-seat-fallback"
+kind = "code"
+pattern = 'res.get("is_error") and mm.get("fallback")'
+paths = ["src/dispatch.py"]

@@ -1245,5 +1245,38 @@ with contextlib.redirect_stdout(io.StringIO()):
     mg.main_(["work", "main", "--writes", "**"])
 check("pre-gate grant failure cannot reuse old append channel", "append_only" not in events()[-1])
 
+# L-spec-1494: an infra secret-scan failure holds without rework, and cleans
+# even the partial worktree left by a failed git worktree add.
+from unittest.mock import patch
+import hashlib
+infra_events = []
+removed_worktrees = []
+real_git = mg.git
+
+def infra_git(*args, **kwargs):
+    if args[:1] == ("ls-tree",):
+        return b"scripts/ci/detect-secrets-changed.sh\n"
+    if args[:1] == ("show",):
+        return b"#!/bin/bash\nexit 0\n"
+    if args[:2] == ("worktree", "add"):
+        raise mg.Undetermined("git worktree add: No space left on device")
+    return real_git(*args, **kwargs)
+
+with patch.object(mg, "git", side_effect=infra_git), \
+     patch.object(mg, "_remove_worktree", side_effect=removed_worktrees.append), \
+     patch.object(mg.fold, "append", side_effect=infra_events.append):
+    verdict, findings = mg.secret_scan(d, "main", "infra-fixture")
+check("infra scan is undetermined", verdict == "undetermined" and findings == ["infra:no-space"])
+check("infra scan records once and cleans partial worktree", len(infra_events) == 1 and
+      infra_events[0][0] == "infra-failure" and len(removed_worktrees) == 1)
+with patch.object(mg, "gate", return_value=([], [], "main-sha", "branch-sha", "tree-sha")), \
+     patch.object(mg, "secret_scan", return_value=(verdict, findings)), \
+     patch.object(mg.fold, "append", side_effect=infra_events.append):
+    check("infra main verdict is hold", mg.main_(["work", "main"]) == 2)
+check("infra scan appends no rework or findings", len(infra_events) == 1)
+body = json.dumps(dict(events=infra_events, diagnostics=findings, partial_worktrees_cleaned=len(removed_worktrees)), sort_keys=True).encode()
+print(json.dumps(dict(criterion="AC4", url="cli://infra-retry/AC4", status=0 if all(ok) else 1,
+                     body_sha256=hashlib.sha256(body).hexdigest(), body_excerpt=json.loads(body))))
+
 print(f"merge-gate: {sum(ok)}/{len(ok)} checks pass")
 sys.exit(0 if all(ok) else 1)

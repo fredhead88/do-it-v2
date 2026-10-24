@@ -15,7 +15,7 @@ own injected `runner`).
 """
 import json
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import shlex, os, pathlib, re, shutil, subprocess, tomllib, urllib.parse  # noqa: E401
 import verification
 HERE = pathlib.Path(__file__).resolve().parent
@@ -39,7 +39,40 @@ GRADER_NEVER = ("browser", "deploy", "git")
 PROD_DSN_VARS = ("SUPABASE_DB_URL", "SUPABASE_DB_URL_DIRECT",
                   "SUPABASE_DB_URL_RO", "SUPABASE_DB_URL_MIGRATIONS")
 _PG_BIN = pathlib.Path("/usr/lib/postgresql/17/bin")
-def _run(argv, **kw): return subprocess.run(argv, **kw)
+def failure_kind(text, exit_code=1):
+    """Unknown/missing classifiers fail closed; no dependency API is inferred."""
+    try:
+        from nextstep import classify_failure
+        result = classify_failure(text, exit_code)
+        return result if result in {"infra", "work", "unknown"} else "unknown"
+    except Exception:
+        return "unknown"
+
+
+def infra_class(text):
+    if re.search(r"No space left|ENOSPC|Errno 28|Out of diskspace", text, re.I):
+        return "no-space"
+    if re.search(r"capacity|overloaded|429|quota|limit", text, re.I):
+        return "capacity"
+    if re.search(r"worktree|work tree", text, re.I):
+        return "worktree"
+    return "runner-or-network"
+
+
+def infra_fields(attempt, backend, text, *, clock=None):
+    clock = clock or datetime.now(timezone.utc)
+    return dict(attempt=attempt, backend=backend, **{"class": infra_class(text)},
+                retry_at=(clock + timedelta(minutes=5)).isoformat(timespec="seconds"))
+
+
+class InfraFailure(RuntimeError):
+    def __init__(self, category):
+        self.category = category
+        super().__init__("infra:" + category)
+
+
+def _run(argv, **kw):
+    return subprocess.run(argv, **kw)
 
 
 _TOOL_TOKENS = {"python3", "python", "bash", "node", "alembic", "pytest"}
@@ -370,11 +403,15 @@ def _prove_db(view, *, admin=False, avoid_port=None):
     try:
         r = _run(argv, capture_output=True, text=True, env=env, timeout=60)
     except Exception as exc:
+        if failure_kind(str(exc), 124 if isinstance(exc, subprocess.TimeoutExpired) else 1) == "infra":
+            raise InfraFailure(infra_class(str(exc))) from None
         if admin:
             _stop_cluster(view, "pg-admin")
             return False, f"{prefix}private-pg.sh raised {type(exc).__name__}", None
         return False, f"private-pg.sh raised: {exc}", None
     if r.returncode != 0:
+        if failure_kind((r.stderr or "") + (r.stdout or ""), r.returncode) == "infra":
+            raise InfraFailure(infra_class((r.stderr or "") + (r.stdout or "")))
         if admin:
             _stop_cluster(view, "pg-admin")
             return False, f"{prefix}private-pg.sh exit {r.returncode}", None
@@ -458,7 +495,9 @@ def _provision_env_file(tree, row, dsn):
         path.write_text("".join(f"{name}={shlex.quote(value)}\n" for name, value in values.items())
                         + ("".join(f"{name}={dsn}\n" for name in row.get("db_env", [])) if dsn else ""))
         proven = _env_values(path.read_text(), names)
-    except (OSError, UnicodeError):
+    except (OSError, UnicodeError) as exc:
+        if failure_kind(str(exc)) == "infra":
+            raise InfraFailure(infra_class(str(exc))) from None
         return False, f"env_file destination {path} could not be written or read", {}
     missing = {name for name in names if name not in proven or proven[name] != values[name]}
     if missing:
@@ -623,7 +662,9 @@ def _prove_node_modules(view, row, project):
                 dst.symlink_to(src)
             if not dst.is_symlink() or not dst.is_dir() or dst.resolve() != src.resolve():
                 return False, f"{key} destination {dst} does not resolve to source {src}"
-        except OSError:
+        except OSError as exc:
+            if failure_kind(str(exc)) == "infra":
+                raise InfraFailure(infra_class(str(exc))) from None
             return False, f"{key} source {src} could not be linked at {dst}"
     return True, None
 
@@ -697,7 +738,9 @@ def release_in_progress(now=None):
                for subject, ts in starts.items())
 
 
-def _prove_deploy(project, repo):
+def _prove_deploy(project, repo, *, clock=None, sleep=None):
+    clock = clock or time.monotonic
+    sleep = sleep or time.sleep
     row = next((p for p in _look_toml(repo).get("prod", []) if p.get("project") == project), None)
     if row is None:
         return False, f"no [[prod]] row for project {project!r} in look.toml"
@@ -706,7 +749,7 @@ def _prove_deploy(project, repo):
         return False, "the [[prod]] row is missing ssh_target/version_path"
     # version_path needs the host in front of it or curl exits 3 (malformed URL).
     url = f"{row.get('base_url', '').rstrip('/')}{version_path}"
-    started, waited = time.monotonic(), 0
+    started, waited = clock(), 0
     while True:
         try:
             r = _run(["ssh", ssh_target, f"curl -fsS -w '\\n%{{http_code}}' {shlex.quote(url)}"],
@@ -722,13 +765,13 @@ def _prove_deploy(project, repo):
         transient = r.returncode == 7 or (r.returncode == 22 and 500 <= status < 600)
         if not transient or not release_in_progress():
             return False, f"deploy version check failed: exit {r.returncode}; waited_s={int(waited)}"
-        remaining = 900 - (time.monotonic() - started)
+        remaining = 900 - (clock() - started)
         if remaining <= 0:
             return False, f"deploy version check failed: exit {r.returncode}; waited_s={int(waited)}"
         delay = min(30, remaining)
-        before_sleep = time.monotonic()
-        time.sleep(delay)
-        waited += time.monotonic() - before_sleep
+        before_sleep = clock()
+        sleep(delay)
+        waited += clock() - before_sleep
 
 
 def _write_state(view, **kv):
@@ -834,6 +877,9 @@ def preflight(role, subject, view, project, *, repo, mcp_config=None, owed=froze
                      db_env_names=(row.get("db_env") or []) if dsn else [], dsn=dsn or "",
                      admin_env_names=(row.get("admin_env") or []) if admin_dsn else [],
                      admin_dsn=admin_dsn or "", env_file_vars=env_file_vars)
+    for reason in reasons.values():
+        if failure_kind(reason) == "infra":
+            raise InfraFailure(infra_class(reason))
     return [(c, reasons[c]) for c in CAPABILITIES if c in reasons]
 
 

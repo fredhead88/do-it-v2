@@ -13,6 +13,10 @@ import types
 import shlex
 from unittest.mock import patch
 
+_ledger_root = tempfile.TemporaryDirectory(prefix="window-gate-test-")
+atexit.register(_ledger_root.cleanup)
+os.environ["DOIT_ROOT"] = _ledger_root.name
+os.environ.pop("DOIT_LEDGER_FILE", None)
 os.environ["DOIT_NO_POKE"] = "1"
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 import fold, window_gate  # noqa: E402
@@ -291,18 +295,18 @@ def clock_checks():
             patch.object(fold, "ROOT", pathlib.Path(tmp)), \
             patch.object(fold, "EVENTS", pathlib.Path(tmp) / "events"):
         calls, restored = [], []
+        clock = time.time()
         for n in range(2):
-            before = time.time()
-            window_gate.ev("window-opened", "clock", values=[1, "two", None], count=n,
-                           enabled=True, **({"project": "custom"} if n else {}))
-            after = time.time()
+            before = after = clock + n * 3
+            with patch.object(window_gate, "datetime", wraps=window_gate.datetime) as dates:
+                dates.now.return_value = window_gate.datetime.fromtimestamp(before, window_gate.timezone.utc)
+                window_gate.ev("window-opened", "clock", values=[1, "two", None], count=n,
+                               enabled=True, **({"project": "custom"} if n else {}))
             # Read the file anew after each append; never use append's return value.
             events = [json.loads(line) for line in (fold.EVENTS / ledger).read_text().splitlines()]
             stamp = window_gate.datetime.fromisoformat(events[-1]["ts"]).timestamp()
             calls.append(dict(ts=events[-1]["ts"], fresh=before - 2 <= stamp <= after + 2))
             restored.append(fold.NOW is original_now)
-            if n == 0:
-                time.sleep(1.1)
         clock_ok = calls[0]["ts"] != calls[1]["ts"] and all(c["fresh"] for c in calls)
         held(clock_ok, "ac-clock ts differ")
         held(all(restored), "ac-clock fold.NOW restored")
@@ -981,8 +985,8 @@ def attribution_checks():
         fx.run_n(1, 1, output)
         # Allow the fake baseline process to start on a busy build box while
         # keeping the 30-second ensure child bounded well below its sleep.
-        with patch.object(window_gate, "BASE_RED_MARGIN_SECS", .2), \
-             patch.object(window_gate, "verify_timeout_secs", return_value=2), \
+        with patch.object(window_gate, "BASE_RED_MARGIN_SECS", .1), \
+             patch.object(window_gate, "verify_timeout_secs", return_value=.5), \
              patch.object(window_gate, "BASE_RED_COMMAND", str(fx.tmp / "missing") if mode == "missing" else "doit"):
             rc = fx.go()
         calls = (fx.fdir / "base-red-calls").read_text().splitlines() if mode != "missing" else []
@@ -2035,6 +2039,32 @@ def scope_checks():
                              body_sha256=hashlib.sha256(encoded).hexdigest(), body_excerpt=cases)))
 
 
+def infra_checks():
+    evidence = []
+    for phase in ("candidate", "verification", "subprocess"):
+        fx = Fx({"L-spec-9149": "feature.py"})
+        if phase == "candidate":
+            cm = patch.object(window_gate, "build_candidate", side_effect=RuntimeError("git worktree add: No space left on device"))
+        elif phase == "subprocess":
+            cm = patch.object(window_gate, "verify", side_effect=OSError(28, "No space left on device"))
+        else:
+            fx.run_n(1, 1, "No space left on device")
+            from contextlib import nullcontext
+            cm = nullcontext()
+        with cm:
+            rc = fx.go()
+        rows = fx.events("infra-failure")
+        check(rc == 2 and len(rows) == 1, "infra " + phase + " emits one hold")
+        check(not fx.events("window-dropped") and not fx.events("merge-conflict") and not fx.events("rejected-criterion"),
+              "infra " + phase + " never drops work")
+        check(rows and rows[0]["subject"] == "w1" and rows[0]["retry_at"] > rows[0]["ts"], "infra retry instant is future")
+        evidence.extend(rows)
+    body = json.dumps(evidence, sort_keys=True).encode()
+    print(json.dumps(dict(criterion="AC5", url="cli://infra-retry/AC5", status=0 if not FAILS else 1,
+                         body_sha256=hashlib.sha256(body).hexdigest(), body_excerpt=evidence)))
+
+
+infra_checks()
 train_checks()
 rerun_checks()
 test_window_attribution()

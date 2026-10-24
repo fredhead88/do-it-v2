@@ -523,6 +523,31 @@ def _remove_worktree(path):
             pass
 
 
+# The gate caller supplies its subject without changing secret_scan's seam.
+from contextvars import ContextVar
+_SCAN_SUBJECT = ContextVar("secret_scan_subject", default=None)
+
+
+def _scan_diagnostic(repo, attempt, text):
+    import grading_env
+    if grading_env.failure_kind(text) != "infra":
+        return "undetermined", [text]
+    import fold
+    fields = grading_env.infra_fields(attempt, "merge-gate", text)
+    fields["project"] = pathlib.Path(repo).name
+    original = os.environ.get("DOIT_LEDGER_FILE")
+    try:
+        os.environ["DOIT_LEDGER_FILE"] = os.environ.get("DOIT_GATE_LEDGER_FILE", "L-executor-0001.jsonl")
+        fold.append(["infra-failure", _SCAN_SUBJECT.get() or attempt] +
+                    [f"{key}:={json.dumps(value)}" for key, value in fields.items()])
+    finally:
+        if original is None:
+            os.environ.pop("DOIT_LEDGER_FILE", None)
+        else:
+            os.environ["DOIT_LEDGER_FILE"] = original
+    return "undetermined", ["infra:" + fields["class"]]
+
+
 def secret_scan(repo, main_sha, branch_sha):
     """R4 — run only when gate()'s own verdict would otherwise be clean.
     Returns (verdict, finding_lines): verdict is one of clean / findings /
@@ -554,11 +579,12 @@ def secret_scan(repo, main_sha, branch_sha):
 
         wt_path = gate_dir / f"wt-{branch_sha}"
         try:
-            git("worktree", "add", "--detach", str(wt_path), branch_sha)
-        except Undetermined as e:
-            return "undetermined", [str(e)]
-
-        try:
+            try:
+                git("worktree", "add", "--detach", str(wt_path), branch_sha)
+            except Undetermined as e:
+                return _scan_diagnostic(repo, branch_sha, str(e))
+            import resources
+            resources.record("worktree", str(wt_path), lane="executor", subject=_SCAN_SUBJECT.get() or branch_sha)
             sub_env = dict(ENV)                 # never os.environ (D114/AC8)
             venv_bin = pathlib.Path(repo) / ".venv" / "bin" / "detect-secrets"
             if venv_bin.exists():
@@ -595,7 +621,7 @@ def secret_scan(repo, main_sha, branch_sha):
         finally:
             _remove_worktree(wt_path)
     except Exception as e:      # never raise Undetermined — or anything else (D108)
-        return "undetermined", [f"secret_scan: {type(e).__name__}: {e}"]
+        return _scan_diagnostic(repo, branch_sha, f"secret_scan: {type(e).__name__}: {e}")
 
 
 def out_of_grant(branch, main, spec_id):
@@ -895,7 +921,14 @@ def main_(argv):
         # clean/not-applicable verdict leaves it exactly as today.
         scan_verdict, scan_findings = None, None
         if status == "clean":
-            scan_verdict, scan_findings = secret_scan(_TOP, main_sha, branch_sha)
+            token = _SCAN_SUBJECT.set(subject)
+            try:
+                scan_verdict, scan_findings = secret_scan(_TOP, main_sha, branch_sha)
+            finally:
+                _SCAN_SUBJECT.reset(token)
+            if scan_verdict == "undetermined" and scan_findings and scan_findings[0].startswith("infra:"):
+                print("merge-gate: hold — " + scan_findings[0])
+                return 2
             if scan_verdict in ("findings", "undetermined"):
                 status = "rework"
         # The shas are the verdict's subject. Without them nothing ties a `clean`
