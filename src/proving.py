@@ -201,17 +201,45 @@ def should_enter(charter_evs, mine):
     return False
 
 
+def _check_blocks(row):
+    """Only known non-customer production or scratch data can be non-blocking."""
+    source, customer = row.get("data_source"), row.get("customer_data")
+    return (source not in ("scratch", "production") or customer is None
+            or (source == "production" and customer is True))
+
+
+def unproven_checks(mine, now, checks=None):
+    """Unproven owed rows with explicit closure classification; no I/O."""
+    import checks as check_records
+
+    out = []
+    for s in mine:
+        sid, evs = s["id"], s.get("evs", [])
+        rows = checks.get(sid, []) if checks is not None else owed.checks(evs, now)
+        for row in rows:
+            if row.get("status") in DISCHARGED:
+                continue
+            criterion = row.get("criterion")
+            record = check_records.record_for(evs, sid, criterion)
+            out.append({"check_id": record.check_id if record else f"{sid}:{criterion}",
+                        "spec": sid, "criterion": criterion,
+                        "data_source": row.get("data_source", "data-source-unknown"),
+                        "customer_data": row.get("customer_data"), "blocks": _check_blocks(row)})
+    return out
+
+
 def to_reopen(charter_evs, mine, now, checks=None):
     """R4/SD9 — `{"spec","criterion","failed_src"}` rows for every criterion
     whose governing post-declaration event is a fresh, unmet failure.
-    `checks=` is accepted for signature symmetry with `summary()` only —
-    never read, never mutated (kind/`_src` are not on `owed.checks()`'s own
-    rows)."""
+    Only blocking checks reopen; kind/`_src` still come from the governing
+    event rather than the lifecycle row."""
     entered = entered_at(charter_evs)
     if entered is None:
         return []
 
     used_srcs = {e.get("failed_src") for e in charter_evs if e.get("type") == "charter-reopened"}
+    blockers = {(row["spec"], row["criterion"])
+                for row in unproven_checks(mine, now, checks) if row["blocks"]}
     out = []
     for s in mine:
         evs = s.get("evs", [])
@@ -221,6 +249,8 @@ def to_reopen(charter_evs, mine, now, checks=None):
             if e.get("type") == "owed-ac" and c and c not in criteria:
                 criteria.append(c)
         for c in criteria:
+            if (s["id"], c) not in blockers:
+                continue
             gov = _governing_event(evs, c, now)
             if gov is None:
                 continue
@@ -268,7 +298,8 @@ def summary(charter_id, charter_evs, mine, now, *, title, review_owed, open_brie
             else:
                 owner = "owed-sweeper"
             items.append({"kind": "owed-check", "spec": sid, "criterion": crit, "text": text,
-                          "due_at": due, "status": row.get("status"), "owner": owner})
+                          "due_at": due, "status": row.get("status"), "owner": owner,
+                          "blocks": _check_blocks(row)})
 
     for s in mine:                                          # spec-review
         if s.get("state") == "shipped":
@@ -306,29 +337,33 @@ def summary(charter_id, charter_evs, mine, now, *, title, review_owed, open_brie
                       "text": "planner ended without l1-complete; confirm every slot was written",
                       "due_at": base_due, "status": None, "owner": "operator"})
 
-    blocking = any(it["kind"] in ("owed-check", "spec-review", "killed-spec") for it in items)
+    blocking = any((it["kind"] == "owed-check" and it["blocks"])
+                   or it["kind"] in ("spec-review", "killed-spec") for it in items)
     if review_owed and not blocking:                         # charter-review
         items.append({"kind": "charter-review", "spec": None, "criterion": None,
                       "text": "charter review is owed", "due_at": base_due,
                       "status": None, "owner": "executor"})
 
-    all_due = [entered_or_now]                                # deadline: every owed row, discharged too
+    all_due = [entered_or_now]                                # blocking owed rows, discharged too
     for s in mine:
         for row in checks_map.get(s["id"], []):
+            if not _check_blocks(row):
+                continue
             all_due.append(row.get("due_at") if row.get("due_at") is not None else default_owed_due)
     deadline = max(all_due) + timedelta(days=GRACE_DAYS)
 
     def sort_key(it):
         return (it["due_at"], _KIND_RANK[it["kind"]], it["spec"] or "", it["criterion"] or "")
 
-    next_item = min(items, key=sort_key) if items else None
+    blocking_items = [it for it in items if it.get("blocks", True)]
+    next_item = min(blocking_items, key=sort_key) if blocking_items else None
     next_out = ({"text": next_item["text"], "due_at": _iso(next_item["due_at"]),
                 "kind": next_item["kind"]} if next_item else None)
     owner_out = next_item["owner"] if next_item is not None else "tick"
 
     today = now.date()
-    overdue = now > deadline or any(it["due_at"].date() < today for it in items)
-    due_today = any(it["due_at"].date() == today for it in items)
+    overdue = now > deadline or any(it["due_at"].date() < today for it in blocking_items)
+    due_today = any(it["due_at"].date() == today for it in blocking_items)
     colour = "overdue" if overdue else ("due-today" if due_today else "on-time")
 
     out_items = [{**it, "due_at": _iso(it["due_at"])} for it in items]
@@ -339,7 +374,8 @@ def summary(charter_id, charter_evs, mine, now, *, title, review_owed, open_brie
         "phase": phase(charter_evs, mine),
         "label": LABEL,
         "entered_at": _iso(entered) if entered is not None else "entry not recorded",
-        "remaining": len(items),
+        "remaining": len(blocking_items),
+        "unproven_non_blocking": len(items) - len(blocking_items),
         "next": next_out,
         "deadline": _iso(deadline),
         "owner": owner_out,

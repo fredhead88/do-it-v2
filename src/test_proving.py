@@ -185,7 +185,7 @@ def test_ac7():
                           open_briefs=[], checks=checks)
     assert out["items"] == [{"kind": "owed-check", "spec": "S7", "criterion": "AC1",
                              "text": "verify the thing", "due_at": proving._iso(T0 + timedelta(days=4)),
-                             "status": "waiting", "owner": "owed-sweeper"}], out["items"]
+                             "status": "waiting", "owner": "owed-sweeper", "blocks": True}], out["items"]
 
     charter_unswept = [ev("l1-complete", stamp(40)), ev("charter-proving", stamp(30))]
     out2 = proving.summary("L-charter-9007", charter_unswept, mine, NOW, title="t", review_owed=False,
@@ -319,7 +319,7 @@ def test_ac10():
                           open_briefs=[], checks=checks)
 
     expected_keys = {"id", "title", "phase", "label", "entered_at", "remaining", "next",
-                     "deadline", "owner", "colour", "items"}
+                     "deadline", "owner", "colour", "items", "unproven_non_blocking"}
     assert set(out.keys()) == expected_keys, out.keys()
     assert isinstance(out["deadline"], str) and datetime.fromisoformat(out["deadline"])
     if out["entered_at"] != "entry not recorded":
@@ -727,3 +727,73 @@ def test_unverifiable_discharged_1104():
 
 
 test_unverifiable_discharged_1104()
+
+
+def test_close_rule_1506():
+    import hashlib
+    from unittest.mock import patch
+    import checks as records
+
+    cid = 'L-charter-91506'
+    charter = [ev('l1-complete', stamp(2)), ev('charter-proving', stamp(1)),
+               ev('sweep-fixpoint', stamp(1))]
+    mine = [spec('L-spec-91506', 'shipped-owed-evidence', [], cid)]
+    sid = mine[0]['id']
+    rows = [dict(criterion='AC1', status='waiting', due_at=at(-1), data_source='production', customer_data=True),
+            dict(criterion='AC2', status='failed', due_at=at(30), data_source='scratch', customer_data=True),
+            dict(criterion='AC3', status='expired', due_at=at(-30), data_source='production', customer_data=False)]
+
+    def summary(selected, review=False):
+        return proving.summary(cid, charter, mine, NOW, title='fixture', review_owed=review,
+                               open_briefs=[], checks={sid: selected})
+
+    baseline = summary(rows[:1])
+    mixed = summary(rows)
+    assert [it['blocks'] for it in mixed['items']] == [True, False, False]
+    assert mixed['remaining'] == 1 and mixed['unproven_non_blocking'] == 2
+    for key in ('next', 'deadline', 'owner', 'colour'):
+        assert mixed[key] == baseline[key], (key, mixed, baseline)
+    assert mixed['colour'] == 'on-time'
+    # Non-blocking dates also cannot create due-today or overdue colour.
+    for due in (at(0), at(30)):
+        assert summary(rows[:1] + [{**rows[1], 'due_at': due}])['colour'] == 'on-time'
+    only = summary(rows[1:])
+    assert only['remaining'] == 0 and only['next'] is None and only['owner'] == 'tick'
+    assert len(only['items']) == 2 and only['unproven_non_blocking'] == 2
+    reviewed = summary(rows[1:], review=True)
+    assert reviewed['remaining'] == 1 and reviewed['next']['kind'] == 'charter-review'
+    assert not any(it['kind'] == 'charter-review' for it in summary(rows, review=True)['items'])
+    with patch('builtins.open', side_effect=AssertionError('file read')), \
+         patch('io.open', side_effect=AssertionError('file read')):
+        assert proving.unproven_checks(mine, NOW) == []
+        assert len(proving.unproven_checks(mine, NOW, {sid: rows})) == 3
+    # Actual declarations with no checks override use the same classification, without I/O.
+    for source, customer, blocks in (('scratch', False, False), ('production', True, True), (None, None, True)):
+        history = [ev('owed-ac', stamp(10), subject=sid, criterion='AC1', wake_at=stamp(5)),
+                   ev('shipped', stamp(9), subject=sid),
+                   ev('owed-failed', stamp(0), subject=sid, criterion='AC1', kind='unmet', _src='f:1506')]
+        if source:
+            record = records.CheckRecord('custom-check-id', sid, 'AC1', ['true'], 'fixture', source,
+                                         customer, 'fixture', 'post-deploy', 'script')
+            history.insert(1, ev('check-declared', stamp(10), subject=sid, **record.to_event()))
+        actual = [spec(sid, 'shipped-owed-due', history, cid)]
+        with patch('builtins.open', side_effect=AssertionError('file read')), \
+             patch('io.open', side_effect=AssertionError('file read')):
+            check = proving.unproven_checks(actual, NOW)[0]
+        assert check == dict(check_id='custom-check-id' if source else f'{sid}:AC1', spec=sid,
+                             criterion='AC1', data_source=source or 'data-source-unknown',
+                             customer_data=customer, blocks=blocks)
+        closed = charter + [ev('charter-closed', stamp(1), label='closed-unproven')]
+        reopen = proving.to_reopen(closed, actual, NOW)
+        assert bool(reopen) is blocks
+        if blocks:
+            assert reopen == [dict(spec=sid, criterion='AC1', failed_src='f:1506')]
+    for ac, body in (('AC5', dict(blocks=[True, False, False], remaining=1, non_blocking=2,
+                                 scheduling_unchanged=True, review_remaining=1, pure=True)),
+                     ('AC6', dict(scratch_reopen=False, production_customer_reopen=True, unknown_reopen=True))):
+        payload = json.dumps(body, sort_keys=True)
+        print(json.dumps(dict(url=f'cli://close-rule/{ac}', status=0,
+                              body_sha256=hashlib.sha256(payload.encode()).hexdigest(), body_excerpt=payload)))
+
+
+test_close_rule_1506()

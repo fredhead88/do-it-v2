@@ -1,0 +1,6 @@
+[[retired]]
+name = "inline every-owed-spec closure tally"
+kind = "code"
+pattern = 'owed_within_k=sum\(1 for s in mine if s\["state"\] in OWED_TALLY_STATES\)'
+regex = true
+paths = ["src/fold.py"]

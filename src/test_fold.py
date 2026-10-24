@@ -3348,7 +3348,8 @@ print("0472-AC3 ok")
 # the charter's own newest charter-filed title, falling back to the charter
 # id when absent (0472-AC1a's fixture carries no charter-filed at all) ──────
 assert set(p0472_1a) == {"id", "title", "phase", "label", "entered_at", "remaining",
-                          "next", "deadline", "owner", "colour", "items"}, set(p0472_1a)
+                          "next", "deadline", "owner", "colour", "items",
+                          "unproven_non_blocking"}, set(p0472_1a)
 assert p0472_1a["title"] == C0472_1, p0472_1a["title"]
 
 S0472_4, C0472_4 = "L-spec-9412", "L-charter-9412"
@@ -4906,3 +4907,135 @@ def test_resource_creator_actors_1496():
 
 
 test_resource_creator_actors_1496()
+
+
+# L-spec-1506: close-rule, exercised through fresh scratch-ledger reads.
+def test_close_rule_1506():
+    import checks, hashlib, tomllib
+    from unittest.mock import patch
+
+    cid = 'L-charter-91506'
+    sids = [f'L-spec-9150{i}' for i in range(1, 5)]
+    sources = [('production', True), ('production', False), ('scratch', False), ('scratch', True)]
+
+    def fixture(declarations=sources, wake=-10, post=None):
+        files = {
+            'L-operator-1506.jsonl': [dict(type='charter-filed', subject=cid, covers='none', ts=stamp(15)),
+                                     dict(type='l1-complete', subject=cid, ts=stamp(3))],
+            'L-executor-1506.jsonl': [dict(type='sweep-fixpoint', subject=cid, ts=stamp(1))],
+            'L-spec-writer-1506.jsonl': [],
+            'L-grader-1506.jsonl': [], 'L-reviewer-1506.jsonl': []}
+        for sid, declaration in zip(sids, declarations):
+            files['L-spec-writer-1506.jsonl'].extend([
+                dict(type='spec-written', subject=sid, charter=cid, ts=stamp(14)),
+                dict(type='owed-ac', subject=sid, criterion='AC1', line='scratch fixture',
+                     wake_at=stamp(wake), ts=stamp(12))])
+            if declaration is not None:
+                source, customer = declaration
+                record = checks.CheckRecord(f'check-{sid}', sid, 'AC1', ['true'], 'fixture',
+                                            source, customer, 'fixture', 'post-deploy', 'script')
+                files['L-spec-writer-1506.jsonl'].append(dict(
+                    type='check-declared', subject=sid, ts=stamp(11), **record.to_event()))
+            files['L-executor-1506.jsonl'].append(dict(type='shipped', subject=sid, ts=stamp(10)))
+            files['L-grader-1506.jsonl'].append(dict(type='verdict', subject=sid, confirmed=True, ts=stamp(9)))
+            files['L-reviewer-1506.jsonl'].append(dict(type='review', subject=sid, depth='gates-only', ts=stamp(9)))
+        if post:
+            for event in post:
+                actor = 'operator' if event['type'] == 'owed-waived' else 'owed-sweeper'
+                files.setdefault(f'L-{actor}-1506.jsonl', []).append(event)
+        ledger(**files)
+        fresh = fold.read_events(use_cache=False)
+        return (fresh,) + fold.fold(fresh)
+
+    def evidence(ac, body):
+        payload = json.dumps(body, sort_keys=True)
+        print(json.dumps(dict(url=f'cli://close-rule/{ac}', status=0,
+                              body_sha256=hashlib.sha256(payload.encode()).hexdigest(), body_excerpt=payload)))
+
+    with patch.object(fold, 'K', 0):
+        fx = fixture()
+        assert all(s['state'] == 'shipped-owed-evidence' for s in fx[1].values())
+        first = checks.record_for(fx[1][sids[0]]['evs'], sids[0], 'AC1').check_id
+        assert fold.close_blockers(fx[0], cid) == [first]
+        discharged = {}
+        for kind in ('owed-met', 'owed-waived'):
+            posts = [dict(type=kind, subject=sids[0], criterion='AC1', evidence='$ true\nfixture',
+                          reason='fixture', ts=stamp(2))]
+            discharged[kind] = fold.close_blockers(fixture(post=posts)[0], cid)
+            assert discharged[kind] == []
+            posts.append(dict(type='owed-failed', subject=sids[0], criterion='AC1', kind='unmet',
+                              evidence='$ true\nfixture', ts=stamp(1)))
+            assert fold.close_blockers(fixture(post=posts)[0], cid) == []
+        failed = [dict(type='owed-failed', subject=sids[0], criterion='AC1', kind='unmet',
+                       evidence='$ true\nfixture', ts=stamp(1))]
+        assert fold.close_blockers(fixture(post=failed)[0], cid) == [first]
+        evidence('AC1', dict(blockers=[first], discharged=discharged,
+                             discharges_stay_terminal=True, failed_without_discharge=[first]))
+
+        unknown = fixture([None, None])
+        expected = sorted(f'{sid}:AC1' for sid in sids[:2])
+        assert fold.close_blockers(unknown[0], cid) == expected
+        assert fold.close_blockers(unknown[0], 'L-charter-unknown') == []
+        mine = [unknown[1][sids[0]]]
+        for row in ({'data_source': 'scratch', 'customer_data': None},
+                    {'data_source': 'data-source-unknown', 'customer_data': False},
+                    {'customer_data': False}):
+            supplied = {sids[0]: [dict(criterion='AC1', status='expired', **row)]}
+            with patch.object(fold.owed, 'checks', return_value=supplied[sids[0]]):
+                assert fold.close_blockers(unknown[0], cid) == expected
+            assert fold.proving.unproven_checks(mine, fold.NOW, supplied)[0]['blocks'] is True
+        evidence('AC2', dict(unknown_ids=expected, missing_charter=[], undetermined_cases=3))
+
+        labels = []
+        for declarations, label in (([], 'accepted'), (sources[1:], 'closed-unproven'),
+                                    (sources, None)):
+            fx = fixture(declarations)
+            labels.append(label)
+            assert fold.close_label(fx[0], cid) == label
+            assert fx[2][cid]['close_label'] == label
+            close = fold.closable(fx[0], cid)
+            assert close['owed_within_k'] is (label is not None)
+            assert fold.l2_complete(close) is (label is not None)
+            assert (fx[2][cid]['state'] == 'L2-complete') is (label is not None)
+            fold.render(*fx)
+        # A single spec carrying both a blocking and a non-blocking row still holds.
+        fx = fixture([sources[0]])
+        non_blocking = checks.CheckRecord('mixed-scratch-check', sids[0], 'AC2', ['true'],
+                                         'fixture', 'scratch', False, 'fixture', 'post-deploy', 'script')
+        evs = fx[0] + [dict(type='owed-ac', subject=sids[0], criterion='AC2', line='mixed',
+                            actor='spec-writer', wake_at=stamp(-10), ts=stamp(12)),
+                       dict(type='check-declared', subject=sids[0], actor='spec-writer',
+                            ts=stamp(11), **non_blocking.to_event())]
+        mixed_specs = list(fold.fold(evs)[0].values())
+        assert [row['blocks'] for row in fold.proving.unproven_checks(mixed_specs, fold.NOW)] == [True, False]
+        assert not fold.closable(evs, cid)['owed_within_k']
+        evidence('AC4', dict(labels=labels, charter_dict_matches=True))
+
+        for source in (('scratch', False), ('production', False), ('production', True)):
+            for status in ('due', 'blocked', 'failed'):
+                post = [] if status == 'due' else [dict(
+                    type='owed-unobservable' if status == 'blocked' else 'owed-failed',
+                    subject=sids[0], criterion='AC1', capability='operator-action', kind='unmet',
+                    reason='fixture', evidence='$ true\nfixture', ts=stamp(1))]
+                fx = fixture([source], wake=5, post=post)
+                assert fx[1][sids[0]]['state'] == 'shipped-owed-due'
+                assert fold.owed.checks(fx[1][sids[0]]['evs'], fold.NOW)[0]['status'] == status
+                complete = source != ('production', True)
+                assert fold.l2_complete(fold.closable(fx[0], cid)) is complete
+                assert (fx[2][cid]['state'] == 'L2-complete') is complete
+                fold.render(*fx)
+        evidence('AC3', dict(non_blocking_complete=True, mixed_spec_blocked=True,
+                             due_blocked_failed_cases=9, boards_rendered=True))
+
+    retired = pathlib.Path(__file__).resolve().parent.parent / 'retired.d/close-rule.toml'
+    rows = tomllib.loads(retired.read_text())['retired']
+    row = next(row for row in rows if row['kind'] == 'code' and 'src/fold.py' in row['paths'])
+    old = 'owed_within_k=sum(1 for s in mine if s["state"] in OWED_TALLY_STATES) <= K,'
+    tally = 'owed = sum(1 for s in mine if s["state"] in OWED_TALLY_STATES)'
+    assert re.search(row['pattern'], old)
+    assert not re.search(row['pattern'], tally)
+    assert not re.search(row['pattern'], pathlib.Path(fold.__file__).read_text())
+    evidence('AC7', dict(old_matches=True, charter_tally_matches=False, live_matches=False))
+
+
+test_close_rule_1506()
