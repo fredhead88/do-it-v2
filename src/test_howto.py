@@ -87,6 +87,13 @@ class HowtoTests(unittest.TestCase):
         self.assertIn('rowless: codex (default)', howto.render(str(self.repo)))
         print('1500-AC1 fixture, real repo, both emit forms, environment ... ok')
 
+    def test_token_health_text(self):
+        page = howto.render(str(REPO))
+        for marker in ('tokens = {vendor, input, cached_input, output, reasoning}',
+                       'doit health', 'unmeasured_specs', 'unknown', 'claude-sonnet-5-5',
+                       'claude-opus-5-5', '14 days', 'axis=K'):
+            self.assertIn(marker, page)
+
     def test_ac2_mutation_and_deletion(self):
         before = howto.render(str(self.repo))
         sources = {name: (self.repo / name).read_text()

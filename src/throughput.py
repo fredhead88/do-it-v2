@@ -182,6 +182,115 @@ def summary(events, now, hours=24):
     return result
 
 
+def tokens_per_live_spec(events: list[dict], now: datetime, days: int = 7) -> dict:
+    """Mean uncached-input plus output per shipped spec, excluding unknown costs.
+
+    Pre-spawn refusals and tick-owned stale observations have no measured run.
+    A stale run without a later terminal event therefore understates spend.
+    """
+    now = _utc(now)
+    start = now - timedelta(days=days)
+    dated = []
+    for event in events:
+        try:
+            stamp = _utc(event.get('ts'))
+        except (ValueError, TypeError, OverflowError):
+            continue
+        if stamp <= now:
+            dated.append((stamp, event))
+    live = {e.get('subject') for stamp, e in dated if e.get('type') == 'shipped' and start < stamp}
+    counted = {spec: [] for spec in live}
+    for _, event in dated:
+        spec, kind = event.get('subject'), event.get('type')
+        if spec in live and (kind == 'spawn-done' or kind == 'spawn-failed' and (
+                event.get('backend_ran') is True or event.get('tokens') is not None)):
+            counted[spec].append(event.get('tokens'))
+    total = dict(codex=0, claude=0)
+    measured = 0
+    for runs in counted.values():
+        cost = dict(codex=0, claude=0)
+        if not runs:
+            continue
+        for tokens in runs:
+            if (not isinstance(tokens, dict) or tokens.get('vendor') not in cost
+                    or any(type(tokens.get(f)) is not int or tokens[f] < 0
+                           for f in ('input', 'cached_input', 'output'))
+                    or tokens['cached_input'] > tokens['input']
+                    or tokens.get('reasoning') is not None and (
+                        type(tokens['reasoning']) is not int or tokens['reasoning'] < 0)):
+                break
+            cost[tokens['vendor']] += tokens['input'] - tokens['cached_input'] + tokens['output']
+        else:
+            measured += 1
+            for vendor in total:
+                total[vendor] += cost[vendor]
+    return {**{vendor: value // measured if measured else None for vendor, value in total.items()},
+            'specs': len(live), 'unmeasured_specs': len(live) - measured}
+
+
+def health_view(events: list[dict], now: datetime, *, usage: dict,
+                disk_used_fraction: float | None) -> dict:
+    """SD16 values from supplied inputs only; no clock or meter reads."""
+    now = _utc(now)
+    first = {}
+    for event in events:
+        if event.get('type') != 'spec-written':
+            continue
+        try:
+            stamp = _utc(event.get('ts'))
+        except (ValueError, TypeError, OverflowError):
+            continue
+        subject = event.get('subject')
+        if subject not in first or stamp < first[subject]:
+            first[subject] = stamp
+    return dict(finishing_per_day=summary(events, now, 24)['shipped'],
+                intake_per_day=sum(now-timedelta(hours=24) < stamp <= now for stamp in first.values()),
+                usage=usage, disk_used_fraction=disk_used_fraction,
+                tokens_per_live_spec=tokens_per_live_spec(events, now))
+
+
+def health_main(argv=None):
+    """Read the ledger and meters once; never append or render a partial view."""
+    import shutil
+    import seat_usage
+    parser = argparse.ArgumentParser(prog='doit health')
+    parser.add_argument('--json', action='store_true')
+    args = parser.parse_args(argv)
+    try:
+        now = _utc(os.environ['DOIT_NOW']) if 'DOIT_NOW' in os.environ else datetime.now(timezone.utc)
+        ledger = importlib.import_module('fold')
+        files = list(ledger.EVENTS.iterdir())
+        # fold's cached reader tolerates unreadable files; health must fail closed.
+        for path in files:
+            if path.suffix == '.jsonl':
+                with path.open('rb'):
+                    pass
+        events = ledger.read_events()
+        ignored = {id(e) for e in ledger.fold(events)[2]}
+        try:
+            disk = shutil.disk_usage(ledger.ROOT)
+            fraction = disk.used / disk.total if disk.total else None
+        except OSError:
+            fraction = None
+        stats = health_view([e for e in events if id(e) not in ignored], now,
+                            usage=seat_usage.usage_view(ledger.ROOT, now), disk_used_fraction=fraction)
+    except (OSError, ValueError, TypeError) as exc:
+        print(f'health: unavailable — {safe_text(type(exc).__name__)}', file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(stats, ensure_ascii=True, allow_nan=False))
+    else:
+        def display(value):
+            if value is None:
+                return 'unknown'
+            if isinstance(value, dict):
+                return ', '.join(f'{key}={display(item)}' for key, item in value.items())
+            return safe_text(value)
+        for key, value in stats.items():
+            print(f'{key}: {display(value)}')
+    return 0
+
+
 def _hours(value):
     try:
         number = int(value)
@@ -223,4 +332,4 @@ def main(argv=None):
 
 
 if __name__ == '__main__':
-    sys.exit(main())
+    sys.exit(health_main(sys.argv[2:]) if sys.argv[1:2] == ['health'] else main())

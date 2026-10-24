@@ -290,5 +290,79 @@ def test_throughput_regressions():
     check_board()
 
 
+
+def tokens_per_live_spec():
+    def tokens(vendor, i, cached, output):
+        return dict(vendor=vendor, input=i, cached_input=cached, output=output, reasoning=None)
+    rows = [event('shipped', spec) for spec in ('A', 'B', 'C')]
+    rows += [event('shipped', 'D', minutes=-8*24*60),
+             event('spawn-failed', 'A', reason='preflight:no-pinned-base', tokens=None),
+             event('spawn-stale', 'A'),
+             event('spawn-done', 'A', tokens=tokens('codex', 100, 80, 10)),
+             event('spawn-failed', 'A', backend_ran=True, tokens=tokens('claude', 50, 10, 10)),
+             event('spawn-done', 'B', tokens=tokens('codex', 200, 100, 20)),
+             event('spawn-done', 'C', tokens=None)]
+    expected = dict(codex=75, claude=25, specs=3, unmeasured_specs=1)
+    assert throughput.tokens_per_live_spec(rows, NOW) == expected
+    assert throughput.tokens_per_live_spec([], NOW) == dict(codex=None, claude=None, specs=0, unmeasured_specs=0)
+    boundary = [event('shipped', 'past', minutes=-7*24*60), event('shipped', 'future', minutes=1)]
+    assert throughput.tokens_per_live_spec(boundary, NOW)['specs'] == 0
+    assert throughput.tokens_per_live_spec([event('shipped')], NOW)['unmeasured_specs'] == 1
+    assert throughput.tokens_per_live_spec(rows + [event('spawn-failed', 'B', backend_ran=True)], NOW) == dict(
+        codex=30, claude=50, specs=3, unmeasured_specs=2)
+    for bad in (None, {}, dict(vendor='codex', input=100, cached_input=None, output=1),
+                tokens('codex', True, 0, 1), tokens('codex', 1, 2, 1), tokens('unknown', 2, 1, 1)):
+        result = throughput.tokens_per_live_spec([event('shipped'), event('spawn-done', tokens=bad)], NOW)
+        assert result == dict(codex=None, claude=None, specs=1, unmeasured_specs=1), result
+    assert throughput.tokens_per_live_spec(rows + [event('spawn-done', 'B', minutes=1, tokens=None)], NOW) == expected
+
+
+def health():
+    meters = dict(codex=dict(used=None, limit=100), claude=dict(used=25, limit=100))
+    rows = [event('spec-written', 'A', minutes=-1500), event('spec-written', 'A'),
+            event('spec-written', 'B'), event('spec-written', 'B'), event('spec-written', 'future', minutes=1),
+            event('review', n_blocking=0), event('shipped')]
+    got = throughput.health_view(rows, NOW, usage=meters, disk_used_fraction=None)
+    assert got == dict(finishing_per_day=1, intake_per_day=1, usage=meters, disk_used_fraction=None,
+                       tokens_per_live_spec=dict(codex=None, claude=None, specs=1, unmeasured_specs=1)), got
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / 'events').mkdir()
+        env = dict(os.environ, HOME=str(root), DOIT_ROOT=str(root), DOIT_NOW=NOW.isoformat())
+        def cli(*args, **extra):
+            return subprocess.run([str(REPO / 'doit'), 'health', *args], env=env | extra,
+                                  capture_output=True, text=True)
+        result = cli('--json')
+        assert result.returncode == 0, result.stderr
+        view = json.loads(result.stdout)
+        assert set(view) == set(got) and view['tokens_per_live_spec']['codex'] is None
+        text = cli()
+        assert text.returncode == 0 and len(text.stdout.splitlines()) == 5 and 'unknown' in text.stdout
+        for key in got:
+            assert key + ': ' in text.stdout
+        missing = cli('--json', DOIT_ROOT=str(root / 'missing'))
+        assert missing.returncode == 2 and missing.stdout == ''
+        before = subprocess.run([str(REPO / 'doit'), 'throughput', '--json'], env=env, capture_output=True)
+        cli('--json')
+        after = subprocess.run([str(REPO / 'doit'), 'throughput', '--json'], env=env, capture_output=True)
+        assert before.stdout == after.stdout and before.returncode == after.returncode == 0
+
+
+def run_groups():
+    import argparse, hashlib
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-k')
+    args = parser.parse_args()
+    groups = dict(legacy=test_throughput_regressions, tokens_per_live_spec=tokens_per_live_spec, health=health)
+    selected = [name for name in groups if args.k is None or args.k in name]
+    if not selected:
+        parser.exit(1, 'no group matches: ' + args.k + '\n')
+    for name in selected:
+        groups[name]()
+        body = name + ': passed'
+        print(json.dumps(dict(url='cli://throughput/' + name, status=0,
+                             body_sha256=hashlib.sha256(body.encode()).hexdigest(), body_excerpt=body)))
+
+
 if __name__ == '__main__':
-    test_throughput_regressions()
+    run_groups()

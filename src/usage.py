@@ -20,7 +20,7 @@ Used by scripts/seat/stamp.sh (the completion stamp, S13) and
 scripts/seat/backfill_tokens.py (the one-time retro backfill). Unmeasured is
 never zero: no resolvable transcript -> every field None, never 0.
 """
-import json, os, pathlib
+import json, os, pathlib, re
 
 PROJECTS = pathlib.Path(os.environ.get("DOIT_CLAUDE_PROJECTS", pathlib.Path.home() / ".claude" / "projects"))
 FIELDS = ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
@@ -117,6 +117,52 @@ def resolve(session, projects=None):
     if got is None:
         return {**empty, "transcript": str(path)}
     return {**got, "transcript": str(path)}
+
+
+def tokens_for_spawn(spawn: str, root: str, backend: str) -> dict | None:
+    """Read SD10 usage from the backend that ran; missing measurements stay null."""
+    if (backend not in ("codex", "seat") or not isinstance(spawn, str)
+            or re.fullmatch(r"[A-Za-z0-9._-]+", spawn) is None):
+        return None
+    try:
+        path = pathlib.Path(root) / "seat" / (spawn + (
+            ".codex.jsonl" if backend == "codex" else ".meta.json"))
+        if backend == "codex":
+            usages = []
+            for line in path.read_text().splitlines():
+                if not line.strip():
+                    continue
+                event = json.loads(line)
+                if not isinstance(event, dict):
+                    return None
+                if event.get("type") == "turn.completed":
+                    usages.append(event.get("usage"))
+            fields = ("input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens")
+        else:
+            usages = [json.loads(path.read_text()).get("usage")]
+            fields = FIELDS
+        if not usages or any(not isinstance(u, dict) for u in usages):
+            return None
+        for u in usages:
+            if any(u.get(f) is not None and (type(u[f]) is not int or u[f] < 0) for f in fields):
+                return None
+        totals = {f: None if any(u.get(f) is None for u in usages)
+                  else sum(u[f] for u in usages) for f in fields}
+        if all(v is None for v in totals.values()):
+            return None
+        if backend == "codex":
+            result = dict(zip(("input", "cached_input", "output", "reasoning"), totals.values()))
+        else:
+            inputs = [totals[f] for f in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")]
+            result = dict(input=None if None in inputs else sum(inputs),
+                          cached_input=totals["cache_read_input_tokens"],
+                          output=totals["output_tokens"], reasoning=None)
+        if (result["input"] is not None and result["cached_input"] is not None
+                and result["cached_input"] > result["input"]):
+            return None
+        return dict(vendor="codex" if backend == "codex" else "claude", **result)
+    except (OSError, ValueError, TypeError, AttributeError, RecursionError):
+        return None
 
 
 def main(argv):

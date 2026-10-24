@@ -298,5 +298,41 @@ def test_seat_usage():
     main()
 
 
-if __name__ == "__main__":
-    test_seat_usage()
+
+def usage_view():
+    import dispatch
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        path = state(root)
+        before = {p.relative_to(root): (p.read_bytes(), p.stat().st_mtime_ns) for p in root.rglob('*') if p.is_file()}
+        with mock.patch.object(dispatch, 'codex_quota', return_value=dict(used_percent=42)):
+            assert seat_usage.usage_view(root, NOW) == dict(codex=dict(used=42, limit=100), claude=dict(used=62, limit=100))
+        after = {p.relative_to(root): (p.read_bytes(), p.stat().st_mtime_ns) for p in root.rglob('*') if p.is_file()}
+        assert before == after
+        with mock.patch.object(dispatch, 'codex_quota', return_value=None):
+            assert seat_usage.usage_view(root, NOW)['codex']['used'] is None
+            assert seat_usage.usage_view(root, NOW + dt.timedelta(seconds=900))['claude']['used'] is None
+            path.write_text('{')
+            assert seat_usage.usage_view(root, NOW)['claude']['used'] is None
+            path.unlink()
+            assert seat_usage.usage_view(root, NOW)['claude']['used'] is None
+
+
+def run_groups():
+    import argparse, hashlib
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-k')
+    args = parser.parse_args()
+    groups = dict(legacy=test_seat_usage, usage_view=usage_view)
+    selected = [name for name in groups if args.k is None or args.k in name]
+    if not selected:
+        parser.exit(1, 'no group matches: ' + args.k + '\n')
+    for name in selected:
+        groups[name]()
+        body = name + ': passed'
+        print(json.dumps(dict(url='cli://seat-usage/' + name, status=0,
+                             body_sha256=hashlib.sha256(body.encode()).hexdigest(), body_excerpt=body)))
+
+
+if __name__ == '__main__':
+    run_groups()

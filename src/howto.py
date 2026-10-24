@@ -87,6 +87,15 @@ def render(repo: str) -> str:
              'Generated from repository code and config by `doit howto`; regenerate when sources change.',
              '', '## Roles', '', f'Source: `agents/*.md` and `{model_source}`.', '']
     lines.extend('- ' + backend for backend in backends)
+    lines.extend(['', 'SD10 records `tokens = {vendor, input, cached_input, output, reasoning}` on terminal events.',
+                  'Vendors are `codex` or `claude`; input includes cached input; absent usage is unknown.',
+                  '`doit health [--json]` reports finishing, intake, usage percentages, disk and tokens_per_live_spec.',
+                  'Tokens per live spec average uncached input plus output for measured specs shipped in seven days.',
+                  'unmeasured_specs counts excluded specs; spawn-stale has no usage and understates spend.',
+                  'The vendor routing above assigns authors to Codex and judging roles to Claude seats.',
+                  'The Executor uses claude-sonnet-5-5; judgment calls go to a claude-opus-5-5 seat sub-agent.',
+                  'Sonnet trial: log tokens_per_live_spec.claude via doit health --json at start and 14 days later;',
+                  'record both readings and judgment outcomes in lesson lines (axis=K); a measured rise ends it.'])
     lines.extend(['', '## Lane rules', '', 'Source: `lane_rules.toml`. Name | action | actor | limit_min.', ''])
     for row in rules:
         lines.extend(_wrap(' | '.join(str(row[key]) for key in ('name', 'action', 'actor', 'limit_min'))))
