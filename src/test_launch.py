@@ -107,6 +107,7 @@ print("R9a-AC2 ok")
 _saved_scratch_ac3 = os.environ["DOIT_SCRATCH"]
 _git_fixture = pathlib.Path(tempfile.mkdtemp())
 (_git_fixture / ".git").mkdir()
+(_git_fixture / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
 os.environ["DOIT_SCRATCH"] = str(_git_fixture / "nested" / "scratch")
 try:
     _result = launch.child_env("planner")

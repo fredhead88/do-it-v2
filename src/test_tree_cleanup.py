@@ -1253,3 +1253,45 @@ with tempfile.TemporaryDirectory() as d, patch.object(fold, "ROOT", pathlib.Path
 print("L1365-AC6 ok")
 
 print(f"tree-cleanup: {N} checks pass")
+
+# Recorded worktrees retain the existing ancestry/dirty proofs and process refusals.
+import hashlib
+import resources
+import reap_tmp
+outcomes1496 = {}
+for case1496 in ("terminal-idle", "owner-live", "live-pid", "unmerged", "unknown-owner"):
+    with (tempfile.TemporaryDirectory(prefix="recorded-tree-") as d,
+          patch.object(fold, "ROOT", pathlib.Path(d)),
+          patch.object(fold, "EVENTS", pathlib.Path(d) / "events"),
+          patch.dict(os.environ, DOIT_ROOT=d, DOIT_LEDGER_FILE="L-executor-1496.jsonl")):
+        r, b, wt = conventional_fixture(d)
+        fold.append(["spec-killed", "L-spec-1040"], strict=True)
+        proc1496 = pathlib.Path(d) / "proc"
+        (proc1496 / "net").mkdir(parents=True)
+        (proc1496 / "net/unix").write_text("Num RefCount Protocol Flags Type St Inode Path\n")
+        row1496 = resources.record("worktree", wt, lane="build", subject="L-spec-1040")
+        ev1496 = fold.read_events(use_cache=False)
+        if case1496 == "owner-live":
+            ev1496 = [e for e in ev1496 if e.get("type") in ("spec-written", "build-done", "resource-created")]
+        elif case1496 == "unknown-owner":
+            ev1496 = [e for e in ev1496 if e.get("type") == "resource-created"]
+        elif case1496 == "live-pid":
+            pid1496 = proc1496 / str(os.getpid())
+            (pid1496 / "fd").mkdir(parents=True)
+            (pid1496 / "cwd").symlink_to(wt)
+        elif case1496 == "unmerged":
+            (pathlib.Path(wt) / "extra").write_text("unmerged work")
+            sh(wt, "git", "add", "extra")
+            sh(wt, "git", "commit", "-qm", "unmerged")
+        check(sum(pathlib.Path(wt).exists() for _ in [0]) == 1, "recorded worktree removal preflight count=1")
+        result1496 = reap_tmp._reap_recorded(ev1496, scratch_root=pathlib.Path(d) / "scratch", proc_root=proc1496)
+        check(len(result1496) == 1, "one result per recorded path")
+        row1496 = result1496[0]
+        check((row1496.action == "reaped") == (case1496 == "terminal-idle"), str(row1496))
+        check(pathlib.Path(wt).exists() == (case1496 != "terminal-idle"), "only idle terminal worktree removed")
+        if case1496 == "unknown-owner":
+            check("undetermined" in row1496.reason, "unknown owner fails closed")
+        outcomes1496[case1496] = dict(action=row1496.action, reason=row1496.reason)
+body1496 = json.dumps(outcomes1496, sort_keys=True)
+print(json.dumps(dict(url="cli://tree-cleanup/AC3", status=0, body_sha256=hashlib.sha256(body1496.encode()).hexdigest(), body_excerpt=body1496)))
+print("L1496-AC3 ok")

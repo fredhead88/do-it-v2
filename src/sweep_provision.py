@@ -19,12 +19,28 @@ import tempfile
 import time
 
 import build_runner
+import fold
+import resources
+from contextlib import contextmanager
 import grading_env
 
 LIVE_DASHBOARD = pathlib.Path("/opt/albert-scott/dashboard")
 PRIVATE_PG = pathlib.Path(__file__).resolve().parents[1] / "scripts/private-pg.sh"
 PG_CTL = "/usr/lib/postgresql/17/bin/pg_ctl"
 PG_MARKERS = re.compile(r"pg_scratch|live_db|AS_LOCAL_PG_ADMIN")
+
+
+@contextmanager
+def _resource_ledger():
+    previous = os.environ.get("DOIT_LEDGER_FILE")
+    os.environ["DOIT_LEDGER_FILE"] = "L-owed-sweeper-provision.jsonl"
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("DOIT_LEDGER_FILE", None)
+        else:
+            os.environ["DOIT_LEDGER_FILE"] = previous
 
 
 def dashboard(tree, root, *, live=LIVE_DASHBOARD):
@@ -53,8 +69,11 @@ def dashboard(tree, root, *, live=LIVE_DASHBOARD):
             source, used = live / "node_modules", "matching-lock:" + str(live)
         else:
             # Stage atomically: a failed install must never become a cache hit.
-            with tempfile.TemporaryDirectory(prefix=digest[:12] + "-", dir=cache_root) as tmp:
-                stage = pathlib.Path(tmp)
+            stage = pathlib.Path(tempfile.mkdtemp(prefix=digest[:12] + "-", dir=cache_root))
+            with _resource_ledger():
+                row = resources.record("tmpdir", str(stage), lane="owed", subject=pathlib.Path(tree).parent.name)
+            promoted = False
+            try:
                 for name in ("package.json", "package-lock.json"):
                     if (directory / name).is_file():
                         shutil.copyfile(directory / name, stage / name)
@@ -64,6 +83,10 @@ def dashboard(tree, root, *, live=LIVE_DASHBOARD):
                 if not (stage / "node_modules").is_dir() or (stage / "package-lock.json").read_bytes() != lock.read_bytes():
                     raise build_runner.Undetermined("npm ci produced no lock-matched node_modules")
                 stage.rename(cache)
+                promoted = True
+            finally:
+                with _resource_ledger():
+                    resources.release(row, reason="promoted-to-cache" if promoted else "creator-finally")
             source, used = cache / "node_modules", "cache:" + digest
         target.symlink_to(source.resolve(), target_is_directory=True)
     return used
@@ -86,7 +109,6 @@ def _stop_pg(path, env):
                                 capture_output=True, timeout=20)
         if result.returncode and (path / "data/postmaster.pid").exists():
             raise build_runner.Undetermined("scratch Postgres stop failed; directory retained")
-    shutil.rmtree(path)
 
 
 def run_check(tree, base, commands, record, *, timeout=build_runner.WALL_CAP):
@@ -94,13 +116,15 @@ def run_check(tree, base, commands, record, *, timeout=build_runner.WALL_CAP):
     env = grading_env._clean_env({"BASE": base})
     summary = json.loads(pathlib.Path(record).read_text())
     summary.update(pg="none", prod_dsns="unset")
-    pg = None
+    pg = pg_row = None
     previous = {sig: signal.signal(sig, build_runner._interrupted)
                 for sig in (signal.SIGINT, signal.SIGTERM)}
     try:
         deadline = time.monotonic() + timeout
         if PG_MARKERS.search(commands):
             pg = _pg_path(pathlib.Path(tempfile.mkdtemp(prefix="owed-pg-", dir="/var/tmp")))
+            with _resource_ledger():
+                pg_row = resources.record("tmpdir", str(pg), lane="owed", subject=summary.get("subject") or pathlib.Path(tree).parent.name)
             output = build_runner._required(["/bin/bash", str(PRIVATE_PG), str(pg), "loopback"],
                 phase="scratch Postgres", env=env, deadline=deadline)
             match = re.search(r"^ADMIN_DSN='(postgresql://albert:[0-9a-f]{32}@127\.0\.0\.1:\d+/postgres)'$",
@@ -141,6 +165,8 @@ def run_check(tree, base, commands, record, *, timeout=build_runner.WALL_CAP):
         try:
             if pg is not None:
                 _stop_pg(pg, grading_env._clean_env())
+                with _resource_ledger():
+                    resources.release(pg_row, reason="creator-finally")
         finally:
             for sig, handler in previous.items():
                 signal.signal(sig, handler)

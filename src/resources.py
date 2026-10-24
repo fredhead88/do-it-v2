@@ -8,17 +8,22 @@ import json
 import os
 from pathlib import Path
 import shutil
+import tomllib
 
 import fold
 import reap_tmp
 import tree_cleanup
+import scratch
 
 KINDS = frozenset({"worktree", "scratch-db", "venv", "upload-copy", "tmpdir"})
 PROC_ROOT = Path("/proc")
+_CREATED = {}  # Identity and pid prove this process owns the returned row.
 # Resolve roots when reaping, including a caller's current fold.ROOT.
 ROOTS = {
     "worktree": lambda: (fold.ROOT / "worktrees",),
-    "tmpdir": lambda: (Path("/tmp"), Path("/dev/shm")),
+    "tmpdir": lambda: (Path("/tmp"), Path("/dev/shm"), Path("/var/tmp"),
+                       scratch.root(), fold.ROOT / "cache/node_modules"),
+    "scratch-db": lambda: (Path("/tmp"), Path("/var/tmp"), scratch.root()),
     "venv": lambda: (fold.ROOT / "venvs", Path("/tmp")),
     "upload-copy": lambda: (),
 }
@@ -65,9 +70,43 @@ def record(kind: str, ref: str, *, lane: str, subject: str) -> dict:
         raise ValueError(why)
     written = _append("resource-created", subject, kind=kind, ref=ref, lane=lane)
     filename = os.environ.get("DOIT_LEDGER_FILE", "L-operator-local.jsonl")
-    return next(e for e in reversed(fold.read_events(use_cache=False))
+    result = next(e for e in reversed(fold.read_events(use_cache=False))
                 if e.get("_src", "").startswith(filename + ":")
                 and all(e.get(k) == v for k, v in written.items()))
+    _CREATED[id(result)] = (result, os.getpid())
+    return result
+
+
+def release(row: dict, *, reason: str):
+    """Release only this process's exact record() return value, after use ends."""
+    proof = _CREATED.get(id(row))
+    if proof is None or proof[0] is not row or proof[1] != os.getpid():
+        raise ValueError("creator release requires this process's record row")
+    if not isinstance(reason, str) or not reason.strip():
+        raise ValueError("release requires a reason")
+    resource = _resource(row, "")
+    if resource.undetermined:
+        raise ValueError(resource.undetermined)
+    filename = os.environ.get("DOIT_LEDGER_FILE", "L-operator-local.jsonl")
+    if fold.admits({"type": "resource-reaped"}, fold.actor_of(filename)) is not None:
+        raise ValueError("actor-not-admitted")
+    why = _path_reason(resource)
+    if why:
+        raise ValueError(why)
+    path = Path(resource.ref)
+    if reason == "promoted-to-cache" and os.path.lexists(path):
+        raise ValueError("promotion not confirmed")
+    if os.path.lexists(path):
+        if resource.kind == "worktree" and (path / ".git").is_file():
+            tree_cleanup.git(path, "worktree", "remove", "--force", str(path))
+        elif path.is_dir():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+    if os.path.lexists(path):
+        raise RuntimeError("removal not confirmed")
+    _append("resource-reaped", resource.subject, ref=resource.ref, reason=reason)
+    del _CREATED[id(row)]
 
 
 def _resource(row, fallback):
@@ -75,6 +114,38 @@ def _resource(row, fallback):
                     ref=row.get("ref") if isinstance(row.get("ref"), str) and row["ref"] else fallback,
                     lane=row.get("lane", ""), subject=row.get("subject", ""),
                     undetermined=_field_reason(row))
+
+
+def _uploads():
+    # Match the live root's project checkout, rather than another root's config.
+    config = fold.ROOT / "repos/do-it-v2/look.toml"
+    if not config.exists():
+        return []
+    ref = "upload-manifest:unknown"
+    try:
+        configured = tomllib.loads(config.read_text()).get("resources", {}).get("upload_manifest")
+        if configured is None:
+            return []
+        if not isinstance(configured, str) or not Path(configured).is_absolute():
+            raise ValueError("upload manifest path must be absolute")
+        ref = configured
+        result = []
+        for n, line in enumerate(Path(configured).read_text().splitlines()):
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            if not isinstance(row, dict):
+                raise ValueError("invalid upload manifest row")
+            why = _field_reason(row)
+            if row.get("kind") != "upload-copy":
+                why = "invalid upload manifest kind"
+            result.append(Resource("upload-copy", row.get("ref") or f"upload-manifest:{n}",
+                                   row.get("lane", ""), row.get("subject", ""),
+                                   source="upload-manifest", undetermined=why))
+        return result
+    except (OSError, ValueError, TypeError, AttributeError) as exc:
+        return [Resource("upload-copy", ref, "upload-archive", "upload-manifest",
+                         source="upload-manifest", undetermined=f"upload manifest: {type(exc).__name__}")]
 
 
 def live(events: list[dict]) -> list[Resource]:
@@ -88,6 +159,8 @@ def live(events: list[dict]) -> list[Resource]:
         elif kind == "resource-created":
             resource = _resource(event, f"ledger:{n}")
             active[resource.ref] = resource
+    for resource in _uploads():
+        active.setdefault(resource.ref, resource)
     return list(active.values())
 
 
@@ -117,7 +190,7 @@ def _path_reason(resource):
     protected = (Path("/"), Path.home().resolve(), fold.ROOT.resolve(), Path.cwd().resolve())
     if any(path == root or path in root.parents for root in protected):
         return "protected root"
-    if path.lstat().st_uid != os.getuid():
+    if path.exists() and path.lstat().st_uid != os.getuid():
         return "path owned by another uid"
     if (path / ".git").is_dir() or ((path / ".git").exists() and resource.kind != "worktree"):
         return "repository root"
@@ -156,7 +229,8 @@ def _worktree(resource, events):
     return repo, branch, dead, why
 
 
-def _default_safety(resource, events):
+def _default_safety(resource, events, *, proc_root=None):
+    proc_root = PROC_ROOT if proc_root is None else proc_root
     if resource.kind == "worktree":
         _, _, dead, why = _worktree(resource, events)
         if not dead:
@@ -166,7 +240,7 @@ def _default_safety(resource, events):
                         why in ("builder spawn live", "standing rejection")):
                 return why
             return "undetermined: " + (why or "worktree proof")
-    if reap_tmp._refs_c(PROC_ROOT, resource.ref) or reap_tmp._refs_d(PROC_ROOT, resource.ref):
+    if reap_tmp._refs_c(proc_root, resource.ref) or reap_tmp._refs_d(proc_root, resource.ref):
         return "live process, socket or pidfile references path"
     return None
 
@@ -195,7 +269,6 @@ def reap(events: list[dict], *, dry_run: bool = True, safety=None) -> list[ReapR
         try:
             reason = ("actor-not-admitted" if denied else None)
             reason = reason or ("undetermined: " + resource.undetermined if resource.undetermined else
-                      "no-remover" if resource.kind == "scratch-db" else
                       _path_reason(resource) or _owner_reason(resource, events) or
                       safety(resource, events))
             if reason is not None and (not isinstance(reason, str) or not reason):

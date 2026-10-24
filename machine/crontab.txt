@@ -49,7 +49,6 @@
 */5 * * * * /home/albert/.do-it/bin/agents-link-guard.sh
 # L-spec-0460 db-time done-bar gate (installed by Thinker 2026-09-30, owed AC20)
 10 3 * * * /opt/albert-scott/scripts/deploy/db_time_gate_wrapper.sh
-*/10 * * * * python3 /home/albert/.do-it/bin/reap-grader-views.py >> /home/albert/.do-it/logs/reap-grader-views.log 2>&1  # Thinker stopgap 2026-10-04, until 0042 R15 covers relay graders
 # disabled 2026-10-21 (Thinker: temporary 10-04 rule outlived its purpose; auto-converted 1369/1370 capability holds with project=albert-scott) */5 * * * * python3 /home/albert/.do-it/bin/regrade-owed-rule.py >> /home/albert/.do-it/logs/regrade-owed-rule.log 2>&1  # Thinker 2026-10-04: operator A-ruling re-grades, remove once the 13 are graded
 7,22,37,52 * * * * /home/albert/.do-it/bin/auto-carry.sh >> /home/albert/.do-it/logs/auto-carry.log 2>&1  # Thinker 2026-10-05: auto-carry inbound (operator)
 */5 * * * * /home/albert/do-it-v2/doit cron-run thinker-inbox -- /usr/bin/python3 /home/albert/.do-it/thinker-inbox.py >> /home/albert/.do-it/logs/thinker-inbox.log 2>&1  # doit-cron:thinker-inbox
@@ -72,7 +71,6 @@
 15 6 * * * /home/albert/do-it-v2/doit cron-run stuck-digest -- /home/albert/do-it-v2/doit stuck-digest --send >> /home/albert/.do-it/logs/stuck-digest.log 2>&1  # doit-cron:stuck-digest
 15 6 * * * /home/albert/do-it-v2/doit cron-run gh-bill -- /home/albert/do-it-v2/doit gh-bill >> /home/albert/.do-it/logs/gh-bill.log 2>&1  # doit-cron:gh-bill
 */15 * * * * /home/albert/do-it-v2/doit cron-run seat-usage -- /home/albert/do-it-v2/doit seat-usage >> /home/albert/.do-it/logs/seat-usage.log 2>&1  # doit-cron:seat-usage
-* * * * * /home/albert/.do-it/bin/scratch-dotgit-watch.sh  # Thinker 2026-10-21: remove stray empty doit-scratch/.git (problem scratch-root-stray-dotgit); remove when scratch.root ignores empty .git
 */30 * * * * /home/albert/do-it-v2/doit cron-run owed-digest-json -- /home/albert/do-it-v2/doit owed-digest --json-only >> /home/albert/.do-it/logs/owed-digest-json.log 2>&1  # doit-cron:owed-digest-json
 20 3 * * * /home/albert/do-it-v2/doit cron-run base-red-nightly -- /usr/bin/python3 /home/albert/do-it-v2/src/base_red.py nightly albert-scott >> /home/albert/.do-it/logs/base-red-nightly.log 2>&1  # doit-cron:base-red-nightly
 # TEMPORARY (expires 2026-10-29, self-disables): /tmp inode cleanup, operator-approved via Telegram 2026-10-22 05:50Z "Approve tmp cleanup". Remove once tests use on-disk TMPDIR.

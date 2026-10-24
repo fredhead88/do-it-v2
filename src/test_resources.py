@@ -176,7 +176,9 @@ class ResourcesTests(unittest.TestCase):
         self.assert_refused(path, finished() + [created(path)], "undetermined:",
                             safety=lambda *_: (_ for _ in ()).throw(RuntimeError("probe failed")))
         self.assert_refused(path, finished() + [created(path)], "custom hold", safety=lambda *_: "custom hold")
-        self.assert_refused(path, finished() + [created(path, "scratch-db")], "no-remover")
+        result = resources.reap(finished() + [created(path, "scratch-db")], dry_run=False)
+        self.assertEqual(result[0].action, "reaped")
+        self.assertFalse(path.exists())
 
     def test_worktree_adapter_refuses(self):
         repo, wt, evs = self.worktree()
@@ -287,7 +289,7 @@ class ResourcesTests(unittest.TestCase):
         self.assertEqual(accepted.returncode, 0, accepted.stdout + accepted.stderr)
         self.assertEqual(len(self.fresh()), 1)
         self.assertNotIn("resource-created", fold_emits.EMITS)
-        self.assertEqual(fold_emits.EMITS["resource-reaped"], {"tick", "executor", "operator"})
+        self.assertEqual(fold_emits.EMITS["resource-reaped"], {"tick", "executor", "operator", "owed-sweeper"})
         self.assertTrue(fold.admits(dict(type="resource-reaped"), "builder"))
         self.assertIsNone(fold.admits(dict(type="resource-reaped"), "tick"))
         for actor in ("builder", "tick", "relay"):
@@ -383,6 +385,32 @@ class ResourcesTests(unittest.TestCase):
             self.assertTrue(outside.is_dir())
             self.assertTrue((outside / "payload").is_file())
             self.assertEqual(resources.reap(finished() + [created(allowed)])[0].action, "refused")
+
+    def test_upload_manifest(self):
+        config = self.root / "repos/do-it-v2/look.toml"
+        config.parent.mkdir(parents=True)
+        manifest = self.root / "uploads.jsonl"
+        config.write_text('[resources]\nupload_manifest = ' + json.dumps(str(manifest)) + '\n')
+        self.assertTrue(resources.live([])[0].undetermined)
+        manifest.write_text(json.dumps(dict(kind="upload-copy", ref="/archive/fixture", lane="upload-archive", subject="fixture-sha")) + "\n")
+        row = resources.live([])[0]
+        self.assertEqual((row.ref, row.source, row.undetermined), ("/archive/fixture", "upload-manifest", None))
+        manifest.write_text("malformed\n")
+        self.assertTrue(resources.live([])[0].undetermined)
+
+    def test_creator_release(self):
+        path = self.directory("creator")
+        row = resources.record("tmpdir", str(path), lane="check", subject="live-operation")
+        with self.assertRaises(ValueError):
+            resources.release(dict(row), reason="creator-finally")
+        with patch.object(resources.shutil, "rmtree", side_effect=OSError("fixture failure")):
+            with self.assertRaises(OSError):
+                resources.release(row, reason="creator-finally")
+        self.assertTrue(path.exists())
+        self.assertFalse(any(e["type"] == "resource-reaped" for e in self.fresh()))
+        resources.release(row, reason="creator-finally")
+        self.assertFalse(path.exists())
+        self.assertEqual(resources.live(self.fresh()), [])
 
     def test_actor_admission(self):
         path = self.directory("admission")

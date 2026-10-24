@@ -54,7 +54,12 @@ def _has_git_entry(path):
     """True if path/.git exists as either a directory (normal checkout) or a
     file (the shape `git worktree add` leaves behind). No git subprocess."""
     git = path / ".git"
-    return git.is_dir() or git.is_file()
+    try:
+        if git.is_dir():
+            return next(git.iterdir(), None) is not None
+        return git.is_file() or git.is_symlink()
+    except OSError:
+        return True
 
 
 def _git_ancestor(resolved):

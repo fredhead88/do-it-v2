@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Six health alarms, pure evaluation and bounded ledger/Telegram delivery."""
+"""Health alarms, pure evaluation and bounded ledger/Telegram delivery."""
 import argparse
 import json
 import math
@@ -17,7 +17,7 @@ import scratch
 
 LOCK_STALE_S = 4200
 ALARMS = ("mirror-stale", "release-failed", "deploy-lock-stale",
-          "sweeper-unobservable", "disk-low", "preflight-refusals")
+          "sweeper-unobservable", "disk-low", "disk-used", "preflight-refusals")
 LEDGER_NAME = "L-health-local.jsonl"
 RELEASE_LOG = pathlib.Path("/var/log/albert-scott/daily-release.log")
 _PROC = object()
@@ -50,6 +50,17 @@ def _events(events, now, seconds=None):
         ts = _time(e.get("ts"))
         if ts is not None and ts <= now and (seconds is None or (now - ts).total_seconds() <= seconds):
             yield e
+
+
+def disk_alarm(used_fraction):
+    valid = _number(used_fraction) and 0 <= used_fraction <= 1
+    if valid and used_fraction < .90:
+        return None
+    reading = {"used_fraction": used_fraction if valid else None}
+    if not valid:
+        reading["undetermined"] = ["used_fraction"]
+    return dict(alarm="disk-used", severity="immediate" if valid else "summary",
+                reading=reading, line=f"disk used fraction={used_fraction}" if valid else "disk usage undetermined")
 
 
 def evaluate(events, now, *, probes):
@@ -123,6 +134,9 @@ def evaluate(events, now, *, probes):
         add("disk-low", dict(values), f"disk free GB: /={values['/']}, scratch={values['scratch']}" +
             ("; undetermined " + ", ".join(unknown) if unknown else ""),
             any(_number(v) and v < 5 for v in values.values()), unknown)
+
+    if alarm := disk_alarm(p.get("used_fraction")):
+        result.append(alarm)
 
     refusals = recent(3600, {"grading-preflight-failed", "evidence-bundle-failed"})
     refusals = [e for e in refusals if not any(str(e.get(k, "")).startswith("bundle-pending") for k in ("capability", "reason", "why"))]
@@ -233,7 +247,12 @@ def live_probes(now):
             disk[name] = shutil.disk_usage("/" if name == "/" else scratch.root()).free / 1024**3
         except Exception:
             disk[name] = None
-    return dict(backup=pushed, mirror_ahead_s=mirror_ahead(now), release_log_failed=failed,
+    try:
+        usage = shutil.disk_usage("/")
+        used_fraction = usage.used / usage.total
+    except Exception:
+        used_fraction = None
+    return dict(used_fraction=used_fraction, backup=pushed, mirror_ahead_s=mirror_ahead(now), release_log_failed=failed,
                 locks=dict(deploy=dict(held=lock_held(fold.ROOT / "deploy.lock"), since=deploy_start),
                            release=dict(held=lock_held("/var/lock/albert-scott-daily-release.lock"), since=release_start)),
                 disk_free_gb=disk)
@@ -252,7 +271,7 @@ def _read_ledger():
 
 
 def _plan(alarm, events, now):
-    window = 86400 if alarm["alarm"] == "release-failed" else 21600
+    window = 86400 if alarm["alarm"] in ("release-failed", "disk-used") else 21600
     prior = [e for e in _events(events, now, window) if e["type"] == "health-alarm" and e.get("alarm") == alarm["alarm"]]
     key = alarm["reading"].get("key", "ongoing")
     append = not any(e.get("severity") == alarm["severity"] and _dict(e.get("reading")).get("key", "ongoing") == key for e in prior)

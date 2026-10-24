@@ -14,6 +14,7 @@ import subprocess
 import tempfile
 
 import fold
+import resources
 
 VERSIONS = "api/alembic_supabase/versions/"
 MANIFEST = "api/alembic_supabase/branch_isolation.json"
@@ -316,10 +317,14 @@ def fingerprint(repo, candidate, window, *, ev):
     env = child_env()
     override = os.environ.get("DOIT_RECHAIN_PG_CMD")
     pgcmd = shlex.split(override) if override else ["bash", str(pathlib.Path(__file__).resolve().parent.parent / "scripts/private-pg.sh")]
-    with tempfile.TemporaryDirectory(prefix="doit-rechain-") as tmp:
-        root = pathlib.Path(tmp)
-        wt, pg = root / "tree", root / "pg"
-        pg.mkdir()
+    parent = fold.ROOT / "worktrees"
+    parent.mkdir(parents=True, exist_ok=True)
+    wt = pathlib.Path(tempfile.mkdtemp(prefix="doit-rechain-", dir=parent))
+    wt_row = resources.record("worktree", str(wt), lane="rechain", subject=window)
+    pg_row = None
+    try:
+        pg = pathlib.Path(tempfile.mkdtemp(prefix="doit-rechain-pg-"))
+        pg_row = resources.record("scratch-db", str(pg), lane="rechain", subject=window)
         try:
             git(repo, "worktree", "add", "--detach", str(wt), candidate)
             started = subprocess.run([*pgcmd, str(pg), "loopback"], env=env, cwd=wt,
@@ -346,7 +351,9 @@ def fingerprint(repo, candidate, window, *, ev):
             return sha
         finally:
             stop = [*pgcmd, str(pg), "stop"] if override else ["/usr/lib/postgresql/17/bin/pg_ctl", "-w", "-D", str(pg / "data"), "-m", "fast", "stop"]
-            try:
-                subprocess.run(stop, env=child_env(), capture_output=True, timeout=30)
-            finally:
-                git(repo, "worktree", "remove", "--force", str(wt), check=False)
+            stopped = subprocess.run(stop, env=child_env(), capture_output=True, timeout=30)
+            if stopped.returncode and (pg / "data/postmaster.pid").exists():
+                raise ValueError("private PG stop failed; directory retained")
+            resources.release(pg_row, reason="creator-finally")
+    finally:
+        resources.release(wt_row, reason="creator-finally")
