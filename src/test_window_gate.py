@@ -19,7 +19,7 @@ os.environ["DOIT_ROOT"] = _ledger_root.name
 os.environ.pop("DOIT_LEDGER_FILE", None)
 os.environ["DOIT_NO_POKE"] = "1"
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
-import fold, window_gate  # noqa: E402
+import fold, window_gate, merge_queue  # noqa: E402
 
 HERE = pathlib.Path(__file__).parent
 FAILS = []
@@ -174,6 +174,7 @@ class Fx:
         specs = specs or list(self.branches)
         for s in specs:
             fold.append(["merge-gate-clean", s, f"branch={self.branches[s]}", "project=albert-scott"])
+            fold.append(["queue-add", s, f"branch={self.branches[s]}", "project=albert-scott", "rule=operator"])
         with patch.dict(os.environ, FAKE_BASE=self.base, PATH=self.path), \
              patch.dict(sys.modules, base_red=self.service), \
              patch.object(window_gate, "base_red_snapshot", side_effect=self.base_reader), \
@@ -577,7 +578,7 @@ PY
         with patch.object(window_gate, "git", wraps=real_git) as calls:
             rc = fx.go(fixes_base=fixes)
         check(rc == (0 if state == "green" else 2) and
-              not any("rev-list" in call.args for call in calls.call_args_list) and
+              not any("--max-count=31" in call.args for call in calls.call_args_list) and
               not fx.events("window-base-pg-inherited"),
               "inherited PG: no ancestor walk for base " + state + " fixes=" + str(fixes))
 
@@ -674,7 +675,7 @@ def main():
     check(rc == 1 and fx.master() != fx.base and
           [e["subject"] for e in fx.events("shipped")] == ["A"], "AC4 first green half ships")
     check(not fx.events("window-dropped") and
-          [s for s, _ in window_gate.pending_from_ledger(fold.read_events())] == ["B", "C"], "AC4 unresolved half pending")
+          [r['spec'] for r in merge_queue.queue(fold.read_events())] == ["B", "C"], "AC4 unresolved half pending")
     check([e["halves"] for e in fx.events("window-bisected")] == [[["A"], ["B", "C"]]] and
           len(fx.events("escalation-blocking")) == 1 and len(fx.calls()) == 3, "AC4 bisect with unresolved-half escalation")
 
@@ -780,22 +781,18 @@ def rechain_checks():
         sh(["checkout", "live-scratch"], fx.repo)
         return fx, sf
 
-    cases = ["green", "cap", "cap4", "owner-X", "owner-B", "second-red", "fingerprint-fail", "off", "unset"]
+    cases = ["green", "no-cap", "owner-X", "owner-B", "second-red", "fingerprint-fail", "off", "unset"]
     for case in cases:
-        names = ["a", "b", "c", "d"] if case in ("cap", "cap4") else ["a", "b", "c"] if case == "green" else ["a", "b"]
-        fx, sf = fixture(names, extra=case in ("cap", "cap4", "owner-X", "owner-B", "second-red", "fingerprint-fail"))
+        names = ["a", "b", "c", "d"] if case == "no-cap" else ["a", "b", "c"] if case == "green" else ["a", "b"]
+        fx, sf = fixture(names, extra=case in ("no-cap", "owner-X", "owner-B", "second-red", "fingerprint-fail"))
         env = sf.scripts(fx.tmp, fail=case == "fingerprint-fail")
         env["DOIT_WINDOW_RECHAIN"] = "off" if case == "off" else "on"
-        if case == "cap4":
-            env["DOIT_WINDOW_MAX_MIGRATIONS"] = "4"
         before = sh(["status", "--porcelain"], fx.repo)
         refs = {b: sh(["rev-parse", b], fx.repo) for b in fx.branches.values()}
         try:
             with patch.dict(os.environ, env):
                 if case == "unset":
                     os.environ.pop("DOIT_WINDOW_RECHAIN", None)
-                if case != "cap4":
-                    os.environ.pop("DOIT_WINDOW_MAX_MIGRATIONS", None)
                 fx.run_n(1, 1 if case in ("owner-X", "owner-B", "second-red") else 0,
                          red(["api/tests/test_x.py::test_x"]) if case == "owner-X" else
                          red([rechain.TEST + "::test_head"]) if case in ("owner-B", "second-red") else GREEN)
@@ -816,10 +813,9 @@ def rechain_checks():
                     check(rechain.revision(rechain.text(fx.repo, fx.master(), rechain.VERSIONS + child + ".py")) == (child, parent), "ac4 chain " + child)
                 commits = sh(["rev-list", "--first-parent", fx.base + ".." + fx.master()], fx.repo).splitlines()
                 check(len(commits) == 4 and fps[0]["sha"] == fx.master(), "ac4 three merges one fixup before CI")
-            elif case in ("cap", "cap4"):
-                check(shipped == (["a", "b", "c", "X"] if case == "cap" else names + ["X"]), "ac5 migration cap excludes only fourth")
-                check([e["subject"] for e in fx.events("window-deferred")] == (["d"] if case == "cap" else []), "ac5 deferred event")
-                check(not fx.events("window-dropped"), "ac5 no deferred drop")
+            elif case == "no-cap":
+                check(shipped == names + ["X"], "all explicit migration candidates integrate")
+                check(not fx.events("window-deferred") and not fx.events("window-dropped"), "no migration-cap deferral")
             elif case == "owner-X":
                 check(rc == 1 and shipped == names and len(fx.calls()) == 2, "ac6 X drops migrations stay")
                 check([e["subject"] for e in fx.events("window-dropped")] == ["X"], "ac6 owners mapping")
@@ -832,6 +828,9 @@ def rechain_checks():
                 check(rc == 1 and shipped == ["X"] and len(fx.calls()) == 1, "ac3f fingerprint failure rebuilds without migrations")
                 check(set(e["subject"] for e in fx.events("rechain-declined")) == set(names), "ac3f all migration declines")
                 check(rechain.routed_head(fx.repo, fx.master()) == "h0", "ac3f unchanged migration candidate")
+            elif case == "unset":
+                check(rc == 0 and shipped == names and len(fps) == 1 and
+                      rechain.routed_head(fx.repo, fx.master()) == "b", "unset re-chains by default")
             else:
                 check(rc == 1 and shipped == ["a"] and not fps and not fx.events("rechained"), "ac9 disabled behavior " + case)
                 check([e["subject"] for e in fx.events("merge-conflict")] == ["b"], "ac9 disabled migration conflict")
@@ -839,7 +838,7 @@ def rechain_checks():
             check(refs == {b: sh(["rev-parse", b], fx.repo) for b in refs}, "ac8 builder refs unchanged " + case)
             check(all(not pathlib.Path(c.split(" ", 1)[1]).exists() for c in calls), "ac8 disposable resources gone " + case)
             print("ac3f/ac4/ac5/ac6/ac9", case, "checked")
-            criterion = {"green": "AC4", "cap": "AC5", "cap4": "AC5", "owner-X": "AC6",
+            criterion = {"green": "AC4", "no-cap": "AC5", "owner-X": "AC6",
                          "owner-B": "AC6", "second-red": "AC6", "fingerprint-fail": "AC3",
                          "off": "AC9", "unset": "AC9"}[case]
             response(criterion, dict(case=case, exit=rc, shipped=shipped, ci_calls=len(fx.calls()),
@@ -1298,7 +1297,7 @@ def rerun_checks():
           calls == [list("ABCDEF"), list("ABC"), list("DEF"), ["D"], list("EF")] and
           len(drops) == 1 and drops[0]["subject"] == "D" and drops[0]["reason"] == "bisect-single" and drops[0]["nodes"] and
           [e["subject"] for e in fx.events("shipped")] == list("ABC") and fx.master() == tips[1] and
-          [s for s, _ in window_gate.pending_from_ledger(fold.read_events())] == list("EF"), "bisect_six_one_bad")
+          [r['spec'] for r in merge_queue.queue(fold.read_events())] == list("EF"), "bisect_six_one_bad")
     response("bisect_six_one_bad", ["AC6", "AC10"], {"halves": halves, "calls": calls, "pending": ["E", "F"], "first_green_advanced": True})
     response("bisect_outside_run_cap", ["AC10"], {"bisect_dispatches": len(calls) - 1})
 
@@ -1311,7 +1310,7 @@ def rerun_checks():
     fx, calls, _, verify = exercise("ABCD", "C", owner=(["C", "D"], "C.py::bad"))
     with patch.object(window_gate, "verify", side_effect=verify): rc = fx.go()
     check(rc == 1 and [(e["subject"], e["reason"]) for e in fx.events("window-dropped")] == [("C", "bisect-owner")] and
-          [s for s, _ in window_gate.pending_from_ledger(fold.read_events())] == ["D"], "bisect_owner_half")
+          [r['spec'] for r in merge_queue.queue(fold.read_events())] == ["D"], "bisect_owner_half")
     response("bisect_owner_half", ["AC7"], {"dropped": ["C"], "reason": "bisect-owner", "pending": ["D"]})
 
     fx, calls, _, verify = exercise("AB", "AB")
@@ -1324,7 +1323,7 @@ def rerun_checks():
         with patch.object(window_gate, "verify", side_effect=verify): rc = fx.go()
         check(rc == 1 and fx.master() != fx.base and not fx.events("window-dropped") and fx.events("escalation-blocking") and
               [e["subject"] for e in fx.events("shipped")] == ["A", "B"] and
-              [s for s, _ in window_gate.pending_from_ledger(fold.read_events())] == ["C", "D"] and
+              [r['spec'] for r in merge_queue.queue(fold.read_events())] == ["C", "D"] and
               len(fx.events("window-tree-verified")) == 2, "bisect_undetermined_half " + mode)
     response("bisect_undetermined_half", ["AC7"], {"undetermined_and_base_incomplete": "escalate; no drops; unresolved half pending; verified half ships"})
 
@@ -1771,7 +1770,7 @@ def train_checks():
                for path in folder.rglob("*") if path.suffix in (".py", ".md") and "window-verified" in path.read_text()]
     harvest = [path for path in (root / "src").glob("harvest*.py") if "window-verified" in path.read_text()]
     mark("readers config caller", configured == 2 and type(configured) is int and
-         "one window at a time" not in executor and "in_flight()" in executor and "--after" in executor and
+         "one window at a time" in executor and "in_flight()" in executor and "queue head" in executor and
          not harvest, dict(configured=configured, readers=readers, harvest_reads_verified=bool(harvest)))
 
     body = json.dumps(observations, sort_keys=True)
@@ -2064,6 +2063,61 @@ def infra_checks():
                          body_sha256=hashlib.sha256(body).hexdigest(), body_excerpt=evidence)))
 
 
+def merge_simple_checks():
+    records = []
+    def mark(name, ok, **fields):
+        check(ok, "merge-simple AC4 " + name)
+        records.append(dict(case=name, passed=bool(ok), **fields))
+
+    for state in ("red", "undetermined"):
+        fx = Fx({"S": "api/tests/test_x.py"})
+        fx.run_n(1, 1 if state == "red" else 2,
+                 red(["api/tests/test_x.py::test_bad"]) if state == "red" else "unverifiable")
+        rc = fx.go()
+        mark(state, rc != 0 and fx.master() == fx.base and not fx.events("shipped") and
+             (bool(fx.events("window-dropped")) if state == "red" else bool(fx.events("escalation-blocking"))),
+             main_unchanged=fx.master() == fx.base, shipped=len(fx.events("shipped")))
+
+    fx = Fx({"S": "single.txt"})
+    fx.run_n(1, 0, GREEN)
+    updates, emitted = [], []
+    real_git, real_ev = window_gate.git, window_gate.ev
+    def record_git(repo, *args, **kwargs):
+        result = real_git(repo, *args, **kwargs)
+        if args[:2] == ("update-ref", "refs/heads/master"):
+            updates.append(args)
+        return result
+    def record_event(kind, subject, **fields):
+        if kind in {"shipped", "window-verified"}:
+            emitted.append((kind, fx.master() == fields["sha"]))
+        return real_ev(kind, subject, **fields)
+    with patch.object(window_gate, "git", side_effect=record_git), \
+         patch.object(window_gate, "ev", side_effect=record_event):
+        rc = fx.go()
+    mark("green atomic advance", rc == 0 and fx.master() != fx.base and
+         updates == [("update-ref", "refs/heads/master", fx.master(), fx.base)] and
+         emitted == [("shipped", True), ("window-verified", True)],
+         old_asserted=True, emitted_after_move=emitted)
+    candidate = fx.master()
+    sh(["update-ref", "refs/heads/master", fx.base, candidate], fx.repo)
+    before = len(fx.events("shipped"))
+    try:
+        window_gate.advance(fx.repo, "master", candidate, candidate, "stale", ["S"], [], 1, [],
+                            [("S", "br-S", candidate)], False)
+    except RuntimeError:
+        refused = True
+    else:
+        refused = False
+    mark("stale old main", refused and fx.master() == fx.base and len(fx.events("shipped")) == before,
+         refused=refused, main_unchanged=fx.master() == fx.base)
+    encoded = json.dumps(records, sort_keys=True).encode()
+    ok = all(row["passed"] for row in records)
+    print(json.dumps(dict(url="cli://merge-simple/AC4", status=0 if ok else 1,
+                         body_sha256=hashlib.sha256(encoded).hexdigest(), body_excerpt=records)))
+    if ok:
+        print("merge-simple AC4 status=0")
+
+
 infra_checks()
 train_checks()
 rerun_checks()
@@ -2074,3 +2128,6 @@ parity_checks()
 timeout_checks()
 rechain_checks()
 main()
+merge_simple_checks()
+if FAILS:
+    sys.exit(1)
