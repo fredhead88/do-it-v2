@@ -203,5 +203,44 @@ def main():
         signed('AC10', {'injected_execution': True, 'size_bounds': True})
 
 
+def test_ac4_events_passed_down_browser():
+    from contextlib import ExitStack
+    import fold
+    with tempfile.TemporaryDirectory(prefix="browser-events-") as temporary, ExitStack() as stack:
+        root = pathlib.Path(temporary)
+        (root / "events").mkdir()
+        repo = root / "repo"
+        (repo / "dashboard/e2e").mkdir(parents=True)
+        (repo / "dashboard/e2e/one.spec.ts").write_text("// scratch")
+        def git(*args):
+            return subprocess.check_output(["git", "-C", str(repo), *args], text=True,
+                                           stderr=subprocess.DEVNULL).strip()
+        git("init", "-q")
+        git("add", ".")
+        git("-c", "user.name=fixture", "-c", "user.email=fixture@localhost", "commit", "-qm", "fixture")
+        (root / "events/L-executor-fixture.jsonl").write_text(json.dumps(dict(v=1,
+            subject="L-spec-9902", ts=NOW.isoformat(), type="deploy-landed", target="demo",
+            sha=git("rev-parse", "HEAD"))) + "\n")
+        spec = root / "spec.md"
+        spec.write_text("## Acceptance criteria\nAC1 [backend]: dashboard/e2e/one.spec.ts\nAC2 [backend]: seat\n")
+        rows = [dict(spec="L-spec-9902", criterion=f"AC{i}", project="demo", spec_path=str(spec)) for i in (1, 2)]
+        for attr, value in (("ROOT", root), ("EVENTS", root / "events"), ("PROJECT", None)):
+            stack.enter_context(patch.object(fold, attr, value))
+        stack.enter_context(patch.dict(os.environ, DOIT_ROOT=str(root)))
+        stack.enter_context(patch.object(browser.grading_env, "_look_toml",
+            return_value={"prod": [dict(project="demo", repo=str(repo))]}))
+        ev = fold.read_events()
+        expected = browser.split(rows)
+        assert expected == ([rows[0]], [rows[1]])
+        with patch.object(fold, "read_events", side_effect=AssertionError("implicit read")):
+            assert browser.split(rows, events=ev) == expected
+            assert browser.split(rows, events=[]) == ([], rows)
+            with patch.object(browser, "_credentials", side_effect=browser.Unobservable("scratch")):
+                observations = browser.run_batch(rows, NOW, events=ev)
+                assert len(observations) == 1 and observations[0]["outcome"] == "unobservable"
+    print("L-spec-1531 AC4 prod_browser ok")
+
+
 if __name__ == '__main__':
+    test_ac4_events_passed_down_browser()
     main()

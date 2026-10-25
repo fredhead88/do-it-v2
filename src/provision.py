@@ -80,13 +80,17 @@ def _stop_pg(path, env, ctl=None):
         shutil.rmtree(path)
 
 
-def _repo(env, record):
+def _repo(env, record, events=None):
     options = _OPTIONS.get()
     if "tree" in options:
         return
     import dispatch
     import fold
-    project = fold.fold(fold.read_events())[0].get(record.spec, {}).get("project")
+    if events is None:
+        events = fold.read_events()  # events=None default
+    subject = fold.fold(events)[0].get(record.spec, {})
+    project = subject.get("project") or next((event["project"]
+        for event in reversed(subject.get("evs", [])) if event.get("project")), None)
     repo = dispatch.ROOT / "repos" / project if project else None
     if repo is None or not repo.is_dir() or not re.fullmatch(r"[0-9a-f]{40}", record.sha):
         raise Undetermined("exact check repository or sha unavailable")
@@ -104,7 +108,7 @@ def _repo(env, record):
 
 def _repo_setup(env, record):
     options = _OPTIONS.get()
-    _repo(env, record)
+    _repo(env, record, events=options.get("events"))
     if options.get("dashboard"):
         root, live = options["dashboard"]
         env.summary["node_modules"] = _sweep_dashboard(env.tree, root, live=live)
@@ -188,7 +192,8 @@ def script_rows(rows, events, path, *, lane, dry_run=False):
             continue
         prepared = None
         try:
-            prepared = prepare(record, lane=lane)
+            with context(events=events):
+                prepared = prepare(record, lane=lane)
             verdict = run_script_check(record, prepared)
         except (Undetermined, br.Undetermined, OSError, subprocess.SubprocessError):
             verdict = Verdict("unobservable", "environment unavailable", "environment unavailable", "repo")

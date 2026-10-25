@@ -795,7 +795,7 @@ def check_capability_readmission(*, fixture_root, now, epoch, iso, clear, write,
     clear()
     for n in range(40):
         seed('repo', n, runner='build')
-    def record(row):
+    def record(row, events=None):
         return dict(judgment, runner='build')
     with patch.object(prod_runner, 'record_for', side_effect=record):
         original = specs_now()[1]

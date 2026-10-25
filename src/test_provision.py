@@ -41,6 +41,58 @@ class ProvisionTests(unittest.TestCase):
             capture_output=True, text=True, check=True)
         return json.loads(result.stdout)
 
+    def test_ac4_events_passed_down_checkout(self):
+        import dispatch
+        from contextvars import ContextVar
+        from datetime import datetime, timezone
+        repo = self.root / "repos/demo"
+        repo.mkdir(parents=True)
+        def git(*args):
+            return subprocess.check_output(["git", "-C", str(repo), *args], text=True,
+                                           stderr=subprocess.DEVNULL).strip()
+        git("init", "-q")
+        (repo / "fixture").write_text("scratch")
+        git("add", ".")
+        git("-c", "user.name=fixture", "-c", "user.email=fixture@localhost", "commit", "-qm", "fixture")
+        sha = git("rev-parse", "HEAD")
+        fold.EVENTS.mkdir()
+        self.enterContext(patch.object(fold, "PROJECT", None))
+        record = dataclasses.replace(self.record, spec="L-spec-9903", check_id="L-spec-9903:AC1", sha=sha)
+        (fold.EVENTS / "L-spec-writer-fixture.jsonl").write_text(json.dumps(dict(v=1,
+            ts=datetime.now(timezone.utc).isoformat(), type="spec-written", project="demo",
+            subject=record.spec)) + "\n")
+        with patch.object(dispatch, "ROOT", self.root), \
+                patch.object(provision, "_OPTIONS", ContextVar("test_repo_options", default={})), \
+                patch.object(provision, "_record"):
+            # Resource readback has a separate unit; exercise the checkout itself.
+            events = fold.read_events()
+            environments = []
+            try:
+                for supplied in (False, True):
+                    env = provision.Env("repo-venv", self.tree, provision.grading_env._clean_env())
+                    environments.append(env)
+                    if supplied:
+                        with patch.object(fold, "read_events", side_effect=AssertionError("implicit read")):
+                            provision._repo(env, record, events=events)
+                    else:
+                        provision._repo(env, record)
+                heads = [subprocess.check_output(["git", "-C", str(env.tree), "rev-parse", "HEAD"],
+                                                text=True).strip() for env in environments]
+                self.assertEqual(heads, [sha, sha])
+                row = dict(spec=record.spec, criterion=record.criterion)
+                with patch.object(checks, "record_for", return_value=record), \
+                        patch.object(provision, "_repo", wraps=provision._repo) as checkout, \
+                        patch.object(fold, "read_events", side_effect=AssertionError("implicit read")):
+                    pending, lines = provision.script_rows([row], events,
+                        fold.EVENTS / "L-verifier-local.jsonl", lane="test")
+                self.assertEqual(pending, [])
+                self.assertTrue(any("script met" in line for line in lines))
+                self.assertIs(checkout.call_args.kwargs["events"], events)
+            finally:
+                for env in environments:
+                    env.cleanup()
+        print("L-spec-1531 AC4 provision ok")
+
     def test_each_profile(self):
         for profile in ("repo-scratch-pg", "repo-venv", "prod-readonly", "browser-review"):
             with self.subTest(profile=profile):

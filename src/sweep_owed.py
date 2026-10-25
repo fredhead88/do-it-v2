@@ -286,7 +286,7 @@ def _attempt_in_flight(row, evs, now):
         return True  # An undetermined attempt cannot authorize another try.
 
 
-def readmitted(specs, now, epochs_for, *, exclude=frozenset()):
+def readmitted(specs, now, epochs_for, *, exclude=frozenset(), events=None):
     """Oldest ready blocked rows, excluding transient holds before the cap."""
     rows = []
     for spec in specs.values():
@@ -298,17 +298,18 @@ def readmitted(specs, now, epochs_for, *, exclude=frozenset()):
                     or _attempt_in_flight(row, spec["evs"], now)
                     or not owed_routes.ready(row, now, epochs_for(row["project"]))
                     or not resolvable(row)[0]
-                    or "operator" in prod_runner.record_for(row)["needs"]):
+                    or "operator" in prod_runner.record_for(row, events=events)["needs"]):
                 continue
             rows.append(row)
     return sorted(rows, key=lambda r: r["last_unobservable_at"])[:READMIT_CAP]
 
 
-def browser_input(specs, due, now):
+def browser_input(specs, due, now, events=None):
     """The model-free runner consumes every ready capability, once per key."""
     rows = {(r["spec"], r["criterion"]): r for r in due}
-    events = fold.read_events()
-    for row in readmitted(specs, now, lambda p: route_epochs(events, p)):
+    if events is None:
+        events = fold.read_events()  # events=None default
+    for row in readmitted(specs, now, lambda p: route_epochs(events, p), events=events):
         rows.setdefault((row["spec"], row["criterion"]), row)
     return [{**r, "spec_path": str(_spec_file(r))} for r in rows.values()]
 
@@ -505,6 +506,7 @@ def _resolve_candidates(specs, now, *, dry_run=False):
                         lines.append(f"sweep-owed: recheck {sid}/{row['criterion']} refused: {refused}")
 
     if not dry_run:
+        # re-read: quarantine/recheck appends above can change due status.
         specs = fold.fold(fold.read_events())[0]
     elif rechecked:
         # Simulate the same governing-instant change without writing an event.
@@ -655,13 +657,13 @@ def dispatch_batch(project, batch, runner, *, dry_run=False, kind="plain"):
             f"({_describe(batch)})"]
 
 
-def judgment_rows(rows, observations):
+def judgment_rows(rows, observations, events=None):
     """Partition using the runner's single returned hand-off channel."""
     selected, excluded = [], {}
-    browser = {(r["spec"], r["criterion"]) for r in prod_runner.batch_for_browser(rows)}
+    browser = {(r["spec"], r["criterion"]) for r in prod_runner.batch_for_browser(rows, events=events)}
     for row in rows:
         key = row["spec"], row["criterion"]
-        record = prod_runner.record_for(row)
+        record = prod_runner.record_for(row, events=events)
         if key in observations["held"]:
             reason = "runner held"
         elif row.get("capability") in ("operator-action", "ro-dsn-grant") or "operator" in record["needs"]:
@@ -691,7 +693,7 @@ def run(*, dry_run=False, runner=None, now=None):
     """One pass: expiry, resolution, project choice, dispatch and run record."""
     runner = runner or Runner()
     now = now or datetime.now(timezone.utc)
-    all_ev = fold.read_events()
+    all_ev = fold.read_events()  # events=None default: initial sweep snapshot
     specs = fold.fold(all_ev)[0]
     if not dry_run:
         reap_repo_cwds(all_ev)
@@ -701,12 +703,18 @@ def run(*, dry_run=False, runner=None, now=None):
     # Preserve pre-observation rows: a runner verdict may change their status.
     retry_specs = specs
     epochs_for = lambda project: route_epochs(all_ev, project)
-    runner_keys = {(r["spec"], r["criterion"]) for r in readmitted(specs, now, epochs_for)}
+    runner_keys = {(r["spec"], r["criterion"]) for r in readmitted(specs, now, epochs_for, events=all_ev)}
     retry_epochs = {r["project"]: epochs_for(r["project"])
-                    for r in readmitted(specs, now, epochs_for)}
-    observations = prod_runner.run(now, dry_run=dry_run)
+                    for r in readmitted(specs, now, epochs_for, events=all_ev)}
+    if not dry_run and any(line.startswith(("sweep-owed: escalated ", "sweep-owed: reopened ",
+                                            "sweep-owed: recheck ")) for line in lines):
+        # re-read: expiry/failure escalation or recheck appended before observations.
+        all_ev = fold.read_events()
+    observations = prod_runner.run(now, dry_run=dry_run, events=all_ev)
     lines.extend(observations["lines"])
-    all_ev = fold.read_events()
+    if not dry_run:
+        # re-read: runner verdicts must govern routing and open-batch decisions.
+        all_ev = fold.read_events()
     specs = fold.fold(all_ev)[0]
     lines.extend(close_unverifiable(all_ev, now, dry_run=dry_run))
     no_runner_counts = {}
@@ -735,7 +743,7 @@ def run(*, dry_run=False, runner=None, now=None):
                 else:
                     lines.append(f"sweep-owed: 1 routed row excluded: {key[0]}/{key[1]}: {reason}")
     retries = readmitted(retry_specs, now, lambda p: retry_epochs.get(p, route_epochs(all_ev, p)),
-                         exclude=observations["held"])
+                         exclude=observations["held"], events=all_ev)
     retry_epochs.update({r["project"]: route_epochs(all_ev, r["project"]) for r in retries
                          if r["project"] not in retry_epochs})
     retry_keys = {(r["spec"], r["criterion"]) for r in retries}
@@ -745,11 +753,11 @@ def run(*, dry_run=False, runner=None, now=None):
                                               lane="sweep", dry_run=dry_run)
     lines.extend(script_lines)
     # Capability browser always goes to the browser seat, even for judgment rows.
-    handed = prod_runner.batch_for_browser(due)
+    handed = prod_runner.batch_for_browser(due, events=all_ev)
     handed_keys = {(r["spec"], r["criterion"]) for r in handed}
     handed.extend(r for r in retries if owed_routes.route_for(r["capability"]) == "browser"
                   and (r["spec"], r["criterion"]) not in handed_keys)
-    e2e, browser_seat = prod_browser.split(handed)
+    e2e, browser_seat = prod_browser.split(handed, events=all_ev)
     if e2e:
         lines.append(f"sweep-owed: {len(e2e)} browser row(s) assigned to committed e2e observations")
     seat_keys = {(r["spec"], r["criterion"]) for r in browser_seat}
@@ -757,17 +765,17 @@ def run(*, dry_run=False, runner=None, now=None):
         key = row["spec"], row["criterion"]
         if (key in runner_keys and key not in seat_keys
                 and key not in observations["bundle_rows"] and key not in observations["to_judgment"]
-                and prod_runner.record_for(row)["runner"] in ("build", "prod", "prod-browser")):
+                and prod_runner.record_for(row, events=all_ev)["runner"] in ("build", "prod", "prod-browser")):
             if not dry_run:
                 refused = _record_attempt(row, retry_epochs[row["project"]], now)
                 if refused:
                     lines.append(f"sweep-owed: attempt for {key[0]}/{key[1]} refused: {refused}")
     due = [r for r in due if (r["spec"], r["criterion"]) not in seat_keys]
-    due, partition_lines = judgment_rows(due, observations)
+    due, partition_lines = judgment_rows(due, observations, events=all_ev)
     lines.extend(partition_lines)
     repo_rows, plain_rows = [], []
     for row in due:
-        if (prod_runner.record_for(row)["runner"] == "judgment"
+        if (prod_runner.record_for(row, events=all_ev)["runner"] == "judgment"
                 and owed_routes.ROUTES.get(owed_routes.route_for(row.get("capability"))) == "repo"):
             sha = next((e.get("sha") for e in reversed(specs[row["spec"]]["evs"])
                         if e.get("type") == "shipped"), None)
