@@ -1077,6 +1077,183 @@ def test_live_rows_between_refolds_and_omens_rows_reused():
                 assert reduce.call_count == n+2+3
 
 
+def test_ac1_spec_text_returns_criteria():
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        (root / "content").mkdir()
+        long = "A" * 260 + "."
+        (root / "content/L-spec-9001.md").write_text(
+            "# Test spec\n## Requirements\n"
+            "AC1 [backend]: First sentence. Second sentence omitted.\n"
+            "check: scratch\nreview_path: internal\n\n"
+            f"AC2 [ui]: {long}\ncheck: scratch\nreview_path: internal\n\n"
+            "AC3 [backend]: Third criterion! Another sentence.\ncheck: scratch\nreview_path: internal\n")
+        with patch.object(realm, "ROOT", root), patch.object(realm, "_SPEC_CACHE", {}):
+            result = realm.spec_text("L-spec-9001")
+            assert result["criteria"] == [dict(id="AC1", text="First sentence."),
+                                          dict(id="AC2", text="A" * 240),
+                                          dict(id="AC3", text="Third criterion!")]
+            assert result["criteria_error"] is None
+            assert realm.spec_criteria("## Acceptance criteria\n- **Legacy label**: Kept. Not this.\n") == ([dict(id="Legacy label", text="Kept.")], None)
+
+
+def test_ac2_every_real_spec_has_criteria_or_a_named_error():
+    from unittest.mock import patch
+    root = pathlib.Path("/home/albert/.do-it")
+    files = sorted((root / "content").glob("L-spec-*.md"))
+    assert files, "real content directory has no specs"
+    good = errors = 0
+    with patch.object(realm, "ROOT", root), patch.object(realm, "_SPEC_CACHE", {}):
+        for file in files:
+            result = realm.spec_text(file.stem)
+            assert result is not None, file.name
+            if result["criteria"]:
+                assert result["criteria_error"] is None, file.name
+                good += 1
+            else:
+                assert isinstance(result["criteria_error"], str) and result["criteria_error"], file.name
+                errors += 1
+    assert good + errors == len(files)
+    print(f"AC2 real content: files={len(files)} criteria={good} named_errors={errors}")
+
+
+def test_ac3_criteria_error_cache_and_route():
+    import hashlib, http.server, threading, urllib.request
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        (root / "content").mkdir()
+        f = root / "content/L-spec-9001.md"
+        with patch.object(realm, "ROOT", root), patch.object(realm, "_SPEC_CACHE", {}):
+            f.write_text("# Missing\n## Goal\nSomething.\n")
+            result = realm.spec_text("L-spec-9001")
+            assert result["criteria"] == [] and "no criteria" in result["criteria_error"]
+            with patch.object(pathlib.Path, "read_text", side_effect=AssertionError("cache re-read")):
+                assert realm.spec_text("L-spec-9001") is result
+            f.write_text("# Empty\n## Acceptance criteria\nNothing parseable here.\n")
+            os.utime(f, ns=(f.stat().st_atime_ns, f.stat().st_mtime_ns + 1_000_000))
+            result = realm.spec_text("L-spec-9001")
+            assert result["criteria"] == [] and "unparseable" in result["criteria_error"]
+            f.write_text("# Rewritten\n## Requirements\nAC1 [backend]: New criterion.\n")
+            os.utime(f, ns=(f.stat().st_atime_ns, f.stat().st_mtime_ns + 2_000_000))
+            assert realm.spec_text("L-spec-9001")["criteria"] == [dict(id="AC1", text="New criterion.")]
+            realm._SPEC_CACHE.clear()
+            with patch.object(pathlib.Path, "read_text", side_effect=OSError("unreadable")):
+                assert realm.spec_text("L-spec-9001") is None
+            class Handler(realm.Handler):
+                def _authorized(self, qs): return True
+                def log_message(self, *args): pass
+            server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                base = f"http://127.0.0.1:{server.server_port}/api/spec?id="
+                for sid in ["L-spec-9001", "L-spec-9999", "../escape", "L-spec-../escape"]:
+                    with urllib.request.urlopen(base + sid) as response:
+                        body = response.read()
+                        payload = json.loads(body)
+                        if sid == "L-spec-9001":
+                            assert payload["criteria"] and payload["criteria_error"] is None
+                        else:
+                            assert payload == {"error": "no file"}
+                        print(json.dumps(dict(url=response.url, status=response.status,
+                                              body_sha256=hashlib.sha256(body).hexdigest(),
+                                              body_excerpt=body.decode())))
+                with patch.object(pathlib.Path, "is_file", side_effect=AssertionError("invalid id touched disk")):
+                    assert realm.spec_text("../escape") is None
+                    assert realm.spec_text("L-spec-7/escape") is None
+            finally:
+                server.shutdown(); server.server_close(); thread.join()
+
+
+def _spec_panel_node(assertions):
+    import subprocess
+    page = realm.PAGE.read_text()
+    # Load the actual page entry points and helpers, without the canvas boot.
+    helpers = page[page.index("function openActor("):page.index("function narrate(")]
+    helpers += "\n" + page[page.index("const specInfo="):page.index("function chronicleHtml(")]
+    helpers += "\n" + page[page.index("const BUCKET="):page.index("function charterRows(")]
+    esc = next(line for line in page.splitlines() if line.startswith("const esc ="))
+    codex = (realm.HERE / "realm_codex.js").read_text()
+    inspect = codex[codex.index("  function sessionRows("):codex.index("  function target(")]
+    script = r"""
+const assert=require('node:assert/strict');
+let DATA={states:[['L-spec-7','building']],specs:{'L-spec-7':{title:'Shared title',criteria:[{id:'AC1',text:'Safe <img>.'}],criteria_error:null,charter:'L-charter-0064'}},titles:{},spec_charter:{},codex:{sessions:[]}},stream=true;
+let S={lane:[{spec:'L-spec-7',bucket:'build',reason:'ready <now>'}],subjectEvents:new Map(),actors:new Map(),esc:new Map(),decided:new Map(),now:1000};
+let panel='',panelView=null,fetches=0,links=[];
+const window={},document={querySelectorAll:selector=>selector==='a.link[data-subj]'?links:[]},$=()=>({scrollTop:0,innerHTML:''});
+const openPanel=(html,view)=>{panel=html;panelView=view;},bindPix=()=>{};
+const fmt=x=>String(x),fmtDur=x=>String(x),charterOfSubject=s=>specCharter(s),intentLine=()=>'',spritePix=()=>'',escOwner=()=>'',fmtAge=()=>'';
+const narrate=e=>({cls:'',text:e.ty}),toMs=x=>Date.parse(x)||0;
+const PACKET={},ROLE_NAME={builder:'Builder'},MODEL={builder:'Claude'},CAP={builder:30},CX={builder:{quest:'Build'}};
+const fetch=async()=>{fetches++;return {ok:false};};
+const builds=new Map(),workers=new Map();let source={sessions:[],quota:{weekly_used_pct:71}};
+""" + esc + "\n" + helpers + "\n" + inspect + "\nconst Codex={sessionExtra};\n" + assertions
+    result = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_ac4_spec_detail_html_order_and_states():
+    _spec_panel_node(r"""
+S.subjectEvents.set('L-spec-7',Array.from({length:41},(_,i)=>({ms:i,ty:'event-'+i})));
+const html=specDetailHtml('L-spec-7',{title:'CODEX SESSION',rows:[['State','live<script>']]});
+let last=-1;for(const label of ['L-spec-7','Shared title','STAGE','LANE STATE','CRITERIA','CHARTER','LATEST EVENTS','CODEX SESSION']){const i=html.indexOf(label);assert(i>last,label);last=i;}
+for(const text of ['in flight','build','ready &lt;now&gt;','Safe &lt;img&gt;.','live&lt;script&gt;'])assert(html.includes(text),text);
+assert.equal((html.match(/<li class=/g)||[]).length,40);assert(!html.includes('event-0<'));
+S.lane=[];assert(specDetailHtml('L-spec-7').includes('no lane row'));
+DATA.specs['L-spec-7'].criteria=[];DATA.specs['L-spec-7'].criteria_error='unparseable <input>';
+const bad=specDetailHtml('L-spec-7');assert(bad.includes('criteria unreadable'));assert(!bad.includes('<ul class="criteria">'));assert(!bad.includes('no criteria listed'));
+DATA.specs['L-spec-7'].criteria_error=null;assert(specDetailHtml('L-spec-7').includes('no criteria listed'));
+""")
+
+
+def test_ac6_session_section_only_for_spec_subjects():
+    _spec_panel_node(r"""
+(async()=>{
+DATA.codex.sessions=[{id:'old',kind:'doit-build',subject:'L-spec-7',last:'2026-10-25T01:00:00Z',tmux:'old-window'},{id:'new',kind:'doit-build',subject:'L-spec-7',last:'2026-10-25T02:00:00Z',tmux:'new-window'}];
+openSubject('L-spec-7');assert(panel.includes('CODEX SESSION'));assert(panel.includes('new-window'));assert(!panel.includes('old-window'));
+for(const entry of ['lane marker','stuck row','timeline link']){
+ const link={dataset:{subj:'L-spec-7'}};links=[link];bindLinks();panel='';link.onclick();assert(panel.includes('CODEX SESSION'),entry);assert(panel.includes('new-window'),entry);
+}
+DATA.codex.sessions=[{kind:'worker',subject:'L-spec-7'}];openSubject('L-spec-7');assert(!panel.includes('CODEX SESSION'));
+for(const subject of ['L-charter-0064','L-spec-7-extra','x-L-spec-7','a-slug']){
+ builds.set('test',{session:{subject,kind:'doit-build',state:'live'}});inspect('test');assert(panel.includes('codex-inspector'));assert(!panel.includes('CRITERIA'));assert(!panel.includes('STAGE'));
+}
+inspect();assert(panel.includes('Codex Gate'));assert(!panel.includes('CRITERIA'));
+assert.equal(fetches,0);
+builds.set('test',{session:{subject:'L-spec-7',kind:'doit-build',state:'live'}});inspect('test');assert(panel.includes('CODEX SESSION'));assert(panel.includes('Shared title'));
+await Promise.resolve();assert.equal(fetches,0);
+})().catch(e=>{console.error(e);process.exitCode=1;});
+""")
+    page = realm.PAGE.read_text()
+    assert "openSubject(it.s)" in page  # timeline row
+    assert "openSubject(a.dataset.subj)" in page  # lane/stuck/dossier links
+    assert "subject:openSubject" in page  # map marker bubble
+
+
+def test_ac8_footprint_routes_and_no_new_polling():
+    import re, subprocess
+    repo = realm.HERE.parent
+    build = subprocess.check_output(["git", "log", "-1", "--format=%H", "--grep=^build(L-spec-1526):"], cwd=repo, text=True).strip()
+    # Scope the footprint promise to this build, so later unrelated commits stay legal.
+    base = build + "^" if build else "HEAD"
+    tip = [build] if build else []
+    allowed = {'src/realm.py','src/realm.html','src/realm_codex.js','src/test_realm.py','e2e/realm-codex.spec.ts'}
+    changed = subprocess.check_output(["git", "diff", "--name-only", base, *tip], cwd=repo, text=True).splitlines()
+    assert set(changed) <= allowed, changed
+    parent = subprocess.check_output(["git", "show", base + ":src/realm.py"], cwd=repo, text=True)
+    def routes(source):
+        get = source[source.index("    def do_GET(self):"):]
+        return set(re.findall(r'"(/[^"\s]*)"', get))
+    current = subprocess.check_output(["git", "show", build + ":src/realm.py"], cwd=repo, text=True) if build else (realm.HERE / "realm.py").read_text()
+    assert routes(parent) == routes(current)
+    diff = subprocess.check_output(["git", "diff", base, *tip, "--", "src/realm.html", "src/realm_codex.js"], cwd=repo, text=True)
+    added = '\n'.join(line[1:] for line in diff.splitlines() if line.startswith('+') and not line.startswith('+++'))
+    assert not re.search(r'\b(?:setInterval|setTimeout|EventSource)\s*\(', added)
+    assert not re.search(r'\bfetch\s*\(', added)  # existing ensureSpec call is reused
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
