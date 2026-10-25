@@ -2280,6 +2280,11 @@ def subject_project(subject):
                  if e.get("subject") == subject and e.get("project")), None)
 
 
+def ledger_path(inbox: bool = False) -> pathlib.Path:
+    """Resolve the append destination using the caller's current configuration."""
+    return EVENTS / ("L-inbox-local.jsonl" if inbox else os.environ.get("DOIT_LEDGER_FILE", "L-operator-local.jsonl"))
+
+
 def append(argv: list[str], strict: bool = False) -> dict:
     """Content before event, always (§9.2 rule 3). Never trust the write — re-read (rule 4)."""
     argv = list(argv)
@@ -2290,7 +2295,7 @@ def append(argv: list[str], strict: bool = False) -> dict:
     inbox = "--inbox" in argv
     if inbox:
         argv = [a for a in argv if a != "--inbox"]
-    path = EVENTS / ("L-inbox-local.jsonl" if inbox else os.environ.get("DOIT_LEDGER_FILE", "L-operator-local.jsonl"))
+    path = ledger_path(inbox=inbox)
     e = {"v": 1, "ts": NOW.isoformat(timespec="seconds"), "type": argv[0], "subject": argv[1]}
     for kv in argv[2:]:
         k, _, v = kv.partition("=")

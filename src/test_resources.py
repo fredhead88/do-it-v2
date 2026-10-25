@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """Resource lifecycle checks against private ledgers and real filesystem/git state."""
 import atexit
+import ast
+from datetime import datetime
+import inspect
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import tracemalloc
 import unittest
 from unittest.mock import patch
 
@@ -102,6 +106,233 @@ class ResourcesTests(unittest.TestCase):
         evs = finished() + [event("build-done", branch="l-spec-0001", ready_sha=sha),
                             created(wt, "worktree")]
         return repo, wt, evs
+
+    def test_ac1_ledger_path_is_single_source(self):
+        for root in (self.root / "events", self.root / "other-events"):
+            with patch.object(fold, "EVENTS", root):
+                for filename in (None, "L-build-local.jsonl", str(self.root / "absolute.jsonl")):
+                    with self.subTest(root=root, filename=filename), patch.dict(os.environ):
+                        if filename is None:
+                            os.environ.pop("DOIT_LEDGER_FILE", None)
+                        else:
+                            os.environ["DOIT_LEDGER_FILE"] = filename
+                        self.assertEqual(fold.ledger_path(), root / (filename or "L-operator-local.jsonl"))
+                        self.assertEqual(fold.ledger_path(inbox=True), root / "L-inbox-local.jsonl")
+        tree = ast.parse(Path(fold.__file__).read_text())
+        functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+        self.assertTrue(any(isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                            and node.func.id == "ledger_path" for node in ast.walk(functions["append"])))
+        occurrences = [node for node in ast.walk(tree) if isinstance(node, ast.Constant)
+                       and node.value == "L-inbox-local.jsonl"]
+        self.assertEqual(len(occurrences), 1)
+        self.assertIn(occurrences[0], list(ast.walk(functions["ledger_path"])))
+
+    def test_ac2_append_bytes_unchanged(self):
+        # Run the same append body with the original literal path expression
+        # as an independent routing/bytes oracle, not a second writer model.
+        original_expression = ('path = EVENTS / ("L-inbox-local.jsonl" if inbox else '
+                               'os.environ.get("DOIT_LEDGER_FILE", "L-operator-local.jsonl"))')
+        source = inspect.getsource(fold.append)
+        self.assertEqual(source.count("path = ledger_path(inbox=inbox)"), 1)
+        legacy_source = source.replace("path = ledger_path(inbox=inbox)", original_expression)
+        for filename, inbox in ((None, False), ("L-build-local.jsonl", False),
+                                (str(self.root / "events/L-builder-local.jsonl"), False),
+                                ("L-build-local.jsonl", True)):
+            with self.subTest(filename=filename, inbox=inbox), patch.dict(os.environ):
+                if filename is None:
+                    os.environ.pop("DOIT_LEDGER_FILE", None)
+                else:
+                    os.environ["DOIT_LEDGER_FILE"] = filename
+                argv = ["resource-created", "L-spec-0001", 'kind="tmpdir"', 'ref="fixture"',
+                        'lane="build"', 'project="resource-test"'] + (["--inbox"] if inbox else [])
+                expected_path = fold.EVENTS / ("L-inbox-local.jsonl" if inbox else
+                                               os.environ.get("DOIT_LEDGER_FILE", "L-operator-local.jsonl"))
+                expected = dict(v=1, ts="2026-10-25T12:00:00+00:00", type="resource-created",
+                                subject="L-spec-0001", kind="tmpdir", ref="fixture", lane="build",
+                                project="resource-test")
+                with patch.object(fold, "NOW", datetime.fromisoformat(expected["ts"])):
+                    namespace = dict(vars(fold))
+                    exec(compile(legacy_source, "<original-path-append>", "exec"), namespace)
+                    original = namespace["append"](argv, strict=True)
+                    original_bytes = expected_path.read_bytes()
+                    self.assertEqual(set(fold.EVENTS.iterdir()), {expected_path})
+                    expected_path.unlink()
+                    written = fold.append(argv, strict=True)
+                self.assertEqual(written, original)
+                self.assertEqual(expected_path.read_bytes(), original_bytes)
+                self.assertEqual(written, expected)
+                self.assertEqual(expected_path.read_bytes(), (json.dumps(expected, sort_keys=True) + "\n").encode())
+                self.assertEqual(set(fold.EVENTS.iterdir()), {expected_path})
+                expected_path.unlink()
+
+    def test_ac3_record_reads_no_full_ledger(self):
+        fold.EVENTS.mkdir()
+        wrong = event("resource-created", kind="tmpdir", ref="fixture", lane="build")
+        (fold.EVENTS / "L-other-local.jsonl").write_text(json.dumps(wrong) + "\n")
+        with patch.object(fold, "PROJECT", "resource-test"), \
+                patch.object(fold, "read_events", side_effect=AssertionError("full ledger")), \
+                patch.object(fold, "_read_events_uncached", side_effect=AssertionError("uncached ledger")):
+            row = resources.record("tmpdir", "fixture", lane="build", subject="L-spec-0001")
+        self.assertEqual(row["_src"], "L-tick-local.jsonl:1")
+        self.assertEqual(row["project"], "resource-test")
+        tree = ast.parse(inspect.getsource(resources.record))
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Name, ast.Attribute)):
+                self.assertNotIn(node.id if isinstance(node, ast.Name) else node.attr,
+                                 ("read_events", "_read_events_uncached"))
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "next":
+                self.assertGreaterEqual(len(node.args), 2)
+
+    def test_ac4_record_matches_fold_shape(self):
+        for filename in (None, "L-build-local.jsonl", str(self.root / "events/L-builder-local.jsonl"),
+                         "L-hidden-local.jsonl"):
+            with self.subTest(filename=filename), patch.dict(os.environ):
+                if filename is None:
+                    os.environ.pop("DOIT_LEDGER_FILE", None)
+                else:
+                    os.environ["DOIT_LEDGER_FILE"] = filename
+                hidden = filename == "L-hidden-local.jsonl"
+                with patch.object(fold, "PROJECT", "hidden-project" if hidden else None):
+                    row = resources.record("tmpdir", "fixture", lane="build", subject="L-spec-0001")
+                if hidden:
+                    with patch.dict(os.environ, DOIT_PROJECT="visible-project"):
+                        self.assertNotIn(row, self.fresh())
+                    expected = [e for e in fold._read_events_uncached() if e["_src"] == row["_src"]][0]
+                else:
+                    expected = [e for e in self.fresh() if e["_src"] == row["_src"]][0]
+                self.assertEqual(row, expected)
+                self.assertEqual(row["actor"], fold.actor_of(Path(filename or "L-operator-local.jsonl").name))
+        with patch.object(fold, "PROJECT", "resource-test"):
+            first = resources.record("tmpdir", "duplicate", lane="build", subject="L-spec-0001")
+            second = resources.record("tmpdir", "duplicate", lane="build", subject="L-spec-0001")
+        self.assertEqual(first | {"_src": second["_src"]}, second)
+        self.assertEqual(int(second["_src"].rsplit(":", 1)[1]), int(first["_src"].rsplit(":", 1)[1]) + 1)
+
+    def test_ac5_line_number_matches_fold_split_rule(self):
+        fold.EVENTS.mkdir()
+        # Put a UTF-8 character across the first streaming boundary. Include
+        # splitlines separators both inside (invalid) JSON and between rows.
+        seed = b" " * 63 + "é\n".encode()
+        foreign = json.dumps(event("fixture")) + "\r\n\n\r"
+        for separator in ("\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"):
+            foreign += '{"raw":"x' + separator + 'y"}' + separator
+        seed += ((foreign + "torn JSON\n") * 25).encode()
+        self.ledger.write_bytes(seed)
+        with patch.object(resources, "_READ_CHUNK", 64), patch.object(resources, "_TAIL_WINDOW", 512), \
+                patch.object(fold, "PROJECT", "resource-test"):
+            row = resources.record("tmpdir", "fixture", lane="build", subject="L-spec-0001")
+        expected = [e for e in fold._read_events_uncached() if e.get("type") == "resource-created"][0]
+        self.assertEqual(row, expected)
+        window_lines = len(self.ledger.read_bytes()[-512:].decode().splitlines())
+        self.assertGreater(int(row["_src"].rsplit(":", 1)[1]), window_lines)
+        self.assertGreater(len(seed), 512 + 64)
+
+    def test_ac6_record_memory_is_bounded(self):
+        fold.EVENTS.mkdir()
+        line = (json.dumps(event("fixture", padding="x" * 1000)) + "\n").encode()
+        with self.ledger.open("wb") as stream:
+            for _ in range((24 * 1024 * 1024) // len(line)):
+                stream.write(line)
+        original_append, original_open = fold.append, Path.open
+        requests = []
+
+        class TrackedFile:
+            def __init__(self, stream):
+                self.stream = stream
+
+            def __enter__(self):
+                self.stream.__enter__()
+                return self
+
+            def __exit__(self, *args):
+                return self.stream.__exit__(*args)
+
+            def read(self, size=-1):
+                requests.append(size)
+                if not 0 <= size <= resources._READ_CHUNK:
+                    raise AssertionError(f"unbounded read: {size}")
+                return self.stream.read(size)
+
+            def __getattr__(self, key):
+                return getattr(self.stream, key)
+
+        def append_then_measure(*args, **kwargs):
+            written = original_append(*args, **kwargs)
+            tracemalloc.start()
+            return written
+
+        def tracked_open(path, *args, **kwargs):
+            return TrackedFile(original_open(path, *args, **kwargs))
+
+        try:
+            with patch.object(fold, "PROJECT", "resource-test"), \
+                    patch.object(fold, "append", side_effect=append_then_measure), \
+                    patch.object(Path, "open", tracked_open), \
+                    patch.object(Path, "read_text", side_effect=AssertionError("whole-file read_text")):
+                row = resources.record("tmpdir", "fixture", lane="build", subject="L-spec-0001")
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        self.assertEqual(row["ref"], "fixture")
+        self.assertTrue(requests)
+        self.assertLess(peak, 12 * 1024 * 1024)
+        print(f"readback memory: peak={peak} bytes; max read={max(requests)} bytes")
+
+    def test_ac7_miss_raises_named_error(self):
+        self.assertTrue(issubclass(resources.RecordReadbackError, RuntimeError))
+        self.assertFalse(issubclass(resources.RecordReadbackError, StopIteration))
+        original = fold.append
+        for case in ("miss", "missing", "directory", "beyond-window", "unparseable"):
+            filename = f"L-{case}-local.jsonl"
+            path = fold.EVENTS / filename
+
+            def changed_append(*args, **kwargs):
+                written = original(*args, **kwargs)
+                if case == "miss":
+                    return written | {"ref": "not-written"}
+                if case == "missing":
+                    path.unlink()
+                elif case == "directory":
+                    path.unlink()
+                    path.mkdir()
+                elif case == "beyond-window":
+                    with path.open("ab") as stream:
+                        stream.write(b"{}\n" * 2000)
+                elif case == "unparseable":
+                    path.write_bytes(b"\xffnot JSON\n")
+                return written
+
+            with self.subTest(case=case), patch.dict(os.environ, DOIT_LEDGER_FILE=filename), \
+                    patch.object(resources, "_TAIL_WINDOW", 128), \
+                    patch.object(fold, "PROJECT", "resource-test"), \
+                    patch.object(fold, "append", side_effect=changed_append):
+                with self.assertRaises(resources.RecordReadbackError) as raised:
+                    resources.record("tmpdir", "fixture", lane="build", subject="L-spec-miss")
+                for word in (filename, "resource-created", "L-spec-miss"):
+                    self.assertIn(word, str(raised.exception))
+
+        def concurrent_append(*args, **kwargs):
+            written = original(*args, **kwargs)
+            with self.ledger.open("ab") as stream:
+                stream.write(b'{}\n{"other":"writer"}\n')
+            return written
+
+        with patch.object(fold, "PROJECT", "resource-test"), \
+                patch.object(fold, "append", side_effect=concurrent_append):
+            row = resources.record("tmpdir", "fixture", lane="build", subject="L-spec-concurrent")
+        self.assertEqual(row["_src"], "L-tick-local.jsonl:1")
+        self.assertEqual(row["subject"], "L-spec-concurrent")
+
+    def test_ac8_signatures_and_release_round_trip(self):
+        self.assertEqual(str(inspect.signature(resources.record)),
+                         "(kind: str, ref: str, *, lane: str, subject: str) -> dict")
+        self.assertEqual(str(inspect.signature(resources.release)), "(row: dict, *, reason: str)")
+        path = self.directory("round-trip")
+        row = resources.record("tmpdir", str(path), lane="build", subject="live-operation")
+        self.assertEqual(sum(p.exists() for p in [path]), 1)
+        resources.release(row, reason="creator-finally")
+        self.assertFalse(path.exists())
+        self.assertEqual(resources.live(self.fresh()), [])
 
     def test_record_round_trip(self):
         os.environ["DOIT_LEDGER_FILE"] = "L-build-local.jsonl"
