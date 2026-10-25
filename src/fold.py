@@ -20,6 +20,7 @@ from datetime import datetime, timedelta, timezone
 import freeze
 import owed, routing
 import proving
+import ledger_compact
 
 ROOT = pathlib.Path(os.environ.get("DOIT_ROOT", pathlib.Path.home() / ".do-it"))
 EVENTS, BOARD = ROOT / "events", ROOT / "board.md"
@@ -181,7 +182,7 @@ def _read_events_uncached():
             if not line.strip():
                 continue
             try:
-                e = json.loads(line)
+                e = ledger_compact.compact(json.loads(line))
             except json.JSONDecodeError:
                 continue
             e["actor"], e["_src"] = actor, f"{f.name}:{n}"
