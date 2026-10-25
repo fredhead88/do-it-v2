@@ -5,9 +5,11 @@ Keep one private bundle, temporarily install its aliases under Python's import
 lock, then restore the registry. Reimport only when that checkout changes.
 """
 import _imp
+import codecs
 import contextlib
 import gc
 import importlib.util
+import json
 import os
 from pathlib import Path
 import sys
@@ -30,6 +32,15 @@ class Ledger:
         self.clock_minute = None
         self.watch = None
         self.file_offsets = {}
+        self.raw_events = []
+        self._raw_revision = 0
+        self.events_dir = None
+        self.event_key = None
+        self._metadata = None
+        self._rescan = True
+        self._force = True
+        self._last_fold = None
+        self._snapshot_offsets = {}
         self.folds = self.reads = self.loads = 0
 
     @contextlib.contextmanager
@@ -41,14 +52,8 @@ class Ledger:
         with self.lock:
             if key != self.key:
                 replacing = self.key is not None
-                if self.watch is not None:
-                    self.watch.close()
-                self.watch = None
-                self.file_offsets = {}
                 self.key, self.modules = key, {}
-                self.events = self.folded = self.rows = self.offsets = None
-                self.codex_sessions = None
-                self.generation = self.clock_minute = None
+                self._force = True
                 if replacing:
                     # Modules contain function/global cycles. Collect a retired
                     # bundle before allocating the next ledger, not hours later
@@ -86,33 +91,91 @@ class Ledger:
                 _imp.release_lock()
 
     def refresh(self, fold, events_dir, now):
-        if self.watch is None:
-            self.watch = Changes(events_dir)
-        changed = self.watch.poll()
-        generation = (fingerprint(events_dir) if changed is None or changed or self.generation is None
-                      else self.generation)
-        if generation != self.generation or self.events is None:
-            # Drop this owner's old snapshot before allocating the next one.
-            # Request threads may finish with the previous immutable snapshot.
-            self.events = self.folded = self.rows = self.offsets = None
-            self.codex_sessions = None
-            events = fold.read_events()
-            self.reads += 1
-            fold.NOW = now
-            folded = fold.fold(events)
-            self.folds += 1
-            if not isinstance(folded, tuple) or len(folded) != 4 or not isinstance(folded[0], dict):
-                raise ValueError('fold returned an invalid four-part spec map')
-            self.events, self.folded, self.generation = events, folded, generation
-            self.clock_minute = int(now.timestamp() // 60)
-        elif self.clock_minute != int(now.timestamp() // 60):
-            # Owed deadlines/age may cross without any ledger event. Reuse the
-            # parsed events, but never freeze time-dependent derived states.
-            fold.NOW = now
-            self.folded = fold.fold(self.events)
-            self.folds += 1
-            self.clock_minute = int(now.timestamp() // 60)
-        return self.events, self.folded
+        """Read new bytes transactionally, then publish a consistent bounded snapshot."""
+        with self.lock:
+            directory = Path(events_dir).resolve()
+            new_directory = directory != self.events_dir
+            if new_directory:
+                if self.watch is not None:
+                    self.watch.close()
+                self.watch = Changes(directory)
+            changed = self.watch.poll()
+            scan = new_directory or self._rescan or changed is None or bool(changed)
+            if scan:
+                # A failure must trigger a retry even after poll consumed notifications.
+                self._rescan = True
+                metadata = fingerprint(directory)
+                previous = {} if new_directory else self.file_offsets
+                staged = {}
+                for meta in metadata:
+                    name, dev, inode, size = meta[:4]
+                    old = previous.get(name)
+                    if old and old['identity'] == (dev, inode) and size >= old['size']:
+                        if size == old['size']:
+                            staged[name] = old
+                            continue
+                        start, pending, line, events = old['size'], old['pending'], old['line'], old['events']
+                    else:
+                        start, pending, line, events = 0, b'', 0, []
+                    with (directory / name).open('rb') as stream:
+                        opened = os.fstat(stream.fileno())
+                        if (opened.st_dev, opened.st_ino) != (dev, inode) or opened.st_size < size:
+                            raise OSError(f'ledger changed before read: {name}')
+                        stream.seek(start)
+                        data = stream.read(size - start)
+                    if len(data) != size - start:
+                        raise OSError(f'ledger changed during read: {name}')
+                    data = pending + data
+                    end = data.rfind(b'\n') + 1
+                    complete, pending = data[:end], data[end:]
+                    codecs.getincrementaldecoder('utf-8')().decode(pending, final=False)
+                    parsed = []
+                    # splitlines matches the reference's CRLF and Unicode line numbering.
+                    for text in complete.decode('utf-8').splitlines():
+                        line += 1
+                        if not text.strip():
+                            continue
+                        try:
+                            event = fold.ledger_compact.compact(json.loads(text))
+                        except json.JSONDecodeError:
+                            continue
+                        event['actor'], event['_src'] = fold.actor_of(name), f'{name}:{line}'
+                        parsed.append(event)
+                    # Strictly validate completed bytes; a torn UTF-8 suffix stays pending.
+                    staged[name] = dict(identity=(dev, inode), size=size, pending=pending,
+                                        line=line, events=events + parsed, offset=size-len(pending))
+                if new_directory or metadata != self._metadata:
+                    # Preserve retained objects on a mere code/project change or idle poll.
+                    if new_directory or staged != previous:
+                        self.file_offsets = staged
+                        self.raw_events = [e for state in staged.values() for e in state['events']]
+                        self._raw_revision += 1
+                        self.reads += 1
+                    self._metadata = metadata
+                self.events_dir = directory
+                self._rescan = False
+            minute = int(now.timestamp() // 60)
+            source_key = (self.key, self._raw_revision)
+            event_change = self.event_key != source_key
+            exceptional = self.events is None or self._force or new_directory
+            due = exceptional or self._last_fold is None or (now - self._last_fold).total_seconds() >= 10
+            if due and (exceptional or event_change or self.clock_minute != minute):
+                events = fold.finish_events(self.raw_events) if event_change or exceptional else self.events
+                fold.NOW = now
+                folded = fold.fold(events)
+                if not isinstance(folded, tuple) or len(folded) != 4 or not isinstance(folded[0], dict):
+                    raise ValueError('fold returned an invalid four-part spec map')
+                self.folds += 1
+                # Never mutate a pair a previous caller may still hold.
+                self.events, self.folded = events, folded
+                self.generation = object()
+                if event_change or exceptional:
+                    self.rows = self.codex_sessions = None
+                    self._snapshot_offsets = {name: state['offset'] for name, state in self.file_offsets.items()}
+                self.offsets = dict(self._snapshot_offsets)
+                self.event_key = source_key
+                self.clock_minute, self._last_fold, self._force = minute, now, False
+            return self.events, self.folded
 
 
 class Changes:

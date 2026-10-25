@@ -225,6 +225,14 @@ def read_events(use_cache=True):
             out = _read_events_uncached()
     else:
         out = _read_events_uncached()
+    return finish_events(out)
+
+
+def finish_events(raw):
+    """Order, correct and filter parsed events without changing the reader's raw list."""
+    out = [dict(e) for e in raw]
+    # Restore parser order for callers supplying files/lines in any order.
+    out.sort(key=lambda e: (e['_src'].rsplit(':', 1)[0], int(e['_src'].rsplit(':', 1)[1])))
     # Stable sort by ts alone first — ties keep the original (file-glob, then
     # line) order, which is exactly the per-file substructure `_merge_same_ts`
     # needs to preserve. Then merge each same-ts run across files by content.

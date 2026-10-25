@@ -3,6 +3,7 @@ import json, os, pathlib, sys, tempfile
 TMP = pathlib.Path(tempfile.mkdtemp())
 (TMP / "events").mkdir(); (TMP / "seat").mkdir()
 os.environ["DOIT_ROOT"] = str(TMP)
+os.environ["DOIT_LIVE_REPO"] = str(pathlib.Path(__file__).resolve().parent.parent)
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import realm  # noqa: E402
 
@@ -254,7 +255,7 @@ class EventSource:
 EVENTS = [{'actor': 'executor', '_src': 'live-reader', 'type': 'tick'}]
 SPECS = {'L-spec-7001': {'state': 'written'}}
 BY_SUBJECT = {}
-def read_events():
+def finish_events(raw):
     return EVENTS
 def fold(events):
     assert events is EVENTS
@@ -263,7 +264,7 @@ def stall_lane_rows(events, specs, now, *, by_subject):
     import lane_rules
     assert by_subject is BY_SUBJECT
     return lane_rules.due(events, specs, now)
-''' + ("\ndef read_events(): raise RuntimeError('read-broken')\n" if case == "read-broken" else "")
+''' + ("\ndef finish_events(raw): raise RuntimeError('read-broken')\n" if case == "read-broken" else "")
                 + ("\ndef fold(events): raise RuntimeError('fold-broken')\n" if case == "fold-broken" else "")
                 + ("\ndef fold(events): return {}, {}\n" if case == "shape-broken" else ""))
             (src / "lane_rules.py").write_text('''import fold
@@ -853,6 +854,218 @@ console.log('operator header: duration boundaries, rounding, singulars, zeros, u
     result = subprocess.run(["node", "-e", script], text=True, capture_output=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
     print(result.stdout, end="")
+
+
+# ---------------------------------------------------------------- lock-free Realm reader
+@contextlib.contextmanager
+def lockfree_fixture():
+    import realm_ledger
+    with tempfile.TemporaryDirectory(prefix="realm-lockfree-") as folder, contextlib.ExitStack() as stack:
+        root = pathlib.Path(folder)
+        events = root / 'events'; events.mkdir()
+        file = events / 'L-executor-fixture.jsonl'
+        file.write_text(json.dumps(dict(type='tick', ts=NOW.isoformat(), subject='fixture'))+'\n')
+        ledger = realm_ledger.Ledger()
+        stack.enter_context(mock.patch.dict(os.environ, DOIT_ROOT=str(root), DOIT_READ_CACHE='1',
+                            DOIT_LIVE_REPO=str(pathlib.Path(realm.__file__).parent.parent)))
+        stack.enter_context(mock.patch.multiple(realm, ROOT=root, EVENTS=events, SEAT=root/'seat',
+                                              LEDGER=ledger, HUB=realm.Hub()))
+        stack.enter_context(mock.patch.dict(realm._OM, generation=None, rows=[], master=({}, realm.time.monotonic())))
+        stack.enter_context(mock.patch.dict(realm._GLANCE, key=None))
+        stack.enter_context(mock.patch.object(realm.realm_codex, 'process_sessions', return_value=set()))
+        stack.enter_context(mock.patch.object(realm.realm_codex, 'tmux_windows', return_value={}))
+        stack.enter_context(mock.patch.object(realm.realm_omens, 'master_merges', return_value={}))
+        try:
+            yield root, events, file, ledger
+        finally:
+            if ledger.watch is not None: ledger.watch.close()
+
+
+def test_realm_never_opens_ledger_lock():
+    with lockfree_fixture() as (root, events, file, ledger):
+        def exercise():
+            with realm.ledger_snapshot() as (_, raw, folded):
+                assert raw and len(folded) == 4
+            assert realm.read_all()[1]
+            hash(realm.ledger_generation())
+            assert realm.derive_states() is not None
+            assert realm.derive_goals() is not None
+            assert realm.derive_proving() is not None
+            assert realm.omens_model([]) is not None
+            assert 'sessions' in realm.codex_payload()
+            assert realm.lane_payload(NOW)['lane_error'] is None
+            assert realm.glance_payload(NOW).get('error') is None
+        exercise()
+        with file.open('a') as f: f.write(json.dumps(dict(type='tick', ts=NOW.isoformat()))+'\n')
+        exercise()
+        assert not list((root/'cache').glob('ledger-*'))
+        # Use the exact live module bundle/root exercised above for the control.
+        with ledger.live(realm.live_src(), root) as fold:
+            result = fold.read_events()
+            assert len(result) == 2
+        assert list((root/'cache').glob('ledger-*.lock'))
+
+
+def test_subprocess_sites_enumerated_and_lock_free():
+    import ast
+    import collections
+    import subprocess
+    src = pathlib.Path(realm.__file__).parent
+    sites = collections.Counter()
+    methods = {'run', 'Popen', 'call', 'check_output', 'check_call'}
+    class Sites(ast.NodeVisitor):
+        def __init__(self, filename): self.filename, self.function = filename, '<module>'
+        def visit_FunctionDef(self, node):
+            previous = self.function; self.function = node.name
+            self.generic_visit(node); self.function = previous
+        visit_AsyncFunctionDef = visit_FunctionDef
+        def visit_Attribute(self, node):
+            if isinstance(node.value, ast.Name) and node.value.id == 'subprocess' and node.attr in methods:
+                sites[self.filename, self.function] += 1
+            self.generic_visit(node)
+    for path in sorted(src.glob('realm*.py')):
+        Sites(path.name).visit(ast.parse(path.read_text()))
+    # Every subprocess attribute, including defaults, has a classified occurrence.
+    table = {
+        ('realm.py', 'ci_status'): (1, 'no ledger'),
+        ('realm.py', 'fires_register'): (1, 'ledger'),
+        ('realm.py', 'pane_status'): (2, 'no ledger'),
+        ('realm.py', 'quota_status'): (2, 'no ledger'),
+        ('realm.py', 'sys_signals'): (2, 'no ledger'),
+        ('realm.py', 'tick_omens'): (1, 'ledger'),
+        ('realm.py', 'throughput_payload'): (1, 'ledger'),
+        ('realm.py', 'derive_dossier'): (1, 'ledger'),
+        ('realm.py', 'ask_thinker'): (1, 'append'),
+        ('realm.py', 'main'): (1, 'no ledger'),
+        ('realm_codex.py', 'tmux_windows'): (1, 'no ledger'),
+        ('realm_omens.py', 'master_merges'): (1, 'no ledger'),
+    }
+    assert sites == collections.Counter({key: value[0] for key, value in table.items()}), (sites, table)
+    with lockfree_fixture() as (root, events, file, ledger):
+        for name in ['omens.py', 'fires.py']: (root/name).touch()
+        with mock.patch.dict(realm._FIRES, at=0, v=None), mock.patch.object(realm, 'BRIEF', src/'brief.py'), \
+             mock.patch.object(realm.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '[]', '')) as run:
+            for call in [realm.tick_omens, realm.fires_register, realm.throughput_payload,
+                         lambda: realm.derive_dossier('L-spec-1')]:
+                call()
+                env = run.call_args.kwargs['env']
+                assert env['DOIT_READ_CACHE'] == '0' and env['DOIT_ROOT'] == str(root)
+                if run.call_args.args[0][1:3] == ['throughput', '--json']: assert env['DOIT_NOW']
+            realm.ask_thinker('stuck', [])
+            assert run.call_args.kwargs['env']['DOIT_READ_CACHE'] == '1'
+        expected_count = 1
+        for name in ['omens.py', 'fires.py']:
+            script = root/name
+            marker = ("print('info|ledger-read|'+str(n))" if name == 'omens.py' else
+                      "print(json.dumps([{'class':'ledger-read','n':n}]))")
+            script.write_text('import sys, json\nsys.path.insert(0, '+repr(str(src))+')\n'
+                              'import fold\nevents=fold.read_events()\nn=len(events)\n'+marker+'\n')
+            if name == 'omens.py':
+                value = realm.tick_omens()
+                assert value and any(r['name'] == 'ledger-read' and r['detail'] == str(expected_count)
+                                     for r in value['lines']), value
+            else:
+                with mock.patch.dict(realm._FIRES, at=0, v=None): value = realm.fires_register()
+                assert value and any(r['cls'] == 'ledger-read' and r['n'] == expected_count for r in value), value
+            assert not list((root/'cache').glob('ledger-*'))
+            with tempfile.TemporaryDirectory(prefix='realm-child-control-') as folder:
+                control = pathlib.Path(folder); (control/'events').mkdir()
+                (control/'events'/file.name).write_bytes(file.read_bytes())
+                args = [sys.executable, str(script)] + (['--json'] if name == 'fires.py' else [])
+                result = subprocess.run(args, capture_output=True, text=True, timeout=30,
+                         env={**os.environ, 'DOIT_ROOT': str(control), 'DOIT_READ_CACHE':'1'})
+                assert result.returncode == 0, result.stderr
+                if name == 'omens.py': assert result.stdout.strip() == 'info|ledger-read|1'
+                else: assert json.loads(result.stdout) == [{'class':'ledger-read', 'n':expected_count}]
+                assert expected_count > 0 and list((control/'cache').glob('ledger-*.lock'))
+
+
+def generation_layout_uses(source):
+    """Catch consumers treating the snapshot token as metadata, including local aliases."""
+    import ast
+    tree = ast.parse(source)
+    aliases = set()
+    def token(node):
+        return (isinstance(node, ast.Attribute) and node.attr == 'generation'
+                and isinstance(node.value, ast.Name) and node.value.id == 'LEDGER'
+                or isinstance(node, ast.Name) and node.id in aliases)
+    # Resolve simple aliases to a fixed point, including assignments chained through aliases.
+    for _ in range(len(list(ast.walk(tree)))):
+        before = set(aliases)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign) and token(node.value):
+                aliases.update(t.id for t in node.targets if isinstance(t, ast.Name))
+            if isinstance(node, ast.AnnAssign) and node.value and token(node.value) and isinstance(node.target, ast.Name):
+                aliases.add(node.target.id)
+        if aliases == before: break
+    bad = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Subscript) and token(node.value): bad.append((node.lineno, ast.unparse(node)))
+        if isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)) and token(node.iter):
+            bad.append((getattr(node, 'lineno', 0), ast.unparse(node.iter)))
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in {'iter','list','tuple'}:
+            if any(token(arg) for arg in node.args): bad.append((node.lineno, ast.unparse(node)))
+        if isinstance(node, ast.Assign) and token(node.value):
+            if any(isinstance(t, (ast.Tuple, ast.List)) for t in node.targets): bad.append((node.lineno, ast.unparse(node)))
+    return bad
+
+
+def test_live_rows_between_refolds_and_omens_rows_reused():
+    import ast
+    src = pathlib.Path(realm.__file__).parent
+    paths = [p for p in sorted(src.glob('realm*.py')) if p.name != 'realm_ledger.py']
+    violations = {str(p): generation_layout_uses(p.read_text()) for p in paths}
+    assert not any(violations.values()), (list(map(str, paths)), violations)
+    for expression in ['x=LEDGER.generation[0]', 'for x in LEDGER.generation: pass',
+                       'x=[a for a in LEDGER.generation]', 'x={a for a in LEDGER.generation}',
+                       'x={a:a for a in LEDGER.generation}', 'x=(a for a in LEDGER.generation)',
+                       'x=iter(LEDGER.generation)', 'x=list(LEDGER.generation)', 'x=tuple(LEDGER.generation)',
+                       'a,b=LEDGER.generation', '[a,b]=LEDGER.generation']:
+        assert generation_layout_uses(expression), expression
+        assert generation_layout_uses('alias=LEDGER.generation\n'+expression.replace('LEDGER.generation', 'alias')), expression
+    assert not generation_layout_uses('x=hash(LEDGER.generation)\ny=(LEDGER.generation, 1)\nz=x==LEDGER.generation')
+    with lockfree_fixture() as (root, events, file, ledger):
+        # A controlled clock keeps all tail work inside the bound.
+        with mock.patch.object(realm.dt, 'datetime', wraps=_dt.datetime) as clock:
+            clock.now.return_value = NOW
+            rows, raw, offsets = realm.read_all()
+            folds, generation = ledger.folds, ledger.generation
+            seq = realm.HUB.seq
+            class PollDone(BaseException): pass
+            polls = 0
+            def poll(_):
+                nonlocal polls
+                polls += 1
+                if polls > 1: raise PollDone()
+                with file.open('a') as f:
+                    f.write(json.dumps(dict(type='tick', subject='arrived', ts=(NOW+_dt.timedelta(seconds=1)).isoformat()))+'\n')
+            with mock.patch.object(realm.time, 'sleep', side_effect=poll):
+                try: realm.tail_forever()
+                except PollDone: pass
+            assert any(row['s'] == 'arrived' for row in realm.since(seq)['ledger'])
+            assert ledger.folds == folds and ledger.generation == generation
+            rows, raw, offsets = realm.read_all()
+            # The held snapshot's offsets must describe its events, not the pending read.
+            for name, offset in offsets.items():
+                lines = (events/name).read_bytes()[:offset].decode().splitlines()
+                expected = [json.loads(line) for line in lines if line.strip()]
+                actual = [{k:v for k,v in e.items() if k not in {'actor','_src'}} for e in raw if e['_src'].startswith(name+':')]
+                assert actual == expected
+            compact = [c for e in raw for c in [realm.compact(e, e['actor'])] if c]
+            assert rows == sorted(compact, key=lambda r: r['t'])
+            with mock.patch.object(realm.realm_omens, 'reduce_event', wraps=realm.realm_omens.reduce_event) as reduce:
+                realm.omens_model([], NOW)
+                n = len(raw); assert reduce.call_count == n
+                clock.now.return_value = NOW+_dt.timedelta(seconds=60)
+                realm.omens_model([], clock.now.return_value)  # publishes the pending append
+                assert reduce.call_count == n+2
+                clock.now.return_value = NOW+_dt.timedelta(seconds=120)
+                realm.omens_model([], clock.now.return_value)  # clock-only fold retains reduced rows
+                assert reduce.call_count == n+2
+                with file.open('a') as f: f.write(json.dumps(dict(type='tick', ts=NOW.isoformat()))+'\n')
+                clock.now.return_value = NOW+_dt.timedelta(seconds=130)
+                realm.omens_model([], clock.now.return_value)
+                assert reduce.call_count == n+2+3
 
 
 if __name__ == "__main__":
