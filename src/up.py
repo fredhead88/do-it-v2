@@ -17,6 +17,7 @@ import fcntl, importlib, json, math, os, pathlib, subprocess, sys, time
 
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+import ledger_cache
 import cli_path, ctx_guard, dispatch, fold, launch, models, scratch, tick  # noqa: E402
 
 DOIT = HERE.parent / "doit"
@@ -405,7 +406,11 @@ def _hold(state, lines, *, relay_only=False):
 def _cycle(state, started_sha):
     """Plan every ready charter, otherwise hold; seat serving belongs to the relay."""
     maybe_reexec("planner", started_sha)
-    events = fold.read_events()
+    try:
+        events = fold.read_events()
+    except ledger_cache.LockTimeout as exc:
+        print(str(exc), file=sys.stderr)
+        return _degrade()
     ok, plan = _guarded("plannable", events, fold.ROOT)
     if not ok:
         return _degrade()
@@ -569,7 +574,14 @@ def relay_main(print_only=False, max_cycles=None):
                 _relay_heartbeat()
                 maybe_reexec("relay", started_sha)   # one call per cycle: this loop starts at
                                                       # most one pane per iteration (R2 point 5)
-            pending = relay.pending_packets(fold.read_events(), fold.ROOT)
+            try:
+                pending = relay.pending_packets(fold.read_events(), fold.ROOT)
+            except ledger_cache.LockTimeout as exc:
+                print(str(exc), file=sys.stderr)
+                if print_only:
+                    return None
+                _SLEEP(_interval())
+                continue
             todo = _unclaimed_pending(pending, fold.ROOT)
             if not todo:
                 if print_only:
@@ -879,10 +891,15 @@ def executor_loop(root, interval, print_only=False, max_cycles=None):
             maybe_reexec("executor", started_sha, events_dir=events_dir)   # one call per
                                                   # cycle: at most one pane per iteration
         ledger = dispatch.alloc(root / "events", "L-executor-", ".jsonl")
-        ev = fold.read_events()
-        if not print_only:
-            _settle_overdue(ev)
-            ev = fold.read_events()          # its decisions are on the board this pane reads
+        try:
+            ev = fold.read_events()
+            if not print_only:
+                _settle_overdue(ev)
+                ev = fold.read_events()      # decisions are on the board this pane reads
+        except ledger_cache.LockTimeout as exc:
+            print(str(exc), file=sys.stderr)
+            _SLEEP(float(interval) * 60)
+            continue
         board = fold.render(ev, *fold.fold(ev))
         model = launch.model_for("executor")
         model_configured = models.resolve("executor", mp=mp).get("model") if mp is not None else None
@@ -913,10 +930,16 @@ def executor_loop(root, interval, print_only=False, max_cycles=None):
                       events_dir=events_dir)
         code = proc.wait()
         launch.ended(ledger.stem, code, events_dir=events_dir)
-        edits = _repo_edits(before, _snapshot(root), ledger, fold.read_events())
+        try:
+            edits = _repo_edits(before, _snapshot(root), ledger, fold.read_events())
+        except ledger_cache.LockTimeout as exc:
+            print(str(exc), file=sys.stderr)
+            edits = None
+        counts = {} if edits is None else {"repo_edits": len(edits)}
         dispatch.emit(ledger, base, "spawn-done", subject=ledger.stem, exit_code=code,
-                      seconds=round(time.time() - t0, 1), repo_edits=len(edits))
-        print(f"# executor pane {ledger.stem} ended (exit {code}) · {len(edits)} repo-edit — next pane now")
+                      seconds=round(time.time() - t0, 1), **counts)
+        count = "unknown" if edits is None else str(len(edits))
+        print(f"# executor pane {ledger.stem} ended (exit {code}) · {count} repo-edit — next pane now")
 
 
 if __name__ == "__main__":

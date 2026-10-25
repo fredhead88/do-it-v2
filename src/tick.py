@@ -10,6 +10,7 @@ fold-and-record: it spends nothing, it can be run at any frequency by anything,
 and the one event it appends is what `fold` reads for staleness. The Executor is
 a supervised pane that reads the same lane for itself; nothing here launches it.
 """
+import ledger_cache
 import argparse, fcntl, os, pathlib, re, socket, sys, time
 from datetime import datetime, timezone
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
@@ -277,7 +278,11 @@ def launch(step, *, dispatcher):
         return None
     events = getattr(dispatcher, 'events', None)
     if events is None:
-        events = fold.read_events()
+        try:
+            events = fold.read_events()
+        except ledger_cache.LockTimeout as exc:
+            print(str(exc), file=sys.stderr)
+            return None
     evs = [e for e in events if e.get('subject') == step.item]
     if autodispatch._standing_autodispatch_failed(evs):
         return None
@@ -481,7 +486,12 @@ def _record():
     except BlockingIOError:
         lock.close()
         return None
-    ev = fold.read_events()
+    try:
+        ev = fold.read_events()
+    except ledger_cache.LockTimeout as exc:
+        print(str(exc), file=sys.stderr)
+        lock.close()
+        return None
     # SD11 (L-spec-0242, extended by L-spec-0244 and L-spec-0243): `intake.run(ev)`
     # fires off the FIRST read, its own try/except so a raise never stops the
     # tick's own heartbeat (mirroring `carry_error` below); `notes.run(ev,
@@ -532,7 +542,12 @@ def _record():
         push_origin.run(ev)
     except Exception as e:
         push_origin_error = f"{e}"
-    ev = fold.read_events()
+    try:
+        ev = fold.read_events()
+    except ledger_cache.LockTimeout as exc:
+        print(str(exc), file=sys.stderr)
+        lock.close()
+        return None
     specs, charters, _, _ = fold.fold(ev)
     reaped = {e.get("subject") for e in ev if e["type"] == "tree-reaped"}
     errors = []
