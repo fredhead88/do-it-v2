@@ -349,7 +349,7 @@ def test_lane_page_shows_only_classified_stuck():
         for expr in re.findall(r"(?:const|let)\s+" + name + r"\s*=\s*([\d\s*]+)[;,]", page):
             assert eval(expr, {"__builtins__": {}}, {}) not in (600, 900, 1800, 600000, 900000, 1800000)
     functions = ("applyLane", "applyHistory", "laneNotice", "laneDetails", "renderStuckTile",
-                 "stateMap", "laneSplit", "computeHolds", "computeBlockers", "renderStuck", "stuckHtml0",
+                 "stateMap", "laneSplit", "computeHolds", "stuckData", "computeBlockers", "renderStuck", "stuckHtml0",
                  "escOwner", "computeOmens")
     constants = ("S", "toMs", "fmt", "fmtDur", "fmtAge", "esc", "LANE_PLACE", "WHO", "HOLD_RE", "LIFT_RE")
     declarations = []
@@ -359,7 +359,7 @@ def test_lane_page_shows_only_classified_stuck():
     script = "\n".join(declarations + [_page_function(page, n) for n in functions])
     script += r'''
 const assert=require('node:assert/strict');
-const els=new Map();const $=id=>{if(!els.has(id))els.set(id,{className:'',innerHTML:'',firstElementChild:{textContent:''}});return els.get(id);};
+const els=new Map();const $=id=>{if(!els.has(id))els.set(id,{className:'',innerHTML:'',firstElementChild:{textContent:'',style:{}}});return els.get(id);};
 let LIVE=true, DATA={states:[]}, stream=null, REMOTE=false,lastHeard=0;
 const CAP={builder:5};
 const isRaven=()=>true, knownBug=()=>null, execBusy=()=>false, OM=()=>null,lastOf=()=>null;
@@ -367,33 +367,42 @@ const specCharter=()=>null,charterRows=()=>[],fixFor=()=>null,ownerFor=()=>null,
 const NO_SELFCHECK=new Set(),FINISHED_RE=/accepted|shipped|killed/,DEFAULT_OWNER={shelf:'executor'},NEXT_ACTION={shelf:()=>['executor','dispatch a builder']};
 const isOperator=o=>o==='operator'||o==='you';
 const now=Date.parse('2026-10-15T12:00:00Z'),H=3600000;
-function fresh(lane=[]){S.now=now;S.lane=lane;S.laneAt='2026-10-15T12:00:00Z';S.laneError=null;S.actors.clear();S.subjectEvents.clear();S.esc.clear();S.sys=null;S.wallclock=null;S.lastAct=0;S.lastTick=null;S.recent=[];S.raisedAt.clear();DATA={states:[]};LIVE=true;}
+// The fixture represents the server's classification. The page must consume
+// it verbatim; lane rules only choose map placement, never membership or count.
+function payload(lane){
+ const stuck=(lane||[]).filter(r=>r.bucket==='STUCK').map(r=>({spec:r.spec,subject:r.spec,title:'Title <'+r.rule+'>',project:'fixture <project>',since:r.since,stuck_for_s:Math.max(0,(now-Date.parse(r.since))/1000),reason:'Action needed: '+r.reason,who:r.actor==='grader'?'process':'executor',kind:'lane',src:'fixture:'+r.rule}));
+ return {error:null,count:stuck.length,stuck,held:[]};
+}
+function fresh(lane=[],stuck=payload(lane)){S.now=now;S.lane=lane;S.laneAt='2026-10-15T12:00:00Z';S.laneError=null;S.actors.clear();S.subjectEvents.clear();S.esc.clear();S.sys=null;S.wallclock=null;S.lastAct=0;S.lastTick=null;S.recent=[];S.raisedAt.clear();DATA={states:[],glance:{error:null,stuck}};LIVE=true;}
 function row(rule,age=3,extra={}){return {spec:'L-spec-'+rule,bucket:'STUCK',rule,actor:'tick',since:new Date(now-age*H).toISOString(),limit_min:17,overdue:true,reason:'because <'+rule+'>',reason_live:false,blocker:'block <'+rule+'>',...extra};}
 function has(text,part){assert.ok(text.includes(part),part+' missing in '+text);}
 const rows=[row('build',5),row('grade',2,{actor:'grader'}),row('gate',.5,{actor:'-'}),row('wave-held',3,{bucket:'waiting-on-prereq',overdue:false,reason_live:true}),row('future',1),row('review',1,{bucket:'queued',overdue:false})];
 fresh(rows);computeBlockers();assert.equal(S.blockers.length,4);
-for(const [rule,place,kind,who,need,sev] of [['build','tower','shelf','executor',true,2],['grade','court','grade','grader',true,1],['gate','gate','merge','executor',true,0],['future','tower','lane','executor',true,0]]){
+for(const [rule,place,kind,who,need,sev] of [['build','tower','shelf','executor',true,2],['grade','court','grade','process',true,1],['gate','gate','merge','executor',true,0],['future','tower','lane','executor',true,0]]){
  const b=S.blockers.find(b=>b.lane.rule===rule);assert.deepEqual([b.place,b.kind,b.who,b.need,b.sev],[place,kind,who,need,sev]);assert.equal(b.s,'L-spec-'+rule);assert.equal(b.since,Date.parse(b.lane.since));assert.equal(b.wait,now-b.since);
 }
-const panel=stuckHtml0();for(const r of rows){for(const value of [r.spec,r.rule,String(r.limit_min),r.since,esc(r.reason),esc(r.blocker)])has(panel,value);}
-assert.ok(!panel.includes('because <build>'));assert.ok(!panel.includes('block <build>'));
-assert.ok(!/\d/.test(panel.split('WHAT COUNTS AS STUCK')[1].replace(/<[^>]*>/g,'')));has(panel,'WITHIN LIMITS · 2');
+const panel=stuckHtml0();for(const r of DATA.glance.stuck.stuck){for(const value of [r.spec,esc(r.title),esc(r.project),esc(r.reason),r.who])has(panel,value);}
+assert.ok(!panel.includes('because <build>'));assert.ok(!panel.includes('fixture <project>'));
+assert.equal($('h-stuck').firstElementChild.textContent,'4');assert.ok(!panel.includes('WITHIN LIMITS'));
 const allRules={rebuild:['tower','shelf'],'dependency-held':['tower','shelf'],regrade:['court','grade'],review:['inn','review'],enqueue:['gate','merge'],merge:['gate','merge'],close:['keep','close'],idle:['tower','idle'],toString:['tower','lane'],constructor:['tower','lane']};
 for(const [rule,mapping] of Object.entries(allRules)){fresh([row(rule)]);computeBlockers();assert.deepEqual([S.blockers[0].place,S.blockers[0].kind],mapping);}
-fresh(null);S.laneError='load <failed>';computeBlockers();for(const text of [$('stuck').innerHTML,stuckHtml0()]){has(text,'rule table unreadable');has(text,'load &lt;failed&gt;');assert.ok(!text.toUpperCase().includes('NOTHING STUCK'));}assert.notEqual($('stuck').className,'calm');assert.equal($('h-stuck').firstElementChild.textContent,'unreadable');
-fresh([]);computeBlockers();has($('stuck').innerHTML,'NOTHING STUCK');assert.equal($('stuck').className,'calm');
-fresh([row('unrecognized',1,{reason:'undetermined: cannot decide'})]);computeBlockers();assert.equal(S.blockers.length,1);assert.equal(S.blockers[0].need,true);has(stuckHtml0(),'undetermined: cannot decide');has($('stuck').innerHTML,'1 spec');has($('h-stuck').firstElementChild.textContent,'1 ·');assert.notEqual($('h-stuck').className,'stat good');
+fresh(null,{error:'load <failed>',count:0,stuck:[],held:[]});computeBlockers();for(const text of [$('stuck').textContent,stuckHtml0()]){has(text,'stuck list unavailable');assert.ok(!text.toUpperCase().includes('NOTHING STUCK'));}assert.notEqual($('stuck').className,'calm');assert.equal($('h-stuck').firstElementChild.textContent,'stuck list unavailable');
+fresh([]);computeBlockers();has($('stuck').textContent,'Nothing stuck');assert.equal($('stuck').className,'calm');
+fresh([row('unrecognized',1,{reason:'undetermined: cannot decide'})]);computeBlockers();assert.equal(S.blockers.length,1);assert.equal(S.blockers[0].need,true);has(stuckHtml0(),'undetermined: cannot decide');has($('stuck').textContent,'1 spec');assert.equal($('h-stuck').firstElementChild.textContent,'1');assert.notEqual($('h-stuck').className,'stat click good');
 // Histories far past every removed limit cannot recreate page-side lane waits.
 fresh([]);for(const [i,ty] of ['spec-written','build-done','verdict','review','merge-gate-clean'].entries()){const s='L-spec-old'+i;DATA.states.push([s,['written','built','graded','reviewing','reviewing'][i]]);S.subjectEvents.set(s,[{ty,ms:now-100*H,st:'DONE',ok:true,nb:0}]);}computeBlockers();assert.deepEqual(S.blockers,[]);
-// A hold, a freeze, a busy subject and red master CI cannot overrule lane rows.
-fresh([row('build',5),row('gate',3)]);S.subjectEvents.set('L-spec-build',[{ty:'decision',a:'operator',ms:now-H,why:'hold L-spec-build until merge'}]);S.subjectEvents.set('L-charter-1',[{ty:'decision',a:'operator',ms:now-H,why:'merge freeze'}]);S.actors.set('busy',{subject:'L-spec-build',state:'working',start:now,tour:false});S.sys={ci:{red:1}};computeBlockers();assert.ok(S.holds.bySpec.has('L-spec-build'));assert.ok(S.holds.freeze);for(const b of S.blockers){assert.equal(b.need,true);assert.equal(b.text,b.lane.reason);}computeOmens();assert.ok(S.alarms.some(a=>a.kind==='shelf'));
+// A page-side hold, freeze, busy subject or red CI cannot overrule server rows.
+fresh([row('build',5),row('gate',3)]);S.subjectEvents.set('L-spec-build',[{ty:'decision',a:'operator',ms:now-H,why:'hold L-spec-build until merge'}]);S.subjectEvents.set('L-charter-1',[{ty:'decision',a:'operator',ms:now-H,why:'merge freeze'}]);S.actors.set('busy',{subject:'L-spec-build',state:'working',start:now,tour:false});S.sys={ci:{red:1}};computeBlockers();assert.ok(S.holds.bySpec.has('L-spec-build'));assert.ok(S.holds.freeze);for(const b of S.blockers){assert.equal(b.need,true);assert.equal(b.text,DATA.glance.stuck.stuck.find(r=>r.spec===b.s).reason);}computeOmens();assert.ok(S.alarms.some(a=>a.kind==='shelf'));
 for(const bucket of ['queued','held','waiting-on-prereq','waiting-on-human',undefined]){fresh([row('wait',3,{bucket,reason_live:true})]);computeBlockers();assert.deepEqual(S.blockers,[]);}
 function kept(){for(const [s,state] of [['L-spec-raven','written'],['L-spec-owed','shipped-owed']]){DATA.states.push([s,state]);S.subjectEvents.set(s,[{ty:'shipped',ms:now-30*H}]);}S.esc.set('L-spec-raven',[{ms:now-H,ow:'operator'}]);S.actors.set('queued',{sp:'L-builder-q',subject:'L-spec-q',role:'builder',state:'queued',start:now-3*60000,wp:'forge'});S.actors.set('working',{sp:'L-builder-w',subject:'L-spec-w',role:'builder',state:'working',start:now-H,wp:'forge'});}
-fresh([]);kept();computeBlockers();assert.deepEqual(S.blockers,[]);has($('stuck').innerHTML,'NOTHING STUCK');
-applyHistory({lane:[row('build')],lane_error:null,lane_at:'updated',history:{},wallclock:{}});assert.equal(S.lane.length,1);assert.equal(S.laneAt,'updated');
-applyHistory({lane:null,lane_error:'refresh failed',lane_at:'failed',history:{}});assert.equal(S.lane,null);assert.equal(S.laneError,'refresh failed');has($('stuck').innerHTML,'rule table unreadable');
-fresh([row('build')]);kept();LIVE=false;S.now=now-1;computeBlockers();assert.deepEqual(S.blockers,[]);for(const text of [$('stuck').innerHTML,stuckHtml0()]){has(text,'rule table: live only');assert.ok(!text.toUpperCase().includes('NOTHING STUCK'));}assert.notEqual($('stuck').className,'calm');
-console.log('lane UI: mappings, rendering, unreadable, explicit STUCK, other buckets excluded, refresh and replay passed');
+fresh([]);kept();computeBlockers();assert.deepEqual(S.blockers,[]);has($('stuck').textContent,'Nothing stuck');
+applyHistory({lane:[row('build')],lane_error:null,lane_at:'updated',history:{},wallclock:{}});assert.equal(S.lane.length,1);assert.equal(S.laneAt,'updated');assert.deepEqual(S.blockers,[]);
+applyHistory({lane:null,lane_error:'refresh failed',lane_at:'failed',history:{}});assert.equal(S.lane,null);assert.equal(S.laneError,'refresh failed');has($('stuck').textContent,'Nothing stuck');
+DATA.glance.stuck=payload([row('build')]);computeBlockers();assert.equal(S.blockers.length,1);assert.equal($('h-stuck').firstElementChild.textContent,'1');
+DATA.glance={error:'refresh failed'};computeBlockers();has($('stuck').textContent,'stuck list unavailable');assert.deepEqual(S.blockers,[]);
+fresh([row('build')]);kept();LIVE=false;S.now=now-1;computeBlockers();assert.deepEqual(S.blockers,[]);for(const text of [$('stuck').textContent,stuckHtml0()]){has(text,'stuck list unavailable');assert.ok(!text.toUpperCase().includes('NOTHING STUCK'));}assert.notEqual($('stuck').className,'calm');
+console.log('stuck UI: server mappings, rendering, unavailable, explicit stuck, other buckets excluded, refresh and replay passed');
+
 '''
     # seek/reset must preserve the live result, while tick retains its numeric count separately.
     assert "S.lane=null" not in _page_function(page, "reset")

@@ -356,7 +356,7 @@ canvas#map.hand{cursor:pointer}
     <div class="stat click" id="h-proving" title="Counts groups of work being watched on the live site to confirm they keep working." style="width:100px"><b>—</b><span>proving</span></div>
     <div class="stat click" id="h-flight" title="Counts worker runs currently working or waiting to start."><b>—</b><span>in flight</span></div>
     <div class="stat click" id="h-merge" title="Shows finished specs waiting to join the main code, active merge batches, recent wait times, and the merge rate."><b>?</b><span>merge</span></div>
-    <div class="stat click" id="h-stuck" title="Counts specs that could move forward but are waiting without a valid reason." style="width:124px"><b>—</b><span>stuck</span></div>
+    <div class="stat click" id="h-stuck" title="Open stuck items; click for the list and work held on purpose." style="width:124px"><b>—</b><span>stuck</span></div>
     <div class="stat click" id="h-shelf" title="Counts written specs that no builder has started yet, and shows how long the oldest has waited."><b>—</b><span>ready, waiting for a builder</span></div>
     <div class="stat click" id="h-esc" title="Counts unanswered requests for a decision, including how many need your decision."><b>—</b><span>ravens</span></div>
     <div class="stat click" id="h-ship" title="Counts changes delivered to the live site during the time shown."><b>—</b><span>shipped</span></div>
@@ -848,10 +848,10 @@ function renderGlance(){
   else{sentence=d.collapsed;lines=[...(d.groups||[]).slice(0,5).map(g=>g.text),d.attention];}
   $('glance-sentence').textContent=sentence;$('glance-toggle').title=sentence;
   const box=$('glance-lines');box.replaceChildren();for(const [i,text] of lines.filter(Boolean).slice(0,6).entries()){const p=document.createElement('p');p.textContent=text;p.title=d&&d.groups&&d.groups[i]?d.groups[i].detail||text:text;
-    if(i===5&&d&&((d.needs_you||[]).length||(d.overdue||[]).length||(d.check_issues||[]).length)){const b=document.createElement('button');b.textContent=text+' ›';b.setAttribute('aria-label',text+' Read details');b.onclick=()=>openPanel('<h2>What needs attention</h2>'+((d.needs_you||[]).map(x=>'<p>'+esc(x.spec)+': '+esc(x.ask)+'</p>').join('')||'<p>No operator decisions waiting.</p>')+((d.overdue||[]).length?'<p>Steps overdue: '+d.overdue.map(esc).join(', ')+'.</p>':'')+((d.check_issues||[]).length?'<p>Merge checks need attention: '+d.check_issues.map(esc).join(', ')+'.</p>':''));p.replaceChildren(b);}
+    if(i===5&&d&&((d.needs_you||[]).length||(d.stuck&&(d.stuck.count||d.stuck.error))||(d.check_issues||[]).length)){const b=document.createElement('button');b.textContent=text+' ›';b.setAttribute('aria-label',text+' Read details');b.onclick=()=>{openPanel('<h2>What needs attention</h2>'+((d.needs_you||[]).map(x=>'<p>'+esc(x.spec)+': '+esc(x.ask)+'</p>').join('')||'<p>No operator decisions waiting.</p>')+stuckHtml0()+((d.check_issues||[]).length?'<p>Merge checks need attention: '+d.check_issues.map(esc).join(', ')+'.</p>':''));bindLinks();};p.replaceChildren(b);}
     box.appendChild(p);}
 }
-async function refreshGlance(){if(!LIVE||REMOTE)return;try{const r=await fetch(api('/api/glance'),{cache:'no-store'});if(!r.ok)throw Error('unavailable');const d=await r.json();if(DATA)DATA.glance=d;}catch(_){if(DATA)DATA.glance={error:'What matters is unavailable'};}renderGlance();}
+async function refreshGlance(){if(!LIVE||REMOTE)return;try{const r=await fetch(api('/api/glance'),{cache:'no-store'});if(!r.ok)throw Error('unavailable');const d=await r.json();if(DATA)DATA.glance=d;}catch(_){if(DATA)DATA.glance={error:'What matters is unavailable'};}renderGlance();computeBlockers();mRender();rerenderPanel();}
 setInterval(refreshGlance,30000);
 
 function hud(){
@@ -890,7 +890,7 @@ cv.addEventListener('click',ev=>{const h=hit(worldPt(ev));if(!h){hideBubble();re
   else if(false){const a=S.actors.get(h.id);const ch=charterOfSubject(a.subject);showBubble(h.id,`<b>${ROLE_NAME[a.role].toUpperCase()} · ${MODEL[a.role].toUpperCase()}</b><br>${ch?`<b style="color:#7a2f18">CHARTER ${esc(ch)}</b> ${esc(intentLine(ch)||(DATA.charters[ch]||{}).title||'')}<br>`:'<span class="tiny">Free-standing: no charter above this spec.</span><br>'}<span class="tiny">${esc(a.subject||'')} · ${a.state} · ${fmtDur(S.now-a.start)} of ${CAP[a.role]||'—'} min</span><br>${ch?`<a data-open="charter:${ch}">Open the charter ▸</a> · `:''}<a data-open="actor:${h.id}">This run ▸</a>`,()=>{const a=S.actors.get(h.id);return a?{x:a.x+SW/2,y:a.y-14}:null;});}
   else if(h.kind==='role'){const s=standing.find(s=>s.role===h.id);showBubble(ROLE_NAME[h.id],`<b>${MODEL[h.id].toUpperCase()}</b><br>${esc(CX[h.id].quest)}<br><a data-open="role:${h.id}">Open the codex ▸</a>`,()=>{const s=standing.find(s=>s.role===h.id);return s?{x:s.x+SW/2,y:s.y-14}:null;});}
   else if(h.kind==='place'){const p=PLACES[h.id],x=PX[h.id];showBubble(p.n,`${x.body}<br><a data-open="place:${h.id}">Open the codex ▸</a>`,()=>({x:p.x+p.w/2,y:p.y-8}));}
-  else if(h.kind==='blocker'){const b=S.blockers.find(x=>x.s===h.id);if(b){const si=specInfo(b.s);ensureSpec(b.s).then(()=>{});showBubble(b.s,`<b>${esc(b.text.toUpperCase())} · ${fmtDur(b.wait).toUpperCase()}</b><br>${esc(WHO[b.who]||'')}.${b.need?' This wait did not have to happen.':''}<br>${si?`<span class="tiny">${esc(si.title)}</span><br>`:''}<a data-open="subject:${b.s}">The story ▸</a></a>`,()=>({x:b.bx+6,y:b.by-6}));}}
+  else if(h.kind==='blocker'){openSubject(h.id);}
   else if(h.kind==='monster'){showBubble(MON[h.id].name,`${MX[h.id].body}<br><a data-open="monster:${h.id}">Open the codex ▸</a>`,()=>{const e=S.effects.find(e=>e.kind==='monster'&&e.m===h.id);return e?{x:e.bx+20,y:e.by-6}:null;});}
 });
 function showActorBubble(sp){const a=S.actors.get(sp);if(!a)return;const ch=charterOfSubject(a.subject);const si=specInfo(a.subject);const what=si?`<b>${esc(si.title)}</b><br>${esc(si.intent||'')}<br>`:(String(a.subject||'').startsWith('L-spec-')?'<span class="tiny">Reading the spec…</span><br>':'');
@@ -1278,24 +1278,16 @@ function applyLane(d){S.lane=d.lane??null;S.laneError=d.lane_error||null;S.laneA
 function applyHistory(d){S.history=d.history;if(d.now)S.metricsNow=d.now;if(d.wallclock)S.wallclock=d.wallclock;applyLane(d);computeBlockers();}
 function laneNotice(){return !LIVE?'rule table: live only':S.lane===null?'rule table unreadable: '+(S.laneError||'no live result available'):'';}
 function laneDetails(row){return `<span class="tiny">rule ${esc(row.rule)} · limit ${esc(row.limit_min)} min · since ${esc(row.since)} · reason ${esc(row.reason)} · blocker ${esc(row.blocker||'none')}</span>`;}
-function renderStuckTile(){const need=S.blockers.filter(b=>b.need);const hrs=need.reduce((s,b)=>s+b.wait,0)/3600000;const stk=$('h-stuck');const notice=laneNotice();stk.firstElementChild.textContent=notice?(LIVE?'unreadable':'live only'):need.length?`${need.length} · ${hrs<1?Math.round(hrs*60)+'m':Math.round(hrs)+'h'}`:'0';stk.className='stat '+(notice?'warn':need.some(b=>b.sev===2)?'bad':need.length?'warn':'good');}
-function computeBlockers(){const now=S.now;const B=[];const st=stateMap();const holds=computeHolds();S.holds=holds;
-  const held=s=>holds.bySpec.get(s);const heldText=hd=>`held by ruling on ${hd.subj} ${fmt(hd.ms).slice(6)}: ${(hd.why||'').slice(0,70)}`;
-  const add=(s,place,kind,since,who,text,need)=>{const wait=now-since;if(wait<0)return;if(need){const hd=held(s);if(hd){who='decision';text=heldText(hd);need=false;}else if(holds.freeze&&(kind==='merge'||kind==='ship')){who='freeze';text=`merge freeze since ${fmt(holds.freeze.ms).slice(6)} (ruling on ${holds.freeze.subj})`;need=false;}}B.push({s,place,kind,since,wait,who,text,need,sev:wait>4*3600000?2:wait>3600000?1:0});};
-  if(LIVE&&S.lane!==null)for(const row of S.lane){if(!row.overdue)continue;const [place,kind]=LANE_PLACE[row.rule]||['tower','lane'];const since=toMs(row.since),wait=now-since;const who=/^(wave-held|dependency-held)$/.test(row.rule)?'wave':(['tick','executor','-'].includes(row.actor)?'executor':row.actor);B.push({s:row.spec,place,kind,since,wait,who,text:row.reason+(row.reason_live&&row.blocker?' · '+row.blocker:''),need:row.overdue&&!row.reason_live,sev:wait>4*3600000?2:wait>3600000?1:0,lane:row});}
-  for(const [s,state] of st){if(!s.startsWith('L-spec-')||/killed|void|dropped|accepted|^shipped$/.test(state))continue;const ev=S.subjectEvents.get(s)||[];if(!ev.length)continue;const last={};for(const e of ev)last[e.ty]=e;const T=e=>e?e.ms:0;
-    const sh=last['shipped'];const busy=[...S.actors.values()].some(a=>a.subject===s&&!a.done&&!a.tour);
-    if(S.esc.has(s)&&!isRaven(S.esc.get(s)))continue;
-    if(S.esc.has(s)){const xl=S.esc.get(s);const ow=escOwner(xl);add(s,'keep','raven',xl[0].ms,ow==='you'?'you':'thinker',ow==='you'?`waiting on your ruling`:`waiting on the Thinker's ruling`,false);continue;}
-    if(busy)continue;
-    if(/owed/.test(state)&&sh&&now-T(sh)>24*3600000)add(s,'town','owed',T(sh),'deploy','shipped, owes a live check',false);}
-  for(const a of S.actors.values()){if(a.tour||a.done)continue;if(a.state==='queued'&&!a.claimed&&now-a.start>2*60000)add(a.subject||a.sp,'docks','unclaimed',a.start,'relay',`${a.sp} unclaimed at the ferry`,true);const cap=(CAP[a.role]||30)*60000;if(a.state==='working'&&now-a.start>cap)add(a.subject||a.sp,a.wp,'cap',a.start+cap,'cap',`${a.sp} past its ${CAP[a.role]} min cap`,true);}
-  B.sort((a,b)=>(b.need-a.need)||(b.wait-a.wait));S.blockers=B.filter(b=>b.lane?.bucket==='STUCK');renderStuck();}
-function renderStuck(){renderStuckTile();const el=$('stuck');const B=S.blockers;const notice=laneNotice();if(notice){el.className='';el.innerHTML=`<b>${esc(notice)}</b>${B.length} other waits${B.some(b=>b.who==='you')?' · YOUR ruling':''}`;return;}const sy=S.sys||(DATA&&DATA.sys);if((stream||REMOTE)&&lastHeard&&Date.now()-lastHeard>150000){el.className='';el.innerHTML=`<b>THIS PAGE IS STALE</b>nothing heard from the ledger for ${fmtAge(Date.now()-lastHeard)} · every wait below may already be over · reload if it does not reconnect`;return;}if(sy&&sy.quota&&sy.quota.max_pct>=100){el.className='';el.innerHTML=`<b>THE REALM SLEEPS</b>weekly quota at ${sy.quota.max_pct}%${sy.quota.reset?', resets '+esc(sy.quota.reset):''} · nothing below can move until then`;return;}const need=B.filter(b=>b.need);const hours=need.reduce((s,b)=>s+b.wait,0)/3600000;const you=B.filter(b=>b.who==='you').length;
-  if(!need.length&&!you){el.className='calm';el.innerHTML='<b>NOTHING STUCK</b>every spec is either being worked on or waiting on something that has to happen';return;}
-  const real=B.filter(b=>!b.need&&b.who!=='you');const reasons={};for(const b of real)reasons[b.who]=(reasons[b.who]||0)+1;const realTxt=Object.entries(reasons).map(([k,n])=>`${n} on ${({wave:'a wave sibling',ci:'master CI',deploy:'a deploy',thinker:'the Thinker',cap:'a cap',decision:'a ruling',freeze:'the merge freeze'})[k]||k}`).join(', ');
-  if(!need.length&&!you){el.className='calm';el.innerHTML=`<b>NOTHING STUCK</b>${real.length?'waiting on something real: '+esc(realTxt):'every spec is either being worked on or waiting on something that has to happen'}`;return;}
-  el.className='';const worst=need[0];el.innerHTML=`<b>STUCK NOW</b>${need.length?`${need.length} spec${need.length>1?'s':''} waiting for no good reason, ${fmtDur(hours*3600000)} between them${worst?` · worst ${esc(worst.s.replace('L-spec-',''))}: ${esc(worst.text)} for ${fmtDur(worst.wait)}`:''}`:''}${you?`${need.length?' · ':''}<span style="color:var(--amber)">${you} need${you>1?'':'s'} YOUR ruling</span>`:''}${real.length?` · <span style="color:var(--mute)">${esc(realTxt)}</span>`:''}`;}
+function stuckData(){return (LIVE||REMOTE)&&DATA&&DATA.glance&&!DATA.glance.error&&DATA.glance.stuck;}
+function renderStuckTile(){const d=stuckData();const unavailable=!d||d.error;const stk=$('h-stuck');stk.firstElementChild.textContent=unavailable?'stuck list unavailable':String(d.count);stk.firstElementChild.style.fontSize=unavailable?'12px':'';stk.firstElementChild.style.whiteSpace=unavailable?'normal':'';stk.className='stat click '+(unavailable?'warn':d.count?'bad':'good');}
+function computeBlockers(){
+  S.holds=computeHolds();const d=stuckData();
+  S.blockers=(d&&d.stuck||[]).filter(row=>row.spec).map(row=>{
+    const lane=(S.lane||[]).find(r=>r.spec===row.spec);const [place,kind]=LANE_PLACE[lane&&lane.rule]||[row.kind==='window'?'gate':row.kind==='owed'?'town':row.kind==='escalation'?'keep':'tower',row.kind];
+    return {s:row.spec,place,kind,since:toMs(row.since),wait:row.stuck_for_s*1000,who:row.who,text:row.reason,need:true,sev:row.stuck_for_s>14400?2:row.stuck_for_s>3600?1:0,lane};
+  });renderStuck();
+}
+function renderStuck(){renderStuckTile();const d=stuckData();const el=$('stuck');el.className=d&&!d.error&&!d.count?'calm':'';el.textContent=!d||d.error?'stuck list unavailable':d.count?`${d.count} ${d.count===1?'spec is':'specs are'} stuck`:'Nothing stuck';}
 $('stuck').onclick=()=>openStuck();
 function listPanel(title,sub,rows){const html=()=>`<h2>${esc(title)}</h2><div class="cls">${esc(sub)}</div>${rows().length?rows().map(r=>`<p><a class="link" data-subj="${esc(r.s)}">${esc(r.s)}</a>${r.t?' · '+esc(r.t):''}${(()=>{const i=specInfo(r.s);return i?`<br><span class="tiny">${esc(i.title)}</span>`:'';})()}${r.why?`<br><span class="tiny">${esc(r.why)}</span>`:''}</p>`).join(''):'<p class="tiny">None.</p>'}`;openPanel(html(),{html,bind:bindLinks});bindLinks();}
 function provingNextLine(p){return p.next?`${p.next.text} · due ${p.next.due_at}`:'nothing remaining';}
@@ -1328,23 +1320,22 @@ function openProvingItems(id){const p=DATA&&DATA.proving;const x=p&&p.find(e=>e.
   const back=$('back-pv');if(back)back.onclick=openProvingPanel;}
 const ageOf=s=>{const ev=S.subjectEvents.get(s)||[];return ev.length?fmtAge(S.now-ev[ev.length-1].ms)+' since last event':'';};
 function openStuck(){openPanel(stuckHtml(),{html:stuckHtml,bind:bindLinks});bindLinks();}
-function stuckHtml0(){const B=S.blockers;const notice=laneNotice();const within=LIVE&&S.lane?S.lane.filter(row=>!row.overdue):[];return `<h2>Stuck right now</h2><div class="cls">${notice?esc(notice):`${B.length} waits · rule table computed ${esc(S.laneAt||'unknown')}`}</div>
-  ${B.map(b=>`<div class="act ${b.need&&b.sev?'bad':b.need?'':''}" style="${b.who==='you'?'border-left-color:var(--amber)':b.need?'':'border-left-color:var(--mute)'}"><b><a class="link" data-subj="${esc(b.s)}">${esc(b.s)}</a> · ${esc(fmtDur(b.wait))} · owner: ${esc(b.who==='you'?'YOU':b.who)}</b>${esc(b.text)}<br>${b.lane?laneDetails(b.lane):esc(WHO[b.who]||b.who)}<span class="tiny">${b.need?'This wait did not have to happen.':'This wait is on something real.'}</span></div>`).join('')||(!notice?'<p class="tiny">Nothing stuck.</p>':'')}
-  ${within.length?`<h4>WITHIN LIMITS · ${within.length}</h4>${within.map(row=>`<p>${esc(row.spec)}<br>${laneDetails(row)}</p>`).join('')}`:''}
-  <h4>WHAT COUNTS AS STUCK</h4><p>The live rule table supplies each lane wait, its limit and its reason. Only overdue rows count as stuck; reason_live decides whether a wait is real or needless. Escalations, owed checks, unclaimed packets and role caps also appear here. Lane rows are available only live.</p>`;}
+function stuckHtml0(){
+  const d=stuckData();
+  const rows=items=>items.map(row=>`<div class="act stuck-row"><b>${row.spec?`<a class="link" data-subj="${esc(row.spec)}">${esc(row.spec)}</a>`:esc(row.subject)} · ${esc(fmtDur(row.stuck_for_s*1000))}</b><span>${esc(row.title)}</span><br><span class="tiny">${esc(row.project)} · who has to act: ${esc(row.who)} · ${esc(row.kind==='owed'?'owed check':row.kind.startsWith('held-')?'held on purpose':row.kind)}</span><p>${esc(row.reason)}</p></div>`).join('');
+  return '<h2>Stuck right now</h2>'+(!d||d.error?'<p>stuck list unavailable</p>':`<p>${d.count?`${d.count} ${d.count===1?'spec is':'specs are'} stuck`:'Nothing stuck'}</p>`)+(d?rows(d.stuck||[])+((d.held||[]).length?'<h3>Held on purpose</h3>'+rows(d.held):''):'');
+}
 function drawBlockers(t){const groups={};for(const b of S.blockers){(groups[b.place]=groups[b.place]||[]).push(b);}
-  for(const [pid,list] of Object.entries(groups)){const p=PLACES[pid];if(!p)continue;const need=list.filter(b=>b.need);const hours=list.reduce((s,b)=>s+b.wait,0)/3600000;const col=need.length?(list.some(b=>b.sev===2)?'#ff6a5c':'#ffc46b'):list.some(b=>b.who==='you')?'#ffc46b':'#9a92ad';
-    // a row of sweating scrolls at the door
-    const n=Math.min(list.length,6);const x0=p.x+p.w/2-n*9;const y0=p.y+p.h+22;
-    for(let i=0;i<n;i++){const b=list[i];const x=x0+i*18,y=y0;R(g,x,y,12,14,'#efe6d2');R(g,x,y+5,12,2,col);R(g,x+2,y+9,8,1,'#9a92ad');
-      if(b.need&&!REDUCED){const k=(t*1.4+i*.37)%1;const dx=(i%2?4:-4);R(g,x+6+dx,y-4+k*14,2,3,'#7fc4ff');if(b.sev===2){const k2=(t*1.1+i*.5)%1;R(g,x+6-dx,y-6+k2*12,2,2,'#7fc4ff');}}
-      b.bx=x;b.by=y;}
-    g.fillStyle=col;g.font='700 '+mapFont(10,'Cinzel');g.fillText(`${list.length} STUCK · ${hours<1?Math.round(hours*60)+'m':Math.round(hours)+'h'}`,x0,y0+26);
-    if(need.length&&!REDUCED){const k=(t*.9)%1;g.strokeStyle=`rgba(255,106,92,${.8*(1-k)})`;g.lineWidth=2;g.beginPath();g.ellipse(p.x+p.w/2,y0+8,20+k*30,8+k*10,0,0,7);g.stroke();}}}
+  const size=Math.max(12,12/MAP_SCALE());
+  for(const [pid,list] of Object.entries(groups)){const p=PLACES[pid];if(!p)continue;
+    const cols=Math.max(1,Math.floor(p.w/(size+6)));const x0=p.x,y0=p.y+p.h+22;
+    for(let i=0;i<list.length;i++){const b=list[i],x=x0+(i%cols)*(size+6),y=y0+Math.floor(i/cols)*(size+6);R(g,x,y,size,size,'#efe6d2');R(g,x,y+size*.35,size,2,'#ff6a5c');R(g,x+2,y+size*.7,size-4,1,'#9a92ad');b.bx=x;b.by=y;b.size=size;}
+  }
+}
 function drawQuota(t){const q=(S.sys||(DATA&&DATA.sys)||{}).quota;if(!q||!q.panes||!q.panes.length)return;const d7=Math.max(...q.panes.map(p=>p.d7));const x=612,y=392,w=12,hh=60;R(g,x-2,y-2,w+4,hh+4,'#1a1428');R(g,x,y,w,hh,'#2a2438');const fill=Math.round(hh*Math.min(100,d7)/100);const col=d7>=95?'#ff5e52':d7>=80?'#ffc46b':'#8fe08f';R(g,x,y+hh-fill,w,fill,col);if(d7>=95&&!REDUCED&&Math.floor(t*2)%2){R(g,x-2,y-2,w+4,2,col);}g.fillStyle=col;g.font='700 '+mapFont(9,'Cinzel');g.fillText('QUOTA '+d7+'%',x-20,y-6);}
 function drawCI(t){const sy=S.sys||(DATA&&DATA.sys);if(!sy||!sy.ci)return;const p=PLACES.gate;const red=sy.ci.red;const col=red?'#ff5e52':sy.ci.green?'#8fe08f':'#9a92ad';R(g,p.x+w2(p)-2,p.y-30,4,28,'#2a2a30');R(g,p.x+w2(p)+2,p.y-30,22,12,col);g.fillStyle=col;g.font='700 '+mapFont(9,'Cinzel');g.fillText(red?'MASTER RED':'MASTER GREEN',p.x+w2(p)-30,p.y-36);if(red&&!REDUCED){const k=(t*1.5)%1;g.strokeStyle=`rgba(255,94,82,${1-k})`;g.lineWidth=2;g.beginPath();g.arc(p.x+w2(p)+12,p.y-24,8+k*18,0,7);g.stroke();}}
 const w2=p=>p.w/2;
-function blockerAt(pt){for(const b of S.blockers)if(b.bx!=null&&pt.x>=b.bx-2&&pt.x<=b.bx+14&&pt.y>=b.by-6&&pt.y<=b.by+16)return b;return null;}
+function blockerAt(pt){for(const b of S.blockers)if(b.bx!=null&&pt.x>=b.bx-2&&pt.x<=b.bx+b.size+2&&pt.y>=b.by-2&&pt.y<=b.by+b.size+2)return b;return null;}
 /* ---------------- wall clock: where the hours go ---------------- */
 const WC_LABEL={shelf:['On the shelf','written, no builder yet','tower'],await_grade:['Built, waiting for a grade','the card is done; no grader dispatched','court'],await_review:['Graded, waiting for review','no reviewer dispatched','inn'],await_merge:['Reviewed, waiting for the merge','the gate has not run','gate'],await_deploy:['Merged, waiting to ship','the deploy has not landed','harbor'],owed:['Shipped, owing a live check','nobody has observed it on production','town']};
 function clockHtml(){const w=S.wallclock||(DATA&&DATA.wallclock);if(!w)return '<h2>Wall clock</h2><p class="tiny">No audit yet; the server computes it every five minutes.</p>';const now=S.now;

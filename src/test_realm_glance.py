@@ -52,7 +52,24 @@ def test_holds_and_active_rework_never_become_overdue():
     classified = [dict(spec='L-spec-1418', bucket='held'), dict(spec='L-spec-1421', bucket='waiting-on-prereq'),
                   dict(spec='L-spec-1422', bucket='queued', reason='builder owns active rework')]
     d = project([ruling], rules=[*due, dict(spec='L-spec-1423', rule='wave-held', overdue=True)], classified=classified)
-    assert d['overdue'] == ['L-spec-1454']
+    assert 'overdue' not in d and 'stuck count unavailable' in d['attention']
+    from realm_stuck import shape
+    rework = event('decision', 'L-spec-1422', rework='yes', why='Repair is assigned.')
+    facts = g.hold_facts([ruling, rework], [], due, classified, NOW)
+    lane = [dict(row, bucket='STUCK', since='2026-10-23T06:00:00Z',
+                 reason='no ledger evidence for the next action', src='fixture:1') for row in due]
+    for row in lane:
+        if row['spec'] == 'L-spec-1423':
+            row['rule'] = 'wave-held'
+        for active in classified:
+            if active['spec'] == row['spec']:
+                row.update(active)
+                row['owner'] = 'builder'
+    stuck = shape(lane, [], set(), facts['held'], facts['rulings'], [], [], [], {}, {}, NOW)
+    counted = project([ruling, rework],rules=due,classified=classified,stuck=stuck)
+    assert [row['spec'] for row in counted['stuck']['stuck']] == ['L-spec-1454']
+    assert {row['spec'] for row in counted['stuck']['held']} == {row['spec'] for row in due} - {'L-spec-1454'}
+    assert '1 spec is stuck' in counted['attention'] and counted['stuck']['count'] == 1
     assert 'L-spec-1417' in d['held']
     assert 'held on purpose' in d['groups'][3]['text']
     unrelated = ruling | {'subject':'realm-operator-panel'}
@@ -128,7 +145,7 @@ def test_server_cache_and_unavailable_answer():
     from unittest.mock import patch
     import realm
     fake_rules = SimpleNamespace(due=lambda *a: [])
-    fake_fold = SimpleNamespace(stall_rows=lambda *a, **k: [], admits=lambda *a: None,
+    fake_fold = SimpleNamespace(stall_lane_rows=lambda *a, **k: [], stall_rows=lambda *a, **k: [], admits=lambda *a: None,
                                 open_escalations=lambda *a: [], answered=lambda *a: set())
     @contextlib.contextmanager
     def snapshot(*a):
@@ -142,6 +159,88 @@ def test_server_cache_and_unavailable_answer():
         with patch.object(realm, 'ledger_snapshot', side_effect=OSError('fixture read failure')):
             failed = realm.glance_payload(NOW + dt.timedelta(seconds=31))
             assert failed['error'] and 'collapsed' not in failed
+
+
+def test_ac5_one_payload_one_number_no_new_read():
+    import contextlib
+    import subprocess
+    from unittest.mock import patch
+    from types import SimpleNamespace
+    import realm
+    import tempfile
+    root = Path(__file__).resolve().parents[1]
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp); (path/'state').mkdir()
+        (path/'state/owed-digest.json').write_text(json.dumps(dict(at=NOW.isoformat(),needs_you=[],health=[])))
+        fold = SimpleNamespace(stall_rows=lambda *a,**k: [],stall_lane_rows=lambda *a,**k: [],admits=lambda *a: None,
+                               open_escalations=lambda *a: [],answered=lambda *a: set())
+        @contextlib.contextmanager
+        def snapshot(*a):
+            yield fold, [], ({}, {}, [], {})
+        with patch.object(realm,'ROOT',path), patch.object(realm,'ledger_snapshot',snapshot), patch.dict(realm._GLANCE,key=None,value=None):
+            first = realm.glance_payload(NOW)
+            assert first['stuck']['error'] is None and 'overdue' not in first
+            assert 'specs are stuck' not in first['attention'] and 'overdue' not in first['attention']
+            with patch.object(realm,'ledger_snapshot',side_effect=AssertionError('cache read')):
+                assert realm.glance_payload(NOW+dt.timedelta(seconds=1)) is first
+            with patch.object(realm,'codex_payload',return_value={}),patch.object(realm,'sys_signals',return_value={}),patch.object(realm,'read_all',return_value=([],[],{})):
+                assert realm.bootstrap(24,states=[],goals=[],proving=[],now=NOW)['glance']['stuck'] == first['stuck']
+            with patch.object(realm,'ledger_snapshot',side_effect=OSError('unavailable')):
+                failed = realm.glance_payload(NOW+dt.timedelta(seconds=31))
+                assert failed['error'] and 'stuck' not in failed
+    for count in [0,1,3]:
+        d = project(stuck=dict(count=count,error=None))
+        clause = f'{count} '+('spec is' if count==1 else 'specs are')+' stuck'
+        assert (clause in d['attention']) == bool(count)
+    assert 'stuck count unavailable' in project(stuck=dict(count=0,error='unreadable'))['attention']
+    parent = subprocess.check_output(['git','show',subprocess.check_output(['git','merge-base','HEAD','main'],text=True).strip()+':src/realm.py'],text=True)
+    current = (root/'src/realm.py').read_text()
+    import re
+    routes = lambda text: re.findall(r'(?:path|p) == ["\']([^"\']+)', text[text.index('    def do_GET('):])
+    assert routes(parent) == routes(current)
+    base_html = subprocess.check_output(['git','show',subprocess.check_output(['git','merge-base','HEAD','main'],text=True).strip()+':src/realm.html'],text=True)
+    html = (root/'src/realm.html').read_text()
+    for call in ['setInterval(', 'EventSource(', 'fetch(']:
+        assert html.count(call) == base_html.count(call)
+
+
+def test_ac6_stuck_rows_equal_the_lane():
+    import contextlib
+    import time
+    from unittest.mock import patch
+    import fold
+    import realm
+    import realm_stuck
+    events = []
+    def ev(kind, sid, minutes, actor='executor', **kw):
+        events.append(dict(type=kind,subject=sid,actor=actor,ts=(NOW-dt.timedelta(minutes=minutes)).isoformat(),_src=f'fixture:{len(events)+1}',**kw))
+    for sid, minutes in [('L-spec-1',20),('L-spec-2',3000),('L-spec-3',3000),('L-spec-4',3000)]:
+        ev('spec-written',sid,minutes,actor='planner',project='fixture')
+    ev('blocked','L-spec-3',280,actor='builder',blocker='L-spec-5',reason='wait for L-spec-5')
+    ev('shipped','L-spec-5',60)
+    ev('decision','lane-stale:L-spec-4',30,actor='thinker',why='Held on purpose: dependency order')
+    events.sort(key=lambda e:e['ts'])
+    specs = {sid:dict(state=state,ts=next(e['ts'] for e in events if e['subject']==sid)) for sid,state in [('L-spec-1','written'),('L-spec-2','written'),('L-spec-3','blocked'),('L-spec-4','written'),('L-spec-5','shipped')]}
+    by = {sid:[e for e in events if e['subject']==sid] for sid in specs}
+    for sid in specs:
+        specs[sid].update(id=sid,evs=by[sid])
+    @contextlib.contextmanager
+    def snapshot(*a):
+        yield fold, events, (specs,{},[],by)
+    with tempfile.TemporaryDirectory() as tmp:
+        path=Path(tmp);(path/'state').mkdir();(path/'state/owed-digest.json').write_text(json.dumps(dict(at=NOW.isoformat(),needs_you=[],health=[])))
+        with patch.object(realm,'ROOT',path),patch.object(realm,'ledger_snapshot',snapshot),patch.dict(realm._GLANCE,key=None,value=None):
+            start=time.perf_counter();glance=realm.glance_payload(NOW);elapsed=time.perf_counter()-start
+            assert not glance['error'], glance
+            lane=realm.lane_payload(NOW)['lane']
+            facts=g.hold_facts(events,[],[],[],NOW)
+            expected={r['spec'] for r in lane if r['bucket']=='STUCK' and not realm_stuck.hold_evidence(r,facts['rulings'])}
+            actual={r['spec'] for r in glance['stuck']['stuck'] if r['kind']=='lane'}
+            assert actual == expected and 'L-spec-2' in actual, (lane,glance)
+            assert not {'L-spec-1','L-spec-3'} & actual
+            with patch.object(realm_stuck,'shape',return_value=dict(count=0,error=None,stuck=[],held=[])),patch.dict(realm._GLANCE,key=None,value=None):
+                start=time.perf_counter();realm.glance_payload(NOW);without=time.perf_counter()-start
+            print(f'fixture glance with stuck {elapsed:.6f}s; without {without:.6f}s; delta {elapsed-without:.6f}s')
 
 
 if __name__ == '__main__':

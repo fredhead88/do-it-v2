@@ -37,7 +37,7 @@ import time
 import urllib.parse
 import urllib.request
 
-import realm_omens, realm_codex, realm_ledger, realm_glance
+import realm_omens, realm_codex, realm_ledger, realm_glance, realm_stuck
 
 ROOT = pathlib.Path(os.environ.get("DOIT_ROOT", pathlib.Path.home() / ".do-it"))
 EVENTS, SEAT = ROOT / "events", ROOT / "seat"
@@ -275,9 +275,33 @@ def glance_payload(now=None):
                 classified = live_fold.stall_rows(events, active, now=now, by_subject=by_subject,
                                                   dwell={v['state']: -1 for v in active.values()})
                 admitted = [e for e in events if live_fold.admits(e, e.get('actor', '')) is None]
-                value = realm_glance.shape(admitted, [(s, v['state']) for s, v in specs.items()],
-                                           rules, classified, priorities, now,
-                                           needs=live_fold.open_escalations(events), answered=live_fold.answered(events))
+                states = [(s, v['state']) for s, v in specs.items()]
+                facts = realm_glance.hold_facts(admitted, states, rules, classified, now)
+                # Default approved by 1525: use the exact lane pass, including its
+                # dwell and shipped-prerequisite semantics, on this same snapshot.
+                try:
+                    lane = live_fold.stall_lane_rows(events, specs, now, by_subject=by_subject)
+                except Exception:
+                    lane = None
+                needs, answered = live_fold.open_escalations(events), live_fold.answered(events)
+                stuck = realm_stuck.shape(lane, needs, answered, facts['held'], facts['rulings'],
+                    realm_stuck.vanished_spawns(events, states, now), facts['windows'],
+                    realm_stuck.owed_overdue(ROOT, now), {}, {}, now)
+                projects, titles, spec_charters = {}, {}, {}
+                for e in events:
+                    sid = e.get('subject')
+                    if e.get('project'):
+                        projects[sid] = e['project']
+                    if e.get('title'):
+                        titles[sid] = e['title']
+                    if e.get('type') == 'spec-written' and e.get('charter'):
+                        spec_charters[sid] = charter_of(e['charter'])
+                for row in stuck['stuck'] + stuck['held']:
+                    text = spec_text(row['spec']) if row['spec'] else None
+                    row['title'] = (text or {}).get('title') or titles.get(row['subject']) or titles.get(spec_charters.get(row['subject'])) or '(no title on record)'
+                    row['project'] = projects.get(row['subject']) or 'unknown'
+                value = realm_glance.shape(admitted, states, rules, classified, priorities, now,
+                                           needs=needs, answered=answered, stuck=stuck)
             _GLANCE.update(key=key, value=value)
             return value
         except Exception as ex:

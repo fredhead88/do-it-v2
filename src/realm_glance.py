@@ -30,7 +30,7 @@ def ids(value):
     return value.split(',') if isinstance(value, str) else list(value or [])
 
 
-def window_facts(events):
+def window_facts(events, *, include_windows=False):
     """An opened window stays open until its actual terminal event.
 
     A candidate alone cannot open one. Tree verification is intermediate: red
@@ -55,7 +55,7 @@ def window_facts(events):
                 failures.pop(spec, None)
             for row in windows.values():
                 row['specs'] = [s for s in row['specs'] if s not in current]
-            windows[sid] = {'specs': current, 'phase': 'merging now'}
+            windows[sid] = {'window': sid, 'specs': current, 'phase': 'merging now', 'since': e['ts'], 'src': e.get('_src')}
         elif kind == 'window-candidate' and sid in windows:
             windows[sid].update(specs=ids(e.get('specs')), phase='merging now')
         elif kind == 'window-tree-verified' and sid in windows:
@@ -76,18 +76,19 @@ def window_facts(events):
             if kind == 'shipped':
                 shipped[sid] = e
     active = {s: row['phase'] for row in windows.values() for s in row['specs']}
-    return active, shipped, {s: row['phase'] for s, row in failures.items()}
+    result = active, shipped, {s: row['phase'] for s, row in failures.items()}
+    return (*result, list(windows.values())) if include_windows else result
 
 
-def shape(events, states, rules, classified, priorities, now, *, needs=(), answered=()):
+def recorded_hold(e):
+    why = str(e.get('why', '')).lower()
+    return e.get('actor') in {'thinker', 'operator', 'executor'} and e.get('type') == 'decision' and (
+        why.startswith(('held on purpose:', 'dependency-held', 'wave-held'))
+        or why.startswith('not stuck:') and 'migration order' in why)
+
+
+def hold_facts(events, states, rules, classified, now):
     events = sorted((e for e in events if utc(e.get('ts')) and utc(e['ts']) <= now), key=lambda e: utc(e['ts']))
-    states = dict(states)
-    active, shipped, failed = window_facts(events)
-    work = {}
-    for e in events:
-        if e.get('type') in {'spec-written', 'build-started', 'build-done', 'build-blocked', 'verdict', 'review', 'merge-gate-clean'}:
-            work[e.get('subject')] = e
-    running = {r['spec']: r.get('owner') for r in classified if 'owns active dispatch' in str(r.get('reason', ''))}
     # The live classifier understands migration sequencing, recorded rulings,
     # dependency and wave holds. Read it even before a wait is overdue.
     held = {r['spec'] for r in [*classified, *rules] if r.get('rule') in HELD_RULES
@@ -102,11 +103,21 @@ def shape(events, states, rules, classified, priorities, now, *, needs=(), answe
             if e.get('type') in {'decision', 'unblocked'}:
                 rulings[sid] = e
     for sid, e in rulings.items():
-        why = str(e.get('why', '')).lower()
-        if e['type'] == 'decision' and (why.startswith(('held on purpose:', 'dependency-held', 'wave-held'))
-                or why.startswith('not stuck:') and 'migration order' in why):
+        if recorded_hold(e):
             held.add(sid)
-    in_progress = {r['spec'] for r in classified if r.get('bucket') in {'queued', 'waiting-on-human'}}
+    return {'held': held, 'rulings': rulings, 'windows': window_facts(events, include_windows=True)[3]}
+
+
+def shape(events, states, rules, classified, priorities, now, *, needs=(), answered=(), stuck=None):
+    events = sorted((e for e in events if utc(e.get('ts')) and utc(e['ts']) <= now), key=lambda e: utc(e['ts']))
+    states = dict(states)
+    active, shipped, failed = window_facts(events)
+    work = {}
+    for e in events:
+        if e.get('type') in {'spec-written', 'build-started', 'build-done', 'build-blocked', 'verdict', 'review', 'merge-gate-clean'}:
+            work[e.get('subject')] = e
+    running = {r['spec']: r.get('owner') for r in classified if 'owns active dispatch' in str(r.get('reason', ''))}
+    held = hold_facts(events, states, rules, classified, now)['held']
     for sid in list(held):
         if sid in shipped or states.get(sid) in FINISHED:
             held.discard(sid)
@@ -164,18 +175,17 @@ def shape(events, states, rules, classified, priorities, now, *, needs=(), answe
                        'text': f'{name}: {short}.', 'detail': f'{name}: {status}.'})
     needs = [e for e in needs if str(e.get('owner', '')).strip().lower() in {'operator', 'you'}
              and e.get('_src') not in answered]
-    failures = sorted({r['spec'] for r in rules if r.get('overdue') and not r.get('reason_live')
-                       and r.get('spec') not in held and r.get('spec') not in in_progress and r.get('spec') not in active
-                       and r.get('spec') not in shipped and r.get('spec') not in failed and states.get(r.get('spec')) not in FINISHED
-                       and r.get('rule') not in HELD_RULES and not str(r.get('reason', '')).startswith('undetermined:')})
     broken = sum(p == 'checks failed; waiting for repair' for p in active.values()) + len(failed)
     attention = []
     if needs:
         attention.append(f'{len(needs)} {"thing needs" if len(needs) == 1 else "things need"} you')
     else:
         attention.append('No operator decisions waiting')
-    if failures:
-        attention.append(f'{len(failures)} {"step is" if len(failures) == 1 else "steps are"} overdue')
+    if stuck is None or stuck.get('error'):
+        attention.append('stuck count unavailable')
+    elif stuck['count']:
+        count = stuck['count']
+        attention.append(f'{count} {"spec is" if count == 1 else "specs are"} stuck')
     if broken:
         attention.append('Merge checks need attention')
     # Lead with active merging, then the first priorities and required action.
@@ -186,5 +196,5 @@ def shape(events, states, rules, classified, priorities, now, *, needs=(), answe
     return {'at': now.isoformat(timespec='seconds'), 'error': None, 'groups': groups,
             'collapsed': collapsed, 'attention': ' · '.join(attention) + '.',
             'needs_you': [{'spec': e.get('subject'), 'ask': ' '.join(str(e.get('why') or e.get('asks') or 'Decision requested').split())[:200]} for e in needs],
-            'overdue': failures, 'check_issues': sorted(failed), 'held': sorted(held), 'merging': sorted(active),
+            'stuck': stuck, 'check_issues': sorted(failed), 'held': sorted(held), 'merging': sorted(active),
             'queue_available': False}
