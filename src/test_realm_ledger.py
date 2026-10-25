@@ -1,4 +1,7 @@
 """Realm shares one isolated fold and handles torn tails without retaining bytes."""
+import builtins
+import contextlib
+import copy
 import datetime as dt
 import json
 import os
@@ -31,7 +34,16 @@ from dataclasses import dataclass
 @dataclass
 class Marker:
     value: str = 'private'
-READS = FOLDS = 0
+READS = FOLDS = FINISHES = 0
+import ledger_compact
+def actor_of(name):
+    parts = Path(name).stem.split('-')
+    return '-'.join(parts[1:-1]) if len(parts) >= 3 else Path(name).stem
+def finish_events(raw):
+    global FINISHES
+    FINISHES += 1
+    return [dict(e) for e in raw if not os.environ.get('DOIT_PROJECT') or e.get('project') == os.environ['DOIT_PROJECT']]
+
 def read_events():
     global READS
     READS += 1
@@ -62,11 +74,11 @@ def stall_lane_rows(events, specs, now, *, by_subject):
         self.assertEqual((self.ledger.reads,self.ledger.folds),(1,2))
         with self.file.open('a') as stream:
             stream.write(self.file.read_text().splitlines()[0]+'\n')
-        third = realm.lane_payload(NOW+dt.timedelta(minutes=1))
+        third = realm.lane_payload(NOW+dt.timedelta(seconds=70))
         self.assertEqual(third['lane'][0]['events'],2)
         self.assertEqual((self.ledger.loads,self.ledger.reads,self.ledger.folds),(1,2,3))
         self.file.write_text(self.file.read_text().splitlines()[0]+'\n')
-        self.assertEqual(realm.lane_payload(NOW)['lane'][0]['events'],1)
+        self.assertEqual(realm.lane_payload(NOW+dt.timedelta(seconds=80))['lane'][0]['events'],1)
         self.assertEqual(sys.path,path); self.assertEqual(sys.modules,modules)
         # Import bundle stays bounded; every lazy sibling is reused.
         names = set(self.ledger.modules)
@@ -143,11 +155,212 @@ def stall_lane_rows(events, specs, now, *, by_subject):
             with self.file.open('a') as stream:
                 stream.write(json.dumps(dict(type='spawn-started',ts=NOW.isoformat(),subject='L-spec-1',
                     actor='executor',_src=self.file.name+':2',spawn='L-builder-01',backend='codex'))+'\n')
-            third=realm.codex_payload()
+            with patch.object(realm.dt, 'datetime', wraps=dt.datetime) as clock:
+                clock.now.return_value = dt.datetime.now(dt.timezone.utc)+dt.timedelta(seconds=11)
+                third=realm.codex_payload()
             self.assertEqual(project.call_count,2)
             self.assertEqual(third['sessions'][0]['id'],'L-builder-01')
             third['sessions'][0]['state']='caller mutation'
             self.assertEqual(realm.codex_payload()['sessions'][0]['state'],'live')
+
+
+    @contextlib.contextmanager
+    def counted_reads(self):
+        counts = {}
+        original_open, path_open = builtins.open, Path.open
+        class Counted:
+            def __init__(self, file, name): self.file, self.name = file, name
+            def __getattr__(self, name): return getattr(self.file, name)
+            def __enter__(self): return self
+            def __exit__(self, *args): return self.file.__exit__(*args)
+            def read(self, *args):
+                data = self.file.read(*args)
+                counts[self.name] = counts.get(self.name, 0) + len(data)
+                return data
+        def wrap(file, name):
+            return Counted(file, Path(name).name) if Path(name).parent == self.events else file
+        def opened(name, *args, **kwargs): return wrap(original_open(name, *args, **kwargs), name)
+        def path_opened(name, *args, **kwargs): return wrap(path_open(name, *args, **kwargs), name)
+        with patch('builtins.open', opened), patch.object(Path, 'open', path_opened):
+            yield counts
+
+    def live_refresh(self, seconds=0):
+        with self.ledger.live(self.src, self.root) as fold:
+            return self.ledger.refresh(fold, self.events, NOW+dt.timedelta(seconds=seconds))
+
+    def test_finish_events_matches_read_events(self):
+        live_src = Path(realm.__file__).parent
+        stamp = NOW.isoformat()
+        for name, subjects in [('L-builder-a.jsonl', ['z', 'a']),
+                               ('L-thinker-b.jsonl', ['m']), ('L-grader-c.jsonl', ['b']),
+                               ('L-builder-colon:x.jsonl', ['z', 'a']), ('L-builder-colon:y.jsonl', ['m'])]:
+            (self.events/name).write_text(''.join(json.dumps(dict(ts=stamp, type='tick', subject=s,
+                                                     project='old'))+'\n' for s in subjects))
+        self.file.unlink()
+        (self.events/'L-operator-fix.jsonl').write_text(''.join(json.dumps(dict(ts=stamp,
+            type='correction', ref=ref, set={'project':'corrected'}))+'\n'
+            for ref in ['L-builder-a.jsonl:1', 'missing.jsonl:99']))
+        with self.ledger.live(live_src, self.root) as fold:
+            raw = fold._read_events_uncached()
+            before = copy.deepcopy(raw)
+            for cache in ['0', '1']:
+                for project in [None, 'corrected']:
+                    with patch.dict(os.environ, DOIT_READ_CACHE=cache), patch.object(fold, 'PROJECT', project):
+                        finished = fold.finish_events(raw)
+                        self.assertEqual(finished, fold.read_events())
+                        self.assertEqual(finished, fold.finish_events(raw))
+                        self.assertEqual(finished, fold.finish_events(list(reversed(raw))))
+                        self.assertEqual(raw, before)
+
+    def test_incremental_reader_matches_reference_parser(self):
+        live_src = Path(realm.__file__).parent
+        self.file.write_bytes(b'\nnot json\n{"type":"tick","detail":"raw '+ '\u2028'.encode()+
+                              b' separator"}\r\n{"type":"tick"')
+        other = self.events/'L-builder-other.jsonl'
+        other.write_text('{"type":"tick","subject":"other"}\n')
+        with self.ledger.live(live_src, self.root) as fold, patch.object(fold, 'read_events', side_effect=AssertionError('cached read')):
+            self.ledger.refresh(fold, self.events, NOW)
+            self.assertEqual(self.ledger.raw_events, fold._read_events_uncached())
+            with self.file.open('ab') as f: f.write(b',"subject":"completed"}\n')
+            self.ledger.refresh(fold, self.events, NOW+dt.timedelta(seconds=1))
+            self.assertEqual(self.ledger.raw_events, fold._read_events_uncached())
+            completed = [e for e in self.ledger.raw_events if e.get('subject') == 'completed']
+            self.assertEqual(len(completed), 1)
+            self.assertEqual(completed[0]['_src'], self.file.name+':5')
+            self.ledger.refresh(fold, self.events, NOW+dt.timedelta(seconds=2))
+            self.assertEqual(self.ledger.raw_events, fold._read_events_uncached())
+            with other.open('ab') as f: f.write(b'{"type":"tick","subject":"pending"}')
+            self.ledger.refresh(fold, self.events, NOW+dt.timedelta(seconds=3))
+            self.assertFalse(any(e.get('subject') == 'pending' for e in self.ledger.raw_events))
+            with other.open('ab') as f: f.write(b'\n')
+            self.ledger.refresh(fold, self.events, NOW+dt.timedelta(seconds=4))
+            self.assertEqual(self.ledger.raw_events, fold._read_events_uncached())
+            self.assertEqual(sum(e.get('subject') == 'pending' for e in self.ledger.raw_events), 1)
+
+    def test_append_reads_only_new_bytes(self):
+        data = b'{"type":"tick","subject":"fixture"}\n' * 1100
+        other = self.events/'L-builder-other.jsonl'
+        self.file.write_bytes(data); other.write_bytes(data)
+        self.live_refresh()
+        def append(data, seconds):
+            with self.file.open('ab') as f: f.write(data)
+            with self.counted_reads() as counts: self.live_refresh(seconds)
+            self.assertLessEqual(counts.get(self.file.name, 0), len(data)+4096)
+            self.assertNotIn(other.name, counts)
+            self.assertEqual(counts.get(self.file.name), len(data))
+        append(b'{"type":"tick"}\n'*3, 10)
+        append(b'{"type":', 11); append(b'"tick"}\n', 12)
+        replacement = self.root/'new'
+        replacement.write_bytes(data*2); replacement.replace(self.file)
+        with self.counted_reads() as counts: self.live_refresh(20)
+        self.assertEqual(counts, {self.file.name: len(data)*2})
+        inode = self.file.stat().st_ino
+        self.file.write_bytes(data[:100])
+        self.assertEqual(inode, self.file.stat().st_ino)
+        with self.counted_reads() as counts: self.live_refresh(30)
+        self.assertEqual(counts, {self.file.name: 100})
+        os.utime(self.file, None)
+        with self.counted_reads() as counts: self.live_refresh(40)
+        self.assertEqual(counts, {})
+        other.unlink()
+        fresh = self.events/'L-grader-new.jsonl'
+        fresh.write_bytes(b'{"type":"tick","subject":"new"}\n')
+        with self.counted_reads() as counts: events, _ = self.live_refresh(50)
+        self.assertEqual(counts, {fresh.name: fresh.stat().st_size})
+        self.assertNotIn(other.name, self.ledger.file_offsets)
+        self.assertEqual(events, sorted(events, key=lambda e: e.get('ts','')))
+        snapshot, offsets, raw = self.ledger.events, self.ledger.file_offsets, self.ledger.raw_events
+        with self.file.open('ab') as f: f.write(b'\n')
+        original = Path.open
+        def fail(path, *args, **kwargs):
+            if path == self.file: raise PermissionError('fixture unreadable')
+            return original(path, *args, **kwargs)
+        with patch.object(Path, 'open', fail), self.assertRaises(PermissionError): self.live_refresh(60)
+        self.assertIs(self.ledger.events, snapshot)
+        self.assertIs(self.ledger.file_offsets, offsets)
+        self.assertIs(self.ledger.raw_events, raw)
+        self.live_refresh(60)  # notifications consumed on the failed attempt must be retried
+        with self.file.open('ab') as f: f.write(b'\xff\n')
+        with self.assertRaises(UnicodeDecodeError): self.live_refresh(70)
+
+    def test_refold_bounded_and_generation(self):
+        events, folded = self.live_refresh()
+        times = [0]
+        generation = self.ledger.generation
+        for second in range(1, 51):
+            with self.file.open('a') as f: f.write('{"type":"tick","subject":"fixture"}\n')
+            before = self.ledger.folds
+            pair = self.live_refresh(second)
+            if self.ledger.folds != before:
+                times.append(second)
+                self.assertNotEqual(self.ledger.generation, generation)
+                generation = self.ledger.generation
+                events, folded = pair
+            else:
+                self.assertIs(pair[0], events); self.assertIs(pair[1], folded)
+                self.assertEqual(self.ledger.generation, generation)
+        self.assertEqual(times, [0,10,20,30,40,50])
+        self.live_refresh(60)
+        self.assertEqual(self.ledger.folds, 7)
+        self.assertNotEqual(self.ledger.generation, generation)
+        generation = self.ledger.generation
+        self.live_refresh(61); self.live_refresh(62)
+        self.assertEqual(self.ledger.folds, 7); self.assertEqual(self.ledger.generation, generation)
+        # A held pair stays consistent after a refresh in another thread.
+        held = self.live_refresh(63)
+        with self.file.open('a') as f: f.write('{"type":"tick","subject":"fixture"}\n')
+        worker = threading.Thread(target=lambda: self.live_refresh(70))
+        worker.start(); worker.join(5)
+        self.assertFalse(worker.is_alive())
+        self.assertIs(held[1][3]['fixture'], held[0])
+        self.assertEqual(len(held[0]), 51)
+        # Clock and ledger changes use one timer even across minute boundaries.
+        self.live_refresh(119)
+        self.assertEqual(self.ledger.folds, 8)
+        self.live_refresh(120)
+        self.assertEqual(self.ledger.folds, 9)
+        self.ledger.watch.close()
+        self.ledger = realm_ledger.Ledger()
+        self.live_refresh(59)
+        generation = self.ledger.generation
+        self.live_refresh(60)  # the minute changed only one second after bootstrap
+        self.assertEqual(self.ledger.folds, 1)
+        self.assertEqual(self.ledger.generation, generation)
+        self.live_refresh(69)
+        self.assertEqual(self.ledger.folds, 2)
+        self.assertNotEqual(self.ledger.generation, generation)
+
+    def test_code_change_keeps_raw_events(self):
+        self.live_refresh()
+        raw, offsets = self.ledger.raw_events, self.ledger.file_offsets
+        generation = self.ledger.generation
+        old_module = self.ledger.modules['fold']
+        (self.src/'new_bundle.py').write_text('MARKER = 1\n')
+        with self.counted_reads() as counts: self.live_refresh(1)
+        self.assertEqual(counts, {})
+        self.assertIs(self.ledger.raw_events, raw); self.assertIs(self.ledger.file_offsets, offsets)
+        self.assertEqual(self.ledger.loads, 2); self.assertEqual(self.ledger.folds, 2)
+        self.assertIsNot(self.ledger.modules['fold'], old_module)
+        self.assertEqual(self.ledger.modules['fold'].FOLDS, 1)
+        self.assertEqual(self.ledger.modules['fold'].FINISHES, 1)
+        self.assertNotEqual(generation, self.ledger.generation)
+        generation = self.ledger.generation
+        with patch.dict(os.environ, DOIT_PROJECT='corrected'):
+            with self.counted_reads() as counts: events, _ = self.live_refresh(2)
+            self.assertEqual(counts, {}); self.assertEqual(events, [])
+            self.assertEqual(self.ledger.folds, 3)
+            self.assertEqual(self.ledger.modules['fold'].FINISHES, 1)
+            self.assertIs(self.ledger.raw_events, raw); self.assertIs(self.ledger.file_offsets, offsets)
+            self.assertNotEqual(generation, self.ledger.generation)
+            with self.file.open('a') as f: f.write('{"type":"tick","project":"corrected"}\n')
+            self.live_refresh(3); self.live_refresh(11)
+            self.assertEqual(self.ledger.folds, 3)
+            self.assertEqual(len(self.live_refresh(12)[0]), 1)
+            self.assertEqual(self.ledger.folds, 4)
+            other = self.root/'other-events'; other.mkdir()
+            with self.ledger.live(self.src, self.root) as fold:
+                self.assertEqual(self.ledger.refresh(fold, other, NOW+dt.timedelta(seconds=13))[0], [])
+            self.assertEqual(self.ledger.raw_events, [])
 
 
 if __name__=='__main__': unittest.main()

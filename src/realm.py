@@ -212,6 +212,11 @@ def ledger_snapshot(now=None):
         yield live_fold, events, folded
 
 
+def ledger_generation():
+    with ledger_snapshot():
+        return LEDGER.generation
+
+
 def read_all():
     """Shared corrected ledger rows and offsets; parse/fold once per change."""
     with ledger_snapshot() as (_, raw, _folded):
@@ -225,26 +230,7 @@ def read_all():
             _REF_CACHE.update({e['_src']: e.get('subject') for e in raw if e['_src'] in refs})
             rows = [c for e in raw for c in [compact(e, e['actor'])] if c]
             rows.sort(key=lambda r: r['t'])
-            offsets, file_offsets = {}, {}
-            for meta in LEDGER.generation:
-                name, size = meta[0], meta[3]
-                previous = LEDGER.file_offsets.get(name)
-                if previous and previous[0] == meta:
-                    off = previous[1]
-                else:
-                    with (EVENTS / name).open('rb') as fh:
-                        # Search backwards only as far as the final newline.
-                        pos, suffix = size, b''
-                        while pos and b'\n' not in suffix:
-                            start = max(0, pos - 4096)
-                            fh.seek(start)
-                            suffix = fh.read(pos - start) + suffix
-                            pos = start
-                        off = size - len(suffix.rsplit(b'\n', 1)[-1]) if suffix else 0
-                offsets[name] = off
-                file_offsets[name] = (meta, off)
-            LEDGER.file_offsets = file_offsets
-            LEDGER.rows, LEDGER.offsets = rows, offsets
+            LEDGER.rows = rows
         # Row dicts are cheap and callers join claim times onto them. Never let
         # a bootstrap mutate the shared rows seen by another request.
         return [dict(r) for r in LEDGER.rows], raw, dict(LEDGER.offsets)
@@ -576,7 +562,7 @@ def fires_register():
         return _FIRES["v"]
     v = None
     try:
-        p = subprocess.run([sys.executable, str(script), "--json"], capture_output=True, text=True, timeout=180, env={**os.environ, "DOIT_ROOT": str(ROOT)})
+        p = subprocess.run([sys.executable, str(script), "--json"], capture_output=True, text=True, timeout=180, env={**os.environ, "DOIT_ROOT": str(ROOT), "DOIT_READ_CACHE": "0"})
         data = json.loads(p.stdout or "[]")
         if isinstance(data, list):
             v = [{"cls": d.get("class"), "n": d.get("n"), "first": d.get("first"), "last": d.get("last"), "fix": d.get("fix"),
@@ -690,7 +676,7 @@ def tick_omens():
     if not script.is_file():
         return None
     try:
-        p = subprocess.run([sys.executable, str(script)], capture_output=True, text=True, timeout=180, env={**os.environ, "DOIT_ROOT": str(ROOT)})
+        p = subprocess.run([sys.executable, str(script)], capture_output=True, text=True, timeout=180, env={**os.environ, "DOIT_ROOT": str(ROOT), "DOIT_READ_CACHE": "0"})
         lines = []
         for l in p.stdout.splitlines():
             parts = [x.strip() for x in l.split("|", 2)]
@@ -713,7 +699,7 @@ def omens_model(states, now=None):
     now = now or dt.datetime.now(dt.timezone.utc)
     with _OM["lock"]:
         with ledger_snapshot() as (_, events, _folded):
-            generation = (LEDGER.key, LEDGER.generation)
+            generation = LEDGER.event_key
             if _OM["generation"] != generation:
                 _OM["rows"] = [r for e in events
                                if e.get('subject') != 'operator-ruling' and e.get('problem') != 'operator-ruling'
@@ -1148,7 +1134,7 @@ def throughput_payload(cached=False):
                                   cwd=LIVE_REPO, stdin=subprocess.DEVNULL,
                                   capture_output=True, text=True, timeout=THROUGHPUT_TIMEOUT,
                                   env={**os.environ, "DOIT_ROOT": str(ROOT),
-                                       "DOIT_NOW": result["throughput_at"]})
+                                       "DOIT_NOW": result["throughput_at"], "DOIT_READ_CACHE": "0"})
             if proc.returncode:
                 raise ValueError(f"throughput exit {proc.returncode}: {proc.stderr.strip()}")
             value = json.loads(proc.stdout)
@@ -1190,7 +1176,7 @@ def derive_dossier(item_id):
         return None
     try:
         p = subprocess.run([sys.executable, str(BRIEF), item_id, "--json"], capture_output=True, text=True,
-                           timeout=120, env={**os.environ, "DOIT_ROOT": str(ROOT)})
+                           timeout=120, env={**os.environ, "DOIT_ROOT": str(ROOT), "DOIT_READ_CACHE": "0"})
         if p.returncode == 0:
             return json.loads(p.stdout)
         if p.returncode == 2 and p.stdout.strip() == "":
