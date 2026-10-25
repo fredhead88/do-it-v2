@@ -11,6 +11,7 @@ and the one event it appends is what `fold` reads for staleness. The Executor is
 a supervised pane that reads the same lane for itself; nothing here launches it.
 """
 import argparse, fcntl, os, pathlib, re, socket, sys, time
+from datetime import datetime, timezone
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import carry, dispatch, fold, intake, notes, pane_resume, panes, tree_cleanup  # noqa: E402
 # `relay` is imported LAZILY, inside `wait()` only — importing tick.py must not
@@ -530,7 +531,7 @@ def _record():
         look_error = f"{look_error}; {e}" if look_error else f"{e}"
     try:
         import up
-        relay_status = up.ensure_relay(ev, fold.NOW)
+        relay_status = up.ensure_relay(ev, datetime.now(timezone.utc))
     except Exception:
         relay_status = "undetermined"
     # L-charter-0046/L-spec-0473, R1/R3/R4: the tick's own Proving bookkeeping —
@@ -655,6 +656,12 @@ def _record():
     # The one liveness fact: `fold` reads the newest of these for staleness, and
     # `lane` is the count — the whole record this process leaves behind.
     kv = {"lane": len(todo), "relay": relay_status}
+    if relay_status == "wedged":
+        try:
+            kv["relay_heartbeat_age_s"] = (datetime.now(timezone.utc).timestamp()
+                                            - (fold.ROOT / "relay.heartbeat").stat().st_mtime)
+        except OSError:
+            kv["relay_heartbeat_age_s"] = None
     if errors:
         kv["carry_error"] = "; ".join(errors)
     if intake_errors:
