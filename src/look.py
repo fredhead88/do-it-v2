@@ -924,7 +924,7 @@ def _append_watchdog(root, dst, event_type, **fields):
 
 
 def heartbeat_missed(name, now, events, *, root=None, sender=None, dst=None):
-    """Observe cron starts and deliver at most one successful send per outage.
+    """Observe cron starts/skips and deliver at most one successful send per outage.
 
     Alert identity uses last_start, and ordering uses measured_at. Emitted ts
     belongs to the writer's clock and is deliberately never used here.
@@ -941,6 +941,18 @@ def heartbeat_missed(name, now, events, *, root=None, sender=None, dst=None):
         missed = newest is None or (now - newest).total_seconds() > window * 60
     except (KeyError, TypeError, ValueError, UnicodeError):
         newest, last_start, missed = None, "none", True
+    # Skip evidence is independent: a broken skip store must never invalidate
+    # a healthy start, and skips never enter the run/overrun reader's ring.
+    try:
+        rows = _read_cron_store(cron_run.skip_store_path(name, root)) or []
+        skips = [(datetime.fromisoformat(str(r["ts"]).replace("Z", "+00:00")), r["ts"])
+                 for r in rows if isinstance(r, dict) and r.get("ev") == "skip"]
+        skip_newest, skip_ts = max(skips, key=lambda item: item[0], default=(None, "none"))
+        if skip_newest is not None and (newest is None or skip_newest > newest):
+            skip_missed = (now - skip_newest).total_seconds() > window * 60
+            newest, last_start, missed = skip_newest, skip_ts, skip_missed
+    except (KeyError, TypeError, ValueError, UnicodeError):
+        pass
     if not missed or _DRY_RUN:
         return missed
     alerts = [e for e in [*events, *_read_jsonl(dst)]

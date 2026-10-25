@@ -11,14 +11,20 @@ buffer (last 20 lines, at most 2000 characters) that becomes `error_tail` — th
 appends an `end` row `{ev:"end", ts, rc, duration_s, error_class, error_tail,
 start_ts}`. Exits with CMD's own exit code; a signal death exits `128+n`.
 
+Takes a non-blocking exclusive flock on `<name>.lock` before any row, held
+through the end row. The descriptor is close-on-exec. A contending invocation
+runs nothing, prints nothing, returns 0, and records a `skip` row with reason
+`already-running` in its own newest-50-row `<name>.skips.jsonl` ring. Skips
+never evict start/end rows. Any other lock error runs CMD as usual.
+
 `cron-run` must never change a job's behaviour (Constraints): a failure to
-write a row (unwritable root, full disk, lock contention) is swallowed —
+write a row (unwritable root, full disk, concurrent writer) is swallowed —
 nothing is printed, nothing raises past this module — and CMD's exit code and
 stdout/stderr pass through exactly as CMD produced them. Only alarms reach the
 ledger, and only through `look` (`_check_cron_runs`); this module writes
 NOTHING to `$DOIT_ROOT/events/`.
 """
-import collections, json, os, pathlib, re, subprocess, sys, time
+import collections, errno, fcntl, json, os, pathlib, re, subprocess, sys, time
 from datetime import datetime, timezone
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
@@ -43,6 +49,11 @@ def store_path(name, root=None):
     contract)."""
     root = pathlib.Path(root) if root is not None else fold.ROOT
     return root / "state" / "cron-runs" / f"{name}.jsonl"
+
+
+def skip_store_path(name, root=None):
+    """The separate skip ring, with the same live-root default as store_path."""
+    return store_path(name, root).with_name(f"{name}.skips.jsonl")
 
 
 def error_class(rc, stderr_tail):
@@ -90,8 +101,36 @@ def _append_row(path, row):
 
 def run(name, cmd, root=None):
     """Runs CMD (a list), wrapped. Returns CMD's own exit code (128+n on a
-    signal death) — never raises."""
+    signal death), or 0 without running CMD when this job already holds its lock."""
     path = store_path(name, root)
+    lock = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lock = path.with_suffix(".lock").open("a")
+        os.set_inheritable(lock.fileno(), False)
+    except OSError:
+        if lock is not None:
+            lock.close()
+        lock = None
+    if lock is not None:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            lock.close()
+            lock = None
+            if exc.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
+                _append_row(skip_store_path(name, root), {"ev": "skip", "ts": _now_iso(),
+                            "pid": os.getpid(), "reason": "already-running"})
+                return 0
+    try:
+        return _run_command(path, cmd)
+    finally:
+        if lock is not None:
+            lock.close()
+
+
+def _run_command(path, cmd):
+    """Existing command execution and start/end bookkeeping, under run's lock."""
     start_ts = _now_iso()
     _append_row(path, {"ev": "start", "ts": start_ts, "pid": os.getpid()})
     t0 = time.monotonic()

@@ -11,7 +11,9 @@ separate, freshly-spawned reader process. AC14 is a meta-harness proving the
 whole cron-adjacent test surface (this file, test_crons.py, test_look.py)
 never reaches a real crontab binary or a real cron.d path.
 """
-import json, os, pathlib, subprocess, sys, tempfile
+import errno, fcntl, hashlib, json, os, pathlib, signal, subprocess, sys, tempfile, time
+from datetime import datetime
+from unittest.mock import patch
 
 HERE = pathlib.Path(__file__).resolve().parent
 REPO = HERE.parent
@@ -114,6 +116,190 @@ check(p_ac4.returncode == 5, f"R14-AC4: exit code 5 despite an unwritable state 
 check(p_ac4.stdout == "hi\n", f"R14-AC4: stdout is still 'hi': {p_ac4.stdout!r}")
 check(p_ac4.stderr == "", f"R14-AC4: nothing on stderr beyond CMD's own (CMD wrote none): {p_ac4.stderr!r}")
 print("R14-AC4 ok")
+
+
+def _overlap_signed(ac, body):
+    body = json.dumps(body, sort_keys=True)
+    print(json.dumps(dict(url=f"cli://cron-run/L-spec-1532/AC{ac}", status=0,
+                          body_sha256=hashlib.sha256(body.encode()).hexdigest(), body_excerpt=body)))
+
+
+def _spawn_job(root, name, cmd):
+    return subprocess.Popen([sys.executable, str(HERE / "cron_run.py"), name, "--", *cmd],
+                            env=_env_for(root), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, start_new_session=True)
+
+
+def _wait_file(path):
+    deadline = time.monotonic() + 5
+    while not path.exists():
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"timed out waiting for {path.name}")
+        time.sleep(.01)
+
+
+def _cleanup_job(proc):
+    # Also reap commands left in the fixture's own group after wrapper SIGKILL.
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    proc.communicate(timeout=5)
+
+
+def _single_instance_checks():
+    with tempfile.TemporaryDirectory(prefix="cron-overlap-") as directory:
+        root = pathlib.Path(directory)
+        first = _spawn_job(root, "j-ac1", ["sh", "-c", "sleep 4"])
+        try:
+            _wait_file(cron_run.store_path("j-ac1", root))
+            marker = root / "second-ran"
+            began = time.monotonic()
+            second = _spawn_job(root, "j-ac1", ["sh", "-c", f"echo ran > {marker}"])
+            try:
+                out, err = second.communicate(timeout=2)
+                elapsed = time.monotonic() - began
+                check(second.returncode == 0 and elapsed < 2 and out == err == "",
+                      "1532 AC1: a contending process returns 0 immediately and silently")
+                check(not marker.exists(), "1532 AC1: the second command never runs")
+                skips = [json.loads(line) for line in cron_run.skip_store_path("j-ac1", root).read_text().splitlines()]
+                check(len(skips) == 1 and set(skips[0]) == {"ev", "ts", "pid", "reason"},
+                      "1532 AC1: exactly one skip with exactly the contracted keys")
+                check(skips[0]["ev"] == "skip" and skips[0]["reason"] == "already-running"
+                      and skips[0]["pid"] == second.pid and isinstance(skips[0]["pid"], int)
+                      and datetime.fromisoformat(skips[0]["ts"]).utcoffset() is not None,
+                      "1532 AC1: skip identity, reason and ISO instant")
+            finally:
+                _cleanup_job(second)
+            first.communicate(timeout=6)
+            rows = [json.loads(line) for line in cron_run.store_path("j-ac1", root).read_text().splitlines()]
+            check(first.returncode == 0 and [row["ev"] for row in rows] == ["start", "end"],
+                  "1532 AC1: the first copy keeps its own result and two-row ring")
+            _overlap_signed(1, dict(second_rc=second.returncode, elapsed_s=elapsed,
+                                    stdout=out, stderr=err, marker_exists=marker.exists(),
+                                    skip=skips[0], first_rc=first.returncode, ring_events=[r["ev"] for r in rows]))
+        finally:
+            _cleanup_job(first)
+
+        check(cron_run.run("j-release", ["sh", "-c", "exit 3"], root) == 3,
+              "1532 AC2: failing command retains exit 3")
+        marker = root / "released"
+        check(cron_run.run("j-release", ["sh", "-c", f"touch {marker}; exit 7"], root) == 7
+              and marker.exists(), "1532 AC2: another command runs after failure")
+
+        daemon_pid = root / "daemon-pid"
+        daemon = _spawn_job(root, "j-daemon", ["sh", "-c",
+                            f"sleep 30 >/dev/null 2>&1 & echo $! > {daemon_pid}; exit 0"])
+        try:
+            daemon.communicate(timeout=5)
+            check(daemon.returncode == 0, "1532 AC2: a background leftover does not delay wrapper exit")
+            marker = root / "after-daemon"
+            check(cron_run.run("j-daemon", ["touch", str(marker)], root) == 0 and marker.exists()
+                  and not cron_run.skip_store_path("j-daemon", root).exists(),
+                  "1532 AC2: a background leftover cannot retain the lock")
+        finally:
+            _cleanup_job(daemon)
+
+        fd_job = _spawn_job(root, "j-fds", [sys.executable, "-c",
+                             "import os; "
+                             "print([os.readlink('/proc/self/fd/'+fd) for fd in os.listdir('/proc/self/fd') "
+                             "if os.path.exists('/proc/self/fd/'+fd)])"])
+        try:
+            fd_out, fd_err = fd_job.communicate(timeout=5)
+            check(fd_job.returncode == 0 and not fd_err and ".lock" not in fd_out,
+                  "1532 AC2: no lock descriptor reaches CMD")
+        finally:
+            _cleanup_job(fd_job)
+
+        child_pid = root / "child-pid"
+        killed = _spawn_job(root, "j-killed", ["sh", "-c", f"echo $$ > {child_pid}; exec sleep 30"])
+        try:
+            _wait_file(child_pid)
+            killed.kill()
+            killed.wait(timeout=5)
+            os.kill(int(child_pid.read_text()), 0)
+            marker = root / "after-kill"
+            check(cron_run.run("j-killed", ["touch", str(marker)], root) == 0 and marker.exists()
+                  and not cron_run.skip_store_path("j-killed", root).exists(),
+                  "1532 AC2: SIGKILL releases wrapper lock while CMD still lives")
+        finally:
+            _cleanup_job(killed)
+
+        ready, release = root / "ready", root / "release"
+        concurrent = _spawn_job(root, "j-a", [sys.executable, "-c",
+            "import pathlib,sys,time; pathlib.Path(sys.argv[1]).touch(); "
+            "\nwhile not pathlib.Path(sys.argv[2]).exists(): time.sleep(.01)", str(ready), str(release)])
+        try:
+            _wait_file(ready)
+            marker = root / "other-name"
+            check(cron_run.run("j-b", ["touch", str(marker)], root) == 0 and marker.exists()
+                  and concurrent.poll() is None, "1532 AC2: different names run concurrently")
+            release.touch()
+            concurrent.communicate(timeout=5)
+            check(concurrent.returncode == 0 and not list(root.glob("state/cron-runs/j-?.skips.jsonl")),
+                  "1532 AC2: independent jobs never skip each other")
+        finally:
+            _cleanup_job(concurrent)
+        _overlap_signed(2, dict(failure_rc=3, next_rc=7, daemon_lock_released=True,
+                                fd_targets=fd_out.strip(), sigkill_lock_released=True, independent_names=True))
+
+        broken = root / "broken"
+        broken.mkdir()
+        (broken / "state").write_text("not a directory")
+        marker = broken / "ran"
+        check(cron_run.run("j-broken", ["sh", "-c", f"touch {marker}; exit 5"], broken) == 5
+              and marker.exists() and not list(broken.rglob("*.skips.jsonl")),
+              "1532 AC3: a failed lock-directory creation never skips CMD")
+        for error in (errno.ENOLCK, errno.EACCES):
+            marker = root / f"ran-{error}"
+            with patch.object(cron_run.fcntl, "flock", side_effect=OSError(error, "fixture")):
+                check(cron_run.run("j-lock-error", ["sh", "-c", f"touch {marker}; exit 6"], root) == 6
+                      and marker.exists() and not cron_run.skip_store_path("j-lock-error", root).exists(),
+                      "1532 AC3: non-contention flock errors never skip CMD")
+        with patch.object(cron_run.fcntl, "flock", side_effect=BlockingIOError(errno.EWOULDBLOCK, "held")), \
+                patch.object(cron_run.subprocess, "Popen") as popen:
+            check(cron_run.run("j-held", ["false"], root) == 0 and not popen.called,
+                  "1532 AC3: only contention skips the command")
+        held_rows = [json.loads(line) for line in cron_run.skip_store_path("j-held", root).read_text().splitlines()]
+        check(len(held_rows) == 1 and held_rows[0]["reason"] == "already-running",
+              "1532 AC3: contention records exactly one skip")
+        _overlap_signed(3, dict(directory_failure_rc=5, flock_error_rc=6,
+                                flock_errors=[errno.ENOLCK, errno.EACCES], contention_rc=0, skip_rows=held_rows))
+
+        ring = cron_run.store_path("j-ac4", root)
+        skip_path = cron_run.skip_store_path("j-ac4", root)
+        check(skip_path == root / "state/cron-runs/j-ac4.skips.jsonl",
+              "1532 AC4: skip_store_path has the contracted path")
+        with patch.object(cron_run.fold, "ROOT", root):
+            check(cron_run.skip_store_path("j-ac4") == skip_path, "1532 AC4: default root read live")
+        with patch.object(cron_run.fold, "ROOT", broken):
+            check(cron_run.skip_store_path("j-ac4") == broken / "state/cron-runs/j-ac4.skips.jsonl",
+                  "1532 AC4: default root is never cached")
+        with ring.with_suffix(".lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            for index in range(55):
+                with patch.object(cron_run.os, "getpid", return_value=20000 + index):
+                    check(cron_run.run("j-ac4", ["false"], root) == 0, "1532 AC4: real held-lock skip")
+            check(not ring.exists(), "1532 AC4: skips never create the start/end ring")
+            reader = subprocess.run([sys.executable, "-c",
+                "import cron_run,json,look,sys; print(json.dumps(look._read_cron_store("
+                "cron_run.skip_store_path('j-ac4', sys.argv[1]))))", str(root)],
+                cwd=HERE, env=_env_for(root), capture_output=True, text=True, check=True)
+            rows = json.loads(reader.stdout)
+            check(len(rows) == 50 and all(row["ev"] == "skip" for row in rows)
+                  and [row["pid"] for row in rows] == list(range(20005, 20055)),
+                  "1532 AC4: a fresh reader sees the newest 50 of 55 skips in order")
+            original = "\n".join(json.dumps(dict(ev="start" if i == 0 else "end", ts=str(i)))
+                                  for i in range(50)) + "\n"
+            ring.write_text(original)
+            for _ in range(55):
+                cron_run.run("j-ac4", ["false"], root)
+            check(ring.read_bytes() == original.encode(), "1532 AC4: 55 skips never evict the open start")
+        _overlap_signed(4, dict(fresh_reader_rows=len(rows), pids=[row["pid"] for row in rows],
+                                ring_created_by_skip=False, existing_ring_byte_identical=True))
+
+
+_single_instance_checks()
 
 
 # ══ R14-AC14 · behavioural hermeticity — no real crontab/cron.d ever reached ═
