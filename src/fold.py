@@ -21,6 +21,17 @@ import freeze
 import owed, routing
 import proving
 import ledger_compact
+import ledger_cache
+
+
+def _ledger_excepthook(exc_type, value, traceback, previous=sys.excepthook):
+    if isinstance(value, ledger_cache.LockTimeout):
+        print(str(value), file=sys.stderr, flush=True)
+        os._exit(75)
+    previous(exc_type, value, traceback)
+
+
+sys.excepthook = _ledger_excepthook
 
 ROOT = pathlib.Path(os.environ.get("DOIT_ROOT", pathlib.Path.home() / ".do-it"))
 EVENTS, BOARD = ROOT / "events", ROOT / "board.md"

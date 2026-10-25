@@ -2,6 +2,9 @@
 from contextlib import closing
 import copy
 import hashlib
+import ast
+import fcntl
+import io
 import json
 import os
 from pathlib import Path
@@ -9,6 +12,10 @@ import subprocess
 import sqlite3
 import sys
 import tempfile
+import threading
+import time
+from contextlib import ExitStack, redirect_stderr, redirect_stdout
+from types import SimpleNamespace
 import tracemalloc
 import unittest
 from unittest.mock import patch
@@ -373,6 +380,381 @@ class CacheTests(unittest.TestCase):
         self.assertTrue(all(p.returncode == 0 for p in procs), results)
         self.assertTrue(all(out == results[0][0] for out, err in results))
         self.assertEqual(json.loads(results[0][0]), self.same())
+
+    def process_env(self, **extra):
+        return {**os.environ, 'DOIT_ROOT': str(self.root),
+                'PYTHONPATH': str(Path(__file__).parent.resolve()), **extra}
+
+    def processes(self, script, count=1, **extra):
+        procs = [subprocess.Popen([sys.executable, '-c', script],
+                 env=self.process_env(**extra), stdout=subprocess.PIPE,
+                 stderr=subprocess.PIPE, text=True) for _ in range(count)]
+        try:
+            results = [p.communicate(timeout=30) for p in procs]
+            self.assertEqual([p.returncode for p in procs], [0] * count, results)
+            self.assertTrue(all(out == results[0][0] for out, err in results), results)
+            return json.loads(results[0][0])
+        finally:
+            for p in procs:
+                if p.poll() is None:
+                    p.kill()
+                p.wait()
+
+    def test_ac1_current_readers_unpack_together(self):
+        self.write('L-operator-01.jsonl', [dict(ts='1', type='row')])
+        expected = self.same()
+        markers = self.root / 'markers'
+        markers.mkdir()
+        actual = self.processes("""
+import fold, ledger_cache, os, time, json
+from pathlib import Path
+markers = Path(os.environ['MARKERS'])
+original = ledger_cache._unpack
+entered = False
+def unpack(*args):
+    global entered
+    if not entered:
+        entered = True
+        (markers / f'{os.getpid()}.in').touch()
+        end = time.monotonic() + 20
+        while len(list(markers.glob('*.in'))) < 3:
+            if time.monotonic() > end:
+                raise RuntimeError('readers did not overlap')
+            time.sleep(.01)
+        assert not list(markers.glob('*.done'))
+        (markers / f'{os.getpid()}.overlap').touch()
+        while len(list(markers.glob('*.overlap'))) < 3:
+            if time.monotonic() > end:
+                raise RuntimeError('overlap barrier expired')
+            time.sleep(.01)
+    return original(*args)
+ledger_cache._unpack = unpack
+result = fold.read_events()
+(markers / f'{os.getpid()}.done').touch()
+print(json.dumps(result))
+""", 3, MARKERS=str(markers))
+        self.assertEqual(actual, expected)
+        self.assertEqual(len(list(markers.glob('*.in'))), 3)
+
+    def cached_fixture(self):
+        self.write('L-operator-01.jsonl', [dict(ts='1', type='row')])
+        expected = self.same()
+        cache = self.root / 'cache'
+        return expected, next(cache.glob('*.sqlite3')), next(cache.glob('*.lock'))
+
+    def test_ac4_lock_clock_is_independent_of_callers(self):
+        self.write('L-operator-01.jsonl', [dict(ts='1', type='row')])
+        expected = fold.read_events(use_cache=False)
+        with patch.object(time, 'monotonic', side_effect=iter([0, 1500])) as clock:
+            self.assertEqual(time.monotonic(), 0)
+            self.assertEqual(fold.read_events(), expected)  # Cold rebuild.
+            self.assertEqual(fold.read_events(), expected)  # Current cache.
+            self.write('L-operator-01.jsonl', [dict(ts='2', type='row')], 'a')
+            self.assertEqual(fold.read_events(), fold.read_events(use_cache=False))
+            self.assertEqual(time.monotonic(), 1500)
+            self.assertEqual(clock.call_count, 2)
+
+    def test_ac2_current_read_writes_nothing(self):
+        expected, db, lock = self.cached_fixture()
+        cache = db.parent
+        for rebuild in (False, True):
+            if rebuild:
+                db.unlink()
+                self.assertEqual(fold.read_events(), expected)
+                self.assertTrue(db.exists())
+            before = (db.read_bytes(), db.stat().st_mtime_ns, lock.read_bytes(), lock.stat().st_mtime_ns)
+            journal = Path(str(db) + '-journal')
+            self.assertFalse(journal.exists())
+            db.chmod(0o444)
+            cache.chmod(0o500)
+            try:
+                with patch.object(ledger_cache, '_pack', side_effect=AssertionError('pack on shared read')), \
+                     patch.object(ledger_cache, '_connect', wraps=ledger_cache._connect) as connect, \
+                     patch.object(fold, '_read_events_uncached', side_effect=AssertionError('fallback')):
+                    for _ in range(2):
+                        self.assertEqual(fold.read_events(), expected)
+                    self.assertTrue(connect.call_count)
+                    self.assertTrue(all(not c.kwargs.get('writable', False) for c in connect.call_args_list))
+                self.assertEqual(before, (db.read_bytes(), db.stat().st_mtime_ns, lock.read_bytes(), lock.stat().st_mtime_ns))
+                self.assertFalse(journal.exists())
+            finally:
+                cache.chmod(0o700)
+                db.chmod(0o600)
+            self.assertEqual(fold.read_events(use_cache=False), expected)
+        # Empty and version-zero databases must take the exclusive initializer.
+        for empty in (True, False):
+            db.unlink()
+            if empty:
+                db.touch()
+            else:
+                with sqlite3.connect(db) as connection:
+                    connection.execute('CREATE TABLE placeholder (x)')
+            with patch.object(ledger_cache, '_update', wraps=ledger_cache._update) as update:
+                self.assertEqual(fold.read_events(), expected)
+                update.assert_called_once()
+
+    def test_ac3_update_is_exclusive_once_and_round_trips(self):
+        expected, db, lock = self.cached_fixture()
+        self.write('L-operator-01.jsonl', [dict(ts='2', type='appended')], 'a')
+        markers = self.root / 'updates'
+        markers.mkdir()
+        result = self.processes("""
+import fold, ledger_cache, os, time, json, fcntl
+from pathlib import Path
+markers = Path(os.environ['MARKERS'])
+(markers / f'{os.getpid()}.ready').touch()
+end = time.monotonic() + 20
+while len(list(markers.glob('*.ready'))) < 4:
+    if time.monotonic() > end: raise RuntimeError('start barrier')
+    time.sleep(.01)
+original = ledger_cache._update
+unpack = ledger_cache._unpack
+def update(*args):
+    (markers / f'{os.getpid()}-{time.monotonic_ns()}.update').touch()
+    with next((fold.ROOT / 'cache').glob('*.lock')).open('rb') as fh:
+        try: fcntl.flock(fh, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError: pass
+        else: raise AssertionError('update lacks exclusive lock')
+    return original(*args)
+def shared_unpack(*args):
+    with next((fold.ROOT / 'cache').glob('*.lock')).open('rb') as fh:
+        fcntl.flock(fh, fcntl.LOCK_SH | fcntl.LOCK_NB)
+    return unpack(*args)
+ledger_cache._update = update
+ledger_cache._unpack = shared_unpack
+print(json.dumps(fold.read_events()))
+""", 4, MARKERS=str(markers))
+        self.assertEqual(len(list(markers.glob('*.update'))), 1)
+        self.assertEqual(result, fold.read_events(use_cache=False))
+        fresh = self.processes("""
+import fold, ledger_cache, json
+def forbidden(*args): raise AssertionError('second update')
+ledger_cache._update = forbidden
+print(json.dumps(fold.read_events()))
+""")
+        self.assertEqual(fresh, result)
+        self.assertEqual(fresh[-1]['type'], 'appended')
+        self.write('L-operator-01.jsonl', [dict(ts='3', type='waiting')], 'a')
+        with lock.open('rb') as fh, patch.dict(os.environ, DOIT_LEDGER_LOCK_WAIT_S='0.2'):
+            fcntl.flock(fh, fcntl.LOCK_SH)
+            started = time.monotonic()
+            with self.assertRaises(ledger_cache.LockTimeout):
+                ledger_cache.read(self.events, db.parent, fold.actor_of)
+            self.assertGreaterEqual(time.monotonic() - started, .2)
+            self.assertLess(time.monotonic() - started, 2)
+        self.same()
+
+    def test_ac4_lock_timeout_is_bounded_clear_and_never_uncached(self):
+        expected, db, lock = self.cached_fixture()
+        with lock.open('rb') as fh, patch.dict(os.environ, DOIT_LEDGER_LOCK_WAIT_S='0.5'):
+            fcntl.flock(fh, fcntl.LOCK_EX)
+            start = time.monotonic()
+            with self.assertRaises(ledger_cache.LockTimeout) as caught:
+                ledger_cache.read(self.events, db.parent, fold.actor_of)
+            self.assertGreaterEqual(time.monotonic() - start, .5)
+            self.assertLess(time.monotonic() - start, 5)
+            self.assertIsInstance(caught.exception, RuntimeError)
+            self.assertNotIsInstance(caught.exception, (OSError, ValueError))
+            self.assertRegex(str(caught.exception), r'^ledger cache: lock not acquired within 0\.5s \(.+\.lock\)$')
+            with patch.object(fold, '_read_events_uncached', side_effect=AssertionError('fallback')):
+                with self.assertRaises(ledger_cache.LockTimeout): fold.read_events()
+            with patch.dict(os.environ, DOIT_LEDGER_LOCK_WAIT_S='0'):
+                start = time.monotonic()
+                with patch.object(ledger_cache.time, 'sleep', side_effect=AssertionError('waited')):
+                    with self.assertRaises(ledger_cache.LockTimeout): fold.read_events()
+                self.assertLess(time.monotonic() - start, .2)
+        self.assertEqual(fold.read_events(), expected)
+        for value in ('abc', '-1', 'nan', 'inf', '-inf'):
+            with patch.dict(os.environ, DOIT_LEDGER_LOCK_WAIT_S=value):
+                self.assertEqual(ledger_cache.lock_wait_s(), 120.0)
+
+    def test_ac5_nested_read_raises_at_once(self):
+        expected, db, lock = self.cached_fixture()
+        def read(): return ledger_cache.read(self.events, db.parent, fold.actor_of)
+        original = ledger_cache._unpack
+        with patch.dict(os.environ, DOIT_LEDGER_LOCK_WAIT_S='60'):
+            with patch.object(ledger_cache, '_unpack', side_effect=lambda *args: read()):
+                start = time.monotonic()
+                with self.assertRaises(ledger_cache.ReentrantRead) as caught: read()
+                self.assertLess(time.monotonic() - start, 2)
+                self.assertIsInstance(caught.exception, ledger_cache.LockTimeout)
+                self.assertIn(str(lock), str(caught.exception))
+            self.assertEqual(read(), expected)
+            entered = False
+            def fork_unpack(*args):
+                nonlocal entered
+                if not entered:
+                    entered = True
+                    pid = os.fork()
+                    if pid == 0:
+                        ledger_cache._unpack = original
+                        try: os._exit(0 if read() == expected else 2)
+                        except BaseException: os._exit(3)
+                    end = time.monotonic() + 3
+                    while True:
+                        done, status = os.waitpid(pid, os.WNOHANG)
+                        if done:
+                            self.assertEqual(os.waitstatus_to_exitcode(status), 0)
+                            break
+                        if time.monotonic() > end:
+                            os.kill(pid, 9); os.waitpid(pid, 0)
+                            self.fail('forked read hung')
+                        time.sleep(.01)
+                return original(*args)
+            with patch.object(ledger_cache, '_unpack', side_effect=fork_unpack):
+                self.assertEqual(read(), expected)
+            entered = False
+            def thread_unpack(*args):
+                nonlocal entered
+                if not entered:
+                    entered = True
+                    result, errors = [], []
+                    def run():
+                        try: result.append(read())
+                        except BaseException as exc: errors.append(exc)
+                    thread = threading.Thread(target=run, daemon=True)
+                    thread.start(); thread.join(3)
+                    self.assertFalse(thread.is_alive(), 'second thread hung')
+                    self.assertEqual(errors, [])
+                    self.assertEqual(result, [expected])
+                return original(*args)
+            with patch.object(ledger_cache, '_unpack', side_effect=thread_unpack):
+                self.assertEqual(read(), expected)
+            self.assertEqual(read(), expected)
+
+    def test_ac6_uncaught_timeout_is_one_line_exit_75(self):
+        expected, db, lock = self.cached_fixture()
+        with lock.open('rb') as fh:
+            fcntl.flock(fh, fcntl.LOCK_EX)
+            proc = subprocess.run([sys.executable, '-c', 'import fold; fold.read_events()'],
+                env=self.process_env(DOIT_LEDGER_LOCK_WAIT_S='0.3'), capture_output=True, text=True, timeout=5)
+        self.assertEqual(proc.returncode, 75, proc.stderr)
+        self.assertEqual(proc.stderr, f'ledger cache: lock not acquired within 0.3s ({lock})\n')
+        self.assertNotIn('Traceback', proc.stdout + proc.stderr)
+        proc = subprocess.run([sys.executable, '-c', 'import fold; raise RuntimeError("boom")'],
+            env=self.process_env(), capture_output=True, text=True, timeout=5)
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn('Traceback', proc.stderr)
+        self.assertIn('RuntimeError: boom', proc.stderr)
+        proc = subprocess.run([sys.executable, '-c',
+            'import fold,ledger_cache; raise ledger_cache.ReentrantRead("nested")'],
+            env=self.process_env(), capture_output=True, text=True, timeout=5)
+        self.assertEqual(proc.returncode, 75)
+        self.assertEqual(proc.stderr, 'nested\n')
+        self.assertNotIn('Traceback', proc.stdout)
+
+    def test_ac7_every_read_site_logs_and_carries_on(self):
+        import up
+        import tick
+        import nextstep
+        import relay
+        import install_sync
+        import push_origin
+        import pr_closeout
+        sites = ('planner', 'relay', 'executor-top', 'executor-settled',
+                 'executor-pane', 'launch', 'record-first', 'record-second')
+        call_count = 0
+        for module in (up, tick):
+            tree = ast.parse(Path(module.__file__).read_text())
+            call_count += sum(isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                              and n.func.attr == 'read_events' for n in ast.walk(tree))
+        self.assertEqual(call_count, len(sites))
+        contracts = self.root / 'agents'
+        contracts.mkdir()
+        for role in ('relay', 'executor'):
+            (contracts / f'{role}.md').write_text('fixture contract')
+        message = 'ledger cache: lock not acquired within 1s (x)'
+        for site in sites:
+            with self.subTest(site=site), ExitStack() as stack:
+                def mock(obj, name, **kwargs):
+                    return stack.enter_context(patch.object(obj, name, **kwargs))
+                stderr, stdout = io.StringIO(), io.StringIO()
+                stack.enter_context(redirect_stderr(stderr))
+                stack.enter_context(redirect_stdout(stdout))
+                timeout = ledger_cache.LockTimeout(message)
+                read = mock(fold, 'read_events', side_effect=timeout)
+                uncached = mock(fold, '_read_events_uncached', side_effect=AssertionError('fallback'))
+                mock(up, 'maybe_reexec')
+                sleep = mock(up, '_SLEEP')
+                mock(up.time, 'sleep')
+                mock(up, '_interval', return_value=1)
+                degrade = mock(up, '_degrade', return_value='degraded')
+                mock(up, 'install')
+                mock(up, '_check_guard')
+                mock(up, 'code_sha', return_value=None)
+                mock(up, '_relay_heartbeat')
+                mock(up.models, 'load', return_value=None)
+                mock(up.dispatch, 'AGENTS', new=contracts)
+                emit = mock(up.dispatch, 'emit')
+                if site == 'planner':
+                    self.assertEqual(up._cycle({}, None), 'degraded')
+                    degrade.assert_called_once()
+                    self.assertEqual(read.call_count, 1)
+                elif site == 'relay':
+                    pending = mock(relay, 'pending_packets')
+                    up.relay_main(max_cycles=2)
+                    self.assertEqual(read.call_count, 2)
+                    pending.assert_not_called()
+                    self.assertEqual(sleep.call_count, 2)
+                    sleep.assert_called_with(1)
+                elif site.startswith('executor'):
+                    settle = mock(up, '_settle_overdue')
+                    mock(up.fold, 'fold', return_value=({}, {}, {}, {}))
+                    mock(up.fold, 'render', return_value='board')
+                    mock(up.launch, 'model_for', return_value=None)
+                    mock(up.launch, 'child_env', return_value={})
+                    mock(up, '_child_env', return_value={})
+                    mock(up, '_pane_argv', return_value=['pane', '-n', 'fixture', 'prompt'])
+                    mock(up, '_snapshot', return_value={})
+                    edits = mock(up, '_repo_edits', side_effect=AssertionError('unknown edits'))
+                    mock(up.launch, 'record')
+                    mock(up.launch, 'ended')
+                    proc = SimpleNamespace(pid=123, wait=lambda: 0)
+                    popen = mock(up.subprocess, 'Popen', return_value=proc)
+                    if site == 'executor-settled': read.side_effect = [[], timeout, [], timeout]
+                    if site == 'executor-pane': read.side_effect = [[], [], timeout, [], [], timeout]
+                    up.executor_loop(self.root, 1, max_cycles=2)
+                    self.assertEqual(read.call_count, {'executor-top': 2,
+                        'executor-settled': 4, 'executor-pane': 6}[site])
+                    edits.assert_not_called()
+                    if site == 'executor-pane':
+                        self.assertEqual(popen.call_count, 2)
+                        done = [c for c in emit.call_args_list if c.args[2] == 'spawn-done']
+                        self.assertEqual(len(done), 2)
+                        self.assertTrue(all('repo_edits' not in c.kwargs for c in done))
+                        self.assertIn('unknown repo-edit', stdout.getvalue())
+                        sleep.assert_not_called()
+                    else:
+                        popen.assert_not_called()
+                        self.assertEqual(sleep.call_count, 2)
+                        sleep.assert_called_with(60.0)
+                elif site == 'launch':
+                    step = nextstep.Step('L-spec-fixture', 'spec', 'building',
+                        'action', 'build', 'tick', None, '', None, '')
+                    self.assertIsNone(tick.launch(step, dispatcher=SimpleNamespace(events=None)))
+                    self.assertEqual(read.call_count, 1)
+                    emit.assert_not_called()
+                else:
+                    intake = mock(tick.intake, 'run', return_value={})
+                    mock(tick.notes, 'run')
+                    mock(pr_closeout, 'run')
+                    mock(install_sync, 'run', return_value=[])
+                    mock(push_origin, 'run')
+                    if site == 'record-second': read.side_effect = [[], timeout]
+                    self.assertIsNone(tick._record())
+                    self.assertEqual(read.call_count, 2 if site == 'record-second' else 1)
+                    if site == 'record-first': intake.assert_not_called()
+                    emit.assert_not_called()
+                    # A following tick can take ownership: both failure paths
+                    # released tick.lock rather than retaining a loop's lock.
+                    with (self.root / 'tick.lock').open('rb') as fh:
+                        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                uncached.assert_not_called()
+                repeats = 2 if site in sites[1:5] else 1
+                self.assertEqual(stderr.getvalue(), (message + '\n') * repeats)
+        event = dict(type='spawn-done', subject='L-executor-fixture', spawn='L-executor-fixture')
+        self.assertIsNone(fold.required_reason(event))
+        self.assertIsNone(fold.admits(event, 'executor'))
 
 
 if __name__ == '__main__':

@@ -2,28 +2,84 @@
 
 Only raw events are saved; fold owns ordering, corrections and project filters.
 Transactions publish whole reads atomically under flock. Checksummed, data-only
-pickles avoid JSON reparsing without allowing executable cache content. Any
-cache failure falls back to fold's independent reference parser.
+pickles avoid JSON reparsing without allowing executable cache content. Cache
+corruption falls back to fold's reference parser; lock failures propagate.
 """
+from contextlib import contextmanager
 import fcntl
 import hashlib
 import io
 import json
+import math
 import os
 import pathlib
 import pickle
 import sqlite3
 import sys
+import threading
+import time
 
 import ledger_compact
 
 VERSION = 3
 CHUNK_EVENTS = 256
 PREFIX_CHUNK = 8 * 1024 * 1024
+# Callers may patch the shared time module for their own timeout tests.
+_monotonic = time.monotonic
 
 
 class Invalid(ValueError):
     pass
+
+
+class LockTimeout(RuntimeError):
+    pass
+
+
+class ReentrantRead(LockTimeout):
+    pass
+
+
+# Include pid and thread: neither a fork nor a concurrent thread is recursion.
+_HELD = set()
+
+
+def lock_wait_s():
+    try:
+        value = float(os.environ.get('DOIT_LEDGER_LOCK_WAIT_S', '120'))
+        return value if math.isfinite(value) and value >= 0 else 120.0
+    except ValueError:
+        return 120.0
+
+
+@contextmanager
+def _locked(lock, mode):
+    claim = (str(lock), os.getpid(), threading.get_ident())
+    if claim in _HELD:
+        raise ReentrantRead(f'ledger cache: reentrant read ({lock})')
+    try:
+        fh = lock.open('rb')
+    except FileNotFoundError:
+        fd = os.open(lock, os.O_CREAT | os.O_RDWR, 0o600)
+        fh = os.fdopen(fd, 'rb')
+    with fh:
+        wait = lock_wait_s()
+        deadline = _monotonic() + wait
+        while True:
+            try:
+                fcntl.flock(fh, mode | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                remaining = deadline - _monotonic()
+                if remaining <= 0:
+                    raise LockTimeout(f'ledger cache: lock not acquired within {wait:g}s ({lock})')
+                time.sleep(min(.05, remaining))
+        _HELD.add(claim)
+        try:
+            yield
+        finally:
+            _HELD.discard(claim)
+            fcntl.flock(fh, fcntl.LOCK_UN)
 
 
 class _DataOnly(pickle.Unpickler):
@@ -122,15 +178,19 @@ def _file(path, actor, old):
                 events=events, tail=_parse(data[end:], path.name, actor, line), append=append)
 
 
-def _connect(path):
-    db = sqlite3.connect(path, timeout=5)
+def _connect(path, *, writable=False):
+    # mode=ro refuses absent files and cannot create a journal or run DDL.
+    db = (sqlite3.connect(path, timeout=5) if writable else
+          sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True, timeout=5))
     try:
         # Keep SQLite's page heap bounded. Rollback journal + FULL synchronous
         # protects commits; an interrupted build leaves a valid older cache.
         db.execute('PRAGMA cache_size=-2048')
         version = db.execute('PRAGMA user_version').fetchone()[0]
-        if version not in (0, VERSION):
+        if version != VERSION and not (writable and version == 0):
             raise Invalid('cache version')
+        if not writable:
+            return db
         db.execute('CREATE TABLE IF NOT EXISTS files (name TEXT PRIMARY KEY, '
                    'dev INTEGER, ino INTEGER, size INTEGER, mtime INTEGER, ctime INTEGER, '
                    'offset INTEGER, line INTEGER, digest BLOB, chunks INTEGER, tail BLOB, tail_sha BLOB, record_sha BLOB)')
@@ -145,13 +205,24 @@ def _connect(path):
         raise
 
 
-def _read(db, directory, actor_of):
+def _metadata(db):
     rows = db.execute('SELECT * FROM files').fetchall()
     if any(len(row) != 13 or _record_digest(row) != row[12] for row in rows):
         raise Invalid('cache metadata checksum')
     old = {r[0]: dict(meta=tuple(r[1:6]), offset=r[6], line=r[7], digest=r[8],
                        chunks=r[9], tail=r[10], tail_sha=r[11]) for r in rows}
-    out, seen = [], set()
+    return old
+
+
+def _current(db, directory):
+    old = _metadata(db)
+    return {name: row['meta'] for name, row in old.items()} == {
+        file.name: _meta(file.stat()) for file in directory.glob('*.jsonl')}
+
+
+def _update(db, directory, actor_of):
+    old = _metadata(db)
+    seen = set()
     with db:  # All metadata, prefix chunks and torn tails publish together.
         for file in sorted(directory.glob('*.jsonl')):
             name = file.name
@@ -171,53 +242,102 @@ def _read(db, directory, actor_of):
                           current['digest'], seq, tail, digest)
                 db.execute('INSERT OR REPLACE INTO files VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
                            (*record, _record_digest(record)))
-                entry = dict(chunks=seq, tail=tail, tail_sha=digest)
-                # Do not retain parsed chunks while deserializing their saved
-                # counterparts, especially on the first, large cache build.
                 del current
-            else:
-                entry = previous
-            count = 0
-            for seq, data, digest in db.execute('SELECT seq,data,sha FROM chunks WHERE name=? ORDER BY seq', (name,)):
-                if seq != count:
-                    raise Invalid('cache chunk sequence')
-                out.extend(_unpack(data, digest))
-                count += 1
-            if count != entry['chunks']:
-                raise Invalid('cache missing chunks')
-            out.extend(_unpack(entry['tail'], entry['tail_sha']))
         for name in old.keys() - seen:
             db.execute('DELETE FROM chunks WHERE name=?', (name,))
             db.execute('DELETE FROM files WHERE name=?', (name,))
+
+
+def _read(db):
+    out = []
+    for name, entry in sorted(_metadata(db).items()):
+        count = 0
+        for seq, data, digest in db.execute(
+                'SELECT seq,data,sha FROM chunks WHERE name=? ORDER BY seq', (name,)):
+            if seq != count:
+                raise Invalid('cache chunk sequence')
+            out.extend(_unpack(data, digest))
+            count += 1
+        if count != entry['chunks']:
+            raise Invalid('cache missing chunks')
+        out.extend(_unpack(entry['tail'], entry['tail_sha']))
     return out
 
 
+def _refresh(path, directory, actor_of):
+    # Called only under LOCK_EX. Re-check after waiting: another writer may
+    # already have published exactly the state this reader needs.
+    for attempt in range(2):
+        db = None
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_WRONLY, 0o600)
+            os.close(fd)
+            db = _connect(path, writable=True)
+            if not _current(db, directory):
+                _update(db, directory, actor_of)
+            return
+        except (sqlite3.DatabaseError, Invalid) as exc:
+            if attempt:
+                raise OSError('ledger cache unavailable') from exc
+            if db is not None:
+                db.close()
+                db = None
+            path.unlink(missing_ok=True)
+            pathlib.Path(str(path) + '-journal').unlink(missing_ok=True)
+        finally:
+            if db is not None:
+                db.close()
+
+
 def read(events_dir, cache_dir, actor_of):
-    directory, cache_dir = pathlib.Path(events_dir), pathlib.Path(cache_dir)
-    cache_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    directory, cache_dir = pathlib.Path(events_dir), pathlib.Path(cache_dir).resolve()
     ident = hashlib.sha256(os.fsencode(directory.resolve())).hexdigest()[:16]
     path, lock = cache_dir / f'ledger-{ident}.sqlite3', cache_dir / f'ledger-{ident}.lock'
-    with lock.open('a+b') as fh:
-        os.chmod(lock, 0o600)
-        fcntl.flock(fh, fcntl.LOCK_EX)
-        # Permission is private from creation, including a first writer's DB.
-        fd = os.open(path, os.O_CREAT | os.O_WRONLY, 0o600)
-        os.close(fd)
-        for attempt in range(2):
+    claim = (str(lock), os.getpid(), threading.get_ident())
+    if claim in _HELD:
+        raise ReentrantRead(f'ledger cache: reentrant read ({lock})')
+    cache_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # No lock conversion: drop SH before requesting EX, and drop EX before
+    # unpacking. Each acquisition has its own bounded wait.
+    for attempt in range(3):
+        corrupt = False
+        broken_meta = None
+        with _locked(lock, fcntl.LOCK_SH):
             db = None
             try:
                 db = _connect(path)
-                return _read(db, directory, actor_of)
-            except (sqlite3.DatabaseError, Invalid) as exc:
-                if db is not None:
-                    db.close()
-                    db = None
-                if attempt:
-                    raise OSError('ledger cache unavailable') from exc
-                # Protected by our process lock; no reader can observe a
-                # partially rebuilt DB. The ledger is never touched.
-                path.unlink(missing_ok=True)
-                pathlib.Path(str(path) + '-journal').unlink(missing_ok=True)
+                if _current(db, directory):
+                    return _read(db)
+            except (sqlite3.DatabaseError, Invalid):
+                corrupt = True
+                if path.exists():
+                    broken_meta = _meta(path.stat())
             finally:
                 if db is not None:
                     db.close()
+        if attempt == 2:
+            raise OSError('ledger cache unavailable')
+        with _locked(lock, fcntl.LOCK_EX):
+            # A damaged payload can have current metadata. Validate on the
+            # shared read; if it failed, rebuild rather than trust that cache.
+            db = None
+            needs_refresh = True
+            try:
+                db = _connect(path)
+                current = _current(db, directory)
+                if current and corrupt and broken_meta == _meta(path.stat()):
+                    # Only needed after a corrupt shared read, never on a
+                    # healthy stale path. Do not unpack under exclusive lock.
+                    db.close()
+                    db = None
+                    path.unlink(missing_ok=True)
+                    pathlib.Path(str(path) + '-journal').unlink(missing_ok=True)
+                elif current:
+                    needs_refresh = False
+            except (sqlite3.DatabaseError, Invalid):
+                pass
+            finally:
+                if db is not None:
+                    db.close()
+            if needs_refresh:
+                _refresh(path, directory, actor_of)
