@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import tomllib
 
@@ -18,6 +19,11 @@ import scratch
 KINDS = frozenset({"worktree", "scratch-db", "venv", "upload-copy", "tmpdir"})
 PROC_ROOT = Path("/proc")
 _CREATED = {}  # Identity and pid prove this process owns the returned row.
+_TAIL_WINDOW = 1024 * 1024
+_READ_CHUNK = 1024 * 1024
+# UTF-8 spellings of str.splitlines separators, including universal newlines.
+# Keep two bytes between chunks so CRLF and three-byte separators stay whole.
+_LINE_BREAKS = re.compile(rb"\r\n|[\n\r\v\f\x1c-\x1e]|\xc2\x85|\xe2\x80[\xa8\xa9]")
 # Resolve roots when reaping, including a caller's current fold.ROOT.
 ROOTS = {
     "worktree": lambda: (fold.ROOT / "worktrees",),
@@ -64,15 +70,86 @@ def _append(event_type, subject, **fields):
                        [key + "=" + json.dumps(value) for key, value in fields.items()], strict=True)
 
 
+class RecordReadbackError(RuntimeError):
+    """The appended resource event could not be confirmed in its ledger file."""
+
+
+def _tail_lines(stream, size, window):
+    """Count the prefix without parsing it; yield bounded, complete tail lines.
+
+    A line crossing the window boundary is included. An oversized foreign line
+    is counted but never buffered whole: our own encoded line fits twice in
+    the window. Snapshot the size so concurrent appends cannot extend the scan.
+    """
+    remaining, offset, number = size, 0, 1
+    pending, line, oversized = b"", bytearray(), False
+    while True:
+        chunk = stream.read(min(_READ_CHUNK, remaining)) if remaining else b""
+        remaining -= len(chunk)
+        final = not chunk or not remaining
+        data = pending + chunk
+        base = offset - len(pending)
+        offset += len(chunk)
+        safe = len(data) if final else max(0, len(data) - 2)
+        cursor = 0
+        for separator in _LINE_BREAKS.finditer(data):
+            if separator.start() >= safe:
+                break
+            if not oversized:
+                if len(line) + separator.start() - cursor <= window:
+                    line.extend(data[cursor:separator.start()])
+                else:
+                    oversized = True
+            if base + separator.end() > size - window and not oversized:
+                yield number, bytes(line)
+            number += 1
+            line.clear()
+            oversized = False
+            cursor = separator.end()
+        consumed = max(cursor, safe)
+        if not oversized:
+            if len(line) + consumed - cursor <= window:
+                line.extend(data[cursor:consumed])
+            else:
+                line.clear()
+                oversized = True
+        pending = data[consumed:]
+        if final:
+            if line and not oversized and offset > size - window:
+                yield number, bytes(line)
+            return
+
+
+def _readback(path, written):
+    window = max(_TAIL_WINDOW, 2 * (len(json.dumps(written, sort_keys=True).encode("utf-8")) + 1))
+    message = f"readback failed for {path}: {written['type']} subject={written['subject']}"
+    result = None
+    try:
+        with path.open("rb") as stream:
+            size = stream.seek(0, os.SEEK_END)
+            stream.seek(0)
+            for number, raw in _tail_lines(stream, size, window):
+                try:
+                    event = json.loads(raw.decode("utf-8"))
+                except json.JSONDecodeError:
+                    continue  # Like fold, count blank and torn lines, then skip.
+                if isinstance(event, dict) and all(event.get(k) == v for k, v in written.items()):
+                    event["actor"] = fold.actor_of(path.name)
+                    event["_src"] = f"{path.name}:{number}"
+                    result = event
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise RecordReadbackError(message) from exc
+    if result is None:
+        raise RecordReadbackError(message)
+    return result
+
+
 def record(kind: str, ref: str, *, lane: str, subject: str) -> dict:
     row = dict(kind=kind, ref=ref, lane=lane, subject=subject)
     if why := _field_reason(row):
         raise ValueError(why)
     written = _append("resource-created", subject, kind=kind, ref=ref, lane=lane)
-    filename = os.environ.get("DOIT_LEDGER_FILE", "L-operator-local.jsonl")
-    result = next(e for e in reversed(fold.read_events(use_cache=False))
-                if e.get("_src", "").startswith(filename + ":")
-                and all(e.get(k) == v for k, v in written.items()))
+    result = _readback(fold.ledger_path(), written)
     _CREATED[id(result)] = (result, os.getpid())
     return result
 
