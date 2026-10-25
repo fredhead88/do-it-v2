@@ -6,7 +6,7 @@ Every check builds a real repository with real worktrees and a real merge. The
 squash case is the one that matters — it is the case where git's own answer is
 confidently wrong (§8.11), and a mocked git would agree with the bug.
 """
-import contextlib, io, json, os, pathlib, subprocess, sys, tempfile
+import contextlib, hashlib, io, json, os, pathlib, subprocess, sys, tempfile
 from types import SimpleNamespace
 from datetime import datetime, timezone
 from unittest.mock import patch
@@ -152,8 +152,9 @@ with tempfile.TemporaryDirectory() as d:
     check(json.loads(p.stdout)["reaped"] == [b], f"…the merged branch: {p.stdout}")
     check(b not in branches(r) and not pathlib.Path(wt).exists(), "…and the branch AND worktree are gone")
     e = events(d, "tree-reaped")
-    check(len(e) == 1 and e[0]["reaped"] == [b] and e[0]["retained"] == [],
-          f"one tree-reaped event carrying the same object (§4.11): {e}")
+    check(len(e) == 1 and e[0]["reaped"] == [b] and e[0]["retained_count"] == 0
+          and "retained" not in e[0] and "retained_reason" not in e[0],
+          f"one tree-reaped event carrying the reap summary (§4.11): {e}")
 
 # ── ★ the squash-merge case: git's own flag is confidently wrong ──────────────
 with tempfile.TemporaryDirectory() as d:
@@ -353,7 +354,7 @@ with tempfile.TemporaryDirectory() as d:
     check(not (pathlib.Path(d) / "state" / "reap-retained.json").exists(),
           "L0941: dry-run creates no retained status file")
 
-# ── L0440-AC12 · exactly one tree-reaped event, actor executor, reaped+retained shape ──
+# ── L0440-AC12 / L1529-AC1,AC3 · real append and fresh-process read ──
 with tempfile.TemporaryDirectory() as d:
     r = repo_for(d, "l0440-proj12")
     charter_project(d, "L-charter-0440d", "l0440-proj12")
@@ -362,14 +363,104 @@ with tempfile.TemporaryDirectory() as d:
     bB, wtB, readyB = branchwork(r, d, "L-spec-0002", "y")
     (pathlib.Path(wtB) / "dirty.txt").write_text("uncommitted\n")
     accepted(d, "L-charter-0440d", "L-spec-0002", bB, readyB, project="l0440-proj12")
+    bC, wtC, readyC = branchwork(r, d, "L-spec-0003", "z")
+    (pathlib.Path(wtC) / "dirty.txt").write_text("uncommitted\n")
+    accepted(d, "L-charter-0440d", "L-spec-0003", bC, readyC, project="l0440-proj12")
+    preflight_count = sum(b in branches(r) for b in (bA, bB, bC))
+    check(preflight_count == 3, "L1529: three fixture branches before reap")
     out = run_merged(d)
     check(out == [bA], f"L0440-AC12: reaped list: {out}")
     e = read_via_fold(d, "tree-reaped")
     check(len(e) == 1, f"L0440-AC12: exactly one tree-reaped event: {e}")
     check(e[0]["actor"] == "executor", f"L0440-AC12: authoring actor is executor: {e[0]}")
-    check(e[0]["reaped"] == [bA] and e[0]["retained"] == [bB], f"L0440-AC12: shape: {e[0]}")
-    check(any("worktree is not clean" in rr for rr in e[0]["retained_reason"]),
-          f"L0440-AC12: reason names B's dirty worktree: {e[0]['retained_reason']}")
+    check(e[0]["reaped"] == [bA] and e[0]["retained_count"] == 2
+          and type(e[0]["retained_count"]) is int and e[0]["repo"] == str(r)
+          and e[0]["worktrees"] == [] and "retained" not in e[0]
+          and "retained_reason" not in e[0], f"L1529-AC1: event shape: {e[0]}")
+    state = json.loads((pathlib.Path(d) / "state/reap-retained.json").read_text())
+    expected = {"project": "l0440-proj12", "repo": str(r), "retained": [bB, bC],
+                "retained_reason": [f"{b}: worktree is not clean" for b in (bB, bC)]}
+    check(state["projects"] == [expected]
+          and len(expected["retained"]) == e[0]["retained_count"],
+          f"L1529-AC3: full status agrees with event: {state}")
+    check(run_merged(d) == [] and len(read_via_fold(d, "tree-reaped")) == 1,
+          "L1529-AC3: retained-only rerun appends zero events")
+    check(json.loads((pathlib.Path(d) / "state/reap-retained.json").read_text())["projects"] == [expected],
+          "L1529-AC3: retained-only rerun still writes full status")
+    for ac, body in (("AC1", {"event": e[0], "preflight_branch_count": preflight_count}),
+                     ("AC3", {"projects": state["projects"], "retained_only_new_events": 0})):
+        body = json.dumps(body, sort_keys=True)
+        print(json.dumps(dict(url=f"cli://tree-cleanup/L1529-{ac}", status=0,
+                              body_sha256=hashlib.sha256(body.encode()).hexdigest(), body_excerpt=body)))
+
+# Charter close goes through the public CLI and preserves the detailed stdout.
+with tempfile.TemporaryDirectory() as d:
+    r = repo(d)
+    bA, wtA, readyA = branchwork(r, d, "L-spec-1529", "reap")
+    bB, wtB, readyB = branchwork(r, d, "L-spec-1530", "retain")
+    (pathlib.Path(wtB) / "dirty.txt").write_text("uncommitted\n")
+    for sid, branch, ready in (("L-spec-1529", bA, readyA), ("L-spec-1530", bB, readyB)):
+        accepted(d, "L-charter-1529", sid, branch, ready)
+    close(d, "L-charter-1529")
+    preflight_count = sum(b in branches(r) for b in (bA, bB))
+    check(preflight_count == 2, "L1529-AC2: two fixture branches before reap")
+    p = subprocess.run([str(HERE.parent / "doit"), "reap", "L-charter-1529", "--repo", str(r)],
+                       capture_output=True, text=True,
+                       env={k: v for k, v in os.environ.items() if k != "DOIT_PROJECT"}
+                       | {"DOIT_ROOT": d})
+    check(p.returncode == 0, f"L1529-AC2: doit reap succeeds: {p.stderr}")
+    out = json.loads(p.stdout)
+    check(out == {"reaped": [bA], "retained": [bB],
+                  "retained_reason": [f"{bB}: worktree is not clean"]},
+          f"L1529-AC2: unchanged detailed stdout: {out}")
+    e = read_via_fold(d, "tree-reaped")
+    check(len(e) == 1 and e[0]["reaped"] == [bA] and e[0]["retained_count"] == 1
+          and type(e[0]["retained_count"]) is int and e[0]["repo"] == str(r)
+          and not {"retained", "retained_reason", "worktrees"}.intersection(e[0]),
+          f"L1529-AC2: charter-close summary: {e}")
+    body = json.dumps({"event": e[0], "stdout": out, "preflight_branch_count": preflight_count}, sort_keys=True)
+    print(json.dumps(dict(url="cli://tree-cleanup/L1529-AC2", status=p.returncode,
+                          body_sha256=hashlib.sha256(body.encode()).hexdigest(), body_excerpt=body)))
+
+# Size boundary: real branches and append; synthetic long reasons isolate payload size.
+with (tempfile.TemporaryDirectory() as d,
+      patch.object(fold, "ROOT", pathlib.Path(d)),
+      patch.object(fold, "EVENTS", pathlib.Path(d) / "events"),
+      patch.dict(os.environ, DOIT_ROOT=d, DOIT_LEDGER_FILE="L-executor-0001.jsonl")):
+    project = "l1529-size"
+    r = repo_for(d, project)
+    charter_project(d, "L-charter-1529", project)
+    bA, wtA, readyA = branchwork(r, d, "L-spec-1529", "reap")
+    accepted(d, "L-charter-1529", "L-spec-1529", bA, readyA, project=project)
+    retained = [f"l-spec-{n}" for n in range(2000, 2200)]
+    for b in retained:
+        sh(r, "git", "branch", b)
+        accepted(d, "L-charter-1529", b.replace("l-spec", "L-spec"), b, readyA, project=project)
+    preflight_count = len([b for b in branches(r) if b != "main"])
+    check(preflight_count == 201, "L1529-AC4: 201 fixture branches before reap")
+    judge = tree_cleanup.judge
+    def size_judge(repo, spec, *args):
+        if spec.lower() in retained:
+            return spec.lower(), None, False, "x" * 100
+        return judge(repo, spec, *args)
+    with patch.object(tree_cleanup, "judge", side_effect=size_judge):
+        check(tree_cleanup.reap_merged_specs(fold.read_events()) == [bA], "L1529-AC4: one branch reaped")
+    lines = (pathlib.Path(d) / "events/L-executor-0001.jsonl").read_bytes().splitlines(keepends=True)
+    lines = [line for line in lines if json.loads(line)["type"] == "tree-reaped"]
+    check(len(lines) == 1, "L1529-AC4: exactly one tree-reaped line")
+    e = json.loads(lines[0])
+    check(len(lines[0]) < 2048 and e["retained_count"] == 200
+          and type(e["retained_count"]) is int
+          and not {"retained", "retained_reason"}.intersection(e),
+          f"L1529-AC4: bounded event size: {len(lines[0])} bytes: {e}")
+    state = json.loads((pathlib.Path(d) / "state/reap-retained.json").read_text())["projects"][0]
+    check(state["retained"] == retained
+          and state["retained_reason"] == [f"{b}: {'x' * 100}" for b in retained],
+          "L1529-AC4: full 200-branch list and long reasons remain in status")
+    body = json.dumps({"event": e, "line_bytes": len(lines[0]),
+                       "retained_reason_chars": 100, "preflight_branch_count": preflight_count}, sort_keys=True)
+    print(json.dumps(dict(url="cli://tree-cleanup/L1529-AC4", status=0,
+                          body_sha256=hashlib.sha256(body.encode()).hexdigest(), body_excerpt=body)))
 
 # ══════════════════════════════════════════════════════════════════════════
 # L-spec-0486 R15a — `reap_worktrees`: a spec's own worktree goes the instant
@@ -702,11 +793,11 @@ with tempfile.TemporaryDirectory() as d:
     sh(r, "git", "merge", "-q", "--no-ff", b, "-m", "land remaining work")
     check(run_merged(d) == [b], "L0941: the newly clean merged branch is reaped")
     e = events(d, "tree-reaped")
-    check(len(e) == 1 and e[0]["reaped"] == [b] and e[0]["retained"] == [b2]
+    check(len(e) == 1 and e[0]["reaped"] == [b] and e[0]["retained_count"] == 1
           and e[0]["subject"] == project and e[0]["repo"] == str(r)
-          and e[0]["retained_reason"] == [f"{b2}: ready_sha holds work not on main"]
+          and "retained" not in e[0] and "retained_reason" not in e[0]
           and e[0]["worktrees"] == [] and e[0]["actor"] == "L-executor-0001",
-          f"L0941: actual branch destruction appends exactly one unchanged-shape event: {e}")
+          f"L0941: actual branch destruction appends exactly one summary event: {e}")
     check(json.loads(state.read_text())["projects"][0]["retained"] == [b2],
           "L0941: status overwrites the previous retained list")
     before = state.read_bytes()
@@ -727,7 +818,7 @@ with tempfile.TemporaryDirectory() as d:
         out = json.loads(p.stdout)
         e = events(d, "tree-reaped")
         check(len(e) == i + 1 and e[-1]["subject"] == "L-charter-0941"
-              and e[-1]["reaped"] == [] and e[-1]["retained"] == [b],
+              and e[-1]["reaped"] == [] and e[-1]["retained_count"] == 1,
               "L0941: charter-close still emits its no-reap charter marker")
         check(not state.exists(), "L0941: charter-close does not write periodic status")
     reap(d, "L-charter-0941", "--repo", str(r), "--dry-run")
@@ -1255,7 +1346,6 @@ print("L1365-AC6 ok")
 print(f"tree-cleanup: {N} checks pass")
 
 # Recorded worktrees retain the existing ancestry/dirty proofs and process refusals.
-import hashlib
 import resources
 import reap_tmp
 outcomes1496 = {}

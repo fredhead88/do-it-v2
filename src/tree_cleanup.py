@@ -481,8 +481,7 @@ def reap_merged_specs(events, *, dry_run=False):
             # project, not to this group's own spec set (the requirement's own
             # shape); empty when it removed nothing here.
             fold.append(["tree-reaped", str(project), f"reaped:={json.dumps(reaped)}",
-                         f"retained:={json.dumps(retained)}",
-                         f"retained_reason:={json.dumps(reasons)}", f"repo={repo}",
+                         f"retained_count:={len(retained)}", f"repo={repo}",
                          f"worktrees:={json.dumps(wt_paths_by_project.get(str(project), []))}"])
     if not dry_run:
         _write_retained(retained_status)
@@ -586,8 +585,7 @@ def main(argv=None):
         os.environ["DOIT_LEDGER_FILE"] = os.environ.get(
             "DOIT_REAP_LEDGER_FILE", os.environ.get("DOIT_LEDGER_FILE", "L-executor-0001.jsonl"))
         fold.append(["tree-reaped", a.charter, f"reaped:={json.dumps(reaped)}",
-                     f"retained:={json.dumps(retained)}",
-                     f"retained_reason:={json.dumps(reasons)}", f"repo={repo}"])
+                     f"retained_count:={len(retained)}", f"repo={repo}"])
     print(json.dumps(out, indent=1))
     return 0
 
