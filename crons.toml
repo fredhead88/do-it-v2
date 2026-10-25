@@ -75,6 +75,17 @@ project = "do-it-v2"
 max_runtime_s = 90
 
 [[row]]
+name = "ledger-repack"
+where = "user"
+schedule = "47 4 * * *"
+command = "{doit} cron-run ledger-repack -- {doit} backup maintain >> {root}/logs/ledger-repack.log 2>&1"
+path = "{doit}"
+sig = '\bdoit backup maintain\b'
+owner = "thinker"
+project = "do-it-v2"
+max_runtime_s = 2820
+
+[[row]]
 name = "ledger-snapshot"
 where = "user"
 schedule = "*/10 * * * *"
