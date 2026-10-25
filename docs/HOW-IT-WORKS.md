@@ -68,8 +68,8 @@ Source: `crons.toml`. Name | schedule | where | path; command on following lines
   {doit} cron-run backup-watch -- {doit} backup watch --for 60 >> {root}/backup.log 2>&1
 - ledger-repack | 47 4 * * * | user | {doit}
   {doit} cron-run ledger-repack -- {doit} backup maintain >> {root}/logs/ledger-repack.log 2>&1
-- ledger-snapshot | */10 * * * * | user | /var/backups/do-it/snapshot.sh
-  {doit} cron-run ledger-snapshot -- /var/backups/do-it/snapshot.sh >/dev/null 2>&1
+- ledger-snapshot | */10 * * * * | user | {repo}/scripts/snapshot.sh
+  {doit} cron-run ledger-snapshot -- {repo}/scripts/snapshot.sh >/dev/null 2>&1
 - sweep-owed | */30 * * * * | user | {doit}
   {doit} cron-run sweep-owed -- {doit} sweep-owed >> {root}/logs/sweep-owed.log 2>&1
 - auto-deploy | */5 * * * * | cron.d | /opt/albert-scott/venv/bin/python
