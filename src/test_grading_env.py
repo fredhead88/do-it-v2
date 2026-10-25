@@ -70,6 +70,67 @@ version_path = "/version"
 sys.path.insert(0, str(HERE))
 import grading_env  # noqa: E402
 
+
+def codex_strict_checks():
+    import hashlib
+
+    def response(ac, rows):
+        body = json.dumps(rows, sort_keys=True).encode()
+        print(json.dumps(dict(url="cli://codex-strict/" + ac, status=0,
+                              body_sha256=hashlib.sha256(body).hexdigest(), body_excerpt=rows)))
+        print(f"codex-strict {ac} status=0")
+
+    rejected = [
+        "API error: invalid_json_schema",
+        "Invalid schema for response_format 'x': In context=('properties','ac_types'), "
+        "'uniqueItems' is not permitted.",
+        "request limit diagnostic\nschema keyword 'uniqueItems' is not permitted",
+        "'uniqueItems' is not permitted in response_format",
+        "INVALID_JSON_SCHEMA",
+    ]
+    samples = {
+        "No space left on device": "no-space", "at capacity": "capacity",
+        "git worktree add failed": "worktree", "Connection reset by peer": "runner-or-network",
+        "Operation not permitted": "runner-or-network",
+        "schema accepted\nOperation not permitted": "runner-or-network",
+        "Operation not permitted\nresponse_format accepted": "runner-or-network",
+    }
+    rows = []
+    for text in rejected:
+        got = grading_env.infra_class(text)
+        assert got == "schema-rejected", (text, got)
+        rows.append(dict(text=text, classification=got))
+    for text, expected in samples.items():
+        got = grading_env.infra_class(text)
+        assert got == expected, (text, got)
+        rows.append(dict(text=text, classification=got))
+    response("AC4", rows)
+    rows = []
+    for text in rejected:
+        for message, expected in ((text, "infra"), (text + "\nAssertionError: fixture", "unknown")):
+            got = grading_env.failure_kind(message, 1)
+            assert got == expected, (message, got)
+            rows.append(dict(text=message, classification=got))
+    for text in ("unclassified refusal", "Operation not permitted",
+                 "schema accepted\nOperation not permitted", ""):
+        got = grading_env.failure_kind(text, 1)
+        assert got == "unknown", (text, got)
+        rows.append(dict(text=text, classification=got))
+    assert grading_env.failure_kind(rejected[0], None) == "unknown"
+    response("AC5", rows)
+
+
+if __name__ == "__main__" and sys.argv[1:] == ["--codex-strict"]:
+    try:
+        codex_strict_checks()
+    finally:
+        for directory in (FIXTURE_ROOT, FIXTURE_HOME, FIXTURE_SCRATCH):
+            shutil.rmtree(directory, ignore_errors=True)
+    sys.exit(0)
+
+# Also leave these regressions in the ordinary full-suite path.
+codex_strict_checks()
+
 N = 0
 
 

@@ -287,7 +287,25 @@ def infra_dispatch_checks(mode):
                     except SystemExit as exc:
                         return exc.code
                 raise AssertionError("a failed backend returned success")
-            if mode == "ladder":
+            if mode == "schema":
+                response.stdout = json.dumps(dict(is_error=True, result=(
+                    "Invalid schema for response_format 'x': In context=('properties','ac_types'), "
+                    "'uniqueItems' is not permitted.")))
+                with patch.object(relay, "serving", return_value=False, create=True):
+                    assert run() == 2
+                rows = events()  # Fresh fold.read_events, reading dispatch.emit's ledger.
+                failures = [e for e in rows if e["type"] == "infra-failure"]
+                assert len(failures) == 1, rows
+                row = failures[0]
+                assert row["class"] == "schema-rejected" and row["backend"] == "codex"
+                assert row["attempt"] == row["spawn"] and row["role"] == "builder"
+                assert row["retry_at"] == (clock + timedelta(minutes=5)).isoformat(timespec="seconds")
+                assert backend.call_count == 1 and seat.call_count == 0
+                assert not any(e["type"] in ("escalation-blocking", "spawn-failed", "backend-fallback")
+                               for e in rows), rows
+                _infra_response("AC6", rows)
+                print("codex-strict AC6 status=0")
+            elif mode == "ladder":
                 with patch.object(relay, "serving", return_value=False, create=True):
                     for index, minutes in enumerate((5, 15, 45, 120)):
                         before = backend.call_count
@@ -493,6 +511,101 @@ def infra_emits_checks():
     _infra_response("AC7", dict(roles=sorted(roles), unauthorized="recorded-and-ignored", retired=retired))
 
 
+def codex_strict_checks():
+    import hashlib
+    import jsonschema
+    import dispatch
+
+    schemas = Path(__file__).resolve().parents[1] / "agents"
+
+    def walk(schema):
+        if isinstance(schema, list):
+            for value in schema:
+                yield from walk(value)
+        elif isinstance(schema, dict):
+            assert not set(schema).intersection(dispatch._STRICT_DROP), schema
+            for key, value in schema.items():
+                if key in ("properties", "$defs", "definitions"):
+                    for child in value.values():
+                        yield from walk(child)
+                else:
+                    yield from walk(value)
+            yield schema
+
+    checked = []
+    for path in sorted(schemas.glob("*.schema.json")):
+        before = path.read_bytes()
+        original = json.loads(before)
+        unchanged = json.dumps(original, sort_keys=True)
+        strict = dispatch.strict_schema(original)
+        list(walk(strict))
+        assert json.dumps(original, sort_keys=True) == unchanged
+        assert path.read_bytes() == before
+        assert set(strict.get("properties", {})) == set(original.get("properties", {}))
+        checked.append(path.name)
+        print("schema ok", path.name)
+    assert checked
+    # Keyword-like names in every schema name map must survive recursively.
+    for name_map in ("properties", "$defs", "definitions"):
+        original = {name_map: {name: {"type": "string", "default": "fixture"}
+                               for name in dispatch._STRICT_DROP}}
+        strict = dispatch.strict_schema(original)
+        assert set(strict[name_map]) == set(dispatch._STRICT_DROP)
+        list(walk(strict))
+    print(f"schema count {len(checked)}")
+    _infra_response("AC1", dict(schemas=checked, count=len(checked), property_names_preserved=True))
+    print("codex-strict AC1 status=0")
+
+    # OpenAI Structured Outputs subset, retrieved 2026-10-25:
+    # https://developers.openai.com/api/docs/guides/structured-outputs#supported-schemas
+    # Composition exclusions plus unsupported structural constraints and legacy
+    # exclusions; supported scalar/array bounds must remain in the strict copy.
+    refused = {"if", "then", "else", "not", "allOf", "dependentRequired", "dependentSchemas",
+               "dependencies", "patternProperties", "default", "$comment", "examples",
+               "unevaluatedProperties", "propertyNames", "contains", "minContains", "maxContains",
+               "uniqueItems", "minProperties", "maxProperties", "unevaluatedItems"}
+    supported = {"pattern", "format", "minLength", "maxLength", "minimum", "maximum",
+                 "exclusiveMinimum", "exclusiveMaximum", "multipleOf", "minItems", "maxItems",
+                 "const", "enum"}
+    assert set(dispatch._STRICT_DROP) == refused
+    assert len(dispatch._STRICT_DROP) == len(refused)
+    assert refused.isdisjoint(supported)
+    # Exercise removal even for keywords absent from today's role contracts.
+    probe = {"items": {"type": "string", **{key: True for key in refused},
+                       **{key: "fixture" for key in supported}}}
+    strict = dispatch.strict_schema(probe)
+    assert set(strict["items"]) == supported | {"type"}
+    _infra_response("AC2", dict(refused=sorted(refused), supported=sorted(supported)))
+    print("codex-strict AC2 status=0")
+
+    path = schemas / "spec-writer.schema.json"
+    before = path.read_bytes()
+    original = json.loads(before)
+    unchanged = json.dumps(original, sort_keys=True)
+    strict = dispatch.strict_schema(original)
+    card = dict(status="written", spec_id="L-spec-fixture", ac_count=2, ac_types=["ui", "backend"],
+                footprint=[], requirement_ids=[], owed=0, unknowns=0, split=[], weak_dimensions=[],
+                escalations=[], declarations=[], killed_by_check=None)
+    clean = dispatch.unnull(card, original)
+    jsonschema.validate(clean, original)
+    duplicate = dict(clean, ac_types=["ui", "ui"])
+    try:
+        jsonschema.validate(duplicate, original)
+    except jsonschema.ValidationError as exc:
+        assert exc.validator == "uniqueItems" and list(exc.path) == ["ac_types"]
+    else:
+        raise AssertionError("original contract accepted duplicate ac_types")
+    assert "uniqueItems" not in strict["properties"]["ac_types"]
+    assert json.dumps(original, sort_keys=True) == unchanged and path.read_bytes() == before
+    _infra_response("AC3", dict(duplicate_rejected=True, distinct_valid=True,
+                               original_sha256=hashlib.sha256(before).hexdigest()))
+    print("codex-strict AC3 status=0")
+
+
+def test_codex_strict():
+    _isolated_run([sys.executable, __file__, "--codex-strict-cases"])
+
+
 if __name__ == "__main__":
     if len(sys.argv) == 2 and sys.argv[1].startswith("--infra-"):
         mode = sys.argv[1][len("--infra-"):]
@@ -507,11 +620,16 @@ if __name__ == "__main__":
             infra_provision_checks()
         else:
             infra_dispatch_checks(mode)
+    elif sys.argv[1:] == ["--codex-strict"]:
+        test_codex_strict()
+    elif sys.argv[1:] == ["--codex-strict-cases"]:
+        codex_strict_checks()
     elif sys.argv[1:] == ["--alloc-cases"]:
         _check_alloc_suffix()
     elif sys.argv[1:] == ["--issued-by-cases"]:
         test_dispatch_1134()
     else:
+        test_codex_strict()
         test_alloc_suffix()
         _isolated_run([sys.executable, __file__, "--issued-by-cases"])
         test_dispatch_0898()
@@ -698,7 +816,7 @@ def check_capability_readmission(*, fixture_root, now, epoch, iso, clear, write,
 
 
 def test_infra_retry():
-    for mode in ("ladder", "fallback", "unknown", "provision", "emits"):
+    for mode in ("schema", "ladder", "fallback", "unknown", "provision", "emits"):
         _isolated_run([sys.executable, __file__, "--infra-cases", mode])
 
 

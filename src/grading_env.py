@@ -50,6 +50,9 @@ def failure_kind(text, exit_code=1):
 
 
 def infra_class(text):
+    from nextstep import SCHEMA_REJECTION_RE
+    if SCHEMA_REJECTION_RE.search(text):
+        return "schema-rejected"
     if re.search(r"No space left|ENOSPC|Errno 28|Out of diskspace", text, re.I):
         return "no-space"
     if re.search(r"capacity|overloaded|429|quota|limit", text, re.I):

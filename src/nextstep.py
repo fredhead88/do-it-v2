@@ -62,6 +62,14 @@ class Step:
             raise ValueError('hold Step needs reason and clears')
 
 
+# Shared with grading_env.infra_class so retry labels and hold reasoning agree.
+# Permission refusals count only when the same physical line names the schema.
+SCHEMA_REJECTION_RE = re.compile(
+    r'\binvalid_json_schema\b|Invalid schema for response_format|'
+    r'\b(?:schema|response_format)\b[^\r\n]*not permitted|'
+    r'not permitted[^\r\n]*\b(?:schema|response_format)\b', re.I)
+
+
 def classify_failure(text, exit_code, rules=None):
     """Conservative SD3 classifier; mixed evidence is always unknown."""
     if exit_code is None:
@@ -74,7 +82,7 @@ def classify_failure(text, exit_code, rules=None):
         r'fatal: could not create work tree dir|'
         r'git worktree add[^\n]*(?:fail|error)|(?:fail|error)[^\n]*git worktree add|'
         r'Connection reset by peer|Connection refused|at capacity|overloaded|\bHTTP\s+429\b',
-        text, re.I))
+        text, re.I) or SCHEMA_REJECTION_RE.search(text))
     work = bool(re.search(r'\bFAILED\b|\bAssertionError\b', text))
     return 'unknown' if infra == work else 'infra' if infra else 'work'
 
