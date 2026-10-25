@@ -57,15 +57,13 @@ workflows = []   # empty -> every distinct workflow name a push to `branch` ran,
 # branch the local tip is pushed onto; a project with no entry here
 # resolves it from `origin/HEAD` at push time instead (push_origin.targets).
 [push]
-projects = ["do-it-v2", "albert-scott", "do-it-v2-realm"]
+projects = ["do-it-v2", "albert-scott"]
 
 [push.main]
 do-it-v2 = "main"
 albert-scott = "master"
-do-it-v2-realm = "realm"
 
 [push.path]
-do-it-v2-realm = "/home/albert/do-it-v2-realm"
 
 [resources]
 upload_manifest = "/opt/albert-scott/docs/do-it/ledger/upload-manifest.jsonl"

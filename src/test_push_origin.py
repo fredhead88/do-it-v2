@@ -73,7 +73,9 @@ class PushOriginTests(unittest.TestCase):
         self.cfg["push"]["path"] = {
             name: str(self.root / "outside-repos" / name)
             for name in (self.cfg["push"].get("path") or {})}
-        self.cfg["push"]["path"]["do-it-v2-realm"] = str(self.root / "outside-repos" / "realm")
+        self.cfg["push"]["projects"].append("external-viewer")
+        self.cfg["push"]["main"]["external-viewer"] = "realm"
+        self.cfg["push"]["path"]["external-viewer"] = str(self.root / "outside-repos" / "realm")
         for p in (patch.object(fold, "ROOT", self.root),
                   patch.object(fold, "EVENTS", self.events),
                   patch.object(fold, "PROJECT", ""),
@@ -139,7 +141,7 @@ class PushOriginTests(unittest.TestCase):
         return clone
 
     def test_hand_merge_and_external_realm(self):
-        for name, branch in (("do-it-v2", "main"), ("do-it-v2-realm", "realm")):
+        for name, branch in (("do-it-v2", "main"), ("external-viewer", "realm")):
             origin, clone = self.pair(name, branch)
             self.git(clone, "checkout", "-qb", "side")
             self.commit(clone, "side commit")
@@ -159,7 +161,7 @@ class PushOriginTests(unittest.TestCase):
             self.assertFalse(self.ledger("shipped"))
             self.assertEqual(push_origin.run([], runner=self.runner()), [])
             self.assertEqual(len([e for e in self.ledger("origin-pushed") if e["subject"] == name]), 1)
-        self.assertFalse((self.root / "repos" / "do-it-v2-realm").exists())
+        self.assertFalse((self.root / "repos" / "external-viewer").exists())
         response("AC1", {"hand_merge": "pushed", "realm_external_path": "pushed",
                          "fresh_ledger_read": "one event per project", "shipped_events": 0})
 
@@ -198,11 +200,12 @@ class PushOriginTests(unittest.TestCase):
 
     def test_config_and_checkout_resolution(self):
         cfg = self.original_load()
-        self.assertEqual(cfg["push"]["path"]["do-it-v2-realm"], "/home/albert/do-it-v2-realm")
+        self.assertEqual(cfg["push"]["path"], {})
         self.assertEqual(dict(push_origin.targets(cfg)),
-                         {"do-it-v2": "main", "albert-scott": "master", "do-it-v2-realm": "realm"})
+                         {"do-it-v2": "main", "albert-scott": "master"})
         for resolver in (look.push_checkout, push_origin.checkout):
-            self.assertEqual(resolver(cfg, "do-it-v2-realm"), pathlib.Path("/home/albert/do-it-v2-realm"))
+            self.assertEqual(resolver(self.cfg, "external-viewer"),
+                             pathlib.Path(self.cfg["push"]["path"]["external-viewer"]))
             self.assertEqual(resolver(cfg, "do-it-v2"), self.root / "repos" / "do-it-v2")
         absent = self.root / "no-path.toml"
         absent.write_text('[push]\nprojects=["do-it-v2"]\n[push.main]\ndo-it-v2="main"\n')
@@ -211,7 +214,7 @@ class PushOriginTests(unittest.TestCase):
         self.assertEqual(defaults["push"]["path"], {})
         self.assertEqual(dict(push_origin.targets(defaults)), dict(push_origin.targets(cfg)))
         self.assertFalse(any(r.calls for r in self.runners))
-        response("AC3", {"shipped_path": "preserved", "absent_path": {}, "missing_file_targets": 3,
+        response("AC3", {"shipped_path": {}, "fixture_external_path": "preserved", "absent_path": {}, "missing_file_targets": 2,
                          "resolvers": "configured path or ROOT/repos/project"})
 
     def test_target_branch_fallback_uses_path(self):
@@ -266,19 +269,19 @@ class PushOriginTests(unittest.TestCase):
                          "origin": "unchanged by pass", "unreadable_ledger": "no append"})
 
     def test_origin_behind_resolves_external_checkout(self):
-        self.pair("do-it-v2-realm", "realm")
+        self.pair("external-viewer", "realm")
         cfg = copy.deepcopy(self.cfg)
-        cfg["push"]["projects"] = ["do-it-v2-realm"]
-        cfg["push"]["main"]["do-it-v2-realm"] = "realm"
+        cfg["push"]["projects"] = ["external-viewer"]
+        cfg["push"]["main"]["external-viewer"] = "realm"
         briefs, answered = [], []
         runner = OriginBehindRunner(self.runner())
         now = datetime.now(timezone.utc)
         look._check_origin_behind(cfg, runner, now, runner.clock() + 90, [], self.root, briefs, answered)
         self.assertFalse(briefs)
         self.assertTrue(runner.recorder.calls)
-        self.assertTrue(all(cwd == pathlib.Path(cfg["push"]["path"]["do-it-v2-realm"])
+        self.assertTrue(all(cwd == pathlib.Path(cfg["push"]["path"]["external-viewer"])
                             for _, cwd in runner.recorder.calls))
-        self.assertFalse((self.root / "repos" / "do-it-v2-realm").exists())
+        self.assertFalse((self.root / "repos" / "external-viewer").exists())
         cfg["push"]["projects"] = ["missing"]
         cfg["push"]["main"]["missing"] = "main"
         look._check_origin_behind(cfg, runner, now, runner.clock() + 90, [], self.root, briefs, answered)
@@ -346,7 +349,7 @@ class PushOriginTests(unittest.TestCase):
         runner = self.runner()
         # The assertion precedes subprocess execution, so the negative control is harmless.
         with self.assertRaisesRegex(AssertionError, "escaped fixture"):
-            runner.git(["symbolic-ref", "HEAD"], pathlib.Path("/home/albert/do-it-v2-realm"), 10)
+            runner.git(["symbolic-ref", "HEAD"], pathlib.Path("/nonexistent/external-viewer"), 10)
         args, cwd = runner.calls.pop()
         self.assertFalse(cwd.is_relative_to(self.root))
         self.assertEqual(args, ["symbolic-ref", "HEAD"])

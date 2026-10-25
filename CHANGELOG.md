@@ -10,6 +10,16 @@ each direction.
 
 ## [Unreleased]
 
+### 2026-10-25 · Realm joins main
+
+Merged the Realm at `5b75a38` (the last `realm` commit and this merge's second
+parent). The branch's history is reachable from `main`. The read-only viewer
+now runs with `./doit realm` from the ordinary checkout. After deployment, the
+operator or Executor must repoint `doit-realm` from
+`/home/albert/do-it-v2-realm` to `/home/albert/do-it-v2` (both WorkingDirectory
+and ExecStart), restart it, then retire the `realm` branch and its old checkout.
+These box changes are owed post-deploy observations, due 2026-10-26T12:00:00Z.
+
 ## [0.3.0] — 2026-09-15
 
 The day charter 3 closed with no operator hands: the six changes the retro argued for, each

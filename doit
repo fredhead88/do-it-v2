@@ -29,6 +29,7 @@ case "${1:-board}" in
   wait)    shift; exec python3 "$SRC/tick.py" wait "$@" ;;
   up)      shift; exec python3 "$SRC/up.py" "$@" ;;
   relay)   shift; exec python3 "$SRC/up.py" --relay "$@" ;;
+  realm)   shift; exec python3 "$SRC/realm.py" "$@" ;;
   launch)  shift; exec python3 "$SRC/launch.py" "$@" ;;
   pane-end) shift; exec python3 "$SRC/pane_end.py" "$@" ;;
   think)   shift; exec python3 "$SRC/think.py" "$@" ;;
@@ -94,6 +95,7 @@ case "${1:-board}" in
            export HOME="$DOIT_TEST_ISO/home" DOIT_ROOT="$DOIT_TEST_ISO/root" \
                   XDG_CONFIG_HOME="$DOIT_TEST_ISO/xdg"
            unset DOIT_LEDGER_FILE
+           export DOIT_LIVE_REPO="$HERE"
            rc=0
            if [ -n "${DOIT_TEST_LIVE_ROOT:-}" ]; then
              # No ledger or an unreadable ledger is undetermined, never green.
@@ -197,6 +199,7 @@ doit — a ledger that derives state, and the guards that read it
 
   doit                                    render the board
   doit states                             every derived state, one per line
+  doit realm [--port N] [--hours H]       the ledger as a lit overworld on localhost, live (read-only)
   doit events <subject>                   one subject's events, oldest first
   doit spend <charter|spec|spawn-id>      per-spawn token table + totals; charter stage wall clock (read-only)
   doit grades-rate [--json]               grades spent per spec shipped, trailing 24h — the board's HEALTH line (read-only)

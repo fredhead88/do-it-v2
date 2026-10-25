@@ -36,8 +36,8 @@ DEFAULTS = {
     # `push_origin.py`) so `_check_origin_behind` shares the identical
     # defaults without importing `push_origin` at module scope (Constraints:
     # `push_origin` imports `look`, so the reverse import stays lazy).
-    "push": {"projects": ["do-it-v2", "albert-scott", "do-it-v2-realm"],
-             "main": {"do-it-v2": "main", "albert-scott": "master", "do-it-v2-realm": "realm"},
+    "push": {"projects": ["do-it-v2", "albert-scott"],
+             "main": {"do-it-v2": "main", "albert-scott": "master"},
              "path": {}},
 }
 _PASS_LOCKED = False   # True only while `run()` holds `look.lock` (skip re-locking, SD22)

@@ -1534,8 +1534,8 @@ print("L-spec-0482 AC12 ok")
 
 # ── merge-origin-0484 AC10 · look.load_toml()'s [push] table ────────────────
 cfg0484_10 = look.load_toml()   # the shipped look.toml, no override
-ok(cfg0484_10["push"]["projects"] == ["do-it-v2", "albert-scott", "do-it-v2-realm"], f"AC10: default projects: {cfg0484_10['push']}")
-ok(cfg0484_10["push"]["main"] == {"do-it-v2": "main", "albert-scott": "master", "do-it-v2-realm": "realm"},
+ok(cfg0484_10["push"]["projects"] == ["do-it-v2", "albert-scott"], f"AC10: default projects: {cfg0484_10['push']}")
+ok(cfg0484_10["push"]["main"] == {"do-it-v2": "main", "albert-scott": "master"},
    f"AC10: default mains: {cfg0484_10['push']}")
 ok(cfg0484_10["thresholds"]["pass_budget_s"] == 90, "AC10: pre-existing thresholds key unchanged")
 ok(bool(cfg0484_10["prod"]) and cfg0484_10["prod"][0]["project"] == "albert-scott",
@@ -1546,19 +1546,19 @@ ok(bool(cfg0484_10["ci"]) and cfg0484_10["ci"][0]["project"] == "albert-scott", 
 ok(cfg0484_10["classes"] == {}, "AC10: pre-existing classes key unchanged")
 
 cfg0484_10b = look.load_toml(pathlib.Path("/nonexistent-do-it-fixture/no-such-look.toml"))
-ok(cfg0484_10b["push"]["projects"] == ["do-it-v2", "albert-scott", "do-it-v2-realm"], "AC10: a missing file returns the defaults")
-ok(cfg0484_10b["push"]["main"] == {"do-it-v2": "main", "albert-scott": "master", "do-it-v2-realm": "realm"},
+ok(cfg0484_10b["push"]["projects"] == ["do-it-v2", "albert-scott"], "AC10: a missing file returns the defaults")
+ok(cfg0484_10b["push"]["main"] == {"do-it-v2": "main", "albert-scott": "master"},
    "AC10: a missing file returns the defaults (main)")
 
 root0484_10c = newroot()
 badtoml0484_10c = root0484_10c / "bad.toml"
 badtoml0484_10c.write_text("this is not [[[ valid toml")
 cfg0484_10c = look.load_toml(badtoml0484_10c)
-ok(cfg0484_10c["push"]["projects"] == ["do-it-v2", "albert-scott", "do-it-v2-realm"], "AC10: a malformed file returns the defaults")
+ok(cfg0484_10c["push"]["projects"] == ["do-it-v2", "albert-scott"], "AC10: a malformed file returns the defaults")
 
 root0484_10d = newroot()
 cfg0484_10d = look.load_toml(clean_toml(root0484_10d))   # a real file with no [push] table at all
-ok(cfg0484_10d["push"]["projects"] == ["do-it-v2", "albert-scott", "do-it-v2-realm"], "AC10: no [push] table returns the defaults")
+ok(cfg0484_10d["push"]["projects"] == ["do-it-v2", "albert-scott"], "AC10: no [push] table returns the defaults")
 print("merge-origin-0484 AC10 ok")
 
 
