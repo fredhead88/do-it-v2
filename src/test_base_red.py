@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Offline regression and real local store round-trip checks for base_red."""
+import ast
 import contextlib
 import io
 import json
@@ -80,16 +81,19 @@ class BaseRedTests(unittest.TestCase):
 
     def gh(self, argv):
         self.calls.append(argv)
+        if "--slurp" in argv:
+            return 1, "", "unknown flag: --slurp"
         self.assertEqual(argv[:2], ["gh", "api"])
         self.assertNotIn("view", argv)
         if self.gh_error:
             return 1, "", "fixture error"
         if "/jobs?" in argv[2]:
-            return 0, json.dumps([{"jobs": [{"name": "pg-parity (Postgres)", "conclusion": "failure",
-                                              "steps": [{"name": STEP, "conclusion": "failure"}]}]}]), ""
+            return 0, json.dumps({"jobs": [{"name": "pg-parity (Postgres)", "conclusion": "failure",
+                                             "steps": [{"name": STEP, "conclusion": "failure"}]}]}), ""
         self.assertIn("actions/runs?", argv[2])
         self.assertIn("--paginate", argv)
-        return 0, json.dumps([{"workflow_runs": self.runs}]), ""
+        pages = [{"workflow_runs": [run]} for run in self.runs] or [{"workflow_runs": []}]
+        return 0, "\n".join(json.dumps(page) for page in pages), ""
 
     def binary(self, argv, **kw):
         if argv[0] != "base-red-fake-gh":
@@ -118,6 +122,80 @@ class BaseRedTests(unittest.TestCase):
     def cli(self, sha=None):
         return subprocess.run([str(HERE.parent / "doit"), "base-red", "demo", sha or self.sha, "--json"],
                               capture_output=True, text=True, env=dict(os.environ), timeout=15)
+
+    def test_ac1_api_paginates_without_slurp(self):
+        path = "repos/example/demo/actions/runs?per_page=100"
+        rows = [{"id": 1}, {"id": 2}]
+        for key in ("workflow_runs", "jobs"):
+            for separator in ("\n", ""):
+                with self.subTest(key=key, separator=separator):
+                    output = separator.join(json.dumps({key: [row]}) for row in rows)
+                    with patch.object(br.ghlimit, "run", return_value=(0, output, "")) as run:
+                        self.assertEqual(br._api(path, key), rows)
+                    argv = run.call_args.args[0]
+                    self.assertEqual(argv, ["gh", "api", path, "--paginate"])
+                    self.assertNotIn("--slurp", argv)
+        with patch.object(br.ghlimit, "run", return_value=(0, ' \n{"jobs": []} \n', "")):
+            self.assertEqual(br._api(path, "jobs"), [])
+
+    def test_ac2_gh_flags_allowlisted(self):
+        self.assertEqual(self.gh(["gh", "api", "fixture", "--slurp"]),
+                         (1, "", "unknown flag: --slurp"))
+        self.calls.clear()
+        result = br.failing("demo", self.sha)
+        self.assertTrue(result["complete"], result)
+        self.assertEqual(result["ids"], self.expected())
+        self.assertTrue(self.calls)
+        self.assertTrue(any("/jobs?" in argv[2] for argv in self.calls))
+        for argv in self.calls:
+            with self.subTest(argv=argv):
+                self.assertLessEqual({arg for arg in argv if arg.startswith("-")}, {"--paginate"})
+
+    def test_ac3_no_slurp_in_gh_callers(self):
+        for name in ("base_red.py", "ci_shadow.py"):
+            with self.subTest(module=name):
+                tree = ast.parse((HERE / name).read_text())
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                        self.assertNotIn("--slurp", node.value, f"{name}:{node.lineno}")
+
+    def assert_api_output_incomplete(self, output, rc=0):
+        for jobs in (False, True):
+            with self.subTest(jobs=jobs):
+                def gh(argv):
+                    if ("/jobs?" in argv[2]) == jobs:
+                        self.calls.append(argv)
+                        return rc, output, "fixture error" if rc else ""
+                    return self.gh(argv)
+                with patch.object(br.ghlimit, "run", side_effect=gh):
+                    result = br.failing("demo", self.sha)
+                self.assertFalse(result["complete"], result)
+                self.assertTrue(result["undetermined"], result)
+                self.assertEqual(result["ids"], {key: [] for key in KINDS})
+                self.assertFalse(self.cache.exists())
+                self.assertEqual(self.events(), [])
+
+    def test_ac4_unreadable_api_output_is_incomplete_empty(self):
+        self.assert_api_output_incomplete(" \n\t")
+
+    def test_ac4_unreadable_api_output_is_incomplete_truncated(self):
+        self.assert_api_output_incomplete('{"workflow_runs": [], "jobs": []}\n{"')
+
+    def test_ac4_unreadable_api_output_is_incomplete_missing_key(self):
+        self.assert_api_output_incomplete('{"workflow_runs": [], "jobs": []}{}')
+
+    def test_ac4_unreadable_api_output_is_incomplete_non_list(self):
+        for value in ({}, None, "", 1):
+            with self.subTest(value=value):
+                self.assert_api_output_incomplete(json.dumps({"workflow_runs": value, "jobs": value}))
+
+    def test_ac4_unreadable_api_output_is_incomplete_nonzero_exit(self):
+        self.assert_api_output_incomplete('{"workflow_runs": [], "jobs": []}', rc=1)
+
+    def test_ac4_unreadable_api_output_is_incomplete_invalid_page_or_row(self):
+        for output in ('[]', 'null', '{"workflow_runs": [null], "jobs": [null]}'):
+            with self.subTest(output=output):
+                self.assert_api_output_incomplete(output)
 
     def test_parse_failed_error_changed_vitest_suite_error_pg_parity(self):
         actual = br.parse_log("\n".join(p.read_text() for p in sorted(FIX.glob("*.log"))))
