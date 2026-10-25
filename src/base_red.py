@@ -128,13 +128,23 @@ def _owner(repo):
 
 
 def _api(path, key):
-    rc, out, _ = ghlimit.run(["gh", "api", path, "--paginate", "--slurp"])
+    rc, out, _ = ghlimit.run(["gh", "api", path, "--paginate"])
     if rc:
         raise ValueError("GitHub API failed")
-    pages = json.loads(out)
-    if isinstance(pages, dict):
-        pages = [pages]
-    return [row for page in pages for row in page[key]]
+    source = out.lstrip()
+    if not source:
+        raise ValueError("missing GitHub API pages")
+    decoder, rows = json.JSONDecoder(), []
+    while source:
+        page, end = decoder.raw_decode(source)
+        if not isinstance(page, dict) or key not in page:
+            raise ValueError("invalid GitHub API page")
+        batch = page[key]
+        if not isinstance(batch, list) or any(not isinstance(row, dict) for row in batch):
+            raise ValueError("invalid GitHub API rows")
+        rows.extend(batch)
+        source = source[end:].lstrip()
+    return rows
 
 
 def _logs(owner, rid):
