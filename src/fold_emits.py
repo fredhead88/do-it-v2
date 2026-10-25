@@ -295,6 +295,7 @@ EMITS["window-tree-verified"] = {"executor", "operator"}
 EMITS["window-bisected"] = {"executor", "operator"}
 
 # L-spec-1143: admit the train and batcher before their emitters land.
+EMITS["window-run-minutes"] = {"executor", "tick", "operator"}
 EMITS["window-candidate"] = {"executor", "tick", "operator"}
 EMITS["window-cancelled"] = {"executor", "tick", "operator"}
 EMITS["train-depth"] = {"executor", "tick", "operator"}
@@ -326,6 +327,7 @@ REQUIRED_ROWS = {
     "bill-check": ("date", "yday", "mtd"),
     "window-tree-verified": ("window", "sha", "tree"),
     "window-bisected": ("window", "halves"),
+    "window-run-minutes": ("window", "candidate", "minutes_source"),
     "window-candidate": ("sha", "verified_on", "specs"),
     "window-cancelled": ("after", "reason"),
     "train-depth": ("depth", "reason"),

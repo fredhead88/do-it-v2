@@ -211,7 +211,7 @@ def train_events():
 
 
 def red_rate(events, now, hours=24):
-    """Distinct terminal windows in the trailing day; a dropped subset is red."""
+    """Count non-green terminal windows; a dropped subset remains sticky red."""
     now = datetime.fromisoformat(str(now).replace("Z", "+00:00")) if not isinstance(now, datetime) else now
     if now.tzinfo is None:
         now = now.replace(tzinfo=timezone.utc)
@@ -230,12 +230,24 @@ def red_rate(events, now, hours=24):
                     stamp = stamp.replace(tzinfo=timezone.utc)
             except (ValueError, TypeError):
                 continue
-            terminals[name] = stamp
+            if name not in terminals or stamp >= terminals[name][0]:
+                terminals[name] = stamp, event
             if event.get("dropped") or event.get("outcome") == "red":
                 reds.add(name)
-    windows = {name for name, stamp in terminals.items() if now - timedelta(hours=hours) <= stamp <= now}
+    windows = {name for name, (stamp, _) in terminals.items() if now - timedelta(hours=hours) <= stamp <= now}
     red = len(windows & reds)
-    return dict(rate=red / len(windows) if len(windows) >= 5 else None, red=red, windows=len(windows))
+    undetermined = other = 0
+    for name in windows - reds:
+        newest = terminals[name][1]
+        if newest.get("type") == "window-verified" and not newest.get("dropped"):
+            continue
+        if newest.get("outcome") in ("undetermined", "base-not-releasable"):
+            undetermined += 1
+        else:
+            other += 1
+    non_green = red + undetermined + other
+    return dict(rate=non_green / len(windows) if len(windows) >= 5 else None,
+                red=red, undetermined=undetermined, other=other, non_green=non_green, windows=len(windows))
 
 
 def train_depth(env, toml_path=None, root=None, events=None, now=None):
@@ -259,7 +271,8 @@ def train_depth(env, toml_path=None, root=None, events=None, now=None):
     except (OSError, ValueError, ZeroDivisionError):
         depth, reason = 1, "disk-unreadable"
     try:
-        rate = red_rate(train_events() if events is None else events, now or datetime.now(timezone.utc))["rate"]
+        health = red_rate(train_events() if events is None else events, now or datetime.now(timezone.utc))
+        rate = health["red"] / health["windows"] if health["windows"] >= 5 else None
     except (OSError, ValueError, TypeError):
         rate, depth, reason = None, 1, "ledger-unreadable"
     if rate is not None and rate > .40:
@@ -533,33 +546,65 @@ def run_minutes(repo, docs, *, required=None):
             if not isinstance(checks, dict) or not checks:
                 return estimate
             for check in checks.values():
-                if not isinstance(check, dict) or not str(check.get("run_id", "")).isdigit():
+                rid = check.get("run_id") if isinstance(check, dict) else None
+                if isinstance(rid, (str, int)) and not isinstance(rid, bool) and re.fullmatch(r"[0-9]+", str(rid)):
+                    ids.add(str(rid))
+                elif check == "ran" or isinstance(check, dict) and check.get("state") == "ran":
                     return estimate
-                ids.add(str(check["run_id"]))
         totals = dict(actions_minutes=0, selfhosted_minutes=0, minutes_source="measured")
+        if not docs:
+            return totals
+        if not ids:
+            return estimate
+        # base_red imports us: resolve its repository helper only at call time.
+        import base_red
+        import ghlimit
+        owner = base_red._owner(repo)
+        if not isinstance(owner, str) or not re.fullmatch(r"[\w.-]+/[\w.-]+", owner):
+            return estimate
         for rid in sorted(ids):
-            proc = subprocess.run(["gh", "run", "view", rid, "--json", "jobs"], cwd=repo,
-                                  capture_output=True, text=True, timeout=60)
-            if proc.returncode:
+            if not ghlimit.gate(wait=False)["ok"]:
                 return estimate
-            jobs = json.loads(proc.stdout)["jobs"]
-            if not isinstance(jobs, list) or not jobs:
+            try:
+                proc = subprocess.run([ghlimit.real_gh(), "api",
+                                       f"repos/{owner}/actions/runs/{rid}/jobs?filter=all&per_page=100",
+                                       "--paginate"], cwd=repo, capture_output=True, text=True, timeout=60)
+            finally:
+                ghlimit._bump_spent()
+            if proc.returncode:
+                if ghlimit._matches_rate_limit(proc.stderr):
+                    ghlimit._mark_exhausted()
+                return estimate
+            source = proc.stdout.lstrip()
+            decoder, jobs = json.JSONDecoder(), []
+            while source:
+                page, end = decoder.raw_decode(source)
+                if not isinstance(page, dict) or not isinstance(page.get("jobs"), list):
+                    return estimate
+                jobs.extend(page["jobs"])
+                source = source[end:].lstrip()
+            if not jobs:
                 return estimate
             for job in jobs:
-                labels, runner = job.get("labels"), job.get("runnerName")
-                if labels is not None and (not isinstance(labels, list) or any(not isinstance(s, str) for s in labels)):
+                if not isinstance(job, dict):
                     return estimate
-                if runner is not None and not isinstance(runner, str):
+                if "runner_name" not in job or not isinstance(job.get("status"), str):
                     return estimate
-                if not labels and not runner:
+                labels, runner = job.get("labels"), job.get("runner_name")
+                if not isinstance(labels, list) or any(not isinstance(label, str) for label in labels):
                     return estimate
-                start = datetime.fromisoformat(job["startedAt"].replace("Z", "+00:00"))
-                end = datetime.fromisoformat(job["completedAt"].replace("Z", "+00:00"))
+                if runner is None:
+                    if job.get("status") == "completed":
+                        continue  # skipped jobs never acquired a runner
+                    return estimate
+                if not isinstance(runner, str) or not runner:
+                    return estimate
+                start = datetime.fromisoformat(job["started_at"].replace("Z", "+00:00"))
+                end = datetime.fromisoformat(job["completed_at"].replace("Z", "+00:00"))
                 if start.tzinfo is None or end.tzinfo is None or end < start:
                     return estimate
-                minutes = math.ceil((end - start).total_seconds() / 60)
-                hosted = "self-hosted" in (labels or []) or "self-hosted" in (runner or "")
-                totals["selfhosted_minutes" if hosted else "actions_minutes"] += minutes
+                minutes = max(1, math.ceil((end - start).total_seconds() / 60))
+                totals["selfhosted_minutes" if "self-hosted" in labels else "actions_minutes"] += minutes
         return totals
     except Exception:
         return estimate
@@ -1253,6 +1298,17 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
             print(f"gate-window: tree {tree} already verified in {prior.get('window', prior.get('subject'))}")
             return dict(state="green", nodes=[], url="", doc={})
         res = dict(verify(repo, cand, candidate_required, window), candidate=cand)
+        try:
+            doc = res.get("doc", {})
+            run_ids = sorted({str(check["run_id"]) for check in doc.get("checks", {}).values()
+                              if isinstance(check, dict) and isinstance(check.get("run_id"), (str, int))
+                              and not isinstance(check["run_id"], bool)
+                              and re.fullmatch(r"[0-9]+", str(check["run_id"]))})
+            if run_ids:
+                ev("window-run-minutes", window, window=window, candidate=cand, run_ids=run_ids,
+                   state=res["state"], **run_minutes(repo, [doc], required=[candidate_required]))
+        except Exception as exc:
+            print(f"gate-window: candidate minutes unavailable ({type(exc).__name__})")
         if res["state"] != "green" and infra_failure(window, project, res.get("output", "") + "\n" + res.get("why", "")):
             return dict(res, state="undetermined", why="infra: verification unavailable")
         # No attribution or shipment may escape a verification on an unmerged base.
