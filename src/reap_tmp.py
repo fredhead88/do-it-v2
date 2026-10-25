@@ -285,8 +285,12 @@ def _reap_recorded(events, *, dry_run=False, scratch_root=None, proc_root="/proc
     roots = [p.resolve() for p in roots]
     refused, unsafe = [], set()
     for resource in resources.live(events):
+        if not resources.reapable(resource):
+            continue
         ref = resource.ref
-        if not ref or not pathlib.Path(ref).is_absolute():
+        if resource.undetermined is not None:
+            why = "undetermined: " + resource.undetermined
+        elif not ref or not pathlib.Path(ref).is_absolute():
             why = "undetermined: malformed ref"
         else:
             path = pathlib.Path(os.path.realpath(ref))
@@ -294,8 +298,7 @@ def _reap_recorded(events, *, dry_run=False, scratch_root=None, proc_root="/proc
         if why:
             unsafe.add(ref)
             refused.append(resources.ReapResult(ref, resource.kind, "refused", why))
-    safe_events = [e for e in events if not (e.get("type") == "resource-created" and (not isinstance(e.get("ref"), str) or not e.get("ref") or e.get("ref") in unsafe))]
-    return refused + resources.reap(safe_events, dry_run=dry_run,
+    return refused + resources.reap(events, dry_run=dry_run, exclude=frozenset(unsafe),
         safety=lambda r, e: resources._default_safety(r, e, proc_root=proc_root))
 
 

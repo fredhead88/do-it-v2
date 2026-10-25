@@ -409,6 +409,57 @@ def run_steps(events, specs, now, *, dispatcher=None, dry_run=False, handled=fro
     return out
 
 
+def _reap_summary(rows, *, not_reapable, manifest) -> dict | None:
+    """Bound the tick's reaper report while retaining kinds and reason classes."""
+    from collections import Counter, defaultdict
+
+    def kind_key(kind):
+        kind = str(kind)[:40]
+        return "other(kind)" if kind == "other" else kind
+
+    def capped(counts, *, actions=False):
+        if len(counts) <= 16:
+            return dict(counts)
+        total = (lambda v: sum(v.values())) if actions else (lambda v: v)
+        ranked = sorted(counts, key=lambda k: (-total(counts[k]), k))
+        kept = {k: counts[k] for k in ranked[:15]}
+        if actions:
+            rest = Counter()
+            for k in ranked[15:]:
+                rest.update(counts[k])
+            kept["other"] = dict(rest)
+        else:
+            kept["other"] = sum(counts[k] for k in ranked[15:])
+        return kept
+
+    by_action, by_reason = Counter(), Counter()
+    by_kind = defaultdict(Counter)
+    n = 0
+    for row in rows:
+        n += 1
+        kind = kind_key(row.kind)
+        by_action[row.action] += 1
+        by_kind[kind][row.action] += 1
+        tokens = [token.strip("'\"`,:;()") for token in row.reason.split()]
+        reason = " ".join("<path>" if token.startswith("/") else token for token in tokens)
+        reason = re.sub(r"\d+", "#", reason)[:60]
+        by_reason[kind + ":" + reason] += 1
+    rootless = Counter()
+    for kind, count in (not_reapable or {}).items():
+        if count:
+            rootless[kind_key(kind)] += count
+    if not n and not rootless and not any((manifest or {}).values()):
+        return None
+    result = dict(n=n, by_action=dict(by_action),
+                  by_kind=capped({k: dict(v) for k, v in by_kind.items()}, actions=True),
+                  by_reason=capped(by_reason))
+    if not_reapable is not None:
+        result["not_reapable"] = capped(rootless)
+    if manifest is not None:
+        result["manifest"] = dict(manifest)
+    return result
+
+
 def _record():
     """One flock-guarded fold+lane+append — the shared core `main()` and
     `wait()` both run under the IDENTICAL non-blocking lock (this module's own
@@ -632,9 +683,21 @@ def _record():
     worktree_reap_error = None
     worktrees_retained = None
     recorded_reap = []
+    reap_counts_errors = []
+    manifest = not_reapable = None
+    try:
+        import resources
+        manifest = resources.manifest_counts()
+    except Exception:
+        reap_counts_errors.append("manifest_counts")
+    try:
+        import resources
+        not_reapable = resources.not_reapable_counts(ev)
+    except Exception:
+        reap_counts_errors.append("not_reapable_counts")
     try:
         import reap_tmp
-        recorded_reap = [vars(row) for row in reap_tmp._reap_recorded(ev)]
+        recorded_reap = reap_tmp._reap_recorded(ev)
         wt_reaped, wt_retained = tree_cleanup.reap_worktrees(ev)
         for row in wt_reaped:
             dispatch.emit(tick_path(), {}, "worktree-reaped", subject=row["spec"],
@@ -680,8 +743,11 @@ def _record():
         kv["autodispatch_error"] = autodispatch_error
     if lane_driver_log_error:
         kv["lane_driver_log_error"] = lane_driver_log_error
-    if recorded_reap:
-        kv["recorded_reap"] = recorded_reap
+    reap_counts = _reap_summary(recorded_reap, not_reapable=not_reapable, manifest=manifest)
+    if reap_counts is not None:
+        kv["recorded_reap_counts"] = reap_counts
+    if reap_counts_errors:
+        kv["recorded_reap_counts_error"] = "; ".join(reap_counts_errors)
     if worktree_reap_error:
         kv["worktree_reap_error"] = worktree_reap_error
     if worktrees_retained is not None:

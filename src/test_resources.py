@@ -330,8 +330,9 @@ class ResourcesTests(unittest.TestCase):
 
     def test_reap_safety_upload_copy_no_allowed_root(self):
         path = self.directory("upload-copy")
-        row = self.assert_refused(path, finished() + [created(path, "upload-copy")])
-        self.assertEqual(row.reason, "no-allowed-root")
+        with patch.object(resources, "_path_reason", side_effect=AssertionError("rootless walked")):
+            self.assertEqual(resources.reap(finished() + [created(path, "upload-copy")], dry_run=False), [])
+        self.assertTrue(path.exists())
         self.assertEqual(self.fresh(), [])
 
     def builder_record(self, path, kind):
@@ -352,7 +353,9 @@ class ResourcesTests(unittest.TestCase):
     def test_path_guard_upload_copy(self):
         path = self.directory("upload-copy")
         evs = self.builder_record(path, "upload-copy")
-        self.assertEqual(self.assert_refused(path, evs).reason, "no-allowed-root")
+        self.assertEqual(resources.reap(evs, dry_run=False), [])
+        self.assertTrue(path.exists())
+        self.assertFalse(any(e["type"] == "resource-reaped" for e in self.fresh()))
 
     def test_path_guard_protected_roots(self):
         home = self.directory("home")
@@ -397,6 +400,56 @@ class ResourcesTests(unittest.TestCase):
         self.assertEqual((row.ref, row.source, row.undetermined), ("/archive/fixture", "upload-manifest", None))
         manifest.write_text("malformed\n")
         self.assertTrue(resources.live([])[0].undetermined)
+
+    def test_manifest_split_and_errors(self):
+        self.assertEqual(resources.manifest_counts(), {"legacy": 0, "declared": 0})
+        config = self.root / "repos/do-it-v2/look.toml"
+        config.parent.mkdir(parents=True)
+        manifest = self.root / "uploads.jsonl"
+        config.write_text('[resources]\nupload_manifest = ' + json.dumps(str(manifest)) + '\n')
+        valid = dict(kind="upload-copy", ref=str(self.root / "archive"), lane="archive", subject="fixture")
+        missing_kind = {k: v for k, v in valid.items() if k != "kind"} | {"ref": str(self.root / "missing-kind")}
+        declared = [valid, valid | {"ref": ""}, missing_kind]
+        rows = [{"archived_to": "/legacy/one"}, {}, {"sha": "legacy"}] + declared
+        manifest.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+        actual = resources._uploads()
+        self.assertEqual(len(actual), 3)
+        self.assertIsNone(actual[0].undetermined)
+        self.assertTrue(all(r.undetermined for r in actual[1:]))
+        self.assertEqual([r.undetermined for r in actual[1:]], ["missing or invalid ref", "missing or invalid kind"])
+        self.assertTrue(all(r.ref not in {"upload-manifest:0", "upload-manifest:1", "upload-manifest:2"} for r in actual))
+        self.assertEqual(resources.manifest_counts(), {"legacy": 3, "declared": 3})
+        body = json.dumps(dict(counts=resources.manifest_counts(), resources=[vars(r) for r in actual]), sort_keys=True)
+        import hashlib
+        print(json.dumps(dict(url="cli://resources/AC2", status=0,
+              body_sha256=hashlib.sha256(body.encode()).hexdigest(), body_excerpt=body)))
+        for bad in (json.dumps(valid) + "\n[]\n" + json.dumps(valid), "malformed", "null"):
+            manifest.write_text(bad)
+            self.assertEqual(resources.manifest_counts(), {"legacy": 0, "declared": 0, "unreadable": True})
+            errors = resources._uploads()
+            self.assertEqual(len(errors), 1)
+            self.assertIn("upload manifest:", errors[0].undetermined)
+        manifest.unlink()
+        self.assertTrue(resources.manifest_counts()["unreadable"])
+        for kind in (None, "", "tmpdir"):
+            manifest.write_text(json.dumps(valid | {"kind": kind}))
+            self.assertEqual(resources.manifest_counts(), {"legacy": 0, "declared": 1})
+            self.assertIsNotNone(resources._uploads()[0].undetermined)
+
+    def test_reapable_and_exclude(self):
+        path = self.directory("excluded")
+        evs = finished() + [created(path)]
+        with patch.object(resources, "_remove") as remove:
+            self.assertEqual(resources.reap(evs, dry_run=False, exclude=frozenset({str(path)})), [])
+            remove.assert_not_called()
+        self.assertEqual(resources.reap(evs, safety=lambda *_: None)[0].action, "would-reap")
+        with patch.dict(resources.ROOTS, tmpdir=lambda: (_ for _ in ()).throw(RuntimeError("root failure"))):
+            self.assertTrue(resources.reapable(resources.live(evs)[0]))
+            self.assertEqual(resources.not_reapable_counts(evs), {})
+            self.assertIn("root failure", resources.reap(evs)[0].reason)
+        unknown = created(path, "unknown")
+        self.assertTrue(resources.reapable(resources.live([unknown])[0]))
+        self.assertIn("invalid kind", resources.reap([unknown])[0].reason)
 
     def test_creator_release(self):
         path = self.directory("creator")
