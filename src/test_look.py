@@ -2266,6 +2266,69 @@ with patch.dict(os.environ, DOIT_TICK_MIN="5"):
         ok(not look._read_jsonl(root / "events" / look.LEDGER_NAME), "watchdog: dry run never appends")
 print("watchdog AC9 ok")
 
+
+def _skip_heartbeat_checks():
+    import cron_run
+    checks_before = n
+    with tempfile.TemporaryDirectory(prefix="look-cron-skips-") as directory, \
+            patch.object(look, "_DRY_RUN", True), patch.dict(os.environ, DOIT_TICK_MIN="5"):
+        root = pathlib.Path(directory)
+        calls = []
+        def verdict(name):
+            return look.heartbeat_missed(name, _WNOW, [], root=root,
+                                         sender=lambda text: calls.append(text) or 0)
+        for name in ("tick", "look"):
+            skips = cron_run.skip_store_path(name, root)
+            _write_cron_store(root, name, [dict(ev="start", ts=iso(_WNOW - timedelta(minutes=40)))])
+            skips.write_text(json.dumps(dict(ev="skip", ts=iso(_WNOW - timedelta(minutes=1)))) + "\n")
+            ok(not verdict(name), "1532 AC5: a recent skip proves cron fired after a stale start")
+            skips.write_text(json.dumps(dict(ev="skip", ts=iso(_WNOW - timedelta(minutes=40)))) + "\n")
+            ok(verdict(name), "1532 AC5: a stale skip never hides a missed heartbeat")
+            for age in (1, 40):
+                _write_cron_store(root, name, [dict(ev="start", ts=iso(_WNOW - timedelta(minutes=age)))])
+                skips.unlink(missing_ok=True)
+                baseline = verdict(name)
+                junk = ["\n", "not-json\n", "[]\n", json.dumps(dict(ev="skip")) + "\n",
+                        json.dumps(dict(ev="skip", ts="unparseable")) + "\n"]
+                for text in [*junk, "".join(junk),
+                             json.dumps(dict(ev="end", ts=iso(_WNOW))) + "\n",
+                             json.dumps(dict(ev="skip", ts="2026-10-25T00:00:00")) + "\n"]:
+                    skips.write_text(text)
+                    ok(verdict(name) == baseline, "1532 AC5: junk skip evidence never changes the start-only verdict")
+                skips.write_bytes(b"\xff")
+                ok(verdict(name) == baseline, "1532 AC5: undecodable skip store preserves the verdict")
+                skips.unlink()
+                skips.mkdir()
+                ok(verdict(name) == baseline, "1532 AC5: unreadable skip store preserves the verdict")
+                skips.rmdir()
+            _write_cron_store(root, name, [dict(ev="start", ts=iso(_WNOW - timedelta(minutes=1)))])
+            skips.write_text(json.dumps(dict(ev="skip", ts=iso(_WNOW - timedelta(minutes=40)))) + "\n")
+            ok(not verdict(name), "1532 AC5: an older skip never replaces a newer start")
+            cron_run.store_path(name, root).unlink()
+            skips.write_text(json.dumps(dict(ev="skip", ts=iso(_WNOW))) + "\n")
+            ok(not verdict(name), "1532 AC5: a recent skip also works without a start ring")
+
+        manifest = _write_cron_manifest(root, [dict(ROW_BW10, name="j-overrun"),
+                                               dict(ROW_BW10, name="j-skip-only")])
+        for name in ("j-overrun", "j-skip-only"):
+            cron_run.skip_store_path(name, root).write_text(json.dumps(dict(ev="skip", ts=iso(_WNOW))) + "\n")
+        _write_cron_store(root, "j-overrun", [dict(ev="start", ts=iso(_WNOW - timedelta(minutes=40)), pid=1)])
+        briefs = []
+        look._check_cron_runs(_WNOW, [], root, briefs, [], crons_manifest=str(manifest))
+        ok(len(briefs) == 1 and briefs[0]["condition"] == "cron-overrun"
+           and briefs[0]["reading"]["open"] is True,
+           "1532 AC5: recent skips never hide cron-overrun and skip-only jobs produce no brief")
+        ok(not calls, "1532 AC5: dry-run heartbeat checks never send")
+    import hashlib
+    body = json.dumps(dict(checks_passed=n - checks_before, recent_skip_counts=True,
+                           malformed_skips_preserve_start_verdict=True, open_overrun_preserved=True,
+                           skip_only_job_briefs=0), sort_keys=True)
+    print(json.dumps(dict(url="cli://look/L-spec-1532/AC5", status=0,
+                          body_sha256=hashlib.sha256(body.encode()).hexdigest(), body_excerpt=body)))
+
+
+_skip_heartbeat_checks()
+
 # Signed CLI responses use the repository's backend-evidence convention.
 import hashlib
 for criterion in (1, 2, 3, 4, 5, 6, 7, 8, 9):
