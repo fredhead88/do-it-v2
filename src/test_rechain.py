@@ -17,6 +17,9 @@ _ledger_root = tempfile.TemporaryDirectory(prefix="rechain-ledger-")
 atexit.register(_ledger_root.cleanup)
 os.environ["DOIT_ROOT"] = _ledger_root.name
 os.environ["DOIT_NO_POKE"] = "1"
+_grading = pathlib.Path(_ledger_root.name) / "grading.toml"
+_grading.write_text("")
+os.environ["DOIT_GRADING_TOML"] = str(_grading)
 import rechain
 import window_gate
 
@@ -186,6 +189,110 @@ class RechainTests(unittest.TestCase):
         a, b = self.fx.branch("a"), self.fx.branch("b")
         cur, _ = window_gate.merge_into(self.fx.repo, self.fx.base, a[2], "a")
         return cur, b
+
+    def fingerprint_env(self):
+        root = pathlib.Path(self.tmp.name)
+        env = self.fx.scripts(root)
+        config = root / "grading.toml"
+        venv = root / "venv"
+        (venv / "bin").mkdir(parents=True)
+        python = venv / "bin/python"
+        python.write_text('#!/bin/sh\nexec /usr/bin/python3 "$@"\n')
+        python.chmod(0o755)
+        config.write_text('[project.albert-scott]\nvenv = ' + json.dumps(str(venv)) + '\n')
+        bare = root / "bare"
+        bare.mkdir()
+        (bare / "git").symlink_to("/usr/bin/git")
+        env.update(DOIT_GRADING_TOML=str(config), PATH=str(bare))
+        return root, env, venv
+
+    def test_ac1_fingerprint_finds_project_python(self):
+        branch = self.fx.branch("b")
+        root, env, _ = self.fingerprint_env()
+        script = root / "fingerprint.sh"
+        script.write_text('python -c \'import pathlib, sys; pathlib.Path(sys.argv[1]).write_text("project python\\n")\' "$2" || exit 1\n'
+                          'echo "fingerprint $PWD" >> "$RECHAIN_TEST_LOG"\n')
+        env["DOIT_RECHAIN_FINGERPRINT_CMD"] = "/bin/bash " + str(script)
+        with patch.dict(os.environ, env):
+            sha = rechain.fingerprint(self.fx.repo, branch[2], "w", project="albert-scott", ev=self.fx.ev)
+            self.assertNotEqual(sha, branch[2])
+            self.assertEqual(rechain.blob(self.fx.repo, sha, rechain.FINGERPRINT), b"project python\n")
+            calls = pathlib.Path(env["RECHAIN_TEST_LOG"]).read_text().splitlines()
+            self.assertEqual([line.split()[0] for line in calls], ["loopback", "fingerprint", "stop"])
+            with self.assertRaises(rechain.FingerprintFailed):
+                rechain.fingerprint(self.fx.repo, branch[2], "w", project=None, ev=self.fx.ev)
+        response("1534-AC1", dict(project_python=True, no_project_declined=True, calls=3))
+
+    def test_ac2_venv_first_and_prod_vars_stripped(self):
+        branch = self.fx.branch("b")
+        root, env, venv = self.fingerprint_env()
+        script = root / "fp.py"
+        original = script.read_text()
+        keys = ("SUPABASE_DB_URL", "SUPABASE_DB_URL_DIRECT", "DATABASE_URL", "PGPASSWORD", "SCRATCH_PG_URL")
+        env.update({k: "forbidden-fixture" for k in keys})
+        for project, configured in (("albert-scott", True), ("unconfigured", False), (None, False)):
+            expected = str(venv / "bin") + os.pathsep + env["PATH"] if configured else env["PATH"]
+            script.write_text(original + '\nassert os.environ["PATH"] == ' + repr(expected) + '\n'
+                              + 'assert not any(k in os.environ for k in ' + repr(keys) + ')\n'
+                              + 'assert os.environ["AS_LOCAL_PG_ADMIN"] == "postgresql://fixture@127.0.0.1:23456/postgres"\n')
+            with self.subTest(project=project), patch.dict(os.environ, env):
+                rechain.fingerprint(self.fx.repo, branch[2], "w", project=project, ev=self.fx.ev)
+        for name in ("rechain.py", "window_gate.py"):
+            self.assertNotIn("/opt/" + "albert-scott", pathlib.Path(__file__).with_name(name).read_text())
+        response("1534-AC2", dict(cases=3, venv_first=True, production_variables_stripped=True))
+
+    def test_ac3_failure_carries_redacted_stderr_tail(self):
+        branch = self.fx.branch("b")
+        root, env, _ = self.fingerprint_env()
+        secret = "test-" + "credential"
+        raw = ["line1", "line2", "line3", "line4", "", "postgresql://u:" + secret + "@127.0.0.1:5432/x",
+               "password=" + secret, "x" * 400, "line8"]
+        script = root / "fp.py"
+        script.write_text('import sys\nsys.stderr.write(' + repr("\n".join(raw)) + ')\nsys.exit(2)\n')
+        with patch.dict(os.environ, env):
+            with self.assertRaises(rechain.FingerprintFailed) as caught:
+                rechain.fingerprint(self.fx.repo, branch[2], "w", ev=self.fx.ev)
+        exc = caught.exception
+        self.assertEqual(exc.stage, "fingerprint")
+        self.assertTrue(str(exc).startswith("fingerprint regeneration failed"))
+        self.assertEqual(exc.stderr_tail, ["line4", "[redacted database URL]", "password=[redacted]", "x" * 300, "line8"])
+        self.assertTrue(all(len(line) <= 300 and secret not in line and "postgresql://" not in line for line in exc.stderr_tail))
+        for pg_failure in (False, True):
+            (root / ("pg.py" if pg_failure else "fp.py")).write_text(
+                'import sys\n' + ('sys.stderr.write("PG fixture failed\\n")\n' if pg_failure else '') + 'sys.exit(1)\n')
+            with patch.dict(os.environ, env), self.assertRaises(rechain.FingerprintFailed) as caught:
+                rechain.fingerprint(self.fx.repo, branch[2], "w", ev=self.fx.ev)
+            self.assertEqual(caught.exception.stage, "pg-start" if pg_failure else "fingerprint")
+            self.assertEqual(caught.exception.stderr_tail, ["PG fixture failed"] if pg_failure else [])
+        response("1534-AC3", dict(cases=3, redacted=True, bounded=True, empty_stderr_declined=True))
+
+    def test_rules_decline_fields_unchanged(self):
+        a = self.fx.branch("a", mutation=lambda f: f.write("outside.txt", "a\n"))
+        b = self.fx.branch("b", mutation=lambda f: f.write("outside.txt", "b\n"))
+        cur, _ = window_gate.merge_into(self.fx.repo, self.fx.base, a[2], "a")
+        sha, why = rechain.resolve(self.fx.repo, cur, b, "w", ev=self.fx.ev)
+        self.assertIsNone(sha)
+        self.assertEqual(why, "re-chain rules could not be applied safely")
+        event = self.fx.events[-1]
+        self.assertEqual(event["why"], why)
+        self.assertNotIn("stderr_tail", event)
+        self.assertNotIn("stage", event)
+        response("1534-AC5-rules", dict(declined=True, why=why, no_stderr_tail=True))
+
+    def test_missing_project_environment_declines(self):
+        branch = self.fx.branch("b")
+        root, env, venv = self.fingerprint_env()
+        config = root / "grading.toml"
+        for contents in ('[project.albert-scott]\nvenv = ' + json.dumps(str(venv / "missing")),
+                         'invalid = [', None):
+            if contents is None:
+                config.unlink()
+            else:
+                config.write_text(contents)
+            with patch.dict(os.environ, env), self.assertRaises(rechain.FingerprintFailed) as caught:
+                rechain.fingerprint(self.fx.repo, branch[2], "w", project="albert-scott", ev=self.fx.ev)
+            self.assertEqual(caught.exception.stage, "worktree")
+        self.assertFalse((root / "calls").exists())
 
     def test_ac1_ac7(self):
         cur, b = self.stacked()
