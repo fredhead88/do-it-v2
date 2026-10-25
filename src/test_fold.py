@@ -5039,3 +5039,24 @@ def test_close_rule_1506():
 
 
 test_close_rule_1506()
+
+
+def test_nightly_fold_reexport():
+    import fold_emits
+
+    # Keep the cumulative freeze fold available without growing fold.py beyond
+    # the size guards exercised by this suite and test_routing.py.
+    assert fold.nightly_unowned is fold_emits.nightly_unowned
+    red = dict(type='nightly-red', subject='nightly:demo', project='demo',
+               ids=['A'], ts='2026-10-26T01:00:00Z')
+    owner = dict(type='nightly-red-owned', subject='nightly:demo', ids=['A'],
+                 owner='L-spec-9001', actor='operator', ts='2026-10-26T02:00:00Z')
+    events = [owner, red]
+    before = json.dumps(events, sort_keys=True)
+    assert fold.nightly_unowned(events, 'demo') == []
+    assert fold.nightly_unowned([red, dict(owner, ts=red['ts'])], 'demo') == ['A']
+    assert json.dumps(events, sort_keys=True) == before
+    print('1538 nightly fold re-export and pure ownership ordering ok')
+
+
+test_nightly_fold_reexport()

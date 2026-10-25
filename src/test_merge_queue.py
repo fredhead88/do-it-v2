@@ -70,6 +70,79 @@ class QueueTests(unittest.TestCase):
         print(json.dumps(dict(url=f'cli://doit-v2/merge-queue/AC{ac}', status=0,
                               body_sha256=hashlib.sha256(body.encode()).hexdigest(), body_excerpt=body)))
 
+    def nightly_mark(self, number):
+        body = f'nightly-ac{number} ok'
+        print(body)
+        print(json.dumps(dict(url=f'cli://doit-v2/nightly/AC{number}', status=0,
+              body_sha256=hashlib.sha256(body.encode()).hexdigest(), body_excerpt=body)))
+
+    def nightly_event(self, kind, minute, **fields):
+        return dict(type=kind, subject='nightly:albert-scott', project='albert-scott',
+                    ts=(self.now + timedelta(minutes=minute)).isoformat(),
+                    actor='operator', _src=f'fixture:{minute}', **fields)
+
+    def test_nightly_ac4_cumulative_freeze(self):
+        e = self.nightly_event
+        a = e('nightly-red', 0, ids=['A'])
+        b = e('nightly-red', 2, ids=['B'])
+        events = [a, e('base-red-nightly', 1, complete=True, ids=['A']), b]
+        self.assertEqual(fold.nightly_unowned(events, 'albert-scott'), ['A', 'B'])
+        for owned in (['A'], ['B']):
+            owner = e('nightly-red-owned', 3, ids=owned, owner='L-spec-9001')
+            self.assertIsNotNone(mq.merge_freeze(events + [owner], 'albert-scott'))
+        owner = e('nightly-red-owned', 3, ids=['A', 'B'], owner='quarantine')
+        self.assertIsNone(mq.merge_freeze(events + [owner], 'albert-scott'))
+        for bad in (dict(owner, actor='builder'), dict(owner, owner='anyone'),
+                    dict(owner, ts=a['ts']), dict(owner, subject='nightly:other'), dict(owner, project='other')):
+            self.assertIsNotNone(mq.merge_freeze(events + [bad], 'albert-scott'))
+        for verdict in (e('base-red-nightly', 4, complete=False, ids=[]),
+                        e('base-red-nightly', 4, complete=True, ids=['C'])):
+            self.assertIsNotNone(mq.merge_freeze(events + [verdict], 'albert-scott'))
+        green = e('base-red-nightly', 4, complete=True, ids=[])
+        self.assertIsNone(mq.merge_freeze(events + [green], 'albert-scott'))
+        self.assertIsNotNone(mq.merge_freeze([dict(a, ids=None)], 'albert-scott'))
+        self.assertIsNotNone(mq.merge_freeze(events + [owner, e('nightly-red', 5, ids=['A'])], 'albert-scott'))
+        self.assertIsNone(mq.merge_freeze(events, 'other'))
+        self.nightly_mark(4)
+
+    def test_nightly_ac5_window_freeze(self):
+        self.window_seed()
+        red = self.nightly_event('nightly-red', 0, ids=['A'])
+        self.seed([red], 'L-base-red-local.jsonl')
+        for _ in range(2):
+            with patch.object(mq, 'batching_allowed', side_effect=AssertionError('batch attempted')):
+                self.assertEqual(mq.window_run('albert-scott', runner=self.fake), 3)
+        self.assertEqual(self.calls, [])
+        events = fold.read_events()
+        self.assertFalse(any(e['type'] == 'queue-batch' for e in events))
+        frozen = [e for e in events if e['type'] == 'merge-frozen']
+        self.assertEqual(len(frozen), 1)
+        self.assertIn('A', frozen[0]['reason'])
+        for target, failure in ((mq, 'merge_freeze'), (mq.window_gate, 'train_events')):
+            with patch.object(target, failure, side_effect=RuntimeError('unreadable')):
+                self.assertEqual(mq.window_run('albert-scott', runner=self.fake), 3)
+        self.assertEqual(self.calls, [])
+        self.nightly_mark(5)
+
+    def test_nightly_ac12_escalation_closure(self):
+        e = self.nightly_event
+        escalation = e('escalation-blocking', 1, default='quarantine',
+                       deadline=(self.now - timedelta(hours=1)).isoformat(), revert='remove quarantine')
+        events = [e('nightly-red', 0, ids=['A', 'B']), escalation]
+        def check(rows, closed):
+            self.assertEqual(fold.open_escalations(rows), [] if closed else [escalation])
+            self.assertEqual(escalation['_src'] in fold.answered(rows), closed)
+            if closed:
+                self.assertNotIn(escalation, fold.overdue_questions(rows))
+        check(events, False)
+        check(events + [e('decision', 2)], False)
+        owner = e('nightly-red-owned', 2, ids=['A'], owner='L-spec-9001')
+        check(events + [owner], False)
+        check(events + [owner, e('nightly-red-owned', 3, ids=['B'], owner='quarantine')], True)
+        check(events + [dict(owner, ids=['A', 'B'], actor='reviewer')], False)
+        check(events + [e('base-red-nightly', 4, complete=True, ids=[])], True)
+        self.nightly_mark(12)
+
     def test_queue_fold(self):
         add = self.event('queue-add', 5, project='p', branch='b', rule='operator')
         other = dict(add, subject='L-spec-9002')

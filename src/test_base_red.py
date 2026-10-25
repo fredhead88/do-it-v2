@@ -2,6 +2,8 @@
 """Offline regression and real local store round-trip checks for base_red."""
 import ast
 import contextlib
+import hashlib
+from datetime import datetime, timedelta, timezone
 import io
 import json
 import os
@@ -9,6 +11,7 @@ import pathlib
 import subprocess
 import sys
 import tempfile
+import time
 import threading
 import unittest
 import zipfile
@@ -523,99 +526,355 @@ print(json.dumps({'known': base_red.known_red('demo'),
         print("ac4 selection garbled-undetermined")
 
     def nightly_fixture(self, *, finish=True):
-        # Real local fetch; only the GitHub identity/listing/log/dispatch seam is faked.
-        subprocess.run(["git", "-C", str(self.repo), "branch", "-M", "master"], check=True)
-        subprocess.run(["git", "-C", str(self.repo), "remote", "set-url", "origin", str(self.repo)], check=True)
+        # Real local fetch; only GitHub identity and gh are faked here.
+        subprocess.run(['git', '-C', str(self.repo), 'branch', '-M', 'master'], check=True)
+        subprocess.run(['git', '-C', str(self.repo), 'remote', 'set-url', 'origin', str(self.repo)], check=True)
         self.dispatched = []
+        self.pending_runs = []
+        self.listings = 0
+        self.appear_after = 0 if finish else 1000
+        self.now = datetime.now(timezone.utc)
         def gh(argv, **kw):
-            if argv[1:3] != ["workflow", "run"]:
+            if argv[1:3] != ['workflow', 'run']:
+                if 'actions/runs?' in argv[2]:
+                    self.listings += 1
+                    if self.listings > self.appear_after:
+                        self.runs.extend(self.pending_runs)
+                        self.pending_runs.clear()
                 return self.gh(argv)
             self.dispatched.append(argv)
-            filename = argv[3]
-            name = {"python-tests.yml": "Python Tests", "dashboard-pr-quality.yml": "Dashboard PR Quality"}[filename]
-            if finish:
-                rid = 1 if name == "Python Tests" else 2
-                self.runs.append(self.run_doc(rid, name))
-                self.zips[rid] = archive(log="CI-SELECTION mode=full reason=nightly files=0\n" +
-                                            "\n".join(p.read_text() for p in sorted(FIX.glob("*.log"))))
-            return 0, "", ""
+            name = {'python-tests.yml': 'Python Tests',
+                    'dashboard-pr-quality.yml': 'Dashboard PR Quality'}[argv[3]]
+            rid = 100 + len(self.dispatched)
+            self.pending_runs.append(self.run_doc(rid, name, event='workflow_dispatch',
+                head_branch='master', created_at=(self.now + timedelta(seconds=1)).isoformat()))
+            self.zips[rid] = archive(log='CI-SELECTION mode=full reason=nightly files=0\n' +
+                '\n'.join(p.read_text() for p in sorted(FIX.glob('*.log'))))
+            return 0, '', ''
         stack = contextlib.ExitStack()
         self.addCleanup(stack.close)
-        stack.enter_context(patch.object(br, "_owner", return_value="example/demo"))
-        stack.enter_context(patch.object(br.ghlimit, "run", side_effect=gh))
+        stack.enter_context(patch.object(br, '_owner', return_value='example/demo'))
+        stack.enter_context(patch.object(br.ghlimit, 'run', side_effect=gh))
+        stack.enter_context(patch.object(br.time, 'sleep', return_value=None))
+
+    def nightly_mark(self, number):
+        body = f'nightly-ac{number} ok'
+        print(body)
+        print(json.dumps(dict(url=f'cli://doit-v2/nightly/AC{number}', status=0,
+              body_sha256=hashlib.sha256(body.encode()).hexdigest(), body_excerpt=body)))
 
     def test_ac5_nightly_complete_and_idempotent(self):
         self.nightly_fixture()
         self.runs = []
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            self.assertEqual(br.main(["nightly", "demo"]), 0)
+        self.assertFalse(br.nightly('demo')['undetermined'])
         self.assertEqual(len(self.dispatched), 2)
-        row, = self.events()
-        self.assertEqual(row["type"], "base-red-nightly")
-        self.assertIs(row["complete"], True)
-        self.assertEqual(set(row["ids"]), {i for values in self.expected().values() for i in values})
-        self.assertEqual(set(self.fresh_read()["known"]), set(row["ids"]))
-        self.assertNotIn("actor", row)
-        self.calls.clear()
-        self.dispatched.clear()
-        self.assertTrue(br.nightly("demo")["complete"])
-        self.assertEqual(self.calls, [])
-        self.assertEqual(self.dispatched, [])
-        self.assertEqual(len(self.events()), 1)
-        print("ac5 nightly complete")
-        print("ac5 nightly idempotent")
+        self.assertTrue(br.nightly_collect('demo')['complete'])
+        rows = self.events()
+        nightly, = [e for e in rows if e['type'] == 'base-red-nightly']
+        self.assertEqual(set(nightly['ids']), {i for values in self.expected().values() for i in values})
+        self.assertEqual(set(self.fresh_read()['known']), set(nightly['ids']))
+        self.assertTrue(all('actor' not in r for r in rows))
+        self.assertFalse(br.nightly('demo')['undetermined'])
+        self.assertEqual(len(self.dispatched), 2)
+        self.assertEqual(br.nightly_collect('demo')['message'], 'already collected')
+        self.assertEqual(self.events(), rows)
 
     def test_ac5_dashboard_only_and_selected(self):
         self.nightly_fixture()
-        self.runs = [self.run_doc(2, "Dashboard PR Quality")]
-        result = br.nightly("demo")
-        self.assertTrue(result["complete"])
-        self.assertEqual([a[3] for a in self.dispatched], ["python-tests.yml"])
-        self.assertIn("full_run=true", self.dispatched[0])
-        print("ac5 nightly dashboard-only-tip dispatches python")
-        (self.root / "events/L-base-red-local.jsonl").unlink()
-        for path in (self.root / "base-red/demo").glob("*.dispatched"):
-            path.unlink()
-        self.dispatched.clear()
-        self.runs = [self.run_doc(2, "Dashboard PR Quality"), self.run_doc(3, "Python Tests")]
-        self.zips[3] = archive(log="CI-SELECTION mode=selected reason=paths files=1")
-        self.assertTrue(br.nightly("demo")["complete"])
-        self.assertEqual([a[3] for a in self.dispatched], ["python-tests.yml"])
+        self.runs = [self.run_doc(2, 'Dashboard PR Quality'), self.run_doc(3, 'Python Tests')]
+        self.zips[3] = archive(log='CI-SELECTION mode=selected reason=paths files=1')
+        self.assertFalse(br.nightly('demo')['undetermined'])
+        self.assertEqual(len(self.dispatched), 2)
+        self.assertTrue(br.nightly_collect('demo')['complete'])
+        python, = [a for a in self.dispatched if a[3] == 'python-tests.yml']
+        self.assertIn('full_run=true', python)
+        self.assertNotIn('suite=nightly', python)
 
     def test_ac5_incomplete(self):
         self.nightly_fixture(finish=False)
         self.runs = []
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            self.assertEqual(br.main(["nightly", "demo"]), 3)
-        self.assertIn("missing", out.getvalue())
-        self.assertIs(self.events()[0]["complete"], False)
-        self.assertEqual(self.fresh_read()["known"], {})
+        self.assertTrue(br.nightly('demo')['undetermined'])
+        self.assertEqual(self.events(), [])
+        self.assertEqual(br.known_red('demo'), {})
+        br.nightly('demo')
         self.assertEqual(len(self.dispatched), 2)
-        br.nightly("demo")
-        self.assertEqual(len(self.dispatched), 2, "per-workflow markers prevent repeated paid dispatch")
-        print("ac5 nightly incomplete")
+        self.appear_after = 0
+        self.assertTrue(br.nightly_collect('demo')['complete'])
 
     def test_ac5_undetermined_and_active(self):
         self.nightly_fixture()
-        for status in ("queued", "in_progress"):
-            self.runs = [dict(self.run_doc(1, "Python Tests"), status=status)]
-            with contextlib.redirect_stdout(io.StringIO()):
-                self.assertEqual(br.main(["nightly", "demo"]), 2)
-            self.assertEqual(self.events(), [])
-            self.assertEqual(self.dispatched, [])
-        print("ac5 nightly in-progress waits")
-        self.runs = [self.run_doc(1, "Python Tests")]
-        self.zips[1] = archive(log="CI-SELECTION mode=unknown reason=paths files=0")
-        with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(br.main(["nightly", "demo"]), 2)
-        self.assertEqual(self.events(), [])
+        br.nightly('demo')
+        original = list(self.runs)
+        for status in ('queued', 'in_progress'):
+            self.runs = [dict(r, status=status) for r in original if r['id'] >= 100]
+            self.assertTrue(br.nightly_collect('demo')['waiting'])
+        self.runs = original
+        for r in self.runs:
+            if r['id'] >= 100:
+                self.zips[r['id']] = archive(log='CI-SELECTION mode=unknown reason=paths files=0')
+        self.assertTrue(br.nightly_collect('demo')['undetermined'])
+        self.assertEqual([e['type'] for e in self.events()], ['base-red-nightly-dispatched'])
+
+    def test_nightly_ac1_late_and_pending(self):
+        self.nightly_fixture(finish=False)
+        self.runs = []
+        self.assertTrue(br.nightly('demo')['undetermined'])
+        self.assertEqual(self.listings, 8)  # one pre-list per workflow, six polls
+        markers = list((self.root / 'base-red/demo').glob('*.pending.json'))
+        self.assertEqual(len(markers), 2)
+        for p in markers:
+            marker = json.loads(p.read_text())
+            self.assertEqual(marker['sha'], self.sha)
+            self.assertIn('dispatch_time', marker)
+            self.assertIn('before_ids', marker)
+        br.nightly('demo')
+        self.assertEqual(len(self.dispatched), 2)
+        self.appear_after = 0
+        self.assertFalse(br.nightly('demo')['undetermined'])
+        row, = self.events()
+        self.assertEqual(row['type'], 'base-red-nightly-dispatched')
+        self.assertEqual(len(row['run_ids']), 2)
+        self.assertEqual(row['suite'], 'undeclared')
+        self.assertEqual(row['ids'], [])
+        self.assertIs(row['complete'], False)
+        br.nightly('demo')
+        self.assertEqual(len(self.events()), 1)
+        self.nightly_mark(1)
+
+    def test_nightly_ac1_second_poll_suite_and_expiry(self):
+        self.nightly_fixture()
+        self.runs = []
+        self.appear_after = 3
+        original = br.window_gate.git
+        source = 'on:\n  workflow_dispatch:\n    inputs:\n      suite:\n        default: full\n'
+        def git(repo, *args, **kw):
+            if args[0] == 'show':
+                return subprocess.CompletedProcess(args, 0, source, '')
+            return original(repo, *args, **kw)
+        with patch.object(br.window_gate, 'git', side_effect=git):
+            self.assertFalse(br.nightly('demo')['undetermined'])
+        self.assertEqual(self.listings, 4)
+        for argv in self.dispatched:
+            self.assertEqual('suite=nightly' in argv, argv[3] == 'python-tests.yml')
+        self.assertEqual(self.events()[0]['suite'], 'nightly')
+        # A new sha with an expired marker must be retired before any retry.
+        directory = self.root / 'base-red/demo'
+        marker = directory / 'expired.pending.json'
+        marker.write_text(json.dumps(dict(sha='a'*40, workflow='Python Tests',
+            dispatch_time=(self.now-timedelta(hours=7)).isoformat(), before_ids=[], suite='nightly')))
+        result = br.nightly_collect('demo')
+        self.assertIn('dispatch never appeared', ' '.join(result['undetermined']))
+        self.assertFalse(marker.exists())
+        self.assertTrue(list(directory.glob('expired.pending.json.*')))
+        self.nightly_mark(1)
+
+    def test_nightly_ac1_unreadable_and_failed_dispatch(self):
+        self.nightly_fixture()
+        original = br.window_gate.git
+        def git(repo, *args, **kw):
+            if args[0] == 'show':
+                raise RuntimeError('unreadable')
+            return original(repo, *args, **kw)
+        with patch.object(br.window_gate, 'git', side_effect=git):
+            self.assertTrue(br.nightly('demo')['undetermined'])
         self.assertEqual(self.dispatched, [])
-        with patch.object(br.ghlimit, "gate", return_value={"ok": False}):
-            self.assertTrue(br.nightly("demo")["undetermined"])
-        self.assertEqual(self.events(), [])
-        print("ac5 nightly undetermined appends nothing")
+        with patch.object(br.ghlimit, 'run', return_value=(1, '', '')):
+            self.assertTrue(br.nightly('demo')['undetermined'])
+        self.assertEqual(list((self.root / 'base-red/demo').glob('*.pending.json')), [])
+        self.nightly_mark(1)
+
+    def collect_fixture(self, suite='nightly'):
+        br._append('base-red-nightly-dispatched', 'demo', self.sha, complete=False,
+                   ids=[], run_ids=['1', '2'], suite=suite)
+
+    def test_nightly_ac2_pinned_and_quiet_cli(self):
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(br.main(['nightly-collect', 'demo']), 0)
+        self.assertIn('no nightly dispatched', output.getvalue())
+        self.collect_fixture('undeclared')
+        original = br.window_gate.git
+        def git(repo, *args, **kw):
+            self.assertNotEqual(args[0], 'fetch')
+            self.assertNotIn('origin/master', args)
+            return original(repo, *args, **kw)
+        self.runs.append(self.run_doc(99, 'Python Tests'))  # logs deliberately absent
+        with patch.object(br.window_gate, 'git', side_effect=git):
+            self.runs[0]['status'] = 'in_progress'
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(br.main(['nightly-collect', 'demo']), 3)
+            self.assertEqual(len(self.events()), 1)
+            self.runs[0]['status'] = 'completed'
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(br.main(['nightly-collect', 'demo']), 0)
+        verdict = self.events()[-1]
+        self.assertTrue(verdict['complete'])
+        self.assertEqual(verdict['suite'], 'undeclared')
+        self.assertTrue(any(e['type'] == 'nightly-red' for e in self.events()))
+        count = len(self.events())
+        self.assertEqual(br.nightly_collect('demo')['message'], 'already collected')
+        self.assertEqual(len(self.events()), count)
+        self.nightly_mark(2)
+
+    def test_nightly_ac2_undeclared_green(self):
+        import merge_queue
+        br._append('nightly-red', 'demo', 'a' * 40, subject='nightly:demo',
+                   complete=True, ids=['old'], url='fixture')
+        self.collect_fixture('undeclared')
+        self.zips = {i: archive(log='CI-SELECTION mode=full reason=nightly files=0\nSUMMARY pytest check: PASS new=0 changed=0') for i in (1, 2)}
+        with patch.object(br, '_api', wraps=br._api):
+            # Jobs, too, must be green; a failed pg-parity job is a real red.
+            original = self.gh
+            def gh(argv):
+                if '/jobs?' in argv[2]: return 0, '{"jobs": []}', ''
+                return original(argv)
+            with patch.object(br.ghlimit, 'run', side_effect=gh):
+                self.assertTrue(br.nightly_collect('demo')['complete'])
+        self.assertEqual(self.events()[-1]['suite'], 'undeclared')
+        self.assertEqual(self.events()[-1]['ids'], [])
+        self.assertIsNone(merge_queue.merge_freeze(self.events(), 'demo'))
+        self.nightly_mark(2)
+
+    def test_nightly_ac3_crash_safe_alarm(self):
+        self.collect_fixture()
+        append = br._append
+        for crash_kind in ('nightly-red', 'escalation-blocking'):
+            path = self.root / 'events/L-base-red-local.jsonl'
+            path.write_text('')
+            self.collect_fixture()
+            crashed = False
+            def crashing(kind, *args, **kwargs):
+                nonlocal crashed
+                append(kind, *args, **kwargs)
+                if kind == crash_kind and not crashed:
+                    crashed = True
+                    raise RuntimeError('crash')
+            with patch.object(br, '_append', side_effect=crashing):
+                self.assertTrue(br.nightly_collect('demo')['undetermined'])
+            self.assertTrue(br.nightly_collect('demo')['complete'])
+            rows = self.events()
+            self.assertEqual([r['type'] for r in rows], ['base-red-nightly-dispatched',
+                'nightly-red', 'escalation-blocking', 'base-red-nightly'])
+            alarm = rows[2]
+            self.assertTrue(br.fold.escalation_ok(alarm))
+            gap = br._time(alarm['deadline']) - br._time(rows[-1]['ts'])
+            self.assertLess(abs(gap.total_seconds() - 86400), 10)
+            self.assertIn('integrator', alarm['default'])
+            self.assertTrue(all('actor' not in row for row in rows))
+        path.write_text('')
+        br._append('base-red-nightly', 'demo', 'a' * 40, complete=True,
+                   ids=sorted({i for v in self.expected().values() for i in v}), url='fixture')
+        self.collect_fixture()
+        self.assertTrue(br.nightly_collect('demo')['complete'])
+        self.assertFalse(any(e['type'] == 'nightly-red' for e in self.events()))
+        self.nightly_mark(3)
+
+    def test_nightly_ac6_admission(self):
+        import fold_emits
+        rows = {'base-red-nightly-dispatched': ('base-red', dict(sha=self.sha, run_ids=['1'])),
+                'nightly-red': ('base-red', dict(sha=self.sha, ids=['A'], url='fixture')),
+                'nightly-red-owned': ('operator', dict(ids=['A'], owner='quarantine')),
+                'merge-frozen': ('executor', dict(project='demo', reason='A'))}
+        for kind, (actor, fields) in rows.items():
+            row = dict(type=kind, **fields)
+            self.assertIsNone(br.fold.check_append(row, actor))
+            for field in fold_emits.REQUIRED_ROWS[kind]:
+                self.assertIsNotNone(br.fold.check_append({k:v for k,v in row.items() if k != field}, actor))
+        for actor in ('builder', 'grader', 'reviewer'):
+            self.assertIsNotNone(br.fold.admits(dict(type='nightly-red-owned'), actor))
+        self.nightly_mark(6)
+
+    def test_nightly_ac8_real_store_fresh_reader(self):
+        self.collect_fixture()
+        # This process inherits no Python mocks. Only the gh executable is fake.
+        fixture = self.root / 'gh-fixture'
+        fixture.mkdir()
+        (fixture / 'runs.json').write_text(json.dumps({'workflow_runs': self.runs}))
+        for rid, data in self.zips.items():
+            (fixture / f'{rid}.zip').write_bytes(data)
+        fake = fixture / 'gh'
+        fake.write_text("""#!/usr/bin/python3
+import json, pathlib, sys, time
+root = pathlib.Path(__file__).parent
+path = sys.argv[2]
+if path == 'rate_limit':
+    print(json.dumps({'resources': {k: dict(limit=5000, remaining=5000, reset=time.time()+3600) for k in ('core', 'graphql')}}))
+elif '/logs' in path:
+    sys.stdout.buffer.write((root / (path.split('/')[-2]+'.zip')).read_bytes())
+elif '/jobs?' in path:
+    print(json.dumps({'jobs': []}))
+else:
+    print((root / 'runs.json').read_text())
+""")
+        fake.chmod(0o700)
+        proc = self.real_run(['/usr/bin/python3', str(HERE / 'base_red.py'), 'nightly-collect', 'demo'],
+            capture_output=True, text=True, timeout=30,
+            env={**os.environ, 'DOIT_REAL_GH': str(fake), 'GH_LIMIT_STATE': str(fixture / 'quota.json')})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual([e['type'] for e in self.events()], ['base-red-nightly-dispatched',
+                         'nightly-red', 'escalation-blocking', 'base-red-nightly'])
+
+        code = "import fold,merge_queue,json; print(json.dumps(merge_queue.merge_freeze(fold.read_events(use_cache=False), 'demo')))"
+        def freeze():
+            proc = self.real_run([sys.executable, '-c', code], capture_output=True, text=True,
+                env={**os.environ, 'PYTHONPATH': str(HERE)}, timeout=15)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            return json.loads(proc.stdout)
+        self.assertIsNotNone(freeze())
+        verdict = self.events()[-1]
+        ids = verdict['ids']
+        # Ledger timestamps have second precision; ownership must be strictly later.
+        delay = (br._time(verdict['ts']) + timedelta(seconds=1) - datetime.now(timezone.utc)).total_seconds()
+        time.sleep(max(0, delay) + 0.01)
+        result = self.real_run([str(br.DOIT), 'append', 'nightly-red-owned', 'nightly:demo',
+            'ids:=' + json.dumps(ids), 'owner=quarantine'], capture_output=True, text=True,
+            env={**os.environ, 'DOIT_LEDGER_FILE': 'L-operator-local.jsonl'}, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIsNone(freeze())
+        self.nightly_mark(8)
+
+    def test_nightly_ac9_undetermined(self):
+        self.collect_fixture()
+        row = self.events()[0]
+        original = [dict(r) for r in self.runs]
+        for case in ('api', 'sha', 'logs', 'cancelled', 'overdue', 'malformed', 'partial'):
+            self.runs = [dict(r) for r in original]
+            event = dict(row)
+            self.gh_error = case == 'api'
+            if case == 'sha': self.runs[0]['head_sha'] = 'a' * 40
+            if case == 'cancelled': self.runs[0]['conclusion'] = 'cancelled'
+            if case == 'overdue':
+                self.runs[0]['status'] = 'in_progress'
+                event['ts'] = (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat()
+            if case == 'malformed': event['run_ids'] = 'bad'
+            red = dict(type='nightly-red', project='demo', subject='nightly:demo',
+                       sha=self.sha, ts=row['ts'], ids=['old'], complete=True, url='fixture')
+            self.ledger_fixture([red, event])
+            original_zip = self.zips[1]
+            if case == 'logs': self.zips[1] = b'broken'
+            if case == 'partial': self.zips[1] = archive(log='CI-SELECTION mode=selected reason=paths files=1')
+            result = br.nightly_collect('demo')
+            self.zips[1] = original_zip
+            self.assertTrue(result['undetermined'], (case, result))
+            if case == 'overdue': self.assertIn('overdue', ' '.join(result['undetermined']))
+            self.assertEqual(len(self.events_valid()), 2)
+            import merge_queue
+            self.assertIsNotNone(merge_queue.merge_freeze(self.events_valid(), 'demo'))
+        self.nightly_mark(9)
+
+    def events_valid(self):
+        path = self.root / 'events/L-base-red-local.jsonl'
+        return [json.loads(s) for s in path.read_text().splitlines() if s.startswith('{')]
+
+    def test_nightly_ac7_collect_cron(self):
+        import crons
+        row, = [r for r in crons.rows() if r['name'] == 'base-red-nightly-collect']
+        self.assertEqual(row, dict(name='base-red-nightly-collect', where='user',
+            schedule='40 * * * *', command=f'{HERE.parent}/doit cron-run base-red-nightly-collect -- '
+            f'/usr/bin/python3 {HERE}/base_red.py nightly-collect albert-scott >> '
+            f'{self.root}/logs/base-red-nightly-collect.log 2>&1', path='/usr/bin/python3',
+            sig=r'base_red\.py\s+nightly-collect\s+albert-scott\b', owner='thinker',
+            project='albert-scott', max_runtime_s=1800))
+        self.nightly_mark(7)
 
     def test_ac6_cron(self):
         import crons

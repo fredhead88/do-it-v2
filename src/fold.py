@@ -43,7 +43,7 @@ SESSIONS = pathlib.Path(os.environ.get("DOIT_SESSIONS_DIR",
                                        pathlib.Path.home() / ".claude" / "sessions"))
 PROJECT = os.environ.get("DOIT_PROJECT")          # §9.1/D93: a filter, not a second read
 
-from fold_emits import EMITS, DECLARES, OWED_DECLARERS, REQUIRED_ROWS
+from fold_emits import EMITS, DECLARES, OWED_DECLARERS, REQUIRED_ROWS, nightly_unowned
 EMITS["suite-run"] = {"suite-daily"}
 EMITS["check-declared"] = {"spec-writer", "executor", "operator"}
 # L-spec-0682: the full-environment verifier may record verdicts and re-date timed checks.
@@ -375,6 +375,10 @@ def answered(events):
         if e.get("type") not in ("question", "escalation-blocking"):
             continue
         src = e["_src"]
+        if e.get('type') == 'escalation-blocking' and str(e.get('subject', '')).startswith('nightly:'):
+            if not nightly_unowned(events, e['subject'][len('nightly:'):]):
+                out.add(src)
+            continue
         if src in by_ref or failure_resolved(e, fixes_by_subject.get(e.get("subject"), [])):
             out.add(src)
             continue
@@ -479,9 +483,12 @@ def open_escalations(events):
     last = {}
     for e in events:
         if e.get("type") in ("escalation-blocking", "decision", "unblocked") and e.get("subject"):
+            if str(e['subject']).startswith('nightly:') and e['type'] != 'escalation-blocking':
+                continue
             last[e["subject"]] = e
     return [e for e in last.values() if e["type"] == "escalation-blocking"
-            and not failure_resolved(e, events)]
+            and not failure_resolved(e, events)
+            and (not str(e['subject']).startswith('nightly:') or nightly_unowned(events, e['subject'][8:]))]
 
 
 # R3's shape, in one place, read by the refusal (append), by the health count

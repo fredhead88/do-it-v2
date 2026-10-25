@@ -1,4 +1,4 @@
-"""Ledger event authorization vocabulary, re-exported by fold."""
+"""Ledger event authorization vocabulary and nightly ownership fold, re-exported by fold."""
 
 # Who may emit what. A type absent here is open to any actor (§2.5).
 EMITS = {"verdict": {"grader"}, "review": {"reviewer"}, "shipped": {"executor"},
@@ -310,6 +310,10 @@ EMITS["selection-cutover"] = {"executor", "tick", "operator"}
 EMITS["selection-miss"] = {"executor", "tick", "operator"}
 EMITS["window-rerun"] = {"executor", "tick", "operator"}
 EMITS["base-red-nightly"] = {"base-red", "operator"}
+EMITS["base-red-nightly-dispatched"] = {"base-red"}
+EMITS["nightly-red"] = {"base-red"}
+EMITS["nightly-red-owned"] = {"operator", "executor", "thinker"}
+EMITS["merge-frozen"] = {"executor", "tick", "operator"}
 
 REQUIRED_ROWS = {
     "resource-created": ("kind", "ref", "lane"),
@@ -335,6 +339,10 @@ REQUIRED_ROWS = {
     "selection-miss": ("nightly_sha", "ids", "windows"),
     "window-rerun": ("window", "target", "sha"),
     "base-red-nightly": ("sha",),
+    "base-red-nightly-dispatched": ("sha", "run_ids"),
+    "nightly-red": ("sha", "ids", "url"),
+    "nightly-red-owned": ("ids", "owner"),
+    "merge-frozen": ("project", "reason"),
 }
 
 # resource-created intentionally stays open: every lane records its resources.
@@ -343,3 +351,32 @@ EMITS["resource-reaped"] = {"tick", "executor", "operator", "owed-sweeper"}
 # L-spec-1494 A3 (amended): only the failure-producing ledgers own this stamp.
 EMITS["infra-failure"] = {"builder", "grader", "reviewer", "spec-writer", "research",
                           "probe", "owed-sweeper", "executor", "build-runner"}
+
+
+def nightly_unowned(events, project):
+    """Cumulative alarms since complete green; only strictly later owners clear ids."""
+    import re
+    from datetime import datetime
+
+    def timestamp(event):
+        value = datetime.fromisoformat(str(event.get("ts")).replace("Z", "+00:00"))
+        if value.tzinfo is None:
+            raise ValueError("nightly timestamp needs a timezone")
+        return value
+
+    pending = {}
+    for e in sorted(events, key=timestamp):
+        kind, ids = e.get('type'), e.get('ids')
+        if (kind == 'base-red-nightly' and e.get('project') == project
+                and e.get('complete') is True and ids == []):
+            pending.clear()
+        elif e.get('subject') == 'nightly:' + project and e.get('project', project) == project:
+            valid = isinstance(ids, list) and all(isinstance(i, str) for i in ids)
+            if kind == 'nightly-red':
+                pending.update(dict.fromkeys(ids if valid else ['nightly evidence undetermined'], timestamp(e)))
+            elif (kind == 'nightly-red-owned' and valid
+                  and e.get('actor') in EMITS.get(kind, set())
+                  and re.fullmatch(r'(?:L-spec-[0-9]{4}|quarantine)', str(e.get('owner', '')))):
+                pending = {i: at for i, at in pending.items() if i == 'nightly evidence undetermined'
+                           or i not in ids or timestamp(e) <= at}
+    return sorted(pending)
