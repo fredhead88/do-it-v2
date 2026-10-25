@@ -2427,3 +2427,23 @@ body = json.dumps(dict(old_shape_deduped=True, unknown_age_alarm=True,
                        sweep_check_escalations=len(read_ledger(root))), sort_keys=True)
 print(json.dumps(dict(url='cli://look/readers-1495', status=0,
                       body_sha256=hashlib.sha256(body.encode()).hexdigest(), body_excerpt=body)))
+
+# L1541 AC6: shipped thresholds, fresh ledger reads and hysteresis edges.
+import hashlib
+shipped1541 = pathlib.Path(__file__).resolve().parents[1] / 'look.toml'
+th1541 = look.load_toml(shipped1541)['thresholds']
+ok((th1541['disk_high'], th1541['disk_high_clear']) == (90, 85), 'L1541 shipped 90/85 disk thresholds')
+root1541 = newroot()
+look.run([], now=NOW, runner=FakeRunner(disk_usage=disk13(91)), root=root1541, toml_path=shipped1541)
+ev1541 = read_ledger(root1541)
+raised1541 = [e for e in ev1541 if e.get('type') == 'brief' and e.get('condition') == 'disk-high']
+ok(len(raised1541) == 1, 'L1541 91% raises disk-high read from ledger')
+look.run(ev1541, now=NOW + timedelta(minutes=10), runner=FakeRunner(disk_usage=disk13(84)), root=root1541, toml_path=shipped1541)
+cleared1541 = read_ledger(root1541)
+ok(any(e.get('type') == 'brief-answered' and e.get('ref') == raised1541[0]['_src'] for e in cleared1541), 'L1541 84% clears the disk brief on a fresh read')
+root1541b = newroot()
+look.run([], now=NOW, runner=FakeRunner(disk_usage=disk13(88)), root=root1541b, toml_path=shipped1541)
+ok(not any(e.get('type') == 'brief' and e.get('condition') == 'disk-high' for e in read_ledger(root1541b)), 'L1541 88% raises nothing')
+body1541 = json.dumps({'raised_at': 91, 'cleared_at': 84, 'quiet_at': 88, 'thresholds': [90, 85]}, sort_keys=True)
+print(json.dumps(dict(url='cli://look/AC6', status=0, body_sha256=hashlib.sha256(body1541.encode()).hexdigest(), body_excerpt=body1541)))
+print('L1541 AC6 pass')

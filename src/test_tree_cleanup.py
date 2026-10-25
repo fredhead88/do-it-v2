@@ -16,10 +16,17 @@ os.environ.pop("DOIT_LEDGER_FILE", None)
 os.environ.pop("DOIT_REAP_LEDGER_FILE", None)
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import fold, tree_cleanup  # noqa: E402
+import fold, tree_cleanup, disk_reaper  # noqa: E402
+_PROC_FIXTURE = tempfile.TemporaryDirectory(prefix="tree-proc-")
+# All legacy calls, including child interpreters, use this empty fake /proc.
+disk_reaper._WORKTREE_PASS.set((_PROC_FIXTURE.name, []))
 
 N = 0
 HERE = pathlib.Path(__file__).resolve().parent
+
+
+def legacy_rows(rows):
+    return [{k: v for k, v in row.items() if k != "freed_bytes"} for row in rows]
 
 
 def check(cond, msg):
@@ -91,7 +98,10 @@ def close(root, charter):
 
 
 def reap(root, *argv):
-    return subprocess.run([sys.executable, str(HERE / "tree_cleanup.py"), *argv],
+    code = (f"import sys; sys.path.insert(0, {str(HERE)!r}); import tree_cleanup, disk_reaper;"
+            f"disk_reaper._WORKTREE_PASS.set(({_PROC_FIXTURE.name!r}, []));"
+            "raise SystemExit(tree_cleanup.main(sys.argv[1:]))")
+    return subprocess.run([sys.executable, "-c", code, *argv],
                           capture_output=True, text=True,
                           env={k: v for k, v in os.environ.items() if k != "DOIT_PROJECT"}
                           | {"DOIT_ROOT": str(root)})
@@ -109,7 +119,7 @@ def branches(r):
 
 
 # L1365: a shipped project's own witness overrides misfiled build metadata.
-with tempfile.TemporaryDirectory() as d, patch.object(fold, "ROOT", pathlib.Path(d)):
+with tempfile.TemporaryDirectory() as d, patch.multiple(fold, ROOT=pathlib.Path(d), EVENTS=pathlib.Path(d) / "events"):
     for project in ("A", "B"):
         (pathlib.Path(d) / "repos" / project).mkdir(parents=True)
     check(tree_cleanup.spec_project([
@@ -288,7 +298,8 @@ def charter_project(d, charter, project):
 def run_merged(root, dry_run=False):
     code = ("import json,sys;"
             f"sys.path.insert(0, {str(HERE)!r});"
-            "import fold, tree_cleanup;"
+            "import fold, tree_cleanup, disk_reaper;"
+            f"disk_reaper._WORKTREE_PASS.set(({_PROC_FIXTURE.name!r}, []));"
             "evs = fold.read_events();"
             f"out = tree_cleanup.reap_merged_specs(evs, dry_run={dry_run!r});"
             "print(json.dumps(out))")
@@ -511,7 +522,8 @@ def shipped_trail(root, charter, spec, branch, ready, merge_sha, project=None):
 def run_reap_worktrees(root, dry_run=False):
     code = ("import json,sys;"
             f"sys.path.insert(0, {str(HERE)!r});"
-            "import fold, tree_cleanup;"
+            "import fold, tree_cleanup, disk_reaper;"
+            f"disk_reaper._WORKTREE_PASS.set(({_PROC_FIXTURE.name!r}, []));"
             "evs = fold.read_events();"
             f"reaped, retained = tree_cleanup.reap_worktrees(evs, dry_run={dry_run!r});"
             "print(json.dumps({'reaped': reaped, 'retained': retained}))")
@@ -616,8 +628,9 @@ with tempfile.TemporaryDirectory() as d:
                                  "charter": "L-charter-0486b4", "project": "l0486-proj2d"})
     out = run_reap_worktrees(d)
     seen = {x["spec"] for x in out["reaped"]} | {x["spec"] for x in out["retained"]}
-    check("L-spec-0001" not in seen and "L-spec-0002" not in seen,
-          f"L0486-AC2: a reviewing spec (no shipped) and an open spec are absent from both lists: {out}")
+    check(not out["reaped"] and seen == {"L-spec-0001", "L-spec-0002"}
+          and all("not finished" in row["why"] for row in out["retained"]),
+          f"L1541: non-terminal worktrees retained with reasons: {out}")
 print("L0486-AC2 ok")
 
 # ── L0486-AC3 · killed, branch pushed+confirmed -> reaped, proof origin-branch ──
@@ -668,7 +681,7 @@ with tempfile.TemporaryDirectory() as d:
     (pathlib.Path(wt) / "tracked.txt").write_text("modified\n")
     out = run_reap_worktrees(d)
     row = next((x for x in out["retained"] if x["spec"] == "L-spec-0001"), None)
-    check(row is not None and row["why"] == "uncommitted changes",
+    check(row is not None and "rework in flight" in row["why"],
           f"L0486-AC4: a modified tracked file retains a shipped-on-origin worktree: {out}")
     check((pathlib.Path(wt) / "tracked.txt").read_text() == "modified\n", "L0486-AC4: the edit is intact")
 
@@ -681,9 +694,9 @@ with tempfile.TemporaryDirectory() as d:
     shipped_trail(d, "L-charter-0486d2", "L-spec-0001", b, ready, merge_sha, project="l0486-proj4b")
     (pathlib.Path(wt) / "untracked.txt").write_text("stray\n")
     out = run_reap_worktrees(d)
-    row = next((x for x in out["retained"] if x["spec"] == "L-spec-0001"), None)
-    check(row is not None and row["why"] == "uncommitted changes",
-          f"L0486-AC4: an untracked file also retains: {out}")
+    row = next((x for x in out["reaped"] if x["spec"] == "L-spec-0001"), None)
+    check(row is not None and row["proof"] == "origin-merged" and not pathlib.Path(wt).exists(),
+          f"L1541: finished dirty worktree removed: {out}")
 
 with tempfile.TemporaryDirectory() as d:
     r = repo_for(d, "l0486-proj4c")
@@ -696,12 +709,12 @@ with tempfile.TemporaryDirectory() as d:
     write(d, "L-thinker-0001", {"type": "spec-killed", "subject": "L-spec-0001", "charter": "L-charter-0486d3"})
     (pathlib.Path(wt) / "dirty.txt").write_text("uncommitted\n")
     out = run_reap_worktrees(d)
-    row = next((x for x in out["retained"] if x["spec"] == "L-spec-0001"), None)
-    check(row is not None and row["why"] == "uncommitted changes",
-          f"L0486-AC4: a killed spec with an uncommitted change also retains: {out}")
+    row = next((x for x in out["reaped"] if x["spec"] == "L-spec-0001"), None)
+    check(row is not None and row["proof"] == "origin-branch" and not pathlib.Path(wt).exists(),
+          f"L1541: dirty killed worktree removed: {out}")
     p = subprocess.run(["git", "-C", str(r), "ls-remote", "origin", f"refs/heads/{b}"],
                        capture_output=True, text=True)
-    check(p.stdout.strip() == "", f"L0486-AC4: nothing was pushed for the dirty killed worktree: {p.stdout!r}")
+    check(p.stdout.strip(), "L1541: dirty killed branch confirmed on origin")
 print("L0486-AC4 ok")
 
 # ── L0486-AC5 · dry-run judges only; reap_merged_specs composes with reap_worktrees ──
@@ -836,7 +849,9 @@ with tempfile.TemporaryDirectory() as d:
     (pathlib.Path(d) / "repos" / "a-missing").mkdir()
     accepted(d, "L-charter-missing", "L-spec-0942", "l-spec-0942", ready, project="a-missing")
     code = (f"import sys; sys.path.insert(0, {str(HERE)!r});"
-            "import fold, tree_cleanup; tree_cleanup.reap_merged_specs(fold.read_events())")
+            "import fold, tree_cleanup, disk_reaper;"
+            f"disk_reaper._WORKTREE_PASS.set(({_PROC_FIXTURE.name!r}, []));"
+            "tree_cleanup.reap_merged_specs(fold.read_events())")
     p = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
                        env={k: v for k, v in os.environ.items() if k != "DOIT_PROJECT"}
                        | {"DOIT_ROOT": d})
@@ -862,7 +877,7 @@ with tempfile.TemporaryDirectory() as d:
     check(list(state.parent.iterdir()) == [state], "L0941: atomic write leaves no temporary file")
 
 # L1040: path first, corroborated spec events second, charter fallback last.
-with tempfile.TemporaryDirectory() as d, patch.object(fold, "ROOT", pathlib.Path(d)):
+with tempfile.TemporaryDirectory() as d, patch.multiple(fold, ROOT=pathlib.Path(d), EVENTS=pathlib.Path(d) / "events"):
     root = pathlib.Path(d)
     for project in ("A", "B", "C"):
         (root / "repos" / project).mkdir(parents=True)
@@ -902,7 +917,7 @@ with tempfile.TemporaryDirectory() as d:
     shipped_trail(d, None, "L-spec-1040", b, ready, sh(r, "git", "rev-parse", "HEAD"),
                   project="spec-own")
     out = run_reap_worktrees(d, dry_run=True)
-    check(out["reaped"] == [{"spec": "L-spec-1040", "project": "spec-own", "path": wt,
+    check(legacy_rows(out["reaped"]) == [{"spec": "L-spec-1040", "project": "spec-own", "path": wt,
                               "proof": "origin-merged"}], "L1040-AC1: no charter needed")
     check(pathlib.Path(wt).exists(), "L1040-AC1: dry-run retains the directory")
 print("L1040-AC1 ok")
@@ -921,7 +936,7 @@ def conventional_fixture(d):
 
 
 with (tempfile.TemporaryDirectory() as d,
-      patch.object(fold, "ROOT", pathlib.Path(d)),
+      patch.multiple(fold, ROOT=pathlib.Path(d), EVENTS=pathlib.Path(d) / "events"),
       patch.object(fold, "EVENTS", pathlib.Path(d) / "events")):
     for project in ("A", "B"):
         (pathlib.Path(d) / "repos" / project).mkdir(parents=True)
@@ -943,7 +958,7 @@ with tempfile.TemporaryDirectory() as d:
     check(len(sh(r, "git", "worktree", "list", "--porcelain").split("worktree ")) - 1 == 2,
           "L1040-AC3: pre-removal count is two registered worktrees")
     out = run_reap_worktrees(d)
-    check(out["reaped"] == [{"spec": "L-spec-1040", "project": "path-project", "path": wt,
+    check(legacy_rows(out["reaped"]) == [{"spec": "L-spec-1040", "project": "path-project", "path": wt,
                               "proof": "origin-merged"}], "L1040-AC3: path project reaped")
     check(not pathlib.Path(wt).exists() and wt not in sh(r, "git", "worktree", "list", "--porcelain"),
           "L1040-AC3: directory and registration removed")
@@ -951,7 +966,7 @@ with tempfile.TemporaryDirectory() as d:
 print("L1040-AC3 ok")
 
 with (tempfile.TemporaryDirectory() as d,
-      patch.object(fold, "ROOT", pathlib.Path(d)),
+      patch.multiple(fold, ROOT=pathlib.Path(d), EVENTS=pathlib.Path(d) / "events"),
       patch.object(fold, "EVENTS", pathlib.Path(d) / "events")):
     r, b, wt = conventional_fixture(d)
     repo_for(d, "other-project")
@@ -976,7 +991,7 @@ with (tempfile.TemporaryDirectory() as d,
 print("L1040-AC4 ok")
 
 with (tempfile.TemporaryDirectory() as d,
-      patch.object(fold, "ROOT", pathlib.Path(d)),
+      patch.multiple(fold, ROOT=pathlib.Path(d), EVENTS=pathlib.Path(d) / "events"),
       patch.object(fold, "EVENTS", pathlib.Path(d) / "events")):
     r, b, wt = conventional_fixture(d)
     write(d, "L-grader-0001", {"type": "verdict", "subject": "L-spec-1040", "confirmed": True})
@@ -1020,7 +1035,7 @@ for projects in (("A", "A"), ("A", "B"), (None, None), ("A", None)):
             check(p.returncode == 0 and len(json.loads(p.stdout)["reaped"]) == 2,
                   f"L1040-AC6: unanimous own projects resolve: {p.stderr}")
         else:
-            with patch.object(fold, "ROOT", pathlib.Path(d)), patch.object(fold, "read_events", return_value=read_via_fold(d)), \
+            with patch.multiple(fold, ROOT=pathlib.Path(d), EVENTS=pathlib.Path(d) / "events"), patch.object(fold, "read_events", return_value=read_via_fold(d)), \
                  patch.object(tree_cleanup, "git", side_effect=AssertionError("unresolved charter must not run git")):
                 try:
                     tree_cleanup.main(["L-charter-1040"])
@@ -1049,7 +1064,7 @@ with tempfile.TemporaryDirectory() as d:
     p = reap(d, "--all", "--dry-run")
     check(p.returncode == 0, f"L1040-AC7: whole-root dry-run succeeds: {p.stderr}")
     out = json.loads(p.stdout)
-    check(out["reaped"] == [{"spec": "L-spec-1040", "project": "path-project", "path": wt,
+    check(legacy_rows(out["reaped"]) == [{"spec": "L-spec-1040", "project": "path-project", "path": wt,
                               "proof": "origin-merged"}]
           and out["retained"] == [], "L1040-AC7: JSON omits specs without conventional directories")
     check(pathlib.Path(wt).exists() and not (pathlib.Path(d) / "state").exists(),
@@ -1062,8 +1077,8 @@ with tempfile.TemporaryDirectory() as d:
           f"L1040-AC7: whole-root real run succeeds: {p.stderr}")
     check(not pathlib.Path(wt).exists() and unknown.exists() and b in branches(r),
           "L1040-AC7: only resolved worktree removed, branch preserved")
-    check(before == {str(p): p.read_bytes() for p in (pathlib.Path(d) / "events").glob("*")},
-          "L1040-AC7: real --all writes no ledger")
+    check(all(pathlib.Path(p).read_bytes().startswith(data) for p, data in before.items())
+          and len(events(d, "resource-reaped")) == 1, "L1541: real --all appends resource-reaped without editing history")
 print("L1040-AC7 ok")
 
 
@@ -1082,7 +1097,7 @@ with tempfile.TemporaryDirectory() as d:
     trail.write_text("".join(json.dumps(row) + "\n" for row in rows))
     before = {str(p): p.read_bytes() for p in (pathlib.Path(d) / "events").glob("*")}
     out = json.loads(reap(d, "--all", "--dry-run").stdout)
-    check(out["reaped"] == [{"spec": "L-spec-1040", "project": "path-project", "path": wt,
+    check(legacy_rows(out["reaped"]) == [{"spec": "L-spec-1040", "project": "path-project", "path": wt,
                              "proof": "origin-merged"}], "R2: legacy rebuild resolved from its spec path")
     check(pathlib.Path(wt).exists() and new_branch in branches(r), "R2: dry-run preserves branch and tree")
     check(before == {str(p): p.read_bytes() for p in (pathlib.Path(d) / "events").glob("*")},
@@ -1090,14 +1105,14 @@ with tempfile.TemporaryDirectory() as d:
     # The second conventional name must never make project choice arbitrary.
     duplicate = pathlib.Path(d) / "worktrees" / "other-project" / new_branch
     duplicate.mkdir(parents=True)
-    with patch.object(fold, "ROOT", pathlib.Path(d)):
+    with patch.multiple(fold, ROOT=pathlib.Path(d), EVENTS=pathlib.Path(d) / "events"):
         check(tree_cleanup._spec_worktree("L-spec-1040", rows) is None,
               "R2: duplicate conventional paths stay unresolved")
 print("R2: renamed legacy branch dry-run and ambiguity checks pass")
 
 # L1365 exercises the existing fixtures with the revised resolution and guards.
 for shipped_project in ("path-project", None):
-    with tempfile.TemporaryDirectory() as d, patch.object(fold, "ROOT", pathlib.Path(d)):
+    with tempfile.TemporaryDirectory() as d, patch.multiple(fold, ROOT=pathlib.Path(d), EVENTS=pathlib.Path(d) / "events"):
         r, b, wt = conventional_fixture(d)
         repo_for(d, "B")
         evs = read_via_fold(d)
@@ -1111,7 +1126,7 @@ for shipped_project in ("path-project", None):
         check(len(sh(r, "git", "worktree", "list", "--porcelain").split("worktree ")) - 1 == 2,
               "L1365-AC1: two registered worktrees before removal")
         reaped, retained = tree_cleanup.reap_worktrees(evs)
-        check(reaped == [{"spec": "L-spec-1040", "project": "path-project", "path": wt,
+        check(legacy_rows(reaped) == [{"spec": "L-spec-1040", "project": "path-project", "path": wt,
                           "proof": "origin-merged"}] and not retained,
               f"L1365-AC1: shipped/path beats misfiled metadata: {reaped}, {retained}")
         print(f"resolved row project={reaped[0]['project']}")
@@ -1122,7 +1137,7 @@ for shipped_project in ("path-project", None):
             "L1365-AC1: agreeing valid build metadata is the last own witness")
 print("L1365-AC1 ok")
 
-with tempfile.TemporaryDirectory() as d, patch.object(fold, "ROOT", pathlib.Path(d)):
+with tempfile.TemporaryDirectory() as d, patch.multiple(fold, ROOT=pathlib.Path(d), EVENTS=pathlib.Path(d) / "events"):
     root = pathlib.Path(d)
     for project in ("A", "B"):
         (root / "repos" / project).mkdir(parents=True)
@@ -1147,7 +1162,7 @@ with tempfile.TemporaryDirectory() as d, patch.object(fold, "ROOT", pathlib.Path
           "L1365-AC2: both directories survive uncertainty")
 print("L1365-AC2 ok")
 
-with tempfile.TemporaryDirectory() as d, patch.object(fold, "ROOT", pathlib.Path(d)):
+with tempfile.TemporaryDirectory() as d, patch.multiple(fold, ROOT=pathlib.Path(d), EVENTS=pathlib.Path(d) / "events"):
     root = pathlib.Path(d)
     for project in ("A", "B"):
         (root / "repos" / project).mkdir(parents=True)
@@ -1176,7 +1191,7 @@ with tempfile.TemporaryDirectory() as d, patch.object(fold, "ROOT", pathlib.Path
             "L1365-AC3: an unresolved project with a directory remains visible")
 
 with (tempfile.TemporaryDirectory() as d,
-      patch.object(fold, "ROOT", pathlib.Path(d)),
+      patch.multiple(fold, ROOT=pathlib.Path(d), EVENTS=pathlib.Path(d) / "events"),
       patch.object(fold, "EVENTS", pathlib.Path(d) / "events")):
     r = repo_for(d, "A")
     bare_origin(r)
@@ -1204,7 +1219,7 @@ print("L1365-AC3 ok")
 for variant in ("clean", "renamed", "build-live", "spawn-live", "ended", "other-spec", "dirty",
                 "rework", "off-origin", "reviewing", "written", "killed-live", "killed", "no-sha",
                 "missing-spawn", "grader-live", "failed", "stale", "unreadable"):
-    with tempfile.TemporaryDirectory() as d, patch.object(fold, "ROOT", pathlib.Path(d)):
+    with tempfile.TemporaryDirectory() as d, patch.multiple(fold, ROOT=pathlib.Path(d), EVENTS=pathlib.Path(d) / "events"):
         r, b, wt = conventional_fixture(d)
         evs = read_via_fold(d)
         evs.append({"type": "rejected-criterion", "subject": "L-spec-1040", "criterion": "AC1",
@@ -1247,7 +1262,7 @@ for variant in ("clean", "renamed", "build-live", "spawn-live", "ended", "other-
             next(e for e in evs if e["type"] == "shipped").pop("sha")
         expected = {"renamed": "standing rejection", "build-live": "builder spawn live",
                     "spawn-live": "builder spawn live", "killed-live": "builder spawn live",
-                    "dirty": "uncommitted changes", "rework": "rework in flight",
+                    "rework": "rework in flight",
                     "off-origin": "origin/main does not contain", "no-sha": "shipped event carries no sha",
                     "unreadable": "unreadable git"}.get(variant)
         check(len(sh(r, "git", "worktree", "list", "--porcelain").split("worktree ")) - 1 == 2,
@@ -1261,8 +1276,8 @@ for variant in ("clean", "renamed", "build-live", "spawn-live", "ended", "other-
             check(not reaped and len(retained) == 1 and expected in retained[0]["why"]
                   and pathlib.Path(wt).exists(), f"L1365-AC4: {variant} retains: {retained}")
         elif variant in ("reviewing", "written"):
-            check((reaped, retained) == ([], []) and pathlib.Path(wt).exists(),
-                  "L1365-AC4: non-terminal worktree stays without a row")
+            check(not reaped and len(retained) == 1 and "not finished" in retained[0]["why"] and pathlib.Path(wt).exists(),
+                  "L1541: non-terminal worktree stays with a reason")
         else:
             proof = "origin-branch" if variant == "killed" else "origin-merged"
             check(len(reaped) == 1 and reaped[0]["proof"] == proof and not retained
@@ -1270,7 +1285,7 @@ for variant in ("clean", "renamed", "build-live", "spawn-live", "ended", "other-
 print("L1365-AC4 ok")
 
 with (tempfile.TemporaryDirectory() as d,
-      patch.object(fold, "ROOT", pathlib.Path(d)),
+      patch.multiple(fold, ROOT=pathlib.Path(d), EVENTS=pathlib.Path(d) / "events"),
       patch.object(fold, "EVENTS", pathlib.Path(d) / "events")):
     r, b, wt = conventional_fixture(d)
     # Only the shipped event names the project; the charter has a misfiled fallback.
@@ -1309,7 +1324,7 @@ with (tempfile.TemporaryDirectory() as d,
           "L1365-AC5: shared resolution preserves branch ancestry proof")
 print("L1365-AC5 ok")
 
-with tempfile.TemporaryDirectory() as d, patch.object(fold, "ROOT", pathlib.Path(d)):
+with tempfile.TemporaryDirectory() as d, patch.multiple(fold, ROOT=pathlib.Path(d), EVENTS=pathlib.Path(d) / "events"):
     import dispatch
     r, b, wt = conventional_fixture(d)
     evs = read_via_fold(d) + [{"type": "rejected-criterion", "subject": "L-spec-1040",
@@ -1351,7 +1366,7 @@ import reap_tmp
 outcomes1496 = {}
 for case1496 in ("terminal-idle", "owner-live", "live-pid", "unmerged", "unknown-owner"):
     with (tempfile.TemporaryDirectory(prefix="recorded-tree-") as d,
-          patch.object(fold, "ROOT", pathlib.Path(d)),
+          patch.multiple(fold, ROOT=pathlib.Path(d), EVENTS=pathlib.Path(d) / "events"),
           patch.object(fold, "EVENTS", pathlib.Path(d) / "events"),
           patch.dict(os.environ, DOIT_ROOT=d, DOIT_LEDGER_FILE="L-executor-1496.jsonl")):
         r, b, wt = conventional_fixture(d)
@@ -1385,3 +1400,110 @@ for case1496 in ("terminal-idle", "owner-live", "live-pid", "unmerged", "unknown
 body1496 = json.dumps(outcomes1496, sort_keys=True)
 print(json.dumps(dict(url="cli://tree-cleanup/AC3", status=0, body_sha256=hashlib.sha256(body1496.encode()).hexdigest(), body_excerpt=body1496)))
 print("L1496-AC3 ok")
+
+# L1541: real git removals and append-only event readback; injected proc only.
+import disk_reaper
+outcomes1541 = {}
+for case1541 in ('shipped', 'run-shipped', 'other-uid', 'killed', 'void', 'building', 'reworking', 'held', 'awaiting-merge',
+                 'rejection', 'recorded', 'void-off-origin', 'cwd', 'fd', 'undetermined'):
+    with (tempfile.TemporaryDirectory() as d,
+          patch.object(fold, 'ROOT', pathlib.Path(d)),
+          patch.object(fold, 'EVENTS', pathlib.Path(d) / 'events'),
+          patch.dict(os.environ, DOIT_ROOT=d, DOIT_LEDGER_FILE='L-executor-1541.jsonl')):
+        r, b, wt = conventional_fixture(d)
+        proc1541 = pathlib.Path(d) / 'proc'
+        proc1541.mkdir()
+        evs1541 = read_via_fold(d)
+        if case1541 in ('killed', 'void', 'building', 'reworking', 'held', 'awaiting-merge', 'void-off-origin'):
+            evs1541 = [e for e in evs1541 if e['type'] != 'shipped']
+        if case1541 == 'killed':
+            evs1541.append(dict(type='spec-killed', subject='L-spec-1040', actor='thinker'))
+        if case1541.startswith('void'):
+            evs1541 = [e for e in evs1541 if e['type'] != 'spec-written']
+            evs1541 += [dict(type=t, subject='L-spec-1040', actor='spec-writer', spawn='L-spec-writer-1541')
+                        for t in ('spawn-started', 'spawn-failed')]
+            if case1541 == 'void':
+                sh(r, 'git', 'push', '-q', 'origin', b)
+            else:
+                sh(r, 'git', 'remote', 'set-url', 'origin', str(pathlib.Path(d) / 'absent-origin'))
+        if case1541 == 'building':
+            evs1541.append(dict(type='build-started', subject='L-spec-1040', spawn='L-builder-1541'))
+        if case1541 == 'held':
+            evs1541.append(dict(type='capability-hold', subject='capability:live_db:L-spec-1040',
+                                capability='live_db', spec='L-spec-1040', actor='grader'))
+        if case1541 == 'reworking':
+            (pathlib.Path(wt) / 'work').write_text('unmerged')
+            sh(wt, 'git', 'add', '-A')
+            sh(wt, 'git', 'commit', '-qm', 'rework')
+            check(tree_cleanup.git(r, 'merge-base', '--is-ancestor', b, 'origin/main', ok=True).returncode == 1, 'L1541 rework tip not on origin')
+        if case1541 == 'rejection':
+            sh(r, 'git', 'branch', '-m', b, b + '-r2')
+            next(e for e in evs1541 if e['type'] == 'build-done')['branch'] = b + '-r2'
+            evs1541.append(dict(type='rejected-criterion', subject='L-spec-1040', criterion='AC1', actor='grader'))
+        if case1541 == 'recorded':
+            evs1541.append(dict(type='resource-created', subject='L-spec-1040', actor='executor',
+                                kind='worktree', ref=wt, lane='build'))
+        if case1541 in ('cwd', 'fd', 'undetermined', 'other-uid'):
+            pid1541 = proc1541 / str(os.getpid())
+            (pid1541 / 'fd').mkdir(parents=True)
+            (pid1541 / ('fd/4' if case1541 == 'fd' else 'cwd')).symlink_to(pathlib.Path(wt) / ('seed.txt' if case1541 == 'fd' else ''))
+        (pathlib.Path(wt) / 'seed.txt').write_text('modified')
+        (pathlib.Path(wt) / 'untracked').write_text('debris')
+        expected_bytes1541 = sum(p.lstat().st_size for p in pathlib.Path(wt).iterdir())
+        check(sum(pathlib.Path(wt).exists() for _ in [0]) == 1, 'L1541 pre-removal count=1')
+        real_lstat1541 = os.lstat
+        def other_uid1541(path, *args, **kwargs):
+            st = real_lstat1541(path, *args, **kwargs)
+            if pathlib.Path(path) == proc1541 / str(os.getpid()):
+                fields = list(st)
+                fields[4] = os.getuid() + 1
+                return os.stat_result(fields)
+            return st
+        with (disk_reaper.worktree_pass(proc1541),
+              patch.object(os, 'lstat', side_effect=other_uid1541) if case1541 == 'other-uid' else contextlib.nullcontext()):
+            with patch.object(reap_tmp, '_pid_refs', side_effect=PermissionError('proc')) if case1541 in ('undetermined', 'other-uid') else contextlib.nullcontext():
+                if case1541 in ('run-shipped', 'other-uid'):
+                    for name1541 in ('tmp', 'var', 'sessions'):
+                        (pathlib.Path(d) / name1541).mkdir()
+                    logfile1541 = pathlib.Path(d) / 'logs/tmp-reaper.log'
+                    run1541 = reap_tmp.run(root=pathlib.Path(d) / 'tmp', proc_root=proc1541,
+                        events=evs1541, var_tmp_root=pathlib.Path(d) / 'var',
+                        session_roots=[pathlib.Path(d) / 'sessions'],
+                        session_state_path=pathlib.Path(d) / 'state/date.json', log_path=logfile1541)
+                    check(not run1541['errors'], 'L1541 run surfaces complete')
+                    check(run1541['other_uid_skipped'] == int(case1541 == 'other-uid'),
+                          'L1541 worktree process skip count reaches run result')
+                    got1541, kept1541 = run1541['worktree_rows'], []
+                    check(run1541['freed_bytes_worktrees'] == expected_bytes1541 and
+                          f'worktrees removed=1 freed_bytes={expected_bytes1541} ' in logfile1541.read_text(),
+                          'L1541 positive worktree bytes reach real log')
+                else:
+                    got1541, kept1541 = tree_cleanup.reap_worktrees(evs1541)
+        if case1541 in ('shipped', 'run-shipped', 'other-uid', 'killed', 'void'):
+            check(len(got1541) == 1 and not kept1541 and not pathlib.Path(wt).exists(), f'L1541 AC1 {case1541}: {got1541} {kept1541}')
+            row1541 = got1541[0]
+            check(row1541['freed_bytes'] == expected_bytes1541 > 0 and row1541['proof'] == ('origin-merged' if case1541 in ('shipped', 'run-shipped', 'other-uid') else 'origin-branch'), 'L1541 bytes and proof')
+            fresh1541 = read_via_fold(d)
+            reaped1541 = [e for e in fresh1541 if e['type'] == 'resource-reaped']
+            check(len(reaped1541) == 1 and reaped1541[0]['ref'] == wt and reaped1541[0]['reason'] == 'worktree: ' + row1541['proof'], 'L1541 fresh-process event readback')
+            outcomes1541[case1541] = row1541['proof']
+        else:
+            check(not got1541 and len(kept1541) == 1 and kept1541[0]['why'] and pathlib.Path(wt).exists(), f'L1541 AC2 {case1541}: {got1541} {kept1541}')
+            check(not [e for e in read_via_fold(d) if e['type'] == 'resource-reaped'], 'L1541 retained appends no event')
+            expected_reason1541 = {'building': 'builder spawn live', 'held': 'spec held',
+                'reworking': 'not finished', 'awaiting-merge': 'not finished',
+                'rejection': 'standing rejection', 'recorded': 'recorded resource',
+                'void-off-origin': 'origin', 'cwd': 'live process', 'fd': 'live process',
+                'undetermined': 'undetermined'}[case1541]
+            check(expected_reason1541 in kept1541[0]['why'], f'L1541 {case1541} reason names its guard')
+            if case1541 in ('cwd', 'fd', 'undetermined'):
+                sh(wt, 'git', 'checkout', '--', 'seed.txt')
+                (pathlib.Path(wt) / 'untracked').unlink()
+                with disk_reaper.worktree_pass(proc1541):
+                    with patch.object(reap_tmp, '_pid_refs', side_effect=PermissionError('proc')) if case1541 == 'undetermined' else contextlib.nullcontext():
+                        tree_cleanup.reap_merged_specs(evs1541)
+                check(pathlib.Path(wt).exists(), 'L1541 conservative second pass cannot bypass process guard')
+            outcomes1541[case1541] = kept1541[0]['why']
+body1541 = json.dumps(outcomes1541, sort_keys=True)
+print(json.dumps(dict(url='cli://tree-cleanup/AC1-AC2-AC7', status=0, body_sha256=hashlib.sha256(body1541.encode()).hexdigest(), body_excerpt=body1541)))
+print('L1541 AC1 AC2 AC7 pass; destructive fixture count=1 per case')

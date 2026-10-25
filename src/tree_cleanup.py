@@ -36,7 +36,7 @@ import argparse, json, os, pathlib, subprocess, sys, tempfile
 from datetime import datetime, timezone
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import fold, merge_gate  # noqa: E402
+import fold, merge_gate, disk_reaper  # noqa: E402
 
 DEPTH = int(os.environ.get("DOIT_REAP_DEPTH", "200"))    # how far back on main patch-ids are read
 CLOSED = ("L2-complete", "retracted")
@@ -231,21 +231,13 @@ def _recorded_worktree(path, events):
 
 
 def reap_worktrees(events, *, dry_run=False):
-    """R15a: a spec's worktree goes the instant ITS OWN reason to exist ends —
-    it shipped and origin/<main> already holds the merge sha, or it was
-    killed and its branch is confirmed pushed to origin — never waiting on
-    `reap_merged_specs`'s whole-charter-state judge()/patch-id path, and never
-    consulting local main's own ancestry (that stays `judge()`'s job). Scope:
-    every spec carrying its own `shipped` event (`shipped` itself, and every
-    TERMINAL_SPEC_STATES state reached through one — accepted, the three
-    shipped-owed-* states, closed-shipped, per Assumption 3), OR in state
-    `killed` (which carries no `shipped` event) — `void` carries neither and
-    is deliberately untouched here (Assumption 3: "nothing shipped").
-    Returns (reaped, retained): `reaped` rows `{spec, project, path, proof}`,
-    `retained` rows `{spec, project, path, why}` — never destroyed silently,
-    never retained silently."""
+    """Remove finished specs' origin-proven worktrees, including build debris.
+    Live builders, recorded resources, rework and process references win.
+    Public return shape remains (reaped rows, retained rows).
+    """
     specs, charters, _, _ = fold.fold(events)
     ended = fold.terminal_spawns(events)
+    held = fold.held_specs(events)
     live_builders = {e.get("subject") for e in events
                      if e.get("spawn") and e["spawn"] not in ended
                      and (e.get("type") == "build-started"
@@ -253,8 +245,6 @@ def reap_worktrees(events, *, dry_run=False):
                               and "-".join(e["spawn"].split("-")[1:-1]) == "builder"))}
     groups, resolutions = {}, {}
     for sid, s in specs.items():
-        if not (_shipped_event(s["evs"]) or s["state"] == "killed"):
-            continue
         c = charters.get(s["charter"]) or {"evs": []}
         project, why, path = _project_resolution(sid, s["evs"], c["evs"])
         if project is None and not _spec_worktree_paths(sid, s["evs"]):
@@ -298,16 +288,21 @@ def reap_worktrees(events, *, dry_run=False):
             if branch != sid.lower() and fold.standing_rejects(s["evs"]):
                 retained.append({**row, "why": "standing rejection"})
                 continue
-            # 1 — uncommitted changes, tracked or not: never removed, never pushed.
-            try:
-                dirty = git(wt, "status", "--porcelain").stdout.strip()
-            except Undetermined as e:
-                retained.append({**row, "why": str(e)})
-                continue
-            if dirty:
-                retained.append({**row, "why": "uncommitted changes"})
+            if sid in held:
+                retained.append({**row, "why": "spec held"})
                 continue
             shipped = _shipped_event(s["evs"])
+            if not shipped and s["state"] not in ("killed", "void"):
+                retained.append({**row, "why": f"spec not finished ({s['state']})"})
+                continue
+            try:
+                import reap_tmp
+                if any(reap_tmp._under(ref, wt) for ref in disk_reaper.process_refs()):
+                    retained.append({**row, "why": "live process references worktree"})
+                    continue
+            except OSError as exc:
+                retained.append({**row, "why": "undetermined: " + str(exc)})
+                continue
             if shipped is not None:
                 sha = shipped.get("sha")
                 if not sha:
@@ -338,7 +333,7 @@ def reap_worktrees(events, *, dry_run=False):
                     continue
                 proof = "origin-merged"
             else:
-                # killed: push the branch (never --force, never any other ref), then
+                # killed/void: push the branch (never --force, never any other ref), then
                 # remove only once origin itself confirms it — never in dry_run.
                 try:
                     if not dry_run:
@@ -346,8 +341,11 @@ def reap_worktrees(events, *, dry_run=False):
                         if p.returncode != 0:
                             retained.append({**row, "why": p.stderr.strip() or "git push origin failed"})
                             continue
-                    confirmed = git(repo, "ls-remote", "--exit-code", "origin",
-                                    f"refs/heads/{branch}", ok=True).returncode == 0
+                    remote = git(repo, "ls-remote", "--exit-code", "origin",
+                                 f"refs/heads/{branch}", ok=True)
+                    tip = git(repo, "rev-parse", f"refs/heads/{branch}").stdout.strip()
+                    confirmed = remote.returncode == 0 and any(
+                        line.split() == [tip, f"refs/heads/{branch}"] for line in remote.stdout.splitlines())
                 except Undetermined as e:
                     retained.append({**row, "why": str(e)})
                     continue
@@ -355,15 +353,30 @@ def reap_worktrees(events, *, dry_run=False):
                     retained.append({**row, "why": f"{branch} is not (yet) confirmed on origin"})
                     continue
                 proof = "origin-branch"
-            if dry_run:
-                reaped.append({**row, "proof": proof})
-                continue
             try:
-                git(repo, "worktree", "remove", wt)
-            except Undetermined as e:
-                retained.append({**row, "why": str(e)})
+                size = disk_reaper.entry_bytes(wt)
+                row = {**row, "proof": proof, "freed_bytes": size}
+                if not dry_run:
+                    filename = os.environ.get("DOIT_REAP_LEDGER_FILE", os.environ.get("DOIT_LEDGER_FILE", "L-executor-0001.jsonl"))
+                    if fold.admits({"type": "resource-reaped"}, fold.actor_of(filename)) is not None:
+                        raise Undetermined("resource-reaped actor not admitted")
+                    git(repo, "worktree", "remove", "--force", wt)
+                    previous = os.environ.get("DOIT_LEDGER_FILE")
+                    os.environ["DOIT_LEDGER_FILE"] = filename
+                    try:
+                        fold.append(["resource-reaped", sid, f"ref={wt}", f"reason=worktree: {proof}"], strict=True)
+                    finally:
+                        if previous is None:
+                            os.environ.pop("DOIT_LEDGER_FILE", None)
+                        else:
+                            os.environ["DOIT_LEDGER_FILE"] = previous
+            except (Undetermined, OSError) as exc:
+                retained.append({**row, "why": "undetermined: " + str(exc)})
                 continue
-            reaped.append({**row, "proof": proof})
+            reaped.append(row)
+            context = disk_reaper._WORKTREE_PASS.get()
+            if context is not None:
+                context[1].append(row)
     return reaped, retained
 
 
@@ -423,7 +436,7 @@ def reap_merged_specs(events, *, dry_run=False):
     groups update machine-local status without a ledger event."""
     # A conventional path may be the only project witness; resolve before removal.
     specs, groups = _terminal_groups(events)
-    wt_reaped, _wt_retained = reap_worktrees(events, dry_run=dry_run)
+    wt_reaped, wt_retained = reap_worktrees(events, dry_run=dry_run)
     wt_paths_by_project = {}
     for row in wt_reaped:
         wt_paths_by_project.setdefault(str(row["project"]), []).append(row["path"])
@@ -458,13 +471,23 @@ def reap_merged_specs(events, *, dry_run=False):
         else:
             for spec in spec_ids:
                 branch, wt, dead, why = judge(repo, spec, specs[spec]["evs"], main_branch, wts, main_ids)
-                if wt and _recorded_worktree(wt, events):
+                guarded = next((row for row in wt_retained if row["spec"] == spec and row["path"] == wt), None)
+                if wt and guarded and dead and guarded["why"].startswith((
+                        "live process", "undetermined", "builder spawn", "standing rejection",
+                        "recorded resource", "spec not finished", "spec held")):
+                    dead, why = False, guarded["why"]
+                elif wt and _recorded_worktree(wt, events):
                     dead, why = False, "recorded resource; registry owns cleanup"
                 if dead and not dry_run:
                     proof = git(repo, "merge-base", "--is-ancestor", branch, main_branch, ok=True).returncode != 0
                     try:
+                        size = disk_reaper.entry_bytes(wt) if wt else 0
                         reap(repo, branch, wt, proof)
-                    except Undetermined as e:
+                        context = disk_reaper._WORKTREE_PASS.get()
+                        if wt and context is not None:
+                            context[1].append({"spec": spec, "project": project, "path": wt,
+                                               "proof": "local-main", "freed_bytes": size})
+                    except (Undetermined, OSError) as e:
                         dead, why = False, str(e)
                 if dead:
                     reaped.append(branch)
