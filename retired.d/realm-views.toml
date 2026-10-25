@@ -3,6 +3,5 @@ name = "realm-views"
 kind = "code"
 pattern = "realm_omens"
 paths = ["src/**/*.py"]
-repo = "/home/albert/do-it-v2-realm"
 armed_when_path = "src/realm.py"
 armed_when_contains = "def flow_view"

@@ -1,0 +1,861 @@
+"""realm.py: the compact row shape, the tail offsets, and a bootstrap over a throwaway root."""
+import json, os, pathlib, sys, tempfile
+TMP = pathlib.Path(tempfile.mkdtemp())
+(TMP / "events").mkdir(); (TMP / "seat").mkdir()
+os.environ["DOIT_ROOT"] = str(TMP)
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import realm  # noqa: E402
+
+def w(name, rows):
+    (TMP / "events" / name).write_text("".join(json.dumps(r) + "\n" for r in rows))
+
+def test_compact_keeps_pipeline_rows_and_drops_noise():
+    e = {"ts": "2026-09-25T05:00:00+00:00", "type": "spawn-done", "subject": "L-spec-0001", "spawn": "L-grader-0007",
+         "duration_ms": 61000, "subagent_tokens": 12345, "status": "DONE", "model_used": "claude-sonnet-5"}
+    c = realm.compact(e, "grader")
+    assert c["r"] == "grader" and c["dur"] == 61000 and c["tok"] == 12345 and c["a"] == "grader"
+    assert realm.compact({"ts": "x", "type": "worked"}, "x") is None
+    assert realm.compact({"ts": "x", "type": "lesson", "text": "no problem field"}, "builder") is None
+    assert realm.compact({"ts": "x", "type": "lesson", "problem": "disk-full", "text": "t"}, "thinker")["pb"] == "disk-full"
+
+def test_bootstrap_and_offsets_over_a_throwaway_root():
+    w("L-executor-0001.jsonl", [
+        {"ts": "2026-09-25T04:00:00+00:00", "type": "tick", "lane": 3},
+        {"ts": "2026-09-25T04:01:00+00:00", "type": "spawn-started", "subject": "L-spec-0001", "spawn": "L-grader-0001", "role": "grader"},
+        {"ts": "2026-09-25T04:05:00+00:00", "type": "spawn-failed", "subject": "L-spec-0001", "spawn": "L-grader-0001", "why": "unserved after 300s"}])
+    (TMP / "seat" / "L-grader-0001.claimed").touch()
+    rows, raw, offsets = realm.read_all()
+    assert [r["ty"] for r in rows] == ["tick", "spawn-started", "spawn-failed"]
+    assert offsets["L-executor-0001.jsonl"] == (TMP / "events" / "L-executor-0001.jsonl").stat().st_size
+    b = realm.bootstrap(0, states=[])
+    assert b["n_events"] == 3 and b["stats"]["grader"]["fails"] == {"unserved": 1}
+    assert b["events"][1]["cl"]  # claim time joined from the seat file
+    # a torn tail is not consumed
+    with open(TMP / "events" / "L-executor-0001.jsonl", "a") as fh:
+        fh.write('{"ts":"2026-09-25T04:06:00+00:00","type":"tick"')
+    _, _, off2 = realm.read_all()
+    assert off2["L-executor-0001.jsonl"] == offsets["L-executor-0001.jsonl"]
+
+
+# ---------------------------------------------------------------- omen model (realm_omens.py)
+import datetime as _dt
+import realm_omens as om  # noqa: E402
+
+NOW = _dt.datetime(2026, 10, 15, 12, 0, tzinfo=_dt.timezone.utc)
+
+
+def _ago(h):
+    return (NOW - _dt.timedelta(hours=h)).isoformat(timespec="seconds")
+
+
+def _row(ty, h, s=None, **kw):
+    return {"t": _ago(h), "ty": ty, "s": s, **kw}
+
+
+def _brief(h, pb, **kw):
+    return _row("brief", h, "look:x", pb=pb, **kw)
+
+
+def test_aliases_merge_serving_pane_variants_into_one_name():
+    for v in ("serving-pane-started-for-claimed-seat", "serving-pane-launched-for-claimed-seats", "serving-pane-claim-race"):
+        assert om.canonical(v) == "relay-serves-claimed-seat"
+    assert om.canonical("look-packet-unserved") == "look-packet-unserved"
+
+
+def test_recurring_needs_a_last_24h_occurrence_and_resolves_after():
+    rows = [_brief(h, "look-packet-unserved", own="relay") for h in (200, 100, 60)]       # lifetime 3, last seen 60 h ago
+    active, resolved = om.recurring(rows, [], NOW)
+    assert active == [] and [r["id"] for r in resolved] == ["rec:look-packet-unserved"]     # quiet: resolved, not an omen
+    rows.append(_brief(2, "look-packet-unserved", own="relay"))
+    active, resolved = om.recurring(rows, [], NOW)
+    assert [a["id"] for a in active] == ["rec:look-packet-unserved"] and resolved == []
+    a = active[0]
+    assert a["owner"] == "relay" and not a["needs_you"] and a["sev"] <= 1
+    assert a["trend"].startswith("1 in 24h") and "4 since" in a["trend"]                    # lifetime is the trend line
+    assert a["last"] == _ago(2) and a["since"] == _ago(2)                                   # a 58 h gap starts a new spell
+
+
+def test_recurring_since_is_the_start_of_the_current_spell_and_variants_are_listed():
+    rows = [_brief(h, pb) for h, pb in ((300, "serving-pane-claim-race"), (30, "serving-pane-claim-race"),
+                                          (20, "serving-pane-started-for-claimed-seat"), (3, "serving-pane-for-claimed-seat"))]
+    (a,), _ = om.recurring(rows, [], NOW)
+    assert a["id"] == "rec:relay-serves-claimed-seat" and a["since"] == _ago(30)
+    assert a["variants"] == ["serving-pane-claim-race", "serving-pane-for-claimed-seat", "serving-pane-started-for-claimed-seat"]
+
+
+def test_operator_owner_is_needs_you_and_only_those_may_be_critical():
+    rows = [_brief(h, "disk-full", own="operator") for h in (5, 4, 3, 2, 1, 1, 1, 1, 1, 1, 1)]
+    (a,), _ = om.recurring(rows, [], NOW)
+    assert not a["needs_you"] and a["owner"] == "thinker" and a["sev"] == 1    # a look brief naming the operator is NOT a request
+    out = om.compute(rows, [], NOW)
+    assert out["needs_you"] == 0 and out["health"] == 2
+    missing, = [i for i in out["items"] if i["id"] == "owed-digest-missing"]
+    assert "no root" in missing["detail"]
+    assert om._item("x", "k", 2, "t", "d", "operator", "n", NOW, NOW)["sev"] == 2
+    rows = [_brief(h, "relay-thing", own="thinker") for h in [1] * 30]
+    (b,), _ = om.recurring(rows, [], NOW)
+    assert not b["needs_you"] and b["sev"] == 1
+    assert om._item("x", "k", 2, "t", "d", "executor", "n", NOW, NOW)["sev"] == 1
+
+
+def test_a_fix_in_flight_silences_the_problem_but_a_landed_fix_that_still_fires_does_not():
+    rows = [_brief(h, "p-one", fix="L-spec-0001") for h in (3, 2, 1)]
+    assert om.recurring(rows, [["L-spec-0001", "building"]], NOW)[0] == []
+    (a,), _ = om.recurring(rows, [["L-spec-0001", "shipped"]], NOW)
+    assert "still firing" in a["title"]
+
+
+def test_blocked_counts_only_a_latest_blocked_with_no_later_start_or_ship():
+    rows = [_row("build-done", 9, "L-spec-0001", st="BLOCKED"), _row("build-started", 8, "L-spec-0001"),       # re-dispatched
+            _row("build-done", 9, "L-spec-0002", st="BLOCKED"),                                               # still blocked
+            _row("build-done", 9, "L-spec-0003", st="BLOCKED"), _row("shipped", 5, "L-spec-0003"),           # shipped since
+            _row("build-blocked", 9, "L-spec-0004", why="x")]
+    states = [["L-spec-0001", "building"], ["L-spec-0002", "built"], ["L-spec-0003", "shipped"], ["L-spec-0004", "killed"]]
+    hits = om.blocked_builders(om._by_spec(rows), states, NOW)
+    assert [s for s, _, _ in hits] == ["L-spec-0002"] and not hits[0][2]
+
+
+def test_blocked_with_a_later_decision_amendment_rewrite_unblock_or_answer_is_redispatch_pending():
+    for ty in ("decision", "spec-amended", "spec-written", "unblocked", "brief-answered"):
+        rows = [_row("build-done", 9, "L-spec-0050", st="BLOCKED"), _row(ty, 5, "L-spec-0050")]
+        hits = om.blocked_builders(om._by_spec(rows), [["L-spec-0050", "graded"]], NOW)
+        assert [(s, p) for s, _, p in hits] == [("L-spec-0050", True)], ty
+        blocked, pending = om.blocked_items(hits, NOW)
+        assert blocked is None and pending["owner"] == "executor" and pending["sev"] == 0
+    rows = [_row("decision", 12, "L-spec-0051"), _row("build-done", 9, "L-spec-0051", st="BLOCKED")]     # decision came BEFORE the block
+    (h,) = om.blocked_builders(om._by_spec(rows), [["L-spec-0051", "graded"]], NOW)
+    assert h[2] is False
+
+
+def test_needs_you_comes_from_digest_and_decision_requests():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        _write_digest(root, needs_you=[dict(spec="L-spec-0060", criterion="AC1", ask="please act", since=_ago(9))])
+        rows = []
+        st = [["L-spec-0060", "shipped-owed-expired"]]
+        out = om.compute(rows, st, NOW, root=root)
+        (it,) = [i for i in out["items"] if i["needs_you"]]
+        assert it["kind"] == "owedop" and it["subjects"] == ["L-spec-0060"]
+        rows.append(_row("message-sent", 3, "shlomo", to="operator", why="please rule on X"))
+        assert om.compute(rows, st, NOW, root=root)["needs_you"] == 2
+        rows.append(_row("brief-answered", 1, "shlomo"))
+        assert om.compute(rows, st, NOW, root=root)["needs_you"] == 1
+
+
+def test_churn_counts_only_unfinished_specs_and_grades_in_the_last_48h():
+    rows = [_row("verdict", h, "L-spec-0010", ok=False) for h in (60, 40, 30, 20)]       # 3 inside 48 h
+    rows += [_row("verdict", h, "L-spec-0011", ok=False) for h in (100, 90, 80)]         # all older than 48 h
+    rows += [_row("verdict", h, "L-spec-0012", ok=False) for h in (10, 9, 8)]            # shipped since
+    it = om.churn_item(om._by_spec(rows), [["L-spec-0010", "reviewing"], ["L-spec-0011", "reviewing"], ["L-spec-0012", "shipped"]], NOW)
+    assert it["subjects"] == ["L-spec-0010"] and "x3" not in it["detail"] and it["owner"] == "thinker"
+
+
+def test_vanished_excludes_ended_spawns_and_shipped_specs():
+    rows = [_row("spawn-started", 5, "L-spec-0020", sp="L-grader-1", role="grader"),                         # vanished
+            _row("spawn-started", 5, "L-spec-0021", sp="L-grader-2", role="grader"), _row("spawn-stale", 4, "L-spec-0021", sp="L-grader-2"),
+            _row("spawn-started", 5, "L-spec-0022", sp="L-grader-3", role="grader"), _row("shipped", 3, "L-spec-0022"),
+            _row("spawn-started", 5, "L-spec-0023", sp="L-grader-4", role="grader"), _row("spawn-failed", 4, "L-spec-0023", sp="L-grader-4"),
+            _row("spawn-started", 0.1, "L-spec-0024", sp="L-grader-5", role="grader")]                        # still young
+    it = om.vanished_item(rows, [["L-spec-0020", "built"], ["L-spec-0022", "shipped"]], NOW)
+    assert it["subjects"] == ["L-spec-0020"]
+
+
+def test_gate_clean_is_not_merged_without_a_window_or_a_master_commit():
+    rows = [_row("merge-gate-clean", 6, "L-spec-0030"), _row("merge-gate-clean", 6, "L-spec-0031"), _row("merge-gate-clean", 6, "L-spec-0032"),
+            _row("window-verified", 5, "win-1", kept=["L-spec-0031"])]
+    st = [["L-spec-0030", "reviewing"], ["L-spec-0031", "reviewing"], ["L-spec-0032", "reviewing"]]
+    mi = om.merge_info(rows, om._by_spec(rows), st, {"L-spec-0032": _ago(1)})
+    assert mi["L-spec-0030"]["merged"] is False
+    assert mi["L-spec-0031"]["merged"] and mi["L-spec-0031"]["via"].startswith("window win-1")
+    assert mi["L-spec-0032"]["via"] == "commit on master"
+    rows.append(_row("merge-gate-clean", 1, "L-spec-0031"))       # re-gated after the window: the old window no longer counts
+    assert om.merge_info(rows, om._by_spec(rows), st, {})["L-spec-0031"]["merged"] is False
+
+
+def test_compute_drops_omens_whose_subjects_are_all_finished_and_counts_needs_you():
+    rows = [_row("build-done", 9, "L-spec-0040", st="BLOCKED")] + [_brief(h, "disk-full", own="operator") for h in (3, 2, 1)]
+    out = om.compute(rows, [["L-spec-0040", "killed"]], NOW)
+    assert [i["id"] for i in out["items"]] == ["owed-digest-missing", "rec:disk-full"] and out["needs_you"] == 0 and out["health"] == 2
+    assert out["v"] == 2 and out["at"] == _ago(0)
+    assert "no root" in out["items"][0]["detail"]
+
+def test_codex_ledger_lifecycle_and_compact():
+    import realm_codex
+    rows = [
+        {"ts": "2026-10-12T10:00:00Z", "type": "build-started", "spawn": "L-builder-7", "subject": "L-spec-7", "backend": "codex"},
+        {"ts": "2026-10-12T10:01:00Z", "type": "backend-fallback", "spawn": "L-builder-7", "why": "weekly limit"},
+        {"ts": "2026-10-12T10:02:00Z", "type": "build-done", "spawn": "L-builder-7", "status": "DONE"},
+    ]
+    with tempfile.TemporaryDirectory() as home:
+        for n, state in [(1, "live"), (2, "fallback"), (3, "ended")]:
+            data = realm_codex.payload(rows[:n], home=pathlib.Path(home), processes=set(), windows={})
+            assert len(data["sessions"]) == 1
+            s = data["sessions"][0]
+            assert (s["kind"], s["state"], s["subject"]) == ("doit-build", state, "L-spec-7")
+            if n > 1:
+                assert s["fell_back"] == "fell back: weekly limit"
+        assert realm.compact(rows[0], "builder")["backend"] == "codex"
+        assert realm.compact(rows[1], "builder")["ty"] == "backend-fallback"
+
+
+def test_codex_workers_allowlist_mtime_quota_and_paths():
+    import realm_codex
+    now = 1791806400
+    with tempfile.TemporaryDirectory() as tmp:
+        home = pathlib.Path(tmp)
+        folder = home / ".codex/sessions/2026/10/12"
+        folder.mkdir(parents=True)
+        worktree = home / ".do-it/worktrees/do-it-v2/audit"
+        for ident, age, cwd in [("live", 10, worktree), ("idle", 600, home / "private"), ("ended", 2000, worktree), ("no-process", 10, worktree), ("old", 24000, worktree)]:
+            rows = [
+                {"type": "session_meta", "payload": {"id": ident, "cwd": str(cwd), "timestamp": "2026-10-12T10:00:00Z"}},
+                {"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "intro\n# Technical audit\nFAKE_TOKEN_SECRET_MARKER\nprivate prompt"}]}},
+                {"type": "turn_context", "payload": {"turn_id": "turn-1"}},
+                {"type": "event_msg", "payload": {"type": "token_count", "info": {"total_token_usage": {"total_tokens": 1234}}, "rate_limits": {"secondary": {"window_minutes": 10080, "used_percent": 71, "resets_at": now + 100}, "credits": {"balance": "20.00"}}}},
+                {"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "# PRIVATE_SECOND_HEADING"}]}},
+            ]
+            f = folder / ("rollout-" + ident + ".jsonl")
+            f.write_text("\n".join(map(json.dumps, rows)) + '\n{"torn":')
+            os.utime(f, (now - age, now - age))
+        data = realm_codex.payload([], home=home, now=now, processes={"live"}, windows={str(worktree): "codex-audit"})
+        by_id = {s["id"]: s for s in data["sessions"]}
+        assert set(by_id) == {"live", "idle", "ended", "no-process"}
+        assert [by_id[x]["state"] for x in ["live", "idle", "ended", "no-process"]] == ["live", "idle", "ended", "idle"]
+        assert by_id["live"]["subject"] == "Technical audit"
+        assert by_id["live"]["cwd"] == "audit" and "cwd" not in by_id["idle"]
+        assert by_id["live"]["tmux"] == "codex-audit"
+        assert by_id["live"]["tokens"] == 1234 and by_id["live"]["turns"] == 1
+        assert data["quota"] == {"weekly_used_pct": 71, "resets_at": now + 100, "credits_balance": "20.00"}
+        serialized = json.dumps(data)
+        for marker in ["FAKE_TOKEN_SECRET_MARKER", "PRIVATE_SECOND_HEADING", "private prompt", str(home)]:
+            assert marker not in serialized
+
+
+# ---------------------------------------------------------------- live lane (no main-branch module required)
+def test_lane_loads_each_repo_without_import_residue():
+    import itertools
+    from unittest.mock import patch
+    rows = [{"spec": "L-spec-7001", "rule": "build", "limit_min": 7,
+             "since": _ago(3), "overdue": True, "reason": "dispatch <builder>",
+             "reason_live": False, "blocker": "", "actor": "tick", "extra": [1, 2]}]
+    with tempfile.TemporaryDirectory() as tmp:
+        repos = {}
+        for case in ("rows", "absent", "load-broken", "due-broken", "read-broken", "fold-broken", "shape-broken"):
+            root = pathlib.Path(tmp) / case
+            src = root / "src"
+            src.mkdir(parents=True)
+            repos[case] = root
+            if case == "absent":
+                continue
+            (src / "fold.py").write_text('''from dataclasses import dataclass
+@dataclass
+class EventSource:
+    name: str = 'live'
+EVENTS = [{'actor': 'executor', '_src': 'live-reader', 'type': 'tick'}]
+SPECS = {'L-spec-7001': {'state': 'written'}}
+BY_SUBJECT = {}
+def read_events():
+    return EVENTS
+def fold(events):
+    assert events is EVENTS
+    return SPECS, {'not': 'specs'}, [], BY_SUBJECT
+def stall_lane_rows(events, specs, now, *, by_subject):
+    import lane_rules
+    assert by_subject is BY_SUBJECT
+    return lane_rules.due(events, specs, now)
+''' + ("\ndef read_events(): raise RuntimeError('read-broken')\n" if case == "read-broken" else "")
+                + ("\ndef fold(events): raise RuntimeError('fold-broken')\n" if case == "fold-broken" else "")
+                + ("\ndef fold(events): return {}, {}\n" if case == "shape-broken" else ""))
+            (src / "lane_rules.py").write_text('''import fold
+from pathlib import Path
+import json
+LOG = Path(__file__).with_name('calls.jsonl')
+def record(value):
+    with LOG.open('a') as stream: stream.write(json.dumps(value) + '\\n')
+def load():
+    record({'case': CASE, 'call': 'load'})
+    if CASE == 'load-broken': raise ValueError(CASE)
+    return {}
+def due(events, specs, now):
+    record({'case': CASE, 'call': 'due', 'events': events, 'specs': specs, 'now': now.isoformat()})
+    assert events is fold.EVENTS and specs is fold.SPECS
+    if CASE == 'due-broken': raise RuntimeError(CASE)
+    return ROWS
+''' + f"\nCASE = {case!r}\nROWS = {rows!r}\n")
+        # Multiple orders in one interpreter detect stale live-module caches.
+        for order in itertools.chain([list(repos), list(reversed(repos))],
+                                     itertools.permutations(("rows", "absent", "load-broken", "due-broken"))):
+            for case in order:
+                root = repos[case]
+                before_path, before_modules = sys.path[:], sys.modules.copy()
+                log = root / "src/calls.jsonl"
+                if log.exists():
+                    log.unlink()
+                with patch.dict(os.environ, {"DOIT_LIVE_REPO": str(root)}):
+                    with patch.object(realm, "read_all", return_value=([], [], {})), \
+                         patch.object(realm, "sys_signals", return_value={}), \
+                         patch.object(realm.realm_codex, "payload", return_value={}), \
+                         patch.object(realm, "omens_model", return_value={}), \
+                         patch.object(realm, "glance_payload", return_value={}):
+                        payload = realm.bootstrap(0, states=[], goals=[], proving=[], now=NOW)
+                    history = realm.history_payload([], [], NOW, {})
+                assert sys.path == before_path
+                assert sys.modules == before_modules
+                assert payload["lane_at"] == history["lane_at"] == NOW.isoformat(timespec="seconds")
+                assert "wallclock" in history
+                for result in (payload, history):
+                    if case == "rows":
+                        assert result["lane"] == rows and result["lane_error"] is None
+                    else:
+                        assert result["lane"] is None and result["lane_error"]
+                        assert (str(root) if case == "absent" else "invalid four-part" if case == "shape-broken" else case) in result["lane_error"], (case, result)
+                calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+                due = [c for c in calls if c["call"] == "due"]
+                assert len(due) == (2 if case in ("rows", "due-broken") else 0)
+                for call in due:
+                    assert call["case"] == case and call["now"] == NOW.isoformat()
+                    assert all(e["actor"] and e["_src"] == "live-reader" for e in call["events"])
+                    assert call["specs"] == {"L-spec-7001": {"state": "written"}}
+
+
+def _page_function(source, name):
+    """Brace-match a real page function, including balanced template expressions."""
+    start = source.index("function " + name + "(")
+    opening = source.index("{", start)
+    depth = 0
+    for i in range(opening, len(source)):
+        if source[i] == "{":
+            depth += 1
+        elif source[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start:i + 1]
+    raise AssertionError("unclosed function " + name)
+
+
+def test_lane_page_shows_only_classified_stuck():
+    import re
+    import subprocess
+    page = realm.PAGE.read_text()
+    body = _page_function(page, "computeBlockers")
+    assert body and _page_function(page, "renderStuck")
+    for lookup in ("spec-written", "build-done", "verdict", "review", "merge-gate-clean"):
+        assert lookup not in body
+    # Evaluate numeric products, so spelling a removed threshold differently cannot hide it.
+    for expr in re.findall(r"(?<![\w.])\d+(?:\.\d+)?(?:\s*\*\s*\d+(?:\.\d+)?)*", body):
+        assert eval(expr, {"__builtins__": {}}, {}) not in (600, 900, 1800, 600000, 900000, 1800000), expr
+    for name in re.findall(r"\b[A-Z][A-Z_]+\b", body):
+        for expr in re.findall(r"(?:const|let)\s+" + name + r"\s*=\s*([\d\s*]+)[;,]", page):
+            assert eval(expr, {"__builtins__": {}}, {}) not in (600, 900, 1800, 600000, 900000, 1800000)
+    functions = ("applyLane", "applyHistory", "laneNotice", "laneDetails", "renderStuckTile",
+                 "stateMap", "laneSplit", "computeHolds", "computeBlockers", "renderStuck", "stuckHtml0",
+                 "escOwner", "computeOmens")
+    constants = ("S", "toMs", "fmt", "fmtDur", "fmtAge", "esc", "LANE_PLACE", "WHO", "HOLD_RE", "LIFT_RE")
+    declarations = []
+    for name in constants:
+        declarations.append(next(line for line in page.splitlines() if line.startswith("const " + name + " ") or "const " + name + "=" in line))
+    # WHO_ shares the HOLD_RE line; LIFT_RE and all page functions are real source.
+    script = "\n".join(declarations + [_page_function(page, n) for n in functions])
+    script += r'''
+const assert=require('node:assert/strict');
+const els=new Map();const $=id=>{if(!els.has(id))els.set(id,{className:'',innerHTML:'',firstElementChild:{textContent:''}});return els.get(id);};
+let LIVE=true, DATA={states:[]}, stream=null, REMOTE=false,lastHeard=0;
+const CAP={builder:5};
+const isRaven=()=>true, knownBug=()=>null, execBusy=()=>false, OM=()=>null,lastOf=()=>null;
+const specCharter=()=>null,charterRows=()=>[],fixFor=()=>null,ownerFor=()=>null,sinceFor=()=>S.now,renderOmens=()=>{};
+const NO_SELFCHECK=new Set(),FINISHED_RE=/accepted|shipped|killed/,DEFAULT_OWNER={shelf:'executor'},NEXT_ACTION={shelf:()=>['executor','dispatch a builder']};
+const isOperator=o=>o==='operator'||o==='you';
+const now=Date.parse('2026-10-15T12:00:00Z'),H=3600000;
+function fresh(lane=[]){S.now=now;S.lane=lane;S.laneAt='2026-10-15T12:00:00Z';S.laneError=null;S.actors.clear();S.subjectEvents.clear();S.esc.clear();S.sys=null;S.wallclock=null;S.lastAct=0;S.lastTick=null;S.recent=[];S.raisedAt.clear();DATA={states:[]};LIVE=true;}
+function row(rule,age=3,extra={}){return {spec:'L-spec-'+rule,bucket:'STUCK',rule,actor:'tick',since:new Date(now-age*H).toISOString(),limit_min:17,overdue:true,reason:'because <'+rule+'>',reason_live:false,blocker:'block <'+rule+'>',...extra};}
+function has(text,part){assert.ok(text.includes(part),part+' missing in '+text);}
+const rows=[row('build',5),row('grade',2,{actor:'grader'}),row('gate',.5,{actor:'-'}),row('wave-held',3,{bucket:'waiting-on-prereq',overdue:false,reason_live:true}),row('future',1),row('review',1,{bucket:'queued',overdue:false})];
+fresh(rows);computeBlockers();assert.equal(S.blockers.length,4);
+for(const [rule,place,kind,who,need,sev] of [['build','tower','shelf','executor',true,2],['grade','court','grade','grader',true,1],['gate','gate','merge','executor',true,0],['future','tower','lane','executor',true,0]]){
+ const b=S.blockers.find(b=>b.lane.rule===rule);assert.deepEqual([b.place,b.kind,b.who,b.need,b.sev],[place,kind,who,need,sev]);assert.equal(b.s,'L-spec-'+rule);assert.equal(b.since,Date.parse(b.lane.since));assert.equal(b.wait,now-b.since);
+}
+const panel=stuckHtml0();for(const r of rows){for(const value of [r.spec,r.rule,String(r.limit_min),r.since,esc(r.reason),esc(r.blocker)])has(panel,value);}
+assert.ok(!panel.includes('because <build>'));assert.ok(!panel.includes('block <build>'));
+assert.ok(!/\d/.test(panel.split('WHAT COUNTS AS STUCK')[1].replace(/<[^>]*>/g,'')));has(panel,'WITHIN LIMITS · 2');
+const allRules={rebuild:['tower','shelf'],'dependency-held':['tower','shelf'],regrade:['court','grade'],review:['inn','review'],enqueue:['gate','merge'],merge:['gate','merge'],close:['keep','close'],idle:['tower','idle'],toString:['tower','lane'],constructor:['tower','lane']};
+for(const [rule,mapping] of Object.entries(allRules)){fresh([row(rule)]);computeBlockers();assert.deepEqual([S.blockers[0].place,S.blockers[0].kind],mapping);}
+fresh(null);S.laneError='load <failed>';computeBlockers();for(const text of [$('stuck').innerHTML,stuckHtml0()]){has(text,'rule table unreadable');has(text,'load &lt;failed&gt;');assert.ok(!text.toUpperCase().includes('NOTHING STUCK'));}assert.notEqual($('stuck').className,'calm');assert.equal($('h-stuck').firstElementChild.textContent,'unreadable');
+fresh([]);computeBlockers();has($('stuck').innerHTML,'NOTHING STUCK');assert.equal($('stuck').className,'calm');
+fresh([row('unrecognized',1,{reason:'undetermined: cannot decide'})]);computeBlockers();assert.equal(S.blockers.length,1);assert.equal(S.blockers[0].need,true);has(stuckHtml0(),'undetermined: cannot decide');has($('stuck').innerHTML,'1 spec');has($('h-stuck').firstElementChild.textContent,'1 ·');assert.notEqual($('h-stuck').className,'stat good');
+// Histories far past every removed limit cannot recreate page-side lane waits.
+fresh([]);for(const [i,ty] of ['spec-written','build-done','verdict','review','merge-gate-clean'].entries()){const s='L-spec-old'+i;DATA.states.push([s,['written','built','graded','reviewing','reviewing'][i]]);S.subjectEvents.set(s,[{ty,ms:now-100*H,st:'DONE',ok:true,nb:0}]);}computeBlockers();assert.deepEqual(S.blockers,[]);
+// A hold, a freeze, a busy subject and red master CI cannot overrule lane rows.
+fresh([row('build',5),row('gate',3)]);S.subjectEvents.set('L-spec-build',[{ty:'decision',a:'operator',ms:now-H,why:'hold L-spec-build until merge'}]);S.subjectEvents.set('L-charter-1',[{ty:'decision',a:'operator',ms:now-H,why:'merge freeze'}]);S.actors.set('busy',{subject:'L-spec-build',state:'working',start:now,tour:false});S.sys={ci:{red:1}};computeBlockers();assert.ok(S.holds.bySpec.has('L-spec-build'));assert.ok(S.holds.freeze);for(const b of S.blockers){assert.equal(b.need,true);assert.equal(b.text,b.lane.reason);}computeOmens();assert.ok(S.alarms.some(a=>a.kind==='shelf'));
+for(const bucket of ['queued','held','waiting-on-prereq','waiting-on-human',undefined]){fresh([row('wait',3,{bucket,reason_live:true})]);computeBlockers();assert.deepEqual(S.blockers,[]);}
+function kept(){for(const [s,state] of [['L-spec-raven','written'],['L-spec-owed','shipped-owed']]){DATA.states.push([s,state]);S.subjectEvents.set(s,[{ty:'shipped',ms:now-30*H}]);}S.esc.set('L-spec-raven',[{ms:now-H,ow:'operator'}]);S.actors.set('queued',{sp:'L-builder-q',subject:'L-spec-q',role:'builder',state:'queued',start:now-3*60000,wp:'forge'});S.actors.set('working',{sp:'L-builder-w',subject:'L-spec-w',role:'builder',state:'working',start:now-H,wp:'forge'});}
+fresh([]);kept();computeBlockers();assert.deepEqual(S.blockers,[]);has($('stuck').innerHTML,'NOTHING STUCK');
+applyHistory({lane:[row('build')],lane_error:null,lane_at:'updated',history:{},wallclock:{}});assert.equal(S.lane.length,1);assert.equal(S.laneAt,'updated');
+applyHistory({lane:null,lane_error:'refresh failed',lane_at:'failed',history:{}});assert.equal(S.lane,null);assert.equal(S.laneError,'refresh failed');has($('stuck').innerHTML,'rule table unreadable');
+fresh([row('build')]);kept();LIVE=false;S.now=now-1;computeBlockers();assert.deepEqual(S.blockers,[]);for(const text of [$('stuck').innerHTML,stuckHtml0()]){has(text,'rule table: live only');assert.ok(!text.toUpperCase().includes('NOTHING STUCK'));}assert.notEqual($('stuck').className,'calm');
+console.log('lane UI: mappings, rendering, unreadable, explicit STUCK, other buckets excluded, refresh and replay passed');
+'''
+    # seek/reset must preserve the live result, while tick retains its numeric count separately.
+    assert "S.lane=null" not in _page_function(page, "reset")
+    assert "S.lane=e.ln" not in _page_function(page, "handle")
+    assert "applyLane(d)" in _page_function(page, "loadData")
+    assert "applyLane(d)" in _page_function(page, "applySnapshot")
+    assert "stream.addEventListener('history',ev=>applyHistory(JSON.parse(ev.data)))" in page
+    result = subprocess.run(["/usr/bin/node", "-e", script], text=True, capture_output=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+
+# ---------------------------------------------------------------- merge throughput (L-spec-1149)
+import contextlib
+import inspect
+import shlex
+import subprocess
+from unittest import mock
+
+THROUGHPUT_SENTINELS = {
+    "queue_depth": 7,
+    "in_flight": [{"window": "win-b", "specs": ["L-spec-b"], "since": "2026-10-19T01:00:00Z"},
+                  {"window": "win-a", "specs": ["L-spec-a"], "since": "2026-10-19T02:00:00Z"}],
+    "median_wait_min": 31.5, "p90_wait_min": 80, "merged_per_hour": 3.2,
+    "busy_hours": 13, "shipped": 29, "stale_merges": 17, "unproven_merges": 19,
+    "minutes_per_spec": 23.5, "selfhosted_minutes_per_spec": 27.5, "reason": "sentinel reason",
+}
+
+
+@contextlib.contextmanager
+def throughput_stub(value=THROUGHPUT_SENTINELS, *, mode="ok"):
+    with tempfile.TemporaryDirectory(prefix="realm-throughput-") as folder, contextlib.ExitStack() as stack:
+        repo = pathlib.Path(folder)
+        log = repo / "calls.jsonl"
+        script = repo / "stub.py"
+        script.write_text("import json, os, sys, time\n"
+                          f"with open({str(log)!r}, 'a') as f:\n"
+                          " f.write(json.dumps(dict(argv=sys.argv[1:], now=os.environ.get('DOIT_NOW'), "
+                          f"stdin=sys.stdin.read(), status={2 if mode == 'exit' else 0}))+'\\n')\n"
+                          + ("time.sleep(2)\n" if mode == "timeout" else "")
+                          + ("print('ledger unreadable', file=sys.stderr)\nsys.exit(2)\n" if mode == "exit" else "")
+                          + f"print({('not JSON' if mode == 'invalid' else json.dumps(value))!r})\n")
+        if mode != "missing":
+            (repo / "doit").write_text(f'#!/bin/sh\nexec /usr/bin/python3 {shlex.quote(str(script))} "$@"\n')
+            (repo / "doit").chmod(0o700)
+        stack.enter_context(mock.patch.multiple(realm, LIVE_REPO=repo, sys_signals=lambda: {},
+                                               maker_index=lambda *a: {}, omens_model=lambda *a: {}))
+        stack.enter_context(mock.patch.object(realm.realm_codex, "payload", return_value={}))
+        stack.enter_context(mock.patch.object(realm.HUB, "throughput", None))
+        yield log
+
+
+def throughput_bootstrap():
+    return realm.bootstrap(0, states=[], goals=[], proving=[])
+
+
+def test_1149_cli_passthrough_and_bootstrap():
+    with throughput_stub() as log:
+        d = throughput_bootstrap()
+        assert d["throughput"] == THROUGHPUT_SENTINELS and d["throughput_error"] is None
+        assert _dt.datetime.fromisoformat(d["throughput_at"]).tzinfo is not None
+        call, = [json.loads(line) for line in log.read_text().splitlines()]
+        assert call == dict(argv=["throughput", "--json"], now=d["throughput_at"], stdin="", status=0)
+        print("1149-AC1 passthrough ok")
+
+
+def test_1149_unavailable_and_admission_boundary():
+    for mode, value, cause in [("missing", {}, "FileNotFoundError"), ("exit", {}, "exit 2"),
+                                ("invalid", {}, "JSONDecodeError"), ("ok", [], "not an object"),
+                                ("timeout", {}, "TimeoutExpired")]:
+        # Leave process startup ample time under load; only this case tests a timeout.
+        timeout = 0.1 if mode == "timeout" else 60
+        with throughput_stub(value, mode=mode) as log, mock.patch.object(realm, "THROUGHPUT_TIMEOUT", timeout):
+            modules, paths = set(sys.modules), list(sys.path)
+            d = throughput_bootstrap()
+            assert d["throughput"] is None and cause in d["throughput_error"], d
+            assert set(sys.modules) == modules and sys.path == paths
+            print(f"1149-AC2 {mode if mode != 'ok' else 'list'} ok")
+    with throughput_stub() as log:
+        w("L-builder-1149.jsonl", [{"ts": "2026-10-19T01:00:00Z", "type": "review",
+                                    "subject": "L-spec-untrusted", "decision": "approve"}])
+        try:
+            throughput_bootstrap()
+            call = json.loads(log.read_text())
+            assert call["stdin"] == "" and call["argv"] == ["throughput", "--json"]
+        finally:
+            (TMP / "events" / "L-builder-1149.jsonl").unlink()
+        print("1149-AC2 cli-only-admission ok")
+
+
+def test_1149_cache_guard_and_sampler():
+    keys = {"throughput", "throughput_error", "throughput_at"}
+    with throughput_stub() as log:
+        p = realm.throughput_payload()
+        assert set(p) == keys
+        assert {k: throughput_bootstrap()[k] for k in keys} == p
+        assert len(log.read_text().splitlines()) == 1
+        realm.HUB.throughput = {**p, "throughput_at": (_dt.datetime.now(_dt.timezone.utc)
+                                                   - _dt.timedelta(minutes=11)).isoformat()}
+        throughput_bootstrap()
+        assert len(log.read_text().splitlines()) == 2
+        print("1149-AC3 cache ok")
+        with mock.patch.object(realm.subprocess, "run", side_effect=RuntimeError("broken")):
+            failed = realm.throughput_payload()
+        assert failed["throughput"] is None and "broken" in failed["throughput_error"]
+        assert realm.HUB.throughput == failed
+        print("1149-AC3 guard ok")
+    assert "sample_once()" in inspect.getsource(realm.sample_forever)
+    assert 'HUB.send("throughput", throughput_payload())' in inspect.getsource(realm.sample_once)
+    assert "throughput" not in inspect.getsource(realm.heartbeat_forever)
+    print("1149-AC3 wiring ok")
+    for failure in (False, True):
+        with throughput_stub() as log, contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(realm, "history_add"))
+            lane = {"lane": [], "lane_error": None, "lane_at": "lane-instant"}
+            stack.enter_context(mock.patch.object(realm, "lane_payload", return_value=lane))
+            stack.enter_context(mock.patch.object(realm, "derive_states", return_value=[]))
+            send = stack.enter_context(mock.patch.object(realm.HUB, "send"))
+            if failure:
+                stack.enter_context(mock.patch.object(realm.subprocess, "run", side_effect=RuntimeError("broken")))
+            realm.sample_once()
+            assert [call.args[0] for call in send.call_args_list] == ["history", "throughput"]
+            history = send.call_args_list[0].args[1]
+            assert all(history[k] == v for k, v in lane.items())
+            assert "history" in history and "wallclock" in history
+            p = send.call_args_list[1].args[1]
+            assert set(p) == keys
+            assert p["throughput"] == (None if failure else THROUGHPUT_SENTINELS)
+            assert bool(p["throughput_error"]) == failure
+            print(f"1149-AC10 {'failure' if failure else 'success'} ok")
+
+
+def test_1149_real_page_under_node():
+    page = realm.PAGE.read_text()
+    merge = page[page.index("// Format only CLI-provided metrics;"):page.index("function openPanel(")]
+    snapshot = next(line for line in page.splitlines() if line.startswith("function applySnapshot("))
+    connect = page[page.index("function connect()"):page.index("let REMOTE=")]
+    seek = next(line for line in page.splitlines() if line.startswith("function seek("))
+    esc = next(line for line in page.splitlines() if line.startswith("const esc ="))
+    source = inspect.getsource(realm.throughput_payload) + merge
+    for forbidden in ("statistics.", "median(", "percentile", "merge-gate-clean", "'review'", "'shipped'"):
+        assert forbidden not in source
+    print("1149-AC7 cli-owned ok")
+    assert 'id="h-merge"' in page and "$('h-merge').onclick=" in page
+    assert "renderMerge();" in page[page.index("$('h-flight').firstElementChild"):page.index("let last=performance.now()")]
+    js = r"""
+const assert=require('node:assert/strict');
+let DATA={}, LIVE=true, EVENTS=[], T0=0, T1=0, lastPush='', S={};
+let stream, heard=false,lastHeard=0;
+const header={firstElementChild:{textContent:''},title:''};
+const $=id=>{assert.equal(id,'h-merge');return header;};
+const applyLane=()=>{}, rerenderPanel=()=>{}, insertEvent=()=>{}, Codex={load:()=>{},reset:()=>{}};
+const reset=()=>{},process=()=>{},renderLog=()=>{},computeBlockers=()=>{},computeOmens=()=>{};
+const setTimeout=()=>{},setInterval=()=>{},api=x=>x;
+const listeners={};class EventSource{addEventListener(k,f){listeners[k]=f;}}
+""" + esc + "\n" + merge + "\n" + snapshot + "\n" + connect + "\n" + seek + r"""
+const p=SENTINELS;
+function apply(d){applySnapshot({events:[],...d});return header.firstElementChild.textContent;}
+function includesAll(text){for(const v of ['7','2','32 min','80 min','3.2'])assert(text.includes(v),text);}
+function unknown(text){assert(text.includes('unavailable'));assert(!/0 specs|none merging|0 min|about 0|idle|>[0-9]/.test(text),text);}
+apply({throughput:p,throughput_error:null});includesAll(header.firstElementChild.textContent);includesAll(mergeHtml());
+console.log('1149-AC4 payload ok');
+apply({throughput:null,throughput_error:'x'});unknown(header.firstElementChild.textContent);assert(mergeHtml().includes('x'));assert(header.title.endsWith(' x'));
+const empty={queue_depth:null,median_wait_min:null,p90_wait_min:null,merged_per_hour:null,reason:'unknown'};
+apply({throughput:empty,throughput_error:null});unknown(header.firstElementChild.textContent);unknown(mergeHtml());assert(mergeHtml().includes('unknown'));
+for(const value of ['9',false,{},NaN,Infinity]){DATA.throughput={...empty,queue_depth:value};assert.equal(mergeValues().queue,'?');}
+console.log('1149-AC5 unavailable ok');
+apply({throughput:p});apply({throughput:null,throughput_error:'boom',throughput_at:null});unknown(header.firstElementChild.textContent);assert(header.title.endsWith(' boom'));assert(mergeHtml().includes('boom'));
+console.log('1149-AC6 snapshot-null ok');
+DATA={};apply({});unknown(header.firstElementChild.textContent);console.log('1149-AC6 absent ok');
+apply({throughput:p});LIVE=false;seek(Date.now());renderMerge();assert.equal(header.firstElementChild.textContent,'Merge information is available in live mode');assert.equal(mergeHtml(),'<h2>Merge information is available in live mode</h2>');
+console.log('1149-AC8 scrub ok');
+DATA={throughput:p,live:false};LIVE=DATA.live;renderMerge();assert.equal(header.firstElementChild.textContent,'Merge information is available in live mode');assert(!mergeHtml().includes('31.5'));
+console.log('1149-AC8 snapshot ok');
+LIVE=true;renderMerge();includesAll(header.firstElementChild.textContent);includesAll(mergeHtml());
+const attack='<img src=x onerror=alert(1)>';
+for(const field of ['reason','window','error','spec']){
+ const bad={...p,in_flight:[{window:field==='window'?attack:'safe',specs:[field==='spec'?attack:'safe']}]};
+ if(field==='reason')bad.reason=attack;
+ apply({throughput:bad,throughput_error:field==='error'?attack:null});
+ assert(mergeHtml().includes('&lt;img'));assert(!mergeHtml().includes('<img'));
+ assert(header.title.startsWith('Shows finished specs')); // title is assigned as plain text, never HTML
+ console.log('1149-AC9 '+field+' ok');
+}
+connect();listeners.throughput({data:JSON.stringify({throughput:p,throughput_error:null,throughput_at:'instant'})});includesAll(header.firstElementChild.textContent);
+listeners.throughput({data:JSON.stringify({throughput:null,throughput_error:'stream boom',throughput_at:'later'})});unknown(header.firstElementChild.textContent);assert.equal(DATA.throughput_at,'later');assert(mergeHtml().includes('stream boom'));
+console.log('1149-AC6 sse-null ok');
+"""
+    js = js.replace("SENTINELS", json.dumps(THROUGHPUT_SENTINELS))
+    proc = subprocess.run(["node", "-e", js], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    print(proc.stdout, end="")
+
+
+def _write_digest(root, **kw):
+    data = dict(at=NOW.isoformat(), needs_you=[], health=[])
+    data.update(kw)
+    path = root / "state" / "owed-digest.json"
+    path.parent.mkdir(exist_ok=True)
+    path.write_text(json.dumps(data))
+    return path
+
+
+def test_digest_needs_you_exact_ask():
+    asks = ['please "act"\n<b>' + 'long ask ' * 50, "second action", "third action"]
+    rows = [dict(spec=f"L-spec-{i}", criterion="AC1", ask=ask,
+                 since="2026-10-15T09:00:00.123Z", route="ro-dsn-grant", owner="thinker")
+            for i, ask in enumerate(asks)]
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        _write_digest(root, needs_you=rows, extra="ignored")
+        out = om.compute([], [[r["spec"], st] for r, st in zip(rows, ["killed", "void", "dropped"])], NOW, root=root)
+        assert len(out["items"]) == out["needs_you"] == 3 and out["health"] == 0
+        for row in rows:
+            it, = [i for i in out["items"] if i["subjects"] == [row["spec"]]]
+            assert it["detail"] == row["ask"] and it["since"] == row["since"]
+            assert it["needs_you"] is True and it["owner"] == "operator" and it["kind"] == "owedop"
+        assert len({i["id"] for i in out["items"]}) == 3
+    print("owed digest needs_you exact ask ok")
+
+
+def test_digest_health_rows():
+    kinds = ["quarantined", "quarantined", "failed", "expired", "sweep-failing", "future-kind"]
+    rows = [dict(kind=k, spec=f"L-spec-{i}", criterion=f"AC{i}", since=_ago(3),
+                 **({"text": f"text {i}"} if i < 4 else {"reason": "reason fallback"} if i == 4 else {}))
+            for i, k in enumerate(kinds)]
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        _write_digest(root, health=rows)
+        states = [[r["spec"], "killed" if i == 0 else "shipped-owed-expired"] for i, r in enumerate(rows)]
+        first = om.compute([], [], NOW, root=root)
+        second = om.compute([], states, NOW, root=root)
+        assert first == second
+        assert first["needs_you"] == 0 and first["health"] == 5 and len(first["items"]) == 5
+        for kind in set(kinds):
+            it, = [i for i in first["items"] if i["id"] == "owedhealth:" + kind]
+            grouped = [r for r in rows if r["kind"] == kind]
+            assert it["sev"] == 1 and it["owner"] == "thinker" and it["needs_you"] is False
+            assert str(len(grouped)) in it["title"]
+            for row in grouped:
+                for text in (row["spec"], row["criterion"], row.get("text", row.get("reason", kind))):
+                    assert text in it["detail"]
+        # Groups are not capped at the legacy five rows.
+        many = [dict(rows[0], spec=f"L-spec-many-{i}") for i in range(20)]
+        _write_digest(root, health=many)
+        it, = om.compute([], [], NOW, root=root)["items"]
+        assert "20" in it["title"] and all(r["spec"] in it["detail"] for r in many)
+        _write_digest(root, health=rows, at=_ago(3))
+        stale = om.compute([], states, NOW, root=root)
+        assert stale["health"] == 6
+        assert {i["id"] for i in stale["items"]} == {i["id"] for i in first["items"]} | {"owed-digest-stale"}
+    print("owed digest health rows ok")
+
+
+def test_digest_missing_and_stale():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        cases = ["missing", "unreadable", "empty", "json", "list", "needs_you", "health",
+                 "at missing", "at invalid", "at null", "future", "stale", "no root"]
+        for case in cases:
+            path = _write_digest(root)
+            if case == "missing":
+                path.unlink()
+            elif case == "unreadable":
+                path.chmod(0o000)
+                if os.geteuid() == 0:
+                    path.chmod(0o600)
+                    print("owed digest missing and stale unreadable SKIPPED: process is root")
+                    continue
+            elif case in ("empty", "json", "list"):
+                path.write_text({"empty": "", "json": "{bad", "list": "[]"}[case])
+            elif case in ("needs_you", "health"):
+                _write_digest(root, **{case: {}})
+            elif case.startswith("at "):
+                data = json.loads(path.read_text())
+                if case == "at missing":
+                    del data["at"]
+                else:
+                    data["at"] = None if case == "at null" else "unparseable"
+                path.write_text(json.dumps(data))
+            elif case == "future":
+                _write_digest(root, at=(NOW + _dt.timedelta(minutes=10)).isoformat())
+            elif case == "stale":
+                _write_digest(root, at=(NOW - _dt.timedelta(minutes=121)).isoformat())
+            try:
+                it, = om.compute([], [], NOW, root=None if case == "no root" else root)["items"]
+                assert it["id"] == ("owed-digest-stale" if case == "stale" else "owed-digest-missing"), case
+                assert it["kind"] == "owedhealth" and it["owner"] == "executor" and it["sev"] == 1
+                assert it["needs_you"] is False and "owed-digest.json" in it["detail"]
+                assert ("no root" if case == "no root" else str(path)) in it["detail"]
+                assert ": " in it["detail"] and it["detail"].split(": ", 1)[1]
+                if case == "stale":
+                    assert "stale" in it["title"].lower()
+            finally:
+                if path.exists():
+                    path.chmod(0o600)
+            print(f"owed digest missing and stale {case} ok")
+        for minutes in (119, 120, -5):
+            _write_digest(root, at=(NOW - _dt.timedelta(minutes=minutes)).isoformat())
+            assert om.compute([], [], NOW, root=root)["items"] == []
+        _write_digest(root, at=_ago(3), needs_you=[dict(spec="L-spec-1", ask="still visible", since=_ago(4))])
+        out = om.compute([], [["L-spec-1", "shipped"]], NOW, root=root)
+        assert out["needs_you"] == 1 and out["health"] == 1
+        assert any(i["detail"] == "still visible" for i in out["items"])
+
+
+def test_no_owed_derivation_in_realm():
+    import re
+    assert not hasattr(om, "operator_action_owed")
+    assert not any(t.startswith("owed-") for t in om.WANT)
+    event = dict(type="owed-unobservable", ts=_ago(1), subject="L-spec-1", capability="operator-action")
+    assert om.reduce_event(event) is None
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        (root / "events").mkdir()
+        (root / "events" / "ledger.jsonl").write_text(json.dumps(event) + "\n")
+        rows = om.scan(root / "events", {})
+        out = om.compute(rows, [["L-spec-1", "shipped"]], NOW, root=root)
+        assert [i["id"] for i in out["items"]] == ["owed-digest-missing"]
+    allow = {
+        "realm_omens.py": "followed windowed owed- owed-sweep owed-sweeper owedop owedhealth owed-digest owed-digest-missing owed-digest-stale owed_digest_items",
+        "realm.py": "owed owed-ac owed-met owed_checks owed_close_rate owed_overdue owed-sweeper owed-digest",
+        "realm.html": "followed windowed unwindowed shadowed h-owed owed owed-ac owed-met owed-check owed-checks owed_checks owed_close_rate owed_overdue owed-due owed-evidence owed-expired owed-waiting owed-sweeper owedop owedhealth shipped-owed-due",
+    }
+    for filename, allowed in allow.items():
+        source = realm.PAGE.with_name(filename).read_text()
+        tokens = set(re.findall(r"[a-z0-9_-]*owed[a-z0-9_-]*", source))
+        assert tokens <= set(allowed.split()), (filename, tokens - set(allowed.split()))
+        forbidden = {"operator_action_owed", "owed-unobservable", "owed-failed", "owed-waived"}
+        if filename == "realm_omens.py":
+            forbidden |= {"owed-ac", "owed-met"}
+        assert not tokens & forbidden
+    print("no owed derivation in realm ok")
+
+
+def test_omens_model_rereads_digest():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        (root / "events").mkdir()
+        rows = [dict(spec=f"L-spec-{i}", ask=f"act {i}", since=_ago(3)) for i in range(3)]
+        _write_digest(root, needs_you=rows)
+        with mock.patch.object(realm, "ROOT", root), mock.patch.dict(realm._OM, master=({}, realm.time.monotonic())):
+            first = realm.omens_model([], NOW)
+            generation, cached = realm._OM["generation"], realm._OM["rows"]
+            _write_digest(root, at=_ago(0.01), needs_you=rows[1:])
+            second = realm.omens_model([], NOW)
+            assert first["needs_you"] == 3 and second["needs_you"] == 2
+            assert {i["detail"] for i in second["items"]} == {"act 1", "act 2"}
+            assert realm._OM["generation"] == generation and realm._OM["rows"] is cached
+    assert 'HUB.send("omens", omens_model(HUB.states))' in inspect.getsource(realm.heartbeat_forever)
+    handler = inspect.getsource(realm.Handler.do_GET)
+    assert 'u.path == "/api/omens"' in handler and 'self._json(omens_model(HUB.states))' in handler
+    print("omens_model rereads the digest ok")
+
+
+def test_owed_omens_render_by_section():
+    page = realm.PAGE.read_text()
+    names = ("computeOmens", "stateMap", "omensTopHtml", "omenFoot")
+    constants = ("SERVER_KINDS", "NO_SELFCHECK", "FINISHED_RE", "DEFAULT_OWNER", "OMEN_HELP", "NEXT_ACTION", "S", "esc", "toMs")
+    declarations = []
+    for name in constants:
+        start = page.index("const " + name + (" =" if name in ("esc", "toMs", "S") else "="))
+        end = page.index("\n};", start) + 3 if name in ("OMEN_HELP", "NEXT_ACTION") else page.index("\n", start)
+        declarations.append(page[start:end])
+    script = "\n".join(declarations + [_page_function(page, n) for n in names])
+    script += r'''
+const assert=require('node:assert/strict');
+let DATA={states:[['L-spec-1','shipped'],['L-spec-2','shipped']]},LIVE=true,REMOTE=false,stream=null,lastHeard=0;
+const CAP={},execBusy=()=>false,lastOf=()=>null,knownBug=()=>null,specCharter=()=>null,charterRows=()=>[];
+const laneSplit=()=>({close:[]}),renderOmens=()=>{},fixFor=()=>null,ownerFor=()=>null,sinceFor=a=>a.srvSince;
+const loopState=()=>({badge:{cls:'open',text:'open'}}),omenWhen=()=>'',hhmm=()=>'';
+const isOperator=o=>o==='operator'||o==='you';
+const ask='please "act"\n<b>'+('long action '.repeat(40));
+const OM=()=>({items:[
+ {id:'owedop:1',kind:'owedop',sev:1,owner:'operator',title:'operator action',detail:ask,subjects:['L-spec-1'],since:'2026-10-15T10:00:00Z'},
+ {id:'owedhealth:failed',kind:'owedhealth',sev:1,owner:'thinker',title:'1 failed check',detail:'health detail',subjects:['L-spec-2'],since:'2026-10-15T10:00:00Z'}]});
+S.now=Date.parse('2026-10-15T12:00:00Z');computeOmens();
+assert.equal(S.alarms.length,2);
+assert.equal(S.alarms.find(a=>a.kind==='owedop').needs,true);
+assert.equal(S.alarms.find(a=>a.kind==='owedhealth').needs,false);
+const html=omensTopHtml(),need=html.split('<h4>NEEDS YOU (1)</h4>')[1].split('<h4>SYSTEM HEALTH (1)</h4>')[0];
+const health=html.split('<h4>SYSTEM HEALTH (1)</h4>')[1];
+assert(need.includes(esc(ask)));assert(!need.includes('<b>'+('long action')));assert(!need.includes(ask));
+assert(health.includes('health detail'));assert(!need.includes('health detail'));assert(!health.includes(esc(ask)));
+for(const kind of ['owedop','owedhealth']){
+ assert(SERVER_KINDS.has(kind));assert(NO_SELFCHECK.has(kind));assert(DEFAULT_OWNER[kind]);assert(OMEN_HELP[kind]);
+ assert(!JSON.stringify(OMEN_HELP[kind]).includes('expired production checks'));
+}
+assert(NEXT_ACTION.owedop);assert(!NEXT_ACTION.owedop.toString().includes('expired production checks'));
+assert(!DEFAULT_OWNER.owedop.includes('expired production checks'));
+console.log('owed omens render by section ok');
+'''
+    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    print(proc.stdout, end="")
+
+
+def test_operator_header_rounding_units_zero_and_tooltips():
+    from html.parser import HTMLParser
+
+    class HeaderTiles(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.tiles = []
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            if tag == "div" and "stat" in attrs.get("class", "").split():
+                self.tiles.append(attrs)
+
+    page = realm.PAGE.read_text()
+    parser = HeaderTiles()
+    parser.feed(page)
+    assert len(parser.tiles) == 16
+    for tile in parser.tiles:
+        assert tile.get("title", "").endswith("."), tile
+    tiles = {tile["id"]: tile for tile in parser.tiles if "id" in tile}
+    assert "no builder has started" in tiles["h-shelf"]["title"]
+    assert '<span>ready, waiting for a builder</span>' in page
+    assert 'sh.firstElementChild.textContent=shelfText(S.shelf.size,oldest)' in page
+    helpers = page[page.index("// Format only CLI-provided metrics;"):page.index("function openPanel(")]
+    mobile = page[page.index("const M_TILES="):page.index("function mOmensHtml(")]
+    esc = next(line for line in page.splitlines() if line.startswith("const esc ="))
+    script = r"""
+const assert=require('node:assert/strict');
+let DATA={},LIVE=true,S={alarms:[]};
+const cells=TILES;
+for(const cell of Object.values(cells))Object.assign(cell,{firstElementChild:{textContent:''},className:'stat click'});
+cells.stuck={classList:{contains:()=>true},innerHTML:'No work stuck'};
+const $=id=>cells[id],rerenderPanel=()=>{};
+""" + helpers + "\n" + esc + "\n" + mobile + r"""
+for(const [value,want] of [[0,'0 min'],[0.49,'0 min'],[0.5,'1 min'],[31.5,'32 min'],[89,'89 min'],[89.99,'90 min'],[90,'1.5 h'],[120,'2 h'],[502.05,'8.4 h'],[2003.0333333333,'33.4 h'],[2880,'48 h'],[2880.01,'2 days'],[3024,'2.1 days'],[4320,'3 days']]){
+ assert.equal(humanWait(value),want);
+}
+for(const v of [null,undefined,'90',false,{},NaN,Infinity,-1])assert.equal(humanWait(v),'unavailable');
+const minute=60000;
+for(const [n,age,want] of [[0,0,'0 specs'],[1,0,'1 spec · oldest waiting 0 m'],[7,563*minute,'7 specs · oldest waiting 9 h 23 m'],[1,59.6*minute,'1 spec · oldest waiting 1 h'],[2,-minute,'2 specs · oldest waiting 0 m'],[2,2880*minute,'2 specs · oldest waiting 48 h'],[2,2963*minute,'2 specs · oldest waiting 2 d 1 h 23 m']])assert.equal(shelfText(n,age),want);
+DATA.throughput={queue_depth:84,in_flight:[],median_wait_min:502.05,p90_wait_min:2003.0333333333,merged_per_hour:1.56};
+const expected='84 specs waiting to merge · none merging right now · typical wait 8.4 h (slowest 1 in 10: 33.4 h) · about 1.6 merged per hour';
+renderMerge();assert.equal(cells['h-merge'].firstElementChild.textContent,expected);
+const panel=mergeHtml();for(const v of ['8.4 h','33.4 h','1.6'])assert(panel.includes(v));
+for(const raw of ['502.05','2003.0333333333','1.56']){assert(!mergeText().includes(raw));assert(!panel.includes(raw));}
+console.log('HEADER RENDER: MERGE: '+mergeText());
+console.log('HEADER RENDER: READY, WAITING FOR A BUILDER: '+shelfText(7,563*minute));
+const phone=mNowHtml();assert(phone.includes(expected));assert(phone.includes('ready, waiting for a builder'));assert(!phone.includes('<span>shelf</span>'));
+for(const title of [cells['h-merge'].title,cells['h-shelf'].title])assert(phone.includes(title));
+DATA.throughput={queue_depth:0,in_flight:[],median_wait_min:0,p90_wait_min:0,merged_per_hour:0};
+assert.equal(mergeText(),'0 specs waiting to merge · none merging right now · typical wait 0 min (slowest 1 in 10: 0 min) · about 0 merged per hour');
+DATA.throughput={queue_depth:1,in_flight:[{}],median_wait_min:90,p90_wait_min:3000,merged_per_hour:2};
+assert.equal(mergeText(),'1 spec waiting to merge · 1 batch merging right now · typical wait 1.5 h (slowest 1 in 10: 2.1 days) · about 2 merged per hour');
+for(const v of [-1,1.25,NaN,Infinity,'84',null]){DATA.throughput.queue_depth=v;assert.equal(mergeValues().queue,'?');}
+for(const v of [-1,NaN,Infinity,'1.56',null]){DATA.throughput.merged_per_hour=v;assert.equal(mergeValues().rate,'unavailable');}
+DATA.throughput=null;renderMerge();assert(mergeText().includes('merge queue unavailable'));assert(cells['h-merge'].title.startsWith('Shows finished specs'));
+LIVE=false;renderMerge();assert.equal(mergeText(),'Merge information is available in live mode');assert(cells['h-merge'].title.startsWith('Shows finished specs'));
+console.log('operator header: duration boundaries, rounding, singulars, zeros, unknowns, panel, phone, and tooltips ok');
+"""
+    script = script.replace("TILES", json.dumps(tiles), 1)
+    result = subprocess.run(["node", "-e", script], text=True, capture_output=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+    print(result.stdout, end="")
+
+
+if __name__ == "__main__":
+    for name, fn in list(globals().items()):
+        if name.startswith("test_"):
+            fn(); print("ok", name)
