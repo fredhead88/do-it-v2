@@ -65,7 +65,7 @@ import argparse, json, os, pathlib, re, shutil, signal, stat, subprocess, sys, t
 from datetime import datetime, timezone
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import fold, look, panes, scratch, tree_cleanup  # noqa: E402
+import fold, look, panes, scratch, tree_cleanup, disk_reaper  # noqa: E402
 
 ROOT = pathlib.Path(os.environ.get("DOIT_ROOT", str(pathlib.Path.home() / ".do-it")))
 
@@ -125,20 +125,20 @@ def _pid_refs(proc_root, pid):
             out.append(os.readlink(base / name))
         except PermissionError:
             raise
-        except OSError:
+        except (FileNotFoundError, ProcessLookupError):
             continue
     try:
         fds = os.listdir(base / "fd")
     except PermissionError:
         raise
-    except OSError:
+    except (FileNotFoundError, ProcessLookupError):
         fds = []
     for fdname in fds:
         try:
             out.append(os.readlink(base / "fd" / fdname))
         except PermissionError:
             raise
-        except OSError:
+        except (FileNotFoundError, ProcessLookupError):
             continue
     return out
 
@@ -936,9 +936,11 @@ def _psql_pg_fn():
 
 def run(root="/tmp", uid=None, min_age_min=120, dry_run=False, now=None, proc_root="/proc",
         scratch_root=None, events=None, kill_fn=None, state_path=None, pg_fn=None,
-        stop_fn=None, wait_s=10):
+        stop_fn=None, wait_s=10, var_tmp_root=None, session_roots=None,
+        session_state_path=None, log_path=None):
     """SD7's decision, applied to `root` (and, opted in, `scratch_root`), plus
-    R9's three additive surfaces. `scratch_root`/`events`/`kill_fn` do NOT
+    R9's additive surfaces. Explicit `var_tmp_root` and `session_roots` opt
+    in the age-limited disk surfaces; only the live resolver supplies defaults. `scratch_root`/`events`/`kill_fn` do NOT
     resolve a live default when `None` — that means the caller has not opted
     that surface in: `run()` skips it outright (no scratch scan,
     `reaped_worktrees == []`, `stopped_servers == []`, zero `/proc` scanning
@@ -990,13 +992,33 @@ def run(root="/tmp", uid=None, min_age_min=120, dry_run=False, now=None, proc_ro
             errors["servers"] = str(e)
 
     reaped_worktrees = []
+    worktree_rows = []
+    worktree_stats = {'other_uid_skipped': 0}
     if events is not None:
         try:
-            reaped_worktrees = tree_cleanup.reap_merged_specs(events, dry_run=dry_run)
+            with disk_reaper.worktree_pass(proc_root, stats=worktree_stats) as worktree_rows:
+                reaped_worktrees = tree_cleanup.reap_merged_specs(events, dry_run=dry_run)
         except tree_cleanup.GroupFailure as e:
             reaped_worktrees, errors["worktrees"] = e.reaped, str(e)
         except Exception as e:
             errors["worktrees"] = str(e)
+
+    var_tmp = {"removed": [], "kept": [], "freed_bytes": 0, "other_uid_skipped": 0}
+    session_logs = {"removed": [], "kept": [], "freed_bytes": 0, "ran": False, "other_uid_skipped": 0}
+    if var_tmp_root is not None:
+        try:
+            var_tmp = disk_reaper.reap_var_tmp(var_tmp_root, uid=uid, now=now,
+                proc_root=proc_root, recorded_refs=recorded_refs, dry_run=dry_run)
+        except Exception as exc:
+            errors["var_tmp"] = "undetermined: " + str(exc)
+    if session_roots is not None:
+        try:
+            session_logs = disk_reaper.reap_session_logs(session_roots, now=now,
+                proc_root=proc_root, dry_run=dry_run, state_path=session_state_path)
+            if session_logs.get("errors"):
+                errors["session_logs"] = session_logs["errors"]
+        except Exception as exc:
+            errors["session_logs"] = "undetermined: " + str(exc)
 
     # L-charter-0042/L-spec-0486, R15b: a grader/reviewer's own `grade/<spawn>/`
     # scratch copy, removed the instant its spawn is terminal — both `scratch_root`
@@ -1036,10 +1058,31 @@ def run(root="/tmp", uid=None, min_age_min=120, dry_run=False, now=None, proc_ro
                         {"used_bytes": quota["used_bytes"], "limit_bytes": quota["limit_bytes"],
                          "limit_source": quota["limit_source"]}, events)
 
-    return {"removed": removed, "kept": kept, "before_pct": before_pct, "after_pct": _disk_pct(root),
+    result = {"removed": removed, "kept": kept, "before_pct": before_pct, "after_pct": _disk_pct(root),
             "quota": quota, "mode": mode, "reaped_worktrees": reaped_worktrees,
             "stopped_servers": stopped_servers, "removed_scratch": removed_scratch,
-            "stopped_clusters": stopped_clusters, "dropped_databases": dropped_databases, "errors": errors}
+            "stopped_clusters": stopped_clusters, "dropped_databases": dropped_databases, "errors": errors,
+            "var_tmp": var_tmp, "session_logs": session_logs,
+            "worktree_rows": worktree_rows,
+            "other_uid_skipped": worktree_stats['other_uid_skipped'],
+            "freed_bytes_worktrees": sum(row["freed_bytes"] for row in worktree_rows)}
+    if log_path is not None and not dry_run:
+        _write_log(result, log_path, now)
+    return result
+
+
+def _write_log(result, log_path, now=None):
+    path = pathlib.Path(log_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    ts = (now or datetime.now(timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    pct = _disk_pct("/")
+    with path.open("a") as f:
+        f.write(f"{ts} /tmp {result['before_pct']}% -> {result['after_pct']}%\n")
+        surfaces = (("worktrees", len(result.get("worktree_rows", [])), result.get("freed_bytes_worktrees", 0)),)
+        surfaces += tuple((name, len(result.get(key, {}).get("removed", [])), result.get(key, {}).get("freed_bytes", 0))
+                          for name, key in (("var-tmp", "var_tmp"), ("session-logs", "session_logs")))
+        for name, count, size in surfaces:
+            f.write(f"{ts} {name} removed={count} freed_bytes={size} root_disk={pct}%\n")
 
 
 def reap_now(dry_run=False, min_age_min=120):
@@ -1050,7 +1093,8 @@ def reap_now(dry_run=False, min_age_min=120):
     when `root` itself cannot be scanned; the caller decides what that means."""
     return run(root="/tmp", uid=os.getuid(), min_age_min=min_age_min, dry_run=dry_run,
               proc_root="/proc", scratch_root=scratch.root(), events=fold.read_events(),
-              kill_fn=os.kill, pg_fn=_psql_pg_fn())
+              kill_fn=os.kill, pg_fn=_psql_pg_fn(), var_tmp_root="/var/tmp",
+              session_roots=[pathlib.Path.home() / ".claude/projects", pathlib.Path.home() / ".codex/sessions"])
 
 
 def main(argv=None):
@@ -1065,13 +1109,14 @@ def main(argv=None):
         sys.stderr.write(f"reap-tmp: could not scan /tmp: {e}\n")
         return 1
 
-    log_path = ROOT / "logs" / "tmp-reaper.log"
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    with open(log_path, "a") as f:
-        f.write(f"{ts} /tmp {result['before_pct']}% -> {result['after_pct']}%\n")
+    if not a.dry_run:
+        _write_log(result, ROOT / "logs" / "tmp-reaper.log")
     print(json.dumps({"removed": len(result["removed"]), "kept_count": len(result["kept"]),
-                      "kept": result["kept"], "errors": result.get("errors", {})}, sort_keys=True))
+                      "kept": result["kept"], "errors": result.get("errors", {}),
+                      "var_tmp": result.get("var_tmp", {}), "session_logs": result.get("session_logs", {}),
+                      "worktree_rows": result.get("worktree_rows", []),
+                      "other_uid_skipped": result.get("other_uid_skipped", 0),
+                      "freed_bytes_worktrees": result.get("freed_bytes_worktrees", 0)}, sort_keys=True))
     return 0
 
 

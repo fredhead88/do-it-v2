@@ -1958,6 +1958,11 @@ def _sh486(cwd, *cmd):
 
 
 R486 = pathlib.Path(tempfile.mkdtemp())
+proc486 = R486 / 'proc'
+proc486.mkdir()
+import disk_reaper as _dr486
+proc_context486 = _dr486.worktree_pass(proc486)
+proc_context486.__enter__()
 (R486 / "events").mkdir(parents=True)
 repo486 = R486 / "repos" / "l0486-tick-proj"
 repo486.mkdir(parents=True)
@@ -2019,6 +2024,7 @@ try:
         _tc486.reap_worktrees = real_reap_worktrees486
 finally:
     fold.ROOT, fold.EVENTS = saved_root486, saved_events486
+    proc_context486.__exit__(None, None, None)
 print("L0486-AC7 ok")
 
 # ══════════════════════════════════════════════════════════════════════════════

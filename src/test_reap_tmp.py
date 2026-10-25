@@ -294,7 +294,7 @@ try:
     rc = reap_tmp.main([])
     ok(rc == 0, "AC10: exits 0 on a normal run")
     lines = log_path.read_text().splitlines()
-    ok(len(lines) == 1, f"AC10: exactly one line appended: {lines}")
+    ok(len(lines) == 4, f"L1541 AC10: tmp plus three surface lines: {lines}")
     ok(re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z /tmp \d+% -> \d+%$", lines[0]),
        f"AC10: matches the retired script's own log format: {lines[0]!r}")
 
@@ -801,6 +801,9 @@ finally:
 # resolves its own live `pg_fn` (a fresh closure each call, so it is checked
 # for callability, never `==` identity, and popped before the rest of the
 # eight original keys are compared unchanged).
+for call1541 in calls22:
+    ok(call1541.pop("var_tmp_root") == "/var/tmp", "L1541 main opts in var/tmp")
+    ok(call1541.pop("session_roots") == [pathlib.Path.home() / ".claude/projects", pathlib.Path.home() / ".codex/sessions"], "L1541 main opts in session roots")
 pg_fn22_0 = calls22[0].pop("pg_fn", None)
 pg_fn22_1 = calls22[1].pop("pg_fn", None)
 ok(callable(pg_fn22_0) and callable(pg_fn22_1),
@@ -1545,3 +1548,101 @@ with tempfile.TemporaryDirectory(prefix="retired-negative-") as d1496:
     checked1496 = subprocess.run([str(pathlib.Path(__file__).resolve().parents[1] / "doit"), "retired", "check", "--crontab-file", str(fixture1496path)], capture_output=True, text=True)
     assert checked1496.returncode == 1, checked1496.stderr
     response1496("AC10-negative", dict(retired_line_present=True, exit_code=1))
+
+# L1541: opt-in roots, real log readback, isolated failures and dry CLI dispatch.
+import contextlib, hashlib
+from unittest.mock import patch
+import disk_reaper
+outcomes1541 = {}
+with tempfile.TemporaryDirectory(prefix='reap-surfaces-') as d1541:
+    base1541 = pathlib.Path(d1541)
+    tmp1541, var1541, sess1541, proc1541 = [base1541 / name for name in ('tmp', 'var', 'sessions', 'proc')]
+    for p1541 in (tmp1541, var1541, sess1541, proc1541):
+        p1541.mkdir()
+    old1541 = (NOW - timedelta(days=30)).timestamp()
+    for p1541 in (tmp1541 / 'old', var1541 / 'old', sess1541 / 'old.jsonl'):
+        p1541.write_text('1234')
+        os.utime(p1541, (old1541, old1541))
+    log1541 = base1541 / 'logs/tmp-reaper.log'
+    def pass1541(**kw):
+        return reap_tmp.run(root=tmp1541, uid=UID, now=NOW, proc_root=proc1541,
+                            events=[], var_tmp_root=var1541, session_roots=[sess1541],
+                            session_state_path=base1541 / 'state/date.json', log_path=log1541, **kw)
+    with patch.object(fold, 'ROOT', base1541), patch.object(fold, 'EVENTS', base1541 / 'events'):
+        before1541 = sorted(str(p) for p in base1541.rglob('*') if p.is_file())
+        with patch.object(reap_tmp, 'reap_now', side_effect=lambda **kw: pass1541(**kw)), patch.object(reap_tmp, 'ROOT', base1541):
+            with contextlib.redirect_stdout(__import__('io').StringIO()):
+                ok(reap_tmp.main(['--dry-run']) == 0, 'L1541 AC7 CLI dry run exits 0')
+        ok(before1541 == sorted(str(p) for p in base1541.rglob('*') if p.is_file()), 'L1541 CLI dry run writes/deletes nothing')
+        # Exercise the real shell entrypoint with its interpreter routed to a fixture resolver.
+        bin1541 = base1541 / 'bin'
+        bin1541.mkdir()
+        cli1541 = base1541 / 'cli.py'
+        cli1541.write_text(
+            "import sys,pathlib; sys.path.insert(0, str(pathlib.Path(sys.argv[1]).parent)); "
+            "import reap_tmp; from datetime import datetime,timezone; "
+            f"reap_tmp.ROOT=pathlib.Path({str(base1541)!r}); "
+            "reap_tmp.reap_now=lambda **kw: reap_tmp.run("
+            f"root={str(tmp1541)!r}, proc_root={str(proc1541)!r}, events=[], "
+            f"var_tmp_root={str(var1541)!r}, session_roots=[{str(sess1541)!r}], "
+            f"session_state_path={str(base1541 / 'state/date.json')!r}, "
+            f"now=datetime.fromisoformat({NOW.isoformat()!r}), **kw); "
+            "raise SystemExit(reap_tmp.main(sys.argv[2:]))")
+        import shlex
+        stub1541 = bin1541 / 'python3'
+        stub1541.write_text('#!/bin/sh\nif [ "$1" = "-c" ]; then exec /usr/bin/python3 "$@"; fi\nexec /usr/bin/python3 ' + shlex.quote(str(cli1541)) + ' "$@"\n')
+        stub1541.chmod(0o755)
+        before_cli1541 = {str(p): p.read_bytes() for p in base1541.rglob('*') if p.is_file()}
+        cli_result1541 = subprocess.run([str(pathlib.Path(__file__).resolve().parents[1] / 'doit'), 'reap-tmp', '--dry-run'],
+            capture_output=True, text=True, env=dict(os.environ, PATH=str(bin1541) + os.pathsep + os.environ['PATH']))
+        ok(cli_result1541.returncode == 0, f'L1541 real doit CLI dry run: {cli_result1541.stderr}')
+        ok(before_cli1541 == {str(p): p.read_bytes() for p in base1541.rglob('*') if p.is_file()}, 'L1541 real CLI preserves fixture bytes')
+        with patch.object(disk_reaper, 'reap_var_tmp', side_effect=OSError('listing root')):
+            result1541 = pass1541()
+        ok('var_tmp' in result1541['errors'] and not (tmp1541 / 'old').exists()
+           and not (sess1541 / 'old.jsonl').exists() and (var1541 / 'old').exists(), 'L1541 AC7 surface failure isolated')
+        outcomes1541['isolated_errors'] = result1541['errors']
+        result1541 = pass1541()
+        empty1541 = pass1541()
+        lines1541 = log1541.read_text().splitlines()
+        pattern1541 = r'^\S+ (worktrees|var-tmp|session-logs) removed=\d+ freed_bytes=\d+ root_disk=\d+(\.\d+)?%$'
+        matched1541 = [line for line in lines1541 if re.match(pattern1541, line)]
+        ok(len(matched1541) == 9, 'L1541 AC5 three surface log lines per pass')
+        ok(all('removed=0 freed_bytes=0' in line for line in matched1541[-3:]), 'L1541 AC5 zero-count lines written')
+        ok(sum(bool(re.match(r'^\S+ /tmp \d+% -> \d+%$', line)) for line in lines1541) == 3, 'L1541 AC5 existing tmp log survives')
+        outcomes1541['log_lines'] = matched1541
+        # Unreadable /proc holds candidates on each filesystem surface.
+        (var1541 / 'blocked').write_text('keep')
+        (sess1541 / 'blocked.jsonl').write_text('keep')
+        for p1541 in (var1541 / 'blocked', sess1541 / 'blocked.jsonl'):
+            os.utime(p1541, (old1541, old1541))
+        (proc1541 / str(os.getpid())).mkdir()
+        (base1541 / 'state/date.json').unlink()
+        with patch.object(reap_tmp, '_pid_refs', side_effect=PermissionError('proc')):
+            blocked1541 = pass1541()
+        ok((var1541 / 'blocked').exists() and (sess1541 / 'blocked.jsonl').exists(), 'L1541 AC7 unreadable proc retains both roots')
+        ok('undetermined' in blocked1541['var_tmp']['kept'][0]['reason']
+           and 'undetermined' in blocked1541['session_logs']['kept'][0]['reason'], 'L1541 AC7 reports undetermined')
+        real_lstat1541 = os.lstat
+        def other_uid1541(path, *args, **kwargs):
+            st = real_lstat1541(path, *args, **kwargs)
+            if pathlib.Path(path) == proc1541 / str(os.getpid()):
+                fields = list(st)
+                fields[4] = UID + 1
+                return os.stat_result(fields)
+            return st
+        ok(sum(p.exists() for p in (var1541 / 'blocked', sess1541 / 'blocked.jsonl')) == 2,
+           'L1541 other-uid pre-removal count=2')
+        with (patch.object(os, 'lstat', side_effect=other_uid1541),
+              patch.object(reap_tmp, '_pid_refs', side_effect=PermissionError('other uid')) as refs1541):
+            unblocked1541 = pass1541()
+        refs1541.assert_not_called()
+        ok(not (var1541 / 'blocked').exists() and not (sess1541 / 'blocked.jsonl').exists(),
+           'L1541 other-uid permission error permits both surfaces to reap')
+        ok(all(unblocked1541[s]['other_uid_skipped'] == 1 for s in ('var_tmp', 'session_logs')),
+           'L1541 other-uid process counts reach run result')
+        outcomes1541['other_uid_skipped'] = {s: unblocked1541[s]['other_uid_skipped']
+                                            for s in ('var_tmp', 'session_logs')}
+body1541 = json.dumps(outcomes1541, sort_keys=True)
+print(json.dumps(dict(url='cli://reap-tmp/AC5-AC7', status=0, body_sha256=hashlib.sha256(body1541.encode()).hexdigest(), body_excerpt=body1541)))
+print('L1541 AC5 AC7 pass')
