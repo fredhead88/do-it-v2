@@ -382,9 +382,17 @@ def codex_quota_refusal(quota):
     return None
 
 
+# OpenAI Structured Outputs subset (retrieved 2026-10-25):
+# https://developers.openai.com/api/docs/guides/structured-outputs#supported-schemas
+# Drop unsupported composition/structural keywords and the legacy exclusions.
+# uniqueItems is also confirmed by recorded Codex invalid_json_schema errors.
+# Keep supported pattern, numeric bounds and minItems/maxItems; the extra
+# fine-tuned-model exclusions do not apply to our Codex models. The untouched
+# original remains the card validator, including constraints removed here.
 _STRICT_DROP = ("if", "then", "else", "not", "allOf", "dependentRequired", "dependentSchemas",
                 "dependencies", "patternProperties", "default", "$comment", "examples",
-                "unevaluatedProperties", "propertyNames", "contains", "minContains", "maxContains")
+                "unevaluatedProperties", "propertyNames", "contains", "minContains", "maxContains",
+                "uniqueItems", "minProperties", "maxProperties", "unevaluatedItems")
 
 
 def strict_schema(s):
