@@ -1165,25 +1165,24 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
     actions_minutes = 0
     verdicts, verification_scopes, candidate_scopes = [], [], {}
     conflicted_all = {}
+    fingerprint_failed = rechain.FailedFingerprints()
 
     def prepare(batch):
+        batch = [e for e in batch if e[0] not in fingerprint_failed.specs]
         candidate, kept, clashes = build_candidate(repo, window, base, batch)
         migration_kept = [s for s in kept if s in migrations]
         if migration_kept:
             try:
-                candidate = rechain.fingerprint(repo, candidate, window, ev=ev)
+                candidate = rechain.fingerprint(repo, candidate, window, ev=ev, project=project)
                 git(repo, "update-ref", f"refs/heads/window/{window}", candidate)
             except (ValueError, OSError, subprocess.SubprocessError) as exc:
                 import grading_env
                 if grading_env.failure_kind(str(exc)) == "infra":
                     raise
-                for s in migration_kept:
-                    ev("rechain-declined", s, window=window, why="final-tree fingerprint or private PG failed")
-                    clashes[s] = [rechain.FINGERPRINT]
+                fingerprint_failed.decline(migration_kept, exc, window, ev)
                 rest = [e for e in batch if e[0] not in migrations]
                 candidate, kept, more = build_candidate(repo, window, base, rest)
                 clashes.update(more)
-                print(f"gate-window: excluded {len(migration_kept)} migration(s), reason=fingerprint-failed")
         if kept:
             if rebased:
                 # Identical parents, message and second-resolution timestamps can
@@ -1328,8 +1327,8 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
     note_conflicts(conflicts)
     if not merged:
         ev("window-opened", window, specs=[s for s, _, _ in entries], base=base[:12], fixes_base=fixes_base)
-        print("gate-window: every branch conflicts — nothing to verify")
-        escalate(window, "every branch in the window conflicts; builder re-dispatch via the merge-conflict flow", "undetermined")
+        print("gate-window: " + fingerprint_failed.why("every branch conflicts — nothing to verify"))
+        escalate(window, fingerprint_failed.why("every branch in the window conflicts; builder re-dispatch via the merge-conflict flow"), "undetermined")
         return 2
     live = list(merged)
     while True:
@@ -1342,7 +1341,7 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
         if runs == 1 and len(live) > 1 and len(unattributed) == len(res["nodes"]):
             chosen = bisect_window(window, live, prepare_half, judge_half, drop_specs, note_conflicts)
             if chosen is None:
-                escalate(window, f"window {window} bisection found no advanceable candidate; dropped specs={json.dumps(dropped)}; master unmoved", "red")
+                escalate(window, fingerprint_failed.why(f"window {window} bisection found no advanceable candidate; dropped specs={json.dumps(dropped)}; master unmoved"), "red")
                 return 2
             cand, live = chosen
             pending = [s for s, _, _ in entries if s not in live and s not in dropped]
@@ -1373,7 +1372,7 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
         cand, live, more = prepare(rest)
         note_conflicts(more)
         if not live:
-            escalate(window, "remaining merges conflict after the drop", "undetermined")
+            escalate(window, fingerprint_failed.why("remaining merges conflict after the drop"), "undetermined")
             return 2
     rechained = set()
     if enabled:

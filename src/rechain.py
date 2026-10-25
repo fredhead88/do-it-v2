@@ -14,6 +14,8 @@ import subprocess
 import tempfile
 
 import fold
+import grading_env
+import prod_runner
 import resources
 
 VERSIONS = "api/alembic_supabase/versions/"
@@ -312,9 +314,62 @@ def child_env():
                     or "SUPABASE_DB" in k or k in ("AS_LOCAL_PG_ADMIN", "SCRATCH_PG_URL"))}
 
 
-def fingerprint(repo, candidate, window, *, ev):
-    """Regenerate once, discard all output on failure, always stop and remove."""
+def stderr_tail(raw, limit=5):
+    """Keep only bounded, redacted diagnostics from an untrusted child."""
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", errors="replace")
+    lines = [line for line in (raw or "").splitlines() if line.strip()]
+    return [prod_runner.redact(line)[:300] for line in lines[-limit:]] if limit > 0 else []
+
+
+class FingerprintFailed(ValueError):
+    def __init__(self, message, stage, raw=None):
+        super().__init__(message)
+        self.stage = stage
+        self.stderr_tail = stderr_tail(raw)
+
+
+class FailedFingerprints:
+    """Pending specs excluded for tool failure, separate from merge conflicts."""
+    def __init__(self):
+        self.specs = set()
+
+    def decline(self, specs, exc, window, ev):
+        fields = dict(stage=exc.stage, stderr_tail=exc.stderr_tail) if isinstance(exc, FingerprintFailed) else {}
+        for spec in specs:
+            ev("rechain-declined", spec, window=window,
+               why="final-tree fingerprint or private PG failed", **fields)
+        self.specs.update(specs)
+        print("gate-window: re-chain failed for " + ", ".join(specs) + f" ({len(specs)} migration(s) excluded)")
+
+    def why(self, fallback):
+        return "re-chain failed for " + ", ".join(sorted(self.specs)) + "; specs remain pending" if self.specs else fallback
+
+
+def fingerprint(repo, candidate, window, *, ev, project=None):
+    """Regenerate once with project Python; always stop and remove resources."""
+    try:
+        return _fingerprint(repo, candidate, window, ev=ev, project=project)
+    except FingerprintFailed:
+        raise
+    except (ValueError, OSError, subprocess.SubprocessError) as exc:
+        raise FingerprintFailed(prod_runner.redact(str(exc)), "worktree", getattr(exc, "stderr", None)) from None
+
+
+def _fingerprint(repo, candidate, window, *, ev, project):
     env = child_env()
+    try:
+        if project is not None:
+            if not grading_env._toml_path().is_file():
+                raise ValueError("project grading configuration is missing")
+            venv = grading_env.project_venv(project)
+            if venv:
+                bindir = pathlib.Path(venv) / "bin"
+                if not bindir.is_dir():
+                    raise ValueError("project venv bin is missing")
+                env["PATH"] = str(bindir) + os.pathsep + env.get("PATH", os.defpath)
+    except (ValueError, OSError, TypeError):
+        raise FingerprintFailed("fingerprint regeneration failed: project environment unavailable", "worktree") from None
     override = os.environ.get("DOIT_RECHAIN_PG_CMD")
     pgcmd = shlex.split(override) if override else ["bash", str(pathlib.Path(__file__).resolve().parent.parent / "scripts/private-pg.sh")]
     parent = fold.ROOT / "worktrees"
@@ -325,23 +380,26 @@ def fingerprint(repo, candidate, window, *, ev):
     try:
         pg = pathlib.Path(tempfile.mkdtemp(prefix="doit-rechain-pg-"))
         pg_row = resources.record("scratch-db", str(pg), lane="rechain", subject=window)
+        stage = "worktree"
         try:
             git(repo, "worktree", "add", "--detach", str(wt), candidate)
+            stage = "pg-start"
             started = subprocess.run([*pgcmd, str(pg), "loopback"], env=env, cwd=wt,
                                      capture_output=True, timeout=120, text=True)
             if started.returncode:
-                raise ValueError("private PG start failed")
+                raise FingerprintFailed("private PG start failed", stage, started.stderr)
             m = re.search(r"^ADMIN_DSN='(postgresql://[^'\n]+@127\.0\.0\.1:\d+/postgres)'$", started.stdout, re.M)
             if not m:
-                raise ValueError("private PG did not return a loopback admin endpoint")
+                raise FingerprintFailed("private PG did not return a loopback admin endpoint", stage, started.stderr)
             env["AS_LOCAL_PG_ADMIN"] = m.group(1)
+            stage = "fingerprint"
             cmd = shlex.split(os.environ.get("DOIT_RECHAIN_FINGERPRINT_CMD", "bash scripts/refresh_genesis_fingerprint.sh"))
             target = wt / FINGERPRINT
             target.unlink(missing_ok=True)
             result = subprocess.run([*cmd, "--out", str(target)], cwd=wt, env=env,
                                     capture_output=True, timeout=600)
             if result.returncode or not target.is_file():
-                raise ValueError("fingerprint regeneration failed")
+                raise FingerprintFailed("fingerprint regeneration failed", stage, result.stderr)
             content = target.read_bytes()
             if content == blob(repo, candidate, FINGERPRINT):
                 return candidate
@@ -349,6 +407,10 @@ def fingerprint(repo, candidate, window, *, ev):
             sha = out(repo, *IDENT, "commit-tree", tree, "-p", candidate, "-m", "window: regenerate genesis fingerprint")
             ev("rechain-fingerprint", window, sha=sha, fingerprint_sha256=hashlib.sha256(content).hexdigest())
             return sha
+        except FingerprintFailed:
+            raise
+        except (ValueError, OSError, subprocess.SubprocessError) as exc:
+            raise FingerprintFailed(prod_runner.redact(str(exc)), stage, getattr(exc, "stderr", None)) from None
         finally:
             stop = [*pgcmd, str(pg), "stop"] if override else ["/usr/lib/postgresql/17/bin/pg_ctl", "-w", "-D", str(pg / "data"), "-m", "fast", "stop"]
             stopped = subprocess.run(stop, env=child_env(), capture_output=True, timeout=30)

@@ -77,6 +77,9 @@ class Fx:
         self.tempdir = tempfile.TemporaryDirectory(prefix="wg-")
         atexit.register(self.tempdir.cleanup)
         self.tmp = pathlib.Path(self.tempdir.name)
+        config = self.tmp / "grading.toml"
+        config.write_text("")
+        os.environ["DOIT_GRADING_TOML"] = str(config)
         self.root = self.tmp / "r"
         self.origin = self.tmp / "o.git"
         sh(["init", "--bare", str(self.origin)], self.tmp)
@@ -782,6 +785,64 @@ def rechain_checks():
         return fx, sf
 
     cases = ["green", "no-cap", "owner-X", "owner-B", "second-red", "fingerprint-fail", "off", "unset"]
+    # L-spec-1534: the actual child fails on each prepare entry point.
+    from contextlib import redirect_stdout
+    from io import StringIO
+    for scenario in ("initial", "partial", "rebuilt", "bisect", "bisect-none"):
+        fx, sf = fixture(["a"], extra=scenario != "initial")
+        env = sf.scripts(fx.tmp)
+        env["DOIT_WINDOW_RECHAIN"] = "on"
+        script = fx.tmp / "fp.py"
+        original = script.read_text()
+        fail_on = 1 if scenario in ("initial", "partial") else 2
+        script.write_text('import pathlib, sys\n'
+                          'counter = pathlib.Path(' + repr(str(fx.tmp / "fp-count")) + ')\n'
+                          'count = int(counter.read_text()) + 1 if counter.exists() else 1\n'
+                          'counter.write_text(str(count))\n'
+                          'if count == ' + str(fail_on) + ':\n'
+                          '    sys.stderr.write("fixture fingerprint failed\\n")\n'
+                          '    sys.exit(2)\n' + original)
+        if scenario == "rebuilt":
+            fx.run_n(1, 1, red(["api/tests/test_x.py::test_x"]))
+        elif scenario.startswith("bisect"):
+            fx.run_n(1, 1, red(["unowned.py::test_unknown"]))
+            fx.run_n(2, 1 if scenario == "bisect-none" else 0,
+                     red(["api/tests/test_x.py::test_x"]) if scenario == "bisect-none" else GREEN)
+        else:
+            fx.run_n(1, 0, GREEN)
+        stdout = StringIO()
+        with patch.dict(os.environ, env), redirect_stdout(stdout):
+            rc = fx.go()
+        declined = [e for e in fx.events("rechain-declined") if e["subject"] == "a"]
+        forbidden = [e for e in fx.events() if e["subject"] == "a" and
+                     e["type"] in ("merge-conflict", "window-dropped", "shipped", "rejected-criterion")]
+        expected_rc = 1 if scenario in ("partial", "bisect") else 2
+        check(rc == expected_rc and len(declined) == 1 and not forbidden and
+              declined[0].get("stderr_tail") == ["fixture fingerprint failed"] and
+              declined[0].get("stage") == "fingerprint" and
+              declined[0]["why"] == "final-tree fingerprint or private PG failed" and
+              "re-chain failed for a" in stdout.getvalue(), "rechain-failed is not a conflict " + scenario)
+        if rc == 2:
+            why = fx.events("escalation-blocking")[-1]["why"]
+            check(why.startswith("re-chain failed") and "conflicts" not in why and
+                  rechain.FINGERPRINT not in why, "rechain failure escalation " + scenario)
+        else:
+            check([e["subject"] for e in fx.events("shipped")] == ["X"], "rechain partial ships plain " + scenario)
+        check("a" in [row["spec"] for row in merge_queue.queue(fold.read_events())],
+              "rechain failure stays queued " + scenario)
+        if scenario.startswith("bisect"):
+            check(bool(fx.events("window-bisected")), "rechain failure reached half " + scenario)
+        response("1534-AC4-AC5", dict(scenario=scenario, exit=rc, stage="fingerprint",
+                                      stderr_tail=["fixture fingerprint failed"], conflicts=0,
+                                      migration_outcomes=0, pending=True))
+        fx.tempdir.cleanup()
+
+    fx = Fx({"A": "base.txt", "B": "base.txt"})
+    fx.run_n(1, 0, GREEN)
+    check(fx.go() == 1 and any(e["subject"] == "B" and "base.txt" in e["files"]
+                              for e in fx.events("merge-conflict")), "1534 genuine conflict stays conflict")
+    response("1534-AC5-conflict", dict(real_conflict=True, files=["base.txt"]))
+    fx.tempdir.cleanup()
     for case in cases:
         names = ["a", "b", "c", "d"] if case == "no-cap" else ["a", "b", "c"] if case == "green" else ["a", "b"]
         fx, sf = fixture(names, extra=case in ("no-cap", "owner-X", "owner-B", "second-red", "fingerprint-fail"))
