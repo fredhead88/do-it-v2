@@ -1,4 +1,7 @@
 """Cached/reference byte equivalence, incremental parsing, and shared cache safety."""
+from contextlib import closing
+import copy
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -6,14 +9,19 @@ import subprocess
 import sqlite3
 import sys
 import tempfile
+import tracemalloc
 import unittest
 from unittest.mock import patch
 
 # Set before importing fold; tests never inspect the operator's root.
 ROOT = Path(tempfile.mkdtemp(prefix='ledger-cache-test-'))
 os.environ['DOIT_ROOT'] = str(ROOT)
+os.environ['V4_LEDGER_DIR'] = str(ROOT / 'v4-ledger')
+os.environ['V4_INBOX_DIR'] = str(ROOT / 'v4-inbox')
 import fold
 import ledger_cache
+import ledger_compact
+import brief
 
 
 class CacheTests(unittest.TestCase):
@@ -22,7 +30,7 @@ class CacheTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.events = self.root / 'events'
         self.events.mkdir()
-        self.patch = patch.multiple(fold, ROOT=self.root, EVENTS=self.events, PROJECT=None)
+        self.patch = patch.multiple(fold, ROOT=self.root, EVENTS=self.events, SESSIONS=self.root / 'sessions', PROJECT=None)
         self.patch.start()
         self.addCleanup(self.patch.stop)
         self.addCleanup(self.tmp.cleanup)
@@ -38,6 +46,178 @@ class CacheTests(unittest.TestCase):
         self.assertEqual(json.dumps(actual, ensure_ascii=False), json.dumps(expected, ensure_ascii=False))
         self.assertEqual(json.dumps(fold.APPLIED), applied)
         return actual
+
+    def test_projection_cached_equals_reference_and_stored_bytes(self):
+        a, b = 'L-executor-01.jsonl', 'L-tick-01.jsonl'
+        old = dict(ts='2026-01-01', type='tree-reaped', subject='L-charter-01',
+                   retained=['é' * 100] * 400, retained_reason=['reason' * 100] * 400,
+                   actor='forged', _src='forged')
+        self.write(a, [old, dict(old, ts='2026-01-02', retained_count=7)])
+        self.write(b, [dict(ts='2026-01-03', type='tick', subject='tick', recorded_reap=['old']),
+                       dict(ts='2026-01-04', type='observed', subject='ordinary')])
+
+        def check():
+            events = self.same()
+            for e in events:
+                if e['type'] == 'tree-reaped':
+                    self.assertNotIn('retained', e)
+                    self.assertNotIn('retained_reason', e)
+                    self.assertIsInstance(e['retained_count'], int)
+                    self.assertEqual(e['actor'], 'executor')
+                    self.assertNotEqual(e['_src'], 'forged')
+                if e['type'] == 'tick':
+                    self.assertNotIn('recorded_reap', e)
+            cache = next((self.root / 'cache').glob('*.sqlite3'))
+            with closing(sqlite3.connect(cache)) as db, db:
+                stored = []
+                for data, digest in db.execute('SELECT data,sha FROM chunks ORDER BY name,seq'):
+                    self.assertNotIn(b'retained_reason', data)
+                    stored.extend(ledger_cache._unpack(data, digest))
+                for data, digest in db.execute('SELECT tail,tail_sha FROM files ORDER BY name'):
+                    self.assertNotIn(b'retained_reason', data)
+                    stored.extend(ledger_cache._unpack(data, digest))
+            self.assertEqual(sorted(stored, key=lambda e: e['_src']),
+                             sorted(events, key=lambda e: e['_src']))
+            return cache
+
+        cache = check()
+        # New-shape records without a retained list pass through unchanged.
+        self.write(a, [dict(ts='2026-01-05', type='tree-reaped', subject='L-charter-01',
+                            retained_count=3)], 'a')
+        check()
+        # Repair an old byte and grow on the same inode.
+        with (self.events / a).open('r+b') as stream:
+            data = stream.read().replace(b'2026-01-01', b'2026-01-06', 1)
+            stream.seek(0)
+            stream.write(data + (json.dumps(old) + '\n').encode())
+        check()
+        data, digest = ledger_cache._pack([old])
+        with closing(sqlite3.connect(cache)) as db, db:
+            db.execute('PRAGMA user_version=2')
+            db.execute('UPDATE chunks SET data=?,sha=?', (data, digest))
+        check()
+        with closing(sqlite3.connect(cache)) as db, db:
+            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 3)
+
+    def test_folded_state_unchanged_by_projection(self):
+        cid, sid = 'L-charter-9901', 'L-spec-9901'
+        def event(kind, day, subject=cid, **fields):
+            return dict(type=kind, ts=f'2026-01-{day:02}T00:00:00+00:00', subject=subject, **fields)
+        self.write('L-operator-01.jsonl', [event('charter-filed', 1, title='Fixture')])
+        self.write('L-planner-01.jsonl', [event('cut-written', 2), event('l1-complete', 3)])
+        self.write('L-spec-writer-01.jsonl', [event('spec-written', 4, sid, charter=cid)])
+        self.write('L-builder-01.jsonl', [event('build-started', 5, sid), event('build-done', 6, sid)])
+        self.write('L-grader-01.jsonl', [event('verdict', 7, sid, confirmed=True)])
+        self.write('L-reviewer-01.jsonl', [event('review', 8, sid, depth='gates-only')])
+        self.write('L-executor-01.jsonl', [event('shipped', 9, sid),
+            event('sweep-fixpoint', 10),
+            event('tree-reaped', 11, retained=['branch'], retained_reason=['branch: kept'])])
+        self.write('L-charter-reviewer-01.jsonl', [event('charter-review-complete', 10)])
+        self.write('L-tick-01.jsonl', [event('tick', 12, recorded_reap=['old']),
+                                     event('charter-closed', 13, reason='done')])
+
+        def projected_state(state):
+            # Normalize only embedded event dictionaries, never derived fields.
+            specs, charters, ignored, by_subject = copy.deepcopy(state)
+            for row in list(specs.values()) + list(charters.values()):
+                row['evs'] = [ledger_compact.compact(e) for e in row['evs']]
+            ignored = [ledger_compact.compact(e) for e in ignored]
+            by_subject = {k: [ledger_compact.compact(e) for e in evs] for k, evs in by_subject.items()}
+            return json.dumps((specs, charters, ignored, by_subject), default=str, sort_keys=True)
+
+        with patch.object(fold, 'NOW', fold.ts('2026-01-14T00:00:00+00:00')):
+            projected = self.same()
+            projected_fold = fold.fold(projected)
+            board = fold.render(projected, *projected_fold)
+            with patch.object(ledger_compact, 'PROJECTION', {}):
+                # A separate cache forces both parsers to actually see the table.
+                with patch.object(fold, 'ROOT', self.root / 'unprojected'):
+                    raw = self.same()
+                raw_fold = fold.fold(raw)
+                raw_board = fold.render(raw, *raw_fold)
+            self.assertEqual(projected_state(projected_fold), projected_state(raw_fold))
+            self.assertEqual(board, raw_board)
+            self.assertEqual(projected_fold[0][sid]['state'], 'accepted')
+            self.assertEqual(projected_fold[1][cid]['state'], 'L2-complete')
+            self.assertEqual(projected_fold[1][cid]['owed'], 0)
+            self.assertIn('tree-reaped', dict(fold.CHARTER_STAGE_EVENTS))
+            self.assertEqual(fold.charter_stage_clock(projected, cid, projected_fold[0]),
+                             fold.charter_stage_clock(raw, cid, raw_fold[0]))
+            self.assertEqual(brief._newest(projected, 'tree-reaped')['ts'],
+                             brief._newest(raw, 'tree-reaped')['ts'])
+            self.assertTrue(any('retained' in e for e in raw))
+
+    def test_projected_read_memory_scales_with_kept_bytes(self):
+        rows = [dict(ts=f'{i:04}', type='tree-reaped', subject='L-charter-01',
+                     retained=['a' * 1024] * 40, retained_reason=['b' * 1024] * 40)
+                for i in range(300)]
+        removed_size = sum(len(json.dumps({k: e[k] for k in ('retained', 'retained_reason')})) for e in rows)
+        self.write('L-executor-01.jsonl', rows)
+        del rows
+        fold.read_events()
+
+        def peak():
+            tracemalloc.start()
+            try:
+                events = fold.read_events()
+                high = tracemalloc.get_traced_memory()[1]
+                self.assertEqual(len(events), 300)
+                return high
+            finally:
+                tracemalloc.stop()
+
+        self.assertLess(peak(), removed_size * .25)
+        cache = next((self.root / 'cache').glob('*.sqlite3'))
+        self.assertLess(cache.stat().st_size, (self.events / 'L-executor-01.jsonl').stat().st_size * .05)
+        with patch.object(ledger_compact, 'PROJECTION', {}), patch.object(fold, 'ROOT', self.root / 'control'):
+            fold.read_events()
+            self.assertGreater(peak(), removed_size * .25)
+
+    def test_append_streams_prefix_and_still_detects_rewrite(self):
+        path = self.events / 'L-executor-01.jsonl'
+        self.write(path.name, [dict(ts='1', type='tree-reaped', subject='L-charter-01',
+                                    retained=['x' * 1024] * (16 * 1024))])
+        old = ledger_cache._file(path, 'executor', None)
+        fold.read_events()
+        self.write(path.name, [dict(ts='2', type='observed', subject='next')], 'a')
+        real_file = ledger_cache._file
+        peaks = []
+        def measured(*args):
+            tracemalloc.start()
+            try:
+                result = real_file(*args)
+                peaks.append(tracemalloc.get_traced_memory()[1])
+                self.assertTrue(result['append'])
+                return result
+            finally:
+                tracemalloc.stop()
+        with patch.object(ledger_cache, 'PREFIX_CHUNK', 64 * 1024), \
+             patch.object(ledger_cache, '_parse', wraps=ledger_cache._parse) as parse, \
+             patch.object(ledger_cache, '_file', side_effect=measured):
+            actual = fold.read_events()
+            self.assertEqual(parse.call_count, 2)
+        self.assertEqual(len(peaks), 1)
+        self.assertLess(peaks[0], 4 * 1024 * 1024)
+        self.assertEqual(json.dumps(actual, ensure_ascii=False),
+                         json.dumps(fold.read_events(use_cache=False), ensure_ascii=False))
+        # The changed byte is deep inside the old prefix, away from the tail.
+        with path.open('r+b') as stream:
+            stream.seek(old['meta'][2] // 2)
+            self.assertEqual(stream.read(1), b'x')
+            stream.seek(-1, 1)
+            stream.write(b'y')
+        self.write(path.name, [dict(ts='3', type='observed', subject='repair')], 'a')
+        repaired = real_file(path, 'executor', old)
+        self.assertFalse(repaired['append'])
+        self.assertEqual(repaired['events'] + repaired['tail'], fold._read_events_uncached())
+        self.assertEqual(repaired['digest'], hashlib.sha256(path.read_bytes()).digest())
+        self.same()
+        st = path.stat()
+        changed = type('ChangedStat', (), dict(st_dev=st.st_dev, st_ino=st.st_ino,
+            st_size=st.st_size + 1, st_mtime_ns=st.st_mtime_ns, st_ctime_ns=st.st_ctime_ns))()
+        with patch.object(Path, 'stat', side_effect=[st, changed]):
+            with self.assertRaisesRegex(OSError, 'ledger changed during cache read'):
+                real_file(path, 'executor', repaired)
 
     def test_reference_equivalence_through_repairs_and_tails(self):
         a, b = 'L-builder-01.jsonl', 'L-executor-01.jsonl'
@@ -79,7 +259,7 @@ class CacheTests(unittest.TestCase):
         cache = next((self.root / 'cache').glob('*.sqlite3'))
         cache.write_bytes(b'corrupt cache')
         self.same()
-        with sqlite3.connect(cache) as db:
+        with closing(sqlite3.connect(cache)) as db, db:
             db.execute("UPDATE chunks SET data=? WHERE rowid=(SELECT min(rowid) FROM chunks)", (b'broken chunk',))
         self.same()
 

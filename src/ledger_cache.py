@@ -15,8 +15,11 @@ import pickle
 import sqlite3
 import sys
 
-VERSION = 2
+import ledger_compact
+
+VERSION = 3
 CHUNK_EVENTS = 256
+PREFIX_CHUNK = 8 * 1024 * 1024
 
 
 class Invalid(ValueError):
@@ -40,6 +43,13 @@ def _unpack(data, digest):
         value = _DataOnly(io.BytesIO(data)).load()
         if not isinstance(value, list) or any(not isinstance(e, dict) for e in value):
             raise Invalid('cache schema')
+        # Pickle shares strings within a chunk, but not across chunks. Reuse
+        # JSON keys and repeated labels without changing order or values.
+        labels = {'type', 'subject', 'project', 'role', 'actor'}
+        for n, event in enumerate(value):
+            value[n] = {sys.intern(k) if isinstance(k, str) else k:
+                        sys.intern(v) if k in labels and isinstance(v, str) else v
+                        for k, v in event.items()}
         return value
     except (EOFError, ValueError, TypeError, pickle.UnpicklingError) as exc:
         raise Invalid('cache payload') from exc
@@ -68,7 +78,7 @@ def _parse(data, name, actor, first_line, *, with_count=False):
         if not line.strip():
             continue
         try:
-            event = json.loads(line, object_hook=_keys)
+            event = ledger_compact.compact(json.loads(line, object_hook=_keys))
         except json.JSONDecodeError:
             continue
         event['actor'], event['_src'] = actor, f'{name}:{n}'
@@ -79,20 +89,36 @@ def _parse(data, name, actor, first_line, *, with_count=False):
 def _file(path, actor, old):
     st = path.stat()
     meta = _meta(st)
+    append = False
+    digest = hashlib.sha256()
     with path.open('rb') as fh:
-        data = fh.read(st.st_size)
+        if old is not None and meta[:2] == old['meta'][:2] and st.st_size > old['meta'][2]:
+            remaining = old['meta'][2]
+            while remaining:
+                chunk = fh.read(min(PREFIX_CHUNK, remaining))
+                if not chunk:
+                    break
+                digest.update(chunk)
+                remaining -= len(chunk)
+            append = remaining == 0 and digest.digest() == old['digest']
+        # Verify every old byte, including an unterminated tail, before using
+        # the suffix. A rewrite-and-grow must take the full reparse path.
+        start, first_line = (old['offset'], old['line']) if append else (0, 1)
+        fh.seek(start)
+        data = fh.read(st.st_size - start)
+        if append:
+            digest.update(memoryview(data)[old['meta'][2] - start:])
+        else:
+            digest = hashlib.sha256(data)
         if _meta(os.fstat(fh.fileno())) != meta or _meta(path.stat()) != meta:
             raise OSError('ledger changed during cache read')
-    append = (old is not None and meta[:2] == old['meta'][:2] and len(data) > old['meta'][2]
-              and hashlib.sha256(memoryview(data)[:old['meta'][2]]).digest() == old['digest'])
     # Verify the ENTIRE old prefix: a historical repair may rewrite AND grow
     # a file in place. Offset/line exclude any unterminated final line, even
     # if that line happened to parse as valid JSON on the previous read.
-    start, first_line = (old['offset'], old['line']) if append else (0, 1)
     end = data.rfind(b'\n') + 1
-    complete = data[start:end]
+    complete = data[:end]
     events, line = _parse(complete, path.name, actor, first_line, with_count=True)
-    return dict(meta=meta, digest=hashlib.sha256(data).digest(), offset=end, line=line,
+    return dict(meta=meta, digest=digest.digest(), offset=start + end, line=line,
                 events=events, tail=_parse(data[end:], path.name, actor, line), append=append)
 
 
