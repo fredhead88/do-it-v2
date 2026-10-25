@@ -1,5 +1,6 @@
 /* Codex is light over the painted village: a separate, smooth canvas. */
 const Codex = (() => {
+  const labelFont = base => typeof mapFont==='function'?mapFont(base,'monospace'):base+'px monospace';
   const palette = {cyan:'#5ef2ff', violet:'#a77bff', core:'#fff'};
   const gate = {x:1210,y:190};
   PLACES.codex = {id:'codex',n:'Codex Gate',x:1178,y:125,w:64,h:130,kind:'codex'};
@@ -113,7 +114,7 @@ const Codex = (() => {
       const phase=(t*.15+i/18)%1;light.globalAlpha=(1-phase)*.7;
       light.fillStyle=i%2?palette.cyan:palette.violet;light.beginPath();light.arc(gate.x+Math.sin(i*13)*38,gate.y+60-phase*140,1.2,0,7);light.fill();
     }
-    light.globalAlpha=active?.9:.4;light.shadowBlur=0;light.fillStyle=palette.cyan;light.font='11px monospace';light.textAlign='center';light.fillText('CODEX GATE',gate.x,gate.y+85);light.restore();
+    light.globalAlpha=active?.9:.4;light.shadowBlur=0;light.fillStyle=palette.cyan;light.font=labelFont(11);light.textAlign='center';light.fillText('CODEX GATE',gate.x,gate.y+85);light.restore();
     target('gate',gate.x,gate.y,68,'Codex Gate, OpenAI sessions and weekly quota');
   }
   function ship(t){
@@ -126,7 +127,7 @@ const Codex = (() => {
     const quota=source.quota?.weekly_used_pct,used=quota==null?0:Math.max(0,Math.min(100,quota));
     light.shadowBlur=6;light.fillStyle=quota==null?palette.violet:used<70?'#63ff9c':used<90?'#ffca65':'#ff637c';
     light.fillRect(-32,10,64*(quota==null?1:used/100),3);light.strokeStyle=palette.cyan;light.strokeRect(-32,10,64,3);
-    light.shadowBlur=0;light.font='10px monospace';light.textAlign='center';light.fillStyle=palette.core;light.fillText(quota==null?'QUOTA —':used+'% WEEKLY',0,34);light.restore();
+    light.shadowBlur=0;light.font=labelFont(10);light.textAlign='center';light.fillStyle=palette.core;light.fillText(quota==null?'QUOTA —':used+'% WEEKLY',0,34);light.restore();
   }
   function crystal(n,x,y,t,alpha){
     light.save();light.globalAlpha=alpha;
@@ -139,7 +140,7 @@ const Codex = (() => {
     glow(x,y,8,1.5);light.fillStyle=palette.core;light.beginPath();light.arc(x,y,2.4,0,7);light.fill();
     light.shadowBlur=0;light.strokeStyle=palette.violet;light.globalAlpha=alpha*.5;light.beginPath();light.ellipse(x,y,23,8,-.3,0,7);light.stroke();
     light.globalAlpha=alpha;for(let j=0;j<3;j++){const a=(REDUCED?0:t*1.3)+j*Math.PI*2/3;light.fillStyle=j%2?palette.violet:palette.cyan;light.beginPath();light.arc(x+23*Math.cos(a),y+8*Math.sin(a),1.6,0,7);light.fill();}
-    light.font='10px monospace';light.textAlign='center';light.fillStyle=palette.cyan;
+    light.font=labelFont(10);light.textAlign='center';light.fillStyle=palette.cyan;
     const label=n.session.tmux||n.session.subject||n.session.id;light.fillText(label.slice(0,40),x,y+34);light.restore();
     n.x=x;n.y=y;hits.push({id:n.session.id,x,y,state:n.session.state});
     target(n.session.id,x,y,36,`Codex ${n.session.role||'worker'} for ${label}, ${n.session.state==='live'?'building':n.session.state}, ${fmtDur(Math.max(0,S.now-toMs(n.session.started)))}`);

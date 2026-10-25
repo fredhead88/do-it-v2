@@ -292,12 +292,60 @@ canvas#map.hand{cursor:pointer}
 #glance-lines[hidden]{display:none}
 #stuck{display:none} /* superseded by the fact-checked glance sentences */
 @media(max-width:700px){#mview{padding-top:66px}#glance{left:8px;right:8px;font-size:15px}#glance-toggle{padding:7px 10px}#glance-lines{padding:6px 10px 10px}}
+
+/* Desktop map owns the viewport; secondary surfaces take no grid space. */
+#strip-primary,#b-menu,#b-chronicle{display:none}
+#strip-menu{display:contents}
+@media(min-width:701px){
+  #app,#app.nopanel{grid-template-columns:minmax(0,1fr);grid-template-rows:56px minmax(0,1fr);grid-template-areas:"hud" "stage";position:relative}
+  #strip{display:flex;gap:14px;min-width:0;width:100%;height:56px;padding:6px 12px;overflow:visible;position:relative;z-index:9}
+  #strip h1{font-size:12px;letter-spacing:.08em;gap:10px;flex:none}
+  #strip-primary{display:flex;align-items:center;gap:14px;flex:1;min-width:0;height:100%}
+  #strip-primary>.stat{flex:none;max-width:120px}
+  #b-menu,#b-chronicle{display:block;flex:none}
+  #b-omens{flex:none;white-space:nowrap}
+  #strip-menu{display:none;position:absolute;right:8px;top:100%;width:min(720px,calc(100vw - 16px));max-height:calc(100vh - 64px);overflow:auto;padding:16px;background:var(--glass2);border:1px solid var(--hair);box-shadow:0 8px 24px #0008}
+  #strip-menu.open{display:block}
+  #strip-menu .stats{grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;white-space:normal;overflow:visible}
+  #strip-menu .row,#strip-menu .ctl{flex-wrap:wrap;overflow:visible;gap:8px;margin-top:10px}
+  #strip-menu .ctl{flex:1 1 100%;max-width:100%}
+  #strip-menu .scrub{flex-basis:100%;min-width:0}
+  #strip-menu .scrub input{min-width:0}
+  .stage{position:relative;grid-template-rows:minmax(0,1fr)}
+  #app .panel{position:absolute;grid-area:auto;right:0;top:56px;bottom:0;width:min(380px,100%);max-height:none;left:auto;transform:none;z-index:8;box-shadow:-12px 0 30px #0008}
+  #app.nopanel .panel{display:none}
+  #omens{display:none;top:12px}
+  #omens.open{display:flex}
+  #log{display:none;position:absolute;left:0;right:0;bottom:0;z-index:6}
+  #log.open{display:block}
+  .stage.focus #log,.view.focus #omens{display:none}
+  #strip-primary .glance-anchor{height:auto;position:static;flex:1;min-width:0;align-self:center}
+  #glance{position:static;font-size:13px;line-height:1.5;min-width:0}
+  #glance-toggle{gap:6px;padding:6px 8px}
+  #glance-more{font-size:11px}
+  #glance-lines{position:absolute;left:8px;right:8px;top:56px;background:#1a1530;border:1px solid #4b435c;box-shadow:0 6px 16px #0006;font-size:15px}
+}
+@media(min-width:701px) and (max-width:1100px){
+  #strip,#strip-primary{gap:8px}
+  #strip .realm-title{display:none}
+  #strip .mode{max-width:84px;overflow:hidden;text-overflow:ellipsis}
+  #strip-primary>.stat{max-width:72px;flex:0 1 72px;min-width:40px}
+  #strip-primary>.stat span{font-size:9px;letter-spacing:.04em}
+  #strip-primary>.stat b{font-size:12px}
+  #strip .btn{font-size:10px;letter-spacing:.04em;padding:7px}
+  #glance-more{display:none}
+}
+@media(min-width:701px) and (max-width:900px){
+  #app .panel{position:fixed;left:0;right:0;top:auto;bottom:0;width:auto;max-height:62%;transform:translateY(105%)}
+  #app .panel.open{transform:none}
+}
 </style>
 
 <div id="app">
-  <header class="hud">
-    <h1>REALM OF DO-IT <span class="mode" id="mode">…</span></h1>
-    <div class="stats">
+  <header class="hud" id="strip">
+    <h1><span class="realm-title">REALM OF DO-IT</span> <span class="mode" id="mode">…</span></h1>
+    <div id="strip-primary"></div><button class="btn" id="b-menu" aria-expanded="false" aria-controls="strip-menu">MENU</button>
+    <div id="strip-menu"><div class="stats">
     <div class="stat" style="grid-column:span 2" title="Shows the time being viewed; in replay mode this can be earlier than now."><b id="h-clock">—</b><span id="h-clock-l">chronicle time</span></div>
     <div class="stat click" id="h-exec" title="Shows when the coordinator last moved work forward, so you can tell whether work is being managed."><b>—</b><span>executor</span></div>
     <div class="stat click" id="h-quota" title="Shows how much of the weekly AI allowance has been used; work pauses when an allowance runs out." style="width:96px"><b>—</b><span>weekly quota</span></div>
@@ -329,8 +377,10 @@ canvas#map.hand{cursor:pointer}
       <button class="btn" id="b-census">CENSUS</button>
       <button class="btn" id="b-tour" style="border-color:var(--gold);color:var(--gold)">TOUR</button>
       <button class="btn" id="b-help">GUIDE</button>
+      <button class="btn" id="b-chronicle" aria-expanded="false" aria-controls="log">CHRONICLE</button>
     </div>
     <div class="scrub"><small id="s-a">—</small><input type="range" id="scrub" min="0" max="1000" value="0" aria-label="Scrub chronicle time"><small id="s-b">—</small></div>
+    </div>
     </div>
   </header>
   <div class="glance-anchor"><section id="glance" aria-label="What matters"><button id="glance-toggle" aria-expanded="false" aria-controls="glance-lines"><span id="glance-sentence">Reading what matters…</span><span id="glance-more">more ⌄</span></button><div id="glance-lines" hidden></div></section></div>
@@ -588,6 +638,17 @@ function handle(e){Codex.event(e);const ty=e.ty;if(ty!=='tick')subjectPush(e.s,e
 /* ---------------- rendering: HD-2D ---------------- */
 const cv=$('map'),ctx=cv.getContext('2d');const wc=document.createElement('canvas');wc.width=W;wc.height=H;const g=wc.getContext('2d');
 let scale=1,ox=0,oy=0;
+function MAP_SCALE(){return scale;}
+// Round upward so canvas font serialization cannot shave below the CSS floor.
+function mapFont(base,face){return (innerWidth<=700?base:Math.ceil(Math.max(base,12/MAP_SCALE())*1000)/1000)+'px '+face;}
+// Extend the final painted edge, including its vignette, into the letterbox.
+function extendMapEdges(){
+  const d=cv._dpr,l=Math.ceil(ox*d),r=Math.ceil((ox+W*scale)*d)-1,t=Math.ceil(oy*d),b=Math.ceil((oy+H*scale)*d)-1;
+  if(l>0)ctx.drawImage(cv,l,t,1,b-t+1,0,t,l,b-t+1);
+  if(r<cv.width-1)ctx.drawImage(cv,r,t,1,b-t+1,r+1,t,cv.width-r-1,b-t+1);
+  if(t>0)ctx.drawImage(cv,0,t,cv.width,1,0,0,cv.width,t);
+  if(b<cv.height-1)ctx.drawImage(cv,0,b,cv.width,1,0,b+1,cv.width,cv.height-b-1);
+}
 function resize(){const r=cv.parentElement.getBoundingClientRect();const dpr=Math.min(1.75,devicePixelRatio||1);cv.width=Math.floor(r.width*dpr);cv.height=Math.floor(r.height*dpr);scale=Math.min(r.width/W,r.height/H);ox=(r.width-W*scale)/2;oy=(r.height-H*scale)/2;cv._dpr=dpr;}
 addEventListener('resize',resize);resize();if(window.ResizeObserver)new ResizeObserver(resize).observe(cv.parentElement);
 function mulberry(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};}
@@ -668,29 +729,29 @@ function drawPlaceDynamic(p,t){const{x,y,w,h,kind}=p;const c=g;
   switch(kind){
     case 'castle':{const n=S.esc.size;R(c,x+w/2+2,y+2,18,10,n?'#ff5e52':'#e6c46a');
       // the close bell: hangs in the left tower; unrung (grey, red mark) while charters wait to close, swings on a close
-      {const cl=S.alarms.find(a=>a.kind==='closable');const chime=S.effects.find(e=>e.kind==='chime');const sw=chime&&!REDUCED?Math.sin(t*18)*4:0;R(c,x+8,y+14,20,3,'#5a5f70');R(c,x+13+sw,y+17,10,11,cl?'#8a8a98':'#e6c46a');R(c,x+16+sw,y+28,4,3,cl?'#8a8a98':'#e6c46a');if(cl){R(c,x+11,y+12,14,2,'#ff5e52');c.fillStyle='#ffb0a6';c.font='700 9px Cinzel';c.fillText('UNRUNG · '+cl.subjects.length,x-2,y+8);}}if(n&&!REDUCED){const f=6+Math.sin(t*8)*3;R(c,x+8,y-6-f,12,8+f,'#ff8a3a');R(c,x+10,y-10-f,8,6,'#ffd36b');}break;}
+      {const cl=S.alarms.find(a=>a.kind==='closable');const chime=S.effects.find(e=>e.kind==='chime');const sw=chime&&!REDUCED?Math.sin(t*18)*4:0;R(c,x+8,y+14,20,3,'#5a5f70');R(c,x+13+sw,y+17,10,11,cl?'#8a8a98':'#e6c46a');R(c,x+16+sw,y+28,4,3,cl?'#8a8a98':'#e6c46a');if(cl){R(c,x+11,y+12,14,2,'#ff5e52');c.fillStyle='#ffb0a6';c.font='700 '+mapFont(9,'Cinzel');c.fillText('UNRUNG · '+cl.subjects.length,x-2,y+8);}}if(n&&!REDUCED){const f=6+Math.sin(t*8)*3;R(c,x+8,y-6-f,12,8+f,'#ff8a3a');R(c,x+10,y-10-f,8,6,'#ffd36b');}break;}
     case 'hall':if(S.plans.size)R(c,x+w-22,y-6,18,10,'#39aab8');break;
     case 'docks':{const q=[...S.actors.values()].filter(a=>a.state==='queued').length;const bob=REDUCED?0:Math.sin(t*2)*2;R(c,520,470+bob,60,16,'#6b4a2a');R(c,516,466+bob,68,6,'#8a6a3a');R(c,548,446+bob,4,24,'#4a3420');R(c,552,448+bob,18,12,'#efe6d2');for(let i=0;i<Math.min(q,8);i++){R(c,506+i*11,420,8,10,'#efe6d2');R(c,506+i*11,423,8,2,'#9a2f28');}break;}
-    case 'tower':{const sw=S.bell>0&&!REDUCED?Math.sin(t*20)*S.bell*4:0;R(c,x+w/2-6+sw,y+44,12,14,'#e6c46a');R(c,x+w/2-2+sw,y+58,4,3,'#e6c46a');const n=S.shelf.size;for(let i=0;i<Math.min(n,18);i++){const cx=x+w+6+(i%6)*10,cy=y+h-10-Math.floor(i/6)*10;R(c,cx,cy,8,8,'#efe6d2');R(c,cx,cy+3,8,2,'#9a2f28');}if(n>18){c.fillStyle='#fff';c.font='12px Noto Sans';c.fillText('+'+(n-18),x+w+66,y+h-10);}break;}
+    case 'tower':{const sw=S.bell>0&&!REDUCED?Math.sin(t*20)*S.bell*4:0;R(c,x+w/2-6+sw,y+44,12,14,'#e6c46a');R(c,x+w/2-2+sw,y+58,4,3,'#e6c46a');const n=S.shelf.size;for(let i=0;i<Math.min(n,18);i++){const cx=x+w+6+(i%6)*10,cy=y+h-10-Math.floor(i/6)*10;R(c,cx,cy,8,8,'#efe6d2');R(c,cx,cy+3,8,2,'#9a2f28');}if(n>18){c.fillStyle='#fff';c.font=mapFont(12,'Noto Sans');c.fillText('+'+(n-18),x+w+66,y+h-10);}break;}
     case 'forge':{
       // the store room: the root disk, as crates filling a shed beside the forge
-      {const sy=S.sys||(DATA&&DATA.sys);const pct=sy&&sy.disk?sy.disk.root_pct:null;const sx=x-52,sy0=y+62;R(c,sx-2,sy0-2,48,60,'#2a2420');R(c,sx,sy0,44,56,'#5a5a68');R(c,sx,sy0,44,4,'#8a8fa0');if(pct!=null){const rows=Math.round(pct/100*5);for(let i=0;i<rows;i++)for(let j=0;j<3;j++){const cx=sx+4+j*13,cy=sy0+50-i*10;R(c,cx,cy,11,9,pct>=92?'#a8302a':pct>=80?'#b8763a':'#8a6a3a');R(c,cx+2,cy+2,7,1,'#c9a86a');}if(pct>=92){R(c,sx+46,sy0+46,11,9,'#a8302a');R(c,sx+50,sy0+36,11,9,'#a8302a');}c.fillStyle=pct>=92?'#ffb0a6':pct>=80?'#ffd9a0':'rgba(255,255,255,.8)';c.font='700 9px Cinzel';c.fillText('STORE '+Math.round(pct)+'%',sx-4,sy0-6);}}
+      {const sy=S.sys||(DATA&&DATA.sys);const pct=sy&&sy.disk?sy.disk.root_pct:null;const sx=x-52,sy0=y+62;R(c,sx-2,sy0-2,48,60,'#2a2420');R(c,sx,sy0,44,56,'#5a5a68');R(c,sx,sy0,44,4,'#8a8fa0');if(pct!=null){const rows=Math.round(pct/100*5);for(let i=0;i<rows;i++)for(let j=0;j<3;j++){const cx=sx+4+j*13,cy=sy0+50-i*10;R(c,cx,cy,11,9,pct>=92?'#a8302a':pct>=80?'#b8763a':'#8a6a3a');R(c,cx+2,cy+2,7,1,'#c9a86a');}if(pct>=92){R(c,sx+46,sy0+46,11,9,'#a8302a');R(c,sx+50,sy0+36,11,9,'#a8302a');}c.fillStyle=pct>=92?'#ffb0a6':pct>=80?'#ffd9a0':'rgba(255,255,255,.8)';c.font='700 '+mapFont(9,'Cinzel');c.fillText('STORE '+Math.round(pct)+'%',sx-4,sy0-6);}}
       const busy=[...S.actors.values()].some(a=>a.role==='builder'&&a.state==='working');if(busy){R(c,x+w/2-12,y+h-30,24,18,'#ff8a3a');R(c,x+w/2-6,y+h-26,12,10,'#ffd36b');}if(!REDUCED)for(let i=0;i<3;i++){const k=(t*.5+i*.33)%1;c.globalAlpha=(1-k)*.6;R(c,x+w-40+Math.sin(k*6+i)*8,y-20-k*50,14,12,'#c9c9d4');}c.globalAlpha=1;break;}
     case 'harbor':{
       // a ship stuck between merged and running: do-it-v2 behind origin/main
-      {const sy=S.sys||(DATA&&DATA.sys);const b=sy&&sy.live?sy.live.behind:0;if(b>0){const bob=REDUCED?0:Math.sin(t*1.5)*2;R(c,x+30,y+58+bob,60,14,'#4a3420');R(c,x+26,y+54+bob,68,6,'#6b4a2a');R(c,x+58,y+26+bob,4,30,'#4a3420');R(c,x+62,y+28+bob,20,14,'#8a8fa0');for(let i=0;i<Math.min(b,6);i++)R(c,x+30+i*10,y+46+bob,6,6,'#ff5e52');c.fillStyle='#ffb0a6';c.font='700 9px Cinzel';c.fillText(b+' MERGED · NOT RUNNING',x+14,y+16);}}break;}
+      {const sy=S.sys||(DATA&&DATA.sys);const b=sy&&sy.live?sy.live.behind:0;if(b>0){const bob=REDUCED?0:Math.sin(t*1.5)*2;R(c,x+30,y+58+bob,60,14,'#4a3420');R(c,x+26,y+54+bob,68,6,'#6b4a2a');R(c,x+58,y+26+bob,4,30,'#4a3420');R(c,x+62,y+28+bob,20,14,'#8a8fa0');for(let i=0;i<Math.min(b,6);i++)R(c,x+30+i*10,y+46+bob,6,6,'#ff5e52');c.fillStyle='#ffb0a6';c.font='700 '+mapFont(9,'Cinzel');c.fillText(b+' MERGED · NOT RUNNING',x+14,y+16);}}break;}
     case 'chapel':{
       // the inbound gate: letters from outside the realm pile beside the chapel until a carry takes them
-      {let n=0;if(DATA&&DATA.makers)for(const m of Object.values(DATA.makers))for(const it of m.items)if(it.state==='pending')n++;if(n){R(c,x+w+8,y+h-10,4,10,'#2a2420');for(let i=0;i<Math.min(n,14);i++){const lx=x+w+14+(i%2)*13,ly=y+h-6-Math.floor(i/2)*5;R(c,lx,ly,12,8,'#efe6d2');R(c,lx+5,ly+3,2,2,'#9a2f28');}c.fillStyle=n>=5?'#ffb0a6':'rgba(255,255,255,.85)';c.font='700 9px Cinzel';c.fillText('INBOUND · '+n,x+w+8,y+h-42);}}break;}
+      {let n=0;if(DATA&&DATA.makers)for(const m of Object.values(DATA.makers))for(const it of m.items)if(it.state==='pending')n++;if(n){R(c,x+w+8,y+h-10,4,10,'#2a2420');for(let i=0;i<Math.min(n,14);i++){const lx=x+w+14+(i%2)*13,ly=y+h-6-Math.floor(i/2)*5;R(c,lx,ly,12,8,'#efe6d2');R(c,lx+5,ly+3,2,2,'#9a2f28');}c.fillStyle=n>=5?'#ffb0a6':'rgba(255,255,255,.85)';c.font='700 '+mapFont(9,'Cinzel');c.fillText('INBOUND · '+n,x+w+8,y+h-42);}}break;}
     case 'observatory':{
       // the triage lane: open briefs from look stacked at the Thinker's door
-      {const n=S.look.size;for(let i=0;i<Math.min(n,12);i++){const cx=x-14-(i%3)*10,cy=y+h-10-Math.floor(i/3)*10;R(c,cx,cy,8,8,'#efe6d2');R(c,cx,cy+3,8,2,'#5aa2ff');}if(n){c.fillStyle='#bfe2ff';c.font='700 9px Cinzel';c.fillText('TRIAGE · '+n,x-40,y+h-52);}}break;}
+      {const n=S.look.size;for(let i=0;i<Math.min(n,12);i++){const cx=x-14-(i%3)*10,cy=y+h-10-Math.floor(i/3)*10;R(c,cx,cy,8,8,'#efe6d2');R(c,cx,cy+3,8,2,'#5aa2ff');}if(n){c.fillStyle='#bfe2ff';c.font='700 '+mapFont(9,'Cinzel');c.fillText('TRIAGE · '+n,x-40,y+h-52);}}break;}
     case 'gate':{const f=S.gate.flash>0;const col=f?(S.gate.ok?'#8fe08f':'#ff5e52'):'#2a2420';const open=f&&S.gate.ok;R(c,x+26,y+64,w-52,h-64,open?'#a0aa94':col);if(!open)for(let i=0;i<5;i++)R(c,x+30+i*12,y+64,4,h-64,'#1a1428');break;}
-    case 'town':{for(let i=0;i<5;i++){const hx=x+8+i*38,hy=y+60+(i%2)*40;const lit=S.shipped>i*10;R(c,hx+4,hy+24,5,6,lit?'#ffcd7a':'#3a3450');R(c,hx+20,hy+24,5,6,lit?'#ffcd7a':'#3a3450');}c.fillStyle='#fff';c.font='700 11px Cinzel';c.fillText('PROD',x+w/2-16,y+8);break;}
-    case 'obelisk':{const gl=REDUCED?1:.6+Math.sin(t*3)*.4;for(let i=0;i<8;i++){c.globalAlpha=gl;R(c,x+56,y+20+i*12,8,6,'#7fc4ff');}c.globalAlpha=1;c.fillStyle='rgba(255,255,255,.85)';c.font='12px Noto Sans';c.fillText((DATA?DATA.n_events.toLocaleString():'')+' events',x+24,y+h+30);break;}
+    case 'town':{for(let i=0;i<5;i++){const hx=x+8+i*38,hy=y+60+(i%2)*40;const lit=S.shipped>i*10;R(c,hx+4,hy+24,5,6,lit?'#ffcd7a':'#3a3450');R(c,hx+20,hy+24,5,6,lit?'#ffcd7a':'#3a3450');}c.fillStyle='#fff';c.font='700 '+mapFont(11,'Cinzel');c.fillText('PROD',x+w/2-16,y+8);break;}
+    case 'obelisk':{const gl=REDUCED?1:.6+Math.sin(t*3)*.4;for(let i=0;i<8;i++){c.globalAlpha=gl;R(c,x+56,y+20+i*12,8,6,'#7fc4ff');}c.globalAlpha=1;c.fillStyle='rgba(255,255,255,.85)';c.font=mapFont(12,'Noto Sans');c.fillText((DATA?DATA.n_events.toLocaleString():'')+' events',x+24,y+h+30);break;}
   }
-  if(kind!=='outer'){const hi=hover&&hover.kind==='place'&&hover.id===p.id;c.font='700 13px Cinzel';c.textAlign='center';const label=p.n.toUpperCase(),tw=c.measureText(label).width;c.fillStyle='rgba(8,6,20,.62)';c.fillRect(x+w/2-tw/2-7,y+h+5,tw+14,17);c.fillStyle=hi?'#fff':'#f1e6c8';c.fillText(label,x+w/2,y+h+18);c.textAlign='left';}
-  else{c.fillStyle='rgba(255,255,255,.55)';c.font='700 12px Cinzel';c.save();c.translate(x+w-16,y+60);c.rotate(Math.PI/2);c.fillText('THE OUTER LANDS',0,0);c.restore();}}
+  if(kind!=='outer'){const hi=hover&&hover.kind==='place'&&hover.id===p.id;c.font='700 '+mapFont(13,'Cinzel');c.textAlign='center';const label=p.n.toUpperCase(),tw=c.measureText(label).width;c.fillStyle='rgba(8,6,20,.62)';c.fillRect(x+w/2-tw/2-7,y+h+5,tw+14,17);c.fillStyle=hi?'#fff':'#f1e6c8';c.fillText(label,x+w/2,y+h+18);c.textAlign='left';}
+  else{c.fillStyle='rgba(255,255,255,.55)';c.font='700 '+mapFont(12,'Cinzel');c.save();c.translate(x+w-16,y+60);c.rotate(Math.PI/2);c.fillText('THE OUTER LANDS',0,0);c.restore();}}
 function lit(pid){if(['keep','observatory','maphall','tower'].includes(pid))return true;for(const a of S.actors.values())if(a.wp===pid&&a.state==='working')return true;return false;}
 function daylight(ms){const h=new Date(ms).getHours()+new Date(ms).getMinutes()/60;// local hour
   const night=h<5.5||h>20.5?1:h<7?1-(h-5.5)/1.5:h>19?(h-19)/1.5:0;const dusk=(h>17&&h<20.5)?1-Math.abs(h-18.75)/1.75:(h>5&&h<8)?1-Math.abs(h-6.5)/1.5:0;return{night:Math.max(0,Math.min(1,night)),dusk:Math.max(0,Math.min(1,dusk))};}
@@ -767,6 +828,7 @@ function frame(dt,t){
   drawTour();
   const v=ctx.createRadialGradient(W/2,H/2,H*.4,W/2,H/2,H*1.05);v.addColorStop(0,'rgba(0,0,0,0)');v.addColorStop(1,'rgba(6,4,16,.42)');ctx.fillStyle=v;ctx.fillRect(0,0,W,H);
   ctx.setTransform(1,0,0,1,0,0);
+  if(innerWidth>700)extendMapEdges();
   hud();placeBubble();
 }
 /* Read-only operator summary. Storage failure must never prevent rendering. */
@@ -904,7 +966,7 @@ function applyThroughput(d){
 function openPanel(html,view){$('p-body').innerHTML=html;$('panel').classList.add('open');if(!PHONE.matches)$('app').classList.remove('nopanel');if(view===undefined)panelView=null;else panelView=view;$('panel').scrollTop=0;}
 function rerenderPanel(){if(!panelView||$('app').classList.contains('nopanel'))return;const sc=$('panel').scrollTop;const html=panelView.html();if($('p-body').innerHTML!==html){$('p-body').innerHTML=html;if(panelView.bind)panelView.bind();$('panel').scrollTop=sc;}}
 let rerenderT=0;
-$('p-close').onclick=()=>{$('panel').classList.remove('open');if(innerWidth>900&&!PHONE.matches)$('app').classList.add('nopanel');};$('reopen').onclick=()=>{$('app').classList.remove('nopanel');};
+$('p-close').onclick=()=>{$('panel').classList.remove('open');if(!PHONE.matches)$('app').classList.add('nopanel');};$('reopen').onclick=()=>{$('panel').classList.add('open');$('app').classList.remove('nopanel');};
 function spritePix(role,monster){const c=monster?monsterSprite(role):makeSprite(role,0);return `<canvas class="pix" width="${c.width}" height="${c.height}" data-src="${monster?'m:':'r:'}${role}" style="width:${c.width*1.6}px;height:${c.height*1.6}px"></canvas>`;}
 function bindPix(){for(const c of document.querySelectorAll('canvas.pix')){const [k,id]=c.dataset.src.split(':');c.getContext('2d').drawImage(k==='m'?monsterSprite(id):makeSprite(id,0),0,0);}}
 function roleStats(r){const s=DATA&&DATA.stats[r];if(!s)return '<p class="tiny">Not dispatched as a seat spawn in this ledger (standing pane or human).</p>';const tot=s.done+s.failed;const fails=Object.entries(s.fails).map(([k,v])=>`<span class="pill ${k==='refused'?'':'bad'}">${k} ${v}</span>`).join('');
@@ -1277,10 +1339,10 @@ function drawBlockers(t){const groups={};for(const b of S.blockers){(groups[b.pl
     for(let i=0;i<n;i++){const b=list[i];const x=x0+i*18,y=y0;R(g,x,y,12,14,'#efe6d2');R(g,x,y+5,12,2,col);R(g,x+2,y+9,8,1,'#9a92ad');
       if(b.need&&!REDUCED){const k=(t*1.4+i*.37)%1;const dx=(i%2?4:-4);R(g,x+6+dx,y-4+k*14,2,3,'#7fc4ff');if(b.sev===2){const k2=(t*1.1+i*.5)%1;R(g,x+6-dx,y-6+k2*12,2,2,'#7fc4ff');}}
       b.bx=x;b.by=y;}
-    g.fillStyle=col;g.font='700 10px Cinzel';g.fillText(`${list.length} STUCK · ${hours<1?Math.round(hours*60)+'m':Math.round(hours)+'h'}`,x0,y0+26);
+    g.fillStyle=col;g.font='700 '+mapFont(10,'Cinzel');g.fillText(`${list.length} STUCK · ${hours<1?Math.round(hours*60)+'m':Math.round(hours)+'h'}`,x0,y0+26);
     if(need.length&&!REDUCED){const k=(t*.9)%1;g.strokeStyle=`rgba(255,106,92,${.8*(1-k)})`;g.lineWidth=2;g.beginPath();g.ellipse(p.x+p.w/2,y0+8,20+k*30,8+k*10,0,0,7);g.stroke();}}}
-function drawQuota(t){const q=(S.sys||(DATA&&DATA.sys)||{}).quota;if(!q||!q.panes||!q.panes.length)return;const d7=Math.max(...q.panes.map(p=>p.d7));const x=612,y=392,w=12,hh=60;R(g,x-2,y-2,w+4,hh+4,'#1a1428');R(g,x,y,w,hh,'#2a2438');const fill=Math.round(hh*Math.min(100,d7)/100);const col=d7>=95?'#ff5e52':d7>=80?'#ffc46b':'#8fe08f';R(g,x,y+hh-fill,w,fill,col);if(d7>=95&&!REDUCED&&Math.floor(t*2)%2){R(g,x-2,y-2,w+4,2,col);}g.fillStyle=col;g.font='700 9px Cinzel';g.fillText('QUOTA '+d7+'%',x-20,y-6);}
-function drawCI(t){const sy=S.sys||(DATA&&DATA.sys);if(!sy||!sy.ci)return;const p=PLACES.gate;const red=sy.ci.red;const col=red?'#ff5e52':sy.ci.green?'#8fe08f':'#9a92ad';R(g,p.x+w2(p)-2,p.y-30,4,28,'#2a2a30');R(g,p.x+w2(p)+2,p.y-30,22,12,col);g.fillStyle=col;g.font='700 9px Cinzel';g.fillText(red?'MASTER RED':'MASTER GREEN',p.x+w2(p)-30,p.y-36);if(red&&!REDUCED){const k=(t*1.5)%1;g.strokeStyle=`rgba(255,94,82,${1-k})`;g.lineWidth=2;g.beginPath();g.arc(p.x+w2(p)+12,p.y-24,8+k*18,0,7);g.stroke();}}
+function drawQuota(t){const q=(S.sys||(DATA&&DATA.sys)||{}).quota;if(!q||!q.panes||!q.panes.length)return;const d7=Math.max(...q.panes.map(p=>p.d7));const x=612,y=392,w=12,hh=60;R(g,x-2,y-2,w+4,hh+4,'#1a1428');R(g,x,y,w,hh,'#2a2438');const fill=Math.round(hh*Math.min(100,d7)/100);const col=d7>=95?'#ff5e52':d7>=80?'#ffc46b':'#8fe08f';R(g,x,y+hh-fill,w,fill,col);if(d7>=95&&!REDUCED&&Math.floor(t*2)%2){R(g,x-2,y-2,w+4,2,col);}g.fillStyle=col;g.font='700 '+mapFont(9,'Cinzel');g.fillText('QUOTA '+d7+'%',x-20,y-6);}
+function drawCI(t){const sy=S.sys||(DATA&&DATA.sys);if(!sy||!sy.ci)return;const p=PLACES.gate;const red=sy.ci.red;const col=red?'#ff5e52':sy.ci.green?'#8fe08f':'#9a92ad';R(g,p.x+w2(p)-2,p.y-30,4,28,'#2a2a30');R(g,p.x+w2(p)+2,p.y-30,22,12,col);g.fillStyle=col;g.font='700 '+mapFont(9,'Cinzel');g.fillText(red?'MASTER RED':'MASTER GREEN',p.x+w2(p)-30,p.y-36);if(red&&!REDUCED){const k=(t*1.5)%1;g.strokeStyle=`rgba(255,94,82,${1-k})`;g.lineWidth=2;g.beginPath();g.arc(p.x+w2(p)+12,p.y-24,8+k*18,0,7);g.stroke();}}
 const w2=p=>p.w/2;
 function blockerAt(pt){for(const b of S.blockers)if(b.bx!=null&&pt.x>=b.bx-2&&pt.x<=b.bx+14&&pt.y>=b.by-6&&pt.y<=b.by+16)return b;return null;}
 /* ---------------- wall clock: where the hours go ---------------- */
@@ -1300,7 +1362,7 @@ function clockHtml(){const w=S.wallclock||(DATA&&DATA.wallclock);if(!w)return '<
 function openClock(){openPanel(clockHtml());bindLinks();}
 function drawClocks_unused(t){const w=S.wallclock||(DATA&&DATA.wallclock);if(!w||!w.live)return;for(const [k,b] of Object.entries(w.live)){if(!b.n)continue;const pid=WC_LABEL[k][2];const p=PLACES[pid];if(!p)continue;const x=p.x+p.w-6,y=p.y-8;const col=k==='owed'?'#ffc46b':k==='shelf'?'#d9d2e6':'#ff8a7e';
     R(g,x-2,y-2,10,14,'#1a1428');R(g,x,y,6,3,col);R(g,x,y+9,6,3,col);R(g,x+2,y+3,2,6,col);const k2=REDUCED?0:(t*.6)%1;R(g,x+2,y+3+Math.floor(k2*4),2,2,'#1a1428');
-    g.fillStyle=col;g.font='700 10px Cinzel';g.fillText(`${b.n} · ${Math.round(b.hours)}h`,x+12,y+10);}}
+    g.fillStyle=col;g.font='700 '+mapFont(10,'Cinzel');g.fillText(`${b.n} · ${Math.round(b.hours)}h`,x+12,y+10);}}
 /* ---------------- phone layout ---------------- */
 const PHONE=matchMedia('(max-width:700px)');let mTab='now';
 const M_TILES=[['h-exec','executor'],['h-quota','weekly quota'],['h-stuck','stuck'],['h-esc','ravens · yours'],['h-pipe','in pipeline'],['h-owed','owed checks'],['h-proving','proving'],['h-shelf','ready, waiting for a builder'],['h-merge','merge'],['h-ship','shipped'],['h-fail','fallen'],['h-disk','root disk']];
@@ -1314,7 +1376,15 @@ function mRender(){if(!PHONE.matches||mTab==='map')return;const v=$('mview');con
   for(const t of v.querySelectorAll('[data-cell]'))t.onclick=()=>$(t.dataset.cell).click();for(const o of v.querySelectorAll('[data-om]'))o.onclick=()=>o.dataset.om==='ravens'?openPlace('keep'):openOmen(o.dataset.om);
   for(const c of v.querySelectorAll('.cb[data-ch]'))c.onclick=()=>openDossier(c.dataset.ch);for(const l of v.querySelectorAll('[data-mtab]'))l.onclick=()=>mSet(l.dataset.mtab);bindLinks();}}
 function mSet(t){mTab=t;for(const b of document.querySelectorAll('#mnav button'))b.classList.toggle('on',b.dataset.t===t);$('app').classList.toggle('m-map',t==='map');$('mview').scrollTop=0;if(t==='map'){resize();$('omens').classList.add('min');renderOmens();}mRender();}
-function mApply(){const on=PHONE.matches;$('mview').hidden=!on;$('mnav').hidden=!on;if(on){$('app').classList.remove('nopanel');$('panel').classList.remove('open');mSet(mTab);}else{$('app').classList.remove('m-map');resize();}}
+// Retain each original slot so crossing the phone breakpoint restores its DOM.
+const stripSlots=['h-exec','h-stuck','h-esc','h-pipe','b-omens'].map(id=>$(id)).concat(document.querySelector('.glance-anchor')).map(el=>{
+  const slot=document.createComment('phone slot');el.before(slot);return {el,slot};
+});
+function arrangeStrip(){
+  for(const {el,slot} of stripSlots){if(PHONE.matches)slot.after(el);else $('strip-primary').appendChild(el);}
+  if(!PHONE.matches){const glance=document.querySelector('.glance-anchor');$('strip-primary').prepend(glance);}
+}
+function mApply(){arrangeStrip();const on=PHONE.matches;$('mview').hidden=!on;$('mnav').hidden=!on;if(on){$('app').classList.remove('nopanel');$('panel').classList.remove('open');mSet(mTab);}else{$('app').classList.remove('m-map');$('app').classList.add('nopanel');$('panel').classList.remove('open');resize();}}
 for(const b of document.querySelectorAll('#mnav button'))b.onclick=()=>mSet(b.dataset.t);
 PHONE.addEventListener?PHONE.addEventListener('change',mApply):PHONE.addListener(mApply);
 /* ---------------- omens: the failure modes, derived every two seconds ---------------- */
@@ -1492,10 +1562,10 @@ $('h-accept').onclick=()=>listPanel('Awaiting accept','merged and shipped, not y
 $('h-close').onclick=()=>listPanel('Charters to close','all specs built (L1-complete), held only by owed live checks; retracted charters are cancelled and not counted',()=>laneSplit().close.map(([s,v])=>({s,t:v+' · '+(intentLine(s)||'')})));
 $('h-proving').onclick=()=>openProvingPanel();
 $('h-exec').onclick=()=>openClock();
-$('h-quota').onclick=()=>{const html=()=>{const q=(S.sys||(DATA&&DATA.sys)||{}).quota;if(!q||!q.panes)return '<h2>Quota</h2><p class="tiny">No pane status lines readable.</p>';return `<h2>Quota</h2><div class="cls">read from each pane's status line every 30 s</div><p>When the weekly quota reaches 100%, no pane can serve a packet and the whole pipeline stops until the reset. The five-hour window pauses work the same way, for a shorter time.</p><table><tr><th>pane</th><th>weekly</th><th>resets</th><th>5-hour</th><th>resets</th></tr>${q.panes.map(p=>`<tr><td>${esc(p.name)}</td><td style="color:${p.d7>=95?'var(--red)':p.d7>=80?'var(--amber)':'var(--green)'}">${p.d7}%</td><td>${esc(p.d7_reset||'')}</td><td style="color:${p.h5>=95?'var(--red)':p.h5>=80?'var(--amber)':'var(--green)'}">${p.h5}%</td><td>${esc(p.h5_reset||'')}</td></tr>`).join('')}</table>`;};openPanel(html(),{html});};$('h-disk').onclick=()=>{const a=S.alarms.find(x=>x.kind==='disk');if(a)openOmen(a.id);else openPlace('forge');};$('b-charters').onclick=openCharters;$('b-omens').onclick=openOmens;$('b-yitzy').onclick=()=>openWorkshop('yitzchak-eg');
+$('h-quota').onclick=()=>{const html=()=>{const q=(S.sys||(DATA&&DATA.sys)||{}).quota;if(!q||!q.panes)return '<h2>Quota</h2><p class="tiny">No pane status lines readable.</p>';return `<h2>Quota</h2><div class="cls">read from each pane's status line every 30 s</div><p>When the weekly quota reaches 100%, no pane can serve a packet and the whole pipeline stops until the reset. The five-hour window pauses work the same way, for a shorter time.</p><table><tr><th>pane</th><th>weekly</th><th>resets</th><th>5-hour</th><th>resets</th></tr>${q.panes.map(p=>`<tr><td>${esc(p.name)}</td><td style="color:${p.d7>=95?'var(--red)':p.d7>=80?'var(--amber)':'var(--green)'}">${p.d7}%</td><td>${esc(p.d7_reset||'')}</td><td style="color:${p.h5>=95?'var(--red)':p.h5>=80?'var(--amber)':'var(--green)'}">${p.h5}%</td><td>${esc(p.h5_reset||'')}</td></tr>`).join('')}</table>`;};openPanel(html(),{html});};$('h-disk').onclick=()=>{const a=S.alarms.find(x=>x.kind==='disk');if(a)openOmen(a.id);else openPlace('forge');};$('b-charters').onclick=openCharters;$('b-omens').onclick=()=>{if(PHONE.matches)openOmens();else{const on=$('omens').classList.toggle('open');$('b-omens').setAttribute('aria-expanded',String(on));}};$('b-yitzy').onclick=()=>openWorkshop('yitzchak-eg');
 function guideHtml(){return `<h2>Realm of DO-IT</h2><div class="cls">${LIVE?'live from the ledger':'a replay of the ledger'}</div><p>Your pipeline as an overworld. Every sprite that walks is a real spawn id; every scroll, raven and boat is a ledger event.${LIVE?' New events arrive as they are appended; the clock is now.':' <b>This copy is a snapshot.</b> The live view is <code>doit realm</code> on the box that holds the ledger, at http://127.0.0.1:8642.'}</p><p>New here? Press <b>TOUR</b> for a walkthrough on the map itself.</p><h4>HOW TO READ IT</h4><ul><li><b>North terrace</b> is thinking: Keep, Observatory, Map Hall, Scriptorium, Chapel. <b>South plaza</b> is building: Forge, Court, Inn, Gate, Harbor, Prod Town.</li><li>Every sub-agent is a seat packet that must cross <b>the Ferry</b>. A sleeping sprite on the quay is a packet nobody has claimed.</li><li>Scrolls stacked at the <b>Watchtower</b> are specs written but not yet dispatched. That stack is the wall-clock you pay.</li><li>A raven flying to the <b>Keep</b> is an escalation. It flies back on a decision. A burning beacon means one is open.</li><li>The bar over a working sprite is elapsed time against its cap. Windows glow where someone is working. Light follows your local clock.</li></ul><h4>STUCK NOW</h4><p>The strip at the top of the map, and the sweating scrolls at each door, are the specs sitting between steps this very minute. Red means the wait did not have to happen: the Executor, the ferry, the gate or the deploy should have moved it. Amber means it waits on you. Click a scroll for the story.</p><h4>OMENS</h4><p>Each omen now shows its loop: RAISED (only the page sees it), CAUGHT (look filed a brief; a blue raven flies to the Observatory's triage lane), HANDLED (the Thinker's decision or lesson, or look clearing it; a green raven flies back). Four map features carry their own omens: the store room beside the Forge fills with crates as the root disk fills, a ship sits in the harbor when merges are not running, letters pile beside the Chapel while inbound PRs wait for a carry, and the Keep's bell hangs unrung while a charter is ready to close.</p><p>The top-left stack is the failure watch: a dead Executor, unclaimed packets, runs near their cap, contamination deadlocks, grader churn, an aging shelf, overdue ravens, BLOCKED builders, a held merge gate, owed evidence, a bad cut, a failure spike, vanished runs, a swollen lane. Each is anchored on the map with a marker; click it for why and what to do.</p><h4>CHARTERS</h4><p>The CHARTERS button is the work itself: every charter by project, its specs as a bar by state, and one line on where it is holding.</p><h4>CLICK</h4><ul><li>A character or building: a word bubble, then the codex.</li><li>A chronicle line: the subject's whole story.</li><li>Census: every subject by derived state.</li></ul><h4>THE THREE NUMBERS</h4><ul><li><b>Executor</b>: time since the last bell. Over 5 min, the pane is dead.</li><li><b>Shelf</b>: specs waiting for a builder, and the oldest wait.</li><li><b>Fallen</b>: failures over total, and the monster says why.</li></ul><p class="tiny">${LIVE?'Scrub to replay; LIVE returns to now.':'Scrub with the slider; speeds are ledger minutes per real second.'}</p>`;}
 $('b-help').onclick=()=>openPanel(guideHtml());$('b-tour').onclick=startTour;$('b-clock').onclick=openClock;
-try{if(localStorage.getItem('realm.omens')==='min')$('omens').classList.add('min');}catch(_){}
+try{if(PHONE.matches&&localStorage.getItem('realm.omens')==='min')$('omens').classList.add('min');}catch(_){}
 (function legend(){const L=$('legend');for(const [r,c] of [['builder','#b8763a'],['grader','#6b4bb8'],['reviewer','#48b062'],['spec-writer','#4a7ce0'],['spec-auditor','#7a7a96'],['plan-auditor','#9a844a'],['probe','#c9a25a'],['charter-reviewer','#c4cad8']]){const d=document.createElement('div');d.className='chip';d.innerHTML=`<i style="background:${c}"></i>${ROLE_NAME[r]}`;d.onclick=()=>openRole(r);L.appendChild(d);}})();
 $('b-play').onclick=()=>{if(!LIVE&&S.now>=T1){seek(T0);S.playing=true;}else S.playing=!S.playing;};
 for(const b of document.querySelectorAll('.spd'))b.onclick=()=>{S.speed=+b.dataset.s;document.querySelectorAll('.spd').forEach(x=>x.classList.toggle('on',x===b));if(LIVE){LIVE=false;}};
@@ -1503,6 +1573,9 @@ let scrubbing=false;const sc=$('scrub');
 sc.addEventListener('input',()=>{scrubbing=true;const t=T0+(T1-T0)*sc.value/1000;$('h-clock').textContent=fmt(t)+' Z';});
 sc.addEventListener('change',()=>{const t=T0+(T1-T0)*sc.value/1000;if(stream||REMOTE)LIVE=false;seek(t);S.playing=true;scrubbing=false;});
 $('b-live').onclick=()=>{if(!stream&&!REMOTE)return;LIVE=true;S.playing=true;T1=Date.now();seek(Date.now());};
+$('b-menu').onclick=()=>{const on=$('strip-menu').classList.toggle('open');$('b-menu').setAttribute('aria-expanded',String(on));};
+$('strip-menu').addEventListener('click',ev=>{if(ev.target.closest('button')&&!ev.target.closest('.spd')){$('strip-menu').classList.remove('open');$('b-menu').setAttribute('aria-expanded','false');}});
+$('b-chronicle').onclick=()=>{const on=$('log').classList.toggle('open');$('b-chronicle').setAttribute('aria-expanded',String(on));};
 $('log-min').onclick=()=>{const l=$('log');l.classList.toggle('min');$('log-min').textContent=l.classList.contains('min')?'show':'hide';};
 addEventListener('keydown',ev=>{if(ev.target.tagName==='INPUT')return;if(tour){if(ev.key===' '||ev.key==='ArrowRight'){ev.preventDefault();showTourStep(tour.i+1);}else if(ev.key==='ArrowLeft'){showTourStep(tour.i-1);}else if(ev.key==='Escape')endTour();return;}if(ev.key===' '){ev.preventDefault();$('b-play').click();}if(ev.key==='Escape'){if(!$('dossier').hidden)closeDossier();else{$('p-close').click();hideBubble();}}});
 
@@ -1553,7 +1626,7 @@ async function boot(){
   if(d.live){LIVE=true;seek(Date.now());connect();document.querySelectorAll('.spd').forEach(x=>x.classList.remove('on'));}
   else if(REMOTE){LIVE=true;lastPush=d.pushedAt||d.now||'';T1=Date.now();seek(Date.now());$('b-live').style.display='';if(!remoteTimer)remoteTimer=setInterval(remotePoll,45000);document.querySelectorAll('.spd').forEach(x=>x.classList.remove('on'));}
   else{LIVE=false;$('b-live').style.display='none';const dayStart=Date.UTC(new Date(T1).getUTCFullYear(),new Date(T1).getUTCMonth(),new Date(T1).getUTCDate());const t=dayStart>T0&&dayStart<T1?dayStart:T0;seek(t);}
-  computeBlockers();computeOmens();mApply();if(!PHONE.matches)openCharters();status(null);
+  computeBlockers();computeOmens();mApply();status(null);
 }
 /*__CODEX_JS__*/
 boot();

@@ -145,6 +145,9 @@ test('reduced motion is steady, focusable, and departures finish',async ({page})
 });
 
 test('empty Codex layer leaves village pixels within tolerance of base',async ({page})=>{
+  // Keep even the original header/panel/log layout above scale 1; AC9 then
+  // preserves every base village font size in both comparison frames.
+  await page.setViewportSize({width:2400,height:1800});
   await page.emulateMedia({reducedMotion:'reduce'});await page.context().tracing.start({screenshots:true,snapshots:true});await open(page,'empty');
   const village=async ()=>Buffer.from(await page.evaluate(()=>{
     // The world canvas retains antialiased edge pixels across frames. Compare

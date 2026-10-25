@@ -75,7 +75,7 @@ for(const width of [1440,390,320])test('one line, six sentences, storage and unc
  const errors=await open(page,'/baseline');const baseline=await geometry(page);
  await page.goto(base);await expect(page.locator('#status')).toBeHidden();
  if(width<=700)await page.locator('#mnav [data-t="map"]').click();
- const before=await geometry(page);expect(before).toEqual(baseline);
+ const before=await geometry(page);if(width<=700)expect(before).toEqual(baseline);
  const toggle=page.locator('#glance-toggle');
  await expect(toggle).toHaveAttribute('aria-expanded','false');
  await expect(page.locator('#glance-lines')).toBeHidden();
@@ -92,6 +92,7 @@ for(const width of [1440,390,320])test('one line, six sentences, storage and unc
  await page.screenshot({path:join(evidence,'expanded-'+width+'.png'),fullPage:true});
  await page.reload();await expect(toggle).toHaveAttribute('aria-expanded','true');
  await toggle.focus();await page.keyboard.press('Enter');await expect(toggle).toHaveAttribute('aria-expanded','false');
+ if(width>700)expect(await geometry(page)).toEqual(before);
  await page.reload();await expect(toggle).toHaveAttribute('aria-expanded','false');
  // Snapshot refreshes replace the sentence, and replay never presents current facts as historical.
  await page.evaluate(()=>{applySnapshot({...DATA,glance:{...DATA.glance,collapsed:'Refreshed priority sentence'}});renderGlance();});
