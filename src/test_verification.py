@@ -83,7 +83,7 @@ class VerificationTests(unittest.TestCase):
                 self.assertEqual(build_runner._commands(text, None, None),
                                  build_runner._commands(clean, None, None))
                 commands, judgment = build_runner._commands(text, None, {"AC2"})
-                self.assertEqual(commands, [("AC2", "cd dashboard &&\n/usr/bin/test -d .")])
+                self.assertEqual(commands, [(None, CODE)])
                 self.assertEqual(judgment, [])
                 self.assertEqual(grading_env._tool_texts(text, ""), grading_env._tool_texts(clean, ""))
                 self.assertEqual(grading_env.criterion_caps(text, "", "fixture"),

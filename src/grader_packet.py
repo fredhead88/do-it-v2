@@ -136,7 +136,10 @@ def validate_output(output, bundle):
     if any(x not in rows or x not in data.get("judgment_only", []) for x in output.get("judgment_only", [])):
         return "judgment_only: criterion absent from verdicts or bundle judgment_only"
     covered = {c.get("criterion") for c in data.get("commands", []) if c.get("criterion")}
+    covered.update(ac for c in data.get("commands", []) for ac in c.get("covers", []))
     for row in output["verdicts"]:
+        if row.get("reason_code") == "tooling-defect" and "missing_capability" in row:
+            return "verdicts: tooling-defect row cannot carry missing_capability"
         if row["ac"] in covered and row["verdict"] == "cannot-assess" and (
                 row.get("reason_code") == "tool-failed" or row.get("missing_capability")):
             return "verdicts: bundle-covered criterion cannot claim tool-failed or missing_capability"
