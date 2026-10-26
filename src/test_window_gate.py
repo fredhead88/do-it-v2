@@ -19,7 +19,7 @@ os.environ["DOIT_ROOT"] = _ledger_root.name
 os.environ.pop("DOIT_LEDGER_FILE", None)
 os.environ["DOIT_NO_POKE"] = "1"
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
-import fold, window_gate, merge_queue  # noqa: E402
+import fold, window_gate, merge_queue, ghlimit  # noqa: E402
 
 HERE = pathlib.Path(__file__).parent
 FAILS = []
@@ -127,6 +127,14 @@ class Fx:
         gh = bindir / "gh"
         gh.write_text("#!/usr/bin/python3\nimport os, pathlib, sys\n"
                       "args = sys.argv[1:]\n"
+                      "if args == ['api', 'rate_limit']:\n"
+                      " import json, time\n"
+                      " print(json.dumps({'resources': {k: {'limit': 5000, 'remaining': 5000, 'reset': int(time.time()) + 3600} for k in ('core', 'search', 'graphql')}})); sys.exit(0)\n"
+                      "if args[0] == 'api':\n"
+                      " key = 'jobs-' + args[1].split('/runs/')[1].split('/')[0]\n"
+                      " p = pathlib.Path(os.environ['FAKE_DIR']) / key\n"
+                      " if not p.exists(): sys.exit(1)\n"
+                      " print(p.read_text()); sys.exit(0)\n"
                       "key = ('log-' + args[args.index('--job') + 1]) if '--job' in args else ('jobs-' + args[2])\n"
                       "p = pathlib.Path(os.environ['FAKE_DIR']) / key\n"
                       "if not p.exists(): sys.exit(1)\nprint(p.read_text())\n")
@@ -136,8 +144,13 @@ class Fx:
         fold.EVENTS = self.root / "events"
         fold.EVENTS.mkdir(parents=True)
         os.environ.update(DOIT_ROOT=str(self.root), DOIT_WINDOW_PREDEPLOY=str(self.fake), FAKE_DIR=str(self.fdir),
+                          GH_LIMIT_STATE=str(self.tmp / "ghlimit.json"), DOIT_REAL_GH=str(gh),
                           DOIT_MAIN="master", DOIT_LEDGER_FILE="L-executor-0001.jsonl",
                           DOIT_GATE_LEDGER_FILE="L-executor-0001.jsonl")
+        pathlib.Path(os.environ["GH_LIMIT_STATE"]).write_text(json.dumps(dict(
+            checked_at=time.time(), spent_since_check=0,
+            core=dict(limit=5000, remaining=5000, reset=time.time() + 3600),
+            graphql=dict(limit=5000, remaining=5000, reset=time.time() + 3600))))
         os.environ.pop("FAKE_BASE", None)
         os.environ.pop("DOIT_WINDOW_GATE", None)
         os.environ.pop("DOIT_WINDOW_VERIFY_TIMEOUT_SECS", None)
@@ -146,7 +159,7 @@ class Fx:
         self.known = set()
         self.base_reader = lambda project, sha: {"sha": sha, "complete": True}
         self.log_reader = lambda repo, doc: []
-        self.service = types.SimpleNamespace(parse_log=base_red.parse_log,
+        self.service = types.SimpleNamespace(_owner=lambda repo: "o/r", parse_log=base_red.parse_log,
             classify=lambda project, sha, ids: {
                 "complete": True, "pre_existing": [n for n in ids if n in self.known],
                 "new": [n for n in ids if n not in self.known]})
@@ -1533,7 +1546,7 @@ def train_checks():
         high = window_gate.train_depth({}, root=fx.root, events=events, now=now)
         low = window_gate.train_depth({}, root=fx.root, events=events[1:] + [dict(events[-1], subject="extra")], now=now)
         old = window_gate.red_rate(events, now + timedelta(days=2))
-        mark("depth red-rate", rates[0]["rate"] is None and rates[1] == dict(rate=.6, red=3, windows=5) and
+        mark("depth red-rate", rates[0]["rate"] is None and rates[1] == dict(rate=.6, red=3, undetermined=0, other=0, non_green=3, windows=5) and
              high["depth"] == 1 and low["depth"] == 2 and old["windows"] == 0, dict(rates=rates, high=high, low=low))
         window_gate.ev("train-depth", "merge-train", depth=2, reason="test")
         ledger = next(fold.EVENTS.glob("*.jsonl"))
@@ -2044,26 +2057,31 @@ def scope_checks():
          sorted(event))
 
     def job(seconds, **runner):
-        return dict(startedAt="2026-10-20T00:00:00Z", completedAt=datetime.fromtimestamp(
-            datetime(2026, 10, 20, tzinfo=timezone.utc).timestamp() + seconds, timezone.utc).isoformat(), **runner)
+        return dict(status="completed", runner_name="Hosted Agent", labels=["ubuntu-latest"], started_at="2026-10-20T00:00:00Z", completed_at=datetime.fromtimestamp(
+            datetime(2026, 10, 20, tzinfo=timezone.utc).timestamp() + seconds, timezone.utc).isoformat()) | runner
     docs = [{"checks": {"pytest": {"run_id": 10}, window_gate.DASHBOARD_CHECK: {"run_id": 10}}},
             {"checks": {window_gate.PG_CHECK: {"run_id": 11}}}]
-    jobs = {"10": [job(61, labels=["ubuntu-latest"]), job(120, runnerName="Hosted Agent")],
+    jobs = {"10": [job(61, labels=["ubuntu-latest"]), job(120, labels=["ubuntu-latest"])],
             "11": [job(90, labels=["self-hosted"])]}
     for rid, data in jobs.items():
         (fx.fdir / ("jobs-" + rid)).write_text(json.dumps(dict(jobs=data)))
-    with patch.dict(os.environ, PATH=fx.path, FAKE_DIR=str(fx.fdir)), patch.object(subprocess, "run", wraps=subprocess.run) as gh:
+    with patch.dict(os.environ, PATH=fx.path, FAKE_DIR=str(fx.fdir)), \
+         patch.object(ghlimit, "gate", return_value={"ok": True}), \
+         patch.object(sys.modules["base_red"], "_owner", return_value="o/r"), \
+         patch.object(subprocess, "run", wraps=subprocess.run) as gh:
         result = window_gate.run_minutes(fx.repo, docs)
     mark("AC9", "minutes measured", result == dict(actions_minutes=4, selfhosted_minutes=2, minutes_source="measured"), result)
     mark("AC9", "minutes selfhosted split", result["actions_minutes"] == 4 and result["selfhosted_minutes"] == 2, result)
     mark("AC9", "minutes run counted once", gh.call_count == 2, gh.call_count)
-    (fx.fdir / "jobs-11").write_text(json.dumps(dict(jobs=[job(90, runnerName="self-hosted-runner") ])))
-    with patch.dict(os.environ, PATH=fx.path, FAKE_DIR=str(fx.fdir)):
-        check(window_gate.run_minutes(fx.repo, docs) == result, "scope self-hosted runnerName")
+    (fx.fdir / "jobs-11").write_text(json.dumps(dict(jobs=[job(90, labels=["self-hosted"]) ])))
+    with patch.dict(os.environ, PATH=fx.path, FAKE_DIR=str(fx.fdir)), \
+         patch.object(sys.modules["base_red"], "_owner", return_value="o/r"):
+        check(window_gate.run_minutes(fx.repo, docs) == result, "scope self-hosted REST labels")
     bad_results = []
-    with patch.dict(os.environ, PATH=fx.path, FAKE_DIR=str(fx.fdir)):
+    with patch.dict(os.environ, PATH=fx.path, FAKE_DIR=str(fx.fdir)), \
+         patch.object(sys.modules["base_red"], "_owner", return_value="o/r"):
         for bad in ("missing", "not json", json.dumps(dict(jobs=[{}])),
-                    json.dumps(dict(jobs=[job(61)]))):
+                    json.dumps(dict(jobs=[dict(job(61), started_at=None)]))):
             (fx.fdir / "jobs-10").write_text(bad)
             bad_results.append(window_gate.run_minutes(fx.repo, docs))
         bad_results.append(window_gate.run_minutes(fx.repo, [{"checks": {"pytest": "ran"}}]))
@@ -2084,11 +2102,13 @@ def scope_checks():
     fx.run_n("base", 0, json.dumps(dict(verdict="green", checks={window_gate.PG_CHECK: {"state": "ran", "run_id": 76}})))
     fx.run_n(1, 0, json.dumps(dict(verdict="green", checks={name: {"state": "ran", "run_id": 77}
                                                         for name in ("pytest", window_gate.PG_CHECK)})))
-    for rid, data in ((76, [job(60, runnerName="Hosted Agent")]), (77, jobs["10"] + jobs["11"])):
+    for rid, data in ((76, [job(60, labels=["ubuntu-latest"])]), (77, jobs["10"] + jobs["11"])):
         data[0].update(name=window_gate.PG_CHECK, conclusion="success")
         (fx.fdir / f"jobs-{rid}").write_text(json.dumps(dict(jobs=data)))
     rc = fx.go()
     event = fx.events("window-verified")[0]
+    check(len(fx.events("window-run-minutes")) == 1 and fx.events("window-run-minutes")[0]["run_ids"] == ["77"],
+          "honest AC3 base-sha run excluded from candidate minutes")
     mark("AC9", "minutes include baseline", rc == 0 and event["actions_minutes"] == 5 and
          event["selfhosted_minutes"] == 2 and event["minutes_source"] == "measured",
          {k: event[k] for k in ("actions_minutes", "selfhosted_minutes", "minutes_source")})
@@ -2284,6 +2304,191 @@ def base_kind_checks():
 
 
 base_kind_checks()
+def honest_rate_checks():
+    """L-spec-1578: production append/read fixtures, no live GitHub calls."""
+    from datetime import datetime, timedelta, timezone
+    passed_cases = []
+    def report(ac, start, body):
+        encoded = json.dumps(body, sort_keys=True).encode()
+        passed = len(FAILS) == start
+        print(json.dumps(dict(url="cli://honest-rate/" + ac, status=0 if passed else 1,
+                              body_sha256=hashlib.sha256(encoded).hexdigest(), body_excerpt=body)))
+        if passed:
+            passed_cases.append(ac)
+
+    start = len(FAILS)
+    now = datetime.now(timezone.utc)
+    def event(kind, name, **fields):
+        return dict(type=kind, subject=name, ts=now.isoformat(), **fields)
+    events = [event("window-verified", "g1", dropped=[]), event("window-verified", "g2", dropped=[]),
+              event("window-verified", "r", dropped=["S"]),
+              event("escalation-blocking", "u", outcome="undetermined"),
+              event("escalation-blocking", "b", outcome="base-not-releasable")]
+    rates = [window_gate.red_rate(events, now)]
+    check(rates[0] == dict(rate=.6, red=1, undetermined=2, other=0, non_green=3, windows=5), "honest AC1 counts")
+    rates.append(window_gate.red_rate(events + [event("window-opened", "o"), event("escalation-blocking", "o")], now))
+    check(rates[-1]["other"] == 1 and rates[-1]["non_green"] == 4, "honest AC1 outcome-less")
+    early = (now - timedelta(minutes=1)).isoformat()
+    small = [[event("escalation-blocking", "x", outcome="undetermined") | {"ts": early}, event("window-verified", "x", dropped=[])],
+             [event("window-dropped", "S", window="x", nodes=["node"]), event("window-verified", "x", dropped=[])],
+             [event("window-verified", "x", dropped=[]), event("escalation-blocking", "x", outcome="undetermined") | {"ts": early}]]
+    for rows, red_count, non_green in zip(small, (0, 1, 0), (0, 1, 0)):
+        rate = window_gate.red_rate(rows, now)
+        check(rate["red"] == red_count and rate["non_green"] == non_green and rate["rate"] is None, "honest AC1 chronology/sticky/threshold")
+    check(window_gate.red_rate([event("window-verified", "x", dropped=[]) | {"ts": "bad"}], now)["windows"] == 0,
+          "honest AC1 malformed timestamp")
+    with tempfile.TemporaryDirectory() as tmp:
+        config = pathlib.Path(tmp) / "look.toml"
+        config.write_text("[window_gate]\ntrain_depth = 2\n")
+        with patch.object(window_gate.shutil, "disk_usage", return_value=types.SimpleNamespace(total=100, used=50)):
+            depths = [window_gate.train_depth({}, config, root=tmp, events=rows, now=now) for rows in
+                      (events, [event("window-verified", str(i), dropped=["S"] if i < 3 else []) for i in range(5)])]
+    check(depths[0]["depth"] == 2 and depths[0]["reason"] == "configured" and depths[0]["red_rate"] == .2 and
+          depths[1]["depth"] == 1 and depths[1]["reason"] == "red-rate-over-0.40", "honest AC1 train stays red-only")
+    report("AC1", start, dict(rates=rates, depths=depths))
+
+    start = len(FAILS)
+    fx = Fx({})
+    def job(seconds, **fields):
+        return dict(runner_name="Hosted Agent", labels=["ubuntu-latest"], status="completed",
+                    started_at="2026-10-20T00:00:00Z", completed_at=(datetime(2026, 10, 20, tzinfo=timezone.utc)
+                    + timedelta(seconds=seconds)).isoformat()) | fields
+    pages = json.dumps(dict(jobs=[job(61), job(20)])) + "\n" + json.dumps(dict(jobs=[
+        job(0, runner_name=None), job(59, run_attempt=2)]))
+    (fx.fdir / "jobs-10").write_text(pages)
+    (fx.fdir / "jobs-11").write_text(json.dumps(dict(jobs=[job(90, labels=["self-hosted"])])))
+    docs = [dict(checks={"a": {"run_id": 10}, "b": {"run_id": "10", "state": "cached"}}),
+            dict(checks={"c": {"state": "ran", "run_id": 11}})]
+    with patch.object(sys.modules["base_red"], "_owner", return_value="o/r"), \
+         patch.object(ghlimit, "gate", return_value={"ok": True}) as gate, \
+         patch.object(window_gate.subprocess, "run", wraps=subprocess.run) as calls, \
+         patch.object(ghlimit, "sleep", side_effect=AssertionError("must not sleep")):
+        result = window_gate.run_minutes(fx.repo, docs)
+        argv = [c.args[0] for c in calls.call_args_list]
+        check(result == dict(actions_minutes=4, selfhosted_minutes=2, minutes_source="measured"), "honest AC2 measured totals")
+        check(len(argv) == 2 and all(a[0] == os.environ["DOIT_REAL_GH"] and a[1] == "api" and
+              "jobs?filter=all&per_page=100" in a[2] and "--paginate" in a and "--slurp" not in a for a in argv),
+              "honest AC2 API pagination once per id")
+        check(all(c.kwargs["timeout"] == 60 for c in calls.call_args_list) and
+              all(c.kwargs == {"wait": False} for c in gate.call_args_list), "honest AC2 bounded nonwaiting")
+        fallback = []
+        for bad in ("not JSON", "{}", "[]", json.dumps(dict(jobs=[])), json.dumps(dict(jobs=[None])),
+                    json.dumps(dict(jobs=[job(-1)])), json.dumps(dict(jobs=[job(61, started_at=None)])),
+                    json.dumps(dict(jobs=[job(61, completed_at=None)])),
+                    json.dumps(dict(jobs=[job(0, runner_name=None, status="queued")])),
+                    json.dumps(dict(jobs=[job(1, labels="bad")])),
+                    json.dumps(dict(jobs=[job(1, completed_at="bad")]))):
+            (fx.fdir / "jobs-10").write_text(bad)
+            fallback.append(window_gate.run_minutes(fx.repo, docs))
+        for doc in (dict(checks={"a": "ran"}), {}, dict(checks={"a": {"run_id": 10}, "b": "ran"})):
+            fallback.append(window_gate.run_minutes(fx.repo, [doc]))
+        for failure in (types.SimpleNamespace(returncode=1, stdout="", stderr="failure"),
+                        subprocess.TimeoutExpired("gh", 60),
+                        types.SimpleNamespace(returncode=1, stdout="", stderr="API rate limit exceeded")):
+            kw = dict(side_effect=failure) if isinstance(failure, Exception) else dict(return_value=failure)
+            with patch.object(subprocess, "run", **kw) as api, patch.object(ghlimit, "_mark_exhausted") as exhausted, \
+                 patch.object(ghlimit, "_bump_spent") as spent:
+                fallback.append(window_gate.run_minutes(fx.repo, docs))
+                check(api.call_count == 1 and spent.call_count == 1, "honest AC2 failure one charged attempt")
+                check(exhausted.call_count == int(getattr(failure, "stderr", "") == "API rate limit exceeded"), "honest AC2 quota exhausted")
+        with patch.object(ghlimit, "gate", return_value={"ok": False}), patch.object(subprocess, "run") as api:
+            fallback.append(window_gate.run_minutes(fx.repo, docs))
+            check(api.call_count == 0, "honest AC2 closed quota")
+        with patch.object(sys.modules["base_red"], "_owner", side_effect=ValueError("local origin")), \
+             patch.object(ghlimit, "gate") as no_gate:
+            fallback.append(window_gate.run_minutes(fx.repo, docs))
+            check(no_gate.call_count == 0, "honest AC2 slug before quota")
+        check(all(r["minutes_source"] == "estimate" for r in fallback), "honest AC2 all failures estimate")
+        (fx.fdir / "jobs-10").write_text(pages)
+        mixed = window_gate.run_minutes(fx.repo, [dict(checks={"a": {"run_id": 10}, "b": {"state": "cached"}})])
+        check(mixed["minutes_source"] == "measured" and mixed["actions_minutes"] == 4, "honest AC2 undispatched check skipped")
+        check(window_gate.run_minutes(fx.repo, [dict(checks={"a": {"state": "cached"}})])["minutes_source"] == "estimate",
+              "honest AC2 nonempty docs need run id")
+        check(window_gate.run_minutes(fx.repo, []) == dict(actions_minutes=0, selfhosted_minutes=0, minutes_source="measured"),
+              "honest AC2 all cache zero")
+    quota = json.loads(pathlib.Path(os.environ["GH_LIMIT_STATE"]).read_text())
+    check(quota["spent_since_check"] > 0, "honest AC2 temporary quota charged")
+    report("AC2", start, dict(result=result, argv=argv, fallbacks=len(fallback), mixed=mixed, quota_spent=quota["spent_since_check"]))
+
+    start = len(FAILS)
+    candidate_scope = dict(checks=["pytest"], everything=False, reason="honest-rate fixture")
+    evidence = []
+    for state in ("green", "red", "undetermined"):
+        fx = Fx({"S": "api/tests/test_x.py"})
+        doc = dict(verdict=state, checks={"pytest": {"state": "ran", "run_id": 10}},
+                   new_failures=["api/tests/test_x.py::bad"] if state == "red" else [])
+        fx.run_n(1, {"green": 0, "red": 1, "undetermined": 2}[state], json.dumps(doc))
+        (fx.fdir / "jobs-10").write_text(pages)
+        with patch.object(ghlimit, "gate", return_value={"ok": True}), \
+             patch.object(window_gate, "scope", return_value=candidate_scope):
+            rc = fx.go()
+        # Fresh read from the production JSONL append store, independent of fold's reader.
+        fresh = [json.loads(line) for file in fold.EVENTS.glob("*.jsonl") for line in file.read_text().splitlines()]
+        measured = [e for e in fresh if e["type"] == "window-run-minutes"]
+        check(len(measured) == 1, "honest AC3 exactly one " + state)
+        if measured:
+            row = measured[0]
+            check(row["subject"] == row["window"] == "w1" and row["candidate"] == fx.events("window-candidate")[0]["sha"] and
+                  row["state"] == state and row["run_ids"] == ["10"] and row["minutes_source"] == "measured" and
+                  row["actions_minutes"] == 4 and row["selfhosted_minutes"] == 0, "honest AC3 fields " + state)
+            check(all(fold.admits(row, actor) is None for actor in ("executor", "tick", "operator")) and
+                  fold.admits(row, "builder") is not None, "honest AC3 actors")
+            check(bool(fold.required_reason(dict(row, minutes_source=""))), "honest AC3 required source")
+            evidence.append(dict(state=state, exit=rc, event=row))
+        check(rc == (0 if state == "green" else 2), "honest AC3 verdict " + state)
+        if state == "red":
+            check(bool(fx.events("window-dropped")), "honest AC3 attributed drop")
+        if state == "green":
+            candidate = fx.master()
+            sh(["update-ref", "refs/heads/master", fx.base, candidate], fx.repo)
+            before = len(measured)
+            with patch.object(window_gate, "scope", return_value=candidate_scope):
+                check(fx.go(window="cached") == 0 and len(fx.events("window-run-minutes")) == before, "honest AC3 cache no emit")
+    for mode in ("no-ids", "fetch-error", "emit-error", "cancel-after", "cancel-inside"):
+        fx = Fx({"S": "api/tests/test_x.py"})
+        fx.run_n(1, 0, GREEN if mode == "no-ids" else json.dumps(dict(verdict="green", checks={"pytest": {"state": "ran", "run_id": 10}})))
+        (fx.fdir / "jobs-10").write_text(pages)
+        real_attempt = window_gate._run_attempt
+        real_minutes, real_verify, real_wait, real_ev = window_gate.run_minutes, window_gate.verify, window_gate.wait_predecessor, window_gate.ev
+        fetch_failed = []
+        def minutes(*a, **kw):
+            if mode == "fetch-error" and not fetch_failed:
+                fetch_failed.append(True)
+                raise ValueError("fixture fetch failure")
+            return real_minutes(*a, **kw)
+        def emit(kind, *a, **kw):
+            if mode == "emit-error" and kind == "window-run-minutes":
+                raise ValueError("fixture emit failure")
+            return real_ev(kind, *a, **kw)
+        def verify(*a, **kw):
+            if mode == "cancel-inside" and a[1] != fx.base:
+                raise window_gate.TrainCancelled("fixture cancellation")
+            return real_verify(*a, **kw)
+        def attempt(*a, **kw):
+            if mode == "cancel-after":
+                a = (*a[:-1], {"fixture": True})
+            return real_attempt(*a, **kw)
+        def wait(*a, **kw):
+            if mode == "cancel-after" and fx.events("window-run-minutes"):
+                raise window_gate.TrainCancelled("fixture cancellation")
+            return real_wait(*a, **kw)
+        with patch.object(ghlimit, "gate", return_value={"ok": True}), \
+             patch.object(window_gate, "scope", return_value=candidate_scope), \
+             patch.object(window_gate, "run_minutes", side_effect=minutes), \
+             patch.object(window_gate, "ev", side_effect=emit), \
+             patch.object(window_gate, "verify", side_effect=verify), \
+             patch.object(window_gate, "wait_predecessor", side_effect=wait), \
+             patch.object(window_gate, "_run_attempt", side_effect=attempt):
+            rc = fx.go()
+        rows = fx.events("window-run-minutes")
+        check(len(rows) == int(mode == "cancel-after"), "honest AC3 exclusions/error isolation " + mode)
+        check(rc == (2 if mode.startswith("cancel") else 0), "honest AC3 unchanged verdict " + mode)
+    report("AC3", start, evidence)
+    # Keep the grep -q markers last: pipefail must not see a SIGPIPE from printf.
+    for ac in passed_cases:
+        print("honest-rate " + ac + " status=0")
+
+
 infra_checks()
 train_checks()
 rerun_checks()
@@ -2295,5 +2500,6 @@ timeout_checks()
 rechain_checks()
 main()
 merge_simple_checks()
+honest_rate_checks()
 if FAILS:
     sys.exit(1)
