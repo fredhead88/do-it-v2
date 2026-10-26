@@ -392,14 +392,15 @@ class BuildRunnerTests(unittest.TestCase):
         text = text.replace('run `pwd`', 'run `bash -c pwd`')
         self.spec(text=text)
         bundle, _ = self.bundle()
-        self.assertEqual([r["criterion"] for r in bundle["commands"]], ["AC1", "AC2", None])
+        self.assertEqual([r["criterion"] for r in bundle["commands"]], ["AC1", None])
+        self.assertEqual(bundle["commands"][-1]["covers"], ["AC2"])
         self.assertEqual(bundle["judgment_only"], ["AC3", "AC4", "AC5"])
         self.assertTrue(all(r["exit"] == 0 for r in bundle["commands"]))
         for cid, runner in (("AC1", "build"), ("AC2", "build"), ("AC3", "prod"),
                             ("AC4", "prod-browser"), ("AC5", "judgment")):
             print(cid, runner, "ran", "yes" if cid in ("AC1", "AC2") else "no")
         selected, _ = self.bundle("--criteria", "AC2,AC1")
-        self.assertEqual([r["criterion"] for r in selected["commands"]], ["AC1", "AC2"])
+        self.assertEqual([r["criterion"] for r in selected["commands"]], ["AC1", None])
         self.assertEqual(self.tail(selected["commands"][0]).decode().strip(), selected["commands"][0]["cwd"])
 
     def test_verification_prose_never_runs_or_gets_tagged(self):
@@ -417,13 +418,14 @@ class BuildRunnerTests(unittest.TestCase):
                 self.spec(text=clean + suffix)
                 bundle, _ = self.bundle()
                 rows = bundle["commands"]
-                self.assertEqual([row["criterion"] for row in rows], ["AC1", "AC2", None])
-                self.assertEqual([row["exit"] for row in rows], [0, 0, 0])
-                self.assertEqual(rows[-1]["cmd"], code.strip())
+                self.assertEqual([row["criterion"] for row in rows], [None])
+                self.assertEqual([row["exit"] for row in rows], [0])
+                self.assertEqual(rows[-1]["cmd"], code)
+                self.assertEqual(rows[-1]["covers"], ["AC1", "AC2"])
                 self.assertTrue(all("touch" not in row["cmd"] for row in rows))
                 self.assertFalse(marker.exists())
                 selected, _ = self.bundle("--criteria", "AC2")
-                self.assertEqual([row["criterion"] for row in selected["commands"]], ["AC2"])
+                self.assertEqual([row["criterion"] for row in selected["commands"]], [None])
                 self.assertEqual(selected["commands"][0]["exit"], 0)
                 self.assertIn("cd dashboard &&", selected["commands"][0]["cmd"])
 

@@ -815,15 +815,28 @@ def events_for(role, out, a, base):
         import fold, grading_env, routing
         events = fold.read_events()
         owed_criteria = fold.verdict_owed_criteria(events, a.subject) | set(routing.ruled_criteria(events, a.subject))
-        missing_capability = []
+        missing_capability, tooling_criteria = [], []
         for v in vs:
             if v["verdict"] != "cannot-assess" or v["ac"] in owed_criteria:
+                continue
+            if v.get("reason_code") == "tooling-defect":
+                tooling_criteria.append(v["ac"])
                 continue
             cap = v.get("missing_capability")
             if cap not in grading_env.CAPABILITIES:
                 cap = "unknown"
             missing_capability.append({"ac": v["ac"], "capability": cap})
         ev[0][1]["missing_capability"] = missing_capability
+        if tooling_criteria:
+            subj = f"grading-tooling:{a.subject}"
+            latest = next((e for e in reversed(events) if e.get("subject") == subj
+                           and e.get("type") in ("escalation-blocking", "decision", "unblocked")), None)
+            if latest is None or latest["type"] != "escalation-blocking":
+                ev.append(("escalation-blocking", dict(
+                    subject=subj, kind="grading-tooling", owner="executor",
+                    default="re-grade once after the tooling fix", criteria=sorted(set(tooling_criteria)),
+                    deadline=(datetime.now(timezone.utc) + timedelta(hours=24)).isoformat(timespec="seconds"),
+                    revert=f"doit append unblocked {subj}")))
         opened_here = set()
         for row in missing_capability:
             cap = row["capability"]

@@ -107,6 +107,21 @@ A command index in `comparison.undetermined` is never passing: its criterion is
 `cannot-assess` with `reason_code: evidence-missing`, never `tool-failed`.
 A bundle-covered command cannot fail because the grader could not execute it:
 `tool-failed` or `missing_capability` on that criterion is a validation error.
+Coverage includes each criterion in a whole-chain row's `covers` list. A
+per-criterion verdict may cite that whole-chain result when its captured output
+contains a line naming that criterion (`AC<n>`) and ending in `ok`. If the chain
+exits non-zero and that criterion has no such ok-line, use `unmet` with the
+failing id from `comparison`, or `cannot-assess` with `reason_code:
+evidence-missing`; never `tool-failed`.
+
+If a criterion's packet text is cut off, or the bundle runs a Verification
+statement as a fragment (an unbound variable, unclosed quote, or a command not
+in the chain), return `cannot-assess` with `reason_code: tooling-defect`.
+Never use `tool-failed` or `missing_capability: unknown` for packet or runner
+defects, and never attach `missing_capability` to a `tooling-defect` row. File
+the matching `evidence-gap` declaration, led by `problem:<slug> —`, naming the
+packet or runner defect. The Executor owns the resulting `grading-tooling`
+escalation.
 Without a bundle only, use the recorded base comparison or reproduce the failing
 command at the base in a scratch worktree; identical failures outside Writes
 are pre-existing. An unprovable comparison is missing evidence, never passing.

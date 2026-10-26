@@ -20,20 +20,7 @@ DONE = ("the verify command exits 0; no tracked file is modified and no untracke
 
 
 def done_condition(c, charter_id):
-    """L-spec-0129: the done-condition text THIS packet carries. A charter may
-    rule its own baseline convention (e.g. L-charter-0021's
-    FAIL-SET-IDENTICAL-OR-SMALLER — hold the fail set identical to or smaller
-    than a named baseline, rather than force exit 0) and record it as a
-    `done-condition-override` event on the charter's own subject — planner or
-    operator only. `fold.EMITS` is the sole authorization gate (R2): an override
-    authored by any other actor never reaches `by_subject`, so it is invisible
-    here — this function does not re-check the actor, because there is nothing
-    left to check by the time an event survives the fold.
-
-    No charter, or a charter with no override on file, returns the hardcoded
-    `DONE` string UNCHANGED — R1's regression floor (AC1): byte-identical to
-    current behavior. The LATEST override wins, same convention as every other
-    `last()`-style read in this file."""
+    """Latest fold.EMITS-authorized charter override, or DONE (L-spec-0129)."""
     if charter_id:
         ev = next((e for e in reversed(c.by.get(charter_id, []))
                    if e["type"] == "done-condition-override" and e.get("clause")), None)
@@ -72,12 +59,9 @@ FENCE = re.compile(r"^```")
 
 
 def _heading_positions(text):
-    """Line indices that are real markdown headings (`^#+ `) — SKIPPING any such
-    -looking line that sits inside a fenced (``` ``` ```) code block. Fence state
-    toggles on any line starting with ``` , the same convention every fenced
-    block in this repo already uses."""
+    """Physical-line indices of markdown headings outside triple-backtick fences."""
     out, in_fence = [], False
-    for i, line in enumerate(text.splitlines()):
+    for i, line in enumerate(text.split("\n")):
         if FENCE.match(line):
             in_fence = not in_fence
             continue
@@ -87,14 +71,8 @@ def _heading_positions(text):
 
 
 def section(text, name):
-    """The joined body of the first heading matching `name`, up to the next
-    heading of any level — skipping a `#`-prefixed line that sits inside a
-    fenced (``` ``` ```) code block, for BOTH the start match and the end
-    match (R3c). `str | None`: `None` when no matching heading exists outside
-    a fence; an existing heading with nothing beneath it before the next
-    heading returns `""` (found, just empty) — never a bare list, never `[]`
-    for absent."""
-    lines = text.splitlines()
+    """Stripped section outside fences: None if absent, empty string if empty."""
+    lines = text.split("\n")
     headings = _heading_positions(text)
     pat = re.compile(rf"^#+\s*\d*\.?\s*[^\n]*{name}[^\n]*$", re.I)
     start = next((i for i in headings if pat.match(lines[i])), None)
@@ -105,20 +83,50 @@ def section(text, name):
     return "\n".join(body_lines).strip()
 
 
-def criteria(body):
-    """The spec's acceptance criteria, verbatim and with their review paths.
+def _criterion_spans(body, *, allow_bullets=False):
+    """Physical-line ranges; headings and AC examples inside fences are data."""
+    lines = body.split("\n")
+    spans, current, in_fence = [], None, False
+    for index, line in enumerate(lines):
+        if FENCE.match(line):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        marker = r"(?:(?:[-*+]|\d+[.)])\s+)?" if allow_bullets else ""
+        anchor = re.match(r"\s*" + marker + r"\**(AC\d+)\** \[", line)
+        heading = re.match(r"^#+ ", line)
+        if anchor or heading:
+            if current is not None:
+                spans.append((*current, index))
+                current = None
+            if anchor:
+                current = (anchor[1], index)
+            if heading:
+                allow_bullets = bool(re.match(r"^#+\s*\d*\.?\s*[^\n]*Acceptance[^\n]*$", line, re.I))
+    if current is not None:
+        spans.append((*current, len(lines)))
+    return spans
 
-    One extractor for the grader and the reviewer, because they had two and the
-    reviewer's — an `AC\\d+ \\[` line anchor — missed a spec whose criteria are
-    bold (`**AC1 [ui] — ...**`). It reported "none found in the spec" and the
-    reviewer returned no blocking finding on a review of nothing
-    (`L-reviewer-0002`, 2026-09-08). A criterion the packet cannot find is
-    undetermined, and undetermined is never clean: refuse."""
-    sec = section(body, "Acceptance")
-    return ((sec.splitlines() if sec else None)
-            or [l for l in body.splitlines() if re.match(r"\s*\**AC\d+ \[", l)]
-            or die("no acceptance criteria in the spec — a grade or review of "
-                   "nothing is not a pass"))
+
+def criteria(body):
+    """Full criterion lines, including bold anchors; refuse if none exist."""
+    lines = body.split("\n")
+    spans = _criterion_spans(body)
+    if not spans:
+        die("no acceptance criteria in the spec — a grade or review of nothing is not a pass")
+    # Preserve the Acceptance preamble as before, without stripping the blocks.
+    headings = _heading_positions(body)
+    start = next((i for i in headings if re.match(r"^#+\s*\d*\.?\s*[^\n]*Acceptance[^\n]*$", lines[i], re.I)), None)
+    prefix = []
+    if start is not None:
+        end = next((i for i in headings if i > start), len(lines))
+        selected = [span for span in spans if start < span[1] < end]
+        if selected:
+            spans = selected
+            preamble = "\n".join(lines[start + 1:spans[0][1]]).strip()
+            prefix = preamble.split("\n") if preamble else []
+    return prefix + [line for _, start, end in spans for line in lines[start:end]]
 
 
 class Ctx:
@@ -972,9 +980,10 @@ def p_builder(c):
 
 
 def _drop_owed_blocks(lines, owed):
-    """L-spec-0435 (R10(a)'s enforcement half); body moved to `routing.drop_blocks`
-    (L-spec-8034, R12 size offset) and re-imported here under the old name."""
-    return routing.drop_blocks(lines, owed)
+    """Drop whole physical-line blocks, including fenced criterion examples."""
+    dropped = {i for cid, start, end in _criterion_spans("\n".join(lines), allow_bullets=True)
+               if cid in owed for i in range(start, end)}
+    return [line for i, line in enumerate(lines) if i not in dropped]
 
 
 def p_grader(c):
@@ -985,9 +994,7 @@ def p_grader(c):
     owed = ({e["criterion"] for e in c.all_of("owed-ac")} | set(fold.routed_criteria(c.evs, c.a.subject)) | set(routing.ruled_criteria(c.evs, c.a.subject))) - rejected
     crit = _drop_owed_blocks(criteria(body), owed)
     rows = [l for l in card.read_text().splitlines() if AC_ROW.match(l)]
-    # Every row, from the card object the wrapper writes beside the rendered card —
-    # the fifteen-line render drops rows past its room, and a grader that cannot see
-    # a claim cannot test it. Falls back to the render for a pre-sidecar card.
+    # The sidecar carries every row; older cards fall back to the capped render.
     side = card.with_suffix(".json")
     if side.is_file():
         import json
@@ -998,13 +1005,8 @@ def p_grader(c):
     ver = subprocess.run(["shasum", "-a", "256", str(v)], capture_output=True, text=True).stdout.split()[0][:16] \
         if v else "no script"
     done = done_condition(c, c.charter_id())
-    # R8/L-spec-0437: item 5 alone is gated on whether a view will actually exist
-    # for this grader dispatch — `models.resolve` is the same, backend-blind lookup
-    # `dispatch.main` itself uses, since `doit packet grader` runs before a backend
-    # is chosen and carries no argument naming one (Assumptions §4). Every other
-    # resolved backend, or no `models.toml` at all, keeps base_sha's worktree line
-    # (AC13) — only `backend == "seat"` names the view's own relative layout,
-    # never a host-absolute path (AC10).
+    # L-spec-0437: only seat uses view-relative paths. Resolve the backend exactly
+    # as dispatch.main does, before choosing item 5's checker location.
     seat_view = models.resolve("grader")["backend"] == "seat"
     item5 = (f"5. Checker: `verify.sh` · version {ver} · coverage note "
              f"\"the spec's Verification block\" · re-run it from this view's own root — "
@@ -1024,19 +1026,18 @@ def p_grader(c):
         f"6. The done-condition: {done}.",
         f"7. Standing verify-waivers applied to this checker: {waiver_line(c)}.",
     ] + amends.standing_item(c.evs, owed)       # L-spec-0755/R3(b): ids of standing rejections only
-    # L-spec-0668, 2026-10-05: a builder's own evidence/check prose sometimes names
-    # its own spawn id verbatim ("Re-run in worktree by L-builder-0973: ...") — a
-    # row the output card legitimately carries (AC1/AC2 "claims to test"), but one
-    # that trips builder_cues's "the builder's spawn id" Blindness line the moment
-    # it is quoted into item 2 above. Redact the token rather than refuse the whole
-    # packet before any spend — the same shape of fix as _minus_charter (strip a
-    # false cue) applied on the producing side instead: the text stays, the id
-    # does not.
-    # L-spec-0673, 2026-10-05: same family — a card quoting the build's base_sha (e.g. after a squash
-    # rework) tripped the base_sha Blindness cue. Redact every recorded base_sha of this subject.
+    # L-spec-0668/0673: redact builder spawn ids and recorded base commits from
+    # card prose before Blindness checks; criterion completeness is checked after.
     out = grader_packet.packet_items(c, out)
     shas = _subject_base_shas(c)
-    return [_redact_base_shas(_redact_builder_spawn(l), shas) for l in out]
+    out = [_redact_base_shas(_redact_builder_spawn(l), shas) for l in out]
+    item1 = "\n".join(out[:out.index("2. The output card's per-criterion rows. These are claims to test, not facts:")])
+    lines = body.split("\n")
+    # Independently read the source ranges: criteria() itself may have cut one.
+    for cid, start, end in _criterion_spans(body):
+        if cid not in owed and "\n".join(lines[start:end]) not in item1:
+            die(f"incomplete criterion {cid} from {spec}")
+    return out
 
 
 def _subject_base_shas(c):

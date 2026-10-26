@@ -117,31 +117,31 @@ def _main_branch(repo, project, env, deadline):
 
 
 def _commands(text, project, criteria):
-    # The registry alone maps criteria. Carry only the untagged preceding cds
-    # for a tagged Verification statement, never for a review_path command.
-    prefixes, cds = {}, []
-    for criterion, statement in checks._verification_statements(text):
-        if criterion is None and re.match(r"^cd\s+", statement):
-            cds.append(statement)
-        elif criterion is not None:
-            prefixes[(criterion, statement)] = list(cds)
+    chain = verification.block(text) or ""
+    tagged = _chain_covers(chain)
+    blocks = grading_env._criterion_blocks(text)
     commands, judgment = [], []
     for record in checks.records(text, project):
         criterion = record["criterion"]
         if criteria is not None and criterion not in criteria:
             continue
-        if record["runner"] != "build":
+        if criterion in tagged:
+            review = checks._review_command(blocks.get(criterion, ""))
+            if review:
+                commands.append((criterion, review))
+        elif record["runner"] != "build":
             judgment.append(criterion)
-            continue
-        for command in record["commands"]:
-            prefix = prefixes.get((criterion, command), [])
-            commands.append((criterion, " &&\n".join([*prefix, command])))
-    chain = (verification.block(text) or "").strip()
-    if criteria is None and chain:
+        else:
+            commands.extend((criterion, command) for command in record["commands"])
+    if chain and (criteria is None or set(tagged).intersection(criteria)):
         commands.append((None, chain))
     if not commands:
         raise Undetermined("no build command or Verification block")
     return commands, judgment
+
+
+def _chain_covers(chain):
+    return sorted(set(re.findall(r"^[ \t]*#\s*(AC\d+)\b", chain, re.M)))
 
 
 def _source_paths(command):
@@ -295,6 +295,8 @@ def _run_tree(spec, sha, repo, row, commands, tail_dir, offset, tail_limit, dead
                          "wall_s": round(time.monotonic() - started, 3),
                          "out_sha256": hashlib.sha256(output).hexdigest(), "out_bytes": len(output),
                          "tail": str(tail), "failing_ids": ids})
+            if criterion is None:
+                rows[-1]["covers"] = _chain_covers(command)
             parsed.append(log)
         return rows, parsed, missing, rewrites, summary
     finally:

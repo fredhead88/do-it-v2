@@ -79,6 +79,7 @@
             "enum": [
               "evidence-missing",
               "tool-failed",
+              "tooling-defect",
               "criterion-unevaluable-from-packet",
               "evidence-contradictory"
             ]
