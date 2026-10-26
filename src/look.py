@@ -333,7 +333,32 @@ def _ask_user_question_id(entry):
 def _has_tool_result(entries, after_idx, tool_use_id):
     return any(isinstance(c, dict) and c.get("type") == "tool_result" and c.get("tool_use_id") == tool_use_id
               for en in entries[after_idx + 1:] for c in (en.get("message") or {}).get("content") or [])
-def _check_pane_at_menu_claude(events, root, briefs, sessions_dir=None, projects_dir=None):
+def _scan_menu(rows):
+    last, question, answered = None, (None, None), (False, None)
+    for _, entry in rows:
+        if entry.get("type") == "assistant":
+            last = entry
+            question = look_wallclock._defer(_ask_user_question_id, entry)
+            answered = (False, None)
+        elif question[0] and answered == (False, None):
+            answered = look_wallclock._defer(_has_tool_result, [None, entry], 0, question[0])
+    return last, question, answered
+
+
+def _legacy_menu(path):
+    entries = _read_jsonl(path)
+    idx = max((i for i, entry in enumerate(entries) if entry.get("type") == "assistant"), default=None)
+    if idx is None:
+        return None, (None, None), (False, None)
+    last = entries[idx]
+    question = look_wallclock._defer(_ask_user_question_id, last)
+    answered = (False, None)
+    if question[0]:
+        answered = look_wallclock._defer(_has_tool_result, entries, idx, question[0])
+    return last, question, answered
+
+
+def _check_pane_at_menu_claude(events, root, briefs, sessions_dir=None, projects_dir=None, *, tally=None):
     live = panes.live_panes(sessions_dir=sessions_dir, events=events)
     idle = {p["name"] for p in live if p.get("status") == "idle" and panes.ledger_role(p.get("name"))}
     joined = pane_resume._live_join(sessions_dir, idle)
@@ -342,18 +367,17 @@ def _check_pane_at_menu_claude(events, root, briefs, sessions_dir=None, projects
         if not sid or not target: continue
         tp = pane_resume._find_transcript(sid, projects_dir)
         if tp is None: continue
-        entries = _read_jsonl(tp)
-        idx = max((i for i, en in enumerate(entries) if en.get("type") == "assistant"), default=None)
-        if idx is None: continue
-        last = entries[idx]
+        last, question, answered = look_wallclock._transcript_read(
+            tp, lambda: _legacy_menu(tp), lambda factory: _scan_menu(factory()), tally)
+        if last is None: continue
         cls = pane_resume._classify(last)
         key = f"{pane}:{last.get('uuid')}"
         if cls in ("quota", "auth"):
             r = _write_brief("pane-at-menu", key, "operator", {"class": cls}, events, root)
             r and briefs.append(r)
             continue
-        tool_use_id = _ask_user_question_id(last)
-        if tool_use_id and not _has_tool_result(entries, idx, tool_use_id):
+        tool_use_id = look_wallclock._value(question)
+        if tool_use_id and not look_wallclock._value(answered):
             r = _write_brief("pane-at-menu", key, "thinker", {"class": "menu"}, events, root)
             r and briefs.append(r)
 def _check_pane_at_menu_codex(cfg, runner, deadline, events, root, briefs):
@@ -1052,13 +1076,13 @@ def _check_lane_stale(events, now, root, briefs):
         _fire_undetermined("lane-stale", events, root, briefs)
 
 
-def _check_wallclock(events, runner, now, root, cfg, deadline, dry_run, briefs):
+def _check_wallclock(events, runner, now, root, cfg, deadline, dry_run, briefs, *, tally=None):
     """The four wall-clock checks (L-charter-0038 R6), wrapped in the SAME
     lazily-guarded broad `except Exception` shape `_check_crons` uses around
     `crons.check()` (Seams) — a raise here degrades to one `reading-undetermined`
     (key `undetermined:wallclock`) and this pass's own "wallclock" key is `[]`."""
     try:
-        result = look_wallclock.run(events, runner, now, root, cfg, deadline, _write_brief, dry_run)
+        result = look_wallclock.run(events, runner, now, root, cfg, deadline, _write_brief, dry_run, tally=tally)
     except Exception:
         _fire_undetermined("wallclock", events, root, briefs)
         return []
@@ -1067,6 +1091,7 @@ def _check_wallclock(events, runner, now, root, cfg, deadline, dry_run, briefs):
 def run(events, *, now=None, runner=None, root=None, toml_path=None, dry_run=False,
         crons_manifest=None, crond_dir=None, repo=None):
     global _PASS_LOCKED, _DRY_RUN
+    tally = look_wallclock._new_tally()
     now = now or datetime.now(timezone.utc)
     root = pathlib.Path(root) if root is not None else fold.ROOT
     runner = runner or Runner()
@@ -1080,7 +1105,7 @@ def run(events, *, now=None, runner=None, root=None, toml_path=None, dry_run=Fal
         fcntl.flock(lockf, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
         lockf.close()
-        return {"briefs": [], "answered": []}
+        return {"briefs": [], "answered": [], **tally}
     _PASS_LOCKED, _DRY_RUN = True, dry_run
     look_wallclock._CLASSES = cfg.get("classes") or {}
     briefs, answered = [], []
@@ -1091,7 +1116,7 @@ def run(events, *, now=None, runner=None, root=None, toml_path=None, dry_run=Fal
         for row in cfg["prod"]:
             _check_prod(row, runner, now, deadline, single, events, root, briefs, answered)
         _check_packet_unserved(events, root, briefs)
-        _check_pane_at_menu_claude(events, root, briefs)
+        _check_pane_at_menu_claude(events, root, briefs, tally=tally)
         _check_pane_at_menu_codex(cfg, runner, deadline, events, root, briefs)
         _check_pane_dead(events, now, root, briefs)
         _check_supervisor_stale_code(events, now, runner, deadline, root, briefs, answered)
@@ -1112,7 +1137,7 @@ def run(events, *, now=None, runner=None, root=None, toml_path=None, dry_run=Fal
         _check_spec_idle(events, now, root, briefs, answered)
         _check_lane_stale(events, now, root, briefs)
         _check_owed_overdue(events, now, root, briefs)
-        wallclock_events = _check_wallclock(events, runner, now, root, cfg, deadline, dry_run, briefs)
+        wallclock_events = _check_wallclock(events, runner, now, root, cfg, deadline, dry_run, briefs, tally=tally)
         r = _clear("look-stale", "look-stale", "fresh pass", events, root)
         r and answered.append(r)
         if not dry_run:
@@ -1126,13 +1151,20 @@ def run(events, *, now=None, runner=None, root=None, toml_path=None, dry_run=Fal
             fcntl.flock(lockf, fcntl.LOCK_UN)
         except OSError: pass
         lockf.close()
-    return {"briefs": briefs, "answered": answered, "wallclock": wallclock_events}
+    return {"briefs": briefs, "answered": answered, "wallclock": wallclock_events, **tally}
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="doit look")
     ap.add_argument("--dry-run", action="store_true")
     a = ap.parse_args(argv)
+    print(f"look-start: pid={os.getpid()} at={datetime.now(timezone.utc).isoformat(timespec='seconds')}", flush=True)
     result = run(fold.read_events(), dry_run=a.dry_run)
-    print(f"look: {len(result['briefs'])} brief(s), {len(result['answered'])} answered")
+    import resource
+    print(f"look: {len(result['briefs'])} brief(s), {len(result['answered'])} answered"
+          f" pid={os.getpid()} at={datetime.now(timezone.utc).isoformat(timespec='seconds')}"
+          f" maxrss_mib={resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 1024}"
+          f" transcripts_read={result['transcripts_read']}"
+          f" transcript_fallbacks={result['transcript_fallbacks']['count']}"
+          f" transcripts_skipped={result['transcripts_skipped']}")
     return 0
 if __name__ == "__main__":
     sys.exit(main(sys.argv[1:]))
