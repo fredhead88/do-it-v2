@@ -23,7 +23,7 @@ corrected one (Assumptions). Only `gh_run_list` is `Runner`-routed and
 deadline-gated; every other read here is a plain filesystem/ledger read,
 matching `_check_pane_at_menu_claude` precedent.
 """
-import json, pathlib, re, sys
+import json, os, pathlib, re, sys
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
@@ -37,6 +37,115 @@ DROP_CONCLUSIONS = {"cancelled", "skipped", "neutral"}
 
 # Set (and reset to {}) from INSIDE look.run(); read only by fix_for(), below.
 _CLASSES = {}
+TRANSCRIPT_FALLBACK_MAX_BYTES = 32 * 1024 * 1024
+
+
+def read_mode():
+    return "legacy" if os.environ.get("DOIT_LOOK_TRANSCRIPT_READ") == "legacy" else "scan"
+
+
+def _new_tally():
+    return {"transcripts_read": 0, "transcript_fallbacks": {"count": 0, "classes": []},
+            "transcripts_skipped": 0}
+
+
+def _defer(fn, *args):
+    try:
+        return fn(*args), None
+    except Exception as exc:
+        return None, exc.with_traceback(None)
+
+
+def _value(pair):
+    value, error = pair
+    if error is not None:
+        raise error
+    return value
+
+
+def _transcript_read(path, legacy, scan, tally, *, strict=False):
+    """One decision, including all scans/retries; predicates raise after return."""
+    if tally is None:
+        tally = _new_tally()
+    tally["transcripts_read"] += 1
+    if read_mode() == "legacy":
+        return legacy()
+    try:
+        import transcript_scan
+        return scan(lambda: transcript_scan.iter_jsonl(path))
+    except UnicodeDecodeError:
+        raise
+    except OSError:
+        if strict:
+            raise
+        return scan(lambda: iter(()))
+    except Exception as exc:
+        classes = tally["transcript_fallbacks"]["classes"]
+        name = type(exc).__name__
+        if name not in classes and len(classes) < 5:
+            classes.append(name)
+        try:
+            size = pathlib.Path(path).stat().st_size
+        except OSError:
+            size = None
+        if size is not None and size <= TRANSCRIPT_FALLBACK_MAX_BYTES:
+            tally["transcript_fallbacks"]["count"] += 1
+            # Outside the scan's try: legacy exceptions keep their original route.
+        else:
+            tally["transcripts_skipped"] += 1
+            if strict:
+                raise OSError("transcript scan skipped") from None
+            return scan(lambda: iter(()))
+    return legacy()
+
+
+def _scan_quota_hit(rows):
+    hit, structured = None, (None, None)
+    for lineno, entry in rows:
+        if _quota_hit_index([(lineno, entry)]) is not None:
+            hit, structured = (lineno, entry), (None, None)
+        if hit is not None and structured == (None, None):
+            structured = _defer(_structured_resets_at, [(lineno, entry)])
+    return hit, structured
+
+
+def _legacy_quota_hit(path):
+    rows = _read_jsonl_lines(path)
+    idx = _quota_hit_index(rows)
+    if idx is None:
+        return None, (None, None)
+    return rows[idx], _defer(_structured_resets_at, rows[idx:])
+
+
+def _scan_resolved(rows, hit_ts):
+    result = (False, None)
+    for _, entry in rows:
+        if result != (False, None) or entry.get("type") != "assistant":
+            continue
+        ts = panes._ts(entry.get("timestamp"))
+        if ts and ts > hit_ts:
+            cls, error = _defer(pane_resume._classify, entry)
+            result = (cls == "none", error)
+    return result
+
+
+def _scan_quota_resolution(factory, hit_ts_raw):
+    if hit_ts_raw is None:
+        hit = None
+        for lineno, entry in factory():
+            if _quota_hit_index([(lineno, entry)]) is not None:
+                hit = entry
+        hit_ts_raw = hit.get("timestamp") if hit is not None else None
+    return _scan_resolved(factory(), panes._ts(hit_ts_raw) or EPOCH)
+
+
+def _legacy_quota_resolution(path, hit_ts_raw):
+    rows = _read_jsonl_lines(path)
+    if hit_ts_raw is None:
+        idx = _quota_hit_index(rows)
+        hit_ts_raw = rows[idx][1].get("timestamp") if idx is not None else None
+    # Same predicate order and short circuit as the original list loop.
+    return _scan_resolved(rows, panes._ts(hit_ts_raw) or EPOCH)
 
 
 # ── small local duplicates (Assumptions: no reverse import of look.py) ──────
@@ -161,7 +270,7 @@ def _derive_quota_from_ledger(events):
     return out
 
 
-def _check_quota(events, now, quota_state, state_missing, emit):
+def _check_quota(events, now, quota_state, state_missing, emit, *, tally=None):
     proj_root = pane_resume.PROJECTS
     window_start = now - timedelta(hours=2)
     sid_to_pane = _sid_to_pane(events, now)
@@ -172,17 +281,17 @@ def _check_quota(events, now, quota_state, state_missing, emit):
         try: mtime = datetime.fromtimestamp(f.stat().st_mtime, timezone.utc)
         except OSError: continue
         if mtime < window_start: continue
-        rows = _read_jsonl_lines(f)
-        hit_i = _quota_hit_index(rows)
-        if hit_i is None: continue
-        lineno, hit = rows[hit_i]
+        found, structured_result = _transcript_read(
+            f, lambda: _legacy_quota_hit(f), lambda factory: _scan_quota_hit(factory()), tally)
+        if found is None: continue
+        lineno, hit = found
         sid = f.stem
         evidence = f"{sid}.jsonl:{lineno}"
         if any(e.get("type") == "pane-paused" and e.get("evidence") == evidence for e in events):
             continue
         pane = sid_to_pane.get(sid, sid)
         resets_at = _parsed_resets_at(str(hit.get("content") or ""))
-        structured = _structured_resets_at(rows[hit_i:])
+        structured = _value(structured_result)
         if structured: resets_at = structured
         opens = [e for e in events if e.get("type") == "escalation-blocking"
                  and e.get("subject") == pane and e.get("reason_class") == "quota"]
@@ -201,18 +310,9 @@ def _check_quota(events, now, quota_state, state_missing, emit):
         pane, src, hit_ts_raw = entry.get("pane"), entry.get("src"), entry.get("hit_ts")
         tp = pane_resume._find_transcript(sid, None)
         if tp is None: continue
-        rows = _read_jsonl_lines(tp)
-        if hit_ts_raw is None:
-            hi = _quota_hit_index(rows)
-            hit_ts_raw = rows[hi][1].get("timestamp") if hi is not None else None
-        hit_ts = panes._ts(hit_ts_raw) or EPOCH
-        resolved = False
-        for _, e in rows:
-            if e.get("type") != "assistant": continue
-            t = panes._ts(e.get("timestamp"))
-            if t and t > hit_ts and pane_resume._classify(e) == "none":
-                resolved = True
-                break
+        resolved = _value(_transcript_read(
+            tp, lambda: _legacy_quota_resolution(tp, hit_ts_raw),
+            lambda factory: _scan_quota_resolution(factory, hit_ts_raw), tally))
         if not resolved: continue
         emit("pane-pause-ended", {"pane": pane, "reason": "quota", "ref": src})
         if not state_missing: quota_state.pop(sid, None)
@@ -261,7 +361,34 @@ def _check_ci(rows, runner, deadline, now, ci_state, emit, undetermined):
 
 
 # ── check 3: message answered ────────────────────────────────────────────────
-def _check_message_answered(events, emit, undetermined):
+def _scan_message(rows, needle):
+    matched, reply, error = False, None, None
+    for _, entry in rows:
+        if error is not None or reply is not None:
+            continue
+        if not matched:
+            if needle and entry.get("type") == "user":
+                text, error = _defer(pane_resume._entry_text, entry)
+                if error is None:
+                    matched = bool(needle and needle in " ".join(text.split()))
+        elif entry.get("type") == "assistant":
+            cls, error = _defer(pane_resume._classify, entry)
+            if error is None and cls == "none":
+                reply = entry
+    return reply, error
+
+
+def _legacy_message(path, needle):
+    entries = [entry for _, entry in _read_jsonl_lines_strict(path)]
+    match = next((i for i, entry in enumerate(entries) if entry.get("type") == "user"
+                  and needle and needle in " ".join(pane_resume._entry_text(entry).split())), None)
+    if match is None:
+        return None, None
+    return next((entry for entry in entries[match + 1:] if entry.get("type") == "assistant"
+                 and pane_resume._classify(entry) == "none"), None), None
+
+
+def _check_message_answered(events, emit, undetermined, *, tally=None):
     answered_refs = {e.get("ref") for e in events if e.get("type") == "message-answered"}
     for e in events:
         if e.get("type") != "message-sent": continue
@@ -291,21 +418,15 @@ def _check_message_answered(events, emit, undetermined):
         if tp is None:
             undetermined("message-answered")
             continue
+        needle = " ".join(str(text).split())[:120]
         try:
-            entries = [e2 for _, e2 in _read_jsonl_lines_strict(tp)]
+            reply_result = _transcript_read(
+                tp, lambda: _legacy_message(tp, needle),
+                lambda factory: _scan_message(factory(), needle), tally, strict=True)
         except OSError:
             undetermined("message-answered")
             continue
-        needle = " ".join(str(text).split())[:120]
-        match_idx = None
-        for i, entry in enumerate(entries):
-            if entry.get("type") != "user": continue
-            if needle and needle in " ".join(pane_resume._entry_text(entry).split()):
-                match_idx = i
-                break
-        if match_idx is None: continue
-        reply_entry = next((en for en in entries[match_idx + 1:]
-                            if en.get("type") == "assistant" and pane_resume._classify(en) == "none"), None)
+        reply_entry = _value(reply_result)
         if reply_entry is None: continue
         t1 = panes._ts(reply_entry.get("timestamp"))
         delay_min = (t1 - ts0).total_seconds() / 60 if t1 else None
@@ -330,7 +451,7 @@ def _check_planner_stuck(events, root, write_brief, out_briefs):
 
 
 # ── assembly ─────────────────────────────────────────────────────────────────
-def run(events, runner, now, root, cfg, deadline, write_brief, dry_run):
+def run(events, runner, now, root, cfg, deadline, write_brief, dry_run, *, tally=None):
     root = pathlib.Path(root)
     events = list(events or ())
     out_events, out_briefs = [], []
@@ -360,11 +481,11 @@ def run(events, runner, now, root, cfg, deadline, write_brief, dry_run):
         out_events.append(row)
         return row
 
-    try: _check_quota(events, now, quota_state, state_missing, emit)
+    try: _check_quota(events, now, quota_state, state_missing, emit, tally=tally)
     except Exception: undetermined("quota")
     try: _check_ci(cfg.get("ci") or [], runner, deadline, now, ci_state, emit, undetermined)
     except Exception: undetermined("ci")
-    try: _check_message_answered(events, emit, undetermined)
+    try: _check_message_answered(events, emit, undetermined, tally=tally)
     except Exception: undetermined("message-answered")
     try: _check_planner_stuck(events, root, write_brief, out_briefs)
     except Exception: undetermined("planner-attempts-stuck")

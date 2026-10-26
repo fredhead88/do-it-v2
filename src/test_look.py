@@ -27,6 +27,10 @@ os.environ["DOIT_ROOT"] = str(_FIXTURE_ROOT)
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 import crons, dispatch, fold, look, look_wallclock, pane_resume, panes  # noqa: E402
 
+# The cron hermeticity harness also executes this script via runpy, after
+# importing fold. Environment changes alone do not repoint that cached module.
+fold.ROOT, fold.EVENTS = _FIXTURE_ROOT, _FIXTURE_ROOT / "events"
+
 # All watchdog deliveries are local fakes, including pre-existing run fixtures.
 look._send_operator = lambda text, root: 0
 
@@ -392,7 +396,8 @@ heldfd = open(lockp2, "w")
 import fcntl
 fcntl.flock(heldfd, fcntl.LOCK_EX)
 res2a = look.run([], now=NOW, runner=FakeRunner(), root=root2, toml_path=toml2)
-ok(res2a == {"briefs": [], "answered": []}, "AC2: a concurrent held lock returns empty, appends nothing")
+ok(res2a == {"briefs": [], "answered": [], **look_wallclock._new_tally()},
+   "AC2: a concurrent held lock returns empty with zero transcript counts, appends nothing")
 ok(not (root2 / "events" / "L-look-local.jsonl").exists(), "AC2: nothing appended while locked")
 fcntl.flock(heldfd, fcntl.LOCK_UN)
 heldfd.close()
@@ -855,7 +860,8 @@ fake_briefs_ac8 = [{"type": "brief", "condition": "planner-attempts-stuck", "key
                    "problem": "planner-attempts-stuck", "reading": {}, "measured_at": "m", "subject": "s", "why": "w"}]
 
 
-def fake_wallclock_run(events, runner, now, root, cfg, deadline, write_brief, dry_run):
+def fake_wallclock_run(events, runner, now, root, cfg, deadline, write_brief, dry_run, *, tally=None):
+    ok(tally == look_wallclock._new_tally(), '1652 empty pass threads its tally to wallclock')
     calls_ac8.append((events, runner, now, root, cfg, deadline, write_brief, dry_run))
     order_ac8.append("wallclock")
     return {"events": list(fake_events_ac8), "briefs": list(fake_briefs_ac8)}
@@ -2447,3 +2453,71 @@ ok(not any(e.get('type') == 'brief' and e.get('condition') == 'disk-high' for e 
 body1541 = json.dumps({'raised_at': 91, 'cleared_at': 84, 'quiet_at': 88, 'thresholds': [90, 85]}, sort_keys=True)
 print(json.dumps(dict(url='cli://look/AC6', status=0, body_sha256=hashlib.sha256(body1541.encode()).hexdigest(), body_excerpt=body1541)))
 print('L1541 AC6 pass')
+
+# L-spec-1652 AC5: main's observation channel, without any real reads/calls.
+import contextlib, io, re
+ok(fold.ROOT == _FIXTURE_ROOT, '1652 fold root is the isolated fixture')
+import pwd
+ok(fold.ROOT != pathlib.Path(pwd.getpwuid(os.getuid()).pw_dir) / '.do-it',
+   '1652 fixture differs from the invoking account ledger')
+fixed1652 = {'briefs': [1, 2], 'answered': [1], 'transcripts_read': 7,
+             'transcript_fallbacks': {'count': 2, 'classes': ['RuntimeError']}, 'transcripts_skipped': 1}
+
+
+def main1652(result):
+    output = io.StringIO()
+    with patch.object(fold, 'read_events', return_value=[]), patch.object(look, 'run', return_value=result), \
+         patch.object(pane_resume, '_find_transcript', side_effect=AssertionError('no transcript read')), \
+         contextlib.redirect_stdout(output):
+        ok(look.main([]) == 0, '1652 main returns success')
+    lines = output.getvalue().splitlines()
+    ok(len(lines) == 2, '1652 main prints exactly two lines')
+    start = re.fullmatch(r'look-start: pid=(\d+) at=(\S+)', lines[0])
+    end = re.fullmatch(r'look: (\d+) brief\(s\), (\d+) answered pid=(\d+) at=(\S+) '
+                       r'maxrss_mib=(\d+) transcripts_read=(\d+) transcript_fallbacks=(\d+) transcripts_skipped=(\d+)', lines[1])
+    ok(start is not None and end is not None, '1652 exact start/summary formats')
+    ok(int(start[1]) == int(end[3]) == os.getpid(), '1652 process pid matches')
+    t0, t1 = datetime.fromisoformat(start[2]), datetime.fromisoformat(end[4])
+    ok(t0.utcoffset() == t1.utcoffset() == timedelta(0) and t1 >= t0, '1652 UTC times ordered')
+    ok(int(end[5]) > 0, '1652 peak memory is positive MiB')
+    ok([int(end[i]) for i in (1, 2, 6, 7, 8)] ==
+       [len(result['briefs']), len(result['answered']), result['transcripts_read'],
+        result['transcript_fallbacks']['count'], result['transcripts_skipped']], '1652 summary values match result')
+    return lines
+
+
+lines1652 = main1652(fixed1652)
+
+
+class Flushed1652(io.StringIO):
+    flushed = False
+    def flush(self): self.flushed = True
+
+
+out1652 = Flushed1652()
+def failed1652(*args, **kwargs):
+    ok(out1652.flushed, '1652 start flushed before run')
+    raise RuntimeError('fixture failure')
+with patch.object(fold, 'read_events', return_value=[]), patch.object(look, 'run', side_effect=failed1652), \
+     contextlib.redirect_stdout(out1652):
+    try:
+        look.main([])
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError('1652 run failure must propagate')
+ok(len(out1652.getvalue().splitlines()) == 1 and out1652.getvalue().startswith('look-start:'),
+   '1652 raised pass prints only start')
+root1652 = newroot()
+(root1652 / 'look').mkdir()
+with (root1652 / 'look/look.lock').open('w') as lock1652:
+    import fcntl
+    fcntl.flock(lock1652, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    held1652 = look.run([], root=root1652, runner=FakeRunner(), toml_path=write_toml(root1652, ci=[]))
+ok(all(held1652[k] == v for k, v in look_wallclock._new_tally().items()), '1652 held lock returns zero tally')
+main1652(held1652)
+body1652 = json.dumps({'lines': lines1652, 'failure_propagates': True, 'start_flushed': True,
+                       'lock_counts': {k: held1652[k] for k in look_wallclock._new_tally()}}, sort_keys=True)
+print(json.dumps(dict(url='cli://look/L-spec-1652/AC5', status=0,
+                      body_sha256=hashlib.sha256(body1652.encode()).hexdigest(), body_excerpt=body1652)))
+print('L-spec-1652 AC5 ok')
