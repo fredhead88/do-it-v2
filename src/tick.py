@@ -11,7 +11,7 @@ and the one event it appends is what `fold` reads for staleness. The Executor is
 a supervised pane that reads the same lane for itself; nothing here launches it.
 """
 import ledger_cache
-import argparse, fcntl, os, pathlib, re, socket, sys, time
+import argparse, fcntl, json, os, pathlib, re, socket, sys, time
 from datetime import datetime, timezone
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import carry, dispatch, fold, intake, notes, pane_resume, panes, tree_cleanup  # noqa: E402
@@ -377,7 +377,7 @@ def _steps(events, specs, now):
     return nextstep.next_steps(events, specs, now, lane_rules.load(), waves)
 
 
-def run_steps(events, specs, now, *, dispatcher=None, dry_run=False, handled=frozenset(), steps=None):
+def run_steps(events, specs, now, *, dispatcher=None, dry_run=False, handled=frozenset(), steps=None, admission: dict | None = None):
     """Shared entry point; a tick pass supplies its single computed snapshot."""
     import autodispatch
     import lane_driver
@@ -385,47 +385,84 @@ def run_steps(events, specs, now, *, dispatcher=None, dry_run=False, handled=fro
     if steps is None:
         steps = _steps(events, specs, now)
     runner = _PassDispatcher(dispatcher or autodispatch._real_runner, events, specs, now, dry_run)
-    slots = dict(builder=max(0, autodispatch.capacity() - lane_driver._in_flight_role(events, now, 'builder')),
-                 reviewer=max(0, lane_driver.capacity() - lane_driver._in_flight_role(events, now, 'reviewer')))
-    out = []
-    for step in sorted(steps, key=lambda s: (s.since, s.item)):
-        if step.item in handled:
-            continue
-        if step.reason.startswith('undetermined:') or step.state == 'hold':
-            out.append(f"{'undetermined' if step.reason.startswith('undetermined:') else 'hold'} {step.item}: {step.reason}")
-            continue
-        if step.owner != 'tick' or step.action not in LAUNCH_ACTIONS:
-            continue
-        if step.action == 'merge':
-            import merge_queue
-            try:
-                head = merge_queue.next_candidate(events)
-            except (ValueError, OSError) as exc:
-                out.append(f'hold undetermined: {exc}')
-                continue
-            if head is None or step.item_kind == 'spec' and step.item != head:
-                out.append('hold undetermined: merge Step item differs from queue head'
-                           if head is not None else 'hold undetermined: no merge candidate')
-                continue
-        role = ROUTINE_ROLES.get(step.action)
-        if role in slots and slots[role] <= 0:
-            out.append(f'seat-wait {step.item} {step.action}')
-            continue
-        if dry_run:
-            out.append(f'would act {step.item} {step.action}')
-            if role in slots:
-                slots[role] -= 1
-            continue
+    in_flight = {role: lane_driver._in_flight_role(events, now, role)
+                 for role in ('builder', 'reviewer')}
+    slots = dict(builder=max(0, autodispatch.capacity() - in_flight['builder']),
+                 reviewer=max(0, lane_driver.capacity() - in_flight['reviewer']))
+    gate, gate_errors = None, []
+    if not dry_run:
         try:
-            spawn = launch(step, dispatcher=runner)
-            if spawn:
-                out.append(f'acted {step.item} {step.action} spawn={spawn}')
+            import loadgate
+            gate = loadgate.begin(running=in_flight)
+        except Exception as exc:
+            if admission is not None:
+                admission['admission_error'] = str(exc)[:160]
+    out = []
+    try:
+        for step in sorted(steps, key=lambda s: (s.since, s.item)):
+            if step.item in handled:
+                continue
+            if step.reason.startswith('undetermined:') or step.state == 'hold':
+                out.append(f"{'undetermined' if step.reason.startswith('undetermined:') else 'hold'} {step.item}: {step.reason}")
+                continue
+            if step.owner != 'tick' or step.action not in LAUNCH_ACTIONS:
+                continue
+            if step.action == 'merge':
+                import merge_queue
+                try:
+                    head = merge_queue.next_candidate(events)
+                except (ValueError, OSError) as exc:
+                    out.append(f'hold undetermined: {exc}')
+                    continue
+                if head is None or step.item_kind == 'spec' and step.item != head:
+                    out.append('hold undetermined: merge Step item differs from queue head'
+                               if head is not None else 'hold undetermined: no merge candidate')
+                    continue
+            role = ROUTINE_ROLES.get(step.action)
+            if role in slots and slots[role] <= 0:
+                out.append(f'seat-wait {step.item} {step.action}')
+                continue
+            if gate is not None:
+                try:
+                    gate.check(step.item, role or 'window_gate')
+                except Exception as exc:
+                    gate_errors.append('check: ' + str(exc))
+            if dry_run:
+                out.append(f'would act {step.item} {step.action}')
                 if role in slots:
                     slots[role] -= 1
-            else:
-                out.append(f'hold {step.item}: standing dispatch failure')
-        except ValueError as exc:
-            out.append(f'failed {step.item} {step.action}: {exc}')
+                continue
+            try:
+                spawned = True  # Any exception may follow a started process.
+                try:
+                    spawn = launch(step, dispatcher=runner)
+                    spawned = bool(spawn)
+                finally:
+                    if gate is not None:
+                        try:
+                            gate.note_launch(step.item, spawned)
+                        except Exception as exc:
+                            gate_errors.append('note_launch: ' + str(exc))
+                if spawn:
+                    out.append(f'acted {step.item} {step.action} spawn={spawn}')
+                    if role in slots:
+                        slots[role] -= 1
+                else:
+                    out.append(f'hold {step.item}: standing dispatch failure')
+            except ValueError as exc:
+                out.append(f'failed {step.item} {step.action}: {exc}')
+    finally:
+        if gate is not None:
+            try:
+                fields = gate.finish()
+            except Exception as exc:
+                fields = {'admission_error': 'finish: ' + str(exc)}
+            if gate_errors:
+                fields['admission_error'] = '; '.join(
+                    ([fields['admission_error']] if fields.get('admission_error') else [])
+                    + gate_errors)[:160]
+            if admission is not None:
+                admission.update(fields)
     return out
 
 
@@ -678,6 +715,7 @@ def _record():
     # between here and Steps (Boundaries), so an event `run()` appends
     # this pass never changes THIS pass's own `todo`. A raise never stops the
     # tick's own heartbeat, exactly like `carry_error` above.
+    admission = {}
     autodispatch_error = None
     lane_driver_log_error = None
     dispatch_started = time.monotonic()
@@ -692,7 +730,7 @@ def _record():
         import autodispatch
         import merge_queue
         steps = _steps(ev, specs, fold.NOW)
-        outcomes = run_steps(ev, specs, fold.NOW, steps=steps)
+        outcomes = run_steps(ev, specs, fold.NOW, steps=steps, admission=admission)
         outcomes.extend(autodispatch.redispatch_dead(ev, specs, fold.NOW,
                         handled={s.item for s in steps if s.state == 'action' and s.owner == 'tick'
                                  and s.action in ROUTINE_ACTIONS}))
@@ -703,6 +741,15 @@ def _record():
             autodispatch_error = '; '.join(failures)
     except Exception as e:
         autodispatch_error = f"{e}"
+        if not admission:
+            try:
+                import loadgate
+                config, _ = loadgate.settings()
+                if config['mode'] != 'off':
+                    admission.update(admission_mode=config['mode'],
+                                     admission_error=('not reached: ' + str(e))[:160])
+            except Exception as exc:
+                admission['admission_error'] = str(exc)[:160]
         log_outcomes([f'failed autodispatch: {e}'])
     log_outcomes([f'finished autodispatch elapsed_s={time.monotonic() - dispatch_started:.3f}'])
     # L-charter-0042/L-spec-0486 (cleanup-on-finish), R15a (record): the tick's own
@@ -784,6 +831,12 @@ def _record():
         kv["worktrees_retained"] = worktrees_retained
     if proving_error:
         kv["proving_error"] = proving_error
+    try:
+        if any(not key.startswith('admission_') for key in admission) or len(json.dumps(admission).encode()) > 1024:
+            admission = {'admission_error': 'oversize'}
+    except Exception:
+        admission = {'admission_error': 'oversize'}
+    kv.update(admission)
     dispatch.emit(tick_path(), {}, "tick", **kv)
     # A caught sender exception can retain its traceback until cyclic GC.
     # Release the lock explicitly so that traceback cannot drop the next tick.
