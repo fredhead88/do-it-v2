@@ -10,6 +10,12 @@ TEED — copied live to this process's own stderr, and accumulated into a bounde
 buffer (last 20 lines, at most 2000 characters) that becomes `error_tail` — then
 appends an `end` row `{ev:"end", ts, rc, duration_s, error_class, error_tail,
 start_ts}`. Exits with CMD's own exit code; a signal death exits `128+n`.
+A run stopped at its crons.toml `kill_after_s` limit exits 124 when SIGTERM
+sufficed and 137 when SIGKILL was sent (as timeout(1)). A run with such a
+limit that is stopped because cron-run itself received signal n exits `128+n`.
+On a run with such a limit, cron-run stops reading CMD's stderr at most one
+`kill_grace_s` after its last signal, or at once when nothing in CMD's group
+is left to signal, and records `stderr_abandoned` on the `end` row.
 
 Takes a non-blocking exclusive flock on `<name>.lock` before any row, held
 through the end row. The descriptor is close-on-exec. A contending invocation
@@ -17,14 +23,18 @@ runs nothing, prints nothing, returns 0, and records a `skip` row with reason
 `already-running` in its own newest-50-row `<name>.skips.jsonl` ring. Skips
 never evict start/end rows. Any other lock error runs CMD as usual.
 
-`cron-run` must never change a job's behaviour (Constraints): a failure to
-write a row (unwritable root, full disk, concurrent writer) is swallowed —
-nothing is printed, nothing raises past this module — and CMD's exit code and
-stdout/stderr pass through exactly as CMD produced them. Only alarms reach the
-ledger, and only through `look` (`_check_cron_runs`); this module writes
-NOTHING to `$DOIT_ROOT/events/`.
+`cron-run` must never change a job's behaviour (Constraints), with one exception:
+a run whose crons.toml row declares `kill_after_s`, while kills are not switched
+off, runs in its own session and is stopped once that limit passes (SIGTERM to
+its process group, then SIGKILL only if a member survives the grace), exits as
+above, and ends its stderr with one `cron-run:` line. A failure to write a row
+(unwritable root, full disk, concurrent writer) is swallowed — nothing is
+printed, nothing raises past this module — and, apart from that exception,
+CMD's exit code and stdout/stderr pass through exactly as CMD produced them.
+Only alarms reach the ledger, and only through `look` (`_check_cron_runs`);
+this module writes NOTHING to `$DOIT_ROOT/events/`.
 """
-import collections, errno, fcntl, json, os, pathlib, re, subprocess, sys, time
+import codecs, collections, errno, fcntl, json, locale, os, pathlib, re, select, signal, subprocess, sys, time
 from datetime import datetime, timezone
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
@@ -99,7 +109,37 @@ def _append_row(path, row):
         pass
 
 
-def run(name, cmd, root=None):
+def _limit(name, path, manifest):
+    """Fail-open raw NAME lookup, after the lock and switch, independent of crons."""
+    if os.environ.get("DOIT_CRON_KILL") == "off":
+        return {}
+    try:
+        try:
+            path.with_name("kill.off").stat()
+        except FileNotFoundError:
+            pass
+        else:
+            return {}
+        import tomllib
+        manifest = pathlib.Path(manifest) if manifest is not None else pathlib.Path(__file__).resolve().parent.parent / "crons.toml"
+        doc = tomllib.loads(manifest.read_text())
+        row = next((r for r in doc.get("row", []) if r.get("name") == name), {})
+        if "kill_after_s" not in row:
+            return {}
+        after, grace = row["kill_after_s"], row.get("kill_grace_s", 10)
+        if type(after) is not int or not 1 <= after <= 86400 or type(grace) is not int or not 1 <= grace <= 300:
+            return {"kill_config": "invalid"}
+        return {"kill_after_s": after, "kill_grace_s": grace}
+    except Exception:
+        return {}
+
+
+def _killpg(pgid, sig):
+    """The single seam for group probes and delivered signals."""
+    os.killpg(pgid, sig)
+
+
+def run(name, cmd, root=None, manifest=None):
     """Runs CMD (a list), wrapped. Returns CMD's own exit code (128+n on a
     signal death), or 0 without running CMD when this job already holds its lock."""
     path = store_path(name, root)
@@ -123,13 +163,16 @@ def run(name, cmd, root=None):
                             "pid": os.getpid(), "reason": "already-running"})
                 return 0
     try:
-        return _run_command(path, cmd)
+        config = _limit(name, path, manifest)
+        if "kill_after_s" in config:
+            return _run_bounded(name, path, cmd, config)
+        return _run_command(path, cmd, config)
     finally:
         if lock is not None:
             lock.close()
 
 
-def _run_command(path, cmd):
+def _run_command(path, cmd, config=None):
     """Existing command execution and start/end bookkeeping, under run's lock."""
     start_ts = _now_iso()
     _append_row(path, {"ev": "start", "ts": start_ts, "pid": os.getpid()})
@@ -146,7 +189,7 @@ def _run_command(path, cmd):
         tail_text = str(e)[-MAX_TAIL_CHARS:]
         _append_row(path, {"ev": "end", "ts": _now_iso(), "rc": rc, "duration_s": duration,
                            "error_class": error_class(rc, tail_text), "error_tail": tail_text,
-                           "start_ts": start_ts})
+                           "start_ts": start_ts, **(config or {})})
         return rc
     try:
         for line in proc.stderr:
@@ -162,7 +205,180 @@ def _run_command(path, cmd):
     tail_text = "\n".join(tail)[-MAX_TAIL_CHARS:]
     _append_row(path, {"ev": "end", "ts": _now_iso(), "rc": rc, "duration_s": duration,
                        "error_class": error_class(rc, tail_text), "error_tail": tail_text,
-                       "start_ts": start_ts})
+                       "start_ts": start_ts, **(config or {})})
+    return rc
+
+
+def _run_bounded(name, path, cmd, config):
+    """Poll/tee in this thread; TERM and KILL bound both CMD and its open pipe.
+
+    A gone group is never contacted again. A refused probe/signal abandons the
+    bound and waits naturally, retaining only signals actually delivered.
+    """
+    received = []
+    previous = {}
+
+    def flag(signum, frame):
+        if not received:
+            received.append(signum)
+
+    try:
+        try:
+            for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+                handler = signal.getsignal(sig)
+                if handler != signal.SIG_IGN:
+                    signal.signal(sig, flag)
+                    previous[sig] = handler
+        except ValueError:  # Python forbids handler installation in worker threads.
+            for sig, handler in previous.items():
+                signal.signal(sig, handler)
+            previous.clear()
+        return _poll_command(name, path, cmd, config, received)
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+
+
+def _poll_command(name, path, cmd, config, received):
+    start_ts = _now_iso()
+    _append_row(path, {"ev": "start", "ts": start_ts, "pid": os.getpid()})
+    t0 = time.monotonic()
+    extra = dict(config)
+    try:
+        proc = subprocess.Popen(cmd, stdout=None, stderr=subprocess.PIPE, start_new_session=True)
+    except OSError as exc:
+        print(str(exc), file=sys.stderr)
+        tail_text = str(exc)[-MAX_TAIL_CHARS:]
+        _append_row(path, {"ev": "end", "ts": _now_iso(), "rc": 127, "duration_s": time.monotonic() - t0,
+                           "error_class": error_class(127, tail_text), "error_tail": tail_text,
+                           "start_ts": start_ts, **extra})
+        return 127
+
+    deadline = t0 + config["kill_after_s"]
+    grace = config["kill_grace_s"]
+    decoder = codecs.getincrementaldecoder(locale.getpreferredencoding(False))(errors="replace")
+    tail_text = ""
+    eof = False
+    sequence = None
+    last_signal = None
+    group_gone = False
+    kill_error = None
+    wrapper_signal = None
+
+    def tail_add(text):
+        nonlocal tail_text
+        # Keep both bounds even for an arbitrarily long, unterminated line.
+        tail_text = (tail_text + text)[-MAX_TAIL_CHARS:]
+        lines = tail_text.split("\n")
+        tail_text = "\n".join(lines[-(MAX_TAIL_LINES + (not lines[-1])):])
+
+    def contact(sig):
+        nonlocal group_gone, kill_error, last_signal
+        if group_gone:
+            return False
+        try:
+            _killpg(proc.pid, sig)
+        except ProcessLookupError:
+            group_gone = True
+            return False
+        except Exception as exc:
+            kill_error = f"{type(exc).__name__}: {exc}"[:200]
+            return False
+        if sig:
+            extra["kill_signals"].append("TERM" if sig == signal.SIGTERM else "KILL")
+            last_signal = time.monotonic()
+        return True
+
+    try:
+        while True:
+            proc.poll()  # Reap before sending TERM: an exited CMD must not keep the group alive.
+            now = time.monotonic()
+            if sequence is None:
+                if proc.returncode is not None and eof:
+                    break
+                if received or now >= deadline:
+                    wrapper_signal = received[0] if received else None
+                    sequence = now if wrapper_signal else deadline
+                    extra.update(kill_reason="wrapper-signal" if wrapper_signal else "deadline",
+                                 kill_pgid=proc.pid, kill_elapsed_s=now - t0, kill_signals=[])
+                    contact(signal.SIGTERM)
+            if sequence is not None and kill_error is None:
+                if not group_gone:
+                    contact(0)
+                if kill_error is None:
+                    if group_gone and not extra["kill_signals"]:
+                        break  # Only an outside-group process holds the pipe.
+                    if not group_gone and now >= sequence + grace and "KILL" not in extra["kill_signals"]:
+                        contact(signal.SIGKILL)
+                    # Do not finish on CMD/EOF alone while a descendant survives TERM.
+                    if group_gone and proc.returncode is not None and eof:
+                        break
+                    if "KILL" in extra["kill_signals"] and proc.returncode is not None and eof:
+                        break
+                    if kill_error is None and last_signal is not None and now >= last_signal + grace:
+                        break
+            # Signal failure deliberately has no deadline: continue the same polling tee.
+            timeout = .1
+            if kill_error is None:
+                next_check = deadline if sequence is None else sequence + grace
+                if sequence is not None and (group_gone or "KILL" in extra["kill_signals"]):
+                    next_check = last_signal + grace if last_signal is not None else now
+                timeout = max(0, min(timeout, next_check - now))
+            if eof:
+                if kill_error is not None and proc.returncode is not None:
+                    break
+                time.sleep(timeout)
+            elif select.select([proc.stderr], [], [], timeout)[0]:
+                chunk = os.read(proc.stderr.fileno(), 65536)
+                if not chunk:
+                    eof = True
+                    decoded = decoder.decode(b"", final=True)
+                    tail_add(decoded)
+                    if decoded and not hasattr(sys.stderr, "buffer"):
+                        try:
+                            sys.stderr.write(decoded)
+                            sys.stderr.flush()
+                        except Exception:
+                            pass
+                else:
+                    decoded = decoder.decode(chunk)
+                    tail_add(decoded)
+                    try:
+                        sys.stderr.flush()
+                        if hasattr(sys.stderr, "buffer"):
+                            sys.stderr.buffer.write(chunk)
+                            sys.stderr.buffer.flush()
+                        else:
+                            sys.stderr.write(decoded)
+                            sys.stderr.flush()
+                    except Exception:
+                        pass  # As today, stderr output failures do not alter CMD's outcome.
+    finally:
+        proc.stderr.close()
+
+    proc.poll()
+    cmd_rc = None if proc.returncode is None else (proc.returncode if proc.returncode >= 0 else 128 - proc.returncode)
+    rc = cmd_rc
+    if sequence is not None:
+        extra.update(cmd_reaped=cmd_rc is not None, cmd_rc=cmd_rc)
+    if not eof:
+        extra["stderr_abandoned"] = True
+    if kill_error is not None:
+        extra["kill_error"] = kill_error
+    elif sequence is not None and extra["kill_signals"]:
+        extra["killed"] = True
+        rc = 128 + wrapper_signal if wrapper_signal else (137 if "KILL" in extra["kill_signals"] else 124)
+        line = (f"cron-run: {name} killed after {time.monotonic() - t0:.3f}s "
+                f"(kill_after_s={config['kill_after_s']}, signal={extra['kill_signals'][-1]})")
+        try:
+            print(line, file=sys.stderr)
+        except Exception:
+            pass
+        tail_add(("\n" if tail_text and not tail_text.endswith("\n") else "") + line)
+    tail_text = tail_text.removesuffix("\n")[-MAX_TAIL_CHARS:]
+    _append_row(path, {"ev": "end", "ts": _now_iso(), "rc": rc, "duration_s": time.monotonic() - t0,
+                       "error_class": "killed" if extra.get("killed") else error_class(rc, tail_text),
+                       "error_tail": tail_text, "start_ts": start_ts, **extra})
     return rc
 
 
@@ -177,7 +393,8 @@ def main(argv=None):
         print(f"cron_run: invalid name {name!r} (must match [a-z0-9-]+)", file=sys.stderr)
         return 2
     cmd = argv[2:]
-    return run(name, cmd)
+    manifest = os.environ.get("DOIT_CRON_RUN_MANIFEST") if os.environ.get("DOIT_CRON_RUN_TEST") == "1" else None
+    return run(name, cmd, manifest=manifest)
 
 
 if __name__ == "__main__":
