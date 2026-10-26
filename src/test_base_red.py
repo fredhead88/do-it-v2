@@ -63,6 +63,14 @@ class BaseRedTests(unittest.TestCase):
                           "pg-parity (Postgres).txt": (FIX / "pg-parity.log").read_text()}),
             2: archive(**{"dashboard.txt": (FIX / "vitest.log").read_text()}),
         }
+        self.jobs = {
+            1: [{"name": "pytest — shard api-1", "conclusion": "success"},
+                {"name": "pytest — shard api-2", "conclusion": "success"},
+                {"name": "pytest", "conclusion": "failure"},
+                {"name": "pg-parity (Postgres)", "conclusion": "failure",
+                 "steps": [{"name": STEP, "conclusion": "failure"}]}],
+            2: [{"name": "TypeScript · Biome · Tests · File Sizes", "conclusion": "success"}],
+        }
         self.gh_error = False
         stack = contextlib.ExitStack()
         self.addCleanup(stack.close)
@@ -91,8 +99,10 @@ class BaseRedTests(unittest.TestCase):
         if self.gh_error:
             return 1, "", "fixture error"
         if "/jobs?" in argv[2]:
-            return 0, json.dumps({"jobs": [{"name": "pg-parity (Postgres)", "conclusion": "failure",
-                                             "steps": [{"name": STEP, "conclusion": "failure"}]}]}), ""
+            rid = int(argv[2].split("/")[-2])
+            run = next(r for r in self.runs if r["id"] == rid)
+            jobs = self.jobs.get(rid, self.jobs[1 if run["name"] == "Python Tests" else 2])
+            return 0, json.dumps({"jobs": jobs}), ""
         self.assertIn("actions/runs?", argv[2])
         self.assertIn("--paginate", argv)
         pages = [{"workflow_runs": [run]} for run in self.runs] or [{"workflow_runs": []}]
@@ -125,6 +135,206 @@ class BaseRedTests(unittest.TestCase):
     def cli(self, sha=None):
         return subprocess.run([str(HERE.parent / "doit"), "base-red", "demo", sha or self.sha, "--json"],
                               capture_output=True, text=True, env=dict(os.environ), timeout=15)
+
+    def test_kind_ac2_classify_python_only(self):
+        self.runs = self.runs[:1]
+        self.zips[1] = archive(**{"0_pytest.txt":
+            "NEW failed: A.py::t1\nSUMMARY pytest_baseline_gate.py check: FAIL new=1 changed=0"})
+        self.jobs[1][-1]["steps"] = [{"name": "Run parity", "conclusion": "failure"}]
+        nodes = ["A.py::t1", "B.py::t2", "pg-parity::Run parity"]
+        result = br.classify("demo", self.sha, nodes)
+        self.assertTrue(result["complete"], result)
+        self.assertEqual(result["pre_existing"], [nodes[0], nodes[2]])
+        self.assertEqual(result["new"], [nodes[1]])
+        self.assertEqual(result["needed"], ["pg-parity", "pytest"])
+        self.assertEqual(result["covered"], ["pg-parity", "pytest"])
+        vitest = "dashboard/src/x.test.ts::renders"
+        result = br.classify("demo", self.sha, nodes + [vitest])
+        self.assertFalse(result["complete"])
+        self.assertIn("vitest", result["needed"])
+        self.assertNotIn("vitest", result["covered"])
+        self.assertEqual(result["uncovered"], [vitest])
+        self.jobs[1][-1]["conclusion"] = "skipped"
+        self.assertFalse(br.classify("demo", self.sha, [nodes[2]])["complete"])
+        self.assertTrue(br.classify("demo", self.sha, [nodes[0]])["complete"])
+        self.runs = [self.run_doc(2, "Dashboard PR Quality")]
+        self.assertTrue(br.classify("demo", self.sha, [vitest])["complete"])
+        self.assertFalse(br.classify("demo", self.sha, [nodes[0]])["complete"])
+        for node, kind in (("A.py::t", "pytest"), ("pg-parity::s", "pg-parity"),
+                           ("x.test.ts::t", "vitest"), ("x.test.ts", "suite-error")):
+            self.assertEqual(br.id_kind(node), kind)
+        self.assertEqual(set(br.window_gate.BASE_RED_KINDS), set(br.KINDS))
+        self.assertEqual(set(br.window_gate.BASE_RED_WORKFLOWS), br.WORKFLOWS)
+        # The node's shape, rather than its source bucket, decides coverage.
+        with patch.object(br, "failing", return_value={"complete": False,
+                "ids": {"pytest": ["x.test.ts"]}, "kinds_covered": ["pytest"]}):
+            self.assertEqual(br.classify("demo", self.sha, ["x.test.ts"])["pre_existing"], [])
+        print("base-kind ac2 ok")
+
+    def test_kind_ac1_snapshot_and_cache(self):
+        python, dashboard = self.runs
+        self.runs = [python]
+        result = br.failing("demo", self.sha)
+        self.assertFalse(result["complete"])
+        self.assertEqual(result["workflows"], ["Python Tests"])
+        self.assertEqual(result["kinds_covered"], ["pg-parity", "pytest"])
+        self.assertEqual(result["undetermined"], [])
+        self.assertFalse(self.cache.exists())
+        self.runs.append(dashboard)
+        result = br.failing("demo", self.sha)
+        self.assertTrue(result["complete"])
+        self.assertEqual(result["workflows"], sorted(br.WORKFLOWS))
+        self.assertEqual(result["kinds_covered"], sorted(KINDS))
+        # An independent interpreter opens the actual production-written file.
+        def read_cache():
+            proc = self.real_run([sys.executable, "-I", "-c",
+                "import json,sys; print(json.dumps(json.load(open(sys.argv[1]))))", str(self.cache)],
+                capture_output=True, text=True, check=True)
+            return json.loads(proc.stdout)
+        self.assertEqual(read_cache(), result)
+        self.assertEqual(self.events()[0]["ids"], result["ids"])
+        self.assertEqual(len(self.events()), 1)
+
+        # A full-kind cache still short-circuits every API call.
+        self.calls.clear()
+        self.assertEqual(br.failing("demo", self.sha), result)
+        self.assertEqual(self.calls, [])
+        self.cache.unlink()
+        self.jobs[1][-1]["conclusion"] = "skipped"
+        result = br.failing("demo", self.sha)
+        self.assertTrue(result["complete"])
+        self.assertNotIn("pg-parity", result["kinds_covered"])
+        rows = len(self.events())
+        self.assertEqual(rows, 2)  # One row for each first-store fixture.
+        self.calls.clear()
+        self.assertEqual(br.failing("demo", self.sha), result)
+        self.assertEqual(len(self.calls), 1)
+        self.assertIn("actions/runs?", self.calls[0][2])
+
+        self.runs.append(self.run_doc(3, "Python Tests"))
+        self.zips[3], self.jobs[3] = self.zips[1], self.jobs[1]
+        result = br.failing("demo", self.sha)
+        self.assertIn("3", result["runs_seen"])
+        self.assertEqual(read_cache(), result)
+        self.assertEqual(len(self.events()), rows)
+        self.runs.append(self.run_doc(4, "Python Tests"))
+        self.runs[-1]["conclusion"] = "cancelled"
+        result = br.failing("demo", self.sha)
+        self.assertIn("4", read_cache()["runs_seen"])
+        self.calls.clear()
+        self.assertEqual(br.failing("demo", self.sha), result)
+        self.assertEqual(len(self.calls), 1)
+        before = self.cache.read_bytes()
+        self.runs.append(self.run_doc(5, "Python Tests"))
+        self.zips[5] = b"unreadable"
+        self.assertEqual(br.failing("demo", self.sha), result)
+        self.assertEqual(self.cache.read_bytes(), before)
+        with patch.object(br, "_api", side_effect=ValueError("fixture unavailable")):
+            self.assertEqual(br.failing("demo", self.sha), result)
+        self.zips[5] = archive(log="NEW failed: extra.py::t\nSUMMARY pytest_baseline_gate.py check: FAIL new=1 changed=0")
+        self.jobs[5] = self.jobs[1]
+        result = br.failing("demo", self.sha)
+        self.assertIn("extra.py::t", read_cache()["ids"]["pytest"])
+        self.assertEqual(len(self.events()), rows + 1)
+        self.assertEqual(self.events()[-1]["ids"], result["ids"])
+        self.runs.append(self.run_doc(6, "Python Tests"))
+        self.zips[6] = archive(log="pg parity passed")
+        self.jobs[6] = [{"name": "pg-parity (Postgres)", "conclusion": "success"}]
+        result = br.failing("demo", self.sha)
+        self.assertEqual(result["kinds_covered"], sorted(KINDS))
+        self.assertEqual(read_cache(), result)
+        self.assertEqual(len(self.events()), rows + 1)
+
+        # A legacy file is refreshed without another ledger row, or fails closed.
+        for missing in (("kinds_covered",), ("workflows",)):
+            legacy = {k: v for k, v in result.items() if k not in missing}
+            self.cache.write_text(json.dumps(legacy))
+            result = br.failing("demo", self.sha)
+            self.assertEqual(read_cache(), result)
+            self.assertIn("kinds_covered", result)
+            self.assertIn("workflows", result)
+            self.assertEqual(len(self.events()), rows + 1)
+        legacy = {k: v for k, v in result.items() if k != "kinds_covered"}
+        self.cache.write_text(json.dumps(legacy))
+        before = self.cache.read_bytes()
+        self.runs = [python]
+        self.assertFalse(br.failing("demo", self.sha)["complete"])
+        self.assertEqual(self.cache.read_bytes(), before)
+        self.cache.unlink()
+        self.runs = [python, dashboard, self.run_doc(6, "", path="BuildFailed")]
+        self.runs[-1]["conclusion"] = "startup_failure"
+        self.assertTrue(br.failing("demo", self.sha)["complete"])
+        self.cache.unlink()
+        self.runs[-1]["path"] = ".github/workflows/python-tests.yml@master"
+        result = br.failing("demo", self.sha)
+        self.assertFalse(result["complete"])
+        self.assertTrue(result["undetermined"])
+        print("base-kind ac1 ok")
+
+    def test_kind_ac3_unknown_stays_unknown(self):
+        python, dashboard = self.runs
+        default_jobs = json.dumps(self.jobs)
+        default_zips = dict(self.zips)
+        cases = ("selected", "cancelled", "running", "other-sha", "logs", "dashboard-unknown",
+                 "api", "shards-skipped", "shard-cancelled", "aggregator-skipped",
+                 "aggregator-cancelled", "no-summary", "shard-timeout", "missing-shards",
+                 "missing-aggregator", "dashboard-api")
+        for case in cases:
+            with self.subTest(case=case):
+                self.cache.unlink(missing_ok=True)
+                self.runs = [dict(python)]
+                self.jobs = {int(k): v for k, v in json.loads(default_jobs).items()}
+                self.zips = dict(default_zips)
+                self.gh_error = case == "api"
+                if case == "selected":
+                    self.zips[1] = archive(log="CI-SELECTION mode=selected reason=paths files=1")
+                elif case == "cancelled":
+                    self.runs[0]["conclusion"] = "cancelled"
+                elif case == "running":
+                    self.runs[0]["status"] = "in_progress"
+                elif case == "other-sha":
+                    self.runs[0]["head_sha"] = "0" * 40
+                elif case == "logs":
+                    self.zips[1] = b"unreadable"
+                elif case == "dashboard-unknown":
+                    self.runs.append(dashboard)
+                    self.zips[2] = archive(log="SUMMARY vitest_baseline_gate.mjs check: FAIL new=1")
+                elif case == "dashboard-api":
+                    self.runs.append(dashboard)
+                    self.jobs[2] = None
+                elif case == "shards-skipped":
+                    for job in self.jobs[1][:2]:
+                        job["conclusion"] = "skipped"
+                elif case.startswith("shard-"):
+                    self.jobs[1][0]["conclusion"] = "cancelled" if case.endswith("cancelled") else "timed_out"
+                elif case.startswith("aggregator-"):
+                    self.jobs[1][2]["conclusion"] = case.split("-")[1]
+                elif case == "no-summary":
+                    self.zips[1] = archive(log="NEW failed: A.py::t1")
+                elif case == "missing-shards":
+                    self.jobs[1] = self.jobs[1][2:]
+                elif case == "missing-aggregator":
+                    self.jobs[1].pop(2)
+                result = br.classify("demo", self.sha, ["tests/test_a.py::test_failed"])
+                self.assertFalse(result["complete"], result)
+                self.assertEqual(result["pre_existing"], [])
+        self.gh_error = False
+        for case in ("skipped", "no-summary"):
+            self.cache.unlink(missing_ok=True)
+            self.runs = [dashboard]
+            self.jobs = {int(k): v for k, v in json.loads(default_jobs).items()}
+            self.zips = dict(default_zips)
+            if case == "skipped":
+                self.jobs[2][0]["conclusion"] = "skipped"
+            else:
+                self.zips[2] = archive(log="tree already verified")
+            result = br.classify("demo", self.sha, ["dashboard/a.test.ts::describe > test"])
+            self.assertFalse(result["complete"])
+            self.assertEqual(result["pre_existing"], [])
+        now = datetime(2026, 10, 21, tzinfo=timezone.utc)
+        self.ledger_fixture([self.ledger_row()])
+        self.assertTrue(br.classify("demo", self.sha, ["A.py::t"], known_red=True, now=now)["complete"])
+        print("base-kind ac3 ok")
 
     def test_ac1_api_paginates_without_slurp(self):
         path = "repos/example/demo/actions/runs?per_page=100"
@@ -337,12 +547,17 @@ class BaseRedTests(unittest.TestCase):
     def test_classify_b10_and_incomplete(self):
         ids = ["A::describe > t1", "dashboard/x.ts", "B::describe > t2"]
         for complete in (True, False):
-            base = {"complete": complete, "ids": {"vitest": ids[:1], "suite-error": ids[1:2]}}
+            covered = ["suite-error", "vitest"] if complete else []
+            base = {"complete": complete, "ids": {"vitest": ids[:1], "suite-error": ids[1:2]},
+                    "kinds_covered": covered}
             with patch.object(br, "failing", return_value=base):
                 r = br.classify("demo", self.sha, ids)
                 self.assertEqual(r, {"pre_existing": ids[:2] if complete else [],
-                                     "new": ids[2:] if complete else ids, "complete": complete})
-                self.assertEqual(br.classify("demo", self.sha, []), {"pre_existing": [], "new": [], "complete": complete})
+                                     "new": ids[2:] if complete else ids, "complete": complete,
+                                     "needed": ["suite-error", "vitest"], "covered": covered,
+                                     "uncovered": [] if complete else ids, "undetermined": False})
+                self.assertEqual(br.classify("demo", self.sha, []), {"pre_existing": [], "new": [], "complete": complete,
+                    "needed": [], "covered": covered, "uncovered": [], "undetermined": False})
         with patch.object(br, "failing", return_value={"complete": False, "ids": {}, "undetermined": ["fixture"]}):
             self.assertEqual(br.classify("demo", self.sha, ids)["new"], ids)
 
@@ -461,7 +676,8 @@ print(json.dumps({'known': base_red.known_red('demo'),
         now = datetime(2026, 10, 21, tzinfo=timezone.utc)
         ids = ["nightly", "base", "new"]
         for complete in (False, True):
-            base = {"complete": complete, "ids": {"pytest": ["base"]}}
+            covered = ["suite-error"] if complete else []
+            base = {"complete": complete, "ids": {"pytest": ["base"]}, "kinds_covered": covered}
             for age in (0, 35.999, 36, 37, None):
                 path = self.root / "events/L-base-red-local.jsonl"
                 if age is None:
@@ -472,7 +688,9 @@ print(json.dumps({'known': base_red.known_red('demo'),
                     default = br.classify("demo", self.sha, ids)
                     self.assertEqual(default, {"pre_existing": ["base"] if complete else [],
                                                "new": ["nightly", "new"] if complete else ids,
-                                               "complete": complete})
+                                               "complete": complete, "needed": ["suite-error"],
+                                               "covered": covered, "uncovered": [] if complete else ids,
+                                               "undetermined": False})
                     actual = br.classify("demo", self.sha, ids, known_red=True, now=now)
                     expected = (["nightly"] if age is not None else []) + (["base"] if complete else [])
                     self.assertEqual(actual["pre_existing"], expected)
