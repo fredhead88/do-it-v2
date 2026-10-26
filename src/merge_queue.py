@@ -345,7 +345,7 @@ def _train_emit(ledger_file, subject, kind, **fields):
     if Path(ledger_file).name != ledger_file:
         raise ValueError('ledger filename required')
     actor = fold.actor_of(ledger_file)
-    allowed = ('executor', 'tick', 'operator') if kind == 'batch-cap' else ('executor', 'tick')
+    allowed = ('executor', 'tick', 'operator') if kind in ('batch-cap', 'merge-frozen') else ('executor', 'tick')
     if actor not in allowed:
         raise ValueError('unsupported train ledger actor')
     dst = fold.ROOT / 'events' / ledger_file
@@ -444,6 +444,11 @@ def _window_reconcile(events, ledger_file):
     print(f"window-run: removed {len(removed)} spec(s); outcomes={' | '.join(removed) or 'none'}")
 
 
+def merge_freeze(events, project):
+    ids = fold.nightly_unowned(events, project)
+    return 'unowned nightly red: ' + ', '.join(ids) if ids else None
+
+
 def window_run(project, *, runner=None, launcher=None, detach=False, now=None):
     if not re.fullmatch(r'[A-Za-z0-9._-]+', project) or project in ('.', '..'):
         return 2
@@ -465,6 +470,17 @@ def window_run(project, *, runner=None, launcher=None, detach=False, now=None):
             waiting = queue(events)
             if waiting[0]['project'] != project:
                 raise ValueError('queue head project undetermined or differs from launch')
+            try:
+                reason = merge_freeze(events, project)
+            except Exception as exc:
+                raise ValueError('nightly freeze undetermined') from exc
+            if reason is not None:
+                print('window-run: ' + reason)
+                previous = _latest([e for e in events if e.get('project') == project], {'merge-frozen'})
+                if previous is None or previous.get('reason') != reason:
+                    _train_emit(ledger_file, 'nightly:' + project, 'merge-frozen',
+                                project=project, reason=reason)
+                return 3
             entries = queue(events, project)
             specs = [head]
             if batching_allowed(events, len(entries)):
@@ -495,7 +511,7 @@ def window_run(project, *, runner=None, launcher=None, detach=False, now=None):
                         stdout=stream, stderr=subprocess.STDOUT)
                 (fold.ROOT / 'state' / f'window-run.{window}.pid').write_text(str(process.pid))
                 print(f'window-run: launched {window}; log={log}')
-        except (OSError, ValueError, KeyError, TypeError, StopIteration) as exc:
+        except (OSError, RuntimeError, ValueError, KeyError, TypeError, StopIteration) as exc:
             print(f'window-run: undetermined; {exc}', file=sys.stderr)
             return 3
     if detach:

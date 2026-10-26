@@ -103,6 +103,9 @@ Source: `crons.toml`. Name | schedule | where | path; command on following lines
 - base-red-nightly | 20 3 * * * | user | /usr/bin/python3
   {doit} cron-run base-red-nightly -- /usr/bin/python3 {repo}/src/base_red.py nightly albert-scott
   >> {root}/logs/base-red-nightly.log 2>&1
+- base-red-nightly-collect | 40 * * * * | user | /usr/bin/python3
+  {doit} cron-run base-red-nightly-collect -- /usr/bin/python3 {repo}/src/base_red.py
+  nightly-collect albert-scott >> {root}/logs/base-red-nightly-collect.log 2>&1
 
 ## Tick event types
 

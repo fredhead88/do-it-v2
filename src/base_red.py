@@ -15,6 +15,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
 import zlib
 
@@ -365,8 +366,8 @@ def known_red(project):
     return _known_state(project)[0]
 
 
-def _append(event, project, sha, *, complete, ids, **fields):
-    argv = [str(DOIT), "append", event, "base-" + project, "project=" + project,
+def _append(event, project, sha, *, complete, ids, subject=None, **fields):
+    argv = [str(DOIT), "append", event, subject or "base-" + project, "project=" + project,
             "sha=" + sha, "complete:=" + json.dumps(complete), "ids:=" + json.dumps(ids)]
     argv.extend(key + ":=" + json.dumps(value) for key, value in fields.items())
     proc = subprocess.run(argv, env={**os.environ, "DOIT_ROOT": str(fold.ROOT),
@@ -405,89 +406,236 @@ def classify(project, base_sha, ids, *, known_red=False, now=None):
     return result
 
 
-def nightly(project):
-    """Fetch master, dispatch missing full workflows once, and record evidence."""
-    result = _result("")
+def _nightly_rows(project):
+    """Read dispatches raw: a malformed newest dispatch must not select an older one."""
+    path = fold.ROOT / 'events' / 'L-base-red-local.jsonl'
+    if not path.exists():
+        return []
+    rows = []
+    for line in path.read_text().splitlines():
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue  # append-only ledgers may have torn lines
+        if isinstance(row, dict) and row.get('project') == project:
+            rows.append(row)
+    return rows
+
+
+def _nightly_suite(repo, sha):
+    source = window_gate.git(repo, 'show', f'{sha}:.github/workflows/python-tests.yml')
+    if source.returncode or not source.stdout.strip():
+        raise ValueError('master workflow unreadable')
+    # Only a suite key beneath workflow_dispatch.inputs declares the input.
+    parents = []
+    for line in source.stdout.splitlines():
+        match = re.match(r'^( *)([A-Za-z_][\w-]*)\s*:', line)
+        if not match:
+            continue
+        indent, key = len(match[1]), match[2]
+        while parents and parents[-1][0] >= indent:
+            parents.pop()
+        if key == 'suite' and [p[1] for p in parents][-2:] == ['workflow_dispatch', 'inputs']:
+            return 'nightly'
+        parents.append((indent, key))
+    return 'undeclared'
+
+
+def _pending(directory):
+    return [(p, json.loads(p.read_text())) for p in sorted(directory.glob('*.pending.json'))]
+
+
+def _resolve_pending(project, directory, *, sleep=time.sleep, polls=1):
+    markers = _pending(directory)
+    if not markers:
+        return None
+    sha = markers[0][1]['sha']
+    if any(m['sha'] != sha or m['workflow'] not in WORKFLOWS for _, m in markers):
+        raise ValueError('pending dispatch malformed')
+    repo = _repo(project)
+    owner = _owner(repo)
+    for attempt in range(polls):
+        runs = _api(f'repos/{owner}/actions/runs?head_sha={sha}&per_page=100', 'workflow_runs')
+        found = {}
+        for path, marker in markers:
+            matches = [r for r in runs if r.get('head_sha') == sha
+                       and r.get('name') == marker['workflow']
+                       and r.get('event') == 'workflow_dispatch' and r.get('head_branch') == 'master'
+                       and str(r.get('id', '')).isdigit()
+                       and str(r['id']) not in marker['before_ids']
+                       and _time(r['created_at']) >= _time(marker['dispatch_time'])]
+            if matches:
+                found[marker['workflow']] = str(min(matches, key=lambda r: int(r['id']))['id'])
+            elif datetime.now(timezone.utc) - _time(marker['dispatch_time']) > timedelta(hours=6):
+                path.rename(path.with_name(path.name + '.' + str(time.time_ns()) + '.expired'))
+                raise ValueError('dispatch never appeared')
+        if WORKFLOWS <= found.keys():
+            rows = _nightly_rows(project)
+            if not any(e.get('type') == 'base-red-nightly-dispatched' and e.get('sha') == sha for e in rows):
+                _append('base-red-nightly-dispatched', project, sha, complete=False, ids=[],
+                        run_ids=sorted(found.values()), suite=markers[0][1]['suite'])
+            for path, _ in markers:
+                path.unlink(missing_ok=True)
+            return sha
+        if attempt + 1 < polls:
+            sleep(10)
+    return None
+
+
+_NIGHTLY_ERRORS = (OSError, RuntimeError, ValueError, KeyError, TypeError, EOFError,
+                   zipfile.BadZipFile, zipfile.LargeZipFile, zlib.error, subprocess.SubprocessError)
+
+
+def nightly(project, *, sleep=None):
+    """Dispatch a full master nightly once; persist intent before each paid call."""
+    result = _result('')
     try:
         repo = _repo(project)
-        window_gate.git(repo, "fetch", "origin", "master")
-        tip = window_gate.git(repo, "rev-parse", "origin/master").stdout.strip()
-        repo, sha = _project(project, tip)
-        result["sha"] = sha
-        directory = fold.ROOT / "base-red" / project
+        directory = fold.ROOT / 'base-red' / project
         directory.mkdir(parents=True, exist_ok=True)
-        with (directory / (sha + ".nightly.lock")).open("a") as lock:
+        with (directory / 'nightly.lock').open('a') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            previous = [r for r in _rows(project) if r.get("type") == "base-red-nightly"
-                        and r.get("complete") is True and r["sha"] == sha]
-            if previous:
-                result["complete"] = True
-                return result
-            if not ghlimit.gate(wait=False)["ok"]:
-                raise ValueError("GitHub quota unavailable")
+            markers = _pending(directory)
+            if markers:
+                resolved = _resolve_pending(project, directory)
+                if resolved:
+                    result.update(sha=resolved, message='nightly dispatched')
+                    return result
+                sha = markers[0][1]['sha']
+                suite = markers[0][1]['suite']
+                existing = {m['workflow'] for _, m in markers}
+                if WORKFLOWS <= existing:
+                    result['undetermined'].append('dispatch runs have not appeared')
+                    return result
+            else:
+                window_gate.git(repo, 'fetch', 'origin', 'master')
+                tip = window_gate.git(repo, 'rev-parse', 'origin/master').stdout.strip()
+                repo, sha = _project(project, tip)
+                result['sha'] = sha
+                if any(e.get('type') == 'base-red-nightly-dispatched' and e.get('sha') == sha
+                       for e in _nightly_rows(project)):
+                    result['message'] = 'already dispatched'
+                    return result
+                suite = _nightly_suite(repo, sha)
+                existing = set()
+            result['sha'] = sha
             owner = _owner(repo)
-            endpoint = f"repos/{owner}/actions/runs?head_sha={sha}&per_page=100"
-            runs = _api(endpoint, "workflow_runs")
-            covered = set()
-            result, _ = _snapshot(repo, sha, runs=runs, covered=covered)
-            if result["undetermined"]:
-                return result
-            needed = WORKFLOWS - covered
-            if any(r["head_sha"] == sha and r.get("name") in needed
-                   and r["status"] != "completed" for r in runs):
-                result["undetermined"].append("needed workflow is queued or in progress")
-                return result
-            for name in sorted(needed):
-                filename = WORKFLOW_FILES[name]
-                if not ghlimit.gate(wait=False)["ok"]:
-                    raise ValueError("GitHub quota unavailable")
-                marker = directory / (sha + "." + filename + ".dispatched")
-                try:
-                    fd = os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-                except FileExistsError:
-                    continue
-                os.close(fd)
-                # Dispatch accepts a branch/tag ref. Evidence remains pinned to
-                # the fetched sha, so a concurrent master advance cannot certify it.
-                argv = ["gh", "workflow", "run", filename, "--repo", owner, "--ref", "master"]
-                if name == "Python Tests":
-                    argv.extend(["-f", "full_run=true"])
+            for name in sorted(WORKFLOWS - existing):
+                if not ghlimit.gate(wait=False)['ok']:
+                    raise ValueError('GitHub quota unavailable')
+                runs = _api(f'repos/{owner}/actions/runs?head_sha={sha}&per_page=100', 'workflow_runs')
+                marker = directory / (sha + '.' + WORKFLOW_FILES[name] + '.pending.json')
+                marker.write_text(json.dumps(dict(sha=sha, workflow=name,
+                    dispatch_time=datetime.now(timezone.utc).isoformat(),
+                    before_ids=[str(r['id']) for r in runs], suite=suite)))
+                argv = ['gh', 'workflow', 'run', WORKFLOW_FILES[name], '--repo', owner, '--ref', 'master']
+                if name == 'Python Tests':
+                    argv.extend(['-f', 'full_run=true'])
+                    if suite == 'nightly':
+                        argv.extend(['-f', 'suite=nightly'])
                 rc, _, _ = ghlimit.run(argv, wait=False)
                 if rc:
-                    raise ValueError("nightly dispatch unavailable")
-            if needed:
-                runs = _api(endpoint, "workflow_runs")
-                if any(r["head_sha"] == sha and r.get("name") in needed
-                       and r["status"] != "completed" for r in runs):
-                    result["undetermined"].append("dispatched workflow is queued or in progress")
-                    return result
-                result, _ = _snapshot(repo, sha, runs=runs)
-            if not result["undetermined"]:
-                ids = sorted({i for values in result["ids"].values() for i in values})
-                _append("base-red-nightly", project, sha, complete=result["complete"], ids=ids,
-                        url=next(iter(result["sources"]), ""))
+                    marker.unlink(missing_ok=True)
+                    raise ValueError('nightly dispatch unavailable')
+            resolved = _resolve_pending(project, directory, sleep=sleep or time.sleep, polls=6)
+            if resolved:
+                result['message'] = 'nightly dispatched'
+            else:
+                result['undetermined'].append('dispatch runs have not appeared')
         return result
-    except (OSError, RuntimeError, ValueError, KeyError, TypeError, EOFError,
-            zipfile.BadZipFile, zipfile.LargeZipFile, zlib.error, subprocess.SubprocessError):
-        result["complete"] = False
-        result["undetermined"].append("nightly could not establish evidence")
+    except _NIGHTLY_ERRORS as exc:
+        result['undetermined'].append('dispatch never appeared' if str(exc) == 'dispatch never appeared'
+                                      else 'nightly could not establish dispatch')
+        return result
+
+
+def nightly_collect(project):
+    """Collect only the recorded dispatch, without fetching or resolving master."""
+    result = _result('')
+    try:
+        repo = _repo(project)
+        directory = fold.ROOT / 'base-red' / project
+        directory.mkdir(parents=True, exist_ok=True)
+        with (directory / 'nightly.lock').open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            if _pending(directory) and not _resolve_pending(project, directory):
+                result['waiting'] = True
+                result['message'] = 'waiting for dispatch runs'
+                return result
+            rows = _nightly_rows(project)
+            dispatched = [e for e in rows if e.get('type') == 'base-red-nightly-dispatched']
+            if not dispatched:
+                result['message'] = 'no nightly dispatched'
+                return result
+            event = dispatched[-1]
+            sha, run_ids, suite = event['sha'], event['run_ids'], event['suite']
+            if (not isinstance(sha, str) or not re.fullmatch(r'[a-fA-F0-9]{40}', sha)
+                    or not isinstance(run_ids, list) or len(run_ids) != len(WORKFLOWS)
+                    or any(not isinstance(i, (str, int)) or not str(i).isdigit() for i in run_ids)
+                    or len(set(map(str, run_ids))) != len(run_ids)
+                    or suite not in ('nightly', 'undeclared')):
+                raise ValueError('malformed nightly dispatch')
+            dispatched_at = _time(event['ts'])
+            result['sha'] = sha
+            if any(e.get('type') == 'base-red-nightly' and e.get('sha') == sha
+                   and e.get('complete') is True for e in rows):
+                result['message'] = 'already collected'
+                return result
+            owner = _owner(repo)
+            listed = _api(f'repos/{owner}/actions/runs?head_sha={sha}&per_page=100', 'workflow_runs')
+            runs = [r for r in listed if str(r.get('id')) in set(map(str, run_ids))]
+            if len(runs) != len(run_ids) or any(r.get('head_sha') != sha for r in runs):
+                raise ValueError('dispatched runs missing or sha differs')
+            if any(r.get('conclusion') == 'cancelled' for r in runs):
+                raise ValueError('dispatched run cancelled')
+            if any(r.get('status') != 'completed' for r in runs):
+                if datetime.now(timezone.utc) - dispatched_at > timedelta(hours=24):
+                    result['undetermined'].append('nightly overdue')
+                else:
+                    result['waiting'] = True
+                    result['message'] = 'nightly runs queued or in progress'
+                return result
+            result, _ = _snapshot(repo, sha, runs=runs)
+            if not result['complete'] or result['undetermined']:
+                result['complete'] = False
+                result['undetermined'].append('nightly snapshot incomplete')
+                return result
+            ids = sorted({i for values in result['ids'].values() for i in values})
+            new = sorted(set(ids) - set(known_red(project)))
+            alarms = [e for e in rows if e.get('type') == 'nightly-red' and e.get('sha') == sha]
+            subject = 'nightly:' + project
+            url = next(iter(result['sources']), '')
+            if new or alarms:
+                if not alarms:
+                    _append('nightly-red', project, sha, complete=True, ids=new, subject=subject, url=url)
+                if not any(e.get('type') == 'escalation-blocking' and e.get('subject') == subject
+                           and e.get('sha') == sha for e in rows):
+                    _append('escalation-blocking', project, sha, complete=True, ids=new, subject=subject,
+                            default='Create a quarantine-row or fix spec with owner integrator for these nightly ids',
+                            deadline=(datetime.now(timezone.utc) + timedelta(hours=24)).isoformat(),
+                            revert='Remove the quarantine row after the integrator fix is verified')
+            _append('base-red-nightly', project, sha, complete=True, ids=ids, url=url, suite=suite)
+        return result
+    except _NIGHTLY_ERRORS as exc:
+        result['complete'] = False
+        result['undetermined'].append('dispatch never appeared' if str(exc) == 'dispatch never appeared'
+                                      else 'nightly collect could not establish evidence')
         return result
 
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
-    if argv[:1] == ["nightly"]:
-        parser = argparse.ArgumentParser(description="Record full master CI evidence")
+    if argv[:1] in (["nightly"], ["nightly-collect"]):
+        command = argv[0]
+        parser = argparse.ArgumentParser(description="Dispatch or collect full master CI evidence")
         parser.add_argument("project")
         args = parser.parse_args(argv[1:])
-        result = nightly(args.project)
-        state = "undetermined" if result["undetermined"] else "complete" if result["complete"] else "incomplete"
-        print(f"{args.project} nightly: {state}")
-        for reason in result["undetermined"]:
+        result = nightly(args.project) if command == 'nightly' else nightly_collect(args.project)
+        state = 'undetermined' if result['undetermined'] else result.get('message', 'complete')
+        print(f'{args.project} {command}: {state}')
+        for reason in result['undetermined']:
             print(reason)
-        if not result["complete"] and not result["undetermined"]:
-            print("required full workflow evidence is missing after dispatch")
-        return 2 if result["undetermined"] else 0 if result["complete"] else 3
+        return 2 if result['undetermined'] else 3 if result.get('waiting') else 0
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("project")
     parser.add_argument("sha")

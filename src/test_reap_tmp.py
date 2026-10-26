@@ -756,6 +756,10 @@ EXPECTED_CRONS_ROWS = [
      "command": "{doit} cron-run base-red-nightly -- /usr/bin/python3 {repo}/src/base_red.py nightly albert-scott >> {root}/logs/base-red-nightly.log 2>&1",
      "path": "/usr/bin/python3", "sig": r"base_red\.py\s+nightly\s+albert-scott\b",
      "owner": "thinker", "project": "albert-scott", "max_runtime_s": 5400},
+    {"name": "base-red-nightly-collect", "where": "user", "schedule": "40 * * * *",
+     "command": "{doit} cron-run base-red-nightly-collect -- /usr/bin/python3 {repo}/src/base_red.py nightly-collect albert-scott >> {root}/logs/base-red-nightly-collect.log 2>&1",
+     "path": "/usr/bin/python3", "sig": r"base_red\.py\s+nightly-collect\s+albert-scott\b",
+     "owner": "thinker", "project": "albert-scott", "max_runtime_s": 1800},
 ]
 CRONS_PATH = pathlib.Path(__file__).resolve().parent.parent / "crons.toml"
 with open(CRONS_PATH, "rb") as f:
