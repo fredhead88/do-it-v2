@@ -304,8 +304,17 @@ def launch(step, *, dispatcher):
             raise ValueError(result.get('stderr') or result.get('stdout') or 'merge launch failed')
         return head
     role = ROUTINE_ROLES[step.action]
+    heal = None
     try:
-        project = next((e['project'] for e in reversed(evs) if e.get('project')), 'unknown')
+        try:
+            import worktree_heal
+        except Exception:
+            pass  # A broken optional repair module must preserve legacy dispatch.
+        else:
+            if worktree_heal.enabled(fold.ROOT):
+                heal = worktree_heal
+        project = (heal.project_of(evs, fold.ROOT) if heal else
+                   next((e['project'] for e in reversed(evs) if e.get('project')), 'unknown'))
         charter = dispatch.resolve_charter(evs, step.item, None)
         wt = fold.ROOT / 'worktrees' / project / step.item.lower()
         if step.action == 'build':
@@ -329,6 +338,9 @@ def launch(step, *, dispatcher):
             raise ValueError('review round limit')
         if options and options[0] == 'needs-browser':
             raise ValueError('ui review requires review-mcp.json')
+        recreated = False
+        if heal and step.action in ('rebuild', 'grade', 'regrade', 'review'):
+            recreated = heal.repair(step.item, step.action, evs, fold.ROOT, project, wt, dispatcher)
         spawn = lane_driver._dispatch(role, step.item, project, charter, dispatcher, options)
         # `doit dispatch --detach` reports the detached pid as an int; a missing one is undetermined.
         if isinstance(spawn, int) and not isinstance(spawn, bool) and spawn > 0:
@@ -336,11 +348,14 @@ def launch(step, *, dispatcher):
         if not isinstance(spawn, str) or not spawn:
             raise ValueError('undetermined: missing spawn id')
         refusal = dispatch.emit(tick_path(), {'subject': step.item}, 'autodispatched',
-                                role=role, rule=step.action, since=step.since, spawn=spawn)
+                                role=role, rule=step.action, since=step.since, spawn=spawn,
+                                **({'worktree_recreated': True} if recreated else {}))
         if refusal is not None:
             raise ValueError('autodispatched record refused: ' + str(refusal))
         return spawn
     except Exception as exc:
+        if heal and isinstance(exc, heal.RepairRetry):
+            raise
         refusal = dispatch.emit(tick_path(), {'subject': step.item}, 'autodispatch-failed',
                                 role=role, rule=step.action, reason=str(exc))
         raise ValueError(str(exc) + (f'; failure record refused: {refusal}' if refusal else '')) from exc
