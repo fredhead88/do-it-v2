@@ -98,7 +98,7 @@ def parse_log(text):
 
 def _result(sha, reasons=()):
     return {"sha": sha, "complete": False, "ids": {k: [] for k in KINDS},
-            "sources": [], "undetermined": list(reasons)}
+            "sources": [], "undetermined": list(reasons), "workflows": [], "kinds_covered": []}
 
 
 def _repo(project):
@@ -185,21 +185,30 @@ def _selection(repo, sha, run, members):
     return "selected" if re.search(r"(?m)^\s*select_base\s*:", source.stdout) else "full"
 
 
+def _runs_seen(runs, sha):
+    return sorted({str(r["id"]) for r in runs if r["head_sha"] == sha
+                   and r["status"] == "completed" and r.get("name") in WORKFLOWS})
+
+
 def _snapshot(repo, sha, *, runs=None, covered=None):
     result = _result(sha)
     owner = _owner(repo)
     if runs is None:
         runs = _api(f"repos/{owner}/actions/runs?head_sha={sha}&per_page=100", "workflow_runs")
+    result["runs_seen"] = _runs_seen(runs, sha)
     complete_runs = [r for r in runs if r["head_sha"] == sha and r["status"] == "completed"
                      and r.get("conclusion") != "cancelled"]
-    workflows, seen = set(), set()
+    workflows, seen, kinds_covered = set(), set(), set()
     ids = {k: set() for k in KINDS}
     for run in complete_runs:
+        filename = str(run.get("path", "")).split("/")[-1].split("@")[0]
         if not isinstance(run.get("name"), str) or not run["name"]:
+            if (not run.get("name") and run.get("conclusion") == "startup_failure"
+                    and filename not in WORKFLOW_FILES.values()):
+                continue
             raise ValueError("workflow cannot be classified")
         # A renamed required workflow is unknown, rather than an absent clean run.
         expected = {"python-tests.yml": "Python Tests", "dashboard-pr-quality.yml": "Dashboard PR Quality"}
-        filename = str(run.get("path", "")).split("/")[-1].split("@")[0]
         if filename in expected and run["name"] != expected[filename]:
             raise ValueError("required workflow cannot be classified")
         rid = str(run["id"])
@@ -221,10 +230,24 @@ def _snapshot(repo, sha, *, runs=None, covered=None):
         workflows.add(run["name"])
         # Step metadata supplies display names for zip members, which otherwise
         # contain only timestamped command output. Never invent a command name.
+        jobs = _api(f"repos/{owner}/actions/runs/{rid}/jobs?per_page=100", "jobs")
         pg_jobs = []
+        text = "\n".join(text for _, text in members)
+        ran = {"success", "failure"}
         if run["name"] == "Python Tests":
-            pg_jobs = [j for j in _api(f"repos/{owner}/actions/runs/{rid}/jobs?per_page=100", "jobs")
-                       if "pg-parity" in j["name"].lower()]
+            pg_jobs = [j for j in jobs if "pg-parity" in j["name"].lower()]
+            shards = [j for j in jobs if j["name"].startswith("pytest — shard ")]
+            if (any(j["name"] == "pytest" and j.get("conclusion") in ran for j in jobs)
+                    and any(j.get("conclusion") in ran for j in shards)
+                    and not any(j.get("conclusion") in {"cancelled", "timed_out"} for j in shards)
+                    and re.search(r"\bSUMMARY pytest_baseline_gate\.py check:", text)):
+                kinds_covered.add("pytest")
+            if any(j["name"] == "pg-parity (Postgres)" and j.get("conclusion") in ran for j in jobs):
+                kinds_covered.add("pg-parity")
+        elif (any(j["name"] == "TypeScript · Biome · Tests · File Sizes"
+                  and j.get("conclusion") in ran for j in jobs)
+              and re.search(r"\bSUMMARY vitest_baseline_gate\.mjs check:", text)):
+            kinds_covered.update(("vitest", "suite-error"))
         pg_text = "\n".join(text for name, text in members if "pg-parity" in name.lower())
         pg_named = set()
         for name, text in members:
@@ -249,26 +272,29 @@ def _snapshot(repo, sha, *, runs=None, covered=None):
                         ids["pg-parity"].update(parsed["pg-parity"])
         result["sources"].append(run["html_url"])
     result["ids"] = {k: sorted(v) for k, v in ids.items()}
+    result["workflows"] = sorted(workflows)
+    result["kinds_covered"] = sorted(kinds_covered)
     result["complete"] = WORKFLOWS <= workflows and not result["undetermined"]
     if covered is not None:
         covered.update(workflows)
     return result, bool(complete_runs)
 
 
-def _store(path, project, result):
+def _store(path, project, result, *, record=True):
     # Stage first; append through the public entry point with a private env.
     with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as f:
         staged = pathlib.Path(f.name)
         json.dump(result, f, sort_keys=True)
     try:
-        proc = subprocess.run([str(DOIT), "append", "base-red", "base-" + project,
-                               "project=" + project, "sha=" + result["sha"], "complete:=true",
-                               "ids:=" + json.dumps(result["ids"]), "sources:=" + json.dumps(result["sources"])],
-                              env={**os.environ, "DOIT_ROOT": str(fold.ROOT),
-                                   "DOIT_LEDGER_FILE": "L-base-red-local.jsonl"},
-                              capture_output=True, text=True, timeout=30)
-        if proc.returncode:
-            raise ValueError("base-red ledger append failed")
+        if record:
+            proc = subprocess.run([str(DOIT), "append", "base-red", "base-" + project,
+                                   "project=" + project, "sha=" + result["sha"], "complete:=true",
+                                   "ids:=" + json.dumps(result["ids"]), "sources:=" + json.dumps(result["sources"])],
+                                  env={**os.environ, "DOIT_ROOT": str(fold.ROOT),
+                                       "DOIT_LEDGER_FILE": "L-base-red-local.jsonl"},
+                                  capture_output=True, text=True, timeout=30)
+            if proc.returncode:
+                raise ValueError("base-red ledger append failed")
         os.replace(staged, path)
     finally:
         staged.unlink(missing_ok=True)
@@ -289,6 +315,24 @@ def failing(project, sha, *, ensure=False):
                 cached = json.loads(path.read_text())
                 if cached["sha"] != sha or not cached["complete"] or cached.get("undetermined"):
                     raise ValueError("invalid base-red cache")
+                if "workflows" not in cached or "kinds_covered" not in cached:
+                    result, _ = _snapshot(repo, sha)
+                    if result["complete"]:
+                        _store(path, project, result, record=False)
+                    return result
+                if set(KINDS) <= set(cached["kinds_covered"]):
+                    return cached
+                try:
+                    runs = _api(f"repos/{_owner(repo)}/actions/runs?head_sha={sha}&per_page=100", "workflow_runs")
+                    if set(_runs_seen(runs, sha)) <= set(cached.get("runs_seen", [])):
+                        return cached
+                    refreshed, _ = _snapshot(repo, sha, runs=runs)
+                    if refreshed["complete"]:
+                        _store(path, project, refreshed, record=refreshed["ids"] != cached["ids"])
+                        return refreshed
+                except (OSError, RuntimeError, ValueError, KeyError, TypeError, EOFError,
+                        zipfile.BadZipFile, zipfile.LargeZipFile, zlib.error, subprocess.SubprocessError):
+                    pass  # Previously established complete evidence still holds.
                 return cached
             result, has_runs = _snapshot(repo, sha)
             if result["complete"]:
@@ -388,10 +432,23 @@ def record(project, sha, ids, source):
     _append("base-red", project, sha, complete=False, ids=sorted(set(ids)), source=source)
 
 
+def id_kind(node):
+    if node.startswith("pg-parity::"):
+        return "pg-parity"
+    if ".py::" in node:
+        return "pytest"
+    return "vitest" if "::" in node else "suite-error"
+
+
 def classify(project, base_sha, ids, *, known_red=False, now=None):
+    ids = list(ids)
     base = failing(project, base_sha)
-    complete = bool(base["complete"] and not base.get("undetermined"))
-    known = set().union(*(set(v) for v in base["ids"].values())) if complete else set()
+    undetermined = bool(base.get("undetermined"))
+    needed = {id_kind(i) for i in ids}
+    covered = set() if undetermined else set(base.get("kinds_covered", []))
+    complete = not undetermined and (needed <= covered if ids else bool(base["complete"]))
+    known = {i for bucket in base["ids"].values() for i in bucket
+             if id_kind(i) in covered}
     recorded = {}
     if known_red:
         recorded, nightly = _known_state(project)
@@ -400,7 +457,10 @@ def classify(project, base_sha, ids, *, known_red=False, now=None):
         fresh = nightly is not None and timedelta(0) <= current - _time(nightly["ts"]) < timedelta(hours=36)
         complete = complete or fresh
     result = {"pre_existing": [i for i in ids if i in known],
-              "new": [i for i in ids if i not in known], "complete": complete}
+              "new": [i for i in ids if i not in known], "complete": complete,
+              "needed": sorted(needed), "covered": sorted(covered),
+              "uncovered": [i for i in ids if id_kind(i) not in covered],
+              "undetermined": undetermined}
     if known_red:
         result["known_red"] = [i for i in ids if i in recorded]
     return result

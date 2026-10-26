@@ -48,6 +48,8 @@ DEFAULT_TOML_PATH = pathlib.Path(__file__).resolve().parent.parent / "look.toml"
 KILL_MARGIN_MIN = 10
 BASE_RED_MARGIN_SECS = 600  # nested verify teardown, plus bounded log fetch
 BASE_RED_COMMAND = "doit"
+BASE_RED_WORKFLOWS = frozenset({"Python Tests", "Dashboard PR Quality"})
+BASE_RED_KINDS = frozenset({"pytest", "pg-parity", "vitest", "suite-error"})
 PYTEST_CHECK = "pytest"
 PG_CHECK = "pg-parity (Postgres)"
 # These workflows only run on master pushes/PRs, not ci-verify dispatches.
@@ -887,12 +889,17 @@ def call_base_red(project, base, ensure):
             os.killpg(proc.pid, signal.SIGKILL)
             proc.communicate()
             return incomplete
-        if proc.returncode != 0:
+        if proc.returncode not in (0, 3):
             return incomplete
         answer = json.loads(out)
         if (not isinstance(answer, dict) or answer.get("sha") != base or
-                answer.get("complete") is not True or answer.get("undetermined") or
-                not isinstance(answer.get("ids"), dict)):
+                answer.get("complete") is not (proc.returncode == 0) or answer.get("undetermined") or
+                not isinstance(answer.get("ids"), dict) or
+                not isinstance(answer.get("workflows"), list) or
+                not all(isinstance(w, str) and w in BASE_RED_WORKFLOWS for w in answer["workflows"]) or
+                not isinstance(answer.get("kinds_covered"), list) or
+                not all(isinstance(k, str) and k in BASE_RED_KINDS for k in answer["kinds_covered"]) or
+                (answer["complete"] and set(answer["workflows"]) != BASE_RED_WORKFLOWS)):
             return incomplete
         return answer
     except (OSError, ValueError, subprocess.SubprocessError):
@@ -1283,12 +1290,24 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
                 record(res, tree, candidate_required)
             return dict(res, state="undetermined")
         classification = {"complete": False}
-        if base_red_answer.get("complete") and not base_red_answer.get("undetermined"):
+        if ((base_red_answer.get("complete") or base_red_answer.get("workflows"))
+                and not base_red_answer.get("undetermined")):
             import base_red
             classification = base_red.classify(project, root_base, nodes)
-        if not classification.get("complete"):
+        covered = set(classification.get("covered", BASE_RED_KINDS))
+        uncovered = classification.get("uncovered", [])
+        base_undetermined = classification.get("undetermined", False)
+        pg_covered = (PG_CHECK in candidate_required and baseline is not None
+                      and baseline["state"] == "green" and not base_undetermined)
+        pg_complete = pg_covered and uncovered and all(n.startswith("pg-parity::") for n in uncovered)
+        if base_undetermined or not (classification.get("complete") or pg_complete):
             outcome = "half remains pending" if half else "master unmoved"
-            escalate(window, f"base incomplete; NEW ids={json.dumps(nodes)}; {outcome}, no spec dropped", "undetermined")
+            reason = "base incomplete"
+            if base_undetermined:
+                reason += " (base undetermined)"
+            elif "needed" in classification and "covered" in classification:
+                reason += f" (needs {classification['needed']}, base has {sorted(covered)})"
+            escalate(window, f"{reason}; NEW ids={json.dumps(nodes)}; {outcome}, no spec dropped", "undetermined")
             if not half:
                 record(res, tree, candidate_required)
             return dict(res, state="undetermined")

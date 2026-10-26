@@ -2179,6 +2179,111 @@ def merge_simple_checks():
         print("merge-simple AC4 status=0")
 
 
+def base_kind_checks():
+    from unittest.mock import Mock
+    start = len(FAILS)
+    old, new = "old.py::test_base", "api/tests/test_x.py::test_new"
+    partial = dict(complete=False, workflows=["Python Tests"],
+                   kinds_covered=["pg-parity", "pytest"], undetermined=[])
+    fx = Fx({"A": "api/tests/test_x.py", "B": "b.txt"})
+    fx.base_reader = lambda project, sha: dict(partial, sha=sha)
+    fx.run_n(1, 1, red([old, new]))
+    fx.run_n(2, 0, GREEN)
+    fx.service.classify = Mock(return_value=dict(complete=True, pre_existing=[old], new=[new],
+        needed=["pytest"], covered=["pg-parity", "pytest"], uncovered=[], undetermined=False))
+    check(fx.go() == 1, "base-kind partial Python base advances remainder")
+    check(fx.service.classify.call_args.args == ("albert-scott", fx.base, sorted([old, new])),
+          "base-kind classify receives all NEW ids")
+    check([e["ids"] for e in fx.events("window-pre-existing")] == [[old]], "base-kind base id recorded")
+    check([e["subject"] for e in fx.events("window-dropped")] == ["A"], "base-kind new id attributed")
+    check(not fx.events("escalation-blocking"), "base-kind no base incomplete escalation")
+
+    fx = Fx({"A": "dashboard/src/x.test.ts"})
+    fx.base_reader = lambda project, sha: dict(partial, sha=sha)
+    node = "dashboard/src/x.test.ts::renders"
+    fx.run_n(1, 1, red([node]))
+    fx.service.classify = lambda *a: dict(complete=False, pre_existing=[], new=[node],
+        needed=["vitest"], covered=["pg-parity", "pytest"], uncovered=[node], undetermined=False)
+    check(fx.go() == 2 and fx.master() == fx.base and not fx.events("window-dropped"),
+          "base-kind uncovered vitest keeps master and specs")
+    check("base incomplete (needs ['vitest'], base has ['pg-parity', 'pytest'])" in
+          fx.events("escalation-blocking")[0]["why"], "base-kind needs and coverage escalation")
+
+    pg = "pg-parity::Run parity"
+    for mode in ("inherited", "undetermined", "not-required", "fixes-base", "missing-covered"):
+        fx = Fx({"A": "a.txt", **({"B": "b.txt"} if mode == "not-required" else {})})
+        fx.base_reader = lambda project, sha: dict(partial, sha=sha)
+        fx.run_n(1, 1, red([pg]))
+        answer = dict(complete=False, pre_existing=[], new=[pg], needed=["pg-parity"],
+                      covered=["pytest"], uncovered=[pg], undetermined=mode == "undetermined")
+        if mode == "missing-covered":
+            del answer["covered"]
+        fx.service.classify = Mock(return_value=answer)
+        baseline = dict(state="red" if mode == "fixes-base" else "green", pg_failures={})
+        # not-required starts with a green PG baseline from the first candidate.
+        if mode == "not-required":
+            fx.run_n(1, 1, red(["a.py::first"]))
+            fx.run_n(2, 1, red([pg]))
+            fx.service.classify.side_effect = [dict(complete=True, pre_existing=[], new=["a.py::first"]), answer]
+            scopes = [dict(checks=[window_gate.PYTEST_CHECK, window_gate.PG_CHECK]),
+                      dict(checks=[window_gate.PYTEST_CHECK])]
+        else:
+            scopes = [dict(checks=[window_gate.PYTEST_CHECK, window_gate.PG_CHECK])]
+        with patch.object(window_gate, "base_pg", return_value=(baseline, [])), \
+             patch.object(window_gate, "scope", side_effect=scopes), \
+             patch.object(window_gate, "unattributed_ids", return_value=[]), \
+             patch.object(window_gate, "owners", return_value=["A"]):
+            rc = fx.go(fixes_base=mode == "fixes-base")
+        whys = [e["why"] for e in fx.events("escalation-blocking")]
+        excused = mode in ("inherited", "missing-covered")
+        if excused:
+            check(rc == 2 and bool(fx.events("window-dropped")) and
+                  all("base incomplete" not in why for why in whys), "base-kind PG baseline attribution " + mode)
+        else:
+            check(rc == 2 and fx.master() == fx.base and "base incomplete" in whys[-1],
+                  "base-kind PG incomplete " + mode)
+            check(not fx.events("window-dropped") if mode != "not-required" else
+                  len(fx.events("window-dropped")) == 1, "base-kind no drop on uncovered PG pass " + mode)
+            check("base undetermined" in whys[-1] if mode == "undetermined" else
+                  "needs ['pg-parity']" in whys[-1], "base-kind PG reason " + mode)
+        check(pg in fx.service.classify.call_args.args[2], "base-kind PG ids passed to classify " + mode)
+    if len(FAILS) == start:
+        print("base-kind AC4 status=0")
+
+    start = len(FAILS)
+    fx = Fx({"A": "a.txt"})
+    cli = fx.tmp / "base-red-command"
+    cli.write_text("#!/usr/bin/python3\nimport pathlib,sys,json\n"
+                   "d=pathlib.Path(__file__).parent\n"
+                   "sys.stdout.write((d/'answer').read_text())\n"
+                   "sys.exit(int((d/'status').read_text()))\n")
+    cli.chmod(0o755)
+    valid = dict(partial, sha=fx.base, ids={"pytest": []})
+    complete = dict(valid, complete=True, workflows=sorted(window_gate.BASE_RED_WORKFLOWS))
+    cases = [("partial", 3, valid, True), ("complete", 0, complete, True)]
+    for field, value in (("undetermined", ["unknown"]), ("workflows", ["unknown"]),
+                         ("kinds_covered", ["unknown"]), ("ids", []), ("workflows", {}),
+                         ("kinds_covered", {}), ("sha", "0" * 40), ("complete", True),
+                         ("workflows", [1]), ("kinds_covered", [1]), ("complete", 0)):
+        cases.append((field + repr(value), 3, dict(valid, **{field: value}), False))
+    for field in ("workflows", "kinds_covered"):
+        cases.append(("missing " + field, 3, {k: v for k, v in valid.items() if k != field}, False))
+    cases.extend([("exit2", 2, valid, False), ("exit1", 1, valid, False),
+                  ("false exit0", 0, valid, False),
+                  ("single workflow complete", 0, dict(complete, workflows=["Python Tests"]), False),
+                  ("bad-json", 3, "not-json", False)])
+    with patch.object(window_gate, "BASE_RED_COMMAND", str(cli)):
+        for name, status, answer, accepted in cases:
+            (fx.tmp / "answer").write_text(answer if isinstance(answer, str) else json.dumps(answer))
+            (fx.tmp / "status").write_text(str(status))
+            got = window_gate.call_base_red("albert-scott", fx.base, False)
+            check(got == (answer if accepted else {"sha": fx.base, "complete": False}),
+                  "base-kind CLI validation " + name)
+    if len(FAILS) == start:
+        print("base-kind AC5 status=0")
+
+
+base_kind_checks()
 infra_checks()
 train_checks()
 rerun_checks()
