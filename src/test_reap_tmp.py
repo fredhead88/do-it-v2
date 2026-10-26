@@ -21,10 +21,15 @@ proving — by the fact that every AC below still runs to completion — that
 outside L0440-AC22's own bracket, which is the only place that installs (and
 then removes) a real stand-in.
 """
-import collections, json, os, pathlib, re, shutil, signal, subprocess, sys, tempfile, tomllib
+import atexit, collections, io, json, os, pathlib, re, shutil, signal, subprocess, sys, tempfile, tomllib
 from datetime import datetime, timedelta, timezone
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
+_IMPORT_ROOT1654 = tempfile.TemporaryDirectory(prefix='reap-import-')
+atexit.register(_IMPORT_ROOT1654.cleanup)
+os.environ.update(HOME=_IMPORT_ROOT1654.name, DOIT_ROOT=_IMPORT_ROOT1654.name)
 import fold, look, panes, reap_tmp, scratch, tree_cleanup  # noqa: E402
+import disk_reaper
+disk_reaper.LOOK_TOML_PATH = pathlib.Path(_IMPORT_ROOT1654.name) / 'look.toml'
 TMP = pathlib.Path(tempfile.mkdtemp(prefix="reap-tmp-test-"))
 NOW = datetime(2026, 9, 24, 12, 0, 0, tzinfo=timezone.utc)
 UID = os.getuid()
@@ -1650,3 +1655,207 @@ with tempfile.TemporaryDirectory(prefix='reap-surfaces-') as d1541:
 body1541 = json.dumps(outcomes1541, sort_keys=True)
 print(json.dumps(dict(url='cli://reap-tmp/AC5-AC7', status=0, body_sha256=hashlib.sha256(body1541.encode()).hexdigest(), body_excerpt=body1541)))
 print('L1541 AC5 AC7 pass')
+
+# L1654: committed ledgers, parent shields, shared hold and bounded reports.
+def birth1654(ref, kind='scratch-db', subject='unknown-run', ts=None, **extra):
+    return resources._append('resource-created', subject, ref=str(ref), kind=kind,
+        lane='build', ts=ts or (NOW - timedelta(hours=7)).isoformat(), project='fixture', **extra)
+
+outcomes1654 = {}
+for present1654, held1654 in ((True, False), (False, False), (False, True)):
+    with fixture1496() as (top, ledger, proc, scr):
+        with patch.object(disk_reaper, 'LOOK_TOML_PATH', top / 'look.toml'):
+            tmp = top / 'tmp'
+            tmp.mkdir()
+            runner = scr / 'runner'
+            runner.mkdir()
+            birth1654(runner / 'a-env/pg')
+            if present1654:
+                other = runner / 'b-env/pg'
+                other.mkdir(parents=True)
+                fold.append(['spec-written', 'L-spec-1654'], strict=True)
+                birth1654(other, subject='L-spec-1654')
+            for path in [*runner.rglob('*'), runner]:
+                os.utime(path, ((NOW - timedelta(hours=13)).timestamp(),) * 2)
+            first = reap_tmp.run(root=tmp, proc_root=proc, scratch_root=scr,
+                                 events=fresh1496(), now=NOW)
+            ok(len(first['retired']) == 1 and runner.exists(), 'L1654 first pass retires child but preserves snapshot shield')
+            ok(any(k['path'] == str(runner) and k['reason'].startswith('recorded resource') for k in first['kept']), 'L1654 first parent reason')
+            with patch.dict(os.environ, DOIT_REAP_HOLD='1' if held1654 else ''):
+                second = reap_tmp.run(root=tmp, proc_root=proc, scratch_root=scr,
+                                      events=fresh1496(), now=NOW)
+            ok(runner.exists() == (present1654 or held1654), 'L1654 second pass uses remaining records and hold')
+            if held1654:
+                ok(any(k['reason'] == 'held: reap hold set' for k in second['kept']), 'L1654 unshielded scratch is held')
+            outcomes1654[f'parent-{present1654}-{held1654}'] = dict(retired=len(first['retired']), parent_survives=runner.exists())
+
+with fixture1496() as (top, ledger, proc, scr):
+    with patch.object(disk_reaper, 'LOOK_TOML_PATH', top / 'look.toml'):
+        tmp = top / 'tmp'
+        tmp.mkdir()
+        birth1654(scr / 'young')
+        events1654 = fresh1496()
+        early = reap_tmp.run(root=tmp, proc_root=proc, events=events1654,
+                            scratch_root=scr, now=NOW - timedelta(hours=6))
+        ok(not early['retired'], 'L1654 run forwards one-hour grace')
+        late = reap_tmp.run(root=tmp, proc_root=proc, events=events1654,
+                           scratch_root=scr, now=NOW)
+        ok(len(late['retired']) == 1, 'L1654 run forwards seven-hour grace')
+        config = ledger / 'repos/do-it-v2/look.toml'
+        config.parent.mkdir(parents=True)
+        manifest = top / 'manifest.jsonl'
+        manifest.write_text(json.dumps(dict(kind='upload-copy', ref=str(scr / 'absent-upload'), lane='archive', subject='upload')) + '\n')
+        config.write_text('[resources]\nupload_manifest=' + json.dumps(str(manifest)) + '\n')
+        birth1654('/dev/shm/outside-1654')
+        before = fresh1496()
+        rows = reap_tmp._reap_recorded(before, scratch_root=scr, proc_root=proc, now=NOW)
+        ok(len(rows) == 1 and rows[0].reason == 'undetermined: ref outside allowed roots', 'L1654 excluded and upload rows never retire')
+        ok(fresh1496() == before, 'L1654 excluded rows append nothing')
+        manifest.write_text('{broken')
+        malformed = resources.reap([], now=NOW)
+        ok(malformed[0].action == 'refused' and malformed[0].reason.startswith('undetermined: upload manifest:'), 'L1654 broken manifest never retires')
+
+# A hold on every newly enabled surface; a dry run previews the bounded release.
+for switch1654 in ('1', 'true', 'file', 'file-zero'):
+    with fixture1496() as (top, ledger, proc, scr):
+        with patch.object(disk_reaper, 'LOOK_TOML_PATH', top / 'look.toml'):
+            tmp, var, sess = [top / name for name in ('tmp', 'var', 'sessions')]
+            for path in (tmp, var, sess, sess / 'empty', scr / 'idle'):
+                path.mkdir()
+            for path in (var / 'old', sess / 'old.jsonl'):
+                path.write_text('payload')
+            for path in (var / 'old', sess / 'old.jsonl', scr / 'idle'):
+                os.utime(path, ((NOW - timedelta(days=20)).timestamp(),) * 2)
+            terminal1496()
+            present = scr / 'present'
+            present.mkdir()
+            birth1654(present, subject='L-spec-1496')
+            birth1654(scr / 'absent')
+            if switch1654.startswith('file'):
+                (ledger / 'state').mkdir()
+                (ledger / 'state/reap-hold').touch()
+            env = switch1654 if not switch1654.startswith('file') else ('0' if switch1654 == 'file-zero' else '')
+            before = fresh1496()
+            ok(sum(p.exists() for p in (var / 'old', sess / 'old.jsonl', scr / 'idle', present)) == 4, 'L1654 hold fixture pre-removal count=4')
+            logfile, marker = top / 'log', top / 'marker'
+            with patch.dict(os.environ, DOIT_REAP_HOLD=env):
+                result = reap_tmp.run(root=tmp, proc_root=proc, scratch_root=scr,
+                    var_tmp_root=var, session_roots=[sess], session_state_path=marker,
+                    events=before, now=NOW, log_path=logfile)
+            ok(not result['removed'] and not result['retired'] and fresh1496() == before, 'L1654 hold removes and appends nothing')
+            ok((sess / 'empty').exists() and (scr / 'idle').exists() and not marker.exists(), 'L1654 hold keeps empty dirs, scratch and marker')
+            lines = logfile.read_text().splitlines()
+            ok(len(lines) == 6 and all('removed=0 freed_bytes=0' in line for line in lines[1:4]), 'L1654 original four lines stay honest')
+            ok('hold=1' in lines[5] and f'config_invalid={int(switch1654 == "true")}' in lines[5], 'L1654 hold and invalid union logged')
+            outcomes1654['hold-' + switch1654] = result['recorded_summary']['counts']
+
+with fixture1496() as (top, ledger, proc, scr):
+    with patch.object(disk_reaper, 'LOOK_TOML_PATH', top / 'look.toml'):
+        tmp, var = top / 'tmp', top / 'var'
+        tmp.mkdir(); var.mkdir()
+        for i in range(30):
+            path = var / f'{i:02}'
+            path.write_text('fixture')
+            os.utime(path, ((NOW - timedelta(days=20)).timestamp(),) * 2)
+        disk_reaper.LOOK_TOML_PATH.write_text('[thresholds]\nreap_retire_max_per_pass="x"\n')
+        log = top / 'dry-log'
+        dry = reap_tmp.run(root=tmp, proc_root=proc, events=[], now=NOW,
+                           var_tmp_root=var, log_path=log, dry_run=True)
+        ok(len(dry['var_tmp']['removed']) == 25 and len(list(var.iterdir())) == 30 and not log.exists(), 'L1654 dry run caps without writes')
+        invalid = reap_tmp.run(root=tmp, proc_root=proc, events=[], now=NOW)
+        ok(invalid['surface_summary']['config_invalid'] == 1, 'L1654 own settings reports retire-only invalid key')
+        for value in ('"lots"', '-1', '2.5', '25.0'):
+            disk_reaper.LOOK_TOML_PATH.write_text('[thresholds]\nreap_max_entries_per_pass=' + value + '\n')
+            invalid = reap_tmp.run(root=tmp, proc_root=proc, events=[], now=NOW,
+                scratch_root=scr, var_tmp_root=var, session_roots=[], dry_run=True)
+            ok(invalid['surface_summary']['config_invalid'] == 1 and len(invalid['var_tmp']['removed']) == 25,
+               'L1654 invalid count defaults once across every surface')
+
+# Real refusal reasons and retirement counts, with one live child and one exempt child.
+with fixture1496() as (top, ledger, proc, scr):
+    with (patch.object(disk_reaper, 'LOOK_TOML_PATH', top / 'look.toml'),
+          tempfile.TemporaryDirectory(dir='/var/tmp', prefix='l1654-') as var_dir):
+        tmp, var = top / 'tmp', top / 'var'
+        tmp.mkdir(); var.mkdir()
+        disk_reaper.LOOK_TOML_PATH.write_text('[thresholds]\nreap_retire_max_per_pass=2\n')
+        for kind in ('tmpdir', 'scratch-db', 'venv'):
+            for terminal in (False, True):
+                path = scr / f'{kind}-{terminal}'
+                path.mkdir()
+                sid = f'L-spec-1654-{kind}' if terminal else f'unknown-{kind}'
+                if terminal:
+                    fold.append(['spec-written', sid], strict=True)
+                birth1654(path, kind, sid)
+        wt = top / 'outside-worktree'; wt.mkdir(); birth1654(wt, 'worktree')
+        venv = pathlib.Path(var_dir) / 'venv'; venv.mkdir(); birth1654(venv, 'venv')
+        terminal1496()
+        repository = scr / 'repository'; (repository / '.git').mkdir(parents=True)
+        birth1654(repository, subject='L-spec-1496')
+        target = scr / 'target'; target.mkdir()
+        alias = scr / 'alias'; alias.symlink_to(target)
+        birth1654(alias, 'tmpdir', 'L-spec-1496')
+        birth1654('/dev/shm/outside-1654', 'tmpdir')
+        active = scr / 'active'; active.mkdir()
+        birth1654(active, 'tmpdir', 'L-spec-1496')
+        for i in range(3):
+            birth1654(scr / f'gone-{i}')
+        child = subprocess.Popen(['/bin/sleep', '60'], cwd=active)
+        exempt = subprocess.Popen(['/bin/sleep', '60'])
+        try:
+            live_pid = proc / str(child.pid)
+            live_pid.mkdir(); (live_pid / 'fd').mkdir(); (live_pid / 'cwd').symlink_to(active)
+            pid = proc / str(exempt.pid); pid.mkdir()
+            uid = os.getuid()
+            (pid / 'status').write_text(f'Uid: {uid} {uid} {uid} {uid}\nCapPrm: 8\n')
+            (pid / 'cmdline').write_bytes(b'/usr/lib/systemd/systemd\0--user\0')
+            (proc / 'self').mkdir(); (proc / 'self/status').write_text('CapEff: 0\n')
+            old = var / 'old'; old.write_text('fixture')
+            os.utime(old, ((NOW - timedelta(days=20)).timestamp(),) * 2)
+            real = reap_tmp._pid_refs
+            def refs1654(root, number):
+                if number == exempt.pid:
+                    raise PermissionError('login process')
+                return real(root, number)
+            with patch.object(reap_tmp, '_pid_refs', side_effect=refs1654):
+                result = reap_tmp.run(root=tmp, proc_root=proc, events=fresh1496(),
+                    scratch_root=scr, var_tmp_root=var, now=NOW, log_path=top / 'log')
+            lines = (top / 'log').read_text().splitlines()
+            summary = result['recorded_summary']
+            ok(summary['counts'] == {'refused': 12, 'retired': 2, 'deferred': 1}, 'L1654 real 12-key refusal matrix, two retirements and a deferral')
+            ok(len(lines) == 6 and len(lines[4].encode()) + 1 <= 2048 and len(lines[5].encode()) + 1 <= 2048, 'L1654 six bounded log lines')
+            ok(lines[4].endswith('truncated=0') and all(len(sample) <= 120 for sample in summary['samples']), 'L1654 fitting report preserves full sample allowance')
+            ok(result['var_tmp']['unreadable_exempt'] == 1 and len(result['var_tmp']['exempt']) == 1, 'L1654 exemption reaches surfaces log')
+            ok(not set(result['retired']) & {k['path'] for k in result['kept']}, 'L1654 retired is separate from kept')
+            with (patch.object(reap_tmp, 'reap_now', return_value=result),
+                  contextlib.redirect_stdout(io.StringIO()) as output):
+                ok(reap_tmp.main(['--dry-run']) == 0, 'L1654 stdout succeeds')
+            ok(json.loads(output.getvalue())['retired'] == 2, 'L1654 stdout reports retired count')
+            outcomes1654['recorded'] = summary
+        finally:
+            for process in (child, exempt):
+                process.terminate(); process.wait()
+
+with fixture1496() as (top, ledger, proc, scr):
+    with patch.object(disk_reaper, 'LOOK_TOML_PATH', top / 'look.toml'):
+        tmp = top / 'tmp'; tmp.mkdir()
+        synthetic = [resources.ReapResult('r' * 200, str(i) + 'k' * 39, 'refused', '"' + 'é' * 59) for i in range(8)]
+        for count in (8, 5000):
+            with patch.object(reap_tmp, '_reap_recorded', return_value=[synthetic[i % 8] for i in range(count)]):
+                result = reap_tmp.run(root=tmp, proc_root=proc, events=[], now=NOW, log_path=top / str(count))
+            line = (top / str(count)).read_text().splitlines()[4]
+            match = re.search(r'top_reasons=(\{.*\}) samples=(\[.*\]) truncated=(\d+)$', line)
+            reasons, samples, dropped = json.loads(match[1]), json.loads(match[2]), int(match[3])
+            ranked = sorted(result['recorded_summary']['top_reasons'], key=lambda key: (-result['recorded_summary']['top_reasons'][key], key))
+            ok(len(line.encode()) + 1 <= 2048 and len(samples) == len(reasons) and all(len(s) <= 40 for s in samples), 'L1654 escaped truncation retains valid aligned JSON')
+            ok(dropped == 8 - len(reasons) and dropped > 0 and list(reasons) == ranked[:len(reasons)], 'L1654 drops lowest-ranked pairs only')
+        with patch.object(reap_tmp, '_reap_recorded', side_effect=RuntimeError('fixture')):
+            failed = reap_tmp.run(root=tmp, proc_root=proc, events=[], now=NOW, log_path=top / 'error')
+        ok(failed['recorded_summary']['error'] == 1 and not failed['recorded_summary']['counts'], 'L1654 exception produces zero-count error summary')
+        birth1654(scr / 'fallback', subject='unlabelled')
+        events1654 = fresh1496()
+        for e in events1654:
+            e.pop('project', None)
+        with patch.object(fold, 'PROJECT', None):
+            fallback = reap_tmp.run(root=tmp, proc_root=proc, events=events1654, now=NOW, log_path=top / 'fallback-log')
+        ok(fallback['recorded_summary']['project_fallback'] == 1 and 'project_fallback=1' in (top / 'fallback-log').read_text(), 'L1654 unlabelled fallback counted in real log')
+response1496('L1654-AC3-AC4-AC5-AC6-AC11', outcomes1654)

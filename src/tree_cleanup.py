@@ -230,11 +230,25 @@ def _recorded_worktree(path, events):
     return any(r.ref == str(path) for r in resources.live(events))
 
 
-def reap_worktrees(events, *, dry_run=False):
+def _pass_stats(settings):
+    context = disk_reaper._WORKTREE_PASS.get()
+    stats = context[2] if context is not None and len(context) > 2 else {}
+    stats.setdefault('config_invalid', set()).update(settings['config_invalid'])
+    stats['hold'] = stats.get('hold', False) or settings['hold']
+    return stats
+
+
+def reap_worktrees(events, *, dry_run=False, budget=None):
     """Remove finished specs' origin-proven worktrees, including build debris.
     Live builders, recorded resources, rework and process references win.
     Public return shape remains (reaped rows, retained rows).
     """
+    import resources
+    settings = disk_reaper._settings()
+    budget = disk_reaper._budget(settings) if budget is None else budget
+    budget['settings'] = settings
+    stats = _pass_stats(settings)
+    projects = resources._project_map(events)
     specs, charters, _, _ = fold.fold(events)
     ended = fold.terminal_spawns(events)
     held = fold.held_specs(events)
@@ -294,6 +308,11 @@ def reap_worktrees(events, *, dry_run=False):
             shipped = _shipped_event(s["evs"])
             if not shipped and s["state"] not in ("killed", "void"):
                 retained.append({**row, "why": f"spec not finished ({s['state']})"})
+                continue
+            why = disk_reaper._budget_reason(budget, dry_run)
+            if why:
+                disk_reaper._count_reason(stats, why)
+                retained.append({**row, 'why': why})
                 continue
             try:
                 import reap_tmp
@@ -361,10 +380,14 @@ def reap_worktrees(events, *, dry_run=False):
                     if fold.admits({"type": "resource-reaped"}, fold.actor_of(filename)) is not None:
                         raise Undetermined("resource-reaped actor not admitted")
                     git(repo, "worktree", "remove", "--force", wt)
+                    budget['count'] += 1
+                    budget['freed_bytes'] += size
                     previous = os.environ.get("DOIT_LEDGER_FILE")
                     os.environ["DOIT_LEDGER_FILE"] = filename
                     try:
-                        fold.append(["resource-reaped", sid, f"ref={wt}", f"reason=worktree: {proof}"], strict=True)
+                        fold.append(["resource-reaped", sid, f"ref={wt}", f"reason=worktree: {proof}"] +
+                                    [key + '=' + json.dumps(value) for key, value in
+                                     resources._project_fields(sid, projects).items()], strict=True)
                     finally:
                         if previous is None:
                             os.environ.pop("DOIT_LEDGER_FILE", None)
@@ -374,6 +397,9 @@ def reap_worktrees(events, *, dry_run=False):
                 retained.append({**row, "why": "undetermined: " + str(exc)})
                 continue
             reaped.append(row)
+            if dry_run:
+                budget['count'] += 1
+                budget['freed_bytes'] += size
             context = disk_reaper._WORKTREE_PASS.get()
             if context is not None:
                 context[1].append(row)
@@ -435,8 +461,15 @@ def reap_merged_specs(events, *, dry_run=False):
     so §4.11's "nothing destroyed silently" holds here too. Retained-only
     groups update machine-local status without a ledger event."""
     # A conventional path may be the only project witness; resolve before removal.
+    import resources
+    settings = disk_reaper._settings()
+    stats = _pass_stats(settings)
+    budget = disk_reaper._budget(settings)
+    projects = resources._project_map(events)
     specs, groups = _terminal_groups(events)
-    wt_reaped, wt_retained = reap_worktrees(events, dry_run=dry_run)
+    wt_reaped, wt_retained = reap_worktrees(events, dry_run=dry_run, budget=budget)
+    budget['settings'] = settings
+    removed_paths = {row['path'] for row in wt_reaped}
     wt_paths_by_project = {}
     for row in wt_reaped:
         wt_paths_by_project.setdefault(str(row["project"]), []).append(row["path"])
@@ -474,14 +507,25 @@ def reap_merged_specs(events, *, dry_run=False):
                 guarded = next((row for row in wt_retained if row["spec"] == spec and row["path"] == wt), None)
                 if wt and guarded and dead and guarded["why"].startswith((
                         "live process", "undetermined", "builder spawn", "standing rejection",
-                        "recorded resource", "spec not finished", "spec held")):
+                        "recorded resource", "spec not finished", "spec held", "deferred:", "held:")):
                     dead, why = False, guarded["why"]
                 elif wt and _recorded_worktree(wt, events):
                     dead, why = False, "recorded resource; registry owns cleanup"
+                size = 0
+                directory = bool(wt and wt not in removed_paths)
+                if dead:
+                    why = disk_reaper._budget_reason(budget, dry_run, directory=directory)
+                    if why:
+                        disk_reaper._count_reason(stats, why)
+                        dead = False
+                    elif directory:
+                        try:
+                            size = disk_reaper.entry_bytes(wt)
+                        except OSError as e:
+                            dead, why = False, str(e)
                 if dead and not dry_run:
                     proof = git(repo, "merge-base", "--is-ancestor", branch, main_branch, ok=True).returncode != 0
                     try:
-                        size = disk_reaper.entry_bytes(wt) if wt else 0
                         reap(repo, branch, wt, proof)
                         context = disk_reaper._WORKTREE_PASS.get()
                         if wt and context is not None:
@@ -491,6 +535,9 @@ def reap_merged_specs(events, *, dry_run=False):
                         dead, why = False, str(e)
                 if dead:
                     reaped.append(branch)
+                    if directory:
+                        budget['count'] += 1
+                        budget['freed_bytes'] += size
                 elif why:
                     retained.append(branch)
                     reasons.append(f"{branch}: {why}")
@@ -505,7 +552,9 @@ def reap_merged_specs(events, *, dry_run=False):
             # shape); empty when it removed nothing here.
             fold.append(["tree-reaped", str(project), f"reaped:={json.dumps(reaped)}",
                          f"retained_count:={len(retained)}", f"repo={repo}",
-                         f"worktrees:={json.dumps(wt_paths_by_project.get(str(project), []))}"])
+                         f"worktrees:={json.dumps(wt_paths_by_project.get(str(project), []))}"] +
+                        [key + '=' + json.dumps(value) for key, value in
+                         resources._project_fields(str(project), projects).items()])
     if not dry_run:
         _write_retained(retained_status)
     if failures:

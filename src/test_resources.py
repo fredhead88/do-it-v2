@@ -2,8 +2,9 @@
 """Resource lifecycle checks against private ledgers and real filesystem/git state."""
 import atexit
 import ast
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import inspect
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -18,6 +19,7 @@ from unittest.mock import patch
 _IMPORT_ROOT = tempfile.TemporaryDirectory(prefix="doit-resources-")
 atexit.register(_IMPORT_ROOT.cleanup)
 os.environ["DOIT_ROOT"] = _IMPORT_ROOT.name
+os.environ['HOME'] = _IMPORT_ROOT.name
 if Path(os.environ["DOIT_ROOT"]).resolve() == (Path.home() / ".do-it").resolve():
     raise RuntimeError("resource tests require a throwaway DOIT_ROOT")
 os.environ.pop("DOIT_PROJECT", None)
@@ -26,6 +28,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fold
 import resources
 import fold_emits
+import disk_reaper
+import reap_tmp
+disk_reaper.LOOK_TOML_PATH = Path(_IMPORT_ROOT.name) / 'look.toml'
 
 
 def event(event_type, subject="L-spec-0001", **fields):
@@ -41,11 +46,20 @@ def finished(subject="L-spec-0001"):
     return [event("spec-written", subject), event("spec-killed", subject)]
 
 
+def evidence1654(ac, body):
+    body = json.dumps(body, sort_keys=True)
+    print(json.dumps(dict(url='cli://resources/L1654-' + ac, status=0,
+        body_sha256=hashlib.sha256(body.encode()).hexdigest(), body_excerpt=body)))
+
+
 class ResourcesTests(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory(prefix="doit-resource-case-")
         self.addCleanup(tmp.cleanup)
         self.root = Path(tmp.name)
+        p = patch.object(disk_reaper, 'LOOK_TOML_PATH', self.root / 'look.toml')
+        p.start()
+        self.addCleanup(p.stop)
         self.ledger = self.root / "events" / "L-tick-local.jsonl"
         for target, value in (("ROOT", self.root), ("EVENTS", self.root / "events"),
                               ("BOARD", self.root / "board.md")):
@@ -460,8 +474,231 @@ class ResourcesTests(unittest.TestCase):
             finally:
                 child.communicate("\n", timeout=5)
                 child.stdout.close()
-        with patch.object(resources.reap_tmp, "_refs_c", side_effect=PermissionError("unreadable pid")):
+        with patch.object(resources.reap_tmp, "_pid_refs", side_effect=PermissionError("unreadable pid")):
             self.assert_refused(path, evs, "undetermined:")
+
+    def thresholds1654(self, **values):
+        disk_reaper.LOOK_TOML_PATH.write_text('[thresholds]\n' +
+            '\n'.join(key + '=' + json.dumps(value) for key, value in values.items()))
+
+    def test_1654_recorded_process_classifier(self):
+        child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])
+        self.addCleanup(lambda: (child.terminate(), child.wait()))
+        pid = self.proc / str(child.pid)
+        pid.mkdir()
+        (pid / 'status').write_text(f'Uid: {os.getuid()} {os.getuid()} {os.getuid()} {os.getuid()}\nCapPrm: 8\n')
+        (pid / 'cmdline').write_bytes(b'/usr/lib/systemd/systemd\0--user\0')
+        (self.proc / 'self').mkdir()
+        (self.proc / 'self/status').write_text('CapEff: 0\n')
+        real_stat, real_refs = os.lstat, reap_tmp._pid_refs
+        def other_uid(path, *args, **kw):
+            st = real_stat(path, *args, **kw)
+            if Path(path) == pid:
+                fields = list(st)
+                fields[4] = os.getuid() + 1
+                return os.stat_result(fields)
+            return st
+        def refs(proc, number):
+            if number == child.pid:
+                raise PermissionError('child pid')
+            return real_refs(proc, number)
+        for skip in (True, False):
+            path = self.directory('process-' + str(skip))
+            self.assertEqual(sum(p.exists() for p in [path]), 1)
+            with (patch.object(reap_tmp, '_pid_refs', side_effect=refs),
+                  patch.object(os, 'lstat', side_effect=other_uid if skip else real_stat)):
+                self.assertEqual(resources.reap(finished() + [created(path)], dry_run=False)[0].action, 'reaped')
+            self.assertFalse(path.exists())
+        evidence1654('AC2', dict(other_uid_reaped=1, exempt_same_uid_reaped=1, paths_remaining=0))
+
+    def test_1654_single_fold_and_live_counters(self):
+        events = finished() + [event('spec-written', 'L-spec-0002')]
+        for i in range(30):
+            events.append(created(self.directory(f'count-{i}'),
+                'scratch-db' if i < 20 else 'tmpdir',
+                'L-spec-0001' if i < 20 else 'L-spec-0002'))
+        base = self.root
+        for i in range(3):
+            case_root = base / 'worktrees' / f'case-{i}'
+            case_root.mkdir(parents=True)
+            with patch.object(self, 'root', case_root):
+                repo, _, evs = self.worktree()
+                sid = f'L-spec-{10 + i:04}'
+                self.git(repo, 'branch', '-m', 'l-spec-0001', sid.lower())
+                evs = [dict(e, subject=sid, **({'branch': sid.lower()} if 'branch' in e else {})) for e in evs]
+            events += evs
+        for dry in (True, False):
+            with (patch.object(fold, 'fold', wraps=fold.fold) as folded,
+                  patch.object(fold, 'terminal_spawns', wraps=fold.terminal_spawns) as ended,
+                  patch.object(resources, 'live', wraps=resources.live) as live):
+                rows = reap_tmp._reap_recorded(events, dry_run=dry, proc_root=self.proc)
+            self.assertEqual(sum(r.action == ('would-reap' if dry else 'reaped') for r in rows), 23)
+            self.assertEqual(sum(r.action == 'refused' for r in rows), 10)
+            self.assertLessEqual(folded.call_count, 1)
+            self.assertLessEqual(ended.call_count, 1)
+            self.assertEqual(live.call_count, 1)
+            self.assertIsNone(resources._REAP_MEMO.get())
+            evidence1654('AC3', dict(dry_run=dry, fold=folded.call_count,
+                terminal_spawns=ended.call_count, live=live.call_count,
+                removable=sum(r.action in ('reaped', 'would-reap') for r in rows),
+                refused=sum(r.action == 'refused' for r in rows)))
+        # The adapter remains usable without a memo, on fresh real git state.
+        with patch.object(self, 'root', base / 'direct'):
+            self.root.mkdir()
+            _, wt, evs = self.worktree()
+            self.assertIsNone(resources._default_safety(resources.live(evs)[0], evs))
+
+    def test_1654_retirement_roundtrip_and_identity(self):
+        now = datetime(2026, 10, 26, 12, tzinfo=timezone.utc)
+        old = (now - timedelta(hours=7)).isoformat()
+        subject = 'L-spec-0001-abcdef123456-42'
+        ref = str(self.root / 'absent')
+        resources._append('spec-written', subject, project='do-it-v2', ts=old)
+        resources._append('resource-created', subject, kind='scratch-db', ref=ref,
+                          lane='build', project='albert-scott', ts=old)
+        events = self.fresh()
+        before = self.bytes()
+        with patch.dict(os.environ, DOIT_LEDGER_FILE='L-builder-local.jsonl'):
+            self.assertEqual(resources.reap(events, dry_run=False, now=now)[0].reason, 'actor-not-admitted')
+            self.assertEqual(resources.reap(events, now=now)[0].action, 'would-retire')
+        self.assertEqual(resources.reap(events, now=now)[0].action, 'would-retire')
+        self.assertEqual(self.bytes(), before)
+        with (patch.object(fold, 'PROJECT', None), patch.object(fold, 'NOW', now - timedelta(hours=10))):
+            self.assertEqual(resources.reap(events, dry_run=False, now=now)[0].action, 'retired')
+        fresh = self.fresh()
+        retirement = fresh[-1]
+        self.assertEqual((retirement['created_ts'], retirement['ts'], retirement['project']),
+                         (old, now.isoformat(timespec='seconds'), 'do-it-v2'))
+        self.assertTrue(retirement['reason'].startswith('gone:'))
+        self.assertEqual(resources.live(fresh), [])
+        self.assertEqual(resources.reap(fresh, dry_run=False, now=now), [])
+        original = events[-1]
+        newer = dict(original, ts=(now + timedelta(hours=1)).isoformat())
+        self.assertEqual(resources.live([original, retirement, newer, retirement])[0].created_ts, newer['ts'])
+        self.assertEqual(resources.live([original, dict(retirement, subject='someone-else')])[0].ref, ref)
+        self.assertEqual(resources.live([original, retirement, retirement]), [])
+        resources._append('resource-created', subject, kind='scratch-db', ref=ref, lane='build', ts=old)
+        self.assertEqual(resources.live(self.fresh()), [])  # same-process re-record stays the documented open case
+        evidence1654('AC4', dict(retirement=retirement, live_after_retirement=0,
+                                fresh_interpreter_readback=True, repeat_appends=0))
+
+    def test_1654_retirement_refusals_races_and_caps(self):
+        now = datetime(2026, 10, 26, 12, tzinfo=timezone.utc)
+        old = (now - timedelta(hours=7)).isoformat()
+        path = self.root / 'gone'
+        row = dict(created(path, 'scratch-db', 'unknown-run'), ts=old)
+        def action(event_row=row, **kw):
+            return resources.reap([event_row], dry_run=False, now=now, **kw)[0]
+        young = dict(row, ts=(now - timedelta(hours=1)).isoformat())
+        self.assertEqual(action(young).reason, 'undetermined: owner')
+        self.assertEqual(action(dict(row, lane='')).action, 'refused')
+        self.assertEqual(action(dict(row, ts='bad')).action, 'refused')
+        real = os.lstat
+        def denied(ref, *args, **kw):
+            if str(ref) == str(path):
+                raise PermissionError('fixture')
+            return real(ref, *args, **kw)
+        with patch.object(os, 'lstat', side_effect=denied):
+            self.assertNotEqual(action().action, 'retired')
+        path.mkdir()
+        calls = 0
+        def reappears(ref, *args, **kw):
+            nonlocal calls
+            if str(ref) == str(path):
+                calls += 1
+                if calls == 1:
+                    raise FileNotFoundError('first read')
+            return real(ref, *args, **kw)
+        with patch.object(os, 'lstat', side_effect=reappears):
+            self.assertEqual(action().reason, 'undetermined: owner')
+        self.assertEqual(action(dict(row, kind='worktree')).reason, 'no-allowed-root')
+        path.rmdir()
+        self.assertEqual(action(dict(row, kind='worktree')).action, 'retired')
+        self.thresholds1654(reap_retire_max_per_pass=2)
+        rows = resources.reap([dict(row, ref=str(self.root / f'absent-{i}')) for i in range(5)],
+                              dry_run=False, now=now)
+        self.assertEqual([r.action for r in rows], ['retired'] * 2 + ['deferred'] * 3)
+
+    def test_1654_census_budget_and_project_reads(self):
+        now = datetime(2026, 10, 26, 12, tzinfo=timezone.utc)
+        events = finished() + [event('spec-written', 'L-spec-0002')]
+        events += [created(self.root / f'gone-{i}') for i in range(3)]
+        events += [created(self.directory(f'live-{i}'), subject='L-spec-0002') for i in range(2)]
+        events += [created(self.directory(f'dead-{i}')) for i in range(3)]
+        self.thresholds1654(reap_max_entries_per_pass=1)
+        with (patch.object(disk_reaper, 'process_refs', wraps=disk_reaper.process_refs) as census,
+              patch.object(fold, 'fold', wraps=fold.fold) as folded):
+            rows = resources.reap(events, dry_run=False, now=now)
+        self.assertEqual(census.call_count, 1)
+        self.assertLessEqual(folded.call_count, 1)
+        self.assertEqual([r.action for r in rows], ['retired'] * 3 + ['refused'] * 2 + ['reaped'] + ['deferred'] * 2)
+        evidence1654('AC9', dict(censuses=census.call_count, folds=folded.call_count,
+            actions=[r.action for r in rows]))
+        for n in (5, 50):
+            events = [dict(created(self.root / f'label-{n}-{i}', 'scratch-db', f'run-{n}-{i}'), project='fixture')
+                      for i in range(n)]
+            for e in events:
+                resources._append('resource-created', e['subject'], kind=e['kind'], ref=e['ref'],
+                                  lane=e['lane'], project=e['project'], ts=e['ts'])
+            snapshot = self.fresh()
+            expected = {e['subject']: fold.subject_project(e['subject']) for e in events}
+            with (patch.object(fold, 'PROJECT', None),
+                  patch.object(fold, 'read_events', wraps=fold.read_events) as reads,
+                  patch.object(fold, 'subject_project', wraps=fold.subject_project) as labels):
+                rows = resources.reap(events, dry_run=False, now=now)
+            self.assertEqual([r.action for r in rows], ['retired'] * n)
+            self.assertEqual((reads.call_count, labels.call_count), (0, 0))
+            evidence1654('AC11', dict(n=n, retired=len(rows), ledger_reads=reads.call_count,
+                subject_project=labels.call_count))
+            for e in self.fresh():
+                if e['type'] == 'resource-reaped' and e['subject'] in expected:
+                    self.assertEqual(e['project'], expected[e['subject']])
+        for pinned in (None, 'pinned'):
+            path = self.directory('label-removal-' + str(pinned))
+            events = [dict(e, project='fixture') for e in finished() + [created(path)]]
+            with (patch.object(fold, 'PROJECT', pinned),
+                  patch.object(fold, 'subject_project', wraps=fold.subject_project) as labels):
+                self.assertEqual(resources.reap(events, dry_run=False)[0].action, 'reaped')
+            self.assertEqual(labels.call_count, 0)
+            self.assertEqual(self.fresh()[-1]['project'], pinned or 'fixture')
+        events = [created(self.root / 'no-project', 'scratch-db', 'unlabelled')]
+        report = {}
+        token = resources._REAP_REPORT.set(report)
+        try:
+            with (patch.object(fold, 'PROJECT', None),
+                  patch.object(fold, 'subject_project', wraps=fold.subject_project) as labels):
+                self.assertEqual(resources.reap(events, dry_run=False, now=now)[0].action, 'retired')
+            self.assertEqual(labels.call_count, 1)
+            self.assertEqual(report['project_fallback'], 1)
+        finally:
+            resources._REAP_REPORT.reset(token)
+
+    def test_1654_removal_cap_survives_append_failure(self):
+        self.thresholds1654(reap_max_entries_per_pass=1)
+        paths = [self.directory(f'append-failure-{i}') for i in range(2)]
+        self.assertEqual(sum(p.exists() for p in paths), 2)
+        with patch.object(resources, '_append', side_effect=OSError('ledger unavailable')):
+            rows = resources.reap(finished() + [created(path) for path in paths], dry_run=False)
+        self.assertFalse(paths[0].exists())
+        self.assertTrue(paths[1].exists())
+        self.assertEqual([r.action for r in rows], ['refused', 'deferred'])
+
+    def test_1654_recorded_count_cap_and_hold(self):
+        self.thresholds1654(reap_max_entries_per_pass=3)
+        paths = [self.directory(f'cap-three-{i}') for i in range(4)]
+        events = finished() + [created(path) for path in paths]
+        before = self.bytes()
+        with (patch.dict(os.environ, DOIT_REAP_HOLD='1'),
+              patch.object(disk_reaper, 'process_refs', wraps=disk_reaper.process_refs) as census):
+            self.assertEqual([r.action for r in resources.reap(events, dry_run=False)], ['held'] * 4)
+            self.assertEqual(census.call_count, 0)
+            self.assertEqual([r.action for r in resources.reap(events)], ['would-reap'] * 3 + ['deferred'])
+        self.assertEqual(self.bytes(), before)
+        self.assertEqual(sum(path.exists() for path in paths), 4)
+        self.assertEqual([r.action for r in resources.reap(events, dry_run=False)], ['reaped'] * 3 + ['deferred'])
+        self.assertEqual(sum(path.exists() for path in paths), 1)
+        evidence1654('AC5', dict(pre_removal_count=4, removed=3, deferred=1,
+                                held=4, held_censuses=0, remaining=1))
 
     def test_reap_safety_paths_and_actor(self):
         path = self.directory("protected")
@@ -732,4 +969,9 @@ if __name__ == "__main__":
             sys.exit(2)
     suite = unittest.TestSuite(ResourcesTests(name) for name in names)
     result = unittest.TextTestRunner(verbosity=2).run(suite)
+    body = json.dumps(dict(tests=names, success=result.wasSuccessful(),
+                           failures=len(result.failures), errors=len(result.errors)), sort_keys=True)
+    print(json.dumps(dict(url='cli://resources/L1654-AC2-AC3-AC4-AC5-AC9-AC11',
+        status=0 if result.wasSuccessful() else 1,
+        body_sha256=hashlib.sha256(body.encode()).hexdigest(), body_excerpt=body)))
     sys.exit(0 if result.wasSuccessful() else 1)
