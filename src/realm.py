@@ -383,13 +383,48 @@ def charter_text(cid):
 _SPEC_CACHE = {}
 
 
+def spec_criteria(body):
+    """Read contract AC lines, or labelled bullets in older criteria sections."""
+    criteria, section, bullets, found, fenced = [], False, False, False, False
+    for line in body.splitlines():
+        if line.lstrip().startswith(('```', '~~~')):
+            fenced = not fenced
+            continue
+        if fenced:
+            continue
+        heading = re.match(r'^#{1,3}\s+(.+)', line)
+        if heading:
+            section = bool(re.search(r'acceptance|criteria|requirements?', heading[1], re.I))
+            bullets = bool(re.search(r'acceptance|criteria', heading[1], re.I))
+            found |= section
+            continue
+        if not section:
+            continue
+        item = re.match(r'^AC(\d+)\s*\[[^\]]+\]\s*:\s*(.+)', line)
+        if item:
+            label, text = 'AC' + item[1], item[2]
+        else:
+            if not bullets:
+                continue
+            bullet = re.match(r'^\s*[-*]\s+(?:\*\*)?([^:]+?)(?:\*\*)?\s*:\s*(.+)', line)
+            if not bullet:
+                continue
+            label, text = bullet[1].strip('* '), bullet[2]
+        text = re.split(r'(?<=[.!?])\s+', text.strip(), maxsplit=1)[0][:240]
+        criteria.append({'id': label, 'text': text})
+    error = None if criteria else ('unparseable criteria section' if found else 'no criteria section')
+    return criteria, error
+
+
 def spec_text(sid):
-    """A spec's title and one plain paragraph of what it is for, from content/<spec>.md."""
+    """A spec's description and acceptance criteria from content/<spec>.md."""
+    if not isinstance(sid, str) or '..' in sid or not re.fullmatch(r'L-spec-[\w.-]+', sid):
+        return None
     f = ROOT / "content" / f"{sid}.md"
     if not f.is_file():
         return None
     try:
-        mtime = f.stat().st_mtime
+        mtime = f.stat().st_mtime_ns
         c = _SPEC_CACHE.get(sid)
         if c and c[0] == mtime:
             return c[1]
@@ -430,6 +465,7 @@ def spec_text(sid):
         intent = paras[0] if paras else ""
     intent = re.sub(r"\s+", " ", intent)
     out = {"title": trunc(title, 140), "intent": trunc(intent, 600), "charter": charter_of(fm.get("charter"))}
+    out['criteria'], out['criteria_error'] = spec_criteria(body)
     for key in ("corrects", "target"):
         m = re.search(rf"^{key}\s*:\s*(.+)$", head, re.M)
         if m:

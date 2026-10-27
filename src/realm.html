@@ -383,7 +383,7 @@ canvas#map.hand{cursor:pointer}
     </div>
     </div>
   </header>
-  <div class="glance-anchor"><section id="glance" aria-label="What matters"><button id="glance-toggle" aria-expanded="false" aria-controls="glance-lines"><span id="glance-sentence">Reading what matters…</span><span id="glance-more">more ⌄</span></button><div id="glance-lines" hidden></div></section></div>
+  <div class="glance-anchor"><section id="glance" aria-label="What matters"><button id="glance-toggle" disabled aria-controls="glance-lines"><span id="glance-sentence">Reading what matters…</span><span id="glance-more">more ⌄</span></button><div id="glance-lines" hidden></div></section></div>
   <div class="stage">
     <div class="view"><canvas id="map"></canvas><div id="status">WAKING THE REALM<small>fetching the ledger…</small></div><div id="tip"></div><div class="legend" id="legend"></div><div class="omens" id="omens"></div><div id="stuck" class="calm"><b>STUCK NOW</b>…</div>
       <button class="btn" id="reopen">CODEX ▸</button><div id="bubble"><span class="tag" id="bb-tag"></span><div class="box" id="bb-box"></div></div><div id="dossier" hidden></div><div id="tourcap"><span class="tag" id="tc-tag"></span><div class="box" id="tc-box"></div></div></div>
@@ -835,12 +835,14 @@ function frame(dt,t){
 let glanceOpen=false,glanceSignature='';
 try{glanceOpen=localStorage.getItem('realm.glance.expanded')==='true';}catch(_){}
 function setGlanceOpen(open){glanceOpen=open;$('glance-toggle').setAttribute('aria-expanded',String(open));$('glance-lines').hidden=!open;$('glance-more').textContent=open?'less ⌃':'more ⌄';}
-$('glance-toggle').onclick=()=>{setGlanceOpen(!glanceOpen);try{localStorage.setItem('realm.glance.expanded',String(glanceOpen));}catch(_){}};
-setGlanceOpen(glanceOpen);
+$('glance-toggle').onclick=()=>{if(!DATA)return;setGlanceOpen(!glanceOpen);try{localStorage.setItem('realm.glance.expanded',String(glanceOpen));}catch(_){}};
 function renderGlance(){
+  // Restore the drawer only once the snapshot exists, including after reload.
+  if(!DATA)return;
   const d=DATA&&DATA.glance;const replay=DATA&&!LIVE&&!REMOTE;
   const stale=d&&Date.now()-toMs(d.at)>120000;
   const signature=JSON.stringify([d,replay,stale]);if(signature===glanceSignature)return;glanceSignature=signature;
+  setGlanceOpen(glanceOpen);$('glance-toggle').disabled=false;
   let sentence,lines;
   if(replay){sentence='What matters is available in live mode';lines=['Return to live mode to see current priorities.'];}
   else if(!d||d.error){sentence=d&&d.error||'What matters is unavailable';lines=['Current priority information could not be read.'];}
@@ -976,9 +978,30 @@ function openRole(r){openPanel(roleHtml(r));bindPix();}
 function openPlace(id){const p=PX[id];if(!p)return;const who=Object.keys(WORK).filter(r=>WORK[r]===id);const html=()=>(`<h2>${p.title}</h2><div class="cls">a place in the realm</div><p>${p.body}</p><h4>FOR THE DRIVER</h4><p>${p.driver}</p>${who.length?'<h4>WHO WORKS HERE</h4><p>'+who.map(r=>`<a class="link" data-role="${r}">${ROLE_NAME[r]}</a>`).join(' · ')+'</p>':''}${id==='chronicle'?chronicleHtml():''}${id==='tower'?shelfHtml():''}${id==='keep'?keepHtml():''}${id==='docks'?docksHtml():''}`);openPanel(html(),{html,bind:bindLinks});bindLinks();}
 function openMonster(id){const m=MX[id];openPanel(`<h2>${MON[id].name}</h2><div class="cls">a way to die</div>${spritePix(id,true)}<p>${m.body}</p><h4>FOR THE DRIVER</h4><p>${m.driver}</p><p class="tiny">Fallen to it on screen: ${S.failsBy['_'+id]||0}.</p>`);bindPix();}
 function openActor(sp){const a=S.actors.get(sp);if(!a)return;const el=S.now-a.start;const st={queued:'waiting at the ferry for a pane to claim the packet',walking:'walking to work',working:'working',leaving:'returning, stamped',dying:'fallen'}[a.state];const pk=PACKET[a.role]||[];const ev=S.subjectEvents.get(a.subject)||[];
+  if(/^L-spec-\d+$/.test(a.subject||''))return window.realmOpenSpec(a.subject,{title:'ACTOR FACTS',rows:[['Role',ROLE_NAME[a.role]||a.role],['Model',MODEL[a.role]],['Project',a.prj||'—'],['State',st||a.state],['Set out',fmt(a.start)+' Z'],['Elapsed',fmtDur(el)],['Claim',a.claimed?fmt(a.claimed)+' Z':'unclaimed']]});
   const ch=charterOfSubject(a.subject);ensureSpec(a.subject).then(i=>{if(i&&$('spec-blurb'))$('spec-blurb').innerHTML=specBlurb(a.subject);});openPanel(`<h2>${sp}</h2><div class="cls">${ROLE_NAME[a.role]} · ${MODEL[a.role]} · ${a.prj||''}</div>${spritePix(a.role)}<h4>WHAT THIS SPEC IS FOR</h4><p id="spec-blurb">${specBlurb(a.subject)||'<span class="tiny">Reading the spec…</span>'}</p>${ch?`<p><b>Charter ${esc(ch)}</b><br>${esc(intentLine(ch)||(DATA.charters[ch]||{}).title||'')}<br><a class="link" data-ch="${esc(ch)}">Open the charter dossier ▸</a></p>`:'<p class="tiny">Free-standing spec: no charter above it (charter: null).</p>'}<div class="kv"><b>subject</b><span><a class="link" data-subj="${esc(a.subject)}">${esc(a.subject)}</a></span><b>state</b><span>${st}</span><b>set out</b><span>${fmt(a.start)} Z</span><b>elapsed</b><span>${fmtDur(el)} of a ${CAP[a.role]||'—'} min cap</span>${a.claimed?`<b>claimed</b><span>${fmt(a.claimed)} Z (${fmtDur(Math.max(0,a.claimed-a.start))} at the ferry)</span>`:''}</div><h4>THE PACKET CARRIES</h4><ul>${pk.map(x=>`<li>${x}</li>`).join('')}</ul><h4>THE SUBJECT'S STORY</h4>${timelineHtml(ev)}<h4>ABOUT THIS ROLE</h4><p>${CX[a.role].quest}</p><p><a class="link" data-role="${a.role}">Open the full codex entry</a></p>`);bindPix();bindLinks();}
 function openSubject(s){if(!s)return;const ev=S.subjectEvents.get(s)||[];const final=((DATA&&DATA.states)||[]).find(r=>r[0]===s);const title=DATA&&DATA.titles[s];const esc_=S.esc.get(s);
+  if(/^L-spec-\d+$/.test(s))return window.realmOpenSpec(s);
   const chs=charterOfSubject(s);ensureSpec(s).then(i=>{if(i&&$('spec-blurb'))$('spec-blurb').innerHTML=specBlurb(s);});openPanel(`<h2>${esc(s)}</h2><div class="cls">${final?'derived state now: '+final[1]:'subject'}</div>${title?`<p>${esc(title)}</p>`:''}${String(s).startsWith('L-spec-')?`<h4>WHAT THIS SPEC IS FOR</h4><p id="spec-blurb">${specBlurb(s)||'<span class="tiny">Reading the spec…</span>'}</p>`:''}${chs&&chs!==s?`<p><b>Charter ${esc(chs)}</b><br>${esc(intentLine(chs)||'')}<br><a class="link" data-ch="${esc(chs)}">Open the charter dossier ▸</a></p>`:''}${esc_?`<h4>WAITING ON A RULING · ${escOwner(esc_)==='you'?'YOURS':'THE THINKER\'S'}</h4>${esc_.map(x=>`<p><b>${esc(x.a)}</b> asked: ${esc(x.why)}<br><span class="tiny">default: ${esc(x.df||'—')} · deadline ${esc((x.dl||'—').slice(0,16))}${x.irr?' · irreversible':''}</span></p>`).join('')}`:''}${(()=>{const d=S.decided.get(s);return d?`<p><span class="pill good">decided by ${esc(d.by)}</span> ${fmtAge(S.now-d.ms)} ago</p>`:'';})()}<h4>STORY</h4>${timelineHtml(ev)}<p class="tiny">Every row is a ledger event on this subject. States are derived by the fold, never stamped.</p>`);bindLinks();}
+function latestSpecSession(sid){return (((DATA&&DATA.codex)||{}).sessions||[]).filter(s=>s.subject===sid&&s.kind==='doit-build').sort((a,b)=>(toMs(b.last)||0)-(toMs(a.last)||0))[0];}
+function specDetailHtml(sid,extra){
+  const info=specInfo(sid),state=(((DATA&&DATA.states)||[]).find(r=>r[0]===sid)||[])[1];
+  const stage=state?BUCKET.find(b=>b[1].test(state))[3]:'unknown';
+  const lane=(S.lane||[]).find(r=>r.spec===sid),ch=(info&&info.charter)||specCharter(sid);
+  const criteria=info&&info.criteria||[],error=!info?'no spec file available':info.criteria_error;
+  return `<h2>${esc(sid)} · ${esc(info&&info.title||(DATA&&DATA.titles||{})[sid]||sid)}</h2>
+    <h4>STAGE</h4><p>${esc(stage)}</p>
+    <h4>LANE STATE</h4><p>${lane?esc(lane.bucket)+' · '+esc(lane.reason):'no lane row'}</p>
+    <h4>CRITERIA</h4>${error?`<p>criteria unreadable: ${esc(error)}</p>`:criteria.length?`<ul class="criteria">${criteria.map(c=>`<li><b>${esc(c.id)}</b>: ${esc(c.text)}</li>`).join('')}</ul>`:'<p>no criteria listed</p>'}
+    <h4>CHARTER</h4>${ch?`<p><a class="link" data-ch="${esc(ch)}">${esc(ch)} · Open the charter dossier ▸</a></p>`:'<p>Free-standing spec: no charter above it.</p>'}
+    <h4>LATEST EVENTS</h4>${timelineHtml(S.subjectEvents.get(sid)||[])}
+    ${extra?`<section class="${extra.title==='CODEX SESSION'?'codex-inspector':'actor-facts'}"><h4>${esc(extra.title)}</h4><dl>${extra.rows.map(([k,v])=>`<dt>${esc(k)}</dt><dd>${esc(v??'—')}</dd>`).join('')}</dl></section>`:''}`;
+}
+window.realmOpenSpec=function(sid,extra){
+  const html=()=>{const session=extra?null:latestSpecSession(sid);return specDetailHtml(sid,extra||(session?Codex.sessionExtra(session):null));};
+  const view={html,bind:bindLinks};openPanel(html(),view);bindLinks();
+  ensureSpec(sid).then(()=>{if(panelView===view){const sc=$('panel').scrollTop;$('p-body').innerHTML=html();bindLinks();$('panel').scrollTop=sc;}});
+};
 function timelineHtml(ev){if(!ev.length)return '<p class="tiny">Nothing yet.</p>';return '<ul class="tl">'+ev.slice(-40).map(e=>{const n=narrate(e);return `<li class="${n.cls}"><time>${fmt(e.ms)}</time><span>${esc(n.text)}</span></li>`;}).join('')+'</ul>';}
 function narrate(e){switch(e.ty){case 'spawn-started':return{cls:'',text:`${e.sp} dispatched (${e.r})`};case 'build-started':return{cls:'',text:`${e.sp} started the build`};case 'spawn-done':return{cls:'good',text:`${e.sp} done in ${e.dur?fmtDur(e.dur):'?'}, ${kTok(e.tok)} tokens${e.st?', '+e.st:''}`};case 'spawn-failed':return{cls:'bad',text:`${e.sp} failed: ${e.why}`};case 'build-done':return{cls:e.st==='DONE'?'good':'bad',text:`build ${e.st}, verify exit ${e.vx}`};case 'build-blocked':return{cls:'bad',text:`builder blocked: ${e.why}`};case 'verdict':return{cls:e.ok?'good':'bad',text:`grader: ${e.ok?'confirmed':'not confirmed'}, ${e.n} criteria${e.ca?', '+e.ca+' could not assess':''}`};case 'review':return{cls:e.nb?'bad':'good',text:`review depth ${e.d}, ${e.nb} blocking`};case 'merge-gate-clean':return{cls:'good',text:'merge gate clean'};case 'merge-gate-rework':return{cls:'bad',text:`merge gate rework: ${e.why||''}`};case 'shipped':return{cls:'good',text:`shipped ${e.sha||''}`};case 'escalation-blocking':return{cls:'esc',text:`escalation by ${e.a}: ${e.why} (default: ${e.df||'—'}, by ${(e.dl||'—').slice(0,16)})`};case 'question':return{cls:'esc',text:`question by ${e.a}: ${e.why} (default: ${e.df||'—'})`};case 'decision':return{cls:'esc',text:`decision by ${e.a}: ${e.why}`};case 'spec-written':return{cls:'',text:`spec written: ${e.ac} criteria, ${e.fp} files, charter ${e.ch||'?'}`};case 'spec-killed':return{cls:'bad',text:`killed: ${e.why||''}`};case 'charter-filed':return{cls:'',text:`charter filed: ${e.ti}`};case 'plan-written':return{cls:'',text:'plan written'};case 'deploy-failed':return{cls:'bad',text:'deploy failed'};default:return{cls:'',text:e.ty};}}
 const charterOfSubject=s=>!s?null:String(s).startsWith('L-charter-')?s:specCharter(s);

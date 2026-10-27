@@ -73,17 +73,23 @@ const Codex = (() => {
     const e=n.fallbackEvent||{sp:n.session.id,s:n.session.subject,r:n.session.role,ms:S.now,t:n.session.fallback_at};
     spawnActor({...e,backend:null,cl:e.t},n.session.role||'builder');
   }
+  function sessionRows(s,q=source.quota||{}){
+    const fields=s?[
+      ['Kind',s.kind],['Subject / title',s.subject],['Tmux window',s.tmux||'—'],['State',s.state],
+      ['Started',s.started],['Last activity',s.last],['Turns',s.turns??0],['Tokens',s.tokens??0],
+      ['Fallback history',s.fell_back||'none'],['Worktree',s.cwd||'—']
+    ]:[['Sessions',source.sessions.length],['Presence',[...builds.values(),...workers.values()].filter(n=>n.session.state==='live').length+' live']];
+    fields.push(['Weekly quota',q.weekly_used_pct==null?'unavailable':q.weekly_used_pct+'% used'],
+      ['Resets',q.resets_at?new Date(q.resets_at*1000).toISOString():'—']);
+    if(q.credits_balance!=null)fields.push(['Credits balance',q.credits_balance]);
+    return fields;
+  }
+  function sessionExtra(s){return {title:'CODEX SESSION',rows:sessionRows(s)};}
   function inspect(id){
+    const n=builds.get(id)||workers.get(id),s=n?n.session:null;
+    if(s&&/^L-spec-\d+$/.test(s.subject||''))return window.realmOpenSpec(s.subject,sessionExtra(s));
     const html=()=>{
-      const n=builds.get(id)||workers.get(id),s=n?n.session:null,q=source.quota||{};
-      const fields=s?[
-        ['Kind',s.kind],['Subject / title',s.subject],['Tmux window',s.tmux||'—'],['State',s.state],
-        ['Started',s.started],['Last activity',s.last],['Turns',s.turns??0],['Tokens',s.tokens??0],
-        ['Fallback history',s.fell_back||'none'],['Worktree',s.cwd||'—']
-      ]:[['Sessions',source.sessions.length],['Presence',[...builds.values(),...workers.values()].filter(n=>n.session.state==='live').length+' live']];
-      fields.push(['Weekly quota',q.weekly_used_pct==null?'unavailable':q.weekly_used_pct+'% used'],
-        ['Resets',q.resets_at?new Date(q.resets_at*1000).toISOString():'—']);
-      if(q.credits_balance!=null)fields.push(['Credits balance',q.credits_balance]);
+      const n=builds.get(id)||workers.get(id),s=n?n.session:null,fields=sessionRows(s);
       return `<div class="codex-inspector"><h2>${esc(s?s.subject:'Codex Gate')}</h2><div class="cls">CODEX · OPENAI</div><dl>${fields.map(([k,v])=>`<dt>${esc(k)}</dt><dd>${esc(v??'—')}</dd>`).join('')}</dl>${!s?'<p>Live constructs hover at the forge or orbit this gate. Idle workers dim; ended workers depart.</p>':''}</div>`;
     };openPanel(html(),{html});
   }
@@ -176,5 +182,5 @@ const Codex = (() => {
     for(const [id,b] of buttons)b.hidden=!visibleTargets.has(id);
     light.globalAlpha=1;light.globalCompositeOperation='source-over';
   }
-  return {load,reset,event,draw,inspect,get positions(){return hits.map(h=>({...h}));}};
+  return {load,reset,event,draw,inspect,sessionExtra,get positions(){return hits.map(h=>({...h}));}};
 })();
