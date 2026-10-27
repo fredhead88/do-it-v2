@@ -232,7 +232,7 @@ def test_ac6_stuck_rows_equal_the_lane():
         with patch.object(realm,'ROOT',path),patch.object(realm,'ledger_snapshot',snapshot),patch.dict(realm._GLANCE,key=None,value=None):
             start=time.perf_counter();glance=realm.glance_payload(NOW);elapsed=time.perf_counter()-start
             assert not glance['error'], glance
-            lane=realm.lane_payload(NOW)['lane']
+            lane=fold.stall_lane_rows(events,specs,NOW,by_subject=by)
             facts=g.hold_facts(events,[],[],[],NOW)
             expected={r['spec'] for r in lane if r['bucket']=='STUCK' and not realm_stuck.hold_evidence(r,facts['rulings'])}
             actual={r['spec'] for r in glance['stuck']['stuck'] if r['kind']=='lane'}

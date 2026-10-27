@@ -1135,22 +1135,89 @@ def history_backfill(rows, claims, hours=24, step_min=15):
     return added
 
 
-def lane_payload(now):
-    """Reclassify deadlines at `now`, reusing the shared live fold snapshot."""
-    result = {"lane": None, "lane_error": None, "lane_at": now.isoformat(timespec="seconds")}
-    try:
-        with ledger_snapshot(now) as (live_fold, events, folded):
-            import lane_rules
-            lane_rules.load()
-            result["lane"] = live_fold.stall_lane_rows(events, folded[0], now, by_subject=folded[3])
-    except Exception as ex:
-        result["lane_error"] = f"{type(ex).__name__}: {ex}"
-    return result
+FLOW_STAGES = ("idea", "planned", "building", "checking", "merging", "live")
+VIEW_TIMEOUT = 10
+VIEW_CACHE = {}
+VIEW_LOCK = threading.Lock()
+
+
+def flow_view(steps, *, live_count=None):
+    """Present canonical Steps without deriving a diagnosis from ledger rows."""
+    if not isinstance(steps, list):
+        raise ValueError("steps must be a list")
+    stages = dict.fromkeys(FLOW_STAGES, 0)
+    stuck = []
+    for step in steps:
+        if (not isinstance(step, dict) or step.get("stage") not in FLOW_STAGES
+                or step.get("state") not in ("action", "hold")):
+            raise ValueError("Step requires a valid stage and state")
+        stages[step["stage"]] += 1
+        if step["state"] == "hold":
+            stuck.append(step)
+    if live_count is not None and (type(live_count) is not int or live_count < 0):
+        raise ValueError("live count must be a nonnegative integer or null")
+    stages["live"] = live_count
+    return {"stages": stages, "stuck": stuck}
+
+
+def _view_payload(command, now=None):
+    now = now or dt.datetime.now(dt.timezone.utc)
+    key = (str(LIVE_REPO), str(ROOT), command)
+    name = "flow" if command == "next" else "health"
+    with VIEW_LOCK:
+        previous = VIEW_CACHE.get(key)
+        if previous:
+            age = (now - dt.datetime.fromisoformat(previous[name + "_at"])).total_seconds()
+            if 0 <= age < 30:
+                return previous
+        result = {name: None, name + "_error": None, name + "_at": now.isoformat()}
+        if command == "next":
+            result["steps"] = None
+        try:
+            proc = subprocess.run([str(LIVE_REPO / "doit"), command, "--json"],
+                                  cwd=LIVE_REPO, stdin=subprocess.DEVNULL,
+                                  capture_output=True, text=True, timeout=VIEW_TIMEOUT,
+                                  env={**os.environ, "DOIT_ROOT": str(ROOT), "DOIT_READ_CACHE": "0"})
+            if proc.returncode:
+                raise ValueError(f"{command} exit {proc.returncode}")
+            value = json.loads(proc.stdout)
+            if command == "next":
+                if not isinstance(value, dict) or not isinstance(value.get("steps"), list):
+                    raise ValueError("next JSON requires an object with list-valued steps")
+                counts = value.get("counts", {})
+                if not isinstance(counts, dict):
+                    raise ValueError("next counts must be an object")
+                result["flow"] = flow_view(value["steps"], live_count=counts.get("live"))
+                result["steps"] = value["steps"]
+            else:
+                fields = {"finishing_per_day", "intake_per_day", "usage",
+                          "disk_used_fraction", "tokens_per_live_spec"}
+                if not isinstance(value, dict) or not fields <= value.keys():
+                    raise ValueError("health JSON requires a HealthView object")
+                for field in ("usage", "tokens_per_live_spec"):
+                    block = value[field]
+                    if block is not None and (not isinstance(block, dict)
+                                              or not {"codex", "claude"} <= block.keys()):
+                        raise ValueError("invalid health " + field)
+                for vendor in ("codex", "claude"):
+                    usage = (value["usage"] or {}).get(vendor)
+                    if usage is not None and (not isinstance(usage, dict)
+                                              or not {"used", "limit"} <= usage.keys()):
+                        raise ValueError("invalid vendor usage")
+                result["health"] = value
+        except Exception as ex:  # unknown replaces successful and failed cached answers alike
+            result[name + "_error"] = f"{type(ex).__name__}: {ex}"
+        VIEW_CACHE[key] = result
+        return result
+
+
+def views_payload(now=None):
+    return {**_view_payload("next", now), **_view_payload("health", now)}
 
 
 def history_payload(rows, states, now, metrics):
     return {"history": HISTORY, "now": metrics, "wallclock": wallclock(rows, states, now),
-            **lane_payload(now)}
+            **views_payload(now)}
 
 
 def sample_once():
@@ -1338,7 +1405,7 @@ def bootstrap(hours, states=None, goals=None, proving=None, now=None):
         proving = derive_proving()
     _, spec_ch_now = charter_index(raw)
     metrics_now = metrics_at(rows, states, claims, now, sys_signals(), None, spec_ch_now)
-    return {"glance": glance_payload(now), **lane_payload(now), "codex": codex_payload(raw), "live": True, "now": now.isoformat(timespec="seconds"), "root": str(ROOT), "metrics": metrics_now,
+    return {"glance": glance_payload(now), **views_payload(now), "codex": codex_payload(raw), "live": True, "now": now.isoformat(timespec="seconds"), "root": str(ROOT), "metrics": metrics_now,
             "window": [window_rows[0]["t"] if window_rows else now.isoformat(timespec="seconds"), now.isoformat(timespec="seconds")],
             "ledger_start": rows[0]["t"] if rows else None, "n_events": len(raw), "events": window_rows,
             "stats": role_stats(raw), "states": states, "goals": goals, "proving": proving,
@@ -1646,6 +1713,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         if not self._authorized(qs):
             self._json({"error": "key required"}, 401)
+            return
+        view_commands = {"/api/flow": "next", "/api/health": "health"}
+        if u.path in view_commands:
+            self._json(_view_payload(view_commands[u.path]))
             return
         if u.path == "/api/bootstrap":
             hours = int(qs.get("hours", [self.hours])[0])

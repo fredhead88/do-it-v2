@@ -232,93 +232,6 @@ def test_codex_workers_allowlist_mtime_quota_and_paths():
             assert marker not in serialized
 
 
-# ---------------------------------------------------------------- live lane (no main-branch module required)
-def test_lane_loads_each_repo_without_import_residue():
-    import itertools
-    from unittest.mock import patch
-    rows = [{"spec": "L-spec-7001", "rule": "build", "limit_min": 7,
-             "since": _ago(3), "overdue": True, "reason": "dispatch <builder>",
-             "reason_live": False, "blocker": "", "actor": "tick", "extra": [1, 2]}]
-    with tempfile.TemporaryDirectory() as tmp:
-        repos = {}
-        for case in ("rows", "absent", "load-broken", "due-broken", "read-broken", "fold-broken", "shape-broken"):
-            root = pathlib.Path(tmp) / case
-            src = root / "src"
-            src.mkdir(parents=True)
-            repos[case] = root
-            if case == "absent":
-                continue
-            (src / "fold.py").write_text('''from dataclasses import dataclass
-@dataclass
-class EventSource:
-    name: str = 'live'
-EVENTS = [{'actor': 'executor', '_src': 'live-reader', 'type': 'tick'}]
-SPECS = {'L-spec-7001': {'state': 'written'}}
-BY_SUBJECT = {}
-def finish_events(raw):
-    return EVENTS
-def fold(events):
-    assert events is EVENTS
-    return SPECS, {'not': 'specs'}, [], BY_SUBJECT
-def stall_lane_rows(events, specs, now, *, by_subject):
-    import lane_rules
-    assert by_subject is BY_SUBJECT
-    return lane_rules.due(events, specs, now)
-''' + ("\ndef finish_events(raw): raise RuntimeError('read-broken')\n" if case == "read-broken" else "")
-                + ("\ndef fold(events): raise RuntimeError('fold-broken')\n" if case == "fold-broken" else "")
-                + ("\ndef fold(events): return {}, {}\n" if case == "shape-broken" else ""))
-            (src / "lane_rules.py").write_text('''import fold
-from pathlib import Path
-import json
-LOG = Path(__file__).with_name('calls.jsonl')
-def record(value):
-    with LOG.open('a') as stream: stream.write(json.dumps(value) + '\\n')
-def load():
-    record({'case': CASE, 'call': 'load'})
-    if CASE == 'load-broken': raise ValueError(CASE)
-    return {}
-def due(events, specs, now):
-    record({'case': CASE, 'call': 'due', 'events': events, 'specs': specs, 'now': now.isoformat()})
-    assert events is fold.EVENTS and specs is fold.SPECS
-    if CASE == 'due-broken': raise RuntimeError(CASE)
-    return ROWS
-''' + f"\nCASE = {case!r}\nROWS = {rows!r}\n")
-        # Multiple orders in one interpreter detect stale live-module caches.
-        for order in itertools.chain([list(repos), list(reversed(repos))],
-                                     itertools.permutations(("rows", "absent", "load-broken", "due-broken"))):
-            for case in order:
-                root = repos[case]
-                before_path, before_modules = sys.path[:], sys.modules.copy()
-                log = root / "src/calls.jsonl"
-                if log.exists():
-                    log.unlink()
-                with patch.dict(os.environ, {"DOIT_LIVE_REPO": str(root)}):
-                    with patch.object(realm, "read_all", return_value=([], [], {})), \
-                         patch.object(realm, "sys_signals", return_value={}), \
-                         patch.object(realm.realm_codex, "payload", return_value={}), \
-                         patch.object(realm, "omens_model", return_value={}), \
-                         patch.object(realm, "glance_payload", return_value={}):
-                        payload = realm.bootstrap(0, states=[], goals=[], proving=[], now=NOW)
-                    history = realm.history_payload([], [], NOW, {})
-                assert sys.path == before_path
-                assert sys.modules == before_modules
-                assert payload["lane_at"] == history["lane_at"] == NOW.isoformat(timespec="seconds")
-                assert "wallclock" in history
-                for result in (payload, history):
-                    if case == "rows":
-                        assert result["lane"] == rows and result["lane_error"] is None
-                    else:
-                        assert result["lane"] is None and result["lane_error"]
-                        assert (str(root) if case == "absent" else "invalid four-part" if case == "shape-broken" else case) in result["lane_error"], (case, result)
-                calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
-                due = [c for c in calls if c["call"] == "due"]
-                assert len(due) == (2 if case in ("rows", "due-broken") else 0)
-                for call in due:
-                    assert call["case"] == case and call["now"] == NOW.isoformat()
-                    assert all(e["actor"] and e["_src"] == "live-reader" for e in call["events"])
-                    assert call["specs"] == {"L-spec-7001": {"state": "written"}}
-
-
 def _page_function(source, name):
     """Brace-match a real page function, including balanced template expressions."""
     start = source.index("function " + name + "(")
@@ -332,87 +245,6 @@ def _page_function(source, name):
             if depth == 0:
                 return source[start:i + 1]
     raise AssertionError("unclosed function " + name)
-
-
-def test_lane_page_shows_only_classified_stuck():
-    import re
-    import subprocess
-    page = realm.PAGE.read_text()
-    body = _page_function(page, "computeBlockers")
-    assert body and _page_function(page, "renderStuck")
-    for lookup in ("spec-written", "build-done", "verdict", "review", "merge-gate-clean"):
-        assert lookup not in body
-    # Evaluate numeric products, so spelling a removed threshold differently cannot hide it.
-    for expr in re.findall(r"(?<![\w.])\d+(?:\.\d+)?(?:\s*\*\s*\d+(?:\.\d+)?)*", body):
-        assert eval(expr, {"__builtins__": {}}, {}) not in (600, 900, 1800, 600000, 900000, 1800000), expr
-    for name in re.findall(r"\b[A-Z][A-Z_]+\b", body):
-        for expr in re.findall(r"(?:const|let)\s+" + name + r"\s*=\s*([\d\s*]+)[;,]", page):
-            assert eval(expr, {"__builtins__": {}}, {}) not in (600, 900, 1800, 600000, 900000, 1800000)
-    functions = ("applyLane", "applyHistory", "laneNotice", "laneDetails", "renderStuckTile",
-                 "stateMap", "laneSplit", "computeHolds", "stuckData", "computeBlockers", "renderStuck", "stuckHtml0",
-                 "escOwner", "computeOmens")
-    constants = ("S", "toMs", "fmt", "fmtDur", "fmtAge", "esc", "LANE_PLACE", "WHO", "HOLD_RE", "LIFT_RE")
-    declarations = []
-    for name in constants:
-        declarations.append(next(line for line in page.splitlines() if line.startswith("const " + name + " ") or "const " + name + "=" in line))
-    # WHO_ shares the HOLD_RE line; LIFT_RE and all page functions are real source.
-    script = "\n".join(declarations + [_page_function(page, n) for n in functions])
-    script += r'''
-const assert=require('node:assert/strict');
-const els=new Map();const $=id=>{if(!els.has(id))els.set(id,{className:'',innerHTML:'',firstElementChild:{textContent:'',style:{}}});return els.get(id);};
-let LIVE=true, DATA={states:[]}, stream=null, REMOTE=false,lastHeard=0;
-const CAP={builder:5};
-const isRaven=()=>true, knownBug=()=>null, execBusy=()=>false, OM=()=>null,lastOf=()=>null;
-const specCharter=()=>null,charterRows=()=>[],fixFor=()=>null,ownerFor=()=>null,sinceFor=()=>S.now,renderOmens=()=>{};
-const NO_SELFCHECK=new Set(),FINISHED_RE=/accepted|shipped|killed/,DEFAULT_OWNER={shelf:'executor'},NEXT_ACTION={shelf:()=>['executor','dispatch a builder']};
-const isOperator=o=>o==='operator'||o==='you';
-const now=Date.parse('2026-10-15T12:00:00Z'),H=3600000;
-// The fixture represents the server's classification. The page must consume
-// it verbatim; lane rules only choose map placement, never membership or count.
-function payload(lane){
- const stuck=(lane||[]).filter(r=>r.bucket==='STUCK').map(r=>({spec:r.spec,subject:r.spec,title:'Title <'+r.rule+'>',project:'fixture <project>',since:r.since,stuck_for_s:Math.max(0,(now-Date.parse(r.since))/1000),reason:'Action needed: '+r.reason,who:r.actor==='grader'?'process':'executor',kind:'lane',src:'fixture:'+r.rule}));
- return {error:null,count:stuck.length,stuck,held:[]};
-}
-function fresh(lane=[],stuck=payload(lane)){S.now=now;S.lane=lane;S.laneAt='2026-10-15T12:00:00Z';S.laneError=null;S.actors.clear();S.subjectEvents.clear();S.esc.clear();S.sys=null;S.wallclock=null;S.lastAct=0;S.lastTick=null;S.recent=[];S.raisedAt.clear();DATA={states:[],glance:{error:null,stuck}};LIVE=true;}
-function row(rule,age=3,extra={}){return {spec:'L-spec-'+rule,bucket:'STUCK',rule,actor:'tick',since:new Date(now-age*H).toISOString(),limit_min:17,overdue:true,reason:'because <'+rule+'>',reason_live:false,blocker:'block <'+rule+'>',...extra};}
-function has(text,part){assert.ok(text.includes(part),part+' missing in '+text);}
-const rows=[row('build',5),row('grade',2,{actor:'grader'}),row('gate',.5,{actor:'-'}),row('wave-held',3,{bucket:'waiting-on-prereq',overdue:false,reason_live:true}),row('future',1),row('review',1,{bucket:'queued',overdue:false})];
-fresh(rows);computeBlockers();assert.equal(S.blockers.length,4);
-for(const [rule,place,kind,who,need,sev] of [['build','tower','shelf','executor',true,2],['grade','court','grade','process',true,1],['gate','gate','merge','executor',true,0],['future','tower','lane','executor',true,0]]){
- const b=S.blockers.find(b=>b.lane.rule===rule);assert.deepEqual([b.place,b.kind,b.who,b.need,b.sev],[place,kind,who,need,sev]);assert.equal(b.s,'L-spec-'+rule);assert.equal(b.since,Date.parse(b.lane.since));assert.equal(b.wait,now-b.since);
-}
-const panel=stuckHtml0();for(const r of DATA.glance.stuck.stuck){for(const value of [r.spec,esc(r.title),esc(r.project),esc(r.reason),r.who])has(panel,value);}
-assert.ok(!panel.includes('because <build>'));assert.ok(!panel.includes('fixture <project>'));
-assert.equal($('h-stuck').firstElementChild.textContent,'4');assert.ok(!panel.includes('WITHIN LIMITS'));
-const allRules={rebuild:['tower','shelf'],'dependency-held':['tower','shelf'],regrade:['court','grade'],review:['inn','review'],enqueue:['gate','merge'],merge:['gate','merge'],close:['keep','close'],idle:['tower','idle'],toString:['tower','lane'],constructor:['tower','lane']};
-for(const [rule,mapping] of Object.entries(allRules)){fresh([row(rule)]);computeBlockers();assert.deepEqual([S.blockers[0].place,S.blockers[0].kind],mapping);}
-fresh(null,{error:'load <failed>',count:0,stuck:[],held:[]});computeBlockers();for(const text of [$('stuck').textContent,stuckHtml0()]){has(text,'stuck list unavailable');assert.ok(!text.toUpperCase().includes('NOTHING STUCK'));}assert.notEqual($('stuck').className,'calm');assert.equal($('h-stuck').firstElementChild.textContent,'stuck list unavailable');
-fresh([]);computeBlockers();has($('stuck').textContent,'Nothing stuck');assert.equal($('stuck').className,'calm');
-fresh([row('unrecognized',1,{reason:'undetermined: cannot decide'})]);computeBlockers();assert.equal(S.blockers.length,1);assert.equal(S.blockers[0].need,true);has(stuckHtml0(),'undetermined: cannot decide');has($('stuck').textContent,'1 spec');assert.equal($('h-stuck').firstElementChild.textContent,'1');assert.notEqual($('h-stuck').className,'stat click good');
-// Histories far past every removed limit cannot recreate page-side lane waits.
-fresh([]);for(const [i,ty] of ['spec-written','build-done','verdict','review','merge-gate-clean'].entries()){const s='L-spec-old'+i;DATA.states.push([s,['written','built','graded','reviewing','reviewing'][i]]);S.subjectEvents.set(s,[{ty,ms:now-100*H,st:'DONE',ok:true,nb:0}]);}computeBlockers();assert.deepEqual(S.blockers,[]);
-// A page-side hold, freeze, busy subject or red CI cannot overrule server rows.
-fresh([row('build',5),row('gate',3)]);S.subjectEvents.set('L-spec-build',[{ty:'decision',a:'operator',ms:now-H,why:'hold L-spec-build until merge'}]);S.subjectEvents.set('L-charter-1',[{ty:'decision',a:'operator',ms:now-H,why:'merge freeze'}]);S.actors.set('busy',{subject:'L-spec-build',state:'working',start:now,tour:false});S.sys={ci:{red:1}};computeBlockers();assert.ok(S.holds.bySpec.has('L-spec-build'));assert.ok(S.holds.freeze);for(const b of S.blockers){assert.equal(b.need,true);assert.equal(b.text,DATA.glance.stuck.stuck.find(r=>r.spec===b.s).reason);}computeOmens();assert.ok(S.alarms.some(a=>a.kind==='shelf'));
-for(const bucket of ['queued','held','waiting-on-prereq','waiting-on-human',undefined]){fresh([row('wait',3,{bucket,reason_live:true})]);computeBlockers();assert.deepEqual(S.blockers,[]);}
-function kept(){for(const [s,state] of [['L-spec-raven','written'],['L-spec-owed','shipped-owed']]){DATA.states.push([s,state]);S.subjectEvents.set(s,[{ty:'shipped',ms:now-30*H}]);}S.esc.set('L-spec-raven',[{ms:now-H,ow:'operator'}]);S.actors.set('queued',{sp:'L-builder-q',subject:'L-spec-q',role:'builder',state:'queued',start:now-3*60000,wp:'forge'});S.actors.set('working',{sp:'L-builder-w',subject:'L-spec-w',role:'builder',state:'working',start:now-H,wp:'forge'});}
-fresh([]);kept();computeBlockers();assert.deepEqual(S.blockers,[]);has($('stuck').textContent,'Nothing stuck');
-applyHistory({lane:[row('build')],lane_error:null,lane_at:'updated',history:{},wallclock:{}});assert.equal(S.lane.length,1);assert.equal(S.laneAt,'updated');assert.deepEqual(S.blockers,[]);
-applyHistory({lane:null,lane_error:'refresh failed',lane_at:'failed',history:{}});assert.equal(S.lane,null);assert.equal(S.laneError,'refresh failed');has($('stuck').textContent,'Nothing stuck');
-DATA.glance.stuck=payload([row('build')]);computeBlockers();assert.equal(S.blockers.length,1);assert.equal($('h-stuck').firstElementChild.textContent,'1');
-DATA.glance={error:'refresh failed'};computeBlockers();has($('stuck').textContent,'stuck list unavailable');assert.deepEqual(S.blockers,[]);
-fresh([row('build')]);kept();LIVE=false;S.now=now-1;computeBlockers();assert.deepEqual(S.blockers,[]);for(const text of [$('stuck').textContent,stuckHtml0()]){has(text,'stuck list unavailable');assert.ok(!text.toUpperCase().includes('NOTHING STUCK'));}assert.notEqual($('stuck').className,'calm');
-console.log('stuck UI: server mappings, rendering, unavailable, explicit stuck, other buckets excluded, refresh and replay passed');
-
-'''
-    # seek/reset must preserve the live result, while tick retains its numeric count separately.
-    assert "S.lane=null" not in _page_function(page, "reset")
-    assert "S.lane=e.ln" not in _page_function(page, "handle")
-    assert "applyLane(d)" in _page_function(page, "loadData")
-    assert "applyLane(d)" in _page_function(page, "applySnapshot")
-    assert "stream.addEventListener('history',ev=>applyHistory(JSON.parse(ev.data)))" in page
-    result = subprocess.run(["/usr/bin/node", "-e", script], text=True, capture_output=True)
-    assert result.returncode == 0, result.stdout + result.stderr
-
 
 
 # ---------------------------------------------------------------- merge throughput (L-spec-1149)
@@ -451,6 +283,7 @@ def throughput_stub(value=THROUGHPUT_SENTINELS, *, mode="ok"):
         stack.enter_context(mock.patch.multiple(realm, LIVE_REPO=repo, sys_signals=lambda: {},
                                                maker_index=lambda *a: {}, omens_model=lambda *a: {}))
         stack.enter_context(mock.patch.object(realm.realm_codex, "payload", return_value={}))
+        stack.enter_context(mock.patch.object(realm, "views_payload", return_value={}))
         stack.enter_context(mock.patch.object(realm.HUB, "throughput", None))
         yield log
 
@@ -517,8 +350,8 @@ def test_1149_cache_guard_and_sampler():
     for failure in (False, True):
         with throughput_stub() as log, contextlib.ExitStack() as stack:
             stack.enter_context(mock.patch.object(realm, "history_add"))
-            lane = {"lane": [], "lane_error": None, "lane_at": "lane-instant"}
-            stack.enter_context(mock.patch.object(realm, "lane_payload", return_value=lane))
+            views = {"flow": None, "flow_error": "fixture", "flow_at": "flow-instant"}
+            stack.enter_context(mock.patch.object(realm, "views_payload", return_value=views))
             stack.enter_context(mock.patch.object(realm, "derive_states", return_value=[]))
             send = stack.enter_context(mock.patch.object(realm.HUB, "send"))
             if failure:
@@ -526,7 +359,7 @@ def test_1149_cache_guard_and_sampler():
             realm.sample_once()
             assert [call.args[0] for call in send.call_args_list] == ["history", "throughput"]
             history = send.call_args_list[0].args[1]
-            assert all(history[k] == v for k, v in lane.items())
+            assert all(history[k] == v for k, v in views.items())
             assert "history" in history and "wallclock" in history
             p = send.call_args_list[1].args[1]
             assert set(p) == keys
@@ -554,8 +387,8 @@ let DATA={}, LIVE=true, EVENTS=[], T0=0, T1=0, lastPush='', S={};
 let stream, heard=false,lastHeard=0;
 const header={firstElementChild:{textContent:''},title:''};
 const $=id=>{assert.equal(id,'h-merge');return header;};
-const applyLane=()=>{}, rerenderPanel=()=>{}, insertEvent=()=>{}, Codex={load:()=>{},reset:()=>{}};
-const reset=()=>{},process=()=>{},renderLog=()=>{},computeBlockers=()=>{},computeOmens=()=>{};
+const applyViews=()=>{}, rerenderPanel=()=>{}, insertEvent=()=>{}, Codex={load:()=>{},reset:()=>{}};
+const reset=()=>{},process=()=>{},renderLog=()=>{},computeOmens=()=>{};
 const setTimeout=()=>{},setInterval=()=>{},api=x=>x;
 const listeners={};class EventSource{addEventListener(k,f){listeners[k]=f;}}
 """ + esc + "\n" + merge + "\n" + snapshot + "\n" + connect + "\n" + seek + r"""
@@ -902,7 +735,7 @@ def test_realm_never_opens_ledger_lock():
             assert realm.derive_proving() is not None
             assert realm.omens_model([]) is not None
             assert 'sessions' in realm.codex_payload()
-            assert realm.lane_payload(NOW)['lane_error'] is None
+            assert realm.views_payload(NOW)['flow_at']
             assert realm.glance_payload(NOW).get('error') is None
         exercise()
         with file.open('a') as f: f.write(json.dumps(dict(type='tick', ts=NOW.isoformat()))+'\n')
@@ -943,6 +776,7 @@ def test_subprocess_sites_enumerated_and_cached_child_reads():
         ('realm.py', 'sys_signals'): (2, 'no ledger'),
         ('realm.py', 'tick_omens'): (1, 'ledger'),
         ('realm.py', 'throughput_payload'): (1, 'ledger'),
+        ('realm.py', '_view_payload'): (1, 'ledger'),
         ('realm.py', 'derive_dossier'): (1, 'ledger'),
         ('realm.py', 'ask_thinker'): (1, 'append'),
         ('realm.py', 'main'): (1, 'no ledger'),
@@ -1182,7 +1016,7 @@ def _spec_panel_node(assertions):
     script = r"""
 const assert=require('node:assert/strict');
 let DATA={states:[['L-spec-7','building']],specs:{'L-spec-7':{title:'Shared title',criteria:[{id:'AC1',text:'Safe <img>.'}],criteria_error:null,charter:'L-charter-0064'}},titles:{},spec_charter:{},codex:{sessions:[]}},stream=true;
-let S={lane:[{spec:'L-spec-7',bucket:'build',reason:'ready <now>'}],subjectEvents:new Map(),actors:new Map(),esc:new Map(),decided:new Map(),now:1000};
+let S={steps:[{item:'L-spec-7',stage:'building',state:'action',reason:'ready <now>'}],subjectEvents:new Map(),actors:new Map(),esc:new Map(),decided:new Map(),now:1000};
 let panel='',panelView=null,fetches=0,links=[];
 const window={},document={querySelectorAll:selector=>selector==='a.link[data-subj]'?links:[]},$=()=>({scrollTop:0,innerHTML:''});
 const openPanel=(html,view)=>{panel=html;panelView=view;},bindPix=()=>{};
@@ -1200,10 +1034,10 @@ def test_ac4_spec_detail_html_order_and_states():
     _spec_panel_node(r"""
 S.subjectEvents.set('L-spec-7',Array.from({length:41},(_,i)=>({ms:i,ty:'event-'+i})));
 const html=specDetailHtml('L-spec-7',{title:'CODEX SESSION',rows:[['State','live<script>']]});
-let last=-1;for(const label of ['L-spec-7','Shared title','STAGE','LANE STATE','CRITERIA','CHARTER','LATEST EVENTS','CODEX SESSION']){const i=html.indexOf(label);assert(i>last,label);last=i;}
-for(const text of ['in flight','build','ready &lt;now&gt;','Safe &lt;img&gt;.','live&lt;script&gt;'])assert(html.includes(text),text);
+let last=-1;for(const label of ['L-spec-7','Shared title','STAGE','NEXT STEP','CRITERIA','CHARTER','LATEST EVENTS','CODEX SESSION']){const i=html.indexOf(label);assert(i>last,label);last=i;}
+for(const text of ['building','action','ready &lt;now&gt;','Safe &lt;img&gt;.','live&lt;script&gt;'])assert(html.includes(text),text);
 assert.equal((html.match(/<li class=/g)||[]).length,40);assert(!html.includes('event-0<'));
-S.lane=[];assert(specDetailHtml('L-spec-7').includes('no lane row'));
+S.steps=[];assert(specDetailHtml('L-spec-7').includes('unknown'));
 DATA.specs['L-spec-7'].criteria=[];DATA.specs['L-spec-7'].criteria_error='unparseable <input>';
 const bad=specDetailHtml('L-spec-7');assert(bad.includes('criteria unreadable'));assert(!bad.includes('<ul class="criteria">'));assert(!bad.includes('no criteria listed'));
 DATA.specs['L-spec-7'].criteria_error=null;assert(specDetailHtml('L-spec-7').includes('no criteria listed'));
@@ -1254,6 +1088,189 @@ def test_ac8_footprint_routes_and_no_new_polling():
     added = '\n'.join(line[1:] for line in diff.splitlines() if line.startswith('+') and not line.startswith('+++'))
     assert not re.search(r'\b(?:setInterval|setTimeout|EventSource)\s*\(', added)
     assert not re.search(r'\bfetch\s*\(', added)  # existing ensureSpec call is reused
+
+
+
+# Canonical flow/health regression fixtures: no live ledger or production writes.
+FLOW_STEPS = [dict(item='L-spec-'+str(i), item_kind='spec', stage=stage,
+                   state='hold' if i < 3 else 'action', action=None if i < 3 else 'build',
+                   owner=['operator','executor','sweeper'][i % 3], trigger=None,
+                   reason='reason '+str(i), clears='decision', since='2026-10-27T00:00:00Z')
+              for i, stage in enumerate(['building','checking','merging','building','planned','idea'])]
+HEALTH_VIEW = dict(finishing_per_day=3, intake_per_day=5,
+                   usage=dict(codex=dict(used=12,limit=100),claude=dict(used=None,limit=100)),
+                   disk_used_fraction=.42, tokens_per_live_spec=dict(codex=123,claude=None))
+
+@contextlib.contextmanager
+def views_stub():
+    with tempfile.TemporaryDirectory(prefix='realm-views-') as folder, contextlib.ExitStack() as stack:
+        repo=pathlib.Path(folder)
+        program=repo/'doit'
+        program.write_text('#!/usr/bin/python3\nimport json,sys,time\nfrom pathlib import Path\n'
+            'root=Path(__file__).parent\nname=sys.argv[1]\n'
+            'with (root/"calls").open("a") as f: f.write(name+"\\n")\n'
+            'cfg=json.loads((root/(name+".json")).read_text())\n'
+            'time.sleep(cfg.get("sleep",0))\nprint(cfg["stdout"])\nsys.exit(cfg.get("exit",0))\n')
+        program.chmod(0o700)
+        def configure(name='next', value=None, **kw):
+            if value is None: value=dict(counts={},steps=FLOW_STEPS) if name=='next' else HEALTH_VIEW
+            (repo/(name+'.json')).write_text(json.dumps(dict(stdout=json.dumps(value),**kw)))
+            realm.VIEW_CACHE.clear()
+        configure(); configure('health')
+        # Allow interpreter startup under suite load; timeout cases still exceed this.
+        stack.enter_context(mock.patch.multiple(realm,LIVE_REPO=repo,VIEW_TIMEOUT=1))
+        stack.enter_context(mock.patch.dict(realm.VIEW_CACHE,clear=True))
+        yield repo,configure
+
+@contextlib.contextmanager
+def views_server():
+    import http.server, threading
+    server=http.server.ThreadingHTTPServer(('127.0.0.1',0),realm.Handler)
+    thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+    try: yield 'http://127.0.0.1:'+str(server.server_port)
+    finally: server.shutdown(); server.server_close(); thread.join()
+
+def view_get(base,path):
+    import urllib.request,hashlib
+    with urllib.request.urlopen(base+path) as response:
+        body=response.read(); value=json.loads(body)
+        print(json.dumps(dict(url=base+path,status=response.status,body_sha256=hashlib.sha256(body).hexdigest(),body_excerpt=body.decode()[:180])))
+        return value
+
+def test_flow_view():
+    v=realm.flow_view(FLOW_STEPS)
+    assert v['stages']==dict(idea=1,planned=1,building=2,checking=1,merging=1,live=None)
+    assert v['stuck']==FLOW_STEPS[:3]
+    for stage,count in v['stages'].items(): print(stage,count)
+    assert realm.flow_view([])==dict(stages=dict(idea=0,planned=0,building=0,checking=0,merging=0,live=None),stuck=[])
+    assert realm.flow_view([],live_count=4)['stages']['live']==4
+    for bad in [None,{},[dict(stage='future',state='hold')],[dict(stage='idea')],[dict(stage='idea',state='future')]]:
+        try: realm.flow_view(bad)
+        except ValueError: pass
+        else: raise AssertionError(bad)
+
+def test_api_flow():
+    with views_stub() as (repo,configure),views_server() as base:
+        good=view_get(base,'/api/flow')
+        assert good['flow']==realm.flow_view(FLOW_STEPS) and good['steps']==FLOW_STEPS
+        assert good['flow_error'] is None and good['flow_at']
+        cases=[dict(exit=1),dict(exit=2),dict(stdout='bad json'),dict(value=[]),dict(value={}),
+               dict(value={'steps':[{'stage':'future','state':'hold'}]}),dict(sleep=1.5)]
+        for case in cases:
+            value=case.pop('value',None); stdout=case.pop('stdout',None)
+            configure(value=value,**case)
+            if stdout:
+                cfg=repo/'next.json'; cfg.write_text(json.dumps({'stdout':stdout}))
+            bad=view_get(base,'/api/flow')
+            assert bad['flow'] is None and bad['steps'] is None and bad['flow_error'],bad
+            configure(); assert view_get(base,'/api/flow')['flow']==good['flow']
+        # Successful cache is replaced with unknown when the next refresh fails.
+        configure(exit=2); assert view_get(base,'/api/flow')['flow'] is None
+
+def test_api_health():
+    with views_stub() as (repo,configure),views_server() as base:
+        good=view_get(base,'/api/health'); assert good['health']==HEALTH_VIEW and good['health_error'] is None
+        for cfg in [dict(exit=1),dict(exit=2),dict(stdout='bad'),dict(stdout='[]'),dict(stdout='{}'),dict(sleep=1.5)]:
+            configure('health')
+            path=repo/'health.json';value=json.loads(path.read_text());value.update(cfg);path.write_text(json.dumps(value))
+            bad=view_get(base,'/api/health');assert bad['health'] is None and bad['health_error']
+        configure('health');assert view_get(base,'/api/health')['health']==HEALTH_VIEW
+
+def test_flow_in_bootstrap_and_history():
+    import datetime as dt
+    with views_stub() as (repo,configure),contextlib.ExitStack() as stack:
+        for name in ['read_all','sys_signals','maker_index','omens_model','glance_payload','codex_payload']:
+            stack.enter_context(mock.patch.object(realm,name,return_value=([],[],{}) if name=='read_all' else {}))
+        now=dt.datetime.now(dt.timezone.utc)
+        boot=realm.bootstrap(0,states=[],goals=[],proving=[],now=now)
+        hist=realm.history_payload([],[],now,{})
+        required={'flow','flow_error','flow_at','health','health_error','health_at'}
+        for payload in [boot,hist]:
+            assert required<=payload.keys() and not any(k.startswith('lane') for k in payload)
+        assert (repo/'calls').read_text().splitlines().count('next')==1
+        assert (repo/'calls').read_text().splitlines().count('health')==1
+        realm.views_payload(now+dt.timedelta(seconds=31))
+        assert (repo/'calls').read_text().splitlines().count('next')==2
+        for failure in [False,True]:
+            configure(exit=2 if failure else 0)
+            with mock.patch.object(realm.HUB,'send') as send:
+                realm.sample_once()
+            payload=next(call.args[1] for call in send.call_args_list if call.args[0]=='history')
+            assert required<=payload.keys()
+            assert bool(payload['flow_error'])==failure
+            assert (payload['flow'] is None)==failure
+        assert 'snap = bootstrap(' in inspect.getsource(realm.push_forever)
+        assert 'snap = bootstrap(' in inspect.getsource(realm.main)
+
+def test_blockers_readers_and_ask():
+    import urllib.request,urllib.error
+    assert realm.ASK_PANELS==('stuck','omens','proving')
+    with views_server() as base,mock.patch.object(realm.subprocess,'run',return_value=subprocess.CompletedProcess([],0,'','')) as run:
+        items=['L-spec-0 · hold · operator · reason 0']
+        request=urllib.request.Request(base+'/api/ask-thinker',data=json.dumps(dict(panel='stuck',items=items,note='fixture')).encode(),headers={'Content-Type':'application/json'})
+        with urllib.request.urlopen(request) as response: assert json.load(response)['ok']
+        assert run.call_args.args[0]==[str(realm.LIVE_REPO/'doit'),'append','realm-ask','realm:stuck','panel=stuck','items:='+json.dumps(items),'why=fixture']
+        request=urllib.request.Request(base+'/api/ask-thinker',data=b'{"panel":"flow"}')
+        try: urllib.request.urlopen(request)
+        except urllib.error.HTTPError as error: assert error.code==400
+        else: raise AssertionError('bad panel accepted')
+        assert run.call_count==1
+    test_flow_page_under_node()
+
+
+
+def test_flow_page_under_node():
+    page=realm.PAGE.read_text()
+    funcs=['applyViews','applyHistory','renderFlowTile','stageBadges','drawStageBadges',
+           'flowHtml','healthHtml','stuckHtml0','askItems','applySnapshot','loadData','hit']
+    functions='\n'.join(_page_function(page,name) for name in funcs)
+    constants='\n'.join(line for line in page.splitlines() if line.startswith(('const FLOW_STAGES=','const STAGE_PLACES=','const viewText=','const esc =')))
+    shelf=next(line for line in page.splitlines() if line.startswith("$('h-shelf').onclick="))
+    script=r"""
+const assert=require('node:assert/strict');
+let DATA={},LIVE=true,REMOTE=false,EVENTS=[],lastT='',lastHeard=0,T0=0,T1=0,lastPush='',CAP={};
+const SEEN=new Set(),rowKey=e=>e.t,toMs=x=>Date.parse(x)||0,fmt=x=>String(x);
+const nodes={};const $=id=>nodes[id]??=( {firstElementChild:{textContent:''},textContent:'',className:''});
+const S={flow:null,health:null,steps:null,shelf:new Map([['shelf-item',1]]),now:1000,actors:new Map(),effects:[]};
+let panel='',rerenders=0;const listPanel=(a,b,rows)=>{assert.equal(rows()[0].s,'shelf-item');};
+const rerenderPanel=()=>{panel=flowHtml()+healthHtml();rerenders++;};
+const Codex={load:()=>{}},applyThroughput=()=>{},insertEvent=()=>{},fmtDur=String;
+const g={fillText:(s)=>drawn.push(s)},mapFont=()=>'',PLACES=Object.fromEntries(['keep','tower','forge','court','gate','town'].map(k=>[k,{x:1,y:2,h:3}]));
+const standing=[];let drawn=[];
+"""+constants+'\n'+functions+'\n'+shelf+'\n'+r"""
+const steps=STEPS;
+const flow={stages:{idea:1,planned:1,building:2,checking:1,merging:1,live:null},stuck:steps.slice(0,2)};
+const health=HEALTH;
+const good={flow,health,steps,events:[],window:['2026-10-27','2026-10-28'],live:true};
+loadData(good);
+let html=flowHtml();for(const [stage,count] of Object.entries(flow.stages))assert(html.includes(stage+' · '+viewText(count)));
+for(const row of flow.stuck)for(const field of ['item','owner','reason','since'])assert(html.includes(row[field]));
+assert.equal((html.match(/class="act stuck-row"/g)||[]).length,2);assert(html.includes('hold'));
+assert.equal($('h-stuck').firstElementChild.textContent,'2');
+assert.deepEqual(stageBadges().map(b=>b.place),['keep','tower','forge','court','gate','town']);
+for(const badge of stageBadges())assert.equal(badge.count,flow.stages[badge.stage]);
+drawStageBadges();assert(drawn.includes('live unknown'));
+html=healthHtml();for(const text of ['finishing per day · 3','intake per day · 5','codex usage · 12 / 100','claude usage · unknown / 100','disk · 42.0%','codex tokens per live spec · 123','claude tokens per live spec · unknown'])assert(html.includes(text),text);
+assert.deepEqual(askItems('stuck'),flow.stuck.map(b=>`${b.item} · ${b.state} · ${b.owner} · ${b.reason}`));
+$('h-shelf').onclick();hit({x:-100,y:-100});
+S.flow={...flow,stuck:[{...steps[0],reason:'<img onerror=1>'}]};assert(stuckHtml0().includes('&lt;img onerror=1&gt;'));assert(!stuckHtml0().includes('<img'));
+for(const apply of [applyHistory,applySnapshot,loadData]){
+ for(const missing of [false,true]){
+  applyViews(good);apply({...good,...(missing?{}:{flow:null,flow_error:'x',health:null,health_error:'x'}) ,...(missing?{flow:undefined,health:undefined}:{})});
+  for(const b of stageBadges())assert.equal(b.count,null);
+  assert.equal($('h-stuck').firstElementChild.textContent,'unknown');
+  for(const stage of FLOW_STAGES)assert(flowHtml().includes(stage+' · unknown'));
+  drawn=[];drawStageBadges();assert.equal(drawn.filter(x=>x.endsWith('unknown')).length,6);
+  assert(!healthHtml().includes('42.0%'));assert(healthHtml().includes('finishing per day · unknown'));
+ }
+}
+applyViews(good);applyHistory({});assert.equal(S.flow,null);assert.equal(S.health,null);
+console.log('flow page: bootstrap, history, snapshot, missing/null, six badges, health, escaping, shelf and ask passed');
+"""
+    script=script.replace('STEPS',json.dumps(FLOW_STEPS)).replace('HEALTH;',json.dumps(HEALTH_VIEW)+';')
+    result=subprocess.run(['/usr/bin/node','-e',script],text=True,capture_output=True,timeout=30)
+    assert result.returncode==0,result.stdout+result.stderr
+    print(result.stdout.strip())
 
 
 if __name__ == "__main__":
