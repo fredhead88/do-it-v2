@@ -66,15 +66,29 @@ def _locked(lock, mode):
     with fh:
         wait = lock_wait_s()
         deadline = _monotonic() + wait
-        while True:
+
+        def acquire(handle, requested):
+            while True:
+                try:
+                    fcntl.flock(handle, requested | fcntl.LOCK_NB)
+                    return
+                except BlockingIOError:
+                    remaining = deadline - _monotonic()
+                    if remaining <= 0:
+                        raise LockTimeout(f'ledger cache: lock not acquired within {wait:g}s ({lock})')
+                    time.sleep(min(.05, remaining))
+
+        gate_fd = os.open(lock.with_suffix('.gate'), os.O_CREAT | os.O_RDWR, 0o600)
+        with os.fdopen(gate_fd, 'rb') as gate:
+            acquire(gate, fcntl.LOCK_EX)
             try:
-                fcntl.flock(fh, mode | fcntl.LOCK_NB)
-                break
-            except BlockingIOError:
-                remaining = deadline - _monotonic()
-                if remaining <= 0:
-                    raise LockTimeout(f'ledger cache: lock not acquired within {wait:g}s ({lock})')
-                time.sleep(min(.05, remaining))
+                # Readers pass through; a writer holds back new readers until
+                # the existing shared holders drain and it owns the main lock.
+                if mode == fcntl.LOCK_SH:
+                    fcntl.flock(gate, fcntl.LOCK_UN)
+                acquire(fh, mode)
+            finally:
+                fcntl.flock(gate, fcntl.LOCK_UN)
         _HELD.add(claim)
         try:
             yield
