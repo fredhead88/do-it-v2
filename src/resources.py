@@ -4,6 +4,8 @@ Creation sites call record(); callers inspect live() or reap() (dry by default).
 The legacy census remains responsible for resources predating these records.
 """
 from dataclasses import dataclass
+from datetime import datetime, timezone
+import contextvars
 import json
 import os
 from pathlib import Path
@@ -15,10 +17,49 @@ import fold
 import reap_tmp
 import tree_cleanup
 import scratch
+import disk_reaper
 
 KINDS = frozenset({"worktree", "scratch-db", "venv", "upload-copy", "tmpdir"})
 PROC_ROOT = Path("/proc")
 _CREATED = {}  # Identity and pid prove this process owns the returned row.
+_REAP_MEMO = contextvars.ContextVar('resources_reap_memo', default=None)
+_REAP_REPORT = contextvars.ContextVar('resources_reap_report', default=None)
+
+
+def _memo(events, key, compute):
+    memo = _REAP_MEMO.get()
+    if memo is None or memo['events'] is not events:
+        return compute()
+    if key not in memo:
+        memo[key] = compute()
+    return memo[key]
+
+
+def _project_map(events):
+    result = {}
+    for event in events:
+        if event.get('project'):
+            result.setdefault(event.get('subject'), event['project'])
+    return result
+
+
+def _project_fields(subject, projects):
+    if fold.PROJECT:
+        return {}
+    if subject in projects:
+        return {'project': projects[subject]}
+    report = _REAP_REPORT.get()
+    if report is not None:
+        report['project_fallback'] = report.get('project_fallback', 0) + 1
+    return {}
+
+
+def _live_builders(events):
+    ended = _memo(events, 'ended', lambda: fold.terminal_spawns(events))
+    return {e.get('subject') for e in events if e.get('spawn') and e['spawn'] not in ended
+            and (e.get('type') == 'build-started' or
+                 (e.get('type') == 'spawn-started' and
+                  (e.get('role') == 'builder' or '-builder-' in e['spawn'])))}
 _TAIL_WINDOW = 1024 * 1024
 _READ_CHUNK = 1024 * 1024
 # UTF-8 spellings of str.splitlines separators, including universal newlines.
@@ -43,6 +84,7 @@ class Resource:
     subject: str
     source: str = "ledger"
     undetermined: str | None = None
+    created_ts: str | None = None
 
 
 @dataclass(frozen=True)
@@ -190,7 +232,7 @@ def _resource(row, fallback):
     return Resource(kind=row.get("kind", ""),
                     ref=row.get("ref") if isinstance(row.get("ref"), str) and row["ref"] else fallback,
                     lane=row.get("lane", ""), subject=row.get("subject", ""),
-                    undetermined=_field_reason(row))
+                    undetermined=_field_reason(row), created_ts=row.get('ts'))
 
 
 def _upload_path():
@@ -256,7 +298,10 @@ def live(events: list[dict]) -> list[Resource]:
         if kind == "resource-reaped" and isinstance(ref, str):
             if fold.admits(event, event.get("actor")) is not None:
                 continue
-            active.pop(ref, None)
+            resource = active.get(ref)
+            if 'created_ts' not in event or (resource is not None and
+                    resource.created_ts == event['created_ts'] and resource.subject == event.get('subject')):
+                active.pop(ref, None)
         elif kind == "resource-created":
             resource = _resource(event, f"ledger:{n}")
             active[resource.ref] = resource
@@ -284,9 +329,9 @@ def not_reapable_counts(events):
 
 
 def _owner_reason(resource, events):
-    if resource.subject in fold.terminal_spawns(events):
+    if resource.subject in _memo(events, 'ended', lambda: fold.terminal_spawns(events)):
         return None
-    specs = fold.fold(events)[0]
+    specs = _memo(events, 'folded', lambda: fold.fold(events))[0]
     owner = specs.get(resource.subject)
     if not owner or owner["state"] == "unknown":
         return "undetermined: owner"
@@ -333,13 +378,9 @@ def _worktree(resource, events):
     matching = [b for b, wt in wts.items() if Path(wt) == Path(resource.ref)]
     if len(matching) != 1 or matching[0] == main:
         raise tree_cleanup.Undetermined("recorded path is not a secondary branch worktree")
-    ended = fold.terminal_spawns(events)
-    if any(e.get("subject") == resource.subject and e.get("spawn") and e["spawn"] not in ended
-           and (e.get("type") == "build-started" or
-                (e.get("type") == "spawn-started" and
-                 (e.get("role") == "builder" or "-builder-" in e["spawn"]))) for e in events):
+    if resource.subject in _memo(events, 'builders', lambda: _live_builders(events)):
         return repo, matching[0], False, "builder spawn live"
-    spec_events = fold.fold(events)[3].get(resource.subject, [])
+    spec_events = _memo(events, 'folded', lambda: fold.fold(events))[3].get(resource.subject, [])
     if fold.standing_rejects(spec_events):
         return repo, matching[0], False, "standing rejection"
     branch, wt, dead, why = tree_cleanup.judge(repo, resource.subject, spec_events, main, wts, None)
@@ -359,7 +400,8 @@ def _default_safety(resource, events, *, proc_root=None):
                         why in ("builder spawn live", "standing rejection")):
                 return why
             return "undetermined: " + (why or "worktree proof")
-    if reap_tmp._refs_c(proc_root, resource.ref) or reap_tmp._refs_d(proc_root, resource.ref):
+    if (any(reap_tmp._under(ref, resource.ref) for ref in disk_reaper.process_refs(proc_root, stats={}))
+            or reap_tmp._refs_d(proc_root, resource.ref)):
         return "live process, socket or pidfile references path"
     return None
 
@@ -380,29 +422,93 @@ def _remove(resource, events):
 
 
 def reap(events: list[dict], *, dry_run: bool = True, safety=None,
-         exclude: frozenset[str] = frozenset()) -> list[ReapResult]:
+         exclude: frozenset[str] = frozenset(), now=None, live_rows=None) -> list[ReapResult]:
+    token = _REAP_MEMO.set({'events': events})
+    try:
+        return _reap(events, dry_run=dry_run, safety=safety, exclude=exclude,
+                     now=now, live_rows=live_rows)
+    finally:
+        _REAP_MEMO.reset(token)
+
+
+def _gone(resource, now, grace):
+    if resource.undetermined is not None or resource.source != 'ledger':
+        return False
+    if not os.path.isabs(resource.ref) or os.path.normpath(resource.ref) != resource.ref:
+        return False
+    try:
+        created = datetime.fromisoformat(resource.created_ts)
+        if (now - created).total_seconds() < grace * 3600:
+            return False
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return _absent(resource.ref)
+
+
+def _absent(ref):
+    try:
+        os.lstat(ref)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        pass
+    return False
+
+
+def _reap(events, *, dry_run, safety, exclude, now, live_rows):
     safety = _default_safety if safety is None else safety
+    now = datetime.now(timezone.utc) if now is None else now
+    settings = disk_reaper._settings()
+    removed, retired = 0, 0
     results = []
     filename = os.environ.get("DOIT_LEDGER_FILE", "L-operator-local.jsonl")
     denied = not dry_run and fold.admits({"type": "resource-reaped"}, fold.actor_of(filename)) is not None
-    for resource in live(events):
+    for resource in live(events) if live_rows is None else live_rows:
         if resource.ref in exclude or not reapable(resource):
             continue
         try:
             reason = ("actor-not-admitted" if denied else None)
+            if not reason and _gone(resource, now, settings['reap_gone_grace_h']):
+                if settings['hold'] and not dry_run:
+                    results.append(ReapResult(resource.ref, resource.kind, 'held', 'held: reap hold set'))
+                    continue
+                if retired >= settings['reap_retire_max_per_pass']:
+                    results.append(ReapResult(resource.ref, resource.kind, 'deferred',
+                        f"deferred: retire cap {settings['reap_retire_max_per_pass']} reached"))
+                    continue
+                if _absent(resource.ref):
+                    reason = 'gone: path absent; record retired, nothing removed'
+                    if not dry_run:
+                        _append('resource-reaped', resource.subject, ref=resource.ref, reason=reason,
+                            created_ts=resource.created_ts, ts=now.isoformat(timespec='seconds'),
+                            **_project_fields(resource.subject, _memo(events, 'projects', lambda: _project_map(events))))
+                    results.append(ReapResult(resource.ref, resource.kind,
+                                              'would-retire' if dry_run else 'retired', reason))
+                    retired += 1
+                    continue
             reason = reason or ("undetermined: " + resource.undetermined if resource.undetermined else
-                      _path_reason(resource) or _owner_reason(resource, events) or
-                      safety(resource, events))
+                      _path_reason(resource) or _owner_reason(resource, events))
+            action = 'refused'
+            if reason is None:
+                if settings['hold'] and not dry_run:
+                    action, reason = 'held', 'held: reap hold set'
+                elif removed >= settings['reap_max_entries_per_pass']:
+                    action, reason = 'deferred', f"deferred: pass cap {settings['reap_max_entries_per_pass']} reached"
+                else:
+                    reason = safety(resource, events)
             if reason is not None and (not isinstance(reason, str) or not reason):
                 raise ValueError("safety must return None or a non-empty reason")
             if reason:
-                action = "refused"
+                pass
             elif dry_run:
                 action, reason = "would-reap", "owner terminal; safety passed"
+                removed += 1
             else:
                 _remove(resource, events)
+                removed += 1
                 reason = "owner terminal; safety passed; removal confirmed"
-                _append("resource-reaped", resource.subject, ref=resource.ref, reason=reason)
+                _append("resource-reaped", resource.subject, ref=resource.ref, reason=reason,
+                        **_project_fields(resource.subject, _memo(events, 'projects', lambda: _project_map(events))))
                 action = "reaped"
         except Exception as exc:
             action, reason = "refused", f"undetermined: {exc}"

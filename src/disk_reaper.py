@@ -2,17 +2,154 @@
 import contextlib
 import contextvars
 import json
+import math
 import os
 import pathlib
+import re
 import stat
 import tempfile
+import tomllib
 from datetime import datetime, timezone
 
 KEEP_VAR_TMP = ('dt',)
 VAR_TMP_MAX_AGE_S = 3 * 86400
 SESSION_LOG_MAX_AGE_S = 14 * 86400
 ROOT_DISK_HIGH_PCT = 90
+LOOK_TOML_PATH = pathlib.Path(__file__).resolve().parent.parent / 'look.toml'
 _WORKTREE_PASS = contextvars.ContextVar('disk_reaper_worktrees', default=None)
+_SETTINGS_REPORT = contextvars.ContextVar('disk_reaper_settings_report', default=None)
+UNREADABLE_EXEMPT_NAMES = ('systemd', '(sd-pam)', 'sshd-session', 'ssh-agent')
+
+
+@contextlib.contextmanager
+def _settings_pass():
+    token = _SETTINGS_REPORT.set(dict(config_invalid=set(), hold=False))
+    try:
+        yield
+    finally:
+        _SETTINGS_REPORT.reset(token)
+
+
+def _unreadable_pid(proc_root, pid):
+    """Classify only permission denials; a live pid's missing files retain."""
+    import reap_tmp
+    path = pathlib.Path(proc_root) / str(pid)
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        return 'exited', None
+    if not reap_tmp.panes.alive(pid):
+        return 'exited', None
+    try:
+        status = dict(line.split(':', 1) for line in (path / 'status').read_text().splitlines() if ':' in line)
+        if [int(v) for v in status.get('Uid', '').split()] != [os.getuid()] * 4:
+            return None, None
+        token = (path / 'cmdline').read_bytes().split(b'\0', 1)[0].decode()
+        name = pathlib.Path(re.split(r'[:\s]', token, maxsplit=1)[0]).name
+        if not token or name not in UNREADABLE_EXEMPT_NAMES:
+            return None, None
+        try:
+            root_owned = os.lstat(path / 'cwd').st_uid == 0
+        except OSError:
+            root_owned = False
+        if root_owned:
+            return 'root-owned cwd', name
+        own = dict(line.split(':', 1) for line in
+                   (pathlib.Path(proc_root) / 'self/status').read_text().splitlines() if ':' in line)
+        if int(status['CapPrm'], 16) & ~int(own['CapEff'], 16):
+            return 'permitted capability outside effective set', name
+    except (OSError, ValueError, KeyError, UnicodeError):
+        pass
+    return None, None
+
+
+def _budget(settings=None):
+    settings = _settings() if settings is None else settings
+    return dict(settings=settings, count=0, freed_bytes=0)
+
+
+def _budget_reason(budget, dry_run, *, directory=True):
+    settings = budget['settings']
+    if settings['hold'] and not dry_run:
+        return 'held: reap hold set'
+    if directory and (budget['count'] >= settings['reap_max_entries_per_pass'] or
+                      budget['freed_bytes'] >= settings['reap_max_gb_per_pass'] * 2**30):
+        return f"deferred: pass cap {settings['reap_max_entries_per_pass']} reached"
+    return None
+
+
+def _surface_stats(settings):
+    return dict(hold=settings['hold'], config_invalid=settings['config_invalid'],
+                deferred=0, held=0, unreadable_exempt=0, other_uid_skipped=0, exempt=[])
+
+
+def _count_reason(stats, reason):
+    for action in ('held', 'deferred'):
+        if reason and reason.startswith(action + ':'):
+            stats[action] = stats.get(action, 0) + 1
+
+
+def _settings():
+    """Read one surface's settings and the machine-local stop controls."""
+    import fold
+
+    defaults = {
+        'reap_max_entries_per_pass': 25,
+        'reap_max_gb_per_pass': 10,
+        'reap_retire_max_per_pass': 200,
+        'reap_gone_grace_h': 6,
+    }
+    invalid = set()
+    thresholds = {}
+    broken = False
+    try:
+        with pathlib.Path(LOOK_TOML_PATH).open('rb') as stream:
+            document = tomllib.load(stream)
+        thresholds = document.get('thresholds', {})
+        if not isinstance(thresholds, dict):
+            raise ValueError('thresholds is not a table')
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError):
+        thresholds = {}
+        invalid.add('look.toml')
+        broken = True
+
+    settings = {}
+    for key, default in defaults.items():
+        value = thresholds.get(key, default)
+        count = key in ('reap_max_entries_per_pass', 'reap_retire_max_per_pass')
+        # Avoid coercion: booleans and integral floats are not count values.
+        valid = type(value) in (int, float) and value >= 0
+        if valid and isinstance(value, float):
+            valid = math.isfinite(value) and not count
+        if not valid:
+            invalid.add(key)
+            value = default
+        settings[key] = value
+
+    toml_hold = thresholds.get('reap_hold', False)
+    if type(toml_hold) is not bool:
+        invalid.add('reap_hold')
+        toml_hold = True
+    env_hold = os.environ.get('DOIT_REAP_HOLD', '')
+    if env_hold not in ('', '0', '1'):
+        invalid.add('DOIT_REAP_HOLD')
+    hold = (broken or toml_hold) if not env_hold else env_hold != '0'
+    try:
+        os.lstat(fold.ROOT / 'state' / 'reap-hold')
+        hold = True
+    except FileNotFoundError:
+        pass
+    except OSError:
+        invalid.add('reap-hold')
+    settings['hold'] = hold
+    settings['config_invalid'] = invalid
+    report = _SETTINGS_REPORT.get()
+    if report is not None:
+        report['config_invalid'].update(invalid)
+        report['hold'] = report['hold'] or hold
+    return settings
 
 
 @contextlib.contextmanager
@@ -33,15 +170,30 @@ def process_refs(proc_root=None, *, stats=None):
     proc_root = proc_root if proc_root is not None else context[0] if context else '/proc'
     stats = stats if stats is not None else context[2] if context and len(context) > 2 else {}
     stats['other_uid_skipped'] = 0
+    stats['unreadable_exempt'] = 0
+    stats['exempt'] = []
     refs = []
     for name in reap_tmp._pid_dir_names(proc_root):
         # Other users' proc links are unreadable by design. Establish ownership
         # first; uncertainty about our own processes still retains all data.
-        if os.lstat(pathlib.Path(proc_root) / name).st_uid != os.getuid():
+        try:
+            uid = os.lstat(pathlib.Path(proc_root) / name).st_uid
+        except FileNotFoundError:
+            continue
+        if uid != os.getuid():
             stats['other_uid_skipped'] += 1
             continue
         if reap_tmp.panes.alive(int(name)):
-            refs.extend(r.removesuffix(' (deleted)') for r in reap_tmp._pid_refs(proc_root, int(name)))
+            try:
+                refs.extend(r.removesuffix(' (deleted)') for r in reap_tmp._pid_refs(proc_root, int(name)))
+            except PermissionError:
+                why, process_name = _unreadable_pid(proc_root, int(name))
+                if why is None:
+                    raise
+                if why != 'exited':
+                    stats['unreadable_exempt'] += 1
+                    if len(stats['exempt']) < 5:
+                        stats['exempt'].append(dict(pid=int(name), name=process_name, why=why))
     return refs
 
 
@@ -134,7 +286,8 @@ def reap_var_tmp(root='/var/tmp', uid=None, now=None, proc_root='/proc', recorde
     root = pathlib.Path(root)
     uid = os.getuid() if uid is None else uid
     now = now or datetime.now(timezone.utc)
-    result = dict(removed=[], kept=[], freed_bytes=0, other_uid_skipped=0)
+    budget = _budget()
+    result = dict(removed=[], kept=[], freed_bytes=0, **_surface_stats(budget['settings']))
     fd = _open_dir(root)
     try:
         names = sorted(os.listdir(fd))
@@ -174,11 +327,18 @@ def reap_var_tmp(root='/var/tmp', uid=None, now=None, proc_root='/proc', recorde
                                              if len(rel.parts) <= 3) <= VAR_TMP_MAX_AGE_S:
                         raise OSError('entry became too young during scan')
                     size = sum(s.st_size for s in records.values() if stat.S_ISREG(s.st_mode))
+                    reason = _budget_reason(budget, dry_run)
+                    if reason:
+                        _count_reason(result, reason)
+                        result['kept'].append(dict(path=str(path), reason=reason))
+                        continue
                     _remove(path, records, dry_run=True)
                     if not dry_run:
                         _remove(path, records)
                     result['removed'].append(str(path))
                     result['freed_bytes'] += size
+                    budget['count'] += 1
+                    budget['freed_bytes'] += size
         except OSError as exc:
             reason = 'undetermined: ' + str(exc)
         if reason:
@@ -206,7 +366,8 @@ def reap_session_logs(roots=None, now=None, proc_root='/proc', dry_run=False, st
     today = now.astimezone(timezone.utc).date().isoformat()
     roots = [pathlib.Path.home() / '.claude/projects', pathlib.Path.home() / '.codex/sessions'] if roots is None else roots
     state_path = pathlib.Path(state_path) if state_path is not None else reap_tmp.ROOT / 'state/disk-reaper-session-logs.json'
-    result = dict(removed=[], freed_bytes=0, ran=False, kept=[], errors={}, other_uid_skipped=0)
+    budget = _budget()
+    result = dict(removed=[], freed_bytes=0, ran=False, kept=[], errors={}, **_surface_stats(budget['settings']))
     try:
         if json.loads(state_path.read_text()).get('date') == today:
             return result
@@ -249,15 +410,21 @@ def reap_session_logs(roots=None, now=None, proc_root='/proc', dry_run=False, st
                 reason = 'live process holds log open'
             else:
                 try:
-                    _unlink_checked(path, st, dry_run=dry_run)
-                    result['removed'].append(str(path))
-                    result['freed_bytes'] += st.st_size
+                    reason = _budget_reason(budget, dry_run)
+                    if reason:
+                        _count_reason(result, reason)
+                    else:
+                        _unlink_checked(path, st, dry_run=dry_run)
+                        result['removed'].append(str(path))
+                        result['freed_bytes'] += st.st_size
+                        budget['count'] += 1
+                        budget['freed_bytes'] += st.st_size
                 except OSError as exc:
                     reason = 'undetermined: ' + str(exc)
                     result['errors'][str(path)] = reason
             if reason:
                 result['kept'].append(dict(path=str(path), reason=reason))
-        if not dry_run:
+        if not dry_run and not budget['settings']['hold']:
             for rel in sorted(records, key=lambda p: len(p.parts), reverse=True):
                 st = records[rel]
                 if rel == pathlib.Path('.') or not stat.S_ISDIR(st.st_mode):
@@ -273,7 +440,7 @@ def reap_session_logs(roots=None, now=None, proc_root='/proc', dry_run=False, st
                         _unlink_checked(path, st, directory=True)
                 except OSError as exc:
                     result['errors'][str(path)] = 'undetermined: ' + str(exc)
-    if not dry_run and not result['errors']:
+    if not dry_run and not result['errors'] and not result['held'] and not result['deferred'] and not budget['settings']['hold']:
         state_path.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(mode='w', dir=state_path.parent, delete=False) as f:
             marker = pathlib.Path(f.name)

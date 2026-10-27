@@ -6,7 +6,7 @@ Every check builds a real repository with real worktrees and a real merge. The
 squash case is the one that matters — it is the case where git's own answer is
 confidently wrong (§8.11), and a mocked git would agree with the bug.
 """
-import contextlib, hashlib, io, json, os, pathlib, subprocess, sys, tempfile
+import atexit, contextlib, hashlib, io, json, os, pathlib, subprocess, sys, tempfile
 from types import SimpleNamespace
 from datetime import datetime, timezone
 from unittest.mock import patch
@@ -16,7 +16,11 @@ os.environ.pop("DOIT_LEDGER_FILE", None)
 os.environ.pop("DOIT_REAP_LEDGER_FILE", None)
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+_IMPORT_ROOT1654 = tempfile.TemporaryDirectory(prefix='tree-import-')
+atexit.register(_IMPORT_ROOT1654.cleanup)
+os.environ.update(HOME=_IMPORT_ROOT1654.name, DOIT_ROOT=_IMPORT_ROOT1654.name)
 import fold, tree_cleanup, disk_reaper  # noqa: E402
+disk_reaper.LOOK_TOML_PATH = pathlib.Path(_IMPORT_ROOT1654.name) / 'look.toml'
 _PROC_FIXTURE = tempfile.TemporaryDirectory(prefix="tree-proc-")
 # All legacy calls, including child interpreters, use this empty fake /proc.
 disk_reaper._WORKTREE_PASS.set((_PROC_FIXTURE.name, []))
@@ -1507,3 +1511,117 @@ for case1541 in ('shipped', 'run-shipped', 'other-uid', 'killed', 'void', 'build
 body1541 = json.dumps(outcomes1541, sort_keys=True)
 print(json.dumps(dict(url='cli://tree-cleanup/AC1-AC2-AC7', status=0, body_sha256=hashlib.sha256(body1541.encode()).hexdigest(), body_excerpt=body1541)))
 print('L1541 AC1 AC2 AC7 pass; destructive fixture count=1 per case')
+
+# L1654: cap and hold both worktree deletion proofs, including branch-only rows.
+def finish1654(root, *specs):
+    for spec in specs:
+        write(root, 'L-grader-0001', dict(type='verdict', subject=spec, confirmed=True))
+        write(root, 'L-reviewer-0001', dict(type='review', subject=spec, depth='gates-only'))
+
+outcomes1654 = {}
+for mode1654 in ('hold', 'hold-file', 'cap', 'bytes', 'dry', 'bare-cap', 'killed-cap', 'local-dry'):
+    with (tempfile.TemporaryDirectory(prefix='tree-1654-') as d,
+          patch.multiple(fold, ROOT=pathlib.Path(d), EVENTS=pathlib.Path(d) / 'events'),
+          patch.dict(os.environ, DOIT_ROOT=d, DOIT_LEDGER_FILE='L-executor-1654.jsonl'),
+          patch.object(disk_reaper, 'LOOK_TOML_PATH', pathlib.Path(d) / 'look.toml')):
+        r, b, wt = conventional_fixture(d)
+        b2, wt2, sha2 = branchwork(r, d, 'L-spec-1655', 'second')
+        shipped_trail(d, None, 'L-spec-1655', b2, sha2, sh(r, 'git', 'rev-parse', 'HEAD'), project='path-project')
+        finish1654(d, 'L-spec-1040', 'L-spec-1655')
+        bare_origin(r)
+        evs = read_via_fold(d)
+        if mode1654 == 'killed-cap':
+            evs = [e for e in evs if e['type'] != 'shipped']
+            evs += [dict(type='spec-killed', subject=sid, actor='thinker') for sid in ('L-spec-1040', 'L-spec-1655')]
+        if mode1654 == 'local-dry':
+            # No origin proof: the local-main loop must share the dry-run cap.
+            sh(r, 'git', 'update-ref', '-d', 'refs/remotes/origin/main')
+        settings1654 = '[thresholds]\nreap_max_entries_per_pass=1\n'
+        if mode1654 == 'bytes':
+            settings1654 = '[thresholds]\nreap_max_gb_per_pass=0.000000001\n'
+        disk_reaper.LOOK_TOML_PATH.write_text(settings1654)
+        if mode1654 == 'hold-file':
+            (pathlib.Path(d) / 'state').mkdir(exist_ok=True)
+            (pathlib.Path(d) / 'state/reap-hold').touch()
+        before = read_via_fold(d)
+        origin_branches = sh(r, 'git', 'ls-remote', '--heads', 'origin')
+        check(sum(pathlib.Path(p).exists() for p in (wt, wt2)) == 2, 'L1654 destructive worktree fixture pre-count=2')
+        stats = {}
+        with (disk_reaper.worktree_pass(_PROC_FIXTURE.name, stats=stats),
+              patch.dict(os.environ, DOIT_REAP_HOLD='1' if mode1654 == 'hold' else ''),
+              patch.object(disk_reaper, 'process_refs', wraps=disk_reaper.process_refs) as census):
+            if mode1654.startswith('hold'):
+                rows, kept = tree_cleanup.reap_worktrees(evs)
+                check(not rows and len(kept) == 2 and all(k['why'].startswith('held:') for k in kept), 'L1654 hold reports retained rows only')
+                check(census.call_count == 0, 'L1654 held worktrees take no census')
+                tree_cleanup.reap_merged_specs(evs)
+            elif mode1654 == 'bare-cap':
+                rows, kept = tree_cleanup.reap_worktrees(evs)
+                check(len(rows) == 1 and len(kept) == 1 and kept[0]['why'] == 'deferred: pass cap 1 reached', 'L1654 standalone worktree budget')
+            else:
+                tree_cleanup.reap_merged_specs(evs, dry_run=mode1654 in ('dry', 'local-dry'))
+        survivors = sum(pathlib.Path(p).exists() for p in (wt, wt2))
+        if mode1654.startswith('hold'):
+            check(survivors == 2 and read_via_fold(d) == before, 'L1654 held passes remove and append nothing')
+            check(sh(r, 'git', 'ls-remote', '--heads', 'origin') == origin_branches, 'L1654 held passes never push')
+        elif mode1654 in ('dry', 'local-dry'):
+            check(survivors == 2 and read_via_fold(d) == before and stats['deferred'] == 1, 'L1654 dry budgets retain second worktree without writes')
+        else:
+            check(survivors == 1 and stats['deferred'] == 1, 'L1654 shared cap removes exactly one directory')
+        if mode1654 == 'killed-cap':
+            check(b2 not in sh(r, 'git', 'ls-remote', '--heads', 'origin'), 'L1654 deferred killed branch never pushed')
+        outcomes1654[mode1654] = dict(survivors=survivors, deferred=stats.get('deferred', 0))
+
+for file1654 in (False, True):
+    with (tempfile.TemporaryDirectory(prefix='tree-branch-hold-') as d,
+          patch.multiple(fold, ROOT=pathlib.Path(d), EVENTS=pathlib.Path(d) / 'events'),
+          patch.dict(os.environ, DOIT_ROOT=d, DOIT_LEDGER_FILE='L-executor-1654.jsonl'),
+          patch.object(disk_reaper, 'LOOK_TOML_PATH', pathlib.Path(d) / 'look.toml')):
+        r, b, wt = conventional_fixture(d)
+        sh(r, 'git', 'worktree', 'remove', wt)
+        write(d, 'L-executor-0001', dict(type='spec-written', subject='L-spec-1040', project='path-project'))
+        finish1654(d, 'L-spec-1040')
+        if file1654:
+            (pathlib.Path(d) / 'state').mkdir()
+            (pathlib.Path(d) / 'state/reap-hold').touch()
+        with patch.dict(os.environ, DOIT_REAP_HOLD='' if file1654 else '1'):
+            tree_cleanup.reap_merged_specs(read_via_fold(d))
+        check(b in branches(r) and not read_via_fold(d, 'tree-reaped'), 'L1654 hold protects branch-only deletion')
+        state = json.loads((pathlib.Path(d) / 'state/reap-retained.json').read_text())
+        check('held: reap hold set' in json.dumps(state), 'L1654 held branch reason visible')
+
+for labelled1654 in (False, True):
+    with (tempfile.TemporaryDirectory(prefix='tree-project-1654-') as d,
+          patch.multiple(fold, ROOT=pathlib.Path(d), EVENTS=pathlib.Path(d) / 'events'),
+          patch.dict(os.environ, DOIT_ROOT=d, DOIT_LEDGER_FILE='L-executor-1654.jsonl'),
+          patch.object(disk_reaper, 'LOOK_TOML_PATH', pathlib.Path(d) / 'look.toml'),
+          patch.object(fold, 'PROJECT', None)):
+        r, b, wt = conventional_fixture(d)
+        write(d, 'L-executor-0001', dict(type='spec-written', subject='L-spec-1040', project='path-project'))
+        if labelled1654:
+            write(d, 'L-executor-0001', dict(type='spec-written', subject='path-project', project='original-label'))
+        evs = read_via_fold(d)
+        real_project = fold.subject_project
+        expected = {sid: real_project(sid) or pathlib.Path.cwd().name for sid in ('L-spec-1040', 'path-project')}
+        with patch.object(fold, 'subject_project', wraps=real_project) as labels:
+            tree_cleanup.reap_merged_specs(evs)
+        check(labels.call_count == int(not labelled1654), 'L1654 explicit project avoids per-append ledger reads')
+        for row in read_via_fold(d):
+            if row['type'] in ('resource-reaped', 'tree-reaped'):
+                check(row['project'] == expected[row['subject']], 'L1654 append labels equal historical resolution')
+
+# One unfinished spec and one shipped worktree: only the shipped one gets a census.
+with (tempfile.TemporaryDirectory(prefix='tree-census-1654-') as d,
+      patch.multiple(fold, ROOT=pathlib.Path(d), EVENTS=pathlib.Path(d) / 'events'),
+      patch.object(disk_reaper, 'LOOK_TOML_PATH', pathlib.Path(d) / 'look.toml')):
+    r, b, wt = conventional_fixture(d)
+    b2, wt2, sha2 = branchwork(r, d, 'L-spec-1655', 'unfinished', merge='none')
+    shipped_trail(d, None, 'L-spec-1655', b2, sha2, sha2, project='path-project')
+    evs = [e for e in read_via_fold(d) if not (e['subject'] == 'L-spec-1655' and e['type'] == 'shipped')]
+    with patch.object(disk_reaper, 'process_refs', wraps=disk_reaper.process_refs) as census:
+        rows, kept = tree_cleanup.reap_worktrees(evs, dry_run=True)
+    check(census.call_count == 1 and len(rows) == 1 and 'spec not finished' in kept[0]['why'], 'L1654 census runs only after terminal proof')
+body1654 = json.dumps(outcomes1654, sort_keys=True)
+print(json.dumps(dict(url='cli://tree-cleanup/L1654-AC5-AC9-AC11', status=0,
+    body_sha256=hashlib.sha256(body1654.encode()).hexdigest(), body_excerpt=body1654)))
+print('L1654 AC5 AC9 AC11 pass; fixture worktree pre-count=2 per budget case')

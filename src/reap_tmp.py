@@ -272,10 +272,11 @@ def _recorded_overlap(path, refs):
     return any(path == ref or path in ref.parents or ref in path.parents for ref in refs)
 
 
-def _reap_recorded(events, *, dry_run=False, scratch_root=None, proc_root="/proc"):
+def _reap_recorded(events, *, dry_run=False, scratch_root=None, proc_root="/proc", now=None):
     """Resolve untrusted refs before delegating to the registry's existing proofs."""
     import resources
-    if not resources.live(events):
+    live_rows = resources.live(events)
+    if not live_rows:
         return []
     roots = [pathlib.Path("/tmp"), pathlib.Path("/var/tmp"), fold.ROOT / "worktrees"]
     if scratch_root is not None:
@@ -284,7 +285,7 @@ def _reap_recorded(events, *, dry_run=False, scratch_root=None, proc_root="/proc
         roots.append(scratch.root())
     roots = [p.resolve() for p in roots]
     refused, unsafe = [], set()
-    for resource in resources.live(events):
+    for resource in live_rows:
         if not resources.reapable(resource):
             continue
         ref = resource.ref
@@ -298,7 +299,7 @@ def _reap_recorded(events, *, dry_run=False, scratch_root=None, proc_root="/proc
         if why:
             unsafe.add(ref)
             refused.append(resources.ReapResult(ref, resource.kind, "refused", why))
-    return refused + resources.reap(events, dry_run=dry_run, exclude=frozenset(unsafe),
+    return refused + resources.reap(events, dry_run=dry_run, exclude=frozenset(unsafe), now=now, live_rows=live_rows,
         safety=lambda r, e: resources._default_safety(r, e, proc_root=proc_root))
 
 
@@ -575,6 +576,7 @@ _SCRATCH_PROTECTED = frozenset({
 
 def _scan_scratch(scratch_root, uid, now, proc_root, dry_run, recorded_refs=()):
     """Fixed scratch retention, with no recursive deletion of live containers."""
+    settings = disk_reaper._settings()
     root = pathlib.Path(scratch_root)
     if root.is_symlink():
         raise Undetermined("scratch root is a symlink")
@@ -612,6 +614,8 @@ def _scan_scratch(scratch_root, uid, now, proc_root, dry_run, recorded_refs=()):
                 if (_scratch_refs(proc_root, path, snapshot=snapshot)
                         or _refs_d(proc_root, path, sockets=sockets)):
                     reason = "a live process or socket references this entry"
+                elif settings['hold'] and not dry_run:
+                    reason = 'held: reap hold set'
                 elif not dry_run:
                     _delete(path)
         except OSError:
@@ -934,6 +938,7 @@ def _psql_pg_fn():
     return fn
 
 
+@disk_reaper._settings_pass()
 def run(root="/tmp", uid=None, min_age_min=120, dry_run=False, now=None, proc_root="/proc",
         scratch_root=None, events=None, kill_fn=None, state_path=None, pg_fn=None,
         stop_fn=None, wait_s=10, var_tmp_root=None, session_roots=None,
@@ -960,6 +965,7 @@ def run(root="/tmp", uid=None, min_age_min=120, dry_run=False, now=None, proc_ro
     effective_min_age = 30 if mode == "pressure" else min_age_min
 
     import resources
+    settings = disk_reaper._settings()
     recorded_refs = {pathlib.Path(os.path.realpath(r.ref)) for r in resources.live(events or [])
                      if pathlib.Path(r.ref).is_absolute()}
     removed, kept = _scan_dir(root, uid, effective_min_age, now, proc_root, dry_run, recorded_refs)
@@ -973,15 +979,23 @@ def run(root="/tmp", uid=None, min_age_min=120, dry_run=False, now=None, proc_ro
         except Exception as e:
             errors["scratch"] = str(e)
 
+    retired, recorded_rows, recorded_report = [], [], {}
     if events is not None:
+        token = resources._REAP_REPORT.set(recorded_report)
         try:
-            for row in _reap_recorded(events, dry_run=dry_run, scratch_root=scratch_root, proc_root=proc_root):
+            recorded_rows = _reap_recorded(events, dry_run=dry_run, scratch_root=scratch_root, proc_root=proc_root, now=now)
+            for row in recorded_rows:
                 if row.action in ("reaped", "would-reap"):
                     removed.append(row.ref)
+                elif row.action in ('retired', 'would-retire'):
+                    retired.append(row.ref)
                 else:
                     kept.append({"path": row.ref, "reason": row.reason})
         except Exception as exc:
             errors["recorded"] = "undetermined: " + str(exc)
+            recorded_report.clear()
+        finally:
+            resources._REAP_REPORT.reset(token)
 
     stopped_servers = []
     if kill_fn is not None:
@@ -1058,17 +1072,68 @@ def run(root="/tmp", uid=None, min_age_min=120, dry_run=False, now=None, proc_ro
                         {"used_bytes": quota["used_bytes"], "limit_bytes": quota["limit_bytes"],
                          "limit_source": quota["limit_source"]}, events)
 
-    result = {"removed": removed, "kept": kept, "before_pct": before_pct, "after_pct": _disk_pct(root),
+    invalid = set(settings['config_invalid'])
+    for surface in (var_tmp, session_logs, worktree_stats):
+        invalid.update(surface.get('config_invalid', ()))
+    hold = settings['hold'] or any(s.get('hold', False) for s in (var_tmp, session_logs, worktree_stats))
+    hold = hold or any(row.action == 'held' for row in recorded_rows)
+    report = disk_reaper._SETTINGS_REPORT.get()
+    invalid.update(report['config_invalid'])
+    hold = hold or report['hold']
+    result = {"removed": removed, "retired": retired, "kept": kept, "before_pct": before_pct, "after_pct": _disk_pct(root),
             "quota": quota, "mode": mode, "reaped_worktrees": reaped_worktrees,
             "stopped_servers": stopped_servers, "removed_scratch": removed_scratch,
             "stopped_clusters": stopped_clusters, "dropped_databases": dropped_databases, "errors": errors,
             "var_tmp": var_tmp, "session_logs": session_logs,
+            "surface_summary": dict(hold=hold, config_invalid=len(invalid), worktrees=worktree_stats),
             "worktree_rows": worktree_rows,
             "other_uid_skipped": worktree_stats['other_uid_skipped'],
             "freed_bytes_worktrees": sum(row["freed_bytes"] for row in worktree_rows)}
+    # Internal sets never escape into the CLI's JSON result.
+    for surface in (var_tmp, session_logs, worktree_stats):
+        surface.pop('config_invalid', None)
+    if events is not None:
+        result['recorded_summary'] = _recorded_summary(recorded_rows, recorded_report,
+                                                      int('recorded' in errors))
     if log_path is not None and not dry_run:
         _write_log(result, log_path, now)
     return result
+
+
+def _recorded_summary(rows, report, error):
+    from collections import Counter
+    counts, reasons, samples = Counter(), Counter(), {}
+    for row in rows:
+        counts[row.action] += 1
+        tokens = [token.strip("'\"`,:;()") for token in row.reason.split()]
+        reason = ' '.join('<path>' if token.startswith('/') else token for token in tokens)
+        key = str(row.kind)[:40] + ':' + re.sub(r'\d+', '#', reason)[:60]
+        reasons[key] += 1
+        samples.setdefault(key, row.ref[:120])
+    ranked = sorted(reasons, key=lambda key: (-reasons[key], key))[:8]
+    return dict(counts=dict(counts), project_fallback=report.get('project_fallback', 0),
+                error=error, top_reasons={key: reasons[key] for key in ranked},
+                samples=[samples[key] for key in ranked])
+
+
+def _recorded_line(ts, summary):
+    encode = lambda value: json.dumps(value, ensure_ascii=True, separators=(',', ':'))
+    reasons = dict(summary['top_reasons'])
+    samples = list(summary['samples'])
+    dropped = 0
+    def line():
+        counts = ' '.join(f"{key}={summary['counts'].get(key, 0)}"
+                          for key in ('reaped', 'retired', 'deferred', 'held', 'refused'))
+        return (f"{ts} recorded {counts} project_fallback={summary['project_fallback']} "
+                f"error={summary['error']} top_reasons={encode(reasons)} "
+                f"samples={encode(samples)} truncated={dropped}\n")
+    if len(line().encode()) > 2048:
+        samples = [sample[:40] for sample in samples]
+    while len(line().encode()) > 2048:
+        reasons.pop(next(reversed(reasons)))
+        samples.pop()
+        dropped += 1
+    return line()
 
 
 def _write_log(result, log_path, now=None):
@@ -1083,6 +1148,19 @@ def _write_log(result, log_path, now=None):
                           for name, key in (("var-tmp", "var_tmp"), ("session-logs", "session_logs")))
         for name, count, size in surfaces:
             f.write(f"{ts} {name} removed={count} freed_bytes={size} root_disk={pct}%\n")
+        if 'recorded_summary' in result:
+            f.write(_recorded_line(ts, result['recorded_summary']))
+        if 'var_tmp' in result:
+            summary = result.get('surface_summary', {})
+            data = [('var-tmp', result['var_tmp']), ('session-logs', result['session_logs']),
+                    ('worktrees', summary.get('worktrees', {}))]
+            encode = lambda value: json.dumps(value, ensure_ascii=True, separators=(',', ':'))
+            parts = [f"{name}={encode({key: surface.get(key, 0) for key in ('deferred', 'held', 'unreadable_exempt', 'other_uid_skipped')})}"
+                     for name, surface in data]
+            samples = [sample for _, surface in data for sample in surface.get('exempt', [])][:5]
+            f.write(f"{ts} surfaces hold={int(summary.get('hold', False))} "
+                    f"config_invalid={summary.get('config_invalid', 0)} " + ' '.join(parts) +
+                    f" exempt={encode(samples)}\n")
 
 
 def reap_now(dry_run=False, min_age_min=120):
@@ -1111,7 +1189,7 @@ def main(argv=None):
 
     if not a.dry_run:
         _write_log(result, ROOT / "logs" / "tmp-reaper.log")
-    print(json.dumps({"removed": len(result["removed"]), "kept_count": len(result["kept"]),
+    print(json.dumps({"removed": len(result["removed"]), "retired": len(result.get('retired', [])), "kept_count": len(result["kept"]),
                       "kept": result["kept"], "errors": result.get("errors", {}),
                       "var_tmp": result.get("var_tmp", {}), "session_logs": result.get("session_logs", {}),
                       "worktree_rows": result.get("worktree_rows", []),
