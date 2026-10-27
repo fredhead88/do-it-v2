@@ -171,8 +171,12 @@ main() {
             else note "tarball kept missing=$missing path=$archive"; fi
         done
     }
-    local cutover_allowed=1 rename_day late late_name
-    old_running && cutover_allowed=0
+    local cutover_allowed=0 rename_day late late_name
+    # Scan only for existing legacy state; anything arriving later waits a run.
+    if [[ -e "$DST/mirror" || -e "$DST/mirror.legacy" || -e "$DST/.cutover-renamed" ]]; then
+        cutover_allowed=1
+        old_running && cutover_allowed=0
+    fi
     if (( cutover_allowed )); then
         if [[ ! -f "$DST/.cutover-renamed" && -d "$DST/mirror" ]]; then
             if step cutover-rename mv -- "$DST/mirror" "$DST/mirror.legacy"; then
