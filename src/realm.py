@@ -253,6 +253,26 @@ def codex_payload(raw=None):
     return realm_codex.payload(raw, ledger_projection=sessions)
 
 
+def stall_result(kind, live_fold, events, folded, now):
+    """Cache each argument set independently beside the published generation."""
+    cached = LEDGER.stalls.get(kind)
+    age = (now - cached['at']).total_seconds() if cached else 60
+    if cached and cached['generation'] is LEDGER.generation and 0 <= age < 60:
+        return cached['value']
+    specs, by_subject = folded[0], folded[3]
+    if kind == 'classified':
+        active = {s: v for s, v in specs.items() if v['state'] not in realm_glance.FINISHED
+                  and not v['state'].startswith('shipped')}
+        value = live_fold.stall_rows(events, active, now=now, by_subject=by_subject,
+                                    dwell={v['state']: -1 for v in active.values()})
+    else:
+        import lane_rules
+        lane_rules.load()
+        value = live_fold.stall_lane_rows(events, specs, now, by_subject=by_subject)
+    LEDGER.stalls[kind] = dict(generation=LEDGER.generation, at=now, value=value)
+    return value
+
+
 _GLANCE = {"key": None, "value": None, "lock": threading.Lock()}
 
 
@@ -262,27 +282,19 @@ def glance_payload(now=None):
     with _GLANCE["lock"]:
         try:
             config = HERE.parent / "realm_priorities.json"
-            key = (live_src(), ROOT, os.environ.get("DOIT_PROJECT"), int(now.timestamp() // 30), config.stat().st_mtime_ns)
-            if key == _GLANCE["key"]:
-                return _GLANCE["value"]
-            priorities = realm_glance.load_priorities(config)
             with ledger_snapshot(now) as (live_fold, events, folded):
+                key = (live_src(), ROOT, os.environ.get("DOIT_PROJECT"), LEDGER.generation, config.stat().st_mtime_ns)
+                if key == _GLANCE["key"] and 0 <= (now - _GLANCE["at"]).total_seconds() < 60:
+                    return _GLANCE["value"]
+                priorities = realm_glance.load_priorities(config)
                 import lane_rules
                 specs, by_subject = folded[0], folded[3]
                 rules = lane_rules.due(events, specs, now)
-                active = {s: v for s, v in specs.items() if v['state'] not in realm_glance.FINISHED
-                          and not v['state'].startswith('shipped')}
-                classified = live_fold.stall_rows(events, active, now=now, by_subject=by_subject,
-                                                  dwell={v['state']: -1 for v in active.values()})
+                classified = stall_result('classified', live_fold, events, folded, now)
+                lane = stall_result('lane', live_fold, events, folded, now)
                 admitted = [e for e in events if live_fold.admits(e, e.get('actor', '')) is None]
                 states = [(s, v['state']) for s, v in specs.items()]
                 facts = realm_glance.hold_facts(admitted, states, rules, classified, now)
-                # Default approved by 1525: use the exact lane pass, including its
-                # dwell and shipped-prerequisite semantics, on this same snapshot.
-                try:
-                    lane = live_fold.stall_lane_rows(events, specs, now, by_subject=by_subject)
-                except Exception:
-                    lane = None
                 needs, answered = live_fold.open_escalations(events), live_fold.answered(events)
                 stuck = realm_stuck.shape(lane, needs, answered, facts['held'], facts['rulings'],
                     realm_stuck.vanished_spawns(events, states, now), facts['windows'],
@@ -302,7 +314,7 @@ def glance_payload(now=None):
                     row['project'] = projects.get(row['subject']) or 'unknown'
                 value = realm_glance.shape(admitted, states, rules, classified, priorities, now,
                                            needs=needs, answered=answered, stuck=stuck)
-            _GLANCE.update(key=key, value=value)
+            _GLANCE.update(key=key, value=value, at=now)
             return value
         except Exception as ex:
             return {"at": now.isoformat(timespec="seconds"), "error": "What matters is unavailable (" + type(ex).__name__ + ")"}
@@ -1378,7 +1390,9 @@ def queue_stats(rows, claims):
             "max_min": round(waits[-1], 1) if waits else None}
 
 
-def bootstrap(hours, states=None, goals=None, proving=None, now=None):
+def bootstrap(hours, states=None, goals=None, proving=None, now=None, part=None):
+    if part not in (None, 'first', 'rest'):
+        raise ValueError('part must be first or rest')
     rows, raw, _ = read_all()
     claims = seat_claims()
     for r in rows:
@@ -1394,24 +1408,47 @@ def bootstrap(hours, states=None, goals=None, proving=None, now=None):
         if r["t"] < since and r["ty"] in ("spawn-started", "build-started") and r.get("sp") in terminal and r.get("sp") not in started_in:
             window_rows.append(r)
     window_rows.sort(key=lambda r: r["t"])
-    titles = {e["subject"]: trunc(e.get("title"), 160) for e in raw if e.get("type") == "charter-filed"}
     charters, spec_charter = charter_index(raw)
-    counts = collections.Counter(e.get("type") for e in raw)
     if states is None:
         states = derive_states() or []
-    if goals is None:
-        goals = derive_goals() or []
-    if proving is None:
-        proving = derive_proving()
-    _, spec_ch_now = charter_index(raw)
-    metrics_now = metrics_at(rows, states, claims, now, sys_signals(), None, spec_ch_now)
-    return {"glance": glance_payload(now), **views_payload(now), "codex": codex_payload(raw), "live": True, "now": now.isoformat(timespec="seconds"), "root": str(ROOT), "metrics": metrics_now,
+    # Select by position, preserving even identical ledger rows in the partition.
+    cutoff = now - dt.timedelta(minutes=30)
+    terminal_types = {'spawn-done', 'spawn-failed', 'spawn-stale', 'build-done', 'build-blocked'}
+    terminal = {r.get('sp') for r in window_rows if r['ty'] in terminal_types}
+    recent_terminal = {r.get('sp') for r in window_rows if r['ty'] in terminal_types
+                       and (_parse(r['t']) or dt.datetime.min.replace(tzinfo=dt.timezone.utc)) >= cutoff}
+    first_positions = {i for i, r in enumerate(window_rows)
+                       if (_parse(r['t']) or dt.datetime.min.replace(tzinfo=dt.timezone.utc)) >= cutoff
+                       or r['ty'] in ('spawn-started', 'build-started')
+                       and (r.get('sp') not in terminal or r.get('sp') in recent_terminal)}
+    out = {}
+    if part != 'rest':
+        metrics_now = metrics_at(rows, states, claims, now, sys_signals(), None, spec_charter)
+        out.update({"glance": glance_payload(now), **views_payload(now), "live": True,
+            "now": now.isoformat(timespec="seconds"), "root": str(ROOT), "metrics": metrics_now,
             "window": [window_rows[0]["t"] if window_rows else now.isoformat(timespec="seconds"), now.isoformat(timespec="seconds")],
-            "ledger_start": rows[0]["t"] if rows else None, "n_events": len(raw), "events": window_rows,
-            "stats": role_stats(raw), "states": states, "goals": goals, "proving": proving,
+            "ledger_start": rows[0]["t"] if rows else None, "n_events": len(raw), "states": states,
+            "seat": seat_summary(), "queue": queue_stats(rows, claims), "caps": ROLE_CAPS_MIN,
+            "sys": sys_signals(), "omens": omens_model(states, now)})
+    if part != 'first':
+        if goals is None:
+            goals = derive_goals() or []
+        if proving is None:
+            proving = derive_proving()
+        counts = collections.Counter(e.get("type") for e in raw)
+        out.update({"codex": codex_payload(raw), "stats": role_stats(raw), "goals": goals, "proving": proving,
             **throughput_payload(cached=True),
-            "seat": seat_summary(), "titles": titles, "counts": dict(counts.most_common(60)),
-            "queue": queue_stats(rows, claims), "caps": ROLE_CAPS_MIN, "charters": charters, "spec_charter": spec_charter, "makers": maker_index(raw, states), "specs": {sid: t for sid in dict(states) if sid.startswith("L-spec-") for t in [spec_text(sid)] if t}, "sys": sys_signals(), "tick_omens": _OMENS_SCRIPT if _OMENS_SCRIPT["at"] else None, "history": HISTORY, "wallclock": wallclock(rows, states, now), "omens": omens_model(states, now)}
+            "titles": {e["subject"]: trunc(e.get("title"), 160) for e in raw if e.get("type") == "charter-filed"},
+            "counts": dict(counts.most_common(60)), "charters": charters, "spec_charter": spec_charter,
+            "makers": maker_index(raw, states),
+            "specs": {sid: t for sid in dict(states) if sid.startswith("L-spec-") for t in [spec_text(sid)] if t},
+            "tick_omens": _OMENS_SCRIPT if _OMENS_SCRIPT["at"] else None,
+            "history": HISTORY, "wallclock": wallclock(rows, states, now)})
+    out['events'] = window_rows if part is None else [r for i, r in enumerate(window_rows)
+                                                     if (i in first_positions) == (part == 'first')]
+    if part is not None:
+        out['part'] = part
+    return out
 
 
 # ---------------------------------------------------------------- streaming
@@ -1699,7 +1736,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         u = urllib.parse.urlparse(self.path)
-        qs = urllib.parse.parse_qs(u.query)
+        qs = urllib.parse.parse_qs(u.query, keep_blank_values=True)
         if u.path in ("/", "/index.html"):
             # The page holds no ledger data; it is served open so a browser that
             # remembered the key can present it on the API calls that follow.
@@ -1719,8 +1756,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._json(_view_payload(view_commands[u.path]))
             return
         if u.path == "/api/bootstrap":
-            hours = int(qs.get("hours", [self.hours])[0])
-            self._json(bootstrap(hours, HUB.states))
+            parts = qs.get("part", ["first"])
+            if len(parts) != 1 or parts[0] not in ("first", "rest"):
+                self._json({"error": "part must be first or rest, once"}, 400)
+                return
+            try:
+                hours = int(qs.get("hours", [self.hours])[0])
+                if hours < 0:
+                    raise ValueError()
+            except ValueError:
+                self._json({"error": "hours must be a nonnegative integer"}, 400)
+                return
+            self._json(bootstrap(hours, HUB.states, part=parts[0]))
         elif u.path == "/api/omens":
             if not HUB.states:
                 HUB.states = derive_states() or HUB.states
@@ -1799,7 +1846,40 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._json({"error": "not found"}, 404)
 
 
+def systemctl_user(*args):
+    """The cron caller has no user-bus environment. Preserve explicit values."""
+    env = os.environ.copy()
+    if not env.get('XDG_RUNTIME_DIR'):
+        env['XDG_RUNTIME_DIR'] = f'/run/user/{os.getuid()}'
+    if not env.get('DBUS_SESSION_BUS_ADDRESS'):
+        env['DBUS_SESSION_BUS_ADDRESS'] = f"unix:path={env['XDG_RUNTIME_DIR']}/bus"
+    command = ['systemctl', '--user', *args]
+    result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=30)
+    if result.returncode:
+        raise RuntimeError(' '.join(command) + ': ' + (result.stderr.strip() or f'exit {result.returncode}'))
+
+
+def install_realm(repo=None):
+    import shutil
+    source = pathlib.Path(repo) if repo is not None else HERE.parent
+    target = pathlib.Path(os.environ.get('XDG_CONFIG_HOME') or pathlib.Path.home()/'.config') / 'systemd/user/doit-realm.service'
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source/'ops/doit-realm.service', target)
+    systemctl_user('daemon-reload')
+    systemctl_user('restart', 'doit-realm')
+
+
 def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    if argv and argv[0] == 'install':
+        if len(argv) != 1:
+            sys.exit('usage: doit realm install')
+        try:
+            install_realm()
+        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+            sys.exit(f'realm install failed: {exc}')
+        print('realm: installed and restarted doit-realm')
+        return
     ap = argparse.ArgumentParser(prog="doit realm", description=__doc__.split("\n")[0])
     ap.add_argument("--host", default=None, help="interface to bind (default 127.0.0.1, or 0.0.0.0 with --public)")
     ap.add_argument("--public", action="store_true", help="bind every interface and require the key in ~/.do-it/realm.key")

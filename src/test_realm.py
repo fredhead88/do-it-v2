@@ -780,6 +780,7 @@ def test_subprocess_sites_enumerated_and_cached_child_reads():
         ('realm.py', 'derive_dossier'): (1, 'ledger'),
         ('realm.py', 'ask_thinker'): (1, 'append'),
         ('realm.py', 'main'): (1, 'no ledger'),
+        ('realm.py', 'systemctl_user'): (1, 'no ledger'),
         ('realm_codex.py', 'tmux_windows'): (1, 'no ledger'),
         ('realm_omens.py', 'master_merges'): (1, 'no ledger'),
     }
@@ -1271,6 +1272,246 @@ console.log('flow page: bootstrap, history, snapshot, missing/null, six badges, 
     result=subprocess.run(['/usr/bin/node','-e',script],text=True,capture_output=True,timeout=30)
     assert result.returncode==0,result.stdout+result.stderr
     print(result.stdout.strip())
+# L1668: real HTTP over an isolated, deterministic ledger.
+import contextlib
+import collections
+import hashlib
+import threading
+import urllib.request
+import urllib.error
+from unittest.mock import patch
+
+
+@contextlib.contextmanager
+def parts_fixture(extra_ticks=0):
+    with tempfile.TemporaryDirectory(prefix="realm-parts-") as tmp:
+        root = pathlib.Path(tmp)
+        (root / "events").mkdir(); (root / "seat").mkdir(); (root / "content").mkdir()
+        now = _dt.datetime.now(_dt.timezone.utc).replace(second=0, microsecond=0)
+        def row(minutes, kind, **kw):
+            return dict(ts=(now-_dt.timedelta(minutes=minutes)).isoformat(), type=kind, **kw)
+        rows = [row(60+i, "tick", subject="tick", lane=3) for i in range(40)]
+        rows += [row(1800+i, "tick", subject="tick", lane=3) for i in range(6)]
+        rows += [row(120, "spawn-started", subject="L-spec-9001", spawn="L-grader-open"),
+                 row(40, "spawn-started", subject="L-spec-9001", spawn="L-grader-recent"),
+                 row(10, "spawn-done", subject="L-spec-9001", spawn="L-grader-recent", status="DONE"),
+                 row(120, "spawn-started", subject="L-spec-9001", spawn="L-grader-old"),
+                 row(90, "spawn-done", subject="L-spec-9001", spawn="L-grader-old", status="DONE"),
+                 row(1801, "spawn-started", subject="L-spec-9001", spawn="L-grader-ancient"),
+                 row(1800, "spawn-done", subject="L-spec-9001", spawn="L-grader-ancient", status="DONE"),
+                 row(80, "charter-filed", subject="L-charter-9001", title="Fixture", project="do-it-v2"),
+                 row(70, "spec-written", subject="L-spec-9001", charter="L-charter-9001", project="do-it-v2"),
+                 row(5, "spawn-started", subject="L-spec-9001", spawn="L-builder-9001", role="builder", backend="codex")]
+        rows += [row(60+i/1000, "tick", subject="tick", lane=3) for i in range(extra_ticks)]
+        (root / "events/L-executor-fixture.jsonl").write_text("".join(json.dumps(r)+"\n" for r in rows))
+        (root / "content/L-spec-9001.md").write_text("# Fixture spec\ncharter: L-charter-9001\n\n## Acceptance criteria\nAC1: fixture\n")
+        class Clock(_dt.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return clock[0] if tz else clock[0].replace(tzinfo=None)
+        clock = [now]
+        import types
+        fake_dt = types.SimpleNamespace(datetime=Clock, timedelta=_dt.timedelta, timezone=_dt.timezone)
+        with contextlib.ExitStack() as stack:
+            for name, value in dict(ROOT=root, EVENTS=root/'events', SEAT=root/'seat',
+                                    LEDGER=realm.realm_ledger.Ledger(),
+                                    _GLANCE={"key":None,"value":None,"lock":threading.Lock()}, dt=fake_dt).items():
+                stack.enter_context(patch.object(realm, name, value))
+            stack.enter_context(patch.dict(os.environ, {"DOIT_ROOT":str(root), "HOME":str(root)}))
+            stack.enter_context(patch.object(realm, 'views_payload', return_value={'flow':{},'flow_error':None,'health':{},'health_error':None}))
+            stack.enter_context(patch.object(realm, 'sys_signals', return_value={}))
+            stack.enter_context(patch.object(realm, 'seat_summary', return_value={}))
+            stack.enter_context(patch.object(realm, 'throughput_payload', return_value={"throughput":{}}))
+            stack.enter_context(patch.object(realm.HUB, 'states', [('L-spec-9001','written')]))
+            yield root, now, clock
+
+
+@contextlib.contextmanager
+def parts_server(key=None):
+    class Handler(realm.Handler):
+        pass
+    Handler.key = key
+    server = realm.http.server.ThreadingHTTPServer(('127.0.0.1',0), Handler)
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
+    base = 'http://127.0.0.1:' + str(server.server_port)
+    def get(path, authorized=True):
+        request = urllib.request.Request(base+path, headers={'X-Realm-Key':key} if key and authorized else {})
+        try:
+            response = urllib.request.urlopen(request, timeout=60)
+        except urllib.error.HTTPError as e:
+            response = e
+        with response:
+            body = response.read()
+            data = json.loads(body)
+            print(json.dumps(dict(url=base+path,status=response.status,body_sha256=hashlib.sha256(body).hexdigest(),
+                                  body_excerpt=json.dumps({k:data[k] for k in ('part','error') if k in data}))))
+            return response.status, data, len(body)
+    try:
+        yield get
+    finally:
+        server.shutdown(); server.server_close(); thread.join()
+
+
+def test_bootstrap_parts_partition():
+    with parts_fixture() as (root, now, _):
+        args = dict(states=[('L-spec-9001','written')],goals=[],proving=[],now=now)
+        full = realm.bootstrap(24, **args)
+        first = realm.bootstrap(24, **args, part='first')
+        rest = realm.bootstrap(24, **args, part='rest')
+        required = set('live now root glance flow health metrics states seat sys queue omens window n_events ledger_start caps events'.split())
+        heavy = set('specs makers codex charters spec_charter titles counts stats proving goals'.split())
+        assert required <= first.keys() and not heavy & first.keys()
+        assert first['part']=='first' and rest['part']=='rest'
+        a,b = set(first)-{'part'},set(rest)-{'part'}
+        assert a&b == {'events'} and a|b == set(full)
+        for key in set(full)-{'events'}:
+            assert (first if key in first else rest)[key] == full[key], key
+        encode=lambda rows: collections.Counter(json.dumps(r,sort_keys=True) for r in rows)
+        assert encode(first['events'])+encode(rest['events']) == encode(full['events'])
+        cutoff=(now-_dt.timedelta(minutes=30)).isoformat()
+        terminal={r.get('sp') for r in full['events'] if r['ty'] in ('spawn-done','spawn-failed','spawn-stale','build-done','build-blocked')}
+        recent={r.get('sp') for r in full['events'] if r['ty'] in ('spawn-done','spawn-failed','spawn-stale','build-done','build-blocked') and r['t']>=cutoff}
+        expected=[r for r in full['events'] if r['t']>=cutoff or r['ty'] in ('spawn-started','build-started') and (r.get('sp') not in terminal or r.get('sp') in recent)]
+        assert first['events']==expected
+        assert not (encode(first['events']) & encode(rest['events']))
+        older=realm.bootstrap(48,**args,part='rest')['events']
+        assert any(r.get('sp')=='L-grader-ancient' for r in older)
+        assert not any(r.get('sp')=='L-grader-ancient' for r in realm.bootstrap(48,**args,part='first')['events'])
+        with parts_server() as get:
+            _, first, _=get('/api/bootstrap'); _, rest, _=get('/api/bootstrap?part=rest')
+            _, older, _=get('/api/bootstrap?part=rest&hours=48')
+            assert first['part']=='first' and rest['part']=='rest'
+            assert not encode(first['events']) & encode(rest['events'])
+            assert encode(first['events'])+encode(rest['events'])==encode(full['events'])
+            assert len(older['events'])>len(rest['events'])
+
+
+def test_first_paint_builds_nothing_from_rest():
+    with parts_fixture(20000) as (_, now, _):
+        args=dict(states=[('L-spec-9001','written')], goals=[], proving=[], now=now)
+        full=realm.bootstrap(24,**args)
+        calls=[]
+        with contextlib.ExitStack() as stack:
+            for name in ('codex_payload','maker_index','role_stats','derive_goals','charter_index','spec_text'):
+                real=getattr(realm,name)
+                def spy(*a,_name=name,_real=real,**kw):
+                    calls.append((_name,a)); return _real(*a,**kw)
+                stack.enter_context(patch.object(realm,name,side_effect=spy))
+            # Force a cold glance so its title reads are checked too.
+            realm._GLANCE['key']=None
+            first=realm.bootstrap(24,**args,part='first')
+            assert not {n for n,a in calls}&{'codex_payload','maker_index','role_stats','derive_goals'}
+            stuck=first['glance']['stuck']
+            ids={r['spec'] for r in stuck['stuck']+stuck['held']}
+            assert all(a[0] in ids for n,a in calls if n=='spec_text')
+            assert not first['glance'].get('error') and first['flow_error'] is None
+            assert first['glance']==full['glance'] and first['metrics']==full['metrics']
+            rest=realm.bootstrap(24,**args,part='rest')
+            assert all(rest[k] for k in ('codex','makers','specs','charters','stats'))
+        with parts_server() as get:
+            status,first,size=get('/api/bootstrap')
+            assert status==200 and first['part']=='first'
+            full_size=len(json.dumps(full,separators=(',',':')).encode())
+            assert size<=full_size*.25
+            print(json.dumps(dict(first_bytes=size,full_bytes=full_size,ratio=round(size/full_size,4))))
+
+
+def test_part_validation_and_auth():
+    with parts_fixture() as (root,_,_):
+        (root/'realm.key').write_text('fixture-only')
+        with parts_server((root/'realm.key').read_text()) as get:
+            for path in ('/api/bootstrap','/api/bootstrap?part=rest'):
+                status,data,_=get(path,False); assert status==401 and data=={'error':'key required'}
+                assert get(path)[0]==200
+            assert get('/api/bootstrap?part=first')[1]['part']=='first'
+            for query in ('part=','part=REST','part=rest%00','part=../x','part=a&part=b','hours=abc'):
+                status,data,_=get('/api/bootstrap?'+query)
+                assert status==400 and set(data)=={'error'} and isinstance(data['error'],str)
+            assert get('/api/bootstrap?hours=-5')[0] in (200,400)
+            assert get('/api/bootstrap')[0]==200
+
+
+def test_fold_once_per_generation():
+    with parts_fixture() as (root, now, clock):
+        with realm.ledger_snapshot(now) as (fold,_,folded):
+            specs = folded[0]
+            active = {sid: value for sid, value in specs.items()
+                      if value['state'] not in realm.realm_glance.FINISHED
+                      and not value['state'].startswith('shipped')}
+        with patch.object(fold,'stall_rows',wraps=fold.stall_rows) as rows, patch.object(fold,'stall_lane_rows',wraps=fold.stall_lane_rows) as lanes:
+            realm.glance_payload(clock[0]); clock[0]+=_dt.timedelta(seconds=5)
+            realm.glance_payload(clock[0]); clock[0]+=_dt.timedelta(seconds=5)
+            for part in ('first','rest'):
+                realm.bootstrap(24,states=[],goals=[],proving=[],now=clock[0],part=part)
+                clock[0]+=_dt.timedelta(seconds=5)
+            realm.glance_payload(clock[0])
+            with parts_server() as get:
+                for path in ['/api/glance']*3+['/api/bootstrap']*2: assert get(path)[0]==200
+            assert (rows.call_count,lanes.call_count)==(2,1),(rows.call_count,lanes.call_count)
+            assert rows.call_args_list[0].kwargs['dwell'] == {v['state']: -1 for v in active.values()}
+            assert rows.call_args_list[0].args[1] == active
+            assert 'dwell' not in rows.call_args_list[1].kwargs
+            assert lanes.call_args_list[0].args[1] == specs
+            assert rows.call_args_list[1].args[1] == specs
+            generation=realm.ledger_generation()
+            with (root/'events/L-executor-fixture.jsonl').open('a') as f:
+                f.write(json.dumps(dict(ts=clock[0].isoformat(),type='tick',subject='tick',lane=3))+'\n')
+            for _ in range(12):
+                clock[0]+=_dt.timedelta(seconds=1)
+                if realm.ledger_generation() is not generation: break
+            assert realm.ledger_generation() is not generation
+            realm.glance_payload(clock[0]); assert (rows.call_count,lanes.call_count)==(4,2)
+            clock[0]+=_dt.timedelta(seconds=61)
+            realm.glance_payload(clock[0]); assert (rows.call_count,lanes.call_count)==(6,3)
+        print('stall_rows/stall_lane_rows: 2/1 cold, 4/2 ledger change, 6/3 after 61s')
+
+
+def test_unit_file_tracked():
+    import subprocess
+    unit=realm.HERE.parent/'ops/doit-realm.service'
+    text=unit.read_text()
+    assert 'WorkingDirectory=/home/albert/do-it-v2' in text
+    assert 'ExecStart=/home/albert/do-it-v2/doit realm' in text
+    assert 'do-it-v2-realm' not in text
+    # Includes the staged file during the pre-commit regression run.
+    assert unit.relative_to(realm.HERE.parent).as_posix() in subprocess.check_output(
+        ['git','ls-files','--cached'],cwd=realm.HERE.parent,text=True).splitlines()
+
+
+def test_realm_install_command():
+    import subprocess
+    with tempfile.TemporaryDirectory(prefix='realm-install-') as tmp:
+        home=pathlib.Path(tmp); config=home/'config'; binary=home/'bin'; binary.mkdir()
+        log=home/'calls'
+        script=binary/'systemctl'
+        script.write_text('#!/bin/sh\nprintf "%s|%s|%s\\n" "$*" "$XDG_RUNTIME_DIR" "$DBUS_SESSION_BUS_ADDRESS" >> "$CALL_LOG"\n[ "$*" != "$FAIL_COMMAND" ] || { echo "fixture bus failure" >&2; exit 1; }\n')
+        script.chmod(0o755)
+        env={**os.environ,'HOME':str(home),'XDG_CONFIG_HOME':str(config),'PATH':str(binary)+':'+os.environ['PATH'],'CALL_LOG':str(log)}
+        env.pop('XDG_RUNTIME_DIR',None);env.pop('DBUS_SESSION_BUS_ADDRESS',None)
+        drop=config/'systemd/user/doit-realm.service.d/memcap.conf';drop.parent.mkdir(parents=True)
+        drop.write_text('[Service]\nMemoryMax=4G\n');original=drop.read_bytes()
+        command=[str(realm.HERE.parent/'doit'),'realm','install']
+        r=subprocess.run(command,env=env,capture_output=True,text=True)
+        assert r.returncode==0,r.stderr
+        print(json.dumps(dict(url='cli://doit/realm/install',status=r.returncode,body_sha256=hashlib.sha256((r.stdout+r.stderr).encode()).hexdigest(),body_excerpt=r.stdout.strip())))
+        assert (config/'systemd/user/doit-realm.service').read_bytes()==(realm.HERE.parent/'ops/doit-realm.service').read_bytes()
+        assert drop.read_bytes()==original
+        runtime=f'/run/user/{os.getuid()}'
+        calls=log.read_text().splitlines()
+        assert calls==[f'--user daemon-reload|{runtime}|unix:path={runtime}/bus',f'--user restart doit-realm|{runtime}|unix:path={runtime}/bus']
+        for fail in ('--user daemon-reload','--user restart doit-realm'):
+            log.write_text('')
+            r=subprocess.run(command,env={**env,'FAIL_COMMAND':fail},capture_output=True,text=True)
+            assert r.returncode!=0 and 'fixture bus failure' in r.stderr
+            assert len(log.read_text().splitlines())==(1 if 'daemon-reload' in fail else 2)
+        # A destination that cannot be a directory makes the copy fail before systemctl.
+        blocked=home/'blocked';blocked.write_text('file');log.write_text('')
+        r=subprocess.run(command,env={**env,'XDG_CONFIG_HOME':str(blocked)},capture_output=True,text=True)
+        assert r.returncode!=0 and r.stderr and not log.read_text()
+        log.write_text('')
+        r=subprocess.run(command,env={**env,'XDG_RUNTIME_DIR':'/fixture/runtime','DBUS_SESSION_BUS_ADDRESS':'unix:path=/fixture/bus'},capture_output=True,text=True)
+        assert r.returncode==0 and all(line.endswith('|/fixture/runtime|unix:path=/fixture/bus') for line in log.read_text().splitlines())
 
 
 if __name__ == "__main__":

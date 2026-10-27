@@ -1,0 +1,13 @@
+[Unit]
+Description=DO-IT Realm
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/albert/do-it-v2
+ExecStart=/home/albert/do-it-v2/doit realm
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

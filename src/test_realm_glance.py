@@ -144,20 +144,20 @@ def test_server_cache_and_unavailable_answer():
     from types import SimpleNamespace
     from unittest.mock import patch
     import realm
-    fake_rules = SimpleNamespace(due=lambda *a: [])
+    fake_rules = SimpleNamespace(due=lambda *a: [], load=lambda: None)
     fake_fold = SimpleNamespace(stall_lane_rows=lambda *a, **k: [], stall_rows=lambda *a, **k: [], admits=lambda *a: None,
                                 open_escalations=lambda *a: [], answered=lambda *a: set())
     @contextlib.contextmanager
     def snapshot(*a):
         yield fake_fold, [], ({}, {}, [], {})
     with patch.dict(sys.modules, {'lane_rules':fake_rules}), patch.object(realm, 'ledger_snapshot', snapshot), \
-         patch.dict(realm._GLANCE, {'key':None, 'value':None}):
+         patch.dict(realm._GLANCE, {'key':None, 'value':None}), patch.dict(realm.LEDGER.stalls, clear=True):
         first = realm.glance_payload(NOW)
         assert first['error'] is None and len(first['groups']) == 5
-        with patch.object(realm, 'ledger_snapshot', side_effect=AssertionError('cached call read ledger')):
+        with patch.object(fake_fold, 'stall_rows', side_effect=AssertionError('cached call recomputed stalls')):
             assert realm.glance_payload(NOW + dt.timedelta(seconds=1)) is first
         with patch.object(realm, 'ledger_snapshot', side_effect=OSError('fixture read failure')):
-            failed = realm.glance_payload(NOW + dt.timedelta(seconds=31))
+            failed = realm.glance_payload(NOW + dt.timedelta(seconds=61))
             assert failed['error'] and 'collapsed' not in failed
 
 
@@ -177,16 +177,18 @@ def test_ac5_one_payload_one_number_no_new_read():
         @contextlib.contextmanager
         def snapshot(*a):
             yield fold, [], ({}, {}, [], {})
-        with patch.object(realm,'ROOT',path), patch.object(realm,'ledger_snapshot',snapshot), patch.dict(realm._GLANCE,key=None,value=None):
+        with patch.object(realm,'ROOT',path), patch.object(realm,'ledger_snapshot',snapshot), patch.dict(realm._GLANCE,key=None,value=None), patch.dict(realm.LEDGER.stalls, clear=True):
             first = realm.glance_payload(NOW)
             assert first['stuck']['error'] is None and 'overdue' not in first
             assert 'specs are stuck' not in first['attention'] and 'overdue' not in first['attention']
-            with patch.object(realm,'ledger_snapshot',side_effect=AssertionError('cache read')):
+            with patch.object(fold,'stall_rows',side_effect=AssertionError('cache recomputed')):
                 assert realm.glance_payload(NOW+dt.timedelta(seconds=1)) is first
             with patch.object(realm,'codex_payload',return_value={}),patch.object(realm,'sys_signals',return_value={}),patch.object(realm,'read_all',return_value=([],[],{})):
-                assert realm.bootstrap(24,states=[],goals=[],proving=[],now=NOW)['glance']['stuck'] == first['stuck']
+                with patch.object(fold,'stall_rows',side_effect=AssertionError('same-generation bootstrap recomputed')):
+                    for _ in range(2):
+                        assert realm.bootstrap(24,states=[],goals=[],proving=[],now=NOW)['glance']['stuck'] == first['stuck']
             with patch.object(realm,'ledger_snapshot',side_effect=OSError('unavailable')):
-                failed = realm.glance_payload(NOW+dt.timedelta(seconds=31))
+                failed = realm.glance_payload(NOW+dt.timedelta(seconds=61))
                 assert failed['error'] and 'stuck' not in failed
     for count in [0,1,3]:
         d = project(stuck=dict(count=count,error=None))
@@ -229,7 +231,7 @@ def test_ac6_stuck_rows_equal_the_lane():
         yield fold, events, (specs,{},[],by)
     with tempfile.TemporaryDirectory() as tmp:
         path=Path(tmp);(path/'state').mkdir();(path/'state/owed-digest.json').write_text(json.dumps(dict(at=NOW.isoformat(),needs_you=[],health=[])))
-        with patch.object(realm,'ROOT',path),patch.object(realm,'ledger_snapshot',snapshot),patch.dict(realm._GLANCE,key=None,value=None):
+        with patch.object(realm,'ROOT',path),patch.object(realm,'ledger_snapshot',snapshot),patch.dict(realm._GLANCE,key=None,value=None), patch.dict(realm.LEDGER.stalls, clear=True):
             start=time.perf_counter();glance=realm.glance_payload(NOW);elapsed=time.perf_counter()-start
             assert not glance['error'], glance
             lane=fold.stall_lane_rows(events,specs,NOW,by_subject=by)
@@ -238,7 +240,7 @@ def test_ac6_stuck_rows_equal_the_lane():
             actual={r['spec'] for r in glance['stuck']['stuck'] if r['kind']=='lane'}
             assert actual == expected and 'L-spec-2' in actual, (lane,glance)
             assert not {'L-spec-1','L-spec-3'} & actual
-            with patch.object(realm_stuck,'shape',return_value=dict(count=0,error=None,stuck=[],held=[])),patch.dict(realm._GLANCE,key=None,value=None):
+            with patch.object(realm_stuck,'shape',return_value=dict(count=0,error=None,stuck=[],held=[])),patch.dict(realm._GLANCE,key=None,value=None), patch.dict(realm.LEDGER.stalls, clear=True):
                 start=time.perf_counter();realm.glance_payload(NOW);without=time.perf_counter()-start
             print(f'fixture glance with stuck {elapsed:.6f}s; without {without:.6f}s; delta {elapsed-without:.6f}s')
 

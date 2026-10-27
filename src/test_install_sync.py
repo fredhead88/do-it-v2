@@ -575,3 +575,61 @@ rows_m = shipped_tick_m(2, refuse=True)
 assert all("machine" not in row for row in rows_m if row["type"] == "install-synced")
 assert len([row for row in rows_m if row.get("condition") == "machine-install-refused"]) == 1
 machine_signed(14, "out-of-band and missing-marker refusal is write-free; bootstrap; operator brief; per-row loop preserved")
+
+
+def test_realm_restart_on_ship():
+    import realm
+    with tempfile.TemporaryDirectory(prefix='realm-sync-') as tmp:
+        base=pathlib.Path(tmp); repo=base/'repo';repo.mkdir()
+        subprocess.run(['git','init','-q',str(repo)],check=True)
+        subprocess.run(['git','-C',str(repo),'config','user.email','fixture@example.test'],check=True)
+        subprocess.run(['git','-C',str(repo),'config','user.name','Fixture'],check=True)
+        (repo/'crons.toml').write_text('')
+        def commit(path,text):
+            dest=repo/path;dest.parent.mkdir(parents=True,exist_ok=True);dest.write_text(text)
+            subprocess.run(['git','-C',str(repo),'add','.'],check=True)
+            subprocess.run(['git','-C',str(repo),'commit','-qm','fixture'],check=True)
+            return subprocess.check_output(['git','-C',str(repo),'rev-parse','HEAD'],text=True).strip()
+        baseline=commit('readme','fixture')
+        code=commit('src/realm.html','changed')
+        unrelated=commit('readme','unrelated')
+        unit=commit('ops/doit-realm.service',(REPO_ROOT/'ops/doit-realm.service').read_text())
+        def run(sha):
+            root=base/('root-'+sha);root.mkdir()
+            events=[dict(type='install-synced',sha=baseline,ts='2026-10-01T00:00:00Z'),
+                    dict(type='shipped',sha=sha,project='do-it-v2',subject='L-spec-9001',ts='2026-10-02T00:00:00Z')]
+            with patch.object(install_sync,'install_machine',return_value=[]):
+                install_sync.run(events,root=root,repo=repo,agents_dir=base/'agents',crontab_path=base/'cron')
+            return root,_read_jsonl(root/'events/L-tick-installsync.jsonl')[-1],events
+        with patch.object(realm,'systemctl_user') as ctl,patch.object(realm,'install_realm') as install:
+            root,row,events=run(code)
+            assert row['realm']=='restarted' and not row.get('failed')
+            ctl.assert_called_once_with('restart','doit-realm');install.assert_not_called()
+            with patch.object(install_sync,'install_machine',return_value=[]):
+                install_sync.run(events+[row],root=root,repo=repo,agents_dir=base/'agents',crontab_path=base/'cron')
+            assert ctl.call_count==1
+            ctl.reset_mock()
+            _,row,_=run(unrelated);assert 'realm' not in row
+            ctl.assert_not_called();install.assert_not_called()
+            _,row,_=run(unit);assert row['realm']=='installed'
+            install.assert_called_once_with(repo);ctl.assert_not_called()
+        # Real systemctl invocation from the sync under a cron-like environment.
+        binary=base/'bin';binary.mkdir();log=base/'calls'
+        script=binary/'systemctl';script.write_text('#!/bin/sh\nprintf "%s|%s|%s\\n" "$*" "$XDG_RUNTIME_DIR" "$DBUS_SESSION_BUS_ADDRESS" >> "$CALL_LOG"\necho "fixture sync bus failure" >&2\nexit 1\n');script.chmod(0o755)
+        with patch.dict(os.environ,{'PATH':str(binary)+':'+os.environ['PATH'],'CALL_LOG':str(log)}):
+            with patch.dict(os.environ):
+                os.environ.pop('XDG_RUNTIME_DIR',None);os.environ.pop('DBUS_SESSION_BUS_ADDRESS',None)
+                # A new root allows another observation of the same ship.
+                other=commit('src/realm.py','changed again')
+                _,row,_=run(other)
+        assert 'realm' not in row and row['failed'][0]['name']=='doit-realm'
+        assert 'fixture sync bus failure' in row['failed'][0]['error']
+        runtime=f'/run/user/{os.getuid()}'
+        assert log.read_text().strip()==f'--user restart doit-realm|{runtime}|unix:path={runtime}/bus'
+    import hashlib
+    body=json.dumps(row,sort_keys=True).encode()
+    print(json.dumps(dict(url='install-synced://fixture',status=0,body_sha256=hashlib.sha256(body).hexdigest(),body_excerpt=json.dumps({'failed':row['failed']}))))
+    print('ok test_realm_restart_on_ship')
+
+
+test_realm_restart_on_ship()
