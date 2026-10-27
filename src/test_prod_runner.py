@@ -422,6 +422,7 @@ def test_hermetic():
                 patch.object(socket, "socket", side_effect=AssertionError("network")), \
                 patch.object(subprocess, "Popen", side_effect=AssertionError("real process")), \
                 patch.object(subprocess, "run", side_effect=execute):
+            prod_runner.record_for.side_effect = lambda r, events=None: records[int(r["criterion"][2:])-1]
             result = prod_runner.run(NOW)
         assert {pathlib.Path(argv[0]).name for argv in calls} == {"ro-sql", "droplet-read", "curl", "doit"}
         assert len(calls) == 4 and result["to_judgment"] == {(SPEC, "AC7")}
@@ -436,7 +437,33 @@ def test_hermetic():
     print("AC10 ok")
 
 
+def test_ac4_events_passed_down_runner():
+    import dataclasses
+    import checks
+    original_record_for = prod_runner.record_for
+    with fixture(n=3) as (_, write), patch.object(prod_runner, "record_for", new=original_record_for):
+        declaration = checks.CheckRecord(SPEC + ":AC1", SPEC, "AC1", ["/usr/bin/true"], SHA,
+            "scratch", False, "repo-venv", "pre-merge", "script")
+        write("L-spec-writer-fixture.jsonl", [dict(type="spec-written", project="project"),
+            dict(type="check-declared", **dataclasses.asdict(declaration)),
+            *(dict(type="owed-ac", criterion=f"AC{i}", wake_at=(NOW - timedelta(hours=4)).isoformat(),
+                line="fixture", **({"capability": "browser"} if i == 3 else {})) for i in range(1, 4))])
+        ev = fold.read_events()
+        rows = [dict(spec=SPEC, criterion=f"AC{i}", **({"capability": "browser"} if i == 3 else {}))
+                for i in range(1, 4)]
+        expected_records = [prod_runner.record_for(row) for row in rows]
+        expected = prod_runner.run(NOW, dry_run=True)
+        with patch.object(fold, "read_events", side_effect=AssertionError("implicit read")):
+            assert [prod_runner.record_for(row, events=ev) for row in rows] == expected_records
+            assert prod_runner.run(NOW, dry_run=True, events=ev) == expected
+            assert prod_runner.run(NOW, dry_run=True, events=[]) == dict(
+                lines=[], bundle_rows={}, held=set(), to_judgment=set())
+        assert [record["runner"] for record in expected_records] == ["script", "judgment", "prod-browser"]
+    print("L-spec-1531 AC4 prod_runner ok")
+
+
 if __name__ == "__main__":
+    test_ac4_events_passed_down_runner()
     for test in (test_empty_commands, test_observe, test_allowlist, test_permissions, test_strikes,
                  test_stale_failure_selection, test_events, test_build, test_ledger_and_hooks,
                  test_observed_data_build_refusal_is_unobservable, test_hermetic):

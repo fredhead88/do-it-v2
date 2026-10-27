@@ -135,9 +135,11 @@ def observe(row, record, *, now=None):
     return {**result, "outcome": "failed" if failed else "met", "evidence": redact("; ".join(evidence))}
 
 
-def record_for(row):
+def record_for(row, events=None):
     """Adapt the authoritative declaration for existing model-lane routing."""
-    record = checks.record_for(fold.read_events(), row["spec"], row["criterion"])
+    if events is None:
+        events = fold.read_events()  # events=None default
+    record = checks.record_for(events, row["spec"], row["criterion"])
     if record is None:
         browser = row.get("capability") == "browser"
         return {"runner": "prod-browser" if browser else "judgment",
@@ -150,8 +152,8 @@ def record_for(row):
             "needs": needs, "commands": [record.argv] if record.argv else [], "validity_h": 24}
 
 
-def batch_for_browser(rows):
-    return [row for row in rows if record_for(row)["runner"] == "prod-browser"]
+def batch_for_browser(rows, events=None):
+    return [row for row in rows if record_for(row, events=events)["runner"] == "prod-browser"]
 
 
 def stale_failure_ready(row, evs, now):
@@ -237,16 +239,17 @@ def _build(row, record, specs, now):
         return None, None
 
 
-def run(now, *, dry_run=False):
-    specs = fold.fold(fold.read_events())[0]
+def run(now, *, dry_run=False, events=None):
+    if events is None:
+        events = fold.read_events()  # events=None default
+    specs = fold.fold(events)[0]
     import prod_browser
     import sweep_owed
-    rows = sweep_owed.browser_input(specs, _selected(specs, now), now)
-    events = fold.read_events()
+    rows = sweep_owed.browser_input(specs, _selected(specs, now), now, events=events)
     total_rows = len(rows)
     rows = [r for r in rows if not ((declared := checks.record_for(events, r["spec"], r["criterion"]))
                                   and declared.answered_by == "script")]
-    records = {(r["spec"], r["criterion"]): record_for(r) for r in rows}
+    records = {(r["spec"], r["criterion"]): record_for(r, events=events) for r in rows}
     result = {"lines": [], "bundle_rows": {}, "held": set(), "to_judgment": set()}
     started = time.monotonic()
     state_path = pathlib.Path(os.environ.get("DOIT_ROOT", dispatch.ROOT)) / "state" / "prod-runner.json"
@@ -292,7 +295,7 @@ def run(now, *, dry_run=False):
                          "spec_path": str(r.get("spec_path") or dispatch.spec_path(r["spec"]))}
                         for r in rows if records[r["spec"], r["criterion"]]["runner"] == "prod-browser"]
         browser_results = {(o["spec"], o["criterion"]): o
-                           for o in prod_browser.run_batch(browser_rows, now)}
+                           for o in prod_browser.run_batch(browser_rows, now, events=events)}
         builds = 0
         for row in rows:
             key = row["spec"], row["criterion"]

@@ -45,7 +45,7 @@ def _command(runner, argv, *, cwd=None, env=None, timeout=60, phase='command'):
     return result.stdout or ''
 
 
-def _target(row, runner):
+def _target(row, runner, events=None):
     project = row.get('project')
     if not isinstance(project, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', project):
         return None
@@ -55,7 +55,9 @@ def _target(row, runner):
         if not entry or not entry.get('repo'):
             return None
         repo = pathlib.Path(entry['repo']).expanduser().resolve()
-        events = [e for e in fold.read_events() if e.get('type') == 'deploy-landed' and e.get('target') == project]
+        if events is None:
+            events = fold.read_events()  # events=None default
+        events = [e for e in events if e.get('type') == 'deploy-landed' and e.get('target') == project]
         event = max(events, key=lambda e: fold.ts(e.get('ts'))) if events else {}
         sha = event.get('sha', '')
         if not re.fullmatch(r'[0-9a-fA-F]{7,40}', sha):
@@ -84,10 +86,10 @@ def _paths(row, repo, sha, runner):
     return paths
 
 
-def _partition(rows, runner):
+def _partition(rows, runner, events=None):
     e2e, seats = [], []
     for row in rows:
-        target = _target(row, runner)
+        target = _target(row, runner, events=events)
         paths = _paths(row, *target, runner) if target else []
         if paths:
             e2e.append((row, *target, paths))
@@ -96,8 +98,8 @@ def _partition(rows, runner):
     return e2e, seats
 
 
-def split(rows, *, runner=None):
-    e2e, seats = _partition(rows, runner or Runner())
+def split(rows, *, runner=None, events=None):
+    e2e, seats = _partition(rows, runner or Runner(), events=events)
     return [entry[0] for entry in e2e], seats
 
 
@@ -207,9 +209,9 @@ def _answer(report, paths, dashboard):
     return ('failed', failure[0] + ': ' + failure[1]) if failure else ('met', ', '.join(paths) + ': passed')
 
 
-def run_batch(rows, now, *, runner=None):
+def run_batch(rows, now, *, runner=None, events=None):
     runner = runner or Runner()
-    entries, _ = _partition(rows, runner)
+    entries, _ = _partition(rows, runner, events=events)
     groups = {}
     for row, repo, sha, paths in entries:
         groups.setdefault((row['project'], repo, sha), []).append((row, paths))

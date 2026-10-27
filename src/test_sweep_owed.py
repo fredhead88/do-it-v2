@@ -984,7 +984,7 @@ records = {
     "AC11": ("build", ["repo"]), "AC12": ("prod", ["ro-prod-sql"]), "AC13": ("build", ["repo"])}
 
 
-def fixture_record(row):
+def fixture_record(row, events=None):
     kind, needs = records[row["criterion"]]
     return {"runner": kind, "needs": needs, "validity_h": 24,
             "commands": [] if row["criterion"] == "AC10" else ["fixture"]}
@@ -1003,7 +1003,7 @@ def expired_first(*args, **kw):
     return real_expired(*args, **kw)
 
 
-def observe_pass(now, *, dry_run=False):
+def observe_pass(now, *, dry_run=False, events=None):
     assert order == ["expiry"]
     order.append("runner")
     if not dry_run:
@@ -1035,7 +1035,7 @@ with patch.object(prod_runner, "record_for", side_effect=fixture_record), \
     run_stub.reset_mock()
     fake = FakeRunner()
     sweep_owed.run(now=NOW, runner=fake)
-    run_stub.assert_called_once_with(NOW, dry_run=False)
+    run_stub.assert_called_once_with(NOW, dry_run=False, events=run_stub.call_args.kwargs["events"])
     assert order == ["expiry", "runner"] and len(fake.calls) == 2
     manifest = rows_of(next(CONTENT.glob("L-sweep-*.md")))
     included = {r["criterion"] for r in manifest}
@@ -1143,13 +1143,13 @@ empty_observations = dict(lines=[], bundle_rows={}, held=set(), to_judgment=set(
 seen = []
 
 
-def classify(row):
+def classify(row, events=None):
     return dict(runner='prod-browser' if int(row['criterion'][2:]) > 3 else 'judgment',
                 needs=['browser-review-account'] if int(row['criterion'][2:]) > 3 else ['repo'],
                 validity_h=24, commands=[])
 
 
-def partition(rows):
+def partition(rows, *, events=None):
     seen.append([r['criterion'] for r in rows])
     return ([r for r in rows if r['criterion'] in ('AC4', 'AC5', 'AC6')],
             [r for r in rows if r['criterion'] not in ('AC4', 'AC5', 'AC6')])
