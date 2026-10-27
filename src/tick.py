@@ -557,8 +557,9 @@ def _record():
     except BlockingIOError:
         lock.close()
         return None
+    snapshot = fold.ReaderSnapshot()
     try:
-        ev = fold.read_events()
+        ev = fold.read_events(snapshot=snapshot)
     except ledger_cache.LockTimeout as exc:
         print(str(exc), file=sys.stderr)
         lock.close()
@@ -614,7 +615,7 @@ def _record():
     except Exception as e:
         push_origin_error = f"{e}"
     try:
-        ev = fold.read_events()
+        ev = fold.read_events(snapshot=snapshot)
     except ledger_cache.LockTimeout as exc:
         print(str(exc), file=sys.stderr)
         lock.close()

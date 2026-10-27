@@ -709,7 +709,13 @@ def _check_spec_misrouted(events, root, briefs):
         want, have = _resolve(str(spec_path_fn(spec)), root), (_resolve(path, root) if path else None)
         if have is None or have != want:
             brief(spec, {"path": path, "want": str(want)})
-def _check_dispatchable_stale(events, now, root, briefs):
+def _fold_input(events, folded):
+    if isinstance(folded, Exception):
+        raise folded
+    return fold.fold(events) if folded is None else folded
+
+
+def _check_dispatchable_stale(events, now, root, briefs, *, folded=None):
     """L-charter-0042/L-spec-0427, SD4: `autodispatch.candidates` folds
     `events` itself (`look.run` takes none), and anything `dispatchable`, or
     `blocked` specifically on a standing `autodispatch-failed`, whose `since`
@@ -723,7 +729,7 @@ def _check_dispatchable_stale(events, now, root, briefs):
     try:
         import autodispatch, lane_rules
         limit = lane_rules.load()["build"]["limit_min"]
-        specs, _, _, _ = fold.fold(events)
+        specs, _, _, _ = _fold_input(events, folded)
         rows = autodispatch.candidates(events, specs, now)
         readings = []
         for row in rows:
@@ -747,13 +753,14 @@ def _check_dispatchable_stale(events, now, root, briefs):
         _clear("spec-dispatchable-stale", sid, "left written", events, root)
 
 
-def _check_grades_per_shipped(events, now, root, briefs, answered, th):
+def _check_grades_per_shipped(events, now, root, briefs, answered, th, *, folded=None):
     """L-spec-0482/R12.d: `fold.grades_per_shipped`'s trailing-24h ratio above
     `[thresholds] grades_per_shipped_high` (default 1.5) briefs
     `grades-per-shipped-high`, owner `thinker` — the same fire/quiet/clear
     shape `_settle` already gives every other threshold check here. `None`
     (nothing shipped in the window) is never bad."""
-    ratio, specs_n, runs_n = fold.grades_per_shipped(events, now)
+    by_subject = _fold_input(events, folded)[3]
+    ratio, specs_n, runs_n = fold.grades_per_shipped(events, now, by_subject=by_subject)
     bad = ratio is not None and ratio > th["grades_per_shipped_high"]
     _settle("grades-per-shipped-high", "grades-per-shipped", "thinker", bad,
             {"ratio": ratio, "specs": specs_n, "runs": runs_n}, events, root, briefs, answered)
@@ -896,7 +903,7 @@ def _spec_idle_bad(sid, s, evs, events, cand_rows, held, answered_ids, now):
     return (now - newest) / timedelta(minutes=1) >= limit
 
 
-def _check_spec_idle(events, now, root, briefs, answered):
+def _check_spec_idle(events, now, root, briefs, answered, *, folded=None):
     """L-charter-0042/L-spec-0484 R13(d): "any spec whose newest event is
     older than the idle rule's limit while not held for a live reason or awaiting a human is
     surfaced by name." Population and exclusions: Assumptions 6-9. Wrapped in
@@ -907,7 +914,7 @@ def _check_spec_idle(events, now, root, briefs, answered):
     try:
         import lane_rules
         lane_rules.load()
-        specs, _charters, _, _ = fold.fold(events)
+        specs, _charters, _, _ = _fold_input(events, folded)
         import autodispatch
         cand_rows = {r["spec"]: r for r in autodispatch.candidates(events, specs, now)}
         held_fn = getattr(fold, "held_specs", None)
@@ -1040,10 +1047,10 @@ def _check_lane_rules(events, now, root, briefs):
         _fire_undetermined("lane-rules-unreadable", events, root, briefs)
 
 
-def _check_lane_stale(events, now, root, briefs):
+def _check_lane_stale(events, now, root, briefs, *, folded=None):
     try:
         import lane_rules
-        specs, _, _, _ = fold.fold(events)
+        specs, _, _, _ = _fold_input(events, folded)
         dst = root / "events" / LEDGER_NAME
         seen_events = [*events, *_read_jsonl(dst)]
         keys = {(e.get("spec"), e.get("rule"), e.get("since")) for e in seen_events
@@ -1110,6 +1117,19 @@ def run(events, *, now=None, runner=None, root=None, toml_path=None, dry_run=Fal
     look_wallclock._CLASSES = cfg.get("classes") or {}
     briefs, answered = [], []
     wallclock_events = []
+    folded = None
+    def evaluation_fold():
+        nonlocal folded
+        if folded is None:
+            previous_now = fold.NOW
+            try:
+                fold.NOW = now
+                folded = fold.fold(events)
+            except Exception as exc:
+                folded = exc
+            finally:
+                fold.NOW = previous_now
+        return folded
     try:
         deadline = runner.clock() + th["pass_budget_s"]
         single = len(cfg["prod"]) == 1
@@ -1131,11 +1151,11 @@ def run(events, *, now=None, runner=None, root=None, toml_path=None, dry_run=Fal
         _check_lane_rules(events, now, root, briefs)
         _check_dispatch_failures(events, root, briefs, answered)
         _check_spec_misrouted(events, root, briefs)
-        _check_dispatchable_stale(events, now, root, briefs)
-        _check_grades_per_shipped(events, now, root, briefs, answered, th)
+        _check_dispatchable_stale(events, now, root, briefs, folded=evaluation_fold())
+        _check_grades_per_shipped(events, now, root, briefs, answered, th, folded=evaluation_fold())
         _check_origin_behind(cfg, runner, now, deadline, events, root, briefs, answered)
-        _check_spec_idle(events, now, root, briefs, answered)
-        _check_lane_stale(events, now, root, briefs)
+        _check_spec_idle(events, now, root, briefs, answered, folded=evaluation_fold())
+        _check_lane_stale(events, now, root, briefs, folded=evaluation_fold())
         _check_owed_overdue(events, now, root, briefs)
         wallclock_events = _check_wallclock(events, runner, now, root, cfg, deadline, dry_run, briefs, tally=tally)
         r = _clear("look-stale", "look-stale", "fresh pass", events, root)
