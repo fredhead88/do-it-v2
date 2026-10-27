@@ -331,7 +331,8 @@ def bwrap_argv(view, *, doit_src, venvs: tuple = (), binds: tuple = ()) -> list:
     `src/`, `agents/`, `scripts/` and `doit` (individually, never the bare
     checkout root), any path in `venvs`, every `(src, dst)` pair in `binds`
     (L-spec-0481/R12.2 — `grading_env.sandbox_binds`'s own node_modules/venv
-    pairs, always `--ro-bind`, never `--bind`), `view` and `config_dir()`'s
+    pairs, always `--ro-bind`, never `--bind`), a safe Playwright browser
+    cache (read-only), `view` and `config_dir()`'s
     own directory (rw) — nothing else. `$HOME`, `~/.claude`, `$DOIT_ROOT`
     (seat included), any repository, and any `.git` are simply absent."""
     view = pathlib.Path(view)
@@ -361,6 +362,23 @@ def bwrap_argv(view, *, doit_src, venvs: tuple = (), binds: tuple = ()) -> list:
     for src, dst in binds:
         ro_pairs.append((str(src), str(dst)))
 
+    home = pathlib.Path.home()
+    browsers = pathlib.Path(os.environ.get("PLAYWRIGHT_BROWSERS_PATH") or
+                            home / ".cache" / "ms-playwright").resolve()
+    protected = [(home.resolve(), True), ((home / ".claude").resolve(), False),
+                 (ROOT.resolve(), False)]
+    if "DOIT_ROOT" in os.environ:
+        protected.append((pathlib.Path(os.environ["DOIT_ROOT"]).resolve(), False))
+    home_cache = (home / ".cache").resolve()
+    browser_allowed = browsers.is_dir() and ".git" not in browsers.parts
+    for path, cache_exception in protected:
+        if (browsers == path or path.is_relative_to(browsers) or
+                (browsers.is_relative_to(path) and
+                 not (cache_exception and browsers.is_relative_to(home_cache)))):
+            browser_allowed = False
+    if browser_allowed:
+        ro_pairs.append((str(browsers), str(browsers)))
+
     seen, ro = set(), []
     for pair in ro_pairs:
         if pair not in seen:
@@ -381,6 +399,8 @@ def bwrap_argv(view, *, doit_src, venvs: tuple = (), binds: tuple = ()) -> list:
     argv += ["--bind", str(cfg), str(cfg)]
     argv += ["--setenv", "CLAUDE_CONFIG_DIR", str(cfg)]
     argv += ["--setenv", "HOME", str(view)]
+    if browser_allowed:
+        argv += ["--setenv", "PLAYWRIGHT_BROWSERS_PATH", str(browsers)]
     argv += ["--setenv", "PATH", "/usr/bin:/bin"]
     argv += ["--chdir", str(view)]
     return argv

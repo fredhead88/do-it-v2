@@ -17,11 +17,13 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from unittest import mock
 
 HERE = pathlib.Path(__file__).resolve().parent  # this checkout's own src/
 REPO = HERE.parent  # this checkout's own root — the real `repo` for AC1/AC5
 
 REAL_HOME = os.environ.get("HOME", "")  # captured BEFORE the override below
+REAL_BROWSERS_PATH = os.environ.pop("PLAYWRIGHT_BROWSERS_PATH", None)
 
 FIXTURE_ROOT = pathlib.Path(tempfile.mkdtemp(prefix="grader-view-root-"))
 FIXTURE_SCRATCH = pathlib.Path(tempfile.mkdtemp(prefix="grader-view-scratch-"))
@@ -178,7 +180,14 @@ print("AC3 ok")
 
 # ── AC4 · bwrap_argv()'s bind allowlist ─────────────────────────────────────
 DOIT_SRC = REPO
-argv = grader_view.bwrap_argv(view, doit_src=DOIT_SRC, venvs=())
+BROWSER_FIXTURE = pathlib.Path(tempfile.mkdtemp(prefix="grader-view-browsers-")).resolve()
+# This browser fixture is separate from both protected fixture trees.
+for protected in (FIXTURE_HOME, FIXTURE_ROOT, grader_view.ROOT):
+    assert not under(BROWSER_FIXTURE, protected)
+    assert not under(protected, BROWSER_FIXTURE)
+assert ".git" not in BROWSER_FIXTURE.parts
+with mock.patch.dict(os.environ, {"PLAYWRIGHT_BROWSERS_PATH": str(BROWSER_FIXTURE)}):
+    argv = grader_view.bwrap_argv(view, doit_src=DOIT_SRC, venvs=())
 triples = bind_triples(argv)
 assert triples, "no bind triples found"
 
@@ -191,6 +200,8 @@ allow_exact = {
     str(DOIT_SRC / "scripts"), str(DOIT_SRC / "doit"),
     claude_launcher, claude_resolved,
 }
+if BROWSER_FIXTURE.is_dir():
+    allow_exact.add(str(BROWSER_FIXTURE))
 
 seen_allow = set()
 for flag, src, dst in triples:
@@ -225,6 +236,94 @@ argv_binds = grader_view.bwrap_argv(view, doit_src=DOIT_SRC, venvs=(), binds=[(e
 bind_flags = [t[0] for t in bind_triples(argv_binds) if t[1] == extra_src]
 assert bind_flags == ["--ro-bind"], bind_flags
 print("L-spec-0481 AC9 ok")
+print("L-spec-1682 AC3 ok")
+
+
+# ── L-spec-1682 · browser bind, containment and real Chromium ───────────────
+def browser_argv(path=None):
+    with mock.patch.dict(os.environ):
+        os.environ.pop("PLAYWRIGHT_BROWSERS_PATH", None)
+        if path is not None:
+            os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(path)
+        return grader_view.bwrap_argv(view, doit_src=REPO)
+
+
+browser_path = str(BROWSER_FIXTURE)
+browser_args = browser_argv(BROWSER_FIXTURE / ".." / BROWSER_FIXTURE.name)
+assert ("--ro-bind", browser_path, browser_path) in bind_triples(browser_args)
+assert ("--bind", browser_path, browser_path) not in bind_triples(browser_args)
+assert any(browser_args[i:i + 3] == ["--setenv", "PLAYWRIGHT_BROWSERS_PATH", browser_path]
+           for i in range(len(browser_args) - 2))
+assert browser_args.index(browser_path) < browser_args.index("--bind")
+print("L-spec-1682 AC1 ok")
+
+baseline = browser_argv()
+assert browser_argv(BROWSER_FIXTURE / "missing") == baseline
+assert browser_argv("") == baseline
+not_directory = BROWSER_FIXTURE / "file"
+not_directory.write_text("not a directory\n")
+assert browser_argv(not_directory) == baseline
+refused_paths = [
+    pathlib.Path("/"), FIXTURE_HOME.parent, FIXTURE_HOME,
+    FIXTURE_HOME / ".claude" / "browsers", FIXTURE_HOME / "other",
+    FIXTURE_ROOT, FIXTURE_ROOT / "browsers", FIXTURE_ROOT.parent,
+    BROWSER_FIXTURE / ".git" / "browsers",
+]
+for refused in refused_paths:
+    refused.mkdir(parents=True, exist_ok=True)
+    assert browser_argv(refused) == baseline, refused
+# Check both the import-time ROOT and a different calling-process DOIT_ROOT.
+with tempfile.TemporaryDirectory(prefix="grader-view-other-root-") as other_root:
+    with mock.patch.dict(os.environ, {"DOIT_ROOT": other_root}):
+        assert browser_argv(other_root) == baseline
+        assert browser_argv(FIXTURE_ROOT / "browsers") == baseline
+    with mock.patch.dict(os.environ, {"DOIT_ROOT": str(FIXTURE_HOME / ".cache")}):
+        (FIXTURE_HOME / ".cache").mkdir(exist_ok=True)
+        assert browser_argv(FIXTURE_HOME / ".cache") == baseline
+# Resolve symlinks before applying containment and .git checks.
+for index, target in enumerate((FIXTURE_HOME / ".claude", FIXTURE_ROOT,
+                                BROWSER_FIXTURE / ".git" / "browsers")):
+    link = BROWSER_FIXTURE / f"refused-link-{index}"
+    link.symlink_to(target, target_is_directory=True)
+    assert browser_argv(link) == baseline, link
+allowed_link = FIXTURE_HOME / "browser-link"
+allowed_link.symlink_to(BROWSER_FIXTURE, target_is_directory=True)
+assert browser_argv(allowed_link) == browser_argv(BROWSER_FIXTURE)
+default_browser = FIXTURE_HOME / ".cache" / "ms-playwright"
+default_browser.mkdir(parents=True)
+assert browser_argv() == browser_argv(default_browser)
+assert ("--ro-bind", str(default_browser), str(default_browser)) in bind_triples(browser_argv())
+assert ["--setenv", "PLAYWRIGHT_BROWSERS_PATH", str(default_browser)] in [
+    browser_argv()[i:i + 3] for i in range(len(browser_argv()) - 2)]
+for allowed in (default_browser.parent, default_browser.parent / "other-browser"):
+    allowed.mkdir(exist_ok=True)
+    assert ("--ro-bind", str(allowed), str(allowed)) in bind_triples(browser_argv(allowed))
+shutil.rmtree(default_browser.parent)
+print("L-spec-1682 AC2 ok")
+
+real_browsers = pathlib.Path(REAL_HOME) / ".cache" / "ms-playwright"
+if not REAL_HOME or not real_browsers.is_dir():
+    print("L-spec-1682 AC4 undetermined: real browser cache absent")
+elif shutil.which("bwrap") is None:
+    print("L-spec-1682 AC4 undetermined: bwrap absent")
+else:
+    print("L-spec-1682 AC4: real browser cache exists; running sandboxed Chromium")
+    chromiums = list(real_browsers.glob("chromium-*/chrome-linux64/chrome"))
+    assert chromiums, "real browser cache has no Chromium executable"
+    newest_chromium = max(chromiums, key=lambda p: int(p.parents[1].name.split("-")[-1]))
+    with tempfile.TemporaryDirectory(prefix="grader-view-browser-smoke-") as browser_view:
+        with mock.patch.dict(os.environ, {"PLAYWRIGHT_BROWSERS_PATH": str(real_browsers)}):
+            real_args = grader_view.bwrap_argv(browser_view, doit_src=REPO)
+        browser_run = subprocess.run(real_args + ["--", str(newest_chromium), "--headless",
+                                    "--no-sandbox", "--disable-gpu", "--dump-dom",
+                                    "data:text/html,<p>L1682-ok</p>"],
+                                    capture_output=True, text=True, timeout=60)
+    if grader_view._sandbox_unavailable(browser_run):
+        print("L-spec-1682 AC4 undetermined: nested namespace refusal")
+    else:
+        assert browser_run.returncode == 0, browser_run.stderr
+        assert "L1682-ok" in browser_run.stdout, browser_run.stdout
+        print("L-spec-1682 AC4 ok")
 
 
 # ── AC5 · smoke() — real bwrap, discriminating checks ───────────────────────
@@ -476,4 +575,7 @@ shutil.rmtree(MB_REPO, ignore_errors=True)
 shutil.rmtree(FIXTURE_ROOT, ignore_errors=True)
 shutil.rmtree(FIXTURE_SCRATCH, ignore_errors=True)
 shutil.rmtree(FIXTURE_HOME, ignore_errors=True)
+shutil.rmtree(BROWSER_FIXTURE)
+if REAL_BROWSERS_PATH is not None:
+    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = REAL_BROWSERS_PATH
 print("ALL OK")
