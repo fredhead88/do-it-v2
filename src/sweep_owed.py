@@ -447,7 +447,7 @@ def _emit(subject, type_, **fields):
     return dispatch.emit(ledger_path(), {"subject": subject}, type_, strict=True, **fields)
 
 
-def _resolve_candidates(specs, now, *, dry_run=False):
+def _resolve_candidates(specs, now, *, dry_run=False, snapshot=None):
     """Retire legacy keys, recheck changed quarantines, and resolve ALL due rows.
 
     Cache per-row results so a legacy key also present in the due list is
@@ -507,7 +507,7 @@ def _resolve_candidates(specs, now, *, dry_run=False):
 
     if not dry_run:
         # re-read: quarantine/recheck appends above can change due status.
-        specs = fold.fold(fold.read_events())[0]
+        specs = fold.fold(fold.read_events(snapshot=snapshot))[0]
     elif rechecked:
         # Simulate the same governing-instant change without writing an event.
         specs = {sid: {**spec, "evs": [*spec["evs"],
@@ -693,7 +693,8 @@ def run(*, dry_run=False, runner=None, now=None):
     """One pass: expiry, resolution, project choice, dispatch and run record."""
     runner = runner or Runner()
     now = now or datetime.now(timezone.utc)
-    all_ev = fold.read_events()  # events=None default: initial sweep snapshot
+    snapshot = fold.ReaderSnapshot()
+    all_ev = fold.read_events(snapshot=snapshot)  # events=None default: initial sweep snapshot
     specs = fold.fold(all_ev)[0]
     if not dry_run:
         reap_repo_cwds(all_ev)
@@ -709,12 +710,12 @@ def run(*, dry_run=False, runner=None, now=None):
     if not dry_run and any(line.startswith(("sweep-owed: escalated ", "sweep-owed: reopened ",
                                             "sweep-owed: recheck ")) for line in lines):
         # re-read: expiry/failure escalation or recheck appended before observations.
-        all_ev = fold.read_events()
+        all_ev = fold.read_events(snapshot=snapshot)
     observations = prod_runner.run(now, dry_run=dry_run, events=all_ev)
     lines.extend(observations["lines"])
     if not dry_run:
         # re-read: runner verdicts must govern routing and open-batch decisions.
-        all_ev = fold.read_events()
+        all_ev = fold.read_events(snapshot=snapshot)
     specs = fold.fold(all_ev)[0]
     lines.extend(close_unverifiable(all_ev, now, dry_run=dry_run))
     no_runner_counts = {}
@@ -727,7 +728,8 @@ def run(*, dry_run=False, runner=None, now=None):
     for cause, count in sorted(no_runner_counts.items()):
         lines.append(f"sweep-owed: {count} no-runner row(s) excluded from escalation and batching: {cause}; see owed digest")
 
-    due, quarantined, resolution_lines = _resolve_candidates(specs, now, dry_run=dry_run)
+    due, quarantined, resolution_lines = _resolve_candidates(specs, now, dry_run=dry_run,
+                                                           snapshot=snapshot)
     lines.extend(resolution_lines)
     # Re-admit stale failure hand-offs only under the same guards as observation,
     # using the fresh fold in case a corrective landed during the runner pass.

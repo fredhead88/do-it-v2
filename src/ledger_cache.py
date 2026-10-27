@@ -6,6 +6,7 @@ pickles avoid JSON reparsing without allowing executable cache content. Cache
 corruption falls back to fold's reference parser; lock failures propagate.
 """
 from contextlib import contextmanager
+from typing import NamedTuple
 import fcntl
 import hashlib
 import io
@@ -214,10 +215,16 @@ def _metadata(db):
     return old
 
 
-def _current(db, directory):
+def _generation(db, directory):
+    """Return the metadata validated by this scan, never a later fingerprint."""
     old = _metadata(db)
-    return {name: row['meta'] for name, row in old.items()} == {
-        file.name: _meta(file.stat()) for file in directory.glob('*.jsonl')}
+    recorded = {name: row['meta'] for name, row in old.items()}
+    current = {file.name: _meta(file.stat()) for file in directory.glob('*.jsonl')}
+    return tuple(sorted(recorded.items())) if recorded == current else None
+
+
+def _current(db, directory):
+    return _generation(db, directory) is not None
 
 
 def _update(db, directory, actor_of):
@@ -289,8 +296,17 @@ def _refresh(path, directory, actor_of):
                 db.close()
 
 
+class ConditionalRead(NamedTuple):
+    generation: tuple
+    events: list | None  # None means unchanged; [] is a newly loaded empty ledger.
+
+
 def read(events_dir, cache_dir, actor_of):
-    directory, cache_dir = pathlib.Path(events_dir), pathlib.Path(cache_dir).resolve()
+    return read_conditional(events_dir, cache_dir, actor_of).events
+
+
+def read_conditional(events_dir, cache_dir, actor_of, *, previous=None):
+    directory, cache_dir = pathlib.Path(events_dir).resolve(), pathlib.Path(cache_dir).resolve()
     ident = hashlib.sha256(os.fsencode(directory.resolve())).hexdigest()[:16]
     path, lock = cache_dir / f'ledger-{ident}.sqlite3', cache_dir / f'ledger-{ident}.lock'
     claim = (str(lock), os.getpid(), threading.get_ident())
@@ -306,8 +322,12 @@ def read(events_dir, cache_dir, actor_of):
             db = None
             try:
                 db = _connect(path)
-                if _current(db, directory):
-                    return _read(db)
+                validated = _generation(db, directory)
+                if validated is not None:
+                    generation = (str(directory), str(cache_dir), validated)
+                    if generation == previous:
+                        return ConditionalRead(generation, None)
+                    return ConditionalRead(generation, _read(db))
             except (sqlite3.DatabaseError, Invalid):
                 corrupt = True
                 if path.exists():

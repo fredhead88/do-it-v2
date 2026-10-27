@@ -201,7 +201,65 @@ def _read_events_uncached():
     return out
 
 
-def read_events(use_cache=True):
+def _immutable_mutation(*args, **kwargs):
+    raise TypeError("snapshot nested values are immutable")
+
+
+class _SnapshotDict(dict):
+    __setitem__ = __delitem__ = clear = pop = popitem = setdefault = update = __ior__ = _immutable_mutation
+
+
+class _SnapshotList(list):
+    __setitem__ = __delitem__ = append = clear = extend = insert = pop = remove = reverse = sort = __iadd__ = __imul__ = _immutable_mutation
+
+
+def _immutable(value):
+    # JSON containers retain their equality, iteration and serialization shape.
+    # Freeze once on publication; hits only shallow-copy the top-level events.
+    if isinstance(value, dict):
+        return _SnapshotDict((k, _immutable(v)) for k, v in value.items())
+    if isinstance(value, list):
+        return _SnapshotList(_immutable(v) for v in value)
+    return value
+
+
+class ReaderSnapshot:
+    """One caller's normalized generation, with no raw or derived-fold cache.
+
+    Returned event dicts are mutable. Nested JSON containers are immutable;
+    callers can replace a nested value when they need a modified event.
+    Instances belong to one pass and are not shared between concurrent readers.
+    """
+    def __init__(self):
+        self._clear()
+
+    def _clear(self):
+        self._scope = self._generation = None
+        self._events = ()
+        self._visible = 0
+        self._applied = ()
+
+    def _publish(self, scope, generation, events):
+        canonical = list(events)
+        positions = {id(e): i for i, e in enumerate(canonical)}
+        applied = []
+        for e in APPLIED:
+            if id(e) not in positions:
+                positions[id(e)] = len(canonical)
+                canonical.append(e)
+            applied.append(positions[id(e)])
+        self._events = tuple(_immutable(e) for e in canonical)
+        self._visible, self._applied = len(events), tuple(applied)
+        self._scope, self._generation = scope, generation
+
+    def _copy(self):
+        # Exactly one shallow event-copy pass, including filtered corrections.
+        out = [dict(e) for e in self._events]
+        APPLIED[:] = [out[i] for i in self._applied]
+        return out[:self._visible]
+
+
+def read_events(use_cache=True, *, snapshot=None):
     """Every event in every file, oldest first. A torn tail never wedges the fold.
 
     Tie-break on identical `ts` (R5/L-charter-0040): two events from the SAME
@@ -218,12 +276,30 @@ def read_events(use_cache=True):
     if use_cache and os.environ.get("DOIT_READ_CACHE", "1") != "0":
         try:
             import ledger_cache
-            out = ledger_cache.read(EVENTS, ROOT / "cache", actor_of)
+            if snapshot is None:
+                out = ledger_cache.read(EVENTS, ROOT / "cache", actor_of)
+            else:
+                scope = (str(EVENTS.resolve()), str((ROOT / "cache").resolve()), PROJECT)
+                previous = snapshot._generation if snapshot._scope == scope else None
+                result = ledger_cache.read_conditional(EVENTS, ROOT / "cache", actor_of,
+                                                       previous=previous)
+                if result.events is not None:
+                    out = finish_events(result.events)
+                    snapshot._publish(scope, result.generation, out)
+                return snapshot._copy()
+        except ledger_cache.LockTimeout:
+            if snapshot is not None:
+                snapshot._clear()
+            raise
         except (OSError, ValueError, EOFError, KeyError, TypeError):
             # A read-only root, a corrupt cache or a racing writer is harmless.
             # The ledger remains the only authority.
+            if snapshot is not None:
+                snapshot._clear()
             out = _read_events_uncached()
     else:
+        if snapshot is not None:
+            snapshot._clear()
         out = _read_events_uncached()
     return finish_events(out)
 
@@ -1478,7 +1554,7 @@ def verdict_owed_criteria(events, subject):
             and e.get("criterion") and e.get("actor") in OWED_DECLARERS} | set(routed_criteria(events, subject))
 
 
-def grades_per_shipped(events, now, window_h=24):
+def grades_per_shipped(events, now, window_h=24, *, by_subject=None):
     """L-spec-0482/R12.d — `(ratio, specs, runs)`: `specs` are the distinct
     subjects with a `shipped` in the trailing `window_h` hours, `runs` are
     every grader `spawn-started` on those subjects at ANY time (the Goal is
@@ -1490,7 +1566,8 @@ def grades_per_shipped(events, now, window_h=24):
     `fold()`'s own `by_subject` (the membership door `EMITS["shipped"] ==
     {"executor"}` already applies there; a non-executor `shipped` is dropped
     into `ignored` and never reaches `by_subject` at all)."""
-    _, _, _, by_subject = fold(events)
+    if by_subject is None:
+        _, _, _, by_subject = fold(events)
     window_start = now - timedelta(hours=window_h)
     shipped_subjects = {s for s, evs in by_subject.items()
                         if any(e.get("type") == "shipped" and ts(e.get("ts")) >= window_start for e in evs)}
