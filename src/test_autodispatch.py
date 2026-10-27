@@ -1050,5 +1050,93 @@ for released_minutes in (11, 5):
     assert len(out) == 1 and out[0].startswith('acted '), out
 print('lane-driver-1137 AC10 AC13 AC16 released-wave first builds ok')
 
+
+class HeldCandidateTests(unittest.TestCase):
+    def test_enforce_AC16_candidates_and_idle(self):
+        import loadgate as lg
+        import look
+        import hashlib
+        old = fold.ROOT,fold.EVENTS,dispatch.ROOT,dispatch.EVENTS,dispatch.CONTENT
+        self.addCleanup(lambda: self.restore(old))
+        root = _fresh('held')
+        self.addCleanup(__import__('shutil').rmtree,root)
+        now = datetime.datetime(2026,10,27,tzinfo=datetime.timezone.utc)
+        ago = lambda minutes: _iso(now-datetime.timedelta(minutes=minutes))
+        a,b,c,d,e,f = 'L-spec-9801','L-spec-9802','L-spec-'+'x'*100,'L-spec-9804','L-spec-9805','L-spec-9806'
+        events = [dict(type='spec-written',subject=sid,ts=ago(age),project='held')
+                  for sid,age in ((a,41),(b,40),(c,39),(d,90),(e,90),(f,90))]
+        for sid in (a,b,c,d,e,f):
+            _spec_file(root,sid)
+        for sid in (d,e):
+            events += [dict(type=kind,subject=sid,ts=ago(age),actor='builder',role='builder',
+                            spawn='L-builder-'+sid,status='DONE')
+                       for kind,age in (('build-started',85),('spawn-started',84),('spawn-done',71),('build-done',70))]
+        events += [dict(type='verdict',subject=e,ts=ago(80),verdict='REWORK',actor='grader'),
+                   dict(type='shipped',subject=f,ts=ago(60),actor='executor')]
+        specs = fold.fold(events)[0]
+        self.assertEqual((specs[d]['state'],specs[e]['state']),('graded','reviewing'))
+        state_path = root / 'state/admission.json'
+        opt = root / 'admission.toml'
+        opt.write_text('mode="enforce"')
+        state = lg._fresh() | dict(t=now.timestamp()-60,holding={lg.hold_key(sid):ago(30) for sid in (a,c,d,e,f)})
+        lg.save_state(state_path,state)
+        def rows():
+            return autodispatch.candidates(events,specs,now)
+        def idle(sid,rows):
+            evs = [ev for ev in events if ev.get('subject') == sid]
+            return look._spec_idle_bad(sid,specs[sid],evs,events,{r['spec']:r for r in rows},set(),set(),now)
+        with patch.object(autodispatch,'capacity',return_value=1):
+            result = rows()
+            for sid in (a,c,d,e):
+                r = _row(result,sid)
+                self.assertEqual((r['status'],r['reason']),('seat-wait','resource-wait'))
+            self.assertEqual(_row(result,b)['status'],'dispatchable')
+            self.assertNotIn(f,[r['spec'] for r in result])
+            self.assertFalse(idle(d,result))
+            self.assertFalse(idle(e,result))
+            self.assertEqual([r['spec'] for r in result][-2:],[d,e])
+            self.assertEqual(_row(result,d)['since'],_iso(now))
+            for fault in ('missing','stale','helper','unnamed'):
+                with __import__('contextlib').ExitStack() as stack:
+                    if fault == 'missing':
+                        opt.unlink()
+                    elif fault == 'stale':
+                        lg.save_state(state_path,state | dict(t=now.timestamp()-3660))
+                    elif fault == 'helper':
+                        stack.enter_context(patch.object(lg,'held_items',side_effect=RuntimeError('failed')))
+                    else:
+                        lg.save_state(state_path,state | dict(holding={}))
+                    result = rows()
+                    self.assertEqual(_row(result,a)['status'],'dispatchable')
+                    self.assertEqual(_row(result,b)['status'],'seat-wait')
+                    self.assertNotIn(d,[r['spec'] for r in result])
+                    self.assertTrue(idle(d,result))
+                opt.write_text('mode="enforce"')
+                lg.save_state(state_path,state)
+            events.append(dict(type='autodispatch-failed',subject=a,ts=ago(1),reason='fixture refused',role='builder',actor='tick'))
+            specs = fold.fold(events)[0]
+            result = rows()
+            self.assertEqual(_row(result,a)['status'],'blocked')
+            self.assertTrue(_row(result,a)['_dispatch_failed'])
+        for age in (3660,-301):
+            lg.save_state(state_path,state | dict(t=now.timestamp()-age))
+            self.assertEqual(lg.held_items(root,now=now),frozenset())
+        state_path.write_text('bad')
+        self.assertFalse(lg.held_items(root,now=now))
+        state_path.unlink()
+        self.assertFalse(lg.held_items(root,now=now))
+        lg.save_state(state_path,state)
+        self.assertFalse(lg.held_items(root,now=now.replace(tzinfo=None)))
+        opt.write_text('mode="observe"')
+        self.assertFalse(lg.held_items(root,now=now))
+        body = json.dumps(dict(held_build_preserves_seat=True,held_grades_suppress_idle=True,
+                               stale_restores_alarm=True,hashed_key=True,blocked_preserved=True),sort_keys=True)
+        print(json.dumps(dict(url='cli://autodispatch/AC16-1649',status=0,
+            body_sha256=hashlib.sha256(body.encode()).hexdigest(),body_excerpt=body)))
+
+    @staticmethod
+    def restore(old):
+        fold.ROOT,fold.EVENTS,dispatch.ROOT,dispatch.EVENTS,dispatch.CONTENT = old
+
 if __name__ == '__main__':
     unittest.main(argv=[sys.argv[0]])

@@ -1,6 +1,7 @@
 """One bounded, fail-open pressure observation per scheduler pass.
 
-No launch is held here. Global off is [admission] mode in look.toml;
+Only opted-in tick passes may defer new builds and grades.
+Global off is [admission] mode in look.toml;
 DOIT_ADMISSION affects only callers inheriting that environment (cron and
 Executor panes differ). Revert enforcement before reverting this module;
 the retained state file then becomes inert.
@@ -27,6 +28,10 @@ DEFAULTS = dict(mode='observe', mem_floor_gb=6, mem_hard_stop_gb=8,
                 peak_gb=dict(window_gate=.9, builder=.5, grader=.6, reviewer=.4))
 RULES = ('mem-hard-stop', 'mem-swap-hard-stop', 'mem-pressure', 'load-stop', 'mem-headroom', 'load-delay')
 PROBE_ROLE = 'probe'
+ENFORCE_FILE = 'admission.toml'
+DEFERRABLE_ACTIONS = ('build', 'grade')
+STATE_STALE_MIN = 60
+STATE_FUTURE_SLACK_S = 300
 _TOML = Path(__file__).resolve().parent.parent / 'look.toml'
 _SHORT = ('mem_avail_gb', 'swap_free_gb', 'mem_some10', 'mem_full10', 'load1_per_core', 'pswpout_s')
 _FULL = ('shmem_gb', 'mem_some60', 'mem_full60', 'cpu_some10', 'io_some10', 'io_full10',
@@ -93,6 +98,51 @@ def settings(env=None, toml_path=None):
         problems.append('enforce only via $DOIT_ROOT/admission.toml; observing')
     result['mode'] = mode
     return result, problems
+
+
+def read_enforce_file(path):
+    """The sole bounded reader of the machine-local opt-in; never raises."""
+    try:
+        with open(path, 'rb') as f:
+            data = f.read(4097)
+        if len(data) > 4096:
+            return False, 'admission.toml too large'
+        table = tomllib.loads(data.decode('utf-8'))
+        if table.keys() - {'mode'}:
+            return False, 'admission.toml extra keys'
+        if 'mode' not in table:
+            return False, 'admission.toml has no mode'
+        mode = table['mode']
+        if not isinstance(mode, str) or mode.strip().lower() not in ('enforce', 'observe'):
+            return False, 'bad admission.toml mode'
+        return mode.strip().lower() == 'enforce', None
+    except FileNotFoundError:
+        return False, None
+    except Exception:
+        return False, 'admission.toml unreadable'
+
+
+def _state_current(state, now):
+    return _number(state['t']) and now - STATE_STALE_MIN * 60 <= state['t'] <= now + STATE_FUTURE_SLACK_S
+
+
+def held_items(root=None, *, now=None):
+    """Read the last pass's bounded informational holds, with no sampling."""
+    try:
+        if root is None:
+            import fold
+            root = fold.ROOT
+        if not read_enforce_file(Path(root) / ENFORCE_FILE)[0]:
+            return frozenset()
+        if isinstance(now, datetime):
+            if now.tzinfo is None or now.utcoffset() is None:
+                return frozenset()
+            now = now.timestamp()
+        now = time.time() if now is None else now
+        state, usable = load_state(Path(root) / 'state/admission.json')
+        return frozenset(state['holding']) if usable and _state_current(state, now) else frozenset()
+    except Exception:
+        return frozenset()
 
 
 def _psi(text, prefix):
@@ -322,6 +372,7 @@ class Decision:
     would_hold: bool
     reason: str
     hold: bool
+    override: str | None = None
 
 
 class Gate:
@@ -332,40 +383,83 @@ class Gate:
         self.roles, self.would_hold = {}, set()
         self.checked, self.reasons, self.admitted_gb = 0, Counter(), 0.
         self.cost, self.age, self.test_hooks = 0., None, False
+        self.mode, self.grades_first, self.holds_on = 'observe', False, False
+        self.held, self.escape_due, self.escape_unspawned = 0, 0, 0
+        self.escape, self.pending_override = None, None
+        self.state_problems, self.trip_start, self.loaded_trip = [], None, None
+        self.launched = False
 
-    def check(self, item, role):
+    def check(self, item, role, *, action=None, since=None):
         start = time.monotonic()
         try:
             if self.readings is not None:
-                age = max(0, self.clock() - self.readings['t'])
+                now = self.clock()
+                age = max(0, now - self.readings['t'])
                 self.age = max(self.age or 0, age)
-            ok, reason, _ = admit(role, self.readings, self.running, admitted_gb=self.admitted_gb,
+            ok, reason, detail = admit(role, self.readings, self.running, admitted_gb=self.admitted_gb,
                                   state=self.state, settings=self.settings)
             self.checked += 1
             self.roles[item] = role
             if not ok:
                 self.would_hold.add(hold_key(item))
                 self.reasons[reason] += 1
+            candidate = (self.mode == 'enforce' and self.holds_on and not self.errors
+                         and action in DEFERRABLE_ACTIONS and not ok
+                         and any(rule != 'load-delay' for rule in detail['failed']))
+            if candidate:
+                wait_s = 60 * self.settings['max_wait_min']
+                try:
+                    parsed = datetime.fromisoformat(since.replace('Z', '+00:00'))
+                    if parsed.tzinfo is None or parsed.utcoffset() is None:
+                        raise ValueError('timezone required')
+                    since_t = parsed.timestamp()
+                except (AttributeError, TypeError, ValueError, OverflowError):
+                    # An invalid since admits even during a newly started trip.
+                    waited = wait_s
+                else:
+                    waited = now - max(since_t, self.trip_start) if self.trip_start is not None else now - since_t
+                due = waited >= wait_s
+                self.escape_due += int(due)
+                idle = (any(rule != 'load-delay' for rule in self.trips)
+                        and self.loaded_trip is not None and now - self.loaded_trip >= wait_s
+                        and not (self.running or {}).get('builder', 0)
+                        and not (self.running or {}).get('reviewer', 0) and not self.launched)
+                override = ('max-wait' if due else 'idle-box' if idle else None)
+                if override and self.pending_override is None:
+                    self.pending_override = dict(item=item, action=action, why=override, waited_s=int(waited))
+                    return Decision(True, reason, False, override)
+                self.held += 1
+                return Decision(True, reason, True)
             return Decision(not ok, reason, False)
         except Exception as exc:
+            self.holds_on = False
             self.errors.append('check: ' + str(exc))
             return Decision(False, 'error', False)
         finally:
             self.cost += time.monotonic() - start
 
-    def note_launch(self, item, spawned):
+    def note_launch(self, item, spawned, *, raised=False):
         start = time.monotonic()
         try:
             if spawned and item in self.roles:
                 self.admitted_gb += self.settings['peak_gb'].get(self.roles[item], 0)
+            if spawned and not raised:
+                self.launched = True
+            if self.pending_override is not None and self.pending_override['item'] == item:
+                if spawned and not raised:
+                    self.escape = self.pending_override | {'item': item[:80]}
+                else:
+                    self.escape_unspawned += 1
+                    self.pending_override = None
         except Exception as exc:
+            self.holds_on = False
             self.errors.append('note_launch: ' + str(exc))
         finally:
             self.cost += time.monotonic() - start
 
     def finish(self):
         start = time.monotonic()
-        fields = dict(admission_mode=self.settings['mode'])
+        fields = dict(admission_mode=self.mode)
         try:
             now = self.clock()
             r = self.readings
@@ -375,7 +469,7 @@ class Gate:
             old = self.state['holding']
             self.state['holding'] = _bounded_holding({key: old.get(key, _iso(now)) for key in self.would_hold})
             fields.update(admission_checked=self.checked, admission_would_hold=sum(self.reasons.values()),
-                          admission_held=0, admission_reason=dict(self.reasons), admission_trips=self.trips,
+                          admission_held=self.held, admission_reason=dict(self.reasons), admission_trips=self.trips,
                           admission_readings={k: round(r[k], 2) if r and r.get(k) is not None else None
                                               for k in _SHORT + (_FULL if self.trips else ())})
             if r is not None:
@@ -388,9 +482,23 @@ class Gate:
             if self.state['holding']:
                 fields['admission_oldest_hold_s'] = max(0, int(now - min(map(_timestamp, self.state['holding'].values()))))
             if self.path is not None:
-                save_state(self.path, self.state)
+                try:
+                    save_state(self.path, self.state)
+                except Exception:
+                    if self.mode == 'enforce':
+                        self.state_problems.append('save-failed')
+                    raise
         except Exception as exc:
             self.errors.append('finish: ' + str(exc))
+        if self.mode == 'enforce':
+            if self.escape is not None:
+                fields['admission_escape'] = self.escape
+            if self.escape_due:
+                fields['admission_escape_due'] = self.escape_due
+            if self.escape_unspawned:
+                fields['admission_escape_unspawned'] = self.escape_unspawned
+            if self.state_problems:
+                fields['admission_state'] = self.state_problems
         if self.unreadable:
             fields['admission_unreadable'] = sorted(set(self.unreadable))
         if self.problems:
@@ -401,14 +509,20 @@ class Gate:
             fields['admission_test_hooks'] = True
         self.cost += time.monotonic() - start
         fields['admission_cost_ms'] = int(self.cost * 1000)
+        drops = ('admission_readings',)
+        if self.mode == 'enforce':
+            drops += ('admission_settings', 'admission_trip_since', 'admission_unreadable',
+                      'admission_reason', 'admission_oldest_hold_s', 'admission_reading_age_s', 'admission_cost_ms')
+        for key in drops:
+            if len(json.dumps(fields).encode()) <= 1024:
+                break
+            fields.pop(key, None)
         if len(json.dumps(fields).encode()) > 1024:
-            fields.pop('admission_readings', None)
-        if len(json.dumps(fields).encode()) > 1024:
-            return dict(admission_mode=self.settings['mode'], admission_error='oversize')
+            return dict(admission_mode=self.mode, admission_error='oversize')
         return fields
 
 
-def begin(*, root=None, env=None, toml_path=None, proc_root=None, cgroup_root=None, clock=None, ncpu=None, running=None):
+def begin(*, root=None, env=None, toml_path=None, proc_root=None, cgroup_root=None, clock=None, ncpu=None, running=None, allow_enforce=False):
     start = time.monotonic()
     env = os.environ if env is None else env
     args = dict(proc_root=proc_root, cgroup_root=cgroup_root, toml_path=toml_path, ncpu=ncpu)
@@ -427,6 +541,15 @@ def begin(*, root=None, env=None, toml_path=None, proc_root=None, cgroup_root=No
         if root is None:
             import fold
             root = fold.ROOT
+        raw = env.get('DOIT_ADMISSION', '').strip().lower()
+        if allow_enforce and raw in ('', 'enforce'):
+            opted_in, problem = read_enforce_file(Path(root) / ENFORCE_FILE)
+            if problem:
+                gate.problems.append(problem)
+            if opted_in:
+                gate.mode = 'enforce'
+                gate.problems = [p for p in gate.problems
+                                 if p != 'enforce only via $DOIT_ROOT/admission.toml; observing']
         gate.path = Path(root) / 'state/admission.json'
         exists = gate.path.exists()
         gate.state, usable = load_state(gate.path)
@@ -436,10 +559,19 @@ def begin(*, root=None, env=None, toml_path=None, proc_root=None, cgroup_root=No
                                  prev=gate.state, clock=gate.clock,
                                  ncpu=int(args['ncpu']) if args['ncpu'] is not None else None)
         gate.unreadable.extend(gate.readings['unreadable'])
+        if gate.mode == 'enforce' and usable and not _state_current(gate.state, gate.readings['t']):
+            usable = False
+            gate.state = _fresh()
+            gate.state_problems.append('stale')
+        gate.holds_on = gate.mode == 'enforce' and usable and not gate.errors
+        gate.loaded_trip = _timestamp(gate.state['trip_since']) if gate.state['trip_since'] else None
         gate.state = advance(gate.state, gate.readings, config)
         gate.trips = admit(PROBE_ROLE, gate.readings, running, state=gate.state, settings=config)[2]['failed']
+        gate.trip_start = (gate.loaded_trip if gate.loaded_trip is not None else gate.readings['t']) if gate.trips else None
+        gate.grades_first = gate.holds_on and any(rule != 'load-delay' for rule in gate.trips)
     except Exception as exc:
         gate.readings = None
+        gate.holds_on, gate.grades_first = False, False
         gate.trips = []
         gate.errors.append('begin: ' + str(exc))
     gate.cost = time.monotonic() - start

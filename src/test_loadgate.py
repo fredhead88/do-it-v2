@@ -318,5 +318,181 @@ class LoadgateTests(unittest.TestCase):
         signed('AC13', dict(age_s=300, trip_s=600, saved_t=saved['t'], exact_calls=True))
 
 
+class EnforcementTests(unittest.TestCase):
+    setUp = LoadgateTests.setUp
+    """Enforcing regressions use only local files and a deterministic clock."""
+    now = 1800000000.
+
+    def seed(self, *, age=60, trip=60, **changes):
+        state = lg._fresh() | dict(t=self.now-age, trip_since=lg._iso(self.now-trip)) | changes
+        lg.save_state(self.root / 'state/admission.json', state)
+        return state
+
+    def enforcing(self, *, env=None, clock=None, **kw):
+        (self.root / 'admission.toml').write_text('mode="enforce"')
+        return lg.begin(root=self.root, env={} if env is None else env, proc_root=self.proc,
+                        cgroup_root=self.cg, ncpu=8, clock=clock or (lambda: self.now),
+                        allow_enforce=True, **kw)
+
+    def pressure(self, mem=7, load=8):
+        (self.proc / 'meminfo').write_text(f'MemAvailable: {int(mem*2**20)} kB\nSwapFree: {8*2**20} kB\n')
+        (self.proc / 'loadavg').write_text(f'{load} 0 0 1/1 1\n')
+
+    def test_enforce_AC1_opt_in(self):
+        table = self.root / 'look.toml'
+        problem = 'enforce only via $DOIT_ROOT/admission.toml; observing'
+        def begin(env, allow=True):
+            return lg.begin(root=self.root, env=env, toml_path=table, proc_root=self.proc,
+                            cgroup_root=self.cg, ncpu=8, allow_enforce=allow)
+        table.write_text('[admission]\nmode="observe"')
+        for env, toml_mode, listed in (({}, 'observe', False), ({'DOIT_ADMISSION':'enforce'}, 'observe', True),
+                                       ({}, 'enforce', True)):
+            table.write_text(f'[admission]\nmode="{toml_mode}"')
+            g = begin(env)
+            self.assertEqual(g.mode, 'observe')
+            self.assertEqual(problem in g.finish().get('admission_settings', []), listed)
+        opt = self.root / 'admission.toml'
+        opt.write_text('mode="enforce"')
+        for raw in (None, '', 'enforce'):
+            for mode in ('observe', 'enforce'):
+                table.write_text(f'[admission]\nmode="{mode}"')
+                g = begin({} if raw is None else {'DOIT_ADMISSION':raw})
+                self.assertEqual(g.mode, 'enforce')
+                f = g.finish()
+                self.assertEqual(f['admission_mode'], 'enforce')
+                self.assertNotIn(problem, f.get('admission_settings', []))
+        for raw, allow, reads in (('enforce', False, 0), ('observe', True, 0), ('bogus', True, 0), ('off', True, 0)):
+            with patch.object(lg, 'read_enforce_file', wraps=lg.read_enforce_file) as read:
+                g = begin({'DOIT_ADMISSION':raw}, allow)
+                self.assertEqual(read.call_count, reads)
+                if raw == 'off':
+                    self.assertIsNone(g)
+                else:
+                    self.assertEqual(g.mode, 'observe')
+                    if raw == 'bogus':
+                        self.assertIn('bad mode', g.finish()['admission_settings'])
+        table.write_text('[admission]\nmode="off"')
+        self.assertIsNone(begin({}))
+        table.write_text('[admission]\nmode="observe"')
+        cases = [('mode="bogus"', 'bad admission.toml mode'), ('mode=1', 'bad admission.toml mode'),
+                 ('mode=true', 'bad admission.toml mode'), ('mode="off"', 'bad admission.toml mode'),
+                 ('mode="enforce"\nx=1', 'admission.toml extra keys'), ('x'*5120, 'admission.toml too large'),
+                 ('[', 'admission.toml unreadable'), ('', 'admission.toml has no mode'),
+                 ('# comment', 'admission.toml has no mode')]
+        for text, expected in cases:
+            opt.write_text(text)
+            g = begin({})
+            self.assertEqual(g.mode, 'observe')
+            self.assertIn(expected, g.finish()['admission_settings'])
+        opt.unlink()
+        opt.mkdir()
+        self.assertEqual(lg.read_enforce_file(opt), (False, 'admission.toml unreadable'))
+        signed('AC1-1649', dict(opt_in_matrix=True, bounded_file_errors=True, compatibility_never_reads=True))
+
+    def test_enforce_AC2_decisions_and_AC9_error_latches(self):
+        self.seed()
+        self.pressure()
+        g = self.enforcing()
+        for action, role in (('build','builder'), ('grade','grader'), ('rebuild','builder'),
+                             ('regrade','grader'), ('review','reviewer'), ('merge','window_gate'), (None,'builder')):
+            d = g.check(str(action), role, action=action, since=lg._iso(self.now))
+            self.assertEqual((d.would_hold, d.reason, d.hold), (True, 'mem-hard-stop', action in ('build','grade')))
+        self.pressure(20)
+        self.assertFalse(self.enforcing().check('a','builder',action='build').hold)
+        self.pressure(20, 28)
+        d = self.enforcing().check('a','builder',action='build')
+        self.assertEqual((d.would_hold, d.reason, d.hold, d.override), (True,'load-delay',False,None))
+        self.pressure()
+        g = self.enforcing(env={'DOIT_ADMISSION':'observe'})
+        self.assertFalse(g.check('a','builder',action='build').hold)
+        g = self.enforcing()
+        with patch.object(lg, 'admit', side_effect=RuntimeError('broken rule')):
+            self.assertFalse(g.check('a','builder',action='build').hold)
+        for i in range(2):
+            d = g.check(str(i),'builder',action='build')
+            self.assertFalse(d.hold)
+            self.assertIsNone(d.override)
+        self.assertIn('broken rule', g.finish()['admission_error'])
+        self.assertTrue(self.enforcing().check('a','builder',action='build',since=lg._iso(self.now)).hold)
+        with patch.object(lg, 'readings', side_effect=RuntimeError('reading')):
+            g = self.enforcing()
+        self.assertEqual(g.mode, 'enforce')
+        self.assertFalse(g.check('a','builder',action='build').hold)
+        with patch.object(lg, 'read_enforce_file', side_effect=RuntimeError('opt read')):
+            g = self.enforcing()
+        self.assertEqual(g.mode, 'observe')
+        signed('AC2-1649', dict(actions=True, load_delay_bypassed=True, errors_latch_fail_open=True))
+
+    def test_enforce_AC6_clock_and_AC8_idle(self):
+        state = self.seed(trip=2400)
+        self.pressure()
+        values = iter([self.now, self.now+1, self.now+2, self.now+3, self.now+4])
+        calls = []
+        def clock():
+            calls.append(1)
+            return next(values)
+        g = self.enforcing(clock=clock, running={'builder':1, 'reviewer':0})
+        for i, age in enumerate((1200,960,600)):
+            d = g.check(str(i),'builder',action='build',since=lg._iso(self.now-age))
+            self.assertEqual(d.override, 'max-wait' if i == 0 else None)
+            self.assertEqual(d.hold, i != 0)
+            if not d.hold:
+                g.note_launch(str(i), True)
+        f = g.finish()
+        self.assertEqual(len(calls), 5)
+        self.assertEqual(f['admission_escape'], dict(item='0', action='build', why='max-wait', waited_s=1201))
+        self.assertEqual(f['admission_escape_due'], 2)
+        self.assertEqual(lg.load_state(self.root / 'state/admission.json')[0]['trip_since'], state['trip_since'])
+        for running, trip, launched, expected in ((0,960,False,True), (1,960,False,False),
+                                                  (0,600,False,False), (0,960,True,False)):
+            self.seed(trip=trip)
+            g = self.enforcing(running={'builder':running,'reviewer':0})
+            if launched:
+                g.check('rebuild','builder',action='rebuild')
+                g.note_launch('rebuild',True)
+            d = g.check('a','builder',action='build',since=lg._iso(self.now-60))
+            self.assertEqual(d.override, 'idle-box' if expected else None)
+        signed('AC6-1649', dict(exact_clock_calls=5, waited_s=1201, due=2, independent_state_read=True))
+        signed('AC8-1649', dict(idle_box_matrix=True))
+
+    def test_enforce_AC14_state_bounds_and_save_failure(self):
+        self.pressure()
+        for age, held in ((3660,False), (-360,False), (-240,True), (3540,True)):
+            self.seed(age=age)
+            g = self.enforcing()
+            self.assertEqual(g.check('a','builder',action='build',since=lg._iso(self.now)).hold, held)
+            f = g.finish()
+            self.assertEqual('stale' in f.get('admission_state', []), not held)
+            self.assertNotIn('state', f.get('admission_unreadable', []))
+        for trip in ('not-a-time', '2026-10-26T10:00:00', '2026-10-26T10:00:00+02:00'):
+            state = lg._fresh() | dict(t=self.now-60,trip_since=trip)
+            (self.root / 'state/admission.json').write_text(json.dumps(state))
+            g = self.enforcing()
+            self.assertFalse(g.check('a','builder',action='build').hold)
+            f = g.finish()
+            self.assertIn('state', f['admission_unreadable'])
+            self.assertNotIn('stale', f.get('admission_state', []))
+        self.seed(age=3660)
+        calls = []
+        def clock():
+            calls.append(1)
+            self.assertEqual(len(calls), 1)
+            return self.now
+        with patch.object(lg, 'readings', side_effect=RuntimeError('unreadable')):
+            g = self.enforcing(clock=clock)
+        for i in range(2):
+            self.assertFalse(g.check(str(i),'builder',action='build').hold)
+        f = g.finish()
+        self.assertEqual(len(calls), 1)
+        self.assertNotIn('admission_sampled_at', f)
+        self.assertNotIn('stale', f.get('admission_state', []))
+        self.seed()
+        g = self.enforcing()
+        self.assertTrue(g.check('a','builder',action='build',since=lg._iso(self.now)).hold)
+        with patch.object(lg, 'save_state', side_effect=OSError('full disk')):
+            self.assertIn('save-failed', g.finish()['admission_state'])
+        signed('AC14-1649', dict(stale_and_future_bounds=True, invalid_times_fail_open=True, save_failed=True))
+
+
 if __name__ == '__main__':
     unittest.main()
