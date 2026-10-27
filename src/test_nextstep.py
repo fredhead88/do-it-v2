@@ -221,7 +221,8 @@ class NextStepTests(unittest.TestCase):
         infra = ['No space left on device', '[Errno 28]', 'Out of diskspace', 'ENOSPC',
                  'fatal: could not create work tree dir', 'git worktree add failed',
                  'failed git worktree add', 'Connection reset by peer', 'Connection refused',
-                 'at capacity', 'overloaded', 'HTTP 429']
+                 'at capacity', 'overloaded', 'HTTP 429',
+                 'ledger cache: lock not acquired within 120s (/home/x/.do-it/cache/ledger-abc.lock)']
         for text in infra:
             with self.subTest(text=text):
                 self.assertEqual(ns.classify_failure(text, 1), 'infra')
@@ -233,7 +234,7 @@ class NextStepTests(unittest.TestCase):
             self.assertEqual(ns.classify_failure(text, 124), 'infra')
             for code in (None, 0, 1, 127):
                 self.assertEqual(ns.classify_failure(text, code), 'unknown')
-        for text in ['14290', 'all green', 'HTTP 14290']:
+        for text in ['14290', 'all green', 'HTTP 14290', 'ledger cache: lock acquired']:
             self.assertEqual(ns.classify_failure(text, 1), 'unknown')
         self.assertEqual(ns.classify_failure('ENOSPC', None), 'unknown')
 
