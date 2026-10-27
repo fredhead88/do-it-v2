@@ -156,7 +156,9 @@ def candidates(events, specs, now, *, head_of=None):
     """One row per `written` spec: `{spec, charter, project, since, status,
     reason}` — `status` `dispatchable`/`seat-wait`/`blocked`, oldest `since`
     first (SD1/SD2). `head_of(project)` is read only for a single-token Base
-    declaration, once per project, and defaults to the repository's symbolic HEAD."""
+    declaration, once per project, and defaults to the repository's symbolic HEAD.
+    Fresh resource-held written rows seat-wait without consuming capacity;
+    held grades in other unsettled states get trailing resource-wait rows."""
     reader = head_of if head_of is not None else _head_of
     heads = {}
 
@@ -217,16 +219,35 @@ def candidates(events, specs, now, *, head_of=None):
                      "status": "blocked" if reason else None, "reason": reason,
                      "_dispatch_failed": is_fail, "_since_dt": since})
     rows.sort(key=lambda r: r["_since_dt"])
+    try:
+        import loadgate
+        held = loadgate.held_items(now=now)
+    except Exception:
+        held = frozenset()
     slots = max(0, capacity() - _builder_in_flight_count(events))
     for r in rows:
         if r["status"] == "blocked":
             continue
-        if slots > 0:
+        if held and loadgate.hold_key(r['spec']) in held:
+            r['status'], r['reason'] = 'seat-wait', 'resource-wait'
+        elif slots > 0:
             r["status"], slots = "dispatchable", slots - 1
         else:
             r["status"] = "seat-wait"
     for r in rows:
         del r["_since_dt"]
+    if held:
+        for s in specs.values():
+            sid = s['id']
+            if s.get('state') == 'written' or s.get('state') in dispatch.SETTLED_STATES:
+                continue
+            if loadgate.hold_key(sid) not in held:
+                continue
+            evs = s.get('evs') or by_subject.get(sid, [])
+            project = next((e.get('project') for e in reversed(evs) if e.get('project')), None) or 'unknown'
+            rows.append(dict(spec=sid, charter=dispatch.resolve_charter(events, sid, None), project=project,
+                             since=now.isoformat(timespec='seconds'), limit_min=limit_min,
+                             status='seat-wait', reason='resource-wait', _dispatch_failed=False))
     return rows
 
 

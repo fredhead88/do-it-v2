@@ -393,13 +393,22 @@ def run_steps(events, specs, now, *, dispatcher=None, dry_run=False, handled=fro
     if not dry_run:
         try:
             import loadgate
-            gate = loadgate.begin(running=in_flight)
+            gate = loadgate.begin(running=in_flight, allow_enforce=admission is not None)
         except Exception as exc:
             if admission is not None:
                 admission['admission_error'] = str(exc)[:160]
     out = []
+    gate_disabled = False
     try:
-        for step in sorted(steps, key=lambda s: (s.since, s.item)):
+        try:
+            grades_first = bool(gate is not None and gate.grades_first)
+        except Exception:
+            grades_first = False
+        def visit_order(step):
+            grade = (step.action == 'grade' and step.owner == 'tick' and step.state != 'hold'
+                     and not step.reason.startswith('undetermined:'))
+            return (not grade if grades_first else False, step.since, step.item)
+        for step in sorted(steps, key=visit_order):
             if step.item in handled:
                 continue
             if step.reason.startswith('undetermined:') or step.state == 'hold':
@@ -422,27 +431,37 @@ def run_steps(events, specs, now, *, dispatcher=None, dry_run=False, handled=fro
             if role in slots and slots[role] <= 0:
                 out.append(f'seat-wait {step.item} {step.action}')
                 continue
-            if gate is not None:
+            if gate is not None and not gate_disabled:
                 try:
-                    gate.check(step.item, role or 'window_gate')
+                    decision = gate.check(step.item, role or 'window_gate', action=step.action, since=step.since)
+                    if decision.hold:
+                        out.append(f'resource-wait {step.item} {step.action}')
+                        continue
+                    if decision.override:
+                        detail = decision.override
+                        if detail == 'max-wait':
+                            detail += f" waited_s={gate.pending_override['waited_s']}"
+                        out.append(f'resource-escape {step.item} {step.action} {detail}')
                 except Exception as exc:
                     gate_errors.append('check: ' + str(exc))
+                    gate_disabled = getattr(gate, 'mode', 'observe') == 'enforce'
             if dry_run:
                 out.append(f'would act {step.item} {step.action}')
                 if role in slots:
                     slots[role] -= 1
                 continue
             try:
-                spawned = True  # Any exception may follow a started process.
+                spawned, raised = True, True  # Any exception may follow a started process.
                 try:
                     spawn = launch(step, dispatcher=runner)
-                    spawned = bool(spawn)
+                    spawned, raised = bool(spawn), False
                 finally:
-                    if gate is not None:
+                    if gate is not None and not gate_disabled:
                         try:
-                            gate.note_launch(step.item, spawned)
+                            gate.note_launch(step.item, spawned, raised=raised)
                         except Exception as exc:
                             gate_errors.append('note_launch: ' + str(exc))
+                            gate_disabled = getattr(gate, 'mode', 'observe') == 'enforce'
                 if spawn:
                     out.append(f'acted {step.item} {step.action} spawn={spawn}')
                     if role in slots:

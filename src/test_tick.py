@@ -424,6 +424,22 @@ class AdmissionTests(unittest.TestCase):
         _launcher_evidence('AC8-1650', dict(checked=8, would_hold=8, held=0, calls_and_events_equal=True,
                                          peaks=observe[4], exceptional_finish=True))
 
+    def test_enforce_AC12_without_machine_opt_in(self):
+        observed = self.dispatch_pass('observe')
+        original = self.isolated
+        @contextlib.contextmanager
+        def isolated(mode):
+            with original(mode) as (root, stack):
+                table = root / 'look.toml'
+                table.write_text('[admission]\nmode="enforce"')
+                stack.enter_context(patch.dict(os.environ,DOIT_ADMISSION_TEST_TOML=str(table)))
+                yield root,stack
+        with patch.object(self,'isolated',side_effect=isolated):
+            requested = self.dispatch_pass('enforce')
+        self.assertEqual(observed[:3],requested[:3])
+        self.assertIn('enforce only via $DOIT_ROOT/admission.toml; observing',requested[3]['admission_settings'])
+        _launcher_evidence('AC12-1649',dict(no_file_enforce_equals_observe=True))
+
     def test_AC9_dry_and_begin_failures(self):
         import loadgate
         with patch.object(loadgate, 'begin') as begin:
@@ -516,10 +532,336 @@ class AdmissionTests(unittest.TestCase):
         _launcher_evidence('AC12-1650', dict(check_finish_fail_open=True, not_reached=['boom', 'seat'], off_empty=True))
 
 
+class EnforcementTests(unittest.TestCase):
+    setUp = AdmissionTests.setUp
+    step = AdmissionTests.step
+    rows = AdmissionTests.rows
+    prepare = AdmissionTests.prepare
+    dispatcher = AdmissionTests.dispatcher
+
+    def ago(self, minutes):
+        return (self.now - datetime.timedelta(minutes=minutes)).isoformat(timespec='seconds')
+
+    @contextlib.contextmanager
+    def enforcing(self, *, mem=7, trip=1, age=1, seats=3, running=1, wait=15):
+        import loadgate as lg
+        with AdmissionTests.isolated(self, '') as (root, stack):
+            self.root, self.events, self.calls = root, [], []
+            (root / 'events').mkdir()
+            (root / 'content').mkdir()
+            (root / 'admission.toml').write_text('mode="enforce"')
+            (root / 'models.toml').write_text(f'[seats]\nbuilder={seats}\nreviewer=1\n')
+            table = root / 'look.toml'
+            table.write_text(f'[admission]\nmode="observe"\nmax_wait_min={wait}\n')
+            stack.enter_context(patch.dict(os.environ, DOIT_ADMISSION_TEST_TOML=str(table)))
+            self.memory(mem)
+            state = lg._fresh() | dict(t=self.now.timestamp()-age*60, trip_since=self.ago(trip))
+            lg.save_state(root / 'state/admission.json', state)
+            # Exercise the real capacity and in-flight readers with a fixture ledger.
+            stack.enter_context(patch.object(autodispatch, 'capacity', new=self.builder_capacity))
+            stack.enter_context(patch.object(lane_driver, '_in_flight_role', new=self.in_flight))
+            if running:
+                self.events.append(dict(type='spawn-started', subject='L-spec-9990', spawn='L-builder-9990',
+                    role='builder', ts=self.ago(1), window_min=90))
+            original = lg.begin
+            def begin(**kw):
+                return original(clock=lambda: self.now.timestamp(), **kw)
+            stack.enter_context(patch.object(lg, 'begin', side_effect=begin))
+            yield root, stack
+
+    def builder_capacity(self):
+        import tomllib
+        return tomllib.loads((self.root / 'models.toml').read_text())['seats']['builder']
+
+    def in_flight(self, events, now, role):
+        # The unpatched implementation is retained below the class definition.
+        return _enforce_in_flight(events, now, role)
+
+    def memory(self, mem):
+        (self.root / 'proc/meminfo').write_text(f'MemAvailable: {int(mem*2**20)} kB\nSwapFree: {8*2**20} kB\n')
+
+    def steps(self):
+        actions = ['build', 'grade', 'rebuild', 'regrade', 'review', 'merge', 'review']
+        return [self.step(a, item=f'L-spec-{9601+i}', since=self.ago(1 if i == 6 else 2))
+                for i,a in enumerate(actions)] + [self.step(state='hold', item='L-spec-9699', clears='decision')]
+
+    def run_pass(self, steps, *, outcomes=None, admission=True):
+        info, calls = {}, []
+        def launch(step, **kw):
+            calls.append((step.item, step.action))
+            result = (outcomes or {}).get(step.item, 'spawn')
+            if isinstance(result, Exception):
+                raise result
+            return result
+        with patch.object(tick, 'launch', side_effect=launch):
+            lines = tick.run_steps(self.events, {}, self.now, steps=steps,
+                                   **({'admission':info} if admission else {}))
+        return lines, calls, info
+
+    def test_enforce_AC3_AC4_and_AC5_retry(self):
+        with self.enforcing() as (root, stack):
+            for step in self.steps():
+                self.prepare(step.item)
+                self.events[-1]['ts'] = step.since
+            self.events += [dict(type='queue-entered', subject='L-spec-9606', ts=self.ago(3), project='proj')]
+            # Compare actual dispatch and ledger writes from independent identical roots.
+            def actual():
+                calls = []
+                real_launch = tick.launch
+                def launch(step, **kw):
+                    calls.append((step.item,step.action))
+                    return real_launch(step, **kw)
+                with patch.object(tick, 'launch', side_effect=launch):
+                    info = {}
+                    lines = tick.run_steps(self.events, {}, self.now, steps=self.steps(),
+                                           dispatcher=self.dispatcher, admission=info)
+                events = self.rows() if tick.tick_path().exists() else []
+                return lines,calls,[(e['type'],e.get('subject')) for e in events],info
+            held = actual()
+            self.assertIn('resource-wait L-spec-9601 build', held[0])
+            self.assertIn('resource-wait L-spec-9602 grade', held[0])
+            self.assertEqual(held[3]['admission_held'], 2)
+            self.assertFalse(any(sid in ('L-spec-9601','L-spec-9602') for _,sid in held[2]))
+            # The held first build re-derives with its ledger timestamp unchanged.
+            evs = [e for e in self.events if e.get('subject') == 'L-spec-9601']
+            specs = fold.fold(evs)[0]
+            again = next(s for s in tick._steps(evs, specs, self.now) if s.item == 'L-spec-9601')
+            self.assertEqual((again.action,again.owner,again.since), ('build','tick',self.steps()[0].since))
+            row = fold.step_row(again, lane_rules.load(), self.now)
+            self.assertIn(lane_rules.ladder(evs,row,self.now), ('act','retry'))
+            self.memory(20)
+            lines, calls, info = self.run_pass([again])
+            self.assertEqual(calls, [(again.item,'build')])
+            self.assertEqual(info['admission_held'], 0)
+        with self.enforcing(mem=20):
+            calm = self.run_pass(self.steps())
+        with self.enforcing(mem=20), patch.dict(os.environ, DOIT_ADMISSION='off'):
+            off = self.run_pass(self.steps())
+        self.assertEqual(calm[:2],off[:2])
+        with self.enforcing(), patch.dict(os.environ, DOIT_ADMISSION='off'):
+            off = self.run_pass(self.steps())
+        with self.enforcing(), patch.dict(os.environ,DOIT_ADMISSION='off'):
+            for step in self.steps():
+                self.prepare(step.item)
+                self.events[-1]['ts'] = step.since
+            self.events += [dict(type='queue-entered',subject='L-spec-9606',ts=self.ago(3),project='proj')]
+            off_actual = actual()
+        self.assertEqual(held[2],[row for row in off_actual[2] if row[1] not in ('L-spec-9601','L-spec-9602')])
+        self.assertEqual(held[1], [c for c in off[1] if c[0] not in ('L-spec-9601','L-spec-9602')])
+        self.assertIn('seat-wait L-spec-9607 review', held[0])
+        for ac in ('AC3','AC4','AC5'):
+            _launcher_evidence(ac+'-1649', dict(held=2, no_held_events=True, calm_equals_off=True, retry_derived=True))
+
+    def test_enforce_AC6_AC7_escape_and_grades_first(self):
+        for outcome in ('spawn',None,ValueError('refused')):
+            with self.enforcing(trip=40):
+                steps = [self.step('build',item=str(i),since=self.ago(age)) for i,age in enumerate((20,16,10))]
+                lines,calls,info = self.run_pass(steps,outcomes={'0':outcome})
+                winner = '0' if outcome else '1'
+                if isinstance(outcome,Exception):
+                    winner = '1'
+                self.assertIn('admission_escape',info,info)
+                self.assertEqual(info['admission_escape']['item'],winner)
+                self.assertEqual(info['admission_escape_due'],2)
+                self.assertEqual(len(calls),1 if winner == '0' else 2)
+                if winner == '0':
+                    self.assertLess(lines.index('resource-escape 0 build max-wait waited_s=1200'),
+                                    lines.index('acted 0 build spawn=spawn'))
+                else:
+                    self.assertEqual(info['admission_escape_unspawned'],1)
+        for mem,outcome in ((7,'spawn'),(7,None),(20,'spawn')):
+            with self.enforcing(trip=40, mem=mem):
+                steps = [self.step('build',item='b',since=self.ago(30)),self.step('grade',item='g',since=self.ago(20))]
+                lines,calls,info = self.run_pass(steps,outcomes={'g':outcome})
+                self.assertEqual(calls[0][0], 'g' if mem == 7 else 'b')
+                if mem == 7:
+                    self.assertEqual(info['admission_escape']['item'],'g' if outcome else 'b')
+        with self.enforcing(trip=40):
+            info = {}
+            with patch.object(tick,'launch',side_effect=RuntimeError('after dispatch')):
+                with self.assertRaisesRegex(RuntimeError,'after dispatch'):
+                    tick.run_steps(self.events,{},self.now,
+                        steps=[self.step('build',item='raised',since=self.ago(20))],admission=info)
+            self.assertEqual(info['admission_escape_due'],1)
+            self.assertEqual(info['admission_escape_unspawned'],1)
+            self.assertNotIn('admission_escape',info)
+        with self.enforcing(trip=10):
+            _,calls,info = self.run_pass([self.step('build',since=self.ago(20))])
+            self.assertEqual(calls,[])
+            self.assertNotIn('admission_escape_due',info)
+        with self.enforcing(trip=70,wait=600):
+            _,calls,info = self.run_pass([self.step('build',since=self.ago(61))])
+            self.assertEqual(len(calls),1)
+            self.assertIn('max_wait_min capped at 60',info['admission_settings'])
+        for ac in ('AC6','AC7'):
+            _launcher_evidence(ac+'-1649', dict(max_wait=True, unspawned_reoffers=True, grade_first=True))
+
+    def test_enforce_AC8_idle_and_AC9_fail_open(self):
+        import loadgate as lg
+        for running, trip, result, idle in ((0,16,None,True),(1,16,None,False),(0,10,None,False),(0,16,'spawn',False)):
+            with self.enforcing(running=running,trip=trip):
+                steps = [self.step('rebuild',item='r',since=self.ago(2)),self.step('build',item='b',since=self.ago(1))]
+                _,calls,info = self.run_pass(steps,outcomes={'r':result})
+                self.assertEqual(('b','build') in calls,idle)
+                if idle:
+                    self.assertEqual(info['admission_escape']['why'],'idle-box')
+        for method in ('check','note_launch'):
+            with self.enforcing() as (root,stack):
+                steps = [self.step(a,item=str(i),since=self.ago(age))
+                         for i,(a,age) in enumerate((('grade',1),('build',3),('rebuild',2),('build',1)))]
+                original = getattr(lg.Gate,method)
+                count = []
+                def fault(g,*args,**kw):
+                    count.append(1)
+                    if method == 'note_launch' or len(count) == 3:
+                        raise RuntimeError('latch')
+                    return original(g,*args,**kw)
+                with patch.object(lg.Gate,method,new=fault):
+                    _,calls,info = self.run_pass(steps)
+                self.assertEqual(calls,[('2','rebuild'),('3','build')])
+                self.assertEqual(info['admission_held'],2)
+                self.assertIn('latch',info['admission_error'])
+        for fault in ('begin','import','check','state'):
+            with self.enforcing() as (root,stack):
+                if fault == 'begin':
+                    stack.enter_context(patch.object(lg,'begin',side_effect=RuntimeError('begin')))
+                elif fault == 'import':
+                    stack.enter_context(patch.dict(sys.modules,{'loadgate':None}))
+                elif fault == 'check':
+                    stack.enter_context(patch.object(lg.Gate,'check',side_effect=RuntimeError('check')))
+                else:
+                    (root / 'state/admission.json').write_text('bad')
+                _,calls,info = self.run_pass(self.steps())
+                self.assertEqual(info.get('admission_held',0),0)
+                self.assertTrue(('L-spec-9601','build') in calls and ('L-spec-9602','grade') in calls)
+                if fault == 'check':
+                    self.assertEqual(calls[0][1],'grade')
+                if fault == 'state':
+                    self.assertIn('state',info['admission_unreadable'])
+        for ac in ('AC8','AC9'):
+            _launcher_evidence(ac+'-1649', dict(idle_matrix=True, errors_disable_later_holds=True, earlier_holds_preserved=True))
+
+    def test_enforce_AC10_seats_and_generated_progress(self):
+        for mem, acted, waiting in ((20,2,2),(7,0,0)):
+            with self.enforcing(mem=mem,seats=2,running=0):
+                lines,calls,info = self.run_pass([self.step('build',item=str(i),since=self.ago(1)) for i in range(4)])
+                self.assertEqual(len(calls),acted,info)
+                self.assertEqual(sum(l.startswith('seat-wait') for l in lines),waiting)
+                self.assertEqual(info['admission_held'],4 if mem == 7 else 0)
+        for i in range(20):
+            def scenario(off=False):
+                with self.enforcing(mem=7 if i%2 else 20,seats=i%4,running=0,trip=20 if i%3 else 1), \
+                     patch.dict(os.environ,DOIT_ADMISSION='off' if off else ''):
+                    steps = [self.step(a,item=str(n),since=self.ago(20 if n%2 else 1)) for n,a in
+                             enumerate(('build','grade','rebuild','regrade','review','build','merge','review'))]
+                    return self.run_pass(steps,outcomes={'2':None if i%3 else ValueError('fixture')})
+            on, off = scenario(),scenario(True)
+            for role,actions in (('builder',('build','rebuild')),('grader',('grade','regrade')),('reviewer',('review',)),('window_gate',('merge',))):
+                def spawned(result):
+                    return sum(l.startswith('acted ') and l.split()[2] in actions for l in result[0])
+                self.assertLessEqual(spawned(on),spawned(off))
+                if role == 'builder':
+                    self.assertLessEqual(spawned(on),i%4)
+                if role == 'reviewer':
+                    self.assertLessEqual(spawned(on),1)
+            self.assertFalse(any(l.startswith('resource-wait') and l.split()[2] not in ('build','grade') for l in on[0]))
+            self.assertLessEqual(sum(l.startswith('resource-escape') for l in on[0]),1)
+        _launcher_evidence('AC10-1649',dict(fixtures=20, seats_respected=True, bypasses_progress=True))
+
+    def test_enforce_AC14_AC15_state_and_seat_wait_clock(self):
+        import loadgate as lg
+        for age,held in ((61,False),(-6,False),(-4,True),(59,True)):
+            with self.enforcing(age=age):
+                _,calls,info = self.run_pass(self.steps())
+                self.assertEqual(info['admission_held'],2 if held else 0)
+                self.assertEqual('stale' in info.get('admission_state',[]),not held)
+        with self.enforcing(seats=1,trip=40) as (root,stack):
+            step = self.step('build',since=self.ago(20))
+            lines,calls,info = self.run_pass([step])
+            self.assertEqual(calls,[])
+            self.assertTrue(lines[0].startswith('seat-wait'))
+            self.assertNotIn(step.item,lg.load_state(root / 'state/admission.json')[0]['holding'])
+            (root / 'models.toml').write_text('[seats]\nbuilder=2\n')
+            self.now += datetime.timedelta(minutes=1)
+            lines,calls,info = self.run_pass([step])
+            self.assertEqual(info['admission_escape']['waited_s'],1260)
+        with self.enforcing(seats=3,trip=40) as (root,stack):
+            state,_ = lg.load_state(root / 'state/admission.json')
+            state['holding'] = {f'other-{i}':self.ago(30) for i in range(64)}
+            lg.save_state(root / 'state/admission.json',state)
+            lines,calls,info = self.run_pass([self.step('build',item=f'{i:03}',since=self.ago(20)) for i in range(100)])
+            self.assertEqual(calls,[('000','build')])
+            # One running builder plus the escape leaves a free seat, so
+            # every remaining step reaches the resource gate.
+            self.assertEqual(info['admission_escape']['item'],'000')
+            self.assertEqual(info['admission_escape']['why'],'max-wait')
+            self.assertEqual(info['admission_escape']['waited_s'],1200)
+            self.assertEqual(info['admission_escape_due'],100)
+            self.assertEqual(info['admission_held'],99)
+            self.assertEqual(sum(line.startswith('resource-wait') for line in lines),99)
+            self.assertFalse(any(line.startswith('seat-wait') for line in lines))
+        _launcher_evidence('AC14-1649',dict(freshness_bounds=True))
+        _launcher_evidence('AC15-1649',dict(seat_wait_clock_preserved=True, backlog=100,
+                                          spawned=1, held=99, resource_waits=99, due=100))
+
+    def test_enforce_AC11_tick_and_AC17_entrypoints(self):
+        import loadgate as lg
+        for entry in ('direct','auto','lane'):
+            with self.enforcing() as (root,stack):
+                steps = self.steps()
+                stack.enter_context(patch.object(tick,'_steps',return_value=steps))
+                with patch.object(lg,'read_enforce_file',wraps=lg.read_enforce_file) as reader, \
+                     patch.object(tick,'launch',return_value='spawn') as launch:
+                    if entry == 'direct':
+                        lines = tick.run_steps(self.events,{},self.now,steps=steps)
+                    else:
+                        lines = (autodispatch if entry == 'auto' else lane_driver).run(self.events,{},self.now)
+                    reader.assert_not_called()
+                    self.assertFalse(any(l.startswith('resource-wait') for l in lines))
+                    self.assertIn('build',[c.args[0].action for c in launch.call_args_list])
+        for entry in ('record','wait'):
+            with self.enforcing(trip=20 if entry == 'record' else 1,seats=4) as (root,stack):
+                steps = ([self.step('build',item=f'L-spec-{10000+i}',since=self.ago(20)) for i in range(1000)]
+                         if entry == 'record' else self.steps())
+                for module,name,value in ((tick,'_steps',steps),(tick,'launch','spawn'),
+                    (autodispatch,'redispatch_dead',[]),(merge_queue,'enqueue_due',[]),
+                    (intake,'run',None),(carry,'sync_v4',None),(_watchdog_look,'emit_once',None),
+                    (_watchdog_look,'heartbeat_missed',False)):
+                    stack.enter_context(patch.object(module,name,return_value=value))
+                import tree_cleanup
+                stack.enter_context(patch.object(tree_cleanup,'reap_worktrees',return_value=([],[])))
+                with patch.object(tick,'run_steps',wraps=tick.run_steps) as run:
+                    if entry == 'record':
+                        tick._record()
+                    else:
+                        old = fold.ROOT,fold.EVENTS
+                        try:
+                            tick.wait(root=root,max_s=0)
+                        finally:
+                            fold.ROOT,fold.EVENTS = old
+                    self.assertIsInstance(run.call_args.kwargs['admission'],dict)
+                ticks = [e for e in self.rows() if e['type'] == 'tick']
+                self.assertEqual(len(ticks),1)
+                info = {k:v for k,v in ticks[0].items() if k.startswith('admission_')}
+                self.assertEqual(info['admission_mode'],'enforce')
+                self.assertLessEqual(len(json.dumps(info).encode()),1024)
+                self.assertEqual(info['admission_held'],999 if entry == 'record' else 2)
+                if entry == 'record':
+                    self.assertEqual(info['admission_checked'],1000)
+                    self.assertEqual(info['admission_escape_due'],1000)
+                    self.assertEqual(info['admission_escape']['why'],'max-wait')
+                    self.assertFalse(any(e.get('subject') in {s.item for s in steps} for e in self.rows()))
+        _launcher_evidence('AC11-1649',dict(checked=1000,held=999,due=1000,one_tick=True,bounded=True))
+        _launcher_evidence('AC17-1649',dict(compatibility_no_reads=True,wait_enforces=True))
+
+
+_enforce_in_flight = lane_driver._in_flight_role
+
+
 # These script suites predate unittest. Respect the authored targeted checks
 # before running the historical script assertions; unfiltered CI still runs both.
 if __name__ == '__main__' and '-k' in sys.argv and sys.argv[-1] in {
-        'launch', 'sole_launcher', 'manual_routine', 'launch_failure', 'no_double_gate', 'AdmissionTests'}:
+        'launch', 'sole_launcher', 'manual_routine', 'launch_failure', 'no_double_gate', 'AdmissionTests', 'EnforcementTests'}:
     unittest.main()
 
 # An idle tick: one tick event, lane 0, nothing spawned and no `spawned` key to report it.
