@@ -113,6 +113,26 @@ def gate(events, subject, packet, emit, fail):
     bundle = bundle_for(events, subject, ready) if bundle_event else None
     if failure_newer or (bundle_event and bundle is None):
         reason = failed.get("reason", "runner failed") if failure_newer else "bundle-unreadable"
+        if ready and failure_newer and (failed.get("reason_code") == "wall-cap" or reason == "wall cap exceeded"):
+            # Dispatch's infra gate has already enforced retry_at. A retry is
+            # claimed visibly before launch so repeated dispatches cannot fan out.
+            later = events[events.index(failed) + 1:]
+            retried = any(e.get("subject") == subject and e.get("type") == "infra-failure"
+                          and e.get("role") == "grader" for e in later)
+            if retried:
+                claimed = any(e.get("subject") == subject and e.get("type") == "grading-preflight-failed"
+                              and e.get("sha") == ready and e.get("reason") == "wall-cap-retry"
+                              for e in later)
+                if not claimed:
+                    emit("grading-preflight-failed", role="grader", capability="runner",
+                         reason="wall-cap-retry", sha=ready)
+                    subprocess.Popen([str(pathlib.Path(__file__).resolve().parents[1] / "doit"),
+                                      "run-checks", subject, "--sha", ready],
+                                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
+                fail("evidence bundle pending after wall-cap retry", reason="wall-cap-retry")
+            emit("grading-preflight-failed", role="grader", capability="runner", reason=reason)
+            fail(reason, reason="wall-cap")
         emit("grading-preflight-failed", role="grader", capability="runner", reason=reason)
         fail(reason, reason="preflight:runner")
     digest = re.escape(bundle["event"]["bundle_sha256"]) if bundle else ""

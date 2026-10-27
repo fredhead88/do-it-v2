@@ -263,19 +263,20 @@ def _run_tree(spec, sha, repo, row, commands, tail_dir, offset, tail_limit, dead
     if tree.exists() or auxiliary.exists():
         raise Undetermined("runner scratch already exists")
     auxiliary.mkdir()
-    env = grading_env._clean_env()
-    if row.get("venv"):
-        # Match db_setup's venv resolution for absolute and tree-relative paths.
-        venv_bin = tree / row["venv"] / "bin"
-        env["PATH"] = str(venv_bin) + os.pathsep + env.get("PATH", os.defpath)
-    for name in ("DOIT_LEDGER_FILE", "DOIT_SUPERVISED"):
-        env.pop(name, None)
-    for name, relative in (("HOME", "home"), ("DOIT_ROOT", "root")):
-        path = auxiliary / relative
-        path.mkdir()
-        env[name] = str(path)
-    rows, parsed, missing, rewrites = [], [], [], []
     try:
+        env = grading_env._clean_env()
+        if row.get("venv"):
+            # Match db_setup's venv resolution for absolute and tree-relative paths.
+            venv_bin = tree / row["venv"] / "bin"
+            env["PATH"] = str(venv_bin) + os.pathsep + env.get("PATH", os.defpath)
+        for name in ("DOIT_LEDGER_FILE", "DOIT_SUPERVISED"):
+            env.pop(name, None)
+        for name, relative in (("HOME", "home"), ("DOIT_ROOT", "root"), ("TMPDIR", "tmp")):
+            path = auxiliary / relative
+            path.mkdir()
+            env[name] = str(path.resolve())
+        env["TMP"] = env["TEMP"] = env["TMPDIR"]
+        rows, parsed, missing, rewrites = [], [], [], []
         _required(["git", "clone", "--shared", "--no-checkout", str(repo), str(tree)],
                   phase="clone", env=env, deadline=deadline)
         _required(["git", "-C", str(tree), "checkout", "--detach", sha],
@@ -345,7 +346,6 @@ def _event(spec, project, kind, **fields):
 
 
 def run(spec, requested_sha=None, criteria=None):
-    deadline = time.monotonic() + WALL_CAP
     started = datetime.now(timezone.utc).isoformat()
     sha, project = requested_sha or "unresolved", None
     tails = path = None
@@ -357,6 +357,15 @@ def run(spec, requested_sha=None, criteria=None):
         project = next((e["project"] for e in events if e.get("project")), None)
         if not project or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", project):
             raise Undetermined("spec has no ledger project")
+        row = grading_env._project_row(project)
+        cap = row.get("runner_wall_cap_s", WALL_CAP)
+        if "runner_wall_cap_s" in row and (type(cap) is not int or cap <= 0):
+            raise Undetermined("runner_wall_cap_s must be a positive integer")
+        deadline = time.monotonic() + cap
+        previous = signal.signal(signal.SIGALRM, _expired)
+        resources.callback(signal.signal, signal.SIGALRM, previous)
+        resources.callback(signal.setitimer, signal.ITIMER_REAL, 0)
+        signal.setitimer(signal.ITIMER_REAL, cap)
         repo = grading_env._project_checkout(project)
         env = grading_env._clean_env()
         done = next((e for e in reversed(events) if e["type"] == "build-done"), {})
@@ -382,7 +391,6 @@ def run(spec, requested_sha=None, criteria=None):
             base_sha = _resolve(repo, base_sha, env, deadline)
         text = (fold.ROOT / "content" / f"{spec}.md").read_text()
         commands, judgment = _commands(text, project, criteria)
-        row = grading_env._project_row(project)
         tails = path.with_suffix("")
         tails.mkdir(parents=True)
         limit = min(TAIL_CAP, DIRECTORY_CAP // (2 * len(commands)))
@@ -433,6 +441,8 @@ def run(spec, requested_sha=None, criteria=None):
         reason = "infra:" + category if category else (str(exc) if isinstance(exc, Undetermined)
                   else "runner could not establish evidence (" + type(exc).__name__ + ")")
         fields = {"env": NO_PROD_ENV} if isinstance(exc, ProductionDataUnavailable) else {}
+        if isinstance(exc, WallCap):
+            fields["reason_code"] = "wall-cap"
         _event(spec, project, "evidence-bundle-failed", sha=sha, reason=reason, **fields)
         raise Undetermined(reason) from None
     finally:
@@ -449,9 +459,7 @@ def main(argv=None):
     criteria = set(args.criteria.split(",")) if args.criteria is not None else None
     if criteria is not None and any(not re.fullmatch(r"AC\d+", c) for c in criteria):
         parser.error("criteria must be comma-separated AC ids")
-    previous = signal.signal(signal.SIGALRM, _expired)
     interrupts = {sig: signal.signal(sig, _interrupted) for sig in (signal.SIGINT, signal.SIGTERM)}
-    signal.setitimer(signal.ITIMER_REAL, WALL_CAP)
     try:
         path = run(args.spec, args.sha, criteria)
         print(path.read_text().rstrip() if args.json else path)
@@ -461,7 +469,6 @@ def main(argv=None):
         return 2
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
-        signal.signal(signal.SIGALRM, previous)
         for sig, handler in interrupts.items():
             signal.signal(sig, handler)
 

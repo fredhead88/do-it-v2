@@ -1190,6 +1190,12 @@ def _main(a):
 
     def fail(why, reason=None, exit_code=1, backend_failure=False):
         import grading_env
+        if a.role == "grader" and reason == "wall-cap":
+            machine_failure(why, exit_code, category="runner-or-network")
+            sys.exit(2)
+        if a.role == "grader" and reason == "wall-cap-retry":
+            print(f"dispatch: {why}", file=sys.stderr)
+            sys.exit(2)
         # Deterministic packet/output guard failures are work; process failures
         # need the classifier, and infra setup diagnostics always take the hold.
         if (backend_failure or grading_env.failure_kind(why, exit_code) == "infra") and machine_failure(why, exit_code):
