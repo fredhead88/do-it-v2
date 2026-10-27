@@ -8,7 +8,8 @@ Everything is a fixture — `DOIT_ROOT` points under a fresh temp dir, and
 independent guard: even if this stub failed to intercept, a real exec would
 hit `/bin/false`, never GitHub.
 """
-import base64, json, os, pathlib, sys, tempfile
+import base64, contextlib, io, json, os, pathlib, sys, tempfile
+from unittest.mock import patch
 
 TMP = pathlib.Path(tempfile.mkdtemp(prefix="intake-test-"))
 os.environ["DOIT_ROOT"] = str(TMP)
@@ -316,6 +317,82 @@ check(intake.comment(url17, "hi <!--m-->", "<!--m-->") is False,
      "AC17: comment() returns False on a ghlimit.run skip tuple")
 check(intake.close(url17) is False, "AC17: close() returns False on a ghlimit.run skip tuple")
 STUB.skip_mode = False
+
+# ══ L-spec-1726 AC1 · batches larger than gh's default are registered in full ══
+reset()
+set_trusted(("batch-author", "batch@example.com"))
+STUB.listings["inbound-spec"] = [
+    pr(f"https://github.com/x/y/pull/{n}", n, "batch-author") for n in range(45)
+]
+batch_stderr = io.StringIO()
+with contextlib.redirect_stderr(batch_stderr):
+    batch = intake.run([])
+check(intake.PR_LIST_LIMIT == 1000, "L-spec-1726 AC1: the list limit is 1000")
+batch_calls = [c for c in CALLS if c[:3] == ["gh", "pr", "list"]]
+check(len(batch_calls) == 2, "L-spec-1726 AC1: still one listing call per label")
+for argv in batch_calls:
+    check("--limit" in argv and argv[argv.index("--limit") + 1] == str(intake.PR_LIST_LIMIT),
+          f"L-spec-1726 AC1: explicit list limit: {argv}")
+    check(argv[argv.index("--json") + 1] ==
+          "url,number,author,title,body,createdAt,files,headRefOid",
+          f"L-spec-1726 AC1: unchanged JSON fields: {argv}")
+batch_registered = [e for e in events_in("intake") if e["type"] == "inbound-registered"]
+check(len(batch["spec_prs"]) == len(batch_registered) == 45,
+      "L-spec-1726 AC1: all 45 PRs returned and registered")
+check({e["subject"] for e in batch_registered} == {r["url"] for r in STUB.listings["inbound-spec"]},
+      "L-spec-1726 AC1: every batch PR is registered")
+check(batch_stderr.getvalue() == "", "L-spec-1726 AC1: no warning below the limit")
+print("L-spec-1726 AC1 ok")
+
+# ══ L-spec-1726 AC2 · warn at the cap; a partial listing cannot prove absence ══
+reset()
+set_trusted(("batch-author", "batch@example.com"))
+absent_url = "https://github.com/x/y/pull/absent"
+intake._awaiting({"url": absent_url, "author_login": "someone"})
+limit_rows = [pr(f"https://github.com/x/y/pull/{n}", n, "batch-author")
+              for n in range(intake.PR_LIST_LIMIT)]
+for label in ("inbound-spec", "inbound-note"):
+    STUB.listings[label] = limit_rows
+    limit_stderr = io.StringIO()
+    with contextlib.redirect_stderr(limit_stderr):
+        listed = intake.list_open(label)
+    check(len(listed) == intake.PR_LIST_LIMIT,
+          f"L-spec-1726 AC2: every capped row is returned for {label}")
+    check([r["url"] for r in listed] == [r["url"] for r in limit_rows],
+          f"L-spec-1726 AC2: capped rows retain their order and URLs for {label}")
+    warning = limit_stderr.getvalue().splitlines()
+    check(len(warning) == 1 and label in warning[0] and str(intake.PR_LIST_LIMIT) in warning[0],
+          f"L-spec-1726 AC2: one warning names the label and limit: {warning}")
+    STUB.listings[label] = limit_rows[:-1]
+    below_stderr = io.StringIO()
+    with contextlib.redirect_stderr(below_stderr):
+        below = intake.list_open(label)
+    check(len(below) == intake.PR_LIST_LIMIT - 1 and below_stderr.getvalue() == "",
+          f"L-spec-1726 AC2: no warning immediately below the cap for {label}")
+    STUB.listings[label] = []
+
+STUB.listings["inbound-spec"] = limit_rows
+capped_stderr = io.StringIO()
+# Observe registration without writing 1,000 fixture ledger events. AC1 above
+# exercises the real registration path; awaiting/gone reads stay real here.
+with patch.object(intake, "_register") as register_capped:
+    with contextlib.redirect_stderr(capped_stderr):
+        capped = intake.run([])
+check(len(capped["spec_prs"]) == register_capped.call_count == intake.PR_LIST_LIMIT,
+      "L-spec-1726 AC2: the capped run still processes every row for registration")
+check([call.args[0]["url"] for call in register_capped.call_args_list] ==
+      [r["url"] for r in limit_rows], "L-spec-1726 AC2: every capped PR reaches registration")
+check(len(capped_stderr.getvalue().splitlines()) == 1,
+      "L-spec-1726 AC2: the capped run emits exactly one warning")
+check(not [e for e in events_in("intake") if e["type"] == "inbound-awaiting-gone"],
+      "L-spec-1726 AC2: an absent awaiting PR is not marked gone at the cap")
+check(absent_url in intake._awaiting_urls(), "L-spec-1726 AC2: absent PR remains awaiting")
+STUB.listings["inbound-spec"] = []
+intake.run([])
+check([e["subject"] for e in events_in("intake") if e["type"] == "inbound-awaiting-gone"] == [absent_url],
+      "L-spec-1726 AC2: a later complete listing still marks the absent PR gone")
+clear_trusted()
+print("L-spec-1726 AC2 ok")
 
 # ══ AC11/AC12 · every call is stubbed, and ingest_inbound_spec never appears ══
 check(intake.ghlimit is STUB, "AC11: intake.ghlimit is the recording fake")
