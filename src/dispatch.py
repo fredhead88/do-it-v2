@@ -31,6 +31,23 @@ sha = lambda s: hashlib.sha256(s.encode() if isinstance(s, str) else s).hexdiges
 now = lambda: datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+# Kept in parity with prod_runner.redact without its import cycle or head truncation.
+_FAILURE_REDACTIONS = (
+    (r"(?i)postgres(?:ql)?://[^\s\"'<>]+", "[redacted database URL]", 0),
+    (r"(https?://)[^\s/@]+@", r"\1[redacted]@", re.I),
+    (r"(?i)\b(password|token|secret|api[_-]?key|authorization)\s*[:=]\s*[^\s,;]+",
+     r"\1=[redacted]", 0),
+)
+
+
+def _failure_detail(text) -> str:
+    """Redact the full diagnostic before retaining its bounded cause-bearing tail."""
+    text = str(text or "")
+    for pattern, replacement, flags in _FAILURE_REDACTIONS:
+        text = re.sub(pattern, replacement, text, flags=flags)
+    return text[-600:]
+
+
 def frontmatter(role):
     text = (AGENTS / f"{role}.md").read_text().split("---")[1]
     return {k.strip(): v.strip() for k, v in
@@ -1147,7 +1164,8 @@ def _main(a):
         import fold
         clock = datetime.fromisoformat(now())
         events = fold.read_events()
-        fields = dict(role=a.role, backend=meta.get("backend", "unknown"), attempt=spawn)
+        detail = _failure_detail(text)
+        fields = dict(role=a.role, backend=meta.get("backend", "unknown"), attempt=spawn, detail=detail)
         if classification == "infra":
             # A fifth failure ends the ladder; it never advertises a sixth attempt.
             rows = _retry_events(events, a.subject, a.role)
@@ -1167,7 +1185,7 @@ def _main(a):
                  revert="Executor records a decision or unblocked")
         if grading_view is not None:
             grading_env.teardown(grading_view)
-        print(f"dispatch: {classification} hold {spawn}", file=sys.stderr)
+        print(f"dispatch: {classification} hold {spawn} {detail}", file=sys.stderr)
         return True
 
     def fail(why, reason=None, exit_code=1, backend_failure=False):
