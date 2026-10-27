@@ -517,7 +517,7 @@ class HealTests(unittest.TestCase):
                 self.assertTrue(f.run(action)[0].startswith('acted'))
                 self.assertEqual([a[:2] for a in f.calls], [['doit', 'packet'], ['doit', 'dispatch']])
                 self.assertNotIn('worktree_recreated', f.rows('autodispatched')[0])
-                self.assertFalse(f.state.parent.exists())
+                self.assertFalse(f.state.exists())
 
     def test_AC7_wait_dry_hold_standing_and_review_refusals(self):
         for kind in ('seat', 'dry', 'hold', 'undetermined', 'standing', 'review-round', 'browser'):
@@ -538,7 +538,7 @@ class HealTests(unittest.TestCase):
                         f.run('review' if kind in ('review-round', 'browser') else 'rebuild', dry_run=kind == 'dry')
                 self.assertEqual(f.calls, [])
                 self.assertFalse(f.wt.exists())
-                self.assertFalse(f.state.parent.exists())
+                self.assertFalse(f.state.exists())
 
     def test_AC7_switch_and_import_fallback_then_reenable(self):
         for kind in ('file', 'dangling', 'import'):

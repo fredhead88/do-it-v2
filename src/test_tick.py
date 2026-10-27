@@ -328,10 +328,198 @@ SRC = (pathlib.Path(__file__).parent / "tick.py").read_text()
 assert not re.search(r"run_claude|--agent|executor\.schema\.json|models\.|dispatch\.alloc", SRC), \
     "tick.py must contain no code path that starts an Executor process (L-adr-0035)"
 
+class AdmissionTests(unittest.TestCase):
+    setUp = LauncherTests.setUp
+    step = LauncherTests.step
+    prepare = LauncherTests.prepare
+    dispatcher = LauncherTests.dispatcher
+    rows = LauncherTests.rows
+
+    @contextlib.contextmanager
+    def isolated(self, mode):
+        with tempfile.TemporaryDirectory(prefix='admission-tick-') as directory, contextlib.ExitStack() as stack:
+            root = pathlib.Path(directory)
+            for module, key, value in ((fold, 'ROOT', root), (fold, 'EVENTS', root / 'events'),
+                                       (dispatch, 'ROOT', root), (dispatch, 'EVENTS', root / 'events'),
+                                       (dispatch, 'CONTENT', root / 'content')):
+                stack.enter_context(patch.object(module, key, value))
+            proc, cg = root / 'proc', root / 'cgroup'
+            for name, content in {
+                'meminfo': 'MemAvailable: 7340032 kB\nSwapFree: 0 kB\nShmem: 1048576 kB\n',
+                'loadavg': '8 4 2 3/2500 1\n', 'vmstat': 'pswpin 1000\npswpout 2000\n',
+                'stat': 'procs_running 3\n', **{'pressure/' + p:
+                    'some avg10=0 avg60=0 avg300=0 total=0\nfull avg10=0 avg60=0 avg300=0 total=0\n'
+                    for p in ('memory', 'cpu', 'io')}}.items():
+                path = proc / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content)
+            cron = cg / 'system.slice/cron.service'
+            cron.mkdir(parents=True)
+            (cron / 'memory.pressure').write_text((proc / 'pressure/memory').read_text())
+            (cron / 'memory.current').write_text('1073741824')
+            stack.enter_context(patch.dict(os.environ, DOIT_ADMISSION=mode, DOIT_ADMISSION_TEST='1',
+                DOIT_ADMISSION_TEST_PROC=str(proc), DOIT_ADMISSION_TEST_CGROUP=str(cg), DOIT_ADMISSION_TEST_NCPU='8'))
+            stack.enter_context(patch.object(autodispatch, 'capacity', return_value=2))
+            stack.enter_context(patch.object(lane_driver, 'capacity', return_value=1))
+            stack.enter_context(patch.object(lane_driver, '_in_flight_role', return_value=0))
+            stack.enter_context(patch.object(merge_queue, 'next_candidate', return_value='L-spec-9606'))
+            yield root, stack
+
+    def scenario(self):
+        actions = ['build', 'rebuild', 'grade', 'regrade', 'review', 'merge', 'grade', 'regrade', 'build', 'merge']
+        steps = [self.step(action, item=f'L-spec-{9601 + i}') for i, action in enumerate(actions)]
+        steps += [self.step(state='hold', action=None, item='L-spec-9611', clears='decision')]
+        return steps
+
+    def dispatch_pass(self, mode, fault=None, dry=False):
+        import loadgate
+        with self.isolated(mode) as (root, stack):
+            self.root, self.events, self.calls = root, [], []
+            (root / 'events').mkdir()
+            (root / 'content').mkdir()
+            for i in range(9601, 9611):
+                self.prepare(f'L-spec-{i}')
+            self.events.append(dict(type='autodispatch-failed', subject='L-spec-9607', role='grader',
+                                    reason='fixture standing failure', ts=self.now.isoformat()))
+            original = self.dispatcher
+            def dispatcher(argv):
+                result = original(argv)
+                if argv[:2] == ['doit', 'dispatch'] and 'L-spec-9608' in argv:
+                    return dict(code=1, stdout='', stderr='fixture refused')
+                return result
+            if fault:
+                stack.enter_context(fault)
+            checks = stack.enter_context(patch.object(loadgate, 'admit', wraps=loadgate.admit))
+            info = {}
+            lines = tick.run_steps(self.events, {}, self.now, dispatcher=dispatcher,
+                                   steps=self.scenario(), admission=info, dry_run=dry)
+            rows = self.rows() if tick.tick_path().exists() else []
+            for row in rows:
+                row.pop('ts', None)
+            calls = json.loads(json.dumps(self.calls).replace(str(root), '<root>'))
+            admitted = [c.kwargs['admitted_gb'] for c in checks.call_args_list if c.args[0] != 'probe']
+            return lines, calls, rows, info, admitted, (root / 'state/admission.json').exists()
+
+    def test_AC8_observe_invariant_and_accounting(self):
+        off = self.dispatch_pass('off')
+        observe = self.dispatch_pass('observe')
+        self.assertEqual(off[:3], observe[:3])
+        self.assertEqual(off[3], {})
+        self.assertEqual(observe[3]['admission_checked'], 8)
+        self.assertEqual(observe[3]['admission_would_hold'], 8)
+        self.assertEqual(observe[3]['admission_held'], 0)
+        self.assertEqual(observe[3]['admission_reason'], {'mem-hard-stop': 8})
+        expected = [0, .5, 1., 1.6, 2.2, 2.6, 3.5, 3.5]
+        for actual, wanted in zip(observe[4], expected):
+            self.assertAlmostEqual(actual, wanted)
+        self.assertEqual(len(observe[4]), len(expected))
+        self.assertTrue(observe[5])
+        with self.isolated('observe') as (root, stack):
+            stack.enter_context(patch.object(tick, 'launch', side_effect=['one', 'two', RuntimeError('third')]))
+            info = {}
+            with self.assertRaisesRegex(RuntimeError, 'third'):
+                tick.run_steps([], {}, self.now, steps=self.scenario(), admission=info)
+            self.assertEqual(info['admission_checked'], 3)
+            self.assertTrue((root / 'state/admission.json').exists())
+        _launcher_evidence('AC8-1650', dict(checked=8, would_hold=8, held=0, calls_and_events_equal=True,
+                                         peaks=observe[4], exceptional_finish=True))
+
+    def test_AC9_dry_and_begin_failures(self):
+        import loadgate
+        with patch.object(loadgate, 'begin') as begin:
+            result = self.dispatch_pass('observe', dry=True)
+            begin.assert_not_called()
+        self.assertEqual([line for line in result[0] if line.startswith('would act')], [
+            'would act L-spec-9601 build', 'would act L-spec-9602 rebuild',
+            'would act L-spec-9603 grade', 'would act L-spec-9604 regrade',
+            'would act L-spec-9605 review', 'would act L-spec-9606 merge',
+            'would act L-spec-9607 grade', 'would act L-spec-9608 regrade'])
+        self.assertFalse(result[5])
+        off = self.dispatch_pass('off')
+        for fault in (patch.object(loadgate, 'begin', side_effect=RuntimeError('begin')),
+                      patch.dict(sys.modules, {'loadgate': None})):
+            result = self.dispatch_pass('observe', fault=fault)
+            self.assertEqual(result[:3], off[:3])
+            self.assertEqual(set(result[3]), {'admission_error'})
+        _launcher_evidence('AC9-1650', dict(dry_literal_lines=8, begin_and_import_fail_open=True))
+
+    def record_pass(self, mode, fault=None, oversize=False):
+        with self.isolated(mode) as (root, stack):
+            stack.enter_context(patch.object(fold, 'read_events', return_value=[]))
+            steps = [self.step('grade', item=f'L-spec-{10000+i}') for i in range(1000)]
+            stack.enter_context(patch.object(tick, '_steps', return_value=steps))
+            stack.enter_context(patch.object(tick, 'launch', return_value='spawn'))
+            stack.enter_context(patch.object(autodispatch, 'redispatch_dead', return_value=[]))
+            stack.enter_context(patch.object(merge_queue, 'enqueue_due', return_value=[]))
+            if fault:
+                stack.enter_context(fault)
+            if oversize:
+                def oversized(*args, admission=None, **kw):
+                    admission['admission_test'] = 'x' * 5000
+                    return []
+                stack.enter_context(patch.object(tick, 'run_steps', side_effect=oversized))
+            tick._record()
+            rows = [r for r in self.rows() if r['type'] == 'tick']
+            self.assertEqual(len(rows), 1)
+            return rows[0], (root / 'state/admission.json').exists()
+
+    def test_AC10_tick_fields_bounded_and_invariant(self):
+        off, _ = self.record_pass('off')
+        observed, _ = self.record_pass('observe')
+        info = {k: v for k, v in observed.items() if k.startswith('admission_')}
+        self.assertLessEqual(len(json.dumps(info).encode()), 1024)
+        self.assertIn('admission_mode', info, info)
+        self.assertEqual(info['admission_mode'], 'observe')
+        self.assertEqual(info['admission_checked'], 1000)
+        self.assertEqual(info['admission_held'], 0)
+        self.assertEqual(info['admission_trips'], ['mem-hard-stop', 'mem-swap-hard-stop'])
+        self.assertEqual(info['admission_readings']['mem_avail_gb'], 7)
+        for key, kind in (('admission_cost_ms', int), ('admission_sampled_at', str), ('admission_reading_age_s', int)):
+            self.assertIsInstance(info[key], kind)
+        def other(event):
+            return {k: v for k, v in event.items() if not k.startswith('admission_') and k not in ('ts', 'relay_heartbeat_age_s')}
+        self.assertEqual(other(off), other(observed))
+        self.assertFalse(any(k.startswith('admission_') for k in off))
+        oversized, _ = self.record_pass('observe', oversize=True)
+        self.assertEqual({k: v for k, v in oversized.items() if k.startswith('admission_')}, {'admission_error': 'oversize'})
+        _launcher_evidence('AC10-1650', dict(bytes=len(json.dumps(info).encode()), checked=1000,
+                                          other_fields_equal=True, oversize='oversize'))
+
+    def test_AC11_config_and_event_vocabulary(self):
+        import howto, tomllib, loadgate
+        repo = pathlib.Path(__file__).resolve().parent.parent
+        parsed = tomllib.loads((repo / 'look.toml').read_text())
+        self.assertEqual(parsed['admission'], loadgate.DEFAULTS)
+        self.assertFalse(any('admission' in name for name in howto.event_types(repo / 'src/tick.py')))
+        _launcher_evidence('AC11-1650', dict(defaults_match=True, event_type_unchanged=True))
+
+    def test_AC12_hook_failures_and_not_reached(self):
+        import loadgate
+        off = self.dispatch_pass('off')
+        result = self.dispatch_pass('observe', fault=patch.object(loadgate.Gate, 'check', side_effect=RuntimeError('chk')))
+        self.assertEqual(result[:3], off[:3])
+        self.assertEqual(result[3]['admission_checked'], 0)
+        self.assertIn('check: chk', result[3]['admission_error'])
+        result = self.dispatch_pass('observe', fault=patch.object(loadgate.Gate, 'finish', side_effect=RuntimeError('fin')))
+        self.assertEqual(result[:3], off[:3])
+        self.assertEqual(result[3], {'admission_error': 'finish: fin'})
+        self.assertFalse(result[5])
+        for mode in ('observe', 'off'):
+            for fault, message in ((patch.object(tick, '_steps', side_effect=RuntimeError('boom')), 'boom'),
+                                   (patch.object(lane_driver, '_in_flight_role', side_effect=RuntimeError('seat')), 'seat')):
+                event, exists = self.record_pass(mode, fault=fault)
+                info = {k: v for k, v in event.items() if k.startswith('admission_')}
+                expected = dict(admission_mode='observe', admission_error='not reached: ' + message) if mode == 'observe' else {}
+                self.assertEqual(info, expected)
+                self.assertIn(message, event['autodispatch_error'])
+                self.assertFalse(exists)
+        _launcher_evidence('AC12-1650', dict(check_finish_fail_open=True, not_reached=['boom', 'seat'], off_empty=True))
+
+
 # These script suites predate unittest. Respect the authored targeted checks
 # before running the historical script assertions; unfiltered CI still runs both.
 if __name__ == '__main__' and '-k' in sys.argv and sys.argv[-1] in {
-        'launch', 'sole_launcher', 'manual_routine', 'launch_failure', 'no_double_gate'}:
+        'launch', 'sole_launcher', 'manual_routine', 'launch_failure', 'no_double_gate', 'AdmissionTests'}:
     unittest.main()
 
 # An idle tick: one tick event, lane 0, nothing spawned and no `spawned` key to report it.
