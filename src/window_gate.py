@@ -15,9 +15,8 @@ gates each branch (`doit gate`, unchanged), collects the window, and calls this:
      deadline are ITS mechanism; none of that is re-implemented here);
   3. green  -> fast-forward master to the candidate sha (old value asserted);
      red    -> map the NEW failing node ids to the specs that own them, drop
-               exactly those, verify the remainder ONCE more, advance to the green
-               subset. At most two rounds on this path; a second red drops the window.
-               A first red with only unattributed ids splits into bounded halves,
+               exactly those, verify the remainder within a size-derived budget.
+               Unattributed reds at any round split into bounded halves,
                shipping the first verified half and leaving other green halves pending.
 
 Candidate trees with a green ledger result covering the required checks in the
@@ -1094,34 +1093,42 @@ def bisect_window(window, live, prepare, judge, drop, conflict):
     """
     chosen = None
 
+    def judge_batch(batch):
+        cand, kept, clashes = prepare(batch)
+        conflict(clashes)
+        if not kept:
+            escalate(window, "bisection half has no mergeable specs; half remains pending", "undetermined")
+            return
+        visit(kept, cand, judge(cand, kept))
+
     def split(batch):
-        nonlocal chosen
         k = len(batch) // 2
         halves = [batch[:k], batch[k:]]
         ev("window-bisected", window, window=window, halves=halves)
         for half in halves:
-            cand, kept, clashes = prepare(half)
-            conflict(clashes)
-            if not kept:
-                escalate(window, "bisection half has no mergeable specs; half remains pending", "undetermined")
-                continue
-            result = judge(cand, kept)
-            if result["state"] == "green":
-                if chosen is None:
-                    chosen = (cand, kept)
-            elif result["state"] == "undetermined":
-                continue
-            elif len(kept) > 1 and len(result["unattributed"]) == len(result["nodes"]):
-                split(kept)
-            else:
-                if len(kept) == 1:
-                    owners_to_drop, reason = kept, "bisect-single"
-                else:
-                    owners_to_drop = list(dict.fromkeys(
-                        owner for node in result["nodes"]
-                        for owner in owners(result["repo"], cand, node, result["paths"])))
-                    reason = "bisect-owner"
-                drop(owners_to_drop, result, reason)
+            judge_batch(half)
+
+    def visit(kept, cand, result):
+        nonlocal chosen
+        if result["state"] == "green":
+            if chosen is None:
+                chosen = (cand, kept)
+            return
+        if result["state"] == "undetermined":
+            return
+        if len(kept) == 1:
+            drop(kept, result, "bisect-single")
+            return
+        demonstrated = list(dict.fromkeys(
+            owner for node in result["nodes"]
+            for owner in owners(result["repo"], cand, node, result["paths"])))
+        drop(demonstrated, result, "bisect-owner")
+        rest = [s for s in kept if s not in demonstrated]
+        if not demonstrated:
+            split(rest)
+        elif rest:
+            # Removing owners changes the tree. Judge before selecting/splitting.
+            judge_batch(rest)
 
     split(live)
     return chosen
@@ -1218,6 +1225,7 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
     verdicts, verification_scopes, candidate_scopes = [], [], {}
     conflicted_all = {}
     fingerprint_failed = rechain.FailedFingerprints()
+    judgments, judgment_limit = 0, 2 * len(entries) + 1
 
     def prepare(batch):
         batch = [e for e in batch if e[0] not in fingerprint_failed.specs]
@@ -1256,7 +1264,10 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
     def drop_specs(specs, result, reason):
         for s in specs:
             ev("window-dropped", s, window=window, nodes=result["nodes"],
-               run_url=result["url"], branch=by_id[s][0], reason=reason)
+               run_url=result["url"], branch=by_id[s][0], reason=reason,
+               owned_nodes=[n for n in result["nodes"]
+                            if s in owners(repo, result["candidate"], n, result["paths"])],
+               unattributed_nodes=list(result["unattributed"]))
             print(f"gate-window: dropped {s} reason={reason} nodes={json.dumps(result['nodes'])}")
         dropped.extend(s for s in specs if s not in dropped)
         print(f"gate-window: dropped {len(specs)} spec(s), reason={reason}")
@@ -1267,7 +1278,11 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
                tree=tree, green=res["state"] == "green", new_ids=res["nodes"], required=required)
 
     def judge(cand, kept, *, half=False):
-        nonlocal runs, dashboard, actions_minutes, baseline, base_failures, opened
+        nonlocal runs, dashboard, actions_minutes, baseline, base_failures, opened, judgments
+        if judgments >= judgment_limit:
+            escalate(window, "candidate judgment budget exhausted; affected specs remain pending", "undetermined")
+            return dict(state="undetermined", nodes=[], url="", doc={})
+        judgments += 1
         candidate_scope = scope(repo, base, cand, ci_checks, fixes_base=fixes_base)
         candidate_scopes[cand] = candidate_scope
         candidate_required = candidate_scope["checks"]
@@ -1349,7 +1364,7 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
         if ((base_red_answer.get("complete") or base_red_answer.get("workflows"))
                 and not base_red_answer.get("undetermined")):
             import base_red
-            classification = base_red.classify(project, root_base, nodes)
+            classification = base_red.classify(project, root_base, nodes, refresh=True)
         covered = set(classification.get("covered", BASE_RED_KINDS))
         uncovered = classification.get("uncovered", [])
         base_undetermined = classification.get("undetermined", False)
@@ -1412,43 +1427,39 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
             break
         if res["state"] == "undetermined":
             return 2
-        unattributed, paths = res["unattributed"], res["paths"]
-        if runs == 1 and len(live) > 1 and len(unattributed) == len(res["nodes"]):
-            chosen = bisect_window(window, live, prepare_half, judge_half, drop_specs, note_conflicts)
-            if chosen is None:
-                escalate(window, fingerprint_failed.why(f"window {window} bisection found no advanceable candidate; dropped specs={json.dumps(dropped)}; master unmoved"), "red")
-                return 2
-            cand, live = chosen
-            pending = [s for s, _, _ in entries if s not in live and s not in dropped]
-            print(f"gate-window: pending {len(pending)} spec(s), reason=bisection-unselected specs={json.dumps(pending)}")
-            break
-        if runs >= 2 or unattributed:
-            drop = list(live)
-        else:
-            drop = []
-            for n in res["nodes"]:
-                drop += [s for s in owners(repo, cand, n, paths) if s not in drop]
-        bisected = []
-        if enabled and not unattributed and runs == 1 and any(s in migrations for s in drop):
-            stack = [s for s in live if s in migrations]
-            bisected = stack[1:]
-            drop = [s for s in drop if s not in migrations] + bisected
-        for s in drop:
-            ev("window-dropped", s, window=window, nodes=res["nodes"], run_url=res["url"], branch=by_id[s][0],
-               **({"reason": "unattributed"} if unattributed else {"reason": "migration-bisect"} if s in bisected else {}))
-            print(f"gate-window: dropped {s} nodes={json.dumps(res['nodes'])}")
-        dropped += drop
-        live = [s for s in live if s not in drop]
-        if not live or runs >= 2:
-            why = "unattributed " + json.dumps(unattributed) if unattributed else "new ids " + json.dumps(res["nodes"])
-            escalate(window, f"window {window} is red after {runs} run(s); {why}; dropped specs={json.dumps(drop)}; whole window dropped, master unmoved", "red")
+        paths = res["paths"]
+        demonstrated = list(dict.fromkeys(
+            s for node in res["nodes"] for s in owners(repo, cand, node, paths)))
+        if len(live) == 1:
+            drop_specs(live, res, "bisect-single" if not demonstrated else "owner")
+            escalate(window, "isolated candidate is red; master unmoved", "red")
             return 2
-        rest = [e for e in entries if e[0] in live]
-        cand, live, more = prepare(rest)
-        note_conflicts(more)
+        drop_specs(demonstrated, res, "owner")
+        live = [s for s in live if s not in demonstrated]
         if not live:
-            escalate(window, fingerprint_failed.why("remaining merges conflict after the drop"), "undetermined")
+            escalate(window, "all demonstrated owners dropped; master unmoved", "red")
             return 2
+        if enabled and any(s in migrations for s in dropped) and any(s in migrations for s in live):
+            escalate(window, "migration ordering after owner removal is unsafe; remainder pending", "undetermined")
+            return 2
+        if demonstrated:
+            cand, live, more = prepare_half(live)
+            note_conflicts(more)
+            if not live:
+                escalate(window, fingerprint_failed.why("remaining merges conflict after the drop"), "undetermined")
+                return 2
+            continue
+        chosen = bisect_window(window, live, prepare_half, judge_half, drop_specs, note_conflicts)
+        if chosen is None:
+            escalate(window, fingerprint_failed.why(f"window {window} bisection found no advanceable candidate; dropped specs={json.dumps(dropped)}; master unmoved"), "red")
+            return 2
+        cand, live = chosen
+        pending = [s for s, _, _ in entries if s not in live and s not in dropped]
+        print(f"gate-window: pending {len(pending)} spec(s), reason=bisection-unselected specs={json.dumps(pending)}")
+        break
+    if enabled and any(s in migrations for s in dropped) and any(s in migrations for s in live):
+        escalate(window, "migration ordering after owner removal is unsafe; remainder pending", "undetermined")
+        return 2
     rechained = set()
     if enabled:
         # Only merges reachable from the final candidate count as shipped re-chains.

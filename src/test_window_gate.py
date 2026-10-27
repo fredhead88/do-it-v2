@@ -160,7 +160,7 @@ class Fx:
         self.base_reader = lambda project, sha: {"sha": sha, "complete": True}
         self.log_reader = lambda repo, doc: []
         self.service = types.SimpleNamespace(_owner=lambda repo: "o/r", parse_log=base_red.parse_log,
-            classify=lambda project, sha, ids: {
+            classify=lambda project, sha, ids, **kwargs: {
                 "complete": True, "pre_existing": [n for n in ids if n in self.known],
                 "new": [n for n in ids if n not in self.known]})
 
@@ -658,7 +658,7 @@ def main():
     rc = fx.go()
     check(rc == 2 and fx.master() == fx.base, "AC2 non-zero, master unmoved")
     check(not fx.events("shipped"), "AC2 nothing shipped")
-    check(len(fx.calls()) == 1, "AC2 whole window dropped without a second run")
+    check(len(fx.calls()) == 1, "AC2 unnamed failure holds without a second run")
 
     # AC3: a new failure drops only the owner; two dispatches
     fx = Fx({"A": "a.txt", "B": "api/tests/test_x.py", "C": "c.txt"})
@@ -695,13 +695,13 @@ def main():
     check([e["halves"] for e in fx.events("window-bisected")] == [[["A"], ["B", "C"]]] and
           len(fx.events("escalation-blocking")) == 1 and len(fx.calls()) == 3, "AC4 bisect with unresolved-half escalation")
 
-    # AC4b: second run red -> whole remainder dropped, never a third run
+    # AC4b: independently red singleton after owner removal; no unsafe advance
     fx = Fx({"A": "a.txt", "B": "api/tests/test_x.py"})
     fx.run_n(1, 1, red(["api/tests/test_x.py::test_y"]))
     fx.run_n(2, 1, red(["api/tests/test_z.py::test_q"]))
     rc = fx.go()
     check(rc == 2 and fx.master() == fx.base and len(fx.calls()) == 2 and not fx.events("shipped"),
-          "AC4b second red drops the window; exactly two runs")
+          "AC4b red singleton rejected after its own second judgment")
     check(len(fx.events("escalation-blocking")) == 1, "AC4b escalation")
 
     # AC5: dashboard check only when dashboard/ changed
@@ -894,10 +894,14 @@ def rechain_checks():
                 check(rc == 1 and shipped == names and len(fx.calls()) == 2, "ac6 X drops migrations stay")
                 check([e["subject"] for e in fx.events("window-dropped")] == ["X"], "ac6 owners mapping")
             elif case in ("owner-B", "second-red"):
-                check(len(fx.calls()) == 2 and len(fp_calls) == 2, "ac6 two runs two final-tree fingerprints")
-                check(any(e["subject"] == "b" and e.get("reason") == "migration-bisect" for e in fx.events("window-dropped")), "ac6 B migration-bisect")
-                check((rc == 1 and shipped == ["a", "X"] and rechain.routed_head(fx.repo, fx.master()) == "a") if case == "owner-B" else
-                      (rc == 2 and fx.master() == fx.base and not shipped), "ac6 retry outcome " + case)
+                check(len(fx.calls()) == 2 and len(fp_calls) == 1,
+                      "ac6 shared migration owners removed before verified nonmigration retry")
+                drops = fx.events("window-dropped")
+                check([e["subject"] for e in drops] == names + (["X"] if case == "second-red" else []) and
+                      all(e["reason"] == "owner" and e["owned_nodes"] == [rechain.TEST + "::test_head"]
+                          for e in drops[:2]), "ac6 both demonstrated migration owners drop")
+                check((rc == 1 and shipped == ["X"] and rechain.routed_head(fx.repo, fx.master()) == "h0") if case == "owner-B" else
+                      (rc == 2 and fx.master() == fx.base and not shipped), "ac6 verified remainder preserves migration safety " + case)
             elif case == "fingerprint-fail":
                 check(rc == 1 and shipped == ["X"] and len(fx.calls()) == 1, "ac3f fingerprint failure rebuilds without migrations")
                 check(set(e["subject"] for e in fx.events("rechain-declined")) == set(names), "ac3f all migration declines")
@@ -1155,10 +1159,13 @@ def attribution_checks():
             check(rc == 1 and not drops and [e["halves"] for e in fx.events("window-bisected")] == [[["A"], ["B"]]] and
                   [e["subject"] for e in fx.events("shipped")] == ["A"], "unattributed_drops_window now bisects two-spec fixture")
             continue
-        check(rc == 2 and [e["subject"] for e in drops] == ["A", "B"] and all(
-            e["reason"] == "unattributed" and set(e["nodes"]) == ({unknown, v} if mixed else {unknown}) for e in drops), "mixed_ids whole window named")
-        check("unattributed" in fx.events("escalation-blocking")[0]["why"] and unknown in fx.events("escalation-blocking")[0]["why"], "unattributed escalation")
-    response("unattributed_drops_window_mixed_ids", ["AC10", "AC11"], {"dropped": [e["subject"] for e in drops], "nodes": drops[0]["nodes"], "reason": "unattributed"})
+        check(rc == 2 and [e["subject"] for e in drops] == ["A"] and
+              drops[0]["reason"] == "owner" and set(drops[0]["nodes"]) == {unknown, v} and
+              drops[0]["owned_nodes"] == [v] and drops[0]["unattributed_nodes"] == [unknown],
+              "mixed_ids demonstrated owner only; undetermined sibling pending")
+        check(fx.events("escalation-blocking") and fx.master() == fx.base,
+              "mixed_ids unresolved remainder cannot advance")
+    response("unattributed_drops_window_mixed_ids", ["AC10", "AC11"], {"dropped": [e["subject"] for e in drops], "nodes": drops[0]["nodes"], "reason": "owner"})
 
     fx = Fx({"A": "api/tests/test_x.py", "B": "api/tests/test_z.py"})
     fx.run_n(1, 1, red([p])); fx.run_n(2, 1, red(["api/tests/test_z.py::q"]))
@@ -1256,9 +1263,9 @@ def rerun_checks():
             present = [s for s in names if window_gate.git(repo, "cat-file", "-e", f"{sha}:{s}.py", check=False).returncode == 0]
             calls.append(present); contents.append(sha)
             if tuple(present) in incomplete:
-                fx.service.classify = lambda *a: {"complete": False}
+                fx.service.classify = lambda *a, **kw: {"complete": False}
             else:
-                fx.service.classify = lambda project, base, nodes: {"complete": True, "pre_existing": [], "new": nodes}
+                fx.service.classify = lambda project, base, nodes, **kw: {"complete": True, "pre_existing": [], "new": nodes}
             if tuple(present) in uncertain: return verdict("undetermined")
             if owner and present == owner[0]: return verdict("red", [owner[1]])
             return verdict("red", [unknown]) if any(s in bad for s in present) else verdict()
@@ -1403,14 +1410,14 @@ def rerun_checks():
 
     fx, calls, _, verify = exercise("A", "A")
     with patch.object(window_gate, "verify", side_effect=verify): fx.go()
-    check(not fx.events("window-bisected") and fx.events("window-dropped")[0]["reason"] == "unattributed", "no_bisect_single_or_mixed")
+    check(not fx.events("window-bisected") and fx.events("window-dropped")[0]["reason"] == "bisect-single", "no_bisect_single_or_mixed")
     response("no_bisect_single_or_mixed", ["AC7"], {"single_unchanged": True, "mixed_covered_by_1110": True})
 
     fx = Fx({"A": "api/tests/test_x.py", "B": "b.txt", "C": "c.txt"})
     fx.run_n(1, 1, red(["api/tests/test_x.py::bad"])); fx.run_n(2, 1, red([unknown]))
-    check(fx.go() == 2 and len(fx.calls()) == 2 and not fx.events("window-bisected") and fx.master() == fx.base and
-          [e["subject"] for e in fx.events("window-dropped")] == list("ABC"), "no_bisect_on_second_run")
-    response("no_bisect_on_second_run", ["AC10"], {"dispatches": 2, "bisects": 0, "master_unmoved": True})
+    check(fx.go() == 2 and len(fx.calls()) == 4 and fx.events("window-bisected") and fx.master() == fx.base and
+          [e["subject"] for e in fx.events("window-dropped")] == ["A"], "bisect_on_second_run retains undetermined siblings")
+    response("bisect_on_second_run", ["AC10"], {"dispatches": 4, "bisects": 1, "master_unmoved": True})
 
     table = []
     import math
@@ -2222,7 +2229,7 @@ def base_kind_checks():
     fx.base_reader = lambda project, sha: dict(partial, sha=sha)
     node = "dashboard/src/x.test.ts::renders"
     fx.run_n(1, 1, red([node]))
-    fx.service.classify = lambda *a: dict(complete=False, pre_existing=[], new=[node],
+    fx.service.classify = lambda *a, **kw: dict(complete=False, pre_existing=[], new=[node],
         needed=["vitest"], covered=["pg-parity", "pytest"], uncovered=[node], undetermined=False)
     check(fx.go() == 2 and fx.master() == fx.base and not fx.events("window-dropped"),
           "base-kind uncovered vitest keeps master and specs")

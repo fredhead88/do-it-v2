@@ -808,9 +808,9 @@ try:
 finally:
     mg.DETECT_SECRETS_TIMEOUT = _orig_timeout
 ev = events()[-1]
-check("AC4(b) timeout -> rework/reason=secret-scan/non-empty findings",
-      rc == 1 and ev["type"] == "merge-gate-rework" and ev.get("reason") == "secret-scan"
-      and bool(ev.get("findings")))
+check("AC4(b) two timeouts -> infrastructure hold, no rework",
+      rc == 2 and ev["type"] == "infra-failure" and ev.get("backend") == "merge-gate"
+      and ev.get("retry_at"))
 _ps = subprocess.run(["ps", "-ef"], capture_output=True, text=True).stdout
 check("★ AC4(b) the whole process group was killed, not just bash",
       "L_SPEC_0430_AC4B_MARKER" not in _ps)

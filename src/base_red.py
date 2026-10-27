@@ -300,7 +300,7 @@ def _store(path, project, result, *, record=True):
         staged.unlink(missing_ok=True)
 
 
-def failing(project, sha, *, ensure=False):
+def failing(project, sha, *, ensure=False, refresh=False):
     """Compute a full-sha CI set, caching and recording only complete evidence."""
     result = _result(sha)
     try:
@@ -313,8 +313,32 @@ def failing(project, sha, *, ensure=False):
             fcntl.flock(lock, fcntl.LOCK_EX)
             if path.exists():
                 cached = json.loads(path.read_text())
-                if cached["sha"] != sha or not cached["complete"] or cached.get("undetermined"):
+                if (cached["sha"] != sha or cached.get("project", project) != project
+                        or cached.get("complete") is not True or cached.get("undetermined")
+                        or not isinstance(cached.get("ids"), dict)
+                        or set(cached["ids"]) != set(KINDS)
+                        or any(not isinstance(v, list) or any(not isinstance(i, str) for i in v)
+                               for v in cached["ids"].values())):
                     raise ValueError("invalid base-red cache")
+                if refresh:
+                    # Keep positive proof on refresh failure, never stale negatives.
+                    if (set(cached.get("workflows", [])) != WORKFLOWS
+                            or not set(cached.get("kinds_covered", [])) <= set(KINDS)):
+                        raise ValueError("invalid base coverage")
+                    result = dict(cached)
+                    result["undetermined"] = []
+                    runs = _api(f"repos/{_owner(repo)}/actions/runs?head_sha={sha}&per_page=100", "workflow_runs")
+                    if (set(KINDS) <= set(cached.get("kinds_covered", []))
+                            and set(_runs_seen(runs, sha)) <= set(cached.get("runs_seen", []))):
+                        return cached
+                    refreshed, _ = _snapshot(repo, sha, runs=runs)
+                    if (refreshed["complete"] and not refreshed["undetermined"]
+                            and set(KINDS) <= set(refreshed["kinds_covered"])):
+                        _store(path, project, refreshed, record=refreshed["ids"] != cached["ids"])
+                        return refreshed
+                    result["complete"] = False
+                    result["undetermined"].append("required base refresh incomplete")
+                    return result
                 if "workflows" not in cached or "kinds_covered" not in cached:
                     result, _ = _snapshot(repo, sha)
                     if result["complete"]:
@@ -440,22 +464,39 @@ def id_kind(node):
     return "vitest" if "::" in node else "suite-error"
 
 
-def classify(project, base_sha, ids, *, known_red=False, now=None):
+def classify(project, base_sha, ids, *, known_red=False, now=None, refresh=False):
     ids = list(ids)
-    base = failing(project, base_sha)
+    base = failing(project, base_sha, refresh=True) if refresh else failing(project, base_sha)
     undetermined = bool(base.get("undetermined"))
     needed = {id_kind(i) for i in ids}
     covered = set() if undetermined else set(base.get("kinds_covered", []))
     complete = not undetermined and (needed <= covered if ids else bool(base["complete"]))
     known = {i for bucket in base["ids"].values() for i in bucket
              if id_kind(i) in covered}
+    if refresh:
+        # Exact-SHA positive proof survives an unavailable refresh. Nightlies
+        # never supply negative proof for unrelated ids when the API failed.
+        known.update(i for bucket in base["ids"].values() for i in bucket)
+        current = _time(now) if now is not None else datetime.now(timezone.utc)
+        for row in _rows(project):
+            if (row.get("type") == "base-red-nightly" and row.get("complete") is True
+                    and row["sha"] == base["sha"] and _time(row["ts"]) <= current):
+                known.update(row["ids"])
+        if ids and set(ids) <= known:
+            complete, undetermined = True, False
     recorded = {}
     if known_red:
         recorded, nightly = _known_state(project)
-        known.update(recorded)
         current = _time(now) if now is not None else datetime.now(timezone.utc)
-        fresh = nightly is not None and timedelta(0) <= current - _time(nightly["ts"]) < timedelta(hours=36)
-        complete = complete or fresh
+        if refresh:
+            recorded = {i: meta for i, meta in recorded.items()
+                        if meta["sha"] == base["sha"] and _time(meta["since"]) <= current}
+        known.update(recorded)
+        if not refresh:
+            fresh = nightly is not None and timedelta(0) <= current - _time(nightly["ts"]) < timedelta(hours=36)
+            complete = complete or fresh
+        elif ids and set(ids) <= known:
+            complete, undetermined = True, False
     result = {"pre_existing": [i for i in ids if i in known],
               "new": [i for i in ids if i not in known], "complete": complete,
               "needed": sorted(needed), "covered": sorted(covered),
