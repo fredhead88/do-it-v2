@@ -528,12 +528,12 @@ from contextvars import ContextVar
 _SCAN_SUBJECT = ContextVar("secret_scan_subject", default=None)
 
 
-def _scan_diagnostic(repo, attempt, text):
+def _scan_diagnostic(repo, attempt, text, *, clock=None, timeout=False):
     import grading_env
-    if grading_env.failure_kind(text) != "infra":
+    if not timeout and grading_env.failure_kind(text) != "infra":
         return "undetermined", [text]
     import fold
-    fields = grading_env.infra_fields(attempt, "merge-gate", text)
+    fields = grading_env.infra_fields(attempt, "merge-gate", text, clock=clock)
     fields["project"] = pathlib.Path(repo).name
     original = os.environ.get("DOIT_LEDGER_FILE")
     try:
@@ -923,7 +923,14 @@ def main_(argv):
         if status == "clean":
             token = _SCAN_SUBJECT.set(subject)
             try:
-                scan_verdict, scan_findings = secret_scan(_TOP, main_sha, branch_sha)
+                for attempt in range(2):
+                    scan_verdict, scan_findings = secret_scan(_TOP, main_sha, branch_sha)
+                    timeout_finding = [f"detect-secrets-changed.sh timed out after {DETECT_SECRETS_TIMEOUT:.0f}s"]
+                    if (scan_verdict, scan_findings) != ("undetermined", timeout_finding):
+                        break
+                    if attempt == 1:
+                        scan_verdict, scan_findings = _scan_diagnostic(
+                            _TOP, branch_sha, timeout_finding[0], timeout=True)
             finally:
                 _SCAN_SUBJECT.reset(token)
             if scan_verdict == "undetermined" and scan_findings and scan_findings[0].startswith("infra:"):
