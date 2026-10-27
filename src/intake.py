@@ -27,6 +27,7 @@ import carry, dispatch, ghlimit  # noqa: E402 — dispatch.emit is this module's
 
 REPO = "fredhead88/albert-scott-platform"          # A4: the one hardcoded target
 INBOUND_PREFIX = "docs/do-it/inbound/"
+PR_LIST_LIMIT = 1000
 
 root = lambda: pathlib.Path(os.environ.get("DOIT_ROOT") or (pathlib.Path.home() / ".do-it"))
 now = lambda: datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -74,8 +75,10 @@ def _head_file(path, head_sha):
 def list_open(label):
     """One `gh pr list`-shaped call for `label` → a list of `{url, number,
     author_login, title, body, created_at, files, head_sha}` dicts, or `None`
-    on a `gh` failure or unparsable JSON — never raises."""
+    on a `gh` failure or unparsable JSON — never raises. Warns on stderr
+    when the returned row count reaches the cap and may be truncated."""
     ok, out = _run(["gh", "pr", "list", "--repo", REPO, "--label", label, "--state", "open",
+                    "--limit", str(PR_LIST_LIMIT),
                     "--json", "url,number,author,title,body,createdAt,files,headRefOid"])
     if not ok:
         return None
@@ -95,6 +98,9 @@ def list_open(label):
                          "title": r.get("title") or "", "body": r.get("body") or "",
                          "created_at": r.get("createdAt"), "files": files,
                          "head_sha": r.get("headRefOid")})
+    if len(out_rows) == PR_LIST_LIMIT:
+        print(f"intake: {label} reached PR list limit {PR_LIST_LIMIT}; listing may be truncated",
+              file=sys.stderr)
     return out_rows
 
 
@@ -151,7 +157,7 @@ def _gone(url):
                  project="albert-scott")
 
 
-def _process_spec_prs(prs):
+def _process_spec_prs(prs, *, check_gone=True):
     trusted = {(a.get("login") or "").strip().lower() for a in carry.trusted_authors()}
     open_urls = set()
     for pr in prs:
@@ -167,9 +173,10 @@ def _process_spec_prs(prs):
             continue
         if state != "inbound-awaiting":
             _awaiting(pr)
-    for url in _awaiting_urls():
-        if url not in open_urls:
-            _gone(url)
+    if check_gone:
+        for url in _awaiting_urls():
+            if url not in open_urls:
+                _gone(url)
 
 
 def run(events):
@@ -190,8 +197,10 @@ def run(events):
     # sweep every standing `inbound-awaiting` into `inbound-awaiting-gone`. A
     # genuinely EMPTY, successful listing (`[]`) still runs it, so §5(b)'s
     # "gone" pass fires when every open PR really has left.
+    # At the cap, older PRs may be missing from a truncated listing; still
+    # register/await returned PRs, but defer absence checks to a complete run.
     if raw_spec_prs is not None:
-        _process_spec_prs(spec_prs)
+        _process_spec_prs(spec_prs, check_gone=len(spec_prs) < PR_LIST_LIMIT)
     return {"spec_prs": spec_prs, "note_prs": note_prs}
 
 
