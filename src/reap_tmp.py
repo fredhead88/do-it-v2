@@ -54,6 +54,8 @@ anywhere in an entry's own evaluation) is kept, reason "undetermined" — never
 removed: unreadable is fail-safe, not fail-open. A dead pid's `proc_root/<pid>`
 entry is skipped entirely as evidence, mirroring a real `/proc` where it would
 not exist at all.
+As in L-spec-1541, the `/tmp` snapshot skips and counts other uids' processes,
+whose references were never readable; unreadable own-uid evidence still keeps.
 
 `panes.alive(pid)` (src/panes.py) is the one liveness predicate this module
 trusts, for both a live pid found under `proc_root` and a pid recovered from a
@@ -143,19 +145,26 @@ def _pid_refs(proc_root, pid):
     return out
 
 
-def _refs_c(proc_root, x):
-    """Rule (c): every reference of a live pid that resolves under `x`. A pid
-    `panes.alive()` reports dead is skipped entirely — no read is attempted —
-    a stale fixture `<pid>` directory is not evidence of anything."""
-    out = []
-    for name in _pid_dir_names(proc_root):
-        pid = int(name)
-        if not panes.alive(pid):
-            continue
-        for ref in _pid_refs(proc_root, pid):
-            if _under(ref, x):
-                out.append(ref)
-    return out
+def _own_uid_refs(proc_root, uid):
+    """One rule (c) snapshot: targets (None if undetermined), foreign pid count.
+    Ownership is established before liveness or links; no own-uid read failure
+    is exempted. Keep counting foreign pids even after uncertainty is found."""
+    out, skipped, undetermined = [], 0, False
+    try:
+        names = _pid_dir_names(proc_root)
+    except OSError:
+        return None, 0
+    for name in names:
+        try:
+            if os.lstat(pathlib.Path(proc_root) / name).st_uid != uid:
+                skipped += 1
+                continue
+            pid = int(name)
+            if panes.alive(pid):
+                out.extend(_pid_refs(proc_root, pid))
+        except OSError:
+            undetermined = True
+    return (None if undetermined else out), skipped
 
 
 def _bound_sockets(proc_root):
@@ -219,7 +228,7 @@ def _reason(b_ok, c_refs, d_refs):
     return "; ".join(parts) if parts else "undetermined"
 
 
-def _decide(path, uid, min_age_min, now, proc_root, allow_recurse):
+def _decide(path, uid, min_age_min, now, proc_root, allow_recurse, proc_refs):
     """One entry (top-level, or an immediate child when `allow_recurse` is
     False), evaluated by SD7's four conditions in order. Returns
     ("remove", None) | ("keep", reason) | ("recurse", None) — the last only
@@ -232,7 +241,9 @@ def _decide(path, uid, min_age_min, now, proc_root, allow_recurse):
 
         is_dir = stat.S_ISDIR(st.st_mode) and not stat.S_ISLNK(st.st_mode)
         newest = _newest_mtime(path, 3)
-        c_refs = _refs_c(proc_root, path)
+        if proc_refs is None:
+            raise Undetermined("unreadable process snapshot")
+        c_refs = [ref for ref in proc_refs if _under(ref, path)]
         d_refs = _refs_d(proc_root, path)
     except OSError as e:
         raise Undetermined(str(e))
@@ -303,7 +314,7 @@ def _reap_recorded(events, *, dry_run=False, scratch_root=None, proc_root="/proc
         safety=lambda r, e: resources._default_safety(r, e, proc_root=proc_root))
 
 
-def _scan_dir(dirpath, uid, min_age_min, now, proc_root, dry_run, recorded_refs=()):
+def _scan_dir(dirpath, uid, min_age_min, now, proc_root, dry_run, proc_refs, recorded_refs=()):
     """SD7's decision, applied to every top-level entry of `dirpath`. Shared
     by `root`; scratch has its own fixed retention policy. A failure listing `dirpath` itself propagates (the caller
     decides whether that is fatal, per surface)."""
@@ -314,7 +325,7 @@ def _scan_dir(dirpath, uid, min_age_min, now, proc_root, dry_run, recorded_refs=
             kept.append({"path": path, "reason": "recorded resource; registry owns cleanup"})
             continue
         try:
-            kind, reason = _decide(path, uid, min_age_min, now, proc_root, True)
+            kind, reason = _decide(path, uid, min_age_min, now, proc_root, True, proc_refs)
         except Undetermined:
             kept.append({"path": path, "reason": "undetermined"})
             continue
@@ -336,7 +347,7 @@ def _scan_dir(dirpath, uid, min_age_min, now, proc_root, dry_run, recorded_refs=
                     kept.append({"path": cpath, "reason": "recorded resource; registry owns cleanup"})
                     continue
                 try:
-                    ckind, creason = _decide(cpath, uid, min_age_min, now, proc_root, False)
+                    ckind, creason = _decide(cpath, uid, min_age_min, now, proc_root, False, proc_refs)
                 except Undetermined:
                     kept.append({"path": cpath, "reason": "undetermined"})
                     continue
@@ -968,7 +979,9 @@ def run(root="/tmp", uid=None, min_age_min=120, dry_run=False, now=None, proc_ro
     settings = disk_reaper._settings()
     recorded_refs = {pathlib.Path(os.path.realpath(r.ref)) for r in resources.live(events or [])
                      if pathlib.Path(r.ref).is_absolute()}
-    removed, kept = _scan_dir(root, uid, effective_min_age, now, proc_root, dry_run, recorded_refs)
+    proc_refs, tmp_other_uid_skipped = _own_uid_refs(proc_root, uid)
+    removed, kept = _scan_dir(root, uid, effective_min_age, now, proc_root, dry_run,
+                              proc_refs, recorded_refs)
 
     errors = {}
     if scratch_root is not None:
@@ -1088,6 +1101,7 @@ def run(root="/tmp", uid=None, min_age_min=120, dry_run=False, now=None, proc_ro
             "surface_summary": dict(hold=hold, config_invalid=len(invalid), worktrees=worktree_stats),
             "worktree_rows": worktree_rows,
             "other_uid_skipped": worktree_stats['other_uid_skipped'],
+            "tmp_other_uid_skipped": tmp_other_uid_skipped,
             "freed_bytes_worktrees": sum(row["freed_bytes"] for row in worktree_rows)}
     # Internal sets never escape into the CLI's JSON result.
     for surface in (var_tmp, session_logs, worktree_stats):
