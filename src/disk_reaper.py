@@ -41,6 +41,12 @@ def _unreadable_pid(proc_root, pid):
     if not reap_tmp.panes.alive(pid):
         return 'exited', None
     try:
+        raw = (path / 'stat').read_text()
+        if raw[raw.rindex(')') + 1:].split()[0] == 'Z':
+            return 'exited', None
+    except (OSError, ValueError, IndexError):
+        pass
+    try:
         status = dict(line.split(':', 1) for line in (path / 'status').read_text().splitlines() if ':' in line)
         if [int(v) for v in status.get('Uid', '').split()] != [os.getuid()] * 4:
             return None, None
