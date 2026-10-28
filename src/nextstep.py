@@ -267,7 +267,7 @@ def _review(c):
 
 def _clean_review(c):
     trigger = _latest(c['evs'], JUDGING | {'build-done', 'build-blocked'})
-    if (trigger and trigger['type'] == 'review' and trigger.get('confirmed') is True
+    if (trigger and trigger['type'] == 'review'
             and type(trigger.get('n_blocking')) is int and trigger['n_blocking'] == 0
             and not fold.standing_rejects(c['evs'])):
         return trigger
