@@ -6,7 +6,7 @@ import argparse, hashlib, os, pathlib, re, shlex, subprocess, sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import amends, audit, fold, merge_gate, models, routing, grader_packet  # noqa: E402
-import verification
+import verification, base_refresh
 
 ROOT = pathlib.Path(os.environ.get("DOIT_ROOT", pathlib.Path.home() / ".do-it"))
 CONTENT, PACKETS = ROOT / "content", ROOT / "packets"
@@ -355,14 +355,13 @@ def _interp_violations(segs):
             out.append(f"`{cmd}` in `{seg.strip()}`")
     return out
 
-
 def verify_base_sha(c):
     """Pin the verify base once at packet time (R3d, R7 Target 2).
-    Precedence: --base-sha; latest subject build-done with base_sha_explicit;
+    Precedence: --base-sha; refresh tip; latest explicit build-done;
     earliest subject build-done.base_sha; latest build-started; latest
     spec-written; worktree merge-base; worktree HEAD as a last resort.
     Explicit pins preserve the main tip from a landed rebase on later rework;
-    otherwise the earliest build-done keeps rework anchored before round one,
+    otherwise the earliest build-done keeps must-fix rework anchored before round one,
     rather than at a prior round's ready_sha. Ctx.evs scopes this to the subject.
     Subjects with no explicit build-done retain the original precedence.
     If the worktree is absent, fall back to HEAD in --repo or $R/repos/project
@@ -370,8 +369,9 @@ def verify_base_sha(c):
     spec audits before a worktree or any recorded base exists. Refuse only if
     the repository also yields no base. Never re-derive the pin at script time.
     """
-    if c.a.base_sha:
-        return c.a.base_sha
+    pinned = c.a.base_sha or base_refresh.refresh_tip(c)
+    if pinned:
+        return pinned
     bds = c.all_of("build-done")
     explicit = [e for e in bds if e.get("base_sha") and e.get("base_sha_explicit")]
     if explicit:
@@ -398,7 +398,6 @@ def verify_base_sha(c):
             return r.stdout.strip()
     die(f"{c.a.subject}: no base_sha recorded, and neither `git merge-base` nor "
         f"`git rev-parse HEAD` in {wt} produced one — pin it with --base-sha")
-
 
 class VerifyLint(Exception):
     """A Verification block violates one of `verify_script`'s lint rules — the
@@ -928,7 +927,6 @@ def hint_block(c):
             hint,
             f"   The paths it concerns: {', '.join(c.footprint()) or 'none stated'}."]
 
-
 def p_builder(c):
     hint = hint_block(c)          # refused before anything else is assembled
     spec, v = c.spec_file(), write_verify_script(c)
@@ -948,7 +946,10 @@ def p_builder(c):
          # R7/Target 1, AC1/AC3: the machine line `dispatch.pinned_base` reads back
          # off this same file — unconditional, byte-equal to `base_sha` above.
          f"PINNED_BASE_SHA: {base_sha}",
-         *(["PINNED_BASE_SHA_EXPLICIT: true"] if c.a.base_sha else []),
+         *(["PINNED_BASE_SHA_EXPLICIT: true"] if c.a.base_sha or base_refresh.refresh_tip(c) else []),
+         *(["The base moved to the main tip because main changed under this spec. "
+            "If your branch already has a commit, rebase it onto `base_sha` first, "
+            "keeping exactly one commit above it."] if not c.a.base_sha and base_refresh.refresh_tip(c) else []),
          f"4. Verify command: `bash {v}`" if v else
          "4. Verify command: NONE — the spec's Verification block is empty. Declare `spec-ambiguity` and stop.",
          f"   Done-condition: {done}.",
@@ -977,7 +978,6 @@ def p_builder(c):
     L += ["", f"Your cwd is your worktree, on branch `{c.a.subject.lower()}`. "
               f"The repository is `{repo}`. One spec, one commit, on that branch."]
     return L
-
 
 def _drop_owed_blocks(lines, owed):
     """Drop whole physical-line blocks, including fenced criterion examples."""
