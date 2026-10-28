@@ -775,6 +775,10 @@ EXPECTED_CRONS_ROWS = [
      "command": "{doit} cron-run stall-sample -- /usr/bin/python3 {repo}/src/stall_sample.py sample >> {root}/logs/stall-sample.log 2>&1",
      "path": "/usr/bin/python3", "sig": r"stall_sample\.py\s+sample\b",
      "owner": "thinker", "project": "do-it-v2", "max_runtime_s": 1800},
+    {"name": "spec-preflight", "where": "user", "schedule": "*/5 * * * *",
+     "command": "{doit} cron-run spec-preflight -- /usr/bin/python3 {repo}/src/spec_preflight.py tick >> {root}/logs/spec-preflight.log 2>&1",
+     "path": "/usr/bin/python3", "sig": r"spec_preflight\.py\s+tick\b",
+     "owner": "thinker", "project": "do-it-v2", "max_runtime_s": 3300},
 ]
 CRONS_PATH = pathlib.Path(__file__).resolve().parent.parent / "crons.toml"
 with open(CRONS_PATH, "rb") as f:

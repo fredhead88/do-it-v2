@@ -2069,3 +2069,43 @@ test_repo_packet()
 
 assert set(__import__("owed_routes").ROUTES) == set(json.loads((pathlib.Path(__file__).parents[1] / "agents/owed-sweeper.schema.json").read_text())["properties"]["results"]["items"]["properties"]["capability"]["enum"])
 print("AC7 ok packet capability list uses route vocabulary")
+
+# L-spec-1663 AC9: real packet builders retain the complete current body.
+def test_spec_preflight_packets():
+    import types
+    sid = 'L-spec-9663'
+    fixture = TMP / 'content' / (sid + '.md')
+    fixture.write_text(SPEC.read_text().replace('L-spec-0001', sid))
+    args = types.SimpleNamespace(subject=sid, charter=None, project='t', role='builder',
+                                 repo=str(REPO), worktree=str(REPO), base_sha='fixture',
+                                 produces=None, conventions=None, hint=None)
+    ev('spec-writer', 'spec-written', sid, path=str(fixture), footprint=['src/fold.py'], ts='2030-01-01T00:00:00Z')
+
+    def packets():
+        c = packet.Ctx(args)
+        return ['\n'.join(builder(c)) for builder in (packet.p_spec_auditor, packet.p_builder)]
+
+    missing = packets()
+    assert all('preflight undetermined: none recorded' in text and 'spec-preflight (newest):' not in text
+               for text in missing)
+    body = dict(spec=sid, findings=[dict(check=3, id='src/test_x.py', line='reaches src/a.py')],
+                red_on_master=['src/test_red.py'], undetermined=[])
+    ev('spec-preflight', 'spec-preflight', sid, ts='2030-01-01T00:00:01Z', **body)
+    current = packets()
+    assert all('spec-preflight (newest):\n' + json.dumps(body, sort_keys=True) in text for text in current)
+    for old, new in zip(missing, current):
+        assert new.split('spec-preflight (newest):')[0].rstrip() == old.split('preflight undetermined:')[0].rstrip()
+    ev('spec-writer', 'spec-written', sid, path=str(fixture), footprint=['src/fold.py'], ts='2030-01-01T00:00:02Z')
+    assert all('preflight undetermined: stale: recorded before the newest spec-written' in text
+               and 'spec-preflight (newest):' not in text for text in packets())
+    body['undetermined'] = ['check 1: imports unavailable', 'check 4: timeout']
+    ev('spec-preflight', 'spec-preflight', sid, ts='2030-01-01T00:00:03Z', **body)
+    for text in packets():
+        assert 'spec-preflight (newest):\n' + json.dumps(body, sort_keys=True) in text
+        assert 'preflight undetermined: check 1: imports unavailable\npreflight undetermined: check 4: timeout' in text
+        assert all('clean' not in line for line in text.splitlines()
+                   if line.startswith(('spec-preflight (newest):', 'preflight undetermined:')))
+    print('L-spec-1663 AC9 ok')
+
+
+test_spec_preflight_packets()

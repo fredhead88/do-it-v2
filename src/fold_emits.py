@@ -1,7 +1,7 @@
 """Ledger event authorization vocabulary and nightly ownership fold, re-exported by fold."""
 
 # Who may emit what. A type absent here is open to any actor (§2.5).
-EMITS = {"verdict": {"grader"}, "review": {"reviewer"}, "shipped": {"executor"},
+EMITS = {"spec-preflight": {"spec-preflight"}, "verdict": {"grader"}, "review": {"reviewer"}, "shipped": {"executor"},
          # SD8: packet authors queue seats; only the relay records service.
          # Static so a standalone fold reader enforces these without dispatch.
          "seat-queued": {"spec-writer", "spec-auditor", "builder", "grader", "reviewer",

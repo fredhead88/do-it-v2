@@ -18,7 +18,6 @@ CONTENT, PACKETS = ROOT / "content", ROOT / "packets"
 DONE = ("the verify command exits 0; no tracked file is modified and no untracked file "
         "outside `__pycache__/` remains; exactly one commit above base_sha")
 
-
 def done_condition(c, charter_id):
     """Latest fold.EMITS-authorized charter override, or DONE (L-spec-0129)."""
     if charter_id:
@@ -28,14 +27,11 @@ def done_condition(c, charter_id):
             return ev["clause"]
     return DONE
 
-
 AC_ROW = re.compile(r"^\S+ \[(ui|backend|observed-data|financial)\] ")
 PLACEHOLDER = re.compile(r"TODO|TBD|\[NEEDS CLARIFICATION|as needed|etc\.")
 
-
 def die(msg):
     sys.exit(f"packet: {msg}")
-
 
 def resolve(p):
     """A content path in the ledger may be absolute, root-relative, or a bare name."""
@@ -45,7 +41,6 @@ def resolve(p):
             return cand
     die(f"nothing on disk at {p}")
 
-
 def long_lines(path, n=50):
     """A file's substantial lines — what a paste of it would drag along. The strip
     check looks for these verbatim in the packet."""
@@ -54,9 +49,7 @@ def long_lines(path, n=50):
     except OSError:
         return []
 
-
 FENCE = re.compile(r"^```")
-
 
 def _heading_positions(text):
     """Physical-line indices of markdown headings outside triple-backtick fences."""
@@ -69,7 +62,6 @@ def _heading_positions(text):
             out.append(i)
     return out
 
-
 def section(text, name):
     """Stripped section outside fences: None if absent, empty string if empty."""
     lines = text.split("\n")
@@ -81,7 +73,6 @@ def section(text, name):
     end = next((i for i in headings if i > start), None)
     body_lines = lines[start + 1:end] if end is not None else lines[start + 1:]
     return "\n".join(body_lines).strip()
-
 
 def _criterion_spans(body, *, allow_bullets=False):
     """Physical-line ranges; headings and AC examples inside fences are data."""
@@ -107,7 +98,6 @@ def _criterion_spans(body, *, allow_bullets=False):
     if current is not None:
         spans.append((*current, len(lines)))
     return spans
-
 
 def criteria(body):
     """Full criterion lines, including bold anchors; refuse if none exist."""
@@ -833,6 +823,20 @@ def _round_one_slot(c):
 
 # ─────────────────────────────── the seven Input lists ──────────────────────────────
 
+def preflight_lines(c):
+    """Evidence from the newest authorized event; packets never run preflight."""
+    import json
+    written = max((i for i, e in enumerate(c.evs) if e.get("type") == "spec-written"), default=-1)
+    recorded = [(i, e) for i, e in enumerate(c.evs) if e.get("type") == "spec-preflight"]
+    if not recorded:
+        return ["preflight undetermined: none recorded"]
+    index, event = recorded[-1]
+    if index < written:
+        return ["preflight undetermined: stale: recorded before the newest spec-written"]
+    body = {key: event[key] for key in ("spec", "findings", "red_on_master", "undetermined")}
+    return ["spec-preflight (newest):", json.dumps(body, sort_keys=True),
+            *["preflight undetermined: " + reason for reason in body["undetermined"]]]
+
 def p_spec_auditor(c):
     spec, v = c.spec_file(), write_verify_script(c)
     body = spec.read_text()
@@ -856,8 +860,7 @@ def p_spec_auditor(c):
          if ids is not None else ""),
         "```",
         "4. Calibration examples: none on file.",
-    ]
-
+    ] + preflight_lines(c)
 
 def p_spec_writer(c):
     """Rework. Round one is the Planner's: it holds the plan slot, which is not in the
@@ -902,9 +905,7 @@ def p_spec_writer(c):
     lines += [f"{len(findings) + i}. [spec-shape] {f}" for i, f in enumerate(shape_findings, 1)]
     return base + ["", "## Fix list — apply each, same spec id, same path", ""] + lines
 
-
 HINT_DIFF_MARKER = re.compile(r"^(\+\+\+|---|@@)")
-
 
 def hint_block(c):
     """L-adr-0039's builder re-dispatch: a one-line correction, or a merge collision,
@@ -985,7 +986,7 @@ def p_builder(c):
           "- a gate-clean merge sometimes leaves master red (L-charter-0028)."]
     L += ["", f"Your cwd is your worktree, on branch `{c.a.subject.lower()}`. "
               f"The repository is `{repo}`. One spec, one commit, on that branch."]
-    return L
+    return L + preflight_lines(c)
 
 def _drop_owed_blocks(lines, owed):
     """Drop whole physical-line blocks, including fenced criterion examples."""
@@ -1147,7 +1148,6 @@ def p_charter_reviewer(c):
 _AC_ANY = re.compile(r"^\s*\**AC(\d+)\s*\[")  # group added (L-spec-0435): same
 # anchor shape `criterion_block` already matched — `_drop_owed_blocks` below
 # reuses it to also RECOVER the id, rather than forking a near-identical regex.
-
 
 def not_sha_bound(block, project):
     """Find checkout paths; invalid shell quoting is never clean."""

@@ -123,8 +123,8 @@ check(by_id.get("PL-004") == "warn", f"an unpromoted PL-004 stays warn: {by_id}"
 # files stay under the 400-line cap, and install.sh names test_packet_lint.py
 data = packet_lint.load(packet_lint.CHECKLIST)
 eids = [e["id"] for e in data["entry"]]
-check(len(eids) == 12 and len(set(eids)) == 12 and set(eids) == {f"PL-{n:03d}" for n in range(1, 13)},
-      f"twelve unique ids PL-001..PL-012: {eids}")
+check(len(eids) == 14 and len(set(eids)) == 14 and set(eids) == {f"PL-{n:03d}" for n in range(1, 15)},
+      f"fourteen unique ids PL-001..PL-014: {eids}")
 check(all(hasattr(packet_lint, e["check"]) for e in data["entry"]),
       "every entry's check function resolves on packet_lint")
 HERE = pathlib.Path(__file__).resolve().parent
@@ -204,3 +204,26 @@ test_pl011_owed_environment()
 test_pl011_local_dev_server_screenshots()
 
 print(f"packet_lint: {N} checks pass")
+
+# L-spec-1663: new screens remain warn-only and use the shared AC spans.
+for command, fires in (("$PWD/.venv/bin/python -m pytest x", True),
+                       ("../.venv/bin/python x", True), ("python3 x", True),
+                       ("python x", True), ("/usr/bin/python3 -m pytest x", False),
+                       ("/opt/albert-scott/.venv/bin/python -m pytest x", False)):
+    rows = [r for r in packet_lint.run(spec_text(verify=command), packet_lint.CHECKLIST, 'spec')
+            if r['id'] == 'PL-013']
+    check(bool(rows) == fires and all(r['severity'] == 'warn' for r in rows), command)
+check(packet_lint.check_interpreter_path(spec_text(verify='/usr/bin/true', accept='AC1 [backend]: python3 x.')) is None,
+      'interpreter screen only reads Verification')
+print('L-spec-1663 AC1 lint ok')
+for accept, fires in (("AC1 [backend]: commit abc1234.", True),
+                      ("**AC1** [backend]: works.\n  continuation abc1234", True),
+                      ("- **AC1** [backend]: abc1234.", True),
+                      ("AC1 [backend]: works.\n## Assumptions\nabc1234", False),
+                      ("AC1 [backend]: deadbeef.", False),
+                      ("AC1 [backend]: 12345678.", False),
+                      ("```\nAC1 [backend]: abc1234\n```", False)):
+    rows = [r for r in packet_lint.run(spec_text(accept=accept), packet_lint.CHECKLIST, 'spec')
+            if r['id'] == 'PL-014']
+    check(bool(rows) == fires and all(r['severity'] == 'warn' for r in rows), accept)
+print('L-spec-1663 AC2 lint ok')
