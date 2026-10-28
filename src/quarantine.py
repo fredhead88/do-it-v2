@@ -35,15 +35,17 @@ def active(events, project, now):
 def due(events, project, now):
     now = _time(now)
     blamed = {}
+    owned = set()
     for e in events:
         if (e.get("type") == "window-dropped" and e.get("project") == project
-                and now-timedelta(hours=BLAME_HOURS) <= _time(e["ts"]) <= now
-                and e.get("window")):
-            for node in e.get("nodes", []):
+                and now-timedelta(hours=BLAME_HOURS) <= _time(e["ts"]) <= now):
+            if isinstance(e.get("owned_nodes"), list):
+                owned.update(e["owned_nodes"])
+            for node in e.get("nodes", []) if e.get("window") else []:
                 blamed.setdefault(node, set()).add(e["window"])
     current = active(events, project, now)
     return [dict(node=n, rule="repeat-blame", windows=sorted(ws))
-            for n, ws in sorted(blamed.items()) if len(ws) >= BLAME_WINDOWS and n not in current]
+            for n, ws in sorted(blamed.items()) if len(ws) >= BLAME_WINDOWS and n not in current and n not in owned]
 
 
 def lifts(events, project, now):
