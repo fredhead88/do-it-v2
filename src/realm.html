@@ -1172,7 +1172,7 @@ setInterval(async()=>{if(!dossierFor)return;const id=dossierFor;const dd=await f
 function cticksFor(H,filed){const rows=H.rows;const t=[{ms:filed,k:'good'}];for(const e of rows){if(e.s!==H.id&&!String(e.s||'').startsWith('L-charter-'))continue;if(e.ty==='plan-written'||e.ty==='l1-complete')t.push({ms:e.ms,k:'good'});else if(e.ty==='escalation-blocking'||e.ty==='question')t.push({ms:e.ms,k:'esc'});else if(e.ty==='decision')t.push({ms:e.ms,k:'dec'});else if(e.ty==='audit-finding'||e.ty==='charter-gap'||e.ty==='charter-retracted')t.push({ms:e.ms,k:'bad'});}return t;}
 function closeDossier(){$('dossier').hidden=true;cv.parentElement.classList.remove('focus');$('app').querySelector('.stage').classList.remove('focus');if(!PHONE.matches)$('app').classList.remove('nopanel');dossierFor=null;dossierH=null;dossierData=null;}
 async function replayCharter(cid,fromMs){closeDossier();if(REMOTE&&!stream&&fromMs<T0){status('WAKING THE REALM','fetching the whole history for the replay…');try{const hd=await remoteFetch('history');if(hd&&hd.events){hd.live=false;loadData(hd);}}catch(_){}status(null);}
-  if(stream&&fromMs<T0){status('WAKING THE REALM','fetching the charter\'s whole history for the replay…');try{const hours=Math.ceil((Date.now()-fromMs)/3600000)+1;const r=await fetch(api('/api/bootstrap?hours='+hours),{cache:'no-store'});if(r.ok)loadData(await r.json());}catch(_){}status(null);}
+  if(stream&&fromMs<T0){status('WAKING THE REALM','fetching the charter\'s whole history for the replay…');try{const hours=Math.ceil((Date.now()-fromMs)/3600000)+1;loadData(await loadBootstrap(hours));await bootstrapRest;}catch(_){}status(null);}
   LIVE=false;S.focus=cid;S.speed=720;document.querySelectorAll('.spd').forEach(x=>x.classList.toggle('on',x.dataset.s==='720'));seek(Math.max(T0,fromMs-60000));S.playing=true;renderFocus();}
 function renderFocus(){let el=document.getElementById('focus');if(!S.focus){if(el)el.remove();return;}if(!el){el=document.createElement('div');el.id='focus';el.className='chip focus';$('legend').prepend(el);}el.innerHTML=`REPLAYING ${esc(S.focus)} <a data-a="d">dossier</a><a data-a="c">clear</a>`;el.querySelector('[data-a=d]').onclick=()=>openDossier(S.focus);el.querySelector('[data-a=c]').onclick=()=>{S.focus=null;renderFocus();};}
 const inFocus=subj=>!S.focus||subj===S.focus||specCharter(subj)===S.focus;
@@ -1565,7 +1565,13 @@ sc.addEventListener('change',()=>{const t=T0+(T1-T0)*sc.value/1000;if(stream||RE
 $('b-live').onclick=()=>{if(!stream&&!REMOTE)return;LIVE=true;S.playing=true;T1=Date.now();seek(Date.now());};
 $('b-menu').onclick=()=>{const on=$('strip-menu').classList.toggle('open');$('b-menu').setAttribute('aria-expanded',String(on));};
 $('strip-menu').addEventListener('click',ev=>{if(ev.target.closest('button')&&!ev.target.closest('.spd')){$('strip-menu').classList.remove('open');$('b-menu').setAttribute('aria-expanded','false');}});
-$('b-chronicle').onclick=()=>{const on=$('log').classList.toggle('open');$('b-chronicle').setAttribute('aria-expanded',String(on));};
+function setChronicle(open, remember=false){
+  if(PHONE.matches)return;
+  $('log').classList.toggle('open',open);$('b-chronicle').setAttribute('aria-expanded',String(open));
+  if(remember)try{localStorage.setItem('realm.chronicle',open?'open':'closed');}catch(_){}
+}
+if(!PHONE.matches){try{setChronicle(localStorage.getItem('realm.chronicle')==='open');}catch(_){setChronicle(false);}}
+$('b-chronicle').onclick=()=>setChronicle(!$('log').classList.contains('open'),true);
 $('log-min').onclick=()=>{const l=$('log');l.classList.toggle('min');$('log-min').textContent=l.classList.contains('min')?'show':'hide';};
 addEventListener('keydown',ev=>{if(ev.target.tagName==='INPUT')return;if(tour){if(ev.key===' '||ev.key==='ArrowRight'){ev.preventDefault();showTourStep(tour.i+1);}else if(ev.key==='ArrowLeft'){showTourStep(tour.i-1);}else if(ev.key==='Escape')endTour();return;}if(ev.key===' '){ev.preventDefault();$('b-play').click();}if(ev.key==='Escape'){if(!$('dossier').hidden)closeDossier();else{$('p-close').click();hideBubble();}}});
 
@@ -1575,7 +1581,7 @@ let stream=null;
 let KEY='';try{const u=new URL(location.href);if(u.searchParams.get('key')){KEY=u.searchParams.get('key');localStorage.setItem('realm.key',KEY);u.searchParams.delete('key');history.replaceState(null,'',u.pathname+u.hash);}else KEY=localStorage.getItem('realm.key')||'';}catch(_){}
 const BASE=location.pathname.replace(/\/[^/]*$/,'');/* works at / and behind a proxy prefix such as /realm/ */
 const api=path=>BASE+path+(KEY?(path.includes('?')?'&':'?')+'key='+encodeURIComponent(KEY):'');
-function loadData(d){DATA=d;applyViews(d);Codex.load(d.codex);if(d.caps)CAP={...CAP,...d.caps};SEEN.clear();for(const e of d.events){SEEN.add(rowKey(e));if(e.t>lastT)lastT=e.t;}lastHeard=Date.now();EVENTS=d.events.map(e=>({...e,ms:toMs(e.t)})).filter(e=>e.ms).sort((a,b)=>a.ms-b.ms);T0=toMs(d.window[0]);T1=d.live?Date.now():toMs(d.window[1])+60000;$('s-a').textContent=fmt(T0);$('s-b').textContent=fmt(T1);}
+function loadData(d){DATA={stats:{},counts:{},titles:{},makers:{},charters:{},spec_charter:{},specs:{},...d};applyViews(d);Codex.load(d.codex);if(d.caps)CAP={...CAP,...d.caps};SEEN.clear();for(const e of d.events){SEEN.add(rowKey(e));if(e.t>lastT)lastT=e.t;}lastHeard=Date.now();EVENTS=d.events.map(e=>({...e,ms:toMs(e.t)})).filter(e=>e.ms).sort((a,b)=>a.ms-b.ms);T0=toMs(d.window[0]);T1=d.live?Date.now():toMs(d.window[1])+60000;$('s-a').textContent=fmt(T0);$('s-b').textContent=fmt(T1);}
 const SEEN=new Set();let lastT='',lastHeard=0;
 const rowKey=r=>r.t+'|'+r.ty+'|'+(r.s||'')+'|'+(r.sp||'')+'|'+(r.a||'')+'|'+(r.c||'')+'|'+String(r.why||r.ti||r.pb||'').slice(0,48);
 function insertEvent(row){const k=rowKey(row);if(SEEN.has(k))return false;SEEN.add(k);if(row.t>lastT)lastT=row.t;const e={...row,ms:toMs(row.t)||Date.now()};let i=EVENTS.length;while(i>0&&EVENTS[i-1].ms>e.ms)i--;EVENTS.splice(i,0,e);if(i<S.cursor)S.cursor++;// arrived out of order behind the cursor: handle now
@@ -1606,13 +1612,44 @@ function passwordForm(msg){openPanel(`<h2>Realm of DO-IT</h2><div class="cls">th
 function applySnapshot(d){if(!DATA){return false;}applyViews(d);applyThroughput(d);if('glance' in d)DATA.glance=d.glance;else DATA.glance=null;if(d.codex){DATA.codex=d.codex;Codex.load(d.codex);}let lastT='';for(const e of EVENTS)if(e.t>lastT)lastT=e.t;let n=0;for(const row of d.events){if(row.t>lastT){insertEvent(row);n++;}}for(const k of ['states','seat','stats','titles','counts','queue','charters','spec_charter','makers','n_events','sys','tick_omens','history','specs','wallclock','metrics','goals','omens'])if(d[k]!=null)DATA[k]=d[k];if('proving' in d)DATA.proving=d.proving;if(d.wallclock)S.wallclock=d.wallclock;if(d.metrics)S.metricsNow=d.metrics;if(d.history)S.history=d.history;if(d.sys)S.sys=d.sys;if(d.tick_omens)S.tickOmens=d.tick_omens;if(d.omens)S.omens=d.omens;S.lastStates=Date.now();lastPush=d.pushedAt||d.now||'';T1=Date.now();return n;}
 async function remotePoll(){const d=await remoteFetch('snapshot');if(!d||d.auth===false)return;applySnapshot(d);}
 let booted=false;
+let bootstrapVersion=0,bootstrapRest=Promise.resolve();
+function historyNotice(failed){
+  let notice=$('history-notice');
+  if(!notice){notice=document.createElement('div');notice.id='history-notice';notice.setAttribute('role','status');notice.style.cssText='position:absolute;bottom:12px;left:12px;z-index:7;background:var(--glass2);color:var(--amber);padding:8px 12px';document.querySelector('.view').appendChild(notice);}
+  notice.hidden=!failed;notice.textContent=failed?'History did not load. Reload to try again.':'';
+}
+async function loadBootstrap(hours){
+  const version=++bootstrapVersion;
+  const query=hours==null?'':'?hours='+encodeURIComponent(hours);
+  const response=await fetch(api('/api/bootstrap'+query),{cache:'no-store'});
+  if(!response.ok){const error=new Error('Realm did not answer');error.status=response.status;throw error;}
+  const first=await response.json();
+  if(first.part==='first'){
+    historyNotice(false);
+    bootstrapRest=fetch(api('/api/bootstrap?part=rest'+(hours==null?'':'&hours='+encodeURIComponent(hours))),{cache:'no-store',signal:AbortSignal.timeout(30000)})
+      .then(async response=>{
+        if(!response.ok)throw new Error('History did not load');
+        const rest=await response.json();
+        if(rest.part!=='rest')throw new Error('History did not load');
+        if(version!==bootstrapVersion)return;
+        const at=S.now,playing=S.playing;
+        // Keep streamed rows that arrived while the history was in flight.
+        const rows=EVENTS.map(({ms,...row})=>row).concat(rest.events).sort((a,b)=>a.t.localeCompare(b.t));
+        loadData({...DATA,...rest,part:undefined,events:rows});
+        if(DATA.history)S.history=DATA.history;if(DATA.wallclock)S.wallclock=DATA.wallclock;
+        if(DATA.tick_omens)S.tickOmens=DATA.tick_omens;applyThroughput(DATA);
+        seek(LIVE?Date.now():at);S.playing=playing;mApply();historyNotice(false);
+      }).catch(()=>{if(version===bootstrapVersion)historyNotice(true);});
+  }
+  return first;
+}
 async function boot(){
   let d=null;if(!booted){booted=true;requestAnimationFrame(loop);}
-  try{status('WAKING THE REALM','asking the server for the last 24 hours…');const r=await fetch(api('/api/bootstrap'),{cache:'no-store'});if(r.ok){status('WAKING THE REALM','reading the ledger…');d=await r.json();}else if(r.status===401){status('KEY NEEDED','open the address doit realm printed, with ?key= on it',true);openPanel('<h2>Key needed</h2><p>This realm is served with a key. Open the address that <code>doit realm --public</code> printed, which carries <code>?key=…</code>; this browser will remember it.</p>');requestAnimationFrame(loop);return;}}catch(_){}
+  try{status('WAKING THE REALM','asking the server for the last 24 hours…');d=await loadBootstrap();}catch(error){if(error.status===401){status('KEY NEEDED','open the address doit realm printed, with ?key= on it',true);openPanel('<h2>Key needed</h2><p>This realm is served with a key. Open the address that <code>doit realm --public</code> printed, which carries <code>?key=…</code>; this browser will remember it.</p>');requestAnimationFrame(loop);return;}}
   if(!d){try{const rd=await remoteFetch('snapshot');if(rd&&rd.auth===false){passwordForm();return;}if(rd){d=rd;REMOTE=true;}}catch(_){}}
   if(!d){try{d=JSON.parse(document.getElementById('ledger').textContent);}catch(_){}}
   if(!d){status('NO LEDGER REACHED','the server did not answer and this copy has no snapshot',true);openPanel('<h2>No ledger</h2><p>Run <code>doit realm</code> on the box that holds <code>~/.do-it</code> and open the address it prints. This copy has no embedded snapshot.</p>');return;}
-  status('WAKING THE REALM',`replaying ${d.events.length.toLocaleString()} events…`);await new Promise(r=>setTimeout(r,20));loadData(d);
+  status('WAKING THE REALM',`replaying ${d.events.length.toLocaleString()} events…`);loadData(d);
   if(d.live){LIVE=true;seek(Date.now());connect();document.querySelectorAll('.spd').forEach(x=>x.classList.remove('on'));}
   else if(REMOTE){LIVE=true;lastPush=d.pushedAt||d.now||'';T1=Date.now();seek(Date.now());$('b-live').style.display='';if(!remoteTimer)remoteTimer=setInterval(remotePoll,45000);document.querySelectorAll('.spd').forEach(x=>x.classList.remove('on'));}
   else{LIVE=false;$('b-live').style.display='none';const dayStart=Date.UTC(new Date(T1).getUTCFullYear(),new Date(T1).getUTCMonth(),new Date(T1).getUTCDate());const t=dayStart>T0&&dayStart<T1?dayStart:T0;seek(t);}

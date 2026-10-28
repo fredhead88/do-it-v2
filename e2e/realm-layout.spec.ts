@@ -17,16 +17,27 @@ realm.maker_index=lambda *a: {}
 realm.glance_payload=lambda *a: {}
 now=dt.datetime.now(dt.timezone.utc)
 start=(now-dt.timedelta(minutes=5)).isoformat()
-fixture.w('L-builder-7.jsonl',[dict(ts=start,type='build-started',subject='L-spec-7',spawn='L-builder-7',backend='codex')])
+fixture.w('L-builder-7.jsonl',[dict(ts=start,type='build-started',subject='L-spec-7',spawn='L-builder-7',backend='codex'),dict(ts=start,type='tick',subject='tick',lane=12345)])
 realm.codex_payload=lambda *a: {'sessions':[dict(id='L-builder-7',kind='doit-build',subject='L-spec-7',role='builder',state='live',started=start,last=start)],'quota':{'weekly_used_pct':71}}
 d=realm.bootstrap(24,states=[('L-spec-7','building')],goals=[],proving=[],now=now)
 d['omens']={'items':[dict(id='layout-need',kind='decide',sev=1,title='A decision needs you',detail='Review fixture access',anchor='keep',subjects=['L-spec-7'],owner='operator',next='Review access',since=start,last=start)]}
-d.update(live=True,lane=[],glance={'at':now.isoformat(),'collapsed':'A fixture build is moving forward.','attention':'1 thing needs you.','needs_you':[]})
+d.update(live=True,lane=[],glance={'at':now.isoformat(),'collapsed':'Five priority groups are moving through building, checking, reviewing and deployment; 12345 specs need attention and 54321 are held on their prerequisites.','attention':'1 thing needs you.','needs_you':[],'stuck':{'count':12345,'stuck':[],'held':[],'error':None}})
+d.update(flow={'stages':{'idea':0,'planned':0,'building':1,'checking':0,'merging':0,'live':0},'stuck':[]},flow_error=None,health={},health_error=None)
+first_keys=set('live now root glance flow flow_error health health_error metrics states seat sys queue omens window n_events ledger_start caps events'.split())
+cutoff=(now-dt.timedelta(minutes=30)).isoformat()
+first={k:v for k,v in d.items() if k in first_keys};first.update(part='first',events=[e for e in d['events'] if e['t']>=cutoff])
+rest={k:v for k,v in d.items() if k not in first_keys};rest.update(part='rest',events=[e for e in d['events'] if e['t']<cutoff])
+rest['events'].append({'t':(now-dt.timedelta(hours=1)).isoformat(),'ty':'tick','s':'tick','a':'executor','ln':3})
 class Handler(realm.Handler):
  def do_GET(self):
   path=urllib.parse.urlparse(self.path).path
-  if path=='/api/bootstrap': self._json(d);return
-  if path=='/api/glance': self._json(d['glance']);return
+  if path=='/api/bootstrap':
+   d['glance']['at']=dt.datetime.now(dt.timezone.utc).isoformat()
+   query=urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+   self._json(d if '/baseline' in self.headers.get('Referer','') else rest if query.get('part')==['rest'] else first);return
+  if path=='/api/glance':
+   d['glance']['at']=dt.datetime.now(dt.timezone.utc).isoformat()
+   self._json(d['glance']);return
   if path=='/baseline':
    body=pathlib.Path(sys.argv[1]).read_bytes().replace(b'/*__CODEX_JS__*/',pathlib.Path('src/realm_codex.js').read_bytes())
    self.send_response(200);self.send_header('Content-Type','text/html');self.send_header('Content-Length',str(len(body)));self.end_headers();self.wfile.write(body);return
@@ -46,12 +57,12 @@ test.beforeAll(async()=>{
 });
 test.afterAll(()=>server?.kill());
 test.beforeEach(async({page})=>{
- await page.context().tracing.start({screenshots:true,snapshots:true});
+ await page.context().tracing.start({screenshots:true,snapshots:false});
  await page.emulateMedia({reducedMotion:'reduce'});
  await page.route('**/*',r=>new URL(r.request().url()).origin===base?r.continue():r.abort());
 });
 test.afterEach(async({page},info)=>{
- const name=info.title.split(':')[0];
+ const name=info.title.split(':')[0]+(info.title.startsWith('L1668-AC7')?(info.title.includes('phone')?'-phone':'-desktop'):'');
  await page.screenshot({path:join(evidence,name+'.png'),fullPage:true});
  await page.context().tracing.stop({path:join(evidence,name+'.trace.zip')});
 });
@@ -218,4 +229,119 @@ test('AC10: phone MAP and NOW geometry matches the original page',async({page})=
    expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);frames.push({map,now});
   }expect(frames[1]).toEqual(frames[0]);
  }
+});
+
+
+async function painted(page){
+ await expect(page.locator('#status')).toBeHidden();
+ const s=await state(page);fit(s);
+ for(const id of ['h-stuck','h-exec','h-pipe']){
+  await expect(page.locator('#'+id+' b')).not.toHaveText('—');
+  await expect(page.locator('#'+id+' b')).not.toBeEmpty();
+ }
+ await expect(page.locator('#glance-sentence')).not.toBeEmpty();
+ expect(await page.locator('#map').evaluate(canvas=>{
+  const pixels=canvas.getContext('2d').getImageData(0,0,canvas.width,canvas.height).data;
+  let painted=0,total=0;for(let i=0;i<pixels.length;i+=16){total++;if(pixels[i]+pixels[i+1]+pixels[i+2]>30&&pixels[i+3]>0)painted++;}return painted/total;
+ })).toBeGreaterThanOrEqual(.70);
+}
+
+test('L1668-AC6: first paint while history is pending, merge and visible failure',async({page})=>{
+ await page.setViewportSize({width:1440,height:900});
+ const errors=[];page.on('pageerror',e=>errors.push(e.message));
+ // Timestamp readiness in the browser, before assertion protocol round trips.
+ await page.addInitScript(()=>{
+  const probe=()=>{
+   const status=document.querySelector('#status'),canvas=document.querySelector('#map');
+   const tiles=['h-stuck','h-exec','h-pipe'].map(id=>document.querySelector('#'+id+' b')?.textContent);
+   if(status?.style.display==='none'&&canvas&&tiles.every(text=>text&&text!=='—')&&document.querySelector('#glance-sentence')?.textContent){
+    const pixels=canvas.getContext('2d').getImageData(0,0,canvas.width,canvas.height).data;
+    let painted=0,total=0;for(let i=0;i<pixels.length;i+=16){total++;if(pixels[i]+pixels[i+1]+pixels[i+2]>30&&pixels[i+3]>0)painted++;}
+    if(painted/total>=.70){window.realmFirstPaint={ms:performance.now(),historyPending:DATA.part==='first'&&DATA.codex===undefined};return;}
+   }
+   requestAnimationFrame(probe);
+  };requestAnimationFrame(probe);
+ });
+ let requests=0;
+ await page.route('**/api/bootstrap?part=rest',async route=>{
+  requests++;await new Promise(resolve=>setTimeout(resolve,10000));await route.continue();
+ });
+ await page.goto(base+'/');
+ await page.waitForFunction(()=>window.realmFirstPaint!==undefined,null,{timeout:5000});
+ const firstPaint=await page.evaluate(()=>window.realmFirstPaint);
+ expect(firstPaint.ms).toBeLessThanOrEqual(5000);expect(firstPaint.historyPending).toBe(true);
+ writeFileSync(join(evidence,'L1668-AC6-timing.json'),JSON.stringify(firstPaint));
+ await painted(page);expect(requests).toBe(1);expect(errors).toEqual([]);
+ await page.screenshot({path:join(evidence,'L1668-AC6-first.png')});
+ await page.waitForFunction(()=>DATA&&DATA.codex!==undefined);
+ await page.locator('#b-menu').click();await page.locator('#b-chronicle').click();
+ await expect(page.locator('#log-ul li').first()).toBeVisible();expect(requests).toBe(1);expect(errors).toEqual([]);
+ await page.unroute('**/api/bootstrap?part=rest');
+ await page.route('**/api/bootstrap?part=rest',route=>route.fulfill({status:500,body:'history unavailable'}));
+ await page.reload();await painted(page);
+ await expect(page.locator('#history-notice')).toBeVisible();
+ await expect(page.locator('#history-notice')).toContainText('History did not load');expect(errors).toEqual([]);
+ // The replay entry point uses the same split loader and forwards hours to both requests.
+ await page.unroute('**/api/bootstrap?part=rest');
+ const replay=[];page.on('request',r=>{if(r.url().includes('/api/bootstrap'))replay.push(r.url());});
+ await page.evaluate(async()=>{loadData(await loadBootstrap(48));await bootstrapRest;seek(Date.now());});
+ expect(replay.filter(url=>url.includes('hours=48'))).toHaveLength(2);
+ expect(replay.filter(url=>url.includes('part=rest'))).toHaveLength(1);
+});
+
+test('L1668-AC7: desktop Chronicle remembers both choices and tolerates storage failures',async({page})=>{
+ await open(page);await expect(page.locator('#log')).toBeHidden();
+ expect(await page.evaluate(()=>localStorage.getItem('realm.chronicle'))).toBeNull();
+ for(const on of [true,false]){
+  await page.locator('#b-menu').click();await page.locator('#b-chronicle').click();
+  expect(await page.evaluate(()=>localStorage.getItem('realm.chronicle'))).toBe(on?'open':'closed');
+  await page.reload();await expect(page.locator('#status')).toBeHidden();
+  if(on)await expect(page.locator('#log')).toBeVisible();else await expect(page.locator('#log')).toBeHidden();
+ }
+ await page.addInitScript(()=>{const get=Storage.prototype.getItem;Storage.prototype.getItem=function(key){if(key==='realm.chronicle')throw Error('unreadable');return get.call(this,key);};});
+ await page.reload();await expect(page.locator('#status')).toBeHidden();await expect(page.locator('#log')).toBeHidden();
+ await page.addInitScript(()=>{const set=Storage.prototype.setItem;Storage.prototype.setItem=function(key,value){if(key==='realm.chronicle')throw Error('unwritable');return set.call(this,key,value);};});
+ const errors=[];page.on('pageerror',e=>errors.push(e.message));
+ await page.reload();await expect(page.locator('#status')).toBeHidden();
+ await page.locator('#b-menu').click();await page.locator('#b-chronicle').click();await expect(page.locator('#log')).toBeVisible();
+ expect(errors).toEqual([]);
+});
+
+test('L1668-AC7: phone never reads or writes Chronicle storage',async({page})=>{
+ await page.addInitScript(()=>{
+  window.chronicleStorage=[];
+  for(const method of ['getItem','setItem']){const original=Storage.prototype[method];Storage.prototype[method]=function(key,...args){if(key==='realm.chronicle')window.chronicleStorage.push(method);return original.call(this,key,...args);};}
+ });
+ await open(page,390,844);await page.locator('#mnav [data-t="map"]').click();
+ await expect(page.locator('#b-chronicle')).toBeHidden();await expect(page.locator('#log')).toBeVisible();
+ expect(await page.evaluate(()=>window.chronicleStorage)).toEqual([]);
+});
+
+test('L1668-AC8: live-length header stays within three text rows before and after history',async({page})=>{
+ await page.setViewportSize({width:1440,height:900});
+ let release;const pending=new Promise(resolve=>release=resolve);
+ await page.route('**/api/bootstrap?part=rest',async route=>{await pending;await route.continue();});
+ await page.goto(base+'/');await expect(page.locator('#status')).toBeHidden();
+ const check=async()=>{
+  await expect(page.locator('#glance-sentence')).toContainText('12345 specs need attention and 54321 are held');
+  const s=await state(page);fit(s);
+  expect(await page.locator('#strip').evaluate(strip=>{
+   const rects=[];const walker=document.createTreeWalker(strip,NodeFilter.SHOW_TEXT);
+   while(walker.nextNode()){
+    const node=walker.currentNode;if(!node.textContent.trim()||!node.parentElement.checkVisibility())continue;
+    const range=document.createRange();range.selectNodeContents(node);
+    for(const rect of range.getClientRects())if(rect.width&&rect.height)rects.push({top:rect.top,bottom:rect.bottom});
+   }
+   // Different fonts on one visual line have different glyph tops. A row
+   // must share a horizontal band; wrapped lines produce separate bands.
+   const bands=[];
+   for(const rect of rects.sort((a,b)=>a.top-b.top)){
+    const last=bands[bands.length-1];
+    if(last&&rect.top<last.bottom){last.top=Math.max(last.top,rect.top);last.bottom=Math.min(last.bottom,rect.bottom);}
+    else bands.push({...rect});
+   }return bands.length;
+  })).toBeLessThanOrEqual(3);
+ };
+ await check();await page.screenshot({path:join(evidence,'L1668-AC8-first.png')});
+ release();await page.waitForFunction(()=>DATA.codex!==undefined);await check();
 });

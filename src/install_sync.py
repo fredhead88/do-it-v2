@@ -175,6 +175,21 @@ def changed_rows(repo, sha):
     return [name for name, val in cur.items() if parent.get(name) != val]
 
 
+def sync_realm(repo, sha):
+    """Ship the tracked unit when it changes; otherwise restart changed Realm code."""
+    import realm
+    result = subprocess.run(['git', '-C', str(repo), 'diff-tree', '--root', '--no-commit-id',
+                             '--name-only', '-r', '--diff-merges=first-parent', sha], capture_output=True, text=True, check=True)
+    paths = result.stdout.splitlines()
+    if 'ops/doit-realm.service' in paths:
+        realm.install_realm(repo)
+        return 'installed'
+    if any(path.startswith('src/realm') for path in paths):
+        realm.systemctl_user('restart', 'doit-realm')
+        return 'restarted'
+    return None
+
+
 def _row_where(name, manifest):
     import crons
     for row in crons.rows(manifest=manifest):
@@ -242,6 +257,13 @@ def run(events, *, now=None, root=None, repo=None, agents_dir=None, manifest=Non
         kv = dict(sha=sha, linked=[], installed=installed, print_only=print_only, subject="do-it-v2")
         if e is shipped[-1] and machine_changes is not None:
             kv["machine"] = machine_changes
+        try:
+            action = sync_realm(repo, sha)
+            if action:
+                kv['realm'] = action
+        except Exception as exc:
+            detail = exc.stderr.strip() if isinstance(exc, subprocess.CalledProcessError) and exc.stderr else str(exc)
+            failed.append({'name': 'doit-realm', 'error': detail})
         if failed:
             kv["failed"] = failed
         dispatch.emit(dst, {}, "install-synced", **kv)

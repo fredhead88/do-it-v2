@@ -27,6 +27,7 @@ class Ledger:
         self.key = None
         self.modules = {}
         self.events = self.folded = self.rows = self.offsets = None
+        self.stalls = {}
         self.codex_sessions = None
         self.generation = None
         self.clock_minute = None
