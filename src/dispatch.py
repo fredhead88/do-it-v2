@@ -59,6 +59,8 @@ def subject_ids(prefix):
     out = []
     for f in EVENTS.glob("*.jsonl"):
         for line in f.read_text().splitlines():
+            if prefix not in line:
+                continue
             m = re.match(rf"{re.escape(prefix)}(\d+)$", (json.loads(line).get("subject") or "")
                          ) if line.strip().startswith("{") else None
             m and out.append(int(m.group(1)))
