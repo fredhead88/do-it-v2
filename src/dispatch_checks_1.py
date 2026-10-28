@@ -205,6 +205,7 @@ card = {"status": "DONE", "identity": {"spec_id": "L-spec-0001", "built_by": "L-
         "tests": {"added": True}, "not_built": [{"item": "n", "reason": "out-of-scope-per-spec"}], "unknowns": [],
         "built_against": [], "escalations": [],
         "declarations": [{"term": "spec-ambiguity", "root_cause": "false-premise", "line": "l"}, {"term": "worked", "line": "y"}]}
+dispatch.emit(TMP / "events" / "L-spec-auditor-fx1673.jsonl", {}, "spawn-done", subject="L-spec-0001", bad_cut=False)
 code, types, evs, cmd = spawn("builder", out=card, side=lambda: stray.write_text("builder may write"))
 assert code == 0, evs
 assert types == ["build-started", "build-done", "adr-filed", "build-deviation", "build-stub", "spec-ambiguity", "worked", "spawn-done"], types

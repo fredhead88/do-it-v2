@@ -822,3 +822,152 @@ def test_infra_retry():
 
 if __name__ == "__main__" and not sys.argv[1:]:
     test_infra_retry()
+
+
+import unittest
+from unittest.mock import patch
+
+
+class AuditGateTests(unittest.TestCase):
+    def setUp(self):
+        import dispatch, fold
+        self.dispatch, self.fold = dispatch, fold
+        self.tmp = tempfile.TemporaryDirectory(prefix='audit-gate-')
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        (self.root / 'events').mkdir()
+        (self.root / 'content').mkdir()
+        for module, attrs in ((dispatch, dict(ROOT=self.root, EVENTS=self.root / 'events', CONTENT=self.root / 'content')),
+                              (fold, dict(ROOT=self.root, EVENTS=self.root / 'events'))):
+            swap = patch.multiple(module, **attrs)
+            swap.start()
+            self.addCleanup(swap.stop)
+
+    def emit(self, actor, kind, subject='L-spec-9673', **kw):
+        path = self.root / 'events' / ('L-' + actor + '-9673.jsonl')
+        stamp = kw.pop('ts', '2026-10-28T12:00:00+00:00')
+        with patch.object(self.dispatch, 'now', return_value=stamp):
+            self.assertIsNone(self.dispatch.emit(path, {}, kind, subject=subject, **kw))
+
+    def read(self, subject='L-spec-9673'):
+        return [e for e in self.fold.read_events(use_cache=False) if e.get('subject') == subject]
+
+    def signed(self, ac, body):
+        import hashlib
+        payload = json.dumps(body, sort_keys=True)
+        print(json.dumps(dict(url='cli://audit-gate/' + ac, status=0,
+            body_sha256=hashlib.sha256(payload.encode()).hexdigest(), body_excerpt=payload)))
+
+    def test_ac1_audit_origin_and_outcome_matrix(self):
+        cases = {
+            'a': [('spec-writer', 'spec-written', {})],
+            'b': [('spec-writer', 'spec-written', {}), ('spec-auditor', 'spawn-done', {'bad_cut': False})],
+            'c': [('spec-writer', 'spec-written', {}), ('operator', 'spec-carried', {'source': 'fixture', 'tier': 'fixture', 'audited_at': '2026-10-27'})],
+            'd-thinker': [('thinker', 'spec-written', {})],
+            'd-operator': [('operator', 'spec-written', {})],
+            'e': [('spec-writer', 'spec-written', {}), ('builder', 'build-started', {})],
+            'f': [('spec-writer', 'spec-written', {}), ('spec-auditor', 'spawn-done', {'bad_cut': False}), ('spec-writer', 'spec-written', {})],
+            'g': [('spec-writer', 'spec-written', {}), ('spec-auditor', 'spawn-failed', {'reason': 'fixture'})],
+            'h': [('spec-writer', 'spec-written', {}), ('spec-auditor', 'spawn-done', {'subject': 'L-spec-9999', 'bad_cut': False})],
+            'i': [('spec-writer', 'spec-written', {})],
+            'j': [],
+            'k': [('spec-writer', 'spec-written', {}), ('spec-auditor', 'spawn-done', {'bad_cut': True})],
+            'l': [('spec-writer', 'spec-written', {}), ('spec-auditor', 'spawn-done', {'bad_cut': True}), ('spec-writer', 'spec-written', {})],
+            'm': [('spec-writer', 'spec-written', {}), ('spec-auditor', 'spawn-done', {'bad_cut': True}), ('operator', 'decision', {})],
+            'n': [('spec-writer', 'spec-written', {}), ('spec-auditor', 'spawn-done', {})],
+        }
+        from datetime import datetime, timedelta, timezone
+        start = datetime(2026, 10, 27, tzinfo=timezone.utc)
+        for label, rows in cases.items():
+            for path in (self.root / 'events').glob('*.jsonl'):
+                path.unlink()
+            for n, (actor, kind, extra) in enumerate(rows):
+                self.emit(actor, kind, ts=(start + timedelta(minutes=n)).isoformat(), **extra)
+            events = self.read()
+            if label == 'i':
+                events[0].pop('actor')
+            result = self.dispatch.unaudited(events)
+            self.assertEqual(result is not None, label in {'a', 'g', 'h', 'i', 'k', 'n'}, label)
+            if result:
+                self.assertTrue(result.startswith('unaudited:'))
+            if label == 'i':
+                self.assertTrue(result.startswith('unaudited: undetermined'))
+            if label in {'k', 'n'}:
+                self.assertIn('bad_cut', result)
+            self.signed('AC1-' + label, dict(events=events, result=result))
+
+    def test_ac5_wrapper_refuses_before_backend(self):
+        import argparse, contextlib, io, models
+        repo = self.root / 'repo'
+        repo.mkdir()
+        subprocess.run(['git', 'init', '-q', '-b', 'l-spec-9673'], cwd=repo, check=True)
+        subprocess.run(['git', '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+                        'commit', '--allow-empty', '-qm', 'fixture'], cwd=repo, check=True)
+        packet = self.root / 'packet.md'
+        packet.write_text('fixture\nPINNED_BASE_SHA: X0000000\n')
+        self.emit('spec-writer', 'spec-written')
+        with patch.object(models, 'resolve', return_value=dict(backend='codex', model='fixture', source='fixture')), \
+             patch.object(self.dispatch, 'ensure_room', return_value=True), \
+             patch.dict(os.environ, {'DOIT_NO_POKE': '1'}), \
+             patch.object(self.dispatch, 'run_codex', side_effect=RuntimeError('AssertionError: fixture backend stop')) as backend:
+            os.environ.pop('DOIT_SEAT', None)
+            def start(role='builder'):
+                args = argparse.Namespace(role=role, subject='L-spec-9673', packet=str(packet), path=None,
+                    cwd=str(repo), charter=None, project='repo', mcp_config=None, timeout=None, max_usd=None, seat=False)
+                with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+                    try:
+                        self.dispatch.main(args)
+                    except SystemExit as exc:
+                        return exc.code
+                    except RuntimeError as exc:
+                        self.assertIn('fixture backend stop', str(exc))
+                        return 'backend'
+            self.assertNotEqual(start(), 0)
+            backend.assert_not_called()
+            events = self.read()
+            failed = [e for e in events if e['type'] == 'spawn-failed']
+            self.assertEqual(len(failed), 1)
+            self.assertEqual(failed[0]['reason'], 'unaudited')
+            self.assertIn('L-spec-9673', failed[0]['why'])
+            self.assertFalse(any(e['type'] == 'build-started' for e in events))
+            self.signed('AC5-refused', dict(backend_calls=0, events=events))
+            # Existing deterministic refusals keep precedence on the same unaudited spec.
+            packet.write_text('fixture without pin\n')
+            self.assertNotEqual(start(), 0)
+            self.assertTrue(any(e.get('reason') == 'no-pinned-base' for e in self.read() if e['type'] == 'spawn-failed'))
+            packet.write_text('fixture\nPINNED_BASE_SHA: X0000000\n')
+            for module, name, value, expected in (
+                    (self.fold, 'subject_project', 'other-project', 'wrong-project'),
+                    (self.dispatch, 'open_spec_writer_spawn', True, 'rework-open'),
+                    (self.fold, 'spec_shape_pending', True, 'spec-shape')):
+                with patch.object(module, name, return_value=value):
+                    before = {e.get('spawn') for e in self.read() if e['type'] == 'spawn-failed'}
+                    self.assertNotEqual(start(), 0)
+                    new = [e for e in self.read() if e['type'] == 'spawn-failed' and e.get('spawn') not in before]
+                    self.assertEqual(new[0]['reason'], expected)
+            self.emit('spec-writer', 'spec-written', charter='L-charter-9673', footprint=['fixture.py'])
+            with patch.object(self.dispatch, 'spec_wave', return_value=2), \
+                 patch.object(self.dispatch, 'wave_blocker', return_value='L-spec-9672'):
+                self.assertNotEqual(start(), 0)
+                self.assertTrue(any(e.get('reason') == 'wave-order' for e in self.read()))
+            backend.assert_not_called()
+            import grading_env
+            with patch.object(self.dispatch, 'unaudited', wraps=self.dispatch.unaudited) as predicate, \
+                 patch.object(grading_env, 'preflight', return_value=[]):
+                for role in ('grader', 'reviewer', 'spec-auditor', 'spec-writer'):
+                    start(role)
+                predicate.assert_not_called()
+            self.signed('AC5-other-roles', dict(roles=['grader', 'reviewer', 'spec-auditor', 'spec-writer'], gate_calls=0))
+            self.signed('AC5-guard-precedence', [dict(reason=e.get('reason'), why=e.get('why'))
+                        for e in self.read() if e['type'] == 'spawn-failed'])
+            self.emit('spec-auditor', 'spawn-done', bad_cut=False)
+            self.assertEqual(start(), 'backend', self.read())
+            self.assertTrue(any(e['type'] == 'build-started' for e in self.read()))
+            # A pre-deploy build remains exempt even without its audit.
+            (self.root / 'events' / 'L-spec-auditor-9673.jsonl').unlink()
+            self.assertEqual(start(), 'backend', self.read())
+            self.signed('AC5-audited-rebuild', dict(backend_calls=backend.call_count, events=self.read()))
+
+
+if __name__ == '__main__' and not sys.argv[1:]:
+    unittest.main(argv=[sys.argv[0]])

@@ -59,7 +59,7 @@ class LauncherTests(unittest.TestCase):
     def prepare(self, sid):
         (self.root / 'worktrees/proj' / sid.lower()).mkdir(parents=True)
         (self.root / 'content' / (sid + '.md')).write_text('AC1 [backend]: fixture.\n')
-        self.events.append(dict(type='spec-written', subject=sid, project='proj',
+        self.events.append(dict(type='spec-written', subject=sid, project='proj', actor='operator',
                                 ts=(self.now - datetime.timedelta(hours=1)).isoformat()))
 
     def dispatcher(self, argv):
@@ -109,7 +109,7 @@ class LauncherTests(unittest.TestCase):
                     if s.state == 'action' and s.owner == 'tick' and s.action in tick.ROUTINE_ACTIONS]
         self.assertCountEqual(actual, expected)
         before = len(self.calls)
-        for step in steps[5:]:
+        for step in steps[len(tick.ROUTINE_ACTIONS):]:
             self.assertIsNone(tick.launch(step, dispatcher=self.runner))
         self.assertEqual(len(self.calls), before)
         _launcher_evidence('AC1', dict(dispatches=actual, expected=expected, lines=out))
@@ -2773,6 +2773,175 @@ def test_recorded_reap_counts_1515():
 
 
 test_recorded_reap_counts_1515()
+
+class AuditTickTests(unittest.TestCase):
+    dispatcher = LauncherTests.dispatcher
+
+    def setUp(self):
+        LauncherTests.setUp(self)
+        slots = patch.object(autodispatch, 'capacity', return_value=0)
+        slots.start()
+        self.addCleanup(slots.stop)
+    step = LauncherTests.step
+
+    def emit(self, actor, kind, sid='L-spec-9673', minutes=-31, **kw):
+        with patch.object(dispatch, 'now', return_value=(self.now + datetime.timedelta(minutes=minutes)).isoformat()):
+            self.assertIsNone(dispatch.emit(self.root / 'events' / ('L-' + actor + '-9673.jsonl'), {}, kind, subject=sid, **kw))
+
+    def read(self):
+        events = fold.read_events(use_cache=False)
+        return events, fold.fold(events)[0]
+
+    def record(self, argv):
+        self.calls.append(argv)
+        if argv[:2] == ['doit', 'dispatch']:
+            sid = argv[4]
+            spawn = 'L-spec-auditor-' + str(9700 + len(self.calls))
+            self.emit('spec-auditor', 'spawn-started', sid, minutes=0,
+                      spawn=spawn, role='spec-auditor', issued_by='tick')
+            return dict(code=0, stdout=json.dumps(dict(detached=spawn)), stderr='')
+        self.assertEqual(argv[:3], ['doit', 'packet', 'spec-auditor'])
+        return dict(code=0, stdout='/fixture.packet.md', stderr='')
+
+    def pass_steps(self, now=None, **kwargs):
+        events, specs = self.read()
+        now = now or self.now
+        steps = tick._steps(events, specs, now)
+        out = tick.run_steps(events, specs, now, dispatcher=self.record, steps=steps, **kwargs)
+        return events, specs, steps, out
+
+    def test_ac6_audit_argv_failure_validation_and_cap(self):
+        self.emit('spec-writer', 'spec-written', project='proj', charter='L-charter-9673')
+        events, specs = self.read()
+        runner = tick._PassDispatcher(self.record, events, specs, self.now, False)
+        step = self.step('audit', item='L-spec-9673', stage='planned')
+        spawn = tick.launch(step, dispatcher=runner)
+        self.assertEqual(self.calls, [
+            ['doit', 'packet', 'spec-auditor', 'L-spec-9673'],
+            ['doit', 'dispatch', '--detach', 'spec-auditor', 'L-spec-9673', '--packet', '/fixture.packet.md',
+             '--cwd', str(fold.ROOT / 'repos' / 'proj'), '--charter', 'L-charter-9673', '--project', 'proj']])
+        rows = self.read()[0]
+        emitted = [e for e in rows if e['type'] == 'autodispatched']
+        self.assertEqual(len(emitted), 1)
+        self.assertEqual({k: emitted[0][k] for k in ('role', 'rule', 'since', 'spawn')},
+                         dict(role='spec-auditor', rule='audit', since=step.since, spawn=spawn))
+        _launcher_evidence('AC6-argv', dict(calls=self.calls, events=emitted))
+        self.calls.clear()
+        with patch.object(runner, 'runner', return_value=dict(code=1, stderr='packet failed')):
+            with self.assertRaises(ValueError):
+                tick.launch(step, dispatcher=runner)
+        failed = [e for e in self.read()[0] if e['type'] == 'autodispatch-failed']
+        self.assertEqual((failed[-1]['role'], failed[-1]['rule']), ('spec-auditor', 'audit'))
+        with self.assertRaises(ValueError):
+            tick.launch(replace(step, item='../../escape'), dispatcher=runner)
+        runner.events = [dict(type='spec-written', subject=step.item, project='../escape')]
+        with self.assertRaises(ValueError):
+            tick.launch(step, dispatcher=runner)
+        self.assertEqual(self.calls, [])
+        _launcher_evidence('AC6-failures', [e for e in self.read()[0] if e['type'] == 'autodispatch-failed'])
+        steps = []
+        for n in range(8):
+            sid = f'L-spec-{9800+n}'
+            self.emit('spec-writer', 'spec-written', sid, project='proj')
+            steps.append(replace(step, item=sid))
+        events, specs = self.read()
+        dry = tick.run_steps(events, specs, self.now, steps=steps, dispatcher=self.record, dry_run=True)
+        self.assertEqual(self.calls, [])
+        out = tick.run_steps(events, specs, self.now, steps=steps, dispatcher=self.record)
+        self.assertEqual(sum(a[:2] == ['doit', 'dispatch'] for a in self.calls), tick.AUDIT_PASS_MAX)
+        self.assertEqual(sum(line.startswith('seat-wait ') for line in out), 2)
+        _launcher_evidence('AC6-cap', dict(out=out, dry=dry))
+
+    def test_ac7_old_specs_and_dead_replay_bounds(self):
+        for n, days in enumerate((2, 9, 30)):
+            self.emit('spec-writer', 'spec-written', f'L-spec-{9800+n}', minutes=-days*1440, project='proj')
+        self.emit('spec-writer', 'spec-written', 'L-spec-9803', minutes=-3000, project='proj')
+        self.emit('operator', 'spec-carried', 'L-spec-9803', source='fixture', tier='fixture', audited_at=self.now.isoformat())
+        self.emit('thinker', 'spec-written', 'L-spec-9804', minutes=-3000, project='proj')
+        self.emit('spec-writer', 'spec-written', 'L-spec-9805', minutes=-3000, project='proj')
+        self.emit('builder', 'build-started', 'L-spec-9805', spawn='L-builder-9805', role='builder')
+        self.emit('spec-writer', 'spec-written', 'L-spec-9806', minutes=-10, project='proj')
+        # Isolate audit launches while allowing the exempt specs their normal build Steps.
+        events, specs = self.read()
+        steps = tick._steps(events, specs, self.now)
+        out = tick.run_steps(events, specs, self.now, steps=steps, dispatcher=self.record)
+        self.assertEqual([a[4] for a in self.calls if a[:2] == ['doit', 'dispatch']],
+                         ['L-spec-9802', 'L-spec-9801', 'L-spec-9800'])
+        self.calls.clear()
+        events, specs = self.read()
+        steps = tick._steps(events, specs, self.now)
+        second = tick.run_steps(events, specs, self.now, steps=steps, dispatcher=self.record)
+        self.assertEqual(self.calls, [])
+        _launcher_evidence('AC7-catchup', dict(first=out, second=second))
+        import attempts
+        for n in range(attempts.MAX_ATTEMPTS):
+            self.emit('spec-writer', 'spec-written', minutes=-90, project='proj') if n == 0 else None
+            self.emit('spec-auditor', 'spawn-started', minutes=-6, spawn=f'L-spec-auditor-{9900+n}', role='spec-auditor')
+            self.emit('tick', 'spawn-stale', minutes=-4, spawn=f'L-spec-auditor-{9900+n}', role='spec-auditor')
+            events, specs = self.read()
+            steps = [s for s in tick._steps(events, specs, self.now) if s.item == 'L-spec-9673']
+            self.calls.clear()
+            tick.run_steps(events, specs, self.now, steps=steps, dispatcher=self.record)
+            replay = autodispatch.redispatch_dead(events, specs, self.now, runner=self.record, handled=tick.handled_items(steps))
+            self.assertEqual(self.calls, [])
+            self.assertFalse(any(line.startswith('replayed ') for line in replay))
+            self.assertIn('L-spec-9673', tick.handled_items(steps))
+            _launcher_evidence('AC7-replay-bound', dict(steps=[s.reason for s in steps], replay=replay))
+            if n == 0:
+                later = self.now + datetime.timedelta(minutes=1)
+                due = [s for s in tick._steps(events, specs, later) if s.item == 'L-spec-9673']
+                tick.run_steps(events, specs, later, steps=due, dispatcher=self.record)
+                autodispatch.redispatch_dead(events, specs, later, runner=self.record, handled=tick.handled_items(due))
+                self.assertEqual(sum(a[:2] == ['doit', 'dispatch'] for a in self.calls), 1)
+                # Close the recording runner's synthetic start before testing exhaustion.
+                for e in self.read()[0]:
+                    if e['type'] == 'spawn-started' and e.get('issued_by') == 'tick' and e['subject'] == 'L-spec-9673':
+                        self.emit('tick', 'spawn-stale', minutes=-4, spawn=e['spawn'], role='spec-auditor')
+
+    def test_ac8_real_ledger_audit_then_build_rewrite_and_bad_cut(self):
+        (self.root / 'repos' / 'proj').mkdir(parents=True)
+        (self.root / 'content' / 'L-spec-9673.md').write_text(
+            '# Goal\nFixture.\n# Acceptance criteria\nAC1 [backend]: fixture. review_path: fixture.\n'
+            'Writes:\n- fixture.py\n# Verification\n```\ntrue && echo VERIFIED\n```\n')
+        self.emit('spec-writer', 'spec-written', project='proj')
+        events, specs, steps, out = self.pass_steps()
+        with patch.object(autodispatch, 'capacity', return_value=1):
+            row = autodispatch.candidates(events, specs, self.now)[0]
+        self.assertEqual(row['status'], 'blocked')
+        self.assertTrue(row['reason'].startswith('unaudited'))
+        self.assertEqual([s.action for s in steps if s.item == 'L-spec-9673'], ['audit'])
+        self.assertTrue(dispatch.unaudited(events))
+        self.emit('spec-auditor', 'spawn-done', minutes=1, bad_cut=False,
+                  spawn=next(e['spawn'] for e in self.read()[0] if e['type'] == 'spawn-started'))
+        events, specs = self.read()
+        steps = tick._steps(events, specs, self.now + datetime.timedelta(minutes=1))
+        self.assertEqual([s.action for s in steps if s.item == 'L-spec-9673'], ['build'])
+        self.emit('spec-writer', 'spec-written', minutes=2, project='proj')
+        events, specs = self.read()
+        rewritten = tick._steps(events, specs, self.now + datetime.timedelta(minutes=2))
+        self.assertEqual([s.action for s in rewritten if s.item == 'L-spec-9673'], ['build'])
+        self.assertIsNone(dispatch.unaudited(events))
+        self.assertEqual(sum(a[:2] == ['doit', 'dispatch'] for a in self.calls), 1)
+        self.emit('builder', 'build-started', minutes=3, spawn='L-builder-9673')
+        self.emit('builder', 'build-blocked', minutes=4, spawn='L-builder-9673')
+        self.emit('builder', 'spawn-done', minutes=4, spawn='L-builder-9673')
+        blocked = next(e for e in self.read()[0] if e['type'] == 'build-blocked')
+        self.emit('operator', 'unblocked', minutes=5)
+        self.emit('operator', 'decision', minutes=5, ref=blocked['_src'])
+        events, specs = self.read()
+        rebuilt = tick._steps(events, specs, self.now + datetime.timedelta(minutes=5))
+        self.assertEqual(next(s for s in rebuilt if s.item == 'L-spec-9673').action, 'rebuild')
+        self.assertFalse(any(s.action == 'audit' for s in rebuilt))
+        self.emit('spec-writer', 'spec-written', 'L-spec-9674', project='proj')
+        self.emit('spec-auditor', 'spawn-done', 'L-spec-9674', minutes=3, bad_cut=True)
+        events, specs = self.read()
+        bad = tick._steps(events, specs, self.now + datetime.timedelta(minutes=3))
+        self.assertTrue(next(s for s in bad if s.item == 'L-spec-9674').reason.startswith('audit-bad-cut:'))
+        self.emit('spec-writer', 'spec-written', 'L-spec-9674', minutes=4, project='proj')
+        events, specs = self.read()
+        self.assertEqual(next(s for s in tick._steps(events, specs, self.now + datetime.timedelta(minutes=4)) if s.item == 'L-spec-9674').action, 'build')
+        _launcher_evidence('AC8-real-ledger', dict(pass1=out, pass2=[s.action for s in steps], rewrite=[s.action for s in rewritten], rebuild=[s.action for s in rebuilt], candidate=row))
+
 
 if __name__ == '__main__':
     unittest.main(argv=[sys.argv[0]])

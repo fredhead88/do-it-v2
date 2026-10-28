@@ -1063,7 +1063,7 @@ class HeldCandidateTests(unittest.TestCase):
         now = datetime.datetime(2026,10,27,tzinfo=datetime.timezone.utc)
         ago = lambda minutes: _iso(now-datetime.timedelta(minutes=minutes))
         a,b,c,d,e,f = 'L-spec-9801','L-spec-9802','L-spec-'+'x'*100,'L-spec-9804','L-spec-9805','L-spec-9806'
-        events = [dict(type='spec-written',subject=sid,ts=ago(age),project='held')
+        events = [dict(type='spec-written',subject=sid,ts=ago(age),project='held',actor='operator')
                   for sid,age in ((a,41),(b,40),(c,39),(d,90),(e,90),(f,90))]
         for sid in (a,b,c,d,e,f):
             _spec_file(root,sid)
@@ -1137,6 +1137,38 @@ class HeldCandidateTests(unittest.TestCase):
     @staticmethod
     def restore(old):
         fold.ROOT,fold.EVENTS,dispatch.ROOT,dispatch.EVENTS,dispatch.CONTENT = old
+
+class AuditCandidateTests(unittest.TestCase):
+    def test_ac4_unaudited_never_uses_builder_slot(self):
+        old = fold.ROOT, fold.EVENTS, dispatch.ROOT, dispatch.EVENTS, dispatch.CONTENT
+        self.addCleanup(HeldCandidateTests.restore, old)
+        root = _fresh()
+        now = fold.NOW
+        for n in (9673, 9674, 9675):
+            sid = f'L-spec-{n}'
+            _spec_file(root, sid)
+            with patch.object(dispatch, 'now', return_value=_iso(now - datetime.timedelta(minutes=90 - (n-9673)))):
+                self.assertIsNone(dispatch.emit(root / 'events' / 'L-spec-writer-9673.jsonl', {}, 'spec-written', subject=sid, project='proj'))
+        dispatch.emit(root / 'events' / 'L-spec-auditor-9673.jsonl', {}, 'spawn-done', subject='L-spec-9674', bad_cut=False)
+        dispatch.emit(root / 'events' / 'L-operator-9673.jsonl', {}, 'spec-carried', subject='L-spec-9675', source='fixture', tier='fixture', audited_at=now.isoformat())
+        with patch.object(autodispatch, 'capacity', return_value=1):
+            events = fold.read_events(use_cache=False)
+            rows = autodispatch.candidates(events, fold.fold(events)[0], now)
+            self.assertEqual(_row(rows, 'L-spec-9673')['status'], 'blocked')
+            self.assertTrue(_row(rows, 'L-spec-9673')['reason'].startswith('unaudited'))
+            self.assertEqual(_row(rows, 'L-spec-9674')['status'], 'dispatchable')
+            self.assertEqual(_row(rows, 'L-spec-9675')['status'], 'seat-wait')
+            dispatch.emit(root / 'events' / 'L-spec-auditor-9673.jsonl', {}, 'spawn-done', subject='L-spec-9673', bad_cut=False)
+            events = fold.read_events(use_cache=False)
+            after = autodispatch.candidates(events, fold.fold(events)[0], now)
+            self.assertEqual(_row(after, 'L-spec-9673')['status'], 'dispatchable')
+        with patch.object(autodispatch, 'capacity', return_value=3):
+            self.assertEqual(_row(autodispatch.candidates(events, fold.fold(events)[0], now), 'L-spec-9675')['status'], 'dispatchable')
+        import hashlib
+        payload = json.dumps(dict(before=rows, after=after), sort_keys=True)
+        print(json.dumps(dict(url='cli://audit-candidates/AC4', status=0,
+            body_sha256=hashlib.sha256(payload.encode()).hexdigest(), body_excerpt=payload)))
+
 
 if __name__ == '__main__':
     unittest.main(argv=[sys.argv[0]])

@@ -2105,7 +2105,8 @@ root = newroot()
 saved = _ad_root_setup(root, project="watchdog")
 try:
     (root / "content" / f"{_WA}.md").write_text(CLEAN_SPEC_AD)
-    events = [_wev("spec-written", project="watchdog")]
+    events = [_wev("spec-written", project="watchdog", actor="spec-writer"),
+              _wev("spawn-done", age=119, actor="spec-auditor", bad_cut=False)]
     specs = fold.fold(events)[0]
     before = autodispatch.candidates(events, specs, _WNOW)
     ok(any(r["spec"] == _WA and r["status"] == "dispatchable" for r in before), "watchdog: build initially dispatchable")

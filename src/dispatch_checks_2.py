@@ -927,6 +927,7 @@ assert specs["L-spec-0093"]["state"] == "written", \
 
 # ── AC4 · a builder dispatch against it is refused before any spend, and clears
 #          the instant a fresh well-formed spec-written lands ─────────────────
+dispatch.emit(TMP / "events" / "L-spec-auditor-fx0093.jsonl", {}, "spawn-done", subject="L-spec-0093", bad_cut=False)
 code, types, evs, cmd = spawn("builder", out=card, subject="L-spec-0093")
 assert code == 1 and types == ["spawn-failed"] and "spec-shape" in evs[0]["why"], (types, evs)
 assert evs[0].get("reason") == "spec-shape", evs[0]
