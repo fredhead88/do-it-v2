@@ -5,6 +5,14 @@
 # (loadgate.DEFAULTS for admission). Missing or malformed config fails open.
 
 [window_gate]
+tree_guards = [
+  "tests/test_820_no_abs_test_imports.py::",
+  "tests/test_496_r3_guard.py::",
+  "tests/test_207_monitoring_denoise.py::TestDigestFoldCronStale::test_query_cron_runs_stale_returns_data_trust_when_failed",
+  "tests/deploy/test_ship_snapshot.py::test_ac14_line_counts",
+  "tests/deploy/test_protected_stamp.py::test_ac12_deploy_sh_line_count_not_grown",
+  "api/tests/profit_v2/test_read_model_refresh.py::test_ac9_deploy_sh_net_zero",
+]
 dispatch_timeout_min = 70
 train_depth = 2
 max_merges = 10

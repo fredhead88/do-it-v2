@@ -163,6 +163,7 @@ class Fx:
             classify=lambda project, sha, ids, **kwargs: {
                 "complete": True, "pre_existing": [n for n in ids if n in self.known],
                 "new": [n for n in ids if n not in self.known]})
+        self.service.recheck = lambda project, sha, ids: {"red": [], "green": list(ids), "absent": [], "undetermined": []}
 
     def run_n(self, n, rc, out="", sleep=None):
         (self.fdir / f"run{n}.rc").write_text(str(rc))
@@ -2495,6 +2496,251 @@ def honest_rate_checks():
     for ac in passed_cases:
         print("honest-rate " + ac + " status=0")
 
+
+def proof_1664(ac, before):
+    if len(FAILS) == before:
+        body = {"marker": "L-spec-1664 "+ac+" ok", "failures": len(FAILS)-before}
+        print(json.dumps(dict(url="cli://window-gate/1664/"+ac, status=0,
+                              body_sha256=hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest(),
+                              body_excerpt=body)))
+        print(body["marker"])
+
+
+def ac4_quarantined_never_drops():
+    import quarantine
+    from datetime import datetime, timezone
+    start = len(FAILS)
+    node = "api/tests/test_x.py::test_a"
+    charged = "api/tests/test_z.py::test_z"
+    def activate():
+        quarantine.record("albert-scott", node, "base-red", ["previous"], now=datetime.now(timezone.utc))
+    for mode in ("only", "mixed", "empty", "unnamed", "all"):
+        fx = Fx({"A": "api/tests/test_z.py", "B": "base.txt"})
+        if mode != "empty":
+            activate()
+        if mode in ("only", "all"):
+            fx.run_n(1, 1, red([node]))
+        elif mode == "mixed":
+            fx.run_n(1, 1, red([node, charged]))
+            fx.run_n(2, 0, GREEN)
+        elif mode == "unnamed":
+            fx.run_n(1, 1, red([]))
+        else:
+            fx.run_n(1, 0, GREEN)
+        rc = fx.go()
+        if mode == "unnamed":
+            check(rc == 2 and not fx.events("window-dropped"), "AC4 unnamed remains undetermined")
+            check(fx.events("escalation-blocking")[-1].get("outcome") == "undetermined", "AC4 unnamed outcome")
+        elif mode == "mixed":
+            rows = fx.events("window-dropped")
+            check(rc == 1 and [e["subject"] for e in rows] == ["A"], "AC4 mixed only charged owner dropped")
+            check(all(e["nodes"] == [charged] and e["quarantined"] == [node] for e in rows), "AC4 drop exposes quarantine")
+        else:
+            check(rc == 0 and not fx.events("window-dropped"), "AC4 ships all " + mode)
+            rows = fx.events("window-verified")
+            check(rows[-1]["kept"] == ["A", "B"], "AC4 both specs ship " + mode)
+            check(rows[-1]["quarantined"] == ([] if mode == "empty" else [node]), "AC4 quarantine list " + mode)
+            check(isinstance(rows[-1]["pre_existing"], list), "AC4 pre_existing list")
+            check(not fx.events("escalation-blocking"), "AC4 excused failures never undetermined")
+    proof_1664("AC4", start)
+
+
+def ac6_recheck_before_drop():
+    start = len(FAILS)
+    node = "api/tests/test_x.py::test_a"
+    for state in ("red", "green", "absent", "undetermined", "raises", "cached", "incomplete"):
+        fx = Fx({"A": "api/tests/test_x.py", "B": "base.txt"})
+        fx.run_n(1, 1, red([node]))
+        fx.run_n(2, 0, GREEN)
+        calls = []
+        def recheck(project, sha, ids):
+            calls.append((sha, list(ids), len(fx.events("window-dropped"))))
+            if state == "raises":
+                raise RuntimeError("local runner unavailable")
+            return {key: list(ids) if key == state else [] for key in ("red", "green", "absent", "undetermined")}
+        fx.service.recheck = recheck
+        if state == "cached":
+            fx.known.add(node)
+        if state == "incomplete":
+            fx.service.classify = lambda *a, **kw: {"complete": False}
+        rc = fx.go()
+        if state in ("red", "cached"):
+            check(rc == 0 and not fx.events("window-dropped"), "AC6 base-red ships " + state)
+            check(fx.events("window-verified")[-1]["quarantined"] == [node], "AC6 base red quarantine reported")
+            rows = fx.events("test-quarantined")
+            check(len(rows) == 1 and rows[0]["rule"] == "base-red", "AC6 records base red once")
+        elif state == "incomplete":
+            check(rc == 2 and not fx.events("window-dropped") and not calls, "AC6 incomplete unchanged")
+        else:
+            rows = fx.events("window-dropped")
+            check(rc == 1 and [r["subject"] for r in rows] == ["A"], "AC6 charged result " + state)
+            expected = "undetermined" if state == "raises" else state
+            check(rows[0]["rechecked"] == {node: expected}, "AC6 rechecked result visible " + state)
+            check(rows[0]["recheck_undetermined"] == ([node] if expected == "undetermined" else []), "AC6 uncertainty visible")
+        if state not in ("cached", "incomplete"):
+            check(len(calls) == 1 and calls[0][0] == fx.base and calls[0][2] == 0, "AC6 recheck before drop " + state)
+        else:
+            check(not calls, "AC6 cached/incomplete never rerun")
+    for all_red in (False, True):
+        fx = Fx({"A": "api/tests/test_x.py", "B": "api/tests/test_z.py", "C": "api/app/lib.py", "D": "d.txt"})
+        ids = ["api/tests/test_x.py::base_red", "api/tests/test_z.py::new", "api/app/lib.py::unknown"]
+        fx.known = {"old1.py::old", "old2.py::old", "old3.py::old"}
+        fx.run_n(1, 1, red(ids))
+        fx.run_n(2, 0, GREEN)
+        order = []
+        def mixed_recheck(project, base, nodes):
+            order.append((base, list(nodes), len(fx.events("window-dropped"))))
+            return {"red": list(ids) if all_red else ids[:1],
+                    "green": [] if all_red else ids[1:2], "absent": [],
+                    "undetermined": [] if all_red else ids[2:]}
+        fx.service.recheck = mixed_recheck
+        rc = fx.go()
+        rows = fx.events("window-dropped")
+        check(len(order) == 1 and order[0][0] == fx.base and set(order[0][1]) == set(ids)
+              and order[0][2] == 0, "AC6 c153 recheck before any drop")
+        if all_red:
+            check(rc == 0 and not rows and fx.events("window-verified")[-1]["kept"] == ["A", "B", "C", "D"], "AC6 all rechecked red ships every spec")
+        else:
+            check(rc == 1 and sorted(r["subject"] for r in rows) == ["B", "C"], "AC6 c153 green and unknown owners charged")
+            check(all(r["nodes"] == sorted(ids[1:]) and r["quarantined"] == ids[:1]
+                      and r["recheck_undetermined"] == ids[2:] for r in rows), "AC6 c153 reasons visible on drops")
+            check(fx.events("window-verified")[-1]["recheck_undetermined"] == ids[2:], "AC6 c153 unknown visible on verified")
+        check(all(ids[0] not in r["nodes"] for r in rows), "AC6 base red absent from every charged nodes list")
+        check(all(r["rule"] == "base-red" for r in fx.events("test-quarantined")), "AC6 c153 base-red quarantine rule")
+    proof_1664("AC6", start)
+
+
+def ac7_tree_guard_attribution():
+    start = len(FAILS)
+    guard = window_gate.TREE_GUARDS[0] + "test_no_absolute_test_to_test_imports_under_tests_root"
+    node = "api/tests/test_x.py::test_a"
+    unknown = "api/tests/test_z.py::test_unknown"
+    for mode in ("first", "second-prefix", "last", "twice", "owned", "same-owner", "cached", "base-red", "base-unknown", "prefix-unknown", "disagree", "unattributed", "half", "second", "second-mixed", "nonlinear"):
+        fx = Fx({"A": "api/tests/test_x.py", "B": "base.txt", "C": "api/app/lib.py", "D": "d.txt"})
+        first_ids = [node] if mode in ("second", "second-mixed") else [guard]
+        if mode in ("owned", "same-owner"):
+            first_ids.append(node)
+        if mode == "unattributed":
+            first_ids.append(unknown)
+        fx.run_n(1, 1, red(first_ids))
+        fx.run_n(2, 1, red([guard]+([unknown] if mode == "second-mixed" else [])))
+        if mode not in ("second", "second-mixed", "half", "unattributed", "twice"):
+            fx.run_n(2, 0, GREEN)
+        # A guard found only while bisecting must keep that half pending.
+        if mode == "half":
+            fx.run_n(1, 1, red([unknown]))
+            fx.run_n(2, 1, red([guard]))
+            fx.run_n(3, 0, GREEN)
+        if mode in ("unattributed", "second-mixed"):
+            fx.run_n(3, 0, GREEN)
+            fx.run_n(4, 0, GREEN)
+        if mode == "cached":
+            fx.known.add(guard)
+        prefix_calls = []
+        base_calls = []
+        prefix_state, builds = {}, []
+        real_build, real_prefixes = window_gate.build_candidate, window_gate.guard_prefixes
+        def build(*args, **kwargs):
+            builds.append(args[3])
+            return real_build(*args, **kwargs)
+        def prefixes_before_attribution(*args, **kwargs):
+            prefix_state.update(candidate=sh(["rev-parse", "refs/heads/window/w1"], fx.repo),
+                                builds=len(builds), drops=len(fx.events("window-dropped")), events=[e for e in fx.events() if e["type"] in
+                                ("rechained", "rechain-declined", "rechain-fingerprint")])
+            return real_prefixes(*args, **kwargs)
+        real_owners = window_gate.owners
+        def owners(repo, rev, n, touched):
+            check(n != guard, "AC7 guard never passed to owners")
+            return real_owners(repo, rev, n, touched)
+        def recheck(project, sha, ids):
+            if sha == fx.base:
+                base_calls.append(list(ids))
+                state = "red" if mode == "base-red" else "undetermined" if mode == "base-unknown" else "green"
+                return {key: list(ids) if key == state else [] for key in ("red", "green", "absent", "undetermined")}
+            prefix_calls.append(sha)
+            candidate = sh(["rev-parse", "refs/heads/window/w1"], fx.repo)
+            check(candidate == prefix_state["candidate"] and len(builds) == prefix_state["builds"], "AC7 prefix attribution neither rebuilds nor moves the candidate")
+            check([e for e in fx.events() if e["type"] in ("rechained", "rechain-declined", "rechain-fingerprint")] == prefix_state["events"], "AC7 prefix attribution emits no rechain events")
+            check(len(fx.events("window-dropped")) == prefix_state["drops"], "AC7 prefix runs append no drops")
+            # Side-effect-free prefix reads leave the candidate ref and rechain events alone.
+            all_events = [(e["type"], e["_src"]) for e in fx.events()]
+            prefixes = sh(["rev-list", "--first-parent", fx.base+".."+candidate], fx.repo).splitlines()[::-1]
+            if mode == "disagree":
+                state = "green"
+            elif mode == "prefix-unknown" and sha != candidate:
+                state = "undetermined"
+            else:
+                state = "red" if (mode in ("first", "same-owner") or sha == prefixes[-1] or (mode in ("second-prefix", "twice") and prefixes.index(sha) >= 1)) else "green"
+            check(sh(["rev-parse", "refs/heads/window/w1"], fx.repo) == candidate, "AC7 candidate ref unchanged")
+            check([(e["type"], e["_src"]) for e in fx.events()] == all_events, "AC7 no rechain prefix events")
+            return {key: list(ids) if key == state else [] for key in ("red", "green", "absent", "undetermined")}
+        fx.service.recheck = recheck
+        with patch.object(window_gate, "owners", side_effect=owners), \
+             patch.object(window_gate, "build_candidate", side_effect=build), \
+             patch.object(window_gate, "guard_prefixes", side_effect=prefixes_before_attribution):
+            if mode == "nonlinear":
+                with patch.object(window_gate, "guard_prefixes", return_value=None):
+                    rc = fx.go()
+            else:
+                rc = fx.go()
+        rows = fx.events("window-dropped")
+        if mode not in ("unattributed", "half", "second-mixed"):
+            check(not fx.events("window-bisected"), "AC7 pure guards never enter bisection")
+        if mode in ("base-unknown", "prefix-unknown", "disagree", "nonlinear"):
+            check(rc == 2 and not rows, "AC7 uncertain guard nobody dropped " + mode)
+            check(fx.events("escalation-blocking")[-1].get("outcome") == "undetermined", "AC7 guard undetermined outcome")
+        elif mode in ("cached", "base-red"):
+            check(rc == 0 and not rows, "AC7 base-red guard excused " + mode)
+            check(not prefix_calls, "AC7 excused guard no prefix runs")
+        elif mode in ("first", "second-prefix", "last"):
+            expected = "A" if mode == "first" else "B" if mode == "second-prefix" else "D"
+            check(rc == 1 and [e["subject"] for e in rows] == [expected], "AC7 only first red prefix owner " + mode)
+            check(rows[0]["nodes"] == [guard], "AC7 drop names guard")
+            check(len(prefix_calls) <= 4, "AC7 bounded prefix runs")
+        elif mode == "twice":
+            check(rc == 2 and [r["subject"] for r in rows] == ["B", "C"], "AC7 guard-only runs 1 and 2 charge only their prefix owners")
+            check(all(r["nodes"] == [guard] for r in rows), "AC7 guard-only run2 names only guards")
+            check(fx.events("escalation-blocking")[-1].get("outcome") == "red", "AC7 guard-only run2 red outcome")
+        elif mode == "second":
+            check(rc == 2 and [e["subject"] for e in rows] == ["A", "D"], "AC7 run2 guard only its owner dropped")
+            check(rows[-1]["nodes"] == [guard], "AC7 run2 guard node")
+        elif mode in ("owned", "same-owner"):
+            expected = ["A", "D"] if mode == "owned" else ["A"]
+            check(rc == 1 and [r["subject"] for r in rows] == expected, "AC7 owned non-guard combines with prefix charges")
+            guard_row = next(r for r in rows if guard in r["nodes"])
+            check(guard_row["nodes"] == ([guard] if mode == "owned" else [node, guard]), "AC7 guard row includes only its own non-guard charges")
+        else:
+            check(not prefix_calls, "AC7 non-guard path precedence " + mode)
+            check(all(guard not in r["nodes"] for r in rows), "AC7 bisection never blames guards " + mode)
+            check(fx.events("window-bisected"), "AC7 existing bisection kept " + mode)
+    proof_1664("AC7", start)
+
+
+def ac8_tree_guards_config():
+    start = len(FAILS)
+    seed = (
+        "tests/test_820_no_abs_test_imports.py::",
+        "tests/test_496_r3_guard.py::",
+        "tests/test_207_monitoring_denoise.py::TestDigestFoldCronStale::test_query_cron_runs_stale_returns_data_trust_when_failed",
+        "tests/deploy/test_ship_snapshot.py::test_ac14_line_counts",
+        "tests/deploy/test_protected_stamp.py::test_ac12_deploy_sh_line_count_not_grown",
+        "api/tests/profit_v2/test_read_model_refresh.py::test_ac9_deploy_sh_net_zero",
+    )
+    check(window_gate.tree_guards({}) == seed and window_gate.TREE_GUARDS == seed, "AC8 configured six seeds")
+    print(json.dumps(seed))
+    with tempfile.TemporaryDirectory(prefix="tree-guards-") as temp:
+        path = pathlib.Path(temp)/"look.toml"
+        check(window_gate.tree_guards({}, path) == seed, "AC8 missing config fallback")
+        for text in ("[broken", '[window_gate]\ntree_guards = "wrong"', '[window_gate]\ntree_guards = [1]', '[window_gate]\ntree_guards = []'):
+            path.write_text(text)
+            check(window_gate.tree_guards({}, path) == seed, "AC8 malformed config fallback")
+    proof_1664("AC8", start)
+
+
+ac4_quarantined_never_drops()
+ac6_recheck_before_drop()
+ac7_tree_guard_attribution()
+ac8_tree_guards_config()
 
 infra_checks()
 train_checks()
