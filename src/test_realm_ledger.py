@@ -63,35 +63,55 @@ def stall_lane_rows(events, specs, now, *, by_subject):
         env = patch.dict(os.environ, DOIT_ROOT=str(self.root), DOIT_LIVE_REPO=str(self.root), HOME=str(self.root/'home'))
         env.start(); self.addCleanup(env.stop)
 
+    def test_flow_cache_reuse_refresh_and_error(self):
+        import subprocess
+        good=json.dumps({'counts': {}, 'steps': [{'stage':'building','state':'hold','item':'fixture'}]})
+        with patch.multiple(realm, LIVE_REPO=self.root), patch.dict(realm.VIEW_CACHE, clear=True), patch.object(realm.subprocess,'run',return_value=subprocess.CompletedProcess([],0,good,'')) as run:
+            first=realm._view_payload('next',NOW)
+            self.assertIsNone(first['flow_error'])
+            self.assertEqual(realm._view_payload('next',NOW+dt.timedelta(seconds=29)),first)
+            self.assertEqual(run.call_count,1)
+            realm._view_payload('next',NOW+dt.timedelta(seconds=30))
+            self.assertEqual(run.call_count,2)
+            run.return_value=subprocess.CompletedProcess([],2,'','')
+            bad=realm._view_payload('next',NOW+dt.timedelta(seconds=60))
+            self.assertIsNone(bad['flow']);self.assertIsNone(bad['steps']);self.assertTrue(bad['flow_error'])
+            run.return_value=subprocess.CompletedProcess([],0,good,'')
+            self.assertIsNotNone(realm._view_payload('next',NOW+dt.timedelta(seconds=90))['flow'])
+
+    def snapshot(self, now):
+        with realm.ledger_snapshot(now) as (_, events, folded):
+            return {'rows': [{'now': now.isoformat(), 'events': len(events)}], 'error': None}
+
     def test_shared_fold_deadline_refresh_and_replacement(self):
         path, modules = sys.path[:], sys.modules.copy()
-        first = realm.lane_payload(NOW)
-        second = realm.lane_payload(NOW+dt.timedelta(seconds=30))
-        self.assertIsNone(first['lane_error']); self.assertIsNone(second['lane_error'])
+        first = self.snapshot(NOW)
+        second = self.snapshot(NOW+dt.timedelta(seconds=30))
+        self.assertIsNone(first['error']); self.assertIsNone(second['error'])
         self.assertEqual((self.ledger.loads,self.ledger.reads,self.ledger.folds),(1,1,1))
-        self.assertNotEqual(first['lane'][0]['now'],second['lane'][0]['now'])
-        realm.lane_payload(NOW+dt.timedelta(minutes=1))
+        self.assertNotEqual(first['rows'][0]['now'],second['rows'][0]['now'])
+        self.snapshot(NOW+dt.timedelta(minutes=1))
         self.assertEqual((self.ledger.reads,self.ledger.folds),(1,2))
         with self.file.open('a') as stream:
             stream.write(self.file.read_text().splitlines()[0]+'\n')
-        third = realm.lane_payload(NOW+dt.timedelta(seconds=70))
-        self.assertEqual(third['lane'][0]['events'],2)
+        third = self.snapshot(NOW+dt.timedelta(seconds=70))
+        self.assertEqual(third['rows'][0]['events'],2)
         self.assertEqual((self.ledger.loads,self.ledger.reads,self.ledger.folds),(1,2,3))
         self.file.write_text(self.file.read_text().splitlines()[0]+'\n')
-        self.assertEqual(realm.lane_payload(NOW+dt.timedelta(seconds=80))['lane'][0]['events'],1)
+        self.assertEqual(self.snapshot(NOW+dt.timedelta(seconds=80))['rows'][0]['events'],1)
         self.assertEqual(sys.path,path); self.assertEqual(sys.modules,modules)
         # Import bundle stays bounded; every lazy sibling is reused.
         names = set(self.ledger.modules)
         for _ in range(15):
-            self.assertIsNone(realm.lane_payload(NOW)['lane_error'])
+            self.assertIsNone(self.snapshot(NOW)['error'])
         self.assertEqual(set(self.ledger.modules),names)
         self.assertEqual(self.ledger.loads,1)
 
     def test_threads_share_one_snapshot_and_import_registry(self):
         errors=[]
         def read():
-            value=realm.lane_payload(NOW)
-            if value['lane_error']: errors.append(value)
+            value=self.snapshot(NOW)
+            if value['error']: errors.append(value)
         threads=[threading.Thread(target=read) for _ in range(8)]
         for thread in threads: thread.start()
         for thread in threads: thread.join(timeout=10)

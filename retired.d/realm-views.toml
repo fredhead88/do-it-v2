@@ -1,7 +1,8 @@
 [[retired]]
 name = "realm-views"
 kind = "code"
-pattern = "realm_omens"
-paths = ["src/**/*.py"]
+pattern = 'lane_payload|renderStuck|S\.blockers|computeBlockers|drawBlockers|applyLane'
+regex = true
+paths = ["src/realm.py", "src/realm.html"]
 armed_when_path = "src/realm.py"
 armed_when_contains = "def flow_view"

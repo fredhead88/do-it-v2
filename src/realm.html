@@ -372,6 +372,7 @@ canvas#map.hand{cursor:pointer}
       <button class="btn spd" data-s="720">12m/s</button>
       <button class="btn" id="b-charters">CHARTERS</button>
       <button class="btn" id="b-yitzy" style="border-color:#7fc4ff;color:#bfe2ff">YITZY'S WORLD</button>
+      <button class="btn" id="b-flow">FLOW</button><button class="btn" id="b-health">HEALTH</button>
       <button class="btn" id="b-omens">OMENS</button>
       <button class="btn" id="b-clock" style="border-color:var(--amber);color:var(--amber)">WALL CLOCK</button>
       <button class="btn" id="b-census">CENSUS</button>
@@ -561,7 +562,7 @@ const PACKET = {
 
 /* ---------------- data & sim state ---------------- */
 let DATA = null, EVENTS = [], T0 = 0, T1 = 0, LIVE = false;
-const S = { now:0, speed:180, playing:true, cursor:0, quiet:false, actors:new Map(), packets:[], effects:[], sparks:[], ravens:[], boats:[], shelf:new Map(), esc:new Map(), lastTick:null, laneCount:null, lane:null, laneError:null, laneAt:null, shipped:0, fails:0, done:0, failsBy:{}, spawnsBy:{}, doneBy:{}, subjectEvents:new Map(), log:[], gate:{flash:0,ok:true}, bell:0, verdicts:{ok:0,no:0}, reviews:{full:0,gates:0}, charters:new Map(), plans:new Set(), slotUse:{}, lastStates:null, recent:[], vanished:[], alarms:[], alarmT:0, focus:null, lastAct:0, raisedAt:new Map(), look:new Map(), handled:[], sys:null, tickOmens:null, closed:new Map(), history:null, wallclock:null, blockers:[], blockT:0, decided:new Map(), terminal:new Set(), metricsNow:null, refused:0, refusedBy:{}, fallenList:[], refusedList:[], shippedList:[] };
+const S = { now:0, speed:180, playing:true, cursor:0, quiet:false, actors:new Map(), packets:[], effects:[], sparks:[], ravens:[], boats:[], shelf:new Map(), esc:new Map(), lastTick:null, flow:null, flowError:null, health:null, healthError:null, steps:null, shipped:0, fails:0, done:0, failsBy:{}, spawnsBy:{}, doneBy:{}, subjectEvents:new Map(), log:[], gate:{flash:0,ok:true}, bell:0, verdicts:{ok:0,no:0}, reviews:{full:0,gates:0}, charters:new Map(), plans:new Set(), slotUse:{}, lastStates:null, recent:[], vanished:[], alarms:[], alarmT:0, focus:null, lastAct:0, raisedAt:new Map(), look:new Map(), handled:[], sys:null, tickOmens:null, closed:new Map(), history:null, wallclock:null, decided:new Map(), terminal:new Set(), metricsNow:null, refused:0, refusedBy:{}, fallenList:[], refusedList:[], shippedList:[] };
 let qcount = 0;
 function subjectPush(s,e){if(!s)return;if(!S.subjectEvents.has(s))S.subjectEvents.set(s,[]);S.subjectEvents.get(s).push(e);}
 function placeSlot(pid){const p=PLACES[pid];if(!p||!p.yard)return{x:640,y:400};const used=S.slotUse[pid]||0;S.slotUse[pid]=used+1;const i=used%12;return{x:p.yard.x-110+(i%6)*44,y:p.yard.y+Math.floor(i/6)*40};}
@@ -574,8 +575,8 @@ const dedupe = arr => arr.filter((p,i)=>i===0||p.x!==arr[i-1].x||p.y!==arr[i-1].
 const toWork = (from,slot) => dedupe([from,{x:from.x,y:roadY(slot)===330?330:352},{x:640,y:roadY(slot)===330?330:352},{x:640,y:roadY(slot)},{x:slot.x,y:roadY(slot)},slot]);
 const toFerry = from => dedupe([from,{x:from.x,y:roadY(from)},{x:640,y:roadY(from)},{x:640,y:480}]);
 
-function reset(t){S.now=t;S.cursor=0;S.actors.clear();S.packets=[];S.effects=[];S.sparks=[];S.ravens=[];S.boats=[];S.shelf.clear();S.esc.clear();S.lastTick=null;S.laneCount=null;S.shipped=0;S.fails=0;S.done=0;S.failsBy={};S.spawnsBy={};S.doneBy={};S.subjectEvents.clear();S.log=[];S.verdicts={ok:0,no:0};S.reviews={full:0,gates:0};S.charters.clear();S.plans.clear();S.slotUse={};S.recent=[];S.vanished=[];S.alarms=[];S.look.clear();S.handled=[];S.closed.clear();S.raisedAt.clear();S.lastAct=0;S.decided.clear();S.terminal.clear();S.refused=0;S.refusedBy={};S.fallenList=[];S.refusedList=[];S.shippedList=[];$('log-ul').innerHTML='';}
-function seek(t){reset(T0);Codex.reset();S.quiet=true;process(t);S.quiet=false;S.now=t;renderLog();if(DATA){computeBlockers();computeOmens();}}
+function reset(t){S.now=t;S.cursor=0;S.actors.clear();S.packets=[];S.effects=[];S.sparks=[];S.ravens=[];S.boats=[];S.shelf.clear();S.esc.clear();S.lastTick=null;S.shipped=0;S.fails=0;S.done=0;S.failsBy={};S.spawnsBy={};S.doneBy={};S.subjectEvents.clear();S.log=[];S.verdicts={ok:0,no:0};S.reviews={full:0,gates:0};S.charters.clear();S.plans.clear();S.slotUse={};S.recent=[];S.vanished=[];S.alarms=[];S.look.clear();S.handled=[];S.closed.clear();S.raisedAt.clear();S.lastAct=0;S.decided.clear();S.terminal.clear();S.refused=0;S.refusedBy={};S.fallenList=[];S.refusedList=[];S.shippedList=[];$('log-ul').innerHTML='';}
+function seek(t){reset(T0);Codex.reset();S.quiet=true;process(t);S.quiet=false;S.now=t;renderLog();if(DATA){computeOmens();}}
 function addLog(e,cls,who,text){const item={ms:e.ms,cls,who,text,s:e.s||e.sp};S.log.push(item);if(S.log.length>80)S.log.shift();if(!S.quiet)renderLogItem(item);}
 function renderLog(){const ul=$('log-ul');ul.innerHTML='';for(const it of S.log.slice(-40))renderLogItem(it);}
 function renderLogItem(it){const ul=$('log-ul');const li=document.createElement('li');li.className=(it.cls||'')+(inFocus(it.s)?'':' dim');li.innerHTML=`<time>${fmt(it.ms).slice(6)}</time><span><span class="who">${esc(it.who)}</span> ${esc(it.text)}</span>`;li.onclick=()=>openSubject(it.s);ul.prepend(li);while(ul.children.length>40)ul.lastChild.remove();}
@@ -595,7 +596,7 @@ function handle(e){Codex.event(e);const ty=e.ty;if(ty!=='tick')subjectPush(e.s,e
   const spark=pid=>{if(S.quiet||S.sparks.length>160||REDUCED)return;const p=PLACES[pid];if(!p)return;S.sparks.push({x:p.x+p.w/2,y:p.y+p.h/2,t:0});};
   const roleA=actorRole(e.a);
   switch(ty){
-    case 'tick':S.lastTick=e.ms;S.laneCount=e.ln;if(!S.quiet&&!REDUCED)S.bell=1;break;
+    case 'tick':S.lastTick=e.ms;if(!S.quiet&&!REDUCED)S.bell=1;break;
     case 'spawn-started':{const r=e.r;if(!r||!WORK[r])break;spawnActor(e,r);addLog(e,'',e.sp,`sets out for the ${PLACES[WORK[r]].n}: ${e.s||'?'}`);spark(DISPATCHER[r]||'tower');break;}
     case 'build-started':spawnActor(e,'builder');if(e.s)S.shelf.delete(e.s);addLog(e,'',e.sp,`takes ${e.s} to the forge`);spark('tower');break;
     case 'spawn-done':{const r=e.r||roleOf(e.sp);S.terminal.add(e.sp);S.done++;S.recent.push({ms:e.ms,ok:true});S.doneBy[r]=(S.doneBy[r]||0)+1;finishActor(e.sp,true);addLog(e,'good',e.sp,`returns from ${e.s}: ${e.dur?fmtDur(e.dur):'?'}, ${kTok(e.tok)} tokens${e.st?', '+e.st:''}`);spark(WORK[r]||'tower');break;}
@@ -785,7 +786,7 @@ function frame(dt,t){
   for(const r of S.ravens)r.t+=dt;S.ravens=S.ravens.filter(r=>r.t<r.dur);
   for(const b of S.boats)b.t+=dt;S.boats=S.boats.filter(b=>b.t<b.dur);
 
-  if(PHONE.matches&&mTab!=='map'){S.alarmT+=dt;if(S.alarmT>2){S.alarmT=0;computeBlockers();computeOmens();mRender();rerenderPanel();}hud();return;}
+  if(PHONE.matches&&mTab!=='map'){S.alarmT+=dt;if(S.alarmT>2){S.alarmT=0;computeOmens();mRender();rerenderPanel();}hud();return;}
   // ---- world pass
   g.setTransform(1,0,0,1,0,0);g.imageSmoothingEnabled=false;g.drawImage(bg,0,0);
   if(!REDUCED){g.fillStyle='rgba(255,255,255,.14)';for(let i=0;i<50;i++){const x=((i*97+t*24)%(W+40))-20,y=456+(i*37)%60;g.fillRect(x|0,y,16,2);}g.fillStyle='rgba(255,255,255,.08)';for(let i=0;i<20;i++){const x=1070+((i*53+t*10)%200),y=706+(i*23)%90;g.fillRect(x|0,y,12,2);}}
@@ -802,7 +803,7 @@ function frame(dt,t){
   for(const s of S.sparks){const k=s.t/1.2;const x=s.x+(120-s.x)*k,y=s.y+(580-s.y)*k-Math.sin(k*Math.PI)*70;g.globalAlpha=1-k*.5;R(g,x,y,4,4,'#9fd8ff');g.globalAlpha=1;}
   for(const b of S.boats){const k=ease(b.t/b.dur);const x=1080+90*k,y=740-70*k;R(g,x,y,34,10,'#6b4a2a');R(g,x+14,y-16,3,16,'#4a3420');R(g,x+17,y-14,12,9,'#efe6d2');if(k>.8)for(let i=0;i<8;i++)R(g,1150+((i*53)%90),480+((i*37)%60)-(k-.8)*120,4,4,['#ffd36b','#ff8fb0','#7fc4ff'][i%3]);}
   for(const e of S.effects){if(e.kind==='chime'){const k=e.t/e.dur;g.strokeStyle=`rgba(230,196,106,${1-k})`;g.lineWidth=3;g.beginPath();g.arc(e.x,e.y,10+k*80,0,7);g.stroke();}else if(e.kind==='monster'){const m=monsterSprite(e.m);const bob=REDUCED?0:Math.sin(t*6)*3;g.globalAlpha=e.t>e.dur-1?e.dur-e.t:1;g.drawImage(m,e.x,e.y-24+bob);g.globalAlpha=1;e.bx=e.x;e.by=e.y-24;}else if(e.kind==='glyph')drawGlyph(g,e.g,e.x,e.y-e.t*22,4);}
-  drawBlockers(t);drawCI(t);drawQuota(t);drawOmens(t);S.alarmT+=dt;if(S.alarmT>2){S.alarmT=0;computeBlockers();computeOmens();mRender();rerenderT++;if(rerenderT%2===0)rerenderPanel();}
+  drawStageBadges();drawCI(t);drawQuota(t);drawOmens(t);S.alarmT+=dt;if(S.alarmT>2){S.alarmT=0;computeOmens();mRender();rerenderT++;if(rerenderT%2===0)rerenderPanel();}
   if(hover&&hover.kind==='actor'){const a=S.actors.get(hover.id);if(a){g.strokeStyle='rgba(255,255,255,.9)';g.lineWidth=2;g.strokeRect(a.x+4,a.y-2,SW-8,SH+4);}}
 
   // ---- lighting
@@ -853,7 +854,7 @@ function renderGlance(){
     if(i===5&&d&&((d.needs_you||[]).length||(d.stuck&&(d.stuck.count||d.stuck.error))||(d.check_issues||[]).length)){const b=document.createElement('button');b.textContent=text+' ›';b.setAttribute('aria-label',text+' Read details');b.onclick=()=>{openPanel('<h2>What needs attention</h2>'+((d.needs_you||[]).map(x=>'<p>'+esc(x.spec)+': '+esc(x.ask)+'</p>').join('')||'<p>No operator decisions waiting.</p>')+stuckHtml0()+((d.check_issues||[]).length?'<p>Merge checks need attention: '+d.check_issues.map(esc).join(', ')+'.</p>':''));bindLinks();};p.replaceChildren(b);}
     box.appendChild(p);}
 }
-async function refreshGlance(){if(!LIVE||REMOTE)return;try{const r=await fetch(api('/api/glance'),{cache:'no-store'});if(!r.ok)throw Error('unavailable');const d=await r.json();if(DATA)DATA.glance=d;}catch(_){if(DATA)DATA.glance={error:'What matters is unavailable'};}renderGlance();computeBlockers();mRender();rerenderPanel();}
+async function refreshGlance(){if(!LIVE||REMOTE)return;try{const r=await fetch(api('/api/glance'),{cache:'no-store'});if(!r.ok)throw Error('unavailable');const d=await r.json();if(DATA)DATA.glance=d;}catch(_){if(DATA)DATA.glance={error:'What matters is unavailable'};}renderGlance();mRender();rerenderPanel();}
 setInterval(refreshGlance,30000);
 
 function hud(){
@@ -865,7 +866,7 @@ function hud(){
   {const L=laneSplit();$('h-pipe').firstElementChild.textContent=L.pipe.length;$('h-owed').firstElementChild.textContent=L.owed.length+' due';$('h-accept').firstElementChild.textContent=L.accept.length;$('h-close').firstElementChild.textContent=L.close.length;$('h-owed').className='stat click '+(L.owed.length>20?'warn':'');$('h-close').className='stat click '+(L.close.length>5?'warn':'');}
   {const pv=DATA&&DATA.proving;const el=$('h-proving');if(pv==null){el.firstElementChild.textContent='unavailable';el.className='stat click';}else{el.firstElementChild.textContent=String(pv.length);const worst=pv.some(x=>x.colour==='overdue')?'bad':pv.some(x=>x.colour==='due-today')?'warn':'';el.className='stat click '+worst;}}
   $('h-flight').firstElementChild.textContent=[...S.actors.values()].filter(a=>!a.done&&!a.tour).length;
-  renderStuckTile();
+  renderFlowTile();
   renderMerge();
   const sh=$('h-shelf');let oldest=0;for(const ms of S.shelf.values())oldest=Math.max(oldest,S.now-ms);sh.firstElementChild.textContent=shelfText(S.shelf.size,oldest);sh.className='stat '+(oldest>4*3600000?'bad':oldest>3600000?'warn':'');
   const es=$('h-esc');let eo=0;for(const l of S.esc.values())eo=Math.max(eo,S.now-l[0].ms);{const o=escOwners();const n=o.you+o.th;es.firstElementChild.textContent=n?`${n} · ${o.you} YOU`:'0';es.className='stat '+(o.you?(eo>4*3600000?'bad':'warn'):'');es.lastElementChild.textContent='ravens · yours';}
@@ -880,7 +881,7 @@ let last=performance.now();function loop(now){const dt=Math.min(.1,(now-last)/10
 
 /* ---------------- input, bubble, panel ---------------- */
 function worldPt(ev){const r=cv.getBoundingClientRect();return{x:(ev.clientX-r.left-ox)/scale,y:(ev.clientY-r.top-oy)/scale};}
-function hit(pt){const bl=blockerAt(pt);if(bl)return{kind:'blocker',id:bl.s,name:bl.s+' · '+bl.text+' · '+fmtDur(bl.wait)};for(const a of [...S.actors.values()].reverse())if(pt.x>=a.x+4&&pt.x<=a.x+SW-4&&pt.y>=a.y-10&&pt.y<=a.y+SH){const c=specCharter(a.subject)||(String(a.subject||'').startsWith('L-charter-')?a.subject:null);return{kind:'actor',id:a.sp,name:a.sp+' · '+(a.subject||'')+(c?' · '+c:'')};}
+function hit(pt){for(const a of [...S.actors.values()].reverse())if(pt.x>=a.x+4&&pt.x<=a.x+SW-4&&pt.y>=a.y-10&&pt.y<=a.y+SH){const c=specCharter(a.subject)||(String(a.subject||'').startsWith('L-charter-')?a.subject:null);return{kind:'actor',id:a.sp,name:a.sp+' · '+(a.subject||'')+(c?' · '+c:'')};}
   for(const e of S.effects)if(e.kind==='monster'&&e.bx!=null&&pt.x>=e.bx&&pt.x<=e.bx+40&&pt.y>=e.by&&pt.y<=e.by+40)return{kind:'monster',id:e.m,name:MON[e.m].name};
   for(const s of standing)if(pt.x>=s.x+4&&pt.x<=s.x+SW-4&&pt.y>=s.y&&pt.y<=s.y+SH)return{kind:'role',id:s.role,name:ROLE_NAME[s.role]};
   for(const p of Object.values(PLACES))if(pt.x>=p.x-10&&pt.x<=p.x+p.w+10&&pt.y>=p.y-30&&pt.y<=p.y+p.h+20)return{kind:'place',id:p.id,name:p.n};return null;}
@@ -892,7 +893,6 @@ cv.addEventListener('click',ev=>{const h=hit(worldPt(ev));if(!h){hideBubble();re
   else if(false){const a=S.actors.get(h.id);const ch=charterOfSubject(a.subject);showBubble(h.id,`<b>${ROLE_NAME[a.role].toUpperCase()} · ${MODEL[a.role].toUpperCase()}</b><br>${ch?`<b style="color:#7a2f18">CHARTER ${esc(ch)}</b> ${esc(intentLine(ch)||(DATA.charters[ch]||{}).title||'')}<br>`:'<span class="tiny">Free-standing: no charter above this spec.</span><br>'}<span class="tiny">${esc(a.subject||'')} · ${a.state} · ${fmtDur(S.now-a.start)} of ${CAP[a.role]||'—'} min</span><br>${ch?`<a data-open="charter:${ch}">Open the charter ▸</a> · `:''}<a data-open="actor:${h.id}">This run ▸</a>`,()=>{const a=S.actors.get(h.id);return a?{x:a.x+SW/2,y:a.y-14}:null;});}
   else if(h.kind==='role'){const s=standing.find(s=>s.role===h.id);showBubble(ROLE_NAME[h.id],`<b>${MODEL[h.id].toUpperCase()}</b><br>${esc(CX[h.id].quest)}<br><a data-open="role:${h.id}">Open the codex ▸</a>`,()=>{const s=standing.find(s=>s.role===h.id);return s?{x:s.x+SW/2,y:s.y-14}:null;});}
   else if(h.kind==='place'){const p=PLACES[h.id],x=PX[h.id];showBubble(p.n,`${x.body}<br><a data-open="place:${h.id}">Open the codex ▸</a>`,()=>({x:p.x+p.w/2,y:p.y-8}));}
-  else if(h.kind==='blocker'){openSubject(h.id);}
   else if(h.kind==='monster'){showBubble(MON[h.id].name,`${MX[h.id].body}<br><a data-open="monster:${h.id}">Open the codex ▸</a>`,()=>{const e=S.effects.find(e=>e.kind==='monster'&&e.m===h.id);return e?{x:e.bx+20,y:e.by-6}:null;});}
 });
 function showActorBubble(sp){const a=S.actors.get(sp);if(!a)return;const ch=charterOfSubject(a.subject);const si=specInfo(a.subject);const what=si?`<b>${esc(si.title)}</b><br>${esc(si.intent||'')}<br>`:(String(a.subject||'').startsWith('L-spec-')?'<span class="tiny">Reading the spec…</span><br>':'');
@@ -905,7 +905,7 @@ let panelView=null;/* a live view re-renders itself every few seconds while open
 /* ── Ask the Thinker (operator button, 2026-10-04) ── */
 let ASKS={},askBusy={};
 function askItems(panel){try{
-  if(panel==='stuck')return (S.blockers||[]).map(b=>`${b.s} · ${fmtDur(b.wait)} · owner ${b.who} · ${b.text}`);
+  if(panel==='stuck')return (S.flow?.stuck||[]).map(b=>`${b.item} · ${b.state} · ${b.owner} · ${b.reason}`);
   if(panel==='omens')return (S.alarms||[]).filter(a=>a.sev>0).map(a=>`${a.sev===2?'CRITICAL':'WARNING'} · ${a.title} — ${a.detail}`);
   if(panel==='proving')return ((DATA&&DATA.proving)||[]).map(x=>`${x.id} · ${x.remaining} left · next: ${provingNextLine(x)} · owner ${x.owner}`);
 }catch(_){}return [];}
@@ -986,12 +986,12 @@ function openSubject(s){if(!s)return;const ev=S.subjectEvents.get(s)||[];const f
 function latestSpecSession(sid){return (((DATA&&DATA.codex)||{}).sessions||[]).filter(s=>s.subject===sid&&s.kind==='doit-build').sort((a,b)=>(toMs(b.last)||0)-(toMs(a.last)||0))[0];}
 function specDetailHtml(sid,extra){
   const info=specInfo(sid),state=(((DATA&&DATA.states)||[]).find(r=>r[0]===sid)||[])[1];
-  const stage=state?BUCKET.find(b=>b[1].test(state))[3]:'unknown';
-  const lane=(S.lane||[]).find(r=>r.spec===sid),ch=(info&&info.charter)||specCharter(sid);
+  const step=(S.steps||[]).find(r=>r.item===sid),stage=step?.stage||'unknown';
+  const ch=(info&&info.charter)||specCharter(sid);
   const criteria=info&&info.criteria||[],error=!info?'no spec file available':info.criteria_error;
   return `<h2>${esc(sid)} · ${esc(info&&info.title||(DATA&&DATA.titles||{})[sid]||sid)}</h2>
     <h4>STAGE</h4><p>${esc(stage)}</p>
-    <h4>LANE STATE</h4><p>${lane?esc(lane.bucket)+' · '+esc(lane.reason):'no lane row'}</p>
+    <h4>NEXT STEP</h4><p>${step?esc(step.state)+' · '+esc(step.reason):'unknown'}</p>
     <h4>CRITERIA</h4>${error?`<p>criteria unreadable: ${esc(error)}</p>`:criteria.length?`<ul class="criteria">${criteria.map(c=>`<li><b>${esc(c.id)}</b>: ${esc(c.text)}</li>`).join('')}</ul>`:'<p>no criteria listed</p>'}
     <h4>CHARTER</h4>${ch?`<p><a class="link" data-ch="${esc(ch)}">${esc(ch)} · Open the charter dossier ▸</a></p>`:'<p>Free-standing spec: no charter above it.</p>'}
     <h4>LATEST EVENTS</h4>${timelineHtml(S.subjectEvents.get(sid)||[])}
@@ -1285,33 +1285,21 @@ function showTourStep(i){if(!tour)return;if(i<0||i>=TOUR.length){endTour();retur
   $('tourcap').style.display='block';$('tc-prev').onclick=()=>showTourStep(i-1);$('tc-next').onclick=()=>showTourStep(i+1);$('tc-end').onclick=endTour;}
 function drawTour(){if(!tour)return;const st=TOUR[tour.i];const p=PLACES[st.p];const cx=p.x+p.w/2,cy=p.y+p.h/2;const gr=ctx.createRadialGradient(cx,cy,Math.max(p.w,p.h)*.55,cx,cy,Math.max(p.w,p.h)*1.6);gr.addColorStop(0,'rgba(6,4,16,0)');gr.addColorStop(1,'rgba(6,4,16,.78)');ctx.fillStyle=gr;ctx.fillRect(0,0,W,H);ctx.strokeStyle='rgba(230,196,106,.9)';ctx.lineWidth=3;ctx.strokeRect(p.x-10,p.y-36,p.w+20,p.h+52);}
 /* ---------------- blockers: what is stuck right now, and whether it had to be ---------------- */
-const WHO_={};const HOLD_RE=/serial|in this order|freez|froze|frozen|\bhold\b|held|until .{0,40}(merge|land|ship)|after .{0,40}(merge|land)|do not merge|don't merge|no merge|wait for/i;
-const LIFT_RE=/\b(lift|lifted|unfroze|unfreeze|unfrozen|resume|resumed|thaw)/i;
-function laneSplit(){const st=stateMap();const L={pipe:[],owed:[],accept:[],close:[]};for(const [s,v] of st){if(s.startsWith('L-spec-')){if(/^(written|registered|building|built|graded|reviewing|grading)$/.test(v))L.pipe.push([s,v]);else if(v==='shipped-owed-due')L.owed.push([s,v]);else if(v==='shipped')L.accept.push([s,v]);}else if(s.startsWith('L-charter-')&&/L1-complete/i.test(v))L.close.push([s,v]);}return L;}
-function computeHolds(){const now=S.now,H24=now-24*3600000;const bySpec=new Map();let freeze=null;
-  for(const [subj,ev] of S.subjectEvents){for(const e of ev){if(e.ty!=='decision'||e.ms<H24||!(e.a==='thinker'||e.a==='operator'))continue;const text=e.why||'';
-      if(/merge/i.test(text)&&/(re-?froze|freez|frozen)/i.test(text)&&!LIFT_RE.test(text.slice(0,80))){if(!freeze||e.ms>freeze.ms)freeze={subj,ms:e.ms,why:text};}
-      if(/merge/i.test(text)&&LIFT_RE.test(text)&&freeze&&e.ms>freeze.ms)freeze=null;
-      if(HOLD_RE.test(text)){const ids=new Set((text.match(/L-spec-\d+/g)||[]).concat(subj.startsWith('L-spec-')?[subj]:[]));for(const id of ids){const cur=bySpec.get(id);if(!cur||e.ms>cur.ms)bySpec.set(id,{subj,ms:e.ms,why:text});}}}}
-  return{bySpec,freeze};}
-const WHO={decision:'held by a recorded ruling',freeze:'all merges are frozen by a recorded ruling',wave:'waiting on an earlier-wave sibling still in flight',ci:'held while master CI is red',thinker:'the Thinker decides this one; it is not yours',executor:'the Executor should have dispatched',relay:'no pane is serving the ferry',you:'waiting on your ruling',deploy:'waiting on a deploy that has not landed',cap:'a run past its cap',gate:'the merge gate has not run'};
-// Presentation only: limits and overdue decisions belong to the live rule table.
-const LANE_PLACE=Object.assign(Object.create(null),{build:['tower','shelf'],rebuild:['tower','shelf'],'wave-held':['tower','shelf'],'dependency-held':['tower','shelf'],grade:['court','grade'],regrade:['court','grade'],review:['inn','review'],gate:['gate','merge'],enqueue:['gate','merge'],merge:['gate','merge'],close:['keep','close'],idle:['tower','idle']});
-function applyLane(d){S.lane=d.lane??null;S.laneError=d.lane_error||null;S.laneAt=d.lane_at||null;}
-function applyHistory(d){S.history=d.history;if(d.now)S.metricsNow=d.now;if(d.wallclock)S.wallclock=d.wallclock;applyLane(d);computeBlockers();}
-function laneNotice(){return !LIVE?'rule table: live only':S.lane===null?'rule table unreadable: '+(S.laneError||'no live result available'):'';}
-function laneDetails(row){return `<span class="tiny">rule ${esc(row.rule)} · limit ${esc(row.limit_min)} min · since ${esc(row.since)} · reason ${esc(row.reason)} · blocker ${esc(row.blocker||'none')}</span>`;}
-function stuckData(){return (LIVE||REMOTE)&&DATA&&DATA.glance&&!DATA.glance.error&&DATA.glance.stuck;}
-function renderStuckTile(){const d=stuckData();const unavailable=!d||d.error;const stk=$('h-stuck');stk.firstElementChild.textContent=unavailable?'stuck list unavailable':String(d.count);stk.firstElementChild.style.fontSize=unavailable?'12px':'';stk.firstElementChild.style.whiteSpace=unavailable?'normal':'';stk.className='stat click '+(unavailable?'warn':d.count?'bad':'good');}
-function computeBlockers(){
-  S.holds=computeHolds();const d=stuckData();
-  S.blockers=(d&&d.stuck||[]).filter(row=>row.spec).map(row=>{
-    const lane=(S.lane||[]).find(r=>r.spec===row.spec);const [place,kind]=LANE_PLACE[lane&&lane.rule]||[row.kind==='window'?'gate':row.kind==='owed'?'town':row.kind==='escalation'?'keep':'tower',row.kind];
-    return {s:row.spec,place,kind,since:toMs(row.since),wait:row.stuck_for_s*1000,who:row.who,text:row.reason,need:true,sev:row.stuck_for_s>14400?2:row.stuck_for_s>3600?1:0,lane};
-  });renderStuck();
-}
-function renderStuck(){renderStuckTile();const d=stuckData();const el=$('stuck');el.className=d&&!d.error&&!d.count?'calm':'';el.textContent=!d||d.error?'stuck list unavailable':d.count?`${d.count} ${d.count===1?'spec is':'specs are'} stuck`:'Nothing stuck';}
-$('stuck').onclick=()=>openStuck();
+const WHO_={};function laneSplit(){const st=stateMap();const L={pipe:[],owed:[],accept:[],close:[]};for(const [s,v] of st){if(s.startsWith('L-spec-')){if(/^(written|registered|building|built|graded|reviewing|grading)$/.test(v))L.pipe.push([s,v]);else if(v==='shipped-owed-due')L.owed.push([s,v]);else if(v==='shipped')L.accept.push([s,v]);}else if(s.startsWith('L-charter-')&&/L1-complete/i.test(v))L.close.push([s,v]);}return L;}
+// Format only canonical flow and health values. Missing values stay unknown.
+const FLOW_STAGES=['idea','planned','building','checking','merging','live'];
+const STAGE_PLACES={keep:'idea',tower:'planned',forge:'building',court:'checking',gate:'merging',town:'live'};
+const viewText=v=>v==null?'unknown':String(v);
+function applyViews(d){S.flow=d.flow??null;S.flowError=d.flow_error||null;S.steps=d.steps??null;S.health=d.health??null;S.healthError=d.health_error||null;renderFlowTile();if(typeof rerenderPanel==='function')rerenderPanel();}
+function applyHistory(d){S.history=d.history;if(d.now)S.metricsNow=d.now;if(d.wallclock)S.wallclock=d.wallclock;applyViews(d);}
+function renderFlowTile(){const n=S.flow?S.flow.stuck.length:null;const tile=$('h-stuck');tile.firstElementChild.textContent=viewText(n);tile.className='stat click '+(n==null?'warn':n?'bad':'good');const strip=$('stuck');strip.className=n===0?'calm':'';strip.textContent=n==null?'Flow unknown':n+' stuck';}
+function stageBadges(){return Object.entries(STAGE_PLACES).map(([place,stage])=>({place,stage,count:S.flow?.stages?.[stage]??null}));}
+function drawStageBadges(){for(const badge of stageBadges()){const p=PLACES[badge.place];g.fillStyle='#efe6d2';g.font='700 '+mapFont(10,'Cinzel');g.fillText(badge.stage+' '+viewText(badge.count),p.x,p.y+p.h+24);}}
+function flowHtml(){return '<h2>Flow</h2><div class="flow-stages">'+FLOW_STAGES.map(stage=>'<p>'+esc(stage)+' · '+esc(viewText(S.flow?.stages?.[stage]))+'</p>').join('')+'</div>'+stuckHtml0();}
+function healthHtml(){const h=S.health;const row=(label,value)=>'<p>'+esc(label)+' · '+esc(viewText(value))+'</p>';return '<h2>Health</h2>'+row('finishing per day',h?.finishing_per_day)+row('intake per day',h?.intake_per_day)+['codex','claude'].map(v=>row(v+' usage',viewText(h?.usage?.[v]?.used)+' / '+viewText(h?.usage?.[v]?.limit))+row(v+' tokens per live spec',h?.tokens_per_live_spec?.[v])).join('')+row('disk',h?.disk_used_fraction==null?null:(h.disk_used_fraction*100).toFixed(1)+'%');}
+function openFlow(){openPanel(flowHtml(),{html:flowHtml,bind:bindLinks});bindLinks();}
+function openHealth(){openPanel(healthHtml(),{html:healthHtml});}
+$('stuck').onclick=()=>openFlow();
 function listPanel(title,sub,rows){const html=()=>`<h2>${esc(title)}</h2><div class="cls">${esc(sub)}</div>${rows().length?rows().map(r=>`<p><a class="link" data-subj="${esc(r.s)}">${esc(r.s)}</a>${r.t?' · '+esc(r.t):''}${(()=>{const i=specInfo(r.s);return i?`<br><span class="tiny">${esc(i.title)}</span>`:'';})()}${r.why?`<br><span class="tiny">${esc(r.why)}</span>`:''}</p>`).join(''):'<p class="tiny">None.</p>'}`;openPanel(html(),{html,bind:bindLinks});bindLinks();}
 function provingNextLine(p){return p.next?`${p.next.text} · due ${p.next.due_at}`:'nothing remaining';}
 const PV_STEP={'killed-spec':[0,'Rule on a killed spec',15,'Thinker'],'l1-missing':[0,'Confirm the plan was fully written',30,'Operator'],'spec-review':[1,'Finish grading and review',90,'Pipeline'],'owed-due':[2,'Production checks the sweeper can run',30,'Sweeper'],'owed-expired':[2,'Expired production checks: meet, re-date or waive',20,'Thinker'],'owed-waiting':[3,'Production checks waiting for their date',0,'Calendar'],'brief':[3,'Answer open follow-up briefs',30,'Executor'],'sweep':[4,'Final sweep',10,'Executor'],'charter-review':[5,'Charter review',45,'Executor']};
@@ -1343,22 +1331,10 @@ function openProvingItems(id){const p=DATA&&DATA.proving;const x=p&&p.find(e=>e.
   const back=$('back-pv');if(back)back.onclick=openProvingPanel;}
 const ageOf=s=>{const ev=S.subjectEvents.get(s)||[];return ev.length?fmtAge(S.now-ev[ev.length-1].ms)+' since last event':'';};
 function openStuck(){openPanel(stuckHtml(),{html:stuckHtml,bind:bindLinks});bindLinks();}
-function stuckHtml0(){
-  const d=stuckData();
-  const rows=items=>items.map(row=>`<div class="act stuck-row"><b>${row.spec?`<a class="link" data-subj="${esc(row.spec)}">${esc(row.spec)}</a>`:esc(row.subject)} · ${esc(fmtDur(row.stuck_for_s*1000))}</b><span>${esc(row.title)}</span><br><span class="tiny">${esc(row.project)} · who has to act: ${esc(row.who)} · ${esc(row.kind==='owed'?'owed check':row.kind.startsWith('held-')?'held on purpose':row.kind)}</span><p>${esc(row.reason)}</p></div>`).join('');
-  return '<h2>Stuck right now</h2>'+(!d||d.error?'<p>stuck list unavailable</p>':`<p>${d.count?`${d.count} ${d.count===1?'spec is':'specs are'} stuck`:'Nothing stuck'}</p>`)+(d?rows(d.stuck||[])+((d.held||[]).length?'<h3>Held on purpose</h3>'+rows(d.held):''):'');
-}
-function drawBlockers(t){const groups={};for(const b of S.blockers){(groups[b.place]=groups[b.place]||[]).push(b);}
-  const size=Math.max(12,12/MAP_SCALE());
-  for(const [pid,list] of Object.entries(groups)){const p=PLACES[pid];if(!p)continue;
-    const cols=Math.max(1,Math.floor(p.w/(size+6)));const x0=p.x,y0=p.y+p.h+22;
-    for(let i=0;i<list.length;i++){const b=list[i],x=x0+(i%cols)*(size+6),y=y0+Math.floor(i/cols)*(size+6);R(g,x,y,size,size,'#efe6d2');R(g,x,y+size*.35,size,2,'#ff6a5c');R(g,x+2,y+size*.7,size-4,1,'#9a92ad');b.bx=x;b.by=y;b.size=size;}
-  }
-}
+function stuckHtml0(){return '<h3>Stuck right now</h3>'+(S.flow===null?'<p>unknown</p>':S.flow.stuck.map(row=>'<div class="act stuck-row"><b>'+esc(row.item)+'</b> · '+esc(row.action||'hold')+' · '+esc(row.owner)+' · '+esc(row.reason)+' · '+esc(row.since)+'</div>').join('')||'<p>Nothing stuck</p>');}
 function drawQuota(t){const q=(S.sys||(DATA&&DATA.sys)||{}).quota;if(!q||!q.panes||!q.panes.length)return;const d7=Math.max(...q.panes.map(p=>p.d7));const x=612,y=392,w=12,hh=60;R(g,x-2,y-2,w+4,hh+4,'#1a1428');R(g,x,y,w,hh,'#2a2438');const fill=Math.round(hh*Math.min(100,d7)/100);const col=d7>=95?'#ff5e52':d7>=80?'#ffc46b':'#8fe08f';R(g,x,y+hh-fill,w,fill,col);if(d7>=95&&!REDUCED&&Math.floor(t*2)%2){R(g,x-2,y-2,w+4,2,col);}g.fillStyle=col;g.font='700 '+mapFont(9,'Cinzel');g.fillText('QUOTA '+d7+'%',x-20,y-6);}
 function drawCI(t){const sy=S.sys||(DATA&&DATA.sys);if(!sy||!sy.ci)return;const p=PLACES.gate;const red=sy.ci.red;const col=red?'#ff5e52':sy.ci.green?'#8fe08f':'#9a92ad';R(g,p.x+w2(p)-2,p.y-30,4,28,'#2a2a30');R(g,p.x+w2(p)+2,p.y-30,22,12,col);g.fillStyle=col;g.font='700 '+mapFont(9,'Cinzel');g.fillText(red?'MASTER RED':'MASTER GREEN',p.x+w2(p)-30,p.y-36);if(red&&!REDUCED){const k=(t*1.5)%1;g.strokeStyle=`rgba(255,94,82,${1-k})`;g.lineWidth=2;g.beginPath();g.arc(p.x+w2(p)+12,p.y-24,8+k*18,0,7);g.stroke();}}
 const w2=p=>p.w/2;
-function blockerAt(pt){for(const b of S.blockers)if(b.bx!=null&&pt.x>=b.bx-2&&pt.x<=b.bx+b.size+2&&pt.y>=b.by-2&&pt.y<=b.by+b.size+2)return b;return null;}
 /* ---------------- wall clock: where the hours go ---------------- */
 const WC_LABEL={shelf:['On the shelf','written, no builder yet','tower'],await_grade:['Built, waiting for a grade','the card is done; no grader dispatched','court'],await_review:['Graded, waiting for review','no reviewer dispatched','inn'],await_merge:['Reviewed, waiting for the merge','the gate has not run','gate'],await_deploy:['Merged, waiting to ship','the deploy has not landed','harbor'],owed:['Shipped, owing a live check','nobody has observed it on production','town']};
 function clockHtml(){const w=S.wallclock||(DATA&&DATA.wallclock);if(!w)return '<h2>Wall clock</h2><p class="tiny">No audit yet; the server computes it every five minutes.</p>';const now=S.now;
@@ -1492,7 +1468,6 @@ function computeOmens(){const now=S.now,A=[];const add=(id,kind,sev,title,detail
   if(dead.length)add('deadlock','deadlock',2,`${dead.length} spec${dead.length>1?'s':''} deadlocked on contamination`,dead.join(', '),'court',dead);
   if(reasserted.length)add('reasserted','reasserted',0,`${reasserted.length} spec${reasserted.length>1?'s':''} reasserted after contamination, awaiting a fresh grade`,reasserted.join(', '),'court',reasserted);
   /* churn: server-side (realm_omens.py): unshipped specs graded 3+ times in the last 48 h */
-  {const needless=S.blockers.filter(b=>b.kind==='shelf'&&b.need);if(needless.length){const worst=needless.reduce((m,b)=>b.wait>m.wait?b:m);if(worst.wait>2*3600000)add('shelf','shelf',worst.wait>6*3600000?2:1,`${needless.length} spec${needless.length>1?'s':''} on the shelf with no reason, oldest ${fmtDur(worst.wait)}`,`${worst.s} was written ${fmt(now-worst.wait)} and no builder has taken it. Wave-held specs are not counted.`,'tower',needless.map(b=>b.s));}}
   {const kb={};for(const [s,l] of S.esc){const x=l[l.length-1];const k=knownBug((x.why||'')+' '+(x.irr||''));if(k)(kb[k.name]=kb[k.name]||{k,subs:[]}).subs.push(s);}for(const [name,{k,subs}] of Object.entries(kb))add('knownbug:'+name,'knownbug',0,`Known bug: ${name} on ${subs.join(', ')}`,`${k.note} Not a decision for anyone.`,'keep',subs);}
   if(S.esc.size){const overdue=[],mine=[];let oldest=0,mineOld=0;for(const [s,l] of S.esc){const x=l[l.length-1];if(!isRaven(l))continue;const age=now-l[0].ms;if(escOwner(l)==='you'){mine.push(s);mineOld=Math.max(mineOld,age);continue;}const dl=toMs(x.dl);if((dl&&dl<now)||age>4*3600000){overdue.push(s);oldest=Math.max(oldest,age);}}
     if(mine.length)add('ravens-you','ravens',mineOld>12*3600000?2:1,`${mine.length} escalation${mine.length>1?'s':''} waiting on your ruling`,`Money, credentials, an irreversible production write or a product call. Oldest has waited ${fmtDur(mineOld)}.`,'keep',mine);
@@ -1564,8 +1539,9 @@ function drawOmens(t){for(const a of S.alarms){if(!a.sev)continue;/* INFO draws 
 function censusHtml(){const by={};for(const [s,st] of (DATA.states||[]))(by[st]=by[st]||[]).push(s);const order=Object.entries(by).sort((a,b)=>b[1].length-a[1].length);const roles=Object.entries(DATA.stats).sort((a,b)=>(b[1].done+b[1].failed)-(a[1].done+a[1].failed));
   return `<h2>Realm Census</h2><div class="cls">doit states · ${S.lastStates?fmt(S.lastStates)+' Z':(DATA.window[1]||'').slice(0,16)}</div><h4>EVERY SUBJECT BY DERIVED STATE</h4>${order.map(([st,l])=>`<p><span class="pill ${/accepted|shipped$|complete/.test(st)?'good':/killed|void|unknown/.test(st)?'bad':/owed/.test(st)?'warn':''}">${st} · ${l.length}</span><span class="tiny">${l.map(s=>`<a class="link" data-subj="${s}">${s.replace(/^L-/,'')}</a>`).join(', ')}</span></p>`).join('')}<h4>ROLES, WHOLE LEDGER</h4><table><tr><th>role</th><th>done</th><th>fail</th><th>med min</th><th>tokens</th></tr>${roles.map(([r,s])=>`<tr><td><a class="link" data-role="${r}">${r}</a></td><td>${s.done}</td><td>${s.failed}</td><td>${s.med_min??'—'}</td><td>${kTok(s.med_tok)}</td></tr>`).join('')}</table><h4>HOW THEY FALL</h4><p>${Object.keys(MON).map(k=>`<a class="link" data-mon="${k}">${MON[k].name}</a>`).join(' · ')}</p>`;}
 $('b-census').onclick=()=>{openPanel(censusHtml());bindLinks();};
+$('b-flow').onclick=openFlow;$('b-health').onclick=openHealth;
 $('h-esc').onclick=()=>openPlace('keep');$('h-stuck').onclick=()=>openStuck();
-$('h-shelf').onclick=()=>listPanel('Ready, waiting for a builder','written specs no builder has started · oldest first',()=>[...S.shelf.entries()].sort((a,b)=>a[1]-b[1]).map(([s,ms])=>{const b=S.blockers.find(x=>x.s===s);return{s,t:'waiting '+fmtDur(S.now-ms),why:b&&!b.need?b.text:''};}));
+$('h-shelf').onclick=()=>listPanel('Ready, waiting for a builder','written specs no builder has started · oldest first',()=>[...S.shelf.entries()].sort((a,b)=>a[1]-b[1]).map(([s,ms])=>({s,t:'waiting '+fmtDur(S.now-ms)})));
 $('h-fail').onclick=()=>listPanel('Fallen runs',`${S.fails} runs started and failed · ${S.refused} turned back before any spend`,()=>[...S.fallenList.slice().reverse().map(f=>({s:f.s||f.sp,t:f.sp+' · '+fmt(f.ms),why:f.why})),...S.refusedList.slice(-15).reverse().map(f=>({s:f.s||f.sp,t:'turned back · '+f.sp+' · '+fmt(f.ms),why:f.why}))]);
 $('h-ship').onclick=()=>listPanel('Shipped','in this window, newest first',()=>S.shippedList.slice().reverse().map(x=>({s:x.s,t:fmt(x.ms)+(x.sha?' · '+x.sha:'')+' · now '+(stateMap().get(x.s)||'?')})));
 $('h-flight').onclick=()=>listPanel('In flight','runs working or waiting at the ferry right now',()=>[...S.actors.values()].filter(a=>!a.done&&!a.tour).map(a=>({s:a.subject||a.sp,t:a.sp+' · '+a.state+' · '+fmtDur(S.now-a.start)})));
@@ -1599,7 +1575,7 @@ let stream=null;
 let KEY='';try{const u=new URL(location.href);if(u.searchParams.get('key')){KEY=u.searchParams.get('key');localStorage.setItem('realm.key',KEY);u.searchParams.delete('key');history.replaceState(null,'',u.pathname+u.hash);}else KEY=localStorage.getItem('realm.key')||'';}catch(_){}
 const BASE=location.pathname.replace(/\/[^/]*$/,'');/* works at / and behind a proxy prefix such as /realm/ */
 const api=path=>BASE+path+(KEY?(path.includes('?')?'&':'?')+'key='+encodeURIComponent(KEY):'');
-function loadData(d){DATA=d;applyLane(d);Codex.load(d.codex);if(d.caps)CAP={...CAP,...d.caps};SEEN.clear();for(const e of d.events){SEEN.add(rowKey(e));if(e.t>lastT)lastT=e.t;}lastHeard=Date.now();EVENTS=d.events.map(e=>({...e,ms:toMs(e.t)})).filter(e=>e.ms).sort((a,b)=>a.ms-b.ms);T0=toMs(d.window[0]);T1=d.live?Date.now():toMs(d.window[1])+60000;$('s-a').textContent=fmt(T0);$('s-b').textContent=fmt(T1);}
+function loadData(d){DATA=d;applyViews(d);Codex.load(d.codex);if(d.caps)CAP={...CAP,...d.caps};SEEN.clear();for(const e of d.events){SEEN.add(rowKey(e));if(e.t>lastT)lastT=e.t;}lastHeard=Date.now();EVENTS=d.events.map(e=>({...e,ms:toMs(e.t)})).filter(e=>e.ms).sort((a,b)=>a.ms-b.ms);T0=toMs(d.window[0]);T1=d.live?Date.now():toMs(d.window[1])+60000;$('s-a').textContent=fmt(T0);$('s-b').textContent=fmt(T1);}
 const SEEN=new Set();let lastT='',lastHeard=0;
 const rowKey=r=>r.t+'|'+r.ty+'|'+(r.s||'')+'|'+(r.sp||'')+'|'+(r.a||'')+'|'+(r.c||'')+'|'+String(r.why||r.ti||r.pb||'').slice(0,48);
 function insertEvent(row){const k=rowKey(row);if(SEEN.has(k))return false;SEEN.add(k);if(row.t>lastT)lastT=row.t;const e={...row,ms:toMs(row.t)||Date.now()};let i=EVENTS.length;while(i>0&&EVENTS[i-1].ms>e.ms)i--;EVENTS.splice(i,0,e);if(i<S.cursor)S.cursor++;// arrived out of order behind the cursor: handle now
@@ -1627,7 +1603,7 @@ let REMOTE=false,remoteTimer=null,lastPush='';
 async function remoteFetch(file){const r=await fetch(api('/api/ledger?file='+file),{cache:'no-store'});if(r.status===401)return {auth:false};if(!r.ok)return null;const d=await r.json();d.pushedAt=r.headers.get('X-Pushed-At')||'';return d;}
 function passwordForm(msg){openPanel(`<h2>Realm of DO-IT</h2><div class="cls">this realm is behind a password</div><p>${esc(msg||'Enter the password to open the realm.')}</p><form id="pwf"><input id="pw" type="password" autocomplete="current-password" placeholder="password" style="width:100%;padding:8px 10px;font-family:var(--body);font-size:15px;background:rgba(255,255,255,.06);color:#fff;border:1px solid var(--hair);border-radius:2px"><p style="margin-top:8px"><button class="btn on" type="submit">ENTER</button></p></form>`);status('A PASSWORD IS NEEDED','enter it in the panel');
   $('pwf').onsubmit=async ev=>{ev.preventDefault();const pw=$('pw').value;try{const r=await fetch(api('/api/login'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pw})});if(r.ok){status('WAKING THE REALM','fetching the last snapshot…');boot();}else passwordForm('That was not it. Try again.');}catch(_){passwordForm('Could not reach the login. Try again.');}};}
-function applySnapshot(d){if(!DATA){return false;}applyLane(d);applyThroughput(d);if('glance' in d)DATA.glance=d.glance;else DATA.glance=null;if(d.codex){DATA.codex=d.codex;Codex.load(d.codex);}let lastT='';for(const e of EVENTS)if(e.t>lastT)lastT=e.t;let n=0;for(const row of d.events){if(row.t>lastT){insertEvent(row);n++;}}for(const k of ['states','seat','stats','titles','counts','queue','charters','spec_charter','makers','n_events','sys','tick_omens','history','specs','wallclock','metrics','goals','omens'])if(d[k]!=null)DATA[k]=d[k];if('proving' in d)DATA.proving=d.proving;if(d.wallclock)S.wallclock=d.wallclock;if(d.metrics)S.metricsNow=d.metrics;if(d.history)S.history=d.history;if(d.sys)S.sys=d.sys;if(d.tick_omens)S.tickOmens=d.tick_omens;if(d.omens)S.omens=d.omens;S.lastStates=Date.now();lastPush=d.pushedAt||d.now||'';T1=Date.now();return n;}
+function applySnapshot(d){if(!DATA){return false;}applyViews(d);applyThroughput(d);if('glance' in d)DATA.glance=d.glance;else DATA.glance=null;if(d.codex){DATA.codex=d.codex;Codex.load(d.codex);}let lastT='';for(const e of EVENTS)if(e.t>lastT)lastT=e.t;let n=0;for(const row of d.events){if(row.t>lastT){insertEvent(row);n++;}}for(const k of ['states','seat','stats','titles','counts','queue','charters','spec_charter','makers','n_events','sys','tick_omens','history','specs','wallclock','metrics','goals','omens'])if(d[k]!=null)DATA[k]=d[k];if('proving' in d)DATA.proving=d.proving;if(d.wallclock)S.wallclock=d.wallclock;if(d.metrics)S.metricsNow=d.metrics;if(d.history)S.history=d.history;if(d.sys)S.sys=d.sys;if(d.tick_omens)S.tickOmens=d.tick_omens;if(d.omens)S.omens=d.omens;S.lastStates=Date.now();lastPush=d.pushedAt||d.now||'';T1=Date.now();return n;}
 async function remotePoll(){const d=await remoteFetch('snapshot');if(!d||d.auth===false)return;applySnapshot(d);}
 let booted=false;
 async function boot(){
@@ -1640,7 +1616,7 @@ async function boot(){
   if(d.live){LIVE=true;seek(Date.now());connect();document.querySelectorAll('.spd').forEach(x=>x.classList.remove('on'));}
   else if(REMOTE){LIVE=true;lastPush=d.pushedAt||d.now||'';T1=Date.now();seek(Date.now());$('b-live').style.display='';if(!remoteTimer)remoteTimer=setInterval(remotePoll,45000);document.querySelectorAll('.spd').forEach(x=>x.classList.remove('on'));}
   else{LIVE=false;$('b-live').style.display='none';const dayStart=Date.UTC(new Date(T1).getUTCFullYear(),new Date(T1).getUTCMonth(),new Date(T1).getUTCDate());const t=dayStart>T0&&dayStart<T1?dayStart:T0;seek(t);}
-  computeBlockers();computeOmens();mApply();status(null);
+  computeOmens();mApply();status(null);
 }
 /*__CODEX_JS__*/
 boot();
