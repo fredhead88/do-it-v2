@@ -26,17 +26,25 @@ def classify_ask(note, capability=None):
     text = ' '.join(str(note or '').lower().split())
     if re.search(r'operator(?:\W+\w+){0,3}\W+ruling|written operator ruling|decision, not an observable', text):
         return dict(owner='operator', kind='decision', capability='operator-action')
+    approval = re.search(r'operator-gated|operator cron install|operator re-enables|operator-run write|'
+                         r'flag toggle is a production change|sudo unshare.*live|tmpfs over the live|'
+                         r'approve|approval|client email|purchase', text)
+    requested = re.split(r'(?:operator|you)\s*:', text)[-1]
+    tooling = re.search(r'\b(?:batch|actions[: ]read|dsn|ro-dsn|browser|chrome-devtools|'
+                        r'dev server|review account|review session|verifier session|staff login|deploy time)\b',
+                        requested) and not approval
+    privilege = re.search(r'\bgrant (?:select|insert|update|delete|usage) on \S+', requested)
+    # Tooling falls through to the route rules; a named privilege stays access.
     # A denied SELECT proves only that this reporting seat cannot read it.
     # The Thinker may already have an approved route; do not demand a new grant.
-    if (re.search(r'(?:operator|you)\s*:\s*(?:please\s+)?(?:give|grant|provide)\b', text)
+    if (privilege or not tooling and (
+            re.search(r'(?:operator|you)\s*:\s*(?:please\s+)?(?:give|grant|provide)\b', text)
             and not re.search(r'grant a batch|\bno (?:ro[ -]*dsn|review account)\b|'
                               r'grant (?:a |one |the )?(?:read-only )?dsn|'
                               r'provide the review account|no browser.*here', text)
-            or 'authorized scratch supavisor' in text):
+            or 'authorized scratch supavisor' in text)):
         return dict(owner='operator', kind='access', capability='ro-dsn-grant')
-    if re.search(r'operator-gated|operator cron install|operator re-enables|operator-run write|'
-                 r'flag toggle is a production change|sudo unshare.*live|tmpfs over the live|'
-                 r'approve|approval|client email|purchase', text):
+    if approval:
         kind = 'real-world' if re.search(r'client email|purchase', text) else 'approval'
         return dict(owner='operator', kind=kind, capability='operator-action')
     if re.search(r'not (?:yet )?deployed|not live|needs (?:a |integrator )?deploy|deploy has not run', text):
