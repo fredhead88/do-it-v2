@@ -218,6 +218,7 @@ Rule two: `Writes:` entries are bare paths or globs, one per line, never annotat
 - src/owed.py
 
 Never the annotated form: `- src/owed.py (new)`.
+Before finishing, run `python3 src/coupled_tests.py <spec.md> --repo <project-checkout>` against the spec's project checkout and resolve every `named` hit by adding the test to `Writes:` or naming its full path in `## Boundaries` with the reason it cannot break; resolve exit 2 as an incomplete scan.
 
 Rule three: AC lines sit at the margin, unbulleted, so the criteria extractor can read them. Correct example: `AC3 [backend]: …`.
 
