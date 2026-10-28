@@ -613,6 +613,13 @@ def ci_status():
 _FIRES = {"at": 0.0, "v": None}
 
 
+def _ledger_child_env():
+    """Share the validated parser cache, with a bounded default lock wait."""
+    env = {**os.environ, "DOIT_ROOT": str(ROOT)}
+    env.setdefault("DOIT_LEDGER_LOCK_WAIT_S", "30")
+    return env
+
+
 def fires_register():
     """The Thinker's fires register (~/.do-it/fires.py --json, read-only): recurring problem classes and their fixes. Cached ten minutes."""
     script = ROOT / "fires.py"
@@ -622,7 +629,8 @@ def fires_register():
         return _FIRES["v"]
     v = None
     try:
-        p = subprocess.run([sys.executable, str(script), "--json"], capture_output=True, text=True, timeout=180, env={**os.environ, "DOIT_ROOT": str(ROOT), "DOIT_READ_CACHE": "0"})
+        p = subprocess.run([sys.executable, str(script), "--json"], capture_output=True, text=True, timeout=180, env=_ledger_child_env())
+        p.check_returncode()
         data = json.loads(p.stdout or "[]")
         if isinstance(data, list):
             v = [{"cls": d.get("class"), "n": d.get("n"), "first": d.get("first"), "last": d.get("last"), "fix": d.get("fix"),
@@ -736,10 +744,13 @@ def tick_omens():
     if not script.is_file():
         return None
     try:
-        p = subprocess.run([sys.executable, str(script)], capture_output=True, text=True, timeout=180, env={**os.environ, "DOIT_ROOT": str(ROOT), "DOIT_READ_CACHE": "0"})
+        p = subprocess.run([sys.executable, str(script)], capture_output=True, text=True, timeout=180, env=_ledger_child_env())
+        p.check_returncode()
         lines = []
         for l in p.stdout.splitlines():
             parts = [x.strip() for x in l.split("|", 2)]
+            if parts == ["WARN", "shelf", "shelf check unavailable (dispatcher error)"]:
+                return None
             if len(parts) == 3:
                 lines.append({"sev": parts[0], "name": parts[1], "detail": trunc(parts[2], 200)})
         _OMENS_SCRIPT.update(at=dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), lines=lines)
@@ -1193,8 +1204,7 @@ def throughput_payload(cached=False):
             proc = subprocess.run([str(LIVE_REPO / "doit"), "throughput", "--json"],
                                   cwd=LIVE_REPO, stdin=subprocess.DEVNULL,
                                   capture_output=True, text=True, timeout=THROUGHPUT_TIMEOUT,
-                                  env={**os.environ, "DOIT_ROOT": str(ROOT),
-                                       "DOIT_NOW": result["throughput_at"], "DOIT_READ_CACHE": "0"})
+                                  env={**_ledger_child_env(), "DOIT_NOW": result["throughput_at"]})
             if proc.returncode:
                 raise ValueError(f"throughput exit {proc.returncode}: {proc.stderr.strip()}")
             value = json.loads(proc.stdout)
@@ -1236,7 +1246,7 @@ def derive_dossier(item_id):
         return None
     try:
         p = subprocess.run([sys.executable, str(BRIEF), item_id, "--json"], capture_output=True, text=True,
-                           timeout=120, env={**os.environ, "DOIT_ROOT": str(ROOT), "DOIT_READ_CACHE": "0"})
+                           timeout=120, env=_ledger_child_env())
         if p.returncode == 0:
             return json.loads(p.stdout)
         if p.returncode == 2 and p.stdout.strip() == "":

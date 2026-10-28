@@ -915,7 +915,7 @@ def test_realm_never_opens_ledger_lock():
         assert list((root/'cache').glob('ledger-*.lock'))
 
 
-def test_subprocess_sites_enumerated_and_lock_free():
+def test_subprocess_sites_enumerated_and_cached_child_reads():
     import ast
     import collections
     import subprocess
@@ -958,7 +958,8 @@ def test_subprocess_sites_enumerated_and_lock_free():
                          lambda: realm.derive_dossier('L-spec-1')]:
                 call()
                 env = run.call_args.kwargs['env']
-                assert env['DOIT_READ_CACHE'] == '0' and env['DOIT_ROOT'] == str(root)
+                assert env['DOIT_READ_CACHE'] == '1' and env['DOIT_ROOT'] == str(root)
+                assert env['DOIT_LEDGER_LOCK_WAIT_S'] == os.environ.get('DOIT_LEDGER_LOCK_WAIT_S', '30')
                 if run.call_args.args[0][1:3] == ['throughput', '--json']: assert env['DOIT_NOW']
             realm.ask_thinker('stuck', [])
             assert run.call_args.kwargs['env']['DOIT_READ_CACHE'] == '1'
@@ -976,7 +977,8 @@ def test_subprocess_sites_enumerated_and_lock_free():
             else:
                 with mock.patch.dict(realm._FIRES, at=0, v=None): value = realm.fires_register()
                 assert value and any(r['cls'] == 'ledger-read' and r['n'] == expected_count for r in value), value
-            assert not list((root/'cache').glob('ledger-*'))
+            assert list((root/'cache').glob('ledger-*.lock'))
+            assert list((root/'cache').glob('ledger-*.sqlite3'))
             with tempfile.TemporaryDirectory(prefix='realm-child-control-') as folder:
                 control = pathlib.Path(folder); (control/'events').mkdir()
                 (control/'events'/file.name).write_bytes(file.read_bytes())
