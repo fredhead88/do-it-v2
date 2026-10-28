@@ -765,6 +765,8 @@ EXPECTED_CRONS_ROWS = [
      "command": "{doit} cron-run base-red-nightly-collect -- /usr/bin/python3 {repo}/src/base_red.py nightly-collect albert-scott >> {root}/logs/base-red-nightly-collect.log 2>&1",
      "path": "/usr/bin/python3", "sig": r"base_red\.py\s+nightly-collect\s+albert-scott\b",
      "owner": "thinker", "project": "albert-scott", "max_runtime_s": 1800},
+    {'name': 'pane-watchdog', 'where': 'user', 'schedule': '*/5 * * * *', 'command': 'DOIT_ROOT={root} {doit} cron-run pane-watchdog -- {repo}/src/pane_watchdog.py', 'path': '{repo}/src/pane_watchdog.py', 'sig': 'pane_watchdog\\.py\\b', 'owner': 'thinker', 'project': 'do-it-v2'},
+    {'name': 'executor-wake', 'where': 'user', 'schedule': '*/5 * * * *', 'command': 'DOIT_ROOT={root} {doit} cron-run executor-wake -- {repo}/scripts/executor-wake.sh', 'path': '{repo}/scripts/executor-wake.sh', 'sig': 'executor-wake\\.sh\\b', 'owner': 'thinker', 'project': 'do-it-v2'},
     {"name": "pace-sample", "where": "user", "schedule": "*/10 * * * *",
      "command": "{doit} cron-run pace-sample -- /usr/bin/python3 {repo}/src/pace.py sample >> {root}/logs/pace-sample.log 2>&1",
      "path": "/usr/bin/python3", "sig": r"pace\.py\s+sample\b",

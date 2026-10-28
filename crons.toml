@@ -240,6 +240,26 @@ project = "albert-scott"
 max_runtime_s = 1800
 
 [[row]]
+name = "pane-watchdog"
+where = "user"
+schedule = "*/5 * * * *"
+command = "DOIT_ROOT={root} {doit} cron-run pane-watchdog -- {repo}/src/pane_watchdog.py"
+path = "{repo}/src/pane_watchdog.py"
+sig = 'pane_watchdog\.py\b'
+owner = "thinker"
+project = "do-it-v2"
+
+[[row]]
+name = "executor-wake"
+where = "user"
+schedule = "*/5 * * * *"
+command = "DOIT_ROOT={root} {doit} cron-run executor-wake -- {repo}/scripts/executor-wake.sh"
+path = "{repo}/scripts/executor-wake.sh"
+sig = 'executor-wake\.sh\b'
+owner = "thinker"
+project = "do-it-v2"
+
+[[row]]
 name = "pace-sample"
 where = "user"
 schedule = "*/10 * * * *"
