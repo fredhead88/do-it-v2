@@ -61,6 +61,89 @@ class DiskReaperTests(unittest.TestCase):
         with patch.dict(os.environ, DOIT_REAP_HOLD=env):
             return dr._settings()
 
+    def test_1800_zombie_pid_is_exited(self):
+        def before_change(proc_root, pid):
+            """Embedded pre-change _unreadable_pid for the same fixtures."""
+            import re
+            path = pathlib.Path(proc_root) / str(pid)
+            try:
+                os.lstat(path)
+            except FileNotFoundError:
+                return 'exited', None
+            if not reap_tmp.panes.alive(pid):
+                return 'exited', None
+            try:
+                status = dict(line.split(':', 1) for line in (path / 'status').read_text().splitlines() if ':' in line)
+                if [int(v) for v in status.get('Uid', '').split()] != [os.getuid()] * 4:
+                    return None, None
+                token = (path / 'cmdline').read_bytes().split(b'\0', 1)[0].decode()
+                name = pathlib.Path(re.split(r'[:\s]', token, maxsplit=1)[0]).name
+                if not token or name not in dr.UNREADABLE_EXEMPT_NAMES:
+                    return None, None
+                try:
+                    root_owned = os.lstat(path / 'cwd').st_uid == 0
+                except OSError:
+                    root_owned = False
+                if root_owned:
+                    return 'root-owned cwd', name
+                own = dict(line.split(':', 1) for line in
+                           (pathlib.Path(proc_root) / 'self/status').read_text().splitlines() if ':' in line)
+                if int(status['CapPrm'], 16) & ~int(own['CapEff'], 16):
+                    return 'permitted capability outside effective set', name
+            except (OSError, ValueError, KeyError, UnicodeError):
+                pass
+            return None, None
+
+        outcomes = []
+        for label, pid_number, content, zombie in (
+                ('zombie', 305865, '305865 (codex) Z 2246 ...', True),
+                ('command parentheses', 9, '9 (a) b) Z 1 ...', True),
+                ('sleeping', 305865, '305865 (codex) S 2246 ...', False),
+                ('missing', 305865, None, False),
+                ('empty', 305865, '', False),
+                ('no delimiter', 305865, '305865 codex Z 2246 ...', False),
+                ('no state', 305865, '305865 (codex)', False)):
+            with self.subTest(case=label):
+                pid = self.proc / str(pid_number)
+                pid.mkdir(exist_ok=True)
+                uid = os.getuid()
+                (pid / 'status').write_text(f'Uid:\t{uid} {uid} {uid} {uid}\n')
+                (pid / 'cmdline').write_bytes(b'')
+                stat_path = pid / 'stat'
+                if content is None:
+                    stat_path.unlink(missing_ok=True)
+                else:
+                    stat_path.write_text(content)
+                for version, classifier in (('before', before_change), ('after', dr._unreadable_pid)):
+                    with (self.subTest(version=version),
+                          patch.object(reap_tmp.panes, 'alive', return_value=True),
+                          patch.object(reap_tmp, '_pid_refs', side_effect=PermissionError('fd denied')) as refs,
+                          patch.object(dr, '_unreadable_pid', classifier)):
+                        exited = zombie and version == 'after'
+                        self.assertEqual(classifier(self.proc, pid_number),
+                                         ('exited', None) if exited else (None, None))
+                        stats = {}
+                        if exited:
+                            self.assertEqual(dr.process_refs(self.proc, stats=stats), [])
+                        else:
+                            with self.assertRaises(PermissionError):
+                                dr.process_refs(self.proc, stats=stats)
+                        refs.assert_called_once_with(self.proc, pid_number)
+                        self.assertEqual(stats['unreadable_exempt'], 0)
+                        self.assertEqual(stats['exempt'], [])
+                        outcomes.append(dict(case=label, version=version,
+                            result='exited' if exited else 'PermissionError', unreadable_exempt=0))
+                # Keep exactly one fake pid visible to the next process scan.
+                self.assertEqual(len(list(pid.iterdir())), 2 if content is None else 3)
+                for child in pid.iterdir():
+                    child.unlink()
+                pid.rmdir()
+        self.assertEqual(len(outcomes), 14)
+        body = json.dumps(outcomes, sort_keys=True)
+        print(json.dumps(dict(url='cli://disk-reaper/L-spec-1800/AC1', status=0,
+            body_sha256=hashlib.sha256(body.encode()).hexdigest(), body_excerpt=body)))
+        print('L-spec-1800 AC1 ok')
+
     def test_unreadable_classifier_matrix(self):
         child = subprocess.Popen(['/usr/bin/python3', '-c', 'import time; time.sleep(60)'])
         self.addCleanup(lambda: (child.terminate(), child.wait()))
