@@ -590,5 +590,154 @@ for ctx_flag in ("--executor", "--relay"):
           "ctx leaves existing executor/relay gates unchanged")
     print(f"1131-AC4 {ctx_flag[2:]}-unchanged refused")
 
-shutil.rmtree(TMP, ignore_errors=True)
+# L-spec-1667: own-file hold authorization, safe end, and real store round trip.
+from unittest.mock import patch
+import signal
+
+
+def held_rows(planner="L-planner-0001", charter=CHARTER):
+    return [{"type": "planner-started", "subject": charter, "planner": planner,
+             "actor": "planner", "_src": f"{planner}.jsonl:1", "ts": TS},
+            {"type": "planner-held", "subject": charter, "actor": "planner",
+             "_src": f"{planner}.jsonl:2", "ts": TS}]
+
+
+own_rows = held_rows()
+hold_cases = [
+    ("id", CHARTER, own_rows, True),
+    ("content-path", f"/content/{CHARTER}.md", own_rows, True),
+    ("no-hold", CHARTER, own_rows[:1], False),
+    ("older-than-newest-start", CHARTER, own_rows + [own_rows[0]], False),
+    ("other-file", CHARTER, [own_rows[0], held_rows("L-planner-0002")[1]], False),
+    ("non-planner", CHARTER, [own_rows[0], {**own_rows[1], "actor": "builder"}], False),
+    ("other-charter", OTHER, own_rows, False),
+    ("no-own-start", CHARTER, own_rows[1:], False),
+    ("start-planner-mismatch", CHARTER, [{**own_rows[0], "planner": "L-planner-0002"}, own_rows[1]], False),
+    ("start-file-mismatch", CHARTER, [{**own_rows[0], "_src": "L-planner-0002.jsonl:1"}, own_rows[1]], False),
+    ("start-actor-mismatch", CHARTER, [{**own_rows[0], "actor": "builder"}, own_rows[1]], False),
+    ("missing-hold-src", CHARTER, [own_rows[0], {k: v for k, v in own_rows[1].items() if k != "_src"}], False),
+    ("missing-start-src", CHARTER, [{k: v for k, v in own_rows[0].items() if k != "_src"}, own_rows[1]], False),
+    ("malformed", CHARTER, [None], False),
+]
+for label, charter, rows, expected in hold_cases:
+    result = pane_end.authorized_hold(charter, rows, "L-planner-0001")
+    check(result is expected, f"1667 AC1 {label}: {result}")
+    print(f"1667 AC1 {label} -> {result}")
+
+
+def held_end_case(label, *, rows=None, hand=HANDOVER, process="L-planner-0001.jsonl",
+                  child=None, pending=CLEAR, ancestor=4242, unreadable=False, expected=False):
+    rows = own_rows if rows is None else rows
+    ledger(B, **{"L-planner-0001.jsonl": []})
+    env = {"DOIT_SUPERVISED": "1"} if child is None else child
+    spy = Spy(watch=B / "events/L-planner-0001.jsonl")
+    ancestor_spy = Spy(ret=ancestor)
+    with patch.dict(os.environ):
+        if process is None:
+            os.environ.pop("DOIT_LEDGER_FILE", None)
+        else:
+            os.environ["DOIT_LEDGER_FILE"] = process
+        with patch.object(fold, "read_events", side_effect=OSError("fixture unreadable") if unreadable else None,
+                          return_value=rows), patch.object(fold, "append") as append, \
+                patch.object(pane_end, "authorized_hold", wraps=pane_end.authorized_hold) as authorize:
+            result = pane_end.check_and_end(CHARTER, hand, reason="held", root=B, child_env=env,
+                pending_packets=pending, kill=spy, find_ancestor=ancestor_spy)
+            check(result[0] is expected, f"1667 AC2 {label}: {result}")
+            check(append.call_count == int(expected) and len(spy.calls) == int(expected),
+                  f"1667 AC2 {label}: append/signal counts")
+            if expected:
+                check(authorize.call_args.args[2] == pathlib.Path(process).stem,
+                      "1667 AC2 authorization uses process destination stem")
+                fields = append.call_args.args[0]
+                check("reason=held" in fields and f"handover={HANDOVER}" in fields, "held end fields")
+                check(spy.calls[0][0] == (4242, signal.SIGTERM), "explicit SIGTERM spy")
+            if label == "two-planner-mismatch":
+                check("mismatch" in result[1].lower(), "mismatch diagnostic must name ledger mismatch")
+    print(f"1667 AC2 {label} -> {result}")
+
+
+for label, options in [
+    ("no-hold", {"rows": own_rows[:1]}),
+    ("older-hold", {"rows": own_rows + [own_rows[0]]}),
+    ("empty-handover", {"hand": EMPTY}),
+    ("missing-handover", {"hand": TMP / "missing-held"}),
+    ("outstanding-packet", {"pending": UNCLAIMED}),
+    ("pending-raises", {"pending": boom}),
+    ("no-marker", {"child": {}}),
+    ("no-ancestor", {"ancestor": None}),
+    ("unreadable-ledger", {"unreadable": True}),
+    ("missing-process-ledger", {"process": None}),
+    ("non-planner-process", {"process": "L-builder-0001.jsonl"}),
+    ("non-planner-child", {"child": {"DOIT_SUPERVISED": "1", "DOIT_LEDGER_FILE": "L-builder-0001.jsonl"}}),
+    ("two-planner-mismatch", {"rows": own_rows + held_rows("L-planner-0002"),
+                              "child": {"DOIT_SUPERVISED": "1", "DOIT_LEDGER_FILE": "L-planner-0002.jsonl"}}),
+    ("matching-child", {"child": {"DOIT_SUPERVISED": "1", "DOIT_LEDGER_FILE": "L-planner-0001.jsonl"}, "expected": True}),
+    ("absent-child-ledger", {"expected": True}),
+]:
+    held_end_case(label, **options)
+with patch.object(fold, "read_events", return_value=own_rows):
+    refuses("hold-does-not-authorize-default-end", B, pending_packets=CLEAR)
+
+# CLI success calls the REAL function only through this explicit injection seam.
+saved_check = pane_end.check_and_end
+cli_kill = Spy()
+cli_ancestor = Spy(ret=4242)
+
+
+def held_cli_wrapper(*args, **kwargs):
+    return saved_check(*args, **kwargs, kill=cli_kill, find_ancestor=cli_ancestor,
+                       pending_packets=CLEAR)
+
+
+with patch.object(fold, "read_events", return_value=own_rows), patch.object(fold, "append"), \
+        patch.object(pane_end, "check_and_end", side_effect=held_cli_wrapper), \
+        patch.dict(os.environ, {"DOIT_LEDGER_FILE": "L-planner-0001.jsonl", "DOIT_SUPERVISED": "1"}):
+    result = pane_end.main([CHARTER, "--handover", str(HANDOVER), "--reason", "held", "--root", str(B)])
+    check(result == 0 and cli_kill.calls == [((4242, signal.SIGTERM), {})]
+          and len(cli_ancestor.calls) == 1, "1667 AC3 explicit wrapper signal/ancestor spies")
+ledger(B)
+output = io.StringIO()
+with contextlib.redirect_stderr(output):
+    result = pane_end.main([CHARTER, "--handover", str(HANDOVER), "--reason", "held", "--root", str(B)])
+check(result == 1 and "hold" in output.getvalue(), "1667 AC3 CLI missing hold")
+held_env = {**os.environ, "DOIT_ROOT": str(B), "DOIT_LEDGER_FILE": "L-planner-0001.jsonl"}
+held_env.pop("DOIT_SUPERVISED", None)
+cli = subprocess.run([DOIT_BIN, "pane-end", CHARTER, "--handover", str(HANDOVER),
+                      "--reason", "held", "--root", str(B)], env=held_env, capture_output=True, text=True)
+check(cli.returncode == 1 and "hold" in cli.stderr, "1667 AC3 subprocess missing hold")
+print("1667 AC3 wrapper=0 missing-hold=1 subprocess=1 unknown-reason=2; no real signal")
+
+# AC7: no mocked ledger read or write; fresh interpreter derives the actor.
+ledger(B)
+with patch.dict(os.environ, {"DOIT_LEDGER_FILE": "L-planner-0001.jsonl", "DOIT_NO_POKE": "1"}):
+    pane_end.bind_root(B)
+    fold.append(["planner-started", CHARTER, "planner=L-planner-0001"])
+    fold.append(["planner-held", CHARTER])
+    round_kill = Spy(watch=B / "events/L-planner-0001.jsonl")
+    ended, why = saved_check(CHARTER, HANDOVER, reason="held", root=B,
+                            child_env={"DOIT_SUPERVISED": "1"}, kill=round_kill,
+                            find_ancestor=lambda: 4242)
+check(ended and len(round_kill.calls) == 1, f"1667 AC7 real end: {why}")
+disk = [json.loads(line) for line in round_kill.disk[0].splitlines()]
+check(len(disk) == 3 and disk[-1]["reason"] == "held" and all("actor" not in row for row in disk),
+      "1667 AC7 exactly one end visible before signal, no raw actor")
+fresh = subprocess.run(["/usr/bin/python3", "-c", """
+import fold, relay, json, sys
+events = fold.read_events()
+ends = [e for e in events if e['type'] == 'planner-ended']
+assert len(ends) == 1
+end = ends[0]
+assert end['actor'] == 'planner' and end['reason'] == 'held'
+assert end['handover'] == sys.argv[2] and end['_src'].startswith('L-planner-0001.jsonl:')
+hold = next(e for e in events if e['type'] == 'planner-held')
+assert relay.held_since(events, sys.argv[1]) == hold['ts']
+print(json.dumps({'end': end, 'standing_hold': hold['ts']}))
+""", CHARTER, str(HANDOVER)], cwd=pathlib.Path(__file__).parent, env=held_env,
+                       capture_output=True, text=True)
+check(fresh.returncode == 0, f"1667 AC7 fresh process: {fresh.stderr}")
+check(list((B / "events").glob("L-planner-*.jsonl")) == [B / "events/L-planner-0001.jsonl"],
+      "1667 AC7 no end in another planner file")
+print(f"1667 AC7 fresh read-back: {fresh.stdout.strip()}")
+
 print(f"pane_end: {N} checks pass")
+shutil.rmtree(TMP, ignore_errors=True)

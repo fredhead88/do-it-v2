@@ -250,13 +250,55 @@ def open_charters(events, by_subject=None):
     return out
 
 
+def held_since(events, charter):
+    """Timestamp of the latest standing planner hold, in ledger-position order.
+
+    Lifecycle rows cannot clear the hold, including its own held end. Only a
+    resolvable change on the charter, its specs, or its escalations can clear it.
+    This is scheduling evidence, not authorization to signal a pane.
+    """
+    cid = fold.charter_id(charter)
+    rows = [e for e in events if isinstance(e, dict)]
+    hold = None
+    for index, event in enumerate(rows):
+        if (event.get("type") == "planner-held" and event.get("actor") == "planner"
+                and fold.charter_id(event.get("subject")) == cid
+                and isinstance(event.get("ts"), str) and event["ts"].strip()):
+            hold = index
+    if hold is None:
+        return None
+    try:
+        specs = {sid for sid, spec in fold.fold(rows)[0].items() if spec["charter"] == cid}
+    except Exception:
+        specs = set()                  # unresolvable associations never clear a hold
+
+    def on_subject(event):
+        subject = fold.charter_id(event.get("subject"))
+        return subject == cid or subject in specs
+
+    def escalation(event):
+        return (event.get("type") in ("escalation", "escalation-blocking")
+                and (on_subject(event) or fold.charter_id(event.get("charter")) == cid))
+
+    refs = {e["_src"] for e in rows if escalation(e) and isinstance(e.get("_src"), str)}
+    for event in rows[hold + 1:]:
+        kind = event.get("type")
+        if not isinstance(kind, str) or kind in ("planner-started", "planner-ended", "planner-held"):
+            continue
+        if (on_subject(event) or escalation(event)
+                or (kind in ("decision", "unblocked") and isinstance(event.get("ref"), str)
+                    and event["ref"] in refs)):
+            return None
+    return rows[hold]["ts"]
+
+
 def plannable(events, root=None):
     """(ready, waiting). `ready` is every open charter no check excludes, sorted by
     `(goal_date, set_order, charter_id)`; `waiting` is `[(charter_id, reason)]` for
     every other open charter, ONE reason each — the first check that hit, in this
     order: a known-bug hold (`planner_attempts`'s `next == "held"` —
-    planner-attempts-hold, L-charter-0042 R6), standing escalation, the declared
-    block (`after:` then `conflicts:`), the count throttle, the footprint
+    planner-attempts-hold, L-charter-0042 R6), standing planner hold, standing
+    escalation, the declared block (`after:` then `conflicts:`), the count throttle, the footprint
     intersection. The held check runs first because `fold.open_escalations` stops
     naming a subject the moment ANY decision/unblocked answers it — a held charter
     would otherwise fall straight through to `ready` the instant it is answered,
@@ -291,6 +333,10 @@ def plannable(events, root=None):
         attempts_info = planner_attempts(events, cid)
         if attempts_info["next"] == "held":
             why = f"held: known-bug escalation answered by {attempts_info['held_by']} without replan=yes"
+        if why is None:
+            since = held_since(events, cid)
+            if since is not None:
+                why = f"held since {since}"
         if why is None and cid in escalated:
             why = f"escalation open: {escalated[cid].get('why', 'escalation')}"
         block = sequencing(next((e for e in reversed(evs) if e["type"] == "charter-filed"), {}), events)
@@ -537,7 +583,7 @@ def planner_attempts(events, charter_id):
     `mode: "serving"` pairs are ignored (a Planner serving an already-cut charter is
     not an attempt at cutting one). An unmatched trailing `planner-started` is the
     run happening NOW: it is never counted as a failure, or a launcher would escalate
-    against its own live pane. A pair whose `reason` is `l1-complete` is a success and
+    against its own live pane. A pair whose `reason` is `l1-complete` or `held`
     does not count either.
 
     One left-to-right walk also tracks a **known-bug hold** (planner-attempts-hold,
@@ -580,7 +626,7 @@ def planner_attempts(events, charter_id):
     held_by = latest_answer["_src"] if held else None
 
     def _summarize(subset):
-        att = sum(1 for _, end, _ in subset if end.get("reason") != "l1-complete")
+        att = sum(1 for _, end, _ in subset if end.get("reason") not in ("l1-complete", "held"))
         return att, (subset[-1][1].get("reason") if subset else None)
 
     attempts, last_reason = _summarize(pairs)
