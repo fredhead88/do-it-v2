@@ -89,22 +89,14 @@ def recorded_hold(e):
 
 def hold_facts(events, states, rules, classified, now):
     events = sorted((e for e in events if utc(e.get('ts')) and utc(e['ts']) <= now), key=lambda e: utc(e['ts']))
-    # The live classifier understands migration sequencing, recorded rulings,
-    # dependency and wave holds. Read it even before a wait is overdue.
-    held = {r['spec'] for r in [*classified, *rules] if r.get('rule') in HELD_RULES
-            or r.get('bucket') in {'held', 'waiting-on-prereq'}}
-    # Some deliberate migration holds are rulings on lane-stale:<spec>,
-    # rather than on the spec itself. Read only that exact target and explicit
-    # hold language from an authorized decision, never incidental spec mentions.
+    # SD2 classification alone establishes membership in the held list.
+    held = {r['spec'] for r in classified if r.get('bucket') == 'held'}
     rulings = {}
     for e in events:
         sid = str(e.get('subject') or '').removeprefix('lane-stale:')
         if re.fullmatch(r'L-spec-\d+', sid) and e.get('actor') in {'thinker', 'operator', 'executor'}:
             if e.get('type') in {'decision', 'unblocked'}:
                 rulings[sid] = e
-    for sid, e in rulings.items():
-        if recorded_hold(e):
-            held.add(sid)
     return {'held': held, 'rulings': rulings, 'windows': window_facts(events, include_windows=True)[3]}
 
 
@@ -116,7 +108,10 @@ def shape(events, states, rules, classified, priorities, now, *, needs=(), answe
     for e in events:
         if e.get('type') in {'spec-written', 'build-started', 'build-done', 'build-blocked', 'verdict', 'review', 'merge-gate-clean'}:
             work[e.get('subject')] = e
-    running = {r['spec']: r.get('owner') for r in classified if 'owns active dispatch' in str(r.get('reason', ''))}
+    running = {r['spec']: r.get('owner') for r in classified if r.get('bucket') == 'in-flight'}
+    waiting = {r['spec']: {'audit-wait':'audit pending', 'retry-wait':'retry scheduled',
+               'waiting-on-human':'awaiting a decision'}[r['bucket']] for r in classified
+               if r.get('bucket') in {'audit-wait','retry-wait','waiting-on-human'}}
     held = hold_facts(events, states, rules, classified, now)['held']
     for sid in list(held):
         if sid in shipped or states.get(sid) in FINISHED:
@@ -141,11 +136,13 @@ def shape(events, states, rules, classified, priorities, now, *, needs=(), answe
         if s in shipped or state.startswith('shipped') or state == 'accepted':
             return 'shipped'
         if s in held:
-            return 'held on purpose'
+            return 'Held on purpose'
         if s in failed:
             return failed[s]
         if s in running:
             return {'builder':'building', 'grader':'being checked', 'reviewer':'in review'}.get(running[s], 'being checked')
+        if s in waiting:
+            return waiting[s]
         marker = work.get(s, {})
         if marker.get('type') == 'merge-gate-clean' or marker.get('type') == 'review' and marker.get('n_blocking') == 0:
             return 'ready to merge'
@@ -163,8 +160,8 @@ def shape(events, states, rules, classified, priorities, now, *, needs=(), answe
             status = stage(sid)
             counts[status] = counts.get(status, 0) + 1
         # Surface active work before completed work, preserving a short sentence.
-        order = ['merging now', 'checks failed; waiting for repair', 'held on purpose', 'checks need repair', 'checks need attention', 'waiting for repair',
-                 'changes requested', 'building', 'being checked', 'in review', 'ready for review', 'ready to merge', 'ready to build', 'live', 'shipped', 'stopped', 'status unconfirmed']
+        order = ['merging now', 'checks failed; waiting for repair', 'Held on purpose', 'checks need repair', 'checks need attention', 'waiting for repair',
+                 'changes requested', 'audit pending', 'retry scheduled', 'awaiting a decision', 'building', 'being checked', 'in review', 'ready for review', 'ready to merge', 'ready to build', 'live', 'shipped', 'stopped', 'status unconfirmed']
         status = next(iter(counts)) if len(counts) == 1 else ', '.join(f'{counts[k]} {k}' for k in order if k in counts)
         lead = next(k for k in order if k in counts)
         short = {'checks failed; waiting for repair':'checks need repair', 'waiting for repair':'needs repair',
@@ -192,7 +189,8 @@ def shape(events, states, rules, classified, priorities, now, *, needs=(), answe
     # Expansion shows all five groups; never shrink the font to fit a phone.
     ordered = sorted(groups, key=lambda g: 'merging now' not in g['status'])
     clauses = [g['text'].rstrip('.').replace(': ', ' ', 1) for g in ordered[:3]]
-    collapsed = ' · '.join([*attention, *clauses] if needs else [*clauses, *attention])
+    urgent = needs or stuck is not None and (stuck.get('error') or stuck.get('count'))
+    collapsed = ' · '.join([*attention, *clauses] if urgent else [*clauses, *attention])
     return {'at': now.isoformat(timespec='seconds'), 'error': None, 'groups': groups,
             'collapsed': collapsed, 'attention': ' · '.join(attention) + '.',
             'needs_you': [{'spec': e.get('subject'), 'ask': ' '.join(str(e.get('why') or e.get('asks') or 'Decision requested').split())[:200]} for e in needs],

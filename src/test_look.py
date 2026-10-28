@@ -1770,13 +1770,10 @@ root0484_13c = newroot()
 saved0484_13c = _si_setup(root0484_13c)
 append_raw(root0484_13c, "L-planner-0001.jsonl", OLD61(), type="spec-written", subject="L-spec-8023", project="p")
 ev0484_13c = read_ledger(root0484_13c)
-real_held_13c = fold.held_specs
-fold.held_specs = lambda events, **kw: {"L-spec-8023"}
-try:
-    res0484_13c = look.run(ev0484_13c, now=NOW, runner=FakeRunner(), root=root0484_13c,
-                           toml_path=clean_toml(root0484_13c))
-finally:
-    fold.held_specs = real_held_13c
+append_raw(root0484_13c, "L-thinker-0001.jsonl", OLD61(), type="decision",
+           subject="L-spec-8023", why="Held on purpose: maintenance")
+res0484_13c = look.run(read_ledger(root0484_13c), now=NOW, runner=FakeRunner(), root=root0484_13c,
+                       toml_path=clean_toml(root0484_13c))
 ok(not briefs_of(res0484_13c, "spec-idle"), "AC13: a held spec never fires")
 _si_restore(saved0484_13c)
 
@@ -1837,8 +1834,8 @@ append_raw(root0484_13h, "L-planner-0002.jsonl", OLD61(), type="spec-written", s
 ev0484_13h = read_ledger(root0484_13h)
 res0484_13h = look.run(ev0484_13h, now=NOW, runner=FakeRunner(), root=root0484_13h, toml_path=clean_toml(root0484_13h))
 b0484_13h = briefs_of(res0484_13h, "spec-idle")
-ok(not any(b["key"] in ("L-spec-8028", "L-spec-8029") for b in b0484_13h),
-   f"AC13: a dispatchable row and a seat-wait row never fire: {b0484_13h}")
+ok({b["key"] for b in b0484_13h} == {"L-spec-8028", "L-spec-8029"},
+   f"SD2: seat/candidate observations cannot renew an overdue assignment: {b0484_13h}")
 _ad_root_restore(saved0484_13h)
 
 # an event newer than 60 minutes (any type) also yields none.
@@ -1873,7 +1870,7 @@ append_raw(root0484_14, "L-thinker-0001.jsonl", OLD61(), type="observed", subjec
 ev0484_14 = read_ledger(root0484_14)
 res0484_14 = look.run(ev0484_14, now=NOW, runner=FakeRunner(), root=root0484_14, toml_path=clean_toml(root0484_14))
 b0484_14 = {b["key"] for b in briefs_of(res0484_14, "spec-idle")}
-ok(b0484_14 == {"L-spec-0501"}, f"AC14: exactly the one real unsettled building spec fires: {b0484_14}")
+ok(b0484_14 == {"L-spec-0501", "L-spec-8040", "L-spec-8041"}, f"AC14: exactly the one real unsettled building spec fires: {b0484_14}")
 _ad_root_restore(saved0484_14)
 print("merge-origin-0484 AC14 ok")
 
@@ -1956,20 +1953,28 @@ _WA, _WB = "L-spec-9139", "L-spec-9140"
 
 
 def _wev(kind, sid=_WA, age=120, **fields):
+    fields.setdefault('actor', {'spec-written':'planner','dependency-hold':'thinker','decision':'thinker'}.get(kind,'executor'))
+    fields.setdefault('_src',f'fixture:{kind}:{sid}:{age}')
     return dict(type=kind, subject=sid, ts=iso(_WNOW - timedelta(minutes=age)), **fields)
 
 
-def _widle(events, *, held=()):
-    own = [e for e in events if e["subject"] == _WA]
-    return look._spec_idle_bad(_WA, {"state": "written"}, own, events,
-                               {_WA: {"status": "blocked"}}, held, set(), _WNOW)
+def _widle(events, *, held=(), now=_WNOW):
+    # SD2: direct helper checks use actual classification, never candidate exemptions.
+    events = events + [_wev('decision',sid,100,actor='operator',why='Held on purpose: fixture') for sid in held]
+    specs,_,_,by = fold.fold(events)
+    unfinished = {sid:s for sid,s in specs.items() if s['state'] != 'unknown'
+                  and s['state'] not in dispatch.SETTLED_STATES}
+    rows = fold.stall_rows(events,unfinished,now=now,by_subject=by,
+                           dwell={s['state']:-1 for s in unfinished.values()})
+    own = [e for e in events if e['subject']==_WA]
+    return look._spec_idle_bad(_WA,specs[_WA],own,events,{r['spec']:r for r in rows},set(),set(),now)
 
 
 # First regression: gate-clean but unsettled cannot exempt a hold forever.
 _wevents = [_wev("spec-written"), _wev("spec-written", _WB, 200),
             _wev("merge-gate-clean", _WB, 70)]
 with patch.object(dispatch, "wave_blocker", return_value=_WB):
-    ok(_widle(_wevents), "watchdog: overdue gate-clean blocker must not exempt A")
+    ok(not _widle(_wevents), "SD2: a named unfinished prerequisite remains a deliberate hold")
     ok(not _widle(_wevents + [_wev("observed", _WB, 30)]),
        "watchdog: recent blocker keeps A exempt")
 
@@ -2010,7 +2015,7 @@ try:
               _wev("spec-written", _WB, 200, charter=charter, footprint=["first.py"]),
               _wev("merge-gate-clean", _WB, 70)]
     ok(dispatch.wave_blocker(events, charter, _WA, 2) == _WB, "watchdog: actual wave blocker")
-    ok(_widle(events), "watchdog: gate-clean never settled reports A")
+    ok(not _widle(events), "SD2: unfinished wave prerequisite holds A at any age")
     ok(not _widle(events + [_wev("observed", _WB, 30)]), "watchdog: B age controls exemption")
     for state in ("shipped", "shipped-owed-evidence", "shipped-owed-due", "shipped-owed-expired"):
         terminal = events + [_wev("shipped", _WB, 70)]
@@ -2037,22 +2042,12 @@ for terminal in (None, "spec-killed", "void", "shipped"):
         events += [_wev(terminal, _WB, 70)]
     ok(bool(autodispatch.held_by_dependency(events[:2], events)) == (terminal != "shipped"),
        "watchdog: only shipped dependency lifts hold")
-    ok(_widle(events), "watchdog: dependency held spec is idle")
+    ok(_widle(events) == (terminal == "shipped"), "SD2: dependency holds release only on shipping")
     ok(not _widle(events, held={_WA}), "watchdog: capability hold remains exempt")
-for target, attr in ((fold, "answered"), (dispatch, "wave_blocker")):
-    briefs = []
-    events = [_wev("spec-written"), _wev("spec-written", _WB)]
-    # A late raise must not leave A's already-computed brief on disk.
-    values = iter([None, RuntimeError("watchdog-induced")])
-    def _late_raise(*args, **kw):
-        value = next(values)
-        if isinstance(value, Exception):
-            raise value
-        return value
-    kwargs = {"side_effect": RuntimeError("watchdog-induced")} if attr == "answered" else {"side_effect": _late_raise}
-    with patch.object(autodispatch, "candidates", return_value=[]), patch.object(target, attr, **kwargs):
-        look._check_spec_idle(events, _WNOW, newroot(), briefs, [])
-    ok(len(briefs) == 1 and briefs[0]["key"] == "undetermined:spec-idle", "watchdog: whole sweep undetermined")
+briefs = []
+with patch.object(fold, 'stall_rows', side_effect=RuntimeError('watchdog-induced')):
+    look._check_spec_idle([_wev('spec-written')],_WNOW,newroot(),briefs,[])
+ok(len(briefs)==1 and briefs[0]['key']=='undetermined:spec-idle', 'SD2: classifier failure leaves sweep undetermined')
 print("watchdog AC3 ok")
 
 
@@ -2176,9 +2171,7 @@ for rule in ("wave-held", "dependency-held"):
            and alerts[0]["subject"] == f"lane-stale:{_WA}", f"watchdog: {rule} escalates once")
         ok(lane_rules.ladder(retried + alerts, row, now) == "digest", f"watchdog: {rule} digest after inbox")
         own = [e for e in events if e["subject"] == _WA]
-        ok(look._spec_idle_bad(_WA, {"state": "written"}, own, events,
-                              {_WA: {"status": "blocked"}}, set(), set(),
-                              _WNOW + timedelta(minutes=71)), f"watchdog: {rule} overdue blocker never exempts A")
+        ok(not _widle(events, now=_WNOW + timedelta(minutes=71)), f"SD2: {rule} remains a hold until released")
         shipped = events + [_wev("shipped", _WB, 0)]
         shipped_specs = fold.fold(shipped)[0]
         for minutes in (9, 11):
@@ -2522,3 +2515,54 @@ body1652 = json.dumps({'lines': lines1652, 'failure_propagates': True, 'start_fl
 print(json.dumps(dict(url='cli://look/L-spec-1652/AC5', status=0,
                       body_sha256=hashlib.sha256(body1652.encode()).hexdigest(), body_excerpt=body1652)))
 print('L-spec-1652 AC5 ok')
+
+# AC7: real SD2 rows, real emit/_settle and fresh-file persistence evidence.
+def test_ac7_sd2_idle_persistence():
+    from test_realm_stuck import fixture_events, NOW as clock
+    root=newroot(); saved=_si_setup(root)
+    try:
+        grouped={}
+        incoming=fixture_events(clock)
+        incoming += [dict(type='spec-written',subject='L-spec-9014',actor='planner',ts=(clock-timedelta(minutes=10)).isoformat()),
+                     dict(type='spec-written',subject='L-spec-9015',actor='planner',ts=(clock-timedelta(minutes=120)).isoformat()),
+                     dict(type='question',subject='L-spec-9015',actor='builder',ts=(clock-timedelta(minutes=100)).isoformat(),deadline=(clock+timedelta(hours=1)).isoformat())]
+        for e in incoming:
+            e=dict(e); actor=e.pop('actor'); e.pop('_src',None)
+            grouped.setdefault(actor,[]).append(e)
+        for actor,rows in grouped.items():
+            (root/'events'/f'L-{actor}-sd2.jsonl').write_text(''.join(json.dumps(e)+'\n' for e in rows))
+        events=read_ledger(root)
+        with patch.object(fold,'NOW',clock):
+            folded=fold.fold(events); briefs=[]
+            with patch.object(fold,'stall_rows',wraps=fold.stall_rows) as classify:
+                look._check_spec_idle(events,clock,root,briefs,[],folded=folded)
+                assert classify.call_args.kwargs['by_subject'] is folded[3]
+                assert classify.call_args.kwargs['dwell']=={s['state']:-1 for s in folded[0].values()}
+            # Separate uncached file opens, independent of returned brief objects.
+            def fresh():
+                path=root/'events'/look.LEDGER_NAME
+                with path.open() as handle: return [json.loads(line) for line in handle]
+            committed=fresh()
+            alarms=[e for e in committed if e.get('condition')=='spec-idle']
+            assert {e['reading']['spec'] for e in alarms}=={'L-spec-9001','L-spec-9002'},alarms
+            assert all(e['key']==e['reading']['spec'] and e['reading']['idle_min']>=60 for e in alarms)
+            rows=fold.stall_rows(events,folded[0],now=clock,dwell={s['state']:-1 for s in folded[0].values()},by_subject=folded[3])
+            for row in rows: print('AC7',row['spec'],row['bucket'],'fired' if row['spec'] in {e['key'] for e in alarms} else 'quiet')
+            assert {r['bucket'] for r in rows}==__import__('fold_stalls').BUCKETS
+            before=len(committed)
+            look._check_spec_idle(read_ledger(root),clock,root,[],[])
+            assert len(fresh())==before
+            with patch.object(fold,'stall_rows',side_effect=RuntimeError('AC7 unavailable')):
+                look._check_spec_idle(read_ledger(root),clock,root,[],[])
+                look._check_spec_idle(read_ledger(root),clock,root,[],[])
+            failed=fresh()
+            assert sum(e.get('condition')=='reading-undetermined' for e in failed)==1
+            assert not any(e['type']=='brief-answered' for e in failed)
+            for sid in ['L-spec-9001','L-spec-9002']:
+                append_raw(root,'L-operator-hold.jsonl',(clock-timedelta(minutes=65)).isoformat(),type='decision',subject=sid,why='Held on purpose: maintenance')
+            look._check_spec_idle(read_ledger(root),clock,root,[],[])
+            assert sum(e['type']=='brief-answered' for e in fresh())==2
+            print('AC7 fresh persisted readings:',json.dumps(alarms,sort_keys=True))
+    finally: _si_restore(saved)
+
+test_ac7_sd2_idle_persistence()

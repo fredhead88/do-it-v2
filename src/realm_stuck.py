@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import re
 
-from realm_glance import HELD_RULES, recorded_hold, utc
+from realm_glance import utc
 from realm_omens import CAP_MIN, _gone
 
 WORDS = [
@@ -21,7 +21,7 @@ WORDS = [
     ('build blocked with no active next action:', 'The build needs a next action to resolve its blocker.'),
     ('capability-hold:', 'The Thinker needs to resolve a capability question.'),
 ]
-JARGON = re.compile(r'\b(stalls|STUCK|bucket|dependency-held|wave-held|migration-sequenced|conflict-rework|waiting-on-prereq|capability-hold)\b', re.I)
+JARGON = re.compile(r'\b(stalls|STUCK|bucket|dependency-held|wave-held|migration-sequenced|conflict-rework|waiting-on-prereq|capability-hold|audit-wait|retry-wait|in-flight|held)\b', re.I)
 
 
 def words(reason):
@@ -105,17 +105,9 @@ def owed_overdue(root, now):
 
 
 def hold_evidence(row, rulings):
-    if row.get('bucket') in {'held','waiting-on-prereq'}:
-        return 'held-bucket', row.get('src')
-    if row.get('rule') in HELD_RULES:
-        return 'held-rule', row.get('src')
-    ruling = rulings.get(row.get('spec'), {})
-    if recorded_hold(ruling) and utc(ruling.get('ts')) and utc(row.get('since')) and utc(ruling['ts']) >= utc(row['since']):
-        return 'held-ruling', ruling.get('_src') or ruling.get('src')
-    if re.search(r'dependency hold honored|held on purpose', str(row.get('reason',''))+' '+str(row.get('blocker','')), re.I):
-        return 'held-report', row.get('src')
-    if row.get('bucket') == 'queued' and row.get('owner') == 'builder' and ruling.get('rework') == 'yes':
-        return 'held-rework', row.get('src')
+    # SD2 lane rows are authoritative; prose and active rework are not holds.
+    if row.get('bucket') == 'held':
+        return row.get('hold_kind'), row.get('src')
     return None
 
 
@@ -123,8 +115,6 @@ def shape(lane_rows, escalations, answered, held, rulings, open_spawns, windows,
     errors = []
     if lane_rows is None:
         errors.append('Lane unavailable')
-    if owed_overdue is None:
-        errors.append('Owed digest unavailable')
     stuck, waiting = {}, {}
 
     def add(target, subject, since, reason, owner, kind, src):
@@ -148,26 +138,11 @@ def shape(lane_rows, escalations, answered, held, rulings, open_spawns, windows,
         evidence = hold_evidence(row, rulings)
         if evidence:
             kind, src = evidence
-            reason = 'Rework is actively assigned.' if kind == 'held-rework' else 'Waiting on purpose for a recorded prerequisite or decision.'
-            add(waiting,row['spec'],row.get('since'),reason,row.get('owner') or row.get('actor'),kind,src)
+            add(waiting,row['spec'],row.get('since'),words(row.get('reason')),
+                row.get('owner') or row.get('actor'),kind,src)
         elif row.get('bucket') == 'STUCK':
-            add(stuck,row['spec'],row.get('since'),words(row.get('reason')),row.get('owner') or row.get('actor'),'lane',row.get('src'))
-    for e in escalations:
-        if e.get('_src') not in answered:
-            add(stuck,e.get('subject'),e.get('ts'),words(e.get('why') or e.get('asks') or 'A decision is needed'),e.get('owner'),'escalation',e.get('_src'))
-    for e in open_spawns:
-        add(stuck,e['subject'],e['since'],'An assigned run has not reported an outcome.','process','spawn',e.get('src') or e['spawn'])
-    for e in windows:
-        since = utc(e.get('since'))
-        if since and (now-since).total_seconds() > 3600:
-            for sid in e['specs']:
-                add(stuck,sid,e['since'],'The merge window has been open for over an hour.','executor','window',e.get('src') or e['window'])
-    for e in owed_overdue or []:
-        add(stuck,e['spec'],e['since'],('Owed check: '+str(e.get('criterion') or '')+' '+words(e.get('why')))[:140],e.get('who'),'owed',e.get('src'))
-    # An independently open question or missing observation still needs action.
-    # Its spec appears once, in the actionable list, with no duplicate held row.
-    for sid in stuck:
-        waiting.pop(sid, None)
+            add(stuck,row['spec'],row.get('due_since') or row.get('since'),words(row.get('reason')),
+                row.get('owner') or row.get('actor'),'lane',row.get('src'))
     order = lambda row: (utc(row['since']),row['subject'])
     return dict(at=now.isoformat(),error='; '.join(dict.fromkeys(errors)) or None,count=len(stuck),
                 stuck=sorted(stuck.values(),key=order),held=sorted(waiting.values(),key=order))

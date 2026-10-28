@@ -1084,7 +1084,10 @@ class HeldCandidateTests(unittest.TestCase):
             return autodispatch.candidates(events,specs,now)
         def idle(sid,rows):
             evs = [ev for ev in events if ev.get('subject') == sid]
-            return look._spec_idle_bad(sid,specs[sid],evs,events,{r['spec']:r for r in rows},set(),set(),now)
+            # SD2 idle fixtures carry classified buckets, not candidate status.
+            classified = {r['spec']: dict(r, bucket='queued' if r['status']=='seat-wait' else 'STUCK')
+                          for r in rows}
+            return look._spec_idle_bad(sid,specs[sid],evs,events,classified,set(),set(),now)
         with patch.object(autodispatch,'capacity',return_value=1):
             result = rows()
             for sid in (a,c,d,e):

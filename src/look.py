@@ -859,67 +859,35 @@ def _spec_idle_busy_spawn(evs, events, now):
 
 
 def _spec_idle_bad(sid, s, evs, events, cand_rows, held, answered_ids, now):
-    """Assumptions 6-9: idle means "the table's idle limit since this subject's own
-    newest event, with nothing legitimately holding it" — every exclusion is
-    checked BEFORE the age (a young-but-otherwise-excluded spec never reaches
-    the age check, but the age check is what makes an otherwise-eligible one
-    a non-event)."""
+    """SD2 owns exclusions; the existing idle limit still gates eligible stalls."""
     import lane_rules
-    limit = lane_rules.load()["idle"]["limit_min"]
-    if s["state"] in dispatch.SETTLED_STATES:
+    if s['state'] == 'unknown' or s['state'] in dispatch.SETTLED_STATES:
         return False
-    row = cand_rows.get(sid)
-    if row is not None and (row["status"] in ("seat-wait", "dispatchable")
-                            or (row["status"] == "blocked" and row.get("_dispatch_failed"))):
-        return False   # owned elsewhere: seat-dispatchable-stale's row, or legitimately waiting
-    if sid in held:
-        return False
-    charter = dispatch.resolve_charter(events, sid, None)
-    footprint = next((e.get("footprint") for e in reversed(evs)
-                      if e.get("type") == "spec-written" and e.get("footprint")), None)
-    wave = dispatch.spec_wave(charter, footprint) if (charter and footprint) else None
-    blocker = dispatch.wave_blocker(events, charter, sid, wave)
-    if blocker is not None:
-        blocker_evs = [e for e in events if e.get("subject") == blocker]
-        if fold.spec_state(blocker_evs, set()) not in dispatch.SETTLED_STATES:
-            # Missing/malformed evidence cannot establish a live reason.
-            try:
-                newest_blocker = max(datetime.fromisoformat(e["ts"].replace("Z", "+00:00"))
-                                     for e in blocker_evs)
-                if (now - newest_blocker) / timedelta(minutes=1) <= limit:
-                    return False
-            except (KeyError, TypeError, ValueError):
-                pass
-    if any(e.get("subject") == sid for e in fold.open_escalations(events)):
-        return False
-    if any(e.get("type") == "question" and e.get("subject") == sid and e["_src"] not in answered_ids
-          for e in events):
-        return False
-    if _spec_idle_busy_spawn(evs, events, now):
-        return False
-    newest = max((fold.ts(e.get("ts")) for e in evs), default=None)
-    if newest is None:
-        return False
-    return (now - newest) / timedelta(minutes=1) >= limit
+    # Keep the existing helper call shape. Production supplies its classified
+    # snapshot here; older callers supplying candidates still get SD2 evidence.
+    classified = cand_rows
+    if 'bucket' not in classified.get(sid, {}):
+        specs, _, _, by_subject = fold.fold(events)
+        unfinished = {key: value for key, value in specs.items()
+                      if value['state'] != 'unknown' and value['state'] not in dispatch.SETTLED_STATES}
+        classified = {r['spec']: r for r in fold.stall_rows(events, unfinished, now=now,
+                      dwell={value['state']: -1 for value in unfinished.values()}, by_subject=by_subject)}
+    limit = lane_rules.load()['idle']['limit_min']
+    newest = max((fold.ts(e.get('ts')) for e in evs), default=None)
+    return bool(classified.get(sid, {}).get('bucket') == 'STUCK' and newest is not None
+                and (now - newest) / timedelta(minutes=1) >= limit)
 
 
 def _check_spec_idle(events, now, root, briefs, answered, *, folded=None):
-    """L-charter-0042/L-spec-0484 R13(d): "any spec whose newest event is
-    older than the idle rule's limit while not held for a live reason or awaiting a human is
-    surfaced by name." Population and exclusions: Assumptions 6-9. Wrapped in
-    the SAME broad `except Exception` shape `_check_dispatchable_stale` uses:
-    a raise anywhere in here — including `fold.held_specs` itself being
-    absent pre-wave-3, though `getattr` alone already covers that case —
-    degrades to one `reading-undetermined`, never a half-finished sweep."""
+    """Classify once on the caller's snapshot; unavailable never clears briefs."""
     try:
         import lane_rules
         lane_rules.load()
-        specs, _charters, _, _ = _fold_input(events, folded)
-        import autodispatch
-        cand_rows = {r["spec"]: r for r in autodispatch.candidates(events, specs, now)}
-        held_fn = getattr(fold, "held_specs", None)
-        held = held_fn(events) if held_fn is not None else set()
-        answered_ids = fold.answered(events)
+        specs, _charters, _, by_subject = _fold_input(events, folded)
+        unfinished = {sid: s for sid, s in specs.items()
+                      if s['state'] != 'unknown' and s['state'] not in dispatch.SETTLED_STATES}
+        classified = {r['spec']: r for r in fold.stall_rows(events, unfinished, now=now,
+                      dwell={s['state']: -1 for s in unfinished.values()}, by_subject=by_subject)}
         readings = []
         for sid, s in specs.items():
             if not _SPEC_ID_RE.match(sid) or s["state"] == "unknown":
@@ -927,7 +895,7 @@ def _check_spec_idle(events, now, root, briefs, answered, *, folded=None):
             evs = s.get("evs") or [e for e in events if e.get("subject") == sid]
             if not any(e.get("type") == "spec-written" for e in evs):
                 continue
-            bad = _spec_idle_bad(sid, s, evs, events, cand_rows, held, answered_ids, now)
+            bad = _spec_idle_bad(sid, s, evs, events, classified, set(), set(), now)
             idle_min = (now - max(fold.ts(e.get("ts")) for e in evs)).total_seconds() / 60
             readings.append((sid, bad, idle_min))
     except Exception:

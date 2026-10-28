@@ -46,36 +46,43 @@ def test_partial_drop_and_tree_checks_are_not_window_completion():
         assert d['groups'][1]['status'] == ('merging now' if green else 'checks failed; waiting for repair')
 
 
-def test_holds_and_active_rework_never_become_overdue():
-    due = [dict(spec=s, rule='merge', overdue=True) for s in ['L-spec-1417','L-spec-1418','L-spec-1421','L-spec-1422','L-spec-1423','L-spec-1454']]
-    ruling = event('decision', 'lane-stale:L-spec-1417', why='Held on purpose: migration solo order; after 1418 ships.') | {'actor':'thinker'}
-    classified = [dict(spec='L-spec-1418', bucket='held'), dict(spec='L-spec-1421', bucket='waiting-on-prereq'),
-                  dict(spec='L-spec-1422', bucket='queued', reason='builder owns active rework')]
-    d = project([ruling], rules=[*due, dict(spec='L-spec-1423', rule='wave-held', overdue=True)], classified=classified)
-    assert 'overdue' not in d and 'stuck count unavailable' in d['attention']
-    from realm_stuck import shape
-    rework = event('decision', 'L-spec-1422', rework='yes', why='Repair is assigned.')
-    facts = g.hold_facts([ruling, rework], [], due, classified, NOW)
-    lane = [dict(row, bucket='STUCK', since='2026-10-23T06:00:00Z',
-                 reason='no ledger evidence for the next action', src='fixture:1') for row in due]
-    for row in lane:
-        if row['spec'] == 'L-spec-1423':
-            row['rule'] = 'wave-held'
-        for active in classified:
-            if active['spec'] == row['spec']:
-                row.update(active)
-                row['owner'] = 'builder'
-    stuck = shape(lane, [], set(), facts['held'], facts['rulings'], [], [], [], {}, {}, NOW)
-    counted = project([ruling, rework],rules=due,classified=classified,stuck=stuck)
-    assert [row['spec'] for row in counted['stuck']['stuck']] == ['L-spec-1454']
-    assert {row['spec'] for row in counted['stuck']['held']} == {row['spec'] for row in due} - {'L-spec-1454'}
-    assert '1 spec is stuck' in counted['attention'] and counted['stuck']['count'] == 1
-    assert 'L-spec-1417' in d['held']
-    assert 'held on purpose' in d['groups'][3]['text']
-    unrelated = ruling | {'subject':'realm-operator-panel'}
-    assert 'L-spec-1417' not in project([unrelated])['held']
-    release = event('unblocked', 'L-spec-1417') | {'ts':'2026-10-23T07:01:00Z'}
-    assert 'L-spec-1417' not in project([ruling, release])['held']
+def test_ac7_hold_facts_use_sd2():
+    import dispatch
+    import fold
+    from test_realm_stuck import fixture
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory(prefix='realm-glance-ac7-') as tmp:
+        root = Path(tmp)
+        (root / 'events').mkdir()
+        (root / 'content').mkdir()
+        tick = root / 'events' / 'L-tick-local.jsonl'
+        assert not tick.exists()
+        # Seat diagnostics also use fold.NOW to age active runs. Keep that clock
+        # on the fixture snapshot so a live rework cannot emit a stale tick.
+        with patch.object(fold, 'ROOT', root), patch.object(fold, 'EVENTS', root / 'events'), \
+                patch.object(fold, 'NOW', NOW), patch.object(dispatch, 'CONTENT', root / 'content'):
+            events, folded, classified = fixture(NOW)
+            # Include queued and waiting-on-human, completing the enumerated SD2 matrix.
+            events += [dict(type='spec-written',subject='L-spec-9014',actor='planner',ts=(NOW-dt.timedelta(minutes=10)).isoformat()),
+                       dict(type='spec-written',subject='L-spec-9015',actor='planner',ts=(NOW-dt.timedelta(minutes=100)).isoformat()),
+                       dict(type='question',subject='L-spec-9015',actor='builder',ts=(NOW-dt.timedelta(minutes=90)).isoformat(),deadline=(NOW+dt.timedelta(hours=1)).isoformat())]
+            for i,e in enumerate(events): e.setdefault('_src',f'fixture:{i+1}')
+            specs,_,_,by=fold.fold(events)
+            classified=fold.stall_lane_rows(events,specs,NOW,by_subject=by)
+            assert {r['bucket'] for r in classified}==__import__('fold_stalls').BUCKETS
+            facts=g.hold_facts(events,[],[dict(spec='L-spec-9990',rule='wave-held')],classified,NOW)
+            assert facts['held']=={r['spec'] for r in classified if r['bucket']=='held'}
+            groups={'Running':['L-spec-9008']}
+            assert 'owns active dispatch' not in next(r for r in classified if r['spec']=='L-spec-9008')['reason']
+            shaped=g.shape(events,[(sid,s['state']) for sid,s in specs.items()],[],classified,groups,NOW)
+            assert shaped['groups'][0]['status']=='building' and 'L-spec-9008' not in shaped['held']
+            release=dict(type='unblocked',subject='L-spec-9003',actor='operator',ts=NOW.isoformat())
+            events.append(release)
+            specs,_,_,by=fold.fold(events)
+            released=fold.stall_lane_rows(events,specs,NOW,by_subject=by)
+            assert 'L-spec-9003' not in g.hold_facts(events,[],[],released,NOW)['held']
+            assert not tick.exists(), 'classification must not create a tick ledger'
+            print('AC7 classifier held set:',sorted(facts['held']),'active rework building; released operator hold absent; tick ledger absent')
 
 
 def test_deployment_requires_exact_evidence_and_never_equates_acceptance_to_live():
@@ -134,7 +141,7 @@ def test_ready_for_review_and_ready_to_merge_are_not_active_review():
     assert project(states=[('L-spec-1430','graded')])['groups'][1]['status'] == 'ready for review'
     assert project([event('review',n_blocking=0)], states=[('L-spec-1430','graded')])['groups'][1]['status'] == 'ready to merge'
     assert project([event('review',n_blocking=1)])['groups'][1]['status'] == 'changes requested'
-    active = [dict(spec='L-spec-1430',owner='builder',bucket='queued',reason='builder owns active dispatch rework')]
+    active = [dict(spec='L-spec-1430',owner='builder',bucket='in-flight',reason='builder has a live assigned run')]
     assert project(states=[('L-spec-1430','graded')],classified=active)['groups'][1]['status'] == 'building'
 
 
@@ -239,7 +246,7 @@ def test_ac6_stuck_rows_equal_the_lane():
             expected={r['spec'] for r in lane if r['bucket']=='STUCK' and not realm_stuck.hold_evidence(r,facts['rulings'])}
             actual={r['spec'] for r in glance['stuck']['stuck'] if r['kind']=='lane'}
             assert actual == expected and 'L-spec-2' in actual, (lane,glance)
-            assert not {'L-spec-1','L-spec-3'} & actual
+            assert 'L-spec-1' not in actual and 'L-spec-3' in actual
             with patch.object(realm_stuck,'shape',return_value=dict(count=0,error=None,stuck=[],held=[])),patch.dict(realm._GLANCE,key=None,value=None), patch.dict(realm.LEDGER.stalls, clear=True):
                 start=time.perf_counter();realm.glance_payload(NOW);without=time.perf_counter()-start
             print(f'fixture glance with stuck {elapsed:.6f}s; without {without:.6f}s; delta {elapsed-without:.6f}s')

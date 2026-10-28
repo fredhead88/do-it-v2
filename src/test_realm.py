@@ -1250,18 +1250,20 @@ const nodes={};const $=id=>nodes[id]??=( {firstElementChild:{textContent:''},tex
 const S={flow:null,health:null,steps:null,shelf:new Map([['shelf-item',1]]),now:1000,actors:new Map(),effects:[]};
 let panel='',rerenders=0;const listPanel=(a,b,rows)=>{assert.equal(rows()[0].s,'shelf-item');};
 const rerenderPanel=()=>{panel=flowHtml()+healthHtml();rerenders++;};
-const Codex={load:()=>{}},applyThroughput=()=>{},insertEvent=()=>{},fmtDur=String;
+const Codex={load:()=>{}},applyThroughput=()=>{},insertEvent=()=>{},fmtDur=String,fmtAge=String;
 const g={fillText:(s)=>drawn.push(s)},mapFont=()=>'',PLACES=Object.fromEntries(['keep','tower','forge','court','gate','town'].map(k=>[k,{x:1,y:2,h:3}]));
 const standing=[];let drawn=[];
 """+constants+'\n'+functions+'\n'+shelf+'\n'+r"""
 const steps=STEPS;
 const flow={stages:{idea:1,planned:1,building:2,checking:1,merging:1,live:null},stuck:steps.slice(0,2)};
 const health=HEALTH;
-const good={flow,health,steps,events:[],window:['2026-10-27','2026-10-28'],live:true};
+const stuck={count:2,error:null,stuck:steps.slice(0,2).map(r=>({spec:r.item,subject:r.item,title:'Title',project:'fixture',reason:r.reason,who:r.owner,since:r.since,stuck_for_s:3600,kind:'lane'})),held:[]};
+const good={flow,health,steps,glance:{stuck},events:[],window:['2026-10-27','2026-10-28'],live:true};
 loadData(good);
 let html=flowHtml();for(const [stage,count] of Object.entries(flow.stages))assert(html.includes(stage+' · '+viewText(count)));
-for(const row of flow.stuck)for(const field of ['item','owner','reason','since'])assert(html.includes(row[field]));
-assert.equal((html.match(/class="act stuck-row"/g)||[]).length,2);assert(html.includes('hold'));
+// SD2: the visible list and tile use the glance lane, independently of flow.
+for(const row of stuck.stuck)for(const field of ['spec','who','reason','title'])assert(html.includes(row[field]));
+assert.equal((html.match(/class="act stuck-row"/g)||[]).length,2);assert(html.includes('Held on purpose'));
 assert.equal($('h-stuck').firstElementChild.textContent,'2');
 assert.deepEqual(stageBadges().map(b=>b.place),['keep','tower','forge','court','gate','town']);
 for(const badge of stageBadges())assert.equal(badge.count,flow.stages[badge.stage]);
@@ -1269,18 +1271,19 @@ drawStageBadges();assert(drawn.includes('live unknown'));
 html=healthHtml();for(const text of ['finishing per day · 3','intake per day · 5','codex usage · 12 / 100','claude usage · unknown / 100','disk · 42.0%','codex tokens per live spec · 123','claude tokens per live spec · unknown'])assert(html.includes(text),text);
 assert.deepEqual(askItems('stuck'),flow.stuck.map(b=>`${b.item} · ${b.state} · ${b.owner} · ${b.reason}`));
 $('h-shelf').onclick();hit({x:-100,y:-100});
-S.flow={...flow,stuck:[{...steps[0],reason:'<img onerror=1>'}]};assert(stuckHtml0().includes('&lt;img onerror=1&gt;'));assert(!stuckHtml0().includes('<img'));
+DATA.glance={stuck:{...stuck,stuck:[{...stuck.stuck[0],reason:'<img onerror=1>'}]}};assert(stuckHtml0().includes('&lt;img onerror=1&gt;'));assert(!stuckHtml0().includes('<img'));
 for(const apply of [applyHistory,applySnapshot,loadData]){
  for(const missing of [false,true]){
   applyViews(good);apply({...good,...(missing?{}:{flow:null,flow_error:'x',health:null,health_error:'x'}) ,...(missing?{flow:undefined,health:undefined}:{})});
   for(const b of stageBadges())assert.equal(b.count,null);
-  assert.equal($('h-stuck').firstElementChild.textContent,'unknown');
+  assert.equal($('h-stuck').firstElementChild.textContent,'2'); // a healthy lane survives unrelated unavailable flow
   for(const stage of FLOW_STAGES)assert(flowHtml().includes(stage+' · unknown'));
   drawn=[];drawStageBadges();assert.equal(drawn.filter(x=>x.endsWith('unknown')).length,6);
   assert(!healthHtml().includes('42.0%'));assert(healthHtml().includes('finishing per day · unknown'));
  }
 }
 applyViews(good);applyHistory({});assert.equal(S.flow,null);assert.equal(S.health,null);
+DATA.glance=null;renderFlowTile();assert.equal($('h-stuck').firstElementChild.textContent,'stuck list unavailable');
 console.log('flow page: bootstrap, history, snapshot, missing/null, six badges, health, escaping, shelf and ask passed');
 """
     script=script.replace('STEPS',json.dumps(FLOW_STEPS)).replace('HEALTH;',json.dumps(HEALTH_VIEW)+';')
@@ -1466,9 +1469,9 @@ def test_fold_once_per_generation():
             assert (rows.call_count,lanes.call_count)==(2,1),(rows.call_count,lanes.call_count)
             assert rows.call_args_list[0].kwargs['dwell'] == {v['state']: -1 for v in active.values()}
             assert rows.call_args_list[0].args[1] == active
-            assert 'dwell' not in rows.call_args_list[1].kwargs
-            assert lanes.call_args_list[0].args[1] == specs
-            assert rows.call_args_list[1].args[1] == specs
+            assert rows.call_args_list[1].kwargs['dwell'] == {v['state']: -1 for v in active.values()}
+            assert lanes.call_args_list[0].args[1] == active
+            assert rows.call_args_list[1].args[1] == active
             generation=realm.ledger_generation()
             with (root/'events/L-executor-fixture.jsonl').open('a') as f:
                 f.write(json.dumps(dict(ts=clock[0].isoformat(),type='tick',subject='tick',lane=3))+'\n')
@@ -1527,6 +1530,29 @@ def test_realm_install_command():
         log.write_text('')
         r=subprocess.run(command,env={**env,'XDG_RUNTIME_DIR':'/fixture/runtime','DBUS_SESSION_BUS_ADDRESS':'unix:path=/fixture/bus'},capture_output=True,text=True)
         assert r.returncode==0 and all(line.endswith('|/fixture/runtime|unix:path=/fixture/bus') for line in log.read_text().splitlines())
+
+
+def test_ac6_default_stalls_reach_glance_and_bootstrap():
+    with parts_fixture() as (root, now, clock):
+        from test_realm_stuck import fixture_events
+        # Remove the unrelated fixture's live run for the same fixture id.
+        source=root/'events/L-executor-fixture.jsonl'
+        source.write_text(''.join(line for line in source.read_text().splitlines(True)
+                                  if json.loads(line).get('subject')!='L-spec-9001'))
+        grouped = {}
+        for event in fixture_events(now):
+            event = dict(event); actor = event.pop('actor'); event.pop('_src', None)
+            grouped.setdefault(actor, []).append(event)
+        for actor, rows in grouped.items():
+            (root/'events'/f'L-{actor}-ac6.jsonl').write_text(''.join(json.dumps(e)+'\n' for e in rows))
+        glance = realm.glance_payload(now)
+        assert not glance.get('error'), glance
+        boot = realm.bootstrap(24, states=[], goals=[], proving=[], now=now)
+        for payload in [glance, boot['glance']]:
+            assert payload['stuck']['count']==2, payload
+            assert 'L-spec-9001' in {r['spec'] for r in payload['stuck']['stuck']}
+            assert len(payload['stuck']['held'])==3
+        print('AC6 actual scratch glance/bootstrap: 121-minute review selected; count=2 held=3')
 
 
 if __name__ == "__main__":
