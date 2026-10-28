@@ -189,7 +189,8 @@ def _rebuild(c):
                       or e.get('rework') == 'yes')]
     rewrites = [e for e in evs if blocked and e.get('type') == 'spec-written'
                 and _time(e['ts']) > _time(blocked['ts'])]
-    trigger = max(decisions + rewrites, key=lambda e: _time(e['ts']), default=None)
+    drops = [e for e in evs if e.get('type') == 'window-dropped' and e.get('reason') == 'owner']
+    trigger = max(decisions + rewrites + drops, key=lambda e: _time(e['ts']), default=None)
     dispatched = [e for e in evs if _builder_dispatch(e)]
     if (trigger and (not blocked or _time(trigger['ts']) > _time(blocked['ts']))
             and not _after(dispatched, trigger, DISPATCH_EVENTS)

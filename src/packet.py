@@ -963,6 +963,14 @@ def p_builder(c):
     if rej or fix:
         L += ["", "This is a rework on the same worktree and branch. Standing and blocking:",
               *[f"   rejected — {x}" for x in rej], *[f"   must-fix — {x}" for x in fix]]
+    drop = max((e for e in c.all_of("window-dropped") if e.get("reason") == "owner"),
+               key=lambda e: fold.ts(e["ts"]), default=None)
+    built = c.last("build-done")
+    if drop and (not built or fold.ts(drop["ts"]) > fold.ts(built["ts"])):
+        L += ["", f"Dropped from window {drop['window']}: these test nodes failed with your change and pass without it:",
+              *[f"   {node}" for node in drop.get("owned_nodes", [])], f"Run: {drop.get('run_url', '')}"]
+        if drop.get("unattributed_nodes"):
+            L += ["These also failed but were not attributed to this spec: " + ", ".join(drop["unattributed_nodes"])]
     # Two independent sections: a standing grader rejection and a hint may both be on
     # one packet, and neither is dropped when the other is present.
     if hint:
@@ -984,7 +992,6 @@ def _drop_owed_blocks(lines, owed):
     dropped = {i for cid, start, end in _criterion_spans("\n".join(lines), allow_bullets=True)
                if cid in owed for i in range(start, end)}
     return [line for i, line in enumerate(lines) if i not in dropped]
-
 
 def p_grader(c):
     spec, card, v = c.spec_file(), c.card_file(), write_verify_script(c)
@@ -1039,25 +1046,20 @@ def p_grader(c):
             die(f"incomplete criterion {cid} from {spec}")
     return out
 
-
 def _subject_base_shas(c):
     s = (getattr(c, "specs", {}) or {}).get(c.a.subject) or {}
     return {e["base_sha"] for e in s.get("evs", [])
             if e.get("type") == "build-done" and re.fullmatch(r"[0-9a-f]{40}", e.get("base_sha") or "")}
-
 
 def _redact_base_shas(text, shas):
     for sha in shas:
         text = re.sub(r"\b" + sha[:7] + r"[0-9a-f]{0,33}\b", "[base commit]", text)
     return text
 
-
 _BUILDER_SPAWN_RE = re.compile(r"\bL-builder-\d+\b")
-
 
 def _redact_builder_spawn(text):
     return _BUILDER_SPAWN_RE.sub("[this build]", text)
-
 
 def p_reviewer(c):
     spec = c.spec_file()
@@ -1118,7 +1120,6 @@ def p_reviewer(c):
         *routed_lines,
     ]
 
-
 def p_charter_reviewer(c):
     ch = c.charter_file() or die("no charter file — `--charter PATH` or a charter-filed event")
     mine = [s for s in c.specs.values() if s["charter"] == c.a.subject]
@@ -1142,7 +1143,6 @@ def p_charter_reviewer(c):
         f"5. The review account for this app: {review_account(c)}. Read-only or write-scoped; "
         "never delete, never money.",
     ]
-
 
 _AC_ANY = re.compile(r"^\s*\**AC(\d+)\s*\[")  # group added (L-spec-0435): same
 # anchor shape `criterion_block` already matched — `_drop_owed_blocks` below
