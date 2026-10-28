@@ -40,3 +40,6 @@ venv = "/home/albert/do-it-v2/.venv"
 # Explicit empty list = "no JS in this project": the node_modules proof passes
 # rather than refusing (grading_env._prove_node_modules).
 node_dirs = []
+# Thinker 2026-10-28 05:30Z: L-spec-1662 evidence hit the 30-min runner cap 6 times at
+# load ~16 (escalation L-executor-0001.jsonl:24467). 1713 key; 60 min bound.
+runner_wall_cap_s = 3600
