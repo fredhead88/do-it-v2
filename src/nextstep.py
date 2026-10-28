@@ -35,6 +35,7 @@ EVENT_STAGES = {'spec-written': 'planned', 'build-started': 'building',
 PIPELINE = {'written', 'building', 'graded', 'reviewing'}
 OWED_STATES = {'shipped-owed-evidence', 'shipped-owed-due', 'shipped-owed-expired'}
 FAILURES = {'merge-gate-rework', 'spawn-failed', 'autodispatch-failed'}
+NOT_READY_PREFIXES = ('wave-order', 'bundle-pending', 'duplicate-dispatch', 'dispatch-in-progress')
 RETRIES = {'build-started', 'spawn-started', 'queue-add', 'decision', 'spec-written'}
 ACTIONS: dict[str, str] = {}
 
@@ -462,7 +463,9 @@ def _wave(sid, evs, by, specs, waves):
 
 
 def _failure(evs, rules):
-    latest = next((e for e in reversed(evs) if e['type'] in FAILURES | RETRIES), None)
+    latest = next((e for e in reversed(evs) if e['type'] in FAILURES | RETRIES
+                   and not (e['type'] == 'spawn-failed'
+                            and str(e.get('reason') or '').startswith(NOT_READY_PREFIXES))), None)
     if latest and latest['type'] in FAILURES:
         text = '\n'.join(str(latest.get(k) or '') for k in ('findings', 'why', 'error', 'reason'))
         return latest, classify_failure(text, latest.get('exit_code', 1), rules)
