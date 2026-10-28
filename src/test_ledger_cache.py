@@ -487,7 +487,7 @@ print(json.dumps(result))
             if empty:
                 db.touch()
             else:
-                with sqlite3.connect(db) as connection:
+                with closing(sqlite3.connect(db)) as connection, connection:
                     connection.execute('CREATE TABLE placeholder (x)')
             with patch.object(ledger_cache, '_update', wraps=ledger_cache._update) as update:
                 self.assertEqual(fold.read_events(), expected)

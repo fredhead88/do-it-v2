@@ -5,7 +5,7 @@ Transactions publish whole reads atomically under flock. Checksummed, data-only
 pickles avoid JSON reparsing without allowing executable cache content. Cache
 corruption falls back to fold's reference parser; lock failures propagate.
 """
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from typing import NamedTuple
 import fcntl
 import hashlib
@@ -271,17 +271,36 @@ def _update(db, directory, actor_of):
 
 def _read(db):
     out = []
-    for name, entry in sorted(_metadata(db).items()):
-        count = 0
-        for seq, data, digest in db.execute(
-                'SELECT seq,data,sha FROM chunks WHERE name=? ORDER BY seq', (name,)):
+    metadata = _metadata(db)
+    names = iter(sorted(metadata.items()))
+    current, entry = next(names, (None, None))
+    count = 0
+
+    # An interrupted stream still owns a SQLite statement; release it before
+    # the caller closes or rebuilds the connection after an integrity failure.
+    with closing(db.execute(
+            'SELECT name,seq,data,sha FROM chunks ORDER BY name,seq')) as rows:
+        for name, seq, data, digest in rows:
+            if name not in metadata:
+                continue
+            while current is not None and current < name:
+                if count != entry['chunks']:
+                    raise Invalid('cache missing chunks')
+                out.extend(_unpack(entry['tail'], entry['tail_sha']))
+                current, entry = next(names, (None, None))
+                count = 0
+            if current is None or name != current:
+                raise Invalid('cache chunk order')
             if seq != count:
                 raise Invalid('cache chunk sequence')
             out.extend(_unpack(data, digest))
             count += 1
+    while current is not None:
         if count != entry['chunks']:
             raise Invalid('cache missing chunks')
         out.extend(_unpack(entry['tail'], entry['tail_sha']))
+        current, entry = next(names, (None, None))
+        count = 0
     return out
 
 
