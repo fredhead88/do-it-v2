@@ -79,7 +79,7 @@ class RelayRestartTests(unittest.TestCase):
         fcntl.flock(fd, fcntl.LOCK_EX)
         try:
             self.assertEqual(self.ensure(), "serving")
-            with patch.object(pathlib.Path, "stat", side_effect=PermissionError):
+            with patch.object(pathlib.Path, "stat", side_effect=PermissionError), patch.object(up.ledger_files, "assert_readable", return_value=None):
                 self.assertEqual(self.ensure(), "serving")
         finally:
             os.close(fd)
@@ -88,7 +88,7 @@ class RelayRestartTests(unittest.TestCase):
             self.assertEqual(self.ensure(), "undetermined")
         heartbeat.unlink()
         (self.root / "events/L-relay-9999.jsonl").touch()
-        with patch.object(pathlib.Path, "read_bytes", side_effect=PermissionError):
+        with patch.object(up.ledger_files, "assert_readable", side_effect=PermissionError):
             self.assertEqual(self.ensure(), "undetermined")
         self.assertFalse(self.launches)
         (self.root / "events/L-relay-9999.jsonl").unlink()

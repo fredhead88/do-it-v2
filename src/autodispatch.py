@@ -4,6 +4,7 @@
 Routine launches delegate to tick's Step consumer. candidates remains a legacy
 read-only filesystem preparation diagnostic.
 """
+import ledger_files
 import datetime, json, os, pathlib, re, socket, subprocess, sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import dispatch, fold, panes, shape, tick  # noqa: E402
@@ -287,7 +288,7 @@ def _own_terminal_event(events, spawn):
     # after `events` was read looked dead and was escalated as spawn-redispatch-lapsed
     # (L-builder-0902, L-builder-0914, 2026-10-04).
     try:
-        text = (fold.EVENTS / f"{spawn}.jsonl").read_text()
+        text = ledger_files.read_text(fold.EVENTS, f"{spawn}.jsonl")
     except (OSError, TypeError):
         return False
     return any(f'"{t}"' in text for t in ("spawn-done", "spawn-failed", "build-done", "verdict"))

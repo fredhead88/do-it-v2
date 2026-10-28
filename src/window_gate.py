@@ -32,7 +32,7 @@ Exit codes (the Executor contract, agents/executor.md, mirrors these):
 
 Env: DOIT_WINDOW_PREDEPLOY (override the script path), DOIT_WINDOW_VERIFY_TIMEOUT_SECS.
 """
-import io, json, math, os, pathlib, posixpath, re, shlex, shutil, signal, subprocess, sys, time, zipfile, zlib
+import io, json, math, os, pathlib, posixpath, re, shlex, shutil, signal, subprocess, sys, time, zipfile, zlib, ledger_files
 from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 import tempfile
@@ -197,10 +197,8 @@ def in_flight(events, root=None):
 def train_events():
     """A torn or unreadable ledger cannot establish a speculative merge base."""
     if fold.EVENTS.exists():
-        for path in fold.EVENTS.iterdir():
-            if path.suffix != ".jsonl":
-                continue
-            for line in path.read_text().splitlines():
+        for name, lines in ledger_files.iter_sources(fold.EVENTS):
+            for line in lines:
                 if line.strip():
                     try:
                         if not isinstance(json.loads(line), dict):

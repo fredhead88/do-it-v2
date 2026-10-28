@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Read-only merge-stage metrics from already-admitted ledger events."""
+import ledger_files
 import argparse
 import importlib
 import json
@@ -259,12 +260,7 @@ def health_main(argv=None):
     try:
         now = _utc(os.environ['DOIT_NOW']) if 'DOIT_NOW' in os.environ else datetime.now(timezone.utc)
         ledger = importlib.import_module('fold')
-        files = list(ledger.EVENTS.iterdir())
-        # fold's cached reader tolerates unreadable files; health must fail closed.
-        for path in files:
-            if path.suffix == '.jsonl':
-                with path.open('rb'):
-                    pass
+        ledger_files.assert_readable(ledger.EVENTS)
         events = ledger.read_events()
         ignored = {id(e) for e in ledger.fold(events)[2]}
         try:
@@ -311,7 +307,7 @@ def main(argv=None):
         ledger = importlib.import_module('fold')
         # Path.glob alone silently treats a missing directory as an empty ledger.
         # Check directory accessibility before using the production reader.
-        list(ledger.EVENTS.iterdir())
+        ledger_files.assert_readable(ledger.EVENTS)
         events = ledger.read_events()
         ignored = {id(e) for e in ledger.fold(events)[2]}
         stats = summary([e for e in events if id(e) not in ignored], now, args.hours)

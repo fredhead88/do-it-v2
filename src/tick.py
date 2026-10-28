@@ -10,6 +10,7 @@ fold-and-record: it spends nothing, it can be run at any frequency by anything,
 and the one event it appends is what `fold` reads for staleness. The Executor is
 a supervised pane that reads the same lane for itself; nothing here launches it.
 """
+import ledger_files
 import ledger_cache
 import argparse, fcntl, json, os, pathlib, re, socket, sys, time
 from datetime import datetime, timezone
@@ -95,7 +96,7 @@ def _ended_since_read(sid):
     if not sid:
         return False
     try:
-        text = (fold.EVENTS / f"{sid}.jsonl").read_text()
+        text = ledger_files.read_text(fold.EVENTS, f"{sid}.jsonl")
     except OSError:
         return False
     return any(f'"{t}"' in text for t in ("spawn-done", "spawn-failed"))

@@ -104,7 +104,7 @@ class CacheTests(unittest.TestCase):
             db.execute('UPDATE chunks SET data=?,sha=?', (data, digest))
         check()
         with closing(sqlite3.connect(cache)) as db, db:
-            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 3)
+            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 4)
 
     def test_folded_state_unchanged_by_projection(self):
         cid, sid = 'L-charter-9901', 'L-spec-9901'

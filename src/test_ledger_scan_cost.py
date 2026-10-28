@@ -24,7 +24,7 @@ with patch.dict(os.environ, DOIT_ROOT=IMPORT_ROOT.name,
 
 def original_subject_ids(prefix):
     out = []
-    for f in dispatch.EVENTS.glob('*.jsonl'):
+    for f in sorted(dispatch.EVENTS.glob('*.jsonl')):
         for line in f.read_text().splitlines():
             m = re.match(rf'{re.escape(prefix)}(\d+)$', (json.loads(line).get('subject') or '')
                          ) if line.strip().startswith('{') else None
@@ -84,7 +84,7 @@ class ScanCostTests(unittest.TestCase):
         (self.events / 'L-operator-02.jsonl').write_text(
             '  ' + json.dumps(dict(subject='L-builder-7')) + '\n')
         expected = original_subject_ids('L-builder-')
-        parse_lines = [line for file in self.events.glob('*.jsonl')
+        parse_lines = [line for file in sorted(self.events.glob('*.jsonl'))
                        for line in file.read_text().splitlines()
                        if 'L-builder-' in line and line.strip().startswith('{')]
         with patch.object(dispatch.json, 'loads', wraps=json.loads) as loads:

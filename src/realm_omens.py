@@ -13,6 +13,7 @@ pure live state (executor silent, packets unclaimed, quota, disk ...) and takes 
 Every omen carries owner, next action, since (first occurrence of the CURRENT active spell) and last seen.
 Only owner `operator` goes in NEEDS YOU; SYSTEM HEALTH never exceeds severity 1 (warning).
 """
+import ledger_files
 import datetime as dt
 import importlib.util
 import json
@@ -116,19 +117,20 @@ def scan(events_dir, cache):
     """All reduced rows, oldest first. `cache` maps filename -> (size, rows): only changed files are re-parsed."""
     out = []
     seen = set()
-    for f in sorted(pathlib.Path(events_dir).glob("*.jsonl")):
+    for name in ledger_files.names(pathlib.Path(events_dir)) if pathlib.Path(events_dir).exists() else []:
         try:
-            size = f.stat().st_size
+            key = ledger_files.stat_key(events_dir, name)
+            size = key if ledger_files._members(events_dir, name) else key[2]
         except OSError:
             continue
-        seen.add(f.name)
-        hit = cache.get(f.name)
+        seen.add(name)
+        hit = cache.get(name)
         if hit and hit[0] == size:
             out.extend(hit[1])
             continue
         rows = []
         try:
-            data = f.read_bytes()
+            data = ledger_files._read_bytes(events_dir, name)
         except OSError:
             continue
         end = data.rfind(b"\n") + 1            # a torn tail is never consumed
@@ -146,7 +148,7 @@ def scan(events_dir, cache):
                 if not r.get("actor"):
                     r.pop("actor", None)
                 rows.append(r)
-        cache[f.name] = (size, rows)
+        cache[name] = (size, rows)
         out.extend(rows)
     for k in [k for k in cache if k not in seen]:
         del cache[k]

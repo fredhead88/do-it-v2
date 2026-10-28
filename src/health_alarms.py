@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Health alarms, pure evaluation and bounded ledger/Telegram delivery."""
+import ledger_files
 import argparse
 import json
 import math
@@ -17,7 +18,7 @@ import scratch
 
 LOCK_STALE_S = 4200
 ALARMS = ("mirror-stale", "release-failed", "deploy-lock-stale",
-          "sweeper-unobservable", "disk-low", "disk-used", "preflight-refusals")
+          "sweeper-unobservable", "disk-low", "disk-used", "preflight-refusals", "ledger-segment-invalid")
 LEDGER_NAME = "L-health-local.jsonl"
 RELEASE_LOG = pathlib.Path("/var/log/albert-scott/daily-release.log")
 _PROC = object()
@@ -76,6 +77,11 @@ def evaluate(events, now, *, probes):
             reading["undetermined"] = list(unknown)
         result.append(dict(alarm=name, severity="immediate" if immediate and not unknown else "summary",
                            reading=reading, line=_text(line)))
+
+    issues = p.get("ledger_segments", [])
+    if issues:
+        add("ledger-segment-invalid", dict(count=len(issues), problems=issues[:5]),
+            f"ledger segment problems={len(issues)}: {issues[:5]}", True)
 
     age = _dict(p.get("backup")).get("age_s")
     ahead = p.get("mirror_ahead_s")
@@ -252,7 +258,8 @@ def live_probes(now):
         used_fraction = usage.used / usage.total
     except Exception:
         used_fraction = None
-    return dict(used_fraction=used_fraction, backup=pushed, mirror_ahead_s=mirror_ahead(now), release_log_failed=failed,
+    issues = ledger_files.problems(fold.EVENTS) + ledger_files.verify_segments(fold.EVENTS, fold.ROOT / "state")
+    return dict(ledger_segments=issues, used_fraction=used_fraction, backup=pushed, mirror_ahead_s=mirror_ahead(now), release_log_failed=failed,
                 locks=dict(deploy=dict(held=lock_held(fold.ROOT / "deploy.lock"), since=deploy_start),
                            release=dict(held=lock_held("/var/lock/albert-scott-daily-release.lock"), since=release_start)),
                 disk_free_gb=disk)
@@ -264,9 +271,7 @@ def _read_ledger():
     stat = directory.stat()
     if not directory.is_dir() or not stat.st_mode & 0o444 or not stat.st_mode & 0o111:
         raise OSError("health alarms ledger is unreadable")
-    for path in directory.glob("*.jsonl"):
-        if not path.stat().st_mode & 0o444:
-            raise OSError("health alarms ledger is unreadable")
+    ledger_files.assert_readable(directory)
     return fold.read_events()
 
 

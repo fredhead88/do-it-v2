@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Daily owed digest and deduplicated operator alerts, pure over the ledger."""
+import ledger_files
 import argparse
 import fcntl
 import json
@@ -221,7 +222,7 @@ def _read_ledger(*, use_cache=True):
     events = fold.EVENTS
     if (not events.is_dir() or not os.access(events, os.R_OK | os.X_OK)
             or not events.stat().st_mode & 0o444 or not events.stat().st_mode & 0o111
-            or not any(events.glob("*.jsonl"))):
+            or not ledger_files.names(events)):
         raise OSError("owed digest ledger is unavailable")
     return fold.read_events(use_cache=use_cache)
 

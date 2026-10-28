@@ -14,7 +14,7 @@ derives every state precisely so nothing is stamped. Authorization lives here,
 in the fold: an event from an actor not permitted to emit it is recorded and
 ignored (§9.2), which leaves an audit trail of the attempt.
 """
-import collections, heapq, json, os, pathlib, sys
+import collections, heapq, json, os, pathlib, sys, ledger_files
 from datetime import datetime, timedelta, timezone
 
 import freeze
@@ -187,16 +187,16 @@ def actor_of(filename: str) -> str:
 def _read_events_uncached():
     """Reference parser and safe fallback; kept independent of the cache."""
     out = []
-    for f in sorted(EVENTS.glob("*.jsonl")):
-        actor = actor_of(f.name)
-        for n, line in enumerate(f.read_text().splitlines(), 1):
+    for name, lines in ledger_files.iter_sources(EVENTS) if EVENTS.exists() else []:
+        actor = actor_of(name)
+        for n, line in enumerate(lines, 1):
             if not line.strip():
                 continue
             try:
                 e = ledger_compact.compact(json.loads(line))
             except json.JSONDecodeError:
                 continue
-            e["actor"], e["_src"] = actor, f"{f.name}:{n}"
+            e["actor"], e["_src"] = actor, f"{name}:{n}"
             out.append(e)
     return out
 
