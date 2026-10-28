@@ -990,12 +990,13 @@ function specDetailHtml(sid,extra){
   const ch=(info&&info.charter)||specCharter(sid);
   const criteria=info&&info.criteria||[],error=!info?'no spec file available':info.criteria_error;
   return `<h2>${esc(sid)} · ${esc(info&&info.title||(DATA&&DATA.titles||{})[sid]||sid)}</h2>
+    <h4>WHAT THIS SPEC IS FOR</h4><p>${esc(info&&info.intent||'intent unavailable')}</p>
     <h4>STAGE</h4><p>${esc(stage)}</p>
     <h4>NEXT STEP</h4><p>${step?esc(step.state)+' · '+esc(step.reason):'unknown'}</p>
     <h4>CRITERIA</h4>${error?`<p>criteria unreadable: ${esc(error)}</p>`:criteria.length?`<ul class="criteria">${criteria.map(c=>`<li><b>${esc(c.id)}</b>: ${esc(c.text)}</li>`).join('')}</ul>`:'<p>no criteria listed</p>'}
-    <h4>CHARTER</h4>${ch?`<p><a class="link" data-ch="${esc(ch)}">${esc(ch)} · Open the charter dossier ▸</a></p>`:'<p>Free-standing spec: no charter above it.</p>'}
+    <h4>CHARTER</h4>${ch?`<p><a class="link" data-ch="${esc(ch)}">${esc(ch)} · Open the charter dossier ▸</a></p>`:'<p>Free-standing spec: no charter above it; charter unavailable.</p>'}
     <h4>LATEST EVENTS</h4>${timelineHtml(S.subjectEvents.get(sid)||[])}
-    ${extra?`<section class="${extra.title==='CODEX SESSION'?'codex-inspector':'actor-facts'}"><h4>${esc(extra.title)}</h4><dl>${extra.rows.map(([k,v])=>`<dt>${esc(k)}</dt><dd>${esc(v??'—')}</dd>`).join('')}</dl></section>`:''}`;
+    ${extra?`<section class="${extra.title==='CODEX SESSION'?'codex-inspector':'actor-facts'}"><h4>${esc(extra.title)}</h4><dl>${(extra.refresh?extra.refresh():extra.rows).map(([k,v])=>`<dt>${esc(k)}</dt><dd>${esc(v??'—')}</dd>`).join('')}</dl></section>`:''}`;
 }
 window.realmOpenSpec=function(sid,extra){
   const html=()=>{const session=extra?null:latestSpecSession(sid);return specDetailHtml(sid,extra||(session?Codex.sessionExtra(session):null));};

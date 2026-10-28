@@ -199,6 +199,21 @@ def test_codex_ledger_lifecycle_and_compact():
         assert realm.compact(rows[1], "builder")["ty"] == "backend-fallback"
 
 
+def test_codex_completion_story_usage_and_reason_privacy():
+    import realm_codex
+    for fields,total in [({'input_tokens':100,'output_tokens':20},120),({'tokens':{'input':100,'output':20,'cached_input':50,'reasoning':10}},120),({'tokens':0},0),({},None)]:
+        row=dict(type='spawn-done',backend='codex',spawn='L-builder-7',**fields)
+        assert compact_total(row) == total
+    for kind in ['spawn-failed','spawn-stale','build-blocked','backend-fallback']:
+        row=dict(type=kind,backend='codex',spawn='L-builder-7',why='https://example.invalid/private /private/fixture sk-syntheticfixturesecret',reason='https://example.invalid/private /private/fixture sk-syntheticfixturesecret')
+        serialized=json.dumps(realm.compact(row,'builder'))
+        assert all(marker not in serialized for marker in ['example.invalid','/private/fixture','sk-syntheticfixturesecret'])
+
+
+def compact_total(row):
+    return realm.compact(row,'builder').get('tok')
+
+
 def test_codex_workers_allowlist_mtime_quota_and_paths():
     import realm_codex
     now = 1791806400
@@ -224,7 +239,7 @@ def test_codex_workers_allowlist_mtime_quota_and_paths():
         assert [by_id[x]["state"] for x in ["live", "idle", "ended", "no-process"]] == ["live", "idle", "ended", "idle"]
         assert by_id["live"]["subject"] == "Technical audit"
         assert by_id["live"]["cwd"] == "audit" and "cwd" not in by_id["idle"]
-        assert by_id["live"]["tmux"] == "codex-audit"
+        assert all("tmux" not in by_id[ident] for ident in ("live", "ended", "no-process"))  # shared cwd cannot prove window ownership
         assert by_id["live"]["tokens"] == 1234 and by_id["live"]["turns"] == 1
         assert data["quota"] == {"weekly_used_pct": 71, "resets_at": now + 100, "credits_balance": "20.00"}
         serialized = json.dumps(data)
@@ -1012,7 +1027,7 @@ def _spec_panel_node(assertions):
     helpers += "\n" + page[page.index("const BUCKET="):page.index("function charterRows(")]
     esc = next(line for line in page.splitlines() if line.startswith("const esc ="))
     codex = (realm.HERE / "realm_codex.js").read_text()
-    inspect = codex[codex.index("  function sessionRows("):codex.index("  function target(")]
+    inspect = next(line for line in codex.splitlines() if line.startswith("  const phrase =")) + "\n" + codex[codex.index("  function sessionRows("):codex.index("  function target(")]
     script = r"""
 const assert=require('node:assert/strict');
 let DATA={states:[['L-spec-7','building']],specs:{'L-spec-7':{title:'Shared title',criteria:[{id:'AC1',text:'Safe <img>.'}],criteria_error:null,charter:'L-charter-0064'}},titles:{},spec_charter:{},codex:{sessions:[]}},stream=true;
