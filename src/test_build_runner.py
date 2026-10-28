@@ -325,7 +325,7 @@ class BuildRunnerTests(unittest.TestCase):
                         str(expected / "alembic"), str(expected / "python"),
                         "venv-alembic", "venv-python",
                         str(expected) + os.pathsep + self.env["PATH"],
-                        self.env.get("TMPDIR", "")])
+                        str(pathlib.Path(row["cwd"] + "-env") / "tmp")])
                 # The next config must run again even if its git tip is unchanged.
                 path.unlink()
                 shutil.rmtree(path.with_suffix(""))
