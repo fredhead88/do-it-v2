@@ -507,6 +507,116 @@ def classify(project, base_sha, ids, *, known_red=False, now=None, refresh=False
     return result
 
 
+_RECHECK_PLUGIN = '''
+import json, os, socket
+from pathlib import Path
+rows = {"collected": [], "reports": {}, "collection_error": False}
+def pytest_collection_finish(session):
+    rows["collected"] = [item.nodeid for item in session.items]
+def pytest_collectreport(report):
+    if report.failed:
+        rows["collection_error"] = True
+def pytest_runtest_logreport(report):
+    rows["reports"].setdefault(report.nodeid, {})[report.when] = (
+        "xfail" if hasattr(report, "wasxfail") else report.outcome)
+def pytest_sessionstart(session):
+    def offline(*a, **kw):
+        raise RuntimeError("base recheck is offline")
+    socket.socket.connect = offline
+    socket.create_connection = offline
+def pytest_sessionfinish(session, exitstatus):
+    Path(os.environ["DOIT_RECHECK_REPORT"]).write_text(json.dumps(rows))
+'''
+
+
+def _recheck_python(project):
+    if os.environ.get("DOIT_RECHECK_PYTHON"):
+        return os.environ["DOIT_RECHECK_PYTHON"]
+    import grading_env
+    venv = grading_env.project_venv(project)
+    return str((pathlib.Path(venv) if venv else _repo(project) / ".venv") / "bin/python")
+
+
+def _run_recheck(repo, sha, ids):
+    """One bounded, offline pytest run in an archive; checkout is never written."""
+    result = {k: [] for k in ("red", "green", "absent", "undetermined")}
+    python = _recheck_python(repo.name)
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith("SUPABASE_DB_URL") and k not in
+           ("PYTEST_ADDOPTS", "PYTEST_PLUGINS", "PYTHONPATH")}
+    env["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
+    if (not pathlib.Path(python).is_file() or subprocess.run(
+            [python, "-c", "import pytest"], env=env, capture_output=True, timeout=30).returncode):
+        return dict(result, undetermined=list(ids))
+    with tempfile.TemporaryDirectory(prefix="doit-recheck-") as temp:
+        directory = pathlib.Path(temp)
+        checkout = directory / "archive"
+        checkout.mkdir()
+        archive = subprocess.run(["git", "-C", str(repo), "archive", "--format=zip", sha],
+                                 capture_output=True, timeout=60, check=True)
+        with zipfile.ZipFile(io.BytesIO(archive.stdout)) as z:
+            z.extractall(checkout)
+        present = []
+        for node in ids:
+            if not (checkout / node.split("::", 1)[0]).is_file():
+                result["absent"].append(node)
+            else:
+                present.append(node)
+        if not present:
+            return result
+        (directory / "doit_recheck_report.py").write_text(_RECHECK_PLUGIN)
+        report = directory / "report.json"
+        env.update(PYTHONPATH=str(directory)+os.pathsep+str(checkout),
+                   DOIT_RECHECK_REPORT=str(report))
+        proc = subprocess.run([python, "-m", "pytest", "--noconftest", "-c", os.devnull,
+                               "--rootdir", str(checkout), "-o", "addopts=", "-p", "doit_recheck_report",
+                               "-q", *present], cwd=checkout, env=env,
+                              capture_output=True, timeout=120)
+        if proc.returncode not in (0, 1) or not report.is_file():
+            result["undetermined"].extend(present)
+            return result
+        data = json.loads(report.read_text())
+        for node in present:
+            phases = data.get("reports", {}).get(node, {})
+            if (data.get("collection_error") or node not in data.get("collected", [])
+                    or phases.get("setup") != "passed" or phases.get("teardown") != "passed"):
+                state = "undetermined"
+            elif phases.get("call") == "failed":
+                state = "red"
+            elif phases.get("call") == "passed":
+                state = "green"
+            else:
+                state = "undetermined"
+            result[state].append(node)
+    return result
+
+
+def recheck(project, base_sha, ids, *, runner=None, now=None):
+    """A missing/uncertain local result is never negative proof about the base."""
+    result = {k: [] for k in ("red", "green", "absent", "undetermined")}
+    valid = []
+    for node in dict.fromkeys(ids):
+        if (isinstance(node, str) and re.fullmatch(r"[\w./-]+\.py::[^\s\"',]+", node)
+                and window_gate.safe_path(node.split("::", 1)[0])):
+            valid.append(node)
+        else:
+            result["undetermined"].append(node)
+    if not valid:
+        return result
+    try:
+        repo, sha = _project(project, base_sha)
+        answer = (runner or _run_recheck)(repo, sha, valid)
+        for node in valid:
+            states = [k for k in result if node in answer.get(k, [])]
+            result[states[0] if len(states) == 1 else "undetermined"].append(node)
+    except Exception:
+        result["undetermined"].extend(valid)
+    order = {node: index for index, node in enumerate(ids)}
+    for values in result.values():
+        values.sort(key=order.__getitem__)
+    return result
+
+
 def _nightly_rows(project):
     """Read dispatches raw: a malformed newest dispatch must not select an older one."""
     path = fold.ROOT / 'events' / 'L-base-red-local.jsonl'

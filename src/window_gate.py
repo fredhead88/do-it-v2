@@ -40,6 +40,7 @@ import tempfile
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import fold  # noqa: E402
 import rechain
+import quarantine
 
 PROJECT = "albert-scott"
 PREDEPLOY = "scripts/ci/predeploy_gate.sh"
@@ -702,6 +703,43 @@ def max_merges(env, toml_path=None):
     return configured if configured is not None else 10
 
 
+TREE_GUARDS = (
+    "tests/test_820_no_abs_test_imports.py::",
+    "tests/test_496_r3_guard.py::",
+    "tests/test_207_monitoring_denoise.py::TestDigestFoldCronStale::test_query_cron_runs_stale_returns_data_trust_when_failed",
+    "tests/deploy/test_ship_snapshot.py::test_ac14_line_counts",
+    "tests/deploy/test_protected_stamp.py::test_ac12_deploy_sh_line_count_not_grown",
+    "api/tests/profit_v2/test_read_model_refresh.py::test_ac9_deploy_sh_net_zero",
+)
+
+
+def tree_guards(env, toml_path=None):
+    try:
+        import tomllib
+        path = pathlib.Path(toml_path) if toml_path is not None else DEFAULT_TOML_PATH
+        guards = tomllib.loads(path.read_text())["window_gate"]["tree_guards"]
+        if isinstance(guards, list) and guards and all(isinstance(g, str) and g for g in guards):
+            return tuple(guards)
+    except (OSError, ValueError, KeyError, TypeError, ImportError):
+        pass
+    return TREE_GUARDS
+
+
+def guard_prefixes(repo, candidate, base, live):
+    """Read the already-built ordinary merge chain, without creating any refs."""
+    commits = git(repo, "rev-list", "--first-parent", f"{base}..{candidate}").stdout.splitlines()[::-1]
+    if len(commits) != len(live):
+        return None
+    previous = base
+    for spec, commit in zip(live, commits):
+        parents = git(repo, "show", "-s", "--format=%P", commit).stdout.split()
+        message = git(repo, "show", "-s", "--format=%s", commit).stdout.strip()
+        if len(parents) != 2 or parents[0] != previous or not message.startswith(f"merge({spec}): window "):
+            return None
+        previous = commit
+    return commits
+
+
 def parse_verdict(out):
     """The gate's JSON verdict line (last line that parses as an object), tolerant
     of shape: node ids from `new_failures`/`failures`, url from `run_url`/`url`."""
@@ -1068,7 +1106,7 @@ def resolve_entries(repo, spec_args, events):
     return out
 
 
-def advance(repo, main, old, new, window, kept, dropped, runs, urls, entries, dashboard, rechained=(), pre_existing=(), actions_minutes=None, after=None, *, scope=None, minutes=None):
+def advance(repo, main, old, new, window, kept, dropped, runs, urls, entries, dashboard, rechained=(), pre_existing=(), actions_minutes=None, after=None, *, scope=None, minutes=None, quarantined=None, rechecked=None):
     replaced = git(repo, "rev-parse", f"refs/heads/{main}").stdout.strip()
     git(repo, "update-ref", f"refs/heads/{main}", new, old)       # old value asserted
     branch_of = {s: b for s, b, _ in entries}
@@ -1078,6 +1116,11 @@ def advance(repo, main, old, new, window, kept, dropped, runs, urls, entries, da
     ev("window-verified", window, sha=new, verified_on=old, replaced=replaced,
        **({"after": after} if after else {}), runs=urls, kept=kept, dropped=dropped,
        pre_existing=list(pre_existing),
+       # Legacy direct helper callers retain their event shape; every gate
+       # attempt below explicitly supplies a list, including when it is empty.
+       **({"quarantined": list(quarantined)} if quarantined is not None else {}),
+       **({"rechecked": rechecked, "recheck_undetermined": sorted(n for n, state in rechecked.items()
+                                                               if state == "undetermined")} if rechecked else {}),
        actions_minutes=(minutes["actions_minutes"] if minutes is not None else
                         (runs * RUN_MINUTES + (runs * DASHBOARD_MINUTES if dashboard else 0)
                          if actions_minutes is None else actions_minutes)),
@@ -1197,6 +1240,7 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
     repo = fold.ROOT / "repos" / project
     if not repo.is_dir():
         sys.exit(f"gate-window: no repo at {repo}")
+    quarantine.apply(project)
     events = train_events()
     entries = resolve_entries(repo, spec_args, events)
     if not entries:
@@ -1221,6 +1265,8 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
     touched = {s: set(git(repo, "diff", "--name-only", f"{base}...{b}").stdout.split()) for s, b, _ in entries}
     dropped, urls, runs, dashboard = [], [], 0, False
     pre_existing_all = set()
+    quarantined_all, rechecked_all = set(), {}
+    guard_seed = tree_guards(os.environ)
     actions_minutes = 0
     verdicts, verification_scopes, candidate_scopes = [], [], {}
     conflicted_all = {}
@@ -1263,12 +1309,18 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
 
     def drop_specs(specs, result, reason):
         for s in specs:
-            ev("window-dropped", s, window=window, nodes=result["nodes"],
+            guard_nodes = result.get("guard_charges", {}).get(s, [])
+            owned_nodes = [n for n in result["nodes"]
+                           if s in owners(repo, result["candidate"], n, result["paths"])]
+            reported_nodes = (owned_nodes if guard_nodes else result["nodes"]) + guard_nodes
+            ev("window-dropped", s, window=window, nodes=reported_nodes,
+               quarantined=sorted(quarantined_all),
+               **({"rechecked": dict(rechecked_all), "recheck_undetermined": sorted(
+                   n for n, state in rechecked_all.items() if state == "undetermined")} if rechecked_all else {}),
                run_url=result["url"], branch=by_id[s][0], reason=reason,
-               owned_nodes=[n for n in result["nodes"]
-                            if s in owners(repo, result["candidate"], n, result["paths"])],
+               owned_nodes=owned_nodes + guard_nodes,
                unattributed_nodes=list(result["unattributed"]))
-            print(f"gate-window: dropped {s} reason={reason} nodes={json.dumps(result['nodes'])}")
+            print(f"gate-window: dropped {s} reason={reason} nodes={json.dumps(reported_nodes)}")
         dropped.extend(s for s in specs if s not in dropped)
         print(f"gate-window: dropped {len(specs)} spec(s), reason={reason}")
 
@@ -1360,6 +1412,25 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
             if not half:
                 record(res, tree, candidate_required)
             return dict(res, state="undetermined")
+        current = quarantine.active(fold.read_events(), project, datetime.now(timezone.utc))
+        # Preserve the existing per-run base audit when an earlier run of this
+        # attempt already proved these ids pre-existing and quarantined them.
+        already_proved = sorted(n for n in nodes if n in current and n in pre_existing_all)
+        if already_proved:
+            ev("window-pre-existing", window, ids=already_proved, base_sha=root_base,
+               count=len(already_proved), nodes=already_proved, run_url=res["url"])
+        quarantined_all.update(n for n in nodes if n in current)
+        excused = sorted(n for n in nodes if n in current)
+        if excused:
+            print(f"gate-window: {len(excused)} failure(s) excused by active quarantine: {json.dumps(excused)}")
+        nodes = [n for n in nodes if n not in current]
+        if not nodes:
+            res["nodes"] = []
+            record(res, tree, candidate_required)
+            if fixes_base and res.get("pg_failed"):
+                escalate(window, "base-not-releasable: --fixes-base window has not repaired pg-parity", "base-not-releasable")
+                return dict(res, state="undetermined")
+            return dict(res, state="green")
         classification = {"complete": False}
         if ((base_red_answer.get("complete") or base_red_answer.get("workflows"))
                 and not base_red_answer.get("undetermined")):
@@ -1396,9 +1467,36 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
                count=len(pre_existing), nodes=pre_existing, run_url=res["url"])
             print(f"gate-window: {len(pre_existing)} failure(s) pre-existing at base: {json.dumps(pre_existing)}")
             pre_existing_all.update(pre_existing)
-        res["nodes"] = [n for n in nodes if n not in pre_existing]
+        for node in pre_existing:
+            quarantine.record(project, node, "base-red", [window])
+            quarantined_all.add(node)
+        new_ids = [n for n in classification.get("new", nodes) if n not in pre_existing]
+        rechecked = {}
+        if new_ids:
+            import base_red
+            unseen = [n for n in new_ids if n not in rechecked_all]
+            try:
+                answer = base_red.recheck(project, root_base, unseen) if unseen else {}
+            except Exception:
+                answer = {}
+            for node in new_ids:
+                states = [k for k in ("red", "green", "absent", "undetermined") if node in answer.get(k, [])]
+                state = rechecked_all.get(node, states[0] if len(states) == 1 else "undetermined")
+                rechecked[node] = state
+                rechecked_all[node] = state
+                if state == "red":
+                    quarantine.record(project, node, "base-red", [window])
+                    quarantined_all.add(node)
+                    print(f"gate-window: 1 failure excused by base-red quarantine: {node}")
+        charged = [n for n in nodes if n not in pre_existing and rechecked.get(n) != "red"]
+        guards = [n for n in charged if n.startswith(guard_seed)]
+        res["nodes"] = [n for n in charged if n not in guards]
+        res["guards"] = guards
         record(res, tree, candidate_required)
-        if not res["nodes"]:
+        if guards and (half or any(rechecked.get(n) == "undetermined" for n in guards)):
+            escalate(window, "guard evidence is undetermined; affected specs remain pending", "undetermined")
+            return dict(res, state="undetermined")
+        if not charged:
             if fixes_base and res.get("pg_failed"):
                 escalate(window, "base-not-releasable: --fixes-base window has not repaired pg-parity", "base-not-releasable")
                 return dict(res, state="undetermined")
@@ -1406,6 +1504,34 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
         paths = OwnershipPaths({s: touched[s] for s in kept}, failures["pg_files"])
         unattributed = unattributed_ids(repo, cand, res["nodes"], paths)
         return dict(res, repo=repo, paths=paths, unattributed=unattributed)
+
+    def charge_guards(result, kept):
+        guards = result.get("guards", [])
+        if not guards or result["unattributed"] or (runs >= 2 and result["nodes"]):
+            return True
+        prefixes = guard_prefixes(repo, result["candidate"], base, kept)
+        if prefixes is None:
+            return False
+        import base_red
+        try:
+            full = base_red.recheck(project, prefixes[-1], guards)
+            if any(n not in full.get("red", []) for n in guards):
+                return False
+            charges, remaining = {}, list(guards)
+            for spec, prefix in zip(kept, prefixes):
+                answer = full if prefix == prefixes[-1] else base_red.recheck(project, prefix, remaining)
+                for node in list(remaining):
+                    if node in answer.get("red", []):
+                        charges.setdefault(spec, []).append(node)
+                        remaining.remove(node)
+                    elif node not in answer.get("green", []) and node not in answer.get("absent", []):
+                        return False
+                if not remaining:
+                    break
+            result["guard_charges"] = charges
+            return not remaining
+        except Exception:
+            return False
 
     def judge_half(cand, kept):
         return judge(cand, kept, half=True)
@@ -1427,9 +1553,17 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
             break
         if res["state"] == "undetermined":
             return 2
+        if not charge_guards(res, live):
+            escalate(window, "guard merge-prefix evidence is undetermined; no spec dropped", "undetermined")
+            return 2
         paths = res["paths"]
         demonstrated = list(dict.fromkeys(
             s for node in res["nodes"] for s in owners(repo, cand, node, paths)))
+        demonstrated = list(dict.fromkeys(demonstrated + list(res.get("guard_charges", {}))))
+        if runs >= 2 and res.get("guard_charges") and not res["nodes"]:
+            drop_specs(demonstrated, res, "guard-prefix")
+            escalate(window, "second candidate guard is red; remainder pending", "red")
+            return 2
         if len(live) == 1:
             drop_specs(live, res, "bisect-single" if not demonstrated else "owner")
             escalate(window, "isolated candidate is red; master unmoved", "red")
@@ -1472,11 +1606,13 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
     try:
         advance(repo, main, base, cand, window, live, dropped, runs, urls, entries, dashboard, rechained,
                 pre_existing=sorted(pre_existing_all), actions_minutes=actions_minutes, after=after,
+                quarantined=sorted(quarantined_all), rechecked=dict(rechecked_all),
                 scope=candidate_scopes[cand], minutes=run_minutes(repo, verdicts, required=verification_scopes))
     except RuntimeError:
         if train:
             raise TrainCancelled("base-moved")
         raise
+    quarantine.apply(project)
     print(f"gate-window: advanced {main} -> {cand[:12]}  shipped={live} dropped={dropped}")
     return 1 if dropped or len(live) < len(entries) else 0
 

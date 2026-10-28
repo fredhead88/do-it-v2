@@ -241,6 +241,9 @@ class Disposition(unittest.TestCase):
                 path = self.root / "events" / "L-executor-0001.jsonl"
                 if path.exists():
                     path.unlink()
+                base_red_path = self.root / "events" / "L-base-red-local.jsonl"
+                if base_red_path.exists():
+                    base_red_path.unlink()
                 nodes = [OWNED] if mode == "coverage" else [AUDIENCE] + ([OWNED] if mode == "mixed" else [])
                 rc, calls, advanced, rows = self.attempt(
                     "AB", lambda kept, n: ("red", nodes) if n == 1 else ("green", []),

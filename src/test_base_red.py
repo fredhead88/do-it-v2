@@ -1111,5 +1111,103 @@ else:
                          ["base-red-nightly"])
 
 
+class RecheckTests(unittest.TestCase):
+    def test_l1664_ac5_recheck(self):
+        with tempfile.TemporaryDirectory(prefix="recheck-proof-") as temp:
+            root = pathlib.Path(temp)
+            repo = root / "repos/demo"
+            repo.mkdir(parents=True)
+            def git(*args):
+                return subprocess.check_output(["git", "-C", str(repo), *args], text=True).strip()
+            git("init", "-q")
+            (repo / "test_cases.py").write_text("""import pytest
+@pytest.fixture
+def bad_setup():
+    raise RuntimeError('setup')
+@pytest.fixture
+def bad_teardown():
+    yield
+    raise RuntimeError('teardown')
+def test_red(): assert False
+def test_green(): assert True
+def test_fixture(missing_fixture): pass
+def test_setup(bad_setup): pass
+def test_teardown(bad_teardown): assert False
+@pytest.mark.skip(reason='skip')
+def test_skip(): pass
+@pytest.mark.xfail(reason='xfail')
+def test_xfail(): assert False
+""")
+            (repo / "test_collection.py").write_text("def test_broken(:\n")
+            (repo / "conftest.py").write_text("raise RuntimeError('conftests must stay off')\n")
+            git("add", ".")
+            git("-c", "user.name=t", "-c", "user.email=t@x", "commit", "-qm", "fixture")
+            sha = git("rev-parse", "HEAD")
+            common = pathlib.Path(subprocess.check_output(["git", "rev-parse", "--git-common-dir"], text=True).strip()).resolve()
+            candidates = [os.environ.get("DOIT_RECHECK_PYTHON"), str(common.parent/".venv/bin/python"), "/opt/albert-scott/.venv/bin/python"]
+            python = next((p for p in candidates if p and pathlib.Path(p).is_file() and subprocess.run(
+                [p, "-c", "import pytest"], capture_output=True).returncode == 0), None)
+            self.assertIsNotNone(python, "real pytest interpreter is required")
+            def ids(*names): return ["test_cases.py::test_"+n for n in names]
+            before = {str(p.relative_to(repo)): p.read_bytes() for p in repo.rglob("*") if p.is_file()}
+            calls = []
+            real_run = subprocess.run
+            def observed(argv, **kw):
+                calls.append(argv)
+                self.assertNotIn(argv[0], ("gh", "claude"))
+                return real_run(argv, **kw)
+            with patch.object(br.fold, "ROOT", root), patch.dict(os.environ, DOIT_ROOT=str(root), DOIT_RECHECK_PYTHON=python), patch.object(br.subprocess, "run", side_effect=observed):
+                probe_ids = ids("red", "fixture", "green") + ["bad node"] + ids("setup") + ["missing.py::test_absent"]
+                def injected(repo, base, nodes):
+                    self.assertNotIn("bad node", nodes)
+                    return {"red": ids("red"), "green": ids("green"), "absent": ["missing.py::test_absent"], "undetermined": ids("setup", "fixture")}
+                injected_result = br.recheck("demo", sha, probe_ids, runner=injected)
+                self.assertEqual(injected_result, {"red": ids("red"), "green": ids("green"), "absent": ["missing.py::test_absent"], "undetermined": ids("fixture") + ["bad node"] + ids("setup")})
+                omitted = br.recheck("demo", sha, ids("red", "green"), runner=lambda *a: {"red": ids("red")})
+                self.assertEqual(omitted["undetermined"], ids("green"))
+                for exception in (RuntimeError("runner"), subprocess.TimeoutExpired("runner", 1)):
+                    with patch.object(br, "_run_recheck", side_effect=exception):
+                        self.assertEqual(br.recheck("demo", sha, ids("red"))["undetermined"], ids("red"))
+                result = br.recheck("demo", sha, ids("red", "green", "fixture", "setup", "teardown", "skip", "xfail") + ["missing.py::test_absent"])
+                self.assertEqual(result["red"], ids("red"))
+                self.assertEqual(result["green"], ids("green"))
+                self.assertEqual(result["absent"], ["missing.py::test_absent"])
+                self.assertEqual(result["undetermined"], ids("fixture", "setup", "teardown", "skip", "xfail"))
+                for nodes in [ids("nonexistent"), ["test_collection.py::test_unknown"]]:
+                    self.assertEqual(br.recheck("demo", sha, nodes)["undetermined"], nodes)
+                for code in (2, 3, 4, 5):
+                    def aborted(argv, **kw):
+                        if "-m" in argv and "pytest" in argv:
+                            return subprocess.CompletedProcess(argv, code, b"", b"")
+                        return observed(argv, **kw)
+                    with patch.object(br.subprocess, "run", side_effect=aborted):
+                        self.assertEqual(br.recheck("demo", sha, ids("red"))["undetermined"], ids("red"))
+                for interpreter in [str(root/"missing-python"), "/usr/bin/python3"]:
+                    with patch.dict(os.environ, DOIT_RECHECK_PYTHON=interpreter):
+                        self.assertEqual(br.recheck("demo", sha, ids("red"))["undetermined"], ids("red"))
+                invalid = ["../test_cases.py::test_red", "-x.py::test_red", "test_cases.py::bad name", "/test_cases.py::test_red", "vitest::test"]
+                runner = unittest.mock.Mock()
+                self.assertEqual(br.recheck("demo", sha, invalid, runner=runner)["undetermined"], invalid)
+                runner.assert_not_called()
+                with patch.object(br, "_run_recheck", side_effect=ValueError("runner unavailable")):
+                    self.assertEqual(br.recheck("demo", sha, ids("red"))["undetermined"], ids("red"))
+                import grading_env
+                with patch.dict(os.environ, DOIT_RECHECK_PYTHON=""):
+                    with patch.object(grading_env, "project_venv", return_value="/chosen/venv"):
+                        self.assertEqual(br._recheck_python("demo"), "/chosen/venv/bin/python")
+                    with patch.object(grading_env, "project_venv", return_value=None):
+                        self.assertEqual(br._recheck_python("demo"), str(repo/".venv/bin/python"))
+            after = {str(p.relative_to(repo)): p.read_bytes() for p in repo.rglob("*") if p.is_file()}
+            self.assertEqual(before, after)
+            self.assertTrue(any("archive" in call for call in calls))
+            body = {"red": result["red"], "green": result["green"],
+                    "absent": result["absent"], "undetermined": result["undetermined"],
+                    "checkout_unchanged": before == after}
+            print(json.dumps(dict(url="cli://base-red/1664/AC5", status=0,
+                                  body_sha256=hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest(),
+                                  body_excerpt=body)))
+            print("L-spec-1664 AC5 base_red ok")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

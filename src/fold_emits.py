@@ -272,6 +272,8 @@ EMITS["origin-pushed"] = {"tick"}
 EMITS["evidence-bundle"] = {"build-runner"}
 EMITS["evidence-bundle-failed"] = {"build-runner"}
 EMITS["base-red"] = {"base-red"}
+EMITS["test-quarantined"] = {"base-red"}
+EMITS["test-unquarantined"] = {"base-red"}
 EMITS["health-alarm"] = {"health"}
 EMITS["owed-unverifiable"] = {"prod-runner", "operator"}
 # L-spec-1133: queue, digest and operator-alert writers (SD3).
@@ -317,6 +319,8 @@ EMITS["nightly-red-owned"] = {"operator", "executor", "thinker"}
 EMITS["merge-frozen"] = {"executor", "tick", "operator"}
 
 REQUIRED_ROWS = {
+    "test-quarantined": ("project", "node", "rule", "windows", "since", "until", "fix"),
+    "test-unquarantined": ("project", "node", "reason"),
     "resource-created": ("kind", "ref", "lane"),
     "resource-reaped": ("ref", "reason"),
     "seat-usage": ("five_hour_pct", "seven_day_pct", "five_hour_resets_at"),
