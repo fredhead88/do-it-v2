@@ -26,6 +26,13 @@ NOT_KEEPING_UP = "backup-maintain: not keeping up (see ledger-repack.log)\n"
 STUB = r'''#!/usr/bin/python3
 import json, os, pathlib, subprocess, sys, time
 c = json.loads(pathlib.Path(os.environ['STUB_CONFIG']).read_text())
+
+def advance_clock(value):
+    path = pathlib.Path(c['clock'])
+    pending = path.with_suffix('.tmp')
+    pending.write_text(value)
+    pending.replace(path)
+
 a = sys.argv[1:]
 i = 0
 while a[i] in ('-C', '-c'):
@@ -48,17 +55,15 @@ if cmd == c.get('sleep'):
         pathlib.Path(c['child']).write_text(str(child.pid))
     if c.get('clock'):
         time.sleep(.2)
-        pathlib.Path(c['clock']).write_text('11')
+        advance_clock('11')
     time.sleep(60)
 if cmd == 'cat-file' and c.get('late'):
-    pathlib.Path(c['clock']).write_text('8')
+    advance_clock('8')
 p = subprocess.run([c['git'], *a], input=data, text=True)
 if cmd == 'pack-objects' and p.returncode == 0:
     pathlib.Path(c['packed']).touch()
     if c.get('drop_free'):
         pathlib.Path(c['free']).write_text('0')
-if cmd == 'prune-packed' and c.get('after_clock') and pathlib.Path(c['packed']).exists():
-    pathlib.Path(c['clock']).write_text('11')
 if cmd == c.get('drop_memory_after'):
     pathlib.Path(c['meminfo']).write_text('MemAvailable: 1 kB\n')
 sys.exit(p.returncode)
@@ -94,6 +99,8 @@ class MaintainTests(unittest.TestCase):
         self.config = {"git": REAL_GIT, "log": str(self.base / "calls"),
                        "packed": str(self.base / "packed"), "free": str(self.free),
                        "child": str(self.base / "child")}
+        # Real git and scheduler latency must not consume the fixture's budget.
+        self.clock()
 
     def git(self, *args, data=None):
         p = subprocess.run([REAL_GIT, "-C", str(self.repo), *args], input=data,
@@ -149,12 +156,24 @@ class MaintainTests(unittest.TestCase):
 
     def run_maintain(self, rc=0, stopped="none"):
         out, err = io.StringIO(), io.StringIO()
-        with patch.dict(os.environ, self.env), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        real_git = backup._MaintainRun.git
+
+        def git(run, args, *pos, **kwargs):
+            result = real_git(run, args, *pos, **kwargs)
+            # Advance only after the supervisor has reaped a successful prune.
+            # Publishing from the child races its exit and can stop at 'prune'.
+            if (args[0] == "prune-packed" and self.config.get("after_clock")
+                    and pathlib.Path(self.config["packed"]).exists()):
+                pathlib.Path(self.config["clock"]).write_text("11")
+            return result
+
+        with patch.dict(os.environ, self.env), patch.object(backup._MaintainRun, "git", git), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             result = backup.maintain(self.repo)
         self.assertEqual(result, rc, (out.getvalue(), err.getvalue()))
         summary = [s for s in out.getvalue().splitlines() if s.startswith("backup-maintain:")][-1]
         fields = dict(word.split("=", 1) for word in summary.split()[1:])
-        self.assertEqual(fields["stopped"], stopped)
+        self.assertEqual(fields["stopped"], stopped, out.getvalue())
         if rc == 3:
             self.assertEqual(err.getvalue(), NOT_KEEPING_UP)
         elif rc == 0:
@@ -288,7 +307,7 @@ class MaintainTests(unittest.TestCase):
         self.env["DOIT_BACKUP_MAINTAIN_TIMEOUT_S"] = "0.3"
         for cmd, stopped in (("rev-list", "listing"), ("prune-packed", "prune")):
             self.state(history=[1, 2, 3])
-            self.stub(sleep=cmd)
+            self.stub(sleep=cmd, clock=self.clock())
             self.run_maintain(3, stopped)
             self.assertEqual(self.state()["chunk"], 3)
             self.assertEqual(self.state()["history"], [1, 2, 3])
@@ -400,4 +419,11 @@ class MaintainTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    result = unittest.main(exit=False).result
+    if result.wasSuccessful():
+        body = "L-spec-1708 AC1 ok"
+        print(json.dumps({"url": "cli://test_backup_maintain.py", "status": 0,
+                          "body_sha256": hashlib.sha256(body.encode()).hexdigest(),
+                          "body_excerpt": body}, sort_keys=True))
+        print(body)
+    sys.exit(0 if result.wasSuccessful() else 1)

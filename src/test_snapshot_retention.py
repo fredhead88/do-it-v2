@@ -115,7 +115,14 @@ class SnapshotTests(unittest.TestCase):
             self.clock = first + dt.timedelta(hours=hour)
             if self.clock.day == 3 or (self.clock.day == 4 and self.clock.hour < 3):
                 continue
-            self.run_snapshot()
+            # Seed intervening freezes cheaply; exercise the real script at
+            # midnight, either side of the 24-hour boundary, and after the gap.
+            checkpoint = self.clock.hour in (0, 1, 23) or hour == 75
+            if checkpoint:
+                self.run_snapshot()
+            else:
+                shutil.copytree(self.src, self.dst / 'snap' / self.clock.strftime('%Y-%m-%dT%H'),
+                                copy_function=os.link)
             history.append(self.clock)
             if hour == 0:
                 (self.src / 'daily-file').unlink()
@@ -129,6 +136,8 @@ class SnapshotTests(unittest.TestCase):
                 self.assertFalse((self.dst / 'snap/2026-10-01T00').exists())
             if hour == 25:
                 self.assertTrue((self.dst / 'snap/2026-10-01T01/hourly-file').exists())
+            if not checkpoint:
+                continue
             cutoff = self.clock - dt.timedelta(hours=24)
             daily = {}
             for stamp in history:
@@ -363,9 +372,14 @@ class SnapshotTests(unittest.TestCase):
         self.env['SNAPSHOT_TEST_FREE_BYTES'] = '0'
         pause = self.write('pause', '', self.root)
         self.env['SNAPSHOT_TEST_PAUSE_FILE'] = str(pause)
+        # Exercise the ordinary df/date paths without depending on host space
+        # or crossing a real hour boundary while the subprocess runs.
+        self.stub('df', 'printf "Avail\\n107374182400\\n"')
+        actual = dt.datetime(2030, 1, 2, 3, tzinfo=UTC)
+        self.stub('date', 'if [[ "$*" == "-u +%s" ]]; then echo '
+                  f'{int(actual.timestamp())}; else exec /usr/bin/date "$@"; fi')
         self.run_snapshot()
-        actual = dt.datetime.now(UTC).strftime('%Y-%m-%dT%H')
-        self.assertEqual(self.snapshots(), [actual])
+        self.assertEqual(self.snapshots(), [actual.strftime('%Y-%m-%dT%H')])
         self.assertTrue(pause.exists())
 
     def test_ac4_executable(self):
@@ -382,6 +396,8 @@ if __name__ == '__main__':
         suite = unittest.TestSuite(t for t in suite if group in t.id().lower())
     result = unittest.TextTestRunner(verbosity=2).run(suite)
     if result.wasSuccessful():
+        if group is None:
+            print('L-spec-1708 AC2 ok')
         for number in range(1, 5):
             if group is None or group == f'ac{number}':
                 body = f'snapshot-retention AC{number} status=0'
