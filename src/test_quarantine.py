@@ -100,6 +100,53 @@ class QuarantineTests(unittest.TestCase):
                               body_sha256=hashlib.sha256(encoded).hexdigest(), body_excerpt=body)))
         print(body["marker"])
 
+    def test_1799_ac1_owned_nodes_never_due(self):
+        def pre_change_due(events, project, now):
+            now = q._time(now)
+            blamed = {}
+            for e in events:
+                if (e.get("type") == "window-dropped" and e.get("project") == project
+                        and now-timedelta(hours=q.BLAME_HOURS) <= q._time(e["ts"]) <= now
+                        and e.get("window")):
+                    for node in e.get("nodes", []):
+                        blamed.setdefault(node, set()).add(e["window"])
+            current = q.active(events, project, now)
+            return [dict(node=n, rule="repeat-blame", windows=sorted(ws))
+                    for n, ws in sorted(blamed.items()) if len(ws) >= q.BLAME_WINDOWS and n not in current]
+
+        drops = [self.row("window-dropped", at=T-timedelta(hours=h),
+                          window=w, nodes=["A"])
+                 for w, h in (("1", 40), ("2", 20), ("3", 0))]
+        expected = [dict(node="A", rule="repeat-blame", windows=["1", "2", "3"])]
+        owned = [dict(drops[0], owned_nodes=["A"]), *drops[1:]]
+        expired = drops + [self.row("window-dropped", at=T-timedelta(hours=49),
+                                   window="old", nodes=["A"], owned_nodes=["A"])]
+        results = {}
+        for name, events, want in (("owned", owned, []), ("unowned", drops, expected),
+                                   ("expired-owned", expired, expected)):
+            old, new = pre_change_due(events, "demo", T), q.due(events, "demo", T)
+            self.assertEqual(old, expected, name)
+            self.assertEqual(new, want, name)
+            results[name] = dict(old=old, new=new)
+
+        for value in (None, "A", {"A": True}, 1):
+            self.assertEqual(q.due([dict(drops[0], owned_nodes=value), *drops[1:]],
+                                   "demo", T), expected)
+        for change in (dict(project="other"), dict(type="window-verified"),
+                       dict(ts=(T+timedelta(seconds=1)).isoformat())):
+            self.assertEqual(q.due(drops + [dict(owned[0], **change)], "demo", T), expected)
+        for h in (0, q.BLAME_HOURS):
+            mention = self.row("window-dropped", at=T-timedelta(hours=h),
+                               owned_nodes=["A"], nodes=[])
+            self.assertEqual(q.due(drops + [mention], "demo", T), [])
+        self.assertEqual(q.active(owned + [self.quarantine()], "demo", T),
+                         {"A": self.quarantine()})
+        body = {"marker": "L-spec-1799 AC1 ok", "results": results}
+        encoded = json.dumps(body, sort_keys=True).encode()
+        print(json.dumps(dict(url="cli://quarantine/1799/AC1", status=0,
+                              body_sha256=hashlib.sha256(encoded).hexdigest(), body_excerpt=body)))
+        print(body["marker"])
+
     def test_ac1_active_and_due(self):
         events = []
         for node, windows, hours in (("A", ["1", "2", "3"], [40, 20, 0]),
