@@ -85,7 +85,7 @@ def render(repo: str) -> str:
 
     lines = ['# How DO-IT works', '',
              'Generated from repository code and config by `doit howto`; regenerate when sources change.',
-             '', '## Roles', '', f'Source: `agents/*.md` and `{model_source}`.', '']
+             '', '## Roles', '', f'Source: `agents/*.md` and `{model_source}`.']
     lines.extend('- ' + backend for backend in backends)
     lines.extend(['', 'SD10 records `tokens = {vendor, input, cached_input, output, reasoning}` on terminal events.',
                   'Vendors are `codex` or `claude`; input includes cached input; absent usage is unknown.',
@@ -96,17 +96,17 @@ def render(repo: str) -> str:
                   'The Executor uses claude-sonnet-5-5; judgment calls go to a claude-opus-5-5 seat sub-agent.',
                   'Sonnet trial: log tokens_per_live_spec.claude via doit health --json at start and 14 days later;',
                   'record both readings and judgment outcomes in lesson lines (axis=K); a measured rise ends it.'])
-    lines.extend(['', '## Lane rules', '', 'Source: `lane_rules.toml`. Name | action | actor | limit_min.', ''])
+    lines.extend(['', '## Lane rules', '', 'Source: `lane_rules.toml`. Name | action | actor | limit_min.'])
     for row in rules:
         lines.extend(_wrap(' | '.join(str(row[key]) for key in ('name', 'action', 'actor', 'limit_min'))))
     lines.extend(['', '## Cron manifest', '',
-                  'Source: `crons.toml`. Name | schedule | where | path; command on following lines.', ''])
+                  'Source: `crons.toml`. Name | schedule | where | path; command on following lines.'])
     for row in crons:
         lines.extend(_wrap(' | '.join(row[key] for key in ('name', 'schedule', 'where', 'path'))))
         lines.extend(_wrap(row['command'], initial='  '))
     lines.extend(['', '## Tick event types', '',
                   'Source: literal `dispatch.emit` and `look.emit_once` calls in `src/tick.py`,',
-                  'plus every action in `lane_rules.toml`.', ''])
+                  'plus every action in `lane_rules.toml`.'])
     lines.extend(_wrap('; '.join(sorted(events))))
     return '\n'.join(lines) + '\n'
 

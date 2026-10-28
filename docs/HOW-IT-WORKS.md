@@ -5,7 +5,6 @@ Generated from repository code and config by `doit howto`; regenerate when sourc
 ## Roles
 
 Source: `agents/*.md` and `machine/models.toml`.
-
 - builder: codex
 - charter-reviewer: seat
 - executor: pane
@@ -36,7 +35,6 @@ record both readings and judgment outcomes in lesson lines (axis=K); a measured 
 ## Lane rules
 
 Source: `lane_rules.toml`. Name | action | actor | limit_min.
-
 - build | dispatch-builder | tick | 30
 - grade | dispatch-grader | tick | 15
 - review | dispatch-reviewer | tick | 15
@@ -54,7 +52,6 @@ Source: `lane_rules.toml`. Name | action | actor | limit_min.
 ## Cron manifest
 
 Source: `crons.toml`. Name | schedule | where | path; command on following lines.
-
 - tick | */{tick_min} * * * * | user | {doit}
   DOIT_ROOT={root} {doit} cron-run tick -- {doit} tick >> {root}/logs/tick.log 2>&1
 - look | */10 * * * * | user | {doit}
@@ -106,12 +103,17 @@ Source: `crons.toml`. Name | schedule | where | path; command on following lines
 - base-red-nightly-collect | 40 * * * * | user | /usr/bin/python3
   {doit} cron-run base-red-nightly-collect -- /usr/bin/python3 {repo}/src/base_red.py
   nightly-collect albert-scott >> {root}/logs/base-red-nightly-collect.log 2>&1
+- pace-sample | */10 * * * * | user | /usr/bin/python3
+  {doit} cron-run pace-sample -- /usr/bin/python3 {repo}/src/pace.py sample >>
+  {root}/logs/pace-sample.log 2>&1
+- stall-sample | 3 * * * * | user | /usr/bin/python3
+  {doit} cron-run stall-sample -- /usr/bin/python3 {repo}/src/stall_sample.py sample >>
+  {root}/logs/stall-sample.log 2>&1
 
 ## Tick event types
 
 Source: literal `dispatch.emit` and `look.emit_once` calls in `src/tick.py`,
 plus every action in `lane_rules.toml`.
-
 - autodispatch-failed; autodispatched; charter-closed; charter-proving; charter-reopened;
   cron-missing; dispatch-builder; dispatch-grader; dispatch-reviewer; doit-gate; look-stale; none;
   proving-check-failed; proving-overdue; queue-add; spawn-stale; spec-killed; sweep-check; tick;
