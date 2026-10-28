@@ -133,9 +133,11 @@ the repository. The same object, on the `claude -p` route, goes through the
 StructuredOutput tool instead; the wrapper validates it against the same schema
 either way.
 
-## Two more checks (L-charter-0042 R10)
+## More checks (L-charter-0042 R10)
 
 Beyond the eleven slots above, checked independent of slot-completeness: 12. **Owed at spec time** (category: owed-ac) — a criterion whose `review_path` can only be satisfied with a browser or a portal/production credential and that carries no `owed-ac` declaration is a finding, naming that it would be sent to a grader with no browser tool and no credential; 13. **Store round trip** (category: wrong-evidence-type) — a `Writes:` that includes store/database-writing code with no criterion exercising the real write-and-read round trip is a finding, naming that this is the class of defect that let a mocked write pass grading while nothing committed in production. Each finding carries `field: Requirements` by default (both checks are about a missing or mistyped acceptance criterion), except row 13 carries `field: Interfaces` instead when the anomaly is that `Writes:` itself fails to name the store/database code the footprint touches.
+
+14. **Coupled tests** (category: `reader-not-checked`, field: `Interfaces`) — on every spec, run `python3 src/coupled_tests.py <spec.md> --repo <project-checkout>` against the spec's project checkout. Each unfenced `named` hit is a finding: ask the author to add the test to `Writes:` or name its full path in `## Boundaries` with the reason it cannot break. List `referencing` hits together as one low-severity advisory finding. Exit 2 means the scan is incomplete; resolve the bad input or truncation before finishing.
 
 ## Lessons (operator rule, 2026-09-24)
 
