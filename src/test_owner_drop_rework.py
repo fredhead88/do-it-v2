@@ -131,14 +131,14 @@ class OwnerDropReworkTests(unittest.TestCase):
                                         '--project', 'fixture', '--base-sha', 'fixture-base'])
                     return Path(path).read_bytes()
 
-            self.assertEqual(render(events), render(events, old=True))
+            self.assertEqual(render(events), render(events, old=True) + b'preflight undetermined: none recorded\n')
             old_drop = dropped(-20)
             # Lexically later drop is older in absolute time than build-done.
             old_drop['ts'] = '2026-10-28T13:00:00+02:00'
             done = event('build-done', -30, status='DONE')
             for rows in (events + [old_drop, done], events + [done, dict(dropped(), ts=done['ts'])],
                          events + [dict(dropped(), reason='bisect-single')]):
-                self.assertEqual(render(rows), render(rows, old=True))
+                self.assertEqual(render(rows), render(rows, old=True) + b'preflight undetermined: none recorded\n')
             owner = dict(dropped(), unattributed_nodes=['tests/test_other.py::test_unknown'])
             rows = events + [done, owner, dict(dropped(-5), reason='bisect-single')]
             text = render(rows).decode()

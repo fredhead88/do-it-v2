@@ -115,3 +115,19 @@ applies_to = "spec"
 check = "check_verification_trailing_prose"
 message = "Move text after the Verification closing fence under a notes heading, such as ## 9b. Notes on the checks"
 severity = "block"
+
+[[entry]]
+id = "PL-013"
+since = "2026-10-28"
+applies_to = "spec"
+check = "check_interpreter_path"
+message = "Verification uses a relative venv or bare Python interpreter"
+severity = "warn"
+
+[[entry]]
+id = "PL-014"
+since = "2026-10-28"
+applies_to = "spec"
+check = "check_literal_sha_candidate"
+message = "an acceptance criterion contains a literal commit-sha candidate"
+severity = "warn"

@@ -368,3 +368,21 @@ def check_owed_environment(text):
         if not any(p.search(block) for p in _OWED_ENVS):
             return (f"{cid}: names none of prod read, verifier portal session, local stack, CI")
     return None
+
+
+def check_interpreter_path(text):
+    block = verification.block(text) or ""
+    for line in block.splitlines():
+        if re.search(r"\$PWD/\.venv|\.\./\.venv|(?<![\w/.-])python3?\b", line):
+            return line.strip()
+    return None
+
+
+def check_literal_sha_candidate(text):
+    lines = text.split("\n")
+    for _, start, end in packet._criterion_spans(text):
+        for line in lines[start:end]:
+            for token in re.findall(r"\b[0-9a-fA-F]{7,40}\b", line):
+                if re.search(r"\d", token) and re.search(r"[a-f]", token, re.I):
+                    return line.strip()
+    return None

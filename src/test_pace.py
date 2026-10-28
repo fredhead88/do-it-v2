@@ -242,8 +242,9 @@ class PaceTests(unittest.TestCase):
     def test_cron_rows(self):
         import crons
         rows = crons.rows(str(REPO/'crons.toml'))
-        self.assertEqual([r['name'] for r in rows[-2:]], ['pace-sample','stall-sample'])
-        for row, interval, runtime, module in zip(rows[-2:],(600,3600),(540,1800),('pace','stall_sample')):
+        samples = [next(r for r in rows if r['name'] == name) for name in ('pace-sample','stall-sample')]
+        self.assertEqual([r['name'] for r in samples], ['pace-sample','stall-sample'])
+        for row, interval, runtime, module in zip(samples,(600,3600),(540,1800),('pace','stall_sample')):
             self.assertEqual(crons.interval_s(row['schedule']),interval)
             for field,value in dict(where='user',path='/usr/bin/python3',owner='thinker',project='do-it-v2',max_runtime_s=runtime).items():
                 self.assertEqual(row[field],value)

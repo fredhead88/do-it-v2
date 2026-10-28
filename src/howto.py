@@ -99,11 +99,24 @@ def render(repo: str) -> str:
     lines.extend(['', '## Lane rules', '', 'Source: `lane_rules.toml`. Name | action | actor | limit_min.'])
     for row in rules:
         lines.extend(_wrap(' | '.join(str(row[key]) for key in ('name', 'action', 'actor', 'limit_min'))))
-    lines.extend(['', '## Cron manifest', '',
-                  'Source: `crons.toml`. Name | schedule | where | path, followed by command.'])
-    for row in crons:
-        lines.extend(_wrap(' | '.join(row[key] for key in ('name', 'schedule', 'where', 'path'))
-                           + '  ' + row['command']))
+    lines.extend(['', '## Cron manifest',
+                  'Source: `crons.toml`. Name | schedule | where | path, then command.'])
+    # Pack rows together, keeping each metadata tuple intact where it fits.
+    # Commands retain two spaces after metadata and ordinary word wrapping.
+    current = '- '
+    for index, row in enumerate(crons):
+        metadata = ' | '.join(row[key] for key in ('name', 'schedule', 'where', 'path'))
+        chunks = textwrap.wrap(metadata, width=98, break_long_words=False, break_on_hyphens=False)
+        tokens = [('' if index == 0 and j == 0 else '; ' if j == 0 else ' ', chunk)
+                  for j, chunk in enumerate(chunks)]
+        tokens += [('  ' if j == 0 else ' ', word) for j, word in enumerate(row['command'].split())]
+        for separator, chunk in tokens:
+            if len(current) + len(separator) + len(chunk) > 100:
+                lines.append(current.rstrip())
+                current = '  ' + chunk
+            else:
+                current += separator + chunk
+    lines.append(current)
     lines.extend(['', '## Tick event types', '',
                   'Source: literal `dispatch.emit` and `look.emit_once` calls in `src/tick.py`,',
                   'plus every action in `lane_rules.toml`.'])
