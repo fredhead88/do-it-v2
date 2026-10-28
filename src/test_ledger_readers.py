@@ -94,6 +94,7 @@ ALLOW = {
     ('base_red.py', '_nightly_rows'): 'Only reads L-base-red-local.jsonl; local files never roll up (additional classified hit).',
     ('base_red.py', '_rows'): 'Only reads L-base-red-local.jsonl; local files never roll up.',
     ('dispatch.py', 'alloc'): 'Raw glob applies only to generic directories; event allocations use ledger_files.names.',
+    ('flow_health.py', 'main'): 'Requires a listable events directory with a regular jsonl file before judging; decoded events use fold.read_events.',
     ('ledger_files.py', '_accessible'): 'The virtual file layer itself; raw file access is confined here.',
     ('ledger_files.py', '_indexes'): 'The virtual file layer itself; raw file access is confined here.',
     ('ledger_files.py', '_open_binary'): 'The virtual file layer itself; raw file access is confined here.',

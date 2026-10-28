@@ -783,6 +783,10 @@ EXPECTED_CRONS_ROWS = [
      "command": "{doit} cron-run ledger-rollup -- nice -n 19 {doit} ledger-rollup >> {root}/logs/ledger-rollup.log 2>&1",
      "path": "{doit}", "sig": r"\bdoit ledger-rollup\b",
      "owner": "thinker", "project": "do-it-v2"},
+    {"name": "flow-health-daily", "where": "user", "schedule": "30 0 * * *",
+     "command": "{doit} cron-run flow-health-daily -- /usr/bin/python3 {repo}/src/flow_health.py >> {root}/logs/flow-health.log 2>&1",
+     "path": "/usr/bin/python3", "sig": r"flow_health\.py\b",
+     "owner": "thinker", "project": "do-it-v2", "max_runtime_s": 600},
 ]
 CRONS_PATH = pathlib.Path(__file__).resolve().parent.parent / "crons.toml"
 with open(CRONS_PATH, "rb") as f:

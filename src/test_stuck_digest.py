@@ -152,6 +152,9 @@ Thinker: choose and start the next step. No reply needed from you. [L-spec-9401]
 Waiting their turn to merge. No reply needed from you. [L-spec-9402]
 Waiting to merge, on a dependency, or on work in progress: 1 rows.
 
+## MERGE WINDOWS
+windows (past 24 h): 0 attempts, n/a verified, median review-to-window wait n/a
+
 ## OWED
 - waiting: 0
 - due: 0
@@ -293,11 +296,70 @@ none
         self.evidence = dict(row=row, cli_summary=json.loads(result.stdout), unknown_selection_status=unknown.returncode)
 
 
+    def test_ac7(self):
+        # Status-block baseline captured on the pinned base before render_md changed.
+        golden = '# Stuck digest — 2026-10-18\n\n## STUCK\nstuck: 2 (live reason: 1)\nRaw overdue timers for audit; waiting and stalled work are listed separately below.\n- spec: L-spec-9001; rule: idle; action: none; since: 2026-10-18T04:55:00+00:00; limit_min: 60; reason: judgment: open question/escalation; not-live\n- spec: L-spec-9002; rule: build; action: build; since: 2026-10-18T04:45:00+00:00; limit_min: 30; reason: condition met; live\n\n## NEXT ACTIONS\n\nThinker: choose and start the next step. No reply needed from you. [L-spec-9001]\nWaiting on work already in progress. No reply needed from you. [L-spec-9002]\nWaiting to merge, on a dependency, or on work in progress: 1 rows.\n\n## OWED\n- waiting: 0\n- due: 0\n- blocked: 0\n- failed: 0\n- correcting: 0\n- quarantined: 0\n- met: 0\n- waived: 0\n- expired: 0\n- dropped: 0\n- unshipped: 0\n- unverifiable: 0\n\nBlocked causes: none\n\nSweep: {"consecutive_failed": 0, "failed_24h": 0, "last_batched_at": null, "runs_24h": 0}\nM1: {"sweep_failed_one_row_24h": 0, "terminal_unobservable": 0, "verify_unbuildable": 0}\n\n## HEALTH ALARMS\nnone\n'
+        telegram = 'Nothing needs you today.\n1 spec is waiting on work already in progress.\n1 spec is stuck and the Thinker is on it.'
+        import scorecard
+        import flow_health
+        from test_flow_health import windows, stuck_rows, NOW as FLOW_NOW
+        obj = digest.build(fixture(), NOW)
+        results = []
+        for variant in ('windows', 'empty', 'failure'):
+            evs = fixture()
+            if variant == 'windows':
+                # Keep the window cohort inside the digest's past-24-hour horizon.
+                window_events = windows(4, 90)
+                shift = NOW - timedelta(hours=1) - datetime(2026, 10, 26, 5, tzinfo=timezone.utc)
+                for row in window_events:
+                    row['ts'] = (datetime.fromisoformat(row['ts']) + shift).isoformat()
+                evs += window_events
+            stats = scorecard.window_stats(evs, NOW - timedelta(hours=24), NOW)
+            if variant == 'failure':
+                with patch.object(scorecard, 'window_stats', side_effect=ValueError('unreadable')):
+                    text = digest.render_md(obj, evs, NOW)
+                expected = 'windows (past 24 h): undetermined (ValueError: unreadable)'
+            else:
+                text = digest.render_md(obj, evs, NOW)
+                expected = ('windows (past 24 h): 5 attempts, 80% verified, median review-to-window wait 90 min'
+                            if variant == 'windows' else
+                            'windows (past 24 h): 0 attempts, n/a verified, median review-to-window wait n/a')
+            insertion = '\n## MERGE WINDOWS\n' + expected + '\n'
+            self.assertEqual(text.count(expected), 1)
+            self.assertEqual(len([line for line in text.splitlines() if line.startswith('windows (past 24 h):')]), 1)
+            self.assertIn('Waiting to merge, on a dependency, or on work in progress: 1 rows.\n' + insertion + '\n## OWED', text)
+            self.assertEqual(text.replace(insertion, '', 1), golden)
+            self.assertEqual(digest.render_telegram(obj), telegram)
+            results.append(dict(line=expected, stats=stats, golden_equal=True, telegram=telegram))
+        # AC1's actual result, through the same strict writer the CLI uses.
+        with patch.object(flow_health.stall_sample, 'samples', return_value=stuck_rows()):
+            m1 = next(b for b in flow_health.daily(fixture(), FLOW_NOW)
+                      if b['type'] == 'health-alarm' and b['measure'] == 'M1')
+        with patch.object(fold, 'NOW', NOW - timedelta(minutes=5)):
+            flow_health.append_body(m1)
+        for i, measure in enumerate(('M2', 'M3', 'M5')):
+            body = dict(m1, measure=measure, flow_key=measure + ':' + m1['day'],
+                        subject='flow-health-' + measure + '-' + m1['day'], line=measure + ' summary')
+            with patch.object(fold, 'NOW', NOW - timedelta(minutes=4-i)):
+                flow_health.append_body(body)
+        reread = fold.read_events()
+        text = digest.render_md(obj, reread, NOW)
+        self.assertIn('HEALTH flow-health summary: ' + m1['line'], text.split('## HEALTH ALARMS')[1])
+        self.assertEqual(text.count('HEALTH flow-health summary:'), 4)
+        with patch.object(fold, 'NOW', NOW):
+            flow_health.append_body(dict(m1, line='M1 newest'))
+        text = digest.render_md(obj, fold.read_events(), NOW)
+        self.assertNotIn(m1['line'], text)
+        self.assertIn('HEALTH flow-health summary: M1 newest', text)
+        self.assertEqual(text.count('HEALTH flow-health summary:'), 4)
+        self.evidence = dict(variants=results, health_section=text.split('## HEALTH ALARMS')[1])
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('-k', choices=[f'test_ac{i}' for i in range(1, 7)])
+    parser.add_argument('-k', choices=[f'test_ac{i}' for i in range(1, 8)])
     args = parser.parse_args()
-    names = [args.k] if args.k else [f'test_ac{i}' for i in range(1, 7)]
+    names = [args.k] if args.k else [f'test_ac{i}' for i in range(1, 8)]
     for name in names:
         test = DigestTests(name)
         result = unittest.TextTestRunner().run(unittest.TestSuite([test]))

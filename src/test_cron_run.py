@@ -830,3 +830,16 @@ _runtime_checks()
 _r14ac14()
 
 print(f"cron_run: {N} checks pass")
+
+# L-spec-1676: only the exact watchdog start/end store keeps 50 hours.
+for basename, limit in (("pane-watchdog.jsonl", 1200), ("another-job.jsonl", 50),
+                        ("pane-watchdog.skips.jsonl", 50), ("other-pane-watchdog.jsonl", 50)):
+    retained = TMP / "retention-1676" / basename
+    for i in range(1210):
+        cron_run._append_row(retained, dict(ev="end" if i % 2 else "start", n=i))
+    # Fresh-open read-back; never an in-memory mirror of the writer.
+    with retained.open() as stream:
+        rows = [json.loads(line) for line in stream]
+    check(len(rows) == limit, f"1676: {basename} retains {limit}")
+    check(rows[0]["n"] == 1210-limit and rows[-1]["n"] == 1209, f"1676: newest rows in {basename}")
+print("L-spec-1676 watchdog retention ok")
