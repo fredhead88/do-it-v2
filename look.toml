@@ -12,6 +12,7 @@ max_merges = 10
 [merge_queue]
 batch_cap = 10
 batch_cap_floor = 6
+window_target = 6
 
 [thresholds]
 tmp_high = 85

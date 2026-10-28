@@ -4,7 +4,6 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 import fcntl
 import json
-import math
 import os
 from pathlib import Path
 import re
@@ -21,7 +20,7 @@ import window_gate
 DOIT = str(Path(__file__).resolve().parent.parent / 'doit')
 OUTCOMES = {'shipped', 'window-dropped', 'merge-conflict'}
 TERMINALS = OUTCOMES | {'spec-killed', 'spec-closed'}
-BATCH_MIN_QUEUE = 5
+BATCH_MIN_QUEUE = 2
 GATE_PER_TICK = 2
 MIGRATION_ORDER_SOURCE = 'queue'
 
@@ -72,21 +71,9 @@ def next_candidate(events):
 
 
 def batching_allowed(events, queue_len):
-    """Only an authorised, equal-input improvement can enable batching."""
-    if queue_len < BATCH_MIN_QUEUE:
-        return False
-    try:
-        latest = next((e for e in reversed(_ordered(events))
-                       if e.get('type') == 'merge-measurement' and
-                       e.get('actor') in {'operator', 'executor'}), None)
-        if latest is None or latest.get('equal_input') is not True:
-            return False
-        single, batched = latest.get('single_p50_s'), latest.get('batched_p50_s')
-        return (type(single) in (int, float) and type(batched) in (int, float)
-                and math.isfinite(single) and math.isfinite(batched)
-                and 0 <= batched < single)
-    except (ValueError, TypeError, OverflowError):
-        return False
+    """Orderable ready work can batch immediately, without historical permission."""
+    _ordered(events)
+    return queue_len >= BATCH_MIN_QUEUE
 
 
 def _emit(sid, kind, **fields):
@@ -326,12 +313,27 @@ def is_risky(paths):
     return False
 
 
+def _look_toml():
+    return Path(DOIT).parent / 'look.toml'
+
+
+def window_target(toml_path=None):
+    """The versioned selection target is independent of the safety ceiling."""
+    try:
+        import tomllib
+        with open(_look_toml() if toml_path is None else toml_path, 'rb') as stream:
+            value = tomllib.load(stream).get('merge_queue', {}).get('window_target')
+        return value if type(value) is int and 2 <= value <= 6 else 6
+    except (OSError, ValueError, TypeError, AttributeError, ImportError):
+        return 6
+
+
 def effective_cap(events, now, env=None, toml_path=None):
     events = _ordered(events)
     configured, floor, unreadable = 10, 6, False
     try:
         import tomllib
-        with open(Path(DOIT).parent / 'look.toml' if toml_path is None else toml_path, 'rb') as stream:
+        with open(_look_toml() if toml_path is None else toml_path, 'rb') as stream:
             config = tomllib.load(stream).get('merge_queue', {})
         def positive(key, default):
             value = config.get(key)
@@ -506,20 +508,34 @@ def window_run(project, *, runner=None, launcher=None, detach=False, now=None):
                                 project=project, reason=reason)
                 return 3
             entries = queue(events, project)
-            specs = [head]
-            if batching_allowed(events, len(entries)):
-                cap = effective_cap(events, now)
-                record_cap(cap, events, ledger_file)
+            cap = effective_cap(events, now)
+            record_cap(cap, events, ledger_file)
+            target = window_target()
+            try:
                 repo, master = _repository(project)
-                footprints, risky = {}, set()
-                for row in entries:
-                    paths = spec_paths(repo, master, row['branch'])
-                    footprints[row['spec']] = None if paths is None else {path for _, path in paths}
-                    if is_risky(paths):
-                        risky.add(row['spec'])
-                specs = form_batch(entries, footprints, cap['cap'], risky)
+            except (OSError, ValueError):
+                # An unavailable repository gives no safe mixed-window footprint.
+                repo, master = None, None
+            footprints, risky = {}, set()
+            for row in entries:
+                paths = spec_paths(repo, master, row['branch']) if repo is not None else None
+                footprints[row['spec']] = None if paths is None else {path for _, path in paths}
+                if is_risky(paths):
+                    risky.add(row['spec'])
+            eligible = form_batch(entries, footprints, len(entries), risky)
+            if head in risky or footprints.get(head) is None:
+                reason = 'solo-head'
+            elif len(eligible) == 1:
+                reason = 'sole-eligible'
+            elif cap['cap'] < 2:
+                raise ValueError(f"capacity undetermined: cap {cap['cap']} cannot batch eligible work")
+            elif len(eligible) <= min(target, cap['cap']):
+                reason = 'all-ready'
+            else:
+                reason = 'window-target' if target <= cap['cap'] else 'effective-cap'
+            specs = eligible[:min(target, cap['cap'])]
             print(f'window-run: selected {len(specs)}; deferred {len(waiting) - len(specs)} '
-                  '(reason=single queue head unless authorised measurement enables cap/footprint batching)')
+                  f'(reason={reason})')
             window = 'window-' + uuid.uuid4().hex
             _train_emit(ledger_file, window, 'queue-batch', project=project, specs=','.join(specs))
             argv = ['doit', 'gate-window', window, '--project', project, '--specs', ','.join(specs)]

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Hermetic queue regressions: real ledger admission, git gates and CLI writes."""
-from contextlib import redirect_stdout
+from contextlib import redirect_stdout, redirect_stderr
 from datetime import datetime, timedelta, timezone
 import io
 import hashlib
@@ -384,13 +384,256 @@ class QueueTests(unittest.TestCase):
         events.extend(dict(events[0], subject=f'L-spec-{9001+i}') for i in range(1, count))
         self.seed(events)
 
+    def batching_mark(self, ac, cases):
+        body = json.dumps(cases, sort_keys=True)
+        print(json.dumps(dict(url=f'cli://doit-v2/window-batching/AC{ac}', status=0,
+                              body_sha256=hashlib.sha256(body.encode()).hexdigest(),
+                              body_excerpt=body)))
+
+    def batching_case(self, count, *, config='batch_cap=10\nbatch_cap_floor=6\nwindow_target=6',
+                      extra=(), paths=None, ceiling=10, rate=None, detached=False,
+                      code=0, independent=False, callback=None, repository=True):
+        ids = [f'L-spec-{9001+i}' for i in range(count)]
+        self.seed([dict(self.event('queue-add', 5, project='albert-scott',
+                                   branch=sid.lower(), rule='operator'), subject=sid)
+                   for sid in ids] + list(extra))
+        config_path = self.root / ('missing.toml' if config is None else 'look.toml')
+        if config is not None:
+            config_path.write_text('[merge_queue]\n' + config + '\n')
+        calls, out, err = [], io.StringIO(), io.StringIO()
+        def gate(argv, **kw):
+            events = self.fresh_events() if independent else fold.read_events(use_cache=False)
+            rows = [e for e in events if e['type'] == 'queue-batch']
+            self.assertEqual(len(rows), 1)
+            self.assertEqual((rows[0]['subject'], rows[0]['project'], rows[0]['specs']),
+                             (argv[2], 'albert-scott', argv[argv.index('--specs') + 1]))
+            calls.append(argv)
+            if callback:
+                callback(argv)
+            if detached:
+                return type('Child', (), {'pid': os.getpid()})()
+            return dict(code=code)
+        repository_value = (self.root, 'main') if repository else None
+        with patch.object(mq, '_look_toml', return_value=config_path), \
+             patch.object(mq, '_repository', **({'return_value': repository_value} if repository else
+                                              {'side_effect': OSError('repository unavailable')})), \
+             patch.object(mq, 'spec_paths', side_effect=lambda repo, master, branch:
+                          [('M', branch + '.py')] if paths is None else paths.get(branch)), \
+             patch.object(mq.window_gate, 'red_rate', return_value=rate or dict(rate=None, windows=0)), \
+             patch.dict(os.environ, DOIT_WINDOW_MAX_MERGES=str(ceiling)), \
+             redirect_stdout(out), redirect_stderr(err):
+            result = mq.window_run('albert-scott', now=self.now,
+                                   **({'detach': True, 'launcher': gate} if detached else {'runner': gate}))
+        selected = calls[0][calls[0].index('--specs') + 1].split(',') if calls else []
+        return dict(code=result, selected=selected, stdout=out.getvalue(), stderr=err.getvalue(),
+                    events=fold.read_events(use_cache=False), calls=calls)
+
+    def assert_batching(self, result, expected, reason, deferred):
+        self.assertEqual(result['code'], 0, result['stderr'])
+        self.assertEqual(result['selected'], expected)
+        self.assertIn(f'window-run: selected {len(expected)}; deferred {deferred} (reason={reason})\n',
+                      result['stdout'])
+        for text in ('authorised measurement', 'single queue head'):
+            self.assertNotIn(text, result['stdout'] + result['stderr'])
+
+    def test_window_batching_ready_sizes(self):
+        matrix = []
+        for count in (0, 1, 2, 3, 4, 5, 6, 7, 12):
+            result = self.batching_case(count)
+            expected = [f'L-spec-{9001+i}' for i in range(min(count, 6))]
+            if count:
+                reason = 'sole-eligible' if count == 1 else 'all-ready' if count <= 6 else 'window-target'
+                self.assert_batching(result, expected, reason, count - len(expected))
+            else:
+                self.assertEqual((result['code'], result['calls']), (3, []))
+            matrix.append(dict(ready=count, selected=result['selected'], stdout=result['stdout']))
+        for fields in ({}, dict(equal_input=False), dict(equal_input=True, single_p50_s=20, batched_p50_s=10),
+                       dict(equal_input=True, single_p50_s=10, batched_p50_s=20)):
+            measurement = dict(self.event('merge-measurement', 2, **fields), actor='operator')
+            result = self.batching_case(3, extra=[measurement])
+            self.assert_batching(result, ['L-spec-9001', 'L-spec-9002', 'L-spec-9003'], 'all-ready', 0)
+            matrix.append(dict(measurement=fields, selected=result['selected']))
+        for count in range(13):
+            self.assertEqual(mq.batching_allowed([], count), count >= 2)
+        malformed = dict(self.event('queue-add', project='albert-scott', branch='b'), ts='bad')
+        for count in (0, 1, 2, 6):
+            with self.assertRaisesRegex(ValueError, 'event timestamp undetermined'):
+                mq.batching_allowed([malformed], count)
+        result = self.batching_case(2, extra=[malformed])
+        self.assertEqual((result['code'], result['calls']), (3, []))
+        self.assertIn('window-run: undetermined', result['stderr'])
+        self.assertFalse(any(e['type'] == 'queue-batch' for e in result['events']))
+        result = self.batching_case(2, paths={'l-spec-9001': [('M', 'deploy.sh')]})
+        self.assert_batching(result, ['L-spec-9001'], 'solo-head', 1)
+        for text in ('authorised measurement', 'single queue head'):
+            self.assertNotIn(text, Path(mq.__file__).read_text())
+        self.batching_mark(1, dict(matrix=matrix, malformed_refused=True, solo_head=True))
+
+    def test_window_batching_caps(self):
+        import tomllib
+        shipped = tomllib.loads((Path(DOIT).parent / 'look.toml').read_text())['merge_queue']
+        self.assertEqual(shipped, dict(batch_cap=10, batch_cap_floor=6, window_target=6))
+        self.assertEqual(mq._look_toml(), Path(DOIT).parent / 'look.toml')
+        matrix = []
+        for literal, target in ((None, 6), ('2', 2), ('4', 4), ('6', 6), ('0', 6), ('-1', 6),
+                                ('1', 6), ('7', 6), ('true', 6), ('"4"', 6)):
+            config = 'batch_cap=10\nbatch_cap_floor=6'
+            if literal is not None:
+                config += '\nwindow_target=' + literal
+            result = self.batching_case(8, config=config)
+            self.assertEqual(mq.window_target(self.root / 'look.toml'), target)
+            self.assert_batching(result, [f'L-spec-{9001+i}' for i in range(target)], 'window-target', 8-target)
+            self.assertFalse(any(e['type'] == 'batch-cap' for e in result['events']))
+            matrix.append(dict(target=literal, selected=result['selected']))
+        for config in ('window_target=[', None, '[window_target]\nx=1', 'window_target=2.5'):
+            result = self.batching_case(8, config=config)
+            self.assert_batching(result, [f'L-spec-{9001+i}' for i in range(6)], 'window-target', 2)
+        with patch.object(mq, '_look_toml', return_value=self.root):
+            self.assertEqual(mq.window_target(), 6)  # opening a directory is unreadable
+        for previous, expected in ((None, 6), (4, 4)):
+            extra = [] if previous is None else [dict(self.event('batch-cap', 2, cap=previous,
+                         reason='operator'), subject='merge-train')]
+            result = self.batching_case(8, extra=extra)
+            self.assert_batching(result, [f'L-spec-{9001+i}' for i in range(expected)],
+                                 'window-target' if previous is None else 'effective-cap', 8-expected)
+        throttle = []
+        for floor in (3, 6):
+            for rate, expected in ((.40, 6), (.41, floor)):
+                result = self.batching_case(8, config=f'batch_cap=10\nbatch_cap_floor={floor}\nwindow_target=6',
+                                            rate=dict(rate=rate, windows=5))
+                self.assert_batching(result, [f'L-spec-{9001+i}' for i in range(expected)],
+                                     'window-target' if expected == 6 else 'effective-cap', 8-expected)
+                caps = [e for e in result['events'] if e['type'] == 'batch-cap']
+                self.assertEqual(len(caps), int(rate > .40))
+                if caps:
+                    self.assertEqual((caps[0]['cap'], caps[0]['from'], caps[0]['red_rate'],
+                                      caps[0]['windows'], caps[0]['reason']),
+                                     (floor, 10, rate, 5, 'red-rate-over-0.40'))
+                throttle.append(dict(floor=floor, rate=rate, selected=result['selected']))
+        result = self.batching_case(8, config='batch_cap=10\nbatch_cap_floor=3\nwindow_target=6',
+                                    rate=dict(rate=None, windows=5))
+        self.assert_batching(result, ['L-spec-9001', 'L-spec-9002', 'L-spec-9003'], 'effective-cap', 5)
+        self.assertEqual([e['reason'] for e in result['events'] if e['type'] == 'batch-cap'], ['undetermined'])
+        result = self.batching_case(6, ceiling=3)
+        self.assert_batching(result, ['L-spec-9001', 'L-spec-9002', 'L-spec-9003'], 'effective-cap', 3)
+        result = self.batching_case(2, ceiling=1)
+        self.assertEqual((result['code'], result['calls']), (3, []))
+        self.assertIn('window-run: undetermined', result['stderr'])
+        self.assertIn('capacity', result['stderr'])
+        self.assertIn('cap', result['stderr'])
+        self.assertFalse(any(e['type'] == 'queue-batch' for e in result['events']))
+        result = self.batching_case(1, ceiling=1)
+        self.assert_batching(result, ['L-spec-9001'], 'sole-eligible', 0)
+        self.batching_mark(2, dict(target_matrix=matrix, throttle=throttle, ceiling_three=True,
+                                   contradictory_capacity_refused=True, sole_under_cap_one=True))
+
+    def test_window_batching_solo_and_order(self):
+        cases = [([('M', 'deploy.sh')], True), ([('M', 'scripts/release_kit.sh')], True),
+                 ([('M', 'scripts/release/x.sh')], True), ([('A', 'alembic/versions/a.py')], True),
+                 (None, True), ([('M', 'src/code.py')], False),
+                 ([('A', 'deploy/cron/x.sh')], False), ([('M', 'infra/x/deploy.sh')], False)]
+        for paths, solo in cases:
+            self.assertEqual(mq.is_risky(paths), solo)
+            result = self.batching_case(2, paths={'l-spec-9001': paths, 'l-spec-9002': [('M', 'b')]})
+            self.assert_batching(result, ['L-spec-9001'] if solo else ['L-spec-9001', 'L-spec-9002'],
+                                 'solo-head' if solo else 'all-ready', int(solo))
+        paths = {'l-spec-9001': [('M', 'a')], 'l-spec-9002': [('M', 'b')],
+                 'l-spec-9003': [('M', 'a'), ('M', 'c')], 'l-spec-9004': [('M', 'deploy.sh')],
+                 'l-spec-9005': [('M', 'x')]}
+        result = self.batching_case(5, paths=paths)
+        self.assert_batching(result, ['L-spec-9001', 'L-spec-9003', 'L-spec-9002', 'L-spec-9005'], 'all-ready', 1)
+        result = self.batching_case(5, paths=paths, config='window_target=2')
+        self.assert_batching(result, ['L-spec-9001', 'L-spec-9003'], 'window-target', 3)
+        result = self.batching_case(3, paths={'l-spec-9001': [], 'l-spec-9002': None,
+                                           'l-spec-9003': [('M', 'deploy.sh')]}, ceiling=1)
+        self.assert_batching(result, ['L-spec-9001'], 'sole-eligible', 2)
+        result = self.batching_case(3, repository=False)
+        self.assert_batching(result, ['L-spec-9001'], 'solo-head', 2)
+        result = self.batching_case(2, ceiling=1, paths={'l-spec-9001': None})
+        self.assert_batching(result, ['L-spec-9001'], 'solo-head', 1)
+        # Retain the existing pure-function protections for duplicates, empty
+        # footprints, unknown non-heads and a rename's two path names.
+        rows = [dict(spec=s) for s in ('A', 'B', 'C', 'R', 'X', 'A')]
+        footprints = dict(A={'a'}, B={'b'}, C={'a', 'c'}, R={'deploy.sh'}, X={'x'})
+        first = mq.form_batch(rows, footprints, 6, {'R'})
+        self.assertEqual(first, ['A', 'C', 'B', 'X'])
+        self.assertEqual(mq.form_batch([r for r in rows if r['spec'] not in first], footprints, 6, {'R'}), ['R'])
+        self.assertEqual(mq.form_batch(rows, dict(footprints, B=None, X=set()), 6, {'R'}), ['A', 'C', 'X'])
+        self.assertEqual(mq.form_batch([dict(spec=s) for s in ('rename', 'old', 'empty')],
+                                      dict(rename={'old.py', 'new.py'}, old={'old.py'}, empty=set()), 6, set()),
+                         ['rename', 'old', 'empty'])
+        self.batching_mark(3, dict(risk_classes=cases, mixed=first, target_two=['A', 'C'],
+                                   unavailable_repository_solo=True, retained_solo_next=True))
+
+    def test_window_batching_round_trip(self):
+        reads = []
+        for detached in (False, True):
+            for code in ((0, 1, 2, 3, 4) if not detached else (0,)):
+                result = self.batching_case(4, detached=detached, code=code, independent=True)
+                self.assertEqual(result['code'], 0 if detached else code)
+                self.assertEqual(result['selected'], [f'L-spec-{9001+i}' for i in range(4)])
+                reads.append(dict(detached=detached, code=result['code'], specs=result['selected']))
+        result = self.batching_case(0, independent=True)
+        self.assertEqual((result['code'], result['calls']), (3, []))
+        with patch.object(mq.window_gate, 'in_flight', return_value=[dict(window='live', specs=[self.sid])]):
+            result = self.batching_case(3)
+        self.assertEqual((result['code'], result['calls']), (3, []))
+        # A live PID reservation is read from the real scratch state file.
+        reservation = dict(self.event('queue-batch', 2, project='albert-scott', specs=self.sid),
+                           subject='window-reserved')
+        pid_path = self.root / 'state' / 'window-run.window-reserved.pid'
+        pid_path.write_text(str(os.getpid()))
+        result = self.batching_case(3, extra=[reservation])
+        self.assertEqual((result['code'], result['calls']), (3, []))
+        pid_path.unlink()
+        red = self.nightly_event('nightly-red', 0, ids=['test_fixture'])
+        self.seed([red], 'L-base-red-local.jsonl')
+        result = self.batching_case(3)
+        self.assertEqual((result['code'], result['calls']), (3, []))
+        self.assertIn('window-run: unowned nightly red:', result['stdout'])
+        (self.root / 'events' / 'L-base-red-local.jsonl').unlink()
+        for target, name in ((mq, 'merge_freeze'), (mq.window_gate, 'train_events')):
+            with patch.object(target, name, side_effect=OSError('unreadable')):
+                result = self.batching_case(3)
+            self.assertEqual((result['code'], result['calls']), (3, []))
+            self.assertIn('window-run: undetermined', result['stderr'])
+        wrong = dict(self.event('queue-add', 10, project='other', branch='other', rule='operator'),
+                     subject='L-spec-9999')
+        malformed = dict(wrong, ts='broken')
+        for extra in (wrong, malformed):
+            result = self.batching_case(3, extra=[extra])
+            self.assertEqual((result['code'], result['calls']), (3, []))
+            self.assertFalse(any(e['type'] == 'queue-batch' for e in result['events']))
+        for project in ('../bad', '.', '..', ''):
+            self.assertEqual(mq.window_run(project, runner=self.fake), 2)
+        self.assertFalse(self.calls)
+        # Real outcomes and a queue-add committed during the gate are folded
+        # only into the next selection, never into the already-recorded batch.
+        def outcomes(argv):
+            for i, kind in enumerate(('shipped', 'window-dropped', 'merge-conflict')):
+                self.simple_emit(kind, f'L-spec-{9001+i}', reason='fixture', window=argv[2])
+            self.simple_add('L-spec-9010')
+        result = self.batching_case(4, independent=True, callback=outcomes)
+        self.assertEqual(result['selected'], [f'L-spec-{9001+i}' for i in range(4)])
+        self.assertEqual([r['spec'] for r in mq.queue(self.fresh_events())], ['L-spec-9004', 'L-spec-9010'])
+        self.assertEqual(len([e for e in result['events'] if e['type'] == 'queue-remove']), 3)
+        code, calls = self.train_call()
+        self.assertEqual(code, 0)
+        self.assertEqual(calls[0][-1], 'L-spec-9004,L-spec-9010')
+        # Reuse the existing two-process lock/reservation regression, which
+        # commits to the same production append path in this scratch store.
+        self.test_train_concurrent()
+        self.batching_mark(4, dict(independent_reads=reads, empty=True, live=True, reservation=True,
+                                   freeze=True, unreadable=True, wrong_project=True, malformed=True,
+                                   simultaneous_callers=True, terminal_reconciliation=True, mid_window_add=True))
+
     def test_window_launch_and_exit_codes(self):
         for code in (0, 1, 2, 3, 4):
             self.window_seed(7)
             def runner(argv):
                 batch = [e for e in fold.read_events() if e['type'] == 'queue-batch'][-1]
                 self.assertEqual(argv[2], batch['subject'])
-                self.assertEqual(len(batch['specs'].split(',')), 1)
+                self.assertEqual(batch['specs'].split(','), [f'L-spec-{9001+i}' for i in range(6)])
                 return dict(code=code)
             with patch.object(mq, '_repository', return_value=(self.root, 'main')), \
                  patch.object(mq, 'spec_paths', return_value=[('M', 'file.py')]):
@@ -643,7 +886,7 @@ class QueueTests(unittest.TestCase):
     def fresh_events(self):
         env = dict(os.environ, DOIT_ROOT=str(self.root), DOIT_READ_CACHE='0')
         result = subprocess.run([sys.executable, '-c',
-                                 'import fold,json; print(json.dumps(fold.read_events()))'],
+                                 'import fold,json; print(json.dumps(fold.read_events(use_cache=False)))'],
                                 cwd=Path(mq.__file__).parent, env=env, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout)
@@ -697,7 +940,7 @@ class QueueTests(unittest.TestCase):
         self.assertEqual(fold_emits.EMITS['batch-cap'], {'executor', 'tick', 'operator'})
         import tomllib
         table = tomllib.loads((Path(DOIT).parent / 'look.toml').read_text())['merge_queue']
-        self.assertEqual(table, dict(batch_cap=10, batch_cap_floor=6))
+        self.assertEqual(table, dict(batch_cap=10, batch_cap_floor=6, window_target=6))
         self.train_mark(4, 'config', 'unreadable floor', 'rate none many windows floor',
                         'few windows keep newest', 'few windows configured', 'floor on red', 'boundary 0.40',
                         'configured when calm', 'max_merges clamp', 'record once', 'unchanged silent',
@@ -720,7 +963,7 @@ class QueueTests(unittest.TestCase):
         with patch.object(mq.window_gate, 'train_depth', side_effect=AssertionError('depth called')):
             self.assertEqual(self.train_call()[0], 0)
         batch = [e for e in fold.read_events() if e['type'] == 'queue-batch'][-1]
-        self.assertEqual(batch['specs'], self.sid)
+        self.assertEqual(batch['specs'].split(','), [f'L-spec-{9001+i}' for i in range(6)])
         self.assertEqual(self.train_call(flying=[dict(window='active', specs=[self.sid])]), (3, []))
         pending = dict(self.event('queue-batch', 0, project='albert-scott', specs=self.sid), subject='window-pending')
         with (self.root / 'events' / 'L-executor-0001.jsonl').open('a') as stream:
@@ -736,7 +979,7 @@ class QueueTests(unittest.TestCase):
         for node in ast.walk(tree):
             self.assertFalse(isinstance(node, ast.Name) and node.id in forbidden)
             self.assertFalse(isinstance(node, ast.Attribute) and node.attr in forbidden)
-        self.train_mark(5, 'single head', 'in flight waits', 'reservation holds', 'no gate internals')
+        self.train_mark(5, 'six ready specs', 'in flight waits', 'reservation holds', 'no gate internals')
 
     def test_train_lock_and_detach(self):
         self.window_seed()
@@ -931,12 +1174,13 @@ sys.exit(m.window_run('albert-scott', detach=True, launcher=launch))
             self.simple_add(sid)
         head = mq.next_candidate(self.fresh_events())
         with patch.object(mq.window_gate, 'train_depth', side_effect=AssertionError('depth used')), \
-             patch.object(mq, 'effective_cap', side_effect=AssertionError('cap used')), \
-             patch.object(mq, 'form_batch', side_effect=AssertionError('batch used')):
+             patch.object(mq, 'form_batch', wraps=mq.form_batch) as form:
             code, calls = self.train_call()
         self.assertEqual(code, 0)
         self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0][calls[0].index('--specs') + 1], head)
+        self.assertTrue(form.called)
+        self.assertEqual(calls[0][calls[0].index('--specs') + 1].split(','),
+                         [head, 'L-spec-9002', 'L-spec-9003'])
         self.assertNotIn('--after', calls[0])
         self.assertEqual(self.train_call(flying=[dict(window='busy', specs=[head])]), (3, []))
         with self.assertRaises(TypeError):
@@ -947,22 +1191,25 @@ sys.exit(m.window_run('albert-scott', detach=True, launcher=launch))
         self.simple_mark(2, dict(argv=calls[0], in_flight_launches=0, maximum_rejected=True))
 
     def test_batching_allowed(self):
-        self.assertFalse(mq.batching_allowed(self.fresh_events(), 5))
+        self.assertTrue(mq.batching_allowed(self.fresh_events(), 5))
         measurement = dict(single_p50_s=20, batched_p50_s=10, equal_input=True)
         for actor in ('builder', 'grader'):
             events = self.simple_emit('merge-measurement', actor=actor, **measurement)
-            self.assertFalse(mq.batching_allowed(events, 5))
+            self.assertTrue(mq.batching_allowed(events, 5))
+            with self.assertRaisesRegex(ValueError, 'unsupported train ledger actor'):
+                mq._train_emit(f'L-{actor}-local.jsonl', 'window-denied', 'queue-batch',
+                               project='albert-scott', specs=self.sid)
         for fields in (dict(measurement, equal_input=False), dict(measurement, batched_p50_s=20),
                        dict(measurement, batched_p50_s=30), dict(single_p50_s=20, equal_input=True),
                        dict(measurement, single_p50_s='20'), dict(measurement, single_p50_s=True),
                        dict(measurement, batched_p50_s=-1), dict(measurement, batched_p50_s=float('nan'))):
             events = self.simple_emit('merge-measurement', actor='operator', **fields)
-            self.assertFalse(mq.batching_allowed(events, 5))
+            self.assertTrue(mq.batching_allowed(events, 5))
         events = self.simple_emit('merge-measurement', actor='operator', **measurement)
         self.assertFalse(mq.batching_allowed(events, mq.BATCH_MIN_QUEUE - 1))
         self.assertTrue(mq.batching_allowed(events, mq.BATCH_MIN_QUEUE))
         events = self.simple_emit('merge-measurement', actor='executor', **dict(measurement, equal_input=False))
-        self.assertFalse(mq.batching_allowed(events, 5))
+        self.assertTrue(mq.batching_allowed(events, 5))
         self.simple_emit('merge-measurement', actor='executor', **measurement)
         for actor in ('builder', 'grader'):
             events = self.simple_emit('merge-measurement', actor=actor, **dict(measurement, batched_p50_s=1))
@@ -977,7 +1224,7 @@ sys.exit(m.window_run('albert-scott', detach=True, launcher=launch))
         self.assertTrue(form.called)
         self.assertEqual(calls[0][calls[0].index('--specs') + 1].split(','), expected)
         self.assertEqual([e['cap'] for e in self.fresh_events() if e['type'] == 'batch-cap'], [3])
-        self.simple_mark(3, dict(authorised=True, untrusted_ignored=True, invalid_disabled=True,
+        self.simple_mark(3, dict(measurement_independent=True, untrusted_ignored=True, invalid_ignored=True,
                                  minimum=mq.BATCH_MIN_QUEUE, selected=expected, cap_recorded=True))
 
     def test_tick_launch(self):
