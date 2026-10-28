@@ -30,7 +30,7 @@ FIXTURES = ROOT / 'src/fixtures/nextstep'
 
 def event(kind, minutes=-30, subject=SID, **extra):
     return dict(type=kind, ts=(NOW + timedelta(minutes=minutes)).isoformat(),
-                subject=subject, _src=f'L-operator-fixture.jsonl:{minutes + 20000}', **extra)
+                subject=subject, _src=f'L-operator-fixture.jsonl:{minutes + 20000}', **({'actor': 'operator'} | extra))
 
 
 def specs_for(events):
@@ -44,6 +44,9 @@ def replay(name):
     lines = (directory / 'source.txt').read_text().splitlines()
     now = datetime.fromisoformat(lines[0].split('cut: ')[1])
     # The caller supplies fold state; replay time never comes from fold.NOW.
+    events += [dict(type='spawn-done', subject=e['subject'], ts=e['ts'],
+                    actor='spec-auditor', bad_cut=False, _src='L-spec-auditor-fixture.jsonl:1')
+               for e in list(events) if e['type'] == 'spec-written']
     normalized = ns._snapshot(events, {})[0]
     with patch.object(fold, 'NOW', now):
         specs = fold.fold(normalized)[0]
@@ -396,6 +399,96 @@ class NextStepTests(unittest.TestCase):
             self.assertEqual(ns.main([]), 2)
             self.assertEqual(out.getvalue(), '')
             self.assertIn('clock unavailable', err.getvalue())
+
+
+class AuditStepTests(unittest.TestCase):
+    setUp = NextStepTests.setUp
+    steps = NextStepTests.steps
+    one = NextStepTests.one
+    # Use the inherited snapshot helpers without repeating the historical cases.
+    def planner(self, minutes=-31, **kw):
+        return event('spec-written', minutes, actor='spec-writer', **kw)
+
+    def signed(self, ac, body):
+        payload = json.dumps(body, sort_keys=True, default=str)
+        print(json.dumps(dict(url='cli://audit-nextstep/' + ac, status=0,
+            body_sha256=hashlib.sha256(payload.encode()).hexdigest(), body_excerpt=payload)))
+
+    def test_ac2_audit_grace_and_precedence(self):
+        written = self.planner(-30)
+        evs = [written]
+        for offset, expected in ((-1, None), (0, 'audit')):
+            now = NOW + timedelta(seconds=offset)
+            step = self.one(evs, now=now)
+            self.assertEqual(step.action, expected)
+            if expected:
+                self.assertEqual((step.owner, step.stage), ('tick', 'planned'))
+                self.assertEqual(ns.audit_due(evs, now)['since'], written['ts'])
+            else:
+                self.assertTrue(step.reason.startswith('audit-wait:'))
+            self.signed('AC2-boundary', asdict(step))
+        self.assertTrue(self.one(evs + [self.planner(-10)]).reason.startswith('audit-wait:'))
+        clean = event('spawn-done', -1, actor='spec-auditor', bad_cut=False)
+        self.assertEqual(self.one(evs + [clean]).action, 'build')
+        for exempt in ([event('spec-written')], evs + [event('spec-carried')]):
+            self.assertEqual(self.one(exempt).action, 'build')
+        for blocked in (event('question'), event('spawn-started', -1, spawn='L-spec-auditor-9001', role='spec-auditor')):
+            self.assertIsNone(self.one(evs + [blocked]).action)
+        dependency = event('spec-written', -40, subject='L-spec-9002')
+        with patch.object(ns.autodispatch, 'held_by_dependency', return_value='L-spec-9002'):
+            self.assertEqual(self.one(evs, specs={SID: dict(state='written')}).action, 'audit')
+        bad = event('spawn-done', -2, actor='spec-auditor', bad_cut=True)
+        step = self.one(evs + [bad])
+        self.assertEqual(step.owner, 'executor')
+        self.assertTrue(step.reason.startswith('audit-bad-cut:'))
+        self.assertEqual(self.one(evs + [bad, self.planner(-1)]).action, 'build')
+        self.assertIsNone(ns._build(dict(evs=evs)))
+        self.signed('AC2-bad-cut', asdict(step))
+
+    def test_ac3_real_attempts_and_failure_hold_order(self):
+        import attempts
+        evs = [self.planner(-90)]
+        start = event('spawn-started', -10, spawn='L-spec-auditor-9001', role='spec-auditor')
+        self.assertEqual(ns.audit_state(evs + [start], NOW)['phase'], 'live')
+        self.assertIsNone(ns.audit_due(evs + [start], NOW))
+        refusal = event('spawn-failed', -20, role='builder', spawn='L-builder-9001', reason='unaudited')
+        self.assertEqual(ns.classify_failure('unaudited', 1), 'unknown')
+        self.assertEqual(self.one(evs + [refusal]).action, 'audit')
+        fail = event('spawn-failed', -5, role='spec-auditor', spawn='L-spec-auditor-9001', reason='audit fixture failed')
+        retry = evs + [refusal, start, fail]
+        for seconds, phase in ((-1, 'retry-wait'), (0, 'due'), (1, 'due')):
+            now = NOW + timedelta(seconds=seconds)
+            state = ns.audit_state(retry, now)
+            self.assertEqual(state['phase'], phase)
+            step = self.one(retry, now=now)
+            if phase == 'due':
+                self.assertEqual(ns.audit_due(retry, now)['attempt'], 2)
+                self.assertEqual(step.action, 'audit')
+            else:
+                self.assertIsNone(ns.audit_due(retry, now))
+                self.assertTrue(step.reason.startswith('audit-wait:'))
+            self.signed('AC3-backoff', dict(state=state, step=asdict(step)))
+        stale = event('spawn-stale', -5, role='spec-auditor', spawn='L-spec-auditor-9001')
+        self.assertEqual(ns.audit_due(evs + [start, stale], NOW)['attempt'], 2)
+        failures = [event('spawn-failed', -30 + n, role='spec-auditor',
+                         spawn=f'L-spec-auditor-{9100+n}', reason=f'audit failure {n}')
+                    for n in range(attempts.MAX_ATTEMPTS)]
+        exhausted = evs + failures
+        self.assertEqual(ns.audit_state(exhausted, NOW)['phase'], 'exhausted')
+        self.assertIsNone(ns.audit_due(exhausted, NOW))
+        step = self.one(exhausted)
+        self.assertTrue(step.reason.startswith('audit-exhausted:'))
+        for n in range(attempts.MAX_ATTEMPTS):
+            self.assertIn(f'audit failure {n}', step.reason)
+        self.assertEqual(ns.audit_state(exhausted + [self.planner(-10)], NOW + timedelta(minutes=20))['phase'], 'due')
+        with patch.object(attempts, 'history', side_effect=OSError('ledger unavailable')):
+            self.assertEqual(ns.audit_state(evs, NOW)['phase'], 'undetermined')
+            self.assertIsNone(ns.audit_due(evs, NOW))
+        def unreadable():
+            raise OSError('slice unavailable')
+            yield
+        self.assertEqual(ns.audit_state(unreadable(), NOW)['phase'], 'undetermined')
+        self.signed('AC3-exhausted', asdict(step))
 
 
 if __name__ == '__main__':

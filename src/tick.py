@@ -248,8 +248,9 @@ def _carry_packet_busy(busy):
 
 
 ROUTINE_ROLES = dict(build='builder', grade='grader', review='reviewer',
-                     rebuild='builder', regrade='grader')
+                     rebuild='builder', regrade='grader', audit='spec-auditor')
 ROUTINE_ACTIONS = set(ROUTINE_ROLES)
+AUDIT_PASS_MAX = 6
 LAUNCH_ACTIONS = ROUTINE_ACTIONS | {'merge'}
 
 
@@ -285,7 +286,7 @@ def launch(step, *, dispatcher):
             print(str(exc), file=sys.stderr)
             return None
     evs = [e for e in events if e.get('subject') == step.item]
-    if autodispatch._standing_autodispatch_failed(evs):
+    if step.action != 'audit' and autodispatch._standing_autodispatch_failed(evs):
         return None
     if getattr(dispatcher, 'dry_run', False):
         return None
@@ -307,6 +308,31 @@ def launch(step, *, dispatcher):
     role = ROUTINE_ROLES[step.action]
     heal = None
     try:
+        if step.action == 'audit':
+            if not re.fullmatch(r'L-spec-\d+', step.item):
+                raise ValueError('invalid audit spec id')
+            project = next((e['project'] for e in reversed(evs) if e.get('project')), 'unknown')
+            if not isinstance(project, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]*', project):
+                raise ValueError('invalid audit project')
+            charter = dispatch.resolve_charter(evs, step.item, None)
+            packet = dispatcher(['doit', 'packet', role, step.item])
+            if packet.get('code', 1):
+                raise ValueError(packet.get('stderr') or packet.get('stdout') or 'packet failed')
+            result = dispatcher(['doit', 'dispatch', '--detach', role, step.item,
+                '--packet', packet.get('stdout', '').strip(),
+                '--cwd', str(fold.ROOT / 'repos' / project), '--charter', charter or '', '--project', project])
+            if result.get('code', 1):
+                raise ValueError(result.get('stderr') or result.get('stdout') or 'dispatch failed')
+            spawn = json.loads(result.get('stdout') or '')['detached']
+            if isinstance(spawn, int) and not isinstance(spawn, bool) and spawn > 0:
+                spawn = str(spawn)
+            if not isinstance(spawn, str) or not spawn:
+                raise ValueError('undetermined: missing spawn id')
+            refusal = dispatch.emit(tick_path(), {'subject': step.item}, 'autodispatched',
+                                    role=role, rule='audit', since=step.since, spawn=spawn)
+            if refusal is not None:
+                raise ValueError('autodispatched record refused: ' + str(refusal))
+            return spawn
         try:
             import worktree_heal
         except Exception:
@@ -399,6 +425,7 @@ def run_steps(events, specs, now, *, dispatcher=None, dry_run=False, handled=fro
             if admission is not None:
                 admission['admission_error'] = str(exc)[:160]
     out = []
+    audit_launches = 0
     gate_disabled = False
     try:
         try:
@@ -429,6 +456,9 @@ def run_steps(events, specs, now, *, dispatcher=None, dry_run=False, handled=fro
                                if head is not None else 'hold undetermined: no merge candidate')
                     continue
             role = ROUTINE_ROLES.get(step.action)
+            if step.action == 'audit' and audit_launches >= AUDIT_PASS_MAX:
+                out.append(f'seat-wait {step.item} audit')
+                continue
             if role in slots and slots[role] <= 0:
                 out.append(f'seat-wait {step.item} {step.action}')
                 continue
@@ -454,6 +484,8 @@ def run_steps(events, specs, now, *, dispatcher=None, dry_run=False, handled=fro
             try:
                 spawned, raised = True, True  # Any exception may follow a started process.
                 try:
+                    if step.action == 'audit':
+                        audit_launches += 1
                     spawn = launch(step, dispatcher=runner)
                     spawned, raised = bool(spawn), False
                 finally:
@@ -484,6 +516,14 @@ def run_steps(events, specs, now, *, dispatcher=None, dry_run=False, handled=fro
             if admission is not None:
                 admission.update(fields)
     return out
+
+
+def handled_items(steps):
+    """Keep audit retries exclusively under the bounded next-step decision."""
+    return {s.item for s in steps
+            if (s.state == 'action' and s.owner == 'tick' and s.action in ROUTINE_ACTIONS)
+            or (s.state == 'hold' and s.reason.startswith(
+                ('audit-wait:', 'audit-exhausted:', 'audit-bad-cut:')))}
 
 
 def _reap_summary(rows, *, not_reapable, manifest) -> dict | None:
@@ -753,8 +793,7 @@ def _record():
         steps = _steps(ev, specs, fold.NOW)
         outcomes = run_steps(ev, specs, fold.NOW, steps=steps, admission=admission)
         outcomes.extend(autodispatch.redispatch_dead(ev, specs, fold.NOW,
-                        handled={s.item for s in steps if s.state == 'action' and s.owner == 'tick'
-                                 and s.action in ROUTINE_ACTIONS}))
+                        handled=handled_items(steps)))
         outcomes.extend(merge_queue.enqueue_due(ev, fold.NOW))
         log_outcomes(outcomes or [])
         failures = [line for line in outcomes if line.startswith('failed ')]

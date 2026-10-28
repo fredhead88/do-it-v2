@@ -16,6 +16,7 @@ import sys
 import unicodedata
 
 import autodispatch
+import attempts
 import dispatch
 import fold
 import lane_rules
@@ -38,6 +39,7 @@ OWED_STATES = {'shipped-owed-evidence', 'shipped-owed-due', 'shipped-owed-expire
 FAILURES = {'merge-gate-rework', 'spawn-failed', 'autodispatch-failed'}
 NOT_READY_PREFIXES = ('wave-order', 'bundle-pending', 'duplicate-dispatch', 'dispatch-in-progress')
 RETRIES = {'build-started', 'spawn-started', 'queue-add', 'decision', 'spec-written'}
+AUDIT_GRACE_MIN = 30
 ACTIONS: dict[str, str] = {}
 
 
@@ -229,7 +231,64 @@ def _regrade(c):
 
 
 
+def audit_state(evs, now):
+    """Evaluate SD3's one audit and SD1's bounded attempts on a subject slice."""
+    state = dict(phase='undetermined', since=None, due_at=None, retry_at=None, reason='')
+    try:
+        evs = list(evs)
+        trigger = _latest(evs, {'spec-written'})
+        if trigger:
+            state['since'] = trigger['ts']
+            due_at = _time(trigger['ts']) + timedelta(minutes=AUDIT_GRACE_MIN)
+            state['due_at'] = due_at.isoformat()
+        reason = dispatch.unaudited(evs)
+        if reason is None:
+            first = next((e for e in evs if e.get('type') == 'spec-written'), {})
+            exempt = (not first or first.get('actor') != 'spec-writer'
+                      or any(e.get('type') in {'spec-carried', 'build-started'} for e in evs))
+            state.update(phase='exempt' if exempt else 'done', reason='audit exempt' if exempt else 'audit complete')
+            return state
+        state['reason'] = reason
+        if reason.startswith('unaudited: undetermined'):
+            return state
+        if 'audit reported bad_cut' in reason:
+            state['phase'] = 'bad-cut'
+            return state
+        if now < due_at:
+            state.update(phase='wait', reason='30 minute audit grace')
+            return state
+        history = attempts.history(evs, trigger, 'spec-auditor', now=now,
+            dead=frozenset(e['spawn'] for e in autodispatch.dead_spawns(evs, now)))
+        if history.live:
+            state.update(phase='live', reason='spec-auditor in flight')
+        elif history.not_ready:
+            state.update(phase='not-ready', reason=history.not_ready)
+        elif history.exhausted:
+            state.update(phase='exhausted', reason='; '.join(history.reasons))
+        elif history.consumed:
+            # A consumed trigger without a C1 audit cannot authorize a build.
+            state.update(phase='not-ready', reason='audit trigger already consumed')
+        elif history.next_retry_at and now < history.next_retry_at:
+            state.update(phase='retry-wait', retry_at=history.next_retry_at.isoformat(),
+                         reason='; '.join(history.reasons))
+        else:
+            state.update(phase='due', reason='one blind spec audit due', attempt=history.n_failed + 1)
+        return state
+    except Exception as exc:
+        state.update(phase='undetermined', reason='undetermined: ' + str(exc))
+        return state
+
+
+def audit_due(evs, now):
+    state = audit_state(evs, now)
+    if state['phase'] == 'due':
+        return {key: state[key] for key in ('since', 'reason', 'attempt', 'retry_at')}
+    return None
+
+
 def _build(c):
+    if dispatch.unaudited(c['evs']) is not None:
+        return None
     if c['spec'].get('state') != 'written' or c['sid'] in c['busy'] or c['dependency'] or c['wave']:
         return None
     if _rebuild(c) or _close(c) or _regrade(c):
@@ -574,6 +633,33 @@ def next_steps(events, specs, now, rules, waves=None):
                     step = _hold(item, 'check', 'live', event, 'owed check waiting',
                                  str(check['due_at'] or 'dated owed check'), 'sweeper', since)
                 steps.append(step)
+            continue
+        if state == 'written' and dispatch.unaudited(evs) is not None:
+            questions = _unanswered(evs, events)
+            if questions:
+                steps.append(_hold(sid, 'spec', stage, questions[-1],
+                                   'judgment: open question/escalation', 'decision'))
+                continue
+            if sid in busy:
+                spawn = next(s for s, e in attempts.items() if e.get('subject') == sid)
+                steps.append(_hold(sid, 'spec', stage, attempts[spawn], 'in flight: ' + spawn,
+                                   spawn + ' spawn-done/spawn-failed', 'tick'))
+                continue
+            audit = audit_state(evs, now)
+            trigger = _latest(evs, {'spec-written'})
+            phase = audit['phase']
+            if phase == 'due':
+                steps.append(Step(sid, 'spec', 'planned', 'action', 'audit', 'tick',
+                                  _source(trigger), audit['reason'], None, audit['since']))
+            elif phase == 'bad-cut':
+                steps.append(_hold(sid, 'spec', 'planned', trigger,
+                                   f'audit-bad-cut: {sid} audit reported bad_cut',
+                                   'spec-written rewrite or operator decision', 'executor', audit['since']))
+            else:
+                prefix = 'audit-exhausted: ' if phase == 'exhausted' else 'audit-wait: '
+                steps.append(_hold(sid, 'spec', 'planned', trigger,
+                                   prefix + phase + ': ' + audit['reason'],
+                                   'spec-auditor spawn-done', 'tick', audit['since']))
             continue
         failure, classification = _failure(evs, rules)
         if failure and classification != 'work':

@@ -639,6 +639,7 @@ if __name__ == "__main__":
     SW276 = TMP / "events" / "L-spec-writer-fx276a.jsonl"
     dispatch.emit(SW276, {}, "spec-written", subject="L-spec-2761", charter="CH276", footprint=["src/x276.py"])
     dispatch.emit(SW276, {}, "spec-written", subject="L-spec-2762", charter="CH276", footprint=["src/y276.py"])
+    dispatch.emit(TMP / "events" / "L-spec-auditor-fx2762.jsonl", {}, "spawn-done", subject="L-spec-2762", bad_cut=False)
 
     for charter_arg in ("CH276", "/any/path/CH276.md", None):
         code, types, evs, cmd = spawn("builder", out=card, subject="L-spec-2762", charter=charter_arg)
@@ -654,6 +655,7 @@ if __name__ == "__main__":
     dispatch.emit(SW276, {}, "spec-written", subject="L-spec-2765", charter="CH276", footprint=["src/x276.py"])
     dispatch.emit(SW276, {}, "spec-killed", subject="L-spec-2765", check=1)
     dispatch.emit(SW276, {}, "spec-written", subject="L-spec-2763", charter="CH276", footprint=["src/y276.py"])
+    dispatch.emit(TMP / "events" / "L-spec-auditor-fx2763.jsonl", {}, "spawn-done", subject="L-spec-2763", bad_cut=False)
     code, types, evs, cmd = spawn("builder", out=card, subject="L-spec-2763", charter="CH276")
     assert code == 0 and cmd is not None, (code, types, evs)
 
@@ -672,6 +674,7 @@ if __name__ == "__main__":
     # refusal — and `build-started` carries `wave_note="undetermined"` ────────────
     SW276b = TMP / "events" / "L-spec-writer-fx276b.jsonl"
     dispatch.emit(SW276b, {}, "spec-written", subject="L-spec-2764", footprint=["src/z276.py"])
+    dispatch.emit(TMP / "events" / "L-spec-auditor-fx2764.jsonl", {}, "spawn-done", subject="L-spec-2764", bad_cut=False)
     code, types, evs, cmd = spawn("builder", out=card, subject="L-spec-2764")
     assert code == 0 and cmd is not None, (code, types, evs)
     bs276 = next(e for e in evs if e["type"] == "build-started")

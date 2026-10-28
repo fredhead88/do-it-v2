@@ -214,6 +214,8 @@ def candidates(events, specs, now, *, head_of=None):
             reason = 'busy (open escalation or spawn)'
         if reason is None and not (fold.ROOT / 'repos' / project).exists():
             reason = f'no $R/repos/{project} symlink'
+        if reason is None:
+            reason = dispatch.unaudited(evs)
         since = _since(events, sid, evs, charter, wave) or now
         rows.append({"spec": sid, "charter": charter, "project": project,
                      "since": since.isoformat(timespec="seconds"), "limit_min": limit_min,

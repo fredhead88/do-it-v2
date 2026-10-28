@@ -30,7 +30,6 @@ BUILDER_DENY = ["Bash(git push --force:*)", "Bash(git push -f:*)", "Bash(*--no-v
 sha = lambda s: hashlib.sha256(s.encode() if isinstance(s, str) else s).hexdigest()[:16]
 now = lambda: datetime.now(timezone.utc).isoformat(timespec="seconds")
 
-
 # Kept in parity with prod_runner.redact without its import cycle or head truncation.
 _FAILURE_REDACTIONS = (
     (r"(?i)postgres(?:ql)?://[^\s\"'<>]+", "[redacted database URL]", 0),
@@ -39,7 +38,6 @@ _FAILURE_REDACTIONS = (
      r"\1=[redacted]", 0),
 )
 
-
 def _failure_detail(text) -> str:
     """Redact the full diagnostic before retaining its bounded cause-bearing tail."""
     text = str(text or "")
@@ -47,12 +45,10 @@ def _failure_detail(text) -> str:
         text = re.sub(pattern, replacement, text, flags=flags)
     return text[-600:]
 
-
 def frontmatter(role):
     text = (AGENTS / f"{role}.md").read_text().split("---")[1]
     return {k.strip(): v.strip() for k, v in
             (l.split(":", 1) for l in text.strip().splitlines() if ":" in l)}
-
 
 def subject_ids(prefix):
     """The ids of that kind the LEDGER owns. A spec id can exist as a subject with no content file — three did, from a charter whose specs were never written out — and §2.8's max+1 is over the ids that exist, not over the files that happen to. Allocating over files alone re-issues such an id, and the second `spec-written` lands on a subject the fold has already resolved to terminal: it never renders, the Executor never picks it up, and an append-only ledger cannot take it back."""
@@ -82,7 +78,6 @@ def alloc(d, prefix, suffix):
         except FileExistsError:
             pass
 
-
 def emit(dst, base, type_, /, *, strict=False, **kv):
     """Append and re-read; strict callers refuse events the fold would ignore."""
     if type_ == "escalation-blocking" and kv.get("kind") == "owed-expired":
@@ -110,9 +105,7 @@ def emit(dst, base, type_, /, *, strict=False, **kv):
     assert line in dst.read_text().splitlines(), f"append to {dst} did not land"
     return None
 
-
 RETRY_MINUTES = (5, 15, 45, 120)
-
 
 def _retry_events(events, subject, role):
     rows = []
@@ -127,7 +120,6 @@ def _retry_events(events, subject, role):
                 rows.append(event)
     return rows
 
-
 def retry_at(events, subject, role, now):
     """Four bounded delays from each failure; a successful role resets the ladder."""
     rows = _retry_events(events, subject, role)
@@ -140,7 +132,6 @@ def retry_at(events, subject, role, now):
         return (stamp + timedelta(minutes=RETRY_MINUTES[len(rows) - 1])).isoformat(timespec="seconds")
     except (ValueError, KeyError, TypeError):
         return None
-
 
 def infra_gate(events, subject, role, now):
     if _machine_hold(events, subject, role):
@@ -156,7 +147,6 @@ def infra_gate(events, subject, role, now):
     except (ValueError, TypeError):
         return "hold"
 
-
 def _machine_hold(events, subject, role):
     hold = None
     for event in events:
@@ -170,14 +160,12 @@ def _machine_hold(events, subject, role):
             hold = event
     return hold
 
-
 def relay_serving(clock):
     try:
         import relay
         return relay.serving(clock) is True
     except Exception:
         return False
-
 
 def open_spec_writer_spawn(all_ev, subject):
     """R3/L-spec-0192: whether SUBJECT carries a spec-writer `spawn-started` with no matching terminal event — `tick.in_flight`'s own terminal tuple (spawn-done/spawn-failed/spawn-stale) and its own aging rule (busy within twice the role's cap, dispatchable once older, whether or not the start named a spawn id), scoped here to one subject and one role so `dispatch. main()` and the tick can never disagree about what counts as open."""
@@ -196,11 +184,9 @@ def open_spec_writer_spawn(all_ev, subject):
         return True
     return False
 
-
 # L-spec-0276/R3 Target 4: the settled states `wave_blocker` treats as "done with this wave, safe to build past" — `tick.SPEC_DONE`'s own five, plus `killed` and `void` (a killed/void sibling never blocks a later wave; `dispatch.py` must not import `tick`, since `tick.py` already imports `dispatch` — Constraints), plus bare `shipped` itself: the Goal's own wording is "an UNMERGED ... wave", and `shipped` is the literal, Executor-only ledger event that records a merge (AC10) — a minimal fixture that never reaches a verdict/review carries no other SPEC_DONE label at all, and the wave-order gate is about merge order, not acceptance order.
 SETTLED_STATES = ("accepted", "shipped", "shipped-owed-evidence", "shipped-owed-due", "shipped-owed-expired", "dropped", "closed-unbuilt",
                   "closed-shipped", "killed", "void")
-
 
 def resolve_charter(all_ev, subject, charter_arg):
     """L-spec-0276/R3 Target 4: `charter_arg` (`--charter`, bare id or path) normalises via `pathlib.Path(x).stem` (a no-op on a bare id — Assumptions); absent, the NEWEST (by `ts`) of `subject`'s own `spec-written`/`spec-carried` events carrying a non-null `charter` field, normalised the same way. `None` when neither source resolves one — most live `build-started`/`spec-written` events carry no `charter` at all, and this must not crash on that."""
@@ -212,7 +198,6 @@ def resolve_charter(all_ev, subject, charter_arg):
         return None
     newest = max(cand, key=lambda e: str(e.get("ts", "")))
     return pathlib.Path(newest["charter"]).stem
-
 
 def _plan_units(charter):
     """Yields `(footprint_set, wave)` per `## <name>` unit in `content/plan-<charter>.md` that carries both a `Footprint:` list and a `Wave: N` line — a non-unit section (e.g. `## Research findings`) has neither and is silently skipped, never mismatched to a unit."""
@@ -238,7 +223,6 @@ def _plan_units(charter):
                     fp.add(tok[0])
         yield fp, int(wave_m.group(1))
 
-
 def spec_wave(charter, footprint):
     """L-spec-0276/R3 Target 4 (Assumptions): the spec's own footprint (a set of path strings) against each unit's `Footprint:` list — exact set equality wins outright; failing that, the highest-Jaccard-overlap unit at or above 0.5; below that bar, or with no plan file at all, `None` ("undetermined" — "the unit boundary is not this check's call", SD6)."""
     fp_set = set(footprint or [])
@@ -253,7 +237,6 @@ def spec_wave(charter, footprint):
     return best_wave if best_score >= 0.5 else None
 # "shipped-owed-due" added by operator ruling 2026-09-27 ~07:30Z: a merged sibling whose post-deploy
 # check is overdue has landed its code; the overdue check is the owed sweeper's, not a reason to hold a wave.
-
 
 def wave_blocker(all_ev, charter, subject, wave):
     """L-spec-0276/R3 Target 4(a): the id of a sibling spec on the SAME charter whose own unit is an EARLIER wave and is not yet SETTLED (Assumptions) — the reason a `role=builder` dispatch on `subject` must refuse; `None` when no such sibling exists (or `wave` is itself `None` — "undetermined" never blocks, SD6)."""
@@ -289,14 +272,11 @@ def wave_blocker(all_ev, charter, subject, wave):
             return sid
     return None
 
-
 # ★ `probe` runs with its cwd OUTSIDE every repo on purpose (§4.6·10, §9.5): its run directory is under the ledger root so there is no accidental path into the product. "Not a repository" is a definite answer, not an undetermined one, and reading it as undetermined refused the probe before it ever spent.
 NOT_A_REPO = "<not a git repository>"
 
-
 # Paths other processes write to while a spawn runs — a cron's health file, a session hook's handoff — declared by the operator, never inferred. The baseline's finding 2 (a $2.19 spawn voided by the driver's own handoff file) fired again on the Albert Scott pilot: a cron rewrote docs/sessions/process- health.md under a 15-minute audit, and the whole spawn was void. The check is still whole-tree by default; this only lets a root declare what it knows moves.
 VOLATILE = [g for g in os.environ.get("DOIT_REPO_VOLATILE", "").split() if g]
-
 
 def porcelain(cwd):
     r = subprocess.run(["git", "status", "--porcelain", "--untracked-files=all"], cwd=cwd, capture_output=True, text=True)
@@ -311,7 +291,6 @@ def porcelain(cwd):
         return NOT_A_REPO                               # definite: there is no repo to mutate
     return None                                         # None = undetermined, never clean
 
-
 def repo_moved(before, after, role):
     """What moved in the repository across a spawn — an observation, never a verdict. Another charter's builder merging into the same shared checkout is not this spawn's misbehaviour, and a read-only audit that ran correctly beside it is recorded as what it was. `lines` is the sorted symmetric difference of the two snapshots' whole non-empty porcelain lines, status columns included: diffing lines and not path names is what makes a status-only change visible, since a file staged mid-spawn moves " M a.txt" -> "M a.txt" and its *path* diff is empty. `paths` is the sorted de-duplicated set those lines name (column 4 onward, quote-stripped — the extraction porcelain()'s own VOLATILE filter uses), a rename split on " -> " so `R a.txt -> b.txt` contributes both names and never the joined string. `by_this_spawn` is the role fact `role == "builder"`, deliberately not a claim of authorship: outside the builder, write access inside cwd is forbidden by contract prose on seat/claude-p and mechanically *granted* on codex (CODEX_WRITES + --sandbox workspace-write), so the field says which role was dispatched and the event records the movement either way. Called only with two real, determinate porcelain strings: the undetermined and NOT_A_REPO-flip cases are decided by main() before this is reached, so it never reads a sentinel as a diff."""
     b, a = ({l for l in (s or "").splitlines() if l.strip()} for s in (before, after))
@@ -324,21 +303,17 @@ def repo_moved(before, after, role):
                 paths.add(p)
     return {"lines": lines, "paths": sorted(paths), "by_this_spawn": role == "builder"}
 
-
 def issued_by():
     return fold.actor_of(os.path.basename(os.environ.get("DOIT_LEDGER_FILE", ""))) or "unknown"
-
 
 def run_claude(cmd, packet, cwd, timeout):
     env = {k: v for k, v in os.environ.items() if k not in ("ANTHROPIC_API_KEY", "DOIT_LEDGER_FILE")}   # no meter to fall through to
     return subprocess.run(cmd, input=packet, capture_output=True, text=True, cwd=cwd,
                           env=env, timeout=timeout)
 
-
 # Roles whose contract writes a file: the Codex sandbox lets them write in the spawn's cwd and under content/; every judging role runs read-only. The builder's BUILDER_DENY patterns have no Codex spelling — the sandbox and the merge gate are the enforcement on that backend. The post-spawn porcelain comparison is not one of them: it records movement on spawn-done (repo_moved) instead of voiding the spawn, because concurrent work is not misbehaviour.
 CODEX_FULL_ACCESS = ("builder",)
 CODEX_WRITES = ("builder", "spec-writer", "research", "reuse-scout", "probe", "reviewer", "charter-reviewer")
-
 
 def run_codex_exec(cmd, packet, cwd, timeout):
     """The one subprocess the codex backend runs. Neither vendor's metered key is in the environment: the spawn draws the ChatGPT plan or it fails loudly."""
@@ -1122,6 +1097,30 @@ def builder_worktree_preflight(a, cwd, ledger, base, fail):
         fail("builder worktree is not on its expected branch", reason="preflight:wrong-branch")
 
 
+def unaudited(evs):
+    """Fail closed on a first Planner build until its one audit is resolved."""
+    evs = list(evs)
+    written = next((e for e in evs if e.get('type') == 'spec-written'), None)
+    if written is None or any(e.get('type') in {'spec-carried', 'build-started'} for e in evs):
+        return None
+    sid = written.get('subject')
+    actor = written.get('actor')
+    if not isinstance(actor, str):
+        return f'unaudited: undetermined origin for {sid}'
+    if actor != 'spec-writer':
+        return None
+    audits = [i for i, e in enumerate(evs) if e.get('type') == 'spawn-done'
+              and e.get('actor') == 'spec-auditor' and e.get('subject') == sid]
+    if any(evs[i].get('bad_cut') is False for i in audits):
+        return None
+    if audits:
+        if any(e.get('type') in {'spec-written', 'decision', 'unblocked'}
+               and e.get('subject') == sid for e in evs[audits[-1] + 1:]):
+            return None
+        return f'unaudited: {sid} audit reported bad_cut; rewrite or decision owed'
+    return f'unaudited: {sid} is Planner-written and has no spec-auditor spawn-done'
+
+
 def main(a):
     """Every unexpected backend-path exception gets a terminal ledger event."""
     a._dispatch_crash = None
@@ -1304,6 +1303,9 @@ def _main(a):
         if fold.spec_shape_pending([e for e in all_ev if e.get("subject") == a.subject]):
             fail(f"{a.subject} fails spec-shape validation — refusing role=builder before any spend",
                  reason="spec-shape")
+        audit_reason = unaudited([e for e in all_ev if e.get('subject') == a.subject])
+        if audit_reason:
+            fail(audit_reason + ' — refusing role=builder before any spend', reason='unaudited')
     # L-spec-0435 (R10(b)/(c)): the FIRST thing done for role=grader (Assumptions
     # §6) — ahead of D120, write_path, window_min, spawn-started, any backend.
     if a.role == "grader":
