@@ -47,14 +47,43 @@ def data(phase):
  realm.LEDGER = realm.realm_ledger.Ledger()
  realm._GLANCE['key'] = None
  d=realm.bootstrap(0,states=[['L-spec-7','building']],goals=[],proving=[])
- d['lane']=[{'spec':'L-spec-7','bucket':'building','reason':'fixture builder working','rule':'builder','since':iso(now-600)}]
+ d['steps']=[{'item':'L-spec-7','stage':'in flight','state':'hold','reason':'fixture builder working'}]
  d.update(live=False,now=iso(now),window=[iso(now-1800),iso(now)])
  if phase=='empty': d['codex']={'sessions':[],'quota':{}}
  return d
+# AC6 fixtures use the real readers and correlation, including /proc ancestry.
+lifecycle_base=None
+def lifecycle(phase):
+ global lifecycle_base
+ import socket,copy
+ from unittest import mock
+ from test_realm_codex import rollout
+ with tempfile.TemporaryDirectory() as folder:
+  h=pathlib.Path(folder)
+  clock=1793188800.0
+  cwd=h/'.do-it/worktrees/do-it-v2/fixture'
+  rollout(h,ident='joined-builder',cwd=cwd,age=200 if phase=='waiting' else 0)
+  rollout(h,ident='joined-writer',cwd=h/'shared',age=200 if phase=='waiting' else 0)
+  rollout(h,ident='separate-worker',cwd=h/'independent',heading='Independent audit')
+  rows=[dict(type='build-started',ts=iso(clock-120),spawn='L-builder-1669',subject='L-spec-7',role='builder',backend='codex',worktree=str(cwd)),
+        dict(type='spawn-started',ts=iso(clock-120),spawn='L-spec-writer-1669',subject='L-spec-8',role='spec-writer',backend='codex',waiter_host=socket.gethostname(),waiter_pid=101,waiter_proc_start='111')]
+  tree={101:dict(ppid=1,start='111'),102:dict(ppid=101,start='222',sessions=['joined-writer']),103:dict(ppid=1,start='333',sessions=['joined-builder','separate-worker'])}
+  if phase=='unjoined': tree={};rows[0].pop('worktree')
+  if phase in ('completed','departed'):
+   for sp,session in [('L-builder-1669','joined-builder'),('L-spec-writer-1669','joined-writer')]:
+    rows.append(dict(type='spawn-done',ts=iso(clock),spawn=sp,session=session,backend='codex',input_tokens=1000,output_tokens=250,status='DONE'))
+  with mock.patch.object(realm_codex,'_read_process_tree',return_value=tree):
+   codex=original(rows,home=h,now=clock,windows={})
+  if lifecycle_base is None: lifecycle_base=data('live')
+  d=copy.deepcopy(lifecycle_base);d['events']=[realm.compact(row,'fixture') for row in rows];d['codex']=codex;d['now']=iso(clock);d['window']=[iso(clock-1800),iso(clock)]
+  d['specs']['L-spec-7']['intent']='Show the purpose of this work'
+  d['specs']['L-spec-8']=dict(title='Writer fixture',intent='Write the next spec',charter='L-charter-0064',criteria=[])
+  return d
 class Handler(realm.Handler):
  def do_GET(self):
   u=urllib.parse.urlparse(self.path);q=urllib.parse.parse_qs(u.query)
   phase=q.get('phase',['live'])[0]
+  if u.path=='/fixture/1669': self._json(lifecycle(phase));return
   if u.path in ('/api/bootstrap','/fixture/backend'): self._json(data(phase));return
   if u.path=='/baseline':
    body=pathlib.Path(sys.argv[1]).read_bytes().replace(b'/*__CODEX_JS__*/',pathlib.Path('src/realm_codex.js').read_bytes());self.send_response(200);self.send_header('Content-Type','text/html');self.send_header('Content-Length',str(len(body)));self.end_headers();self.wfile.write(body);return
@@ -129,7 +158,7 @@ for(const width of [1440,400]){
     for(const label of ['Kind','Subject / title','Tmux window','State','Started','Last activity','Turns','Tokens','Fallback history','Weekly quota','Resets','Worktree'])await expect(session).toContainText(label);
     await expect(page.locator('#p-body img')).toHaveCount(0);
     const headings=await page.locator('#p-body h2,#p-body h4').allTextContents();
-    expect(headings).toEqual(['L-spec-7 · Shared fixture spec','STAGE','LANE STATE','CRITERIA','CHARTER','LATEST EVENTS','CODEX SESSION']);
+    expect(headings).toEqual(['L-spec-7 · Shared fixture spec','WHAT THIS SPEC IS FOR','STAGE','NEXT STEP','CRITERIA','CHARTER','LATEST EVENTS','CODEX SESSION']);
     await shot(page,'AC5-'+width);
     // All spec links use the same entry point and choose the latest build session.
     await page.evaluate(()=>{DATA.codex.sessions.push({...DATA.codex.sessions.find(s=>s.kind==='doit-build'),id:'newer',last:'2099-01-01T00:00:00Z',tmux:'latest-build'});openSubject('L-spec-7');});
@@ -163,7 +192,7 @@ for(const width of [1440,400]){
 
 async function assertSpecPanel(page) {
   const panel=page.locator('#p-body');
-  for(const text of ['Shared fixture spec','STAGE','in flight','LANE STATE','fixture builder working','AC1','Show <img src=x onerror=alert(1)> as text.','AC2','Keep the shared detail.','LATEST EVENTS'])await expect(panel).toContainText(text);
+  for(const text of ['Shared fixture spec','STAGE','in flight','NEXT STEP','fixture builder working','AC1','Show <img src=x onerror=alert(1)> as text.','AC2','Keep the shared detail.','LATEST EVENTS'])await expect(panel).toContainText(text);
   await expect(panel.locator('.tl')).toBeVisible();
 }
 
@@ -172,12 +201,12 @@ test('AC4 and AC6 detail error states and session routing',async ({page})=>{
   await page.context().tracing.start({screenshots:true,snapshots:true});
   await open(page);
   await page.evaluate(()=>{
-    S.lane=[];S.subjectEvents.set('L-spec-7',Array.from({length:41},(_,i)=>({ms:S.now+i,ty:'fixture-event-'+i})));
+    S.steps=[];S.subjectEvents.set('L-spec-7',Array.from({length:41},(_,i)=>({ms:S.now+i,ty:'fixture-event-'+i})));
     DATA.specs['L-spec-7'].criteria=[];DATA.specs['L-spec-7'].criteria_error='unparseable fixture';
     window.realmOpenSpec('L-spec-7',{title:'CODEX SESSION',rows:[['State','live<script>']]});
   });
   const panel=page.locator('#p-body');
-  await expect(panel).toContainText('no lane row');
+  await expect(panel).toContainText('NEXT STEPunknown');
   await expect(panel).toContainText('criteria unreadable: unparseable fixture');
   await expect(panel.locator('.criteria')).toHaveCount(0);
   await expect(panel.locator('.tl li')).toHaveCount(40);
@@ -329,3 +358,73 @@ for(const width of [1440,390])for(const expanded of [false,true]){
     await page.context().tracing.stop({path:join(evidence,'glance-ready-'+width+'-'+expanded+'.trace.zip')});
   });
 }
+
+
+for(const width of [1440,400])test('1669 AC6 joined lifecycle at '+width+'px',async({page,request})=>{
+  await page.clock.install();
+  await page.setViewportSize({width,height:1000});
+  await page.context().tracing.start({screenshots:true,snapshots:true});
+  await open(page,'empty');
+  await page.clock.pauseAt(await page.evaluate(()=>Date.now())+120_000);
+  const fetchPhase=async phase=>{
+    const response=await request.get(base+'/fixture/1669?phase='+phase);
+    expect(response.ok()).toBe(true);return response.json();
+  };
+  const unjoined=await fetchPhase('unjoined');
+  expect(unjoined.codex.sessions).toHaveLength(5);
+  await page.evaluate(d=>{loadData(d);seek(toMs(d.now));S.playing=false;Codex.draw(0);},unjoined);
+  await expect(page.locator('[data-codex="joined-writer"]')).toBeVisible();
+  const live=await fetchPhase('live');
+  expect(live.codex.sessions).toHaveLength(3);
+  for(const [spawn,worker] of [['L-builder-1669','joined-builder'],['L-spec-writer-1669','joined-writer']]){
+    expect(live.codex.sessions.find(s=>s.id===spawn).worker_id).toBe(worker);
+  }
+  await page.evaluate(d=>{applyBatch({codex:d.codex,ledger:[]});Codex.draw(0);},live);
+  for(const id of ['joined-builder','joined-writer'])await expect(page.locator('[data-codex="'+id+'"]')).toHaveCount(0);
+  const counts=()=>page.evaluate(()=>Codex.positions.map(p=>p.id));
+  expect((await counts()).sort()).toEqual(['L-builder-1669','L-spec-writer-1669','separate-worker']);
+  await page.evaluate(d=>{applyBatch({codex:d.codex,ledger:[]});Codex.draw(0);},live);
+  expect((await counts()).sort()).toEqual(['L-builder-1669','L-spec-writer-1669','separate-worker']);
+  for(const [id,role] of [['L-builder-1669','builder'],['L-spec-writer-1669','spec-writer']]){
+    await expect(page.locator('[data-codex="'+id+'"]')).toHaveCount(1);
+    await expect(page.locator('[data-codex="'+id+'"]')).toHaveAttribute('aria-label',new RegExp(role));
+  }
+  const labels=await page.evaluate(()=>{
+    const ctx=document.querySelector('#codex-light').getContext('2d'),original=ctx.fillText,calls=[];
+    ctx.fillText=function(text,x,y,...rest){
+      if(['L-spec-7','L-spec-8'].includes(String(text)))calls.push({text,y,size:parseFloat(this.font)});
+      return original.call(this,text,x,y,...rest);
+    };
+    try{Codex.draw(0);}finally{ctx.fillText=original;}
+    return calls;
+  });
+  expect(labels.map(label=>label.text).sort()).toEqual(['L-spec-7','L-spec-8']);
+  expect(Math.abs(labels[0].y-labels[1].y)).toBeGreaterThanOrEqual(Math.max(...labels.map(label=>label.size)));
+  await shot(page,'1669-joined-'+width);
+  // Keyboard opens the same selected run and its shared subject view.
+  await page.locator('[data-codex="L-builder-1669"]').focus();await page.keyboard.press('Enter');
+  await expect(page.locator('#p-body')).toContainText('Show the purpose of this work');
+  const waiting=await fetchPhase('waiting');
+  await page.evaluate(d=>{applySnapshot({...d,events:[]});rerenderPanel();Codex.draw(0);},waiting);
+  await expect(page.locator('#p-body')).toContainText('waiting on the model');
+  const completed=await fetchPhase('completed');
+  await page.evaluate(d=>{applyBatch({codex:d.codex,ledger:[]});rerenderPanel();Codex.draw(0);},completed);
+  for(const text of ['finished and departing','1000','250','1250'])await expect(page.locator('#p-body')).toContainText(text);
+  await shot(page,'1669-completed-'+width);
+  // A late completion event refreshes usage without restarting departure.
+  await page.evaluate(()=>{Codex.event({ty:'spawn-done',sp:'L-builder-1669',st:'DONE',tok:1250,t:DATA.now});Codex.inspect('L-builder-1669');});
+  await expect(page.locator('#p-body')).toContainText('1250');
+  await page.locator('#p-close').click();
+  await page.clock.fastForward(5000);
+  await expect(page.locator('[data-codex="L-builder-1669"]')).toBeHidden();
+  await expect(page.locator('[data-codex="L-spec-writer-1669"]')).toBeHidden();
+  await expect(page.locator('[data-codex="separate-worker"]')).toBeVisible();
+  await page.locator('[data-codex="separate-worker"]').click();
+  await expect(page.locator('#p-body')).toContainText('Independent audit');
+  await expect(page.locator('#p-body')).toContainText('unavailable');
+  await page.emulateMedia({reducedMotion:'reduce'});
+  await page.evaluate(d=>{loadData(d);seek(toMs(d.now));Codex.draw(0);},completed);
+  expect(await counts()).toEqual(['separate-worker']);
+  await shot(page,'1669-departed-'+width);
+  await page.context().tracing.stop({path:join(evidence,'1669-AC6-'+width+'.trace.zip')});
+});

@@ -24,49 +24,58 @@ const Codex = (() => {
   const elapsed = node => Math.max(0,performance.now()/1000-node.changed);
   const meta = id => source.sessions.find(s=>s.id===id) || {};
   function node(session){return {session:{...session},changed:performance.now()/1000,trail:[],x:gate.x,y:gate.y,takeover:false};}
+  const phrase = s => s.activity || (s.outcome==='blocked'?'blocked: '+(s.reason||'reason unavailable'):s.outcome==='failed'||s.outcome==='stale'?'failed: '+(s.reason||'reason unavailable'):s.state==='fallback'?'fell back: '+(s.reason||'reason unavailable'):['done','written'].includes(s.outcome)?'finished and departing':s.state==='ended'?'inactive; outcome unavailable':s.state==='idle'?'waiting on the model':({builder:'building','spec-writer':'writing the spec','spec-auditor':'auditing the spec',grader:'grading',reviewer:'reviewing',probe:'probing'}[s.role]||'working'));
+  function update(old,session){
+    if(old.session.state!==session.state){old.changed=performance.now()/1000;old.trail=[];}
+    old.session={...session};
+  }
   function load(data){
     source = data || {sessions:[],quota:{}};
     const seen = new Set();
     for(const session of source.sessions || []){
       if(session.kind==='doit-build'){
+        if(session.worker_id){workers.delete(session.worker_id);const b=buttons.get(session.worker_id);if(b)b.remove();buttons.delete(session.worker_id);}
         const old=builds.get(session.id);
-        if(!old)builds.set(session.id,node(session));
-        else {old.session.tokens=session.tokens;old.session.turns=session.turns;}
+        if(!old)builds.set(session.id,node(session));else update(old,session);
         continue;
       }
       seen.add(session.id);
       const old=workers.get(session.id);
-      if(!old)workers.set(session.id,node(session));
-      else {if(old.session.state!==session.state){old.changed=performance.now()/1000;old.trail=[];}old.session={...session};}
+      if(!old)workers.set(session.id,node(session));else update(old,session);
     }
     for(const [id,worker] of workers)if(!seen.has(id)&&worker.session.state!=='ended'){
-      worker.session.state='ended';worker.changed=performance.now()/1000;
+      update(worker,{...worker.session,state:'ended',activity:'inactive; outcome unavailable'});
     }
   }
   function reset(){
-    builds.clear();epoch++;
-    for(const session of source.sessions || [])if(session.kind==='doit-build'&&toMs(session.started)<T0){
-      const n=node(session);if(session.state==='live')n.changed-=5;builds.set(session.id,n);
+    builds.clear();workers.clear();epoch++;
+    for(const session of source.sessions || [])if(session.kind==='worker'||toMs(session.started)<T0){
+      const n=node(session);if(session.state==='live'||S.quiet)n.changed-=5;
+      (session.kind==='doit-build'?builds:workers).set(session.id,n);
     }
   }
   function event(e){
     if((e.ty==='build-started'||e.ty==='spawn-started')&&e.backend==='codex'){
       if(builds.has(e.sp))return;
-      const session={...meta(e.sp),id:e.sp,kind:'doit-build',subject:e.s,role:e.r||roleOf(e.sp)||'builder',state:'live',started:e.t,last:e.t};
+      const session={...meta(e.sp),id:e.sp,spawn:e.sp,kind:'doit-build',subject:e.s,role:e.r||roleOf(e.sp)||'builder',state:'live',started:e.t,last:e.t};
       const n=node(session);if(S.quiet)n.changed-=5;builds.set(e.sp,n);
     }
-    const n=builds.get(e.sp);if(!n)return;
+    const n=builds.get(e.sp)||[...builds.values()].find(n=>e.ty==='spec-written'&&n.session.subject===e.s&&n.session.role==='spec-writer');if(!n)return;
     if(e.ty==='backend-fallback'){
-      n.session.state='fallback';n.session.fell_back='fell back: '+(e.why||'backend unavailable');n.session.fallback_at=e.t;
+      n.session.state='fallback';n.session.reason=e.why||'reason unavailable';n.session.outcome='fallback';n.session.fell_back='fell back: '+n.session.reason;n.session.fallback_at=e.t;
       n.session.last=e.t;n.changed=performance.now()/1000;n.trail=[];n.fallbackEvent=e;
       if(S.quiet||REDUCED)takeover(n);
-    } else if(['build-done','spawn-done','spawn-failed','spawn-stale'].includes(e.ty)){
-      if(n.session.state==='ended')return;
-      n.session.state='ended';n.session.last=e.t;n.changed=performance.now()/1000;n.trail=[];
+    } else if(['build-done','build-blocked','spawn-done','spawn-failed','spawn-stale','spec-written'].includes(e.ty)){
+      if(n.session.state!=='ended'){n.session.state='ended';n.changed=performance.now()/1000;n.trail=[];if(S.quiet)n.changed-=5;}
+      n.session.last=e.t;
       if(e.tok!=null)n.session.tokens=e.tok;
-      if(S.quiet)n.changed-=5;
+      if(e.ty==='build-blocked'||e.st==='BLOCKED'||e.st==='NEEDS_CONTEXT'){n.session.outcome='blocked';n.session.reason=e.why||n.session.reason;}
+      else if(e.ty==='spawn-failed'||e.ty==='spawn-stale'){n.session.outcome=e.ty==='spawn-failed'?'failed':'stale';n.session.reason=e.why;}
+      else if(e.ty==='spec-written')n.session.outcome='written';
+      else if(e.st==='DONE'&&!['blocked','failed','stale','written','fallback'].includes(n.session.outcome))n.session.outcome='done';
       if(S.actors.has(e.sp)&&e.ty==='build-done')finishActor(e.sp,e.st==='DONE');
     }
+    n.session.activity=null;n.session.activity=phrase(n.session);
   }
   function takeover(n){
     if(n.takeover)return;n.takeover=true;
@@ -75,8 +84,8 @@ const Codex = (() => {
   }
   function sessionRows(s,q=source.quota||{}){
     const fields=s?[
-      ['Kind',s.kind],['Subject / title',s.subject],['Tmux window',s.tmux||'—'],['State',s.state],
-      ['Started',s.started],['Last activity',s.last],['Turns',s.turns??0],['Tokens',s.tokens??0],
+      ['Kind',s.kind],['Subject / title',s.subject],['Role',s.role||'unavailable'],['Spawn',s.spawn||s.id],['Worker',s.worker_id||'unavailable'],['Tmux window',s.tmux||'unavailable'],['State',s.state],['Activity',phrase(s)],['Outcome',s.outcome||'unavailable'],['Reason',s.reason||'unavailable'],
+      ['Started',s.started],['Last activity',s.last],['Turns',s.turns??0],['Input tokens',s.input_tokens??'unavailable'],['Output tokens',s.output_tokens??'unavailable'],['Tokens',s.tokens??'unavailable'],
       ['Fallback history',s.fell_back||'none'],['Worktree',s.cwd||'—']
     ]:[['Sessions',source.sessions.length],['Presence',[...builds.values(),...workers.values()].filter(n=>n.session.state==='live').length+' live']];
     fields.push(['Weekly quota',q.weekly_used_pct==null?'unavailable':q.weekly_used_pct+'% used'],
@@ -84,13 +93,13 @@ const Codex = (() => {
     if(q.credits_balance!=null)fields.push(['Credits balance',q.credits_balance]);
     return fields;
   }
-  function sessionExtra(s){return {title:'CODEX SESSION',rows:sessionRows(s)};}
+  function sessionExtra(s){return {title:'CODEX SESSION',rows:sessionRows(s),refresh:()=>sessionRows((builds.get(s.id)||workers.get(s.id)||{}).session||s)};}
   function inspect(id){
     const n=builds.get(id)||workers.get(id),s=n?n.session:null;
     if(s&&/^L-spec-\d+$/.test(s.subject||''))return window.realmOpenSpec(s.subject,sessionExtra(s));
     const html=()=>{
       const n=builds.get(id)||workers.get(id),s=n?n.session:null,fields=sessionRows(s);
-      return `<div class="codex-inspector"><h2>${esc(s?s.subject:'Codex Gate')}</h2><div class="cls">CODEX · OPENAI</div><dl>${fields.map(([k,v])=>`<dt>${esc(k)}</dt><dd>${esc(v??'—')}</dd>`).join('')}</dl>${!s?'<p>Live constructs hover at the forge or orbit this gate. Idle workers dim; ended workers depart.</p>':''}</div>`;
+      return `<div class="codex-inspector"><h2>${esc(s?s.subject:'Codex Gate')}</h2><div class="cls">CODEX · OPENAI</div><dl>${fields.map(([k,v])=>`<dt>${esc(k)}</dt><dd>${esc(v??'—')}</dd>`).join('')}</dl>${s&&s.kind==='doit-build'?'<h4>STORY</h4>'+timelineHtml(S.subjectEvents.get(s.subject)||[]):''}${!s?'<p>Live constructs hover at the forge or orbit this gate. Idle workers dim; ended workers depart.</p>':''}</div>`;
     };openPanel(html(),{html});
   }
   function target(id,x,y,size,label){
@@ -135,7 +144,7 @@ const Codex = (() => {
     light.fillRect(-32,10,64*(quota==null?1:used/100),3);light.strokeStyle=palette.cyan;light.strokeRect(-32,10,64,3);
     light.shadowBlur=0;light.font=labelFont(10);light.textAlign='center';light.fillStyle=palette.core;light.fillText(quota==null?'QUOTA —':used+'% WEEKLY',0,34);light.restore();
   }
-  function crystal(n,x,y,t,alpha){
+  function crystal(n,x,y,t,alpha,labelRow=0){
     light.save();light.globalAlpha=alpha;
     if(!REDUCED){n.trail.push({x,y});if(n.trail.length>14)n.trail.shift();
       for(let i=0;i<n.trail.length;i++){light.globalAlpha=alpha*i/n.trail.length*.15;glow(n.trail[i].x,n.trail[i].y,15,.5);}light.globalAlpha=alpha;}
@@ -147,9 +156,15 @@ const Codex = (() => {
     light.shadowBlur=0;light.strokeStyle=palette.violet;light.globalAlpha=alpha*.5;light.beginPath();light.ellipse(x,y,23,8,-.3,0,7);light.stroke();
     light.globalAlpha=alpha;for(let j=0;j<3;j++){const a=(REDUCED?0:t*1.3)+j*Math.PI*2/3;light.fillStyle=j%2?palette.violet:palette.cyan;light.beginPath();light.arc(x+23*Math.cos(a),y+8*Math.sin(a),1.6,0,7);light.fill();}
     light.font=labelFont(10);light.textAlign='center';light.fillStyle=palette.cyan;
-    const label=n.session.tmux||n.session.subject||n.session.id;light.fillText(label.slice(0,40),x,y+34);light.restore();
+    const subject=(n.session.subject||n.session.id).slice(0,40);
+    const role=n.session.kind==='doit-build'?' · '+(n.session.role||'worker'):'';
+    const label=subject+role,left=x-light.measureText(label).width/2;
+    const labelY=y+34+labelRow*parseFloat(light.font)*1.4;
+    light.textAlign='left';light.fillText(subject,left,labelY);
+    if(role)light.fillText(role,left+light.measureText(subject).width,labelY);
+    light.restore();
     n.x=x;n.y=y;hits.push({id:n.session.id,x,y,state:n.session.state});
-    target(n.session.id,x,y,36,`Codex ${n.session.role||'worker'} for ${label}, ${n.session.state==='live'?'building':n.session.state}, ${fmtDur(Math.max(0,S.now-toMs(n.session.started)))}`);
+    target(n.session.id,x,y,36,`Codex ${n.session.role||'worker'} for ${label}, ${phrase(n.session)}, ${fmtDur(Math.max(0,S.now-toMs(n.session.started)))}`);
   }
   function draw(t){
     if(layer.width!==cv.width||layer.height!==cv.height){layer.width=cv.width;layer.height=cv.height;}
@@ -170,7 +185,7 @@ const Codex = (() => {
       const progress=REDUCED?1:Math.min(1,k/3),depart=s.state==='ended';
       const x=depart?fx+(gate.x-fx)*progress:gate.x+(fx-gate.x)*progress;
       const y=depart?fy+(gate.y-fy)*progress:gate.y+(fy-gate.y)*progress;
-      crystal(n,x,y+(REDUCED?0:Math.sin(t*2+i)*4),t,depart?Math.max(0,1-k/4):1);
+      crystal(n,x,y+(REDUCED?0:Math.sin(t*2+i)*4),t,depart?Math.max(0,1-k/4):1,(i-1)%5);
     }
     i=0;
     for(const n of workers.values()){

@@ -114,17 +114,17 @@ def compact(e, actor):
         r["sp"] = sp
         r["r"] = e.get("role") or role_of(sp)
     if ty == "spawn-done":
-        r.update(dur=e.get("duration_ms"), tok=e.get("subagent_tokens"), st=e.get("status"), m=e.get("model_used"))
+        r.update(dur=e.get("duration_ms"), tok=realm_codex.usage(e)["tokens"] if e.get("backend") == "codex" else e.get("subagent_tokens"), st=e.get("status"), m=e.get("model_used"))
     elif ty in ("spawn-failed", "backend-fallback"):
-        r["why"] = realm_codex.text(e.get("why"), 160) if ty == "backend-fallback" else trunc(e.get("why"), 160)
+        r["why"] = realm_codex.text(e.get("why"), 160) if e.get("backend") == "codex" or ty == "backend-fallback" else trunc(e.get("why"), 160)
     elif ty == "spawn-stale":
-        r["why"] = trunc(e.get("reason") or e.get("why"), 160)
+        r["why"] = realm_codex.text(e.get("reason") or e.get("why"), 160) if e.get("backend") == "codex" else trunc(e.get("reason") or e.get("why"), 160)
     elif ty == "spawn-started":
         pass
     elif ty == "build-done":
         r.update(st=e.get("status"), vx=e.get("verify_exit"))
     elif ty == "build-blocked":
-        r["why"] = trunc(e.get("reason"), 200)
+        r["why"] = realm_codex.text(e.get("reason"), 200) if e.get("backend") == "codex" else trunc(e.get("reason"), 200)
     elif ty == "verdict":
         r.update(ok=e.get("confirmed"), n=e.get("n"), ca=len(e.get("cannot_assess") or []))
     elif ty == "review":
