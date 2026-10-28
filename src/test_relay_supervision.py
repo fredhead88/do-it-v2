@@ -135,7 +135,7 @@ class RelaySupervisionTests(unittest.TestCase):
         self.assertFalse((self.root / "relay.lock").exists())
         with patch.object(up.os, "open", side_effect=PermissionError):
             self.assertEqual(self.ensure(), "undetermined")
-        with patch.object(Path, "read_bytes", side_effect=PermissionError):
+        with patch.object(up.ledger_files, "assert_readable", side_effect=PermissionError):
             (self.root / "events/L-fixture.jsonl").touch()
             self.assertEqual(self.ensure(), "undetermined")
         self.assertFalse(self.launches)

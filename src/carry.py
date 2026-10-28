@@ -26,6 +26,7 @@ Every refusal fires before `alloc`, so a refused carry allocates nothing and
 spends nothing. A killed, split or failed spawn stamps nothing, which is what
 makes it a retry rather than a permanently burned source.
 """
+import ledger_files
 import argparse, glob, json, os, pathlib, re, subprocess, sys
 from datetime import datetime, timezone
 
@@ -442,13 +443,14 @@ def scan_events(pred):
     exactly as `fold.read_events()` derives it (L-spec-0198, finding 2) — additive;
     existing callers that never look at `actor` are unaffected."""
     out = []
-    for f in sorted((root() / "events").glob("*.jsonl")):
+    for name in ledger_files.names(root() / "events") if (root() / "events").exists() else []:
         try:
-            lines = f.read_text().splitlines()
+            lines = ledger_files.read_text(root() / "events", name).splitlines()
         except OSError:
             continue
-        parts = f.stem.split("-")
-        actor = "-".join(parts[1:-1]) if len(parts) >= 3 else f.stem
+        stem = pathlib.Path(name).stem
+        parts = stem.split("-")
+        actor = "-".join(parts[1:-1]) if len(parts) >= 3 else stem
         for line in lines:
             if not line.strip().startswith("{"):
                 continue

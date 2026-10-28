@@ -6,6 +6,7 @@ context. Only main reads files or the clock. Retires: nothing; reader migration
 belongs to the following wave. ACTIONS is the most recently supplied rule table's
 owner registry; decisions themselves always use a call-local owner mapping.
 """
+import ledger_files
 import argparse
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
@@ -678,11 +679,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         # Missing/unreadable directories cannot silently become an empty ledger.
-        files = list(fold.EVENTS.iterdir())
-        for path in files:
-            if path.suffix == '.jsonl':
-                with path.open():
-                    pass
+        ledger_files.assert_readable(fold.EVENTS)
         events = fold.read_events(use_cache=False)
         rules = lane_rules.load()
         now = datetime.now(timezone.utc)

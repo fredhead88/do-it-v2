@@ -13,6 +13,7 @@ system, and §4.9 routes those to a human rather than to an unattended process.
 `test_up.py` holds that as a check, because it is exactly the rule a later edit
 would helpfully break.
 """
+import ledger_files
 import fcntl, importlib, json, math, os, pathlib, subprocess, sys, time
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -273,7 +274,7 @@ def _launcher(state):
 
 def _ended(ledger):
     """True if the pane wrote its own end row. Re-read, never remembered (§9.2)."""
-    for line in ledger.read_text().splitlines():
+    for line in ledger_files.read_text(ledger.parent, ledger.name).splitlines():
         if not line.strip().startswith("{"):
             continue
         try:
@@ -470,9 +471,7 @@ def ensure_relay(events, now, *, launcher=None):
         if events is None:
             return "undetermined"
         # fold.read_events tolerates an absent directory; a restart decision cannot.
-        for path in fold.EVENTS.iterdir():
-            if path.suffix == ".jsonl":
-                path.read_bytes()
+        ledger_files.assert_readable(fold.EVENTS)
         fd = os.open(fold.ROOT / "relay.lock", os.O_RDONLY | os.O_CREAT, 0o644)
         try:
             try:

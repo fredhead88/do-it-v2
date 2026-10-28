@@ -7,6 +7,7 @@ corruption falls back to fold's reference parser; lock failures propagate.
 """
 from contextlib import closing, contextmanager
 from typing import NamedTuple
+import ledger_files
 import fcntl
 import hashlib
 import io
@@ -22,7 +23,7 @@ import time
 
 import ledger_compact
 
-VERSION = 3
+VERSION = 4
 CHUNK_EVENTS = 256
 PREFIX_CHUNK = 8 * 1024 * 1024
 # Callers may patch the shared time module for their own timeout tests.
@@ -158,12 +159,12 @@ def _parse(data, name, actor, first_line, *, with_count=False):
 
 
 def _file(path, actor, old):
-    st = path.stat()
-    meta = _meta(st)
+    meta = ledger_files.stat_key(path.parent, path.name)
+    member = bool(ledger_files._members(path.parent, path.name))
     append = False
     digest = hashlib.sha256()
-    with path.open('rb') as fh:
-        if old is not None and meta[:2] == old['meta'][:2] and st.st_size > old['meta'][2]:
+    with ledger_files._open_binary(path.parent, path.name) as fh:
+        if not member and old is not None and meta[:2] == old['meta'][:2] and meta[2] > old['meta'][2]:
             remaining = old['meta'][2]
             while remaining:
                 chunk = fh.read(min(PREFIX_CHUNK, remaining))
@@ -176,12 +177,12 @@ def _file(path, actor, old):
         # the suffix. A rewrite-and-grow must take the full reparse path.
         start, first_line = (old['offset'], old['line']) if append else (0, 1)
         fh.seek(start)
-        data = fh.read(st.st_size - start)
+        data = fh.read() if member else fh.read(meta[2] - start)
         if append:
             digest.update(memoryview(data)[old['meta'][2] - start:])
         else:
             digest = hashlib.sha256(data)
-        if _meta(os.fstat(fh.fileno())) != meta or _meta(path.stat()) != meta:
+        if (not member and _meta(os.fstat(fh.fileno())) != meta) or ledger_files.stat_key(path.parent, path.name) != meta:
             raise OSError('ledger changed during cache read')
     # Verify the ENTIRE old prefix: a historical repair may rewrite AND grow
     # a file in place. Offset/line exclude any unterminated final line, even
@@ -233,7 +234,7 @@ def _generation(db, directory):
     """Return the metadata validated by this scan, never a later fingerprint."""
     old = _metadata(db)
     recorded = {name: row['meta'] for name, row in old.items()}
-    current = {file.name: _meta(file.stat()) for file in directory.glob('*.jsonl')}
+    current = {name: ledger_files.stat_key(directory, name) for name in ledger_files.names(directory)}
     return tuple(sorted(recorded.items())) if recorded == current else None
 
 
@@ -245,11 +246,11 @@ def _update(db, directory, actor_of):
     old = _metadata(db)
     seen = set()
     with db:  # All metadata, prefix chunks and torn tails publish together.
-        for file in sorted(directory.glob('*.jsonl')):
-            name = file.name
+        for name in ledger_files.names(directory):
+            file = directory / name
             seen.add(name)
             previous = old.get(name)
-            if previous is None or previous['meta'] != _meta(file.stat()):
+            if previous is None or previous['meta'] != ledger_files.stat_key(directory, name):
                 current = _file(file, actor_of(name), previous)
                 if not current['append']:
                     db.execute('DELETE FROM chunks WHERE name=?', (name,))

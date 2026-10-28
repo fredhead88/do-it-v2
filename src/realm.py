@@ -17,7 +17,7 @@ Server-Sent Events. Never appends, never edits, never touches a repository.
                                every 30 s (and the whole ledger every 10 min), with
                                the token in ~/.do-it/realm.push. Outbound only.
 """
-import argparse
+import argparse, ledger_files
 import bisect
 import collections
 import contextlib
@@ -184,9 +184,8 @@ def _ref_subject(ref):
     name, _, n = str(ref).rpartition(":")
     out = None
     try:
-        f = EVENTS / name
-        if f.is_file() and n.isdigit():
-            for i, line in enumerate(f.read_text(errors="replace").splitlines(), 1):
+        if ledger_files.exists(EVENTS, name) and n.isdigit():
+            for i, line in enumerate(ledger_files.read_text(EVENTS, name, errors="replace").splitlines(), 1):
                 if i == int(n):
                     out = json.loads(line).get("subject")
                     break
@@ -1663,9 +1662,9 @@ def ask_thinker(panel, items, note=""):
 def asks_state():
     """Newest ask and newest answer per panel, read straight off the ledger files."""
     out = {p: {"ask": None, "answer": None} for p in ASK_PANELS}
-    for f in sorted(EVENTS.glob("*.jsonl")):
+    for name in ledger_files.names(EVENTS) if EVENTS.exists() else []:
         try:
-            lines = f.read_text().splitlines()
+            lines = ledger_files.read_text(EVENTS, name).splitlines()
         except OSError:
             continue
         for n, line in enumerate(lines, 1):
@@ -1684,7 +1683,7 @@ def asks_state():
             cur = out[panel][slot]
             if cur is None or e.get("ts", "") > cur.get("ts", ""):
                 keep = {k: e.get(k) for k in ("ts", "why", "text", "ref", "items")}
-                keep["src"] = f"{f.name}:{n}"
+                keep["src"] = f"{name}:{n}"
                 out[panel][slot] = keep
     return out
 

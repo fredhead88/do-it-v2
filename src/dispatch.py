@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """dispatch — spawn one contract on the D116 line, check after the fact, append events. dispatch.py <role> <subject> [--packet FILE|-] [--path P] [--cwd DIR] [--charter ID] [--project NAME] [--mcp-config FILE] [--timeout MIN] [--max-usd N] The BACKEND — claude-p, seat, or codex — and the MODEL are the ledger root's ruling, `$DOIT_ROOT/models.toml` (models.py). `--seat` / DOIT_SEAT may only agree with it. Every terminal event stamps `backend`, `model_requested` (the map) beside `model_used` (what came back), `model_match`, and `first_on_model` — the D120 trust run of a (contract, model) pair is then a ledger fact, not a memory. Also stamped: the four-way token split (`input_tokens`, `output_tokens`, `cache_read`, `cache_creation`) and, on a seat spawn whose stamp.sh resolved it, `subagent_tokens` — the route's OLDER blended figure, kept beside the split rather than replaced by it (src/usage.py; retro step 9). Every check here converts a silent failure into a loud one, and each was observed before it was written (D116, D120): a tools: line without StructuredOutput comes back is_error:false with structured_output:null; a denied Write came back as `answered: yes` with no file on disk; a refused spawn is is_error:true with cost above zero; an unreachable seat is api_error with zero tokens. The contract appends nothing — every event below is derived from the Output object into this spawn's own file, and the actor is that filename (D90)."""
-import argparse, atexit, hashlib, json, os, pathlib, re, shutil, socket, subprocess, sys
+import argparse, atexit, hashlib, json, os, pathlib, re, shutil, socket, subprocess, sys, ledger_files
 from datetime import datetime, timedelta, timezone
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -57,8 +57,8 @@ def frontmatter(role):
 def subject_ids(prefix):
     """The ids of that kind the LEDGER owns. A spec id can exist as a subject with no content file — three did, from a charter whose specs were never written out — and §2.8's max+1 is over the ids that exist, not over the files that happen to. Allocating over files alone re-issues such an id, and the second `spec-written` lands on a subject the fold has already resolved to terminal: it never renders, the Executor never picks it up, and an append-only ledger cannot take it back."""
     out = []
-    for f in EVENTS.glob("*.jsonl"):
-        for line in f.read_text().splitlines():
+    for name, lines in ledger_files.iter_sources(EVENTS) if EVENTS.exists() else []:
+        for line in lines:
             if prefix not in line:
                 continue
             m = re.match(rf"{re.escape(prefix)}(\d+)$", (json.loads(line).get("subject") or "")
@@ -66,11 +66,11 @@ def subject_ids(prefix):
             m and out.append(int(m.group(1)))
     return out
 
-
 def alloc(d, prefix, suffix):
     """max+1 of a kind (§2.8), claimed with O_EXCL so two concurrent spawns never share a file."""
     # Ids >= 9000 are the test-fixture range (L-spec-9001, L-charter-9101 ...). A fixture event that leaked into the live ledger on 09-27 made every later alloc start at 9102; the fixture range never sets the next real number. Thinker 2026-09-28. Floor lowered 9000 -> 8000 (operator ruling 2026-09-30): a leaked fixture L-spec-8026 pushed real specs to 8027-8034. Those keep their ids (above the floor, so never re-allocated); new ids resume the real sequence.
-    n = max([i for i in [int(p.stem[len(prefix):]) for p in d.glob(f"{prefix}[0-9]*{suffix}")
+    files = (d / n for n in ledger_files.names(d)) if d == EVENTS and suffix == ".jsonl" else d.glob(f"{prefix}[0-9]*{suffix}")
+    n = max([i for i in [int(p.stem[len(prefix):]) for p in files
                         if re.fullmatch(rf"{re.escape(prefix)}[0-9]+", p.stem)]
              + subject_ids(prefix) if i < 8000] or [0])
     while True:

@@ -4,6 +4,7 @@ Bare imports in the live checkout must never resolve to Realm's older siblings.
 Keep one private bundle, temporarily install its aliases under Python's import
 lock, then restore the registry. Reimport only when that checkout changes.
 """
+import ledger_files
 import _imp
 import codecs
 import contextlib
@@ -101,31 +102,32 @@ class Ledger:
                     self.watch.close()
                 self.watch = Changes(directory)
             changed = self.watch.poll()
-            scan = new_directory or self._rescan or changed is None or bool(changed)
+            scan = new_directory or self._rescan or changed is None or bool(changed) or (directory / ledger_files.SEGMENT_DIR).exists()
             if scan:
                 # A failure must trigger a retry even after poll consumed notifications.
                 self._rescan = True
-                metadata = fingerprint(directory)
+                metadata = tuple((name, *ledger_files.stat_key(directory, name)) for name in ledger_files.names(directory))
                 previous = {} if new_directory else self.file_offsets
                 staged = {}
                 for meta in metadata:
                     name, dev, inode, size = meta[:4]
                     old = previous.get(name)
-                    if old and old['identity'] == (dev, inode) and size >= old['size']:
+                    member = bool(ledger_files._members(directory, name))
+                    if old and old.get('meta') == meta:
+                        staged[name] = old
+                        continue
+                    if not member and old and not old.get('member') and old['identity'] == (dev, inode) and size >= old['size']:
                         if size == old['size']:
                             staged[name] = old
                             continue
                         start, pending, line, events = old['size'], old['pending'], old['line'], old['events']
                     else:
                         start, pending, line, events = 0, b'', 0, []
-                    with (directory / name).open('rb') as stream:
-                        opened = os.fstat(stream.fileno())
-                        if (opened.st_dev, opened.st_ino) != (dev, inode) or opened.st_size < size:
-                            raise OSError(f'ledger changed before read: {name}')
-                        stream.seek(start)
-                        data = stream.read(size - start)
-                    if len(data) != size - start:
-                        raise OSError(f'ledger changed during read: {name}')
+                    if member:
+                        data = ledger_files._read_bytes(directory, name)
+                        size = len(data)
+                    else:
+                        data = ledger_files._read_range(directory, name, start, size, (dev, inode))
                     data = pending + data
                     end = data.rfind(b'\n') + 1
                     complete, pending = data[:end], data[end:]
@@ -143,7 +145,7 @@ class Ledger:
                         event['actor'], event['_src'] = fold.actor_of(name), f'{name}:{line}'
                         parsed.append(event)
                     # Strictly validate completed bytes; a torn UTF-8 suffix stays pending.
-                    staged[name] = dict(identity=(dev, inode), size=size, pending=pending,
+                    staged[name] = dict(meta=meta, member=member, identity=(dev, inode), size=size, pending=pending,
                                         line=line, events=events + parsed, offset=size-len(pending))
                 if new_directory or metadata != self._metadata:
                     # Preserve retained objects on a mere code/project change or idle poll.

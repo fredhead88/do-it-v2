@@ -13,6 +13,7 @@ only, never an argv element. `_run` is the one subprocess indirection every
 call here goes through; tests monkeypatch it (mirrors `grader_serve.py`'s
 own injected `runner`).
 """
+import ledger_files
 import json
 import time
 from datetime import datetime, timedelta, timezone
@@ -646,8 +647,8 @@ def release_in_progress(now=None):
     now = now if now is not None else datetime.now(timezone.utc)
     starts, terminals = {}, {}
     try:
-        for path in (ROOT / "events").glob("*.jsonl"):
-            for line in path.read_text().splitlines():
+        for name, lines in ledger_files.iter_sources(ROOT / "events"):
+            for line in lines:
                 try:
                     event = json.loads(line)
                     if not isinstance(event, dict) or not isinstance(event.get("subject"), str):
