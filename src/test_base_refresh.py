@@ -140,6 +140,68 @@ class BaseRefreshTests(unittest.TestCase):
                               "rev-parse", "master"])
         print("L-spec-1784 AC5 ok")
 
+    def test_l1798_ac1_wave_order_and_rebase_ruling(self):
+        def pre_change_refresh(events):
+            held, due = False, False
+            for event in events:
+                kind = event.get("type")
+                if kind == "build-done":
+                    due = False
+                elif kind == "dependency-hold":
+                    held = True
+                elif kind == "conflict-rework" or (kind == "unblocked" and held):
+                    due = True
+            return self.tip if due else None
+
+        wave = {"type": "spawn-failed", "reason": "wave-order: earlier wave pending"}
+        ruling = {"type": "decision", "rebase": "yes"}
+        done = {"type": "build-done", "base_sha": self.earliest}
+        blocked = {"type": "build-blocked"}
+        cases = (
+            ("wave-order", [wave], self.tip),
+            ("bare wave-order", [{"type": "spawn-failed", "reason": "wave-order"}],
+             self.tip),
+            ("completed wave-order", [wave, done], None),
+            ("rebase after build", [done, ruling], self.tip),
+            ("rework alone", [{"type": "decision", "rework": "yes"}], None),
+            ("completed rebase", [ruling, done], None),
+            ("blocked wave-order", [wave, blocked], self.tip),
+            ("blocked rebase", [done, ruling, blocked], self.tip),
+        )
+        for name, events, expected in cases:
+            with self.subTest(case=name):
+                events = [{"type": "spec-written", "base_sha": self.earliest}, *events]
+                self.assertEqual(base_refresh.refresh_tip(Context(self.repo, events)), expected)
+                self.assertIsNone(pre_change_refresh(events))
+        print("L-spec-1798 AC1 ok")
+
+    def test_l1798_ac2_unrelated_failures_and_roles(self):
+        for reason in ("bundle-pending", "duplicate-dispatch", "timeout", "",
+                       None, 1798, "prefix wave-order"):
+            with self.subTest(reason=reason), patch("base_refresh.subprocess.run") as run:
+                events = [{"type": "spawn-failed", "reason": reason}]
+                self.assertIsNone(base_refresh.refresh_tip(Context(self.repo, events)))
+                run.assert_not_called()
+        for event in ({"type": "spawn-failed"},
+                      {"type": "decision", "rebase": "no"},
+                      {"type": "decision", "rebase": True},
+                      {"type": "decision", "rebase": "YES"},
+                      {"type": "unblocked", "rebase": "yes"}):
+            with self.subTest(event=event), patch("base_refresh.subprocess.run") as run:
+                self.assertIsNone(base_refresh.refresh_tip(Context(self.repo, [event])))
+                run.assert_not_called()
+        for role in ("grader", "reviewer", "planner", None):
+            for event in ({"type": "spawn-failed", "reason": "wave-order"},
+                          {"type": "decision", "rebase": "yes"}):
+                with self.subTest(role=role, event=event):
+                    context = Context(self.repo, [event], role=role)
+                    if role is None:
+                        del context.a.role
+                    with patch("base_refresh.subprocess.run") as run:
+                        self.assertIsNone(base_refresh.refresh_tip(context))
+                        run.assert_not_called()
+        print("L-spec-1798 AC2 ok")
+
 
 if __name__ == "__main__":
     unittest.main()
