@@ -92,6 +92,17 @@ def _members(events_dir, name):
             for member in obj['members'] if member['name'] == name]
 
 
+def segment_members(events_dir) -> dict[str, list[tuple[str, int, int]]]:
+    """Member slices in sorted valid-index order; invalid indexes are skipped."""
+    result = {}
+    for _, obj, _ in _indexes(events_dir):
+        if obj:
+            for member in obj['members']:
+                result.setdefault(member['name'], []).append(
+                    (obj['segment'], member['offset'], member['length']))
+    return result
+
+
 def names(events_dir):
     directory = Path(events_dir)
     # iterdir, unlike glob, refuses a missing directory.

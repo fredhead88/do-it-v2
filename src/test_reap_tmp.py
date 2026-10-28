@@ -779,6 +779,10 @@ EXPECTED_CRONS_ROWS = [
      "command": "{doit} cron-run spec-preflight -- /usr/bin/python3 {repo}/src/spec_preflight.py tick >> {root}/logs/spec-preflight.log 2>&1",
      "path": "/usr/bin/python3", "sig": r"spec_preflight\.py\s+tick\b",
      "owner": "thinker", "project": "do-it-v2", "max_runtime_s": 3300},
+    {"name": "ledger-rollup", "where": "user", "schedule": "20 4 * * *",
+     "command": "{doit} cron-run ledger-rollup -- nice -n 19 {doit} ledger-rollup >> {root}/logs/ledger-rollup.log 2>&1",
+     "path": "{doit}", "sig": r"\bdoit ledger-rollup\b",
+     "owner": "thinker", "project": "do-it-v2"},
 ]
 CRONS_PATH = pathlib.Path(__file__).resolve().parent.parent / "crons.toml"
 with open(CRONS_PATH, "rb") as f:
