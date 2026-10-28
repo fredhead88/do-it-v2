@@ -22,6 +22,7 @@ DOIT = str(Path(__file__).resolve().parent.parent / 'doit')
 OUTCOMES = {'shipped', 'window-dropped', 'merge-conflict'}
 TERMINALS = OUTCOMES | {'spec-killed', 'spec-closed'}
 BATCH_MIN_QUEUE = 5
+GATE_PER_TICK = 2
 MIGRATION_ORDER_SOURCE = 'queue'
 
 
@@ -173,6 +174,7 @@ def enqueue_due(events, now, *, runner=None, dry_run=False):
         if not dry_run:
             _emit('queue', 'autodispatch-failed', role='queue', reason=str(exc))
         return out + [f'queue failed: {exc}']
+    eligible = []
     for row in rows:
         rule, sid = row.get('rule'), row.get('spec')
         if str(row.get('reason', '')).startswith('undetermined:'):
@@ -194,6 +196,25 @@ def enqueue_due(events, now, *, runner=None, dry_run=False):
                     (e.get('type') in ('spawn-started', 'spawn-failed', 'autodispatch-failed') and
                      e.get('role') == row.get('role', rule)) for e in newer):
                 continue
+            eligible.append((row, rung, evs))
+        except Exception as exc:
+            if not dry_run:
+                _emit(sid or 'queue', 'autodispatch-failed', role=rule, rule=rule, reason=str(exc))
+            out.append(f'{rule} failed {sid}: {exc}')
+    # Choose only after all existing skips, so skipped rows take no slot.
+    # Replace gate positions only: enqueue rows retain their relative order.
+    gates = sorted((item for item in eligible if item[0]['rule'] == 'gate'),
+                   key=lambda item: lane_rules._time(item[0]['since']))
+    permitted = {item[0]['spec'] for item in gates[:GATE_PER_TICK]}
+    ordered_gates = iter(gates)
+    pending = [next(ordered_gates) if item[0]['rule'] == 'gate' else item for item in eligible]
+    deferred = []
+    for row, rung, evs in pending:
+        rule, sid = row['rule'], row['spec']
+        if rule == 'gate' and sid not in permitted:
+            deferred.append(sid)
+            continue
+        try:
             if dry_run:
                 out.append(f'would {rule} {sid} ({rung})')
                 continue
@@ -234,6 +255,9 @@ def enqueue_due(events, now, *, runner=None, dry_run=False):
             if not dry_run:
                 _emit(sid or 'queue', 'autodispatch-failed', role=rule, rule=rule, reason=str(exc))
             out.append(f'{rule} failed {sid}: {exc}')
+    if deferred:
+        out.append(f'gate deferred {len(deferred)} (per-tick cap {GATE_PER_TICK}): '
+                   + ', '.join(deferred[:3]) + '...')
     return out
 
 
