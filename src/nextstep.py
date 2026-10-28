@@ -16,6 +16,7 @@ import sys
 import unicodedata
 
 import autodispatch
+import attempts as dispatch_attempts
 import dispatch
 import fold
 import lane_rules
@@ -53,6 +54,8 @@ class Step:
     reason: str
     clears: str | None
     since: str
+    attempt: int = 0
+    retry_at: str | None = None
 
     def __post_init__(self):
         if (self.item_kind not in KINDS or self.stage not in STAGES
@@ -138,6 +141,57 @@ def _result(trigger, reason='condition met', **fields):
 
 
 
+def _dispatch_result(c, trigger, role):
+    """Use SD1 for eligibility; evidence readiness stays tied to the build."""
+    if not trigger or _terminal(c['evs'], c['spec']):
+        return None
+    trigger = dict(trigger, subject=c['sid'])  # capability releases name another subject
+    evs = c['evs']
+    history = dispatch_attempts.history(evs, trigger, role, now=c['now'], dead=c['dead'])
+    if history.consumed:
+        return None
+    # These reset only this pending action; they cannot reopen a consumed output.
+    resets = {'decision', 'unblocked', 'spec-written', 'spec-amended'}
+    build = _latest(evs, {'build-done'})
+    candidates = [e for e in evs if e['type'] in resets and _time(e['ts']) > _time(trigger['ts'])
+                  and (e['type'] != 'decision' or e.get('actor') in ('thinker', 'operator'))]
+    if role == 'grader' and build:
+        candidates += [e for e in evs if e['type'] in {'evidence-bundle', 'evidence-bundle-failed'}
+                       and e.get('sha') == build.get('ready_sha')
+                       and _time(e['ts']) > _time(trigger['ts'])]
+    if candidates and not history.live:
+        trigger = max(candidates, key=lambda e: _time(e['ts']))
+        history = dispatch_attempts.history(evs, dict(trigger, subject=c['sid']), role,
+                                            now=c['now'], dead=c['dead'])
+    if history.consumed:
+        return None
+    not_ready = history.not_ready
+    if role == 'grader' and build:
+        refused = [e for e in evs if e['type'] == 'spawn-failed'
+                   and (e.get('role') == 'grader' or str(e.get('spawn', '')).startswith('L-grader-'))
+                   and str(e.get('reason') or e.get('why') or '').startswith('bundle-pending')
+                   and _time(e['ts']) >= _time(build['ts'])]
+        if refused:
+            threshold = max(_time(build['ts']), max(_time(e['ts']) for e in refused))
+            ready = any(e['type'] in {'evidence-bundle', 'evidence-bundle-failed'}
+                        and e.get('sha') == build.get('ready_sha') and _time(e['ts']) > threshold
+                        for e in evs)
+            not_ready = None if ready else 'bundle-pending'
+    reason, retry_at = 'condition met', None
+    if history.live:
+        reason = 'in flight'
+    elif not_ready:
+        reason = 'not-ready: ' + not_ready
+    elif history.exhausted:
+        reason = 'retries-exhausted: ' + role
+    elif history.next_retry_at and c['now'] < history.next_retry_at:
+        reason = 'retry-wait: ' + role
+        retry_at = history.next_retry_at.astimezone(timezone.utc).isoformat()
+    return _result(trigger, reason, _trigger=_source(trigger),
+                   attempt=min(history.n_failed + 1, dispatch_attempts.MAX_ATTEMPTS),
+                   retry_at=retry_at, dispatch_hold=reason != 'condition met')
+
+
 def _builder_dispatch(e):
     return (e.get('type') in DISPATCH_EVENTS and
             (e.get('role') or '-'.join(str(e.get('spawn') or '').split('-')[1:-1])
@@ -189,15 +243,18 @@ def _rebuild(c):
                       or any(e.get('ref') == q['_src'] and _time(e['ts']) > _time(q['ts'])
                              for q in questions)
                       or e.get('rework') == 'yes')]
-    rewrites = [e for e in evs if blocked and e.get('type') == 'spec-written'
-                and _time(e['ts']) > _time(blocked['ts'])]
-    drops = [e for e in evs if e.get('type') == 'window-dropped' and e.get('reason') == 'owner']
-    trigger = max(decisions + rewrites + drops, key=lambda e: _time(e['ts']), default=None)
-    dispatched = [e for e in evs if _builder_dispatch(e)]
-    if (trigger and (not blocked or _time(trigger['ts']) > _time(blocked['ts']))
-            and not _after(dispatched, trigger, DISPATCH_EVENTS)
-            and not _after(evs, trigger, {'build-started'})):
-        return _result(trigger)
+    recoverable = _latest(evs, {'build-blocked', 'build-done', 'window-dropped'})
+    if recoverable and (recoverable['type'] in {'build-blocked', 'window-dropped'}
+                        or recoverable.get('status') == 'BLOCKED'):
+        rewrites = [e for e in evs if e['type'] in {'spec-written', 'spec-amended', 'unblocked'}
+                    and _time(e['ts']) > _time(recoverable['ts'])]
+    else:
+        rewrites = []
+    drops = [e for e in evs if e['type'] == 'window-dropped'
+             and (not outcome or _time(e['ts']) > _time(outcome['ts']))]
+    # Rework keeps its branch anchor even when freshness releases also exist.
+    trigger = max(decisions or rewrites + drops, key=lambda e: _time(e['ts']), default=None)
+    return _dispatch_result(c, trigger, 'builder')
 
 
 
@@ -224,13 +281,12 @@ def _regrade(c):
     if decision and kind == 'regrade':
         triggers.append(decision)
     trigger = max(triggers, key=lambda e: _time(e['ts']), default=None)
-    if trigger and not _after(c['evs'], trigger, DISPATCH_EVENTS, 'grader'):
-        return _result(trigger)
+    return _dispatch_result(c, trigger, 'grader')
 
 
 
 def _build(c):
-    if c['spec'].get('state') != 'written' or c['sid'] in c['busy'] or c['dependency'] or c['wave']:
+    if c['spec'].get('state') not in {'written', 'building'} or c['dependency'] or c['wave']:
         return None
     if _rebuild(c) or _close(c) or _regrade(c):
         return None
@@ -239,7 +295,7 @@ def _build(c):
     if any(e.get('type') in JUDGING | {'build-done', 'queue-add', 'merge-gate-clean', 'build-blocked'} for e in c['evs']):
         return None
     trigger = _latest(c['evs'], {'spec-written'})
-    return _result(trigger) if trigger else None
+    return _dispatch_result(c, trigger, 'builder')
 
 
 
@@ -249,9 +305,7 @@ def _grade(c):
     trigger, kind = autodispatch._grader_trigger(c['evs'])
     if not trigger or kind == 'regrade' or _rebuild(c) or _regrade(c) or _close(c):
         return None
-    if _after(c['evs'], trigger, DISPATCH_EVENTS, 'grader') or _after(c['evs'], trigger, JUDGING | {'queue-add', 'merge-gate-clean'}):
-        return None
-    return _result(trigger)
+    return _dispatch_result(c, trigger, 'grader')
 
 
 
@@ -262,9 +316,7 @@ def _review(c):
         return None
     if fold.standing_rejects(c['evs']) or _rebuild(c) or _close(c) or _regrade(c):
         return None
-    if _after(c['evs'], trigger, DISPATCH_EVENTS, 'reviewer') or _after(c['evs'], trigger, {'queue-add', 'merge-gate-clean'}):
-        return None
-    return _result(trigger)
+    return _dispatch_result(c, trigger, 'reviewer')
 
 
 
@@ -464,7 +516,7 @@ def _wave(sid, evs, by, specs, waves):
 
 
 def _failure(evs, rules):
-    latest = next((e for e in reversed(evs) if e['type'] in FAILURES | RETRIES
+    latest = next((e for e in reversed(evs) if e['type'] in {'merge-gate-rework'} | RETRIES
                    and not (e['type'] == 'spawn-failed'
                             and str(e.get('reason') or '').startswith(NOT_READY_PREFIXES))), None)
     if latest and latest['type'] in FAILURES:
@@ -485,9 +537,17 @@ def _choose(c, rows, owners):
     row = next(iter(acting), None)
     if row:
         name = row['name']
-        trigger = next((e for e in reversed(evs) if e['ts'] == row['since']), {})
-        return Step(sid, 'spec', ACTION_STAGES[name], 'action', name, owners[name],
-                    _source(trigger), row.get('reason', 'condition met'), None, row['since'])
+        trigger = next((e for e in reversed(evs) if row.get('_trigger')
+                        and _source(e) == row['_trigger']), None)
+        trigger = trigger or next((e for e in reversed(evs) if e['ts'] == row['since']), {})
+        if name in {'build', 'rebuild', 'grade', 'regrade', 'review'} and (c['wave'] or c['dependency']):
+            return _hold(sid, 'spec', stage, trigger, 'wave/dependency: held',
+                         str(c['wave'] or c['dependency']) + ' shipped', 'tick')
+        held = row.get('dispatch_hold', False)
+        return Step(sid, 'spec', ACTION_STAGES[name], 'hold' if held else 'action', name, owners[name],
+                    _source(trigger), row.get('reason', 'condition met'),
+                    'retry time, evidence or decision' if held else None, row['since'],
+                    row.get('attempt', 0), row.get('retry_at'))
     for row in rows:
         if row['name'] in {'wave-held', 'dependency-held'}:
             label = 'dependency' if row['name'] == 'dependency-held' else 'wave'
@@ -515,6 +575,7 @@ def next_steps(events, specs, now, rules, waves=None):
         ACTIONS.update(owners)
     except (ValueError, TypeError, KeyError) as exc:
         rule_error, owners = str(exc), {}
+    dead = frozenset(r['spawn'] for r in autodispatch.dead_spawns(events, now))
     steps, attempts = [], {}
     for e in events:
         spawn = e.get('spawn')
@@ -529,6 +590,7 @@ def next_steps(events, specs, now, rules, waves=None):
         if (e.get('spawn') in bad and e.get('spawn') not in ended
                 and e.get('type') in {'spawn-started', 'build-started'}):
             attempts.setdefault(e['spawn'], dict(e, ts='', _src=_source(e)))
+    attempts = {spawn: e for spawn, e in attempts.items() if spawn not in dead}
     busy = {e.get('subject') for e in attempts.values()}
     for spawn, e in attempts.items():
         role = e.get('role') or fold.actor_of(spawn)
@@ -585,14 +647,9 @@ def next_steps(events, specs, now, rules, waves=None):
         if questions:
             steps.append(_hold(sid, 'spec', stage, questions[-1], 'judgment: open question/escalation', 'decision'))
             continue
-        if sid in busy:
-            spawn = next(s for s, e in attempts.items() if e.get('subject') == sid)
-            steps.append(_hold(sid, 'spec', stage, attempts[spawn], 'in flight: ' + spawn,
-                               spawn + ' spawn-done/spawn-failed', 'tick'))
-            continue
         c = dict(sid=sid, spec=spec, specs=specs, events=events, evs=evs,
                  by_subject=by, now=now, table=rules, busy=busy, live=busy,
-                 capabilities=capabilities, memo={}, acting_rows=rows)
+                 capabilities=capabilities, memo={}, acting_rows=rows, dead=dead)
         c['dependency'] = autodispatch.held_by_dependency(evs, events, shipped=shipped)
         c['wave'] = _wave(sid, evs, by, specs, waves)
         contexts.append(c)

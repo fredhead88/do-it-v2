@@ -108,7 +108,9 @@ def history(evs, trigger, role, *, now, dead=frozenset()):
         _, _, e = row
         if _role(e) != role:
             continue
-        if e.get('type') == 'autodispatch-failed':
+        if (e.get('type') == 'autodispatch-failed'
+                and e.get('spawn') not in older
+                and e.get('spawn') not in groups):
             failures.append((row[0], row[1], _reason(e)))
         if e.get('spawn') in older:
             continue

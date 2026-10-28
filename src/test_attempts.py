@@ -406,6 +406,36 @@ def failure(minute=1, number=900001, **extra):
 
 
 class AttemptsTests(unittest.TestCase):
+    def test_retry1672_AC9_older_spawn_marker_is_not_a_new_failure(self):
+        spawned = start(minute=-2)
+        marker = event('autodispatch-failed', 1, role='grader',
+                       spawn=spawned['spawn'], reason='packet preparation failed')
+        actual = result([spawned, marker])
+        self.assertEqual(actual.n_failed, 0)
+        self.assertEqual(actual.reasons, ())
+        self.assertIsNone(actual.next_retry_at)
+
+    def test_retry1672_AC9_same_spawn_markers_count_once(self):
+        spawned = start()
+        failed = failure(2, reason='detached dispatch failed')
+        marker = event('autodispatch-failed', 3, role='grader',
+                       spawn=spawned['spawn'], reason='wrapper observed failure')
+        for rows in ([spawned, failed, marker], [spawned, marker, failed],
+                     [marker, failed, spawned]):
+            with self.subTest(rows=[row['type'] for row in rows]):
+                actual = result(rows)
+                self.assertEqual(actual.n_failed, 1)
+                self.assertEqual(actual.reasons, ('detached dispatch failed',))
+                self.assertEqual(actual.next_retry_at, NOW + timedelta(minutes=7))
+
+    def test_retry1672_AC9_spawnless_marker_still_counts_once(self):
+        marker = event('autodispatch-failed', 1, role='grader',
+                       reason='packet preparation failed before spawn allocation')
+        actual = result([marker])
+        self.assertEqual(actual.n_failed, 1)
+        self.assertEqual(actual.reasons, (marker['reason'],))
+        self.assertEqual(actual.next_retry_at, NOW + timedelta(minutes=6))
+
     def flags(self, actual, **expected):
         for key, value in expected.items():
             self.assertEqual(getattr(actual, key), value, (key, actual))

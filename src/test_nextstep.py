@@ -23,7 +23,7 @@ import lane_rules as lr
 NOW = datetime(2026, 10, 23, 12, tzinfo=timezone.utc)
 SID = 'L-spec-9001'
 KEYS = {'item', 'item_kind', 'stage', 'state', 'action', 'owner',
-        'trigger', 'reason', 'clears', 'since'}
+        'trigger', 'reason', 'clears', 'since', 'attempt', 'retry_at'}
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURES = ROOT / 'src/fixtures/nextstep'
 
@@ -276,7 +276,7 @@ class NextStepTests(unittest.TestCase):
             matching = [s for s in steps if s.item == sid]
             self.assertEqual(len(matching), 1)
             expected = ns.Step(sid, 'spec', 'building', 'action', 'rebuild', 'tick', trigger,
-                               'condition met', None, since)
+                               'condition met', None, since, 1)
             for key in KEYS:
                 self.assertEqual(asdict(matching[0])[key], asdict(expected)[key], (name, key))
             if name == 'w41':
@@ -300,6 +300,10 @@ class NextStepTests(unittest.TestCase):
                                    ('L-spec-1417', 'spec', 'in flight: L-builder-3018')]:
             expected = ns.Step(item, kind, 'building', 'hold', None, 'tick', 'L-builder-3018.jsonl:1',
                                reason, 'L-builder-3018 spawn-done/spawn-failed', '2026-10-22T10:14:59+00:00')
+            if kind == 'spec':
+                expected = replace(expected, action='rebuild', trigger='L-thinker-0004.jsonl:6180',
+                                   reason='in flight', clears='retry time, evidence or decision',
+                                   since='2026-10-22T10:05:20+00:00', attempt=1)
             self.assertEqual(ns.step_for(events, specs, item, now, self.rules, waves), expected)
         self.assertEqual(next(e for e in events if e['_src'] == 'L-builder-3018.jsonl:1')['issued_by'], 'executor')
         print('w56', json.dumps(asdict(expected), sort_keys=True))
@@ -334,9 +338,15 @@ class NextStepTests(unittest.TestCase):
                   event('decision', -40, actor='thinker', rework='yes')]
         for kind in ('merge-gate-rework', 'spawn-failed', 'autodispatch-failed'):
             for text, prefix in [('ENOSPC', 'infra:'), ('unmatched', 'undetermined:')]:
-                step = self.one(events + [event(kind, -30, findings=text)])
-                self.assertEqual((step.state, step.owner), ('hold', 'executor'))
-                self.assertTrue(step.reason.startswith(prefix))
+                failure = event(kind, -30, findings=text, role='builder',
+                                spawn='L-builder-9001', reason=text)
+                step = self.one(events + [failure])
+                if kind == 'merge-gate-rework':
+                    self.assertEqual((step.state, step.owner), ('hold', 'executor'))
+                    self.assertTrue(step.reason.startswith(prefix))
+                else:
+                    self.assertEqual((step.state, step.owner, step.action, step.attempt),
+                                     ('action', 'tick', 'rebuild', 2))
             failure = event(kind, -30, findings='FAILED')
             with patch.dict(ns.PREDICATES, {'rebuild': lambda c: dict(
                     since=events[-1]['ts'], reason='table evaluated')}):
@@ -397,6 +407,256 @@ class NextStepTests(unittest.TestCase):
             self.assertEqual(out.getvalue(), '')
             self.assertIn('clock unavailable', err.getvalue())
 
+
+
+class Retry1672Tests(unittest.TestCase):
+    def chain(self, action):
+        rows = [event('spec-written', -200)]
+        if action == 'rebuild':
+            rows += [event('build-blocked', -190),
+                     event('decision', -180, actor='thinker', rework='yes')]
+        elif action in ('grade', 'regrade', 'review'):
+            rows += [event('build-done', -190, actor='builder', status='DONE', ready_sha='new')]
+            if action == 'regrade':
+                rows += [event('decision', -180, actor='thinker', regrade='yes')]
+            elif action == 'review':
+                rows += [event('verdict', -180, confirmed=True)]
+        return rows
+
+    def one(self, rows, now=NOW, specs=None):
+        return ns.step_for(rows, specs or specs_for(rows), SID, now, lr.load())
+
+    def test_retry1672_AC1_role_history_matrix(self):
+        import attempts
+        roles = dict(build='builder', rebuild='builder', grade='grader',
+                     regrade='grader', review='reviewer')
+        outputs = dict(builder=['build-done', 'build-blocked'],
+                       grader=['verdict', 'cannot-assess'], reviewer=['review'])
+        for action, role in roles.items():
+            rows = self.chain(action)
+            for failure in ('spawn-failed', 'autodispatch-failed', 'spawn-stale', 'spawn-done'):
+                with self.subTest(action=action, failure=failure):
+                    spawn = f'L-{role}-9001'
+                    failed = rows + [event('spawn-started', -100, role=role, spawn=spawn),
+                                     event(failure, -90, role=role, spawn=spawn, reason='unknown cause')]
+                    if failure == 'autodispatch-failed':
+                        failed = rows + [event(failure, -90, role=role, reason='unknown cause')]
+                    with patch.object(attempts, 'history', wraps=attempts.history) as helper:
+                        step = self.one(failed)
+                    self.assertTrue(helper.called)
+                    self.assertEqual((step.action, step.attempt), (action, 2))
+                    self.assertEqual(step.state, 'action')
+            dead = rows + [event('spawn-started', -80, role=role, spawn=f'L-{role}-9001',
+                                 waiter_pid=99999999, waiter_host=ns.autodispatch.socket.gethostname())]
+            with patch.object(ns.autodispatch.panes, '_is_live', return_value=False):
+                self.assertEqual((self.one(dead).state, self.one(dead).attempt), ('action', 2))
+            live = rows + [event('spawn-started', -1, role=role, spawn=f'L-{role}-9001')]
+            self.assertEqual(self.one(live).state, 'hold')
+            for output in outputs[role] + ['queue-add', 'merge-gate-clean']:
+                with self.subTest(action=action, output=output):
+                    done = live + [event(output, 0, spawn=f'L-{role}-9001')]
+                    step = self.one(done)
+                    self.assertFalse(step.action == action and step.state == 'action')
+            unrelated = rows + [event('spawn-failed', -20, role='spec-writer', spawn='L-spec-writer-9001'),
+                                event('spawn-failed', -10, subject='L-spec-9002', role=role, spawn=f'L-{role}-9002')]
+            self.assertEqual(self.one(unrelated).attempt, 1)
+            older = [event('spawn-started', -300, role=role, spawn=f'L-{role}-9000')] + rows
+            older += [event('spawn-failed', -20, role=role, spawn=f'L-{role}-9000')]
+            self.assertEqual(self.one(older).attempt, 1)
+            for terminal in ('shipped', 'spec-killed', 'spec-closed'):
+                self.assertNotEqual(self.one(rows + [event(terminal, -1)]).state, 'action')
+
+    def test_retry1672_AC2_boundaries_exhaustion_reset_serialization(self):
+        for action, role in dict(build='builder', rebuild='builder', grade='grader',
+                                 regrade='grader', review='reviewer').items():
+            rows = self.chain(action)
+            first = event('autodispatch-failed', -60, role=role, reason='first')
+            rows.append(first)
+            for delta, state in ((timedelta(minutes=5, microseconds=-1), 'hold'),
+                                 (timedelta(minutes=5), 'action')):
+                step = self.one(rows, ns._time(first['ts']) + delta)
+                self.assertEqual((step.state, step.attempt), (state, 2), action)
+                self.assertEqual(step.since, self.chain(action)[-1]['ts'])
+                self.assertEqual(step.trigger, self.chain(action)[-1]['_src'])
+                if state == 'hold':
+                    self.assertIn('retry-wait', step.reason)
+                    self.assertEqual(ns._time(step.retry_at), ns._time(first['ts']) + timedelta(minutes=5))
+                self.assertEqual(json.loads(json.dumps(asdict(step)))['attempt'], 2)
+            second = event('autodispatch-failed', -50, role=role, reason='second')
+            rows.append(second)
+            for delta, state in ((timedelta(minutes=15, microseconds=-1), 'hold'),
+                                 (timedelta(minutes=15), 'action')):
+                self.assertEqual(self.one(rows, ns._time(second['ts']) + delta).state, state)
+            third = event('autodispatch-failed', -30, role=role, reason='third')
+            rows.append(third)
+            for now in (ns._time(third['ts']), NOW + timedelta(days=2)):
+                step = self.one(rows, now)
+                self.assertEqual((step.state, step.attempt, step.retry_at), ('hold', 3, None))
+                self.assertIn('retries-exhausted', step.reason)
+            reset = event('decision', -10, actor='thinker',
+                          **({'rework': 'yes'} if action == 'rebuild' else
+                             {'regrade': 'yes'} if action == 'regrade' else {}))
+            self.assertEqual(self.one(rows + [reset]).attempt, 1)
+            self.assertEqual(self.one(rows + [event('note', -1)]).attempt, 3)
+            if action != 'rebuild':
+                for kind in ('unblocked', 'spec-amended', 'spec-written'):
+                    reset = event(kind, -10, actor='operator')
+                    step = self.one(rows + [reset])
+                    self.assertEqual((step.state, step.attempt, step.trigger), ('action', 1, reset['_src']))
+                    self.assertEqual(self.one(rows + [reset]), step)  # polling is stable
+            if role == 'grader':
+                bundle = event('evidence-bundle', -10, sha='new')
+                self.assertEqual((self.one(rows + [bundle]).attempt,
+                                  self.one(rows + [bundle]).trigger), (1, bundle['_src']))
+
+    def test_retry1672_AC3_newest_bundle_refusal_strict_readiness(self):
+        for action in ('grade', 'regrade'):
+            rows = self.chain(action)
+            self.assertEqual(self.one(rows).action, action)  # bootstrap
+            preparatory = event('autodispatch-failed', -100, role='grader', reason='packet failed')
+            self.assertEqual(self.one(rows + [preparatory]).attempt, 2)
+            refusal = event('spawn-failed', -80, role='grader', spawn='L-grader-9001', reason='bundle-pending')
+            refused = rows + [refusal]
+            self.assertEqual((self.one(refused).state, self.one(refused).attempt), ('hold', 1))
+            for kind in ('evidence-bundle', 'evidence-bundle-failed'):
+                for minute, sha, ready in ((-90, 'new', False), (-80, 'new', False),
+                                           (-70, 'old', False), (-70, 'new', True)):
+                    with self.subTest(action=action, kind=kind, minute=minute, sha=sha):
+                        step = self.one(refused + [event(kind, minute, sha=sha)])
+                        self.assertEqual(step.state, 'action' if ready else 'hold')
+                        self.assertEqual(step.attempt, 1)
+            newest = event('build-done', -20, actor='builder', status='DONE', ready_sha='newer')
+            self.assertEqual(self.one(refused + [newest]).action, 'grade')
+
+    def test_retry1672_AC3_tick_real_gate_and_checker_publication(self):
+        import argparse
+        import grader_packet
+        import models
+        import tick
+        with tempfile.TemporaryDirectory(prefix='retry1672-bootstrap-') as temporary, ExitStack() as stack:
+            top = Path(temporary)
+            root, scratch = top / 'root', top / 'scratch'
+            repo = root / 'repos/demo'
+            repo.mkdir(parents=True)
+            for name in ('events', 'content', 'worktrees/demo/l-spec-9001'):
+                (root / name).mkdir(parents=True)
+            def git(*argv):
+                return subprocess.check_output(['git', '-C', str(repo), *argv],
+                                               text=True, stderr=subprocess.DEVNULL).strip()
+            git('init', '-q', '-b', 'main')
+            git('config', 'user.name', 'fixture')
+            git('config', 'user.email', 'fixture@example.invalid')
+            (repo / 'probe.py').write_text("print('local evidence ready')\n")
+            git('add', '.')
+            git('commit', '-qm', 'fixture')
+            ready = git('rev-parse', 'HEAD')
+            (root / 'content' / (SID + '.md')).write_text(
+                '## Acceptance criteria\nAC1 [backend]: local fixture.\n'
+                'review_path: run `/usr/bin/python3 probe.py`\n')
+            (root / 'events/L-planner-fixture.jsonl').write_text(json.dumps(dict(
+                v=1, type='spec-written', subject=SID, project='demo',
+                ts=(NOW - timedelta(hours=2)).isoformat())) + '\n')
+            (root / 'events/L-builder-fixture.jsonl').write_text(json.dumps(dict(
+                v=1, type='build-done', subject=SID, project='demo', status='DONE',
+                ready_sha=ready, base_sha=ready, ts=NOW.isoformat())) + '\n')
+            packet = root / 'packet.md'
+            packet.write_text('fixture packet awaiting evidence')
+            env = dict(os.environ, DOIT_ROOT=str(root), DOIT_NO_POKE='1',
+                       DOIT_SCRATCH=str(scratch), DOIT_MAIN='main')
+            for key in list(env):
+                if key.startswith('SUPABASE_DB_URL') or key in ('DOIT_PROJECT', 'DOIT_LEDGER_FILE'):
+                    del env[key]
+            stack.enter_context(patch.dict(os.environ, env, clear=True))
+            stack.enter_context(patch.multiple(fold, ROOT=root, EVENTS=root / 'events', PROJECT=None))
+            stack.enter_context(patch.multiple(dispatch, ROOT=root, EVENTS=root / 'events',
+                                               CONTENT=root / 'content'))
+            stack.enter_context(patch.object(dispatch, 'ensure_room', return_value=True))
+            stack.enter_context(patch.object(models, 'resolve', return_value=dict(
+                backend='codex', model='fixture', source='fixture')))
+            paid = [stack.enter_context(patch.object(dispatch, name, side_effect=AssertionError('metered entry')))
+                    for name in ('run_codex', 'run_seat')]
+            # Record the refusal ten seconds before the real checker publishes,
+            # without sleeping or admitting equal-time readiness.
+            stamp = (datetime.now(timezone.utc) - timedelta(seconds=10)).isoformat()
+            stack.enter_context(patch.object(dispatch, 'now', return_value=stamp))
+            checker_calls = []
+            defer_checker = [True]
+            real_popen = subprocess.Popen
+            def popen(argv, *args, **kwargs):
+                if defer_checker[0] and len(argv) > 1 and argv[1] == 'run-checks':
+                    checker_calls.append(argv)
+                    return None  # Run synchronously after the refusal is durable.
+                return real_popen(argv, *args, **kwargs)
+            stack.enter_context(patch.object(grader_packet.subprocess, 'Popen', side_effect=popen))
+            def runner(argv):
+                self.assertIsInstance(argv, list)
+                if argv[:2] == ['doit', 'packet']:
+                    return dict(code=0, stdout=str(packet), stderr='')
+                self.assertEqual(argv[:5], ['doit', 'dispatch', '--detach', 'grader', SID])
+                args = argparse.Namespace(role='grader', subject=SID, packet=str(packet), path=None,
+                    cwd=str(repo), charter=None, project='demo', mcp_config=None,
+                    timeout=None, max_usd=None, seat=False)
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    try:
+                        dispatch.main(args)
+                    except SystemExit:
+                        pass
+                return dict(code=1, stdout='', stderr='bundle-pending')
+            events = fold.read_events(use_cache=False)
+            lines = tick.run_steps(events, fold.fold(events)[0], datetime.now(timezone.utc), dispatcher=runner)
+            self.assertTrue(any(line.startswith('failed ') for line in lines), lines)
+            self.assertEqual(len(checker_calls), 1)
+            self.assertEqual(checker_calls[0][1:], ['run-checks', SID, '--sha', ready])
+            fresh = fold.read_events(use_cache=False)
+            refusal = [e for e in fresh if e['type'] == 'spawn-failed']
+            self.assertEqual([e['reason'] for e in refusal], ['bundle-pending'])
+            step = ns.step_for(fresh, fold.fold(fresh)[0], SID, datetime.now(timezone.utc), lr.load())
+            self.assertEqual((step.state, step.reason, step.attempt),
+                             ('hold', 'not-ready: bundle-pending', 1))
+            # Execute the actual local checker and its production append path.
+            defer_checker[0] = False
+            checked = subprocess.run(checker_calls[0], env=env, capture_output=True, text=True, timeout=30)
+            self.assertEqual(checked.returncode, 0, checked.stderr)
+            reader = subprocess.run(['/usr/bin/python3', '-c',
+                'import fold,json; print(json.dumps(fold.read_events(use_cache=False)))'],
+                cwd=ROOT / 'src', env=env, capture_output=True, text=True, timeout=10)
+            self.assertEqual(reader.returncode, 0, reader.stderr)
+            fresh = json.loads(reader.stdout)
+            published = [e for e in fresh if e['type'] == 'evidence-bundle']
+            self.assertEqual([e['sha'] for e in published], [ready])
+            due = tick.run_steps(fresh, fold.fold(fresh)[0], datetime.now(timezone.utc),
+                                 dispatcher=runner, dry_run=True)
+            self.assertIn(f'would act {SID} grade', due)
+            self.assertEqual([entry.call_count for entry in paid], [0, 0])
+
+    def test_retry1672_AC4_releases_and_protected_holds(self):
+        for blocked in ('build-blocked', 'build-done', 'window-dropped'):
+            for release in ('unblocked', 'spec-amended', 'spec-written'):
+                rows = [event('spec-written', -200), event(blocked, -100, reason='owner', status='BLOCKED'),
+                        event(release, -90, actor='operator')]
+                self.assertEqual(self.one(rows).action, 'rebuild')
+                older = self.one([rows[0], event(release, -110), rows[1]])
+                if blocked == 'window-dropped':
+                    self.assertEqual(older.trigger, rows[1]['_src'])
+                else:
+                    self.assertNotEqual(older.action, 'rebuild')
+                completed = event('build-done', -80, actor='builder', status='DONE', ready_sha='new')
+                self.assertNotEqual(self.one(rows + [completed]).action, 'rebuild')
+                for hold in (event('question', -50),
+                             event('escalation-blocking', -50),
+                             event('dependency-hold', -50, waits_for='L-spec-9999')):
+                    self.assertEqual(self.one(rows + [hold]).state, 'hold')
+                held = event('escalation-blocking', -50)
+                for release_hold in ('decision', 'unblocked'):
+                    released = rows + [held, event(release_hold, -40, actor='operator')]
+                    self.assertEqual(self.one(released).action, 'rebuild')
+                for state in ('dropped', 'killed', 'shipped'):
+                    steps = ns.next_steps(rows, {SID: dict(state=state)}, NOW, lr.load())
+                    self.assertFalse(any(s.state == 'action' for s in steps))
+        # A capability release belongs to grading, not builder recovery.
+        rows = self.chain('grade') + [event('capability-hold', -100, subject='capability:browser:' + SID),
+                                      event('unblocked', -90, subject='capability:browser:' + SID, actor='operator')]
+        self.assertEqual(self.one(rows).action, 'regrade')
 
 if __name__ == '__main__':
     unittest.main()

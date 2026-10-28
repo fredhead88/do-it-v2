@@ -13,7 +13,7 @@ a supervised pane that reads the same lane for itself; nothing here launches it.
 import ledger_files
 import ledger_cache
 import argparse, fcntl, json, os, pathlib, re, socket, sys, time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import carry, dispatch, fold, intake, notes, pane_resume, panes, tree_cleanup  # noqa: E402
 # `relay` is imported LAZILY, inside `wait()` only — importing tick.py must not
@@ -357,8 +357,23 @@ def launch(step, *, dispatcher):
     except Exception as exc:
         if heal and isinstance(exc, heal.RepairRetry):
             raise
+        # The detached wrapper may already have recorded this failed attempt.
+        # Attach its identity so SD1 groups both markers once, including a
+        # bundle-pending refusal which consumes no failure budget.
+        attempt_fields = {}
+        reason = str(exc)
+        try:
+            known = {e.get('spawn') for e in events if e.get('spawn')}
+            failed = [e for e in fold.read_events(use_cache=False)
+                      if e.get('subject') == step.item and e.get('type') == 'spawn-failed'
+                      and e.get('spawn') and e['spawn'] not in known
+                      and (e.get('role') or e.get('actor') or fold.actor_of(e['spawn'])) == role]
+            if failed:
+                attempt_fields['spawn'] = failed[-1]['spawn']
+        except Exception as read_error:
+            reason += '; attempt readback failed: ' + str(read_error)
         refusal = dispatch.emit(tick_path(), {'subject': step.item}, 'autodispatch-failed',
-                                role=role, rule=step.action, reason=str(exc))
+                                role=role, rule=step.action, reason=reason, **attempt_fields)
         raise ValueError(str(exc) + (f'; failure record refused: {refusal}' if refusal else '')) from exc
 
 
@@ -376,6 +391,35 @@ def _steps(events, specs, now):
         if written and charter:
             waves[sid] = dispatch.spec_wave(charter, written['footprint'])
     return nextstep.next_steps(events, specs, now, lane_rules.load(), waves)
+
+
+def _record_exhaustion(step, events, now):
+    """Persist one reader-visible blocking row for a subject/role/trigger."""
+    import attempts
+    import autodispatch
+    import dispatch
+    role = ROUTINE_ROLES[step.action]
+    if any(e.get('type') == 'escalation-blocking' and e.get('kind') == 'retries-exhausted'
+           and (e.get('subject'), e.get('role'), e.get('ref')) == (step.item, role, step.trigger)
+           for e in events):
+        return None
+    trigger = next((e for e in events if (e.get('_src') or e.get('src')) == step.trigger), None)
+    if trigger is None or not step.trigger:
+        raise ValueError('retries-exhausted: governing trigger is missing')
+    dead = frozenset(row['spawn'] for row in autodispatch.dead_spawns(events, now))
+    history = attempts.history(events, dict(trigger, subject=step.item), role, now=now, dead=dead)
+    if not history.exhausted:
+        raise ValueError('retries-exhausted: history no longer exhausted')
+    emitted_at = datetime.fromisoformat(dispatch.now().replace('Z', '+00:00'))
+    refusal = dispatch.emit(tick_path(), {'subject': step.item}, 'escalation-blocking', strict=True,
+                            kind='retries-exhausted', owner='thinker', role=role,
+                            reasons=list(history.reasons), ref=step.trigger,
+                            default='leave the action stopped pending a human decision',
+                            deadline=(emitted_at + timedelta(hours=24)).isoformat(),
+                            revert='no automatic action taken; nothing to revert')
+    if refusal is not None:
+        raise ValueError('retries-exhausted record refused: ' + str(refusal))
+    return f'escalated {step.item} role={role} ref={step.trigger} kind=retries-exhausted'
 
 
 def run_steps(events, specs, now, *, dispatcher=None, dry_run=False, handled=frozenset(), steps=None, admission: dict | None = None):
@@ -413,6 +457,14 @@ def run_steps(events, specs, now, *, dispatcher=None, dry_run=False, handled=fro
             if step.item in handled:
                 continue
             if step.reason.startswith('undetermined:') or step.state == 'hold':
+                if (not dry_run and step.owner == 'tick' and step.action in ROUTINE_ACTIONS
+                        and step.reason.startswith('retries-exhausted:')):
+                    try:
+                        recorded = _record_exhaustion(step, events, now)
+                        if recorded:
+                            out.append(recorded)
+                    except Exception as exc:
+                        out.append(f'failed {step.item} escalation: {exc}')
                 out.append(f"{'undetermined' if step.reason.startswith('undetermined:') else 'hold'} {step.item}: {step.reason}")
                 continue
             if step.owner != 'tick' or step.action not in LAUNCH_ACTIONS:

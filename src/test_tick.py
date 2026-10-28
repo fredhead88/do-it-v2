@@ -33,6 +33,121 @@ def _launcher_evidence(criterion, body):
                           body_excerpt=payload)))
 
 
+class RetryExhaustionTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix='retry1672-')
+        self.addCleanup(self.tmp.cleanup)
+        self.root = pathlib.Path(self.tmp.name)
+        (self.root / 'events').mkdir()
+        self.now = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0)
+        for module, fields in ((fold, dict(ROOT=self.root, EVENTS=self.root / 'events', PROJECT=None)),
+                               (dispatch, dict(ROOT=self.root, EVENTS=self.root / 'events'))):
+            swap = patch.multiple(module, **fields)
+            swap.start()
+            self.addCleanup(swap.stop)
+        swap = patch.object(dispatch, 'now', side_effect=lambda: self.now.isoformat())
+        swap.start()
+        self.addCleanup(swap.stop)
+
+    def append(self, kind, age, **fields):
+        row = dict(v=1, type=kind, subject='L-spec-9001',
+                   ts=(self.now - datetime.timedelta(minutes=age)).isoformat(), **fields)
+        with (self.root / 'events/L-operator-fixture.jsonl').open('a') as out:
+            out.write(json.dumps(row) + '\n')
+
+    def read(self):
+        # No writer or reader handle survives a pass.
+        return fold.read_events(use_cache=False)
+
+    def exhaust(self, role='builder'):
+        if role == 'builder':
+            self.append('spec-written', 100, project='proj')
+        else:
+            self.append('decision', 100, regrade='yes')
+        for n, age in enumerate((80, 60, 30)):
+            self.append('autodispatch-failed', age, role=role, reason=f'failure {n + 1}')
+
+    def drive(self, *, dry=False):
+        events = self.read()
+        specs = {'L-spec-9001': dict(state='written', evs=events)}
+        def metered(argv):
+            self.fail(f'exhausted/held action reached runner: {argv}')
+        return tick.run_steps(events, specs, self.now, dispatcher=metered, dry_run=dry)
+
+    def test_retry1672_AC5_durable_once_and_release(self):
+        self.exhaust()
+        trigger = self.read()[0]['_src']
+        lines = self.drive()
+        fresh = self.read()
+        rows = [e for e in fresh if e['type'] == 'escalation-blocking']
+        self.assertEqual(len(rows), 1, lines)
+        row = rows[0]
+        self.assertEqual({k: row[k] for k in ('kind', 'owner', 'role', 'ref', 'reasons')},
+                         dict(kind='retries-exhausted', owner='thinker', role='builder',
+                              ref=trigger, reasons=['failure 1', 'failure 2', 'failure 3']))
+        self.assertEqual(nextstep._time(row['deadline']), nextstep._time(row['ts']) + datetime.timedelta(hours=24))
+        self.assertTrue(all(str(row[k]).strip() for k in ('default', 'deadline', 'revert')))
+        self.assertIn(row, fold.open_escalations(fresh))
+        self.assertTrue(any(line.startswith('escalated ') for line in lines), lines)
+        self.drive()
+        self.assertEqual(len([e for e in self.read() if e['type'] == 'escalation-blocking']), 1)
+        # A budget reset cannot clear a blocking escalation.
+        self.append('spec-amended', -1)
+        self.drive()
+        self.assertEqual(len(fold.open_escalations(self.read())), 1)
+        # Only an authorized release supplies a new trigger/identity.
+        self.append('unblocked', -2)
+        released = self.read()
+        step = nextstep.step_for(released, {'L-spec-9001': dict(state='written')},
+                                 'L-spec-9001', self.now + datetime.timedelta(minutes=3), lane_rules.load())
+        self.assertEqual((step.state, step.attempt), ('action', 1))
+        new_ref = step.trigger
+        for n in range(3):
+            self.append('autodispatch-failed', -3 - n, role='builder', reason='new failure')
+        self.now += datetime.timedelta(minutes=6)
+        self.drive()
+        escalations = [e for e in self.read() if e['type'] == 'escalation-blocking']
+        self.assertEqual(len(escalations), 2)
+        self.assertEqual(escalations[-1]['ref'], new_ref)
+        self.assertIn(escalations[-1], fold.open_escalations(self.read()))
+        _launcher_evidence('retry1672-AC5', dict(escalations=escalations,
+                                               open_count=len(fold.open_escalations(self.read()))))
+
+    def test_retry1672_AC5_role_identity_and_dry_run(self):
+        self.exhaust('grader')
+        before = {p.name: p.read_bytes() for p in (self.root / 'events').iterdir()}
+        self.drive(dry=True)
+        self.assertEqual(before, {p.name: p.read_bytes() for p in (self.root / 'events').iterdir()})
+        self.drive()
+        row = fold.open_escalations(self.read())[0]
+        self.assertEqual((row['role'], row['kind']), ('grader', 'retries-exhausted'))
+        # The same subject/ref with a different role is a different identity.
+        for age in (80, 60, 30):
+            self.append('autodispatch-failed', age, role='builder', reason='builder failure')
+        fresh = self.read()
+        grader_step = nextstep.step_for(
+            [e for e in fresh if e['type'] != 'escalation-blocking'],
+            {'L-spec-9001': dict(state='written')}, 'L-spec-9001', self.now, lane_rules.load())
+        builder_step = replace(grader_step, action='rebuild')
+        tick.run_steps(fresh, {}, self.now, steps=[builder_step],
+                       dispatcher=lambda argv: self.fail(f'metered call: {argv}'))
+        rows = [e for e in self.read() if e['type'] == 'escalation-blocking']
+        self.assertEqual({(e['role'], e['ref']) for e in rows},
+                         {('builder', row['ref']), ('grader', row['ref'])})
+
+    def test_retry1672_AC5_failed_persistence_visible(self):
+        self.exhaust()
+        for refused in ('fixture refused', OSError('fixture disk failure')):
+            with self.subTest(refused=str(refused)):
+                kwargs = (dict(side_effect=refused) if isinstance(refused, Exception)
+                          else dict(return_value=refused))
+                with patch.object(dispatch, 'emit', **kwargs):
+                    lines = self.drive()
+                self.assertTrue(any(line.startswith('failed ') for line in lines), lines)
+                self.assertFalse(any(line.startswith('escalated ') for line in lines), lines)
+                self.assertEqual(fold.open_escalations(self.read()), [])
+
+
 class LauncherTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix='sole-launcher-')
@@ -1344,7 +1459,8 @@ class _FakeAutodispatch:
             raise RuntimeError("boom-autodispatch")
         if self.append_failed:
             import dispatch as _dispatch
-            _dispatch.emit(tick.tick_path(), {"subject": "L-spec-42005"}, "autodispatch-failed", reason="x")
+            _dispatch.emit(tick.tick_path(), {"subject": "L-spec-42005"}, "autodispatch-failed",
+                           role="builder", reason="x")
         return self.outcomes
 
 
@@ -1421,8 +1537,12 @@ try:
     todo2 = tick._record()
 finally:
     tick.run_steps = _real_run_steps
-assert todo2 is not None and any(line.startswith("L-spec-42005 · hold · executor") for line in todo2), \
-    f"autodispatch-0427 AC25c: the SECOND pass sees the standing failure: {todo2}"
+retry_events = fold.read_events(use_cache=False)
+retry_step = nextstep.step_for(retry_events, fold.fold(retry_events)[0], 'L-spec-42005',
+                               fold.NOW, lane_rules.load())
+assert todo2 is not None and not any(line.startswith('L-spec-42005 ·') for line in todo2)
+assert (retry_step.owner, retry_step.state, retry_step.attempt) == ('tick', 'hold', 2), retry_step
+assert retry_step.reason.startswith('retry-wait:') and retry_step.retry_at, retry_step
 print("autodispatch-0427 AC25 ok")
 fold.EVENTS = saved_events
 

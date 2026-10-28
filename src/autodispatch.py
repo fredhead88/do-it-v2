@@ -252,7 +252,7 @@ def candidates(events, specs, now, *, head_of=None):
     return rows
 
 
-REPLAYABLE_ROLES = ("builder", "grader", "spec-writer", "spec-auditor")
+REPLAYABLE_ROLES = ("builder", "grader", "reviewer", "spec-writer", "spec-auditor")
 TERMINAL_STATES = ("accepted", "killed", "void", "dropped", "closed-shipped", "closed-unbuilt")
 
 
