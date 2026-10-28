@@ -318,7 +318,10 @@ EMITS["nightly-red"] = {"base-red"}
 EMITS["nightly-red-owned"] = {"operator", "executor", "thinker"}
 EMITS["merge-frozen"] = {"executor", "tick", "operator"}
 
+EMITS["pane-dialog-resolved"] = {"pane-watchdog"}
+
 REQUIRED_ROWS = {
+    "pane-dialog-resolved": ("pane", "role", "seen_at", "resolved_at", "choice"),
     "test-quarantined": ("project", "node", "rule", "windows", "since", "until", "fix"),
     "test-unquarantined": ("project", "node", "reason"),
     "resource-created": ("kind", "ref", "lane"),

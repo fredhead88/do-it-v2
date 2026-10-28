@@ -100,10 +100,10 @@ def render(repo: str) -> str:
     for row in rules:
         lines.extend(_wrap(' | '.join(str(row[key]) for key in ('name', 'action', 'actor', 'limit_min'))))
     lines.extend(['', '## Cron manifest', '',
-                  'Source: `crons.toml`. Name | schedule | where | path; command on following lines.'])
+                  'Source: `crons.toml`. Name | schedule | where | path, followed by command.'])
     for row in crons:
-        lines.extend(_wrap(' | '.join(row[key] for key in ('name', 'schedule', 'where', 'path'))))
-        lines.extend(_wrap(row['command'], initial='  '))
+        lines.extend(_wrap(' | '.join(row[key] for key in ('name', 'schedule', 'where', 'path'))
+                           + '  ' + row['command']))
     lines.extend(['', '## Tick event types', '',
                   'Source: literal `dispatch.emit` and `look.emit_once` calls in `src/tick.py`,',
                   'plus every action in `lane_rules.toml`.'])
