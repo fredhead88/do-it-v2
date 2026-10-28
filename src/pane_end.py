@@ -16,6 +16,8 @@ It signals only when all four preconditions hold, in this order:
      sitting in `L-builder-0001.jsonl`, which `fold.fold()` drops into
      `ignored` and the board never counts, so the pane would end on a claim
      the system does not hold.
+     Alternatively, `--reason held` requires this Planner's own hold after its
+     newest own start; `--reason ctx` permits a context restart.
   2. the handover file exists and is non-empty (content before event, §9.2
      rule 3 — the artifact is on disk before anything records it).
   3. `relay.pending_packets(events, root)` returns nothing outstanding.
@@ -123,6 +125,34 @@ def authorized_l1(charter, events):
                for e in events)
 
 
+def authorized_hold(charter, events, planner):
+    """Only this destination's hold after its newest own start permits an end.
+
+    Actor and source are supplied by read_events, never by a raw actor field.
+    Ledger position determines recency; an undetermined provenance refuses.
+    """
+    try:
+        cid = fold.charter_id(charter)
+        if not cid or not isinstance(planner, str) or not planner.startswith("L-planner-"):
+            return False
+
+        def own(event):
+            return (event.get("actor") == "planner"
+                    and pathlib.Path(event["_src"].rsplit(":", 1)[0]).stem == planner
+                    and fold.charter_id(event.get("subject")) == cid)
+
+        start = None
+        held = False
+        for index, event in enumerate(events):
+            if event.get("type") == "planner-started" and own(event) and event.get("planner") == planner:
+                start, held = index, False
+            elif event.get("type") == "planner-held" and own(event) and start is not None:
+                held = True
+        return held
+    except Exception:
+        return False
+
+
 def bind_root(root):
     """`fold.ROOT` and `fold.EVENTS` are module globals bound at import from
     DOIT_ROOT. Accepting a `root` and merely passing it along leaves `--root`
@@ -166,8 +196,21 @@ def check_and_end(charter, handover, *, reason=None, root=None, child_env=None,
                             or not _own_stem(os.environ).startswith("L-planner-")):
         return False, "refused: context end requires a planner ledger (L-planner-)"
 
-    # 1 — an AUTHORIZED l1-complete, except on a context restart.
-    if reason != "ctx" and not authorized_l1(charter, events):
+    if reason == "held":
+        # fold.append writes to the PROCESS destination, not child_env's ledger.
+        destination = os.environ.get("DOIT_LEDGER_FILE")
+        planner = pathlib.Path(destination).stem if destination else ""
+        if not planner.startswith("L-planner-"):
+            return False, "refused: held end requires a process planner ledger (L-planner-)"
+        if child_env is not None and "DOIT_LEDGER_FILE" in child_env:
+            child_ledger = child_env["DOIT_LEDGER_FILE"]
+            if not isinstance(child_ledger, str) or pathlib.Path(child_ledger).stem != planner:
+                return False, "refused: held end ledger mismatch between child and process destination"
+        if not authorized_hold(charter, events, planner):
+            return False, f"refused: no authorized own hold for {charter} in {planner}"
+
+    # 1 — an AUTHORIZED l1-complete, except on a context restart or own hold.
+    if reason not in ("ctx", "held") and not authorized_l1(charter, events):
         return False, (f"refused: no authorized {L1} for {charter} on the ledger under "
                        f"{events_dir} (authorized actors: "
                        f"{', '.join(sorted(fold.EMITS.get(L1) or {'any'}))})")
@@ -205,8 +248,8 @@ def check_and_end(charter, handover, *, reason=None, root=None, child_env=None,
                        f"— nothing to signal")
 
     fields = [ENDED, str(charter), f"handover={handover}"]
-    if reason == "ctx":
-        fields.append("reason=ctx")
+    if reason in ("ctx", "held"):
+        fields.append(f"reason={reason}")
     fold.append(fields)   # re-read asserted inside
     kill(pid, signal.SIGTERM)
     return True, f"ended: SIGTERM to {CLAUDE} pid {pid}; {ENDED} appended for {charter}"
@@ -422,8 +465,8 @@ def main(argv=None):
                     help="path to the handover file, already written (required on the charter "
                          "and --executor paths; not read on --relay/--grader)")
     ap.add_argument("--root", default=None, help="the do-it root to read and append under")
-    ap.add_argument("--reason", choices=["ctx"], default=None,
-                    help="context restart: skips only the planner's l1-complete check")
+    ap.add_argument("--reason", choices=["ctx", "held"], default=None,
+                    help="ctx restarts for context; held ends after this planner's own hold")
     a = ap.parse_args(argv)
     if a.grader:
         ended, reason = check_and_end_grader()

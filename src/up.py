@@ -321,7 +321,7 @@ def ctx_handover(events, charter):
     latest = next((event for event in reversed(events)
                    if event.get("type") == "planner-ended"
                    and event.get("subject") == charter), None)
-    if latest is None or latest.get("reason") != "ctx":
+    if latest is None or latest.get("reason") not in ("ctx", "held"):
         return None
     try:
         handover = latest.get("handover")
@@ -332,7 +332,7 @@ def ctx_handover(events, charter):
             with path.open("rb") as stream:
                 if stream.read(1):
                     return handover
-    except OSError:
+    except (OSError, ValueError):
         pass
     return None
 

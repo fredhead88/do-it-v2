@@ -201,6 +201,109 @@ class RelayRestartTests(unittest.TestCase):
         print("1497 AC4/AC11: restart states, child polls, tmux argv and tick field pass")
 
 
+class HeldPlannerTests(unittest.TestCase):
+    """Exercise the actual supervisor readers; only process effects are replaced."""
+
+    A, B, C = "L-charter-0001", "L-charter-0002", "L-charter-0003"
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory(prefix="held-supervisor-")
+        self.addCleanup(tmp.cleanup)
+        self.root = pathlib.Path(tmp.name)
+        (self.root / "events").mkdir()
+        self.clock = 0
+        self.launches, self.holds = [], []
+        self.handover = self.root / "held handover.md"
+        self.handover.write_text("resume this charter after the decision")
+        stack = self.enterContext(ExitStack())
+        for obj, key, value in ((fold, "ROOT", self.root), (fold, "EVENTS", self.root / "events"),
+                                (fold, "PROJECT", None), (dispatch, "EVENTS", self.root / "events")):
+            stack.enter_context(patch.object(obj, key, value))
+        stack.enter_context(patch.object(up, "install"))
+        stack.enter_context(patch.object(up, "maybe_reexec"))
+        stack.enter_context(patch.object(up, "code_sha", return_value=None))
+        stack.enter_context(patch.object(up, "_hold", side_effect=lambda state, lines: self.holds.append(lines)))
+        stack.enter_context(patch.object(up, "_start", side_effect=self.start))
+
+    def emit(self, kind, subject=None, actor="operator", **fields):
+        self.clock += 1
+        row = {"v": 1, "ts": f"2026-10-27T05:08:{self.clock:02d}Z", "type": kind,
+               "subject": subject or self.A, **fields}
+        with (fold.EVENTS / f"L-{actor}-9901.jsonl").open("a") as stream:
+            stream.write(json.dumps(row) + "\n")
+        return row["ts"]
+
+    def start(self, state, **fields):
+        self.launches.append(fields)
+        self.emit("planner-started", fields["subject"], "planner", planner="L-planner-9901")
+        self.emit("planner-held", fields["subject"], "planner")
+        self.emit("planner-ended", fields["subject"], "planner", reason="held", handover=str(self.handover))
+
+    def state(self):
+        return {"up": None, "watermark": None, "said": None}
+
+    def test_mixed_cycle(self):
+        for charter in (self.A, self.B, self.C):
+            self.emit("charter-filed", charter)
+        self.emit("planner-held", actor="planner")
+        up._cycle(self.state(), None)
+        subjects = [x["subject"] for x in self.launches]
+        self.assertEqual(subjects, [self.B, self.C])
+        self.assertFalse(self.holds)
+        print(f"1667 AC9 mixed launches: {subjects}")
+
+    def test_new_hold_and_clear_resume(self):
+        self.emit("charter-filed")
+        self.assertEqual(up.main(max_cycles=2), 2)
+        self.assertEqual([x["subject"] for x in self.launches], [self.A])
+        self.assertEqual(len(self.holds), 1)
+        self.assertTrue(any("held since " in line for line in self.holds[0]))
+        print(f"1667 AC9 newly-held launches: {[x['subject'] for x in self.launches]}; hold: {self.holds}")
+        self.emit("decision")
+        up._cycle(self.state(), None)
+        self.assertEqual([x["subject"] for x in self.launches], [self.A, self.A])
+        prompt = self.launches[-1]["prompt"]
+        self.assertTrue(prompt.startswith(self.A) and str(self.handover) in prompt)
+        self.assertEqual(up.pane_cmd(prompt)[-1], prompt)
+        print(f"1667 AC9 cleared launches one resumed A; AC10 prompt: {prompt!r}")
+
+    def test_already_held_at_entry(self):
+        self.emit("charter-filed")
+        ts = self.emit("planner-held", actor="planner")
+        up.main(max_cycles=2)
+        self.assertEqual(self.launches, [])
+        self.assertEqual(len(self.holds), 2)
+        self.assertTrue(all(any(f"held since {ts}" in line for line in lines) for lines in self.holds))
+        print(f"1667 AC9 already-held launches: []; holds: {self.holds}")
+
+    def test_latest_handover(self):
+        empty = self.root / "empty.md"
+        empty.touch()
+        end = {"type": "planner-ended", "subject": self.A, "reason": "held", "handover": str(self.handover)}
+        for reason in ("held", "ctx"):
+            with self.subTest(reason=reason):
+                self.assertEqual(up.ctx_handover([{**end, "reason": reason}], self.A), str(self.handover))
+                print(f"1667 AC10 {reason} -> {self.handover}")
+        cases = [("ordinary-end", {**end, "reason": "exit-0"}),
+                 ("missing", {**end, "handover": str(self.root / "missing")}),
+                 ("empty", {**end, "handover": str(empty)}),
+                 ("directory", {**end, "handover": str(self.root)})]
+        cases += [(f"malformed-{value!r}", {**end, "handover": value})
+                  for value in (None, "", [], {}, 42, "bad\0path")]
+        for label, latest in cases:
+            with self.subTest(label=label):
+                self.assertIsNone(up.ctx_handover([end, latest], self.A))
+                up._charter_pass(self.state(), [end, latest], self.A, None)
+                self.assertEqual(self.launches[-1]["prompt"], self.A)
+                print(f"1667 AC10 {label} -> None; prompt=charter")
+        self.assertIsNone(up.ctx_handover([{**end, "subject": self.B}], self.A))
+        with patch.object(pathlib.Path, "open", side_effect=PermissionError("fixture unreadable")):
+            self.assertIsNone(up.ctx_handover([end, end], self.A))
+        print("1667 AC10 other-charter/unreadable -> None")
+
+
+_held_suite = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(HeldPlannerTests))
+assert _held_suite.wasSuccessful()
 _suite = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(RelayRestartTests))
 if not _suite.wasSuccessful():
     sys.exit(1)

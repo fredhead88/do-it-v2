@@ -806,4 +806,90 @@ ok(code_b == 1 and rec_b.calls == [],
    f"AC10: check_and_end_relay refuses while the spec-writer packet is outstanding: code={code_b}")
 print("L-spec-8033 AC10 ok")
 
+# L-spec-1667: ledger position controls standing holds, never wall-clock order.
+HA, HB, HC, HS = "L-charter-0001", "L-charter-0002", "L-charter-0003", "L-spec-9901"
+
+
+def hold_event(event_type, subject=HA, actor="planner", **fields):
+    return {"type": event_type, "subject": subject, "actor": actor, "ts": "2026-10-27T05:08:20Z",
+            "_src": f"L-{actor}-9901.jsonl:1", **fields}
+
+
+base_hold = [hold_event("spec-written", HS, "spec-writer", charter=f"/content/{HA}.md"),
+             hold_event("escalation-blocking", HS, "operator", _src="L-operator-9901.jsonl:2"),
+             hold_event("planner-held")]
+hold_ts = base_hold[-1]["ts"]
+hold_table = [("no-hold", [], None), ("standing", base_hold, hold_ts)]
+for kind, subject, extra in [
+    ("decision", HA, {}), ("unblocked", HA, {}), ("charter-filed", HA, {}),
+    ("spec-written", HS, {"charter": HA}), ("build-started", HS, {}),
+    ("escalation", HA, {}), ("escalation-blocking", HS, {}),
+    ("escalation", "unrelated", {"charter": f"/content/{HA}.md"}),
+    ("decision", "answer", {"ref": "L-operator-9901.jsonl:2"}),
+    ("unblocked", "answer", {"ref": "L-operator-9901.jsonl:2"}),
+]:
+    hold_table.append((f"cleared-{kind}-{subject}-{extra}",
+                       base_hold + [hold_event(kind, subject, "operator", **extra)], None))
+for label, event in [
+    ("own-ended-held", hold_event("planner-ended", reason="held")),
+    ("next-start", hold_event("planner-started")),
+    ("unauthorized-hold", hold_event("planner-held", actor="builder")),
+    ("unrelated-charter", hold_event("decision", HB, "operator")),
+    ("unrelated-spec", hold_event("build-started", "L-spec-9902", "builder")),
+    ("unresolvable-ref", hold_event("decision", "answer", "operator", ref="missing:1")),
+    ("malformed-hold", hold_event("planner-held", ts=None)),
+]:
+    hold_table.append((label, base_hold + [event], hold_ts))
+hold_table.extend([
+    ("newer-valid-hold", base_hold + [hold_event("planner-held", ts="replacement")], "replacement"),
+    ("earlier-ts-later-position", base_hold + [hold_event("decision", actor="operator", ts="2000-01-01")], None),
+    ("later-ts-earlier-position", [hold_event("decision", actor="operator", ts="2099-01-01")] + base_hold, hold_ts),
+    ("content-subject", [{**base_hold[-1], "subject": f"/content/{HA}.md"}], hold_ts),
+])
+for subject, extra in [(HA, {}), ("naming-charter", {"charter": HA})]:
+    escalation = hold_event("escalation", subject, "operator", _src="L-operator-9902.jsonl:1", **extra)
+    for answer in ("decision", "unblocked"):
+        hold_table.append((f"referenced-{subject}-{answer}",
+                           [escalation] + base_hold + [hold_event(answer, "answer", "operator",
+                                                               ref=escalation["_src"])], None))
+for label, events, expected in hold_table:
+    actual = relay.held_since(events, f"/content/{HA}.md")
+    ok(actual == expected, f"1667 AC4 {label}: {actual} != {expected}")
+    print(f"1667 AC4 {label} -> {actual}")
+
+# Each queue fixture reads real folded events and includes only open charters.
+queue_root = scene("1667-queue")
+for cid in (HA, HB, HC):
+    ev(queue_root, "L-operator-9901", "charter-filed", cid)
+ev(queue_root, "L-planner-9901", "planner-held", HA)
+queue_events = read()
+queue_ts = next(e["ts"] for e in queue_events if e["type"] == "planner-held")
+ready, waiting = relay.plannable(queue_events, queue_root)
+ok(ready == [HB, HC] and len(waiting) == 1 and waiting[0][0] == HA
+   and waiting[0][1].startswith(f"held since {queue_ts}"), "1667 AC5 mixed ready/waiting")
+ok(any(f"held since {queue_ts}" in line for line in relay.waiting_lines(queue_events, queue_root)),
+   "1667 AC5 visible waiting reason")
+print(f"1667 AC5 mixed: {ready=} {waiting=}")
+only_a = [e for e in queue_events if e["subject"] == HA]
+ready, waiting = relay.plannable(only_a, queue_root)
+ok(ready == [] and waiting[0][1].startswith(f"held since {queue_ts}"), "1667 AC5 only A stays waiting")
+print(f"1667 AC5 only-A: {ready=} {waiting=}")
+cleared = queue_events + [hold_event("decision", actor="operator")]
+ready, waiting = relay.plannable(cleared, queue_root)
+ok(ready == [HA, HB, HC] and not waiting, "1667 AC5 clearing restores ordinary order")
+print(f"1667 AC5 cleared: {ready=} {waiting=}")
+known_bug = queue_events + [
+    hold_event("escalation-blocking", actor="operator", kind="known-bug"),
+    hold_event("decision", actor="operator"), hold_event("planner-held")]
+ready, waiting = relay.plannable(known_bug, queue_root)
+ok(ready == [HB, HC] and waiting[0][1].startswith("held: known-bug"), "1667 AC5 known-bug precedence")
+
+for reason, attempts, next_action in [("held", 0, "start"), ("exit-143", 3, "escalate"),
+                                      ("l1-complete", 0, "start"), ("ctx", 3, "escalate")]:
+    pairs = [hold_event(kind, reason=reason) for _ in range(3)
+             for kind in ("planner-started", "planner-ended")]
+    tally = relay.planner_attempts(pairs, HA)
+    ok(tally["attempts"] == attempts and tally["next"] == next_action, f"1667 AC6 {reason}: {tally}")
+    print(f"1667 AC6 {reason}: {tally}")
+
 print(f"relay: {N} checks pass")
