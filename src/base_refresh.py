@@ -31,6 +31,10 @@ def refresh_tip(c):
             held = True
         elif kind == "conflict-rework" or (kind == "unblocked" and held):
             due = True
+        elif kind == "spawn-failed" and str(event.get("reason", "")).startswith("wave-order"):
+            due = True
+        elif kind == "decision" and event.get("rebase") == "yes":
+            due = True
     if not due:
         return None
 
