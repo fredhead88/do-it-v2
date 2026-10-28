@@ -119,6 +119,10 @@ def _main_branch(repo, project, env, deadline):
 def _commands(text, project, criteria):
     chain = verification.block(text) or ""
     tagged = _chain_covers(chain)
+    joined = re.sub(r"\\\n", " ", chain)
+    uncommented = re.sub(r"^[ \t]*#.*$", "", joined, flags=re.M)
+    statements = {" ".join(statement.split())
+                  for statement in re.split(r"\n|&&|\|\||;|\|", uncommented)}
     blocks = grading_env._criterion_blocks(text)
     commands, judgment = [], []
     for record in checks.records(text, project):
@@ -127,7 +131,7 @@ def _commands(text, project, criteria):
             continue
         if criterion in tagged:
             review = checks._review_command(blocks.get(criterion, ""))
-            if review:
+            if review and " ".join(review.split()) not in statements:
                 commands.append((criterion, review))
         elif record["runner"] != "build":
             judgment.append(criterion)
