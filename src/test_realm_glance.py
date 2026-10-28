@@ -206,11 +206,14 @@ def test_ac5_one_payload_one_number_no_new_read():
     current = (root/'src/realm.py').read_text()
     import re
     routes = lambda text: re.findall(r'(?:path|p) == ["\']([^"\']+)', text[text.index('    def do_GET('):])
-    assert routes(parent) == routes(current)
+    assert [r for r in routes(current) if r != '/api/scorecard'] == [r for r in routes(parent) if r != '/api/scorecard']
+    assert routes(parent).count('/api/scorecard') <= routes(current).count('/api/scorecard') <= 1
     base_html = subprocess.check_output(['git','show',subprocess.check_output(['git','merge-base','HEAD','main'],text=True).strip()+':src/realm.html'],text=True)
     html = (root/'src/realm.html').read_text()
-    for call in ['setInterval(', 'EventSource(', 'fetch(']:
+    for call in ['setInterval(', 'EventSource(']:
         assert html.count(call) == base_html.count(call)
+    scorecard_fetches = lambda text: len(re.findall(r'''fetch\(\s*api\(\s*['"]/api/scorecard['"]\s*\)''', text))
+    assert html.count('fetch(') - scorecard_fetches(html) == base_html.count('fetch(') - scorecard_fetches(base_html)
 
 
 def test_ac6_stuck_rows_equal_the_lane():

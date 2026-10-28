@@ -43,6 +43,15 @@ ROOT = pathlib.Path(os.environ.get("DOIT_ROOT", pathlib.Path.home() / ".do-it"))
 EVENTS, SEAT = ROOT / "events", ROOT / "seat"
 HERE = pathlib.Path(__file__).resolve().parent
 PAGE = HERE / "realm.html"
+# Keep these worktree modules outside LEDGER.live's temporary module swapping.
+_SCORECARD_IMPORT_ERROR = None
+try:
+    import scorecard
+    import pace
+except Exception as error:
+    _SCORECARD_IMPORT_ERROR = error
+_SCORECARD_CACHE = None
+_SCORECARD_LOCK = threading.RLock()
 # The checkout the panes execute from. The realm may run from its own worktree; states and the
 # "merged, not running" signal must still be judged against the live one.
 LIVE_REPO = pathlib.Path(os.environ.get("DOIT_LIVE_REPO", pathlib.Path.home() / "do-it-v2"))
@@ -214,6 +223,39 @@ def ledger_snapshot(now=None):
 def ledger_generation():
     with ledger_snapshot():
         return LEDGER.generation
+
+
+def _scorecard_now():
+    return dt.datetime.now(dt.timezone.utc)
+
+
+def scorecard_payload():
+    """Lazy, read-only projection, retained for one source generation/minute."""
+    global _SCORECARD_CACHE
+    now = _scorecard_now()
+    generated = now.isoformat().replace("+00:00", "Z")
+    try:
+        if _SCORECARD_IMPORT_ERROR is not None:
+            raise _SCORECARD_IMPORT_ERROR
+        with _SCORECARD_LOCK, ledger_snapshot(now) as (_, events, _folded):
+            path = ROOT / "state" / "pace-samples.jsonl"
+            try:
+                stat = path.stat()
+                stamp = (stat.st_mtime_ns, stat.st_size)
+            except FileNotFoundError:
+                stamp = None
+            key = (str(ROOT), id(LEDGER), LEDGER.generation, stamp,
+                   now.replace(second=0, microsecond=0))
+            if _SCORECARD_CACHE is not None and _SCORECARD_CACHE[0] == key:
+                return _SCORECARD_CACHE[1]
+            samples = pace.samples(now - dt.timedelta(days=7), root=ROOT)
+            rows = scorecard.day_rows(events, now, days=7, samples=samples)
+            payload = dict(days=[dict(row, copy_text=scorecard.copy_text(row)) for row in rows],
+                           pace=samples, ceiling=pace.SAFE_CEILING, generated_at=generated)
+            _SCORECARD_CACHE = (key, payload)
+            return payload
+    except Exception as error:
+        return {"error": f"scorecard unavailable ({type(error).__name__})", "generated_at": generated}
 
 
 def read_all():
@@ -1774,6 +1816,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._json(omens_model(HUB.states))
         elif u.path == "/api/glance":
             self._json(glance_payload())
+        elif u.path == "/api/scorecard":
+            self._json(scorecard_payload())
         elif u.path == "/api/states":
             st = derive_states()
             if st is not None:

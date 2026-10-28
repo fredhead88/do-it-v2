@@ -340,12 +340,44 @@ canvas#map.hand{cursor:pointer}
   #app .panel{position:fixed;left:0;right:0;top:auto;bottom:0;width:auto;max-height:62%;transform:translateY(105%)}
   #app .panel.open{transform:none}
 }
+/* Scorecard is an overlay: opening it never changes the stage geometry. */
+#b-scorecard{flex:none;white-space:nowrap}
+#scorecard{position:fixed;z-index:20;inset:60px 8px 8px;overflow:auto;padding:16px;background:#171229;border:1px solid var(--hair);box-shadow:0 8px 24px #0008;color:var(--text)}
+#scorecard[hidden]{display:none}
+.scorecard-tools{display:flex;gap:12px;align-items:center;position:sticky;top:-16px;background:var(--glass2);z-index:1;padding:8px 0}
+.scorecard-days{display:grid;grid-template-columns:repeat(7,minmax(230px,1fr));gap:10px;align-items:start;overflow-x:auto}
+.scorecard-day{border:1px solid var(--hair);padding:10px}
+.scorecard-day h3,.scorecard-day h4{margin:10px 0}
+.scorecard-cell{border-left:3px solid #a8a1b4;margin:6px 0;padding:4px 8px;font-size:12px;overflow-wrap:anywhere}
+.scorecard-cell.green{border-color:#79d59b}.scorecard-cell.amber{border-color:#edc56f}.scorecard-cell.red{border-color:#f39393}
+.scorecard-cell .band{display:block;font-weight:bold}
+.scorecard-pace{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,310px),1fr));gap:14px}
+.scorecard-chart{min-width:0;border:1px solid var(--hair);padding:10px}
+.scorecard-chart svg{display:block;width:100%;height:150px;background:#161421}
+.scorecard-chart .reading{fill:none;stroke:#a9cbff;stroke-width:2}
+.scorecard-chart .capacity{stroke:#b8b3c2;stroke-dasharray:5 5}
+.scorecard-chart .ceiling{stroke:#edc56f;stroke-dasharray:4 3}
+.scorecard-chart .pace-line{fill:none;stroke:#b2e1bd;stroke-dasharray:3 3}
+.scorecard-chart .reset{stroke:#f5b3dc;stroke-dasharray:2 3}
+.scorecard-chart .gap{font-size:11px;color:#bcb5ca}
+@media(max-width:700px){
+ #strip{max-height:56px;grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"title scorecard";column-gap:6px}
+ #strip-primary{display:flex;grid-area:scorecard;align-items:center;justify-content:flex-end}
+ #strip>h1{min-width:0;overflow:hidden}
+ #strip>h1 .realm-title{display:none}
+ #b-scorecard{font-size:9px;line-height:1.4;padding:3px 7px}
+ #scorecard{padding:10px}
+}
 </style>
 
+<section id="scorecard" role="region" aria-label="Scorecard" hidden>
+ <div class="scorecard-tools"><h2>SCORECARD</h2><button class="btn" id="scorecard-refresh">REFRESH</button><button class="btn" id="scorecard-close">CLOSE</button></div>
+ <p id="scorecard-status" role="status"></p><div id="scorecard-content"></div>
+</section>
 <div id="app">
   <header class="hud" id="strip">
     <h1><span class="realm-title">REALM OF DO-IT</span> <span class="mode" id="mode">…</span></h1>
-    <div id="strip-primary"></div><button class="btn" id="b-menu" aria-expanded="false" aria-controls="strip-menu">MENU</button>
+    <div id="strip-primary"><button class="btn" id="b-scorecard" disabled title="live Realm only" aria-expanded="false" aria-controls="scorecard">SCORECARD</button></div><button class="btn" id="b-menu" aria-expanded="false" aria-controls="strip-menu">MENU</button>
     <div id="strip-menu"><div class="stats">
     <div class="stat" style="grid-column:span 2" title="Shows the time being viewed; in replay mode this can be earlier than now."><b id="h-clock">—</b><span id="h-clock-l">chronicle time</span></div>
     <div class="stat click" id="h-exec" title="Shows when the coordinator last moved work forward, so you can tell whether work is being managed."><b>—</b><span>executor</span></div>
@@ -1652,6 +1684,88 @@ async function loadBootstrap(hours){
   }
   return first;
 }
+// Scorecard: server-owned values, bands, flags and copy text.
+let scorecardData=null,scorecardRequest=0,scorecardRestored=false;
+function scorecardNode(tag,text,cls){const el=document.createElement(tag);if(text!==undefined)el.textContent=String(text);if(cls)el.className=cls;return el;}
+function scorecardAvailable(){return !!(DATA&&DATA.live===true&&!REMOTE);}
+function scorecardCapability(){const enabled=scorecardAvailable();$('b-scorecard').disabled=!enabled;$('b-scorecard').title=enabled?'Open production scorecard':'live Realm only';if(!enabled){$('scorecard').hidden=true;$('b-scorecard').setAttribute('aria-expanded','false');}}
+function scorecardPacePct(at,reset,windowMs){return 100*(at-(reset-windowMs))/windowMs;}
+function scorecardNumber(value){return value===null||value===undefined||typeof value==='boolean'||(typeof value==='string'&&!value.trim())?null:Number.isFinite(Number(value))?Number(value):null;}
+async function copyScorecardDay(row,message){
+  try{await navigator.clipboard.writeText(row.copy_text);message.textContent='copied';}
+  catch(_){message.textContent='copy failed';}
+}
+function scorecardChart(data,key,label,windowMs,ceiling){
+ const chart=scorecardNode('section',undefined,'scorecard-chart');chart.dataset.series=key;chart.append(scorecardNode('h4',label));
+ const rows=data.pace||[],end=Date.parse(data.generated_at),start=end-7*86400000,width=340,height=140;
+ const x=t=>10+(t-start)/(end-start)*(width-20),y=v=>height-10-v/100*(height-20);
+ const ns='http://www.w3.org/2000/svg',svg=document.createElementNS(ns,'svg');svg.setAttribute('viewBox',`0 0 ${width} ${height}`);svg.setAttribute('role','img');svg.setAttribute('aria-label',label+' over seven UTC days');
+ const draw=(tag,attrs)=>{const el=document.createElementNS(ns,tag);for(const [k,v] of Object.entries(attrs))el.setAttribute(k,String(v));svg.append(el);return el;};
+ const horizontal=(v,cls)=>draw('line',{x1:10,x2:width-10,y1:y(v),y2:y(v),class:cls,'data-value':v});
+ horizontal(100,'capacity');if(ceiling!==undefined)horizontal(ceiling,'ceiling');
+ let newest=null,segment=[],previous=null;const gaps=[];
+ const flush=()=>{if(segment.length){draw('path',{d:segment.map((p,i)=>(i?'L':'M')+x(p.t)+','+y(p.v)).join(' '),class:'reading'});segment=[];}};
+ for(const row of rows){const t=Date.parse(row.ts),v=scorecardNumber(row[key+'_pct']);if(!Number.isFinite(t)||t<start||t>end)continue;
+  if(previous!==null&&t-previous>6*3600000){flush();gaps.push(new Date(previous).toISOString()+' – '+new Date(t).toISOString());}
+  if(v===null){flush();gaps.push(row.ts);}else{segment.push({t,v});newest={v,ts:row.ts};}previous=t;
+ }flush();
+ if(!rows.length)gaps.push('last seven days');
+ if(rows.length&&Date.parse(rows[0].ts)>start+6*3600000)gaps.unshift(new Date(start).toISOString()+' – '+rows[0].ts);
+ if(previous!==null&&end-previous>6*3600000)gaps.push(new Date(previous).toISOString()+' – '+data.generated_at);
+ if(windowMs){
+  let points=[];const resets=new Set();const flushPace=()=>{if(points.length)draw('path',{d:points.join(' '),class:'pace-line'});points=[];};let prior=null;
+  for(const row of rows){const t=Date.parse(row.ts),r=Date.parse(row[key+'_reset']);if(!Number.isFinite(t)||t<start||t>end)continue;
+   if(prior!==null&&t-prior>6*3600000)flushPace();
+   if(Number.isFinite(r)){points.push((points.length?'L':'M')+x(t)+','+y(scorecardPacePct(t,r,windowMs)));if(r>=start&&r<=end)resets.add(r);}else flushPace();prior=t;
+  }flushPace();for(const reset of resets)draw('line',{x1:x(reset),x2:x(reset),y1:10,y2:height-10,class:'reset','data-reset':new Date(reset).toISOString()});
+ }
+ chart.append(svg,scorecardNode('p',newest?newest.v+'% · '+newest.ts:'not sampled','newest'));
+ if(newest){chart.querySelector('.newest').dataset.value=String(newest.v);chart.querySelector('.newest').dataset.ts=newest.ts;}
+ chart.append(scorecardNode('p','Capacity 100%'+(ceiling!==undefined?' · Safe ceiling '+ceiling+'%':'')+(windowMs?' · Pace line · Reset markers':''),'scorecard-legend'));
+ for(const gap of gaps)chart.append(scorecardNode('p',gap+' · not sampled','gap'));
+ return chart;
+}
+function renderScorecard(data){
+ const content=$('scorecard-content');content.replaceChildren();
+ if(data.error){$('scorecard-status').textContent=data.error;return;}
+ $('scorecard-status').textContent='UTC · generated '+data.generated_at;
+ const days=scorecardNode('div',undefined,'scorecard-days'),today=data.generated_at.slice(0,10);
+ const output=new Set(['shipped','median_lead_h','window_attempts','windows_verified','windows_dropped','median_wait_min','multi_build_pct','window_verified_pct']);
+ const loss=new Set(['stalled_spec_h','stuck_over_1h','waiting_seat_h','waiting_window_h','waiting_human_h','ignored_bucket_samples','skipped_events','failed_runs','total_runs','failed_share_pct','failed_tokens']);
+ for(const row of data.days){const column=scorecardNode('article',undefined,'scorecard-day');column.dataset.date=row.date;
+  column.append(scorecardNode('h3',row.date+(row.date===today?' · partial':'')));
+  const copy=scorecardNode('button','COPY','btn'),message=scorecardNode('span','','copy-status');copy.type='button';copy.setAttribute('aria-label','Copy '+row.date);copy.onclick=()=>copyScorecardDay(row,message);column.append(copy,message);
+  if(row.capacity_unused===true)column.append(scorecardNode('p','capacity left unused','capacity-unused'));
+  for(const [label,match] of [['Output',c=>output.has(c.key)],['Capacity used',c=>!output.has(c.key)&&!loss.has(c.key)],['Loss',c=>loss.has(c.key)]]){
+   const group=scorecardNode('section',undefined,'scorecard-group');group.append(scorecardNode('h4',label));
+   for(const cell of row.cells.filter(match)){const cls=['green','amber','red'].includes(cell.band)?cell.band:'neutral';const el=scorecardNode('div',undefined,'scorecard-cell '+cls);el.dataset.key=cell.key;el.dataset.band=cell.band;
+    el.append(scorecardNode('span',cell.label,'label'),scorecardNode('div',cell.text,'value'),scorecardNode('span',cell.band,'band'));group.append(el);
+   }column.append(group);
+  }
+  for(const item of row.top||[])column.append(scorecardNode('p',item.spec+': '+(item.kinds||[]).join(', ')+': '+item.reason,'scorecard-reason'));
+  days.append(column);
+ }content.append(days,scorecardNode('h3','Capacity used · Resource pace'));
+ const charts=scorecardNode('div',undefined,'scorecard-pace');
+ for(const [key,label,windowMs,ceiling] of [['disk_used','Root disk',null,data.ceiling.disk],['ram_used','RAM',null,data.ceiling.ram],['swap_used','Swap'],['claude_5h','Claude 5h',5*3600000],['claude_7d','Claude 7d',7*86400000],['codex_7d','Codex 7d',7*86400000]])charts.append(scorecardChart(data,key,label,windowMs,ceiling));
+ content.append(charts);
+}
+async function fetchScorecard(){
+ if(!scorecardAvailable())return;const request=++scorecardRequest;$('scorecard-status').textContent='Loading scorecard…';
+ try{const response=await fetch(api('/api/scorecard'),{cache:'no-store'});if(!response.ok)throw Error('HTTP '+response.status);const data=await response.json();if(request!==scorecardRequest)return;scorecardData=data;renderScorecard(data);}
+ catch(error){if(request===scorecardRequest){$('scorecard-content').replaceChildren();$('scorecard-status').textContent='scorecard unavailable ('+error.message+')';}}
+}
+function setScorecard(open,remember=true){
+ if(open&&!scorecardAvailable())return;$('scorecard').hidden=!open;$('b-scorecard').setAttribute('aria-expanded',String(open));
+ if(remember)try{localStorage.setItem('realm.scorecard',open?'open':'closed');}catch(_){}
+ if(open)fetchScorecard();else ++scorecardRequest;
+}
+$('b-scorecard').onclick=()=>setScorecard($('scorecard').hidden);
+$('scorecard-close').onclick=()=>setScorecard(false);
+$('scorecard-refresh').onclick=()=>fetchScorecard();
+$('scorecard').addEventListener('keydown',e=>{if(e.key==='Escape'){setScorecard(false);$('b-scorecard').focus();}});
+function restoreScorecard(){scorecardCapability();if(scorecardRestored)return;scorecardRestored=true;requestAnimationFrame(()=>requestAnimationFrame(()=>{try{if(localStorage.getItem('realm.scorecard')==='open')setScorecard(true,false);}catch(_){}}));}
+// End scorecard
+
 async function boot(){
   let d=null;if(!booted){booted=true;requestAnimationFrame(loop);}
   try{status('WAKING THE REALM','asking the server for the last 24 hours…');d=await loadBootstrap();}catch(error){if(error.status===401){status('KEY NEEDED','open the address doit realm printed, with ?key= on it',true);openPanel('<h2>Key needed</h2><p>This realm is served with a key. Open the address that <code>doit realm --public</code> printed, which carries <code>?key=…</code>; this browser will remember it.</p>');requestAnimationFrame(loop);return;}}
@@ -1662,7 +1776,7 @@ async function boot(){
   if(d.live){LIVE=true;seek(Date.now());connect();document.querySelectorAll('.spd').forEach(x=>x.classList.remove('on'));}
   else if(REMOTE){LIVE=true;lastPush=d.pushedAt||d.now||'';T1=Date.now();seek(Date.now());$('b-live').style.display='';if(!remoteTimer)remoteTimer=setInterval(remotePoll,45000);document.querySelectorAll('.spd').forEach(x=>x.classList.remove('on'));}
   else{LIVE=false;$('b-live').style.display='none';const dayStart=Date.UTC(new Date(T1).getUTCFullYear(),new Date(T1).getUTCMonth(),new Date(T1).getUTCDate());const t=dayStart>T0&&dayStart<T1?dayStart:T0;seek(t);}
-  computeOmens();mApply();status(null);
+  computeOmens();mApply();status(null);restoreScorecard();
 }
 /*__CODEX_JS__*/
 boot();
