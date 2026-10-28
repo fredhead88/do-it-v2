@@ -765,6 +765,14 @@ EXPECTED_CRONS_ROWS = [
      "command": "{doit} cron-run base-red-nightly-collect -- /usr/bin/python3 {repo}/src/base_red.py nightly-collect albert-scott >> {root}/logs/base-red-nightly-collect.log 2>&1",
      "path": "/usr/bin/python3", "sig": r"base_red\.py\s+nightly-collect\s+albert-scott\b",
      "owner": "thinker", "project": "albert-scott", "max_runtime_s": 1800},
+    {"name": "pace-sample", "where": "user", "schedule": "*/10 * * * *",
+     "command": "{doit} cron-run pace-sample -- /usr/bin/python3 {repo}/src/pace.py sample >> {root}/logs/pace-sample.log 2>&1",
+     "path": "/usr/bin/python3", "sig": r"pace\.py\s+sample\b",
+     "owner": "thinker", "project": "do-it-v2", "max_runtime_s": 540},
+    {"name": "stall-sample", "where": "user", "schedule": "3 * * * *",
+     "command": "{doit} cron-run stall-sample -- /usr/bin/python3 {repo}/src/stall_sample.py sample >> {root}/logs/stall-sample.log 2>&1",
+     "path": "/usr/bin/python3", "sig": r"stall_sample\.py\s+sample\b",
+     "owner": "thinker", "project": "do-it-v2", "max_runtime_s": 1800},
 ]
 CRONS_PATH = pathlib.Path(__file__).resolve().parent.parent / "crons.toml"
 with open(CRONS_PATH, "rb") as f:

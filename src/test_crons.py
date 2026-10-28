@@ -43,7 +43,7 @@ BASE_MANIFEST.write_bytes(subprocess.check_output(
 BASE_ROWS = crons.rows(str(BASE_MANIFEST))
 NAMES = {"tick", "look", "tmp-reaper", "lessons-digest", "backup-watch", "ledger-repack",
          "ledger-snapshot", "sweep-owed", "auto-deploy", "owed-digest", "owed-digest-json",
-         "portal-latency-daily", "suite-daily", "health-alarms", "ci-shadow", "balance", "stuck-digest", "gh-bill"} | {"seat-usage", "base-red-nightly", "base-red-nightly-collect"}
+         "portal-latency-daily", "suite-daily", "health-alarms", "ci-shadow", "balance", "stuck-digest", "gh-bill"} | {"seat-usage", "base-red-nightly", "base-red-nightly-collect", "pace-sample", "stall-sample"}
 
 
 def _write_manifest(path, rows_):
@@ -86,7 +86,7 @@ def _exec_manifest(tmpdir, rows_=None, mode=0o755):
 d1 = TMP / "ac1"
 d1.mkdir()
 r1 = crons.rows(str(REAL_MANIFEST))
-check(len(r1) == len(BASE_ROWS) + 4, f"AC1: base + seat-usage + owed-digest-json + base-red-nightly + ledger-repack - verify-owed: {len(r1)} vs {len(BASE_ROWS)}")
+check(len(r1) == len(BASE_ROWS) + 6, f"AC1: base + seat-usage + owed-digest-json + base-red-nightly + ledger-repack - verify-owed + pace-sample + stall-sample: {len(r1)} vs {len(BASE_ROWS)}")
 check({row["name"] for row in r1} == NAMES, f"AC1: name set: {[row['name'] for row in r1]}")
 repack = next(row for row in r1 if row["name"] == "ledger-repack")
 check(repack == {
@@ -311,10 +311,10 @@ base_dir.mkdir()
 base_manifest, _ = _exec_manifest(base_dir, BASE_ROWS)
 base_missing = crons.check(manifest=str(base_manifest), crontab_text=FIXTURE_5,
                            crond_dir=str(crond5_empty))
-check({r["name"] for r in res5} == ({r["name"] for r in base_missing} - {"verify-owed"}) | {"seat-usage", "owed-digest-json", "base-red-nightly", "base-red-nightly-collect", "ledger-repack", "ledger-snapshot"},
-      f"AC5: inherited absent rows plus seat-usage, owed-digest-json, base-red-nightly, ledger-repack and ledger-snapshot: {res5}")
+check({r["name"] for r in res5} == ({r["name"] for r in base_missing} - {"verify-owed"}) | {"seat-usage", "owed-digest-json", "base-red-nightly", "base-red-nightly-collect", "ledger-repack", "ledger-snapshot", "pace-sample", "stall-sample"},
+      f"AC5: inherited absent rows plus seat-usage, owed-digest-json, base-red-nightly, ledger-repack and ledger-snapshot, pace-sample and stall-sample: {res5}")
 check(all(r["reason"] == "absent" for r in res5), f"AC5: every entry is absent: {res5}")
-check(len(res5) == len(base_missing) + 5, f"AC5: six additions and verify-owed retired: {res5}")
+check(len(res5) == len(base_missing) + 7, f"AC5: eight additions and verify-owed retired: {res5}")
 seat = next(row for row in r1 if row["name"] == "seat-usage")
 check(seat == {
     "name": "seat-usage", "where": "user", "schedule": "*/15 * * * *",
@@ -330,8 +330,8 @@ first_install = seat_crontab.read_bytes()
 check(first_install.count(b"# doit-cron:seat-usage") == 1, "1129-AC9: exactly one installed row")
 crons.install("seat-usage", crontab_path=str(seat_crontab))
 check(seat_crontab.read_bytes() == first_install, "1129-AC9: second install unchanged")
-print(f"1129-AC9 rows {len(r1)} = base {len(BASE_ROWS)} + 4; "
-      f"absent {len(res5)} = base {len(base_missing)} + 5; install idempotent")
+print(f"1129-AC9 rows {len(r1)} = base {len(BASE_ROWS)} + 6; "
+      f"absent {len(res5)} = base {len(base_missing)} + 7; install idempotent")
 
 # AC5's second, minimal fixture: the only matching line is commented.
 d5b = TMP / "ac5b"
@@ -614,10 +614,13 @@ for row in rows6:
     check(bool(re.search(row["sig"], line)),
           f"R14-AC6: {row['name']}'s sig still matches its own wrapped line: {row['sig']!r} vs {line!r}")
 check(not any_bare, "R14-AC6: none of the eight rows prints bare")
+for sampler_name, runtime in (("pace-sample", 540), ("stall-sample", 1800)):
+    sampler = next(r for r in rows6 if r["name"] == sampler_name)
+    check(sampler["max_runtime_s"] == runtime, f"1670: {sampler_name} runtime bound")
 bw6 = next(r for r in rows6 if r["name"] == "backup-watch")
 check(bw6["max_runtime_s"] == 90, f"R14-AC6: backup-watch max_runtime_s == 90: {bw6['max_runtime_s']}")
 for r in rows6:
-    if r["name"] not in {"backup-watch", "ledger-repack", "suite-daily", "base-red-nightly", "base-red-nightly-collect", "ledger-snapshot"}:
+    if r["name"] not in {"backup-watch", "ledger-repack", "suite-daily", "base-red-nightly", "base-red-nightly-collect", "ledger-snapshot", "pace-sample", "stall-sample"}:
         check(r["max_runtime_s"] is None, f"R14-AC6: {r['name']} max_runtime_s is None: {r['max_runtime_s']}")
 buf6 = io.StringIO()
 with contextlib.redirect_stdout(buf6):

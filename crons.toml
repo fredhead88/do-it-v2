@@ -238,3 +238,25 @@ sig = 'base_red\.py\s+nightly-collect\s+albert-scott\b'
 owner = "thinker"
 project = "albert-scott"
 max_runtime_s = 1800
+
+[[row]]
+name = "pace-sample"
+where = "user"
+schedule = "*/10 * * * *"
+command = "{doit} cron-run pace-sample -- /usr/bin/python3 {repo}/src/pace.py sample >> {root}/logs/pace-sample.log 2>&1"
+path = "/usr/bin/python3"
+sig = 'pace\.py\s+sample\b'
+owner = "thinker"
+project = "do-it-v2"
+max_runtime_s = 540
+
+[[row]]
+name = "stall-sample"
+where = "user"
+schedule = "3 * * * *"
+command = "{doit} cron-run stall-sample -- /usr/bin/python3 {repo}/src/stall_sample.py sample >> {root}/logs/stall-sample.log 2>&1"
+path = "/usr/bin/python3"
+sig = 'stall_sample\.py\s+sample\b'
+owner = "thinker"
+project = "do-it-v2"
+max_runtime_s = 1800
