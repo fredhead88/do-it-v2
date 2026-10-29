@@ -9,10 +9,11 @@ real `$DOIT_ROOT` ledger. `link_agents`'s own AC2 fixtures are the one
 exception by design — they exercise the REAL repo's `agents/*.md` as SOURCE,
 symlinked into a fresh, throwaway destination dir.
 """
-import json, os, pathlib, shutil, subprocess, sys, tempfile, types
+import json, os, pathlib, shutil, subprocess, sys, tempfile, types, unittest
 from datetime import datetime, timedelta, timezone
 
-TMP = pathlib.Path(tempfile.mkdtemp(prefix="install-sync-test-"))
+_scratch = tempfile.TemporaryDirectory(prefix="install-sync-test-")
+TMP = pathlib.Path(_scratch.name)
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import crons, install_sync  # noqa: E402
 
@@ -601,10 +602,11 @@ def test_realm_restart_on_ship():
             with patch.object(install_sync,'install_machine',return_value=[]):
                 install_sync.run(events,root=root,repo=repo,agents_dir=base/'agents',crontab_path=base/'cron')
             return root,_read_jsonl(root/'events/L-tick-installsync.jsonl')[-1],events
-        with patch.object(realm,'systemctl_user') as ctl,patch.object(realm,'install_realm') as install:
+        with patch.object(realm,'systemctl_user') as ctl,patch.object(realm,'install_realm') as install, \
+             patch.object(realm,'unit_active',return_value=True):
             root,row,events=run(code)
             assert row['realm']=='restarted' and not row.get('failed')
-            ctl.assert_called_once_with('restart','doit-realm');install.assert_not_called()
+            ctl.assert_called_once_with('try-restart','doit-realm');install.assert_not_called()
             with patch.object(install_sync,'install_machine',return_value=[]):
                 install_sync.run(events+[row],root=root,repo=repo,agents_dir=base/'agents',crontab_path=base/'cron')
             assert ctl.call_count==1
@@ -612,7 +614,7 @@ def test_realm_restart_on_ship():
             _,row,_=run(unrelated);assert 'realm' not in row
             ctl.assert_not_called();install.assert_not_called()
             _,row,_=run(unit);assert row['realm']=='installed'
-            install.assert_called_once_with(repo);ctl.assert_not_called()
+            install.assert_called_once_with(repo,restart_running_only=True);ctl.assert_not_called()
         # Real systemctl invocation from the sync under a cron-like environment.
         binary=base/'bin';binary.mkdir();log=base/'calls'
         script=binary/'systemctl';script.write_text('#!/bin/sh\nprintf "%s|%s|%s\\n" "$*" "$XDG_RUNTIME_DIR" "$DBUS_SESSION_BUS_ADDRESS" >> "$CALL_LOG"\necho "fixture sync bus failure" >&2\nexit 1\n');script.chmod(0o755)
@@ -625,11 +627,285 @@ def test_realm_restart_on_ship():
         assert 'realm' not in row and row['failed'][0]['name']=='doit-realm'
         assert 'fixture sync bus failure' in row['failed'][0]['error']
         runtime=f'/run/user/{os.getuid()}'
-        assert log.read_text().strip()==f'--user restart doit-realm|{runtime}|unix:path={runtime}/bus'
+        assert log.read_text().strip()==f'--user is-active doit-realm|{runtime}|unix:path={runtime}/bus'
     import hashlib
     body=json.dumps(row,sort_keys=True).encode()
     print(json.dumps(dict(url='install-synced://fixture',status=0,body_sha256=hashlib.sha256(body).hexdigest(),body_excerpt=json.dumps({'failed':row['failed']}))))
     print('ok test_realm_restart_on_ship')
 
 
-test_realm_restart_on_ship()
+class RealmTryRestartTests(unittest.TestCase):
+    """Real git, systemctl subprocesses, unit copies and append-only ledger IO."""
+
+    def setUp(self):
+        import realm
+        self.realm = realm
+        scratch = tempfile.TemporaryDirectory(dir=TMP)
+        self.addCleanup(scratch.cleanup)
+        self.base = pathlib.Path(scratch.name)
+        self.repo = _git_repo()
+        self.baseline = _commit_crons(self.repo, [], 'baseline')
+        binary = self.base / 'bin'
+        binary.mkdir()
+        self.state = self.base / 'state.json'
+        self.log = self.base / 'commands.jsonl'
+        script = binary / 'systemctl'
+        script.write_text('''#!/usr/bin/python3
+import json, os, pathlib, sys
+state_path = pathlib.Path(os.environ['REALM_FIXTURE_STATE'])
+log = pathlib.Path(os.environ['REALM_FIXTURE_LOG'])
+state = json.loads(state_path.read_text())
+args = sys.argv[1:]
+with log.open('a') as out:
+    out.write(json.dumps(dict(argv=args, runtime=os.environ.get('XDG_RUNTIME_DIR'),
+                             bus=os.environ.get('DBUS_SESSION_BUS_ADDRESS'))) + '\\n')
+assert args[0] == '--user'
+action = args[1]
+if action == 'is-active':
+    print(state.get('printed', state['state']))
+    print(state.get('stderr', ''), file=sys.stderr, end='')
+    if state.get('stop_after_status'):
+        state['state'] = 'inactive'
+        state_path.write_text(json.dumps(state))
+    sys.exit(state['status'])
+if action == state.get('fail_action'):
+    print('fixture ' + action + ' failure', file=sys.stderr)
+    sys.exit(1)
+if action in ('start', 'restart') or (action == 'try-restart' and state['state'] == 'running'):
+    state['state'] = 'running'
+    state['restarts'] += 1
+if action in ('enable', 'unmask'):
+    state['enabled'] = True
+state_path.write_text(json.dumps(state))
+''')
+        script.chmod(0o755)
+        self.config = self.base / 'config'
+        self.target = self.config / 'systemd/user/doit-realm.service'
+        self.drop = self.config / 'systemd/user/doit-realm.service.d/limit.conf'
+        self.drop.parent.mkdir(parents=True)
+        self.drop.write_text('[Service]\nMemoryMax=4G\n')
+        self.env = patch.dict(os.environ, {
+            'PATH': str(binary) + ':' + os.environ['PATH'],
+            'REALM_FIXTURE_STATE': str(self.state), 'REALM_FIXTURE_LOG': str(self.log),
+            'XDG_CONFIG_HOME': str(self.config),
+        })
+        self.env.start()
+        self.addCleanup(self.env.stop)
+        os.environ.pop('XDG_RUNTIME_DIR', None)
+        os.environ.pop('DBUS_SESSION_BUS_ADDRESS', None)
+
+    def reset(self, enabled=True, state='running', status=0, **extra):
+        self.state.write_text(json.dumps(dict(enabled=enabled, state=state, status=status,
+                                             restarts=0, **extra)))
+        self.log.write_text('')
+
+    def commands(self):
+        return _read_jsonl(self.log)
+
+    def actions(self):
+        commands = self.commands()
+        for row in commands:
+            self.assertEqual(row['argv'][0], '--user')
+            self.assertEqual(row['argv'][2:], [] if row['argv'][1] == 'daemon-reload' else ['doit-realm'])
+        return [row['argv'][1] for row in commands]
+
+    def commit(self, *paths):
+        for path in paths:
+            dest = self.repo / path
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            if path == 'ops/doit-realm.service':
+                dest.write_bytes((REPO_ROOT / path).read_bytes() + f'\n# fixture {paths!r}\n'.encode())
+            else:
+                dest.write_text('fixture ' + path + '\n')
+        subprocess.run(['git', '-C', str(self.repo), 'add', '.'], check=True)
+        subprocess.run(['git', '-C', str(self.repo), 'commit', '-qm', 'fixture'], check=True)
+        return subprocess.check_output(['git', '-C', str(self.repo), 'rev-parse', 'HEAD'], text=True).strip()
+
+    def assert_state(self, enabled, state, restarts):
+        saved = json.loads(self.state.read_text())
+        self.assertEqual((saved['enabled'], saved['state'], saved['restarts']),
+                         (enabled, state, restarts))
+
+    def signed(self, ac, result):
+        body = json.dumps(result, sort_keys=True)
+        print(json.dumps(dict(url=f'install-sync://scratch/AC{ac}', status=0,
+                              body_sha256=hashlib.sha256(body.encode()).hexdigest(), body_excerpt=body)))
+
+    def test_code_only_state_matrix(self):
+        results = []
+        for path in ('src/realm.py', 'src/realm.html', 'src/realm_ledger.py', 'src/realm_future.py'):
+            sha = self.commit(path)
+            for enabled in (True, False):
+                for state, status in (('running', 0), ('inactive', 3), ('failed', 3)):
+                    with self.subTest(path=path, enabled=enabled, state=state):
+                        self.reset(enabled, state, status)
+                        action = install_sync.sync_realm(self.repo, sha)
+                        self.assertEqual(action, 'restarted' if status == 0 else 'not-running')
+                        self.assert_state(enabled, state, int(status == 0))
+                        self.assertEqual(self.actions(), ['is-active', 'try-restart'])
+                        results.append(dict(path=path, enabled=enabled, state=state, action=action,
+                                            argv=[r['argv'] for r in self.commands()]))
+            for printed in ('activating', 'deactivating', 'reloading'):
+                for status in (0, 3, 1):
+                    with self.subTest(path=path, printed=printed, status=status):
+                        self.reset(printed=printed, status=status)
+                        if status == 1:
+                            with self.assertRaises(RuntimeError):
+                                install_sync.sync_realm(self.repo, sha)
+                            self.assertEqual(self.actions(), ['is-active'])
+                            action = 'error'
+                        else:
+                            action = install_sync.sync_realm(self.repo, sha)
+                            self.assertEqual(action, 'restarted' if status == 0 else 'not-running')
+                            self.assertEqual(self.actions(), ['is-active', 'try-restart'])
+                        results.append(dict(path=path, printed=printed, status=status, action=action))
+            self.reset(stop_after_status=True)
+            self.assertEqual(install_sync.sync_realm(self.repo, sha), 'restarted')
+            self.assert_state(True, 'inactive', 0)
+            self.assertEqual(self.actions(), ['is-active', 'try-restart'])
+            results.append(dict(path=path, intervening_stop='inactive', restarts=0))
+        self.signed(1, results)
+
+    def test_unit_sync_state_matrix(self):
+        results = []
+        for paths in (('ops/doit-realm.service',), ('ops/doit-realm.service', 'src/realm.py')):
+            sha = self.commit(*paths)
+            for enabled in (True, False):
+                for state, status in (('running', 0), ('inactive', 3), ('failed', 3)):
+                    with self.subTest(paths=paths, enabled=enabled, state=state):
+                        self.reset(enabled, state, status)
+                        self.target.write_text('old unit')
+                        self.assertEqual(install_sync.sync_realm(self.repo, sha), 'installed')
+                        with self.target.open('rb') as installed:
+                            self.assertEqual(installed.read(), (self.repo / paths[0]).read_bytes())
+                        self.assertEqual(self.drop.read_text(), '[Service]\nMemoryMax=4G\n')
+                        self.assert_state(enabled, state, int(status == 0))
+                        self.assertEqual(self.actions(), ['daemon-reload', 'try-restart'])
+                        results.append(dict(paths=paths, enabled=enabled, state=state, action='installed',
+                                            copied=True, drop_in_preserved=True, argv=[r['argv'] for r in self.commands()]))
+        self.signed(2, results)
+
+    def run_ship(self, sha):
+        root = pathlib.Path(tempfile.mkdtemp(dir=self.base))
+        events = [dict(type='install-synced', sha=self.baseline, ts='2026-10-01T00:00:00Z'),
+                  dict(type='shipped', sha=sha, project='do-it-v2', ts='2026-10-02T00:00:00Z')]
+        kwargs = dict(root=root, repo=self.repo, agents_dir=self.base / 'agents',
+                      manifest=self.repo / 'crons.toml', crontab_path=self.base / 'cron')
+        # The machine sync is independent; service and ledger seams stay real.
+        with patch.object(install_sync, 'install_machine', return_value=[]):
+            install_sync.run(events, **kwargs)
+        row = next(e for e in reread_m(root) if e['type'] == 'install-synced')
+        before = self.log.read_bytes()
+        install_sync.run(events + [row], **kwargs)
+        self.assertEqual(self.log.read_bytes(), before)
+        self.assertEqual(len(reread_m(root)), 1)
+        return row
+
+    def test_sync_event_round_trip_and_failures(self):
+        results = []
+        code = self.commit('src/realm.py')
+        for state, status, expected in (('running', 0, 'restarted'), ('inactive', 3, 'not-running')):
+            self.reset(state=state, status=status)
+            row = self.run_ship(code)
+            self.assertEqual(row['realm'], expected)
+            self.assertNotIn('failed', row)
+            results.append(row)
+        unrelated = self.commit('readme')
+        self.reset()
+        self.assertNotIn('realm', self.run_ship(unrelated))
+        self.assertEqual(self.actions(), [])
+        root = pathlib.Path(tempfile.mkdtemp(dir=self.base))
+        install_sync.run([dict(type='shipped', sha=code, project='do-it-v2')],
+                         root=root, repo=self.repo, agents_dir=self.base / 'agents')
+        self.assertTrue(reread_m(root)[0]['baseline'])
+        self.assertEqual(self.actions(), [])
+        unit = self.commit('ops/doit-realm.service')
+        self.reset(state='inactive', status=3)
+        row = self.run_ship(unit)
+        self.assertEqual(row['realm'], 'installed')
+        results.append(row)
+
+        for status, printed, stderr in ((0, 'active', ''), (3, 'inactive', ''), (3, 'failed', ''),
+                                        (1, 'inactive', 'fixture bus failure'), (1, 'active', ''),
+                                        (4, 'unknown', 'fixture missing unit')):
+            with self.subTest(status=status, printed=printed, stderr=stderr):
+                self.reset(status=status, printed=printed, stderr=stderr)
+                if status in (0, 3):
+                    self.assertIs(self.realm.unit_active('doit-realm'), status == 0)
+                else:
+                    with self.assertRaises(RuntimeError) as error:
+                        self.realm.unit_active('doit-realm')
+                    self.assertIn(f'exit {status}', str(error.exception))
+                    self.assertIn('systemctl --user is-active doit-realm', str(error.exception))
+                    if stderr:
+                        self.assertIn(stderr, str(error.exception))
+                self.assertEqual(self.actions(), ['is-active'])
+                results.append(dict(status=status, printed=printed, stderr=stderr, classified=True))
+
+        for explicit in (False, True):
+            self.reset()
+            if explicit:
+                os.environ.update(XDG_RUNTIME_DIR='/fixture/runtime', DBUS_SESSION_BUS_ADDRESS='unix:path=/fixture/bus')
+            self.assertTrue(self.realm.unit_active('doit-realm'))
+            self.realm.systemctl_user('try-restart', 'doit-realm')
+            runtime = '/fixture/runtime' if explicit else f'/run/user/{os.getuid()}'
+            bus = 'unix:path=/fixture/bus' if explicit else f'unix:path={runtime}/bus'
+            for call in self.commands():
+                self.assertEqual((call['runtime'], call['bus']), (runtime, bus))
+            for call in (lambda: self.realm.unit_active('doit-realm'),
+                         lambda: self.realm.systemctl_user('try-restart', 'doit-realm')):
+                with patch.object(self.realm.subprocess, 'run', side_effect=subprocess.TimeoutExpired('systemctl', 30)) as runner:
+                    with self.assertRaises(subprocess.TimeoutExpired):
+                        call()
+                    self.assertEqual(runner.call_args.kwargs['timeout'], 30)
+                    env = runner.call_args.kwargs['env']
+                    self.assertEqual((env['XDG_RUNTIME_DIR'], env['DBUS_SESSION_BUS_ADDRESS']), (runtime, bus))
+            results.append(dict(explicit_environment=explicit, runtime=runtime, bus=bus,
+                                status_and_action_timeout=30))
+
+        failures = ((code, dict(status=1, stderr='fixture bus failure'), ['is-active'], 'fixture bus failure'),
+                    (code, dict(status=1), ['is-active'], 'exit 1'),
+                    (code, dict(fail_action='try-restart'), ['is-active', 'try-restart'], 'fixture try-restart failure'),
+                    (code, dict(state='inactive', status=3, fail_action='try-restart'),
+                     ['is-active', 'try-restart'], 'fixture try-restart failure'),
+                    (unit, dict(fail_action='daemon-reload'), ['daemon-reload'], 'fixture daemon-reload failure'),
+                    (unit, dict(fail_action='try-restart'), ['daemon-reload', 'try-restart'], 'fixture try-restart failure'))
+        for sha, state, actions, diagnostic in failures:
+            with self.subTest(failure=diagnostic, sha=sha):
+                self.reset(**state)
+                row = self.run_ship(sha)
+                self.assertNotIn('realm', row)
+                self.assertEqual(row['failed'][0]['name'], 'doit-realm')
+                self.assertIn(diagnostic, row['failed'][0]['error'])
+                self.assertEqual(self.actions(), actions)
+                results.append(row)
+        self.reset()
+        real_run = subprocess.run
+        def timeout_status(command, **kwargs):
+            if command[:3] == ['systemctl', '--user', 'is-active']:
+                self.assertEqual(kwargs['timeout'], 30)
+                raise subprocess.TimeoutExpired(command, 30)
+            return real_run(command, **kwargs)
+        with patch.object(self.realm.subprocess, 'run', side_effect=timeout_status):
+            row = self.run_ship(code)
+        self.assertNotIn('realm', row)
+        self.assertEqual(row['failed'][0]['name'], 'doit-realm')
+        self.assertIn('timed out', row['failed'][0]['error'])
+        self.assertEqual(self.actions(), [])
+        results.append(row)
+        self.reset()
+        # Fail inside the real copyfile, after the destination parent exists.
+        self.target.unlink()
+        self.target.mkdir()
+        row = self.run_ship(unit)
+        self.assertNotIn('realm', row)
+        self.assertEqual(row['failed'][0]['name'], 'doit-realm')
+        self.assertTrue(row['failed'][0]['error'])
+        self.assertEqual(self.actions(), [])
+        results.append(row)
+        self.signed(3, results)
+
+
+if __name__ == '__main__':
+    test_realm_restart_on_ship()
+    unittest.main()

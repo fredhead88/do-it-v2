@@ -1846,7 +1846,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._json({"error": "not found"}, 404)
 
 
-def systemctl_user(*args):
+def systemctl_user(*args, _status=False):
     """The cron caller has no user-bus environment. Preserve explicit values."""
     env = os.environ.copy()
     if not env.get('XDG_RUNTIME_DIR'):
@@ -1855,18 +1855,28 @@ def systemctl_user(*args):
         env['DBUS_SESSION_BUS_ADDRESS'] = f"unix:path={env['XDG_RUNTIME_DIR']}/bus"
     command = ['systemctl', '--user', *args]
     result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=30)
+    if _status:
+        if result.returncode in (0, 3):
+            return result.returncode == 0
+        raise RuntimeError(' '.join(command) + f': exit {result.returncode}' +
+                           (': ' + result.stderr.strip() if result.stderr.strip() else ''))
     if result.returncode:
         raise RuntimeError(' '.join(command) + ': ' + (result.stderr.strip() or f'exit {result.returncode}'))
 
 
-def install_realm(repo=None):
+def unit_active(name: str) -> bool:
+    """Classify the status exit code, including failed units as not running."""
+    return systemctl_user('is-active', name, _status=True)
+
+
+def install_realm(repo=None, *, restart_running_only=False):
     import shutil
     source = pathlib.Path(repo) if repo is not None else HERE.parent
     target = pathlib.Path(os.environ.get('XDG_CONFIG_HOME') or pathlib.Path.home()/'.config') / 'systemd/user/doit-realm.service'
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(source/'ops/doit-realm.service', target)
     systemctl_user('daemon-reload')
-    systemctl_user('restart', 'doit-realm')
+    systemctl_user('try-restart' if restart_running_only else 'restart', 'doit-realm')
 
 
 def main(argv=None):
