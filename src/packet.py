@@ -7,6 +7,7 @@ import argparse, hashlib, os, pathlib, re, shlex, subprocess, sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import amends, audit, fold, merge_gate, models, routing, grader_packet  # noqa: E402
 import verification, base_refresh
+from packet_base import current_tip, _effective_base, builder_pin, pinned_baseline
 
 ROOT = pathlib.Path(os.environ.get("DOIT_ROOT", pathlib.Path.home() / ".do-it"))
 CONTENT, PACKETS = ROOT / "content", ROOT / "packets"
@@ -345,9 +346,13 @@ def _interp_violations(segs):
             out.append(f"`{cmd}` in `{seg.strip()}`")
     return out
 
+def _builder_pin(c):
+    return builder_pin(c, ROOT)
+
+
 def verify_base_sha(c):
-    """Pin the verify base once at packet time (R3d, R7 Target 2).
-    Precedence: --base-sha; refresh tip; latest explicit build-done;
+    """Builders capture the effective local branch tip once per context.
+    Other roles retain precedence: --base-sha; latest explicit build-done;
     earliest subject build-done.base_sha; latest build-started; latest
     spec-written; worktree merge-base; worktree HEAD as a last resort.
     Explicit pins preserve the main tip from a landed rebase on later rework;
@@ -359,6 +364,11 @@ def verify_base_sha(c):
     spec audits before a worktree or any recorded base exists. Refuse only if
     the repository also yields no base. Never re-derive the pin at script time.
     """
+    if getattr(c.a, "role", None) == "builder":
+        try:
+            return _builder_pin(c)
+        except (ValueError, OSError, TypeError, KeyError, subprocess.SubprocessError):
+            die(f"{c.a.subject}: stale-base — effective base unresolved; Executor checks project/ref")
     pinned = c.a.base_sha or base_refresh.refresh_tip(c)
     if pinned:
         return pinned
@@ -495,7 +505,8 @@ def out_of_grant_line(c):
 
 def write_verify_script(c):
     """Write a per-role wrapper, keeping the linted block verbatim (SD8).
-    Merge-base runs at runtime, falling back to the packet-time pin on failure.
+    Builder/grader/reviewer supported baselines use the captured packet pin.
+    Other roles keep their runtime merge-base/fallback behavior.
     Only grader/reviewer apply waivers and guard readonly .env loading.
     """
     spec = c.spec_file()
@@ -514,12 +525,18 @@ def write_verify_script(c):
     if dsn_line and c.a.role in ("grader", "reviewer"):
         dsn_line = "if [ -f ./.env ]; then set -a; . ./.env; set +a; fi\n"
     calls = [shlex.split(call[2:-1])[1:] for call in MERGE_BASE_CALL.findall(block)]
+    pinned_calls = c.a.role in ("builder", "grader", "reviewer") and re.search(r"\bgit\s+merge-base\b", block)
     uses_base = re.search(r"\$\{?BASE\b", block) and not re.search(r"(?:^|&&)\s*BASE=", block)
     base_line, source = "", "no base"
-    if calls or uses_base:
+    if calls or uses_base or pinned_calls:
         base = verify_base_sha(c)
         base_line, source = f"BASE={base}\n", f"pinned {base}"
-    if calls:
+    if pinned_calls:
+        try:
+            base_line = pinned_baseline(c, ROOT, spec, base)
+        except (ValueError, OSError, TypeError, KeyError, subprocess.SubprocessError):
+            die("invalid verify main or pinned base")
+    elif calls:
         import look
         main = look.load_toml()["push"]["main"].get(c.project(), "master")
         if not re.fullmatch(r"[A-Za-z0-9._/-]+", main) or not re.fullmatch(r"[0-9a-f]{40}", base):
@@ -930,11 +947,13 @@ def hint_block(c):
 
 def p_builder(c):
     hint = hint_block(c)          # refused before anything else is assembled
+    base_sha = verify_base_sha(c)  # fail closed before writing a verification artifact
     spec, v = c.spec_file(), write_verify_script(c)
     repo = c.a.repo or str(ROOT / "repos" / c.project())
-    # R7: the packet pin shares verify_base_sha's precedence with the wrapper's
-    # fallback; runtime merge-base may move forward after a rebase (L-spec-1044).
-    base_sha = verify_base_sha(c)
+    historical = [e for e in c.all_of("build-done") if e.get("base_sha")]
+    explicit = [e for e in historical if e.get("base_sha_explicit")]
+    changed = ((historical and historical[0]["base_sha"] != base_sha)
+               or (explicit and explicit[-1]["base_sha"] != base_sha))
     ch = c.charter_file()
     extract = (section(ch.read_text(), "Constraints") or "").splitlines() if ch else []
     rej, fix = c.standing()
@@ -947,10 +966,8 @@ def p_builder(c):
          # R7/Target 1, AC1/AC3: the machine line `dispatch.pinned_base` reads back
          # off this same file — unconditional, byte-equal to `base_sha` above.
          f"PINNED_BASE_SHA: {base_sha}",
-         *(["PINNED_BASE_SHA_EXPLICIT: true"] if c.a.base_sha or base_refresh.refresh_tip(c) else []),
-         *(["The base moved to the main tip because main changed under this spec. "
-            "If your branch already has a commit, rebase it onto `base_sha` first, "
-            "keeping exactly one commit above it."] if not c.a.base_sha and base_refresh.refresh_tip(c) else []),
+         *(["PINNED_BASE_SHA_EXPLICIT: true"]
+           if c.a.base_sha or base_refresh.refresh_tip(c) or changed else []),
          f"4. Verify command: `bash {v}`" if v else
          "4. Verify command: NONE — the spec's Verification block is empty. Declare `spec-ambiguity` and stop.",
          f"   Done-condition: {done}.",
@@ -1549,29 +1566,9 @@ def packet_spec_rework(spec):
 
 
 def packet_builder_rework(spec, hint):
-    """The builder re-dispatch packet (L-adr-0039) — the identical builder packet for
-    that spec's own worktree, plus the hint verbatim and the paths it concerns. A
-    diff-shaped hint is refused, not rendered.
-
-    R7/Target 3: this is the Executor's merge-conflict/rebase re-dispatch — the sole
-    non-test caller of this symbol (Assumptions §8) — so it pins the CURRENT main
-    tip here, unconditionally, before calling `main()`: the subject's `project`,
-    read off the ledger (`fold.subject_project` — the same reading `dispatch.main`'s
-    own project fallback uses), then `git -C <ROOT/repos/project> rev-parse HEAD` —
-    the tip of the repo the Executor merges into, i.e. the main tip the builder is
-    about to rebase onto (SD7). An unresolvable project, or a non-zero/empty git
-    result, adds no `--base-sha` at all: this never dies, it falls through to
-    `p_builder`'s own existing `verify_base_sha` precedence unchanged. Keeps its
-    exact two-argument signature — no Executor change, no new CLI flag needed
-    (`--base-sha` already exists). Returns the packet path."""
-    argv = ["builder", spec, "--hint", hint]
+    """Use the same builder base policy for Executor-requested rework."""
     project = fold.subject_project(spec)
-    if project:
-        r = subprocess.run(["git", "-C", str(ROOT / "repos" / project), "rev-parse", "HEAD"],
-                           capture_output=True, text=True)
-        if r.returncode == 0 and r.stdout.strip():
-            argv += ["--base-sha", r.stdout.strip()]
-    return main(argv)
+    return main(["builder", spec, "--hint", hint] + (["--project", project] if project else []))
 
 
 if __name__ == "__main__":

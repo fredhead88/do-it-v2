@@ -111,6 +111,7 @@ class OwnerDropReworkTests(unittest.TestCase):
         print('L-spec-1790 AC2 ok')
 
     def test_ac3_builder_packet_evidence_and_unchanged_cases(self):
+        from contextlib import nullcontext
         with tempfile.TemporaryDirectory(prefix='owner-drop-rework-') as directory:
             root = Path(directory)
             content = root / 'content'
@@ -118,17 +119,28 @@ class OwnerDropReworkTests(unittest.TestCase):
             spec = content / f'{SID}.md'
             spec.write_text('# fixture\n## Interfaces\nWrites: src/nextstep.py\n'
                             '## Verification\n```\n/usr/bin/true\n```\n')
+            repo = root / 'repo'
+            subprocess.run(['git', 'init', '-q', '--initial-branch=main', str(repo)], check=True)
+            subprocess.run(['git', '-C', str(repo), '-c', 'user.name=Fixture',
+                            '-c', 'user.email=fixture@example.invalid', 'commit', '-q',
+                            '--allow-empty', '-m', 'fixture'], check=True)
+            tip = subprocess.check_output(['git', '-C', str(repo), 'rev-parse', 'HEAD'], text=True).strip()
             events = [event('spec-written', -60, path=str(spec), footprint=['src/nextstep.py'], project='fixture')]
 
             def render(rows, old=False):
                 with patch.object(fold, 'read_events', return_value=rows), \
+                     patch('look.load_toml', return_value={'push': {'main': {'fixture': 'main'}}}), \
                      patch.object(packet, 'ROOT', root), \
                      patch.object(packet, 'CONTENT', content), \
                      patch.object(packet, 'PACKETS', root / 'packets'), \
                      patch.dict(os.environ, {'DOIT_ROOT': str(root), 'HOME': str(root / 'home')}), \
-                     patch.dict(packet.BUILD, {'builder': self.old_builder if old else packet.p_builder}):
-                    path = packet.main(['builder', SID, '--repo', str(ROOT), '--worktree', str(ROOT),
-                                        '--project', 'fixture', '--base-sha', 'fixture-base'])
+                     patch.dict(packet.BUILD, {'builder': self.old_builder if old else packet.p_builder}), \
+                     (patch.dict(self.old_builder.__globals__, {'preflight_lines': lambda c: []})
+                      if old else nullcontext()):
+                    # The inherited snapshot already includes the later preflight
+                    # suffix; omit it only in the historical comparison fixture.
+                    path = packet.main(['builder', SID, '--repo', str(repo), '--worktree', str(repo),
+                                        '--project', 'fixture', '--base-sha', tip])
                     return Path(path).read_bytes()
 
             self.assertEqual(render(events), render(events, old=True) + b'preflight undetermined: none recorded\n')
