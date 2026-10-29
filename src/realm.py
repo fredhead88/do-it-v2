@@ -259,15 +259,16 @@ def stall_result(kind, live_fold, events, folded, now):
     if cached and cached['generation'] is LEDGER.generation and 0 <= age < 60:
         return cached['value']
     specs, by_subject = folded[0], folded[3]
+    import dispatch
+    active = {s: v for s, v in specs.items() if v['state'] != 'unknown'
+              and v['state'] not in dispatch.SETTLED_STATES}
     if kind == 'classified':
-        active = {s: v for s, v in specs.items() if v['state'] not in realm_glance.FINISHED
-                  and not v['state'].startswith('shipped')}
         value = live_fold.stall_rows(events, active, now=now, by_subject=by_subject,
                                     dwell={v['state']: -1 for v in active.values()})
     else:
         import lane_rules
         lane_rules.load()
-        value = live_fold.stall_lane_rows(events, specs, now, by_subject=by_subject)
+        value = live_fold.stall_lane_rows(events, active, now, by_subject=by_subject)
     LEDGER.stalls[kind] = dict(generation=LEDGER.generation, at=now, value=value)
     return value
 

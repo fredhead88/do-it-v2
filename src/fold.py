@@ -1799,21 +1799,37 @@ def wedged(spec, dwell=None, *, events=None, specs=None, by_subject=None, now=No
     The two-argument form retains standalone spec checks. Cross-spec wave and
     capability facts require the same admitted context the board/realm use.
     """
+    if dwell is None:
+        import dispatch
+        selected = {sid: s for sid, s in (specs or {spec['id']: spec}).items()
+                    if s['state'] != 'unknown' and s['state'] not in dispatch.SETTLED_STATES}
+        specs = selected
+        dwell = {s['state']: -1 for s in selected.values()}
+        if spec['id'] not in selected:
+            return False
     if events is not None or by_subject is not None:
         found = stall_rows(events or (), specs or {spec['id']: spec}, now=now,
                            dwell=dwell, by_subject=by_subject)
         return any(r['spec'] == spec['id'] and r['bucket'] == 'STUCK' for r in found)
     from fold_stalls import rows
-    found = rows({spec['id']: spec}, {spec['id']: spec.get('evs', [])}, NOW,
+    found = rows({spec['id']: spec}, {spec['id']: spec.get('evs', [])}, now or NOW,
                  dwell or DWELL_DAYS)
     return bool(found and found[0]['bucket'] == 'STUCK')
 
 
 def stall_lane_rows(events, specs=None, now=None, *, by_subject=None):
     """Realm's lane-compatible view; reason_live is never guessed from age."""
+    import dispatch
+    if specs is None or by_subject is None:
+        folded = fold(events)
+        specs = folded[0] if specs is None else specs
+        by_subject = folded[3] if by_subject is None else by_subject
+    unfinished = {sid: s for sid, s in specs.items()
+                  if s['state'] != 'unknown' and s['state'] not in dispatch.SETTLED_STATES}
     return [dict(r, rule='stalls', action=r['reason'], actor=r['owner'],
                  overdue=r['bucket'] == 'STUCK', reason_live=r['bucket'] != 'STUCK')
-            for r in stall_rows(events, specs, now=now, by_subject=by_subject)]
+            for r in stall_rows(events, unfinished, now=now, by_subject=by_subject,
+                                dwell={s['state']: -1 for s in unfinished.values()})]
 
 
 def in_flight_deploys(events):
@@ -1898,15 +1914,18 @@ def render(events, specs, charters, ignored, by_subject):
                                for x in by_subject.get(e.get("subject", ""), []))]
     since = lambda t: [e for e in events if e.get("type") == t and ts(e["ts"]) > looked]
     pick = lambda *st: [s for s in specs.values() if s["state"] in st]
-    dwell = dwell_days(by_subject)
+    import dispatch
+    unfinished = {sid: s for sid, s in specs.items()
+                  if s['state'] != 'unknown' and s['state'] not in dispatch.SETTLED_STATES}
+    dwell = {s['state']: -1 for s in unfinished.values()}
     stall_error = None
     try:
-        stalls = {r['spec']: r for r in stall_rows(events, specs, dwell=dwell, by_subject=by_subject)}
+        stalls = {r['spec']: r for r in stall_rows(events, unfinished, dwell=dwell, by_subject=by_subject)}
     except Exception as exc:
         from fold_stalls import text
         stall_error, stalls = text(f'{type(exc).__name__}: {exc}'), {}
     def flag(s):
-        if stall_error and s['age'] > dwell.get(s['state'], 1e9):
+        if stall_error and s['id'] in unfinished:
             return f' · classification unavailable · owner executor · {stall_error}'
         r = stalls.get(s['id'])
         if r is None:
@@ -2208,10 +2227,10 @@ def render(events, specs, charters, ignored, by_subject):
 
     drill = max((ts(e["ts"]) for e in events if e.get("type") == "restore-verified"), default=None)
     health = [f"restore drill: {'never run — the backup is unproven' if not drill else f'{(NOW-drill).days}d ago'}"]
-    from fold_stalls import BUCKETS
+    from fold_stalls import BUCKET_ORDER
     aged_counts = collections.Counter(r['bucket'] for r in stalls.values())
     health.append('aged specs: unavailable — ' + stall_error if stall_error else
-                  'aged specs: ' + ' · '.join(f'{bucket}={aged_counts[bucket]}' for bucket in BUCKETS))
+                  'aged specs: ' + ' · '.join(f'{bucket}={aged_counts[bucket]}' for bucket in BUCKET_ORDER))
     # The degrade half of the block above (L-adr-0033). It lands HERE rather than at
     # the block's own position so that slot stays a pure pass-through of relay's
     # lines and nothing else — same loudness, a surface fold.py already owns. The

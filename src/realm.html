@@ -27,6 +27,7 @@ body{margin:0;background:var(--night);color:var(--text);font-family:var(--body);
 .stats{scrollbar-width:none}.stats::-webkit-scrollbar{display:none}
 .hud .stat b{text-overflow:ellipsis;font-family:var(--display);font-weight:800;font-size:14px;color:#fff;font-variant-numeric:tabular-nums;white-space:nowrap;letter-spacing:.02em;overflow:hidden;text-overflow:clip;height:20px;line-height:20px}
 .hud .stat span{font-size:10px;color:var(--mute);text-transform:uppercase;letter-spacing:.16em}
+.hud #h-stuck span,.m-tile[data-cell="h-stuck"] span{text-transform:none}
 #h-merge,#h-shelf{grid-column:1/-1}
 .hud #h-merge b,.hud #h-shelf b{font-family:var(--body);font-size:13px;font-weight:600;letter-spacing:normal;white-space:normal;height:auto;min-height:20px;overflow-wrap:anywhere}
 .hud #h-shelf span{white-space:normal;text-transform:none;letter-spacing:normal}
@@ -356,7 +357,7 @@ canvas#map.hand{cursor:pointer}
     <div class="stat click" id="h-proving" title="Counts groups of work being watched on the live site to confirm they keep working." style="width:100px"><b>—</b><span>proving</span></div>
     <div class="stat click" id="h-flight" title="Counts worker runs currently working or waiting to start."><b>—</b><span>in flight</span></div>
     <div class="stat click" id="h-merge" title="Shows finished specs waiting to join the main code, active merge batches, recent wait times, and the merge rate."><b>?</b><span>merge</span></div>
-    <div class="stat click" id="h-stuck" title="Open stuck items; click for the list and work held on purpose." style="width:124px"><b>—</b><span>stuck</span></div>
+    <div class="stat click" id="h-stuck" title="Open stuck items; click for the list and work held on purpose." style="width:124px"><b>—</b><span>Stuck</span></div>
     <div class="stat click" id="h-shelf" title="Counts written specs that no builder has started yet, and shows how long the oldest has waited."><b>—</b><span>ready, waiting for a builder</span></div>
     <div class="stat click" id="h-esc" title="Counts unanswered requests for a decision, including how many need your decision."><b>—</b><span>ravens</span></div>
     <div class="stat click" id="h-ship" title="Counts changes delivered to the live site during the time shown."><b>—</b><span>shipped</span></div>
@@ -840,6 +841,7 @@ $('glance-toggle').onclick=()=>{if(!DATA)return;setGlanceOpen(!glanceOpen);try{l
 function renderGlance(){
   // Restore the drawer only once the snapshot exists, including after reload.
   if(!DATA)return;
+  renderFlowTile();
   const d=DATA&&DATA.glance;const replay=DATA&&!LIVE&&!REMOTE;
   const stale=d&&Date.now()-toMs(d.at)>120000;
   const signature=JSON.stringify([d,replay,stale]);if(signature===glanceSignature)return;glanceSignature=signature;
@@ -1293,14 +1295,14 @@ const STAGE_PLACES={keep:'idea',tower:'planned',forge:'building',court:'checking
 const viewText=v=>v==null?'unknown':String(v);
 function applyViews(d){S.flow=d.flow??null;S.flowError=d.flow_error||null;S.steps=d.steps??null;S.health=d.health??null;S.healthError=d.health_error||null;renderFlowTile();if(typeof rerenderPanel==='function')rerenderPanel();}
 function applyHistory(d){S.history=d.history;if(d.now)S.metricsNow=d.now;if(d.wallclock)S.wallclock=d.wallclock;applyViews(d);}
-function renderFlowTile(){const n=S.flow?S.flow.stuck.length:null;const tile=$('h-stuck');tile.firstElementChild.textContent=viewText(n);tile.className='stat click '+(n==null?'warn':n?'bad':'good');const strip=$('stuck');strip.className=n===0?'calm':'';strip.textContent=n==null?'Flow unknown':n+' stuck';}
+function renderFlowTile(){const d=typeof DATA==='undefined'?null:DATA?.glance;const stuck=d&&!d.error?d.stuck:null;const n=stuck&&!stuck.error?stuck.count:null;const tile=$('h-stuck');tile.firstElementChild.textContent=n==null?'stuck list unavailable':String(n);tile.className='stat click '+(n==null?'warn':n?'bad':'good');const strip=$('stuck');strip.className=n===0?'calm':'';strip.textContent=n==null?'stuck list unavailable':n+' stuck';}
 function stageBadges(){return Object.entries(STAGE_PLACES).map(([place,stage])=>({place,stage,count:S.flow?.stages?.[stage]??null}));}
 function drawStageBadges(){for(const badge of stageBadges()){const p=PLACES[badge.place];g.fillStyle='#efe6d2';g.font='700 '+mapFont(10,'Cinzel');g.fillText(badge.stage+' '+viewText(badge.count),p.x,p.y+p.h+24);}}
 function flowHtml(){return '<h2>Flow</h2><div class="flow-stages">'+FLOW_STAGES.map(stage=>'<p>'+esc(stage)+' · '+esc(viewText(S.flow?.stages?.[stage]))+'</p>').join('')+'</div>'+stuckHtml0();}
 function healthHtml(){const h=S.health;const row=(label,value)=>'<p>'+esc(label)+' · '+esc(viewText(value))+'</p>';return '<h2>Health</h2>'+row('finishing per day',h?.finishing_per_day)+row('intake per day',h?.intake_per_day)+['codex','claude'].map(v=>row(v+' usage',viewText(h?.usage?.[v]?.used)+' / '+viewText(h?.usage?.[v]?.limit))+row(v+' tokens per live spec',h?.tokens_per_live_spec?.[v])).join('')+row('disk',h?.disk_used_fraction==null?null:(h.disk_used_fraction*100).toFixed(1)+'%');}
 function openFlow(){openPanel(flowHtml(),{html:flowHtml,bind:bindLinks});bindLinks();}
 function openHealth(){openPanel(healthHtml(),{html:healthHtml});}
-$('stuck').onclick=()=>openFlow();
+$('stuck').onclick=()=>openStuck();
 function listPanel(title,sub,rows){const html=()=>`<h2>${esc(title)}</h2><div class="cls">${esc(sub)}</div>${rows().length?rows().map(r=>`<p><a class="link" data-subj="${esc(r.s)}">${esc(r.s)}</a>${r.t?' · '+esc(r.t):''}${(()=>{const i=specInfo(r.s);return i?`<br><span class="tiny">${esc(i.title)}</span>`:'';})()}${r.why?`<br><span class="tiny">${esc(r.why)}</span>`:''}</p>`).join(''):'<p class="tiny">None.</p>'}`;openPanel(html(),{html,bind:bindLinks});bindLinks();}
 function provingNextLine(p){return p.next?`${p.next.text} · due ${p.next.due_at}`:'nothing remaining';}
 const PV_STEP={'killed-spec':[0,'Rule on a killed spec',15,'Thinker'],'l1-missing':[0,'Confirm the plan was fully written',30,'Operator'],'spec-review':[1,'Finish grading and review',90,'Pipeline'],'owed-due':[2,'Production checks the sweeper can run',30,'Sweeper'],'owed-expired':[2,'Expired production checks: meet, re-date or waive',20,'Thinker'],'owed-waiting':[3,'Production checks waiting for their date',0,'Calendar'],'brief':[3,'Answer open follow-up briefs',30,'Executor'],'sweep':[4,'Final sweep',10,'Executor'],'charter-review':[5,'Charter review',45,'Executor']};
@@ -1332,7 +1334,13 @@ function openProvingItems(id){const p=DATA&&DATA.proving;const x=p&&p.find(e=>e.
   const back=$('back-pv');if(back)back.onclick=openProvingPanel;}
 const ageOf=s=>{const ev=S.subjectEvents.get(s)||[];return ev.length?fmtAge(S.now-ev[ev.length-1].ms)+' since last event':'';};
 function openStuck(){openPanel(stuckHtml(),{html:stuckHtml,bind:bindLinks});bindLinks();}
-function stuckHtml0(){return '<h3>Stuck right now</h3>'+(S.flow===null?'<p>unknown</p>':S.flow.stuck.map(row=>'<div class="act stuck-row"><b>'+esc(row.item)+'</b> · '+esc(row.action||'hold')+' · '+esc(row.owner)+' · '+esc(row.reason)+' · '+esc(row.since)+'</div>').join('')||'<p>Nothing stuck</p>');}
+function stuckHtml0(){
+ const d=DATA&&DATA.glance;const stuck=d&&!d.error?d.stuck:null;
+ if(!stuck||stuck.error)return '<h2>Stuck right now</h2><p>stuck list unavailable</p>';
+ const kinds={operator:'Operator hold',decision:'Decision hold',dependency:'Dependency hold',prerequisite:'Prerequisite hold',wave:'Earlier wave',capability:'Capability hold'};
+ const row=r=>'<div class="act stuck-row"><a class="link" data-subj="'+esc(r.spec||r.subject)+'">'+esc(r.spec||r.subject)+'</a> · '+esc(r.title)+' · '+esc(r.project)+'<br>'+esc(r.reason)+' · '+esc(r.who)+' · '+esc(fmtAge(r.stuck_for_s*1000))+(kinds[r.kind]?' · '+esc(kinds[r.kind]):'')+'</div>';
+ return '<h2>Stuck right now · '+esc(stuck.count)+'</h2>'+(stuck.stuck.map(row).join('')||'<p>Nothing stuck</p>')+'<h3>Held on purpose · '+esc(stuck.held.length)+'</h3>'+stuck.held.map(row).join('');
+}
 function drawQuota(t){const q=(S.sys||(DATA&&DATA.sys)||{}).quota;if(!q||!q.panes||!q.panes.length)return;const d7=Math.max(...q.panes.map(p=>p.d7));const x=612,y=392,w=12,hh=60;R(g,x-2,y-2,w+4,hh+4,'#1a1428');R(g,x,y,w,hh,'#2a2438');const fill=Math.round(hh*Math.min(100,d7)/100);const col=d7>=95?'#ff5e52':d7>=80?'#ffc46b':'#8fe08f';R(g,x,y+hh-fill,w,fill,col);if(d7>=95&&!REDUCED&&Math.floor(t*2)%2){R(g,x-2,y-2,w+4,2,col);}g.fillStyle=col;g.font='700 '+mapFont(9,'Cinzel');g.fillText('QUOTA '+d7+'%',x-20,y-6);}
 function drawCI(t){const sy=S.sys||(DATA&&DATA.sys);if(!sy||!sy.ci)return;const p=PLACES.gate;const red=sy.ci.red;const col=red?'#ff5e52':sy.ci.green?'#8fe08f':'#9a92ad';R(g,p.x+w2(p)-2,p.y-30,4,28,'#2a2a30');R(g,p.x+w2(p)+2,p.y-30,22,12,col);g.fillStyle=col;g.font='700 '+mapFont(9,'Cinzel');g.fillText(red?'MASTER RED':'MASTER GREEN',p.x+w2(p)-30,p.y-36);if(red&&!REDUCED){const k=(t*1.5)%1;g.strokeStyle=`rgba(255,94,82,${1-k})`;g.lineWidth=2;g.beginPath();g.arc(p.x+w2(p)+12,p.y-24,8+k*18,0,7);g.stroke();}}
 const w2=p=>p.w/2;
@@ -1356,7 +1364,7 @@ function drawClocks_unused(t){const w=S.wallclock||(DATA&&DATA.wallclock);if(!w|
     g.fillStyle=col;g.font='700 '+mapFont(10,'Cinzel');g.fillText(`${b.n} · ${Math.round(b.hours)}h`,x+12,y+10);}}
 /* ---------------- phone layout ---------------- */
 const PHONE=matchMedia('(max-width:700px)');let mTab='now';
-const M_TILES=[['h-exec','executor'],['h-quota','weekly quota'],['h-stuck','stuck'],['h-esc','ravens · yours'],['h-pipe','in pipeline'],['h-owed','owed checks'],['h-proving','proving'],['h-shelf','ready, waiting for a builder'],['h-merge','merge'],['h-ship','shipped'],['h-fail','fallen'],['h-disk','root disk']];
+const M_TILES=[['h-exec','executor'],['h-quota','weekly quota'],['h-stuck','Stuck'],['h-esc','ravens · yours'],['h-pipe','in pipeline'],['h-owed','owed checks'],['h-proving','proving'],['h-shelf','ready, waiting for a builder'],['h-merge','merge'],['h-ship','shipped'],['h-fail','fallen'],['h-disk','root disk']];
 function mNowHtml(){const st=$('stuck');const calm=st.classList.contains('calm');const live=S.alarms.filter(a=>a.needs);
   return `<div class="m-strip ${calm?'calm':''}">${st.innerHTML}</div>
   <div class="m-tiles">${M_TILES.map(([id,label])=>{const c=$(id);if(!c)return '';const cls=(c.className.match(/\b(bad|warn|good)\b/)||[''])[0];return `<div class="m-tile ${cls}" data-cell="${id}" title="${esc(c.title)}"><b>${esc(c.firstElementChild.textContent)}</b><span>${esc(label)}</span></div>`;}).join('')}</div>

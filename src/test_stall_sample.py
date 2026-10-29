@@ -80,7 +80,7 @@ class StallTests(unittest.TestCase):
             row = stall_sample.sample(NOW,root=root)
             self.assertTrue(row['ok'],row)
             self.assertEqual(row['buckets'],self.expected(root))
-            self.assertEqual(set(row['buckets']),{'STUCK','queued','waiting-on-human'})
+            self.assertEqual(set(row['buckets']),{'STUCK'})
             self.assertEqual(row['builder_capacity'],autodispatch.capacity(root))
             self.assertEqual(row['builder_capacity'],cap)
             self.assertEqual(row['hold_kinds'],{})
