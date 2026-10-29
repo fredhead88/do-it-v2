@@ -262,6 +262,39 @@ def _page_function(source, name):
     raise AssertionError("unclosed function " + name)
 
 
+def _gate_page_snapshots(fixtures):
+    """Run the production held-gate reader with replay-filtered compact rows."""
+    page = realm.PAGE.read_text()
+    declarations = []
+    for name in ("S", "toMs", "SERVER_KINDS", "NO_SELFCHECK", "FINISHED_RE",
+                 "DEFAULT_OWNER", "NEXT_ACTION"):
+        start = page.index("const " + name + (" =" if name in ("S", "toMs") else "="))
+        end = page.index("\n};", start) + 3 if name == "NEXT_ACTION" else page.index("\n", start)
+        declarations.append(page[start:end])
+    script = "\n".join(declarations + [_page_function(page, n)
+                                       for n in ("computeOmens", "stateMap")])
+    script += r'''
+let DATA={states:[]},LIVE=false,REMOTE=false,stream=null,lastHeard=0;
+const CAP={},execBusy=()=>false,lastOf=()=>null,knownBug=()=>null,specCharter=()=>null,charterRows=()=>[];
+const laneSplit=()=>({close:[]}),renderOmens=()=>{},fixFor=()=>null,ownerFor=()=>null,sinceFor=()=>S.now;
+const isOperator=o=>o==='operator'||o==='you',OM=()=>null;
+const fixtures=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+const results=fixtures.map(f=>{
+  S.now=Date.parse(f.at);DATA.states=f.states;S.subjectEvents=new Map();S.raisedAt=new Map();
+  for(const row of f.rows){const ms=Date.parse(row.t);if(ms>S.now)continue;
+    if(!S.subjectEvents.has(row.s))S.subjectEvents.set(row.s,[]);
+    S.subjectEvents.get(row.s).push({...row,ms});}
+  computeOmens();
+  return S.alarms.filter(a=>a.kind==='gate').flatMap(a=>a.subjects).sort();
+});
+console.log(JSON.stringify(results));
+'''
+    result = subprocess.run(["node", "-e", script], input=json.dumps(fixtures),
+                            text=True, capture_output=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+    return json.loads(result.stdout)
+
+
 # ---------------------------------------------------------------- merge throughput (L-spec-1149)
 import contextlib
 import inspect

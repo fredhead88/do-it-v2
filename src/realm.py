@@ -61,7 +61,7 @@ BRIEF = (LIVE_REPO / "src" / "brief.py") if (LIVE_REPO / "src" / "brief.py").is_
 
 KEEP = {
     "spawn-started", "spawn-done", "spawn-failed", "spawn-stale", "build-started", "build-done", "build-blocked", "backend-fallback",
-    "verdict", "review", "merge-gate-clean", "merge-gate-rework", "shipped", "escalation-blocking",
+    "verdict", "review", "merge-gate-clean", "merge-gate-rework", "merge-gate-undetermined", "shipped", "escalation-blocking",
     "question", "decision", "spec-written", "charter-filed", "plan-written", "tick", "spec-killed",
     "deploy-landed", "deploy-failed", "deploy-started", "deploy-refused", "charter-retracted", "charter-complete",
     "brief", "brief-answered", "lesson", "spec-carried", "inbound-registered", "inbound-closed", "inbound-covered",
@@ -140,6 +140,8 @@ def compact(e, actor):
         r.update(d=e.get("depth"), nb=e.get("n_blocking"))
     elif ty == "merge-gate-rework":
         r["why"] = trunc(e.get("undetermined") or e.get("why"), 160)
+    elif ty == "merge-gate-undetermined":
+        r["why"] = trunc(e.get("reason"), 160)
     elif ty in ("escalation-blocking", "question"):
         r.update(why=trunc(e.get("why") or e.get("asks"), 260), df=trunc(e.get("default"), 200), dl=e.get("deadline") or "", ow=e.get("owner"),
                  irr=trunc(e.get("irreversible"), 160) if e.get("irreversible") and not re.match(r"^\s*(none|no|false)\b", str(e.get("irreversible")), re.I) else None,
@@ -927,12 +929,12 @@ def metrics_at(rows, states, claims, at, sys_sig=None, makers=None, spec_ch=None
     m["unclaimed"], m["vanished"] = unclaimed, vanished
     rec = [r for r in rs if r["ty"] in ("spawn-done", "spawn-failed") and r["t"] > H1]
     m["spike"] = round(sum(1 for r in rec if r["ty"] == "spawn-failed") / len(rec), 2) if len(rec) >= 5 else 0
-    dead = churn = blocked = gate = 0
+    dead = churn = blocked = gate = gate_undetermined = 0
     per = {}
     for r in rs:
         if not str(r.get("s") or "").startswith("L-spec-"):
             continue
-        d = per.setdefault(r["s"], {"cont": 0, "lastCont": "", "lastDone": "", "lastWritten": "", "verd": 0, "lastOk": None, "build": None, "buildT": "", "gate": None, "gateT": "", "last": ""})
+        d = per.setdefault(r["s"], {"cont": 0, "lastCont": "", "lastDone": "", "lastWritten": "", "verd": 0, "lastOk": None, "build": None, "buildT": "", "gate": None, "gateT": "", "churnGate": None, "last": ""})
         d["last"] = r["t"]
         ty = r["ty"]
         if ty == "spawn-failed" and re.search(r"contamin", str(r.get("why") or ""), re.I) and not re.search(r"identical packet|D120", str(r.get("why") or ""), re.I):
@@ -948,22 +950,28 @@ def metrics_at(rows, states, claims, at, sys_sig=None, makers=None, spec_ch=None
         elif ty in ("build-done", "build-blocked"):
             d["build"] = "BLOCKED" if ty == "build-blocked" else r.get("st")
             d["buildT"] = r["t"]
-        elif ty in ("merge-gate-clean", "merge-gate-rework"):
+        elif ty in ("merge-gate-clean", "merge-gate-rework", "merge-gate-undetermined"):
             d["gate"] = ty
             d["gateT"] = r["t"]
+            # Tooling supersedes held gates, but never changes clean/rework churn.
+            if ty != "merge-gate-undetermined":
+                d["churnGate"] = ty
     stx = dict(states or [])
     for sid, d in per.items():
         if d.get("last", "") < H24 or re.search(r"killed|void|dropped", stx.get(sid, "")):
             continue
         if d["cont"] >= 2 and d["lastDone"] < d["lastCont"] and d.get("lastWritten", "") < d["lastCont"]:
             dead += 1
-        if d["verd"] >= 3 and d["lastOk"] is False and not re.match(r"^(shipped|accepted)", stx.get(sid, "")) and not (d["gate"] == "merge-gate-clean"):
+        if d["verd"] >= 3 and d["lastOk"] is False and not re.match(r"^(shipped|accepted)", stx.get(sid, "")) and not (d["churnGate"] == "merge-gate-clean"):
             churn += 1
         if d["build"] and d["build"] != "DONE" and d["buildT"] > H12:
             blocked += 1
         if d["gate"] == "merge-gate-rework" and d["gateT"] > H12:
             gate += 1
-    m.update(deadlock=dead, churn=churn, blocked=blocked, gate=gate)
+        if d["gate"] == "merge-gate-undetermined" and d["gateT"] > H12:
+            gate_undetermined += 1
+    m.update(deadlock=dead, churn=churn, blocked=blocked, gate=gate,
+             gate_undetermined=gate_undetermined)
     # shape failures: specs whose latest shape event is a failure with no later spec-written; and their hours lost
     # a spec counts as shape-failed only if its latest shape failure is newer than its latest spec-written
     # AND it has not moved on: fold state still written/registered (or, when reconstructing the past, no
