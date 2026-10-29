@@ -226,6 +226,7 @@ EMITS["message-answered"] = {"look", "planner", "executor", "thinker"}
 # creates it names, per §2.5's own rule.
 EMITS["autodispatched"] = {"tick"}          # R1: the tick's own dispatch record
 EMITS["autodispatch-failed"] = {"tick"}     # R1: the tick's own dispatch-skip record
+EMITS["autodispatch-skipped"] = {"tick"}
 EMITS["dependency-hold"] = {"thinker", "operator", "planner"}
 EMITS["supervisor-code"] = {"up"}           # R2: `up.maybe_reexec`'s own version claim
 EMITS["install-synced"] = {"tick"}          # R5: the tick's own once-per-sha install pass
@@ -324,6 +325,7 @@ EMITS["merge-frozen"] = {"executor", "tick", "operator"}
 EMITS["pane-dialog-resolved"] = {"pane-watchdog"}
 
 REQUIRED_ROWS = {
+    "autodispatch-skipped": ("subject", "reason"),
     "pane-dialog-resolved": ("pane", "role", "seen_at", "resolved_at", "choice"),
     "test-quarantined": ("project", "node", "rule", "windows", "since", "until", "fix"),
     "test-unquarantined": ("project", "node", "reason"),

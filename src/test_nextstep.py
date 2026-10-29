@@ -726,10 +726,24 @@ class RulingExecutionTests(RulingMixin, unittest.TestCase):
                 if kind == 'spec-killed' and (change.get('ref') == 'elsewhere:1' or 'ts' in change):
                     continue
                 sample = evs + [dict(execution, **change)]
+                if action == 'hold' and kind == 'dependency-hold' and sample[-1]['subject'] == SID:
+                    # Dependency explanation takes precedence even when this
+                    # event does not execute the older ruling's own obligation.
+                    step = self.one(sample)
+                    self.assertEqual(step.state, 'hold')
+                    self.assertIn('L-spec-1642', step.reason)
+                    context = dict(sid=SID, evs=ns._snapshot(sample, {})[1][SID],
+                                   spec=dict(state='written'), now=NOW)
+                    self.assertEqual(ns._ruling_step(context, {}, {}) is not None, not clears)
+                    continue
                 self.assertEqual(bool(self.due(sample)), not clears, (action, change))
                 results.append(dict(action=action, change=change, cleared=clears))
             if action == 'hold':
-                self.assertTrue(self.due(evs + [dict(execution, waits_for='other')]))
+                sample = evs + [dict(execution, waits_for='other')]
+                self.assertIn('waits for other', self.one(sample).reason)
+                context = dict(sid=SID, evs=ns._snapshot(sample, {})[1][SID],
+                               spec=dict(state='written'), now=NOW)
+                self.assertIsNotNone(ns._ruling_step(context, {}, {}))
             if action == 'rework':
                 for role in ('grader', 'reviewer'):
                     self.assertTrue(self.due(evs + [dict(execution, role=role)]))
@@ -799,7 +813,12 @@ class RulingExecutionTests(RulingMixin, unittest.TestCase):
         for line, cleared in [(1, False), (3, True)]:
             done = event('dependency-hold', waits_for='L-spec-1642', _src=f'L-operator-fixture.jsonl:{line}')
             sample = [base[0], done, ruling]
-            self.assertEqual(bool(self.due(sample)), not cleared)
+            step = self.one(sample)
+            self.assertEqual(step.state, 'hold')
+            self.assertIn('L-spec-1642', step.reason)
+            context = dict(sid=SID, evs=ns._snapshot(sample, {})[1][SID],
+                           spec=dict(state='written'), now=NOW)
+            self.assertEqual(ns._ruling_step(context, {}, {}) is not None, not cleared)
             self.assertEqual(self.steps(sample), self.steps(list(reversed(sample))))
         self.signed('AC2-order', dict(newest_clock=True, provenance=True, canonical_order=True))
 

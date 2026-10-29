@@ -549,6 +549,9 @@ def _ruling_step(c, spawn_events, owners):
     if ruling is None:
         return None
     action, source = ruling['action'], _source(ruling)
+    if action in ('hold', 'recut') and (autodispatch._hold_released(ruling, evs)
+            or any(e['type'] == 'build-started' and _time(e['ts']) >= _time(ruling['ts']) for e in evs)):
+        return None
     if not source or action == 'hold' and (not isinstance(ruling.get('waits_for'), str)
                                          or not ruling['waits_for'].strip()):
         return _hold(sid, 'spec', _stage(evs), ruling,
@@ -791,8 +794,19 @@ def next_steps(events, specs, now, rules, waves=None):
         c['dependency'] = autodispatch.held_by_dependency(evs, events, shipped=shipped)
         c['wave'] = _wave(sid, evs, by, specs, waves)
         ruling_step = _ruling_step(c, spawn_events, owners)
+        ruling = autodispatch._standing_ruling(evs)
+        if ruling is not None and c['dependency']:
+            hold = _latest(evs, {'dependency-hold'})
+            steps.append(_hold(sid, 'spec', stage, hold, c['dependency'],
+                               str(hold.get('waits_for')) + ' shipped', 'tick'))
+            continue
         if ruling_step is not None:
             steps.append(ruling_step)
+            continue
+        if ruling is not None:
+            steps.append(_hold(sid, 'spec', stage, ruling,
+                               autodispatch._automatic_hold(evs, events, shipped=shipped),
+                               'thinker/operator unblocked or decision referring to ruling', 'tick'))
             continue
         if state == 'written' and dispatch.unaudited(evs) is not None:
             questions = _unanswered(evs, events)
