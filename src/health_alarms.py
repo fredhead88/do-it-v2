@@ -18,7 +18,7 @@ import scratch
 
 LOCK_STALE_S = 4200
 ALARMS = ("mirror-stale", "release-failed", "deploy-lock-stale",
-          "sweeper-unobservable", "disk-low", "disk-used", "preflight-refusals", "ledger-segment-invalid")
+          "sweeper-unobservable", "disk-low", "disk-used", "preflight-refusals", "ledger-segment-invalid", "flow-health")
 LEDGER_NAME = "L-health-local.jsonl"
 RELEASE_LOG = pathlib.Path("/var/log/albert-scott/daily-release.log")
 _PROC = object()
@@ -156,15 +156,16 @@ def evaluate(events, now, *, probes):
 
 
 def summary_lines(events, now):
-    """Newest firing per alarm in 24h, then the newest complete base-red per project."""
+    """Newest firing per alarm (flow-health per measure/day) in 24h, then the newest complete base-red per project."""
     now = _time(now)
     alarms, bases = {}, {}
     for e in sorted(_events(events, now), key=lambda e: _time(e["ts"])):
         if e["type"] == "health-alarm" and e.get("alarm") in ALARMS and (now - _time(e["ts"])).total_seconds() <= 86400:
-            alarms[e["alarm"]] = e
+            key = (e["alarm"], e.get("measure", ""), e.get("day", "")) if e["alarm"] == "flow-health" else (e["alarm"], "", "")
+            alarms[key] = e
         if e["type"] == "base-red" and e.get("complete") is True and isinstance(e.get("project"), str):
             bases[e["project"]] = e
-    lines = [f"HEALTH {name} {_text(e.get('severity'))}: {_text(e.get('line'))}" for name, e in sorted(alarms.items())]
+    lines = [f"HEALTH {name} {_text(e.get('severity'))}: {_text(e.get('line'))}" for (name, _, _), e in sorted(alarms.items())]
     for project, e in sorted(bases.items()):
         ids = e.get("ids", [])
         if isinstance(ids, dict):

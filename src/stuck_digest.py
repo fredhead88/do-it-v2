@@ -7,7 +7,7 @@ import os
 import re
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import dispatch
 import digest_actions
@@ -116,6 +116,21 @@ def _line(value):
     return ' '.join(str(value).split())
 
 
+def window_line(events: list[dict], now: datetime) -> str:
+    import scorecard
+    prefix = 'windows (past 24 h): '
+    try:
+        stats = scorecard.window_stats(events, now - timedelta(hours=24), now)
+        if stats['attempts'] == 0:
+            return prefix + '0 attempts, n/a verified, median review-to-window wait n/a'
+        pct, wait = stats['verified_pct'], stats['median_wait_min']
+        pct = f'{pct:g}%' if pct is not None else 'n/a'
+        wait = f'{wait:g} min' if wait is not None else 'n/a'
+        return prefix + f"{stats['attempts']} attempts, {pct} verified, median review-to-window wait {wait}"
+    except Exception as exc:
+        return prefix + f'undetermined ({type(exc).__name__}: {_line(exc)})'
+
+
 def render_md(obj, events, now):
     owed = owed_digest.render_md(owed_digest.build(events, now))
     counts = owed.split('## Counts by status and cause\n', 1)[1].split('## NEEDS YOU', 1)[0].strip()
@@ -131,7 +146,7 @@ def render_md(obj, events, now):
     lines.extend(['', '## NEXT ACTIONS', ''])
     lines.append(next_steps(obj))
     lines.append(f"Waiting to merge, on a dependency, or on work in progress: {len(obj.get('waiting_rows', []))} rows.")
-    lines.extend(['', '## OWED', counts, '', '## HEALTH ALARMS'])
+    lines.extend(['', '## MERGE WINDOWS', window_line(events, now), '', '## OWED', counts, '', '## HEALTH ALARMS'])
     try:
         import health_alarms
     except ImportError:

@@ -220,6 +220,22 @@ class HealthTests(unittest.TestCase):
         print("AC12 ok")
 
 
+    def test_flow_health_grouping(self):
+        rows = [dict(type='health-alarm', alarm='flow-health', severity='summary',
+                     measure=measure, day='2026-10-26', line=measure,
+                     ts=(NOW - timedelta(minutes=5-i)).isoformat())
+                for i, measure in enumerate(('M1', 'M2', 'M3', 'M5'))]
+        rows += [dict(rows[0], line='newest M1', ts=NOW.isoformat()),
+                 dict(rows[0], day='2026-10-25', line='other day'),
+                 dict(rows[0], day='2026-10-24', line='expired', ts=(NOW - timedelta(hours=25)).isoformat())]
+        lines = health.summary_lines(rows, NOW)
+        self.assertEqual(len(lines), 5)
+        self.assertIn('HEALTH flow-health summary: newest M1', lines)
+        self.assertNotIn('HEALTH flow-health summary: M1', lines)
+        self.assertIn('HEALTH flow-health summary: other day', lines)
+        self.assertFalse(any('expired' in line for line in lines))
+
+
 class RunTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="health-run-")

@@ -90,7 +90,7 @@ def _now_iso():
 
 
 def _append_row(path, row):
-    """Append one JSON line, trimmed to the newest `MAX_ROWS`. Any failure
+    """Append one JSON line, trimmed to 1200 rows for pane-watchdog.jsonl, else `MAX_ROWS`. Any failure
     (unwritable parent, full disk, a concurrent writer) is swallowed entirely
     — this must never be the reason a cron job's own exit code changes."""
     try:
@@ -101,7 +101,8 @@ def _append_row(path, row):
             pass
         lines = path.read_text().splitlines() if path.exists() else []
         lines.append(json.dumps(row, default=str))
-        lines = lines[-MAX_ROWS:]
+        limit = 1200 if path.name == "pane-watchdog.jsonl" else MAX_ROWS
+        lines = lines[-limit:]
         tmp = path.with_name(path.name + f".tmp{os.getpid()}")
         tmp.write_text("\n".join(lines) + "\n")
         os.replace(tmp, path)

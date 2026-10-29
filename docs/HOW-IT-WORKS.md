@@ -101,6 +101,8 @@ Source: `crons.toml`. Name | schedule | where | path, then command.
   /usr/bin/python3 {repo}/src/spec_preflight.py tick >> {root}/logs/spec-preflight.log 2>&1
   ledger-rollup | 20 4 * * * | user | {doit}  {doit} cron-run ledger-rollup -- nice -n 19 {doit}
   ledger-rollup >> {root}/logs/ledger-rollup.log 2>&1
+  flow-health-daily | 30 0 * * * | user | /usr/bin/python3  {doit} cron-run flow-health-daily --
+  /usr/bin/python3 {repo}/src/flow_health.py >> {root}/logs/flow-health.log 2>&1
 
 ## Tick event types
 

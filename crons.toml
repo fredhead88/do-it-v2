@@ -301,3 +301,14 @@ path = "{doit}"
 sig = '\bdoit ledger-rollup\b'
 owner = "thinker"
 project = "do-it-v2"
+
+[[row]]
+name = "flow-health-daily"
+where = "user"
+schedule = "30 0 * * *"
+command = "{doit} cron-run flow-health-daily -- /usr/bin/python3 {repo}/src/flow_health.py >> {root}/logs/flow-health.log 2>&1"
+path = "/usr/bin/python3"
+sig = 'flow_health\.py\b'
+owner = "thinker"
+project = "do-it-v2"
+max_runtime_s = 600
