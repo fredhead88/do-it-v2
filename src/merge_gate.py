@@ -35,7 +35,7 @@ REPO AND A MISSING OR UNPARSEABLE `writes:` GRANT ALL READ AS REWORK.
 
 Runs at the Executor's merge step (§3.9, D17), BEFORE `--no-ff`.
 """
-import ast, collections, json, os, pathlib, re, signal, subprocess, sys, time
+import ast, collections, fcntl, json, math, os, pathlib, re, shutil, signal, subprocess, sys, tempfile, time
 
 import fold
 import freeze
@@ -47,7 +47,7 @@ import scratch
 # whatever the grant says: the excision case removes the evidence with the artifact.
 DEFAULT_MIGRATIONS = r"(^|/)(migrations|migrate|versions)/"
 DEFAULTS = {"DOIT_MIGRATIONS": DEFAULT_MIGRATIONS, "DOIT_GIT_TIMEOUT": "20",
-            "DOIT_GATE_DEADLINE": "60", "DOIT_REVERT_DEPTH": "50",
+            "DOIT_GATE_DEADLINE": "auto", "DOIT_REVERT_DEPTH": "50",
             "DOIT_REVERT_MAX_PATHS": "200"}
 PINNED = ("-c", "diff.relative=false", "-c", "diff.ignoreSubmodules=none",
           "-c", "core.quotepath=false", "-c", "diff.renames=true",
@@ -76,6 +76,7 @@ MIGRATIONS = re.compile(DEFAULT_MIGRATIONS, re.I)
 PATH_TOKEN_RE = re.compile(r"[A-Za-z0-9_.@+*?\[\]()/-]+")
 GIT_TIMEOUT, DEADLINE, REVERT_DEPTH, REVERT_MAX_PATHS = 20.0, 60.0, 50, 200
 _TOP, _START, _KNOBS = None, time.monotonic(), {}
+_RUN_ACTIVE, _DEADLINE_OVERRIDE = False, False
 LAST_APPEND_ONLY, LAST_LIST_ERROR = [], None
 APPEND_LIST = "scripts/ci/append_only_files.txt"
 
@@ -84,10 +85,7 @@ APPEND_LIST = "scripts/ci/append_only_files.txt"
 # ONLY by the script's own documented shape (its `print(f"  {filename}:
 # {item['line_number']} -- {item['type']}")`) — exit 1 with zero matching
 # lines is undetermined, never findings with an empty list (D108/AC4d). The
-# timeout is its own module-level constant, distinct from GIT_TIMEOUT and
-# DEADLINE — no charter/plan text names a number; 45s sits inside the 60s
-# DEADLINE with headroom for the worktree-add overhead run() already accounts
-# for (Assumptions).
+# effective pass timeout is temporarily published for diagnostics/importers.
 DETECT_SECRETS_SCRIPT = "scripts/ci/detect-secrets-changed.sh"
 DETECT_SECRETS_TIMEOUT = 45.0
 FINDING_LINE_RE = re.compile(r"^  \S+:\d+ -- .+$")
@@ -99,13 +97,14 @@ def load_config():
     indistinguishable from an honest one, so every non-default is recorded on the
     event. A malformed one is could-not-determine, not a crash before any event
     is written."""
-    global MIGRATIONS, GIT_TIMEOUT, DEADLINE, REVERT_DEPTH, REVERT_MAX_PATHS, _KNOBS
+    global MIGRATIONS, GIT_TIMEOUT, DEADLINE, REVERT_DEPTH, REVERT_MAX_PATHS, _KNOBS, _DEADLINE_OVERRIDE
     _KNOBS = {k: os.environ[k] for k, d in DEFAULTS.items()
-              if k in os.environ and os.environ[k] != d}
+              if k in os.environ and (os.environ[k] != d or k == "DOIT_GATE_DEADLINE")}
     try:
         MIGRATIONS = re.compile(os.environ.get("DOIT_MIGRATIONS", DEFAULT_MIGRATIONS), re.I)
         GIT_TIMEOUT = float(os.environ.get("DOIT_GIT_TIMEOUT", "20"))
-        DEADLINE = float(os.environ.get("DOIT_GATE_DEADLINE", "60"))
+        _DEADLINE_OVERRIDE = "DOIT_GATE_DEADLINE" in os.environ
+        DEADLINE = float(os.environ["DOIT_GATE_DEADLINE"]) if _DEADLINE_OVERRIDE else 60.0
         REVERT_DEPTH = int(os.environ.get("DOIT_REVERT_DEPTH", "50"))
         REVERT_MAX_PATHS = int(os.environ.get("DOIT_REVERT_MAX_PATHS", "200"))
     except (re.error, ValueError) as e:
@@ -115,7 +114,7 @@ def load_config():
                            "that removes the always-name carve-out")
     for name, v in (("DOIT_GIT_TIMEOUT", GIT_TIMEOUT), ("DOIT_GATE_DEADLINE", DEADLINE),
                     ("DOIT_REVERT_DEPTH", REVERT_DEPTH), ("DOIT_REVERT_MAX_PATHS", REVERT_MAX_PATHS)):
-        if v < 1:
+        if not math.isfinite(v) or v < 1:
             raise Undetermined(f"{name}={v} disables a check rather than tuning it")
 
 
@@ -127,12 +126,13 @@ class Undetermined(Exception):
 
 
 def run(args, stdin=None):
-    if time.monotonic() - _START > DEADLINE:
+    remaining = min(DEADLINE, 60.0) - (time.monotonic() - _START)
+    if remaining <= 0:
         raise Undetermined(f"deadline of {DEADLINE:.0f}s exceeded — a partial scan is not a clean one")
     base = ("git",) + (("-C", _TOP) if _TOP else ()) + PINNED
     try:
         return subprocess.run(base + tuple(args), capture_output=True,
-                              timeout=GIT_TIMEOUT, env=ENV, input=stdin)
+                              timeout=min(GIT_TIMEOUT, remaining), env=ENV, input=stdin)
     except (OSError, subprocess.SubprocessError) as e:
         raise Undetermined(f"git {' '.join(args)}: {e}")
 
@@ -452,11 +452,13 @@ def begin_run(repo=None):
     whole of D113-D115's hardening — the GIT_* strip, the pinned config, the
     shallow/replace-ref/submodule hard stops — and a second hand-rolled prologue
     is exactly how one of them comes to be missing from the other."""
-    global _START, LAST_APPEND_ONLY, LAST_LIST_ERROR
+    global _START, _RUN_ACTIVE, LAST_APPEND_ONLY, LAST_LIST_ERROR
+    _RUN_ACTIVE = False
     LAST_APPEND_ONLY, LAST_LIST_ERROR = [], None
     _START = time.monotonic()          # the budget is per RUN, not per process
     load_config()
     preflight(repo)
+    _RUN_ACTIVE = True
 
 
 def gate(branch, main, grant):
@@ -499,28 +501,26 @@ def gate(branch, main, grant):
 
 
 def _remove_worktree(path):
-    """Unconditional cleanup on every secret_scan exit path (D108/AC6):
-    `git worktree remove --force`, falling back to `git worktree prune` on
-    that command's own failure — a plain remove refuses a worktree left dirty
-    by a killed subprocess. Reuses PINNED/ENV/GIT_TIMEOUT exactly as run()
-    composes them, but is deliberately EXEMPT from run()'s own DEADLINE check:
-    secret_scan never calls begin_run() (never resets _START), and run()
-    raises Undetermined BEFORE spawning git once the deadline is exceeded — a
-    cleanup gated on that check could raise without ever removing anything."""
+    """Bounded cleanup of this run's unique path, even after deadline expiry.
+
+    A failed add may leave an unregistered directory. Never prune another
+    run's registrations to remove it; check only this owned path instead.
+    """
     base = ("git",) + (("-C", _TOP) if _TOP else ()) + PINNED
-    removed = False
     try:
         p = subprocess.run(base + ("worktree", "remove", "--force", str(path)),
                            capture_output=True, timeout=GIT_TIMEOUT, env=ENV)
-        removed = p.returncode == 0
+        if p.returncode == 0:
+            return True
+        if path.exists():
+            shutil.rmtree(path)
+        subprocess.run(base + ("worktree", "remove", "--force", str(path)),
+                       capture_output=True, timeout=GIT_TIMEOUT, env=ENV)
+        p = subprocess.run(base + ("worktree", "list", "--porcelain", "-z"),
+                           capture_output=True, timeout=GIT_TIMEOUT, env=ENV)
+        return p.returncode == 0 and (b"worktree " + os.fsencode(path)) not in p.stdout.split(b"\0")
     except (OSError, subprocess.SubprocessError):
-        removed = False
-    if not removed:
-        try:
-            subprocess.run(base + ("worktree", "prune"),
-                          capture_output=True, timeout=GIT_TIMEOUT, env=ENV)
-        except (OSError, subprocess.SubprocessError):
-            pass
+        return False
 
 
 # The gate caller supplies its subject without changing secret_scan's seam.
@@ -528,10 +528,11 @@ from contextvars import ContextVar
 _SCAN_SUBJECT = ContextVar("secret_scan_subject", default=None)
 
 
-def _scan_diagnostic(repo, attempt, text, *, clock=None, timeout=False):
+def _scan_diagnostic(repo, attempt, text, *, clock=None, timeout=False, reason=None):
+    reason = reason or ("timeout" if timeout else "tool")
     import grading_env
     if not timeout and grading_env.failure_kind(text) != "infra":
-        return "undetermined", [text]
+        return "undetermined", [reason, text]
     import fold
     fields = grading_env.infra_fields(attempt, "merge-gate", text, clock=clock)
     fields["project"] = pathlib.Path(repo).name
@@ -545,83 +546,149 @@ def _scan_diagnostic(repo, attempt, text, *, clock=None, timeout=False):
             os.environ.pop("DOIT_LEDGER_FILE", None)
         else:
             os.environ["DOIT_LEDGER_FILE"] = original
-    return "undetermined", ["infra:" + fields["class"]]
+    return "undetermined", [reason, "infra:" + fields["class"]]
+
+
+def scan_deadline(changed_files: int) -> float:
+    """Bound scanner work by the unique, unfiltered changed-path count."""
+    if type(changed_files) is not int or changed_files < 0:
+        raise ValueError("changed_files must be a nonnegative integer")
+    return min(600.0, max(60.0, 30.0 + 3.0 * min(changed_files, 190)))
 
 
 def secret_scan(repo, main_sha, branch_sha):
-    """R4 — run only when gate()'s own verdict would otherwise be clean.
-    Returns (verdict, finding_lines): verdict is one of clean / findings /
-    not-applicable / undetermined. NEVER RAISES — every internal failure is
-    caught here and folded into ("undetermined", [diagnostic, ...]), because
-    an undetermined rework with no stated reason is the silent-clean failure
-    mode this function exists to prevent (D108).
+    """One acquired SD4a attempt: trusted main bytes, at most two passes.
 
-    Applicability and the executed bytes both come from `main_sha` alone,
-    never from the branch worktree's own copy — a branch is builder-
-    controlled and could otherwise rewrite the script to disarm it (AC10)."""
+    Rendezvous inodes persist in the canonical Git common directory. Only the
+    descriptor owns the lock; all temporary resources belong to a unique run.
+    """
+    global _TOP, _START, _RUN_ACTIVE, DEADLINE, DETECT_SECRETS_TIMEOUT
+    implicit = not _RUN_ACTIVE
+    prior = (_TOP, _START, DEADLINE, DETECT_SECRETS_TIMEOUT)
+    lock, owned, wt_path = None, None, None
+    result = ("undetermined", ["tool"])
+    phase = "tool"
+
+    def remaining(*, setup=False):
+        limit = min(DEADLINE, 60.0) if setup else DEADLINE
+        return limit - (time.monotonic() - _START)
+
+    def diagnostic(reason, text, *, timeout=False):
+        return _scan_diagnostic(repo, branch_sha, text, reason=reason, timeout=timeout)
+
     try:
+        if implicit:
+            _START = time.monotonic()
+            load_config()
+        # Repository identity and every Git operation have the same authority,
+        # even for an imported caller whose previous _TOP named another repo.
+        _TOP = str(pathlib.Path(repo).resolve())
+        if remaining(setup=True) <= 0:
+            return "undetermined", ["deadline"]
+        common = pathlib.Path(os.fsdecode(git("rev-parse", "--path-format=absolute", "--git-common-dir")).strip()).resolve()
+        main_sha, branch_sha = resolve(main_sha), resolve(branch_sha)
+        if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", branch_sha):
+            raise ValueError("Git did not return a full commit SHA")
+        lock_dir = common / "doit-secret-scan-locks"
+        lock_dir.mkdir(exist_ok=True)
+        lock = (lock_dir / (branch_sha + ".lock")).open("a+b")
         try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return "undetermined", ["lock-busy"]
+
+        def acquired():
+            nonlocal owned, wt_path, phase
+            global DEADLINE, DETECT_SECRETS_TIMEOUT
+            paths = git("diff", "--diff-filter=ACMRT", "--name-only", "-z", f"{main_sha}...{branch_sha}")
+            if not isinstance(paths, bytes) or (paths and not paths.endswith(b"\0")):
+                raise ValueError("incomplete changed-path enumeration")
+            budget = scan_deadline(len(set(paths.split(b"\0")) - {b""}))
+            if not _DEADLINE_OVERRIDE:
+                DEADLINE = 60.0 + budget  # Preserve the original run origin.
+            if remaining(setup=True) <= 0:
+                return "undetermined", ["deadline"]
             out = git("ls-tree", "-r", "--name-only", main_sha, "--", DETECT_SECRETS_SCRIPT)
-        except Undetermined as e:
-            return "undetermined", [str(e)]
-        if not out.decode("utf-8", "surrogateescape").strip():
-            return "not-applicable", []
-
-        try:
+            if not out.strip():
+                return "clean", []
             script_bytes = git("show", f"{main_sha}:{DETECT_SECRETS_SCRIPT}")
-        except Undetermined as e:
-            return "undetermined", [str(e)]
-
-        gate_dir = scratch.sub("gate")
-        script_path = gate_dir / f"detect-secrets-changed-{branch_sha}.sh"
-        script_path.write_bytes(script_bytes)
-        script_path.chmod(0o755)
-
-        wt_path = gate_dir / f"wt-{branch_sha}"
-        try:
-            try:
-                git("worktree", "add", "--detach", str(wt_path), branch_sha)
-            except Undetermined as e:
-                return _scan_diagnostic(repo, branch_sha, str(e))
+            owned = pathlib.Path(tempfile.mkdtemp(prefix="scan-", dir=scratch.sub("gate")))
+            script_path = owned / "detect-secrets-changed.sh"
+            script_path.write_bytes(script_bytes)
+            script_path.chmod(0o700)
+            wt_path = owned / "worktree"
+            phase = "worktree"
+            git("worktree", "add", "--detach", str(wt_path), branch_sha)
+            phase = "tool"
             import resources
             resources.record("worktree", str(wt_path), lane="executor", subject=_SCAN_SUBJECT.get() or branch_sha)
-            sub_env = dict(ENV)                 # never os.environ (D114/AC8)
-            venv_bin = pathlib.Path(repo) / ".venv" / "bin" / "detect-secrets"
+            sub_env = dict(ENV)
+            venv_bin = pathlib.Path(_TOP) / ".venv" / "bin" / "detect-secrets"
             if venv_bin.exists():
                 sub_env["DETECT_SECRETS_BIN"] = str(venv_bin)
-            try:
+            if remaining(setup=True) <= 0:
+                return "undetermined", ["deadline"]
+            scan_start = time.monotonic()
+            for attempt in range(2):
+                elapsed = time.monotonic() - scan_start
+                allowance = budget / 2 if attempt == 0 else budget - elapsed
+                DETECT_SECRETS_TIMEOUT = min(allowance, remaining())
+                if DETECT_SECRETS_TIMEOUT <= 0:
+                    return diagnostic("deadline" if remaining() <= 0 else "timeout",
+                                      "secret scanner budget exhausted", timeout=True)
                 proc = subprocess.Popen(
                     ["bash", str(script_path), "scan", main_sha, branch_sha],
                     cwd=str(wt_path), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                    env=sub_env, start_new_session=True)      # own process group (AC4b)
-            except OSError as e:
-                return "undetermined", [f"detect-secrets-changed.sh: {e}"]
-            try:
-                out_b, err_b = proc.communicate(timeout=DETECT_SECRETS_TIMEOUT)
-            except subprocess.TimeoutExpired:
-                # a timeout kills the WHOLE process group, not just `bash`,
-                # so a wedged detect-secrets child cannot outlive the verdict.
+                    env=sub_env, start_new_session=True)
                 try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except (ProcessLookupError, PermissionError):
-                    pass
-                proc.communicate()
-                return "undetermined", [f"detect-secrets-changed.sh timed out after "
-                                        f"{DETECT_SECRETS_TIMEOUT:.0f}s"]
-            if proc.returncode == 0:
-                return "clean", []
-            stdout_text = out_b.decode("utf-8", "surrogateescape")
-            lines = [l for l in stdout_text.splitlines() if FINDING_LINE_RE.match(l)]
-            if proc.returncode == 1 and lines:
-                return "findings", lines
-            diag = (err_b.decode("utf-8", "surrogateescape").strip()
-                    or stdout_text.strip()
-                    or f"detect-secrets-changed.sh exited {proc.returncode} with no output")
-            return "undetermined", [diag.splitlines()[-1] if diag.splitlines() else diag]
+                    out_b, err_b = proc.communicate(timeout=DETECT_SECRETS_TIMEOUT)
+                except subprocess.TimeoutExpired:
+                    try:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    proc.communicate()  # Reap the whole group before retry/cleanup.
+                    if remaining() <= 0:
+                        return diagnostic("deadline", "secret scanner deadline expired", timeout=True)
+                    if attempt == 0 and time.monotonic() - scan_start < budget:
+                        continue
+                    return diagnostic("timeout", "secret scanner timed out twice", timeout=True)
+                if remaining() <= 0:
+                    return diagnostic("deadline", "secret scanner deadline expired", timeout=True)
+                if time.monotonic() - scan_start > budget:
+                    return diagnostic("timeout", "secret scanner budget exhausted", timeout=True)
+                if proc.returncode == 0:
+                    return "clean", []
+                lines = [line for line in out_b.decode("utf-8", "surrogateescape").splitlines()
+                         if FINDING_LINE_RE.fullmatch(line)]
+                if proc.returncode == 1 and lines:
+                    return "rework", lines
+                return diagnostic("tool", err_b.decode("utf-8", "replace").strip()
+                                  or "secret scanner failed without recognized findings")
+
+        result = acquired()
+    except Exception as e:  # The imported seam never raises, including config/setup errors.
+        reason = "deadline" if remaining(setup=True) <= 0 else phase
+        try:
+            result = diagnostic(reason, f"secret_scan: {type(e).__name__}: {e}")
+        except Exception:
+            result = ("undetermined", [reason])
+    finally:
+        try:
+            if wt_path is not None and _remove_worktree(wt_path) is False:
+                result = ("undetermined", ["worktree", "owned worktree cleanup failed"])
+            if owned is not None:
+                shutil.rmtree(owned)
+        except Exception:
+            result = ("undetermined", ["worktree", "owned run cleanup failed"])
         finally:
-            _remove_worktree(wt_path)
-    except Exception as e:      # never raise Undetermined — or anything else (D108)
-        return _scan_diagnostic(repo, branch_sha, f"secret_scan: {type(e).__name__}: {e}")
+            if lock is not None:
+                lock.close()  # Never unlink/replace a rendezvous inode.
+            _RUN_ACTIVE = False
+            DEADLINE, DETECT_SECRETS_TIMEOUT = prior[2:]
+            if implicit:
+                _TOP, _START = prior[:2]
+    return result
 
 
 def out_of_grant(branch, main, spec_id):
@@ -886,6 +953,7 @@ def _print_append_only():
 
 
 def main_(argv):
+    global _RUN_ACTIVE
     branch = argv[0]
     if branch.startswith("-"):      # `doit gate --help` once appended a rework event with subject "--help"
         sys.exit(f"merge-gate: {branch!r} is not a branch\n{__doc__}")
@@ -917,26 +985,19 @@ def main_(argv):
         status = "rework" if (removed or reverts) else "clean"
         # R4/gate-secret-scan: only on a run that would OTHERWISE record clean
         # — never when gate() itself already found a grant violation (AC9).
-        # A findings/undetermined verdict flips a clean run to rework; a
-        # clean/not-applicable verdict leaves it exactly as today.
+        # SD4a tooling outcomes hold; only recognized findings request rework.
         scan_verdict, scan_findings = None, None
         if status == "clean":
             token = _SCAN_SUBJECT.set(subject)
             try:
-                for attempt in range(2):
-                    scan_verdict, scan_findings = secret_scan(_TOP, main_sha, branch_sha)
-                    timeout_finding = [f"detect-secrets-changed.sh timed out after {DETECT_SECRETS_TIMEOUT:.0f}s"]
-                    if (scan_verdict, scan_findings) != ("undetermined", timeout_finding):
-                        break
-                    if attempt == 1:
-                        scan_verdict, scan_findings = _scan_diagnostic(
-                            _TOP, branch_sha, timeout_finding[0], timeout=True)
+                scan_verdict, scan_findings = secret_scan(_TOP, main_sha, branch_sha)
             finally:
                 _SCAN_SUBJECT.reset(token)
-            if scan_verdict == "undetermined" and scan_findings and scan_findings[0].startswith("infra:"):
+            if scan_verdict == "undetermined" and scan_findings and scan_findings[0] in {
+                    "lock-busy", "deadline", "timeout", "worktree", "tool"}:
                 print("merge-gate: hold — " + scan_findings[0])
                 return 2
-            if scan_verdict in ("findings", "undetermined"):
+            if scan_verdict != "clean":
                 status = "rework"
         # The shas are the verdict's subject. Without them nothing ties a `clean`
         # to the --no-ff that follows it, and no audit can say what was gated.
@@ -953,7 +1014,7 @@ def main_(argv):
                     + ([f"removed={json.dumps(removed)}"] if removed else [])
                     + ([f"reverted={json.dumps(reverts)}"] if reverts else [])
                     + ([f"reason=secret-scan", f"findings={json.dumps(scan_findings)}"]
-                       if scan_verdict in ("findings", "undetermined") else []))
+                       if scan_verdict in ("rework", "undetermined") else []))
         print(f"merge-gate: {status}  ({main} {main_sha[:7]} + {branch} {branch_sha[:7]})"
               + (f"\n  removed:  {', '.join(removed)}" if removed else "")
               + (f"\n  reverted: {', '.join(reverts)}" if reverts else "")
@@ -984,6 +1045,8 @@ def main_(argv):
         if gate_started:
             _print_append_only()
         return 1
+    finally:
+        _RUN_ACTIVE = False
 
 
 if __name__ == "__main__":

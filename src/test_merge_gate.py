@@ -12,7 +12,600 @@ import harness  # noqa: E402 -- L-spec-0430: a real, disposable DOIT_SCRATCH for
 os.environ["DOIT_SCRATCH"] = str(harness.test_root("gate-scratch"))
 import merge_gate as mg
 
-GRANT, ok = ["src/*", "docs/"], []
+# The direct-import contract also has a process-isolated selector. Reject typos
+# before running any fixture; an empty selection must never report success.
+if len(sys.argv) > 1 and sys.argv[1:] != ["--spec-1868-ac1"]:
+    sys.exit("usage: test_merge_gate.py [--spec-1868-ac1]")
+
+
+def _spec_response(ac, body, success=True):
+    import hashlib
+    raw = json.dumps(body, sort_keys=True).encode()
+    print(json.dumps(dict(url="cli://L-spec-1868/" + ac, status=0 if success else 1,
+                         body_sha256=hashlib.sha256(raw).hexdigest(), body_excerpt=body)))
+
+
+def spec1868_ac1():
+    """Real Git, scanner processes and kernel locks; no lock mocks."""
+    import fcntl
+    import shlex
+    import signal
+    import time
+    import unittest
+    from unittest.mock import patch
+    observations = []
+
+    class Ownership(unittest.TestCase):
+        def setUp(self):
+            self.temp = tempfile.TemporaryDirectory(prefix="scan-ownership-")
+            self.addCleanup(self.temp.cleanup)
+            self.root = pathlib.Path(self.temp.name)
+            self.repo = self.root / "repo"
+            self.repo.mkdir()
+            self.processes = []
+            self.addCleanup(self.stop)
+            self.git("init", "-q", "-b", "main")
+            self.git("config", "user.name", "fixture")
+            self.git("config", "user.email", "fixture@localhost")
+            self.release = self.root / "release"
+            code = ("import os,pathlib,sys,time,json; "
+                    f"root=pathlib.Path({str(self.root)!r}); "
+                    "script=pathlib.Path(sys.argv[1]); "
+                    "p=root/('scan-'+script.parent.name+'.json'); "
+                    "row=dict(start=time.monotonic(),cwd=os.getcwd(),script=str(script),pid=os.getpid()); "
+                    "q=p.with_suffix('.pending'); q.write_text(json.dumps(row)); q.replace(p); "
+                    "exec(\"while not (root/'release').exists(): time.sleep(.01)\"); "
+                    "row['end']=time.monotonic(); q.write_text(json.dumps(row)); q.replace(p)")
+            ci = self.repo / "scripts" / "ci"
+            ci.mkdir(parents=True)
+            (ci / "detect-secrets-changed.sh").write_text(
+                "#!/bin/bash\nexec " + shlex.quote(sys.executable) + " -c " + shlex.quote(code) + ' "$0"\n')
+            self.git("add", "."); self.git("commit", "-qm", "scanner")
+            self.sha = self.git("rev-parse", "HEAD")
+            self.module = str(pathlib.Path(mg.__file__).parent)
+            self.lock = self.repo / ".git" / "doit-secret-scan-locks" / (self.sha + ".lock")
+
+        def git(self, *args, repo=None):
+            return subprocess.check_output(["git", "-C", str(repo or self.repo), *args],
+                                           stderr=subprocess.DEVNULL).strip().decode()
+
+        def stop(self):
+            self.release.touch()
+            for proc in self.processes:
+                if proc.poll() is None:
+                    try:
+                        proc.communicate(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        proc.kill(); proc.communicate()
+
+        def start(self, repo=None, sha=None, top=None):
+            n = str(len(self.processes))
+            env = dict(os.environ, DOIT_ROOT=str(self.root / (n + "-ledger")),
+                       DOIT_LEDGER_FILE="L-executor-fixture.jsonl",
+                       DOIT_SCRATCH=str(self.root / (n + "-scratch")))
+            env.pop("DOIT_GATE_DEADLINE", None)
+            code = ("import sys,json; sys.path.insert(0,sys.argv[1]); import merge_gate as m; "
+                    "m._TOP=sys.argv[5]; result=m.secret_scan(*sys.argv[2:5]); "
+                    "assert m._TOP==sys.argv[5]; print(json.dumps(result))")
+            proc = subprocess.Popen([sys.executable, "-B", "-c", code, self.module,
+                    str(repo or self.repo), self.sha, sha or self.sha, str(top or "prior-context")],
+                    env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            self.processes.append(proc)
+            return proc
+
+        def rows(self):
+            return [json.loads(p.read_text()) for p in self.root.glob("scan-*.json")]
+
+        def entered(self, count):
+            until = time.monotonic() + 10
+            while len(self.rows()) < count and time.monotonic() < until:
+                time.sleep(.01)
+            self.assertEqual(len(self.rows()), count, "scanner failed to enter")
+
+        def finish(self, proc, expected="clean"):
+            output, error = proc.communicate(timeout=5)
+            self.assertEqual(proc.returncode, 0, error.decode())
+            result = json.loads(output)
+            self.assertEqual(result[0], expected, result)
+            return result
+
+        def assert_serial(self):
+            rows = sorted(self.rows(), key=lambda r: r["start"])
+            self.assertTrue(all(a["end"] <= b["start"] for a, b in zip(rows, rows[1:])))
+            self.assertEqual(len({r["cwd"] for r in rows}), len(rows))
+            self.assertEqual(len({r["script"] for r in rows}), len(rows))
+            for row in rows:
+                self.assertFalse(pathlib.Path(row["cwd"]).exists())
+                self.assertFalse(pathlib.Path(row["script"]).exists())
+            observations.append(dict(case=self._testMethodName, intervals=rows))
+
+        def test_same_key_alias_and_linked_worktree(self):
+            owner = self.start(); self.entered(1)
+            alias = self.root / "alias"; alias.symlink_to(self.repo, target_is_directory=True)
+            linked = self.root / "linked"
+            self.git("worktree", "add", "--detach", str(linked), self.sha)
+            for spelling in (self.repo, alias, linked):
+                loser = self.start(repo=spelling)
+                self.assertEqual(self.finish(loser, "undetermined")[1][0], "lock-busy")
+                self.assertFalse((self.root / (str(len(self.processes)-1) + "-scratch")).exists())
+            self.assertEqual(len(self.rows()), 1)
+            self.assertTrue(pathlib.Path(self.rows()[0]["cwd"]).exists())
+            self.release.touch(); self.finish(owner)
+            self.git("worktree", "remove", str(linked))
+            self.assert_serial()
+
+        def test_distinct_keys_progress(self):
+            owner = self.start(); self.entered(1)
+            (self.repo / "added").write_text("second commit")
+            self.git("add", "."); self.git("commit", "-qm", "second")
+            second = self.start(sha=self.git("rev-parse", "HEAD")); self.entered(2)
+            clone = self.root / "clone"
+            subprocess.run(["git", "clone", "-q", str(self.repo), str(clone)], check=True)
+            third = self.start(repo=clone); self.entered(3)
+            self.release.touch()
+            for proc in (owner, second, third): self.finish(proc)
+            self.assertTrue(all(r["end"] >= max(x["start"] for x in self.rows()) for r in self.rows()))
+            observations.append(dict(case=self._testMethodName, concurrent_owners=3))
+
+        def test_stale_file_completion_and_unique_reacquisition(self):
+            self.lock.parent.mkdir(); self.lock.touch()
+            inode = self.lock.stat().st_ino
+            self.release.touch()
+            for count in (1, 2):
+                self.finish(self.start())
+                self.assertEqual(len(self.rows()), count)
+                self.assertEqual(self.lock.stat().st_ino, inode)
+            self.assert_serial()
+
+        def test_release_race_open_descriptor_and_newcomer(self):
+            owner = self.start(); self.entered(1)
+            inode = self.lock.stat().st_ino
+            code = ("import fcntl,json,sys,time; f=open(sys.argv[1],'a+b'); print('opened',flush=True); "
+                    "sys.stdin.readline(); "
+                    "exec(\"while True:\\n try: fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB); break\\n except BlockingIOError: time.sleep(.001)\"); "
+                    "print(json.dumps(dict(start=time.monotonic())),flush=True); "
+                    "time.sleep(.1); print(json.dumps(dict(end=time.monotonic())),flush=True)")
+            contender = subprocess.Popen([sys.executable, "-B", "-c", code, str(self.lock)],
+                         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            self.assertEqual(contender.stdout.readline().strip(), "opened")
+            # A real same-key scan loses before release; its retry races the
+            # already-open contender and a new scan across owner completion.
+            self.assertEqual(self.finish(self.start(), "undetermined")[1][0], "lock-busy")
+            contender.stdin.write("go\n"); contender.stdin.flush()
+            self.release.touch()
+            newcomer = self.start()
+            self.finish(owner)
+            output, err = newcomer.communicate(timeout=5)
+            self.assertEqual(newcomer.returncode, 0, err.decode())
+            self.assertIn(json.loads(output)[0], ("clean", "undetermined"))
+            rest, err = contender.communicate(timeout=5)
+            self.assertEqual(contender.returncode, 0, err)
+            interval = [json.loads(line) for line in rest.splitlines()]
+            self.assertEqual(len(interval), 2)
+            self.finish(self.start())
+            self.assertEqual(self.lock.stat().st_ino, inode)
+            for row in self.rows():
+                self.assertTrue(row["end"] <= interval[0]["start"] or interval[1]["end"] <= row["start"])
+            self.assert_serial()
+
+        def test_sigkill_releases_lock(self):
+            owner = self.start(); self.entered(1)
+            old = self.rows()[0]
+            inode = self.lock.stat().st_ino
+            owner.kill(); owner.communicate()
+            self.release.touch()  # Let the orphaned scanner finish; no claim of finally after SIGKILL.
+            self.finish(self.start())
+            self.assertEqual(len(self.rows()), 2)
+            self.assertEqual(self.lock.stat().st_ino, inode)
+            new = next(r for r in self.rows() if r["cwd"] != old["cwd"])
+            self.assertNotEqual(new["script"], old["script"])
+            observations.append(dict(case=self._testMethodName, unique_reacquisition=True, stable_inode=True))
+
+        def test_repository_argument_controls_all_operations(self):
+            other = self.root / "other"
+            subprocess.run(["git", "clone", "-q", str(self.repo), str(other)], check=True)
+            self.git("config", "user.name", "fixture", repo=other)
+            self.git("config", "user.email", "fixture@localhost", repo=other)
+            (other / "scripts/ci/detect-secrets-changed.sh").write_text("exit 98\n")
+            (other / "unrelated-path").write_text("other-only")
+            self.git("add", ".", repo=other); self.git("commit", "-qm", "unrelated", repo=other)
+            self.git("checkout", "-qb", "work")
+            (self.repo / "repo-only-path").touch()
+            self.git("add", "."); self.git("commit", "-qm", "repo-only branch")
+            before = self.git("worktree", "list", "--porcelain", repo=other)
+            original_git = mg.git
+            trace = []
+            def recording_git(*args, **kw):
+                out = original_git(*args, **kw)
+                trace.append((args, mg._TOP, out if args[0] == "diff" else None))
+                return out
+            self.release.touch()
+            with patch.object(mg, "_TOP", str(other)), patch.object(mg, "_RUN_ACTIVE", False), \
+                 patch.dict(os.environ, DOIT_SCRATCH=str(self.root / "direct-scratch")), \
+                 patch.object(mg, "git", side_effect=recording_git):
+                self.assertEqual(mg.secret_scan(self.repo, "main", "work"), ("clean", []))
+                self.assertEqual(mg._TOP, str(other))
+            self.assertTrue(all(top == str(self.repo) for _, top, _ in trace))
+            self.assertEqual(next(data for args, _, data in trace if args[0] == "diff"), b"repo-only-path\0")
+            self.assertEqual(self.git("worktree", "list", "--porcelain", repo=other), before)
+            self.assertFalse((other / ".git/doit-secret-scan-locks").exists())
+            self.assertEqual(len(self.git("worktree", "list", "--porcelain").split("worktree "))-1, 1)
+            self.assert_serial()
+
+        def test_real_scanner_timeout_reaps_and_releases(self):
+            pids, paths = [], []
+            real_popen = subprocess.Popen
+            def popen(argv, **kw):
+                proc = real_popen(argv, **kw)
+                if argv[0] == "bash":
+                    pids.append(proc.pid)
+                    paths.extend((pathlib.Path(argv[1]), pathlib.Path(kw["cwd"])))
+                return proc
+            with patch.object(mg, "_RUN_ACTIVE", False), \
+                 patch.dict(os.environ, DOIT_SCRATCH=str(self.root / "direct-scratch")), \
+                 patch.object(mg, "scan_deadline", return_value=2.0), \
+                 patch.object(mg.subprocess, "Popen", side_effect=popen):
+                result = mg.secret_scan(self.repo, self.sha, self.sha)
+            self.assertEqual(result[0], "undetermined")
+            self.assertEqual(result[1][0], "timeout")
+            self.assertEqual(len(pids), 2)
+            self.assertTrue(all(not pathlib.Path("/proc", str(pid)).exists() for pid in pids))
+            self.assertTrue(all(not path.exists() for path in paths))
+            with self.lock.open("a+b") as descriptor:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            observations.append(dict(case=self._testMethodName, killed_reaped=2, cleaned=True))
+
+        def test_spawn_and_partial_add_failure_cleanup(self):
+            real_git = mg.git
+            for failure in ("spawn", "add"):
+                added = []
+                def git(*args, **kw):
+                    if args[:2] == ("worktree", "add"):
+                        added.append(pathlib.Path(args[3]))
+                        if failure == "add":
+                            added[-1].mkdir(); (added[-1] / "partial").touch()
+                            raise mg.Undetermined("fixture partial worktree add failure")
+                    return real_git(*args, **kw)
+                real_popen = subprocess.Popen
+                def popen(argv, **kw):
+                    if argv[0] == "bash": raise OSError("fixture spawn failure")
+                    return real_popen(argv, **kw)
+                with patch.object(mg, "_RUN_ACTIVE", False), \
+                     patch.dict(os.environ, DOIT_SCRATCH=str(self.root / "direct-scratch")), \
+                     patch.object(mg, "git", side_effect=git), \
+                     patch.object(mg.subprocess, "Popen", side_effect=popen):
+                    result = mg.secret_scan(self.repo, self.sha, self.sha)
+                self.assertEqual(result[0], "undetermined")
+                self.assertEqual(result[1][0], "worktree" if failure == "add" else "tool")
+                self.assertEqual(len(added), 1)
+                self.assertFalse(added[0].exists())
+                self.assertFalse(added[0].parent.exists())
+                self.assertTrue(self.lock.exists())
+                with self.lock.open("a+b") as descriptor:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            observations.append(dict(case=self._testMethodName, cleaned_failures=["spawn", "partial-add"]))
+
+    suite = unittest.defaultTestLoader.loadTestsFromTestCase(Ownership)
+    result = unittest.TextTestRunner(verbosity=2).run(suite)
+    _spec_response("AC1", dict(executed=result.testsRun, observations=observations), result.wasSuccessful())
+    print(f"L-spec-1868 AC1: {result.testsRun} executed, {len(result.failures) + len(result.errors)} failures")
+    return result.testsRun > 0 and result.wasSuccessful()
+
+
+def spec1868_ac2():
+    """Controlled scanner clocks with real Git setup and ledger persistence."""
+    import contextlib
+    import unittest
+    from unittest.mock import patch
+    observations = []
+
+    class Budget(unittest.TestCase):
+        def setUp(self):
+            self.temp = tempfile.TemporaryDirectory(prefix="scan-budget-")
+            self.addCleanup(self.temp.cleanup)
+            self.root = pathlib.Path(self.temp.name)
+            self.repo = self.root / "repo"
+            self.repo.mkdir()
+            self.git("init", "-q", "-b", "main")
+            self.git("config", "user.name", "fixture")
+            self.git("config", "user.email", "fixture@localhost")
+            ci = self.repo / "scripts" / "ci"; ci.mkdir(parents=True)
+            (ci / "detect-secrets-changed.sh").write_text("#!/bin/bash\nexit 0\n")
+            (self.repo / "modified").write_text("base")
+            (self.repo / "deleted").write_text("base")
+            self.git("add", "."); self.git("commit", "-qm", "scanner")
+            self.main = self.git("rev-parse", "HEAD")
+            self.git("checkout", "-qb", "work")
+            self.clock, self.calls, self.git_calls, self.killed, self.reaped = [1000.0], [], [], [], []
+            self.stack = contextlib.ExitStack(); self.addCleanup(self.stack.close)
+            self.stack.enter_context(patch.object(mg, "_TOP", "prior-context"))
+            self.stack.enter_context(patch.object(mg, "_START", -2000.0))
+            self.stack.enter_context(patch.object(mg, "_RUN_ACTIVE", False))
+            self.stack.enter_context(patch.object(mg, "DEADLINE", 60.0))
+            self.stack.enter_context(patch.object(mg, "DETECT_SECRETS_TIMEOUT", 45.0))
+            self.stack.enter_context(patch.dict(os.environ, DOIT_SCRATCH=str(self.root / "scratch")))
+            # No ambient override may silently change the default fixtures.
+            self.stack.enter_context(patch.dict(os.environ))
+            os.environ.pop("DOIT_GATE_DEADLINE", None)
+            self.stack.enter_context(patch.object(mg.time, "monotonic", side_effect=lambda: self.clock[0]))
+            self.real_git = mg.git
+            self.real_popen = subprocess.Popen
+            self.real_run = subprocess.run
+            self.stack.enter_context(patch.object(mg.subprocess, "Popen", side_effect=self.popen))
+            self.stack.enter_context(patch.object(mg.subprocess, "run", side_effect=self.git_run))
+            self.stack.enter_context(patch.object(mg.os, "killpg", side_effect=lambda pid, sig: self.killed.append((pid, sig))))
+            self.plan = []
+            self.setup_spend = 0
+            self.branch = self.main
+
+        def git(self, *args):
+            return subprocess.check_output(["git", "-C", str(self.repo), *args],
+                                           stderr=subprocess.DEVNULL).strip().decode()
+
+        def changed(self, count):
+            # Once per fixture, except the lifecycle test which supplies two
+            # enumerations while retaining real Git identity/worktree setup.
+            for n in range(count): (self.repo / ("path-" + str(n))).touch()
+            self.git("add", "."); self.git("commit", "-qm", "branch", "--allow-empty")
+            self.branch = self.git("rev-parse", "HEAD")
+
+        def git_run(self, argv, **kw):
+            self.git_calls.append(dict(argv=list(argv), timeout=kw.get("timeout"),
+                                       start=mg._START, deadline=mg.DEADLINE, now=self.clock[0]))
+            result = self.real_run(argv, **kw)
+            if "add" in argv and "worktree" in argv: self.clock[0] += self.setup_spend
+            return result
+
+        def popen(self, argv, **kw):
+            if argv[0] != "bash": return self.real_popen(argv, **kw)
+            case = self
+            class Proc:
+                pid = 1234567
+                def __init__(self):
+                    case.assertTrue(kw["start_new_session"])
+                    case.assertTrue(pathlib.Path(kw["cwd"]).is_dir())
+                    self.duration, self.returncode, self.stdout, self.stderr = case.plan.pop(0)
+                    self.call = dict(start=mg._START, deadline=mg.DEADLINE, script=argv[1],
+                                     cwd=kw["cwd"], effective=mg.DETECT_SECRETS_TIMEOUT)
+                    case.calls.append(self.call)
+                def communicate(self, timeout=None):
+                    if timeout is None:
+                        case.reaped.append(self.pid)
+                        return b"", b""
+                    self.call["timeout"] = timeout
+                    if self.duration is None or self.duration > timeout:
+                        case.clock[0] += timeout
+                        raise subprocess.TimeoutExpired(argv, timeout)
+                    case.clock[0] += self.duration
+                    return self.stdout, self.stderr
+            return Proc()
+
+        def scan(self):
+            return mg.secret_scan(self.repo, self.main, self.branch)
+
+        def assert_restored(self):
+            self.assertEqual((mg._TOP, mg._START, mg.DEADLINE, mg.DETECT_SECRETS_TIMEOUT),
+                             ("prior-context", -2000.0, 60.0, 45.0))
+            self.assertFalse(mg._RUN_ACTIVE)
+            for call in self.calls:
+                self.assertFalse(pathlib.Path(call["cwd"]).exists())
+                self.assertFalse(pathlib.Path(call["script"]).exists())
+
+        def test_budget_table_and_domain(self):
+            table = [(0,60),(1,60),(10,60),(34,132),(40,150),(100,330),(190,600),(1000,600)]
+            for count, expected in table: self.assertEqual(mg.scan_deadline(count), expected)
+            for invalid in (-1, True, False, 1.5, "34", None):
+                with self.assertRaises(ValueError): mg.scan_deadline(invalid)
+            observations.append(dict(case=self._testMethodName, table=table, invalid_counts=6))
+
+        def test_divergent_history_and_byte_enumeration(self):
+            self.git("checkout", "-q", "main")
+            (self.repo / "main-only").touch()
+            self.git("add", "."); self.git("commit", "-qm", "main advance")
+            self.main = self.git("rev-parse", "HEAD")
+            self.git("checkout", "-q", "work")
+            (self.repo / "modified").write_text("branch")
+            (self.repo / "deleted").unlink()
+            (self.repo / "newline\npath").touch()
+            self.git("add", "."); self.git("commit", "-qm", "branch divergence")
+            self.branch = self.git("rev-parse", "HEAD")
+            enumerations = []
+            def capture(*args, **kw):
+                output = self.real_git(*args, **kw)
+                if args[0] == "diff":
+                    self.assertEqual(args, ("diff", "--diff-filter=ACMRT", "--name-only", "-z", self.main + "..." + self.branch))
+                    enumerations.append(set(output.split(b"\0")) - {b""})
+                return output
+            with patch.object(mg, "git", side_effect=capture):
+                self.plan = [(0,0,b"",b"")]
+                self.assertEqual(self.scan(), ("clean", []))
+            self.assertEqual(enumerations, [{b"modified", b"newline\npath"}])
+            # The undecodable path exists on disk and is enumerated as bytes.
+            fd = os.open(os.fsencode(self.repo) + b"/byte-\xff", os.O_CREAT | os.O_WRONLY, 0o600)
+            os.close(fd)
+            self.git("add", "."); self.git("commit", "-qm", "raw filename")
+            self.branch = self.git("rev-parse", "HEAD")
+            self.plan = [(0,0,b"",b"")]
+            with patch.object(mg, "git", side_effect=capture): self.assertEqual(self.scan()[0], "clean")
+            self.assertIn(b"byte-\xff", enumerations[-1])
+            self.assert_restored()
+            observations.append(dict(case=self._testMethodName, divergent_count=2, raw_byte_count=3))
+
+        def test_duplicate_empty_and_failed_enumeration(self):
+            for output in (b"a\0a\0\0b\0", b"incomplete", None, mg.Undetermined("fixture git nonzero")):
+                def injected(*args, **kw):
+                    if args[0] == "diff":
+                        if isinstance(output, Exception): raise output
+                        return output
+                    return self.real_git(*args, **kw)
+                self.plan = [(0,0,b"",b"")]
+                with patch.object(mg, "git", side_effect=injected): result = self.scan()
+                if output == b"a\0a\0\0b\0":
+                    self.assertEqual(result, ("clean", []))
+                    self.assertEqual(self.calls[-1]["deadline"], 120)
+                else:
+                    self.assertEqual(result[0:1], ("undetermined",))
+                    self.assertEqual(result[1][0], "tool")
+                self.assert_restored()
+            observations.append(dict(case=self._testMethodName, unique_count=2, closed_failures=3))
+
+        def test_default_34_allows_61_seconds(self):
+            self.changed(34); self.plan = [(61,0,b"",b"")]
+            self.assertEqual(self.scan(), ("clean", []))
+            self.assertEqual((self.calls[0]["timeout"], self.calls[0]["deadline"]), (66,192))
+            self.assertNotIn("DOIT_GATE_DEADLINE", mg._KNOBS)
+            self.assertEqual(mg.DEFAULTS["DOIT_GATE_DEADLINE"], "auto")
+            self.assert_restored()
+            observations.append(dict(case=self._testMethodName, scanner_elapsed=61, pass_timeout=66, gate_deadline=192))
+
+        def test_explicit_overrides_and_validation(self):
+            self.changed(34)
+            for value, duration, verdict, reason, timeout in (("60",61,"undetermined","deadline",60),
+                    ("1000",67,"undetermined","timeout",66)):
+                with patch.dict(os.environ, DOIT_GATE_DEADLINE=value):
+                    self.plan = [(duration,0,b"",b""), (None,0,b"",b"")]
+                    offset = len(self.calls)
+                    result = self.scan()
+                    self.assertEqual(result[0], verdict)
+                    self.assertEqual(result[1][0], reason)
+                    self.assertEqual(self.calls[offset]["timeout"], timeout)
+                    self.assertEqual(mg._KNOBS["DOIT_GATE_DEADLINE"], value)
+                    self.assert_restored()
+            for value in ("auto", "bad", "nan", "inf", "-inf", "0", ".9"):
+                with patch.dict(os.environ, DOIT_GATE_DEADLINE=value):
+                    self.assertEqual(self.scan()[0], "undetermined")
+                    with self.assertRaises(mg.Undetermined): mg.load_config()
+                mg.DEADLINE = 60.0
+            observations.append(dict(case=self._testMethodName, overrides=[60,1000], invalid=7,
+                                     killed=len(self.killed), reaped=len(self.reaped)))
+
+        def test_retry_findings_success_and_exhaustion(self):
+            self.changed(34)
+            for last, verdict in (((1,0,b"",b""),"clean"),
+                    ((1,1,b"  example.py:1 -- Secret Keyword\n",b""),"rework"),
+                    ((None,0,b"",b""),"undetermined")):
+                self.plan = [(None,0,b"",b""), last]
+                offset = len(self.calls)
+                result = self.scan()
+                self.assertEqual(result[0], verdict)
+                self.assertEqual(len(self.calls)-offset, 2)
+                self.assertEqual([c["timeout"] for c in self.calls[offset:]], [66,66])
+                if verdict == "undetermined": self.assertEqual(result[1][0], "timeout")
+                self.assert_restored()
+            self.assertEqual(len(self.killed), 4)
+            self.assertEqual(len(self.reaped), 4)
+            observations.append(dict(case=self._testMethodName, outcomes=["clean","rework","timeout"], passes=2))
+
+        def test_implicit_lifecycle_does_not_leak_large_budget(self):
+            enumerations = iter([b"".join(str(n).encode()+b"\0" for n in range(1000)), b"one\0"])
+            def git(*args, **kw):
+                if args[0] == "diff": return next(enumerations)
+                return self.real_git(*args, **kw)
+            with patch.object(mg, "git", side_effect=git), \
+                 patch.dict(os.environ, DOIT_GIT_TIMEOUT="1000"):
+                self.plan = [(1,0,b"",b"")]
+                self.assertEqual(self.scan(), ("clean", []))
+                self.assertEqual((self.calls[0]["timeout"],self.calls[0]["deadline"]), (300,660))
+                self.assert_restored()
+                self.clock[0] += 700
+                second_start = self.clock[0]
+                self.plan = [(None,0,b"",b""), (None,0,b"",b"")]
+                offset = len(self.git_calls)
+                self.assertEqual(self.scan()[1][0], "timeout")
+                self.assertEqual([c["timeout"] for c in self.calls[1:]], [30,30])
+                self.assertEqual([c["deadline"] for c in self.calls[1:]], [120,120])
+                self.assertEqual(self.clock[0]-second_start, 60)
+                setup_calls = [c for c in self.git_calls[offset:] if "remove" not in c["argv"]]
+                self.assertTrue(all(c["timeout"] == 60 for c in setup_calls))
+                self.assertTrue(all(c["start"] == second_start for c in setup_calls))
+                self.assert_restored()
+            observations.append(dict(case=self._testMethodName, first_budget=600, second_budget=60,
+                                     second_passes=[30,30], second_gate=120, origin_gap=701))
+
+        def test_explicit_setup_is_preserved_and_cannot_borrow(self):
+            self.changed(34)
+            mg.begin_run(self.repo); start = mg._START
+            self.clock[0] += 20
+            self.plan = [(61,0,b"",b"")]
+            self.assertEqual(self.scan(), ("clean", []))
+            self.assertEqual((mg._START, self.calls[-1]["start"]), (start,start))
+            self.assertFalse(mg._RUN_ACTIVE)
+            mg.begin_run(self.repo); self.clock[0] += 61
+            offset = len(self.calls)
+            self.assertEqual(self.scan()[1][0], "deadline")
+            self.assertEqual(len(self.calls), offset)
+            self.assertFalse(mg._RUN_ACTIVE)
+            # A direct call whose worktree setup consumes 61s cannot borrow S.
+            mg._RUN_ACTIVE = False
+            self.setup_spend = 61
+            self.assertEqual(self.scan()[1][0], "deadline")
+            self.assertEqual(len(self.calls), offset)
+            observations.append(dict(case=self._testMethodName, explicit_setup=20, expired_setup=61,
+                                     setup_cannot_borrow=True))
+
+        def test_main_caller_matrix_local_ledger(self):
+            # Keep production append/admission/read behavior; only the scan
+            # verdict and unrelated guard are supplied by the fixture.
+            self.stack.enter_context(patch.object(mg.freeze, "state", return_value=None))
+            self.stack.enter_context(patch.object(mg, "_TOP", str(self.repo)))
+            ledger = mg.fold.EVENTS / os.environ["DOIT_GATE_LEDGER_FILE"]
+            def rows():
+                return [json.loads(line) for line in ledger.read_text().splitlines()] if ledger.exists() else []
+            for reason in ("lock-busy", "deadline", "timeout", "worktree", "tool"):
+                for metadata in ([], ["infra:capacity"]):
+                    before = len(rows())
+                    with patch.object(mg, "gate", return_value=([],[],self.main,self.main,self.main)), \
+                         patch.object(mg, "secret_scan", return_value=("undetermined", [reason]+metadata)) as scan:
+                        self.assertEqual(mg.main_(["work", "main"]), 2)
+                        self.assertEqual(scan.call_count, 1)
+                    self.assertEqual(len(rows()), before)
+                    self.assertFalse(mg._RUN_ACTIVE)
+            for verdict, findings, rc, event in (("clean",[],0,"merge-gate-clean"),
+                    ("rework",["  example.py:1 -- Secret Keyword"],1,"merge-gate-rework")):
+                with patch.object(mg, "gate", return_value=([],[],self.main,self.main,self.main)), \
+                     patch.object(mg, "secret_scan", return_value=(verdict,findings)) as scan:
+                    self.assertEqual(mg.main_(["work", "main"]), rc)
+                    self.assertEqual(scan.call_count, 1)
+                self.assertEqual(rows()[-1]["type"], event)
+            with patch.object(mg, "gate", return_value=(["outside"],[],self.main,self.main,self.main)), \
+                 patch.object(mg, "secret_scan") as scan:
+                self.assertEqual(mg.main_(["work", "main"]), 1)
+                scan.assert_not_called()
+            self.assertEqual(rows()[-1]["type"], "merge-gate-rework")
+            observations.append(dict(case=self._testMethodName, holds=10, controls=3, gate_events=3))
+
+        def test_production_records_read_by_fresh_process(self):
+            self.plan = [(None,0,b"",b""), (None,0,b"",b"")]
+            token = mg._SCAN_SUBJECT.set("L-spec-1868-fixture")
+            try: self.assertEqual(self.scan()[1][0], "timeout")
+            finally: mg._SCAN_SUBJECT.reset(token)
+            code = ("import json,sys; sys.path.insert(0,sys.argv[1]); import ledger_files as l,fold; "
+                    "print(json.dumps([dict(json.loads(line),fixture_filename=name,fixture_actor=fold.actor_of(name)) "
+                    "for name in l.names(sys.argv[2]) for line in l.read_text(sys.argv[2],name).splitlines()]))")
+            output = subprocess.check_output([sys.executable,"-B","-c",code,
+                       str(pathlib.Path(mg.__file__).parent),str(mg.fold.EVENTS)])
+            rows = json.loads(output)
+            resource = next(r for r in reversed(rows) if r["type"] == "resource-created" and r["subject"] == "L-spec-1868-fixture")
+            infra = next(r for r in reversed(rows) if r["type"] == "infra-failure" and r["subject"] == "L-spec-1868-fixture")
+            self.assertEqual(resource["ref"], self.calls[0]["cwd"])
+            self.assertEqual(resource["kind"], "worktree")
+            self.assertEqual(infra["class"], "runner-or-network")
+            self.assertEqual(infra["backend"], "merge-gate")
+            self.assertEqual(infra["fixture_filename"], os.environ["DOIT_GATE_LEDGER_FILE"])
+            self.assertEqual(infra["fixture_actor"], "executor")
+            observations.append(dict(case=self._testMethodName, subject=infra["subject"],
+                resource_path=resource["ref"], infrastructure_class=infra["class"], actor_file=infra["fixture_filename"]))
+
+    result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(Budget))
+    _spec_response("AC2", dict(executed=result.testsRun, observations=observations), result.wasSuccessful())
+    print(f"L-spec-1868 AC2: {result.testsRun} executed, {len(result.failures) + len(result.errors)} failures")
+    return result.testsRun > 0 and result.wasSuccessful()
+
+
+if sys.argv[1:] == ["--spec-1868-ac1"]:
+    sys.exit(0 if spec1868_ac1() else 1)
+
+GRANT, ok = ["src/*", "docs/"], [spec1868_ac1(), spec1868_ac2()]
 CONTENT = pathlib.Path(os.environ["DOIT_ROOT"]) / "content"
 CONTENT.mkdir(parents=True, exist_ok=True)
 (CONTENT / "L-spec-0001.md").write_text("# spec\n\nwrites: src/*, docs/\n")
@@ -754,7 +1347,7 @@ def _with_restricted_path(fn):
 d, base = repo()
 os.chdir(d); mg.begin_run(d)
 m_sha, b_sha = sh("git", "-C", d, "rev-parse", "main").strip(), sh("git", "-C", d, "rev-parse", "work").strip()
-check("AC1", mg.secret_scan(d, m_sha, b_sha) == ("not-applicable", []))
+check("AC1", mg.secret_scan(d, m_sha, b_sha) == ("clean", []))
 
 # AC2 — a relevant-extension addition with no secret-shaped content is clean,
 # end-to-end through main_ too, with no reason=/findings= keys on the event.
@@ -775,7 +1368,7 @@ d, main_sha, branch_sha = secrets_fixture(secret=True, install_bin=True)
 os.chdir(d); mg.begin_run(d)
 verdict, findings = _with_restricted_path(lambda: mg.secret_scan(d, main_sha, branch_sha))
 check("AC3 secret_scan direct call",
-      verdict == "findings" and findings and all(mg.FINDING_LINE_RE.match(l) for l in findings))
+      verdict == "rework" and findings and all(mg.FINDING_LINE_RE.match(l) for l in findings))
 rc = _with_restricted_path(lambda: mg.main_(["work", "main"]))
 check("AC3 main_ exits 1", rc == 1)
 ev = events()[-1]
@@ -792,9 +1385,7 @@ d, main_sha, branch_sha = secrets_fixture(secret=False, baseline_on_branch=False
 os.chdir(d)
 rc = mg.main_(["work", "main", "--writes", ".secrets.baseline", "--writes", "added.py"])
 ev = events()[-1]
-check("AC4(a) missing baseline -> rework/reason=secret-scan/non-empty findings",
-      rc == 1 and ev["type"] == "merge-gate-rework" and ev.get("reason") == "secret-scan"
-      and bool(ev.get("findings")) and "removed" not in ev)
+check("AC4(a) tooling failure holds without gate rework", rc == 2 and ev["type"] != "merge-gate-rework")
 
 # (b) the script subprocess hangs past secret_scan's own timeout; the WHOLE
 # process group is killed, not just `bash`.
@@ -802,11 +1393,13 @@ SLEEP_SCRIPT = b"#!/usr/bin/env bash\nexec -a L_SPEC_0430_AC4B_MARKER sleep 9999
 d, main_sha, branch_sha = secrets_fixture(secret=False, script_bytes=SLEEP_SCRIPT)
 os.chdir(d)
 _orig_timeout = mg.DETECT_SECRETS_TIMEOUT
-mg.DETECT_SECRETS_TIMEOUT = 1.0
+_orig_scan_budget = mg.scan_deadline
+mg.scan_deadline = lambda count: 2.0
 try:
     rc = mg.main_(["work", "main"])
 finally:
     mg.DETECT_SECRETS_TIMEOUT = _orig_timeout
+    mg.scan_deadline = _orig_scan_budget
 ev = events()[-1]
 check("AC4(b) two timeouts -> infrastructure hold, no rework",
       rc == 2 and ev["type"] == "infra-failure" and ev.get("backend") == "merge-gate"
@@ -820,9 +1413,7 @@ d, main_sha, branch_sha = secrets_fixture(secret=False, install_bin=False)
 os.chdir(d)
 rc = _with_restricted_path(lambda: mg.main_(["work", "main"]))
 ev = events()[-1]
-check("AC4(c) no detect-secrets binary anywhere -> rework/reason=secret-scan/non-empty findings",
-      rc == 1 and ev["type"] == "merge-gate-rework" and ev.get("reason") == "secret-scan"
-      and bool(ev.get("findings")))
+check("AC4(c) tooling failure holds without gate rework", rc == 2 and ev["type"] != "merge-gate-rework")
 
 # (d) exit 1 with only banner lines, no line matching the finding shape.
 BANNER_ONLY_SCRIPT = (
@@ -835,9 +1426,7 @@ d, main_sha, branch_sha = secrets_fixture(secret=False, script_bytes=BANNER_ONLY
 os.chdir(d)
 rc = mg.main_(["work", "main"])
 ev = events()[-1]
-check("AC4(d) exit 1 with no parseable finding line -> rework/reason=secret-scan/non-empty findings",
-      rc == 1 and ev["type"] == "merge-gate-rework" and ev.get("reason") == "secret-scan"
-      and bool(ev.get("findings")))
+check("AC4(d) tooling failure holds without gate rework", rc == 2 and ev["type"] != "merge-gate-rework")
 
 # AC5 — DETECT_SECRETS_BIN precedence and invocation count: the repo-local
 # wrapper, never an ambient binary, is invoked exactly twice (the script's
@@ -883,13 +1472,14 @@ _install_detect_secrets(d, marker=None)
 os.chdir(d)
 wt_before = sh("git", "-C", d, "worktree", "list")
 _orig_timeout = mg.DETECT_SECRETS_TIMEOUT
+_orig_scan_budget = mg.scan_deadline
 
 def _ac6():
     mg.begin_run(d)
     v1 = mg.secret_scan(d, main_sha_a, branch_sha_clean)
     mg.begin_run(d)
     v2 = mg.secret_scan(d, main_sha_a, branch_sha_findings)
-    mg.DETECT_SECRETS_TIMEOUT = 1.0
+    mg.scan_deadline = lambda count: 2.0
     mg.begin_run(d)
     v3 = mg.secret_scan(d, main_sha_b, branch_sha_timeout)
     return v1, v2, v3
@@ -898,8 +1488,9 @@ try:
     (v1, f1), (v2, f2), (v3, f3) = _with_restricted_path(_ac6)
 finally:
     mg.DETECT_SECRETS_TIMEOUT = _orig_timeout
+    mg.scan_deadline = _orig_scan_budget
 check("AC6 call 1 clean", (v1, f1) == ("clean", []))
-check("AC6 call 2 findings", v2 == "findings" and bool(f2))
+check("AC6 call 2 findings", v2 == "rework" and bool(f2))
 check("AC6 call 3 undetermined (timeout)", v3 == "undetermined" and bool(f3))
 wt_after = sh("git", "-C", d, "worktree", "list")
 check("★ AC6 git worktree list is byte-identical before and after all three verdicts",
@@ -928,7 +1519,7 @@ os.environ["GIT_WORK_TREE"] = other_d
 try:
     verdict, findings = mg.secret_scan(d, main_sha, branch_sha)
     check("AC8 the script subprocess's own git diff is isolated from ambient GIT_DIR/GIT_WORK_TREE",
-          verdict == "findings" and bool(findings))
+          verdict == "rework" and bool(findings))
 finally:
     del os.environ["GIT_DIR"]; del os.environ["GIT_WORK_TREE"]
 
@@ -974,7 +1565,7 @@ _install_detect_secrets(d, marker=None)
 os.chdir(d); mg.begin_run(d)
 verdict, findings = _with_restricted_path(lambda: mg.secret_scan(d, main_sha, branch_sha))
 check("AC10 the executed bytes come from main_sha, not the branch's rewritten copy",
-      verdict == "findings" and bool(findings))
+      verdict == "rework" and bool(findings))
 
 # ------------------------------------------------------ R6: append-only grants
 # Kept verbatim from the committed albert-scott list, never branch-controlled.
@@ -1201,7 +1792,7 @@ for kind in ("append", "revert-shaped", "rewrite-revert", "rewrite-new", "grante
         return result
     def no_git(*args, **kwargs):
         raise AssertionError("main_ recomputed append-only verdicts")
-    mg.gate, mg.git, mg.secret_scan = cached_gate, no_git, lambda *args: ("not-applicable", [])
+    mg.gate, mg.git, mg.secret_scan = cached_gate, no_git, lambda *args: ("clean", [])
     try:
         with contextlib.redirect_stdout(io.StringIO()):
             mg.main_(["work", "main"])
@@ -1265,8 +1856,8 @@ def infra_git(*args, **kwargs):
 with patch.object(mg, "git", side_effect=infra_git), \
      patch.object(mg, "_remove_worktree", side_effect=removed_worktrees.append), \
      patch.object(mg.fold, "append", side_effect=infra_events.append):
-    verdict, findings = mg.secret_scan(d, "main", "infra-fixture")
-check("infra scan is undetermined", verdict == "undetermined" and findings == ["infra:no-space"])
+    verdict, findings = mg.secret_scan(d, "main", "work")
+check("infra scan is undetermined", verdict == "undetermined" and findings == ["worktree", "infra:no-space"])
 check("infra scan records once and cleans partial worktree", len(infra_events) == 1 and
       infra_events[0][0] == "infra-failure" and len(removed_worktrees) == 1)
 with patch.object(mg, "gate", return_value=([], [], "main-sha", "branch-sha", "tree-sha")), \
