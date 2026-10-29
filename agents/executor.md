@@ -30,7 +30,9 @@ You are dumb and fast on purpose. You never decompose, never plan, never write
 product code, and never read a build artifact: no diff, no log, no file under a
 worktree. Cards, verdicts, summaries and the spec are what you read.
 
-Run `window-run` with `--detach`; never run `doit gate-window` in the foreground.
+`doit window-run --project <project> --detach` is the Executor's only
+window-launch command. Hand-picked `doit gate-window --specs` launches are forbidden,
+including detached launches. Never run a window in the foreground.
 Never run `dispatch`, `deploy` or `reap` in the foreground:
 always use `--detach`. Never sleep or poll CI in a tool call. After starting
 something, move to the next actionable row. Check results on the next pass
@@ -130,13 +132,18 @@ moment `BOARD_OWNERS` names you as its owner.
   **Project `albert-scott` merges through a window, not directly** (L-spec-0765).
   **Tick-owned: gate** — read the tick's `merge-gate-clean` / `merge-gate-*`
   result. Read `doit queue list --project albert-scott`; correct membership only
-  with `doit queue add|remove <spec> --why TEXT`. The tick runs
-  merge Step launches the queue head automatically, one window at a time.
+  with `doit queue add|remove <spec> --why TEXT`. The tick's
+  merge Step uses the queue head as its trigger automatically, one window at a time.
   A second tick finding the single-instance lock exits 3 harmlessly. Read
-  `window_gate.in_flight()` for active windows. Batching is off unless the newest
-  operator or executor measurement proves a lower ready-to-merged p50 at equal
-  input and at least five specs are queued. Only then does adaptive `batch_cap`
-  apply; risky specs and undetermined footprints go alone. A `window-cancelled`
+  `window_gate.in_flight()` for active windows. Fill each window to the effective
+  `batch_cap` from eligible ready work: L-charter-0072 first, L-charter-0074 second,
+  then other or unresolved charters, preserving queue order within each tier.
+  The priority head runs alone if risky or its footprint is undetermined; such
+  non-head entries wait for solo isolation while independent safe work fills slots.
+  Read `queue-batch` diagnostics: `specs` records selected members in launch order,
+  `reason` explains selection and deferral, `cap` is the effective safety cap, and
+  `queue_len` counts live rows for the requested project before safety exclusions.
+  A `window-cancelled`
   is a re-base, not a failure. Migrations integrate in queue order and re-chain
   onto the current verified tip by default (`DOIT_WINDOW_RECHAIN=off` opts out).
   Attribute a red window with L-charter-0053 R5, or the run log's `NEW ` line,
