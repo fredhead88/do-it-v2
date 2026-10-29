@@ -317,17 +317,6 @@ def _look_toml():
     return Path(DOIT).parent / 'look.toml'
 
 
-def window_target(toml_path=None):
-    """The versioned selection target is independent of the safety ceiling."""
-    try:
-        import tomllib
-        with open(_look_toml() if toml_path is None else toml_path, 'rb') as stream:
-            value = tomllib.load(stream).get('merge_queue', {}).get('window_target')
-        return value if type(value) is int and 2 <= value <= 6 else 6
-    except (OSError, ValueError, TypeError, AttributeError, ImportError):
-        return 6
-
-
 def effective_cap(events, now, env=None, toml_path=None):
     events = _ordered(events)
     configured, floor, unreadable = 10, 6, False
@@ -508,9 +497,12 @@ def window_run(project, *, runner=None, launcher=None, detach=False, now=None):
                                 project=project, reason=reason)
                 return 3
             entries = queue(events, project)
+            tiers = {'L-charter-0072': 0, 'L-charter-0074': 1}
+            entries.sort(key=lambda row: tiers.get(
+                dispatch.resolve_charter(events, row['spec'], None), 2))
+            head = entries[0]['spec']
             cap = effective_cap(events, now)
             record_cap(cap, events, ledger_file)
-            target = window_target()
             try:
                 repo, master = _repository(project)
             except (OSError, ValueError):
@@ -522,22 +514,26 @@ def window_run(project, *, runner=None, launcher=None, detach=False, now=None):
                 footprints[row['spec']] = None if paths is None else {path for _, path in paths}
                 if is_risky(paths):
                     risky.add(row['spec'])
-            eligible = form_batch(entries, footprints, len(entries), risky)
+            # Keep charter priority and FIFO ties; overlap never displaces ready work.
+            eligible = [row['spec'] for row in entries
+                        if row['spec'] not in risky and footprints[row['spec']] is not None]
             if head in risky or footprints.get(head) is None:
+                eligible = [head]
                 reason = 'solo-head'
-            elif len(eligible) == 1:
+            elif len(eligible) < len(entries):
+                reason = 'safety-exclusions'
+            elif len(entries) == 1:
                 reason = 'sole-eligible'
-            elif cap['cap'] < 2:
-                raise ValueError(f"capacity undetermined: cap {cap['cap']} cannot batch eligible work")
-            elif len(eligible) <= min(target, cap['cap']):
+            elif len(eligible) <= cap['cap']:
                 reason = 'all-ready'
             else:
-                reason = 'window-target' if target <= cap['cap'] else 'effective-cap'
-            specs = eligible[:min(target, cap['cap'])]
-            print(f'window-run: selected {len(specs)}; deferred {len(waiting) - len(specs)} '
+                reason = 'effective-cap'
+            specs = eligible[:cap['cap']]
+            print(f'window-run: selected {len(specs)}; deferred {len(entries) - len(specs)} '
                   f'(reason={reason})')
             window = 'window-' + uuid.uuid4().hex
-            _train_emit(ledger_file, window, 'queue-batch', project=project, specs=','.join(specs))
+            _train_emit(ledger_file, window, 'queue-batch', project=project, specs=','.join(specs),
+                        reason=reason, cap=cap['cap'], queue_len=len(entries))
             argv = ['doit', 'gate-window', window, '--project', project, '--specs', ','.join(specs)]
             if runner is not None:
                 if detach:
