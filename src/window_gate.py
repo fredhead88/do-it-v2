@@ -26,13 +26,14 @@ Exit codes (the Executor contract, agents/executor.md, mirrors these):
   0  advanced: every spec in the window shipped
   1  partially advanced: some specs dropped (window-dropped / merge-conflict), the rest shipped
   2  red or undetermined: master did not move (an escalation-blocking is filed)
-  3  no slot free, predecessor absent/not yet a candidate/past its first verification: retry next pass
+  3  project chain held, no slot free, or predecessor unavailable: retry next pass
   4  DOIT_WINDOW_GATE=off: bypassed, one window-gate-bypassed event per spec;
      use the direct merge path (operator-declared CI outage only)
 
 Env: DOIT_WINDOW_PREDEPLOY (override the script path), DOIT_WINDOW_VERIFY_TIMEOUT_SECS.
 """
-import io, json, math, os, pathlib, posixpath, re, shlex, shutil, signal, subprocess, sys, time, zipfile, zlib, ledger_files
+import fcntl, io, json, math, os, pathlib, posixpath, re, shlex, shutil, signal, subprocess, sys, time, zipfile, zlib, ledger_files
+from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 import tempfile
@@ -133,6 +134,43 @@ def escalate(window, why, outcome=None):
 
 
 # ── lock ────────────────────────────────────────────────────────────────────
+@contextmanager
+def chain_lock(window, project, root=None):
+    """Kernel ownership covers admission through cleanup; metadata is diagnostic.
+
+    Keep the inode after release. Opening never truncates a competing owner's
+    record, and close-on-exec prevents a gate child from extending ownership.
+    """
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", project) or project in (".", ".."):
+        raise ValueError("invalid window-chain project")
+    path = pathlib.Path(root if root is not None else fold.ROOT) / "state" / f"window-chain.{project}.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_CLOEXEC, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            holder = dict(holder_window="<unknown>", holder_pid=-1, reason="holder-undetermined")
+            try:
+                metadata = json.loads(os.pread(fd, 4096, 0))
+                pid, name = metadata["pid"], metadata["window"]
+                if (type(pid) is int and pid > 0 and isinstance(name, str)
+                        and re.fullmatch(r"[A-Za-z0-9._-]+", name) and name not in (".", "..")):
+                    holder = dict(holder_window=name, holder_pid=pid, reason="contended")
+            except (OSError, ValueError, TypeError, KeyError):
+                pass
+            yield holder
+            return
+        os.ftruncate(fd, 0)
+        record = json.dumps(dict(window=window, pid=os.getpid())).encode()
+        # One small regular-file write publishes both diagnostic fields together.
+        if os.write(fd, record) != len(record):
+            raise OSError("incomplete window-chain metadata write")
+        yield None
+    finally:
+        os.close(fd)
+
+
 def lock_path(slot=0, root=None):
     return pathlib.Path(root if root is not None else fold.ROOT) / "state" / f"window-gate.{slot}.lock"
 
@@ -1835,9 +1873,9 @@ def main_(argv):
         elif a == "--fixes-base": fixes_base = True
         elif a == "--after": after = next(it, "")
         else: sys.exit(f"gate-window: unknown argument {a!r}\n{__doc__}")
-    if not re.fullmatch(r"[A-Za-z0-9._-]+", window):
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", window) or window in (".", ".."):
         sys.exit(f"gate-window: {window!r} is not a window id")
-    if after is not None and not re.fullmatch(r"[A-Za-z0-9._-]+", after):
+    if after is not None and (not re.fullmatch(r"[A-Za-z0-9._-]+", after) or after in (".", "..")):
         sys.exit(f"gate-window: {after!r} is not a window id")
     if project != PROJECT:
         sys.exit(f"gate-window: only project {PROJECT} uses merge windows (got {project!r}); other projects merge directly")
@@ -1847,6 +1885,16 @@ def main_(argv):
         return 2
     if bypass or fixes_base:
         after = None
+    with chain_lock(window, project) as refusal:
+        if refusal is not None:
+            ev("window-refused", window, window=window, project=project, **refusal)
+            print(f"gate-window: project chain held by {refusal['holder_window']} pid={refusal['holder_pid']}")
+            return 3
+        return _admitted(window, project, specs, main, fixes_base, after, bypass)
+
+
+def _admitted(window, project, specs, main, fixes_base, after, bypass):
+    """Only main_'s lifetime-lock owner may evaluate admission or touch slots."""
     if not main:
         try:
             import look, push_origin
@@ -1893,8 +1941,10 @@ def main_(argv):
             pass
         return 2
     finally:
-        cleanup(repo, window)
-        release(slot)
+        try:
+            cleanup(repo, window)
+        finally:
+            release(slot)
 
 
 if __name__ == "__main__":

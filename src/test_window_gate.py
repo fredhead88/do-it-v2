@@ -382,8 +382,10 @@ def cap_checks():
                    and all(type(v) is int for v in env_values + toml_values))
         held(invalid, "ac-cap invalid falls through")
         cap_clock_response("AC1", dict(precedence=precedence, invalid_falls_through=invalid))
+    import tomllib
+    configured = tomllib.loads((HERE.parent / 'look.toml').read_text())['window_gate']['max_merges']
     shipped = window_gate.max_merges({})
-    check(type(shipped) is int and shipped == 10, "shipped cap is 10 int")
+    check(type(shipped) is int and shipped == configured, "shipped cap follows versioned config")
     print(shipped, type(shipped).__name__)
     cap_clock_response("AC3", dict(value=shipped, type=type(shipped).__name__))
 
@@ -398,19 +400,20 @@ def cap_checks():
                 try:
                     rc = fx.go()
                 except SystemExit as error:
-                    cap = 10 if override is None else override
+                    cap = shipped if override is None else override
                     return (size > cap and str(error) == f"gate-window: {size} merges exceeds the window cap of {cap}"
                             and fx.master() == fx.base and not fx.calls() and not fx.events("shipped"))
-                return (size <= (10 if override is None else override) and rc == 0
+                return (size <= (shipped if override is None else override) and rc == 0
                         and len(fx.events("shipped")) == size and len(fx.calls()) == 1)
             finally:
                 fx.tempdir.cleanup()
 
-    accepted, refused = boundary(10), boundary(11)
+    accepted, refused = boundary(shipped), boundary(shipped + 1)
     env_refused = boundary(7, 6)
-    held(accepted and refused, "ac-cap boundary 10 ok 11 refused")
+    held(accepted and refused, f"ac-cap boundary {shipped} ok {shipped + 1} refused")
     held(env_refused, "ac-cap env 6 refuses 7")
-    cap_clock_response("AC2", dict(ten_accepted=accepted, eleven_refused=refused, env_six_refuses_seven=env_refused))
+    cap_clock_response("AC2", dict(cap=shipped, at_cap_accepted=accepted, above_cap_refused=refused,
+                                  env_six_refuses_seven=env_refused))
 
 
 def parity_checks():
@@ -1601,7 +1604,7 @@ def train_checks():
         window_gate.release(0)
         window_gate.ev("window-verified", "N", sha=candidate, kept=["A"], dropped=[])
         terminal = fx.go(["B"], after="N")
-        mark("exit3 reasons", reasons == [3, 3, 3] and terminal == 3 and dead and not list((fx.root / "state").glob("*.lock")), reasons)
+        mark("exit3 reasons", reasons == [3, 3, 3] and terminal == 3 and dead and not list((fx.root / "state").glob("window-gate.*.lock")), reasons)
         for bad in ("../N", "", "N with space"):
             try:
                 window_gate.main_(["w", "--project", "albert-scott", "--after", bad])
@@ -1642,7 +1645,7 @@ def train_checks():
         mark("verified fields", verified[0]["after"] == "N" and verified[0]["replaced"] == verified[0]["verified_on"] == candidate, verified)
         mark("merge when N merged", rc == 0 and fx.master() == built[0]["sha"] and not fx.events("window-cancelled"))
         mark("origin lags still merges", rc == 0 and sh(["rev-parse", "master"], fx.origin) == fx.base)
-        check(not list((fx.root / "state").glob("*.lock")) and
+        check(not list((fx.root / "state").glob("window-gate.*.lock")) and
               not window_gate.git(fx.repo, "show-ref", "--verify", "refs/heads/window/N1", check=False).stdout, "train cleanup")
 
         # Every cancellation uses the same held slot and makes exactly one fresh attempt.
@@ -1806,7 +1809,7 @@ def train_checks():
         with patch.object(window_gate, "verify", side_effect=slide):
             rc = fx.go(["C"], window="N2", after="N1")
         mark("base-red sliding root", rc == 0 and requests == [candidate] and
-             not list((fx.root / "state").glob("*.lock")), requests)
+             not list((fx.root / "state").glob("window-gate.*.lock")), requests)
 
         # A failed guard on the rebuilt attempt cannot start a third verification.
         fx = Fx({"A": "a.txt", "B": "b.txt"})
@@ -2783,7 +2786,8 @@ if "--local-owner-ac" in sys.argv:
     sys.exit(0)
 
 
-base_kind_checks()
+if '--window-chain-check' not in sys.argv:
+    base_kind_checks()
 def honest_rate_checks():
     """L-spec-1578: production append/read fixtures, no live GitHub calls."""
     from datetime import datetime, timedelta, timezone
@@ -3207,6 +3211,679 @@ def ac8_tree_guards_config():
             path.write_text(text)
             check(window_gate.tree_guards({}, path) == seed, "AC8 malformed config fallback")
     proof_1664("AC8", start)
+
+
+# Local subprocess fixture: the executable dispatch, main_ admission, flock,
+# slots and ledger writes stay real. Only downstream workload/services change.
+CHAIN_SITE = r'''
+import json, os, pathlib, subprocess, sys, time
+def install(frame, event, arg):
+    if event != 'call' or frame.f_code.co_name != 'main_' or pathlib.Path(frame.f_code.co_filename).name != 'window_gate.py':
+        return install
+    sys.settrace(None)
+    g = frame.f_globals
+    root = pathlib.Path(os.environ['DOIT_ROOT'])
+    role = os.environ.get('CHAIN_ROLE', 'holder')
+    mode = os.environ.get('CHAIN_CASE', 'normal')
+    def note(name):
+        with (root / ('work.' + str(os.getpid()))).open('a') as out:
+            out.write(name + '\n')
+    def wait(name):
+        end = time.monotonic() + 30
+        while not (root / name).exists():
+            if time.monotonic() > end:
+                raise RuntimeError('fixture barrier timed out: ' + name)
+            time.sleep(.01)
+    for name in ('train_events', 'in_flight', 'train_depth', 'acquire', 'release', 'build_candidate', 'verify', 'git'):
+        original = g[name]
+        def wrapped(*args, _name=name, _original=original, **kw):
+            note(_name)
+            if role == 'contender':
+                raise AssertionError('refused process reached ' + _name)
+            return _original(*args, **kw)
+        g[name] = wrapped
+    def workload(window, project, specs, main, fixes_base=False, after=None, slot=0):
+        note('run_window')
+        g['ev']('window-candidate', window, sha='fixture', verified_on='fixture-base', specs=specs, slot=slot)
+        with (root / 'gate-calls').open('a') as out:
+            out.write(json.dumps(dict(window=window, pid=os.getpid())) + '\n')
+        if mode == 'exception':
+            raise ValueError('fixture propagated exception')
+        if mode == 'child':
+            child = subprocess.Popen(['/usr/bin/python3', '-c', 'import time; time.sleep(30)'], close_fds=False,
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            pending_pid = root / 'child-pid.pending'
+            pending_pid.write_text(str(child.pid))
+            pending_pid.replace(root / 'child-pid')
+        if mode not in ('complete', 'cleanup', 'cleanup-exception'):
+            wait('finish')
+        return 0
+    def cleanup(repo, window):
+        note('cleanup')
+        if role == 'contender':
+            raise AssertionError('refused process reached cleanup')
+        if mode in ('cleanup', 'cleanup-exception'):
+            (root / 'cleaning').write_text(str(os.getpid()))
+            wait('finish')
+        if mode == 'cleanup-exception':
+            raise ValueError('fixture cleanup exception')
+    g['run_window'], g['cleanup'] = workload, cleanup
+    if mode == 'ledger-unreadable':
+        def unreadable(): raise OSError('fixture unreadable')
+        g['train_events'] = unreadable
+    if mode == 'in-flight': g['in_flight'] = lambda events: [dict(window='prior')]
+    if mode in ('invalid-predecessor', 'depth'):
+        n = 2 if mode == 'invalid-predecessor' else 1
+        g['train_events'] = lambda: [dict(type='window-candidate', subject='prior')] * n
+        g['in_flight'] = lambda events: [dict(window='prior')]
+        g['train_depth'] = lambda *a, **kw: dict(depth=1)
+    if mode == 'slot-unavailable': g['acquire'] = lambda *a: False
+    if mode == 'race':
+        original_lock = g['chain_lock']
+        def barrier(*args, **kw):
+            (root / ('ready.' + str(os.getpid()))).touch()
+            wait('start')
+            return original_lock(*args, **kw)
+        g['chain_lock'] = barrier
+    return None
+sys.settrace(install)
+'''
+
+
+class ChainFixture:
+    def __init__(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='window-chain-')
+        self.root = pathlib.Path(self.temp.name)
+        self.children = []
+        (self.root / 'events').mkdir()
+        site = self.root / 'site'
+        site.mkdir()
+        (site / 'sitecustomize.py').write_text(CHAIN_SITE)
+        self.env = dict(os.environ, DOIT_ROOT=str(self.root), DOIT_NO_POKE='1',
+                        DOIT_MAIN='master', DOIT_WINDOW_TRAIN_DEPTH='3',
+                        DOIT_GATE_LEDGER_FILE='L-executor-0001.jsonl',
+                        DOIT_LEDGER_FILE='L-executor-0001.jsonl',
+                        PYTHONPATH=str(site) + os.pathsep + str(HERE.resolve()))
+        self.env.pop('DOIT_WINDOW_GATE', None)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        # Reap detached production window-run children too: their launcher has
+        # already exited, so Popen alone does not own those process handles.
+        (self.root / 'finish').touch()
+        pid_files = list((self.root / 'state').glob('window-run.*.pid'))
+        for path in pid_files:
+            pid = int(path.read_text())
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                continue
+            self.wait(lambda: self.probe())
+        for process in self.children:
+            if process.poll() is None:
+                process.kill()
+            process.communicate(timeout=5)
+        child = self.root / 'child-pid'
+        if child.exists():
+            import signal
+            try: os.kill(int(child.read_text()), signal.SIGKILL)
+            except ProcessLookupError: pass
+        self.temp.cleanup()
+
+    def rows(self):
+        return [json.loads(line) for path in (self.root / 'events').glob('*.jsonl')
+                for line in path.read_text().splitlines()]
+
+    def wait(self, predicate):
+        deadline = time.monotonic() + 10
+        while not predicate():
+            assert time.monotonic() < deadline, 'fixture readiness barrier timed out'
+            time.sleep(.01)
+
+    def start(self, route='python', window='owner', role='holder', mode='normal', options=(), bypass=False):
+        args = [window, '--project', 'albert-scott', '--specs', 'A', *options]
+        if route == 'relative': argv = ['./doit', 'gate-window', *args]
+        elif route == 'absolute': argv = [str(HERE.resolve().parent / 'doit'), 'gate-window', *args]
+        elif route == 'queue':
+            argv = ['/usr/bin/python3', '-c',
+                    'import merge_queue; raise SystemExit(merge_queue.window_run("albert-scott", detach=True))']
+        else:
+            argv = ['/usr/bin/python3', '-c',
+                    'import sys, window_gate; sys.exit(window_gate.main_(sys.argv[1:]))', *args]
+        env = dict(self.env, CHAIN_ROLE=role, CHAIN_CASE=mode)
+        if bypass: env['DOIT_WINDOW_GATE'] = 'off'
+        p = subprocess.Popen(argv, cwd=HERE.resolve().parent, env=env,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.children.append(p)
+        return p
+
+    def candidate(self):
+        self.wait(lambda: any(r['type'] == 'window-candidate' for r in self.rows()))
+        return next(r for r in self.rows() if r['type'] == 'window-candidate')
+
+    def seed_queue(self):
+        code = ('import fold; '
+                'fold.append(["merge-gate-clean", "A", "branch=br-A", "project=albert-scott"]); '
+                'fold.append(["queue-add", "A", "branch=br-A", "project=albert-scott", "rule=operator"])')
+        subprocess.run(['/usr/bin/python3', '-c', code], env=self.env, check=True, capture_output=True)
+
+    def probe(self, project='albert-scott', root=None):
+        code = ('import window_gate; '
+                'exec("with window_gate.chain_lock(\'probe\', ' + repr(project) +
+                ', root=' + repr(str(root or self.root)) + ') as refusal:\\n print(refusal is None)")')
+        p = subprocess.run(['/usr/bin/python3', '-c', code], env=self.env, capture_output=True, text=True, check=True)
+        return p.stdout.strip() == 'True'
+
+    def refused(self, p, attempted, owner, owner_pid, reason='contended'):
+        out, err = p.communicate(timeout=5)
+        assert p.returncode == 3, (p.returncode, out, err)
+        rows = [r for r in self.rows() if r['type'] == 'window-refused']
+        row = rows[-1]
+        assert row['subject'] == row['window'] == attempted
+        assert row['project'] == 'albert-scott' and row['holder_window'] == owner
+        assert type(row['holder_pid']) is int and row['holder_pid'] == owner_pid and row['reason'] == reason
+        assert not (self.root / ('work.' + str(p.pid))).exists(), 'loser performed admission/gate/cleanup work'
+        return row
+
+
+def chain_ac1():
+    observations = []
+    for holder in ('relative', 'absolute', 'queue'):
+        for contender in ('relative', 'absolute', 'python'):
+            for equal in (True, False):
+                with ChainFixture() as fx:
+                    if holder == 'queue': fx.seed_queue()
+                    p = fx.start(holder)
+                    actual = fx.candidate()['subject']
+                    metadata = json.loads((fx.root / 'state/window-chain.albert-scott.lock').read_text())
+                    requested = actual if equal else 'other'
+                    before = (fx.root / 'state/window-chain.albert-scott.lock').stat().st_ino
+                    started = time.monotonic()
+                    loser = fx.start(contender, requested, 'contender')
+                    fx.refused(loser, requested, actual, metadata['pid'])
+                    assert time.monotonic() - started < 5
+                    assert json.loads((fx.root / 'state/window-chain.albert-scott.lock').read_text()) == metadata
+                    assert (fx.root / 'state/window-chain.albert-scott.lock').stat().st_ino == before
+                    assert len([r for r in fx.rows() if r['type'] == 'window-refused']) == 1
+                    assert len((fx.root / 'gate-calls').read_text().splitlines()) == 1
+                    assert metadata['pid'] == (p.pid if holder != 'queue' else int(next((fx.root / 'state').glob('window-run.*.pid')).read_text()))
+                    assert not fx.probe()
+                    (fx.root / 'finish').touch()
+                    if holder != 'queue': assert p.wait(timeout=5) == 0
+                    else: fx.wait(lambda: fx.probe())
+                    row = dict(holder=holder, contender=contender, equal_id=equal, owner_pid=metadata['pid'], exit=3, gate_calls=1)
+                    observations.append(row)
+                    print('AC1 matrix ' + json.dumps(row))
+    assert len(observations) == 18
+    with ChainFixture() as fx:
+        a = fx.start(window='same', mode='race')
+        b = fx.start(window='same', mode='race')
+        fx.wait(lambda: len(list(fx.root.glob('ready.*'))) == 2)
+        (fx.root / 'start').touch()
+        fx.candidate()
+        fx.wait(lambda: any(r['type'] == 'window-refused' for r in fx.rows()))
+        owner_pid = json.loads((fx.root / 'state/window-chain.albert-scott.lock').read_text())['pid']
+        winner, loser = (a, b) if a.pid == owner_pid else (b, a)
+        assert winner.pid == owner_pid
+        assert loser.wait(timeout=5) == 3
+        refusal = next(r for r in fx.rows() if r['type'] == 'window-refused')
+        assert (refusal['holder_pid'], refusal['holder_window'], refusal['reason']) in (
+            (winner.pid, 'same', 'contended'), (-1, '<unknown>', 'holder-undetermined'))
+        assert len((fx.root / 'gate-calls').read_text().splitlines()) == 1
+        (fx.root / 'finish').touch()
+        assert winner.wait(timeout=5) == 0
+        observations.append(dict(case='simultaneous', exits=[0, 3], gate_calls=1))
+    for options, bypass in ((('--after', 'absent'), False), (('--after', 'multiple'), False),
+                            (('--after', 'owner'), False), (('--fixes-base', '--after', 'absent'), False), ((), True)):
+        with ChainFixture() as fx:
+            p = fx.start()
+            fx.candidate()
+            if options == ('--after', 'multiple'):
+                subprocess.run(['/usr/bin/python3', '-c',
+                    'import window_gate; '
+                    '[window_gate.ev("window-candidate", "multiple", sha="fixture", verified_on="fixture-base", specs=["A"], slot=1) for _ in range(2)]'],
+                    env=fx.env, check=True, capture_output=True)
+            if options == ('--after', 'owner'):
+                fx.env['DOIT_WINDOW_TRAIN_DEPTH'] = '1'
+            loser = fx.start(window='option', role='contender', options=options, bypass=bypass)
+            fx.refused(loser, 'option', 'owner', p.pid)
+            (fx.root / 'finish').touch()
+            assert p.wait(timeout=5) == 0
+            observations.append(dict(options=options, bypass=bypass, exit=3))
+    return observations
+
+
+def window_chain_check(which):
+    functions = {'AC1': chain_ac1, 'AC2': chain_ac2, 'AC3': chain_ac3, 'AC4': chain_ac4}
+    assert which in functions, 'missing window-chain proof: ' + which
+    try:
+        body = functions[which]()
+    except AssertionError as exc:
+        body = dict(error=str(exc))
+        encoded = json.dumps(body, sort_keys=True)
+        print(json.dumps(dict(url='cli://window-chain/' + which, status=1,
+                             body_sha256=hashlib.sha256(encoded.encode()).hexdigest(), body_excerpt=body)))
+        raise
+    encoded = json.dumps(body, sort_keys=True)
+    print(json.dumps(dict(url='cli://window-chain/' + which, status=0,
+                         body_sha256=hashlib.sha256(encoded.encode()).hexdigest(), body_excerpt=body)))
+    print('window-chain ' + which + ' ok', flush=True)
+
+
+def chain_ac2():
+    import signal
+    observations = []
+    cases = [('complete', (), 0), ('ledger-unreadable', (), 3), ('in-flight', (), 3),
+             ('missing-predecessor', ('--after', 'absent'), 3),
+             ('invalid-predecessor', ('--after', 'prior'), 3), ('depth', ('--after', 'prior'), 3),
+             ('slot-unavailable', (), 3), ('exception', (), 1), ('cleanup', (), 0),
+             ('cleanup-exception', (), 1), ('SIGTERM', (), -signal.SIGTERM),
+             ('SIGKILL', (), -signal.SIGKILL), ('child', (), -signal.SIGKILL)]
+    for mode, options, code in cases:
+        with ChainFixture() as fx:
+            p = fx.start(mode=mode, options=options)
+            path = fx.root / 'state/window-chain.albert-scott.lock'
+            if mode in ('cleanup', 'cleanup-exception'):
+                fx.wait(lambda: (fx.root / 'cleaning').exists())
+                fx.refused(fx.start(window='during-cleanup', role='contender'), 'during-cleanup', 'owner', p.pid)
+                assert not fx.probe()
+                (fx.root / 'finish').touch()
+            if mode in ('SIGTERM', 'SIGKILL', 'child'):
+                fx.candidate()
+                if mode == 'child': fx.wait(lambda: (fx.root / 'child-pid').exists())
+                p.send_signal(signal.SIGTERM if mode == 'SIGTERM' else signal.SIGKILL)
+            out, err = p.communicate(timeout=5)
+            assert p.returncode == code, (mode, p.returncode, out, err)
+            inode = path.stat().st_ino
+            assert fx.probe() and path.stat().st_ino == inode
+            if mode == 'child': os.kill(int((fx.root / 'child-pid').read_text()), 0)
+            if mode in ('cleanup', 'cleanup-exception', 'exception', 'complete'):
+                assert not (fx.root / 'state/window-gate.0.lock').exists()
+            row = dict(case=mode, exit=code, reacquired=True, inode_persisted=True)
+            observations.append(row)
+            print('AC2 lifecycle ' + json.dumps(row))
+    for metadata in ('stale', 'live'):
+        with ChainFixture() as fx:
+            path = fx.root / 'state/window-chain.albert-scott.lock'
+            path.parent.mkdir()
+            path.write_text(json.dumps(dict(pid=os.getpid() if metadata == 'live' else 999999999, window='old')))
+            inode = path.stat().st_ino
+            assert fx.probe() and path.stat().st_ino == inode
+            observations.append(dict(case=metadata + '-unlocked', acquired=True))
+    for bad in ('', '{', '[]', '{"pid":null,"window":"owner"}',
+                '{"pid":0,"window":"owner"}', '{"pid":true,"window":"owner"}',
+                '{"pid":42,"window":"../bad"}', '{"pid":42}'):
+        with ChainFixture() as fx:
+            p = fx.start()
+            fx.candidate()
+            path = fx.root / 'state/window-chain.albert-scott.lock'
+            inode = path.stat().st_ino
+            path.write_text(bad)
+            fx.refused(fx.start(window='unknown', role='contender'), 'unknown', '<unknown>', -1, 'holder-undetermined')
+            assert path.read_text() == bad and path.stat().st_ino == inode and not fx.probe()
+            (fx.root / 'finish').touch()
+            assert p.wait(timeout=5) == 0
+            observations.append(dict(case='metadata-' + repr(bad), holder_window='<unknown>', holder_pid=-1))
+    with ChainFixture() as fx:
+        p = fx.start()
+        fx.candidate()
+        assert not fx.probe() and fx.probe(project='other-project')
+        assert fx.probe(root=fx.root / 'separate-root')
+        (fx.root / 'finish').touch()
+        assert p.wait(timeout=5) == 0
+        observations.append(dict(case='root-and-project-isolation', passed=True))
+    # Early returns must close descriptors even when main_ is called repeatedly
+    # in one interpreter, rather than relying on process exit to release them.
+    with ChainFixture() as fx, patch.object(fold, 'ROOT', fx.root), patch.object(fold, 'EVENTS', fx.root / 'events'):
+        descriptors = len(list(pathlib.Path('/proc/self/fd').iterdir()))
+        for _ in range(3):
+            with patch.object(window_gate, 'train_events', side_effect=OSError('unreadable')):
+                assert window_gate.main_(['fd-owner', '--project', 'albert-scott', '--specs', 'A']) == 3
+            assert fx.probe()
+        assert len(list(pathlib.Path('/proc/self/fd').iterdir())) == descriptors
+        observations.append(dict(case='same-interpreter-descriptors', leaked=0))
+    return observations
+
+
+def chain_ac3():
+    observations = []
+    with ChainFixture() as fx:
+        # Real contention append, then retry the pending queue item after exit.
+        fx.seed_queue()
+        p = fx.start()
+        fx.candidate()
+        fx.refused(fx.start(window='retry', role='contender'), 'retry', 'owner', p.pid)
+        refused_rows = [r for r in fx.rows() if r['subject'] == 'retry']
+        assert [r['type'] for r in refused_rows] == ['window-refused']
+        assert not any(r['type'] in ('queue-remove', 'shipped', 'window-verified') for r in fx.rows())
+        (fx.root / 'finish').touch()
+        assert p.wait(timeout=5) == 0
+        retry = fx.start(window='retry', mode='complete')
+        assert retry.wait(timeout=5) == 0
+        assert any(r['type'] == 'window-candidate' and r['subject'] == 'retry' for r in fx.rows())
+        reader = ('import fold, json, merge_queue; events=fold.read_events(); '
+                  'rows=fold.fold(events)[3]["retry"]; '
+                  'assert [e["type"] for e in rows] == ["window-refused", "window-candidate"]; '
+                  'assert merge_queue.next_candidate(events) == "A"; '
+                  'print(json.dumps(rows[0]))')
+        result = subprocess.run(['/usr/bin/python3', '-c', reader], env=fx.env, text=True, capture_output=True, check=True)
+        admitted = json.loads(result.stdout)
+        assert admitted['actor'] == 'executor' and type(admitted['holder_pid']) is int and admitted['holder_pid'] == p.pid
+        raw = next(r for r in fx.rows() if r['type'] == 'window-refused')
+        assert all(admitted[k] == v for k, v in raw.items())
+        observations.append(dict(case='production-refusal-independent-reader-retry', row=admitted))
+    # Every shape uses production append, and a fresh interpreter checks both
+    # the committed JSON and the production reader/fold, including actor names.
+    with ChainFixture() as fx, patch.object(fold, 'ROOT', fx.root), patch.object(fold, 'EVENTS', fx.root / 'events'):
+        valid = dict(window='attempt', project='albert-scott', holder_window='owner', holder_pid=os.getpid(), reason='contended')
+        sentinel = dict(valid, holder_window='<unknown>', holder_pid=-1, reason='holder-undetermined')
+        for actor in ('executor', 'tick', 'operator'):
+            for label, fields in (('known', valid), ('sentinel', sentinel)):
+                filename = 'L-' + actor + '-9000.jsonl'
+                with patch.dict(os.environ, DOIT_ROOT=str(fx.root), DOIT_GATE_LEDGER_FILE=filename):
+                    window_gate.ev('window-refused', 'attempt', **fields)
+                observations.append(dict(actor=actor, shape=label, accepted=True))
+        # Project omission uses fold.append's existing default; the other
+        # required payload fields must be supplied by the caller.
+        for name in ('window', 'holder_window', 'holder_pid', 'reason'):
+            fields = dict(valid)
+            del fields[name]
+            observations.append(dict(case='missing-' + name, rejected=True))
+            event = dict(type='window-refused', subject='attempt', **fields)
+            assert fold.required_reason(event)
+            before = sum(len(p.read_text().splitlines()) for p in (fx.root / 'events').glob('*.jsonl'))
+            try:
+                fold.append(['window-refused', 'attempt'] + [k + ':=' + json.dumps(v) for k, v in fields.items()])
+            except SystemExit: pass
+            else: raise AssertionError('missing field appended: ' + name)
+            assert sum(len(p.read_text().splitlines()) for p in (fx.root / 'events').glob('*.jsonl')) == before
+        for name, value in (('holder_window', None), ('holder_pid', None), ('holder_pid', 0)):
+            fields = dict(valid, **{name: value})
+            assert fold.required_reason(dict(type='window-refused', **fields))
+            before = len(fx.rows())
+            try:
+                fold.append(['window-refused', 'attempt'] + [k + ':=' + json.dumps(v) for k, v in fields.items()])
+            except SystemExit: pass
+            else: raise AssertionError('null/zero field appended')
+            assert len(fx.rows()) == before
+            observations.append(dict(case=name, value=value, rejected=True))
+        assert fold.admits(dict(type='window-refused', subject='attempt', **valid), 'builder')
+        with patch.dict(os.environ, DOIT_LEDGER_FILE='L-builder-9000.jsonl'):
+            try:
+                fold.append(['window-refused', 'attempt'] + [k + ':=' + json.dumps(v) for k, v in valid.items()], strict=True)
+            except SystemExit: pass
+            else: raise AssertionError('builder refusal admitted')
+        assert len(fx.rows()) == 6
+        reader = '''import fold, json
+raw = []
+for path in fold.EVENTS.glob('*.jsonl'):
+    for line in path.read_text().splitlines():
+        row = json.loads(line)
+        raw.append((row, fold.actor_of(path.name)))
+events = fold.read_events()
+admitted = fold.fold(events)[3]['attempt']
+assert len(raw) == len(events) == len(admitted) == 6
+for row, actor in raw:
+    assert not fold.required_reason(row) and not fold.admits(row, actor)
+    assert any(all(e[k] == v for k, v in row.items()) and e['actor'] == actor for e in admitted)
+    assert type(row['holder_pid']) is int
+    assert (row['holder_pid'] > 0 and row['holder_window'] == 'owner' and row['reason'] == 'contended') or (row['holder_pid'] == -1 and row['holder_window'] == '<unknown>' and row['reason'] == 'holder-undetermined')
+print(json.dumps(dict(committed=len(raw), admitted=len(admitted), actors=sorted(set(e['actor'] for e in events)))))
+'''
+        result = subprocess.run(['/usr/bin/python3', '-c', reader], env=fx.env, capture_output=True, text=True, check=True)
+        observations.append(dict(case='independent-admission-readback', **json.loads(result.stdout)))
+        observations.append(dict(actor='builder', accepted=False))
+    with ChainFixture() as fx, patch.object(fold, 'ROOT', fx.root), patch.object(fold, 'EVENTS', fx.root / 'events'), \
+         patch.object(fold, 'PROJECT', 'albert-scott'), \
+         patch.dict(os.environ, DOIT_LEDGER_FILE='L-executor-9000.jsonl'):
+        omitted = dict(valid)
+        del omitted['project']
+        assert fold.required_reason(dict(type='window-refused', **omitted))
+        fold.append(['window-refused', 'attempt'] + [k + ':=' + json.dumps(v) for k, v in omitted.items()])
+        reader = '''import fold, json
+raw = [json.loads(line) for path in fold.EVENTS.glob('*.jsonl') for line in path.read_text().splitlines()]
+events = fold.read_events()
+admitted = fold.fold(events)[3]['attempt']
+assert len(raw) == len(events) == len(admitted) == 1
+assert raw[0]['project'] == admitted[0]['project'] == 'albert-scott'
+assert not fold.required_reason(raw[0]) and not fold.admits(raw[0], 'executor')
+assert admitted[0]['actor'] == 'executor' and type(admitted[0]['holder_pid']) is int
+assert all(admitted[0][key] == value for key, value in raw[0].items())
+print(json.dumps(dict(project=raw[0]['project'], committed=len(raw), admitted=len(admitted))))
+'''
+        result = subprocess.run(['/usr/bin/python3', '-c', reader], env=fx.env, capture_output=True, text=True, check=True)
+        observations.append(dict(case='missing-project-default', accepted=True, **json.loads(result.stdout)))
+    for row in observations: print('AC3 admission ' + json.dumps(row))
+    return observations
+
+
+def chain_ac4():
+    chain_signature_checks()
+    observations = []
+    # Validation must be event-free and must not even create the state directory.
+    invalid = [(['--help'], 0), (['../escape', '--project', 'albert-scott', '--specs', 'A'], 1),
+               (['..', '--project', 'albert-scott', '--specs', 'A'], 1),
+               (['ok', '--project', '../escape', '--specs', 'A'], 1),
+               (['ok', '--project', 'other', '--specs', 'A'], 1),
+               (['ok', '--project', 'albert-scott', '--specs', 'A', '--after', '../bad'], 1),
+               (['ok', '--project', 'albert-scott', '--unknown'], 1),
+               (['ok', '--project', 'albert-scott'], 2)]
+    for args, expected in invalid:
+        with ChainFixture() as fx:
+            result = subprocess.run([str(HERE.resolve().parent / 'doit'), 'gate-window', *args],
+                                    env=fx.env, capture_output=True, text=True)
+            assert result.returncode == expected, (args, result.stderr)
+            assert not fx.rows() and not (fx.root / 'state').exists()
+            observations.append(dict(args=args, exit=expected, prelock=True))
+    with ChainFixture() as fx:
+        p = fx.start(window='bypass', mode='complete', bypass=True)
+        assert p.wait(timeout=5) == 4
+        assert [r['type'] for r in fx.rows()] == ['window-gate-bypassed']
+        assert fx.probe()
+        observations.append(dict(case='unlocked-bypass', exit=4))
+    # Existing git/service fixture exercises ordinary outcomes, not the synthetic
+    # blocking workload used only to make process contention deterministic.
+    for green in (True, False):
+        with patch.dict(os.environ):
+            fx = Fx({'A': 'a.txt'})
+            try:
+                fx.run_n(1, 0 if green else 2, GREEN if green else '')
+                result = fx.go(window='ordinary')
+                assert result == (0 if green else 2)
+                assert (fx.master() != fx.base) is green
+                assert bool(fx.events('shipped')) is green
+                assert not fx.events('window-refused')
+                observations.append(dict(case='ordinary-green' if green else 'ordinary-undetermined', exit=result, advanced=green))
+            finally:
+                fx.tempdir.cleanup()
+    with ChainFixture() as fx:
+        for i in range(2):
+            p = fx.start(window='repeat', mode='complete')
+            assert p.wait(timeout=5) == 0
+        assert len((fx.root / 'gate-calls').read_text().splitlines()) == 2
+        assert not any(r['type'] == 'window-refused' for r in fx.rows())
+        observations.append(dict(case='sequential-repeat', admitted=2))
+    with ChainFixture() as fx:
+        p = fx.start(window='predecessor')
+        fx.candidate()
+        fx.refused(fx.start(window='successor', role='contender', options=('--after', 'predecessor')),
+                   'successor', 'predecessor', p.pid)
+        (fx.root / 'finish').touch()
+        assert p.wait(timeout=5) == 0
+        observations.append(dict(case='active-predecessor-depth-three', exit=3))
+    # Explicit reports for every required regression entry point. Children have
+    # no selector argument, so this never recursively selects AC4.
+    with ChainFixture() as scratch:
+        env = dict(os.environ, DOIT_ROOT=str(scratch.root))
+        env.pop('PYTHONPATH', None)
+        env = {k: v for k, v in env.items() if not k.startswith('SUPABASE_DB_URL')}
+        failures = []
+        for argv in (['/usr/bin/python3', 'src/test_window_gate.py'],
+                     ['/usr/bin/python3', 'src/test_window_failure_disposition.py'],
+                     ['/usr/bin/python3', 'src/test_merge_queue.py'],
+                     ['/usr/bin/python3', 'src/test_fold.py'], ['./doit', 'test'], ['./doit']):
+            print('AC4 running ' + shlex.join(argv), flush=True)
+            result = subprocess.run(argv, cwd=HERE.resolve().parent, env=env, capture_output=True, text=True)
+            # Preserve complete failure lists for baseline comparison.
+            print('AC4 command ' + shlex.join(argv) + ' exit=' + str(result.returncode), flush=True)
+            if result.returncode:
+                print(result.stdout, result.stderr, flush=True)
+            if result.returncode: failures.append((argv, result))
+            if argv == ['./doit']: assert 'HEALTH' in result.stdout, 'HEALTH absent'
+            observations.append(dict(command=shlex.join(argv), exit=result.returncode,
+                                     health='HEALTH' in result.stdout if argv == ['./doit'] else None))
+        if failures:
+            observations.extend(chain_base_failures(failures, env))
+    assert not FAILS, FAILS
+    return observations
+
+
+def chain_failure_signature(argv, result, repo, base, required_tests=None):
+    """Fail closed unless every failure has unchanged, out-of-grant evidence."""
+    import re
+    text = result.stdout + result.stderr
+    if argv == ['./doit', 'test']:
+        blocks = re.split(r'^· (test_\S+)\n', text, flags=re.M)
+        failures = {}
+        for name, output in zip(blocks[1::2], blocks[2::2]):
+            if re.search(r'^FAIL ' + re.escape(name) + r' \(exit \d+\)$', output, re.M):
+                failures[name] = output
+        # Non-test guards must also be accounted for; never hide a trailing red.
+        for name in ('retired check', 'machine check'):
+            if re.search(r'^FAIL ' + name + r'(?: \(exit \d+\))?$', text, re.M):
+                raise AssertionError('unclassified regression guard: ' + name)
+        assert failures, 'nonzero suite without a complete failure list'
+    else:
+        failures = {argv[-1]: text}
+    if required_tests is not None:
+        assert set(required_tests) <= failures.keys(), 'HEAD-only regression: missing baseline failure'
+        extras = sorted(failures.keys() - set(required_tests))
+        print('AC4 baseline-only failures ' + json.dumps(dict(count=len(extras), tests=extras,
+              reason='absent from HEAD failure list; not attributed to this change')), flush=True)
+        failures = {name: failures[name] for name in required_tests}
+    signatures = {}
+    for name, output in failures.items():
+        frames = []
+        for filename, line, function, source in re.findall(
+                r'  File "([^"]+)", line (\d+), in ([^\n]+)\n\s+([^\n]+)', output):
+            if filename.startswith('<') and filename.endswith('>'):
+                continue
+            path = pathlib.Path(filename).resolve()
+            if not path.is_relative_to(repo):
+                continue
+            relative = path.relative_to(repo).as_posix()
+            assert relative not in ('src/window_gate.py', 'src/test_window_gate.py', 'src/fold_emits.py'), relative
+            diff = subprocess.check_output(['git', 'diff', base, '--', relative], cwd=repo, text=True)
+            assert not diff, 'changed failing source: ' + relative
+            frames.append((relative, int(line), function, source))
+        errors = re.findall(r'^\w*(?:Error|Exception|Failure)(?::[^\n]*)?$', output, re.M)
+        # unittest abbreviates long values using a length that includes the
+        # disposable checkout path; retain the actual differing text.
+        errors = [re.sub(r'\[\d+ chars\]', '[... chars]', error.replace(str(repo), '<repo>'))
+                  for error in errors]
+        assert frames and errors, 'unclassified regression failure: ' + name
+        signatures[name] = dict(frames=frames, errors=errors)
+    return signatures
+
+
+def chain_signature_checks():
+    """Synthetic traceback names must compare the same in different checkouts."""
+    repo = HERE.resolve().parent
+    with tempfile.TemporaryDirectory(prefix='chain-signature-') as directory:
+        baseline = pathlib.Path(directory) / 'tree'
+        def failure(tree, filename='src/test_fold.py'):
+            output = ('Traceback (most recent call last):\n'
+                      '  File "<string>", line 30, in <module>\n'
+                      '    exec(code)\n'
+                      f'  File "{tree / filename}", line 4207, in check\n'
+                      '    assert line_count <= 2465, line_count\n'
+                      'AssertionError: 2560\n')
+            return subprocess.CompletedProcess([], 1, stdout=output, stderr='')
+        # Only the unchanged-source probe is stubbed: this regression concerns
+        # traceback attribution, including names that are not files at all.
+        with patch.object(subprocess, 'check_output', return_value=''):
+            args = ['/usr/bin/python3', 'src/test_fold.py']
+            current = chain_failure_signature(args, failure(repo), repo, 'baseline')
+            previous = chain_failure_signature(args, failure(baseline), baseline, 'baseline')
+            assert current == previous, 'synthetic frame depends on checkout location'
+            assert len(current[args[-1]]['frames']) == 1
+            # unittest embeds a child's traceback in the outer AssertionError;
+            # its checkout prefix and length abbreviation vary across worktrees.
+            def nested_failure(tree, abbreviation):
+                result = failure(tree)
+                result.stdout = result.stdout.replace(
+                    'AssertionError: 2560',
+                    f'AssertionError: nested File "{tree / "src/test_fold.py"}" [{abbreviation} chars]')
+                return result
+            current = chain_failure_signature(args, nested_failure(repo, 100), repo, 'baseline')
+            previous = chain_failure_signature(args, nested_failure(baseline, 120), baseline, 'baseline')
+            assert current == previous, 'nested traceback depends on checkout location'
+            # HEAD can fix a baseline-only failure. Compare every HEAD failure
+            # without treating an extra baseline failure as a HEAD regression.
+            suite_args = ['./doit', 'test']
+            head_suite = failure(repo)
+            head_suite.stdout = '· test_fold.py\nFAIL test_fold.py (exit 1)\n' + head_suite.stdout
+            base_suite = failure(baseline)
+            base_suite.stdout = ('· test_fold.py\nFAIL test_fold.py (exit 1)\n' + base_suite.stdout +
+                                 '· test_window_gate.py\nFAIL test_window_gate.py (exit 1)\n' +
+                                 failure(baseline, 'src/test_window_gate.py').stdout)
+            current = chain_failure_signature(suite_args, head_suite, repo, 'baseline')
+            previous = chain_failure_signature(suite_args, base_suite, baseline, 'baseline', required_tests=current)
+            assert current == previous, 'baseline-only fixed failure hides an identical HEAD failure'
+            try:
+                chain_failure_signature(suite_args, base_suite, baseline, 'baseline', required_tests={'absent.py'})
+            except AssertionError:
+                pass
+            else:
+                raise AssertionError('HEAD-only suite failure accepted as pre-existing')
+            try:
+                chain_failure_signature(args, failure(repo, 'src/window_gate.py'), repo, 'baseline')
+            except AssertionError:
+                pass
+            else:
+                raise AssertionError('in-grant failure accepted as pre-existing')
+
+
+def chain_base_failures(failures, env):
+    """Standing base-red rule: prove identical failures with the same commands."""
+    repo = HERE.resolve().parent
+    base = subprocess.check_output(['git', 'merge-base', 'HEAD', 'origin/main'], cwd=repo, text=True).strip()
+    probe = subprocess.run(['doit', 'base-red', 'do-it-v2', base], cwd=repo, env=env,
+                           capture_output=True, text=True)
+    print('AC4 base-red exit=' + str(probe.returncode), flush=True)
+    observations = []
+    # One checkout for this selector, under TMPDIR, removed even on failure.
+    with tempfile.TemporaryDirectory(prefix='window-chain-base-') as directory:
+        root = pathlib.Path(directory)
+        tree = root / 'tree'
+        subprocess.run(['git', 'worktree', 'add', '--detach', str(tree), base], cwd=repo,
+                       check=True, capture_output=True, text=True)
+        try:
+            baseline_env = {k: v for k, v in env.items()
+                            if not k.startswith('SUPABASE_DB_URL') and k != 'AS_LOCAL_PG_ADMIN'}
+            baseline_env['DOIT_ROOT'] = str(root / 'state')
+            (root / 'state').mkdir()
+            for argv, head in failures:
+                print('AC4 baseline running ' + shlex.join(argv), flush=True)
+                before = subprocess.run(argv, cwd=tree, env=baseline_env, capture_output=True, text=True)
+                print('AC4 baseline command ' + shlex.join(argv) + ' exit=' + str(before.returncode), flush=True)
+                current = chain_failure_signature(argv, head, repo, base)
+                previous = chain_failure_signature(argv, before, tree, base, required_tests=current)
+                print('AC4 failure comparison ' + json.dumps(dict(command=shlex.join(argv), head=current, base=previous)), flush=True)
+                assert head.returncode == before.returncode and current == previous, 'HEAD-only regression: ' + shlex.join(argv)
+                observations.append(dict(command=shlex.join(argv), head_exit=head.returncode,
+                                         base_exit=before.returncode, pre_existing=current))
+        finally:
+            subprocess.run(['git', 'worktree', 'remove', '--force', str(tree)], cwd=repo, check=True, capture_output=True)
+    return observations
+
+
+if '--window-chain-check' in sys.argv:
+    assert len(sys.argv) == 3 and sys.argv[1] == '--window-chain-check'
+    window_chain_check(sys.argv[2])
+    sys.exit(0)
 
 
 ac4_quarantined_never_drops()
