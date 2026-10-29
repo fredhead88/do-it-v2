@@ -15,10 +15,10 @@ tree_guards = [
 ]
 dispatch_timeout_min = 70
 train_depth = 2
-max_merges = 10
+max_merges = 15
 
 [merge_queue]
-batch_cap = 10
+batch_cap = 15
 batch_cap_floor = 6
 
 [thresholds]
