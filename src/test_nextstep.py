@@ -1064,5 +1064,63 @@ class NoSilentUndeterminedTests(unittest.TestCase):
                                          hold=asdict(held), review=asdict(review)))
 
 
+class R7BaseRefreshTests(unittest.TestCase):
+    setUp = NextStepTests.setUp
+    steps = NextStepTests.steps
+    one = NextStepTests.one
+
+    def signed(self, name, body):
+        payload = json.dumps(body, sort_keys=True)
+        print(json.dumps(dict(url='cli://r7/' + name, status=0,
+            body_sha256=hashlib.sha256(payload.encode()).hexdigest(), body_excerpt=body)))
+
+    def test_failure_class_and_step(self):
+        import grading_env
+        for name in ('stale-base', 'branch-not-descendant', 'pinned-base-mismatch'):
+            for diagnostic in (name, 'reason=' + name, 'problem:' + name + ' — refresh'):
+                self.assertEqual(ns.classify_failure(diagnostic, 1), 'base-refresh', diagnostic)
+                self.assertEqual(grading_env.failure_kind(diagnostic), 'unknown')
+            for diagnostic in ('prefix-' + name, name + '-suffix', 'question about ' + name,
+                               'problem:' + name + '-suffix', 'reason=' + name + '-suffix'):
+                self.assertEqual(ns.classify_failure(diagnostic, 1), 'unknown', diagnostic)
+            kind = 'build-blocked' if name == 'pinned-base-mismatch' else 'spawn-failed'
+            events = [event('spec-written', -60, actor='operator'),
+                      event(kind, -20, actor='builder', spawn='L-builder-9774', reason='problem:' + name + ' — refresh')]
+            step = self.one(events)
+            self.assertEqual((step.owner, step.state, step.action), ('executor', 'hold', None))
+            for word in ('base-refresh', 'regenerate', 'redispatch', 'safe auto-rebase'):
+                self.assertIn(word, step.reason)
+            self.assertIn('effective base', step.clears)
+            self.assertIn('packet', step.clears)
+            self.assertEqual(self.one(events), step)
+            self.signed('R7-' + name, asdict(step))
+            started = events + [event('build-started', -10, spawn='L-builder-9775')]
+            self.assertNotIn('base-refresh', self.one(started).reason)
+        self.assertNotIn('build-blocked', ns.FAILURES)
+        for text, expected in (('FAILED fixture', 'work'), ('No space left on device', 'infra'),
+                               ('FAILED No space left on device', 'unknown'), ('other', 'unknown')):
+            self.assertEqual(ns.classify_failure(text, 1), expected)
+            self.assertEqual(grading_env.failure_kind(text), expected)
+        baseline = [event('spec-written', -90, actor='operator'),
+                    event('build-blocked', -40, actor='builder', spawn='L-builder-9774', reason='needs judgment'),
+                    event('question', -30, actor='builder', spawn='L-builder-9774', asks='Which option?')]
+        original = self.one(baseline)
+        incidental = deepcopy(baseline)
+        incidental[-1]['asks'] += ' stale-base pinned-base-mismatch'
+        incidental[-2]['why'] = 'reason=pinned-base-mismatch'
+        self.assertEqual(self.one(incidental), original)
+        answered = baseline + [event('decision', -10, actor='operator', ref=baseline[-1]['_src'])]
+        self.assertEqual(self.one(answered).action, 'rebuild')
+        self.signed('R7-unrelated-blocked', dict(original=asdict(original), answered=asdict(self.one(answered))))
+        exhausted = [event('spec-written', -90, actor='operator')]
+        exhausted += [event('spawn-failed', -60 + n * 10, actor='tick', role='builder',
+                            spawn=f'L-builder-{9800 + n}', reason='vanished') for n in range(3)]
+        exhausted += [event('spawn-failed', -10, actor='builder', spawn='L-builder-9803', reason='stale-base')]
+        held = self.one(exhausted)
+        self.assertIn('retry exhausted: 3', held.reason)
+        self.assertEqual((held.owner, held.action), ('executor', None))
+        self.signed('R7-bounded-exhaustion', asdict(held))
+
+
 if __name__ == '__main__':
     unittest.main()

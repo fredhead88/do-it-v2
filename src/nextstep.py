@@ -76,6 +76,12 @@ PACKET_INCOMPLETE_RE = re.compile(
     r'^packet: incomplete criterion [A-Za-z][A-Za-z0-9_.-]* from [^\s\r\n][^\r\n]*$', re.M)
 
 
+BASE_FAILURES = ('stale-base', 'branch-not-descendant', 'pinned-base-mismatch')
+BASE_FAILURE_RE = re.compile(
+    r'(?:^(?:' + '|'.join(BASE_FAILURES) + r')$|'
+    r'(?:\breason=|\bproblem:)(?:' + '|'.join(BASE_FAILURES) + r')(?=$|\s|[,;]))', re.M)
+
+
 def classify_failure(text, exit_code, rules=None):
     """Conservative SD3 classifier; mixed evidence is always unknown."""
     if exit_code is None:
@@ -92,7 +98,8 @@ def classify_failure(text, exit_code, rules=None):
         text, re.I) or SCHEMA_REJECTION_RE.search(text))
     work = bool(re.search(r'\bFAILED\b|\bAssertionError\b', text))
     defect = bool(PACKET_INCOMPLETE_RE.search(text))
-    classes = [name for name, present in (('infra', infra), ('work', work), ('spec-defect', defect))
+    base = bool(BASE_FAILURE_RE.search(text))
+    classes = [name for name, present in (('infra', infra), ('work', work), ('spec-defect', defect), ('base-refresh', base))
                if present]
     return classes[0] if len(classes) == 1 else 'unknown'
 
@@ -181,7 +188,8 @@ def _attempt_role(e):
 
 def _refusal(e):
     return (e.get('type') == 'spawn-failed'
-            and str(e.get('reason') or '').startswith(NOT_READY_PREFIXES))
+            and (str(e.get('reason') or '').startswith(NOT_READY_PREFIXES)
+                 or str(e.get('reason') or '') in BASE_FAILURES))
 
 
 def _history_events(evs):
@@ -668,13 +676,53 @@ def _failure_text(event):
 def _failure(evs, rules):
     latest = next((e for e in reversed(evs) if e['type'] in FAILURES | RETRIES
                    and not (e['type'] == 'spawn-failed'
-                            and str(e.get('reason') or '').startswith(NOT_READY_PREFIXES))), None)
-    if latest and latest['type'] in FAILURES:
+                            and str(e.get('reason') or '').startswith(NOT_READY_PREFIXES))
+                   or e['type'] == 'build-blocked' and _base_blocked(e)), None)
+    base = next((e for e in reversed(evs) if _base_blocked(e)
+                 or e['type'] == 'spawn-failed' and e.get('reason') in BASE_FAILURES), None)
+    if base and latest and latest['type'] in RETRIES and _time(latest['ts']) == _time(base['ts']):
+        latest = base
+    if latest and (latest['type'] in FAILURES or _base_blocked(latest)):
         if _vanished(latest):
             return latest, 'retry'
-        text = _failure_text(latest)
-        return latest, classify_failure(text, latest.get('exit_code', 1), rules)
+        text = latest['reason'] if _base_blocked(latest) else _failure_text(latest)
+        classification = classify_failure(text, latest.get('exit_code', 1), rules)
+        if classification == 'base-refresh':
+            # Actor files can tie at second resolution. Builder ids are allocated
+            # monotonically; a newer start discharges an older refused dispatch.
+            def order(e):
+                spawn = re.fullmatch(r'L-builder-(\d+)', str(e.get('spawn') or ''))
+                return (_time(e['ts']), int(spawn[1]) if spawn else -1)
+            if any(e['type'] == 'build-started' and order(e) > order(latest) for e in evs):
+                return None, None
+        return latest, classification
     return None, None
+
+
+def _base_blocked(event):
+    reason = str(event.get('reason') or '')
+    return (event.get('type') == 'build-blocked'
+            and bool(BASE_FAILURE_RE.search(reason))
+            and ('pinned-base-mismatch' == reason
+                 or re.search(r'(?:\breason=|\bproblem:)pinned-base-mismatch(?=$|\s|[,;])', reason)))
+
+
+def _base_refresh_hold(c, failure):
+    evs = c['evs']
+    trigger = _latest(evs, {'decision', 'spec-written', 'window-dropped', 'verdict', 'conflict-rework', 'merge-conflict'})
+    history = attempts.history(_history_events(evs), trigger or failure, 'builder', now=c['now'])
+    detail = str(failure.get('why') or failure.get('reason') or '')
+    reason = ('base-refresh: regenerate the packet with the current effective base and redispatch; '
+              'dispatch performs safe auto-rebase of a clean ordinary branch')
+    if 'dirty work' in detail:
+        reason += '; builder/operator preserves and cleans dirty work first'
+    elif 'rebase conflict' in detail:
+        reason += '; Executor uses existing subject-authorized conflict-rework to send the builder to resolve the conflict'
+    if history.exhausted:
+        reason += f'; retry exhausted: {history.n_failed} failed attempts; operator authorization required'
+    return _hold(c['sid'], 'spec', _stage(evs), failure, reason,
+                 'refreshed effective base/branch and regenerated packet; successful redispatch'
+                 + (' after new authorized trigger or operator decision' if history.exhausted else ''))
 
 
 def _choose(c, rows, owners):
@@ -842,6 +890,9 @@ def next_steps(events, specs, now, rules, waves=None):
                                    'executor' if exhausted else 'tick', audit['since']))
             continue
         failure, classification = _failure(evs, rules)
+        if classification == 'base-refresh':
+            steps.append(_base_refresh_hold(c, failure))
+            continue
         if classification == 'spec-defect':
             diagnostic = PACKET_INCOMPLETE_RE.search(_failure_text(failure)).group(0)
             steps.append(_hold(sid, 'spec', stage, failure, 'spec-defect: ' + diagnostic,
