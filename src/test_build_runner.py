@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
 """Hermetic CLI regressions; git and the append/fold store are real."""
 import hashlib
+import contextlib
+import io
 import json
 import os
 import pathlib
 import shutil
+import signal
+import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -25,6 +30,10 @@ class BuildRunnerTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix="build-runner-test-")
         self.addCleanup(self.temp.cleanup)
         self.top = pathlib.Path(self.temp.name)
+        self.aliases = self.top / "aliases"
+        self.backing = self.top / "backing"
+        self.aliases.mkdir()
+        self.backing.mkdir()
         self.root = self.top / "root"
         self.repo = self.root / "repos" / "demo"
         self.repo.mkdir(parents=True)
@@ -80,11 +89,20 @@ class BuildRunnerTests(unittest.TestCase):
         (self.root / "events" / "L-builder-fixture.jsonl").write_text(json.dumps(event) + "\n")
 
     def cli(self, *args, driver=False, **env):
-        argv = ([sys.executable, str(FIX / "driver.py")] if driver else
-                [str(DOIT), "run-checks"])
+        argv = self.runner_argv(driver)
         result = subprocess.run([*argv, self.sid, *args], env=dict(self.env, **env),
                                 capture_output=True, text=True, timeout=20)
         return result
+
+    def runner_argv(self, driver=False):
+        # Set the declared test seams before any startup discovery in children.
+        code = ("import sys,pathlib,runpy; sys.path.insert(0,sys.argv.pop(1)); "
+                "import build_runner as r; r.SHORT_TMP_ROOT=pathlib.Path(sys.argv.pop(1)); "
+                "r.SHORT_TMP_BACKING_ROOT=pathlib.Path(sys.argv.pop(1)); ")
+        code += ("runpy.run_path(sys.argv.pop(1),run_name='__main__')" if driver else
+                 "sys.exit(r.main(sys.argv[1:]))")
+        return [sys.executable, "-c", code, str(HERE), str(self.aliases), str(self.backing),
+                *([str(FIX / "driver.py")] if driver else [])]
 
     def bundle(self, *args, **kw):
         result = self.cli(*args, **kw)
@@ -321,11 +339,15 @@ class BuildRunnerTests(unittest.TestCase):
                     # Relative venvs follow db_setup's disposable-tree resolution.
                     expected = pathlib.Path(row["cwd"]) / configured / "bin"
                     self.assertEqual(row["exit"], 0)
-                    self.assertEqual(self.tail(row).decode().splitlines(), [
+                    output = self.tail(row).decode().splitlines()
+                    self.assertEqual(output[:-1], [
                         str(expected / "alembic"), str(expected / "python"),
                         "venv-alembic", "venv-python",
-                        str(expected) + os.pathsep + self.env["PATH"],
-                        str(pathlib.Path(row["cwd"] + "-env") / "tmp")])
+                        str(expected) + os.pathsep + self.env["PATH"]])
+                    tmp = pathlib.Path(output[-1])
+                    self.assertEqual(tmp.parent, self.aliases)
+                    self.assertRegex(tmp.name, r"^dr-[1-9][0-9]*-[a-z0-9]{8}$")
+                    self.assertFalse(os.path.lexists(tmp))
                 # The next config must run again even if its git tip is unchanged.
                 path.unlink()
                 shutil.rmtree(path.with_suffix(""))
@@ -532,7 +554,7 @@ class BuildRunnerTests(unittest.TestCase):
         counter = self.top / "counter"
         self.spec(f"python3 -c 'import pathlib,time;p=pathlib.Path(\"{counter}\"); "
                   "f=p.open(\"a\");f.write(\"run\\n\");f.close();time.sleep(.15)'")
-        argv = [str(DOIT), "run-checks", self.sid]
+        argv = [*self.runner_argv(), self.sid]
         processes = [subprocess.Popen(argv, env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                      for _ in range(2)]
         try:
@@ -743,6 +765,491 @@ class NodeModulesTests(unittest.TestCase):
                 build_runner._node(dashboard.parent, {"node_dirs": ["dashboard"]},
                                    {}, time.monotonic() + 10)
             self.assertFalse((dashboard / "node_modules").exists())
+
+
+class ShortTmpdirTests(unittest.TestCase):
+    """Real allocation/write/socket evidence; all discovery roots are private."""
+
+    def setUp(self):
+        self.stack = contextlib.ExitStack()
+        self.addCleanup(self.stack.close)
+        self.top = pathlib.Path(self.stack.enter_context(tempfile.TemporaryDirectory(
+            prefix="short-tmp-test-", dir=build_runner.scratch.sub("tests"))))
+        self.aliases = pathlib.Path(self.stack.enter_context(
+            tempfile.TemporaryDirectory(prefix="drt-", dir="/tmp")))
+        self.backing = self.top / ("scratch-backing-" + "x" * 100)
+        self.backing.mkdir()
+        self.production_root = build_runner.SHORT_TMP_ROOT
+        self.stack.enter_context(patch.multiple(build_runner, SHORT_TMP_ROOT=self.aliases,
+                                                SHORT_TMP_BACKING_ROOT=self.backing))
+        self.stack.enter_context(patch.dict(os.environ, DOIT_SCRATCH=str(self.top / "scratch")))
+        self.proc = self.top / "proc"
+        (self.proc / "net").mkdir(parents=True)
+        (self.proc / "net" / "unix").write_text("Num RefCount Protocol Flags Type St Inode Path\n")
+        self.events = []
+
+    def evidence(self, ac, **body):
+        text = json.dumps(body, sort_keys=True)
+        print(json.dumps(dict(url=f"cli://test_build_runner/ShortTmpdirTests.{ac}", status=0,
+            body_sha256=hashlib.sha256(text.encode()).hexdigest(), body_excerpt=text)))
+
+    def allocate(self):
+        alias = build_runner.short_tmpdir()
+        return alias, pathlib.Path(os.readlink(alias))
+
+    def remove(self, alias, backing):
+        build_runner._remove_tmp_pair(alias, backing, build_runner._tmp_pair(alias, backing))
+
+    def child(self, code, *args, env=None):
+        return subprocess.run([sys.executable, "-c", code, *map(str, args)], env=env,
+                              text=True, capture_output=True, check=True, timeout=15).stdout.strip()
+
+    def test_ac1(self):
+        self.assertEqual(self.production_root, pathlib.Path("/tmp"))
+        allocated = []
+        for case in ("first", "consecutive", "delete-reallocate", "long-inherited", "long-scratch"):
+            with self.subTest(case=case), patch.dict(os.environ,
+                    TMPDIR="/ignored/" + "a" * 200, TMP="/ignored/" + "b" * 200,
+                    TEMP="/ignored/" + "c" * 200,
+                    DOIT_SCRATCH=str(self.top / ("long-scratch-" + "d" * 180))):
+                # Also exercise the real scratch.sub selection with a long root.
+                with patch.object(build_runner, "SHORT_TMP_BACKING_ROOT", None):
+                    alias, backing = self.allocate()
+                self.assertNotIn(alias, allocated)
+                allocated.append(alias)
+                self.assertEqual(alias.parent, self.aliases)
+                self.assertRegex(alias.name, rf"^dr-{os.getpid()}-[a-z0-9]{{8}}$")
+                self.assertEqual(backing.name, alias.name)
+                self.assertEqual(backing.parent, pathlib.Path(os.environ["DOIT_SCRATCH"]) / "runner-tmp")
+                nested = alias / ("s" * 20)
+                nested.mkdir()
+                sockpath = nested / ".s.PGSQL.65535"
+                self.assertLess(len(os.fsencode(sockpath)), 107)
+                self.assertLess(len(os.fsencode(pathlib.Path("/tmp") / alias.name /
+                                               ("s" * 20) / ".s.PGSQL.65535")), 107)
+                with socket.socket(socket.AF_UNIX) as sock:
+                    sock.bind(str(sockpath))
+                env = dict(os.environ, TMPDIR=str(alias), TMP=str(alias), TEMP=str(alias))
+                output = json.loads(self.child(
+                    "import os,pathlib,stat,tempfile,json; "
+                    "a=pathlib.Path(os.environ['TMPDIR']); st=a.stat(); "
+                    "assert st.st_uid==os.geteuid() and stat.S_IMODE(st.st_mode)==0o700; "
+                    "f=tempfile.NamedTemporaryFile(delete=False); f.write(b'x'*(1024*1024)); "
+                    "f.close(); print(json.dumps([f.name,str(pathlib.Path(f.name).resolve())]))", env=env))
+                lexical, canonical = map(pathlib.Path, output)
+                self.assertEqual(lexical.parent, alias)
+                self.assertEqual(canonical.parent, backing)
+                self.assertEqual(self.child(
+                    "import pathlib,sys; b=pathlib.Path(sys.argv[1]).read_bytes(); "
+                    "assert b==b'x'*(1024*1024); print(len(b))", lexical), "1048576")
+                self.assertFalse([p for root, dirs, files in os.walk(self.aliases, followlinks=False)
+                                  for p in files if stat.S_ISREG((pathlib.Path(root)/p).lstat().st_mode)])
+                self.remove(alias, backing)
+                self.assertFalse(os.path.lexists(alias))
+                self.assertFalse(backing.exists())
+        marker = self.aliases / "unowned"
+        marker.write_text("keep")
+        with patch.object(pathlib.Path, "symlink_to", side_effect=FileExistsError("occupied")):
+            with self.assertRaises(FileExistsError):
+                build_runner.short_tmpdir()
+        self.assertEqual(list(self.backing.iterdir()), [])
+        self.assertEqual(marker.read_text(), "keep")
+        marker.unlink()
+        # A real exclusive-publication collision preserves the unowned alias.
+        name = f"dr-{os.getpid()}-01234567"
+        occupied = self.aliases / name
+        occupied.write_text("unowned")
+        with patch.object(build_runner.secrets, "token_hex", return_value="01234567"):
+            with self.assertRaises(FileExistsError):
+                build_runner.short_tmpdir()
+        self.assertEqual(occupied.read_text(), "unowned")
+        self.assertFalse((self.backing / name).exists())
+        occupied.unlink()
+        self.evidence("AC1", allocations=len(allocated), socket_bind=True, bytes_written_read=1048576,
+                      scratch_backed=True, publication_rollback=True)
+
+    def required(self, argv, **kw):
+        env = kw["env"]
+        self.assertEqual(env["TMPDIR"], env["TMP"])
+        self.assertEqual(env["TMPDIR"], env["TEMP"])
+        self.assertEqual(pathlib.Path(env["TMPDIR"]).parent, self.aliases)
+        if "clone" in argv:
+            pathlib.Path(argv[-1]).mkdir()
+        return ""
+
+    def invoke(self, sha="a" * 40, row=None):
+        tails = self.top / "tails"
+        tails.mkdir(exist_ok=True)
+        return build_runner._run_tree("L-spec-9000", sha, self.top, row or {},
+            [("AC1", "true")], tails, 0, 1000, time.monotonic() + 30)
+
+    def test_ac2(self):
+        observed = []
+        required_paths = []
+        def required(argv, **kw):
+            required_paths.append(kw["env"]["TMPDIR"])
+            return self.required(argv, **kw)
+        def provision(tree, auxiliary, row, env, deadline):
+            alias = pathlib.Path(env["TMPDIR"])
+            backing = alias.resolve()
+            self.assertEqual(pathlib.Path(env["HOME"]), auxiliary / "home")
+            self.assertEqual(pathlib.Path(env["DOIT_ROOT"]), auxiliary / "root")
+            self.assertEqual(env["PATH"].split(os.pathsep)[0], str(tree / row["venv"] / "bin"))
+            output = self.child("import os,tempfile,pathlib,json; "
+                "f=tempfile.NamedTemporaryFile(delete=False); f.write(b'fixture'); f.close(); "
+                "p=pathlib.Path(f.name); assert p.read_bytes()==b'fixture'; "
+                "print(json.dumps([str(p.parent),str(p.resolve().parent)]))", env=env)
+            self.assertEqual(json.loads(output), [str(alias), str(backing)])
+            observed.append((alias, backing))
+            return {}
+        def check(*a, **kw):
+            self.assertEqual(kw["env"]["TMPDIR"], str(observed[-1][0]))
+            return 0, b"fixture"
+        with patch.dict(os.environ, TMPDIR="/ignored", TMP="/ignored", TEMP="/ignored"), \
+                patch.object(build_runner, "_required", side_effect=required), \
+                patch.object(build_runner, "_provision", side_effect=provision), \
+                patch.object(build_runner, "_process", side_effect=check), \
+                patch.object(build_runner.grading_env, "teardown"):
+            parent = dict(os.environ)
+            for sha, venv in (("a"*40, ".venv"), ("b"*40, "/fixture-venv"), ("a"*40, ".venv")):
+                self.invoke(sha, dict(venv=venv))
+            self.assertEqual(dict(os.environ), parent)
+        self.assertEqual(len({str(a) for a, b in observed}), 3)
+        self.assertEqual(required_paths, [str(a) for a,b in observed for _ in range(2)])
+        self.assertTrue(all(not os.path.lexists(a) and not b.exists() for a,b in observed))
+        self.evidence("AC2", unique_invocations=3, clone_checkout_provision_check=True,
+                      child_tempfile=True, parent_unchanged=True, venv_home_root=True)
+
+    def test_ac3(self):
+        outcomes = ("success", "nonzero", "clone", "checkout", "provision", "check",
+                    "wallcap", "sigint", "sigterm", "home", "root", "allocation", "teardown")
+        recorded = []
+        real_allocate = build_runner.short_tmpdir
+        marker = self.top / "outside-marker"
+        marker.write_text("keep")
+        def allocate():
+            alias = real_allocate()
+            backing = alias.resolve()
+            (backing / "nested-link").symlink_to(marker.parent, target_is_directory=True)
+            recorded.append((alias, backing))
+            return alias
+        mkdir = pathlib.Path.mkdir
+        for outcome in outcomes:
+            with self.subTest(outcome=outcome), contextlib.ExitStack() as stack:
+                def required(argv, **kw):
+                    if outcome == kw["phase"]:
+                        raise OSError("fixture " + outcome)
+                    return self.required(argv, **kw)
+                def provision(*a):
+                    if outcome == "provision":
+                        raise RuntimeError("fixture provision")
+                    return {}
+                def check(*a, **kw):
+                    if outcome == "check":
+                        raise RuntimeError("fixture check")
+                    if outcome == "wallcap":
+                        raise build_runner.WallCap("fixture cap")
+                    if outcome in ("sigint", "sigterm"):
+                        sig = signal.SIGINT if outcome == "sigint" else signal.SIGTERM
+                        old = signal.signal(sig, build_runner._interrupted)
+                        try:
+                            os.kill(os.getpid(), sig)
+                        finally:
+                            signal.signal(sig, old)
+                    return (1 if outcome == "nonzero" else 0), b"fixture"
+                def partial(path, *a, **kw):
+                    if outcome in ("home", "root") and path.name == outcome:
+                        raise OSError("partial fixture setup")
+                    return mkdir(path, *a, **kw)
+                stack.enter_context(patch.object(build_runner, "short_tmpdir",
+                    side_effect=OSError("allocation failed") if outcome == "allocation" else allocate))
+                stack.enter_context(patch.object(build_runner, "_required", side_effect=required))
+                stack.enter_context(patch.object(build_runner, "_provision", side_effect=provision))
+                stack.enter_context(patch.object(build_runner, "_process", side_effect=check))
+                teardown = stack.enter_context(patch.object(build_runner.grading_env, "teardown",
+                    side_effect=RuntimeError("teardown failed") if outcome == "teardown" else None))
+                stack.enter_context(patch.object(pathlib.Path, "mkdir", partial))
+                if outcome in ("success", "nonzero"):
+                    result = self.invoke()
+                    self.assertEqual(result[0][0]["exit"], int(outcome == "nonzero"))
+                else:
+                    with self.assertRaises((OSError, RuntimeError, build_runner.Undetermined)):
+                        self.invoke()
+                teardown.assert_called_once()
+                self.assertEqual(list(build_runner.scratch.sub("runner").iterdir()), [])
+                self.assertTrue(all(not os.path.lexists(a) and not b.exists() for a,b in recorded))
+                self.assertEqual(list(self.aliases.iterdir()), [])
+                self.assertEqual(list(self.backing.iterdir()), [])
+                self.assertEqual(marker.read_text(), "keep")
+        auxiliary = build_runner.scratch.sub("runner") / f"L-spec-9000-{'a'*12}-{os.getpid()}-env"
+        auxiliary.mkdir()
+        (auxiliary / "unowned").write_text("keep")
+        with self.assertRaisesRegex(build_runner.Undetermined, "already exists"):
+            self.invoke()
+        self.assertEqual((auxiliary / "unowned").read_text(), "keep")
+        self.evidence("AC3", outcomes=list(outcomes), allocated_pairs=len(recorded), residue=0,
+                      unowned_preserved=True, nested_symlink_preserved=True)
+
+    def dead_pair(self, suffix="abcdefgh"):
+        name = f"dr-2147483647-{suffix}"
+        backing = self.backing / name
+        backing.mkdir(mode=0o700)
+        alias = self.aliases / name
+        alias.symlink_to(backing)
+        return alias, backing
+
+    def sweep(self):
+        return build_runner.sweep_short_tmpdirs(proc_root=self.proc)
+
+    def test_ac4(self):
+        self.recovery_matrix()
+        self.real_holders()
+        self.startup_errors()
+        self.evidence("AC4", matrix=self.events, real_orphans=["cwd", "fd"],
+                      real_socket=True, real_pidfile=True, startup_direct_cli_cached=True)
+
+    def recovery_matrix(self):
+        # The only PID predicate patched is the shared panes.alive.
+        cases = ("safe", "backing-only", "alias-only", "live-owner", "foreign-alias", "foreign-backing",
+                 "unexpected-target", "backing-symlink", "liveness-error", "snapshot-error",
+                 "socket-missing", "socket-unreadable", "pidfile-unreadable", "pidfile-invalid-text",
+                 "candidate-unreadable",
+                 "cwd-alias", "cwd-backing", "fd-alias", "fd-backing", "socket-alias", "socket-backing",
+                 "live-pidfile", "remove-error", "changed-identity")
+        real_pair = build_runner._tmp_pair
+        real_lstat = pathlib.Path.lstat
+        real_read = pathlib.Path.read_text
+        real_remove = build_runner._remove_tmp_pair
+        for case in cases:
+            with self.subTest(case=case), contextlib.ExitStack() as stack:
+                alias, backing = self.dead_pair()
+                marker = self.top / "outside"
+                marker.mkdir(exist_ok=True)
+                (marker / "keep").write_text("keep")
+                (backing / "nested").symlink_to(marker, target_is_directory=True)
+                if case == "backing-only": alias.unlink()
+                if case == "alias-only": shutil.rmtree(backing)
+                if case == "unexpected-target":
+                    alias.unlink(); alias.symlink_to(marker)
+                if case == "backing-symlink":
+                    shutil.rmtree(backing); backing.symlink_to(marker)
+                if case == "socket-missing": (self.proc / "net" / "unix").unlink()
+                if case == "live-pidfile": (backing / "postmaster.pid").write_text(str(os.getpid()))
+                if case == "pidfile-unreadable": (backing / "postmaster.pid").write_text("123")
+                if case == "pidfile-invalid-text": (backing / "postmaster.pid").write_bytes(b"\xff")
+                if case in ("cwd-alias", "cwd-backing", "fd-alias", "fd-backing"):
+                    proc = self.proc / str(os.getpid())
+                    (proc / "fd").mkdir(parents=True)
+                    target = alias if case.endswith("alias") else backing
+                    (proc / ("cwd" if case.startswith("cwd") else "fd/9")).symlink_to(target)
+                if case in ("socket-alias", "socket-backing"):
+                    path = alias if case.endswith("alias") else backing
+                    (self.proc / "net" / "unix").write_text("header\n0 0 0 0 0 0 0 " + str(path / "socket") + "\n")
+                def alive(pid):
+                    if case == "liveness-error": raise PermissionError("uncertain")
+                    return pid == os.getpid() or case == "live-owner"
+                stack.enter_context(patch.object(build_runner.panes, "alive", side_effect=alive))
+                if case == "snapshot-error":
+                    stack.enter_context(patch.object(build_runner.reap_tmp, "_own_uid_refs", return_value=(None, 0)))
+                def lstat(path, *a, **kw):
+                    if path == alias and case == "candidate-unreadable": raise PermissionError("candidate")
+                    result = real_lstat(path, *a, **kw)
+                    foreign = (case == "foreign-alias" and path == alias or
+                               case == "foreign-backing" and path == backing)
+                    if foreign:
+                        fields = list(result); fields[4] = os.geteuid() + 1
+                        return os.stat_result(fields)
+                    return result
+                stack.enter_context(patch.object(pathlib.Path, "lstat", lstat))
+                def read(path, *a, **kw):
+                    if (case == "socket-unreadable" and path == self.proc / "net" / "unix" or
+                        case == "pidfile-unreadable" and path == backing / "postmaster.pid"):
+                        raise PermissionError("evidence")
+                    return real_read(path, *a, **kw)
+                stack.enter_context(patch.object(pathlib.Path, "read_text", read))
+                def remove(a, b, identity):
+                    if case == "remove-error": raise PermissionError("removal")
+                    if case == "changed-identity":
+                        a.unlink(); a.symlink_to(marker)
+                    return real_remove(a, b, identity)
+                stack.enter_context(patch.object(build_runner, "_remove_tmp_pair", side_effect=remove))
+                result = self.sweep()
+                safe = case in ("safe", "backing-only", "alias-only")
+                self.assertEqual(result["removed"], int(safe), result)
+                self.assertEqual(result["retained"], int(not safe), result)
+                if not safe:
+                    self.assertTrue(os.path.lexists(alias))
+                    self.assertTrue(os.path.lexists(backing))
+                else:
+                    self.assertFalse(os.path.lexists(alias)); self.assertFalse(backing.exists())
+                self.assertEqual((marker / "keep").read_text(), "keep")
+                self.events.append(case)
+            # Fixture-owned cleanup, including substituted paths, never follows links.
+            if os.path.lexists(alias): alias.unlink()
+            if backing.is_symlink(): backing.unlink()
+            elif backing.exists(): shutil.rmtree(backing)
+            proc = self.proc / str(os.getpid())
+            if proc.exists(): shutil.rmtree(proc)
+            (self.proc / "net" / "unix").write_text("header\n")
+        current = [self.allocate() for _ in range(2)]
+        self.assertEqual(self.sweep(), dict(removed=0, retained=2, errors=0))
+        self.assertNotEqual(current[0][0], current[1][0])
+        for a,b in current: self.remove(a,b)
+        # Unrelated and malformed names are never deleted.
+        for name in ("unrelated", "dr-no-pid-abcdefgh", "dr-99999999999-abcdefgh"):
+            (self.aliases / name).mkdir()
+        self.sweep()
+        self.assertEqual(len(list(self.aliases.iterdir())), 3)
+        for path in self.aliases.iterdir(): path.rmdir()
+        self.events.extend(["current-live", "concurrent", "unrelated", "malformed-pid"])
+        # An inspection/removal error on one pair cannot block a safe peer.
+        a,b = self.dead_pair("aaaaaaaa")
+        c,d = self.dead_pair("bbbbbbbb")
+        def remove(a1,b1,identity):
+            if a1 == a: raise OSError("fixture removal")
+            return real_remove(a1,b1,identity)
+        with patch.object(build_runner, "_remove_tmp_pair", side_effect=remove):
+            self.assertEqual(self.sweep(), dict(removed=1, retained=1, errors=1))
+        self.remove(a,b)
+        with patch.object(pathlib.Path, "iterdir", side_effect=OSError("discovery")):
+            self.assertEqual(self.sweep()["errors"], 1)
+        # A vanished candidate is not reported as removed and repeated sweep is harmless.
+        a,b = self.dead_pair()
+        # Disappear after discovery has captured the name, before inspection.
+        def disappear(*args):
+            a.unlink()
+            shutil.rmtree(b)
+            return None, None
+        with patch.object(build_runner, "_tmp_pair", side_effect=disappear):
+            self.assertEqual(self.sweep()["removed"], 0)
+        self.assertEqual(self.sweep(), dict(removed=0, retained=0, errors=0))
+
+    def owner_code(self):
+        return ("import sys,pathlib,time,json,subprocess,os; sys.path.insert(0,sys.argv[1]); "
+                "import build_runner as r; r.SHORT_TMP_ROOT=pathlib.Path(sys.argv[2]); "
+                "r.SHORT_TMP_BACKING_ROOT=pathlib.Path(sys.argv[3]); a=r.short_tmpdir(); "
+                "b=a.resolve(); (b/'marker').write_text('keep'); ")
+
+    def real_holders(self):
+        import ctypes
+        libc = ctypes.CDLL(None, use_errno=True)
+        previous = ctypes.c_int()
+        self.assertEqual(libc.prctl(37, ctypes.byref(previous), 0, 0, 0), 0)
+        self.assertEqual(libc.prctl(36, 1, 0, 0, 0), 0)
+        self.addCleanup(lambda: libc.prctl(36, previous.value, 0, 0, 0))
+        # Read the actual holder's /proc links and actual kernel socket table,
+        # through an isolated proc snapshot containing only fixture processes.
+        (self.proc / "net" / "unix").unlink()
+        (self.proc / "net" / "unix").symlink_to("/proc/net/unix")
+        for kind in ("cwd", "fd", "socket", "pidfile", "unused"):
+            with self.subTest(real=kind):
+                ready = self.top / "ready"
+                ready.unlink(missing_ok=True)
+                holder_code = (
+                    "import os,sys,pathlib,time,socket; b=pathlib.Path(sys.argv[1]); kind=sys.argv[2]; "
+                    "f=None; s=None; "
+                    "os.chdir(b) if kind=='cwd' else None; "
+                    "f=(b/'marker').open() if kind=='fd' else None; "
+                    "s=socket.socket(socket.AF_UNIX) if kind=='socket' else None; "
+                    "s.bind(str(pathlib.Path(sys.argv[4])/'socket')) if s else None; "
+                    "(b/'postmaster.pid').write_text(str(os.getpid())) if kind=='pidfile' else None; "
+                    "pathlib.Path(sys.argv[3]).write_text(str(os.getpid())); time.sleep(60)")
+                code = self.owner_code()
+                if kind != "unused":
+                    code += ("p=subprocess.Popen([sys.executable,'-c',sys.argv[4],str(b),sys.argv[5],"
+                             "sys.argv[6],str(a)],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); ")
+                code += "print(str(a),flush=True); time.sleep(60)"
+                owner = subprocess.Popen([sys.executable, "-c", code, str(HERE), str(self.aliases),
+                    str(self.backing), holder_code, kind, str(ready)], stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE, text=True)
+                holder = None
+                try:
+                    alias = pathlib.Path(owner.stdout.readline().strip())
+                    self.assertEqual(alias.parent, self.aliases)
+                    backing = alias.resolve()
+                    if kind != "unused":
+                        end = time.monotonic() + 10
+                        while not ready.exists() and time.monotonic() < end: time.sleep(.01)
+                        self.assertTrue(ready.exists(), kind)
+                        holder = int(ready.read_text())
+                        # Make this test the orphan's reaper on Linux, so no zombie
+                        # PID can keep a fixture allocation alive after teardown.
+                    owner.kill(); owner.wait(timeout=5)
+                    if holder:
+                        (self.proc / str(holder)).symlink_to(pathlib.Path("/proc") / str(holder))
+                        self.assertEqual(self.sweep()["retained"], 1)
+                        self.assertTrue(alias.is_symlink() and backing.is_dir())
+                        self.assertEqual((backing / "marker").read_text(), "keep")
+                        os.kill(holder, signal.SIGTERM)
+                        # The subreaper below adopts it; waitpid proves it is dead.
+                        os.waitpid(holder, 0)
+                        (self.proc / str(holder)).unlink()
+                        holder = None
+                    self.assertEqual(self.sweep(), dict(removed=1, retained=0, errors=0))
+                    self.assertFalse(os.path.lexists(alias)); self.assertFalse(backing.exists())
+                finally:
+                    if owner.poll() is None: owner.kill(); owner.wait()
+                    owner.stdout.close(); owner.stderr.close()
+                    if holder:
+                        os.kill(holder, signal.SIGKILL)
+                        os.waitpid(holder, 0)
+                        (self.proc / str(holder)).unlink(missing_ok=True)
+                self.events.append("real-" + kind)
+
+    def startup_errors(self):
+        # Reuse the hermetic bundle fixture; no external command is added.
+        fixture = BuildRunnerTests("test_env_none_row")
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch.dict(os.environ, fixture.env))
+            stack.enter_context(patch.multiple(build_runner.fold, ROOT=fixture.root,
+                                               EVENTS=fixture.root / "events"))
+            stack.enter_context(patch.object(build_runner.grading_env, "_project_checkout", return_value=fixture.repo))
+            stack.enter_context(patch.object(build_runner.grading_env, "_project_row", return_value={}))
+            stack.enter_context(patch.object(build_runner, "_event", side_effect=lambda s,p,k,**kw: self.events.append(k)))
+            stack.enter_context(patch.object(build_runner, "_provision", return_value={}))
+            real_sweep = build_runner.sweep_short_tmpdirs
+            for entry in ("direct", "cli"):
+                for failure in ("none", "discovery", "removal"):
+                    owner = subprocess.Popen([sys.executable, "-c", self.owner_code() +
+                        "print(str(a),flush=True); time.sleep(60)", str(HERE),
+                        str(self.aliases), str(self.backing)], stdout=subprocess.PIPE, text=True)
+                    try:
+                        alias = pathlib.Path(owner.stdout.readline().strip())
+                        backing = alias.resolve()
+                    finally:
+                        owner.kill(); owner.wait(timeout=5); owner.stdout.close()
+                    sweep_results = []
+                    def sweep():
+                        with contextlib.ExitStack() as errors:
+                            if failure == "discovery":
+                                errors.enter_context(patch.object(pathlib.Path, "iterdir", side_effect=OSError("discovery")))
+                            if failure == "removal":
+                                errors.enter_context(patch.object(build_runner, "_remove_tmp_pair", side_effect=OSError("removal")))
+                            result = real_sweep(proc_root=self.proc)
+                        if failure == "none": self.assertEqual(result["removed"], int(not sweep_results))
+                        else: self.assertGreaterEqual(result["errors"], 1)
+                        sweep_results.append(result)
+                        return result
+                    with patch.object(build_runner, "sweep_short_tmpdirs", side_effect=sweep) as startup:
+                        if entry == "direct":
+                            path = build_runner.run(fixture.sid)
+                        else:
+                            with contextlib.redirect_stdout(io.StringIO()):
+                                self.assertEqual(build_runner.main([fixture.sid]), 0)
+                            path = next((fixture.root / "content/evidence" / fixture.sid).glob("*.json"))
+                        self.assertIn("commands", json.loads(path.read_text()))
+                        # Every cached return must still sweep.
+                        if entry == "direct":
+                            self.assertEqual(build_runner.run(fixture.sid), path)
+                        else:
+                            with contextlib.redirect_stdout(io.StringIO()):
+                                self.assertEqual(build_runner.main([fixture.sid]), 0)
+                        self.assertEqual(startup.call_count, 2)
+                    if failure != "none": self.remove(alias,backing)
+                    path.unlink(); shutil.rmtree(path.with_suffix(""))
+            self.assertNotIn("evidence-bundle-failed", self.events)
 
 
 if __name__ == "__main__":

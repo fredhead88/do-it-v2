@@ -55,6 +55,11 @@ class GradingWaitTests(unittest.TestCase):
         self.addCleanup(self.stack.close)
         self.stack.enter_context(patch.dict(os.environ, DOIT_ROOT=str(self.root),
             DOIT_SCRATCH=str(self.top / "scratch"), DOIT_NO_POKE="1"))
+        aliases, backing = self.top / "aliases", self.top / "backing"
+        aliases.mkdir()
+        backing.mkdir()
+        self.stack.enter_context(patch.multiple(runner, SHORT_TMP_ROOT=aliases,
+                                                SHORT_TMP_BACKING_ROOT=backing))
         self.stack.enter_context(patch.multiple(fold, ROOT=self.root, EVENTS=self.root / "events"))
         self.stack.enter_context(patch.object(fold, "read_events", side_effect=lambda *a, **k: self.events[:]))
         self.stack.enter_context(patch.object(fold, "fold", side_effect=lambda ev: (
@@ -205,7 +210,8 @@ class GradingWaitTests(unittest.TestCase):
             tmp = pathlib.Path(env["TMPDIR"])
             self.assertEqual(env["TMPDIR"], env["TMP"])
             self.assertEqual(env["TMPDIR"], env["TEMP"])
-            self.assertTrue(tmp.is_absolute() and tmp.is_relative_to(auxiliary))
+            self.assertTrue(tmp.is_absolute() and tmp.parent == runner.SHORT_TMP_ROOT)
+            self.assertEqual(tmp.resolve().parent, runner.SHORT_TMP_BACKING_ROOT)
             self.assertTrue(tmp.is_dir())
             self.assertNotEqual(str(tmp), outside)
             self.assertEqual(pathlib.Path(env["HOME"]), auxiliary / "home")
@@ -248,7 +254,7 @@ class GradingWaitTests(unittest.TestCase):
                     invoke()
                 self.assertEqual(list(runner_root.iterdir()), [])
             mkdir = pathlib.Path.mkdir
-            for part in ("home", "root", "tmp"):
+            for part in ("home", "root"):
                 def partial(path, *a, **kw):
                     if path.name == part:
                         raise OSError("partial directory setup")
@@ -257,6 +263,12 @@ class GradingWaitTests(unittest.TestCase):
                     with self.assertRaises(OSError):
                         invoke()
                 self.assertEqual(list(runner_root.iterdir()), [])
+            with patch.object(runner, "short_tmpdir", side_effect=OSError("allocation failed")):
+                with self.assertRaises(OSError):
+                    invoke()
+            self.assertEqual(list(runner_root.iterdir()), [])
+            self.assertEqual(list(runner.SHORT_TMP_ROOT.iterdir()), [])
+            self.assertEqual(list(runner.SHORT_TMP_BACKING_ROOT.iterdir()), [])
             auxiliary = runner_root / f"{SID}-{TIP[:12]}-{os.getpid()}-env"
             auxiliary.mkdir()
             marker = auxiliary / "keep"
