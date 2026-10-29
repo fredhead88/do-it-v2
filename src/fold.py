@@ -817,6 +817,8 @@ def required_reason(e):
                 present = ((isinstance(value, int) and not isinstance(value, bool) and value >= 0)
                            or (isinstance(value, str) and value.isdecimal())
                            or (k == "listed" and isinstance(value, list)))
+            elif t == "merge-gate-undetermined":
+                present = k in e
             elif t == "bill-check" and k in ("yday", "mtd"):
                 # Explicit null means unknown; numeric zero is measured spend.
                 value = e.get(k)

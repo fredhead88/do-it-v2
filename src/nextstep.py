@@ -36,7 +36,7 @@ EVENT_STAGES = {'spec-written': 'planned', 'build-started': 'building',
                 'review': 'checking', 'queue-add': 'merging'}
 PIPELINE = {'written', 'building', 'graded', 'reviewing'}
 OWED_STATES = {'shipped-owed-evidence', 'shipped-owed-due', 'shipped-owed-expired'}
-FAILURES = {'merge-gate-rework', 'spawn-failed', 'autodispatch-failed'}
+FAILURES = {'merge-gate-undetermined', 'merge-gate-rework', 'spawn-failed', 'autodispatch-failed'}
 NOT_READY_PREFIXES = ('wave-order', 'bundle-pending', 'duplicate-dispatch', 'dispatch-in-progress')
 RETRIES = {'build-started', 'spawn-started', 'queue-add', 'decision', 'spec-written'}
 AUDIT_GRACE_MIN = 30
@@ -257,7 +257,10 @@ def _rebuild(c):
     rewrites = [e for e in evs if blocked and e.get('type') == 'spec-written'
                 and _time(e['ts']) > _time(blocked['ts'])]
     drops = [e for e in evs if e.get('type') == 'window-dropped' and e.get('reason') == 'owner']
-    trigger = max(decisions + rewrites + drops, key=lambda e: _time(e['ts']), default=None)
+    review = _latest(evs, JUDGING | {'build-done', 'build-blocked'})
+    blocking = ([review] if review and review['type'] == 'review'
+                and type(review.get('n_blocking')) is int and review['n_blocking'] > 0 else [])
+    trigger = max(decisions + rewrites + drops + blocking, key=lambda e: _time(e['ts']), default=None)
     dispatched = [e for e in evs if _builder_dispatch(e) and not _refusal(e)]
     if trigger and (not blocked or _time(trigger['ts']) > _time(blocked['ts'])):
         result = _retry_result(c, trigger, 'builder', dispatched=(
@@ -407,16 +410,65 @@ def _clean_review(c):
 
 
 
+def _gate_attempts(evs, event):
+    """Count persisted acquired failures once, within one review/SHA/repo."""
+    identity = tuple(event.get(k) for k in ('subject', 'repo', 'branch_sha', 'cycle'))
+    unblocked = _latest([e for e in evs if e.get('type') == 'unblocked'
+                         and _admitted_actor(e) in {'operator', 'thinker'}], {'unblocked'})
+    reset = _time(unblocked['ts']) if unblocked else None
+    acquired = {}
+    for e in evs:
+        if (e.get('type') == 'merge-gate-undetermined'
+                and tuple(e.get(k) for k in ('subject', 'repo', 'branch_sha', 'cycle')) == identity
+                and e.get('retryable') is True and e.get('attempt')
+                and (reset is None or _time(e['ts']) > reset)):
+            acquired.setdefault(e['attempt'], e)
+    return len(acquired), reset
+
+
+def _gate_tooling(c):
+    evs = c['evs']
+    event = _latest(evs, {'merge-gate-undetermined', 'merge-gate-clean', 'merge-gate-rework',
+                          'conflict-rework', 'shipped', 'spec-killed', 'spec-closed'} | JUDGING)
+    if not event or event['type'] != 'merge-gate-undetermined':
+        return None
+    review = _clean_review(c)
+    if review and _time(review['ts']) > _time(event['ts']):
+        return None  # A new clean review starts its own cycle at the same SHA.
+    if not review or event.get('cycle') != review['ts']:
+        return dict(event=event, hold='review-required', due=None)
+    count, reset = _gate_attempts(evs, event)
+    if reset is not None and reset > _time(event['ts']):
+        return dict(event=event, hold=None, due=None)
+    # A refusal cannot clear an outstanding acquired failure's hold or backoff.
+    policy = event
+    if event.get('reason') == 'lock-busy':
+        identity = tuple(event.get(k) for k in ('repo', 'branch_sha', 'cycle'))
+        policy = _latest([e for e in evs if e.get('type') == 'merge-gate-undetermined'
+                          and e.get('attempt') and tuple(e.get(k) for k in
+                          ('repo', 'branch_sha', 'cycle')) == identity
+                          and (reset is None or _time(e['ts']) > reset)], {'merge-gate-undetermined'}) or event
+    hold = policy.get('hold_reason')
+    if policy.get('retryable') is not True:
+        hold = hold or policy.get('reason') or 'gate-tooling'
+    if count >= 3:
+        hold = 'retry-cap-exhausted'
+    due = policy.get('retry_at')
+    return dict(event=event, hold=hold, due=due)
+
+
 def _gate(c):
+    tooling = _gate_tooling(c)
+    if tooling:
+        if (tooling['hold'] or c['sid'] in c['live'] or _close(c) or _rebuild(c) or _regrade(c)
+                or tooling['due'] and c['now'] < _time(tooling['due'])):
+            return None
+        return _result(tooling['event'], 'gate tooling retry due', retry_at=tooling['due'])
     trigger = _clean_review(c)
     if not trigger or _close(c) or _rebuild(c) or _regrade(c):
         return None
-    build = _latest(c['evs'], {'build-done'})
-    judgment = _latest(c['evs'], {'verdict', 'cannot-assess'})
-    # Regrades start a new gate cycle even when the build is unchanged.
-    anchor = max((e for e in (build, judgment) if e),
-                 key=lambda e: _time(e['ts']), default=trigger)
-    if any(str(e.get('type', '')).startswith('merge-gate-') and _time(e['ts']) >= _time(anchor['ts']) for e in c['evs']):
+    if any(str(e.get('type', '')).startswith('merge-gate-')
+           and _time(e['ts']) >= _time(trigger['ts']) for e in c['evs']):
         return None
     if _after(c['evs'], trigger, {'queue-add'}):
         return None
@@ -425,8 +477,8 @@ def _gate(c):
 
 
 def _enqueue(c):
-    trigger = _latest(c['evs'], {'merge-gate-clean'})
-    if not trigger or _close(c) or _rebuild(c) or _regrade(c):
+    trigger = _latest(c['evs'], {'merge-gate-clean', 'merge-gate-undetermined', 'merge-gate-rework', 'conflict-rework'})
+    if not trigger or trigger['type'] != 'merge-gate-clean' or _close(c) or _rebuild(c) or _regrade(c):
         return None
     judgment = _latest(c['evs'], {'verdict', 'cannot-assess'})
     if judgment and _time(trigger['ts']) < _time(judgment['ts']):
@@ -673,8 +725,14 @@ def _failure_text(event):
     return '\n'.join(str(event.get(k) or '') for k in ('findings', 'why', 'error', 'reason'))
 
 
+def _gate_refusal(e):
+    return (e.get('type') == 'spawn-failed' and e.get('role') == 'gate'
+            and e.get('reason') in {'lock', 'duplicate', 'dispatch-in-progress'})
+
+
 def _failure(evs, rules):
     latest = next((e for e in reversed(evs) if e['type'] in FAILURES | RETRIES
+                   and not _gate_refusal(e)
                    and not (e['type'] == 'spawn-failed'
                             and str(e.get('reason') or '').startswith(NOT_READY_PREFIXES))
                    or e['type'] == 'build-blocked' and _base_blocked(e)), None)
@@ -682,6 +740,8 @@ def _failure(evs, rules):
                  or e['type'] == 'spawn-failed' and e.get('reason') in BASE_FAILURES), None)
     if base and latest and latest['type'] in RETRIES and _time(latest['ts']) == _time(base['ts']):
         latest = base
+    if latest and latest['type'] == 'merge-gate-undetermined':
+        return latest, 'gate-tooling'
     if latest and (latest['type'] in FAILURES or _base_blocked(latest)):
         if _vanished(latest):
             return latest, 'retry'
@@ -889,6 +949,14 @@ def next_steps(events, specs, now, rules, waves=None):
                 steps.append(_hold(sid, 'spec', 'planned', trigger, reason, clears,
                                    'executor' if exhausted else 'tick', audit['since']))
             continue
+        tooling = _gate_tooling(c)
+        if tooling and (tooling['hold'] or tooling['due'] and now < _time(tooling['due'])):
+            reason = tooling['hold'] or ('gate-tooling: waiting; retry_at=' + tooling['due'])
+            steps.append(_hold(sid, 'spec', stage, tooling['event'], reason,
+                               'thinker/operator unblocked or repaired gate' if tooling['hold']
+                               else 'retry_at=' + tooling['due'],
+                               'executor' if tooling['hold'] else owners['gate']))
+            continue
         failure, classification = _failure(evs, rules)
         if classification == 'base-refresh':
             steps.append(_base_refresh_hold(c, failure))
@@ -900,7 +968,7 @@ def next_steps(events, specs, now, rules, waves=None):
             continue
         # Structured reconciliation retries continue through original role/trigger
         # predicates, which own bounds, completion and stronger lifecycle holds.
-        if failure and classification not in {'work', 'retry'}:
+        if failure and classification not in {'work', 'retry', 'gate-tooling'}:
             reason = 'infra: retry required' if classification == 'infra' else 'undetermined: failure classification'
             steps.append(_hold(sid, 'spec', stage, failure, reason, 'infra-retry backoff or freed disk'
                                if classification == 'infra' else 'classified failure'))

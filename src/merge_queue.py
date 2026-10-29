@@ -170,11 +170,32 @@ def enqueue_due(events, now, *, runner=None, dry_run=False):
         if rule not in ('gate', 'enqueue'):
             continue
         try:
-            rung = lane_rules.ladder(events, row, now)
-            if rung not in ('act', 'retry') or sid in busy:
+            if sid in busy:
                 continue
             evs = [e for e in events if e.get('subject') == sid]
-            newer = [e for e in evs if lane_rules._time(e['ts']) >= lane_rules._time(row['since'])]
+            # An outcome can share its second with the preceding dispatch. Only
+            # bookkeeping persisted after that outcome consumes its fresh trigger.
+            anchor = next((i for i in range(len(evs) - 1, -1, -1)
+                           if evs[i].get('type') == 'merge-gate-undetermined'
+                           and evs[i]['ts'] == row['since']), None) if rule == 'gate' else None
+            preceding = {id(e) for e in evs[:anchor + 1]
+                         if e.get('type') == 'autodispatched' and e.get('rule') == 'gate'} if anchor is not None else set()
+            newer = evs[anchor + 1:] if anchor is not None else [
+                e for e in evs if lane_rules._time(e['ts']) >= lane_rules._time(row['since'])]
+            if rule == 'gate':
+                from nextstep import _gate_refusal
+                refused = {id(e) for i, e in enumerate(newer)
+                           if e.get('type') == 'autodispatched' and e.get('rule') == 'gate'
+                           and any(_gate_refusal(f) for f in newer[i+1:])}
+                preceding |= refused
+                newer = [e for e in newer if id(e) not in refused and not _gate_refusal(e)]
+            if anchor is not None and any(
+                    e.get('type') == 'autodispatched' and e.get('rule') == 'gate'
+                    and e.get('since') == row['since'] for e in newer):
+                continue  # Only a new outcome can provide another gate trigger.
+            rung = lane_rules.ladder([e for e in events if id(e) not in preceding], row, now)
+            if rung not in ('act', 'retry'):
+                continue
             if any(e.get('type') == 'autodispatched' and e.get('rule') == rule and
                    e.get('since') == row['since'] and e.get('trigger') == 'retry' for e in newer):
                 continue
@@ -220,6 +241,10 @@ def enqueue_due(events, now, *, runner=None, dry_run=False):
                            DOIT_PROJECT=written['project'])
                 result = runner(['doit', 'gate', sid.lower(), head, '--spec', sid, '--writes', *grant],
                                 cwd=str(repo), env=env)
+                if result.get('code') == 2:
+                    out.append(f"gate tooling hold {sid}: " +
+                               (result.get('stdout') or result.get('stderr') or 'undetermined').strip())
+                    continue
                 if result.get('code', 1):
                     lines = (result.get('stderr') or result.get('stdout') or 'gate failed').strip().splitlines()
                     raise ValueError(lines[-1])

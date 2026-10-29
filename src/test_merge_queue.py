@@ -1538,5 +1538,161 @@ sys.exit(m.window_run('albert-scott', detach=True, launcher=launch))
         self.simple_mark(5, dict(missing_refused=True, no_ledger_read=True, bypass_head=self.sid))
 
 
+class GateToolingQueueTests(unittest.TestCase):
+    setUp = QueueTests.setUp
+    fixture = QueueTests.fixture
+    git = QueueTests.git
+    event = QueueTests.event
+    landed = QueueTests.landed
+
+    def prepare(self):
+        self.now = self.now.replace(microsecond=0)
+        self.fixture()
+        self.events.insert(1, self.event('spawn-done', 95, spawn='L-spec-auditor-9001', bad_cut=False))
+        actors = {'spec-written':'spec-writer', 'build-done':'builder', 'review':'reviewer', 'spawn-done':'spec-auditor'}
+        for e in self.events:
+            e.setdefault('project', 'proj')
+            path = self.root / 'events' / ('L-'+actors[e['type']]+'-fixture.jsonl')
+            with path.open('a') as stream:
+                stream.write(json.dumps(e)+'\n')
+
+    def reader(self, clock=None):
+        code = '''import fold,json,nextstep,lane_rules,os
+from dataclasses import asdict
+from datetime import datetime
+events=fold.read_events(use_cache=False)
+now=datetime.fromisoformat(os.environ['FIXTURE_NOW'])
+specs=fold.fold(events)[0]
+print(json.dumps(dict(events=events,steps=[asdict(s) for s in nextstep.next_steps(events,specs,now,lane_rules.load())])))
+'''
+        env = dict(os.environ, DOIT_ROOT=str(self.root), FIXTURE_NOW=(clock or self.now).isoformat(),
+                   PYTHONPATH=str(Path(__file__).parent.resolve()))
+        return json.loads(subprocess.check_output([sys.executable,'-B','-c',code], env=env, text=True))
+
+    def child(self, argv, *, cwd, env):
+        self.calls.append(argv)
+        code = '''import sys,merge_gate,fold,os
+from datetime import datetime
+from unittest.mock import patch
+fold.NOW=datetime.fromisoformat(os.environ['FIXTURE_NOW'])
+with patch.object(merge_gate,'secret_scan',return_value=('undetermined',['tool'])):
+    sys.exit(merge_gate.main_(sys.argv[1:]))
+'''
+        proc = subprocess.run([sys.executable,'-B','-c',code,*argv[2:]], cwd=cwd,
+                              env=dict(env, PYTHONPATH=str(Path(__file__).parent.resolve()), FIXTURE_NOW=self.now.isoformat()),
+                              capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 2, proc.stdout+proc.stderr)
+        return dict(code=proc.returncode, stdout=proc.stdout, stderr=proc.stderr)
+
+    def signed(self, name, body):
+        raw = json.dumps(body,sort_keys=True).encode()
+        print(json.dumps(dict(url='cli://L-spec-1869/AC2/'+name,status=0,
+                              body_sha256=hashlib.sha256(raw).hexdigest(),body_excerpt=body)))
+
+    def test_child_event_fresh_reader_and_due_launch(self):
+        import nextstep
+        self.prepare()
+        out = mq.enqueue_due(self.events, self.now, runner=self.child)
+        self.assertEqual(len(self.calls), 1, out)
+        recovered = self.reader()
+        outcomes = [e for e in recovered['events'] if e['type']=='merge-gate-undetermined']
+        self.assertEqual(len(outcomes),1, recovered)
+        self.assertFalse(any(e['type']=='autodispatch-failed' for e in recovered['events']))
+        self.assertTrue(any('tooling' in line for line in out), out)
+        outcome = outcomes[0]
+        self.assertEqual(outcome['cycle'], self.events[-1]['ts'])
+        self.assertTrue(outcome['retryable'])
+        due = datetime.fromisoformat(outcome['retry_at'])
+        for seconds in (-1,0,1):
+            replay = self.reader(due+timedelta(seconds=seconds))
+            step = next(s for s in replay['steps'] if s['item']==self.sid)
+            self.assertEqual(step['action'], 'gate' if seconds>=0 else None, replay)
+            if seconds>=0:
+                self.assertEqual(step['since'],outcome['ts'])
+        snapshot = recovered['events']
+        rows = [r for r in lane_rules.due(snapshot,fold.fold(snapshot)[0],due) if r['rule']=='gate']
+        self.assertEqual(len(rows),1)
+        self.assertEqual(lane_rules.ladder(snapshot,rows[0],due),'act')
+        self.now = due
+        mq.enqueue_due(snapshot,due,runner=self.child)
+        self.assertEqual(len(self.calls),2)
+        again = self.reader()
+        self.assertEqual(len([e for e in again['events'] if e['type']=='merge-gate-undetermined']),2)
+        mq.enqueue_due(again['events'],due,runner=self.child)
+        self.assertEqual(len(self.calls),2)
+        self.signed('child-roundtrip', dict(first=outcome, boundaries=[-1,0,1], gate_launches=2,
+                                          output=out, autodispatch_failed=0))
+
+    def test_persisted_order_refusals_and_live_owner(self):
+        import nextstep
+        self.prepare()
+        outcome = self.event('merge-gate-undetermined', 10, reason='tool', repo=str(self.repo/'.git'),
+                             sha='a'*40,branch_sha='a'*40,main_sha='b'*40,branch=self.sid.lower(),
+                             cycle=self.events[-1]['ts'],attempt='one',retryable=True,
+                             retry_at=(self.now-timedelta(minutes=5)).isoformat(),hold_reason=None,findings=[])
+        prior = self.event('autodispatched',10,rule='gate',role='gate',since=self.events[-1]['ts'],trigger='retry')
+        history = self.events+[prior,outcome]
+        calls = []
+        def runner(*args,**kw):
+            calls.append(args)
+            return dict(code=2,stdout='tooling fixture',stderr='')
+        mq.enqueue_due(history,self.now,runner=runner)
+        self.assertEqual(len(calls),1)
+        tied_old = prior | dict(since=outcome['ts'])
+        mq.enqueue_due(self.events+[tied_old,outcome],self.now+timedelta(hours=2),runner=runner)
+        self.assertEqual(len(calls),2)
+        calls.clear()
+        calls.append('first')
+        consumed = self.event('autodispatched',10,rule='gate',role='gate',since=outcome['ts'])
+        mq.enqueue_due(history+[consumed],self.now,runner=runner)
+        self.assertEqual(len(calls),1)
+        # Time alone cannot spend the same persisted outcome again, including
+        # when an old lane timeout would otherwise offer a dispatch retry.
+        for trigger in ('act', 'retry'):
+            dispatched = consumed | dict(trigger=trigger)
+            mq.enqueue_due(history+[dispatched],self.now+timedelta(hours=2),runner=runner)
+            self.assertEqual(len(calls),1, trigger)
+        for reason in ('lock','duplicate','dispatch-in-progress'):
+            refusal = self.event('spawn-failed',9,role='gate',reason=reason)
+            mq.enqueue_due(history+[consumed,refusal],self.now,runner=runner)
+        self.assertEqual(len(calls),4)
+        refused_retry = consumed | dict(trigger='retry')
+        refused = self.event('spawn-failed',9,role='gate',reason='lock')
+        mq.enqueue_due(history+[refused_retry,refused],self.now+timedelta(hours=2),runner=runner)
+        self.assertEqual(len(calls),5)
+        live = self.event('spawn-started',0,role='executor',spawn='L-executor-9002')
+        mq.enqueue_due(history+[live],self.now,runner=runner)
+        self.assertEqual(len(calls),5)
+        # A delayed tick still anchors the ladder at the latest failure.
+        delayed = self.event('autodispatched',90,rule='gate',since=self.events[-1]['ts'],trigger='retry')
+        row = next(r for r in lane_rules.due(self.events+[delayed,outcome],fold.fold(history)[0],self.now) if r['rule']=='gate')
+        self.assertEqual(lane_rules.ladder(history,row,self.now),'act')
+        self.signed('ordering',dict(preceding_dispatch='eligible',following_dispatch='consumed',refusals=3,live_owner='held'))
+
+    def test_exit_statuses_and_runner_errors_remain_distinct(self):
+        self.prepare()
+        observations = []
+        for code in (0, 1, 2, 13, None):
+            with self.subTest(code=code):
+                before = len(self.landed())
+                def runner(*args, **kwargs):
+                    if code is None:
+                        raise OSError('synthetic runner error')
+                    return dict(code=code, stdout='synthetic gate result', stderr='')
+                output = mq.enqueue_due(self.events, self.now, runner=runner)
+                appended = self.landed()[before:]
+                failed = [e for e in appended if e['type'] == 'autodispatch-failed']
+                self.assertEqual(len(failed), int(code not in (0, 2)), output)
+                self.assertTrue(any(('gated' if code == 0 else 'tooling' if code == 2
+                                     else 'failed') in line for line in output), output)
+                observations.append(dict(code=code, failed=len(failed), output=output))
+        self.signed('exit-statuses', observations)
+
+
 if __name__ == '__main__':
+    if sys.argv[1:] == ['--spec-1869-ac2']:
+        suite = unittest.defaultTestLoader.loadTestsFromTestCase(GateToolingQueueTests)
+        result = unittest.TextTestRunner(verbosity=2).run(suite)
+        print(f'L-spec-1869 AC2 queue: {result.testsRun} executed; success={result.wasSuccessful()}')
+        sys.exit(0 if result.testsRun and result.wasSuccessful() else 1)
     unittest.main()
