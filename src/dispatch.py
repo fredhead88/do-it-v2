@@ -701,7 +701,7 @@ def coverage_changes(checkers):
             for c in checkers if last.get(c["id"]) != c["coverage_note"]]
 
 
-PINNED_BASE_RE = re.compile(r"^PINNED_BASE_SHA: (.+)$", re.M)
+PINNED_BASE_RE = re.compile(r"^PINNED_BASE_SHA:[ \t]*([^\r\n]*)\r?$", re.M)
 PINNED_BASE_EXPLICIT_RE = re.compile(r"^PINNED_BASE_SHA_EXPLICIT: true$", re.M)
 
 
@@ -1070,6 +1070,11 @@ def ensure_room(path, need_gb):
 
 def builder_worktree_preflight(a, cwd, ledger, base, fail):
     """Recreate conventional missing checkouts, then prove root and branch."""
+    # Standalone five-argument callers have no dispatch base context. Real
+    # dispatches use this existing admission seam for all builder git checks.
+    dispatched = getattr(a, '_dispatch_builder', False)
+    if dispatched:
+        builder_effective_base(a, fail)
     worktree = pathlib.Path(cwd).resolve()
     conventional = (ROOT / "worktrees" / (a.project or "") / a.subject.lower()).resolve()
     if not worktree.is_dir():
@@ -1095,6 +1100,99 @@ def builder_worktree_preflight(a, cwd, ledger, base, fail):
                             capture_output=True, text=True)
     if branch.returncode or branch.stdout.strip() != a.subject.lower():
         fail("builder worktree is not on its expected branch", reason="preflight:wrong-branch")
+    if dispatched:
+        builder_branch_preflight(a, cwd, fold.read_events(), fail)
+
+
+def builder_effective_base(a, fail):
+    """Compare packet authority with the resolver, never a packet's boolean."""
+    import packet
+    try:
+        effective = packet._effective_base(ROOT / 'repos' / (a.project or ''),
+                                           a.project, spec_path(a.subject), a.subject)
+    except (ValueError, OSError, TypeError, subprocess.SubprocessError):
+        fail('stale-base: effective project/base cannot be resolved; regenerate the packet',
+             reason='stale-base')
+    a.effective_base_sha = effective
+    if (not re.fullmatch(r'[0-9a-f]{40}', a.pinned_base_sha)
+            or a.pinned_base_sha != effective):
+        fail('stale-base: packet pin differs from the current effective base; regenerate the packet',
+             reason='stale-base')
+    return effective
+
+
+def pending_conflict_rework(events, subject):
+    """Only the subject's still-pending authorized first recovery is exempt."""
+    import conflict
+    own = [e for e in events if e.get('subject') == subject]
+    pending = None
+    for e in own:
+        if e.get('type') == 'build-done' and e.get('status') == 'DONE':
+            pending = None
+        elif e.get('type') in {'merge-conflict', 'conflict-rework'} and e.get('actor') == 'executor':
+            pending = e
+    if not pending or pending.get('branch', subject.lower()) != subject.lower():
+        return False
+    # Cross-file events can share a second; an ambiguous completed recovery
+    # must never revive an exception through content-based ledger ordering.
+    try:
+        if any(e.get('type') == 'build-done' and e.get('status') == 'DONE'
+               and datetime.fromisoformat(e['ts']) >= datetime.fromisoformat(pending['ts']) for e in own):
+            return False
+    except (KeyError, ValueError, TypeError):
+        return False
+    count = conflict.conflict_attempts(own, subject).attempt - 1
+    if pending['type'] == 'conflict-rework':
+        return (count == 1 and pending.get('attempt') == 1
+                and pending.get('verdict') == 're-dispatch')
+    return count == 0
+
+
+def builder_branch_preflight(a, cwd, events, fail):
+    """Obtain ancestry with git's abortable rebase; never recreate a branch."""
+    if pending_conflict_rework(events, a.subject):
+        return
+
+    def git(*args):
+        return subprocess.run(['git', '-C', str(cwd), *args], capture_output=True,
+                              text=True, timeout=30)
+
+    reason = 'branch-not-descendant'
+    try:
+        ancestor = git('merge-base', '--is-ancestor', a.effective_base_sha, 'HEAD')
+        if ancestor.returncode == 0:
+            return
+        if ancestor.returncode != 1:
+            fail(reason + ': ancestry could not be proved; regenerate and redispatch after git is repaired', reason=reason)
+        status = git('status', '--porcelain=v1', '--untracked-files=all')
+        if status.returncode or status.stdout:
+            fail(reason + ': builder/operator must preserve and clean dirty work before packet regeneration and redispatch', reason=reason)
+        for name in ('rebase-merge', 'rebase-apply', 'MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD'):
+            state = git('rev-parse', '--git-path', name)
+            path = pathlib.Path(state.stdout.strip())
+            if not path.is_absolute():
+                path = pathlib.Path(cwd) / path
+            if state.returncode or path.exists():
+                fail(reason + ': builder/operator must finish the existing git operation', reason=reason)
+        common = git('merge-base', 'HEAD', a.effective_base_sha)
+        if common.returncode or not re.fullmatch(r'[0-9a-f]{40}', common.stdout.strip()):
+            fail(reason + ': common ancestry cannot be resolved', reason=reason)
+        # A clean index and no pre-existing operation are established before
+        # rebase owns any state. Git retains ORIG_HEAD and abort restores it.
+        try:
+            rebased = git('rebase', '--no-autostash', '--no-update-refs', '--rebase-merges', a.effective_base_sha)
+            if rebased.returncode:
+                git('rebase', '--abort')
+                fail(reason + ': rebase conflict/command failure; Executor uses the existing subject-authorized '
+                     'conflict-rework packet to dispatch the builder on its own branch', reason=reason)
+        except (OSError, subprocess.SubprocessError):
+            git('rebase', '--abort')
+            raise
+        proved = git('merge-base', '--is-ancestor', a.effective_base_sha, 'HEAD')
+        if proved.returncode:
+            fail(reason + ': refreshed ancestry could not be proved', reason=reason)
+    except (OSError, subprocess.SubprocessError):
+        fail(reason + ': ancestry/rebase command failed or timed out; repair git before packet regeneration and redispatch', reason=reason)
 
 
 def unaudited(evs):
@@ -1133,6 +1231,7 @@ def main(a):
         raise
     finally:
         a._dispatch_crash = None
+        vars(a).pop('_dispatch_builder', None)
 
 
 def _main(a):
@@ -1202,6 +1301,10 @@ def _main(a):
         if (backend_failure or grading_env.failure_kind(why, exit_code) == "infra") and machine_failure(why, exit_code):
             sys.exit(2)
         kv = {"why": why}
+        if builder and getattr(a, 'pinned_base_sha', None) is not None:
+            kv['pinned_base_sha'] = a.pinned_base_sha
+        if builder and getattr(a, 'effective_base_sha', None):
+            kv['effective_base_sha'] = a.effective_base_sha
         if reason is not None:
             kv["reason"] = reason
         kv["tokens"] = tokens_for_spawn(spawn, ROOT, meta.get("spawn_path")) if backend_ran else None
@@ -1439,6 +1542,7 @@ def _main(a):
         fail(f"identical packet and contract already failed as {prior.get('spawn')} "
              f"({str(prior.get('why'))[:60]}); not retried (D120) — not spent")
     if builder:
+        a._dispatch_builder = True
         builder_worktree_preflight(a, cwd, ledger, base, fail)
     elif not pathlib.Path(cwd).is_dir():
         fail("spawn cwd does not exist", reason="preflight:worktree-missing")

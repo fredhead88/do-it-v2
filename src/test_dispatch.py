@@ -101,6 +101,8 @@ def test_dispatch_1134():
                 mock.patch.multiple(fold, ROOT=root, EVENTS=root / "events"), \
                 mock.patch.object(models, "resolve", return_value={"backend": "codex", "model": "fixture", "source": "fixture"}), \
                 mock.patch.object(dispatch, "ensure_room", return_value=True), \
+                mock.patch.object(dispatch, "builder_effective_base"), \
+                mock.patch.object(dispatch, "builder_branch_preflight"), \
                 mock.patch.object(dispatch, "run_codex", side_effect=RuntimeError("AssertionError: fixture backend stop")) as backend:
             def start(role, caller):
                 if caller is None:
@@ -170,6 +172,8 @@ from unittest.mock import Mock
 import nextstep, relay
 nextstep.classify_failure = Mock(return_value="work")
 relay.serving = Mock(return_value=True)
+dispatch.builder_effective_base = Mock()
+dispatch.builder_branch_preflight = Mock()
 """
 
 def _seat_timing_checks(dispatch, root, repo):
@@ -237,7 +241,9 @@ for _chunk in range(1, 4):
         "import dispatch, fold, grader_view, harness\n" + _historical_work_seams +
         "dispatch.builder_worktree_preflight = lambda *args: None\n_fast_seat_poll(dispatch)")
     _source = _source.replace("importlib.reload(dispatch)",
-        "importlib.reload(dispatch)\ndispatch.builder_worktree_preflight = lambda *args: None\n_fast_seat_poll(dispatch)")
+        "importlib.reload(dispatch)\ndispatch.builder_worktree_preflight = lambda *args: None\n"
+        "dispatch.builder_effective_base = lambda *args: None\n"
+        "dispatch.builder_branch_preflight = lambda *args: None\n_fast_seat_poll(dispatch)")
     # These historical graders exercise legacy no-bundle capability and
     # verdict handling. The real bundle gate is covered in check_evidence1109
     # above, in its own process; it now refuses these old fixture packets.
@@ -271,6 +277,8 @@ def infra_dispatch_checks(mode):
              patch.object(models, "resolve", return_value=mapping), \
              patch.object(dispatch, "ensure_room", return_value=True), \
              patch.object(dispatch, "builder_worktree_preflight"), \
+             patch.object(dispatch, "builder_effective_base"), \
+             patch.object(dispatch, "builder_branch_preflight"), \
              patch.object(dispatch.spawns, "gate", return_value=None), \
              patch.object(dispatch, "now", side_effect=lambda: clock.isoformat()), \
              patch.object(dispatch, "run_codex", return_value=response) as backend, \
@@ -828,6 +836,391 @@ import unittest
 from unittest.mock import patch
 
 
+class R7DispatchTests(unittest.TestCase):
+    """Real git/actor-ledger fixtures; only paid execution is replaced."""
+
+    class BackendBoundary(BaseException):
+        pass
+
+    def setUp(self):
+        import dispatch, fold
+        from contextlib import ExitStack
+        self.d, self.f = dispatch, fold
+        self.stack = ExitStack()
+        self.addCleanup(self.stack.close)
+        self.root = Path(self.stack.enter_context(tempfile.TemporaryDirectory(prefix='r7-'))) / 'root'
+        self.root.mkdir()
+        self.home = self.root.parent / 'home'
+        self.home.mkdir()
+        self.repo = self.root / 'repos' / 'do-it-v2'
+        self.repo.mkdir(parents=True)
+        self.tree = self.root / 'tree'
+        (self.root / 'content').mkdir()
+        (self.root / 'events').mkdir()
+        self.sid = 'L-spec-9774'
+        self.spec = self.root / 'content' / (self.sid + '.md')
+        self.spec.write_text('## Acceptance criteria\nAC1 [backend]: scratch\n')
+        self.git('init', '-q', '-b', 'main', cwd=self.repo)
+        self.git('config', 'user.name', 'Fixture', cwd=self.repo)
+        self.git('config', 'user.email', 'fixture@example.invalid', cwd=self.repo)
+        (self.repo / 'base').write_text('O\n')
+        self.commit(self.repo, 'O')
+        self.old = self.git('rev-parse', 'HEAD', cwd=self.repo)
+        self.git('worktree', 'add', '-qb', self.sid.lower(), str(self.tree), self.old, cwd=self.repo)
+        for module in (dispatch, fold):
+            self.stack.enter_context(patch.multiple(module, ROOT=self.root, EVENTS=self.root / 'events'))
+        self.stack.enter_context(patch.object(dispatch, 'CONTENT', self.root / 'content'))
+        self.stack.enter_context(patch.dict(os.environ, DOIT_ROOT=str(self.root), DOIT_NO_POKE='1'))
+        for key in ('DOIT_LEDGER_FILE', 'DOIT_REAP_LEDGER_FILE', 'DOIT_SEAT'):
+            os.environ.pop(key, None)
+        import models
+        self.stack.enter_context(patch.object(models, 'resolve', return_value=dict(
+            backend='codex', model='fixture', source='fixture')))
+        self.stack.enter_context(patch.object(dispatch, 'ensure_room', return_value=True))
+        self.backend = self.stack.enter_context(patch.object(dispatch, 'run_codex', side_effect=self.enter_backend))
+        self.seat = self.stack.enter_context(patch.object(dispatch, 'run_seat', side_effect=AssertionError('paid seat')))
+        self.packet = self.root / 'packet.md'
+        self.observed = []
+        self.advance()
+
+    def git(self, *args, cwd=None):
+        return subprocess.run(['git', '-C', str(cwd or self.tree), *args], check=True,
+                              capture_output=True, text=True, timeout=15).stdout.strip()
+
+    def commit(self, directory, message):
+        self.git('add', '.', cwd=directory)
+        self.git('commit', '-qm', message, cwd=directory)
+
+    def advance(self):
+        (self.repo / 'base').write_text('N\n')
+        self.commit(self.repo, 'N')
+        self.new = self.git('rev-parse', 'HEAD', cwd=self.repo)
+
+    def patch_commit(self, conflict=False):
+        (self.tree / ('base' if conflict else 'builder')).write_text('C\n')
+        self.commit(self.tree, 'builder C')
+
+    def enter_backend(self, *args, **kw):
+        pin = self.d._pinned_base_in(args[4])
+        ancestry = subprocess.run(['git', '-C', str(self.tree), 'merge-base', '--is-ancestor', pin, 'HEAD'],
+                                  capture_output=True, timeout=15).returncode
+        self.observed.append(dict(branch=self.git('branch', '--show-current'),
+                                  pin=pin, ancestor_at_backend=ancestry == 0,
+                                  patch=(self.tree / 'builder').read_text() if (self.tree / 'builder').exists() else None))
+        raise self.BackendBoundary()
+
+    def rows(self):
+        return self.f.read_events(use_cache=False)
+
+    def clear_events(self):
+        for path in (self.root / 'events').glob('*.jsonl'):
+            path.unlink()
+
+    def record(self, kind, actor='executor', **kw):
+        subject = kw.pop('subject', self.sid)
+        self.assertIsNone(self.d.emit(self.root / 'events' / ('L-' + actor + '-9774.jsonl'),
+                                     dict(subject=subject, project='do-it-v2'), kind, **kw))
+
+    def dispatch(self, pin=None, transport='file', project='do-it-v2', extra=''):
+        import argparse, contextlib, io
+        text = 'scratch\n' + ('' if pin is None else 'PINNED_BASE_SHA: ' + pin + '\n') + extra
+        self.packet.write_text(text)
+        args = argparse.Namespace(role='builder', subject=self.sid, packet='-' if transport == 'stdin' else str(self.packet),
+            path=None, cwd=str(self.tree), charter=None, project=project, mcp_config=None,
+            timeout=None, max_usd=None, seat=False)
+        before = self.backend.call_count
+        before_files = set((self.root / 'events').glob('L-builder-*.jsonl'))
+        with patch('sys.stdin', io.StringIO(text)), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            try:
+                self.d.main(args)
+            except self.BackendBoundary:
+                self.assertEqual(self.backend.call_count, before + 1)
+                return 'backend'
+            except SystemExit:
+                self.assertEqual(self.backend.call_count, before)
+                self.seat.assert_not_called()
+                created = set((self.root / 'events').glob('L-builder-*.jsonl')) - before_files
+                self.assertEqual(len(created), 1)
+                rows = [json.loads(line) for line in created.pop().read_text().splitlines()]
+                return next(e.get('reason', e.get('why')) for e in reversed(rows) if e['type'] == 'spawn-failed')
+        self.fail('dispatch did not terminate')
+
+    def signed(self, ac, body):
+        import hashlib
+        payload = json.dumps(body, sort_keys=True)
+        print(json.dumps(dict(url='cli://r7/' + ac, status=0,
+            body_sha256=hashlib.sha256(payload.encode()).hexdigest(), body_excerpt=body)))
+
+    def snapshot(self):
+        return dict(tip=self.git('rev-parse', 'HEAD'), committed=self.git('show', 'HEAD:base'),
+            index=self.git('diff', '--cached', '--binary'), work=self.git('diff', '--binary'),
+            bytes={p.name: p.read_bytes().hex() for p in self.tree.iterdir() if p.is_file() and p.name != '.git'},
+            untracked={p.name: p.read_bytes().hex() for p in self.tree.iterdir()
+                       if p.is_file() and p.name not in {'.git', 'base', 'builder'}})
+
+    def test_stale_base(self):
+        for transport in ('file', 'stdin'):
+            for label, pin in (('old', self.old), ('malformed', 'bad'), ('unavailable', 'f' * 40), ('matching', self.new)):
+                with self.subTest(transport=transport, pin=label):
+                    self.clear_events()
+                    result = self.dispatch(pin, transport)
+                    self.assertEqual(result, 'backend' if label == 'matching' else 'stale-base')
+                    rows = self.rows()
+                    if result != 'backend':
+                        self.assertFalse(any(e['type'] in {'build-started', 'spawn-started', 'seat-queued'} for e in rows))
+                    self.signed('AC1-' + transport + '-' + label, dict(result=result, events=rows))
+        self.clear_events()
+        self.assertEqual(self.dispatch(), 'no-pinned-base')
+        for project in (None, '../bad', 'unconfigured'):
+            self.clear_events()
+            self.assertEqual(self.dispatch(self.new, project=project), 'stale-base')
+        self.clear_events()
+        self.assertEqual(self.dispatch(self.old, extra='PINNED_BASE_SHA_EXPLICIT: true\n'), 'stale-base')
+        self.assertEqual(self.dispatch(''), 'stale-base')
+        import packet
+        with patch.object(packet, '_effective_base', side_effect=ValueError):
+            self.assertEqual(self.dispatch(self.new), 'stale-base')
+        self.git('branch', 'realm', self.old, cwd=self.repo)
+        self.spec.write_text('Base: realm\n')
+        self.clear_events()
+        self.assertEqual(self.dispatch(self.new), 'stale-base')
+        self.assertEqual(self.dispatch(self.old), 'backend')
+        self.git('update-ref', 'refs/heads/realm', self.new, self.old, cwd=self.repo)
+        self.clear_events()
+        self.assertEqual(self.dispatch(self.old), 'stale-base')
+        self.signed('AC1-realm-advanced', dict(events=self.rows()))
+        self.spec.write_text('fixture\n')
+        self.clear_events()
+        for module, name, value, expected in (
+                (self.f, 'spec_state', 'killed', None),
+                (self.f, 'subject_project', 'other', 'wrong-project'),
+                (self.d, 'open_spec_writer_spawn', True, 'rework-open'),
+                (self.f, 'spec_shape_pending', True, 'spec-shape'),
+                (self.d, 'unaudited', 'unaudited fixture', 'unaudited')):
+            with patch.object(module, name, return_value=value):
+                result = self.dispatch(self.old)
+            self.assertIn('killed', result) if expected is None else self.assertEqual(result, expected)
+            self.signed('AC1-precedence-' + name, dict(result=result, events=self.rows()))
+            self.clear_events()
+        with patch.object(self.d, 'resolve_charter', return_value='L-charter-9774'), \
+             patch.object(self.d, 'spec_wave', return_value=2), \
+             patch.object(self.d, 'wave_blocker', return_value='L-spec-9773'):
+            self.record('spec-written', actor='operator', footprint=['src/dispatch.py'])
+            self.assertEqual(self.dispatch(self.old), 'wave-order')
+        # Capture an assembled packet, then advance the default again.
+        self.clear_events()
+        assembled = self.new
+        (self.repo / 'advance').write_text('advanced after assembly\n')
+        self.commit(self.repo, 'advance after packet')
+        self.new = self.git('rev-parse', 'HEAD', cwd=self.repo)
+        self.assertEqual(self.dispatch(assembled), 'stale-base')
+        self.signed('AC1-assembly-race', dict(events=self.rows()))
+        self.cli_rows()
+
+    def cli_rows(self):
+        # pane is a deliberate later guard: no backend executable can be called.
+        (self.root / 'models.toml').write_text('[contracts.builder]\nbackend="pane"\nmodel="fixture"\n')
+        env = dict(os.environ, DOIT_ROOT=str(self.root), HOME=str(self.home), DOIT_NO_POKE='1')
+        env.pop('DOIT_SEAT', None)
+        for label, pin in (('old', self.old), ('malformed', 'bad'), ('unavailable', 'f' * 40), ('matching', self.new)):
+            self.clear_events()
+            self.packet.write_text('PINNED_BASE_SHA: ' + pin + '\n')
+            args = [sys.executable, str(Path(self.d.__file__)), 'builder', self.sid, '--packet', str(self.packet),
+                    '--project', 'do-it-v2', '--cwd', str(self.tree), '--detach']
+            result = subprocess.run(args, env=env, capture_output=True, text=True, timeout=15)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            log = Path(json.loads(result.stdout)['log'])
+            import time
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                rows = self.rows()
+                if any(e['type'] == 'spawn-failed' for e in rows):
+                    break
+                time.sleep(.02)
+            self.assertTrue(any(e['type'] == 'spawn-failed' for e in rows), log.read_text())
+            failure = next(e for e in rows if e['type'] == 'spawn-failed')
+            self.assertEqual(failure.get('reason'), None if label == 'matching' else 'stale-base', log.read_text())
+            self.assertFalse(any(e['type'] in {'build-started', 'spawn-started', 'seat-queued'} for e in rows))
+            self.signed('AC1-detached-' + label, dict(events=rows, later_guard=log.read_text()[-300:]))
+        self.clear_events()
+        result = subprocess.run(args[:-1] + ['--detach', '--packet', '-'], env=env,
+                                input='', capture_output=True, text=True, timeout=15)
+        self.assertIn('--detach needs --packet FILE', result.stderr)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(list((self.root / 'events').glob('L-builder-*.jsonl')), [])
+
+    def test_branch_ancestry(self):
+        self.patch_commit()
+        before = self.snapshot()
+        self.assertEqual(self.dispatch(self.new), 'backend')
+        self.git('merge-base', '--is-ancestor', self.new, 'HEAD')
+        self.assertEqual((self.tree / 'builder').read_text(), 'C\n')
+        self.signed('AC2-safe-diverged', dict(before=before, after=self.snapshot(), backend=self.observed))
+        self.clear_events()
+        self.assertEqual(self.dispatch(self.new), 'backend')
+        self.signed('AC2-descendant', self.observed[-1])
+        # Independent fixtures keep every unsafe pre-image observable.
+        for mode in ('equal', 'old', 'dirty', 'conflict', 'error', 'timeout', 'realm', 'grader-rework', 'owner-drop'):
+            with self.subTest(mode=mode):
+                fixture = R7DispatchTests('runTest')
+                fixture.setUp()
+                try:
+                    if mode == 'equal':
+                        fixture.git('rebase', fixture.new)
+                    elif mode not in {'old', 'realm'}:
+                        fixture.patch_commit(conflict=mode == 'conflict')
+                    if mode == 'grader-rework':
+                        fixture.record('decision', actor='operator', rework='yes')
+                    elif mode == 'owner-drop':
+                        fixture.record('window-dropped', reason='owner', owner='fixture', window='L-window-fixture')
+                    if mode == 'realm':
+                        fixture.git('branch', 'realm', fixture.new, cwd=fixture.repo)
+                        fixture.spec.write_text('Base: realm\n')
+                    if mode == 'dirty':
+                        (fixture.tree / 'builder').write_text('staged\n')
+                        fixture.git('add', 'builder')
+                        (fixture.tree / 'builder').write_text('unstaged\n')
+                        (fixture.tree / 'untracked').write_bytes(b'preserve\x00bytes')
+                    before = fixture.snapshot()
+                    real = subprocess.run
+                    def run(argv, *args, **kw):
+                        if 'merge-base' in argv and '--is-ancestor' in argv:
+                            if mode == 'timeout':
+                                raise subprocess.TimeoutExpired(argv, 10)
+                            if mode == 'error':
+                                return subprocess.CompletedProcess(argv, 128, '', 'failure')
+                        return real(argv, *args, **kw)
+                    with patch.object(subprocess, 'run', side_effect=run):
+                        result = fixture.dispatch(fixture.new)
+                    unsafe = mode in {'dirty', 'conflict', 'error', 'timeout'}
+                    self.assertEqual(result, 'branch-not-descendant' if unsafe else 'backend')
+                    if unsafe:
+                        self.assertEqual(before, fixture.snapshot())
+                        for name in ('rebase-merge', 'rebase-apply'):
+                            self.assertFalse(Path(fixture.git('rev-parse', '--git-path', name)).exists())
+                    else:
+                        fixture.git('merge-base', '--is-ancestor', fixture.new, 'HEAD')
+                        self.assertTrue(fixture.observed[-1]['ancestor_at_backend'])
+                    fixture.signed('AC2-' + mode, dict(result=result, before=before, after=fixture.snapshot(), events=fixture.rows()))
+                finally:
+                    fixture.doCleanups()
+
+    def test_conflict_rework(self):
+        import packet
+        self.patch_commit()
+        self.record('conflict-rework', branch=self.sid.lower(), attempt=1, verdict='re-dispatch', paths=['builder'])
+        with patch.object(packet, 'main', return_value='scratch conflict recovery') as generate:
+            hint = packet.packet_builder_rework(self.sid, 'resolve builder conflict')
+            self.assertIn('--hint', generate.call_args.args[0])
+        before = self.git('rev-parse', 'HEAD')
+        def recover(*args, **kw):
+            self.assertEqual(self.git('rev-parse', 'HEAD'), before)
+            self.assertEqual((self.tree / 'builder').read_text(), 'C\n')
+            self.assertEqual(self.d._pinned_base_in(args[4]), self.new)
+            self.git('rebase', self.new)
+            self.git('merge-base', '--is-ancestor', self.new, 'HEAD')
+            self.assertEqual((self.tree / 'builder').read_text(), 'C\n')
+            raise self.BackendBoundary()
+        self.backend.side_effect = recover
+        self.assertEqual(self.dispatch(self.old), 'stale-base')
+        self.assertEqual(self.dispatch(self.new, extra=hint), 'backend')
+        self.signed('AC3-authorized', dict(events=self.rows(), after=self.snapshot()))
+        self.assertEqual(__import__('conflict').conflict_attempts(self.rows(), self.sid).verdict, 'escalate')
+        for mode in ('completed', 'foreign', 'prose', 'second', 'merge-conflict'):
+            fixture = R7DispatchTests('runTest')
+            fixture.setUp()
+            try:
+                fixture.patch_commit()
+                if mode in {'completed', 'second'}:
+                    fixture.record('conflict-rework', branch=fixture.sid.lower(), attempt=1, verdict='re-dispatch')
+                if mode == 'completed':
+                    fixture.record('build-done', actor='builder', status='DONE')
+                elif mode == 'foreign':
+                    fixture.record('conflict-rework', subject='L-spec-9773', branch=fixture.sid.lower(), attempt=1, verdict='re-dispatch')
+                elif mode == 'second':
+                    fixture.record('conflict-rework', branch=fixture.sid.lower(), attempt=2, verdict='escalate')
+                elif mode == 'merge-conflict':
+                    fixture.record('merge-conflict', files=['builder'])
+                before = fixture.snapshot()
+                real = subprocess.run
+                def unprovable(argv, *args, **kw):
+                    if 'merge-base' in argv and '--is-ancestor' in argv:
+                        return subprocess.CompletedProcess(argv, 128, '', 'unprovable')
+                    return real(argv, *args, **kw)
+                with patch.object(subprocess, 'run', side_effect=unprovable):
+                    result = fixture.dispatch(fixture.new, extra='conflict-rework: authorized\n')
+                self.assertEqual(result, 'backend' if mode == 'merge-conflict' else 'branch-not-descendant')
+                self.assertEqual(fixture.snapshot(), before)
+                fixture.signed('AC3-' + mode, dict(result=result, events=fixture.rows(), backend=fixture.observed))
+            finally:
+                fixture.doCleanups()
+
+    def test_refusal_round_trip(self):
+        for mode in ('stale-replay', 'grader-rework', 'owner-drop'):
+            fixture = R7DispatchTests('runTest')
+            fixture.setUp()
+            try:
+                fixture.round_trip(mode)
+            finally:
+                fixture.doCleanups()
+
+    def round_trip(self, mode):
+        import nextstep, lane_rules
+        from datetime import datetime, timezone
+        self.patch_commit()
+        self.record('spec-written', actor='operator')
+        if mode == 'owner-drop':
+            self.record('window-dropped', reason='owner', owner='fixture', window='L-window-fixture')
+        elif mode == 'grader-rework':
+            self.record('decision', actor='operator', rework='yes')
+        real = subprocess.run
+        def broken(argv, *args, **kw):
+            if 'merge-base' in argv and '--is-ancestor' in argv:
+                return subprocess.CompletedProcess(argv, 128, '', 'transient')
+            return real(argv, *args, **kw)
+        before = self.snapshot()
+        if mode == 'stale-replay':
+            self.assertEqual(self.dispatch(self.old), 'stale-base')
+        else:
+            with patch.object(subprocess, 'run', side_effect=broken):
+                self.assertEqual(self.dispatch(self.new), 'branch-not-descendant')
+        self.assertEqual(before, self.snapshot())
+        rows = self.rows()
+        def steps():
+            return nextstep.next_steps(self.rows(), {self.sid: dict(state='written')},
+                datetime.now(timezone.utc), lane_rules.load())
+        held = next(s for s in steps() if s.item == self.sid)
+        self.assertIn('base-refresh', held.reason)
+        self.assertEqual(held.owner, 'executor')
+        self.assertIsNone(held.action)
+        self.assertFalse(any(e['type'] in {'build-started', 'spawn-started', 'seat-queued'} for e in rows))
+        self.assertTrue(any(e.get('pinned_base_sha') and e.get('effective_base_sha') for e in rows if e['type'] == 'spawn-failed'))
+        trigger = next(e for e in rows if e['type'] == ('decision' if mode == 'grader-rework' else
+                       'window-dropped' if mode == 'owner-drop' else 'spec-written'))
+        self.assertFalse(__import__('attempts').history(nextstep._history_events(rows), trigger, 'builder',
+                         now=datetime.now(timezone.utc)).consumed)
+        self.assertEqual(steps(), steps())
+        self.assertEqual(self.rows(), rows)
+        self.assertEqual(self.backend.call_count, 0)
+        self.assertEqual(self.dispatch(self.new), 'backend')
+        self.git('merge-base', '--is-ancestor', self.new, 'HEAD')
+        self.assertTrue(self.observed[-1]['ancestor_at_backend'])
+        self.assertEqual((self.tree / 'builder').read_text(), 'C\n')
+        self.assertTrue(any(e['type'] == 'build-started' and e['base_sha'] == self.new for e in self.rows()))
+        self.assertFalse(any('base-refresh' in s.reason for s in steps()))
+        self.signed('AC5-' + mode, dict(refused=rows, recovered=self.rows(), steps=[s.__dict__ for s in steps()]))
+        if mode == 'grader-rework':
+            self.clear_events()
+            self.record('spec-written', actor='operator')
+            for n in range(3):
+                self.record('spawn-failed', actor='builder', role='builder', spawn=f'L-builder-{9800 + n}', reason='vanished')
+            self.assertEqual(self.dispatch(self.old), 'stale-base')
+            exhausted = next(s for s in steps() if s.item == self.sid)
+            self.assertIn('retry exhausted: 3', exhausted.reason)
+            self.assertIsNone(exhausted.action)
+            self.signed('AC5-exhausted', dict(events=self.rows(), step=exhausted.__dict__))
+
+
 class AuditGateTests(unittest.TestCase):
     def setUp(self):
         import dispatch, fold
@@ -898,11 +1291,15 @@ class AuditGateTests(unittest.TestCase):
 
     def test_ac5_wrapper_refuses_before_backend(self):
         import argparse, contextlib, io, models
-        repo = self.root / 'repo'
-        repo.mkdir()
+        repo = self.root / 'repos' / 'do-it-v2'
+        repo.mkdir(parents=True)
+        self.dispatch.spec_path('L-spec-9673').write_text('fixture\n')
         subprocess.run(['git', 'init', '-q', '-b', 'l-spec-9673'], cwd=repo, check=True)
         subprocess.run(['git', '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
                         'commit', '--allow-empty', '-qm', 'fixture'], cwd=repo, check=True)
+        subprocess.run(['git', 'branch', 'main'], cwd=repo, check=True)
+        pin = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=repo, check=True,
+                             capture_output=True, text=True).stdout.strip()
         packet = self.root / 'packet.md'
         packet.write_text('fixture\nPINNED_BASE_SHA: X0000000\n')
         self.emit('spec-writer', 'spec-written')
@@ -913,7 +1310,7 @@ class AuditGateTests(unittest.TestCase):
             os.environ.pop('DOIT_SEAT', None)
             def start(role='builder'):
                 args = argparse.Namespace(role=role, subject='L-spec-9673', packet=str(packet), path=None,
-                    cwd=str(repo), charter=None, project='repo', mcp_config=None, timeout=None, max_usd=None, seat=False)
+                    cwd=str(repo), charter=None, project='do-it-v2', mcp_config=None, timeout=None, max_usd=None, seat=False)
                 with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
                     try:
                         self.dispatch.main(args)
@@ -961,6 +1358,7 @@ class AuditGateTests(unittest.TestCase):
             self.signed('AC5-guard-precedence', [dict(reason=e.get('reason'), why=e.get('why'))
                         for e in self.read() if e['type'] == 'spawn-failed'])
             self.emit('spec-auditor', 'spawn-done', bad_cut=False)
+            packet.write_text('fixture\nPINNED_BASE_SHA: ' + pin + '\n')
             self.assertEqual(start(), 'backend', self.read())
             self.assertTrue(any(e['type'] == 'build-started' for e in self.read()))
             # A pre-deploy build remains exempt even without its audit.
