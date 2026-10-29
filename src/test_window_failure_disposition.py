@@ -346,6 +346,9 @@ class Disposition(unittest.TestCase):
                     path.unlink()
                 scans, killed, reaped, cleaned = [], [], [], []
                 def git(*args):
+                    if args[:2] == ("rev-parse", "--path-format=absolute"):
+                        return str(self.repo / ".git").encode()
+                    if args[0] == "diff": return b""
                     if args[0] == "ls-tree": return mg.DETECT_SECRETS_SCRIPT.encode()
                     if args[0] == "show": return b"#!/bin/bash\n"
                     if args[:2] == ("worktree", "add"):
@@ -374,6 +377,7 @@ class Disposition(unittest.TestCase):
                      patch.object(mg, "_TOP", str(self.repo)), \
                      patch.object(mg.freeze, "state", return_value=None), \
                      patch.object(mg, "git", side_effect=git), \
+                     patch.object(mg, "resolve", return_value=self.sha), \
                      patch.object(resources, "record"), \
                      patch.object(mg.subprocess, "Popen", Proc), \
                      patch.object(mg.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, stdout="", stderr="")), \
@@ -384,7 +388,7 @@ class Disposition(unittest.TestCase):
                 rows = self.rows()
                 kinds = [r["type"] for r in rows]
                 self.assertEqual(len(scans), len(outcomes))
-                self.assertEqual(len(cleaned), len(outcomes))
+                self.assertEqual(len(cleaned), 1)
                 self.assertTrue(all(not p.exists() for p in cleaned))
                 self.assertEqual(killed, [(1234567, signal.SIGKILL)] * outcomes.count("timeout"))
                 self.assertEqual(reaped, [1234567] * outcomes.count("timeout"))
@@ -395,6 +399,8 @@ class Disposition(unittest.TestCase):
                     self.assertEqual(rows[0]["retry_at"], (NOW + timedelta(minutes=5)).isoformat(timespec="seconds"))
                 elif outcomes[-1] == "clean":
                     self.assertEqual((rc, kinds), (0, ["merge-gate-clean"]))
+                elif outcomes == ("other",):
+                    self.assertEqual((rc, kinds), (2, []))
                 else:
                     self.assertEqual((rc, kinds), (1, ["merge-gate-rework"]))
                     self.assertEqual(rows[0]["reason"], "secret-scan")
