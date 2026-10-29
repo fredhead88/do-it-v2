@@ -9,9 +9,11 @@ import json
 import os
 import pathlib
 import re
+import secrets
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -23,6 +25,8 @@ import fold
 import grader_view
 import grading_env
 import node_modules
+import panes
+import reap_tmp
 import scratch
 import verification
 
@@ -34,6 +38,125 @@ TAIL_CAP = 65536
 DIRECTORY_CAP = 5 * 1024 * 1024
 PROD_DATA_UNAVAILABLE = "cannot-observe: observed-data check needs a production read-only DSN; none supplied"
 NO_PROD_ENV = {"pg": "none", "prod_dsns": "unset", "required_pg": "prod_ro"}
+SHORT_TMP_ROOT = pathlib.Path("/tmp")
+SHORT_TMP_BACKING_ROOT = None
+_SHORT_TMP_NAME = re.compile(r"dr-([1-9][0-9]{0,9})-[a-z0-9]{8}")
+
+
+def _tmp_backing_root():
+    return (scratch.sub("runner-tmp") if SHORT_TMP_BACKING_ROOT is None
+            else pathlib.Path(SHORT_TMP_BACKING_ROOT)).resolve()
+
+
+def short_tmpdir():
+    """Publish only an alias on /tmp; all payload stays on scratch."""
+    backing = _tmp_backing_root() / f"dr-{os.getpid()}-{secrets.token_hex(4)}"
+    backing.mkdir(mode=0o700)
+    alias = SHORT_TMP_ROOT.absolute() / backing.name
+    try:
+        backing.chmod(0o700)
+        alias.symlink_to(backing)
+    except BaseException:
+        backing.rmdir()
+        raise
+    return alias
+
+
+def _tmp_pair(alias, backing):
+    """Snapshot a validated pair (including interrupted, unpaired residue)."""
+    result = []
+    for path, link in ((alias, True), (backing, False)):
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            result.append(None)
+            continue
+        if info.st_uid != os.geteuid():
+            raise OSError("foreign temporary allocation")
+        if link:
+            if not stat.S_ISLNK(info.st_mode) or os.readlink(path) != str(backing):
+                raise OSError("unexpected temporary alias")
+        elif not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o700:
+            raise OSError("unexpected temporary backing")
+        result.append((info.st_dev, info.st_ino, info.st_mode, info.st_uid))
+    return tuple(result)
+
+
+def _remove_tmp_pair(alias, backing, identity):
+    if _tmp_pair(alias, backing) != identity:
+        raise OSError("temporary allocation changed")
+    if identity[0] is not None:
+        alias.unlink()
+    if identity[1] is not None:
+        if _tmp_pair(alias, backing) != (None, identity[1]):
+            raise OSError("temporary backing changed")
+        # shutil's fd-based deletion does not follow nested symlinks.
+        shutil.rmtree(backing)
+
+
+def _tmp_unused(alias, backing, owner, proc_root):
+    if panes.alive(owner):
+        return False
+    refs, _ = reap_tmp._own_uid_refs(proc_root, os.geteuid())
+    if refs is None:
+        raise OSError("unreadable process snapshot")
+    # _bound_sockets treats a missing source as empty; recovery cannot.
+    (proc_root / "net" / "unix").read_text()
+    sockets = reap_tmp._bound_sockets(proc_root)
+    for path in (alias, backing):
+        if any(reap_tmp._under(ref, path) for ref in refs):
+            return False
+        if os.path.lexists(path):
+            # _refs_d ignores unreadable pidfiles. Establish readability first,
+            # then leave pid parsing and liveness to the shared predicate.
+            for pidfile in reap_tmp._pidfiles_under(path):
+                if pathlib.Path(pidfile).is_symlink():
+                    raise OSError("symlinked pidfile")
+                pathlib.Path(pidfile).read_text()
+            if reap_tmp._refs_d(proc_root, path, sockets=sockets):
+                return False
+        elif any(reap_tmp._under(sock, path) for sock in sockets):
+            return False
+    return True
+
+
+def sweep_short_tmpdirs(root=None, *, backing_root=None, proc_root=pathlib.Path("/proc")):
+    """Best-effort recovery of this runner's namespace, using reaper evidence."""
+    counts = dict(removed=0, retained=0, errors=0)
+    try:
+        root = pathlib.Path(root if root is not None else SHORT_TMP_ROOT).absolute()
+        backing_root = pathlib.Path(backing_root) if backing_root is not None else _tmp_backing_root()
+        if root.is_symlink() or backing_root.is_symlink():
+            raise OSError("symlinked discovery root")
+        backing_root = backing_root.resolve()
+        names = {p.name for base in (root, backing_root) for p in base.iterdir()
+                 if p.name.startswith("dr-")}
+    except (OSError, scratch.ScratchRootError):
+        counts["errors"] += 1
+        return counts
+    for name in sorted(names):
+        match = _SHORT_TMP_NAME.fullmatch(name)
+        if not match or int(match[1]) > 2147483647:
+            counts["retained"] += 1
+            continue
+        alias, backing = root / name, backing_root / name
+        try:
+            identity = _tmp_pair(alias, backing)
+            if identity == (None, None):
+                continue
+            if not _tmp_unused(alias, backing, int(match[1]), pathlib.Path(proc_root)):
+                counts["retained"] += 1
+                continue
+            # Refresh both safety and identity immediately before removal.
+            if not _tmp_unused(alias, backing, int(match[1]), pathlib.Path(proc_root)):
+                counts["retained"] += 1
+                continue
+            _remove_tmp_pair(alias, backing, identity)
+            counts["removed"] += 1
+        except (OSError, UnicodeError):
+            counts["retained"] += 1
+            counts["errors"] += 1
+    return counts
 
 
 class Undetermined(Exception):
@@ -267,6 +390,7 @@ def _run_tree(spec, sha, repo, row, commands, tail_dir, offset, tail_limit, dead
     if tree.exists() or auxiliary.exists():
         raise Undetermined("runner scratch already exists")
     auxiliary.mkdir()
+    temporary = identity = None
     try:
         env = grading_env._clean_env()
         if row.get("venv"):
@@ -275,11 +399,14 @@ def _run_tree(spec, sha, repo, row, commands, tail_dir, offset, tail_limit, dead
             env["PATH"] = str(venv_bin) + os.pathsep + env.get("PATH", os.defpath)
         for name in ("DOIT_LEDGER_FILE", "DOIT_SUPERVISED"):
             env.pop(name, None)
-        for name, relative in (("HOME", "home"), ("DOIT_ROOT", "root"), ("TMPDIR", "tmp")):
+        for name, relative in (("HOME", "home"), ("DOIT_ROOT", "root")):
             path = auxiliary / relative
             path.mkdir()
             env[name] = str(path.resolve())
-        env["TMP"] = env["TEMP"] = env["TMPDIR"]
+        temporary = short_tmpdir()
+        backing = _tmp_backing_root() / temporary.name
+        identity = _tmp_pair(temporary, backing)
+        env["TMPDIR"] = env["TMP"] = env["TEMP"] = str(temporary)
         rows, parsed, missing, rewrites = [], [], [], []
         _required(["git", "clone", "--shared", "--no-checkout", str(repo), str(tree)],
                   phase="clone", env=env, deadline=deadline)
@@ -305,9 +432,15 @@ def _run_tree(spec, sha, repo, row, commands, tail_dir, offset, tail_limit, dead
             parsed.append(log)
         return rows, parsed, missing, rewrites, summary
     finally:
-        grading_env.teardown(auxiliary)
-        shutil.rmtree(tree, ignore_errors=True)
-        shutil.rmtree(auxiliary, ignore_errors=True)
+        try:
+            grading_env.teardown(auxiliary)
+        finally:
+            try:
+                if temporary is not None and identity is not None:
+                    _remove_tmp_pair(temporary, backing, identity)
+            finally:
+                shutil.rmtree(tree, ignore_errors=True)
+                shutil.rmtree(auxiliary, ignore_errors=True)
 
 
 def _compare(project, base_sha, tip, base, tip_logs, base_logs, missing):
@@ -350,6 +483,7 @@ def _event(spec, project, kind, **fields):
 
 
 def run(spec, requested_sha=None, criteria=None):
+    sweep_short_tmpdirs()
     started = datetime.now(timezone.utc).isoformat()
     sha, project = requested_sha or "unresolved", None
     tails = path = None
