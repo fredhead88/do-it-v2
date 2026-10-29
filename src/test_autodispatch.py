@@ -835,8 +835,9 @@ def test_dependency_holds():
     t1 = NOW - datetime.timedelta(hours=2)
     t2 = NOW - datetime.timedelta(hours=1)
     hold = {"type": "dependency-hold", "subject": sid, "ts": _iso(t1),
-            "waits_for": "L-spec-DEP", "why": "needs producer"}
-    reason = "held: waits for L-spec-DEP (needs producer)"
+            "waits_for": "L-spec-DEP", "why": "needs producer",
+            "_src": "L-thinker-0001.jsonl:1"}
+    reason = "held: waits for L-spec-DEP (needs producer) [L-thinker-0001.jsonl:1]"
     held = autodispatch.held_by_dependency
     assert held([], []) is None
     assert held([hold], [hold]) == reason
@@ -847,10 +848,13 @@ def test_dependency_holds():
         assert held([hold], [hold, shipped]) is None
     for kind in ("unblocked", "decision"):
         for released_at in (t0, t1, t2):
-            release = {"type": kind, "subject": sid, "ts": _iso(released_at)}
+            release = {"type": kind, "subject": sid, "ts": _iso(released_at),
+                       "actor": "thinker", "ref": hold['_src']}
             expected = None if released_at > t1 else reason
             assert held([hold, release], [hold, release]) == expected
     other_ship = {"type": "shipped", "subject": "L-spec-OTHER", "ts": _iso(t2)}
+    assert held([hold, {"type": "decision", "subject": sid, "ts": _iso(t2),
+                        "actor": "thinker"}], []) == reason
     assert held([hold], [hold, other_ship]) == reason
     print("dependency-hold AC4 ok")
 
@@ -861,7 +865,8 @@ def test_dependency_holds():
             del bad["waits_for"]
         assert held([bad], [bad, self_shipped]).startswith("held: unresolvable dependency-hold")
         for kind in ("unblocked", "decision"):
-            release = {"type": kind, "subject": sid, "ts": _iso(t2)}
+            release = {"type": kind, "subject": sid, "ts": _iso(t2),
+                       "actor": "operator", "ref": hold['_src']}
             assert held([bad, release], [bad, release, self_shipped]) is None
     older = {**hold, "waits_for": "L-spec-OTHER", "ts": _iso(t0)}
     # Deliberately reverse ledger order: timestamp alone chooses the hold.

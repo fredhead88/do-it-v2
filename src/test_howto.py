@@ -17,7 +17,8 @@ import howto
 REPO = Path(__file__).resolve().parent.parent
 LITERALS = {'spawn-stale', 'spawn-failed', 'charter-proving', 'charter-reopened', 'charter-closed',
             'worktree-reaped', 'tick', 'cron-missing', 'look-stale',
-            'proving-check-failed', 'proving-overdue', 'autodispatch-failed', 'autodispatched'}
+            'proving-check-failed', 'proving-overdue', 'autodispatch-failed',
+            'autodispatch-skipped', 'autodispatched'}
 
 
 class HowtoTests(unittest.TestCase):

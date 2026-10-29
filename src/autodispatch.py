@@ -29,33 +29,70 @@ def _newest_marker_ts(evs):
     return max(times) if times else None
 
 
+def _hold_released(hold, evs):
+    """Only an explicit, strictly newer authorized release clears this hold."""
+    return any(e.get('subject') == hold.get('subject')
+               and e.get('actor') in ('thinker', 'operator')
+               and fold.ts(e.get('ts')) > fold.ts(hold.get('ts'))
+               and (e.get('type') == 'unblocked'
+                    or e.get('type') == 'decision' and bool(hold.get('_src'))
+                    and bool(e.get('ref')) and e['ref'] == hold['_src']) for e in evs)
+
+
+def _hold_order(e):
+    source, _, line = str(e.get('_src') or '').rpartition(':')
+    return fold.ts(e.get('ts')), source, int(line) if line.isdigit() else 0
+
+
 def held_by_dependency(spec_evs, all_evs, *, shipped=None) -> str | None:
     """The newest hold stands until its dependency ships or an own clearer wins.
 
-    Invalid dependencies fail closed. A newer unblocked, an unreferenced
-    decision, or a decision referring to the hold releases it; answers to other
-    questions do not. A dependency shipped before the hold is already satisfied.
+    Invalid dependencies fail closed. Thinker/operator unblocked or a decision
+    referring to the hold releases it; answers to other questions do not.
+    A dependency shipped before the hold is already satisfied.
     """
     spec_evs = list(spec_evs)
     holds = [e for e in spec_evs if e.get("type") == "dependency-hold"]
     if not holds:
         return None
-    hold = max(holds, key=lambda e: fold.ts(e.get("ts")))
-    hold_ts = fold.ts(hold.get("ts"))
-    if any((e.get("type") == "unblocked" or
-            e.get("type") == "decision" and
-            (not e.get("ref") or e.get("ref") == hold.get("_src")))
-           and fold.ts(e.get("ts")) > hold_ts for e in spec_evs):
+    hold = max(holds, key=_hold_order)
+    if _hold_released(hold, spec_evs):
         return None
+    source = f" [{hold['_src']}]" if hold.get('_src') else ''
     dependency = hold.get("waits_for")
     if not dependency:
-        return "held: unresolvable dependency-hold (missing or empty waits_for)"
+        return "held: unresolvable dependency-hold (missing or empty waits_for)" + source
     if dependency == hold.get("subject"):
-        return f"held: unresolvable dependency-hold (waits_for is self: {dependency})"
+        return f"held: unresolvable dependency-hold (waits_for is self: {dependency})" + source
     if (dependency in shipped if shipped is not None else
             any(e.get("type") == "shipped" and e.get("subject") == dependency for e in all_evs)):
         return None
-    return f"held: waits for {dependency} ({hold.get('why', '')})"
+    return f"held: waits for {dependency} ({hold.get('why', '')})" + source
+
+
+def _standing_ruling(spec_evs):
+    """SD10 builder veto, separate from the dependency-only reader contract."""
+    evs = list(spec_evs)
+    last_build = max((fold.ts(e.get('ts')) for e in evs
+                      if e.get('type') == 'build-started'), default=None)
+    holds = [e for e in evs if e.get('type') == 'decision'
+             and str(e.get('subject') or '').startswith('L-spec-')
+             and e.get('actor') in ('thinker', 'operator')
+             and e.get('action') in ('hold', 'recut')
+             and (last_build is None or fold.ts(e.get('ts')) > last_build)]
+    hold = max(holds, key=_hold_order, default=None)
+    return hold if hold is not None and not _hold_released(hold, evs) else None
+
+
+def _automatic_hold(spec_evs, all_evs, *, shipped=None):
+    evs = list(spec_evs)
+    dependency = held_by_dependency(evs, all_evs, shipped=shipped)
+    if dependency:
+        return dependency
+    ruling = _standing_ruling(evs)
+    if ruling is not None:
+        return f"held: ruling {ruling['action']} ({ruling.get('_src') or 'source missing'})"
+    return None
 
 
 def _standing_autodispatch_failed(evs):
@@ -188,7 +225,7 @@ def candidates(events, specs, now, *, head_of=None):
         wave = dispatch.spec_wave(charter, own_footprint) if (charter and own_footprint) else None
         # This diagnostic still reports filesystem preparation failures; all
         # routine launch eligibility belongs to nextstep.
-        reason = held_by_dependency(evs, events)
+        reason = _automatic_hold(evs, events)
         failure = _standing_autodispatch_failed(evs) if reason is None else None
         is_fail = failure is not None
         if failure is not None:
@@ -354,7 +391,8 @@ def dead_spawns(events, now):
             continue
         if role not in REPLAYABLE_ROLES:
             continue
-        if role in ("builder", "grader") and held_by_dependency(subj_evs, events):
+        if (role == "builder" and _automatic_hold(subj_evs, events)
+                or role == "grader" and held_by_dependency(subj_evs, events)):
             continue
         # A grader is only ever dispatched after a build-done (R13a); a dead
         # `role=grader` spawn on a subject with no build-done of its own is not
@@ -434,6 +472,8 @@ def redispatch_dead(events, specs, now, *, runner=None, dry_run=False, handled=f
     """Recover dead spawns without classifying routine item eligibility."""
     runner = runner or _real_runner
     out, handled = [], set(handled)
+    if not dry_run:
+        tick._record_held_skips(events, specs)
     # R13b: replay or escalate every dead spawn this tick has not already
     # handled (replayed or escalated) of its own.
     for row in dead_spawns(events, now):

@@ -397,12 +397,12 @@ class LaneRulesTests(unittest.TestCase):
     def test_dependency_hold_decision_release_distinguishes_answers(self):
         hold = event('dependency-hold', -65, waits_for=TARGET, why='needs producer',
                      _src='thinker:1')
-        for fields, clears in ((dict(ref='builder:2'), False), ({}, True),
+        for fields, clears in ((dict(ref='builder:2'), False), ({}, False),
                                (dict(ref=hold['_src']), True)):
             with self.subTest(fields=fields):
                 answer = event('decision', -60, actor='thinker', **fields)
                 self.assertEqual(autodispatch.held_by_dependency([hold, answer], []),
-                                 None if clears else 'held: waits for ' + TARGET + ' (needs producer)')
+                                 None if clears else 'held: waits for ' + TARGET + ' (needs producer) [thinker:1]')
 
     def test_legacy_grader_and_dead_builder_grader_respect_dependency_hold(self):
         hold = event('dependency-hold', -65, waits_for=TARGET, why='needs producer')

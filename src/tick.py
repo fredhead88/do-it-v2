@@ -264,6 +264,52 @@ class _PassDispatcher:
         return self.runner(argv)
 
 
+def _launch_events():
+    """The launcher and its skip observer share the guarded ledger read."""
+    try:
+        return fold.read_events()
+    except ledger_cache.LockTimeout as exc:
+        print(str(exc), file=sys.stderr)
+        return None
+
+
+def _record_held_skips(events, specs):
+    """Persist only changes from the latest observed skip for each live spec."""
+    import autodispatch
+    by_subject = {}
+    shipped = set()
+    for e in events:
+        by_subject.setdefault(e.get('subject'), []).append(e)
+        if e.get('type') == 'shipped':
+            shipped.add(e.get('subject'))
+    reasons = {}
+    for sid, spec in sorted(specs.items()):
+        if not str(sid).startswith('L-spec-') or spec.get('state') in dispatch.SETTLED_STATES:
+            continue
+        evs = by_subject.get(sid, [])
+        reason = autodispatch._automatic_hold(evs, events, shipped=shipped)
+        if reason:
+            reasons[sid] = reason
+    if not reasons:
+        return
+    latest = {}
+    # A recovery pass or a direct launch may reuse the earlier snapshot. Read
+    # persisted observations too, so it cannot repeat the routine pass's write.
+    persisted = _launch_events()
+    if persisted is None:
+        return
+    observations = [e for e in list(events) + persisted
+                    if e.get('type') == 'autodispatch-skipped' and e.get('actor') == 'tick']
+    for e in sorted(observations, key=autodispatch._hold_order):
+        latest[e.get('subject')] = e.get('reason')
+    for sid, reason in reasons.items():
+        if reason and latest.get(sid) != reason:
+            refused = dispatch.emit(tick_path(), {'subject': sid}, 'autodispatch-skipped',
+                                    strict=True, reason=reason)
+            if refused:
+                raise ValueError('autodispatch-skipped record refused: ' + str(refused))
+
+
 def launch(step, *, dispatcher):
     """Launch precisely one tick-owned routine Step; failures remain standing."""
     import autodispatch
@@ -281,12 +327,14 @@ def launch(step, *, dispatcher):
         return None
     events = getattr(dispatcher, 'events', None)
     if events is None:
-        try:
-            events = fold.read_events()
-        except ledger_cache.LockTimeout as exc:
-            print(str(exc), file=sys.stderr)
+        events = _launch_events()
+        if events is None:
             return None
     evs = [e for e in events if e.get('subject') == step.item]
+    if step.action in ('build', 'rebuild') and autodispatch._automatic_hold(evs, events):
+        if not getattr(dispatcher, 'dry_run', False):
+            _record_held_skips(events, {step.item: {'state': 'written'}})
+        return None
     if step.action != 'audit' and autodispatch._standing_autodispatch_failed(evs):
         return None
     if getattr(dispatcher, 'dry_run', False):
@@ -410,6 +458,11 @@ def run_steps(events, specs, now, *, dispatcher=None, dry_run=False, handled=fro
     import autodispatch
     import lane_driver
     events = list(events)
+    by_subject = {}
+    for e in events:
+        by_subject.setdefault(e.get('subject'), []).append(e)
+    if not dry_run:
+        _record_held_skips(events, specs)
     if steps is None:
         steps = _steps(events, specs, now)
     runner = _PassDispatcher(dispatcher or autodispatch._real_runner, events, specs, now, dry_run)
@@ -439,6 +492,11 @@ def run_steps(events, specs, now, *, dispatcher=None, dry_run=False, handled=fro
             return (not grade if grades_first else False, step.since, step.item)
         for step in sorted(steps, key=visit_order):
             if step.item in handled:
+                continue
+            evs = by_subject.get(step.item, [])
+            hold = autodispatch._automatic_hold(evs, events)
+            if hold and step.action in ('build', 'rebuild'):
+                out.append(f'hold {step.item}: {hold}')
                 continue
             if step.reason.startswith('undetermined:') or step.state == 'hold':
                 out.append(f"{'undetermined' if step.reason.startswith('undetermined:') else 'hold'} {step.item}: {step.reason}")
