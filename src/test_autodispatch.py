@@ -1015,6 +1015,15 @@ from unittest.mock import patch
 import lane_rules
 for released_minutes in (11, 5):
     root = _fresh('released')
+    import look
+    repo = root / 'repos/released'
+    subprocess.run(['git', '-C', str(repo), 'init', '-q', '-b', 'master'], check=True)
+    subprocess.run(['git', '-C', str(repo), '-c', 'user.name=fixture', '-c',
+                    'user.email=fixture@example.invalid', 'commit', '-q',
+                    '--allow-empty', '-m', 'fixture'], check=True)
+    config = look.load_toml()
+    config = dict(config, push={**config.get('push', {}),
+                  'main': {**config.get('push', {}).get('main', {}), 'released': 'master'}})
     sid, blocker = 'L-spec-1137', 'L-spec-1136'
     charter = 'L-charter-0052'
     (root / 'content' / f'plan-{charter}.md').write_text(
@@ -1045,7 +1054,8 @@ for released_minutes in (11, 5):
             if 'add' in argv:
                 pathlib.Path(argv[5]).mkdir(parents=True)
         return dict(code=0, stdout=stdout, stderr='')
-    with patch.dict(os.environ, {'DOIT_LANE_RULES': str(table)}):
+    with patch.dict(os.environ, {'DOIT_LANE_RULES': str(table)}), \
+         patch.object(look, 'load_toml', return_value=config):
         rows = autodispatch.candidates(ev, specs, NOW, head_of=lambda _: 'master')
         assert _row(rows, sid)['limit_min'] == 45, rows
         out = tick.run_steps(ev, specs, NOW, dispatcher=released_runner)

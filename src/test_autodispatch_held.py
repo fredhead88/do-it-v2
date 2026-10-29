@@ -42,6 +42,19 @@ class HeldDispatch1863Tests(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory(prefix='held-1863-')
         self.addCleanup(tmp.cleanup)
         self.root = Path(tmp.name)
+        import look
+        repo = self.root / 'repos/fixture'
+        repo.mkdir(parents=True)
+        subprocess.run(['git', '-C', str(repo), 'init', '-q', '-b', 'master'], check=True)
+        subprocess.run(['git', '-C', str(repo), '-c', 'user.name=fixture', '-c',
+                        'user.email=fixture@example.invalid', 'commit', '-q',
+                        '--allow-empty', '-m', 'fixture'], check=True)
+        config = look.load_toml()
+        config = dict(config, push={**config.get('push', {}),
+                      'main': {**config.get('push', {}).get('main', {}), 'fixture': 'master'}})
+        p = patch.object(look, 'load_toml', return_value=config)
+        p.start()
+        self.addCleanup(p.stop)
         for name in ('events', 'content', 'seat'):
             (self.root / name).mkdir()
         for module, fields in ((fold, ('ROOT', 'EVENTS')),
@@ -240,6 +253,7 @@ class HeldDispatch1863Tests(unittest.TestCase):
         # Holds are checked before seat accounting, even for supplied action Steps.
         sid, held = next(self.replay_cases())
         control = self.written('L-spec-9998')
+        (self.root / 'content/L-spec-9998.md').write_text('AC1 [backend]: fixture.\n')
         (self.root / 'worktrees/fixture/l-spec-9998').mkdir(parents=True)
         events = held + [control]
         steps = [nextstep.Step(s, 'spec', 'building', 'action', 'build', 'tick', 'fixture:1',

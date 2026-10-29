@@ -88,7 +88,10 @@ def _dispatch(role, sid, project, charter, runner, options=None):
         raise ValueError(f'worktree {wt} missing')
     argv = ['doit', 'packet', role, sid, '--worktree', str(wt)]
     if role == 'builder':
-        argv += ['--repo', str(fold.ROOT / 'repos' / project)]
+        import packet as packets
+        repo = fold.ROOT / 'repos' / project
+        base_sha = packets._effective_base(repo, project, dispatch.spec_path(sid), sid)
+        argv += ['--repo', str(repo), '--base-sha', base_sha]
     if options:
         argv += ['--depth', options[0], '--round', str(options[1])]
     packet = runner(argv)

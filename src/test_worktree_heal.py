@@ -55,11 +55,20 @@ class Fixture:
                 (dispatch, 'EVENTS', root / 'events'), (dispatch, 'CONTENT', root / 'content')):
             stack.enter_context(patch.object(module, name, value))
         stack.enter_context(patch.dict(os.environ, DOIT_ROOT=str(root)))
+        import look
+        config = look.load_toml()
+        config = dict(config, push={**config.get('push', {}),
+                      'main': {**config.get('push', {}).get('main', {}),
+                               'proj': 'main', 'other': 'main'}})
+        stack.enter_context(patch.object(look, 'load_toml', return_value=config))
         for name in ('events', 'content', 'repos/proj', 'repos/other'):
             (root / name).mkdir(parents=True)
         (root / 'content' / (self.sid + '.md')).write_text('AC1 [backend]: fixture.\n')
         self.git('init', '-q', '-b', 'main')
         self.commit(self.repo, 'base')
+        other = root / 'repos/other'
+        self.git('init', '-q', '-b', 'main', cwd=other)
+        self.commit(other, 'base')
         self.base = self.git('rev-parse', 'HEAD')
         self.git('worktree', 'add', '-q', str(self.wt), '-b', self.branch)
         self.commit(self.wt, 'ready')
