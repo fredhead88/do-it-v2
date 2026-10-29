@@ -892,19 +892,13 @@ old_ts = (fold.NOW - datetime.timedelta(minutes=75)).isoformat(timespec="seconds
 ev_file.write_text(json.dumps({"v": 1, "ts": old_ts, "type": "spawn-started", "role": "grader",
                                "subject": "L-spec-0001", "spawn": "L-grader-0009"}) + "\n")
 tick.main()
-stale = [json.loads(l) for l in tick.tick_path().read_text().splitlines() if '"spawn-stale"' in l]
-assert stale and stale[-1]["spawn"] == "L-grader-0009", "past the cap: records the stale spawn"
-# L-charter-0042/L-spec-0427, R1: `autodispatch.candidates()` calls BOTH
-# `tick.in_flight`/`tick.spawn_in_flight` (Consumes) — each backed by the SAME
-# side-effecting `_spawn_busy`, and `_record()` calls `autodispatch.run` before
-# `lane()`'s own separate `in_flight(ev)` call — so ONE pass that first
-# observes an aged spawn now records `spawn-stale` more than once for it
-# (inherited, "never suppressed", AC14/AC16). The invariant that still holds:
-# it never grows further once that spawn is terminal on a later pass's fresh read.
-count_after_first_pass = len([l for l in tick.tick_path().read_text().splitlines() if '"spawn-stale"' in l])
+stale = [json.loads(l) for l in tick.tick_path().read_text().splitlines() if '"spawn-failed"' in l]
+assert stale and stale[-1]['spawn'] == 'L-grader-0009' and stale[-1]['reason'] == 'vanished'
+# Reconciliation is idempotent across a subsequent fresh tick as well.
+count_after_first_pass = len([l for l in tick.tick_path().read_text().splitlines() if '"spawn-failed"' in l])
 tick.main()
-assert len([l for l in tick.tick_path().read_text().splitlines() if '"spawn-stale"' in l]) == count_after_first_pass, \
-    "stale never grows further once the spawn is terminal on a later pass"
+assert len([l for l in tick.tick_path().read_text().splitlines() if '"spawn-failed"' in l]) == count_after_first_pass, \
+    "a reconciled attempt has exactly one failure"
 ev_file.unlink()
 
 # a start with NO spawn id — hand-written, or written before the wrapper existed.
@@ -946,7 +940,7 @@ ev269b_file = write("L-grader-0269b.jsonl", {"ts": (fold.NOW - datetime.timedelt
 ev269b = fold.read_events()
 busy269b = tick.in_flight(ev269b)
 assert "L-spec-0269b" not in busy269b, "46 min > 15+30=45: aged out, stale, exactly as the no-bump case"
-stale269b = [json.loads(l) for l in tick.tick_path().read_text().splitlines() if '"spawn-stale"' in l]
+stale269b = [json.loads(l) for l in tick.tick_path().read_text().splitlines() if '"spawn-failed"' in l]
 assert any(s["spawn"] == "L-grader-0269b" for s in stale269b), stale269b
 ev269b_file.unlink()
 
@@ -1829,7 +1823,7 @@ def _dead_pid():
     return pid
 
 
-# AC8 — a same-host, confirmed-dead waiter_pid: spawn-stale fires immediately,
+# AC8 — a same-host, confirmed-dead waiter_pid: vanished fires immediately,
 # though the event's own ts is fresh (well inside any elapsed-time cap), and
 # the subject returns to the lane right away.
 iso8 = _isolated_events()
@@ -1844,9 +1838,9 @@ write_to(iso8, "L-grader-8801.jsonl", {"type": "spawn-started", "role": "grader"
                                        "subject": "L-spec-8801", "spawn": "L-grader-8801",
                                        "waiter_host": HOST, "waiter_pid": dead8})
 assert tick.main() == 0
-stale8 = [json.loads(l) for l in tick.tick_path().read_text().splitlines() if '"spawn-stale"' in l]
-assert stale8 and stale8[-1]["spawn"] == "L-grader-8801" and stale8[-1].get("reason") == "waiter-dead", \
-    f"AC8: a same-host confirmed-dead waiter is stale immediately, reason=waiter-dead: {stale8}"
+stale8 = [json.loads(l) for l in tick.tick_path().read_text().splitlines() if '"spawn-failed"' in l]
+assert stale8 and stale8[-1]["spawn"] == "L-grader-8801" and stale8[-1].get("reason") == "vanished", \
+    f"AC8: a same-host confirmed-dead waiter is vanished immediately, reason=vanished: {stale8}"
 ev8, specs8, charters8 = folded()
 fold.EVENTS = saved_events
 
@@ -1860,8 +1854,8 @@ write_to(iso9, "L-grader-8802.jsonl", {"type": "spawn-started", "role": "grader"
                                        "waiter_host": HOST, "waiter_pid": os.getpid(),
                                        "waiter_proc_start": "not-a-real-start-time"})
 assert tick.main() == 0
-stale9 = [json.loads(l) for l in tick.tick_path().read_text().splitlines() if '"spawn-stale"' in l]
-assert stale9 and stale9[-1]["spawn"] == "L-grader-8802" and stale9[-1].get("reason") == "waiter-dead", \
+stale9 = [json.loads(l) for l in tick.tick_path().read_text().splitlines() if '"spawn-failed"' in l]
+assert stale9 and stale9[-1]["spawn"] == "L-grader-8802" and stale9[-1].get("reason") == "vanished", \
     f"AC9: a mismatched proc_start (pid reuse) is dead even though the pid itself is alive: {stale9}"
 fold.EVENTS = saved_events
 
@@ -2941,6 +2935,165 @@ class AuditTickTests(unittest.TestCase):
         events, specs = self.read()
         self.assertEqual(next(s for s in tick._steps(events, specs, self.now + datetime.timedelta(minutes=4)) if s.item == 'L-spec-9674').action, 'build')
         _launcher_evidence('AC8-real-ledger', dict(pass1=out, pass2=[s.action for s in steps], rewrite=[s.action for s in rewritten], rebuild=[s.action for s in rebuilt], candidate=row))
+
+
+class VanishedTickTests(unittest.TestCase):
+    setUp = LauncherTests.setUp
+    dispatcher = LauncherTests.dispatcher
+
+    def emit(self, actor, kind, minutes=-1, **fields):
+        with patch.object(dispatch, 'now', return_value=(self.now+datetime.timedelta(minutes=minutes)).isoformat()):
+            spawn = fields.get('spawn')
+            name = spawn if spawn and fold.actor_of(spawn) == actor else f'L-{actor}-9861'
+            path = tick.tick_path() if actor == 'tick' else fold.EVENTS / (name+'.jsonl')
+            self.assertIsNone(dispatch.emit(path, {}, kind, strict=True, **fields))
+
+    def fresh(self):
+        # A different interpreter opens real committed ledger files, bypassing cache.
+        import subprocess
+        result = subprocess.run([sys.executable, '-c',
+            'import fold,json; rows=fold.read_events(use_cache=False); '
+            'print(json.dumps(dict(events=rows,ignored=fold.fold(rows)[2],spend=fold.spend_rows(rows))))'],
+            cwd=pathlib.Path(__file__).resolve().parent,
+            env=dict(os.environ, DOIT_ROOT=str(self.root), DOIT_PROJECT=''),
+            capture_output=True, text=True, check=True)
+        return json.loads(result.stdout)
+
+    def test_real_append_admission_census_and_cancel_authority(self):
+        actors = {'relay', 'grader', 'builder', 'reviewer', 'owed-sweeper', 'spec-writer',
+                  'research', 'spec-auditor', 'probe', 'plan-auditor', 'owed-verifier',
+                  'operator', 'executor', 'charter-reviewer', 'thinker', 'tick'}
+        self.assertEqual(fold.EMITS['spawn-failed'], actors)
+        for actor in sorted(actors):
+            self.emit(actor, 'spawn-failed', spawn='L-builder-9861', subject='L-spec-9861',
+                      reason='historical fixture')
+        fresh = self.fresh()
+        self.assertEqual({e['actor'] for e in fresh['events']}, actors)
+        self.assertEqual(fresh['ignored'], [])
+        for actor in actors:
+            rejected = fold.admits(dict(type='spawn-failed', reason='cancelled'), actor)
+            self.assertEqual(rejected is None, actor in {'executor', 'operator', 'thinker'})
+        _launcher_evidence('vanished-AC1-census', fresh)
+
+    def test_real_append_idempotence_start_forms_attribution_and_settled(self):
+        import socket
+        for n, state in enumerate(('open', 'shipped', 'spec-killed')):
+            sid, spawn = f'L-spec-{9861+n}', f'L-builder-{9861+n}'
+            self.emit('operator', 'spec-written', -250, subject=sid, project='proj')
+            fields = dict(subject=sid, spawn=spawn, role='builder', project='proj',
+                          waiter_pid=os.getpid(), waiter_host=socket.gethostname(),
+                          waiter_proc_start='reused-pid')
+            self.emit('builder', 'build-started', **fields)
+            self.emit('builder', 'spawn-started', **fields)
+            self.emit('tick', 'spawn-stale', spawn=spawn, subject=sid, reason='waiter-dead')
+            if state != 'open':
+                self.emit('executor' if state == 'shipped' else 'operator', state, subject=sid)
+        self.emit('builder', 'build-started', -200, subject='L-spec-9864', spawn='L-builder-9864')
+        old = fold.read_events(use_cache=False)
+        tick.in_flight(old)
+        tick.spawn_in_flight(old)
+        tick.in_flight(old)
+        fresh = self.fresh()
+        failures = [e for e in fresh['events'] if e['type'] == 'spawn-failed']
+        self.assertEqual(len(failures), 4)
+        self.assertEqual(len({e['spawn'] for e in failures}), 4)
+        for failure in failures:
+            start = next(e for e in old if e.get('spawn') == failure['spawn'] and e['type'] == 'build-started')
+            self.assertEqual({k: failure[k] for k in ('subject', 'spawn', 'role', 'reason', 'since', 'waiter_pid')},
+                             dict(subject=start['subject'], spawn=start['spawn'], role='builder',
+                                  reason='vanished', since=start['ts'], waiter_pid=start.get('waiter_pid')))
+            self.assertNotIn('cost_usd', failure)
+            self.assertEqual(failure['actor'], 'tick')
+            self.assertIsNone(fold.admits(failure, failure['actor']))
+        self.assertEqual(fresh['spend'], [['proj', 0.0, 3, 3], ['(no project)', 0.0, 1, 1]])
+        self.assertNotIn('project', next(e for e in failures if e['spawn'] == 'L-builder-9864'))
+        tick._spawn_busy(fresh['events'])
+        steps = nextstep.next_steps(fresh['events'], fold.fold(fresh['events'])[0], self.now, lane_rules.load())
+        self.assertFalse(any(s.item in {'L-spec-9862', 'L-spec-9863'} and s.state == 'action' for s in steps))
+        self.assertEqual(len([e for e in self.fresh()['events'] if e['type'] == 'spawn-failed']), 4)
+        _launcher_evidence('vanished-AC1-roundtrip', dict(reader=fresh, steps=[s.__dict__ for s in steps]))
+
+    def test_completion_races_and_ledger_read_route(self):
+        import ledger_files
+        for n, (owner, kind) in enumerate((('builder', 'spawn-done'), ('tick', 'spawn-failed'))):
+            spawn, sid = f'L-builder-{9870+n}', f'L-spec-{9870+n}'
+            self.emit('builder', 'build-started', -200, subject=sid, spawn=spawn)
+            snapshot = fold.read_events(use_cache=False)
+            original = ledger_files.read_text
+            landed = []
+            def racing_read(directory, name, *args, **kwargs):
+                if not landed:
+                    landed.append(True)
+                    self.emit(owner, kind, spawn=spawn, subject=sid, reason='finished')
+                return original(directory, name, *args, **kwargs)
+            with patch.object(ledger_files, 'read_text', side_effect=racing_read) as read:
+                tick._spawn_busy(snapshot)
+            self.assertTrue(read.called)
+            real = self.fresh()['events']
+            self.assertFalse(any(e.get('spawn') == spawn and e.get('reason') == 'vanished' for e in real))
+            _launcher_evidence('vanished-AC1-race-'+owner, dict(events=real))
+
+    def test_record_first_pass_uses_reconciliation_and_bounded_dispatch(self):
+        from contextlib import ExitStack
+        import install_sync, push_origin, pr_closeout, proving, look, up, crons, notes
+        sid = 'L-spec-9881'
+        self.emit('operator', 'spec-written', -250, subject=sid, project='proj')
+        self.emit('builder', 'build-started', -200, subject=sid, spawn='L-builder-9881', project='proj')
+        (self.root / 'worktrees/proj' / sid.lower()).mkdir(parents=True)
+        (self.root / 'content' / (sid+'.md')).write_text('AC1 [backend]: fixture.\n')
+        calls, evaluations = [], []
+        def runner(argv):
+            calls.append(argv)
+            if argv[:2] == ['doit', 'dispatch']:
+                self.emit('builder', 'build-started', 0, subject=sid, spawn='L-builder-9882', project='proj')
+                return dict(code=0, stdout=json.dumps(dict(detached='L-builder-9882')), stderr='')
+            return dict(code=0, stdout='/packet.md' if argv[:2] == ['doit', 'packet']
+                        else '0' if 'rev-list' in argv else 'master', stderr='')
+        real_run = tick.run_steps
+        def recording_run(events, specs, now, **kwargs):
+            evaluations.append([s.__dict__ for s in kwargs['steps']])
+            return real_run(events, specs, now, dispatcher=runner, **kwargs)
+        with ExitStack() as stack:
+            for module, name, result in ((intake, 'run', {}), (notes, 'run', None),
+                    (pr_closeout, 'run', None), (install_sync, 'run', []), (push_origin, 'run', None),
+                    (carry, 'uncarried', []), (carry, 'sync_v4', []), (pane_resume, 'run', None),
+                    (crons, 'check', []), (look, 'heartbeat_missed', None), (look, 'emit_once', None),
+                    (up, 'ensure_relay', None), (merge_queue, 'enqueue_due', []),
+                    (autodispatch, 'capacity', 1)):
+                stack.enter_context(patch.object(module, name, return_value=result))
+            stack.enter_context(patch.object(tick, 'run_steps', side_effect=recording_run))
+            # The first pass records the failure and observes its dated hold, with no dispatch.
+            stack.enter_context(patch.object(dispatch, 'now', return_value=self.now.isoformat()))
+            tick._record()
+            self.assertEqual(calls, [])
+            step = next(s for s in evaluations[-1] if s['item'] == sid)
+            self.assertIn('next_retry_at', step['reason'])
+            self.assertFalse(any(s['item_kind'] == 'attempt' for s in evaluations[-1]))
+            later = self.now+datetime.timedelta(minutes=5)
+            with patch.object(fold, 'NOW', later):
+                tick._record()
+            self.assertEqual(sum(a[:2] == ['doit', 'dispatch'] for a in calls), 1)
+            fresh = self.fresh()
+            self.assertTrue(autodispatch._own_terminal_event(fresh['events'], 'L-builder-9881'))
+            replay = autodispatch.redispatch_dead(fresh['events'], fold.fold(fresh['events'])[0], later, runner=runner)
+            self.assertFalse(any(line.startswith('replayed') for line in replay))
+            self.assertEqual(sum(a[:2] == ['doit', 'dispatch'] for a in calls), 1)
+            # The third failed attempt is also reconciled by the ordinary pass;
+            # neither the normal dispatcher nor the fallback can spend again.
+            import socket
+            self.emit('tick', 'spawn-failed', 4, subject=sid, spawn='L-builder-9882',
+                      role='builder', reason='vanished')
+            self.emit('builder', 'build-started', 4, subject=sid, spawn='L-builder-9883',
+                      role='builder', waiter_pid=os.getpid(), waiter_host=socket.gethostname(),
+                      waiter_proc_start='reused-pid', project='proj')
+            with patch.object(fold, 'NOW', later), patch.object(dispatch, 'now', return_value=later.isoformat()):
+                tick._record()
+            exhausted = next(s for s in evaluations[-1] if s['item'] == sid)
+            self.assertEqual(exhausted['owner'], 'executor')
+            self.assertIn('3 failed attempts', exhausted['reason'])
+            self.assertEqual(sum(a[:2] == ['doit', 'dispatch'] for a in calls), 1)
+            fresh = self.fresh()
+        _launcher_evidence('vanished-AC1-record-first-pass', dict(evaluations=evaluations, calls=calls, reader=fresh))
 
 
 if __name__ == '__main__':

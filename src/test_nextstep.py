@@ -65,6 +65,19 @@ class NextStepTests(unittest.TestCase):
     def one(self, events, specs=None, **kwargs):
         return next(s for s in self.steps(events, specs, **kwargs) if s.item == SID)
 
+    def test_vanished_first_build_keeps_original_trigger_and_backoff(self):
+        written = event('spec-written', -90)
+        start = event('build-started', -10, spawn='L-builder-9861', role='builder')
+        failed = event('spawn-failed', -5, spawn=start['spawn'], role='builder',
+                       reason='vanished', actor='tick') | {'_src': 'L-tick-local.jsonl:1'}
+        evs = [written, start, failed]
+        self.assertEqual(ns._failure(evs, self.rules)[1], 'retry')
+        step = self.one(evs, {SID: dict(state='building')})
+        self.assertEqual((step.action, step.since), ('build', written['ts']))
+        waiting = self.one(evs, {SID: dict(state='building')}, now=NOW-timedelta(seconds=1))
+        self.assertIsNone(waiting.action)
+        self.assertIn('next_retry_at', waiting.reason)
+
     def test_ac1_frozen_validated_shape(self):
         step = ns.Step(SID, 'spec', 'planned', 'hold', None, 'executor',
                        None, 'waiting', 'decision', NOW.isoformat())
@@ -489,6 +502,144 @@ class AuditStepTests(unittest.TestCase):
             yield
         self.assertEqual(ns.audit_state(unreadable(), NOW)['phase'], 'undetermined')
         self.signed('AC3-exhausted', asdict(step))
+
+
+class VanishedRetryTests(unittest.TestCase):
+    setUp = NextStepTests.setUp
+    steps = NextStepTests.steps
+    one = NextStepTests.one
+
+    def fixture(self, action):
+        evs = [event('spec-written', -240, actor='spec-writer' if action == 'audit' else 'operator')]
+        if action == 'rebuild':
+            evs += [event('build-blocked', -230), event('decision', -220, rework='yes')]
+        elif action in ('grade', 'regrade', 'review'):
+            evs += [event('build-done', -230, actor='builder', status='DONE')]
+            if action == 'regrade':
+                evs += [event('decision', -220, regrade='yes')]
+            elif action == 'review':
+                evs += [event('verdict', -220, actor='grader', confirmed=True)]
+        role = dict(build='builder', rebuild='builder', grade='grader',
+                    regrade='grader', review='reviewer', audit='spec-auditor')[action]
+        return evs, role, evs[-1]
+
+    def failure(self, evs, role, number, minute):
+        spawn = f'L-{role}-{9860+number}'
+        start = event('spawn-started', minute-1, spawn=spawn, role=role)
+        evs.append(start)
+        if role == 'builder':
+            evs.append(dict(start, type='build-started'))
+        evs += [event('spawn-stale', minute-.5, spawn=spawn, role=role),
+                event('spawn-failed', minute, spawn=spawn, role=role, reason='vanished', actor='tick')
+                | {'_src': f'L-tick-local.jsonl:{number}'}]
+
+    def report(self, label, step, evs, trigger, role, now):
+        import attempts
+        h = asdict(attempts.history(ns._history_events(evs), trigger, role, now=now))
+        h['next_retry_at'] = str(h['next_retry_at'])
+        body = json.dumps(dict(case=label, step=asdict(step), history=h), sort_keys=True)
+        print(json.dumps(dict(url='cli://vanished-nextstep/' + label, status=0,
+                              body_sha256=hashlib.sha256(body.encode()).hexdigest(), body_excerpt=body)))
+
+    def test_six_actions_all_retry_boundaries_and_new_trigger(self):
+        import attempts
+        self.assertEqual((attempts.MAX_ATTEMPTS, attempts.BACKOFF_MIN), (3, (5, 15, 45)))
+        for action in ('build', 'rebuild', 'grade', 'regrade', 'review', 'audit'):
+            with self.subTest(action=action):
+                evs, role, trigger = self.fixture(action)
+                zero = self.one(evs)
+                self.assertEqual(zero.action, action)
+                self.assertEqual(zero.owner, 'tick')
+                self.report(action+'-zero', zero, evs, trigger, role, NOW)
+                for n, minute in ((1, -120), (2, -60), (3, -10)):
+                    self.failure(evs, role, n, minute)
+                    deadline = NOW + timedelta(minutes=minute + (5, 15, 45)[n-1])
+                    for offset in (-1, 0):
+                        now = deadline + timedelta(seconds=offset)
+                        step = self.one(evs, now=now)
+                        if n == 3:
+                            self.assertIsNone(step.action)
+                            self.assertEqual(step.owner, 'executor')
+                            self.assertIn('exhaust', step.reason)
+                            self.assertIn('operator decision', step.clears)
+                        elif offset == -1:
+                            self.assertIsNone(step.action)
+                            self.assertIn('next_retry_at', step.reason)
+                        else:
+                            self.assertEqual((step.action, step.owner, step.since), (action, 'tick', trigger['ts']))
+                            self.assertEqual(step.trigger, trigger['_src'])
+                        self.report(action+f'-{n}-{offset}', step, evs, trigger, role, now)
+                new = dict(trigger, ts=event('x', 1)['ts'], _src='L-operator-new.jsonl:1')
+                renewed = self.one(evs+[new], now=NOW+timedelta(minutes=32))
+                self.assertEqual(renewed.action, action)
+                self.assertEqual(renewed.since, new['ts'])
+                # A late reconciliation belonging to an older attempt cannot charge the new trigger.
+                late = dict(evs[-1], ts=event('x', 2)['ts'])
+                renewed = self.one(evs+[new, late], now=NOW+timedelta(minutes=32))
+                self.assertEqual(renewed.action, action)
+                self.report(action+'-new-trigger-late-end', renewed, evs+[new, late], new, role, NOW+timedelta(minutes=32))
+
+    def test_stronger_lifecycle_predicates_and_refusals(self):
+        import attempts
+        for action in ('build', 'rebuild', 'grade', 'regrade', 'review', 'audit'):
+            with self.subTest(action=action):
+                evs, role, trigger = self.fixture(action)
+                self.failure(evs, role, 1, -20)
+                live = event('spawn-started', -1, spawn=f'L-{role}-9899', role=role)
+                self.assertIn('in flight', self.one(evs+[live]).reason)
+                output = dict(builder='build-done', grader='verdict', reviewer='review',
+                              **{'spec-auditor': 'spawn-done'})[role]
+                done = event(output, -10, actor=role, spawn=evs[-1]['spawn'], role=role,
+                             status='DONE', confirmed=True, n_blocking=0, bad_cut=False)
+                self.assertNotEqual(self.one(evs+[done]).action, action)
+                late = dict(evs[-1], ts=event('x', -1)['ts'])
+                self.assertNotEqual(self.one(evs+[done, late]).action, action)
+                for terminal in ('queue-add', 'shipped', 'spec-killed'):
+                    result = self.steps(evs+[event(terminal, -1)])
+                    self.assertFalse(any(s.item == SID and s.action == action for s in result))
+                question = event('escalation-blocking', -1)
+                self.assertIn('judgment', self.one(evs+[question]).reason)
+                if action != 'audit':
+                    hold = event('dependency-hold', -1, waits_for='L-spec-9898')
+                    with patch.object(ns.autodispatch, 'held_by_dependency', return_value='L-spec-9898'):
+                        self.assertIsNone(self.one(evs+[hold]).action)
+                clean, _, _ = self.fixture(action)
+                for reason in ('bundle-pending', 'duplicate-dispatch', 'dispatch-in-progress'):
+                    refusal = event('spawn-failed', -2, spawn=f'L-{role}-9898', role=role, reason=reason)
+                    history = attempts.history(ns._history_events(clean+[refusal]), trigger, role, now=NOW)
+                    self.assertEqual((history.consumed, history.n_failed), (False, 0))
+                    refused = self.one(clean+[refusal])
+                    if reason == 'bundle-pending':
+                        self.assertIsNone(refused.action)
+                    else:
+                        self.assertEqual(refused.action, action)
+                    self.report(action+'-refusal-'+reason, refused, clean+[refusal], trigger, role, NOW)
+
+    def test_structured_authority_only_and_text_classifier_unchanged(self):
+        import grading_env
+        base = event('spawn-failed', reason='vanished', actor='tick') | {'_src': 'L-tick-local.jsonl:1'}
+        self.assertEqual(ns._failure([base], self.rules)[1], 'retry')
+        for change in (dict(reason='vanished later'), dict(reason='prose vanished'),
+                       dict(type='autodispatch-failed'), dict(_src='L-builder-9861.jsonl:1'),
+                       dict(_src=None)):
+            self.assertNotEqual(ns._failure([dict(base, **change)], self.rules)[1], 'retry')
+        self.assertEqual(ns.classify_failure('vanished', 1), 'unknown')
+        with patch.object(ns, 'classify_failure', return_value='retry'):
+            self.assertEqual(grading_env.failure_kind('vanished', 1), 'unknown')
+        self.assertEqual(ns._attempt_role(dict(spawn='L-spec-auditor-9861')), 'spec-auditor')
+        self.assertEqual(ns._attempt_role(dict(spawn='L-spec-writer-9861')), 'spec-writer')
+
+    def test_same_timestamp_start_and_reconciliation_has_no_live_hold(self):
+        for action in ('build', 'rebuild', 'grade', 'regrade', 'review', 'audit'):
+            evs, role, _ = self.fixture(action)
+            self.failure(evs, role, 1, -5)
+            # Second-resolution appends from different sources can sort an end
+            # before a start. Terminal identity still wins over that ordering.
+            for e in evs[-4:] if role == 'builder' else evs[-3:]:
+                e['ts'] = event('x', -5)['ts']
+            steps = self.steps(evs)
+            self.assertFalse(any(s.item_kind == 'attempt' for s in steps))
+            self.assertEqual(next(s for s in steps if s.item == SID).action, action)
 
 
 if __name__ == '__main__':

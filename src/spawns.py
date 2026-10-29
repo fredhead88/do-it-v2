@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """L-spec-0755/R2: which spawns are open, and whether a new dispatch conflicts.
-`open_spawns` mirrors `tick._spawn_busy`'s terminal tuple and aging rule but is pure:
-it never emits a `spawn-stale` (the tick's job). `conflict` is the role table."""
+`open_spawns` and `tick._spawn_busy` share the pure start-state decision.
+Only tick records vanished/stale ends. `conflict` is the role table."""
 import os
 import re
 import socket
@@ -24,27 +24,53 @@ def _role(e):
     return "-".join(sid.split("-")[1:-1]) if sid else (e.get("role") or "")
 
 
+def start_events(events):
+    """One start per named attempt, retaining metadata from paired start forms."""
+    named, anonymous = {}, []
+    for e in events:
+        if e.get('type') not in START_TYPES:
+            continue
+        sid = e.get('spawn')
+        if not sid:
+            anonymous.append(e)
+        elif sid not in named:
+            named[sid] = dict(e)
+        else:
+            original = named[sid]
+            original.update({k: v for k, v in e.items()
+                             if v not in (None, '') and k not in ('ts', 'type')})
+            original['ts'] = min(original['ts'], e['ts'])
+    return list(named.values()) + anonymous
+
+
+def start_state(e, now):
+    """Pure busy/stale/vanished decision shared by tick and conflict readers."""
+    import dispatch, fold, panes
+    cap = dispatch.ROLES.get(_role(e), (None, 60, 0))[1]
+    pid = e.get('waiter_pid')
+    if pid and e.get('waiter_host') == socket.gethostname() and \
+            not panes._is_live(pid, {'procStart': e.get('waiter_proc_start')}):
+        return 'vanished'
+    window = e.get('window_min') or cap
+    elapsed = (now - fold.ts(e.get('ts'))).total_seconds() / 60 > window + cap
+    if elapsed:
+        legacy = not any(e.get(k) for k in ('waiter_pid', 'waiter_proc_start', 'waiter_host'))
+        return 'vanished' if legacy else 'stale'
+    return 'busy'
+
+
 def open_spawns(events, now):
     """Start events with no terminal event for their spawn id, not aged past their
     role's window + cap, and whose recorded same-host waiter pid is still live."""
-    import dispatch, fold, panes
+    events = list(events)
     ended = {e.get("spawn") for e in events if e["type"] in TERMINAL}
-    host = socket.gethostname()
     out = []
-    for e in events:
-        if e["type"] not in START_TYPES:
-            continue
+    for e in start_events(events):
         sid = e.get("spawn")
         if sid and sid in ended:
             continue
         role = _role(e)
-        cap = dispatch.ROLES.get(role, (None, 60, 0))[1]
-        pid = e.get("waiter_pid")
-        if pid and e.get("waiter_host") == host and \
-                not panes._is_live(pid, {"procStart": e.get("waiter_proc_start")}):
-            continue
-        window = e.get("window_min") or cap
-        if (now - fold.ts(e.get("ts"))).total_seconds() / 60 > window + cap:
+        if start_state(e, now) != 'busy':
             continue
         out.append({"spawn": sid, "role": role, "subject": e.get("subject"),
                     "worktree": e.get("worktree"), "ts": e.get("ts")})

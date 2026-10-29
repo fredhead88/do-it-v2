@@ -4,6 +4,9 @@
 EMITS = {"spec-preflight": {"spec-preflight"}, "verdict": {"grader"}, "review": {"reviewer"}, "shipped": {"executor"},
          # SD8: packet authors queue seats; only the relay records service.
          # Static so a standalone fold reader enforces these without dispatch.
+         "spawn-failed": {"relay", "grader", "builder", "reviewer", "owed-sweeper",
+                          "spec-writer", "research", "spec-auditor", "probe", "plan-auditor",
+                          "owed-verifier", "operator", "executor", "charter-reviewer", "thinker", "tick"},
          "seat-queued": {"spec-writer", "spec-auditor", "builder", "grader", "reviewer",
                          "plan-auditor", "research", "reuse-scout", "charter-reviewer",
                          "probe", "owed-sweeper", "owed-verifier"},
