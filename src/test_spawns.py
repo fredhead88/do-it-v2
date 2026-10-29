@@ -146,3 +146,74 @@ for name, evs in [("ended", [start("L-builder-0920", "L-spec-0920", type_="build
     assert spawns.conflict("builder", evs[0]["subject"], str(CWD), spawns.open_spawns(ledger_events(), NOW)) is None, name
 print("L-spec-0755 AC4 ok (terminal, spawn-stale and dead-waiter spawns do not block)")
 print("ALL OK")
+
+# L-spec-1861 AC2: complete busy/end matrix; the conflict reader stays pure.
+from contextlib import ExitStack
+from unittest.mock import patch
+import hashlib
+
+matrix = [
+    ('young-dead', 1, dict(live, waiter_pid=dead.pid), None, False, 'spawn-failed'),
+    ('pid-reused', 1, dict(live, waiter_proc_start='reused'), None, False, 'spawn-failed'),
+    ('live-young', 1, live, None, True, None),
+    ('live-old', 181, live, None, False, 'spawn-stale'),
+    ('unreadable-young', 1, live, 'unreadable', True, None),
+    ('unreadable-old', 181, live, 'unreadable', False, 'spawn-stale'),
+    ('foreign-young', 1, dict(live, waiter_host='foreign'), None, True, None),
+    ('foreign-old', 181, dict(live, waiter_host='foreign'), None, False, 'spawn-stale'),
+    ('partial-young', 1, dict(waiter_pid=me), None, True, None),
+    ('partial-old', 181, dict(waiter_pid=me), None, False, 'spawn-stale'),
+    ('host-only-old', 181, dict(waiter_host=HOST), None, False, 'spawn-stale'),
+    ('start-only-old', 181, dict(waiter_proc_start='1'), None, False, 'spawn-stale'),
+    ('legacy-threshold', 180, {}, None, True, None),
+    ('legacy-beyond', 180.01, {}, None, False, 'spawn-failed'),
+    ('legacy-empty', 181, dict(waiter_pid=None, waiter_host='', waiter_proc_start=''), None, False, 'spawn-failed'),
+    ('window-greater-than-cap', 250, dict(window_min=200), None, True, None),
+    ('window-greater-beyond', 291, dict(window_min=200), None, False, 'spawn-failed'),
+    ('window-absent', 181, {}, None, False, 'spawn-failed'),
+    ('stale-then-dead', 1, dict(live, waiter_pid=dead.pid), 'stale', False, 'spawn-failed'),
+    ('previous-done', 181, {}, 'done', False, None),
+    ('previous-failed', 181, {}, 'failed', False, None),
+    ('surviving-live-attempt', 181, {}, 'survivor', True, 'spawn-failed'),
+    ('stale-foreign', 181, dict(live, waiter_host='foreign'), 'stale', False, None),
+    ('stale-partial', 181, dict(waiter_pid=me), 'stale', False, None),
+    ('stale-live', 181, live, 'stale', False, None),
+]
+for index, (name, age, meta, mode, expected_busy, expected_end) in enumerate(matrix):
+    with tempfile.TemporaryDirectory(prefix='vanished-matrix-') as directory, ExitStack() as stack:
+        events_dir = pathlib.Path(directory) / 'events'
+        events_dir.mkdir()
+        stack.enter_context(patch.object(fold, 'EVENTS', events_dir))
+        if mode == 'unreadable':
+            stack.enter_context(patch.object(panes, 'proc_start', return_value=None))
+        sid, spawn = f'L-spec-{9600+index}', f'L-builder-{9600+index}'
+        evs = [start(spawn, sid, ago_min=age, **meta)]
+        evs[0]['ts'] = (NOW-datetime.timedelta(minutes=age)).isoformat()
+        if mode in ('stale', 'done', 'failed'):
+            evs += [end(spawn, sid, 'spawn-'+mode)]
+        elif mode == 'survivor':
+            evs += [start('L-builder-9699', sid, **live)]
+        before = list(events_dir.iterdir())
+        pure = {e['subject'] for e in spawns.open_spawns(evs, NOW)}
+        assert list(events_dir.iterdir()) == before, name
+        want = {sid} if expected_busy else set()
+        assert pure == want, (name, pure, want)
+        actual = tick._spawn_busy(evs)
+        assert actual == pure, (name, actual, pure)
+        emitted = [json.loads(l) for p in events_dir.glob('*.jsonl') for l in p.read_text().splitlines()]
+        assert [e['type'] for e in emitted] == ([expected_end] if expected_end else []), (name, emitted)
+        if expected_end == 'spawn-failed':
+            assert emitted[0]['reason'] == 'vanished'
+        # Same snapshot and fresh subsequent ticks: neither stale nor failure repeats.
+        assert tick._spawn_busy(evs) == want
+        for _ in range(2):
+            fresh = evs + fold.read_events(use_cache=False)
+            assert tick._spawn_busy(fresh) == want
+            assert {e['subject'] for e in spawns.open_spawns(fresh, NOW)} == want
+        final = [json.loads(l) for p in events_dir.glob('*.jsonl') for l in p.read_text().splitlines()]
+        assert final == emitted, (name, emitted, final)
+        body = json.dumps(dict(case=name, inputs=evs, pure_busy=sorted(pure), tick_busy=sorted(actual),
+                               event_delta=emitted, subsequent_event_delta=[]), sort_keys=True)
+        print(json.dumps(dict(url='cli://vanished-matrix/'+name, status=0,
+                              body_sha256=hashlib.sha256(body.encode()).hexdigest(), body_excerpt=body)))
+print('L-spec-1861 AC2 complete matrix: 25 rows, pure-reader writes=0, repeated event deltas=0')

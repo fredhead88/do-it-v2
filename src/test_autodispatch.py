@@ -328,8 +328,11 @@ _write(root, "L-builder-9002.jsonl",
         "subject": "L-spec-9998", "spawn": "L-builder-9002"})
 _, _, rows = _fold_and_candidates(root)
 assert _row(rows, "L-spec-16001")["status"] == "dispatchable", "AC16b: aged past window, the seat frees up"
-stale_lines = [l for l in tick.tick_path().read_text().splitlines() if '"spawn-stale"' in l]
-assert stale_lines, "AC16b: tick.spawn_in_flight's own spawn-stale side effect must still land"
+vanished_lines = [json.loads(l) for l in tick.tick_path().read_text().splitlines() if '"spawn-failed"' in l]
+assert len(vanished_lines) == 1 and vanished_lines[0]['reason'] == 'vanished'
+admitted16 = [e for e in fold.read_events(use_cache=False) if e['type'] == 'spawn-failed']
+assert len(admitted16) == 1 and admitted16[0]['actor'] == 'tick'
+assert fold.admits(admitted16[0], admitted16[0]['actor']) is None
 print("autodispatch-0427 AC16 ok")
 
 # ── AC19: agents/executor.md's `written` row, verbatim ────────────────────
@@ -1171,6 +1174,75 @@ class AuditCandidateTests(unittest.TestCase):
         payload = json.dumps(dict(before=rows, after=after), sort_keys=True)
         print(json.dumps(dict(url='cli://audit-candidates/AC4', status=0,
             body_sha256=hashlib.sha256(payload.encode()).hexdigest(), body_excerpt=payload)))
+
+
+class VanishedRecoveryTests(unittest.TestCase):
+    def test_tick_terminal_takes_recovery_from_fallback(self):
+        import nextstep, lane_rules, hashlib, socket, panes
+        from contextlib import ExitStack
+        for count in (1, 2, 3):
+            with tempfile.TemporaryDirectory(prefix='vanished-autodispatch-') as directory, ExitStack() as stack:
+                root = pathlib.Path(directory)
+                (root/'events').mkdir()
+                (root/'content').mkdir()
+                for module, key, value in ((fold, 'ROOT', root), (fold, 'EVENTS', root/'events'),
+                        (dispatch, 'ROOT', root), (dispatch, 'EVENTS', root/'events'),
+                        (dispatch, 'CONTENT', root/'content')):
+                    stack.enter_context(patch.object(module, key, value))
+                sid = 'L-spec-9861'
+                def emit(actor, kind, minute, **kw):
+                    path = root/'events'/f'L-{actor}-9861.jsonl'
+                    with patch.object(dispatch, 'now', return_value=(NOW+datetime.timedelta(minutes=minute)).isoformat()):
+                        self.assertIsNone(dispatch.emit(path, {}, kind, strict=True, subject=sid, project='proj', **kw))
+                emit('operator', 'spec-written', -300)
+                for n in range(count):
+                    spawn = f'L-builder-{9860+n}'
+                    emit('builder', 'build-started', -250+n, spawn=spawn, role='builder')
+                    if n < count-1:
+                        emit('tick', 'spawn-failed', -60+n, spawn=spawn, role='builder', reason='vanished')
+                before = fold.read_events(use_cache=False)
+                with patch.object(dispatch, 'now', return_value=NOW.isoformat()):
+                    tick.spawn_in_flight(before)
+                fresh = fold.read_events(use_cache=False)
+                failures = [e for e in fresh if e['type'] == 'spawn-failed']
+                self.assertEqual(len(failures), count)
+                for f in failures:
+                    self.assertIsNone(fold.admits(f, f['actor']))
+                    self.assertTrue(autodispatch._own_terminal_event(fresh, f['spawn']))
+                specs = fold.fold(fresh)[0]
+                runner = _FakeRunner()
+                replay = autodispatch.redispatch_dead(fresh, specs, NOW, runner=runner)
+                self.assertEqual(runner.calls, [])
+                steps = nextstep.next_steps(fresh, specs, NOW, lane_rules.load())
+                step = next(s for s in steps if s.item == sid)
+                self.assertIsNone(step.action)
+                if count < 3:
+                    self.assertIn('next_retry_at', step.reason)
+                    later = NOW+datetime.timedelta(minutes=(5, 15)[count-1])
+                    due = next(s for s in nextstep.next_steps(fresh, specs, later, lane_rules.load()) if s.item == sid)
+                    self.assertEqual((due.action, due.owner), ('build', 'tick'))
+                else:
+                    self.assertEqual(step.owner, 'executor')
+                    self.assertIn('exhaust', step.reason)
+                tick.in_flight(before)
+                second = fold.read_events(use_cache=False)
+                autodispatch.redispatch_dead(second, fold.fold(second)[0], NOW, runner=runner)
+                self.assertEqual(len([e for e in second if e['type'] == 'spawn-failed']), count)
+                self.assertEqual(runner.calls, [])
+                body = json.dumps(dict(events=second, steps=[s.__dict__ for s in steps],
+                                       fallback=replay, dispatch_calls=runner.calls), sort_keys=True)
+                print(json.dumps(dict(url='cli://vanished-autodispatch/'+str(count), status=0,
+                                      body_sha256=hashlib.sha256(body.encode()).hexdigest(), body_excerpt=body)))
+                # A possibly-live old waiter retains elapsed-stale seat release.
+                path = root/'events'/'L-builder-9899.jsonl'
+                with patch.object(dispatch, 'now', return_value=(NOW-datetime.timedelta(minutes=200)).isoformat()):
+                    self.assertIsNone(dispatch.emit(path, {}, 'build-started', subject='L-spec-9899',
+                        spawn='L-builder-9899', waiter_pid=os.getpid(), waiter_host=socket.gethostname(),
+                        waiter_proc_start=panes.proc_start(os.getpid())))
+                self.assertNotIn('L-spec-9899', tick.spawn_in_flight(fold.read_events(use_cache=False)))
+                rows = fold.read_events(use_cache=False)
+                self.assertEqual([e['type'] for e in rows if e.get('spawn') == 'L-builder-9899'],
+                                 ['build-started', 'spawn-stale'])
 
 
 if __name__ == '__main__':

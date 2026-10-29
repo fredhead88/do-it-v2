@@ -87,14 +87,29 @@ def _bind_root(root):
     return fold.EVENTS
 
 
+def _tick_spawn_ends():
+    """Read tick-owned ends through the same ledger route as waiter-owned ends."""
+    try:
+        text = ledger_files.read_text(fold.EVENTS, tick_path().name)
+    except OSError:
+        return {}
+    ends = {}
+    for line in text.splitlines():
+        try:
+            e = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        if e.get('type') in ('spawn-done', 'spawn-failed', 'spawn-stale'):
+            ends.setdefault(e.get('spawn'), set()).add(e['type'])
+    return ends
+
+
 def _ended_since_read(sid):
-    """Re-read the spawn's OWN ledger file just before calling it stale: the waiter
-    writes `spawn-done` and exits, and a tick that read the stream a moment earlier
-    then saw a dead waiter and emitted `spawn-stale` after a finished spawn
-    (L-grader-0746/0733, L-builder-0893, 2026-10-04) — which re-dispatched work
-    that had already finished."""
+    """Honor waiter or tick completions landing after the caller's snapshot."""
     if not sid:
         return False
+    if _tick_spawn_ends().get(sid, set()) & {'spawn-done', 'spawn-failed'}:
+        return True
     try:
         text = ledger_files.read_text(fold.EVENTS, f"{sid}.jsonl")
     except OSError:
@@ -103,53 +118,39 @@ def _ended_since_read(sid):
 
 
 def _spawn_busy(ev):
-    """Subjects with a REAL spawn started and not ended — never escalation-busy.
-    A start older than twice its role's cap with no terminal event is a dead
-    wrapper: recorded once as `spawn-stale` (on the CURRENT `tick_path()`, never
-    a stale import-time path), and the subject is back on the lane for the
-    Executor's failed-spawn row.
-
-    A same-host, confirmed-dead waiter goes stale immediately, independent of
-    elapsed time: when the started event carries a truthy `waiter_pid` and
-    `waiter_host` equal to this process's own hostname, `panes._is_live` (reused
-    verbatim, built with a synthetic `{"procStart": waiter_proc_start}` meta
-    dict) decides liveness — a confirmed-dead waiter never gets the benefit of
-    the doubt an unreadable pid/start-time does. An event missing `waiter_pid`/
-    `waiter_host`, or naming a different host, falls through to the existing
-    elapsed-time check unchanged."""
-    started = [e for e in ev if e["type"] in ("build-started", "spawn-started")]
-    ended = {e.get("spawn") for e in ev if e["type"] in ("spawn-done", "spawn-failed", "spawn-stale")}
+    """Reconcile vanished attempts once, preserving elapsed-stale live work."""
+    import spawns
+    ends = _tick_spawn_ends()
+    for e in ev:
+        if e.get('type') in spawns.TERMINAL:
+            ends.setdefault(e.get('spawn'), set()).add(e['type'])
     busy = set()
-    for e in started:
-        sid = e.get("spawn")
-        if sid and sid in ended:
+    for e in spawns.start_events(ev):
+        sid = e.get('spawn')
+        terminal = ends.get(sid, set()) if sid else set()
+        if terminal & {'spawn-done', 'spawn-failed'}:
             continue
-        # A start with no spawn id is not the wrapper's — a hand-written one, or a
-        # pre-wrapper event. It can never be matched to a terminal event, so it is
-        # aged out on the role's own cap and there is nothing to name in a
-        # `spawn-stale`: the subject simply returns to the lane, where the
-        # Executor's failed-spawn row is what looks at it.
-        role = "-".join(sid.split("-")[1:-1]) if sid else (e.get("role") or "")
-        cap = dispatch.ROLES.get(role, (None, 60, 0))[1]
-        waiter_pid = e.get("waiter_pid")
-        if waiter_pid and e.get("waiter_host") == socket.gethostname() and \
-                not panes._is_live(waiter_pid, {"procStart": e.get("waiter_proc_start")}):
-            sid and not _ended_since_read(sid) and dispatch.emit(tick_path(), {"spawn": sid}, "spawn-stale",
-                                  subject=e.get("subject"), role=role, cap_min=cap, reason="waiter-dead")
+        state = spawns.start_state(e, fold.NOW)
+        if state == 'vanished':
+            if sid and not _ended_since_read(sid):
+                fields = dict(subject=e.get('subject'), role=spawns._role(e),
+                              waiter_pid=e.get('waiter_pid') or None, since=e.get('ts'),
+                              reason='vanished')
+                if 'project' in e:
+                    fields['project'] = e['project']
+                dispatch.emit(tick_path(), {'spawn': sid}, 'spawn-failed', **fields)
+                ends.setdefault(sid, set()).add('spawn-failed')
+        elif terminal:
+            # Stale remains outside busy, but is not a real terminal for reconciliation.
             continue
-        # L-spec-0269/R1: the subject's own recorded `window_min` (its offered
-        # claim window), plus the role's cap for the working wait after a claim
-        # — replacing the flat `2 * cap`, which read a spec whose window was
-        # raised as a dead wrapper before it had had its full chance to be
-        # claimed. An event with no recorded `window_min` (every pre-existing
-        # one, and every non-seat-backend one) falls back to `cap`, reproducing
-        # `2 * cap` exactly.
-        window = e.get("window_min") or cap
-        if (fold.NOW - fold.ts(e.get("ts"))).total_seconds() / 60 > window + cap:
-            sid and not _ended_since_read(sid) and dispatch.emit(tick_path(), {"spawn": sid}, "spawn-stale",
-                                  subject=e.get("subject"), role=role, cap_min=cap)
+        elif state == 'stale':
+            if sid and not _ended_since_read(sid):
+                cap = dispatch.ROLES.get(spawns._role(e), (None, 60, 0))[1]
+                dispatch.emit(tick_path(), {'spawn': sid}, 'spawn-stale',
+                              subject=e.get('subject'), role=spawns._role(e), cap_min=cap)
+                ends.setdefault(sid, set()).add('spawn-stale')
         else:
-            busy.add(e.get("subject"))
+            busy.add(e.get('subject'))
     return busy
 
 
@@ -655,12 +656,21 @@ def _record():
         push_origin.run(ev)
     except Exception as e:
         push_origin_error = f"{e}"
-    try:
-        ev = fold.read_events(snapshot=snapshot)
-    except ledger_cache.LockTimeout as exc:
-        print(str(exc), file=sys.stderr)
-        lock.close()
-        return None
+    # Reuse the guarded post-intake read for reconciliation and its resulting
+    # snapshot. Both reads keep the same lock-timeout logging/return contract.
+    for reconcile in (True, False):
+        try:
+            ev = fold.read_events(snapshot=snapshot)
+        except ledger_cache.LockTimeout as exc:
+            print(str(exc), file=sys.stderr)
+            lock.close()
+            return None
+        if reconcile:
+            before = tick_path().stat().st_size if tick_path().exists() else 0
+            _spawn_busy(ev)
+            after = tick_path().stat().st_size if tick_path().exists() else 0
+            if before == after:
+                break
     specs, charters, _, _ = fold.fold(ev)
     reaped = {e.get("subject") for e in ev if e["type"] == "tree-reaped"}
     errors = []

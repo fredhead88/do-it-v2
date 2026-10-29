@@ -163,6 +163,56 @@ def _builder_question(evs):
 
 
 
+def _vanished(e):
+    """Retry authority comes from the ledger filename, never from prose or JSON actor."""
+    source = _source(e)
+    return (e.get('type') == 'spawn-failed' and e.get('reason') == 'vanished'
+            and bool(source) and fold.actor_of(source.split(':')[0]) == 'tick')
+
+
+def _attempt_role(e):
+    return e.get('role') or fold.actor_of(e.get('spawn') or '')
+
+
+def _refusal(e):
+    return (e.get('type') == 'spawn-failed'
+            and str(e.get('reason') or '').startswith(NOT_READY_PREFIXES))
+
+
+def _history_events(evs):
+    return [e for e in evs if not _refusal(e)
+            or str(e.get('reason') or '').startswith('bundle-pending')]
+
+
+def _retry_result(c, trigger, role, *, dispatched=False):
+    """Use the original trigger's history; a vanished end never resets its budget."""
+    evs = c['evs']
+    vanished = any(_vanished(e) and _attempt_role(e) == role
+                   and _time(e['ts']) >= _time(trigger['ts']) for e in evs)
+    if dispatched and not vanished:
+        return None
+    # SD1's transport refusals are not attempts. Bundle readiness retains its
+    # existing history treatment; other refusals simply re-evaluate next tick.
+    h = attempts.history(_history_events(evs), dict(trigger, subject=c['sid']), role, now=c['now'])
+    if h.consumed or h.live:
+        return None
+    fields = {}
+    reason = 'condition met'
+    if h.exhausted:
+        reason = f'retry exhausted: {h.n_failed} failed attempts; ' + '; '.join(h.reasons)
+        fields = dict(retry_hold=True, retry_owner='executor',
+                      clears='new authorized trigger or operator decision')
+    elif h.not_ready:
+        reason = h.not_ready
+        fields = dict(retry_hold=True, retry_owner='tick', clears='evidence-bundle ready')
+    elif h.next_retry_at and c['now'] < h.next_retry_at:
+        reason = f'retry backoff: {h.n_failed} failed attempts; next_retry_at={h.next_retry_at.isoformat()}'
+        fields = dict(retry_hold=True, retry_owner='tick', clears='next_retry_at=' + h.next_retry_at.isoformat())
+    elif h.n_failed:
+        reason = f'retry due: {h.n_failed} failed attempts; ' + '; '.join(h.reasons)
+    return _result(trigger, reason, **fields)
+
+
 def _rebuild(c):
     evs = c['evs']
     # Settled fold states include shipped (and all shipped-owed-* states),
@@ -195,11 +245,10 @@ def _rebuild(c):
                 and _time(e['ts']) > _time(blocked['ts'])]
     drops = [e for e in evs if e.get('type') == 'window-dropped' and e.get('reason') == 'owner']
     trigger = max(decisions + rewrites + drops, key=lambda e: _time(e['ts']), default=None)
-    dispatched = [e for e in evs if _builder_dispatch(e)]
-    if (trigger and (not blocked or _time(trigger['ts']) > _time(blocked['ts']))
-            and not _after(dispatched, trigger, DISPATCH_EVENTS)
-            and not _after(evs, trigger, {'build-started'})):
-        return _result(trigger)
+    dispatched = [e for e in evs if _builder_dispatch(e) and not _refusal(e)]
+    if trigger and (not blocked or _time(trigger['ts']) > _time(blocked['ts'])):
+        return _retry_result(c, trigger, 'builder', dispatched=(
+            _after(dispatched, trigger, DISPATCH_EVENTS) or _after(evs, trigger, {'build-started'})))
 
 
 
@@ -226,8 +275,9 @@ def _regrade(c):
     if decision and kind == 'regrade':
         triggers.append(decision)
     trigger = max(triggers, key=lambda e: _time(e['ts']), default=None)
-    if trigger and not _after(c['evs'], trigger, DISPATCH_EVENTS, 'grader'):
-        return _result(trigger)
+    if trigger:
+        dispatched = [e for e in c['evs'] if not _refusal(e) and _attempt_role(e) == 'grader']
+        return _retry_result(c, trigger, 'grader', dispatched=_after(dispatched, trigger, DISPATCH_EVENTS))
 
 
 
@@ -257,20 +307,20 @@ def audit_state(evs, now):
         if now < due_at:
             state.update(phase='wait', reason='30 minute audit grace')
             return state
-        history = attempts.history(evs, trigger, 'spec-auditor', now=now,
+        history = attempts.history(_history_events(evs), trigger, 'spec-auditor', now=now,
             dead=frozenset(e['spawn'] for e in autodispatch.dead_spawns(evs, now)))
         if history.live:
             state.update(phase='live', reason='spec-auditor in flight')
         elif history.not_ready:
             state.update(phase='not-ready', reason=history.not_ready)
         elif history.exhausted:
-            state.update(phase='exhausted', reason='; '.join(history.reasons))
+            state.update(phase='exhausted', reason=f'{history.n_failed} failed attempts; ' + '; '.join(history.reasons))
         elif history.consumed:
             # A consumed trigger without a C1 audit cannot authorize a build.
             state.update(phase='not-ready', reason='audit trigger already consumed')
         elif history.next_retry_at and now < history.next_retry_at:
             state.update(phase='retry-wait', retry_at=history.next_retry_at.isoformat(),
-                         reason='; '.join(history.reasons))
+                         reason=f'{history.n_failed} failed attempts; ' + '; '.join(history.reasons))
         else:
             state.update(phase='due', reason='one blind spec audit due', attempt=history.n_failed + 1)
         return state
@@ -289,7 +339,10 @@ def audit_due(evs, now):
 def _build(c):
     if dispatch.unaudited(c['evs']) is not None:
         return None
-    if c['spec'].get('state') != 'written' or c['sid'] in c['busy'] or c['dependency'] or c['wave']:
+    state = c['spec'].get('state')
+    vanished = any(_vanished(e) and _attempt_role(e) == 'builder' for e in c['evs'])
+    if (state != 'written' and not (state == 'building' and vanished)
+            or c['sid'] in c['busy'] or c['dependency'] or c['wave']):
         return None
     if _rebuild(c) or _close(c) or _regrade(c):
         return None
@@ -298,7 +351,7 @@ def _build(c):
     if any(e.get('type') in JUDGING | {'build-done', 'queue-add', 'merge-gate-clean', 'build-blocked'} for e in c['evs']):
         return None
     trigger = _latest(c['evs'], {'spec-written'})
-    return _result(trigger) if trigger else None
+    return _retry_result(c, trigger, 'builder') if trigger else None
 
 
 
@@ -308,22 +361,26 @@ def _grade(c):
     trigger, kind = autodispatch._grader_trigger(c['evs'])
     if not trigger or kind == 'regrade' or _rebuild(c) or _regrade(c) or _close(c):
         return None
-    if _after(c['evs'], trigger, DISPATCH_EVENTS, 'grader') or _after(c['evs'], trigger, JUDGING | {'queue-add', 'merge-gate-clean'}):
+    if _after(c['evs'], trigger, JUDGING | {'queue-add', 'merge-gate-clean'}):
         return None
-    return _result(trigger)
+    dispatched = [e for e in c['evs'] if not _refusal(e) and _attempt_role(e) == 'grader']
+    return _retry_result(c, trigger, 'grader', dispatched=_after(dispatched, trigger, DISPATCH_EVENTS))
 
 
 
 def _review(c):
+    if c['dependency']:
+        return None
     trigger = _latest(c['evs'], JUDGING | {'build-done', 'build-blocked'})
     if not trigger or not (trigger['type'] == 'cannot-assess' or
                            trigger['type'] == 'verdict' and trigger.get('confirmed') is True):
         return None
     if fold.standing_rejects(c['evs']) or _rebuild(c) or _close(c) or _regrade(c):
         return None
-    if _after(c['evs'], trigger, DISPATCH_EVENTS, 'reviewer') or _after(c['evs'], trigger, {'queue-add', 'merge-gate-clean'}):
+    if _after(c['evs'], trigger, {'queue-add', 'merge-gate-clean'}):
         return None
-    return _result(trigger)
+    dispatched = [e for e in c['evs'] if not _refusal(e) and _attempt_role(e) == 'reviewer']
+    return _retry_result(c, trigger, 'reviewer', dispatched=_after(dispatched, trigger, DISPATCH_EVENTS))
 
 
 
@@ -527,6 +584,8 @@ def _failure(evs, rules):
                    and not (e['type'] == 'spawn-failed'
                             and str(e.get('reason') or '').startswith(NOT_READY_PREFIXES))), None)
     if latest and latest['type'] in FAILURES:
+        if _vanished(latest):
+            return latest, 'retry'
         text = '\n'.join(str(latest.get(k) or '') for k in ('findings', 'why', 'error', 'reason'))
         return latest, classify_failure(text, latest.get('exit_code', 1), rules)
     return None, None
@@ -543,6 +602,10 @@ def _choose(c, rows, owners):
         return _hold(sid, 'spec', stage, event, 'undetermined: conflicting actions', 'one lane action')
     row = next(iter(acting), None)
     if row:
+        if row.get('retry_hold'):
+            trigger = next((e for e in reversed(evs) if e['ts'] == row['since']), {})
+            return _hold(sid, 'spec', stage, trigger, row['reason'], row['clears'],
+                         row['retry_owner'], row['since'])
         name = row['name']
         trigger = next((e for e in reversed(evs) if e['ts'] == row['since']), {})
         return Step(sid, 'spec', ACTION_STAGES[name], 'action', name, owners[name],
@@ -584,6 +647,8 @@ def next_steps(events, specs, now, rules, waves=None):
         elif e['type'] in {'spawn-done', 'spawn-failed', 'spawn-stale'}:
             attempts.pop(spawn, None)
     ended = {e.get('spawn') for e in events if e['type'] in {'spawn-done', 'spawn-failed', 'spawn-stale'}}
+    # Equal-time cross-file ordering must not resurrect a terminal attempt.
+    attempts = {spawn: e for spawn, e in attempts.items() if spawn not in ended}
     for e in raw_events:
         if (e.get('spawn') in bad and e.get('spawn') not in ended
                 and e.get('type') in {'spawn-started', 'build-started'}):
@@ -657,12 +722,20 @@ def next_steps(events, specs, now, rules, waves=None):
                                    'spec-written rewrite or operator decision', 'executor', audit['since']))
             else:
                 prefix = 'audit-exhausted: ' if phase == 'exhausted' else 'audit-wait: '
-                steps.append(_hold(sid, 'spec', 'planned', trigger,
-                                   prefix + phase + ': ' + audit['reason'],
-                                   'spec-auditor spawn-done', 'tick', audit['since']))
+                reason = prefix + phase + ': ' + audit['reason']
+                if audit['retry_at']:
+                    reason += '; next_retry_at=' + audit['retry_at']
+                exhausted = phase == 'exhausted'
+                clears = ('new authorized trigger or operator decision' if exhausted
+                          else 'next_retry_at=' + audit['retry_at'] if audit['retry_at']
+                          else 'spec-auditor spawn-done')
+                steps.append(_hold(sid, 'spec', 'planned', trigger, reason, clears,
+                                   'executor' if exhausted else 'tick', audit['since']))
             continue
         failure, classification = _failure(evs, rules)
-        if failure and classification != 'work':
+        # Structured reconciliation retries continue through original role/trigger
+        # predicates, which own bounds, completion and stronger lifecycle holds.
+        if failure and classification not in {'work', 'retry'}:
             reason = 'infra: retry required' if classification == 'infra' else 'undetermined: failure classification'
             steps.append(_hold(sid, 'spec', stage, failure, reason, 'infra-retry backoff or freed disk'
                                if classification == 'infra' else 'classified failure'))

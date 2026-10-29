@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import howto
 
 REPO = Path(__file__).resolve().parent.parent
-LITERALS = {'spawn-stale', 'charter-proving', 'charter-reopened', 'charter-closed',
+LITERALS = {'spawn-stale', 'spawn-failed', 'charter-proving', 'charter-reopened', 'charter-closed',
             'worktree-reaped', 'tick', 'cron-missing', 'look-stale',
             'proving-check-failed', 'proving-overdue', 'autodispatch-failed', 'autodispatched'}
 
