@@ -10,6 +10,7 @@ L-spec-0764 (JSON verdict line + exit 0/1/2); the real script is not exercised.
 """
 import atexit, hashlib, json, os, pathlib, subprocess, sys, tempfile, time
 import types
+import contextlib
 import shlex
 from unittest.mock import patch
 
@@ -2309,6 +2310,477 @@ def base_kind_checks():
                   "base-kind CLI validation " + name)
     if len(FAILS) == start:
         print("base-kind AC5 status=0")
+
+
+def local_owner_ac1():
+    """Real runner regression: branch tips, not the current checkout, own failures."""
+    import contextlib
+    import grading_env
+    with tempfile.TemporaryDirectory(prefix="local-owner-") as temp:
+        top = pathlib.Path(temp)
+        repo = top / "repo"
+        repo.mkdir()
+        sh(["init", "-b", "main"], repo)
+        path = repo / "test_named.py"
+        path.write_text("def test_first(): assert True\ndef test_second(): assert True\n")
+        sh(["add", "."], repo); sh(["commit", "-m", "base"], repo)
+        base = sh(["rev-parse", "HEAD"], repo)
+        entries = []
+        for name, first, second in (("A", False, True), ("B", True, False), ("C", True, True)):
+            sh(["checkout", "-B", name, base], repo)
+            path.write_text(f"def test_first(): assert {first}\ndef test_second(): assert {second}\n")
+            sh(["add", "."], repo); sh(["commit", "--allow-empty", "-m", name], repo)
+            entries.append((name, name, sh(["rev-parse", "HEAD"], repo)))
+        nodes = ["test_named.py::test_first", "test_named.py::test_second"]
+        row = {"venv": "/opt/albert-scott/.venv", "node_dirs": []}
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch.dict(os.environ, DOIT_SCRATCH=str(top / "scratch")))
+            stack.enter_context(patch.object(grading_env, "_project_row", return_value=row))
+            stack.enter_context(patch("loadgate.begin", return_value=None))
+            got = window_gate.local_owners(repo, "fixture", entries, nodes + nodes, window_base=base)
+            assert got == {"A": nodes[:1], "B": nodes[1:]}, got
+            sh(["checkout", "-B", "D", base], repo)
+            path.write_text("def test_first(): assert False\ndef test_second(): assert False\n")
+            (repo / "test_added.py").write_text("def test_new(): assert False\n")
+            sh(["add", "."], repo); sh(["commit", "-m", "two failures plus newly added test"], repo)
+            added = "test_added.py::test_new"
+            tip = sh(["rev-parse", "HEAD"], repo)
+            second = window_gate.local_owners(repo, "fixture", [("D", "D", tip)], nodes + [added], window_base=base)
+            assert second == {"D": nodes + [added]}, second
+            with patch("build_runner._run_tree", side_effect=AssertionError("empty input launched")):
+                assert window_gate.local_owners(repo, "fixture", [], nodes, window_base=base) == {}
+                assert window_gate.local_owners(repo, "fixture", entries, [], window_base=base) == {}
+        return {"mapping": got, "multiple_and_added": second,
+                "added_snapshot": {"member": tip, "baseline": base},
+                "snapshots": [{"member": s, "sha": sha, "baseline": base}
+                                                for s, _, sha in entries], "empty_inputs": "passed"}
+
+
+@contextlib.contextmanager
+def local_owner_fixture(db=False):
+    import grading_env
+    with tempfile.TemporaryDirectory(prefix="lo-") as temp:
+        top = pathlib.Path(temp)
+        repo = top / "repo"
+        repo.mkdir()
+        sh(["init", "-b", "main"], repo)
+        path = repo / "test_named.py"
+        path.write_text("def test_first(): assert True\ndef test_second(): assert True\n")
+        sh(["add", "."], repo); sh(["commit", "-m", "base"], repo)
+        base = sh(["rev-parse", "HEAD"], repo)
+        row = {"venv": "/opt/albert-scott/.venv", "node_dirs": []}
+        if db:
+            row.update(db_env=["SCRATCH_PG_URL"], db_setup={"argv": ["/bin/true"]})
+        def branch(name, code, parent=base):
+            sh(["checkout", "-B", name, parent], repo)
+            path.write_text(code)
+            sh(["add", "."], repo); sh(["commit", "--allow-empty", "-m", name], repo)
+            return (name, name, sh(["rev-parse", "HEAD"], repo))
+        with patch.dict(os.environ, DOIT_SCRATCH=str(top / "scratch")), \
+             patch.object(grading_env, "_project_row", return_value=row), \
+             patch("loadgate.begin", return_value=None):
+            yield top, repo, base, branch
+
+
+def local_owner_ac2():
+    import build_runner
+    first, second = "test_named.py::test_first", "test_named.py::test_second"
+    outcomes = {}
+    with local_owner_fixture() as (top, repo, base, branch):
+        cases = {
+            "import": "import nonexistent_local_owner_module\ndef test_first(): assert False\n",
+            "setup": "def setup_function(): assert False\ndef test_first(): assert False\n",
+            "teardown": "def teardown_function(): assert False\ndef test_first(): assert False\n",
+            "skip": "import pytest\n@pytest.mark.skip\ndef test_first(): assert False\n",
+            "xfail": "import pytest\n@pytest.mark.xfail\ndef test_first(): assert False\n",
+            "absent-selector": "def test_other(): assert False\n",
+            "mixed": "import pytest\ndef test_first(): assert False\n@pytest.mark.skip\ndef test_second(): pass\n",
+        }
+        for name, code in cases.items():
+            member = branch(name, code)
+            ids = [first, second] if name == "mixed" else [first]
+            got = window_gate.local_owners(repo, "fixture", [member], ids, window_base=base)
+            assert got == {}, (name, got)
+            outcomes[name] = "undetermined/no-owner"
+        good = branch("introduced", "def test_first(): assert False\n")
+        for name, member, pinned in (("missing-object", ("bad", "bad", "0" * 40), base),
+                                     ("missing-branch", ("bad", "deleted-branch", good[2]), base),
+                                     ("unresolved-base", good, "0" * 40)):
+            assert window_gate.local_owners(repo, "fixture", [member], [first], window_base=pinned) == {}
+            outcomes[name] = "no-owner"
+        missing = branch("missing-file", "def test_first(): assert False\n")
+        sh(["rm", "test_named.py"], repo); sh(["commit", "-m", "remove test"], repo)
+        missing = (missing[0], missing[1], sh(["rev-parse", "HEAD"], repo))
+        with patch.object(build_runner, "_run_tree", side_effect=AssertionError("absent member launched")) as run:
+            assert window_gate.local_owners(repo, "fixture", [missing], [first], window_base=base) == {}
+            assert not run.called
+        outcomes["absent-member-file"] = "no provision"
+        # A stale member's own merge-base is red even though the window base is fixed.
+        stale_base = branch("old-red", "def test_first(): assert False\n")[2]
+        stale = branch("stale", "def test_first(): assert False\n", stale_base)
+        fixed = branch("fixed", "def test_first(): assert True\n", stale_base)[2]
+        assert window_gate.local_owners(repo, "fixture", [stale], [first], window_base=fixed) == {}
+        outcomes["stale-base"] = dict(member=stale[2], baseline=stale_base, window_base=fixed, owners={})
+        bad_base = branch("uncertain-base", cases["import"])[2]
+        repaired = branch("tip-on-uncertain", "def test_first(): assert False\n", bad_base)
+        assert window_gate.local_owners(repo, "fixture", [repaired], [first], window_base=bad_base) == {}
+        outcomes["undetermined-baseline"] = "no-owner"
+        mixed = branch("independent-bad", cases["import"])
+        got = window_gate.local_owners(repo, "fixture", [mixed, good], [first], window_base=base)
+        assert got == {"introduced": [first]}, got
+        outcomes["independent-member"] = got
+        sentinel = top / "injected"
+        unsafe = ["test_named.py::test_first;touch " + str(sentinel), "test_named.py::-x",
+                  "/test_named.py::test_first", "../test_named.py::test_first", "suite-error:pytest",
+                  "test_named.py::test_first$(touch x)", "test_named.py::test_first`touch x`"]
+        with patch.object(build_runner, "_run_tree", side_effect=AssertionError("unsafe launch")) as run:
+            for node in unsafe:
+                assert window_gate.local_owners(repo, "fixture", [good], [node], window_base=base) == {}
+            assert window_gate.local_owners(repo, "fixture", [("../escape", good[1], good[2])],
+                                           [first], window_base=base) == {}
+            assert not run.called and not sentinel.exists()
+        outcomes["injection"] = "sentinel absent; no launch"
+        for name, exception in (("timeout", build_runner.WallCap("deadline")),
+                                ("provision-exception", RuntimeError("provision"))):
+            with patch.object(build_runner, "_run_tree", side_effect=exception):
+                assert window_gate.local_owners(repo, "fixture", [good], [first], window_base=base) == {}
+            outcomes[name] = "no-owner"
+        tail = top / "report.tail"
+        def fake_report(payload, code=0):
+            tail.write_text(payload)
+            return ([{"exit": code, "tail": str(tail), "failing_ids": [first]}], [], [], [], {})
+        valid = {"ids": [first], "collection_exit": 0, "exit": 1,
+                 "inspection": {"collected": [first], "collection_error": False},
+                 "phases": {"collected": [first], "collection_error": False,
+                            "reports": {first: {"setup": "passed", "call": "failed", "teardown": "passed"}}}}
+        for name, payload, code in (("exit1-only", "FAILED " + first, 1),
+                                    ("traceback-only", "Traceback " + first, 0),
+                                    ("absent-report", "", 0), ("malformed", "DOIT_LOCAL_RECHECK={", 0),
+                                    ("signal", "DOIT_LOCAL_RECHECK=" + json.dumps(valid), -15)):
+            with patch.object(build_runner, "_run_tree", side_effect=lambda *a, p=payload, c=code: fake_report(p, c)):
+                assert window_gate.local_owners(repo, "fixture", [good], [first], window_base=base) == {}
+            outcomes[name] = "no-owner"
+        # Valid parameter spaces and brackets survive as literal argv entries.
+        param = branch("param", "import pytest\n@pytest.mark.parametrize('value', [1], ids=['a b'])\ndef test_first(value): assert False\n")
+        node = first + "[a b]"
+        got = window_gate.local_owners(repo, "fixture", [param], [node], window_base=base)
+        assert got == {"param": [node]}, got
+        outcomes["literal-parameter"] = got
+    return outcomes
+
+
+def local_owner_ac3():
+    """Append with production ev/drop_specs and read through fresh-process fold."""
+    from datetime import datetime, timedelta, timezone
+    import base_red
+    import grading_env
+    import lane_rules
+    import nextstep
+    import packet
+    nodes = ["test_named.py::test_first", "test_named.py::test_second"]
+    report = {}
+    for mode in ("one", "two", "all", "none", "mixed", "second", "stale"):
+        fx = Fx({"L-spec-9001": "a.txt", "L-spec-9002": "b.txt", "L-spec-9003": "c.txt"})
+        sh(["checkout", "master"], fx.repo)
+        for name in ("a.txt", "b.txt", "c.txt"):
+            (fx.repo / name).write_text("ok")
+        code = ("import pathlib, pytest\n"
+                "def test_first(): assert pathlib.Path('a.txt').read_text() == 'ok'\n"
+                "def test_second():\n"
+                "    text = pathlib.Path('b.txt').read_text()\n"
+                "    if text == 'uncertain': pytest.skip('uncertain')\n"
+                "    assert text == 'ok'\n")
+        (fx.repo / "test_named.py").write_text(code)
+        sh(["add", "."], fx.repo); sh(["commit", "-m", "shared selected tests"], fx.repo)
+        initial = sh(["rev-parse", "HEAD"], fx.repo)
+        stale = None
+        if mode == "stale":
+            (fx.repo / "a.txt").write_text("red")
+            sh(["add", "."], fx.repo); sh(["commit", "-m", "old red base"], fx.repo)
+            old = sh(["rev-parse", "HEAD"], fx.repo)
+            sh(["checkout", "-B", "br-L-spec-9001", old], fx.repo)
+            (fx.repo / "a-member.txt").write_text("stale change")
+            sh(["add", "."], fx.repo); sh(["commit", "-m", "stale member"], fx.repo)
+            stale = sh(["rev-parse", "HEAD"], fx.repo)
+            sh(["checkout", "master"], fx.repo)
+            (fx.repo / "a.txt").write_text("ok")
+            sh(["add", "."], fx.repo); sh(["commit", "-m", "later base fix"], fx.repo)
+        fx.base = sh(["rev-parse", "HEAD"], fx.repo)
+        for sid, path in (("L-spec-9001", "a.txt"), ("L-spec-9002", "b.txt"), ("L-spec-9003", "c.txt")):
+            if stale and sid == "L-spec-9001":
+                continue
+            sh(["checkout", "-B", fx.branches[sid], fx.base], fx.repo)
+            value = ("bad" if sid == "L-spec-9001" and mode in ("one", "two", "all", "mixed", "second") else
+                     "bad" if sid == "L-spec-9002" and mode in ("two", "all", "second", "stale") else
+                     "uncertain" if sid == "L-spec-9002" and mode == "mixed" else "ok")
+            (fx.repo / path).write_text(value)
+            sh(["add", "."], fx.repo); sh(["commit", "--allow-empty", "-m", sid], fx.repo)
+        sh(["checkout", "live-scratch"], fx.repo)
+        fx.service._RECHECK_PLUGIN = base_red._RECHECK_PLUGIN
+        selected = nodes[:1] if mode in ("one", "none", "second") else nodes
+        fx.run_n(1, 1, red(selected))
+        fx.run_n(2, 1 if mode == "second" else 0, red(nodes[1:]) if mode == "second" else GREEN)
+        for number in range(3, 9):
+            fx.run_n(number, 0, GREEN)
+        invocations = []
+        original = window_gate.local_owners
+        def observed(repo, project, entries, ids, **kw):
+            last_red = [e for e in fold.read_events() if e["type"] == "window-tree-verified"][-1]
+            assert last_red["new_ids"] == ids and last_red["green"] is False
+            invocations.append(dict(members=[e[0] for e in entries], ids=ids, base=kw["window_base"]))
+            return original(repo, project, entries, ids, **kw)
+        members = list(fx.branches)[:2] if mode == "all" else list(fx.branches)
+        with patch.object(grading_env, "_project_row", return_value={"venv": "/opt/albert-scott/.venv", "node_dirs": []}), \
+             patch("loadgate.begin", return_value=None), \
+             patch.object(window_gate, "local_owners", side_effect=observed):
+            result = fx.go(specs=members)
+        reader = subprocess.run(["/usr/bin/python3", "-c",
+            "import sys,json;sys.path.insert(0,sys.argv[1]);import fold;print(json.dumps(fold.read_events()))", str(HERE.resolve())],
+            env=dict(os.environ, DOIT_ROOT=str(fx.root)), capture_output=True, text=True, timeout=20)
+        assert reader.returncode == 0, reader.stderr
+        rows = json.loads(reader.stdout)
+        drops = [r for r in rows if r["type"] == "window-dropped"]
+        expected = {"one": ["L-spec-9001"], "two": ["L-spec-9001", "L-spec-9002"],
+                    "all": ["L-spec-9001", "L-spec-9002"],
+                    "none": [], "mixed": ["L-spec-9001"], "second": ["L-spec-9001", "L-spec-9002"],
+                    "stale": ["L-spec-9002"]}[mode]
+        assert [r["subject"] for r in drops] == expected, (mode, drops)
+        assert result == (2 if mode == "all" else 1), (mode, result)
+        if mode == "all":
+            assert sh(["rev-parse", "master"], fx.repo) == fx.base and len(fx.calls()) == 1
+        assert invocations and invocations[0]["ids"] == selected and invocations[0]["base"] == fx.base
+        assert invocations[0]["members"] == members
+        if mode == "second":
+            assert len(invocations) == 2 and invocations[1]["ids"] == nodes[1:]
+        assert bool([r for r in rows if r["type"] == "window-bisected"]) == (mode == "none")
+        for drop in drops:
+            owned = nodes[:1] if drop["subject"] == "L-spec-9001" else nodes[1:]
+            assert drop["reason"] == "owner" and drop["evidence"] == "local-repro"
+            assert drop["tests"] == drop["owned_nodes"] == drop["nodes"] == owned
+            assert all(k in drop for k in ("branch", "window", "run_url", "quarantined", "unattributed_nodes"))
+            sid = drop["subject"]
+            before = datetime.now(timezone.utc) - timedelta(hours=1)
+            fixtures = [dict(type="spec-written", subject=sid, ts=before.isoformat(), actor="spec-writer",
+                             project="albert-scott", path=str(fx.tmp / "spec.md"), footprint=["a.txt"],
+                             _src="L-spec-writer-fixture.jsonl:1"),
+                        dict(type="build-done", subject=sid, ts=before.isoformat(), actor="builder", status="DONE",
+                             project="albert-scott", _src="L-builder-fixture.jsonl:1")]
+            evidence = fixtures + rows
+            steps = nextstep.next_steps(evidence, {sid: {"state": "graded", "evs": fixtures + [drop]}},
+                                       datetime.now(timezone.utc), lane_rules.load())
+            assert any(s.item == sid and s.action == "rebuild" for s in steps), steps
+            spec = fx.tmp / "spec.md"
+            spec.write_text("## Verification\n```bash\n/usr/bin/python3 -c 'print(1)'\n```\n")
+            verification = fx.tmp / "verify.sh"
+            verification.write_text("#!/bin/bash\ntrue\n")
+            args = types.SimpleNamespace(subject=sid, role="builder", project="albert-scott", repo=str(fx.repo),
+                                         base_sha=fx.base, worktree=str(fx.repo), charter=None,
+                                         produces=None, conventions=None, hint=None)
+            with patch.object(fold, "read_events", return_value=evidence), \
+                 patch.object(packet, "ROOT", fx.root), patch.object(packet, "CONTENT", fx.tmp), \
+                 patch.object(packet, "write_verify_script", return_value=verification):
+                ctx = packet.Ctx(args)
+                lines = packet.p_builder(ctx)
+            marker = next(i for i, line in enumerate(lines) if line.startswith("Dropped from window"))
+            packet_nodes = [line.strip() for line in lines[marker + 1:] if line.startswith("   test_")]
+            assert packet_nodes == owned, (packet_nodes, owned)
+            drop["reader_rebuild"] = "rebuild"
+            drop["packet_nodes"] = packet_nodes
+        report[mode] = dict(exit=result, invocations=invocations, persisted_drops=drops,
+                            window_events=[r for r in rows if r["type"] in ("window-tree-verified", "window-bisected")],
+                            fresh_process_read=True)
+    # The optional callback also runs before a recursive split. Old direct
+    # callers still split immediately when they omit it.
+    order = []
+    def prepare(batch):
+        order.append(("prepare", batch))
+        return "candidate", batch, {}
+    def judge(candidate, batch):
+        return dict(state="red" if len(batch) > 1 else "green", nodes=nodes[:1], repo="fixture", paths={})
+    def local(batch, result):
+        order.append(("local", batch))
+        return {batch[0]: nodes[:1]}
+    def dropped(batch, result, reason):
+        order.append(("drop", batch, reason))
+    with patch.object(window_gate, "owners", return_value=[]):
+        chosen = window_gate.bisect_window("recursive", ["A", "B", "C", "D"], prepare, judge,
+                                           dropped, lambda _: None, local=local)
+    assert chosen == ("candidate", ["B"]), (chosen, order)
+    assert [(v[0], v[1]) for v in order if v[0] == "local"] == [("local", ["A", "B"]), ("local", ["C", "D"])]
+    report["recursive"] = order
+    return report
+
+
+def local_owner_ac4():
+    """Real private Postgres, runner environment, tail capture and teardown."""
+    import build_runner
+    import scratch
+    source = '''
+import os, pathlib, psycopg2
+def test_first():
+    assert os.environ['TMP'] == os.environ['TMPDIR'] == os.environ['TEMP']
+    assert pathlib.Path(os.environ['TMPDIR']).is_dir()
+    # The runner owns the endpoint; never read an operator env file.
+    with psycopg2.connect(os.environ['SCRATCH_PG_URL']) as connection:
+        assert connection.get_dsn_parameters()['host'].startswith('/')
+        with connection.cursor() as cursor:
+            cursor.execute('CREATE TABLE local_owner_fixture (value integer)')
+            cursor.execute('INSERT INTO local_owner_fixture VALUES (1848)')
+    with psycopg2.connect(os.environ['SCRATCH_PG_URL']) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute('SELECT value FROM local_owner_fixture')
+            assert cursor.fetchone() == (1848,)
+    assert pathlib.Path('verdict').read_text() == 'green'
+def test_unselected():
+    raise RuntimeError('UNSELECTED SENTINEL EXECUTED')
+'''
+    with local_owner_fixture(db=True) as (top, repo, base, branch):
+        sh(["checkout", "-B", "pg-base", base], repo)
+        (repo / "test_named.py").write_text(source)
+        (repo / "verdict").write_text("green")
+        sh(["add", "."], repo); sh(["commit", "-m", "pg base"], repo)
+        base = sh(["rev-parse", "HEAD"], repo)
+        (repo / "verdict").write_text("red")
+        sh(["add", "."], repo); sh(["commit", "-m", "pg red"], repo)
+        tip = sh(["rev-parse", "HEAD"], repo)
+        ids = ["test_named.py::test_first"]
+        calls = []
+        postgres_pids = []
+        provision = build_runner._provision
+        def provisioned(tree, auxiliary, row, env, deadline):
+            summary = provision(tree, auxiliary, row, env, deadline)
+            postgres_pids.append(int((auxiliary / "pg/data/postmaster.pid").read_text().splitlines()[0]))
+            return summary
+        original = build_runner._run_tree
+        def recorded(*args):
+            answer = original(*args)
+            rows = answer[0]
+            states = window_gate._local_phases(rows, ids)
+            calls.append(dict(sha=args[1], states=states, env=answer[4],
+                              tree=rows[0]["cwd"], selected=ids))
+            return answer
+        with patch.object(build_runner, "_run_tree", side_effect=recorded), \
+             patch.object(build_runner, "_provision", side_effect=provisioned):
+            got = window_gate.local_owners(repo, "fixture", [("pg", "pg-base", tip)], ids, window_base=base)
+        assert got == {"pg": ids}, (got, calls)
+        assert [c["sha"] for c in calls] == [tip, base]
+        assert [c["states"][ids[0]] for c in calls] == ["red", "green"]
+        assert all(c["env"]["pg"] == "private" for c in calls)
+        assert all(not pathlib.Path(c["tree"]).exists() for c in calls)
+        assert not list(scratch.sub("runner").iterdir())
+        # Run-level deadline kills the process group and runner cleanup stops PG.
+        sleeping = branch("timeout", "import time\ndef test_first(): time.sleep(30)\n", base)
+        until = time.monotonic() + 5
+        with patch.object(build_runner, "_provision", side_effect=provisioned):
+            assert window_gate.local_owners(repo, "fixture", [sleeping], ids,
+                                           window_base=base, deadline=until) == {}
+        assert time.monotonic() - until < 5
+        assert not list(scratch.sub("runner").iterdir())
+        for pid in postgres_pids:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                pass
+            else:
+                raise AssertionError("scratch PostgreSQL process survived cleanup")
+        # No local environment/temp implementation: installed _run_tree owns it.
+        import inspect
+        implementation = inspect.getsource(window_gate.local_owners)
+        assert "build_runner._run_tree" in implementation and "short_tmpdir" not in implementation
+        return dict(mapping=got, calls=calls, postgres_round_trip="committed/fresh-connection",
+                    sentinel="unselected", cleanup="success/failure/timeout passed")
+
+
+def local_owner_ac5():
+    import build_runner
+    import grading_env
+    import loadgate
+    ids = ["test_named.py::test_first"]
+    outcomes = {}
+    with local_owner_fixture() as (top, repo, base, branch):
+        good = branch("A", "def test_first(): assert False\n")
+        other = branch("B", "def test_first(): assert False\n")
+        with patch.object(grading_env, "_project_row", return_value={}), \
+             patch.object(build_runner, "_run_tree", side_effect=AssertionError("unconfigured launched")) as run:
+            assert window_gate.local_owners(repo, "unconfigured", [good], ids, window_base=base) == {}
+            assert not run.called
+        with patch.object(build_runner, "_run_tree", side_effect=AssertionError("missing file launched")) as run:
+            assert window_gate.local_owners(repo, "fixture", [good], ["missing.py::test_x"], window_base=base) == {}
+            assert not run.called
+        outcomes["short-circuits"] = "missing row and member file: zero launches"
+        original = build_runner._run_tree
+        active, maximum, calls, deadlines = 0, 0, [], []
+        def recorded(*args):
+            nonlocal active, maximum
+            active += 1
+            maximum = max(maximum, active)
+            calls.append(args[1]); deadlines.append(args[-1])
+            try:
+                assert len(args[4]) == 1 and args[4][0][0] == "local-owner"
+                return original(*args)
+            finally:
+                active -= 1
+        admissions = []
+        class Gate:
+            def __init__(self, held=False):
+                self.held = held
+            def check(self, item, role, **kw):
+                assert role == "grader" and kw["action"] == "grade"
+                admissions.append((item, role))
+                return types.SimpleNamespace(held=self.held, would_deny=True)
+        def begin(**kw):
+            assert kw["running"]["window_gate"] == 1 and kw["allow_enforce"] is True
+            return Gate()
+        cache = {}
+        started = time.monotonic()
+        with patch.object(build_runner, "_run_tree", side_effect=recorded), \
+             patch.object(loadgate, "begin", side_effect=begin), \
+             patch.object(build_runner, "run", side_effect=AssertionError("wide run")), \
+             patch.object(window_gate, "verify", side_effect=AssertionError("hosted call")):
+            got = window_gate.local_owners(repo, "fixture", [good, other], ids + ids,
+                                           window_base=base, cache=cache)
+            assert got == {"A": ids, "B": ids}, got
+            count = len(calls)
+            assert window_gate.local_owners(repo, "fixture", [good, other], ids,
+                                           window_base=base, cache=cache) == got
+            assert len(calls) == count == len(set(calls)) == 3
+        assert maximum == 1 and len(admissions) == 3
+        assert all(started < d <= time.monotonic() + 300 for d in deadlines)
+        assert deadlines[0] == deadlines[1], "tip/baseline must share the member deadline"
+        outcomes["sequential-cache"] = dict(launches=len(calls), maximum=maximum, admission_checks=len(admissions))
+        with patch.object(loadgate, "begin", return_value=Gate(held=True)), \
+             patch.object(build_runner, "_run_tree", side_effect=AssertionError("held launched")) as run:
+            assert window_gate.local_owners(repo, "fixture", [good], ids, window_base=base) == {}
+            assert not run.called
+        outcomes["held"] = "zero launches, no wait/retry"
+        with patch.object(build_runner, "_run_tree", side_effect=recorded), \
+             patch.object(loadgate, "begin", return_value=None):
+            until = time.monotonic() + 30
+            assert window_gate.local_owners(repo, "fixture", [good], ids, window_base=base, deadline=until) == {"A": ids}
+            assert deadlines[-2:] == [until, until]
+        outcomes["off-and-enclosing-deadline"] = "passed"
+        # Preserve the frozen legacy alarm and place a second deadline outside it.
+        before = time.monotonic()
+        proc = subprocess.run(["/usr/bin/python3", str(HERE / "test_window_failure_disposition.py")],
+                              capture_output=True, text=True, timeout=170)
+        assert proc.returncode == 0, (proc.stdout[-3000:], proc.stderr[-3000:])
+        elapsed = time.monotonic() - before
+        assert elapsed < 170
+        outcomes["frozen-disposition"] = dict(exit=proc.returncode, elapsed_s=round(elapsed, 2),
+                                              result=proc.stderr.splitlines()[-1:])
+    return outcomes
+
+
+if "--local-owner-ac" in sys.argv:
+    selected = sys.argv[sys.argv.index("--local-owner-ac") + 1:]
+    cases = {"AC1": local_owner_ac1, "AC2": local_owner_ac2, "AC3": local_owner_ac3,
+             "AC4": local_owner_ac4, "AC5": local_owner_ac5}
+    assert len(selected) == 1 and selected[0] in cases, "missing local-owner AC case"
+    body = cases[selected[0]]()
+    raw = json.dumps(body, sort_keys=True).encode()
+    print(json.dumps(dict(url="cli://L-spec-1848/" + selected[0], status=0,
+                          body_sha256=hashlib.sha256(raw).hexdigest(), body_excerpt=body)))
+    sys.exit(0)
 
 
 base_kind_checks()
