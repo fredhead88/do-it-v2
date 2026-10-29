@@ -11,7 +11,7 @@ TMP = pathlib.Path(tempfile.mkdtemp())
 os.environ["HOME"] = str(TMP / "home")
 os.environ["DOIT_ROOT"], os.environ["DOIT_PROJECT"] = str(TMP), "t"
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
-import audit, dispatch, fold, packet  # noqa: E402
+import audit, dispatch, fold, packet, look  # noqa: E402
 
 # L-spec-1044 AC1: extraction preserves the spec's merge-base expression.
 VWB_BLOCK = "BASE=$(git merge-base HEAD origin/main) && /usr/bin/python3 -c 'print(1)' && echo $BASE\n"
@@ -21,10 +21,19 @@ print("verify-wrapper-base AC1 merge-base preserved; lint regression cases follo
 REPO = TMP / "repo"
 (TMP / "content").mkdir(parents=True)
 REPO.mkdir()
-subprocess.run(["git", "init", "-q"], cwd=REPO, check=True)
+subprocess.run(["git", "init", "-q", "--initial-branch=master"], cwd=REPO, check=True)
 subprocess.run(["git", "-C", str(REPO), "commit", "-q", "--allow-empty", "-m", "root"],
                check=True, env={**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
                                 "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"})
+# Keep unrelated configuration and subsequent test patches intact.
+_fixture_load_toml = look.load_toml
+def _packet_fixture_config():
+    config = dict(_fixture_load_toml())
+    push = dict(config.get("push", {}))
+    push["main"] = dict(push.get("main", {}), t="master")
+    config["push"] = push
+    return config
+look.load_toml = _packet_fixture_config
 N = 0
 
 CHARTER = TMP / "content" / "L-charter-0001.md"
@@ -814,7 +823,7 @@ else:
 # ── 11. R10 · the Planner dispatches the audit and the rewrite itself ─────────
 REPOS_T = TMP / "repos" / "t"
 REPOS_T.mkdir(parents=True)
-subprocess.run(["git", "init", "-q"], cwd=REPOS_T, check=True)
+subprocess.run(["git", "init", "-q", "--initial-branch=master"], cwd=REPOS_T, check=True)
 subprocess.run(["git", "-C", str(REPOS_T), "commit", "-q", "--allow-empty", "-m", "root"],
                check=True, env={**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
                                 "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"})
@@ -1120,17 +1129,17 @@ assert btxt.splitlines()[3] == "BASE=X0000001", \
     f"AC6: the earliest build-done's base_sha wins, never a later round's or the live worktree HEAD: {btxt.splitlines()[:4]!r}"
 
 # ── R7/AC1-AC2 (the R3d fixture case) · a NEW builder packet against the same
-#    two-build-done fixture: PINNED_BASE_SHA and item-3 both read X0000001,
-#    the same value the fixture's own BASE= assertion above already names ────
+#    two-build-done fixture: builders capture the configured current tip;
+#    the spec-auditor above retains the earliest historical base ────
 t80 = build("builder", subject="L-spec-0080", worktree=str(REPO), repo=str(REPO))
 m_pin80 = re.search(r"^PINNED_BASE_SHA: (.+)$", t80, re.M)
-assert m_pin80 and m_pin80.group(1) == "X0000001", \
-    f"AC1: the R3d fixture's earliest build-done wins here too: {m_pin80}"
+assert m_pin80 and m_pin80.group(1) == packet.current_tip(REPO, "t"), \
+    f"AC1: a builder captures the configured current tip: {m_pin80}"
 assert len(re.findall(r"^PINNED_BASE_SHA: .+$", t80, re.M)) == 1, "AC1: exactly one such line"
-assert "`base_sha` = X0000001" in t80, "AC2: item-3 and PINNED_BASE_SHA agree on the R3d fixture too"
-assert "PINNED_BASE_SHA_EXPLICIT" not in t80, "AC6: no --base-sha was given to THIS packet build"
+assert f"`base_sha` = {packet.current_tip(REPO, 't')}" in t80, "AC2: item-3 and PINNED_BASE_SHA agree on the R3d fixture too"
+assert "PINNED_BASE_SHA_EXPLICIT: true" in t80, "AC6: persist the change from historical O"
 
-# ── R7/AC10 · packet_builder_rework pins the CURRENT repo HEAD (REPOS_T's, via
+# ── R7/AC10 · packet_builder_rework pins the configured default tip (REPOS_T's, via
 #    L-spec-0080's own recorded project "t") — NOT X0000001, the fixture's
 #    earliest recorded base — and the resulting packet carries the EXPLICIT
 #    line too, since packet_builder_rework always supplies --base-sha itself ─
@@ -1139,12 +1148,10 @@ t_rw80 = p_rw80.read_text()
 assert f"PINNED_BASE_SHA: {REPO_HEAD}" in t_rw80 and "X0000001" not in t_rw80, \
     "AC10: the current main tip wins, never a stale history value while the repo is readable"
 assert "PINNED_BASE_SHA_EXPLICIT: true" in t_rw80, \
-    "AC10: packet_builder_rework's own auto-pin always supplies --base-sha"
+    "AC10: packet_builder_rework persists its change from the historical base"
 
-# ── R7/AC10 (fall-through half) · an unresolvable project never dies —
-#    L-spec-0083's own spec-written base_sha (an existing, unrelated
-#    precedence step) is what actually resolves it; packet_builder_rework's
-#    own project-repo short-circuit contributes nothing here, silently.
+# ── R7/AC10 · an unresolvable project now refuses stale-base —
+#    L-spec-0083's historical spec-written base cannot supply a usable pin.
 #    `fold.subject_project` is monkeypatched, not the event's own `project`
 #    field — this whole file runs under DOIT_PROJECT=t, which `fold.
 #    read_events()` uses to FILTER the ledger (§9.1/D93): an event actually
@@ -1167,15 +1174,14 @@ _real_subject_project434 = fold.subject_project
 fold.subject_project = lambda spec: ("nowhere-project-434" if spec == "L-spec-0083"
                                      else _real_subject_project434(spec))
 try:
-    p_rw83 = pathlib.Path(packet.packet_builder_rework("L-spec-0083", "fix it"))
-    t_rw83 = p_rw83.read_text()
+    try:
+        packet.packet_builder_rework("L-spec-0083", "fix it")
+        raise AssertionError("unresolvable project accepted")
+    except SystemExit as exc:
+        assert "stale-base" in str(exc), exc
+        assert not list((TMP / "packets").glob("L-spec-0083-builder-*.md"))
 finally:
     fold.subject_project = _real_subject_project434
-assert "PINNED_BASE_SHA: feed1234ab" in t_rw83, \
-    "AC10: unresolvable project/repo falls through to the existing precedence, never dies"
-assert "PINNED_BASE_SHA_EXPLICIT" not in t_rw83, \
-    "AC10: no explicit pin when the project/repo could not be resolved"
-
 # ── R7/AC11 · a landed explicit pin (base_sha_explicit=true) outlives a later
 #    PLAIN rework: extend the R3d fixture with a THIRD build-done and prove a
 #    FOURTH packet build reads Z0000003, never reverting to X0000001 ─────────
@@ -1702,6 +1708,7 @@ print(f"packet: {N} packets built, eight Blindness lists enforced")
 
 
 # L-spec-1004: verify resolves to the complete section, preserving fenced headings.
+# Extraction keeps packet.py at 1575 lines (-3 from the 1578-line base).
 assert sum(1 for _ in pathlib.Path(packet.__file__).open()) <= 1578, \
     "sweep-unblock must keep packet.py within its routing size baseline"
 for heading1004 in ("# Verification", "## Verification", "## 8. Verification", "## 9. Verification", "## 10. vErIfIcAtIoN"):
@@ -1732,11 +1739,20 @@ print("sweep-unblock AC7 fixture packet; AC13 kind compatibility/rejection ok")
 
 
 def test_verify_wrapper_base():
-    """L-spec-1044: runtime base selection across rebases and missing refs."""
+    """Captured builder/grader/reviewer baselines; other roles retain runtime behavior."""
     from types import SimpleNamespace
     import look
+    from unittest.mock import patch
 
-    with tempfile.TemporaryDirectory(dir=TMP) as td:
+    fixture_config = look.load_toml
+    def wrapper_config():
+        config = dict(fixture_config())
+        push = dict(config.get("push", {}))
+        push["main"] = dict(push.get("main", {}), **{"do-it-v2": "main", "configured-master": "master"})
+        config["push"] = push
+        return config
+
+    with tempfile.TemporaryDirectory(dir=TMP) as td, patch("look.load_toml", side_effect=wrapper_config):
         root = pathlib.Path(td)
         origin, seed, clone = (root / name for name in ("origin.git", "seed", "clone"))
         git_env = {**os.environ, "GIT_AUTHOR_NAME": "fixture", "GIT_AUTHOR_EMAIL": "fixture@example.test",
@@ -1790,11 +1806,11 @@ def test_verify_wrapper_base():
         new = git(clone, "merge-base", "HEAD", "origin/main")
         assert old != new and wrapper.read_bytes() == original
         result = run(wrapper)
-        assert result.returncode == 0 and result.stdout.splitlines() == [new, "own.txt"], result
-        print(f"verify-wrapper-base AC2 new merge-base {new}; old pin differs; diff only own.txt")
+        assert result.returncode == 0 and result.stdout.splitlines() == [old, "own.txt", "upstream.txt"], result
+        print("verify-wrapper-base AC2 builder keeps captured pin after rebase; diff includes upstream change")
         assert write(block).read_bytes() == original  # same subject, role, source and pin
         assert f"BASE_PINNED={old}\n" in wrapper.read_text()
-        print("verify-wrapper-base AC3 successful call ignores fallback")
+        print("verify-wrapper-base AC3 supported tuple uses captured pin")
 
         missing = root / "missing-origin"
         missing.mkdir()
@@ -1832,35 +1848,48 @@ def test_verify_wrapper_base():
             path = write(block)
             text = path.read_text()
             env_line = GUARDED if role in ("grader", "reviewer") else DSN_LINE
-            assert text.splitlines()[:4] == ["#!/usr/bin/env bash", "# BASE source: merge-base origin/main", "set -euo pipefail", f"BASE_PINNED={old}"]
+            assert text.splitlines()[:4] == ["#!/usr/bin/env bash", f"# BASE source: {'pinned ' + old if role in ('builder', 'grader', 'reviewer') else 'merge-base origin/main'}", "set -euo pipefail", f"BASE_PINNED={old}"]
             assert text.endswith(env_line + "\n" + block)
             assert path.read_bytes() == write(block).read_bytes() and os.access(path, os.X_OK)
-            assert run(path).stdout.splitlines() == [new, "own.txt"]
+            assert run(path).stdout.splitlines() == ([old, "own.txt", "upstream.txt"] if role in ("builder", "grader", "reviewer") else [new, "own.txt"])
             readonly = False
         print("verify-wrapper-base AC5 all roles: no pin, self-assigned BASE, legacy bare BASE")
         print("verify-wrapper-base AC6 byte-identical regeneration, verbatim blocks, DSN lines; existing waiver checks passed")
 
-        # Config fallback and a literal ref differing from project main are both intentional.
+        # Builder projects require explicit configuration; literal unrelated
+        # merge-base tuples still delegate to native git.
+        ctx.a.role = "builder"
         project = "unconfigured-project"
+        ctx.__dict__.pop("_builder_base", None)
         git(clone, "update-ref", "refs/remotes/origin/master", new)
         master_block = block.replace("origin/main", "origin/master")
-        assert write(master_block).read_text().splitlines()[1] == "# BASE source: merge-base origin/master"
+        try:
+            write(master_block)
+            raise AssertionError("unconfigured builder project accepted")
+        except SystemExit as exc:
+            assert "stale-base" in str(exc), exc
+        project = "configured-master"
+        git(clone, "branch", "master", old)
+        ctx.__dict__.pop("_builder_base", None)
+        assert write(master_block).read_text().splitlines()[1] == f"# BASE source: pinned {old}"
         project = "do-it-v2"
-        assert write(block).read_text().splitlines()[1] == "# BASE source: merge-base origin/main"
+        ctx.__dict__.pop("_builder_base", None)
+        assert write(block).read_text().splitlines()[1] == f"# BASE source: pinned {old}"
         worktree = root / "not-yet-created"
-        assert write(block).read_text().splitlines()[1] == "# BASE source: merge-base origin/main"
+        assert write(block).read_text().splitlines()[1] == f"# BASE source: pinned {old}"
         assert "origin/not-there" in write(block.replace("origin/main", "origin/not-there")).read_text()
-        print("verify-wrapper-base AC4 configured main, default master, repository fallback, literal refs")
+        print("verify-wrapper-base AC4 configured main/master, unconfigured refusal, repo fallback, literal refs")
 
         real_config = look.load_toml
         try:
             look.load_toml = lambda: {"push": {"main": {project: "main\ninjected"}}}
             before = wrapper.read_bytes()
+            ctx.__dict__.pop("_builder_base", None)
             try:
                 write(block)
                 raise AssertionError("unsafe configured main accepted")
             except SystemExit as exc:
-                assert "invalid verify main" in str(exc)
+                assert "stale-base" in str(exc)
             assert wrapper.read_bytes() == before
         finally:
             look.load_toml = real_config
