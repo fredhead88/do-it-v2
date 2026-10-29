@@ -176,17 +176,18 @@ def changed_rows(repo, sha):
 
 
 def sync_realm(repo, sha):
-    """Ship the tracked unit when it changes; otherwise restart changed Realm code."""
+    """Ship Realm changes without starting a stopped service."""
     import realm
     result = subprocess.run(['git', '-C', str(repo), 'diff-tree', '--root', '--no-commit-id',
                              '--name-only', '-r', '--diff-merges=first-parent', sha], capture_output=True, text=True, check=True)
     paths = result.stdout.splitlines()
     if 'ops/doit-realm.service' in paths:
-        realm.install_realm(repo)
+        realm.install_realm(repo, restart_running_only=True)
         return 'installed'
     if any(path.startswith('src/realm') for path in paths):
-        realm.systemctl_user('restart', 'doit-realm')
-        return 'restarted'
+        running = realm.unit_active('doit-realm')
+        realm.systemctl_user('try-restart', 'doit-realm')
+        return 'restarted' if running else 'not-running'
     return None
 
 
