@@ -50,6 +50,7 @@ case "${1:-board}" in
   machine) shift; exec python3 "$SRC/machine.py" "$@" ;;
   seat-usage) shift; exec python3 "$SRC/seat_usage.py" "$@" ;;
   cron-run) shift; exec python3 "$SRC/cron_run.py" "$@" ;;
+  ledger-rollup) shift; exec python3 "$SRC/ledger_rollup.py" "$@" ;;
   health-alarms) shift; exec python3 "$SRC/health_alarms.py" "$@" ;;
   lane-rules) shift; exec python3 "$SRC/lane_rules.py" "$@" ;;
   next) shift; exec python3 "$SRC/nextstep.py" "$@" ;;
@@ -261,6 +262,7 @@ doit — a ledger that derives state, and the guards that read it
                                           dispatches; escalate the ones that expired (L-charter-0038 R1)
   doit verify-owed [--dry-run|--preflight|--check S/C]
                                           verify owed checks or surface a plain-English operator ask
+  doit ledger-rollup [--dry-run] [--max-segment-mib N] [--min-age-hours H]  pack finished spawns
   doit test [--live]                      run hermetic checks, or only read-only live-ledger checks
   doit help
 
