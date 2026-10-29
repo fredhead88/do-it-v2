@@ -30,7 +30,7 @@ FIXTURES = ROOT / 'src/fixtures/nextstep'
 
 def event(kind, minutes=-30, subject=SID, **extra):
     return dict(type=kind, ts=(NOW + timedelta(minutes=minutes)).isoformat(),
-                subject=subject, _src=f'L-operator-fixture.jsonl:{minutes + 20000}', **({'actor': 'operator'} | extra))
+                subject=subject, _src=f'L-operator-fixture.jsonl:{minutes + 20000}', actor='operator') | extra
 
 
 def specs_for(events):
@@ -640,6 +640,249 @@ class VanishedRetryTests(unittest.TestCase):
             steps = self.steps(evs)
             self.assertFalse(any(s.item_kind == 'attempt' for s in steps))
             self.assertEqual(next(s for s in steps if s.item == SID).action, action)
+
+
+class RulingMixin:
+    setUp = NextStepTests.setUp
+    steps = NextStepTests.steps
+    one = NextStepTests.one
+
+    def ruling(self, action='close', **kw):
+        return event('decision', action=action, **kw)
+
+    def due(self, events, **kw):
+        return [s for s in self.steps(events, **kw)
+                if s.item_kind == 'spec' and s.reason.startswith('ruling-unexecuted:')]
+
+    def signed(self, ac, body):
+        payload = json.dumps(body, sort_keys=True, default=str)
+        print(json.dumps(dict(url='cli://ruling-nextstep/' + ac, status=0,
+            body_sha256=hashlib.sha256(payload.encode()).hexdigest(), body_excerpt=payload)))
+
+
+class RulingTimingTests(RulingMixin, unittest.TestCase):
+    def test_boundary_matrix(self):
+        results = []
+        for action in ('close', 'rework', 'hold', 'recut'):
+            for legacy in ({}, {'rework': 'yes'}, {'ref': 'L-operator-fixture.jsonl:19950'}) if action == 'rework' else ({},):
+                evs = [event('spec-written', -60), event('build-blocked', -50),
+                       self.ruling(action, **legacy, **({'waits_for': 'L-spec-1642'} if action == 'hold' else {}))]
+                ruling = evs[-1]
+                for seconds in (-1, 0, 1):
+                    step = self.one(evs, now=NOW + timedelta(seconds=seconds))
+                    self.assertEqual(len([s for s in self.steps(evs) if s.item == SID]), 1)
+                    if legacy:
+                        self.assertEqual((step.action, step.owner, step.trigger), ('rebuild', 'tick', ruling['_src']))
+                    elif seconds < 0:
+                        self.assertFalse(step.reason.startswith('ruling-unexecuted:'))
+                    else:
+                        self.assertEqual((step.state, step.action, step.owner, step.trigger, step.since),
+                                         ('hold', None, 'executor', ruling['_src'], ruling['ts']))
+                        self.assertEqual(step.reason, f'ruling-unexecuted: {action} ({ruling["_src"]})')
+                        self.assertEqual(step.clears, {'close': 'spec-killed', 'rework': 'rework dispatch',
+                            'hold': 'dependency-hold waits_for=L-spec-1642',
+                            'recut': 'recut resolution recorded as spec-killed'}[action])
+                    results.append(dict(action=action, legacy=legacy, age_seconds=1800+seconds, step=asdict(step)))
+        self.signed('AC1-timing', results)
+
+    def test_precedence_and_scoped_errors(self):
+        ruling = self.ruling()
+        written = event('spec-written', -60)
+        variants = [[], [event('build-started', -10, spawn='L-builder-9001')],
+                    [event('merge-gate-rework', -10, findings='ENOSPC')],
+                    [event('dependency-hold', -40, waits_for='L-spec-1642')],
+                    [event('question', -10)], [event('verdict', -10, confirmed=True)],
+                    [event('review', -10, n_blocking=0)]]
+        for extra in variants:
+            for actor in ('operator', 'spec-writer'):
+                evs = [dict(written, actor=actor), ruling, *extra]
+                self.assertEqual(len(self.due(evs)), 1)
+        for changed in [dict(ruling, ts='invalid'), dict(ruling, action='hold')]:
+            self.assertTrue(self.one([written, changed]).reason.startswith('undetermined:'))
+        malformed = deepcopy(self.rules)
+        malformed.pop('build')
+        self.assertTrue(self.one([written, ruling], rules=malformed).reason.startswith('undetermined:'))
+        conflict = [written, ruling, event('spec-killed', -20), event('shipped', -10)]
+        self.assertTrue(self.one(conflict).reason.startswith('undetermined:'))
+        self.signed('AC1-precedence', dict(variants=len(variants)*2, scoped_errors=4))
+
+
+class RulingExecutionTests(RulingMixin, unittest.TestCase):
+    def test_execution_matrix(self):
+        results = []
+        for action, kind in [('close', 'spec-killed'), ('recut', 'spec-killed'),
+                             ('hold', 'dependency-hold'), ('rework', 'build-started'),
+                             ('rework', 'spawn-started'), ('rework', 'autodispatched')]:
+            ruling = self.ruling(action, **({'waits_for': 'L-spec-1642'} if action == 'hold' else {}))
+            execution = event(kind, -20, spawn='L-builder-9001', role='builder', waits_for='L-spec-1642')
+            if kind == 'autodispatched':
+                execution.update(actor='tick', _src='L-tick-fixture.jsonl:1')
+            evs = [event('spec-written', -60), ruling]
+            for change, clears in [({}, True), ({'ref': ruling['_src']}, True),
+                                   ({'ref': 'elsewhere:1'}, False),
+                                   ({'subject': 'L-spec-9999'}, False),
+                                   ({'ts': event('x', -40)['ts']}, False)]:
+                # A terminal subject stays terminal even with an unrelated ref.
+                if kind == 'spec-killed' and (change.get('ref') == 'elsewhere:1' or 'ts' in change):
+                    continue
+                sample = evs + [dict(execution, **change)]
+                self.assertEqual(bool(self.due(sample)), not clears, (action, change))
+                results.append(dict(action=action, change=change, cleared=clears))
+            if action == 'hold':
+                self.assertTrue(self.due(evs + [dict(execution, waits_for='other')]))
+            if action == 'rework':
+                for role in ('grader', 'reviewer'):
+                    self.assertTrue(self.due(evs + [dict(execution, role=role)]))
+                self.assertTrue(self.due(evs + [dict(execution, spawn=None)]))
+        self.signed('AC2-execution', results)
+
+    def test_acceptance_correlated_across_complete_snapshot(self):
+        results = []
+        ruling = self.ruling('rework')
+        base = [event('spec-written', -60), ruling]
+        start = event('build-started', -20, spawn='L-builder-9001', role='builder')
+        failure = event('spawn-failed', -10, spawn='L-builder-9001')
+        queued = event('seat-queued', -19, subject='L-builder-9001', spawn='L-builder-9001', actor='relay')
+        claim = event('seat-claimed', -18, subject='L-builder-9001', spawn='L-builder-9001',
+                      actor='relay', _src='L-relay-fixture.jsonl:1')
+        done = event('spawn-done', -17, spawn='L-builder-9001', role='builder',
+                     actor='builder', _src='L-builder-fixture.jsonl:1')
+        for tail, cleared in [([], True), ([failure], False), ([queued, failure], False),
+                              ([claim, failure], True), ([done, failure], True),
+                              ([{k: v for k, v in claim.items() if k != 'spawn'}, failure], True),
+                              ([dict(claim, spawn='L-builder-9999'), failure], False),
+                              ([dict(done, spawn='L-builder-9999'), failure], False),
+                              ([dict(claim, _src='L-builder-forged.jsonl:1'), failure], False)]:
+            sample = base + [start] + tail
+            self.assertEqual(bool(self.due(sample)), not cleared)
+            shuffled = list(sample)
+            random.Random(72).shuffle(shuffled)
+            self.assertEqual(self.steps(sample), self.steps(shuffled))
+            results.append(dict(tail=tail, cleared=cleared))
+        for kind in ('spawn-failed', 'autodispatch-failed', 'decision'):
+            self.assertTrue(self.due(base + [event(kind, -20)]))
+        self.signed('AC2-acceptance', results)
+
+    def test_same_act_rebuild_and_refused_launch_at_threshold(self):
+        results = []
+        for legacy in ({'rework': 'yes'}, {'ref': 'L-operator-fixture.jsonl:19950'}):
+            base = [event('spec-written', -60), event('build-blocked', -50),
+                    self.ruling('rework', **legacy)]
+            refused = [event('build-started', -20, spawn='L-builder-9001'),
+                       event('seat-queued', -19, spawn='L-builder-9001'),
+                       event('spawn-failed', -18, spawn='L-builder-9001', reason='bundle-pending')]
+            for seconds in (-1, 0, 1):
+                now = NOW + timedelta(seconds=seconds)
+                eligible = self.one(base, now=now)
+                self.assertEqual((eligible.action, eligible.owner, eligible.trigger),
+                                 ('rebuild', 'tick', base[-1]['_src']))
+                rejected = self.one(base + refused, now=now)
+                self.assertEqual(rejected.reason.startswith('ruling-unexecuted:'), seconds >= 0)
+                results.append(dict(legacy=legacy, age_seconds=1800+seconds,
+                                    eligible=asdict(eligible), refused=asdict(rejected)))
+        self.signed('AC2-same-act-refusal', results)
+
+    def test_newest_actor_legacy_terminal_and_order(self):
+        base = [event('spec-written', -60), self.ruling()]
+        fresh = self.ruling('recut', minutes=-5)
+        self.assertFalse(self.due(base + [fresh]))
+        self.assertIn('recut', self.due(base + [fresh], now=NOW + timedelta(minutes=25))[0].reason)
+        self.assertTrue(self.due(base + [event('decision', -5, why='rework it')]))
+        for state in dispatch.SETTLED_STATES:
+            self.assertFalse(self.due(base, specs={SID: dict(state=state)}))
+        self.assertFalse(self.due([base[0], event('spec-killed', -50), base[1]]))
+        for changed in [dict(base[1], action='unknown'), dict(base[1], action=None),
+                        dict(base[1], _src='L-builder-forged.jsonl:1', actor='thinker')]:
+            self.assertFalse(self.due([base[0], changed]))
+        # Same source append order decides equal timestamps, independent of input order.
+        ruling = self.ruling('hold', waits_for='L-spec-1642', _src='L-operator-fixture.jsonl:2')
+        for line, cleared in [(1, False), (3, True)]:
+            done = event('dependency-hold', waits_for='L-spec-1642', _src=f'L-operator-fixture.jsonl:{line}')
+            sample = [base[0], done, ruling]
+            self.assertEqual(bool(self.due(sample)), not cleared)
+            self.assertEqual(self.steps(sample), self.steps(list(reversed(sample))))
+        self.signed('AC2-order', dict(newest_clock=True, provenance=True, canonical_order=True))
+
+
+class RulingReplayTests(RulingMixin, unittest.TestCase):
+    def test_six_redacted_replays_and_adapters(self):
+        import tick
+        replayed = []
+        for sid, line, action in [('1555', 9044, 'close'), ('1557', 9093, 'close'),
+                                  ('1660', 9140, 'close'), ('1745', 9640, 'rework'),
+                                  ('1743', 9684, 'rework'), ('1641', 9848, 'hold')]:
+            subject = 'L-spec-' + sid
+            ruling = self.ruling(action, subject=subject, actor='thinker',
+                _src=f'L-thinker-0004.jsonl:{line}', **({'waits_for': 'L-spec-1642'} if action == 'hold' else {}))
+            evs = [event('spec-written', -60, subject=subject), ruling]
+            specs = specs_for(evs)
+            original = deepcopy((evs, specs, self.rules))
+            step = self.steps(evs)[0]
+            self.assertEqual(step.owner, 'executor')
+            self.assertEqual(ns.step_for(evs, specs, subject, NOW, self.rules), step)
+            self.assertEqual(ns.flow_counts(evs, specs, NOW, self.rules)['planned'], 1)
+            self.assertEqual(fold.step_row(step, self.rules, NOW)['spec'], subject)
+            self.assertEqual(tick._steps(evs, specs, NOW), [step])
+            self.assertFalse([s for s in tick._steps(evs, specs, NOW) if s.state == 'action' and s.owner == 'tick'])
+            execution = event({'close': 'spec-killed', 'hold': 'dependency-hold', 'rework': 'build-started'}[action],
+                              -20, subject=subject, waits_for='L-spec-1642', spawn='L-builder-9001', role='builder')
+            after = self.steps(evs + [execution], specs={subject: dict(
+                state='killed' if action == 'close' else 'written')})
+            self.assertFalse(any(s.reason.startswith('ruling-unexecuted:') for s in after))
+            if action == 'close':
+                self.assertFalse(any(s.item == subject for s in after))
+            self.assertEqual((evs, specs, self.rules), original)
+            replayed.append(dict(subject=subject, original_ref=ruling['_src'], action=action,
+                                 before=asdict(step), after=[asdict(s) for s in after]))
+        self.signed('AC3-replays', replayed)
+
+    def test_cli_readonly(self):
+        with tempfile.TemporaryDirectory(prefix='ruling-cli-') as directory:
+            root = Path(directory)
+            (root/'events').mkdir()
+            events = [event('spec-written', -60), self.ruling()]
+            path = root/'events/L-operator-fixture.jsonl'
+            path.write_text(''.join(json.dumps(e)+'\n' for e in events))
+            before = {p.name: p.read_bytes() for p in (root/'events').iterdir()}
+            env = dict(os.environ, DOIT_ROOT=str(root), PYTHONDONTWRITEBYTECODE='1')
+            for key in ('DOIT_LEDGER_FILE', 'DOIT_LANE_RULES', 'DOIT_PROJECT'):
+                env.pop(key, None)
+            outputs = []
+            for args in [('--json',), (SID,), ()]:
+                result = subprocess.run([str(ROOT/'doit'), 'next', *args], env=env, text=True, capture_output=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                if '--json' in args:
+                    obj = json.loads(result.stdout)
+                    self.assertEqual(set(obj), {'counts', 'steps'})
+                    self.assertEqual(set(obj['steps'][0]), KEYS)
+                    self.assertEqual(obj['steps'][0]['owner'], 'executor')
+                self.assertIn('ruling-unexecuted: close', result.stdout)
+                outputs.append(result.stdout)
+            after = {p.name: p.read_bytes() for p in (root/'events').iterdir()}
+            self.assertEqual(before, after)
+            self.signed('AC3-cli', dict(outputs=outputs, unchanged_bytes=True,
+                event_sha256=hashlib.sha256(path.read_bytes()).hexdigest()))
+
+
+class RulingConventionTests(RulingMixin, unittest.TestCase):
+    def test_sd10_contract(self):
+        text = (ROOT/'agents/thinker.md').read_text()
+        base = (ROOT/'agents/relay.md').read_text()
+        marker = '## Lessons'
+        self.assertEqual(text[text.index(marker):], base[base.index(marker):])
+        headings = [line for line in text.splitlines() if line.startswith('## ')]
+        self.assertTrue(headings[-1].startswith(marker))
+        convention = text[text.index('## SD10'):text.index(marker)]
+        for phrase in ['action=close|rework|hold|recut', 'waits_for=', '30 minutes', 'executor',
+                       'spec-killed', 'dependency-hold', 'rework dispatch', 'same-act',
+                       'action-less', 'filename', 'original', 'still open', 'settled']:
+            self.assertIn(phrase, convention)
+        for number in ('1555', '1557', '1660', '1745', '1743', '1641', '1560', '1730', '1672', '1768'):
+            self.assertIn('L-spec-' + number, convention)
+        for phrase in ('doit alloc charter', 'doit think --land', 'doit think --discard', 'review_path',
+                       'Covers:', 'You spawn nothing', 'NEVER deletes', 'blocked_me'):
+            self.assertIn(phrase, text)
+        self.signed('AC4-convention', dict(shared_tail_unchanged=True, legacy_subjects=10, spawns_nothing=True))
 
 
 if __name__ == '__main__':

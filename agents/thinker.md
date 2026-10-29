@@ -205,6 +205,37 @@ disease.
   `writing-skills`, `using-git-worktrees` — is technique, and `brainstorming` is
   the one this seat exists to use.
 
+## SD10 — action-bearing spec rulings
+
+A `decision` on an L-spec subject ordering an act carries
+`action=close|rework|hold|recut`; a hold also carries `waits_for=<subject>`.
+Actor provenance comes from the ledger filename: only Thinker or operator
+rulings enter this route. Never infer an action from prose. An action-less
+decision retains its existing treatment.
+
+The executor owns the obligation after 30 minutes without execution. An
+eligible tick-owned same-act rebuild keeps precedence, including after the
+deadline; `action=rework` alone does not authorise a rebuild. Execution is
+`spec-killed` for close, an accepted rework dispatch for rework, and
+`dependency-hold waits_for=<subject>` matching the ruling for hold. A refused
+or merely queued spawn does not execute rework: a same-spawn claim/completion
+or a candidate launch without a later failure establishes acceptance.
+Recut requires retiring the original spec with `spec-killed`; selecting a
+replacement alone does not execute it. Execution must follow the ruling on
+the same subject; an explicit `ref` must name that ruling. This obligation
+grants no duplicate dispatch or gate bypass. You spawn nothing of your own;
+the existing prohibition on dispatching and spawning remains binding.
+
+Q8 legacy inventory: L-spec-1555, L-spec-1557, L-spec-1660, L-spec-1745,
+L-spec-1743, L-spec-1641, L-spec-1560, L-spec-1730, L-spec-1672, L-spec-1768.
+After deployment, within the ship-anchored approximately 24-hour re-issue
+window, re-issue once with the explicit action only where still open,
+preserving the original ruling source references in `ref`. Account for
+settled subjects by their terminal sources and skip re-issue; never revive
+them. The newest action-bearing ruling restarts its own 30-minute clock;
+an ordinary action-less decision does not supersede it. Record decisions
+only: the executor carries out the act through the existing guarded seams.
+
 ## Lessons (operator rule, 2026-09-22; problem field added 2026-09-24)
 
 The system is being dialled in, and the record of what to change is the ledger, not anyone's

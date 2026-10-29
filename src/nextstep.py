@@ -247,8 +247,9 @@ def _rebuild(c):
     trigger = max(decisions + rewrites + drops, key=lambda e: _time(e['ts']), default=None)
     dispatched = [e for e in evs if _builder_dispatch(e) and not _refusal(e)]
     if trigger and (not blocked or _time(trigger['ts']) > _time(blocked['ts'])):
-        return _retry_result(c, trigger, 'builder', dispatched=(
+        result = _retry_result(c, trigger, 'builder', dispatched=(
             _after(dispatched, trigger, DISPATCH_EVENTS) or _after(evs, trigger, {'build-started'})))
+        return dict(result, trigger=_source(trigger)) if result else None
 
 
 
@@ -502,6 +503,71 @@ def _source(e):
     return e.get('_src') or e.get('src')
 
 
+def _admitted_actor(e):
+    """Rulings and their evidence use ledger provenance, never payload identity."""
+    source = _source(e)
+    actor = fold.actor_of(source.rsplit(':', 1)[0]) if source else e.get('actor')
+    return actor if fold.admits(e, actor) is None else None
+
+
+def _accepted_start(e, spawn_events):
+    if (e.get('type') not in {'build-started', 'spawn-started', 'autodispatched'}
+            or (e.get('role') or fold.actor_of(str(e.get('spawn') or ''))
+                or 'builder') != 'builder'
+            or _admitted_actor(e) is None or not e.get('spawn')):
+        return False
+    history = spawn_events.get(e['spawn'], [])
+    positive = any((x['type'] == 'seat-claimed' and _admitted_actor(x) == 'relay'
+                    or x['type'] == 'spawn-done' and _admitted_actor(x) == 'builder'
+                    and x.get('role', 'builder') == 'builder') for x in history)
+    later = history[history.index(e) + 1:] if e in history else history
+    return positive or not any(x['type'] == 'spawn-failed'
+                              and _admitted_actor(x) is not None for x in later)
+
+
+def _ruling_step(c, spawn_events, owners):
+    """SD10's executor obligation; completion is read from this snapshot only."""
+    sid, evs = c['sid'], c['evs']
+    if not re.fullmatch(r'L-spec-\d{4}', sid) or _terminal(evs, c['spec']):
+        return None
+    ruling = next((e for e in reversed(evs) if e['type'] == 'decision'
+                   and e.get('action') in ('close', 'rework', 'hold', 'recut')
+                   and _admitted_actor(e) in {'thinker', 'operator'}), None)
+    if ruling is None:
+        return None
+    action, source = ruling['action'], _source(ruling)
+    if not source or action == 'hold' and (not isinstance(ruling.get('waits_for'), str)
+                                         or not ruling['waits_for'].strip()):
+        return _hold(sid, 'spec', _stage(evs), ruling,
+                     'undetermined: ruling needs ' + ('source' if not source else 'waits_for'),
+                     'valid action-bearing decision')
+    for e in evs[evs.index(ruling) + 1:]:
+        if ('ref' in e and e['ref'] != source) or _admitted_actor(e) is None:
+            continue
+        if (action in {'close', 'recut'} and e['type'] == 'spec-killed'
+                or action == 'hold' and e['type'] == 'dependency-hold'
+                and e.get('waits_for') == ruling['waits_for']
+                or action == 'rework' and _accepted_start(e, spawn_events)):
+            return None
+    if (c['now'] - _time(ruling['ts'])).total_seconds() < 1800:
+        return None
+    # Preserve only a launch that is eligible now and executes this exact ruling.
+    # An action field alone never supplies a legacy rebuild trigger.
+    if action == 'rework' and sid not in c['busy'] and not c['wave']:
+        rebuild = _rebuild(c)
+        failure, classification = _failure(evs, c['table'])
+        if (rebuild and rebuild.get('trigger') == source and owners['rebuild'] == 'tick'
+                and dispatch.unaudited(evs) is None and not _unanswered(evs, c['events'])
+                and not (failure and classification != 'work')):
+            return Step(sid, 'spec', 'building', 'action', 'rebuild', 'tick', source,
+                        rebuild['reason'], None, rebuild['since'])
+    clears = {'close': 'spec-killed', 'rework': 'rework dispatch',
+              'hold': 'dependency-hold waits_for=' + str(ruling.get('waits_for')),
+              'recut': 'recut resolution recorded as spec-killed'}[action]
+    return _hold(sid, 'spec', _stage(evs), ruling,
+                 f'ruling-unexecuted: {action} ({source})', clears)
+
+
 def _snapshot(events, specs):
     """Validate by subject before passing anything to clock-fallback helpers."""
     events = list(events)
@@ -607,7 +673,9 @@ def _choose(c, rows, owners):
             return _hold(sid, 'spec', stage, trigger, row['reason'], row['clears'],
                          row['retry_owner'], row['since'])
         name = row['name']
-        trigger = next((e for e in reversed(evs) if e['ts'] == row['since']), {})
+        trigger = next((e for e in reversed(evs)
+                        if (_source(e) == row['trigger'] if row.get('trigger')
+                            else e['ts'] == row['since'])), {})
         return Step(sid, 'spec', ACTION_STAGES[name], 'action', name, owners[name],
                     _source(trigger), row.get('reason', 'condition met'), None, row['since'])
     for row in rows:
@@ -637,11 +705,12 @@ def next_steps(events, specs, now, rules, waves=None):
         ACTIONS.update(owners)
     except (ValueError, TypeError, KeyError) as exc:
         rule_error, owners = str(exc), {}
-    steps, attempts = [], {}
+    steps, attempts, spawn_events = [], {}, {}
     for e in events:
-        spawn = e.get('spawn')
+        spawn = e.get('spawn') or (e.get('subject') if e['type'] == 'seat-claimed' else None)
         if not spawn:
             continue
+        spawn_events.setdefault(spawn, []).append(e)
         if e['type'] in {'spawn-started', 'build-started'}:
             attempts.setdefault(spawn, e)
         elif e['type'] in {'spawn-done', 'spawn-failed', 'spawn-stale'}:
@@ -699,6 +768,15 @@ def next_steps(events, specs, now, rules, waves=None):
                                  str(check['due_at'] or 'dated owed check'), 'sweeper', since)
                 steps.append(step)
             continue
+        c = dict(sid=sid, spec=spec, specs=specs, events=events, evs=evs,
+                 by_subject=by, now=now, table=rules, busy=busy, live=busy,
+                 capabilities=capabilities, memo={}, acting_rows=rows)
+        c['dependency'] = autodispatch.held_by_dependency(evs, events, shipped=shipped)
+        c['wave'] = _wave(sid, evs, by, specs, waves)
+        ruling_step = _ruling_step(c, spawn_events, owners)
+        if ruling_step is not None:
+            steps.append(ruling_step)
+            continue
         if state == 'written' and dispatch.unaudited(evs) is not None:
             questions = _unanswered(evs, events)
             if questions:
@@ -749,11 +827,6 @@ def next_steps(events, specs, now, rules, waves=None):
             steps.append(_hold(sid, 'spec', stage, attempts[spawn], 'in flight: ' + spawn,
                                spawn + ' spawn-done/spawn-failed', 'tick'))
             continue
-        c = dict(sid=sid, spec=spec, specs=specs, events=events, evs=evs,
-                 by_subject=by, now=now, table=rules, busy=busy, live=busy,
-                 capabilities=capabilities, memo={}, acting_rows=rows)
-        c['dependency'] = autodispatch.held_by_dependency(evs, events, shipped=shipped)
-        c['wave'] = _wave(sid, evs, by, specs, waves)
         contexts.append(c)
     for diagnostic in (False, True):
         for c in contexts:
