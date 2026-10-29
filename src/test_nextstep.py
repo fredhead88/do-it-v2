@@ -885,5 +885,165 @@ class RulingConventionTests(RulingMixin, unittest.TestCase):
         self.signed('AC4-convention', dict(shared_tail_unchanged=True, legacy_subjects=10, spawns_nothing=True))
 
 
+class NoSilentUndeterminedTests(unittest.TestCase):
+    setUp = NextStepTests.setUp
+    steps = NextStepTests.steps
+    one = NextStepTests.one
+    signed = AuditStepTests.signed
+    diagnostic = 'packet: incomplete criterion AC6 from /home/albert/.do-it/content/L-spec-1706.md\n'
+
+    def built(self):
+        return [event('spec-written', -90), event('build-done', -80, actor='builder', status='DONE')]
+
+    def context(self, events):
+        return dict(evs=events, spec=dict(state='graded'), dependency=False,
+                    capabilities={}, sid=SID)
+
+    def test_packet_classification(self):
+        positives = [self.diagnostic, self.diagnostic.rstrip('\n'),
+                     'packet: incomplete criterion AC6 from spec.md\n',
+                     'packet: incomplete criterion AC6 from spec.md',
+                     self.diagnostic.replace('AC6', 'AC42')]
+        for text in positives:
+            with self.subTest(text=text):
+                self.assertEqual(ns.classify_failure(text, 1), 'spec-defect')
+                self.assertEqual(ns.classify_failure(text, None), 'unknown')
+                for other in ('ENOSPC', 'FAILED', 'ENOSPC\nAssertionError'):
+                    self.assertEqual(ns.classify_failure(text + '\n' + other, 1), 'unknown')
+        for text in ('incomplete criterion', 'packet: unrelated error', '',
+                     'mentioned packet: incomplete criterion AC6 from spec.md',
+                     'packet: incomplete criterion AC6',
+                     'packet: incomplete criterion AC6 from '):
+            self.assertEqual(ns.classify_failure(text, 1), 'unknown')
+        for text, code, expected in (('ENOSPC', 1, 'infra'), ('FAILED', 1, 'work'),
+                                     ('ENOSPC\nFAILED', 1, 'unknown'), ('', 124, 'infra'),
+                                     ('invalid_json_schema', 1, 'infra'),
+                                     ('ledger cache: lock not acquired within 120s', 1, 'infra')):
+            self.assertEqual(ns.classify_failure(text, code), expected)
+        self.signed('L-spec-1853/AC1', dict(positive_classes=[ns.classify_failure(t, 1) for t in positives],
+                                         conservative_mixed_evidence=True))
+
+    def test_spec_defect_hold_lifecycle(self):
+        for field in ('findings', 'why', 'error', 'reason'):
+            failure = event('autodispatch-failed', -60, **{field: self.diagnostic})
+            events = self.built() + [failure]
+            with self.subTest(field=field):
+                self.assertEqual(ns._failure(events, self.rules), (failure, 'spec-defect'))
+                step = ns.step_for(events, specs_for(events), SID, NOW, self.rules)
+                self.assertEqual(self.steps(events), [step])
+                self.assertEqual((step.state, step.action, step.owner), ('hold', None, 'executor'))
+                self.assertTrue(step.reason.startswith('spec-defect:'))
+                self.assertIn('incomplete criterion AC6', step.reason)
+                self.assertRegex(step.clears, 'spec.*(amend|rewrite)')
+                self.assertIn('executor', step.clears)
+                self.assertIn('reconsider', step.clears)
+                self.assertEqual((step.trigger, step.since), (failure['_src'], failure['ts']))
+                self.assertEqual(step, self.one(events, now=NOW + timedelta(days=1)))
+                self.assertEqual(step, self.one(events + [event('evidence-bundle', -50)]))
+                for kind in ('spec-written', 'decision'):
+                    cleared = events + [event(kind, -40, actor='executor')]
+                    self.assertEqual(ns._failure(cleared, self.rules), (None, None))
+                    self.assertEqual(self.one(cleared).action, 'grade')
+                # Diagnostic holds precede questions, busy attempts, and rework.
+                for extra in (event('question', -55),
+                              event('autodispatched', -55, role='builder'),
+                              event('spawn-started', -70, spawn='L-builder-9001', role='builder')):
+                    self.assertEqual(self.one(events + [extra]), step)
+                for prefix in ns.NOT_READY_PREFIXES:
+                    refused = event('spawn-failed', -50, reason=prefix + ': fixture')
+                    self.assertEqual(self.one(events + [refused]), step)
+        self.signed('L-spec-1853/AC2', asdict(step))
+
+    def test_stale_gate_review_and_controls(self):
+        original = self.built() + [event('verdict', -70, confirmed=True),
+                                  event('review', -60, n_blocking=0),
+                                  event('merge-gate-clean', -50)]
+        for kind in ('verdict', 'cannot-assess'):
+            judgment = event(kind, -40, **({'confirmed': True} if kind == 'verdict' else {}))
+            events = original + [judgment]
+            with self.subTest(kind=kind):
+                self.assertIsNone(ns._enqueue(self.context(events)))
+                step = ns.step_for(events, specs_for(events), SID, NOW, self.rules)
+                self.assertEqual(self.steps(events), [step])
+                self.assertEqual((step.state, step.action, step.owner), ('action', 'review', 'tick'))
+                self.assertEqual((step.trigger, step.since), (judgment['_src'], judgment['ts']))
+                no_gate = [e for e in events if e['type'] != 'merge-gate-clean']
+                self.assertEqual(self.one(no_gate).action, 'review')
+                # No intervening build: the old gate cannot authorize this review.
+                reviewed = events + [event('autodispatched', -30, role='reviewer'),
+                                     event('review', -20, n_blocking=0)]
+                self.assertNotIn('confirmed', reviewed[-1])
+                self.assertIsNone(ns._enqueue(self.context(reviewed)))
+                self.assertEqual(ns._gate(self.context(reviewed))['since'], reviewed[-1]['ts'])
+                gate_step = self.one(reviewed)
+                self.assertEqual(gate_step.action, 'gate')
+                self.assertEqual((gate_step.trigger, gate_step.since),
+                                 (reviewed[-1]['_src'], reviewed[-1]['ts']))
+                current = reviewed + [event('merge-gate-clean', -10)]
+                self.assertEqual(ns._enqueue(self.context(current))['since'], reviewed[-1]['ts'])
+                self.assertEqual(self.one(current).action, 'enqueue')
+                for terminal in ('queue-add', 'window-dropped', 'merge-conflict', 'shipped'):
+                    suppressed = current + [event(terminal, -5, project='fixture', branch='fixture')]
+                    self.assertIsNone(ns._enqueue(self.context(suppressed)))
+                    self.assertFalse(any(s.action == 'enqueue' for s in self.steps(suppressed)))
+                self.signed('L-spec-1853/AC3-' + kind, dict(review=asdict(step), gate=asdict(gate_step),
+                                                         enqueue=asdict(self.one(current))))
+        negative = original + [event('verdict', -40, confirmed=False)]
+        self.assertIsNone(ns._enqueue(self.context(negative)))
+        self.assertNotEqual(self.one(negative).action, 'enqueue')
+        for gate_time in (-40, -30):
+            malformed = self.built() + [event('verdict', -40, confirmed=True),
+                                        event('merge-gate-clean', gate_time)]
+            with self.subTest(gate_time=gate_time):
+                # Equal-time gates remain current; both inputs lack a clean review.
+                with self.assertRaisesRegex(ValueError, 'clean review timestamp'):
+                    ns._enqueue(self.context(malformed))
+                self.assertTrue(self.one(malformed).reason.startswith('undetermined:'))
+        # A gate that predates its clean review cannot authorize that review.
+        late_review = original + [event('review', -20, n_blocking=0)]
+        self.assertIsNone(ns._enqueue(self.context(late_review)))
+
+    def test_compatibility_and_purity(self):
+        import grading_env
+        import tick
+        rules = self.rules
+        events = self.built() + [event('autodispatch-failed', -60, error=self.diagnostic + '\x1b\n')]
+        review_events = self.built() + [event('verdict', -70, confirmed=True),
+                                       event('review', -60, n_blocking=0),
+                                       event('merge-gate-clean', -50),
+                                       event('cannot-assess', -40)]
+        specs = specs_for(events)
+        originals = deepcopy((events, review_events, specs, rules))
+        with ExitStack() as stack:
+            for hook in ('builtins.open', 'io.open', 'pathlib.Path.open', 'pathlib.Path.write_text',
+                         'subprocess.run', 'subprocess.Popen', 'dispatch.emit', 'fold.read_events',
+                         'time.time'):
+                stack.enter_context(patch(hook, side_effect=AssertionError(hook)))
+            stack.enter_context(patch.object(tick, 'launch', side_effect=AssertionError('launch')))
+            self.assertEqual(grading_env.failure_kind(self.diagnostic), 'unknown')
+            held = ns.step_for(events, specs, SID, NOW, rules)
+            review = ns.step_for(review_events, specs, SID, NOW, rules)
+            self.assertEqual((held.owner, held.action), ('executor', None))
+            self.assertEqual(review.action, 'review')
+            self.assertEqual(set(asdict(held)), KEYS)
+            for invalid in (False, '0', 0.0, None):
+                malformed = review_events + [event('review', -20, n_blocking=invalid)]
+                self.assertIsNone(ns._clean_review(self.context(malformed)))
+            for kind in ('rejected-criterion', 'must-fix'):
+                rejected = review_events + [event('review', -20, n_blocking=0),
+                                             event(kind, -10, criterion='AC1')]
+                self.assertIsNone(ns._clean_review(self.context(rejected)))
+            self.assertNotIn('\x1b', ns._clean(held.reason))
+            self.assertNotIn('\n', ns._clean(held.reason))
+            self.assertEqual(json.loads(json.dumps(asdict(held))), asdict(held))
+        # The real launch guard must return before any dispatcher or ledger access.
+        with patch.object(dispatch, 'emit', side_effect=AssertionError('emit')), \
+                patch.object(fold, 'read_events', side_effect=AssertionError('read')):
+            self.assertIsNone(tick.launch(held, dispatcher=lambda argv: self.fail('dispatch')))
+        self.assertEqual((events, review_events, specs, rules), originals)
+        self.signed('L-spec-1853/AC4', dict(grading_failure_kind='unknown', pure=True,
+                                         hold=asdict(held), review=asdict(review)))
+
+
 if __name__ == '__main__':
     unittest.main()

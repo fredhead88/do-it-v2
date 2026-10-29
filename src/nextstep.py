@@ -72,6 +72,8 @@ SCHEMA_REJECTION_RE = re.compile(
     r'\binvalid_json_schema\b|Invalid schema for response_format|'
     r'\b(?:schema|response_format)\b[^\r\n]*not permitted|'
     r'not permitted[^\r\n]*\b(?:schema|response_format)\b', re.I)
+PACKET_INCOMPLETE_RE = re.compile(
+    r'^packet: incomplete criterion [A-Za-z][A-Za-z0-9_.-]* from [^\s\r\n][^\r\n]*$', re.M)
 
 
 def classify_failure(text, exit_code, rules=None):
@@ -89,7 +91,10 @@ def classify_failure(text, exit_code, rules=None):
         r'Connection reset by peer|Connection refused|at capacity|overloaded|\bHTTP\s+429\b',
         text, re.I) or SCHEMA_REJECTION_RE.search(text))
     work = bool(re.search(r'\bFAILED\b|\bAssertionError\b', text))
-    return 'unknown' if infra == work else 'infra' if infra else 'work'
+    defect = bool(PACKET_INCOMPLETE_RE.search(text))
+    classes = [name for name, present in (('infra', infra), ('work', work), ('spec-defect', defect))
+               if present]
+    return classes[0] if len(classes) == 1 else 'unknown'
 
 
 def _time(value):
@@ -399,7 +404,10 @@ def _gate(c):
     if not trigger or _close(c) or _rebuild(c) or _regrade(c):
         return None
     build = _latest(c['evs'], {'build-done'})
-    anchor = build or trigger
+    judgment = _latest(c['evs'], {'verdict', 'cannot-assess'})
+    # Regrades start a new gate cycle even when the build is unchanged.
+    anchor = max((e for e in (build, judgment) if e),
+                 key=lambda e: _time(e['ts']), default=trigger)
     if any(str(e.get('type', '')).startswith('merge-gate-') and _time(e['ts']) >= _time(anchor['ts']) for e in c['evs']):
         return None
     if _after(c['evs'], trigger, {'queue-add'}):
@@ -412,11 +420,16 @@ def _enqueue(c):
     trigger = _latest(c['evs'], {'merge-gate-clean'})
     if not trigger or _close(c) or _rebuild(c) or _regrade(c):
         return None
+    judgment = _latest(c['evs'], {'verdict', 'cannot-assess'})
+    if judgment and _time(trigger['ts']) < _time(judgment['ts']):
+        return None
     if _after(c['evs'], trigger, {'queue-add', 'shipped', 'window-dropped', 'merge-conflict'}):
         return None
     review = _clean_review(c)
     if review is None:
         raise ValueError('clean gate has no clean review timestamp')
+    if _time(trigger['ts']) < _time(review['ts']):
+        return None
     return _result(review)
 
 
@@ -645,6 +658,10 @@ def _wave(sid, evs, by, specs, waves):
     return None
 
 
+def _failure_text(event):
+    return '\n'.join(str(event.get(k) or '') for k in ('findings', 'why', 'error', 'reason'))
+
+
 def _failure(evs, rules):
     latest = next((e for e in reversed(evs) if e['type'] in FAILURES | RETRIES
                    and not (e['type'] == 'spawn-failed'
@@ -652,7 +669,7 @@ def _failure(evs, rules):
     if latest and latest['type'] in FAILURES:
         if _vanished(latest):
             return latest, 'retry'
-        text = '\n'.join(str(latest.get(k) or '') for k in ('findings', 'why', 'error', 'reason'))
+        text = _failure_text(latest)
         return latest, classify_failure(text, latest.get('exit_code', 1), rules)
     return None, None
 
@@ -811,6 +828,11 @@ def next_steps(events, specs, now, rules, waves=None):
                                    'executor' if exhausted else 'tick', audit['since']))
             continue
         failure, classification = _failure(evs, rules)
+        if classification == 'spec-defect':
+            diagnostic = PACKET_INCOMPLETE_RE.search(_failure_text(failure)).group(0)
+            steps.append(_hold(sid, 'spec', stage, failure, 'spec-defect: ' + diagnostic,
+                               'spec amendment/rewrite and executor reconsideration'))
+            continue
         # Structured reconciliation retries continue through original role/trigger
         # predicates, which own bounds, completion and stronger lifecycle holds.
         if failure and classification not in {'work', 'retry'}:
