@@ -1126,7 +1126,188 @@ def advance(repo, main, old, new, window, kept, dropped, runs, urls, entries, da
        **({k: minutes[k] for k in ("selfhosted_minutes", "minutes_source")} if minutes is not None else {}))
 
 
-def bisect_window(window, live, prepare, judge, drop, conflict):
+def _local_selector(node):
+    if not isinstance(node, str) or "::" not in node:
+        return False
+    path, selector = node.split("::", 1)
+    return (safe_path(path) and re.fullmatch(r"[\w./-]+\.py", path) is not None
+            and all(part not in ("", ".", "..") for part in path.split("/"))
+            and re.fullmatch(r"[\w][\w. :\[\],=+/-]*", selector) is not None
+            and all(part and not part.startswith("-") for part in selector.split("::")))
+
+
+def _local_command(python, ids):
+    """Report out of the runner auxiliary directory before its cleanup.
+
+    Collection establishes selector absence independently of a failing call.
+    Candidate output and pytest exit status alone are never ownership evidence.
+    """
+    import base_red
+    script = '''
+import json, os, pathlib, subprocess, sys
+aux = pathlib.Path(os.environ["HOME"]).parent
+module = aux / "doit_recheck_report.py"
+module.write_text(PLUGIN)
+report = aux / "local-recheck.json"
+env = dict(os.environ)
+env.update(DOIT_RECHECK_REPORT=str(report), PYTEST_DISABLE_PLUGIN_AUTOLOAD="1",
+           PYTHONPATH=str(aux) + os.pathsep + str(pathlib.Path.cwd()))
+env.pop("PYTEST_ADDOPTS", None)
+env.pop("PYTEST_PLUGINS", None)
+argv = [sys.executable, "-m", "pytest", "--noconftest", "-c", os.devnull,
+        "--rootdir", str(pathlib.Path.cwd()), "-o", "addopts=", "-p", "doit_recheck_report", "-q"]
+collect = subprocess.run(argv + ["--collect-only"] + list(dict.fromkeys(n.split("::", 1)[0] for n in IDS)), env=env)
+inspection = json.loads(report.read_text())
+report.unlink()
+present = [n for n in IDS if n in inspection["collected"]]
+code, phases = 0, {"collected": [], "reports": {}, "collection_error": False}
+if collect.returncode in (0, 5) and not inspection["collection_error"] and present:
+    run = subprocess.run(argv + present, env=env)
+    code, phases = run.returncode, json.loads(report.read_text())
+payload = dict(ids=IDS, inspection=inspection, collection_exit=collect.returncode,
+               exit=code, phases=phases)
+print("DOIT_LOCAL_RECHECK=" + json.dumps(payload, separators=(",", ":")), flush=True)
+'''
+    script = "PLUGIN = " + repr(base_red._RECHECK_PLUGIN) + "\nIDS = " + repr(ids) + "\n" + script
+    return shlex.join([python, "-c", script])
+
+
+def _local_phases(rows, ids):
+    if len(rows) != 1 or rows[0].get("exit") != 0:
+        raise ValueError("runner did not complete")
+    lines = pathlib.Path(rows[0]["tail"]).read_text().splitlines()
+    reports = [line.removeprefix("DOIT_LOCAL_RECHECK=") for line in lines
+               if line.startswith("DOIT_LOCAL_RECHECK=")]
+    if len(reports) != 1:
+        raise ValueError("missing or truncated phase report")
+    data = json.loads(reports[0])
+    inspection, phases = data["inspection"], data["phases"]
+    if (data["ids"] != ids or type(data["collection_exit"]) is not int
+            or type(data["exit"]) is not int or data["collection_exit"] not in (0, 5)
+            or data["exit"] not in (0, 1) or inspection["collection_error"] is not False
+            or phases["collection_error"] is not False):
+        raise ValueError("uncertain run")
+    collected = inspection["collected"]
+    if not isinstance(collected, list):
+        raise ValueError("malformed collection")
+    present = [n for n in ids if n in collected]
+    if set(phases["collected"]) != set(present) or set(phases["reports"]) != set(present):
+        raise ValueError("unexpected or missing runtime selection")
+    states = {}
+    for node in ids:
+        if node not in collected:
+            states[node] = "absent"
+            continue
+        phase = phases["reports"].get(node, {})
+        if (node not in phases["collected"] or phase.get("setup") != "passed"
+                or phase.get("teardown") != "passed" or phase.get("call") not in ("passed", "failed")):
+            raise ValueError("uncertain test phases")
+        states[node] = "red" if phase["call"] == "failed" else "green"
+    if data["exit"] != int("red" in states.values()):
+        raise ValueError("inconsistent process and phase results")
+    return states
+
+
+def local_owners(repo, project, entries, new_ids, *, window_base=None, deadline=None, cache=None):
+    """Bounded sequential member/base proof, using the installed runner only.
+
+    Any uncertainty disqualifies the whole member, without disqualifying a
+    separately determined sibling. The cache belongs to one window attempt.
+    """
+    if not entries or not new_ids:
+        return {}
+    import build_runner
+    import grading_env
+    import loadgate
+    if not all(isinstance(n, str) for n in new_ids):
+        return {}
+    ids = list(dict.fromkeys(new_ids))
+    if not all(_local_selector(n) for n in ids):
+        return {}
+    try:
+        row = grading_env._project_row(project)
+        if not row or not row.get("venv"):
+            return {}
+        # Do not change the runner's project provisioning or temporary env.
+        python = str(pathlib.Path(row["venv"]) / "bin/python")
+        cache = {} if cache is None else cache
+        result = {}
+        for spec, branch, supplied_sha in entries:
+            if not isinstance(spec, str) or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", spec) is None:
+                continue  # runner directory names must stay inside its scratch root
+            until = min(time.monotonic() + 300, deadline if deadline is not None else float("inf"))
+            env = grading_env._clean_env()
+            def inspect(*args):
+                return build_runner._required(["git", "-C", str(repo), *args], phase="local object inspection",
+                                               env=env, deadline=until)
+            try:
+                inspect("rev-parse", "--verify", "--quiet", f"refs/heads/{branch}^{{commit}}")
+                sha = build_runner._resolve(repo, supplied_sha, env, until)
+                base = build_runner._resolve(repo, window_base, env, until)
+                baseline = inspect("merge-base", sha, base)
+                baseline = build_runner._resolve(repo, baseline, env, until)
+                files = list(dict.fromkeys(n.split("::", 1)[0] for n in ids))
+                # Member absence is not ownership; short circuit before clone.
+                for path in files:
+                    inspect("cat-file", "-e", f"{sha}:{path}")
+
+                def snapshot(revision, *, member):
+                    key = (revision, tuple(sorted(ids)))
+                    if key in cache:
+                        value = cache[key]
+                        if value is None or (member and "absent" in value.values()):
+                            raise ValueError("previous attempt undetermined")
+                        return value
+                    cache[key] = None  # includes denied, failed and expired attempts
+                    present, states = [], {}
+                    for path in files:
+                        # A successful tree inspection is required for absence.
+                        listing = inspect("ls-tree", "-z", revision, "--", path)
+                        if listing:
+                            if not re.fullmatch(r"100(?:644|755) blob [0-9a-f]{40}\t[^\x00]+\x00", listing):
+                                raise ValueError("selected test is not a regular file")
+                            inspect("cat-file", "-e", f"{revision}:{path}")
+                            present.extend(n for n in ids if n.split("::", 1)[0] == path)
+                        else:
+                            states.update((n, "absent") for n in ids if n.split("::", 1)[0] == path)
+                    if present:
+                        import lane_driver
+                        now = datetime.now(timezone.utc)
+                        events = fold.read_events()
+                        running = {role: lane_driver._in_flight_role(events, now, role)
+                                   for role in ("builder", "reviewer")}
+                        running["window_gate"] = 1
+                        gate = loadgate.begin(running=running, allow_enforce=True)
+                        if gate is not None and gate.check(spec, "grader", action="grade",
+                                since=datetime.now(timezone.utc).isoformat()).held:
+                            raise ValueError("admission held")
+                        if time.monotonic() >= until:
+                            raise ValueError("member deadline exhausted")
+                        with tempfile.TemporaryDirectory(prefix="window-local-report-") as temp:
+                            rows, _, _, _, _ = build_runner._run_tree(spec, revision, repo, row,
+                                [("local-owner", _local_command(python, present))], pathlib.Path(temp),
+                                0, build_runner.TAIL_CAP, until)
+                            states.update(_local_phases(rows, present))
+                    if member and any(v == "absent" for v in states.values()):
+                        raise ValueError("member selector absent")
+                    cache[key] = states
+                    return states
+
+                tip = snapshot(sha, member=True)
+                before = snapshot(baseline, member=False)
+                qualified = [n for n in ids if tip[n] == "red" and before[n] in ("green", "absent")]
+                if qualified:
+                    result[spec] = qualified
+            except Exception:
+                # Missing tooling, load hold, malformed evidence, red/unknown
+                # phases and timeouts preserve the existing bisection fallback.
+                continue
+        return result
+    except Exception:
+        return {}
+
+
+def bisect_window(window, live, prepare, judge, drop, conflict, local=None):
     """Visit both halves in entry order, returning the first verified candidate.
 
     All builds and verdict classification go through run_window's callbacks;
@@ -1163,7 +1344,10 @@ def bisect_window(window, live, prepare, judge, drop, conflict):
         demonstrated = list(dict.fromkeys(
             owner for node in result["nodes"]
             for owner in owners(result["repo"], cand, node, result["paths"])))
-        drop(demonstrated, result, "bisect-owner")
+        if not demonstrated and local is not None:
+            result["local_owners"] = local(kept, result)
+            demonstrated = [s for s in kept if s in result["local_owners"]]
+        drop(demonstrated, result, "owner" if result.get("local_owners") else "bisect-owner")
         rest = [s for s in kept if s not in demonstrated]
         if not demonstrated:
             split(rest)
@@ -1298,6 +1482,19 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
         return candidate, kept, clashes
 
     by_id = {s: (b, sha) for s, b, sha in entries}
+    local_cache = {}
+
+    def local(batch, result):
+        return local_owners(repo, project, [e for e in entries if e[0] in batch],
+                            result["nodes"], window_base=base, cache=local_cache)
+
+    # Unconfigured projects cannot run local proof. Retain the six-argument
+    # route there, including existing judgment-budget callback wrappers.
+    try:
+        import grading_env
+        local_available = bool(grading_env._project_row(project))
+    except Exception:
+        local_available = False
 
     def note_conflicts(conflicts):
         for s, paths in conflicts.items():
@@ -1308,10 +1505,12 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
     def drop_specs(specs, result, reason):
         for s in specs:
             guard_nodes = result.get("guard_charges", {}).get(s, [])
-            owned_nodes = [n for n in result["nodes"]
-                           if s in owners(repo, result["candidate"], n, result["paths"])]
-            reported_nodes = (owned_nodes if guard_nodes else result["nodes"]) + guard_nodes
+            local_nodes = result.get("local_owners", {}).get(s)
+            owned_nodes = (local_nodes if local_nodes is not None else [n for n in result["nodes"]
+                           if s in owners(repo, result["candidate"], n, result["paths"])])
+            reported_nodes = (owned_nodes if guard_nodes or local_nodes is not None else result["nodes"]) + guard_nodes
             ev("window-dropped", s, window=window, nodes=reported_nodes,
+               **({"evidence": "local-repro", "tests": local_nodes} if local_nodes is not None else {}),
                quarantined=sorted(quarantined_all),
                **({"rechecked": dict(rechecked_all), "recheck_undetermined": sorted(
                    n for n, state in rechecked_all.items() if state == "undetermined")} if rechecked_all else {}),
@@ -1566,6 +1765,9 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
             drop_specs(live, res, "bisect-single" if not demonstrated else "owner")
             escalate(window, "isolated candidate is red; master unmoved", "red")
             return 2
+        if not demonstrated:
+            res["local_owners"] = local(live, res)
+            demonstrated = [s for s in live if s in res["local_owners"]]
         drop_specs(demonstrated, res, "owner")
         live = [s for s in live if s not in demonstrated]
         if not live:
@@ -1581,7 +1783,8 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
                 escalate(window, fingerprint_failed.why("remaining merges conflict after the drop"), "undetermined")
                 return 2
             continue
-        chosen = bisect_window(window, live, prepare_half, judge_half, drop_specs, note_conflicts)
+        chosen = bisect_window(window, live, prepare_half, judge_half, drop_specs, note_conflicts,
+                               **({"local": local} if local_available else {}))
         if chosen is None:
             escalate(window, fingerprint_failed.why(f"window {window} bisection found no advanceable candidate; dropped specs={json.dumps(dropped)}; master unmoved"), "red")
             return 2
