@@ -711,6 +711,8 @@ REQUIRED.update(REQUIRED_ROWS)
 REQUIRED["queue-add"] = ("project", "branch", "rule")
 REQUIRED["queue-remove"] = ("reason",)
 REQUIRED["queue-batch"] = ("project", "specs")
+REQUIRED["precheck"] = ("master", "clean", "conflict_master", "conflict_set", "guard_red", "guards", "seconds")
+REQUIRED["precheck-red"] = ("tests", "master", "branch_sha")
 REQUIRED["stuck-digest"] = ("date", "stuck_count", "listed", "live_reason_count", "path")
 REQUIRED["operator-alert"] = ("kind", "sent", "detail")
 

@@ -284,6 +284,7 @@ EMITS["owed-unverifiable"] = {"prod-runner", "operator"}
 EMITS["queue-add"] = {"executor", "tick", "operator"}
 EMITS["queue-remove"] = {"executor", "tick", "operator"}
 EMITS["queue-batch"] = {"executor", "tick"}
+EMITS["precheck"] = EMITS["precheck-red"] = {"executor", "tick", "operator"}
 EMITS["stuck-digest"] = {"digest"}
 EMITS["operator-alert"] = {"look", "tick", "digest"}
 EMITS["owed-met"].add("prod-runner")

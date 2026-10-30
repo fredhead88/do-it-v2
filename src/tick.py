@@ -862,6 +862,7 @@ def _record():
         outcomes = run_steps(ev, specs, fold.NOW, steps=steps, admission=admission)
         outcomes.extend(autodispatch.redispatch_dead(ev, specs, fold.NOW,
                         handled=handled_items(steps)))
+        launch_precheck(ev, fold.NOW)
         outcomes.extend(merge_queue.enqueue_due(ev, fold.NOW))
         log_outcomes(outcomes or [])
         failures = [line for line in outcomes if line.startswith('failed ')]
@@ -970,6 +971,11 @@ def _record():
     # Release the lock explicitly so that traceback cannot drop the next tick.
     lock.close()
     return todo
+
+
+def launch_precheck(events, now, *, project='albert-scott'):
+    import precheck
+    return precheck.launch_due(events, now, project=project)
 
 
 def main():
