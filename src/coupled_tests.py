@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
 """List existing tests coupled to a spec's Writes grant, without changing its repo."""
 import argparse
+import contextlib
+import json
+import math
+import os
 import pathlib
 import re
+import shlex
 import subprocess
 import sys
+import tempfile
 import time
 
 import merge_gate
@@ -13,6 +19,134 @@ import merge_gate
 TEST = re.compile(r"(^|/)tests?/|(^|/)test_[^/]*\.py$|\.test\.tsx?$")
 MAX_WRITES = 40
 GREP_SECONDS = 60
+MAX_FILES = 30
+TOTAL_SECONDS = 1200
+
+
+def selected(rows):
+    """Named first, with each unfenced file run at most once."""
+    return list(dict.fromkeys(row[2] for row in sorted(rows, key=lambda r: r[0] != "named")
+                              if not row[3]))[:MAX_FILES]
+
+
+def selection_note(rows, files):
+    eligible = {row[2] for row in rows if not row[3]}
+    fenced = {row[2] for row in rows if row[3]} - eligible
+    return (f"{len(files)} files; {len(fenced)} fenced by Boundaries; "
+            f"{len(eligible) - len(files)} omitted by the {MAX_FILES}-file cap")
+
+
+def command(file, repo):
+    if file.endswith((".test.ts", ".test.tsx")):
+        return None, "node-test"
+    if not file.endswith(".py"):
+        return None, "unsupported-test"
+    doit = pathlib.Path(repo) / "doit"
+    if doit.is_file() and os.access(doit, os.X_OK):
+        return ["/usr/bin/python3", file], None
+    venv = pathlib.Path("/opt/albert-scott/.venv/bin/python")
+    python = str(venv) if venv.is_file() else sys.executable
+    return [python, "-m", "pytest", "-q", "-p", "no:cacheprovider", file], None
+
+
+def packet_lines(text, repo, rev):
+    try:
+        rows = scan(text, repo, rev)
+        files = selected(rows)
+    except (Truncated, subprocess.TimeoutExpired):
+        return ["coupled tests: undetermined (scan truncated or timed out); report skipped for the set"]
+    except (OSError, ValueError, merge_gate.Undetermined):
+        return ["coupled tests: undetermined (scan failed; check repository and revision); report skipped for the set"]
+    lines = ["9. Coupled existing tests on the base (" + selection_note(rows, files) +
+             "; run after the final edit; report each in coupled):"]
+    for file in files:
+        cmd, reason = command(file, repo)
+        lines.append(f"   {file}: {shlex.join(cmd) if cmd else 'skipped (' + reason + ')'}")
+    return lines
+
+
+def run_line(spec, repo, base):
+    return "   Run: " + shlex.join(["/usr/bin/python3", str(pathlib.Path(__file__).resolve()),
+                                   str(spec), "--repo", str(repo), "--run", "--base", base])
+
+
+def run(files, repo, base, *, runner=None, timeout=300):
+    """Run branch tests and compare failures with one disposable detached base."""
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("timeout must be positive and finite")
+    repo = pathlib.Path(repo).resolve()
+    files = list(dict.fromkeys(files))
+    for file in files:
+        path = pathlib.PurePosixPath(file)
+        if path.is_absolute() or ".." in path.parts or file.startswith("-"):
+            raise ValueError("test files must be repository-relative paths")
+    base = git(repo, "rev-parse", "--verify", "--end-of-options", base + "^{commit}").strip()
+    runner = runner or subprocess.run
+    env = {k: v for k, v in merge_gate.ENV.items() if not k.startswith("SUPABASE_DB_URL")}
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    deadline = time.monotonic() + TOTAL_SECONDS
+    results = []
+
+    def execute(cmd, cwd):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return "timeout"
+        try:
+            proc = runner(cmd, cwd=cwd, env=env, timeout=min(timeout, remaining),
+                          capture_output=True, text=True)
+            return "pass" if proc.returncode == 0 else "fail"
+        except subprocess.TimeoutExpired:
+            return "timeout"
+        except OSError:
+            return "fail"
+
+    with contextlib.ExitStack() as cleanup:
+        scratch = None
+        for file in files:
+            cmd, reason = command(file, repo)
+            row = dict(file=file, branch="skipped", base="not-run", status="skipped")
+            if cmd is None:
+                row["reason"] = reason
+            elif time.monotonic() >= deadline:
+                row["reason"] = "total-timeout"
+            else:
+                row["branch"] = execute(cmd, repo)
+                if row["branch"] == "pass":
+                    row["status"] = "pass"
+                else:
+                    if scratch is None:
+                        temp = cleanup.enter_context(tempfile.TemporaryDirectory(
+                            prefix="doit-coupled-", dir=os.environ.get("TMPDIR")))
+                        scratch = pathlib.Path(temp) / "base"
+                        # Register before add: even a partially created worktree is cleaned.
+                        cleanup.callback(git, repo, "worktree", "remove", "--force", str(scratch))
+                        git(repo, "worktree", "add", "--detach", str(scratch), base)
+                    base_result = execute(cmd, scratch)
+                    # Timeouts count as failures on either revision.
+                    row["base"] = "fail" if base_result == "timeout" else base_result
+                    row["status"] = "base-red" if row["base"] == "fail" else "regressed"
+            results.append(row)
+    return results
+
+
+def validate_card(out):
+    for row in out.get("coupled", []):
+        if row["status"] != "regressed":
+            continue
+        file = row["file"]
+        if out.get("status") == "DONE":
+            return f"regressed coupled test {file} blocks DONE"
+        if out.get("status") in ("NEEDS_CONTEXT", "BLOCKED") and not any(
+                file in e.get("asks", "") for e in out.get("escalations", [])):
+            return f"regressed coupled test {file} needs an escalation naming its path"
+    return None
+
+
+def grader_line(sidecar):
+    if "coupled" not in sidecar:
+        return None
+    return ("4a. Coupled existing tests the builder ran (claims to test, not facts): " +
+            "; ".join(f"{row['file']} {row['status']}" for row in sidecar["coupled"]))
 
 
 class Truncated(Exception):
@@ -90,9 +224,21 @@ def main(argv=None):
     parser.add_argument("spec", type=pathlib.Path)
     parser.add_argument("--repo", required=True, type=pathlib.Path)
     parser.add_argument("--rev")
+    parser.add_argument("--run", action="store_true")
+    parser.add_argument("--base")
+    parser.add_argument("--timeout", type=float, default=300)
     args = parser.parse_args(argv)
     try:
-        rows = scan(args.spec.read_text(), args.repo, args.rev)
+        if args.run and (not args.base or not math.isfinite(args.timeout) or args.timeout <= 0):
+            raise ValueError("--run requires --base and a positive finite --timeout")
+        rows = scan(args.spec.read_text(), args.repo, args.base if args.run else args.rev)
+        if args.run:
+            files = selected(rows)
+            print("coupled tests: " + selection_note(rows, files), file=sys.stderr)
+            results = run(files, args.repo, args.base, timeout=args.timeout)
+            for row in results:
+                print(json.dumps(row))
+            return 4 if any(row["status"] == "regressed" for row in results) else 0
     except (Truncated, subprocess.TimeoutExpired):
         print("truncated")
         return 2
