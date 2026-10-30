@@ -8,6 +8,7 @@ AGENTS = HERE.parent / "agents"
 sys.path.insert(0, str(HERE))
 import models  # noqa: E402
 import grader_packet
+import coupled_tests
 import panes, spawns  # noqa: E402 — panes: proc_start/alive (imports nothing of ours); spawns: L-spec-0755 dup-dispatch/cancel/clear helpers
 ROOT = pathlib.Path(os.environ.get("DOIT_ROOT", pathlib.Path.home() / ".do-it"))
 EVENTS, CONTENT = ROOT / "events", ROOT / "content"
@@ -687,6 +688,8 @@ def write_card(out, subject, spawn):
     full = {k: out[k] for k in ("status", "identity", "acs", "verify", "stubs", "tests",
                                 "not_built", "unknowns", "built_against")}
     full["deviations"] = [{"type": d["type"], "what": d["what"]} for d in out["deviations"]]
+    if "coupled" in out:
+        full["coupled"] = out["coupled"]
     path.with_suffix(".json").write_text(json.dumps(full, indent=1))
     return path
 
@@ -1703,6 +1706,10 @@ def _main(a):
     except jsonschema.ValidationError as e:
         fail(f"structured_output violates {schema_path.name}: {e.message[:200]} at "
              f"{'/'.join(str(x) for x in e.absolute_path) or '<root>'}")
+    if a.role == "builder":
+        error = coupled_tests.validate_card(out)
+        if error:
+            fail("structured_output violates coupled evidence: " + error)
     if a.role == "grader":
         error = grader_packet.validate_output(out, g_bundle)
         if error:

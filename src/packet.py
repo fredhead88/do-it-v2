@@ -6,7 +6,7 @@ import argparse, hashlib, os, pathlib, re, shlex, subprocess, sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import amends, audit, fold, merge_gate, models, routing, grader_packet  # noqa: E402
-import verification, base_refresh
+import verification, base_refresh, coupled_tests
 from packet_base import current_tip, _effective_base, builder_pin, pinned_baseline
 
 ROOT = pathlib.Path(os.environ.get("DOIT_ROOT", pathlib.Path.home() / ".do-it"))
@@ -1003,7 +1003,8 @@ def p_builder(c):
           "- a gate-clean merge sometimes leaves master red (L-charter-0028)."]
     L += ["", f"Your cwd is your worktree, on branch `{c.a.subject.lower()}`. "
               f"The repository is `{repo}`. One spec, one commit, on that branch."]
-    return L + preflight_lines(c)
+    return (L + coupled_tests.packet_lines(spec.read_text(), repo, base_sha) +
+            [coupled_tests.run_line(spec, c.worktree(), base_sha)] + preflight_lines(c))
 
 def _drop_owed_blocks(lines, owed):
     """Drop whole physical-line blocks, including fenced criterion examples."""
@@ -1020,11 +1021,12 @@ def p_grader(c):
     crit = _drop_owed_blocks(criteria(body), owed)
     rows = [l for l in card.read_text().splitlines() if AC_ROW.match(l)]
     # The sidecar carries every row; older cards fall back to the capped render.
-    side = card.with_suffix(".json")
+    side, sidecar = card.with_suffix(".json"), {}
     if side.is_file():
         import json
+        sidecar = json.loads(side.read_text())
         rows = [f"{a['id']} [{a['criterion_type']}] {a['disposition']} · {a['evidence_type']} · "
-                f"check: {a['check']} · evidence: {a['evidence']}" for a in json.loads(side.read_text())["acs"]]
+                f"check: {a['check']} · evidence: {a['evidence']}" for a in sidecar["acs"]]
     rows = [r for r in rows if r.split(None, 1)[0] not in owed]
     vline = next((l for l in card.read_text().splitlines() if l.startswith("verify ")), "verify: not reported")
     ver = subprocess.run(["shasum", "-a", "256", str(v)], capture_output=True, text=True).stdout.split()[0][:16] \
@@ -1047,6 +1049,7 @@ def p_grader(c):
         *([f"   {r}" for r in rows] or ["   none"]),
         "3. Evidence-type validator: not installed; no row is pre-failed on its account.",
         f"4. The verify command the spec authored, with the reported exit code and result: {vline}",
+        *([line] if (line := coupled_tests.grader_line(sidecar)) else []),
         item5,
         f"6. The done-condition: {done}.",
         f"7. Standing verify-waivers applied to this checker: {waiver_line(c)}.",

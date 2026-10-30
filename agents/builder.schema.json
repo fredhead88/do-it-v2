@@ -17,6 +17,22 @@
     "declarations"
   ],
   "properties": {
+    "coupled": {
+      "type": "array",
+      "maxItems": 40,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["file", "branch", "base", "status"],
+        "properties": {
+          "file": {"type": "string", "maxLength": 300},
+          "branch": {"type": "string", "enum": ["pass", "fail", "skipped", "timeout"]},
+          "base": {"type": "string", "enum": ["pass", "fail", "not-run"]},
+          "status": {"type": "string", "enum": ["pass", "regressed", "base-red", "skipped"]},
+          "reason": {"type": "string", "maxLength": 200}
+        }
+      }
+    },
     "status": {
       "type": "string",
       "enum": [

@@ -131,6 +131,13 @@ Failures that are identical there, in files and on source lines outside your
 card the command and both failure lists. The grader and reviewer read that
 evidence. Anything failing only at HEAD is yours.
 
+After your final edit, run the coupled-test CLI command in your packet and copy
+its per-file JSON rows into `coupled` on your card. An undetermined scan means
+the whole set is `skipped`; state the reason. Fix a `regressed` result inside
+`Writes:` before hand-in. If the fix needs a file outside `Writes:`, return
+`NEEDS_CONTEXT` with an escalation whose `asks` names that file path and the
+regressed test path. A `base-red` result is recorded and does not block hand-in.
+
 ## Deviations
 
 Typed, and the type routes:

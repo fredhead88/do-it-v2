@@ -143,14 +143,18 @@ class OwnerDropReworkTests(unittest.TestCase):
                                         '--project', 'fixture', '--base-sha', tip])
                     return Path(path).read_bytes()
 
-            self.assertEqual(render(events), render(events, old=True) + b'preflight undetermined: none recorded\n')
+            suffix = ('9. Coupled existing tests on the base (0 files; 0 fenced by Boundaries; '
+                      '0 omitted by the 30-file cap; run after the final edit; report each in coupled):\n'
+                      + packet.coupled_tests.run_line(spec, repo, tip)
+                      + '\npreflight undetermined: none recorded\n').encode()
+            self.assertEqual(render(events), render(events, old=True) + suffix)
             old_drop = dropped(-20)
             # Lexically later drop is older in absolute time than build-done.
             old_drop['ts'] = '2026-10-28T13:00:00+02:00'
             done = event('build-done', -30, status='DONE')
             for rows in (events + [old_drop, done], events + [done, dict(dropped(), ts=done['ts'])],
                          events + [dict(dropped(), reason='bisect-single')]):
-                self.assertEqual(render(rows), render(rows, old=True) + b'preflight undetermined: none recorded\n')
+                self.assertEqual(render(rows), render(rows, old=True) + suffix)
             owner = dict(dropped(), unattributed_nodes=['tests/test_other.py::test_unknown'])
             rows = events + [done, owner, dict(dropped(-5), reason='bisect-single')]
             text = render(rows).decode()
