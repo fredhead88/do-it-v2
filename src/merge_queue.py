@@ -489,7 +489,7 @@ def merge_freeze(events, project):
     return 'unowned nightly red: ' + ', '.join(ids) if ids else None
 
 
-def window_run(project, *, runner=None, launcher=None, detach=False, now=None):
+def window_run(project, *, runner=None, launcher=None, detach=False, now=None, precheck_runner=None):
     if not re.fullmatch(r'[A-Za-z0-9._-]+', project) or project in ('.', '..'):
         return 2
     ledger_file = os.environ.get('DOIT_LEDGER_FILE', 'L-executor-0001.jsonl')
@@ -533,6 +533,19 @@ def window_run(project, *, runner=None, launcher=None, detach=False, now=None):
             except (OSError, ValueError):
                 # An unavailable repository gives no safe mixed-window footprint.
                 repo, master = None, None
+            import precheck
+            checked = precheck.selection(events, project, repo, master, now, precheck_runner)
+            excluded = 0
+            if checked is not None:
+                by_spec = {row['spec']: row for row in entries}
+                ordered = [by_spec[sid] for sid in checked['clean'] if sid in by_spec]
+                excluded = len(entries) - len(ordered)
+                print(f'window-run: precheck excluded {excluded} spec(s); reason=precheck-exclusions')
+                entries = ordered
+                if not entries:
+                    print('window-run: no precheck-clean candidates')
+                    return 3
+                head = entries[0]['spec']
             footprints, risky = {}, set()
             for row in entries:
                 paths = spec_paths(repo, master, row['branch']) if repo is not None else None
@@ -553,12 +566,15 @@ def window_run(project, *, runner=None, launcher=None, detach=False, now=None):
                 reason = 'all-ready'
             else:
                 reason = 'effective-cap'
+            if excluded:
+                reason = 'precheck-exclusions'
             specs = eligible[:cap['cap']]
             print(f'window-run: selected {len(specs)}; deferred {len(entries) - len(specs)} '
                   f'(reason={reason})')
             window = 'window-' + uuid.uuid4().hex
             _train_emit(ledger_file, window, 'queue-batch', project=project, specs=','.join(specs),
-                        reason=reason, cap=cap['cap'], queue_len=len(entries))
+                        reason=reason, cap=cap['cap'], queue_len=len(entries) + excluded,
+                        precheck=checked['ts'] if checked is not None else 'none')
             argv = ['doit', 'gate-window', window, '--project', project, '--specs', ','.join(specs)]
             if runner is not None:
                 if detach:

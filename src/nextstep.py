@@ -256,7 +256,8 @@ def _rebuild(c):
                       or e.get('rework') == 'yes')]
     rewrites = [e for e in evs if blocked and e.get('type') == 'spec-written'
                 and _time(e['ts']) > _time(blocked['ts'])]
-    drops = [e for e in evs if e.get('type') == 'window-dropped' and e.get('reason') == 'owner']
+    drops = [e for e in evs if (e.get('type') == 'window-dropped' and e.get('reason') == 'owner')
+             or e.get('type') in {'merge-conflict', 'precheck-red'}]
     review = _latest(evs, JUDGING | {'build-done', 'build-blocked'})
     blocking = ([review] if review and review['type'] == 'review'
                 and type(review.get('n_blocking')) is int and review['n_blocking'] > 0 else [])
@@ -478,12 +479,14 @@ def _gate(c):
 
 def _enqueue(c):
     trigger = _latest(c['evs'], {'merge-gate-clean', 'merge-gate-undetermined', 'merge-gate-rework', 'conflict-rework'})
-    if not trigger or trigger['type'] != 'merge-gate-clean' or _close(c) or _rebuild(c) or _regrade(c):
+    if not trigger or trigger['type'] != 'merge-gate-clean':
         return None
     judgment = _latest(c['evs'], {'verdict', 'cannot-assess'})
     if judgment and _time(trigger['ts']) < _time(judgment['ts']):
         return None
-    if _after(c['evs'], trigger, {'queue-add', 'shipped', 'window-dropped', 'merge-conflict'}):
+    if _after(c['evs'], trigger, {'queue-add', 'shipped', 'window-dropped', 'merge-conflict', 'precheck-red'}):
+        return None
+    if _close(c) or _rebuild(c) or _regrade(c):
         return None
     review = _clean_review(c)
     if review is None:
@@ -496,7 +499,7 @@ def _enqueue(c):
 
 def _merge(c):
     trigger = _latest(c['evs'], {'queue-add'})
-    if not trigger or _after(c['evs'], trigger, {'queue-remove', 'shipped', 'window-dropped', 'merge-conflict'}):
+    if not trigger or _after(c['evs'], trigger, {'queue-remove', 'shipped', 'window-dropped', 'merge-conflict', 'precheck-red'}):
         return None
     from merge_queue import queue
     live = next((r for r in queue(c['events']) if r.get('spec') == c['sid']), None)
@@ -769,7 +772,7 @@ def _base_blocked(event):
 
 def _base_refresh_hold(c, failure):
     evs = c['evs']
-    trigger = _latest(evs, {'decision', 'spec-written', 'window-dropped', 'verdict', 'conflict-rework', 'merge-conflict'})
+    trigger = _latest(evs, {'decision', 'spec-written', 'window-dropped', 'verdict', 'conflict-rework', 'merge-conflict', 'precheck-red'})
     history = attempts.history(_history_events(evs), trigger or failure, 'builder', now=c['now'])
     detail = str(failure.get('why') or failure.get('reason') or '')
     reason = ('base-refresh: regenerate the packet with the current effective base and redispatch; '

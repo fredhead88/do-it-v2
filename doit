@@ -6,6 +6,7 @@ SRC="$HERE/src"
 case "${1:-board}" in
   gate)    shift; exec python3 "$SRC/merge_gate.py" "$@" ;;
   queue|window-run) exec python3 "$SRC/merge_queue.py" "$@" ;;
+  precheck) shift; exec python3 "$SRC/precheck.py" "$@" ;;
   gate-window) shift; exec python3 "$SRC/window_gate.py" "$@" ;;
   base-red) shift; exec python3 "$SRC/base_red.py" "$@" ;;
   gh-bill) shift; exec python3 "$SRC/gh_bill.py" "$@" ;;
@@ -284,6 +285,7 @@ The ledger is append-only. Never edit or delete a line: repair with an
 operator-only `correction` event.
 
 Merge queue
+  doit precheck --project <p> [--json]   check queued branches and combined tree guards
   doit queue list|add|remove            ledger-owned merge queue; corrections need --why
   doit window-run --project albert-scott [--detach]  launch the ready queue head
 USAGE
