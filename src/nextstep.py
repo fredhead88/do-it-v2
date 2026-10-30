@@ -1010,7 +1010,7 @@ def next_steps(events, specs, now, rules, waves=None):
     windows.update(s for s, evs in by.items() if any(e['type'] == 'window-opened' for e in evs))
     for window in sorted(windows):
         evs = by.get(window, [])
-        if any(e['type'] in {'window-dropped', 'window-merged', 'window-done', 'window-verified', 'shipped'} for e in evs):
+        if any(e['type'] in {'window-dropped', 'window-merged', 'window-done', 'window-verified', 'window-cancelled', 'shipped'} for e in evs):
             continue
         event = evs[-1] if evs else {}
         questions = _unanswered(evs, events)

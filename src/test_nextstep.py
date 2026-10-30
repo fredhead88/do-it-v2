@@ -118,6 +118,21 @@ class NextStepTests(unittest.TestCase):
         random.Random(41).shuffle(events)
         self.assertEqual(baseline, self.steps(events, specs))
 
+    def test_cancelled_window_is_terminal(self):
+        cancelled, waiting = 'win-cancelled', 'win-waiting'
+        events = [event('window-opened', -30, subject=window)
+                  for window in (cancelled, waiting)]
+        events.append(event('window-cancelled', -20, subject=cancelled,
+                            after='win-successor', reason='superseded'))
+
+        steps = self.steps(events)
+
+        self.assertFalse(any(step.item == cancelled for step in steps))
+        remaining = [step for step in steps if step.item == waiting]
+        self.assertEqual(len(remaining), 1)
+        self.assertEqual((remaining[0].item_kind, remaining[0].owner, remaining[0].reason),
+                         ('window', 'executor', 'window waiting; elapsed_min=30'))
+
     def selected(self, results, rules=None):
         predicates = {n: (lambda c, n=n: results.get(n)) for n in ns.PREDICATES}
         with patch.dict(ns.PREDICATES, predicates, clear=True):
