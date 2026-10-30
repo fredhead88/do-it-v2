@@ -325,7 +325,11 @@ EMITS["merge-frozen"] = {"executor", "tick", "operator"}
 
 EMITS["pane-dialog-resolved"] = {"pane-watchdog"}
 
+EMITS["merge-gate-undetermined"] = {"executor", "tick"}
+
 REQUIRED_ROWS = {
+    "merge-gate-undetermined": ("subject", "reason", "sha", "branch_sha", "main_sha", "branch",
+                                "repo", "cycle", "attempt", "retryable", "retry_at", "hold_reason", "findings"),
     "autodispatch-skipped": ("subject", "reason"),
     "pane-dialog-resolved": ("pane", "role", "seen_at", "resolved_at", "choice"),
     "test-quarantined": ("project", "node", "rule", "windows", "since", "until", "fix"),

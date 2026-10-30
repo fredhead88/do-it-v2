@@ -1122,5 +1122,126 @@ class R7BaseRefreshTests(unittest.TestCase):
         self.signed('R7-bounded-exhaustion', asdict(held))
 
 
+class GateToolingTests(unittest.TestCase):
+    setUp = NextStepTests.setUp
+    steps = NextStepTests.steps
+    one = NextStepTests.one
+    signed = AuditStepTests.signed
+
+    def baseline(self):
+        return [event('spec-written', -120), event('build-done', -110, status='DONE'),
+                event('review', -100, n_blocking=0)]
+
+    def failure(self, minutes=-30, attempt='one', **extra):
+        return event('merge-gate-undetermined', minutes, actor='executor',
+                     _src=f'L-executor-fixture.jsonl:{20000+minutes}', reason='tool',
+                     repo='/repo/.git', sha='a'*40, branch_sha='a'*40, main_sha='b'*40,
+                     branch='work', cycle=self.baseline()[-1]['ts'], attempt=attempt,
+                     retryable=True, retry_at=(NOW+timedelta(minutes=minutes+5)).isoformat(),
+                     hold_reason=None, findings=[]) | extra
+
+    def test_due_boundaries_anchor_and_ladder(self):
+        base = self.baseline()
+        first = self.failure()
+        dispatch_row = event('autodispatched', -80, rule='gate', since=base[-1]['ts'], trigger='retry')
+        evs = base + [dispatch_row, first]
+        due = ns._time(first['retry_at'])
+        for seconds in (-1, 0, 1):
+            clock = due + timedelta(seconds=seconds)
+            step = self.one(evs, now=clock)
+            self.assertEqual(step.action, 'gate' if seconds >= 0 else None)
+            if seconds >= 0:
+                self.assertEqual((step.owner, step.since, step.trigger), ('tick',first['ts'],first['_src']))
+                rows = [r for r in lr.due(evs, specs_for(evs), clock) if r['rule']=='gate']
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(lr.ladder(evs, rows[0], clock), 'act')
+        self.assertEqual(self.one(evs), self.one(evs))
+        self.signed('L-spec-1869/AC2-boundaries', dict(since=first['ts'], retry_at=first['retry_at'], boundaries=[-1,0,1]))
+
+    def test_identity_counts_caps_unblock(self):
+        base = self.baseline()
+        first, second = self.failure(-40), self.failure(-20,'two', retry_at=(NOW-timedelta(minutes=5)).isoformat())
+        third = self.failure(-3,'three', retryable=False, retry_at=None, hold_reason='retry-cap-exhausted')
+        for tail, count in [([first],1), ([first,first],1), ([first,second],2)]:
+            evs = base + tail
+            self.assertEqual(ns._gate_attempts(evs, tail[-1])[0], count)
+            self.assertEqual(self.one(evs).action, 'gate')
+        evs = base + [first,second,third]
+        held = self.one(evs)
+        self.assertEqual((held.action, held.owner, held.reason), (None,'executor','retry-cap-exhausted'))
+        unrelated = event('decision', -1, text='unrelated')
+        self.assertEqual(self.one(evs+[unrelated]).reason, 'retry-cap-exhausted')
+        reset = event('unblocked', -1)
+        self.assertEqual(self.one(evs+[reset]).action, 'gate')
+        self.assertEqual(ns._gate_attempts(evs+[reset], third)[0], 0)
+        fresh = self.failure(-1,'new-sha', sha='c'*40, branch_sha='c'*40,
+                             retry_at=(NOW-timedelta(seconds=1)).isoformat())
+        self.assertEqual(self.one(evs+[fresh]).action, 'gate')
+        self.assertEqual(ns._gate_attempts(evs+[fresh], fresh)[0], 1)
+        self.signed('L-spec-1869/AC2-identities', dict(duplicate_count=1, cap=asdict(held), reset=True))
+
+    def test_refusals_live_owner_and_lock_boundary(self):
+        first = self.failure(-4)
+        lock = self.failure(-2,'', reason='lock-busy', retry_at=None)
+        evs = self.baseline()+[first,lock]
+        due = ns._time(first['retry_at'])
+        self.assertIsNone(self.one(evs, now=due-timedelta(seconds=1)).action)
+        self.assertEqual(self.one(evs, now=due).action, 'gate')
+        self.assertEqual(self.one(evs, now=due).since, lock['ts'])
+        for refusal in ('lock','duplicate','dispatch-in-progress'):
+            refused = event('spawn-failed', -1, role='gate', reason=refusal)
+            self.assertEqual(self.one(evs+[refused], now=due).action, 'gate')
+        live = event('spawn-started', 0, role='executor', spawn='L-executor-9002')
+        self.assertIsNone(self.one(evs+[live], now=due).action)
+        released = event('spawn-done', 0, spawn='L-executor-9002')
+        self.assertEqual(self.one(evs+[live,released], now=due).action, 'gate')
+
+    def test_cycles_cancellation_and_permanent_holds(self):
+        failure = self.failure()
+        base = self.baseline()+[failure]
+        for hold in ('configuration','ref-resolution','scan-cap-exhausted','scan-metadata'):
+            evs = self.baseline()+[failure | dict(retryable=False,hold_reason=hold,retry_at=None)]
+            self.assertEqual((self.one(evs).action, self.one(evs).reason), (None,hold))
+        newer_review = event('review', -1, n_blocking=0)
+        self.assertEqual(self.one(base+[newer_review]).action, 'gate')
+        self.assertEqual(self.one(base+[newer_review]).since, newer_review['ts'])
+        built = event('build-done', -1)
+        self.assertEqual(self.one(base+[built]).reason, 'review-required')
+        clean = event('merge-gate-clean', -1)
+        self.assertEqual(self.one(base+[clean]).action, 'enqueue')
+        stale_clean = self.baseline()+[event('merge-gate-clean', -50), failure]
+        self.assertEqual(self.one(stale_clean).action, 'gate')
+        rework = event('merge-gate-rework', -1, reason='actual guard')
+        self.assertNotEqual(self.one(stale_clean+[rework]).action, 'enqueue')
+        terminal = event('shipped', -1)
+        self.assertEqual(self.steps(base+[terminal], {SID:dict(state='shipped')}), [])
+
+    def test_later_pipeline_outcomes_supersede_tooling_hold(self):
+        for failure in (self.failure(), self.failure(retryable=False, retry_at=None,
+                                                    hold_reason='configuration')):
+            base = self.baseline() + [failure]
+            blocked = event('review', -3, n_blocking=1)
+            built = event('build-done', -2, status='DONE', actor='builder')
+            verdict = event('verdict', -1, confirmed=True, actor='grader')
+            for tail, action in (([blocked], 'rebuild'), ([built, verdict], 'review')):
+                with self.subTest(hold=failure['hold_reason'], action=action):
+                    evs = base + tail
+                    step = self.one(evs)
+                    self.assertEqual((step.state, step.action, step.owner), ('action', action, 'tick'))
+                    self.assertEqual((step.trigger, step.since), (tail[-1]['_src'], tail[-1]['ts']))
+                    self.assertFalse(any(row['rule'] in {'gate', 'enqueue'}
+                                         for row in lr.due(evs, specs_for(evs), NOW)))
+                    self.signed('L-spec-1873/AC2-later-' + action, asdict(step))
+            # A build alone still requires a new clean review before another gate.
+            self.assertEqual(self.one(base + [built]).reason, 'review-required')
+            self.assertNotIn(self.one(base + [blocked, built]).action, {'rebuild', 'gate', 'enqueue'})
+
+
 if __name__ == '__main__':
+    import sys
+    if sys.argv[1:] == ['--spec-1869-ac2']:
+        suite = unittest.defaultTestLoader.loadTestsFromTestCase(GateToolingTests)
+        result = unittest.TextTestRunner(verbosity=2).run(suite)
+        print(f'L-spec-1869 AC2 nextstep: {result.testsRun} executed; success={result.wasSuccessful()}')
+        sys.exit(0 if result.testsRun and result.wasSuccessful() else 1)
     unittest.main()

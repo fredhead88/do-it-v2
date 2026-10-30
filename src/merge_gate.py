@@ -29,13 +29,15 @@ a bare directory must carry its trailing slash, and breadth is tested by asking
 whether the grant covers paths no grant may ever cover.
 
 Three caller states, never conflated (§5.3): nothing-to-report -> proceed (0) ·
-removals/reverts outside the grant -> rework (1) · could-not-determine ->
-rework (1). AN UNRESOLVABLE OR AMBIGUOUS REF, A CONFLICT, A TIMEOUT, A SHALLOW
-REPO AND A MISSING OR UNPARSEABLE `writes:` GRANT ALL READ AS REWORK.
+removals/reverts outside the grant -> rework (1) · tooling could-not-determine -> hold (2). Actual findings and grant guards
+read as rework (1); tooling outcomes carry bounded retry policy.
 
 Runs at the Executor's merge step (§3.9, D17), BEFORE `--no-ff`.
 """
 import ast, collections, fcntl, json, math, os, pathlib, re, shutil, signal, subprocess, sys, tempfile, time
+
+from datetime import timedelta
+import uuid
 
 import fold
 import freeze
@@ -108,27 +110,34 @@ def load_config():
         REVERT_DEPTH = int(os.environ.get("DOIT_REVERT_DEPTH", "50"))
         REVERT_MAX_PATHS = int(os.environ.get("DOIT_REVERT_MAX_PATHS", "200"))
     except (re.error, ValueError) as e:
-        raise Undetermined(f"bad configuration: {e}")
+        raise Undetermined(f"bad configuration: {e}", reason="configuration", retryable=False, guard=False)
     if MIGRATIONS.search("migrations/001.sql") is None:
         raise Undetermined("DOIT_MIGRATIONS no longer matches a migrations path — "
-                           "that removes the always-name carve-out")
+                           "that removes the always-name carve-out", reason="configuration", retryable=False, guard=False)
     for name, v in (("DOIT_GIT_TIMEOUT", GIT_TIMEOUT), ("DOIT_GATE_DEADLINE", DEADLINE),
                     ("DOIT_REVERT_DEPTH", REVERT_DEPTH), ("DOIT_REVERT_MAX_PATHS", REVERT_MAX_PATHS)):
         if not math.isfinite(v) or v < 1:
-            raise Undetermined(f"{name}={v} disables a check rather than tuning it")
+            raise Undetermined(f"{name}={v} disables a check rather than tuning it", reason="configuration", retryable=False, guard=False)
 
 
 Result = collections.namedtuple("Result", "removed reverted main_sha branch_sha tree")
 
 
 class Undetermined(Exception):
-    """Anything the gate could not establish. Never reads as clean."""
+    """An explicit cause, independent of the exception's diagnostic wording."""
+    def __init__(self, message, *, reason="gate-tooling", retryable=True, guard=False):
+        super().__init__(message)
+        self.reason, self.retryable, self.guard = reason, retryable, guard
+
+
+_RESOLVED = {}
+_COMMON = ""
 
 
 def run(args, stdin=None):
     remaining = min(DEADLINE, 60.0) - (time.monotonic() - _START)
     if remaining <= 0:
-        raise Undetermined(f"deadline of {DEADLINE:.0f}s exceeded — a partial scan is not a clean one")
+        raise Undetermined(f"deadline of {DEADLINE:.0f}s exceeded — a partial scan is not a clean one", reason="deadline")
     base = ("git",) + (("-C", _TOP) if _TOP else ()) + PINNED
     try:
         return subprocess.run(base + tuple(args), capture_output=True,
@@ -158,11 +167,13 @@ def resolve(ref):
                 if run(("rev-parse", "--verify", "--quiet", ns + ref)).returncode == 0]
         if len(hits) > 1:
             raise Undetermined(f"{ref} is ambiguous — it names {' and '.join(hits)}; "
-                               f"refusing to guess. Say refs/heads/{ref}")
+                               f"refusing to guess. Say refs/heads/{ref}", reason="ref-resolution", retryable=False, guard=False)
     p = run(("rev-parse", "--verify", "--end-of-options", f"{ref}^{{commit}}"))
     if p.returncode:
-        raise Undetermined(f"{ref}: {p.stderr.decode(errors='replace').strip() or 'unresolvable'}")
-    return p.stdout.decode().strip()
+        raise Undetermined(f"{ref}: {p.stderr.decode(errors='replace').strip() or 'unresolvable'}", reason="ref-resolution", retryable=False, guard=False)
+    sha = p.stdout.decode().strip()
+    _RESOLVED[ref] = sha
+    return sha
 
 
 def preflight(repo=None):
@@ -177,18 +188,18 @@ def preflight(repo=None):
     _TOP = repo                 # resolve the toplevel in the CALLER's cwd, not the last run's
     p = run(("rev-parse", "--show-toplevel"))
     if p.returncode:
-        raise Undetermined("not inside a git repository")
+        raise Undetermined("not inside a git repository", reason="repository-precondition", retryable=False, guard=False)
     _TOP = p.stdout.decode().strip()
     if git("rev-parse", "--is-shallow-repository").decode().strip() == "true":
         raise Undetermined("shallow repository — history is truncated, so `clean` would be unearned "
-                           "(CI checkouts are shallow by default: fetch full depth)")
+                           "(CI checkouts are shallow by default: fetch full depth)", reason="repository-precondition", retryable=False, guard=False)
     if git("replace", "-l").strip():
-        raise Undetermined("replace refs present — the visible history is not the real one")
+        raise Undetermined("replace refs present — the visible history is not the real one", reason="repository-precondition", retryable=False, guard=False)
     sup = git("rev-parse", "--show-superproject-working-tree").decode().strip()
     if sup:
         raise Undetermined(f"cwd is inside a submodule of {sup} — gating the submodule and "
                            f"reporting on it as if it were the project is how a clean gets "
-                           f"earned about the wrong repository")
+                           f"earned about the wrong repository", reason="repository-precondition", retryable=False, guard=False)
 
 
 def blobs(refspecs):
@@ -211,7 +222,7 @@ def blobs(refspecs):
         lines = out.decode("utf-8", "surrogateescape").splitlines()
         if len(lines) != len(batch):        # never guess at an alignment
             raise Undetermined(f"cat-file returned {len(lines)} records for {len(batch)} "
-                               f"queries — refusing to align them by guesswork")
+                               f"queries — refusing to align them by guesswork", reason="malformed-history-output", retryable=False, guard=False)
         for spec, line in zip(batch, lines):
             parts = line.split()
             res[spec] = parts[0] if len(parts) == 2 and parts[1] == "blob" else None
@@ -428,7 +439,7 @@ def revert_window(paths, main):
     """
     if len(paths) > REVERT_MAX_PATHS:
         raise Undetermined(f"{len(paths)} files modified outside the writes: grant "
-                           f"(cap {REVERT_MAX_PATHS}) — widen the grant or split the branch")
+                           f"(cap {REVERT_MAX_PATHS}) — widen the grant or split the branch", reason="grant", retryable=False, guard=True)
     if not paths:
         return {}
     out = git("log", "-z", "--name-only", "--format=%x01%H", f"-{REVERT_DEPTH}",
@@ -452,12 +463,14 @@ def begin_run(repo=None):
     whole of D113-D115's hardening — the GIT_* strip, the pinned config, the
     shallow/replace-ref/submodule hard stops — and a second hand-rolled prologue
     is exactly how one of them comes to be missing from the other."""
-    global _START, _RUN_ACTIVE, LAST_APPEND_ONLY, LAST_LIST_ERROR
+    global _START, _RUN_ACTIVE, LAST_APPEND_ONLY, LAST_LIST_ERROR, _COMMON
+    _COMMON = ""
     _RUN_ACTIVE = False
     LAST_APPEND_ONLY, LAST_LIST_ERROR = [], None
     _START = time.monotonic()          # the budget is per RUN, not per process
     load_config()
     preflight(repo)
+    _COMMON = str(pathlib.Path(os.fsdecode(git("rev-parse", "--path-format=absolute", "--git-common-dir")).strip()).resolve())
     _RUN_ACTIVE = True
 
 
@@ -467,10 +480,11 @@ def gate(branch, main, grant):
     main_sha, branch_sha = resolve(main), resolve(branch)
     if main_sha == branch_sha:
         raise Undetermined(f"{branch} and {main} are the same commit — there is nothing to gate, "
-                           f"and an empty diff is not a clean merge")
+                           f"and an empty diff is not a clean merge", reason="nothing-to-gate", retryable=False)
     p = run(("merge-tree", "--write-tree", main_sha, branch_sha))
     if p.returncode:
-        raise Undetermined("the merge does not apply cleanly — a conflicted merge is not a gated one")
+        raise Undetermined("the merge does not apply cleanly — a conflicted merge is not a gated one",
+                           reason="merge-conflict" if p.returncode == 1 else "gate-tooling")
     tree = p.stdout.decode().splitlines()[0].strip()
 
     removed, modified = [], []
@@ -568,13 +582,21 @@ def secret_scan(repo, main_sha, branch_sha):
     lock, owned, wt_path = None, None, None
     result = ("undetermined", ["tool"])
     phase = "tool"
+    budget, scan_start = None, None
 
     def remaining(*, setup=False):
         limit = min(DEADLINE, 60.0) if setup else DEADLINE
         return limit - (time.monotonic() - _START)
 
+    def timed_details(reason, details=()):
+        exhausted = (budget is not None and scan_start is not None and
+                     time.monotonic() - scan_start >= budget)
+        return "undetermined", [reason, "budget=" + (str(float(budget)) if budget is not None else "unallocated"),
+                                "scan-exhausted=" + str(exhausted).lower(), *details]
+
     def diagnostic(reason, text, *, timeout=False):
-        return _scan_diagnostic(repo, branch_sha, text, reason=reason, timeout=timeout)
+        status, details = _scan_diagnostic(repo, branch_sha, text, reason=reason, timeout=timeout)
+        return timed_details(reason, details[1:]) if reason in {"timeout", "deadline"} else (status, details)
 
     try:
         if implicit:
@@ -584,7 +606,7 @@ def secret_scan(repo, main_sha, branch_sha):
         # even for an imported caller whose previous _TOP named another repo.
         _TOP = str(pathlib.Path(repo).resolve())
         if remaining(setup=True) <= 0:
-            return "undetermined", ["deadline"]
+            return timed_details("deadline")
         common = pathlib.Path(os.fsdecode(git("rev-parse", "--path-format=absolute", "--git-common-dir")).strip()).resolve()
         main_sha, branch_sha = resolve(main_sha), resolve(branch_sha)
         if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", branch_sha):
@@ -598,7 +620,7 @@ def secret_scan(repo, main_sha, branch_sha):
             return "undetermined", ["lock-busy"]
 
         def acquired():
-            nonlocal owned, wt_path, phase
+            nonlocal owned, wt_path, phase, budget, scan_start
             global DEADLINE, DETECT_SECRETS_TIMEOUT
             paths = git("diff", "--diff-filter=ACMRT", "--name-only", "-z", f"{main_sha}...{branch_sha}")
             if not isinstance(paths, bytes) or (paths and not paths.endswith(b"\0")):
@@ -607,7 +629,7 @@ def secret_scan(repo, main_sha, branch_sha):
             if not _DEADLINE_OVERRIDE:
                 DEADLINE = 60.0 + budget  # Preserve the original run origin.
             if remaining(setup=True) <= 0:
-                return "undetermined", ["deadline"]
+                return timed_details("deadline")
             out = git("ls-tree", "-r", "--name-only", main_sha, "--", DETECT_SECRETS_SCRIPT)
             if not out.strip():
                 return "clean", []
@@ -627,7 +649,7 @@ def secret_scan(repo, main_sha, branch_sha):
             if venv_bin.exists():
                 sub_env["DETECT_SECRETS_BIN"] = str(venv_bin)
             if remaining(setup=True) <= 0:
-                return "undetermined", ["deadline"]
+                return timed_details("deadline")
             scan_start = time.monotonic()
             for attempt in range(2):
                 elapsed = time.monotonic() - scan_start
@@ -672,7 +694,7 @@ def secret_scan(repo, main_sha, branch_sha):
         try:
             result = diagnostic(reason, f"secret_scan: {type(e).__name__}: {e}")
         except Exception:
-            result = ("undetermined", [reason])
+            result = timed_details(reason) if reason in {"timeout", "deadline"} else ("undetermined", [reason])
     finally:
         try:
             if wt_path is not None and _remove_worktree(wt_path) is False:
@@ -712,10 +734,11 @@ def out_of_grant(branch, main, spec_id):
     main_sha, branch_sha = resolve(main), resolve(branch)
     if main_sha == branch_sha:
         raise Undetermined(f"{branch} and {main} are the same commit — there is nothing to gate, "
-                           f"and an empty diff is not a clean merge")
+                           f"and an empty diff is not a clean merge", reason="nothing-to-gate", retryable=False)
     p = run(("merge-tree", "--write-tree", main_sha, branch_sha))
     if p.returncode:
-        raise Undetermined("the merge does not apply cleanly — a conflicted merge is not a gated one")
+        raise Undetermined("the merge does not apply cleanly — a conflicted merge is not a gated one",
+                           reason="merge-conflict" if p.returncode == 1 else "gate-tooling")
     tree = p.stdout.decode().splitlines()[0].strip()
     entries = {entry.split("::")[0]: entry for entry in append_only_list(main_sha)}
     changes = diff_names(main_sha, tree)
@@ -752,15 +775,15 @@ def check_grant(toks, whose):
     writing a blocklist, so each candidate grant is simply asked whether it
     covers paths that no grant may ever cover."""
     if not toks:
-        raise Undetermined(f"{whose} has a writes: line with no paths on it")
+        raise Undetermined(f"{whose} has a writes: line with no paths on it", reason="grant", retryable=False, guard=True)
     for t in toks:
         if not PATH_TOKEN_RE.fullmatch(t) or not any(c in t for c in "/.*?"):
             raise Undetermined(f"{whose}: {t!r} is not a path or a glob. Prose is not a grant — "
-                               f"write a bare directory as {t}/ if that is what you meant")
+                               f"write a bare directory as {t}/ if that is what you meant", reason="grant", retryable=False, guard=True)
         hit = [s for s in SENTINELS if granted(s, [t])]
         if hit:
             raise Undetermined(f"{whose} grants {t!r}, which also covers {hit[0]!r} — "
-                               f"that is not a grant, it is an off switch")
+                               f"that is not a grant, it is an off switch", reason="grant", retryable=False, guard=True)
     return toks
 
 
@@ -802,7 +825,12 @@ def _frontmatter_grant(text):
                 toks.append(mm.group(1))
             return True, toks
         return False, None
-    d = yaml.safe_load(fm) or {}
+    try:
+        d = yaml.safe_load(fm) or {}
+        if not isinstance(d, dict):
+            raise ValueError("frontmatter must be a mapping")
+    except (yaml.YAMLError, ValueError) as e:
+        raise Undetermined("invalid frontmatter", reason="grant", retryable=False, guard=True) from e
     return ("writes" in d), d.get("writes")
 
 
@@ -821,7 +849,7 @@ def grant_from_text(text):
     if found:
         if not isinstance(val, list):
             raise Undetermined(f"the grant: {val!r} is not a path or a glob. Prose is not a grant — "
-                               f"a writes: frontmatter key must be a YAML list")
+                               f"a writes: frontmatter key must be a YAML list", reason="grant", retryable=False, guard=True)
         return check_grant([str(x) for x in val], "the grant")
     lines = text.splitlines()
     for i, line in enumerate(lines):
@@ -859,7 +887,7 @@ def grant_from_text(text):
                 toks += [x for x in re.split(r"[,\s|]+", t.lstrip("-* ").replace("`", "")) if x]
             return check_grant(toks, "the grant")
         return check_grant([t for t in re.split(r"[,\s|]+", body) if t], "the grant")
-    raise Undetermined("states no writes: grant — nothing to filter against")
+    raise Undetermined("states no writes: grant — nothing to filter against", reason="grant", retryable=False, guard=True)
 
 
 def writes_grant(spec):
@@ -868,10 +896,10 @@ def writes_grant(spec):
     legitimate removal look like a violation. A thin reader now (R3f): resolve
     `content/<spec>.md`'s text, call `grant_from_text`."""
     if not re.fullmatch(r"[A-Za-z0-9._-]+", spec):
-        raise Undetermined(f"{spec!r} is not a spec id")
+        raise Undetermined(f"{spec!r} is not a spec id", reason="grant", retryable=False, guard=True)
     p = fold.ROOT / "content" / f"{spec}.md"
     if not p.exists():
-        raise Undetermined(f"no content file for {spec} — cannot read its writes: grant")
+        raise Undetermined(f"no content file for {spec} — cannot read its writes: grant", reason="grant", retryable=False, guard=True)
     return grant_from_text(p.read_text())
 
 
@@ -928,6 +956,8 @@ def conflict_event(branch, main, spec):
     import conflict
     try:
         r = conflict.conflicted(branch, main, os.getcwd())
+        if not r.conflicts:
+            return None
         a = conflict.conflict_attempts(fold.read_events(), spec)
     except Undetermined:
         return None
@@ -952,8 +982,76 @@ def _print_append_only():
             print(f"append-only violated: {row['entry']}: {row['detail']}")
 
 
+def _scan_outcome(outcome):
+    """Validate the additive SD4a return contract, without reading diagnostics."""
+    malformed = ("tool", False, "scan-metadata")
+    if (not isinstance(outcome, tuple) or len(outcome) != 2
+            or not isinstance(outcome[1], list)
+            or not all(isinstance(v, str) for v in outcome[1])):
+        return malformed
+    verdict, details = outcome
+    if verdict == "clean" and not details:
+        return None
+    if verdict == "rework" and details and all(FINDING_LINE_RE.fullmatch(v) for v in details):
+        return None
+    if verdict != "undetermined" or not details or details[0] not in {
+            "lock-busy", "deadline", "timeout", "worktree", "tool"}:
+        return malformed
+    reason = details[0]
+    if reason in {"timeout", "deadline"}:
+        budgets = [v[7:] for v in details[1:] if v.startswith("budget=")]
+        exhausted = [v[15:] for v in details[1:] if v.startswith("scan-exhausted=")]
+        if len(budgets) != 1 or len(exhausted) != 1 or exhausted[0] not in {"true", "false"}:
+            return malformed
+        if budgets[0] == "unallocated":
+            return (reason, True, None) if exhausted[0] == "false" else malformed
+        try:
+            budget = float(budgets[0])
+        except ValueError:
+            return malformed
+        if not math.isfinite(budget) or not 60 <= budget <= 600:
+            return malformed
+        if budget == 600 and exhausted[0] == "true":
+            return reason, False, "scan-cap-exhausted"
+    return reason, True, None
+
+
+def _emit_tooling(subject, branch, main_sha, branch_sha, history, review, reason,
+                  retryable, hold_reason=None):
+    import nextstep
+    # A resolved identity comes only from this invocation, never a previous run.
+    resolved = bool(re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", branch_sha or ""))
+    event = dict(type="merge-gate-undetermined", subject=subject,
+                 ts=fold.NOW.isoformat(timespec="seconds"), branch=branch, reason=reason,
+                 sha=branch_sha if resolved else "", branch_sha=branch_sha if resolved else "",
+                 main_sha=main_sha or "", repo=_COMMON, cycle=review['ts'] if review else "",
+                 attempt="" if reason == "lock-busy" else uuid.uuid4().hex,
+                 retryable=retryable, retry_at=None, hold_reason=hold_reason,
+                 findings=[reason + ": gate could not complete"])
+    if not resolved or not _COMMON:
+        event.update(retryable=False, hold_reason=hold_reason or reason)
+    if review is None:
+        event.update(retryable=False, hold_reason="review-required")
+    elif event['retryable'] and reason != "lock-busy":
+        count, _ = nextstep._gate_attempts(history + [event], event)
+        if count >= 3:
+            event.update(retryable=False, hold_reason="retry-cap-exhausted")
+        else:
+            event['retry_at'] = (fold.NOW + timedelta(minutes=5 if count <= 1 else 15)).isoformat(timespec="seconds")
+    if LAST_APPEND_ONLY:
+        event["append_only"] = LAST_APPEND_ONLY
+    fold.append(["merge-gate-undetermined", subject] +
+                [f"{k}:={json.dumps(v)}" for k, v in event.items() if k not in {'type', 'subject', 'ts'}])
+    print("merge-gate: tooling hold — " + reason + "; " +
+          ("retry_at=" + event['retry_at'] if event['retry_at'] else event['hold_reason'] or "lock-busy"))
+    _print_append_only()
+    return 2
+
+
 def main_(argv):
-    global _RUN_ACTIVE
+    global _RUN_ACTIVE, _COMMON
+    _RESOLVED.clear()
+    _COMMON = ""
     branch = argv[0]
     if branch.startswith("-"):      # `doit gate --help` once appended a rework event with subject "--help"
         sys.exit(f"merge-gate: {branch!r} is not a branch\n{__doc__}")
@@ -974,6 +1072,11 @@ def main_(argv):
     os.environ["DOIT_LEDGER_FILE"] = os.environ.get("DOIT_GATE_LEDGER_FILE", "L-executor-0001.jsonl")
     subject = spec or branch
     gate_started = False
+    import nextstep
+    history = [e for e in fold.read_events() if e.get('subject') == subject
+               and nextstep._admitted_actor(e) is not None]
+    review = nextstep._clean_review({'evs': history})
+    main_sha = branch_sha = ""
     try:
         if grant:
             check_grant(grant, "--writes")     # the CLI was never checked at all
@@ -990,14 +1093,14 @@ def main_(argv):
         if status == "clean":
             token = _SCAN_SUBJECT.set(subject)
             try:
-                scan_verdict, scan_findings = secret_scan(_TOP, main_sha, branch_sha)
+                outcome = secret_scan(_TOP, main_sha, branch_sha)
             finally:
                 _SCAN_SUBJECT.reset(token)
-            if scan_verdict == "undetermined" and scan_findings and scan_findings[0] in {
-                    "lock-busy", "deadline", "timeout", "worktree", "tool"}:
-                print("merge-gate: hold — " + scan_findings[0])
-                return 2
-            if scan_verdict != "clean":
+            tooling = _scan_outcome(outcome)
+            if tooling:
+                return _emit_tooling(subject, branch, main_sha, branch_sha, history, review, *tooling)
+            scan_verdict, scan_findings = outcome
+            if scan_verdict == "rework":
                 status = "rework"
         # The shas are the verdict's subject. Without them nothing ties a `clean`
         # to the --no-ff that follows it, and no audit can say what was gated.
@@ -1022,22 +1125,24 @@ def main_(argv):
         _print_append_only()
         return 0 if status == "clean" else 1
     except Undetermined as e:
-        # ★ ONE Undetermined is not like the others. A real content conflict with a
-        # spec id is a re-dispatchable outcome — which paths collide, and whether
-        # this spec has collided before — not a human's decision. Every OTHER
-        # could-not-determine (a bad grant, an unknown ref, a shallow clone, a
-        # branch gated against itself) still reads as generic rework.
-        #
-        # The discriminator is the MESSAGE, and deliberately only the message —
-        # the precedent `grant_for()` sets two functions up (`if cli and "states
-        # no writes: grant" in str(e)`). It must not be "did gate() raise?":
-        # `check_grant`/`grant_for` raise BEFORE gate() runs, so a spec id with no
-        # content file on a genuinely conflicting branch would report a conflict
-        # and hide the grant error behind it.
-        if spec and "does not apply cleanly" in str(e):
-            ev = conflict_event(branch, main, spec)
-            if ev is not None:
-                return ev
+        if e.reason == "merge-conflict":
+            if spec:
+                ev = conflict_event(branch, main, spec)
+                if ev is not None:
+                    return ev
+                e = Undetermined("conflict diagnosis failed", reason="conflict-diagnostic", retryable=False)
+            else:
+                import conflict
+                try:
+                    proven = conflict.conflicted(branch, main, os.getcwd()).conflicts
+                except Undetermined:
+                    proven = False
+                e = Undetermined(str(e) if proven else "conflict diagnosis failed",
+                                 reason="conflict-diagnostic", retryable=False, guard=proven)
+        if not e.guard:
+            return _emit_tooling(subject, branch, main_sha or _RESOLVED.get(main, ""),
+                                 branch_sha or _RESOLVED.get(branch, ""), history, review,
+                                 e.reason, e.retryable, None if e.retryable else e.reason)
         fold.append(["merge-gate-rework", subject, f"branch={branch}", f"undetermined={e}"]
                     + ([f"append_only={json.dumps(LAST_APPEND_ONLY)}"]
                        if gate_started and LAST_APPEND_ONLY else []))

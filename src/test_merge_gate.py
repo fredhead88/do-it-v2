@@ -14,14 +14,14 @@ import merge_gate as mg
 
 # The direct-import contract also has a process-isolated selector. Reject typos
 # before running any fixture; an empty selection must never report success.
-if len(sys.argv) > 1 and sys.argv[1:] != ["--spec-1868-ac1"]:
-    sys.exit("usage: test_merge_gate.py [--spec-1868-ac1]")
+if len(sys.argv) > 1 and sys.argv[1:] not in (["--spec-1868-ac1"], ["--spec-1869-ac1"]):
+    sys.exit("usage: test_merge_gate.py [--spec-1868-ac1|--spec-1869-ac1]")
 
 
-def _spec_response(ac, body, success=True):
+def _spec_response(ac, body, success=True, spec="L-spec-1868"):
     import hashlib
     raw = json.dumps(body, sort_keys=True).encode()
-    print(json.dumps(dict(url="cli://L-spec-1868/" + ac, status=0 if success else 1,
+    print(json.dumps(dict(url="cli://" + spec + "/" + ac, status=0 if success else 1,
                          body_sha256=hashlib.sha256(raw).hexdigest(), body_excerpt=body)))
 
 
@@ -225,7 +225,7 @@ def spec1868_ac1():
                  patch.object(mg, "git", side_effect=recording_git):
                 self.assertEqual(mg.secret_scan(self.repo, "main", "work"), ("clean", []))
                 self.assertEqual(mg._TOP, str(other))
-            self.assertTrue(all(top == str(self.repo) for _, top, _ in trace))
+            self.assertTrue(all(top == str(self.repo.resolve()) for _, top, _ in trace))
             self.assertEqual(next(data for args, _, data in trace if args[0] == "diff"), b"repo-only-path\0")
             self.assertEqual(self.git("worktree", "list", "--porcelain", repo=other), before)
             self.assertFalse((other / ".git/doit-secret-scan-locks").exists())
@@ -381,7 +381,20 @@ def spec1868_ac2():
             return Proc()
 
         def scan(self):
-            return mg.secret_scan(self.repo, self.main, self.branch)
+            result = mg.secret_scan(self.repo, self.main, self.branch)
+            if result[0] == "undetermined" and result[1][0] in {"timeout", "deadline"}:
+                budgets = [x for x in result[1] if x.startswith("budget=")]
+                exhausted = [x for x in result[1] if x.startswith("scan-exhausted=")]
+                self.assertEqual(len(budgets), 1)
+                self.assertEqual(len(exhausted), 1)
+                self.assertIn(exhausted[0], {"scan-exhausted=true", "scan-exhausted=false"})
+                if budgets[0] == "budget=unallocated":
+                    self.assertEqual(exhausted, ["scan-exhausted=false"])
+                else:
+                    value = float(budgets[0].split("=", 1)[1])
+                    self.assertTrue(60 <= value <= 600)
+                    if value == 600: self.assertEqual(budgets, ["budget=600.0"])
+            return result
 
         def assert_restored(self):
             self.assertEqual((mg._TOP, mg._START, mg.DEADLINE, mg.DETECT_SECRETS_TIMEOUT),
@@ -490,11 +503,35 @@ def spec1868_ac2():
                 self.assertEqual(result[0], verdict)
                 self.assertEqual(len(self.calls)-offset, 2)
                 self.assertEqual([c["timeout"] for c in self.calls[offset:]], [66,66])
-                if verdict == "undetermined": self.assertEqual(result[1][0], "timeout")
+                if verdict == "undetermined":
+                    self.assertEqual(result[1][:3], ["timeout", "budget=132.0", "scan-exhausted=true"])
                 self.assert_restored()
             self.assertEqual(len(self.killed), 4)
             self.assertEqual(len(self.reaped), 4)
             observations.append(dict(case=self._testMethodName, outcomes=["clean","rework","timeout"], passes=2))
+
+        def test_1873_metadata_boundaries(self):
+            self.changed(190)
+            self.plan = [(None, 0, b"", b""), (None, 0, b"", b"")]
+            result = self.scan()
+            self.assertEqual(result[1][:3], ["timeout", "budget=600.0", "scan-exhausted=true"])
+            self.assert_restored()
+            with patch.dict(os.environ, DOIT_GATE_DEADLINE="60"):
+                self.plan = [(None, 0, b"", b"")]
+                result = self.scan()
+            self.assertEqual(result[1][:3], ["deadline", "budget=600.0", "scan-exhausted=false"])
+            self.assert_restored()
+            def enumeration_deadline(*args, **kw):
+                if args[0] == "diff":
+                    self.clock[0] += 61
+                    raise mg.Undetermined("enumeration exceeded setup bound")
+                return self.real_git(*args, **kw)
+            with patch.object(mg, "git", side_effect=enumeration_deadline):
+                result = self.scan()
+            self.assertEqual(result[1][:3], ["deadline", "budget=unallocated", "scan-exhausted=false"])
+            self.assert_restored()
+            observations.append(dict(case=self._testMethodName, exhausted_budget=600,
+                                     interrupted_budget=600, preallocation="unallocated"))
 
         def test_implicit_lifecycle_does_not_leak_large_budget(self):
             enumerations = iter([b"".join(str(n).encode()+b"\0" for n in range(1000)), b"one\0"])
@@ -558,7 +595,8 @@ def spec1868_ac2():
                          patch.object(mg, "secret_scan", return_value=("undetermined", [reason]+metadata)) as scan:
                         self.assertEqual(mg.main_(["work", "main"]), 2)
                         self.assertEqual(scan.call_count, 1)
-                    self.assertEqual(len(rows()), before)
+                    self.assertEqual(len(rows()), before + 1)
+                    self.assertEqual(rows()[-1]["type"], "merge-gate-undetermined")
                     self.assertFalse(mg._RUN_ACTIVE)
             for verdict, findings, rc, event in (("clean",[],0,"merge-gate-clean"),
                     ("rework",["  example.py:1 -- Secret Keyword"],1,"merge-gate-rework")):
@@ -572,7 +610,7 @@ def spec1868_ac2():
                 self.assertEqual(mg.main_(["work", "main"]), 1)
                 scan.assert_not_called()
             self.assertEqual(rows()[-1]["type"], "merge-gate-rework")
-            observations.append(dict(case=self._testMethodName, holds=10, controls=3, gate_events=3))
+            observations.append(dict(case=self._testMethodName, holds=10, controls=3, gate_events=13))
 
         def test_production_records_read_by_fresh_process(self):
             self.plan = [(None,0,b"",b""), (None,0,b"",b"")]
@@ -602,10 +640,250 @@ def spec1868_ac2():
     return result.testsRun > 0 and result.wasSuccessful()
 
 
+def spec1873_registration():
+    import contextlib
+    import unittest
+    from unittest.mock import patch
+
+    class Tooling(unittest.TestCase):
+        def test_real_append_presence_and_authority(self):
+            import fold
+            temporary = tempfile.TemporaryDirectory(dir=TMP)
+            self.addCleanup(temporary.cleanup)
+            root = pathlib.Path(temporary.name)
+            fields = dict(reason="tool", sha="", branch_sha="", main_sha="", branch="work",
+                          repo="", cycle="", attempt="", retryable=False, retry_at=None,
+                          hold_reason=None, findings=[])
+            historical = root / "events" / "L-executor-history.jsonl"
+            historical.parent.mkdir()
+            historical_bytes = b'{"v":1,"type":"merge-gate-clean","subject":"legacy","ts":"2026-10-01T00:00:00+00:00"}\n'
+            historical.write_bytes(historical_bytes)
+            args = ["merge-gate-undetermined", "L-spec-fixture"] + [f"{k}:={json.dumps(v)}" for k,v in fields.items()]
+            with patch.object(fold, "ROOT", root), patch.object(fold, "EVENTS", root / "events"), patch.dict(os.environ, DOIT_NO_POKE="1"):
+                for name in ("L-executor-fixture.jsonl", "L-tick-fixture.jsonl"):
+                    with patch.dict(os.environ, DOIT_LEDGER_FILE=name), contextlib.redirect_stdout(__import__('io').StringIO()):
+                        fold.append(args)
+                for key in ("subject", *fields):
+                    event = dict(type="merge-gate-undetermined", subject="L-spec-fixture", **fields)
+                    del event[key]
+                    self.assertIsNotNone(fold.required_reason(event), key)
+                    if key == "subject":
+                        continue
+                    with patch.dict(os.environ, DOIT_LEDGER_FILE="L-executor-fixture.jsonl"):
+                        with self.assertRaises(SystemExit):
+                            fold.append(["merge-gate-undetermined", "" if key == "subject" else "L-spec-fixture"] +
+                                        [f"{k}:={json.dumps(v)}" for k,v in fields.items() if k != key])
+                with patch.dict(os.environ, DOIT_LEDGER_FILE="L-builder-fixture.jsonl"):
+                    with self.assertRaises(SystemExit):
+                        fold.append(args, strict=True)
+                    with self.assertRaises(SystemExit):
+                        fold.append(args + ['actor=executor'])
+            code = "import fold,json,ledger_files; rows=fold.read_events(); print(json.dumps([dict(e) for e in rows]))"
+            output = subprocess.check_output([sys.executable, "-B", "-c", code],
+                env=dict(os.environ, DOIT_ROOT=str(root), PYTHONPATH=str(pathlib.Path(mg.__file__).parent)), text=True)
+            rows = json.loads(output)
+            self.assertEqual(historical.read_bytes(), historical_bytes)
+            self.assertEqual(len(rows), 3)
+            self.assertNotIn('retryable', next(r for r in rows if r['subject']=='legacy'))
+            for row in (r for r in rows if r['subject']!='legacy'):
+                for key, value in fields.items(): self.assertEqual(row[key], value)
+
+    result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(Tooling))
+    print(f"L-spec-1873 registration: {result.testsRun} executed")
+    return result.testsRun > 0 and result.wasSuccessful()
+
+
+def spec1869_ac1():
+    import contextlib
+    import io
+    import unittest
+    from datetime import datetime, timezone
+    from unittest.mock import patch
+
+    observations = []
+
+    class Disposition(unittest.TestCase):
+        def setUp(self):
+            self.tmp = tempfile.TemporaryDirectory(dir=TMP)
+            self.addCleanup(self.tmp.cleanup)
+            self.root = pathlib.Path(self.tmp.name)
+            self.repo = self.root / 'repo'
+            self.repo.mkdir()
+            self.old = os.getcwd()
+            os.chdir(self.repo)
+            self.addCleanup(os.chdir, self.old)
+            for args in [('init', '-qb', 'main'), ('config', 'user.name', 'Fixture'),
+                         ('config', 'user.email', 'fixture@example.invalid')]:
+                self.git(*args)
+            (self.repo / 'allowed.txt').write_text('before\n')
+            self.git('add', '.')
+            self.git('commit', '-qm', 'base')
+            self.git('checkout', '-qb', 'work')
+            (self.repo / 'allowed.txt').write_text('after\n')
+            self.git('commit', '-qam', 'branch')
+            self.git('checkout', '-q', 'main')
+            self.sid = 'L-spec-9001'
+            (self.root / 'content').mkdir()
+            (self.root / 'content' / (self.sid + '.md')).write_text('Writes: allowed.txt\n')
+            self.stack = contextlib.ExitStack()
+            self.addCleanup(self.stack.close)
+            for name, value in [('ROOT', self.root), ('EVENTS', self.root / 'events'),
+                                ('NOW', datetime(2026, 10, 29, 12, tzinfo=timezone.utc))]:
+                self.stack.enter_context(patch.object(mg.fold, name, value))
+            self.stack.enter_context(patch.dict(os.environ, DOIT_ROOT=str(self.root), DOIT_NO_POKE='1',
+                                                DOIT_GATE_LEDGER_FILE='L-executor-test.jsonl',
+                                                DOIT_LEDGER_FILE='L-executor-test.jsonl'))
+            self.stack.enter_context(patch.object(mg.freeze, 'state', return_value=None))
+            self.stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            with patch.dict(os.environ, DOIT_LEDGER_FILE='L-reviewer-fixture.jsonl'):
+                mg.fold.append(['review', self.sid, 'n_blocking:=0', 'ts=2026-10-29T11:00:00+00:00'])
+
+        def git(self, *args):
+            return subprocess.check_output(['git', *args], text=True, stderr=subprocess.DEVNULL).strip()
+
+        def rows(self):
+            return [e for e in mg.fold.read_events(use_cache=False) if e['type'].startswith('merge-gate-')]
+
+        def invoke(self, expected, reason=None, hold=None):
+            before = len(self.rows())
+            rc = mg.main_(['work', 'main', '--spec', self.sid])
+            rows = self.rows()
+            self.assertEqual(rc, expected)
+            self.assertEqual(len(rows), before + 1)
+            row = rows[-1]
+            self.assertEqual(row['type'], 'merge-gate-' + {0:'clean', 1:'rework', 2:'undetermined'}[expected])
+            if reason:
+                self.assertEqual(row['reason'], reason)
+                self.assertEqual(row['hold_reason'], hold)
+            observations.append(dict(exit_code=rc, event_count=1, reason=row.get('reason'),
+                                     retryable=row.get('retryable'), hold_reason=row.get('hold_reason'),
+                                     retry_at=row.get('retry_at')))
+            return row
+
+        def test_configuration_matrix(self):
+            for key, value in [('DOIT_MIGRATIONS', '['), ('DOIT_MIGRATIONS', 'never/'),
+                               ('DOIT_GIT_TIMEOUT', 'oops'), ('DOIT_GIT_TIMEOUT', 'nan'),
+                               ('DOIT_GATE_DEADLINE', 'inf'), ('DOIT_REVERT_DEPTH', '0'),
+                               ('DOIT_REVERT_MAX_PATHS', '-1')]:
+                with self.subTest(key=key, value=value), patch.dict(os.environ, {key:value}):
+                    self.invoke(2, 'configuration', 'configuration')
+
+        def test_origin_inventory(self):
+            import time
+            causes = [
+                ('ref-resolution', lambda: mg.resolve('missing')),
+                ('repository-precondition', lambda: mg.preflight(str(self.root / 'missing'))),
+                ('malformed-history-output', lambda: self.bad_blobs()),
+                ('deadline', lambda: self.deadline()),
+                ('gate-tooling', lambda: self.os_error()),
+                ('gate-tooling', lambda: self.git_error()),
+            ]
+            for reason, cause in causes:
+                with self.subTest(reason=reason), patch.object(mg, 'gate', side_effect=lambda *a: cause()):
+                    # Run origin helpers with a real gate run's pinned state.
+                    mg._START = time.monotonic()
+                    mg.load_config()
+                    mg._TOP = str(self.repo)
+                    self.invoke(2, reason, reason if reason not in {'deadline','gate-tooling'} else reason)
+            row = mg.main_(['main', 'main', '--spec', self.sid])
+            self.assertEqual(row, 2)
+            self.assertEqual(self.rows()[-1]['reason'], 'nothing-to-gate')
+
+        def bad_blobs(self):
+            with patch.object(mg, 'git', return_value=b''):
+                mg.blobs(['a:one', 'a:two'])
+
+        def deadline(self):
+            with patch.object(mg.time, 'monotonic', return_value=mg._START + 10000):
+                mg.run(('status',))
+
+        def os_error(self):
+            with patch.object(mg.subprocess, 'run', side_effect=OSError('synthetic')):
+                mg.run(('status',))
+
+        def git_error(self):
+            with patch.object(mg, 'run', return_value=subprocess.CompletedProcess([], 3, b'', b'synthetic')):
+                mg.git('status')
+
+        def test_scan_matrix_and_metadata(self):
+            cases = [('clean', [], 0, None, None),
+                     ('rework', ['  file.py:1 -- Secret Keyword'], 1, None, None),
+                     ('undetermined', ['lock-busy'], 2, 'lock-busy', None),
+                     ('undetermined', ['worktree'], 2, 'worktree', None),
+                     ('undetermined', ['tool'], 2, 'tool', None)]
+            for reason in ('timeout', 'deadline'):
+                for budget, exhausted in [('60.0','true'), ('600.0','false'), ('unallocated','false'), ('600.0','true')]:
+                    cases.append(('undetermined', [reason, 'budget='+budget, 'scan-exhausted='+exhausted], 2,
+                                  reason, 'scan-cap-exhausted' if (budget,exhausted)==('600.0','true') else None))
+                for details in [[], ['budget=nan','scan-exhausted=true'], ['budget=59','scan-exhausted=true'],
+                                ['budget=601','scan-exhausted=false'], ['budget=inf','scan-exhausted=false'],
+                                ['budget=60','budget=60','scan-exhausted=false'],
+                                ['budget=60','scan-exhausted=false','scan-exhausted=true'],
+                                ['budget=unallocated','scan-exhausted=true'], ['budget=60','scan-exhausted=maybe']]:
+                    cases.append(('undetermined', [reason, *details], 2, 'tool', 'scan-metadata'))
+            cases += [('unexpected', [], 2, 'tool', 'scan-metadata'), ('clean', ['fake'], 2, 'tool', 'scan-metadata')]
+            for verdict, details, rc, reason, hold in cases:
+                with self.subTest(verdict=verdict, details=details):
+                    # An authorized unblock isolates the matrix cases' retry budgets.
+                    with patch.dict(os.environ, DOIT_LEDGER_FILE='L-operator-fixture.jsonl'):
+                        mg.fold.append(['unblocked', self.sid, 'ts=2026-10-29T12:00:01+00:00'])
+                    with patch.object(mg, 'secret_scan', return_value=(verdict, details)) as scan:
+                        row = self.invoke(rc, reason, hold)
+                    self.assertEqual(scan.call_count, 1)
+                    if rc == 2:
+                        self.assertEqual(row['cycle'], '2026-10-29T11:00:00+00:00')
+                        self.assertEqual(row['repo'], str((self.repo / '.git').resolve()))
+                        self.assertEqual(row['branch_sha'], self.git('rev-parse','work'))
+                        if reason == 'lock-busy':
+                            self.assertEqual((row['attempt'], row['retry_at']), ('', None))
+
+        def test_guard_short_circuits_and_failed_conflict_diagnosis(self):
+            for grant in ([], ['English'], ['**']):
+                with self.subTest(grant=grant), patch.object(mg, 'secret_scan') as scan:
+                    with patch.object(mg, 'grant_for', side_effect=lambda *a: mg.check_grant(grant, 'fixture')):
+                        self.invoke(1)
+                    scan.assert_not_called()
+            for text in ('no grant\n', 'Writes: English prose\n', 'Writes:\n',
+                         '---\nwrites: [invalid\n---\n', '---\nwrites: text\n---\n'):
+                with self.subTest(text=text), patch.object(mg, 'grant_for', side_effect=lambda *a: mg.grant_from_text(text)):
+                    self.invoke(1)
+            for spec_id in ('../../bad', 'L-spec-missing'):
+                with patch.object(mg, 'grant_for', side_effect=lambda *a: mg.writes_grant(spec_id)):
+                    self.invoke(1)
+            with patch.object(mg, 'REVERT_MAX_PATHS', 1), patch.object(mg, 'gate', side_effect=lambda *a: mg.revert_window(['a','b'], 'main')):
+                self.invoke(1)
+            with patch.object(mg, 'gate', side_effect=mg.Undetermined('synthetic', reason='merge-conflict')), \
+                 patch.object(mg, 'conflict_event', return_value=None):
+                self.invoke(2, 'conflict-diagnostic', 'conflict-diagnostic')
+
+        def test_retry_budget_emission_and_review_required(self):
+            with patch.object(mg, 'secret_scan', return_value=('undetermined',['tool'])):
+                rows = [self.invoke(2) for _ in range(3)]
+            self.assertEqual([r['retry_at'] for r in rows], ['2026-10-29T12:05:00+00:00',
+                             '2026-10-29T12:15:00+00:00', None])
+            self.assertEqual(rows[-1]['hold_reason'], 'retry-cap-exhausted')
+            self.assertEqual(len({r['attempt'] for r in rows}), 3)
+            mg.fold.append(['build-done', self.sid, 'ts=2026-10-29T12:00:01+00:00'])
+            with patch.object(mg, 'secret_scan', return_value=('undetermined',['tool'])):
+                row = self.invoke(2, 'tool', 'review-required')
+            self.assertEqual(row['cycle'], '')
+
+    result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(Disposition))
+    count = result.testsRun
+    # Registration includes real append, authority and fresh-process ledger recovery.
+    registered = spec1873_registration()
+    _spec_response('AC1-routing', dict(executed=count, registration=registered, cases=observations, failures=len(result.failures)+len(result.errors)), result.wasSuccessful() and registered, spec='L-spec-1869')
+    print(f'L-spec-1869 AC1: {count} executed; registration executed; success={result.wasSuccessful() and registered}')
+    return count > 0 and result.wasSuccessful() and registered
+
+
+if sys.argv[1:] == ["--spec-1869-ac1"]:
+    sys.exit(0 if spec1869_ac1() else 1)
+
 if sys.argv[1:] == ["--spec-1868-ac1"]:
     sys.exit(0 if spec1868_ac1() else 1)
 
-GRANT, ok = ["src/*", "docs/"], [spec1868_ac1(), spec1868_ac2()]
+GRANT, ok = ["src/*", "docs/"], [spec1869_ac1(), spec1868_ac1(), spec1868_ac2()]
 CONTENT = pathlib.Path(os.environ["DOIT_ROOT"]) / "content"
 CONTENT.mkdir(parents=True, exist_ok=True)
 (CONTENT / "L-spec-0001.md").write_text("# spec\n\nwrites: src/*, docs/\n")
@@ -710,11 +988,11 @@ try:
     mg.gate("no-such-branch", "main", GRANT); check("unresolvable ref raises", False)
 except mg.Undetermined:
     check("unresolvable ref raises Undetermined", True)
-check("undetermined exits rework, not clean", mg.main_(["no-such-branch", "main"]) == 1)
+check("unresolvable ref exits tooling hold", mg.main_(["no-such-branch", "main"]) == 2)
 LEDGER = pathlib.Path(os.environ["DOIT_ROOT"]) / "events" / "L-executor-test.jsonl"
 ev = [json.loads(l) for l in LEDGER.read_text().splitlines()]
 check("the stop is in the ledger",
-      ev[-1]["type"] == "merge-gate-rework" and "undetermined" in ev[-1])
+      ev[-1]["type"] == "merge-gate-undetermined" and ev[-1]["reason"] == "ref-resolution")
 
 # 7 — the caller contract: exit code, subject, and the rework payload.
 d, _ = repo()
@@ -1094,8 +1372,9 @@ n_conflict = len(of_type("conflict-rework"))
 for argv, why in ((["no-such-branch", "main", "--spec", "L-spec-0001"], "an unknown ref"),
                   (["main", "main", "--spec", "L-spec-0001"], "a branch gated against itself"),
                   (["work", "main", "--spec", "L-spec-none"], "a spec with no content file")):
-    check(f"★ with --spec, {why} is still generic rework", mg.main_(argv) == 1
-          and events()[-1]["type"] == "merge-gate-rework")
+    expected = 1 if "content file" in why else 2
+    check(f"★ with --spec, {why} has cause-based disposition", mg.main_(argv) == expected
+          and events()[-1]["type"] == ("merge-gate-rework" if expected == 1 else "merge-gate-undetermined"))
 check("★ not one of the three emitted conflict-rework (a grant error is never "
       "masked behind a conflict verdict)", len(of_type("conflict-rework")) == n_conflict)
 
@@ -1402,8 +1681,8 @@ finally:
     mg.scan_deadline = _orig_scan_budget
 ev = events()[-1]
 check("AC4(b) two timeouts -> infrastructure hold, no rework",
-      rc == 2 and ev["type"] == "infra-failure" and ev.get("backend") == "merge-gate"
-      and ev.get("retry_at"))
+      rc == 2 and ev["type"] == "merge-gate-undetermined"
+      and ev.get("reason") == "tool" and any(e["type"] == "infra-failure" for e in events()))
 _ps = subprocess.run(["ps", "-ef"], capture_output=True, text=True).stdout
 check("★ AC4(b) the whole process group was killed, not just bash",
       "L_SPEC_0430_AC4B_MARKER" not in _ps)
@@ -1826,7 +2105,7 @@ try:
     output = io.StringIO()
     with contextlib.redirect_stdout(output):
         rc = mg.main_(["work", "main"])
-    check("Undetermined preserves judged append event and output", rc == 1 and
+    check("Undetermined preserves judged append event and output", rc == 2 and
           events()[-1].get("append_only") == mg.LAST_APPEND_ONLY and
           len(mg.LAST_APPEND_ONLY) == 1 and
           "append-only ok: deploy.sh::REQUIRED_ACTIVATIONS" in output.getvalue())
@@ -1864,7 +2143,8 @@ with patch.object(mg, "gate", return_value=([], [], "main-sha", "branch-sha", "t
      patch.object(mg, "secret_scan", return_value=(verdict, findings)), \
      patch.object(mg.fold, "append", side_effect=infra_events.append):
     check("infra main verdict is hold", mg.main_(["work", "main"]) == 2)
-check("infra scan appends no rework or findings", len(infra_events) == 1)
+check("infra main appends exactly one tooling verdict", len(infra_events) == 2
+      and infra_events[-1][0] == "merge-gate-undetermined")
 body = json.dumps(dict(events=infra_events, diagnostics=findings, partial_worktrees_cleaned=len(removed_worktrees)), sort_keys=True).encode()
 print(json.dumps(dict(criterion="AC4", url="cli://infra-retry/AC4", status=0 if all(ok) else 1,
                      body_sha256=hashlib.sha256(body).hexdigest(), body_excerpt=json.loads(body))))

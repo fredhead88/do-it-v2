@@ -394,18 +394,19 @@ class Disposition(unittest.TestCase):
                 self.assertEqual(reaped, [1234567] * outcomes.count("timeout"))
                 if outcomes == ("timeout", "timeout"):
                     self.assertEqual(rc, 2)
-                    self.assertEqual(kinds, ["infra-failure"])
+                    self.assertEqual(kinds, ["infra-failure", "merge-gate-undetermined"])
                     self.assertEqual(rows[0]["backend"], "merge-gate")
                     self.assertEqual(rows[0]["retry_at"], (NOW + timedelta(minutes=5)).isoformat(timespec="seconds"))
                 elif outcomes[-1] == "clean":
                     self.assertEqual((rc, kinds), (0, ["merge-gate-clean"]))
                 elif outcomes == ("other",):
-                    self.assertEqual((rc, kinds), (2, []))
+                    self.assertEqual((rc, kinds), (2, ["merge-gate-undetermined"]))
+                    self.assertEqual(rows[-1]["reason"], "tool")
                 else:
                     self.assertEqual((rc, kinds), (1, ["merge-gate-rework"]))
                     self.assertEqual(rows[0]["reason"], "secret-scan")
         self.response("AC4", {"timeout_clean_scans": 2, "timeout_timeout_scans": 2,
-            "double_timeout_exit": 2, "double_timeout_events": ["infra-failure"],
+            "double_timeout_exit": 2, "double_timeout_events": ["infra-failure", "merge-gate-undetermined"],
             "retry_at": (NOW + timedelta(minutes=5)).isoformat(timespec="seconds"),
             "group_kill_reap_cleanup": True, "findings_after_timeout": "rework",
             "other_undetermined_scans": len(scans)})
