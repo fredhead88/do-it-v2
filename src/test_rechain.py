@@ -330,6 +330,8 @@ class RechainTests(unittest.TestCase):
         ledger = events_dir / "L-executor-local.jsonl"
         now = datetime.now(timezone.utc)
         launches = []
+        (root / "repos").mkdir()
+        (root / "repos/albert-scott").symlink_to(self.fx.repo, target_is_directory=True)
         def emit(kind, sid, **fields):
             reason = dispatch.emit(ledger, {"subject": sid}, kind, **fields)
             self.assertIsNone(reason)
@@ -353,7 +355,9 @@ class RechainTests(unittest.TestCase):
                 with patch.object(dispatch, 'now', return_value=(now + timedelta(seconds=i-10)).isoformat()):
                     emit('queue-add', entry[0], project='albert-scott', branch=entry[1], rule='operator')
             self.assertEqual(merge_queue.next_candidate(fold.read_events(use_cache=False)), 'a')
-            self.assertEqual(merge_queue.window_run('albert-scott', runner=runner), 0)
+            self.assertEqual(merge_queue.window_run('albert-scott', runner=runner,
+                precheck_runner=lambda project: dict(master=git(self.fx.repo, 'rev-parse', 'master'),
+                    ts=datetime.now(timezone.utc).isoformat(), clean=[])), 0)
             first = git(self.fx.repo, 'rev-parse', 'master')
             # The explicit opt-out leaves the conflicting second migration unmerged.
             with patch.dict(os.environ, DOIT_WINDOW_RECHAIN='off'):
@@ -363,7 +367,9 @@ class RechainTests(unittest.TestCase):
             self.assertIn('b', clashes)
             self.assertNotIn('DOIT_WINDOW_RECHAIN', os.environ)
             self.assertEqual(merge_queue.next_candidate(fold.read_events(use_cache=False)), 'b')
-            self.assertEqual(merge_queue.window_run('albert-scott', runner=runner), 0)
+            self.assertEqual(merge_queue.window_run('albert-scott', runner=runner,
+                precheck_runner=lambda project: dict(master=git(self.fx.repo, 'rev-parse', 'master'),
+                    ts=datetime.now(timezone.utc).isoformat(), clean=[])), 0)
             final = git(self.fx.repo, 'rev-parse', 'master')
             self.assertNotEqual(first, final)
             self.assertEqual(rechain.routed_head(self.fx.repo, final), 'b')

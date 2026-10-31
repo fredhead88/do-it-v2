@@ -521,59 +521,106 @@ def window_run(project, *, runner=None, launcher=None, detach=False, now=None, p
                     _train_emit(ledger_file, 'nightly:' + project, 'merge-frozen',
                                 project=project, reason=reason)
                 return 3
+            # Selection uses the configured capacity, independent of red-rate tuning.
+            import tomllib
+            try:
+                with open(_look_toml(), 'rb') as stream:
+                    configured = tomllib.load(stream).get('merge_queue', {}).get('batch_cap')
+            except (OSError, ValueError, TypeError, AttributeError) as exc:
+                raise ValueError('configuration batch_cap undetermined') from exc
+            if type(configured) is not int or configured < 1:
+                raise ValueError('configuration batch_cap must be a positive integer')
+            if configured > window_gate.max_merges(os.environ):
+                raise ValueError('configuration batch_cap exceeds gate max_merges')
+
+            def refuse(reason, specs):
+                attempt = 'window-' + uuid.uuid4().hex
+                recovery = ('Operator: repair the repository/branch then retry; for an invalid branch use '
+                            'doit queue remove SPEC --why WHY (' + ', '.join(specs) + ')')
+                try:
+                    _train_emit(ledger_file, attempt, 'window-refused', window=attempt,
+                                project=project, holder_window='<unknown>', holder_pid=-1,
+                                reason=reason, specs=specs, recovery=recovery)
+                except (OSError, RuntimeError, ValueError) as exc:
+                    raise ValueError(f'{reason}: refusal persistence failed: {exc}') from exc
+                print(f"window-run: {reason}: {', '.join(specs)}; {recovery}", file=sys.stderr)
+                return 3
+
             entries = queue(events, project)
             tiers = {'L-charter-0072': 0, 'L-charter-0074': 1}
             entries.sort(key=lambda row: tiers.get(
                 dispatch.resolve_charter(events, row['spec'], None), 2))
-            head = entries[0]['spec']
-            cap = effective_cap(events, now)
-            record_cap(cap, events, ledger_file)
             try:
                 repo, master = _repository(project)
             except (OSError, ValueError):
-                # An unavailable repository gives no safe mixed-window footprint.
-                repo, master = None, None
+                return refuse('repository-undetermined', [r['spec'] for r in entries])
             import precheck
             checked = precheck.selection(events, project, repo, master, now, precheck_runner)
-            excluded = 0
-            if checked is not None:
-                by_spec = {row['spec']: row for row in entries}
-                ordered = [by_spec[sid] for sid in checked['clean'] if sid in by_spec]
-                excluded = len(entries) - len(ordered)
-                print(f'window-run: precheck excluded {excluded} spec(s); reason=precheck-exclusions')
-                entries = ordered
-                if not entries:
-                    print('window-run: no precheck-clean candidates')
-                    return 3
-                head = entries[0]['spec']
-            footprints, risky = {}, set()
+            # A synchronous check may have appended terminal outcomes or red evidence.
+            events = _ordered(window_gate.train_events())
+            _window_reconcile(events, ledger_file)
+            events = _ordered(window_gate.train_events())
+            entries = queue(events, project)
+            entries.sort(key=lambda row: tiers.get(
+                dispatch.resolve_charter(events, row['spec'], None), 2))
+
+            # Queue membership is retained for rework. Only a later queue-add
+            # clears a red result, including ledger ties at equal timestamps.
+            red = set()
+            for event in events:
+                sid = event.get('subject')
+                if event['type'] == 'queue-add':
+                    red.discard(sid)
+                elif event['type'] == 'precheck-red':
+                    red.add(sid)
+            readiness = {}
             for row in entries:
-                paths = spec_paths(repo, master, row['branch']) if repo is not None else None
-                footprints[row['spec']] = None if paths is None else {path for _, path in paths}
-                if is_risky(paths):
-                    risky.add(row['spec'])
-            # Keep charter priority and FIFO ties; overlap never displaces ready work.
-            eligible = [row['spec'] for row in entries
-                        if row['spec'] not in risky and footprints[row['spec']] is not None]
-            if head in risky or footprints.get(head) is None:
-                eligible = [head]
-                reason = 'solo-head'
-            elif len(eligible) < len(entries):
-                reason = 'safety-exclusions'
-            elif len(entries) == 1:
-                reason = 'sole-eligible'
-            elif len(eligible) <= cap['cap']:
-                reason = 'all-ready'
-            else:
-                reason = 'effective-cap'
-            if excluded:
-                reason = 'precheck-exclusions'
-            specs = eligible[:cap['cap']]
-            print(f'window-run: selected {len(specs)}; deferred {len(entries) - len(specs)} '
-                  f'(reason={reason})')
+                sid = row['spec']
+                if sid in red:
+                    readiness[sid] = 'precheck-red'
+                if checked is not None and lane_rules._time(checked['ts']) >= lane_rules._time(row['added_at']):
+                    if sid in checked.get('guard_red', {}):
+                        readiness[sid] = 'precheck-red'
+                    elif sid in checked.get('conflict_master', {}) and sid not in readiness:
+                        readiness[sid] = 'conflict-master'
+            footprints = {}
+            for row in entries:
+                sid = row['spec']
+                if sid in readiness:
+                    continue
+                paths = spec_paths(repo, master, row['branch'])
+                footprints[sid] = None if paths is None else {path for _, path in paths}
+            unknown = [sid for sid, paths in footprints.items() if paths is None]
+            if unknown:
+                return refuse('footprint-undetermined', unknown)
+            specs, skipped = [], []
+            for row in entries:
+                sid = row['spec']
+                blockers, shared = [], set()
+                reason = readiness.get(sid)
+                if reason is None:
+                    for selected in specs:
+                        overlap = footprints[sid] & footprints[selected]
+                        if overlap:
+                            blockers.append(selected)
+                            shared.update(overlap)
+                    if blockers:
+                        reason = 'footprint-conflict'
+                    elif len(specs) >= configured:
+                        reason = 'cap-reached'
+                if reason is not None:
+                    skipped.append(dict(spec=sid, reason=reason, conflicts_with=blockers, paths=sorted(shared)))
+                else:
+                    specs.append(sid)
+            print(f'window-run: selected {len(specs)}; skipped {len(skipped)}; '
+                  f'exclusions={json.dumps(skipped)}')
+            if not specs:
+                print('window-run: no merge-ready candidates')
+                return 3
+            reason = 'selection-exclusions' if skipped else 'sole-eligible' if len(specs) == 1 else 'all-ready'
             window = 'window-' + uuid.uuid4().hex
             _train_emit(ledger_file, window, 'queue-batch', project=project, specs=','.join(specs),
-                        reason=reason, cap=cap['cap'], queue_len=len(entries) + excluded,
+                        reason=reason, cap=configured, queue_len=len(entries), taken=specs, skipped=skipped,
                         precheck=checked['ts'] if checked is not None else 'none')
             argv = ['doit', 'gate-window', window, '--project', project, '--specs', ','.join(specs)]
             if runner is not None:
