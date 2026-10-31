@@ -739,8 +739,8 @@ class RulingExecutionTests(RulingMixin, unittest.TestCase):
                 self.assertEqual(bool(self.due(sample)), not clears, (action, change))
                 results.append(dict(action=action, change=change, cleared=clears))
             if action == 'hold':
-                sample = evs + [dict(execution, waits_for='other')]
-                self.assertIn('waits for other', self.one(sample).reason)
+                sample = evs + [dict(execution, waits_for='L-spec-9003')]
+                self.assertIn('waits for L-spec-9003', self.one(sample).reason)
                 context = dict(sid=SID, evs=ns._snapshot(sample, {})[1][SID],
                                spec=dict(state='written'), now=NOW)
                 self.assertIsNotNone(ns._ruling_step(context, {}, {}))

@@ -664,6 +664,26 @@ def _check_dispatch_failures(events, root, briefs, answered):
         reading = {"role": role, "consecutive": len(newest),
                   "class": next(iter(classes), None), "why": newest[-1].get("why") if newest else None}
         _settle("repeat-failure", role, "thinker", bad, reading, events, root, briefs, answered)
+def _check_autodispatch_failures(events, root, briefs, answered):
+    """Only filename-authorized, explicitly classified passes are trustworthy."""
+    from autodispatch import _hold_order
+    ticks = sorted((e for e in events if e.get('type') == 'tick'
+                    and fold.actor_of(str(e.get('_src') or '').rsplit(':', 1)[0]) == 'tick'),
+                   key=_hold_order)
+    if not ticks:
+        return
+    failures = []
+    for e in reversed(ticks):
+        if e.get('autodispatch_pass_failed') is not True:
+            break
+        failures.append(e)
+    reading = dict(consecutive=len(failures),
+                   sources=[e.get('_src') for e in reversed(failures)])
+    if len(failures) >= STREAK or ticks[-1].get('autodispatch_pass_failed') is False:
+        _settle('autodispatch-repeat-failure', 'autodispatch', 'executor',
+                len(failures) >= STREAK, reading, events, root, briefs, answered)
+
+
 def _is_spec_writer_spawn(sid):
     parts = sid.split("-")
     return len(parts) >= 3 and "-".join(parts[1:-1]) == "spec-writer"
@@ -1118,6 +1138,7 @@ def run(events, *, now=None, runner=None, root=None, toml_path=None, dry_run=Fal
         _check_heartbeat_missed(events, now, root, briefs)
         _check_lane_rules(events, now, root, briefs)
         _check_dispatch_failures(events, root, briefs, answered)
+        _check_autodispatch_failures(events, root, briefs, answered)
         _check_spec_misrouted(events, root, briefs)
         _check_dispatchable_stale(events, now, root, briefs, folded=evaluation_fold())
         _check_grades_per_shipped(events, now, root, briefs, answered, th, folded=evaluation_fold())

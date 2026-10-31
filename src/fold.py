@@ -796,6 +796,12 @@ BLOCK_ORDER = {
 }
 
 
+def valid_dependency(value):
+    """Dependency holds name exactly one numeric spec identifier."""
+    import re
+    return isinstance(value, str) and re.fullmatch(r'L-spec-[0-9]+', value) is not None
+
+
 def required_reason(e):
     """Field-only, actor-blind: `None` when `e` carries what its type requires (or
     requires nothing — every type outside `REQUIRED` and `escalation-blocking`).
@@ -803,6 +809,8 @@ def required_reason(e):
     `admits`'s alone. Both strict and in-process append refuse missing fields;
     fold deliberately does not apply this check to historical ledger rows."""
     t = e.get("type")
+    if t == "dependency-hold" and not valid_dependency(e.get("waits_for")):
+        return "dependency-hold waits_for= must be a string matching L-spec-[0-9]+"
     if t == "escalation-blocking":
         if escalation_ok(e):
             return None

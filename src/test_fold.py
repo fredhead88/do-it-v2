@@ -4124,7 +4124,7 @@ def test_dependency_hold_vocabulary():
             mock.patch.object(fold, "PROJECT", "do-it-v2"), \
             mock.patch.dict(os.environ, {"DOIT_ROOT": directory, "DOIT_NO_POKE": "1",
                                          "DOIT_LEDGER_FILE": "L-thinker-0001.jsonl"}):
-        argv = ["dependency-hold", "L-spec-1043", "waits_for=L-spec-DEP", "why=needs producer"]
+        argv = ["dependency-hold", "L-spec-1043", "waits_for=L-spec-9002", "why=needs producer"]
         fold.append(argv)
         path = fold.EVENTS / "L-thinker-0001.jsonl"
         before = path.read_bytes()
@@ -4141,7 +4141,7 @@ def test_dependency_hold_vocabulary():
         assert len(events) == 1 and ignored == []
         kept = subjects["L-spec-1043"]
         assert kept == events and kept[0]["actor"] == "thinker"
-        assert kept[0]["waits_for"] == "L-spec-DEP" and kept[0]["why"] == "needs producer"
+        assert kept[0]["waits_for"] == "L-spec-9002" and kept[0]["why"] == "needs producer"
         assert "actor" not in json.loads(path.read_text())
     print("dependency-hold AC2 ok")
 
