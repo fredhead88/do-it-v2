@@ -579,7 +579,10 @@ class VanishedRetryTests(unittest.TestCase):
                             self.assertIn('operator decision', step.clears)
                         elif offset == -1:
                             self.assertIsNone(step.action)
-                            self.assertIn('next_retry_at', step.reason)
+                            if role == 'grader':
+                                self.assertEqual(step.reason, 'retry-wait: ' + deadline.isoformat())
+                            else:
+                                self.assertIn('next_retry_at', step.reason)
                         else:
                             self.assertEqual((step.action, step.owner, step.since), (action, 'tick', trigger['ts']))
                             self.assertEqual(step.trigger, trigger['_src'])
@@ -621,6 +624,8 @@ class VanishedRetryTests(unittest.TestCase):
                 clean, _, _ = self.fixture(action)
                 for reason in ('bundle-pending', 'duplicate-dispatch', 'dispatch-in-progress'):
                     refusal = event('spawn-failed', -2, spawn=f'L-{role}-9898', role=role, reason=reason)
+                    if role == 'grader' and reason == 'dispatch-in-progress':
+                        refusal['why'] = 'another dispatch holds the subject lock'
                     history = attempts.history(ns._history_events(clean+[refusal]), trigger, role, now=NOW)
                     self.assertEqual((history.consumed, history.n_failed), (False, 0))
                     refused = self.one(clean+[refusal])
@@ -1250,6 +1255,232 @@ class GateToolingTests(unittest.TestCase):
             # A build alone still requires a new clean review before another gate.
             self.assertEqual(self.one(base + [built]).reason, 'review-required')
             self.assertNotIn(self.one(base + [blocked, built]).action, {'rebuild', 'gate', 'enqueue'})
+
+
+class GraderRetryTests(unittest.TestCase):
+    """Grading has distinct transport, checker-request and genuine budgets."""
+
+    def setUp(self):
+        self.rules = lr.load()
+
+    steps = NextStepTests.steps
+    one = NextStepTests.one
+
+    def fixture(self, action='grade'):
+        rows = [event('spec-written', -120),
+                event('build-done', -100, actor='builder', status='DONE', ready_sha='tip')]
+        if action == 'regrade':
+            rows.append(event('decision', -90, actor='thinker', regrade='yes'))
+        return rows
+
+    def refusal(self, minute=-4, reason='bundle-pending', number=1, **extra):
+        return event('spawn-failed', minute, spawn=f'L-grader-{9100+number}',
+                     reason=reason, **extra)
+
+    def signed(self, case, data):
+        body = json.dumps(data, sort_keys=True, default=str)
+        print(json.dumps(dict(url='cli://grader-retry/' + case, status=0,
+                              body_sha256=hashlib.sha256(body.encode()).hexdigest(), body_excerpt=body)))
+
+    def test_retry1851_AC1_detached_marker_preserves_trigger_and_request_window(self):
+        for action in ('grade', 'regrade'):
+            rows = self.fixture(action)
+            trigger = rows[-1]
+            rows += [event('autodispatched', -5, role='grader', spawn='12345'), self.refusal()]
+            for seconds in (0, 59):
+                step = self.one(rows, now=NOW + timedelta(seconds=seconds))
+                self.assertEqual(step.reason, 'grade-wait: bundle-pending')
+                self.assertEqual((step.trigger, step.since), (trigger['_src'], trigger['ts']))
+                self.assertIn('tip', step.clears)
+                self.assertIn('1/3', step.clears)
+            self.assertEqual(self.one(rows, now=NOW + timedelta(minutes=1)).action, action)
+        self.signed('AC1-detached', asdict(step))
+
+    def test_retry1851_AC1_silent_checker_cap_late_evidence_and_resets(self):
+        import attempts
+        for action in ('grade', 'regrade'):
+            rows = self.fixture(action)
+            trigger = rows[-1]
+            for n in range(1, 4):
+                minute = -20 + 5*n
+                rows += [event('autodispatched', minute, role='grader', spawn=str(12340+n)),
+                         self.refusal(minute, number=n)]
+                deadline = NOW+timedelta(minutes=minute+5)
+                for second in (-299, -1, 0, 1):
+                    step = self.one(rows, now=deadline+timedelta(seconds=second))
+                    self.assertEqual((step.trigger, step.since), (trigger['_src'], trigger['ts']))
+                    if second < 0:
+                        self.assertEqual(step.reason, 'grade-wait: bundle-pending')
+                    elif n < 3:
+                        self.assertEqual(step.action, action)
+                    else:
+                        self.assertTrue(step.reason.startswith('exhausted: bundle-pending'))
+                    h = attempts.history(ns._grader_history(rows)[0], trigger, 'grader', now=deadline)
+                    self.assertEqual((h.n_failed, h.reasons, h.not_ready), (0, (), None))
+                # Snapshot rereads and a repeated receipt do not create requests.
+                again = self.one(rows+[rows[-1]], now=deadline-timedelta(seconds=1))
+                self.assertIn(f'{n}/3', again.clears)
+            far_future = NOW+timedelta(days=100)
+            self.assertTrue(self.one(rows, now=far_future).reason.startswith('exhausted: bundle-pending'))
+            for kind in ('evidence-bundle', 'evidence-bundle-failed'):
+                evidence = event(kind, -30, sha='tip')
+                self.assertEqual(self.one(rows+[evidence]).action, action)
+            new_build = event('build-done', 1, actor='builder', status='DONE', ready_sha='new-tip')
+            self.assertEqual(self.one(rows+[new_build], now=NOW+timedelta(minutes=2)).action, 'grade')
+            decision = event('decision', 1, regrade='yes', actor='operator')
+            self.assertEqual(self.one(rows+[decision], now=NOW+timedelta(minutes=2)).action, 'regrade')
+        self.signed('AC1-cap', dict(requests=3, cap=3, interval_seconds=300, history=asdict(h)))
+
+    def test_retry1851_AC1_build_freshness_and_real_gate(self):
+        import grader_packet as gp
+        class Refused(Exception):
+            pass
+        def fail(why, reason=None):
+            raise Refused(reason)
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, DOIT_ROOT=directory):
+            path = Path(directory)/'content'/'evidence'/SID/'bundle.json'
+            path.parent.mkdir(parents=True)
+            raw = json.dumps(dict(spec=SID, sha='tip', commands=[], comparison={})).encode()
+            path.write_bytes(raw)
+            digest = hashlib.sha256(raw).hexdigest()
+            for action in ('grade', 'regrade'):
+                rows = self.fixture(action)+[self.refusal()]
+                success = event('evidence-bundle', -10, sha='tip', path=str(path), bundle_sha256=digest)
+                packet = 'bundle_sha256: `' + digest + '`'
+                self.assertEqual(self.one(rows+[success]).action, action)
+                with patch.object(gp.subprocess, 'Popen') as checker:
+                    with self.assertRaisesRegex(Refused, 'bundle-pending'):
+                        gp.gate(rows+[success], SID, 'stale packet without digest', lambda *a, **k: None, fail)
+                    self.assertEqual(checker.call_args.args[0][-4:], ['run-checks', SID, '--sha', 'tip'])
+                    self.assertIsNotNone(gp.gate(rows+[success], SID, packet, lambda *a, **k: None, fail))
+                failed = event('evidence-bundle-failed', -4, sha='tip', reason='checker failed')
+                self.assertEqual(self.one(rows+[failed]).action, action)
+                with self.assertRaisesRegex(Refused, 'preflight:runner'):
+                    gp.gate(rows+[failed], SID, packet, lambda *a, **k: None, fail)
+                for evidence in (dict(success, ts=rows[1]['ts']), dict(success, sha='old-tip'),
+                                 dict(success, subject='L-spec-9999'),
+                                 dict(success, ts=event('x', -101)['ts'])):
+                    self.assertEqual(self.one(rows+[evidence]).reason, 'grade-wait: bundle-pending')
+                    with patch.object(gp.subprocess, 'Popen'), self.assertRaisesRegex(Refused, 'bundle-pending'):
+                        gp.gate(rows+[evidence], SID, packet, lambda *a, **k: None, fail)
+                # Same-second result order is ledger order, including failures before refusal.
+                tied = dict(failed, ts=success['ts'])
+                for tail, expect_failure in (([success, tied], True), ([tied, success], False)):
+                    if expect_failure:
+                        with self.assertRaisesRegex(Refused, 'preflight:runner'):
+                            gp.gate(rows+tail, SID, packet, lambda *a, **k: None, fail)
+                    else:
+                        self.assertIsNotNone(gp.gate(rows+tail, SID, packet, lambda *a, **k: None, fail))
+                for mutation in (dict(path=str(path.with_name('missing'))), dict(bundle_sha256='bad')):
+                    corrupt = dict(success, **mutation)
+                    self.assertEqual(self.one(rows+[corrupt]).action, action)
+                    with self.assertRaisesRegex(Refused, 'preflight:runner'):
+                        gp.gate(rows+[corrupt], SID, packet, lambda *a, **k: None, fail)
+        self.signed('AC1-freshness', dict(pre_refusal=True, same_second_failure=True, digest_checked=True))
+
+    def test_retry1851_AC2_only_proven_contention_is_free(self):
+        for action in ('grade', 'regrade'):
+            rows = self.fixture(action)
+            for n in range(3):
+                rows += [event('autodispatched', -20+n, role='grader', spawn=str(13000+n)),
+                         self.refusal(-20+n, 'dispatch-in-progress', n,
+                                      why='another dispatch holds the subject lock')]
+            self.assertEqual(self.one(rows).action, action)
+            rows.append(self.refusal(-4, 'dispatch-in-progress', 9,
+                                     why='cannot open the dispatch lock ([Errno 13] Permission denied)'))
+            step = self.one(rows)
+            self.assertEqual(step.reason, 'retry-wait: ' + (NOW+timedelta(minutes=1)).isoformat())
+            self.assertEqual(self.one(rows, now=NOW+timedelta(minutes=1)).action, action)
+        self.signed('AC2-contention', asdict(step))
+
+    def test_retry1851_AC2_live_start_without_spawn_stays_suppressed(self):
+        for action in ('grade', 'regrade'):
+            rows = self.fixture(action)
+            rows.append(event('spawn-started', -1, role='grader'))
+            self.assertFalse(any(step.action == action for step in self.steps(rows)))
+
+    def test_retry1851_AC1_undated_failure_keeps_wall_cap_hold(self):
+        import grader_packet as gp
+        class Refused(Exception):
+            pass
+        def fail(why, reason=None):
+            raise Refused(reason)
+        rows = [dict(type='build-done', subject=SID, ready_sha='tip'),
+                dict(type='evidence-bundle-failed', subject=SID, sha='tip',
+                     reason='wall cap exceeded')]
+        with patch.object(gp.subprocess, 'Popen') as checker:
+            with self.assertRaisesRegex(Refused, '^wall-cap$'):
+                gp.gate(rows, SID, 'no digest', lambda *a, **k: None, fail)
+            checker.assert_not_called()
+
+    def test_retry1851_AC2_genuine_ladder_and_adjacent_roles(self):
+        import attempts
+        for action in ('grade', 'regrade'):
+            for kind in ('spawn-failed', 'autodispatch-failed'):
+                rows = self.fixture(action)
+                trigger = rows[-1]
+                for n, minute in ((1, -40), (2, -30), (3, -10)):
+                    rows.append(event(kind, minute, role='grader', spawn=f'L-grader-{9200+n}',
+                                      reason='preparation failed'))
+                    deadline = NOW+timedelta(minutes=minute+(5, 15, 45)[n-1])
+                    for second in (-1, 0):
+                        step = self.one(rows, now=deadline+timedelta(seconds=second))
+                        if n == 3:
+                            self.assertTrue(step.reason.startswith('exhausted: preparation failed'))
+                        elif second == -1:
+                            self.assertEqual(step.reason, 'retry-wait: '+deadline.isoformat())
+                        else:
+                            self.assertEqual(step.action, action)
+                        self.assertEqual((step.trigger, step.since), (trigger['_src'], trigger['ts']))
+                    h = attempts.history(ns._grader_history(rows)[0], trigger, 'grader', now=deadline)
+                    self.assertEqual(h.n_failed, n)
+                late = event('evidence-bundle', -1, sha='tip')
+                self.assertTrue(self.one(rows+[late], now=NOW+timedelta(days=1)).reason.startswith('exhausted:'))
+        for action in ('build', 'rebuild', 'review'):
+            rows, role, trigger = VanishedRetryTests.fixture(self, action)
+            for n, minute in ((1, -4), (2, -3), (3, -2)):
+                VanishedRetryTests.failure(self, rows, role, n, minute)
+                step = self.one(rows)
+                self.assertTrue(step.reason.startswith('retry exhausted:' if n == 3 else 'retry backoff:'))
+                if n < 3:
+                    due = NOW+timedelta(minutes=minute+(5, 15)[n-1])
+                    self.assertTrue(self.one(rows, now=due).reason.startswith('retry due:'))
+        self.signed('AC2-budgets', dict(max_attempts=3, backoff=attempts.BACKOFF_MIN,
+                                      adjacent_roles_unchanged=True))
+
+    def test_retry1851_AC2_association_and_visible_conflict(self):
+        rows = self.fixture()
+        marker = event('autodispatched', -6, role='grader', spawn='12345')
+        refusal = self.refusal(reason='duplicate-dispatch')
+        live = event('spawn-started', -5, role='grader', spawn='L-grader-9400')
+        held = self.one(rows+[marker, live, refusal])
+        self.assertTrue(held.reason.startswith('grade-wait: conflict'))
+        self.assertIn(live['spawn']+' spawn-done/spawn-failed', held.clears)
+        # The intervening start prevents pairing away the earlier parent.
+        normalized, receipts = ns._grader_history(rows+[marker, live, refusal])
+        self.assertIn(marker, normalized)
+        self.assertEqual(receipts, [refusal])
+        for terminal in ('spawn-done', 'spawn-failed'):
+            clean = rows+[live, refusal, event(terminal, -3, role='grader', spawn=live['spawn'],
+                                              reason='duplicate-dispatch')]
+            # A completed real attempt without a verdict follows genuine history;
+            # a duplicate refusal with no visible start simply re-offers.
+            no_start = [e for e in clean if e is not live]
+            if terminal == 'spawn-failed':
+                self.assertEqual(self.one(no_start).action, 'grade')
+        open_builder = event('spawn-started', -5, role='builder', spawn='L-builder-9400')
+        before = self.one(rows+[open_builder, refusal])
+        self.assertTrue(before.reason.startswith('grade-wait: conflict'))
+        after = self.one(rows+[open_builder, refusal,
+                              event('spawn-done', -3, role='builder', spawn=open_builder['spawn'])])
+        self.assertEqual(after.action, 'grade')
+        for change in (dict(role='reviewer', spawn='L-reviewer-9101'),
+                       dict(subject='L-spec-9999'), dict(spawn=None),
+                       dict(reason='dispatch-in-progress', why='cannot open lock')):
+            foreign = dict(refusal, **change)
+            normalized, _ = ns._grader_history(rows+[marker, foreign])
+            self.assertIn(marker, normalized)
+        self.signed('AC2-conflict', dict(before=asdict(before), after=asdict(after)))
 
 
 if __name__ == '__main__':
