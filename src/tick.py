@@ -406,17 +406,15 @@ def launch(step, *, dispatcher):
         wt = fold.ROOT / 'worktrees' / project / step.item.lower()
         if step.action == 'build':
             repo = fold.ROOT / 'repos' / project
-            result = dispatcher(['git', '-C', str(repo), 'symbolic-ref', '--short', 'HEAD'])
-            if result.get('code', 1) or not result.get('stdout', '').strip():
-                raise ValueError(result.get('stderr') or 'symbolic-ref failed')
-            main = result['stdout'].strip()
+            import packet
+            base = packet._effective_base(repo, project, dispatch.spec_path(step.item), step.item)
             if wt.is_dir():
-                result = dispatcher(['git', '-C', str(wt), 'rev-list', '--count', main + '..HEAD'])
+                result = dispatcher(['git', '-C', str(wt), 'rev-list', '--count', base + '..HEAD'])
                 if result.get('code', 1) or result.get('stdout', '').strip() != '0':
-                    raise ValueError(f'worktree {wt} exists with commits above {main}; not reusing')
-                result = dispatcher(['git', '-C', str(wt), 'merge', '--ff-only', main])
+                    raise ValueError(f'worktree {wt} exists with commits above {base}; not reusing')
+                result = dispatcher(['git', '-C', str(wt), 'merge', '--ff-only', base])
             else:
-                result = autodispatch.add_builder_worktree(repo, wt, step.item.lower(), main,
+                result = autodispatch.add_builder_worktree(repo, wt, step.item.lower(), base,
                                                           runner=dispatcher)
             if result.get('code', 1):
                 raise ValueError(result.get('stderr') or result.get('stdout') or 'worktree add failed')

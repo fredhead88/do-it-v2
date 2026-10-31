@@ -878,13 +878,124 @@ class EnforcementTests(unittest.TestCase):
         _launcher_evidence('AC17-1649',dict(compatibility_no_reads=True,wait_enforces=True))
 
 
+class R7PinLaunchTests(unittest.TestCase):
+    def test_tick_entry_points(self):
+        # Reuse the direct caller's real packet/git fixture; only detachment is stubbed.
+        from test_lane_driver import R7Fixture
+        rows = []
+        for entry in ('create', 'reuse', 'rebuild'):
+            for case in ('default', 'other-head', 'realm'):
+                with self.subTest(entry=entry, case=case), contextlib.ExitStack() as stack:
+                    f = R7Fixture(stack, 'master' if case == 'default' else 'main', case)
+                    f.worktree()
+                    lane_driver._dispatch('builder', f.sid, 'proj', None, f.runner)
+                    saved = f.dispatched[-1]
+                    retained = None
+                    for attempt in range(2):
+                        old = dispatch.pinned_base(saved)
+                        pin = f.advance()
+                        if entry == 'create':
+                            text = f.spec.read_text()
+                            f.sid = f'L-spec-{9002 + attempt}'
+                            f.spec = f.root / 'content' / (f.sid + '.md')
+                            f.spec.write_text(text)
+                            f.wt = f.root / 'worktrees/proj' / f.sid.lower()
+                            f.event('L-spec-writer-9001.jsonl', 'spec-written', project='proj',
+                                    path=str(f.spec), footprint=['seed'])
+                        elif entry == 'rebuild':
+                            # Successful rebuild fixtures already descend from the new pin.
+                            # Advance without discarding the earlier builder commit.
+                            f.git('-c', 'user.name=fixture', '-c',
+                                  'user.email=fixture@example.invalid',
+                                  'merge', '--no-edit', pin, cwd=f.wt)
+                            if retained is None:
+                                retained = f.commit(f.wt, 'builder-work')
+                        f.event('L-builder-8000.jsonl', 'build-done', project='proj',
+                                base_sha=old, ready_sha=old, packet=str(saved),
+                                card=str(f.root / 'content/old-card.md'))
+                        f.calls.clear()
+                        step = nextstep.Step(f.sid, 'spec', 'checking', 'action',
+                            'rebuild' if entry == 'rebuild' else 'build', 'tick',
+                            'fixture:1', 'condition met', None, f.now.isoformat())
+                        runner = tick._PassDispatcher(f.runner, f.events(), {}, f.now, False)
+                        before = len(f.dispatched)
+                        spawn = tick.launch(step, dispatcher=runner)
+                        self.assertEqual(spawn, 'L-builder-9002')
+                        self.assertEqual(len(f.dispatched), before + 1)
+                        packet_argv = next(a for a in f.calls if a[:2] == ['doit', 'packet'])
+                        self.assertEqual(packet_argv[-2:], ['--base-sha', pin])
+                        packet_pin = dispatch.pinned_base(f.dispatched[-1])
+                        self.assertEqual(packet_pin, pin)
+                        self.assertNotEqual(packet_pin, old)
+                        self.assertEqual(dispatch.pinned_base(saved), old)
+                        self.assertIn('PINNED_BASE_SHA_EXPLICIT: true', f.dispatched[-1].read_text())
+                        head = f.git('rev-parse', 'HEAD', cwd=f.wt)
+                        f.git('merge-base', '--is-ancestor', packet_pin, head)
+                        self.assertFalse(any('symbolic-ref' in a for a in f.calls))
+                        if entry == 'create':
+                            add = next(a for a in f.calls if 'worktree' in a and 'add' in a)
+                            self.assertEqual(add[-1], pin)
+                        elif entry == 'reuse':
+                            count = next(a for a in f.calls if 'rev-list' in a)
+                            merge = next(a for a in f.calls if '--ff-only' in a)
+                            self.assertEqual(count[-1], pin + '..HEAD')
+                            self.assertEqual(merge[-1], pin)
+                        else:
+                            f.git('merge-base', '--is-ancestor', retained, head)
+                            self.assertEqual((f.wt / 'builder-work').read_text(), 'builder-work\n')
+                            self.assertFalse(any('merge' in a or 'reset' in a for a in f.calls))
+                        rows.append(dict(attempt=attempt, entry=entry,
+                            base_case=case, repo_head_sha=f.git('rev-parse', 'HEAD'),
+                            effective_ref=f.branch, effective_sha=pin, old_pin=old,
+                            packet_pin=packet_pin, worktree_head_sha=head,
+                            descendant_of_pin=True, spawn=spawn, retained_builder_commit=retained))
+                        saved = f.dispatched[-1]
+        for row in sorted(rows, key=lambda r: r['attempt']):
+            _launcher_evidence('R7-AC1', row)
+
+    def test_local_failures_are_visible_without_admission(self):
+        import packet
+        from test_lane_driver import R7Fixture
+        for action in ('build', 'rebuild'):
+            for failure in ('resolver', 'packet'):
+                with self.subTest(action=action, failure=failure), contextlib.ExitStack() as stack:
+                    f = R7Fixture(stack)
+                    if action == 'rebuild':
+                        f.worktree()
+                    step = nextstep.Step(f.sid, 'spec', 'checking', 'action', action, 'tick',
+                                         'fixture:1', 'condition met', None, f.now.isoformat())
+                    def run(argv):
+                        if failure == 'packet' and argv[:2] == ['doit', 'packet']:
+                            f.calls.append(argv)
+                            return dict(code=1, stdout='', stderr='packet refused')
+                        return f.runner(argv)
+                    if failure == 'resolver':
+                        stack.enter_context(patch.object(packet, '_effective_base',
+                                                         side_effect=ValueError('unresolved base')))
+                    runner = tick._PassDispatcher(run, f.events(), {}, f.now, False)
+                    with self.assertRaisesRegex(ValueError, 'unresolved base|packet refused'):
+                        tick.launch(step, dispatcher=runner)
+                    rows = [e for e in f.events() if e.get('type') in
+                            ('autodispatch-failed', 'autodispatched')]
+                    self.assertEqual([e['type'] for e in rows], ['autodispatch-failed'])
+                    self.assertEqual(f.dispatched, [])
+                    self.assertFalse(any(a[:2] == ['doit', 'dispatch'] for a in f.calls))
+                    # The existing standing failure owns retries; no second attempt here.
+                    runner.events = f.events()
+                    calls = len(f.calls)
+                    self.assertIsNone(tick.launch(step, dispatcher=runner))
+                    self.assertEqual(len(f.calls), calls)
+        _launcher_evidence('R7-AC1-failures', dict(resolver_and_packet_failures=4,
+                                                admitted=0, standing_retries=0))
+
+
 _enforce_in_flight = lane_driver._in_flight_role
 
 
 # These script suites predate unittest. Respect the authored targeted checks
 # before running the historical script assertions; unfiltered CI still runs both.
 if __name__ == '__main__' and '-k' in sys.argv and sys.argv[-1] in {
-        'launch', 'sole_launcher', 'manual_routine', 'launch_failure', 'no_double_gate', 'AdmissionTests', 'EnforcementTests'}:
+        'launch', 'sole_launcher', 'manual_routine', 'launch_failure', 'no_double_gate', 'AdmissionTests', 'EnforcementTests', 'R7PinLaunchTests'}:
     unittest.main()
 
 # An idle tick: one tick event, lane 0, nothing spawned and no `spawned` key to report it.
