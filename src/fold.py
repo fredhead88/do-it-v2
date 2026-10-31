@@ -829,6 +829,9 @@ def required_reason(e):
                            or (k == "listed" and isinstance(value, list)))
             elif t == "merge-gate-undetermined":
                 present = k in e
+            elif t == "window-redcut" and k in ("dropped", "returned", "flakes", "residual"):
+                # Empty lists are measured dispositions, not missing evidence.
+                present = isinstance(e.get(k), list)
             elif t == "bill-check" and k in ("yday", "mtd"):
                 # Explicit null means unknown; numeric zero is measured spend.
                 value = e.get(k)

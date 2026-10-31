@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -158,6 +159,121 @@ class QueueTests(unittest.TestCase):
         self.assertEqual(mq.queue([add, {k: v for k, v in readd.items() if k != 'branch'}]), [])
         self.mark(1, 'add ok', 'remove ok', 're-add ok', 'equal ts ok', 'project filter ok',
                   'batch field ok', 'missing branch ok')
+
+    def redcut_fixture(self):
+        """The retained-row contract, with unrelated work after the batch."""
+        specs = ['L-spec-9001', 'L-spec-9002', 'L-spec-9003', 'L-spec-9004']
+        adds = [dict(self.event('queue-add', 10-i, project='p', branch=branch,
+                                rule='operator'), subject=sid)
+                for i, (sid, branch) in enumerate(zip(specs, 'abcu'))]
+        batch = dict(self.event('queue-batch', 5, project='p', specs=','.join(specs[:3])),
+                     subject='window-redcut')
+        drop = self.event('window-dropped', 4, window=batch['subject'], reason='owner',
+                          evidence='local-repro', tests=['tests/test_a.py::test_a'],
+                          owned_nodes=['tests/test_a.py::test_a'])
+        close = dict(self.event('window-redcut', 3, window=batch['subject'], project='p',
+                               candidate='candidate-fixture', base='base-fixture',
+                               dropped=specs[:1], returned=specs[1:3], flakes=[], residual=[],
+                               first_red_at=drop['ts'], closed_at=self.event('x', 3)['ts'],
+                               outcome='handled-red', automatic=True), subject=batch['subject'])
+        expected = [dict(spec=e['subject'], project='p', branch=e['branch'],
+                         added_at=e['ts'], batch=None) for e in adds[1:]]
+        return adds + [batch, drop], close, expected
+
+    def test_redcut_retains_exact_queue_rows_and_position(self):
+        events, close, expected = self.redcut_fixture()
+        before = json.dumps(events + [close], sort_keys=True)
+        self.assertEqual(mq.queue(events + [close], 'p'), expected)
+        self.assertEqual(mq.queue(events + [close, close], 'p'), expected)
+        self.assertEqual(json.dumps(events + [close], sort_keys=True), before)
+        # A terminal row does not invent a queue entry or affect another project.
+        self.assertEqual(mq.queue([close], 'p'), [])
+        self.assertEqual(mq.queue(events + [dict(close, project='other')], 'p')[0]['batch'],
+                         close['subject'])
+
+    def test_redcut_replay_cannot_clear_successor_or_replace_new_branch(self):
+        events, close, expected = self.redcut_fixture()
+        successor = dict(self.event('queue-batch', 2, project='p',
+                                    specs=','.join(close['returned'])), subject='window-next')
+        replay = dict(close, ts=self.event('x', 1)['ts'])
+        after_successor = [dict(row, batch='window-next') if row['spec'] in close['returned']
+                           else row for row in expected]
+        self.assertEqual(mq.queue(events + [close, successor, replay], 'p'), after_successor)
+        new_add = dict(self.event('queue-add', 1, project='p', branch='b2', rule='operator'),
+                       subject=close['returned'][0])
+        expected_new = [expected[1], expected[2], dict(expected[0], branch='b2',
+                                                     added_at=new_add['ts'])]
+        self.assertEqual(mq.queue(events + [close, new_add, replay], 'p'), expected_new)
+        # A fresh add also replaces a batch link without any preceding redcut.
+        old_link = [events[0], events[1], events[4], new_add]
+        self.assertIsNone(mq.queue(old_link, 'p')[-1]['batch'])
+
+    def test_redcut_does_not_revive_terminal_or_removed_work(self):
+        events, close, expected = self.redcut_fixture()
+        for kind in ('shipped', 'spec-killed', 'spec-closed', 'window-dropped', 'queue-remove'):
+            terminal = dict(self.event(kind, 2), subject=close['returned'][0])
+            self.assertEqual(mq.queue(events + [close, terminal, close], 'p'), expected[1:])
+        all_dropped = events + [dict(events[-1], subject=sid) for sid in close['returned']]
+        self.assertEqual(mq.queue(all_dropped + [dict(close, returned=[])], 'p'), expected[-1:])
+        # Flake-only closure returns the original rows without a fresh queue-add.
+        no_drop = events[:-1]
+        flake = dict(close, dropped=[], returned=[e['subject'] for e in events[:3]],
+                     flakes=['tests/test_a.py::test_a'])
+        rows = mq.queue(no_drop + [flake], 'p')
+        self.assertEqual([r['branch'] for r in rows], list('abcu'))
+        self.assertTrue(all(r['batch'] is None for r in rows))
+
+    def test_redcut_production_append_and_fresh_process_queue_readback(self):
+        events, close, expected = self.redcut_fixture()
+        for actor in ('executor', 'tick'):
+            with self.subTest(actor=actor):
+                self.seed(events)
+                ledger = 'L-' + actor + '-redcut.jsonl'
+                path = self.root / 'events' / ledger
+                path.unlink(missing_ok=True)
+                fields = {k: v for k, v in close.items() if k not in ('v', 'type', 'subject', 'ts')}
+                mq._train_emit(ledger, close['subject'], 'window-redcut', **fields)
+                self.assertEqual(self.separate_queue(), expected)
+                mq._train_emit(ledger, close['subject'], 'window-redcut', **fields)
+                self.assertEqual(self.separate_queue(), expected)
+                successor = dict(self.event('queue-batch', 0, project='p',
+                                           specs=','.join(close['returned'])), subject='window-next')
+                self.seed(events + [successor])
+                mq._train_emit(ledger, close['subject'], 'window-redcut', **fields)
+                self.assertEqual(self.separate_queue(), [dict(r, batch='window-next')
+                                 if r['spec'] in close['returned'] else r for r in expected])
+                self.assertFalse(any(json.loads(line)['type'] == 'queue-add'
+                                     for line in path.read_text().splitlines()))
+                path.unlink()
+
+    def test_redcut_admission_requires_actor_and_fields(self):
+        _, close, _ = self.redcut_fixture()
+        for actor in ('executor', 'tick'):
+            self.assertIsNone(fold.check_append(close, actor))
+            for field in ('window', 'project', 'candidate', 'base', 'dropped', 'returned',
+                          'flakes', 'residual', 'first_red_at', 'closed_at', 'outcome', 'automatic'):
+                malformed = dict(close)
+                malformed.pop(field)
+                self.assertIsNotNone(fold.check_append(malformed, actor), field)
+        for actor in ('builder', 'grader', 'reviewer', 'thinker', 'operator'):
+            self.assertIsNotNone(fold.admits(close, actor), actor)
+
+    def test_redcut_list_fields_accept_empty_but_refuse_missing_or_nonlist(self):
+        _, close, _ = self.redcut_fixture()
+        fields = ('dropped', 'returned', 'flakes', 'residual')
+        empty = dict(close, **dict.fromkeys(fields, []))
+        for actor in ('executor', 'tick'):
+            with self.subTest(actor=actor, case='empty lists'):
+                self.assertIsNone(fold.check_append(empty, actor))
+            for field in fields:
+                missing = dict(empty)
+                missing.pop(field)
+                with self.subTest(actor=actor, field=field, case='missing'):
+                    self.assertIsNotNone(fold.check_append(missing, actor))
+                for value in (None, '', 'node', {}, 0, False, ('node',)):
+                    with self.subTest(actor=actor, field=field, value=value):
+                        self.assertIsNotNone(fold.check_append(
+                            dict(empty, **{field: value}), actor))
 
 
     def git(self, *argv, repo=None):
@@ -1666,10 +1782,479 @@ with patch.object(merge_gate,'secret_scan',return_value=('undetermined',['tool']
         self.signed('exit-statuses', observations)
 
 
+class _RedcutCase(unittest.TestCase):
+    setUp = QueueTests.setUp
+    seed = QueueTests.seed
+    event = QueueTests.event
+    fresh_events = QueueTests.fresh_events
+    separate_queue = QueueTests.separate_queue
+
+    def signed(self, criterion, body):
+        body = json.dumps(body, sort_keys=True)
+        print(json.dumps(dict(url='cli://doit-v2/redcut/' + criterion, status=0,
+                              body_sha256=hashlib.sha256(body.encode()).hexdigest(), body_excerpt=body)))
+
+    def redcut_fixture(self):
+        specs = [f'L-spec-{9001+i}' for i in range(4)]
+        def row(kind, subject, minute, **fields):
+            return dict(type=kind, subject=subject, project='p',
+                        ts=f'2026-10-31T10:{minute:02d}:00Z', **fields)
+        adds = [row('queue-add', sid, i+1, branch=branch, rule='operator')
+                for i, (sid, branch) in enumerate(zip(specs, 'abcu'))]
+        batch = row('queue-batch', 'W', 5, specs=','.join(specs[:3]))
+        drop = row('window-dropped', specs[0], 6, window='W', reason='owner',
+                   evidence='local-repro', nodes=['src/test_example.py::test_red'])
+        close = row('window-redcut', 'W', 7, window='W', candidate='1'*40, base='0'*40,
+                    dropped=specs[:1], returned=specs[1:3], flakes=[], residual=[],
+                    first_red_at=drop['ts'], closed_at='2026-10-31T10:07:00Z',
+                    outcome='handled-red', automatic=True)
+        expected = [dict(spec=e['subject'], project='p', branch=e['branch'],
+                         added_at=e['ts'], batch=None) for e in adds[1:]]
+        return adds + [batch, drop], close, expected
+
+    def snapshot(self):
+        code = '''import fold, merge_queue as m, json
+events=fold.read_events(use_cache=False)
+_,_,ignored,subjects=fold.fold(events)
+print(json.dumps(dict(queue=m.queue(events,'p'),launching=m._launching(events,'p',[]),
+raw=[e for e in events if e['type'] in ('window-redcut','window-flake')],
+ignored=[e for e in ignored if e['type'] in ('window-redcut','window-flake')],
+admitted=[e for rows in subjects.values() for e in rows if e['type'] in ('window-redcut','window-flake')],
+metrics=m.redcut_metrics(events,project='p',since='2026-10-31T10:00:00Z',until='2026-10-31T11:00:00Z'))))'''
+        p = subprocess.run(['/usr/bin/python3', '-c', code], cwd=Path(mq.__file__).parent,
+                           env=dict(os.environ, DOIT_READ_CACHE='0'), capture_output=True, text=True)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        return json.loads(p.stdout)
+
+
+class RedcutQueueTests(_RedcutCase):
+    test_rows = QueueTests.test_redcut_retains_exact_queue_rows_and_position
+    test_terminals = QueueTests.test_redcut_does_not_revive_terminal_or_removed_work
+
+    def test_literal_replay_and_new_branch(self):
+        events, close, expected = self.redcut_fixture()
+        before = json.dumps(events, sort_keys=True)
+        self.assertEqual(mq.queue(events+[close], 'p'), expected)
+        replay = dict(close, ts='2026-10-31T10:09:00Z')
+        self.assertEqual(mq.queue(events+[close, replay], 'p'), expected)
+        successor = dict(events[-2], subject='W2', ts='2026-10-31T10:08:00Z',
+                         specs=','.join(close['returned']))
+        linked = [dict(e, batch='W2') if e['spec'] in close['returned'] else e for e in expected]
+        self.assertEqual(mq.queue(events+[close, successor, replay], 'p'), linked)
+        new = dict(events[1], branch='b2', ts='2026-10-31T10:10:00Z')
+        self.assertEqual(mq.queue(events+[close, successor, new, replay], 'p'),
+                         linked[1:] + [dict(expected[0], branch='b2', added_at=new['ts'])])
+        self.assertEqual(json.dumps(events, sort_keys=True), before)
+        equal = dict(close, ts=events[-2]['ts'])
+        self.assertEqual(mq.queue(events+[equal], 'p'), expected)
+        for disposition in (dict(close, residual=['unknown']), dict(close, returned=[]),
+                            dict(close, returned=[close['returned'][0]])):
+            result = mq.queue(events+[disposition], 'p')
+            self.assertEqual([r['added_at'] for r in result], [r['added_at'] for r in expected])
+        self.signed('AC3-rows', dict(before=events, after=expected, successor=linked))
+
+    def launch_setup(self):
+        events, close, expected = self.redcut_fixture()
+        self.now = datetime(2026, 10, 31, 10, 10, tzinfo=timezone.utc)
+        self.seed(events+[close])
+        for name, value in (('_repository', (self.root, 'main')),
+                            ('spec_paths', [('M', 'safe.py')])):
+            p = patch.object(mq, name, return_value=value)
+            p.start()
+            self.addCleanup(p.stop)
+        # Distinct footprints preserve the configured selector's exclusion rules.
+        p = patch.object(mq, 'spec_paths', side_effect=lambda repo, main, branch: [('M', branch+'.py')])
+        p.start()
+        self.addCleanup(p.stop)
+        return close
+
+    def test_handoff_cleanup_deduplication_and_retry(self):
+        close = self.launch_setup()
+        calls = []
+        def launch(argv, **kw):
+            calls.append(argv)
+            self.assertEqual(self.snapshot()['queue'][0]['branch'], 'b')
+            with mq._run_lock('p') as owned:
+                self.assertFalse(owned)
+            # A racing ordinary launcher cannot reserve a second successor.
+            self.assertEqual(mq.window_run('p', detach=True, launcher=launch, now=self.now), 3)
+            return type('Child', (), {'pid': os.getpid()})()
+        with mq.window_gate.chain_lock('W', 'p', self.root) as holder:
+            self.assertIsNone(holder)
+            self.assertEqual(mq.redcut_handoff('p', 'W', launcher=launch, now=self.now), 3)
+        self.assertTrue(mq.window_gate.acquire('W'))
+        self.assertEqual(mq.redcut_handoff('p', 'W', launcher=launch, now=self.now), 3)
+        mq.window_gate.release()
+        def refuse(*args, **kwargs):
+            raise OSError('fixture launch refusal')
+        self.assertEqual(mq.redcut_handoff('p', 'W', launcher=refuse, now=self.now), 3)
+        failed_id = [e['subject'] for e in self.fresh_events() if e.get('redcut_of') == 'W'][0]
+        self.assertEqual(mq.redcut_handoff('p', 'W', launcher=launch, now=self.now), 0)
+        self.assertEqual(calls[0][2], failed_id)
+        self.assertEqual(mq.redcut_handoff('p', 'W', launcher=launch, now=self.now), 0)
+        self.assertEqual(len(calls), 1)
+        # A durable successor terminal remains deduplicated after its PID is gone.
+        fields = {k:v for k,v in close.items() if k not in ('type','subject','ts')}
+        mq._train_emit('L-executor-0001.jsonl', failed_id, 'window-redcut',
+                       **dict(fields, window=failed_id, returned=[], dropped=[]))
+        (self.root/'state'/f'window-run.{failed_id}.pid').unlink()
+        self.assertEqual(mq.redcut_handoff('p', 'W', launcher=launch, now=self.now), 0)
+        self.assertEqual(len(calls), 1)
+        self.signed('AC3-handoff', dict(launches=len(calls), successor=failed_id, retry_same_id=True))
+
+    def test_holds_and_exit_five(self):
+        close = self.launch_setup()
+        calls = []
+        launch = lambda *a, **kw: calls.append(a)
+        self.assertEqual(mq.redcut_handoff('p', 'missing', launcher=launch), 3)
+        with patch.object(mq, 'merge_freeze', return_value='fixture freeze'):
+            self.assertEqual(mq.redcut_handoff('p', 'W', launcher=launch, now=self.now), 3)
+        self.assertEqual(calls, [])
+        events, close, _ = self.redcut_fixture()
+        self.seed(events+[dict(close, residual=['unattributed'])])
+        self.assertEqual(mq.redcut_handoff('p', 'W', launcher=launch, now=self.now), 3)
+        self.seed([])
+        self.assertEqual(mq.redcut_handoff('p', 'W', launcher=launch, now=self.now), 3)
+
+    def test_disposition_variants_and_pending_siblings(self):
+        events, close, expected = self.redcut_fixture()
+        for returned in ([], close['returned'][:1], close['returned']):
+            with self.subTest(returned=returned):
+                disposition = dict(close, returned=returned, residual=['unattributed'])
+                rows = mq.queue(events+[disposition], 'p')
+                self.assertEqual(rows, [dict(r, batch=None if r['spec'] in returned or
+                                            r['spec']=='L-spec-9004' else 'W') for r in expected])
+        bisected = dict(type='window-bisected',subject='W',project='p',
+                        ts='2026-10-31T10:06:30Z',after='0'*40,left=['L-spec-9002'],right=['L-spec-9003'])
+        partial = dict(close,returned=['L-spec-9002'],residual=['unattributed'])
+        self.assertEqual(mq.queue(events+[bisected,partial], 'p'),
+                         [expected[0],dict(expected[1],batch='W'),expected[2]])
+        # Entire drop includes unrelated pending work, or an actually empty queue.
+        drops = [dict(events[-1],subject=s) for s in close['returned']]
+        entire = dict(close,dropped=close['dropped']+close['returned'],returned=[])
+        self.assertEqual(mq.queue(events+drops+[entire],'p'),expected[-1:])
+        self.assertEqual(mq.queue(events[:3]+events[4:]+drops+[entire],'p'),[])
+        self.signed('AC3-dispositions',dict(partial=True,entire=True,bisected=True,residual=True))
+
+    def test_synchronous_exit_five_after_real_cleanup(self):
+        close = self.launch_setup()
+        events, _, _ = self.redcut_fixture()
+        self.seed(events[:4])
+        trace = []
+        def successor(argv, **kw):
+            self.assertTrue(kw['start_new_session'])
+            self.assertIsNone(mq.window_gate.lock_holder(0,self.root))
+            with mq.window_gate.chain_lock('successor','p',self.root) as holder:
+                self.assertIsNone(holder)
+            trace.append('successor')
+            return type('Child',(),{'pid':os.getpid(),
+                                    'wait':lambda child: self.fail('recursive successor wait')})()
+        def handled(argv):
+            name = argv[2]
+            with mq.window_gate.chain_lock(name,'p',self.root) as holder:
+                self.assertIsNone(holder)
+                self.assertTrue(mq.window_gate.acquire(name))
+                try:
+                    mq._train_emit('L-executor-0001.jsonl','L-spec-9001','window-dropped',
+                                   project='p',window=name,reason='owner',evidence='local-repro',nodes=['literal'])
+                    fields = {k:v for k,v in close.items() if k not in ('type','subject','ts')}
+                    mq._train_emit('L-executor-0001.jsonl',name,'window-redcut',**dict(fields,window=name))
+                    self.assertEqual(mq.redcut_handoff('p',name,launcher=successor,now=self.now),3)
+                    self.assertEqual(trace,[])
+                finally:
+                    mq.window_gate.release()
+                trace.append('cleanup')
+            trace.append('chain-release')
+            return dict(code=5)
+        self.assertEqual(mq.window_run('p',runner=handled,launcher=successor,now=self.now),5)
+        self.assertEqual(trace,['cleanup','chain-release','successor'])
+        landed = self.fresh_events()
+        self.assertEqual(sum(e['type']=='queue-add' for e in landed),4)
+        links = [e for e in landed if e['type']=='queue-batch' and e.get('redcut_of')]
+        self.assertEqual(len(links),1)
+        self.assertFalse(any(e['type'] in ('window-verified','shipped','escalation-blocking') for e in landed))
+        self.signed('AC3-exit-five',dict(exit=5,trace=trace,links=links))
+
+    def test_existing_exit_meanings_and_bounded_holds(self):
+        self.launch_setup()
+        events, close, _ = self.redcut_fixture()
+        for code in (0,1,2,3,4):
+            self.seed(events[:4])
+            with patch.object(mq,'redcut_handoff',side_effect=AssertionError('unexpected handoff')):
+                self.assertEqual(mq.window_run('p',runner=lambda argv:dict(code=code),now=self.now),code)
+        calls = []
+        self.seed([close])  # committed closure, genuinely no queued work
+        self.assertEqual(mq.redcut_handoff('p','W',launcher=lambda *a,**k:calls.append(a),now=self.now),3)
+        self.seed(events+[close])
+        with mq._run_lock('p') as owned:
+            self.assertTrue(owned)
+            self.assertEqual(mq.redcut_handoff('p','W',launcher=lambda *a,**k:calls.append(a),now=self.now),3)
+        self.assertEqual(calls,[])
+        self.assertFalse(any(e['type']=='escalation-blocking' for e in self.fresh_events()))
+        self.signed('AC3-status-holds',dict(exits=[0,1,2,3,4],empty=True,contention=True,launches=0))
+
+
+class RedcutLedgerMetricsTests(_RedcutCase):
+    test_lists = QueueTests.test_redcut_list_fields_accept_empty_but_refuse_missing_or_nonlist
+    test_admission = QueueTests.test_redcut_admission_requires_actor_and_fields
+
+    def metric_fixture(self):
+        def row(kind, subject, time, **fields):
+            return dict(type=kind, subject=subject, project='p', actor='executor',
+                        ts='2026-10-31T'+time+':00Z', **fields)
+        def close(window, first, closed, dropped, returned):
+            return row('window-redcut', window, closed, window=window, candidate='1'*40, base='0'*40,
+                       dropped=dropped, returned=returned, flakes=[], residual=[],
+                       first_red_at='2026-10-31T'+first+':00Z', closed_at='2026-10-31T'+closed+':00Z',
+                       outcome='handled-red', automatic=True)
+        return [row('queue-batch','W1','09:59',specs='L-spec-9001,L-spec-9002'),
+                close('W1','10:00','10:10',['L-spec-9001'],['L-spec-9002']),
+                row('queue-batch','W2','10:11',specs='L-spec-9002',redcut_of='W1'),
+                row('window-opened','W2','10:14',specs='L-spec-9002'),
+                row('queue-batch','W3','10:14',specs='L-spec-9003'),
+                close('W3','10:15','10:20',['L-spec-9003'],[]),
+                row('queue-batch','W4','10:24',specs='L-spec-9004'),
+                row('window-opened','W4','10:25',specs='L-spec-9004'),
+                row('window-dropped','L-spec-9004','10:30',window='W4',nodes=['src/test_example.py::test_red'],reason='owner')]
+
+    def metrics(self, events, **kw):
+        return mq.redcut_metrics(events, project='p', since='2026-10-31T10:00:00Z',
+                                 until=kw.get('until','2026-10-31T11:00:00Z'))
+
+    def test_literal_metrics_and_decision_intervals(self):
+        rows = self.metric_fixture()
+        expected = dict(automatic_closed=2, red_closed=3, without_thinker_decision=2,
+                        red_to_next_open_minutes=[dict(window='W1',next_window='W2',minutes=14.0)],
+                        pending_next_open=['W3'], excluded_invalid=[])
+        self.assertEqual(self.metrics(rows), expected)
+        self.assertEqual(self.metrics(rows+rows), expected)
+        for actor in ('thinker','operator','builder'):
+            for subject in ('W1','L-spec-9002','unrelated'):
+                for time in ('09:59','10:00','10:05','10:10','10:11'):
+                    decision = dict(type='decision',subject=subject,actor=actor,why='inspect failed window',
+                                    ts='2026-10-31T'+time+':00Z')
+                    wanted = 1 if actor != 'builder' and subject != 'unrelated' and '10:00' <= time <= '10:10' else 2
+                    self.assertEqual(self.metrics(rows+[decision]), dict(expected,without_thinker_decision=wanted))
+        matching = [dict(e,redcut_of='W1') if e['type']=='window-opened' and e['subject']=='W2' else e for e in rows]
+        self.assertEqual(self.metrics(matching), expected)
+        no_join = [dict(e,redcut_of='unknown') if e['type']=='queue-batch' and e['subject']=='W2' else e for e in matching]
+        self.assertEqual(self.metrics(no_join)['pending_next_open'], ['W1','W3'])
+        later = [dict(e,ts='2026-10-31T11:01:00Z') if e['type']=='window-opened' and e['subject']=='W2' else e for e in rows]
+        self.assertEqual(self.metrics(later)['pending_next_open'], ['W1','W3'])
+        offset = [dict(e,ts=e['ts'].replace('Z','+00:00')) for e in rows]
+        self.assertEqual(self.metrics(offset), expected)
+        other = [dict(e,project='other',subject='other-'+e['subject']) for e in rows]
+        self.assertEqual(self.metrics(rows+other), expected)
+        self.assertEqual(self.metrics(rows,until='2026-10-31T10:20:00Z')['automatic_closed'],1)
+        self.signed('AC5-metrics', expected)
+
+    def test_invalid_metric_evidence(self):
+        rows = self.metric_fixture()
+        variants = []
+        for field, value in (('closed_at','bad'),('closed_at',None),('closed_at','2026-10-31T10:10:00'),
+                             ('closed_at','2026-10-31T09:59:00Z'),('first_red_at',None),('ts','bad')):
+            variants.append([dict(e,**{field:value}) if e['type']=='window-redcut' and e['subject']=='W1' else e for e in rows])
+        for fields in (dict(redcut_of='W3'),dict(ts='2026-10-31T09:59:00Z'),dict(project='other')):
+            variants.append([dict(e,**fields) if e['type']=='window-opened' and e['subject']=='W2' else e for e in rows])
+        variants.append(rows+[dict(rows[2],subject='conflicting')])
+        for variant in variants:
+            result = self.metrics(variant)
+            self.assertEqual(result['excluded_invalid'],['W1'])
+            self.assertEqual(result['automatic_closed'],1)
+        # Non-owner closure evidence is not a human-assisted red closure.
+        for kind in ('merge-conflict','escalation-blocking','window-bisected'):
+            self.assertEqual(self.metrics(rows[:-1]+[dict(rows[-1],type=kind)])['red_closed'],2)
+
+    def test_production_writes_and_separate_process(self):
+        for actor in ('executor','tick'):
+            with self.subTest(actor=actor):
+                for path in (self.root/'events').glob('*.jsonl'):
+                    path.unlink()
+                events, close, expected = self.redcut_fixture()
+                ledger = f'L-{actor}-redcut.jsonl'
+                def emit(e):
+                    fields={k:v for k,v in e.items() if k not in ('type','subject','ts','actor')}
+                    with patch.object(dispatch,'now',return_value=e['ts']):
+                        mq._train_emit(ledger,e['subject'],e['type'],**fields)
+                for e in events+[close]:
+                    emit(e)
+                self.assertEqual(self.snapshot()['queue'],expected)
+                self.assertEqual(self.snapshot()['launching'],[])
+                successor=dict(events[-2],subject='W2',ts='2026-10-31T10:08:00Z',
+                               specs=','.join(close['returned']),redcut_of='W')
+                emit(successor)
+                emit(dict(close,ts='2026-10-31T10:09:00Z'))
+                self.assertEqual([e['batch'] for e in self.snapshot()['queue']],['W2','W2',None])
+                self.signed('AC5-ledger-'+actor,self.snapshot())
+                # Production ev uses the actor from its configured filename.
+                with patch.dict(os.environ,DOIT_GATE_LEDGER_FILE=ledger):
+                    mq.window_gate.ev('window-flake','W',window='W',project='p',candidate='1'*40,
+                                      node='src/test_example.py::test_red',isolated_state='green',
+                                      evidence=dict(snapshot='1'*40,selector='literal',outcome='green',report='scratch'),scope='window-run')
+                self.assertTrue(any(e['type']=='window-flake' for e in self.fresh_events()))
+                self.assertEqual(sum(e['type']=='queue-add' for e in self.fresh_events()),4)
+
+    def test_wrapper_admission_and_serializable_bad_lists(self):
+        events, close, _ = self.redcut_fixture()
+        self.seed(events)
+        (self.root/'state').mkdir(exist_ok=True)
+        (self.root/'state'/'window-run.W.pid').write_text(str(os.getpid()))
+        baseline = self.snapshot()
+        fields={k:v for k,v in close.items() if k not in ('type','subject','ts')}
+        flake=dict(window='W',project='p',candidate='1'*40,node='literal',isolated_state='green',
+                   evidence=dict(snapshot='1'*40,selector='literal',outcome='green',report='scratch'),scope='window-run')
+        for kind, supplied in (('window-redcut',fields),('window-flake',flake)):
+            for actor in ('builder','grader','reviewer','thinker','operator'):
+                ledger=f'L-{actor}-unauthorized.jsonl'
+                path=self.root/'events'/ledger
+                path.touch()
+                before=path.read_bytes()
+                with self.assertRaises(ValueError):
+                    mq._train_emit(ledger,'W',kind,**supplied)
+                self.assertEqual(path.read_bytes(),before)
+                self.assertIsNotNone(dispatch.emit(path,dict(subject='W'),kind,strict=True,**supplied))
+                self.assertEqual(path.read_bytes(),before)
+                diagnostic = io.StringIO()
+                with redirect_stderr(diagnostic):
+                    self.assertIsNone(dispatch.emit(path,dict(subject='W'),kind,actor='executor',**supplied))
+                self.assertIn('recorded-and-ignored',diagnostic.getvalue())
+                direct = path.read_bytes()
+                self.assertNotEqual(direct,before)
+                with patch.dict(os.environ,DOIT_GATE_LEDGER_FILE=ledger), redirect_stderr(diagnostic):
+                    mq.window_gate.ev(kind,'W',**supplied)
+                self.assertNotEqual(path.read_bytes(),direct)
+                self.assertEqual(diagnostic.getvalue().count('recorded-and-ignored'),2)
+                snapshot = self.snapshot()
+                raw = [e for e in snapshot['raw'] if e['type']==kind and e['actor']==actor]
+                self.assertEqual(len(raw),2)  # raw read_events retains both append attempts
+                self.assertTrue(all(e in snapshot['ignored'] for e in raw))
+                self.assertEqual(snapshot['admitted'],[])
+                for key in ('queue','launching','metrics'):
+                    self.assertEqual(snapshot[key],baseline[key],(actor,kind,key))
+        path=self.root/'events'/'L-executor-malformed.jsonl'
+        path.touch()
+        for field in ('dropped','returned','flakes','residual'):
+            missing = dict(fields)
+            missing.pop(field)
+            for bad in [missing]+[dict(fields,**{field:value}) for value in (None,'node',{},0,False)]:
+                for strict in (True,False):
+                    before=path.read_bytes()
+                    self.assertIsNotNone(dispatch.emit(path,dict(subject='W'),'window-redcut',strict=strict,**bad))
+                    self.assertEqual(path.read_bytes(),before)
+        self.assertIsNotNone(fold.check_append(dict(type='window-flake',subject='W',**dict(flake,evidence={})), 'executor'))
+        self.assertEqual(self.snapshot()['metrics']['automatic_closed'],0)
+        self.signed('AC5-admission',dict(unauthorized_actors=5,wrappers=4,malformed_fields=4))
+
+
+class RedcutRegressionTests(_RedcutCase):
+    """Explicit-only paired inventory; children run their ordinary entry once."""
+    REFERENCE = '54f306695efa4ee9d2bc122b32ff9387fc98d3be'
+    PATHS = ('src/test_merge_queue.py','src/test_fold.py',
+             'src/test_ledger_files.py','src/test_rechain.py')
+
+    def test_paired_subprocess_inventory(self):
+        repo = Path(__file__).resolve().parent.parent
+        # An allowlist removes seat, ledger, configuration, Git, Python and
+        # credential overrides equally from both runs. Report key names only.
+        keep = {'PATH','LANG','LC_ALL','LC_CTYPE','TZ','TMPDIR'}
+        removed = sorted(set(os.environ)-keep)
+        clean = {k:v for k,v in os.environ.items() if k in keep}
+        clean.update(PYTHONDONTWRITEBYTECODE='1',DOIT_NO_POKE='1')
+        self.assertIn('DOIT_LEDGER_FILE',removed)
+        records = []
+        with tempfile.TemporaryDirectory(prefix='redcut-regression-') as temporary:
+            scratch = Path(temporary)
+            trees = {}
+            try:
+                for label, revision in (('reference',self.REFERENCE),('candidate','HEAD')):
+                    tree = scratch/label
+                    p = subprocess.run(['git','worktree','add','--detach',str(tree),revision],
+                                       cwd=repo,env=clean,capture_output=True,text=True,timeout=60)
+                    self.assertEqual(p.returncode,0,p.stderr)
+                    trees[label] = tree
+                # Also exercise the current tracked edits when run before amend.
+                for path in ('src/merge_queue.py','src/fold_emits.py','src/fold.py','src/test_merge_queue.py'):
+                    (trees['candidate']/path).write_bytes((repo/path).read_bytes())
+                counts = {label:len((tree/'src/fold.py').read_text().splitlines())
+                          for label,tree in trees.items()}
+                self.assertEqual(counts['reference'],2572)
+                self.assertEqual(counts['candidate']-counts['reference'],3)
+                for path in self.PATHS:
+                    pair = []
+                    for label, tree in trees.items():
+                        isolated = scratch/(label+'-'+Path(path).stem)
+                        isolated.mkdir()
+                        for name in ('home','root','xdg','tmp'):
+                            (isolated/name).mkdir()
+                        env = dict(clean,HOME=str(isolated/'home'),DOIT_ROOT=str(isolated/'root'),
+                                   XDG_CONFIG_HOME=str(isolated/'xdg'),TMPDIR=str(isolated/'tmp'))
+                        command = ['/usr/bin/python3',path]
+                        p = subprocess.run(command,cwd=tree,env=env,capture_output=True,text=True,timeout=240)
+                        summary = re.search(r'Ran (\d+) tests? in ',p.stderr)
+                        failures = re.findall(r'^(?:FAIL|ERROR): (.+)$',p.stderr,re.M)
+                        output = p.stdout+p.stderr
+                        record = dict(path=path,tree=label,reference_sha=self.REFERENCE,
+                                      command=command,exit=p.returncode,
+                                      executed_cases=int(summary[1]) if summary else None,
+                                      assertion_progress=p.stdout.splitlines()[-4:],
+                                      failures=failures,diagnostics=p.stderr,
+                                      output_sha256=hashlib.sha256(output.encode()).hexdigest(),
+                                      removed_environment_keys=removed,fold_lines=counts[label],
+                                      narrow_grant_delta=counts['candidate']-counts['reference'])
+                        records.append(record)
+                        pair.append(record)
+                        # Print each completed subprocess even if a later row fails.
+                        self.signed('AC6-run',record)
+                        self.assertNotIn('skipped=',p.stderr)
+                    with self.subTest(path=path):
+                        reference, candidate = pair
+                        if path == 'src/test_fold.py':
+                            identity = 'assert line_count <= 2465, line_count'
+                            self.assertEqual(reference['exit'],1)
+                            for row in pair:
+                                if row['exit'] == 0:
+                                    continue
+                                self.assertEqual(row['exit'],1)
+                                self.assertIn(identity,row['diagnostics'])
+                                self.assertEqual(row['diagnostics'].count('Traceback (most recent call last):'),1)
+                                self.assertRegex(row['diagnostics'].strip(),r'AssertionError: \d+$')
+                                self.assertEqual(row['failures'],[])
+                            # This admits the known assertion site only, never claims
+                            # that any later module-level assertions were executed.
+                        else:
+                            self.assertGreater(reference['executed_cases'] or 0,0)
+                            self.assertGreater(candidate['executed_cases'] or 0,0)
+                            self.assertEqual(candidate['exit'],0,candidate['diagnostics'])
+                            self.assertEqual(candidate['failures'],[])
+                            if path == 'src/test_merge_queue.py':
+                                self.assertEqual(reference['exit'],1)
+                                allowed = {'test_window_batching_caps','test_train_caps','test_train_step',
+                                           'test_ac1_fill_to_cap','test_ac5_fill_safety'}
+                                self.assertEqual(len(reference['failures']),6)
+                                self.assertEqual({f.split()[0] for f in reference['failures']},allowed)
+                                safety = [f for f in reference['failures'] if f.startswith('test_ac5_fill_safety ')]
+                                self.assertEqual(len(safety),2)
+                                for name in ('test_window_batching_caps','test_train_caps'):
+                                    self.assertTrue(any("safety_regression='"+name+"'" in f for f in safety))
+                            else:
+                                self.assertEqual(reference['exit'],0,reference['diagnostics'])
+            finally:
+                for tree in trees.values():
+                    p = subprocess.run(['git','worktree','remove','--force',str(tree)],cwd=repo,
+                                       env=clean,capture_output=True,text=True,timeout=60)
+                    self.assertEqual(p.returncode,0,p.stderr)
+        self.assertEqual(len(records),8)
+        self.signed('AC6',dict(inventory=list(self.PATHS),runs=8,recursive=False,records=records))
+
+
 if __name__ == '__main__':
     if sys.argv[1:] == ['--spec-1869-ac2']:
         suite = unittest.defaultTestLoader.loadTestsFromTestCase(GateToolingQueueTests)
         result = unittest.TextTestRunner(verbosity=2).run(suite)
         print(f'L-spec-1869 AC2 queue: {result.testsRun} executed; success={result.wasSuccessful()}')
         sys.exit(0 if result.testsRun and result.wasSuccessful() else 1)
+    if not sys.argv[1:]:
+        # AC6 must be explicitly selected: its candidate child invokes this
+        # ordinary entry, which must not recursively start the paired harness.
+        sys.argv.extend(['QueueTests','GateToolingQueueTests','RedcutQueueTests','RedcutLedgerMetricsTests'])
     unittest.main()
