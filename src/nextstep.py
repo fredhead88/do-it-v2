@@ -514,7 +514,7 @@ def _held_result(c, blocker, kind):
     evs = c['by_subject'].get(blocker, [])
     terminal = _terminal(evs, c['specs'].get(blocker))
     if kind == 'dependency-held' and (not evs or terminal or c['specs'].get(blocker, {}).get('state', 'unknown') == 'unknown'):
-        hold = _latest(c['evs'], {'dependency-hold'})
+        hold = _dependency_hold(c['evs'])
         return _result(hold, 'blocker-dead: ' + str(blocker), blocker=blocker, overdue=True)
     owned = next((r for r in c['acting_rows'] if r['spec'] == blocker
                   and not r['reason'].startswith('undetermined: ')), None)
@@ -533,10 +533,17 @@ def _wave_held(c):
 
 
 
+def _dependency_hold(evs):
+    return max((e for e in evs if e.get('type') == 'dependency-hold'),
+               key=autodispatch._hold_order, default=None)
+
+
 def _dependency_held(c):
     if not c['dependency']:
         return None
-    hold = _latest(c['evs'], {'dependency-hold'})
+    hold = _dependency_hold(c['evs'])
+    if not fold.valid_dependency(hold.get('waits_for')):
+        return _result(hold, c['dependency'], invalid_dependency=True)
     return _held_result(c, hold.get('waits_for'), 'dependency-held')
 
 
@@ -615,8 +622,7 @@ def _ruling_step(c, spawn_events, owners):
     if action in ('hold', 'recut') and (autodispatch._hold_released(ruling, evs)
             or any(e['type'] == 'build-started' and _time(e['ts']) >= _time(ruling['ts']) for e in evs)):
         return None
-    if not source or action == 'hold' and (not isinstance(ruling.get('waits_for'), str)
-                                         or not ruling['waits_for'].strip()):
+    if not source or action == 'hold' and not fold.valid_dependency(ruling.get('waits_for')):
         return _hold(sid, 'spec', _stage(evs), ruling,
                      'undetermined: ruling needs ' + ('source' if not source else 'waits_for'),
                      'valid action-bearing decision')
@@ -818,6 +824,22 @@ def _choose(c, rows, owners):
     return _hold(sid, 'spec', stage, event, 'idle: awaiting lane condition', 'lane condition or decision')
 
 
+def _spec_exception(sid, evs, exc):
+    # Exception messages may contain event payloads or credentials. Class and
+    # subject identify the repair without copying that untrusted text.
+    reason = f'undetermined: {sid} evaluation failed: {type(exc).__name__}'[:300]
+    stage = next((EVENT_STAGES[e['type']] for e in reversed(evs)
+                  if e.get('type') in EVENT_STAGES), 'planned')
+    return _hold(sid, 'spec', stage, evs[-1] if evs else {}, reason,
+                 'correct affected spec input and re-evaluate ' + sid)
+
+
+def _invalid_dependency_step(sid, evs, reason):
+    return _hold(sid, 'spec', _stage(evs), _dependency_hold(evs), reason,
+                 'thinker/operator append a newer dependency-hold with '
+                 'waits_for=L-spec-<digits> or explicitly release the hold')
+
+
 def next_steps(events, specs, now, rules, waves=None):
     """Pure snapshot evaluation; waves is caller-built spec_id -> wave context."""
     raw_events = list(events)
@@ -868,144 +890,163 @@ def next_steps(events, specs, now, rules, waves=None):
     shipped = {e.get('subject') for e in events if e['type'] == 'shipped'}
     for sid, spec in sorted(specs.items()):
         evs = by.get(sid, [])
-        event, stage = evs[-1] if evs else {}, _stage(evs)
-        terminals = {e['type'] for e in evs if e['type'] in lane_rules.TERMINAL_EVENTS}
-        conflict = 'spec-killed' in terminals and bool(terminals - {'spec-killed'})
-        error = bad.get(sid) or ('terminal events disagree' if conflict else None)
-        state = spec.get('state')
-        if not error and state in dispatch.SETTLED_STATES and state not in OWED_STATES:
-            continue
-        error = error or rule_error
-        if state not in PIPELINE | set(dispatch.SETTLED_STATES):
-            error = error or 'unknown spec state: ' + str(state)
-        if not evs:
-            error = error or 'since cannot be established'
-        if error:
-            steps.append(_hold(sid, 'spec', stage, event, 'undetermined: ' + error, 'valid input'))
-            continue
-        if state in OWED_STATES:
-            for check in owed.checks(evs, now):
-                if check['status'] in {'met', 'waived', 'unverifiable'}:
+        first_step = len(steps)
+        try:
+            event, stage = evs[-1] if evs else {}, _stage(evs)
+            terminals = {e['type'] for e in evs if e['type'] in lane_rules.TERMINAL_EVENTS}
+            conflict = 'spec-killed' in terminals and bool(terminals - {'spec-killed'})
+            error = bad.get(sid) or ('terminal events disagree' if conflict else None)
+            state = spec.get('state')
+            if not error and state in dispatch.SETTLED_STATES and state not in OWED_STATES:
+                continue
+            error = error or rule_error
+            if state not in PIPELINE | set(dispatch.SETTLED_STATES):
+                error = error or 'unknown spec state: ' + str(state)
+            if not evs:
+                error = error or 'since cannot be established'
+            if error:
+                steps.append(_hold(sid, 'spec', stage, event, 'undetermined: ' + error, 'valid input'))
+                continue
+            if state in OWED_STATES:
+                for check in owed.checks(evs, now):
+                    if check['status'] in {'met', 'waived', 'unverifiable'}:
+                        continue
+                    item = sid + ':' + check['criterion']
+                    since = check['governing_at'].isoformat()
+                    if check['status'] == 'expired':
+                        step = _hold(item, 'check', 'live', event, 'owed-expired', 'decision', since=since)
+                    elif check['due_at'] is not None and check['due_at'] <= now:
+                        step = Step(item, 'check', 'live', 'action', 'sweep-check', owners['sweep-check'],
+                                    check['declared_src'], 'owed check due', None, since)
+                    else:
+                        step = _hold(item, 'check', 'live', event, 'owed check waiting',
+                                     str(check['due_at'] or 'dated owed check'), 'sweeper', since)
+                    steps.append(step)
+                continue
+            c = dict(sid=sid, spec=spec, specs=specs, events=events, evs=evs,
+                     by_subject=by, now=now, table=rules, busy=busy, live=busy,
+                     capabilities=capabilities, memo={}, acting_rows=rows)
+            c['dependency'] = autodispatch.held_by_dependency(evs, events, shipped=shipped)
+            hold = _dependency_hold(evs)
+            if c['dependency'] and hold is not None and not fold.valid_dependency(hold.get('waits_for')):
+                steps.append(_invalid_dependency_step(sid, evs, c['dependency']))
+                continue
+            c['wave'] = _wave(sid, evs, by, specs, waves)
+            ruling_step = _ruling_step(c, spawn_events, owners)
+            ruling = autodispatch._standing_ruling(evs)
+            if ruling is not None and c['dependency']:
+                hold = _dependency_hold(evs)
+                steps.append(_hold(sid, 'spec', stage, hold, c['dependency'],
+                                   str(hold.get('waits_for')) + ' shipped', 'tick'))
+                continue
+            if ruling_step is not None:
+                steps.append(ruling_step)
+                continue
+            if ruling is not None:
+                steps.append(_hold(sid, 'spec', stage, ruling,
+                                   autodispatch._automatic_hold(evs, events, shipped=shipped),
+                                   'thinker/operator unblocked or decision referring to ruling', 'tick'))
+                continue
+            if state == 'written' and dispatch.unaudited(evs) is not None:
+                questions = _unanswered(evs, events)
+                if questions:
+                    steps.append(_hold(sid, 'spec', stage, questions[-1],
+                                       'judgment: open question/escalation', 'decision'))
                     continue
-                item = sid + ':' + check['criterion']
-                since = check['governing_at'].isoformat()
-                if check['status'] == 'expired':
-                    step = _hold(item, 'check', 'live', event, 'owed-expired', 'decision', since=since)
-                elif check['due_at'] is not None and check['due_at'] <= now:
-                    step = Step(item, 'check', 'live', 'action', 'sweep-check', owners['sweep-check'],
-                                check['declared_src'], 'owed check due', None, since)
+                if sid in busy:
+                    spawn = next(s for s, e in attempts.items() if e.get('subject') == sid)
+                    steps.append(_hold(sid, 'spec', stage, attempts[spawn], 'in flight: ' + spawn,
+                                       spawn + ' spawn-done/spawn-failed', 'tick'))
+                    continue
+                audit = audit_state(evs, now)
+                trigger = _latest(evs, {'spec-written'})
+                phase = audit['phase']
+                if phase == 'due':
+                    steps.append(Step(sid, 'spec', 'planned', 'action', 'audit', 'tick',
+                                      _source(trigger), audit['reason'], None, audit['since']))
+                elif phase == 'bad-cut':
+                    steps.append(_hold(sid, 'spec', 'planned', trigger,
+                                       f'audit-bad-cut: {sid} audit reported bad_cut',
+                                       'spec-written rewrite or operator decision', 'executor', audit['since']))
                 else:
-                    step = _hold(item, 'check', 'live', event, 'owed check waiting',
-                                 str(check['due_at'] or 'dated owed check'), 'sweeper', since)
-                steps.append(step)
-            continue
-        c = dict(sid=sid, spec=spec, specs=specs, events=events, evs=evs,
-                 by_subject=by, now=now, table=rules, busy=busy, live=busy,
-                 capabilities=capabilities, memo={}, acting_rows=rows)
-        c['dependency'] = autodispatch.held_by_dependency(evs, events, shipped=shipped)
-        c['wave'] = _wave(sid, evs, by, specs, waves)
-        ruling_step = _ruling_step(c, spawn_events, owners)
-        ruling = autodispatch._standing_ruling(evs)
-        if ruling is not None and c['dependency']:
-            hold = _latest(evs, {'dependency-hold'})
-            steps.append(_hold(sid, 'spec', stage, hold, c['dependency'],
-                               str(hold.get('waits_for')) + ' shipped', 'tick'))
-            continue
-        if ruling_step is not None:
-            steps.append(ruling_step)
-            continue
-        if ruling is not None:
-            steps.append(_hold(sid, 'spec', stage, ruling,
-                               autodispatch._automatic_hold(evs, events, shipped=shipped),
-                               'thinker/operator unblocked or decision referring to ruling', 'tick'))
-            continue
-        if state == 'written' and dispatch.unaudited(evs) is not None:
+                    prefix = 'audit-exhausted: ' if phase == 'exhausted' else 'audit-wait: '
+                    reason = prefix + phase + ': ' + audit['reason']
+                    if audit['retry_at']:
+                        reason += '; next_retry_at=' + audit['retry_at']
+                    exhausted = phase == 'exhausted'
+                    clears = ('new authorized trigger or operator decision' if exhausted
+                              else 'next_retry_at=' + audit['retry_at'] if audit['retry_at']
+                              else 'spec-auditor spawn-done')
+                    steps.append(_hold(sid, 'spec', 'planned', trigger, reason, clears,
+                                       'executor' if exhausted else 'tick', audit['since']))
+                continue
+            tooling = _gate_tooling(c)
+            if tooling and (tooling['hold'] or tooling['due'] and now < _time(tooling['due'])):
+                reason = tooling['hold'] or ('gate-tooling: waiting; retry_at=' + tooling['due'])
+                steps.append(_hold(sid, 'spec', stage, tooling['event'], reason,
+                                   'thinker/operator unblocked or repaired gate' if tooling['hold']
+                                   else 'retry_at=' + tooling['due'],
+                                   'executor' if tooling['hold'] else owners['gate']))
+                continue
+            failure, classification = _failure(evs, rules)
+            if classification == 'base-refresh':
+                steps.append(_base_refresh_hold(c, failure))
+                continue
+            if classification == 'spec-defect':
+                diagnostic = PACKET_INCOMPLETE_RE.search(_failure_text(failure)).group(0)
+                steps.append(_hold(sid, 'spec', stage, failure, 'spec-defect: ' + diagnostic,
+                                   'spec amendment/rewrite and executor reconsideration'))
+                continue
+            # Structured reconciliation retries continue through original role/trigger
+            # predicates, which own bounds, completion and stronger lifecycle holds.
+            if failure and classification not in {'work', 'retry', 'gate-tooling'}:
+                reason = 'infra: retry required' if classification == 'infra' else 'undetermined: failure classification'
+                steps.append(_hold(sid, 'spec', stage, failure, reason, 'infra-retry backoff or freed disk'
+                                   if classification == 'infra' else 'classified failure'))
+                continue
             questions = _unanswered(evs, events)
             if questions:
-                steps.append(_hold(sid, 'spec', stage, questions[-1],
-                                   'judgment: open question/escalation', 'decision'))
+                steps.append(_hold(sid, 'spec', stage, questions[-1], 'judgment: open question/escalation', 'decision'))
                 continue
             if sid in busy:
                 spawn = next(s for s, e in attempts.items() if e.get('subject') == sid)
                 steps.append(_hold(sid, 'spec', stage, attempts[spawn], 'in flight: ' + spawn,
                                    spawn + ' spawn-done/spawn-failed', 'tick'))
                 continue
-            audit = audit_state(evs, now)
-            trigger = _latest(evs, {'spec-written'})
-            phase = audit['phase']
-            if phase == 'due':
-                steps.append(Step(sid, 'spec', 'planned', 'action', 'audit', 'tick',
-                                  _source(trigger), audit['reason'], None, audit['since']))
-            elif phase == 'bad-cut':
-                steps.append(_hold(sid, 'spec', 'planned', trigger,
-                                   f'audit-bad-cut: {sid} audit reported bad_cut',
-                                   'spec-written rewrite or operator decision', 'executor', audit['since']))
-            else:
-                prefix = 'audit-exhausted: ' if phase == 'exhausted' else 'audit-wait: '
-                reason = prefix + phase + ': ' + audit['reason']
-                if audit['retry_at']:
-                    reason += '; next_retry_at=' + audit['retry_at']
-                exhausted = phase == 'exhausted'
-                clears = ('new authorized trigger or operator decision' if exhausted
-                          else 'next_retry_at=' + audit['retry_at'] if audit['retry_at']
-                          else 'spec-auditor spawn-done')
-                steps.append(_hold(sid, 'spec', 'planned', trigger, reason, clears,
-                                   'executor' if exhausted else 'tick', audit['since']))
-            continue
-        tooling = _gate_tooling(c)
-        if tooling and (tooling['hold'] or tooling['due'] and now < _time(tooling['due'])):
-            reason = tooling['hold'] or ('gate-tooling: waiting; retry_at=' + tooling['due'])
-            steps.append(_hold(sid, 'spec', stage, tooling['event'], reason,
-                               'thinker/operator unblocked or repaired gate' if tooling['hold']
-                               else 'retry_at=' + tooling['due'],
-                               'executor' if tooling['hold'] else owners['gate']))
-            continue
-        failure, classification = _failure(evs, rules)
-        if classification == 'base-refresh':
-            steps.append(_base_refresh_hold(c, failure))
-            continue
-        if classification == 'spec-defect':
-            diagnostic = PACKET_INCOMPLETE_RE.search(_failure_text(failure)).group(0)
-            steps.append(_hold(sid, 'spec', stage, failure, 'spec-defect: ' + diagnostic,
-                               'spec amendment/rewrite and executor reconsideration'))
-            continue
-        # Structured reconciliation retries continue through original role/trigger
-        # predicates, which own bounds, completion and stronger lifecycle holds.
-        if failure and classification not in {'work', 'retry', 'gate-tooling'}:
-            reason = 'infra: retry required' if classification == 'infra' else 'undetermined: failure classification'
-            steps.append(_hold(sid, 'spec', stage, failure, reason, 'infra-retry backoff or freed disk'
-                               if classification == 'infra' else 'classified failure'))
-            continue
-        questions = _unanswered(evs, events)
-        if questions:
-            steps.append(_hold(sid, 'spec', stage, questions[-1], 'judgment: open question/escalation', 'decision'))
-            continue
-        if sid in busy:
-            spawn = next(s for s, e in attempts.items() if e.get('subject') == sid)
-            steps.append(_hold(sid, 'spec', stage, attempts[spawn], 'in flight: ' + spawn,
-                               spawn + ' spawn-done/spawn-failed', 'tick'))
-            continue
-        contexts.append(c)
+            contexts.append(c)
+        except Exception as exc:
+            del steps[first_step:]
+            steps.append(_spec_exception(sid, evs, exc))
+    failed = set()
     for diagnostic in (False, True):
         for c in contexts:
-            for name, rule in rules.items():
-                if name == 'sweep-check':
-                    continue  # Owed checks emit this action above, not a spec predicate.
-                if (name in {'wave-held', 'dependency-held', 'idle'}) != diagnostic:
-                    continue
-                try:
+            if c['sid'] in failed:
+                continue
+            try:
+                for name, rule in rules.items():
+                    if name == 'sweep-check':
+                        continue
+                    if (name in {'wave-held', 'dependency-held', 'idle'}) != diagnostic:
+                        continue
                     result = PREDICATES[name](c)
                     if result is not None:
                         _time(result.get('since'))
                         rows.append(dict(result, name=name, spec=c['sid'], rule=name,
                                          limit_min=result.get('limit_min', rule['limit_min']),
                                          overdue=(now - _time(result['since'])).total_seconds() > rule['limit_min'] * 60))
-                except (ValueError, TypeError, KeyError) as exc:
-                    rows.append(dict(name=name, spec=c['sid'], reason='undetermined: ' + str(exc)))
+            except Exception as exc:
+                failed.add(c['sid'])
+                rows[:] = [r for r in rows if r['spec'] != c['sid']]
+                steps.append(_spec_exception(c['sid'], c['evs'], exc))
     order = {name: i for i, name in enumerate(rules)} if not rule_error else {}
     for c in contexts:
-        own = sorted((r for r in rows if r['spec'] == c['sid']), key=lambda r: order[r['name']])
-        steps.append(_choose(c, own, owners))
+        if c['sid'] in failed:
+            continue
+        try:
+            own = sorted((r for r in rows if r['spec'] == c['sid']), key=lambda r: order[r['name']])
+            steps.append(_choose(c, own, owners))
+        except Exception as exc:
+            steps.append(_spec_exception(c['sid'], c['evs'], exc))
     windows = {r['batch'] for r in merge_queue.queue(events) if r.get('batch')}
     windows.update(s for s, evs in by.items() if any(e['type'] == 'window-opened' for e in evs))
     for window in sorted(windows):

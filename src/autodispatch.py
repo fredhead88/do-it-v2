@@ -60,8 +60,8 @@ def held_by_dependency(spec_evs, all_evs, *, shipped=None) -> str | None:
         return None
     source = f" [{hold['_src']}]" if hold.get('_src') else ''
     dependency = hold.get("waits_for")
-    if not dependency:
-        return "held: unresolvable dependency-hold (missing or empty waits_for)" + source
+    if not fold.valid_dependency(dependency):
+        return "held: invalid waits_for; unresolvable dependency-hold" + source
     if dependency == hold.get("subject"):
         return f"held: unresolvable dependency-hold (waits_for is self: {dependency})" + source
     if (dependency in shipped if shipped is not None else

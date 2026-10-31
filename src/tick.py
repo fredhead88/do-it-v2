@@ -846,6 +846,7 @@ def _record():
     # tick's own heartbeat, exactly like `carry_error` above.
     admission = {}
     autodispatch_error = None
+    autodispatch_pass_failed = False
     lane_driver_log_error = None
     dispatch_started = time.monotonic()
     def log_outcomes(lines):
@@ -869,6 +870,7 @@ def _record():
         if failures:
             autodispatch_error = '; '.join(failures)
     except Exception as e:
+        autodispatch_pass_failed = True
         autodispatch_error = f"{e}"
         if not admission:
             try:
@@ -924,7 +926,8 @@ def _record():
     todo.sort()
     # The one liveness fact: `fold` reads the newest of these for staleness, and
     # `lane` is the count — the whole record this process leaves behind.
-    kv = {"lane": len(todo), "relay": relay_status}
+    kv = {"lane": len(todo), "relay": relay_status,
+          "autodispatch_pass_failed": autodispatch_pass_failed}
     if relay_status == "wedged":
         try:
             kv["relay_heartbeat_age_s"] = (datetime.now(timezone.utc).timestamp()

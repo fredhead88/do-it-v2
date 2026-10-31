@@ -124,7 +124,7 @@ class HeldDispatch1863Tests(unittest.TestCase):
         results = []
         for actor in ('thinker', 'operator', 'builder', 'tick', None):
             for action in ('hold', 'recut', None, 'close', 're-cut'):
-                ruling = event('decision', actor=actor, action=action, waits_for='L-spec-FIXTURE',
+                ruling = event('decision', actor=actor, action=action, waits_for='L-spec-9002',
                                _src=f'L-{actor or "unknown"}-fixture.jsonl:1', why='hold or re-cut prose')
                 # Omitted actor and source cannot acquire authority.
                 if actor is None:
@@ -196,7 +196,7 @@ class HeldDispatch1863Tests(unittest.TestCase):
             if action:
                 ruling.update(action=action, synthetic='SD10 projection')
                 if action == 'hold':
-                    ruling['waits_for'] = 'L-spec-FIXTURE-' + number
+                    ruling['waits_for'] = 'L-spec-' + number
             else:
                 ruling['waits_for'] = 'L-spec-1723'
             events = [dict(self.written(sid), ts='2026-10-25T00:00:00Z'), ruling]

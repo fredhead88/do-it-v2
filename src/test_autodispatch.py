@@ -835,16 +835,16 @@ def test_dependency_holds():
     t1 = NOW - datetime.timedelta(hours=2)
     t2 = NOW - datetime.timedelta(hours=1)
     hold = {"type": "dependency-hold", "subject": sid, "ts": _iso(t1),
-            "waits_for": "L-spec-DEP", "why": "needs producer",
+            "waits_for": "L-spec-9002", "why": "needs producer",
             "_src": "L-thinker-0001.jsonl:1"}
-    reason = "held: waits for L-spec-DEP (needs producer) [L-thinker-0001.jsonl:1]"
+    reason = "held: waits for L-spec-9002 (needs producer) [L-thinker-0001.jsonl:1]"
     held = autodispatch.held_by_dependency
     assert held([], []) is None
     assert held([hold], [hold]) == reason
     print("dependency-hold AC3 ok")
 
     for shipped_at in (t0, t2):
-        shipped = {"type": "shipped", "subject": "L-spec-DEP", "ts": _iso(shipped_at)}
+        shipped = {"type": "shipped", "subject": "L-spec-9002", "ts": _iso(shipped_at)}
         assert held([hold], [hold, shipped]) is None
     for kind in ("unblocked", "decision"):
         for released_at in (t0, t1, t2):
@@ -852,7 +852,7 @@ def test_dependency_holds():
                        "actor": "thinker", "ref": hold['_src']}
             expected = None if released_at > t1 else reason
             assert held([hold, release], [hold, release]) == expected
-    other_ship = {"type": "shipped", "subject": "L-spec-OTHER", "ts": _iso(t2)}
+    other_ship = {"type": "shipped", "subject": "L-spec-9003", "ts": _iso(t2)}
     assert held([hold, {"type": "decision", "subject": sid, "ts": _iso(t2),
                         "actor": "thinker"}], []) == reason
     assert held([hold], [hold, other_ship]) == reason
@@ -863,12 +863,12 @@ def test_dependency_holds():
         bad = {**hold, "waits_for": invalid}
         if invalid is None:
             del bad["waits_for"]
-        assert held([bad], [bad, self_shipped]).startswith("held: unresolvable dependency-hold")
+        assert "unresolvable dependency-hold" in held([bad], [bad, self_shipped])
         for kind in ("unblocked", "decision"):
             release = {"type": kind, "subject": sid, "ts": _iso(t2),
                        "actor": "operator", "ref": hold['_src']}
             assert held([bad, release], [bad, release, self_shipped]) is None
-    older = {**hold, "waits_for": "L-spec-OTHER", "ts": _iso(t0)}
+    older = {**hold, "waits_for": "L-spec-9003", "ts": _iso(t0)}
     # Deliberately reverse ledger order: timestamp alone chooses the hold.
     assert held([hold, older], [hold, older, other_ship]) == reason
     assert held([older, hold], [hold, older, other_ship]) == reason
@@ -905,7 +905,7 @@ def test_dependency_holds():
         # A hold clears a prior failure without moving the original queue marker.
         _write(root, "L-tick-local.jsonl", failure)
         _write(root, "L-executor-0001.jsonl",
-               {"type": "shipped", "subject": "L-spec-DEP", "ts": _iso(t2)})
+               {"type": "shipped", "subject": "L-spec-9002", "ts": _iso(t2)})
         _, _, rows = _fold_and_candidates(root)
         row = _row(rows, sid)
         assert row["status"] == "dispatchable" and row["reason"] is None
@@ -992,7 +992,7 @@ def test_dispatcher_base_1134():
                     git.assert_called_once_with(["git", "-C", str(root / "repos" / "fixture"),
                                                  "symbolic-ref", "--short", "HEAD"], capture_output=True, text=True)
             # Earlier reasons retain priority, without reading HEAD.
-            hold = {"type": "dependency-hold", "subject": sid, "waits_for": "L-spec-DEP", "ts": _iso(NOW)}
+            hold = {"type": "dependency-hold", "subject": sid, "waits_for": "L-spec-9002", "ts": _iso(NOW)}
             specs[sid]["evs"] = [*specs[sid]["evs"], hold]
             with mock.patch.object(autodispatch.subprocess, "run") as git:
                 row = _row(autodispatch.candidates(events + [hold], {sid: specs[sid]}, NOW), sid)
