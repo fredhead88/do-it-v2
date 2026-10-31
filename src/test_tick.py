@@ -33,11 +33,32 @@ def _launcher_evidence(criterion, body):
                           body_excerpt=payload)))
 
 
+def _builder_project(root, stack):
+    """Configure the synthetic builder project for the real base resolver."""
+    import look
+    import subprocess
+    repo = root / 'repos/proj'
+    repo.mkdir(parents=True)
+    subprocess.run(['git', '-C', str(repo), 'init', '-q', '-b', 'master'], check=True)
+    subprocess.run(['git', '-C', str(repo), '-c', 'user.name=fixture', '-c',
+                    'user.email=fixture@example.invalid', 'commit', '-q',
+                    '--allow-empty', '-m', 'fixture'], check=True,
+                   env=dict(os.environ, GIT_AUTHOR_DATE='2000-01-01T00:00:00Z',
+                            GIT_COMMITTER_DATE='2000-01-01T00:00:00Z'))
+    config = look.load_toml()
+    config = dict(config, push={**config.get('push', {}),
+                  'main': {**config.get('push', {}).get('main', {}), 'proj': 'master'}})
+    stack.enter_context(patch.object(look, 'load_toml', return_value=config))
+
+
 class LauncherTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix='sole-launcher-')
         self.addCleanup(self.tmp.cleanup)
         self.root = pathlib.Path(self.tmp.name)
+        stack = contextlib.ExitStack()
+        self.addCleanup(stack.close)
+        _builder_project(self.root, stack)
         self.now = fold.NOW
         self.events = []
         for module, key, value in ((fold, 'ROOT', self.root), (fold, 'EVENTS', self.root / 'events'),
@@ -339,6 +360,7 @@ class AdmissionTests(unittest.TestCase):
     def isolated(self, mode):
         with tempfile.TemporaryDirectory(prefix='admission-tick-') as directory, contextlib.ExitStack() as stack:
             root = pathlib.Path(directory)
+            _builder_project(root, stack)
             for module, key, value in ((fold, 'ROOT', root), (fold, 'EVENTS', root / 'events'),
                                        (dispatch, 'ROOT', root), (dispatch, 'EVENTS', root / 'events'),
                                        (dispatch, 'CONTENT', root / 'content')):
@@ -2893,7 +2915,7 @@ class AuditTickTests(unittest.TestCase):
                         self.emit('tick', 'spawn-stale', minutes=-4, spawn=e['spawn'], role='spec-auditor')
 
     def test_ac8_real_ledger_audit_then_build_rewrite_and_bad_cut(self):
-        (self.root / 'repos' / 'proj').mkdir(parents=True)
+        (self.root / 'repos' / 'proj').mkdir(parents=True, exist_ok=True)
         (self.root / 'content' / 'L-spec-9673.md').write_text(
             '# Goal\nFixture.\n# Acceptance criteria\nAC1 [backend]: fixture. review_path: fixture.\n'
             'Writes:\n- fixture.py\n# Verification\n```\ntrue && echo VERIFIED\n```\n')

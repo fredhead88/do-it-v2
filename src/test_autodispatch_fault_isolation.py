@@ -286,6 +286,18 @@ class PerSpecIsolationTests(Scratch):
                 cases.append(dict(phase=phase, exception=cls.__name__, step=failed.__dict__))
         # Consume the actual computed Steps through the real launch loop.
         import loadgate
+        import look
+        import subprocess
+        repo = self.root / 'repos/fixture'
+        repo.mkdir(parents=True)
+        subprocess.run(['git', '-C', str(repo), 'init', '-q', '-b', 'master'], check=True)
+        subprocess.run(['git', '-C', str(repo), '-c', 'user.name=fixture', '-c',
+                        'user.email=fixture@example.invalid', 'commit', '-q',
+                        '--allow-empty', '-m', 'fixture'], check=True)
+        config = look.load_toml()
+        config = dict(config, push={**config.get('push', {}),
+                      'main': {**config.get('push', {}).get('main', {}), 'fixture': 'master'}})
+        self.swap(look, 'load_toml', lambda: config)
         launches = []
         for sid in ('L-spec-1894', 'L-spec-1896'):
             (self.root / 'worktrees/fixture' / sid.lower()).mkdir(parents=True)
