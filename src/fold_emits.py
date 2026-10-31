@@ -305,6 +305,7 @@ EMITS["window-bisected"] = {"executor", "operator"}
 EMITS["window-run-minutes"] = {"executor", "tick", "operator"}
 EMITS["window-candidate"] = {"executor", "tick", "operator"}
 EMITS["window-cancelled"] = {"executor", "tick", "operator"}
+EMITS["window-redcut"] = {"executor", "tick"}
 EMITS["window-refused"] = {"executor", "tick", "operator"}
 EMITS["train-depth"] = {"executor", "tick", "operator"}
 EMITS["batch-cap"] = {"executor", "tick", "operator"}
@@ -348,6 +349,8 @@ REQUIRED_ROWS = {
     "window-run-minutes": ("window", "candidate", "minutes_source"),
     "window-candidate": ("sha", "verified_on", "specs"),
     "window-cancelled": ("after", "reason"),
+    "window-redcut": ("window", "project", "candidate", "base", "dropped", "returned",
+                       "flakes", "residual", "first_red_at", "closed_at", "outcome", "automatic"),
     "window-refused": ("window", "project", "holder_window", "holder_pid", "reason"),
     "train-depth": ("depth", "reason"),
     "batch-cap": ("cap", "reason"),

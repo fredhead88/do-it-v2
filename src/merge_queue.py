@@ -43,7 +43,7 @@ def _latest(events, kinds):
 
 def queue(events, project=None, *, _include_terminal=False):
     """Fold corrections without consulting a mutable script or the wall clock."""
-    live, batches = {}, {}
+    live, returned = {}, set()
     for pos, e in enumerate(_ordered(events)):
         sid, kind = e.get('subject'), e.get('type')
         if kind == 'queue-add':
@@ -55,8 +55,21 @@ def queue(events, project=None, *, _include_terminal=False):
             live.pop(sid, None)
         elif kind == 'queue-batch':
             for spec in e.get('specs', '').split(','):
-                batches[spec] = sid
-    return [dict(row, batch=batches.get(sid)) for sid, (_, row) in
+                if spec in live:
+                    live[spec][1]['batch'] = sid
+        elif kind == 'window-redcut' and e.get('window') == sid:
+            # Return an existing row, retaining its branch, timestamp and
+            # position. An old completion cannot release a later reservation.
+            for spec in e.get('returned', []):
+                key = (sid, spec)
+                if key in returned:
+                    continue
+                returned.add(key)
+                if spec in live:
+                    row = live[spec][1]
+                    if row['project'] == e.get('project') and row['batch'] == sid:
+                        row['batch'] = None
+    return [dict(row) for sid, (_, row) in
             sorted(live.items(), key=lambda item: item[1][0])
             if project is None or row['project'] == project]
 

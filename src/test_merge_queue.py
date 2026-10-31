@@ -159,6 +159,121 @@ class QueueTests(unittest.TestCase):
         self.mark(1, 'add ok', 'remove ok', 're-add ok', 'equal ts ok', 'project filter ok',
                   'batch field ok', 'missing branch ok')
 
+    def redcut_fixture(self):
+        """The retained-row contract, with unrelated work after the batch."""
+        specs = ['L-spec-9001', 'L-spec-9002', 'L-spec-9003', 'L-spec-9004']
+        adds = [dict(self.event('queue-add', 10-i, project='p', branch=branch,
+                                rule='operator'), subject=sid)
+                for i, (sid, branch) in enumerate(zip(specs, 'abcu'))]
+        batch = dict(self.event('queue-batch', 5, project='p', specs=','.join(specs[:3])),
+                     subject='window-redcut')
+        drop = self.event('window-dropped', 4, window=batch['subject'], reason='owner',
+                          evidence='local-repro', tests=['tests/test_a.py::test_a'],
+                          owned_nodes=['tests/test_a.py::test_a'])
+        close = dict(self.event('window-redcut', 3, window=batch['subject'], project='p',
+                               candidate='candidate-fixture', base='base-fixture',
+                               dropped=specs[:1], returned=specs[1:3], flakes=[], residual=[],
+                               first_red_at=drop['ts'], closed_at=self.event('x', 3)['ts'],
+                               outcome='handled-red', automatic=True), subject=batch['subject'])
+        expected = [dict(spec=e['subject'], project='p', branch=e['branch'],
+                         added_at=e['ts'], batch=None) for e in adds[1:]]
+        return adds + [batch, drop], close, expected
+
+    def test_redcut_retains_exact_queue_rows_and_position(self):
+        events, close, expected = self.redcut_fixture()
+        before = json.dumps(events + [close], sort_keys=True)
+        self.assertEqual(mq.queue(events + [close], 'p'), expected)
+        self.assertEqual(mq.queue(events + [close, close], 'p'), expected)
+        self.assertEqual(json.dumps(events + [close], sort_keys=True), before)
+        # A terminal row does not invent a queue entry or affect another project.
+        self.assertEqual(mq.queue([close], 'p'), [])
+        self.assertEqual(mq.queue(events + [dict(close, project='other')], 'p')[0]['batch'],
+                         close['subject'])
+
+    def test_redcut_replay_cannot_clear_successor_or_replace_new_branch(self):
+        events, close, expected = self.redcut_fixture()
+        successor = dict(self.event('queue-batch', 2, project='p',
+                                    specs=','.join(close['returned'])), subject='window-next')
+        replay = dict(close, ts=self.event('x', 1)['ts'])
+        after_successor = [dict(row, batch='window-next') if row['spec'] in close['returned']
+                           else row for row in expected]
+        self.assertEqual(mq.queue(events + [close, successor, replay], 'p'), after_successor)
+        new_add = dict(self.event('queue-add', 1, project='p', branch='b2', rule='operator'),
+                       subject=close['returned'][0])
+        expected_new = [expected[1], expected[2], dict(expected[0], branch='b2',
+                                                     added_at=new_add['ts'])]
+        self.assertEqual(mq.queue(events + [close, new_add, replay], 'p'), expected_new)
+        # A fresh add also replaces a batch link without any preceding redcut.
+        old_link = [events[0], events[1], events[4], new_add]
+        self.assertIsNone(mq.queue(old_link, 'p')[-1]['batch'])
+
+    def test_redcut_does_not_revive_terminal_or_removed_work(self):
+        events, close, expected = self.redcut_fixture()
+        for kind in ('shipped', 'spec-killed', 'spec-closed', 'window-dropped', 'queue-remove'):
+            terminal = dict(self.event(kind, 2), subject=close['returned'][0])
+            self.assertEqual(mq.queue(events + [close, terminal, close], 'p'), expected[1:])
+        all_dropped = events + [dict(events[-1], subject=sid) for sid in close['returned']]
+        self.assertEqual(mq.queue(all_dropped + [dict(close, returned=[])], 'p'), expected[-1:])
+        # Flake-only closure returns the original rows without a fresh queue-add.
+        no_drop = events[:-1]
+        flake = dict(close, dropped=[], returned=[e['subject'] for e in events[:3]],
+                     flakes=['tests/test_a.py::test_a'])
+        rows = mq.queue(no_drop + [flake], 'p')
+        self.assertEqual([r['branch'] for r in rows], list('abcu'))
+        self.assertTrue(all(r['batch'] is None for r in rows))
+
+    def test_redcut_production_append_and_fresh_process_queue_readback(self):
+        events, close, expected = self.redcut_fixture()
+        for actor in ('executor', 'tick'):
+            with self.subTest(actor=actor):
+                self.seed(events)
+                ledger = 'L-' + actor + '-redcut.jsonl'
+                path = self.root / 'events' / ledger
+                path.unlink(missing_ok=True)
+                fields = {k: v for k, v in close.items() if k not in ('v', 'type', 'subject', 'ts')}
+                mq._train_emit(ledger, close['subject'], 'window-redcut', **fields)
+                self.assertEqual(self.separate_queue(), expected)
+                mq._train_emit(ledger, close['subject'], 'window-redcut', **fields)
+                self.assertEqual(self.separate_queue(), expected)
+                successor = dict(self.event('queue-batch', 0, project='p',
+                                           specs=','.join(close['returned'])), subject='window-next')
+                self.seed(events + [successor])
+                mq._train_emit(ledger, close['subject'], 'window-redcut', **fields)
+                self.assertEqual(self.separate_queue(), [dict(r, batch='window-next')
+                                 if r['spec'] in close['returned'] else r for r in expected])
+                self.assertFalse(any(json.loads(line)['type'] == 'queue-add'
+                                     for line in path.read_text().splitlines()))
+                path.unlink()
+
+    def test_redcut_admission_requires_actor_and_fields(self):
+        _, close, _ = self.redcut_fixture()
+        for actor in ('executor', 'tick'):
+            self.assertIsNone(fold.check_append(close, actor))
+            for field in ('window', 'project', 'candidate', 'base', 'dropped', 'returned',
+                          'flakes', 'residual', 'first_red_at', 'closed_at', 'outcome', 'automatic'):
+                malformed = dict(close)
+                malformed.pop(field)
+                self.assertIsNotNone(fold.check_append(malformed, actor), field)
+        for actor in ('builder', 'grader', 'reviewer', 'thinker', 'operator'):
+            self.assertIsNotNone(fold.admits(close, actor), actor)
+
+    def test_redcut_list_fields_accept_empty_but_refuse_missing_or_nonlist(self):
+        _, close, _ = self.redcut_fixture()
+        fields = ('dropped', 'returned', 'flakes', 'residual')
+        empty = dict(close, **dict.fromkeys(fields, []))
+        for actor in ('executor', 'tick'):
+            with self.subTest(actor=actor, case='empty lists'):
+                self.assertIsNone(fold.check_append(empty, actor))
+            for field in fields:
+                missing = dict(empty)
+                missing.pop(field)
+                with self.subTest(actor=actor, field=field, case='missing'):
+                    self.assertIsNotNone(fold.check_append(missing, actor))
+                for value in (None, '', 'node', {}, 0, False, ('node',)):
+                    with self.subTest(actor=actor, field=field, value=value):
+                        self.assertIsNotNone(fold.check_append(
+                            dict(empty, **{field: value}), actor))
+
 
     def git(self, *argv, repo=None):
         result = subprocess.run(['git', *argv], cwd=repo or self.repo, capture_output=True, text=True)
