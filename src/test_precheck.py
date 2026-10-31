@@ -184,7 +184,7 @@ class PrecheckTests(unittest.TestCase):
                 with patch.object(merge_queue.window_gate, 'train_events', return_value=events), \
                      patch.object(merge_queue, 'next_candidate', return_value='A'), \
                      patch.object(merge_queue, '_train_emit', side_effect=lambda *a, **kw: batches.append((a, kw))), \
-                     patch.object(merge_queue, 'effective_cap', return_value={'cap': 10}), \
+                     patch.object(merge_queue, 'spec_paths', side_effect=lambda r, m, b: [('M', b)]), \
                      patch.object(merge_queue, 'record_cap'), redirect_stdout(out):
                     rc = merge_queue.window_run('proj', runner=launch, now=NOW, precheck_runner=check)
                 self.assertEqual(rc, 0)
@@ -194,10 +194,10 @@ class PrecheckTests(unittest.TestCase):
                     self.assertEqual(batch['precheck'], 'none')
                     self.assertIn('precheck undetermined', out.getvalue())
                 else:
-                    self.assertEqual(batch['specs'], 'D,A')
+                    self.assertEqual(batch['specs'], 'A,B,C,D')
                     self.assertEqual(batch['precheck'], fresh['ts'])
-                    self.assertIn('precheck-exclusions', out.getvalue())
-                    self.assertIn('excluded 2', out.getvalue())
+                    self.assertEqual(batch['skipped'], [])
+                    self.assertIn('selected 4', out.getvalue())
                 self.assertEqual(checks, [] if scenario == 'fresh' else ['proj'])
         self.evidence('AC5', dict(fresh=True, stale_refreshed=True, error_fallback=True))
 

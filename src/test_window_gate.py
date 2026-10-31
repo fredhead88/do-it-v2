@@ -3364,6 +3364,13 @@ class ChainFixture:
         return next(r for r in self.rows() if r['type'] == 'window-candidate')
 
     def seed_queue(self):
+        repo = self.root / 'repos/albert-scott'
+        repo.mkdir(parents=True)
+        for args in (("init", "-q", "-b", "master"),
+                     ("-c", "user.name=fixture", "-c", "user.email=fixture@localhost",
+                      "commit", "--allow-empty", "-qm", "base"),
+                     ("branch", "br-A")):
+            subprocess.run(['git', *args], cwd=repo, check=True, capture_output=True)
         code = ('import fold; '
                 'fold.append(["merge-gate-clean", "A", "branch=br-A", "project=albert-scott"]); '
                 'fold.append(["queue-add", "A", "branch=br-A", "project=albert-scott", "rule=operator"])')
