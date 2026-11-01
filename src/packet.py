@@ -1065,7 +1065,8 @@ def p_grader(c):
     lines = body.split("\n")
     # Independently read the source ranges: criteria() itself may have cut one.
     for cid, start, end in _criterion_spans(body):
-        if cid not in owed and "\n".join(lines[start:end]) not in item1:
+        expected = grader_packet.source_text(c, "\n".join(lines[start:end]))
+        if cid not in owed and _redact_base_shas(_redact_builder_spawn(expected), shas) not in item1:
             die(f"incomplete criterion {cid} from {spec}")
     return out
 def _subject_base_shas(c):

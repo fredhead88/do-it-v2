@@ -103,7 +103,14 @@ def redact(text, build):
     return re.sub(r"\bL-builder-\d+\b", "[this build]", text)
 
 
+def source_text(context, text):
+    """Use exactly the packet's blindness normalization in its completeness proof."""
+    build = getattr(context, '_grader_redaction', None)
+    return redact(text, build) if build else text
+
+
 def packet_items(context, items):
+    context._grader_redaction = None
     build = context.last("build-done") or {}
     bundle = bundle_for(context.evs, context.a.subject, build.get("ready_sha"))
     if bundle is None:
@@ -112,6 +119,7 @@ def packet_items(context, items):
     checkout = root() / "repos" / context.project()
     items += sections(bundle, checkout)
     build = {**build, "base_sha": bundle["bundle"]["base_sha"]}
+    context._grader_redaction = build
     return [redact(line, build) for line in items]
 
 
