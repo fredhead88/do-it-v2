@@ -4691,7 +4691,7 @@ def test_queue_digest_vocabulary_1133():
     import fold_emits
 
     allowed = {
-        "queue-add": {"executor", "tick", "operator"},
+        "queue-add": {"executor", "tick", "operator", "base-red"},
         "queue-remove": {"executor", "tick", "operator"},
         "queue-batch": {"executor", "tick"},
         "stuck-digest": {"digest"},

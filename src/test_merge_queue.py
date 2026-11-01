@@ -125,6 +125,22 @@ class QueueTests(unittest.TestCase):
         self.assertEqual(self.calls, [])
         self.nightly_mark(5)
 
+    def test_nightly_freeze_admits_only_automatic_quarantine_maintenance(self):
+        self.window_seed()
+        maintenance = 'quarantine-' + 'a'*16
+        branch = 'auto-quarantine/' + 'a'*16
+        row = dict(self.event('queue-add', project='albert-scott', branch=branch, rule='auto-quarantine'),
+                   subject=maintenance)
+        self.seed([self.nightly_event('nightly-red', 0, ids=['tests/test_clock.py::test_boundary']), row],
+                  'L-base-red-local.jsonl')
+        code, calls = self.train_call()
+        self.assertEqual(code, 0)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][-1], maintenance)
+        batch = [e for e in fold.read_events() if e['type'] == 'queue-batch'][-1]
+        self.assertEqual(batch['specs'], maintenance)
+        self.assertTrue(any(r['spec'] == self.sid for r in mq.queue(fold.read_events())))
+
     def test_nightly_ac12_escalation_closure(self):
         e = self.nightly_event
         escalation = e('escalation-blocking', 1, default='quarantine',

@@ -1,7 +1,10 @@
-"""Dated, ledger-only quarantine of repeat-blamed and base-red test ids."""
+"""Dated quarantine policy, with automatic base-red evidence and queued Git edits."""
 from datetime import datetime, timedelta, timezone
 import json
+import hashlib
+import fcntl
 import os
+import re
 
 import fold
 
@@ -48,6 +51,68 @@ def due(events, project, now):
             for n, ws in sorted(blamed.items()) if len(ws) >= BLAME_WINDOWS and n not in current and n not in owned]
 
 
+def base_due(events, project, now):
+    """Two distinct consecutive complete base runs, or base-proven windows.
+
+    Re-reading one CI artifact, or bisecting one window, is one observation.
+    A green observation breaks the streak; stale evidence cannot renew a row.
+    """
+    streams = {"ci": {}, "window": {}}
+    for e in sorted(events, key=lambda e: _time(e["ts"])):
+        if e.get("project") != project or _time(e["ts"]) > now:
+            continue
+        kind = e.get("type")
+        if kind in ("base-red", "base-red-nightly") and e.get("complete") is True:
+            observations = e.get("observations")
+            if observations:
+                for observed in observations:
+                    key = ("run:"+str(observed["run_id"])+":"+str(observed.get("attempt", 1)),)
+                    ids = observed.get("ids", {}) if observed.get("complete") is True else {}
+                    nodes = set().union(*(set(v) for v in ids.values()))
+                    stamp = observed.get("timestamp") or e["ts"]
+                    streams["ci"].setdefault(key, (dict(e, ts=stamp), nodes))
+                continue
+            sources = e.get("sources") or e.get("run_ids") or ([e["url"]] if e.get("url") else [])
+            if not sources:
+                continue  # SHA alone cannot distinguish two runs of the same tree.
+            key = tuple(sorted(map(str, sources)))
+            ids = e.get("ids", [])
+            nodes = set().union(*(set(v) for v in ids.values())) if isinstance(ids, dict) else set(ids)
+            streams["ci"].setdefault(key, (e, nodes))
+        elif kind in ("window-pre-existing", "window-base-observed", "window-verified"):
+            key = e.get("window") or e.get("subject")
+            if not key:
+                continue
+            nodes = set(e.get("pre_existing", []) if kind == "window-verified" else e.get("ids", []))
+            previous = streams["window"].get(key)
+            if previous and kind != "window-verified":
+                nodes.update(previous[1])
+            streams["window"][key] = (e, nodes)
+    current, result = active(events, project, now), {}
+    for stream, rows in streams.items():
+        pair = sorted(rows.items(), key=lambda pair: _time(pair[1][0]["ts"]))[-2:]
+        if len(pair) != 2:
+            continue
+        if stream == "ci" and set(pair[0][0]) & set(pair[1][0]):
+            continue  # overlapping snapshots cannot count one CI run twice
+        for node in pair[0][1][1] & pair[1][1][1]:
+            if node in current or not valid_node(node):
+                continue
+            previous = [e for e in events if e.get("project") == project and e.get("node") == node
+                        and e.get("type") == "test-quarantined"]
+            if previous and any(_time(row[0]["ts"]) <= max(_time(e["until"]) for e in previous)
+                                for _, row in pair):
+                continue
+            result[node] = dict(node=node, rule="auto-base-red",
+                                windows=[stream + ":" + ",".join(map(str, key)) if isinstance(key, tuple)
+                                         else stream + ":" + str(key) for key, _ in pair])
+    return list(result.values())
+
+
+def valid_node(node):
+    return isinstance(node, str) and bool(re.fullmatch(r"[A-Za-z0-9_./-]+\.py::[^\s\x00-\x1f]+", node))
+
+
 def lifts(events, project, now):
     now = _time(now)
     verified = sorted((e for e in events if e.get("project") == project
@@ -57,7 +122,7 @@ def lifts(events, project, now):
     for node, row in _latest(events, project, now).items():
         since, until = _time(row["since"]), _time(row["until"])
         windows = [e for e in verified if _time(e["ts"]) > since][-GREEN_WINDOWS:]
-        green = (len(windows) == GREEN_WINDOWS and all(
+        green = (row.get("rule") != "auto-base-red" and len(windows) == GREEN_WINDOWS and all(
             node not in e.get("quarantined", []) and node not in e.get("pre_existing", [])
             for e in windows))
         if green and _time(windows[-1]["ts"]) < until:
@@ -69,12 +134,12 @@ def lifts(events, project, now):
     return result
 
 
-def _append(kind, project, now, **fields):
+def _append(kind, project, now, *, _subject=None, **fields):
     old_file, old_now = os.environ.get("DOIT_LEDGER_FILE"), fold.NOW
     try:
         os.environ["DOIT_LEDGER_FILE"] = "L-base-red-local.jsonl"
         fold.NOW = now
-        row = fold.append([kind, "quarantine:"+project, "project="+project] +
+        row = fold.append([kind, _subject or "quarantine:"+project, "project="+project] +
                           [k+":="+json.dumps(v) for k, v in fields.items()])
         # fold.append returns the stored content; the reader supplies its _src.
         return next(e for e in reversed(fold.read_events()) if e.get("actor") == "base-red"
@@ -89,27 +154,53 @@ def _append(kind, project, now, **fields):
 
 def record(project, node, rule, windows, *, now=None):
     now = _time(now) if now is not None else datetime.now(timezone.utc)
-    if rule not in ("repeat-blame", "base-red"):
+    if rule not in ("repeat-blame", "base-red", "auto-base-red"):
         raise ValueError("unknown quarantine rule")
     current = active(fold.read_events(), project, now)
     if node in current:
         return current[node]
     until = (now+timedelta(days=QUARANTINE_DAYS)).isoformat()
-    question = _append("question", project, now, asks="Create a fix spec for "+node,
-                       blocks=[node], default="the quarantine lifts at until and windows keep shipping",
-                       deadline=until)
+    if rule == "auto-base-red":
+        subject = "quarantine:"+project+":"+hashlib.sha256(node.encode()).hexdigest()[:16]
+        question = _append("brief", project, now, _subject=subject, node=node, owner="auto-"+now.date().isoformat(),
+                           line="Fix base-red test " + node + "; evidence=" + ",".join(windows),
+                           deadline=until)
+    else:
+        question = _append("question", project, now, asks="Create a fix spec for "+node,
+                           blocks=[node], default="the quarantine lifts at until and windows keep shipping",
+                           deadline=until)
     return _append("test-quarantined", project, now, node=node, rule=rule,
-                   windows=list(windows), since=now.isoformat(), until=until, fix=question["_src"])
+                   windows=list(windows), since=now.isoformat(), until=until, fix=question["_src"],
+                   owner="auto-"+now.date().isoformat())
 
 
 def apply(project, *, now=None):
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", project) or project in (".", ".."):
+        raise ValueError("invalid quarantine project")
+    state = fold.ROOT / "state"
+    state.mkdir(parents=True, exist_ok=True)
+    with (state / ("quarantine." + project + ".lock")).open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        return _apply(project, now=now)
+
+
+def _apply(project, *, now=None):
     now = _time(now) if now is not None else datetime.now(timezone.utc)
     # Decide both sets from one view: a green lift must not immediately earn
     # the very same quarantine again during this apply call.
     events = fold.read_events()
-    pending = due(events, project, now)
+    pending = base_due(events, project, now) + due(events, project, now)
     lifted = lifts(events, project, now)
     for node, reason in lifted:
         _append("test-unquarantined", project, now, node=node, reason=reason)
+        if reason == "until":
+            row = _latest(events, project, now)[node]
+            subject = next((e['subject'] for e in events if e.get('_src') == row.get('fix')), None)
+            _append("escalation-blocking", project, now, _subject=subject, ref=row.get("fix"), node=node,
+                    default="Fix expired base-red quarantine for " + node,
+                    deadline=(now+timedelta(days=1)).isoformat(),
+                    revert="Remove escalation after the fix is verified")
     recorded = [record(project, **item, now=now) for item in pending]
+    import quarantine_file
+    quarantine_file.enqueue(project, fold.read_events(), now)
     return {"recorded": recorded, "lifted": lifted}
