@@ -12,6 +12,11 @@
 # never a shared, hardcoded path (the checkout differs per `--project`).
 
 [project.albert-scott]
+# Readiness couples these shared append-only registries by named tests only.
+shared_append_only_registries = [
+  "api/alembic_supabase/branch_isolation.json",
+  "scratch_listing_authority_cleanup.py",
+]
 # A separate role-clean loopback cluster from scripts/private-pg.sh is
 # mandatory for graders, including db_setup. Startup failure blocks grading;
 # inherited AS_LOCAL_PG_ADMIN/PG*/DATABASE_* values never supply a fallback.

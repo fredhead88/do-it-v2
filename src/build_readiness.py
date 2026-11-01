@@ -122,17 +122,17 @@ def producers(missing, events, root, subject, project):
     return result
 
 
-def companion_gaps(text, grant, repo, base, tree):
+def companion_gaps(text, grant, repo, base, tree, *, registries=()):
     tests = sorted(p for p in tree if coupled_tests.TEST.search(p) and not merge_gate.granted(p, grant))
     sources = coupled_tests.writes_paths(grant, tree)
     needed = {test for test in tests if any(coupled_tests.named(source, test) for source in sources)}
-    if tests and sources:
+    references = [source for source in sources if source not in registries]
+    if tests and references:
         patterns = []
-        for source in sources:
-            path = Path(source)
-            module = source[:-3].replace('/', '.') if path.suffix == '.py' else path.stem
-            for pattern in (source, module):
-                patterns += ['-e', pattern]
+        for source in references:
+            patterns += ['-e', source]
+            if Path(source).suffix == '.py':
+                patterns += ['-e', source[:-3].replace('/', '.')]
         output = coupled_tests.git(repo, 'grep', '-l', '-z', '-F', *patterns, base, '--', *tests,
                                    timeout=60, no_match=True)
         needed.update(p[len(base) + 1:] for p in output.split('\0') if p)
@@ -216,7 +216,8 @@ def check(subject, project, base, events, *, root=None, dry_run=True):
                 result['findings'] = ['missing ' + kind + ': ' + name for kind, name in missing]
                 return result
             raise NotReady('missing inputs without a unique producer: ' + ', '.join(name for _, name in missing))
-        gaps = companion_gaps(text, grant, repo, base, tree)
+        registries = grading_env._project_row(project).get('shared_append_only_registries', [])
+        gaps = companion_gaps(text, grant, repo, base, tree, registries=registries)
         if gaps:
             raise NotReady('Writes omits coupled tests/companions: ' + ', '.join(gaps))
         if dry_run:

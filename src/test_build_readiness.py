@@ -43,8 +43,8 @@ class ReadinessTests(unittest.TestCase):
         (self.root / 'content' / (self.sid + '.md')).write_text(text)
         return text
 
-    def check(self, dry_run=True):
-        with patch.object(readiness.grading_env, '_project_row', return_value={}):
+    def check(self, dry_run=True, project_row=None):
+        with patch.object(readiness.grading_env, '_project_row', return_value=project_row or {}):
             return readiness.check(self.sid, 'demo', self.base, self.events, root=self.root, dry_run=dry_run)
 
     def test_exact_base_and_successful_dry_run(self):
@@ -105,6 +105,56 @@ class ReadinessTests(unittest.TestCase):
         self.assertIn('src/test_crons.py', self.check()['findings'][0])
         self.spec(writes='crons.toml src/test_crons.py')
         self.assertEqual(self.check()['status'], 'ready')
+
+    def test_shared_registries_require_named_tests_and_migration_fingerprint(self):
+        registries = ['api/alembic_supabase/branch_isolation.json',
+                      'scratch_listing_authority_cleanup.py']
+        named = ['tests/test_branch_isolation_contract.py',
+                 'tests/test_scratch_listing_authority_cleanup.py']
+        fingerprint = 'api/alembic_supabase/genesis_schema_fingerprint.txt'
+        files = {path: '# registry fixture\n' for path in registries + named + [fingerprint]}
+        files['tests/test_registry_reader.py'] = '\n'.join(registries) + '\nbranch_isolation\n'
+        for path, content in files.items():
+            target = self.repo / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content)
+        self.git('add', '.')
+        self.git('commit', '-qm', 'shared registry readers')
+        self.base = self.git('rev-parse', 'HEAD')
+        writes = registries + ['api/alembic_supabase/migrations/new_revision.py']
+        self.spec(writes=' '.join(writes))
+        config = Path(readiness.__file__).resolve().parent.parent / 'grading.toml'
+        with patch.dict(os.environ, DOIT_GRADING_TOML=str(config)):
+            row = readiness.grading_env._project_row('albert-scott')
+        expected = sorted(named + [fingerprint])
+        self.assertEqual(self.check(dry_run=False, project_row=row)['findings'],
+                         ['Writes omits coupled tests/companions: ' + ', '.join(expected)])
+        self.spec(writes=' '.join(writes + expected))
+        self.assertEqual(self.check(dry_run=False, project_row=row)['status'], 'ready')
+        # The same paths retain text coupling for a project without this policy.
+        self.assertIn('tests/test_registry_reader.py', self.check(dry_run=False)['findings'][0])
+
+    def test_non_python_sources_couple_full_paths_and_names_without_bare_stems(self):
+        sources = ['dashboard/src/app/api/auth/login/route.ts', 'scripts/deploy.sh', 'api/service.py']
+        expected = ['tests/test_explicit_reference.py', 'tests/test_deploy_mode.py',
+                    'dashboard/src/app/api/auth/logout/route.test.ts', 'tests/test_python_import.py']
+        files = {path: '# source fixture\n' for path in sources}
+        files.update({path: '# named fixture\n' for path in expected})
+        files['tests/test_explicit_reference.py'] = '\n'.join(sources[:2])
+        files['tests/test_python_import.py'] = 'import api.service\n'
+        files['tests/test_generic_words.py'] = '# route and deploy are common words\n'
+        for path, content in files.items():
+            target = self.repo / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content)
+        self.git('add', '.')
+        self.git('commit', '-qm', 'path and stem references')
+        self.base = self.git('rev-parse', 'HEAD')
+        self.spec(writes=' '.join(sources))
+        self.assertEqual(self.check(dry_run=False)['findings'],
+                         ['Writes omits coupled tests/companions: ' + ', '.join(sorted(expected))])
+        self.spec(writes=' '.join(sources + expected))
+        self.assertEqual(self.check(dry_run=False)['status'], 'ready')
 
     def test_broken_chain_and_missing_environment_bounce(self):
         for command, reason in [('false\ntrue', 'exit 1'),
