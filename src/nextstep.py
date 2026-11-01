@@ -91,7 +91,7 @@ def classify_failure(text, exit_code, rules=None):
         return 'infra' if exit_code == 124 else 'unknown'
     infra = bool(re.search(
         r'No space left on device|\[Errno 28\]|Out of diskspace|\bENOSPC\b|'
-        r'fatal: could not create work tree dir|'
+        r'fatal: could not create work tree dir|\(os error 2\)|\[Errno 2\] No such file or directory|'
         r'ledger cache: lock not acquired within|'
         r'git worktree add[^\n]*(?:fail|error)|(?:fail|error)[^\n]*git worktree add|'
         r'Connection reset by peer|Connection refused|at capacity|overloaded|\bHTTP\s+429\b',

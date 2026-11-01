@@ -19,6 +19,15 @@ CONFLICTS = {"builder": {"builder", "grader", "reviewer"},
              "reviewer": {"builder", "reviewer"}}
 
 
+
+def resolve_cwd(value, root):
+    """Planner paths prefer the ledger root; all backends receive an absolute cwd."""
+    from pathlib import Path
+    path = Path(value) if value else Path.cwd()
+    if not path.is_absolute() and (Path(root) / path).exists():
+        path = Path(root) / path
+    return str(path.resolve())
+
 def _role(e):
     sid = e.get("spawn")
     return "-".join(sid.split("-")[1:-1]) if sid else (e.get("role") or "")
