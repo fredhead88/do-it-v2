@@ -1241,7 +1241,7 @@ def next_steps(events, specs, now, rules, waves=None):
                            'undetermined: ' + error if error else 'window waiting; elapsed_min=' + str(age),
                            'window resolution', 'executor'))
     for charter, evs in by.items():
-        if not str(charter).startswith('L-charter-') or any(e['type'] in
+        if not re.fullmatch(r'L-charter-\d{4}', str(charter)) or any(e['type'] in
                 {'plan-written', 'charter-closed', 'charter-retracted'} for e in evs):
             continue
         steps.append(_hold(charter, 'charter', 'idea', evs[-1],
@@ -1251,7 +1251,7 @@ def next_steps(events, specs, now, rules, waves=None):
         item = e.get('subject')
         if item not in bad:
             continue
-        kind = 'charter' if str(item).startswith('L-charter-') else 'window' if e.get('type') == 'window-opened' else None
+        kind = 'charter' if re.fullmatch(r'L-charter-\d{4}', str(item)) else 'window' if e.get('type') == 'window-opened' else None
         if kind and (kind, item) not in seen:
             steps.append(_hold(item, kind, 'idea' if kind == 'charter' else 'merging',
                                dict(e, ts=''), 'undetermined: ' + bad[item], 'valid timestamp'))

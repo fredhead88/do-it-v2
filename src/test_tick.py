@@ -2357,7 +2357,7 @@ def _proving_charter(evdir, cid, sid, *, covers=None, ts=None, owed_ac=None):
     exactly like every other fixture in this file. `owed_ac=` optionally adds
     one `owed-ac` criterion to the spec before it ships, e.g.
     `{"criterion": "AC1", "wake_at": "..."}`."""
-    tail = cid[-5:]
+    tail = cid.rsplit('-', 1)[-1]
     tsk = {"ts": ts} if ts else {}
     filed = {"type": "charter-filed", "subject": cid, **tsk}
     if covers is not None:
@@ -2390,7 +2390,7 @@ def _fresh_bound_root():
 iso473_1 = _isolated_events()
 saved_events = fold.EVENTS
 fold.EVENTS = iso473_1
-C1, S1 = "L-charter-90731", "L-spec-90731"
+C1, S1 = "L-charter-0731", "L-spec-90731"
 _proving_charter(iso473_1, C1, S1)
 ev, specs, charters = folded()
 assert charters[C1]["state"] == "proving", charters[C1]["state"]
@@ -2414,7 +2414,7 @@ fold.EVENTS = saved_events
 # ── AC2 — recording the close (Gate invariant (a)) ──────────────────────────
 iso473_2 = _isolated_events()
 fold.EVENTS = iso473_2
-C2, S2 = "L-charter-90732", "L-spec-90732"
+C2, S2 = "L-charter-0732", "L-spec-90732"
 _proving_charter(iso473_2, C2, S2, covers="none", owed_ac={"criterion": "AC1", "wake_at": NOW})
 ev, specs, charters = folded()
 assert specs[S2]["state"] == "shipped-owed-due", specs[S2]["state"]
@@ -2446,7 +2446,7 @@ fold.EVENTS = saved_events
 # same shape until a `charter-review-complete` event also lands.
 iso473_2b = _isolated_events()
 fold.EVENTS = iso473_2b
-C2B, S2B = "L-charter-90733", "L-spec-90733"
+C2B, S2B = "L-charter-0733", "L-spec-90733"
 _proving_charter(iso473_2b, C2B, S2B, covers="R1", owed_ac={"criterion": "AC1", "wake_at": NOW})
 met_ts2b = (fold.NOW + datetime.timedelta(minutes=1)).isoformat(timespec="seconds")
 write_to(iso473_2b, "L-owed-sweeper-90733.jsonl",
@@ -2470,7 +2470,7 @@ fold.EVENTS = saved_events
 # ── AC3 — a charter that skips Proving entirely never gains a charter-closed ─
 iso473_3 = _isolated_events()
 fold.EVENTS = iso473_3
-C3, S3 = "L-charter-90734", "L-spec-90734"
+C3, S3 = "L-charter-0734", "L-spec-90734"
 _proving_charter(iso473_3, C3, S3, covers="none")
 ev, specs, charters = folded()
 assert charters[C3]["state"] == "L2-complete", charters[C3]["state"]
@@ -2486,7 +2486,7 @@ fold.EVENTS = saved_events
 
 # ── AC4 — reopen, the Plan's Gate invariant (b) ─────────────────────────────
 root4a = _fresh_bound_root()
-C4A, S4A = "L-charter-90740", "L-spec-90740"
+C4A, S4A = "L-charter-0740", "L-spec-90740"
 _proving_charter(fold.EVENTS, C4A, S4A, owed_ac={"criterion": "AC1", "wake_at": NOW})
 ev, specs, charters = folded()
 assert specs[S4A]["state"] == "shipped-owed-due", specs[S4A]["state"]
@@ -2522,7 +2522,7 @@ assert charters4a2[C4A]["state"] == "reopened", charters4a2[C4A]["state"]
 
 # AC4, kind="stale" — never reopens, no brief, state stays "proving".
 root4b = _fresh_bound_root()
-C4B, S4B = "L-charter-90741", "L-spec-90741"
+C4B, S4B = "L-charter-0741", "L-spec-90741"
 _proving_charter(fold.EVENTS, C4B, S4B, owed_ac={"criterion": "AC1", "wake_at": NOW})
 ev, specs, charters = folded()
 assert charters[C4B]["state"] == "proving", charters[C4B]["state"]
@@ -2557,7 +2557,7 @@ print("0473-AC5 ok")
 # ── AC6 — the overdue alarm, exactly once per (charter, deadline) ever ──────
 orig_fold_now = fold.NOW
 root6 = _fresh_bound_root()
-C6, S6 = "L-charter-90750", "L-spec-90750"
+C6, S6 = "L-charter-0750", "L-spec-90750"
 t_old6 = (orig_fold_now - datetime.timedelta(days=10)).isoformat(timespec="seconds")
 _proving_charter(fold.EVENTS, C6, S6, ts=t_old6, owed_ac={"criterion": "AC1", "wake_at": t_old6})
 # the charter-proving event itself, backdated to the SAME old instant — EMITS
@@ -2639,7 +2639,7 @@ fold.NOW = orig_fold_now
 
 # a charter whose deadline is still in the future -> no alarm at all.
 root6d = _fresh_bound_root()
-C6D, S6D = "L-charter-90751", "L-spec-90751"
+C6D, S6D = "L-charter-0751", "L-spec-90751"
 _proving_charter(fold.EVENTS, C6D, S6D)
 ev, specs, charters = folded()
 assert charters[C6D]["state"] == "proving", charters[C6D]["state"]
@@ -2653,7 +2653,7 @@ print("0473-AC6 ok")
 # heartbeat; the SAME tick event names it on `proving_error`.
 iso473_8 = _isolated_events()
 fold.EVENTS = iso473_8
-C8, S8 = "L-charter-90748", "L-spec-90748"
+C8, S8 = "L-charter-0748", "L-spec-90748"
 _proving_charter(iso473_8, C8, S8)
 ev, specs, charters = folded()
 assert charters[C8]["state"] == "proving", charters[C8]["state"]
@@ -2913,7 +2913,7 @@ def test_close_rule_emission_1506():
             root = pathlib.Path(directory)
             (root / 'events').mkdir()
             tick._bind_root(root)
-            cid, sid = 'L-charter-91506', 'L-spec-91506'
+            cid, sid = 'L-charter-9156', 'L-spec-91506'
             _proving_charter(fold.EVENTS, cid, sid, covers='none',
                              owed_ac={'criterion': 'AC1', 'wake_at': NOW})
             record = checks.CheckRecord('tick-close-check', sid, 'AC1', ['true'], 'fixture',

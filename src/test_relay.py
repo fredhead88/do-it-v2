@@ -212,6 +212,10 @@ def ev(d, actor_file, type_, subject, **kw):
 read = lambda: fold.read_events()
 TAIL = " (order keys unavailable: goal_date, set_order)"
 
+ok(relay.open_charters([], {sid: [{"type": "charter-filed"}]
+                           for sid in ("L-charter-0008", "L-charter-reviewer-0008")})
+   == ["L-charter-0008"], "only exact charter ids enter the planner queue")
+
 # ── AC1(a): an unmet `after:` excludes, and names the charter it is waiting on ──
 d = scene("after")
 ev(d, "L-operator-a", "charter-filed", "L-charter-0001", covers="none")

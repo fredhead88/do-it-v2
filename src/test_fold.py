@@ -51,6 +51,22 @@ fold.SESSIONS = TMP / "sessions"
 T = datetime.now(timezone.utc)
 stamp = lambda d=0: (T - timedelta(days=d)).isoformat(timespec="seconds")
 
+# A role's spawn id shares a prefix with charters but is not a charter.
+prefix_charter, prefix_spawn = "L-charter-0008", "L-charter-reviewer-0008"
+prefix_events = [
+    dict(type="charter-filed", subject=prefix_charter, actor="operator", ts=stamp()),
+    dict(type="observed", subject=prefix_spawn, actor="operator", ts=stamp()),
+    dict(type="spawn-done", subject=prefix_charter, spawn=prefix_spawn,
+         actor="charter-reviewer", ts=stamp()),
+]
+prefix_specs, prefix_charters, _, prefix_by = fold.fold(prefix_events)
+assert set(prefix_charters) == {prefix_charter}, prefix_charters
+assert prefix_spawn in prefix_by  # its events remain available as spawn evidence
+assert [r["spawn"] for r in fold.spend_detail(prefix_events, prefix_spawn)] == [prefix_spawn]
+assert [r["spawn"] for r in fold.spend_detail(prefix_events, prefix_charter)] == [prefix_spawn]
+assert "## stage wall clock" not in fold.render_spend(prefix_spawn, prefix_events, prefix_specs)
+assert "## stage wall clock" in fold.render_spend(prefix_charter, prefix_events, prefix_specs)
+
 
 def ledger(**files):
     shutil.rmtree(TMP / "events", ignore_errors=True)
@@ -2517,14 +2533,14 @@ print(f"L-spec-1042 AC1/AC2: {count1042} permutations; 1 OWED DUE block; ascendi
 # pair reorders identically regardless of which file glob-sorts first ──────
 AC3_S_WRITTEN, AC3_S_BUILDING, AC3_S_GRADED = "L-spec-9440a", "L-spec-9440b", "L-spec-9440c"
 AC3_S_OWED_EV, AC3_S_OWED_DUE = "L-spec-9440d", "L-spec-9440e"
-AC3_C_CLOSE = "L-charter-9440f"
+AC3_C_CLOSE = "L-charter-9441"
 # L-charter-0046/fold-proving-state (L-spec-0472): AC3_C_CLOSE (l1-complete,
 # no specs, no sweep-fixpoint) now folds to proving, not L1-complete alone —
 # it moved from CHARTER CLOSE to the new PROVING block. A second, genuinely
 # `retracted` charter keeps CHARTER CLOSE itself populated (a retracted
 # charter is decided BEFORE SD1's proving/reopened branch, so it is
 # unaffected by this move) for the "every block populated" check below.
-AC3_C_RETRACTED = "L-charter-9440n"
+AC3_C_RETRACTED = "L-charter-9442"
 AC3_DEP_LIVE, AC3_DEP_AC1B = "deploy-9440-live", "deploy-9440-ac1b"
 AC3_PAST = "2020-01-01T00:00:00Z"
 
@@ -4930,7 +4946,7 @@ def test_close_rule_1506():
     import checks, hashlib, tomllib
     from unittest.mock import patch
 
-    cid = 'L-charter-91506'
+    cid = 'L-charter-9156'
     sids = [f'L-spec-9150{i}' for i in range(1, 5)]
     sources = [('production', True), ('production', False), ('scratch', False), ('scratch', True)]
 

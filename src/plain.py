@@ -118,7 +118,7 @@ def line(item_id, root):
     or a missing content file, returns the `"missing"` fallback below."""
     if item_id.startswith("L-spec-"):
         kind = "spec"
-    elif item_id.startswith("L-charter-") or item_id.startswith("L-goal-"):
+    elif re.fullmatch(r"L-charter-\d{4}", item_id) or item_id.startswith("L-goal-"):
         kind = "goal-or-charter"
     else:
         return {"text": f"{item_id}: no content file", "source": "missing"}

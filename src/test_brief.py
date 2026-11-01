@@ -21,6 +21,9 @@ import fold  # noqa: E402
 import plain  # noqa: E402
 import brief  # noqa: E402
 
+assert brief._kind("L-charter-0008") == "charter"
+assert brief._kind("L-charter-reviewer-0008") is None
+
 # Explicit, relative timestamps — never wall-clock NOW (Assumptions: a fixture
 # using real time would make fold.spec_state's owed-check branches flaky).
 T = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)

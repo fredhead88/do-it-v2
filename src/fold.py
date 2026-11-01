@@ -14,7 +14,7 @@ derives every state precisely so nothing is stamped. Authorization lives here,
 in the fold: an event from an actor not permitted to emit it is recorded and
 ignored (§9.2), which leaves an audit trail of the attempt.
 """
-import collections, heapq, json, os, pathlib, sys, ledger_files
+import collections, heapq, json, os, pathlib, re, sys, ledger_files
 from datetime import datetime, timedelta, timezone
 
 import freeze
@@ -1415,7 +1415,7 @@ def spend_detail(events, subject):
             by_spawn[e["spawn"]].append(e)
 
     def wants(spawn_id, terminal):
-        if subject.startswith("L-charter-"):
+        if re.fullmatch(r"L-charter-\d{4}", subject):
             return charter_id(terminal.get("charter")) == subject or terminal.get("subject") == subject
         if subject.startswith("L-spec-"):
             return terminal.get("subject") == subject
@@ -1517,7 +1517,7 @@ def render_spend(subject, events, specs):
              f"output {tot['output_tokens']:,} · cache_read {tot['cache_read']:,} · "
              f"cache_creation {tot['cache_creation']:,} · weighted {tot['weighted']:,.0f} "
              f"input-equiv tokens · blended {tot['blended']:,} (unsplit) · unmeasured {unmeasured}")
-    if subject.startswith("L-charter-"):
+    if re.fullmatch(r"L-charter-\d{4}", subject):
         gaps, total = charter_stage_clock(events, subject, specs)
         L += ["", "## stage wall clock"]
         if not gaps:
@@ -1700,7 +1700,7 @@ def fold(events):
                           "charter": charter_id(next((e.get("charter") for e in reversed(evs)
                                                      if e.get("charter")), None)),
                           "age": age_days(evs[-1])}
-        elif sid.startswith("L-charter-"):
+        elif re.fullmatch(r"L-charter-\d{4}", sid):
             charters[sid] = {"id": sid, "evs": evs, "age": age_days(evs[-1])}
 
     for cid, c in charters.items():

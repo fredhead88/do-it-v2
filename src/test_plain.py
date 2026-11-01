@@ -47,6 +47,10 @@ assert res == {
 }, res
 print("AC1-i ok")
 
+write("L-charter-reviewer-0008", "# Spawn\n\n## 1. Intent\nThis is a spawn.\n")
+assert plain.line("L-charter-reviewer-0008", TMP) == {
+    "text": "L-charter-reviewer-0008: no content file", "source": "missing"}
+
 # (ii) a goal with an Intent whose first sentence spans >40 words.
 words45 = [f"tok{i}" for i in range(1, 46)]
 sentence45 = " ".join(words45) + "."
@@ -276,7 +280,7 @@ print("plain-core: all checks passed")
 def test_blocked_dossiers():
     import brief
     from test_fold_stalls import admitted, row, outcome, SID, NOW, evidence
-    cid, gid, written = 'L-charter-91909', 'L-goal-91909', 'L-spec-91910'
+    cid, gid, written = 'L-charter-9909', 'L-goal-91909', 'L-spec-91910'
     checked = []
     for mixed in (False, True):
         for reverse in (False, True):

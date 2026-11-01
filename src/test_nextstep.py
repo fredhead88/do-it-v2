@@ -134,6 +134,18 @@ class NextStepTests(unittest.TestCase):
         random.Random(41).shuffle(events)
         self.assertEqual(baseline, self.steps(events, specs))
 
+    def test_charter_reviewer_spawn_is_never_a_charter(self):
+        charter = 'L-charter-9001'
+        for subject in ('L-charter-reviewer-0008', 'L-charter-008', 'L-charter-00008',
+                        'L-charter-0008-extra', 'L-charter-0008\n'):
+            for timestamp in (NOW.isoformat(), 'invalid-time'):
+                with self.subTest(subject=subject, timestamp=timestamp):
+                    events = [event('charter-filed', subject=charter),
+                              event('spawn-done', subject=subject, spawn=subject, ts=timestamp)]
+                    steps = self.steps(events, {})
+                    self.assertEqual([(s.item_kind, s.item) for s in steps], [('charter', charter)])
+                    self.assertEqual(steps[0].reason, 'plan not written')
+
     def test_cancelled_window_is_terminal(self):
         cancelled, waiting = 'win-cancelled', 'win-waiting'
         events = [event('window-opened', -30, subject=window)

@@ -107,7 +107,7 @@ def compact(e, actor):
     """One ledger row → the small dict the page animates from. None if not kept."""
     ty = e.get("type")
     subj = e.get("subject")
-    if ty not in KEEP and not (ty in CHARTER_ONLY and str(subj or "").startswith("L-charter-")):
+    if ty not in KEEP and not (ty in CHARTER_ONLY and re.fullmatch(r"L-charter-\d{4}", str(subj or ""))):
         return None
     if ty == "lesson" and not (actor == "thinker" and e.get("problem")):
         return None                      # only the Thinker's problem-naming lessons are a handled signal

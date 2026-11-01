@@ -10,6 +10,11 @@ import realm  # noqa: E402
 def w(name, rows):
     (TMP / "events" / name).write_text("".join(json.dumps(r) + "\n" for r in rows))
 
+def test_charter_only_rows_require_an_exact_charter_subject():
+    row = {"ts": "2026-09-25T05:00:00+00:00", "type": "planner-started"}
+    assert realm.compact(dict(row, subject="L-charter-0008"), "planner") is not None
+    assert realm.compact(dict(row, subject="L-charter-reviewer-0008"), "planner") is None
+
 def test_compact_keeps_pipeline_rows_and_drops_noise():
     e = {"ts": "2026-09-25T05:00:00+00:00", "type": "spawn-done", "subject": "L-spec-0001", "spawn": "L-grader-0007",
          "duration_ms": 61000, "subagent_tokens": 12345, "status": "DONE", "model_used": "claude-sonnet-5"}
@@ -260,6 +265,42 @@ def _page_function(source, name):
             if depth == 0:
                 return source[start:i + 1]
     raise AssertionError("unclosed function " + name)
+
+
+def test_page_charter_prefixes_do_not_classify_reviewer_spawns():
+    page = realm.PAGE.read_text()
+    functions = '\n'.join(('async ' if name == 'openDossier' else '') + _page_function(page, name)
+                          for name in ('hit', 'laneSplit', 'cticksFor', 'openDossier'))
+    charter = next(line for line in page.splitlines() if line.startswith('const charterOfSubject='))
+    script = r"""
+const assert=require('node:assert/strict');
+const cid='L-charter-0008',sp='L-charter-reviewer-0008';
+const specCharter=s=>s==='L-spec-0008'?cid:null;
+let states=new Map(),dossierFor=null,dossierH=null,dossierData=null;
+const stateMap=()=>states,S={actors:new Map(),effects:[]},SW=40,SH=40,standing=[],PLACES={};
+const element=()=>({hidden:false,classList:{add(){}},querySelector(){return this;}});
+const nodes={},$=id=>nodes[id]??=element(),cv={parentElement:element()};
+const hideBubble=()=>{},esc=s=>s,renderDossier=()=>{},historyCalls=[];
+const charterHistory=async s=>{historyCalls.push(s);return{id:s};},fetchDossier=async()=>({});
+""" + functions + '\n' + charter + r"""
+(async()=>{
+for(const subject of [cid,sp,'L-charter-008','L-charter-00008','L-charter-0008-extra',cid+'\n']){
+  const valid=subject===cid;
+  assert.equal(charterOfSubject(subject),valid?cid:null,subject);
+  states=new Map([[subject,'L1-complete']]);
+  assert.deepEqual(laneSplit().close,valid?[[cid,'L1-complete']]:[],subject);
+  assert.equal(cticksFor({id:cid,rows:[{s:subject,ty:'plan-written',ms:2}]},1).length,valid?2:1,subject);
+  S.actors=new Map([[sp,{sp,subject,x:0,y:0}]]);
+  assert.equal(hit({x:10,y:10}).name,sp+' · '+subject+(valid?' · '+cid:''),subject);
+  historyCalls.length=0;
+  await openDossier(subject);
+  assert.deepEqual(historyCalls,valid?[cid]:[],subject);
+}
+assert.equal(charterOfSubject('L-spec-0008'),cid);
+})().catch(e=>{console.error(e);process.exitCode=1;});
+"""
+    result = subprocess.run(['node', '-e', script], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
 
 
 def _gate_page_snapshots(fixtures):

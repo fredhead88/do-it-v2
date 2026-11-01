@@ -474,7 +474,7 @@ def _goal_dossier(item_id, events, root, now, specs, charters, steps=None):
 def _kind(item_id):
     if item_id.startswith("L-goal-"):
         return "goal"
-    if item_id.startswith("L-charter-"):
+    if re.fullmatch(r"L-charter-\d{4}", item_id):
         return "charter"
     if item_id.startswith("L-spec-"):
         return "spec"

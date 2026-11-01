@@ -1046,7 +1046,7 @@ ok(rec9.count(str(ac9_pg2)) == 1, "L0486-AC9: `postgres-exporter` was NOT matche
 with tempfile.TemporaryDirectory() as ac9g_base:
     r9g = _git_repo(ac9g_base, "l0486-ac9g")
     b9g, wt9g, ready9g = _git_branch(r9g, ac9g_base, "L-spec-9486g", "x")
-    ev9g = _killed_spec_events("L-charter-9486g", "L-spec-9486g", b9g, ready9g, "l0486-ac9g")
+    ev9g = _killed_spec_events("L-charter-9487", "L-spec-9486g", b9g, ready9g, "l0486-ac9g")
     pg9g = wt9g / "pg"
     pg9g.mkdir()
     pm9h = _sleeper486()

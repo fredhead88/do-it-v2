@@ -242,7 +242,7 @@ def open_charters(events, by_subject=None):
         _, _, _, by_subject = fold.fold(events)
     out = []
     for sid, evs in by_subject.items():
-        if not sid.startswith("L-charter-"):
+        if not re.fullmatch(r"L-charter-\d{4}", sid):
             continue
         types = {e["type"] for e in evs}
         if "charter-filed" in types and not (types & {"cut-written", "l1-complete", "charter-retracted"}):
