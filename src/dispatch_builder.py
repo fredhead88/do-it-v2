@@ -39,6 +39,7 @@ def worktree_preflight(runtime, a, cwd, ledger, base, fail):
         fail("builder worktree is not on its expected branch", reason="preflight:wrong-branch")
     if dispatched:
         runtime.builder_branch_preflight(a, cwd, __import__("fold").read_events(), fail)
+    __import__("builder_deps").prepare(worktree, runtime.ROOT, runtime.ROOT / "repos" / (a.project or ""), subject=a.subject)
 
 
 def effective_base(runtime, a, fail):

@@ -111,7 +111,7 @@ ALLOW = {
     ('ledger_rollup.py', 'pending_cleanup'): 'The rollup reads live per-spawn file bytes in order to segment them; re-verifies originals before later-run unlink.',
     ('ledger_rollup.py', 'sync_directory'): 'The rollup reads live per-spawn file bytes in order to segment them; opens directories only for durability fsync.',
     ('look.py', '_read_jsonl'): 'Own local watchdog ledger (never rolled); other callers read transcript files.',
-    ('look.py', '_write_brief'): 'Counts lines only in its own never-rolled local ledger.',
+    ('look.py', '_emit_digest'): 'Counts lines only in its own never-rolled local ledger when publishing the daily digest.',
     ('pace.py', '_json_lines'): 'Binding R3 LIVE-ONLY exception for pace telemetry; local files never roll up (part B R3.1).',
     ('pace.py', '_origins'): 'Binding R3 LIVE-ONLY exception for pace telemetry; local files never roll up (part B R3.1).',
     ('realm.py', 'tail_forever'): 'Live append watcher; full snapshot reads use the helper.',

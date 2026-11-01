@@ -162,6 +162,10 @@ class Command(unittest.TestCase):
         return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
 
     def run_bill(self, items=None, *, dry=False, live=False, config=None):
+        if config is None:
+            # Keep the original GitHub policy fixtures independent of Ubicloud.
+            config = self.home / "github-only.toml"
+            config.write_text("default=450\nafter_r1=120\n")
         args = [str(REPO / "doit"), "gh-bill"]
         if not live:
             path = self.home / "usage.json"

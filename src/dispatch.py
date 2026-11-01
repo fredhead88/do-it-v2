@@ -1133,7 +1133,7 @@ def _main(a):
     packet = sys.stdin.read() if a.packet == "-" else pathlib.Path(a.packet).read_text()
     EVENTS.mkdir(parents=True, exist_ok=True), CONTENT.mkdir(parents=True, exist_ok=True)
     ledger = alloc(EVENTS, f"L-{a.role}-", ".jsonl")
-    spawn, cwd, builder = ledger.stem, a.cwd or os.getcwd(), a.role == "builder"
+    spawn, cwd, builder = ledger.stem, spawns.resolve_cwd(a.cwd, ROOT), a.role == "builder"
     a.cwd = cwd     # R7: resolved once here — `events_for`'s COMMIT-SHAPE check reads
                     # this same value later, never a second `a.cwd or os.getcwd()` guess.
     base = {"subject": a.subject, "project": a.project or pathlib.Path(cwd).name, "spawn": spawn}

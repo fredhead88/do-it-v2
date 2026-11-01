@@ -199,6 +199,8 @@ def test_owed_failures():
     # Counts are admitted, distinct per subject/criterion/type, and UTC-calendar.
     month_start = NOW.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     counts_events = [ev("owed-met", 0, criterion=f"AC{i}") for i in range(9)]
+    counts_events += [ev(kind, 0, criterion="observation-" + kind)
+                      for kind in ("met", "waived", "unverifiable")]
     counts_events += [counts_events[0], ev("owed-waived", 0, criterion="AC10"),
                       ev("owed-unverifiable", 0, criterion="AC11"),
                       ev("owed-met", 0, criterion="old", ts=(month_start-timedelta(seconds=1)).isoformat()),

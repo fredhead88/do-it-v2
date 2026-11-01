@@ -1507,6 +1507,11 @@ if __name__ == "__main__":
     assert "build-started" in [e["type"] for e in raw13c], \
         f"AC13: it got far enough to write build-started: {raw13c}"
     assert not any(e.get("reason") == "disk" for e in raw13c), raw13c
+    # The daily digest also covers the grader. Clearing the builder alone
+    # must not answer it while that second affected key remains active.
+    assert not any(e.get("type") == "brief-answered" and e.get("ref") == _briefs13[0]["_src"]
+                   for e in fold.read_events())
+    _drive_disk486("grader", AC13_GRADER_SUBJ, True)
     _answered13 = [e for e in fold.read_events() if e.get("type") == "brief-answered"]
     _cleared13 = [e for e in _answered13 if str(e.get("why", "")).startswith("cleared:")]
     assert _cleared13, f"L0486-AC13: the disk-room brief is answered, why starting 'cleared:': {_answered13}"

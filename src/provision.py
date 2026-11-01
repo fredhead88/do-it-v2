@@ -111,7 +111,8 @@ def _repo_setup(env, record):
     _repo(env, record, events=options.get("events"))
     if options.get("dashboard"):
         root, live = options["dashboard"]
-        env.summary["node_modules"] = _sweep_dashboard(env.tree, root, live=live)
+        env.summary["node_modules"] = _sweep_dashboard(env.tree, root, live=live,
+            private=bool(options.get("private_node_modules")))
     if options.get("grading"):
         env.failures = _grading_preflight(*options["grading"][0], **options["grading"][1])
     elif options.get("build"):
@@ -519,7 +520,7 @@ def _grading_preflight(role, subject, view, project, *, repo, mcp_config=None, o
 import fcntl, hashlib, pathlib, time
 import build_runner
 
-def _sweep_dashboard(tree, root, *, live):
+def _sweep_dashboard(tree, root, *, live, private=False):
     """Prefer the lock-keyed cache; use the live tree only with identical locks."""
     directory = pathlib.Path(tree) / "dashboard"
     lock = directory / "package-lock.json"
@@ -563,5 +564,9 @@ def _sweep_dashboard(tree, root, *, live):
                 if not promoted:
                     shutil.rmtree(stage)
             source, used = cache / "node_modules", "cache:" + digest
-        target.symlink_to(source.resolve(), target_is_directory=True)
+        if private:
+            import node_modules
+            node_modules.copy_tree(source.resolve(), target)
+        else:
+            target.symlink_to(source.resolve(), target_is_directory=True)
     return used

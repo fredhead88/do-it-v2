@@ -41,7 +41,10 @@ def month_counts(all_ev, now):
     admitted = fold.fold(all_ev)[0]
     for spec in admitted.values():
         for e in spec["evs"]:
-            kind = str(e.get("type", "")).removeprefix("owed-")
+            event_type = e.get("type")
+            if event_type not in {"owed-met", "owed-waived", "owed-unverifiable"}:
+                continue
+            kind = event_type.removeprefix("owed-")
             if kind not in keys:
                 continue
             stamp = fold.ts(e.get("ts")).astimezone(timezone.utc)

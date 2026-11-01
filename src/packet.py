@@ -970,7 +970,7 @@ def p_builder(c):
            if c.a.base_sha or base_refresh.refresh_tip(c) or changed else []),
          f"4. Verify command: `bash {v}`" if v else
          "4. Verify command: NONE — the spec's Verification block is empty. Declare `spec-ambiguity` and stop.",
-         f"   Done-condition: {done}.",
+         f"   Done-condition: {done}.", __import__("builder_deps").PACKET_NOTE,
          f"5. Sibling units' `Produces:` — {c.a.produces or 'none'}.",
          "6. Parked findings on your footprint: none on file.",
          "7. Live cross-charter conflict list — id · what it changes · state:",

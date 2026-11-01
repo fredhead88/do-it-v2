@@ -2396,7 +2396,7 @@ expected_next6 = summ6["next"]["text"] if summ6["next"] is not None else None
 assert reading6.get("next") == expected_next6 and reading6.get("owner") == summ6["owner"], \
     (reading6, summ6)
 
-# isolate the ledger-scan guard from look.emit_once's own 30-minute cooldown:
+# isolate the ledger-scan guard from look.emit_once's daily dedupe:
 # clear the brief directly, advance fold.NOW past the cooldown, and prove via
 # a CONTROL call against a separate scratch root that the cooldown alone
 # would NOT have suppressed a repeat — only this unit's own ledger-scan does.
@@ -2409,7 +2409,7 @@ clear_event6 = next(e for e in reversed(fold.read_events())
 fold.NOW = fold.ts(clear_event6['ts']) + datetime.timedelta(minutes=31)
 control_root6 = pathlib.Path(tempfile.mkdtemp())
 control6 = look.emit_once("proving-overdue", key6, "operator", {"next": None, "owner": "operator"},
-                          fold.read_events(), root=control_root6)
+                          [], root=control_root6)
 assert control6 is not None, \
     "AC6 control: a clean scratch root, past the cooldown, must accept the SAME (condition, key) again"
 assert tick.main() == 0
@@ -2440,7 +2440,9 @@ assert tick.main() == 0
 evs6c = fold.read_events()
 overdue6c_new = [e for e in evs6c if e["type"] == "brief" and e.get("condition") == "proving-overdue"
                  and e.get("key") == key6c]
-assert len(overdue6c_new) == 1, overdue6c_new
+assert len(overdue6c_new) == 0, "a changed key updates the daily digest without another brief"
+digest6 = json.loads((root6 / "look/digests" / f"{fold.NOW.date().isoformat()}.json").read_text())
+assert key6c in digest6['conditions']['proving-overdue']['items']
 overdue6c_old = [e for e in evs6c if e["type"] == "brief" and e.get("condition") == "proving-overdue"
                  and e.get("key") == key6]
 assert len(overdue6c_old) == 1, "AC6: the OLD key's alarm is untouched — one alarm per key, forever"

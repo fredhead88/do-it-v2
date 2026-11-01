@@ -78,7 +78,7 @@ def test_board_line_and_overdue_brief():
           f"the board's HEALTH carries the line: {health[:600]}")
     briefs = []
     look._check_owed_overdue(events, NOW, ROOT, briefs)
-    check(len(briefs) == 1 and briefs[0]["key"] == "L-spec-6001/AC1" and briefs[0]["condition"] == "owed-overdue",
+    check(len(briefs) == 1 and briefs[0]["key"] == "L-spec-6001" and briefs[0]["reading"]["criteria"] == ["AC1"] and briefs[0]["condition"] == "owed-overdue",
           f"one brief, for the one check due >24h with no verdict: {briefs}")
     again = []
     look._check_owed_overdue(fold.read_events(), NOW, ROOT, again)
