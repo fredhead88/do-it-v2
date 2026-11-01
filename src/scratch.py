@@ -55,6 +55,8 @@ def _has_git_entry(path):
     file (the shape `git worktree add` leaves behind). No git subprocess."""
     git = path / ".git"
     try:
+        if git.is_symlink():
+            return True
         if git.is_dir():
             return next(git.iterdir(), None) is not None
         return git.is_file() or git.is_symlink()

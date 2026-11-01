@@ -521,10 +521,12 @@ if __name__ == "__main__":
     #         proving the destination-safety gate fires independently of DSN validity
     sw_dir_4a = _root9004("ac4-dir-self")     # sweep_dir itself holds a .git entry
     (sw_dir_4a / ".git").mkdir()
+    (sw_dir_4a / ".git/HEAD").write_text("ref: refs/heads/main\n")
     r = dispatch.provision_sweep_env(sw_dir_4a, SW_CO_VALID)
     assert r == "refused" and not (sw_dir_4a / ".env").exists(), ("9004 AC4a", r)
     sw_parent_4b = _root9004("ac4-parent")
     (sw_parent_4b / ".git").mkdir()
+    (sw_parent_4b / ".git/HEAD").write_text("ref: refs/heads/main\n")
     sw_dir_4b = sw_parent_4b / "nested" / "sweep"
     sw_dir_4b.mkdir(parents=True)
     r = dispatch.provision_sweep_env(sw_dir_4b, SW_CO_VALID)
@@ -585,6 +587,7 @@ if __name__ == "__main__":
                                         "SUPABASE_DB_URL_RO=table-ro-distinct-9004\n")
     tbl_dir_4 = _root9004("ac8-dir-4")
     (tbl_dir_4 / ".git").mkdir()
+    (tbl_dir_4 / ".git/HEAD").write_text("ref: refs/heads/main\n")
     tbl_rows = [
         ("no-ro", tbl_co_1, _root9004("ac8-dir-1")),
         ("eq-rw", tbl_co_2, _root9004("ac8-dir-2")),

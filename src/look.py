@@ -1145,6 +1145,8 @@ def run(events, *, now=None, runner=None, root=None, toml_path=None, dry_run=Fal
         _check_pane_dead(events, now, root, briefs)
         _check_supervisor_stale_code(events, now, runner, deadline, root, briefs, answered)
         _check_disk_tmp(runner, root, th, now, deadline, events, briefs, answered)
+        import look_scratch
+        look_scratch.check(events, root, briefs, answered)
         crontab_text, crontab_und = _call(runner, deadline, 5, "crontab_text")
         _check_crons(crontab_text, crontab_und, events, root, briefs, crons_manifest, crond_dir)
         _check_cron_unwrapped(crontab_text, crontab_und, events, root, briefs, answered, crons_manifest, crond_dir)
