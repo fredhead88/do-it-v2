@@ -32,13 +32,14 @@ def source_ok(source):
 
 
 def is_candidate(spec_id, root):
-    """fix-2: `SPEC_ID_RE.fullmatch(spec_id)` and the content file existing —
+    """fix-2: `SPEC_ID_RE.fullmatch(spec_id)` and readable content —
     both. The regex excludes malformed subjects (`"L-spec-writer-0515"`,
-    `"-ac12-..."`); `exists()` excludes shaped-but-contentless ones (a real
+    `"-ac12-..."`); readable content excludes shaped-but-contentless ones (a real
     `"L-spec-9001"`, state `"unknown"`)."""
     if not SPEC_ID_RE.fullmatch(spec_id):
         return False
-    return (pathlib.Path(root) / "content" / f"{spec_id}.md").exists()
+    import plain
+    return plain._read_text(pathlib.Path(root) / "content" / f"{spec_id}.md") is not None
 
 
 def rejection_counts(root):
@@ -93,6 +94,8 @@ def decide_row(row, specs, root):
         return "reject", "unknown spec subject"
     if not is_candidate(spec_id, root):
         return "reject", "no content file for this spec"
+    if not state_ok(specs[spec_id]["state"]):
+        return "skip", "spec state excluded"
     sidecar_path = pathlib.Path(root) / "content" / f"{spec_id}.plain.txt"
     if sidecar_path.exists():
         return "skip", "sidecar exists"
@@ -109,6 +112,8 @@ def decide_row(row, specs, root):
     for word in JARGON:
         if re.search(r"\b" + re.escape(word) + r"\b", line):
             return "reject", f"uses jargon word '{word}'"
+    if rejection_counts(root).get(spec_id, 0) >= 2:
+        return "skip", "needs a hand line after two rejections"
     return "write", None
 
 
@@ -124,12 +129,15 @@ def apply_rows(rows, specs, root, served_ids):
     objects (fix-5; the CLI logs a malformed line itself). NEVER calls
     `fold.append` or touches `events/`."""
     counts = {"written": 0, "skipped": 0, "rejected": 0}
+    served = set(served_ids)
     seen = set()
     for row in rows:
         spec_val = row.get("spec")
         if isinstance(spec_val, str):
             seen.add(spec_val)
         verdict, detail = decide_row(row, specs, root)
+        if verdict == "write" and spec_val not in served:
+            verdict, detail = "reject", "not in the served packet"
         if verdict == "write":
             sidecar_path = pathlib.Path(root) / "content" / f"{spec_val}.plain.txt"
             sidecar_path.parent.mkdir(parents=True, exist_ok=True)

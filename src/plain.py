@@ -31,6 +31,14 @@ SIDECAR = "{}.plain.txt"
 _TITLE_RE = re.compile(r"^# (.+)$", re.MULTILINE)
 
 
+def _read_text(path):
+    """Unreadable or malformed description files have no usable text."""
+    try:
+        return pathlib.Path(path).read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return None
+
+
 def _title(text):
     """The item's title: the first `# <title>` line, or (a RESERVED stub) the
     file's first non-blank line, verbatim."""
@@ -93,10 +101,9 @@ def _spec_line(item_id, root, text):
     if m:
         return {"text": m.group(1).strip(), "source": "spec-line"}
     sidecar_path = pathlib.Path(root) / "content" / SIDECAR.format(item_id)
-    if sidecar_path.exists():
-        content = sidecar_path.read_text().strip()
-        if content:
-            return {"text": content, "source": "sidecar"}
+    content = (_read_text(sidecar_path) or "").strip()
+    if content:
+        return {"text": content, "source": "sidecar"}
     goal = _section(text, r"^## Goal[ \t]*$")
     if goal is not None:
         sentence = _first_sentence(goal)
@@ -116,9 +123,9 @@ def line(item_id, root):
     else:
         return {"text": f"{item_id}: no content file", "source": "missing"}
     path = pathlib.Path(root) / "content" / f"{item_id}.md"
-    if not path.exists():
+    text = _read_text(path)
+    if text is None:
         return {"text": f"{item_id}: no content file", "source": "missing"}
-    text = path.read_text()
     if kind == "spec":
         return _spec_line(item_id, root, text)
     return _goal_or_charter_line(text)

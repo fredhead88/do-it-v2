@@ -83,8 +83,9 @@ def _content_title(root, item_id):
     first `^#\\s+(.*)$` line, stripped. `item_id` itself when no content file
     or no matching heading exists (defensive only)."""
     path = pathlib.Path(root) / "content" / f"{item_id}.md"
-    if path.exists():
-        m = _TITLE_RE.search(path.read_text())
+    text = plain._read_text(path)
+    if text is not None:
+        m = _TITLE_RE.search(text)
         if m:
             return m.group(1).strip()
     return item_id
