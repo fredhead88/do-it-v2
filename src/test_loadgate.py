@@ -46,6 +46,192 @@ def signed(ac, body):
 
 
 class LoadgateTests(unittest.TestCase):
+    def test_1961_AC01(self):
+        expected = dict(cpu_pressure_some_avg10_max=60, heavy_jobs_max=10,
+                        load1_per_core_delay=2, load1_per_core_stop=3)
+        self.assertEqual({k: lg.DEFAULTS[k] for k in expected}, expected)
+        table = self.root / 'look.toml'
+        for key, values in (
+                ('heavy_jobs_max', ('0', '2.5', '"x"', 'true')),
+                ('cpu_pressure_some_avg10_max', ('0', '0.0', '-1', '"x"', 'true', 'nan'))):
+            for value in values:
+                with self.subTest(key=key, value=value):
+                    table.write_text(f'[admission]\n{key}={value}\n')
+                    config, problems = lg.settings(env={}, toml_path=table)
+                    self.assertEqual(config[key], lg.DEFAULTS[key])
+                    self.assertIn('bad ' + key, problems)
+        table.write_text('[admission]\nheavy_jobs_max=3\n')
+        self.assertEqual(lg.settings(env={}, toml_path=table)[0]['heavy_jobs_max'], 3)
+        signed('1961-AC1', expected | dict(invalid_settings_rejected=True))
+
+    def test_1961_AC02(self):
+        calm = dict(mem_some10=0, mem_full10=0, cpu_some10=40, cpu_some60=59)
+        state = lg.advance({}, calm | dict(cpu_some10=61), lg.DEFAULTS)
+        self.assertTrue(state['cpu_tripped'])
+        self.assertEqual(state['cpu_release_streak'], 0)
+        self.assertFalse(state['psi_tripped'])
+        first = lg.advance(state, calm, lg.DEFAULTS)
+        self.assertTrue(first['cpu_tripped'])
+        self.assertEqual(first['cpu_release_streak'], 1)
+        second = lg.advance(first, calm, lg.DEFAULTS)
+        self.assertFalse(second['cpu_tripped'])
+        self.assertEqual(second['cpu_release_streak'], 0)
+        self.assertEqual(lg.advance(first, calm | dict(cpu_some60=61), lg.DEFAULTS)['cpu_release_streak'], 0)
+        self.assertEqual(lg.advance(first, calm | dict(cpu_some10=None, cpu_some60=None), lg.DEFAULTS), first)
+        memory = lg.advance({}, calm | dict(mem_some10=6, cpu_some10=0), lg.DEFAULTS)
+        self.assertTrue(memory['psi_tripped'])
+        self.assertFalse(memory['cpu_tripped'])
+        signed('1961-AC2', dict(independent=True, release_readings=2, missing_unchanged=True))
+
+    def test_1961_AC03(self):
+        calm = dict(mem_avail_gb=20, swap_free_gb=8, load1_per_core=1,
+                    mem_some10=0, mem_full10=0, cpu_some10=0)
+        for load, reason in ((2.5, 'load-delay'), (3.5, 'load-stop')):
+            self.assertEqual(lg.admit('builder', calm | dict(load1_per_core=load))[:2], (False, reason))
+        self.assertEqual(lg.admit('builder', calm, state=dict(cpu_tripped=True))[:2], (False, 'cpu-pressure'))
+        missing = lg.admit('builder', calm | dict(cpu_some10=None), state=dict(cpu_tripped=True))
+        self.assertTrue(missing[0])
+        self.assertIn('cpu-pressure', missing[2]['skipped'])
+        for state in (None, dict(psi_tripped=False)):
+            self.assertTrue(lg.admit('builder', calm | dict(cpu_some10=95), state=state)[0])
+        for role in ('builder', 'grader', 'reviewer', 'probe'):
+            running = dict(builder=7, grader=2)
+            self.assertIn('job-slots', lg.admit(role, calm, running, admitted_jobs=1)[2]['failed'])
+            self.assertTrue(lg.admit(role, calm, running, admitted_jobs=0)[0])
+        other = lg.admit('window_gate', calm, dict(builder=12))[2]
+        self.assertNotIn('job-slots', other['failed'] + other['skipped'])
+        self.assertIn('job-slots', lg.admit('builder', calm)[2]['skipped'])
+        all_failed = lg.admit('builder', calm | dict(mem_avail_gb=1, swap_free_gb=0, load1_per_core=5),
+                              dict(builder=10), state=dict(psi_tripped=True, cpu_tripped=True))[2]['failed']
+        rules = ('mem-hard-stop', 'mem-swap-hard-stop', 'mem-pressure', 'cpu-pressure',
+                 'load-stop', 'job-slots', 'mem-headroom', 'load-delay')
+        self.assertEqual(lg.RULES, rules)
+        self.assertEqual(all_failed, list(rules))
+        signed('1961-AC3', dict(ordered_rules=all_failed, cpu_fail_open=True, heavy_roles_checked=True))
+
+    def test_1961_AC04(self):
+        path = self.root / 'state.json'
+        old_keys = {'v', 't', 'pswpin', 'pswpout', 'psi_tripped', 'psi_release_streak', 'trip_since', 'holding'}
+        old = {k: lg._fresh()[k] for k in old_keys}
+        path.write_text(json.dumps(old))
+        state, usable = lg.load_state(path)
+        self.assertTrue(usable)
+        self.assertFalse(state['cpu_tripped'])
+        self.assertEqual(state['cpu_release_streak'], 0)
+        for bad in (dict(cpu_tripped='yes'), dict(cpu_release_streak=-1)):
+            path.write_text(json.dumps(old | bad))
+            self.assertFalse(lg.load_state(path)[1])
+        for optional in (dict(cpu_tripped=True), dict(cpu_release_streak=1)):
+            path.write_text(json.dumps(old | optional))
+            self.assertTrue(lg.load_state(path)[1])
+        lg.save_state(path, lg.advance(old, dict(cpu_some10=61), lg.DEFAULTS))
+        saved = json.loads(path.read_text())
+        reread, usable = lg.load_state(path)
+        self.assertTrue(usable)
+        self.assertTrue(reread['cpu_tripped'])
+        self.assertEqual(saved['cpu_release_streak'], 0)
+        self.assertEqual(saved['v'], 1)
+        self.assertTrue(old_keys <= saved.keys())
+        signed('1961-AC4', dict(legacy_usable=True, persisted=saved, independently_reopened=True))
+
+    def test_1961_AC05(self):
+        (self.proc / 'pressure/cpu').write_text('some avg10=0 avg60=0 total=0\n')
+        table = self.root / 'look.toml'
+        table.write_text('[admission]\nheavy_jobs_max=5\n')
+        running = dict(builder=2, grader=1, reviewer=1)
+        def begin():
+            return self.begin(running=running, toml_path=table)
+        g = begin()
+        self.assertFalse(g.check('a', 'builder').would_hold)
+        g.note_launch('a', True)
+        self.assertEqual(g.check('b', 'grader').reason, 'job-slots')
+        for role, spawned, raised, expected in (('builder', False, False, False),
+                                               ('builder', True, True, True),
+                                               ('window_gate', True, False, False)):
+            g = begin()
+            g.check('c', role)
+            g.note_launch('c', spawned, raised=raised)
+            self.assertEqual(g.check('next', 'grader').would_hold, expected)
+            fields = g.finish()
+            self.assertEqual(fields['admission_jobs'], 4)
+            self.assertEqual(fields['admission_trips'], [])
+        full = dict(builder=3, grader=2)
+        g = self.begin(running=full, toml_path=table)
+        self.assertIn('job-slots', g.finish()['admission_trips'])
+        self.assertIsNotNone(lg.load_state(self.root / 'state/admission.json')[0]['trip_since'])
+        (self.root / 'admission.toml').write_text('mode="enforce"')
+        path = self.root / 'state/admission.json'
+        state, usable = lg.load_state(path)
+        self.assertTrue(usable)
+        state['t'] -= 60
+        lg.save_state(path, state)
+        g = self.begin(running=full, toml_path=table, allow_enforce=True)
+        self.assertTrue(g.grades_first)
+        signed('1961-AC5', dict(same_pass_counted=True, spawned_raised_counted=True,
+                               nonheavy_excluded=True, admission_jobs=4, grades_first=True))
+
+    def saturated_gate(self, *, enforce=False):
+        (self.proc / 'meminfo').write_text('MemAvailable: 1048576 kB\nSwapFree: 0 kB\nShmem: 1048576 kB\n')
+        (self.proc / 'loadavg').write_text('40 4 2 3/2500 123\n')
+        (self.proc / 'pressure/cpu').write_text('some avg10=81.24 avg60=81.24 avg300=81.24 total=0\n')
+        now = 200000.
+        state = lg._fresh() | dict(t=now-60, psi_tripped=True, cpu_tripped=True,
+                                   trip_since=lg._iso(now-99999))
+        lg.save_state(self.root / 'state/admission.json', state)
+        if enforce:
+            (self.root / 'admission.toml').write_text('mode="enforce"')
+        return self.begin(running=dict(builder=10), clock=lambda: now, allow_enforce=enforce)
+
+    def test_1961_AC06(self):
+        fields = self.begin().finish()
+        self.assertEqual(fields['admission_readings']['cpu_some10'], .1)
+        self.assertNotIn('cpu_some60', fields['admission_readings'])
+        fields = self.saturated_gate().finish()
+        self.assertEqual(fields['admission_trips'], list(lg.RULES))
+        self.assertEqual(fields['admission_readings']['cpu_some60'], 81.24)
+        self.assertEqual(fields['admission_jobs'], 10)
+        size = len(json.dumps(fields).encode())
+        self.assertLessEqual(size, 1024)
+        (self.proc / 'pressure/cpu').unlink()
+        missing = self.begin().finish()
+        self.assertIsNone(missing['admission_readings']['cpu_some10'])
+        self.assertIn('pressure/cpu', missing['admission_unreadable'])
+        signed('1961-AC6', dict(bytes=size, readings=fields['admission_readings'],
+                               admission_jobs=10, unreadable=missing['admission_unreadable']))
+
+    def extra_fields(self, g):
+        g.reasons = {'mem-hard-stop': 1000}
+        g.checked = 1000
+        g.unreadable = ['pressure/io', 'state']
+        g.problems = ['bad heavy_jobs_max']
+        return g
+
+    def test_1961_AC11(self):
+        fields = self.extra_fields(self.saturated_gate()).finish()
+        self.assertLessEqual(len(json.dumps(fields).encode()), 1024)
+        self.assertNotIn('admission_error', fields)
+        self.assertEqual(fields['admission_trips'], list(lg.RULES))
+        self.assertEqual(fields['admission_reason'], {'mem-hard-stop': 1000})
+        self.assertEqual(fields['admission_jobs'], 10)
+        signed('1961-AC11', dict(bytes=len(json.dumps(fields).encode()), fields=fields))
+
+    def test_1961_AC12(self):
+        windows = {}
+        for enforce in (False, True):
+            windows[enforce] = []
+            for n in range(81):
+                g = self.extra_fields(self.saturated_gate(enforce=enforce))
+                g.unreadable += [f'name{i:04d}' for i in range(n)]
+                fields = g.finish()
+                self.assertLessEqual(len(json.dumps(fields).encode()), 1024)
+                self.assertFalse('admission_readings' in fields and 'admission_jobs' not in fields)
+                if 'admission_jobs' not in fields and 'admission_error' not in fields:
+                    self.assertNotIn('admission_readings', fields)
+                    if not enforce or 'admission_settings' in fields:
+                        windows[enforce].append(n)
+            self.assertTrue(windows[enforce])
+        signed('1961-AC12', dict(observe_windows=windows[False], enforce_windows=windows[True]))
+
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -96,7 +282,7 @@ class LoadgateTests(unittest.TestCase):
         calm = dict(mem_avail_gb=20, swap_free_gb=8, load1_per_core=1, mem_some10=0, mem_full10=0)
         cases = [(dict(mem_avail_gb=7), 'mem-hard-stop'),
                  (dict(mem_avail_gb=10, swap_free_gb=1), 'mem-swap-hard-stop'),
-                 (dict(load1_per_core=3.5), 'load-delay'), (dict(load1_per_core=4.5), 'load-stop')]
+                 (dict(load1_per_core=2.5), 'load-delay'), (dict(load1_per_core=4.5), 'load-stop')]
         for changes, reason in cases:
             self.assertEqual(lg.admit('builder', calm | changes)[:2], (False, reason))
         for mem, ok in ((8.4, False), (8.6, True)):
@@ -114,7 +300,8 @@ class LoadgateTests(unittest.TestCase):
         self.assertTrue(result[0])
         self.assertIn('mem-pressure', result[2]['skipped'])
         self.assertTrue(lg.admit('builder', calm | dict(swap_free_gb=0, cpu_some10=95, io_some10=95, pswpout_s=10000))[0])
-        result = lg.admit('builder', calm | dict(mem_avail_gb=1, swap_free_gb=0, load1_per_core=5), state={'psi_tripped': True})
+        result = lg.admit('builder', calm | dict(mem_avail_gb=1, swap_free_gb=0, load1_per_core=5, cpu_some10=0),
+                          running={'builder': 10}, state={'psi_tripped': True, 'cpu_tripped': True})
         self.assertEqual(result[2]['failed'], list(lg.RULES))
         signed('AC3', dict(ordered_rules=result[2]['failed'], headroom=8.5))
 
@@ -399,7 +586,7 @@ class EnforcementTests(unittest.TestCase):
             self.assertEqual((d.would_hold, d.reason, d.hold), (True, 'mem-hard-stop', action in ('build','grade')))
         self.pressure(20)
         self.assertFalse(self.enforcing().check('a','builder',action='build').hold)
-        self.pressure(20, 28)
+        self.pressure(20, 20)
         d = self.enforcing().check('a','builder',action='build')
         self.assertEqual((d.would_hold, d.reason, d.hold, d.override), (True,'load-delay',False,None))
         self.pressure()

@@ -21,20 +21,23 @@ import tomllib
 
 DEFAULTS = dict(mode='observe', mem_floor_gb=6, mem_hard_stop_gb=8,
                 mem_swap_hard_stop_gb=12, mem_pressure_some_avg10_max=5,
-                mem_pressure_full_avg10_max=1, load1_per_core_delay=3,
-                load1_per_core_stop=4, running_peak_factor=.5,
+                mem_pressure_full_avg10_max=1, cpu_pressure_some_avg10_max=60,
+                heavy_jobs_max=10, load1_per_core_delay=2,
+                load1_per_core_stop=3, running_peak_factor=.5,
                 release_readings=2, max_wait_min=15,
                 bypass_roles=['executor', 'tick', 'look', 'reaper', 'cleaner'],
                 peak_gb=dict(window_gate=.9, builder=.5, grader=.6, reviewer=.4))
-RULES = ('mem-hard-stop', 'mem-swap-hard-stop', 'mem-pressure', 'load-stop', 'mem-headroom', 'load-delay')
+RULES = ('mem-hard-stop', 'mem-swap-hard-stop', 'mem-pressure', 'cpu-pressure',
+         'load-stop', 'job-slots', 'mem-headroom', 'load-delay')
+HEAVY_ROLES = ('builder', 'grader', 'reviewer')
 PROBE_ROLE = 'probe'
 ENFORCE_FILE = 'admission.toml'
 DEFERRABLE_ACTIONS = ('build', 'grade')
 STATE_STALE_MIN = 60
 STATE_FUTURE_SLACK_S = 300
 _TOML = Path(__file__).resolve().parent.parent / 'look.toml'
-_SHORT = ('mem_avail_gb', 'swap_free_gb', 'mem_some10', 'mem_full10', 'load1_per_core', 'pswpout_s')
-_FULL = ('shmem_gb', 'mem_some60', 'mem_full60', 'cpu_some10', 'io_some10', 'io_full10',
+_SHORT = ('mem_avail_gb', 'swap_free_gb', 'mem_some10', 'mem_full10', 'load1_per_core', 'pswpout_s', 'cpu_some10')
+_FULL = ('shmem_gb', 'mem_some60', 'mem_full60', 'cpu_some60', 'io_some10', 'io_full10',
          'load1', 'procs_running', 'pswpin_s', 'cron_mem_some10', 'cron_mem_full10')
 
 
@@ -74,7 +77,8 @@ def settings(env=None, toml_path=None):
             continue
         valid = (isinstance(value, list) and all(isinstance(r, str) for r in value)
                  if key == 'bypass_roles' else
-                 type(value) is int and value >= 1 if key == 'release_readings' else _number(value))
+                 type(value) is int and value >= 1 if key in ('release_readings', 'heavy_jobs_max') else
+                 _number(value) and value > 0 if key == 'cpu_pressure_some_avg10_max' else _number(value))
         if valid:
             result[key] = value
         else:
@@ -245,7 +249,7 @@ def readings(proc_root='/proc', *, cgroup_root='/sys/fs/cgroup', prev=None, cloc
     return r
 
 
-def admit(role, readings, running=None, *, admitted_gb=0., state=None, settings=None):
+def admit(role, readings, running=None, *, admitted_gb=0., admitted_jobs=0, state=None, settings=None):
     s, r = DEFAULTS if settings is None else settings, readings or {}
     peaks = s['peak_gb']
     unknown = set()
@@ -265,10 +269,14 @@ def admit(role, readings, running=None, *, admitted_gb=0., state=None, settings=
     tests = ((mem is not None, lambda: mem < s['mem_hard_stop_gb']),
              (mem is not None and swap is not None, lambda: mem + swap < s['mem_swap_hard_stop_gb']),
              (r.get('mem_some10') is not None or r.get('mem_full10') is not None, lambda: (state or {}).get('psi_tripped', False)),
+             (r.get('cpu_some10') is not None, lambda: (state or {}).get('cpu_tripped', False)),
              (load is not None, lambda: load > s['load1_per_core_stop']),
+             (running is not None, lambda: sum(running.get(r, 0) for r in HEAVY_ROLES) + admitted_jobs >= s['heavy_jobs_max']),
              (mem is not None, lambda: mem < need),
              (load is not None, lambda: load > s['load1_per_core_delay']))
     for name, (available, fails) in zip(RULES, tests):
+        if name == 'job-slots' and role not in HEAVY_ROLES and role != PROBE_ROLE:
+            continue
         if not available:
             detail['skipped'].append(name)
         elif fails():
@@ -278,7 +286,8 @@ def admit(role, readings, running=None, *, admitted_gb=0., state=None, settings=
 
 def _fresh():
     return dict(v=1, t=0., pswpin=None, pswpout=None, psi_tripped=False,
-                psi_release_streak=0, trip_since=None, holding={})
+                psi_release_streak=0, trip_since=None, holding={},
+                cpu_tripped=False, cpu_release_streak=0)
 
 
 def _iso(t):
@@ -306,12 +315,19 @@ def load_state(path):
         if len(data) > 16384:
             raise ValueError('oversize')
         s = json.loads(data)
-        if not isinstance(s, dict) or not _fresh().keys() <= s.keys():
+        fresh = _fresh()
+        required = fresh.keys() - {'cpu_tripped', 'cpu_release_streak'}
+        if not isinstance(s, dict) or not required <= s.keys():
             raise ValueError('shape')
         if type(s['v']) is not int or s['v'] != 1 or not _number(s['t']):
             raise ValueError('version/time')
         if type(s['psi_tripped']) is not bool or type(s['psi_release_streak']) is not int or s['psi_release_streak'] < 0:
             raise ValueError('hysteresis')
+        if type(s.get('cpu_tripped', False)) is not bool:
+            raise ValueError('CPU hysteresis')
+        streak = s.get('cpu_release_streak', 0)
+        if type(streak) is not int or streak < 0:
+            raise ValueError('CPU hysteresis')
         for k in ('pswpin', 'pswpout'):
             if s[k] is not None and (type(s[k]) is not int or s[k] < 0):
                 raise ValueError('counter')
@@ -323,7 +339,7 @@ def load_state(path):
             if hold_key(key) != key:
                 raise ValueError('key')
             _timestamp(since)
-        return {k: s[k] for k in _fresh()}, True
+        return {k: s.get(k, fresh[k]) for k in fresh}, True
     except Exception:
         return _fresh(), False
 
@@ -364,6 +380,16 @@ def advance(state, readings, settings):
                 s['psi_tripped'], s['psi_release_streak'] = False, 0
         else:
             s['psi_release_streak'] = 0
+    cpu_limit = settings['cpu_pressure_some_avg10_max']
+    if r.get('cpu_some10') is not None and r['cpu_some10'] > cpu_limit:
+        s['cpu_tripped'], s['cpu_release_streak'] = True, 0
+    elif s['cpu_tripped'] and r.get('cpu_some60') is not None:
+        if r['cpu_some60'] <= cpu_limit:
+            s['cpu_release_streak'] += 1
+            if s['cpu_release_streak'] >= settings['release_readings']:
+                s['cpu_tripped'], s['cpu_release_streak'] = False, 0
+        else:
+            s['cpu_release_streak'] = 0
     return s
 
 
@@ -382,6 +408,7 @@ class Gate:
         self.errors, self.unreadable, self.trips = [], [], []
         self.roles, self.would_hold = {}, set()
         self.checked, self.reasons, self.admitted_gb = 0, Counter(), 0.
+        self.admitted_jobs = 0
         self.cost, self.age, self.test_hooks = 0., None, False
         self.mode, self.grades_first, self.holds_on = 'observe', False, False
         self.held, self.escape_due, self.escape_unspawned = 0, 0, 0
@@ -397,7 +424,7 @@ class Gate:
                 age = max(0, now - self.readings['t'])
                 self.age = max(self.age or 0, age)
             ok, reason, detail = admit(role, self.readings, self.running, admitted_gb=self.admitted_gb,
-                                  state=self.state, settings=self.settings)
+                                      admitted_jobs=self.admitted_jobs, state=self.state, settings=self.settings)
             self.checked += 1
             self.roles[item] = role
             if not ok:
@@ -443,6 +470,8 @@ class Gate:
         try:
             if spawned and item in self.roles:
                 self.admitted_gb += self.settings['peak_gb'].get(self.roles[item], 0)
+                if self.roles[item] in HEAVY_ROLES:
+                    self.admitted_jobs += 1
             if spawned and not raised:
                 self.launched = True
             if self.pending_override is not None and self.pending_override['item'] == item:
@@ -472,6 +501,8 @@ class Gate:
                           admission_held=self.held, admission_reason=dict(self.reasons), admission_trips=self.trips,
                           admission_readings={k: round(r[k], 2) if r and r.get(k) is not None else None
                                               for k in _SHORT + (_FULL if self.trips else ())})
+            if isinstance(self.running, dict):
+                fields['admission_jobs'] = sum(self.running.get(role, 0) for role in HEAVY_ROLES)
             if r is not None:
                 fields['admission_sampled_at'] = _iso(t)
             if self.age is not None:
@@ -509,7 +540,7 @@ class Gate:
             fields['admission_test_hooks'] = True
         self.cost += time.monotonic() - start
         fields['admission_cost_ms'] = int(self.cost * 1000)
-        drops = ('admission_readings',)
+        drops = ('admission_readings', 'admission_jobs')
         if self.mode == 'enforce':
             drops += ('admission_settings', 'admission_trip_since', 'admission_unreadable',
                       'admission_reason', 'admission_oldest_hold_s', 'admission_reading_age_s', 'admission_cost_ms')
