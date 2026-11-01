@@ -53,10 +53,10 @@ Source: `lane_rules.toml`. Name | action | actor | limit_min.
 Source: `crons.toml`. Name | schedule | where | path, then command.
 - tick | */{tick_min} * * * * | user | {doit}  DOIT_ROOT={root} {doit} cron-run tick -- {doit} tick
   >> {root}/logs/tick.log 2>&1; look | 3,33 * * * * | user | {doit}  {doit} cron-run look -- {doit}
-  look >> {root}/logs/look.log 2>&1; tmp-reaper | */5 * * * * | user | {doit}  {doit} cron-run
-  tmp-reaper -- {doit} reap-tmp
-  lessons-digest | 7 * * * * | user | {repo}/scripts/lessons_digest.py  {doit} cron-run
-  lessons-digest -- {repo}/scripts/lessons_digest.py >> {root}/lessons-digest.log 2>&1
+  look >> {root}/logs/look.log 2>&1
+  tmp-reaper | 1,6,11,16,21,26,31,36,41,46,51,56 * * * * | user | {doit}  {doit} cron-run tmp-reaper
+  -- {doit} reap-tmp; lessons-digest | 7 * * * * | user | {repo}/scripts/lessons_digest.py  {doit}
+  cron-run lessons-digest -- {repo}/scripts/lessons_digest.py >> {root}/lessons-digest.log 2>&1
   backup-watch | */15 * * * * | user | {doit}  {doit} cron-run backup-watch -- {doit} backup watch
   --for 60 >> {root}/backup.log 2>&1; ledger-repack | 47 4 * * * | user | {doit}  {doit} cron-run
   ledger-repack -- {doit} backup maintain >> {root}/logs/ledger-repack.log 2>&1
@@ -81,7 +81,7 @@ Source: `crons.toml`. Name | schedule | where | path, then command.
   {root}/logs/balance.log 2>&1; stuck-digest | 15 6 * * * | user | {doit}  {doit} cron-run
   stuck-digest -- {doit} stuck-digest --send >> {root}/logs/stuck-digest.log 2>&1
   gh-bill | 15 6 * * * | user | {doit}  {doit} cron-run gh-bill -- {doit} gh-bill >>
-  {root}/logs/gh-bill.log 2>&1; seat-usage | */15 * * * * | user | {doit}  {doit} cron-run
+  {root}/logs/gh-bill.log 2>&1; seat-usage | 12,27,42,57 * * * * | user | {doit}  {doit} cron-run
   seat-usage -- {doit} seat-usage >> {root}/logs/seat-usage.log 2>&1
   base-red-nightly | 20 3 * * * | user | /usr/bin/python3  {doit} cron-run base-red-nightly --
   /usr/bin/python3 {repo}/src/base_red.py nightly albert-scott >> {root}/logs/base-red-nightly.log
@@ -95,14 +95,14 @@ Source: `crons.toml`. Name | schedule | where | path, then command.
   pane-watchdog -- {repo}/src/pane_watchdog.py
   executor-wake | */5 * * * * | user | {repo}/scripts/executor-wake.sh  DOIT_ROOT={root} {doit}
   cron-run executor-wake -- {repo}/scripts/executor-wake.sh
-  pace-sample | */10 * * * * | user | /usr/bin/python3  {doit} cron-run pace-sample --
+  pace-sample | 8,18,28,38,48,58 * * * * | user | /usr/bin/python3  {doit} cron-run pace-sample --
   /usr/bin/python3 {repo}/src/pace.py sample >> {root}/logs/pace-sample.log 2>&1
   stall-sample | 3 * * * * | user | /usr/bin/python3  {doit} cron-run stall-sample --
   /usr/bin/python3 {repo}/src/stall_sample.py sample >> {root}/logs/stall-sample.log 2>&1
-  spec-preflight | */5 * * * * | user | /usr/bin/python3  {doit} cron-run spec-preflight --
-  /usr/bin/python3 {repo}/src/spec_preflight.py tick >> {root}/logs/spec-preflight.log 2>&1
-  ledger-rollup | 20 4 * * * | user | {doit}  {doit} cron-run ledger-rollup -- nice -n 19 {doit}
-  ledger-rollup >> {root}/logs/ledger-rollup.log 2>&1
+  spec-preflight | 4,9,14,19,24,29,34,39,44,49,54,59 * * * * | user | /usr/bin/python3  {doit}
+  cron-run spec-preflight -- /usr/bin/python3 {repo}/src/spec_preflight.py tick >>
+  {root}/logs/spec-preflight.log 2>&1; ledger-rollup | 20 4 * * * | user | {doit}  {doit} cron-run
+  ledger-rollup -- nice -n 19 {doit} ledger-rollup >> {root}/logs/ledger-rollup.log 2>&1
   flow-health-daily | 30 0 * * * | user | /usr/bin/python3  {doit} cron-run flow-health-daily --
   /usr/bin/python3 {repo}/src/flow_health.py >> {root}/logs/flow-health.log 2>&1
   scratch-db-reaper | 17 * * * * | user | {doit}  {doit} cron-run scratch-db-reaper -- {doit}
