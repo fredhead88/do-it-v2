@@ -115,7 +115,8 @@ class GradingToolingTests(unittest.TestCase):
                 self.assertIn("AC2", str(caught.exception))
                 self.assertIn(str(spec), str(caught.exception))
                 self.assertFalse((root / "packets").exists())
-                with patch.object(ctx, "all_of", return_value=[{"criterion": "AC2"}]):
+                with patch.object(ctx, "evs", ctx.evs + [{"type": "owed-ac", "subject": ctx.a.subject,
+                                                       "actor": "spec-writer", "criterion": "AC2"}]):
                     omitted = "\n".join(packet.p_grader(ctx))
                 self.assertNotIn("review_path: second", omitted)
                 self.assertNotIn("AC99 [", omitted)

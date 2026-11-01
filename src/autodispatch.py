@@ -114,7 +114,8 @@ def _standing_autodispatch_failed(evs):
     newest_fail = max(fails, key=lambda e: str(e.get("ts", "")))
     fail_ts = fold.ts(newest_fail.get("ts"))
     clear_ts = max((fold.ts(e.get("ts")) for e in evs
-                    if e.get("type") in ("spec-written", "decision", "unblocked", "dependency-hold")),
+                    if e.get("type") in ("spec-written", "decision", "unblocked", "dependency-hold")
+                    or __import__('empty_grade').clears_failure(newest_fail, e)),
                    default=None)
     if clear_ts is not None and clear_ts > fail_ts:
         return None

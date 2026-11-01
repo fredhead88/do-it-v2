@@ -1017,7 +1017,7 @@ def p_grader(c):
     body = spec.read_text()
     # Standing rejections override owed, routed and ruled omissions until cleared.
     rejected = fold.standing_rejects(c.evs)
-    owed = ({e["criterion"] for e in c.all_of("owed-ac")} | set(fold.routed_criteria(c.evs, c.a.subject)) | set(routing.ruled_criteria(c.evs, c.a.subject))) - rejected
+    owed = __import__('empty_grade').omitted(c.evs, c.a.subject)
     crit = _drop_owed_blocks(criteria(body), owed)
     if not _criterion_spans("\n".join(crit), allow_bullets=True):
         die(f"empty grader criteria for {c.a.subject}: all criteria routed or absent")
