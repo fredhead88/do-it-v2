@@ -492,7 +492,7 @@ def run(spec, requested_sha=None, criteria=None):
         if not re.fullmatch(r"L-spec-\d+", spec):
             raise Undetermined("invalid spec id")
         events = fold.fold(fold.read_events())[3].get(spec, [])
-        project = next((e["project"] for e in events if e.get("project")), None)
+        project = __import__("project_scope").subject_project(events, spec)
         if not project or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", project):
             raise Undetermined("spec has no ledger project")
         row = grading_env._project_row(project)

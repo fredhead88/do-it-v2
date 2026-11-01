@@ -1355,6 +1355,7 @@ def fixture1496():
     with tempfile.TemporaryDirectory(prefix="reaper-1496-") as d:
         top = pathlib.Path(d)
         ledger = top / "ledger"
+        (ledger / "repos" / pathlib.Path.cwd().name).mkdir(parents=True)
         proc = top / "proc"
         (proc / "net").mkdir(parents=True)
         (proc / "net/unix").write_text("Num RefCount Protocol Flags Type St Inode Path\n")
