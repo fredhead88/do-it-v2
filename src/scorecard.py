@@ -188,6 +188,28 @@ def _stall_values(row, hours, histories, intervals, since, until, top):
     row['seat_busy_pct'] = 100 * busy / capacity if capacity else None
 
 
+def _run_tokens(terminal):
+    """Total run tokens, preserving legacy cache sums and unknown readings."""
+    if terminal is None:
+        return None
+    tokens = terminal.get('tokens')
+    if tokens is not None:
+        if (not isinstance(tokens, dict) or tokens.get('vendor') not in ('codex', 'claude')
+                or any(type(tokens.get(key)) is not int or tokens[key] < 0
+                       for key in ('input', 'cached_input', 'output'))
+                or tokens['cached_input'] > tokens['input']
+                or tokens.get('reasoning') is not None and (
+                    type(tokens['reasoning']) is not int or tokens['reasoning'] < 0)):
+            return None
+        # Structured input already includes cached input; reasoning is part of output.
+        return tokens['input'] + tokens['output']
+    values = [terminal.get(key) for key in ('input_tokens', 'output_tokens', 'cache_read', 'cache_creation')]
+    if (any(type(value) is not int or value < 0 for value in values[:2])
+            or any(value is not None and (type(value) is not int or value < 0) for value in values[2:])):
+        return None
+    return sum(value or 0 for value in values)
+
+
 def _failures(row, parsed, since, until, top):
     failures, total = [], 0
     for t, e in parsed:
@@ -208,11 +230,12 @@ def _failures(row, parsed, since, until, top):
     row['failed_share_pct'] = 100 * row['failed_runs'] / row['total_runs'] if row['total_runs'] else None
     terminals = {}
     for _, e in parsed:
-        if e.get('type') == 'spawn-done' and e.get('spawn'):
+        if e.get('spawn') and (e.get('type') == 'spawn-done' or
+                e.get('type') == 'spawn-failed' and (
+                    e.get('backend_ran') is True or e.get('tokens') is not None)):
             terminals.setdefault(e['spawn'], e)
-    row['failed_tokens'] = sum(sum(terminals.get(e.get('spawn'), {}).get(key) or 0
-                                      for key in ('input_tokens', 'output_tokens', 'cache_read', 'cache_creation'))
-                               for e in failures)
+    costs = [_run_tokens(terminals.get(e.get('spawn'))) for e in failures]
+    row['failed_tokens'] = sum(costs) if all(cost is not None for cost in costs) else None
     for e in failures:
         if e.get('subject'):
             entry = _top_entry(top, e['subject'])

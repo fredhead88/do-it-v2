@@ -202,6 +202,40 @@ class ScorecardTests(unittest.TestCase):
         self.assertIsNone(row()['failed_share_pct'])
         print('AC6 failed=4 total=8 share=50% tokens=49')
 
+    def test_failed_token_measurements_are_not_silent_zeroes(self):
+        failure = ev('build-blocked', 1, spawn='b')
+        for receipt in (None, ev('spawn-done', 2, spawn='b'),
+                        ev('spawn-done', 2, spawn='b', input_tokens=10)):
+            with self.subTest(receipt=receipt):
+                got = row([failure] + ([receipt] if receipt else []))
+                self.assertIsNone(got['failed_tokens'])
+                cell = next(c for c in got['cells'] if c['key'] == 'failed_tokens')
+                self.assertEqual((cell['text'], cell['band']), ('no data', 'no data'))
+                self.assertIn('Failed-run tokens: no data [no data]', sc.copy_text(got))
+
+        for vendor in ('codex', 'claude'):
+            usage = dict(vendor=vendor, input=100, cached_input=80, output=10, reasoning=None)
+            for kind in ('spawn-done', 'spawn-failed'):
+                receipt = ev(kind, 2, spawn='b', tokens=usage, backend_ran=True)
+                with self.subTest(vendor=vendor, kind=kind):
+                    self.assertEqual(row([failure, receipt])['failed_tokens'], 110)
+                    self.assertEqual(row([failure, receipt, dict(receipt)])['failed_tokens'], 110)
+            zero = ev('spawn-done', 2, spawn='b', tokens=dict(
+                vendor=vendor, input=0, cached_input=0, output=0, reasoning=None))
+            self.assertEqual(row([failure, zero])['failed_tokens'], 0)
+            for bad in ({}, {**usage, 'input': True}, {**usage, 'input': -1},
+                        {**usage, 'cached_input': 101}, {**usage, 'output': None},
+                        {**usage, 'vendor': 'unknown'}):
+                with self.subTest(bad=bad):
+                    self.assertIsNone(row([failure, ev('spawn-done', 2, spawn='b', tokens=bad)])['failed_tokens'])
+        measured = ev('spawn-done', 2, spawn='b', input_tokens=10,
+                      output_tokens=2, cache_read=3, cache_creation=None)
+        self.assertEqual(row([failure, measured])['failed_tokens'], 15)
+        refusal = ev('spawn-failed', .5, spawn='b', tokens=None, reason='preflight:no-pinned-base')
+        self.assertEqual(row([refusal, failure, measured])['failed_tokens'], 15)
+        self.assertIsNone(row([failure, measured, ev('review', 3, spawn='missing', n_blocking=1)])['failed_tokens'])
+        self.assertEqual(row()['failed_tokens'], 0)  # No failed model runs is a known zero.
+
     def test_AC7_band_boundaries(self):
         expected = {'median_lead_h': ('low', 10, 15), 'stuck_over_1h': ('low', 1, 2),
                     'window_verified_pct': ('high', 80, 60), 'median_wait_min': ('low', 120, 240),
@@ -228,7 +262,11 @@ class ScorecardTests(unittest.TestCase):
         self.assertEqual(sc.band('ram_used_pct', 80, swap_pct=90.1), 'amber')
 
     def test_AC8_copy_and_top_reasons(self):
-        events = [ev('build-blocked', 1, f'S{i}', reason='bad\x00\n\t' + 'x' * 400) for i in range(7)]
+        events = [ev('build-blocked', 1, f'S{i}', spawn=f'b{i}', reason='bad\x00\n\t' + 'x' * 400) for i in range(7)]
+        # This all-measured fixture explicitly observes zero usage; absent
+        # terminal measurements are covered separately as unavailable.
+        events += [ev('spawn-done', 2, f'S{i}', spawn=f'b{i}', input_tokens=0,
+                      output_tokens=0, cache_read=0, cache_creation=0) for i in range(7)]
         events += [ev('spec-written', -2, 'shipped'), ev('shipped', 3, 'shipped'),
                    ev('window-opened', 1, 'verified', specs=['shipped']),
                    ev('review', 0, 'shipped', n_blocking=0), ev('window-verified', 2, 'verified')]
