@@ -13,6 +13,7 @@ case "${1:-board}" in
   ci-runner) shift; exec python3 "$SRC/ci_runner.py" "$@" ;;
   readiness) shift; exec python3 "$SRC/build_readiness.py" "$@" ;;
   run-checks) shift; exec python3 "$SRC/build_runner.py" "$@" ;;
+  review-scratch) shift; exec python3 "$SRC/review_scratch.py" "$@" ;;
   ci-shadow) shift; exec python3 "$SRC/ci_shadow.py" "$@" ;;
   dispatch) shift; exec python3 "$SRC/dispatch.py" "$@" ;;
   cancel)  shift; exec python3 "$SRC/cancel.py" "$@" ;;
