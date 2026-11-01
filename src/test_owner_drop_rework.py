@@ -70,15 +70,28 @@ class OwnerDropReworkTests(unittest.TestCase):
         events = self.history() + [dropped()]
         current, before = self.step(events), self.step(events, old=True)
         self.assertEqual(current.action, 'rebuild')
-        self.assertIsNone(before.action)
-        context = dict(evs=events, spec=dict(state='graded'), dependency=None)
-        self.assertIsNone(self.old_rebuild(context))
+        self.assertEqual(before.action, 'rebuild')
+        context = dict(evs=events, events=events, sid=SID, now=NOW, spec=dict(state='graded'), dependency=None)
+        self.assertEqual(self.old_rebuild(context)['since'], current.since)
         for kind, extra in [('build-started', {'spawn': 'L-builder-9001'}),
                             ('autodispatched', {'role': 'builder', 'spawn': 'L-builder-9001'})]:
             with self.subTest(kind=kind):
                 later = events + [event(kind, -5, **extra)]
                 self.assertIsNone(ns._rebuild(dict(context, evs=later)))
                 self.assertNotEqual(self.step(later).action, 'rebuild')
+        marker = event('autodispatched', -5, role='builder', spawn='12345')
+        deadline = NOW + timedelta(minutes=85)
+        for clock, held in ((deadline-timedelta(microseconds=1), None), (deadline, 'retry-wait')):
+            result = ns._rebuild(dict(context, evs=events+[marker], now=clock))
+            if held is None:
+                self.assertIsNone(result)
+            else:
+                self.assertIn(held, result['reason'])
+                self.assertIn('1 failed attempts', result['reason'])
+        due = deadline + timedelta(minutes=5)
+        result = ns._rebuild(dict(context, evs=events+[marker], now=due))
+        self.assertEqual(result['since'], dropped()['ts'])
+        self.assertIn('dead:', result['reason'])
         blocked = event('build-blocked', -5)
         self.assertIsNone(ns._rebuild(dict(context, evs=events + [blocked])))
         newer = dropped(-2)
@@ -100,7 +113,7 @@ class OwnerDropReworkTests(unittest.TestCase):
         subjects = [SID, 'L-spec-9002', 'L-spec-9003']
         together = [e for sid in subjects for e in self.history(sid) + [dropped(subject=sid)]]
         self.assertEqual([self.step(together, sid).action for sid in subjects], ['rebuild'] * 3)
-        context = dict(evs=self.history() + [dropped()], spec=dict(state='graded'), dependency=None)
+        context = dict(evs=self.history() + [dropped()], events=[], sid=SID, now=NOW, spec=dict(state='graded'), dependency=None)
         for state in ns.dispatch.SETTLED_STATES:
             self.assertIsNone(ns._rebuild(dict(context, spec=dict(state=state))))
         self.assertIsNone(ns._rebuild(dict(context, evs=context['evs'] + [event('spec-killed', -5)])))
@@ -111,7 +124,6 @@ class OwnerDropReworkTests(unittest.TestCase):
         print('L-spec-1790 AC2 ok')
 
     def test_ac3_builder_packet_evidence_and_unchanged_cases(self):
-        from contextlib import nullcontext
         with tempfile.TemporaryDirectory(prefix='owner-drop-rework-') as directory:
             root = Path(directory)
             content = root / 'content'
@@ -134,27 +146,19 @@ class OwnerDropReworkTests(unittest.TestCase):
                      patch.object(packet, 'CONTENT', content), \
                      patch.object(packet, 'PACKETS', root / 'packets'), \
                      patch.dict(os.environ, {'DOIT_ROOT': str(root), 'HOME': str(root / 'home')}), \
-                     patch.dict(packet.BUILD, {'builder': self.old_builder if old else packet.p_builder}), \
-                     (patch.dict(self.old_builder.__globals__, {'preflight_lines': lambda c: []})
-                      if old else nullcontext()):
-                    # The inherited snapshot already includes the later preflight
-                    # suffix; omit it only in the historical comparison fixture.
+                     patch.dict(packet.BUILD, {'builder': self.old_builder if old else packet.p_builder}):
                     path = packet.main(['builder', SID, '--repo', str(repo), '--worktree', str(repo),
                                         '--project', 'fixture', '--base-sha', tip])
                     return Path(path).read_bytes()
 
-            suffix = ('9. Coupled existing tests on the base (0 files; 0 fenced by Boundaries; '
-                      '0 omitted by the 30-file cap; run after the final edit; report each in coupled):\n'
-                      + packet.coupled_tests.run_line(spec, repo, tip)
-                      + '\npreflight undetermined: none recorded\n').encode()
-            self.assertEqual(render(events), render(events, old=True) + suffix)
+            self.assertEqual(render(events), render(events, old=True))
             old_drop = dropped(-20)
             # Lexically later drop is older in absolute time than build-done.
             old_drop['ts'] = '2026-10-28T13:00:00+02:00'
             done = event('build-done', -30, status='DONE')
             for rows in (events + [old_drop, done], events + [done, dict(dropped(), ts=done['ts'])],
                          events + [dict(dropped(), reason='bisect-single')]):
-                self.assertEqual(render(rows), render(rows, old=True) + suffix)
+                self.assertEqual(render(rows), render(rows, old=True))
             owner = dict(dropped(), unattributed_nodes=['tests/test_other.py::test_unknown'])
             rows = events + [done, owner, dict(dropped(-5), reason='bisect-single')]
             text = render(rows).decode()

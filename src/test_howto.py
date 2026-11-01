@@ -72,7 +72,7 @@ class HowtoTests(unittest.TestCase):
             suffix = '' if 'backend' in contract else ' (default)'
             self.assertIn(f'- {role.stem}: {backend}{suffix}', first)
         rules = tomllib.loads((REPO / 'lane_rules.toml').read_text())['rules']
-        self.assertEqual(howto.event_types(REPO / 'src/tick.py'), LITERALS | {'next-step-held'})
+        self.assertEqual(howto.event_types(REPO / 'src/tick.py'), LITERALS | {'next-step-held', 'escalation-blocking'})
         normal = ' '.join(first.split())
         for row in rules:
             self.assertIn(' | '.join(str(row[k]) for k in

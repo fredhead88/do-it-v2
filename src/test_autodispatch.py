@@ -90,7 +90,7 @@ class R7PinReplayTests(unittest.TestCase):
                     self.replay_files(f,spawn,saved,'/saved/card.md')
                     f.calls.clear(); before=len(f.dispatched)
                     events=f.events()
-                    out=autodispatch.redispatch_dead(events,fold.fold(events)[0],f.now,runner=f.runner)
+                    out=autodispatch.redispatch_dead(events, {},f.now,runner=f.runner)
                     self.assertTrue(any('replayed '+spawn in line for line in out),out)
                     self.assertEqual(len(f.dispatched),before+1)
                     self.assertEqual(dispatch.pinned_base(f.dispatched[-1]),pin)
@@ -105,7 +105,7 @@ class R7PinReplayTests(unittest.TestCase):
                     marker=next(e for e in f.events() if e.get('replaces')==spawn)
                     self.assertEqual((marker['trigger'],marker['since']),('redispatch',(f.now-datetime.timedelta(minutes=5)).isoformat(timespec='seconds')))
                     calls=len(f.calls)
-                    fresh=f.events(); autodispatch.redispatch_dead(fresh,fold.fold(fresh)[0],f.now,runner=f.runner,handled={f.sid})
+                    fresh=f.events(); autodispatch.redispatch_dead(fresh, {},f.now,runner=f.runner,handled={f.sid})
                     self.assertEqual(len(f.calls),calls)
                     print(json.dumps(dict(case=case,attempt=attempt,repo_head=f.git('rev-parse','HEAD'),
                         effective_ref=f.branch,effective_sha=pin,old_pin=old,packet_pin=dispatch.pinned_base(f.dispatched[-1]),
@@ -121,7 +121,7 @@ class R7PinReplayTests(unittest.TestCase):
                     if failure=='packet' and argv[:2]==['doit','packet']:
                         f.calls.append(argv);return dict(code=1,stdout='',stderr='packet refused')
                     return f.runner(argv)
-                events=f.events();out=autodispatch.redispatch_dead(events,fold.fold(events)[0],f.now,runner=runner)
+                events=f.events();out=autodispatch.redispatch_dead(events, {},f.now,runner=runner)
                 self.assertFalse(any(a[:2]==['doit','dispatch'] for a in f.calls))
                 self.assertTrue(any('spawn-redispatch-failed' in line for line in out),out)
 
@@ -170,7 +170,7 @@ class R7PinReplayTests(unittest.TestCase):
                     with contextlib.redirect_stdout(io.StringIO()),contextlib.redirect_stderr(io.StringIO()):dispatch.main(args)
                     return dict(code=0,stdout=json.dumps(dict(detached=observed[-1])),stderr='')
                 if entry=='replay':
-                    events=f.events();autodispatch.redispatch_dead(events,fold.fold(events)[0],f.now,runner=runner)
+                    events=f.events();autodispatch.redispatch_dead(events, {},f.now,runner=runner)
                 else:
                     action='build' if entry=='create' else 'rebuild'
                     step=nextstep.Step(f.sid,'spec','building','action',action,'tick','fixture:1','condition met',None,f.now.isoformat())
@@ -691,7 +691,7 @@ ev_bl = fold.read_events()
 specs_bl, _, _, _ = fold.fold(ev_bl)
 assert autodispatch.dead_spawns(ev_bl, NOW) == [], "AC8: the 28-spawn backlog yields zero dead_spawns rows"
 calls_bl = []
-autodispatch.redispatch_dead(ev_bl, specs_bl, NOW, runner=lambda a: calls_bl.append(a) or {"code": 0, "stdout": "", "stderr": ""})
+autodispatch.redispatch_dead(ev_bl, {}, NOW, runner=lambda a: calls_bl.append(a) or {"code": 0, "stdout": "", "stderr": ""})
 assert calls_bl == [], f"AC8: the backlog must call the runner zero times: {calls_bl}"
 lines_bl = [json.loads(l) for l in tick.tick_path().read_text().splitlines()] if tick.tick_path().exists() else []
 assert not any(e.get("subject", "").startswith("L-spec-489") and e["type"] in ("autodispatched", "escalation-blocking")
@@ -723,7 +723,7 @@ for n9, (role9, has_path9) in enumerate((("builder", False), ("spec-writer", Tru
     runner9 = _FakeRunner({0: {"code": 0, "stdout": detach9, "stderr": ""}})
     if role9 == "builder":
         pin9 = _builder_replay_base(root, f"d9-{n9}")
-    autodispatch.redispatch_dead(ev9, specs9, NOW, runner=runner9)
+    autodispatch.redispatch_dead(ev9, {}, NOW, runner=runner9)
     assert len(runner9.calls) == (2 if role9 == "builder" else 1), runner9.calls
     replay_path9 = root / "content" / f"replay-{spawn9}.md"
     expect9 = ["doit", "dispatch", "--detach", role9, sid9, "--packet", str(replay_path9), "--cwd", str(root / "cwd9")]
@@ -774,7 +774,7 @@ specs10, _, _, _ = fold.fold(ev10)
 detach10 = json.dumps({"detached": 222, "role": "grader", "subject": sid10, "log": "l"})
 runner10 = _FakeRunner({0: {"code": 0, "stdout": "/pkt/x.md\n", "stderr": ""},
                          1: {"code": 0, "stdout": detach10, "stderr": ""}})
-autodispatch.redispatch_dead(ev10, specs10, NOW, runner=runner10)
+autodispatch.redispatch_dead(ev10, {}, NOW, runner=runner10)
 assert len(runner10.calls) == 2, runner10.calls
 assert runner10.calls[0] == ["doit", "packet", "grader", sid10, "--worktree", str(worktree10)], runner10.calls[0]
 assert runner10.calls[1][:5] == ["doit", "dispatch", "--detach", "grader", sid10], runner10.calls[1]
@@ -803,7 +803,7 @@ _write(root10b, "L-operator-local.jsonl", {"ts": _iso(NOW - datetime.timedelta(m
 ev10b = fold.read_events()
 specs10b, _, _, _ = fold.fold(ev10b)
 runner10b = _FakeRunner()
-autodispatch.redispatch_dead(ev10b, specs10b, NOW, runner=runner10b)
+autodispatch.redispatch_dead(ev10b, {}, NOW, runner=runner10b)
 assert runner10b.calls == [], f"AC10: a held grader spec must not be replayed: {runner10b.calls}"
 lines10b = [json.loads(l) for l in tick.tick_path().read_text().splitlines()] if tick.tick_path().exists() else []
 assert not any(e.get("subject") == sid10b and e["type"] in ("autodispatched", "escalation-blocking", "autodispatch-failed")
@@ -829,7 +829,7 @@ spawn11b = "8801"
 runner11 = _FakeRunner({0: {"code": 0, "stdout": json.dumps({"detached": spawn11b, "role": "builder",
                                                               "subject": sid11, "log": "l"}), "stderr": ""}})
 _builder_replay_base(root, "d11")
-autodispatch.redispatch_dead(ev11, specs11, NOW, runner=runner11)
+autodispatch.redispatch_dead(ev11, {}, NOW, runner=runner11)
 lines11 = [json.loads(l) for l in tick.tick_path().read_text().splitlines()]
 disp11a = [e for e in lines11 if e["type"] == "autodispatched" and e.get("replaces") == spawn11a]
 assert len(disp11a) == 1 and disp11a[0]["spawn"] == spawn11b, disp11a
@@ -837,7 +837,7 @@ assert len(disp11a) == 1 and disp11a[0]["spawn"] == spawn11b, disp11a
 ev11b = fold.read_events()
 specs11b, _, _, _ = fold.fold(ev11b)
 runner11b = _FakeRunner()
-autodispatch.redispatch_dead(ev11b, specs11b, NOW, runner=runner11b)
+autodispatch.redispatch_dead(ev11b, {}, NOW, runner=runner11b)
 assert runner11b.calls == [], f"AC11: must not replay the same dead spawn twice: {runner11b.calls}"
 
 _write(root, "L-tick-local2.jsonl", {"ts": _iso(NOW - datetime.timedelta(minutes=3)), "type": "spawn-stale",
@@ -845,7 +845,7 @@ _write(root, "L-tick-local2.jsonl", {"ts": _iso(NOW - datetime.timedelta(minutes
 ev11c = fold.read_events()
 specs11c, _, _, _ = fold.fold(ev11c)
 runner11c = _FakeRunner()
-autodispatch.redispatch_dead(ev11c, specs11c, NOW, runner=runner11c)
+autodispatch.redispatch_dead(ev11c, {}, NOW, runner=runner11c)
 assert runner11c.calls == [], f"AC11: the second-death step calls the runner zero times: {runner11c.calls}"
 lines11c = [json.loads(l) for l in tick.tick_path().read_text().splitlines()]
 esc11 = [e for e in lines11c if e["type"] == "escalation-blocking" and e.get("dead_spawn") == spawn11b]
@@ -857,7 +857,7 @@ assert fold.required_reason(esc11[0]) is None, fold.required_reason(esc11[0])
 ev11d = fold.read_events()
 specs11d, _, _, _ = fold.fold(ev11d)
 runner11d = _FakeRunner()
-autodispatch.redispatch_dead(ev11d, specs11d, NOW, runner=runner11d)
+autodispatch.redispatch_dead(ev11d, {}, NOW, runner=runner11d)
 lines11d = [json.loads(l) for l in tick.tick_path().read_text().splitlines()]
 esc11d = [e for e in lines11d if e["type"] == "escalation-blocking" and e.get("dead_spawn") == spawn11b]
 assert len(esc11d) == 1, esc11d
@@ -868,7 +868,7 @@ _write(root, "L-operator-answer.jsonl", {"ts": _iso(NOW - datetime.timedelta(min
 ev11e = fold.read_events()
 specs11e, _, _, _ = fold.fold(ev11e)
 runner11e = _FakeRunner()
-autodispatch.redispatch_dead(ev11e, specs11e, NOW, runner=runner11e)
+autodispatch.redispatch_dead(ev11e, {}, NOW, runner=runner11e)
 lines11e = [json.loads(l) for l in tick.tick_path().read_text().splitlines()]
 esc11e = [e for e in lines11e if e["type"] == "escalation-blocking" and e.get("dead_spawn") == spawn11b]
 assert len(esc11e) == 1, esc11e
@@ -884,7 +884,7 @@ _write(root, "L-tick-local3.jsonl", {"ts": _iso(NOW - datetime.timedelta(minutes
 ev11f = fold.read_events()
 specs11f, _, _, _ = fold.fold(ev11f)
 runner11f = _FakeRunner()
-autodispatch.redispatch_dead(ev11f, specs11f, NOW, runner=runner11f)
+autodispatch.redispatch_dead(ev11f, {}, NOW, runner=runner11f)
 assert runner11f.calls == [], runner11f.calls
 lines11f = [json.loads(l) for l in tick.tick_path().read_text().splitlines()]
 esc11f = [e for e in lines11f if e["type"] == "escalation-blocking" and e.get("dead_spawn") == spawn11f]
@@ -918,7 +918,7 @@ specs12, _, _, _ = fold.fold(ev12)
 runner12 = _FakeRunner({0: {"code": 0, "stdout": json.dumps({"detached": 9001, "role": "builder",
                                                               "subject": sid12a, "log": "l"}), "stderr": ""}})
 _builder_replay_base(root, "d12")
-autodispatch.redispatch_dead(ev12, specs12, NOW, runner=runner12)
+autodispatch.redispatch_dead(ev12, {}, NOW, runner=runner12)
 assert len(runner12.calls) == 2, runner12.calls
 lines12 = [json.loads(l) for l in tick.tick_path().read_text().splitlines()]
 disp12a = [e for e in lines12 if e["type"] == "autodispatched" and e.get("replaces") == spawn12a]
@@ -938,14 +938,14 @@ _write(root, "L-tick-local3.jsonl", {"ts": _iso(NOW - datetime.timedelta(minutes
 ev12c = fold.read_events()
 specs12c, _, _, _ = fold.fold(ev12c)
 runner12c = _FakeRunner({0: {"code": 1, "stdout": "", "stderr": "boom"}})
-autodispatch.redispatch_dead(ev12c, specs12c, NOW, runner=runner12c)
+autodispatch.redispatch_dead(ev12c, {}, NOW, runner=runner12c)
 lines12c = [json.loads(l) for l in tick.tick_path().read_text().splitlines()]
 escf12c = [e for e in lines12c if e["type"] == "escalation-blocking" and e.get("dead_spawn") == spawn12c]
 assert len(escf12c) == 1 and escf12c[0]["kind"] == "spawn-redispatch-failed", escf12c
 ev12d = fold.read_events()
 specs12d, _, _, _ = fold.fold(ev12d)
 runner12d = _FakeRunner()
-autodispatch.redispatch_dead(ev12d, specs12d, NOW, runner=runner12d)
+autodispatch.redispatch_dead(ev12d, {}, NOW, runner=runner12d)
 assert runner12d.calls == [], runner12d.calls
 lines12d = [json.loads(l) for l in tick.tick_path().read_text().splitlines()]
 escf12d = [e for e in lines12d if e["type"] == "escalation-blocking" and e.get("dead_spawn") == spawn12c]
@@ -1300,8 +1300,8 @@ class HeldCandidateTests(unittest.TestCase):
             events.append(dict(type='autodispatch-failed',subject=a,ts=ago(1),reason='fixture refused',role='builder',actor='tick'))
             specs = fold.fold(events)[0]
             result = rows()
-            self.assertEqual(_row(result,a)['status'],'blocked')
-            self.assertTrue(_row(result,a)['_dispatch_failed'])
+            self.assertEqual(_row(result,a)['status'],'seat-wait')
+            self.assertFalse(_row(result,a)['_dispatch_failed'])
         for age in (3660,-301):
             lg.save_state(state_path,state | dict(t=now.timestamp()-age))
             self.assertEqual(lg.held_items(root,now=now),frozenset())
@@ -1389,7 +1389,7 @@ class VanishedRecoveryTests(unittest.TestCase):
                     self.assertTrue(autodispatch._own_terminal_event(fresh, f['spawn']))
                 specs = fold.fold(fresh)[0]
                 runner = _FakeRunner()
-                replay = autodispatch.redispatch_dead(fresh, specs, NOW, runner=runner)
+                replay = autodispatch.redispatch_dead(fresh, {}, NOW, runner=runner)
                 self.assertEqual(runner.calls, [])
                 steps = nextstep.next_steps(fresh, specs, NOW, lane_rules.load())
                 step = next(s for s in steps if s.item == sid)
@@ -1404,7 +1404,7 @@ class VanishedRecoveryTests(unittest.TestCase):
                     self.assertIn('exhaust', step.reason)
                 tick.in_flight(before)
                 second = fold.read_events(use_cache=False)
-                autodispatch.redispatch_dead(second, fold.fold(second)[0], NOW, runner=runner)
+                autodispatch.redispatch_dead(second, {}, NOW, runner=runner)
                 self.assertEqual(len([e for e in second if e['type'] == 'spawn-failed']), count)
                 self.assertEqual(runner.calls, [])
                 body = json.dumps(dict(events=second, steps=[s.__dict__ for s in steps],

@@ -960,6 +960,7 @@ class R7PinLaunchTests(unittest.TestCase):
             for failure in ('resolver', 'packet'):
                 with self.subTest(action=action, failure=failure), contextlib.ExitStack() as stack:
                     f = R7Fixture(stack)
+                    f.now = f.now.replace(microsecond=0)
                     if action == 'rebuild':
                         f.worktree()
                     step = nextstep.Step(f.sid, 'spec', 'checking', 'action', action, 'tick',
@@ -989,13 +990,87 @@ class R7PinLaunchTests(unittest.TestCase):
                                                 admitted=0, standing_retries=0))
 
 
+class RetryRegressionTests(unittest.TestCase):
+    def test_retry1857_AC1_durable_exhaustion_and_dedup(self):
+        from test_nextstep import RetryRegressions1857Tests, NOW, SID, event
+        fixture=LauncherTests('runTest');fixture.setUp();self.addCleanup(fixture.doCleanups)
+        evs,hold=RetryRegressions1857Tests().fixture('builder');evs.remove(hold)
+        specs={SID:dict(state='written')}
+        with patch.object(dispatch,'now',return_value=NOW.isoformat()):
+            out=tick.run_steps(evs,specs,NOW,dispatcher=fixture.dispatcher)
+        self.assertTrue(any('retries-exhausted' in x for x in out),out)
+        env=dict(os.environ,DOIT_ROOT=str(fixture.root),PYTHONPATH=str(pathlib.Path(__file__).parent.resolve()))
+        import subprocess
+        def fresh():
+            r=subprocess.run([sys.executable,'-c','import fold,json; print(json.dumps(fold.read_events(use_cache=False)))'],env=env,capture_output=True,text=True,check=True)
+            return json.loads(r.stdout)
+        rows=fresh();holds=[e for e in rows if e.get('kind')=='retries-exhausted']
+        self.assertEqual(len(holds),1);record=holds[0]
+        self.assertEqual((record['owner'],record['role'],record['ref']),('thinker','builder',evs[0]['_src']))
+        self.assertEqual(record['reasons'],['failure-0','failure-1','failure-2'])
+        for key in ('default','deadline','revert'):self.assertTrue(record[key].strip())
+        self.assertEqual(nextstep._time(record['deadline'])-nextstep._time(record['ts']),datetime.timedelta(hours=24))
+        self.assertIn(record,fold.open_escalations(rows))
+        with patch.object(dispatch,'now',return_value=NOW.isoformat()):
+            tick.run_steps(evs+rows,specs,NOW,dispatcher=fixture.dispatcher)
+        self.assertEqual(len([e for e in fresh() if e.get('kind')=='retries-exhausted']),1)
+        self.assertEqual(fixture.calls,[])
+        # The fold collapses by subject; raw dedup must retain every role/ref.
+        release=event('decision',1)
+        review_trigger=event('verdict',2,actor='grader',confirmed=True,_src='L-grader-review-trigger.jsonl:1')
+        extra=[release,review_trigger]+[event('spawn-failed',3+i,role='reviewer',spawn=f'L-reviewer-{9910+i}',reason=f'review-{i}') for i in range(3)]
+        later=NOW+datetime.timedelta(minutes=60)
+        with patch.object(dispatch,'now',return_value=later.isoformat()):
+            tick.run_steps(evs+rows+extra,{SID:dict(state='building')},later,dispatcher=fixture.dispatcher)
+        both=fresh();records=[e for e in both if e.get('kind')=='retries-exhausted']
+        self.assertEqual({e['role'] for e in records},{'builder','reviewer'})
+        self.assertEqual(len(fold.open_escalations(both)),1)
+        original_step=nextstep.step_for(evs,specs,SID,NOW,lane_rules.load())
+        self.assertIsNone(tick._record_retry_exhaustion(original_step,evs+both+extra,later))
+        self.assertEqual(len([e for e in fresh() if e.get('kind')=='retries-exhausted']),2)
+        renewed=event('decision',61,rework='yes')
+        another=[renewed]+[event('spawn-failed',62+i,role='builder',spawn=f'L-builder-{9920+i}',reason=f'renewed-{i}') for i in range(3)]
+        final_now=NOW+datetime.timedelta(minutes=120)
+        with patch.object(dispatch,'now',return_value=final_now.isoformat()):
+            tick.run_steps(evs+both+extra+another,{SID:dict(state='building')},final_now,dispatcher=fixture.dispatcher)
+        records=[e for e in fresh() if e.get('kind')=='retries-exhausted']
+        self.assertEqual(len(records),3)
+        self.assertEqual({e['ref'] for e in records if e['role']=='builder'},{evs[0]['_src'],renewed['_src']})
+        # Failure to persist is visible and must not be described as success.
+        tick.tick_path().unlink()
+        with patch.object(dispatch,'emit',return_value='fixture refused'):
+            out=tick.run_steps(evs,specs,NOW,dispatcher=fixture.dispatcher)
+        self.assertTrue(any('fixture refused' in x for x in out),out)
+
+    def test_retry1857_AC2_release_and_legacy_tail(self):
+        from test_nextstep import RetryRegressions1857Tests, NOW, SID, event
+        fixture=LauncherTests('runTest');fixture.setUp();self.addCleanup(fixture.doCleanups)
+        fixture.prepare(SID)
+        for role in ('builder','grader','reviewer'):
+            for kind in ('retries-exhausted','spawn-died-twice','spawn-redispatch-lapsed','spawn-redispatch-failed'):
+                with self.subTest(role=role,kind=kind):
+                    fixture.calls.clear();tick.tick_path().unlink(missing_ok=True)
+                    evs,hold=RetryRegressions1857Tests().fixture(role);hold.update(kind=kind,dead_spawn=f'L-{role}-9902')
+                    evs[0]['project']='proj'
+                    specs={SID:dict(state='written' if role=='builder' else 'building')}
+                    held=tick._steps(evs,specs,NOW)
+                    tick.run_steps(evs,specs,NOW,dispatcher=fixture.dispatcher,steps=held)
+                    autodispatch.redispatch_dead(evs,specs,NOW,runner=fixture.dispatcher,handled=tick.handled_items(held))
+                    self.assertEqual(fixture.calls,[])
+                    release=event('unblocked',-20);release['_src']='L-operator-release.jsonl:1';evs.append(release)
+                    steps=tick._steps(evs,specs,NOW)
+                    out=tick.run_steps(evs,specs,NOW,dispatcher=fixture.dispatcher,steps=steps)
+                    autodispatch.redispatch_dead(evs,specs,NOW,runner=fixture.dispatcher,handled=tick.handled_items(steps))
+                    self.assertEqual(sum(a[:2]==['doit','dispatch'] for a in fixture.calls),1,out)
+
+
 _enforce_in_flight = lane_driver._in_flight_role
 
 
 # These script suites predate unittest. Respect the authored targeted checks
 # before running the historical script assertions; unfiltered CI still runs both.
 if __name__ == '__main__' and '-k' in sys.argv and sys.argv[-1] in {
-        'launch', 'sole_launcher', 'manual_routine', 'launch_failure', 'no_double_gate', 'AdmissionTests', 'EnforcementTests', 'R7PinLaunchTests'}:
+        'launch', 'sole_launcher', 'manual_routine', 'launch_failure', 'no_double_gate', 'AdmissionTests', 'EnforcementTests', 'R7PinLaunchTests', 'RetryRegressionTests'}:
     unittest.main()
 
 # An idle tick: one tick event, lane 0, nothing spawned and no `spawned` key to report it.

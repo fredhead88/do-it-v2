@@ -104,7 +104,11 @@ def _standing_autodispatch_failed(evs):
     than the newest of this subject's own `spec-written`/`decision`/
     `unblocked`/`dependency-hold` — else `None` (a later marker clears it,
     AC4)."""
-    fails = [e for e in evs if e.get("type") == "autodispatch-failed"]
+    # Routine failures are owned by nextstep's bounded attempt predicate. A
+    # second standing transport veto would strand a due builder/reviewer retry.
+    fails = [e for e in evs if e.get("type") == "autodispatch-failed"
+             and (e.get('role') or fold.actor_of(str(e.get('spawn') or '')))
+             not in {'builder', 'grader', 'reviewer'}]
     if not fails:
         return None
     newest_fail = max(fails, key=lambda e: str(e.get("ts", "")))
@@ -484,6 +488,11 @@ def redispatch_dead(events, specs, now, *, runner=None, dry_run=False, handled=f
     for row in dead_spawns(events, now):
         spawn, subject, role = row["spawn"], row["subject"], row["role"]
         if subject in handled:
+            continue
+        if (role in {'builder', 'grader', 'reviewer'} and subject in specs
+                and any(e.get('subject') == subject and e.get('type') == 'spec-written' for e in events)):
+            # These roles use the sole tick Step launcher, including when the
+            # trigger is consumed or exhausted. Replay cannot mint another budget.
             continue
         handled.add(subject)
         replacement_of, visible_at = row["replacement_of"], fold.ts(row["visible_at"])

@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import random
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -23,7 +24,7 @@ import lane_rules as lr
 NOW = datetime(2026, 10, 23, 12, tzinfo=timezone.utc)
 SID = 'L-spec-9001'
 KEYS = {'item', 'item_kind', 'stage', 'state', 'action', 'owner',
-        'trigger', 'reason', 'clears', 'since'}
+        'trigger', 'reason', 'clears', 'since', 'attempt', 'retry_at'}
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURES = ROOT / 'src/fixtures/nextstep'
 
@@ -322,7 +323,7 @@ class NextStepTests(unittest.TestCase):
             matching = [s for s in steps if s.item == sid]
             self.assertEqual(len(matching), 1)
             expected = ns.Step(sid, 'spec', 'building', 'action', 'rebuild', 'tick', trigger,
-                               'condition met', None, since)
+                               'condition met', None, since, attempt=1)
             for key in KEYS:
                 self.assertEqual(asdict(matching[0])[key], asdict(expected)[key], (name, key))
             if name == 'w41':
@@ -595,7 +596,7 @@ class VanishedRetryTests(unittest.TestCase):
                         elif offset == -1:
                             self.assertIsNone(step.action)
                             if role == 'grader':
-                                self.assertEqual(step.reason, 'retry-wait: ' + deadline.isoformat())
+                                self.assertTrue(step.reason.startswith('retry-wait:')); self.assertEqual(step.retry_at, deadline.isoformat())
                             else:
                                 self.assertIn('next_retry_at', step.reason)
                         else:
@@ -1404,7 +1405,7 @@ class GraderRetryTests(unittest.TestCase):
             rows.append(self.refusal(-4, 'dispatch-in-progress', 9,
                                      why='cannot open the dispatch lock ([Errno 13] Permission denied)'))
             step = self.one(rows)
-            self.assertEqual(step.reason, 'retry-wait: ' + (NOW+timedelta(minutes=1)).isoformat())
+            self.assertTrue(step.reason.startswith('retry-wait:')); self.assertEqual(step.retry_at, (NOW+timedelta(minutes=1)).isoformat())
             self.assertEqual(self.one(rows, now=NOW+timedelta(minutes=1)).action, action)
         self.signed('AC2-contention', asdict(step))
 
@@ -1441,22 +1442,22 @@ class GraderRetryTests(unittest.TestCase):
                     for second in (-1, 0):
                         step = self.one(rows, now=deadline+timedelta(seconds=second))
                         if n == 3:
-                            self.assertTrue(step.reason.startswith('exhausted: preparation failed'))
+                            self.assertTrue(step.reason.startswith('retries-exhausted: grader; 3 failed attempts; preparation failed'))
                         elif second == -1:
-                            self.assertEqual(step.reason, 'retry-wait: '+deadline.isoformat())
+                            self.assertTrue(step.reason.startswith('retry-wait:')); self.assertEqual(step.retry_at, deadline.isoformat())
                         else:
                             self.assertEqual(step.action, action)
                         self.assertEqual((step.trigger, step.since), (trigger['_src'], trigger['ts']))
                     h = attempts.history(ns._grader_history(rows)[0], trigger, 'grader', now=deadline)
                     self.assertEqual(h.n_failed, n)
                 late = event('evidence-bundle', -1, sha='tip')
-                self.assertTrue(self.one(rows+[late], now=NOW+timedelta(days=1)).reason.startswith('exhausted:'))
+                self.assertTrue(self.one(rows+[late], now=NOW+timedelta(days=1)).reason.startswith('retries-exhausted:'))
         for action in ('build', 'rebuild', 'review'):
             rows, role, trigger = VanishedRetryTests.fixture(self, action)
             for n, minute in ((1, -4), (2, -3), (3, -2)):
                 VanishedRetryTests.failure(self, rows, role, n, minute)
                 step = self.one(rows)
-                self.assertTrue(step.reason.startswith('retry exhausted:' if n == 3 else 'retry backoff:'))
+                self.assertTrue(step.reason.startswith('retries-exhausted:' if n == 3 else 'retry-wait:'))
                 if n < 3:
                     due = NOW+timedelta(minutes=minute+(5, 15)[n-1])
                     self.assertTrue(self.one(rows, now=due).reason.startswith('retry due:'))
@@ -1496,6 +1497,257 @@ class GraderRetryTests(unittest.TestCase):
             normalized, _ = ns._grader_history(rows+[marker, foreign])
             self.assertIn(marker, normalized)
         self.signed('AC2-conflict', dict(before=asdict(before), after=asdict(after)))
+
+
+class AttemptsRebuild1855Tests(unittest.TestCase):
+    def fixture(self, action):
+        written = event('spec-written', -240)
+        evs = [written, event('spawn-done', -240, role='spec-auditor', actor='spec-auditor', bad_cut=False)]
+        if action == 'rebuild':
+            evs += [event('build-blocked', -200), event('decision', -180, rework='yes')]
+        elif action == 'grade':
+            evs += [event('build-done', -180, actor='builder', status='DONE')]
+        elif action == 'regrade':
+            evs += [event('build-done', -200, actor='builder', status='DONE'),
+                    event('decision', -180, regrade='yes')]
+        elif action == 'review':
+            evs += [event('verdict', -180, actor='grader', confirmed=True)]
+        return evs
+
+    def one(self, evs, now=NOW, specs=None):
+        specs = specs or {SID: dict(state='written' if len(evs) == 2 else 'building')}
+        return ns.step_for(evs, specs, SID, now, lr.load())
+
+    def context(self, evs, now=NOW):
+        return dict(evs=evs, events=evs, sid=SID, now=now, dependency=None, wave=None,
+                    spec=dict(state='written'), busy=set(), capabilities={})
+
+    def evidence(self, name, body):
+        body = json.dumps(body, sort_keys=True, default=str)
+        print(json.dumps(dict(url='scratch://attempts-rebuild-1855/'+name, status=0,
+                              body_sha256=hashlib.sha256(body.encode()).hexdigest(), body_excerpt=body)))
+
+    def test_AC1(self):
+        import attempts
+        results = []
+        outputs = dict(builder=('build-done', 'build-blocked'), grader=('verdict', 'cannot-assess'), reviewer=('review',))
+        for action, role in [('build', 'builder'), ('rebuild', 'builder'), ('grade', 'grader'),
+                             ('regrade', 'grader'), ('review', 'reviewer')]:
+            base = self.fixture(action)
+            trigger = base[0] if action == 'build' else base[-1]
+            predicate = ns.PREDICATES[action]
+            variants = [('bare', [], True),
+                        ('marker-live', [event('autodispatched', -1, role=role, spawn='123')], False),
+                        ('marker-dead-due', [event('autodispatched', -100, role=role, spawn='123')], True),
+                        ('start', [event('spawn-started', -1, role=role, spawn='L-'+role+'-9191')], False),
+                        ('failed', [event('spawn-failed', -10, role=role, spawn='L-'+role+'-9191', reason='mystery')], True),
+                        ('parent-failed', [event('autodispatch-failed', -10, role=role, reason='mystery')], True),
+                        ('done-no-output', [event('spawn-done', -10, role=role, spawn='L-'+role+'-9191')], True),
+                        ('stale', [event('spawn-stale', -10, role=role, spawn='L-'+role+'-9191')], True),
+                        ('foreign-role', [event('autodispatched', -1, role='relay', spawn='123')], True),
+                        ('older', [event('spawn-started', -250, role=role, spawn='L-'+role+'-9191'),
+                                   event('spawn-failed', -10, role=role, spawn='L-'+role+'-9191', reason='older attempt')], True)]
+            variants += [(kind, [event(kind, -10)], False) for kind in outputs[role]]
+            variants += [(kind, [event(kind, -10)], False) for kind in ('queue-add', 'merge-gate-clean', 'shipped')]
+            for label, tail, expected in variants:
+                with self.subTest(action=action, variant=label):
+                    with patch.object(attempts, 'history', wraps=attempts.history) as spy:
+                        result = predicate(self.context(sorted(base + tail, key=lambda e: e['ts'])))
+                    self.assertEqual(bool(result), expected, result)
+                    if label in ('bare', 'marker-live', 'failed'):
+                        self.assertTrue(any(c.args[2] == role and c.args[1]['subject'] == SID
+                                            and c.args[1]['ts'] == trigger['ts'] for c in spy.call_args_list))
+                    results.append([action, label, bool(result)])
+            # The public reader must not strand an unknown worker failure.
+            step = self.one(base + [event('spawn-failed', -10, role=role,
+                                         spawn='L-'+role+'-9191', reason='unclassified worker exit')],
+                            specs={SID: dict(state='written' if action == 'build' else 'building')})
+            self.assertEqual(step.action, action, step)
+        for module in ('test_attempts', 'test_owner_drop_rework', 'test_lane_rules'):
+            run = subprocess.run(['/usr/bin/python3', '-m', 'unittest', module],
+                                 env=dict(os.environ, PYTHONPATH='src', PYTHONDONTWRITEBYTECODE='1'),
+                                 text=True, capture_output=True, cwd=ROOT)
+            self.assertEqual(run.returncode, 0, run.stdout[-1000:]+run.stderr[-5000:])
+        self.evidence('AC1', results)
+
+    def test_AC2(self):
+        import attempts
+        self.assertEqual((attempts.BACKOFF_MIN, attempts.MAX_ATTEMPTS), ((5, 15, 45), 3))
+        checked = []
+        for action, role in [('build', 'builder'), ('rebuild', 'builder'), ('grade', 'grader'),
+                             ('regrade', 'grader'), ('review', 'reviewer')]:
+            base = self.fixture(action)
+            trigger = base[0] if action == 'build' else base[-1]
+            fails = []
+            for n, minute, delay in [(1, -60, 5), (2, -40, 15), (3, -20, None)]:
+                fails.append(event('spawn-failed', minute, role=role, spawn='L-'+role+'-'+str(9190+n), reason='failure-'+str(n)))
+                if delay is not None:
+                    due = NOW + timedelta(minutes=minute+delay)
+                    before = self.one(base+fails, due-timedelta(microseconds=1))
+                    self.assertIsNone(before.action)
+                    self.assertIn('retry-wait', before.reason)
+                    self.assertIn(str(n), before.reason)
+                    self.assertIn(due.isoformat(), before.reason + str(before.clears))
+                    at = self.one(base+fails, due)
+                    self.assertEqual(at.action, action, at)
+                    later = self.one(base+fails+[event('note', -1)], NOW+timedelta(hours=1))
+                    self.assertEqual((at.trigger, at.since), (trigger['_src'], trigger['ts']))
+                    self.assertEqual((later.trigger, later.since), (at.trigger, at.since))
+                    checked.append(asdict(before))
+                else:
+                    stop = self.one(base+fails)
+                    self.assertIsNone(stop.action)
+                    self.assertIn('retries-exhausted', stop.reason)
+                    self.assertLess(stop.reason.index('failure-1'), stop.reason.index('failure-2'))
+                    self.assertLess(stop.reason.index('failure-2'), stop.reason.index('failure-3'))
+                    checked.append(asdict(stop))
+        self.evidence('AC2', checked)
+
+    def test_AC3(self):
+        from test_fold_stalls import admitted, row, outcome, SID as real_sid, NOW as cut
+        checked = []
+        for legacy in (False, True):
+            block = row('build-blocked', minute=0, spawn='L-builder-91909') if legacy else outcome('BLOCKED')
+            prefix = [row('spec-written', 'planner', minute=-20), row('build-started', minute=-10, spawn='L-builder-91909'),
+                      block, row('spawn-done', minute=1, role='builder', spawn='L-builder-91909')]
+            with admitted(prefix) as (_, events, folded):
+                self.assertEqual(folded[0][real_sid]['state'], 'building' if legacy else 'blocked')
+                block_src = next(e['_src'] for e in events if e['type'] == block[1]['type'])
+            for actor, kind, ref, expected in [
+                    ('thinker', 'unblocked', None, True), ('operator', 'unblocked', None, True),
+                    ('thinker', 'spec-amended', None, True), ('operator', 'spec-amended', None, True),
+                    ('executor', 'unblocked', block_src, True), ('executor', 'unblocked', None, False),
+                    ('executor', 'unblocked', 'stale:1', False), ('executor', 'spec-amended', block_src, False),
+                    ('builder', 'unblocked', block_src, False), ('grader', 'unblocked', block_src, False),
+                    ('reviewer', 'unblocked', block_src, False)]:
+                release = row(kind, actor, minute=2, **({'ref': ref} if ref else {}))
+                with self.subTest(legacy=legacy, actor=actor, kind=kind, ref=ref), admitted(prefix+[release]) as (_, events, folded):
+                    self.assertEqual(folded[0][real_sid]['state'], 'building' if legacy else 'blocked')
+                    steps = ns.next_steps(events, folded[0], cut, lr.load())
+                    step = ns.step_for(events, folded[0], real_sid, cut, lr.load())
+                    self.assertIn(step, steps)
+                    self.assertEqual(step.action == 'rebuild', expected, step)
+                    if expected:
+                        source = next(e['_src'] for e in events if e['type'] == kind)
+                        self.assertEqual((step.trigger, step.since, step.owner, step.stage),
+                                         (source, release[1]['ts'], 'tick', 'building'))
+                    checked.append(asdict(step))
+            for tail in ([row('unblocked', 'operator', minute=0)],
+                         [row('unblocked', 'operator', minute=-1)],
+                         [row('unblocked', 'operator', minute=2), outcome('DONE', minute=3)],
+                         [outcome('DONE', minute=2), row('unblocked', 'operator', minute=3)],
+                         [row('unblocked', 'operator', minute=2), row('spec-killed', 'operator', minute=3)]):
+                with admitted(prefix+tail) as (_, events, folded):
+                    self.assertFalse(any(s.item == real_sid and s.action == 'rebuild'
+                                         for s in ns.next_steps(events, folded[0], cut, lr.load())))
+        self.evidence('AC3', checked)
+
+
+class RetryRegressions1857Tests(unittest.TestCase):
+    def fixture(self, role):
+        helper=AttemptsRebuild1855Tests()
+        action={'builder':'build','grader':'grade','reviewer':'review'}[role]
+        evs=helper.fixture(action)
+        trigger=evs[0] if role=='builder' else evs[-1]
+        for i,minute in enumerate((-90,-70,-50)):
+            evs.append(event('spawn-failed',minute,role=role,spawn=f'L-{role}-{9900+i}',reason=f'failure-{i}'))
+        hold=event('escalation-blocking',-30,actor='tick',role=role,ref=trigger['_src'],
+                   owner='thinker',default='wait',deadline='2026-10-24T12:00:00Z',revert='nothing to revert')
+        hold.update(kind='retries-exhausted',_src='L-tick-retries.jsonl:1');evs.append(hold)
+        return evs,hold
+
+    def test_retry1857_AC2_authorized_release_matrix(self):
+        for role in ('builder','grader','reviewer'):
+            for actor in ('thinker','operator'):
+                for kind in ('decision','unblocked'):
+                    with self.subTest(role=role,actor=actor,kind=kind):
+                        evs,hold=self.fixture(role)
+                        release=event(kind,-20,actor=actor);release['_src']=f'L-{actor}-release.jsonl:1'
+                        evs.append(release)
+                        specs={SID:dict(state='written' if role=='builder' else 'building')}
+                        s=ns.step_for(evs,specs,SID,NOW,lr.load())
+                        self.assertEqual(s.state,'action',s)
+                        self.assertEqual((s.state,s.action,s.trigger,s.since,s.attempt),
+                            ('action',{'builder':'build','grader':'grade','reviewer':'review'}[role],release['_src'],release['ts'],1),s)
+                        self.assertEqual(s,next(x for x in ns.next_steps(evs,specs,NOW,lr.load()) if x.item==SID))
+                        failed=event('autodispatch-failed',-1,role=role,reason='fresh failure')
+                        again=ns.step_for(evs+[failed],specs,SID,NOW,lr.load())
+                        self.assertEqual((again.state,again.attempt),('hold',2));self.assertIn('retry-wait',again.reason)
+
+    def test_retry1857_AC2_unauthorized_and_historical_holds(self):
+        import tick
+        for kind in ('retries-exhausted','spawn-died-twice','spawn-redispatch-lapsed','spawn-redispatch-failed'):
+            for actor,minute,subject in [('builder',-20,SID),(None,-20,SID),('operator',-30,SID),('thinker',-40,SID),('operator',-20,'L-spec-9998')]:
+                with self.subTest(kind=kind,actor=actor,minute=minute,subject=subject):
+                    evs,hold=self.fixture('builder');hold.update(kind=kind,dead_spawn='L-builder-9902')
+                    release=event('unblocked',minute,subject=subject)
+                    release.pop('actor',None)
+                    if actor:
+                        release['actor']=actor;release['_src']=f'L-{actor}-release.jsonl:1'
+                    else: release.pop('_src',None)
+                    evs.append(release)
+                    s=ns.step_for(evs,{SID:dict(state='written')},SID,NOW,lr.load())
+                    self.assertEqual(s.state,'hold');self.assertIn(SID,tick.in_flight(evs))
+                    self.assertIn(SID,tick.handled_items([s]))
+
+    def test_retry1857_AC2_explicit_directives_keep_priority(self):
+        for action, role in [('rebuild','builder'),('regrade','grader')]:
+            for fields, expected in [(dict(close='superseded'),'close'),(dict(rework='yes'),'rebuild'),(dict(regrade='yes'),'regrade')]:
+                with self.subTest(action=action,fields=fields):
+                    evs=AttemptsRebuild1855Tests().fixture(action)
+                    trigger=evs[-1]
+                    for i,minute in enumerate((-90,-70,-50)):
+                        evs.append(event('spawn-failed',minute,role=role,spawn=f'L-{role}-{9900+i}',reason='crash'))
+                    hold=event('escalation-blocking',-30,actor='tick',role=role,ref=trigger['_src'])
+                    hold.update(kind='retries-exhausted',_src='L-tick-retries.jsonl:1');evs.append(hold)
+                    evs.append(event('decision',-20,**fields))
+                    step=ns.step_for(evs,{SID:dict(state='building')},SID,NOW,lr.load())
+                    self.assertEqual(step.action,expected,step)
+
+    def test_retry1857_AC1_ruling_exhaustion_stays_durable(self):
+        evs=AttemptsRebuild1855Tests().fixture('rebuild')
+        evs[-1]['action']='rework'
+        for i,minute in enumerate((-90,-70,-50)):
+            evs.append(event('spawn-failed',minute,role='builder',spawn=f'L-builder-{9900+i}',reason='crash'))
+        step=ns.step_for(evs,{SID:dict(state='building')},SID,NOW,lr.load())
+        self.assertTrue(step.reason.startswith('retries-exhausted:'),step)
+        self.assertEqual((step.state,step.attempt),('hold',3))
+
+    def test_retry1857_AC1_pregrade_preserves_retry_hold_reason(self):
+        for kind in ('precheck-red','merge-conflict'):
+            for minutes,prefix,attempt in [((-4,),'retry-wait:',2),
+                                          ((-90,-70,-50),'retries-exhausted:',3)]:
+                with self.subTest(kind=kind,prefix=prefix):
+                    evs=[event('spec-written',-240),
+                         event('build-done',-230,status='DONE',ready_sha='built'),
+                         event(kind,-220,layer='pregrade',branch_sha='built',
+                               tests=['tests/a.py::test_a'],path='a.py')]
+                    for i,minute in enumerate(minutes):
+                        evs.append(event('spawn-failed',minute,role='builder',
+                                         spawn=f'L-builder-{9900+i}',reason='crash'))
+                    step=ns.step_for(evs,{SID:dict(state='building')},SID,NOW,lr.load())
+                    self.assertTrue(step.reason.startswith(prefix),step)
+                    self.assertIn('a.py',step.reason)
+                    self.assertEqual((step.state,step.attempt),('hold',attempt))
+
+    def test_retry1857_AC3_step_metadata_and_coverage(self):
+        for role,action in [('builder','build'),('grader','grade'),('reviewer','review')]:
+            helper=AttemptsRebuild1855Tests();evs=helper.fixture(action)
+            first=helper.one(evs)
+            self.assertEqual((first.attempt,first.retry_at),(1,None))
+            evs.append(event('spawn-failed',-4,role=role,spawn=f'L-{role}-9991',reason='crash'))
+            waiting=helper.one(evs)
+            self.assertEqual(waiting.state,'hold');self.assertEqual(waiting.attempt,2)
+            self.assertEqual(waiting.retry_at,(NOW+timedelta(minutes=1)).isoformat())
+        self.assertGreater(unittest.defaultTestLoader.loadTestsFromTestCase(AttemptsRebuild1855Tests).countTestCases(),0)
+        for module, pattern in [('test_attempts','*retry1672_AC9*'), ('test_worktree_heal','*AC1*'), ('test_lane_driver','*worktree*')]:
+            script = ('import importlib,unittest,sys; unittest.defaultTestLoader.testNamePatterns=[sys.argv[2]]; '
+                      's=unittest.defaultTestLoader.loadTestsFromModule(importlib.import_module(sys.argv[1])); '
+                      'assert s.countTestCases()>0; print(sys.argv[1],s.countTestCases()); '
+                      'sys.exit(not unittest.TextTestRunner().run(s).wasSuccessful())')
+            result=subprocess.run([sys.executable,'-c',script,module,pattern],env=dict(os.environ,PYTHONPATH=str(ROOT/'src')),
+                                  capture_output=True,text=True,timeout=120)
+            self.assertEqual(result.returncode,0,result.stdout+result.stderr)
 
 
 if __name__ == '__main__':
