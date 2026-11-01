@@ -327,7 +327,7 @@ def AC7():
     old = dict(type="spec-written", subject="old", ts=(NOW-timedelta(days=4)).isoformat())
     assert not sp._eligible("old", [old], NOW)
     bodies = []
-    with mock.patch.object(sp, "_append", side_effect=lambda root, body: bodies.append(body)):
+    with mock.patch.object(sp, "_append", side_effect=lambda root, body, **kwargs: bodies.append(body)):
         assert sp.tick(root=f.root, now=NOW) == 0
     assert [b["spec"] for b in bodies] == [f"L-spec-{9100+i}" for i in range(4, 8)], bodies
 
