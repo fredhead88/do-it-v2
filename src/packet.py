@@ -1019,6 +1019,8 @@ def p_grader(c):
     rejected = fold.standing_rejects(c.evs)
     owed = ({e["criterion"] for e in c.all_of("owed-ac")} | set(fold.routed_criteria(c.evs, c.a.subject)) | set(routing.ruled_criteria(c.evs, c.a.subject))) - rejected
     crit = _drop_owed_blocks(criteria(body), owed)
+    if not _criterion_spans("\n".join(crit), allow_bullets=True):
+        die(f"empty grader criteria for {c.a.subject}: all criteria routed or absent")
     rows = [l for l in card.read_text().splitlines() if AC_ROW.match(l)]
     # The sidecar carries every row; older cards fall back to the capped render.
     side, sidecar = card.with_suffix(".json"), {}
@@ -1063,20 +1065,18 @@ def p_grader(c):
     lines = body.split("\n")
     # Independently read the source ranges: criteria() itself may have cut one.
     for cid, start, end in _criterion_spans(body):
-        if cid not in owed and "\n".join(lines[start:end]) not in item1:
+        expected = grader_packet.source_text(c, "\n".join(lines[start:end]))
+        if cid not in owed and _redact_base_shas(_redact_builder_spawn(expected), shas) not in item1:
             die(f"incomplete criterion {cid} from {spec}")
     return out
-
 def _subject_base_shas(c):
     s = (getattr(c, "specs", {}) or {}).get(c.a.subject) or {}
     return {e["base_sha"] for e in s.get("evs", [])
             if e.get("type") == "build-done" and re.fullmatch(r"[0-9a-f]{40}", e.get("base_sha") or "")}
-
 def _redact_base_shas(text, shas):
     for sha in shas:
         text = re.sub(r"\b" + sha[:7] + r"[0-9a-f]{0,33}\b", "[base commit]", text)
     return text
-
 _BUILDER_SPAWN_RE = re.compile(r"\bL-builder-\d+\b")
 
 def _redact_builder_spawn(text):
@@ -1406,7 +1406,6 @@ def builder_cues(c):
     out += [("a declared deviation", e.get("what")) for e in c.all_of("build-deviation")]
     return out
 
-
 def grader_reasons(c):
     return ([("the grader's reason", e.get("why")) for e in c.all_of("rejected-criterion")]
             + [("a prior audit finding", e.get("finding")) for e in c.all_of("audit-finding")])
@@ -1514,8 +1513,9 @@ def main(argv=None):
     ap.add_argument("--round", default="1")
     a = ap.parse_args(argv)
 
+    import spec_history
     c = Ctx(a)
-    text = "\n".join(x for x in BUILD[a.role](c) if x) + "\n"
+    text = "\n".join(x for x in spec_history.packet_items(c, BUILD[a.role](c)) if x) + "\n"
     hit = [(w, s) for w, s in strip(c, a.role) if s and str(s) in text]
     if hit:
         die("REFUSED — the packet carries what {}'s Blindness strips: {}".format(

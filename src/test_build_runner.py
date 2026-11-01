@@ -511,7 +511,7 @@ class BuildRunnerTests(unittest.TestCase):
         output = bytes(range(256)) * 781 + bytes(range(64))  # exactly 200000 bytes
         self.spec("python3 -c 'import sys;sys.stdout.buffer.write(bytes(range(256))*781+bytes(range(64)))'")
         bundle, path = self.bundle()
-        self.assertEqual(set(bundle), {"spec", "project", "sha", "base_sha", "runner_version", "started_at",
+        self.assertEqual(set(bundle), {"spec", "project", "sha", "base_sha", "spec_sha256", "runner_version", "started_at",
                                        "env", "rewrites", "commands", "base", "comparison", "judgment_only"})
         self.assertRegex(bundle["started_at"], r"^\d{4}-\d\d-\d\dT")
         self.assertTrue(bundle["runner_version"])

@@ -1,5 +1,6 @@
 """Read runner evidence for a blind grader; never execute bundle commands."""
 import hashlib
+import evidence_revision
 import json
 import os
 import pathlib
@@ -39,6 +40,8 @@ def bundle_for(events, subject, ready_sha):
     if not event:
         return None
     try:
+        if not evidence_revision.current(events, subject, event):
+            return None
         build = _latest(events, subject, 'build-done')
         if build and (build.get('ready_sha') != ready_sha
                       or datetime.fromisoformat(event['ts'].replace('Z', '+00:00'))
@@ -52,6 +55,10 @@ def bundle_for(events, subject, ready_sha):
         data = json.loads(raw)
         if data["spec"] != subject or data["sha"] != ready_sha:
             return None
+        if data.get("spec_sha256") is not None:
+            text = (root() / "content" / f"{subject}.md").read_text()
+            if data["spec_sha256"] != evidence_revision.digest(text):
+                return None
         if not isinstance(data["commands"], list) or not isinstance(data["comparison"], dict):
             return None
         tails = []
@@ -96,7 +103,14 @@ def redact(text, build):
     return re.sub(r"\bL-builder-\d+\b", "[this build]", text)
 
 
+def source_text(context, text):
+    """Use exactly the packet's blindness normalization in its completeness proof."""
+    build = getattr(context, '_grader_redaction', None)
+    return redact(text, build) if build else text
+
+
 def packet_items(context, items):
+    context._grader_redaction = None
     build = context.last("build-done") or {}
     bundle = bundle_for(context.evs, context.a.subject, build.get("ready_sha"))
     if bundle is None:
@@ -105,6 +119,7 @@ def packet_items(context, items):
     checkout = root() / "repos" / context.project()
     items += sections(bundle, checkout)
     build = {**build, "base_sha": bundle["bundle"]["base_sha"]}
+    context._grader_redaction = build
     return [redact(line, build) for line in items]
 
 
@@ -121,6 +136,7 @@ def gate(events, subject, packet, emit, fail):
                      or build.get('ts') and e.get('ts')
                      and datetime.fromisoformat(e['ts'].replace('Z', '+00:00'))
                      > datetime.fromisoformat(build['ts'].replace('Z', '+00:00')))]
+    evidence = [e for e in evidence if evidence_revision.current(events, subject, e)]
     bundle_event = _latest(evidence, subject, "evidence-bundle", ready)
     failed = _latest(evidence, subject, "evidence-bundle-failed", ready)
     # Ledger order breaks timestamp ties, matching the fold's latest-event rule.

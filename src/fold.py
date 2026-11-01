@@ -2304,12 +2304,7 @@ def render(events, specs, charters, ignored, by_subject):
 
 
 def subject_project(subject):
-    """A subject's project is whatever its own first event said. The caller's cwd
-    is a last resort — a script run from a different directory than the one that
-    filed the charter must not strand its events under a second project label,
-    invisible to §9.1/D93's filtered board."""
-    return next((e["project"] for e in read_events()
-                 if e.get("subject") == subject and e.get("project")), None)
+    return __import__('project_scope').subject_project(read_events(), subject)
 
 
 def ledger_path(inbox: bool = False) -> pathlib.Path:
@@ -2385,6 +2380,7 @@ def append(argv: list[str], strict: bool = False) -> dict:
             if suggestions:
                 print(f"mint: {slug!r} is new — near-duplicate slug(s): {', '.join(suggestions)}",
                       file=sys.stderr)
+    __import__('project_scope').check_inferred(ROOT, e, PROJECT, argv[2:])
     path.parent.mkdir(parents=True, exist_ok=True)
     line = json.dumps(e, sort_keys=True)
     with open(path, "ab+") as fh:

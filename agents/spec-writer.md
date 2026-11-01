@@ -47,7 +47,9 @@ Run each. Record what it found in `Assumptions[]`, or kill the spec.
    picker — and list in the spec the paths covered and the paths consciously
    excluded. Scope to the capability, not to the path named in the prompt.
 5. **Recent history and concurrent work** on every file to be touched. Thirty
-   days of history; anything in the last seven, read the diff and state how
+   days of history and seven-day patches are precomputed in your packet. Read
+   that evidence; never parse Git objects, pack files, or reimplement Git. If
+   unavailable/truncated, request corrected history evidence. State how
    this interacts; two recent commits on the same lines, record it and pause.
    Query open specs whose footprint intersects yours, in any charter, and
    record what you are written against in `Assumptions[]` — history is blind

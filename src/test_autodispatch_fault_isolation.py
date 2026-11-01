@@ -57,6 +57,7 @@ class Scratch(unittest.TestCase):
         temp = tempfile.TemporaryDirectory(prefix='fault-isolation-')
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name)
+        (self.root / 'repos' / Path.cwd().name).mkdir(parents=True)
         for part in ('events', 'content', 'seat', 'sessions', 'projects'):
             (self.root / part).mkdir()
         for module, names in ((fold, ('ROOT', 'EVENTS')),

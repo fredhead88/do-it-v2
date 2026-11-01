@@ -1686,10 +1686,12 @@ assert TOKEN_8034P not in t_44_grader and "AC2 [ui] built" not in t_44_grader
 assert "AC1 [backend] built" in t_44_grader and "AC3 [backend] built" in t_44_grader
 ev("operator", "decision", "L-spec-9460", criteria="AC1, AC3", why="Evidence accepted.", evidence="evidence/9460-all.json",
    ts=(fold.NOW + fold.timedelta(seconds=2)).isoformat())
-t_44_all = build("grader", "L-spec-9460", worktree=str(REPO))
-for cid in ("AC1", "AC3"):
-    assert f"{cid}: ruled met by the operator: Evidence accepted., evidence evidence/9460-all.json" in t_44_all
-    assert f"{cid} [backend] built" not in t_44_all
+try:
+    build("grader", "L-spec-9460", worktree=str(REPO))
+except SystemExit as exc:
+    assert "empty grader criteria" in str(exc), exc
+else:
+    raise AssertionError("all-ruled grader packet accepted")
 print("W44 ruled packet carries decisions and evidence; unruled blocks unchanged")
 
 # AC11 · p_reviewer lists the to=reviewer criterion by id and text (item 10)
@@ -2161,3 +2163,14 @@ def test_blocked_conflicts():
 
 
 test_blocked_conflicts()
+
+# Factory: an all-routed packet must refuse before a grader seat is spent.
+from unittest.mock import patch
+with patch.object(fold, 'routed_criteria', return_value={'AC1': 'owed'}):
+    try:
+        packet.p_grader(c437a)
+    except SystemExit as exc:
+        assert 'empty grader criteria' in str(exc), exc
+    else:
+        raise AssertionError('all-routed grader packet accepted')
+print('PASS factory all-routed packet refusal')

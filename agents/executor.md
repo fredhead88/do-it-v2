@@ -405,6 +405,13 @@ record is this conversation would be the one thing a restart cannot recover —
 which is why the append comes first and the handover is a ledger event, not a
 channel.
 
+Before every first builder dispatch, run `doit readiness L-spec-NNNN --project PROJECT --base FULL_SHA`
+against the same resolved base used by the builder packet. The tick launch path
+runs this gate automatically. A nonzero result spends no builder seat: a unique
+producer gets a validated single-id dependency hold; missing/ambiguous inputs,
+coupled tests outside Writes, unavailable dependencies, or a failing base
+Verification chain bounce as spec-shape-failed for the writer to correct.
+
 ## Lessons (operator rule, 2026-09-22)
 
 The system is being dialled in, and the record of what to change is the ledger, not anyone's

@@ -148,6 +148,8 @@ class DriverTests(unittest.TestCase):
                 self.calls.clear()
                 tick.tick_path().unlink(missing_ok=True)
                 self.run_steps([self.step(action)])
+                if role == 'builder':
+                    self.assertEqual(self.calls.pop(0)[:2], ['doit', 'readiness'])
                 self.assertEqual(self.calls[0][:4], ['doit', 'packet', role, self.sid])
                 self.assertEqual(self.calls[1][:5], ['doit', 'dispatch', '--detach', role, self.sid])
                 if role == 'grader':
@@ -164,7 +166,7 @@ class DriverTests(unittest.TestCase):
                 self.worktree.mkdir()
             return self.runner(argv)
         tick.run_steps(self.events, self.specs, self.now, dispatcher=runner, steps=[self.step('build')])
-        self.assertEqual([a[0] for a in self.calls], ['git', 'git', 'git', 'doit', 'doit'])
+        self.assertEqual([a[0] for a in self.calls], ['git', 'git', 'git', 'doit', 'doit', 'doit'])
         self.assertEqual(self.calls[2][-5:], ['add', str(self.worktree), '-b', self.sid.lower(), 'master'])
         rows = fold.read_events(use_cache=False)
         self.assertCountEqual([e['type'] for e in rows], ['resource-created', 'autodispatched'])
@@ -367,6 +369,8 @@ class R7Fixture:
         if argv[0] == 'git':
             result = subprocess.run(argv, capture_output=True, text=True)
             return dict(code=result.returncode, stdout=result.stdout, stderr=result.stderr)
+        if argv[:2] == ['doit', 'readiness']:
+            return dict(code=0, stdout='readiness fixture accepted', stderr='')
         if argv[:2] == ['doit', 'packet']:
             try:
                 path = packet.main(argv[2:])
@@ -419,7 +423,7 @@ class R7PinCallerTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'packet refused'):
                     lane_driver._dispatch('builder', f.sid, 'proj', None, failed)
                 self.assertEqual(len(calls), 1)
-                self.assertEqual(calls[0][:2], ['doit', 'packet'])
+                self.assertEqual(calls[0][:2], ['doit', 'readiness'])
                 r7_evidence('AC1-failures', dict(case=case, resolver_dispatches=0, packet_dispatches=0))
 
 

@@ -129,7 +129,11 @@ def _caps_plain(text):
         found.add("env-file")
     if any(tok in text for tok in _DB_TOKENS):
         found.update(("db", "db-schema"))
-    if any(tok in text for tok in _BROWSER_TOKENS):
+    # Repository-review boilerplate names runner output, not a browser target.
+    browser_text = re.sub(
+        r"log in as repository reviewer\b(?!\s+at\s+https?://)",
+        "", text, flags=re.I)
+    if any(tok in browser_text.lower() for tok in _BROWSER_TOKENS):
         found.update(("browser", "review-account"))
     return found
 
