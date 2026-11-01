@@ -22,6 +22,7 @@ import time
 import base_red
 import checks
 import fold
+import evidence_revision
 import grader_view
 import grading_env
 import node_modules
@@ -509,9 +510,10 @@ def run(spec, requested_sha=None, criteria=None):
         done = next((e for e in reversed(events) if e["type"] == "build-done"), {})
         sha = _resolve(repo, requested_sha or done.get("ready_sha"), env, deadline)
         key = "all" if criteria is None else hashlib.sha256(",".join(sorted(criteria)).encode()).hexdigest()[:8]
-        path = fold.ROOT / "content" / "evidence" / spec / f"{sha[:12]}-{key}.json"
+        text = (fold.ROOT / "content" / f"{spec}.md").read_text()
+        revision = evidence_revision.cache_key(text, events, spec, done)
+        path = fold.ROOT / "content" / "evidence" / spec / f"{sha[:12]}-{key}-{revision}.json"
         if criteria is not None:
-            text = (fold.ROOT / "content" / f"{spec}.md").read_text()
             if _missing_production_data(text, project, criteria, repo, sha, env, deadline):
                 raise ProductionDataUnavailable(PROD_DATA_UNAVAILABLE)
         locks = fold.ROOT / "evidence" / "locks"
@@ -527,7 +529,6 @@ def run(spec, requested_sha=None, criteria=None):
             base_sha = _required(["git", "-C", str(repo), "merge-base", sha, "origin/" + main],
                                  phase="merge base", env=env, deadline=deadline)
             base_sha = _resolve(repo, base_sha, env, deadline)
-        text = (fold.ROOT / "content" / f"{spec}.md").read_text()
         commands, judgment = _commands(text, project, criteria)
         tails = path.with_suffix("")
         tails.mkdir(parents=True)
@@ -545,6 +546,7 @@ def run(spec, requested_sha=None, criteria=None):
             base, base_logs, missing = [], [], []
         comparison = _compare(project, base_sha, tip, base, tip_logs, base_logs, missing)
         bundle = {"spec": spec, "project": project, "sha": sha, "base_sha": base_sha,
+                  "spec_sha256": evidence_revision.digest(text),
                   "runner_version": VERSION, "started_at": started, "env": summary,
                   "rewrites": rewrites, "commands": tip, "base": base,
                   "comparison": comparison, "judgment_only": judgment}
