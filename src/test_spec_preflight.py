@@ -367,7 +367,7 @@ def AC10():
     selected = [r for r in rows if r["name"] == "spec-preflight"]
     assert len(selected) == 1
     row = selected[0]
-    for k, value in dict(where="user", schedule="*/5 * * * *", path="/usr/bin/python3",
+    for k, value in dict(where="user", schedule="4,9,14,19,24,29,34,39,44,49,54,59 * * * *", path="/usr/bin/python3",
                          max_runtime_s=3300, owner="thinker", project="do-it-v2").items():
         assert row[k] == value
     assert "cron-run spec-preflight --" in row["command"]

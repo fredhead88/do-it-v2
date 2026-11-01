@@ -7,7 +7,7 @@ or writes the real `/etc/cron.d`, and never touches the real `$DOIT_ROOT` —
 every fixture is a temp file/dir passed via `manifest=`/`crontab_path=`/
 `crond_dir=`.
 """
-import contextlib, io, os, pathlib, re, subprocess, sys, tempfile
+import contextlib, io, os, pathlib, re, subprocess, sys, tempfile, tomllib
 
 TMP = pathlib.Path(tempfile.mkdtemp(prefix="crons-test-"))
 os.environ["HOME"] = str(TMP / "home")
@@ -317,7 +317,7 @@ check(all(r["reason"] == "absent" for r in res5), f"AC5: every entry is absent: 
 check(len(res5) == len(base_missing) + 15, f"AC5: thirteen additions and verify-owed retired: {res5}")
 seat = next(row for row in r1 if row["name"] == "seat-usage")
 check(seat == {
-    "name": "seat-usage", "where": "user", "schedule": "*/15 * * * *",
+    "name": "seat-usage", "where": "user", "schedule": "12,27,42,57 * * * *",
     "command": f"{REAL_MANIFEST.parent}/doit cron-run seat-usage -- "
                f"{REAL_MANIFEST.parent}/doit seat-usage >> {fold.ROOT}/logs/seat-usage.log 2>&1",
     "path": str(REAL_MANIFEST.parent / "doit"), "sig": r"\bdoit seat-usage\b",
@@ -688,5 +688,105 @@ crond_r14ac16.mkdir()
 unwrapped_r14ac16 = crons.unwrapped(crontab_text=text_r14ac16, crond_dir=str(crond_r14ac16))
 check("tick" not in unwrapped_r14ac16, f"R14-AC16: tick is no longer reported unwrapped: {unwrapped_r14ac16}")
 print("R14-AC16 ok")
+
+# L1967-AC1/AC2: start-minute smoothing, at DOIT_TICK_MIN=5 only.
+# Expand independently of crons.interval_s, including the midnight gap.
+def _daily_starts(schedule):
+    minute, hour, dom, month, dow = schedule.split()
+    check((hour, dom, month, dow) == ("*", "*", "*", "*"),
+          f"L1967: hourly fixture required: {schedule}")
+    minutes = (list(range(0, 60, int(minute[2:]))) if minute.startswith("*/")
+               else [int(value) for value in minute.split(",")])
+    return [hour * 60 + minute for hour in range(24) for minute in minutes]
+
+
+raw1967 = {r["name"]: r for r in tomllib.loads(REAL_MANIFEST.read_text())["row"]}
+rows1967 = {r["name"]: r for r in crons.rows(str(REAL_MANIFEST))}
+schedules1967 = {
+    "spec-preflight": "4,9,14,19,24,29,34,39,44,49,54,59 * * * *",
+    "pace-sample": "8,18,28,38,48,58 * * * *",
+    "seat-usage": "12,27,42,57 * * * *",
+}
+tmp_schedules1967 = {
+    5: "1,6,11,16,21,26,31,36,41,46,51,56 * * * *",
+    15: "1,16,31,46 * * * *",
+}
+check(raw1967["tick"]["schedule"] == "*/{tick_min} * * * *",
+      "L1967-AC1: tick retains its raw template")
+for name, schedule in schedules1967.items():
+    check(rows1967[name]["schedule"] == schedule,
+          f"L1967-AC1: exact {name} schedule: {rows1967[name]['schedule']}")
+check(rows1967["tmp-reaper"]["schedule"] in tmp_schedules1967.values(),
+      f"L1967-AC1: tmp-reaper keeps the builder-base period: {rows1967['tmp-reaper']['schedule']}")
+for period, tmp_schedule in tmp_schedules1967.items():
+    fixture = {**schedules1967, "tmp-reaper": tmp_schedule}
+    starts = {name: _daily_starts(schedule) for name, schedule in fixture.items()}
+    starts["tick"] = _daily_starts("*/5 * * * *")
+    for name, schedule in fixture.items():
+        expected_period = {"spec-preflight": 5, "tmp-reaper": period,
+                           "pace-sample": 10, "seat-usage": 15}[name]
+        fires = starts[name]
+        gaps = [b - a for a, b in zip(fires, fires[1:] + [fires[0] + 1440])]
+        check(set(gaps) == {expected_period},
+              f"L1967-AC1: {name} period including midnight: {gaps}")
+        check(crons.interval_s(schedule) == expected_period * 60,
+              f"L1967-AC1: interval_s({schedule!r})")
+        check(all(minute % 5 for minute in fires),
+              f"L1967-AC2: {name} avoids tick minutes")
+    collisions = {minute: [name for name, fires in starts.items() if minute in fires]
+                  for minute in range(1440)
+                  if sum(minute in fires for fires in starts.values()) > 1}
+    check(not collisions, f"L1967-AC2: tmp period {period}: {collisions}")
+    print(f"L1967-AC1/AC2: tmp period {period}; intervals preserved; collisions={collisions}")
+
+# L1967-AC3: the real installer writes only disposable crontab files.
+d1967 = TMP / "l1967-install"
+d1967.mkdir()
+crond1967 = d1967 / "cron.d"
+crond1967.mkdir()
+unrelated1967 = ["# unrelated fixture", "SHELL=/bin/sh", "23 * * * * echo keep"]
+base_schedules1967 = {"spec-preflight": "*/5 * * * *", "tmp-reaper": "*/5 * * * *",
+                      "pace-sample": "*/10 * * * *", "seat-usage": "*/15 * * * *"}
+for name, base_schedule in base_schedules1967.items():
+    row = rows1967[name]
+    expected_line = crons.print_line(name, str(REAL_MANIFEST))
+    old_line = f"{base_schedule} {row['command']}"
+    for kind in ("tagged", "untagged", "commented-tagged"):
+        previous = old_line
+        if kind != "untagged":
+            previous += f"  # doit-cron:{name}"
+        if kind == "commented-tagged":
+            # Current installer behavior re-arms a paused tagged line.
+            # Pre-ship Notes require that none of these four rows is paused live.
+            previous = "# PAUSED fixture " + previous
+        fixture_path = d1967 / f"{name}-{kind}"
+        fixture_path.write_text("\n".join(unrelated1967[:2] + [previous] + unrelated1967[2:]) + "\n")
+        result = crons.install(name, manifest=str(REAL_MANIFEST), crontab_path=str(fixture_path))
+        check(result["ok"] and result["action"] == "replaced",
+              f"L1967-AC3: {name}/{kind} replaced: {result}")
+        text = fixture_path.read_text()
+        lines = text.splitlines()
+        matching = [line for line in lines if not line.lstrip().startswith("#")
+                    and re.search(row["sig"], line)]
+        check(matching == [expected_line] and expected_line.startswith(row["schedule"] + " "),
+              f"L1967-AC3: {name}/{kind} exactly one new line: {lines}")
+        check(text.encode() == ("\n".join(unrelated1967[:2] + [expected_line] + unrelated1967[2:]) + "\n").encode(),
+              f"L1967-AC3: {name}/{kind} unrelated bytes and order preserved: {lines}")
+        check(not any(r["name"] == name and r["reason"] == "absent"
+                      for r in crons.check(manifest=str(REAL_MANIFEST), crontab_text=text,
+                                           crond_dir=str(crond1967))),
+              f"L1967-AC3: {name}/{kind} detected after independent readback")
+        print(f"L1967-AC3: {name}/{kind}: replaced; one live line; unrelated bytes preserved")
+paused1967 = "# PAUSED by Thinker 2026-10-19 " + crons.print_line("ci-shadow", str(REAL_MANIFEST))
+paused_path1967 = d1967 / "paused-ci-shadow"
+paused_path1967.write_text(paused1967 + "\n")
+for name in base_schedules1967:
+    crons.install(name, manifest=str(REAL_MANIFEST), crontab_path=str(paused_path1967))
+paused_lines1967 = paused_path1967.read_text().splitlines()
+check(paused_lines1967.count(paused1967) == 1,
+      "L1967-AC3: paused ci-shadow remains byte-identical")
+check(not any(not line.lstrip().startswith("#") and re.search(rows1967["ci-shadow"]["sig"], line)
+              for line in paused_lines1967), "L1967-AC3: ci-shadow remains paused")
+print("L1967-AC3: paused ci-shadow preserved")
 
 print(f"crons: {N} checks pass")

@@ -97,10 +97,12 @@ class Tests(unittest.TestCase):
             (root / 'worktrees').symlink_to(root / 'outside', target_is_directory=True)
             self.assertEqual(r.run([], root=root)[0]['reason'], 'outside root allowlist')
     def test_cron_cadence(self):
+        import crons
         import tomllib
         doc = tomllib.loads((pathlib.Path(__file__).resolve().parent.parent / 'crons.toml').read_text())
         rows = {r['name']: r for r in doc['row']}
-        self.assertEqual(rows['worktree-reaper']['schedule'], rows['tmp-reaper']['schedule'])
+        self.assertLessEqual(crons.interval_s(rows['worktree-reaper']['schedule']),
+                             crons.interval_s(rows['tmp-reaper']['schedule']))
         self.assertIn('cron-run worktree-reaper -- {doit} reap-worktrees', rows['worktree-reaper']['command'])
 
     def test_dispatch_help(self):

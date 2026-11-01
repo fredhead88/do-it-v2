@@ -46,7 +46,7 @@ project = "do-it-v2"
 [[row]]
 name = "tmp-reaper"
 where = "user"
-schedule = "*/5 * * * *"
+schedule = "1,6,11,16,21,26,31,36,41,46,51,56 * * * *"
 command = "{doit} cron-run tmp-reaper -- {doit} reap-tmp"
 path = "{doit}"
 sig = '\bdoit reap-tmp\b'
@@ -211,7 +211,7 @@ project = "do-it-v2"
 [[row]]
 name = "seat-usage"
 where = "user"
-schedule = "*/15 * * * *"
+schedule = "12,27,42,57 * * * *"
 command = "{doit} cron-run seat-usage -- {doit} seat-usage >> {root}/logs/seat-usage.log 2>&1"
 path = "{doit}"
 sig = '\bdoit seat-usage\b'
@@ -274,7 +274,7 @@ project = "do-it-v2"
 [[row]]
 name = "pace-sample"
 where = "user"
-schedule = "*/10 * * * *"
+schedule = "8,18,28,38,48,58 * * * *"
 command = "{doit} cron-run pace-sample -- /usr/bin/python3 {repo}/src/pace.py sample >> {root}/logs/pace-sample.log 2>&1"
 path = "/usr/bin/python3"
 sig = 'pace\.py\s+sample\b'
@@ -296,7 +296,7 @@ max_runtime_s = 1800
 [[row]]
 name = "spec-preflight"
 where = "user"
-schedule = "*/5 * * * *"
+schedule = "4,9,14,19,24,29,34,39,44,49,54,59 * * * *"
 command = "{doit} cron-run spec-preflight -- /usr/bin/python3 {repo}/src/spec_preflight.py tick >> {root}/logs/spec-preflight.log 2>&1"
 path = "/usr/bin/python3"
 sig = 'spec_preflight\.py\s+tick\b'
