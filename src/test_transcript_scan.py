@@ -145,11 +145,20 @@ def environment(root, mode):
             os.environ.update(env)
 
 
-def normalize(value):
+def normalize(value, *, root=None):
     if isinstance(value, dict):
-        return {k: normalize(v) for k, v in value.items() if k not in ('ts', 'measured_at', 'last_pass')}
+        result = {k: normalize(v, root=root) for k, v in value.items()
+                  if k not in ('ts', 'measured_at', 'last_pass')}
+        if root is not None and result.get('digest_path'):
+            # Validate the intentional link, then normalize it for parity.
+            path = pathlib.Path(result['digest_path'])
+            assert path.parent == root / 'look/digests'
+            stable = '<root>/look/digests/' + path.name
+            result['why'] = result['why'].replace(result['digest_path'], stable)
+            result['digest_path'] = stable
+        return result
     if isinstance(value, list):
-        return [normalize(v) for v in value]
+        return [normalize(v, root=root) for v in value]
     return value
 
 
@@ -161,7 +170,7 @@ def run_fixture(root, events, mode):
     persisted = [json.loads(line) for line in ledger.read_text().splitlines()] if ledger.exists() else []
     state = json.loads((root / 'look/state.json').read_text())
     compared = normalize(dict(result={k: result[k] for k in ('briefs', 'answered', 'wallclock')},
-                              ledger=persisted, state=state))
+                              ledger=persisted, state=state), root=root)
     assert str(root) not in json.dumps(compared)
     return compared, result
 
@@ -187,7 +196,7 @@ def direct(root, path, events, mode):
                 for p in (root / 'events/L-look-local.jsonl', root / 'look/state.json'):
                     p.unlink(missing_ok=True)
             status = outcome(invoke)[0]
-            outputs.append(normalize([status, rows, und, state, tally]))
+            outputs.append(normalize([status, rows, und, state, tally], root=root))
     return outputs
 
 
@@ -283,7 +292,8 @@ def ac2():
         assert old_result['transcripts_read'] == new_result['transcripts_read']
         assert any(row.get('type') == 'pane-paused' for row in new['result']['wallclock'])
         assert any(row.get('type') == 'message-answered' for row in new['result']['wallclock'])
-        assert any(row.get('reading', {}).get('class') == 'menu' for row in new['result']['briefs'])
+        assert any(item.get('reading', {}).get('class') == 'menu'
+                   for row in new['result']['briefs'] for item in row.get('items', [row]))
     for case in CASES:
         if case[0] == 'mode000' and os.geteuid() == 0:
             print('mode 000 skipped: euid 0 can read it')
@@ -346,7 +356,7 @@ def ac3():
                 _, peak = tracemalloc.get_traced_memory()
                 tracemalloc.stop()
             measured[mode] = peak
-            results.append(normalize([rows, und, state]))
+            results.append(normalize([rows, und, state], root=root))
         assert results[0] == results[1], check
         if check == 'quota':
             assert len(results[0][0]) == 1 and results[0][0][0]['resets_at'] == 'end'
@@ -400,7 +410,8 @@ def ac4():
             assert not calls and tally['transcripts_skipped'] == reads
             assert tally['transcript_fallbacks'] == {'count': 0, 'classes': ['RuntimeError']}
             assert not compared['result']['wallclock']
-            assert any(b['key'] == 'undetermined:message-answered' for b in compared['result']['briefs'])
+            assert any(item['key'] == 'undetermined:message-answered'
+                       for b in compared['result']['briefs'] for item in b.get('items', [b]))
         runs[mode] = (compared, tally)
     assert runs['legacy'][0] == runs['scan'][0] == runs['fault'][0] == runs['import'][0]
     # Normal read/decode/predicate errors never invoke the legacy readers.

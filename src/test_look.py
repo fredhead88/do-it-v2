@@ -174,7 +174,10 @@ class FakeRunner:
 
 
 def briefs_of(res, condition):
-    return [b for b in res["briefs"] if b["condition"] == condition]
+    # Detector assertions inspect each affected item; digest cardinality and
+    # daily lifecycle are covered separately in test_look_digest.py.
+    return [{**b, **item} for b in res["briefs"] if b["condition"] == condition
+            for item in b.get("items", [{"key": b["key"], "reading": b["reading"]}])]
 
 
 def clean_toml(root):
@@ -728,7 +731,7 @@ for ln in lines9:
 (root9 / "events" / look.LEDGER_NAME).write_text("\n".join(patched) + "\n")
 ev9 = read_ledger(root9)
 r9e = look.emit_once("test-cond", "k1", "operator", {"x": 1}, ev9, root=root9)
-ok(r9e is not None, "AC9: re-arms once the cooldown has passed")
+ok(r9e is None, "daily digest does not re-arm within the same day, even after an answer")
 print("AC9 ok")
 
 # ── AC10: brief-answered wiring, actor authorization, TRIAGE rendering ──────
@@ -2199,7 +2202,7 @@ for broken in ("missing", "malformed"):
         with patch.dict(os.environ, env), patch.object(look, "_send_operator", **sender_result):
             for repeat in range(2):
                 res = look.run(events + read_ledger(root), now=_WNOW, root=root, runner=FakeRunner(), toml_path=clean_toml(root))
-                keys = {b["key"] for b in res["briefs"] if b["condition"] == "reading-undetermined"}
+                keys = {b["key"] for b in briefs_of(res, "reading-undetermined")}
                 if repeat == 0:
                     ok({"undetermined:dispatch-stale", "undetermined:spec-idle"} <= keys, "watchdog: limits undetermined")
             alerts = [e for e in look._read_jsonl(root / "events" / look.LEDGER_NAME) if e.get("kind") == "lane-rules-unreadable"]
@@ -2543,7 +2546,9 @@ def test_ac7_sd2_idle_persistence():
                 path=root/'events'/look.LEDGER_NAME
                 with path.open() as handle: return [json.loads(line) for line in handle]
             committed=fresh()
-            alarms=[e for e in committed if e.get('condition')=='spec-idle']
+            assert sum(e.get('condition')=='spec-idle' for e in committed)==1
+            digest=json.loads((root/'look/digests'/f'{clock.date().isoformat()}.json').read_text())
+            alarms=list(digest['conditions']['spec-idle']['items'].values())
             assert {e['reading']['spec'] for e in alarms}=={'L-spec-9001','L-spec-9002'},alarms
             assert all(e['key']==e['reading']['spec'] and e['reading']['idle_min']>=60 for e in alarms)
             rows=fold.stall_rows(events,folded[0],now=clock,dwell={s['state']:-1 for s in folded[0].values()},by_subject=folded[3])
@@ -2561,7 +2566,7 @@ def test_ac7_sd2_idle_persistence():
             for sid in ['L-spec-9001','L-spec-9002']:
                 append_raw(root,'L-operator-hold.jsonl',(clock-timedelta(minutes=65)).isoformat(),type='decision',subject=sid,why='Held on purpose: maintenance')
             look._check_spec_idle(read_ledger(root),clock,root,[],[])
-            assert sum(e['type']=='brief-answered' for e in fresh())==2
+            assert sum(e['type']=='brief-answered' for e in fresh())==1
             print('AC7 fresh persisted readings:',json.dumps(alarms,sort_keys=True))
     finally: _si_restore(saved)
 

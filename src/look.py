@@ -3,20 +3,16 @@
 `look.run(events, *, now=None, runner=None, root=None, toml_path=None)` ->
 `{"briefs": [...], "answered": [...]}`; CLI: `doit look [--dry-run]`.
 One `flock -n $DOIT_ROOT/look/look.lock`-guarded pass, no session, no model.
-Every external read goes through the injectable `Runner`, gated by
-`runner.clock() < deadline` (the 90s pass budget, AC18) — a call past the
-deadline never fires, and it plus every not-yet-started reading becomes
-`reading-undetermined` instead. `emit_once` is the single dedupe-and-append
-path (SD3): a live `state.json["open"]` entry, or (state deleted/invalid) an
-unanswered ledger `brief`, suppresses a repeat; a 30-minute cooldown after
-`brief-answered` holds off re-arming (AC9) — always appends to
-`L-look-local.jsonl`, the one dedupe path `tick._record()`'s checks share.
+Every external read goes through the injectable Runner and 90s budget.
+All look/tick alerts share daily condition digests, capped at 50 briefs/day.
+Each brief links to look/digests/YYYY-MM-DD.json, which accumulates affected
+keys and suppression counters across subsequent passes under look.lock.
 Never deploys, restarts, resumes, sends keys, installs, or deletes (SD1).
 """
 import argparse, fcntl, hashlib, json, os, pathlib, re, shutil, subprocess, sys, time
 from datetime import datetime, timedelta, timezone
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import dispatch, fold, look_wallclock, pane_resume, panes, relay  # noqa: E402
+import dispatch, fold, look_digest, look_wallclock, pane_resume, panes, relay  # noqa: E402
 LEDGER_NAME = "L-look-local.jsonl"
 DEFAULT_TOML_PATH = pathlib.Path(__file__).resolve().parent.parent / "look.toml"
 DEFAULTS = {
@@ -131,7 +127,8 @@ def _open_ref(root, openkey, subject, events):
     st = _read_state(root)
     if st is not None: return (st.get("open") or {}).get(openkey)
     answered = {e.get("ref") for e in events if e.get("type") == "brief-answered"}
-    return next((e["_src"] for e in events if e.get("type") == "brief" and e.get("subject") == subject
+    return next((e["_src"] for e in events if e.get("type") == "brief" and (e.get("subject") == subject or any(
+                    f"{e.get('condition')}|{i.get('key')}" == openkey for i in e.get("items", [])))
                 and e.get("_src") not in answered), None)
 def _recently_cleared(root, subject, events, cooldown_min=30):
     mine = {e["_src"] for e in events if e.get("type") == "brief" and e.get("subject") == subject}
@@ -140,21 +137,41 @@ def _recently_cleared(root, subject, events, cooldown_min=30):
 def _why(reading):
     if isinstance(reading, dict): return "; ".join(f"{k}={v}" for k, v in list(reading.items())[:4])
     return str(reading)
+_DIGEST = None
+
+def _finish_digest(digest):
+    def _emit_digest(brief):
+        kv = {k: v for k, v in brief.items() if k != "type"}
+        fix = look_wallclock.fix_for(brief["condition"], digest.root, digest.events)
+        if fix is not None:
+            kv["fix"] = fix
+            brief["fix"] = fix
+        dst = digest.root / "events" / LEDGER_NAME
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        if dispatch.emit(dst, {}, "brief", **kv):
+            return None
+        with dst.open() as stream:
+            return f"{LEDGER_NAME}:{sum(1 for _ in stream)}"
+    open_refs = set(((_read_state(digest.root) or {}).get("open") or {}).values())
+    digest.finish(_emit_digest, lambda key, ref: _mark(digest.root, key, ref))
+    if not digest.dry_run:
+        for condition, key in digest.seen:
+            ref = digest.data['conditions'][condition].get('ref')
+            if ref in open_refs:
+                _mark(digest.root, f'{condition}|{key}', ref)
+
+
 def _write_brief(condition, key, owner, reading, events, root, problem=None):
-    openkey, subject = f"{condition}|{key}", f"look:{condition}:{key}"
-    if _open_ref(root, openkey, subject, events) is not None or _recently_cleared(root, subject, events): return None
-    kv = dict(condition=condition, owner=owner, key=key, problem=problem or f"look-{condition}", reading=reading,
-              measured_at=fold.NOW.isoformat(timespec="seconds"), subject=subject, why=_why(reading))
-    fix = look_wallclock.fix_for(condition, root, events)
-    if fix is not None: kv["fix"] = fix
-    if _DRY_RUN: return {**kv, "type": "brief", "_src": "dry-run"}
-    dst_dir = root / "events"
-    dst_dir.mkdir(parents=True, exist_ok=True)
-    dst = dst_dir / LEDGER_NAME
-    if dispatch.emit(dst, {}, "brief", **kv): return None
-    src = f"{LEDGER_NAME}:{sum(1 for _ in dst.open())}"
-    _with_state_lock(root, lambda: _mark(root, openkey, src))
-    return {**kv, "type": "brief", "_src": src}
+    if _DIGEST is not None:
+        return _DIGEST.add(condition, key, owner, reading, problem)
+    result = None
+    def write():
+        nonlocal result
+        digest = look_digest.Digest(root, events, fold.NOW, dry_run=_DRY_RUN)
+        result = digest.add(condition, key, owner, reading, problem)
+        _finish_digest(digest)
+    _with_state_lock(root, write)
+    return result
 def _mark(root, openkey, src):
     st = _read_state(root) or {}
     st.setdefault("open", {})[openkey] = src
@@ -163,6 +180,12 @@ def _clear(condition, key, why, events, root):
     openkey, subject = f"{condition}|{key}", f"look:{condition}:{key}"
     ref = _open_ref(root, openkey, subject, events)
     if ref is None: return None
+    st = _read_state(root) or {}
+    others = [k for k, v in (st.get("open") or {}).items() if v == ref and k != openkey]
+    if others:
+        if not _DRY_RUN:
+            _with_state_lock(root, lambda: _unmark(root, openkey))
+        return None
     if _DRY_RUN: return {"ref": ref, "type": "brief-answered"}
     dst = root / "events" / LEDGER_NAME
     if dispatch.emit(dst, {}, "brief-answered", ref=ref, why=f"cleared: {why}"): return None
@@ -827,13 +850,17 @@ def _origin_behind_reading(runner, now, deadline, repo, branch):
 
 
 def _check_owed_overdue(events, now, root, briefs):
-    """L-spec-0682 R6: one brief per owed check due >24h with no verdict, deduped by `emit_once`'s own path."""
+    """One daily condition digest, with overdue criteria grouped by spec."""
     try:
         import owed_metrics
         rows = owed_metrics.summary(events, now)["overdue_24h"]
     except Exception: return
+    grouped = {}
     for row in rows:
-        r = _write_brief("owed-overdue", f"{row['spec']}/{row['criterion']}", "executor", row, events, root)
+        grouped.setdefault(row['spec'], []).append(row)
+    for sid, checks in sorted(grouped.items()):
+        reading = {"spec": sid, "criteria": sorted({r['criterion'] for r in checks}), "checks": checks}
+        r = _write_brief("owed-overdue", sid, "executor", reading, events, root)
         r and briefs.append(r)
 def _check_origin_behind(cfg, runner, now, deadline, events, root, briefs, answered):
     """L-charter-0042/L-spec-0484 R13(c): "local-ahead-of-origin for 10+
@@ -878,10 +905,18 @@ def _spec_idle_busy_spawn(evs, events, now):
     return False
 
 
-def _spec_idle_bad(sid, s, evs, events, cand_rows, held, answered_ids, now):
+def _spec_idle_bad(sid, s, evs, events, cand_rows, held, answered_ids, now, *, covered=None):
     """SD2 owns exclusions; the existing idle limit still gates eligible stalls."""
     import lane_rules
     if s['state'] == 'unknown' or s['state'] in dispatch.SETTLED_STATES:
+        return False
+    # An overdue escalation is still an open escalation; it already surfaces
+    # the problem and must not create an additional spec-idle alarm.
+    if covered is None:
+        answered_refs = fold.answered(events)
+        covered = {e.get('subject') for e in fold.open_escalations(events)
+                   if e.get('_src') not in answered_refs}
+    if sid in covered:
         return False
     # Keep the existing helper call shape. Production supplies its classified
     # snapshot here; older callers supplying candidates still get SD2 evidence.
@@ -908,6 +943,9 @@ def _check_spec_idle(events, now, root, briefs, answered, *, folded=None):
                       if s['state'] != 'unknown' and s['state'] not in dispatch.SETTLED_STATES}
         classified = {r['spec']: r for r in fold.stall_rows(events, unfinished, now=now,
                       dwell={s['state']: -1 for s in unfinished.values()}, by_subject=by_subject)}
+        answered_refs = fold.answered(events)
+        covered = {e.get('subject') for e in fold.open_escalations(events)
+                   if e.get('_src') not in answered_refs}
         readings = []
         for sid, s in specs.items():
             if not _SPEC_ID_RE.match(sid) or s["state"] == "unknown":
@@ -915,7 +953,7 @@ def _check_spec_idle(events, now, root, briefs, answered, *, folded=None):
             evs = s.get("evs") or [e for e in events if e.get("subject") == sid]
             if not any(e.get("type") == "spec-written" for e in evs):
                 continue
-            bad = _spec_idle_bad(sid, s, evs, events, classified, set(), set(), now)
+            bad = _spec_idle_bad(sid, s, evs, events, classified, set(), set(), now, covered=covered)
             idle_min = (now - max(fold.ts(e.get("ts")) for e in evs)).total_seconds() / 60
             readings.append((sid, bad, idle_min))
     except Exception:
@@ -1085,7 +1123,7 @@ def _check_wallclock(events, runner, now, root, cfg, deadline, dry_run, briefs, 
     return result["events"]
 def run(events, *, now=None, runner=None, root=None, toml_path=None, dry_run=False,
         crons_manifest=None, crond_dir=None, repo=None):
-    global _PASS_LOCKED, _DRY_RUN
+    global _PASS_LOCKED, _DRY_RUN, _DIGEST
     tally = look_wallclock._new_tally()
     now = now or datetime.now(timezone.utc)
     root = pathlib.Path(root) if root is not None else fold.ROOT
@@ -1102,6 +1140,7 @@ def run(events, *, now=None, runner=None, root=None, toml_path=None, dry_run=Fal
         lockf.close()
         return {"briefs": [], "answered": [], **tally}
     _PASS_LOCKED, _DRY_RUN = True, dry_run
+    _DIGEST = look_digest.Digest(root, events, now, dry_run=dry_run)
     look_wallclock._CLASSES = cfg.get("classes") or {}
     briefs, answered = [], []
     wallclock_events = []
@@ -1157,12 +1196,13 @@ def run(events, *, now=None, runner=None, root=None, toml_path=None, dry_run=Fal
         wallclock_events = _check_wallclock(events, runner, now, root, cfg, deadline, dry_run, briefs, tally=tally)
         r = _clear("look-stale", "look-stale", "fresh pass", events, root)
         r and answered.append(r)
+        _finish_digest(_DIGEST)
         if not dry_run:
             st = _read_state(root) or {}
             st["last_pass"] = now.isoformat(timespec="seconds")
             _write_state(root, st)
     finally:
-        _PASS_LOCKED, _DRY_RUN = False, False
+        _PASS_LOCKED, _DRY_RUN, _DIGEST = False, False, None
         look_wallclock._CLASSES = {}
         try:
             fcntl.flock(lockf, fcntl.LOCK_UN)

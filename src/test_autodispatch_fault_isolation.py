@@ -411,7 +411,8 @@ class RepeatFailureAlarmTests(Scratch):
         self.assertTrue(any(e['type'] == 'brief-answered' and e['ref'] == alarm['_src'] for e in self.read()))
         self.ticks([True, True, True], start=6)
         self.assertEqual(self.alarms(self.look_pass()), [])  # existing cooldown
-        rearmed, = self.alarms(self.look_pass(now=NOW + dt.timedelta(minutes=60)))
+        self.assertEqual(self.alarms(self.look_pass(now=NOW + dt.timedelta(minutes=60))), [])
+        rearmed, = self.alarms(self.look_pass(now=NOW + dt.timedelta(days=1)))
         self.assertNotEqual(rearmed['_src'], alarm['_src'])
         signed('AC4-lifecycle', dict(alarm=alarm, rearmed=rearmed, separate_handle_state=True,
                                     legacy_does_not_clear=True, dry_run_no_persistence=True,

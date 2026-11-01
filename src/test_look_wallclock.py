@@ -419,9 +419,9 @@ _planner_stuck_fixture(root6, "L-charter-0099", 60)
 evs6 = read_ledger(root6)
 res6a = look_wallclock.run(evs6, DummyRunner(), NOW, root6, cfg(), 10**9, wb(root6), False)
 briefs6 = [b for b in res6a["briefs"] if b.get("condition") == "planner-attempts-stuck"]
-ok(len(briefs6) == 1 and briefs6[0]["subject"] == "look:planner-attempts-stuck:L-charter-0099"
+ok(len(briefs6) == 1 and briefs6[0]["subject"] == f"look:planner-attempts-stuck:{fold.NOW.date().isoformat()}"
    and briefs6[0]["problem"] == "planner-attempts-stuck" and briefs6[0]["owner"] == "thinker",
-   "AC6: one brief for the stuck charter, correct subject/problem/owner")
+   f"AC6: one brief for the stuck charter, correct subject/problem/owner: {briefs6}")
 evs6b = read_ledger(root6)
 res6b = look_wallclock.run(evs6b, DummyRunner(), NOW, root6, cfg(), 10**9, wb(root6), False)
 ok(not any(b.get("condition") == "planner-attempts-stuck" for b in res6b["briefs"]),
