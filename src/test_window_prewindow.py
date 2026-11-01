@@ -133,7 +133,7 @@ class PrewindowIntegrationTests(Fixture):
         self.assertFalse(merge_queue.queue(later_rows, 'albert-scott'))
         self.assertTrue(any(row['type'] == 'shipped' and row['subject'] == b[0] for row in later_rows))
 
-    def test_bisection_cannot_build_child_without_its_parent(self):
+    def test_targeted_probe_cannot_build_child_without_its_parent(self):
         a = self.branch(1, {'one.txt': 'one'})
         b = self.branch(2, {'two.txt': 'two'}, dependency=a[0])
         node = 'api/tests/absent.py::test_bad'
@@ -144,12 +144,18 @@ class PrewindowIntegrationTests(Fixture):
             recheck=lambda *a: dict(green=[node]))
         emitted, inspected, output = [], [], io.StringIO()
 
-        def bisect(window, live, prepare, *args, **kwargs):
-            candidate, kept, clashes = prepare([b[0]])
-            inspected.append(kept)
-            self.assertEqual(kept, [])
-            self.assertEqual(candidate, self.base)
-            return None
+        def attribute(repo, base, entries, ids, *, prepare):
+            # A diagnostic single must pass the same dependency admission as a
+            # shipping candidate. It must remain unknown if its parent is absent.
+            candidate = prepare([b[0]])
+            inspected.append(candidate)
+            self.assertIsNone(candidate)
+            pair = prepare([a[0], b[0]])
+            self.assertIsNotNone(pair)
+            self.assertIn('one.txt', self.git('ls-tree', '--name-only', pair))
+            self.assertIn('two.txt', self.git('ls-tree', '--name-only', pair))
+            return dict(drop={}, proven={}, environment=[], unresolved=[node],
+                        need_pairs=[], mode='singles', base_sha=base, evidence={})
 
         with patch.dict(sys.modules, base_red=base_red), \
              patch.object(window_gate.quarantine, 'apply'), \
@@ -160,13 +166,13 @@ class PrewindowIntegrationTests(Fixture):
              patch.object(window_gate, 'scope', return_value=dict(checks=[window_gate.PYTEST_CHECK], reason='fixture')), \
              patch.object(window_gate, 'verify', return_value=dict(state='red', nodes=[node], url='', doc={})), \
              patch.object(window_gate, 'candidate_failures', return_value=failures), \
-             patch.object(window_gate, 'bisect_window', side_effect=bisect), \
+             patch('window_attribution.attribute', side_effect=attribute), \
              patch.object(window_gate, 'ev', side_effect=lambda typ, subject, **kw:
                           emitted.append(dict(type=typ, subject=subject, **kw))), \
              contextlib.redirect_stdout(output):
             self.assertEqual(window_gate._run_attempt('fixture', 'albert-scott', [], 'master',
                              False, self.base, self.base, None, 0, False), 2)
-        self.assertEqual(inspected, [[]])
+        self.assertEqual(inspected, [None])
         drops = [e for e in emitted if e['type'] == 'window-dropped']
         self.assertEqual(drops, [])
         self.assertIn('deferred ' + b[0], output.getvalue())

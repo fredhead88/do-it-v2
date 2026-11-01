@@ -16,8 +16,8 @@ gates each branch (`doit gate`, unchanged), collects the window, and calls this:
   3. green  -> fast-forward master to the candidate sha (old value asserted);
      red    -> map the NEW failing node ids to the specs that own them, drop
                exactly those, verify the remainder within a size-derived budget.
-               Unattributed reds at any round split into bounded halves,
-               shipping the first verified half and leaving other green halves pending.
+               Unattributed reds use parallel targeted master/single/pair probes,
+               then one full verification of the remainder. Never full-CI bisection.
 
 Candidate trees with a green ledger result covering the required checks in the
 last seven days reuse that result without another dispatch.
@@ -25,7 +25,7 @@ last seven days reuse that result without another dispatch.
 Exit codes (the Executor contract, agents/executor.md, mirrors these):
   0  advanced: every spec in the window shipped
   1  partially advanced: some specs dropped (window-dropped / merge-conflict), the rest shipped
-  2  red or undetermined: master did not move (an escalation-blocking is filed)
+  2  red or undetermined: master did not move; unresolved outcomes escalate
   3  project chain held, no slot free, or predecessor unavailable: retry next pass
   4  DOIT_WINDOW_GATE=off: bypassed, one window-gate-bypassed event per spec;
      use the direct merge path (operator-declared CI outage only)
@@ -126,9 +126,10 @@ def ev(typ, subject, **kv):
         fold.NOW = original_now
 
 
-def escalate(window, why, outcome=None):
+def escalate(window, why, outcome=None, *, nodes=None):
     due = (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat(timespec="seconds")
     ev("escalation-blocking", window, why=why, outcome=outcome,
+       **({"nodes": list(nodes)} if nodes is not None else {}),
        default="after 30 minutes drop attributed specs, requeue unattributed specs with failing ids, cancel window",
        deadline=due,
        revert="rerun `doit gate-window` once the cause is fixed, or DOIT_WINDOW_GATE=off for a declared CI outage")
@@ -1403,6 +1404,35 @@ def bisect_window(window, live, prepare, judge, drop, conflict, local=None):
     return chosen
 
 
+def targeted_attribution(repo, base, entries, nodes, *, main="master"):
+    """Diagnostic merges use ordinary re-chain/fingerprint rules without ledger/ref writes."""
+    import window_attribution
+    import quarantine_file
+    events = fold.read_events()
+    def prepare(specs):
+        batch = [entry for entry in entries if entry[0] in specs]
+        admitted, rejected = window_prewindow.select(
+            repo, base, main, batch, events, fold.ROOT / "content")
+        # Never interpret a subset as the requested single/pair. Dependencies,
+        # overlaps and unreadable metadata leave this probe undetermined.
+        if rejected or [e[0] for e in admitted] != [e[0] for e in batch]:
+            return None
+        tip = base
+        migration = False
+        for entry in admitted:
+            new, conflicts = merge_into(repo, tip, entry[2], "diagnostic attribution " + entry[0])
+            if new is None and os.environ.get("DOIT_WINDOW_RECHAIN", "on") == "on":
+                new, _ = rechain.resolve(repo, tip, entry, "attribution", ev=lambda *a, **kw: None)
+            if new is None:
+                return None
+            migration = migration or len(rechain.added_versions(repo, base, entry[2])) == 1
+            tip = new
+        if migration and os.environ.get("DOIT_WINDOW_RECHAIN", "on") == "on":
+            tip = rechain.fingerprint(repo, tip, "attribution", ev=lambda *a, **kw: None, project=PROJECT)
+        return quarantine_file.candidate(repo, tip, fold.read_events(), PROJECT)
+    return window_attribution.attribute(repo, base, entries, nodes, prepare=prepare)
+
+
 def run_window(window, project, spec_args, main, fixes_base=False, after=None, slot=0):
     events = train_events()
     record_depth(train_depth(os.environ, events=events), events, os.environ)
@@ -1554,20 +1584,6 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
         return policy_candidate(candidate), kept, clashes
 
     by_id = {s: (b, sha) for s, b, sha in entries}
-    local_cache = {}
-
-    def local(batch, result):
-        return local_owners(repo, project, [e for e in entries if e[0] in batch],
-                            result["nodes"], window_base=base, cache=local_cache)
-
-    # Unconfigured projects cannot run local proof. Retain the six-argument
-    # route there, including existing judgment-budget callback wrappers.
-    try:
-        import grading_env
-        local_available = bool(grading_env._project_row(project))
-    except Exception:
-        local_available = False
-
     def note_conflicts(conflicts):
         for s, paths in conflicts.items():
             ev("merge-conflict", s, files=paths, window=window)
@@ -1578,11 +1594,17 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
         for s in specs:
             guard_nodes = result.get("guard_charges", {}).get(s, [])
             local_nodes = result.get("local_owners", {}).get(s)
+            targeted_nodes = result.get("targeted_owners", {}).get(s)
             owned_nodes = (local_nodes if local_nodes is not None else [n for n in result["nodes"]
                            if s in owners(repo, result["candidate"], n, result["paths"])])
-            reported_nodes = (owned_nodes if guard_nodes or local_nodes is not None else result["nodes"]) + guard_nodes
+            if targeted_nodes is not None:
+                owned_nodes = result.get("targeted_proven", {}).get(s, [])
+            reported_nodes = (targeted_nodes if targeted_nodes is not None else
+                              owned_nodes if guard_nodes or local_nodes is not None else result["nodes"]) + guard_nodes
             ev("window-dropped", s, window=window, nodes=reported_nodes,
                **({"evidence": "local-repro", "tests": local_nodes} if local_nodes is not None else {}),
+               **({"evidence": "targeted-repro" if owned_nodes else "targeted-fallback", "tests": targeted_nodes,
+                   "attribution_mode": result.get("attribution_mode")} if targeted_nodes is not None else {}),
                quarantined=sorted(quarantined_all),
                **({"rechecked": dict(rechecked_all), "recheck_undetermined": sorted(
                    n for n, state in rechecked_all.items() if state == "undetermined")} if rechecked_all else {}),
@@ -1809,9 +1831,6 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
         except Exception:
             return False
 
-    def judge_half(cand, kept):
-        return judge(cand, kept, half=True)
-
     def prepare_half(specs):
         return prepare([e for e in entries if e[0] in specs])
 
@@ -1844,37 +1863,50 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
             drop_specs(demonstrated, res, "guard-prefix")
             escalate(window, "second candidate guard is red; remainder pending", "red")
             return 2
-        if len(live) == 1:
-            drop_specs(live, res, "bisect-single" if not demonstrated else "owner")
-            escalate(window, "isolated candidate is red; master unmoved", "red")
+        if runs >= 2:
+            escalate(window, "full remainder verification is red after targeted attribution; master unmoved", "red",
+                     nodes=res["nodes"])
             return 2
-        if not demonstrated:
-            res["local_owners"] = local(live, res)
-            demonstrated = [s for s in live if s in res["local_owners"]]
-        drop_specs(demonstrated, res, "owner")
+        if not demonstrated or res["unattributed"]:
+            plan = targeted_attribution(repo, base, [e for e in entries if e[0] in live], res["nodes"], main=main)
+            ev("window-targeted-attribution", window, window=window, candidate=cand, ids=res["nodes"], nodes=res["nodes"], **plan)
+            environment = plan["environment"]
+            if environment:
+                ev("window-pre-existing", window, window=window, ids=environment, nodes=environment,
+                   base_sha=base, count=len(environment), evidence="targeted-master-3x", run_url=res["url"])
+                pre_existing_all.update(environment)
+                rechecked_all.update(dict.fromkeys(environment, "red"))
+                quarantine.apply(project)
+                current = quarantine.active(fold.read_events(), project, datetime.now(timezone.utc))
+                quarantined_all.update(n for n in environment if n in current)
+            res["targeted_owners"] = plan["drop"]
+            res["targeted_proven"] = plan.get("proven", plan["drop"] if plan["mode"] != "newest-half" else {})
+            res["attribution_mode"] = plan["mode"]
+            demonstrated = [s for s in live if s in plan["drop"]]
+            if not demonstrated and not environment:
+                escalate(window, "targeted attribution found no reproducing spec or master failure; "
+                         f"unresolved ids={json.dumps(plan['unresolved'])}; master unmoved", "undetermined",
+                         nodes=plan["unresolved"])
+                return 2
+        drop_specs(demonstrated, res, "targeted-attribution" if "targeted_owners" in res else "owner")
         live = [s for s in live if s not in demonstrated]
         if not live:
-            escalate(window, "all demonstrated owners dropped; master unmoved", "red")
+            if "targeted_owners" in res:
+                ev("window-cancelled", window, window=window, after=after or "none",
+                   reason="all-attributed-specs-dropped", specs=[], verified_on=base)
+            else:
+                escalate(window, "all demonstrated owners dropped; master unmoved", "red")
+            print("gate-window: all attributed specs dropped; master unmoved")
             return 2
         if enabled and any(s in migrations for s in dropped) and any(s in migrations for s in live):
             escalate(window, "migration ordering after owner removal is unsafe; remainder pending", "undetermined")
             return 2
-        if demonstrated:
-            cand, live, more = prepare_half(live)
-            note_conflicts(more)
-            if not live:
-                escalate(window, fingerprint_failed.why("remaining merges conflict after the drop"), "undetermined")
-                return 2
-            continue
-        chosen = bisect_window(window, live, prepare_half, judge_half, drop_specs, note_conflicts,
-                               **({"local": local} if local_available else {}))
-        if chosen is None:
-            escalate(window, fingerprint_failed.why(f"window {window} bisection found no advanceable candidate; dropped specs={json.dumps(dropped)}; master unmoved"), "red")
+        cand, live, more = prepare_half(live)
+        note_conflicts(more)
+        if not live:
+            escalate(window, fingerprint_failed.why("remaining merges conflict after the drop"), "undetermined")
             return 2
-        cand, live = chosen
-        pending = [s for s, _, _ in entries if s not in live and s not in dropped]
-        print(f"gate-window: pending {len(pending)} spec(s), reason=bisection-unselected specs={json.dumps(pending)}")
-        break
+        # This is the only full-suite retry; diagnostic greens never advance main.
     if enabled and any(s in migrations for s in dropped) and any(s in migrations for s in live):
         escalate(window, "migration ordering after owner removal is unsafe; remainder pending", "undetermined")
         return 2

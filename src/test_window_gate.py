@@ -700,17 +700,16 @@ def main():
     check(rc == 1 and [e["subject"] for e in fx.events("window-dropped")] == ["B"]
           and [e["subject"] for e in fx.events("shipped")] == ["A"], "AC3b import-closure owner dropped")
 
-    # L-spec-1127 R3.4: bisect unattributed reds; ship the first green half.
+    # Missing diagnostic support stays undetermined, without any full halves.
     fx = Fx({"A": "a.txt", "B": "b.txt", "C": "c.txt"})
     fx.run_n(1, 1, red(["api/tests/test_z.py::test_q"]))
     fx.run_n(2, 0, GREEN)
     rc = fx.go()
-    check(rc == 1 and fx.master() != fx.base and
-          [e["subject"] for e in fx.events("shipped")] == ["A"], "AC4 first green half ships")
-    check(not fx.events("window-dropped") and
-          [r['spec'] for r in merge_queue.queue(fold.read_events())] == ["B", "C"], "AC4 unresolved half pending")
-    check([e["halves"] for e in fx.events("window-bisected")] == [[["A"], ["B", "C"]]] and
-          len(fx.events("escalation-blocking")) == 1 and len(fx.calls()) == 3, "AC4 bisect with unresolved-half escalation")
+    check(rc == 2 and fx.master() == fx.base and not fx.events("shipped"),
+          "AC4 missing targeted support holds master")
+    check(not fx.events("window-dropped") and not fx.events("window-bisected") and
+          len(fx.events("escalation-blocking")) == 1 and len(fx.calls()) == 1,
+          "AC4 no full-CI halves and no speculative blame")
 
     # AC4b: independently red singleton after owner removal; no unsafe advance
     fx = Fx({"A": "a.txt", "B": "api/tests/test_x.py"})
@@ -821,7 +820,7 @@ def rechain_checks():
     # L-spec-1534: the actual child fails on each prepare entry point.
     from contextlib import redirect_stdout
     from io import StringIO
-    for scenario in ("initial", "partial", "rebuilt", "bisect", "bisect-none"):
+    for scenario in ("initial", "partial", "rebuilt"):
         fx, sf = fixture(["a"], extra=scenario != "initial")
         env = sf.scripts(fx.tmp)
         env["DOIT_WINDOW_RECHAIN"] = "on"
@@ -837,10 +836,6 @@ def rechain_checks():
                           '    sys.exit(2)\n' + original)
         if scenario == "rebuilt":
             fx.run_n(1, 1, red(["api/tests/test_x.py::test_x"]))
-        elif scenario.startswith("bisect"):
-            fx.run_n(1, 1, red(["unowned.py::test_unknown"]))
-            fx.run_n(2, 1 if scenario == "bisect-none" else 0,
-                     red(["api/tests/test_x.py::test_x"]) if scenario == "bisect-none" else GREEN)
         else:
             fx.run_n(1, 0, GREEN)
         stdout = StringIO()
@@ -849,7 +844,7 @@ def rechain_checks():
         declined = [e for e in fx.events("rechain-declined") if e["subject"] == "a"]
         forbidden = [e for e in fx.events() if e["subject"] == "a" and
                      e["type"] in ("merge-conflict", "window-dropped", "shipped", "rejected-criterion")]
-        expected_rc = 1 if scenario in ("partial", "bisect") else 2
+        expected_rc = 1 if scenario == "partial" else 2
         check(rc == expected_rc and len(declined) == 1 and not forbidden and
               declined[0].get("stderr_tail") == ["fixture fingerprint failed"] and
               declined[0].get("stage") == "fingerprint" and
@@ -863,8 +858,6 @@ def rechain_checks():
             check([e["subject"] for e in fx.events("shipped")] == ["X"], "rechain partial ships plain " + scenario)
         check("a" in [row["spec"] for row in merge_queue.queue(fold.read_events())],
               "rechain failure stays queued " + scenario)
-        if scenario.startswith("bisect"):
-            check(bool(fx.events("window-bisected")), "rechain failure reached half " + scenario)
         response("1534-AC4-AC5", dict(scenario=scenario, exit=rc, stage="fingerprint",
                                       stderr_tail=["fixture fingerprint failed"], conflicts=0,
                                       migration_outcomes=0, pending=True))
@@ -881,6 +874,7 @@ def rechain_checks():
         fx, sf = fixture(names, extra=case in ("no-cap", "owner-X", "owner-B", "second-red", "fingerprint-fail"))
         env = sf.scripts(fx.tmp, fail=case == "fingerprint-fail")
         env["DOIT_WINDOW_RECHAIN"] = "off" if case == "off" else "on"
+        env["DOIT_WINDOW_MAX_MERGES"] = str(max(4, len(fx.branches)))
         before = sh(["status", "--porcelain"], fx.repo)
         refs = {b: sh(["rev-parse", b], fx.repo) for b in fx.branches.values()}
         try:
@@ -917,7 +911,7 @@ def rechain_checks():
                 check(len(fx.calls()) == 2 and len(fp_calls) == 1,
                       "ac6 shared migration owners removed before verified nonmigration retry")
                 drops = fx.events("window-dropped")
-                check([e["subject"] for e in drops] == names + (["X"] if case == "second-red" else []) and
+                check([e["subject"] for e in drops] == names and
                       all(e["reason"] == "owner" and e["owned_nodes"] == [rechain.TEST + "::test_head"]
                           for e in drops[:2]), "ac6 both demonstrated migration owners drop")
                 check((rc == 1 and shipped == ["X"] and rechain.routed_head(fx.repo, fx.master()) == "h0") if case == "owner-B" else
@@ -1073,21 +1067,24 @@ def attribution_checks():
         fx = Fx({"A": "a.txt"})
         cli = fx.tmp / "bin/doit"
         cli.write_text("#!/usr/bin/python3\nimport os,sys,json,subprocess,time,pathlib\n"
-            "d=pathlib.Path(os.environ['FAKE_DIR'])\n"
+            "d=pathlib.Path(os.environ['FAKE_DIR'])\n" +
+            ("time.sleep(.8)\n" if mode == "exit3" else "") +
             "with (d/'base-red-calls').open('a') as f: f.write(json.dumps(sys.argv[1:])+'\\n')\n" +
             ("child=subprocess.Popen(['sleep','30'])\n(d/'child').write_text(str(child.pid))\ntime.sleep(30)\n" if mode == "timeout" else
              "print('not json')\n" if mode == "bad-json" else "print('{}')\nsys.exit(" + ("3" if mode == "exit3" else "2") + ")\n"))
         cli.chmod(0o755)
         fx.base_reader = reader
         fx.run_n(1, 1, output)
-        # Allow the fake baseline process to start on a busy build box while
-        # keeping the 30-second ensure child bounded well below its sleep.
+        # Include interpreter startup under CPU contention in the test budget.
+        # The exit3 fixture deliberately starts after the old 0.6s budget;
+        # the 30s hung descendant must still be killed by the bounded wait.
         with patch.object(window_gate, "BASE_RED_MARGIN_SECS", .1), \
-             patch.object(window_gate, "verify_timeout_secs", return_value=.5), \
+             patch.object(window_gate, "verify_timeout_secs", return_value=5), \
              patch.object(window_gate, "BASE_RED_COMMAND", str(fx.tmp / "missing") if mode == "missing" else "doit"):
             rc = fx.go()
-        calls = (fx.fdir / "base-red-calls").read_text().splitlines() if mode != "missing" else []
-        if calls:
+        calls_path = fx.fdir / "base-red-calls"
+        calls = calls_path.read_text().splitlines() if calls_path.exists() else []
+        if mode != "missing":
             argv = [json.loads(c) for c in calls]
             check(sum("--ensure" in a for a in argv) == 1 and len(argv) == 2 and
                   all(a[:3] == ["base-red", "albert-scott", fx.base] for a in argv), "one ensure then plain read " + mode)
@@ -1176,16 +1173,15 @@ def attribution_checks():
         rc = fx.go()
         drops = fx.events("window-dropped")
         if not mixed:
-            check(rc == 1 and not drops and [e["halves"] for e in fx.events("window-bisected")] == [[["A"], ["B"]]] and
-                  [e["subject"] for e in fx.events("shipped")] == ["A"], "unattributed_drops_window now bisects two-spec fixture")
+            check(rc == 2 and not drops and not fx.events("window-bisected") and
+                  not fx.events("shipped") and fx.master() == fx.base,
+                  "unattributed missing diagnostics never starts full-CI halves")
             continue
-        check(rc == 2 and [e["subject"] for e in drops] == ["A"] and
-              drops[0]["reason"] == "owner" and set(drops[0]["nodes"]) == {unknown, v} and
-              drops[0]["owned_nodes"] == [v] and drops[0]["unattributed_nodes"] == [unknown],
-              "mixed_ids demonstrated owner only; undetermined sibling pending")
+        check(rc == 2 and not drops,
+              "mixed_ids need targeted proof before any spec is dropped")
         check(fx.events("escalation-blocking") and fx.master() == fx.base,
               "mixed_ids unresolved remainder cannot advance")
-    response("unattributed_drops_window_mixed_ids", ["AC10", "AC11"], {"dropped": [e["subject"] for e in drops], "nodes": drops[0]["nodes"], "reason": "owner"})
+    response("unattributed_drops_window_mixed_ids", ["AC10", "AC11"], {"dropped": [], "reason": "targeted evidence unavailable"})
 
     fx = Fx({"A": "api/tests/test_x.py", "B": "api/tests/test_z.py"})
     fx.run_n(1, 1, red([p])); fx.run_n(2, 1, red(["api/tests/test_z.py::q"]))
@@ -1393,141 +1389,43 @@ def rerun_checks():
             check(fx.go() == 0 and len(fx.calls()) == 1, "lookup failure dispatches " + failure)
     response("tree_of_failure_dispatches", ["AC5"], {"tree_failure_dispatches": 1, "ledger_failure_dispatches": 1})
 
-    fx, calls, tips, verify = exercise("ABCDEF", "D")
-    with patch.object(window_gate, "verify", side_effect=verify): rc = fx.go()
-    halves = [e["halves"] for e in fx.events("window-bisected")]
-    drops = fx.events("window-dropped")
-    check(rc == 1 and halves == [[["A", "B", "C"], ["D", "E", "F"]], [["D"], ["E", "F"]]] and
-          calls == [list("ABCDEF"), list("ABC"), list("DEF"), ["D"], list("EF")] and
-          len(drops) == 1 and drops[0]["subject"] == "D" and drops[0]["reason"] == "bisect-single" and drops[0]["nodes"] and
-          [e["subject"] for e in fx.events("shipped")] == list("ABC") and fx.master() == tips[1] and
-          [r['spec'] for r in merge_queue.queue(fold.read_events())] == list("EF"), "bisect_six_one_bad")
-    response("bisect_six_one_bad", ["AC6", "AC10"], {"halves": halves, "calls": calls, "pending": ["E", "F"], "first_green_advanced": True})
-    response("bisect_outside_run_cap", ["AC10"], {"bisect_dispatches": len(calls) - 1})
-
-    fx, calls, _, verify = exercise("AB", "A")
-    with patch.object(window_gate, "verify", side_effect=verify): rc = fx.go()
-    check(rc == 1 and [e["subject"] for e in fx.events("shipped")] == ["B"] and
-          fx.events("window-dropped")[0]["reason"] == "bisect-single", "bisect_two_specs")
-    response("bisect_two_specs", ["AC7"], {"shipped": ["B"], "dropped": ["A"]})
-
-    fx, calls, _, verify = exercise("ABCD", "C", owner=(["C", "D"], "C.py::bad"))
-    with patch.object(window_gate, "verify", side_effect=verify): rc = fx.go()
-    check(rc == 1 and [(e["subject"], e["reason"]) for e in fx.events("window-dropped")] == [("C", "bisect-owner")] and
-          [r['spec'] for r in merge_queue.queue(fold.read_events())] == ["D"], "bisect_owner_half")
-    response("bisect_owner_half", ["AC7"], {"dropped": ["C"], "reason": "bisect-owner", "pending": ["D"]})
-
-    fx, calls, _, verify = exercise("AB", "AB")
-    with patch.object(window_gate, "verify", side_effect=verify): rc = fx.go()
-    check(rc == 2 and fx.master() == fx.base and all(s in fx.events("escalation-blocking")[-1]["why"] for s in "AB"), "bisect_no_green_half")
-    response("bisect_no_green_half", ["AC7"], {"master_unmoved": True, "dropped": ["A", "B"]})
-
-    for mode in ("undetermined", "incomplete"):
-        fx, calls, _, verify = exercise("ABCD", "C", **({"uncertain": [("C", "D")]} if mode == "undetermined" else {"incomplete": [("C", "D")]}))
-        with patch.object(window_gate, "verify", side_effect=verify): rc = fx.go()
-        check(rc == 1 and fx.master() != fx.base and not fx.events("window-dropped") and fx.events("escalation-blocking") and
-              [e["subject"] for e in fx.events("shipped")] == ["A", "B"] and
-              [r['spec'] for r in merge_queue.queue(fold.read_events())] == ["C", "D"] and
-              len(fx.events("window-tree-verified")) == 2, "bisect_undetermined_half " + mode)
-    response("bisect_undetermined_half", ["AC7"], {"undetermined_and_base_incomplete": "escalate; no drops; unresolved half pending; verified half ships"})
-
-    fx, calls, _, verify = exercise("A", "A")
-    with patch.object(window_gate, "verify", side_effect=verify): fx.go()
-    check(not fx.events("window-bisected") and fx.events("window-dropped")[0]["reason"] == "bisect-single", "no_bisect_single_or_mixed")
-    response("no_bisect_single_or_mixed", ["AC7"], {"single_unchanged": True, "mixed_covered_by_1110": True})
-
-    fx = Fx({"A": "api/tests/test_x.py", "B": "b.txt", "C": "c.txt"})
-    fx.run_n(1, 1, red(["api/tests/test_x.py::bad"])); fx.run_n(2, 1, red([unknown]))
-    check(fx.go() == 2 and len(fx.calls()) == 4 and fx.events("window-bisected") and fx.master() == fx.base and
-          [e["subject"] for e in fx.events("window-dropped")] == ["A"], "bisect_on_second_run retains undetermined siblings")
-    response("bisect_on_second_run", ["AC10"], {"dispatches": 4, "bisects": 1, "master_unmoved": True})
-
+    # Full-CI bisection was replaced by independent targeted probes. Re-use
+    # this real-git fixture to prove all unaffected specs ship together only
+    # after the entire remainder receives one full verdict.
     table = []
-    import math
-    for n in range(2, 7):
-        for bad in range(n):
-            names = "ABCDEF"[:n]
-            fx, calls, _, verify = exercise(names, names[bad])
-            with patch.object(window_gate, "verify", side_effect=verify): fx.go()
-            splits = fx.events("window-bisected")
-            limit = math.ceil(math.log2(n))
-            check(len(calls) - 1 <= 2 * limit and all(len(e["halves"]) == 2 and all(e["halves"]) for e in splits), "bisect bound")
-            depth = {tuple(names): 0}
-            for e in splits:
-                parent = tuple(e["halves"][0] + e["halves"][1])
-                for half in e["halves"]: depth[tuple(half)] = depth[parent] + 1
-            check(max(depth.values()) <= limit, "bisect depth bound")
-            table.append([n, bad, len(calls) - 1])
-    # Identical content of two halves exercises the same cache path recursively.
-    fx = Fx({"A": "a.txt", "B": "b.txt"})
-    real_prepare = window_gate.build_candidate
-    shared = [None]
-    def repeat(repo, window, base, entries):
-        tip, kept, clashes = real_prepare(repo, window, base, entries)
-        if len(entries) == 1:
-            if shared[0] is None: shared[0] = tip
-            tip = shared[0]
-        return tip, kept, clashes
-    dispatches = []
-    def verify(repo, sha, required, window):
-        if sha == fx.base: return verdict()
-        dispatches.append(sha)
-        return verdict("red", [unknown]) if len(dispatches) == 1 else verdict()
-    with patch.object(window_gate, "build_candidate", side_effect=repeat), patch.object(window_gate, "verify", side_effect=verify): fx.go()
-    check(len(dispatches) == 2, "bisect repeated tree reused")
-    response("bisect_bounds_table", ["AC8"], {"rows_n_bad_dispatches": table, "max_depth_within_bound": True, "repeated_half_dispatches": 1})
+    for names, bad in (("AB", "A"), ("ABCD", "C"), ("ABCDEF", "D")):
+        fx, calls, tips, verify = exercise(names, bad)
+        probes = []
+        def targeted(repo, base, entries, nodes, **kwargs):
+            probes.append([e[0] for e in entries])
+            return dict(drop={bad: list(nodes)}, environment=[], unresolved=[],
+                        need_pairs=[], mode="singles", base_sha=base, evidence={"fixture": {"states": {n: "red" for n in nodes}}})
+        with patch.dict(os.environ, DOIT_WINDOW_MAX_MERGES=str(len(names))), \
+             patch.object(window_gate, "verify", side_effect=verify), \
+             patch.object(window_gate, "targeted_attribution", side_effect=targeted):
+            rc = fx.go()
+        expected = [s for s in names if s != bad]
+        check(rc == 1 and calls == [list(names), expected] and
+              [e["subject"] for e in fx.events("shipped")] == expected and
+              fx.master() == tips[-1] and not fx.events("window-bisected"),
+              "targeted remainder fully verified " + names)
+        drops = fx.events("window-dropped")
+        check(len(drops) == 1 and drops[0]["subject"] == bad and
+              drops[0]["reason"] == "targeted-attribution" and drops[0]["nodes"] == [unknown],
+              "targeted evidence attached " + names)
+        table.append(dict(specs=list(names), culprit=bad, full_calls=calls, targeted=probes))
+    response("targeted_replaces_full_bisection", ["AC6", "AC7", "AC8", "AC10"], {"rows": table})
 
-    # Exercise real prepare/fingerprint against a migration-bearing half.
-    from test_rechain import Fixture
-    import rechain
-    for fail_half in (False, True):
-        fx = Fx({})
-        with tempfile.TemporaryDirectory() as seed_root:
-            seed_fx = Fixture(seed_root)
-            for path in sh(["ls-tree", "-r", "--name-only", seed_fx.base], seed_fx.repo).splitlines():
-                target = fx.repo / path; target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(rechain.blob(seed_fx.repo, seed_fx.base, path))
-        sh(["add", "."], fx.repo); sh(["commit", "-m", "migration base"], fx.repo)
-        fx.base = sh(["rev-parse", "HEAD"], fx.repo)
-        sh(["update-ref", "refs/heads/master", fx.base], fx.repo)
-        sf = Fixture.__new__(Fixture); sf.repo, sf.base, sf.events = fx.repo, fx.base, []
-        for name in "ABCD":
-            if name == "C":
-                _, branch, _ = sf.branch(name)
-            else:
-                branch = "br-" + name
-                sh(["checkout", "-b", branch, fx.base], fx.repo)
-                (fx.repo / (name + ".txt")).write_text(name)
-                sh(["add", "."], fx.repo); sh(["commit", "-m", name], fx.repo)
-            fx.branches[name] = branch
-        sh(["checkout", "live-scratch"], fx.repo)
-        env = sf.scripts(fx.tmp); env["DOIT_WINDOW_RECHAIN"] = "on"
-        fp_calls, seen = [], []
-        fingerprint = rechain.fingerprint
-        def fp(repo, sha, window, **kw):
-            fp_calls.append(sha)
-            if fail_half and len(fp_calls) == 2: raise ValueError("half fingerprint failed")
-            return fingerprint(repo, sha, window, **kw)
-        def verify(repo, sha, required, window):
-            if sha == fx.base: return verdict()
-            seen.append(sha)
-            has_c = window_gate.git(repo, "cat-file", "-e", sha + ":" + rechain.VERSIONS + "C.py", check=False).returncode == 0
-            if has_c:
-                check(rechain.text(repo, sha, rechain.FINGERPRINT).startswith("final:"), "half carries actual fingerprint")
-            return verdict("red", [unknown]) if len(seen) == 1 else verdict()
-        with patch.dict(os.environ, env), patch.object(rechain, "fingerprint", side_effect=fp), patch.object(window_gate, "verify", side_effect=verify):
-            check(fx.go() == 1, "bisect migration partially advances")
-        check(len(fp_calls) == 2 and [e["halves"] for e in fx.events("window-bisected")] == [[["A", "B"], ["C", "D"]]] and
-              not any(e.get("reason") == "migration-bisect" for e in fx.events("window-dropped")), "bisect_rechain_half")
-        if fail_half:
-            check([e["subject"] for e in fx.events("rechain-declined")] == ["C"] and
-                  window_gate.git(fx.repo, "cat-file", "-e", seen[-1] + ":" + rechain.VERSIONS + "C.py", check=False).returncode != 0,
-                  "declined C excluded from half candidate")
-    # bisect_window accepts only a prepare callback and must never build directly.
-    import inspect
-    check("build_candidate(" not in inspect.getsource(window_gate.bisect_window), "bisect_window never builds directly")
-    response("bisect_rechain_half", ["AC9"], {"fingerprint_calls": 2, "half_carries_fingerprint": True, "declined_C_excluded": True})
-    response("bisect_vs_migration_bisect", ["AC9"], {"unattributed_bisects": True, "migration_bisect_drops": 0, "owner_red_covered_by_rechain_checks": True})
+    # A second full red cannot start either another probe wave or full halves.
+    fx = Fx({"A": "api/tests/test_x.py", "B": "b.txt", "C": "c.txt"})
+    fx.run_n(1, 1, red(["api/tests/test_x.py::bad"]))
+    fx.run_n(2, 1, red([unknown]))
+    with patch.object(window_gate, "targeted_attribution", side_effect=AssertionError("third-round diagnosis")):
+        rc = fx.go()
+    check(rc == 2 and len(fx.calls()) == 2 and not fx.events("window-bisected") and
+          fx.master() == fx.base and [e["subject"] for e in fx.events("window-dropped")] == ["A"],
+          "second red stops without full-CI bisection")
+    response("one_full_retry_bound", ["AC10"], {"dispatches": 2, "master_unmoved": True})
 
 
 def test_window_attribution():
@@ -2491,145 +2389,16 @@ def local_owner_ac2():
 
 
 def local_owner_ac3():
-    """Append with production ev/drop_specs and read through fresh-process fold."""
-    from datetime import datetime, timedelta, timezone
-    import base_red
-    import grading_env
-    import lane_rules
-    import nextstep
-    import packet
-    nodes = ["test_named.py::test_first", "test_named.py::test_second"]
-    report = {}
-    for mode in ("one", "two", "all", "none", "mixed", "second", "stale"):
-        fx = Fx({"L-spec-9001": "a.txt", "L-spec-9002": "b.txt", "L-spec-9003": "c.txt"})
-        sh(["checkout", "master"], fx.repo)
-        for name in ("a.txt", "b.txt", "c.txt"):
-            (fx.repo / name).write_text("ok")
-        code = ("import pathlib, pytest\n"
-                "def test_first(): assert pathlib.Path('a.txt').read_text() == 'ok'\n"
-                "def test_second():\n"
-                "    text = pathlib.Path('b.txt').read_text()\n"
-                "    if text == 'uncertain': pytest.skip('uncertain')\n"
-                "    assert text == 'ok'\n")
-        (fx.repo / "test_named.py").write_text(code)
-        sh(["add", "."], fx.repo); sh(["commit", "-m", "shared selected tests"], fx.repo)
-        initial = sh(["rev-parse", "HEAD"], fx.repo)
-        stale = None
-        if mode == "stale":
-            (fx.repo / "a.txt").write_text("red")
-            sh(["add", "."], fx.repo); sh(["commit", "-m", "old red base"], fx.repo)
-            old = sh(["rev-parse", "HEAD"], fx.repo)
-            sh(["checkout", "-B", "br-L-spec-9001", old], fx.repo)
-            (fx.repo / "a-member.txt").write_text("stale change")
-            sh(["add", "."], fx.repo); sh(["commit", "-m", "stale member"], fx.repo)
-            stale = sh(["rev-parse", "HEAD"], fx.repo)
-            sh(["checkout", "master"], fx.repo)
-            (fx.repo / "a.txt").write_text("ok")
-            sh(["add", "."], fx.repo); sh(["commit", "-m", "later base fix"], fx.repo)
-        fx.base = sh(["rev-parse", "HEAD"], fx.repo)
-        for sid, path in (("L-spec-9001", "a.txt"), ("L-spec-9002", "b.txt"), ("L-spec-9003", "c.txt")):
-            if stale and sid == "L-spec-9001":
-                continue
-            sh(["checkout", "-B", fx.branches[sid], fx.base], fx.repo)
-            value = ("bad" if sid == "L-spec-9001" and mode in ("one", "two", "all", "mixed", "second") else
-                     "bad" if sid == "L-spec-9002" and mode in ("two", "all", "second", "stale") else
-                     "uncertain" if sid == "L-spec-9002" and mode == "mixed" else "ok")
-            (fx.repo / path).write_text(value)
-            sh(["add", "."], fx.repo); sh(["commit", "--allow-empty", "-m", sid], fx.repo)
-        sh(["checkout", "live-scratch"], fx.repo)
-        fx.service._RECHECK_PLUGIN = base_red._RECHECK_PLUGIN
-        selected = nodes[:1] if mode in ("one", "none", "second") else nodes
-        fx.run_n(1, 1, red(selected))
-        fx.run_n(2, 1 if mode == "second" else 0, red(nodes[1:]) if mode == "second" else GREEN)
-        for number in range(3, 9):
-            fx.run_n(number, 0, GREEN)
-        invocations = []
-        original = window_gate.local_owners
-        def observed(repo, project, entries, ids, **kw):
-            last_red = [e for e in fold.read_events() if e["type"] == "window-tree-verified"][-1]
-            assert last_red["new_ids"] == ids and last_red["green"] is False
-            invocations.append(dict(members=[e[0] for e in entries], ids=ids, base=kw["window_base"]))
-            return original(repo, project, entries, ids, **kw)
-        members = list(fx.branches)[:2] if mode == "all" else list(fx.branches)
-        with patch.object(grading_env, "_project_row", return_value={"venv": "/opt/albert-scott/.venv", "node_dirs": []}), \
-             patch("loadgate.begin", return_value=None), \
-             patch.object(window_gate, "local_owners", side_effect=observed):
-            result = fx.go(specs=members)
-        reader = subprocess.run(["/usr/bin/python3", "-c",
-            "import sys,json;sys.path.insert(0,sys.argv[1]);import fold;print(json.dumps(fold.read_events()))", str(HERE.resolve())],
-            env=dict(os.environ, DOIT_ROOT=str(fx.root)), capture_output=True, text=True, timeout=20)
-        assert reader.returncode == 0, reader.stderr
-        rows = json.loads(reader.stdout)
-        drops = [r for r in rows if r["type"] == "window-dropped"]
-        expected = {"one": ["L-spec-9001"], "two": ["L-spec-9001", "L-spec-9002"],
-                    "all": ["L-spec-9001", "L-spec-9002"],
-                    "none": [], "mixed": ["L-spec-9001"], "second": ["L-spec-9001", "L-spec-9002"],
-                    "stale": ["L-spec-9002"]}[mode]
-        assert [r["subject"] for r in drops] == expected, (mode, drops)
-        assert result == (2 if mode == "all" else 1), (mode, result)
-        if mode == "all":
-            assert sh(["rev-parse", "master"], fx.repo) == fx.base and len(fx.calls()) == 1
-        assert invocations and invocations[0]["ids"] == selected and invocations[0]["base"] == fx.base
-        assert invocations[0]["members"] == members
-        if mode == "second":
-            assert len(invocations) == 2 and invocations[1]["ids"] == nodes[1:]
-        assert bool([r for r in rows if r["type"] == "window-bisected"]) == (mode == "none")
-        for drop in drops:
-            owned = nodes[:1] if drop["subject"] == "L-spec-9001" else nodes[1:]
-            assert drop["reason"] == "owner" and drop["evidence"] == "local-repro"
-            assert drop["tests"] == drop["owned_nodes"] == drop["nodes"] == owned
-            assert all(k in drop for k in ("branch", "window", "run_url", "quarantined", "unattributed_nodes"))
-            sid = drop["subject"]
-            before = datetime.now(timezone.utc) - timedelta(hours=1)
-            fixtures = [dict(type="spec-written", subject=sid, ts=before.isoformat(), actor="spec-writer",
-                             project="albert-scott", path=str(fx.tmp / "spec.md"), footprint=["a.txt"],
-                             _src="L-spec-writer-fixture.jsonl:1"),
-                        dict(type="build-done", subject=sid, ts=before.isoformat(), actor="builder", status="DONE",
-                             project="albert-scott", _src="L-builder-fixture.jsonl:1")]
-            evidence = fixtures + rows
-            steps = nextstep.next_steps(evidence, {sid: {"state": "graded", "evs": fixtures + [drop]}},
-                                       datetime.now(timezone.utc), lane_rules.load())
-            assert any(s.item == sid and s.action == "rebuild" for s in steps), steps
-            spec = fx.tmp / "spec.md"
-            spec.write_text("## Verification\n```bash\n/usr/bin/python3 -c 'print(1)'\n```\n")
-            verification = fx.tmp / "verify.sh"
-            verification.write_text("#!/bin/bash\ntrue\n")
-            args = types.SimpleNamespace(subject=sid, role="builder", project="albert-scott", repo=str(fx.repo),
-                                         base_sha=fx.base, worktree=str(fx.repo), charter=None,
-                                         produces=None, conventions=None, hint=None)
-            with patch.object(fold, "read_events", return_value=evidence), \
-                 patch.object(packet, "ROOT", fx.root), patch.object(packet, "CONTENT", fx.tmp), \
-                 patch.object(packet, "write_verify_script", return_value=verification):
-                ctx = packet.Ctx(args)
-                lines = packet.p_builder(ctx)
-            marker = next(i for i, line in enumerate(lines) if line.startswith("Dropped from window"))
-            packet_nodes = [line.strip() for line in lines[marker + 1:] if line.startswith("   test_")]
-            assert packet_nodes == owned, (packet_nodes, owned)
-            drop["reader_rebuild"] = "rebuild"
-            drop["packet_nodes"] = packet_nodes
-        report[mode] = dict(exit=result, invocations=invocations, persisted_drops=drops,
-                            window_events=[r for r in rows if r["type"] in ("window-tree-verified", "window-bisected")],
-                            fresh_process_read=True)
-    # The optional callback also runs before a recursive split. Old direct
-    # callers still split immediately when they omit it.
-    order = []
-    def prepare(batch):
-        order.append(("prepare", batch))
-        return "candidate", batch, {}
-    def judge(candidate, batch):
-        return dict(state="red" if len(batch) > 1 else "green", nodes=nodes[:1], repo="fixture", paths={})
-    def local(batch, result):
-        order.append(("local", batch))
-        return {batch[0]: nodes[:1]}
-    def dropped(batch, result, reason):
-        order.append(("drop", batch, reason))
-    with patch.object(window_gate, "owners", return_value=[]):
-        chosen = window_gate.bisect_window("recursive", ["A", "B", "C", "D"], prepare, judge,
-                                           dropped, lambda _: None, local=local)
-    assert chosen == ("candidate", ["B"]), (chosen, order)
-    assert [(v[0], v[1]) for v in order if v[0] == "local"] == [("local", ["A", "B"]), ("local", ["C", "D"])]
-    report["recursive"] = order
-    return report
+    """The former local-owner integration now exercises its targeted replacement."""
+    import io, unittest
+    from test_window_attribution import Gate
+    output = io.StringIO()
+    suite = unittest.defaultTestLoader.loadTestsFromTestCase(Gate)
+    result = unittest.TextTestRunner(stream=output, verbosity=2).run(suite)
+    assert result.wasSuccessful(), output.getvalue()
+    return dict(replacement="parallel-targeted-attribution", cases=result.testsRun,
+                full_retry_limit=1, master_move="full remainder green only",
+                old_local_probe="retained as standalone API; removed from red-window path")
 
 
 def local_owner_ac4():
@@ -3206,7 +2975,8 @@ def ac7_tree_guard_attribution():
         else:
             check(not prefix_calls, "AC7 non-guard path precedence " + mode)
             check(all(guard not in r["nodes"] for r in rows), "AC7 bisection never blames guards " + mode)
-            check(fx.events("window-bisected"), "AC7 existing bisection kept " + mode)
+            check(not fx.events("window-bisected") and fx.events("escalation-blocking"),
+                  "AC7 targeted/second-red uncertainty preserves guards " + mode)
     proof_1664("AC7", start)
 
 

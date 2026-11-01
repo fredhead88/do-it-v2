@@ -184,7 +184,7 @@ class Disposition(unittest.TestCase):
         return result
 
     def attempt(self, names, judgments, *, base_ids=(), complete=True, pg=False, fixes=False,
-                base_pg="green", migrations=(), exhaust=False, uncovered=False):
+                base_pg="green", migrations=(), uncovered=False, attribution=None):
         entries = self.entries(names)
         calls, advanced, verified = [], [], {}
         def verify(repo, cand, required, window):
@@ -219,16 +219,8 @@ class Disposition(unittest.TestCase):
         with contextlib.ExitStack() as stack:
             for item in patches:
                 stack.enter_context(item)
-            if exhaust:
-                real_bisect = wg.bisect_window
-                def exhaust_then_bisect(window, live, prepare, judge, drop, conflict):
-                    # Stress the callback's shared bound, regardless of how many
-                    # requests a bisection strategy attempts to make.
-                    cand, kept, _ = prepare(live)
-                    for _ in range(2 * len(names) + 2):
-                        judge(cand, kept)
-                    return real_bisect(window, live, prepare, judge, drop, conflict)
-                stack.enter_context(patch.object(wg, "bisect_window", side_effect=exhaust_then_bisect))
+            if attribution is not None:
+                stack.enter_context(patch.object(wg, "targeted_attribution", return_value=attribution))
             if migrations:
                 stack.enter_context(patch.dict(os.environ, DOIT_WINDOW_RECHAIN="on"))
                 stack.enter_context(patch.object(wg.rechain, "added_versions", side_effect=lambda r, b, s: [s] if s in [e[2] for e in entries if e[0] in migrations] else []))
@@ -281,62 +273,45 @@ class Disposition(unittest.TestCase):
         print("L-spec-1712 AC2 ok")
 
     def test_AC3(self):
-        modes = ("mixed", "second", "uncertain", "budget", "exhaust", "migration")
+        modes = ("polluter", "pairs", "no-attribution", "phase-error", "red-remainder", "migration")
+        observations = []
         for mode in modes:
-            with contextlib.nullcontext():
-                path = self.root / "events" / "L-executor-0001.jsonl"
-                if path.exists():
-                    path.unlink()
-                def judgment(kept, n):
-                    if n == 1:
-                        return "red", [OWNED, UNKNOWN] if mode == "mixed" else [UNKNOWN] if mode in ("budget", "exhaust", "uncertain") else [OWNED]
-                    if mode in ("budget", "exhaust"):
-                        return "red", [UNKNOWN]
-                    if mode == "uncertain" and kept == ("B", "C"):
-                        return "undetermined", []
-                    if mode in ("mixed", "second") and len(kept) > 1:
-                        return "red", [UNKNOWN]
-                    if mode == "mixed" and kept == ("C",):
-                        return "red", [UNKNOWN]
-                    return "green", []
-                rc, calls, advanced, rows = self.attempt("ABC", judgment,
-                    migrations=("A", "B") if mode == "migration" else (), exhaust=mode == "exhaust")
-                drops = [r for r in rows if r["type"] == "window-dropped"]
-                expected = ["A", "C"] if mode == "mixed" else ["A"] if mode in ("second", "migration") else list("ABC") if mode == "budget" else []
-                self.assertEqual([r["subject"] for r in drops], expected)
-                self.assertLessEqual(len(calls), 7)
-                for row in drops:
-                    self.assertTrue(row["reason"])
-                    self.assertIn("owned_nodes", row)
-                    self.assertIn("unattributed_nodes", row)
-                    self.assertEqual(row["owned_nodes"], [OWNED] if row["subject"] == "A" and mode in ("mixed", "second", "migration") else [])
-                    self.assertEqual(row["unattributed_nodes"], [UNKNOWN] if mode in ("mixed", "budget") else [])
-                    if row["reason"] == "bisect-single":
-                        self.assertIn((row["subject"],), calls)
-                if mode in ("mixed", "second"):
-                    self.assertEqual(advanced[0][1], ["B"])
-                    self.assertNotIn(("B", "C"), [tuple(a[1]) for a in advanced])
-                if mode in ("budget", "exhaust", "migration"):
-                    self.assertFalse(advanced)
-                if mode == "exhaust":
-                    self.assertEqual(len(calls), 7)
-                    self.assertTrue(any("budget exhausted" in r.get("why", "") for r in rows))
-                if mode == "uncertain":
-                    self.assertEqual(advanced[0][1], ["A"])
-                    self.assertTrue(any(r["type"] == "escalation-blocking" for r in rows))
-        # The production bisection must never judge a union of independently green halves.
-        seen = []
-        with patch.object(wg, "ev"):
-            chosen = wg.bisect_window("w", list("ABCD"),
-                lambda half: (tuple(half), half, {}),
-                lambda cand, kept: seen.append(cand) or {"state": "green"},
-                lambda *a: self.fail("green half dropped"), lambda *a: None)
-        self.assertEqual(seen, [("A", "B"), ("C", "D")])
-        self.assertEqual(chosen, (("A", "B"), ["A", "B"]))
-        self.response("AC3", {"cases": list(modes), "judgment_limit": 7,
-            "independent_green_halves": seen, "selected": chosen[1],
-            "mixed_drops": ["A", "C"], "second_round_drops": ["A"],
-            "exhaustion_drops": [], "unsafe_migration_remainder": "pending"})
+            path = self.root / "events" / "L-executor-0001.jsonl"
+            if path.exists():
+                path.unlink()
+            def judgment(kept, n):
+                if n == 1:
+                    return "red", [OWNED] if mode == "migration" else [UNKNOWN]
+                return ("red", [UNKNOWN]) if mode == "red-remainder" else ("green", [])
+            attributed = mode in ("polluter", "pairs", "red-remainder")
+            plan = dict(drop={"C": [UNKNOWN]} if attributed else {}, environment=[],
+                        unresolved=[] if attributed else [UNKNOWN], need_pairs=[],
+                        mode="pairs" if mode == "pairs" else "singles", base_sha=self.sha,
+                        evidence={"fixture": {"states": {UNKNOWN: "undetermined" if mode == "phase-error" else "red"}}})
+            rc, calls, advanced, rows = self.attempt("ABC", judgment, attribution=plan,
+                migrations=("A", "B") if mode == "migration" else ())
+            drops = [r for r in rows if r["type"] == "window-dropped"]
+            expected = ["A"] if mode == "migration" else ["C"] if attributed else []
+            self.assertEqual([r["subject"] for r in drops], expected)
+            self.assertLessEqual(len(calls), 2)
+            self.assertFalse(any(r["type"] == "window-bisected" for r in rows))
+            if attributed:
+                self.assertEqual(drops[0]["reason"], "targeted-attribution")
+                self.assertEqual(drops[0]["nodes"], [UNKNOWN])
+                self.assertEqual(drops[0]["tests"], [UNKNOWN])
+                self.assertEqual(drops[0]["owned_nodes"], [UNKNOWN])
+            if mode in ("polluter", "pairs"):
+                self.assertEqual(rc, 1)
+                self.assertEqual(calls, [("A", "B", "C"), ("A", "B")])
+                self.assertEqual(advanced[0][1], ["A", "B"])
+                self.assertFalse(any(r["type"] == "escalation-blocking" for r in rows))
+            else:
+                self.assertEqual(rc, 2)
+                self.assertFalse(advanced)
+                self.assertTrue(any(r["type"] == "escalation-blocking" for r in rows))
+            observations.append(dict(mode=mode, calls=calls, dropped=expected, exit=rc))
+        self.response("AC3", {"cases": observations, "full_retry_limit": 1,
+                              "diagnostics_never_advance": True, "unsafe_migration_remainder": "pending"})
         print("L-spec-1712 AC3 ok")
 
     def test_AC4(self):

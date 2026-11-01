@@ -139,6 +139,23 @@ class WindowPolicyTests(unittest.TestCase):
         self.assertFalse(any(e['type']=='window-dropped' and e.get('reason')=='escalation-default'
                              for e in fold.read_events()))
 
+    def test_targeted_proof_stays_dropped_but_newest_half_fallback_requeues(self):
+        esc = self.seed()
+        self.add('window-targeted-attribution', window=WIN, candidate='a'*40,
+                 base_sha='b'*40, ids=[NODE], nodes=[NODE],
+                 drop={A: [NODE], B: [NODE]}, proven={A: [NODE]},
+                 environment=[], unresolved=[], mode='newest-half')
+        self.add('window-dropped', A, window=WIN, nodes=[NODE], owned_nodes=[NODE],
+                 reason='targeted-attribution', evidence='targeted-repro')
+        self.add('window-dropped', B, window=WIN, nodes=[NODE], owned_nodes=[],
+                 reason='targeted-attribution', evidence='targeted-fallback')
+        import window_policy
+        self.assertTrue(window_policy.apply_default(WIN, esc['_src'], NOW))
+        self.assertEqual([(r['spec'], r['batch']) for r in merge_queue.queue(fold.read_events())], [(B, None)])
+        requeues = [e for e in fold.read_events()
+                    if e['type'] == 'queue-add' and e.get('rule') == 'escalation-default']
+        self.assertEqual([(e['subject'], e['nodes']) for e in requeues], [(B, [NODE])])
+
     def test_default_preserves_shipped_specs_and_another_windows_reservation(self):
         esc=self.seed()
         self.add('shipped',A,minutes=-1,window='win-new',sha='a'*40)

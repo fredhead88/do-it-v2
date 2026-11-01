@@ -303,6 +303,7 @@ EMITS["ci-runner-set"] = {"ci-runner", "operator"}
 EMITS["bill-check"] = {"gh-bill"}
 EMITS["window-tree-verified"] = {"executor", "operator"}
 EMITS["window-bisected"] = {"executor", "operator"}
+EMITS["window-targeted-attribution"] = {"executor", "operator"}
 
 # L-spec-1143: admit the train and batcher before their emitters land.
 EMITS["window-run-minutes"] = {"executor", "tick", "operator"}
@@ -352,6 +353,7 @@ REQUIRED_ROWS = {
     "bill-check": ("date", "yday", "mtd"),
     "window-tree-verified": ("window", "sha", "tree"),
     "window-bisected": ("window", "halves"),
+    "window-targeted-attribution": ("window", "candidate", "base_sha", "ids"),
     "window-run-minutes": ("window", "candidate", "minutes_source"),
     "window-candidate": ("sha", "verified_on", "specs"),
     "window-cancelled": ("after", "reason"),
