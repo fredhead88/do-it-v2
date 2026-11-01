@@ -11,12 +11,14 @@ import scratch
 
 
 def run(repo, sha, command):
+    # Ambient Git routing must not redirect setup, review commands or cleanup.
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     parent = Path(tempfile.mkdtemp(prefix="review-", dir=scratch.sub("reviewer")))
     tree = parent / "tree"
     try:
         subprocess.run(["git", "-C", str(repo), "worktree", "add", "--detach", str(tree), sha],
-                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-        proc = subprocess.Popen(command, cwd=tree, start_new_session=True)
+                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, env=env)
+        proc = subprocess.Popen(command, cwd=tree, start_new_session=True, env=env)
         try:
             return proc.wait()
         except BaseException:
@@ -32,7 +34,7 @@ def run(repo, sha, command):
             raise
     finally:
         subprocess.run(["git", "-C", str(repo), "worktree", "remove", "--force", str(tree)],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
         shutil.rmtree(parent)
 
 
