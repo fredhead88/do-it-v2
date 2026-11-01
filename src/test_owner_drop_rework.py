@@ -34,11 +34,8 @@ def dropped(minute=-10, subject=SID, **fields):
 
 
 def prechange(module, name):
-    """Execute the actual base function against the same dependencies/fixtures."""
-    base = subprocess.check_output(['git', 'merge-base', 'HEAD', 'main'],
-                                   cwd=ROOT, text=True).strip()
-    source = subprocess.check_output(['git', 'show', f'{base}:src/{module.__name__}.py'],
-                                     cwd=ROOT, text=True)
+    """Execute the checked-in pre-fix function, independent of mutable main."""
+    source = (ROOT / 'src/fixtures/owner_drop_rework_before.py').read_text()
     node = next(n for n in ast.parse(source).body
                 if isinstance(n, ast.FunctionDef) and n.name == name)
     namespace = dict(vars(module))
@@ -52,6 +49,11 @@ class OwnerDropReworkTests(unittest.TestCase):
         cls.old_rebuild = staticmethod(prechange(ns, '_rebuild'))
         cls.old_builder = staticmethod(prechange(packet, 'p_builder'))
         cls.rules = lane_rules.load()
+
+    def test_prechange_is_independent_of_git_history(self):
+        with patch.object(subprocess, 'check_output', side_effect=AssertionError('Git history unavailable')):
+            self.assertTrue(callable(prechange(ns, '_rebuild')))
+            self.assertTrue(callable(prechange(packet, 'p_builder')))
 
     def history(self, subject=SID):
         return [event('spec-written', -60, subject),
@@ -71,7 +73,7 @@ class OwnerDropReworkTests(unittest.TestCase):
         current, before = self.step(events), self.step(events, old=True)
         self.assertEqual(current.action, 'rebuild')
         self.assertIsNone(before.action)
-        context = dict(evs=events, spec=dict(state='graded'), dependency=None)
+        context = dict(evs=events, spec=dict(state='graded'), dependency=None, sid=SID, now=NOW)
         self.assertIsNone(self.old_rebuild(context))
         for kind, extra in [('build-started', {'spawn': 'L-builder-9001'}),
                             ('autodispatched', {'role': 'builder', 'spawn': 'L-builder-9001'})]:
