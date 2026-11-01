@@ -128,7 +128,7 @@ assert d3["kind"] == "goal"
 assert [c["id"] for c in d3["children"]] == sorted([C3A, C3B]), d3["children"]
 open_row = next(c for c in d3["children"] if c["id"] == C3B)
 assert len(open_row["specs"]) == 1, open_row
-assert open_row["specs"][0]["waiting_on"] == f"{plain.NEXT['written'][0]} ({plain.NEXT['written'][1]})", open_row
+assert open_row["specs"][0]["waiting_on"] == "ready to audit: one blind spec audit due (tick)", open_row
 expected_mid3 = f"Where it stands: {d3['status']['phrase']}; 1 of 2 specs proven, 0 being built, 1 waiting"
 assert d3["catch_me_up"][1] == expected_mid3, d3["catch_me_up"]
 hand_spend = brief._sum_spends([brief._spend_for_subject(C3A, events3), brief._spend_for_subject(C3B, events3)])
