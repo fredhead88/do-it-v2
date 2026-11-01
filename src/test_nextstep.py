@@ -55,6 +55,21 @@ def replay(name):
 
 
 class NextStepTests(unittest.TestCase):
+    def test_current_blocked_build_never_grades_stale_success(self):
+        from test_fold_stalls import admitted, row, outcome, NOW as cut, SID as sid, evidence
+        checked = []
+        for tied in (False, True):
+            minute = 0 if tied else 1
+            for history, expected_grade in [([outcome('BLOCKED')], False),
+                    ([outcome('DONE'), outcome('BLOCKED', minute=minute)], False),
+                    ([outcome('DONE'), outcome('BLOCKED', minute=minute), outcome('DONE', minute=minute + 1)], True)]:
+                with admitted([row('spec-written', 'planner', minute=-10), *history]) as (_, events, folded):
+                    step = next(s for s in self.steps(events, folded[0], now=cut) if s.item == sid)
+                    self.assertNotIn('unknown spec state', step.reason)
+                    self.assertEqual(step.action == 'grade', expected_grade, step)
+                    checked.append(asdict(step))
+        evidence('AC6', checked)
+
     def setUp(self):
         self.rules = lr.load()
 

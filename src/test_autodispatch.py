@@ -1260,5 +1260,27 @@ class VanishedRecoveryTests(unittest.TestCase):
                                  ['build-started', 'spawn-stale'])
 
 
+def test_current_builder_grader_trigger():
+    from test_fold_stalls import admitted, row, outcome, ABSENT, evidence
+    checked = []
+    for tied in (False, True):
+        minute = 0 if tied else 1
+        for status in ['BLOCKED', 'NEEDS_CONTEXT', 'OTHER', '', None, ABSENT]:
+            with admitted([row('spec-written', 'planner', minute=-10), outcome('DONE'),
+                           outcome(status, minute=minute)]) as (_, events, folded):
+                assert autodispatch._grader_trigger(events) == (None, None), status
+                checked.append([str(status) if status is not ABSENT else 'absent', None])
+        for history, name in [([outcome('DONE'), outcome('BLOCKED', minute=minute), outcome('DONE', minute=minute+1)], 'build-done'),
+                ([outcome('BLOCKED'), row('decision', 'operator', minute=2, regrade='yes')], 'regrade'),
+                ([outcome('BLOCKED'), row('decision', 'operator', minute=2, regrade='yes', rework='yes')], None),
+                ([outcome('DONE', actor='executor')], None),
+                ([row('rejected-criterion', 'grader', minute=-1, criterion='AC1'), outcome('DONE')], 'rework')]:
+            with admitted([row('spec-written', 'planner', minute=-10), *history]) as (_, events, _):
+                assert autodispatch._grader_trigger(events)[1] == name, history
+    evidence('AC9', checked)
+
+
+test_current_builder_grader_trigger()
+
 if __name__ == '__main__':
     unittest.main(argv=[sys.argv[0]])

@@ -92,15 +92,20 @@ def classify(spec, specs, by_subject, context, now, dwell):
     if spec['state'] not in dwell or spec['age'] <= dwell[spec['state']]:
         return None
     trigger, role = action(evs)
+    block = block_evidence(evs) if spec['state'] == 'blocked' else None
 
     def result(bucket, reason, owner='executor', event=None, blocker=None, deadline=None,
                hold_kind=None, due=None):
+        human = event and event.get('type') in {'question', 'escalation-blocking'}
+        if block and bucket == 'STUCK' and not human:
+            reason, owner = block
         anchor = event or trigger or (evs[0] if evs else {})
         if bucket == 'STUCK' and due is None:
             due = fold.ts(anchor['ts']) if anchor else now
         return dict(spec=sid, state=spec['state'], bucket=bucket, hold_kind=hold_kind,
                     due_since=due.isoformat() if bucket == 'STUCK' else None,
-                    reason=text(reason), owner=text(owner), blocker=blocker, deadline=deadline,
+                    reason=text(reason), why=block[0] if block else text(reason),
+                    owner=text(owner), blocker=blocker, deadline=deadline,
                     since=anchor.get('ts'), src=anchor.get('_src'), age_days=spec['age'],
                     limit_min=dwell[spec['state']] * 1440)
 
@@ -246,3 +251,168 @@ def rows(specs, by_subject, now, dwell):
         except Exception as exc:
             raise ValueError(f'classification unavailable for {spec["id"]}: {exc}') from exc
     return out
+
+
+def dwell_days(by_subject):
+    """Expected dwell per state, measured from the log's own stage crossings — the
+    fallback stands until fold.DWELL_MIN_N specs have crossed. Twice the MEDIAN crossing,
+    not twice the longest: one spec that sat over a weekend would otherwise raise
+    the bar for every spec after it, and a wedge alarm nothing can trip is worse
+    than no alarm."""
+    import statistics
+    out = dict(fold.DWELL_DAYS)
+    for state, (enter, leave) in fold.STAGES.items():
+        obs = []
+        for evs in by_subject.values():
+            a = next((e for e in evs if e["type"] == enter), None)
+            b = a and next((e for e in evs if e["type"] == leave
+                            and fold.ts(e["ts"]) >= fold.ts(a["ts"])), None)
+            if b:
+                obs.append((fold.ts(b["ts"]) - fold.ts(a["ts"])).total_seconds() / 86400)
+        if len(obs) >= fold.DWELL_MIN_N:
+            out[state] = 2 * statistics.median(obs)
+    return out
+
+
+def stall_rows(events=(), specs=None, *, now=None, dwell=None, by_subject=None):
+    """One classified row per aged spec, shared by board and realm.
+
+    Supply the already-folded by_subject to avoid folding twice. This API only
+    reads ledger facts and prerequisite plans; it never ticks or dispatches.
+    """
+    if by_subject is None:
+        folded = fold.fold(events)
+        specs = folded[0] if specs is None else specs
+        by_subject = folded[3]
+    clock = now or fold.NOW
+    specs = {sid: {**s, 'age': (clock - fold.ts(s['evs'][-1]['ts'])).total_seconds() / 86400}
+             for sid, s in (specs or {}).items()}
+    return rows(specs, by_subject, clock, dwell or fold.dwell_days(by_subject))
+
+
+def wedged(spec, dwell=None, *, events=None, specs=None, by_subject=None, now=None):
+    """Only classified STUCK is a WEDGE; pass ledger context for external holds.
+
+    The two-argument form retains standalone spec checks. Cross-spec wave and
+    capability facts require the same admitted context the board/realm use.
+    """
+    if dwell is None:
+        import dispatch
+        selected = {sid: s for sid, s in (specs or {spec['id']: spec}).items()
+                    if s['state'] != 'unknown' and s['state'] not in dispatch.SETTLED_STATES}
+        specs = selected
+        dwell = {s['state']: -1 for s in selected.values()}
+        if spec['id'] not in selected:
+            return False
+    if events is not None or by_subject is not None:
+        found = fold.stall_rows(events or (), specs or {spec['id']: spec}, now=now,
+                           dwell=dwell, by_subject=by_subject)
+        return any(r['spec'] == spec['id'] and r['bucket'] == 'STUCK' for r in found)
+    found = rows({spec['id']: spec}, {spec['id']: spec.get('evs', [])}, now or fold.NOW,
+                 dwell or fold.DWELL_DAYS)
+    return bool(found and found[0]['bucket'] == 'STUCK')
+
+
+def stall_lane_rows(events, specs=None, now=None, *, by_subject=None):
+    """Realm's lane-compatible view; reason_live is never guessed from age."""
+    import dispatch
+    if specs is None or by_subject is None:
+        folded = fold.fold(events)
+        specs = folded[0] if specs is None else specs
+        by_subject = folded[3] if by_subject is None else by_subject
+    unfinished = {sid: s for sid, s in specs.items()
+                  if s['state'] != 'unknown' and s['state'] not in dispatch.SETTLED_STATES}
+    return [dict(r, rule='stalls', action=r['reason'], actor=r['owner'],
+                 overdue=r['bucket'] == 'STUCK', reason_live=r['bucket'] != 'STUCK')
+            for r in fold.stall_rows(events, unfinished, now=now, by_subject=by_subject,
+                                dwell={s['state']: -1 for s in unfinished.values()})]
+
+
+def step_row(step, limits, now):
+    """Map a Step to the legacy dwell row; an unknown age is always overdue."""
+    import lane_rules
+    reason = step.reason
+    if step.state == 'hold':
+        rule = ('undetermined' if reason.startswith('undetermined:') else
+                'dependency-held' if reason.startswith('held:') else
+                'wave-held' if reason.startswith('wave') else 'idle')
+    else:
+        rule = 'gate' if step.action == 'merge-gate' else step.action
+    limit = 0 if rule == 'undetermined' else limits[rule]['limit_min']
+    try:
+        overdue = (now - lane_rules._time(step.since)).total_seconds() > limit * 60
+    except (ValueError, TypeError, OverflowError):
+        rule, limit, overdue = 'undetermined', 0, True
+    return dict(spec=step.item, rule=rule, since=step.since, reason=reason,
+                action=step.action or 'none', limit_min=limit, overdue=overdue,
+                reason_live=step.owner in {'tick', 'relay', 'sweeper'} and step.trigger is not None)
+
+
+def _step_line(value):
+    """Ledger text cannot add a physical board line or a field separator."""
+    import unicodedata
+    return ' '.join(''.join(' ' if unicodedata.category(c).startswith('C') else c
+                            for c in str(value)).replace(' · ', ' / ').split())
+
+
+def newest_builder_outcome(evs):
+    """Admitted order breaks timestamp ties; body actor claims have no authority."""
+    return next((e for e in reversed(evs) if e.get('type') == 'build-done'
+                 and e.get('actor') == 'builder'), None)
+
+
+def unsuccessful_build(evs):
+    outcome = newest_builder_outcome(evs)
+    if outcome is None or outcome.get('status') == 'DONE':
+        return None
+    index = next(i for i, e in enumerate(evs) if e is outcome)
+    if any(e.get('type') == 'verdict' for e in evs[index + 1:]):
+        return None
+    return outcome
+
+
+def block_evidence(evs):
+    """A block belongs to the current spawn, or its legacy build interval."""
+    outcome = unsuccessful_build(evs)
+    if outcome is None:
+        return None
+    index = next(i for i, e in enumerate(evs) if e is outcome)
+    boundary = lambda e: e.get('actor') == 'builder' and e.get('type') in {'build-started', 'build-done'}
+    start = max((i for i, e in enumerate(evs[:index]) if boundary(e)), default=-1)
+    end = next((i for i in range(index + 1, len(evs)) if boundary(evs[i])), len(evs))
+    spawn = outcome.get('spawn')
+    blocks = [e for i, e in enumerate(evs) if e.get('type') == 'build-blocked'
+              and e.get('actor') == 'builder' and e.get('subject') == outcome.get('subject')
+              and (e.get('spawn') == spawn if spawn and e.get('spawn')
+                   else start < i < end)]
+    block = blocks[-1] if blocks else None
+    if block and block.get('reason'):
+        return text(block['reason']), text(block.get('owner') or 'executor')
+    status = repr(outcome['status']) if 'status' in outcome else 'absent'
+    return text(f'builder returned status {status}; no recorded block line'), 'executor'
+
+
+def in_flight_lines(events, specs, stalls, flag):
+    rows = []
+    for s in specs.values():
+        if s['state'] == 'building':
+            line = f"{s['id']} · {s['age']:.1f}d"
+        elif s['state'] == 'blocked':
+            why, owner = block_evidence(s['evs'])
+            r = stalls.get(s['id'], {})
+            line = (f"{s['id']} · blocked · {s['age']:.1f}d · {r.get('why', why)}"
+                    f" · owner {r.get('owner', owner)}")
+        else:
+            continue
+        rows.append((fold._spec_row_sort_key(s), line + flag(s)))
+    rows += [((-fold.age_days(e), e.get('subject', '?'), fold.raw_content_json(e)),
+              f"deploy in flight · {e.get('subject','?')} · {str(e.get('sha',''))[:7]} · "
+              f"{fold.age_days(e):.1f}d") for e in fold.in_flight_deploys(events)]
+    return [line for _, line in sorted(rows, key=lambda r: r[0])]
+
+
+def verification_lines(specs, flag):
+    return [f"{s['id']} · {s['state']} · {s['age']:.1f}d"
+            + (f"  ⚠ {s['rejects']} REJECTED, needs rework" if s['rejects'] else '') + flag(s)
+            for s in sorted((s for s in specs.values() if s['state'] in {'graded', 'reviewing', 'shipped'}),
+                            key=fold._spec_row_sort_key)]

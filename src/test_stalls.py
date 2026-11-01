@@ -23,6 +23,19 @@ SID = 'L-spec-9000'
 
 
 class Stalls(unittest.TestCase):
+    def test_blocked_build_preserves_operator_hold(self):
+        self.written()
+        self.add('build-blocked', minutes=-2901, role='builder', reason='repair needed', owner='builder')
+        self.add('build-done', minutes=-2900, role='builder', status='BLOCKED')
+        self.add('decision', minutes=-2800, role='operator', why='held on purpose: awaiting approval', owner='operator')
+        events, specs, _, _, by, _ = self.read()
+        r = fold.stall_rows(events, specs, by_subject=by)[0]
+        self.assertEqual((r['bucket'], r['owner']), ('held', 'operator'))
+        self.assertEqual(r['reason'], 'held on purpose: awaiting approval')
+        self.assertEqual(r['why'], 'repair needed')
+        from test_fold_stalls import evidence
+        evidence('AC5', dict(row=r, buckets=BUCKET_ORDER))
+
     def setUp(self):
         self.root = Path(tempfile.mkdtemp(dir=TMP.name))
         self.events = self.root / 'events'

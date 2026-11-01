@@ -563,7 +563,7 @@ def conflicts(c):
     state. Never its content (§4.6·3 item 7)."""
     mine, out = set(c.footprint()), []
     for sid, s in sorted(c.specs.items()):
-        if sid == c.a.subject or s["state"] not in ("written", "building", "graded", "reviewing"):
+        if sid == c.a.subject or s["state"] not in ("written", "building", "blocked", "graded", "reviewing"):
             continue
         fp = set((next((e for e in reversed(s["evs"]) if e["type"] == "spec-written"), {}) or {})
                  .get("footprint") or [])
@@ -1222,7 +1222,7 @@ def parse_sweep_manifest(path):
     for row in rows:
         if kind == "repo" and any(not row.get(key) for key in ("shipped_sha", "base_sha", "clone")):
             die(f"{path}: repo row requires shipped_sha, base_sha and clone")
-        want = dispatch.spec_path(row["spec"])
+        want = dispatch.spec_path(row["spec"]).resolve()
         got = pathlib.Path(row["spec_path"]).resolve()
         if got != want:
             die(f"{path}: row {row['spec']}'s spec_path {row['spec_path']!r} does not resolve "

@@ -86,7 +86,7 @@ ev, *_ = ledger(**{"L-spec-writer-0007.jsonl": [{"ts": stamp(0), "type": "spec-w
 assert {e["actor"] for e in ev} == {"spec-writer", "operator"}, {e["actor"] for e in ev}
 built = [{"ts": stamp(3), "type": "spec-written", "subject": S, "charter": C},
          {"ts": stamp(2), "type": "build-started", "subject": S},
-         {"ts": stamp(2), "type": "build-done", "subject": S}]
+         {"ts": stamp(2), "type": "build-done", "subject": S, "status": "DONE"}]
 graded = [{"ts": stamp(1), "type": "verdict", "subject": S, "confirmed": True}]
 reviewed = [{"ts": stamp(1), "type": "review", "subject": S, "depth": "gates-only"}]
 shipped = [{"ts": stamp(0), "type": "shipped", "subject": S}]
@@ -698,7 +698,7 @@ def crossed(n, days):
     return {f"L-builder-{i:02d}.jsonl": [
         {"ts": stamp(days + 1), "type": "spec-written", "subject": f"L-spec-{i:04d}"},
         {"ts": stamp(days), "type": "build-started", "subject": f"L-spec-{i:04d}"},
-        {"ts": stamp(0), "type": "build-done", "subject": f"L-spec-{i:04d}"}] for i in range(n)}
+        {"ts": stamp(0), "type": "build-done", "subject": f"L-spec-{i:04d}", "status": "DONE"}] for i in range(n)}
 _, _, _, _, by = ledger(**crossed(2, 3))
 assert fold.dwell_days(by)["building"] == 1, "two crossings is not a measurement"
 slow = {"L-builder-99.jsonl": [{"ts": stamp(4), "type": "spec-written", "subject": "L-spec-9999"},
@@ -1089,7 +1089,7 @@ free = ledger(**{
     "L-builder-01.jsonl": built + [                    # `built` carries charter C
         {"ts": stamp(3), "type": "spec-written", "subject": FS},          # no charter, anywhere
         {"ts": stamp(2), "type": "build-started", "subject": FS},
-        {"ts": stamp(2), "type": "build-done", "subject": FS}],
+        {"ts": stamp(2), "type": "build-done", "subject": FS, "status": "DONE"}],
     "L-grader-01.jsonl": graded + [{"ts": stamp(1), "type": "verdict", "subject": FS, "confirmed": True}],
     "L-reviewer-01.jsonl": reviewed + [{"ts": stamp(1), "type": "review", "subject": FS,
                                         "depth": "gates-only"}],
@@ -1539,7 +1539,7 @@ S4 = "L-spec-0145"
 sw_ac7 = [{"ts": stamp(3), "type": "spec-written", "subject": S4, "charter": C},
           {"ts": stamp(2), "type": "owed-ac", "subject": S4, "criterion": "AC7", "wake_at": stamp(-7)}]
 built4 = [{"ts": stamp(2), "type": "build-started", "subject": S4},
-          {"ts": stamp(2), "type": "build-done", "subject": S4}]
+          {"ts": stamp(2), "type": "build-done", "subject": S4, "status": "DONE"}]
 shipped4 = [{"ts": stamp(1), "type": "shipped", "subject": S4}]
 redate_due = [{"ts": stamp(0), "type": "owed-ac", "subject": S4, "criterion": "AC7", "wake_at": stamp(7)}]
 _, sp20, _, _, by20 = ledger(**{"L-spec-writer-01.jsonl": sw_ac7, "L-builder-01.jsonl": built4,
@@ -1611,7 +1611,7 @@ assert "## OWED DUE (0)" in empty_board1, empty_board1
 S2 = "L-spec-0143"
 built2 = [{"ts": stamp(3), "type": "spec-written", "subject": S2, "charter": C},
           {"ts": stamp(2), "type": "build-started", "subject": S2},
-          {"ts": stamp(2), "type": "build-done", "subject": S2}]
+          {"ts": stamp(2), "type": "build-done", "subject": S2, "status": "DONE"}]
 graded2 = [{"ts": stamp(1), "type": "verdict", "subject": S2, "confirmed": True}]
 reviewed2 = [{"ts": stamp(1), "type": "review", "subject": S2, "depth": "gates-only"}]
 shipped2 = [{"ts": stamp(10), "type": "shipped", "subject": S2}]
@@ -2113,7 +2113,7 @@ accepted_s2_files271 = {
     "L-spec-writer-02.jsonl": [
         {"ts": stamp(3), "type": "spec-written", "subject": S2_271, "charter": CID271}],
     "L-builder-02.jsonl": [{"ts": stamp(2), "type": "build-started", "subject": S2_271},
-                          {"ts": stamp(2), "type": "build-done", "subject": S2_271}],
+                          {"ts": stamp(2), "type": "build-done", "subject": S2_271, "status": "DONE"}],
     "L-grader-02.jsonl": [{"ts": stamp(1), "type": "verdict", "subject": S2_271, "confirmed": True}],
     "L-reviewer-02.jsonl": [{"ts": stamp(1), "type": "review", "subject": S2_271, "depth": "gates-only"}],
     "L-executor-02.jsonl": [{"ts": stamp(0), "type": "shipped", "subject": S2_271}],
@@ -2142,7 +2142,7 @@ shipped_only_s2_files271 = {
     "L-spec-writer-02.jsonl": [
         {"ts": stamp(3), "type": "spec-written", "subject": S2_271, "charter": CID271}],
     "L-builder-02.jsonl": [{"ts": stamp(2), "type": "build-started", "subject": S2_271},
-                          {"ts": stamp(2), "type": "build-done", "subject": S2_271}],
+                          {"ts": stamp(2), "type": "build-done", "subject": S2_271, "status": "DONE"}],
     "L-executor-02.jsonl": [{"ts": stamp(0), "type": "shipped", "subject": S2_271}],
 }
 ev10, specs10, charters10, _, _ = _kill_fixture271(shipped_only_s2_files271)
@@ -2551,7 +2551,7 @@ def _ac3_fixed_files():
         "L-builder-9440b.jsonl": [{"ts": stamp(2), "type": "build-started", "subject": AC3_S_BUILDING}],
         "L-spec-writer-9440c.jsonl": [{"ts": stamp(3), "type": "spec-written", "subject": AC3_S_GRADED}],
         "L-builder-9440c.jsonl": [{"ts": stamp(2), "type": "build-started", "subject": AC3_S_GRADED},
-                                  {"ts": stamp(2), "type": "build-done", "subject": AC3_S_GRADED}],
+                                  {"ts": stamp(2), "type": "build-done", "subject": AC3_S_GRADED, "status": "DONE"}],
         "L-spec-writer-9440d.jsonl": [{"ts": stamp(10), "type": "owed-ac", "subject": AC3_S_OWED_EV,
                                        "criterion": "AC1", "wake_at": stamp(-5)}],
         "L-executor-9440d.jsonl": [{"ts": stamp(5), "type": "shipped", "subject": AC3_S_OWED_EV}],
@@ -3271,7 +3271,7 @@ print("0470-AC11 ok")
 S0472_1, C0472_1 = "L-spec-9410", "L-charter-9410"
 built0472_1 = [{"ts": stamp(3), "type": "spec-written", "subject": S0472_1, "charter": C0472_1},
                {"ts": stamp(2), "type": "build-started", "subject": S0472_1},
-               {"ts": stamp(2), "type": "build-done", "subject": S0472_1}]
+               {"ts": stamp(2), "type": "build-done", "subject": S0472_1, "status": "DONE"}]
 graded0472_1 = [{"ts": stamp(1), "type": "verdict", "subject": S0472_1, "confirmed": True}]
 reviewed0472_1 = [{"ts": stamp(1), "type": "review", "subject": S0472_1, "depth": "gates-only"}]
 shipped0472_1 = [{"ts": stamp(0), "type": "shipped", "subject": S0472_1}]
@@ -3326,7 +3326,7 @@ print("0472-AC2 ok")
 S0472_3, C0472_3 = "L-spec-9411", "L-charter-9411"
 built0472_3 = [{"ts": stamp(3), "type": "spec-written", "subject": S0472_3, "charter": C0472_3},
                {"ts": stamp(2), "type": "build-started", "subject": S0472_3},
-               {"ts": stamp(2), "type": "build-done", "subject": S0472_3}]
+               {"ts": stamp(2), "type": "build-done", "subject": S0472_3, "status": "DONE"}]
 graded0472_3 = [{"ts": stamp(1), "type": "verdict", "subject": S0472_3, "confirmed": True}]
 reviewed0472_3 = [{"ts": stamp(1), "type": "review", "subject": S0472_3, "depth": "gates-only"}]
 shipped0472_3 = [{"ts": stamp(0), "type": "shipped", "subject": S0472_3},
@@ -3355,7 +3355,7 @@ assert p0472_1a["title"] == C0472_1, p0472_1a["title"]
 S0472_4, C0472_4 = "L-spec-9412", "L-charter-9412"
 built0472_4 = [{"ts": stamp(3), "type": "spec-written", "subject": S0472_4, "charter": C0472_4},
                {"ts": stamp(2), "type": "build-started", "subject": S0472_4},
-               {"ts": stamp(2), "type": "build-done", "subject": S0472_4}]
+               {"ts": stamp(2), "type": "build-done", "subject": S0472_4, "status": "DONE"}]
 graded0472_4 = [{"ts": stamp(1), "type": "verdict", "subject": S0472_4, "confirmed": True}]
 reviewed0472_4 = [{"ts": stamp(1), "type": "review", "subject": S0472_4, "depth": "gates-only"}]
 shipped0472_4 = [{"ts": stamp(0), "type": "shipped", "subject": S0472_4}]
@@ -3383,7 +3383,7 @@ print("0472-AC5 ok")
 S0472_6a, C0472_6a = "L-spec-9413", "L-charter-9413"
 built0472_6a = [{"ts": stamp(3), "type": "spec-written", "subject": S0472_6a, "charter": C0472_6a},
                 {"ts": stamp(2), "type": "build-started", "subject": S0472_6a},
-                {"ts": stamp(2), "type": "build-done", "subject": S0472_6a}]
+                {"ts": stamp(2), "type": "build-done", "subject": S0472_6a, "status": "DONE"}]
 graded0472_6a = [{"ts": stamp(1), "type": "verdict", "subject": S0472_6a, "confirmed": True}]
 reviewed0472_6a = [{"ts": stamp(1), "type": "review", "subject": S0472_6a, "depth": "gates-only"}]
 shipped0472_6a = [{"ts": stamp(5), "type": "shipped", "subject": S0472_6a}]
@@ -3416,7 +3416,7 @@ assert row0472_6a in board0472_6a, (row0472_6a, board0472_6a)
 S0472_6b, C0472_6b = "L-spec-9414", "L-charter-9414"
 built0472_6b = [{"ts": stamp(3), "type": "spec-written", "subject": S0472_6b, "charter": C0472_6b},
                 {"ts": stamp(2), "type": "build-started", "subject": S0472_6b},
-                {"ts": stamp(2), "type": "build-done", "subject": S0472_6b}]
+                {"ts": stamp(2), "type": "build-done", "subject": S0472_6b, "status": "DONE"}]
 graded0472_6b = [{"ts": stamp(1), "type": "verdict", "subject": S0472_6b, "confirmed": True}]
 reviewed0472_6b = [{"ts": stamp(1), "type": "review", "subject": S0472_6b, "depth": "gates-only"}]
 shipped0472_6b = [{"ts": stamp(0), "type": "shipped", "subject": S0472_6b}]
@@ -5060,3 +5060,9 @@ def test_nightly_fold_reexport():
 
 
 test_nightly_fold_reexport()
+
+
+from test_fold_stalls import evidence as _blocked_evidence
+_blocked_evidence('AC4', dict(fold_lines=len(pathlib.Path(fold.__file__).read_text().splitlines()),
+                             packet_lines=len(pathlib.Path(__file__).with_name('packet.py').read_text().splitlines()),
+                             spec_states=fold.SPEC_STATES, regression='all fold assertions passed'))
