@@ -263,10 +263,16 @@ def check_evidence1109():
             signed("AC6", rows)
             dispatch.emit(ledger, {"subject": subject, "project": "fixture"}, "build-done",
                           ready_sha=ready, status="DONE")
+            # Runner publications must be newer than the re-emitted build.
+            from datetime import datetime, timedelta
+            build_ts = json.loads(ledger.read_text().splitlines()[-1])["ts"]
+            event["ts"] = (datetime.fromisoformat(build_ts.replace("Z", "+00:00"))
+                           + timedelta(seconds=1)).isoformat()
+            failed_ts = (datetime.fromisoformat(event["ts"]) + timedelta(seconds=1)).isoformat()
             # Restore good command and use malformed runner publications.
             path.write_text(raw)
             publish(event, {"v": 1, "type": "evidence-bundle-failed", "subject": subject,
-                            "sha": ready, "reason": "runner failure", "ts": "2026-10-18T00:02:00Z"})
+                            "sha": ready, "reason": "runner failure", "ts": failed_ts})
             before = len(calls)
             def refused():
                 rows = drive()

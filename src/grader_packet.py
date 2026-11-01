@@ -5,6 +5,7 @@ import os
 import pathlib
 import re
 import subprocess
+from datetime import datetime
 
 DIFF_CAP = 3000
 EXECUTION_CAPABILITIES = frozenset({"git", "node_modules", "db", "db-schema", "env-file", "tools", "view-paths"})
@@ -38,6 +39,11 @@ def bundle_for(events, subject, ready_sha):
     if not event:
         return None
     try:
+        build = _latest(events, subject, 'build-done')
+        if build and (build.get('ready_sha') != ready_sha
+                      or datetime.fromisoformat(event['ts'].replace('Z', '+00:00'))
+                      <= datetime.fromisoformat(build['ts'].replace('Z', '+00:00'))):
+            return None
         directory = root() / "content" / "evidence" / subject
         path = _contained(event["path"], directory)
         raw = path.read_bytes()
@@ -106,8 +112,17 @@ def gate(events, subject, packet, emit, fail):
     """Called after budget/commit/disk gates and before routing, on every backend."""
     build = _latest(events, subject, "build-done") or {}
     ready = build.get("ready_sha")
-    bundle_event = _latest(events, subject, "evidence-bundle", ready)
-    failed = _latest(events, subject, "evidence-bundle-failed", ready)
+    evidence = [e for e in events if e.get('subject') == subject
+                and e.get('type') in {'evidence-bundle', 'evidence-bundle-failed'}
+                and e.get('sha') == ready and ready
+                # Undated legacy failures can retain a no-spend infra hold;
+                # they can never establish readiness for paid grading.
+                and (e['type'] == 'evidence-bundle-failed' and not build.get('ts')
+                     or build.get('ts') and e.get('ts')
+                     and datetime.fromisoformat(e['ts'].replace('Z', '+00:00'))
+                     > datetime.fromisoformat(build['ts'].replace('Z', '+00:00')))]
+    bundle_event = _latest(evidence, subject, "evidence-bundle", ready)
+    failed = _latest(evidence, subject, "evidence-bundle-failed", ready)
     # Ledger order breaks timestamp ties, matching the fold's latest-event rule.
     failure_newer = failed and (not bundle_event or events.index(failed) > events.index(bundle_event))
     bundle = bundle_for(events, subject, ready) if bundle_event else None

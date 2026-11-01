@@ -335,8 +335,14 @@ def launch(step, *, dispatcher):
         if not getattr(dispatcher, 'dry_run', False):
             _record_held_skips(events, {step.item: {'state': 'written'}})
         return None
-    if step.action != 'audit' and autodispatch._standing_autodispatch_failed(evs):
-        return None
+    if step.action != 'audit':
+        failure = autodispatch._standing_autodispatch_failed(evs)
+        # Only a due retry or a newer trigger can release a standing failure.
+        if failure and not (step.action in ('grade', 'regrade')
+                            and nextstep._attempt_role(failure) == 'grader'
+                            and (step.reason.startswith('retry due:')
+                                 or nextstep._time(step.since) > nextstep._time(failure['ts']))):
+            return None
     if getattr(dispatcher, 'dry_run', False):
         return None
     if step.action == 'merge':

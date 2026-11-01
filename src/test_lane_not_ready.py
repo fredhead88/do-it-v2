@@ -81,9 +81,10 @@ class LaneNotReadyTests(unittest.TestCase):
 
     def test_ac1_bundle_arrived(self):
         events = [event('spec-written', -40),
-                  event('build-done', -30, actor='builder', status='DONE'),
-                  event('spawn-failed', -20, reason='bundle-pending waiting for evidence'),
-                  event('evidence-bundle', -10)]
+                  event('build-done', -30, actor='builder', status='DONE', ready_sha='tip'),
+                  event('spawn-failed', -20, spawn='L-grader-9001',
+                        reason='bundle-pending waiting for evidence'),
+                  event('evidence-bundle', -10, sha='tip')]
         specs = {SID: dict(state='building')}
         old = self.was_parked(events, specs=specs)
         new = self.one(events, specs=specs)

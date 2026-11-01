@@ -187,6 +187,13 @@ def _attempt_role(e):
 
 
 def _refusal(e):
+    if _attempt_role(e) == 'grader':
+        reason = str(e.get('reason') or '')
+        return (e.get('type') == 'spawn-failed'
+                and (reason.startswith(('bundle-pending', 'duplicate-dispatch'))
+                     or reason == 'dispatch-in-progress'
+                     and 'another dispatch holds the subject lock' in str(e.get('why') or '')
+                     or reason in BASE_FAILURES))
     return (e.get('type') == 'spawn-failed'
             and (str(e.get('reason') or '').startswith(NOT_READY_PREFIXES)
                  or str(e.get('reason') or '') in BASE_FAILURES))
@@ -197,8 +204,87 @@ def _history_events(evs):
             or str(e.get('reason') or '').startswith('bundle-pending')]
 
 
+def _grader_history(evs):
+    """Remove identified no-spend receipts and only their proven parent marker.
+
+    Detached parents report a pid, children an allocated grader id. Association
+    is local to a subject and a contiguous grader activity segment; a start,
+    verdict, failure or another marker prevents reaching past that activity.
+    """
+    removed, receipts = set(), []
+    for i, e in enumerate(evs):
+        if _attempt_role(e) != 'grader' or not _refusal(e) or e.get('reason') in BASE_FAILURES:
+            continue
+        removed.add(i)
+        receipts.append(e)
+        for j in range(i - 1, -1, -1):
+            parent = evs[j]
+            if parent.get('subject') != e.get('subject'):
+                continue
+            if parent.get('type') == 'build-done':
+                break
+            if (parent.get('type') in JUDGING
+                    or _attempt_role(parent) == 'grader'
+                    and parent.get('type') in DISPATCH_EVENTS | {'spawn-done', 'spawn-stale'}):
+                if (parent.get('type') == 'autodispatched' and _attempt_role(parent) == 'grader'
+                        and (parent.get('spawn') == e.get('spawn')
+                             or str(parent.get('spawn') or '').isdigit())):
+                    removed.add(j)
+                break
+    return [e for i, e in enumerate(evs) if i not in removed], receipts
+
+
+def _grader_retry(c, trigger):
+    evs = c['evs']
+    normalized, receipts = _grader_history(evs)
+    h = attempts.history(normalized, dict(trigger, subject=c['sid']), 'grader', now=c['now'])
+    if h.consumed or h.live:
+        return None
+    # A parent which has no child end yet is still a dispatch in flight. A
+    # genuine failure can end preparation without ever allocating a child id.
+    activity = [e for e in normalized if _attempt_role(e) == 'grader'
+                and e.get('type') in DISPATCH_EVENTS | {'spawn-done', 'spawn-stale'}
+                and _time(e['ts']) >= _time(trigger['ts'])]
+    if activity and (activity[-1].get('type') == 'autodispatched'
+                     or activity[-1].get('type') == 'spawn-started'
+                     and not activity[-1].get('spawn')):
+        return None
+    if h.exhausted:
+        return _result(trigger, 'exhausted: ' + '; '.join(h.reasons), retry_hold=True,
+                       retry_owner='executor', clears='new authorized trigger or operator decision')
+    if h.next_retry_at and c['now'] < h.next_retry_at:
+        return _result(trigger, 'retry-wait: ' + h.next_retry_at.isoformat(), retry_hold=True,
+                       retry_owner='tick', clears='retry instant ' + h.next_retry_at.isoformat())
+    build = _latest(evs, {'build-done'}) or {}
+    cutoff = max(_time(trigger['ts']), _time(build.get('ts', trigger['ts'])))
+    pending = [e for e in receipts if str(e.get('reason') or '').startswith('bundle-pending')
+               and _time(e['ts']) >= cutoff]
+    # A receipt's source/spawn identity is stable across repeated snapshots.
+    unique = {}
+    for e in pending:
+        unique.setdefault(e.get('spawn') or _source(e) or (e['ts'], e.get('reason')), e)
+    pending = list(unique.values())
+    evidence = [e for e in evs if e.get('type') in {'evidence-bundle', 'evidence-bundle-failed'}
+                and e.get('sha') == build.get('ready_sha') and build.get('ready_sha')
+                and _time(e['ts']) > _time(build['ts'])]
+    if pending and not evidence:
+        count = len(pending)
+        due = max(_time(e['ts']) for e in pending) + timedelta(minutes=5)
+        clears = (f"{c['sid']} sha={build.get('ready_sha')} evidence-bundle/evidence-bundle-failed "
+                  f"strictly newer than build {build.get('ts')}; requests={count}/3; "
+                  f"re-request instant {due.isoformat()}; new authorized trigger or operator decision")
+        if c['now'] < due or count >= 3:
+            reason = ('grade-wait: bundle-pending' if c['now'] < due
+                      else 'exhausted: bundle-pending; requests=' + str(count) + '/3; '
+                      + '; '.join(str(e.get('reason')) for e in pending))
+            return _result(trigger, reason, retry_hold=True, retry_owner='tick', clears=clears)
+    return _result(trigger, 'retry due: ' + '; '.join(h.reasons) if h.n_failed else 'condition met')
+
+
 def _retry_result(c, trigger, role, *, dispatched=False):
     """Use the original trigger's history; a vanished end never resets its budget."""
+    if role == 'grader':
+        return _grader_retry(c, trigger)
     evs = c['evs']
     vanished = any(_vanished(e) and _attempt_role(e) == role
                    and _time(e['ts']) >= _time(trigger['ts']) for e in evs)
@@ -742,8 +828,8 @@ def _gate_refusal(e):
 def _failure(evs, rules):
     latest = next((e for e in reversed(evs) if e['type'] in FAILURES | RETRIES
                    and not _gate_refusal(e)
-                   and not (e['type'] == 'spawn-failed'
-                            and str(e.get('reason') or '').startswith(NOT_READY_PREFIXES))
+                   and not (e['type'] == 'spawn-failed' and _refusal(e)
+                            and e.get('reason') not in BASE_FAILURES)
                    or e['type'] == 'build-blocked' and _base_blocked(e)), None)
     base = next((e for e in reversed(evs) if _base_blocked(e)
                  or e['type'] == 'spawn-failed' and e.get('reason') in BASE_FAILURES), None)
@@ -756,6 +842,9 @@ def _failure(evs, rules):
             return latest, 'retry'
         text = latest['reason'] if _base_blocked(latest) else _failure_text(latest)
         classification = classify_failure(text, latest.get('exit_code', 1), rules)
+        if (classification == 'unknown' and _attempt_role(latest) == 'grader'
+                and latest.get('type') in {'spawn-failed', 'autodispatch-failed'}):
+            classification = 'retry'
         if classification == 'base-refresh':
             # Actor files can tie at second resolution. Builder ids are allocated
             # monotonically; a newer start discharges an older refused dispatch.
@@ -1010,7 +1099,11 @@ def next_steps(events, specs, now, rules, waves=None):
                 continue
             if sid in busy:
                 spawn = next(s for s, e in attempts.items() if e.get('subject') == sid)
-                steps.append(_hold(sid, 'spec', stage, attempts[spawn], 'in flight: ' + spawn,
+                conflict = (_attempt_role(attempts[spawn]) in {'builder', 'grader'}
+                            and bool(_grader_history(evs)[1]))
+                trigger, _ = autodispatch._grader_trigger(evs)
+                steps.append(_hold(sid, 'spec', stage, trigger if conflict and trigger else attempts[spawn],
+                                   ('grade-wait: conflict ' if conflict else 'in flight: ') + spawn,
                                    spawn + ' spawn-done/spawn-failed', 'tick'))
                 continue
             contexts.append(c)
