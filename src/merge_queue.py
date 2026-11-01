@@ -43,7 +43,7 @@ def _latest(events, kinds):
 
 def queue(events, project=None, *, _include_terminal=False):
     """Fold corrections without consulting a mutable script or the wall clock."""
-    live, batches = {}, {}
+    live, returned = {}, set()
     for pos, e in enumerate(_ordered(events)):
         sid, kind = e.get('subject'), e.get('type')
         if kind == 'queue-add':
@@ -55,8 +55,21 @@ def queue(events, project=None, *, _include_terminal=False):
             live.pop(sid, None)
         elif kind == 'queue-batch':
             for spec in e.get('specs', '').split(','):
-                batches[spec] = sid
-    return [dict(row, batch=batches.get(sid)) for sid, (_, row) in
+                if spec in live and live[spec][1]['project'] == e.get('project'):
+                    live[spec][1]['batch'] = sid
+        elif kind == 'window-redcut' and e.get('window') == sid:
+            # Return an existing row, retaining its branch, timestamp and
+            # position. An old completion cannot release a later reservation.
+            for spec in e.get('returned', []):
+                key = (sid, spec)
+                if key in returned:
+                    continue
+                returned.add(key)
+                if spec in live:
+                    row = live[spec][1]
+                    if row['project'] == e.get('project') and row['batch'] == sid:
+                        row['batch'] = None
+    return [dict(row) for sid, (_, row) in
             sorted(live.items(), key=lambda item: item[1][0])
             if project is None or row['project'] == project]
 
@@ -458,7 +471,9 @@ def _run_lock(project):
 def _launching(events, project, flying):
     """Reserve a launched process before its first candidate reaches the ledger."""
     rows = {row['window']: row for row in flying}
-    terminal = {e['subject'] for e in events if e['type'] in ('window-verified', 'escalation-blocking')}
+    events = _ordered(events)
+    terminal = {e['subject'] for e in events if e['type'] in
+                ('window-verified', 'escalation-blocking', 'window-redcut')}
     for event in events:
         if event['type'] != 'queue-batch' or event.get('project') != project:
             continue
@@ -477,6 +492,202 @@ def _launching(events, project, flying):
         else:
             path.unlink(missing_ok=True)
     return list(rows.values())
+
+
+def _cleanup_pending(project, window):
+    # The lifetime lock protects cleanup even after terminal evidence commits.
+    with window_gate.chain_lock(window, project, root=fold.ROOT) as holder:
+        if holder is not None:
+            return True
+    for path in (fold.ROOT / 'state').glob('window-gate.*.lock'):
+        slot = path.name.split('.')[1]
+        if slot.isdecimal() and window_gate.lock_holder(int(slot), fold.ROOT) is not None:
+            return True
+    return False
+
+
+def _successor_admitted(events, window):
+    if any(e.get('subject') == window and e.get('type') in
+           ('window-opened', 'window-candidate', 'window-verified', 'window-redcut',
+            'escalation-blocking') for e in events):
+        return True
+    path = fold.ROOT / 'state' / f'window-run.{window}.pid'
+    try:
+        return int(path.read_text()) > 0
+    except FileNotFoundError:
+        return False
+
+
+def _redcut_link(events, project):
+    """Choose only committed dispositions; retry a refused launch's same ID."""
+    closures = [e for e in events if e.get('type') == 'window-redcut'
+                and e.get('project') == project and e.get('outcome') == 'handled-red'
+                and e.get('window') == e.get('subject') and not e.get('residual')]
+    for closure in reversed(closures):
+        predecessor = closure['subject']
+        joins = [e for e in events if e.get('type') == 'queue-batch'
+                 and e.get('project') == project and e.get('redcut_of') == predecessor]
+        if any(_successor_admitted(events, e['subject']) for e in joins):
+            continue
+        return predecessor, joins[-1]['subject'] if joins else None
+    return None, None
+
+
+def redcut_handoff(project, window, *, launcher=None, now=None, precheck_runner=None):
+    """One bounded attempt through the ordinary serialized queue launcher."""
+    try:
+        events = _ordered(window_gate.train_events())
+        closed = any(e.get('type') == 'window-redcut' and e.get('subject') == window
+                     and e.get('window') == window and e.get('project') == project
+                     and e.get('outcome') == 'handled-red' and not e.get('residual')
+                     for e in events)
+        if not closed or _cleanup_pending(project, window):
+            print('redcut-handoff: pending; disposition unresolved or cleanup lock held')
+            return 3
+        joins = [e for e in events if e.get('type') == 'queue-batch'
+                 and e.get('project') == project and e.get('redcut_of') == window]
+        if any(_successor_admitted(events, e['subject']) for e in joins):
+            print('redcut-handoff: successor already admitted')
+            return 0
+        if _redcut_link(events, project)[0] != window:
+            print('redcut-handoff: pending; another disposition owns next admission')
+            return 3
+        code = window_run(project, detach=True, launcher=launcher, now=now,
+                          precheck_runner=precheck_runner)
+        events = _ordered(window_gate.train_events())
+        admitted = any(e.get('type') == 'queue-batch' and e.get('project') == project
+                       and e.get('redcut_of') == window
+                       and _successor_admitted(events, e['subject']) for e in events)
+        return 0 if admitted else code if code else 3
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        print(f'redcut-handoff: pending; {exc}')
+        return 3
+
+
+def redcut_metrics(events, *, project, since, until):
+    """Read admitted evidence as of until; never infer an open from launch time."""
+    def stamp(value):
+        value = datetime.fromisoformat(value.replace('Z', '+00:00')) if isinstance(value, str) else value
+        if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError('aware timestamp required')
+        return value
+
+    since, until = stamp(since), stamp(until)
+    if since >= until:
+        raise ValueError('empty metric interval')
+    rows, bad_time = [], []
+    for event in events:
+        if 'actor' in event and fold.admits(event, event['actor']) is not None:
+            continue
+        try:
+            if stamp(event.get('ts')) < until:
+                rows.append(event)
+        except (ValueError, TypeError):
+            bad_time.append(event)
+    windows, invalid = {}, set()
+    for event in rows:
+        if event.get('type') in ('queue-batch', 'window-opened', 'window-redcut'):
+            windows.setdefault(event.get('subject'), []).append(event)
+    members, projects = {}, {}
+    for name, evidence in windows.items():
+        projects[name] = {e.get('project') for e in evidence}
+        members[name] = {sid for e in evidence if e['type'] in ('queue-batch', 'window-opened')
+                         for sid in str(e.get('specs', '')).split(',') if sid}
+    closures = {}
+    for name, evidence in windows.items():
+        if project not in projects[name]:
+            continue
+        redcuts = [e for e in evidence if e['type'] == 'window-redcut']
+        if not redcuts:
+            continue
+        try:
+            if projects[name] != {project}:
+                raise ValueError('contradictory project')
+            signatures = {json.dumps({k: v for k, v in e.items()
+                                      if k not in ('ts', 'actor', '_src', 'v')}, sort_keys=True)
+                          for e in redcuts}
+            if len(signatures) != 1:
+                raise ValueError('contradictory closure')
+            e = redcuts[0]
+            first, closed = stamp(e.get('first_red_at')), stamp(e.get('closed_at'))
+            if (e.get('window') != name or e.get('outcome') != 'handled-red'
+                    or e.get('automatic') is not True or closed < first
+                    or closed > stamp(e['ts'])
+                    or any(not isinstance(e.get(k), list) for k in
+                           ('dropped', 'returned', 'flakes', 'residual'))):
+                raise ValueError('invalid closure')
+            if since <= closed < until:
+                closures[name] = (closed, first)
+        except (ValueError, TypeError):
+            invalid.add(name)
+    for e in bad_time:
+        name = e.get('window') if e.get('type') == 'window-dropped' else e.get('subject')
+        if e.get('type') in ('window-redcut', 'window-opened', 'queue-batch', 'window-dropped'):
+            if e.get('project') == project or project in projects.get(name, set()):
+                invalid.add(name)
+    legacy = {}
+    for e in rows:
+        name = e.get('window')
+        if (e.get('type') != 'window-dropped' or not e.get('nodes') or
+                name not in windows or e.get('subject') not in members[name] or
+                any(r['type'] == 'window-redcut' for r in windows[name])):
+            continue
+        if project not in projects[name]:
+            continue
+        if projects[name] != {project} or e.get('project', project) != project:
+            invalid.add(name)
+            continue
+        closed = stamp(e['ts'])
+        # Membership must precede the drop, not merely exist later in the file.
+        if not any(r['type'] in ('queue-batch', 'window-opened')
+                   and stamp(r['ts']) <= closed and e['subject'] in str(r.get('specs', '')).split(',')
+                   for r in windows[name]):
+            invalid.add(name)
+            continue
+        legacy[name] = max(closed, legacy.get(name, closed))
+    durations, pending, automatic, without = [], [], 0, 0
+    for name, (closed, first) in sorted(closures.items(), key=lambda item: (item[1][0], item[0])):
+        try:
+            joins = [e for e in rows if e.get('type') == 'queue-batch'
+                     and e.get('redcut_of') == name and e.get('project') == project]
+            successors = {e['subject'] for e in joins}
+            if len(successors) > 1:
+                raise ValueError('conflicting successors')
+            successor = next(iter(successors), None)
+            opens = [e for e in rows if e.get('type') == 'window-opened'
+                     and e.get('subject') == successor and successor is not None]
+            if any(stamp(e['ts']) < closed for e in joins):
+                raise ValueError('batch before closure')
+            if any(e.get('project') != project or e.get('redcut_of', name) != name
+                   or stamp(e['ts']) < closed for e in opens):
+                raise ValueError('contradictory open')
+            open_times = {stamp(e['ts']) for e in opens}
+            if len(open_times) > 1:
+                raise ValueError('conflicting opens')
+            if name in invalid:
+                continue
+            automatic += 1
+            involved = members.get(name, set()) | {name}
+            decisions = [e for e in rows if e.get('type') == 'decision'
+                         and e.get('actor') in ('thinker', 'operator')
+                         and e.get('subject') in involved and first <= stamp(e['ts']) <= closed
+                         and e.get('project', project) == project
+                         and (e.get('subject') == name or
+                              len({p for w, ids in members.items() if e['subject'] in ids
+                                   for p in projects[w]}) == 1)]
+            without += not bool(decisions)
+            if open_times:
+                durations.append(dict(window=name, next_window=successor,
+                                      minutes=(next(iter(open_times)) - first).total_seconds() / 60))
+            else:
+                pending.append(name)
+        except (ValueError, TypeError):
+            invalid.add(name)
+    return dict(automatic_closed=automatic,
+                red_closed=automatic + sum(since <= closed < until and name not in invalid
+                                           for name, closed in legacy.items()),
+                without_thinker_decision=without, red_to_next_open_minutes=durations,
+                pending_next_open=pending, excluded_invalid=sorted(invalid))
 
 
 def _window_reconcile(events, ledger_file):
@@ -503,6 +714,10 @@ def window_run(project, *, runner=None, launcher=None, detach=False, now=None, p
             events = _ordered(window_gate.train_events())
             _window_reconcile(events, ledger_file)
             events = _ordered(window_gate.train_events())
+            redcut_of, retry_window = _redcut_link(events, project)
+            if _cleanup_pending(project, redcut_of or 'admission'):
+                print('window-run: pending; cleanup/chain lock held')
+                return 3
             head = next_candidate(events)
             if head is None:
                 print('window-run: no candidate; queue empty or one window in flight')
@@ -576,6 +791,10 @@ def window_run(project, *, runner=None, launcher=None, detach=False, now=None, p
             readiness = {}
             for row in entries:
                 sid = row['spec']
+                if row['batch'] != retry_window and any(
+                        e.get('type') == 'window-redcut' and e.get('subject') == row['batch']
+                        for e in events):
+                    readiness[sid] = 'reserved-window'
                 if sid in red:
                     readiness[sid] = 'precheck-red'
                 if checked is not None and lane_rules._time(checked['ts']) >= lane_rules._time(row['added_at']):
@@ -618,10 +837,11 @@ def window_run(project, *, runner=None, launcher=None, detach=False, now=None, p
                 print('window-run: no merge-ready candidates')
                 return 3
             reason = 'selection-exclusions' if skipped else 'sole-eligible' if len(specs) == 1 else 'all-ready'
-            window = 'window-' + uuid.uuid4().hex
+            window = retry_window or 'window-' + uuid.uuid4().hex
             _train_emit(ledger_file, window, 'queue-batch', project=project, specs=','.join(specs),
                         reason=reason, cap=configured, queue_len=len(entries), taken=specs, skipped=skipped,
-                        precheck=checked['ts'] if checked is not None else 'none')
+                        precheck=checked['ts'] if checked is not None else 'none',
+                        **({'redcut_of': redcut_of} if redcut_of else {}))
             argv = ['doit', 'gate-window', window, '--project', project, '--specs', ','.join(specs)]
             if runner is not None:
                 if detach:
@@ -648,6 +868,9 @@ def window_run(project, *, runner=None, launcher=None, detach=False, now=None, p
                 _window_reconcile(_ordered(window_gate.train_events()), ledger_file)
             except (OSError, ValueError) as exc:
                 print(f'window-run: outcome reconciliation deferred; {exc}', file=sys.stderr)
+    if code == 5:
+        redcut_handoff(project, window, launcher=launcher, now=now,
+                       precheck_runner=precheck_runner)
     return code
 
 
