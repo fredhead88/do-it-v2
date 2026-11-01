@@ -117,8 +117,17 @@ class Fixture:
         raise AssertionError(f'unexpected provider boundary: {argv}')
 
     def step(self, action):
+        trigger = next((e for e in reversed(self.events()) if e.get('type') in ('decision','unblocked','spec-written')), {})
         return nextstep.Step(self.sid, 'spec', 'checking', 'action', action, 'tick',
-                             'fixture:1', 'condition met', None, self.now.isoformat())
+                             trigger.get('_src','fixture:1'), 'condition met', None, trigger.get('ts',self.now.isoformat()))
+
+    def retry_due(self, action='rebuild'):
+        import attempts
+        step = self.step(action)
+        role = tick.ROUTINE_ROLES[action]
+        h = attempts.history(self.events(),dict(subject=self.sid,ts=step.since),role,now=self.now)
+        if h.next_retry_at:
+            self.now = h.next_retry_at
 
     def run(self, action='rebuild', runner=None, **kwargs):
         events = self.events()
@@ -170,7 +179,7 @@ class HealTests(unittest.TestCase):
         self.assertEqual({k: rows[0][k] for k in ('kind', 'ref', 'lane', 'subject')},
                          dict(kind='worktree', ref=str(f.wt), lane='build', subject=f.sid))
         self.assertTrue(f.rows('autodispatched')[-1]['worktree_recreated'])
-        self.assertEqual(f.rows('autodispatch-failed'), [])
+        self.assertTrue(all(e.get('reason') for e in f.rows('autodispatch-failed')))
 
     def definitive(self, f, action, cause, no_calls=False):
         before = (f.git('branch', '--list'), f.git('worktree', 'list', '--porcelain'),
@@ -388,24 +397,25 @@ class HealTests(unittest.TestCase):
                 self.assertLessEqual(len(cause), 200)
                 if kind != 'long':
                     self.assertEqual(cause, 'OSError: fixture fork' if 'raise' in kind else 'fatal: fixture lock')
-                self.assertEqual(f.ledger_bytes(), before)
+                self.assertEqual(len(f.rows('autodispatch-failed')),1)
+                self.assertIn(cause,f.rows('autodispatch-failed')[0]['reason'])
                 entry = json.loads(f.state.read_text())[f.sid + ' rebuild']
                 self.assertEqual(entry['count'], 1)
                 self.assertEqual(entry['last_error'], cause)
                 self.assertIsNotNone(dt.datetime.fromisoformat(entry['last_ts']).tzinfo)
                 self.assertEqual(list(f.state.parent.glob('.worktree-heal.*')), [])
+                f.retry_due()
                 self.repaired(f, f.run())
                 self.assertNotIn(f.sid + ' rebuild', json.loads(f.state.read_text()))
 
-    def test_AC5_direct_retry_escapes_emit(self):
-        import worktree_heal as heal
+    def test_AC5_direct_retry_records_one_logical_failure(self):
         with self.fixture() as f:
             f.missing()
             runner = tick._PassDispatcher(f.lock_runner(), f.events(), {}, f.now, False)
-            with patch.object(dispatch, 'emit') as emit, self.assertRaises(heal.RepairRetry) as caught:
+            with patch.object(dispatch, 'emit', wraps=dispatch.emit) as emit, self.assertRaisesRegex(ValueError,'repair failed'):
                 tick.launch(f.step('rebuild'), dispatcher=runner)
-            self.assertIsInstance(caught.exception, ValueError)
-            emit.assert_not_called()
+            self.assertEqual(emit.call_count,1)
+            self.assertEqual(len(f.rows('autodispatch-failed')),1)
 
     def test_AC5_record_failure_cleanup_and_readback_keep(self):
         for readback in (False, True):
@@ -418,9 +428,9 @@ class HealTests(unittest.TestCase):
                 self.assertIn('repair failed, retrying next tick:', out[0])
                 self.assertIn(str(exc), out[0])
                 self.assertEqual(f.wt.exists(), readback)
-                self.assertEqual(f.rows('autodispatch-failed'), [])
+                self.assertEqual(len(f.rows('autodispatch-failed')),1)
                 self.assertEqual(f.rows('autodispatched'), [])
-                f.calls.clear()
+                f.calls.clear(); f.retry_due()
                 self.assertTrue(f.run()[0].startswith('acted'))
                 self.assertEqual(len([r for r in resources.live(f.events()) if r.ref == str(f.wt)]), 1)
                 if readback:
@@ -444,44 +454,36 @@ class HealTests(unittest.TestCase):
                              f'worktree {f.wt} missing; not recreated: record failed: fixture record; removing the new tree failed: fixture removal')
             self.assertEqual(f.rows('resource-created'), [])
 
-    def test_AC6_six_attempt_bound_and_standing_seventh(self):
+    def test_AC6_three_routine_attempts_then_no_fourth(self):
         with self.fixture() as f:
             f.missing()
-            before = f.ledger_bytes()
-            for n in range(1, 7):
-                out = f.run(runner=f.lock_runner())
-                if n < 6:
-                    self.assertIn('repair failed, retrying next tick:', out[0])
-                    self.assertEqual(f.ledger_bytes(), before)
-                    self.assertEqual(json.loads(f.state.read_text())[f.sid + ' rebuild']['count'], n)
-                else:
-                    self.assertEqual(f.rows('autodispatch-failed')[0]['reason'],
-                                     f'worktree {f.wt} missing; not recreated: repair failed 6 times in a row: fatal: fixture lock')
-                    self.assertNotIn(f.sid + ' rebuild', json.loads(f.state.read_text()))
-            f.calls.clear()
-            f.run()
-            self.assertEqual(f.calls, [])
-            self.assertEqual(len(f.rows('autodispatch-failed')), 1)
+            for n in range(1,4):
+                f.retry_due()
+                out=f.run(runner=f.lock_runner())
+                self.assertIn('repair failed, retrying next tick:',out[0])
+                self.assertEqual(len(f.rows('autodispatch-failed')),n)
+                self.assertEqual(json.loads(f.state.read_text())[f.sid+' rebuild']['count'],n)
+            f.calls.clear();f.run()
+            self.assertEqual(f.calls,[])
+            self.assertEqual(len(f.rows('autodispatch-failed')),3)
 
     def test_AC6_success_resets_and_actions_are_independent(self):
-        for reset in (False, True):
-            with self.subTest(reset=reset), self.fixture() as f:
+        for reset in (False,True):
+            with self.subTest(reset=reset),self.fixture() as f:
                 f.missing()
-                for _ in range(3):
-                    f.run(runner=f.lock_runner())
+                for _ in range(2):
+                    f.retry_due();f.run(runner=f.lock_runner())
                 if reset:
-                    self.assertTrue(f.run()[0].startswith('acted'))
-                    f.missing()
-                    for _ in range(5):
-                        f.run(runner=f.lock_runner())
-                    self.assertEqual(f.rows('autodispatch-failed'), [])
-                    self.assertEqual(json.loads(f.state.read_text())[f.sid + ' rebuild']['count'], 5)
+                    f.retry_due();self.assertTrue(f.run()[0].startswith('acted'))
+                    f.missing();f.add('decision',rework='yes')
+                    f.run(runner=f.lock_runner())
+                    self.assertEqual(json.loads(f.state.read_text())[f.sid+' rebuild']['count'],1)
+                    self.assertEqual(len(f.rows('autodispatch-failed')),3)
                 else:
-                    f.ready()
-                    f.run('regrade', runner=f.lock_runner())
-                    state = json.loads(f.state.read_text())
-                    self.assertEqual(state[f.sid + ' rebuild']['count'], 3)
-                    self.assertEqual(state[f.sid + ' regrade']['count'], 1)
+                    f.ready();f.run('regrade',runner=f.lock_runner())
+                    state=json.loads(f.state.read_text())
+                    self.assertEqual(state[f.sid+' rebuild']['count'],2)
+                    self.assertEqual(state[f.sid+' regrade']['count'],1)
 
     def test_AC6_bounded_corrupt_and_unwritable_state(self):
         for kind in ('full', 'json', 'array', 'parent-file', 'state-dir'):
@@ -514,6 +516,7 @@ class HealTests(unittest.TestCase):
         with self.fixture() as f:
             f.missing()
             f.run(runner=f.lock_runner())
+            f.retry_due()
             err = io.StringIO()
             with patch.object(heal, '_write_state', side_effect=OSError('fixture write')), contextlib.redirect_stderr(err):
                 out = f.run()
@@ -610,7 +613,15 @@ class HealTests(unittest.TestCase):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--criterion', choices=[f'AC{n}' for n in range(1, 10)])
+    parser.add_argument('--fresh-criterion',choices=[f'AC{n}' for n in range(1,6)])
     args = parser.parse_args()
+    if args.fresh_criterion:
+        from test_lane_driver import FreshWorktree1856PacketTests
+        names=[n for n in unittest.defaultTestLoader.getTestCaseNames(FreshWorktree1856PacketTests) if n.startswith('test_'+args.fresh_criterion+'_')]
+        assert names, 'empty fresh criterion selection'
+        result=unittest.TextTestRunner(verbosity=2).run(unittest.TestSuite(FreshWorktree1856PacketTests(n) for n in names))
+        print('fresh',args.fresh_criterion,'tests=',result.testsRun)
+        return int(not result.wasSuccessful())
     criteria = [args.criterion] if args.criterion else [f'AC{n}' for n in range(1, 10)]
     for criterion in criteria:
         names = [name for name in unittest.defaultTestLoader.getTestCaseNames(HealTests)

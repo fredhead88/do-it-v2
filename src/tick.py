@@ -185,6 +185,8 @@ def in_flight(ev):
         if e["type"] in ("escalation-blocking", "decision", "unblocked") and e.get("subject"):
             last[e["subject"]] = e["type"]
     busy = {s for s, t in last.items() if t == "escalation-blocking"}
+    import nextstep
+    busy.update(h['subject'] for h,r in nextstep.retry_hold_pairs(ev) if r is None)
     busy |= _spawn_busy(ev)
     return busy
 
@@ -336,6 +338,8 @@ def launch(step, *, dispatcher):
         if events is None:
             return None
     evs = [e for e in events if e.get('subject') == step.item]
+    if any(release is None for hold,release in nextstep.retry_hold_pairs(evs)):
+        return None
     if step.action in ('build', 'rebuild') and autodispatch._automatic_hold(evs, events):
         if not getattr(dispatcher, 'dry_run', False):
             _record_held_skips(events, {step.item: {'state': 'written'}})
@@ -348,6 +352,16 @@ def launch(step, *, dispatcher):
                             and (step.reason.startswith('retry due:')
                                  or nextstep._time(step.since) > nextstep._time(failure['ts']))):
             return None
+    if step.action in ROUTINE_ROLES and step.action != 'audit':
+        import attempts
+        role = ROUTINE_ROLES[step.action]
+        if any(e.get('type') in {'spawn-failed','autodispatch-failed'} and nextstep._attempt_role(e) == role
+               and nextstep._time(e['ts']) >= nextstep._time(step.since) for e in evs):
+            history = attempts.history(nextstep._grader_history(evs)[0] if role == 'grader' else evs,
+                dict(subject=step.item,ts=step.since),role,now=getattr(dispatcher,'now',fold.NOW))
+            if (history.consumed or history.live or history.exhausted or history.not_ready
+                    or history.next_retry_at and history.next_retry_at > getattr(dispatcher,'now',fold.NOW)):
+                return None
     if getattr(dispatcher, 'dry_run', False):
         return None
     if step.action == 'merge':
@@ -406,17 +420,15 @@ def launch(step, *, dispatcher):
         wt = fold.ROOT / 'worktrees' / project / step.item.lower()
         if step.action == 'build':
             repo = fold.ROOT / 'repos' / project
-            result = dispatcher(['git', '-C', str(repo), 'symbolic-ref', '--short', 'HEAD'])
-            if result.get('code', 1) or not result.get('stdout', '').strip():
-                raise ValueError(result.get('stderr') or 'symbolic-ref failed')
-            main = result['stdout'].strip()
+            import packet
+            base = packet._effective_base(repo, project, dispatch.spec_path(step.item), step.item)
             if wt.is_dir():
-                result = dispatcher(['git', '-C', str(wt), 'rev-list', '--count', main + '..HEAD'])
+                result = dispatcher(['git', '-C', str(wt), 'rev-list', '--count', base + '..HEAD'])
                 if result.get('code', 1) or result.get('stdout', '').strip() != '0':
-                    raise ValueError(f'worktree {wt} exists with commits above {main}; not reusing')
-                result = dispatcher(['git', '-C', str(wt), 'merge', '--ff-only', main])
+                    raise ValueError(f'worktree {wt} exists with commits above {base}; not reusing')
+                result = dispatcher(['git', '-C', str(wt), 'merge', '--ff-only', base])
             else:
-                result = autodispatch.add_builder_worktree(repo, wt, step.item.lower(), main,
+                result = autodispatch.add_builder_worktree(repo, wt, step.item.lower(), base,
                                                           runner=dispatcher)
             if result.get('code', 1):
                 raise ValueError(result.get('stderr') or result.get('stdout') or 'worktree add failed')
@@ -425,10 +437,12 @@ def launch(step, *, dispatcher):
             raise ValueError('review round limit')
         if options and options[0] == 'needs-browser':
             raise ValueError('ui review requires review-mcp.json')
-        recreated = False
-        if heal and step.action in ('rebuild', 'grade', 'regrade', 'review'):
+        fresh = heal.prepare_fresh(step, evs, fold.ROOT, project, wt, dispatcher) if heal else None
+        recreated = fresh is not None
+        if fresh is None and heal and step.action in ('rebuild', 'grade', 'regrade', 'review'):
             recreated = heal.repair(step.item, step.action, evs, fold.ROOT, project, wt, dispatcher)
-        spawn = lane_driver._dispatch(role, step.item, project, charter, dispatcher, options)
+        spawn = lane_driver._dispatch(role, step.item, project, charter, dispatcher, options,
+                                      **({'base_sha': fresh} if fresh is not None else {}))
         # `doit dispatch --detach` reports the detached pid as an int; a missing one is undetermined.
         if isinstance(spawn, int) and not isinstance(spawn, bool) and spawn > 0:
             spawn = str(spawn)
@@ -441,8 +455,6 @@ def launch(step, *, dispatcher):
             raise ValueError('autodispatched record refused: ' + str(refusal))
         return spawn
     except Exception as exc:
-        if heal and isinstance(exc, heal.RepairRetry):
-            raise
         refusal = dispatch.emit(tick_path(), {'subject': step.item}, 'autodispatch-failed',
                                 role=role, rule=step.action, reason=str(exc))
         raise ValueError(str(exc) + (f'; failure record refused: {refusal}' if refusal else '')) from exc
@@ -469,6 +481,49 @@ def _steps(events, specs, now):
             failed.append(nextstep._spec_exception(sid, own, exc))
     planned = nextstep.next_steps(events, usable, now, lane_rules.load(), waves)
     return sorted(planned + failed, key=lambda step: (step.item_kind, step.item))
+
+
+def _record_retry_exhaustion(step, events, now):
+    import nextstep
+    import attempts
+    match = re.match(r'retries-exhausted: (builder|grader|reviewer);', step.reason)
+    if not match:
+        return None
+    role = match.group(1)
+    own = [e for e in events if e.get('subject') == step.item]
+    trigger = next((e for e in own if nextstep._source(e) == step.trigger), None)
+    if trigger is None or not step.trigger:
+        return 'failed exhaustion: governing trigger unavailable'
+    history = attempts.history(nextstep._grader_history(own)[0] if role == 'grader' else own,
+                               dict(trigger, subject=step.item), role, now=now)
+    if not history.exhausted:
+        return None
+    # The caller already supplied the raw historical snapshot. Only this
+    # writer's newly appended rows need a fresh read for same-pass dedup.
+    persisted = []
+    path = tick_path()
+    try:
+        lines = path.read_text().splitlines()
+    except FileNotFoundError:
+        lines = []
+    for number,line in enumerate(lines,1):
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(event,dict):
+            persisted.append(dict(event,actor=fold.actor_of(path.name),_src=f'{path.name}:{number}'))
+    if any(e.get('type') == 'escalation-blocking' and e.get('kind') == 'retries-exhausted'
+           and (e.get('subject'),e.get('role'),e.get('ref')) == (step.item,role,step.trigger)
+           and nextstep._admitted_actor(e) in {'tick','executor','thinker','operator'}
+           for e in list(events)+persisted):
+        return None
+    reason = dispatch.emit(tick_path(), {'subject':step.item}, 'escalation-blocking', strict=True,
+        kind='retries-exhausted', owner='thinker', role=role, reasons=list(history.reasons), ref=step.trigger,
+        default='leave the action stopped pending a human decision',
+        deadline=(now+timedelta(hours=24)).isoformat(),
+        revert='no automatic action was taken; nothing to revert')
+    return ('failed durable exhaustion: '+str(reason) if reason else 'escalated '+step.item+' retries-exhausted')
 
 
 def run_steps(events, specs, now, *, dispatcher=None, dry_run=False, handled=frozenset(), steps=None, admission: dict | None = None):
@@ -519,6 +574,13 @@ def run_steps(events, specs, now, *, dispatcher=None, dry_run=False, handled=fro
                     reporter.fail(step.item, step.reason, phase='planning')
                 if step.item in handled:
                     continue
+                if not dry_run:
+                    try:
+                        exhaustion = _record_retry_exhaustion(step, events, now)
+                    except Exception as exc:
+                        exhaustion = 'failed durable exhaustion: ' + str(exc)
+                    if exhaustion:
+                        out.append(exhaustion)
                 evs = by_subject.get(step.item, [])
                 hold = autodispatch._automatic_hold(evs, events)
                 if hold and step.action in ('build', 'rebuild'):
@@ -620,7 +682,7 @@ def run_steps(events, specs, now, *, dispatcher=None, dry_run=False, handled=fro
 def handled_items(steps):
     """Keep audit retries exclusively under the bounded next-step decision."""
     return {s.item for s in steps
-            if (s.state == 'action' and s.owner == 'tick' and s.action in ROUTINE_ACTIONS)
+            if s.item_kind == 'spec' or (s.state == 'action' and s.owner == 'tick' and s.action in ROUTINE_ACTIONS)
             or (s.state == 'hold' and s.reason.startswith(
                 ('audit-wait:', 'audit-exhausted:', 'audit-bad-cut:')))}
 

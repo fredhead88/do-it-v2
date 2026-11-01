@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -147,6 +148,26 @@ class ReadinessTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'readiness fixture blocked'):
                 lane_driver._dispatch('builder', self.sid, 'demo', None, runner)
         self.assertFalse(any(c[:2] == ['doit', 'dispatch'] for c in calls))
+
+    def test_dispatch_persists_needs_context_reason(self):
+        output = dict(status='NEEDS_CONTEXT', reason='missing base interface',
+                      identity=dict(branch=self.sid.lower(), base_sha=self.base, ready_sha=self.base),
+                      verify=dict(exit_code=0), tests=dict(added=0), deviations=[], stubs=[])
+        args = SimpleNamespace(subject=self.sid, cwd=str(self.repo), pinned_base_sha=self.base)
+        base = dict(subject=self.sid, spawn='L-builder-9000', project='demo')
+        events = self.root / 'events'
+        events.mkdir()
+        with patch.object(dispatch, 'write_card', return_value=self.root / 'card.md'), \
+                patch.object(dispatch, 'commit_shape_events', return_value=[]), \
+                patch.object(fold, 'ROOT', self.root), patch.object(fold, 'EVENTS', events):
+            rows = dispatch.events_for('builder', output, args, base)
+            for kind, fields in rows:
+                self.assertFalse(dispatch.emit(events / 'L-builder-9000.jsonl', base, kind, strict=True, **fields))
+            stored = next(e for e in fold.read_events(use_cache=False) if e['type'] == 'build-done')
+            self.assertEqual(stored['reason'], 'missing base interface')
+            for reason in ('', None):
+                with self.assertRaisesRegex(ValueError, 'requires a nonempty reason'):
+                    dispatch.events_for('builder', dict(output, reason=reason), args, base)
 
 
 if __name__ == '__main__':

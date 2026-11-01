@@ -18,6 +18,7 @@ import dispatch
 import fold
 import merge_queue
 import window_gate
+import precheck_targeted
 
 DOIT = str(Path(__file__).resolve().parent.parent / 'doit')
 
@@ -103,7 +104,7 @@ def guard_runner(repo):
     def run_tree(tree):
         env = dict(os.environ, PYTHONDONTWRITEBYTECODE='1', DOIT_NO_POKE='1')
         env.pop('PYTHONPATH', None)
-        result = subprocess.run([str(python), '-m', 'pytest', '-q',
+        result = subprocess.run(['nice', '-n', '10', 'timeout', '300', str(python), '-m', 'pytest', '-q',
                                  *[g.removesuffix('::') for g in guards]],
                                 cwd=tree, env=env, text=True, capture_output=True, timeout=300)
         output = result.stdout + '\n' + result.stderr
@@ -214,6 +215,141 @@ def run(project, *, events=None, guard_runner=None, emit=None, now=None):
         return dict(event, project=project)
 
 
+PREGRADE_MAX = 5
+
+
+@contextmanager
+def pregrade_lock():
+    path = fold.ROOT / 'state/precheck-pregrade.lock'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open('a') as stream:
+        try:
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            fcntl.flock(stream, fcntl.LOCK_UN)
+
+
+def pregrade(project, *, events=None, guard_runner=None, targeted_runner=None, emit=None, now=None):
+    """Check newest builds solo; absence or uncertainty never blocks grading."""
+    project_name(project)
+    with pregrade_lock() as owned:
+        if not owned:
+            return []
+        events = window_gate.train_events() if events is None else list(events)
+        repo, main = merge_queue._repository(project)
+        master = master_sha(repo, main)
+        emit = emit or emitter(project, os.environ.get('DOIT_LEDGER_FILE', 'L-executor-0001.jsonl'))
+        latest_build = {}
+        for event in merge_queue._ordered(events):
+            if event.get('type') == 'build-done' and event.get('project') == project and event.get('ready_sha'):
+                latest_build[event['subject']] = event
+        seen = {(e.get('subject'), e.get('branch_sha'), e.get('master')) for e in events
+                if e.get('type') == 'precheck-pregrade'}
+        builds = sorted(latest_build.values(), key=lambda e: (e['ts'], e['subject']))
+        results = []
+        with precheck_targeted.bounded(1200):
+            for build in [b for b in builds if (b['subject'], b['ready_sha'], master) not in seen][:PREGRADE_MAX]:
+                started = time.monotonic()
+                sid, sha = build['subject'], build['ready_sha']
+                verdict, detail = 'undetermined', {}
+                try:
+                    candidate, path = merge(repo, master, sha)
+                    if path:
+                        verdict, detail = 'conflict', dict(path=path)
+                    else:
+                        runner = guard_runner or globals()['guard_runner'](repo)
+                        with precheck_targeted.bounded(300):
+                            failures = check_tree(repo, candidate, runner)
+                        if failures:
+                            with precheck_targeted.bounded(300):
+                                before = check_tree(repo, master, runner)
+                            failures = [n for n in failures if n not in before]
+                        row = dict(spec=sid, branch=sha)
+                        target = precheck_targeted.run(repo, master, [row], {sid:sha}, None,
+                            fold.ROOT / 'content', chain=lambda *args:[candidate],
+                            check_tree=check_tree, test_runner=targeted_runner)
+                        if (target['targeted'] == 'undetermined' or target['targeted_unscanned']
+                                or target['targeted_unattributed']):
+                            raise RuntimeError('coupled checks undetermined')
+                        failures = list(dict.fromkeys(failures + target['targeted_red'].get(sid, [])))
+                        verdict, detail = ('red', dict(tests=failures)) if failures else ('clean', {})
+                except (OSError, RuntimeError, ValueError, TimeoutError, KeyError,
+                        subprocess.SubprocessError, tarfile.TarError):
+                    verdict, detail = 'undetermined', {}
+                if verdict == 'conflict':
+                    emit(sid, 'merge-conflict', master=master, branch_sha=sha,
+                         source='precheck-pregrade', **detail)
+                elif verdict == 'red':
+                    emit(sid, 'precheck-red', master=master, branch_sha=sha, layer='pregrade', **detail)
+                results.append(emit(sid, 'precheck-pregrade', master=master, branch_sha=sha,
+                                    verdict=verdict, seconds=round(time.monotonic()-started,3), **detail))
+        return results
+
+
+def _pregrade_history(events, subject):
+    # Unrelated legacy evidence may be undated; it cannot invalidate absence of
+    # a pregrade result or turn an advisory check into a dispatch crash.
+    rows = [e for e in events if e.get('subject') == subject
+            and e.get('type') in {'build-done','precheck-pregrade','precheck-red','merge-conflict'}]
+    try:
+        return merge_queue._ordered(rows)
+    except (ValueError, TypeError, KeyError):
+        return []
+
+
+def grader_master(events, subject, project=None):
+    """An unavailable current master cannot turn advisory results into a refusal."""
+    checked = next((e for e in reversed(_pregrade_history(events, subject))
+                    if e.get('type') == 'precheck-pregrade'), None)
+    if not checked or checked.get('verdict') not in {'red', 'conflict'}:
+        return None
+    try:
+        project = project or next(e['project'] for e in reversed(merge_queue._ordered(events))
+                                  if e.get('subject') == subject and e.get('project'))
+        repo, main = merge_queue._repository(project)
+        return master_sha(repo, main)
+    except (OSError, RuntimeError, ValueError, StopIteration, subprocess.SubprocessError):
+        return None
+
+
+def pregrade_refusal(events, subject, current_master):
+    own = _pregrade_history(events, subject)
+    build = next((e for e in reversed(own) if e.get('type') == 'build-done'), None)
+    checked = next((e for e in reversed(own) if e.get('type') == 'precheck-pregrade'), None)
+    if (not current_master or not build or not checked or checked.get('branch_sha') != build.get('ready_sha')
+            or checked.get('master') != current_master or checked.get('verdict') not in ('red', 'conflict')):
+        return None
+    evidence = next((e for e in reversed(own) if e.get('type') in ('precheck-red','merge-conflict')
+                     and e.get('branch_sha') == checked['branch_sha'] and e.get('master') == current_master), {})
+    detail = dict(evidence, **checked)
+    return 'precheck ' + checked['verdict'] + ': ' + (str(detail.get('path', 'merge conflict'))
+        if checked['verdict'] == 'conflict' else ', '.join(detail.get('tests', ['coupled checks failed'])))
+
+
+def stats(events, since=None, project=None):
+    days = {}
+    for event in events:
+        day = str(event.get('ts', ''))[:10]
+        if not day or since and day < since or project and event.get('project') != project:
+            continue
+        kind = event.get('type')
+        if kind not in ('precheck-pregrade', 'window-run-minutes'):
+            continue
+        row = days.setdefault(day, dict(clean=0,conflict=0,red=0,undetermined=0,windows=set()))
+        if kind == 'precheck-pregrade' and event.get('verdict') in ('clean','conflict','red','undetermined'):
+            row[event['verdict']] += 1
+        elif kind == 'window-run-minutes' and event.get('state') == 'red' and event.get('window'):
+            row['windows'].add(event['window'])
+    for day, row in sorted(days.items()):
+        print(day, *(f'{v}={row[v]}' for v in ('clean','conflict','red','undetermined')),
+              f"red_windows={len(row['windows'])}")
+
+
 def synchronous(project):
     result = subprocess.run([DOIT, 'precheck', '--project', project, '--json'],
                             text=True, capture_output=True, timeout=900)
@@ -260,9 +396,16 @@ def launch_due(events, now, *, project='albert-scott', launcher=None):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(prog='doit precheck', description=__doc__)
-    parser.add_argument('--project', required=True, type=project_name)
+    parser.add_argument('--project', type=project_name)
+    parser.add_argument('--stats', action='store_true')
+    parser.add_argument('--since', type=lambda s: datetime.strptime(s, '%Y-%m-%d').date().isoformat())
     parser.add_argument('--json', action='store_true')
     args = parser.parse_args(argv)
+    if args.stats:
+        stats(window_gate.train_events(), args.since, args.project)
+        return 0
+    if not args.project:
+        parser.error('--project is required for checks')
     def expired(signum, frame):
         raise RuntimeError('precheck deadline exceeded')
     # Unwind extraction and subprocess scopes before the synchronous caller's
@@ -283,6 +426,11 @@ def main(argv=None):
         print(f"precheck: clean {len(result['clean'])}; master conflicts {len(result['conflict_master'])}; "
               f"set conflicts {len(result['conflict_set'])}; guard red {len(result['guard_red'])}; "
               f"guards={result['guards']}")
+    if not args.json:
+        try:
+            pregrade(args.project)
+        except (OSError, RuntimeError, ValueError, TimeoutError, subprocess.SubprocessError):
+            print('pregrade undetermined', file=sys.stderr)
     return 0
 
 

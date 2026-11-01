@@ -112,5 +112,5 @@ Source: literal `dispatch.emit` and `look.emit_once` calls in `src/tick.py`,
 plus every action in `lane_rules.toml`.
 - autodispatch-failed; autodispatch-skipped; autodispatched; charter-closed; charter-proving;
   charter-reopened; cron-missing; dispatch-builder; dispatch-grader; dispatch-reviewer; doit-gate;
-  look-stale; next-step-held; none; proving-check-failed; proving-overdue; queue-add; spawn-failed;
-  spawn-stale; spec-killed; sweep-check; tick; window-run; worktree-reaped
+  escalation-blocking; look-stale; next-step-held; none; proving-check-failed; proving-overdue;
+  queue-add; spawn-failed; spawn-stale; spec-killed; sweep-check; tick; window-run; worktree-reaped

@@ -104,7 +104,11 @@ def _standing_autodispatch_failed(evs):
     than the newest of this subject's own `spec-written`/`decision`/
     `unblocked`/`dependency-hold` — else `None` (a later marker clears it,
     AC4)."""
-    fails = [e for e in evs if e.get("type") == "autodispatch-failed"]
+    # Routine failures are owned by nextstep's bounded attempt predicate. A
+    # second standing transport veto would strand a due builder/reviewer retry.
+    fails = [e for e in evs if e.get("type") == "autodispatch-failed"
+             and (e.get('role') or fold.actor_of(str(e.get('spawn') or '')))
+             not in {'builder', 'grader', 'reviewer'}]
     if not fails:
         return None
     newest_fail = max(fails, key=lambda e: str(e.get("ts", "")))
@@ -485,6 +489,11 @@ def redispatch_dead(events, specs, now, *, runner=None, dry_run=False, handled=f
         spawn, subject, role = row["spawn"], row["subject"], row["role"]
         if subject in handled:
             continue
+        if (role in {'builder', 'grader', 'reviewer'} and subject in specs
+                and any(e.get('subject') == subject and e.get('type') == 'spec-written' for e in events)):
+            # These roles use the sole tick Step launcher, including when the
+            # trigger is consumed or exhausted. Replay cannot mint another budget.
+            continue
         handled.add(subject)
         replacement_of, visible_at = row["replacement_of"], fold.ts(row["visible_at"])
         if dry_run:
@@ -542,8 +551,22 @@ def redispatch_dead(events, specs, now, *, runner=None, dry_run=False, handled=f
                 continue
         else:
             cmd_json = json.loads(cmd_json_path.read_text())
-            replay_path = fold.ROOT / "content" / f"replay-{spawn}.md"
-            replay_path.write_text(_strip_replay_packet(packet_path_seat.read_text(), spawn))
+            if role == "builder":
+                try:
+                    import packet
+                    repo = fold.ROOT / "repos" / project
+                    pin = packet._effective_base(repo, project, dispatch.spec_path(subject), subject)
+                    prepared = runner(["doit", "packet", "builder", subject,
+                        "--repo", str(repo), "--worktree", cmd_json.get("cwd"), "--base-sha", pin])
+                    if prepared.get("code", 1) or not prepared.get("stdout", "").strip():
+                        raise ValueError("builder replay packet failed")
+                    replay_path = pathlib.Path(prepared["stdout"].strip())
+                except (ValueError, OSError, subprocess.SubprocessError):
+                    _escalate("spawn-redispatch-failed")
+                    continue
+            else:
+                replay_path = fold.ROOT / "content" / f"replay-{spawn}.md"
+                replay_path.write_text(_strip_replay_packet(packet_path_seat.read_text(), spawn))
             argv = ["doit", "dispatch", "--detach", role, subject, "--packet", str(replay_path),
                     "--cwd", cmd_json.get("cwd")]
             if cmd_json.get("path"):

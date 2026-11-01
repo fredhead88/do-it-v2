@@ -82,7 +82,7 @@ def _review_options(evs, sid):
     return depth, round_n
 
 
-def _dispatch(role, sid, project, charter, runner, options=None):
+def _dispatch(role, sid, project, charter, runner, options=None, *, base_sha=None):
     wt = fold.ROOT / 'worktrees' / project / sid.lower()
     if not wt.is_dir():
         raise ValueError(f'worktree {wt} missing')
@@ -90,7 +90,10 @@ def _dispatch(role, sid, project, charter, runner, options=None):
     if role == 'builder':
         import packet as packets
         repo = fold.ROOT / 'repos' / project
-        base_sha = packets._effective_base(repo, project, dispatch.spec_path(sid), sid)
+        effective = packets._effective_base(repo, project, dispatch.spec_path(sid), sid)
+        if base_sha is not None and base_sha != effective:
+            raise ValueError('fresh recovery: effective base moved before packet preparation')
+        base_sha = effective
         readiness = runner(['doit', 'readiness', sid, '--project', project, '--base', base_sha])
         if readiness.get('code', 1):
             raise ValueError(readiness.get('stderr') or readiness.get('stdout') or 'build readiness failed')
