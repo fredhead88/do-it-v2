@@ -102,6 +102,7 @@ ALLOW = {
     ('ledger_files.py', '_read_range'): 'The virtual file layer itself; raw file access is confined here.',
     ('ledger_files.py', 'assert_readable'): 'The virtual file layer itself; raw file access is confined here.',
     ('ledger_files.py', 'names'): 'The virtual file layer itself; raw file access is confined here.',
+    ('ledger_files.py', 'stat_keys'): 'The virtual file layer batches metadata and validates segment indexes once.',
     ('ledger_files.py', 'read_text'): 'The virtual file layer itself; live Path.read_text preserves existing failures.',
     ('ledger_files.py', 'problems'): 'The virtual file layer itself; raw file access is confined here.',
     ('ledger_rollup.py', 'candidates'): 'The rollup reads live per-spawn file bytes in order to segment them; candidate selection and byte snapshot.',

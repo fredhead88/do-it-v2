@@ -126,11 +126,13 @@ def _shared_text(value):
     if isinstance(value, str):
         return sys.intern(value)
     if isinstance(value, dict):
-        return {sys.intern(k): v if k == '_src' else sys.intern(v) if isinstance(v, str) else _shared_text(v)
+        return {sys.intern(k): v if k == '_src' else sys.intern(v) if isinstance(v, str)
+                else _shared_text(v) if isinstance(v, (dict, list)) else v
                 for k, v in value.items()}
     if isinstance(value, list):
         for index, child in enumerate(value):
-            value[index] = _shared_text(child)
+            value[index] = (sys.intern(child) if isinstance(child, str) else
+                            _shared_text(child) if isinstance(child, (dict, list)) else child)
     return value
 
 
@@ -241,7 +243,7 @@ def _generation(db, directory):
     """Return the metadata validated by this scan, never a later fingerprint."""
     old = _metadata(db)
     recorded = {name: row['meta'] for name, row in old.items()}
-    current = {name: ledger_files.stat_key(directory, name) for name in ledger_files.names(directory)}
+    current = ledger_files.stat_keys(directory)
     return tuple(sorted(recorded.items())) if recorded == current else None
 
 
@@ -253,11 +255,11 @@ def _update(db, directory, actor_of):
     old = _metadata(db)
     seen = set()
     with db:  # All metadata, prefix chunks and torn tails publish together.
-        for name in ledger_files.names(directory):
+        for name, meta in ledger_files.stat_keys(directory).items():
             file = directory / name
             seen.add(name)
             previous = old.get(name)
-            if previous is None or previous['meta'] != ledger_files.stat_key(directory, name):
+            if previous is None or previous['meta'] != meta:
                 current = _file(file, actor_of(name), previous)
                 if not current['append']:
                     db.execute('DELETE FROM chunks WHERE name=?', (name,))

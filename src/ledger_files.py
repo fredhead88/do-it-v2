@@ -200,6 +200,31 @@ def stat_key(events_dir, name):
             max(st.st_mtime_ns for st in stats), max(st.st_ctime_ns for st in stats))
 
 
+def stat_keys(events_dir):
+    """One metadata scan, validating each segment index once for all members."""
+    def key(st):
+        return st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns
+
+    directory = Path(events_dir)
+    with os.scandir(directory) as entries:
+        result = {_name(entry.name): key(entry.stat()) for entry in entries
+                  if Path(entry.name).suffix == '.jsonl'}
+    sealed = {}
+    for path, obj, _ in _indexes(directory):
+        if obj:
+            meta = key(path.stat())
+            for member in obj['members']:
+                name = member['name']
+                old = sealed.get(name, (meta[0], meta[1], 0, meta[3], meta[4]))
+                sealed[name] = (old[0], old[1], old[2] + member['length'],
+                                max(old[3], meta[3]), max(old[4], meta[4]))
+    for name, meta in sealed.items():
+        live = result.get(name)
+        result[name] = ((live[0], live[1], meta[2] + live[2],
+                         max(meta[3], live[3]), max(meta[4], live[4])) if live else meta)
+    return result
+
+
 def _accessible(path, directory=False):
     mode = path.stat().st_mode
     if not mode & 0o444 or (directory and not mode & 0o111):
