@@ -542,8 +542,22 @@ def redispatch_dead(events, specs, now, *, runner=None, dry_run=False, handled=f
                 continue
         else:
             cmd_json = json.loads(cmd_json_path.read_text())
-            replay_path = fold.ROOT / "content" / f"replay-{spawn}.md"
-            replay_path.write_text(_strip_replay_packet(packet_path_seat.read_text(), spawn))
+            if role == "builder":
+                try:
+                    import packet
+                    repo = fold.ROOT / "repos" / project
+                    pin = packet._effective_base(repo, project, dispatch.spec_path(subject), subject)
+                    prepared = runner(["doit", "packet", "builder", subject,
+                        "--repo", str(repo), "--worktree", cmd_json.get("cwd"), "--base-sha", pin])
+                    if prepared.get("code", 1) or not prepared.get("stdout", "").strip():
+                        raise ValueError("builder replay packet failed")
+                    replay_path = pathlib.Path(prepared["stdout"].strip())
+                except (ValueError, OSError, subprocess.SubprocessError):
+                    _escalate("spawn-redispatch-failed")
+                    continue
+            else:
+                replay_path = fold.ROOT / "content" / f"replay-{spawn}.md"
+                replay_path.write_text(_strip_replay_packet(packet_path_seat.read_text(), spawn))
             argv = ["doit", "dispatch", "--detach", role, subject, "--packet", str(replay_path),
                     "--cwd", cmd_json.get("cwd")]
             if cmd_json.get("path"):

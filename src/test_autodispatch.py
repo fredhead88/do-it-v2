@@ -63,7 +63,144 @@ class WorktreeRecordTests(unittest.TestCase):
                                       body_sha256=hashlib.sha256(body.encode()).hexdigest(), body_excerpt=body)))
 
 
-if __name__ == '__main__' and '-k' in sys.argv and sys.argv[-1] == 'worktree_record':
+class R7PinReplayTests(unittest.TestCase):
+    def replay_files(self, f, spawn, saved, path=None):
+        f.event('L-builder-replay.jsonl', 'build-started', role='builder',spawn=spawn,
+                ts=(f.now-datetime.timedelta(minutes=20)).isoformat(),worktree=str(f.wt),base_sha=f.old)
+        f.event('L-tick-replay.jsonl','spawn-stale',role='builder',spawn=spawn,
+                ts=(f.now-datetime.timedelta(minutes=5)).isoformat())
+        (f.seat/(spawn+'.packet.md')).write_text(saved.read_text())
+        (f.seat/(spawn+'.cmd.json')).write_text(json.dumps(dict(cwd=str(f.wt),path=path)))
+
+    def test_replay_regenerates_packet(self):
+        import contextlib
+        import packet
+        import lane_driver
+        from test_lane_driver import R7Fixture
+        for case in ('default','other-head','realm'):
+            with self.subTest(case=case),contextlib.ExitStack() as stack:
+                f=R7Fixture(stack,'main',case); f.worktree()
+                lane_driver._dispatch('builder',f.sid,'proj',None,f.runner)
+                saved=f.dispatched[-1]; retained=f.commit(f.wt,'builder-work')
+                for attempt in range(2):
+                    old=dispatch.pinned_base(saved); pin=f.advance()
+                    f.git('-c','user.name=fixture','-c','user.email=fixture@example.invalid',
+                          'merge','--no-edit',pin,cwd=f.wt)
+                    spawn='L-builder-'+str(9900+attempt)
+                    self.replay_files(f,spawn,saved,'/saved/card.md')
+                    f.calls.clear(); before=len(f.dispatched)
+                    events=f.events()
+                    out=autodispatch.redispatch_dead(events,fold.fold(events)[0],f.now,runner=f.runner)
+                    self.assertTrue(any('replayed '+spawn in line for line in out),out)
+                    self.assertEqual(len(f.dispatched),before+1)
+                    self.assertEqual(dispatch.pinned_base(f.dispatched[-1]),pin)
+                    self.assertNotEqual(pin,old)
+                    argv=next(a for a in f.calls if a[:3]==['doit','packet','builder'])
+                    self.assertEqual(argv[-2:],['--base-sha',pin])
+                    dispatch_argv=next(a for a in f.calls if a[:2]==['doit','dispatch'])
+                    self.assertEqual(dispatch_argv[dispatch_argv.index('--cwd')+1],str(f.wt))
+                    self.assertEqual(dispatch_argv[dispatch_argv.index('--path')+1],'/saved/card.md')
+                    f.git('merge-base','--is-ancestor',retained,'HEAD',cwd=f.wt)
+                    self.assertEqual((f.wt/'builder-work').read_text(),'builder-work\n')
+                    marker=next(e for e in f.events() if e.get('replaces')==spawn)
+                    self.assertEqual((marker['trigger'],marker['since']),('redispatch',(f.now-datetime.timedelta(minutes=5)).isoformat(timespec='seconds')))
+                    calls=len(f.calls)
+                    fresh=f.events(); autodispatch.redispatch_dead(fresh,fold.fold(fresh)[0],f.now,runner=f.runner,handled={f.sid})
+                    self.assertEqual(len(f.calls),calls)
+                    print(json.dumps(dict(case=case,attempt=attempt,repo_head=f.git('rev-parse','HEAD'),
+                        effective_ref=f.branch,effective_sha=pin,old_pin=old,packet_pin=dispatch.pinned_base(f.dispatched[-1]),
+                        spawn=marker['spawn'],retained_builder_commit=retained)))
+                    saved=f.dispatched[-1]; f.now+=datetime.timedelta(minutes=40)
+        for failure in ('resolver','packet'):
+            with self.subTest(failure=failure),contextlib.ExitStack() as stack:
+                f=R7Fixture(stack);f.worktree()
+                lane_driver._dispatch('builder',f.sid,'proj',None,f.runner)
+                self.replay_files(f,'L-builder-9901',f.dispatched[-1]);f.calls.clear()
+                if failure=='resolver': stack.enter_context(patch.object(packet,'_effective_base',side_effect=ValueError('unresolved')))
+                def runner(argv):
+                    if failure=='packet' and argv[:2]==['doit','packet']:
+                        f.calls.append(argv);return dict(code=1,stdout='',stderr='packet refused')
+                    return f.runner(argv)
+                events=f.events();out=autodispatch.redispatch_dead(events,fold.fold(events)[0],f.now,runner=runner)
+                self.assertFalse(any(a[:2]==['doit','dispatch'] for a in f.calls))
+                self.assertTrue(any('spawn-redispatch-failed' in line for line in out),out)
+
+    def test_dispatch_paths_and_store_round_trip(self):
+        import argparse
+        import contextlib
+        import io
+        import models
+        import packet
+        import lane_driver
+        import nextstep
+        from types import SimpleNamespace
+        from test_lane_driver import R7Fixture
+        for entry in ('create','rebuild','replay'):
+            with self.subTest(entry=entry),contextlib.ExitStack() as stack:
+                f=R7Fixture(stack)
+                f.event('L-spec-auditor-9001.jsonl','spawn-done',role='spec-auditor',bad_cut=False,
+                        ts=(f.now-datetime.timedelta(minutes=30)).isoformat())
+                # The actual verification wrapper must carry an observable base.
+                f.spec.write_text(f.spec.read_text().replace('true\n```','test -n "$BASE"\n```'))
+                if entry!='create':f.worktree()
+                pin=f.pin(); old=f.old
+                if entry=='replay':
+                    lane_driver._dispatch('builder',f.sid,'proj',None,f.runner)
+                    self.replay_files(f,'L-builder-9909',f.dispatched[-1])
+                if entry=='rebuild':f.commit(f.wt,'builder-work')
+                stack.enter_context(patch.object(models,'resolve',return_value=dict(backend='codex',model='fixture',source='fixture')))
+                stack.enter_context(patch.object(dispatch,'ensure_room',return_value=True))
+                stack.enter_context(patch.object(dispatch,'run_seat',side_effect=AssertionError('paid seat')))
+                observed=[]
+                def backend(spawn,role,model,schema,text,cwd,timeout,**kw):
+                    if f.git('rev-list','--count',pin+'..HEAD',cwd=f.wt)=='0':f.commit(f.wt,'builder-work')
+                    ready=f.git('rev-parse','HEAD',cwd=f.wt)
+                    out=dict(status='DONE',identity=dict(spec_id=f.sid,built_by=spawn,branch=f.sid.lower(),base_sha=old,ready_sha=ready),
+                        acs=[dict(id='AC1',criterion_type='backend',evidence='scratch',evidence_type='command-output',check='true',disposition='done')],
+                        verify=dict(command='true',exit_code=0,result='ok'),stubs=[],deviations=[],tests=dict(added=True),
+                        not_built=[],unknowns=[],built_against=[],escalations=[],declarations=[])
+                    observed.append(spawn)
+                    return SimpleNamespace(returncode=0,stdout=json.dumps(dict(structured_output=out)),stderr='')
+                stack.enter_context(patch.object(dispatch,'run_codex',side_effect=backend))
+                def runner(argv):
+                    if argv[:2]!=['doit','dispatch']:return f.runner(argv)
+                    f.calls.append(list(argv)); path=pathlib.Path(argv[argv.index('--packet')+1]);f.dispatched.append(path)
+                    args=argparse.Namespace(role='builder',subject=f.sid,packet=str(path),cwd=str(f.wt),
+                        path=None,charter=None,project='proj',mcp_config=None,timeout=None,max_usd=None,seat=False)
+                    with contextlib.redirect_stdout(io.StringIO()),contextlib.redirect_stderr(io.StringIO()):dispatch.main(args)
+                    return dict(code=0,stdout=json.dumps(dict(detached=observed[-1])),stderr='')
+                if entry=='replay':
+                    events=f.events();autodispatch.redispatch_dead(events,fold.fold(events)[0],f.now,runner=runner)
+                else:
+                    action='build' if entry=='create' else 'rebuild'
+                    step=nextstep.Step(f.sid,'spec','building','action',action,'tick','fixture:1','condition met',None,f.now.isoformat())
+                    tick.launch(step,dispatcher=tick._PassDispatcher(runner,f.events(),{},f.now,False))
+                self.assertEqual(len(observed),1)
+                # A separate interpreter opens the committed actor files afresh.
+                env=dict(os.environ,DOIT_ROOT=str(f.root),PYTHONPATH=str(pathlib.Path(__file__).parent.resolve()))
+                child=subprocess.run([sys.executable,'-c','import fold,json; print(json.dumps(fold.read_events(use_cache=False)))'],
+                    capture_output=True,text=True,env=env,check=True)
+                rows=json.loads(child.stdout)
+                start=next(e for e in rows if e['type']=='build-started' and e.get('spawn')==observed[0])
+                done=next(e for e in rows if e['type']=='build-done' and e.get('spawn')==observed[0])
+                self.assertEqual(start['base_sha'],pin);self.assertNotIn('base_sha_explicit',start)
+                self.assertEqual(done['base_sha'],pin);self.assertIs(done['base_sha_explicit'],True)
+                self.assertEqual(done['card_base_sha'],old)
+                self.assertTrue(any(e['type']=='autodispatched' and e.get('spawn')==observed[0] for e in rows))
+                moved=f.advance()
+                grader=packet.main(['grader',f.sid,'--repo',str(f.repo),'--worktree',str(f.wt)])
+                args=argparse.Namespace(role='grader',subject=f.sid,base_sha=None,repo=str(f.repo),worktree=str(f.wt),project=None)
+                ctx=packet.Ctx(args)
+                self.assertEqual(packet.verify_base_sha(ctx),pin)
+                wrapper=packet.write_verify_script(ctx)
+                self.assertIn('BASE='+pin,pathlib.Path(wrapper).read_text())
+                self.assertIn('verify-L-spec-9001',grader.read_text())
+                builder=packet.main(['builder',f.sid,'--repo',str(f.repo),'--worktree',str(f.wt)])
+                self.assertEqual(dispatch.pinned_base(builder),moved)
+                print(json.dumps(dict(entry=entry,O=old,N=pin,M=moved,start=start,done=done,grader_base=pin)))
+
+
+if __name__ == '__main__' and '-k' in sys.argv and sys.argv[-1] in {'worktree_record', 'R7PinReplayTests'}:
     unittest.main()
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -104,6 +241,18 @@ def _fresh(project="proj", make_repo=True):
         bare.mkdir()
         (root / "repos" / project).symlink_to(bare)
     return root
+
+
+def _builder_replay_base(root, project):
+    import look
+    repo = root / 'repos' / project
+    subprocess.run(['git','-C',str(repo),'init','-q','-b','master'],check=True)
+    subprocess.run(['git','-C',str(repo),'-c','user.name=fixture','-c','user.email=fixture@example.invalid',
+                    'commit','-q','--allow-empty','-m','fixture'],check=True)
+    config = root / 'look.toml'
+    config.write_text('[push.main]\n' + project + ' = "master"\n')
+    look.DEFAULT_TOML_PATH = config
+    return subprocess.check_output(['git','-C',str(repo),'rev-parse','HEAD'],text=True).strip()
 
 
 def _write(root, name, *events):
@@ -298,8 +447,10 @@ class _FakeRunner:
         self.script = script or {}
 
     def __call__(self, argv):
-        i = len(self.calls)
+        i = sum(a[:3] != ["doit", "packet", "builder"] for a in self.calls)
         self.calls.append(list(argv))
+        if argv[:3] == ["doit", "packet", "builder"]:
+            return {"code": 0, "stdout": "/fresh-builder.md", "stderr": ""}
         return self.script.get(i, {"code": 0, "stdout": "", "stderr": ""})
 
 
@@ -570,15 +721,23 @@ for n9, (role9, has_path9) in enumerate((("builder", False), ("spec-writer", Tru
     specs9, _, _, _ = fold.fold(ev9)
     detach9 = json.dumps({"detached": 111 + n9, "role": role9, "subject": sid9, "log": "l"})
     runner9 = _FakeRunner({0: {"code": 0, "stdout": detach9, "stderr": ""}})
+    if role9 == "builder":
+        pin9 = _builder_replay_base(root, f"d9-{n9}")
     autodispatch.redispatch_dead(ev9, specs9, NOW, runner=runner9)
-    assert len(runner9.calls) == 1, runner9.calls
+    assert len(runner9.calls) == (2 if role9 == "builder" else 1), runner9.calls
     replay_path9 = root / "content" / f"replay-{spawn9}.md"
     expect9 = ["doit", "dispatch", "--detach", role9, sid9, "--packet", str(replay_path9), "--cwd", str(root / "cwd9")]
     if has_path9:
         expect9 += ["--path", "/some/path.md"]
     expect9 += ["--charter", "", "--project", f"d9-{n9}"]
-    assert runner9.calls[0] == expect9, runner9.calls[0]
-    assert replay_path9.read_text() == f"\n{body9}", repr(replay_path9.read_text())
+    if role9 == "builder":
+        assert runner9.calls[0] == ["doit", "packet", "builder", sid9, "--repo", str(root / "repos" / f"d9-{n9}"),
+                                   "--worktree", str(root / "cwd9"), "--base-sha", pin9], runner9.calls
+        expect9[expect9.index("--packet") + 1] = "/fresh-builder.md"
+        assert not replay_path9.exists(), "builder replay must regenerate its packet"
+    else:
+        assert replay_path9.read_text() == f"\n{body9}", repr(replay_path9.read_text())
+    assert runner9.calls[-1] == expect9, runner9.calls[-1]
     assert (dispatch.SEAT / f"{spawn9}.packet.md").read_text() == orig_packet9, "AC9: seat packet must stay unchanged"
     assert json.loads((dispatch.SEAT / f"{spawn9}.cmd.json").read_text()) == cmd_json9, "AC9: cmd.json must stay unchanged"
     lines9 = [json.loads(l) for l in tick.tick_path().read_text().splitlines()]
@@ -669,6 +828,7 @@ specs11, _, _, _ = fold.fold(ev11)
 spawn11b = "8801"
 runner11 = _FakeRunner({0: {"code": 0, "stdout": json.dumps({"detached": spawn11b, "role": "builder",
                                                               "subject": sid11, "log": "l"}), "stderr": ""}})
+_builder_replay_base(root, "d11")
 autodispatch.redispatch_dead(ev11, specs11, NOW, runner=runner11)
 lines11 = [json.loads(l) for l in tick.tick_path().read_text().splitlines()]
 disp11a = [e for e in lines11 if e["type"] == "autodispatched" and e.get("replaces") == spawn11a]
@@ -757,8 +917,9 @@ ev12 = fold.read_events()
 specs12, _, _, _ = fold.fold(ev12)
 runner12 = _FakeRunner({0: {"code": 0, "stdout": json.dumps({"detached": 9001, "role": "builder",
                                                               "subject": sid12a, "log": "l"}), "stderr": ""}})
+_builder_replay_base(root, "d12")
 autodispatch.redispatch_dead(ev12, specs12, NOW, runner=runner12)
-assert len(runner12.calls) == 1, runner12.calls
+assert len(runner12.calls) == 2, runner12.calls
 lines12 = [json.loads(l) for l in tick.tick_path().read_text().splitlines()]
 disp12a = [e for e in lines12 if e["type"] == "autodispatched" and e.get("replaces") == spawn12a]
 assert len(disp12a) == 1, disp12a
