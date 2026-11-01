@@ -175,7 +175,7 @@ def no_crontab(cmd, *a, **k):
 subprocess.run = no_crontab
 try:
     line = backup.cron_line()
-    check(bool(re.match(r"^\* \* \* \* \* .*backup watch --for 60", line)), f"AC5: shape: {line!r}")
+    check(bool(re.match(r"^\*/15 \* \* \* \* .*backup watch --for 60", line)), f"AC5: shape: {line!r}")
 finally:
     subprocess.run = _real_run
 

@@ -344,7 +344,7 @@ print('1130-AC7 kept')
     import tomllib
     rows = tomllib.loads((REPO / "crons.toml").read_text())["row"]
     row, = [r for r in rows if r["name"] == "balance"]
-    assert row == {"name": "balance", "where": "user", "schedule": "*/10 * * * *",
+    assert row == {"name": "balance", "where": "user", "schedule": "8 * * * *",
                    "command": "{doit} cron-run balance -- {doit} balance >> {root}/logs/balance.log 2>&1",
                    "path": "{doit}", "sig": r"\bdoit balance\b", "owner": "thinker", "project": "do-it-v2"}
     assert [r["name"] for r in rows if re.search(row["sig"], r["command"].replace("{doit}", "/repo/doit"))] == ["balance"]

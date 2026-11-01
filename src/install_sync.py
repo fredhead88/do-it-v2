@@ -158,7 +158,8 @@ def _crons_toml_at(repo, ref):
     except subprocess.CalledProcessError:
         return None
     doc = tomllib.loads(text)
-    return {r["name"]: (r["schedule"], r["command"]) for r in doc.get("row", [])}
+    return {r["name"]: (r["schedule"], r["command"]) for r in doc.get("row", [])
+            if r.get("paused") is not True}
 
 
 def changed_rows(repo, sha):

@@ -707,7 +707,7 @@ def cron_line(doit_bin=None):
     """Prints only; installs nothing (Boundaries)."""
     b = doit_bin or str(HERE.parent / "doit")
     log = str(fold.ROOT / "backup.log")
-    return f"* * * * * {b} backup watch --for 60 >> {log} 2>&1"
+    return f"*/15 * * * * {b} backup watch --for 60 >> {log} 2>&1"
 
 
 def main(argv=None):
