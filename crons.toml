@@ -334,3 +334,13 @@ path = "{doit}"
 sig = '\bdoit reap-scratch-db\b'
 owner = "thinker"
 project = "do-it-v2"
+
+[[row]]
+name = "worktree-reaper"
+where = "user"
+schedule = "*/5 * * * *"
+command = "{doit} cron-run worktree-reaper -- {doit} reap-worktrees >> {root}/logs/worktree-reaper.log 2>&1"
+path = "{doit}"
+sig = '\bdoit reap-worktrees\b'
+owner = "thinker"
+project = "do-it-v2"

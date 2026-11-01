@@ -1000,7 +1000,7 @@ def _psql_pg_fn():
 def run(root="/tmp", uid=None, min_age_min=120, dry_run=False, now=None, proc_root="/proc",
         scratch_root=None, events=None, kill_fn=None, state_path=None, pg_fn=None,
         stop_fn=None, wait_s=10, var_tmp_root=None, session_roots=None,
-        session_state_path=None, log_path=None):
+        session_state_path=None, log_path=None, worktree_fn=None):
     """SD7's decision, applied to `root` (and, opted in, `scratch_root`), plus
     R9's additive surfaces. Explicit `var_tmp_root` and `session_roots` opt
     in the age-limited disk surfaces; only the live resolver supplies defaults. `scratch_root`/`events`/`kill_fn` do NOT
@@ -1078,7 +1078,19 @@ def run(root="/tmp", uid=None, min_age_min=120, dry_run=False, now=None, proc_ro
     if events is not None:
         try:
             with disk_reaper.worktree_pass(proc_root, stats=worktree_stats) as worktree_rows:
-                reaped_worktrees = tree_cleanup.reap_merged_specs(events, dry_run=dry_run)
+                if worktree_fn is None:
+                    reaped_worktrees = tree_cleanup.reap_merged_specs(events, dry_run=dry_run)
+                else:
+                    # The live cadence shares the branch-preserving, dirty-safe
+                    # conventional-spec reaper instead of the legacy branch sweep.
+                    rows = worktree_fn(events, dry_run=dry_run, proc_refs=disk_reaper.process_refs())
+                    for row in rows:
+                        if row['action'] in ('removed', 'would-remove'):
+                            reaped_worktrees.append(row['branch'])
+                            worktree_rows.append(dict(path=row['path'], freed_bytes=row['freed_bytes'],
+                                spec='L-' + pathlib.Path(row['path']).name[2:], proof='terminal-spec'))
+                        else:
+                            kept.append(dict(path=row['path'], reason=row['reason']))
         except tree_cleanup.GroupFailure as e:
             reaped_worktrees, errors["worktrees"] = e.reaped, str(e)
         except Exception as e:
@@ -1237,7 +1249,9 @@ def reap_now(dry_run=False, min_age_min=120):
     `os.kill`, live `/proc`, and `main()`'s own new `_psql_pg_fn()` (R15c) — all
     resolved HERE, never by any hermetic caller. Raises exactly as `run()` does
     when `root` itself cannot be scanned; the caller decides what that means."""
+    import reap_worktrees
     return run(root="/tmp", uid=os.getuid(), min_age_min=min_age_min, dry_run=dry_run,
+              worktree_fn=reap_worktrees.run,
               proc_root="/proc", scratch_root=scratch.root(), events=fold.read_events(),
               kill_fn=os.kill, pg_fn=_psql_pg_fn(), var_tmp_root="/var/tmp",
               session_roots=[pathlib.Path.home() / ".claude/projects", pathlib.Path.home() / ".codex/sessions"])

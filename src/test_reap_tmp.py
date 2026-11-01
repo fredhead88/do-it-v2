@@ -798,6 +798,9 @@ with open(CRONS_PATH, "rb") as f:
 EXPECTED_CRONS_ROWS.append({"name": "scratch-db-reaper", "where": "user",
     "schedule": "17 * * * *", "command": "{doit} cron-run scratch-db-reaper -- {doit} reap-scratch-db",
     "path": "{doit}", "sig": r"\bdoit reap-scratch-db\b", "owner": "thinker", "project": "do-it-v2"})
+EXPECTED_CRONS_ROWS.append({"name": "worktree-reaper", "where": "user",
+    "schedule": "*/5 * * * *", "command": "{doit} cron-run worktree-reaper -- {doit} reap-worktrees >> {root}/logs/worktree-reaper.log 2>&1",
+    "path": "{doit}", "sig": r"\bdoit reap-worktrees\b", "owner": "thinker", "project": "do-it-v2"})
 ok(crons_doc["row"] == EXPECTED_CRONS_ROWS,
    f"L0440-AC20: cron rows match current wrappers, runtime bounds and */5 reaper cadence: {crons_doc['row']}")
 print("L0440-AC20 ok")
@@ -840,6 +843,8 @@ finally:
 # for callability, never `==` identity, and popped before the rest of the
 # eight original keys are compared unchanged).
 for call1541 in calls22:
+    import reap_worktrees
+    ok(call1541.pop("worktree_fn") is reap_worktrees.run, "W9 live tmp cadence uses the safe branch-preserving reaper")
     ok(call1541.pop("var_tmp_root") == "/var/tmp", "L1541 main opts in var/tmp")
     ok(call1541.pop("session_roots") == [pathlib.Path.home() / ".claude/projects", pathlib.Path.home() / ".codex/sessions"], "L1541 main opts in session roots")
 pg_fn22_0 = calls22[0].pop("pg_fn", None)

@@ -106,7 +106,8 @@ Source: `crons.toml`. Name | schedule | where | path, then command.
   flow-health-daily | 30 0 * * * | user | /usr/bin/python3  {doit} cron-run flow-health-daily --
   /usr/bin/python3 {repo}/src/flow_health.py >> {root}/logs/flow-health.log 2>&1
   scratch-db-reaper | 17 * * * * | user | {doit}  {doit} cron-run scratch-db-reaper -- {doit}
-  reap-scratch-db
+  reap-scratch-db; worktree-reaper | */5 * * * * | user | {doit}  {doit} cron-run worktree-reaper --
+  {doit} reap-worktrees >> {root}/logs/worktree-reaper.log 2>&1
 
 ## Tick event types
 
