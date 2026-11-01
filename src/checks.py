@@ -114,6 +114,31 @@ def record_for(events, spec, criterion):
     return record if record.spec == spec else None
 
 
+def legacy_production(row, spec_text):
+    """Send legacy production-access checks through the approved-access guard.
+
+    This does not guess an execution environment for general unknown checks.
+    Unsupported production commands deliberately reach no-approved-access.
+    """
+    block = grading_env._criterion_blocks(spec_text).get(row["criterion"], "")
+    if not block or re.search(r'^\s*check:', block, re.M):
+        return None
+    access = re.search(r"\b(?:SUPABASE_DB_URL_RO|"
+                       r"[A-Z_]*PROD[A-Z_]*(?:DSN|DB_URL)|ro-sql|droplet-read)\b", block)
+    if row.get("capability") not in ("ro-dsn", "droplet") and not access:
+        return None
+    tagged = _tagged_commands(spec_text).get(row["criterion"], [])
+    review = grading_env._review_paths(block)
+    quoted = re.search(r"`([^`]+)`", review)
+    command = (tagged[0] if len(tagged) == 1 else quoted[1] if not tagged and quoted else "")
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        argv = []
+    return CheckRecord(f"{row['spec']}:{row['criterion']}", row["spec"], row["criterion"],
+                       argv, "", "production", True, "prod-readonly", "post-deploy", "script")
+
+
 def _names(text, words):
     return any(re.search(r"(?<![\w-])" + re.escape(w) + r"(?![\w-])", text, re.I)
                for w in words)

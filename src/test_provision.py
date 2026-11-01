@@ -229,6 +229,53 @@ class ProvisionTests(unittest.TestCase):
                 self.assertEqual(pending, [row])
                 self.assertEqual(any("data-source-unknown" in line for line in lines), record is None)
 
+    def test_legacy_production_checks_reach_guard_without_seats(self):
+        import dispatch
+        content = self.root / "content"
+        content.mkdir()
+        body = content / (self.record.spec + ".md")
+        row = dict(spec=self.record.spec, criterion="AC1", project="fixture")
+        for review, capability, expected in (
+                ("run `pytest -m live_db tests/test_prod.py` with SUPABASE_DB_URL_RO", "ro-dsn", "unobservable"),
+                ("run `ro-sql fixture 'select 1'`", "other", "met"),
+                ("run `droplet-read fixture systemctl status app`", "droplet", "met")):
+            body.write_text("## Acceptance Criteria\nAC1 [observed-data]: production check.\n"
+                            + "review_path: " + review + "\n")
+            with self.subTest(review=review), patch.object(dispatch, "ROOT", self.root), \
+                    patch.object(provision.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "1", "")) as run:
+                pending, _ = provision.script_rows([{**row, "capability": capability}], [],
+                    self.root / "events/L-verifier-local.jsonl", lane="verifier")
+            self.assertEqual(pending, [])
+            event = json.loads((self.root / "events/L-verifier-local.jsonl").read_text().splitlines()[-1])
+            self.assertEqual(event["type"], "owed-" + expected)
+            if expected == "unobservable":
+                self.assertEqual(event["why"], "no-approved-access")
+                run.assert_not_called()
+            else:
+                self.assertEqual(run.call_count, 1)
+                self.assertIn(Path(run.call_args.args[0][0]).name, ("ro-sql", "droplet-read"))
+
+    def test_legacy_adapter_preserves_explicit_and_unknown_checks(self):
+        import dispatch
+        content = self.root / "content"
+        content.mkdir()
+        (content / (self.record.spec + ".md")).write_text(
+            "AC1 [observed-data]: read with SUPABASE_DB_URL_RO\nreview_path: `pytest -m live_db`\n")
+        row = dict(spec=self.record.spec, criterion="AC1", capability="ro-dsn")
+        # A malformed explicit declaration must stay unknown, not be inferred.
+        events = [dict(type="check-declared", subject=self.record.spec, criterion="AC1")]
+        with patch.object(dispatch, "ROOT", self.root), \
+                patch.object(provision, "prepare", side_effect=AssertionError("script")):
+            pending, _ = provision.script_rows([row], events,
+                self.root / "events/L-verifier-local.jsonl", lane="verifier")
+        self.assertEqual(pending, [row])
+        self.assertIsNone(checks.legacy_production(row,
+            'AC1 [observed-data]: read with SUPABASE_DB_URL_RO\n'
+            '  check: malformed explicit declaration\nreview_path: `ro-sql fixture select`\n'))
+        self.assertIsNone(checks.legacy_production({**row, 'capability': 'repo'},
+            'AC1 [backend]: scratch Postgres isolation.\n'
+            'review_path: `pytest tests/test_scratch.py` sets SUPABASE_DB_URL to its private database.\n'))
+
     def test_shell_wrapped_paid_command_is_refused_before_execution(self):
         env = provision.prepare(self.record, lane="test")
         record = dataclasses.replace(self.record, argv=["/bin/sh", "-c", "keepa-fetch fixture"])
