@@ -427,5 +427,226 @@ class R7PinCallerTests(unittest.TestCase):
                 r7_evidence('AC1-failures', dict(case=case, resolver_dispatches=0, packet_dispatches=0))
 
 
+class FreshWorktree1856PacketTests(unittest.TestCase):
+    def fixture(self, stack, kind='unblocked', default='main', dirty=False, missing=False):
+        f=R7Fixture(stack,default)
+        f.worktree(f.old)
+        retained=f.commit(f.wt,'builder-work')
+        f.event('L-builder-1856.jsonl','build-done',status='BLOCKED',project='proj',
+                base_sha=f.old,ready_sha=retained,branch=f.sid.lower(),card=str(f.root/'content/old-card.md'),
+                ts=(f.now-dt.timedelta(seconds=30)).isoformat())
+        f.event('L-builder-1856.jsonl','build-blocked',reason='fixture blocked',
+                ts=(f.now-dt.timedelta(seconds=29)).isoformat())
+        if kind=='window-dropped':
+            f.event('L-executor-1856.jsonl',kind,reason='owner',window='fixture-window',
+                    ts=(f.now-dt.timedelta(seconds=10)).isoformat())
+        elif kind=='rework':
+            f.event('L-operator-1856.jsonl','decision',rework='yes',
+                    ts=(f.now-dt.timedelta(seconds=10)).isoformat())
+        else:
+            f.event('L-operator-1856.jsonl',kind,ts=(f.now-dt.timedelta(seconds=10)).isoformat())
+        if dirty:
+            (f.wt/'builder-work').write_text('uncommitted\n');(f.wt/'untracked').write_text('untracked\n')
+        if missing:
+            import shutil
+            shutil.rmtree(f.wt)
+        return f,retained
+
+    def run_tick(self,f,**kw):
+        events=f.events()
+        return tick.run_steps(events,fold.fold(events)[0],f.now,dispatcher=kw.pop('runner',f.runner),**kw)
+
+    def test_AC1_trigger_scope_and_rework_precedence(self):
+        import worktree_heal
+        for kind in ('unblocked','spec-amended','window-dropped','rework'):
+            with self.subTest(kind=kind),contextlib.ExitStack() as stack:
+                f,retained=self.fixture(stack,kind)
+                events=f.events();s=nextstep.step_for(events,fold.fold(events)[0],f.sid,f.now,lane_rules.load())
+                self.assertEqual(s.action,'rebuild',s)
+                self.assertEqual(worktree_heal.fresh_trigger(s,events),kind!='rework')
+                if kind=='rework':
+                    self.run_tick(f)
+                    self.assertEqual(f.git('rev-parse','HEAD',cwd=f.wt),retained)
+                    self.assertEqual(list(f.wt.parent.glob('*-pre-*')),[])
+                else:
+                    before=f.git('show-ref')
+                    self.run_tick(f,dry_run=True)
+                    self.assertEqual(f.git('show-ref'),before)
+                    self.assertFalse(f.dispatched)
+        for control in ('hold','disabled','older-amendment','newer-DONE','mixed-rework'):
+            with self.subTest(control=control),contextlib.ExitStack() as stack:
+                f,retained=self.fixture(stack)
+                if control=='hold': f.event('L-operator-1856.jsonl','escalation-blocking',why='fixture hold',default='wait',deadline='2099-01-01',revert='none')
+                if control=='disabled':
+                    (f.root/'state').mkdir();(f.root/'state/worktree-heal.off').touch()
+                if control=='older-amendment':
+                    (f.root/'events/L-operator-1856.jsonl').unlink()
+                    f.event('L-operator-1856.jsonl','spec-amended',ts=(f.now-dt.timedelta(seconds=60)).isoformat())
+                if control=='newer-DONE': f.event('L-builder-1856.jsonl','build-done',status='DONE',ready_sha=retained,base_sha=f.old,card=str(f.root/'content/old-card.md'))
+                if control=='mixed-rework': f.event('L-operator-1856.jsonl','decision',rework='yes',ts=(f.now-dt.timedelta(seconds=20)).isoformat())
+                self.run_tick(f)
+                self.assertEqual(f.git('rev-parse','HEAD',cwd=f.wt),retained)
+                self.assertEqual(list(f.wt.parent.glob('*-pre-*')),[])
+
+    def test_AC2_lossless_archival_matrix(self):
+        for default in ('main','master'):
+            for case in ('clean','dirty','missing','collision','no-ahead'):
+                with self.subTest(default=default,case=case),contextlib.ExitStack() as stack:
+                    f,retained=self.fixture(stack,default=default,dirty=case=='dirty',missing=case=='missing')
+                    if case=='collision':f.git('branch',f.sid.lower()+'-pre-1',f.old)
+                    if case=='no-ahead':f.git('reset','--hard',f.old,cwd=f.wt)
+                    pin=f.pin();out=self.run_tick(f)
+                    self.assertTrue(any(line.startswith('acted') for line in out),out)
+                    archive=f.sid.lower()+'-pre-'+('2' if case=='collision' else '1')
+                    if case=='no-ahead':
+                        self.assertEqual(f.git('rev-parse','HEAD',cwd=f.wt),pin)
+                        self.assertFalse(list(f.wt.parent.glob('*-pre-*')))
+                        continue
+                    self.assertEqual(f.git('rev-parse',archive),retained)
+                    self.assertEqual(f.git('rev-parse','HEAD',cwd=f.wt),pin)
+                    self.assertEqual(f.git('symbolic-ref','--short','HEAD',cwd=f.wt),f.sid.lower())
+                    if case!='missing':
+                        archived=f.wt.with_name(archive)
+                        self.assertEqual(f.git('rev-parse','HEAD',cwd=archived),retained)
+                        self.assertEqual((archived/'builder-work').read_text(),'uncommitted\n' if case=='dirty' else 'builder-work\n')
+                        if case=='dirty':self.assertEqual((archived/'untracked').read_text(),'untracked\n')
+                    self.assertFalse(any('reset' in a or '--force' in a or '-f' in a for a in f.calls))
+                    print(json.dumps(dict(criterion='AC2',default=default,case=case,retained=retained,fresh=pin,archive=archive)))
+
+    def test_AC3_packet_preflight_and_base_movement(self):
+        import argparse
+        import packet
+        for move in (False,True):
+            with self.subTest(move=move),contextlib.ExitStack() as stack:
+                f,retained=self.fixture(stack)
+                f.event('L-operator-1856.jsonl','dependency-hold',waits_for='L-spec-9000',ts=(f.now-dt.timedelta(seconds=20)).isoformat())
+                pin=f.pin();moved=[]
+                def runner(argv):
+                    answer=f.runner(argv)
+                    if move and argv[:2]==['git','-C'] and 'worktree' in argv and 'add' in argv and argv[-1]==pin and not moved:
+                        moved.append(f.advance())
+                    return answer
+                out=self.run_tick(f,runner=runner)
+                if move:
+                    self.assertFalse(f.dispatched);self.assertTrue(any('moved' in line or 'does not match' in line for line in out),out)
+                    continue
+                self.assertEqual(dispatch.pinned_base(f.dispatched[-1]),pin)
+                self.assertIn('PINNED_BASE_SHA_EXPLICIT: true',f.dispatched[-1].read_text())
+                argv=next(a for a in f.calls if a[:3]==['doit','packet','builder'])
+                self.assertEqual(argv[-2:],['--base-sha',pin])
+                args=argparse.Namespace(subject=f.sid,project='proj',pinned_base_sha=pin,_dispatch_builder=True)
+                def fail(message,**kw):raise AssertionError((message,kw))
+                dispatch.builder_worktree_preflight(args,str(f.wt),f.root/'events/L-builder-1856.jsonl',{'subject':f.sid},fail)
+                commit=f.commit(f.wt,'fresh-builder')
+                self.assertEqual(f.git('rev-parse',commit+'^'),pin)
+                self.assertEqual(f.git('rev-list','--count',pin+'..'+commit),'1')
+
+    def test_AC4_refusals_and_partial_archive_resume(self):
+        for fault in ('locked','other-head','explicit-base','move-failure','leftover','wrong-add','wrong-branch','record','readback','bad-recorded-base'):
+            with self.subTest(fault=fault),contextlib.ExitStack() as stack:
+                f,retained=self.fixture(stack,dirty=fault=='move-failure')
+                if fault=='locked':f.git('worktree','lock',str(f.wt))
+                if fault=='other-head':f.git('checkout','-qb','other')
+                if fault=='explicit-base':
+                    f.git('branch','realm');f.spec.write_text('Base: realm\n'+f.spec.read_text())
+                if fault=='bad-recorded-base':
+                    path=f.root/'events/L-builder-1856.jsonl'
+                    rows=[json.loads(line) for line in path.read_text().splitlines()]
+                    rows[0]['base_sha']='f'*40
+                    path.write_text(''.join(json.dumps(e)+'\n' for e in rows))
+                failed=[]
+                def runner(argv):
+                    if fault=='move-failure' and 'move' in argv and not failed:
+                        failed.append(True);return dict(code=1,stdout='',stderr='fixture move failed')
+                    if fault=='leftover' and 'move' in argv:
+                        answer=f.runner(argv);f.wt.mkdir();return answer
+                    if fault=='wrong-add' and 'add' in argv:
+                        argv=list(argv);argv[-1]=f.old
+                    if fault=='wrong-branch' and 'add' in argv:
+                        argv=list(argv);argv[argv.index('-b')+1]='wrong-branch'
+                    return f.runner(argv)
+                if fault in ('record','readback'):
+                    import resources
+                    target='record' if fault=='record' else '_readback'
+                    stack.enter_context(patch.object(resources,target,side_effect=resources.RecordReadbackError('record refused')))
+                out=self.run_tick(f,runner=runner)
+                self.assertFalse(f.dispatched,out)
+                self.assertTrue(any(line.startswith('failed') for line in out),out)
+                self.assertIn(retained,f.git('show-ref'))
+                if fault in ('locked','other-head','explicit-base'):
+                    self.assertEqual(f.git('rev-parse','HEAD',cwd=f.wt),retained)
+                    self.assertFalse(list(f.wt.parent.glob('*-pre-*')))
+                if fault=='explicit-base':self.assertTrue(any('the Executor cuts this worktree by hand' in line for line in out))
+                if fault=='move-failure':
+                    # Resume the same journal at the next due tick, without a second archive.
+                    f.now+=dt.timedelta(minutes=6)
+                    self.run_tick(f)
+                    self.assertEqual(len(f.dispatched),1)
+                    self.assertEqual([p.name for p in f.wt.parent.glob('*-pre-*')],[f.sid.lower()+'-pre-1'])
+                    self.assertEqual((f.wt.with_name(f.sid.lower()+'-pre-1')/'builder-work').read_text(),'uncommitted\n')
+
+    def test_AC4_path_and_git_failures_preserve_foreign_content(self):
+        import worktree_heal
+        for fault in ('unsafe-project','unsafe-subject','symlink','foreign','unreadable'):
+            with self.subTest(fault=fault),contextlib.ExitStack() as stack:
+                f,retained=self.fixture(stack)
+                events=f.events();step=nextstep.step_for(events,fold.fold(events)[0],f.sid,f.now,lane_rules.load())
+                project='../../outside' if fault=='unsafe-project' else 'proj'
+                if fault=='unsafe-subject':step=replace(step,item='L-spec-../../outside')
+                if fault in ('symlink','foreign'):
+                    retained_path=f.wt.with_name('retained-foreign')
+                    f.git('worktree','move',str(f.wt),str(retained_path))
+                    if fault=='symlink':f.wt.symlink_to(f.root/'absent')
+                    else:f.wt.mkdir();(f.wt/'sentinel').write_text('foreign')
+                def runner(argv):
+                    if fault=='unreadable':return dict(code=1,stdout='',stderr='unreadable git')
+                    return f.runner(argv)
+                with self.assertRaises(ValueError):worktree_heal.prepare_fresh(step,events,f.root,project,f.wt,runner)
+                self.assertFalse(f.dispatched)
+                self.assertEqual(f.git('rev-parse',f.sid.lower()),retained)
+                if fault=='foreign':self.assertEqual((f.wt/'sentinel').read_text(),'foreign')
+
+    def test_AC4_foreign_registered_branch_is_not_moved(self):
+        import worktree_heal
+        with contextlib.ExitStack() as stack:
+            f,retained=self.fixture(stack)
+            f.git('checkout','-b','foreign-builder',cwd=f.wt)
+            (f.wt/'foreign-sentinel').write_text('preserve here')
+            events=f.events();step=nextstep.step_for(events,fold.fold(events)[0],f.sid,f.now,lane_rules.load())
+            with self.assertRaisesRegex(ValueError,'branch mismatch'):
+                worktree_heal.prepare_fresh(step,events,f.root,'proj',f.wt,f.runner)
+            self.assertEqual((f.wt/'foreign-sentinel').read_text(),'preserve here')
+            self.assertEqual(f.git('symbolic-ref','--short','HEAD',cwd=f.wt),'foreign-builder')
+            self.assertFalse(list(f.wt.parent.glob('*-pre-*')))
+            self.assertEqual(f.git('rev-parse',f.sid.lower()),retained)
+
+    def test_AC5_resource_round_trip_and_reaper_retention(self):
+        import resources
+        import tree_cleanup
+        with contextlib.ExitStack() as stack:
+            f,retained=self.fixture(stack)
+            self.run_tick(f)
+            env=dict(os.environ,DOIT_ROOT=str(f.root),PYTHONPATH=str(Path(__file__).parent.resolve()))
+            read=subprocess.run([sys.executable,'-c','import fold,json; print(json.dumps(fold.read_events(use_cache=False)))'],env=env,capture_output=True,text=True,check=True)
+            events=json.loads(read.stdout)
+            created=[e for e in events if e['type']=='resource-created']
+            archived=f.wt.with_name(f.sid.lower()+'-pre-1')
+            self.assertEqual({e['ref'] for e in created},{str(f.wt),str(archived)})
+            self.assertTrue(all(e['subject']==f.sid and e['lane']=='build' for e in created))
+            self.assertEqual(tree_cleanup._spec_worktree_paths(f.sid,events),[f.wt])
+            # Remove the synthetic parent receipt from reaper input; no worker ran.
+            evidence=[e for e in events if e['type']!='autodispatched']
+            f.commit(f.wt,'uncovered')
+            f.event('L-operator-1856.jsonl','spec-killed',why='terminal fixture')
+            evidence=[e for e in f.events() if e['type']!='autodispatched']
+            reasons=[]
+            for resource in resources.live(evidence):
+                try:reasons.append(resources._worktree(resource,evidence)[3])
+                except tree_cleanup.Undetermined as exc:reasons.append('undetermined: '+str(exc))
+            self.assertIn('undetermined: owner branch does not match recorded path',reasons)
+            self.assertTrue(any('holds work' in why or 'holds-work' in why for why in reasons),reasons)
+            self.assertEqual(f.git('rev-parse',f.sid.lower()+'-pre-1'),retained)
+
+
 if __name__ == '__main__':
     unittest.main()
