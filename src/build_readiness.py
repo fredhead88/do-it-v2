@@ -69,8 +69,10 @@ def missing_inputs(text, repo, base, tree):
             token = token.rstrip('.,:')
             if Path(token).suffix or token.removeprefix('./').split('/', 1)[0] in top_directories:
                 paths.append(token)
+        # Schedules, templates, globs and argument spans are not concrete Git inputs.
         paths = list(dict.fromkeys(p.rstrip('.,:') for p in paths if
-                                 '/' in p and not p.startswith(('http', '/')) and not re.search(r'\s', p)))
+                                 '/' in p and not any(char in p for char in '*{}=') and
+                                 not p.startswith(('http', '/')) and not re.search(r'\s', p)))
         resolved = []
         for path in paths:
             package = '/'.join(path.split('/')[:2]) if path.startswith('@') else path.split('/')[0]

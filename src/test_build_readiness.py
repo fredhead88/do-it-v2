@@ -84,6 +84,26 @@ class ReadinessTests(unittest.TestCase):
         self.spec('- `missing/path.py`')
         self.assertIn('missing inputs', self.check()['findings'][0])
 
+    def test_cron_and_keyword_spans_are_not_repository_inputs(self):
+        target = self.repo / 'api/existing.py'
+        target.parent.mkdir()
+        target.write_text('value = 1\n')
+        self.git('add', '.')
+        self.git('commit', '-qm', 'existing input control')
+        self.base = self.git('rev-parse', 'HEAD')
+        for token in ('*/{tick_min}', 'var_tmp_root="/var/tmp"', '*/5', '*/15',
+                      'api/*.json', 'api/{version/client.py', 'api/version}/client.py',
+                      'var_tmp_root="api/missing.py"'):
+            with self.subTest(token=token):
+                self.spec(f'- `api/existing.py` and `{token}`')
+                result = self.check(dry_run=False)
+                self.assertEqual((result['status'], result['findings']), ('ready', []))
+        self.spec('- `*/5` and `var_tmp_root="/var/tmp"` and `api/missing.py`')
+        result = self.check(dry_run=False)
+        self.assertEqual(result['status'], 'bounced')
+        self.assertEqual(result['findings'], [
+            'missing inputs without a unique producer: api/missing.py'])
+
     def test_unquoted_slash_prose_is_not_a_path_but_explicit_inputs_still_are(self):
         target = self.repo / 'api/existing.py'
         target.parent.mkdir()
