@@ -103,9 +103,15 @@ def latest_routed_events(events, spec):
     id on `spec`, actor `grader` only (SD-R16-6/AC7), `to` included whatever
     its value (`"reviewer"`, `"owed"`, or `"none"`). `events` is read in
     order; the LAST matching row per id wins (last-write-by-position, the
-    same rule `owed.checks`'s own `last_ac` uses)."""
+    same rule `owed.checks`'s own `last_ac` uses). An adopted completed build
+    starts a new routing round; the next grader recomputes its capabilities.
+    Ordinary rework and explicit owed declarations retain their contracts."""
     out = {}
     for e in events:
+        if (e.get('subject') == spec and e.get('type') == 'build-done'
+                and e.get('status') == 'DONE' and e.get('adopted_by')):
+            out.clear()
+            continue
         if (e.get("type") != "criterion-routed" or e.get("subject") != spec
                 or e.get("actor") != "grader"):
             continue

@@ -62,6 +62,26 @@ routed = routing.routed_to(EVS_A, "L-spec-1")
 check(routed == {"AC2": "owed"}, f"routed_to drops to=none and non-grader rows: {routed}")
 print("latest_routed_events/routed_to ok")
 
+# W4 adoption explicitly starts fresh; ordinary rework keeps its routing contract.
+done = {"type": "build-done", "subject": "L-spec-1", "status": "DONE", "adopted_by": "thinker"}
+check(routing.routed_to(EVS_A + [done], "L-spec-1") == {},
+      "adoption invalidates the old grader's routes")
+check(routing.routed_to(EVS_A + [{k: v for k, v in done.items() if k != 'adopted_by'}],
+                        "L-spec-1") == routed,
+      "ordinary rework preserves its standing routing decisions")
+check(routing.routed_to(EVS_A + [{**done, "status": "BLOCKED"}], "L-spec-1") == routed,
+      "an unsuccessful build preserves existing routes")
+check(routing.routed_to(EVS_A + [{**done, "subject": "L-spec-2"}], "L-spec-1") == routed,
+      "another spec's build cannot invalidate routes")
+new_route = {"type": "criterion-routed", "subject": "L-spec-1", "actor": "grader",
+             "criterion": "AC3", "capability": "browser", "to": "reviewer"}
+check(routing.routed_to(EVS_A + [done, new_route], "L-spec-1") == {"AC3": "reviewer"},
+      "new grader routes still apply after a rebuild")
+owed_declaration = {"type": "owed-ac", "subject": "L-spec-1", "actor": "spec-writer",
+                    "criterion": "AC9"}
+check(routing.explicit_owed_ids(EVS_A + [owed_declaration, done], "L-spec-1") == {"AC9"},
+      "adoption never clears explicit owed declarations")
+
 
 # ═══ explicit_owed_ids — spec-writer/spec-auditor actor only ═══════════════
 EVS_B = [

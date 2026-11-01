@@ -39,6 +39,7 @@ case "${1:-board}" in
   pane-end) shift; exec python3 "$SRC/pane_end.py" "$@" ;;
   think)   shift; exec python3 "$SRC/think.py" "$@" ;;
   thinker-answer) shift; exec python3 "$SRC/thinker_answer.py" "$@" ;;
+  adopt-candidate) shift; exec python3 "$SRC/adopt_candidate.py" "$@" ;;
   carry)   shift; exec python3 "$SRC/carry.py" "$@" ;;
   note-close) shift; exec python3 "$SRC/notes.py" "$@" ;;
   guard)   shift; exec python3 "$SRC/guard.py" "$@" ;;
@@ -213,6 +214,8 @@ doit — a ledger that derives state, and the guards that read it
   doit spend <charter|spec|spawn-id>      per-spawn token table + totals; charter stage wall clock (read-only)
   doit grades-rate [--json]               grades spent per spec shipped, trailing 24h — the board's HEALTH line (read-only)
   doit append <type> <subject> [k=v ...]  append one event; --board renders, --json prints the event
+  doit adopt-candidate <L-spec-N> <sha> --by <actor> --reason TEXT
+                                           reconcile a repaired spec branch and hand it back to Verification
   doit gh-bill [--usage-file F] [--dry-run]   check GitHub billing policy
   doit ci-runner status [--json] | doit ci-runner set <CI_SELF_HOSTED|CI_PG_SELF_HOSTED> <true|false> --why TEXT
   doit ci-shadow [--dry-run] [--json]   compare hosted CI with self-hosted shadows
