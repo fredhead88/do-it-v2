@@ -414,3 +414,23 @@ def nightly_unowned(events, project):
 
 
 from dependency_holds import valid_dependency
+
+def escalation_required_reason(e, valid):
+    """Keep reversible/irreversible escalation validation actor-blind."""
+    if valid(e):
+        return None
+    return (f"escalation-blocking {e.get('subject', '?')} carries neither "
+            "default= AND deadline= AND revert= (a reversible escalation) nor "
+            "irreversible=<the act that forbids a default> (an irreversible one)")
+
+
+def window_result_reason(e):
+    if (type(e.get('first_run')) is not bool
+            or e.get('state') not in ('green', 'red', 'undetermined')):
+        return 'window-verification-result needs boolean first_run and a valid state'
+    return None
+
+
+# AIMD observations are gate-owned and replayed after restart.
+EMITS['window-verification-result'] = {'executor', 'tick', 'operator'}
+REQUIRED_ROWS['window-verification-result'] = ('state', 'sha', 'specs')

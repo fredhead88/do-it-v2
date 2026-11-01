@@ -15,7 +15,8 @@ tree_guards = [
 ]
 dispatch_timeout_min = 70
 train_depth = 2
-max_merges = 4  # 2026-11-01 operator GO: merge-morass panel; adaptive sizing to follow
+# Merge cap: ledger AIMD starts at 4, grows to 8, halves to 2 on red.
+# DOIT_WINDOW_MAX_MERGES overrides the controller.
 
 [merge_queue]
 batch_cap = 15

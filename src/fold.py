@@ -43,7 +43,7 @@ SESSIONS = pathlib.Path(os.environ.get("DOIT_SESSIONS_DIR",
                                        pathlib.Path.home() / ".claude" / "sessions"))
 PROJECT = os.environ.get("DOIT_PROJECT")          # §9.1/D93: a filter, not a second read
 
-from fold_emits import EMITS, DECLARES, OWED_DECLARERS, REQUIRED_ROWS, nightly_unowned, valid_dependency
+from fold_emits import EMITS, DECLARES, OWED_DECLARERS, REQUIRED_ROWS, nightly_unowned, valid_dependency, escalation_required_reason, window_result_reason
 EMITS["suite-run"] = {"suite-daily"}
 EMITS["check-declared"] = {"spec-writer", "executor", "operator"}
 # L-spec-0682: the full-environment verifier may record verdicts and re-date timed checks.
@@ -813,11 +813,9 @@ def required_reason(e):
     if t == "dependency-hold" and not valid_dependency(e.get("waits_for")):
         return "dependency-hold waits_for= must be a string matching L-spec-[0-9]+"
     if t == "escalation-blocking":
-        if escalation_ok(e):
-            return None
-        return (f"escalation-blocking {e.get('subject', '?')} carries neither "
-                "default= AND deadline= AND revert= (a reversible escalation) nor "
-                "irreversible=<the act that forbids a default> (an irreversible one)")
+        return escalation_required_reason(e, escalation_ok)
+    if t == 'window-verification-result' and (reason := window_result_reason(e)):
+        return reason
     fields = REQUIRED.get(t)
     if fields:
         missing = []
@@ -2347,6 +2345,8 @@ def append(argv: list[str], strict: bool = False) -> dict:
             e[k] = v
     if "project" not in e:
         e["project"] = PROJECT or subject_project(argv[1]) or pathlib.Path.cwd().name
+    if e['type'] == 'decision' and e.get('ref'):
+        __import__('window_policy').check_decision(e, read_events())
     if "actor" in e:
         raise SystemExit("refused: actor is derived from the ledger filename, never an actor= field")
     actor = actor_of(path.name)

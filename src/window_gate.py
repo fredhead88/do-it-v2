@@ -127,9 +127,9 @@ def ev(typ, subject, **kv):
 
 
 def escalate(window, why, outcome=None):
-    due = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(timespec="seconds")
+    due = (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat(timespec="seconds")
     ev("escalation-blocking", window, why=why, outcome=outcome,
-       default="master stays where it is; the window's specs stay unshipped until an operator decides",
+       default="after 30 minutes drop attributed specs, requeue unattributed specs with failing ids, cancel window",
        deadline=due,
        revert="rerun `doit gate-window` once the cause is fixed, or DOIT_WINDOW_GATE=off for a declared CI outage")
 
@@ -734,7 +734,7 @@ def verify_timeout_secs(env, toml_path=None):
 
 
 def max_merges(env, toml_path=None):
-    """Resolve a positive integer cap: process env, versioned TOML, then 10."""
+    """Explicit env override, otherwise replay the ledger AIMD controller (initial 4)."""
     def positive_integer(value):
         number = _positive_timeout(value)
         return int(number) if number is not None and number.is_integer() else None
@@ -742,15 +742,7 @@ def max_merges(env, toml_path=None):
     override = positive_integer(env.get("DOIT_WINDOW_MAX_MERGES"))
     if override is not None:
         return override
-    try:
-        import tomllib
-        path = pathlib.Path(toml_path) if toml_path is not None else DEFAULT_TOML_PATH
-        with open(path, "rb") as f:
-            table = tomllib.load(f).get("window_gate")
-    except (OSError, ValueError, TypeError, ImportError):
-        table = None
-    configured = positive_integer(table.get("max_merges")) if isinstance(table, dict) else None
-    return configured if configured is not None else 10
+    return __import__('window_policy').adaptive_cap(fold.read_events())
 
 
 TREE_GUARDS = (
@@ -1642,6 +1634,8 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
             print(f"gate-window: tree {tree} already verified in {prior.get('window', prior.get('subject'))}")
             return dict(state="green", nodes=[], url="", doc={})
         res = dict(verify(repo, cand, candidate_required, window), candidate=cand)
+        ev('window-verification-result', window, state=res['state'], first_run=judgments == 1,
+           sha=cand, specs=kept, nodes=res.get('nodes', []))
         try:
             doc = res.get("doc", {})
             run_ids = sorted({str(check["run_id"]) for check in doc.get("checks", {}).values()

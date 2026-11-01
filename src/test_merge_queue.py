@@ -851,8 +851,7 @@ class QueueTests(unittest.TestCase):
             self.assertEqual((result['code'], result['calls']), (3, []))
             self.assertIn('configuration', result['stderr'])
         result = self.batching_case(6, config='batch_cap=6', ceiling=3)
-        self.assertEqual((result['code'], result['calls']), (3, []))
-        self.assertIn('exceeds gate', result['stderr'])
+        self.assert_batching(result, [f'L-spec-{9001+i}' for i in range(3)], 'selection-exclusions', 3)
         prior = dict(self.event('batch-cap', 2, cap=1, reason='operator'), subject='merge-train')
         result = self.batching_case(8, extra=[prior])
         self.assert_batching(result, [f'L-spec-{9001+i}' for i in range(8)], 'all-ready', 0)
@@ -961,7 +960,7 @@ class QueueTests(unittest.TestCase):
             def runner(argv):
                 batch = [e for e in fold.read_events() if e['type'] == 'queue-batch'][-1]
                 self.assertEqual(argv[2], batch['subject'])
-                self.assertEqual(batch['specs'].split(','), [f'L-spec-{9001+i}' for i in range(7)])
+                self.assertEqual(batch['specs'].split(','), [f'L-spec-{9001+i}' for i in range(min(7, mq.window_gate.max_merges(os.environ)))])
                 return dict(code=code)
             with patch.object(mq, '_repository', return_value=(self.root, 'main')), \
                  patch.object(mq, 'spec_paths', return_value=[]):
@@ -1224,7 +1223,7 @@ class QueueTests(unittest.TestCase):
         config.write_text('[merge_queue]\nbatch_cap = 9\nbatch_cap_floor = 6\n')
         def cap(rate=None, windows=0, events=(), path=config, env=None):
             with patch.object(mq.window_gate, 'red_rate', return_value=dict(rate=rate, windows=windows)):
-                return mq.effective_cap(list(events), self.now, env={} if env is None else env, toml_path=path)
+                return mq.effective_cap(list(events), self.now, env={'DOIT_WINDOW_MAX_MERGES': '10'} if env is None else env, toml_path=path)
         self.assertEqual(cap()['configured'], 9)
         self.assertEqual(cap(path=self.root / 'missing')['cap'], 6)
         self.assertEqual(cap(path='')['cap'], 6)
@@ -1237,7 +1236,7 @@ class QueueTests(unittest.TestCase):
         self.assertEqual(cap(.2, 5)['cap'], 9)
         self.assertEqual(cap(.1, 5, env={'DOIT_WINDOW_MAX_MERGES': '3'})['cap'], 3)
         with patch.object(mq.window_gate, 'red_rate', side_effect=OSError('unreadable')):
-            self.assertEqual(mq.effective_cap([], self.now, {}, config)['cap'], 6)
+            self.assertEqual(mq.effective_cap([], self.now, {}, config)['cap'], 4)
         for text, expected, floor in [('', 10, 6), ('batch_cap = "bad"', 10, 6),
                                       ('batch_cap = 0', 10, 6), ('batch_cap = 3\nbatch_cap_floor = 7', 3, 3),
                                       ('batch_cap = true\nbatch_cap_floor = -1', 10, 6)]:
@@ -1304,7 +1303,7 @@ class QueueTests(unittest.TestCase):
         with patch.object(mq.window_gate, 'train_depth', side_effect=AssertionError('depth called')):
             self.assertEqual(self.train_call()[0], 0)
         batch = [e for e in fold.read_events() if e['type'] == 'queue-batch'][-1]
-        self.assertEqual(batch['specs'].split(','), [f'L-spec-{9001+i}' for i in range(12)])
+        self.assertEqual(batch['specs'].split(','), [f'L-spec-{9001+i}' for i in range(min(12, mq.window_gate.max_merges(os.environ)))])
         self.assertEqual(self.train_call(flying=[dict(window='active', specs=[self.sid])]), (3, []))
         pending = dict(self.event('queue-batch', 0, project='albert-scott', specs=self.sid), subject='window-pending')
         with (self.root / 'events' / 'L-executor-0001.jsonl').open('a') as stream:

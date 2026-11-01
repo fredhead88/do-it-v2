@@ -566,7 +566,8 @@ def run_steps(events, specs, now, *, dispatcher=None, dry_run=False, handled=fro
         def visit_order(step):
             grade = (step.action == 'grade' and step.owner == 'tick' and step.state != 'hold'
                      and not step.reason.startswith('undetermined:'))
-            return (not grade if grades_first else False, step.since, step.item)
+            return (step.action != 'window-default', not grade if grades_first else False,
+                    step.since, step.item)
         for step in sorted(steps, key=visit_order):
             try:
                 if reporter and step.item in reporter.failed:
@@ -575,6 +576,12 @@ def run_steps(events, specs, now, *, dispatcher=None, dry_run=False, handled=fro
                 if reporter and 'evaluation failed:' in step.reason:
                     reporter.fail(step.item, step.reason, phase='planning')
                 if step.item in handled:
+                    continue
+                if step.action == 'window-default' and step.owner == 'tick':
+                    applied = __import__('window_policy').apply_default(
+                        step.item, step.trigger, now, dry_run=dry_run)
+                    if applied:
+                        out.append(f"{'would act' if dry_run else 'acted'} {step.item} window-default")
                     continue
                 if __import__('empty_grade').complete(step, events, dry_run=dry_run):
                     out.append(f"{'would act' if dry_run else 'acted'} {step.item}: zero grader criteria; automatic pass")

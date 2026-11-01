@@ -197,7 +197,10 @@ class Fx:
         for s in specs:
             fold.append(["merge-gate-clean", s, f"branch={self.branches[s]}", "project=albert-scott"])
             fold.append(["queue-add", s, f"branch={self.branches[s]}", "project=albert-scott", "rule=operator"])
-        with patch.dict(os.environ, FAKE_BASE=self.base, PATH=self.path), \
+        # Gate mechanics fixtures opt out of AIMD; boundary checks below opt in.
+        cap_env = {} if getattr(self, 'adaptive_cap', False) else {
+            'DOIT_WINDOW_MAX_MERGES': os.environ.get('DOIT_WINDOW_MAX_MERGES', '15')}
+        with patch.dict(os.environ, FAKE_BASE=self.base, PATH=self.path, **cap_env), \
              patch.object(window_gate.window_prewindow, 'select',
                           side_effect=lambda repo, base, main, entries, events, content: (entries, [])), \
              patch.dict(sys.modules, base_red=self.service), \
@@ -362,7 +365,7 @@ def cap_checks():
         path, absent = pathlib.Path(tmp) / "look.toml", pathlib.Path(tmp) / "absent.toml"
         path.write_text("[window_gate]\nmax_merges = 8\n")
         cases = [({key: value}, path, 12) for value in (12, "12", 12.0, "12.0", "1.2e1")]
-        cases += [({}, path, 8), ({}, absent, 10)]
+        cases += [({}, path, 4), ({}, absent, 4)]
         actual = [window_gate.max_merges(env, file) for env, file, _ in cases]
         precedence = actual == [v for _, _, v in cases] and all(type(v) is int for v in actual)
         held(precedence, "ac-cap precedence")
@@ -382,14 +385,14 @@ def cap_checks():
         with patch("builtins.open", side_effect=PermissionError("unreadable")):
             toml_values.append(window_gate.max_merges({}, path))
         path.write_text("[window_gate]\nmax_merges = 8.0\n")
-        check(type(window_gate.max_merges({}, path)) is int and window_gate.max_merges({}, path) == 8,
-              "integer-valued TOML float accepted")
-        invalid = (env_values == [8] * len(bad) and toml_values == [10] * len(toml_values)
+        check(type(window_gate.max_merges({}, path)) is int and window_gate.max_merges({}, path) == 4,
+              "TOML cannot override the adaptive controller")
+        invalid = (env_values == [4] * len(bad) and toml_values == [4] * len(toml_values)
                    and all(type(v) is int for v in env_values + toml_values))
         held(invalid, "ac-cap invalid falls through")
         cap_clock_response("AC1", dict(precedence=precedence, invalid_falls_through=invalid))
     import tomllib
-    configured = tomllib.loads((HERE.parent / 'look.toml').read_text())['window_gate']['max_merges']
+    configured = 4  # New controller starts at four; TOML is no longer its state.
     shipped = window_gate.max_merges({})
     check(type(shipped) is int and shipped == configured, "shipped cap follows versioned config")
     print(shipped, type(shipped).__name__)
@@ -401,6 +404,7 @@ def cap_checks():
             if override is not None:
                 os.environ[key] = str(override)
             fx = Fx({f"S{n}": f"s{n}.txt" for n in range(size)})
+            fx.adaptive_cap = True
             try:
                 fx.run_n(1, 0, GREEN)
                 try:
@@ -410,7 +414,9 @@ def cap_checks():
                     return (size > cap and str(error) == f"gate-window: {size} merges exceeds the window cap of {cap}"
                             and fx.master() == fx.base and not fx.calls() and not fx.events("shipped"))
                 return (size <= (shipped if override is None else override) and rc == 0
-                        and len(fx.events("shipped")) == size and len(fx.calls()) == 1)
+                        and len(fx.events("shipped")) == size and len(fx.calls()) == 1
+                        and fx.events("window-verification-result")[0]["first_run"] is True
+                        and fx.events("window-verification-result")[0]["state"] == "green")
             finally:
                 fx.tempdir.cleanup()
 

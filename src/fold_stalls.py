@@ -42,7 +42,8 @@ def prepare(by_subject, now):
     opened = {}
     for e in events:
         kind, subject = e.get('type'), e.get('subject')
-        if e.get('actor') != 'executor':
+        if e.get('actor') != 'executor' and not (e.get('actor') == 'tick'
+                and kind == 'window-cancelled' and e.get('reason') == 'escalation-default'):
             continue
         if kind == 'window-opened':
             opened[subject] = set(e.get('specs') or [])

@@ -125,7 +125,7 @@ class WindowFillCorrectiveTests(unittest.TestCase):
         import tomllib
         installed = tomllib.loads((SRC.parent / 'look.toml').read_text())
         self.assertEqual(installed['merge_queue']['batch_cap'], 15)
-        self.assertEqual(installed['window_gate']['max_merges'], 15)
+        self.assertNotIn('max_merges', installed['window_gate'])
         for detached in (False, True):
             for count, cap in [(n, 15) for n in (0, 1, 2, 14, 15, 16, 40)] + [(40, n) for n in (1, 6, 15)]:
                 ids = self.seed(count, cap)
@@ -260,11 +260,14 @@ class WindowFillCorrectiveTests(unittest.TestCase):
         return repo
 
     def test_ac4_launch_safety(self):
-        for config in ('', 'batch_cap=0', 'batch_cap=true', 'batch_cap="bad"', 'batch_cap=16'):
+        for config in ('', 'batch_cap=0', 'batch_cap=true', 'batch_cap="bad"'):
             self.seed(2)
             self.config.write_text('[merge_queue]\n' + config + '\n')
             rc, batch, _, calls, *_ = self.run_case('invalid-cap-' + config)
             self.assertEqual((rc, batch, calls), (3, None, []))
+        ids = self.seed(20, 16)
+        rc, batch, *_ = self.run_case('cap-clamped')
+        self.assertEqual((rc, batch['cap'], batch['taken']), (0, 15, ids[:15]))
         ids = self.seed(2)
         self.assertEqual(mq.window_run('../invalid', runner=lambda a: self.fail('gate called')), 2)
         with mq._run_lock('proj'):

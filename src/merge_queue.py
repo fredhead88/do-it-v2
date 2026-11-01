@@ -473,7 +473,8 @@ def _launching(events, project, flying):
     rows = {row['window']: row for row in flying}
     events = _ordered(events)
     terminal = {e['subject'] for e in events if e['type'] in
-                ('window-verified', 'escalation-blocking', 'window-redcut')}
+                ('window-verified', 'escalation-blocking', 'window-redcut')
+                or e['type'] == 'window-cancelled' and e.get('reason') == 'escalation-default'}
     for event in events:
         if event['type'] != 'queue-batch' or event.get('project') != project:
             continue
@@ -753,8 +754,7 @@ def window_run(project, *, runner=None, launcher=None, detach=False, now=None, p
                 raise ValueError('configuration batch_cap undetermined') from exc
             if type(configured) is not int or configured < 1:
                 raise ValueError('configuration batch_cap must be a positive integer')
-            if configured > window_gate.max_merges(os.environ):
-                raise ValueError('configuration batch_cap exceeds gate max_merges')
+            configured = min(configured, window_gate.max_merges(os.environ))
 
             def refuse(reason, specs):
                 attempt = 'window-' + uuid.uuid4().hex

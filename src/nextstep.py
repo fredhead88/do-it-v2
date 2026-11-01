@@ -1225,10 +1225,18 @@ def next_steps(events, specs, now, rules, waves=None):
             steps.append(_choose(c, own, owners))
         except Exception as exc:
             steps.append(_spec_exception(c['sid'], c['evs'], exc))
+    import window_policy
     windows = {r['batch'] for r in merge_queue.queue(events) if r.get('batch')}
     windows.update(s for s, evs in by.items() if any(e['type'] == 'window-opened' for e in evs))
+    windows.update(e['subject'] for e in events if e.get('type') == 'escalation-blocking'
+                   and window_policy.is_window(e.get('subject')))
     for window in sorted(windows):
         evs = by.get(window, [])
+        default = None if window in bad else window_policy.pending(events, window, now, own=evs)
+        if default is not None:
+            steps.append(Step(window, 'window', 'merging', 'action', 'window-default', 'tick',
+                              _source(default), 'window escalation unanswered for 30 minutes', None, default['ts']))
+            continue
         if any(e['type'] in {'window-dropped', 'window-merged', 'window-done', 'window-verified', 'window-cancelled', 'shipped'} for e in evs):
             continue
         event = evs[-1] if evs else {}
