@@ -1476,8 +1476,17 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
     quarantine.apply(project)
     events = train_events()
     entries = resolve_entries(repo, spec_args, events)
+    import rulings
+    ruled_out = []
+    for decision, ruling in rulings.drops(events, project, window):
+        matching = [entry for entry in entries if entry[0] == ruling['spec']]
+        for spec, branch, _ in matching:
+            ev('window-dropped', spec, window=window, nodes=[], branch=branch,
+               reason='thinker-ruling', ref=decision['_src'], why=ruling['reason'])
+            ruled_out.append(spec)
+        entries = [entry for entry in entries if entry[0] not in ruled_out]
     if not entries:
-        print("gate-window: nothing gate-clean is waiting"); return 2
+        print("gate-window: nothing gate-clean is waiting"); return 1 if ruled_out else 2
     cap = max_merges(os.environ)
     if len(entries) > cap:
         sys.exit(f"gate-window: {len(entries)} merges exceeds the window cap of {cap}")
@@ -1496,7 +1505,7 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
                   if enabled and len(rechain.added_versions(repo, base, sha)) == 1}
     opened = False
     touched = {s: set(git(repo, "diff", "--name-only", f"{base}...{b}").stdout.split()) for s, b, _ in entries}
-    dropped, urls, runs, dashboard = [], [], 0, False
+    dropped, urls, runs, dashboard = list(ruled_out), [], 0, False
     pre_existing_all = set()
     quarantined_all, rechecked_all = set(), {}
     guard_seed = tree_guards(os.environ)

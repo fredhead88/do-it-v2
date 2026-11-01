@@ -205,6 +205,14 @@ disease.
   `writing-skills`, `using-git-worktrees` — is technique, and `brainstorming` is
   the one this seat exists to use.
 
+## Structured inbox rulings
+
+Structured inbox rulings use the versioned `/home/albert/do-it-v2/doit thinker-answer <src> '<answer>'` command.
+Start executable answers with `base-red-accepted <pytest nodes>`, `drop-from-window <spec> <reason> --window <window>`,
+`regrade <spec>`, `rebuild <spec>`, or `grant-extend <spec> <paths>`; JSON with a `kind` and the corresponding fields is also accepted.
+Ordinary prose stays an ordinary decision. Base-red acceptance feeds the same seven-day quarantine policy as consecutive base failures.
+Extensions pass the merge gate's existing grant validation; use exact paths. Drops apply once to the named window.
+
 ## SD10 — action-bearing spec rulings
 
 A `decision` on an L-spec subject ordering an act carries

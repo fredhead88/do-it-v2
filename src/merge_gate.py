@@ -932,6 +932,14 @@ def grant_for(spec, cli):
     could-not-determine on its own, but an explicit --writes IS a grant — the spec
     template carries no Writes: line, which blocked the first real merge. A missing
     content file or a bad id stays could-not-determine whatever the CLI says."""
+    import rulings
+    events = fold.read_events()
+    project = fold.subject_project(spec)
+    extension = [path for _, ruling in rulings.decisions(events, project)
+                 if ruling['kind'] == 'grant-extend' and ruling['spec'] == spec for path in ruling['paths']]
+    if extension:
+        check_grant(extension, 'ruling grant-extend')
+    cli = list(cli) + extension
     try:
         return cli + writes_grant(spec)
     except Undetermined as e:

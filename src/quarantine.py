@@ -190,6 +190,19 @@ def _apply(project, *, now=None):
     # the very same quarantine again during this apply call.
     events = fold.read_events()
     pending = base_due(events, project, now) + due(events, project, now)
+    import rulings
+    receipts = []
+    consumed = {e.get("ref") for e in events if e.get("type") == "quarantine-ruling-applied"}
+    for event, ruling in rulings.decisions(events, project):
+        if (ruling['kind'] != 'base-red-accepted' or not event.get('_src')
+                or event['_src'] in consumed or _time(event['ts']) > now):
+            continue
+        receipts.append((event['_src'], ruling['nodes']))
+        source = 'ruling:' + event['_src']
+        for node in ruling['nodes']:
+            if not any(e.get('type') == 'test-quarantined' and e.get('project') == project
+                       and e.get('node') == node and source in e.get('windows', []) for e in events):
+                pending.append(dict(node=node, rule='auto-base-red', windows=[source]))
     lifted = lifts(events, project, now)
     for node, reason in lifted:
         _append("test-unquarantined", project, now, node=node, reason=reason)
@@ -201,6 +214,8 @@ def _apply(project, *, now=None):
                     deadline=(now+timedelta(days=1)).isoformat(),
                     revert="Remove escalation after the fix is verified")
     recorded = [record(project, **item, now=now) for item in pending]
+    for source, nodes in receipts:
+        _append("quarantine-ruling-applied", project, now, ref=source, nodes=nodes)
     import quarantine_file
     quarantine_file.enqueue(project, fold.read_events(), now)
     return {"recorded": recorded, "lifted": lifted}

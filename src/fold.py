@@ -326,6 +326,8 @@ def finish_events(raw):
     # mis-write that motivated them was a wrong `project` value — filter first and
     # the correction can never reach the event it exists to fix.
     merged = apply_corrections(merged)
+    import rulings
+    merged = [rulings.project_event(e) for e in merged]
     return [e for e in merged if not PROJECT or e.get("project") == PROJECT]
 
 

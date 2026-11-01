@@ -13,7 +13,7 @@ unanswered `question` from the moment it is asked, not only once overdue.
   explanation and recommendation. Raw builder questions never go to the operator (operator: "jargon").
 - An item still open 60 min after delivery, or after three consecutive missing-pane passes,
   gets one deduplicated operator request with a recommendation.
-Answer every item with `~/.do-it/thinker-answer <src> "<why>"`. That writes a `decision` with the
+Answer every item with `/home/albert/do-it-v2/doit thinker-answer <src> "<why>"`. That writes a `decision` with the
 item's own subject and `ref=<src>`, so fold, the board and the realm all see it answered.
 
 Read-only on the ledger; writes only its state file and log. Run by cron every 5 min.
@@ -201,7 +201,7 @@ def main():
             else:
                 parts += [("FOR THE OPERATOR, send them a plain-English explanation and your recommendation: " if x["owner"] == "operator" else "") + short(x) for x in l]
         msg = (f"[thinker-inbox] {len(new)} new item(s) waiting on the Thinker: " + " ; ".join(parts) +
-               f". Full list: python3 {ROOT}/thinker-inbox.py --list. Answer each with {ROOT}/thinker-answer <src> \"<why>\".")
+               f". Full list: python3 {ROOT}/thinker-inbox.py --list. Answer each with /home/albert/do-it-v2/doit thinker-answer <src> \"<why>\".")
         if type_into(p, msg[:3500]):
             for i in new:
                 st["delivered"][i["src"]] = t_now

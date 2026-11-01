@@ -34,6 +34,7 @@ case "${1:-board}" in
   launch)  shift; exec python3 "$SRC/launch.py" "$@" ;;
   pane-end) shift; exec python3 "$SRC/pane_end.py" "$@" ;;
   think)   shift; exec python3 "$SRC/think.py" "$@" ;;
+  thinker-answer) shift; exec python3 "$SRC/thinker_answer.py" "$@" ;;
   carry)   shift; exec python3 "$SRC/carry.py" "$@" ;;
   note-close) shift; exec python3 "$SRC/notes.py" "$@" ;;
   guard)   shift; exec python3 "$SRC/guard.py" "$@" ;;
