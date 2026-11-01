@@ -43,7 +43,7 @@ SESSIONS = pathlib.Path(os.environ.get("DOIT_SESSIONS_DIR",
                                        pathlib.Path.home() / ".claude" / "sessions"))
 PROJECT = os.environ.get("DOIT_PROJECT")          # §9.1/D93: a filter, not a second read
 
-from fold_emits import EMITS, DECLARES, OWED_DECLARERS, REQUIRED_ROWS, nightly_unowned
+from fold_emits import EMITS, DECLARES, OWED_DECLARERS, REQUIRED_ROWS, nightly_unowned, valid_dependency
 EMITS["suite-run"] = {"suite-daily"}
 EMITS["check-declared"] = {"spec-writer", "executor", "operator"}
 # L-spec-0682: the full-environment verifier may record verdicts and re-date timed checks.
@@ -794,12 +794,6 @@ BLOCK_ORDER = {
     "OWED DUE": ("due_at", "spec", "criterion", "src"),
     "CHARTER CLOSE": ("age", "id", "content"),
 }
-
-
-def valid_dependency(value):
-    """Dependency holds name exactly one numeric spec identifier."""
-    import re
-    return isinstance(value, str) and re.fullmatch(r'L-spec-[0-9]+', value) is not None
 
 
 def required_reason(e):

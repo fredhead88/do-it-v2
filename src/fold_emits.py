@@ -408,3 +408,9 @@ def nightly_unowned(events, project):
                 pending = {i: at for i, at in pending.items() if i == 'nightly evidence undetermined'
                            or i not in ids or timestamp(e) <= at}
     return sorted(pending)
+
+
+def valid_dependency(value):
+    """Dependency holds name exactly one numeric spec identifier."""
+    import re
+    return isinstance(value, str) and re.fullmatch(r'L-spec-[0-9]+', value) is not None
