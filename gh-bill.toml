@@ -2,3 +2,35 @@
 default = 450
 after_r1 = 120
 # Optional month override: "2026-10" = 450
+
+combined_daily_threshold = 8.0
+combined_monthly_threshold = 300.0
+ubicloud_monthly_credit = 2.5
+ubicloud_repos = ["fredhead88/albert-scott-platform", "fredhead88/do-it-v2"]
+# Enable inventory estimates with this project ID and $DOIT_ROOT/private/ubicloud-token.
+# ubicloud_project_id = "..."
+
+# USD/minute; jobs rounded up individually. Premium routing requires its own rate.
+# https://www.ubicloud.com/docs/about/pricing
+[ubicloud_runner_prices]
+ubicloud-standard-2 = 0.00125
+
+# USD/month for the current always-on inventory; edit for region/size/add-ons.
+# Estimates exclude deleted resources, extra storage, public IPv4 and traffic.
+[ubicloud_resource_monthly]
+"vm.standard-2" = 41.89
+"vm.standard-4" = 83.79
+"vm.standard-8" = 167.58
+"vm.standard-16" = 335.16
+"vm.standard-30" = 628.42
+"vm.standard-60" = 1256.85
+"vm.burstable-1" = 10.47
+"vm.burstable-2" = 20.95
+"postgres.standard-2" = 78.0
+"postgres.standard-4" = 156.0
+"postgres.standard-8" = 313.0
+"postgres.standard-16" = 625.0
+"postgres.standard-30" = 1180.0
+"postgres.standard-60" = 2361.0
+"postgres.hobby-1" = 19.54
+"postgres.hobby-2" = 39.08

@@ -16,6 +16,8 @@ import tomllib
 REPO = Path(__file__).resolve().parents[1]
 CONFIG = REPO / "gh-bill.toml"
 NUMBERS = ("yday", "mtd", "median7", "threshold", "limit", "pct_of_limit", "projection")
+COST_NUMBERS = ("ubicloud_runners_yday", "ubicloud_runners_mtd", "ubicloud_resources_yday",
+                "ubicloud_resources_mtd", "total_yday", "total_mtd", "total_projection")
 LEVELS = (50, 75, 90)
 
 
@@ -107,8 +109,12 @@ def load_limits(path=CONFIG):
         for key in ("default", "after_r1"):
             if _number(cfg[key]) <= 0:
                 return None
+        import ubicloud_bill
+        ubicloud_bill.validate(cfg)
+        settings = {"combined_daily_threshold", "combined_monthly_threshold", "ubicloud_monthly_credit",
+                    "ubicloud_repos", "ubicloud_project_id", "ubicloud_runner_prices", "ubicloud_resource_monthly"}
         for key, value in cfg.items():
-            if key not in ("default", "after_r1"):
+            if key not in settings | {"default", "after_r1"}:
                 datetime.strptime(key, "%Y-%m")
                 if _number(value) <= 0:
                     return None
@@ -193,7 +199,7 @@ def _send(message):
 def _append(decision):
     args = [str(REPO / "doit"), "append", "bill-check", "gh-bill"]
     for key, value in decision.items():
-        args.append(f"{key}{':=' if key in NUMBERS else '='}{json.dumps(value)}")
+        args.append(f"{key}{':=' if key in NUMBERS + COST_NUMBERS or isinstance(value, bool) else '='}{json.dumps(value)}")
     env = dict(os.environ, PROJECT="do-it-v2", DOIT_PROJECT="do-it-v2",
                DOIT_LEDGER_FILE="L-gh-bill-local.jsonl")
     result = subprocess.run(args, env=env, capture_output=True, text=True)
@@ -204,6 +210,7 @@ def _append(decision):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--usage-file")
+    parser.add_argument("--jobs-file", help="offline GitHub jobs API fixture: {jobs: [...]}")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
     today = datetime.now(timezone.utc).date()
@@ -231,10 +238,13 @@ def main(argv=None):
                           "monthly limit file missing or invalid" if cfg is None else "") if e]
     if errors:
         decision.update(action="undetermined", reason="; ".join(errors))
+    if cfg and "ubicloud_runner_prices" in cfg:
+        import ubicloud_bill
+        print(ubicloud_bill.combine(decision, cfg, root, today, args.jobs_file), file=sys.stderr)
     if args.dry_run:
         print(json.dumps(decision, allow_nan=False))
-        return int(decision["action"] == "undetermined")
-    exit_code = int(decision["action"] == "undetermined")
+        return int(decision["action"] == "undetermined" or bool(decision.get("ubicloud_error")))
+    exit_code = int(decision["action"] == "undetermined" or bool(decision.get("ubicloud_error")))
     if decision["action"] == "flip":
         try:
             result = runner.set("CI_SELF_HOSTED", "true", why=decision["reason"], trigger="bill-flip")
@@ -251,7 +261,16 @@ def main(argv=None):
                   f"recommend setting it to ${limit:,.0f} in GitHub billing settings.")
         action = decision["action"]
         if action != "none":
-            _send(render_telegram(decision))
+            message = render_telegram(decision)
+            if decision.get("combined_alert"):
+                message += "\n" + ubicloud_bill.alert_message(decision)
+            elif decision.get("ubicloud_error"):
+                message += "\nCombined cloud cost unavailable; check Ubicloud jobs, inventory and prices."
+            _send(message)
+        elif decision.get("combined_alert"):
+            _send(ubicloud_bill.alert_message(decision))
+        elif decision.get("ubicloud_error"):
+            _send("Combined cloud cost unavailable; check Ubicloud jobs, inventory and prices.")
         if not state_error and limit is not None:
             sent = list(saved.get("sent", []))
             level = 90 if action == "flip" else int(action[6:]) if action.startswith("alert-") else None
