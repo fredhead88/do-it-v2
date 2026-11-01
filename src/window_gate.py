@@ -42,6 +42,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import fold  # noqa: E402
 import rechain
 import quarantine
+import window_prewindow
 
 PROJECT = "albert-scott"
 PREDEPLOY = "scripts/ci/predeploy_gate.sh"
@@ -1485,6 +1486,17 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
                reason='thinker-ruling', ref=decision['_src'], why=ruling['reason'])
             ruled_out.append(spec)
         entries = [entry for entry in entries if entry[0] not in ruled_out]
+    def admit(batch, rejected):
+        chosen, drops = window_prewindow.select(
+            repo, base, main, batch, events, fold.ROOT / 'content')
+        for (spec, branch, _), why in drops:
+            if spec not in rejected:
+                ev('window-dropped', spec, window=window, nodes=[], branch=branch,
+                   reason='prewindow', why=why)
+                rejected.append(spec)
+        return chosen
+
+    entries = admit(entries, ruled_out)
     if not entries:
         print("gate-window: nothing gate-clean is waiting"); return 1 if ruled_out else 2
     cap = max_merges(os.environ)
@@ -1523,7 +1535,8 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
         return changed
 
     def prepare(batch):
-        batch = [e for e in batch if e[0] not in fingerprint_failed.specs]
+        batch = admit([e for e in batch if e[0] not in fingerprint_failed.specs
+                       and e[0] not in dropped], dropped)
         candidate, kept, clashes = build_candidate(repo, window, base, batch)
         migration_kept = [s for s in kept if s in migrations]
         if migration_kept:
@@ -1535,7 +1548,7 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
                 if grading_env.failure_kind(str(exc)) == "infra":
                     raise
                 fingerprint_failed.decline(migration_kept, exc, window, ev)
-                rest = [e for e in batch if e[0] not in migrations]
+                rest = admit([e for e in batch if e[0] not in migrations], dropped)
                 candidate, kept, more = build_candidate(repo, window, base, rest)
                 clashes.update(more)
         if kept:

@@ -168,7 +168,10 @@ class Disposition(unittest.TestCase):
 
     def entries(self, names):
         result = []
+        content = self.root / 'content'
+        content.mkdir(exist_ok=True)
         for name in names:
+            (content / (name + '.md')).write_text('Writes: tests/test_' + name + '.py\n')
             blob = self.git("hash-object", "-w", "--stdin", inp=name + "\n")
             env = dict(os.environ, GIT_INDEX_FILE=str(Path(self.temp.name) / "index"))
             self.git("read-tree", self.sha, env=env)

@@ -189,11 +189,17 @@ class Fx:
             for node in nodes))
 
     def go(self, specs=None, fixes_base=False, window="w1", after=None):
+        # This fixture exercises the post-admission CI/rechain state machine,
+        # including deliberately conflicting and unchained migration batches.
+        # Real admission (including the _run_attempt barrier) has Git-tree
+        # coverage in test_window_prewindow.py; feed admitted entries here.
         specs = specs or list(self.branches)
         for s in specs:
             fold.append(["merge-gate-clean", s, f"branch={self.branches[s]}", "project=albert-scott"])
             fold.append(["queue-add", s, f"branch={self.branches[s]}", "project=albert-scott", "rule=operator"])
         with patch.dict(os.environ, FAKE_BASE=self.base, PATH=self.path), \
+             patch.object(window_gate.window_prewindow, 'select',
+                          side_effect=lambda repo, base, main, entries, events, content: (entries, [])), \
              patch.dict(sys.modules, base_red=self.service), \
              patch.object(window_gate, "base_red_snapshot", side_effect=self.base_reader), \
              patch.object(window_gate, "candidate_logs", side_effect=self.log_reader):
@@ -769,6 +775,9 @@ def main():
     print("test_window_gate ok")
 
 
+# Includes a five-entry downstream rechain fixture; admission policy is covered
+# independently, and the current operator cap must not truncate this scenario.
+@patch.dict(os.environ, DOIT_WINDOW_MAX_MERGES='10')
 def rechain_checks():
     """L-spec-0932 ac3f/ac4/ac5/ac6/ac9, preserving the existing checks above."""
     import shutil
@@ -1201,6 +1210,9 @@ def attribution_checks():
     response("lazy_import_without_base_red", ["AC13"], {"fresh_import": True, "stubbed_window": "shipped"})
 
 
+# Six-branch bisection fixtures exercise the algorithm independently of the
+# operator's current four-entry admission cap (cap_checks covers that policy).
+@patch.dict(os.environ, DOIT_WINDOW_MAX_MERGES='10')
 def rerun_checks():
     """L1127: real git/strict ledger, with external verify evidence stubbed."""
     from datetime import datetime, timedelta, timezone
