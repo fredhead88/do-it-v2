@@ -361,7 +361,7 @@ def main(argv: list[str]) -> int:
             if exc.name != name:
                 raise
             continue
-        samples.extend(module.samples())
+        samples.extend(module.samples(day))
     # A completed day, represented by the older row of a two-day range.
     row = day_rows(read_events(), day + timedelta(days=1), days=2, samples=samples or None)[0]
     print(json.dumps(row))

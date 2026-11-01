@@ -1391,7 +1391,9 @@ with fixture1496() as (top1496, ledger1496, proc1496, scr1496):
     pg1496.write_text("import sys\nif sys.argv[2] == 'loopback':\n print(\"ADMIN_DSN='\" + 'postgre' + 'sql://albert:' + '0'*32 + '@127.0.0.1:23456/postgres' + \"'\")\n")
     regen1496 = top1496 / "fp.py"
     regen1496.write_text("import pathlib,sys; pathlib.Path(sys.argv[2]).write_text('after')\n")
-    with patch.dict(os.environ, DOIT_RECHAIN_PG_CMD=f"/usr/bin/python3 {pg1496}",
+    outside_tmp1496 = top1496 / "outside-allowed-roots"
+    outside_tmp1496.mkdir()
+    with patch.object(tempfile, "tempdir", str(outside_tmp1496)), patch.dict(os.environ, TMPDIR=str(outside_tmp1496), DOIT_RECHAIN_PG_CMD=f"/usr/bin/python3 {pg1496}",
                     DOIT_RECHAIN_FINGERPRINT_CMD=f"/usr/bin/python3 {regen1496}"):
         rechain.fingerprint(repo1496, git1496("rev-parse", "HEAD"), "fixture-window", ev=lambda *a, **k: None)
     tree1496 = top1496 / "clone"
@@ -1423,6 +1425,7 @@ with fixture1496() as (top1496, ledger1496, proc1496, scr1496):
     assert (len(created1496), len(closed1496)) == (5, 2), (created1496, closed1496)
     assert collections.Counter(e["kind"] for e in created1496) == {"worktree":1, "scratch-db":2, "tmpdir":2}
     assert all(e["lane"] and e["subject"] for e in created1496)
+    assert all(not pathlib.Path(e["ref"]).is_relative_to(outside_tmp1496) for e in created1496)
     assert collections.Counter(e["ref"] for e in closed1496) <= collections.Counter(e["ref"] for e in created1496)
     assert sum(e["reason"] == "promoted-to-cache" for e in closed1496) == 0
     assert len(resources.live(rows1496)) == 3

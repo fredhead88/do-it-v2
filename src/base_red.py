@@ -234,6 +234,8 @@ def _snapshot(repo, sha, *, runs=None, covered=None):
         pg_jobs = []
         text = "\n".join(text for _, text in members)
         ran = {"success", "failure"}
+        run_covered = set()
+        observed_ids = {k: set() for k in KINDS}
         if run["name"] == "Python Tests":
             pg_jobs = [j for j in jobs if "pg-parity" in j["name"].lower()]
             shards = [j for j in jobs if j["name"].startswith("pytest — shard ")]
@@ -241,26 +243,26 @@ def _snapshot(repo, sha, *, runs=None, covered=None):
                     and any(j.get("conclusion") in ran for j in shards)
                     and not any(j.get("conclusion") in {"cancelled", "timed_out"} for j in shards)
                     and re.search(r"\bSUMMARY pytest_baseline_gate\.py check:", text)):
-                kinds_covered.add("pytest")
+                run_covered.add("pytest")
             if any(j["name"] == "pg-parity (Postgres)" and j.get("conclusion") in ran for j in jobs):
-                kinds_covered.add("pg-parity")
+                run_covered.add("pg-parity")
         elif (any(j["name"] == "TypeScript · Biome · Tests · File Sizes"
                   and j.get("conclusion") in ran for j in jobs)
               and re.search(r"\bSUMMARY vitest_baseline_gate\.mjs check:", text)):
-            kinds_covered.update(("vitest", "suite-error"))
+            run_covered.update(("vitest", "suite-error"))
         pg_text = "\n".join(text for name, text in members if "pg-parity" in name.lower())
         pg_named = set()
         for name, text in members:
             parsed = parse_log(text)
             for k in KINDS:
-                ids[k].update(parsed[k])
+                observed_ids[k].update(parsed[k])
             result["undetermined"].extend(parsed["undetermined"])
             if "pg-parity" in name.lower():
                 pg_named.update(parsed["pytest"])
         # Raw pytest failure lines also appear in pg-parity, without a baseline
         # gate. Prefer those ids to the failed-step signature.
         pg_named.update(NODE.findall(pg_text))
-        ids["pytest"].update(pg_named)
+        observed_ids["pytest"].update(pg_named)
         if not pg_named:
             for job in pg_jobs:
                 if job.get("conclusion") == "failure":
@@ -269,9 +271,21 @@ def _snapshot(repo, sha, *, runs=None, covered=None):
                         result["undetermined"].append("failed pg-parity job has no failing step")
                     for step in steps:
                         parsed = parse_log(f"pg-parity\t{step}\t##[error]failed step")
-                        ids["pg-parity"].update(parsed["pg-parity"])
+                        observed_ids["pg-parity"].update(parsed["pg-parity"])
+        kinds_covered.update(run_covered)
+        for kind in KINDS:
+            ids[kind].update(observed_ids[kind])
+        if run["name"] == "Python Tests":
+            result.setdefault("observations", []).append(dict(
+                run_id=rid, attempt=run.get("run_attempt", 1),
+                timestamp=run.get("run_started_at") or run.get("created_at"),
+                complete={"pytest", "pg-parity"}.issubset(run_covered),
+                ids={k: sorted(v) for k, v in observed_ids.items()}))
         result["sources"].append(run["html_url"])
     result["ids"] = {k: sorted(v) for k, v in ids.items()}
+    if result.get("observations"):
+        result["observations"] = sorted(result["observations"],
+                                        key=lambda r: (int(r["run_id"]), int(r["attempt"] or 1)))[-2:]
     result["workflows"] = sorted(workflows)
     result["kinds_covered"] = sorted(kinds_covered)
     result["complete"] = WORKFLOWS <= workflows and not result["undetermined"]
@@ -289,7 +303,8 @@ def _store(path, project, result, *, record=True):
         if record:
             proc = subprocess.run([str(DOIT), "append", "base-red", "base-" + project,
                                    "project=" + project, "sha=" + result["sha"], "complete:=true",
-                                   "ids:=" + json.dumps(result["ids"]), "sources:=" + json.dumps(result["sources"])],
+                                   "ids:=" + json.dumps(result["ids"]), "sources:=" + json.dumps(result["sources"]),
+                                   "observations:=" + json.dumps(result.get("observations", []))],
                                   env={**os.environ, "DOIT_ROOT": str(fold.ROOT),
                                        "DOIT_LEDGER_FILE": "L-base-red-local.jsonl"},
                                   capture_output=True, text=True, timeout=30)
@@ -825,7 +840,9 @@ def nightly_collect(project):
                             default='Create a quarantine-row or fix spec with owner integrator for these nightly ids',
                             deadline=(datetime.now(timezone.utc) + timedelta(hours=24)).isoformat(),
                             revert='Remove the quarantine row after the integrator fix is verified')
-            _append('base-red-nightly', project, sha, complete=True, ids=ids, url=url, suite=suite)
+            _append('base-red-nightly', project, sha, complete=True, ids=ids, url=url, suite=suite, run_ids=run_ids)
+        import quarantine
+        quarantine.apply(project)
         return result
     except _NIGHTLY_ERRORS as exc:
         result['complete'] = False

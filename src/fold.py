@@ -326,6 +326,8 @@ def finish_events(raw):
     # mis-write that motivated them was a wrong `project` value — filter first and
     # the correction can never reach the event it exists to fix.
     merged = apply_corrections(merged)
+    import rulings
+    merged = [rulings.project_event(e) for e in merged]
     return [e for e in merged if not PROJECT or e.get("project") == PROJECT]
 
 
@@ -339,8 +341,13 @@ def standing_rejects(evs):
     standing blocking criterion stops acceptance regardless of who wrote it. The
     wrapper happens to write a `rejected-criterion` alongside each one today; that
     is the wrapper's choice, and acceptance must not depend on it."""
-    raised = {e.get("criterion") for e in evs if e["type"] in ("rejected-criterion", "must-fix")}
-    return raised - {e.get("criterion") for e in evs if e["type"] == "criterion-cleared"}
+    standing = set()
+    for e in sorted(evs, key=lambda e: ts(e.get("ts", "1970-01-01T00:00:00Z"))):
+        if e["type"] in ("rejected-criterion", "must-fix"):
+            standing.add(e.get("criterion"))
+        elif e["type"] == "criterion-cleared":
+            standing.discard(e.get("criterion"))
+    return standing
 
 
 def spec_shape_pending(evs):

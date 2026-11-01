@@ -2504,7 +2504,12 @@ def _sh486(cwd, *cmd):
     return p.stdout.strip()
 
 
-R486 = pathlib.Path(tempfile.mkdtemp())
+# Exercise the same short TMPDIR alias shape used by build_runner.
+_backing486 = pathlib.Path(tempfile.mkdtemp())
+R486 = _backing486.with_name(_backing486.name + "-alias")
+R486.symlink_to(_backing486, target_is_directory=True)
+import atexit as _atexit486
+_atexit486.register(lambda: R486.unlink(missing_ok=True))
 proc486 = R486 / 'proc'
 proc486.mkdir()
 import disk_reaper as _dr486
@@ -2550,7 +2555,7 @@ try:
     wr486 = _wrs()
     assert len(wr486) == 1, f"L0486-AC7: exactly one worktree-reaped: {wr486}"
     assert wr486[0]["subject"] == "L-spec-9486a" and wr486[0]["proof"] == "origin-merged" \
-        and wr486[0]["path"] == str(wt486), f"L0486-AC7: shape: {wr486[0]}"
+        and os.path.realpath(wr486[0]["path"]) == os.path.realpath(wt486), f"L0486-AC7: shape: {wr486[0]}"
     assert not wt486.exists(), "L0486-AC7: the worktree really is gone"
 
     assert tick._record() is not None

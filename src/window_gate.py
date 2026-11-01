@@ -531,6 +531,14 @@ def base_pg(repo, root_base, ci_checks, window, events, *, fixes_base=False):
     """Inherit PG only across classified non-PG changes; a failed run still blocks."""
     baseline = verify(repo, root_base, [PG_CHECK], window)
     docs = [baseline.get("doc", {})]
+    failures = baseline.get("pg_failures", {})
+    if baseline["state"] == "red" and failures:
+        ev("window-base-observed", window, ids=sorted(failures), base_sha=root_base,
+           count=len(failures), nodes=sorted(failures), run_url=baseline.get("url", ""))
+        quarantine.apply(PROJECT)
+        current = quarantine.active(fold.read_events(), PROJECT, datetime.now(timezone.utc))
+        if set(failures).issubset(current) and set(baseline.get("other_nodes", [])).issubset(current):
+            baseline = dict(baseline, state="green", nodes=[], quarantined=sorted(failures))
     if fixes_base or baseline["state"] != "undetermined":
         return baseline, docs
     try:
@@ -672,6 +680,11 @@ def pg_result(repo, doc):
         job = matches[0]
         if job["conclusion"] == "success":
             return False, {}
+        steps = job.get("steps", [])
+        if any(step.get("conclusion") == "failure"
+               and step.get("name") != "Run the spec-202 PG-parity data-layer suite against real Postgres"
+               for step in steps):
+            raise RuntimeError("pg-parity has a failed non-test step")
         jid = str(job.get("databaseId", ""))
         if not jid.isdigit():
             raise RuntimeError("pg-parity job id unavailable")
@@ -1463,8 +1476,17 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
     quarantine.apply(project)
     events = train_events()
     entries = resolve_entries(repo, spec_args, events)
+    import rulings
+    ruled_out = []
+    for decision, ruling in rulings.drops(events, project, window):
+        matching = [entry for entry in entries if entry[0] == ruling['spec']]
+        for spec, branch, _ in matching:
+            ev('window-dropped', spec, window=window, nodes=[], branch=branch,
+               reason='thinker-ruling', ref=decision['_src'], why=ruling['reason'])
+            ruled_out.append(spec)
+        entries = [entry for entry in entries if entry[0] not in ruled_out]
     if not entries:
-        print("gate-window: nothing gate-clean is waiting"); return 2
+        print("gate-window: nothing gate-clean is waiting"); return 1 if ruled_out else 2
     cap = max_merges(os.environ)
     if len(entries) > cap:
         sys.exit(f"gate-window: {len(entries)} merges exceeds the window cap of {cap}")
@@ -1483,7 +1505,7 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
                   if enabled and len(rechain.added_versions(repo, base, sha)) == 1}
     opened = False
     touched = {s: set(git(repo, "diff", "--name-only", f"{base}...{b}").stdout.split()) for s, b, _ in entries}
-    dropped, urls, runs, dashboard = [], [], 0, False
+    dropped, urls, runs, dashboard = list(ruled_out), [], 0, False
     pre_existing_all = set()
     quarantined_all, rechecked_all = set(), {}
     guard_seed = tree_guards(os.environ)
@@ -1492,6 +1514,13 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
     conflicted_all = {}
     fingerprint_failed = rechain.FailedFingerprints()
     judgments, judgment_limit = 0, 2 * len(entries) + 1
+
+    def policy_candidate(candidate):
+        import quarantine_file
+        changed = quarantine_file.candidate(repo, candidate, fold.read_events(), project)
+        if changed != candidate:
+            git(repo, "update-ref", f"refs/heads/window/{window}", changed)
+        return changed
 
     def prepare(batch):
         batch = [e for e in batch if e[0] not in fingerprint_failed.specs]
@@ -1517,7 +1546,7 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
                 candidate = git(repo, *IDENT, "commit-tree", tree_of(repo, candidate), "-p", candidate,
                                 "-m", f"verify({window}): rebuild after train cancellation").stdout.strip()
                 git(repo, "update-ref", f"refs/heads/window/{window}", candidate)
-        return candidate, kept, clashes
+        return policy_candidate(candidate), kept, clashes
 
     by_id = {s: (b, sha) for s, b, sha in entries}
     local_cache = {}
@@ -1702,9 +1731,10 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
                count=len(pre_existing), nodes=pre_existing, run_url=res["url"])
             print(f"gate-window: {len(pre_existing)} failure(s) pre-existing at base: {json.dumps(pre_existing)}")
             pre_existing_all.update(pre_existing)
-        for node in pre_existing:
-            quarantine.record(project, node, "base-red", [window])
-            quarantined_all.add(node)
+        if pre_existing:
+            quarantine.apply(project)
+            current = quarantine.active(fold.read_events(), project, datetime.now(timezone.utc))
+            quarantined_all.update(n for n in pre_existing if n in current)
         new_ids = [n for n in classification.get("new", nodes) if n not in pre_existing]
         rechecked = {}
         if new_ids:
@@ -1720,8 +1750,12 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
                 rechecked[node] = state
                 rechecked_all[node] = state
                 if state == "red":
-                    quarantine.record(project, node, "base-red", [window])
-                    quarantined_all.add(node)
+                    ev("window-pre-existing", window, ids=[node], base_sha=root_base,
+                       count=1, nodes=[node], run_url=res["url"])
+                    quarantine.apply(project)
+                    current = quarantine.active(fold.read_events(), project, datetime.now(timezone.utc))
+                    if node in current:
+                        quarantined_all.add(node)
                     print(f"gate-window: 1 failure excused by base-red quarantine: {node}")
         charged = [n for n in nodes if n not in pre_existing and rechecked.get(n) != "red"]
         guards = [n for n in charged if n.startswith(guard_seed)]
@@ -1785,6 +1819,10 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
     while True:
         res = judge(cand, live)
         if res["state"] == "green":
+            changed = policy_candidate(cand)
+            if changed != cand:
+                cand = changed
+                continue  # verify the policy commit through the ordinary gate
             break
         if res["state"] == "undetermined":
             return 2

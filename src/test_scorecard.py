@@ -262,6 +262,18 @@ class ScorecardTests(unittest.TestCase):
                  ev('window-dropped', 2, 'w', nodes=['t1', 't2'])]
         self.assertIn('window dropped on 2 test(s)', row(drops)['top'][0]['reason'])
 
+    def test_cli_reads_both_sample_sources_from_requested_day(self):
+        import types
+        calls = []
+        fake = types.SimpleNamespace(read_events=lambda: [])
+        def samples(since):
+            calls.append(since)
+            return []
+        with patch.dict(sys.modules, {'fold': fake, 'pace': types.SimpleNamespace(samples=samples),
+                                     'stall_sample': types.SimpleNamespace(samples=samples)}), redirect_stdout(io.StringIO()):
+            self.assertEqual(sc.main(['2026-10-27']), 0)
+        self.assertEqual(calls, [datetime(2026, 10, 27, tzinfo=timezone.utc)] * 2)
+
     def test_AC9_contract_purity_and_cli(self):
         required = set(sc.STUDY_MEASURES) | set('date partial through skipped_events sampled window_verified_pct '
             'stalled_spec_h stuck_over_1h waiting_seat_h waiting_window_h waiting_human_h ignored_bucket_samples '

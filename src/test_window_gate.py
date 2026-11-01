@@ -3042,9 +3042,9 @@ def ac6_recheck_before_drop():
         rc = fx.go()
         if state in ("red", "cached"):
             check(rc == 0 and not fx.events("window-dropped"), "AC6 base-red ships " + state)
-            check(fx.events("window-verified")[-1]["quarantined"] == [node], "AC6 base red quarantine reported")
+            check(fx.events("window-verified")[-1]["quarantined"] == [], "AC6 single base observation is not quarantined")
             rows = fx.events("test-quarantined")
-            check(len(rows) == 1 and rows[0]["rule"] == "base-red", "AC6 records base red once")
+            check(not rows, "AC6 requires two distinct base observations before quarantine")
         elif state == "incomplete":
             check(rc == 2 and not fx.events("window-dropped") and not calls, "AC6 incomplete unchanged")
         else:
@@ -3078,7 +3078,7 @@ def ac6_recheck_before_drop():
             check(rc == 0 and not rows and fx.events("window-verified")[-1]["kept"] == ["A", "B", "C", "D"], "AC6 all rechecked red ships every spec")
         else:
             check(rc == 1 and sorted(r["subject"] for r in rows) == ["B", "C"], "AC6 c153 green and unknown owners charged")
-            check(all(r["nodes"] == sorted(ids[1:]) and r["quarantined"] == ids[:1]
+            check(all(r["nodes"] == sorted(ids[1:]) and r["quarantined"] == []
                       and r["recheck_undetermined"] == ids[2:] for r in rows), "AC6 c153 reasons visible on drops")
             check(fx.events("window-verified")[-1]["recheck_undetermined"] == ids[2:], "AC6 c153 unknown visible on verified")
         check(all(ids[0] not in r["nodes"] for r in rows), "AC6 base red absent from every charged nodes list")

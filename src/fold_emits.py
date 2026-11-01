@@ -279,10 +279,11 @@ EMITS["evidence-bundle-failed"] = {"build-runner"}
 EMITS["base-red"] = {"base-red"}
 EMITS["test-quarantined"] = {"base-red"}
 EMITS["test-unquarantined"] = {"base-red"}
+EMITS["quarantine-ruling-applied"] = {"base-red"}
 EMITS["health-alarm"] = {"health"}
 EMITS["owed-unverifiable"] = {"prod-runner", "operator"}
 # L-spec-1133: queue, digest and operator-alert writers (SD3).
-EMITS["queue-add"] = {"executor", "tick", "operator"}
+EMITS["queue-add"] = {"executor", "tick", "operator", "base-red"}
 EMITS["queue-remove"] = {"executor", "tick", "operator"}
 EMITS["queue-batch"] = {"executor", "tick"}
 EMITS["precheck"] = EMITS["precheck-red"] = {"executor", "tick", "operator"}

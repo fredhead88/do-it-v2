@@ -4203,8 +4203,24 @@ def test_ledger_vocabulary_1104():
     assert fold.EMITS is fold_emits.EMITS
     assert fold.DECLARES is fold_emits.DECLARES
     assert fold.OWED_DECLARERS is fold_emits.OWED_DECLARERS
+
+    # A clear only retires earlier raises; stable timestamp ties retain ledger order.
+    for raise_kind in ("rejected-criterion", "must-fix"):
+        for kinds, expected in [([raise_kind, "criterion-cleared"], set()),
+                                (["criterion-cleared", raise_kind], {"AC6"}),
+                                ([raise_kind, "criterion-cleared", raise_kind], {"AC6"}),
+                                (["criterion-cleared", raise_kind, "criterion-cleared"], set())]:
+            rows = [dict(type=k, criterion="AC6", ts="2026-10-25T22:00:00Z") for k in kinds]
+            assert fold.standing_rejects(rows) == expected, rows
+        assert fold.standing_rejects([dict(type=raise_kind, criterion="AC6", ts="2026-10-25T22:01:00Z"),
+                                     dict(type="criterion-cleared", criterion="AC6", ts="2026-10-25T22:00:00Z")]) == {"AC6"}
     line_count = len((here / "fold.py").read_text().splitlines())
-    assert line_count <= 2465, line_count
+    # Guard the extraction itself; a total line cap rejects unrelated fixes.
+    import ast
+    assignments = {target.id for node in ast.parse((here / "fold.py").read_text()).body
+                   if isinstance(node, ast.Assign) for target in node.targets
+                   if isinstance(target, ast.Name)}
+    assert not {"EMITS", "DECLARES", "OWED_DECLARERS"} & assignments
     print("1104-AC6 relocated EMITS, DECLARES and OWED_DECLARERS identities; fold.py lines:", line_count)
 
     subject = "L-spec-91104"
@@ -4675,7 +4691,7 @@ def test_queue_digest_vocabulary_1133():
     import fold_emits
 
     allowed = {
-        "queue-add": {"executor", "tick", "operator"},
+        "queue-add": {"executor", "tick", "operator", "base-red"},
         "queue-remove": {"executor", "tick", "operator"},
         "queue-batch": {"executor", "tick"},
         "stuck-digest": {"digest"},

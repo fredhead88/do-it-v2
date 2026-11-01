@@ -696,7 +696,9 @@ def _window_reconcile(events, ledger_file):
 
 
 def merge_freeze(events, project):
-    ids = fold.nightly_unowned(events, project)
+    import quarantine
+    current = quarantine.active(events, project, datetime.now(timezone.utc))
+    ids = [node for node in fold.nightly_unowned(events, project) if node not in current]
     return 'unowned nightly red: ' + ', '.join(ids) if ids else None
 
 
@@ -711,6 +713,8 @@ def window_run(project, *, runner=None, launcher=None, detach=False, now=None, p
             print('window-run: lock held; no batch formed')
             return 3
         try:
+            import quarantine
+            quarantine.apply(project, now=now)
             events = _ordered(window_gate.train_events())
             _window_reconcile(events, ledger_file)
             events = _ordered(window_gate.train_events())
@@ -729,7 +733,11 @@ def window_run(project, *, runner=None, launcher=None, detach=False, now=None, p
                 reason = merge_freeze(events, project)
             except Exception as exc:
                 raise ValueError('nightly freeze undetermined') from exc
+            maintenance_only = set()
             if reason is not None:
+                import quarantine_file
+                maintenance_only = quarantine_file.queued(events, project)
+            if reason is not None and not maintenance_only:
                 print('window-run: ' + reason)
                 previous = _latest([e for e in events if e.get('project') == project], {'merge-frozen'})
                 if previous is None or previous.get('reason') != reason:
@@ -761,7 +769,8 @@ def window_run(project, *, runner=None, launcher=None, detach=False, now=None, p
                 print(f"window-run: {reason}: {', '.join(specs)}; {recovery}", file=sys.stderr)
                 return 3
 
-            entries = queue(events, project)
+            entries = [row for row in queue(events, project)
+                       if not maintenance_only or row['spec'] in maintenance_only]
             tiers = {'L-charter-0072': 0, 'L-charter-0074': 1}
             entries.sort(key=lambda row: tiers.get(
                 dispatch.resolve_charter(events, row['spec'], None), 2))
@@ -775,7 +784,8 @@ def window_run(project, *, runner=None, launcher=None, detach=False, now=None, p
             events = _ordered(window_gate.train_events())
             _window_reconcile(events, ledger_file)
             events = _ordered(window_gate.train_events())
-            entries = queue(events, project)
+            entries = [row for row in queue(events, project)
+                       if not maintenance_only or row['spec'] in maintenance_only]
             entries.sort(key=lambda row: tiers.get(
                 dispatch.resolve_charter(events, row['spec'], None), 2))
 
