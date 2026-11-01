@@ -576,6 +576,9 @@ def run_steps(events, specs, now, *, dispatcher=None, dry_run=False, handled=fro
                     reporter.fail(step.item, step.reason, phase='planning')
                 if step.item in handled:
                     continue
+                if __import__('empty_grade').complete(step, events, dry_run=dry_run):
+                    out.append(f"{'would act' if dry_run else 'acted'} {step.item}: zero grader criteria; automatic pass")
+                    continue
                 if not dry_run:
                     try:
                         exhaustion = _record_retry_exhaustion(step, events, now)
@@ -587,9 +590,6 @@ def run_steps(events, specs, now, *, dispatcher=None, dry_run=False, handled=fro
                 hold = autodispatch._automatic_hold(evs, events)
                 if hold and step.action in ('build', 'rebuild'):
                     out.append(f'hold {step.item}: {hold}')
-                    continue
-                if __import__('empty_grade').complete(step, events, dry_run=dry_run):
-                    out.append(f"{'would act' if dry_run else 'acted'} {step.item}: zero grader criteria; automatic pass")
                     continue
                 if step.reason.startswith('undetermined:') or step.state == 'hold':
                     out.append(f"{'undetermined' if step.reason.startswith('undetermined:') else 'hold'} {step.item}: {step.reason}")

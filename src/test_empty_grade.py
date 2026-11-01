@@ -67,6 +67,7 @@ class EmptyGradeTests(unittest.TestCase):
         self.assertEqual(verdicts[0]['delegated_criteria'], {'AC1': 'owed', 'AC2': 'reviewer'})
         self.assertEqual(self.f.calls, [])
         self.assertFalse(any(e['type'] == 'spawn-started' for e in events))
+        self.assertFalse(any(e.get('kind') == 'retries-exhausted' for e in events))
         self.assertEqual(len([e for e in events if e['type'] == 'autodispatched']), 1)
         following = nextstep.next_steps(events, specs, self.f.now, lane_rules.load())
         self.assertTrue(any(s.item == self.sid and s.action == 'review' for s in following), following)
@@ -74,6 +75,20 @@ class EmptyGradeTests(unittest.TestCase):
         self.assertTrue(any(c['criterion'] == 'AC1' and c['status'] != 'met' for c in owed.checks(events, self.f.now)))
         tick.run_steps(events, specs, self.f.now, dispatcher=self.f.runner, steps=steps)
         self.assertEqual(len([e for e in self.snapshot()[0] if e['type'] == 'verdict']), 1)
+
+    def test_exhausted_partial_grade_keeps_retry_escalation(self):
+        self.path.write_text(self.text + 'AC3 [backend]: still needs grading.\n')
+        for minutes in (20, 15, 10):
+            self.events.append(self.f.event('autodispatch-failed', minutes, actor='tick',
+                role='grader', rule='grade', reason='packet: empty grader criteria for '
+                + self.sid + ': all criteria routed or absent\n'))
+        self.persist()
+        events, specs = self.snapshot()
+        tick.run_steps(events, specs, self.f.now, dispatcher=self.f.runner)
+        events, _ = self.snapshot()
+        self.assertFalse(any(e['type'] == 'verdict' for e in events))
+        self.assertTrue(any(e.get('kind') == 'retries-exhausted' for e in events))
+        self.assertEqual(self.f.calls, [])
 
     def test_fresh_and_dry_run_do_not_dispatch_or_consume_retry(self):
         events, specs = self.snapshot()

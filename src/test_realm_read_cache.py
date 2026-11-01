@@ -261,15 +261,16 @@ def failure_matrix(realm):
 
 def source_contract():
     repo = SRC.parent
-    base = subprocess.check_output(['git', 'merge-base', 'HEAD', 'main'], cwd=repo, text=True).strip()
-    def source_at(path):
-        return subprocess.check_output(['git', 'show', base+':'+path], cwd=repo, text=True)
+    # This is the historical patch's footprint, not a diff against moving main.
+    patch = 'e0b719b428974ed6485660c80b83f5cb2e762627'
+    def source_at(path, revision=patch):
+        return subprocess.check_output(['git', 'show', revision+':'+path], cwd=repo, text=True)
     def definitions(source):
         return {node.name: ast.dump(node, include_attributes=False) for node in ast.parse(source).body
                 if isinstance(node, (ast.FunctionDef, ast.ClassDef))}
-    old = definitions(source_at('src/realm.py'))
+    old = definitions(source_at('src/realm.py', patch+'^'))
     current_source = (SRC/'realm.py').read_text()
-    new = definitions(current_source)
+    new = definitions(source_at('src/realm.py'))
     assert {name for name in old if old[name] != new[name]} == set(SITES)
     assert set(new)-set(old) == {'_ledger_child_env'}
     for node in ast.parse(current_source).body:
@@ -277,8 +278,8 @@ def source_contract():
             text = ast.get_source_segment(current_source, node)
             assert '"DOIT_READ_CACHE": "0"' not in text
             assert text.count('subprocess.run(') == 1 and '_ledger_child_env()' in text
-    old_tests = definitions(source_at('src/test_realm.py'))
-    new_tests = definitions((SRC/'test_realm.py').read_text())
+    old_tests = definitions(source_at('src/test_realm.py', patch+'^'))
+    new_tests = definitions(source_at('src/test_realm.py'))
     assert old_tests['test_realm_never_opens_ledger_lock'] == new_tests['test_realm_never_opens_ledger_lock']
     removed = set(old_tests)-set(new_tests)
     added = set(new_tests)-set(old_tests)
