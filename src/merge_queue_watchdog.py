@@ -6,13 +6,40 @@ import merge_deadman
 import merge_queue
 
 
+def _owned_step(step):
+    reason = step.reason.removeprefix('undetermined:').strip().split(':', 1)[0]
+    return step.state == 'action' or step.state == 'hold' and (
+        not step.reason.startswith('undetermined:') or
+        reason in {'base-not-releasable', 'window-in-progress'})
+
+
+def _window_owners(events):
+    """Open windows own their members across candidate rebuilds, until closure."""
+    windows = {}
+    closed = {'window-verified', 'window-merged', 'window-done', 'window-dropped',
+              'window-cancelled', 'window-redcut', 'shipped'}
+    for event in merge_queue._ordered(events):
+        key = (event.get('project'), event.get('subject'))
+        kind = event.get('type')
+        if kind in closed:
+            windows.pop(key, None)
+        elif kind in {'window-opened', 'window-candidate'}:
+            specs = event.get('specs', [])
+            if isinstance(specs, str):
+                specs = specs.split(',')
+            windows.setdefault(key, set()).update(specs)
+    return {(project, spec) for (project, _), specs in windows.items() for spec in specs}
+
+
 def due(events, steps, now):
-    owned = {s.item for s in steps if s.state == 'action' or
-             s.state == 'hold' and not s.reason.startswith('undetermined:')}
+    owned = {s.item for s in steps if _owned_step(s)}
+    window_owned = _window_owners(events)
     result = []
     for row in merge_queue.queue(events):
         since = merge_deadman.stamp(row['added_at'])
-        if since is not None and now - since > timedelta(hours=2) and row['spec'] not in owned:
+        if (since is not None and now - since > timedelta(hours=2)
+                and row['spec'] not in owned
+                and (row['project'], row['spec']) not in window_owned):
             result.append(row)
     return result
 
