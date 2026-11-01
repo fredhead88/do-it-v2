@@ -244,9 +244,29 @@ class ReadinessTests(unittest.TestCase):
         result = self.check(dry_run=False)
         self.assertEqual((result['status'], result['run_tests']), ('ready', run_tests))
 
-    def test_broken_chain_and_missing_environment_bounce(self):
-        for command, reason in [('false\ntrue', 'exit 1'),
-                                ('python3 -c "raise SystemExit(5)"', 'exit 5'),
+    def test_base_test_failures_are_recorded_without_bouncing_first_builds(self):
+        # No pytest installation is required: exercise its ordinary failure,
+        # missing-file/node and empty-collection exit codes through real shells.
+        for code in (1, 4, 5):
+            with self.subTest(code=code):
+                self.spec(command=f'python3 -c "raise SystemExit({code})"')
+                result = self.check()
+                readiness.record(result, 'demo', root=self.root)
+                self.assertEqual((result['status'], result['findings']), ('ready', []))
+                self.assertEqual(result['notes'], [
+                    f'Verification on dispatch base observed exit {code} (non-blocking)'])
+        rows = [json.loads(line) for line in (self.root / 'events/L-tick-local.jsonl').read_text().splitlines()]
+        self.assertEqual([e.get('notes') for e in rows if e['type'] == 'build-readiness'], [
+            [f'Verification on dispatch base observed exit {code} (non-blocking)'] for code in (1, 4, 5)])
+        self.assertFalse(any(e['type'] == 'spec-shape-failed' for e in rows))
+        # pipefail/errexit still observes the first failure rather than a later success.
+        self.spec(command='false\ntrue')
+        self.assertEqual(self.check()['notes'], [
+            'Verification on dispatch base observed exit 1 (non-blocking)'])
+
+    def test_broken_environment_still_bounces(self):
+        for command, reason in [('python3 -c "raise SystemExit(3)"', 'exit 3'),
+                                ('./source.py', 'exit 126'),
                                 ('no_such_fixture_command', 'exit 127'),
                                 ('.venv/bin/python -c "print(1)"', 'environment missing')]:
             self.spec(command=command)
@@ -255,6 +275,21 @@ class ReadinessTests(unittest.TestCase):
             self.assertIn(reason, result['findings'][0])
             readiness.record(result, 'demo', root=self.root)
         self.assertIn('spec-shape-failed', (self.root / 'events/L-tick-local.jsonl').read_text())
+
+    def test_base_timeout_and_checkout_or_dependency_failures_still_block(self):
+        text = self.spec(command='sleep 30')
+        with patch.object(readiness.grading_env, '_project_row', return_value={}):
+            with self.assertRaises(subprocess.TimeoutExpired):
+                readiness.verify_base(text, self.repo, self.base, self.root, 'demo', timeout=.05)
+        with patch.object(readiness.spec_preflight, '_process',
+                          side_effect=subprocess.TimeoutExpired('fixture', .05)):
+            self.assertEqual(self.check()['status'], 'bounced')
+        self.spec()
+        with patch.object(readiness.spec_preflight, '_process',
+                          return_value=SimpleNamespace(returncode=1)):
+            self.assertIn('checkout unavailable', self.check()['findings'][0])
+        result = self.check(project_row={'node_dirs': ['dashboard']})
+        self.assertIn('environment missing: dashboard/node_modules', result['findings'][0])
 
     def test_companions_exclude_global_names_fixture_data_and_python_path_prose(self):
         files = {

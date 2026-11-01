@@ -205,8 +205,12 @@ def verify_base(text, repo, base, root, project, timeout=180):
         import build_runner
         chain, _ = build_runner._rewrite(chain, repo, tree, venv)
         result = spec_preflight._process(['/bin/bash', '-eo', 'pipefail', '-c', chain], cwd=tree, env=env, timeout=timeout)
-        if result.returncode:
-            raise NotReady('Verification fails on dispatch base (exit ' + str(result.returncode) + ')')
+        # New tests and their assertions need not pass (or even exist) on base.
+        # pytest internal errors and shell execution failures are environment defects.
+        if result.returncode in (3, 126, 127):
+            raise NotReady('Verification environment fails on dispatch base (exit ' + str(result.returncode) + ')')
+        return ([f'Verification on dispatch base observed exit {result.returncode} (non-blocking)']
+                if result.returncode else [])
 
 
 def check(subject, project, base, events, *, root=None, dry_run=True):
@@ -240,7 +244,7 @@ def check(subject, project, base, events, *, root=None, dry_run=True):
         if gaps:
             raise NotReady('Writes omits coupled tests/companions: ' + ', '.join(gaps))
         if dry_run:
-            verify_base(text, repo, base, root, project)
+            result['notes'] = verify_base(text, repo, base, root, project)
     except (OSError, ValueError, StopIteration, subprocess.SubprocessError,
             coupled_tests.Truncated, merge_gate.Undetermined) as exc:
         result.update(status='bounced', findings=[str(exc) or 'readiness undetermined'])
