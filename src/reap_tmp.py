@@ -843,14 +843,40 @@ def _stop_cluster(d, stop_fn, kill_fn):
 _CLUSTER_STATE_DEFAULT = lambda: ROOT / "state" / "reap-tmp-clusters.json"
 
 
+def _var_tmp_cluster_min_age_s():
+    """Read the opt-in cluster threshold without changing disk settings' keys."""
+    import math
+    import tomllib
+    key = 'reap_var_tmp_cluster_min_age_h'
+    try:
+        with pathlib.Path(disk_reaper.LOOK_TOML_PATH).open('rb') as stream:
+            thresholds = tomllib.load(stream).get('thresholds', {})
+        if not isinstance(thresholds, dict):
+            return 24 * 3600
+        hours = thresholds.get(key, 24)
+    except (OSError, ValueError):
+        return 24 * 3600
+    invalid = type(hours) not in (int, float) or hours < 0
+    invalid = invalid or (isinstance(hours, float) and not math.isfinite(hours))
+    if invalid:
+        hours = 24
+    below_floor = hours < 6
+    report = disk_reaper._SETTINGS_REPORT.get()
+    if (invalid or below_floor) and report is not None:
+        report['config_invalid'].add(key)
+    return max(6, hours) * 3600
+
+
 def _reap_clusters(proc_root, uid, scratch_root, events, now, state_path, stop_fn, kill_fn,
-                    wait_s, dry_run):
+                    wait_s, dry_run, *, var_tmp_root=None, hold=False):
     """R15c/SD-R15-2a: an orphaned private Postgres cluster — a postmaster
     whose owning spawn/spec has already ended, or (no resolvable owner) one
     idle 6h+ across two consecutive passes with no client backend — is
     stopped and, once its pid is genuinely gone, its directory removed.
     Never touches `/var/lib/postgresql` or anything outside `/tmp`, `/dev/shm`,
-    `$HOME` (the scratch root included) or `<ROOT>/worktrees`."""
+    `$HOME` (the scratch root included) or `<ROOT>/worktrees`, except opted-in
+    var/tmp-only clusters: these use their own minimum age and are stop-only."""
+    var_tmp_min_age = _var_tmp_cluster_min_age_s() if var_tmp_root is not None else None
     state_path = pathlib.Path(state_path) if state_path is not None else _CLUSTER_STATE_DEFAULT()
     try:
         state = json.loads(state_path.read_text())
@@ -878,10 +904,22 @@ def _reap_clusters(proc_root, uid, scratch_root, events, now, state_path, stop_f
         if scratch_root is not None and _under(nd, pathlib.Path(scratch_root) / "claude-1000"):
             continue
         seen.add(nd)
-        if _under(nd, "/var/lib/postgresql") or not any(_under(nd, b) for b in allowed_bases):
+        if _under(nd, "/var/lib/postgresql"):
             continue
+        var_tmp_only = not any(_under(nd, b) for b in allowed_bases)
+        if var_tmp_only:
+            real_d = os.path.realpath(nd)
+            if var_tmp_root is None or not _under(real_d, os.path.realpath(var_tmp_root)):
+                continue
+            if (any(part.startswith('closeout-pgdata-')
+                    for path in (nd, real_d) for part in pathlib.Path(path).parts)
+                    or any(_under(real_d, pathlib.Path(os.path.realpath(var_tmp_root)) / name)
+                           for name in disk_reaper.KEEP_VAR_TMP)):
+                if not dry_run:
+                    state.pop(nd, None)
+                continue
 
-        kind, owner = _cluster_owner(nd, scratch_root, terminal_worktrees)
+        kind, owner = (None, None) if var_tmp_only else _cluster_owner(nd, scratch_root, terminal_worktrees)
         if kind == "spawn":
             orphaned = owner in terminal_spawns
         elif kind == "spec":
@@ -897,11 +935,16 @@ def _reap_clusters(proc_root, uid, scratch_root, events, now, state_path, stop_f
                     age_s = uptime_now - int(fields[19]) / clk_tck
                 except (OSError, ValueError, IndexError):
                     age_s = None
-            if has_client or age_s is None or age_s < 6 * 3600:
-                state.pop(nd, None)
+            min_age = var_tmp_min_age if var_tmp_only else 6 * 3600
+            if has_client or age_s is None or age_s < min_age:
+                if not (var_tmp_only and dry_run):
+                    state.pop(nd, None)
+                continue
+            if var_tmp_only and hold:
                 continue
             idle_passes = state.get(nd, {}).get("idle_passes", 0) + 1
-            state[nd] = {"idle_passes": idle_passes}
+            if not (var_tmp_only and dry_run):
+                state[nd] = {"idle_passes": idle_passes}
             orphaned = idle_passes >= 2
         if not orphaned:
             continue
@@ -915,6 +958,8 @@ def _reap_clusters(proc_root, uid, scratch_root, events, now, state_path, stop_f
             if scratch_root is not None else None
         removable = (grade_root is not None and (nd == grade_root or nd.startswith(grade_root + os.sep))) \
             or any(_under(nd, wt) for wt in terminal_worktrees)
+        if var_tmp_only:
+            removable = False
 
         if not dry_run:
             try:
@@ -1135,7 +1180,8 @@ def run(root="/tmp", uid=None, min_age_min=120, dry_run=False, now=None, proc_ro
     if kill_fn is not None:
         try:
             stopped_clusters = _reap_clusters(proc_root, uid, scratch_root, events, now,
-                                              state_path, stop_fn, kill_fn, wait_s, dry_run)
+                                              state_path, stop_fn, kill_fn, wait_s, dry_run,
+                                              var_tmp_root=var_tmp_root, hold=settings['hold'])
         except Exception as e:
             errors["clusters"] = str(e)
 
