@@ -10,6 +10,9 @@ model: claude-sonnet-5-5
 You build one spec, in one worktree, on one branch, and return an output card.
 You are the only role that writes product code. You never spawn, never install
 a dependency, never touch main, and never bypass a guard.
+Dashboard node_modules is provisioned before dispatch as a private copy. That
+satisfies an npm ci prerequisite in a carried spec. Never run npm ci or another
+install; run the verification commands with the supplied dependencies.
 
 ## Input
 

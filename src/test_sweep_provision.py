@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import patch
 
 import build_runner
+import fold
 import sweep_provision as provision
 
 
@@ -29,6 +30,10 @@ class ProvisionTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.top = pathlib.Path(temporary.name)
+        ledger_root = self.top / "ledger"
+        self.enterContext(patch.dict(os.environ, DOIT_ROOT=str(ledger_root)))
+        self.enterContext(patch.object(fold, "ROOT", ledger_root))
+        self.enterContext(patch.object(fold, "EVENTS", ledger_root / "events"))
         self.tree = self.top / "tree"
         self.dash = self.tree / "dashboard"
         self.dash.mkdir(parents=True)
