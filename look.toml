@@ -107,3 +107,22 @@ reviewer = 0.4
 dialog_text = "Background work is running"
 capture_lines = 40
 settle_s = 2
+
+# Ledger omens: values match ~/.do-it/omens.py at the migration.
+[omens]
+near_cap_fraction = 0.8
+vanished_cap_multiple = 3
+vanished_max_h = 48
+shelf_silent_min = 60
+raven_warn_h = 0.5
+raven_critical_h = 2
+regrade_count = 3
+inbound_uncarried_h = 2
+checkout = "/home/albert/do-it-v2"
+
+[omens.caps]
+grader = 15
+reviewer = 30
+builder = 90
+spec-writer = 30
+spec-auditor = 15

@@ -12,7 +12,7 @@ Never deploys, restarts, resumes, sends keys, installs, or deletes (SD1).
 import argparse, fcntl, hashlib, json, os, pathlib, re, shutil, subprocess, sys, time
 from datetime import datetime, timedelta, timezone
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import dispatch, fold, look_digest, look_wallclock, pane_resume, panes, relay  # noqa: E402
+import dispatch, fold, look_omens, look_digest, look_wallclock, pane_resume, panes, relay  # noqa: E402
 LEDGER_NAME = "L-look-local.jsonl"
 DEFAULT_TOML_PATH = pathlib.Path(__file__).resolve().parent.parent / "look.toml"
 DEFAULTS = {
@@ -27,6 +27,7 @@ DEFAULTS = {
     # below / empty (Assumptions) — no look condition names a class yet.
     "ci": [{"project": "albert-scott", "repo": "/opt/albert-scott", "branch": "master", "workflows": []}],
     "classes": {},
+    "omens": look_omens.DEFAULTS,
     # L-charter-0042/L-spec-0484, R13(c): the same `[push]` table
     # `push_origin.targets()` reads — kept here too (not only in
     # `push_origin.py`) so `_check_origin_behind` shares the identical
@@ -54,6 +55,7 @@ def load_toml(toml_path=None):
             "pane_at_menu": {**DEFAULTS["pane_at_menu"], **(doc.get("pane_at_menu") or {})},
             "ci": doc["ci"] if "ci" in doc else DEFAULTS["ci"],
             "classes": doc.get("classes") or DEFAULTS["classes"],
+            "omens": {**look_omens.DEFAULTS, **(doc.get("omens") or {})},
             "push": {"projects": push_doc.get("projects") or DEFAULTS["push"]["projects"],
                      "main": {**DEFAULTS["push"]["main"], **(push_doc.get("main") or {})},
                      "path": push_doc.get("path") or {}}}
@@ -86,6 +88,13 @@ class Runner:
         return subprocess.run(["gh", "run", "list", "--branch", branch, "--event", "push", "--json",
                                "name,status,conclusion,headSha,url,updatedAt", "--limit", "100"],
                               cwd=repo, capture_output=True, text=True, timeout=timeout).stdout
+    def dispatch_processes(self, role, subject, timeout):
+        pattern = re.escape(f"dispatch.py {role} {subject}")
+        proc = subprocess.run(["pgrep", "-af", "--", pattern], capture_output=True,
+                              text=True, timeout=timeout)
+        if proc.returncode not in (0, 1):
+            raise OSError("process reading unavailable")
+        return proc.stdout
     def clock(self):
         return time.monotonic()
     def sleep(self, seconds):
@@ -142,7 +151,12 @@ _DIGEST = None
 def _finish_digest(digest):
     def _emit_digest(brief):
         kv = {k: v for k, v in brief.items() if k != "type"}
-        fix = look_wallclock.fix_for(brief["condition"], digest.root, digest.events)
+        condition = brief["condition"]
+        if condition.startswith("omen-"):
+            rule = condition.split(":", 1)[0].removeprefix("omen-")
+            fix = look_omens.fix_for(rule, digest.root, digest.events, look_wallclock._CLASSES)
+        else:
+            fix = look_wallclock.fix_for(condition, digest.root, digest.events)
         if fix is not None:
             kv["fix"] = fix
             brief["fix"] = fix
@@ -1134,6 +1148,45 @@ def _check_wallclock(events, runner, now, root, cfg, deadline, dry_run, briefs, 
         return []
     briefs.extend(result["briefs"])
     return result["events"]
+def _check_omens(events, specs, runner, now, root, cfg, deadline, briefs, answered):
+    if runner.clock() >= deadline:
+        _fire_undetermined("omens", events, root, briefs)
+        return
+    try:
+        if isinstance(specs, Exception):
+            raise specs
+        rows = look_omens.run(events, specs, runner, now, {**cfg["omens"], "_deadline": deadline})
+    except Exception:
+        _fire_undetermined("omens", events, root, briefs)
+        return  # unknown readings must never clear a standing omen
+    active = set()
+    for row in rows:
+        condition = f"omen-{row['rule']}:{row['key']}"
+        active.add((condition, row['key']))
+        owner = look_omens.OWNERS[row['rule']]
+        r = _write_brief(condition, row['key'], owner,
+                         {"detail": row['detail'], "severity": row['severity']}, events, root)
+        if r is not None:
+            r['subject'] = f"look:{condition}"
+            briefs.append(r)
+    # Recover open keys from both state and ledger (state may have been lost).
+    old = set()
+    for key in ((_read_state(root) or {}).get("open") or {}):
+        if key.startswith("omen-") and "|" in key:
+            old.add(tuple(key.rsplit("|", 1)))
+    for e in events:
+        condition = str(e.get("condition", ""))
+        if condition.startswith("omen-"):
+            old.add((condition, str(e.get("key", ""))))
+    shelf_unknown = any(r['rule'] == 'shelf' and r['key'] == 'unavailable' for r in rows)
+    for condition, key in old - active:
+        if shelf_unknown and condition.startswith(('omen-shelf:', 'omen-shelf-stuck:')):
+            continue
+        r = _clear(condition, key, "omen no longer active", events, root)
+        if r is not None:
+            answered.append(r)
+
+
 def run(events, *, now=None, runner=None, root=None, toml_path=None, dry_run=False,
         crons_manifest=None, crond_dir=None, repo=None):
     global _PASS_LOCKED, _DRY_RUN, _DIGEST
@@ -1208,6 +1261,9 @@ def run(events, *, now=None, runner=None, root=None, toml_path=None, dry_run=Fal
         except Exception:
             _fire_undetermined("merge-queue-no-step", events, root, briefs)
         _check_owed_overdue(events, now, root, briefs)
+        omen_fold = evaluation_fold()
+        omen_specs = omen_fold if isinstance(omen_fold, Exception) else omen_fold[0]
+        _check_omens(events, omen_specs, runner, now, root, cfg, deadline, briefs, answered)
         wallclock_events = _check_wallclock(events, runner, now, root, cfg, deadline, dry_run, briefs, tally=tally)
         r = _clear("look-stale", "look-stale", "fresh pass", events, root)
         r and answered.append(r)
