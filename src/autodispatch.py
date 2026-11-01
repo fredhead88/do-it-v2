@@ -89,6 +89,10 @@ def _automatic_hold(spec_evs, all_evs, *, shipped=None):
     dependency = held_by_dependency(evs, all_evs, shipped=shipped)
     if dependency:
         return dependency
+    import dependency_holds
+    text_hold = dependency_holds.text_hold_reason(evs, all_evs, shipped=shipped)
+    if text_hold:
+        return text_hold
     ruling = _standing_ruling(evs)
     if ruling is not None:
         return f"held: ruling {ruling['action']} ({ruling.get('_src') or 'source missing'})"

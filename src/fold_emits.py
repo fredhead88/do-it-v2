@@ -410,7 +410,4 @@ def nightly_unowned(events, project):
     return sorted(pending)
 
 
-def valid_dependency(value):
-    """Dependency holds name exactly one numeric spec identifier."""
-    import re
-    return isinstance(value, str) and re.fullmatch(r'L-spec-[0-9]+', value) is not None
+from dependency_holds import valid_dependency
