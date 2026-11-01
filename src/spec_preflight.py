@@ -3,6 +3,7 @@
 import argparse
 import ast
 from datetime import datetime, timedelta, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -283,11 +284,23 @@ def _validate(body):
     return body
 
 
-def run(spec_id, *, root=None, now=None):
+def _text_identity(root, event):
+    path = Path(event.get("path", ""))
+    candidates = (path, root / path, root / "content" / path.name)
+    source = next((p for p in candidates if p.is_file()), None)
+    if source is None:
+        return None
+    stat = source.stat()
+    return (stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns,
+            hashlib.sha256(source.read_bytes()).hexdigest())
+
+
+def run(spec_id, *, root=None, now=None, events=None):
     root = Path(root) if root is not None else fold.ROOT
     body = dict(spec=spec_id, findings=[], red_on_master=[], undetermined=[])
     try:
-        events = _events(root)
+        if events is None:
+            events = _events(root)
         written = next((e for e in reversed(events) if e.get("type") == "spec-written"
                         and e.get("subject") == spec_id), None)
         if written is None:
@@ -357,9 +370,11 @@ def _eligible(sid, events, now):
                    (i > index and e.get("type") == "build-started") for i, e in indexed)
 
 
-def _append(root, body):
-    written = next((e for e in reversed(_events(root)) if e.get("type") == "spec-written"
-                    and e.get("subject") == body["spec"]), {})
+def _append(root, body, *, spec_written=None):
+    written = spec_written
+    if written is None:
+        written = next((e for e in reversed(_events(root)) if e.get("type") == "spec-written"
+                        and e.get("subject") == body["spec"]), {})
     project = written.get("project")
     if not isinstance(project, str) or not project:
         raise ValueError("preflight append has no project")
@@ -381,9 +396,28 @@ def tick(*, root=None, now=None):
         return 2
     waiting = pending(events)
     eligible = [sid for sid in waiting if _eligible(sid, events, now)]
-    for sid in eligible[:TICK_MAX]:
+    picked = eligible[:TICK_MAX]
+    written = {e.get("subject"): e for e in events if e.get("type") == "spec-written"}
+    identities = {}
+    for sid in picked:
         try:
-            _append(root, run(sid, root=root, now=now))
+            identities[sid] = _text_identity(root, written[sid])
+        except OSError:
+            identities[sid] = None
+    for sid in picked:
+        try:
+            if identities[sid] is None:
+                print(f"preflight recheck next pass: {sid} spec text changed during the pass", file=sys.stderr)
+                continue
+            body = run(sid, root=root, now=now, events=events)
+            try:
+                unchanged = _text_identity(root, written[sid]) == identities[sid]
+            except OSError:
+                unchanged = False
+            if not unchanged:
+                print(f"preflight recheck next pass: {sid} spec text changed during the pass", file=sys.stderr)
+                continue
+            _append(root, body, spec_written=written[sid])
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             print("preflight append: " + str(exc), file=sys.stderr)
             return 1
