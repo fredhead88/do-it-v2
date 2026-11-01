@@ -15,7 +15,7 @@ tree_guards = [
 ]
 dispatch_timeout_min = 70
 train_depth = 2
-max_merges = 15
+max_merges = 4  # 2026-11-01 operator GO: merge-morass panel; adaptive sizing to follow
 
 [merge_queue]
 batch_cap = 15
