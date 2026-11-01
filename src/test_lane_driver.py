@@ -201,6 +201,7 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(self.appended(), [])
 
     def test_tick_capacity_and_dry_run(self):
+        (self.root / 'content' / 'L-spec-1002.md').write_text('AC1 [backend]: fixture.\n')
         other = replace(self.step(), item='L-spec-1002')
         with patch.object(lane_driver, 'capacity', return_value=1):
             out = self.run_steps([self.step(), other], dry_run=True)
@@ -245,13 +246,59 @@ class DriverTests(unittest.TestCase):
                 ('AC1 [backend]: fixture.', [self.event('spec-carried', 0, tier='full')], 'full', '1')):
             with self.subTest(depth=depth, round=round_n):
                 (self.root / 'content' / (self.sid + '.md')).write_text(text)
-                (self.root / 'review-mcp.json').write_text('{}')
+                self.browser_config()
                 original = self.events[:]
                 self.events.extend(extra)
                 self.calls.clear()
                 self.run_steps([self.step()])
                 self.assertEqual(self.calls[0][-4:], ['--depth', depth, '--round', round_n])
                 self.events = original
+
+    def browser_config(self):
+        path = self.root / 'review-mcp.json'
+        path.write_text(json.dumps({'mcpServers': {'chrome-devtools': {
+            'command': sys.executable, 'args': ['fixture-mcp.py']}}}))
+        return path
+
+    def test_review_browser_readiness_holds_once_without_spending_attempts(self):
+        (self.root / 'content' / (self.sid + '.md')).write_text('AC1 [ui]: fixture.\n')
+        for _ in range(3):
+            out = self.run_steps([self.step()])
+            self.assertEqual(out, [f'hold {self.sid}: review-readiness: missing review-mcp.json'])
+        self.assertEqual(self.calls, [])
+        self.assertEqual([e['type'] for e in self.appended()], ['autodispatch-skipped'])
+        self.assertNotIn('actor', self.appended()[0])
+        # Restoration releases this readiness hold without an operator reset.
+        config = self.browser_config()
+        self.assertTrue(self.run_steps([self.step()])[0].startswith('acted'))
+        self.assertEqual(self.calls[-1][-2:], ['--mcp-config', str(config)])
+        self.assertFalse(any(e['type'] == 'autodispatch-failed' for e in self.appended()))
+
+    def test_review_browser_invalid_configs_and_direct_launch_are_pre_dispatch(self):
+        (self.root / 'content' / (self.sid + '.md')).write_text('AC1 [ui]: fixture.\n')
+        config = self.root / 'review-mcp.json'
+        for body in ('private-fixture-value', '{}', '[]',
+                     '{"mcpServers":{"other":{"command":"npx"}}}',
+                     '{"mcpServers":{"chrome-devtools":{"args":[]}}}'):
+            with self.subTest(body=body):
+                config.write_text(body)
+                self.assertIn('review-readiness: invalid review-mcp.json',
+                              self.run_steps([self.step()])[0])
+        self.assertEqual(self.calls, [])
+        self.assertEqual(len(self.appended()), 1)
+        self.assertNotIn('private-fixture-value', json.dumps(self.appended()))
+        config.unlink()
+        runner = tick._PassDispatcher(self.runner, self.events, self.specs, self.now, False)
+        self.assertIsNone(tick.launch(self.step(), dispatcher=runner))
+        self.assertEqual(self.calls, [])
+        self.assertTrue(all(e['type'] == 'autodispatch-skipped' for e in self.appended()))
+
+    def test_review_browser_readiness_dry_run_is_read_only(self):
+        (self.root / 'content' / (self.sid + '.md')).write_text('AC1 [ui]: fixture.\n')
+        self.assertIn('review-readiness: missing review-mcp.json',
+                      self.run_steps([self.step()], dry_run=True)[0])
+        self.assertEqual(self.appended(), [])
+        self.assertEqual(self.calls, [])
 
 
 def r7_evidence(name, body):

@@ -75,14 +75,14 @@ def _review_options(evs, sid):
         return 'gates-only', round_n
     text = dispatch.spec_path(sid).read_text()
     ui = bool(re.search(r'\[ui\]', text, re.I))
-    if ui and not (fold.ROOT / 'review-mcp.json').is_file():
-        return 'needs-browser', round_n
     carried = _latest(evs, {'spec-carried'})
     depth = carried['tier'] if carried else ('full' if ui else 'gates-only')
     return depth, round_n
 
 
 def _dispatch(role, sid, project, charter, runner, options=None, *, base_sha=None):
+    import review_browser
+    browser = review_browser.config(sid, options) if role == 'reviewer' else None
     wt = fold.ROOT / 'worktrees' / project / sid.lower()
     if not wt.is_dir():
         raise ValueError(f'worktree {wt} missing')
@@ -107,6 +107,8 @@ def _dispatch(role, sid, project, charter, runner, options=None, *, base_sha=Non
             '--cwd', str(wt), '--charter', charter or '', '--project', project]
     if role == 'grader':
         argv += ['--timeout', '30']
+    if browser:
+        argv += ['--mcp-config', str(browser)]
     result = runner(argv)
     if result.get('code', 1):
         raise ValueError(result.get('stderr') or result.get('stdout') or 'dispatch failed')

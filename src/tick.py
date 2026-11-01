@@ -362,6 +362,11 @@ def launch(step, *, dispatcher):
             if (history.consumed or history.live or history.exhausted or history.not_ready
                     or history.next_retry_at and history.next_retry_at > getattr(dispatcher,'now',fold.NOW)):
                 return None
+    options = lane_driver._review_options(evs, step.item) if step.action == 'review' else None
+    if step.action == 'review':
+        import review_browser
+        if review_browser.hold(step, options, dry_run=getattr(dispatcher, 'dry_run', False)):
+            return None
     if getattr(dispatcher, 'dry_run', False):
         return None
     if step.action == 'merge':
@@ -432,11 +437,8 @@ def launch(step, *, dispatcher):
                                                           runner=dispatcher)
             if result.get('code', 1):
                 raise ValueError(result.get('stderr') or result.get('stdout') or 'worktree add failed')
-        options = lane_driver._review_options(evs, step.item) if step.action == 'review' else None
         if step.action == 'review' and options is None:
             raise ValueError('review round limit')
-        if options and options[0] == 'needs-browser':
-            raise ValueError('ui review requires review-mcp.json')
         fresh = heal.prepare_fresh(step, evs, fold.ROOT, project, wt, dispatcher) if heal else None
         recreated = fresh is not None
         if fresh is None and heal and step.action in ('rebuild', 'grade', 'regrade', 'review'):
@@ -594,6 +596,13 @@ def run_steps(events, specs, now, *, dispatcher=None, dry_run=False, handled=fro
                     continue
                 if step.owner != 'tick' or step.action not in LAUNCH_ACTIONS:
                     continue
+                if step.action == 'review':
+                    import review_browser
+                    reason = review_browser.hold(step, lane_driver._review_options(evs, step.item),
+                                                 dry_run=dry_run)
+                    if reason:
+                        out.append(f'hold {step.item}: {reason}')
+                        continue
                 if step.action == 'merge':
                     import merge_queue
                     try:

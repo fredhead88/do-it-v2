@@ -610,6 +610,9 @@ class EnforcementTests(unittest.TestCase):
 
     def run_pass(self, steps, *, outcomes=None, admission=True):
         info, calls = {}, []
+        for step in steps:
+            if step.action == 'review':
+                (self.root / 'content' / (step.item + '.md')).write_text('AC1 [backend]: fixture.\n')
         def launch(step, **kw):
             calls.append((step.item, step.action))
             result = (outcomes or {}).get(step.item, 'spawn')
