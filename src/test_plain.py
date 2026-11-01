@@ -272,7 +272,7 @@ shutil.rmtree(TMP, ignore_errors=True)
 print("plain-core: all checks passed")
 
 
-# Exercise the production direct NEXT lookups for all three dossier kinds.
+# Exercise blocked status vocabulary and shared next steps for all dossier kinds.
 def test_blocked_dossiers():
     import brief
     from test_fold_stalls import admitted, row, outcome, SID, NOW, evidence
@@ -292,13 +292,14 @@ def test_blocked_dossiers():
                     (root / 'content' / (item + '.md')).write_text('# Fixture\n\n## Intent\nA repair fixture.\n')
                 spec = brief.dossier(SID, events, root, NOW)
                 assert spec['status']['phrase'] == 'waiting for repair', spec
-                assert spec['next'] == dict(text='waiting for repair', owner='executor'), spec
+                assert spec['next']['owner'] == 'executor', spec
+                assert 'resumes after' in spec['next']['text'], spec
                 charter = brief.dossier(cid, events, root, NOW)
-                expected = ('waiting to be picked up and built', 'builder') if mixed else ('waiting for repair', 'executor')
-                assert (charter['next']['text'], charter['next']['owner']) == expected, charter
+                expected = brief.dossier(written, events, root, NOW)['next'] if mixed else spec['next']
+                assert charter['next'] == expected, charter
                 child = next(c for c in charter['children'] if c['id'] == SID)
                 assert child['phrase'] == 'waiting for repair', child
-                assert child['waiting_on'] == 'waiting for repair (executor)', child
+                assert child['waiting_on'] == f"{spec['next']['text']} (executor)", child
                 goal = brief.dossier(gid, events, root, NOW)
                 assert goal['children'], goal
                 checked.append(dict(spec=spec['next'], charter=charter['next'], goal=goal['next']))

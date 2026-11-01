@@ -237,9 +237,34 @@ def _expected_done_why(charter_id, now):
     return None, err
 
 
+def _routine_steps(events, specs, now):
+    """Evaluate the same rules/waves as tick once, using this dossier's ledger."""
+    import nextstep
+    import tick
+    if not any(s["state"] in nextstep.PIPELINE for s in specs.values()):
+        return {}
+    try:
+        return {s.item: s for s in tick._steps(events, specs, now) if s.item_kind == "spec"}
+    except (OSError, ValueError) as exc:
+        return {sid: str(exc) for sid, s in specs.items() if s["state"] in nextstep.PIPELINE}
+
+
+def _spec_next(spec, steps):
+    """Static wording is only for terminal/owed states without a routine action."""
+    import nextstep
+    if spec["state"] not in nextstep.PIPELINE:
+        return plain.NEXT[spec["state"]]
+    step = (steps or {}).get(spec["id"])
+    if step is None or isinstance(step, str):
+        return "next step unavailable: " + (step or "no routine step recorded"), "executor"
+    if step.state == "hold":
+        return f"{step.reason}; resumes after {step.clears}", step.owner
+    return f"ready to {step.action}: {step.reason}", step.owner
+
+
 # ── R3 item 4 · next, charter kind ──────────────────────────────────────────
 
-def _charter_next(cid, state, mine, now, briefs):
+def _charter_next(cid, state, mine, now, briefs, steps=None):
     """SD3's four ordered steps (charter kind), after the retracted/L2-complete
     short-circuit. Step 2 (an open in-scope brief) is this unit's own declared
     default — SD3's own text for it is not part of this spec's extract; no
@@ -264,16 +289,17 @@ def _charter_next(cid, state, mine, now, briefs):
     if briefs:
         return "answer the open brief", "executor"
     for state_name in fold.SPEC_STATES:
-        if any(s["state"] == state_name for s in mine):
-            cand = plain.NEXT[state_name]
-            if cand != _DONE:
-                return cand
+        for spec in sorted(mine, key=lambda s: s["id"]):
+            if spec["state"] == state_name:
+                cand = _spec_next(spec, steps)
+                if cand != _DONE:
+                    return cand
     return "final checks and close", "executor"
 
 
 # ── R3 · charter core (shared by a charter dossier and a goal's child rows) ──
 
-def _charter_core(cid, events, root, now, specs, charters):
+def _charter_core(cid, events, root, now, specs, charters, steps=None):
     c = charters.get(cid, {"evs": _own_stream(events, cid), "state": "unknown", "briefs": 0})
     evs = c["evs"]
     state = c["state"]
@@ -281,7 +307,7 @@ def _charter_core(cid, events, root, now, specs, charters):
     pl = plain.line(cid, root)
     ph = plain.phrase("charter", state)
     mine = [s for s in specs.values() if s["charter"] == cid and s["state"] != "void"]
-    next_text, next_owner = _charter_next(cid, state, mine, now, c.get("briefs", 0))
+    next_text, next_owner = _charter_next(cid, state, mine, now, c.get("briefs", 0), steps)
 
     filed = _earliest(evs, "charter-filed", "goal-filed", "spec-written")
     planned = _earliest(evs, "plan-written", "cut-written")
@@ -311,16 +337,16 @@ def _charter_core(cid, events, root, now, specs, charters):
                 "first_merge": first_merge, "last_merge": last_merge,
                 "expected_done": expected_done, "expected_done_why": expected_done_why}
     spend = _spend_for_subject(cid, events)
-    children = _spec_children_rows(mine, root)
+    children = _spec_children_rows(mine, root, steps)
     return {"title": title, "plain": pl, "state": state, "phrase": ph,
             "next": {"text": next_text, "owner": next_owner}, "timeline": timeline,
             "spend": spend, "children": children, "mine": mine, "last_change": _last_change(evs)}
 
 
-def _spec_children_rows(mine, root):
+def _spec_children_rows(mine, root, steps=None):
     rows = []
     for s in mine:
-        text, owner = plain.NEXT[s["state"]]
+        text, owner = _spec_next(s, steps)
         rows.append({
             "id": s["id"], "plain": plain.line(s["id"], root),
             "phrase": plain.phrase("spec", s["state"]),
@@ -334,14 +360,14 @@ def _spec_children_rows(mine, root):
 
 # ── R3 · per-kind dossiers ───────────────────────────────────────────────────
 
-def _spec_dossier(item_id, events, root, now, specs, charters):
+def _spec_dossier(item_id, events, root, now, specs, charters, steps=None):
     del now, charters
     s = specs.get(item_id)
     evs = s["evs"] if s is not None else _own_stream(events, item_id)
     state = s["state"] if s is not None else "unknown"
     pl = plain.line(item_id, root)
     ph = plain.phrase("spec", state)
-    next_text, next_owner = plain.NEXT[state]
+    next_text, next_owner = _spec_next(s or {"id": item_id, "state": state}, steps)
     shipped_ts = _earliest(evs, "shipped")
     timeline = {"filed": _earliest(evs, "spec-written"), "planned": None, "l1_complete": None,
                 "first_merge": shipped_ts, "last_merge": shipped_ts,
@@ -354,8 +380,8 @@ def _spec_dossier(item_id, events, root, now, specs, charters):
             "spend": spend, "children": []}
 
 
-def _charter_dossier(item_id, events, root, now, specs, charters):
-    core = _charter_core(item_id, events, root, now, specs, charters)
+def _charter_dossier(item_id, events, root, now, specs, charters, steps=None):
+    core = _charter_core(item_id, events, root, now, specs, charters, steps)
     n, k, j = _spec_buckets([s["state"] for s in core["mine"]])
     middle = f"Where it stands: {core['phrase']}; {n} of {n + k + j} specs proven, {k} being built, {j} waiting"
     catch_me_up = _catch_me_up(core["plain"]["text"], middle,
@@ -385,7 +411,7 @@ def _linked_charter_ids(charters, goal_id):
     return [cid for _, cid in pairs]
 
 
-def _goal_dossier(item_id, events, root, now, specs, charters):
+def _goal_dossier(item_id, events, root, now, specs, charters, steps=None):
     own_evs = _own_stream(events, item_id)
     title = _goal_title(item_id, events, root)
     pl = plain.line(item_id, root)
@@ -396,7 +422,7 @@ def _goal_dossier(item_id, events, root, now, specs, charters):
     ph = plain.phrase("goal", gstate)
 
     non_retracted = [cid for cid in linked_all if charters[cid]["state"] != "retracted"]
-    charter_cores = {cid: _charter_core(cid, events, root, now, specs, charters)
+    charter_cores = {cid: _charter_core(cid, events, root, now, specs, charters, steps)
                       for cid in non_retracted}
 
     next_cid = next((cid for cid in linked_all if charters[cid]["state"] not in
@@ -475,12 +501,13 @@ def dossier(item_id, events, root, now):
     specs, charters, _ignored, _by_subject = fold.fold(events)
     if kind is None or not _known(item_id, kind, events, specs, charters, root):
         raise UnknownItem(item_id)
+    steps = _routine_steps(events, specs, now)
     if kind == "spec":
-        d = _spec_dossier(item_id, events, root, now, specs, charters)
+        d = _spec_dossier(item_id, events, root, now, specs, charters, steps)
     elif kind == "charter":
-        d = _charter_dossier(item_id, events, root, now, specs, charters)
+        d = _charter_dossier(item_id, events, root, now, specs, charters, steps)
     else:
-        d = _goal_dossier(item_id, events, root, now, specs, charters)
+        d = _goal_dossier(item_id, events, root, now, specs, charters, steps)
     d["as_of"] = now.isoformat(timespec="seconds")
     return d
 

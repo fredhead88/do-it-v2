@@ -115,16 +115,23 @@ def _unpack(data, digest):
         value = _DataOnly(io.BytesIO(data)).load()
         if not isinstance(value, list) or any(not isinstance(e, dict) for e in value):
             raise Invalid('cache schema')
-        # Pickle shares strings within a chunk, but not across chunks. Reuse
-        # JSON keys and repeated labels without changing order or values.
-        labels = {'type', 'subject', 'project', 'role', 'actor'}
-        for n, event in enumerate(value):
-            value[n] = {sys.intern(k) if isinstance(k, str) else k:
-                        sys.intern(v) if k in labels and isinstance(v, str) else v
-                        for k, v in event.items()}
-        return value
+        # Chunks have separate pickle memo tables. Canonicalize immutable text
+        # across chunks (including nested evidence), never mutable containers.
+        return _shared_text(value)
     except (EOFError, ValueError, TypeError, pickle.UnpicklingError) as exc:
         raise Invalid('cache payload') from exc
+
+
+def _shared_text(value):
+    if isinstance(value, str):
+        return sys.intern(value)
+    if isinstance(value, dict):
+        return {sys.intern(k): v if k == '_src' else sys.intern(v) if isinstance(v, str) else _shared_text(v)
+                for k, v in value.items()}
+    if isinstance(value, list):
+        for index, child in enumerate(value):
+            value[index] = _shared_text(child)
+    return value
 
 
 def _record_digest(row):
@@ -273,7 +280,9 @@ def _update(db, directory, actor_of):
 def _read(db):
     out = []
     metadata = _metadata(db)
-    names = iter(sorted(metadata.items()))
+    # Keep the names for corruption checks, release each full record as consumed.
+    known = frozenset(metadata)
+    names = ((name, metadata.pop(name)) for name in sorted(known))
     current, entry = next(names, (None, None))
     count = 0
 
@@ -282,7 +291,7 @@ def _read(db):
     with closing(db.execute(
             'SELECT name,seq,data,sha FROM chunks ORDER BY name,seq')) as rows:
         for name, seq, data, digest in rows:
-            if name not in metadata:
+            if name not in known:
                 continue
             while current is not None and current < name:
                 if count != entry['chunks']:
