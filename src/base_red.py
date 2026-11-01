@@ -321,6 +321,16 @@ def failing(project, sha, *, ensure=False, refresh=False):
     try:
         repo, sha = _project(project, sha)
         result["sha"] = sha
+        if project == 'do-it-v2':
+            local = next((r for r in reversed(_rows(project))
+                          if r.get('type') == 'base-red-nightly' and r.get('sha') == sha
+                          and r.get('complete') is True and r.get('suite') == 'local-hermetic'), None)
+            if local is not None:
+                result.update(complete=True, sources=local.get('sources', []),
+                              kinds_covered=list(KINDS), workflows=['local-hermetic'])
+                for node in local['ids']:
+                    result['ids']['pytest' if node.startswith('src/test_') else 'suite-error'].append(node)
+                return result
         directory = fold.ROOT / "base-red" / project
         directory.mkdir(parents=True, exist_ok=True)
         path = directory / (sha + ".json")
@@ -713,7 +723,14 @@ _NIGHTLY_ERRORS = (OSError, RuntimeError, ValueError, KeyError, TypeError, EOFEr
 
 
 def nightly(project, *, sleep=None):
-    """Dispatch a full master nightly once; persist intent before each paid call."""
+    """Collect local engine evidence or dispatch a full application CI nightly."""
+    if project == 'do-it-v2':
+        import base_red_local
+        try:
+            sha, ids = base_red_local.nightly()
+            return dict(sha=sha, complete=True, ids=ids, undetermined=[], message='local nightly complete')
+        except _NIGHTLY_ERRORS:
+            return dict(complete=False, undetermined=['local nightly incomplete'])
     result = _result('')
     try:
         repo = _repo(project)
