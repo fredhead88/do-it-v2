@@ -9,7 +9,7 @@ sys.path.insert(0, str(HERE))
 import models  # noqa: E402
 import grader_packet
 import coupled_tests
-import panes, spawns, scratch  # noqa: E402 — panes: proc_start/alive (imports nothing of ours); spawns: L-spec-0755 dup-dispatch/cancel/clear helpers
+import panes, spawns, scratch, cpu_share  # noqa: E402 — panes: proc_start/alive; spawns: dup-dispatch/cancel/clear
 ROOT = pathlib.Path(os.environ.get("DOIT_ROOT", pathlib.Path.home() / ".do-it"))
 EVENTS, CONTENT = ROOT / "events", ROOT / "content"
 
@@ -319,7 +319,7 @@ CODEX_WRITES = ("builder", "spec-writer", "research", "reuse-scout", "probe", "r
 def run_codex_exec(cmd, packet, cwd, timeout):
     """The one subprocess the codex backend runs. Neither vendor's metered key is in the environment: the spawn draws the ChatGPT plan or it fails loudly."""
     env = {k: v for k, v in os.environ.items() if k not in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "DOIT_LEDGER_FILE")}
-    return subprocess.run(cmd, input=packet, capture_output=True, text=True, cwd=cwd, env=env, timeout=timeout)
+    return subprocess.run(cpu_share.niced(cmd), input=packet, capture_output=True, text=True, cwd=cwd, env=cpu_share.launch_env(env, ROOT), timeout=timeout)
 
 
 CODEX_PREAMBLE = """You are running a DO-IT role on the CODEX backend. The role contract below is your
@@ -473,7 +473,7 @@ def run_codex(spawn, role, model, schema_path, packet, cwd, timeout, path=None, 
     cmd += ["-"]
     (SEAT / f"{spawn}.cmd.json").write_text(json.dumps({"cmd": cmd, "cwd": str(cwd), "path": path}, indent=1))
     t0 = time.time()
-    r = run_codex_exec(cmd, packet_text, str(cwd), timeout)
+    with cpu_share.codex_claim(role, ROOT): r = run_codex_exec(cmd, packet_text, str(cwd), timeout)
     log.write_text(r.stdout or "")
     thread, turns, usage, errors = None, 0, {}, []
     for line in (r.stdout or "").splitlines():

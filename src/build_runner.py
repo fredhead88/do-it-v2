@@ -21,6 +21,7 @@ import time
 
 import base_red
 import checks
+import cpu_share
 import fold
 import evidence_revision
 import grader_view
@@ -186,13 +187,15 @@ def _interrupted(*_):
     raise Undetermined("runner interrupted")
 
 
-def _process(argv, *, env, deadline, cwd=None):
+def _process(argv, *, env, deadline, cwd=None, lower=False):
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         _expired()
-    proc = subprocess.Popen(argv, cwd=cwd, env=env, stdout=subprocess.PIPE,
+    proc = subprocess.Popen(cpu_share.niced(argv) if lower else argv, cwd=cwd, env=env, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, start_new_session=True)
     try:
+        if lower:
+            cpu_share.lower_autogroup(proc.pid)
         output, _ = proc.communicate(timeout=remaining)
     except BaseException as exc:
         with contextlib.suppress(ProcessLookupError):
@@ -395,7 +398,8 @@ def _run_tree(spec, sha, repo, row, commands, tail_dir, offset, tail_limit, dead
     try:
         # Review/check shells may export a real worktree's GIT_DIR. Even a
         # clone's git config then writes that source's shared config (r2503).
-        env = {k: v for k, v in grading_env._clean_env().items() if not k.startswith("GIT_")}
+        env = cpu_share.launch_env(
+            {k: v for k, v in grading_env._clean_env().items() if not k.startswith("GIT_")}, fold.ROOT)
         if row.get("venv"):
             # Match db_setup's venv resolution for absolute and tree-relative paths.
             venv_bin = tree / row["venv"] / "bin"
@@ -421,7 +425,7 @@ def _run_tree(spec, sha, repo, row, commands, tail_dir, offset, tail_limit, dead
             rewrites.extend(changes)
             missing.append(_targets_missing(command, tree))
             started = time.monotonic()
-            code, output = _process(["/bin/bash", "-c", command], env=env, deadline=deadline, cwd=tree)
+            code, output = _process(["/bin/bash", "-c", command], env=env, deadline=deadline, cwd=tree, lower=True)
             log = base_red.parse_log(output.decode("utf-8", "replace"))
             ids = sorted(set().union(*(set(v) for k, v in log.items() if k != "undetermined")))
             tail = tail_dir / f"{offset + index}.tail"
@@ -537,6 +541,7 @@ def run(spec, requested_sha=None, criteria=None):
         tails = path.with_suffix("")
         tails.mkdir(parents=True)
         limit = min(TAIL_CAP, DIRECTORY_CAP // (2 * len(commands)))
+        resources.enter_context(cpu_share.claim(fold.ROOT))
         tip, tip_logs, _, rewrites, summary = _run_tree(
             spec, sha, repo, row, commands, tails, 0, limit, deadline)
         try:
