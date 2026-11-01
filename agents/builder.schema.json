@@ -16,7 +16,11 @@
     "escalations",
     "declarations"
   ],
+  "if": {"properties": {"status": {"const": "NEEDS_CONTEXT"}}},
+  "then": {"required": ["reason"]},
   "properties": {
+    "reason": {"type": "string", "minLength": 1, "maxLength": 1000,
+               "description": "Required for NEEDS_CONTEXT: the missing context and what would unblock this build."},
     "coupled": {
       "type": "array",
       "maxItems": 40,

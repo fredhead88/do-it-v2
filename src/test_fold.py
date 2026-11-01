@@ -4110,9 +4110,9 @@ print("L1005 AC9 ok")
 def test_dependency_hold_vocabulary():
     from unittest import mock
 
-    for actor in ("thinker", "operator", "planner"):
+    for actor in ("thinker", "operator", "planner", "tick"):
         assert fold.admits({"type": "dependency-hold"}, actor) is None
-    for actor in ("tick", "builder", "grader", "executor"):
+    for actor in ("builder", "grader", "executor"):
         assert "actor mismatch" in fold.admits({"type": "dependency-hold"}, actor)
     assert fold.EMITS["autodispatch-failed"] == {"tick"}
     assert fold.REQUIRED["dependency-hold"] == ("waits_for", "why")

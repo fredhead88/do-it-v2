@@ -11,6 +11,7 @@ case "${1:-board}" in
   base-red) shift; exec python3 "$SRC/base_red.py" "$@" ;;
   gh-bill) shift; exec python3 "$SRC/gh_bill.py" "$@" ;;
   ci-runner) shift; exec python3 "$SRC/ci_runner.py" "$@" ;;
+  readiness) shift; exec python3 "$SRC/build_readiness.py" "$@" ;;
   run-checks) shift; exec python3 "$SRC/build_runner.py" "$@" ;;
   ci-shadow) shift; exec python3 "$SRC/ci_shadow.py" "$@" ;;
   dispatch) shift; exec python3 "$SRC/dispatch.py" "$@" ;;

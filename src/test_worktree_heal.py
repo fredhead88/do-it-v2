@@ -110,6 +110,8 @@ class Fixture:
             return dict(code=p.returncode, stdout=p.stdout, stderr=p.stderr)
         if argv[:2] == ['doit', 'packet']:
             return dict(code=0, stdout='/fixture-packet.md', stderr='')
+        if argv[:2] == ['doit', 'readiness']:
+            return dict(code=0, stdout='{"status":"ready"}', stderr='')
         if argv[:2] == ['doit', 'dispatch']:
             return dict(code=0, stdout=json.dumps({'detached': 'L-fixture-9001'}), stderr='')
         raise AssertionError(f'unexpected provider boundary: {argv}')
@@ -524,7 +526,8 @@ class HealTests(unittest.TestCase):
         for action in ('rebuild', 'grade', 'regrade', 'review'):
             with self.subTest(action=action), self.fixture() as f:
                 self.assertTrue(f.run(action)[0].startswith('acted'))
-                self.assertEqual([a[:2] for a in f.calls], [['doit', 'packet'], ['doit', 'dispatch']])
+                expected = ([['doit', 'readiness']] if action == 'rebuild' else [])
+                self.assertEqual([a[:2] for a in f.calls], expected + [['doit', 'packet'], ['doit', 'dispatch']])
                 self.assertNotIn('worktree_recreated', f.rows('autodispatched')[0])
                 self.assertFalse(f.state.exists())
 

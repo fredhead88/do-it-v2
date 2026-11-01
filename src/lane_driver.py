@@ -91,6 +91,9 @@ def _dispatch(role, sid, project, charter, runner, options=None):
         import packet as packets
         repo = fold.ROOT / 'repos' / project
         base_sha = packets._effective_base(repo, project, dispatch.spec_path(sid), sid)
+        readiness = runner(['doit', 'readiness', sid, '--project', project, '--base', base_sha])
+        if readiness.get('code', 1):
+            raise ValueError(readiness.get('stderr') or readiness.get('stdout') or 'build readiness failed')
         argv += ['--repo', str(repo), '--base-sha', base_sha]
     if options:
         argv += ['--depth', options[0], '--round', str(options[1])]
