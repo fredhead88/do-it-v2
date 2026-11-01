@@ -466,7 +466,8 @@ def infra_provision_checks():
         with patch.object(build_runner, "_process", return_value=(7, b"FAILED fixture assertion")):
             assert sweep_provision.run_check(root / "tree", "fixture", "exit 7", record) == (7, b"FAILED fixture assertion")
         # Exercise run's tip AND base provisioning holds and its own ledger seam.
-        done = dict(type="build-done", project="fixture", ready_sha="a" * 40, base_sha="b" * 40)
+        done = dict(type="build-done", subject="L-spec-9149", project="fixture",
+                    ready_sha="a" * 40, base_sha="b" * 40)
         for fail_base in (False, True):
             emitted = []
             tip = ([], [], [], [], {})
