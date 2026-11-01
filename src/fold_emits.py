@@ -286,6 +286,7 @@ EMITS["owed-unverifiable"] = {"prod-runner", "operator"}
 EMITS["queue-add"] = {"executor", "tick", "operator", "base-red"}
 EMITS["queue-remove"] = {"executor", "tick", "operator"}
 EMITS["queue-batch"] = {"executor", "tick"}
+EMITS["precheck-pregrade"] = {"executor", "tick", "operator"}
 EMITS["precheck"] = EMITS["precheck-red"] = {"executor", "tick", "operator"}
 EMITS["stuck-digest"] = {"digest"}
 EMITS["operator-alert"] = {"look", "tick", "digest"}
@@ -333,6 +334,7 @@ EMITS["pane-dialog-resolved"] = {"pane-watchdog"}
 EMITS["merge-gate-undetermined"] = {"executor", "tick"}
 
 REQUIRED_ROWS = {
+    "precheck-pregrade": ("master", "branch_sha", "verdict"),
     "next-step-held": ("subject", "spec", "reason", "owner", "since"),
     "merge-gate-undetermined": ("subject", "reason", "sha", "branch_sha", "main_sha", "branch",
                                 "repo", "cycle", "attempt", "retryable", "retry_at", "hold_reason", "findings"),

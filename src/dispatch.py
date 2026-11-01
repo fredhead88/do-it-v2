@@ -1321,10 +1321,16 @@ def _main(a):
             fail(f"grading budget: {reason} — refusing role=grader before any spend", reason=reason)
     # R7/Target 6, AC12: a grader dispatch against a subject carrying a standing COMMIT-SHAPE rejection is refused before any spend — grading a build already known to need rework is spend the cost_path exists to short-circuit.
     if a.role == "grader":
-        g_specs, *_ = fold.fold(fold.read_events())
+        pregrade_events = fold.read_events()
+        g_specs, *_ = fold.fold(pregrade_events)
         if "COMMIT-SHAPE" in fold.standing_rejects(g_specs.get(a.subject, {"evs": []})["evs"]):
             fail(f"{a.subject}: COMMIT-SHAPE stands — refusing role=grader before any spend",
                  reason="commit-shape")
+        import precheck
+        pregrade_reason = precheck.pregrade_refusal(pregrade_events, a.subject,
+            precheck.grader_master(pregrade_events, a.subject, a.project))
+        if pregrade_reason:
+            fail(pregrade_reason, reason="precheck-red")
     # L-charter-0042/L-spec-0486, R15d: disk is never the reason a builder or grader fails — refused BEFORE any spend, after the reaper has already had one chance to free the room a spawn's own work needs. `spec-writer` and `reviewer` never call `ensure_room` (scoped to builder/grader only).
     if a.role in ("builder", "grader"):
         import look, scratch

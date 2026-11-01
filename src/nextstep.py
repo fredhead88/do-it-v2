@@ -344,6 +344,9 @@ def _rebuild(c):
                 and _time(e['ts']) > _time(blocked['ts'])]
     drops = [e for e in evs if (e.get('type') == 'window-dropped' and e.get('reason') == 'owner')
              or e.get('type') in {'merge-conflict', 'precheck-red'}]
+    drops = [e for e in drops if not (e.get('layer') == 'pregrade' or e.get('source') == 'precheck-pregrade')
+             or outcome and e.get('branch_sha') == outcome.get('ready_sha')
+             and _time(e['ts']) >= _time(outcome['ts'])]
     review = _latest(evs, JUDGING | {'build-done', 'build-blocked'})
     blocking = ([review] if review and review['type'] == 'review'
                 and type(review.get('n_blocking')) is int and review['n_blocking'] > 0 else [])
@@ -352,6 +355,8 @@ def _rebuild(c):
     if trigger and (not blocked or _time(trigger['ts']) > _time(blocked['ts'])):
         result = _retry_result(c, trigger, 'builder', dispatched=(
             _after(dispatched, trigger, DISPATCH_EVENTS) or _after(evs, trigger, {'build-started'})))
+        if result and (trigger.get('layer') == 'pregrade' or trigger.get('source') == 'precheck-pregrade'):
+            result['reason'] = 'pregrade rework: ' + str(trigger.get('path') or ', '.join(trigger.get('tests', [])))
         return dict(result, trigger=_source(trigger)) if result else None
 
 
