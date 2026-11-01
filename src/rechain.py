@@ -378,7 +378,7 @@ def _fingerprint(repo, candidate, window, *, ev, project):
     wt_row = resources.record("worktree", str(wt), lane="rechain", subject=window)
     pg_row = None
     try:
-        pg = pathlib.Path(tempfile.mkdtemp(prefix="doit-rechain-pg-"))
+        pg = pathlib.Path(tempfile.mkdtemp(prefix="doit-rechain-pg-", dir="/var/tmp"))
         pg_row = resources.record("scratch-db", str(pg), lane="rechain", subject=window)
         stage = "worktree"
         try:
