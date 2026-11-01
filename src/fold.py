@@ -284,7 +284,7 @@ def read_events(use_cache=True, *, snapshot=None):
                 result = ledger_cache.read_conditional(EVENTS, ROOT / "cache", actor_of,
                                                        previous=previous)
                 if result.events is not None:
-                    out = finish_events(result.events)
+                    out = finish_events(result.events, owned=True)
                     snapshot._publish(scope, result.generation, out)
                 return snapshot._copy()
         except ledger_cache.LockTimeout:
@@ -301,14 +301,14 @@ def read_events(use_cache=True, *, snapshot=None):
         if snapshot is not None:
             snapshot._clear()
         out = _read_events_uncached()
-    return finish_events(out)
+    return finish_events(out, owned=True)
 
 
-def finish_events(raw):
-    """Order, correct and filter parsed events without changing the reader's raw list."""
-    out = [dict(e) for e in raw]
+def finish_events(raw, *, owned=False):
+    """Normalize events; owned parser-ordered buffers may be consumed in place."""
+    out = raw if owned else [dict(e) for e in raw]
     # Restore parser order for callers supplying files/lines in any order.
-    out.sort(key=lambda e: (e['_src'].rsplit(':', 1)[0], int(e['_src'].rsplit(':', 1)[1])))
+    if not owned: out.sort(key=lambda e: (e['_src'].rsplit(':', 1)[0], int(e['_src'].rsplit(':', 1)[1])))
     # Stable sort by ts alone first — ties keep the original (file-glob, then
     # line) order, which is exactly the per-file substructure `_merge_same_ts`
     # needs to preserve. Then merge each same-ts run across files by content.
