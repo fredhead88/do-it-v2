@@ -556,9 +556,6 @@ class QueueTests(unittest.TestCase):
                     events=events, calls=calls)
 
     def test_ac1_fill_to_cap(self):
-        import tomllib
-        self.assertEqual(tomllib.loads((Path(DOIT).parent / 'look.toml').read_text())['merge_queue'],
-                         dict(batch_cap=15, batch_cap_floor=6))
         matrix = []
         for cap in (1, 3, 6, 10):
             for count in (0, 1, 2, 3, 6, 7, 9, 10, 11, 17):
@@ -826,9 +823,6 @@ class QueueTests(unittest.TestCase):
         self.batching_mark(1, dict(matrix=matrix, malformed_refused=True, solo_head=True))
 
     def test_window_batching_caps(self):
-        import tomllib
-        shipped = tomllib.loads((Path(DOIT).parent / 'look.toml').read_text())['merge_queue']
-        self.assertEqual(shipped, dict(batch_cap=15, batch_cap_floor=6))
         matrix = []
         for cap in (1, 3, 6, 10):
             for rate in (dict(rate=.41, windows=5), dict(rate=None, windows=5)):
@@ -1256,25 +1250,38 @@ class QueueTests(unittest.TestCase):
             mq._train_emit('L-operator-local.jsonl', 'window-test', 'queue-batch', project='p', specs=self.sid)
         import fold_emits
         self.assertEqual(fold_emits.EMITS['batch-cap'], {'executor', 'tick', 'operator'})
-        import tomllib
-        table = tomllib.loads((Path(DOIT).parent / 'look.toml').read_text())['merge_queue']
-        self.assertEqual(table, dict(batch_cap=15, batch_cap_floor=6))
         self.train_mark(4, 'config', 'unreadable floor', 'rate none many windows floor',
                         'few windows keep newest', 'few windows configured', 'floor on red', 'boundary 0.40',
                         'configured when calm', 'max_merges clamp', 'record once', 'unchanged silent',
-                        'roundtrip fresh process', 'wrong actor ignored', 'emits row', 'look.toml keys')
+                        'roundtrip fresh process', 'wrong actor ignored', 'emits row')
 
-    def train_call(self, *, flying=(), depth=2, code=0, **kwargs):
+    def train_call(self, *, flying=(), depth=2, code=0, config=None, **kwargs):
+        if config is None:
+            config = self.root / 'train-look.toml'
+            config.write_text('[merge_queue]\nbatch_cap=15\nbatch_cap_floor=6\n')
         calls = []
         def runner(argv):
             self.assertTrue(any(e['type'] == 'queue-batch' and e['subject'] == argv[2] for e in fold.read_events()))
             calls.append(argv)
             return dict(code=code)
-        with patch.object(mq.window_gate, 'in_flight', return_value=list(flying)), \
+        with patch.object(mq, '_look_toml', return_value=config), \
+             patch.object(mq.window_gate, 'in_flight', return_value=list(flying)), \
              patch.object(mq, '_repository', return_value=(self.root, 'main')), \
              patch.object(mq, 'spec_paths', side_effect=lambda r, m, b: [('M', b)]):
             result = mq.window_run('albert-scott', runner=runner, now=self.now, **kwargs)
         return result, calls
+
+    def test_cap_cases_ignore_operator_tuning(self):
+        # An arbitrary future operator tuning must not change these scenarios.
+        operator_config = self.root / 'operator-look.toml'
+        operator_config.write_text('[merge_queue]\nbatch_cap=1\nbatch_cap_floor=1\n')
+        with patch.object(mq, '_look_toml', return_value=operator_config):
+            for name in ('test_ac1_fill_to_cap', 'test_window_batching_caps',
+                         'test_train_caps', 'test_train_step'):
+                with self.subTest(case=name):
+                    result = unittest.TestResult()
+                    type(self)(name).run(result)
+                    self.assertTrue(result.wasSuccessful(), str(result.failures + result.errors))
 
     def test_train_step(self):
         self.window_seed(12)
@@ -1540,7 +1547,7 @@ sys.exit(m.window_run('albert-scott', detach=True, launcher=launch))
         with patch.object(mq, '_look_toml', return_value=config), \
              patch.dict(os.environ, DOIT_WINDOW_MAX_MERGES='3'), \
              patch.object(mq, 'form_batch', wraps=mq.form_batch) as form:
-            code, calls = self.train_call()
+            code, calls = self.train_call(config=config)
         self.assertEqual(code, 0)
         self.assertFalse(form.called)  # window selection preserves priority/FIFO over overlap
         self.assertEqual(calls[0][calls[0].index('--specs') + 1].split(','), expected)
