@@ -1405,7 +1405,6 @@ def builder_cues(c):
     out += [("a declared deviation", e.get("what")) for e in c.all_of("build-deviation")]
     return out
 
-
 def grader_reasons(c):
     return ([("the grader's reason", e.get("why")) for e in c.all_of("rejected-criterion")]
             + [("a prior audit finding", e.get("finding")) for e in c.all_of("audit-finding")])
@@ -1513,8 +1512,9 @@ def main(argv=None):
     ap.add_argument("--round", default="1")
     a = ap.parse_args(argv)
 
+    import spec_history
     c = Ctx(a)
-    text = "\n".join(x for x in BUILD[a.role](c) if x) + "\n"
+    text = "\n".join(x for x in spec_history.packet_items(c, BUILD[a.role](c)) if x) + "\n"
     hit = [(w, s) for w, s in strip(c, a.role) if s and str(s) in text]
     if hit:
         die("REFUSED — the packet carries what {}'s Blindness strips: {}".format(
