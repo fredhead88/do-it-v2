@@ -658,7 +658,7 @@ print(json.dumps(fold.read_events()))
             tree = ast.parse(Path(module.__file__).read_text())
             call_count += sum(isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
                               and n.func.attr == 'read_events' for n in ast.walk(tree))
-        self.assertEqual(call_count, len(sites))
+        self.assertEqual(call_count, len(sites) + 1)  # tick's post-dispatch uncached refresh
         contracts = self.root / 'agents'
         contracts.mkdir()
         for role in ('relay', 'executor'):
