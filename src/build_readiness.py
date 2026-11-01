@@ -50,6 +50,7 @@ def inputs(text):
 def missing_inputs(text, repo, base, tree):
     missing = []
     tree_set = set(tree)
+    top_directories = {path.split('/', 1)[0] for path in tree if '/' in path}
     packages = set()
     for path in tree:
         if path.endswith('package.json') and 'node_modules/' not in path:
@@ -63,7 +64,11 @@ def missing_inputs(text, repo, base, tree):
         # Runtime paths with shell/template substitutions are not Git inputs.
         line = re.sub(r'\S*[$<>][^\s`]*', '', line)
         paths = re.findall(r'`([^`\n]+)`', line)
-        paths += re.findall(r'(?<![\w:/$])(?:[\w@.-]+/)+[\w.*?-]+', line)
+        bare = re.sub(r'`[^`\n]*`', '', line)
+        for token in re.findall(r'(?<![\w:/$])(?:[\w@.-]+/)+[\w.*?-]+', bare):
+            token = token.rstrip('.,:')
+            if Path(token).suffix or token.removeprefix('./').split('/', 1)[0] in top_directories:
+                paths.append(token)
         paths = list(dict.fromkeys(p.rstrip('.,:') for p in paths if
                                  '/' in p and not p.startswith(('http', '/')) and not re.search(r'\s', p)))
         resolved = []
@@ -122,31 +127,39 @@ def producers(missing, events, root, subject, project):
     return result
 
 
-def companion_gaps(text, grant, repo, base, tree, *, registries=()):
-    tests = sorted(p for p in tree if coupled_tests.TEST.search(p) and not merge_gate.granted(p, grant))
+def companion_matches(text, grant, repo, base, tree, *, registries=()):
+    """Explain each required companion using its source and matching rule."""
+    tests = sorted(p for p in tree if coupled_tests.is_test(p) and not merge_gate.granted(p, grant))
     sources = coupled_tests.writes_paths(grant, tree)
-    needed = {test for test in tests if any(coupled_tests.named(source, test) for source in sources)}
+    matches = [dict(test=test, source=source, kind='named',
+                    pattern='local test name for ' + Path(source).stem)
+               for test in tests for source in sources if coupled_tests.named(source, test)]
     references = [source for source in sources if source not in registries]
-    if tests and references:
-        patterns = []
-        for source in references:
-            patterns += ['-e', source]
-            if Path(source).suffix == '.py':
-                patterns += ['-e', source[:-3].replace('/', '.')]
-        output = coupled_tests.git(repo, 'grep', '-l', '-z', '-F', *patterns, base, '--', *tests,
-                                   timeout=60, no_match=True)
-        needed.update(p[len(base) + 1:] for p in output.split('\0') if p)
+    matches.extend(coupled_tests.reference_matches(references, tests, repo, base, tree))
+
+    def add(paths, source, rule):
+        matches.extend(dict(test=path, source=source, kind='companion', pattern=rule)
+                       for path in paths if path in tree)
+
     for path in grant:
         if path == 'crons.toml':
-            needed.update(p for p in ('src/test_reap_tmp.py', 'src/test_crons.py') if p in tree)
+            add(('src/test_reap_tmp.py', 'src/test_crons.py'), path, 'cron manifest companion')
         if '/migrations/' in path or path.startswith('migrations/'):
-            needed.update(p for p in tree if p.endswith('genesis_schema_fingerprint.txt'))
+            add((p for p in tree if p.endswith('genesis_schema_fingerprint.txt')), path,
+                'migration fingerprint companion')
         if path.endswith(('contract.gen.ts', 'contract.schema.json')) or (
                 'profit-v2' in path and path.endswith(('types.ts', 'contract.ts'))):
-            needed.update(p for p in tree if p.endswith(('contract.gen.ts', 'contract.schema.json')))
+            add((p for p in tree if p.endswith(('contract.gen.ts', 'contract.schema.json'))), path,
+                'generated contract companion')
     if re.search(r'\bnew event(?: type)?\b', text, re.I):
-        needed.update(p for p in ('docs/HOW-IT-WORKS.md', 'src/test_howto.py') if p in tree)
-    return sorted(p for p in needed if not merge_gate.granted(p, grant))
+        add(('docs/HOW-IT-WORKS.md', 'src/test_howto.py'), '(spec)', 'new event companion')
+    return sorted((row for row in matches if not merge_gate.granted(row['test'], grant)),
+                  key=lambda row: (row['test'], row['source'], row['kind'], row['pattern']))
+
+
+def companion_gaps(text, grant, repo, base, tree, *, registries=()):
+    return sorted({row['test'] for row in companion_matches(
+        text, grant, repo, base, tree, registries=registries)})
 
 
 def verify_base(text, repo, base, root, project, timeout=180):

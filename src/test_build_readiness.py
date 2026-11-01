@@ -84,6 +84,28 @@ class ReadinessTests(unittest.TestCase):
         self.spec('- `missing/path.py`')
         self.assertIn('missing inputs', self.check()['findings'][0])
 
+    def test_unquoted_slash_prose_is_not_a_path_but_explicit_inputs_still_are(self):
+        target = self.repo / 'api/existing.py'
+        target.parent.mkdir()
+        target.write_text('value = 1\n')
+        self.git('add', '.')
+        self.git('commit', '-qm', 'existing top-level directory')
+        self.base = self.git('rev-parse', 'HEAD')
+        prose = ('pass/waived missing/unreadable creates/chmods Scorecard/run pending/stale '
+                 'P/neighbour method/type numbers/kinds/verdicts finalize/contract '
+                 'routes/synonyms exact-relation/book-total metric/relation')
+        self.spec('- ' + prose)
+        self.assertEqual(self.check(dry_run=False)['status'], 'ready')
+        self.spec('- api/existing.py')
+        self.assertEqual(self.check(dry_run=False)['status'], 'ready')
+        for token in ('api/missing_module', './api/missing_module', 'absent/module.py',
+                      '`missing/unreadable`', '`unknown/path`'):
+            with self.subTest(token=token):
+                self.spec('- ' + token)
+                result = self.check(dry_run=False)
+                self.assertEqual(result['status'], 'bounced')
+                self.assertIn('missing inputs', result['findings'][0])
+
     def test_coupled_tests_and_companion_grants_block(self):
         (self.repo / 'test_source.py').write_text('import source\n')
         self.git('add', '.')
@@ -109,7 +131,7 @@ class ReadinessTests(unittest.TestCase):
     def test_shared_registries_require_named_tests_and_migration_fingerprint(self):
         registries = ['api/alembic_supabase/branch_isolation.json',
                       'scratch_listing_authority_cleanup.py']
-        named = ['tests/test_branch_isolation_contract.py',
+        named = ['api/alembic_supabase/test_branch_isolation_contract.py',
                  'tests/test_scratch_listing_authority_cleanup.py']
         fingerprint = 'api/alembic_supabase/genesis_schema_fingerprint.txt'
         files = {path: '# registry fixture\n' for path in registries + named + [fingerprint]}
@@ -136,8 +158,8 @@ class ReadinessTests(unittest.TestCase):
 
     def test_non_python_sources_couple_full_paths_and_names_without_bare_stems(self):
         sources = ['dashboard/src/app/api/auth/login/route.ts', 'scripts/deploy.sh', 'api/service.py']
-        expected = ['tests/test_explicit_reference.py', 'tests/test_deploy_mode.py',
-                    'dashboard/src/app/api/auth/logout/route.test.ts', 'tests/test_python_import.py']
+        expected = ['tests/test_explicit_reference.py', 'scripts/tests/test_deploy_mode.py',
+                    'dashboard/src/app/api/auth/login/route.test.ts', 'tests/test_python_import.py']
         files = {path: '# source fixture\n' for path in sources}
         files.update({path: '# named fixture\n' for path in expected})
         files['tests/test_explicit_reference.py'] = '\n'.join(sources[:2])
@@ -167,6 +189,52 @@ class ReadinessTests(unittest.TestCase):
             self.assertIn(reason, result['findings'][0])
             readiness.record(result, 'demo', root=self.root)
         self.assertIn('spec-shape-failed', (self.root / 'events/L-tick-local.jsonl').read_text())
+
+    def test_companions_exclude_global_names_fixture_data_and_python_path_prose(self):
+        files = {
+            'pkg/route.ts': '// source\n',
+            'pkg/__tests__/route.test.ts': '// local named test\n',
+            'unrelated/route.test.ts': '// unrelated basename\n',
+            'pkg/worker.py': 'value = 1\n',
+            'tests/test_import.py': 'from\tpkg\timport\tworker\n',
+            'tests/test_path_prose.py': '# historical pkg/worker.py path\n',
+            'tests/fixtures/test_reader.py': 'import pkg.worker\n',
+            'tests/manifest.json': 'pkg.worker\npkg/route.ts\n',
+            'tests/manifest.txt': 'pkg.worker\npkg/route.ts\n',
+        }
+        for path, content in files.items():
+            target = self.repo / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content)
+        self.git('add', '.')
+        self.git('commit', '-qm', 'round two false-positive fixtures')
+        self.base = self.git('rev-parse', 'HEAD')
+        self.spec(writes='pkg/route.ts pkg/worker.py')
+        self.assertEqual(self.check(dry_run=False)['findings'], [
+            'Writes omits coupled tests/companions: pkg/__tests__/route.test.ts, tests/test_import.py'])
+        tree = self.git('ls-tree', '-r', '--name-only', self.base).splitlines()
+        rows = readiness.companion_matches('', ['pkg/route.ts', 'pkg/worker.py'],
+                                            self.repo, self.base, tree)
+        self.assertEqual([(r['test'], r['source'], r['kind']) for r in rows], [
+            ('pkg/__tests__/route.test.ts', 'pkg/route.ts', 'named'),
+            ('tests/test_import.py', 'pkg/worker.py', 'reference')])
+        self.assertEqual(rows[1]['line'], 1)
+        self.assertIn('import', rows[1]['pattern'])
+
+    def test_package_import_root_is_preserved_without_bare_path_matching(self):
+        files = {'api/app/__init__.py': '', 'api/app/worker.py': 'value = 1\n',
+                 'tests/test_import.py': 'from app import worker\n',
+                 'tests/test_prose.py': '# api/app/worker.py and worker alone\n'}
+        for path, content in files.items():
+            target = self.repo / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content)
+        self.git('add', '.')
+        self.git('commit', '-qm', 'package-root import fixture')
+        self.base = self.git('rev-parse', 'HEAD')
+        self.spec(writes='api/app/worker.py')
+        self.assertEqual(self.check(dry_run=False)['findings'], [
+            'Writes omits coupled tests/companions: tests/test_import.py'])
 
     def test_rebuilds_bypass_first_build_gate(self):
         self.events.append(dict(type='build-done', subject=self.sid))

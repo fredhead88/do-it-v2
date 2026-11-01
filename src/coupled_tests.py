@@ -168,11 +168,72 @@ def boundaries(text):
 
 
 def named(source, test):
-    stem = pathlib.PurePosixPath(source).stem
-    name = pathlib.PurePosixPath(test).name
+    source, test = map(pathlib.PurePosixPath, (source, test))
+    if not is_test(str(test)) or test.parent not in {
+            source.parent, *(source.parent / directory for directory in ('__tests__', 'tests', 'test'))}:
+        return False
+    stem, name = source.stem, test.name
     return (name == f"test_{stem}.py" or
             (name.startswith(f"test_{stem}_") and name.endswith(".py")) or
             name in (f"{stem}.test.ts", f"{stem}.test.tsx"))
+
+
+def is_test(path):
+    """Runnable test names, excluding fixtures and data inside test trees."""
+    path = pathlib.PurePosixPath(path)
+    return (not {'fixtures', '__fixtures__', 'testdata', 'test_data'}.intersection(path.parts)
+            and bool(re.fullmatch(r'test_.+\.(py|sh|[cm]?js|jsx|ts|tsx)|.+_test\.(py|sh)|'
+                                  r'.+\.(test|spec)\.(ts|tsx|[cm]?js|jsx)', path.name)))
+
+
+def reference_patterns(source, tree):
+    """Repository paths for scripts; package modules/imports for Python."""
+    path = pathlib.PurePosixPath(source)
+    if path.suffix != '.py':
+        return [r'(^|[^A-Za-z0-9_.-])' + re.escape(source) + r'([^A-Za-z0-9_.-]|$)']
+    modules = {str(path.with_suffix('')).replace('/', '.')}
+    # Package markers identify e.g. api/app/... as app..., without guessing
+    # arbitrary suffixes or reducing a nested module to a bare filename.
+    root = path.parent
+    while root != root.parent and str(root / '__init__.py') in tree:
+        root = root.parent
+    if root != path.parent:
+        modules.add(str(path.with_suffix('').relative_to(root)).replace('/', '.'))
+    patterns = []
+    for module in sorted(modules):
+        module = module.removesuffix('.__init__')
+        if '.' in module:
+            patterns.append(r'(^|[^A-Za-z0-9_])' + re.escape(module) + r'([^A-Za-z0-9_]|$)')
+            parent, stem = module.rsplit('.', 1)
+            patterns.append(r'^[ \t]*from[ \t]+' + re.escape(parent) + r'[ \t]+import[ \t]+'
+                            r'([^#]*[^A-Za-z0-9_])?' + re.escape(stem) + r'([^A-Za-z0-9_]|$)')
+        else:
+            patterns.append(r'^[ \t]*(from[ \t]+' + re.escape(module) + r'[ \t]+import|'
+                            r'import[ \t]+' + re.escape(module) + r'([ \t,;]|$))')
+    return list(dict.fromkeys(pattern.replace(r'\t', '\t') for pattern in patterns))
+
+
+def reference_matches(sources, tests, repo, rev, tree, *, timeout=GREP_SECONDS):
+    """Return each source/test/pattern match and its first line as evidence."""
+    tree = set(tree)
+    patterns = {source: reference_patterns(source, tree) for source in sources}
+    if not tests or not patterns:
+        return []
+    expressions = list(dict.fromkeys(pattern for values in patterns.values() for pattern in values))
+    output = git(repo, 'grep', '-I', '-n', '-z', '-E',
+                 *(arg for pattern in expressions for arg in ('-e', pattern)), rev, '--', *sorted(tests),
+                 timeout=timeout, no_match=True)
+    compiled = {pattern: re.compile(pattern) for pattern in expressions}
+    matches = {}
+    for row in output.splitlines():
+        filename, line, content = row.split('\0', 2)
+        test = filename[len(rev) + 1:]
+        for source, values in patterns.items():
+            for pattern in values:
+                if compiled[pattern].search(content):
+                    matches.setdefault((source, test, pattern), dict(
+                        source=source, test=test, kind='reference', pattern=pattern, line=int(line)))
+    return list(matches.values())
 
 
 def writes_paths(grant, tree):
@@ -198,21 +259,17 @@ def scan(text, repo, rev=None):
     # Resolve once: both tree and grep see the same committed snapshot.
     rev = git(repo, "rev-parse", "--verify", "--end-of-options", rev + "^{commit}").strip()
     tree = git(repo, "ls-tree", "-r", "--name-only", "-z", rev, "--").split("\0")
-    tests = {p for p in tree if TEST.search(p) and not merge_gate.granted(p, grant)}
+    tests = {p for p in tree if is_test(p) and not merge_gate.granted(p, grant)}
     fenced = boundaries(text)
     deadline = time.monotonic() + GREP_SECONDS
     rows = []
     for source in writes_paths(grant, tree):
         hits = {p for p in tests if named(source, p)}
-        path = pathlib.PurePosixPath(source)
-        module = (str(path.with_suffix("")).replace("/", ".")
-                  if path.suffix == ".py" else path.stem)
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise Truncated
-        output = git(repo, "grep", "-l", "-z", "-F", "-e", module, rev, "--",
-                     timeout=remaining, no_match=True)
-        references = {p[len(rev) + 1:] for p in output.split("\0") if p}
+        references = {row['test'] for row in reference_matches(
+            [source], tests, repo, rev, tree, timeout=remaining)}
         for tier, found in (("named", hits), ("referencing", (references & tests) - hits)):
             for test in sorted(found):
                 rows.append((tier, source, test, test in fenced))

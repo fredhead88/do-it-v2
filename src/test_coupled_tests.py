@@ -30,7 +30,7 @@ class CoupledTests(unittest.TestCase):
         self.git("init", "-q")
         for path, text in {
             "pkg/foo.py": "value = 1\n",
-            "tests/test_foo.py": "# named\n",
+            "pkg/tests/test_foo.py": "# named\n",
             "tests/test_bar.py": "import pkg.foo\n",
             "tests/test_baz.py": "# unrelated\n",
             "tests/test_foobar.py": "# unrelated prefix\n",
@@ -74,18 +74,18 @@ class CoupledTests(unittest.TestCase):
                           "body_excerpt": result.stdout}))
 
     def test_ac1_grants_and_boundaries(self):
-        named = "named\tpkg/foo.py\ttests/test_foo.py"
+        named = "named\tpkg/foo.py\tpkg/tests/test_foo.py"
         referencing = "referencing\tpkg/foo.py\ttests/test_bar.py"
         cases = [
             ("missing", "pkg/foo.py", "", 3, [named, referencing]),
-            ("explicit", "pkg/foo.py\ntests/test_foo.py", "", 0, [referencing]),
-            ("glob", "pkg/foo.py\ntests/test_*.py", "", 0, []),
-            ("directory", "pkg/foo.py\ntests/", "", 0, []),
-            ("fenced", "pkg/foo.py", "`tests/test_foo.py`: cannot break.",
+            ("explicit", "pkg/foo.py\npkg/tests/test_foo.py", "", 0, [referencing]),
+            ("glob", "pkg/foo.py\npkg/tests/test_*.py\ntests/test_*.py", "", 0, []),
+            ("directory", "pkg/foo.py\npkg/tests/\ntests/", "", 0, []),
+            ("fenced", "pkg/foo.py", "`pkg/tests/test_foo.py`: cannot break.",
              0, [named + "\tfenced", referencing]),
             ("basename-only", "pkg/foo.py", "test_foo.py", 3, [named, referencing]),
             ("outside-boundaries", "pkg/foo.py",
-             "No exclusions.\n## Other\ntests/test_foo.py", 3, [named, referencing]),
+             "No exclusions.\n## Other\npkg/tests/test_foo.py", 3, [named, referencing]),
         ]
         for label, writes, boundary, code, lines in cases:
             with self.subTest(label=label):
@@ -138,11 +138,11 @@ class CoupledTests(unittest.TestCase):
     def test_test_shapes_and_named_deduplication(self):
         for path, text in {
             "pkg/widget.tsx": "export const widget = 1;\n",
-            "web/widget.test.tsx": "import widget from '../pkg/widget';\n",
-            "test/consumer.js": "import widget from '../pkg/widget';\n",
+            "pkg/__tests__/widget.test.tsx": "import widget from '../widget';\n",
+            "test/test_consumer.js": "import widget from '../pkg/widget.tsx';\n",
             "tests/test_foo_extra.py": "import pkg.foo\n",
             "pkg/test_foo.py": "import pkg.foo\n",
-            "test/consumer.py": "import pkg.foo\n",
+            "test/test_consumer.py": "import pkg.foo\n",
             "pkg/consumer.py": "import pkg.foo\n",
         }.items():
             self.write(path, text)
@@ -150,11 +150,11 @@ class CoupledTests(unittest.TestCase):
         result = self.run_tool("pkg/foo.py\npkg/widget.tsx")
         lines = result.stdout.splitlines()
         self.assertEqual(result.returncode, 3, result.stderr)
-        self.assertIn("named\tpkg/widget.tsx\tweb/widget.test.tsx", lines)
-        self.assertIn("referencing\tpkg/widget.tsx\ttest/consumer.js", lines)
-        self.assertIn("named\tpkg/foo.py\ttests/test_foo_extra.py", lines)
+        self.assertIn("named\tpkg/widget.tsx\tpkg/__tests__/widget.test.tsx", lines)
+        self.assertIn("referencing\tpkg/widget.tsx\ttest/test_consumer.js", lines)
+        self.assertIn("referencing\tpkg/foo.py\ttests/test_foo_extra.py", lines)
         self.assertIn("named\tpkg/foo.py\tpkg/test_foo.py", lines)
-        self.assertIn("referencing\tpkg/foo.py\ttest/consumer.py", lines)
+        self.assertIn("referencing\tpkg/foo.py\ttest/test_consumer.py", lines)
         self.assertEqual(len(lines), 7)
 
     def test_revision_pinning_and_read_only(self):
@@ -175,9 +175,36 @@ class CoupledTests(unittest.TestCase):
         self.assertEqual(before, (self.git("status", "--porcelain"),
                                   self.git("rev-parse", "HEAD")))
 
+    def test_local_names_and_real_test_files_only(self):
+        for path, text in {
+            "pkg/route.ts": "export const route = 1;\n",
+            "pkg/__tests__/route.test.ts": "// local named test\n",
+            "unrelated/route.test.ts": "// unrelated basename\n",
+            "unrelated/test_foo.py": "# unrelated basename\n",
+            "tests/fixtures/test_reader.py": "import pkg.foo\n",
+            "tests/manifest.json": "pkg.foo\n",
+            "tests/manifest.txt": "pkg.foo\n",
+            "tests/README.md": "pkg.foo\n",
+            "tests/test_path_prose.py": "# historical pkg/foo.py path\n",
+            "tests/test_parent_import.py": "from pkg import foo\n",
+        }.items():
+            self.write(path, text)
+        self.commit()
+        result = self.run_tool("pkg/foo.py\npkg/route.ts")
+        self.assertEqual(result.returncode, 3, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), [
+            "named\tpkg/foo.py\tpkg/tests/test_foo.py",
+            "referencing\tpkg/foo.py\ttests/test_bar.py",
+            "referencing\tpkg/foo.py\ttests/test_parent_import.py",
+            "named\tpkg/route.ts\tpkg/__tests__/route.test.ts",
+        ])
+
     def test_expanded_grants_and_limit(self):
-        self.assertEqual(len(self.run_tool("pkg/").stdout.splitlines()), 2)
-        self.assertEqual(len(self.run_tool("pkg/*.py").stdout.splitlines()), 2)
+        self.assertEqual(self.run_tool('pkg/').stdout.splitlines(),
+                         ['referencing\tpkg/foo.py\ttests/test_bar.py'])
+        self.assertEqual(self.run_tool('pkg/*.py').stdout.splitlines(), [
+            'named\tpkg/foo.py\tpkg/tests/test_foo.py',
+            'referencing\tpkg/foo.py\ttests/test_bar.py'])
         result = self.run_tool("\n".join(f"pkg/f{i}.py" for i in range(40)))
         self.assertEqual(result.returncode, 0, result.stderr)
         for i in range(41):
@@ -216,12 +243,12 @@ class CoupledTests(unittest.TestCase):
         text = "Writes:\n- pkg/foo.py\n\n## Boundaries\n"
         lines = coupled_tests.packet_lines(text, self.repo, "HEAD")
         block = "\n".join(lines)
-        self.assertLess(block.index("tests/test_foo.py"), block.index("tests/test_bar.py"))
-        self.assertIn("-m pytest -q -p no:cacheprovider tests/test_foo.py", block)
+        self.assertLess(block.index("pkg/tests/test_foo.py"), block.index("tests/test_bar.py"))
+        self.assertIn("-m pytest -q -p no:cacheprovider pkg/tests/test_foo.py", block)
         cli = shlex.split(coupled_tests.run_line("a spec.md", "a worktree", "HEAD")[8:])
         self.assertEqual(cli[-6:], ["a spec.md", "--repo", "a worktree", "--run", "--base", "HEAD"])
-        fenced = coupled_tests.packet_lines(text + "tests/test_foo.py\n", self.repo, "HEAD")
-        self.assertNotIn("tests/test_foo.py", "\n".join(fenced))
+        fenced = coupled_tests.packet_lines(text + "pkg/tests/test_foo.py\n", self.repo, "HEAD")
+        self.assertNotIn("pkg/tests/test_foo.py", "\n".join(fenced))
         self.assertIn("1 fenced by Boundaries", fenced[0])
         for error in (coupled_tests.Truncated(), ValueError("bad revision")):
             with mock.patch.object(coupled_tests, "scan", side_effect=error):
@@ -305,7 +332,7 @@ class CoupledTests(unittest.TestCase):
 
         with mock.patch.dict(os.environ, {"TMPDIR": str(scratch_root)}):
             with self.assertRaisesRegex(RuntimeError, "injected runner failure"):
-                coupled_tests.run(["tests/test_foo.py"], self.repo, "HEAD", runner=runner)
+                coupled_tests.run(["pkg/tests/test_foo.py"], self.repo, "HEAD", runner=runner)
         self.assertTrue(scratch_paths)
         self.assertTrue(all(not p.exists() for p in scratch_paths))
         self.assertEqual(before, (self.git("show-ref", "--head"), self.git("rev-parse", "HEAD")))
@@ -320,7 +347,7 @@ class CoupledTests(unittest.TestCase):
         argv = [str(self.root / "spec.md"), "--repo", str(self.repo), "--run", "--base", "HEAD"]
         cases = [("regressed", 4), ("base-red", 0), ("pass", 0), ("skipped", 0)]
         for status, code in cases:
-            rows = [{"file": "tests/test_foo.py", "branch": "pass", "base": "not-run",
+            rows = [{"file": "pkg/tests/test_foo.py", "branch": "pass", "base": "not-run",
                      "status": status}]
             output = io.StringIO()
             with mock.patch.object(coupled_tests, "run", return_value=rows), \
@@ -362,7 +389,7 @@ class CoupledTests(unittest.TestCase):
         schema = json.loads((ROOT / "agents/builder.schema.json").read_text())
         card = self.card()
         jsonschema.validate(card, schema)
-        card["coupled"] = [{"file": "tests/test_foo.py", "branch": "pass", "base": "not-run",
+        card["coupled"] = [{"file": "pkg/tests/test_foo.py", "branch": "pass", "base": "not-run",
                             "status": "pass"}]
         jsonschema.validate(card, schema)
         card["coupled"][0]["status"] = "maybe"
@@ -373,7 +400,7 @@ class CoupledTests(unittest.TestCase):
     def test_write_card_sidecar_coupled(self):
         import dispatch
         card = self.card()
-        card["coupled"] = [{"file": "tests/test_foo.py", "branch": "pass", "base": "not-run",
+        card["coupled"] = [{"file": "pkg/tests/test_foo.py", "branch": "pass", "base": "not-run",
                             "status": "pass"}]
         with mock.patch.object(dispatch, "CONTENT", self.root):
             path = dispatch.write_card(card, "L-spec-8001", "test")
@@ -383,12 +410,12 @@ class CoupledTests(unittest.TestCase):
     def test_validate_card(self):
         card = self.card()
         self.assertIsNone(coupled_tests.validate_card(card))
-        card["coupled"] = [{"file": "tests/test_foo.py", "status": "regressed"}]
-        self.assertIn("tests/test_foo.py", coupled_tests.validate_card(card))
+        card["coupled"] = [{"file": "pkg/tests/test_foo.py", "status": "regressed"}]
+        self.assertIn("pkg/tests/test_foo.py", coupled_tests.validate_card(card))
         for status in ("NEEDS_CONTEXT", "BLOCKED"):
             card["status"] = status
             self.assertIsNotNone(coupled_tests.validate_card(card))
-            card["escalations"] = [{"asks": "Permit tests/test_foo.py"}]
+            card["escalations"] = [{"asks": "Permit pkg/tests/test_foo.py"}]
             self.assertIsNone(coupled_tests.validate_card(card))
             card["escalations"] = []
         card["status"] = "DONE"
@@ -397,11 +424,11 @@ class CoupledTests(unittest.TestCase):
         self.attest("AC5", {"done_rejected": True, "escalation_required": True, "clean_accepted": True})
 
     def test_grader_coupled_item(self):
-        rows = [{"file": "tests/test_foo.py", "status": "pass", "branch": "pass", "base": "not-run"},
+        rows = [{"file": "pkg/tests/test_foo.py", "status": "pass", "branch": "pass", "base": "not-run"},
                 {"file": "tests/test_bar.py", "status": "base-red", "base_sha": "a" * 40}]
         line = coupled_tests.grader_line({"coupled": rows, "spawn": "L-builder-9999"})
         self.assertTrue(line.startswith("4a. Coupled existing tests"))
-        self.assertIn("tests/test_foo.py pass", line)
+        self.assertIn("pkg/tests/test_foo.py pass", line)
         self.assertIn("tests/test_bar.py base-red", line)
         self.assertNotRegex(line, r"[0-9a-f]{7,}|L-builder-\d+")
         self.assertIsNone(coupled_tests.grader_line({}))
