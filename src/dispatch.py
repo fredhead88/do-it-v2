@@ -9,7 +9,7 @@ sys.path.insert(0, str(HERE))
 import models  # noqa: E402
 import grader_packet
 import coupled_tests
-import panes, spawns  # noqa: E402 — panes: proc_start/alive (imports nothing of ours); spawns: L-spec-0755 dup-dispatch/cancel/clear helpers
+import panes, spawns, scratch  # noqa: E402 — panes: proc_start/alive (imports nothing of ours); spawns: L-spec-0755 dup-dispatch/cancel/clear helpers
 ROOT = pathlib.Path(os.environ.get("DOIT_ROOT", pathlib.Path.home() / ".do-it"))
 EVENTS, CONTENT = ROOT / "events", ROOT / "content"
 
@@ -970,7 +970,7 @@ def provision_sweep_env(sweep_dir, project_checkout):
     dest = sweep_dir / ".env"
     if dest.exists():
         return "readonly" if dest.read_bytes() == line.encode() else "refused"
-    if any((p / ".git").exists() for p in (sweep_dir, *sweep_dir.parents)):
+    if scratch._git_ancestor(sweep_dir.resolve()):
         return "refused"
     sweep_dir.mkdir(parents=True, exist_ok=True)
     dest.write_text(line)

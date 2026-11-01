@@ -183,6 +183,16 @@ def script_rows(rows, events, path, *, lane, dry_run=False):
     pending, lines = [], []
     for row in rows:
         record = checks.record_for(events, row["spec"], row["criterion"])
+        if record is None and not any(e.get("type") == "check-declared"
+                and e.get("criterion") == row["criterion"]
+                and (e.get("spec") == row["spec"] or e.get("subject") == row["spec"])
+                for e in events):
+            import dispatch
+            try:
+                text = (dispatch.ROOT / "content" / (row["spec"] + ".md")).read_text()
+            except OSError:
+                text = ""
+            record = checks.legacy_production(row, text)
         if record is None or record.answered_by == "model":
             pending.append(row)
             if record is None:

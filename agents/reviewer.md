@@ -61,10 +61,17 @@ Silent mis-scoping is worse than failing loudly.
 
 Tree residue you notice is a finding. Cleaning it is not your job.
 
-For backend reproductions that need Git, use the authorized worktree or a
-separate disposable clone. Never export `GIT_DIR`/`GIT_WORK_TREE` pointing at a
-real checkout to give an extracted scratch tree Git history: fixture `git init`
-and `git config` can then overwrite the integrator's shared configuration.
+For backend reproductions that need Git, use the authorized worktree. Never
+export `GIT_DIR`/`GIT_WORK_TREE` pointing at a real checkout to give an extracted
+scratch tree Git history: fixture `git init` and `git config` can then overwrite
+the integrator's shared configuration.
+
+If reproduction needs a separate checkout, run it through
+`doit review-scratch --repo <provided-worktree> --sha <ready_sha> -- <command>`.
+This creates a unique worktree under the shared disk-backed scratch root and
+removes it when the command succeeds, fails, or is terminated. Do not create
+ad hoc repo copies in `/tmp`; your own reproduction scratch is your cleanup
+responsibility. Run all commands needing that checkout in the wrapper command.
 
 Any private Postgres cluster you start while reproducing an `observed-data`
 criterion's evidence lives under `$TMPDIR`, never a literal `/tmp` path.

@@ -373,7 +373,7 @@ row16 = next((r for r in rows16 if r["name"] == "sweep-owed"), None)
 assert row16 is not None, "AC16: crons.toml must carry a [[row]] named sweep-owed"
 tokens16 = crons._tokens()
 assert row16["where"] == "user", row16
-assert row16["schedule"] == "*/30 * * * *", row16
+assert row16["schedule"] == "11 0,6,12,18 * * *", row16
 assert "sweep-owed" in row16["command"] and tokens16["doit"] in row16["command"], row16
 assert row16["path"] == tokens16["doit"], row16
 assert "doit sweep-owed" in row16["sig"], row16

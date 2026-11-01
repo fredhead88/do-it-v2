@@ -106,6 +106,8 @@ def render(repo: str) -> str:
     current = '- '
     for index, row in enumerate(crons):
         metadata = ' | '.join(row[key] for key in ('name', 'schedule', 'where', 'path'))
+        if row.get('paused') is True:
+            metadata += ' (paused)'
         chunks = textwrap.wrap(metadata, width=98, break_long_words=False, break_on_hyphens=False)
         tokens = [('' if index == 0 and j == 0 else '; ' if j == 0 else ' ', chunk)
                   for j, chunk in enumerate(chunks)]

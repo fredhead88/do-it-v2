@@ -345,7 +345,7 @@ class RunTests(unittest.TestCase):
         rows = crons.rows()
         row = next(r for r in rows if r["name"] == "health-alarms")
         self.assertEqual(sum(r["name"] == "health-alarms" for r in rows), 1)
-        self.assertEqual((row["where"], row["schedule"], row["owner"], row["project"]), ("user", "*/10 * * * *", "thinker", "do-it-v2"))
+        self.assertEqual((row["where"], row["schedule"], row["owner"], row["project"]), ("user", "6,36 * * * *", "thinker", "do-it-v2"))
         self.assertEqual(row["command"], f"{DOIT} cron-run health-alarms -- {DOIT} health-alarms >> {self.root}/logs/health-alarms.log 2>&1")
         for other in rows:
             self.assertEqual(bool(re.search(row["sig"], crons.print_line(other["name"]))), other["name"] == "health-alarms")

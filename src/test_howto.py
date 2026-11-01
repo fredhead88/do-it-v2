@@ -168,6 +168,11 @@ class HowtoTests(unittest.TestCase):
         self.assertEqual(self.call('--check')[0], 2)
         print('1500-AC4 equal, drift, missing, malformed; check writes nothing ... ok')
 
+    def test_paused_cron_is_named_in_generated_document(self):
+        source = self.repo / 'crons.toml'
+        source.write_text(source.read_text() + 'paused=true\n')
+        self.assertIn(' (paused)', howto.render(str(self.repo)))
+
     def test_ac5_committed_page_and_shell_entrypoint(self):
         self.assertEqual((REPO / 'docs/HOW-IT-WORKS.md').read_text(), howto.render(str(REPO)))
         result = subprocess.run([str(REPO / 'doit'), 'howto', '--check'],

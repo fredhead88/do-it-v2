@@ -88,6 +88,12 @@ def _row(name, manifest=None):
     raise ValueError(f"crons: no such row {name!r}")
 
 
+def paused_names(manifest=None):
+    path = pathlib.Path(manifest) if manifest else MANIFEST
+    return {row['name'] for row in tomllib.loads(path.read_text()).get('row', [])
+            if row.get('paused') is True}
+
+
 # ── the live crontab, and the one call site of the real binary ──────────────
 
 _RUN = subprocess.run  # the one seam a test replaces (SD11) — never
@@ -162,7 +168,10 @@ def check(manifest=None, crontab_text=None, crond_dir=None):
     user_text = _live_crontab_text() if crontab_text is None else crontab_text
     crond_cache = {}
     out = []
+    paused = paused_names(manifest)
     for row in the_rows:
+        if row['name'] in paused:
+            continue
         if row["where"] == "cron.d":
             if "text" not in crond_cache:
                 crond_cache["text"] = _crond_text(crond_dir if crond_dir is not None else CROND_DEFAULT)
@@ -282,6 +291,8 @@ def install(name, manifest=None, crontab_path=None):
     arm is what lets a legacy bare (never-tagged) line be replaced in place
     instead of leaving it stray alongside a newly appended wrapped one."""
     row = _row(name, manifest)
+    if name in paused_names(manifest):
+        raise ValueError(f"crons: {name!r} is paused")
     if row["where"] == "cron.d":
         raise ValueError(f"crons: {name!r} is a cron.d row — needs root; "
                           f"'doit crons print {name}' shows the line to install by hand")

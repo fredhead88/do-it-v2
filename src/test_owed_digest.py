@@ -451,7 +451,7 @@ class DigestTests(unittest.TestCase):
         jobs = {r["name"]: r for r in rows}
         self.assertNotIn("owed-digest-alert", jobs)
         row = jobs["owed-digest"]
-        self.assertEqual(row["schedule"], "0 6 * * *")
+        self.assertEqual(row["schedule"], "0 * * * *")
         self.assertEqual((row["where"], row["owner"], row["project"]), ("user", "thinker", "do-it-v2"))
         self.assertIn("cron-run owed-digest -- ", row["command"])
         self.assertIn("owed-digest --alert >>", row["command"])

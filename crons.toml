@@ -36,7 +36,7 @@ project = "do-it-v2"
 [[row]]
 name = "look"
 where = "user"
-schedule = "*/10 * * * *"
+schedule = "3,33 * * * *"
 command = "{doit} cron-run look -- {doit} look >> {root}/logs/look.log 2>&1"
 path = "{doit}"
 sig = '\bdoit look\b'
@@ -66,7 +66,7 @@ project = "do-it-v2"
 [[row]]
 name = "backup-watch"
 where = "user"
-schedule = "* * * * *"
+schedule = "*/15 * * * *"
 command = "{doit} cron-run backup-watch -- {doit} backup watch --for 60 >> {root}/backup.log 2>&1"
 path = "{doit}"
 sig = '\bdoit backup watch\b'
@@ -89,7 +89,7 @@ max_runtime_s = 2820
 name = "ledger-snapshot"
 max_runtime_s = 14400
 where = "user"
-schedule = "*/10 * * * *"
+schedule = "2 * * * *"
 command = "{doit} cron-run ledger-snapshot -- {repo}/scripts/snapshot.sh >/dev/null 2>&1"
 path = "{repo}/scripts/snapshot.sh"
 sig = 'scripts/snapshot\.sh\b'
@@ -99,7 +99,7 @@ project = "do-it-v2"
 [[row]]
 name = "sweep-owed"
 where = "user"
-schedule = "*/30 * * * *"
+schedule = "11 0,6,12,18 * * *"
 command = "{doit} cron-run sweep-owed -- {doit} sweep-owed >> {root}/logs/sweep-owed.log 2>&1"
 path = "{doit}"
 sig = '\bdoit sweep-owed\b'
@@ -119,7 +119,7 @@ project = "albert-scott"
 [[row]]
 name = "owed-digest"
 where = "user"
-schedule = "0 6 * * *"
+schedule = "0 * * * *"
 command = "{doit} cron-run owed-digest -- {doit} owed-digest --alert >> {root}/logs/owed-digest.log 2>&1"
 path = "{doit}"
 sig = '\bdoit owed-digest(?: --alert)?(?=\s*>>|\s*(?:#.*)?$)'
@@ -138,6 +138,7 @@ project = "do-it-v2"
 
 [[row]]
 name = "portal-latency-daily"
+paused = true
 where = "cron.d"
 schedule = "30 6 * * *"
 command = "albert {doit} cron-run portal-latency-daily -- /bin/bash /opt/albert-scott/scripts/deploy/portal_check_daily_wrapper.sh"
@@ -160,7 +161,7 @@ max_runtime_s = 1800
 [[row]]
 name = "health-alarms"
 where = "user"
-schedule = "*/10 * * * *"
+schedule = "6,36 * * * *"
 command = "{doit} cron-run health-alarms -- {doit} health-alarms >> {root}/logs/health-alarms.log 2>&1"
 path = "{doit}"
 sig = '\bdoit health-alarms(?=\s*>>|\s*(?:#.*)?$)'
@@ -180,7 +181,7 @@ project = "do-it-v2"
 [[row]]
 name = "balance"
 where = "user"
-schedule = "*/10 * * * *"
+schedule = "8 * * * *"
 command = "{doit} cron-run balance -- {doit} balance >> {root}/logs/balance.log 2>&1"
 path = "{doit}"
 sig = '\bdoit balance\b'
@@ -238,6 +239,17 @@ sig = 'base_red\.py\s+nightly-collect\s+albert-scott\b'
 owner = "thinker"
 project = "albert-scott"
 max_runtime_s = 1800
+
+[[row]]
+name = "doit-base-red-nightly"
+where = "user"
+schedule = "20 2 * * *"
+command = "{doit} cron-run doit-base-red-nightly -- /usr/bin/python3 {repo}/src/base_red.py nightly do-it-v2 >> {root}/logs/doit-base-red-nightly.log 2>&1"
+path = "/usr/bin/python3"
+sig = 'base_red\.py\s+nightly\s+do-it-v2\b'
+owner = "thinker"
+project = "do-it-v2"
+max_runtime_s = 7500
 
 [[row]]
 name = "pane-watchdog"
