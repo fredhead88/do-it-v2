@@ -7,10 +7,11 @@ A throwaway tree — `<tree>/doit` (a byte-for-byte copy of THIS repo's `doit`)
 and one or more fixture test files under `<tree>/src/` — is built fresh per
 case. Each fixture writes what it saw straight
 to `DOIT_TEST_PROBE_OUT`, a path the outer harness controls directly and
-`doit test`'s isolation never touches (it only exports HOME/DOIT_ROOT/
-XDG_CONFIG_HOME and unsets DOIT_LEDGER_FILE), so the report survives even
+`doit test`'s isolation never touches (the report path lies outside the
+redirected environment roots), so the report survives even
 though the isolated tree itself is removed before this process ever looks at
-it. `TMPDIR` is pointed at a fresh, otherwise-empty directory of our own for
+it. The launcher also redirects TMPDIR/TMP/TEMP beneath its cleanup root.
+The caller's `TMPDIR` is a fresh, otherwise-empty directory of our own for
 each run, so `mktemp -d` inside the copied `doit` lands there and "the temp
 dir is gone after" becomes a literal, checkable claim: is that TMPDIR empty
 once the subprocess exits?
@@ -30,12 +31,25 @@ def ok(cond, msg):
 
 
 PROBE_SRC = '''\
-import json, os, pathlib, sys
+import json, os, pathlib, subprocess, sys, tempfile
 
 out = pathlib.Path(os.environ["DOIT_TEST_PROBE_OUT"])
 home = os.environ.get("HOME")
 root = os.environ.get("DOIT_ROOT")
 xdg = os.environ.get("XDG_CONFIG_HOME")
+
+# Deliberately omit cleanup, as many real fixture helpers do. The launcher's
+# EXIT trap must own Python, shell and Node scratch, even on a failing run.
+scratch = [tempfile.mkdtemp(prefix="doit-leak-python-")]
+fd, name = tempfile.mkstemp(prefix="doit-leak-file-")
+os.close(fd)
+scratch.append(name)
+scratch.append(subprocess.check_output(["mktemp", "-d"], text=True).strip())
+scratch.append(subprocess.check_output(["node", "-e",
+    "console.log(require('fs').mkdtempSync(require('os').tmpdir()+'/doit-leak-node-'))"],
+    text=True).strip())
+for key in ("TMP", "TEMP"):
+    scratch.append(tempfile.mkdtemp(dir=os.environ.get(key, tempfile.gettempdir())))
 
 # the same shape of write a real test file makes — into the ISOLATED tree
 # `doit test` set up, never the invoker's own sentinel HOME/DOIT_ROOT
@@ -49,6 +63,7 @@ seat_dir.mkdir(parents=True, exist_ok=True)
 out.write_text(json.dumps({
     "HOME": home, "DOIT_ROOT": root, "XDG_CONFIG_HOME": xdg,
     "DOIT_LEDGER_FILE_present": "DOIT_LEDGER_FILE" in os.environ,
+    "scratch": scratch,
 }))
 
 if os.environ.get("DOIT_TEST_PROBE_FAIL"):
@@ -128,6 +143,8 @@ def _run_case(outer_tmp, *, fail=False, content=False, isolated=True):
         "XDG_CONFIG_HOME": str(sentinel_xdg),
         "DOIT_LEDGER_FILE": "L-sentinel-0001.jsonl",
         "TMPDIR": str(iso_tmpdir),
+        "TMP": str(sentinel_home),
+        "TEMP": str(sentinel_xdg),
         "DOIT_TEST_PROBE_OUT": str(probe_out),
     }
     if fail:
@@ -212,6 +229,8 @@ ok(probe1["HOME"] and probe1["DOIT_ROOT"] and probe1["XDG_CONFIG_HOME"],
 ok(probe1["DOIT_LEDGER_FILE_present"] is False,
    f"AC1: DOIT_LEDGER_FILE is unset before any runner starts: {probe1}")
 ok(_empty(isotmp1), "AC1: the isolation temp dir (under our own TMPDIR) is removed after — nothing left behind")
+ok(all(not pathlib.Path(p).exists() for p in probe1["scratch"]),
+   "AC1: unmanaged Python, shell, Node, TMP and TEMP scratch is removed")
 print("AC1 ok")
 
 
@@ -230,6 +249,8 @@ ok(proc2.returncode != 0, f"AC2: a failing fixture makes `doit test` exit non-ze
 ok(probe2 is not None and probe2["DOIT_LEDGER_FILE_present"] is False,
    f"AC2: the failing fixture still ran under full isolation before it failed: {probe2}")
 ok(_empty(isotmp2), "AC2: the isolation temp dir is removed after a FAILING run too")
+ok(all(not pathlib.Path(p).exists() for p in probe2["scratch"]),
+   "AC2: unmanaged scratch is removed after a failing fixture too")
 ok(_empty(shome2) and _empty(sroot2),
    f"AC2: the invoker's sentinel HOME/DOIT_ROOT stay empty after a failing run too: "
    f"{list(shome2.rglob('*'))} {list(sroot2.rglob('*'))}")

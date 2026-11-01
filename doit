@@ -101,9 +101,11 @@ case "${1:-board}" in
            cd "$SRC"
            DOIT_TEST_ISO=$(mktemp -d)
            trap 'rm -rf "$DOIT_TEST_ISO"' EXIT
-           mkdir -p "$DOIT_TEST_ISO/home" "$DOIT_TEST_ISO/root" "$DOIT_TEST_ISO/xdg"
+           mkdir -p "$DOIT_TEST_ISO/home" "$DOIT_TEST_ISO/root" "$DOIT_TEST_ISO/xdg" "$DOIT_TEST_ISO/tmp"
            export HOME="$DOIT_TEST_ISO/home" DOIT_ROOT="$DOIT_TEST_ISO/root" \
                   XDG_CONFIG_HOME="$DOIT_TEST_ISO/xdg"
+           # Own unmanaged fixture scratch too, including shell/Node children.
+           export TMPDIR="$DOIT_TEST_ISO/tmp" TMP="$DOIT_TEST_ISO/tmp" TEMP="$DOIT_TEST_ISO/tmp"
            unset DOIT_LEDGER_FILE
            export DOIT_LIVE_REPO="$HERE"
            rc=0
