@@ -1041,7 +1041,7 @@ def _check_lane_stale(events, now, root, briefs, *, folded=None):
         specs, _, _, _ = _fold_input(events, folded)
         dst = root / "events" / LEDGER_NAME
         seen_events = [*events, *_read_jsonl(dst)]
-        keys = {(e.get("spec"), e.get("rule"), e.get("since")) for e in seen_events
+        previous = {(e.get("spec"), e.get("rule"), e.get("since")): e for e in seen_events
                 if e.get("type") == "escalation-blocking" and e.get("kind") == "lane-stale"}
         pending = []
         import tick
@@ -1052,19 +1052,32 @@ def _check_lane_stale(events, now, root, briefs, *, folded=None):
                 _fire_undetermined("lane-stale", events, root, briefs)
                 continue
             key = row["spec"], row["rule"], row["since"]
-            if (not row["overdue"] or key in keys
-                    or lane_rules.ladder(seen_events, row, now) != "inbox"):
+            earlier = previous.get(key)
+            if not row["overdue"]:
                 continue
-            keys.add(key)
-            pending.append(row)
+            if earlier:
+                if (earlier.get("owner") != "executor"
+                        or now - lane_rules._time(earlier["measured_at"]) < timedelta(minutes=60)):
+                    continue
+                owner = "thinker"
+            else:
+                if lane_rules.ladder(seen_events, row, now) != "inbox":
+                    continue
+                owner = ("executor" if step.state == "action"
+                         and step.owner in {"tick", "executor", "relay", "sweeper"} else "thinker")
+            previous[key] = dict(owner=owner, measured_at=now.isoformat())
+            pending.append(dict(row, owner=owner, nextstep=step.action or "hold",
+                                waiting_on=step.trigger or step.clears or "undetermined"))
         if _DRY_RUN:
             return
         for row in pending:
             sid, rule = row["spec"], row["rule"]
             _append_watchdog(root, dst, "escalation-blocking", subject=f"lane-stale:{sid}",
-                             kind="lane-stale", owner="thinker", spec=sid, rule=rule, since=row["since"],
+                             kind="lane-stale", owner=row["owner"], spec=sid, rule=rule, since=row["since"],
+                             nextstep=row["nextstep"], waiting_on=row["waiting_on"],
+                             measured_at=now.isoformat(timespec="seconds"),
                              why=row["reason"],
-                             default=f"leave the spec as it stands; the Thinker rules on {rule} for {sid}",
+                             default=f"{row['owner']} follows {row['nextstep']} for {sid}; waiting on {row['waiting_on']}",
                              deadline=(now + timedelta(hours=24)).isoformat(timespec="seconds"),
                              revert="no automatic action was taken - nothing to revert")
     except Exception:

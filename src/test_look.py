@@ -2085,7 +2085,7 @@ with patch.object(tick, "_steps", return_value=_wsteps(rows)), \
 raw = look._read_jsonl(root / "events" / look.LEDGER_NAME)
 ok(len(raw) == 1, "watchdog: inbox only, no duplicate")
 escalation = raw[0]
-ok(escalation["subject"] == f"lane-stale:{_WA}" and escalation["owner"] == "thinker"
+ok(escalation["subject"] == f"lane-stale:{_WA}" and escalation["owner"] == "executor"
    and escalation["spec"] == _WA and escalation["rule"] == "build" and escalation["since"] == rows[0]["since"]
    and escalation["deadline"] == iso(_WNOW + timedelta(hours=24)) and "actor" not in escalation
    and escalation["default"] and escalation["revert"], "watchdog: complete escalation envelope")
