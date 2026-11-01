@@ -186,6 +186,14 @@ def preflight(repo=None):
     caller of a read-only check can be asked to expect."""
     global _TOP
     _TOP = repo                 # resolve the toplevel in the CALLER's cwd, not the last run's
+    configured = run(("config", "--local", "--get-all", "core.worktree"))
+    if configured.returncode == 0:
+        raise Undetermined("core.worktree is set in the repository config; repair the integrator "
+                           "and use a disposable clone or git worktree add for checks",
+                           reason="repository-precondition", retryable=False, guard=False)
+    if configured.returncode != 1:
+        raise Undetermined("cannot inspect repository core.worktree configuration",
+                           reason="repository-precondition", retryable=False, guard=False)
     p = run(("rev-parse", "--show-toplevel"))
     if p.returncode:
         raise Undetermined("not inside a git repository", reason="repository-precondition", retryable=False, guard=False)

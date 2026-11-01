@@ -408,3 +408,6 @@ def nightly_unowned(events, project):
                 pending = {i: at for i, at in pending.items() if i == 'nightly evidence undetermined'
                            or i not in ids or timestamp(e) <= at}
     return sorted(pending)
+
+
+from dependency_holds import valid_dependency

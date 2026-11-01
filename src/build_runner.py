@@ -392,7 +392,9 @@ def _run_tree(spec, sha, repo, row, commands, tail_dir, offset, tail_limit, dead
     auxiliary.mkdir()
     temporary = identity = None
     try:
-        env = grading_env._clean_env()
+        # Review/check shells may export a real worktree's GIT_DIR. Even a
+        # clone's git config then writes that source's shared config (r2503).
+        env = {k: v for k, v in grading_env._clean_env().items() if not k.startswith("GIT_")}
         if row.get("venv"):
             # Match db_setup's venv resolution for absolute and tree-relative paths.
             venv_bin = tree / row["venv"] / "bin"
@@ -505,7 +507,9 @@ def run(spec, requested_sha=None, criteria=None):
         resources.callback(signal.setitimer, signal.ITIMER_REAL, 0)
         signal.setitimer(signal.ITIMER_REAL, cap)
         repo = grading_env._project_checkout(project)
-        env = grading_env._clean_env()
+        # Review/check shells may export a real worktree's GIT_DIR. Even a
+        # clone's git config then writes that source's shared config (r2503).
+        env = {k: v for k, v in grading_env._clean_env().items() if not k.startswith("GIT_")}
         done = next((e for e in reversed(events) if e["type"] == "build-done"), {})
         sha = _resolve(repo, requested_sha or done.get("ready_sha"), env, deadline)
         key = "all" if criteria is None else hashlib.sha256(",".join(sorted(criteria)).encode()).hexdigest()[:8]

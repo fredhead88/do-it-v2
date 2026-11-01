@@ -6,6 +6,8 @@ that its Blindness list never reaches the packet. The second is exercised twice
 per role: the honest packet is scanned for the real forbidden strings, and the
 builder is then made to leak one and the refusal must fire."""
 import json, os, pathlib, re, subprocess, sys, tempfile
+import harness
+harness.isolate_git()
 
 TMP = pathlib.Path(tempfile.mkdtemp())
 os.environ["HOME"] = str(TMP / "home")

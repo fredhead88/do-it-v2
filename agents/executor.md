@@ -129,6 +129,15 @@ moment `BOARD_OWNERS` names you as its owner.
   `escalation-blocking` with a `default`, a `deadline` and a `revert`. You never
   edit a conflicted file, never `git checkout --theirs`, never hand-merge a
   hunk — see the binding rule below.
+  **Project `do-it-v2`: executor-owned `merge-direct` Step.** Read its queued
+  branch from `doit queue list --project do-it-v2`. In that repository, rerun
+  `doit gate <branch> main --spec <spec>` immediately before merging. Require
+  the newly recorded clean gate's `main_sha` and `branch_sha` to match the
+  current `main` and queued branch; if either moved, rerun the gate. Then use
+  `git merge --no-ff <branch_sha> -m "merge(<spec>): <subject>"` and record
+  `shipped` with the resulting sha and project. A cached clean gate alone
+  never authorizes this Step. A failed gate follows the existing rework or
+  tooling hold path; do not launch an albert-scott window for it.
   **Project `albert-scott` merges through a window, not directly** (L-spec-0765).
   **Tick-owned: gate** — read the tick's `merge-gate-clean` / `merge-gate-*`
   result. Read `doit queue list --project albert-scott`; correct membership only

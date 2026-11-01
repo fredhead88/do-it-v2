@@ -6,6 +6,8 @@ No real git, no real `doit dispatch`, no network — every recipe call in
 `autodispatch.run` goes through an injectable fake `runner`; every ledger read
 is a freshly-written tmp-root fixture folded for real through `fold.fold`."""
 import datetime, json, os, pathlib, sys, tempfile
+import harness
+harness.isolate_git()
 
 os.environ["DOIT_ROOT"] = str(pathlib.Path(tempfile.mkdtemp()))
 os.environ["DOIT_NO_POKE"] = "1"

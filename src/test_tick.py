@@ -437,11 +437,12 @@ class AdmissionTests(unittest.TestCase):
         self.assertEqual(len(observe[4]), len(expected))
         self.assertTrue(observe[5])
         with self.isolated('observe') as (root, stack):
-            stack.enter_context(patch.object(tick, 'launch', side_effect=['one', 'two', RuntimeError('third')]))
+            stack.enter_context(patch.object(tick, 'launch', side_effect=['one', 'two', RuntimeError('third'), *['healthy'] * 5]))
             info = {}
-            with self.assertRaisesRegex(RuntimeError, 'third'):
-                tick.run_steps([], {}, self.now, steps=self.scenario(), admission=info)
-            self.assertEqual(info['admission_checked'], 3)
+            lines = tick.run_steps([], {}, self.now, steps=self.scenario(), admission=info)
+            self.assertTrue(any(line.startswith('failed L-spec-9603') for line in lines))
+            self.assertTrue(any(line.startswith('acted L-spec-9608') for line in lines))
+            self.assertGreater(info['admission_checked'], 3)
             self.assertTrue((root / 'state/admission.json').exists())
         _launcher_evidence('AC8-1650', dict(checked=8, would_hold=8, held=0, calls_and_events_equal=True,
                                          peaks=observe[4], exceptional_finish=True))
@@ -701,9 +702,9 @@ class EnforcementTests(unittest.TestCase):
         with self.enforcing(trip=40):
             info = {}
             with patch.object(tick,'launch',side_effect=RuntimeError('after dispatch')):
-                with self.assertRaisesRegex(RuntimeError,'after dispatch'):
-                    tick.run_steps(self.events,{},self.now,
-                        steps=[self.step('build',item='raised',since=self.ago(20))],admission=info)
+                lines = tick.run_steps(self.events,{},self.now,
+                    steps=[self.step('build',item='raised',since=self.ago(20))],admission=info)
+                self.assertTrue(any(line.startswith('failed raised build: RuntimeError') for line in lines))
             self.assertEqual(info['admission_escape_due'],1)
             self.assertEqual(info['admission_escape_unspawned'],1)
             self.assertNotIn('admission_escape',info)
