@@ -294,11 +294,15 @@ def reap_var_tmp(root='/var/tmp', uid=None, now=None, proc_root='/proc', recorde
     now = now or datetime.now(timezone.utc)
     budget = _budget()
     result = dict(removed=[], kept=[], freed_bytes=0, **_surface_stats(budget['settings']))
-    fd = _open_dir(root)
     try:
-        names = sorted(os.listdir(fd))
-    finally:
-        os.close(fd)
+        fd = _open_dir(root)
+        try:
+            names = sorted(os.listdir(fd))
+        finally:
+            os.close(fd)
+    except OSError as exc:
+        result['kept'].append(dict(path=str(root), reason='undetermined: ' + str(exc)))
+        return result
     refs, ref_error = None, None
     for name in names:
         path = root / name
@@ -326,6 +330,11 @@ def reap_var_tmp(root='/var/tmp', uid=None, now=None, proc_root='/proc', recorde
                 if any(reap_tmp._under(ref, path) for ref in refs):
                     reason = 'live process references entry'
                 else:
+                    reason = _budget_reason(budget, dry_run)
+                    if reason:
+                        _count_reason(result, reason)
+                        result['kept'].append(dict(path=str(path), reason=reason))
+                        continue
                     records = _inventory(path, uid)
                     if _identity(records[pathlib.Path('.')]) != _identity(st):
                         raise OSError('entry changed during eligibility check')
@@ -333,11 +342,6 @@ def reap_var_tmp(root='/var/tmp', uid=None, now=None, proc_root='/proc', recorde
                                              if len(rel.parts) <= 3) <= VAR_TMP_MAX_AGE_S:
                         raise OSError('entry became too young during scan')
                     size = sum(s.st_size for s in records.values() if stat.S_ISREG(s.st_mode))
-                    reason = _budget_reason(budget, dry_run)
-                    if reason:
-                        _count_reason(result, reason)
-                        result['kept'].append(dict(path=str(path), reason=reason))
-                        continue
                     _remove(path, records, dry_run=True)
                     if not dry_run:
                         _remove(path, records)
