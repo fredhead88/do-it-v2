@@ -1119,6 +1119,9 @@ def run(events, *, now=None, runner=None, root=None, toml_path=None, dry_run=Fal
                 fold.NOW = previous_now
         return folded
     try:
+        # Independent of tick: a poisoned dispatch item must not silence this alarm.
+        import merge_deadman
+        merge_deadman.run(events, now, root, dry_run=dry_run, sender=_send_operator)
         deadline = runner.clock() + th["pass_budget_s"]
         single = len(cfg["prod"]) == 1
         for row in cfg["prod"]:
