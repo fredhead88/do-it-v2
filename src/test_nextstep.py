@@ -1498,6 +1498,150 @@ class GraderRetryTests(unittest.TestCase):
         self.signed('AC2-conflict', dict(before=asdict(before), after=asdict(after)))
 
 
+class AttemptsRebuild1855Tests(unittest.TestCase):
+    def fixture(self, action):
+        written = event('spec-written', -240)
+        evs = [written, event('spawn-done', -240, role='spec-auditor', actor='spec-auditor', bad_cut=False)]
+        if action == 'rebuild':
+            evs += [event('build-blocked', -200), event('decision', -180, rework='yes')]
+        elif action == 'grade':
+            evs += [event('build-done', -180, actor='builder', status='DONE')]
+        elif action == 'regrade':
+            evs += [event('build-done', -200, actor='builder', status='DONE'),
+                    event('decision', -180, regrade='yes')]
+        elif action == 'review':
+            evs += [event('verdict', -180, actor='grader', confirmed=True)]
+        return evs
+
+    def one(self, evs, now=NOW, specs=None):
+        specs = specs or {SID: dict(state='written' if len(evs) == 2 else 'building')}
+        return ns.step_for(evs, specs, SID, now, lr.load())
+
+    def context(self, evs, now=NOW):
+        return dict(evs=evs, events=evs, sid=SID, now=now, dependency=None, wave=None,
+                    spec=dict(state='written'), busy=set(), capabilities={})
+
+    def evidence(self, name, body):
+        body = json.dumps(body, sort_keys=True, default=str)
+        print(json.dumps(dict(url='scratch://attempts-rebuild-1855/'+name, status=0,
+                              body_sha256=hashlib.sha256(body.encode()).hexdigest(), body_excerpt=body)))
+
+    def test_AC1(self):
+        import attempts
+        results = []
+        outputs = dict(builder=('build-done', 'build-blocked'), grader=('verdict', 'cannot-assess'), reviewer=('review',))
+        for action, role in [('build', 'builder'), ('rebuild', 'builder'), ('grade', 'grader'),
+                             ('regrade', 'grader'), ('review', 'reviewer')]:
+            base = self.fixture(action)
+            trigger = base[0] if action == 'build' else base[-1]
+            predicate = ns.PREDICATES[action]
+            variants = [('bare', [], True),
+                        ('marker-live', [event('autodispatched', -1, role=role, spawn='123')], False),
+                        ('marker-dead-due', [event('autodispatched', -100, role=role, spawn='123')], True),
+                        ('start', [event('spawn-started', -1, role=role, spawn='L-'+role+'-9191')], False),
+                        ('failed', [event('spawn-failed', -10, role=role, spawn='L-'+role+'-9191', reason='mystery')], True),
+                        ('parent-failed', [event('autodispatch-failed', -10, role=role, reason='mystery')], True),
+                        ('done-no-output', [event('spawn-done', -10, role=role, spawn='L-'+role+'-9191')], True),
+                        ('stale', [event('spawn-stale', -10, role=role, spawn='L-'+role+'-9191')], True),
+                        ('foreign-role', [event('autodispatched', -1, role='relay', spawn='123')], True),
+                        ('older', [event('spawn-started', -250, role=role, spawn='L-'+role+'-9191'),
+                                   event('spawn-failed', -10, role=role, spawn='L-'+role+'-9191', reason='older attempt')], True)]
+            variants += [(kind, [event(kind, -10)], False) for kind in outputs[role]]
+            variants += [(kind, [event(kind, -10)], False) for kind in ('queue-add', 'merge-gate-clean', 'shipped')]
+            for label, tail, expected in variants:
+                with self.subTest(action=action, variant=label):
+                    with patch.object(attempts, 'history', wraps=attempts.history) as spy:
+                        result = predicate(self.context(sorted(base + tail, key=lambda e: e['ts'])))
+                    self.assertEqual(bool(result), expected, result)
+                    if label in ('bare', 'marker-live', 'failed'):
+                        self.assertTrue(any(c.args[2] == role and c.args[1]['subject'] == SID
+                                            and c.args[1]['ts'] == trigger['ts'] for c in spy.call_args_list))
+                    results.append([action, label, bool(result)])
+            # The public reader must not strand an unknown worker failure.
+            step = self.one(base + [event('spawn-failed', -10, role=role,
+                                         spawn='L-'+role+'-9191', reason='unclassified worker exit')],
+                            specs={SID: dict(state='written' if action == 'build' else 'building')})
+            self.assertEqual(step.action, action, step)
+        for module in ('test_attempts', 'test_owner_drop_rework', 'test_lane_rules'):
+            run = subprocess.run(['/usr/bin/python3', '-m', 'unittest', module],
+                                 env=dict(os.environ, PYTHONPATH='src', PYTHONDONTWRITEBYTECODE='1'),
+                                 text=True, capture_output=True, cwd=ROOT)
+            self.assertEqual(run.returncode, 0, run.stdout[-1000:]+run.stderr[-5000:])
+        self.evidence('AC1', results)
+
+    def test_AC2(self):
+        import attempts
+        self.assertEqual((attempts.BACKOFF_MIN, attempts.MAX_ATTEMPTS), ((5, 15, 45), 3))
+        checked = []
+        for action, role in [('build', 'builder'), ('rebuild', 'builder'), ('grade', 'grader'),
+                             ('regrade', 'grader'), ('review', 'reviewer')]:
+            base = self.fixture(action)
+            trigger = base[0] if action == 'build' else base[-1]
+            fails = []
+            for n, minute, delay in [(1, -60, 5), (2, -40, 15), (3, -20, None)]:
+                fails.append(event('spawn-failed', minute, role=role, spawn='L-'+role+'-'+str(9190+n), reason='failure-'+str(n)))
+                if delay is not None:
+                    due = NOW + timedelta(minutes=minute+delay)
+                    before = self.one(base+fails, due-timedelta(microseconds=1))
+                    self.assertIsNone(before.action)
+                    self.assertIn('retry-wait', before.reason)
+                    self.assertIn(str(n), before.reason)
+                    self.assertIn(due.isoformat(), before.reason + str(before.clears))
+                    at = self.one(base+fails, due)
+                    self.assertEqual(at.action, action, at)
+                    later = self.one(base+fails+[event('note', -1)], NOW+timedelta(hours=1))
+                    self.assertEqual((at.trigger, at.since), (trigger['_src'], trigger['ts']))
+                    self.assertEqual((later.trigger, later.since), (at.trigger, at.since))
+                    checked.append(asdict(before))
+                else:
+                    stop = self.one(base+fails)
+                    self.assertIsNone(stop.action)
+                    self.assertIn('retries-exhausted', stop.reason)
+                    self.assertLess(stop.reason.index('failure-1'), stop.reason.index('failure-2'))
+                    self.assertLess(stop.reason.index('failure-2'), stop.reason.index('failure-3'))
+                    checked.append(asdict(stop))
+        self.evidence('AC2', checked)
+
+    def test_AC3(self):
+        from test_fold_stalls import admitted, row, outcome, SID as real_sid, NOW as cut
+        checked = []
+        for legacy in (False, True):
+            block = row('build-blocked', minute=0, spawn='L-builder-91909') if legacy else outcome('BLOCKED')
+            prefix = [row('spec-written', 'planner', minute=-20), row('build-started', minute=-10, spawn='L-builder-91909'),
+                      block, row('spawn-done', minute=1, role='builder', spawn='L-builder-91909')]
+            with admitted(prefix) as (_, events, folded):
+                self.assertEqual(folded[0][real_sid]['state'], 'building' if legacy else 'blocked')
+                block_src = next(e['_src'] for e in events if e['type'] == block[1]['type'])
+            for actor, kind, ref, expected in [
+                    ('thinker', 'unblocked', None, True), ('operator', 'unblocked', None, True),
+                    ('thinker', 'spec-amended', None, True), ('operator', 'spec-amended', None, True),
+                    ('executor', 'unblocked', block_src, True), ('executor', 'unblocked', None, False),
+                    ('executor', 'unblocked', 'stale:1', False), ('executor', 'spec-amended', block_src, False),
+                    ('builder', 'unblocked', block_src, False), ('grader', 'unblocked', block_src, False),
+                    ('reviewer', 'unblocked', block_src, False)]:
+                release = row(kind, actor, minute=2, **({'ref': ref} if ref else {}))
+                with self.subTest(legacy=legacy, actor=actor, kind=kind, ref=ref), admitted(prefix+[release]) as (_, events, folded):
+                    self.assertEqual(folded[0][real_sid]['state'], 'building' if legacy else 'blocked')
+                    steps = ns.next_steps(events, folded[0], cut, lr.load())
+                    step = ns.step_for(events, folded[0], real_sid, cut, lr.load())
+                    self.assertIn(step, steps)
+                    self.assertEqual(step.action == 'rebuild', expected, step)
+                    if expected:
+                        source = next(e['_src'] for e in events if e['type'] == kind)
+                        self.assertEqual((step.trigger, step.since, step.owner, step.stage),
+                                         (source, release[1]['ts'], 'tick', 'building'))
+                    checked.append(asdict(step))
+            for tail in ([row('unblocked', 'operator', minute=0)],
+                         [row('unblocked', 'operator', minute=-1)],
+                         [row('unblocked', 'operator', minute=2), outcome('DONE', minute=3)],
+                         [outcome('DONE', minute=2), row('unblocked', 'operator', minute=3)],
+                         [row('unblocked', 'operator', minute=2), row('spec-killed', 'operator', minute=3)]):
+                with admitted(prefix+tail) as (_, events, folded):
+                    self.assertFalse(any(s.item == real_sid and s.action == 'rebuild'
+                                         for s in ns.next_steps(events, folded[0], cut, lr.load())))
+        self.evidence('AC3', checked)
+
+
 if __name__ == '__main__':
     import sys
     if sys.argv[1:] == ['--spec-1869-ac2']:

@@ -586,7 +586,7 @@ class AttemptsTests(unittest.TestCase):
         self.assertEqual(result([a, b]).reasons, ('A',))
         self.assertEqual(result([a, b], trigger=event('trigger', subject='B')).reasons, ('B',))
         self.flags(result([event('autodispatched', 1, role='grader', spawn='L-grader-1')]),
-                   consumed=False, live=False, n_failed=0)
+                   consumed=False, live=True, n_failed=0)
         self.assertEqual(result([start(minute=-1), failure(1)]).n_failed, 0)
         s = start('builder', 0)
         self.assertTrue(result([s], 'builder', trigger=s).live)
@@ -700,6 +700,72 @@ def replay_live():
               'actual=' + str(actual), 'support=' + ','.join(support))
     print(f'L-spec-1662 AC10 replay: {n} subjects, {mismatches} mismatches')
     return 0 if n >= 1 and mismatches == 0 else 1
+
+
+class ProvisionalMarker1855Tests(unittest.TestCase):
+    def history(self, events, role='builder', minute=0, trigger=None):
+        return attempts.history(events, trigger or self.row('spec-written', -1), role,
+                                now=NOW + timedelta(minutes=minute))
+
+    def row(self, kind, minute=0, **fields):
+        return dict(type=kind, subject=SUBJECT,
+                    ts=(NOW + timedelta(minutes=minute)).isoformat(), **fields)
+
+    def test_fixed_deadline_and_exhaustion(self):
+        for role, cap in [('builder', 90), ('grader', 30), ('reviewer', 30)]:
+            marker = self.row('autodispatched', role=role, spawn='123')
+            for minute in (0, cap - 0.01):
+                h = self.history([marker], role, minute)
+                self.assertTrue(h.live)
+                self.assertEqual(h.n_failed, 0)
+            for minute in (cap, cap + 100):
+                h = self.history([marker], role, minute)
+                self.assertFalse(h.live)
+                self.assertEqual(h.n_failed, 1)
+                self.assertTrue(h.reasons[0].startswith('dead:'))
+                self.assertEqual(h.next_retry_at, NOW + timedelta(minutes=cap + 5))
+            markers = [dict(marker, spawn=str(i), ts=self.row('x', i*(cap+20))['ts'])
+                       for i in range(3)]
+            h = self.history(markers, role, 3*(cap+20))
+            self.assertEqual(h.n_failed, 3)
+            self.assertTrue(h.exhausted)
+
+    def test_real_detached_and_same_spawn_correlation(self):
+        for role in ('builder', 'grader', 'reviewer'):
+            for same in (False, True):
+                for start_minute in (-0.1, 1, 100):
+                    marker = self.row('autodispatched', role=role, spawn='123')
+                    start = self.row('build-started' if role == 'builder' else 'spawn-started',
+                                     start_minute, role=role, spawn='123' if same else 'L-'+role+'-9999',
+                                     waiter_pid=123)
+                    for events in ([marker, start], [start, marker]):
+                        h = self.history(events, role, 110)
+                        self.assertTrue(h.live, h)
+                        self.assertEqual(h.n_failed, 0)
+                        failed = self.row('spawn-failed', 111, role=role, spawn=start['spawn'], reason='crash')
+                        h = self.history(events + [failed], role, 112)
+                        self.assertEqual((h.n_failed, h.reasons, h.live), (1, ('crash',), False))
+            for field in (dict(role='reviewer' if role != 'reviewer' else 'builder'),
+                          dict(subject='other'), dict(waiter_pid=124)):
+                marker = self.row('autodispatched', role=role, spawn='123')
+                start = self.row('spawn-started', 1, role=role, spawn='L-'+role+'-9999', waiter_pid=123)
+                h = self.history([marker, dict(start, **field)], role, 110)
+                self.assertEqual(h.n_failed, 1)
+
+    def test_prestart_failure_and_refusal(self):
+        for role in ('builder', 'grader', 'reviewer'):
+            marker = self.row('autodispatched', role=role, spawn='123')
+            for kind in ('spawn-failed', 'autodispatch-failed'):
+                failed = self.row(kind, 1, role=role, spawn='L-'+role+'-9999', reason='crash')
+                for events in ([marker, failed], [failed, marker]):
+                    h = self.history(events, role, 110)
+                    self.assertEqual((h.n_failed, h.reasons), (1, ('crash',)))
+            for reason in ('bundle-pending', 'duplicate-dispatch', 'dispatch-in-progress'):
+                failed = self.row('spawn-failed', 1, role=role, spawn='L-'+role+'-9999',
+                                  reason=reason, why='another dispatch holds the subject lock')
+                h = self.history([marker, failed], role, 110)
+                self.assertEqual((h.live, h.n_failed), (False, 0))
+                self.assertEqual(h.not_ready, 'bundle-pending' if reason == 'bundle-pending' else None)
 
 
 if __name__ == '__main__':

@@ -168,8 +168,15 @@ def _builder_question(evs):
     if not question or question['type'] != 'question' or not question.get('_src'):
         return None
     attempt = _latest(activity, DISPATCH_EVENTS | {'build-started', 'build-blocked'})
-    if attempt and (_time(attempt['ts']) >= _time(question['ts'])
-                    or attempt.get('spawn') and attempt['spawn'] != question.get('spawn')):
+    if attempt and _time(attempt['ts']) >= _time(question['ts']):
+        # Preserve a question's already-authorized trigger through a failed
+        # retry; answering an old question after a different attempt cannot
+        # authorize that attempt. A newer question/output still wins above.
+        if not any(e.get('type') == 'decision' and e.get('actor') in {'thinker', 'operator'}
+                   and e.get('ref') == question['_src']
+                   and _time(question['ts']) < _time(e['ts']) < _time(attempt['ts']) for e in evs):
+            return None
+    elif attempt and attempt.get('spawn') and attempt['spawn'] != question.get('spawn'):
         return None
     return question
 
@@ -245,15 +252,13 @@ def _grader_retry(c, trigger):
     activity = [e for e in normalized if _attempt_role(e) == 'grader'
                 and e.get('type') in DISPATCH_EVENTS | {'spawn-done', 'spawn-stale'}
                 and _time(e['ts']) >= _time(trigger['ts'])]
-    if activity and (activity[-1].get('type') == 'autodispatched'
-                     or activity[-1].get('type') == 'spawn-started'
-                     and not activity[-1].get('spawn')):
+    if activity and activity[-1].get('type') == 'spawn-started' and not activity[-1].get('spawn'):
         return None
     if h.exhausted:
-        return _result(trigger, 'exhausted: ' + '; '.join(h.reasons), retry_hold=True,
+        return _result(trigger, f'retries-exhausted: {h.n_failed} failed attempts; ' + '; '.join(h.reasons), retry_hold=True,
                        retry_owner='executor', clears='new authorized trigger or operator decision')
     if h.next_retry_at and c['now'] < h.next_retry_at:
-        return _result(trigger, 'retry-wait: ' + h.next_retry_at.isoformat(), retry_hold=True,
+        return _result(trigger, f'retry-wait: {h.n_failed} failed attempts; next_retry_at=' + h.next_retry_at.isoformat(), retry_hold=True,
                        retry_owner='tick', clears='retry instant ' + h.next_retry_at.isoformat())
     build = _latest(evs, {'build-done'}) or {}
     cutoff = max(_time(trigger['ts']), _time(build.get('ts', trigger['ts'])))
@@ -286,26 +291,22 @@ def _retry_result(c, trigger, role, *, dispatched=False):
     if role == 'grader':
         return _grader_retry(c, trigger)
     evs = c['evs']
-    vanished = any(_vanished(e) and _attempt_role(e) == role
-                   and _time(e['ts']) >= _time(trigger['ts']) for e in evs)
-    if dispatched and not vanished:
-        return None
     # SD1's transport refusals are not attempts. Bundle readiness retains its
     # existing history treatment; other refusals simply re-evaluate next tick.
-    h = attempts.history(_history_events(evs), dict(trigger, subject=c['sid']), role, now=c['now'])
+    h = attempts.history(evs, dict(trigger, subject=c['sid']), role, now=c['now'])
     if h.consumed or h.live:
         return None
     fields = {}
     reason = 'condition met'
     if h.exhausted:
-        reason = f'retry exhausted: {h.n_failed} failed attempts; ' + '; '.join(h.reasons)
+        reason = f'retries-exhausted: {h.n_failed} failed attempts; ' + '; '.join(h.reasons)
         fields = dict(retry_hold=True, retry_owner='executor',
                       clears='new authorized trigger or operator decision')
     elif h.not_ready:
         reason = h.not_ready
         fields = dict(retry_hold=True, retry_owner='tick', clears='evidence-bundle ready')
     elif h.next_retry_at and c['now'] < h.next_retry_at:
-        reason = f'retry backoff: {h.n_failed} failed attempts; next_retry_at={h.next_retry_at.isoformat()}'
+        reason = f'retry-wait: {h.n_failed} failed attempts; next_retry_at={h.next_retry_at.isoformat()}'
         fields = dict(retry_hold=True, retry_owner='tick', clears='next_retry_at=' + h.next_retry_at.isoformat())
     elif h.n_failed:
         reason = f'retry due: {h.n_failed} failed attempts; ' + '; '.join(h.reasons)
@@ -318,8 +319,16 @@ def _rebuild(c):
     # accepted, closed-shipped, closed-unbuilt, dropped, killed and void.
     if _terminal(evs, c['spec']) or c['dependency']:
         return None
-    blocked = _latest(evs, {'build-blocked'})
     outcome = _latest(evs, {'build-done', 'build-blocked'})
+    blocked = outcome if outcome and (outcome['type'] == 'build-blocked'
+                                      or outcome.get('status') != 'DONE') else None
+    if blocked and blocked['type'] == 'build-done':
+        # Prefer a block receipt only within the current builder attempt.
+        start = _latest([e for e in evs if _time(e['ts']) <= _time(blocked['ts'])], {'build-started'})
+        receipt = _latest([e for e in evs if e['type'] == 'build-blocked'
+                          and (not start or _time(e['ts']) >= _time(start['ts']))], {'build-blocked'})
+        if receipt and (not outcome.get('spawn') or receipt.get('spawn') == outcome.get('spawn')):
+            blocked = receipt
     # thinker-answer refs the builder's question, not the build-blocked row.
     # A spawn ties that question to this blocked build; legacy rows without a
     # spawn must at least belong to the current block's time interval.
@@ -347,7 +356,13 @@ def _rebuild(c):
     review = _latest(evs, JUDGING | {'build-done', 'build-blocked'})
     blocking = ([review] if review and review['type'] == 'review'
                 and type(review.get('n_blocking')) is int and review['n_blocking'] > 0 else [])
-    trigger = max(decisions + rewrites + drops + blocking, key=lambda e: _time(e['ts']), default=None)
+    releases = [e for e in evs if blocked and e.get('type') in {'unblocked', 'spec-amended'}
+                and e.get('subject') == c['sid'] and _time(e['ts']) > _time(outcome['ts'])
+                and (fold.actor_of((_source(e) or '').split(':')[0]) in {'thinker', 'operator'}
+                     or e['type'] == 'unblocked'
+                     and fold.actor_of((_source(e) or '').split(':')[0]) == 'executor'
+                     and bool(blocked.get('_src')) and e.get('ref') == blocked['_src'])]
+    trigger = max(decisions + rewrites + drops + blocking + releases, key=lambda e: _time(e['ts']), default=None)
     dispatched = [e for e in evs if _builder_dispatch(e) and not _refusal(e)]
     if trigger and (not blocked or _time(trigger['ts']) > _time(blocked['ts'])):
         result = _retry_result(c, trigger, 'builder', dispatched=(
@@ -444,8 +459,7 @@ def _build(c):
     if dispatch.unaudited(c['evs']) is not None:
         return None
     state = c['spec'].get('state')
-    vanished = any(_vanished(e) and _attempt_role(e) == 'builder' for e in c['evs'])
-    if (state != 'written' and not (state == 'building' and vanished)
+    if (state not in {'written', 'building'}
             or c['sid'] in c['busy'] or c['dependency'] or c['wave']):
         return None
     if _rebuild(c) or _close(c) or _regrade(c):
@@ -842,7 +856,7 @@ def _failure(evs, rules):
             return latest, 'retry'
         text = latest['reason'] if _base_blocked(latest) else _failure_text(latest)
         classification = classify_failure(text, latest.get('exit_code', 1), rules)
-        if (classification == 'unknown' and _attempt_role(latest) == 'grader'
+        if (classification == 'unknown' and _attempt_role(latest) in {'builder', 'grader', 'reviewer'}
                 and latest.get('type') in {'spawn-failed', 'autodispatch-failed'}):
             classification = 'retry'
         if classification == 'base-refresh':

@@ -183,14 +183,14 @@ class LaneRulesTests(unittest.TestCase):
 
     def test_conditions_from_events(self):
         suppressors = {
-            'build': event('build-started', -30, actor='builder', role='builder'),
-            'grade': event('spawn-started', -30, role='grader'),
-            'review': event('spawn-started', -30, role='reviewer'),
+            'build': event('build-started', -30, actor='builder', role='builder', spawn='L-builder-9998'),
+            'grade': event('spawn-started', -30, role='grader', spawn='L-grader-9998'),
+            'review': event('spawn-started', -30, role='reviewer', spawn='L-reviewer-9998'),
             'gate': event('merge-gate-failed', -30),
             'enqueue': event('window-dropped', -30),
             'merge': event('queue-remove', -30),
-            'rebuild': event('spawn-started', -30, role='builder'),
-            'regrade': event('spawn-started', -30, role='grader'),
+            'rebuild': event('spawn-started', -30, role='builder', spawn='L-builder-9998'),
+            'regrade': event('spawn-started', -30, role='grader', spawn='L-grader-9998'),
             'close': event('spec-killed', -30),
         }
         for rule in sorted(ACTING):
@@ -270,10 +270,11 @@ class LaneRulesTests(unittest.TestCase):
     def test_rework_dispatch_suppression_is_builder_specific(self):
         base = rework_fixture()
         for kind in sorted(lr.DISPATCH_EVENTS | {'build-started'}):
-            for fields in (dict(role='builder'), dict(spawn='L-builder-3016'), {}):
+            for fields in (dict(role='builder', spawn='L-builder-3016'), dict(spawn='L-builder-3016')):
                 with self.subTest(kind=kind, fields=fields):
-                    self.assertFalse(any(r['rule'] == 'rebuild' for r in
-                                         self.rows(base + [event(kind, -55, **fields)])))
+                    rows = self.rows(base + [event(kind, -55, reason='crash', **fields)])
+                    self.assertEqual(any(r['rule'] == 'rebuild' for r in rows),
+                                     kind in {'spawn-failed', 'autodispatch-failed'})
         for kind in sorted(lr.DISPATCH_EVENTS):
             for fields in (dict(role='reviewer'), dict(spawn='L-reviewer-3016')):
                 with self.subTest(kind=kind, fields=fields):
@@ -335,12 +336,17 @@ class LaneRulesTests(unittest.TestCase):
                          _src=spawn + '.jsonl:3')
         answer = event('decision', -60, actor='thinker', ref=question['_src'])
         base = [written(), question, answer]
-        for minute in (-65, -55):
-            for kind in sorted(lr.DISPATCH_EVENTS | {'build-started', 'build-done', 'build-blocked'}):
-                for role in (dict(role='builder'), dict(spawn='L-builder-2993')):
-                    with self.subTest(minute=minute, kind=kind, role=role):
-                        later = event(kind, minute, **role)
-                        self.assertFalse(any(r['rule'] == 'rebuild' for r in self.rows(base + [later])))
+        for kind in ('build-done', 'build-blocked'):
+            for minute in (-65, -55):
+                self.assertFalse(any(r['rule'] == 'rebuild' for r in self.rows(
+                    base + [event(kind, minute, role='builder', spawn='L-builder-2993')])))
+        for kind in ('autodispatched', 'spawn-started', 'build-started'):
+            self.assertFalse(any(r['rule'] == 'rebuild' for r in self.rows(
+                base + [event(kind, -55, role='builder', spawn='L-builder-2993')])))
+        # A failed attempt after the answer retains its bounded trigger budget.
+        failed = base + [event('spawn-failed', -55, role='builder', spawn='L-builder-2993', reason='crash')]
+        self.assertFalse(any(r['rule'] == 'rebuild' for r in self.rows(failed, now=NOW-dt.timedelta(minutes=51))))
+        self.assertEqual(self.row(failed, 'rebuild', now=NOW-dt.timedelta(minutes=50))['since'], answer['ts'])
         newer = event('question', -65, actor='builder', spawn=spawn, _src=spawn + '.jsonl:4')
         self.assertFalse(any(r['rule'] == 'rebuild' for r in self.rows(base + [newer])))
         self.row(base + [event('spawn-started', -65, role='grader')], 'rebuild')
@@ -349,13 +355,13 @@ class LaneRulesTests(unittest.TestCase):
         for minute in (-65, -55):
             ev = fixture('rebuild') + [event('shipped', minute, actor='executor')]
             self.assertFalse(any(r['rule'] == 'rebuild' for r in self.rows(ev)))
-            self.assertIsNone(ns._rebuild(dict(evs=ev, spec={'state': 'reviewing'})))
+            self.assertIsNone(ns._rebuild(dict(evs=ev, events=ev, sid=SID, now=NOW, dependency=None, spec={'state': 'reviewing'})))
         for state in dispatch.SETTLED_STATES:
             with self.subTest(state=state):
                 ev = fixture('rebuild')
                 s = {SID: dict(state=state, evs=ev)}
                 self.assertFalse(any(r['rule'] == 'rebuild' for r in lr.due(ev, s, NOW)))
-                self.assertIsNone(ns._rebuild(dict(evs=ev, spec=s[SID])))
+                self.assertIsNone(ns._rebuild(dict(evs=ev, events=ev, sid=SID, now=NOW, dependency=None, spec=s[SID])))
 
     def test_dependency_hold_suppresses_builder_and_grader_rules_until_released(self):
         blocked = event('build-blocked', -70, actor='builder', _src='builder:1',

@@ -12,6 +12,8 @@ _OUTPUTS = {'grader': ('verdict', 'cannot-assess'), 'reviewer': ('review',),
             'builder': ('build-done', 'build-blocked'), 'spec-auditor': ('spawn-done',)}
 _STARTS = frozenset({'spawn-started', 'build-started'})
 _ATTEMPT_EVENTS = _STARTS | {'spawn-failed', 'spawn-done', 'spawn-stale'}
+# Dispatch role defaults, kept here to preserve the pure helper import direction.
+_MARKER_CAP_MIN = {'builder': 90, 'grader': 30, 'reviewer': 30, 'spec-auditor': 15}
 
 
 @dataclass(frozen=True)
@@ -53,6 +55,54 @@ def _reason(event):
     return event.get('reason') or event.get('why') or f"{event['type']} (no reason recorded)"
 
 
+def _refusal(event):
+    reason = str(_reason(event))
+    return (event.get('type') == 'spawn-failed'
+            and (reason.startswith(('bundle-pending', 'duplicate-dispatch', 'wave-order'))
+                 or reason == 'dispatch-in-progress'
+                 and 'another dispatch holds the subject lock' in str(event.get('why') or '')
+                 or reason in {'stale-base', 'branch-not-descendant', 'pinned-base-mismatch'}))
+
+
+def _marker_groups(rows, role):
+    """Join parent PID receipts to children before evaluating time or input order.
+
+    Pre-start failures do not carry the parent's PID. Attribute only the next
+    same-role receipt before another dispatch/start, as the launcher records it.
+    """
+    groups = {}
+    for row in rows:
+        e = row[2]
+        if _role(e) == role and e.get('spawn') and e.get('type') in _ATTEMPT_EVENTS:
+            groups.setdefault(e['spawn'], []).append(row)
+    associated = set()
+    markers = [r for r in rows if r[2].get('type') == 'autodispatched'
+               and _role(r[2]) == role and r[2].get('spawn')]
+    for marker in markers:
+        pid = str(marker[2]['spawn'])
+        match = next((spawn for spawn, group in groups.items()
+                      if spawn == marker[2]['spawn'] or pid.isdecimal() and any(
+                          r[2].get('type') in _STARTS and str(r[2].get('waiter_pid')) == pid
+                          for r in group)), None)
+        if match is None:
+            following = [r for r in rows if (r[0], r[1]) > (marker[0], marker[1])
+                         and _role(r[2]) == role and r[2].get('type') in
+                         _STARTS | {'autodispatched', 'spawn-failed', 'autodispatch-failed'}]
+            receipt = following[0] if following else None
+            if (receipt and receipt[2]['type'] in {'spawn-failed', 'autodispatch-failed'}
+                    and receipt[1] not in associated):
+                associated.add(receipt[1])
+                match = receipt[2].get('spawn') or ('receipt', receipt[1])
+                if receipt[2]['type'] == 'autodispatch-failed':
+                    groups.setdefault(match, []).append(receipt)
+        if match is None:
+            match = marker[2]['spawn']
+        groups.setdefault(match, []).append(marker)
+    for group in groups.values():
+        group.sort(key=lambda r: (r[0], r[1]))
+    return groups, associated
+
+
 def history(evs, trigger, role, *, now, dead=frozenset()):
     """Return bounded retry state; chronological ownership is independent of input order."""
     if not isinstance(role, str) or role not in _OUTPUTS:
@@ -71,11 +121,7 @@ def history(evs, trigger, role, *, now, dead=frozenset()):
     rows = [(_timestamp(e.get('ts'), 'event.ts'), i, e)
             for i, e in enumerate(evs) if e.get('subject') == subject]
     rows.sort(key=lambda row: (row[0], row[1]))
-    groups = {}
-    for row in rows:
-        e = row[2]
-        if _role(e) == role and e.get('spawn') and e.get('type') in _ATTEMPT_EVENTS:
-            groups.setdefault(e['spawn'], []).append(row)
+    groups, associated = _marker_groups(rows, role)
     older = {spawn for spawn, group in groups.items() if group[0][0] < threshold}
     groups = {spawn: group for spawn, group in groups.items() if spawn not in older}
     recent = [row for row in rows if row[0] >= threshold]
@@ -108,7 +154,7 @@ def history(evs, trigger, role, *, now, dead=frozenset()):
         _, _, e = row
         if _role(e) != role:
             continue
-        if e.get('type') == 'autodispatch-failed':
+        if e.get('type') == 'autodispatch-failed' and row[1] not in associated:
             failures.append((row[0], row[1], _reason(e)))
         if e.get('spawn') in older:
             continue
@@ -120,8 +166,9 @@ def history(evs, trigger, role, *, now, dead=frozenset()):
     live = False
     for spawn, group in groups.items():
         spawned = [r for r in group if r[2]['type'] in _STARTS]
-        failed = [r for r in group if r[2]['type'] == 'spawn-failed']
-        real_failed = [r for r in failed if not _reason(r[2]).startswith('bundle-pending')]
+        failed = [r for r in group if r[2]['type'] in {'spawn-failed', 'autodispatch-failed'}]
+        real_failed = [r for r in failed if not _refusal(r[2])]
+        markers = [r for r in group if r[2]['type'] == 'autodispatched']
         done = [r for r in group if r[2]['type'] == 'spawn-done']
         if real_failed:
             f = real_failed[0]
@@ -134,6 +181,13 @@ def history(evs, trigger, role, *, now, dead=frozenset()):
             failures.append((f[0], f[1], 'spawn-done without ' + '/'.join(outputs)))
         elif spawned and spawn not in output_spawns and not failed and not done:
             live = True
+        elif markers and not spawned and not failed and not done and not consumed:
+            marker = markers[0]
+            deadline = marker[0] + timedelta(minutes=_MARKER_CAP_MIN[role])
+            if now < deadline:
+                live = True
+            else:
+                failures.append((deadline, marker[1], f'dead: {marker[2]["spawn"]}'))
 
     failures.sort(key=lambda row: (row[0], row[1]))
     n_failed = len(failures)
