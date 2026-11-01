@@ -49,6 +49,9 @@ class BuilderDependencies(unittest.TestCase):
                 self.assertTrue((target/'fixture/cli.js').is_file())
                 self.assertFalse(target.is_symlink())
                 self.assertEqual((target/'.bin/tool').readlink(), Path('../fixture/cli.js'))
+                self.assertEqual((target/'fixture/cli.js').stat().st_ino,
+                                 (shared/'fixture/cli.js').stat().st_ino)
+                (target/'fixture/cli.js').unlink()
                 (target/'fixture/cli.js').write_text('private changed dependency')
                 dispatch.builder_worktree_preflight(args, str(tree), None, {}, self.fail)
                 self.assertEqual((target/'fixture/cli.js').read_text(), 'private changed dependency')

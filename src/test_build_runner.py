@@ -186,6 +186,7 @@ class BuildRunnerTests(unittest.TestCase):
             self.env[name] = "CALLER_SENTINEL_" + name
         self.spec("python3 -c 'import os,json,pathlib; print(json.dumps(dict(os.environ))); "
                   "p=pathlib.Path(\"dashboard/node_modules\"); print(p.is_symlink()); "
+                  "(p/\"marker\").unlink(); "
                   "(p/\"marker\").write_text(\"clone-write\")'")
         bundle, path = self.bundle(driver=True)
         output = self.tail(bundle["commands"][0]).decode().splitlines()
@@ -699,9 +700,38 @@ class NodeModulesTests(unittest.TestCase):
             self.assertEqual(result.stdout.strip(), "private bin works")
         private = self.target / "probe" / "dist" / "cli.mjs"
         original = self.source / "probe" / "dist" / "cli.mjs"
-        self.assertNotEqual(private.stat().st_ino, original.stat().st_ino)
+        self.assertEqual(private.stat().st_ino, original.stat().st_ino)
+        # npm replaces installed files by unlinking before writing new content.
+        private.unlink()
         private.write_text("private mutation")
         self.assertIn("private bin works", original.read_text())
+        self.assertNotEqual(private.stat().st_ino, original.stat().st_ino)
+
+    def test_link_failure_copies_only_that_file(self):
+        import errno
+        original = self.source / "probe" / "dist" / "cli.mjs"
+        original.chmod(0o755)
+        link = os.link
+        for error in (errno.EXDEV, errno.EMLINK, errno.EACCES):
+            with self.subTest(error=error):
+                self.target = self.top / "private" / ("node_modules-" + str(error))
+                def link_or_fail(source, target):
+                    if pathlib.Path(source) == original:
+                        raise OSError(error, "fixture link failure")
+                    return link(source, target)
+                with patch.object(os, "link", side_effect=link_or_fail) as attempted:
+                    node_modules.copy_tree(self.source, self.target)
+                self.assertGreater(attempted.call_count, 1)
+                copied = self.target / "probe" / "dist" / "cli.mjs"
+                self.assertNotEqual(copied.stat().st_ino, original.stat().st_ino)
+                self.assertEqual(copied.read_bytes(), original.read_bytes())
+                self.assertEqual(copied.stat().st_mode, original.stat().st_mode)
+                self.assertEqual(copied.stat().st_mtime_ns, original.stat().st_mtime_ns)
+                self.assertEqual((self.target / "probe" / "cli.mjs").stat().st_ino,
+                                 (self.source / "probe" / "cli.mjs").stat().st_ino)
+                self.assertEqual((self.target / ".bin" / "probe").readlink(),
+                                 pathlib.Path("../probe/cli.mjs"))
+                shutil.rmtree(self.target)
 
     def test_escaping_absolute_and_cyclic_links_are_rejected(self):
         outside = self.top / "source" / "outside"
