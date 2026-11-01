@@ -16,8 +16,8 @@ import argparse, fcntl, json, os, pathlib, re, socket, sys, time
 from datetime import datetime, timedelta, timezone
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import carry, dispatch, fold, intake, notes, pane_resume, panes, tree_cleanup  # noqa: E402
-# `relay` is imported LAZILY, inside `wait()` only — importing tick.py must not
-# force `relay` (and its own `audit` import) into sys.modules for every caller,
+# `realm_ledger` is imported LAZILY, inside `wait()` only — importing tick.py must not
+# force the directory watcher into sys.modules for every caller,
 # `pane_end.py` among them, that only wants `up.quiet_point`'s tick.py half.
 
 # Waiting for the Executor's next durable action. `building` is in flight, not waiting.
@@ -32,7 +32,8 @@ RETIRE = ("subagent-driven-development", "executing-plans", "writing-plans", "re
           "receiving-code-review", "finishing-a-development-branch", "dispatching-parallel-agents")
 MINUTES, USD = 20, 5          # the Executor's declared cap, read by fold.caps() (§4.4 correction 9)
 TICK_NAME = "L-tick-local.jsonl"
-POLL_STEP = 0.05              # tick.wait's poll granularity — fine enough for AC3's <1s wake
+POLL_STEP = 0.25              # tick.wait's snapshot fallback step when notifications fail
+NOTIFY_MIN_GAP = 0.02         # bound readable-but-unusable notification wakes
 # §3.11's L2 conjunction, quantified over `mine` — a spec in one of these is done for its charter.
 # L-charter-0038/L-spec-0388 (R2): `shipped-owed-expired` joins — a check the
 # sweeper's own SD3 escalation already surfaced (§4.9's owed<=K, not this
@@ -1185,8 +1186,8 @@ def main():
 
 def _events_state(exclude_name):
     """name -> (size, mtime_ns) for every `events/*.jsonl` file EXCEPT
-    `exclude_name` — the exclusion-aware snapshot `wait()` cross-checks a
-    positive from `relay.ledger_changed` against, so its OWN appended `tick`
+    `exclude_name` — the exclusion-aware snapshot `wait()` uses to confirm a
+    directory notification (or polls when the watcher fails), so its OWN appended `tick`
     (on return) can never register as a real change to itself or a concurrent
     waiter (AC16)."""
     d = fold.EVENTS
@@ -1208,36 +1209,68 @@ def wait(root=None, max_s=300):
     `pane_end.bind_root` already does), so its own tick lands under the given
     root, not the importing process's DOIT_ROOT.
 
-    AC2: never reports "changed" on its own first look. `relay.ledger_changed`
-    reads `watermark=None` as ALWAYS changed (nothing has been seen yet), so a
-    baseline is established once, up front, and that first "changed" is
-    discarded rather than compared against.
+    AC2: never reports "changed" on its own first look. Open the directory
+    watcher before taking the baseline, so writes already in that snapshot
+    are ignored and later writes cannot fall between snapshot and watch.
 
     AC16: `L-tick-local.jsonl` is excluded from what counts as "changed" —
-    `relay.ledger_changed`'s hash is the heartbeat this polls, but a positive
-    from it is trusted only once a SEPARATE, exclusion-aware snapshot
-    (`_events_state`, every `events/*.jsonl` file except the tick file itself)
-    confirms a REAL file moved. Otherwise every wake would append a tick that
-    wakes the next waiter — a feedback loop."""
-    import relay                                             # noqa: PLC0415 — lazy; see the top-of-file note
+    directory notifications block without scans; a non-tick notification is
+    trusted only when `_events_state` confirms a real file moved. Otherwise
+    every wake would append a tick that wakes the next waiter. An unavailable
+    or lost watcher falls back to exclusion-aware snapshots every POLL_STEP.
+    The monotonic deadline bounds both paths, and the watcher always closes."""
     _bind_root(root)
-    _, mark = relay.ledger_changed(fold.ROOT)               # baseline; its own "changed" is discarded
-    excl = _events_state(TICK_NAME)
-    end = time.monotonic() + max_s
-    reason = "interval"
-    while True:
-        changed, mark = relay.ledger_changed(fold.ROOT, mark)
-        if changed:
-            new_excl = _events_state(TICK_NAME)
-            if new_excl != excl:
-                reason = "changed"
+    import realm_ledger                                      # noqa: PLC0415 — lazy; see module note
+    import math
+    import select
+
+    watcher = realm_ledger.Changes(fold.EVENTS)
+    try:
+        excl = _events_state(TICK_NAME)
+        end = time.monotonic() + max_s
+        reason = "interval"
+        if watcher.fd is None:
+            watcher.close()
+            watcher = None
+        else:
+            ready = select.poll()
+            ready.register(watcher.fd, select.POLLIN)
+        while True:
+            left = end - time.monotonic()
+            if left <= 0:
                 break
-            excl = new_excl          # only the tick file moved — not a real change; keep polling
-        if time.monotonic() >= end:
-            break
-        time.sleep(min(POLL_STEP, max(0.0, end - time.monotonic())))
-    _record()                        # exactly one tick per RETURNING call (AC4); a lock-drop loses
-    return reason                    # nothing per this module's own doctrine (Assumption 5)
+            if watcher is None:
+                time.sleep(min(POLL_STEP, left))
+                new_excl = _events_state(TICK_NAME)
+                if new_excl != excl:
+                    reason = "changed"
+                    break
+                excl = new_excl
+                continue
+            try:
+                readable = ready.poll(math.ceil(left * 1000))
+            except InterruptedError:
+                continue
+            if not readable:
+                continue
+            names = watcher.poll()
+            if names is None:
+                # Changes already closed itself. Drop it before any fallback scan.
+                watcher.close()
+                watcher = None
+            if names is None or names - {TICK_NAME}:
+                new_excl = _events_state(TICK_NAME)
+                if new_excl != excl:
+                    reason = "changed"
+                    break
+                excl = new_excl
+            if watcher is not None:
+                time.sleep(min(NOTIFY_MIN_GAP, max(0.0, end - time.monotonic())))
+        _record()                    # exactly one tick per RETURNING call (AC4); a lock-drop loses
+        return reason                # nothing per this module's own doctrine (Assumption 5)
+    finally:
+        if watcher is not None:
+            watcher.close()
 
 
 def _wait_cli(argv=None):
