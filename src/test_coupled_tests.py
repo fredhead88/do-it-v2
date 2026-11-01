@@ -262,6 +262,31 @@ class CoupledTests(unittest.TestCase):
             self.assertIn("15 omitted by the 30-file cap", capped[0])
         self.attest("AC1", lines)
 
+    def test_explicit_readiness_tests_are_uncapped_and_validated(self):
+        files = [f'tests/test_reference_{i:02d}.py' for i in range(45)]
+        with mock.patch.object(coupled_tests, 'scan', side_effect=AssertionError('readiness list rescanned')):
+            lines = coupled_tests.packet_lines('Writes: pkg/foo.py', self.repo, 'HEAD', run_tests=files)
+            self.assertEqual(len(lines), 46)
+            self.assertIn('no edit grants required', lines[0])
+            command = shlex.split(coupled_tests.run_line('spec.md', self.repo, 'HEAD', run_tests=files)[8:])
+            with mock.patch.object(coupled_tests, 'run', return_value=[]) as run, \
+                    contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(coupled_tests.main(command[2:]), 0)
+            self.assertEqual(run.call_args.args[0], files)
+            with mock.patch.object(coupled_tests, 'run', return_value=[]) as run, \
+                    contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(coupled_tests.main(command[2:-1] + ['[]']), 0)
+            self.assertEqual(run.call_args.args[0], [])
+            invalid = ('null', '{}', '"test_a.py"', 'not-json', '["../tests/test_a.py"]',
+                       '["/tests/test_a.py"]', '["tests/fixtures/test_a.py"]')
+            for value in invalid:
+                with self.subTest(value=value), mock.patch.object(coupled_tests, 'run') as run, \
+                        contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(coupled_tests.main(command[2:-1] + [value]), 2)
+                    run.assert_not_called()
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(coupled_tests.main(['spec.md', '--repo', str(self.repo), '--tests', '[]']), 2)
+
     def test_run_classifies(self):
         # The runner identifies the side from fixture data, never from the
         # checkout spelling (TMPDIR or the repo argument may be symlinked).

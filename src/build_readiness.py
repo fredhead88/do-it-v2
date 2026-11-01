@@ -128,7 +128,7 @@ def producers(missing, events, root, subject, project):
 
 
 def companion_matches(text, grant, repo, base, tree, *, registries=()):
-    """Explain each required companion using its source and matching rule."""
+    """Explain blocking companions and reference tests using their sources."""
     tests = sorted(p for p in tree if coupled_tests.is_test(p) and not merge_gate.granted(p, grant))
     sources = coupled_tests.writes_paths(grant, tree)
     matches = [dict(test=test, source=source, kind='named',
@@ -157,9 +157,14 @@ def companion_matches(text, grant, repo, base, tree, *, registries=()):
                   key=lambda row: (row['test'], row['source'], row['kind'], row['pattern']))
 
 
+def _requirements(matches):
+    blocking = {row['test'] for row in matches if row['kind'] != 'reference'}
+    run_tests = {row['test'] for row in matches if row['kind'] == 'reference'} - blocking
+    return sorted(blocking), sorted(run_tests)
+
+
 def companion_gaps(text, grant, repo, base, tree, *, registries=()):
-    return sorted({row['test'] for row in companion_matches(
-        text, grant, repo, base, tree, registries=registries)})
+    return _requirements(companion_matches(text, grant, repo, base, tree, registries=registries))[0]
 
 
 def verify_base(text, repo, base, root, project, timeout=180):
@@ -206,7 +211,7 @@ def verify_base(text, repo, base, root, project, timeout=180):
 
 def check(subject, project, base, events, *, root=None, dry_run=True):
     root = Path(root or fold.ROOT)
-    result = dict(spec=subject, base_sha=base, status='ready', findings=[], waits_for=None)
+    result = dict(spec=subject, base_sha=base, status='ready', findings=[], waits_for=None, run_tests=[])
     own = [e for e in events if e.get('subject') == subject]
     if any(e.get('type') in ('build-started', 'build-done', 'shipped') for e in own):
         result['status'] = 'already-built'
@@ -230,7 +235,8 @@ def check(subject, project, base, events, *, root=None, dry_run=True):
                 return result
             raise NotReady('missing inputs without a unique producer: ' + ', '.join(name for _, name in missing))
         registries = grading_env._project_row(project).get('shared_append_only_registries', [])
-        gaps = companion_gaps(text, grant, repo, base, tree, registries=registries)
+        gaps, result['run_tests'] = _requirements(companion_matches(
+            text, grant, repo, base, tree, registries=registries))
         if gaps:
             raise NotReady('Writes omits coupled tests/companions: ' + ', '.join(gaps))
         if dry_run:

@@ -49,25 +49,61 @@ def command(file, repo):
     return [python, "-m", "pytest", "-q", "-p", "no:cacheprovider", file], None
 
 
-def packet_lines(text, repo, rev):
+def explicit_tests(files):
+    if not isinstance(files, list) or any(not isinstance(file, str) or not is_test(file)
+            or pathlib.PurePosixPath(file).is_absolute() or '..' in pathlib.PurePosixPath(file).parts
+            or file.startswith('-') for file in files):
+        raise ValueError('readiness tests must be a list of repository-relative test files')
+    return list(dict.fromkeys(files))
+
+
+def readiness_tests(events, base_sha):
+    """Use the latest ready result only for this spec revision and base."""
+    indexed = list(enumerate(events))
+    written = max((i for i, e in indexed if e.get('type') == 'spec-written'), default=-1)
+    found = next(((i, e) for i, e in reversed(indexed) if e.get('type') == 'build-readiness'), None)
+    if (not found or found[0] < written or found[1].get('status') != 'ready'
+            or found[1].get('base_sha') != base_sha or 'run_tests' not in found[1]):
+        return None
     try:
-        rows = scan(text, repo, rev)
-        files = selected(rows)
+        return explicit_tests(found[1]['run_tests'])
+    except ValueError:
+        return None
+
+
+def packet_lines(text, repo, rev, *, run_tests=None):
+    try:
+        if run_tests is None:
+            rows = scan(text, repo, rev)
+            files = selected(rows)
+            heading = "9. Coupled existing tests on the base (" + selection_note(rows, files)
+        else:
+            files = explicit_tests(run_tests)
+            heading = (f"9. Readiness reference tests to run ({len(files)} files; no edit grants required")
     except (Truncated, subprocess.TimeoutExpired):
         return ["coupled tests: undetermined (scan truncated or timed out); report skipped for the set"]
     except (OSError, ValueError, merge_gate.Undetermined):
         return ["coupled tests: undetermined (scan failed; check repository and revision); report skipped for the set"]
-    lines = ["9. Coupled existing tests on the base (" + selection_note(rows, files) +
-             "; run after the final edit; report each in coupled):"]
+    lines = [heading + "; run after the final edit; report each in coupled):"]
     for file in files:
         cmd, reason = command(file, repo)
-        lines.append(f"   {file}: {shlex.join(cmd) if cmd else 'skipped (' + reason + ')'}")
+        fallback = ('run with the project test runner' if run_tests is not None else 'skipped')
+        lines.append(f"   {file}: {shlex.join(cmd) if cmd else fallback + ' (' + reason + ')'}")
     return lines
 
 
-def run_line(spec, repo, base):
+def run_line(spec, repo, base, *, run_tests=None):
     return "   Run: " + shlex.join(["/usr/bin/python3", str(pathlib.Path(__file__).resolve()),
-                                   str(spec), "--repo", str(repo), "--run", "--base", base])
+                                   str(spec), "--repo", str(repo), "--run", "--base", base] +
+                                  (["--tests", json.dumps(explicit_tests(run_tests))]
+                                   if run_tests is not None else []))
+
+
+def builder_lines(events, spec, repo, worktree, base):
+    files = readiness_tests(events, base)
+    kwargs = {} if files is None else {'run_tests': files}
+    return (packet_lines(pathlib.Path(spec).read_text(), repo, base, **kwargs) +
+            [run_line(spec, worktree, base, **kwargs)])
 
 
 def run(files, repo, base, *, runner=None, timeout=300):
@@ -284,14 +320,18 @@ def main(argv=None):
     parser.add_argument("--run", action="store_true")
     parser.add_argument("--base")
     parser.add_argument("--timeout", type=float, default=300)
+    parser.add_argument("--tests", metavar="JSON", help="Exact readiness test list; requires --run")
     args = parser.parse_args(argv)
     try:
         if args.run and (not args.base or not math.isfinite(args.timeout) or args.timeout <= 0):
             raise ValueError("--run requires --base and a positive finite --timeout")
-        rows = scan(args.spec.read_text(), args.repo, args.base if args.run else args.rev)
+        if args.tests is not None and not args.run:
+            raise ValueError('--tests requires --run')
+        rows = scan(args.spec.read_text(), args.repo, args.base if args.run else args.rev) if args.tests is None else []
         if args.run:
-            files = selected(rows)
-            print("coupled tests: " + selection_note(rows, files), file=sys.stderr)
+            files = selected(rows) if args.tests is None else explicit_tests(json.loads(args.tests))
+            note = selection_note(rows, files) if args.tests is None else f'{len(files)} readiness tests'
+            print("coupled tests: " + note, file=sys.stderr)
             results = run(files, args.repo, args.base, timeout=args.timeout)
             for row in results:
                 print(json.dumps(row))

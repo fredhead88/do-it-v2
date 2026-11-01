@@ -1003,8 +1003,8 @@ def p_builder(c):
           "- a gate-clean merge sometimes leaves master red (L-charter-0028)."]
     L += ["", f"Your cwd is your worktree, on branch `{c.a.subject.lower()}`. "
               f"The repository is `{repo}`. One spec, one commit, on that branch."]
-    return (L + coupled_tests.packet_lines(spec.read_text(), repo, base_sha) +
-            [coupled_tests.run_line(spec, c.worktree(), base_sha)] + preflight_lines(c))
+    return (L + coupled_tests.builder_lines(c.evs, spec, repo, c.worktree(), base_sha)
+            + preflight_lines(c))
 
 def _drop_owed_blocks(lines, owed):
     """Drop whole physical-line blocks, including fenced criterion examples."""

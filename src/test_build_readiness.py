@@ -128,6 +128,65 @@ class ReadinessTests(unittest.TestCase):
         self.spec(writes='crons.toml src/test_crons.py')
         self.assertEqual(self.check()['status'], 'ready')
 
+    def test_text_references_are_run_only_and_reach_the_builder_packet(self):
+        import coupled_tests
+        import packet
+        sources = ['pkg/service.py', 'scripts/task.sh', 'api/migrations/new_revision.py']
+        named = 'pkg/test_service.py'
+        fingerprint = 'api/genesis_schema_fingerprint.txt'
+        run_tests = [f'tests/test_importer_{i:02d}.py' for i in range(35)]
+        files = {path: '# fixture\n' for path in sources + [fingerprint]}
+        files[named] = 'from pkg import service\n'
+        files.update({path: 'from pkg import service\n# scripts/task.sh\n' for path in run_tests})
+        for path, content in files.items():
+            target = self.repo / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content)
+        self.git('add', '.')
+        self.git('commit', '-qm', 'run-only references and blocking companions')
+        self.base = self.git('rev-parse', 'HEAD')
+        self.spec(writes=' '.join(sources))
+        result = self.check(dry_run=False)
+        self.assertEqual(result['findings'], [
+            'Writes omits coupled tests/companions: ' + ', '.join(sorted([named, fingerprint]))])
+        self.assertEqual(result['run_tests'], run_tests)
+        self.spec(writes=' '.join(sources + [named, fingerprint]))
+        result = self.check(dry_run=False)
+        self.assertEqual((result['status'], result['run_tests']), ('ready', run_tests))
+        with patch.object(fold, 'ROOT', self.root), patch.object(fold, 'EVENTS', self.root / 'events'), \
+                patch.object(fold, 'PROJECT', None):
+            readiness.record(result, 'demo', root=self.root)
+            normalized = next(e for e in fold.read_events(use_cache=False) if e['type'] == 'build-readiness')
+        stored = json.loads((self.root / 'events/L-tick-local.jsonl').read_text().splitlines()[-1])
+        self.assertEqual(stored['run_tests'], run_tests)
+        events = self.events + [normalized]
+        context = SimpleNamespace(
+            a=SimpleNamespace(subject=self.sid, role='builder', base_sha=self.base,
+                              repo=str(self.repo), produces=None, conventions=None, hint=None),
+            evs=events, spec_file=lambda: self.root / 'content' / (self.sid + '.md'),
+            all_of=lambda kind: [e for e in events if e['type'] == kind],
+            last=lambda kind: next((e for e in reversed(events) if e['type'] == kind), None),
+            charter_file=lambda: None, charter_id=lambda: None, standing=lambda: ([], []),
+            footprint=lambda: sources, project=lambda: 'demo', worktree=lambda: str(self.repo))
+        with patch.object(packet, 'verify_base_sha', return_value=self.base), \
+                patch.object(packet, 'write_verify_script', return_value=None), \
+                patch.object(packet, 'conflicts', return_value=[]), \
+                patch.object(packet, 'preflight_lines', return_value=[]):
+            lines = packet.p_builder(context)
+        self.assertIn('no edit grants', '\n'.join(lines))
+        for path in run_tests:
+            self.assertTrue(any(line.startswith('   ' + path + ':') for line in lines), path)
+        import shlex
+        command = shlex.split(next(line for line in lines if line.startswith('   Run: '))[8:])
+        self.assertEqual(json.loads(command[command.index('--tests') + 1]), run_tests)
+        with patch.object(coupled_tests, 'scan', side_effect=AssertionError('explicit list rescanned')), \
+                patch.object(coupled_tests, 'run', return_value=[]) as run:
+            self.assertEqual(coupled_tests.main(command[2:]), 0)
+        self.assertEqual(run.call_args.args[0], run_tests)
+        self.assertIsNone(coupled_tests.readiness_tests(events, '0' * 40))
+        events.append(dict(type='spec-written', subject=self.sid))
+        self.assertIsNone(coupled_tests.readiness_tests(events, self.base))
+
     def test_shared_registries_require_named_tests_and_migration_fingerprint(self):
         registries = ['api/alembic_supabase/branch_isolation.json',
                       'scratch_listing_authority_cleanup.py']
@@ -153,8 +212,10 @@ class ReadinessTests(unittest.TestCase):
                          ['Writes omits coupled tests/companions: ' + ', '.join(expected)])
         self.spec(writes=' '.join(writes + expected))
         self.assertEqual(self.check(dry_run=False, project_row=row)['status'], 'ready')
-        # The same paths retain text coupling for a project without this policy.
-        self.assertIn('tests/test_registry_reader.py', self.check(dry_run=False)['findings'][0])
+        # Without this project policy the readers become run-only references.
+        ordinary = self.check(dry_run=False)
+        self.assertEqual(ordinary['status'], 'ready')
+        self.assertEqual(ordinary['run_tests'], ['tests/test_registry_reader.py'])
 
     def test_non_python_sources_couple_full_paths_and_names_without_bare_stems(self):
         sources = ['dashboard/src/app/api/auth/login/route.ts', 'scripts/deploy.sh', 'api/service.py']
@@ -173,10 +234,15 @@ class ReadinessTests(unittest.TestCase):
         self.git('commit', '-qm', 'path and stem references')
         self.base = self.git('rev-parse', 'HEAD')
         self.spec(writes=' '.join(sources))
-        self.assertEqual(self.check(dry_run=False)['findings'],
-                         ['Writes omits coupled tests/companions: ' + ', '.join(sorted(expected))])
-        self.spec(writes=' '.join(sources + expected))
-        self.assertEqual(self.check(dry_run=False)['status'], 'ready')
+        blocking = ['scripts/tests/test_deploy_mode.py', 'dashboard/src/app/api/auth/login/route.test.ts']
+        run_tests = ['tests/test_explicit_reference.py', 'tests/test_python_import.py']
+        result = self.check(dry_run=False)
+        self.assertEqual(result['findings'],
+                         ['Writes omits coupled tests/companions: ' + ', '.join(sorted(blocking))])
+        self.assertEqual(result['run_tests'], run_tests)
+        self.spec(writes=' '.join(sources + blocking))
+        result = self.check(dry_run=False)
+        self.assertEqual((result['status'], result['run_tests']), ('ready', run_tests))
 
     def test_broken_chain_and_missing_environment_bounce(self):
         for command, reason in [('false\ntrue', 'exit 1'),
@@ -210,8 +276,10 @@ class ReadinessTests(unittest.TestCase):
         self.git('commit', '-qm', 'round two false-positive fixtures')
         self.base = self.git('rev-parse', 'HEAD')
         self.spec(writes='pkg/route.ts pkg/worker.py')
-        self.assertEqual(self.check(dry_run=False)['findings'], [
-            'Writes omits coupled tests/companions: pkg/__tests__/route.test.ts, tests/test_import.py'])
+        result = self.check(dry_run=False)
+        self.assertEqual(result['findings'], [
+            'Writes omits coupled tests/companions: pkg/__tests__/route.test.ts'])
+        self.assertEqual(result['run_tests'], ['tests/test_import.py'])
         tree = self.git('ls-tree', '-r', '--name-only', self.base).splitlines()
         rows = readiness.companion_matches('', ['pkg/route.ts', 'pkg/worker.py'],
                                             self.repo, self.base, tree)
@@ -233,8 +301,8 @@ class ReadinessTests(unittest.TestCase):
         self.git('commit', '-qm', 'package-root import fixture')
         self.base = self.git('rev-parse', 'HEAD')
         self.spec(writes='api/app/worker.py')
-        self.assertEqual(self.check(dry_run=False)['findings'], [
-            'Writes omits coupled tests/companions: tests/test_import.py'])
+        result = self.check(dry_run=False)
+        self.assertEqual((result['status'], result['run_tests']), ('ready', ['tests/test_import.py']))
 
     def test_rebuilds_bypass_first_build_gate(self):
         self.events.append(dict(type='build-done', subject=self.sid))

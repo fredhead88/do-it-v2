@@ -80,6 +80,7 @@ class BuilderDependencies(unittest.TestCase):
             spec = Path(name)/'spec.md'
             spec.write_text('Run npm ci before verification.')
             context = Mock()
+            context.evs = []
             context.a = SimpleNamespace(repo=name, base_sha=None, produces=None, conventions=None, subject='L-spec-9966')
             context.all_of.return_value = []
             context.spec_file.return_value = spec
