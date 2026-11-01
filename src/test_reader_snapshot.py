@@ -345,10 +345,11 @@ class SnapshotTests(unittest.TestCase):
         for driver in ('tick', 'sweep'):
             for append in (False, True):
                 with ExitStack() as stack, self.counted() as (read, unpack, finish, copies):
-                    calls, retained = [], []
+                    calls, retained, cache_modes = [], [], []
                     original = fold.read_events
                     def spy(*args, **kwargs):
                         calls.append(kwargs.get('snapshot'))
+                        cache_modes.append(kwargs.get('use_cache', True))
                         result = original(*args, **kwargs)
                         retained.append(result)
                         return result
@@ -359,7 +360,7 @@ class SnapshotTests(unittest.TestCase):
                             self.patch_call(stack, tick.intake, 'run', side_effect=lambda ev:
                                 self.write('L-builder-appended.jsonl', [event('build-started')], 'a') and {})
                         tick._record()
-                        self.assertEqual(len(calls), 2)
+                        self.assertEqual(len(calls), 3)
                     else:
                         self.stub_sweep(stack)
                         if append:
@@ -385,15 +386,22 @@ class SnapshotTests(unittest.TestCase):
                             sweep_owed.run(now=NOW, runner=SimpleNamespace())
                         self.assertIs(retry.call_args_list[0].args[0], retry.call_args_list[-1].args[0])
                         self.assertEqual(len(calls), 4 if append else 3)
-                    self.assertTrue(all(isinstance(s, fold.ReaderSnapshot) for s in calls))
-                    self.assertTrue(all(s is calls[0] for s in calls))
-                    expected = (len(calls) if append else 1)
-                    self.assertEqual((read.call_count, finish.call_count), (expected, expected))
-                    self.assertEqual(len(copies), len(calls))
+                    shared_calls = calls
+                    if driver == 'tick':
+                        # The observer alone refreshes without the shared snapshot.
+                        self.assertIsNone(calls[-1])
+                        self.assertEqual(cache_modes, [True, True, False])
+                        shared_calls = calls[:-1]
+                    self.assertTrue(all(isinstance(s, fold.ReaderSnapshot) for s in shared_calls))
+                    self.assertTrue(all(s is shared_calls[0] for s in shared_calls))
+                    expected = (len(shared_calls) if append else 1)
+                    self.assertEqual(read.call_count, expected)
+                    self.assertEqual(finish.call_count, expected + (driver == 'tick'))
+                    self.assertEqual(len(copies), len(shared_calls))
                     self.assertTrue(all(passes == 1 for passes, _ in copies))
                     if append:
                         self.assertGreater(len(retained[-1]), len(retained[0]))
-                        self.assertEqual(len(retained[0]), len(self.reference()) - (len(calls) - 1))
+                        self.assertEqual(len(retained[0]), len(self.reference()) - (len(shared_calls) - 1))
         self.look_evaluations()
         # Protect the pinned read-site count, without importing/running up.
         source_root = Path(__file__).parent
@@ -403,8 +411,8 @@ class SnapshotTests(unittest.TestCase):
             count += sum(isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
                 and isinstance(n.func.value, ast.Name) and n.func.value.id == 'fold'
                 and n.func.attr == 'read_events' for n in ast.walk(tree))
-        self.assertEqual(count, 8)
-        print('AC4 tick reads=2; sweep reads=3/4; materializations=generations; copy passes per read=1; look folds=1/evaluation')
+        self.assertEqual(count, 9)
+        print('AC4 tick reads=2 shared + 1 uncached; sweep reads=3/4; cache materializations=generations; tick normalizations=generations+1; copy passes per shared read=1; look folds=1/evaluation')
         print('L-spec-1711 AC4 ok')
 
     def look_evaluations(self):

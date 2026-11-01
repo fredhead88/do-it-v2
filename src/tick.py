@@ -13,7 +13,7 @@ a supervised pane that reads the same lane for itself; nothing here launches it.
 import ledger_files
 import ledger_cache
 import argparse, fcntl, json, os, pathlib, re, socket, sys, time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import carry, dispatch, fold, intake, notes, pane_resume, panes, tree_cleanup  # noqa: E402
 # `relay` is imported LAZILY, inside `wait()` only — importing tick.py must not
@@ -642,6 +642,66 @@ def _reap_summary(rows, *, not_reapable, manifest) -> dict | None:
     return result
 
 
+def _record_next_step_held(events, specs, steps, now):
+    """Observe the computed lane using fresh assignment evidence, never launch.
+
+    The subject namespace keeps these facts out of lifecycle clocks. Only real
+    starts (including a replay joined by spawn id) can end a no-run interval.
+    """
+    import spawns
+    by_subject, ends, assignments = {}, {}, {}
+    for event in events:
+        by_subject.setdefault(event.get('subject'), []).append(event)
+        if event.get('type') in spawns.TERMINAL:
+            ends.setdefault(event.get('spawn'), []).append(event)
+        if event.get('type') == 'autodispatched' and event.get('spawn'):
+            assignments[event['spawn']] = event.get('subject')
+    starts = spawns.start_events(events)
+    live = spawns.open_spawns(events, now)
+    for step in steps:
+        if (step.item_kind != 'spec' or step.item not in specs
+                or specs[step.item]['state'] in dispatch.SETTLED_STATES):
+            continue
+        evs = by_subject.get(step.item, [])
+        builds = [e for e in evs if e.get('type') == 'build-done']
+        if not builds:
+            continue
+        build = max(builds, key=lambda e: fold.ts(e['ts']))
+        since = fold.ts(build['ts'])
+        def follows(run):
+            subject = run.get('subject') or assignments.get(run.get('spawn'))
+            return (subject == step.item and fold.ts(run['ts']) >= fold.ts(build['ts'])
+                    and (not build.get('spawn') or run.get('spawn') != build['spawn']))
+        if any(follows(run) for run in live):
+            continue
+        for run in starts:
+            if not follows(run):
+                continue
+            terminal = ends.get(run.get('spawn'), []) if run.get('spawn') else []
+            if terminal:
+                ended = min(fold.ts(e['ts']) for e in terminal)
+            else:
+                # Same expiry as open_spawns. Reconciliation normally provides
+                # a terminal row, but elapsed legacy starts need a stable clock.
+                cap = dispatch.ROLES.get(spawns._role(run), (None, 60, 0))[1]
+                ended = fold.ts(run['ts']) + timedelta(minutes=(run.get('window_min') or cap) + cap)
+            since = max(since, ended)
+        if (now - since).total_seconds() < 900:
+            continue
+        held = [e for e in by_subject.get('held:' + step.item, [])
+                if e.get('type') == 'next-step-held' and e.get('spec') == step.item
+                and fold.admits(e, e.get('actor', '')) is None
+                and fold.ts(e['since']) == since]
+        # read_events preserves append order for same-file timestamp ties.
+        if held and held[-1]['reason'] == step.reason:
+            continue
+        refusal = dispatch.emit(tick_path(), {}, 'next-step-held',
+                                subject='held:' + step.item, spec=step.item,
+                                reason=step.reason, owner=step.owner, since=since.isoformat())
+        if refusal is not None:
+            raise RuntimeError(refusal)
+
+
 def _record():
     """One flock-guarded fold+lane+append — the shared core `main()` and
     `wait()` both run under the IDENTICAL non-blocking lock (this module's own
@@ -855,6 +915,7 @@ def _record():
     autodispatch_pass_failed = False
     lane_driver_log_error = None
     dispatch_started = time.monotonic()
+    steps = []
     def log_outcomes(lines):
         nonlocal lane_driver_log_error
         try:
@@ -889,6 +950,14 @@ def _record():
                 admission['admission_error'] = str(exc)[:160]
         log_outcomes([f'failed autodispatch: {e}'])
     log_outcomes([f'finished autodispatch elapsed_s={time.monotonic() - dispatch_started:.3f}'])
+    held_error = None
+    try:
+        # Keep ev/specs private to dispatch and todo. This read observes even a
+        # partial dispatch pass, under the same tick lock as the append below.
+        held_events = fold.read_events(use_cache=False)
+        _record_next_step_held(held_events, specs, steps, fold.NOW)
+    except Exception as exc:
+        held_error = str(exc)
     # L-charter-0042/L-spec-0486 (cleanup-on-finish), R15a (record): the tick's own
     # per-spec worktree reap, on this SAME `ev` — its own try/except, exactly like
     # `autodispatch_error` above: a raise never stops the tick's own heartbeat, and
@@ -956,6 +1025,8 @@ def _record():
         kv["push_origin_error"] = push_origin_error
     if autodispatch_error:
         kv["autodispatch_error"] = autodispatch_error
+    if held_error is not None:
+        kv["held_error"] = held_error
     if lane_driver_log_error:
         kv["lane_driver_log_error"] = lane_driver_log_error
     reap_counts = _reap_summary(recorded_reap, not_reapable=not_reapable, manifest=manifest)

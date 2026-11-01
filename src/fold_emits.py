@@ -225,6 +225,7 @@ EMITS["message-answered"] = {"look", "planner", "executor", "thinker"}
 # everything"). Each is scoped to exactly the one actor the requirement that
 # creates it names, per §2.5's own rule.
 EMITS["autodispatched"] = {"tick"}          # R1: the tick's own dispatch record
+EMITS["next-step-held"] = {"tick"}
 EMITS["autodispatch-failed"] = {"tick"}     # R1: the tick's own dispatch-skip record
 EMITS["autodispatch-skipped"] = {"tick"}
 EMITS["dependency-hold"] = {"thinker", "operator", "planner"}
@@ -331,6 +332,7 @@ EMITS["pane-dialog-resolved"] = {"pane-watchdog"}
 EMITS["merge-gate-undetermined"] = {"executor", "tick"}
 
 REQUIRED_ROWS = {
+    "next-step-held": ("subject", "spec", "reason", "owner", "since"),
     "merge-gate-undetermined": ("subject", "reason", "sha", "branch_sha", "main_sha", "branch",
                                 "repo", "cycle", "attempt", "retryable", "retry_at", "hold_reason", "findings"),
     "autodispatch-skipped": ("subject", "reason"),
