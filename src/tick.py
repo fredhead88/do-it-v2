@@ -273,7 +273,7 @@ def _launch_events():
         return None
 
 
-def _record_held_skips(events, specs):
+def _record_held_skips(events, specs, *, reporter=None):
     """Persist only changes from the latest observed skip for each live spec."""
     import autodispatch
     by_subject = {}
@@ -284,12 +284,17 @@ def _record_held_skips(events, specs):
             shipped.add(e.get('subject'))
     reasons = {}
     for sid, spec in sorted(specs.items()):
-        if not str(sid).startswith('L-spec-') or spec.get('state') in dispatch.SETTLED_STATES:
-            continue
-        evs = by_subject.get(sid, [])
-        reason = autodispatch._automatic_hold(evs, events, shipped=shipped)
-        if reason:
-            reasons[sid] = reason
+        try:
+            if not str(sid).startswith('L-spec-') or spec.get('state') in dispatch.SETTLED_STATES:
+                continue
+            evs = by_subject.get(sid, [])
+            reason = autodispatch._automatic_hold(evs, events, shipped=shipped)
+            if reason:
+                reasons[sid] = reason
+        except Exception as exc:
+            if reporter is None:
+                raise
+            reporter.fail(sid, exc, phase='hold-observer')
     if not reasons:
         return
     latest = {}
@@ -448,15 +453,22 @@ def _steps(events, specs, now):
     import dispatch
     import lane_rules
     import nextstep
-    waves = {}
+    waves, failed = {}, []
+    usable = dict(specs)
     for sid, spec in specs.items():
-        evs = spec.get('evs', [])
-        written = next((e for e in reversed(evs)
-                        if e.get('type') == 'spec-written' and e.get('footprint')), None)
-        charter = dispatch.resolve_charter(evs, sid, None)
-        if written and charter:
-            waves[sid] = dispatch.spec_wave(charter, written['footprint'])
-    return nextstep.next_steps(events, specs, now, lane_rules.load(), waves)
+        try:
+            evs = spec.get('evs', [])
+            written = next((e for e in reversed(evs)
+                            if e.get('type') == 'spec-written' and e.get('footprint')), None)
+            charter = dispatch.resolve_charter(evs, sid, None)
+            if written and charter:
+                waves[sid] = dispatch.spec_wave(charter, written['footprint'])
+        except Exception as exc:
+            usable.pop(sid, None)
+            own = [e for e in events if e.get('subject') == sid]
+            failed.append(nextstep._spec_exception(sid, own, exc))
+    planned = nextstep.next_steps(events, usable, now, lane_rules.load(), waves)
+    return sorted(planned + failed, key=lambda step: (step.item_kind, step.item))
 
 
 def run_steps(events, specs, now, *, dispatcher=None, dry_run=False, handled=frozenset(), steps=None, admission: dict | None = None):
@@ -467,8 +479,10 @@ def run_steps(events, specs, now, *, dispatcher=None, dry_run=False, handled=fro
     by_subject = {}
     for e in events:
         by_subject.setdefault(e.get('subject'), []).append(e)
+    import dispatch_isolation
+    reporter = None if dry_run else dispatch_isolation.Pass(events, now)
     if not dry_run:
-        _record_held_skips(events, specs)
+        _record_held_skips(events, specs, reporter=reporter)
     if steps is None:
         steps = _steps(events, specs, now)
     runner = _PassDispatcher(dispatcher or autodispatch._real_runner, events, specs, now, dry_run)
@@ -497,77 +511,90 @@ def run_steps(events, specs, now, *, dispatcher=None, dry_run=False, handled=fro
                      and not step.reason.startswith('undetermined:'))
             return (not grade if grades_first else False, step.since, step.item)
         for step in sorted(steps, key=visit_order):
-            if step.item in handled:
-                continue
-            evs = by_subject.get(step.item, [])
-            hold = autodispatch._automatic_hold(evs, events)
-            if hold and step.action in ('build', 'rebuild'):
-                out.append(f'hold {step.item}: {hold}')
-                continue
-            if step.reason.startswith('undetermined:') or step.state == 'hold':
-                out.append(f"{'undetermined' if step.reason.startswith('undetermined:') else 'hold'} {step.item}: {step.reason}")
-                continue
-            if step.owner != 'tick' or step.action not in LAUNCH_ACTIONS:
-                continue
-            if step.action == 'merge':
-                import merge_queue
-                try:
-                    head = merge_queue.next_candidate(events)
-                except (ValueError, OSError) as exc:
-                    out.append(f'hold undetermined: {exc}')
-                    continue
-                if head is None or step.item_kind == 'spec' and step.item != head:
-                    out.append('hold undetermined: merge Step item differs from queue head'
-                               if head is not None else 'hold undetermined: no merge candidate')
-                    continue
-            role = ROUTINE_ROLES.get(step.action)
-            if step.action == 'audit' and audit_launches >= AUDIT_PASS_MAX:
-                out.append(f'seat-wait {step.item} audit')
-                continue
-            if role in slots and slots[role] <= 0:
-                out.append(f'seat-wait {step.item} {step.action}')
-                continue
-            if gate is not None and not gate_disabled:
-                try:
-                    decision = gate.check(step.item, role or 'window_gate', action=step.action, since=step.since)
-                    if decision.hold:
-                        out.append(f'resource-wait {step.item} {step.action}')
-                        continue
-                    if decision.override:
-                        detail = decision.override
-                        if detail == 'max-wait':
-                            detail += f" waited_s={gate.pending_override['waited_s']}"
-                        out.append(f'resource-escape {step.item} {step.action} {detail}')
-                except Exception as exc:
-                    gate_errors.append('check: ' + str(exc))
-                    gate_disabled = getattr(gate, 'mode', 'observe') == 'enforce'
-            if dry_run:
-                out.append(f'would act {step.item} {step.action}')
-                if role in slots:
-                    slots[role] -= 1
-                continue
             try:
-                spawned, raised = True, True  # Any exception may follow a started process.
-                try:
-                    if step.action == 'audit':
-                        audit_launches += 1
-                    spawn = launch(step, dispatcher=runner)
-                    spawned, raised = bool(spawn), False
-                finally:
-                    if gate is not None and not gate_disabled:
-                        try:
-                            gate.note_launch(step.item, spawned, raised=raised)
-                        except Exception as exc:
-                            gate_errors.append('note_launch: ' + str(exc))
-                            gate_disabled = getattr(gate, 'mode', 'observe') == 'enforce'
-                if spawn:
-                    out.append(f'acted {step.item} {step.action} spawn={spawn}')
+                if reporter and step.item in reporter.failed:
+                    out.append(f'failed {step.item}: hold evaluation failed')
+                    continue
+                if reporter and 'evaluation failed:' in step.reason:
+                    reporter.fail(step.item, step.reason, phase='planning')
+                if step.item in handled:
+                    continue
+                evs = by_subject.get(step.item, [])
+                hold = autodispatch._automatic_hold(evs, events)
+                if hold and step.action in ('build', 'rebuild'):
+                    out.append(f'hold {step.item}: {hold}')
+                    continue
+                if step.reason.startswith('undetermined:') or step.state == 'hold':
+                    out.append(f"{'undetermined' if step.reason.startswith('undetermined:') else 'hold'} {step.item}: {step.reason}")
+                    continue
+                if step.owner != 'tick' or step.action not in LAUNCH_ACTIONS:
+                    continue
+                if step.action == 'merge':
+                    import merge_queue
+                    try:
+                        head = merge_queue.next_candidate(events)
+                    except (ValueError, OSError) as exc:
+                        out.append(f'hold undetermined: {exc}')
+                        continue
+                    if head is None or step.item_kind == 'spec' and step.item != head:
+                        out.append('hold undetermined: merge Step item differs from queue head'
+                                   if head is not None else 'hold undetermined: no merge candidate')
+                        continue
+                role = ROUTINE_ROLES.get(step.action)
+                if step.action == 'audit' and audit_launches >= AUDIT_PASS_MAX:
+                    out.append(f'seat-wait {step.item} audit')
+                    continue
+                if role in slots and slots[role] <= 0:
+                    out.append(f'seat-wait {step.item} {step.action}')
+                    continue
+                if gate is not None and not gate_disabled:
+                    try:
+                        decision = gate.check(step.item, role or 'window_gate', action=step.action, since=step.since)
+                        if decision.hold:
+                            out.append(f'resource-wait {step.item} {step.action}')
+                            continue
+                        if decision.override:
+                            detail = decision.override
+                            if detail == 'max-wait':
+                                detail += f" waited_s={gate.pending_override['waited_s']}"
+                            out.append(f'resource-escape {step.item} {step.action} {detail}')
+                    except Exception as exc:
+                        gate_errors.append('check: ' + str(exc))
+                        gate_disabled = getattr(gate, 'mode', 'observe') == 'enforce'
+                if dry_run:
+                    out.append(f'would act {step.item} {step.action}')
                     if role in slots:
                         slots[role] -= 1
-                else:
-                    out.append(f'hold {step.item}: standing dispatch failure')
-            except ValueError as exc:
-                out.append(f'failed {step.item} {step.action}: {exc}')
+                    continue
+                try:
+                    spawned, raised = True, True  # Any exception may follow a started process.
+                    try:
+                        if step.action == 'audit':
+                            audit_launches += 1
+                        spawn = launch(step, dispatcher=runner)
+                        spawned, raised = bool(spawn), False
+                    finally:
+                        if gate is not None and not gate_disabled:
+                            try:
+                                gate.note_launch(step.item, spawned, raised=raised)
+                            except Exception as exc:
+                                gate_errors.append('note_launch: ' + str(exc))
+                                gate_disabled = getattr(gate, 'mode', 'observe') == 'enforce'
+                    if spawn:
+                        out.append(f'acted {step.item} {step.action} spawn={spawn}')
+                        if role in slots:
+                            slots[role] -= 1
+                    else:
+                        out.append(f'hold {step.item}: standing dispatch failure')
+                except ValueError as exc:
+                    if reporter:
+                        reporter.fail(step.item, exc, phase='launch')
+                    out.append(f'failed {step.item} {step.action}: {exc}')
+            except Exception as exc:
+                if reporter:
+                    reporter.fail(step.item, exc, phase='dispatch')
+                detail = ': ' + dispatch._failure_detail(exc) if isinstance(exc, ValueError) else ''
+                out.append(f'failed {step.item} {step.action}: {type(exc).__name__}{detail}')
     finally:
         if gate is not None:
             try:
@@ -580,6 +607,13 @@ def run_steps(events, specs, now, *, dispatcher=None, dry_run=False, handled=fro
                     + gate_errors)[:160]
             if admission is not None:
                 admission.update(fields)
+        if reporter:
+            try:
+                reporter.finish()
+            except OSError as exc:
+                # Bookkeeping failure must not turn completed launches into a
+                # failed whole pass; the heartbeat retains this diagnostic.
+                out.append(f'failed autodispatch item accounting: {type(exc).__name__}')
     return out
 
 
