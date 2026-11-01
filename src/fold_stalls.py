@@ -337,7 +337,7 @@ def step_row(step, limits, now):
                 'dependency-held' if reason.startswith('held:') else
                 'wave-held' if reason.startswith('wave') else 'idle')
     else:
-        rule = 'gate' if step.action == 'merge-gate' else step.action
+        rule = {'merge-gate': 'gate', 'merge-direct': 'merge'}.get(step.action, step.action)
     limit = 0 if rule == 'undetermined' else limits[rule]['limit_min']
     try:
         overdue = (now - lane_rules._time(step.since)).total_seconds() > limit * 60

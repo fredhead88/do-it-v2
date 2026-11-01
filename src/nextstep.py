@@ -590,6 +590,11 @@ def _merge(c):
     from merge_queue import queue
     live = next((r for r in queue(c['events']) if r.get('spec') == c['sid']), None)
     if live is not None:
+        if live.get('project') == 'do-it-v2':
+            return _result(dict(ts=live['added_at']),
+                           'Executor merge-direct: rerun the merge gate against current main; '
+                           'require fresh main_sha and branch_sha before merging',
+                           step_action='merge-direct', step_owner='executor')
         if live.get('project') != merge_queue.window_gate.PROJECT:
             return _result(dict(ts=live['added_at']), 'undetermined: project')
         return _result(dict(ts=live['added_at']))
@@ -902,7 +907,8 @@ def _choose(c, rows, owners):
         trigger = next((e for e in reversed(evs)
                         if (_source(e) == row['trigger'] if row.get('trigger')
                             else e['ts'] == row['since'])), {})
-        return Step(sid, 'spec', ACTION_STAGES[name], 'action', name, owners[name],
+        return Step(sid, 'spec', ACTION_STAGES[name], 'action',
+                    row.get('step_action', name), row.get('step_owner', owners[name]),
                     _source(trigger), row.get('reason', 'condition met'), None, row['since'])
     for row in rows:
         if row['name'] in {'wave-held', 'dependency-held'}:
@@ -945,6 +951,8 @@ def next_steps(events, specs, now, rules, waves=None):
         # Export effective owners, including the supported window launcher.
         ACTIONS.clear()
         ACTIONS.update(owners)
+        if any(row.get('project') == 'do-it-v2' for row in merge_queue.queue(events)):
+            ACTIONS['merge-direct'] = 'executor'
     except (ValueError, TypeError, KeyError) as exc:
         rule_error, owners = str(exc), {}
     steps, attempts, spawn_events = [], {}, {}

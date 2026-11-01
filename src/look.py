@@ -1148,6 +1148,11 @@ def run(events, *, now=None, runner=None, root=None, toml_path=None, dry_run=Fal
         _check_origin_behind(cfg, runner, now, deadline, events, root, briefs, answered)
         _check_spec_idle(events, now, root, briefs, answered, folded=evaluation_fold())
         _check_lane_stale(events, now, root, briefs, folded=evaluation_fold())
+        try:
+            import merge_queue_watchdog
+            merge_queue_watchdog.check(events, evaluation_fold()[0], now, root, dry_run=dry_run)
+        except Exception:
+            _fire_undetermined("merge-queue-no-step", events, root, briefs)
         _check_owed_overdue(events, now, root, briefs)
         wallclock_events = _check_wallclock(events, runner, now, root, cfg, deadline, dry_run, briefs, tally=tally)
         r = _clear("look-stale", "look-stale", "fresh pass", events, root)
