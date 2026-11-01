@@ -80,7 +80,7 @@ def _candidate(step, events):
         return False
     if step.state == 'action' and step.owner == 'tick' and step.action in ('grade', 'regrade'):
         return True
-    if step.state != 'hold' or not step.reason.startswith(('exhausted:', 'retry-wait:')):
+    if step.state != 'hold' or not step.reason.startswith(('exhausted:', 'retries-exhausted:', 'retry-wait:')):
         return False
     own = [e for e in events if e.get('subject') == step.item]
     import autodispatch
