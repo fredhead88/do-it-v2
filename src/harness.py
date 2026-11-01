@@ -15,6 +15,7 @@ not `/`, and not a directory some OTHER call made with its own raw
 `tempfile.mkdtemp()` — by construction, not by a denylist: those five never
 sit inside a directory this process just created.
 """
+import os
 import pathlib
 import shutil
 import tempfile
@@ -59,3 +60,10 @@ def cleanup(path):
     except ValueError:
         raise NotHarnessPath(f"{p} is not under the harness base {base}") from None
     shutil.rmtree(p)
+
+
+def isolate_git():
+    """Fixture git init/config must never inherit a real checkout's Git routing."""
+    for name in tuple(os.environ):
+        if name.startswith("GIT_"):
+            del os.environ[name]
