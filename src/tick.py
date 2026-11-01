@@ -544,7 +544,7 @@ def run_steps(events, specs, now, *, dispatcher=None, dry_run=False, handled=fro
         steps = _steps(events, specs, now)
     runner = _PassDispatcher(dispatcher or autodispatch._real_runner, events, specs, now, dry_run)
     in_flight = {role: lane_driver._in_flight_role(events, now, role)
-                 for role in ('builder', 'reviewer')}
+                 for role in ('builder', 'reviewer', 'grader')}
     slots = dict(builder=max(0, autodispatch.capacity() - in_flight['builder']),
                  reviewer=max(0, lane_driver.capacity() - in_flight['reviewer']))
     gate, gate_errors = None, []

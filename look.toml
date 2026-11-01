@@ -90,8 +90,13 @@ mem_hard_stop_gb = 8
 mem_swap_hard_stop_gb = 12
 mem_pressure_some_avg10_max = 5
 mem_pressure_full_avg10_max = 1
-load1_per_core_delay = 3
-load1_per_core_stop = 4
+# CPU, job and load limits are provisional: re-check 7 days of observe data
+# before enforcement. Never set heavy_jobs_max below the builder seat cap
+# (the box's models.toml [seats] builder) plus one reviewer.
+cpu_pressure_some_avg10_max = 60
+heavy_jobs_max = 10
+load1_per_core_delay = 2
+load1_per_core_stop = 3
 running_peak_factor = 0.5
 release_readings = 2
 max_wait_min = 15

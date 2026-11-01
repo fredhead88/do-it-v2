@@ -356,6 +356,38 @@ class AdmissionTests(unittest.TestCase):
     dispatcher = LauncherTests.dispatcher
     rows = LauncherTests.rows
 
+    def test_1961_AC07(self):
+        import loadgate
+        original_isolated = self.isolated
+        def run(mode, *, graders=0, cpu=0):
+            captured = []
+            @contextlib.contextmanager
+            def isolated(requested):
+                with original_isolated(requested) as (root, stack):
+                    (root / 'proc/pressure/cpu').write_text(f'some avg10={cpu} avg60={cpu} total=0\n')
+                    stack.enter_context(patch.object(lane_driver, '_in_flight_role',
+                        side_effect=lambda events, now, role: graders if role == 'grader' else 0))
+                    original_begin = loadgate.begin
+                    def begin(**kw):
+                        captured.append(kw['running'])
+                        return original_begin(**kw)
+                    stack.enter_context(patch.object(loadgate, 'begin', side_effect=begin))
+                    yield root, stack
+            with patch.object(self, 'isolated', side_effect=isolated):
+                result = self.dispatch_pass(mode)
+            return result, captured
+        baseline, _ = run('observe')
+        graders, captured = run('observe', graders=1)
+        self.assertEqual(captured, [dict(builder=0, reviewer=0, grader=1)])
+        self.assertEqual(baseline[:3], graders[:3])
+        observed, _ = run('observe', cpu=80)
+        off, _ = run('off', cpu=80)
+        self.assertEqual(observed[:3], off[:3])
+        self.assertEqual(observed[3]['admission_held'], 0)
+        self.assertIn('cpu-pressure', observed[3]['admission_trips'])
+        _launcher_evidence('1961-AC7', dict(running=captured[0], grader_seats_unchanged=True,
+                                         observe_equals_off=True, admission_held=0))
+
     @contextlib.contextmanager
     def isolated(self, mode):
         with tempfile.TemporaryDirectory(prefix='admission-tick-') as directory, contextlib.ExitStack() as stack:
@@ -566,7 +598,8 @@ class EnforcementTests(unittest.TestCase):
         return (self.now - datetime.timedelta(minutes=minutes)).isoformat(timespec='seconds')
 
     @contextlib.contextmanager
-    def enforcing(self, *, mem=7, trip=1, age=1, seats=3, running=1, wait=15):
+    def enforcing(self, *, mem=7, trip=1, age=1, seats=3, running=1, wait=15,
+                  heavy_jobs_max=None, cpu=None, cpu_tripped=False):
         import loadgate as lg
         with AdmissionTests.isolated(self, '') as (root, stack):
             self.root, self.events, self.calls = root, [], []
@@ -576,9 +609,16 @@ class EnforcementTests(unittest.TestCase):
             (root / 'models.toml').write_text(f'[seats]\nbuilder={seats}\nreviewer=1\n')
             table = root / 'look.toml'
             table.write_text(f'[admission]\nmode="observe"\nmax_wait_min={wait}\n')
+            if heavy_jobs_max is not None:
+                with table.open('a') as stream:
+                    stream.write(f'heavy_jobs_max={heavy_jobs_max}\n')
             stack.enter_context(patch.dict(os.environ, DOIT_ADMISSION_TEST_TOML=str(table)))
             self.memory(mem)
+            if cpu is not None:
+                (root / 'proc/pressure/cpu').write_text(f'some avg10={cpu} avg60={cpu} total=0\n')
             state = lg._fresh() | dict(t=self.now.timestamp()-age*60, trip_since=self.ago(trip))
+            if cpu_tripped:
+                state['cpu_tripped'] = True
             lg.save_state(root / 'state/admission.json', state)
             # Exercise the real capacity and in-flight readers with a fixture ledger.
             stack.enter_context(patch.object(autodispatch, 'capacity', new=self.builder_capacity))
@@ -623,6 +663,34 @@ class EnforcementTests(unittest.TestCase):
             lines = tick.run_steps(self.events, {}, self.now, steps=steps,
                                    **({'admission':info} if admission else {}))
         return lines, calls, info
+
+    def test_1961_AC08(self):
+        with self.enforcing(mem=20, cpu=80, cpu_tripped=True):
+            lines, calls, info = self.run_pass(self.steps())
+            self.assertIn('resource-wait L-spec-9601 build', lines)
+            self.assertIn('resource-wait L-spec-9602 grade', lines)
+            self.assertEqual(calls, [(f'L-spec-{n}', action) for n, action in (
+                (9603, 'rebuild'), (9604, 'regrade'), (9605, 'review'),
+                (9606, 'merge'))])
+            self.assertIn('seat-wait L-spec-9607 review', lines)
+            self.assertFalse(any(line.startswith('resource-wait L-spec-9607 ') for line in lines))
+        with self.enforcing(mem=20, cpu=0, heavy_jobs_max=2):
+            steps = [self.step('grade', item='g1', since=self.ago(3)),
+                     self.step('grade', item='g2', since=self.ago(2.5)),
+                     self.step('build', item='b1', since=self.ago(2))]
+            lines, calls, info = self.run_pass(steps)
+            self.assertEqual(calls, [('g1', 'grade')])
+            self.assertIn('resource-wait g2 grade', lines)
+            self.assertIn('resource-wait b1 build', lines)
+            self.assertEqual(info['admission_held'], 2)
+        with self.enforcing(mem=20, cpu=80, cpu_tripped=True, trip=40):
+            steps = [self.step('build', item=f'b{i}', since=self.ago(20)) for i in range(3)]
+            lines, calls, info = self.run_pass(steps)
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(sum(line.startswith('resource-escape ') and 'max-wait' in line for line in lines), 1)
+            self.assertEqual(sum(line.startswith('resource-wait ') for line in lines), 2)
+        _launcher_evidence('1961-AC8', dict(cpu_holds_build_grade=True, other_actions_launch=True,
+                                         same_pass_holds=2, max_wait_launches=len(calls)))
 
     def test_enforce_AC3_AC4_and_AC5_retry(self):
         with self.enforcing() as (root, stack):
