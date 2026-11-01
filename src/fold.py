@@ -58,7 +58,7 @@ APPLIED = []          # corrections that actually landed, for HEALTH. See apply_
 # §12.5 leaves expected dwell UNSET, to be derived from the stage timings the log
 # carries. These are the fallback, used until the log has DWELL_MIN_N crossings of
 # a stage; after that dwell_days() measures it. (enter, leave) per state.
-DWELL_DAYS = {"written": 1, "building": 1, "graded": 1, "reviewing": 1}
+DWELL_DAYS = {"written": 1, "building": 1, "blocked": 1, "graded": 1, "reviewing": 1}
 STAGES = {"written": ("spec-written", "build-started"), "building": ("build-started", "build-done"),
           "graded": ("build-done", "verdict"), "reviewing": ("verdict", "review")}
 DWELL_MIN_N = 3
@@ -1526,26 +1526,8 @@ def render_spend(subject, events, specs):
 
 
 def dwell_days(by_subject):
-    """Expected dwell per state, measured from the log's own stage crossings — the
-    fallback stands until DWELL_MIN_N specs have crossed. Twice the MEDIAN crossing,
-    not twice the longest: one spec that sat over a weekend would otherwise raise
-    the bar for every spec after it, and a wedge alarm nothing can trip is worse
-    than no alarm."""
-    import statistics
-    out = dict(DWELL_DAYS)
-    for state, (enter, leave) in STAGES.items():
-        obs = []
-        for evs in by_subject.values():
-            a = next((e for e in evs if e["type"] == enter), None)
-            b = a and next((e for e in evs if e["type"] == leave
-                            and ts(e["ts"]) >= ts(a["ts"])), None)
-            if b:
-                obs.append((ts(b["ts"]) - ts(a["ts"])).total_seconds() / 86400)
-        if len(obs) >= DWELL_MIN_N:
-            out[state] = 2 * statistics.median(obs)
-    return out
-
-
+    from fold_stalls import dwell_days as project
+    return project(by_subject)
 def verdict_owed_criteria(events, subject):
     """L-spec-0482/R12.b,c,d — the ONE shared filter for "which of SUBJECT's
     criteria are owed", by the same rule `spec_state`'s own `verdict_owed`
@@ -1684,6 +1666,9 @@ def spec_state(evs, retracted):
     charter = charter_id(next((e.get("charter") for e in reversed(evs) if e.get("charter")), None))
     if charter in retracted and "shipped" not in types:
         return "dropped"                                             # D76, terminal for alarms
+    from fold_stalls import unsuccessful_build
+    if "shipped" not in types and unsuccessful_build(evs) is not None:
+        return "blocked"
     for state, marker in (("shipped", "shipped"), ("reviewing", "verdict"),
                           ("graded", "build-done"), ("building", "build-started"),
                           ("written", "spec-written")):
@@ -1789,61 +1774,14 @@ def owed_due(specs):
 
 
 def stall_rows(events=(), specs=None, *, now=None, dwell=None, by_subject=None):
-    """One classified row per aged spec, shared by board and realm.
-
-    Supply the already-folded by_subject to avoid folding twice. This API only
-    reads ledger facts and prerequisite plans; it never ticks or dispatches.
-    """
-    from fold_stalls import rows
-    if by_subject is None:
-        folded = fold(events)
-        specs = folded[0] if specs is None else specs
-        by_subject = folded[3]
-    clock = now or NOW
-    specs = {sid: {**s, 'age': (clock - ts(s['evs'][-1]['ts'])).total_seconds() / 86400}
-             for sid, s in (specs or {}).items()}
-    return rows(specs, by_subject, clock, dwell or dwell_days(by_subject))
-
-
+    from fold_stalls import stall_rows as project
+    return project(events, specs, now=now, dwell=dwell, by_subject=by_subject)
 def wedged(spec, dwell=None, *, events=None, specs=None, by_subject=None, now=None):
-    """Only classified STUCK is a WEDGE; pass ledger context for external holds.
-
-    The two-argument form retains standalone spec checks. Cross-spec wave and
-    capability facts require the same admitted context the board/realm use.
-    """
-    if dwell is None:
-        import dispatch
-        selected = {sid: s for sid, s in (specs or {spec['id']: spec}).items()
-                    if s['state'] != 'unknown' and s['state'] not in dispatch.SETTLED_STATES}
-        specs = selected
-        dwell = {s['state']: -1 for s in selected.values()}
-        if spec['id'] not in selected:
-            return False
-    if events is not None or by_subject is not None:
-        found = stall_rows(events or (), specs or {spec['id']: spec}, now=now,
-                           dwell=dwell, by_subject=by_subject)
-        return any(r['spec'] == spec['id'] and r['bucket'] == 'STUCK' for r in found)
-    from fold_stalls import rows
-    found = rows({spec['id']: spec}, {spec['id']: spec.get('evs', [])}, now or NOW,
-                 dwell or DWELL_DAYS)
-    return bool(found and found[0]['bucket'] == 'STUCK')
-
-
+    from fold_stalls import wedged as project
+    return project(spec, dwell, events=events, specs=specs, by_subject=by_subject, now=now)
 def stall_lane_rows(events, specs=None, now=None, *, by_subject=None):
-    """Realm's lane-compatible view; reason_live is never guessed from age."""
-    import dispatch
-    if specs is None or by_subject is None:
-        folded = fold(events)
-        specs = folded[0] if specs is None else specs
-        by_subject = folded[3] if by_subject is None else by_subject
-    unfinished = {sid: s for sid, s in specs.items()
-                  if s['state'] != 'unknown' and s['state'] not in dispatch.SETTLED_STATES}
-    return [dict(r, rule='stalls', action=r['reason'], actor=r['owner'],
-                 overdue=r['bucket'] == 'STUCK', reason_live=r['bucket'] != 'STUCK')
-            for r in stall_rows(events, unfinished, now=now, by_subject=by_subject,
-                                dwell={s['state']: -1 for s in unfinished.values()})]
-
-
+    from fold_stalls import stall_lane_rows as project
+    return project(events, specs, now, by_subject=by_subject)
 def in_flight_deploys(events):
     """§4.11's `deploy-started` with no terminal event after it, per subject —
     the wrapper may have been killed, and the ledger otherwise has no event that
@@ -1892,32 +1830,11 @@ def _needs_you_sort_key(r):
 
 
 def step_row(step, limits, now):
-    """Map a Step to the legacy dwell row; an unknown age is always overdue."""
-    import lane_rules
-    reason = step.reason
-    if step.state == 'hold':
-        rule = ('undetermined' if reason.startswith('undetermined:') else
-                'dependency-held' if reason.startswith('held:') else
-                'wave-held' if reason.startswith('wave') else 'idle')
-    else:
-        rule = 'gate' if step.action == 'merge-gate' else step.action
-    limit = 0 if rule == 'undetermined' else limits[rule]['limit_min']
-    try:
-        overdue = (now - lane_rules._time(step.since)).total_seconds() > limit * 60
-    except (ValueError, TypeError, OverflowError):
-        rule, limit, overdue = 'undetermined', 0, True
-    return dict(spec=step.item, rule=rule, since=step.since, reason=reason,
-                action=step.action or 'none', limit_min=limit, overdue=overdue,
-                reason_live=step.owner in {'tick', 'relay', 'sweeper'} and step.trigger is not None)
-
-
+    from fold_stalls import step_row as project
+    return project(step, limits, now)
 def _step_line(value):
-    """Ledger text cannot add a physical board line or a field separator."""
-    import unicodedata
-    return ' '.join(''.join(' ' if unicodedata.category(c).startswith('C') else c
-                            for c in str(value)).replace(' · ', ' / ').split())
-
-
+    from fold_stalls import _step_line as project
+    return project(value)
 def render(events, specs, charters, ignored, by_subject):
     looked = max((ts(e["ts"]) for e in events if e.get("type") == "observed"),
                  default=datetime.min.replace(tzinfo=timezone.utc))
@@ -2024,22 +1941,8 @@ def render(events, specs, charters, ignored, by_subject):
                       f"{e.get('owner') or '⚠ NOBODY'} · {age_days(e):.1f}d" for e in open_blocks])
     block("WRITTEN, NOT PICKED UP", [f"{s['id']} · {s['age']:.1f}d{flag(s)}"
                                      for s in sorted(pick("written"), key=_spec_row_sort_key)])
-    # A deploy-started with no landed/failed/refused after it is a wrapper that
-    # may be dead — visible here, not silently lost (S34). BLOCK_ORDER["IN
-    # FLIGHT"]: ONE sequence, spec rows and deploy rows interleaved by the same
-    # common (age-proxy, subject/id, content-tiebreak) key — never concatenated
-    # by kind, since neither row kind's construction order is a meaningful
-    # display order on its own.
-    in_flight_rows = (
-        [(_spec_row_sort_key(s), f"{s['id']} · {s['age']:.1f}d{flag(s)}") for s in pick("building")]
-        + [((-age_days(e), e.get("subject", "?"), raw_content_json(e)),
-            f"deploy in flight · {e.get('subject','?')} · {str(e.get('sha',''))[:7]} · "
-            f"{age_days(e):.1f}d")
-           for e in in_flight_deploys(events)]
-    )
-    in_flight_rows.sort(key=lambda t: t[0])
-    block("IN FLIGHT", [line for _key, line in in_flight_rows])
-
+    from fold_stalls import in_flight_lines, verification_lines
+    block("IN FLIGHT", in_flight_lines(events, specs, stalls, flag))
     # UNSERVED — R6/L-spec-0196: one row per `relay.unserved()` entry, a
     # dispatched packet nobody claimed (pending) or that failed the claim window
     # (failed-unserved) within the last 24h. PANES-idiom degrade (Constraints):
@@ -2068,17 +1971,7 @@ def render(events, specs, charters, ignored, by_subject):
             unserved_rows = [f"unavailable — {unserved_err}"]
     block("UNSERVED", unserved_rows)
 
-    # A standing rejection is the difference between "waiting to be looked at" and
-    # "already looked at and failed". Same section, but the row may not read the same.
-    # R7/L-spec-0196: narrowed back to exclude `shipped-owed-due` now that OWED
-    # DUE (below) is its one home (Planner-directed exception to the
-    # no-trigger-change Constraint) — L-spec-0192 widened this pick by one
-    # token pending this unit's own section (ADR-0028-6); a `shipped-owed-due`
-    # spec renders exactly once now, never here too (AC12).
-    block("AWAITING VERIFICATION",
-          [f"{s['id']} · {s['state']} · {s['age']:.1f}d"
-           + (f"  ⚠ {s['rejects']} REJECTED, needs rework" if s["rejects"] else "") + flag(s)
-           for s in sorted(pick("graded", "reviewing", "shipped"), key=_spec_row_sort_key)])
+    block("AWAITING VERIFICATION", verification_lines(specs, flag))
     def owed_line(s):
         wake = str(next((e.get("wake_at") for e in s["evs"]
                          if e["type"] == "owed-ac" and e.get("wake_at")), "?"))
@@ -2562,7 +2455,7 @@ if __name__ == "__main__":
 # `test_fold.py`'s AST-walking completeness test (below) proves this tuple is
 # a superset of every string `spec_state` can actually produce.
 SPEC_STATES = (
-    "unknown", "written", "building", "graded", "reviewing", "shipped",
+    "unknown", "written", "building", "blocked", "graded", "reviewing", "shipped",
     "shipped-owed-evidence", "shipped-owed-due", "shipped-owed-expired",
     "accepted", "closed-shipped", "closed-unbuilt", "dropped", "killed", "void",
 )

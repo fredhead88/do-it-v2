@@ -196,13 +196,14 @@ for kind, states in (("spec", fold.SPEC_STATES), ("charter", fold.CHARTER_STATES
             assert bad not in low, f"{kind}:{state} phrase contains banned substring {bad!r}: {ph!r}"
         print(f"AC10 {kind}:{state} ok")
         named += 1
-assert named == 26, named
+assert named == len(fold.SPEC_STATES) + len(fold.CHARTER_STATES) + len(plain.GOAL_STATES), named
 
 EXPECTED_PHRASE = {
     "spec": {
         "unknown": "state unclear — needs a look",
         "written": "written, waiting to be built",
         "building": "being built",
+        "blocked": "waiting for repair",
         "graded": "being checked",
         "reviewing": "being checked",
         "shipped": "merged, waiting for its check",
@@ -241,7 +242,7 @@ print("AC11 ok")
 # ── AC12 · plain.NEXT: 15 keys, valid owners, terminal rows exact ──────────
 
 assert set(plain.NEXT) == set(fold.SPEC_STATES), sorted(plain.NEXT)
-assert len(plain.NEXT) == 15
+assert len(plain.NEXT) == len(fold.SPEC_STATES)
 ROLES = {"planner", "executor", "builder", "grader", "reviewer", "owed-sweeper",
          "operator", "thinker", "nobody"}
 for state, (text, owner) in plain.NEXT.items():
@@ -269,3 +270,39 @@ print("AC13 ok")
 
 shutil.rmtree(TMP, ignore_errors=True)
 print("plain-core: all checks passed")
+
+
+# Exercise the production direct NEXT lookups for all three dossier kinds.
+def test_blocked_dossiers():
+    import brief
+    from test_fold_stalls import admitted, row, outcome, SID, NOW, evidence
+    cid, gid, written = 'L-charter-91909', 'L-goal-91909', 'L-spec-91910'
+    checked = []
+    for mixed in (False, True):
+        for reverse in (False, True):
+            children = [row('spec-written', 'planner', minute=-3, charter=cid)]
+            if mixed:
+                children.append(row('spec-written', 'planner', minute=-3, subject=written, charter=cid))
+            if reverse:
+                children.reverse()
+            rows = [row('charter-filed', 'operator', minute=-5, subject=cid, goal=gid, covers=['R1']),
+                    *children, outcome('BLOCKED')]
+            with admitted(rows) as (root, events, folded):
+                for item in (SID, cid, gid, written):
+                    (root / 'content' / (item + '.md')).write_text('# Fixture\n\n## Intent\nA repair fixture.\n')
+                spec = brief.dossier(SID, events, root, NOW)
+                assert spec['status']['phrase'] == 'waiting for repair', spec
+                assert spec['next'] == dict(text='waiting for repair', owner='executor'), spec
+                charter = brief.dossier(cid, events, root, NOW)
+                expected = ('waiting to be picked up and built', 'builder') if mixed else ('waiting for repair', 'executor')
+                assert (charter['next']['text'], charter['next']['owner']) == expected, charter
+                child = next(c for c in charter['children'] if c['id'] == SID)
+                assert child['phrase'] == 'waiting for repair', child
+                assert child['waiting_on'] == 'waiting for repair (executor)', child
+                goal = brief.dossier(gid, events, root, NOW)
+                assert goal['children'], goal
+                checked.append(dict(spec=spec['next'], charter=charter['next'], goal=goal['next']))
+    evidence('AC7', checked)
+
+
+test_blocked_dossiers()

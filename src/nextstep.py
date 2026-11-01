@@ -34,7 +34,7 @@ ACTION_STAGES = dict(build='building', rebuild='building', grade='checking',
 EVENT_STAGES = {'spec-written': 'planned', 'build-started': 'building',
                 'build-done': 'checking', 'verdict': 'checking',
                 'review': 'checking', 'queue-add': 'merging'}
-PIPELINE = {'written', 'building', 'graded', 'reviewing'}
+PIPELINE = {'written', 'building', 'blocked', 'graded', 'reviewing'}
 OWED_STATES = {'shipped-owed-evidence', 'shipped-owed-due', 'shipped-owed-expired'}
 FAILURES = {'merge-gate-undetermined', 'merge-gate-rework', 'spawn-failed', 'autodispatch-failed'}
 NOT_READY_PREFIXES = ('wave-order', 'bundle-pending', 'duplicate-dispatch', 'dispatch-in-progress')

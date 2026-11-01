@@ -296,7 +296,7 @@ TERMINAL_STATES = ("accepted", "killed", "void", "dropped", "closed-shipped", "c
 
 
 def _grader_trigger(evs):
-    """R13a: the newest of (a) a `build-done` (actor builder) `status=DONE`, or
+    """R13a: the newest of (a) a current `build-done` (actor builder) `status=DONE`, or
     (b) a `decision regrade=yes` from `thinker`/`operator` with no `rework=yes`.
     Returns `(trigger_event, trigger_name)`, or `(None, None)` when neither
     exists. `trigger_name` for (a) is `rework` when an OLDER `rejected-criterion`
@@ -304,9 +304,10 @@ def _grader_trigger(evs):
     rework=yes` is never itself a trigger (SD-R13-1a) — the rework's own next
     `build-done` re-triggers as (a)."""
     T = lambda e: fold.ts(e.get("ts"))
-    build_dones = [e for e in evs if e.get("type") == "build-done" and e.get("status") == "DONE"
-                   and e.get("actor") == "builder"]
-    newest_bd = max(build_dones, key=T) if build_dones else None
+    from fold_stalls import newest_builder_outcome
+    newest_bd = newest_builder_outcome(evs)
+    if newest_bd is not None and newest_bd.get("status") != "DONE":
+        newest_bd = None
     regrades = [e for e in evs if e.get("type") == "decision" and e.get("regrade") == "yes"
                 and e.get("actor") in ("thinker", "operator") and e.get("rework") != "yes"]
     newest_rg = max(regrades, key=T) if regrades else None

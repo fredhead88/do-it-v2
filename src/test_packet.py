@@ -2138,3 +2138,24 @@ def test_spec_preflight_packets():
 
 
 test_spec_preflight_packets()
+
+
+# Blocked work remains an open footprint warning.
+def test_blocked_conflicts():
+    from types import SimpleNamespace
+    from test_fold_stalls import admitted, row, outcome, SID, evidence
+    subjects = [SID, 'L-spec-91910', 'L-spec-91911', 'L-spec-91912']
+    rows = []
+    for sid in subjects:
+        rows += [row('spec-written', 'planner', minute=-1, subject=sid,
+                     footprint=['src/other.py'] if sid.endswith('911') else ['src/fold.py']),
+                 outcome('BLOCKED', subject=sid)]
+    rows.append(row('spec-closed', 'operator', minute=1, subject=subjects[-1]))
+    with admitted(rows) as (_, events, folded):
+        c = SimpleNamespace(a=SimpleNamespace(subject=SID), specs=folded[0], footprint=lambda: ['src/fold.py'])
+        actual = packet.conflicts(c)
+        assert actual == ['L-spec-91910 · src/fold.py · blocked'], actual
+        evidence('AC8', actual)
+
+
+test_blocked_conflicts()
