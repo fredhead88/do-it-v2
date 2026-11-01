@@ -21,6 +21,7 @@ case "${1:-board}" in
   audit)   shift; exec python3 "$SRC/audit.py" "$@" ;;
   deploy)  shift; exec python3 "$SRC/deploy.py" "$@" ;;
   reap)    shift; exec python3 "$SRC/tree_cleanup.py" "$@" ;;
+  reap-scratch-db) shift; exec python3 "$SRC/reap_scratch_db.py" "$@" ;;
   reap-tmp) shift; exec python3 "$SRC/reap_tmp.py" "$@" ;;
   vet-dep) shift; exec node "$HERE/scripts/vet-dep.mjs" "$@" ;;
   paid-call) shift; exec python3 "$SRC/paid_call.py" "$@" ;;
@@ -230,6 +231,7 @@ doit — a ledger that derives state, and the guards that read it
                                            a dossier generated from the ledger and content files only
   doit deploy <spec> --sha S --target T --cmd C --check C  serial; waits; proves the sha is live (§4.11)
   doit reap <charter> [--repo D] [--dry-run]   reap only the provably dead worktrees at close (§4.11)
+  doit reap-scratch-db [--dry-run] [--min-idle-h H]  reap allowlisted local scratch databases idle >48h
   doit dispatch <role> <subject> [...]    spawn one contract, check it, append its events (-h for flags)
   doit cancel <spawn> [--force]          end a queued, unclaimed seat spawn (executor/operator/thinker only)
   doit tick                               fold; spawn the Executor only if the lane is actionable (D117)

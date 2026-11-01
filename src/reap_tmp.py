@@ -360,6 +360,53 @@ def _scan_dir(dirpath, uid, min_age_min, now, proc_root, dry_run, proc_refs, rec
     return removed, kept
 
 
+def _nested_pgdata(root, uid=None):
+    """Closed root and shape: claude-*/**/scratchpad/**/pgdata-*; no symlinks."""
+    found = []
+    uid = os.getuid() if uid is None else uid
+    for entry in pathlib.Path(root).iterdir():
+        if not entry.name.startswith("claude-") or entry.is_symlink() or not entry.is_dir():
+            continue
+        if entry.stat().st_uid != uid:
+            continue
+        def fail(exc):
+            raise exc
+        for parent, dirs, _ in os.walk(entry, followlinks=False, onerror=fail):
+            dirs[:] = [d for d in dirs if not pathlib.Path(parent, d).is_symlink()]
+            for name in list(dirs):
+                path = pathlib.Path(parent, name)
+                if name.startswith("pgdata-") and "scratchpad" in path.relative_to(entry).parts[:-1]:
+                    found.append(path)
+                    dirs.remove(name)  # never select a data directory's descendants
+    return found
+
+
+def _scan_nested_pgdata(paths, uid, now, proc_root, dry_run, proc_refs, recorded_refs):
+    removed, kept = [], []
+    for path in paths:
+        reason = None
+        try:
+            if _recorded_overlap(path, recorded_refs):
+                reason = "recorded resource; registry owns cleanup"
+            else:
+                # A worktree anywhere above or inside this candidate is never tmp garbage.
+                ancestors = [path, *path.parents]
+                if any((p / ".git").is_file() or (p / ".git/HEAD").is_file() for p in ancestors) or any(
+                        ".git" in dirs or ".git" in files for _, dirs, files in os.walk(path)):
+                    reason = "git worktree; kept"
+                else:
+                    kind, reason = _decide(str(path), uid, 48 * 60, now, proc_root, False, proc_refs)
+                    if kind == "remove":
+                        removed.append(str(path))
+                        if not dry_run:
+                            _delete(path)
+                        continue
+        except (OSError, Undetermined):
+            reason = "undetermined"
+        kept.append({"path": str(path), "reason": reason})
+    return removed, kept
+
+
 def _device_for(mount):
     """The block device backing `mount`, read from /proc/mounts — quotactl
     wants a device path, not a mount point. None when it cannot be
@@ -980,8 +1027,15 @@ def run(root="/tmp", uid=None, min_age_min=120, dry_run=False, now=None, proc_ro
     recorded_refs = {pathlib.Path(os.path.realpath(r.ref)) for r in resources.live(events or [])
                      if pathlib.Path(r.ref).is_absolute()}
     proc_refs, tmp_other_uid_skipped = _own_uid_refs(proc_root, uid)
+    # Prevent generic parent deletion from bypassing the nested data's fixed 48h
+    # retention or its own live pid/socket checks, including during pressure mode.
+    nested = _nested_pgdata(root, uid)
     removed, kept = _scan_dir(root, uid, effective_min_age, now, proc_root, dry_run,
-                              proc_refs, recorded_refs)
+                              proc_refs, recorded_refs | {p.resolve() for p in nested})
+    n_removed, n_kept = _scan_nested_pgdata(nested, uid, now, proc_root, dry_run,
+                                          proc_refs, recorded_refs)
+    removed += n_removed
+    kept += n_kept
 
     errors = {}
     if scratch_root is not None:

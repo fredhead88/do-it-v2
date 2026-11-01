@@ -795,6 +795,9 @@ EXPECTED_CRONS_ROWS = [
 CRONS_PATH = pathlib.Path(__file__).resolve().parent.parent / "crons.toml"
 with open(CRONS_PATH, "rb") as f:
     crons_doc = tomllib.load(f)
+EXPECTED_CRONS_ROWS.append({"name": "scratch-db-reaper", "where": "user",
+    "schedule": "17 * * * *", "command": "{doit} cron-run scratch-db-reaper -- {doit} reap-scratch-db",
+    "path": "{doit}", "sig": r"\bdoit reap-scratch-db\b", "owner": "thinker", "project": "do-it-v2"})
 ok(crons_doc["row"] == EXPECTED_CRONS_ROWS,
    f"L0440-AC20: cron rows match current wrappers, runtime bounds and */5 reaper cadence: {crons_doc['row']}")
 print("L0440-AC20 ok")

@@ -324,3 +324,13 @@ sig = 'flow_health\.py\b'
 owner = "thinker"
 project = "do-it-v2"
 max_runtime_s = 600
+
+[[row]]
+name = "scratch-db-reaper"
+where = "user"
+schedule = "17 * * * *"
+command = "{doit} cron-run scratch-db-reaper -- {doit} reap-scratch-db"
+path = "{doit}"
+sig = '\bdoit reap-scratch-db\b'
+owner = "thinker"
+project = "do-it-v2"
