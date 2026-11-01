@@ -24,7 +24,7 @@ The first reading is taken on the first verifier pass after the `shipped` event 
 pass runs every two hours). Ship-time capture is deferred by the binding scope
 correction for L-spec-0682; this module does not install a ship-time hook.
 """
-import json, pathlib, subprocess, sys
+import hashlib, json, pathlib, subprocess, sys
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
@@ -32,7 +32,7 @@ import dispatch, fold, owed  # noqa: E402
 
 HERE = pathlib.Path(__file__).resolve().parent
 LEDGER_NAME = "L-verifier-local.jsonl"
-PG_STAT_SQL = ("SELECT queryid, calls, left(query, 200) FROM pg_stat_statements "
+PG_STAT_SQL = ("SELECT queryid, calls, left(query, 200) FROM doit_obs.stat_statements() "
                "ORDER BY calls DESC LIMIT 200")
 
 
@@ -106,16 +106,51 @@ def timed_declarations(spec_evs):
     return keep
 
 
+class ReadingUnavailable(RuntimeError):
+    """A safe diagnostic category, never raw subprocess output or credentials."""
+
+
 def default_reader(spec_id, criterion, decl):
-    """A read-only production reading through `scripts/sweep/ro-sql`; `None` when
-    the declaration names no readable query or the read does not succeed."""
+    """Use the operator-provisioned observation function through ro-sql.
+
+    A declaration may supply its own read-only reading_sql to select the named
+    statements instead of the default top-200 sample.
+    """
     import sweep_wrappers
     sql = decl.get("reading_sql") or (PG_STAT_SQL if decl.get("reading") == "pg_stat_statements" else None)
-    if not sql or sweep_wrappers.sql_statement_refusal(sql) or not decl.get("project"):
-        return None
+    if not sql:
+        raise ReadingUnavailable("no reading SQL declared")
+    if sweep_wrappers.sql_statement_refusal(sql):
+        raise ReadingUnavailable("reading SQL refused by the read-only wrapper")
+    if not decl.get("project"):
+        raise ReadingUnavailable("reading project missing")
     r = subprocess.run([str(HERE.parent / "scripts" / "sweep" / "ro-sql"), decl["project"], sql],
                        capture_output=True, text=True, timeout=120)
-    return {"sql": sql, "rows": r.stdout[:6000]} if r.returncode == 0 else None
+    if r.returncode:
+        raise ReadingUnavailable(f"ro-sql exited {r.returncode}; check observation function access")
+    if not r.stdout.strip():
+        raise ReadingUnavailable("reading returned no matching rows")
+    if "<insufficient privilege>" in r.stdout:
+        raise ReadingUnavailable("statement text hidden; use the observation function")
+    return {"sql": sql, "rows": r.stdout}
+
+
+def _unobservable(sid, crit, decl, reason, events, ledger):
+    # A declaration change can authorize a new attempt/diagnostic. Repeating a
+    # failed pass leaves one observation while still retrying the actual read.
+    identity = hashlib.sha256(json.dumps(decl, sort_keys=True, default=str).encode()).hexdigest()
+    if any(e.get("type") == "owed-unobservable" and e.get("subject") == sid
+           and e.get("criterion") == crit and e.get("timed_reading_of") == identity
+           for e in events):
+        return
+    dst = pathlib.Path(ledger) if ledger is not None else ledger_path()
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    refusal = dispatch.emit(dst, {"subject": sid}, "owed-unobservable", criterion=crit,
+                            capability="ro-dsn", timed_reading_of=identity,
+                            why="first timed reading unavailable: " + reason,
+                            evidence="no baseline captured; the next verifier pass will retry")
+    if refusal:
+        raise ValueError("timed reading observation refused: " + refusal)
 
 
 def run_pass(by_subject, now, reader=None, *, root=None, ledger=None, events=()):
@@ -129,8 +164,15 @@ def run_pass(by_subject, now, reader=None, *, root=None, ledger=None, events=())
         for crit, decl in sorted(timed_declarations(spec_evs).items()):
             rec = load(sid, crit, root=root)
             if rec is None:
-                reading = reader(sid, crit, decl)
+                reason = "reader returned no reading"
+                try:
+                    reading = reader(sid, crit, decl)
+                except ReadingUnavailable as exc:
+                    reading, reason = None, str(exc)
+                except Exception as exc:
+                    reading, reason = None, "reader raised " + type(exc).__name__
                 if reading is None:
+                    _unobservable(sid, crit, decl, reason, list(events) + spec_evs, ledger)
                     lines.append(f"{sid} {crit}: first reading not takeable this pass")
                     continue
                 rec = capture_first(sid, crit, reading, now=now, root=root)
