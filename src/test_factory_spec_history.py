@@ -56,6 +56,20 @@ class HistoryTests(unittest.TestCase):
             self.assertTrue(out.startswith('---\nintent'))
             self.assertEqual(out, spec_history.augment_packet_text(out, str(repo), 'p'))
 
+    def test_yaml_writes_with_trailing_comments_still_yield_history(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            def git(*args):
+                return subprocess.check_output(['git', '-C', str(repo), *args], text=True).strip()
+            git('init', '-q'); git('config', 'user.name', 'f'); git('config', 'user.email', 'f@example.invalid')
+            (repo / 'target.py').write_text('x\n')
+            git('add', '.'); git('commit', '-qm', 'yaml writes history')
+            body = 'writes:\n  - target.py\n  - new_thing.py  # NEW file\n---\n\n# T\n'
+            raw = '---\nintent: ' + __import__('json').dumps(body) + '\n---\n\n# T\n'
+            out = spec_history.augment_packet_text(raw, str(repo), 'p')
+            self.assertIn('yaml writes history', out)
+            self.assertNotIn('history unavailable', out)
+
 
 if __name__ == '__main__':
     unittest.main()

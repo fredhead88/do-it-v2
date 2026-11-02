@@ -58,7 +58,11 @@ def augment_packet_text(text, repo, project=''):
     footprint = []
     try:  # a carried body is the frontmatter's JSON-quoted `intent:` — decode before parsing Writes
         m = re.search(r'(?m)^intent: (".*")$', text)
-        footprint = merge_gate.grant_from_text(json.loads(m[1]) if m else text) or []
+        body = json.loads(m[1]) if m else text
+        # Inbound v4 specs list writes as YAML bullets with trailing comments
+        # (`  - path  # NEW file`); the grant parser reads `#` as a token.
+        body = re.sub(r'(?m)^(\s*-\s+\S+)\s+#.*$', r'\1', body)
+        footprint = merge_gate.grant_from_text(body) or []
     except (ValueError, merge_gate.Undetermined):
         pass
     ctx = SimpleNamespace(a=SimpleNamespace(role='spec-writer', repo=repo),
