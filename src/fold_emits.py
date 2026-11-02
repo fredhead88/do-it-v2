@@ -302,6 +302,7 @@ EMITS["ci-shadow-passed"] = {"ci-shadow", "operator"}
 EMITS["ci-runner-set"] = {"ci-runner", "operator"}
 EMITS["bill-check"] = {"gh-bill"}
 EMITS["window-tree-verified"] = {"executor", "operator"}
+EMITS["window-rehearsed"] = {"executor", "operator"}
 EMITS["window-bisected"] = {"executor", "operator"}
 EMITS["window-targeted-attribution"] = {"executor", "operator"}
 
@@ -352,6 +353,7 @@ REQUIRED_ROWS = {
     "ci-runner-set": ("variable", "from", "to"),
     "bill-check": ("date", "yday", "mtd"),
     "window-tree-verified": ("window", "sha", "tree"),
+    "window-rehearsed": ("base_sha", "specs", "state"),
     "window-bisected": ("window", "halves"),
     "window-targeted-attribution": ("window", "candidate", "base_sha", "ids"),
     "window-run-minutes": ("window", "candidate", "minutes_source"),

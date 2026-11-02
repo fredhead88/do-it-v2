@@ -2,6 +2,10 @@
 """window_gate — verify a merge WINDOW's candidate tip before master moves (L-spec-0765).
 
     doit gate-window <window-id> --project albert-scott [--specs A,B,C] [--after WINDOW] [--main BRANCH] [--fixes-base]
+    doit gate-window <id> --rehearse --on SHA --project albert-scott --specs A,B,C
+
+Rehearsals verify the prospective tree without owning or advancing a window.
+They return 0 green, 1 red, 2 undetermined/preflight failure, or 3 at capacity.
 
 Today nobody runs the full Python suite until a deploy, so one bad merge hides
 behind twenty-four good ones. For project `albert-scott` the Executor instead
@@ -111,6 +115,13 @@ def prior_result(events, tree):
         if newest_ts is None or stamp >= newest_ts:
             newest, newest_ts = event, stamp
     return newest
+
+
+def covers(prior, required):
+    return (prior is not None and prior.get("green") is True
+            and isinstance(prior.get("required"), list)
+            and all(isinstance(c, str) for c in prior["required"])
+            and set(prior["required"]) >= set(required))
 
 
 def ev(typ, subject, **kv):
@@ -403,21 +414,28 @@ def merge_into(repo, cur, branch_sha, msg):
     return c.stdout.strip(), None
 
 
-def build_candidate(repo, window, base, entries):
+def build_candidate(repo, window, base, entries, *, publish=True, emit=None):
     """entries: [(spec, branch, branch_sha)]. -> (candidate, merged_specs, conflicts{spec: paths})."""
     cur, merged, conflicts = base, [], {}
     for spec, branch, bsha in entries:
         new, paths = merge_into(repo, cur, bsha, f"merge({spec}): window {window}")
         if new is None and os.environ.get("DOIT_WINDOW_RECHAIN", "on") == "on":
-            new, _ = rechain.resolve(repo, cur, (spec, branch, bsha), window, ev=ev)
+            new, _ = rechain.resolve(repo, cur, (spec, branch, bsha), window, ev=emit or ev)
         if new is None:
             conflicts[spec] = paths
         else:
             cur = new
             merged.append(spec)
-    if merged:
+    if merged and publish:
         git(repo, "update-ref", f"refs/heads/window/{window}", cur)
     return cur, merged, conflicts
+
+
+def fingerprint_candidate(repo, candidate, window, project, *, publish=True, emit=None):
+    candidate = rechain.fingerprint(repo, candidate, window, ev=emit or ev, project=project)
+    if publish:
+        git(repo, "update-ref", f"refs/heads/window/{window}", candidate)
+    return candidate
 
 
 # ── verification: ONE call into the existing deploy gate ─────────────────────
@@ -524,6 +542,12 @@ def scope(repo, base, cand, ci_checks, *, fixes_base=False):
 
 def base_pg(repo, root_base, ci_checks, window, events, *, fixes_base=False):
     """Inherit PG only across classified non-PG changes; a failed run still blocks."""
+    try:
+        prior = prior_result(events, tree_of(repo, root_base))
+        if covers(prior, [PG_CHECK]):
+            return dict(state="green", nodes=[], url="", doc={}, cached_tree=prior["tree"]), []
+    except (OSError, RuntimeError, ValueError, TypeError, subprocess.SubprocessError):
+        pass
     baseline = verify(repo, root_base, [PG_CHECK], window)
     docs = [baseline.get("doc", {})]
     failures = baseline.get("pg_failures", {})
@@ -1397,7 +1421,7 @@ def bisect_window(window, live, prepare, judge, drop, conflict, local=None):
     return chosen
 
 
-def targeted_attribution(repo, base, entries, nodes, *, main="master"):
+def targeted_attribution(repo, base, entries, nodes, *, main="master", on=None):
     """Diagnostic merges use ordinary re-chain/fingerprint rules without ledger/ref writes."""
     import window_attribution
     import quarantine_file
@@ -1405,7 +1429,7 @@ def targeted_attribution(repo, base, entries, nodes, *, main="master"):
     def prepare(specs):
         batch = [entry for entry in entries if entry[0] in specs]
         admitted, rejected = window_prewindow.select(
-            repo, base, main, batch, events, fold.ROOT / "content")
+            repo, base, main, batch, events, fold.ROOT / "content", **({"on": on} if on else {}))
         # Never interpret a subset as the requested single/pair. Dependencies,
         # overlaps and unreadable metadata leave this probe undetermined.
         if rejected or [e[0] for e in admitted] != [e[0] for e in batch]:
@@ -1525,7 +1549,7 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
         escalate(window, str(e), "undetermined")
         print("gate-window: " + str(e))
         return 2
-    base_red_answer = base_red_snapshot(project, root_base)
+    base_red_answer = None
     baseline, base_failures = None, {}
     enabled = os.environ.get("DOIT_WINDOW_RECHAIN", "on") == "on"
     migrations = {s for s, b, sha in entries
@@ -1556,8 +1580,7 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
         migration_kept = [s for s in kept if s in migrations]
         if migration_kept:
             try:
-                candidate = rechain.fingerprint(repo, candidate, window, ev=ev, project=project)
-                git(repo, "update-ref", f"refs/heads/window/{window}", candidate)
+                candidate = fingerprint_candidate(repo, candidate, window, project)
             except (ValueError, OSError, subprocess.SubprocessError) as exc:
                 import grading_env
                 if grading_env.failure_kind(str(exc)) == "infra":
@@ -1614,7 +1637,7 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
                tree=tree, green=res["state"] == "green", new_ids=res["nodes"], required=required)
 
     def judge(cand, kept, *, half=False):
-        nonlocal runs, dashboard, actions_minutes, baseline, base_failures, opened, judgments
+        nonlocal runs, dashboard, actions_minutes, baseline, base_failures, opened, judgments, base_red_answer
         if judgments >= judgment_limit:
             escalate(window, "candidate judgment budget exhausted; affected specs remain pending", "undetermined")
             return dict(state="undetermined", nodes=[], url="", doc={})
@@ -1628,7 +1651,10 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
             prior = prior_result(fold.read_events(), tree)
         except (OSError, RuntimeError, ValueError, TypeError, subprocess.SubprocessError):
             prior = None
-        if PG_CHECK in candidate_required and baseline is None:
+        cached = covers(prior, candidate_required)
+        if not cached and base_red_answer is None:
+            base_red_answer = base_red_snapshot(project, root_base)
+        if not cached and PG_CHECK in candidate_required and baseline is None:
             baseline, baseline_docs = base_pg(repo, root_base, ci_checks, window, events, fixes_base=fixes_base)
             verdicts.extend(baseline_docs)
             if baseline["state"] != "green" and not (fixes_base and baseline["state"] == "red"):
@@ -1642,10 +1668,7 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
             opened = True
         ev("window-candidate", window, sha=cand, verified_on=base, specs=kept, slot=slot,
            **({"after": after} if after else {}))
-        if (prior is not None and prior["green"] is True
-                and isinstance(prior.get("required"), list)
-                and all(isinstance(c, str) for c in prior["required"])
-                and set(prior["required"]) >= set(candidate_required)):
+        if cached:
             print(f"gate-window: tree {tree} already verified in {prior.get('window', prior.get('subject'))}")
             return dict(state="green", nodes=[], url="", doc={})
         res = dict(verify(repo, cand, candidate_required, window), candidate=cand)
@@ -1934,7 +1957,7 @@ def main_(argv):
     if not argv or argv[0] in ("-h", "--help"):
         print(__doc__); return 0
     window, project, specs, main = argv[0], None, [], os.environ.get("DOIT_MAIN")
-    fixes_base, after = False, None
+    fixes_base, after, rehearse, on = False, None, False, None
     it = iter(argv[1:])
     for a in it:
         if a == "--project": project = next(it, None)
@@ -1942,6 +1965,8 @@ def main_(argv):
         elif a == "--main": main = next(it, None)
         elif a == "--fixes-base": fixes_base = True
         elif a == "--after": after = next(it, "")
+        elif a == "--rehearse": rehearse = True
+        elif a == "--on": on = next(it, "")
         else: sys.exit(f"gate-window: unknown argument {a!r}\n{__doc__}")
     if not re.fullmatch(r"[A-Za-z0-9._-]+", window) or window in (".", ".."):
         sys.exit(f"gate-window: {window!r} is not a window id")
@@ -1949,6 +1974,15 @@ def main_(argv):
         sys.exit(f"gate-window: {after!r} is not a window id")
     if project != PROJECT:
         sys.exit(f"gate-window: only project {PROJECT} uses merge windows (got {project!r}); other projects merge directly")
+    if rehearse:
+        if not on or not specs or after is not None or fixes_base:
+            print("gate-window: --rehearse requires --on SHA and --specs, without --after or --fixes-base", file=sys.stderr)
+            return 2
+        import window_rehearse
+        return window_rehearse.run(window, project, specs, on, main_branch(main))
+    if on is not None:
+        print("gate-window: --on requires --rehearse", file=sys.stderr)
+        return 2
     bypass = os.environ.get("DOIT_WINDOW_GATE") == "off"
     if not specs and not bypass:
         print("gate-window: missing candidate: explicit --specs required", file=sys.stderr)
@@ -1963,15 +1997,19 @@ def main_(argv):
         return _admitted(window, project, specs, main, fixes_base, after, bypass)
 
 
-def _admitted(window, project, specs, main, fixes_base, after, bypass):
-    """Only main_'s lifetime-lock owner may evaluate admission or touch slots."""
+def main_branch(main):
     if not main:
         try:
             import look, push_origin
             main = dict(push_origin.targets(look.load_toml())).get(PROJECT)
         except Exception:
             main = None
-    main = main or "master"
+    return main or "master"
+
+
+def _admitted(window, project, specs, main, fixes_base, after, bypass):
+    """Only main_'s lifetime-lock owner may evaluate admission or touch slots."""
+    main = main_branch(main)
     try:
         events = train_events()
     except (OSError, ValueError):

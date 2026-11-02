@@ -233,7 +233,7 @@ def metadata(repo, master, entry, events, content):
         raise ValueError('spec metadata missing or invalid Writes grant') from exc
 
 
-def select(repo, base, main, entries, events, content):
+def select(repo, base, main, entries, events, content, *, on=None):
     """Return admitted entries and rework drops; log deferrals without events.
 
     Unreadable master leaves admission to CI. A window-local clash stays queued,
@@ -242,7 +242,7 @@ def select(repo, base, main, entries, events, content):
     reader, kept, drops, grants, dependencies, migration_specs = Trees(repo), [], [], {}, {}, set()
     prefix = base
     try:
-        master = git(repo, 'rev-parse', '--verify', 'refs/heads/' + main + '^{commit}').stdout.strip()
+        master = on or git(repo, 'rev-parse', '--verify', 'refs/heads/' + main + '^{commit}').stdout.strip()
         master_paths = reader.read(master)
         master_callers = callers(reader, master_paths)
     except (ValueError, OSError, UnicodeError, subprocess.SubprocessError) as exc:
