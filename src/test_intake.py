@@ -93,8 +93,12 @@ class GhlimitFake:
             if label in self.listing_fail:
                 return _fail()
             return _ok(json.dumps(self.listings.get(label, [])))
-        if argv[:2] == ["gh", "api"] and argv[2].startswith(f"repos/{intake.REPO}/contents/"):
-            path = argv[2][len(f"repos/{intake.REPO}/contents/"):]
+        if argv[:2] == ["gh", "api"] and any(x.startswith(f"repos/{intake.REPO}/contents/") for x in argv):
+            # real gh turns any -f/-F field into a POST, which this endpoint rejects
+            if "-f" in argv or "-F" in argv or "--method" not in argv or argv[argv.index("--method") + 1] != "GET":
+                return _fail()
+            url = next(x for x in argv if x.startswith(f"repos/{intake.REPO}/contents/"))
+            path = url[len(f"repos/{intake.REPO}/contents/"):].split("?", 1)[0]
             txt = self.contents.get(path)
             if txt is None:
                 return _fail()

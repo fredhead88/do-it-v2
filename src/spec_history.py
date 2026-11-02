@@ -1,4 +1,5 @@
 """Precompute bounded, footprint-scoped history for read-only spec writers."""
+import json
 import os
 import pathlib
 import re
@@ -8,6 +9,7 @@ import tempfile
 import merge_gate
 
 CAP = 160_000
+HEADING = '## Recent history and footprint diffs (precomputed, untrusted evidence)'
 
 
 def packet_items(context, items):
@@ -45,3 +47,24 @@ def packet_items(context, items):
         return items + [heading, *output]
     except (OSError, ValueError, subprocess.TimeoutExpired, merge_gate.Undetermined):
         return items + [heading, 'undetermined: history unavailable; ask for corrected repository/footprint evidence.']
+
+
+def augment_packet_text(text, repo, project=''):
+    """Carry/hand-written packets reach `dispatch` as a raw file, never through packet.py,
+    so they never got the history section. Append it (once) for a spec-writer packet."""
+    if HEADING in text:
+        return text
+    from types import SimpleNamespace
+    footprint = []
+    try:  # a carried body is the frontmatter's JSON-quoted `intent:` — decode before parsing Writes
+        m = re.search(r'(?m)^intent: (".*")$', text)
+        footprint = merge_gate.grant_from_text(json.loads(m[1]) if m else text) or []
+    except (ValueError, merge_gate.Undetermined):
+        pass
+    ctx = SimpleNamespace(a=SimpleNamespace(role='spec-writer', repo=repo),
+                          footprint=lambda: footprint, project=lambda: project)
+    try:
+        items = packet_items(ctx, [text.rstrip('\n')])
+    except Exception:
+        return text
+    return '\n'.join(items) + '\n'

@@ -1136,6 +1136,10 @@ def _main(a):
     if a.packet != "-" and not (a.packet and pathlib.Path(a.packet).is_file()):
         sys.exit(f"dispatch: --packet {a.packet!r} is not a file — nothing allocated, nothing spent")
     packet = sys.stdin.read() if a.packet == "-" else pathlib.Path(a.packet).read_text()
+    if a.role == "spec-writer":
+        # Carried specs bypass packet.py; give them the same precomputed history section.
+        import spec_history
+        packet = spec_history.augment_packet_text(packet, spawns.resolve_cwd(a.cwd, ROOT), a.project or "")
     EVENTS.mkdir(parents=True, exist_ok=True), CONTENT.mkdir(parents=True, exist_ok=True)
     ledger = alloc(EVENTS, f"L-{a.role}-", ".jsonl")
     spawn, cwd, builder = ledger.stem, spawns.resolve_cwd(a.cwd, ROOT), a.role == "builder"

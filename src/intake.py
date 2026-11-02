@@ -62,8 +62,11 @@ def _head_file(path, head_sha):
     """One file's content at the PR's head sha — `""` on any failure, never a
     raise. Fires only from `_register()`, i.e. only for a PR's first
     registration (SD5/SD16)."""
-    ok, out = _run(["gh", "api", f"repos/{REPO}/contents/{path}",
-                    "-f", f"ref={head_sha}", "-q", ".content"])
+    # `gh api -f ref=...` silently turns the call into a POST (404/405 -> ""), which left
+    # every registered body ending at its `## <path>` heading; ref belongs in the query string.
+    ref = f"?ref={head_sha}" if head_sha else ""
+    ok, out = _run(["gh", "api", "--method", "GET", f"repos/{REPO}/contents/{path}{ref}",
+                    "-q", ".content"])
     if not ok or not out.strip():
         return ""
     try:

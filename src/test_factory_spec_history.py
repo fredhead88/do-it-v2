@@ -41,6 +41,21 @@ class HistoryTests(unittest.TestCase):
                               footprint=lambda: ['a.py'], project=lambda: 'fixture')
         self.assertIn('undetermined', '\n'.join(spec_history.packet_items(ctx, [])))
 
+    def test_carried_packet_gets_history_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            def git(*args):
+                return subprocess.check_output(['git', '-C', str(repo), *args], text=True).strip()
+            git('init', '-q'); git('config', 'user.name', 'f'); git('config', 'user.email', 'f@example.invalid')
+            (repo / 'target.py').write_text('x\n')
+            git('add', '.'); git('commit', '-qm', 'carried history')
+            raw = '---\nintent: "Writes: target.py"\n---\n\n# T\n'
+            out = spec_history.augment_packet_text(raw, str(repo), 'p')
+            self.assertIn(spec_history.HEADING, out)
+            self.assertIn('carried history', out)
+            self.assertTrue(out.startswith('---\nintent'))
+            self.assertEqual(out, spec_history.augment_packet_text(out, str(repo), 'p'))
+
 
 if __name__ == '__main__':
     unittest.main()
