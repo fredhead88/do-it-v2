@@ -1423,3 +1423,19 @@ finally:
         validate276.spec_shape_warnings = _orig_warn276
 
 print(f"carry: {N} checks pass · +L-spec-0276 (defaults-and-dispatch-order: AC15)")
+
+# ── per-source carry lock (2026-11-02): a second carrier of one source refuses while the
+# first still holds it, and carries once the holder closes. ──
+_held_lock = carry._source_lock("1454")
+try:
+    try:
+        carry.carry("1454", repo=REPO, project="albert-scott", force=True)
+        check(False, "LOCK: a second carrier must refuse while the source lock is held")
+    except carry.Refusal as e:
+        check("being carried by another process" in str(e), "LOCK: the refusal names the lock")
+finally:
+    _held_lock.close()
+_relock = carry._source_lock("1454")
+check(_relock is not None, "LOCK: the lock is free again once the holder closes")
+_relock.close()
+print(f"carry: {N} checks pass · +carry-lock")

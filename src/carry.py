@@ -27,7 +27,7 @@ spends nothing. A killed, split or failed spawn stamps nothing, which is what
 makes it a retry rather than a permanently burned source.
 """
 import ledger_files
-import argparse, glob, json, os, pathlib, re, subprocess, sys
+import argparse, fcntl, glob, hashlib, json, os, pathlib, re, subprocess, sys
 from datetime import datetime, timezone
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -689,6 +689,34 @@ def _do_carry(source, *, repo=None, project=None, force=False, title=None, body=
     if prior:
         raise Refusal(f"carry: {source} was already carried as {prior.get('subject')}; "
                       f"re-run with --force to carry again")
+    lock = _source_lock(sid)
+    try:
+        return _carry_locked(source, repo=repo, project=project, title=title, body=body,
+                             from_ledger=from_ledger)
+    finally:
+        lock.close()
+
+
+def _source_lock(sid):
+    """A per-source flock held for the whole carry. Two carriers (the Executor pane's
+    `doit carry` and bin/auto-carry.sh) both see a PR as uncarried until its
+    `spec-carried` lands, minutes after the spec-writer starts; without this the
+    second one wrote a duplicate spec (L-spec-1986/1989/1990/1991/1996, 2026-11-02).
+    Closing the returned file releases the lock."""
+    d = root() / "state" / "carry-locks"
+    d.mkdir(parents=True, exist_ok=True)
+    f = open(d / (hashlib.sha1(sid.encode()).hexdigest() + ".lock"), "w")
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        f.close()
+        raise Refusal(f"carry: {sid} is being carried by another process right now; "
+                      f"not carrying it twice")
+    return f
+
+
+def _carry_locked(source, *, repo, project, title, body, from_ledger):
+    """The rest of `_do_carry`, run under `_source_lock`."""
     if is_url(source):
         if from_ledger:
             title, body = _title_body_from_ledger(source)
