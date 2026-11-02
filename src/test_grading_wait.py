@@ -71,7 +71,8 @@ class GradingWaitTests(unittest.TestCase):
         self.events.append(dict(type=kind, subject=spec, project=project, **fields))
 
     def test_ac1(self):
-        def tree(*args):
+        def tree(*args, baseline=False):
+            self.assertEqual(baseline, args[6] != 0)
             deadlines.append(args[-1])
             return [], [], [], [], {}
 

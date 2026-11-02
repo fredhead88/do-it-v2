@@ -29,13 +29,14 @@ import grading_env
 import node_modules
 import panes
 import reap_tmp
+import runner_evidence
 import scratch
 import verification
 
 SOURCE = pathlib.Path(__file__).resolve().parent.parent
 PRIVATE_PG = SOURCE / "scripts" / "private-pg.sh"
 WALL_CAP = 30 * 60
-VERSION = "1"
+VERSION = "2"
 TAIL_CAP = 65536
 DIRECTORY_CAP = 5 * 1024 * 1024
 PROD_DATA_UNAVAILABLE = "cannot-observe: observed-data check needs a production read-only DSN; none supplied"
@@ -388,7 +389,7 @@ def _targets_missing(command, tree):
     return bool(targets) and all(not path.exists() for path in targets)
 
 
-def _run_tree(spec, sha, repo, row, commands, tail_dir, offset, tail_limit, deadline):
+def _run_tree(spec, sha, repo, row, commands, tail_dir, offset, tail_limit, deadline, *, baseline=False):
     tree = scratch.sub("runner") / f"{spec}-{sha[:12]}-{os.getpid()}"
     auxiliary = tree.with_name(tree.name + "-env")
     if tree.exists() or auxiliary.exists():
@@ -420,20 +421,48 @@ def _run_tree(spec, sha, repo, row, commands, tail_dir, offset, tail_limit, dead
         _required(["git", "-C", str(tree), "checkout", "--detach", sha],
                   phase="checkout", env=env, deadline=deadline)
         summary = _provision(tree, auxiliary, row, env, deadline)
+        plugins = auxiliary / "plugins"
+        plugins.mkdir()
+        plugin = "_doit_runner_pytest_" + secrets.token_hex(4)
+        shutil.copy2(pathlib.Path(__file__).with_name("build_runner_pytest.py"),
+                     plugins / (plugin + ".py"))
+        # Python wrappers may replace PYTHONPATH with the project's own paths.
+        # Keep a clone-local copy importable from '.', without changing its diff.
+        shutil.copy2(plugins / (plugin + ".py"), tree / (plugin + ".py"))
+        excludes = tree / ".git" / "info" / "exclude"
+        excludes.parent.mkdir(parents=True, exist_ok=True)
+        with excludes.open("a") as ignored:
+            ignored.write(f"\n/{plugin}.py\n/__pycache__/{plugin}.*\n")
+        env["PYTHONPATH"] = os.pathsep.join(filter(None, (str(plugins), env.get("PYTHONPATH"))))
+        env["PYTEST_PLUGINS"] = ",".join(filter(None, (env.get("PYTEST_PLUGINS"), plugin)))
+        env["DOIT_RUNNER_TREE"] = str(tree)
+        env["DOIT_RUNNER_BASE"] = "1" if baseline else "0"
         for index, (criterion, command) in enumerate(commands):
             command, changes = _rewrite(command, repo, tree, row.get("venv"))
             rewrites.extend(changes)
             missing.append(_targets_missing(command, tree))
+            details = auxiliary / str(index)
+            details.mkdir()
+            env["DOIT_RUNNER_REPORT"] = str(details)
+            env["DOIT_RUNNER_STEP"] = "0"
+            executable, parts = runner_evidence.shell(command, details, baseline)
             started = time.monotonic()
-            code, output = _process(["/bin/bash", "-c", command], env=env, deadline=deadline, cwd=tree, lower=True)
+            code, output = _process(["/bin/bash", "-c", executable], env=env, deadline=deadline, cwd=tree, lower=True)
+            output = runner_evidence.capture(details, parts, output)
+            if len(parts) == 1 and not (details / "0.status").exists():
+                (details / "0.status").write_text(f"{code}\t{tree}\t0\n")
+                (details / "0.out").write_bytes(output)
             log = base_red.parse_log(output.decode("utf-8", "replace"))
             ids = sorted(set().union(*(set(v) for k, v in log.items() if k != "undetermined")))
+            segments = runner_evidence.evidence(details, parts, tree)
+            ids = sorted(set(ids).union(*(set(step["failing_ids"]) for step in segments)))
             tail = tail_dir / f"{offset + index}.tail"
             tail.write_bytes(output[-tail_limit:])
             rows.append({"criterion": criterion, "cmd": command, "cwd": str(tree), "exit": code,
                          "wall_s": round(time.monotonic() - started, 3),
                          "out_sha256": hashlib.sha256(output).hexdigest(), "out_bytes": len(output),
                          "tail": str(tail), "failing_ids": ids})
+            rows[-1]["segments"] = segments
             if criterion is None:
                 rows[-1]["covers"] = _chain_covers(command)
             parsed.append(log)
@@ -453,6 +482,13 @@ def _run_tree(spec, sha, repo, row, commands, tail_dir, offset, tail_limit, dead
 def _compare(project, base_sha, tip, base, tip_logs, base_logs, missing):
     existing, new, undetermined = set(), set(), set()
     for index, row in enumerate(tip):
+        if base and row.get("segments") and base[index].get("segments"):
+            known, added, uncertain = runner_evidence.compare(row, base[index])
+            existing.update(known)
+            new.update(added)
+            if uncertain:
+                undetermined.add(index)
+            continue
         ids = set(row["failing_ids"])
         if not row["exit"] and not ids and not tip_logs[index]["undetermined"]:
             continue
@@ -520,7 +556,7 @@ def run(spec, requested_sha=None, criteria=None):
         key = "all" if criteria is None else hashlib.sha256(",".join(sorted(criteria)).encode()).hexdigest()[:8]
         text = (fold.ROOT / "content" / f"{spec}.md").read_text()
         revision = evidence_revision.cache_key(text, events, spec, done)
-        path = fold.ROOT / "content" / "evidence" / spec / f"{sha[:12]}-{key}-{revision}.json"
+        path = fold.ROOT / "content" / "evidence" / spec / f"{sha[:12]}-{key}-{revision}-r{VERSION}.json"
         if criteria is not None:
             if _missing_production_data(text, project, criteria, repo, sha, env, deadline):
                 raise ProductionDataUnavailable(PROD_DATA_UNAVAILABLE)
@@ -546,7 +582,7 @@ def run(spec, requested_sha=None, criteria=None):
             spec, sha, repo, row, commands, tails, 0, limit, deadline)
         try:
             base, base_logs, missing, base_rewrites, _ = _run_tree(
-                spec, base_sha, repo, row, commands, tails, len(commands), limit, deadline)
+                spec, base_sha, repo, row, commands, tails, len(commands), limit, deadline, baseline=True)
             rewrites.extend(base_rewrites)
         except (WallCap, InfraFailure):
             raise
@@ -554,6 +590,7 @@ def run(spec, requested_sha=None, criteria=None):
             # AC7: a base which could not provision supplies no clean ids.
             base, base_logs, missing = [], [], []
         comparison = _compare(project, base_sha, tip, base, tip_logs, base_logs, missing)
+        runner_evidence.compact(tip, base)
         bundle = {"spec": spec, "project": project, "sha": sha, "base_sha": base_sha,
                   "spec_sha256": evidence_revision.digest(text),
                   "runner_version": VERSION, "started_at": started, "env": summary,
