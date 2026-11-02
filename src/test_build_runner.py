@@ -88,10 +88,10 @@ class BuildRunnerTests(unittest.TestCase):
                  "ready_sha": sha or self.sha, "base_sha": base or self.base}
         (self.root / "events" / "L-builder-fixture.jsonl").write_text(json.dumps(event) + "\n")
 
-    def cli(self, *args, driver=False, **env):
+    def cli(self, *args, driver=False, timeout=20, **env):
         argv = self.runner_argv(driver)
         result = subprocess.run([*argv, self.sid, *args], env=dict(self.env, **env),
-                                capture_output=True, text=True, timeout=20)
+                                capture_output=True, text=True, timeout=timeout)
         return result
 
     def runner_argv(self, driver=False):
@@ -527,7 +527,10 @@ class BuildRunnerTests(unittest.TestCase):
         command = "python3 -c 'import sys;sys.stdout.write(\"x\"*70000)'"
         self.spec(text="## Acceptance criteria\n" + "\n".join(
             f"AC{i} [backend]: output.\nreview_path: run `{command}`" for i in range(1, 43)))
-        bundle, path = self.bundle()
+        # This exercises 42 commands at both tip and base: 84 real, niced
+        # children share the host's autogroup throttle. Give this bulk-output
+        # case headroom without changing the ordinary CLI or runner deadlines.
+        bundle, path = self.bundle(timeout=120)
         directory = path.with_suffix("")
         self.assertEqual(len(bundle["commands"]), 42)
         self.assertLessEqual(sum(p.stat().st_size for p in directory.iterdir()), 5 * 1024 * 1024)
