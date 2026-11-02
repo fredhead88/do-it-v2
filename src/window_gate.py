@@ -322,14 +322,7 @@ def record_depth(depth_dict, events, env):
     previous = next((e.get("depth") for e in reversed(events) if e.get("type") == "train-depth"), depth_dict["configured"])
     if previous == depth_dict["depth"]:
         return
-    telegram = "sent"
-    try:
-        script = pathlib.Path(env.get("DOIT_ROOT", fold.ROOT)) / "telegram" / "tg-send.sh"
-        text = f"Merge train depth {previous} -> {depth_dict['depth']}: {depth_dict['reason']}"
-        if subprocess.run(["bash", str(script), text], capture_output=True, timeout=30).returncode:
-            telegram = "failed"
-    except (OSError, subprocess.SubprocessError):
-        telegram = "failed"
+    telegram = "summary"  # Capacity adaptation is routine maintenance, not an interruption.
     ev("train-depth", "merge-train", depth=depth_dict["depth"], **{"from": previous},
        reason=depth_dict["reason"], disk_pct=depth_dict["disk_pct"], red_rate=depth_dict["red_rate"], telegram=telegram)
 

@@ -279,7 +279,7 @@ class DigestTests(unittest.TestCase):
         self.assertEqual(self.run_digest(alert=True), 0)
         self.assertIn("L-spec-filter0/AC1", self.sent[0][1])
         self.assertIn("L-spec-filter1/AC1", self.sent[0][1])
-        self.assertIn("L-spec-filter2/AC1", self.sent[0][1])
+        self.assertNotIn("L-spec-filter2/AC1", self.sent[0][1])
         for i in (3, 4, 5):
             self.assertNotIn(f"L-spec-filter{i}/AC1", self.sent[0][1])
         record = json.loads((self.root / "state/owed-alerted.json").read_text())

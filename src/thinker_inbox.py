@@ -11,8 +11,8 @@ unanswered `question` from the moment it is asked, not only once overdue.
 - Every item is typed into the Thinker pane, batched, when the pane is idle. Operator-owned items (the
   realm's OPERATOR_RE, or `irreversible`) are flagged so the Thinker sends the operator a plain-English
   explanation and recommendation. Raw builder questions never go to the operator (operator: "jargon").
-- An item still open 60 min after delivery, or after three consecutive missing-pane passes,
-  gets one deduplicated operator request with a recommendation.
+- Three consecutive missing-pane passes trigger one delivery-outage alert.
+  Ordinary unanswered questions stay with the Thinker and the daily summary.
 Answer every item with `/home/albert/do-it-v2/doit thinker-answer <src> "<why>"`. That writes a `decision` with the
 item's own subject and `ref=<src>`, so fold, the board and the realm all see it answered.
 
@@ -207,28 +207,20 @@ def main():
                 st["delivered"][i["src"]] = t_now
             log(f"delivered {len(new)} to {p}")
 
-    # unanswered too long, or no Thinker pane: Telegram once per item
-    stale = []
-    for i in th:
-        d = st["delivered"].get(i["src"])
-        late = d and (now() - fold.ts(d)).total_seconds() > ESCALATE_MIN * 60
-        missing = not p and st["pane_misses"] >= 3
-        if ((late and p) or missing) and i["src"] not in st["tg"]:
-            stale.append(i)
-    if stale:
-        why = "the Thinker's session is not running" if not p else "the Thinker has not answered within an hour"
-        subs = sorted({str(i["subject"]) for i in stale})
-        recommendation = ("reopen flow and resume the Thinker" if not p else
-                          "review the pending questions with the Thinker")
-        sent = telegram(f"NEEDS YOU: {len(stale)} pipeline item(s) are waiting and {why}. "
-                        f"Recommendation: {recommendation}. "
-                        f"Specs: {', '.join(subs[:8])}{'…' if len(subs) > 8 else ''}.")
+    # A delivery outage is one incident, regardless of the number of questions.
+    # A slow answer with a healthy pane is a Thinker task, not a phone alert.
+    if p:
+        st['pane_alerted'] = False
+    elif st['pane_misses'] >= 3 and not st.get('pane_alerted'):
+        sent = telegram("NEEDS YOU: The Thinker's delivery session is unavailable. "
+                        "Recommendation: reopen flow and resume the Thinker; pending work stays queued.")
         if sent:
-            for i in stale:
-                st["tg"][i["src"]] = t_now
-            log(f"tg-stale {len(stale)} ({why})")
+            st['pane_alerted'] = True
+            for i in th:
+                st['tg'][i['src']] = t_now
+            log('tg-pane-outage')
         else:
-            log(f"tg-failed {len(stale)}")
+            log('tg-pane-outage-failed')
     save_state(st)
 
 

@@ -28,7 +28,7 @@ def classify_ask(note, capability=None):
         return dict(owner='operator', kind='decision', capability='operator-action')
     approval = re.search(r'operator-gated|operator cron install|operator re-enables|operator-run write|'
                          r'flag toggle is a production change|sudo unshare.*live|tmpfs over the live|'
-                         r'\bapprove\b|\bapproval\b|\bhold (?:is|gets|must be) approved\b|client email|purchase', text)
+                         r'\bapprove\b|\bapproval\b|\bhold (?:is|gets|must be) approved\b|client email|\bpurchase\b', text)
     requested = re.split(r'(?:operator|you)\s*:', text)[-1]
     tooling = re.search(r'\b(?:batch|actions[: ]read|dsn|ro-dsn|browser|chrome-devtools|'
                         r'dev server|review account|review session|verifier session|staff login|deploy time)\b',
@@ -45,7 +45,7 @@ def classify_ask(note, capability=None):
             or 'authorized scratch supavisor' in text)):
         return dict(owner='operator', kind='access', capability='ro-dsn-grant')
     if approval:
-        kind = 'real-world' if re.search(r'client email|purchase', text) else 'approval'
+        kind = 'real-world' if re.search(r'client email|\bpurchase\b', text) else 'approval'
         return dict(owner='operator', kind=kind, capability='operator-action')
     if re.search(r'not (?:yet )?deployed|not live|needs (?:a |integrator )?deploy|deploy has not run', text):
         route = 'not-live'

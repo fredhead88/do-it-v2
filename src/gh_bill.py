@@ -191,7 +191,8 @@ def _runner_inputs(today):
 
 def _send(message):
     sender = os.environ.get("GH_BILL_TG") or str(Path.home() / ".do-it/telegram/tg-send.sh")
-    result = subprocess.run([sender, message], capture_output=True, text=True)
+    result = subprocess.run([sender, message], capture_output=True, text=True,
+                            env={**os.environ,"TG_SENDER":"gh-bill"})
     if result.returncode:
         raise RuntimeError("Telegram delivery failed")
 
@@ -257,10 +258,11 @@ def main(argv=None):
         previous_month = (yesterday.replace(day=1) - timedelta(days=1)).strftime("%Y-%m")
         previous_limit = months.get(previous_month, {}).get("limit")
         if not state_error and limit is not None and month not in months and previous_limit != limit:
-            _send(f"GitHub Actions spending limit for {yesterday:%B}: "
+            _send(f"NEEDS YOU: GitHub Actions spending limit for {yesterday:%B}: "
                   f"recommend setting it to ${limit:,.0f} in GitHub billing settings.")
         action = decision["action"]
-        if action != "none":
+        import notification_policy
+        if notification_policy.bill_interrupt(decision):
             message = render_telegram(decision)
             if decision.get("combined_alert"):
                 message += "\n" + ubicloud_bill.alert_message(decision)
@@ -269,8 +271,7 @@ def main(argv=None):
             _send(message)
         elif decision.get("combined_alert"):
             _send(ubicloud_bill.alert_message(decision))
-        elif decision.get("ubicloud_error"):
-            _send("Combined cloud cost unavailable; check Ubicloud jobs, inventory and prices.")
+        # Unknown billing reads remain in bill-check and the daily summary.
         if not state_error and limit is not None:
             sent = list(saved.get("sent", []))
             level = 90 if action == "flip" else int(action[6:]) if action.startswith("alert-") else None

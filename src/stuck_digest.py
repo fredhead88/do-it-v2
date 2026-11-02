@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 
 import dispatch
 import digest_actions
+import daily_summary
 import fold
 import lane_rules
 import tick
@@ -28,6 +29,16 @@ def build(events, now):
     limits = lane_rules.load()
     rows, actions, waiting = [], [], []
     for step in tick._steps(events, folded[0], now):
+        action = {'merge-gate':'gate','merge-direct':'merge'}.get(step.action,step.action)
+        if step.state != 'hold' and action not in limits:
+            # New engine actions may precede their dwell-table adapter. Keep
+            # the missing mapping visible without losing the entire summary.
+            row = dict(spec=step.item,rule='undetermined',action=step.action or 'none',
+                       since=step.since,limit_min=0,overdue=True,reason_live=False,
+                       reason=f'undetermined: no dwell rule for action {step.action!r}')
+            rows.append(row)
+            actions.append(dict(row,owner='thinker',ask=row['reason'],kind='judgment',criterion='next step'))
+            continue
         row = fold.step_row(step, limits, now)
         if step.state != 'hold' and not row['overdue']:
             continue
@@ -168,10 +179,10 @@ def _emit(event_type, **fields):
 def run(*, send=False, dry_run=False, now=None, sender=None):
     try:
         clock = owed_digest._time(now if now is not None else datetime.now(timezone.utc))
-        events = owed_digest._read_ledger()
+        events = owed_digest._read_ledger(use_cache=not dry_run)
         obj = build(events, clock)
         if dry_run:
-            print(json.dumps(dict(digest=obj, telegrams=[render_telegram(obj)]), sort_keys=True, default=str))
+            print(json.dumps(dict(digest=obj, telegrams=daily_summary.preview(events, clock)), sort_keys=True, default=str))
             return 0
         # Resolve all observation failures before creating any report or event.
         render_md(obj, events, clock)
@@ -190,24 +201,16 @@ def run(*, send=False, dry_run=False, now=None, sender=None):
                        and e.get('path') == str(path) for e in events):
                 _emit('stuck-digest', date=date, path=str(path),
                       **{key: obj[key] for key in ('stuck_count', 'listed', 'live_reason_count')})
-            if send and not any(e.get('type') == 'operator-alert' and e.get('subject') == 'stuck-digest'
-                                and e.get('kind') == 'stuck-digest' and e.get('date') == date
-                                and e.get('sent') == 'yes' for e in events):
-                message = render_telegram(obj)
-                argv = [str(fold.ROOT / 'telegram/tg-send.sh'), message]
-                failure = ''
+            if send:
                 try:
-                    result = sender(argv) if sender else subprocess.run(
-                        argv, capture_output=True, text=True,
-                        env={**os.environ, 'TG_SENDER': 'stuck-digest'})
-                    lines = (result.stdout or '').splitlines()
-                    sent = result.returncode == 0 and bool(lines) and lines[-1] == '200'
-                except OSError as exc:
-                    sent, failure = False, _line(exc)
-                _emit('operator-alert', kind='stuck-digest', date=date, path=str(path),
-                      sent='yes' if sent else 'no', detail=message)
-                if not sent:
-                    raise OSError('Telegram send failed' + (': ' + failure if failure else ''))
+                    delivered = daily_summary.deliver(clock, sender)
+                except OSError:
+                    _emit('operator-alert', kind='stuck-digest', date=date, path=str(path), sent='no',
+                          detail='Daily combined summary delivery failed')
+                    raise
+                if delivered['sent']:
+                    _emit('operator-alert', kind='stuck-digest', date=date, path=str(path),
+                          sent='yes', detail=delivered['message'])
         return 0
     except Exception as exc:
         print(f'stuck-digest: {type(exc).__name__}: {_line(exc)}', file=sys.stderr)

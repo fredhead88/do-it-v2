@@ -210,8 +210,8 @@ class Command(unittest.TestCase):
                 before_rows = len(self.fresh_fold()["kept"])
                 decision = self.run_bill(items)
                 self.assertEqual(decision["action"], name)
-                self.assertEqual(len(self.lines("messages")) - before_messages, name != "none")
-                if name != 'none':
+                self.assertEqual(len(self.lines("messages")) - before_messages, name in {"alert", "alert-50", "alert-75", "alert-90"})
+                if name in {'alert','alert-50','alert-75','alert-90'}:
                     message = self.lines('messages')[-1][0]
                     self.assertEqual(message, gh_bill.render_telegram(decision))
                     self.assertNotIn('{', message)
@@ -267,7 +267,7 @@ class Command(unittest.TestCase):
             self.assertEqual(result["action"], "undetermined")
             self.assertIsNone(result["yday"])
             self.assertIsNone(result["mtd"])
-            self.assertEqual(len(self.lines("messages")) - before, 1)
+            self.assertEqual(len(self.lines("messages")) - before, 0)
             self.assertFalse(any(r["kind"] == "set" for r in self.lines("runner-log")))
             receipt("AC5-read-failure", result)
         self.assertEqual(len(self.fresh_fold()["kept"]), 4)
@@ -292,12 +292,12 @@ class Command(unittest.TestCase):
             result = self.run_bill([], config=path)
             self.assertEqual(result["action"], "undetermined")
             receipt("AC4-bad-config", result)
-        self.assertEqual(len(self.lines("messages")), 4)
+        self.assertEqual(len(self.lines("messages")), 0)
         self.assertFalse(any(r["kind"] == "set" for r in self.lines("runner-log")))
         self.state.unlink()
         result = self.run_bill([])
         self.assertEqual(result["action"], "none")
-        self.assertEqual(len(self.lines("messages")), 5)
+        self.assertEqual(len(self.lines("messages")), 1)
         self.assertIn("450", self.lines("messages")[-1][0])
         self.assertEqual(json.loads(self.state.read_text())["months"][self.month]["limit"], 450)
 
@@ -306,7 +306,7 @@ class Command(unittest.TestCase):
         result = self.run_bill([{"date": (date.today() - timedelta(days=1)).replace(day=1).isoformat(), "netAmount": 427.5}])
         self.assertEqual(result["action"], "flip-refused")
         self.assertIn("stub refusal", result["reason"])
-        self.assertIn("NEEDS YOU", self.lines("messages")[-1][0])
+        self.assertEqual(self.lines("messages"), [])  # Runner repair belongs to the Thinker.
         self.assertEqual(self.fresh_fold()["kept"][-1]["action"], "flip-refused")
         receipt("AC5-set-refusal", result)
 

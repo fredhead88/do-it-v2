@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 
 import dispatch
 import digest_actions
+import daily_summary
 import fold
 import health_alarms
 import owed
@@ -248,7 +249,7 @@ def _row_key(row):
 
 def _actionable(row, now):
     return (row.get("owner", "operator") == "operator" and not row.get("decided")
-            and now >= _time(row["since"]))
+            and timedelta(0) <= now - _time(row["since"]) <= timedelta(hours=48))
 
 
 def _alerts(obj, alerted):
@@ -272,11 +273,11 @@ def run(*, alert=False, now=None, sender=None, dry_run=False, json_only=False):
         if json_only and (alert or dry_run):
             raise ValueError("--json-only cannot be combined with --alert or --dry-run")
         clock = _time(now or datetime.now(timezone.utc))
-        all_ev = _read_ledger(use_cache=not json_only)
+        all_ev = _read_ledger(use_cache=not (json_only or dry_run))
         obj = build(all_ev, clock)
         if dry_run:
-            messages = _alerts(obj, _alerted())
-            print(json.dumps(dict(digest=obj, telegrams=[m[0] for m in messages]), sort_keys=True))
+            messages = daily_summary.preview(all_ev, clock)
+            print(json.dumps(dict(digest=obj, telegrams=messages), sort_keys=True))
             return 0
         state_dir = fold.ROOT / "state"
         state_dir.mkdir(parents=True, exist_ok=True)
@@ -292,7 +293,6 @@ def run(*, alert=False, now=None, sender=None, dry_run=False, json_only=False):
             # sending it. Recent operator rows remain pending until shown.
             silent = {_row_key(r) for r in obj["needs_you"] if not _actionable(r, clock)}
             alerted["rows"] = sorted(set(alerted["rows"]) | silent)
-            messages = _alerts(obj, alerted) if alert else []
             date = clock.date().isoformat()
             path = fold.ROOT / "content" / f"L-owed-digest-{date}.md"
             current = _read_ledger()
@@ -304,16 +304,13 @@ def run(*, alert=False, now=None, sender=None, dry_run=False, json_only=False):
                 if refusal:
                     raise ValueError(refusal)
             _write_json(state_dir / "owed-alerted.json", alerted)
-            for text, field, keys in messages:
-                argv = [str(fold.ROOT / "telegram/tg-send.sh"), text]
-                result = sender(argv) if sender else subprocess.run(
-                    argv, capture_output=True, text=True, env={**os.environ, "TG_SENDER": "owed-digest"})
-                lines = (result.stdout or "").splitlines()
-                if result.returncode != 0 or not lines or lines[-1] != "200":
-                    raise OSError("owed digest Telegram send failed")
-                alerted[field] = sorted(set(alerted[field]) | set(keys))
-                alerted["sent_date"] = date
-                _write_json(state_dir / "owed-alerted.json", alerted)
+            if alert:
+                delivered = daily_summary.deliver(clock, sender)
+                owed_keys = {_row_key(row) for row in obj['needs_you']}
+                alerted['rows'] = sorted(set(alerted['rows']) | (set(delivered['state']['rows']) & owed_keys))
+                if delivered['state'].get('sent_date'):
+                    alerted['sent_date'] = delivered['state']['sent_date']
+                _write_json(state_dir / 'owed-alerted.json', alerted)
         return 0
     except Exception as exc:
         print(f"owed-digest: {type(exc).__name__}: {_text(exc)}", file=sys.stderr)

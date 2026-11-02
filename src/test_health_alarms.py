@@ -291,7 +291,19 @@ class RunTests(unittest.TestCase):
         self.assertEqual(self.calls, [])
         print("AC8 ok")
 
+    def observe_fixture_outage(self):
+        # These delivery/retry fixtures now include an observed service outage.
+        # Severity-only maintenance is exercised separately without this stub.
+        evaluate = health.evaluate
+        def observed(*args, **kwargs):
+            return [dict(a, reading=dict(a['reading'], production_down=True))
+                    for a in evaluate(*args, **kwargs)]
+        stub = patch.object(health, 'evaluate', side_effect=observed)
+        stub.start()
+        self.addCleanup(stub.stop)
+
     def test_ac9(self):
+        self.observe_fixture_outage()
         p = healthy()
         p["locks"]["deploy"] = dict(held=True, since=event("start", 4201)["ts"])
         for minutes, count in ((0, 1), (10, 1), (361, 2)):
@@ -319,14 +331,15 @@ class RunTests(unittest.TestCase):
         self.assertEqual(len(self.calls), 3)
         self.assertEqual(len(self.rows()), before)
         # A new release key cannot bypass the per-alarm notification window.
-        with patch.object(health, "evaluate", return_value=[dict(alarm="release-failed", severity="immediate", reading={"key": "one"}, line="failure")]):
+        with patch.object(health, "evaluate", return_value=[dict(alarm="release-failed", severity="immediate", reading={"key": "one", "production_down": True}, line="failure")]):
             self.assertEqual(self.run_alarm(p), 0)
-        with patch.object(health, "evaluate", return_value=[dict(alarm="release-failed", severity="immediate", reading={"key": "two"}, line="failure")]):
+        with patch.object(health, "evaluate", return_value=[dict(alarm="release-failed", severity="immediate", reading={"key": "two", "production_down": True}, line="failure")]):
             self.assertEqual(self.run_alarm(p, 1), 0)
         self.assertEqual(len(self.calls), 4)
         print("AC9 ok")
 
     def test_sender_failures_and_environment(self):
+        self.observe_fixture_outage()
         p = healthy()
         p["disk_free_gb"]["/"] = 4
         for minutes, stdout in ((0, "429\n"), (61, ""), (122, "200\n500\n")):
@@ -412,14 +425,14 @@ subprocess.run = run
             self.assertEqual(health.run(now=NOW + timedelta(minutes=minutes), probes=p, sender=sender), 0)
             ev = [e for e in fold.read_events(use_cache=False) if e["type"] == "health-alarm" and e["alarm"] == "disk-used"]
             self.assertEqual(len(ev), count)
-            self.assertEqual(len(calls), count)
+            self.assertEqual(len(calls), 0)  # Disk pressure alone is a daily-summary notice.
             table.append([minutes, len(ev), len(calls)])
         p["used_fraction"] = .5
         p["disk_free_gb"]["/"] = 10
         for minutes in (0, 361):
             self.assertEqual(health.run(now=NOW + timedelta(minutes=minutes), probes=p, sender=sender), 0)
         self.assertEqual(len([e for e in fold.read_events(use_cache=False) if e.get("alarm") == "disk-low"]), 2)
-        alarm = dict(alarm="release-failed", severity="immediate", reading={"key": "same"})
+        alarm = dict(alarm="release-failed", severity="immediate", reading={"key": "same", "production_down": True})
         prior = dict(type="health-alarm", ts=NOW.isoformat(), telegram="sent", **alarm)
         self.assertEqual(health._plan(alarm, [prior], NOW + timedelta(hours=12)), (False, False))
         self.assertEqual(health._plan(alarm, [prior], NOW + timedelta(minutes=1441)), (True, True))

@@ -258,7 +258,7 @@ none
         # Exercise the real subprocess boundary with a local executable.
         sender = self.root / 'telegram/tg-send.sh'
         sender.parent.mkdir()
-        sender.write_text('#!/bin/sh\n[ "$TG_SENDER" = stuck-digest ] || exit 3\nprintf "200\\n"\n')
+        sender.write_text('#!/bin/sh\n[ "$TG_SENDER" = daily-summary ] || exit 3\nprintf "200\\n"\n')
         sender.chmod(0o700)
         self.assertEqual(digest.run(now=NOW, send=True), 0)
         before = self.snapshot()

@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 
 import backup
 import fold
+import notification_policy
 import scratch
 
 LOCK_STALE_S = 4200
@@ -104,7 +105,8 @@ def evaluate(events, now, *, probes):
         newest = max(all_failures, key=lambda e: _time(e["ts"])) if all_failures else {}
         immediate = any(e.get("rollback") in ("ran", "failed") or
                         any(word in str(e.get("why", "")).lower() for word in ("timeout", "killed", "-9")) for e in releases)
-        add("release-failed", dict(key=newest.get("ts", "ongoing"), failures=len(all_failures)),
+        add("release-failed", dict(key=newest.get("ts", "ongoing"), failures=len(all_failures),
+                                   production_down=any(e.get("production_down") is True for e in releases)),
             f"release failures/24h={len(all_failures)}" + ("; undetermined release_log_failed" if unknown else ""), immediate, unknown)
 
     locks = _dict(p.get("locks"))
@@ -281,7 +283,7 @@ def _plan(alarm, events, now):
     prior = [e for e in _events(events, now, window) if e["type"] == "health-alarm" and e.get("alarm") == alarm["alarm"]]
     key = alarm["reading"].get("key", "ongoing")
     append = not any(e.get("severity") == alarm["severity"] and _dict(e.get("reading")).get("key", "ongoing") == key for e in prior)
-    send = alarm["severity"] == "immediate" and not any(e.get("telegram") == "sent" for e in prior)
+    send = alarm["severity"] == "immediate" and notification_policy.health_interrupt(alarm) and not any(e.get("telegram") == "sent" for e in prior)
     failed = [e for e in prior if e.get("telegram") == "failed"]
     if failed and (now - max(_time(e["ts"]) for e in failed)).total_seconds() < 3600:
         send = False

@@ -1486,7 +1486,7 @@ def train_checks():
             window_gate.record_depth(high, fx.events(), os.environ)
             window_gate.record_depth(high, fx.events(), os.environ)
         changes = fx.events("train-depth")
-        mark("depth event once", len(changes) == 2 and changes[-1].get("telegram") == "failed" and send.call_count == 1, changes)
+        mark("depth event once", len(changes) == 2 and changes[-1].get("telegram") == "summary" and send.call_count == 0, changes)
 
     # Shared helpers use real git and slot files; only the gate/service is fake.
     def predecessor(fx):

@@ -143,10 +143,9 @@ def usage_paused():
 
 
 def notify(message):
-    try:
-        subprocess.run([str(TG), message], capture_output=True, timeout=60)
-    except (OSError, subprocess.SubprocessError) as exc:
-        log(f"Telegram failed: {type(exc).__name__}")
+    # Account rotation and an unreadable usage probe need maintenance follow-up.
+    # Neither proves a production outage, money loss, or an operator decision.
+    log(message)
 
 
 def worst(u):

@@ -86,18 +86,19 @@ class AutoswitchTests(unittest.TestCase):
             self.assertIsNone(auto.usage('1', live=True))
         self.assertEqual((auto.DIR / '1.json').read_bytes(), before)
 
-    def test_two_blind_passes_alert_once_and_rearm(self):
+    def test_two_blind_passes_log_once_and_rearm(self):
         with patch.object(auto, 'usage', return_value=None), patch.object(auto, 'usage_paused', return_value=False):
             for _ in range(5):
                 auto.main()
-        self.assertEqual(self.run.call_count, 1)
-        self.assertIn('auto-switch blind', self.run.call_args.args[0][1])
+        self.assertEqual(self.run.call_count, 0)
+        self.assertEqual(auto.LOG.read_text().count('auto-switch blind'), 1)
         with patch.object(auto, 'usage', return_value=dict(session=0, weekly=0)):
             auto.main()
         with patch.object(auto, 'usage', return_value=None):
             auto.main()
             auto.main()
-        self.assertEqual(self.run.call_count, 2)
+        self.assertEqual(self.run.call_count, 0)
+        self.assertEqual(auto.LOG.read_text().count('auto-switch blind'), 2)
         self.popen.assert_not_called()
 
     def test_unreadable_active_paused_switches_to_readable_account(self):
@@ -120,7 +121,7 @@ class AutoswitchTests(unittest.TestCase):
             for _ in range(3):
                 auto.main()
         self.assertEqual(json.loads(auto.STATE.read_text())['blind_runs'], 3)
-        self.assertEqual(self.run.call_count, 1)
+        self.assertEqual(self.run.call_count, 0)
 
     def test_pause_probe(self):
         self.run.side_effect = [subprocess.CompletedProcess([], 0, '%1\n', ''),
