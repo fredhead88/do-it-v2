@@ -46,7 +46,8 @@ project = "do-it-v2"
 [[row]]
 name = "tmp-reaper"
 where = "user"
-schedule = "1,6,11,16,21,26,31,36,41,46,51,56 * * * *"
+max_runtime_s = 3600
+schedule = "*/15 * * * *"
 command = "{doit} cron-run tmp-reaper -- {doit} reap-tmp"
 path = "{doit}"
 sig = '\bdoit reap-tmp\b'
@@ -99,6 +100,7 @@ project = "do-it-v2"
 [[row]]
 name = "sweep-owed"
 where = "user"
+max_runtime_s = 3600
 schedule = "11 0,6,12,18 * * *"
 command = "{doit} cron-run sweep-owed -- {doit} sweep-owed >> {root}/logs/sweep-owed.log 2>&1"
 path = "{doit}"
@@ -119,7 +121,7 @@ project = "albert-scott"
 [[row]]
 name = "owed-digest"
 where = "user"
-schedule = "0 * * * *"
+schedule = "0 6 * * *"
 command = "{doit} cron-run owed-digest -- {doit} owed-digest --alert >> {root}/logs/owed-digest.log 2>&1"
 path = "{doit}"
 sig = '\bdoit owed-digest(?: --alert)?(?=\s*>>|\s*(?:#.*)?$)'
@@ -129,7 +131,7 @@ project = "do-it-v2"
 [[row]]
 name = "owed-digest-json"
 where = "user"
-schedule = "*/30 * * * *"
+schedule = "17 * * * *"
 command = "{doit} cron-run owed-digest-json -- {doit} owed-digest --json-only >> {root}/logs/owed-digest-json.log 2>&1"
 path = "{doit}"
 sig = '\bdoit owed-digest --json-only(?=\s*>>|\s*(?:#.*)?$)'

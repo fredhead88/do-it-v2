@@ -1003,7 +1003,8 @@ def heartbeat_missed(name, now, events, *, root=None, sender=None, dst=None):
     import cron_run
     root = pathlib.Path(root) if root is not None else fold.ROOT
     dst = pathlib.Path(dst) if dst is not None else root / "events" / LEDGER_NAME
-    window = 3 * int(os.environ.get("DOIT_TICK_MIN", "5")) if name == "tick" else 30
+    # Half-hourly look gets ten minutes of slack; tick keeps its own cadence.
+    window = 3 * int(os.environ.get("DOIT_TICK_MIN", "5")) if name == "tick" else 40
     try:
         rows = _read_cron_store(cron_run.store_path(name, root)) or []
         starts = [(datetime.fromisoformat(str(r["ts"]).replace("Z", "+00:00")), r["ts"])

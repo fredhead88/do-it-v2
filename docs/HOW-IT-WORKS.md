@@ -53,10 +53,10 @@ Source: `lane_rules.toml`. Name | action | actor | limit_min.
 Source: `crons.toml`. Name | schedule | where | path, then command.
 - tick | */{tick_min} * * * * | user | {doit}  DOIT_ROOT={root} {doit} cron-run tick -- {doit} tick
   >> {root}/logs/tick.log 2>&1; look | 3,33 * * * * | user | {doit}  {doit} cron-run look -- {doit}
-  look >> {root}/logs/look.log 2>&1
-  tmp-reaper | 1,6,11,16,21,26,31,36,41,46,51,56 * * * * | user | {doit}  {doit} cron-run tmp-reaper
-  -- {doit} reap-tmp; lessons-digest | 7 * * * * | user | {repo}/scripts/lessons_digest.py  {doit}
-  cron-run lessons-digest -- {repo}/scripts/lessons_digest.py >> {root}/lessons-digest.log 2>&1
+  look >> {root}/logs/look.log 2>&1; tmp-reaper | */15 * * * * | user | {doit}  {doit} cron-run
+  tmp-reaper -- {doit} reap-tmp
+  lessons-digest | 7 * * * * | user | {repo}/scripts/lessons_digest.py  {doit} cron-run
+  lessons-digest -- {repo}/scripts/lessons_digest.py >> {root}/lessons-digest.log 2>&1
   backup-watch | */15 * * * * | user | {doit}  {doit} cron-run backup-watch -- {doit} backup watch
   --for 60 >> {root}/backup.log 2>&1; ledger-repack | 47 4 * * * | user | {doit}  {doit} cron-run
   ledger-repack -- {doit} backup maintain >> {root}/logs/ledger-repack.log 2>&1
@@ -65,9 +65,9 @@ Source: `crons.toml`. Name | schedule | where | path, then command.
   {doit} cron-run sweep-owed -- {doit} sweep-owed >> {root}/logs/sweep-owed.log 2>&1
   auto-deploy | */5 * * * * | cron.d | /opt/albert-scott/venv/bin/python  albert {doit} cron-run
   auto-deploy -- /opt/albert-scott/venv/bin/python /opt/albert-scott/scripts/ops/auto_deploy.py
-  --once >> /var/log/albert-scott/auto-deploy-run.log 2>&1; owed-digest | 0 * * * * | user | {doit}
+  --once >> /var/log/albert-scott/auto-deploy-run.log 2>&1; owed-digest | 0 6 * * * | user | {doit}
   {doit} cron-run owed-digest -- {doit} owed-digest --alert >> {root}/logs/owed-digest.log 2>&1
-  owed-digest-json | */30 * * * * | user | {doit}  {doit} cron-run owed-digest-json -- {doit}
+  owed-digest-json | 17 * * * * | user | {doit}  {doit} cron-run owed-digest-json -- {doit}
   owed-digest --json-only >> {root}/logs/owed-digest-json.log 2>&1
   portal-latency-daily | 30 6 * * * | cron.d |
   /opt/albert-scott/scripts/deploy/portal_check_daily_wrapper.sh (paused)  albert {doit} cron-run

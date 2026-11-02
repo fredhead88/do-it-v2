@@ -621,7 +621,8 @@ bw6 = next(r for r in rows6 if r["name"] == "backup-watch")
 check(bw6["max_runtime_s"] == 90, f"R14-AC6: backup-watch max_runtime_s == 90: {bw6['max_runtime_s']}")
 for r in rows6:
     if r["name"] not in {"backup-watch", "ledger-repack", "suite-daily", "base-red-nightly", "base-red-nightly-collect", "ledger-snapshot", "pace-sample", "stall-sample"}:
-        check(r["max_runtime_s"] == ({"spec-preflight": 3300, "flow-health-daily": 600, "doit-base-red-nightly": 7500}.get(r["name"])),
+        check(r["max_runtime_s"] == ({"spec-preflight": 3300, "flow-health-daily": 600, "doit-base-red-nightly": 7500,
+                                                "tmp-reaper": 3600, "sweep-owed": 3600}.get(r["name"])),
               f"R14-AC6: {r['name']} exact runtime: {r['max_runtime_s']}")
 buf6 = io.StringIO()
 with contextlib.redirect_stdout(buf6):
@@ -716,7 +717,7 @@ check(raw1967["tick"]["schedule"] == "*/{tick_min} * * * *",
 for name, schedule in schedules1967.items():
     check(rows1967[name]["schedule"] == schedule,
           f"L1967-AC1: exact {name} schedule: {rows1967[name]['schedule']}")
-check(rows1967["tmp-reaper"]["schedule"] in tmp_schedules1967.values(),
+check(rows1967["tmp-reaper"]["schedule"] == "*/15 * * * *",
       f"L1967-AC1: tmp-reaper keeps the builder-base period: {rows1967['tmp-reaper']['schedule']}")
 for period, tmp_schedule in tmp_schedules1967.items():
     fixture = {**schedules1967, "tmp-reaper": tmp_schedule}
