@@ -47,6 +47,15 @@ class ReadinessTests(unittest.TestCase):
         with patch.object(readiness.grading_env, '_project_row', return_value=project_row or {}):
             return readiness.check(self.sid, 'demo', self.base, self.events, root=self.root, dry_run=dry_run)
 
+    def test_archived_package_json_needs_no_node_modules(self):
+        import tempfile, pathlib
+        with tempfile.TemporaryDirectory() as d:
+            tree = pathlib.Path(d)
+            for rel in ("dashboard", "archive/dashboard-bluedot", "_wip/tool", "dashboard/node_modules/x"):
+                (tree / rel).mkdir(parents=True)
+                (tree / rel / "package.json").write_text("{}")
+            self.assertEqual(readiness.package_dirs(tree), ["dashboard"])
+
     def test_exact_base_and_successful_dry_run(self):
         self.spec('- `def existing()` from `source.py`')
         self.assertEqual(self.check()['status'], 'ready')

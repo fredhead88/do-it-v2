@@ -169,6 +169,17 @@ def companion_gaps(text, grant, repo, base, tree, *, registries=()):
     return _requirements(companion_matches(text, grant, repo, base, tree, registries=registries))[0]
 
 
+SKIPPED_PACKAGE_DIRS = {'node_modules', 'archive', '_archive', '_wip', '.worktrees', '.venv'}
+
+
+def package_dirs(tree):
+    """Live package directories under `tree` (relative) that need node_modules. Archived
+    and scratch trees keep a package.json nobody installs (archive/dashboard-bluedot bounced
+    L-spec-1997 three times on 2026-11-02), so they are not environment requirements."""
+    return [str(p.parent.relative_to(tree)) for p in sorted(tree.rglob('package.json'))
+            if not set(p.parts) & SKIPPED_PACKAGE_DIRS]
+
+
 def verify_base(text, repo, base, root, project, timeout=180):
     chain = verification.block(text)
     if not chain:
@@ -186,8 +197,9 @@ def verify_base(text, repo, base, root, project, timeout=180):
                 raise NotReady('Verification base checkout unavailable')
         directories = list(row.get('node_dirs', []))
         if re.search(r'\b(?:npm|npx|vitest|tsc)\b', chain):
-            directories += [str(p.parent.relative_to(tree)) for p in tree.rglob('package.json')
-                            if 'node_modules' not in p.parts]
+            # Archived and scratch trees keep a package.json nobody installs (archive/dashboard-bluedot
+            # bounced L-spec-1997 three times on 2026-11-02); only live packages need node_modules.
+            directories += package_dirs(tree)
         for directory in dict.fromkeys(directories):
             source = (repo / directory / 'node_modules').resolve()
             target = tree / directory / 'node_modules'
