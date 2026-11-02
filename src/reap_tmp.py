@@ -65,6 +65,7 @@ injectable `proc_root`, the identical way.
 """
 import argparse, json, os, pathlib, re, shutil, signal, stat, subprocess, sys, time
 from datetime import datetime, timezone
+from contextlib import contextmanager
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import fold, look, panes, scratch, tree_cleanup, disk_reaper  # noqa: E402
@@ -200,14 +201,14 @@ def _pidfiles_under(x):
     return out
 
 
-def _refs_d(proc_root, x, *, sockets=None):
+def _refs_d(proc_root, x, *, sockets=None, pidfiles=None):
     """Rule (d): a bound socket under `x`, or a `*.pid`/`postmaster.pid` file
     under `x` naming a pid `panes.alive()` reports live. A pid file naming a
     dead pid contributes nothing — its contents are read only for the
     integer, never as a path (security_path (c))."""
     sockets = _bound_sockets(proc_root) if sockets is None else sockets
     out = [s for s in sockets if _under(s, x)]
-    for pf in _pidfiles_under(x):
+    for pf in (_pidfiles_under(x) if pidfiles is None else pidfiles):
         try:
             pid = int(pathlib.Path(pf).read_text().splitlines()[0])
         except (OSError, ValueError, IndexError):
@@ -228,7 +229,8 @@ def _reason(b_ok, c_refs, d_refs):
     return "; ".join(parts) if parts else "undetermined"
 
 
-def _decide(path, uid, min_age_min, now, proc_root, allow_recurse, proc_refs):
+def _decide(path, uid, min_age_min, now, proc_root, allow_recurse, proc_refs, *,
+            sockets=None, pidfiles=None, walk_out=None):
     """One entry (top-level, or an immediate child when `allow_recurse` is
     False), evaluated by SD7's four conditions in order. Returns
     ("remove", None) | ("keep", reason) | ("recurse", None) — the last only
@@ -244,7 +246,14 @@ def _decide(path, uid, min_age_min, now, proc_root, allow_recurse, proc_refs):
         if proc_refs is None:
             raise Undetermined("unreadable process snapshot")
         c_refs = [ref for ref in proc_refs if _under(ref, path)]
-        d_refs = _refs_d(proc_root, path)
+        if isinstance(sockets, _SocketCache):
+            sockets = sockets.get(proc_root)
+        elif sockets is None:
+            sockets = _bound_sockets(proc_root)
+        pidfiles = _pidfiles_under(path) if pidfiles is None else pidfiles
+        if walk_out is not None:
+            walk_out.extend(pidfiles)
+        d_refs = _refs_d(proc_root, path, sockets=sockets, pidfiles=pidfiles)
     except OSError as e:
         raise Undetermined(str(e))
 
@@ -278,9 +287,41 @@ def _delete(path):
         shutil.rmtree(path)
 
 
+class _RecordedIndex:
+    def __init__(self, refs):
+        self.refs = set(refs)
+        self.ancestors = {parent for ref in self.refs for parent in ref.parents}
+
+
+def _recorded_index(refs):
+    return _RecordedIndex(refs)
+
+
+def _overlaps_ref(path, ref):
+    return path == ref or path in ref.parents or ref in path.parents
+
+
 def _recorded_overlap(path, refs):
     path = pathlib.Path(os.path.realpath(path))
-    return any(path == ref or path in ref.parents or ref in path.parents for ref in refs)
+    if isinstance(refs, _RecordedIndex):
+        return path in refs.ancestors or any(p in refs.refs for p in (path, *path.parents))
+    return any(_overlaps_ref(path, ref) for ref in refs)
+
+
+class _SocketCache:
+    def __init__(self):
+        self.sockets = None
+
+    def get(self, proc_root):
+        if self.sockets is None:
+            self.sockets = _bound_sockets(proc_root)  # failures leave the cache empty
+        return self.sockets
+
+
+def _confirm_remove(path, proc_root, *, child=False):
+    refs = _refs_d(proc_root, path, sockets=_bound_sockets(proc_root),
+                   pidfiles=None if child else ())
+    return _reason(True, [], refs) if refs else None
 
 
 def _reap_recorded(events, *, dry_run=False, scratch_root=None, proc_root="/proc", now=None):
@@ -314,19 +355,26 @@ def _reap_recorded(events, *, dry_run=False, scratch_root=None, proc_root="/proc
         safety=lambda r, e: resources._default_safety(r, e, proc_root=proc_root))
 
 
-def _scan_dir(dirpath, uid, min_age_min, now, proc_root, dry_run, proc_refs, recorded_refs=()):
+def _scan_dir(dirpath, uid, min_age_min, now, proc_root, dry_run, proc_refs, recorded_refs=(), *, socket_cache=None):
     """SD7's decision, applied to every top-level entry of `dirpath`. Shared
     by `root`; scratch has its own fixed retention policy. A failure listing `dirpath` itself propagates (the caller
     decides whether that is fatal, per surface)."""
     removed, kept = [], []
+    socket_cache = _SocketCache() if socket_cache is None else socket_cache
     for name in sorted(os.listdir(dirpath)):
         path = os.path.join(dirpath, name)
         if _recorded_overlap(path, recorded_refs):
             kept.append({"path": path, "reason": "recorded resource; registry owns cleanup"})
             continue
         try:
-            kind, reason = _decide(path, uid, min_age_min, now, proc_root, True, proc_refs)
-        except Undetermined:
+            parent_pidfiles = []
+            kind, reason = _decide(path, uid, min_age_min, now, proc_root, True, proc_refs,
+                                   sockets=socket_cache, walk_out=parent_pidfiles)
+            if kind == "remove":
+                reason = _confirm_remove(path, proc_root)
+                if reason:
+                    kind = "keep"
+        except (OSError, Undetermined):
             kept.append({"path": path, "reason": "undetermined"})
             continue
         if kind == "remove":
@@ -347,8 +395,15 @@ def _scan_dir(dirpath, uid, min_age_min, now, proc_root, dry_run, proc_refs, rec
                     kept.append({"path": cpath, "reason": "recorded resource; registry owns cleanup"})
                     continue
                 try:
-                    ckind, creason = _decide(cpath, uid, min_age_min, now, proc_root, False, proc_refs)
-                except Undetermined:
+                    st = os.lstat(cpath)
+                    child_pidfiles = [pf for pf in parent_pidfiles if _under(pf, cpath)] if stat.S_ISDIR(st.st_mode) else []
+                    ckind, creason = _decide(cpath, uid, min_age_min, now, proc_root, False, proc_refs,
+                                             sockets=socket_cache, pidfiles=child_pidfiles)
+                    if ckind == "remove":
+                        creason = _confirm_remove(cpath, proc_root, child=True)
+                        if creason:
+                            ckind = "keep"
+                except (OSError, Undetermined):
                     kept.append({"path": cpath, "reason": "undetermined"})
                     continue
                 if ckind == "remove":
@@ -381,8 +436,9 @@ def _nested_pgdata(root, uid=None):
     return found
 
 
-def _scan_nested_pgdata(paths, uid, now, proc_root, dry_run, proc_refs, recorded_refs):
+def _scan_nested_pgdata(paths, uid, now, proc_root, dry_run, proc_refs, recorded_refs, *, socket_cache=None):
     removed, kept = [], []
+    socket_cache = _SocketCache() if socket_cache is None else socket_cache
     for path in paths:
         reason = None
         try:
@@ -395,8 +451,11 @@ def _scan_nested_pgdata(paths, uid, now, proc_root, dry_run, proc_refs, recorded
                         ".git" in dirs or ".git" in files for _, dirs, files in os.walk(path)):
                     reason = "git worktree; kept"
                 else:
-                    kind, reason = _decide(str(path), uid, 48 * 60, now, proc_root, False, proc_refs)
+                    kind, reason = _decide(str(path), uid, 48 * 60, now, proc_root, False, proc_refs,
+                                           sockets=socket_cache)
                     if kind == "remove":
+                        reason = _confirm_remove(path, proc_root)
+                    if kind == "remove" and reason is None:
                         removed.append(str(path))
                         if not dry_run:
                             _delete(path)
@@ -1041,6 +1100,30 @@ def _psql_pg_fn():
     return fn
 
 
+_times = os.times
+_TIMING_KEYS = "total quota settings ref_index proc_snapshot tmp nested scratch recorded servers worktrees var_tmp session_logs grade_views clusters databases".split()
+
+
+def _sample():
+    value = _times()
+    return time.monotonic(), value.user + value.children_user, value.system + value.children_system
+
+
+def _finish(timings, cpu, key, start):
+    end = _sample()
+    timings[key] += max(0.0, float(end[0] - start[0]))
+    cpu[key] = [a + max(0.0, float(b - c)) for a, b, c in zip(cpu[key], end[1:], start[1:])]
+
+
+@contextmanager
+def _measure(timings, cpu, key):
+    start = _sample()
+    try:
+        yield
+    finally:
+        _finish(timings, cpu, key, start)
+
+
 @disk_reaper._settings_pass()
 def run(root="/tmp", uid=None, min_age_min=120, dry_run=False, now=None, proc_root="/proc",
         scratch_root=None, events=None, kill_fn=None, state_path=None, pg_fn=None,
@@ -1055,6 +1138,9 @@ def run(root="/tmp", uid=None, min_age_min=120, dry_run=False, now=None, proc_ro
     for orphans). Only `main()` resolves live values for them. Raises (never
     returns a partial result) when the scan of `root` itself cannot be
     performed — the one contract unchanged from before this unit."""
+    timings = dict.fromkeys(_TIMING_KEYS, 0.0)
+    cpu = {key: [0.0, 0.0] for key in _TIMING_KEYS}
+    total_start = _sample()
     uid = os.getuid() if uid is None else uid
     now = now or datetime.now(timezone.utc)
     root = str(root)
@@ -1062,101 +1148,123 @@ def run(root="/tmp", uid=None, min_age_min=120, dry_run=False, now=None, proc_ro
         raise NotADirectoryError(f"reap_tmp: {root!r} is not a directory")
 
     before_pct = _disk_pct(root)
-    quota = user_quota(mount=root, uid=uid)
+    with _measure(timings, cpu, "quota"):
+        quota = user_quota(mount=root, uid=uid)
+
     frac = (quota["used_bytes"] / quota["limit_bytes"]) if quota.get("limit_bytes") else 0.0
     mode = "pressure" if frac >= 0.70 else "normal"
     effective_min_age = 30 if mode == "pressure" else min_age_min
 
     import resources
-    settings = disk_reaper._settings()
-    recorded_refs = {pathlib.Path(os.path.realpath(r.ref)) for r in resources.live(events or [])
-                     if pathlib.Path(r.ref).is_absolute()}
-    proc_refs, tmp_other_uid_skipped = _own_uid_refs(proc_root, uid)
+    with _measure(timings, cpu, "settings"):
+        settings = disk_reaper._settings()
+
+    with _measure(timings, cpu, "ref_index"):
+        recorded_refs = _recorded_index(pathlib.Path(os.path.realpath(r.ref)) for r in resources.live(events or [])
+                                        if pathlib.Path(r.ref).is_absolute())
+
+    with _measure(timings, cpu, "proc_snapshot"):
+        proc_refs, tmp_other_uid_skipped = _own_uid_refs(proc_root, uid)
+
     # Prevent generic parent deletion from bypassing the nested data's fixed 48h
     # retention or its own live pid/socket checks, including during pressure mode.
-    nested = _nested_pgdata(root, uid)
-    removed, kept = _scan_dir(root, uid, effective_min_age, now, proc_root, dry_run,
-                              proc_refs, recorded_refs | {p.resolve() for p in nested})
-    n_removed, n_kept = _scan_nested_pgdata(nested, uid, now, proc_root, dry_run,
-                                          proc_refs, recorded_refs)
+    with _measure(timings, cpu, "nested"):
+        nested = _nested_pgdata(root, uid)
+        tmp_refs = _recorded_index(recorded_refs.refs | {p.resolve() for p in nested})
+
+    socket_cache = _SocketCache()
+    with _measure(timings, cpu, "tmp"):
+        removed, kept = _scan_dir(root, uid, effective_min_age, now, proc_root, dry_run,
+                                  proc_refs, tmp_refs, socket_cache=socket_cache)
+
+    with _measure(timings, cpu, "nested"):
+        n_removed, n_kept = _scan_nested_pgdata(nested, uid, now, proc_root, dry_run,
+                                              proc_refs, recorded_refs, socket_cache=socket_cache)
+
     removed += n_removed
     kept += n_kept
 
     errors = {}
     if scratch_root is not None:
-        try:
-            s_removed, s_kept = _scan_scratch(scratch_root, uid, now, proc_root, dry_run, recorded_refs)
-            removed += s_removed
-            kept += s_kept
-        except Exception as e:
-            errors["scratch"] = str(e)
+        with _measure(timings, cpu, "scratch"):
+            try:
+                s_removed, s_kept = _scan_scratch(scratch_root, uid, now, proc_root, dry_run, recorded_refs)
+                removed += s_removed
+                kept += s_kept
+            except Exception as e:
+                errors["scratch"] = str(e)
 
     retired, recorded_rows, recorded_report = [], [], {}
     if events is not None:
-        token = resources._REAP_REPORT.set(recorded_report)
-        try:
-            recorded_rows = _reap_recorded(events, dry_run=dry_run, scratch_root=scratch_root, proc_root=proc_root, now=now)
-            for row in recorded_rows:
-                if row.action in ("reaped", "would-reap"):
-                    removed.append(row.ref)
-                elif row.action in ('retired', 'would-retire'):
-                    retired.append(row.ref)
-                else:
-                    kept.append({"path": row.ref, "reason": row.reason})
-        except Exception as exc:
-            errors["recorded"] = "undetermined: " + str(exc)
-            recorded_report.clear()
-        finally:
-            resources._REAP_REPORT.reset(token)
+        with _measure(timings, cpu, "recorded"):
+            token = resources._REAP_REPORT.set(recorded_report)
+            try:
+                recorded_rows = _reap_recorded(events, dry_run=dry_run, scratch_root=scratch_root, proc_root=proc_root, now=now)
+                for row in recorded_rows:
+                    if row.action in ("reaped", "would-reap"):
+                        removed.append(row.ref)
+                    elif row.action in ('retired', 'would-retire'):
+                        retired.append(row.ref)
+                    else:
+                        kept.append({"path": row.ref, "reason": row.reason})
+            except Exception as exc:
+                errors["recorded"] = "undetermined: " + str(exc)
+                recorded_report.clear()
+            finally:
+                resources._REAP_REPORT.reset(token)
 
     stopped_servers = []
     if kill_fn is not None:
-        try:
-            terminal_paths = tree_cleanup.terminal_worktrees(events) if events is not None else {}
-            stopped_servers = _orphan_servers(proc_root, uid, scratch_root, terminal_paths, kill_fn, dry_run)
-        except Exception as e:
-            errors["servers"] = str(e)
+        with _measure(timings, cpu, "servers"):
+            try:
+                terminal_paths = tree_cleanup.terminal_worktrees(events) if events is not None else {}
+                stopped_servers = _orphan_servers(proc_root, uid, scratch_root, terminal_paths, kill_fn, dry_run)
+            except Exception as e:
+                errors["servers"] = str(e)
 
     reaped_worktrees = []
     worktree_rows = []
     worktree_stats = {'other_uid_skipped': 0}
     if events is not None:
-        try:
-            with disk_reaper.worktree_pass(proc_root, stats=worktree_stats) as worktree_rows:
-                if worktree_fn is None:
-                    reaped_worktrees = tree_cleanup.reap_merged_specs(events, dry_run=dry_run)
-                else:
-                    # The live cadence shares the branch-preserving, dirty-safe
-                    # conventional-spec reaper instead of the legacy branch sweep.
-                    rows = worktree_fn(events, dry_run=dry_run, proc_refs=disk_reaper.process_refs())
-                    for row in rows:
-                        if row['action'] in ('removed', 'would-remove'):
-                            reaped_worktrees.append(row['branch'])
-                            worktree_rows.append(dict(path=row['path'], freed_bytes=row['freed_bytes'],
-                                spec='L-' + pathlib.Path(row['path']).name[2:], proof='terminal-spec'))
-                        else:
-                            kept.append(dict(path=row['path'], reason=row['reason']))
-        except tree_cleanup.GroupFailure as e:
-            reaped_worktrees, errors["worktrees"] = e.reaped, str(e)
-        except Exception as e:
-            errors["worktrees"] = str(e)
+        with _measure(timings, cpu, "worktrees"):
+            try:
+                with disk_reaper.worktree_pass(proc_root, stats=worktree_stats) as worktree_rows:
+                    if worktree_fn is None:
+                        reaped_worktrees = tree_cleanup.reap_merged_specs(events, dry_run=dry_run)
+                    else:
+                        # The live cadence shares the branch-preserving, dirty-safe
+                        # conventional-spec reaper instead of the legacy branch sweep.
+                        rows = worktree_fn(events, dry_run=dry_run, proc_refs=disk_reaper.process_refs())
+                        for row in rows:
+                            if row['action'] in ('removed', 'would-remove'):
+                                reaped_worktrees.append(row['branch'])
+                                worktree_rows.append(dict(path=row['path'], freed_bytes=row['freed_bytes'],
+                                    spec='L-' + pathlib.Path(row['path']).name[2:], proof='terminal-spec'))
+                            else:
+                                kept.append(dict(path=row['path'], reason=row['reason']))
+            except tree_cleanup.GroupFailure as e:
+                reaped_worktrees, errors["worktrees"] = e.reaped, str(e)
+            except Exception as e:
+                errors["worktrees"] = str(e)
 
     var_tmp = {"removed": [], "kept": [], "freed_bytes": 0, "other_uid_skipped": 0}
     session_logs = {"removed": [], "kept": [], "freed_bytes": 0, "ran": False, "other_uid_skipped": 0}
     if var_tmp_root is not None:
-        try:
-            var_tmp = disk_reaper.reap_var_tmp(var_tmp_root, uid=uid, now=now,
-                proc_root=proc_root, recorded_refs=recorded_refs, dry_run=dry_run)
-        except Exception as exc:
-            errors["var_tmp"] = "undetermined: " + str(exc)
+        with _measure(timings, cpu, "var_tmp"):
+            try:
+                var_tmp = disk_reaper.reap_var_tmp(var_tmp_root, uid=uid, now=now,
+                    proc_root=proc_root, recorded_refs=recorded_refs, dry_run=dry_run)
+            except Exception as exc:
+                errors["var_tmp"] = "undetermined: " + str(exc)
     if session_roots is not None:
-        try:
-            session_logs = disk_reaper.reap_session_logs(session_roots, now=now,
-                proc_root=proc_root, dry_run=dry_run, state_path=session_state_path)
-            if session_logs.get("errors"):
-                errors["session_logs"] = session_logs["errors"]
-        except Exception as exc:
-            errors["session_logs"] = "undetermined: " + str(exc)
+        with _measure(timings, cpu, "session_logs"):
+            try:
+                session_logs = disk_reaper.reap_session_logs(session_roots, now=now,
+                    proc_root=proc_root, dry_run=dry_run, state_path=session_state_path)
+                if session_logs.get("errors"):
+                    errors["session_logs"] = session_logs["errors"]
+            except Exception as exc:
+                errors["session_logs"] = "undetermined: " + str(exc)
 
     # L-charter-0042/L-spec-0486, R15b: a grader/reviewer's own `grade/<spawn>/`
     # scratch copy, removed the instant its spawn is terminal — both `scratch_root`
@@ -1164,12 +1272,13 @@ def run(root="/tmp", uid=None, min_age_min=120, dry_run=False, now=None, proc_ro
     # requires), never gated on `kill_fn`.
     removed_scratch = []
     if scratch_root is not None and events is not None:
-        try:
-            removed_scratch, g_errors = _reap_grade_views(scratch_root, events, proc_root, dry_run, uid, stop_fn)
-            removed += removed_scratch
-            errors.update(g_errors)
-        except Exception as e:
-            errors["scratch_grade"] = str(e)
+        with _measure(timings, cpu, "grade_views"):
+            try:
+                removed_scratch, g_errors = _reap_grade_views(scratch_root, events, proc_root, dry_run, uid, stop_fn)
+                removed += removed_scratch
+                errors.update(g_errors)
+            except Exception as e:
+                errors["scratch_grade"] = str(e)
 
     # L-charter-0042/L-spec-0486, R15c: orphaned private Postgres clusters and
     # test databases with no live owner — opted in independently: clusters via
@@ -1178,19 +1287,21 @@ def run(root="/tmp", uid=None, min_age_min=120, dry_run=False, now=None, proc_ro
     # databases via `pg_fn` alone.
     stopped_clusters = []
     if kill_fn is not None:
-        try:
-            stopped_clusters = _reap_clusters(proc_root, uid, scratch_root, events, now,
-                                              state_path, stop_fn, kill_fn, wait_s, dry_run,
-                                              var_tmp_root=var_tmp_root, hold=settings['hold'])
-        except Exception as e:
-            errors["clusters"] = str(e)
+        with _measure(timings, cpu, "clusters"):
+            try:
+                stopped_clusters = _reap_clusters(proc_root, uid, scratch_root, events, now,
+                                                  state_path, stop_fn, kill_fn, wait_s, dry_run,
+                                                  var_tmp_root=var_tmp_root, hold=settings['hold'])
+            except Exception as e:
+                errors["clusters"] = str(e)
 
     dropped_databases = []
     if pg_fn is not None:
-        try:
-            dropped_databases = _reap_databases(pg_fn, dry_run)
-        except Exception as e:
-            errors["pg"] = str(e)
+        with _measure(timings, cpu, "databases"):
+            try:
+                dropped_databases = _reap_databases(pg_fn, dry_run)
+            except Exception as e:
+                errors["pg"] = str(e)
 
     if frac >= 0.85:
         look.emit_once("tmp-quota-high", str(uid), "thinker",
@@ -1221,6 +1332,8 @@ def run(root="/tmp", uid=None, min_age_min=120, dry_run=False, now=None, proc_ro
     if events is not None:
         result['recorded_summary'] = _recorded_summary(recorded_rows, recorded_report,
                                                       int('recorded' in errors))
+    _finish(timings, cpu, "total", total_start)
+    result.update(timings_s=timings, cpu_s=cpu)
     if log_path is not None and not dry_run:
         _write_log(result, log_path, now)
     return result
@@ -1286,7 +1399,9 @@ def _write_log(result, log_path, now=None):
             samples = [sample for _, surface in data for sample in surface.get('exempt', [])][:5]
             f.write(f"{ts} surfaces hold={int(summary.get('hold', False))} "
                     f"config_invalid={summary.get('config_invalid', 0)} " + ' '.join(parts) +
-                    f" exempt={encode(samples)}\n")
+                    f" exempt={encode(samples)}" +
+                    (f" timings_s={encode(result['timings_s'])} cpu_s={encode(result['cpu_s'])}"
+                     if 'timings_s' in result and 'cpu_s' in result else '') + "\n")
 
 
 def reap_now(dry_run=False, min_age_min=120):
@@ -1296,11 +1411,18 @@ def reap_now(dry_run=False, min_age_min=120):
     resolved HERE, never by any hermetic caller. Raises exactly as `run()` does
     when `root` itself cannot be scanned; the caller decides what that means."""
     import reap_worktrees
-    return run(root="/tmp", uid=os.getuid(), min_age_min=min_age_min, dry_run=dry_run,
+    timings, cpu = {"read_events": 0.0}, {"read_events": [0.0, 0.0]}
+    with _measure(timings, cpu, "read_events"):
+        events = fold.read_events()
+    result = run(root="/tmp", uid=os.getuid(), min_age_min=min_age_min, dry_run=dry_run,
               worktree_fn=reap_worktrees.run,
-              proc_root="/proc", scratch_root=scratch.root(), events=fold.read_events(),
+              proc_root="/proc", scratch_root=scratch.root(), events=events,
               kill_fn=os.kill, pg_fn=_psql_pg_fn(), var_tmp_root="/var/tmp",
               session_roots=[pathlib.Path.home() / ".claude/projects", pathlib.Path.home() / ".codex/sessions"])
+    if 'timings_s' in result and 'cpu_s' in result:
+        result['timings_s'].update(timings)
+        result['cpu_s'].update(cpu)
+    return result
 
 
 def main(argv=None):
@@ -1322,7 +1444,8 @@ def main(argv=None):
                       "var_tmp": result.get("var_tmp", {}), "session_logs": result.get("session_logs", {}),
                       "worktree_rows": result.get("worktree_rows", []),
                       "other_uid_skipped": result.get("other_uid_skipped", 0),
-                      "freed_bytes_worktrees": result.get("freed_bytes_worktrees", 0)}, sort_keys=True))
+                      "freed_bytes_worktrees": result.get("freed_bytes_worktrees", 0),
+                      **{key: result[key] for key in ("timings_s", "cpu_s") if key in result}}, sort_keys=True))
     return 0
 
 
