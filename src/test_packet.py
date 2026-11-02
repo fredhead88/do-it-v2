@@ -2093,6 +2093,9 @@ def test_repo_packet():
                  "rebind this check to the shipped sha", "never `met`", "scratch Postgres", "exact ask"):
         assert term in sec, term
     outside = re.sub(r"\n### Repo batches\n.*?(?=\n## )", "", contract, flags=re.S)
+    capability_boundary = 'Preserve the exact missing relation/tool and access ask, with `next_owner` naming\nThinker/prod-runner or the operator only for an exclusive authorized human act.\nUnknown or legacy capability labels stay unchanged and undetermined; never guess\n`repo` or expire a check because a guessed route used its attempts. Missing browser,\nundeployed target, unreadable evidence and denied access are `cannot-observe`.\nOnly an observed criterion mismatch is `failed`; uncertain classification is\n`cannot-observe` with `reason_code: undetermined` and an exact triage ask.\n'
+    assert capability_boundary in outside
+    outside = outside.replace(capability_boundary, "")
     outside = outside.replace("elapsed | repo | not-live | ro-dsn-grant", "elapsed | other")
     assert __import__("hashlib").sha256(outside.encode()).hexdigest() == "7063bfccbf09289ac6ff85881054e750b4a75ac83f129f8c66c96bfdb3124566"
     print("repo-batch AC6 contract and unchanged plain text passed")
@@ -2100,7 +2103,11 @@ def test_repo_packet():
 
 test_repo_packet()
 
-assert set(__import__("owed_routes").ROUTES) == set(json.loads((pathlib.Path(__file__).parents[1] / "agents/owed-sweeper.schema.json").read_text())["properties"]["results"]["items"]["properties"]["capability"]["enum"])
+capability_schema = json.loads((pathlib.Path(__file__).parents[1] / "agents/owed-sweeper.schema.json").read_text())["properties"]["results"]["items"]["properties"]["capability"]
+assert capability_schema['type'] == 'string' and capability_schema['minLength'] == 1
+assert 'enum' not in capability_schema
+for capability in [*__import__('owed_routes').ROUTES, 'unknown', 'legacy-sensor']:
+    __import__('jsonschema').validate(capability, capability_schema)
 print("AC7 ok packet capability list uses route vocabulary")
 
 # L-spec-1663 AC9: real packet builders retain the complete current body.

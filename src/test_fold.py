@@ -1621,9 +1621,9 @@ empty_board1 = fold.render(*ledger(**{"L-operator-local.jsonl": []}))
 assert "## OWED DUE (0)" in empty_board1, empty_board1
 
 # ── AC2 (L-charter-0038/L-spec-0384, R3/AC14) · a due row (S, AC9's fixture)
-# and an EXPIRED-only row (S2, AC6's clamped shape, `shipped_at` 10 days ago)
-# — `owed_due`/HEALTH count only the due one; the expired row is no longer
-# "overdue" at all, and OVER-7-DAYS is gone (deleted, not re-thresholded).
+# and an unknown-capability row (S2, shipped 10 days ago). Both remain
+# visible: an unclassified route cannot expire an unobserved obligation.
+# OVER-7-DAYS remains gone (deleted, not re-thresholded).
 S2 = "L-spec-0143"
 built2 = [{"ts": stamp(3), "type": "spec-written", "subject": S2, "charter": C},
           {"ts": stamp(2), "type": "build-started", "subject": S2},
@@ -1642,14 +1642,14 @@ ev2 = ledger(**{"L-builder-01.jsonl": built + built2, "L-grader-01.jsonl": grade
                "L-spec-writer-01.jsonl": due3 + due9})
 board2 = fold.render(*ev2)
 due_line2 = [l for l in board2.splitlines() if l.strip().startswith("due owed:")][0]
-assert "due owed: 1" in due_line2 and "OVER 7 DAYS" not in due_line2, due_line2
+assert "due owed: 2" in due_line2 and "OVER 7 DAYS" not in due_line2, due_line2
 assert S2 not in due_line2 and "AC2" not in due_line2, due_line2
 od_block2 = board2.split("## OWED DUE")[1].split("## CHARTER CLOSE")[0]
 assert S in od_block2 and "AC1" in od_block2, od_block2
-assert S2 not in od_block2 and "AC2" not in od_block2, od_block2
+assert S2 in od_block2 and "AC2" in od_block2 and "blocked" in od_block2, od_block2
 rows2 = fold.owed_due(ev2[1])
-assert {(r["spec"], r["criterion"]) for r in rows2} == {(S, "AC1")}, rows2
-assert ev2[1][S2]["state"] == "shipped-owed-expired", ev2[1][S2]["state"]
+assert {(r["spec"], r["criterion"]) for r in rows2} == {(S, "AC1"), (S2, "AC2")}, rows2
+assert ev2[1][S2]["state"] == "shipped-owed-due", ev2[1][S2]["state"]
 print("AC14 ok")
 
 # ── AC3 · carry.uncarried: a v4 row with no last_error, a pr row with one
@@ -2335,24 +2335,24 @@ for a in ("builder", "grader"):
     assert fold.check_append(ev_ma, a) is not None, a
 print("AC10 ok")
 
-# ── AC11 · shipped-owed-expired, its priority against due/waiting, and the
-# widened owed tally + done_states ───────────────────────────────────────────
+# ── AC11 · unknown routes remain blocked ahead of waiting; they cannot
+# enter the expired allowance or bypass charter proof ───────────────────────────────────────────
 S11 = "L-spec-9386"
 same_ts11 = stamp(50)
 ac11 = {"ts": same_ts11, "type": "owed-ac", "subject": S11, "criterion": "AC1", "wake_at": same_ts11}
 ship11 = {"ts": stamp(10), "type": "shipped", "subject": S11}
 unobservable11 = {"ts": stamp(1), "type": "owed-unobservable", "subject": S11,
                   "criterion": "AC1", "capability": "zzz", "why": "no route"}
-assert fold.spec_state([ac11, ship11, unobservable11], set()) == "shipped-owed-expired", \
+assert fold.spec_state([ac11, ship11, unobservable11], set()) == "shipped-owed-due", \
     fold.spec_state([ac11, ship11, unobservable11], set())
 
 ac11_due = {"ts": stamp(15), "type": "owed-ac", "subject": S11, "criterion": "AC2", "wake_at": stamp(8)}
 assert fold.spec_state([ac11, ship11, ac11_due, unobservable11], set()) == "shipped-owed-due", \
-    "a due criterion beats an expired-only one"
+    "a due criterion and an unknown route both remain open"
 
 ac11_wait = {"ts": stamp(15), "type": "owed-ac", "subject": S11, "criterion": "AC2", "wake_at": stamp(-5)}
-assert fold.spec_state([ac11, ship11, ac11_wait, unobservable11], set()) == "shipped-owed-evidence", \
-    "waiting beats expired-only"
+assert fold.spec_state([ac11, ship11, ac11_wait, unobservable11], set()) == "shipped-owed-due", \
+    "unknown route remains blocking even with a waiting sibling"
 
 C11 = "L-charter-9386"
 S11c = "L-spec-9386c"
@@ -2364,17 +2364,18 @@ _K11 = fold.K
 fold.K = 1
 ev11c = ledger(**{"L-spec-writer-01.jsonl": [ac11c], "L-executor-01.jsonl": [ship11c, {**unobservable11, "subject": S11c}],
                   "L-thinker-01.jsonl": [charter_filed11]})
-assert ev11c[1][S11c]["state"] == "shipped-owed-expired", ev11c[1][S11c]["state"]
-assert ev11c[2][C11]["owed"] == 1, ev11c[2][C11]["owed"]
+assert ev11c[1][S11c]["state"] == "shipped-owed-due", ev11c[1][S11c]["state"]
+assert ev11c[2][C11]["owed"] == 0, ev11c[2][C11]["owed"]
 cl11 = fold.closable(ev11c[0], C11)
 assert cl11["owed_within_k"] is True, cl11
-assert cl11["all_accepted"] is True, cl11
+assert cl11["all_accepted"] is False, cl11
 fold.K = 0
 ev11c0 = ledger(**{"L-spec-writer-01.jsonl": [ac11c], "L-executor-01.jsonl": [ship11c, {**unobservable11, "subject": S11c}],
                    "L-thinker-01.jsonl": [charter_filed11]})
-assert ev11c0[2][C11]["owed"] == 1, ev11c0[2][C11]["owed"]
+assert ev11c0[2][C11]["owed"] == 0, ev11c0[2][C11]["owed"]
 cl11b = fold.closable(ev11c0[0], C11)
-assert cl11b["owed_within_k"] is False, cl11b
+assert cl11b["owed_within_k"] is False
+assert cl11b["all_accepted"] is False, cl11b
 fold.K = _K11
 print("AC11 ok")
 
@@ -4037,7 +4038,7 @@ def test_owed_vocabulary():
 test_owed_vocabulary()
 
 # L-spec-1003: every actionable lifecycle row reaches the existing spec state
-# and the board; expired remains below waiting and due.
+# and the board; unknown capability remains open alongside due rows.
 life_sid = "L-spec-lifecycle"
 life_decl = {"ts": stamp(30), "type": "owed-ac", "subject": life_sid,
              "criterion": "AC1", "wake_at": stamp(30)}
@@ -4050,13 +4051,13 @@ life_quarantine = {"ts": stamp(3), "type": "owed-quarantined", "subject": life_s
                    "criterion": "AC1", "reason": "drift", "spec_sha256": "digest"}
 life_correct = {"ts": stamp(2), "type": "owed-corrective", "subject": life_sid,
                 "criterion": "AC1", "corrective": "L-spec-fix"}
-life_expired = {**life_unobs, "capability": "zzz"}
+life_unknown = {**life_unobs, "capability": "zzz"}
 life_wait = {**life_decl, "criterion": "AC2", "wake_at": stamp(-30)}
 for extras in ([life_unobs], [life_fail], [life_fail, life_correct], [life_quarantine]):
     assert fold.spec_state([life_decl, life_ship, *extras], set()) == "shipped-owed-due"
-assert fold.spec_state([life_decl, life_ship, life_expired], set()) == "shipped-owed-expired"
-assert fold.spec_state([life_decl, life_wait, life_ship, life_expired], set()) == "shipped-owed-evidence"
-assert fold.spec_state([life_decl, life_wait, life_ship, life_expired,
+assert fold.spec_state([life_decl, life_ship, life_unknown], set()) == "shipped-owed-due"
+assert fold.spec_state([life_decl, life_wait, life_ship, life_unknown], set()) == "shipped-owed-due"
+assert fold.spec_state([life_decl, life_wait, life_ship, life_unknown,
                         {**life_decl, "criterion": "AC3"}], set()) == "shipped-owed-due"
 print("owed-lifecycle AC10 ok")
 
@@ -4083,7 +4084,8 @@ for extras, status in (([], "due"), ([life_unobs], "blocked"), ([life_fail], "fa
                         ([life_fail, life_correct], "correcting"), ([life_quarantine], "quarantined")):
     rows = fold.owed_due({life_sid: {"evs": [life_decl, life_ship, *extras]}})
     assert len(rows) == 1 and rows[0]["status"] == status, rows
-assert fold.owed_due({life_sid: {"evs": [life_decl, life_ship, life_expired]}}) == []
+unknown_rows = fold.owed_due({life_sid: {"evs": [life_decl, life_ship, life_unknown]}})
+assert len(unknown_rows) == 1 and unknown_rows[0]["status"] == "blocked", unknown_rows
 # Due rows append the declared source without a status suffix.
 life_due_folded = ledger(**{"L-spec-writer-lifecycle.jsonl": [life_decl],
                             "L-executor-lifecycle.jsonl": [life_ship]})

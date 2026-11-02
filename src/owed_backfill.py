@@ -6,6 +6,7 @@ from datetime import timedelta
 import json
 import os
 import pathlib
+import re
 import sys
 import tempfile
 
@@ -29,9 +30,13 @@ CORRECTIVES = {
 
 
 def target_capability(row):
-    if 'pg_read_all_stats' in str(row.get('ask') or '').lower():
+    note = row.get('why') if 'why' in row else row.get('ask')
+    if 'pg_read_all_stats' in str(note or '').lower():
         return 'operator-action'
-    return owed_routes.classify_ask(row.get('ask'), row.get('capability'))['capability']
+    target = owed_routes.classify_ask(note, row.get('capability'))['capability']
+    if target == 'repo' and not re.search(r'\brepository|\brepo\b|checkout|pytest|\btests?\b', str(note or ''), re.I):
+        return row.get('capability')
+    return target
 
 
 def _rows(evs_by_spec, now):
@@ -103,9 +108,12 @@ def plan(evs_by_spec, audit_rows, now):
             continue
         target, current = target_capability(row), row.get('capability')
         event = None
-        if target == current:
-            reason = 'skipped-already-present: capability already right'
-        elif current not in ('other', None, ''):
+        if not str((row.get('why') if 'why' in row else row.get('ask')) or '').strip():
+            reason = 'no ask, not relabelled'
+        elif target == current:
+            reason = ('target has no route' if owed_routes.route_for(current) is None else
+                      'skipped-already-present: capability already right')
+        elif row.get('original_capability', current) not in ('other', None, ''):
             reason = 'not legacy'
         elif not str(row.get('ask') or '').strip():
             reason = 'no ask, not relabelled'

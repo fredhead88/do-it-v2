@@ -1089,6 +1089,11 @@ def next_steps(events, specs, now, rules, waves=None):
                     since = check['governing_at'].isoformat()
                     if check['status'] == 'expired':
                         step = _hold(item, 'check', 'live', event, 'owed-expired', 'decision', since=since)
+                    elif check['status'] == 'blocked' and check.get('routing_state') in {'undetermined','exhausted'}:
+                        owner = check.get('next_owner') if check.get('next_owner') in {'thinker','operator'} else 'thinker'
+                        step = _hold(item, 'check', 'live', event,
+                                     'undetermined: owed observation route ' + check['routing_state'],
+                                     check.get('ask') or 'capable observation route established', owner, since)
                     elif check['due_at'] is not None and check['due_at'] <= now:
                         step = Step(item, 'check', 'live', 'action', 'sweep-check', owners['sweep-check'],
                                     check['declared_src'], 'owed check due', None, since)

@@ -44,7 +44,7 @@ def fixture():
         for j, status in enumerate(("waiting", "due", "blocked", "failed", "correcting",
                                     "quarantined", "met", "waived", "expired", "dropped", "unshipped")):
             spec = f"L-spec-{9000 + i * 11 + j}"
-            expected[spec] = status
+            expected[spec] = "blocked-unknown" if status == "expired" else status
             evs = [event("owed-ac", spec, 20, criterion="verify", wake_at=ts(-30 if status == "waiting" else 19))]
             if status != "unshipped":
                 evs.append(event("shipped", spec, 19, actor="executor"))
@@ -53,7 +53,7 @@ def fixture():
             if status in ("blocked", "expired"):
                 evs.append(event("owed-unobservable", spec, 10, actor="owed-sweeper", criterion="verify",
                                  capability="operator-action" if status == "blocked" else "unknown-capability",
-                                 why=ASK))
+                                 why="Unknown observation route" if status == "expired" else ASK))
             if status in ("failed", "correcting"):
                 evs.append(event("owed-failed", spec, 11, actor="owed-sweeper", criterion="verify", evidence="unmet"))
             if status == "correcting":
@@ -160,20 +160,20 @@ class DigestTests(unittest.TestCase):
         evs, expected = fixture()
         obj = digest.build(evs, NOW)
         recount = Counter(r["status"] for s in fold.fold(evs)[0].values() for r in owed.checks(s["evs"], NOW))
-        self.assertEqual(obj["counts"]["by_status"], {**recount, "unverifiable": 0})
+        self.assertEqual(obj["counts"]["by_status"], {**dict.fromkeys(owed.STATUSES,0), **recount})
         self.assertEqual(set(obj), {"at", "counts", "needs_you", "health", "m1", "backlog", "alarms", "trend", "thinker_rows", "answered_asks"})
         self.assertEqual(set(obj["counts"]), {"by_status", "blocked_by_capability", "sweep"})
         self.assertEqual(set(obj["counts"]["by_status"]), set(owed.STATUSES))
         self.assertEqual({r["spec"] for r in obj["needs_you"]}, {s for s, v in expected.items() if v == "blocked"})
-        self.assertEqual(obj["counts"]["blocked_by_capability"], {"operator-action": 10})
+        self.assertEqual(obj["counts"]["blocked_by_capability"], {"operator-action": 10, "unknown-capability": 10})
         # Independent, hand-labelled recount: no owed/checks call in this oracle.
         self.assertEqual(obj["counts"]["by_status"],
-                         {**Counter(expected.values()), "unverifiable": 0})
-        self.assertEqual(obj["m1"], {"terminal_unobservable": 10, "verify_unbuildable": 10,
+                         {**dict.fromkeys(owed.STATUSES,0), **Counter("blocked" if v=="blocked-unknown" else v for v in expected.values())})
+        self.assertEqual(obj["m1"], {"terminal_unobservable": 0, "verify_unbuildable": 10,
                                       "sweep_failed_one_row_24h": 0})
         self.assertEqual(len(expected), 110)
         self.assertEqual({r["kind"] for r in obj["health"]},
-                         {"expired", "failed", "quarantined", "correcting-stale"})
+                         {"failed", "quarantined", "correcting-stale"})
         zero = digest.build([], NOW)
         self.assertEqual(zero["counts"]["by_status"], dict.fromkeys(owed.STATUSES, 0))
         print("PASS by_status recount; needs_you; recount (110 hand-labelled rows)")
@@ -399,7 +399,7 @@ class DigestTests(unittest.TestCase):
         for day in range(3, 8):
             self.assertEqual(self.run_digest(alert=True, now=NOW + timedelta(days=day)), 0)
         record = json.loads((self.root / "state/owed-alerted.json").read_text())
-        self.assertEqual(len(record["rows"]), 10)
+        self.assertEqual(len(record["rows"]), 20)
         self.assertNotIn("NEEDS YOU:", self.sent[-1][1])
         print("PASS bounded daily merge; deferred count; expired backlog silently retired")
 

@@ -37,6 +37,13 @@ You receive only judgment rows and failing build bundles, including production
 rows with no runnable command. You never receive a `browser`, `operator-action`
 or `ro-dsn-grant` row. A `permission denied` from `ro-sql` is missing access,
 never a verdict you record as failed.
+Preserve the exact missing relation/tool and access ask, with `next_owner` naming
+Thinker/prod-runner or the operator only for an exclusive authorized human act.
+Unknown or legacy capability labels stay unchanged and undetermined; never guess
+`repo` or expire a check because a guessed route used its attempts. Missing browser,
+undeployed target, unreadable evidence and denied access are `cannot-observe`.
+Only an observed criterion mismatch is `failed`; uncertain classification is
+`cannot-observe` with `reason_code: undetermined` and an exact triage ask.
 Decide one of three verdicts:
 
 - **met** — the observation confirms the criterion, with `evidence`.

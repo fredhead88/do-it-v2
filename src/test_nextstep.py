@@ -206,7 +206,15 @@ class NextStepTests(unittest.TestCase):
         events = [event('spec-written'), event('owed-ac', -25, criterion='AC1', wake_at=event('x', -24)['ts']),
                   event('shipped', -20), event('owed-unobservable', -10, criterion='AC1', capability='zzz')]
         check = self.steps(events, {SID: dict(state='shipped-owed-expired')})[0]
-        self.assertEqual((check.state, check.owner, check.reason), ('hold', 'executor', 'owed-expired'))
+        self.assertEqual((check.state, check.owner, check.action), ('hold', 'thinker', None))
+        self.assertTrue(check.reason.startswith('undetermined:'))
+        self.assertIn('observation tool, access and owner', check.clears)
+        events[-1] = event('owed-unobservable', -10, criterion='AC1', capability='browser', why='No browser available')
+        events += [event('owed-routed', -9, criterion='AC1', route='browser', epoch='one'),
+                   event('owed-routed', -8, criterion='AC1', route='browser', epoch='two')]
+        check = self.steps(events, {SID: dict(state='shipped-owed-due')})[0]
+        self.assertEqual((check.state, check.owner, check.action), ('hold', 'thinker', None))
+        self.assertIn('exhausted',check.reason)
 
     def test_ac5_pure_inherited_predicates_and_clock(self):
         events, specs, now, waves = replay('w42')

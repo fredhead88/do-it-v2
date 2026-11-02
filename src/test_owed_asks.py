@@ -133,17 +133,18 @@ def test_exhausted_route_escalates_once():
                      "criterion": "AC1", "route": "browser", "capability": "browser", "epoch": ""}
                     for n in range(owed_routes.MAX_ATTEMPTS)])
     evs = fold.fold(fold.read_events())[0][sid]["evs"]
-    check(owed.checks(evs, NOW)[0]["status"] == "expired", "route exhausted after final unobservable")
+    check(owed.checks(evs, NOW)[0]["status"] == "blocked", "route exhaustion remains a Thinker-owned hold")
+    check(owed.checks(evs, NOW)[0]["next_owner"] == "thinker", "capability gap is owned")
     check(not owed_asks.open_ask_criteria(evs, NOW), "an exhausted route has no open ask")
     check(not any(r["spec"] == sid for r in owed_asks.queue(fold.read_events(), NOW)),
           "an exhausted route is absent from the operator queue")
     lines = sweep_owed.sweep_expired({sid: {"evs": evs}}, NOW)
-    check(len(lines) == 1 and "escalated" in lines[0], f"exhaustion escalates: {lines}")
+    check(lines == [], f"capability exhaustion never creates expiry: {lines}")
     specs = fold.fold(fold.read_events())[0]
     check(not sweep_owed.sweep_expired({sid: specs[sid]}, NOW), "exhaustion never escalates twice")
     escalations = [e for e in fold.read_events() if e.get("subject") == sid
                    and e.get("type") == "escalation-blocking" and e.get("kind") == "owed-expired"]
-    check(len(escalations) == 1, "exactly one exhaustion escalation was written")
+    check(escalations == [], "no capability expiry escalation was written")
 
 
 def test_non_exhausted_open_ask_still_stripped():

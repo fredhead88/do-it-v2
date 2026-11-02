@@ -81,6 +81,8 @@ def checks(evs, now):
     `due_at`/`shipped_at` are `datetime.datetime` or `None`; `wake_at` is the
     raw declared string, echoed verbatim. A criterion-less `owed-ac` produces
     no row."""
+    import owed_verdicts
+    evs = [owed_verdicts.project_event(e) for e in evs]
     types = {e.get("type") for e in evs}
     spec = next((e.get("subject") for e in evs if e.get("subject")), None)
     project = next((e.get("project") for e in evs if e.get("project")), None)
@@ -144,7 +146,8 @@ def checks(evs, now):
         if "_capability" in ac:
             capability_evs = [e for e in capability_evs if _ts(e.get("ts"), now) > ac_ts]
         capability = capability_evs[-1].get("capability") if capability_evs else ac.get("_capability")
-        ask = unobservables[-1].get("why") if unobservables else None
+        latest_observation = unobservables[-1] if unobservables else {}
+        ask = latest_observation.get("ask") or latest_observation.get("why")
         attempts = [e for e in criterion_evs if e.get("type") == "owed-routed"
                     and e.get("route") not in ("recheck", "relabel")]
         route_attempts = {}
@@ -163,6 +166,10 @@ def checks(evs, now):
             _ts(e.get("ts"), now) > _ts(quarantines[-1].get("ts"), now) for e in post)
         unobservable = bool(post) and post[-1].get("type") == "owed-unobservable"
         route = owed_routes.route_for(capability)
+        if capability is not None and route is None and not latest_observation:
+            latest_observation = owed_verdicts.normalize(dict(verdict="cannot-observe", capability=capability,
+                why="No established observation route for this capability label"))
+            ask = latest_observation["ask"]
 
         if dropped:
             status = "dropped"
@@ -180,10 +187,7 @@ def checks(evs, now):
             status = "failed"
         elif quarantined:
             status = "quarantined"
-        elif (unobservable and capability != "operator-action"
-              and (route is None or route_attempts.get(route, 0) >= owed_routes.MAX_ATTEMPTS)):
-            status = "expired"
-        elif unobservable:
+        elif unobservable or (capability is not None and route is None):
             status = "blocked"
         elif due_at is not None and due_at <= now:
             status = "due"
@@ -203,7 +207,15 @@ def checks(evs, now):
                     "last_unobservable_capability": last_unobservable_capability,
                     "evidence": evidence, "capability": capability,
                     "last_route_epoch": last_route_epoch, "route_attempts": route_attempts,
-                    "ask": ask, "quarantine_reason": quarantine_reason,
+                    "ask": ask, "why": unobservables[-1].get("why") if unobservables else None,
+                    "next_owner": latest_observation.get("next_owner"),
+                    "missing_access": latest_observation.get("missing_access", []),
+                    "original_capability": latest_observation.get("original_capability", capability),
+                    "routing_state": ("undetermined" if route is None else "exhausted"
+                                      if route_attempts.get(route, 0) >= owed_routes.MAX_ATTEMPTS else "pending"),
+                    "route_history": [dict(route=e.get("route"),epoch=e.get("epoch"),ts=e.get("ts"),source=e.get("_src"))
+                                      for e in attempts if _ts(e.get("ts"), now) > governing_ts],
+                    "quarantine_reason": quarantine_reason,
                     "corrective": corrective, "governing_at": governing_ts})
     return out
 

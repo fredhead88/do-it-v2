@@ -336,14 +336,14 @@ if __name__ == "__main__":
         pass
     N += 1
 
-    # ── AC7 · a capability outside the route vocabulary fails schema validation
-    for cap in sorted(__import__("owed_routes").ROUTES):
+    # ── AC7 · unknown labels survive; an absent/empty capability still fails
+    for cap in [*sorted(__import__("owed_routes").ROUTES), "other", "legacy-sensor"]:
         _js387.validate({**_os_good, "results": [{"spec": "x", "criterion": "AC1", "verdict": "cannot-observe",
                                                   "capability": cap, "why": "w"}]}, OS_SCHEMA)
     try:
         _js387.validate({**_os_good, "results": [{"spec": "x", "criterion": "AC1", "verdict": "cannot-observe",
-                                                  "capability": "other", "why": "w"}]}, OS_SCHEMA)
-        raise AssertionError("AC7: an out-of-enum capability must be refused")
+                                                  "capability": "", "why": "w"}]}, OS_SCHEMA)
+        raise AssertionError("AC7: an empty capability must be refused")
     except _js387.ValidationError:
         pass
     N += 1

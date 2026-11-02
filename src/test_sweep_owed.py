@@ -350,8 +350,9 @@ before11 = sweep_ledger.read_text() if sweep_ledger.exists() else ""
 lines11 = sweep_owed.run(dry_run=True, runner=FakeRunner(), now=NOW)
 after11 = sweep_ledger.read_text() if sweep_ledger.exists() else ""
 assert after11 == before11, "AC11: a dry-run appends no escalation-blocking event"
-assert any("L-spec-i1" in l and "owed-expired" in l for l in lines11), \
-    f"AC11: a dry-run must still print the escalation it would have appended: {lines11}"
+assert not any("owed-expired" in line for line in lines11), lines11
+assert next(r for r in owed.checks(specs_now()[1]['L-spec-i1']['evs'],NOW))['status'] == 'blocked'
+assert any(r['spec']=='L-spec-i1' for r in __import__('owed_asks').queue(fold.read_events(),NOW))
 print("sweep-owed-0388 AC11 ok")
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -450,7 +451,7 @@ write("L-executor-432h.jsonl",
        "criterion": "C_before", "capability": "zzz", "why": "no route"})
 _, specs8_432 = specs_now()
 rows8_432 = [r for r in owed.checks(specs8_432["L-spec-432h"]["evs"], NOW) if r["criterion"] == "C_before"]
-assert rows8_432 and rows8_432[0]["status"] == "expired", rows8_432
+assert rows8_432 and rows8_432[0]["status"] == "blocked", rows8_432
 before8_432 = sweep_ledger.read_text() if sweep_ledger.exists() else ""
 lines8_432 = sweep_owed.sweep_expired(specs8_432, NOW)
 after8_432 = sweep_ledger.read_text() if sweep_ledger.exists() else ""
@@ -468,9 +469,9 @@ write("L-spec-writer-432h.jsonl",
        "wake_at": iso(hours=-240), "line": 1})
 _, specs9_432 = specs_now()
 rows9_432 = [r for r in owed.checks(specs9_432["L-spec-432h"]["evs"], NOW) if r["criterion"] == "C_before"]
-assert rows9_432 and rows9_432[0]["status"] == "expired", rows9_432
+assert rows9_432 and rows9_432[0]["status"] == "blocked", rows9_432
 lines9_432 = sweep_owed.sweep_expired(specs9_432, NOW)
-assert any("L-spec-432h" in l and "C_before" in l for l in lines9_432), lines9_432
+assert not lines9_432, "a re-date cannot turn an unknown capability into an expired observation"
 raw9_432 = [json.loads(l) for l in sweep_ledger.read_text().splitlines()] if sweep_ledger.exists() else []
 esc9_432 = [e for e in raw9_432 if e["type"] == "escalation-blocking" and e.get("subject") == "L-spec-432h"
            and "C_before" in json.loads(e["criteria"])]
@@ -588,8 +589,8 @@ write("L-owed-sweeper-432m.jsonl",
        "deadline": iso(hours=22)})
 _, specs12_432 = specs_now()
 rows12_432 = {r["criterion"]: r for r in owed.checks(specs12_432["L-spec-432m"]["evs"], NOW)}
-assert rows12_432["C_before"]["status"] == "expired", rows12_432["C_before"]
-assert rows12_432["C_before2"]["status"] == "expired", rows12_432["C_before2"]
+assert rows12_432["C_before"]["status"] == "blocked", rows12_432["C_before"]
+assert rows12_432["C_before2"]["status"] == "blocked", rows12_432["C_before2"]
 assert rows12_432["C_due"]["status"] == "due", rows12_432["C_due"]
 answered12_432 = sweep_owed.answered_specs(specs12_432)
 assert "L-spec-432m" in answered12_432, \
@@ -779,7 +780,7 @@ write("L-sweep-1004-expired.jsonl", {"ts": iso(hours=-1), "type": "owed-unobserv
       "subject": "L-spec-1004-fixture", "criterion": "AC4", "capability": "unknown", "why": "unavailable"})
 _, answer_specs1004 = specs_now()
 assert next(r for r in owed.checks(answer_specs1004["L-spec-1004-fixture"]["evs"], NOW)
-            if r["criterion"] == "AC4")["status"] == "expired"
+            if r["criterion"] == "AC4")["status"] == "blocked"
 assert not sweep_owed.sweep_expired(answer_specs1004, NOW)
 print("sweep-unblock AC9 answered AC4 and unnamed AC7 due; expired AC4 deduped ok")
 
@@ -939,7 +940,7 @@ clear()
 backlog_fixture("L-spec-9913", 15, "ro-dsn-grant", "expired")
 backlog_fixture("L-spec-9914", 15, "unknown", "expired")
 expiry = sweep_owed.sweep_expired(specs_now()[1], NOW)
-assert len(expiry) == 1 and "L-spec-9914" in expiry[0]
+assert expiry == [], "unknown routes and missing access stay owned holds"
 for variant in ("relabel", "redate"):
     clear()
     backlog_fixture("L-spec-9913", 1)
@@ -1099,10 +1100,10 @@ for capability, age, expected in [('browser', -2, True), ('browser', -13, True),
     status = owed.checks(events, NOW)[-1]['status']
     candidate = sweep_owed.browser_input({sid: {'evs': events}}, [], NOW)
     assert bool(candidate) is expected
-    assert status == ('blocked' if capability == 'browser' else 'expired')
+    assert status == 'blocked'
     print('browser retry', capability, age, status)
 browser_signature('AC14', {'browser': 'blocked with 12-hour retry',
-                           'browser-review-account': 'expired', 'node_modules': 'expired'})
+                           'browser-review-account': 'blocked, undetermined route', 'node_modules': 'blocked, undetermined route'})
 
 plain_text = sweep_owed._manifest_text('L-sweep-9998', 'proj-a', str(TMP), rows[:1])
 browser_text = sweep_owed._manifest_text('L-sweep-9998', 'proj-a', str(TMP), rows[:1], kind='browser')
@@ -1201,7 +1202,9 @@ with patch.object(prod_browser, 'run_batch', return_value=[dict(spec=sid, criter
 
 # Reverse exactly the three granted edits; all other bytes match the baseline.
 actual = (REPO_ROOT / 'agents/owed-sweeper.md').read_text()
-normalized = re.sub(r'\n### Browser batches\n.*?(?=\n## Blind)', '', actual, flags=re.S)
+assert 'Preserve the exact missing relation/tool and access ask, with `next_owner` naming\nThinker/prod-runner or the operator only for an exclusive authorized human act.\nUnknown or legacy capability labels stay unchanged and undetermined; never guess\n`repo` or expire a check because a guessed route used its attempts. Missing browser,\nundeployed target, unreadable evidence and denied access are `cannot-observe`.\nOnly an observed criterion mismatch is `failed`; uncertain classification is\n`cannot-observe` with `reason_code: undetermined` and an exact triage ask.\n' in actual
+normalized = actual.replace('Preserve the exact missing relation/tool and access ask, with `next_owner` naming\nThinker/prod-runner or the operator only for an exclusive authorized human act.\nUnknown or legacy capability labels stay unchanged and undetermined; never guess\n`repo` or expire a check because a guessed route used its attempts. Missing browser,\nundeployed target, unreadable evidence and denied access are `cannot-observe`.\nOnly an observed criterion mismatch is `failed`; uncertain classification is\n`cannot-observe` with `reason_code: undetermined` and an exact triage ask.\n', '')
+normalized = re.sub(r'\n### Browser batches\n.*?(?=\n## Blind)', '', normalized, flags=re.S)
 normalized = normalized.replace('tools: Read, Glob, Grep, Bash, StructuredOutput, Write, mcp__chrome-devtools\n',
                                 'tools: Read, Glob, Grep, Bash, StructuredOutput, Write\n')
 normalized = normalized.replace('`deploy.sh`, a production wrapper, or a browser yourself, except in a\n`kind: browser` batch, see [Browser batches](#browser-batches).',
@@ -1442,12 +1445,12 @@ def test_repo_batches():
 
         for capability, criterion, blocked, shipped, routed, expected in (
                 ("repo", "verify", False, sha, True, "repo"),
-                ("other", "AC1", False, sha, False, "repo"),
+                ("other", "AC1", False, sha, False, None),
                 ("repo", "AC1", True, sha, False, "repo"),
                 ("repo", "AC1", False, None, False, None),
                 ("elapsed", "verify", False, sha, True, "plain"),
                 ("elapsed", "AC1", False, sha, False, "plain"),
-                ("unknown-capability", "AC1", False, sha, False, "plain")):
+                ("unknown-capability", "AC1", False, sha, False, None)):
             reset()
             seed("route", capability=capability, criterion=criterion, blocked=blocked, shipped=shipped, routed=routed)
             fake, lines, calls = drive()
@@ -1483,12 +1486,9 @@ def test_repo_batches():
 
 test_repo_batches()
 
-
-def test_capability_readmission():
-    from test_dispatch import check_capability_readmission
-    check_capability_readmission(fixture_root=TMP, now=NOW, epoch=EPOCH, iso=iso, clear=clear,
-                                write=write, specs_now=specs_now, runner_type=FakeRunner)
-test_capability_readmission()
+from test_dispatch import check_capability_readmission
+check_capability_readmission(fixture_root=TMP, now=NOW, epoch=EPOCH, iso=iso, clear=clear,
+                            write=write, specs_now=specs_now, runner_type=FakeRunner)
 
 ROOT_PATCHES.close()
 

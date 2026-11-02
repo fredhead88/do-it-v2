@@ -556,16 +556,17 @@ true && echo VERIFIED
 
     def test_holds_lift_on_shipped(self):
         base = self.plan()
-        for state in ('shipped', 'shipped-owed-evidence', 'shipped-owed-due', 'shipped-owed-expired'):
+        for state in ('shipped', 'shipped-owed-evidence', 'shipped-owed-due', 'unknown-capability'):
             ev = base + [event('shipped', -30, subject=TARGET, actor='executor')]
             if state != 'shipped':
                 ev += [event('owed-ac', -60, subject=TARGET, actor='spec-writer', criterion='AC1',
                              wake_at=event('x', 120 if state == 'shipped-owed-evidence' else -60)['ts'], line='fixture')]
-            if state == 'shipped-owed-expired':
+            if state == 'unknown-capability':
                 ev += [event('owed-unobservable', -10, subject=TARGET, actor='owed-sweeper',
-                             criterion='AC1', capability='zzz', why='expired fixture')]
+                             criterion='AC1', capability='zzz', why='unclassified route')]
             s = specs(ev)
-            self.assertEqual(s[TARGET]['state'], state)
+            expected = 'shipped-owed-due' if state == 'unknown-capability' else state
+            self.assertEqual(s[TARGET]['state'], expected)
             self.assertFalse(any(r['rule'] == 'wave-held' for r in lr.due(ev, s, NOW)))
             self.assertEqual(self.candidates(ev)['status'], 'dispatchable')
             print('a', state, 'no row dispatchable')

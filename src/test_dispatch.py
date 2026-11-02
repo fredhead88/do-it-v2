@@ -719,8 +719,8 @@ def check_capability_readmission(*, fixture_root, now, epoch, iso, clear, write,
         for cap in caps:
             seed(cap)
         selected = sweep_owed.readmitted(specs_now()[1], NOW, lambda p: epochs)
-        assert {r['capability'] for r in selected} == set(caps) - {'operator-action', 'ro-dsn-grant'}
-        assert {r['capability'] for r in sweep_owed.readmitted(specs_now()[1], NOW, lambda p: {})} == {'repo', 'browser', 'elapsed', 'other'}
+        assert {r['capability'] for r in selected} == set(caps) - {'operator-action', 'ro-dsn-grant', 'other'}
+        assert {r['capability'] for r in sweep_owed.readmitted(specs_now()[1], NOW, lambda p: {})} == {'repo', 'browser', 'elapsed'}
         # Statuses outside blocked and operator-only commands cannot enter.
         with patch.object(owed, 'checks', return_value=[{**selected[0], 'status': s} for s in
                      ('due', 'expired', 'failed', 'quarantined', 'met')]):
@@ -731,14 +731,15 @@ def check_capability_readmission(*, fixture_root, now, epoch, iso, clear, write,
     print('AC2 ok nine capabilities and status/operator guards')
 
     schema = json.loads((REPO_ROOT / 'agents/owed-sweeper.schema.json').read_text())
-    assert set(schema['properties']['results']['items']['properties']['capability']['enum']) == set(owed_routes.ROUTES)
-    assert owed_routes.route_for('other') == 'repo'
+    assert schema['properties']['results']['items']['properties']['capability']['type'] == 'string'
+    assert 'enum' not in schema['properties']['results']['items']['properties']['capability']
+    assert owed_routes.route_for('other') is None
     print('AC7 ok schema vocabulary and legacy mapping')
 
     clear()
     with patch.object(prod_runner, 'record_for', return_value=judgment), \
             patch.object(prod_runner, 'run', return_value=empty):
-        sid = seed('other')
+        sid = seed('repo')
         # A successful production dispatch emits through the real strict writer.
         def dispatched(project, batch, runner, **kw):
             assert kw['kind'] == 'repo'
@@ -764,7 +765,8 @@ def check_capability_readmission(*, fixture_root, now, epoch, iso, clear, write,
             sweep_owed.run(now=NOW + timedelta(hours=13), runner=FakeRunner())
         evs = specs_now()[1][sid]['evs']
         row = owed.checks(evs, NOW + timedelta(hours=13))[0]
-        assert row['status'] == 'expired' and row['route_attempts'] == {'repo': 2}
+        assert row['status'] == 'blocked' and row['route_attempts'] == {'repo': 2}
+        assert row['routing_state'] == 'exhausted' and row['next_owner'] == 'thinker'
         assert sweep_owed.sweep_expired({sid: {'evs': evs}}, NOW + timedelta(hours=13)) == []
         assert not sweep_owed.readmitted({sid: {'evs': evs}}, NOW + timedelta(hours=26), lambda p: epochs)
         met = dict(type='owed-met', subject=sid, criterion='AC1', evidence='fixture', ts=iso(hours=14))
@@ -773,7 +775,8 @@ def check_capability_readmission(*, fixture_root, now, epoch, iso, clear, write,
         dispatch.emit(EV / 'L-owed-sweeper-result.jsonl', {'subject': sid}, 'owed-unobservable',
                       criterion='AC1', capability='other', why='fixture')
         # Time-based release is independent of the final result's timestamp.
-        assert len(sweep_owed.sweep_expired(specs_now()[1], NOW + timedelta(hours=26))) == 1
+        assert not sweep_owed.sweep_expired(specs_now()[1], NOW + timedelta(hours=26))
+        assert owed.checks(specs_now()[1][sid]['evs'],NOW+timedelta(hours=26))[0]['status'] == 'blocked'
         assert not sweep_owed.sweep_expired(specs_now()[1], NOW + timedelta(hours=26))
     print('AC3 ok batch attempts, dry-run, failure, legacy counts')
     print('AC6 ok exhaustion, in-flight skip, met and one escalation')

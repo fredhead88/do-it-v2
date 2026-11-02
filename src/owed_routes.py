@@ -28,7 +28,7 @@ def classify_ask(note, capability=None):
         return dict(owner='operator', kind='decision', capability='operator-action')
     approval = re.search(r'operator-gated|operator cron install|operator re-enables|operator-run write|'
                          r'flag toggle is a production change|sudo unshare.*live|tmpfs over the live|'
-                         r'approve|approval|client email|purchase', text)
+                         r'\bapprove\b|\bapproval\b|\bhold (?:is|gets|must be) approved\b|client email|purchase', text)
     requested = re.split(r'(?:operator|you)\s*:', text)[-1]
     tooling = re.search(r'\b(?:batch|actions[: ]read|dsn|ro-dsn|browser|chrome-devtools|'
                         r'dev server|review account|review session|verifier session|staff login|deploy time)\b',
@@ -63,13 +63,14 @@ def classify_ask(note, capability=None):
 
 
 def route_for(capability):
-    """Return the capability key, including the legacy `other` spelling."""
-    capability = "repo" if capability == "other" else capability
+    """Only established capability keys are executable; ambiguous labels stay visible."""
     return capability if capability in ROUTES else None
 
 
 def from_grader(grader_capability):
-    return {"browser": "browser", "db": "ro-dsn", "deploy": "not-live"}.get(grader_capability, "repo")
+    known = {"browser":"browser", "review-account":"browser", "db":"ro-dsn", "db-schema":"ro-dsn",
+             "deploy":"not-live", **{c:"repo" for c in ("git","view-paths","tools","node_modules","env-file")}}
+    return known.get(grader_capability, grader_capability or "unknown")
 
 
 def _instant(value):

@@ -178,7 +178,7 @@ unknown6 = {"ts": stamp(1), "type": "owed-unobservable", "subject": S6,
             "criterion": "AC1", "capability": "zzz", "why": "no route"}
 specs = {S6: {"evs": [ac6, ship6a, unknown6]}, S8k: {"evs": [ac8k, ship8k, killed8k]}}
 exp = owed.expired(specs, NOW)
-assert {r["spec"] for r in exp} == {S6}, exp
+assert exp == [], "unknown capability remains an owned hold, never expired"
 
 # ══════════════════════════════════════════════════════════════════════════════
 # L-spec-0470 · ledger-vocabulary R3 (L-charter-0046) — the "waived" status
@@ -331,7 +331,7 @@ cases_life = [
     ("correcting", LIFE_BASE, [failure, corrective]),
     ("quarantined", LIFE_BASE, [quarantine]), ("met", LIFE_BASE, [met_life]),
     ("waived", LIFE_BASE, [waived_life]),
-    ("expired", LIFE_BASE, [{**unobservable, "capability": "zzz"}]),
+    ("blocked", LIFE_BASE, [{**unobservable, "capability": "zzz"}]),
     ("dropped", LIFE_BASE, [life_event("spec-killed", -1)]),
     ("unshipped", [LIFE_AC], []),
     ("failed", LIFE_BASE, [failure, quarantine]),
@@ -353,12 +353,12 @@ for days in (1, 8, 60):
     assert row["status"] == "blocked", row
 assert life_row([{**unobservable, "capability": "operator-action"}],
                 now=LIFE + timedelta(days=60))["status"] == "blocked"
-assert life_row([{**unobservable, "capability": "zzz"}])["status"] == "expired"
-assert life_row([{**unobservable, "capability": None}])["status"] == "expired"
+assert life_row([{**unobservable, "capability": "zzz"}])["status"] == "blocked"
+assert life_row([{**unobservable, "capability": None}])["status"] == "blocked"
 attempts = [life_event("owed-routed", -9, route="repo", epoch="one"),
             life_event("owed-routed", -8, route="repo", epoch="two")]
-assert life_row([unobservable, *attempts])["status"] == "expired"
-assert life_row([{**unobservable, "capability": "other"}, *attempts])["status"] == "expired"
+assert life_row([unobservable, *attempts])["status"] == "blocked"
+assert life_row([{**unobservable, "capability": "other"}, *attempts])["status"] == "blocked"
 assert life_row([{**unobservable, "capability": "operator-action"},
                  *[{**e, "route": "operator-action"} for e in attempts]])["status"] == "blocked"
 status_source = pathlib.Path(owed.__file__).read_text().split("        if dropped:", 1)[1].split("        out.append", 1)[0]
@@ -378,7 +378,7 @@ for count in (1, 2, 3, 10):
         assert life_row([*fixed, reset])["status"] == ("waiting" if reset["type"] == "owed-ac" else "due")
         for verdict, expected in ((met_life, "met"), (failure, "failed"),
                                   (unobservable, "blocked"),
-                                  ({**unobservable, "capability": "zzz"}, "expired")):
+                                  ({**unobservable, "capability": "zzz"}, "blocked")):
             assert life_row([*fixed, reset, {**verdict, "ts": life_event("unused", -1)["ts"]}])["status"] == expected
 assert life_row([failure, {**corrective, "ts": failure["ts"]}])["status"] == "failed"
 assert life_row([corrective, life_event("owed-failed", -1)])["corrective"] is None
@@ -397,11 +397,11 @@ fields_life = {"spec", "criterion", "project", "declared_src", "line", "wake_at"
                "due_at", "status", "failures", "last_failed_at", "last_unobservable_at",
                "last_unobservable_capability", "evidence", "capability", "last_route_epoch",
                "route_attempts", "ask", "quarantine_reason", "corrective", "governing_at",
-               "data_source", "customer_data", "answered_by"}
+               "data_source", "customer_data", "answered_by", "next_owner", "missing_access", "routing_state", "route_history", "why", "original_capability"}
 relabel = life_event("owed-routed", -7, route="relabel", capability="browser", epoch="ignore")
 row = life_row([failure, unobservable, *attempts, relabel, corrective])
 assert set(row) == fields_life, row
-assert row["capability"] == "browser" and row["ask"] == "need checkout", row
+assert row["capability"] == "browser" and "need checkout" in row["ask"] and row["next_owner"] == "thinker", row
 assert row["last_unobservable_capability"] == "repo", row
 assert row["last_unobservable_at"] == datetime.fromisoformat(unobservable["ts"]), row
 assert row["route_attempts"] == {"repo": 2} and row["last_route_epoch"] == "two", row
@@ -435,7 +435,7 @@ project_imports = {name.split(".")[0] for node in ast.walk(imports)
                    for name in ([n.name for n in node.names] if isinstance(node, ast.Import)
                                 else [node.module] if isinstance(node, ast.ImportFrom) and node.module else [])
                    if name.split(".")[0] in project_modules}
-assert project_imports == {"routing", "owed_routes", "checks"}, project_imports
+assert project_imports == {"routing", "owed_routes", "checks", "owed_verdicts"}, project_imports
 print("owed-lifecycle AC9 ok")
 
 
@@ -496,7 +496,7 @@ def cr_ac4():
         assert before[0]["customer_data"] is None and before[0]["answered_by"] is None
         assert after[0]["data_source"] == "production" and after[0]["customer_data"] is True
         assert after[0]["answered_by"] == "script"
-        metadata = {"data_source", "customer_data", "answered_by"}
+        metadata = {"data_source", "customer_data", "answered_by", "next_owner", "missing_access", "routing_state", "route_history", "why", "original_capability"}
         assert {k: v for k, v in before[0].items() if k not in metadata} == {
             k: v for k, v in after[0].items() if k not in metadata}
     for bad in (cr_declaration(subject="other"), cr_declaration(extra=True),

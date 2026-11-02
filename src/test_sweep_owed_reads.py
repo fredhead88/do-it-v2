@@ -150,8 +150,10 @@ def test_ac5_prod_runner_sees_earlier_appends():
             sweep_owed.run(now=NOW)
             supplied = run.call_args.kwargs["events"]
             if expired:
-                assert any(e.get("subject") == sid and e.get("type") == "escalation-blocking"
-                           and e.get("kind") == "owed-expired" for e in supplied)
+                assert not any(e.get("subject") == sid and e.get("type") == "escalation-blocking"
+                               and e.get("kind") == "owed-expired" for e in supplied)
+                row=next(r for r in sweep_owed.owed.checks(fold.fold(supplied)[0][sid]['evs'],NOW) if r['criterion']=='AC5')
+                assert row['status']=='blocked' and row['routing_state']=='exhausted'
             else:
                 assert supplied is snapshots[0]
     print("L-spec-1531 AC5 ok")

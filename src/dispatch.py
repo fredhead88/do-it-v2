@@ -896,15 +896,7 @@ def events_for(role, out, a, base):
             ev.append(("build-blocked", dict(reason=next((q["asks"] for q in out["escalations"]), None)
                                              or next((d["line"] for d in out["declarations"]), "unstated"))))
     elif role in ("owed-sweeper", "owed-verifier"):
-        # L-charter-0038 R1 / L-spec-0387: no manifest lookup here — main() has already filtered `out["results"]` to on-manifest rows before calling this. Each event lands on that ROW's own spec (`subject=row["spec"]`), never on the batch subject; `emit()` in main()'s loop below pops it.
-        for row in out["results"]:
-            common = dict(criterion=row["criterion"], batch=a.subject, subject=row["spec"])
-            if row["verdict"] == "met":
-                ev.append(("owed-met", {**common, "evidence": row["evidence"]}))
-            elif row["verdict"] == "failed":
-                ev.append(("owed-failed", {**common, "evidence": row["evidence"], "kind": row["kind"]}))
-            elif row["verdict"] == "cannot-observe":
-                ev.append(("owed-unobservable", {**common, "capability": row["capability"], "why": row["why"]}))
+        ev.extend(__import__('owed_verdicts').events(out['results'], a.subject))
     return ev + qs + decl
 
 

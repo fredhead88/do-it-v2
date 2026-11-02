@@ -131,7 +131,7 @@ def _caps_plain(text):
         found.update(("db", "db-schema"))
     # Repository-review boilerplate names runner output, not a browser target.
     browser_text = re.sub(
-        r"log in as repository reviewer\b(?!\s+at\s+https?://)",
+        r"log in as (?:a )?(?:repository reviewer|local checkout reader)\b(?!\s+at\s+https?://)",
         "", text, flags=re.I)
     if any(tok in browser_text.lower() for tok in _BROWSER_TOKENS):
         found.update(("browser", "review-account"))

@@ -2007,7 +2007,7 @@ for build_limit, idle_limit in ((45, 90), (10, 20)):
                "watchdog: idle threshold from table")
 print("watchdog AC1 ok")
 
-# AC2: real wave resolution, plus shipped and every shipped-owed state.
+# AC2: real wave resolution, shipped/due/evidence and an unknown route.
 root = newroot()
 saved = _si_setup(root)
 try:
@@ -2020,16 +2020,17 @@ try:
     ok(dispatch.wave_blocker(events, charter, _WA, 2) == _WB, "watchdog: actual wave blocker")
     ok(not _widle(events), "SD2: unfinished wave prerequisite holds A at any age")
     ok(not _widle(events + [_wev("observed", _WB, 30)]), "watchdog: B age controls exemption")
-    for state in ("shipped", "shipped-owed-evidence", "shipped-owed-due", "shipped-owed-expired"):
+    for state in ("shipped", "shipped-owed-evidence", "shipped-owed-due", "unknown-capability"):
         terminal = events + [_wev("shipped", _WB, 70)]
         if state != "shipped":
             terminal += [_wev("owed-ac", _WB, 80, criterion="AC1", line="fixture",
                               wake_at=iso(_WNOW + timedelta(days=1) if state.endswith("evidence")
                                           else _WNOW - timedelta(days=1)))]
-        if state.endswith("expired"):
-            terminal += [_wev("owed-unobservable", _WB, 60, criterion="AC1", capability="fixture", why="expired")]
+        if state == "unknown-capability":
+            terminal += [_wev("owed-unobservable", _WB, 60, criterion="AC1", capability="fixture", why="unclassified route")]
         with patch.object(fold, "NOW", _WNOW):
-            ok(fold.spec_state([e for e in terminal if e["subject"] == _WB], set()) == state,
+            expected = "shipped-owed-due" if state == "unknown-capability" else state
+            ok(fold.spec_state([e for e in terminal if e["subject"] == _WB], set()) == expected,
                f"watchdog: fixture really is {state}")
             ok(dispatch.wave_blocker(terminal, charter, _WA, 2) is None, "watchdog: terminal releases wave")
             ok(_widle(terminal), "watchdog: terminal blocker never exempts A")

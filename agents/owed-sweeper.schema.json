@@ -65,22 +65,43 @@
           },
           "capability": {
             "type": "string",
-            "enum": [
-              "ro-dsn",
-              "droplet",
-              "browser",
-              "operator-action",
-              "elapsed",
-              "repo",
-              "not-live",
-              "ro-dsn-grant"
-            ],
-            "description": "required when verdict is cannot-observe"
+            "description": "Required for cannot-observe. Preserve an unknown/legacy label; never guess a repository route.",
+            "minLength": 1,
+            "maxLength": 80
           },
           "why": {
             "type": "string",
             "maxLength": 400,
             "description": "required when verdict is cannot-observe"
+          },
+          "ask": {
+            "type": "string",
+            "maxLength": 600,
+            "description": "Exact missing observation tool/access, including relation names; never credentials."
+          },
+          "next_owner": {
+            "type": "string",
+            "enum": [
+              "thinker",
+              "prod-runner",
+              "operator"
+            ]
+          },
+          "missing_access": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 200
+            },
+            "maxItems": 20
+          },
+          "reason_code": {
+            "type": "string",
+            "enum": [
+              "product",
+              "capability",
+              "undetermined"
+            ]
           }
         },
         "allOf": [
