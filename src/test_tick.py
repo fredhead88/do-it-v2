@@ -3409,5 +3409,28 @@ class VanishedTickTests(unittest.TestCase):
         _launcher_evidence('vanished-AC1-record-first-pass', dict(evaluations=evaluations, calls=calls, reader=fresh))
 
 
+
+class BuildPriorityTest(unittest.TestCase):
+    def test_listed_items_take_seats_first_in_listed_order(self):
+        import tempfile
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            (root / 'state').mkdir()
+            (root / 'state' / 'build-priority').write_text('# CI speed\nL-spec-3\nL-spec-2  # second\n\n')
+            first = tick.priority_items(root)
+            self.assertEqual(first, {'L-spec-3': 0, 'L-spec-2': 1})
+            step = lambda item, since, action='build': SimpleNamespace(
+                item=item, since=since, action=action, owner='tick', state='ready', reason='')
+            steps = [step('L-spec-1', '01'), step('L-spec-2', '03'), step('L-spec-3', '04'),
+                     step('w', '09', 'window-default')]
+            order = [s.item for s in sorted(steps, key=lambda s: tick.visit_key(s, False, first))]
+            self.assertEqual(order, ['w', 'L-spec-3', 'L-spec-2', 'L-spec-1'])
+            self.assertEqual(tick.priority_items(root / 'missing'), {})
+            plain = [s.item for s in sorted(steps, key=lambda s: tick.visit_key(s, False, {}))]
+            self.assertEqual(plain, ['w', 'L-spec-1', 'L-spec-2', 'L-spec-3'])
+
+
 if __name__ == '__main__':
     unittest.main(argv=[sys.argv[0]])
+

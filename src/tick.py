@@ -529,6 +529,24 @@ def _record_retry_exhaustion(step, events, now):
     return ('failed durable exhaustion: '+str(reason) if reason else 'escalated '+step.item+' retries-exhausted')
 
 
+def priority_items(root=None):
+    """Operator-ordered items that take seats before everything else waiting:
+    one item id per line in state/build-priority, `#` starts a comment."""
+    try:
+        text = ((root or fold.ROOT) / 'state' / 'build-priority').read_text()
+    except OSError:
+        return {}
+    items = [line.split('#')[0].strip() for line in text.splitlines()]
+    return {item: rank for rank, item in enumerate(i for i in items if i)}
+
+
+def visit_key(step, grades_first, first):
+    grade = (step.action == 'grade' and step.owner == 'tick' and step.state != 'hold'
+             and not step.reason.startswith('undetermined:'))
+    return (step.action != 'window-default', step.item not in first, first.get(step.item, 0),
+            not grade if grades_first else False, step.since, step.item)
+
+
 def run_steps(events, specs, now, *, dispatcher=None, dry_run=False, handled=frozenset(), steps=None, admission: dict | None = None):
     """Shared entry point; a tick pass supplies its single computed snapshot."""
     import autodispatch
@@ -564,11 +582,9 @@ def run_steps(events, specs, now, *, dispatcher=None, dry_run=False, handled=fro
             grades_first = bool(gate is not None and gate.grades_first)
         except Exception:
             grades_first = False
+        first = priority_items()
         def visit_order(step):
-            grade = (step.action == 'grade' and step.owner == 'tick' and step.state != 'hold'
-                     and not step.reason.startswith('undetermined:'))
-            return (step.action != 'window-default', not grade if grades_first else False,
-                    step.since, step.item)
+            return visit_key(step, grades_first, first)
         for step in sorted(steps, key=visit_order):
             try:
                 if reporter and step.item in reporter.failed:
