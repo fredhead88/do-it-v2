@@ -869,6 +869,19 @@ MT.write_text('[defaults]\nbackend = "seat"\n'
               '[contracts.grader]\nbackend = "claude-p"\nmodel = "claude-sonnet-5"\n')
 assert dispatch.codex_quota_refusal({"used_percent": 84.9}) is None
 assert dispatch.codex_quota_refusal({"used_percent": 85}) and dispatch.codex_quota_refusal(None) is None
+# The operator's cap file reaches launchers that never saw the cron environment.
+import pathlib as _pl, tempfile as _tf
+_old_root, _old_env = dispatch.fold.ROOT, os.environ.pop("DOIT_CODEX_QUOTA_CAP", None)
+_cap_root = _pl.Path(_tf.mkdtemp()); (_cap_root / "state").mkdir()
+(_cap_root / "state" / "codex-quota-cap").write_text("95 operator 2026-11-02\n")
+dispatch.fold.ROOT = _cap_root
+assert dispatch.codex_quota_refusal({"used_percent": 90}) is None
+assert dispatch.codex_quota_refusal({"used_percent": 95})
+(_cap_root / "state" / "codex-quota-cap").write_text("not a number\n")
+assert dispatch.codex_quota_refusal({"used_percent": 85})
+dispatch.fold.ROOT = _old_root
+if _old_env is not None:
+    os.environ["DOIT_CODEX_QUOTA_CAP"] = _old_env
 
 # Thinker 2026-10-12: a codex contract may never fall back to metered claude -p.
 _bad = TMP / "models-bad.toml"

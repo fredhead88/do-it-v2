@@ -369,9 +369,21 @@ def codex_quota(now=None):
     return None
 
 
+def _quota_cap_file():
+    """Operator-set cap shared by every launcher (cron, panes, waiters), which
+    do not all inherit one environment: first number in state/codex-quota-cap."""
+    try:
+        for word in (fold.ROOT / "state" / "codex-quota-cap").read_text().split():
+            float(word)
+            return word
+    except (OSError, ValueError):
+        return None
+    return None
+
+
 def codex_quota_refusal(quota):
     """Why the codex backend must not spend, or None. The cap (default 85% of the weekly window, env DOIT_CODEX_QUOTA_CAP) keeps the plan's overflow credits unspent: past it the spawn refuses BEFORE running, and the contract's seat fallback takes it."""
-    cap = float(os.environ.get("DOIT_CODEX_QUOTA_CAP", "85"))
+    cap = float(os.environ.get("DOIT_CODEX_QUOTA_CAP") or _quota_cap_file() or "85")
     if quota and quota.get("used_percent") is not None and float(quota["used_percent"]) >= cap:
         return f"codex quota precheck: weekly window {quota['used_percent']}% used >= cap {cap}%"
     return None
