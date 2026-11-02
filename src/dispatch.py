@@ -1136,8 +1136,9 @@ def _main(a):
     if a.packet != "-" and not (a.packet and pathlib.Path(a.packet).is_file()):
         sys.exit(f"dispatch: --packet {a.packet!r} is not a file — nothing allocated, nothing spent")
     packet = sys.stdin.read() if a.packet == "-" else pathlib.Path(a.packet).read_text()
-    if a.role == "spec-writer":
-        # Carried specs bypass packet.py; give them the same precomputed history section.
+    if a.role == "spec-writer" and getattr(a, "augment_history", False):
+        # Carried specs bypass packet.py; `doit carry` passes --augment-history so they get
+        # the same precomputed history section. Other packets stay byte-for-byte (AC6).
         import spec_history
         packet = spec_history.augment_packet_text(packet, spawns.resolve_cwd(a.cwd, ROOT), a.project or "")
     EVENTS.mkdir(parents=True, exist_ok=True), CONTENT.mkdir(parents=True, exist_ok=True)
@@ -1682,6 +1683,8 @@ if __name__ == "__main__":
     ap.add_argument("role", choices=sorted(ROLES))
     ap.add_argument("subject", help="L-spec-NNNN / L-charter-NNNN — the events' subject")
     ap.add_argument("--packet", default="-", help="the packet file; '-' reads stdin (default)")
+    ap.add_argument("--augment-history", action="store_true", dest="augment_history",
+                    help="spec-writer only: append the precomputed footprint history section (used by `doit carry`)")
     ap.add_argument("--path", help="the content path the packet named; must exist afterwards")
     ap.add_argument("--cwd", help="the spawn's cwd: the repo, or the builder's worktree")
     ap.add_argument("--charter"), ap.add_argument("--project")

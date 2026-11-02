@@ -649,6 +649,7 @@ def _shape_gate(spec_id, path, slot, charter, repo, project, ev):
     if charter is not None:
         rework_cmd += ["--charter", charter]
     rework_cmd += ["--packet", rework_slot, "--path", path, "--cwd", str(repo), "--project", project]
+    rework_cmd.append("--augment-history")
     rr = subprocess.run(rework_cmd, capture_output=True, text=True)
     m = re.search(r"FAILED (\S+):", rr.stderr or "")
     rework_spawn = m.group(1) if m else None
@@ -737,6 +738,7 @@ def _carry_locked(source, *, repo, project, title, body, from_ledger):
     if charter is not None:
         cmd += ["--charter", charter]
     cmd += ["--packet", str(slot), "--path", path, "--cwd", str(repo), "--project", project]
+    cmd.append("--augment-history")  # last: callers pin the argv order up to --project
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
         why = next((l for l in (r.stderr or "").splitlines() if l.startswith("FAILED ")),
