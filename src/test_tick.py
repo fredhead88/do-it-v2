@@ -2353,10 +2353,10 @@ finally:
 fold.EVENTS = saved_events
 print("AC11 ok")
 
-# AC17(a) — `look` row present, `last_pass` >25 min old: one look-stale/thinker call.
+# AC17(a) — `look` row present, `last_pass` >40 min old: one look-stale/thinker call.
 iso17 = _isolated_events()
 fold.EVENTS = iso17
-old_last_pass = (fold.NOW - datetime.timedelta(minutes=30)).isoformat(timespec="seconds")
+old_last_pass = (fold.NOW - datetime.timedelta(minutes=41)).isoformat(timespec="seconds")
 fakelook17 = _FakeLook(state={"last_pass": old_last_pass})
 sys.modules["crons"], sys.modules["look"] = _CronsPresent(), fakelook17
 try:
@@ -2368,7 +2368,7 @@ assert fakelook17.calls == [("look-stale", "look-stale", "thinker")], \
     f"AC17: a stale last_pass (row present) briefs look-stale/thinker: {fakelook17.calls}"
 fold.EVENTS = saved_events
 
-# AC17(b) — a fresh last_pass (<25 min) appends nothing.
+# AC17(b) — a fresh last_pass (<40 min) appends nothing.
 iso17b = _isolated_events()
 fold.EVENTS = iso17b
 fresh_last_pass = (fold.NOW - datetime.timedelta(minutes=5)).isoformat(timespec="seconds")
@@ -2379,8 +2379,34 @@ try:
 finally:
     del sys.modules["crons"]
     sys.modules["look"] = _watchdog_look
-assert fakelook17b.calls == [], "AC17: within 25 minutes, no look-stale brief"
+assert fakelook17b.calls == [], "AC17: within 40 minutes, no look-stale brief"
 fold.EVENTS = saved_events
+
+# L-spec-1960 AC3/AC5: healthy half-hourly passes and the exact safety margin.
+import crons as _manifest_crons1960
+import inspect as _inspect1960
+look_period1960 = _manifest_crons1960.interval_s(next(
+    row['schedule'] for row in _manifest_crons1960.rows() if row['name'] == 'look'))
+margin_message1960 = "1960 AC5: threshold must exceed the look row's period plus one tick"
+threshold1960 = int(re.search(r'total_seconds\(\) > (\d+) \* 60',
+                              _inspect1960.getsource(tick._record)).group(1)) * 60
+assert threshold1960 == 40 * 60 and threshold1960 - look_period1960 >= 600, margin_message1960
+for age1960, expected1960 in ((31 * 60, []), (40 * 60, []), (None, [("look-stale", "look-stale", "thinker")]),
+                              (look_period1960 + 300, [])):
+    fold.EVENTS = _isolated_events()
+    state1960 = {} if age1960 is None else {"last_pass": (
+        fold.NOW - datetime.timedelta(seconds=age1960)).isoformat()}
+    fake1960 = _FakeLook(state=state1960)
+    sys.modules["crons"], sys.modules["look"] = _CronsPresent(), fake1960
+    try:
+        assert tick.main() == 0
+        assert fake1960.calls == expected1960, f"{margin_message1960}; age={age1960}: {fake1960.calls}"
+    finally:
+        sys.modules["crons"] = _manifest_crons1960
+        sys.modules["look"] = _watchdog_look
+        fold.EVENTS = saved_events
+_launcher_evidence('L-spec-1960/AC3-AC5', dict(period=look_period1960, threshold=threshold1960,
+                   healthy_minutes=[5, 31, 40], stale_minutes=[41], missing_stale=True))
 
 # AC17(c) — the REAL `look.run()`, a fresh pass, clears an open look-stale entry.
 import look as _real_look  # noqa: E402
@@ -2931,9 +2957,9 @@ for outcome in (0, 1, "raise"):
         return outcome
     with patch.object(fold, "ROOT", root), patch.object(fold, "EVENTS", root / "events"), \
          patch.object(fold, "NOW", _wnow), patch.object(_watchdog_look, "_send_operator", side_effect=_watchdog_send):
-        _watchdog_start(root, _wnow - datetime.timedelta(minutes=29))
+        _watchdog_start(root, _wnow - datetime.timedelta(minutes=39))
         assert tick._record() is not None
-        assert not calls, "watchdog: 29-minute heartbeat gap stays healthy"
+        assert not calls, "watchdog: 39-minute heartbeat gap stays healthy"
         with patch.object(fold, "NOW", _wnow + datetime.timedelta(minutes=2)):
             assert tick._record() is not None
             assert tick._record() is not None
@@ -2948,7 +2974,7 @@ for outcome in (0, 1, "raise"):
         alerts = [e for e in raw if e["type"] == "operator-alert"]
         assert [e["sent"] for e in alerts] == (["yes"] if outcome == 0 else ["no", "yes"]), alerts
         assert all(e["subject"] == "look" and e["kind"] == "heartbeat-missed" and "actor" not in e for e in alerts)
-        assert alerts[0]["last_start"] == (_wnow - datetime.timedelta(minutes=29)).isoformat(timespec="seconds")
+        assert alerts[0]["last_start"] == (_wnow - datetime.timedelta(minutes=39)).isoformat(timespec="seconds")
         assert alerts[0]["measured_at"] == (_wnow + datetime.timedelta(minutes=2)).isoformat(timespec="seconds")
         child = subprocess.run([sys.executable, "-c",
             "import fold,json; print(json.dumps([e for e in fold.read_events() if e['type']=='operator-alert']))"],
@@ -2957,7 +2983,7 @@ for outcome in (0, 1, "raise"):
         from_disk = json.loads(child.stdout)
         assert len(from_disk) == len(alerts) and all(e["actor"] == "tick" for e in from_disk), from_disk
         _watchdog_start(root, _wnow + datetime.timedelta(minutes=3))
-        with patch.object(fold, "NOW", _wnow + datetime.timedelta(minutes=34)), \
+        with patch.object(fold, "NOW", _wnow + datetime.timedelta(minutes=44)), \
              patch.object(_watchdog_look, "_send_operator", return_value=0):
             assert tick._record() is not None
         raw = [json.loads(line) for line in tick.tick_path().read_text().splitlines()]

@@ -685,7 +685,7 @@ finally:
     reap_tmp.look = orig_look19
     reap_tmp.user_quota = orig_user_quota
 print("L0440-AC19 ok")
-# R9f — 5-minute cadence, and look.toml's committed default
+# R9f — approved manifest cadence, and look.toml's committed default
 EXPECTED_CRONS_ROWS = [
     {"name": "tick", "where": "user", "schedule": "*/{tick_min} * * * *",
      "command": "DOIT_ROOT={root} {doit} cron-run tick -- {doit} tick >> {root}/logs/tick.log 2>&1",
@@ -693,7 +693,8 @@ EXPECTED_CRONS_ROWS = [
     {"name": "look", "where": "user", "schedule": "3,33 * * * *",
      "command": "{doit} cron-run look -- {doit} look >> {root}/logs/look.log 2>&1",
      "path": "{doit}", "sig": r"\bdoit look\b", "owner": "thinker", "project": "do-it-v2"},
-    {"name": "tmp-reaper", "where": "user", "schedule": "1,6,11,16,21,26,31,36,41,46,51,56 * * * *",
+    {"name": "tmp-reaper", "where": "user", "schedule": "*/15 * * * *",
+     "max_runtime_s": 3600,
      "command": "{doit} cron-run tmp-reaper -- {doit} reap-tmp", "path": "{doit}", "sig": r"\bdoit reap-tmp\b",
      "owner": "thinker", "project": "do-it-v2"},
     {"name": "lessons-digest", "where": "user", "schedule": "7 * * * *",
@@ -714,6 +715,7 @@ EXPECTED_CRONS_ROWS = [
      "max_runtime_s": 14400,
      "owner": "thinker", "project": "do-it-v2"},
     {"name": "sweep-owed", "where": "user", "schedule": "11 0,6,12,18 * * *",
+     "max_runtime_s": 3600,
      "command": "{doit} cron-run sweep-owed -- {doit} sweep-owed >> {root}/logs/sweep-owed.log 2>&1",
      "path": "{doit}", "sig": r"\bdoit sweep-owed\b", "owner": "thinker", "project": "do-it-v2"},
     {"name": "auto-deploy", "where": "cron.d", "schedule": "*/5 * * * *",
@@ -721,11 +723,11 @@ EXPECTED_CRONS_ROWS = [
                 "--once >> /var/log/albert-scott/auto-deploy-run.log 2>&1",
      "path": "/opt/albert-scott/venv/bin/python", "sig": r"auto_deploy\.py\b.*--once\b",
      "owner": "deployer", "project": "albert-scott"},
-    {"name": "owed-digest", "where": "user", "schedule": "0 * * * *",
+    {"name": "owed-digest", "where": "user", "schedule": "0 6 * * *",
      "command": "{doit} cron-run owed-digest -- {doit} owed-digest --alert >> {root}/logs/owed-digest.log 2>&1",
      "path": "{doit}", "sig": r"\bdoit owed-digest(?: --alert)?(?=\s*>>|\s*(?:#.*)?$)",
      "owner": "thinker", "project": "do-it-v2"},
-    {"name": "owed-digest-json", "where": "user", "schedule": "*/30 * * * *",
+    {"name": "owed-digest-json", "where": "user", "schedule": "17 * * * *",
      "command": "{doit} cron-run owed-digest-json -- {doit} owed-digest --json-only >> {root}/logs/owed-digest-json.log 2>&1",
      "path": "{doit}", "sig": r"\bdoit owed-digest --json-only(?=\s*>>|\s*(?:#.*)?$)",
      "owner": "thinker", "project": "do-it-v2"},

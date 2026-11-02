@@ -2281,14 +2281,22 @@ def _skip_heartbeat_checks():
         def verdict(name):
             return look.heartbeat_missed(name, _WNOW, [], root=root,
                                          sender=lambda text: calls.append(text) or 0)
+        # L-spec-1960 AC4/AC5: starts alone prove the 40-minute look window.
+        period = crons.interval_s(next(row['schedule'] for row in crons.rows() if row['name'] == 'look'))
+        message = "1960 AC5: threshold must exceed the look row's period plus one tick"
+        ok(40 * 60 - period >= 600, message)
+        for age, missed in ((31 * 60, False), (39 * 60, False), (40 * 60, False),
+                            (41 * 60, True), (period + 300, False)):
+            _write_cron_store(root, "look", [dict(ev="start", ts=iso(_WNOW - timedelta(seconds=age)))])
+            ok(verdict("look") is missed, f"{message}; age={age}, expected missed={missed}")
         for name in ("tick", "look"):
             skips = cron_run.skip_store_path(name, root)
-            _write_cron_store(root, name, [dict(ev="start", ts=iso(_WNOW - timedelta(minutes=40)))])
+            _write_cron_store(root, name, [dict(ev="start", ts=iso(_WNOW - timedelta(minutes=50)))])
             skips.write_text(json.dumps(dict(ev="skip", ts=iso(_WNOW - timedelta(minutes=1)))) + "\n")
             ok(not verdict(name), "1532 AC5: a recent skip proves cron fired after a stale start")
-            skips.write_text(json.dumps(dict(ev="skip", ts=iso(_WNOW - timedelta(minutes=40)))) + "\n")
+            skips.write_text(json.dumps(dict(ev="skip", ts=iso(_WNOW - timedelta(minutes=50)))) + "\n")
             ok(verdict(name), "1532 AC5: a stale skip never hides a missed heartbeat")
-            for age in (1, 40):
+            for age in (1, 50):
                 _write_cron_store(root, name, [dict(ev="start", ts=iso(_WNOW - timedelta(minutes=age)))])
                 skips.unlink(missing_ok=True)
                 baseline = verdict(name)
@@ -2306,7 +2314,7 @@ def _skip_heartbeat_checks():
                 ok(verdict(name) == baseline, "1532 AC5: unreadable skip store preserves the verdict")
                 skips.rmdir()
             _write_cron_store(root, name, [dict(ev="start", ts=iso(_WNOW - timedelta(minutes=1)))])
-            skips.write_text(json.dumps(dict(ev="skip", ts=iso(_WNOW - timedelta(minutes=40)))) + "\n")
+            skips.write_text(json.dumps(dict(ev="skip", ts=iso(_WNOW - timedelta(minutes=50)))) + "\n")
             ok(not verdict(name), "1532 AC5: an older skip never replaces a newer start")
             cron_run.store_path(name, root).unlink()
             skips.write_text(json.dumps(dict(ev="skip", ts=iso(_WNOW))) + "\n")
