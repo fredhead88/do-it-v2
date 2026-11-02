@@ -161,6 +161,22 @@ class BaseComparisonTests(unittest.TestCase):
         self.assertEqual(data['comparison'], {'pre_existing': ['test_old.py::test_old'],
                                              'new': ['test_new.py::test_new'], 'undetermined': []})
 
+    def test_child_pytest_in_another_checkout_does_not_inherit_runner_plugin(self):
+        (self.f.repo / 'test_old.py').write_text('def test_old(): assert False\n')
+        self.commit_base()
+        (self.f.repo / 'test_new.py').write_text(
+            'import os,subprocess,sys,tempfile\n'
+            'def test_new():\n'
+            '    d=tempfile.mkdtemp()\n'
+            '    open(os.path.join(d,"test_child.py"),"w").write("def test_child(): pass\\n")\n'
+            '    env=dict(os.environ, PYTHONPATH=d)\n'
+            '    r=subprocess.run([sys.executable,"-m","pytest","-q","-p","no:cacheprovider",d],'
+            'cwd=d,env=env,capture_output=True,text=True)\n'
+            '    assert r.returncode==0, r.stdout+r.stderr\n')
+        data = self.tip(f'{self.pytest} -m pytest -q test_old.py test_new.py')
+        self.assertEqual(data['comparison'], {'pre_existing': ['test_old.py::test_old'],
+                                             'new': [], 'undetermined': []})
+
     def test_directory_selection_keeps_existing_tests_beside_a_new_selector(self):
         old = self.f.repo / 'test_old.py'
         old.write_text('def test_old(): assert False\n')

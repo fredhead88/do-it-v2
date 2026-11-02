@@ -14,6 +14,40 @@ _directories = []
 _collectors = {}
 _examined = set()
 _collection_error = False
+_withheld = []
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_configure(config):
+    """Keep this plugin out of pytest processes the checked tests spawn.
+
+    The runner requests the plugin through PYTEST_PLUGINS and a runner-only
+    PYTHONPATH entry. A test that starts its own pytest (often in another
+    checkout, with its own PYTHONPATH) would inherit PYTEST_PLUGINS and fail to
+    import the plugin; such nested runs are not runner evidence anyway. The
+    value is restored at unconfigure so a later in-process session still loads it.
+    """
+    value = os.environ.get('PYTEST_PLUGINS')
+    _withheld.append(value)
+    option = getattr(config, 'option', None)
+    if getattr(option, 'numprocesses', None) or getattr(option, 'dist', 'no') not in (None, 'no'):
+        return  # xdist workers are spawned from this environment and need the plugin
+    kept = [n for n in (value or '').split(',') if n and n != __name__]
+    if kept:
+        os.environ['PYTEST_PLUGINS'] = ','.join(kept)
+    else:
+        os.environ.pop('PYTEST_PLUGINS', None)
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_unconfigure(config):
+    if not _withheld:
+        return
+    value = _withheld.pop()
+    if value is None:
+        os.environ.pop('PYTEST_PLUGINS', None)
+    else:
+        os.environ['PYTEST_PLUGINS'] = value
 
 
 def _path(path):
