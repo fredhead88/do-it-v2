@@ -465,6 +465,50 @@ class NextStepTests(unittest.TestCase):
             self.assertIn('clock unavailable', err.getvalue())
 
 
+class MemberVerdictCliTests(unittest.TestCase):
+    """L-spec-2012 AC6: `doit next <spec>` shows the latest member-verdict, and only then."""
+
+    def run_cli(self, rows, *args):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root/'events').mkdir()
+            (root/'events/L-executor-0001.jsonl').write_text(''.join(json.dumps(r)+'\n' for r in rows))
+            env = dict(os.environ, DOIT_ROOT=str(root), PYTHONDONTWRITEBYTECODE='1')
+            for key in ('DOIT_LEDGER_FILE', 'DOIT_LANE_RULES', 'DOIT_PROJECT'):
+                env.pop(key, None)
+            result = subprocess.run([str(ROOT/'doit'), 'next', *args], env=env, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout
+
+    def rows(self, *verdicts):
+        now = datetime.now(timezone.utc)
+        out = [dict(v=1, type='spec-written', subject=SID, ts=(now - timedelta(hours=9)).isoformat(timespec='seconds'))]
+        for hours, tree, state in verdicts:
+            out.append(dict(v=1, type='member-verdict', subject=SID, spec=SID, window='w', tree=tree*40, state=state,
+                            url='', nodes=[], ts=(now - timedelta(hours=hours)).isoformat(timespec='seconds')))
+        return out
+
+    def test_latest_green_undetermined_and_absent(self):
+        absent = self.run_cli(self.rows(), SID)
+        self.assertNotIn('member-verdict', absent)
+        green = self.run_cli(self.rows((5, 'a', 'green')), SID)
+        self.assertEqual(len(green.splitlines()), 1)
+        self.assertIn('[member-verdict aaaaaaaa green (verified alone, waiting for a window), 5h ago]', green)
+        # The latest event wins; an older green is not shown once undetermined arrived.
+        latest = self.run_cli(self.rows((5, 'a', 'green'), (2, 'b', 'undetermined')), SID)
+        self.assertIn('member-verdict bbbbbbbb undetermined (UNDETERMINED, not verified', latest)
+        self.assertIn('2h ago', latest)
+        self.assertNotIn('aaaaaaaa', latest)
+        self.assertNotIn('waiting for a window', latest)
+        # Output for a spec without member evidence is exactly what it was.
+        self.assertEqual(absent.split(' | ')[:3], green.split(' | ')[:3])
+        self.assertTrue(absent.rstrip('\n').endswith(absent.split(' | ', 3)[3].rstrip('\n')))
+        obj = json.loads(self.run_cli(self.rows((2, 'c', 'green')), '--json')) 
+        self.assertIn('cccccccc green', obj['steps'][0]['member_verdict'])
+        plain = json.loads(self.run_cli(self.rows(), '--json'))
+        self.assertTrue(all(set(s) == KEYS for s in plain['steps']))
+
+
 class AuditStepTests(unittest.TestCase):
     setUp = NextStepTests.setUp
     steps = NextStepTests.steps

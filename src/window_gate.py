@@ -23,8 +23,8 @@ gates each branch (`doit gate`, unchanged), collects the window, and calls this:
                Unattributed reds use parallel targeted master/single/pair probes,
                then one full verification of the remainder. Never full-CI bisection.
 
-Candidate trees with a green ledger result covering the required checks in the
-last seven days reuse that result without another dispatch.
+Candidate trees with a green ledger result covering the required checks within
+verdict_fresh_hours (default 24) reuse that result without another dispatch.
 
 Exit codes (the Executor contract, agents/executor.md, mirrors these):
   0  advanced: every spec in the window shipped
@@ -47,6 +47,7 @@ import fold  # noqa: E402
 import rechain
 import quarantine
 import window_prewindow
+import window_members
 
 PROJECT = "albert-scott"
 PREDEPLOY = "scripts/ci/predeploy_gate.sh"
@@ -96,25 +97,8 @@ def tree_of(repo, sha):
 
 
 def prior_result(events, tree):
-    """Newest determined result within seven days (ledger order breaks ties)."""
-    now = datetime.now(timezone.utc)
-    newest, newest_ts = None, None
-    for event in events:
-        if (not isinstance(event, dict) or event.get("type") != "window-tree-verified" or event.get("tree") != tree
-                or type(event.get("green")) is not bool):
-            continue
-        try:
-            stamp = fold.ts(event.get("ts"))
-            # fold.ts intentionally defaults malformed timestamps to NOW for other
-            # consumers. A cache entry must have an actual timestamp instead.
-            datetime.fromisoformat(str(event["ts"]).replace("Z", "+00:00"))
-            if not now - timedelta(days=7) <= stamp <= now:
-                continue
-        except (KeyError, TypeError, ValueError):
-            continue
-        if newest_ts is None or stamp >= newest_ts:
-            newest, newest_ts = event, stamp
-    return newest
+    """Newest fresh determined result on this tree (verdict_fresh_hours, default 24)."""
+    return window_members.prior_result(events, tree)
 
 
 def covers(prior, required):
@@ -1549,6 +1533,10 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
         escalate(window, str(e), "undetermined")
         print("gate-window: " + str(e))
         return 2
+    scope_of = lambda c: scope(repo, base, c, ci_checks, fixes_base=fixes_base)["checks"]
+    marks = window_members.readmit(sys.modules[__name__], repo, base, entries, window, scope_of=scope_of, events=events)
+    if marks["green"] or marks["undetermined"]:
+        print(f"gate-window: member verdicts reusable={marks['green']} undetermined={marks['undetermined']}")
     base_red_answer = None
     baseline, base_failures = None, {}
     enabled = os.environ.get("DOIT_WINDOW_RECHAIN", "on") == "on"
@@ -1758,7 +1746,9 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
                 reason += " (base undetermined)"
             elif "needed" in classification and "covered" in classification:
                 reason += f" (needs {classification['needed']}, base has {sorted(covered)})"
-            escalate(window, f"{reason}; NEW ids={json.dumps(nodes)}; {outcome}, no spec dropped", "undetermined")
+            named = window_members.refusal(sys.modules[__name__], repo, base, [e for e in entries if e[0] in kept], window,
+                                           f"NEW ids={json.dumps(nodes)}; {outcome}, no spec dropped", scope_of=scope_of)
+            escalate(window, named or f"{reason}; NEW ids={json.dumps(nodes)}; {outcome}, no spec dropped", "undetermined")
             if not half:
                 record(res, tree, candidate_required)
             return dict(res, state="undetermined")
@@ -1850,6 +1840,15 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
     def prepare_half(specs):
         return prepare([e for e in entries if e[0] in specs])
 
+    redcut = window_members.recovering(events, [e[0] for e in entries])
+    if len(redcut) > 1:  # requeued by a red window's escalation default: verify each alone, in parallel
+        alone = window_members.attribute(sys.modules[__name__], repo, base, [e for e in entries if e[0] in redcut], window,
+                                         scope_of=scope_of, blame=sorted(set().union(*redcut.values())))
+        for spec in alone["drop"]:
+            drop_specs([spec], window_members.drop_result(alone, spec, base), "member-alone")
+        entries = [e for e in entries if e[0] not in alone["drop"]]
+        if not entries:
+            print("gate-window: every member was dropped by its alone verdict"); return 1
     cand, merged, conflicts = prepare(entries)
     note_conflicts(conflicts)
     if not merged:

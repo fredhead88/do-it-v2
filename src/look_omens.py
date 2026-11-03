@@ -6,6 +6,7 @@ import re
 from datetime import datetime, timezone
 
 import fold
+import window_members
 
 DEFAULTS = dict(near_cap_fraction=0.8, vanished_cap_multiple=3, vanished_max_h=48,
                 shelf_silent_min=60, raven_warn_h=0.5, raven_critical_h=2,
@@ -16,7 +17,7 @@ OWNERS = {'near-cap': 'executor', 'vanished': 'executor', 'shelf': 'executor',
           'shelf-stuck': 'executor', 'raven': 'thinker', 'known-bug': 'thinker',
           'contamination': 'executor', 'contamination-handled': 'executor',
           'regrade-loop': 'thinker', 'owed-due': 'executor', 'owed-parked': 'thinker',
-          'inbound-uncarried': 'thinker', 'doit-not-live': 'operator'}
+          'inbound-uncarried': 'thinker', 'doit-not-live': 'operator', 'member-verdict': 'executor'}
 # A corrects: header may name the rule itself, omen-<rule>, or configured class.
 KNOWN_BUG = {'L-charter-0034': 'planner-attempts-stuck: up.py re-escalates after every decision (fix routed to L-charter-0042 R6; the charter itself awaits its closing review)'}
 
@@ -182,6 +183,11 @@ def run(events, specs, runner, now, cfg):
             add('doit-not-live', 'do-it-v2', f'do-it-v2 checkout is {behind} merge(s) behind origin/main', 'CRIT')
     except (OSError, ValueError, AttributeError):
         add('doit-not-live', 'do-it-v2', 'could not check: reading unavailable')
+    try:
+        for rule, key, detail, severity in window_members.waiting_rows(events, specs, now):
+            add(rule, key, detail, severity)
+    except Exception:
+        add('member-verdict', 'unavailable', 'member-verdict reading unavailable')
     order = {'CRIT': 0, 'WARN': 1, 'INFO': 2}
     return sorted(rows, key=lambda r: (order[r['severity']], r['rule'], r['key']))
 

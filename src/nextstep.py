@@ -23,6 +23,7 @@ import lane_rules
 import merge_queue
 import owed
 import routing
+import window_members
 
 
 STAGES = ('idea', 'planned', 'building', 'checking', 'merging', 'live')
@@ -1315,6 +1316,9 @@ def main(argv=None):
                 waves[sid] = dispatch.spec_wave(charter, written['footprint'])
         steps = [step_for(events, specs, args.item, now, rules, waves)] if args.item else next_steps(events, specs, now, rules, waves)
         result = dict(counts=flow_counts(events, specs, now, rules, waves), steps=[asdict(s) for s in steps])
+        for row in result['steps']:
+            if window_members.latest(events, row['item']):
+                row['member_verdict'] = window_members.verdict_text(events, row['item'], now)
     except KeyError as exc:
         # A missing internal ledger/rule field is undetermined, not an unknown ID.
         if args.item and exc.args == (args.item,):
@@ -1329,7 +1333,9 @@ def main(argv=None):
         print(json.dumps(result))
     else:
         for step in steps:
-            print(' | '.join(_clean(v) for v in (step.item, step.action or 'hold', step.owner, step.reason)))
+            note = window_members.verdict_text(events, step.item, now)
+            print(' | '.join(_clean(v) for v in (step.item, step.action or 'hold', step.owner,
+                                                  step.reason + (f' [{note}]' if note else ''))))
     return 0
 
 
