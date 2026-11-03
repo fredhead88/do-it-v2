@@ -49,11 +49,13 @@ def effective_base(runtime, a, fail):
         effective = packet._effective_base(runtime.ROOT / 'repos' / (a.project or ''),
                                            a.project, runtime.spec_path(a.subject), a.subject)
     except (ValueError, OSError, TypeError, subprocess.SubprocessError):
+        __import__('branch_refresh').before_refusal(runtime, a, 'stale-base')
         fail('stale-base: effective project/base cannot be resolved; regenerate the packet',
              reason='stale-base')
     a.effective_base_sha = effective
     if (not re.fullmatch(r'[0-9a-f]{40}', a.pinned_base_sha)
             or a.pinned_base_sha != effective):
+        __import__('branch_refresh').before_refusal(runtime, a, 'stale-base')
         fail('stale-base: packet pin differs from the current effective base; regenerate the packet',
              reason='stale-base')
     return effective
@@ -88,6 +90,8 @@ def pending_conflict_rework(events, subject):
 
 def branch_preflight(runtime, a, cwd, events, fail):
     """Obtain ancestry with git's abortable rebase; never recreate a branch."""
+    if __import__('branch_refresh').dispatch_preflight(runtime, a, cwd, events, fail):
+        return
     if runtime.pending_conflict_rework(events, a.subject):
         return
 

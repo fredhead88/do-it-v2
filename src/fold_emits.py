@@ -440,3 +440,9 @@ def window_result_reason(e):
 # AIMD observations are gate-owned and replayed after restart.
 EMITS['window-verification-result'] = {'executor', 'tick', 'operator'}
 REQUIRED_ROWS['window-verification-result'] = ('state', 'sha', 'specs')
+
+# Isolated branch refresh is owned exclusively by the executor.
+EMITS["branch-refreshed"] = {"executor"}
+EMITS["branch-refresh-skipped"] = {"executor"}
+REQUIRED_ROWS["branch-refreshed"] = ("spec", "from_sha", "to_sha", "base_sha", "checks")
+REQUIRED_ROWS["branch-refresh-skipped"] = ("reason",)

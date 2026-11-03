@@ -144,8 +144,9 @@ class HowtoTests(unittest.TestCase):
             self.assertLessEqual(len(page.splitlines()), 135)
             self.assertTrue(all(len(line) <= 100 for line in page.splitlines()))
             self.assertIn('doit howto', page.split('\n\n')[1])
-            self.assertEqual(page.count('\n## '), 5)
-        print('1500-AC3 header, five sections, 135 lines, 100 columns ... ok')
+            self.assertEqual(page.count('\n## '), 6)
+            self.assertIn('## Branch refresh', page)
+        print('1500-AC3 header, six sections, 135 lines, 100 columns ... ok')
 
     def test_ac4_command_states_and_no_partial_write(self):
         self.assertEqual(self.call()[0], 0)

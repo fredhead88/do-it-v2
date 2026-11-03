@@ -129,3 +129,7 @@ Source: `look.toml` `[merge_queue]` and `src/window_members.py`.
 - Tree reuse: a green member-verdict or window-tree-verified on the exact git tree that covers the
   required checks is reused for 24 hours (verdict_fresh_hours). Undetermined, malformed, stale or
   future-dated evidence is never reused.
+
+## Branch refresh
+
+Before rework: isolated rebase, Verification/guards, adoption, bundle, re-gate; max 3/spec/day.

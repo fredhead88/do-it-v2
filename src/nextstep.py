@@ -1317,6 +1317,9 @@ def main(argv=None):
         steps = [step_for(events, specs, args.item, now, rules, waves)] if args.item else next_steps(events, specs, now, rules, waves)
         result = dict(counts=flow_counts(events, specs, now, rules, waves), steps=[asdict(s) for s in steps])
         for row in result['steps']:
+            refresh = __import__('branch_refresh').refresh_note(events, row['item'])
+            if refresh:
+                row['branch_refresh'] = refresh
             if window_members.latest(events, row['item']):
                 row['member_verdict'] = window_members.verdict_text(events, row['item'], now)
     except KeyError as exc:
@@ -1334,6 +1337,8 @@ def main(argv=None):
     else:
         for step in steps:
             note = window_members.verdict_text(events, step.item, now)
+            refresh = __import__('branch_refresh').refresh_note(events, step.item)
+            note = '; '.join(filter(None, (note, refresh)))
             print(' | '.join(_clean(v) for v in (step.item, step.action or 'hold', step.owner,
                                                   step.reason + (f' [{note}]' if note else ''))))
     return 0

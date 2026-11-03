@@ -61,7 +61,7 @@ def _refusal(event):
             and (reason.startswith(('bundle-pending', 'duplicate-dispatch', 'wave-order'))
                  or reason == 'dispatch-in-progress'
                  and (_role(event) != 'grader' or 'another dispatch holds the subject lock' in str(event.get('why') or ''))
-                 or reason in {'stale-base', 'branch-not-descendant', 'pinned-base-mismatch'}))
+                 or reason == 'branch-refreshed' or reason in __import__('branch_refresh').REFUSALS))
 
 
 def _marker_groups(rows, role):
