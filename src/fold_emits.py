@@ -305,6 +305,7 @@ EMITS["window-tree-verified"] = {"executor", "operator"}
 EMITS["window-rehearsed"] = {"executor", "operator"}
 EMITS["window-bisected"] = {"executor", "operator"}
 EMITS["window-targeted-attribution"] = {"executor", "operator"}
+EMITS["member-verdict"] = {"executor", "operator"}  # L-spec-2012: gate actor convention
 
 # L-spec-1143: admit the train and batcher before their emitters land.
 EMITS["window-run-minutes"] = {"executor", "tick", "operator"}
@@ -353,6 +354,7 @@ REQUIRED_ROWS = {
     "ci-runner-set": ("variable", "from", "to"),
     "bill-check": ("date", "yday", "mtd"),
     "window-tree-verified": ("window", "sha", "tree"),
+    "member-verdict": ("spec", "window", "tree", "state"),
     "window-rehearsed": ("base_sha", "specs", "state"),
     "window-bisected": ("window", "halves"),
     "window-targeted-attribution": ("window", "candidate", "base_sha", "ids"),

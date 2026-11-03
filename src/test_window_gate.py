@@ -188,7 +188,7 @@ class Fx:
             "pg-parity (Postgres)\tRun suite\t2026-10-17T00:00:00Z " + kind + " " + node + " - " + message
             for node in nodes))
 
-    def go(self, specs=None, fixes_base=False, window="w1", after=None):
+    def go(self, specs=None, fixes_base=False, window="w1", after=None, members=False, requeued=None):
         # This fixture exercises the post-admission CI/rechain state machine,
         # including deliberately conflicting and unchained migration batches.
         # Real admission (including the _run_attempt barrier) has Git-tree
@@ -196,7 +196,8 @@ class Fx:
         specs = specs or list(self.branches)
         for s in specs:
             fold.append(["merge-gate-clean", s, f"branch={self.branches[s]}", "project=albert-scott"])
-            fold.append(["queue-add", s, f"branch={self.branches[s]}", "project=albert-scott", "rule=operator"])
+            fold.append(["queue-add", s, f"branch={self.branches[s]}", "project=albert-scott"]
+                        + (["rule=escalation-default", "nodes:=" + json.dumps(requeued)] if requeued else ["rule=operator"]))
         # Gate mechanics fixtures opt out of AIMD; boundary checks below opt in.
         cap_env = {} if getattr(self, 'adaptive_cap', False) else {
             'DOIT_WINDOW_MAX_MERGES': os.environ.get('DOIT_WINDOW_MAX_MERGES', '15')}
@@ -205,7 +206,12 @@ class Fx:
                           side_effect=lambda repo, base, main, entries, events, content: (entries, [])), \
              patch.dict(sys.modules, base_red=self.service), \
              patch.object(window_gate, "base_red_snapshot", side_effect=self.base_reader), \
-             patch.object(window_gate, "candidate_logs", side_effect=self.log_reader):
+             patch.object(window_gate, "candidate_logs", side_effect=self.log_reader), \
+             patch.object(window_gate.window_members, "attribute",
+                          **({"wraps": window_gate.window_members.attribute} if members else
+                             {"side_effect": lambda *a, **k: dict(drop={}, urls={})})):
+            # members=False keeps the historical targeted-attribution fixtures exact;
+            # member-verdict behaviour has its own fixtures (L-spec-2012).
             result = window_gate.main_([window, "--project", "albert-scott", "--specs", ",".join(specs)]
                                        + (["--fixes-base"] if fixes_base else [])
                                        + (["--after", after] if after else []))
@@ -3686,6 +3692,115 @@ ac6_recheck_before_drop()
 ac7_tree_guard_attribution()
 ac8_tree_guards_config()
 
+def member_integration_checks():
+    """L-spec-2012: the gate hooks drive window_members from a real red window."""
+    from datetime import datetime, timedelta, timezone
+    unknown = "api/tests/absent.py::lost"
+    def verdict(state="green", nodes=()):
+        return dict(state=state, nodes=list(nodes), url="cli://candidate", doc={})
+
+    def alone_fixture(names, bad):
+        fx = Fx({s: f"{s}.py" for s in names})
+        calls = []
+        fx.service.classify = lambda project, base, nodes, **kw: {"complete": True, "pre_existing": [], "new": nodes}
+        def verify(repo, sha, required, window):
+            if sha == fx.base: return verdict()
+            present = [s for s in names if window_gate.git(repo, "cat-file", "-e", f"{sha}:{s}.py", check=False).returncode == 0]
+            calls.append(present)
+            return verdict("red", [unknown]) if bad in present else verdict()
+        return fx, calls, verify
+
+    fx, calls, verify = alone_fixture("ABC", "B")
+    with patch.dict(os.environ, DOIT_WINDOW_MAX_MERGES="3"), patch.object(window_gate, "verify", side_effect=verify):
+        rc = fx.go(members=True, requeued=[unknown])
+    verdicts = fx.events("member-verdict")
+    drops = fx.events("window-dropped")
+    check(rc == 1 and sorted(map(tuple, calls[:3])) == [("A",), ("B",), ("C",)] and calls[3:] == [["A", "C"]],
+          "member hook: alone CI per requeued member, then one run of the innocent remainder")
+    check(sorted((e["spec"], e["state"]) for e in verdicts) == [("A", "green"), ("B", "red"), ("C", "green")]
+          and all(len(e["tree"]) == 40 and e["window"] == "w1" for e in verdicts), "member hook: three durable verdicts")
+    check([(e["subject"], e["nodes"], e["reason"]) for e in drops] == [("B", [unknown], "member-alone")]
+          and drops[0]["attribution_mode"] == "member-alone", "member hook: only the red member is dropped with its nodes")
+    check([e["subject"] for e in fx.events("shipped")] == ["A", "C"] and not fx.events("window-targeted-attribution"),
+          "member hook: innocent members ship, no serial targeted probes")
+
+    # A freshly queued (operator) window is untouched by the hook: no alone verification.
+    fx, calls, verify = alone_fixture("ABC", "Z")
+    with patch.dict(os.environ, DOIT_WINDOW_MAX_MERGES="3"), patch.object(window_gate, "verify", side_effect=verify):
+        rc = fx.go(members=True)
+    check(rc == 0 and not fx.events("member-verdict") and calls == [list("ABC")], "member hook: ordinary window dispatches once")
+
+    # Reuse: a second recovery on the same trees repeats no alone-tree CI.
+    fx, calls, verify = alone_fixture("ABC", "Z")
+    ci_checks = window_gate.required_checks(fx.repo, fx.base)
+    for name in "AC":
+        sha = sh(["rev-parse", fx.branches[name]], fx.repo)
+        cand, _ = window_gate.merge_into(fx.repo, fx.base, sha, "x")
+        window_gate.ev("member-verdict", name, spec=name, window="prior", tree=window_gate.tree_of(fx.repo, cand), state="green",
+                       url="", nodes=[], required=window_gate.scope(fx.repo, fx.base, cand, ci_checks)["checks"])
+    with patch.dict(os.environ, DOIT_WINDOW_MAX_MERGES="3"), patch.object(window_gate, "verify", side_effect=verify):
+        rc = fx.go(specs=["A", "B", "C"], members=True, requeued=[unknown])
+    check(rc == 0 and sorted(map(tuple, calls[:1])) == [("B",)] and calls[1:] == [list("ABC")],
+          "member hook: fresh green members are not re-verified alone")
+
+    # Negative control: an operator-queued red window keeps the historical targeted path.
+    fx, calls, verify = alone_fixture("AB", "B")
+    with patch.dict(os.environ, DOIT_WINDOW_MAX_MERGES="2"), patch.object(window_gate, "verify", side_effect=verify), \
+         patch.object(window_gate, "targeted_attribution", return_value=dict(
+             drop={"B": [unknown]}, environment=[], unresolved=[], need_pairs=[], mode="singles", base_sha=fx.base, evidence={})):
+        rc = fx.go(members=True)
+    check(not fx.events("member-verdict") and len(calls) == 2, "member hook: operator-queued red window keeps targeted attribution")
+
+    # R4/AC5: members green alone on the current base never end as "base incomplete".
+    def incomplete_window(seed):
+        fx = Fx({"A": "a.py", "B": "b.py"})
+        fx.service.classify = lambda *a, **kw: {"complete": False}
+        fx.run_n(1, 1, red([unknown]))
+        ci_checks = window_gate.required_checks(fx.repo, fx.base)
+        for name in "AB":
+            sha = sh(["rev-parse", fx.branches[name]], fx.repo)
+            cand, _ = window_gate.merge_into(fx.repo, fx.base, sha, "x")
+            required = window_gate.scope(fx.repo, fx.base, cand, ci_checks)["checks"]
+            seed(fx, name, window_gate.tree_of(fx.repo, cand), required)
+        rc = fx.go(members=True)
+        return rc, [e["why"] for e in fx.events("escalation-blocking")], fx.events("window-cancelled")
+    def fresh(fx, name, tree, required):
+        window_gate.ev("member-verdict", name, spec=name, window="prior", tree=tree, state="green", url="", nodes=[], required=required)
+    def stale(fx, name, tree, required):
+        line = dict(v=1, ts=(datetime.now(timezone.utc) - timedelta(hours=25)).isoformat(timespec="seconds"),
+                    type="member-verdict", subject=name, spec=name, window="prior", tree=tree, state="green",
+                    url="", nodes=[], required=required, project="albert-scott")
+        with open(fold.EVENTS / "L-executor-0001.jsonl", "a") as handle:
+            handle.write(json.dumps(line) + "\n")
+    def wrong_tree(fx, name, tree, required):
+        fresh(fx, name, "0" * 40, required)
+    rc, whys, cancelled = incomplete_window(fresh)
+    check(rc == 2 and whys and all("base incomplete" not in w for w in whys) and whys[-1].startswith("member-interaction:")
+          and not cancelled, "AC5 hook: verified-member window names its refusal, not base incomplete")
+    for label, seeder in (("stale", stale), ("other-base", wrong_tree)):
+        rc, whys, cancelled = incomplete_window(seeder)
+        check(rc == 2 and whys and "base incomplete" in whys[-1], "AC5 hook: " + label + " alone evidence is not trusted")
+
+
+    # AC4: a candidate tree equal to a fresh green member-verdict ships with no CI dispatch.
+    for covered in (True, False):
+        fx = Fx({"A": "a.py"})
+        dispatched = []
+        def verify(repo, sha, required, window):
+            if sha != fx.base: dispatched.append(sha)
+            return verdict()
+        ci_checks = window_gate.required_checks(fx.repo, fx.base)
+        sha = sh(["rev-parse", fx.branches["A"]], fx.repo)
+        cand, _ = window_gate.merge_into(fx.repo, fx.base, sha, "x")
+        required = window_gate.scope(fx.repo, fx.base, cand, ci_checks)["checks"]
+        window_gate.ev("member-verdict", "A", spec="A", window="prior", tree=window_gate.tree_of(fx.repo, cand),
+                       state="green", url="", nodes=[], required=required if covered else [window_gate.PYTEST_CHECK])
+        with patch.object(window_gate, "verify", side_effect=verify):
+            rc = fx.go(members=True)
+        check(rc == 0 and [e["subject"] for e in fx.events("shipped")] == ["A"] and bool(dispatched) is not covered,
+              "AC4 hook: candidate tree shipped on cached member-verdict only when coverage holds, covered=%s" % covered)
+
+
 infra_checks()
 train_checks()
 rerun_checks()
@@ -3698,5 +3813,6 @@ rechain_checks()
 main()
 merge_simple_checks()
 honest_rate_checks()
+member_integration_checks()
 if FAILS:
     sys.exit(1)

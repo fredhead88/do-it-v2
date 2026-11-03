@@ -104,6 +104,22 @@ class Tests(unittest.TestCase):
         self.mocks[3].side_effect = RuntimeError()
         self.assertEqual(self.rules(specs=specs), {'owed-due'})
         self.assertNotEqual(fold.NOW, NOW)  # the injected clock must not leak
+    def test_member_verdict_rows_show_waiting_and_undetermined(self):
+        tree = lambda c: c * 40
+        green = ev('member-verdict', 3, spec=SID, window='w', tree=tree('a'), state='green', url='', nodes=[])
+        rows = self.run_rules([green], {SID: dict(state='written')})
+        self.assertEqual([(r['rule'], r['key'], r['severity']) for r in rows], [('member-verdict', 'waiting', 'INFO')])
+        self.assertIn('verified alone, waiting for a window', rows[0]['detail'])
+        self.assertIn(f'{SID} aaaaaaaa 3h ago', rows[0]['detail'])
+        undetermined = ev('member-verdict', 1, spec=SID, window='w2', tree=tree('b'), state='undetermined', url='', nodes=[])
+        rows = self.run_rules([green, undetermined], {SID: dict(state='written')})
+        self.assertEqual([(r['key'], r['severity']) for r in rows], [('undetermined', 'WARN')])
+        self.assertIn('UNDETERMINED', rows[0]['detail'])
+        self.assertNotIn('waiting for a window', rows[0]['detail'])
+        # Settled specs and specs with no member evidence add nothing.
+        self.assertFalse(self.rules([green], {SID: dict(state='shipped')}))
+        self.assertFalse(self.rules([], {SID: dict(state='written')}))
+        self.assertEqual(o.OWNERS['member-verdict'], 'executor')
     def test_inbound_carried_and_boundary(self):
         source = 'https://example.test/pull/123'
         registration = ev('inbound-registered', 3, source=source)

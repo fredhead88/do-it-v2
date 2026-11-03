@@ -117,3 +117,15 @@ plus every action in `lane_rules.toml`.
   charter-reopened; cron-missing; dispatch-builder; dispatch-grader; dispatch-reviewer; doit-gate;
   escalation-blocking; look-stale; next-step-held; none; proving-check-failed; proving-overdue;
   queue-add; spawn-failed; spawn-stale; spec-killed; sweep-check; tick; window-run; worktree-reaped
+
+## Member verdicts
+
+Source: `look.toml` `[merge_queue]` and `src/window_members.py`.
+- After a red window with unnamed owners, each remaining member is verified alone on the window
+  base, at most 4 CI runs at once (member_verify_parallel).
+- Each run appends `member-verdict {spec, window, tree, state, url, nodes}`; state is green, red or
+  undetermined. A red member is dropped with its failing nodes; green and undetermined members stay
+  eligible for the next window.
+- Tree reuse: a green member-verdict or window-tree-verified on the exact git tree that covers the
+  required checks is reused for 24 hours (verdict_fresh_hours). Undetermined, malformed, stale or
+  future-dated evidence is never reused.

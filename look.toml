@@ -21,6 +21,8 @@ train_depth = 2
 [merge_queue]
 batch_cap = 15
 batch_cap_floor = 6
+member_verify_parallel = 4   # L-spec-2012: concurrent alone-tree CI verifications after a red window
+verdict_fresh_hours = 24     # L-spec-2012: how long a green tree verdict may be reused
 
 [thresholds]
 tmp_high = 85

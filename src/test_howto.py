@@ -36,6 +36,7 @@ class HowtoTests(unittest.TestCase):
                    'action="dispatch-builder"\nactor="tick"\nlimit_min=30\n')
         self.write('crons.toml', '[[row]]\nname="tick"\nschedule="*/{tick_min} * * * *"\n'
                    'where="user"\ncommand="{doit} tick >> {root}/tick.log"\npath="{repo}/doit"\n')
+        self.write('look.toml', '[merge_queue]\nmember_verify_parallel = 4\nverdict_fresh_hours = 24\n')
         self.write('src/tick.py', 'dispatch.emit(path(), {}, "spawn-stale")\n'
                    'look.emit_once("cron-missing", "key", "actor", {}, [])\n'
                    'other.emit("not-an-event")\n')
@@ -88,6 +89,16 @@ class HowtoTests(unittest.TestCase):
         self.assertIn('rowless: codex (default)', howto.render(str(self.repo)))
         print('1500-AC1 fixture, real repo, both emit forms, environment ... ok')
 
+    def test_member_verdict_section_follows_look_toml(self):
+        page = howto.render(str(self.repo))
+        self.assertIn('## Member verdicts', page)
+        self.assertIn('at most 4 CI runs at once', page)
+        self.assertIn('reused for 24 hours', ' '.join(page.split()))
+        self.write('look.toml', '[merge_queue]\nmember_verify_parallel = 2\nverdict_fresh_hours = 6\n')
+        again = ' '.join(howto.render(str(self.repo)).split())
+        self.assertIn('at most 2 CI runs at once', again)
+        self.assertIn('reused for 6 hours', again)
+
     def test_token_health_text(self):
         page = howto.render(str(REPO))
         for marker in ('tokens = {vendor, input, cached_input, output, reasoning}',
@@ -130,11 +141,11 @@ class HowtoTests(unittest.TestCase):
     def test_ac3_page_budget(self):
         for repo in (self.repo, REPO):
             page = howto.render(str(repo))
-            self.assertLessEqual(len(page.splitlines()), 120)
+            self.assertLessEqual(len(page.splitlines()), 135)
             self.assertTrue(all(len(line) <= 100 for line in page.splitlines()))
             self.assertIn('doit howto', page.split('\n\n')[1])
-            self.assertEqual(page.count('\n## '), 4)
-        print('1500-AC3 header, four sections, 120 lines, 100 columns ... ok')
+            self.assertEqual(page.count('\n## '), 5)
+        print('1500-AC3 header, five sections, 135 lines, 100 columns ... ok')
 
     def test_ac4_command_states_and_no_partial_write(self):
         self.assertEqual(self.call()[0], 0)
