@@ -135,7 +135,7 @@ def gate(events, subject, packet, emit, fail):
     ready = build.get("ready_sha")
     evidence = [e for e in events if e.get('subject') == subject
                 and e.get('type') in {'evidence-bundle', 'evidence-bundle-failed'}
-                and e.get('sha') == ready and ready
+                and ready and _same_sha(e.get('sha'), ready)
                 # Undated legacy failures can retain a no-spend infra hold;
                 # they can never establish readiness for paid grading.
                 and (e['type'] == 'evidence-bundle-failed' and not build.get('ts')
