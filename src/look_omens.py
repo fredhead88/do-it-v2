@@ -17,7 +17,7 @@ OWNERS = {'near-cap': 'executor', 'vanished': 'executor', 'shelf': 'executor',
           'shelf-stuck': 'executor', 'raven': 'thinker', 'known-bug': 'thinker',
           'contamination': 'executor', 'contamination-handled': 'executor',
           'regrade-loop': 'thinker', 'owed-due': 'executor', 'owed-parked': 'thinker',
-          'inbound-uncarried': 'thinker', 'doit-not-live': 'operator', 'member-verdict': 'executor'}
+          'inbound-uncarried': 'thinker', 'doit-not-live': 'operator', 'member-verdict': 'executor', 'branch-refreshes': 'executor'}
 # A corrects: header may name the rule itself, omen-<rule>, or configured class.
 KNOWN_BUG = {'L-charter-0034': 'planner-attempts-stuck: up.py re-escalates after every decision (fix routed to L-charter-0042 R6; the charter itself awaits its closing review)'}
 
@@ -188,6 +188,11 @@ def run(events, specs, runner, now, cfg):
             add(rule, key, detail, severity)
     except Exception:
         add('member-verdict', 'unavailable', 'member-verdict reading unavailable')
+    from branch_refresh import utc_day
+    count = sum(e.get('type') == 'branch-refreshed' and utc_day(e['ts']) == now.astimezone(timezone.utc).date()
+                for e in events)
+    if count:
+        add('branch-refreshes', str(now.astimezone(timezone.utc).date()), f'{count} branch refresh(es) today (UTC)', 'INFO')
     order = {'CRIT': 0, 'WARN': 1, 'INFO': 2}
     return sorted(rows, key=lambda r: (order[r['severity']], r['rule'], r['key']))
 

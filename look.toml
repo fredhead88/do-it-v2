@@ -19,6 +19,7 @@ train_depth = 2
 # DOIT_WINDOW_MAX_MERGES overrides the controller.
 
 [merge_queue]
+branch_refresh_per_day = 3
 batch_cap = 15
 batch_cap_floor = 6
 member_verify_parallel = 4   # L-spec-2012: concurrent alone-tree CI verifications after a red window

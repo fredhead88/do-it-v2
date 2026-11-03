@@ -137,6 +137,9 @@ def render(repo: str) -> str:
     lines.extend(_wrap('Tree reuse: a green member-verdict or window-tree-verified on the exact git tree that covers '
                        f'the required checks is reused for {fresh} hours (verdict_fresh_hours). Undetermined, '
                        'malformed, stale or future-dated evidence is never reused.'))
+    lines.extend(['', '## Branch refresh', '',
+                  'Before rework: isolated rebase, Verification/guards, adoption, bundle, re-gate; '
+                  f'max {queue.get("branch_refresh_per_day", 3)}/spec/day.'])
     return '\n'.join(lines) + '\n'
 
 

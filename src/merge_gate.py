@@ -977,6 +977,10 @@ def conflict_event(branch, main, spec):
         a = conflict.conflict_attempts(fold.read_events(), spec)
     except Undetermined:
         return None
+    import branch_refresh
+    refreshed = branch_refresh.gate_refresh(os.getcwd(), branch, main, spec)
+    if refreshed is not None:
+        return refreshed
     fold.append(["conflict-rework", spec, f"branch={branch}",
                  # `attempt:=` — a bare `attempt=1` round-trips as the string "1"
                  # (fold's D-rule: a bare value is a string unless unambiguously JSON)
