@@ -119,6 +119,11 @@ def run(files, repo, base, *, runner=None, timeout=300):
     base = git(repo, "rev-parse", "--verify", "--end-of-options", base + "^{commit}").strip()
     runner = runner or subprocess.run
     env = {k: v for k, v in merge_gate.ENV.items() if not k.startswith("SUPABASE_DB_URL")}
+    # The worktree .env carries the read-only DSN (dispatch.py writes SUPABASE_DB_URL there) and
+    # api/app/config.py load_dotenv() fills only ABSENT keys, so blank them: a coupled run must
+    # never reach a live database (L-spec-2001, 2026-11-03: live-PG smoke tests flaked the check).
+    for key in ("SUPABASE_DB_URL", "SUPABASE_DB_URL_RO", "SUPABASE_DB_URL_DIRECT", "SUPABASE_DB_URL_MIGRATIONS"):
+        env[key] = ""
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     deadline = time.monotonic() + TOTAL_SECONDS
     results = []

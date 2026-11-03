@@ -175,6 +175,24 @@ class CoupledTests(unittest.TestCase):
         self.assertEqual(before, (self.git("status", "--porcelain"),
                                   self.git("rev-parse", "HEAD")))
 
+    def test_coupled_runs_blank_the_live_dsn_keys(self):
+        # The worktree .env carries the read-only DSN; load_dotenv fills only absent keys, so the
+        # coupled run must hand the subprocess blank SUPABASE_DB_URL* keys (L-spec-2001, 2026-11-03).
+        self.write("tests/test_env_probe.py", "def test_ok():\n    assert True\n")
+        self.commit()
+        base = self.git("rev-parse", "HEAD")
+        seen = []
+
+        def runner(cmd, **kw):
+            seen.append(dict(kw.get("env") or {}))
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        coupled_tests.run(["tests/test_env_probe.py"], self.repo, base, runner=runner)
+        self.assertTrue(seen)
+        for env in seen:
+            for key in ("SUPABASE_DB_URL", "SUPABASE_DB_URL_RO", "SUPABASE_DB_URL_DIRECT", "SUPABASE_DB_URL_MIGRATIONS"):
+                self.assertEqual(env.get(key), "", key)
+
     def test_local_names_and_real_test_files_only(self):
         for path, text in {
             "pkg/route.ts": "export const route = 1;\n",
@@ -324,7 +342,10 @@ class CoupledTests(unittest.TestCase):
         for cmd, kw in calls:
             self.assertIn("pytest", cmd)
             self.assertLessEqual(kw["timeout"], 300)
-            self.assertFalse(any(k.startswith("SUPABASE_DB_URL") for k in kw["env"]))
+            # Live DSN keys reach the subprocess only as blanks (absent keys would be refilled from
+            # the worktree .env by load_dotenv); the sentinel value never passes through.
+            self.assertTrue(all(v == "" for k, v in kw["env"].items() if k.startswith("SUPABASE_DB_URL")))
+            self.assertNotIn("sentinel", kw["env"].values())
         self.write("doit", "#!/bin/sh\n")
         (self.repo / "doit").chmod(0o755)
         calls.clear()
