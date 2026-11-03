@@ -16,9 +16,15 @@ def root():
     return pathlib.Path(os.environ.get("DOIT_ROOT", pathlib.Path.home() / ".do-it"))
 
 
+def _same_sha(a, b):
+    """Equal commits, allowing one side abbreviated (a seat builder recorded a 9-char ready_sha on 2026-11-03)."""
+    a, b = str(a or ""), str(b or "")
+    return bool(a) and bool(b) and len(a) >= 7 and len(b) >= 7 and (a.startswith(b) or b.startswith(a))
+
+
 def _latest(events, subject, kind, sha=None):
     return next((e for e in reversed(events) if e.get("subject") == subject
-                 and e.get("type") == kind and (sha is None or e.get("sha") == sha)), None)
+                 and e.get("type") == kind and (sha is None or _same_sha(e.get("sha"), sha))), None)
 
 
 def _contained(path, directory):
@@ -43,7 +49,7 @@ def bundle_for(events, subject, ready_sha):
         if not evidence_revision.current(events, subject, event):
             return None
         build = _latest(events, subject, 'build-done')
-        if build and (build.get('ready_sha') != ready_sha
+        if build and (not _same_sha(build.get('ready_sha'), ready_sha)
                       or datetime.fromisoformat(event['ts'].replace('Z', '+00:00'))
                       <= datetime.fromisoformat(build['ts'].replace('Z', '+00:00'))):
             return None
@@ -53,7 +59,7 @@ def bundle_for(events, subject, ready_sha):
         if hashlib.sha256(raw).hexdigest() != event["bundle_sha256"]:
             return None
         data = json.loads(raw)
-        if data["spec"] != subject or data["sha"] != ready_sha:
+        if data["spec"] != subject or not _same_sha(data["sha"], ready_sha):
             return None
         if data.get("spec_sha256") is not None:
             text = (root() / "content" / f"{subject}.md").read_text()
