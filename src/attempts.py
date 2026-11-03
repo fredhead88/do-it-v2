@@ -207,6 +207,16 @@ def history(evs, trigger, role, *, now, dead=frozenset()):
         cleared = any(ts > refused_at and e.get('type') in {'evidence-bundle', 'evidence-bundle-failed'}
                       for ts, _, e in recent) or any(ts > refused_at for ts, _, _ in starts)
         if not cleared:
+            # A bundle for the current build that already exists clears the refusal too: the
+            # refusal may have been the packet's lookup failing (abbreviated ready_sha, L-spec-1980
+            # 2026-11-03), and build_runner will not re-emit an event for an unchanged bundle.
+            build = next((e for _, _, e in reversed(recent) if e.get('type') == 'build-done'), None)
+            ready = str((build or {}).get('ready_sha') or '')
+            cleared = bool(build) and len(ready) >= 7 and any(
+                e.get('type') == 'evidence-bundle' and ts > _timestamp(build.get('ts'), 'event.ts')
+                and (str(e.get('sha') or '').startswith(ready) or ready.startswith(str(e.get('sha') or 'x')))
+                for ts, _, e in recent)
+        if not cleared:
             not_ready = 'bundle-pending'
     return Attempts(consumed, live, n_failed, tuple(row[2] for row in failures),
                     next_retry_at, exhausted, not_ready)
