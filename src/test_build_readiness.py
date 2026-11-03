@@ -89,6 +89,30 @@ class ReadinessTests(unittest.TestCase):
         self.spec('- Link from `next/link`\n- runtime `$R/base-red/<project>/<sha>.dispatched`')
         self.assertEqual(self.check()['status'], 'ready')
 
+    def test_path_symbol_ref_and_sha_mentions_are_not_missing_inputs(self):
+        target = self.repo / 'src/thing.py'
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text('def entry():\n    return 1\n\nCONSTANT = 2\n')
+        (self.repo / 'docs').mkdir(exist_ok=True)
+        (self.repo / 'docs/list.txt').write_text('a\n')
+        self.git('add', '.')
+        self.git('commit', '-qm', 'symbol fixtures')
+        self.base = self.git('rev-parse', 'HEAD')
+        self.spec('- `src/thing.py::entry` and `src/thing.py::CONSTANT` stay as they are\n'
+                  '- `master:docs/list.txt` as the comparison population\n'
+                  '- commit `8878cef33385b518718b13db84a86f601851f519` (2026-10-29) and `f9fe7c1` (merge) landed it')
+        self.assertEqual(self.check()['status'], 'ready', self.check())
+
+    def test_path_symbol_with_absent_symbol_is_missing(self):
+        target = self.repo / 'src/thing.py'
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text('def entry():\n    return 1\n')
+        self.git('add', '.')
+        self.git('commit', '-qm', 'symbol fixture')
+        self.base = self.git('rev-parse', 'HEAD')
+        self.spec('- `src/thing.py::missing_name`')
+        self.assertIn('missing inputs', self.check()['findings'][0])
+
     def test_missing_path_without_producer_bounces(self):
         self.spec('- `missing/path.py`')
         self.assertIn('missing inputs', self.check()['findings'][0])

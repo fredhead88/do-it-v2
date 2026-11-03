@@ -73,6 +73,20 @@ def missing_inputs(text, repo, base, tree):
         paths = list(dict.fromkeys(p.rstrip('.,:') for p in paths if
                                  '/' in p and not any(char in p for char in '*{}=') and
                                  not p.startswith(('http', '/')) and not re.search(r'\s', p)))
+        # `path::symbol`, `ref:path` (master:docs/x.md) and bare commit shas are spec prose, not Git
+        # inputs: strip the ref, keep the path, check the symbol in that file (2026-11-03: five
+        # specs bounced three times each on these forms).
+        cleaned, extra_symbols = [], []
+        for path in paths:
+            if '::' in path:
+                path, _, symbol = path.partition('::')
+                if re.fullmatch(r'[A-Za-z_][\w.]*', symbol):
+                    extra_symbols.append(symbol)
+            if re.match(r'^[\w.-]+:(?!//)[^\s]*/', path):
+                path = path.split(':', 1)[1]
+            if not re.fullmatch(r'[0-9a-f]{7,40}', path):
+                cleaned.append(path)
+        paths = list(dict.fromkeys(cleaned))
         resolved = []
         for path in paths:
             package = '/'.join(path.split('/')[:2]) if path.startswith('@') else path.split('/')[0]
@@ -90,8 +104,11 @@ def missing_inputs(text, repo, base, tree):
         symbols = re.findall(r'\b(?:function|def|class|const)\s+([A-Za-z_$][\w$]*)', line)
         symbols += re.findall(r'\b([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\(', line)
         symbols += re.findall(r'`([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)`(?=\s*(?:from|in|\())', line)
+        symbols += extra_symbols
         for symbol in dict.fromkeys(symbols):
             name = symbol.rsplit('.', 1)[-1]
+            if re.fullmatch(r'[0-9a-f]{7,40}', name):
+                continue
             targets = resolved or [p for p in tree if p.endswith(('.py', '.ts', '.tsx', '.js', '.jsx'))]
             # git grep accepts paths only after --; no spec text becomes options.
             found = subprocess.run(['git', '-C', str(repo), 'grep', '-q', '-w', '-F', '-e', name,
