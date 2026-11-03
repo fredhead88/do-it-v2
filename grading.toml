@@ -12,6 +12,9 @@
 # never a shared, hardcoded path (the checkout differs per `--project`).
 
 [project.albert-scott]
+# Thinker 2026-11-03 13:05Z: run-checks runs base+candidate; a 49-file workflow-guard chain
+# (L-spec-1980 AC8) exceeded the 30-min default twice. CI pg-parity alone takes ~45 min.
+runner_wall_cap_s = 3600
 # Readiness couples these shared append-only registries by named tests only.
 shared_append_only_registries = [
   "api/alembic_supabase/branch_isolation.json",
