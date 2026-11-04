@@ -275,6 +275,129 @@ def refresh(repo, branch, main, spec, *, events=None, now=None):
                 git(repo, 'worktree', 'prune')
 
 
+def recut(repo, branch, main, spec):
+    """Replay non-merge patches on main, preserving the old tip before adoption."""
+    import re
+    import build_runner
+    import merge_gate
+    if not re.fullmatch(r'L-spec-\d+', spec):
+        raise ValueError('invalid recut spec')
+    repo = Path(repo).resolve()
+    merge_gate.begin_run(repo)
+    with lock(repo, spec) as reservation:
+        events = fold.read_events(use_cache=False)
+        project = next((e['project'] for e in reversed(events) if e.get('subject') == spec and e.get('project')), repo.name)
+        def skip(reason):
+            rework(spec, branch, events, paths=[], reason=reason)
+            return dict(state='skipped', reason=reason)
+        ref = branch if branch.startswith('refs/heads/') else 'refs/heads/' + branch
+        if git(repo, 'check-ref-format', ref, check=False).returncode:
+            return skip('invalid-branch')
+        if ref in {'refs/heads/master', 'refs/heads/main'} or ref == value(repo, 'rev-parse', '--symbolic-full-name', '--end-of-options', main):
+            return skip('main-branch')
+        before = value(repo, 'rev-parse', '--verify', ref + '^{commit}')
+        base = value(repo, 'rev-parse', '--verify', '--end-of-options', main + '^{commit}')
+        if git(repo, 'merge-base', '--is-ancestor', base, before, check=False).returncode == 0:
+            return skip('already-current')
+        text = (fold.ROOT / 'content' / (spec + '.md')).read_text()
+        protected = ('api/alembic_supabase/versions/*', '*genesis_schema_fingerprint.txt',
+                     '*branch_isolation.json', '*.secrets.baseline')
+        if any(fnmatch.fnmatch(p, g) or fnmatch.fnmatch(g, p) for p in merge_gate.grant_from_text(text) for g in protected):
+            return skip('migration-or-fingerprint')
+        holding = holders(repo, ref)
+        main_tree = Path(value(repo, 'rev-parse', '--path-format=absolute', '--git-common-dir')).parent.resolve()
+        if open_builder(events, spec):
+            return skip('open-builder-dispatch')
+        if any(t.resolve() == main_tree for t in holding) or len(holding) > 1:
+            return skip('integrator-holds-branch')
+        if any(dirty(t) for t in holding):
+            return skip('uncommitted-state')
+        day = str(datetime.now(timezone.utc).date())
+        limit = config().get('merge_queue', {}).get('branch_refresh_per_day', 3)
+        if type(limit) is not int or limit < 1:
+            return skip('invalid-daily-limit')
+        if sum(e.get('type') == 'branch-refresh-skipped' and e.get('reason') == 'attempt-started'
+               and e.get('subject') == spec and e.get('day', str(utc_day(e['ts']))) == day for e in events) >= limit:
+            return skip('daily-limit')
+        commits = value(repo, 'rev-list', '--reverse', '--topo-order', '--no-merges', base + '..' + before).splitlines()
+        merges = int(value(repo, 'rev-list', '--count', '--merges', base + '..' + before))
+        emit('branch-refresh-skipped', spec, reason='attempt-started', project=project, day=day)
+        with tempfile.TemporaryDirectory(prefix='branch-recut-', dir='/var/tmp') as name:
+            tree, auxiliary = Path(name) / 'tree', Path(name) / 'checks'
+            auxiliary.mkdir()
+            tag = None
+            try:
+                git(repo, 'worktree', 'add', '--detach', str(tree), base)
+                for commit in commits:
+                    if git(tree, 'diff-tree', '--quiet', '--root', commit, check=False).returncode == 0:
+                        continue
+                    result = git(tree, '-c', 'user.name=Recheck Bot', '-c', 'user.email=fredhead88@users.noreply.github.com',
+                                 'cherry-pick', '--empty=drop', commit, check=False)
+                    if result.returncode:
+                        paths = git(tree, 'diff', '--name-only', '--diff-filter=U', '-z').stdout.rstrip('\0').split('\0')
+                        git(tree, 'cherry-pick', '--abort', check=False)
+                        if paths == ['']:
+                            return skip('cherry-pick-undetermined')
+                        rework(spec, branch, events, paths=paths)
+                        return dict(state='conflict', paths=paths)
+                after = value(tree, 'rev-parse', 'HEAD')
+                count = int(value(tree, 'rev-list', '--count', base + '..HEAD'))
+                try:
+                    failures, reports = check_tree(spec, project, repo, tree, auxiliary, text)
+                except (OSError, ValueError, RuntimeError, subprocess.SubprocessError, build_runner.Undetermined):
+                    failures, reports = ['checks-undetermined'], []
+                if (value(tree, 'rev-parse', 'HEAD') != after
+                        or git(tree, 'diff', '--quiet', after, check=False).returncode):
+                    failures.append('checks-modified-tree')
+                if failures:
+                    rework(spec, branch, events, paths=[], failing_ids=failures)
+                    return dict(state='checks-failed', failing_ids=failures, reports=reports)
+                if (value(repo, 'rev-parse', ref) != before or value(repo, 'rev-parse', main) != base
+                        or open_builder(fold.read_events(use_cache=False), spec) or holders(repo, ref) != holding
+                        or any(dirty(t) or value(t, 'rev-parse', 'HEAD') != before for t in holding)):
+                    return skip('adoption-state-changed')
+                tag, suffix = 'rework/' + spec.removeprefix('L-spec-') + '-prev', 1
+                stem = tag
+                while git(repo, 'show-ref', '--verify', '--quiet', 'refs/tags/' + tag, check=False).returncode == 0:
+                    suffix += 1
+                    tag = stem + '-' + str(suffix)
+                git(repo, 'update-ref', 'refs/tags/' + tag, before, '')
+                try:
+                    if holding:
+                        git(holding[0], 'reset', '--hard', after)
+                    else:
+                        git(repo, 'update-ref', ref, after, before)
+                except subprocess.SubprocessError:
+                    git(repo, 'update-ref', '-d', 'refs/tags/' + tag, before)
+                    raise
+                try:
+                    bundle = build_runner.run(spec, after)
+                    fcntl.flock(reservation, fcntl.LOCK_UN)
+                    gate = regate(repo, branch, main, spec)
+                except (OSError, ValueError, RuntimeError, subprocess.SubprocessError, build_runner.Undetermined):
+                    gate = 1
+                if gate:
+                    fcntl.flock(reservation, fcntl.LOCK_EX)
+                    if (value(repo, 'rev-parse', ref) == after and holders(repo, ref) == holding
+                            and not any(dirty(t) or value(t, 'rev-parse', 'HEAD') != after for t in holding)):
+                        if holding:
+                            git(holding[0], 'reset', '--hard', before)
+                        else:
+                            git(repo, 'update-ref', ref, before, after)
+                        git(repo, 'update-ref', '-d', 'refs/tags/' + tag, before)
+                    rework(spec, branch, fold.read_events(use_cache=False), paths=[], failing_ids=['merge-gate'])
+                    return dict(state='checks-failed', failing_ids=['merge-gate'])
+                facts = dict(from_sha=before, to_sha=after, tag=tag, commit_count=count,
+                             skipped_merges=merges, dropped_empty=len(commits) - count)
+                emit('branch-recut', spec, spec=spec, project=project, **facts)
+                return dict(state='recut', bundle=str(bundle), gate=gate, reports=reports, **facts)
+            finally:
+                if tree.exists():
+                    git(tree, 'cherry-pick', '--abort', check=False)
+                    git(repo, 'worktree', 'remove', '--force', str(tree))
+                git(repo, 'worktree', 'prune')
+
+
 def before_refusal(runtime, a, reason):
     """Attempt refresh, but leave an authoritative stale packet refused."""
     if reason not in REFUSALS or getattr(a, 'role', 'builder') != 'builder':
@@ -301,9 +424,18 @@ def dispatch_preflight(runtime, a, cwd, events, fail):
     outcome = before_refusal(runtime, a, 'branch-not-descendant')
     if outcome and outcome['state'] == 'refreshed':
         fail('branch-refreshed: branch checked, adopted and re-gated; no builder needed', reason='branch-refreshed')
+    try:
+        import packet_base
+        repo = runtime.ROOT / 'repos' / a.project
+        main = packet_base._effective_branch(repo, a.project, runtime.spec_path(a.subject), a.subject)
+        outcome = recut(repo, a.subject.lower(), main, a.subject)
+    except (OSError, ValueError, subprocess.SubprocessError, __import__('merge_gate').Undetermined):
+        outcome = None
+    if outcome and outcome['state'] == 'recut':
+        fail('branch-recut: branch checked, adopted and re-gated; no builder needed', reason='branch-recut')
     if getattr(runtime, 'pending_conflict_rework', lambda *_: False)(events, a.subject):
         return False
-    fail('branch-not-descendant: isolated refresh did not pass; preserve the branch for builder recovery',
+    fail('branch-not-descendant: isolated refresh/recut did not pass; preserve the branch for builder recovery',
          reason='branch-not-descendant')
 
 

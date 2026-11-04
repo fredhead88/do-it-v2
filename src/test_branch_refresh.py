@@ -227,7 +227,8 @@ class TestAC4(Fixture):
             with self.assertRaisesRegex(Refused, 'branch-refreshed'):
                 db.branch_preflight(runtime, a, self.tree, self.events, fail)
         runtime.pending_conflict_rework = lambda *_: True
-        with patch('branch_refresh.before_refusal', return_value={'state': 'conflict'}):
+        with patch('branch_refresh.before_refusal', return_value={'state': 'conflict'}), \
+             patch('branch_refresh.recut', return_value={'state': 'conflict'}):
             db.branch_preflight(runtime, a, self.tree, self.events, fail)
         self.signed('AC4', reasons=sorted(br.REFUSALS), pin_preserved=True, current_packet_admitted=True,
                     no_builder_on_refresh=True, authorized_recovery_preserved=True)
@@ -294,6 +295,197 @@ class TestAC7(Fixture):
             self.assertEqual(nextstep.main([]), 0)
         self.assertIn(br.refresh_note([done, event], self.sid), captured.getvalue())
         self.signed('AC7', note=captured.getvalue(), count=row)
+
+
+class RecutFixture(Fixture):
+    def setUp(self):
+        super().setUp()
+        (self.tree / 'second.txt').write_text('second\n')
+        self.commit('second feature', self.tree)
+        self.start = self.git('rev-parse', self.branch)
+        self.spec.write_text(self.spec.read_text().replace('- feature.py', '- feature.py\n- second.txt\n- side.txt'))
+
+    def run_recut(self):
+        return br.recut(self.repo, self.branch, 'main', self.sid)
+
+    def snapshots(self):
+        return dict(branch=self.git('rev-parse', self.branch), head=self.git('rev-parse', 'HEAD', cwd=self.tree),
+                    status=self.git('status', '--porcelain', cwd=self.tree),
+                    diff=self.git('diff', 'HEAD', cwd=self.tree), tags=self.git('show-ref', '--tags')
+                    if self.git('tag', '--list') else '', worktrees=self.git('worktree', 'list', '--porcelain'))
+
+    def refused(self, expected):
+        before = self.snapshots()
+        result = self.run_recut()
+        self.assertEqual(result['state'], expected)
+        self.assertEqual(self.snapshots(), before)
+        self.invariant(True)
+        self.signed('recut-' + self._testMethodName, before=before, after=self.snapshots(),
+                    result=result, event=self.read()[-1], cleanup=True)
+        return result
+
+
+class TestRecut(RecutFixture):
+    def test_clean_two_commit_dispatch_and_fresh_ledger(self):
+        import build_runner
+        import dispatch_builder
+        self.bundle_patch.stop()
+        (self.root / 'events').mkdir(exist_ok=True)
+        event = dict(self.events[0], v=1, ready_sha=self.start, base_sha=self.old)
+        (self.root / 'events/L-builder-fixture.jsonl').write_text(json.dumps(event) + '\n')
+        (self.root / 'runner').mkdir()
+        (self.root / 'runner-backing').mkdir()
+        runtime = SimpleNamespace(ROOT=self.root, spec_path=lambda _: self.spec,
+                                  pending_conflict_rework=lambda *_: False)
+        a = SimpleNamespace(project='do-it-v2', subject=self.sid, role='builder', effective_base_sha=self.main)
+        def fail(message, **facts):
+            raise RuntimeError(facts['reason'])
+        with patch('branch_refresh.git', wraps=br.git) as trace, \
+             patch('packet_base._effective_branch', return_value='main'), \
+             patch('grading_env._project_checkout', return_value=self.repo), \
+             patch('build_runner.SHORT_TMP_ROOT', self.root), \
+             patch('build_runner.SHORT_TMP_BACKING_ROOT', self.root / 'runner-backing'), \
+             patch('scratch.sub', side_effect=lambda name: self.root / name), \
+             patch('build_runner.run', wraps=build_runner.run) as bundle, \
+             patch('branch_refresh.regate', side_effect=self.real_gate) as gate:
+            with self.assertRaisesRegex(RuntimeError, 'branch-recut'):
+                dispatch_builder.branch_preflight(runtime, a, self.tree, self.events, fail)
+        bundle.assert_called_once()
+        gate.assert_called_once()
+        scratch_adds = [call.args for call in trace.call_args_list if 'worktree' in call.args and 'add' in call.args]
+        self.assertTrue(any(str(args[-2]).startswith('/var/tmp/branch-recut-') for args in scratch_adds))
+        rows = json.loads(subprocess.check_output([sys.executable, '-c',
+            'import json, fold; print(json.dumps(fold.read_events(use_cache=False)))'],
+            env=dict(os.environ, PYTHONPATH=str(Path(__file__).parent.resolve())), text=True))
+        recut = next(e for e in rows if e['type'] == 'branch-recut')
+        after = self.git('rev-parse', self.branch)
+        self.assertEqual((recut['spec'], recut['from_sha'], recut['to_sha'], recut['tag'], recut['commit_count']),
+                         (self.sid, self.start, after, 'rework/9774-prev', 2))
+        self.assertEqual(recut['actor'], 'executor')
+        self.assertEqual(self.git('rev-parse', recut['tag']), self.start)
+        self.assertEqual(self.git('merge-base', 'main', after), self.main)
+        self.assertEqual(self.git('rev-parse', 'HEAD', cwd=self.tree), after)
+        self.assertEqual(self.git('status', '--porcelain', cwd=self.tree), '')
+        self.assertEqual((self.tree / 'feature.py').read_text(), 'feature\n')
+        self.assertEqual((self.tree / 'second.txt').read_text(), 'second\n')
+        self.assertTrue(any(e['type'] == 'merge-gate-clean' for e in rows))
+        self.assertFalse(any(e['type'] == 'conflict-rework' for e in rows))
+        self.invariant()
+        self.signed('recut-clean-two-commit-routing-fresh-ledger', event=recut, snapshots=self.snapshots(),
+                    bundle=True, fresh_gate=True, cleanup=True, main_unchanged=True)
+
+    def test_merge_empty_and_occupied_tags(self):
+        self.git('switch', '-qc', 'side', cwd=self.tree)
+        (self.tree / 'side.txt').write_text('side\n')
+        self.commit('side feature', self.tree)
+        self.git('switch', self.branch, cwd=self.tree)
+        self.git('merge', '--no-ff', '-qm', 'merge side', 'side', cwd=self.tree)
+        self.git('commit', '--allow-empty', '-qm', 'empty', cwd=self.tree)
+        self.start = self.git('rev-parse', self.branch)
+        for tag in ('rework/9774-prev', 'rework/9774-prev-2'):
+            self.git('tag', tag, self.old)
+        result = self.run_recut()
+        self.assertEqual(result['state'], 'recut')
+        self.assertEqual(result['commit_count'], 3)
+        self.assertEqual(result['tag'], 'rework/9774-prev-3')
+        self.assertEqual((result['skipped_merges'], result['dropped_empty']), (1, 1))
+        for tag in ('rework/9774-prev', 'rework/9774-prev-2'):
+            self.assertEqual(self.git('rev-parse', tag), self.old)
+        self.assertEqual(self.git('rev-parse', result['tag']), self.start)
+        self.assertEqual(self.git('rev-list', '--count', '--merges', 'main..' + self.branch), '0')
+        self.assertEqual((self.tree / 'side.txt').read_text(), 'side\n')
+        self.invariant()
+        self.signed('recut-merge-empty-occupied-tags', result=result, snapshots=self.snapshots(), cleanup=True)
+
+    def test_patch_already_on_main_is_dropped(self):
+        self.git('cherry-pick', self.start)
+        self.main = self.git('rev-parse', 'HEAD')
+        self.snapshot = self.git('rev-parse', 'HEAD', 'HEAD^{tree}')
+        result = self.run_recut()
+        self.assertEqual((result['state'], result['commit_count'], result['dropped_empty']), ('recut', 1, 1))
+        self.assertEqual((self.tree / 'second.txt').read_text(), 'second\n')
+        self.invariant()
+        self.signed('recut-redundant-patch', result=result, cleanup=True)
+
+    def test_verification_and_guard_failures(self):
+        for guard in (False, True):
+            with self.subTest(guard=guard):
+                self.spec.write_text('Writes:\n- feature.py\n- second.txt\n\n## Verification\n```bash\n' +
+                                     ('true' if guard else 'false') + '\n```\n')
+                with patch('branch_refresh.guard_commands', return_value=[('recut-guard', 'false' if guard else 'true')]):
+                    result = self.refused('checks-failed')
+                self.assertIn('recut-guard' if guard else 'verification-step-1', result['failing_ids'])
+
+    def test_fresh_gate_failure_restores_old_tip_and_tag_set(self):
+        with patch('branch_refresh.regate', return_value=1):
+            result = self.refused('checks-failed')
+        self.assertIn('merge-gate', result['failing_ids'])
+
+    def test_no_fallback_in_other_refresh_callers(self):
+        runtime = SimpleNamespace(ROOT=self.root, spec_path=lambda _: self.spec)
+        a = SimpleNamespace(project='do-it-v2', subject=self.sid, role='builder')
+        with patch('packet._effective_base', return_value=self.main), patch('branch_refresh.recut') as recut:
+            for reason in ('stale-base', 'pinned-base-mismatch'):
+                br.before_refusal(runtime, a, reason)
+            br.gate_refresh(self.repo, self.branch, 'main', self.sid)
+            br.dispatch_preflight(runtime, a, self.tree, [], self.fail)
+            recut.assert_not_called()
+
+
+class TestRecutConflict(RecutFixture):
+    def test_conflict_preserves_state_and_names_paths_in_recovery(self):
+        (self.tree / 'base').write_text('feature conflict\n')
+        self.commit('conflicting feature', self.tree)
+        self.start = self.git('rev-parse', self.branch)
+        self.git('tag', 'rework/9774-prev', self.old)
+        result = self.refused('conflict')
+        self.assertEqual(result['paths'], ['base'])
+        event = self.read()[-1]
+        self.assertEqual((event['type'], event['paths']), ('conflict-rework', ['base']))
+
+
+class TestRecutDirty(RecutFixture):
+    def test_tracked_edits(self):
+        (self.tree / 'second.txt').write_text('preserve tracked\n')
+        self.assertEqual(self.refused('skipped')['reason'], 'uncommitted-state')
+        self.assertEqual((self.tree / 'second.txt').read_text(), 'preserve tracked\n')
+
+    def test_untracked_files(self):
+        (self.tree / 'untracked').write_text('preserve untracked\n')
+        self.assertEqual(self.refused('skipped')['reason'], 'uncommitted-state')
+        self.assertEqual((self.tree / 'untracked').read_text(), 'preserve untracked\n')
+
+    def test_existing_operations(self):
+        for name in ('MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'rebase-merge', 'rebase-apply'):
+            with self.subTest(operation=name):
+                path = Path(self.git('rev-parse', '--path-format=absolute', '--git-path', name, cwd=self.tree))
+                if name.startswith('rebase-'):
+                    path.mkdir()
+                else:
+                    path.write_text(self.start + '\n')
+                self.assertEqual(self.refused('skipped')['reason'], 'uncommitted-state')
+                self.assertTrue(path.exists())
+                self.signed('recut-existing-operation', operation=name, preserved=True, snapshots=self.snapshots())
+                if path.is_dir():
+                    path.rmdir()
+                else:
+                    self.assertEqual(path.read_text(), self.start + '\n')
+                    path.unlink()
+
+    def test_dirtiness_appearing_during_checks(self):
+        check_tree = br.check_tree
+        def checks(*args):
+            result = check_tree(*args)
+            (self.tree / 'second.txt').write_text('arrived during checks\n')
+            return result
+        with patch('branch_refresh.check_tree', side_effect=checks):
+            result = self.run_recut()
+        self.assertEqual((result['state'], result['reason']), ('skipped', 'adoption-state-changed'))
+        self.assertEqual((self.tree / 'second.txt').read_text(), 'arrived during checks\n')
+        self.assertEqual(self.git('tag', '--list'), '')
+        self.invariant(True)
+        self.assertEqual(self.read()[-1]['type'], 'conflict-rework')
+        self.signed('recut-post-check-dirty', result=result, snapshots=self.snapshots(), cleanup=True)
 
 
 class TestAC8(unittest.TestCase):
