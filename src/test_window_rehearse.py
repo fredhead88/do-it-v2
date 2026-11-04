@@ -1,5 +1,6 @@
 """Real Git rehearsal trees and ledger receipts; all CI seams are local doubles."""
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -203,7 +204,11 @@ class Rehearsal(unittest.TestCase):
         self.assertIn('ATTRIBUTED B ' + NODE, output)
         self.assertIn('UNRESOLVED ' + UNKNOWN, output)
         rows = fold.read_events()
-        self.assertEqual({e['type'] for e in rows}, {'window-tree-verified', 'window-rehearsed'})
+        self.assertEqual({e['type'] for e in rows}, {'window-tree-verified', 'window-rehearsed', 'window-flake'})
+        event = next(e for e in rows if e['type'] == 'window-rehearsed')
+        self.assertEqual(event['state'], 'red')
+        self.assertEqual(event['flakes'], [FLAKE])
+        self.assertEqual(event['attribution']['proven'], {'B': [NODE]})
         self.assertFalse(next(e['green'] for e in rows if e['type'] == 'window-tree-verified'))
         self.assertEqual(self.git('rev-parse', 'master'), self.base)
 
@@ -325,12 +330,93 @@ class Rehearsal(unittest.TestCase):
         self.assertEqual((code, len(calls)), (0, 1))
         self.assertEqual(self.git('rev-parse', 'master'), self.base)
 
-    def test_all_rerun_passes_are_flakes_but_never_a_green_full_ci_receipt(self):
+    def test_all_rerun_passes_are_flakes_with_a_green_tree_receipt(self):
         code, _, retries, attrs, output = self.rehearse(dict(state='red', nodes=[FLAKE], url='', doc={}),
                                                       probe={'states': {FLAKE: 'green'}})
-        self.assertEqual((code, len(retries), attrs), (1, 1, []))
+        self.assertEqual((code, len(retries), attrs), (0, 1, []))
         self.assertIn('FLAKE ' + FLAKE, output)
-        self.assertFalse(next(e['green'] for e in fold.read_events() if e['type'] == 'window-tree-verified'))
+        event = next(e for e in fold.read_events() if e['type'] == 'window-rehearsed')
+        self.assertEqual((event['state'], event['flake_only'], event['flakes']), ('green', True, [FLAKE]))
+        receipt = next(e for e in fold.read_events() if e['type'] == 'window-tree-verified')
+        self.assertTrue(receipt['green'])
+        self.assertEqual(receipt['flakes'], [FLAKE])
+
+    def flake_receipts(self, criterion, code, output, ident='rh-fixture'):
+        # A new process reads the ledger written by the production ev/append path.
+        reader = subprocess.run(['python3', '-c',
+            'import json,fold,sys; print(json.dumps([e for e in fold.read_events(use_cache=False) '
+            'if e.get("window",e.get("subject")) == sys.argv[1]]))', ident],
+            env=dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parent)),
+            capture_output=True, text=True, check=True)
+        rows = json.loads(reader.stdout)
+        event = next(e for e in rows if e['type'] == 'window-rehearsed')
+        records = [e for e in rows if e['type'] == 'window-flake']
+        self.assertEqual(sorted(e['node'] for e in records), event['flakes'])
+        for record in records:
+            self.assertEqual(record['candidate'], event['sha'])
+            self.assertEqual(record['project'], 'albert-scott')
+            self.assertEqual(record['isolated_state'], 'green')
+            self.assertEqual(record['evidence']['snapshot'], event['sha'])
+            self.assertEqual(record['evidence']['selector'], record['node'])
+            self.assertEqual(record['evidence']['report'], 'window_attribution.probe')
+        body = dict(exit_code=code, output=output, receipts=rows)
+        raw = json.dumps(body, sort_keys=True)
+        print(json.dumps(dict(url='scratch://rehearsal/' + criterion, status=200,
+            body_sha256=hashlib.sha256(raw.encode()).hexdigest(), body_excerpt=body)))
+        return rows
+
+    def test_flake_only_rehearsal_is_green(self):
+        ids = sorted([FLAKE, NODE])
+        code, calls, retries, attrs, output = self.rehearse(
+            dict(state='red', nodes=ids, url='', doc={}),
+            probe={'states': dict.fromkeys(ids, 'green'), 'url': 'scratch://exact-tree'})
+        self.assertEqual(code, 0)
+        self.assertEqual(attrs, [])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(retries[0].args[1:], (calls[0].args[1], ids))
+        self.assertIn('green (flakes: 2)', output)
+        rows = self.flake_receipts('AC1', code, output)
+        event = next(e for e in rows if e['type'] == 'window-rehearsed')
+        self.assertEqual((event['state'], event['flake_only'], event['flakes']), ('green', True, ids))
+        receipt = next(e for e in rows if e['type'] == 'window-tree-verified')
+        self.assertEqual(receipt['sha'], calls[0].args[1])
+        self.assertEqual(receipt['tree'], self.git('rev-parse', receipt['sha'] + '^{tree}'))
+        self.assertEqual(receipt['flakes'], ids)
+        self.assertEqual(receipt['required'], CHECKS)
+        self.assertTrue(wg.covers(wg.prior_result(rows, receipt['tree']), CHECKS))
+        self.assertEqual(self.rehearse()[1], [])
+
+    def test_mixed_and_unresolved_flakes_persist_without_promotion(self):
+        for state in ('red', 'undetermined', 'absent', None):
+            with self.subTest(state=state):
+                # Each subcase gets a separate ledger, including the fresh reader.
+                with patch.dict(os.environ, DOIT_GATE_LEDGER_FILE='L-executor-' + str(state) + '.jsonl'):
+                    ident = 'rh-' + str(state)
+                    states = {FLAKE: 'green'}
+                    if state is not None:
+                        states[NODE] = state
+                    code, calls, _, attrs, output = self.rehearse(
+                        dict(state='red', nodes=[FLAKE, NODE], url='', doc={}),
+                        probe={'states': states}, args=self.args(ident))
+                self.assertEqual(code, 1)
+                self.assertEqual(bool(attrs), state == 'red')
+                reader_rows = self.flake_receipts('AC2/' + str(state), code, output, ident)
+                event = next(e for e in reader_rows if e['type'] == 'window-rehearsed')
+                self.assertEqual((event['state'], event['flakes']), ('red', [FLAKE]))
+                self.assertFalse(event.get('flake_only', False))
+                records = [e for e in reader_rows if e['type'] == 'window-flake']
+                self.assertEqual([e['node'] for e in records], [FLAKE])
+                self.assertEqual(records[0]['candidate'], calls[0].args[1])
+
+    def test_unnamed_or_unavailable_red_evidence_cannot_be_promoted(self):
+        for nodes, unavailable in (([], []), ([FLAKE], ['logs unavailable'])):
+            failures = dict.fromkeys(('pytest', 'pg-parity', 'vitest', 'suite-error'), set())
+            failures.update(pytest=set(nodes), undetermined=unavailable)
+            with patch.object(wg, 'candidate_failures', return_value=failures):
+                code, _, retries, _, _ = self.rehearse(dict(state='red', nodes=nodes, url='', doc={}),
+                    probe={'states': {FLAKE: 'green'}})
+            self.assertEqual(code, 1)
+            self.assertEqual(retries, [])
 
     def test_kernel_slot_is_released_when_rehearsal_process_dies(self):
         import select

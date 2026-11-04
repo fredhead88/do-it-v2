@@ -190,16 +190,26 @@ def _run(ident, project, specs, on, main):
             state = result['state']
             if state not in ('green', 'red', 'undetermined'):
                 raise ValueError('invalid rehearsal verdict')
-            if state != 'undetermined' and not reused:
-                gate.ev('window-tree-verified', ident, window=ident, sha=candidate, tree=tree,
-                        green=state == 'green', required=required, new_ids=result.get('nodes', []),
-                        rehearsal=True, base_sha=base, project=project)
             diagnosis = {}
             if state == 'red':
                 diagnosis = diagnose(repo, candidate, base, entries, result, main)
+                gate.record_flakes(ident, project, candidate, diagnosis['flakes'],
+                                   diagnosis.get('retry', {}), 'rehearsal')
+                if (diagnosis['ids'] and diagnosis['flakes'] == diagnosis['ids']
+                        and not diagnosis['unresolved']):
+                    state = 'green'
+                    diagnosis['flake_only'] = True
+            elif reused and prior.get('flakes'):
+                diagnosis = dict(flakes=prior['flakes'], flake_only=prior.get('flake_only', False))
+            if state != 'undetermined' and not reused:
+                gate.ev('window-tree-verified', ident, window=ident, sha=candidate, tree=tree,
+                        green=state == 'green', required=required, new_ids=result.get('nodes', []),
+                        rehearsal=True, base_sha=base, project=project,
+                        **({k: diagnosis[k] for k in ('flakes', 'flake_only') if k in diagnosis}))
             emit(state, sha=candidate, tree=tree, required=required, reused=reused,
                  run_url=result.get('url', ''), **diagnosis)
-            print(f'REHEARSED {ident} {state} base={base} candidate={candidate} tree={tree}')
+            verdict = state + (f" (flakes: {len(diagnosis['flakes'])})" if diagnosis.get('flake_only') else '')
+            print(f'REHEARSED {ident} {verdict} base={base} candidate={candidate} tree={tree}')
             return {'green': 0, 'red': 1, 'undetermined': 2}[state]
         except (ValueError, OSError, RuntimeError, subprocess.SubprocessError) as exc:
             # Keep diagnostics bounded and credential-free even for external tools.

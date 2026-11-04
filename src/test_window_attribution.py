@@ -304,7 +304,8 @@ class Gate(unittest.TestCase):
         code, full, probes, events = self.run_gate()
         self.assertEqual(code, 1)
         self.assertEqual(len(full), 2)
-        self.assertEqual(len(probes), 6)
+        self.assertEqual(len(probes), 7)  # exact candidate, then master/single probes
+        self.assertEqual(probes[0], full[0])
         self.assertEqual(self.git("rev-parse", "master"), full[-1])
         self.assertFalse(self.git("ls-tree", full[-1], "B"))
         drops = [e for e in events if e["type"] == "window-dropped"]
@@ -344,11 +345,40 @@ class Gate(unittest.TestCase):
         self.assertEqual(len(requeues), 3)
         self.assertTrue(all(e["nodes"] == [NODE] for e in requeues))
 
-    def test_red_remainder_stops_after_one_full_retry(self):
-        code, full, _, events = self.run_gate(remainder="red")
+    def test_flake_only_remainder_advances_after_one_full_retry(self):
+        code, full, probes, events = self.run_gate(remainder="red")
+        self.assertEqual(code, 1)
+        self.assertEqual(len(full), 2)
+        self.assertEqual(len(probes), 8)
+        self.assertEqual(probes[-1], full[-1])
+        self.assertEqual(self.git("rev-parse", "master"), full[-1])
+        self.assertFalse(self.git("ls-tree", full[-1], "B"))
+        verified = next(e for e in events if e["type"] == "window-verified")
+        self.assertEqual(verified["flakes"], [NODE])
+        self.assertEqual(verified["kept"], ["A", "C"])
+        flakes = [e for e in events if e["type"] == "window-flake"]
+        self.assertEqual([(e["candidate"], e["node"]) for e in flakes], [(full[-1], NODE)])
+        receipt = [e for e in events if e["type"] == "window-tree-verified"][-1]
+        self.assertEqual((receipt["sha"], receipt["green"], receipt["flakes"]),
+                         (full[-1], True, [NODE]))
+        self.assertFalse(any(e["type"] == "escalation-blocking" for e in events))
+
+    def test_reproduced_red_remainder_stops_after_one_full_retry(self):
+        # Removing one attributed member need not resolve every contributor.
+        # Leave B on the remainder so its exact-tree rerun reproduces the red.
+        plan = dict(base_sha=self.base, mode="single", drop={"C": [NODE]}, proven={"C": [NODE]},
+                    environment=[], unresolved=[])
+        with patch.object(self.wg, "targeted_attribution", return_value=plan) as attribute:
+            code, full, probes, events = self.run_gate(remainder="red")
         self.assertEqual(code, 2)
         self.assertEqual(len(full), 2)
+        self.assertEqual(probes, full)
+        self.assertEqual(attribute.call_count, 1)
         self.assertEqual(self.git("rev-parse", "master"), self.base)
+        self.assertFalse(any(e["type"] in ("window-verified", "window-flake") for e in events))
+        escalation = next(e for e in events if e["type"] == "escalation-blocking")
+        self.assertEqual(escalation["outcome"], "red")
+        self.assertEqual(escalation["nodes"], [NODE])
 
 
 if __name__ == "__main__":

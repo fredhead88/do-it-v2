@@ -3801,6 +3801,67 @@ def member_integration_checks():
               "AC4 hook: candidate tree shipped on cached member-verdict only when coverage holds, covered=%s" % covered)
 
 
+def flake_only_checks():
+    """Exact candidate reruns promote only named, entirely green failures."""
+    import window_attribution
+    ids = ['api/tests/test_x.py::test_a', 'api/tests/test_x.py::test_b']
+    for state in ('green', 'red', 'undetermined', None):
+        fx = Fx({'A': 'api/app/lib.py', 'B': 'other.txt'})
+        fx.run_n(1, 1, red(ids))
+        fx.run_n(2, 0, GREEN)
+        states = {ids[0]: 'green'}
+        if state is not None:
+            states[ids[1]] = state
+        with patch.object(window_attribution, 'probe', return_value=dict(states=states, url='scratch://exact-tree')) as probe:
+            rc = fx.go()
+        candidate = probe.call_args_list[0].args[1]
+        check(probe.call_args_list[0].args[2] == ids, 'C21 probe names every failing id')
+        check(candidate == fx.events('window-candidate')[0]['sha'], 'C21 probe uses failed exact candidate')
+        flakes = ids if state == 'green' else ids[:1]
+        records = fx.events('window-flake')
+        check([r['node'] for r in records] == flakes, 'C21 records only explicit green reruns')
+        check(all(r['candidate'] == candidate and r['evidence']['snapshot'] == candidate
+                  and r['evidence']['report'] == 'window_attribution.probe' for r in records),
+              'C21 records truthfully identify exact-tree probe')
+        if state == 'green':
+            event = fx.events('window-verified')[-1]
+            check(rc == 0 and fx.master() == candidate, 'C21 all-flake candidate reaches merge')
+            check(event['kept'] == ['A', 'B'] and not event['dropped'] and not fx.events('window-dropped'),
+                  'C21 flakes never drop members')
+            check(event.get('flakes') == ids, 'C21 merged window lists flakes')
+            receipt = fx.events('window-tree-verified')[-1]
+            check(receipt['green'] and receipt.get('flakes') == ids and
+                  window_gate.covers(receipt, [window_gate.PYTEST_CHECK, window_gate.PG_CHECK]),
+                  'C21 promoted tree receipt covers required checks')
+            check(len(fx.calls()) == 1, 'C21 no extra full CI retry')
+        else:
+            drops = fx.events('window-dropped')
+            check(rc == 1 and [e['subject'] for e in drops] == ['A'] and drops[0]['nodes'] == ids[1:],
+                  'C21 mixed red/unknown retains existing handling for remaining failure')
+            check(fx.master() != candidate and len(fx.calls()) == 2,
+                  'C21 mixed candidate cannot be promoted')
+            check(fx.events('window-verified')[-1].get('flakes') == flakes,
+                  'C21 partial window retains flake ids from earlier candidate')
+        body = dict(case=state, exit_code=rc, candidate=candidate, events=fx.events())
+        raw = json.dumps(body, sort_keys=True)
+        print(json.dumps(dict(url='scratch://window/AC3/' + str(state), status=200,
+            body_sha256=hashlib.sha256(raw.encode()).hexdigest(), body_excerpt=body)))
+
+    fx = Fx({'A': 'api/app/lib.py', 'B': 'other.txt'})
+    fx.run_n(1, 1, red(ids[1:]))
+    fx.run_n(2, 1, red(ids[:1]))
+    with patch.object(window_attribution, 'probe', side_effect=[
+            dict(states={ids[1]: 'red'}), dict(states={ids[0]: 'green'})]) as probe:
+        rc = fx.go()
+    check(rc == 1 and len(fx.calls()) == 2 and len(probe.call_args_list) == 2,
+          'C21 remainder flake-only verdict needs no third full CI run')
+    check(fx.master() == probe.call_args_list[1].args[1] != probe.call_args_list[0].args[1],
+          'C21 remainder probe verifies the rebuilt candidate')
+    check(fx.events('window-verified')[-1].get('flakes') == ids[:1] and
+          fx.events('window-verified')[-1]['kept'] == ['B'], 'C21 remainder ships with flake record')
+
+
+flake_only_checks()
 infra_checks()
 train_checks()
 rerun_checks()
