@@ -14,9 +14,8 @@ import time
 import unittest
 from unittest.mock import patch
 
-import build_runner
 import cpu_share
-import dispatch
+import test_slots
 
 HERE = pathlib.Path(__file__).resolve().parent
 PROBE = '''import json, os, pathlib, time
@@ -42,6 +41,10 @@ def autogroup():
 
 class CpuShareTests(unittest.TestCase):
     def setUp(self):
+        # Defer ledger readers until collection has established test isolation.
+        global build_runner, dispatch
+        import build_runner
+        import dispatch
         temp = tempfile.TemporaryDirectory(prefix='cpu-share-')
         self.addCleanup(temp.cleanup)
         self.top = pathlib.Path(temp.name)
@@ -81,10 +84,10 @@ class CpuShareTests(unittest.TestCase):
         for parent, expected in [('1', 1), ('16', 4), ('0', 4), ('-3', 4), ('abc', 4), ('', 4)]:
             self.assertEqual(cpu_share.workers(1, ncpu=8, parent=parent), expected)
         for others, expected in [(0, 4), (1, 2), (3, 1), (None, 4)]:
-            with patch.object(cpu_share, 'count', return_value=others):
+            with patch.object(test_slots, 'held_count', return_value=others):
                 self.assertEqual(cpu_share.share(self.root), expected)
             if others is not None:
-                with patch.object(cpu_share, 'count', return_value=others + 1):
+                with patch.object(test_slots, 'held_count', return_value=others):
                     with cpu_share.claim(self.root) as share:
                         self.assertEqual(share, expected)
                         self.assertEqual(cpu_share.share(self.root), expected)
@@ -229,6 +232,9 @@ class CpuShareTests(unittest.TestCase):
             # Linux rate-limits unprivileged autogroup writes per uid. Space
             # these real probes; a missing production write still fails them.
             if kwargs.get('lower'):
+                self.assertEqual(test_slots.held_count(self.root), 1)
+                self.assertEqual(kwargs['env']['DOIT_TEST_SLOT_ROOT'], str(self.root.resolve()))
+                self.assertNotEqual(kwargs['env']['DOIT_ROOT'], str(self.root))
                 time.sleep(.2)
             return process(argv, **kwargs)
         self.stack.enter_context(patch.object(runner, '_process', side_effect=paced))
@@ -252,9 +258,10 @@ class CpuShareTests(unittest.TestCase):
         before = os.getpriority(os.PRIO_PROCESS, 0), autogroup()
         children = []
         def prepare(*args):
+            self.assertEqual(test_slots.held_count(self.root), 0)
             if provision.call_count == 2:
                 children.append(self.child_claim())
-                self.assertEqual(cpu_share.count(self.root), 2)
+                self.assertEqual(cpu_share.count(self.root), 1)
             return {}
         provision.side_effect = prepare
         bundle = json.loads(build_runner.run('L-spec-9000').read_text())
@@ -269,6 +276,24 @@ class CpuShareTests(unittest.TestCase):
         with self.assertRaises(build_runner.Undetermined):
             build_runner.run('L-spec-9000', 'c' * 40)
         self.assertEqual(cpu_share.count(self.root), 0)
+        self.assertEqual(test_slots.held_count(self.root), 0)
+
+    def test_workers_follow_held_slots_not_claims(self):
+        with cpu_share.claim(self.root), cpu_share.claim(self.root):
+            self.assertEqual(cpu_share.share(self.root), 4)
+            with test_slots.acquire('builder', 1, root=self.root):
+                self.assertEqual(cpu_share.share(self.root), 4)
+                with test_slots.acquire('grader', 1, root=self.root):
+                    self.assertEqual(cpu_share.share(self.root), 2)
+                    self.assertEqual(cpu_share.launch_env({}, self.root)['CI_WORKERS'], '2')
+        self.assertEqual(test_slots.held_count(self.root), 0)
+
+    def test_grader_run_checks_role(self):
+        self.runner_fixture()
+        bundle = json.loads(build_runner.run('L-spec-9000', criteria={'AC1'}).read_text())
+        log = [json.loads(line) for line in (self.root / 'state/test-slots/queue.jsonl').read_text().splitlines()]
+        self.assertTrue(bundle['commands'])
+        self.assertEqual({row['role'] for row in log}, {'grader'})
 
     def test_AC4_direct_nine_argument_run_tree(self):
         commands, _, tails = self.runner_fixture()

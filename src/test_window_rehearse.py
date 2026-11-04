@@ -91,7 +91,15 @@ class Rehearsal(unittest.TestCase):
     def rehearse(self, verdict=None, *, probe=None, attribute=None, args=None):
         verdict = verdict or dict(state='green', nodes=[], url='', doc={})
         output = io.StringIO()
-        with patch.object(wg, 'verify', return_value=verdict) as verify, \
+        def verify_session(*unused):
+            import test_slots
+            self.assertEqual(test_slots.held_count(self.root), 1)
+            records = [json.loads(line) for line in
+                       (self.root / 'state/test-slots/queue.jsonl').read_text().splitlines()]
+            self.assertEqual(records[-1]['role'], 'rehearsal')
+            self.assertEqual(records[-1]['event'], 'acquired')
+            return verdict
+        with patch.object(wg, 'verify', side_effect=verify_session) as verify, \
              patch.object(wg, 'escalate', side_effect=AssertionError('rehearsal escalated')), \
              patch.object(wg, 'base_red_snapshot', side_effect=AssertionError('rehearsal base dispatch')), \
              patch.object(wg, 'base_pg', side_effect=AssertionError('rehearsal base PG dispatch')), \
@@ -99,6 +107,8 @@ class Rehearsal(unittest.TestCase):
              patch.object(wg, 'targeted_attribution', return_value=attribute or {}) as attribution, \
              contextlib.redirect_stdout(output):
             code = wg.main_(args or self.args())
+        import test_slots
+        self.assertEqual(test_slots.held_count(self.root), 0)
         return code, verify.call_args_list, retry.call_args_list, attribution.call_args_list, output.getvalue()
 
     def test_identical_tree_reuses_all_checks_and_skips_base_ci_after_master_reaches_on(self):

@@ -22,6 +22,7 @@ import time
 import base_red
 import checks
 import cpu_share
+import test_slots
 import fold
 import evidence_revision
 import grader_view
@@ -447,7 +448,13 @@ def _run_tree(spec, sha, repo, row, commands, tail_dir, offset, tail_limit, dead
             env["DOIT_RUNNER_STEP"] = "0"
             executable, parts = runner_evidence.shell(command, details, baseline)
             started = time.monotonic()
-            code, output = _process(["/bin/bash", "-c", executable], env=env, deadline=deadline, cwd=tree, lower=True)
+            # Provisioning and evidence publication do not occupy test capacity.
+            # Use the actual ledger, not the clone's isolated DOIT_ROOT.
+            with test_slots.acquire(test_slots.current_role(), max(0, deadline - time.monotonic()),
+                                    root=fold.ROOT, spec=spec):
+                session_env = cpu_share.launch_env(env, fold.ROOT)
+                code, output = _process(["/bin/bash", "-c", executable], env=session_env,
+                                        deadline=deadline, cwd=tree, lower=True)
             output = runner_evidence.capture(details, parts, output)
             if len(parts) == 1 and not (details / "0.status").exists():
                 (details / "0.status").write_text(f"{code}\t{tree}\t0\n")
@@ -577,7 +584,7 @@ def run(spec, requested_sha=None, criteria=None):
         tails = path.with_suffix("")
         tails.mkdir(parents=True)
         limit = min(TAIL_CAP, DIRECTORY_CAP // (2 * len(commands)))
-        resources.enter_context(cpu_share.claim(fold.ROOT))
+        resources.enter_context(test_slots.for_role('grader' if criteria is not None else 'builder'))
         tip, tip_logs, _, rewrites, summary = _run_tree(
             spec, sha, repo, row, commands, tails, 0, limit, deadline)
         try:

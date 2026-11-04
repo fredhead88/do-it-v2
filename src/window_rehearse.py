@@ -15,6 +15,7 @@ import quarantine_file
 import window_attribution
 import window_gate as gate
 import window_prewindow
+import test_slots
 
 
 @contextmanager
@@ -185,7 +186,8 @@ def _run(ident, project, specs, on, main):
                 result = dict(state='green', nodes=[], url='', doc={})
                 reused = True
             else:
-                result = gate.verify(repo, candidate, required, ident)
+                with test_slots.acquire('rehearsal', None, root=fold.ROOT, spec=ident):
+                    result = gate.verify(repo, candidate, required, ident)
                 reused = False
             state = result['state']
             if state not in ('green', 'red', 'undetermined'):
