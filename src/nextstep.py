@@ -1303,7 +1303,7 @@ def main(argv=None):
     try:
         # Missing/unreadable directories cannot silently become an empty ledger.
         ledger_files.assert_readable(fold.EVENTS)
-        events = fold.read_events(use_cache=False)
+        events = fold.read_events()
         rules = lane_rules.load()
         now = datetime.now(timezone.utc)
         specs = fold.fold(events)[0]

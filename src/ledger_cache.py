@@ -148,7 +148,10 @@ def _shared_text(value):
 
 
 def _record_digest(row):
-    return hashlib.sha256(pickle.dumps(row[:10] + (row[11],), protocol=5)).digest()
+    # A changed read projection invalidates old payloads without changing the
+    # SQLite schema or the directory-derived cache/lock identity.
+    return hashlib.sha256(pickle.dumps((row[:10] + (row[11],),
+                                        ledger_compact.PROJECTION), protocol=5)).digest()
 
 
 def _meta(st):
@@ -360,6 +363,18 @@ class ConditionalRead(NamedTuple):
 
 def read(events_dir, cache_dir, actor_of):
     return read_conditional(events_dir, cache_dir, actor_of).events
+
+
+def tail_refresh():
+    """Fresh normalized events for a locked or post-action decision.
+
+    Never reuse a caller snapshot: the existing cache validation checks the
+    current ledger generation on every call and parses appended tails only.
+    Reuse fold's ordering, authorization, corruption fallback and explicit
+    DOIT_READ_CACHE override. Domain locks remain the caller's responsibility.
+    """
+    import fold
+    return fold.read_events()
 
 
 def read_conditional(events_dir, cache_dir, actor_of, *, previous=None):

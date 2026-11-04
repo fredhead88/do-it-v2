@@ -47,14 +47,14 @@ def _process(argv, *, timeout=30, **kwargs):
 
 
 def _events(root):
-    # Use the canonical parser, correction order and authorization door, without
-    # updating the reader cache (run itself must leave the ledger root untouched).
+    # One cached canonical snapshot per pass; correction order and authorization
+    # still belong to fold. Only the disposable read cache is updated here.
     saved = fold.ROOT, fold.EVENTS, fold.PROJECT
     try:
         fold.ROOT, fold.EVENTS, fold.PROJECT = root, root / "events", ""
         if not fold.EVENTS.is_dir():
             raise OSError("events directory unavailable")
-        events = fold.read_events(use_cache=False)
+        events = fold.read_events()
         ignored = {id(e) for e in fold.fold(events)[2]}
         return [e for e in events if id(e) not in ignored]
     finally:

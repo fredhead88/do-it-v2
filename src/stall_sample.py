@@ -18,7 +18,7 @@ _CONTEXT_LOCK = threading.RLock()
 
 @contextmanager
 def _fold_root(root, now):
-    """Scope legacy fold globals; bypass caches and restore correction state."""
+    """Scope legacy fold globals; cache by root and restore correction state."""
     with _CONTEXT_LOCK:
         changes = ((fold, 'ROOT', root), (fold, 'EVENTS', root/'events'), (fold, 'NOW', now),
                    (fold, 'BOARD', root/'board.md'), (dispatch, 'ROOT', root),
@@ -42,7 +42,7 @@ def sample(now, *, root=None):
     try:
         row['builder_capacity'] = autodispatch.capacity(root=root)
         with _fold_root(root, now):
-            events = fold.read_events(use_cache=False)
+            events = fold.read_events()
             rows = fold.stall_rows(events, now=now)
             buckets, holds = defaultdict(list), {}
             for item in rows:

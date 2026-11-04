@@ -1086,7 +1086,7 @@ def _record():
     try:
         # Keep ev/specs private to dispatch and todo. This read observes even a
         # partial dispatch pass, under the same tick lock as the append below.
-        held_events = fold.read_events(use_cache=False)
+        held_events = ledger_cache.tail_refresh()
         _record_next_step_held(held_events, specs, steps, fold.NOW)
     except Exception as exc:
         held_error = str(exc)

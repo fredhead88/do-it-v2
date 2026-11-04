@@ -78,7 +78,7 @@ class ReadTests(unittest.TestCase):
 
         def counted_read(*args, **kwargs):
             self.assertEqual(args, ())
-            self.assertEqual(kwargs, {"use_cache": False})
+            self.assertEqual(kwargs, {})
             self.assertEqual(fold.ROOT, self.root)
             self.assertEqual(fold.EVENTS, self.root / "events")
             self.assertEqual(fold.PROJECT, "")
@@ -92,7 +92,7 @@ class ReadTests(unittest.TestCase):
             self.assertEqual(folder.call_count, folds)
         self.assertEqual((fold.ROOT, fold.EVENTS, fold.PROJECT),
                          (original_root, original_events, original_project))
-        self.assertFalse((self.root / "cache").exists())
+        self.assertTrue((self.root / "cache").exists())
         return result
 
     def tick(self):

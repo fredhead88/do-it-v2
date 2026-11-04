@@ -11,6 +11,7 @@ import tempfile
 import time
 
 import fold
+import ledger_cache
 
 REFUSALS = frozenset({'stale-base', 'branch-not-descendant', 'pinned-base-mismatch'})
 
@@ -168,8 +169,10 @@ def refresh(repo, branch, main, spec, *, events=None, now=None):
     import merge_gate
     merge_gate.begin_run(repo)
     now = now or datetime.now(timezone.utc)
+    # Refresh under reservation/adoption locks and after git actions: never
+    # decide from the caller snapshot, but reuse validated cached history.
     with lock(repo, spec) as reservation:
-        persisted = fold.read_events(use_cache=False)
+        persisted = ledger_cache.tail_refresh()
         events = persisted if events is None else [*events, *persisted]
         project = next((e['project'] for e in reversed(events) if e.get('subject') == spec and e.get('project')), repo.name)
         def skip(reason):
@@ -249,7 +252,7 @@ def refresh(repo, branch, main, spec, *, events=None, now=None):
                     return dict(state='checks-failed', failing_ids=failures, rebased_sha=after, reports=reports)
                 # Recheck every adoption precondition after potentially long checks.
                 if (value(repo, 'rev-parse', ref) != before or value(repo, 'rev-parse', main) != base
-                        or open_builder(fold.read_events(use_cache=False), spec)
+                        or open_builder(ledger_cache.tail_refresh(), spec)
                         or holders(repo, ref) != holding or any(dirty(t) for t in holding)):
                     return skip('adoption-state-changed')
                 for t in holding:
@@ -284,8 +287,10 @@ def recut(repo, branch, main, spec):
         raise ValueError('invalid recut spec')
     repo = Path(repo).resolve()
     merge_gate.begin_run(repo)
+    # Refresh under reservation/adoption locks and after git actions: never
+    # decide from the caller snapshot, but reuse validated cached history.
     with lock(repo, spec) as reservation:
-        events = fold.read_events(use_cache=False)
+        events = ledger_cache.tail_refresh()
         project = next((e['project'] for e in reversed(events) if e.get('subject') == spec and e.get('project')), repo.name)
         def skip(reason):
             rework(spec, branch, events, paths=[], reason=reason)
@@ -353,7 +358,7 @@ def recut(repo, branch, main, spec):
                     rework(spec, branch, events, paths=[], failing_ids=failures)
                     return dict(state='checks-failed', failing_ids=failures, reports=reports)
                 if (value(repo, 'rev-parse', ref) != before or value(repo, 'rev-parse', main) != base
-                        or open_builder(fold.read_events(use_cache=False), spec) or holders(repo, ref) != holding
+                        or open_builder(ledger_cache.tail_refresh(), spec) or holders(repo, ref) != holding
                         or any(dirty(t) or value(t, 'rev-parse', 'HEAD') != before for t in holding)):
                     return skip('adoption-state-changed')
                 tag, suffix = 'rework/' + spec.removeprefix('L-spec-') + '-prev', 1
@@ -385,7 +390,7 @@ def recut(repo, branch, main, spec):
                         else:
                             git(repo, 'update-ref', ref, before, after)
                         git(repo, 'update-ref', '-d', 'refs/tags/' + tag, before)
-                    rework(spec, branch, fold.read_events(use_cache=False), paths=[], failing_ids=['merge-gate'])
+                    rework(spec, branch, ledger_cache.tail_refresh(), paths=[], failing_ids=['merge-gate'])
                     return dict(state='checks-failed', failing_ids=['merge-gate'])
                 facts = dict(from_sha=before, to_sha=after, tag=tag, commit_count=count,
                              skipped_merges=merges, dropped_empty=len(commits) - count)

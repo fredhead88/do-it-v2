@@ -24,6 +24,7 @@ os.environ.update(DOIT_ROOT=_BOOT.name, DOIT_NO_POKE='1',
 os.environ.pop('DOIT_PROJECT', None)
 import dispatch
 import fold
+import ledger_cache
 import nextstep
 import spawns
 import tick
@@ -222,26 +223,25 @@ tick._record_next_step_held(events, specs, steps, now)
         import lane_driver
         import loadgate
         mocks = self.isolate_record()
-        # The sole uncached refresh must follow the whole pass and hold the lock.
-        reader = fold.read_events
+        # The sole tail refresh must follow the whole pass and hold the lock.
+        reader = ledger_cache.tail_refresh
         refreshes = []
-        def ordered_read(**kwargs):
-            if kwargs.get('use_cache') is False:
-                import fcntl
-                with (self.root / 'tick.lock').open('a') as lock:
-                    with self.assertRaises(BlockingIOError):
-                        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                self.assertGreaterEqual(mocks['autodispatch.redispatch_dead'].call_count, 1)
-                self.assertGreaterEqual(mocks['merge_queue.enqueue_due'].call_count, 1)
-                refreshes.append(True)
-            return reader(**kwargs)
+        def ordered_read():
+            import fcntl
+            with (self.root / 'tick.lock').open('a') as lock:
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.assertGreaterEqual(mocks['autodispatch.redispatch_dead'].call_count, 1)
+            self.assertGreaterEqual(mocks['merge_queue.enqueue_due'].call_count, 1)
+            refreshes.append(True)
+            return reader()
         self.seed()
         self.seed(-1800, 'L-spec-9902')
         self.emit('spawn-failed', -1700, 'L-spec-9902', actor='tick', reason='unclassified', exit_code=9)
         _, steps = self.steps()
         unknown = next(s for s in steps if s.item == 'L-spec-9902')
         self.assertTrue(unknown.reason.startswith('undetermined:'))
-        with patch.object(fold, 'read_events', side_effect=ordered_read):
+        with patch.object(ledger_cache, 'tail_refresh', side_effect=ordered_read):
             tick._record()
         self.assertEqual(len(refreshes), 1)
         self.assertEqual({e['spec'] for e in self.held()}, {SID, 'L-spec-9902'})
@@ -334,11 +334,7 @@ tick._record_next_step_held(events, specs, steps, now)
             tick._record()
         self.assertEqual(self.heartbeat()['held_error'], 'observer failed')
         self.assertTrue(self.heartbeat()['autodispatch_pass_failed'])
-        def refresh(**kwargs):
-            if kwargs.get('use_cache') is False:
-                raise RuntimeError('refresh failed')
-            return reader(**kwargs)
-        with patch.object(fold, 'read_events', side_effect=refresh), \
+        with patch.object(ledger_cache, 'tail_refresh', side_effect=RuntimeError('refresh failed')), \
              patch.object(tick, 'launch', return_value=None):
             tick._record()
         self.assertEqual(self.heartbeat()['held_error'], 'refresh failed')

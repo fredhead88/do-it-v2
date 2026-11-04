@@ -82,7 +82,7 @@ def snapshot(events, now):
                              action=('Link a valid existing corrective, commission through the authorized path, '
                                      'or obtain an explicit reasoned waiver; do not duplicate an existing fix.'
                                      if overdue else None)))
-    return dict(at=now.isoformat(), reader='uncached, read-only; no ledger/state/cache writes',
+    return dict(at=now.isoformat(), reader='cached, read-only; no ledger/state writes',
                 counts=dict(failed_criteria=len(rows),
                             capability_misclassifications=sum(len(r['capability_misclassifications']) for r in rows),
                             open_product_failures=sum(r['open_product_failure'] for r in rows),
@@ -97,7 +97,7 @@ def main(argv=None):
     now = datetime.fromisoformat(args.at.replace('Z', '+00:00')) if args.at else datetime.now(timezone.utc)
     if now.tzinfo is None:
         parser.error('--at must include a timezone')
-    print(json.dumps(snapshot(fold.read_events(use_cache=False), now), indent=2))
+    print(json.dumps(snapshot(fold.read_events(), now), indent=2))
 
 
 if __name__ == '__main__':
