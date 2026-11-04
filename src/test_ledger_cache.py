@@ -54,6 +54,95 @@ class CacheTests(unittest.TestCase):
         self.assertEqual(json.dumps(fold.APPLIED), applied)
         return actual
 
+    def test_unchanged_cache_reuses_chunk_validation_but_corruption_revalidates(self):
+        self.write('L-operator-01.jsonl', [dict(ts='1', type='observed', subject='fixture')])
+        expected = self.same()
+        original = ledger_cache._unpack
+        digests = []
+        def unpack(data, digest):
+            digests.append(digest)
+            return original(data, digest)
+        with patch.object(ledger_cache, '_unpack', side_effect=unpack):
+            self.assertEqual(fold.read_events(), expected)
+        self.assertIn(ledger_cache._VERIFIED_CHUNK, digests,
+                      'unchanged chunks should reuse validated checksums')
+        path = next((self.root / 'cache').glob('*.sqlite3'))
+        with closing(sqlite3.connect(path)) as db, db:
+            db.execute("UPDATE chunks SET data=?", (b'broken',))
+        self.assertEqual(fold.read_events(), expected)
+
+    def test_snapshot_fold_admits_only_suffix_and_matches_full_reference(self):
+        name = 'L-operator-01.jsonl'
+        self.write(name, [dict(ts='1', type='observed', subject='fixture')])
+        snapshot = fold.ReaderSnapshot()
+        first = fold.read_events(snapshot=snapshot)
+        fold.fold(first)
+        self.write(name, [dict(ts='2', type='observed', subject='fixture')], 'a')
+        # Keep the same callable identity while counting admission calls.
+        original = fold.admits
+        calls = []
+        def admits(*args):
+            calls.append(args[0]['ts'])
+            return original(*args)
+        with patch.object(fold, 'admits', new=admits):
+            fold.fold(first)  # Establish the prefix with this callable.
+            calls.clear()
+            current = fold.read_events(snapshot=snapshot)
+            state = fold.fold(current)
+            self.assertEqual(calls, ['2'])
+            calls.clear()
+            self.assertEqual(fold.fold(current), state)
+            self.assertEqual(calls, [])
+            # Historical edits and late timestamp insertion must replay admission.
+            self.write(name, [dict(ts='0', type='observed', subject='repaired')])
+            repaired = fold.read_events(snapshot=snapshot)
+            fold.fold(repaired)
+            self.assertEqual(calls, ['0'])
+        self.assertEqual(state, fold.fold(fold.finish_events(
+            [dict(e) for e in first] + [dict(ts='2', type='observed', subject='fixture',
+             actor='operator', _src=name + ':2')])))
+        self.assertEqual(fold.fold(repaired), fold.fold(fold.read_events(use_cache=False)))
+        current[0]['subject'] = 'caller edit'
+        self.assertEqual(fold.fold(current), fold.fold(list(current)))
+
+    def test_board_invocation_reads_ledger_once(self):
+        import runpy
+        self.write('L-operator-01.jsonl', [dict(ts='2026-01-01', type='observed', subject='fixture')])
+        with patch.dict(os.environ, DOIT_ROOT=str(self.root), DOIT_PROJECT='',
+                        DOIT_SESSIONS_DIR=str(self.root / 'sessions')), \
+             patch.object(sys, 'argv', [fold.__file__, 'board']), \
+             patch.object(ledger_cache, 'read', wraps=ledger_cache.read) as read, \
+             redirect_stdout(io.StringIO()) as output:
+            runpy.run_path(fold.__file__, run_name='__main__')
+        self.assertEqual(read.call_count, 1)
+        self.assertIn('# board', output.getvalue())
+
+    def test_conditional_hit_rechecks_modified_cache_tail(self):
+        self.write('L-operator-01.jsonl', [dict(ts='1', type='observed', subject='fixture')])
+        first = ledger_cache.read_conditional(self.events, self.root / 'cache', fold.actor_of)
+        path = next((self.root / 'cache').glob('*.sqlite3'))
+        with closing(sqlite3.connect(path)) as db, db:
+            db.execute('UPDATE files SET tail=?', (b'broken',))
+        second = ledger_cache.read_conditional(self.events, self.root / 'cache', fold.actor_of,
+                                               previous=first.generation)
+        self.assertEqual(second.events, first.events)
+
+    def test_missing_checksum_is_not_treated_as_prevalidated(self):
+        with self.assertRaisesRegex(ledger_cache.Invalid, 'cache checksum'):
+            ledger_cache._unpack(ledger_cache._pack([dict(type='observed')])[0], None)
+
+    def test_same_size_tail_rewrite_and_shrink_rebuild(self):
+        name = 'L-operator-01.jsonl'
+        self.write(name, [dict(ts='1', type='observed', subject='before')])
+        self.same()
+        path = self.events / name
+        stamp = path.stat()
+        path.write_bytes(path.read_bytes().replace(b'before', b'after!'))
+        os.utime(path, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+        self.assertEqual(self.same()[0]['subject'], 'after!')
+        path.write_text('')
+        self.assertEqual(self.same(), [])
+
     def test_projection_cached_equals_reference_and_stored_bytes(self):
         a, b = 'L-executor-01.jsonl', 'L-tick-01.jsonl'
         old = dict(ts='2026-01-01', type='tree-reaped', subject='L-charter-01',

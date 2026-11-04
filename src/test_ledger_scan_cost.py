@@ -7,6 +7,11 @@ from pathlib import Path
 import re
 import sqlite3
 import tempfile
+import subprocess
+import sys
+import time
+import resource
+from contextlib import contextmanager
 import unittest
 from unittest.mock import patch
 
@@ -70,6 +75,20 @@ class ScanCostTests(unittest.TestCase):
                 patch.dict(os.environ, DOIT_ROOT=str(self.root), DOIT_READ_CACHE='1')):
             patches.start()
             self.addCleanup(patches.stop)
+
+    def test_warm_full_ledger_budget(self):
+        # Build and measure in separate processes: no process-local event reuse,
+        # and RSS excludes the cold parser's high-water mark.
+        for mode in ('build', 'warm'):
+            run = subprocess.run([sys.executable, __file__, '--profile-worker',
+                                  str(self.root), mode], capture_output=True, text=True)
+            self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+            if mode == 'warm':
+                result = json.loads(run.stdout.splitlines()[-1])
+                print('L-spec-2044 phase table (seconds): ' + json.dumps(result, sort_keys=True))
+                self.assertEqual(result['events'], 216875)
+                self.assertLess(result['cpu_s'], 5)
+                self.assertLess(result['rss_mb'], 250)
 
     def test_ac1_subject_equivalence_and_parse_count(self):
         lines = [
@@ -227,5 +246,71 @@ class ScanCostTests(unittest.TestCase):
         print('L-spec-1786 AC3 ok')
 
 
+def profile_worker(root, mode):
+    root = Path(root)
+    events = root / 'events'
+    cache = root / 'cache'
+    if mode == 'build':
+        # Repeated evidence and nested payloads, spread across independent chunks.
+        for file in range(128):
+            with (events / f'L-operator-{file:04}.jsonl').open('w') as stream:
+                for n in range(file, 216875, 128):
+                    stream.write(json.dumps(dict(ts=f'{n:09}', type='observed',
+                        subject=f'L-spec-{n % 2000:04}',
+                        reading={'description': 'repeated evidence ' * 32,
+                                 'rows': ['same evidence', n]})) + '\n')
+        ledger_cache.read(events, cache, fold.actor_of)
+        return
+    phases = {name: dict(wall_s=0.0, cpu_s=0.0)
+              for name in ('lock_wait', 'unpack', 'digest', 'fold')}
+
+    def clocks():
+        return time.perf_counter(), time.process_time()
+
+    def record(name, start):
+        wall, cpu = clocks()
+        phases[name]['wall_s'] += wall - start[0]
+        phases[name]['cpu_s'] += cpu - start[1]
+
+    original_lock = ledger_cache._locked
+    @contextmanager
+    def locked(*args):
+        start = clocks()
+        with original_lock(*args):
+            record('lock_wait', start)
+            yield
+    def timed(name, function):
+        def call(*args, **kwargs):
+            start = clocks()
+            try:
+                return function(*args, **kwargs)
+            finally:
+                record(name, start)
+        return call
+    # SHA timings are subtracted from unpack to keep the phase table disjoint.
+    original_sha = ledger_cache.hashlib.sha256
+    with patch.object(ledger_cache, '_locked', locked), \
+         patch.object(ledger_cache, '_unpack', timed('unpack', ledger_cache._unpack)), \
+         patch.object(ledger_cache.hashlib, 'sha256', timed('digest', original_sha)), \
+         patch.multiple(fold, ROOT=root, EVENTS=events, PROJECT=None):
+        start = clocks()
+        rows = fold.read_events()
+        fold_start = clocks()
+        state = fold.fold(rows)
+        record('fold', fold_start)
+        end = clocks()
+        totals = dict(wall_s=end[0] - start[0], cpu_s=end[1] - start[1])
+    phases['normalize_and_other'] = {}
+    for clock, total in totals.items():
+        phases['unpack'][clock] = max(0, phases['unpack'][clock] - phases['digest'][clock])
+        phases['normalize_and_other'][clock] = max(
+            0, total - sum(phase.get(clock, 0) for phase in phases.values()))
+    print(json.dumps(dict(totals, phases=phases, events=len(rows),
+                         rss_mb=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024)))
+
+
 if __name__ == '__main__':
-    unittest.main()
+    if len(sys.argv) > 1 and sys.argv[1] == '--profile-worker':
+        profile_worker(*sys.argv[2:])
+    else:
+        unittest.main()

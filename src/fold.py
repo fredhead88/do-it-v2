@@ -223,17 +223,24 @@ def _immutable(value):
     return value
 
 
+class _FoldInput(list):
+    """A caller-owned list carrying only private admission-prefix provenance."""
+
+
 class ReaderSnapshot:
-    """One caller's normalized generation, with no raw or derived-fold cache.
+    """One caller's normalized generation and replayable admission prefix.
 
     Returned event dicts are mutable. Nested JSON containers are immutable;
     callers can replace a nested value when they need a modified event.
     Instances belong to one pass and are not shared between concurrent readers.
     """
+    __slots__ = ('_admission', '__dict__')
+
     def __init__(self):
         self._clear()
 
     def _clear(self):
+        self._admission = None
         self._scope = self._generation = None
         self._events = ()
         self._visible = 0
@@ -256,7 +263,10 @@ class ReaderSnapshot:
         # Exactly one shallow event-copy pass, including filtered corrections.
         out = [dict(e) for e in self._events]
         APPLIED[:] = [out[i] for i in self._applied]
-        return out[:self._visible]
+        result = _FoldInput(out[:self._visible])
+        result._snapshot = self
+        result._canonical = self._events[:self._visible]
+        return result
 
 
 def read_events(use_cache=True, *, snapshot=None):
@@ -1681,12 +1691,37 @@ def spec_state(evs, retracted):
 
 def fold(events):
     by_subject, ignored = collections.defaultdict(list), []
-    for e in events:
+    snapshot = getattr(events, '_snapshot', None)
+    canonical = getattr(events, '_canonical', ())
+    # Caller edits, historical repairs, corrections, timestamp insertion and
+    # scope changes all invalidate the prefix. Time-dependent state is always
+    # derived below, even when admission of the prefix can be reused.
+    reusable = (snapshot is not None and len(events) == len(canonical)
+                and all(e == c for e, c in zip(events, canonical)))
+    prior = snapshot._admission if reusable else None
+    offset = 0
+    decisions = []
+    if prior is not None:
+        old, decisions, admission_function = prior
+        if (admission_function is admits and len(old) <= len(canonical)
+                and old == canonical[:len(old)]):
+            offset = len(old)
+            decisions = list(decisions)
+        else:
+            decisions = []
+    for index, e in enumerate(events):
         subj = e.get("subject", "")
-        if admits(e, e.get("actor", ""), by_subject.get(subj, [])) is not None:
+        if index < offset:
+            rejected = decisions[index]
+        else:
+            rejected = admits(e, e.get("actor", ""), by_subject.get(subj, [])) is not None
+            decisions.append(rejected)
+        if rejected:
             ignored.append(e)
-            continue
-        by_subject[subj].append(e)
+        else:
+            by_subject[subj].append(e)
+    if reusable:
+        snapshot._admission = (canonical, tuple(decisions), admits)
 
     retracted = {s for s, evs in by_subject.items()
                  if any(e["type"] == "charter-retracted" for e in evs)}

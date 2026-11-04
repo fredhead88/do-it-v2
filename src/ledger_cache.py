@@ -6,6 +6,7 @@ pickles avoid JSON reparsing without allowing executable cache content. Cache
 corruption falls back to fold's reference parser; lock failures propagate.
 """
 from contextlib import closing, contextmanager
+from contextvars import ContextVar
 from typing import NamedTuple
 import ledger_files
 import fcntl
@@ -44,6 +45,11 @@ class ReentrantRead(LockTimeout):
 
 # Include pid and thread: neither a fork nor a concurrent thread is recursion.
 _HELD = set()
+# Only successful full reads qualify. A different cache stat or ledger generation
+# revokes checksum reuse; retain no events and bound the process-local index.
+_VERIFIED = {}
+_VERIFIED_CHUNK = object()
+_CHUNKS_VERIFIED = ContextVar("ledger_chunks_verified", default=False)
 
 
 def lock_wait_s():
@@ -109,7 +115,7 @@ def _pack(value):
 
 
 def _unpack(data, digest):
-    if not isinstance(data, bytes) or hashlib.sha256(data).digest() != digest:
+    if not isinstance(data, bytes) or (digest is not _VERIFIED_CHUNK and hashlib.sha256(data).digest() != digest):
         raise Invalid('cache checksum')
     try:
         value = _DataOnly(io.BytesIO(data)).load()
@@ -126,9 +132,14 @@ def _shared_text(value):
     if isinstance(value, str):
         return sys.intern(value)
     if isinstance(value, dict):
-        return {sys.intern(k): v if k == '_src' else sys.intern(v) if isinstance(v, str)
-                else _shared_text(v) if isinstance(v, (dict, list)) else v
-                for k, v in value.items()}
+        # The unpickler memo already shares field names within each chunk.
+        # Replace values in place instead of allocating a second dictionary for
+        # every event and nested payload during a warm full read.
+        for k, v in value.items():
+            if k != '_src':
+                value[k] = (sys.intern(v) if isinstance(v, str) else
+                            _shared_text(v) if isinstance(v, (dict, list)) else v)
+        return value
     if isinstance(value, list):
         for index, child in enumerate(value):
             value[index] = (sys.intern(child) if isinstance(child, str) else
@@ -280,6 +291,7 @@ def _update(db, directory, actor_of):
 
 
 def _read(db):
+    verified = _CHUNKS_VERIFIED.get()
     out = []
     metadata = _metadata(db)
     # Keep the names for corruption checks, release each full record as consumed.
@@ -305,7 +317,7 @@ def _read(db):
                 raise Invalid('cache chunk order')
             if seq != count:
                 raise Invalid('cache chunk sequence')
-            out.extend(_unpack(data, digest))
+            out.extend(_unpack(data, _VERIFIED_CHUNK if verified else digest))
             count += 1
     while current is not None:
         if count != entry['chunks']:
@@ -370,9 +382,25 @@ def read_conditional(events_dir, cache_dir, actor_of, *, previous=None):
                 validated = _generation(db, directory)
                 if validated is not None:
                     generation = (str(directory), str(cache_dir), validated)
-                    if generation == previous:
+                    stamp = _meta(path.stat())
+                    token = (os.getpid(), stamp)
+                    verified = _VERIFIED.get(str(path)) == token
+                    # Even an unchanged caller snapshot must reload after cache
+                    # bytes change, so a corrupt current cache cannot hide behind
+                    # an unchanged ledger generation.
+                    if generation == previous and verified:
                         return ConditionalRead(generation, None)
-                    return ConditionalRead(generation, _read(db))
+                    reuse = _CHUNKS_VERIFIED.set(verified)
+                    try:
+                        events = _read(db)
+                    finally:
+                        _CHUNKS_VERIFIED.reset(reuse)
+                    if _meta(path.stat()) != stamp:
+                        raise Invalid('cache changed during read')
+                    if len(_VERIFIED) >= 16:
+                        _VERIFIED.clear()
+                    _VERIFIED[str(path)] = token
+                    return ConditionalRead(generation, events)
             except (sqlite3.DatabaseError, Invalid):
                 corrupt = True
                 if path.exists():
