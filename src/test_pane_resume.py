@@ -110,10 +110,10 @@ for entry, want in ((AUTH, "auth"), (QUOTA, "quota"), (TRANSIENT, "transient"), 
 d7 = new_root()
 session(d7, "L-executor-0001", session_id="", tmux="flow:1.1")
 out, calls = run_it(d7, [])
-ok(out == {"resumed": [], "escalated": [], "skipped": []}, f"AC7 (absent sessionId): {out}")
+ok(out == {"resumed": [], "escalated": [], "skipped": [], "restarted": []}, f"AC7 (absent sessionId): {out}")
 session(d7, "L-executor-0002", session_id="no-such-session", tmux="flow:1.2")
 out, calls = run_it(d7, [])
-ok(out == {"resumed": [], "escalated": [], "skipped": []} and not calls["send"] and not calls["capture"], \
+ok(out == {"resumed": [], "escalated": [], "skipped": [], "restarted": []} and not calls["send"] and not calls["capture"], \
    f"AC7 (dangling sessionId): {out} {calls}")
 
 # ── AC5 — four excluded shapes, each with a transient-matching transcript,
@@ -134,7 +134,7 @@ session(d5d, "L-executor-0013", status="idle", session_id="s13b", tmux="flow:13b
 transcript(d5d, "s13", TRANSIENT), transcript(d5d, "s13b", TRANSIENT)
 for tag, d in (("busy", d5a), ("shell", d5b), ("unresolved-role", d5c), ("duplicate-name", d5d)):
     out, calls = run_it(d, [], capture=lambda t: "❯ ")
-    ok(out == {"resumed": [], "escalated": [], "skipped": []},
+    ok(out == {"resumed": [], "escalated": [], "skipped": [], "restarted": []},
        f"AC5 ({tag}): never sent a resume or an escalation: {out}")
 
 # ── AC4 — the exact tmux target, verbatim, and no send for an already-moved-on
@@ -149,7 +149,7 @@ d4b = new_root()
 session(d4b, "L-executor-0021", session_id="s21", tmux="flow:1")
 transcript(d4b, "s21", TRANSIENT, NORMAL)          # an EARLIER error, but the LAST turn is normal
 out, calls = run_it(d4b, [], capture=lambda t: "❯ ")
-ok(out == {"resumed": [], "escalated": [], "skipped": []} and not calls["send"],
+ok(out == {"resumed": [], "escalated": [], "skipped": [], "restarted": []} and not calls["send"],
    f"AC4: already moved on — no send at all: {out}")
 
 # ── AC10 — the composer check: dim/empty send, visible non-dim skips ─────────
@@ -159,19 +159,19 @@ d10a = new_root()
 session(d10a, "L-executor-0030", session_id="s30", tmux="flow:30")
 transcript(d10a, "s30", TRANSIENT)
 out_busy, calls_busy = run_it(d10a, [], capture=lambda t: BUSY)
-ok(out_busy == {"resumed": [], "escalated": [], "skipped": ["L-executor-0030"]},
+ok(out_busy == {"resumed": [], "escalated": [], "skipped": ["L-executor-0030"], "restarted": []},
    f"AC10: visible non-dim text skips with composer-busy: {out_busy}")
 d10b = new_root()
 session(d10b, "L-executor-0031", session_id="s31", tmux="flow:31")
 transcript(d10b, "s31", TRANSIENT)
 out_dim, calls_dim = run_it(d10b, [], capture=lambda t: DIM)
-ok(out_dim == {"resumed": ["L-executor-0031"], "escalated": [], "skipped": []},
+ok(out_dim == {"resumed": ["L-executor-0031"], "escalated": [], "skipped": [], "restarted": []},
    f"AC10: the real measured dim-suggestion shape sends normally: {out_dim}")
 d10c = new_root()
 session(d10c, "L-executor-0032", session_id="s32", tmux="flow:32")
 transcript(d10c, "s32", TRANSIENT)
 out_empty, calls_empty = run_it(d10c, [], capture=lambda t: "❯ ")
-ok(out_empty == {"resumed": ["L-executor-0032"], "escalated": [], "skipped": []},
+ok(out_empty == {"resumed": ["L-executor-0032"], "escalated": [], "skipped": [], "restarted": []},
    f"AC10: an empty composer sends normally: {out_empty}")
 
 # ── AC3 — 0/1/2/3 prior pane-resumed rows -> 2/5/15-minute waits, then a cap ──
@@ -194,7 +194,7 @@ for count, wait in ((0, 2), (1, 5), (2, 15)):
     events = prior_rows("L-executor-0040", count)
     transcript(d3, "s40", stop_entry(f"u-{count}", NOW - timedelta(minutes=wait) + timedelta(seconds=1)))
     out, calls = run_it(d3, events, capture=lambda t: "❯ ")
-    ok(out == {"resumed": [], "escalated": [], "skipped": []},
+    ok(out == {"resumed": [], "escalated": [], "skipped": [], "restarted": []},
        f"AC3: {count} prior, {wait}min stop is too fresh by 1s — sends nothing: {out}")
     transcript(d3, "s40", stop_entry(f"u-{count}b", NOW - timedelta(minutes=wait)))
     out, calls = run_it(d3, events, capture=lambda t: "❯ ")
@@ -210,13 +210,13 @@ esc_events = cap_events + [{"type": "escalation-blocking", "subject": "L-executo
                             "reason_class": "cap", "stop_uuid": "u-cap", "irreversible": "x",
                             "ts": iso(NOW - timedelta(minutes=1))}]
 out2, calls2 = run_it(d3, esc_events, capture=lambda t: "❯ ")
-ok(out2 == {"resumed": [], "escalated": [], "skipped": []},
+ok(out2 == {"resumed": [], "escalated": [], "skipped": [], "restarted": []},
    f"AC3: an open cap escalation is not re-escalated on the identical stop: {out2}")
 d3b = new_root()          # calling run() again before the backoff elapses sends nothing (0 prior)
 session(d3b, "L-executor-0041", session_id="s41", tmux="flow:41")
 transcript(d3b, "s41", stop_entry("u-early", NOW - timedelta(minutes=1)))
 out3, _ = run_it(d3b, [], capture=lambda t: "❯ ")
-ok(out3 == {"resumed": [], "escalated": [], "skipped": []}, f"AC3: an early re-call sends nothing: {out3}")
+ok(out3 == {"resumed": [], "escalated": [], "skipped": [], "restarted": []}, f"AC3: an early re-call sends nothing: {out3}")
 
 # ── AC2 — escalation suppression/release, scoped to (pane, reason_class) ─────
 d2 = new_root()
@@ -230,7 +230,7 @@ open_auth = [{"type": "escalation-blocking", "subject": "L-executor-0050", "reas
              "stop_uuid": "u-auth", "irreversible": "x", "ts": esc_ts}]
 # (a) still open: nothing further, for the SAME reason_class
 out_a, _ = run_it(d2, open_auth)
-ok(out_a == {"resumed": [], "escalated": [], "skipped": []}, f"AC2(a): still open — nothing further: {out_a}")
+ok(out_a == {"resumed": [], "escalated": [], "skipped": [], "restarted": []}, f"AC2(a): still open — nothing further: {out_a}")
 # (b) a DIFFERENT reason_class on the same pane still escalates, open (a) notwithstanding
 transcript(d2, "s50", QUOTA)
 out_b, _ = run_it(d2, open_auth)
@@ -241,7 +241,7 @@ recovered = [AUTH, assistant("u-recovered", iso(NOW - timedelta(seconds=30)), te
 transcript(d2, "s50", *recovered)
 still_open_auth = open_auth      # the SAME open auth escalation, ts 1 minute ago
 out_recovered_check, _ = run_it(d2, still_open_auth)
-ok(out_recovered_check == {"resumed": [], "escalated": [], "skipped": []},
+ok(out_recovered_check == {"resumed": [], "escalated": [], "skipped": [], "restarted": []},
    f"AC2(c) precondition: the recovery turn alone (last turn is normal) sends/escalates nothing: "
    f"{out_recovered_check}")
 transcript(d2, "s50", AUTH, assistant("u-recovered", iso(NOW - timedelta(seconds=30)), text="back to work"),
@@ -249,6 +249,62 @@ transcript(d2, "s50", AUTH, assistant("u-recovered", iso(NOW - timedelta(seconds
 out_c, _ = run_it(d2, still_open_auth)
 ok(out_c["escalated"] == ["L-executor-0050"],
    f"AC2(c): a further stop after recovery escalates again, same reason_class: {out_c}")
+
+# L-spec-2045 AC3: ctx/held end identity comes from the writer's ledger source.
+from unittest.mock import patch
+import hashlib
+for reason in ('ctx', 'held'):
+    d = new_root()
+    end = dict(type='planner-ended', subject='L-charter-9001', reason=reason,
+               ts=iso(NOW - timedelta(minutes=5)), _src='L-planner-9001.jsonl:1')
+    calls = []
+    def restart(name):
+        calls.append(name)
+        return True
+    out = pane_resume.run([end], now=NOW, sessions_dir=d / 'sessions', restart=restart)
+    rows = fold.read_events(use_cache=False)
+    resumed = [e for e in rows if e['type'] == 'pane-resumed']
+    ok(out['restarted'] == ['L-planner-9001'] and calls == ['L-planner-9001'],
+       '2045 AC3: restart exactly once on first cycle')
+    ok(len(resumed) == 1 and resumed[0]['reason_class'] == 'ctx-ended'
+       and resumed[0]['lag_s'] == 300, '2045 AC3: durable measured lag')
+    pane_resume.run([end, *rows], now=NOW, sessions_dir=d / 'sessions', restart=restart)
+    ok(len(calls) == 1, '2045 AC3: fresh ledger suppresses duplicate restart')
+    body = json.dumps(resumed, sort_keys=True)
+    print(json.dumps(dict(url='cli://L-spec-2045/AC3', status=0,
+                         body_sha256=hashlib.sha256(body.encode()).hexdigest(), body_excerpt=body)))
+    start = dict(type='planner-started', subject=end['subject'], planner='L-planner-9002', ts=iso(NOW))
+    ok(not pane_resume.ctx_ended_without_successor([end, start], NOW), '2045 AC3: later start suppresses')
+    ok(not pane_resume.ctx_ended_without_successor([{**end, 'ts': 'bad'}], NOW),
+       '2045 AC3: unknown lag cannot claim restart')
+    live_root = new_root()
+    with patch.object(panes, 'live_panes', return_value=[dict(name='L-planner-9002')]):
+        out = pane_resume.run([end], now=NOW, sessions_dir=live_root / 'sessions', restart=restart)
+        ok(not out['restarted'] and len(calls) == 1, '2045 AC3: live successor prevents restart')
+    with patch.object(panes, 'live_panes', side_effect=OSError('undetermined')):
+        out = pane_resume.run([end], now=NOW, sessions_dir=live_root / 'sessions', restart=restart)
+        ok(not out['restarted'] and out['skipped'], '2045 AC3: failed live read never claims restart')
+
+# Production uses the targeted launcher; unreadable metadata cannot authorize a restart.
+d = new_root()
+end = dict(type='planner-ended', subject='L-charter-9002', planner='L-planner-9002',
+           reason='ctx', ts=iso(NOW - timedelta(minutes=1)))
+with patch('up.restart_pane', return_value=False) as restart:
+    out = pane_resume.run([end], now=NOW, sessions_dir=d / 'sessions')
+    restart.assert_called_once_with('L-planner-9002')
+ok(not out['restarted'] and out['skipped'] == ['L-planner-9002'],
+   '2045 AC3: unavailable restart is an explicit skip')
+ok(any(e.get('reason') == 'no-restart-entry' for e in fold.read_events(use_cache=False)),
+   '2045 AC3: false targeted restart is recorded')
+with patch('up.restart_pane', return_value=True) as restart:
+    out = pane_resume.run([end], now=NOW, sessions_dir=d / 'sessions')
+    restart.assert_called_once_with('L-planner-9002')
+ok(out['restarted'] == ['L-planner-9002'], '2045 AC3: production default restarts targeted pane')
+(d / 'sessions' / '123.json').write_text('{')
+with patch.object(pane_resume, '_restart_ctx') as actuator:
+    out = pane_resume.run([end], now=NOW, sessions_dir=d / 'sessions', restart=lambda name: True)
+    ok(not out['restarted'] and out['skipped'], '2045 AC3: corrupt session metadata is undetermined')
+    ok(not actuator.called, '2045 AC3: unknown successor cannot reach actuator')
 
 for p in KIDS:
     p.kill()

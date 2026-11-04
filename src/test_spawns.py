@@ -104,7 +104,7 @@ def dispatch(role, subject, cwd=CWD):
     before = {p.name for p in EV.glob("*.jsonl")}
     r = subprocess.run([sys.executable, str(HERE / "dispatch.py"), role, subject, "--packet", str(PACKET),
                         "--cwd", str(cwd), "--project", "p"], capture_output=True, text=True,
-                       env={**os.environ, "DOIT_NO_POKE": "1"}, timeout=120)
+                       env={**os.environ, "DOIT_NO_POKE": "1", "DOIT_SUPERVISED": "1"}, timeout=120)
     new = [e for p in sorted(EV.glob("*.jsonl")) if p.name not in before
            for e in map(json.loads, p.read_text().splitlines())]
     return r, new

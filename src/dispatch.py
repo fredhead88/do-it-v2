@@ -2,6 +2,7 @@
 """dispatch — spawn one contract on the D116 line, check after the fact, append events. dispatch.py <role> <subject> [--packet FILE|-] [--path P] [--cwd DIR] [--charter ID] [--project NAME] [--mcp-config FILE] [--timeout MIN] [--max-usd N] The BACKEND — claude-p, seat, or codex — and the MODEL are the ledger root's ruling, `$DOIT_ROOT/models.toml` (models.py). `--seat` / DOIT_SEAT may only agree with it. Every terminal event stamps `backend`, `model_requested` (the map) beside `model_used` (what came back), `model_match`, and `first_on_model` — the D120 trust run of a (contract, model) pair is then a ledger fact, not a memory. Also stamped: the four-way token split (`input_tokens`, `output_tokens`, `cache_read`, `cache_creation`) and, on a seat spawn whose stamp.sh resolved it, `subagent_tokens` — the route's OLDER blended figure, kept beside the split rather than replaced by it (src/usage.py; retro step 9). Every check here converts a silent failure into a loud one, and each was observed before it was written (D116, D120): a tools: line without StructuredOutput comes back is_error:false with structured_output:null; a denied Write came back as `answered: yes` with no file on disk; a refused spawn is is_error:true with cost above zero; an unreachable seat is api_error with zero tokens. The contract appends nothing — every event below is derived from the Output object into this spawn's own file, and the actor is that filename (D90)."""
 import argparse, atexit, hashlib, json, os, pathlib, re, shutil, socket, subprocess, sys, ledger_files
 from datetime import datetime, timedelta, timezone
+from typing import Mapping
 
 HERE = pathlib.Path(__file__).resolve().parent
 AGENTS = HERE.parent / "agents"
@@ -306,6 +307,20 @@ def repo_moved(before, after, role):
 
 def issued_by():
     return fold.actor_of(os.path.basename(os.environ.get("DOIT_LEDGER_FILE", ""))) or "unknown"
+
+def manual_dispatch_refusal(role: str, env: Mapping[str, str], override_reason: str | None) -> str | None:
+    if role not in ROLES or "DOIT_SUPERVISED" in env or (override_reason or "").strip():
+        return None
+    try:
+        name = pathlib.Path(env.get("DOIT_LEDGER_FILE", "")).name
+        actor = (fold.actor_of(name) or "unknown") if re.fullmatch(r"L-[a-z-]+-[A-Za-z0-9]+\.jsonl", name) else "unknown"
+    except Exception:
+        actor = "unknown"
+    return "routine manual dispatch requires --manual-override-reason TEXT" if actor in {"unknown", "operator"} else None
+
+def manual_dispatch_violations(events) -> list[dict]:
+    return [{k: e.get(k) for k in ("subject", "role", "ts", "reason")}
+            for e in events if e.get("type") == "manual-dispatch"]
 
 def run_claude(cmd, packet, cwd, timeout):
     env = {k: v for k, v in os.environ.items() if k not in ("ANTHROPIC_API_KEY", "DOIT_LEDGER_FILE")}   # no meter to fall through to
@@ -1136,7 +1151,7 @@ def _main(a):
     # An empty or non-file --packet is refused BEFORE a spawn id is allocated: a shell that captured a failed `doit packet` into a variable hands "" here, which read `.` as the packet and crashed after the fact (pilot "Smaller" list; hit again on charter 3).
     if a.packet != "-" and not (a.packet and pathlib.Path(a.packet).is_file()):
         sys.exit(f"dispatch: --packet {a.packet!r} is not a file — nothing allocated, nothing spent")
-    packet = sys.stdin.read() if a.packet == "-" else pathlib.Path(a.packet).read_text()
+    packet = a._packet if hasattr(a, "_packet") else sys.stdin.read() if a.packet == "-" else pathlib.Path(a.packet).read_text()
     if a.role == "spec-writer" and getattr(a, "augment_history", False):
         # Carried specs bypass packet.py; `doit carry` passes --augment-history so they get
         # the same precomputed history section. Other packets stay byte-for-byte (AC6).
@@ -1676,6 +1691,8 @@ def cli_version():
 import fold
 fold.EMITS["worktree-recreated"] = {"builder"}
 fold.REQUIRED["worktree-recreated"] = ("worktree", "branch")
+fold.EMITS["manual-dispatch"] = set().union(*fold.EMITS.values()) | {"operator"}
+fold.REQUIRED["manual-dispatch"] = ("role", "reason", "outcome")
 
 CLI = cli_version()
 
@@ -1696,7 +1713,20 @@ if __name__ == "__main__":
     ap.add_argument("--seat", action="store_true",
                     help="do not run `claude -p`; write the packet under $R/seat/ and wait for "
                          "<spawn>.result.json from a seat-billed sub-agent (or DOIT_SEAT=1)")
+    ap.add_argument("--manual-override-reason", help="reason for an intentional manual dispatch")
     a = ap.parse_args()
+    if a.role == "plan-auditor":
+        a._packet = sys.stdin.read() if a.packet == "-" else pathlib.Path(a.packet).read_text() if pathlib.Path(a.packet).is_file() else ""
+        if __import__("audit").HEADER not in a._packet:
+            main(a)  # preserve the recorded pre-pass refusal ahead of the manual gate
+    refusal = manual_dispatch_refusal(a.role, os.environ, a.manual_override_reason)
+    if refusal or ((a.manual_override_reason or "").strip() and not a.detach and manual_dispatch_refusal(a.role, os.environ, None)):
+        EVENTS.mkdir(parents=True, exist_ok=True)
+        dst = EVENTS / pathlib.Path(os.environ.get("DOIT_LEDGER_FILE") or "L-operator-local.jsonl").name
+        error = emit(dst, {}, "manual-dispatch", strict=True, subject=a.subject, role=a.role,
+                     reason=refusal or a.manual_override_reason.strip(), outcome="refused" if refusal else "overridden")
+        if error or refusal:
+            sys.exit(error or refusal)
     if a.detach:        # D117: sub-agents are detached subprocesses; the wrapper's terminal event and poke follow
         if a.packet == "-":
             sys.exit("--detach needs --packet FILE")

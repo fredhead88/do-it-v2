@@ -995,7 +995,21 @@ def _append_watchdog(root, dst, event_type, **fields):
 
 
 def heartbeat_missed(name, now, events, *, root=None, sender=None, dst=None):
-    """Observe cron starts/skips and deliver at most one successful send per outage.
+    """Serialize alerts; propagate undetermined reads to the caller's error record."""
+    root = pathlib.Path(root) if root is not None else fold.ROOT
+    dst = pathlib.Path(dst) if dst is not None else root / "events" / LEDGER_NAME
+    # Tick and look can watch the same job; serialize the read/dedupe/write cycle.
+    if _DRY_RUN:
+        return _heartbeat_missed(name, now, events, root=root, sender=sender, dst=dst)
+    state = root / "state"
+    state.mkdir(parents=True, exist_ok=True)
+    with (state / "heartbeat-watchdog.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        return _heartbeat_missed(name, now, events, root=root, sender=sender, dst=dst)
+
+
+def _heartbeat_missed(name, now, events, *, root=None, sender=None, dst=None):
+    """Observe cron starts/skips and dedupe once delivery succeeds.
 
     Alert identity uses last_start, and ordering uses measured_at. Emitted ts
     belongs to the writer's clock and is deliberately never used here.
@@ -1047,7 +1061,8 @@ def heartbeat_missed(name, now, events, *, root=None, sender=None, dst=None):
     if sent == "yes" or not same:
         _append_watchdog(root, dst, "operator-alert", subject=name, kind="heartbeat-missed",
                          sent=sent, detail=detail, last_start=last_start,
-                         measured_at=now.isoformat(timespec="seconds"))
+                         measured_at=now.isoformat(timespec="seconds"),
+                         **({"sender_error": str(error)} if error else {}))
     if error is not None:
         raise error
     return True

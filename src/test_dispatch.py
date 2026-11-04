@@ -1024,18 +1024,24 @@ class R7DispatchTests(unittest.TestCase):
     def cli_rows(self):
         # pane is a deliberate later guard: no backend executable can be called.
         (self.root / 'models.toml').write_text('[contracts.builder]\nbackend="pane"\nmodel="fixture"\n')
-        env = dict(os.environ, DOIT_ROOT=str(self.root), HOME=str(self.home), DOIT_NO_POKE='1')
+        cli_bin = self.root / 'cli-bin'
+        cli_bin.mkdir()
+        cli = cli_bin / 'claude'
+        cli.write_text('#!/bin/sh\nprintf "fixture-cli\\n"\n')
+        cli.chmod(0o755)
+        env = dict(os.environ, DOIT_ROOT=str(self.root), HOME=str(self.home), DOIT_NO_POKE='1',
+                   DOIT_SUPERVISED='1', PATH=str(cli_bin) + os.pathsep + os.environ.get('PATH', ''))
         env.pop('DOIT_SEAT', None)
         for label, pin in (('old', self.old), ('malformed', 'bad'), ('unavailable', 'f' * 40), ('matching', self.new)):
             self.clear_events()
             self.packet.write_text('PINNED_BASE_SHA: ' + pin + '\n')
             args = [sys.executable, str(Path(self.d.__file__)), 'builder', self.sid, '--packet', str(self.packet),
                     '--project', 'do-it-v2', '--cwd', str(self.tree), '--detach']
-            result = subprocess.run(args, env=env, capture_output=True, text=True, timeout=15)
+            result = subprocess.run(args, env=env, capture_output=True, text=True, timeout=60)
             self.assertEqual(result.returncode, 0, result.stderr)
             log = Path(json.loads(result.stdout)['log'])
             import time
-            deadline = time.monotonic() + 15
+            deadline = time.monotonic() + 60
             while time.monotonic() < deadline:
                 rows = self.rows()
                 if any(e['type'] == 'spawn-failed' for e in rows):

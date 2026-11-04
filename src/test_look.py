@@ -2580,3 +2580,46 @@ def test_ac7_sd2_idle_persistence():
     finally: _si_restore(saved)
 
 test_ac7_sd2_idle_persistence()
+
+# L-spec-2045 AC2: fresh fold round-trip, sender failure and watchdog failure.
+for send_status in (0, 1):
+    root = newroot()
+    _wstart(root, "tick", _WNOW - timedelta(minutes=60))
+    with patch.object(fold, 'ROOT', root), patch.object(fold, 'EVENTS', root / 'events'):
+        look.heartbeat_missed('tick', _WNOW, [], root=root, sender=lambda text: send_status)
+        look.heartbeat_missed('tick', _WNOW, [], root=root, sender=lambda text: 0)
+        rows = [e for e in fold.read_events(use_cache=False) if e['type'] == 'operator-alert']
+    ok([e['sent'] for e in rows] == (['yes'] if send_status == 0 else ['no', 'yes']),
+       '2045 AC2: retry failed delivery, then dedupe successful delivery')
+    ok(rows[0]['last_start'] == iso(_WNOW - timedelta(minutes=60))
+       and rows[0]['measured_at'] == iso(_WNOW), '2045 AC2: measured gap fields')
+    body = json.dumps(rows, sort_keys=True)
+    print(json.dumps(dict(url='cli://L-spec-2045/AC2', status=0,
+                         body_sha256=hashlib.sha256(body.encode()).hexdigest(), body_excerpt=body)))
+root = newroot()
+with patch.object(look, '_read_cron_store', side_effect=RuntimeError('fixture unreadable')):
+    try:
+        look.heartbeat_missed('tick', _WNOW, [], root=root, sender=lambda text: 0)
+    except RuntimeError as exc:
+        ok(str(exc) == 'fixture unreadable', '2045 AC2: undetermined read reaches caller')
+    else:
+        raise AssertionError('watchdog swallowed undetermined read')
+rows = look._read_jsonl(root / 'events' / look.LEDGER_NAME)
+ok(not rows, '2045 AC2: undetermined read emits no alert')
+root = newroot()
+_wstart(root, 'tick', _WNOW - timedelta(minutes=60))
+def _raised_sender(text):
+    raise RuntimeError('fixture sender exploded')
+try:
+    look.heartbeat_missed('tick', _WNOW, [], root=root, sender=_raised_sender)
+except RuntimeError as exc:
+    ok(str(exc) == 'fixture sender exploded', '2045 AC2: send error reaches tick')
+else:
+    raise AssertionError('watchdog swallowed sender error')
+rows = look._read_jsonl(root / 'events' / look.LEDGER_NAME)
+ok(len(rows) == 1 and rows[0]['sent'] == 'no', '2045 AC2: raised sender leaves one failed-send row')
+look.heartbeat_missed('tick', _WNOW, [], root=root, sender=lambda text: 0)
+look.heartbeat_missed('tick', _WNOW, [], root=root, sender=_raised_sender)
+rows = look._read_jsonl(root / 'events' / look.LEDGER_NAME)
+ok([e['sent'] for e in rows] == ['no', 'yes'], '2045 AC2: raised sender is retried until delivery')
+print('2045 AC2 heartbeat cases pass')
