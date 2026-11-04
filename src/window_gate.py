@@ -121,6 +121,16 @@ def ev(typ, subject, **kv):
         fold.NOW = original_now
 
 
+def record_flakes(window, project, candidate, flakes, retry, scope):
+    """Persist only explicit green observations from the exact candidate probe."""
+    for node in flakes:
+        ev("window-flake", window, window=window, project=project, candidate=candidate,
+           node=node, isolated_state="green", scope=scope,
+           evidence=dict(snapshot=candidate, selector=node, outcome="green",
+                         report="window_attribution.probe", url=retry.get("url", ""),
+                         run_id=retry.get("run_id")))
+
+
 def escalate(window, why, outcome=None, *, nodes=None):
     due = (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat(timespec="seconds")
     ev("escalation-blocking", window, why=why, outcome=outcome,
@@ -1150,7 +1160,7 @@ def resolve_entries(repo, spec_args, events):
     return out
 
 
-def advance(repo, main, old, new, window, kept, dropped, runs, urls, entries, dashboard, rechained=(), pre_existing=(), actions_minutes=None, after=None, *, scope=None, minutes=None, quarantined=None, rechecked=None):
+def advance(repo, main, old, new, window, kept, dropped, runs, urls, entries, dashboard, rechained=(), pre_existing=(), actions_minutes=None, after=None, *, scope=None, minutes=None, quarantined=None, rechecked=None, flakes=None):
     replaced = git(repo, "rev-parse", f"refs/heads/{main}").stdout.strip()
     git(repo, "update-ref", f"refs/heads/{main}", new, old)       # old value asserted
     branch_of = {s: b for s, b, _ in entries}
@@ -1160,6 +1170,7 @@ def advance(repo, main, old, new, window, kept, dropped, runs, urls, entries, da
     ev("window-verified", window, sha=new, verified_on=old, replaced=replaced,
        **({"after": after} if after else {}), runs=urls, kept=kept, dropped=dropped,
        pre_existing=list(pre_existing),
+       **({"flakes": list(flakes)} if flakes is not None else {}),
        # Legacy direct helper callers retain their event shape; every gate
        # attempt below explicitly supplies a list, including when it is empty.
        **({"quarantined": list(quarantined)} if quarantined is not None else {}),
@@ -1546,6 +1557,7 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
     touched = {s: set(git(repo, "diff", "--name-only", f"{base}...{b}").stdout.split()) for s, b, _ in entries}
     dropped, urls, runs, dashboard = list(ruled_out), [], 0, False
     pre_existing_all = set()
+    flakes_all = set()
     quarantined_all, rechecked_all = set(), {}
     guard_seed = tree_guards(os.environ)
     actions_minutes = 0
@@ -1622,7 +1634,8 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
     def record(res, tree, required):
         if tree is not None:
             ev("window-tree-verified", window, window=window, sha=res["candidate"],
-               tree=tree, green=res["state"] == "green", new_ids=res["nodes"], required=required)
+               tree=tree, green=res["state"] == "green", new_ids=res["nodes"], required=required,
+               **({"flakes": res["flakes"], "flake_only": res.get("flake_only", False)} if res.get("flakes") else {}))
 
     def judge(cand, kept, *, half=False):
         nonlocal runs, dashboard, actions_minutes, baseline, base_failures, opened, judgments, base_red_answer
@@ -1657,6 +1670,7 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
         ev("window-candidate", window, sha=cand, verified_on=base, specs=kept, slot=slot,
            **({"after": after} if after else {}))
         if cached:
+            flakes_all.update(prior.get("flakes", []))
             print(f"gate-window: tree {tree} already verified in {prior.get('window', prior.get('subject'))}")
             return dict(state="green", nodes=[], url="", doc={})
         res = dict(verify(repo, cand, candidate_required, window), candidate=cand)
@@ -1709,6 +1723,20 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
             if not half:
                 record(res, tree, candidate_required)
             return dict(res, state="undetermined")
+        import window_attribution
+        retry = window_attribution.probe(repo, cand, nodes, deadline=None)
+        flakes = [node for node in nodes if retry.get("states", {}).get(node) == "green"]
+        if flakes:
+            record_flakes(window, project, cand, flakes, retry, "window-run")
+            flakes_all.update(flakes)
+            res["flakes"] = flakes
+            print(f"gate-window: {len(flakes)} flake(s) on exact candidate: {json.dumps(flakes)}")
+            nodes = [node for node in nodes if node not in flakes]
+            res["nodes"] = nodes
+            if not nodes:
+                res.update(state="green", flake_only=True)
+                record(res, tree, candidate_required)
+                return res
         current = quarantine.active(fold.read_events(), project, datetime.now(timezone.utc))
         # Preserve the existing per-run base audit when an earlier run of this
         # attempt already proved these ids pre-existing and quarantined them.
@@ -1921,7 +1949,7 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
         if not live:
             escalate(window, fingerprint_failed.why("remaining merges conflict after the drop"), "undetermined")
             return 2
-        # This is the only full-suite retry; diagnostic greens never advance main.
+        # A changed remainder needs verification on its own exact tree.
     if enabled and any(s in migrations for s in dropped) and any(s in migrations for s in live):
         escalate(window, "migration ordering after owner removal is unsafe; remainder pending", "undetermined")
         return 2
@@ -1938,6 +1966,7 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
         advance(repo, main, base, cand, window, live, dropped, runs, urls, entries, dashboard, rechained,
                 pre_existing=sorted(pre_existing_all), actions_minutes=actions_minutes, after=after,
                 quarantined=sorted(quarantined_all), rechecked=dict(rechecked_all),
+                flakes=sorted(flakes_all),
                 scope=candidate_scopes[cand], minutes=run_minutes(repo, verdicts, required=verification_scopes))
     except RuntimeError:
         if train:
