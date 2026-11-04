@@ -1,5 +1,5 @@
 """Change-keyed coupled tests on precheck's disposable combined trees."""
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import hashlib
 import json
 import os
@@ -11,6 +11,9 @@ import time
 
 import coupled_tests
 from merge_gate import Undetermined
+import cpu_share
+import fold
+import test_slots
 
 TARGETED_SECONDS = 600
 SCAN_SECONDS = 300
@@ -53,8 +56,12 @@ def runner(tree, files, *, dashboard, timeout):
     else:
         cwd = tree
         argv = ['/opt/albert-scott/.venv/bin/python', '-m', 'pytest', '-q', '-p', 'no:cacheprovider', *files]
-    result = subprocess.run(['nice', '-n', '10', 'timeout', str(min(300, timeout)), *argv], cwd=cwd, env=env,
-                            timeout=min(300, timeout), capture_output=True, text=True)
+    admission = test_slots.acquire('sweep', timeout, root=fold.ROOT) if not dashboard else nullcontext()
+    with admission:
+        if not dashboard:
+            env = cpu_share.launch_env(env, fold.ROOT)
+        result = subprocess.run(['nice', '-n', '10', 'timeout', str(min(300, timeout)), *argv], cwd=cwd, env=env,
+                                timeout=min(300, timeout), capture_output=True, text=True)
     output = result.stdout + '\n' + result.stderr
     if result.returncode == 0:
         return []

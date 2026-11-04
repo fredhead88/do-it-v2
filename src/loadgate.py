@@ -19,6 +19,14 @@ import re
 import time
 import tomllib
 
+
+def test_waiters(root=None, *, now=None):
+    """Queue display only; test admission never changes loadgate policy."""
+    import fold
+    import test_slots
+    return test_slots.waiters(fold.ROOT if root is None else root,
+                             now=None if now is None else now.timestamp())
+
 DEFAULTS = dict(mode='observe', mem_floor_gb=6, mem_hard_stop_gb=8,
                 mem_swap_hard_stop_gb=12, mem_pressure_some_avg10_max=5,
                 mem_pressure_full_avg10_max=1, cpu_pressure_some_avg10_max=60,

@@ -8,6 +8,8 @@ import secrets
 import threading
 import time
 
+import test_slots
+
 NICE_INCREMENT = 10
 _local = threading.local()
 
@@ -69,8 +71,11 @@ def count(root=None):
 
 
 def share(root=None):
-    held = count(root)
-    return workers(None if held is None else held + (0 if _active(root) else 1))
+    try:
+        held = test_slots.held_count(root)
+    except OSError:
+        held = None
+    return workers(None if held is None else held + (0 if test_slots.owns(root) else 1))
 
 
 @contextlib.contextmanager
@@ -121,8 +126,7 @@ def child_env(env, n):
 
 
 def launch_env(env, root=None):
-    held = _active(root)
-    return child_env(env, held if held is not None else share(root))
+    return child_env(dict(env, DOIT_TEST_SLOT_ROOT=str(test_slots.root_path(root))), share(root))
 
 
 def niced(argv):

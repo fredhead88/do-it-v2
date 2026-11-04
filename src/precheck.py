@@ -19,6 +19,8 @@ import fold
 import merge_queue
 import window_gate
 import precheck_targeted
+import cpu_share
+import test_slots
 
 DOIT = str(Path(__file__).resolve().parent.parent / 'doit')
 
@@ -104,9 +106,11 @@ def guard_runner(repo):
     def run_tree(tree):
         env = dict(os.environ, PYTHONDONTWRITEBYTECODE='1', DOIT_NO_POKE='1')
         env.pop('PYTHONPATH', None)
-        result = subprocess.run(['nice', '-n', '10', 'timeout', '300', str(python), '-m', 'pytest', '-q',
-                                 *[g.removesuffix('::') for g in guards]],
-                                cwd=tree, env=env, text=True, capture_output=True, timeout=300)
+        with test_slots.acquire('sweep', 300, root=fold.ROOT):
+            env = cpu_share.launch_env(env, fold.ROOT)
+            result = subprocess.run(['nice', '-n', '10', 'timeout', '300', str(python), '-m', 'pytest', '-q',
+                                     *[g.removesuffix('::') for g in guards]],
+                                    cwd=tree, env=env, text=True, capture_output=True, timeout=300)
         output = result.stdout + '\n' + result.stderr
         nodes = list(dict.fromkeys(re.findall(r'^(?:FAILED|ERROR) ([^\s]+)', output, re.M)))
         if result.returncode == 0:

@@ -297,6 +297,15 @@ def candidates(events, specs, now, *, head_of=None):
             rows.append(dict(spec=sid, charter=dispatch.resolve_charter(events, sid, None), project=project,
                              since=now.isoformat(timespec='seconds'), limit_min=limit_min,
                              status='seat-wait', reason='resource-wait', _dispatch_failed=False))
+    try:
+        waiters = loadgate.test_waiters(now=now)
+    except Exception:
+        waiters = []
+    for waiter in waiters:
+        rows.append(dict(spec=waiter.get('spec') or 'unknown', role=waiter['role'],
+                         **{'class': waiter['class']}, charter=None, project='unknown',
+                         since=waiter['waiting_since'], limit_min=20,
+                         status='slot-wait', reason='test-slot', _dispatch_failed=False))
     return rows
 
 

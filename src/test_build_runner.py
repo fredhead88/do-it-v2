@@ -808,6 +808,7 @@ class ShortTmpdirTests(unittest.TestCase):
         self.addCleanup(self.stack.close)
         self.top = pathlib.Path(self.stack.enter_context(tempfile.TemporaryDirectory(
             prefix="short-tmp-test-", dir=build_runner.scratch.sub("tests"))))
+        self.stack.enter_context(patch.object(build_runner.fold, 'ROOT', self.top / 'ledger'))
         self.aliases = pathlib.Path(self.stack.enter_context(
             tempfile.TemporaryDirectory(prefix="drt-", dir="/tmp")))
         self.backing = self.top / ("scratch-backing-" + "x" * 100)
