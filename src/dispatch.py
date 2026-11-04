@@ -559,13 +559,14 @@ def spec_path(subject):
 
 
 def window_min(role, subject, events, *, backend="seat"):
-    """L-spec-0269: the window a role's spawn is offered under. A non-`seat` backend (`run_claude`/`run_codex`) always gets the flat, unbumped role cap — `Unserved`/claiming is a seat-only concept. On `backend="seat"`: `grader`/ `reviewer` get 45 minutes instead of their own cap when the subject's newest `spec-written` event's `ac_types` names `observed-data` or (reserved) `live-db`; that base is then raised, never lowered, to the subject's own leading `window_min:` line when one is present and larger; the result is capped at 240 regardless. No `spec-written` event and no readable `content/<subject>.md` degrades cleanly to the plain base — never an exception (§4, §6)."""
-    if backend != "seat":
-        return ROLES.get(role, (None, 240, 0))[1]
-    import fold                                  # lazy: see fold.py's own alloc() note
-    base = ROLES[role][1]
+    """L-spec-0269: the window a role's spawn is offered under. A non-`seat` backend (`run_claude`/`run_codex`) gets the flat, unbumped role cap unless the spec head says `window_min: N` — `Unserved`/claiming is a seat-only concept. On `backend="seat"`: `grader`/ `reviewer` get 45 minutes instead of their own cap when the subject's newest `spec-written` event's `ac_types` names `observed-data` or (reserved) `live-db`; that base is then raised, never lowered, to the subject's own leading `window_min:` line when one is present and larger; the result is capped at 240 regardless. No `spec-written` event and no readable `content/<subject>.md` degrades cleanly to the plain base — never an exception (§4, §6)."""
+    # A non-`seat` backend keeps the flat role cap, but a spec's own `window_min: N` head
+    # line (SD22) still lifts it: the builder fallback codex->seat inherited 90 min from
+    # the codex precheck and L-spec-2019 timed out three times at 90 (2026-11-04 02:05Z).
+    base = ROLES.get(role, (None, 240, 0))[1]
     newest = None
-    for e in events:
+    import fold                                  # lazy: see fold.py's own alloc() note
+    for e in (events if backend == "seat" else ()):
         if e.get("type") == "spec-written" and e.get("spec") == subject:
             if newest is None or fold.ts(e.get("ts")) > fold.ts(newest.get("ts")):
                 newest = e
