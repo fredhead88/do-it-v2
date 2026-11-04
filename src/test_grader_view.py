@@ -23,6 +23,7 @@ HERE = pathlib.Path(__file__).resolve().parent  # this checkout's own src/
 REPO = HERE.parent  # this checkout's own root — the real `repo` for AC1/AC5
 
 REAL_HOME = os.environ.get("HOME", "")  # captured BEFORE the override below
+REAL_FIXTURE_ENV = {key: os.environ.get(key) for key in ("HOME", "DOIT_ROOT", "DOIT_SCRATCH")}
 REAL_BROWSERS_PATH = os.environ.pop("PLAYWRIGHT_BROWSERS_PATH", None)
 
 FIXTURE_ROOT = pathlib.Path(tempfile.mkdtemp(prefix="grader-view-root-"))
@@ -59,6 +60,12 @@ CREDS_FIXTURE = json.dumps({"token": "fixture-not-a-real-secret"})
 
 sys.path.insert(0, str(HERE))
 import grader_view  # noqa: E402
+
+# Pytest can import grader_view through build_runner before this script. Pin
+# its cached paths to this fixture too, and restore them after the assertions.
+fixture_paths = mock.patch.multiple(grader_view, ROOT=FIXTURE_ROOT,
+                                   CONTENT=FIXTURE_ROOT / "content", SEAT=FIXTURE_ROOT / "seat")
+fixture_paths.start()
 
 
 def snapshot(*roots):
@@ -289,7 +296,8 @@ for index, target in enumerate((FIXTURE_HOME / ".claude", FIXTURE_ROOT,
 allowed_link = FIXTURE_HOME / "browser-link"
 allowed_link.symlink_to(BROWSER_FIXTURE, target_is_directory=True)
 assert browser_argv(allowed_link) == browser_argv(BROWSER_FIXTURE)
-default_browser = FIXTURE_HOME / ".cache" / "ms-playwright"
+# The browser bind resolves symlinks, including a runner's short TMPDIR.
+default_browser = (FIXTURE_HOME / ".cache" / "ms-playwright").resolve()
 default_browser.mkdir(parents=True)
 assert browser_argv() == browser_argv(default_browser)
 assert ("--ro-bind", str(default_browser), str(default_browser)) in bind_triples(browser_argv())
@@ -576,6 +584,12 @@ shutil.rmtree(FIXTURE_ROOT, ignore_errors=True)
 shutil.rmtree(FIXTURE_SCRATCH, ignore_errors=True)
 shutil.rmtree(FIXTURE_HOME, ignore_errors=True)
 shutil.rmtree(BROWSER_FIXTURE)
+fixture_paths.stop()
+for key, value in REAL_FIXTURE_ENV.items():
+    if value is None:
+        os.environ.pop(key, None)
+    else:
+        os.environ[key] = value
 if REAL_BROWSERS_PATH is not None:
     os.environ["PLAYWRIGHT_BROWSERS_PATH"] = REAL_BROWSERS_PATH
 print("ALL OK")

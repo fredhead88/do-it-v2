@@ -2,6 +2,7 @@
 """Hermetic CLI regressions; git and the append/fold store are real."""
 import hashlib
 import contextlib
+from datetime import datetime, timezone
 import io
 import json
 import os
@@ -163,6 +164,155 @@ class BuildRunnerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout)
 
+    def read_bundle(self, sha=None):
+        code = ("import fold,grader_packet,json; "
+                "events=fold.fold(fold.read_events())[3].get('L-spec-9000',[]); "
+                "b=grader_packet.bundle_for(events,'L-spec-9000'," + repr(sha or self.sha) + "); "
+                "print(json.dumps(b))")
+        result = subprocess.run([sys.executable, "-c", code], cwd=HERE, env=self.env,
+                                capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def test_bundle_reuse_publication_retry_review_and_forced_execution(self):
+        import evidence_revision
+        counter = self.top / 'executions'
+        self.spec(f"python3 -c 'from pathlib import Path; "
+                  f"p=Path(\"{counter}\"); p.open(\"a\").write(\"run\\n\"); print(123)'" )
+        self.assertIsNone(self.read_bundle())
+        data, path = self.bundle()
+        first = self.read_bundle()
+        self.assertEqual(first['bundle'], data)
+        build_path = self.root / 'events/L-builder-fixture.jsonl'
+        build = json.loads(build_path.read_text())
+        old_fresh_key = evidence_revision.cache_key('text', [], self.sid, build)
+        stable_key = evidence_revision.bundle_key('text', [build], self.sid, self.sha, self.base)
+        build['ts'] = '2026-10-19T00:00:00Z'
+        self.assertNotEqual(old_fresh_key, evidence_revision.cache_key('text', [], self.sid, build))
+        self.assertEqual(stable_key, evidence_revision.bundle_key('text', [build], self.sid, self.sha, self.base))
+        second = self.read_bundle(self.sha[:9])
+        self.assertEqual(second['bundle']['bundle_key'], data['bundle_key'])
+        self.assertEqual(self.bundle()[1], path)
+        self.assertEqual(counter.read_text().splitlines(), ['run', 'run'])
+        reused = [e for e in self.folded()['kept'] if e['type'] == 'bundle-reused']
+        self.assertGreaterEqual(len(reused), 2)
+        self.assertEqual(reused[-1]['bundle_key'], data['bundle_key'])
+        self.assertEqual(reused[-1]['bundle_sha256'], hashlib.sha256(path.read_bytes()).hexdigest())
+        forced, fresh_path = self.bundle('--fresh')
+        self.assertNotEqual(path, fresh_path)
+        self.assertEqual(counter.read_text().splitlines(), ['run'] * 4)
+        self.assertEqual(forced['bundle_key'], data['bundle_key'])
+        self.assertEqual(self.tail(forced['commands'][0]), self.tail(data['commands'][0]))
+        self.assertEqual(forced['comparison'], data['comparison'])
+        self.assertEqual(self.read_bundle()['bundle'], forced)
+        as_json = self.cli('--json', '--sha', self.sha[:9])
+        self.assertEqual(as_json.returncode, 0, as_json.stderr)
+        self.assertEqual(json.loads(as_json.stdout), forced)
+        payload = json.dumps(dict(ordinary_executions=2, forced_executions=4,
+                                  bundle=forced, reuse=reused[-1]), sort_keys=True)
+        print(json.dumps(dict(url='cli://test_build_runner/bundle_reuse', status=0,
+                              body_sha256=hashlib.sha256(payload.encode()).hexdigest(),
+                              body_excerpt=payload)))
+
+    def test_bundle_reuse_local_main_without_remote(self):
+        self.git('update-ref', '-d', 'refs/remotes/origin/main')
+        self.env.pop('DOIT_MAIN', None)
+        data, path = self.bundle()
+        self.assertEqual(data['master_sha'], self.sha)
+        self.assertEqual(self.bundle()[1], path)
+        self.assertIsNotNone(self.read_bundle())
+
+    def test_bundle_invalidation_missing_bundle_and_unprovable_master(self):
+        import grader_packet
+        data, path = self.bundle()
+        with patch.object(grader_packet, 'root', return_value=self.root):
+            with patch.object(build_runner, '_event') as emit:
+                self.assertIsNone(grader_packet.bundle_for(
+                    self.folded()['kept'], self.sid, self.sha,
+                    identity=(self.base, None, None)))
+                emit.assert_not_called()
+        events = self.folded()['kept']
+        path.unlink()
+        self.assertIsNone(self.read_bundle())
+        with patch.object(grader_packet, 'root', return_value=self.root), \
+                patch.object(grader_packet.subprocess, 'Popen') as launch:
+            def fail(message, **fields):
+                raise RuntimeError(fields['reason'])
+            with self.assertRaisesRegex(RuntimeError, 'bundle-pending'):
+                grader_packet.gate(events, self.sid, '',
+                                   lambda *args, **kwargs: None, fail)
+            launch.assert_called_once()
+        _, replacement = self.bundle()
+        self.assertNotEqual(path, replacement)
+
+    def test_bundle_invalidation_inputs_integrity_and_selection(self):
+        import evidence_revision
+        self.bundle('--criteria', 'AC1')
+        self.assertIsNone(self.read_bundle(), 'partial evidence cannot establish readiness')
+        data, path = self.bundle()
+        counter = len([e for e in self.events() if e['type'] == 'evidence-bundle'])
+        def rebuilt(label):
+            nonlocal data, path, counter
+            self.assertIsNone(self.read_bundle(), label)
+            old_path = path
+            data, path = self.bundle()
+            counter += 1
+            self.assertNotEqual(path, old_path, label)
+            self.assertEqual(len([e for e in self.events() if e['type'] == 'evidence-bundle']), counter)
+            self.assertIsNotNone(self.read_bundle(), label)
+            payload = json.dumps(dict(case=label, publications=counter,
+                                      path=str(path), bundle_key=data['bundle_key']), sort_keys=True)
+            print(json.dumps(dict(url='cli://test_build_runner/bundle_invalidation', status=0,
+                                  body_sha256=hashlib.sha256(payload.encode()).hexdigest(),
+                                  body_excerpt=payload)))
+        self.spec('python3 -c "print(456)"')
+        rebuilt('changed spec text')
+        # A new build at the same SHA invalidates evidence without changing its key.
+        stable_key = data['bundle_key']
+        ledger_path = self.root / 'events/L-build-runner-local.jsonl'
+        observations = self.events()
+        latest_bundle = next(e for e in reversed(observations) if e['type'] == 'evidence-bundle')
+        latest_bundle['ts'] = '2026-10-19T00:00:00Z'
+        ledger_path.write_text(''.join(json.dumps(e) + '\n' for e in observations))
+        self.build_done()
+        build_path = self.root / 'events/L-builder-fixture.jsonl'
+        build = json.loads(build_path.read_text())
+        build['ts'] = '2026-10-20T00:00:00Z'
+        build_path.write_text(json.dumps(build) + '\n')
+        rebuilt('same SHA build newer than bundle')
+        self.assertEqual(data['bundle_key'], stable_key)
+        event = dict(type='spec-amended', subject=self.sid, project='demo',
+                     ts=datetime.now(timezone.utc).isoformat(timespec='seconds'))
+        (self.root / 'events/L-executor-amend.jsonl').write_text(json.dumps(event) + '\n')
+        time.sleep(1.05)  # Ledger publication timestamps have second precision.
+        rebuilt('identical text amendment')
+        (self.repo / 'new-sha').touch()
+        self.sha = self.commit('new ready sha')
+        self.build_done()
+        rebuilt('ready sha')
+        self.git('update-ref', 'refs/remotes/origin/main', self.sha)
+        rebuilt('master movement with pinned comparison base')
+        self.assertEqual(data['base_sha'], self.base)
+        self.base = self.sha
+        self.build_done()
+        rebuilt('effective base')
+        (self.repo / 'local-master').touch()
+        self.commit('local master moves without remote movement')
+        rebuilt('local master movement')
+        path.write_bytes(path.read_bytes() + b' ')
+        rebuilt('bundle digest')
+        pathlib.Path(data['commands'][0]['tail']).write_bytes(b'tampered')
+        rebuilt('referenced tail digest')
+        pathlib.Path(data['base'][0]['tail']).unlink()
+        rebuilt('missing referenced base output')
+        self.assertIsNotNone(self.read_bundle(self.sha[:9]))
+        self.assertNotEqual(evidence_revision.bundle_key('one', [], self.sid, self.sha, self.base),
+                            evidence_revision.bundle_key('two', [], self.sid, self.sha, self.base))
+        selected, selected_path = self.bundle('--criteria', 'AC1')
+        self.assertIsNotNone(selected.get('criteria'))
+        self.assertEqual(self.read_bundle()['bundle'], data)
+        self.assertNotEqual(path, selected_path)
+
     def test_fresh_clone_uncommitted_absent_clone_removed(self):
         (self.repo / "probe.py").write_text("raise RuntimeError('builder-input-marker')\n")
         (self.repo / "uncommitted").write_text("builder-input-marker")
@@ -172,7 +322,7 @@ class BuildRunnerTests(unittest.TestCase):
         bundle, _ = self.bundle("--sha", self.base)
         row = bundle["commands"][0]
         cwd = pathlib.Path(row["cwd"])
-        self.assertEqual(cwd.parent, self.top / "scratch" / "runner")
+        self.assertEqual(cwd.parent.resolve(), (self.top / "scratch" / "runner").resolve())
         self.assertRegex(cwd.name, self.sid + "-" + self.base[:12] + r"-\d+$")
         self.assertEqual(self.tail(row).decode().splitlines(), [str(cwd), self.base, "False False"])
         self.assertFalse(cwd.exists())
@@ -206,7 +356,9 @@ class BuildRunnerTests(unittest.TestCase):
         self.assertTrue(all("/api" in s for s in self.lines() if s.startswith("setup ")))
         prior = path.read_bytes(), self.lines(), self.events()
         self.assertEqual(self.bundle(driver=True)[1], path)
-        self.assertEqual((path.read_bytes(), self.lines(), self.events()), prior)
+        self.assertEqual((path.read_bytes(), self.lines()), prior[:2])
+        self.assertEqual(self.events()[:-1], prior[2])
+        self.assertEqual(self.events()[-1]['type'], 'bundle-reused')
         # A distinct criteria set runs both clones but reuses the lockfile cache.
         self.bundle("--criteria", "AC1", driver=True)
         self.assertEqual(sum(s.startswith("npm ") for s in self.lines()), 1)
@@ -397,9 +549,9 @@ class BuildRunnerTests(unittest.TestCase):
         self.assertIn(str(self.repo / "absent"), row["cmd"])
         self.assertEqual(row["cmd"].count(str(venv / "pin")), 2)
         changes = bundle["rewrites"]
-        self.assertTrue(any(r["from"] == str(self.repo) for r in changes))
-        self.assertTrue(any(r["from"] == str(actual) for r in changes))
-        self.assertFalse(any(str(venv) in r["from"] for r in changes))
+        self.assertTrue(any(pathlib.Path(r["from"]).resolve() == self.repo.resolve() for r in changes))
+        self.assertTrue(any(pathlib.Path(r["from"]).resolve() == actual.resolve() for r in changes))
+        self.assertFalse(any(pathlib.Path(r["from"]).resolve().is_relative_to(venv.resolve()) for r in changes))
 
     def test_commands_exact_criteria_filter_prior_cd_carried(self):
         (self.repo / "sub").mkdir()
@@ -512,7 +664,7 @@ class BuildRunnerTests(unittest.TestCase):
         output = bytes(range(256)) * 781 + bytes(range(64))  # exactly 200000 bytes
         self.spec("python3 -c 'import sys;sys.stdout.buffer.write(bytes(range(256))*781+bytes(range(64)))'")
         bundle, path = self.bundle()
-        self.assertEqual(set(bundle), {"spec", "project", "sha", "base_sha", "spec_sha256", "runner_version", "started_at",
+        self.assertEqual(set(bundle), {"spec", "project", "sha", "base_sha", "spec_sha256", "bundle_key", "master_sha", "local_master_sha", "criteria", "runner_version", "started_at",
                                        "env", "rewrites", "commands", "base", "comparison", "judgment_only"})
         self.assertRegex(bundle["started_at"], r"^\d{4}-\d\d-\d\dT")
         self.assertTrue(bundle["runner_version"])
@@ -573,7 +725,7 @@ class BuildRunnerTests(unittest.TestCase):
         self.assertEqual(counter.read_text().splitlines(), ["run", "run"])  # tip + base exactly once
         path = pathlib.Path(results[0][0].decode().strip())
         original = path.read_bytes()
-        self.assertEqual(len(self.events()), 1)
+        self.assertEqual(len([e for e in self.events() if e['type'] == 'evidence-bundle']), 1)
         self.bundle()
         self.assertEqual(counter.read_text().splitlines(), ["run", "run"])
         _, selected = self.bundle("--criteria", "AC1")
@@ -584,7 +736,7 @@ class BuildRunnerTests(unittest.TestCase):
         self.assertNotEqual(changed, path)
         self.assertEqual(path.read_bytes(), original)
         folded = self.folded()
-        self.assertEqual(len(self.events()), 3)
+        self.assertEqual(len([e for e in self.events() if e['type'] == 'evidence-bundle']), 3)
         for event in self.events():
             self.assertEqual(event["bundle_sha256"], folded["digests"][event["path"]])
 
@@ -615,7 +767,8 @@ class BuildRunnerTests(unittest.TestCase):
         self.assertNotIn("DOIT_LEDGER_FILE", private)
         self.assertNotIn("DOIT_SUPERVISED", private)
         for name in ("HOME", "DOIT_ROOT"):
-            self.assertTrue(pathlib.Path(private[name]).is_relative_to(self.top / "scratch" / "runner"))
+            self.assertTrue(pathlib.Path(private[name]).resolve().is_relative_to(
+                (self.top / "scratch" / "runner").resolve()))
         for artifact in [path, *path.with_suffix("").iterdir(), self.root / "events" / "L-build-runner-local.jsonl"]:
             self.assertNotIn(b"builder-input-marker", artifact.read_bytes())
             self.assertNotIn(b"CALLER_SENTINEL", artifact.read_bytes())
@@ -687,7 +840,7 @@ class NodeModulesTests(unittest.TestCase):
         binary = self.target / ".bin" / "probe"
         self.assertTrue(binary.is_symlink())
         self.assertTrue((self.target / "probe-alias").is_symlink())
-        self.assertEqual(binary.resolve(), self.target / "probe" / "cli.mjs")
+        self.assertEqual(binary.resolve(), (self.target / "probe" / "cli.mjs").resolve())
         # Node is optional in the hermetic suite; containment is always tested.
         node = shutil.which("node")
         if node:
@@ -791,7 +944,7 @@ class NodeModulesTests(unittest.TestCase):
             self.assertEqual(result, "cache:" + key)
             binary = dashboard / "node_modules" / ".bin" / "probe"
             self.assertTrue(binary.is_symlink())
-            self.assertTrue(binary.resolve().is_relative_to(dashboard / "node_modules"))
+            self.assertTrue(binary.resolve().is_relative_to((dashboard / "node_modules").resolve()))
             shutil.rmtree(dashboard / "node_modules")
             (cached / "escape").symlink_to(self.top / "outside")
             with self.assertRaisesRegex(build_runner.Undetermined, "escapes private tree"):
@@ -1240,7 +1393,11 @@ class ShortTmpdirTests(unittest.TestCase):
                                                EVENTS=fixture.root / "events"))
             stack.enter_context(patch.object(build_runner.grading_env, "_project_checkout", return_value=fixture.repo))
             stack.enter_context(patch.object(build_runner.grading_env, "_project_row", return_value={}))
-            stack.enter_context(patch.object(build_runner, "_event", side_effect=lambda s,p,k,**kw: self.events.append(k)))
+            real_event = build_runner._event
+            def published(s, p, k, **kw):
+                self.events.append(k)
+                real_event(s, p, k, **kw)
+            stack.enter_context(patch.object(build_runner, "_event", side_effect=published))
             stack.enter_context(patch.object(build_runner, "_provision", return_value={}))
             real_sweep = build_runner.sweep_short_tmpdirs
             for entry in ("direct", "cli"):
