@@ -122,7 +122,24 @@ def _standing_autodispatch_failed(evs):
     return newest_fail
 
 
-def _since(events, sid, evs, charter, wave):
+def _sibling_blocks(evs, charter, wave, waves):
+    """`dispatch.wave_blocker`'s test for one sibling, from that sibling's events so far."""
+    raw = next((e.get("charter") for e in reversed(evs) if e.get("charter")), None)
+    if raw is None or pathlib.Path(raw).stem != charter:
+        return False
+    written = next((e for e in reversed(evs) if e.get("type") == "spec-written" and e.get("footprint")), None)
+    if not written:
+        return False
+    key = tuple(sorted(written["footprint"]))
+    if key not in waves:
+        waves[key] = dispatch.spec_wave(charter, written["footprint"])
+    sib_wave = waves[key]
+    if sib_wave is None or sib_wave >= wave:
+        return False
+    return fold.spec_state(evs, set()) not in dispatch.SETTLED_STATES
+
+
+def _since(events, sid, evs, charter, wave, memo=None):
     """SD1's three-part `since` (Assumption 6): later of `spec-written`/
     `decision`/`unblocked`, plus — only if this subject was EVER wave-blocked
     — the ts `wave_blocker` last stopped returning non-`None` for it,
@@ -134,22 +151,33 @@ def _since(events, sid, evs, charter, wave):
         return marker_ts
     # Fast path (Thinker 2026-09-29, operator-approved build-speed fix): `wave_blocker` only
     # ever counts L-spec subjects whose charter stem is `charter`, and its answer can only
-    # change at an event of one of those subjects. So replay just those subjects' events and
-    # re-evaluate only there. Same answer as the full replay; O(sibling events^2) instead of
-    # O(all events^2) per spec (the full replay made each tick take 8+ minutes).
-    siblings = set()
-    for e in events:
-        subj = e.get("subject")
-        if (subj and subj != sid and str(subj).startswith("L-spec-") and e.get("charter")
-                and pathlib.Path(e["charter"]).stem == charter):
-            siblings.add(subj)
-    ordered = sorted(events, key=lambda e: str(e.get("ts", "")))
-    was_blocked, settle_ts, prefix = False, None, []
+    # change at an event of one of those subjects. Thinker 2026-11-05: at such an event only
+    # that sibling's own blocking status can change, so keep the set of blocking siblings
+    # and re-test just that one. Same answer as re-running `wave_blocker` on every prefix,
+    # which took `fold.py board` 30 minutes and `look` 2 hours with 61 written specs.
+    if memo is None:
+        memo = {}
+    if charter not in memo:
+        members = set()
+        for e in events:
+            subj = e.get("subject")
+            if (subj and str(subj).startswith("L-spec-") and e.get("charter")
+                    and pathlib.Path(e["charter"]).stem == charter):
+                members.add(subj)
+        memo[charter] = (members, sorted((e for e in events if e.get("subject") in members),
+                                         key=lambda e: str(e.get("ts", ""))))
+    members, ordered = memo[charter]
+    was_blocked, settle_ts, seen, blocking, waves = False, None, {}, set(), {}
     for e in ordered:
-        if e.get("subject") not in siblings:
+        subj = e.get("subject")
+        if subj == sid:
             continue
-        prefix.append(e)
-        now_blocked = dispatch.wave_blocker(prefix, charter, sid, wave) is not None
+        seen.setdefault(subj, []).append(e)
+        if _sibling_blocks(seen[subj], charter, wave, waves):
+            blocking.add(subj)
+        else:
+            blocking.discard(subj)
+        now_blocked = bool(blocking)
         if was_blocked and not now_blocked:
             settle_ts = fold.ts(e.get("ts"))
         was_blocked = now_blocked
@@ -223,6 +251,7 @@ def candidates(events, specs, now, *, head_of=None):
     busy = tick.in_flight(events)
     written = [s for s in specs.values() if s.get("state") == "written"]
     rows = []
+    since_memo = {}
     limit_min = _lane_limit("build")
     for s in written:
         sid = s["id"]
@@ -262,7 +291,7 @@ def candidates(events, specs, now, *, head_of=None):
             reason = f'no $R/repos/{project} symlink'
         if reason is None:
             reason = dispatch.unaudited(evs)
-        since = _since(events, sid, evs, charter, wave) or now
+        since = _since(events, sid, evs, charter, wave, since_memo) or now
         rows.append({"spec": sid, "charter": charter, "project": project,
                      "since": since.isoformat(timespec="seconds"), "limit_min": limit_min,
                      "status": "blocked" if reason else None, "reason": reason,
