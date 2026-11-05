@@ -238,11 +238,19 @@ def _main_branch(repo, project, env, deadline):
     configured = grading_env._look_toml(SOURCE).get("push", {}).get("main", {}).get(project)
     if os.environ.get("DOIT_MAIN") or configured:
         return os.environ.get("DOIT_MAIN") or configured
-    ref = _required(["git", "-C", str(repo), "symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
-                    phase="resolve main", env=env, deadline=deadline)
-    if not ref.startswith("origin/"):
-        raise Undetermined("unresolvable main")
-    return ref[len("origin/"):]
+    code, output = _process(["git", "-C", str(repo), "symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+                            env=env, deadline=deadline)
+    ref = output.decode().strip()
+    if code == 0 and ref.startswith("origin/"):
+        return ref[len("origin/"):]
+    for local in ('main', 'master'):
+        try:
+            _required(['git', '-C', str(repo), 'show-ref', '--verify', '--quiet',
+                       'refs/heads/' + local], phase='resolve main', env=env, deadline=deadline)
+        except Undetermined:
+            continue
+        return local
+    raise Undetermined("unresolvable main")
 
 
 def _commands(text, project, criteria):
@@ -532,7 +540,29 @@ def _event(spec, project, kind, **fields):
     _required(argv, phase="ledger append", env=env, deadline=time.monotonic() + 30)
 
 
-def run(spec, requested_sha=None, criteria=None):
+def _bundle_base(repo, project, done, sha, env, deadline):
+    # Keep explicit comparison pins, but never let them hide movement of master.
+    # A supplied comparison base can still support fresh execution when the
+    # checkout seam has no Git metadata. Its master identity is unprovable, so
+    # readers must never accept such a publication for reuse.
+    if done.get('base_sha') and not (pathlib.Path(repo) / '.git').exists():
+        return _resolve(repo, done['base_sha'], env, deadline), None, None
+    main = _main_branch(repo, project, env, deadline)
+    code, output = _process(['git', '-C', str(repo), 'rev-parse', '--verify',
+                             'origin/' + main + '^{commit}'], env=env, deadline=deadline)
+    master = output.decode().strip() if code == 0 else _required(
+        ['git', '-C', str(repo), 'rev-parse', '--verify', main + '^{commit}'],
+        phase='resolve current master', env=env, deadline=deadline)
+    code, output = _process(['git', '-C', str(repo), 'rev-parse', '--verify',
+                             main + '^{commit}'], env=env, deadline=deadline)
+    local_master = output.decode().strip() if code == 0 else None
+    base = done.get('base_sha') or _required(
+        ['git', '-C', str(repo), 'merge-base', sha, master],
+        phase='merge base', env=env, deadline=deadline)
+    return _resolve(repo, base, env, deadline), _resolve(repo, master, env, deadline), local_master
+
+
+def run(spec, requested_sha=None, criteria=None, *, fresh=False):
     sweep_short_tmpdirs()
     started = datetime.now(timezone.utc).isoformat()
     sha, project = requested_sha or "unresolved", None
@@ -562,8 +592,6 @@ def run(spec, requested_sha=None, criteria=None):
         sha = _resolve(repo, requested_sha or done.get("ready_sha"), env, deadline)
         key = "all" if criteria is None else hashlib.sha256(",".join(sorted(criteria)).encode()).hexdigest()[:8]
         text = (fold.ROOT / "content" / f"{spec}.md").read_text()
-        revision = evidence_revision.cache_key(text, events, spec, done)
-        path = fold.ROOT / "content" / "evidence" / spec / f"{sha[:12]}-{key}-{revision}-r{VERSION}.json"
         if criteria is not None:
             if _missing_production_data(text, project, criteria, repo, sha, env, deadline):
                 raise ProductionDataUnavailable(PROD_DATA_UNAVAILABLE)
@@ -571,15 +599,21 @@ def run(spec, requested_sha=None, criteria=None):
         locks.mkdir(parents=True, exist_ok=True)
         lock = resources.enter_context((locks / f"{spec}-{sha}.lock").open("a"))
         fcntl.flock(lock, fcntl.LOCK_EX)
-        if path.exists():
-            return path
-        if done.get("base_sha"):
-            base_sha = _resolve(repo, done["base_sha"], env, deadline)
-        else:
-            main = _main_branch(repo, project, env, deadline)
-            base_sha = _required(["git", "-C", str(repo), "merge-base", sha, "origin/" + main],
-                                 phase="merge base", env=env, deadline=deadline)
-            base_sha = _resolve(repo, base_sha, env, deadline)
+        # Another runner may have published while we waited on the subject lock.
+        events = fold.fold(fold.read_events())[3].get(spec, [])
+        done = next((e for e in reversed(events) if e['type'] == 'build-done'), {})
+        text = (fold.ROOT / 'content' / f'{spec}.md').read_text()
+        base_sha, master_sha, local_master_sha = _bundle_base(repo, project, done, sha, env, deadline)
+        revision = evidence_revision.bundle_key(text, events, spec, sha, base_sha)
+        if not fresh:
+            import grader_packet
+            cached = grader_packet.bundle_for(events, spec, sha, criteria=criteria,
+                identity=(base_sha, master_sha, local_master_sha), runner_version=VERSION)
+            if cached:
+                return pathlib.Path(cached['event']['path'])
+        # Never overwrite a previously published bundle, even on forced rebuild.
+        path = fold.ROOT / 'content' / 'evidence' / spec / (
+            f'{sha[:12]}-{key}-{revision[:16]}-{secrets.token_hex(6)}-r{VERSION}.json')
         commands, judgment = _commands(text, project, criteria)
         tails = path.with_suffix("")
         tails.mkdir(parents=True)
@@ -600,9 +634,11 @@ def run(spec, requested_sha=None, criteria=None):
         runner_evidence.compact(tip, base)
         bundle = {"spec": spec, "project": project, "sha": sha, "base_sha": base_sha,
                   "spec_sha256": evidence_revision.digest(text),
+                  "master_sha": master_sha, "local_master_sha": local_master_sha, "criteria": sorted(criteria) if criteria is not None else None,
                   "runner_version": VERSION, "started_at": started, "env": summary,
                   "rewrites": rewrites, "commands": tip, "base": base,
                   "comparison": comparison, "judgment_only": judgment}
+        runner_evidence.stamp_bundle(bundle, revision)
         data = (json.dumps(bundle, indent=2) + "\n").encode()
         if time.monotonic() >= deadline:
             _expired()
@@ -613,6 +649,7 @@ def run(spec, requested_sha=None, criteria=None):
         temporary.write_bytes(data)
         temporary.replace(path)
         _event(spec, project, "evidence-bundle", path=str(path), sha=sha, base_sha=base_sha,
+               bundle_key=revision, criteria=bundle['criteria'],
                bundle_sha256=hashlib.sha256(data).hexdigest(), n_commands=len(tip),
                n_failed=sum(r["exit"] != 0 for r in tip), n_new=len(comparison["new"]))
         return path
@@ -648,13 +685,15 @@ def main(argv=None):
     parser.add_argument("--sha")
     parser.add_argument("--criteria")
     parser.add_argument("--json", action="store_true")
+    parser.add_argument("--fresh", action="store_true",
+                        help="force evidence execution, including reproducibility checks; bypass bundle reuse")
     args = parser.parse_args(argv)
     criteria = set(args.criteria.split(",")) if args.criteria is not None else None
     if criteria is not None and any(not re.fullmatch(r"AC\d+", c) for c in criteria):
         parser.error("criteria must be comma-separated AC ids")
     interrupts = {sig: signal.signal(sig, _interrupted) for sig in (signal.SIGINT, signal.SIGTERM)}
     try:
-        path = run(args.spec, args.sha, criteria)
+        path = run(args.spec, args.sha, criteria, fresh=True) if args.fresh else run(args.spec, args.sha, criteria)
         print(path.read_text().rstrip() if args.json else path)
         return 0
     except Undetermined as exc:

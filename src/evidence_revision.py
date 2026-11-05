@@ -1,5 +1,6 @@
 """Evidence identity and amendment freshness shared by runner and grader."""
 import hashlib
+import json
 from datetime import datetime, timezone
 
 
@@ -25,3 +26,8 @@ def digest(text):
 def cache_key(text, events, subject, build):
     # Even identical amendment text and a repeated ready SHA need fresh evidence.
     return digest(digest(text) + str(amendment(events, subject)) + str(build.get('ts', '')))[:16]
+
+
+def bundle_key(text, events, subject, sha, base):
+    """Stable identity excluding build time; readers enforce build freshness."""
+    return digest(json.dumps([subject, digest(text), str(amendment(events, subject)), sha, base]))

@@ -326,3 +326,10 @@ def compact(tip, base):
                 for key in ('results', 'collected'):
                     step[key] = {node: value for node, value in step.get(key, {}).items()
                                  if node in wanted}
+
+
+def stamp_bundle(bundle, key):
+    """Stamp publication metadata without changing collected evidence."""
+    bundle['bundle_key'] = key
+    for row in bundle['commands'] + bundle.get('base', []):
+        row['tail_sha256'] = hashlib.sha256(pathlib.Path(row['tail']).read_bytes()).hexdigest()

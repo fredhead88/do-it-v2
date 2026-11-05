@@ -6,6 +6,7 @@ import os
 import pathlib
 import re
 import subprocess
+import time
 from datetime import datetime
 
 DIFF_CAP = 3000
@@ -40,19 +41,29 @@ def _contained(path, directory):
     return candidate
 
 
-def bundle_for(events, subject, ready_sha):
+def bundle_for(events, subject, ready_sha, *, criteria=None, identity=None, runner_version=None):
     """Matched event, original JSON and parsed bundle, or None if unprovable."""
-    event = _latest(events, subject, "evidence-bundle", ready_sha)
+    import build_runner
+    selected = sorted(criteria) if criteria is not None else None
+    event = next((e for e in reversed(events) if e.get('subject') == subject
+                  and e.get('type') == 'evidence-bundle' and _same_sha(e.get('sha'), ready_sha)
+                  and e.get('criteria') == selected), None)
     if not event:
         return None
     try:
         if not evidence_revision.current(events, subject, event):
             return None
         build = _latest(events, subject, 'build-done')
-        if build and (not _same_sha(build.get('ready_sha'), ready_sha)
-                      or datetime.fromisoformat(event['ts'].replace('Z', '+00:00'))
-                      <= datetime.fromisoformat(build['ts'].replace('Z', '+00:00'))):
+        # Stable identity excludes build time; freshness still requires evidence
+        # published after the latest build, including a rebuild at the same SHA.
+        if build and (not build.get('ts') or not event.get('ts')
+                      or evidence_revision._time(event['ts']) <= evidence_revision._time(build['ts'])):
             return None
+        if build and not _same_sha(build.get('ready_sha'), ready_sha) and criteria is None:
+            # Explicit runner --sha may collect another commit, but it cannot
+            # establish readiness for the current grader attempt.
+            if identity is None:
+                return None
         directory = root() / "content" / "evidence" / subject
         path = _contained(event["path"], directory)
         raw = path.read_bytes()
@@ -65,14 +76,49 @@ def bundle_for(events, subject, ready_sha):
             text = (root() / "content" / f"{subject}.md").read_text()
             if data["spec_sha256"] != evidence_revision.digest(text):
                 return None
+        stable = 'bundle_key' in data
+        if identity is not None and not stable:
+            return None
+        if stable:
+            text = (root() / 'content' / f'{subject}.md').read_text()
+            project = data['project']
+            if (not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', project)
+                    or event.get('project') != project
+                    or build and build.get('project') != project):
+                return None
+            if identity is None:
+                env = {k: v for k, v in build_runner.grading_env._clean_env().items()
+                       if not k.startswith('GIT_')}
+                repo = root() / 'repos' / project
+                sha = build_runner._resolve(repo, ready_sha, env, time.monotonic() + 30)
+                identity = build_runner._bundle_base(repo, project, build or {}, sha,
+                                                     env, time.monotonic() + 30)
+            else:
+                sha = ready_sha
+            base, master, local_master = identity
+            if (not master or data['base_sha'] != base or data['master_sha'] != master
+                    or data.get('local_master_sha') != local_master
+                    or event.get('base_sha') != base or data.get('criteria') != selected
+                    or data['bundle_key'] != evidence_revision.bundle_key(text, events, subject, sha, base)
+                    or event.get('bundle_key') != data['bundle_key']
+                    or data.get('runner_version') != (runner_version or build_runner.VERSION)):
+                return None
         if not isinstance(data["commands"], list) or not isinstance(data["comparison"], dict):
             return None
         tails = []
         for index, command in enumerate(data["commands"] + data.get("base", [])):
-            tail = _contained(command["tail"], directory).read_text()
-            tails.append(f"Command output {index}:\n{tail}")
+            output = _contained(command["tail"], directory).read_bytes()
+            if stable and hashlib.sha256(output).hexdigest() != command['tail_sha256']:
+                return None
+            tails.append(f"Command output {index}:\n{output.decode(errors='replace')}")
+        if stable:
+            build_runner._event(subject, data['project'], 'bundle-reused',
+                sha=data['sha'], base_sha=data['base_sha'], bundle_key=data['bundle_key'],
+                path=event['path'], bundle_sha256=event['bundle_sha256'])
         return {"event": event, "bundle": data, "raw": raw.decode(), "tails": tails}
-    except (OSError, ValueError, KeyError, TypeError, UnicodeError):
+    except (OSError, ValueError, KeyError, TypeError, UnicodeError, subprocess.SubprocessError):
+        return None
+    except build_runner.Undetermined:
         return None
 
 
@@ -136,6 +182,7 @@ def gate(events, subject, packet, emit, fail):
     evidence = [e for e in events if e.get('subject') == subject
                 and e.get('type') in {'evidence-bundle', 'evidence-bundle-failed'}
                 and ready and _same_sha(e.get('sha'), ready)
+                and (e['type'] != 'evidence-bundle' or e.get('criteria') is None)
                 # Undated legacy failures can retain a no-spend infra hold;
                 # they can never establish readiness for paid grading.
                 and (e['type'] == 'evidence-bundle-failed' and not build.get('ts')
@@ -148,7 +195,8 @@ def gate(events, subject, packet, emit, fail):
     # Ledger order breaks timestamp ties, matching the fold's latest-event rule.
     failure_newer = failed and (not bundle_event or events.index(failed) > events.index(bundle_event))
     bundle = bundle_for(events, subject, ready) if bundle_event else None
-    if failure_newer or (bundle_event and bundle is None):
+    legacy_unreadable = bundle_event and bundle is None and not bundle_event.get('bundle_key')
+    if failure_newer or legacy_unreadable:
         reason = failed.get("reason", "runner failed") if failure_newer else "bundle-unreadable"
         if ready and failure_newer and (failed.get("reason_code") == "wall-cap" or reason == "wall cap exceeded"):
             # Dispatch's infra gate has already enforced retry_at. A retry is

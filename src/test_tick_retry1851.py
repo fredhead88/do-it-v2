@@ -101,6 +101,8 @@ def deferred(mode='silent'):
             return subprocess.Popen([sys.executable, '-c', 'pass'], **kw)
         real_popen = subprocess.Popen
         def launch_checker(checker_argv, **kw):
+            if 'run-checks' not in checker_argv:
+                return real_popen(checker_argv, **kw)
             with patch.object(subprocess, 'Popen', real_popen):
                 child = local_checker(checker_argv, **kw)
                 assert child.wait(timeout=10) == 0
