@@ -32,6 +32,26 @@ def cli(command, repo, mf, cf=None, extra=(), env=None):
     return subprocess.run(args + list(extra), capture_output=True, text=True, env=env)
 
 
+def test_machine_equal_fixtures_no_drift():
+    with tempfile.TemporaryDirectory(prefix="machine-equal-") as tmp:
+        mirror = Path(tmp) / "machine"
+        mirror.mkdir()
+        for name, text in zip(machine.NAMES, (MODELS, CRON)):
+            (mirror / name).write_bytes(text.encode())
+
+        assert machine.check(live_models=MODELS, live_crontab=CRON, repo=tmp) == []
+        extra = "# extra live line\n"
+        for subject in machine.NAMES:
+            drifts = machine.check(
+                live_models=MODELS + (extra if subject == "models.toml" else ""),
+                live_crontab=CRON + (extra if subject == "crontab.txt" else ""),
+                repo=tmp,
+            )
+            assert drifts == [machine.Drift(
+                "differs", subject, f"live-only: {[extra]!r}; repo-only: []")]
+        signed(2, "test_machine_equal_fixtures_no_drift: equal fixtures; one live-only line per subject")
+
+
 def test_machine_contract():
     with tempfile.TemporaryDirectory(prefix="machine-test-") as tmp:
         root = Path(tmp)
@@ -194,4 +214,5 @@ def test_machine_contract():
 
 
 if __name__ == "__main__":
+    test_machine_equal_fixtures_no_drift()
     test_machine_contract()
