@@ -52,7 +52,8 @@ class QueueTests(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
         p = patch.dict(os.environ, {'DOIT_ROOT': str(self.root), 'DOIT_NO_POKE': '1',
-                                   'DOIT_LEDGER_FILE': 'L-executor-0001.jsonl'})
+                                   'DOIT_LEDGER_FILE': 'L-executor-0001.jsonl',
+                                   'DOIT_REHEARSAL_LAUNCHER': 'off'})
         p.start()
         self.addCleanup(p.stop)
         self.events = []
@@ -2269,6 +2270,377 @@ class RedcutRegressionTests(_RedcutCase):
         self.signed('AC6',dict(inventory=list(self.PATHS),runs=8,recursive=False,records=records))
 
 
+class RehearsalLauncherTests(unittest.TestCase):
+    """Real Git/persistence coverage of the stacked admission step."""
+
+    def setUp(self):
+        QueueTests.setUp(self)
+        self.repo = self.root / 'repos' / 'albert-scott'
+        self.repo.mkdir(parents=True)
+        self.git('init', '-q', '-b', 'master')
+        (self.repo / 'base.txt').write_text('base\n')
+        self.git('add', '.')
+        self.git('commit', '-qm', 'base')
+        self.base = self.git('rev-parse', 'HEAD')
+        self.specs = [f'L-spec-{9500 + i}' for i in range(9)]
+        events = []
+        for index, sid in enumerate(self.specs):
+            branch = sid.lower()
+            self.git('switch', '-qc', branch, self.base)
+            (self.repo / f'{index}.txt').write_text(sid + '\n')
+            self.git('add', '.')
+            self.git('commit', '-qm', sid)
+            (self.root / 'content' / (sid + '.md')).write_text(f'Writes: {index}.txt\n')
+            events.append(dict(v=1, type='queue-add', subject=sid, actor='executor',
+                               ts=self.now.isoformat(), project='albert-scott', branch=branch))
+        self.git('switch', '-q', 'master')
+        QueueTests.seed(self, events)
+        self.stack = __import__('contextlib').ExitStack()
+        self.addCleanup(self.stack.close)
+        self.stack.enter_context(patch.dict(os.environ, DOIT_MAIN='master', DOIT_WINDOW_RECHAIN='off',
+                                           DOIT_REHEARSAL_BATCHES='3', DOIT_READ_CACHE='0',
+                                           DOIT_REHEARSAL_LAUNCHER='on'))
+
+    def git(self, *args):
+        result = subprocess.run(['git', '-C', str(self.repo), '-c', 'user.name=fixture',
+                                 '-c', 'user.email=fixture@localhost', *args],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.strip()
+
+    def fresh(self):
+        result = subprocess.run([sys.executable, '-c',
+            'import fold,json; print(json.dumps(fold.read_events(use_cache=False)))'],
+            env=dict(os.environ, PYTHONPATH=str(Path(__file__).parent.resolve())),
+            capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def test_stacked_refill_persists_441_and_workers_consume_prepared_candidates(self):
+        import window_rehearse
+        calls, verified = [], []
+        def verify(repo, candidate, required, ident, *, rehearsal=False):
+            import test_slots
+            self.assertTrue(rehearsal)
+            self.assertEqual(test_slots.held_count(self.root), 1)
+            verified.append(candidate)
+            return dict(state='green', nodes=[], url='fixture://ci/' + ident, doc={})
+        def runner(argv):
+            calls.append(argv)
+            # The real worker must consume the parent's immutable preparation.
+            with patch.object(window_rehearse, 'prepare', side_effect=AssertionError('candidate rebuilt')):
+                self.assertEqual(mq.window_gate.main_(argv[2:]), 0)
+            return dict(code=0)
+        with patch.object(mq.window_gate, 'required_checks', return_value=['fixture']), \
+             patch.object(mq.window_gate, 'scope', return_value=dict(checks=['fixture'])), \
+             patch.object(mq.window_gate, 'verify', side_effect=verify):
+            started = mq._refill_rehearsals('albert-scott', runner=runner, cap=4)
+        batches = mq._rehearsal_batches(self.fresh(), 'albert-scott')
+        self.assertEqual(len(started), 3)
+        self.assertEqual([len(row['specs'].split(',')) for row in batches], [4, 4, 1])
+        base = self.base
+        for index, row in enumerate(batches):
+            self.assertEqual(row['base_sha'], base)
+            self.assertEqual(row['receipt']['base_sha'], base)
+            self.assertEqual(row['receipt']['sha'], verified[index])
+            self.assertEqual(row['receipt']['state'], 'green')
+            base = verified[index]
+        self.assertEqual([sid for batch in batches for sid in batch['specs'].split(',')], self.specs)
+        self.assertEqual(mq._refill_rehearsals('albert-scott', runner=runner, cap=4), [])
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(self.git('rev-parse', 'master'), self.base)
+        # Real worker receipts must retain enough identity for the ordinary
+        # launcher; synthetic reports with extra fields hid this handoff gap.
+        code, launches = self.tick()
+        self.assertEqual(code, 0)
+        self.assertEqual(len(launches), 1)
+        self.assertNotIn('--rehearse', launches[0])
+        self.assertEqual(launches[0][2], batches[0]['subject'])
+        body = json.dumps(dict(calls=calls, batches=batches), sort_keys=True)
+        print(json.dumps(dict(url='cli://doit-v2/C22/stacked-admission', status=0,
+                              body_sha256=hashlib.sha256(body.encode()).hexdigest(), body_excerpt=body)))
+
+    def test_prepared_candidate_rejects_changed_branch_tree_base_and_actor(self):
+        import window_rehearse
+        entries = mq.window_gate.resolve_entries(self.repo, [self.specs[0] + ':' + self.specs[0].lower()], [])
+        ident = 'window-binding'
+        candidate = window_rehearse.prepare(self.repo, ident, self.base, entries, 'albert-scott', 'master', [])
+        receipt = dict(type='window-rehearsed', subject=ident, project='albert-scott', actor='executor',
+                       ts=self.now.isoformat(), state='prepared', launcher_prepared=True,
+                       base_sha=self.base, sha=candidate, tree=mq.window_gate.tree_of(self.repo, candidate),
+                       specs=[entries[0][0]], entries=[list(entry) for entry in entries])
+        self.assertEqual(window_rehearse.prepared_candidate(
+            self.repo, ident, 'albert-scott', self.base, entries, [receipt]), candidate)
+        for change in (dict(tree='0' * 40), dict(base_sha=candidate), dict(entries=[]),
+                       dict(specs=[]), dict(sha='missing'), dict(state='green')):
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                window_rehearse.prepared_candidate(self.repo, ident, 'albert-scott', self.base,
+                                                   entries, [dict(receipt, **change)])
+        for change in (dict(actor='builder'), dict(project='other'), dict(subject='other')):
+            self.assertIsNone(window_rehearse.prepared_candidate(
+                self.repo, ident, 'albert-scott', self.base, entries, [dict(receipt, **change)]))
+
+    def test_C22_AC2(self):
+        calls = []
+        def launcher(argv, **kwargs):
+            calls.append(argv)
+            self.assertTrue(kwargs['start_new_session'])
+            return type('Worker', (), dict(pid=os.getpid()))()
+        started = mq._refill_rehearsals('albert-scott', launcher=launcher, cap=4)
+        inventory = mq._rehearsal_batches(self.fresh(), 'albert-scott')
+        self.assertEqual(len(started), 3)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual([len(batch['taken']) for batch in inventory], [4, 4, 1])
+        # Exercise the existing append/admission path for a reported red and
+        # its matching disposition. Launcher result consumption is a separate
+        # contract; the board must distinguish reported from actually parked.
+        last = inventory[-1]
+        parked = last['taken'][0]
+        mq._train_emit('L-executor-0001.jsonl', last['subject'], 'window-rehearsed',
+                       project='albert-scott', base_sha=last['base_sha'], sha=last['sha'],
+                       specs=last['taken'], state='red', rehearsal=True,
+                       attribution=dict(proven={parked: ['fixture::failure']},
+                                        drop={parked: ['fixture::failure']}))
+        mq._train_emit('L-executor-0001.jsonl', parked, 'queue-remove', project='albert-scott',
+                       window=last['subject'], reason='attributed rehearsal red')
+        result = subprocess.run([sys.executable, str(Path(fold.__file__)), 'board'],
+                                env=dict(os.environ, DOIT_PROJECT='albert-scott'),
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        section = result.stdout.split('## MERGE LANE\n', 1)[1].split('\n\n', 1)[0]
+        base = self.base
+        for batch in inventory:
+            self.assertEqual(batch['base_sha'], base)
+            self.assertIn(batch['subject'], section)
+            self.assertIn('candidate=' + batch['sha'], section)
+            self.assertIn('specs=' + batch['specs'], section)
+            self.assertIn('chain=' + base + ' -> ' + batch['sha'], section)
+            self.assertIn('stacked-on=' + base, section)
+            base = batch['sha']
+        self.assertIn('rehearsal=prepared', section)
+        self.assertIn('rehearsal=red', section)
+        for label in ('ATTRIBUTED', 'FALLBACK'):
+            self.assertIn(label + ' ' + parked, section)
+        self.assertIn('disposition=parked', section)
+        self.assertIn('reason=attributed rehearsal red', section)
+        body = json.dumps(dict(inventory=inventory, rendered=section), sort_keys=True)
+        print(json.dumps(dict(url='cli://doit-v2/C22/AC2', status=0,
+                              body_sha256=hashlib.sha256(body.encode()).hexdigest(), body_excerpt=body)))
+
+
+    def emit(self, ident, kind, **fields):
+        mq._train_emit('L-executor-0001.jsonl', ident, kind, project='albert-scott', **fields)
+
+    def batches(self, project='albert-scott'):
+        return mq._rehearsal_batches(self.fresh(), project)
+
+    def report(self, batch, state, **fields):
+        self.emit(batch['subject'], 'window-rehearsed', base_sha=batch['base_sha'], sha=batch['sha'],
+                  specs=batch['specs'].split(','), state=state, rehearsal=True,
+                  entries=batch['receipt']['entries'], **fields)
+
+    def add_spec(self, project, sid, files, start):
+        repo = self.root / 'repos' / project
+        self.git('switch', '-qc', sid.lower(), start)
+        for name, text in files.items():
+            (repo / name).parent.mkdir(parents=True, exist_ok=True)
+            (repo / name).write_text(text)
+        self.git('add', '.')
+        self.git('commit', '-qm', sid)
+        (self.root / 'content' / (sid + '.md')).write_text('Writes: ' + ', '.join(files) + '\n')
+        self.git('switch', '-q', 'master')
+        return dict(v=1, type='queue-add', subject=sid, actor='executor', ts=self.now.isoformat(),
+                    project=project, branch=sid.lower())
+
+
+    def tick(self, **kwargs):
+        calls = []
+        with patch.dict(os.environ, DOIT_WINDOW_MAX_MERGES='4'):
+            code = mq.window_run('albert-scott', runner=lambda argv: calls.append(argv) or dict(code=0), **kwargs)
+        return code, calls
+
+    def test_C22_AC1(self):
+        code, calls = self.tick()
+        batches = self.batches()
+        self.assertEqual(code, 0)
+        self.assertEqual([len(b['specs'].split(',')) for b in batches], [4, 4, 1])
+        base = self.base
+        for batch, argv in zip(batches, calls):
+            self.assertEqual((batch['base_sha'], argv[argv.index('--on') + 1]), (base, base))
+            base = batch['sha']
+        self.assertEqual(len(calls), 3)
+        # Capacity: a further tick starts nothing while three batches are in flight.
+        self.assertIsNone(mq.refill_candidate(self.fresh(), 'albert-scott'))
+        self.assertEqual(self.tick()[1], [])
+        self.assertEqual(len(self.batches()), 3)
+        # Green: the first batch launches its ordinary window on the next tick.
+        self.report(batches[0], 'green', tree=batches[0]['receipt']['tree'])
+        # Capacity must not suppress the tick step that consumes a verdict.
+        from nextstep import Step
+        step = Step(self.specs[0], 'spec', 'merging', 'action', 'merge', 'tick',
+                    'queue-add', 'condition met', None, self.now.isoformat())
+        events = self.fresh()
+        launches = []
+        def dispatcher(argv):
+            launches.append(argv)
+            return dict(code=0, stdout='', stderr='')
+        dispatcher.events = events
+        owner = self.root / 'state' / ('window-run.' + batches[0]['subject'] + '.pid')
+        owner.write_text(str(os.getpid()))
+        outcomes = tick.run_steps(events, {}, self.now, dispatcher=dispatcher, steps=[step])
+        owner.unlink()
+        self.assertEqual(launches, [['doit', 'window-run', '--project', 'albert-scott', '--detach']])
+        self.assertTrue(any(line.startswith('acted ') for line in outcomes), outcomes)
+        code, calls = self.tick()
+        self.assertEqual(code, 0)
+        self.assertEqual([a[2] for a in calls], [batches[0]['subject']])
+        self.assertNotIn('--rehearse', calls[0])
+        self.assertEqual(calls[0][calls[0].index('--specs') + 1].split(',')[0], 'L-spec-9500:l-spec-9500')
+        (self.root / 'state' / ('window-run.' + batches[0]['subject'] + '.pid')).write_text(str(os.getpid()))
+        self.assertEqual(self.tick()[1], [])
+        # ATTRIBUTED red on the second batch parks the culprit, voids its stacked
+        # successor and re-forms one batch on the newest surviving candidate.
+        culprit = batches[1]['specs'].split(',')[0]
+        self.report(batches[1], 'red', attribution=dict(proven={culprit: ['n::a']}, drop={culprit: ['n::a']}))
+        self.report(batches[0], 'green', tree=batches[0]['receipt']['tree'])
+        code, calls = self.tick()
+        self.assertEqual(code, 0)
+        after = self.batches()
+        self.assertEqual([b['subject'] for b in after][0], batches[0]['subject'])
+        formed = after[1:]
+        self.assertEqual(len(formed), 1)
+        self.assertEqual(formed[0]['base_sha'], batches[0]['sha'])
+        remaining = [s for s in self.specs if s != culprit and s not in batches[0]['specs'].split(',')]
+        self.assertEqual(formed[0]['specs'].split(','), remaining[:4])
+        queued = [row['spec'] for row in mq.queue(self.fresh(), 'albert-scott')]
+        self.assertNotIn(culprit, queued)
+        self.assertEqual(sorted(queued), sorted(s for s in self.specs if s != culprit))
+        # FALLBACK-only attribution gets the same treatment.
+        victim = formed[0]['specs'].split(',')[1]
+        self.report(formed[0], 'red', attribution=dict(proven={}, drop={victim: ['n::b']}))
+        self.tick()
+        self.assertNotIn(victim, [row['spec'] for row in mq.queue(self.fresh(), 'albert-scott')])
+        self.assertTrue(all(victim not in b['specs'] for b in self.batches()))
+        # Unattributed red is never clean or parked: the batch is held.
+        held = self.batches()[-1]
+        self.report(held, 'red')
+        self.tick()
+        self.assertIn(held['subject'], [b['subject'] for b in self.batches()])
+        body = json.dumps(dict(calls=calls, batches=after), sort_keys=True)
+        print(json.dumps(dict(url='cli://doit-v2/C22/AC1', status=0,
+                              body_sha256=hashlib.sha256(body.encode()).hexdigest(), body_excerpt=body[:300])))
+
+    def test_C22_AC1_safety_cases(self):
+        project = 'safety'
+        self.repo = self.root / 'repos' / project
+        self.repo.mkdir(parents=True)
+        self.git('init', '-q', '-b', 'master')
+        (self.repo / 'base.txt').write_text('base\n')
+        self.git('add', '.')
+        self.git('commit', '-qm', 'base')
+        start = self.git('rev-parse', 'HEAD')
+        v = 'api/alembic_supabase/versions/'
+        rows = [self.add_spec(project, 'L-spec-9601', {'shared.txt': 'a\n'}, start),
+                self.add_spec(project, 'L-spec-9602', {'shared.txt': 'b\n'}, start),
+                self.add_spec(project, 'L-spec-9603', {v + 'm1.py': 'x = 1\n'}, start),
+                self.add_spec(project, 'L-spec-9604', {v + 'm2.py': 'x = 2\n'}, start),
+                self.add_spec(project, 'L-spec-9605', {'clash': 'file\n'}, start),
+                self.add_spec(project, 'L-spec-9606', {'clash/inner.txt': 'dir\n'}, start)]
+        QueueTests.seed(self, [dict(row, project=project) for row in rows])
+        mq._refill_rehearsals(project, runner=lambda argv: None, cap=6)
+        formed = [b['taken'] for b in self.batches(project)]
+        flat = [sid for taken in formed for sid in taken]
+        for sid in ('L-spec-9601', 'L-spec-9602', 'L-spec-9603', 'L-spec-9604', 'L-spec-9605', 'L-spec-9606'):
+            self.assertLessEqual(flat.count(sid), 1)
+        for taken in formed:
+            self.assertFalse({'L-spec-9601', 'L-spec-9602'} <= set(taken), 'shared file in one batch')
+            self.assertFalse({'L-spec-9603', 'L-spec-9604'} <= set(taken), 'two migrations in one batch')
+            self.assertFalse({'L-spec-9605', 'L-spec-9606'} <= set(taken), 'unclean merge on stacked base')
+        self.assertLessEqual(len(formed), 3)
+
+    def test_C22_AC3(self):
+        import threading
+        self.assertFalse(mq.local_prefilter_enabled())
+        trace, started, lock = [], threading.Event(), threading.Lock()
+        def launcher(argv, **kwargs):
+            with lock:
+                trace.append(('ci-start', argv[2]))
+            started.set()
+            return type('W', (), dict(pid=os.getpid() + 1))()
+        def local(repo, run, candidate, members):
+            with lock:
+                trace.append(('local-start', run['batch']))
+            self.assertTrue(started.wait(5), 'local ran before CI dispatch: CI would have been delayed')
+            with lock:
+                trace.append(('local-done', run['batch']))
+            return self.verdicts[run['batch']]
+        cancels = []
+        # Default: no local pass at all, CI dispatches immediately.
+        self.verdicts = {}
+        mq._refill_rehearsals('albert-scott', launcher=launcher, cap=4, cancel=cancels.append)
+        self.assertEqual([t[0] for t in trace], ['ci-start'] * 3)
+        self.assertEqual(cancels, [])
+        # Environment selects N and the local switch.
+        with patch.dict(os.environ, DOIT_LOCAL_PREFILTER='on', DOIT_REHEARSAL_BATCHES='2'):
+            self.assertTrue(mq.local_prefilter_enabled())
+            import window_rehearse
+            self.assertEqual(window_rehearse.capacity(), 2)
+        with patch.dict(os.environ, DOIT_LOCAL_PREFILTER='maybe'):
+            with self.assertRaises(ValueError):
+                mq.local_prefilter_enabled()
+        # Enabled: local overlaps CI. Reset to a clean ledger of unbatched ready specs.
+        first = self.batches()
+        for batch in first:
+            mq._release_batch('L-executor-0001.jsonl', 'albert-scott', batch['subject'],
+                              batch['specs'].split(','), [], 'fixture reset', candidate=batch['sha'])
+        trace.clear()
+        started.clear()
+        def launcher2(argv, **kwargs):
+            trace.append(('ci-start', argv[2]))
+            started.set()
+            return type('W', (), dict(pid=os.getpid() + 1))()
+        class Verdicts(dict):
+            def __missing__(self, key):
+                return 'green'
+        self.verdicts = Verdicts()
+        green = self.tick_local(launcher2, local, cancels)
+        self.assertEqual(cancels, [], 'local green must cancel nothing')
+        self.assertEqual(sorted(t[0] for t in trace), ['ci-start'] * 3 + ['local-done'] * 3 + ['local-start'] * 3)
+        for batch in green:
+            self.assertLess(trace.index(('ci-start', batch)), trace.index(('local-done', batch)))
+        # Local red on the second batch cancels exactly that run and its stacked successor.
+        for batch in self.batches():
+            mq._release_batch('L-executor-0001.jsonl', 'albert-scott', batch['subject'],
+                              batch['specs'].split(','), [], 'fixture reset', candidate=batch['sha'])
+        trace.clear()
+        started.clear()
+        cancels.clear()
+        probe = []
+        def local_red(repo, run, candidate, members):
+            probe.append(run['batch'])
+            started.wait(5)
+            return 'red' if len(probe) == 2 else 'green'
+        self.tick_local(launcher2, local_red, cancels)
+        second = [t[1] for t in trace if t[0] == 'ci-start'][1]
+        self.assertEqual([c['batch'] for c in cancels], [second, [t[1] for t in trace][2]])
+        self.assertNotIn([t[1] for t in trace][0], [c['batch'] for c in cancels])
+        queued = [row['spec'] for row in mq.queue(self.fresh(), 'albert-scott')]
+        parked = self.batches()
+        self.assertEqual([b['subject'] for b in parked][0], [t[1] for t in trace][0])
+        redcuts = [e for e in self.fresh() if e['type'] == 'window-redcut' and e.get('outcome') == 'rehearsal-reformed']
+        self.assertEqual(sorted(e['subject'] for e in redcuts if e['dropped']), [second])
+        removed = [e['subject'] for e in self.fresh() if e['type'] == 'queue-remove' and e.get('window') == second]
+        self.assertEqual(len(removed), 4)
+        self.assertTrue(set(removed).isdisjoint(queued))
+        body = json.dumps(dict(trace=trace, cancels=cancels), sort_keys=True)
+        print(json.dumps(dict(url='cli://doit-v2/C22/AC3', status=0,
+                              body_sha256=hashlib.sha256(body.encode()).hexdigest(), body_excerpt=body[:300])))
+
+    def tick_local(self, launcher, local, cancels):
+        mq._refill_rehearsals('albert-scott', launcher=launcher, cap=4, local=local, cancel=cancels.append)
+        return [b['subject'] for b in self.batches()]
+
+
 if __name__ == '__main__':
     if sys.argv[1:] == ['--spec-1869-ac2']:
         suite = unittest.defaultTestLoader.loadTestsFromTestCase(GateToolingQueueTests)
@@ -2278,5 +2650,6 @@ if __name__ == '__main__':
     if not sys.argv[1:]:
         # AC6 must be explicitly selected: its candidate child invokes this
         # ordinary entry, which must not recursively start the paired harness.
-        sys.argv.extend(['QueueTests','GateToolingQueueTests','RedcutQueueTests','RedcutLedgerMetricsTests'])
+        sys.argv.extend(['QueueTests','GateToolingQueueTests','RedcutQueueTests','RedcutLedgerMetricsTests',
+                         'RehearsalLauncherTests'])
     unittest.main()

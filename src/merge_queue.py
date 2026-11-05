@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
 import subprocess
 import sys
 import uuid
@@ -602,7 +603,8 @@ def redcut_metrics(events, *, project, since, until):
     for name, evidence in windows.items():
         if project not in projects[name]:
             continue
-        redcuts = [e for e in evidence if e['type'] == 'window-redcut']
+        redcuts = [e for e in evidence if e['type'] == 'window-redcut'
+                   and e.get('outcome') != 'rehearsal-reformed']
         if not redcuts:
             continue
         try:
@@ -707,9 +709,360 @@ def merge_freeze(events, project):
     return 'unowned nightly red: ' + ', '.join(ids) if ids else None
 
 
-def window_run(project, *, runner=None, launcher=None, detach=False, now=None, precheck_runner=None):
+def _rehearsal_batches(events, project):
+    """Project-scoped reservations, including the interval before a worker starts."""
+    batches = {}
+    for event in _ordered(events):
+        if event.get('project') != project:
+            continue
+        ident, kind = event.get('subject'), event.get('type')
+        if kind == 'queue-batch' and event.get('rehearsal') is True:
+            batches[ident] = dict(event, receipt=None)
+        elif ident in batches:
+            if kind == 'window-rehearsed':
+                batches[ident]['receipt'] = event
+            elif kind in ('window-verified', 'window-redcut', 'escalation-blocking') or (
+                    kind == 'window-cancelled' and event.get('reason') == 'escalation-default'):
+                del batches[ident]
+    return list(batches.values())
+
+
+def _refill_rehearsals(project, *, runner=None, launcher=None, cap=6, local=None, cancel=None):
+    """Prepare and dispatch stacked CI work without acquiring ordinary gate slots.
+
+    Every reservation is durable before dispatch. The caller may poll results on
+    a later tick; a missing/undetermined candidate is never treated as free room.
+    """
+    import precheck
+    import window_prewindow
+    import window_rehearse
+
+    if (not re.fullmatch(r'[A-Za-z0-9._-]+', project) or project in ('.', '..')
+            or type(cap) is not int or not 1 <= cap <= 6):
+        raise ValueError('invalid rehearsal admission configuration')
+    ledger_file = os.environ.get('DOIT_LEDGER_FILE', 'L-executor-0001.jsonl')
+    started, locals_ = [], []
+    local = local if local is not None else (_local_prefilter if local_prefilter_enabled() else None)
+    cancel = cancel or _cancel_rehearsal
+    with _run_lock(project) as owned:
+        if not owned:
+            return started
+        events = _ordered(window_gate.train_events())
+        _window_reconcile(events, ledger_file)
+        events = _ordered(window_gate.train_events())
+        if _cleanup_pending(project, 'admission'):
+            print('window-run: rehearsal refill pending cleanup')
+            return started
+        reason = merge_freeze(events, project)
+        if reason:
+            print('window-run: rehearsal refill held; ' + reason)
+            return started
+        repo, main = _repository(project)
+        active = _rehearsal_batches(events, project)
+        capacity = window_rehearse.capacity()
+        base = window_gate.git(repo, 'rev-parse', '--verify', 'refs/heads/' + main).stdout.strip()
+        for batch in active:
+            receipt = batch['receipt'] or {}
+            if receipt.get('state') not in ('prepared', 'running', 'green'):
+                print('window-run: rehearsal refill held; predecessor verdict undetermined or red')
+                return started
+            candidate = receipt.get('sha', '')
+            if not re.fullmatch(r'[0-9a-f]{40}', candidate):
+                raise ValueError('in-flight rehearsal candidate unavailable')
+            window_gate.tree_of(repo, candidate)
+            base = candidate
+        red = set()
+        for event in events:
+            if event.get('type') == 'queue-add':
+                red.discard(event.get('subject'))
+            elif event.get('type') == 'precheck-red':
+                red.add(event.get('subject'))
+        remaining = [row for row in queue(events, project) if row['batch'] is None]
+        tiers = {'L-charter-0072': 0, 'L-charter-0074': 1}
+        remaining.sort(key=lambda row: tiers.get(
+            dispatch.resolve_charter(events, row['spec'], None), 2))
+        while remaining and len(active) < capacity:
+            entries, selected, skipped, paths, migration = [], [], [], set(), False
+            tip = base
+            for row in remaining:
+                sid = row['spec']
+                reason = 'precheck-red' if sid in red else 'cap-reached' if len(entries) >= cap else None
+                changes = spec_paths(repo, main, row['branch'])
+                if changes is None:
+                    raise ValueError('rehearsal footprint undetermined: ' + sid)
+                footprint = {path for _, path in changes}
+                migrations = any(path.startswith(window_gate.rechain.VERSIONS) and path.endswith('.py')
+                                 and '/_archive/' not in path for path in footprint)
+                if reason is None and paths & footprint:
+                    reason = 'footprint-conflict'
+                if reason is None and migration and migrations:
+                    reason = 'multiple-migrations'
+                if reason is None:
+                    entry = window_gate.resolve_entries(repo, [sid + ':' + row['branch']], events)[0]
+                    admitted, rejected = window_prewindow.select(
+                        repo, base, main, entries + [entry], events, fold.ROOT / 'content', on=base)
+                    if rejected or admitted != entries + [entry]:
+                        reason = ('prewindow: ' + '; '.join(why for _, why in rejected)
+                                  if rejected else 'prewindow-deferred')
+                    else:
+                        new_tip, conflict = precheck.merge(repo, tip, entry[2])
+                        if conflict:
+                            reason = 'merge-conflict: ' + conflict
+                if reason:
+                    skipped.append(dict(spec=sid, reason=reason))
+                    continue
+                tip = new_tip
+                entries.append(entry)
+                selected.append(sid)
+                paths.update(footprint)
+                migration = migration or migrations
+            print(f'window-run: rehearsal selected {len(selected)}; skipped {len(skipped)}; '
+                  f'exclusions={json.dumps(skipped)}')
+            if not entries:
+                break
+            ident = 'window-' + uuid.uuid4().hex
+            candidate = window_rehearse.prepare(repo, ident, base, entries, project, main, events)
+            tree = window_gate.tree_of(repo, candidate)
+            _train_emit(ledger_file, ident, 'queue-batch', project=project, specs=','.join(selected),
+                        rehearsal=True, base_sha=base, sha=candidate, cap=cap, queue_len=len(remaining),
+                        taken=selected, skipped=skipped, reason='rehearsal-refill')
+            _train_emit(ledger_file, ident, 'window-rehearsed', project=project, specs=selected,
+                        rehearsal=True, base_sha=base, sha=candidate, tree=tree, state='prepared',
+                        launcher_prepared=True, entries=[list(entry) for entry in entries])
+            argv = ['doit', 'gate-window', ident, '--project', project, '--main', main,
+                    '--rehearse', '--on', base,
+                    '--specs', ','.join(spec + ':' + branch for spec, branch, _ in entries)]
+            run = dict(batch=ident, project=project, pid=None)
+            # CI is dispatched first; the optional local pass only overlaps it.
+            if runner is not None:
+                runner(argv)
+            else:
+                log = fold.ROOT / 'state' / f'rehearsal.{ident}.log'
+                with log.open('ab') as stream:
+                    process = (launcher or subprocess.Popen)([DOIT, *argv[1:]], start_new_session=True,
+                                                            stdout=stream, stderr=subprocess.STDOUT)
+                (fold.ROOT / 'state' / f'rehearsal.{ident}.pid').write_text(str(process.pid))
+                run['pid'] = process.pid
+            started.append(ident)
+            if local is not None:
+                locals_.append(_start_local(local, repo, run, candidate, selected))
+            events = _ordered(window_gate.train_events())
+            active = _rehearsal_batches(events, project)
+            current = next((batch for batch in active if batch['subject'] == ident), None)
+            if current is None or (current['receipt'] or {}).get('state') not in ('prepared', 'running', 'green'):
+                print('window-run: rehearsal refill stopped; current batch has no usable candidate verdict')
+                break
+            remaining = [row for row in remaining if row['spec'] not in selected]
+            base = candidate
+        _consume_local(project, ledger_file, locals_, started, cancel)
+    return started
+
+
+def local_prefilter_enabled(env=None):
+    """The optional local pass is off unless explicitly switched on."""
+    value = str((os.environ if env is None else env).get('DOIT_LOCAL_PREFILTER', 'off')).lower()
+    if value not in ('on', 'off', '1', '0', 'true', 'false'):
+        raise ValueError('DOIT_LOCAL_PREFILTER must be on or off')
+    return value in ('on', '1', 'true')
+
+
+def _local_prefilter(repo, run, candidate, members):
+    """Run the configured local command on the exact candidate; anything else is no verdict."""
+    import shlex
+    import tempfile
+    command = shlex.split(os.environ.get('DOIT_LOCAL_PREFILTER_CMD', ''))
+    if not command:
+        return 'undetermined'
+    with tempfile.TemporaryDirectory(prefix='local-prefilter-') as directory:
+        tree = Path(directory) / 'tree'
+        window_gate.git(repo, 'worktree', 'add', '--detach', str(tree), candidate)
+        try:
+            done = subprocess.run(command, cwd=tree, capture_output=True, timeout=3600)
+        except (OSError, subprocess.SubprocessError):
+            return 'undetermined'
+        finally:
+            window_gate.git(repo, 'worktree', 'remove', '--force', str(tree))
+    return 'green' if done.returncode == 0 else 'red'
+
+
+def _start_local(local, repo, run, candidate, members):
+    import threading
+    box = dict(run=run, candidate=candidate, members=list(members), verdict='undetermined')
+
+    def work():
+        try:
+            box['verdict'] = local(repo, run, candidate, list(members))
+        except Exception:
+            box['verdict'] = 'undetermined'
+    thread = threading.Thread(target=work, daemon=True)
+    box['thread'] = thread
+    thread.start()
+    return box
+
+
+def _cancel_rehearsal(run):
+    """Stop only the worker this launcher started for the batch; its trap cancels CI."""
+    pid = run.get('pid')
+    if type(pid) is int and pid > 1 and _alive(pid):
+        try:
+            os.killpg(pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+
+def _release_batch(ledger_file, project, ident, members, parked, reason, *, candidate='', base=''):
+    """Park attributed members and return the rest of the batch to the ready queue."""
+    stamp = datetime.now(timezone.utc).isoformat()
+    for spec in sorted(parked):
+        _train_emit(ledger_file, spec, 'queue-remove', project=project, window=ident, reason=reason)
+    _train_emit(ledger_file, ident, 'window-redcut', window=ident, project=project, candidate=candidate,
+                base=base or '0' * 40, dropped=sorted(parked), returned=[m for m in members if m not in parked],
+                flakes=[], residual=[], first_red_at=stamp, closed_at=stamp,
+                outcome='rehearsal-reformed', automatic=True)
+
+
+def _consume_local(project, ledger_file, locals_, started, cancel):
+    """A local red cancels its own CI run, parks its batch and voids stacked successors."""
+    for box in locals_:
+        box['thread'].join(timeout=3600)
+    events = _ordered(window_gate.train_events())
+    for index, box in enumerate(locals_):
+        if box['verdict'] != 'red':
+            continue
+        active = {batch['subject']: batch for batch in _rehearsal_batches(events, project)}
+        names = [box['run']['batch']] + [b['run']['batch'] for b in locals_[index + 1:]]
+        for name in names:
+            batch = active.get(name)
+            if batch is None:
+                continue
+            run = next(b['run'] for b in locals_ if b['run']['batch'] == name)
+            cancel(run)
+            members = batch['specs'].split(',')
+            first = name == box['run']['batch']
+            _release_batch(ledger_file, project, name, members, members if first else [],
+                           'local pre-filter red' if first else 'stacked on locally red batch',
+                           candidate=batch.get('sha', ''), base=batch.get('base_sha', ''))
+        break
+
+
+def rehearsal_launcher_enabled(env=None):
+    value = str((os.environ if env is None else env).get('DOIT_REHEARSAL_LAUNCHER', 'off')).lower()
+    if value not in ('on', 'off'):
+        raise ValueError('DOIT_REHEARSAL_LAUNCHER must be on or off')
+    return value == 'on'
+
+
+def refill_candidate(events, project=None):
+    """First unbatched ready spec while fewer than N rehearsal batches are in flight."""
+    if not rehearsal_launcher_enabled():
+        return None
+    import window_rehearse
+    events = _ordered(events)
+    rows = queue(events, project)
+    if not rows:
+        return None
+    active = _rehearsal_batches(events, rows[0]['project'])
+    if any((batch['receipt'] or {}).get('state') in ('green', 'red') for batch in active):
+        return active[0]['specs'].split(',')[0]
+    free = [row for row in rows if row['batch'] is None]
+    return free[0]['spec'] if free and len(active) < window_rehearse.capacity() else None
+
+
+def _settle_rehearsals(project, ledger_file, *, runner=None, launcher=None, cancel=None):
+    """Park attributed reds, void their stacked successors and launch the oldest green batch."""
+    cancel = cancel or _cancel_rehearsal
+    launched = []
+    events = _ordered(window_gate.train_events())
+    active = _rehearsal_batches(events, project)
+    for index, batch in enumerate(active):
+        receipt = batch['receipt'] or {}
+        if receipt.get('state') != 'red':
+            continue
+        members = batch['specs'].split(',')
+        attribution = receipt.get('attribution') or {}
+        parked = set()
+        if isinstance(attribution, dict):
+            for field in ('proven', 'drop'):
+                blamed = attribution.get(field) or {}
+                if isinstance(blamed, dict):
+                    parked.update(spec for spec in blamed if spec in members)
+        if not parked:
+            print('window-run: rehearsal red without attribution; ' + batch['subject'] + ' held')
+            break
+        reason = 'attributed rehearsal red'
+        for later in active[index:]:
+            run = dict(batch=later['subject'], project=project, pid=_pid_of(later['subject']))
+            names = later['specs'].split(',')
+            if later is batch:
+                _release_batch(ledger_file, project, later['subject'], names, parked, reason,
+                               candidate=later.get('sha', ''), base=later.get('base_sha', ''))
+            else:
+                cancel(run)
+                _release_batch(ledger_file, project, later['subject'], names, [],
+                               'stacked on red rehearsal ' + batch['subject'],
+                               candidate=later.get('sha', ''), base=later.get('base_sha', ''))
+        events = _ordered(window_gate.train_events())
+        active = _rehearsal_batches(events, project)
+        break
+    flying = window_gate.in_flight(events, root=fold.ROOT)
+    if active and not _launching(events, project, flying) and not flying:
+        head = active[0]
+        receipt = head['receipt'] or {}
+        started = any(e.get('subject') == head['subject'] and
+                      e.get('type') in ('window-opened', 'window-candidate') for e in events)
+        if receipt.get('state') == 'green' and not started:
+            specs = ','.join(entry[0] + ':' + entry[1] for entry in receipt.get('entries', []))
+            if not specs:
+                print('window-run: green rehearsal has no member entries; not launched')
+                return launched
+            argv = ['doit', 'gate-window', head['subject'], '--project', project, '--specs', specs]
+            if runner is not None:
+                runner(argv)
+            else:
+                log = fold.ROOT / 'state' / f"window-run.{head['subject']}.log"
+                with log.open('ab') as stream:
+                    process = (launcher or subprocess.Popen)([DOIT, *argv[1:]], start_new_session=True,
+                                                            stdout=stream, stderr=subprocess.STDOUT)
+                (fold.ROOT / 'state' / f"window-run.{head['subject']}.pid").write_text(str(process.pid))
+            print(f"window-run: launched green rehearsal {head['subject']}")
+            launched.append(head['subject'])
+    return launched
+
+
+def _pid_of(ident):
+    try:
+        return int((fold.ROOT / 'state' / f'rehearsal.{ident}.pid').read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def _rehearsal_run(project, *, runner=None, launcher=None, now=None, cancel=None, local=None):
+    ledger_file = os.environ.get('DOIT_LEDGER_FILE', 'L-executor-0001.jsonl')
+    now = now if now is not None else datetime.now(timezone.utc)
+    cap = window_gate.max_merges(os.environ)
+    try:
+        with _run_lock(project) as owned:
+            if not owned:
+                print('window-run: lock held; no batch formed')
+                return 3
+            import quarantine
+            quarantine.apply(project, now=now)
+            launched = _settle_rehearsals(project, ledger_file, runner=runner, launcher=launcher,
+                                          cancel=cancel)
+        started = _refill_rehearsals(project, runner=runner, launcher=launcher, cap=min(cap, 6),
+                                     local=local, cancel=cancel)
+    except (OSError, RuntimeError, ValueError, KeyError, TypeError, StopIteration) as exc:
+        print(f'window-run: undetermined; {exc}', file=sys.stderr)
+        return 3
+    return 0 if launched or started else 3
+
+
+def window_run(project, *, runner=None, launcher=None, detach=False, now=None, precheck_runner=None,
+               cancel=None, local=None):
     if not re.fullmatch(r'[A-Za-z0-9._-]+', project) or project in ('.', '..'):
         return 2
+    if rehearsal_launcher_enabled():
+        return _rehearsal_run(project, runner=runner, launcher=launcher, now=now, cancel=cancel, local=local)
     ledger_file = os.environ.get('DOIT_LEDGER_FILE', 'L-executor-0001.jsonl')
     now = now if now is not None else datetime.now(timezone.utc)
     process = None
