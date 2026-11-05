@@ -187,7 +187,7 @@ def _run(ident, project, specs, on, main):
                 reused = True
             else:
                 with test_slots.acquire('rehearsal', None, root=fold.ROOT, spec=ident):
-                    result = gate.verify(repo, candidate, required, ident)
+                    result = gate.verify(repo, candidate, required, ident, rehearsal=True)
                 reused = False
             state = result['state']
             if state not in ('green', 'red', 'undetermined'):
@@ -208,6 +208,9 @@ def _run(ident, project, specs, on, main):
                         green=state == 'green', required=required, new_ids=result.get('nodes', []),
                         rehearsal=True, base_sha=base, project=project,
                         **({k: diagnosis[k] for k in ('flakes', 'flake_only') if k in diagnosis}))
+            if state == 'undetermined' and 'why' in result:
+                import prod_runner
+                diagnosis['why'] = prod_runner.redact(result['why'])[:500]
             emit(state, sha=candidate, tree=tree, required=required, reused=reused,
                  run_url=result.get('url', ''), **diagnosis)
             verdict = state + (f" (flakes: {len(diagnosis['flakes'])})" if diagnosis.get('flake_only') else '')
