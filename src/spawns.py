@@ -28,6 +28,30 @@ def resolve_cwd(value, root):
         path = Path(root) / path
     return str(path.resolve())
 
+
+def default_cwd(role, subject, project, root):
+    """Resolve an implicit dispatch path using registered orchestration metadata."""
+    from pathlib import Path
+
+    def component(value, name):
+        if not isinstance(value, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', value):
+            raise ValueError(f'invalid {name} component {value!r}')
+        return value
+
+    root = Path(root).resolve()
+    if project is None or project == '':
+        raise ValueError('no-project: missing registered project')
+    try:
+        project = component(project, 'project')
+    except ValueError as exc:
+        raise ValueError(f'no-project: {exc}') from exc
+    if not (root / 'repos' / project).is_dir():
+        raise ValueError(f'no-project: unregistered project {project!r}')
+    if role == 'builder':
+        subject = component(subject, 'subject')
+        return str((root / 'worktrees' / project / subject.lower()).resolve())
+    return str((root / 'repos' / project).resolve())
+
 def _role(e):
     sid = e.get("spawn")
     return "-".join(sid.split("-")[1:-1]) if sid else (e.get("role") or "")
