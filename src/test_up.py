@@ -176,6 +176,46 @@ class RelayRestartTests(unittest.TestCase):
             if not present:
                 self.assertEqual(calls[1], ["tmux", "new-session", "-d", "-s", "do-it-relay"])
 
+    def test_2045_targeted_context_restart(self):
+        end = {"type": "planner-ended", "subject": "L-charter-9001", "planner": "L-planner-9001",
+               "reason": "ctx", "ts": self.now.isoformat()}
+        source = fold.EVENTS / (end["planner"] + ".jsonl")
+        source.write_text(json.dumps(end) + "\n")
+        with patch.object(up, "default_launcher") as launcher, \
+             patch.object(up, "install"), patch.object(up.launch, "model_for", return_value=None):
+            self.assertTrue(up.restart_pane("L-planner-9001"))
+            launcher.assert_called_once()
+            argv = launcher.call_args.args[0]
+            started = [r for file in fold.EVENTS.glob("*.jsonl")
+                       for line in file.read_text().splitlines()
+                       if (r := json.loads(line))["type"] == "planner-started"]
+            self.assertEqual(len(started), 1)
+            self.assertEqual(started[0]["subject"], end["subject"])
+            self.assertEqual(started[0]["type"], "planner-started")
+            self.assertNotEqual(started[0]["planner"], end["planner"])
+            self.assertIn("DOIT_SUPERVISED=1", argv)
+            self.assertIn("DOIT_LEDGER_FILE=" + started[0]["planner"] + ".jsonl", argv)
+            self.assertEqual(argv[-1], end["subject"])
+            self.assertIn("--agent", argv)
+        for events, name in (([], end["planner"]), ([end], "L-relay-9001"),
+                             ([{**end, "reason": "exit-0"}], end["planner"]),
+                             ([end, {"type": "planner-started", "subject": end["subject"],
+                                     "ts": self.now.isoformat()}], end["planner"])):
+            source.write_text("".join(json.dumps(e) + "\n" for e in events))
+            with patch.object(up, "default_launcher") as launcher:
+                self.assertFalse(up.restart_pane(name))
+                launcher.assert_not_called()
+        source.write_text(json.dumps(end) + "\n")
+        with patch.object(up, "install"), \
+             patch.object(up.launch, "model_for", return_value=None), \
+             patch.object(up, "default_launcher", side_effect=OSError("tmux unavailable")):
+            with self.assertRaises(OSError):
+                up.restart_pane(end["planner"])
+        rows = [json.loads(line) for file in fold.EVENTS.glob("*.jsonl")
+                for line in file.read_text().splitlines()]
+        self.assertEqual([r["reason"] for r in rows if r.get("reason") == "restart-launch-failed"],
+                         ["restart-launch-failed"])
+
     def test_tick_records_each_restart_result(self):
         with ExitStack() as stack:
             for target, result in (("intake.run", {}), ("notes.run", None), ("pr_closeout.run", None),

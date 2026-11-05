@@ -197,5 +197,29 @@ class WindowPolicyTests(unittest.TestCase):
         for i in range(10):result('win-red-'+str(i),'red')
         self.assertEqual(window_gate.max_merges({}),2)
 
+    def test_2045_ac1_launch_round_trip(self):
+        # Reuse the established hermetic launch fixture, including its gate runner.
+        from test_merge_queue import QueueTests
+        fixture = QueueTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        fixture.window_seed(1)
+        code, calls = fixture.train_call()
+        self.assertEqual(code, 0)
+        rows = fold.read_events(use_cache=False)
+        batches = [e for e in rows if e['type'] == 'queue-batch']
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(batches), 1)
+        self.assertEqual((batches[0]['subject'], batches[0]['project'], batches[0]['specs']),
+                         (calls[0][2], 'albert-scott', fixture.sid))
+        before = len(batches)
+        code, calls = fixture.train_call(flying=[dict(window='active', specs=[fixture.sid])])
+        self.assertEqual((code, calls), (3, []))
+        self.assertEqual(sum(e['type'] == 'queue-batch' for e in fold.read_events(use_cache=False)), before)
+        import hashlib
+        body = json.dumps(dict(batch=batches[0], refused_new_batches=0), sort_keys=True)
+        print(json.dumps(dict(url='cli://L-spec-2045/AC1', status=0,
+                             body_sha256=hashlib.sha256(body.encode()).hexdigest(), body_excerpt=body)))
+
 
 if __name__=='__main__':unittest.main()

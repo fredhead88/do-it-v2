@@ -19,7 +19,7 @@ import fcntl, importlib, json, math, os, pathlib, subprocess, sys, time
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import ledger_cache
-import cli_path, ctx_guard, dispatch, fold, launch, models, scratch, tick  # noqa: E402
+import cli_path, ctx_guard, dispatch, fold, launch, models, panes, scratch, tick  # noqa: E402
 
 DOIT = HERE.parent / "doit"
 
@@ -462,6 +462,54 @@ def default_launcher(argv, *, runner=None):
     elif present.returncode != 0:
         raise OSError("tmux session state undetermined")
     runner(["tmux", "new-window", "-d", "-t", session, *argv], check=True, capture_output=True)
+
+
+def restart_pane(pane_name: str) -> bool:
+    """Issue one targeted Planner launch, retaining its charter and handover."""
+    if panes.ledger_role(pane_name) != "planner":
+        return False
+    ledger_files.assert_readable(fold.EVENTS)
+    try:
+        text = ledger_files.read_text(fold.EVENTS, f"{pane_name}.jsonl")
+    except FileNotFoundError:
+        return False
+    events = [json.loads(line) for line in text.splitlines() if line.strip()]
+    end = next((e for e in reversed(events) if e.get("type") == "planner-ended"
+                and (e.get("planner") or e.get("spawn") or
+                     pane_name) == pane_name), None)
+    if not end or end.get("reason") not in ("ctx", "held") or not end.get("subject"):
+        return False
+    ended_at = panes._ts(end.get("ts"))
+    if ended_at is None or any(e.get("type") == "planner-started" and e.get("subject") == end["subject"]
+                               and (panes._ts(e.get("ts")) is None or panes._ts(e["ts"]) >= ended_at)
+                               for e in events):
+        return False
+    install(dispatch.AGENTS / "planner.md")
+    ledger = dispatch.alloc(fold.EVENTS, "L-planner-", ".jsonl")
+    prompt = end["subject"]
+    handover = ctx_handover(events, prompt)
+    if handover:
+        prompt += f"\nResume from the handover: {handover}"
+    # Pass only launcher settings as argv; ambient credentials stay out of argv.
+    inherited = _child_env(ledger, supervised=True)
+    clean = launch.child_env("planner", base={})
+    settings = {k: inherited[k] for k in ("PATH", "DOIT_LEDGER_FILE", "DOIT_SUPERVISED")}
+    settings.update(clean, DOIT_ROOT=str(fold.ROOT))
+    removed = [k for k in os.environ if k not in launch.child_env("planner")]
+    argv = ["env", *(x for k in removed for x in ("-u", k)),
+            *(f"{k}={v}" for k, v in settings.items()),
+            *pane_cmd(prompt, name=ledger.stem, model=launch.model_for("planner"))]
+    refusal = dispatch.emit(ledger, {"spawn": ledger.stem}, "planner-started", strict=True,
+                            subject=end["subject"], planner=ledger.stem, mode="ctx-restart", attempt=1)
+    if refusal:
+        raise ValueError(refusal)
+    try:
+        default_launcher(argv)
+    except Exception:
+        dispatch.emit(ledger, {}, "planner-ended", subject=end["subject"], planner=ledger.stem,
+                      reason="restart-launch-failed")
+        raise
+    return True
 
 
 def ensure_relay(events, now, *, launcher=None):
