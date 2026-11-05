@@ -614,6 +614,8 @@ def _enqueue(c):
         raise ValueError('clean gate has no clean review timestamp')
     if _time(trigger['ts']) < _time(review['ts']):
         return None
+    if _merge(c) is not None:
+        return None
     return _result(review)
 
 
@@ -621,6 +623,10 @@ def _enqueue(c):
 def _merge(c):
     trigger = _latest(c['evs'], {'queue-add'})
     if not trigger or _after(c['evs'], trigger, {'queue-remove', 'shipped', 'window-dropped', 'merge-conflict', 'precheck-red'}):
+        return None
+    if _after(c['evs'], trigger, {'build-started', 'build-done', 'build-blocked'} | JUDGING):
+        return None
+    if _close(c) or _rebuild(c) or _regrade(c):
         return None
     from merge_queue import queue
     live = next((r for r in queue(c['events']) if r.get('spec') == c['sid']), None)

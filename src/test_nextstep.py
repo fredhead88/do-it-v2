@@ -192,6 +192,125 @@ class NextStepTests(unittest.TestCase):
         reversed_rules = dict(reversed(list(self.rules.items())))
         self.assertEqual(self.selected({'build': row, 'rebuild': row}, reversed_rules).action, 'rebuild')
 
+    def queued_clean(self, project='do-it-v2'):
+        return NoSilentUndeterminedTests().built() + [
+            event('verdict', -70, confirmed=True),
+            event('review', -60, n_blocking=0),
+            event('merge-gate-clean', -50, branch_sha='built', main_sha='old-main'),
+            event('queue-add', -40, project=project, branch='l-spec-9001')]
+
+    def queued_action(self, events, action, **kwargs):
+        steps = [s for s in self.steps(events, **kwargs) if s.item == SID]
+        self.assertEqual(len(steps), 1, steps)
+        step = steps[0]
+        self.assertEqual((step.state, step.action), ('action', action), step)
+        self.assertFalse(step.reason.startswith('undetermined'), step)
+        AuditStepTests().signed('L-spec-2116/' + self._testMethodName, asdict(step))
+        return step
+
+    def test_queued_no_conflict_reclean_do_it_v2(self):
+        events = self.queued_clean()
+        baseline = self.queued_action(events, 'merge-direct')
+        reclean = event('merge-gate-clean', -30, branch_sha='built', main_sha='new-main')
+        self.assertEqual(self.queued_action(events + [reclean], 'merge-direct'), baseline)
+
+    def test_queued_no_conflict_reclean_window_gate(self):
+        events = self.queued_clean(ns.merge_queue.window_gate.PROJECT)
+        baseline = self.queued_action(events, 'merge')
+        reclean = event('merge-gate-clean', -30, branch_sha='built', main_sha='new-main')
+        self.assertEqual(self.queued_action(events + [reclean], 'merge'), baseline)
+
+    def test_queued_no_conflict_rebuild(self):
+        events = AttemptsRebuild1855Tests().fixture('rebuild')
+        events.append(event('queue-add', -190, project='do-it-v2', branch='l-spec-9001'))
+        self.queued_action(events, 'rebuild')
+
+    def test_queued_no_conflict_close(self):
+        events = AttemptsRebuild1855Tests().fixture('grade')
+        events += [event('queue-add', -170, project='do-it-v2', branch='l-spec-9001'),
+                   event('decision', -20, close='superseded')]
+        self.queued_action(events, 'close')
+
+    def test_queued_no_conflict_regrade(self):
+        events = AttemptsRebuild1855Tests().fixture('regrade')
+        events.append(event('queue-add', -190, project='do-it-v2', branch='l-spec-9001'))
+        self.queued_action(events, 'regrade')
+
+    def test_queued_no_conflict_rebuild_retry_due(self):
+        fixture = VanishedRetryTests()
+        events, role, _ = fixture.fixture('rebuild')
+        fixture.failure(events, role, 1, -120)
+        now = NOW - timedelta(minutes=115)
+        baseline = self.queued_action(events, 'rebuild', now=now)
+        self.assertTrue(baseline.reason.startswith('retry due'), baseline)
+        events.append(event('queue-add', -225, project='do-it-v2', branch='l-spec-9001'))
+        self.assertEqual(self.queued_action(events, 'rebuild', now=now), baseline)
+
+    def queued_rebuilt(self):
+        return self.queued_clean() + [
+            event('build-started', -30, actor='builder'),
+            event('build-done', -25, actor='builder', status='DONE')]
+
+    def test_queued_stale_row_after_rebuild_awaiting_grade(self):
+        events = self.queued_rebuilt()
+        self.queued_action(events, 'grade')
+        self.assertIsNone(ns._merge(AttemptsRebuild1855Tests().context(events)))
+
+    def test_queued_stale_row_after_rebuild_verdict(self):
+        self.queued_action(self.queued_rebuilt() + [
+            event('verdict', -20, confirmed=True)], 'review')
+
+    def test_queued_stale_row_after_rebuild_clean_review(self):
+        self.queued_action(self.queued_rebuilt() + [
+            event('verdict', -20, confirmed=True),
+            event('review', -10, n_blocking=0)], 'gate')
+
+    def test_queued_stale_row_regate_after_refresh(self):
+        self.queued_action(self.queued_clean() + [
+            event('merge-gate-clean', -30, branch_sha='refreshed', main_sha='new-main'),
+            event('verdict', -20, confirmed=True)], 'review')
+
+    def test_queued_no_conflict_precedence(self):
+        events = AttemptsRebuild1855Tests().fixture('rebuild') + [
+            event('decision', -20, close='superseded'),
+            event('queue-add', -190, project='do-it-v2', branch='l-spec-9001')]
+        step = ns.step_for(events, {SID: dict(state='building')}, SID, NOW, lr.load())
+        self.assertEqual((step.state, step.action), ('action', 'close'), step)
+        self.assertFalse(step.reason.startswith('undetermined'), step)
+        self.assertEqual(self.queued_action(events, 'close',
+                                          specs={SID: dict(state='building')}), step)
+
+    def test_queued_no_conflict_genuine_hold_kept(self):
+        row = dict(since=event('x')['ts'], reason='ready')
+        conflict = self.selected({'build': row, 'grade': row})
+        self.assertTrue(conflict.reason.startswith('undetermined: conflicting actions'))
+        self.assertEqual((conflict.state, conflict.owner, conflict.clears),
+                         ('hold', 'executor', 'one lane action'))
+        AuditStepTests().signed('L-spec-2116/genuine-conflict', asdict(conflict))
+        self.queued_action(self.queued_clean()[:-1], 'enqueue')
+
+    def test_queued_no_conflict_not_live_still_enqueues(self):
+        for kind in ('queue-remove', 'window-dropped', 'branch-less'):
+            with self.subTest(kind=kind):
+                events = self.queued_clean()
+                if kind == 'branch-less':
+                    del events[-1]['branch']
+                else:
+                    events.append(event(kind, -35, reason='conflict'))
+                events.append(event('merge-gate-clean', -30))
+                baseline = [e for e in events if e['type'] not in
+                            {'queue-add', 'queue-remove', 'window-dropped'}]
+                self.assertEqual(self.queued_action(events, 'enqueue'), self.one(baseline))
+        events = self.queued_clean() + [
+            event('precheck-red', -35, tests=['fixture'], master='main', branch_sha='built'),
+            event('build-started', -30, actor='builder'),
+            event('build-done', -25, actor='builder', status='DONE'),
+            event('verdict', -20, confirmed=True),
+            event('review', -15, n_blocking=0),
+            event('merge-gate-clean', -10)]
+        self.assertTrue(any(r['spec'] == SID for r in ns.merge_queue.queue(events)))
+        self.queued_action(events, 'enqueue')
+
     def test_ac4_table_owners_and_judgment(self):
         row = dict(since=event('x')['ts'], reason='ready')
         for action in ns.ACTION_STAGES:
@@ -1348,6 +1467,8 @@ class GateToolingTests(unittest.TestCase):
 class GraderRetryTests(unittest.TestCase):
     """Grading has distinct transport, checker-request and genuine budgets."""
 
+    READY_SHA = 'a' * 40
+
     def setUp(self):
         self.rules = lr.load()
 
@@ -1356,7 +1477,7 @@ class GraderRetryTests(unittest.TestCase):
 
     def fixture(self, action='grade'):
         rows = [event('spec-written', -120),
-                event('build-done', -100, actor='builder', status='DONE', ready_sha='tip')]
+                event('build-done', -100, actor='builder', status='DONE', ready_sha=self.READY_SHA)]
         if action == 'regrade':
             rows.append(event('decision', -90, actor='thinker', regrade='yes'))
         return rows
@@ -1379,7 +1500,7 @@ class GraderRetryTests(unittest.TestCase):
                 step = self.one(rows, now=NOW + timedelta(seconds=seconds))
                 self.assertEqual(step.reason, 'grade-wait: bundle-pending')
                 self.assertEqual((step.trigger, step.since), (trigger['_src'], trigger['ts']))
-                self.assertIn('tip', step.clears)
+                self.assertIn(self.READY_SHA, step.clears)
                 self.assertIn('1/3', step.clears)
             self.assertEqual(self.one(rows, now=NOW + timedelta(minutes=1)).action, action)
         self.signed('AC1-detached', asdict(step))
@@ -1411,9 +1532,9 @@ class GraderRetryTests(unittest.TestCase):
             far_future = NOW+timedelta(days=100)
             self.assertTrue(self.one(rows, now=far_future).reason.startswith('exhausted: bundle-pending'))
             for kind in ('evidence-bundle', 'evidence-bundle-failed'):
-                evidence = event(kind, -30, sha='tip')
+                evidence = event(kind, -30, sha=self.READY_SHA)
                 self.assertEqual(self.one(rows+[evidence]).action, action)
-            new_build = event('build-done', 1, actor='builder', status='DONE', ready_sha='new-tip')
+            new_build = event('build-done', 1, actor='builder', status='DONE', ready_sha='b' * 40)
             self.assertEqual(self.one(rows+[new_build], now=NOW+timedelta(minutes=2)).action, 'grade')
             decision = event('decision', 1, regrade='yes', actor='operator')
             self.assertEqual(self.one(rows+[decision], now=NOW+timedelta(minutes=2)).action, 'regrade')
@@ -1428,24 +1549,24 @@ class GraderRetryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, DOIT_ROOT=directory):
             path = Path(directory)/'content'/'evidence'/SID/'bundle.json'
             path.parent.mkdir(parents=True)
-            raw = json.dumps(dict(spec=SID, sha='tip', commands=[], comparison={})).encode()
+            raw = json.dumps(dict(spec=SID, sha=self.READY_SHA, commands=[], comparison={})).encode()
             path.write_bytes(raw)
             digest = hashlib.sha256(raw).hexdigest()
             for action in ('grade', 'regrade'):
                 rows = self.fixture(action)+[self.refusal()]
-                success = event('evidence-bundle', -10, sha='tip', path=str(path), bundle_sha256=digest)
+                success = event('evidence-bundle', -10, sha=self.READY_SHA, path=str(path), bundle_sha256=digest)
                 packet = 'bundle_sha256: `' + digest + '`'
                 self.assertEqual(self.one(rows+[success]).action, action)
                 with patch.object(gp.subprocess, 'Popen') as checker:
                     with self.assertRaisesRegex(Refused, 'bundle-pending'):
                         gp.gate(rows+[success], SID, 'stale packet without digest', lambda *a, **k: None, fail)
-                    self.assertEqual(checker.call_args.args[0][-4:], ['run-checks', SID, '--sha', 'tip'])
+                    self.assertEqual(checker.call_args.args[0][-4:], ['run-checks', SID, '--sha', self.READY_SHA])
                     self.assertIsNotNone(gp.gate(rows+[success], SID, packet, lambda *a, **k: None, fail))
-                failed = event('evidence-bundle-failed', -4, sha='tip', reason='checker failed')
+                failed = event('evidence-bundle-failed', -4, sha=self.READY_SHA, reason='checker failed')
                 self.assertEqual(self.one(rows+[failed]).action, action)
                 with self.assertRaisesRegex(Refused, 'preflight:runner'):
                     gp.gate(rows+[failed], SID, packet, lambda *a, **k: None, fail)
-                for evidence in (dict(success, ts=rows[1]['ts']), dict(success, sha='old-tip'),
+                for evidence in (dict(success, ts=rows[1]['ts']), dict(success, sha='c' * 40),
                                  dict(success, subject='L-spec-9999'),
                                  dict(success, ts=event('x', -101)['ts'])):
                     self.assertEqual(self.one(rows+[evidence]).reason, 'grade-wait: bundle-pending')
@@ -1493,8 +1614,8 @@ class GraderRetryTests(unittest.TestCase):
             pass
         def fail(why, reason=None):
             raise Refused(reason)
-        rows = [dict(type='build-done', subject=SID, ready_sha='tip'),
-                dict(type='evidence-bundle-failed', subject=SID, sha='tip',
+        rows = [dict(type='build-done', subject=SID, ready_sha=self.READY_SHA),
+                dict(type='evidence-bundle-failed', subject=SID, sha=self.READY_SHA,
                      reason='wall cap exceeded')]
         with patch.object(gp.subprocess, 'Popen') as checker:
             with self.assertRaisesRegex(Refused, '^wall-cap$'):
@@ -1522,7 +1643,7 @@ class GraderRetryTests(unittest.TestCase):
                         self.assertEqual((step.trigger, step.since), (trigger['_src'], trigger['ts']))
                     h = attempts.history(ns._grader_history(rows)[0], trigger, 'grader', now=deadline)
                     self.assertEqual(h.n_failed, n)
-                late = event('evidence-bundle', -1, sha='tip')
+                late = event('evidence-bundle', -1, sha=self.READY_SHA)
                 self.assertTrue(self.one(rows+[late], now=NOW+timedelta(days=1)).reason.startswith('retries-exhausted:'))
         for action in ('build', 'rebuild', 'review'):
             rows, role, trigger = VanishedRetryTests.fixture(self, action)
