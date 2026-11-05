@@ -12,7 +12,7 @@ a supervised pane that reads the same lane for itself; nothing here launches it.
 """
 import ledger_files
 import ledger_cache
-import argparse, fcntl, json, os, pathlib, re, socket, sys, time
+import argparse, fcntl, hashlib, json, os, pathlib, re, socket, sys, time
 from datetime import datetime, timedelta, timezone
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import carry, dispatch, fold, intake, notes, pane_resume, panes, tree_cleanup  # noqa: E402
@@ -547,7 +547,7 @@ def visit_key(step, grades_first, first):
             not grade if grades_first else False, step.since, step.item)
 
 
-def run_steps(events, specs, now, *, dispatcher=None, dry_run=False, handled=frozenset(), steps=None, admission: dict | None = None):
+def run_steps(events, specs, now, *, dispatcher=None, dry_run=False, handled=frozenset(), steps=None, admission: dict | None = None, seat_state: dict | None = None):
     """Shared entry point; a tick pass supplies its single computed snapshot."""
     import autodispatch
     import lane_driver
@@ -712,6 +712,10 @@ def run_steps(events, specs, now, *, dispatcher=None, dry_run=False, handled=fro
                 # Bookkeeping failure must not turn completed launches into a
                 # failed whole pass; the heartbeat retains this diagnostic.
                 out.append(f'failed autodispatch item accounting: {type(exc).__name__}')
+    # Publish only a completed pass's existing accounting. A caller must not
+    # reconstruct seats from starts: accepted launches may not have started yet.
+    if seat_state is not None:
+        seat_state['builder'] = slots['builder']
     return out
 
 
@@ -772,6 +776,154 @@ def _reap_summary(rows, *, not_reapable, manifest) -> dict | None:
     if manifest is not None:
         result["manifest"] = dict(manifest)
     return result
+
+
+def rework_waits(events, now, free_slots):
+    """Observe unresolved builder waits in reader order, without side effects."""
+    import lane_driver
+    import lane_rules
+    import nextstep
+    if free_slots <= 0:
+        return []
+    valid = []
+    for event in events:
+        try:
+            stamp = datetime.fromisoformat(event['ts'])
+            if stamp.tzinfo is None:
+                continue
+        except (KeyError, TypeError, ValueError):
+            continue
+        valid.append(event)
+    rules = lane_rules.load()
+    assignments = {e.get('spawn'): e.get('subject') for e in valid
+                   if e.get('type') == 'autodispatched' and e.get('spawn')}
+    pending, settled, escalated = {}, set(), set()
+    resets = {'build-started', 'branch-recut', 'shipped', 'spec-killed', 'spec-closed',
+              'escalation-blocking'}
+    failures = {'spawn-failed', 'autodispatch-failed', 'merge-gate-undetermined',
+                'merge-gate-rework', 'build-blocked'}
+    for event in valid:
+        subject, kind = event.get('subject'), event.get('type')
+        if kind == 'build-started' and not subject:
+            subject = assignments.get(event.get('spawn'))
+        if not isinstance(subject, str) or not re.fullmatch(r'L-spec-\d+', subject):
+            continue
+        if kind == 'spec-written':
+            settled.discard(subject)
+        if kind in {'decision', 'unblocked'}:
+            escalated.discard(subject)
+        if kind in {'shipped', 'spec-killed', 'spec-closed'}:
+            settled.add(subject)
+        escalate = kind == 'conflict-rework' and event.get('verdict') == 'escalate'
+        if kind == 'escalation-blocking' or escalate:
+            escalated.add(subject)
+        if kind in resets or escalate or kind == 'verdict' and event.get('confirmed') is True:
+            pending.pop(subject, None)
+            continue
+        if subject in settled or subject in escalated or subject in pending:
+            continue
+        trigger = (kind == 'conflict-rework' and not event.get('reason')
+                   or kind == 'verdict' and event.get('confirmed') is False)
+        if kind in failures:
+            trigger = nextstep._failure([event], rules)[1] == 'base-refresh'
+        # Fresh same-pass starts/resolutions may follow the pass's clock. They
+        # still discharge waits; only future triggers must not start one.
+        if trigger and datetime.fromisoformat(event['ts']) <= now:
+            pending[subject] = event
+
+    # _in_flight_role deliberately has no subject argument. Retain starts for
+    # this spec and *all* their terminal receipts, even spawn-subject terminals.
+    starts = {}
+    ends = {}
+    for event in valid:
+        if event.get('type') in {'spawn-started', 'build-started'}:
+            subject = event.get('subject') or assignments.get(event.get('spawn'))
+            if subject:
+                starts.setdefault(subject, []).append(dict(event, subject=subject))
+        if event.get('type') in {'spawn-done', 'spawn-failed', 'spawn-stale'}:
+            ends.setdefault(event.get('spawn'), []).append(event)
+    candidates = []
+    for subject, event in sorted(pending.items()):
+        wait = (now - datetime.fromisoformat(event['ts'])).total_seconds()
+        if wait <= 1800:
+            continue
+        projection = starts.get(subject, [])
+        spawn_ids = {e.get('spawn') for e in projection if e.get('spawn')}
+        projection = projection + [e for spawn in spawn_ids for e in ends.get(spawn, [])]
+        if lane_driver._in_flight_role(projection, now, 'builder'):
+            continue
+        identity = ['rework-wait-v1', subject, event['type'], event['ts'],
+                    event.get('spawn') or '', event.get('reason') or '',
+                    event.get('verdict') or '', event.get('confirmed'), event.get('attempt')]
+        trigger = hashlib.sha256(json.dumps(identity, separators=(',', ':'),
+                                           ensure_ascii=True).encode('utf-8')).hexdigest()
+        candidates.append(dict(subject=subject, trigger=trigger,
+                               trigger_source=event.get('_src') or event.get('src'),
+                               trigger_type=event['type'], since=event['ts'],
+                               wait_seconds=wait, free_slots=free_slots))
+    return candidates
+
+
+def _record_rework_waits(events, steps, now, free_slots, outcomes=()):
+    """Use the post-dispatch snapshot, existing holds and the durable look door."""
+    import autodispatch
+    import look
+    candidates = rework_waits(events, now, free_slots)
+    by_subject = {}
+    for event in events:
+        by_subject.setdefault(event.get('subject'), []).append(event)
+    by_step = {step.item: step for step in steps}
+    summary = dict(eligible=len(candidates), held=0, held_reasons={}, observed=0)
+
+    def emitted(candidate):
+        condition = 'rework-wait:' + candidate['trigger']
+        # The shared snapshot supplies archived ledger evidence. Read the current
+        # look source afresh as well, so retries with a stale snapshot see appends.
+        persisted = list(events)
+        try:
+            text = ledger_files.read_text(fold.EVENTS, look.LEDGER_NAME)
+        except FileNotFoundError:
+            text = ''
+        for line in text.splitlines():
+            try:
+                persisted.append(json.loads(line))
+            except ValueError:
+                continue
+        for event in persisted:
+            if event.get('type') != 'brief' or event.get('condition') != condition:
+                continue
+            if event.get('key') == candidate['subject']:
+                return True
+            if any(item.get('key') == candidate['subject']
+                   and item.get('reading', {}).get('trigger') == candidate['trigger']
+                   for item in event.get('items', [])):
+                return True
+        return False
+
+    for candidate in candidates:
+        subject = candidate['subject']
+        step = by_step.get(subject)
+        base_hold = (step is not None and step.owner == 'executor'
+                     and step.reason.startswith('base-refresh:'))
+        reason = None
+        if autodispatch._automatic_hold(by_subject.get(subject, []), events):
+            reason = 'automatic-hold'
+        elif step is not None and (step.state == 'hold' or step.reason.startswith('undetermined:')) and not base_hold:
+            reason = 'step-hold'
+        elif any(line.startswith((f'acted {subject} ', f'would act {subject} ')) for line in outcomes):
+            reason = 'dispatched'
+        elif any(line.startswith((f'resource-wait {subject} ', f'hold {subject}:',
+                                  f'undetermined {subject}:')) for line in outcomes) and not base_hold:
+            reason = 'pass-hold'
+        if reason:
+            summary['held'] += 1
+            summary['held_reasons'][reason] = summary['held_reasons'].get(reason, 0) + 1
+            continue
+        if not emitted(candidate):
+            look.emit_once('rework-wait:' + candidate['trigger'], subject, 'thinker',
+                           candidate, events, root=fold.ROOT)
+            summary['observed'] += 1
+    return summary
 
 
 def _record_next_step_held(events, specs, steps, now):
@@ -1048,6 +1200,8 @@ def _record():
     lane_driver_log_error = None
     dispatch_started = time.monotonic()
     steps = []
+    outcomes = []
+    seat_state = {}
     def log_outcomes(lines):
         nonlocal lane_driver_log_error
         try:
@@ -1059,7 +1213,7 @@ def _record():
         import autodispatch
         import merge_queue
         steps = _steps(ev, specs, fold.NOW)
-        outcomes = run_steps(ev, specs, fold.NOW, steps=steps, admission=admission)
+        outcomes = run_steps(ev, specs, fold.NOW, steps=steps, admission=admission, seat_state=seat_state)
         outcomes.extend(autodispatch.redispatch_dead(ev, specs, fold.NOW,
                         handled=handled_items(steps)))
         launch_precheck(ev, fold.NOW)
@@ -1083,6 +1237,7 @@ def _record():
         log_outcomes([f'failed autodispatch: {e}'])
     log_outcomes([f'finished autodispatch elapsed_s={time.monotonic() - dispatch_started:.3f}'])
     held_error = None
+    held_events = None
     try:
         # Keep ev/specs private to dispatch and todo. This read observes even a
         # partial dispatch pass, under the same tick lock as the append below.
@@ -1090,6 +1245,18 @@ def _record():
         _record_next_step_held(held_events, specs, steps, fold.NOW)
     except Exception as exc:
         held_error = str(exc)
+    rework_wait_error = None
+    rework_wait = None
+    try:
+        if 'builder' not in seat_state:
+            rework_wait_error = 'remaining builder seats unavailable; retry next tick'
+        elif held_events is None:
+            rework_wait_error = 'post-dispatch ledger unavailable; retry next tick'
+        else:
+            rework_wait = _record_rework_waits(held_events, steps, fold.NOW,
+                                              seat_state['builder'], outcomes)
+    except Exception as exc:
+        rework_wait_error = str(exc)
     # L-charter-0042/L-spec-0486 (cleanup-on-finish), R15a (record): the tick's own
     # per-spec worktree reap, on this SAME `ev` — its own try/except, exactly like
     # `autodispatch_error` above: a raise never stops the tick's own heartbeat, and
@@ -1159,6 +1326,10 @@ def _record():
         kv["autodispatch_error"] = autodispatch_error
     if held_error is not None:
         kv["held_error"] = held_error
+    if rework_wait_error is not None:
+        kv['rework_wait_error'] = rework_wait_error
+    if rework_wait is not None and rework_wait['eligible']:
+        kv['rework_wait'] = rework_wait
     if lane_driver_log_error:
         kv["lane_driver_log_error"] = lane_driver_log_error
     reap_counts = _reap_summary(recorded_reap, not_reapable=not_reapable, manifest=manifest)
