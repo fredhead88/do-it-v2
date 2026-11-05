@@ -352,8 +352,19 @@ def _check_packet_unserved(events, root, briefs):
         r = _write_brief("packet-unserved", sid, "executor", {"started": False}, events, root)
         r and briefs.append(r)
 def _read_jsonl(path):
+    path = pathlib.Path(path)
+    if path.parent.name == 'events' and path.suffix == '.jsonl':
+        if not path.parent.is_dir():
+            return []  # Preserve the raw reader's missing-directory behavior.
+        # Ledger alerts include this pass's appends and archived virtual files.
+        # Transcripts and cron stores below retain their distinct raw formats.
+        import ledger_cache
+        rows = ledger_cache.read(path.parent, path.parent.parent / 'cache', fold.actor_of)
+        # Preserve this helper's raw-record shape; cache provenance is private.
+        return [{k: v for k, v in e.items() if k not in ('actor', '_src')}
+                for e in rows if e['_src'].rsplit(':', 1)[0] == path.name]
     try:
-        text = pathlib.Path(path).read_text()
+        text = path.read_text()
     except OSError: return []
     out = []
     for line in text.splitlines():

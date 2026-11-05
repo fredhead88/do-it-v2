@@ -54,6 +54,67 @@ class CacheTests(unittest.TestCase):
         self.assertEqual(json.dumps(fold.APPLIED), applied)
         return actual
 
+    def test_cached_reader_inventory_and_locked_refresh(self):
+        # No full-parser bypass is necessary: even locked/post-action callers
+        # can use the metadata-validated tail refresh. Keep reasons explicit.
+        reasons = {
+            'branch_refresh.py': 'reservation, adoption and post-gate decisions under the branch lock',
+            'empty_grade.py': 'double-read under the grading lock before an automatic verdict',
+            'owed_backfill.py': 'read back committed backfill appends',
+            'tick.py': 'post-dispatch held-step evidence under the tick lock',
+        }
+        bypasses, fresh = [], set()
+        for path in Path(__file__).parent.glob('*.py'):
+            if path.name.startswith('test_'):
+                continue
+            for node in ast.walk(ast.parse(path.read_text())):
+                if not isinstance(node, ast.Call):
+                    continue
+                if isinstance(node.func, ast.Attribute) and node.func.attr == 'read_events':
+                    if any(k.arg == 'use_cache' and isinstance(k.value, ast.Constant)
+                           and k.value.value is False for k in node.keywords):
+                        bypasses.append((path.name, node.lineno))
+                if isinstance(node.func, ast.Attribute) and node.func.attr == 'tail_refresh':
+                    fresh.add(path.name)
+        self.assertEqual(bypasses, [], 'necessary full-parse allow-list is empty')
+        self.assertEqual(fresh, set(reasons))
+        print('L-spec-2049 AC1 uncached_allow_list=[] tail_refresh=' + json.dumps(reasons, sort_keys=True))
+
+        name = 'L-operator-01.jsonl'
+        self.write(name, [dict(ts='1', type='observed', subject='old')])
+        ledger_cache.tail_refresh()
+        self.write(name, [dict(ts='2', type='observed', subject='new')], 'a')
+        parsed = []
+        original = ledger_cache._parse
+        def parse(data, *args, **kwargs):
+            parsed.extend(data.splitlines())
+            return original(data, *args, **kwargs)
+        with patch.object(ledger_cache, '_parse', side_effect=parse), \
+             patch.object(fold, '_read_events_uncached', side_effect=AssertionError('full parse')):
+            rows = ledger_cache.tail_refresh()
+        self.assertEqual([r['subject'] for r in rows], ['old', 'new'])
+        self.assertEqual(len(parsed), 1)
+        rows[0]['subject'] = 'caller edit'
+        self.assertEqual(ledger_cache.tail_refresh()[0]['subject'], 'old')
+        print('L-spec-2049 AC1 fresh_tail=true parsed_lines=1 caller_isolation=true')
+
+    def test_look_ledger_cache_and_nonledger_input(self):
+        import look
+        name = 'L-operator-01.jsonl'
+        self.write(name, [dict(ts='1', type='observed', subject='old')])
+        with patch.object(ledger_cache, 'read', wraps=ledger_cache.read) as reader:
+            self.assertEqual(look._read_jsonl(self.events / name),
+                             [dict(ts='1', type='observed', subject='old')])
+            self.assertEqual(reader.call_count, 1)
+            self.write(name, [dict(ts='2', type='observed', subject='new')], 'a')
+            self.assertEqual([r['subject'] for r in look._read_jsonl(self.events / name)], ['old', 'new'])
+        transcript = self.root / 'transcript.jsonl'
+        transcript.write_text('{"type":"assistant","message":{"content":[]}}\n')
+        with patch.object(ledger_cache, 'read', side_effect=AssertionError('non-ledger cache')):
+            self.assertEqual(look._read_jsonl(transcript), [dict(type='assistant', message=dict(content=[]))])
+            self.assertEqual(look._read_jsonl(self.root / 'absent' / 'events' / name), [])
+        print('L-spec-2049 AC1 look_ledger_cached=true transcript_unchanged=true')
+
     def test_unchanged_cache_reuses_chunk_validation_but_corruption_revalidates(self):
         self.write('L-operator-01.jsonl', [dict(ts='1', type='observed', subject='fixture')])
         expected = self.same()
@@ -746,8 +807,8 @@ print(json.dumps(fold.read_events()))
         for module in (up, tick):
             tree = ast.parse(Path(module.__file__).read_text())
             call_count += sum(isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-                              and n.func.attr == 'read_events' for n in ast.walk(tree))
-        self.assertEqual(call_count, len(sites) + 1)  # tick's post-dispatch uncached refresh
+                              and n.func.attr in ('read_events', 'tail_refresh') for n in ast.walk(tree))
+        self.assertEqual(call_count, len(sites) + 1)  # tick's post-dispatch tail refresh
         contracts = self.root / 'agents'
         contracts.mkdir()
         for role in ('relay', 'executor'):

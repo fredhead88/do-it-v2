@@ -11,6 +11,7 @@ import sys
 import tempfile
 
 import fold
+import ledger_cache
 import owed
 import owed_digest
 import owed_routes
@@ -301,7 +302,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         _readable_dir(fold.EVENTS)
-        events = fold.read_events(use_cache=False)
+        events = fold.read_events()
         audits = _audits(args.audit)
         label_path = args.labels or fold.ROOT / 'content/probe-L-charter-0049/q5_labels.json'
         if args.labels and not label_path.exists():
@@ -341,7 +342,8 @@ def main(argv=None):
             fold.append(argv, strict=True)
             action['written'] = True
             written += 1
-        fresh = fold.read_events(use_cache=False)
+        # Read back committed appends without reparsing unchanged history.
+        fresh = ledger_cache.tail_refresh()
         after_specs = {sid: spec['evs'] for sid, spec in fold.fold(fresh)[0].items()}
         text = render(before, _rows(after_specs, fold.NOW), events, actions, retired, labels_state, written)
         _write_report(text)

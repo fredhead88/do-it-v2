@@ -295,7 +295,7 @@ def prepare_fresh(step, evs, root, project, wt, runner):
         state[key] = journal
         _write_state(state_path,state)
     def record(path):
-        events = fold.read_events(use_cache=False)
+        events = fold.read_events()
         if not any(e.get('type') == 'resource-created' and e.get('subject') == item
                    and e.get('kind') == 'worktree' and e.get('ref') == str(path) for e in events):
             resources.record('worktree',str(path),lane='build',subject=item)

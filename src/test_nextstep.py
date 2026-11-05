@@ -448,7 +448,12 @@ class NextStepTests(unittest.TestCase):
             result = run(environment=dict(env, DOIT_LANE_RULES=str(root/'bad.toml')))
             self.assertEqual((result.returncode, result.stdout), (2, ''))
             (root/'bad.toml').unlink()
-            self.assertEqual(before, tree())
+            after = tree()
+            self.assertEqual(before, {name: value for name, value in after.items() if name in before})
+            self.assertTrue(set(after) - set(before))
+            self.assertTrue(all(name.startswith('cache/ledger-') for name in set(after) - set(before)))
+            self.assertEqual(run('--json').returncode, 0)
+            self.assertEqual(after, tree())  # unchanged cache is reused without writes
             # Default invocation still renders the existing board entry point.
             result = subprocess.run([str(ROOT/'doit')], env=env, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)

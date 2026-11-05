@@ -25,6 +25,8 @@ except ImportError:
     ledger_files = None
 
 SPAWN = re.compile(r'^L-[a-z0-9-]+-[0-9]+\.jsonl$')
+EXECUTOR = 'L-executor-0001.jsonl'
+EXECUTOR_MAX_BYTES = 8_000_000
 
 
 @dataclass
@@ -136,20 +138,28 @@ def candidates(events_dir, now, min_age_hours, members=None):
                 stat = path.stat()
                 if path.is_symlink() or not path.is_file():
                     reason = 'not-regular'
-                elif now - stat.st_mtime <= min_age_hours * 3600:
+                elif path.name == EXECUTOR and stat.st_size <= EXECUTOR_MAX_BYTES:
+                    reason = 'executor-under-limit'
+                elif path.name != EXECUTOR and now - stat.st_mtime <= min_age_hours * 3600:
                     reason = 'young'
                 elif blocked(stat, scan):
                     reason = blocked(stat, scan)
                 else:
                     data = path.read_bytes()
-                    terminal = False
-                    for line in data.splitlines():
+                    # The long-lived Executor has no spawn terminal event.
+                    # It still passes the same open-writer and stat checks.
+                    terminal = path.name == EXECUTOR
+                    for line in (() if terminal else data.splitlines()):
                         try:
                             event = json.loads(line)
                             terminal |= isinstance(event, dict) and event.get('type') in ('spawn-done', 'spawn-failed')
                         except (ValueError, UnicodeError):
                             pass
-                    if not terminal:
+                    if path.name == EXECUTOR and not data.endswith(b'\n'):
+                        # A continuation must not introduce a separator into a
+                        # torn JSON tail. Wait until its writer completes it.
+                        reason = 'executor-unterminated'
+                    elif not terminal:
                         reason = 'not-terminal'
                     elif not unchanged(path, stat) or len(data) != stat.st_size:
                         reason = 'changed'
@@ -246,6 +256,14 @@ def set_aside(candidate, directory, reasons):
     sync_directory(candidate.path.parent)
     sync_directory(pending)
     checkpoint(8)
+    if candidate.path.name == EXECUTOR:
+        # Recreate for future O_APPEND writers, never truncate or replace a
+        # concurrently recreated live file. The old inode stays in .pending
+        # until the existing later-run byte/hash verification cleans it up.
+        with candidate.path.open('ab') as stream:
+            stream.flush()
+            os.fsync(stream.fileno())
+        sync_directory(candidate.path.parent)
     return True
 
 
@@ -332,6 +350,11 @@ def pending_cleanup(events_dir, members):
         if not unchanged(path, stat):
             raise OSError(f'pending changed: {path.name}')
         if equal:
+            if path.name == EXECUTOR:
+                # Also recover a crash after rename but before live recreation.
+                with (Path(events_dir) / path.name).open('ab'):
+                    pass
+                sync_directory(events_dir)
             path.unlink()
             sync_directory(pending)
             checkpoint(9)
@@ -403,7 +426,11 @@ def run(root, args):
         files, written = publish(group, directory, date, reasons)
         rolled += files
         size += written
-    summary(rolled, len(groups), size, count - rolled, reasons)
+    # Executor rotation recreates a live file; include it in the visible count.
+    recreated = int(any(candidate.path.name == EXECUTOR and
+                        (directory / '.pending' / EXECUTOR).exists()
+                        for candidate in selected))
+    summary(rolled, len(groups), size, count - rolled + recreated, reasons)
     return 0
 
 

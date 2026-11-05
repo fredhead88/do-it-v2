@@ -2,7 +2,7 @@
 
 PROJECTION: dict[str, tuple[str, ...]] = {
     'tree-reaped': ('retained', 'retained_reason'),
-    'tick': ('recorded_reap',),
+    'tick': ('recorded_reap', 'worktrees_retained'),
 }
 
 

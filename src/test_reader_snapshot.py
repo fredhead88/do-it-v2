@@ -390,12 +390,12 @@ class SnapshotTests(unittest.TestCase):
                     if driver == 'tick':
                         # The observer alone refreshes without the shared snapshot.
                         self.assertIsNone(calls[-1])
-                        self.assertEqual(cache_modes, [True, True, False])
+                        self.assertEqual(cache_modes, [True, True, True])
                         shared_calls = calls[:-1]
                     self.assertTrue(all(isinstance(s, fold.ReaderSnapshot) for s in shared_calls))
                     self.assertTrue(all(s is shared_calls[0] for s in shared_calls))
                     expected = (len(shared_calls) if append else 1)
-                    self.assertEqual(read.call_count, expected)
+                    self.assertEqual(read.call_count, expected + (driver == 'tick'))
                     self.assertEqual(finish.call_count, expected + (driver == 'tick'))
                     self.assertEqual(len(copies), len(shared_calls))
                     self.assertTrue(all(passes == 1 for passes, _ in copies))
@@ -409,10 +409,12 @@ class SnapshotTests(unittest.TestCase):
         for name in ('tick.py', 'up.py'):
             tree = ast.parse((source_root / name).read_text())
             count += sum(isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-                and isinstance(n.func.value, ast.Name) and n.func.value.id == 'fold'
-                and n.func.attr == 'read_events' for n in ast.walk(tree))
+                and isinstance(n.func.value, ast.Name)
+                and ((n.func.value.id == 'fold' and n.func.attr == 'read_events')
+                     or (n.func.value.id == 'ledger_cache' and n.func.attr == 'tail_refresh'))
+                for n in ast.walk(tree))
         self.assertEqual(count, 9)
-        print('AC4 tick reads=2 shared + 1 uncached; sweep reads=3/4; cache materializations=generations; tick normalizations=generations+1; copy passes per shared read=1; look folds=1/evaluation')
+        print('AC4 tick reads=2 shared + 1 cached tail refresh; sweep reads=3/4; cache materializations=generations+tick refresh; tick normalizations=generations+1; copy passes per shared read=1; look folds=1/evaluation')
         print('L-spec-1711 AC4 ok')
 
     def look_evaluations(self):

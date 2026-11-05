@@ -102,7 +102,7 @@ class FailureSnapshotTests(unittest.TestCase):
         self.assertEqual(out['rows'],[])
         self.assertEqual(out['counts']['ignored_unauthorized_failures'],1)
 
-    def test_real_reader_cli_changes_no_ledger_state_or_cache_bytes(self):
+    def test_real_reader_cli_changes_no_ledger_state_or_existing_cache_bytes(self):
         with tempfile.TemporaryDirectory(prefix='failure-snapshot-cli-') as temp:
             root=Path(temp);(root/'events').mkdir()
             (root/'state').mkdir();(root/'state'/'keep').write_text('unchanged')
@@ -119,7 +119,14 @@ class FailureSnapshotTests(unittest.TestCase):
             result=subprocess.run([sys.executable,str(Path(audit.__file__)), '--at',NOW.isoformat()],
                                   env=env,capture_output=True,text=True,check=True)
             self.assertEqual(json.loads(result.stdout)['counts']['overdue_unowned'],1)
-            self.assertEqual(before,files())
+            after=files()
+            self.assertEqual(before, {name:data for name,data in after.items() if name in before})
+            self.assertTrue(set(after) - set(before))
+            self.assertTrue(all(name.startswith('cache/ledger-') for name in set(after) - set(before)))
+            # A warm, unchanged read reuses the cache without rewriting bytes.
+            subprocess.run([sys.executable,str(Path(audit.__file__)), '--at',NOW.isoformat()],
+                           env=env,capture_output=True,text=True,check=True)
+            self.assertEqual(after,files())
 
 
 if __name__=='__main__':

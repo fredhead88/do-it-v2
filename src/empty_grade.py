@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 
 import fold
+import ledger_cache
 import routing
 
 MARKER = 'zero-grader-criteria'
@@ -102,12 +103,12 @@ def complete(step, events, *, dry_run=False):
     if dry_run:
         return True
     # Tick is already serialized; this also protects an explicit recovery CLI
-    # from racing tick, and reopens the ledger rather than trusting its snapshot.
+    # from racing tick; tail refresh observes appends after the first read.
     lock_path = fold.ROOT / 'state' / 'empty-grade.lock'
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        fresh = fold.read_events(use_cache=False)
+        fresh = ledger_cache.tail_refresh()
         evidence = proof(fresh, step.item)
         if evidence is None:
             return False
@@ -132,7 +133,7 @@ def main(argv=None):
     import nextstep
     import lane_rules
     from datetime import datetime, timezone
-    events = fold.read_events(use_cache=False)
+    events = fold.read_events()
     spec = fold.fold(events)[0].get(args.subject)
     steps = nextstep.next_steps(events, {args.subject: spec} if spec else {},
                                 datetime.now(timezone.utc), lane_rules.load())

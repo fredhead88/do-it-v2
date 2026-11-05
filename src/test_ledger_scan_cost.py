@@ -1,5 +1,7 @@
 """Scratch-ledger equivalence, bounded queries, and corrupt-cache regressions."""
 import atexit
+import copy
+import hashlib
 from contextlib import closing
 import json
 import os
@@ -25,6 +27,9 @@ with patch.dict(os.environ, DOIT_ROOT=IMPORT_ROOT.name,
     import dispatch
     import fold
     import ledger_cache
+import ledger_compact
+import ledger_files
+import ledger_rollup
 
 
 def original_subject_ids(prefix):
@@ -147,6 +152,156 @@ class ScanCostTests(unittest.TestCase):
         paths = list(self.cache.glob('*.sqlite3'))
         self.assertEqual(len(paths), 1)
         return paths[0]
+
+    def test_unchanged_zero_parses_and_committed_fresh_session(self):
+        self.fixture()
+        expected = self.read_cache()  # Production SQLite writer, fully closed.
+        with patch.object(ledger_cache, '_parse', side_effect=AssertionError('unchanged parse')):
+            self.assertEqual(self.read_cache(), expected)
+            with closing(ledger_cache._connect(self.database())) as fresh:
+                self.assertEqual(ledger_cache._read(fresh), expected)
+        print('L-spec-2049 AC3 unchanged_parsed_lines=0 committed_fresh_session_equal=true')
+
+    def test_projection_consumer_search_and_value_preservation(self):
+        field = 'worktrees_retained'
+        pattern = re.compile(re.escape(field))
+        matches = []
+        for path in sorted(Path(__file__).parent.rglob('*.py')):
+            if path.name.startswith('test'):
+                continue
+            for number, source in enumerate(path.read_text().splitlines(), 1):
+                if pattern.search(source):
+                    matches.append(f'{path}:{number}:{source}')
+        search = '\n'.join(matches)
+        # Every use outside the declaration must be a producer. Assert exact
+        # producer expressions, so adding a consumer inside tick fails too.
+        expected_producer = {
+            'worktrees_retained = None', 'worktrees_retained = len(wt_retained)',
+            'if worktrees_retained is not None:',
+            'kv["worktrees_retained"] = worktrees_retained',
+        }
+        uses = set()
+        for line in search.splitlines():
+            path, number, source = line.split(':', 2)
+            if Path(path).name != 'ledger_compact.py':
+                self.assertEqual(Path(path).name, 'tick.py')
+                uses.add(source.strip())
+        self.assertEqual(uses, expected_producer)
+        self.assertIn(field, ledger_compact.PROJECTION['tick'])
+        event = dict(type='tick', ts='1', subject='tick', worktrees_retained=7,
+                     recorded_reap=['old'], recorded_reap_counts={'kept': 7},
+                     detail={'nested': [1, False, None, 'é']})
+        before = copy.deepcopy(event)
+        projected = ledger_compact.compact(event)
+        self.assertEqual(event, before)
+        self.assertEqual(projected, {k: v for k, v in event.items()
+                                    if k not in ledger_compact.PROJECTION['tick']})
+        self.assertEqual(ledger_compact.compact(projected), projected)
+        self.assertEqual(projected['recorded_reap_counts'], {'kept': 7})
+        # A previously committed cache must not keep the superseded view.
+        path = self.events / 'L-tick-01.jsonl'
+        path.write_text(json.dumps(event) + '\n')
+        old_projection = {**ledger_compact.PROJECTION, 'tick': ('recorded_reap',)}
+        with patch.object(ledger_compact, 'PROJECTION', old_projection):
+            self.assertEqual(self.read_cache()[0][field], 7)
+        self.assertNotIn(field, self.read_cache()[0])
+        print('L-spec-2049 AC3 field-consumer grep:\n' + search.rstrip())
+        print('L-spec-2049 AC3 projection_pure=true retained_values_equal=true')
+
+    def test_executor_40mb_rotation_bytes_hash_and_fold(self):
+        if '--rotation-worker' not in sys.argv:
+            # Keep this fixture's 40 MB byte comparisons out of the parent
+            # process: forked performance workers inherit its RSS high-water.
+            worker = subprocess.run([sys.executable, __file__, '--rotation-worker'],
+                                    capture_output=True, text=True, timeout=60)
+            self.assertEqual(worker.returncode, 0, worker.stdout + worker.stderr)
+            print(worker.stdout, end='')
+            return
+        # Forty MB of raw history, including whitespace and CRLF; only forty
+        # event objects so the proof does not need a ledger-sized folded heap.
+        name = 'L-executor-0001.jsonl'
+        path = self.events / name
+        original = b''.join((json.dumps(dict(type='observed', ts=f'{n:03}', subject='fixture'))
+                            .encode() + b'\r\n' + b' ' * 1_000_000 + b'\n') for n in range(40))
+        path.write_bytes(original)
+        expected = fold.read_events()
+        state = fold.fold(expected)
+        (self.root / 'state').mkdir()
+        (self.root / 'state/ledger-rollup-approved').touch()
+        with patch.object(ledger_rollup.os, 'nice'), \
+             patch.object(ledger_rollup, 'open_files', return_value=(set(), False, 0)):
+            self.assertEqual(ledger_rollup.main([]), 0)
+        indexes = ledger_files._indexes(self.events)
+        self.assertTrue(indexes)
+        parts = []
+        for index_path, obj, error in indexes:
+            self.assertIsNone(error)
+            self.assertEqual(obj['version'], 1)
+            parts.append((index_path.parent / obj['segment']).read_bytes())
+        packed = b''.join(parts)
+        self.assertEqual(packed, original)
+        self.assertEqual(hashlib.sha256(packed).digest(), hashlib.sha256(original).digest())
+        self.assertLess(path.stat().st_size, 8_000_000)
+        self.assertEqual(fold.read_events(), expected)
+        self.assertEqual(fold.fold(fold.read_events()), state)
+        # Continue the same source, then rotate a second continuation. Source
+        # line identities/order and concatenated raw hashes remain unchanged.
+        suffix = json.dumps(dict(type='observed', ts='999', subject='tail')).encode() + b'\n'
+        suffix += b' ' * 8_000_001 + b'\n'
+        with path.open('ab') as stream:
+            stream.write(suffix)
+        self.assertEqual(ledger_files._read_bytes(self.events, name), original + suffix)
+        with patch.object(ledger_rollup.os, 'nice'), \
+             patch.object(ledger_rollup, 'open_files', return_value=(set(), False, 0)):
+            self.assertEqual(ledger_rollup.main([]), 0)
+        self.assertEqual(path.stat().st_size, 0)
+        self.assertEqual(ledger_files._read_bytes(self.events, name), original + suffix)
+        self.assertEqual(fold.read_events()[-1]['_src'], name + ':81')
+        self.assertEqual(ledger_files.verify_segments(self.events, self.root / 'verify'), [])
+        print('L-spec-2049 AC2 ' + json.dumps(dict(source_bytes=len(original),
+              segment_bytes=len(packed), live_bytes=path.stat().st_size,
+              source_sha256=hashlib.sha256(original).hexdigest(),
+              segment_sha256=hashlib.sha256(packed).hexdigest(), bytes_equal=True, fold_equal=True)))
+
+    def test_executor_rotation_defers_busy_and_torn_tail(self):
+        path = self.events / ledger_rollup.EXECUTOR
+        path.write_bytes(b' ' * 8_000_001)
+        (self.root / 'state').mkdir()
+        (self.root / 'state/ledger-rollup-approved').touch()
+        stat = path.stat()
+        with patch.object(ledger_rollup.os, 'nice'), patch.object(ledger_rollup, 'open_files',
+                return_value=({(stat.st_dev, stat.st_ino)}, False, 0)):
+            self.assertEqual(ledger_rollup.main([]), 0)
+        self.assertEqual(path.stat().st_size, 8_000_001)
+        self.assertFalse((self.events / 'segments').exists())
+        with patch.object(ledger_rollup.os, 'nice'), \
+             patch.object(ledger_rollup, 'open_files', return_value=(set(), False, 0)):
+            self.assertEqual(ledger_rollup.main([]), 0)
+        self.assertEqual(path.read_bytes(), b' ' * 8_000_001)
+        self.assertFalse((self.events / 'segments').exists())
+        print('L-spec-2049 AC2 busy_writer_deferred=true torn_tail_retained=true')
+
+    def test_executor_rotation_crash_recovers_empty_live(self):
+        path = self.events / ledger_rollup.EXECUTOR
+        data = b' ' * 8_000_001 + b'\n'
+        path.write_bytes(data)
+        (self.root / 'state').mkdir()
+        (self.root / 'state/ledger-rollup-approved').touch()
+        class Crash(BaseException):
+            pass
+        def crash(step):
+            if step == 8:
+                raise Crash()
+        with patch.object(ledger_rollup.os, 'nice'), \
+             patch.object(ledger_rollup, 'open_files', return_value=(set(), False, 0)):
+            with patch.object(ledger_rollup, 'checkpoint', side_effect=crash), self.assertRaises(Crash):
+                ledger_rollup.main([])
+            self.assertFalse(path.exists())
+            self.assertEqual(ledger_files._read_bytes(self.events, path.name), data)
+            self.assertEqual(ledger_rollup.main([]), 0)
+        self.assertEqual(path.stat().st_size, 0)
+        self.assertEqual(ledger_files._read_bytes(self.events, path.name), data)
+        print('L-spec-2049 AC2 executor_crash_recovery=true live_bytes=0')
 
     def test_ac2_equivalence_appends_and_constant_queries(self):
         counts = []
@@ -312,5 +467,7 @@ def profile_worker(root, mode):
 if __name__ == '__main__':
     if len(sys.argv) > 1 and sys.argv[1] == '--profile-worker':
         profile_worker(*sys.argv[2:])
+    elif '--rotation-worker' in sys.argv:
+        unittest.main(argv=[__file__, 'ScanCostTests.test_executor_40mb_rotation_bytes_hash_and_fold'])
     else:
         unittest.main()

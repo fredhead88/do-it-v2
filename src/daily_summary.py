@@ -87,7 +87,7 @@ def deliver(now, sender=None):
     directory.mkdir(parents=True, exist_ok=True)
     with (directory/'telegram-summary.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        events = owed_digest._read_ledger(use_cache=False)
+        events = owed_digest._read_ledger()
         previous = state(events, now)
         planned = plan(events, now, previous)
         previous['rows'] = planned['rows']

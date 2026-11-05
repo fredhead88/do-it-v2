@@ -240,7 +240,14 @@ def AC4():
     with mock.patch.object(sp, "_process", side_effect=isolated):
         assert not f.run()["red_on_master"]
     assert observed == ["marker"]
-    assert before_files == {str(p): p.read_bytes() for p in f.root.rglob('*') if p.is_file()}
+    after_files = {str(p): p.read_bytes() for p in f.root.rglob('*') if p.is_file()}
+    def generated_cache(name):
+        path = Path(name)
+        return path.parent == f.root / 'cache' and re.fullmatch(
+            r'ledger-[0-9a-f]{16}\.(sqlite3|lock|gate)(-journal)?', path.name)
+    assert any(generated_cache(name) for name in after_files)
+    assert ({name: data for name, data in before_files.items() if not generated_cache(name)}
+            == {name: data for name, data in after_files.items() if not generated_cache(name)})
 
     albert = Fixture("albert-scott")
     albert.file("tests/test_x.py", "")
