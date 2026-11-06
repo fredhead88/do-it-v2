@@ -250,12 +250,13 @@ def open_charters(events, by_subject=None):
     return out
 
 
-def held_since(events, charter):
+def held_since(events, charter, folded_specs=None):
     """Timestamp of the latest standing planner hold, in ledger-position order.
 
     Lifecycle rows cannot clear the hold, including its own held end. Only a
     resolvable change on the charter, its specs, or its escalations can clear it.
     This is scheduling evidence, not authorization to signal a pane.
+    `folded_specs` is `fold.fold(events)[0]`, passed by a caller that already has it.
     """
     cid = fold.charter_id(charter)
     rows = [e for e in events if isinstance(e, dict)]
@@ -268,7 +269,8 @@ def held_since(events, charter):
     if hold is None:
         return None
     try:
-        specs = {sid for sid, spec in fold.fold(rows)[0].items() if spec["charter"] == cid}
+        folded = fold.fold(rows)[0] if folded_specs is None else folded_specs
+        specs = {sid for sid, spec in folded.items() if spec["charter"] == cid}
     except Exception:
         specs = set()                  # unresolvable associations never clear a hold
 
@@ -334,7 +336,7 @@ def plannable(events, root=None):
         if attempts_info["next"] == "held":
             why = f"held: known-bug escalation answered by {attempts_info['held_by']} without replan=yes"
         if why is None:
-            since = held_since(events, cid)
+            since = held_since(events, cid, specs)
             if since is not None:
                 why = f"held since {since}"
         if why is None and cid in escalated:
