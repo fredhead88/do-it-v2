@@ -1629,6 +1629,263 @@ def test_ac6_default_stalls_reach_glance_and_bootstrap():
         print('AC6 actual scratch glance/bootstrap: 121-minute review selected; count=2 held=3')
 
 
+def _nightly_event(kind, h, project="albert-scott", **kw):
+    return dict(type=kind, ts=_ago(h), subject="nightly:" + project, project=project, **kw)
+
+
+def _nightly_source(event, role="base-red"):
+    return ("host-" + role + "-x.jsonl", event)
+
+
+def _nightly_fixture(project="albert-scott", ids=None):
+    ids = ["src/test_alpha.py", "src/test_beta.py"] if ids is None else ids
+    return [_nightly_source(_nightly_event("nightly-red", 6, project, ids=ids, complete=True, sha="fixture", url="")),
+            _nightly_source(_nightly_event("escalation-blocking", 5, project, ids=ids, sha="fixture",
+                           default="Assign a fix spec or quarantine owner", deadline=_ago(-18), revert="Remove quarantine"))]
+
+
+def _nightly_write(directory, sources):
+    for filename, event in sources:
+        assert "actor" not in event, (filename, event)
+        with (directory / filename).open("a") as stream:
+            stream.write(json.dumps(event) + "\n")
+
+
+def _nightly_read(directory):
+    from fold import actor_of
+    return [dict(json.loads(line), actor=actor_of(path.name))
+            for path in sorted(directory.glob("*.jsonl")) for line in path.read_text().splitlines()]
+
+
+def _nightly_model(sources):
+    from fold import actor_of
+    return om.compute([om.reduce_event(dict(event, actor=actor_of(filename)))
+                       for filename, event in sources if event["type"] in om.WANT], [], NOW)
+
+
+def _nightly_items(model):
+    return [i for i in model["items"] if i["kind"] == "nightly"]
+
+
+def test_nightly_red_needs_you_ingestion():
+    from fold import actor_of
+    events = _nightly_fixture()
+    events += [events[1], events[1]]
+
+    def check(model, route):
+        assert set(model) == {"v", "at", "items", "resolved", "merge", "needs_you", "health"}, route
+        items = _nightly_items(model)
+        assert len(items) == 1 and model["needs_you"] == 1, (route, model)
+        item = items[0]
+        assert item["owner"] == "operator" and item["needs_you"] and item["sev"] > 0, route
+        assert item["subjects"] == ["nightly:albert-scott"], route
+        for value in ["albert-scott", *events[0][1]["ids"]]:
+            assert value in item["title"] + item["detail"], (route, value)
+        assert "fix spec" in item["next"] and "quarantine" in item["next"], route
+        assert om.parse(item["since"]) == om.parse(_ago(6)), (route, item)
+        assert om.parse(item["since"]) <= om.parse(item["last"]) <= NOW, route
+        print("nightly ingestion:", route, "pending", item["variants"])
+        return item["id"]
+
+    stable = check(_nightly_model(events), "filename-normalized reduce_event -> compute")
+    for role in ("executor", "thinker", "operator"):
+        for clear in ("nightly-red-owned", "base-red-nightly"):
+            with lockfree_fixture() as (root, directory, _, ledger):
+                _nightly_write(directory, events)
+                cache = {}
+                with mock.patch.object(realm.dt, "datetime", wraps=_dt.datetime) as clock:
+                    clock.now.return_value = NOW
+                    cached = None
+                    for read in range(2):
+                        rows = om.scan(directory, cache)
+                        assert check(om.compute(rows, [], NOW, root=root), f"scan cached read {read}") == stable
+                        assert check(realm.omens_model([], NOW), f"omens_model cached read {read}") == stable
+                        if cached is not None:
+                            assert realm._OM["generation"] == cached[0]
+                            assert realm._OM["rows"] is cached[1]
+                        cached = (realm._OM["generation"], realm._OM["rows"])
+                    generation, reduced = realm._OM["generation"], realm._OM["rows"]
+                    assert realm._OM["rows"] is reduced
+                    forged = _nightly_event("nightly-red-owned", 3, ids=events[0][1]["ids"], owner="quarantine")
+                    _nightly_write(directory, [_nightly_source(forged, "builder")])
+                    clock.now.return_value = NOW + _dt.timedelta(seconds=60)
+                    rows = om.scan(directory, cache)
+                    assert [r["actor"] for r in rows if r["ty"] == "nightly-red-owned"] == [actor_of("host-builder-x.jsonl")]
+                    assert check(om.compute(rows, [], NOW), "scan builder unauthorized") == stable
+                    assert check(realm.omens_model([], NOW), "omens_model builder unauthorized") == stable
+                    assert realm._OM["generation"] != generation
+                    generation = realm._OM["generation"]
+                    event = _nightly_event(clear, 1, ids=events[0][1]["ids"] if clear.endswith("owned") else [],
+                                           complete=True, owner="L-spec-1234")
+                    filename = "host-" + (role if clear.endswith("owned") else "base-red") + "-x.jsonl"
+                    # Existing files exercise changed-file reread as well as new-file discovery.
+                    (directory / filename).touch(exist_ok=True)
+                    om.scan(directory, cache)
+                    _nightly_write(directory, [(filename, event)])
+                    clock.now.return_value = NOW + _dt.timedelta(seconds=120)
+                    for route, model in [("scan changed file", om.compute(om.scan(directory, cache), [], NOW)),
+                                         ("omens_model changed generation", realm.omens_model([], NOW))]:
+                        assert not _nightly_items(model) and model["needs_you"] == 0, (route, role, clear, model)
+                        print("nightly ingestion:", route, role, clear, "cleared")
+                    assert realm._OM["generation"] != generation
+                    assert realm._OM["rows"] is not reduced
+                    assert not _nightly_items(realm.omens_model([], NOW))
+    other = _nightly_items(_nightly_model(_nightly_fixture("other-project")))[0]
+    assert other["id"] != stable
+
+
+def _nightly_cases(project="albert-scott", ids=None):
+    a, b = ids or ["src/test_alpha.py", "src/test_beta.py"]
+    base = _nightly_fixture(project, [a, b])
+    own = _nightly_event("nightly-red-owned", 3, project, ids=[a], owner="L-spec-1234")
+    green = _nightly_event("base-red-nightly", 2, project, ids=[], complete=True)
+    ex = lambda event: _nightly_source(event, "executor")
+    red = lambda **kw: _nightly_source(_nightly_event("nightly-red", 1, project, **kw))
+    malformed = lambda value: [_nightly_source(dict(base[0][1], ids=value)), base[1]]
+    return [
+        ("01 two unowned IDs", base),
+        ("02 duplicate alarms/escalations", base + base),
+        ("03 partial executor ownership", base + [ex(own)]),
+        ("04 remaining thinker quarantine", base + [ex(own), _nightly_source(dict(own, ts=_ago(2), ids=[b], owner="quarantine"), "thinker")]),
+        ("05 ownership at alarm timestamp", base + [ex(dict(own, ts=_ago(6), ids=[a, b]))]),
+        ("06 ownership before alarm", base + [ex(dict(own, ts=_ago(7), ids=[a, b]))]),
+        ("07 unauthorized builder", base + [_nightly_source(dict(own, ids=[a, b]), "builder")]),
+        ("08 invalid owner", base + [ex(dict(own, owner="unassigned", ids=[a, b]))]),
+        ("09 other project ownership/green", base + [ex(dict(own, project="other", subject="nightly:other")),
+                                                   _nightly_source(dict(green, project="other", subject="nightly:other"))]),
+        ("10 incomplete green", base + [_nightly_source(dict(green, complete=False))]),
+        ("11 complete non-green cumulative", base + [_nightly_source(dict(green, ids=[b]))]),
+        ("12 same project complete green", base + [_nightly_source(green)]),
+        ("13 later red reopens", base + [_nightly_source(green), red(ids=[b])]),
+        ("14 older than 24 hours", [(f, dict(e, ts=_ago(50))) for f, e in base]),
+        ("15 master full alone", [_nightly_source(_nightly_event("master-full-run", h, project, ids=failures, complete=True, green=not failures))
+                                  for h, failures in [(4, [a]), (1, [])]]),
+        ("16 stale escalation after clear", base + [_nightly_source(green), _nightly_source(dict(base[1][1], ts=_ago(1)))]),
+        ("17 operator ownership", base + [_nightly_source(dict(own, ids=[a, b]), "operator")]),
+        ("18 non-list IDs", malformed(a)),
+        ("19 non-string ID", malformed([a, 42])),
+        ("20a undetermined ownership after non-list", malformed(a) + [ex(dict(own, ids=["nightly evidence undetermined"]))]),
+        ("20b undetermined ownership after non-string", malformed([a, 42]) + [ex(dict(own, ids=["nightly evidence undetermined"]))]),
+        ("21 naive alarm timestamp", [(f, dict(e, ts=e["ts"][:19])) if e["type"] == "nightly-red" else (f, e)
+                                      for f, e in base] + [ex(dict(own, ids=[a, b, "nightly evidence undetermined"]))]),
+        ("extra master full cannot clear", base + [_nightly_source(_nightly_event("master-full-run", 1, project, ids=[], complete=True, green=True))]),
+        ("extra mismatched project", base + [ex(dict(own, project="other", ids=[a, b]))]),
+        ("extra ownership without project", base + [ex({k: v for k, v in dict(own, ids=[a, b]).items() if k != "project"})]),
+        ("extra alarm supersedes ownership", base + [ex(own), red(ids=[a])]),
+    ]
+
+
+def test_nightly_red_needs_you_lifecycle():
+    from fold_emits import nightly_unowned
+    for name, sources in _nightly_cases():
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = pathlib.Path(tmp)
+            _nightly_write(directory, sources)
+            events = _nightly_read(directory)
+            if name.startswith("21"):
+                try:
+                    nightly_unowned(events, "albert-scott")
+                except ValueError as exc:
+                    assert "timezone" in str(exc), str(exc)
+                else:
+                    raise AssertionError("21 real oracle must reject naive timestamp")
+                oracle = ["nightly evidence undetermined"]  # Display fallback, not an oracle result.
+                print("nightly lifecycle:", name, "oracle ValueError: nightly timestamp needs a timezone")
+            else:
+                oracle = nightly_unowned(events, "albert-scott")
+            states = [["L-spec-1234", "shipped"], ["L-spec-5678", "killed"]]
+            routes = [("scan", om.scan(directory, {}))]
+            if name.startswith("21"):
+                routes.append(("reduce_event", [om.reduce_event(e) for e in events]))
+            for route, rows in routes:
+                model = om.compute([r for r in rows if r], states, NOW)
+                items = _nightly_items(model)
+                actual = items[0]["variants"] if items else []
+                print("nightly lifecycle:", name, route, "oracle/fallback", oracle, "actual", actual)
+                assert actual == oracle, (name, route, actual, oracle)
+                assert len(items) == bool(oracle) and model["needs_you"] == bool(oracle), (name, route, model)
+                for item in items:
+                    assert item["owner"] == "operator" and item["needs_you"]
+                    assert "albert-scott" in item["title"]
+                    for key in ("since", "last"):
+                        assert _dt.datetime.fromisoformat(item[key]).utcoffset() is not None, (name, item)
+                if name.startswith("13"):
+                    assert items[0]["since"] == _ago(1) and items[0]["last"] == _ago(1)
+    green = _nightly_source(_nightly_event("base-red-nightly", 2, ids=[], complete=True))
+    model = _nightly_model(_nightly_fixture() + _nightly_fixture("other") + [green])
+    assert [i["subjects"] for i in _nightly_items(model)] == [["nightly:other"]]
+
+
+def test_nightly_red_needs_you_page():
+    from fold import actor_of
+    project, ids = 'project "<b>', ['test "<b> alpha', 'test "<b> beta']
+    cases = dict(_nightly_cases(project, ids))
+    selected = [("pending", "01"), ("partially owned", "03"), ("owned", "04"), ("green", "12"),
+                ("reopened", "13"), ("undetermined non-list", "18"), ("undetermined non-string", "19"),
+                ("undetermined owned", "20a"), ("undetermined owned non-string", "20b"), ("undetermined timestamp", "21")]
+    models = []
+    for label, prefix in selected:
+        sources = next(value for key, value in cases.items() if key.startswith(prefix + " "))
+        model = _nightly_model(sources)
+        # This separate escalation reader deliberately retains its Thinker raven.
+        escalation = dict(sources[1][1], deadline=_ago(1))
+        compact = realm.compact(escalation, actor_of(sources[1][0]))
+        assert compact and compact["ty"] == "escalation-blocking"
+        models.append((label, model, _nightly_items(model)[0]["variants"] if _nightly_items(model) else [], compact))
+    page = realm.PAGE.read_text()
+    declarations = []
+    for name in ("SERVER_KINDS", "NO_SELFCHECK", "FINISHED_RE", "DEFAULT_OWNER", "OMEN_HELP", "NEXT_ACTION", "S", "esc", "toMs", "isRaven", "pendingQ"):
+        start = page.index("const " + name + (" =" if name in ("esc", "toMs", "S") else "="))
+        end = page.index("\n};", start) + 3 if name in ("OMEN_HELP", "NEXT_ACTION") else page.index("\n", start)
+        declarations.append(page[start:end])
+    functions = ("computeOmens", "stateMap", "omensTopHtml", "omenFoot", "escOwner", "handle")
+    script = "\n".join(declarations + [_page_function(page, n) for n in functions])
+    script += "\nconst fixtures=" + json.dumps(models) + ";\nconst project=" + json.dumps(project) + ";\n"
+    script += r'''
+const assert=require('node:assert/strict');
+let DATA={states:[]},LIVE=true,REMOTE=false,stream=null,lastHeard=0;
+const CAP={},execBusy=()=>false,lastOf=()=>null,knownBug=()=>null,specCharter=()=>null,charterRows=()=>[];
+const laneSplit=()=>({close:[]}),renderOmens=()=>{},fixFor=()=>null,ownerFor=()=>null,sinceFor=a=>a.srvSince;
+const loopState=()=>({badge:{cls:'open',text:'open'}}),omenWhen=()=>'',hhmm=()=>'',fmtDur=ms=>String(ms);
+const isOperator=o=>o==='operator'||o==='you';
+const Codex={event:()=>{}},subjectPush=()=>{},actorRole=a=>a,addLog=()=>{};
+let model;const OM=()=>model;
+S.now=Date.parse('2026-10-15T12:00:00Z');S.quiet=true;
+for(const [name,payload,pending,compact] of fixtures){
+ S.esc.clear();S.subjectEvents.clear();
+ handle({...compact,ms:toMs(compact.t)});
+ const raven=S.esc.get('nightly:'+project);
+ assert(raven&&isRaven(raven),name+' nightly raven');
+ assert.equal(escOwner(raven),'thinker',name+' Thinker owner');
+ assert(toMs(raven[0].dl)<S.now,name+' expired deadline');
+ model=payload;computeOmens();
+ assert.equal(payload.needs_you,pending.length?1:0,name+' server count');
+ assert.equal(S.alarms.filter(a=>a.needs).length,pending.length?1:0,name);
+ assert(S.alarms.some(a=>a.kind==='ravens'&&!a.needs&&a.owner==='thinker'&&a.subjects.includes('nightly:'+project)),name+' health raven');
+ const html=omensTopHtml();
+ const need=html.split(`<h4>NEEDS YOU (${pending.length?1:0})</h4>`)[1].split('<h4>SYSTEM HEALTH (2)</h4>')[0];
+ const health=html.split('<h4>SYSTEM HEALTH (2)</h4>')[1];
+ assert(health&&health.includes('digest'),name);assert(!need.includes('digest'),name);
+ assert(health.includes(esc('nightly:'+project)),name+' residual raven in SYSTEM HEALTH');
+ if(pending.length){
+  assert(need.includes(esc(project)),name);
+  for(const id of pending)assert(need.includes(esc(id)),name+id);
+  for(const id of ['test "<b> alpha','test "<b> beta'].filter(id=>!pending.includes(id)))assert(!need.includes(esc(id)),name+id);
+  assert(need.includes('fix spec')&&need.includes('quarantine'),name);
+ }else{
+  assert(!need.includes(esc(project)),name);
+  assert(!S.alarms.some(a=>a.kind==='nightly'),name+' server nightly gone');
+  assert(S.esc.has('nightly:'+project),name+' independent raven remains');
+ }
+ assert(!html.includes(project)&&!html.includes('<b> alpha')&&!html.includes('<b> beta'),name+' escaping');
+ console.log('nightly page:',name,'pending',JSON.stringify(pending),'escaped; NEEDS YOU and residual Thinker SYSTEM HEALTH raven checked');
+}
+'''
+    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    print(proc.stdout, end="")
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
