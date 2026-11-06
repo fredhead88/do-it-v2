@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """The shared, offline-by-default base CI failure service (L-spec-1106).
 
-Only --ensure and nightly may dispatch CI. Uncertain evidence is never cached.
+Readers stay offline; --ensure, nightly and rerun_on_base may dispatch CI.
+Uncertain observations never claim a complete base snapshot.
 """
 import argparse
 import collections
@@ -487,6 +488,120 @@ def id_kind(node):
     if ".py::" in node:
         return "pytest"
     return "vitest" if "::" in node else "suite-error"
+
+
+def classify_selected(project, base_sha, ids, *, now=None):
+    """Read positive ancestral evidence; absence always needs an exact-base probe."""
+    ids = list(dict.fromkeys(ids))
+    result = dict(known_red=[], rerun_on_base=ids, undetermined=bool(ids))
+    if not ids:
+        return result
+    try:
+        repo, base = _project(project, base_sha)
+        known, anchor = _known_state(project)
+        current = _time(now) if now is not None else datetime.now(timezone.utc)
+        def ancestral(sha):
+            try:
+                _, resolved = _project(project, sha)
+                return window_gate.git(repo, "merge-base", "--is-ancestor", resolved,
+                                       base, check=False).returncode == 0
+            except Exception:
+                return False
+        if (anchor is None or not ancestral(anchor["sha"])
+                or not timedelta(0) <= current - _time(anchor["ts"]) < timedelta(hours=36)):
+            return result
+        positives = set()
+        for node, evidence in known.items():
+            try:
+                if (_time(anchor["ts"]) <= _time(evidence["since"]) <= current
+                        and ancestral(evidence["sha"])):
+                    positives.add(node)
+            except (KeyError, TypeError, ValueError, AttributeError):
+                continue
+        return dict(known_red=[n for n in ids if n in positives],
+                    rerun_on_base=[n for n in ids if n not in positives], undetermined=False)
+    except Exception:
+        return result
+
+
+def rerun_on_base(project, base_sha, ids):
+    """Adapt the validated targeted transport and commit only red observations."""
+    import window_attribution
+    ids = list(dict.fromkeys(ids))
+    result = dict(pre_existing=[], new=[], undetermined=False)
+    if not ids:
+        return result
+    try:
+        repo, sha = _project(project, base_sha)
+        supported = []
+        for node in ids:
+            try:
+                ok = window_attribution.supported(repo, sha, [node])
+            except Exception:
+                ok = False
+            if ok:
+                supported.append(node)
+            else:
+                result["undetermined"] = True
+        if not supported:
+            return result
+        answer = window_attribution.probe(repo, sha, supported)
+        if answer.get("sha", sha) != sha or not isinstance(answer.get("states"), dict):
+            raise ValueError("invalid base observation")
+        states = answer["states"]
+        if set(states) - set(supported):
+            raise ValueError("unexpected base observation")
+        for node in supported:
+            state = states.get(node)
+            if state == "red":
+                result["pre_existing"].append(node)
+            elif state in ("green", "absent"):
+                result["new"].append(node)
+            else:
+                result["undetermined"] = True
+        if result["pre_existing"]:
+            record(project, sha, result["pre_existing"], source="rerun")
+    except Exception:
+        result["undetermined"] = True
+    return result
+
+
+def _classify_selected_attempt(project, base_sha, ids, memo, unsettled,
+                               classification, selective, pg_complete):
+    """One attempt's exact-base evidence, shared by full and half judgments."""
+    if selective:
+        import base_red as service
+        try:
+            selected = service.classify_selected(project, base_sha, ids)
+            known = set(selected["known_red"])
+            known.difference_update(n for n in ids
+                if (base_sha, n) in unsettled or
+                memo.get((base_sha, n)) == "undetermined")
+            pending = [n for n in ids if n not in known]
+            unseen = [n for n in pending if (base_sha, n) not in memo]
+            if unseen:
+                try:
+                    answer = service.rerun_on_base(project, base_sha, unseen)
+                    # Aggregate uncertainty can include a failed ledger append.
+                    # Keep it sticky even for a later half containing one id.
+                    if answer.get("undetermined", True):
+                        unsettled.update((base_sha, n) for n in unseen)
+                    for node in unseen:
+                        states = [k for k in ("pre_existing", "new") if node in answer.get(k, [])]
+                        memo[base_sha, node] = (
+                            states[0] if len(states) == 1 else "undetermined")
+                except Exception:
+                    memo.update({(base_sha, n): "undetermined" for n in unseen})
+            settled = all(memo[base_sha, n] != "undetermined" and
+                          (base_sha, n) not in unsettled for n in pending)
+            classification.update(complete=settled, undetermined=not settled,
+                pre_existing=[n for n in ids if n in known or
+                              memo.get((base_sha, n)) == "pre_existing"],
+                new=[n for n in pending if memo[base_sha, n] == "new"])
+        except Exception:
+            classification = dict(classification, complete=False)
+        pg_complete = False
+    return classification, classification.get("undetermined", False), pg_complete
 
 
 def classify(project, base_sha, ids, *, known_red=False, now=None, refresh=False):
