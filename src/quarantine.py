@@ -5,6 +5,8 @@ import hashlib
 import fcntl
 import os
 import re
+import sys
+from itertools import combinations
 
 import fold
 
@@ -113,6 +115,149 @@ def valid_node(node):
     return isinstance(node, str) and bool(re.fullmatch(r"[A-Za-z0-9_./-]+\.py::[^\s\x00-\x1f]+", node))
 
 
+def _metadata(value):
+    return isinstance(value, str) and bool(value) and not re.search(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]", value)
+
+
+def _evidence(prefix, values):
+    return prefix + json.dumps(values, separators=(",", ":"), ensure_ascii=True)
+
+
+def _diagnostics(rule, excluded, *, unavailable=None):
+    if excluded or unavailable:
+        print(json.dumps(dict(rule=rule, excluded_count=len(excluded),
+                              excluded=sorted(excluded, key=lambda e: (e["source"], e["reason"])),
+                              **({"unavailable": unavailable} if unavailable else {})),
+                         ensure_ascii=True), file=sys.stderr)
+
+
+def _excluded(excluded, event, reason):
+    source = event.get("_src")
+    if not isinstance(source, str) or not source:
+        source = _evidence("event:", [event.get(k) for k in ("subject", "sha", "tree")])
+    excluded.append(dict(source=source, reason=reason))
+
+
+def _prior_until(events, project, now):
+    """A lift does not erase the evidence boundary imposed by a prior row."""
+    result = {}
+    for e in events:
+        if (e.get("type") == "test-quarantined" and e.get("project") == project
+                and _time(e["ts"]) <= now):
+            node, until = e["node"], _time(e["until"])
+            result[node] = max(result.get(node, until), until)
+    return result
+
+
+def _nodes(ids):
+    if not isinstance(ids, list) or any(not isinstance(n, str) for n in ids):
+        return "invalid-ids"
+    if any(not valid_node(n) or not _metadata(n) for n in ids):
+        return "invalid-node-ids"
+    return None
+
+
+def _members(records, tree):
+    """Resolve exact matches without merging contradictory membership claims."""
+    choices = set()
+    for e in records:
+        specs = e.get("specs")
+        if specs is None or specs == []:
+            continue
+        if not isinstance(specs, list) or any(not _metadata(s) for s in specs):
+            return None, "invalid-membership"
+        if e.get("type") == "window-rehearsed" and "tree" in e and e["tree"] != tree:
+            return None, "contradictory-tree"
+        choices.add(frozenset(specs))
+    if len(choices) > 1:
+        return None, "contradictory-membership"
+    return (next(iter(choices)), None) if choices else (None, None)
+
+
+def spec_due(events, project, now):
+    """Propose reds shared by two distinct trees with disjoint spec membership."""
+    now = _time(now)
+    joins = {}
+    for e in events:
+        if (e.get("project") == project and e.get("type") in ("window-candidate", "window-rehearsed")
+                and _time(e["ts"]) <= now
+                and all(_metadata(e.get(k)) for k in ("subject", "sha"))):
+            joins.setdefault((e["project"], e["subject"], e["sha"]), []).append(e)
+    excluded, observations = [], []
+    for e in events:
+        if e.get("project") != project or e.get("type") != "window-tree-verified":
+            continue
+        if not now-timedelta(days=QUARANTINE_DAYS) <= _time(e["ts"]) <= now:
+            continue
+        reason = None
+        if not all(_metadata(e.get(k)) for k in ("subject", "sha", "tree")) or any(
+                k in e and not _metadata(e[k]) for k in ("_src", "window")):
+            reason = "invalid-identity"
+        elif type(e.get("green")) is not bool:
+            reason = "invalid-green"
+        else:
+            reason = _nodes(e.get("new_ids"))
+        if reason:
+            _excluded(excluded, e, reason)
+            continue
+        records = joins.get((project, e["subject"], e["sha"]), [])
+        specs, reason = _members([r for r in records if r["type"] == "window-candidate"], e["tree"])
+        if not specs and not reason:
+            specs, reason = _members([r for r in records if r["type"] == "window-rehearsed"], e["tree"])
+        if reason or not specs:
+            _excluded(excluded, e, reason or "missing-membership")
+            continue
+        if e["green"] is False:
+            observations.append((e, specs, _evidence("tree:", [e[k] for k in ("subject", "sha", "tree")])))
+    _diagnostics("two-specs", excluded)
+    current, prior = active(events, project, now), _prior_until(events, project, now)
+    by_node = {}
+    for e, specs, source in observations:
+        for node in set(e["new_ids"]):
+            if node not in current and (node not in prior or _time(e["ts"]) > prior[node]):
+                by_node.setdefault(node, []).append((e["tree"], specs, source))
+    result = []
+    for node, rows in sorted(by_node.items()):
+        for a, b in combinations(sorted(rows, key=lambda r: r[2]), 2):
+            if a[0] != b[0] and a[1].isdisjoint(b[1]):
+                result.append(dict(node=node, rule="two-specs", windows=sorted({a[2], b[2]})))
+                break
+    return result
+
+
+def seed_due(events, project, now):
+    """Seed a project once, from its latest complete counted master nightly."""
+    now = _time(now)
+    if any(e.get("type") == "test-quarantined" and e.get("actor") == "base-red"
+           and e.get("rule") == "master-seed" and e.get("project") == project
+           and _time(e["ts"]) <= now for e in events):
+        return []
+    counted = [(i, e) for i, e in enumerate(events)
+               if e.get("type") == "base-red-nightly" and e.get("project") == project
+               and e.get("complete") is True and e.get("suite") in ("nightly", "undeclared")
+               and _time(e["ts"]) <= now]
+    if not counted:
+        _diagnostics("master-seed", [], unavailable="no-counted-nightly")
+        return []
+    _, event = max(counted, key=lambda p: (_time(p[1]["ts"]), str(p[1].get("_src", "")), p[0]))
+    ids = event.get("ids")
+    if isinstance(ids, dict):
+        ids = [n for values in ids.values() for n in values] if all(
+            isinstance(values, list) for values in ids.values()) else None
+    reason = ("invalid-identity" if not all(_metadata(event.get(k)) for k in ("sha", "_src"))
+              else _nodes(ids))
+    if reason:
+        excluded = []
+        _excluded(excluded, event, reason)
+        _diagnostics("master-seed", excluded)
+        return []
+    current, prior = active(events, project, now), _prior_until(events, project, now)
+    return [dict(node=node, rule="master-seed",
+                 windows=[_evidence("nightly:", [event["_src"], event["sha"]])])
+            for node in sorted(set(ids)) if node not in current
+            and (node not in prior or _time(event["ts"]) > prior[node])]
+
+
 def lifts(events, project, now):
     now = _time(now)
     verified = sorted((e for e in events if e.get("project") == project
@@ -122,7 +267,8 @@ def lifts(events, project, now):
     for node, row in _latest(events, project, now).items():
         since, until = _time(row["since"]), _time(row["until"])
         windows = [e for e in verified if _time(e["ts"]) > since][-GREEN_WINDOWS:]
-        green = (row.get("rule") != "auto-base-red" and len(windows) == GREEN_WINDOWS and all(
+        green = (row.get("rule") not in ("auto-base-red", "two-specs", "master-seed")
+                 and len(windows) == GREEN_WINDOWS and all(
             node not in e.get("quarantined", []) and node not in e.get("pre_existing", [])
             for e in windows))
         if green and _time(windows[-1]["ts"]) < until:
@@ -154,8 +300,13 @@ def _append(kind, project, now, *, _subject=None, **fields):
 
 def record(project, node, rule, windows, *, now=None):
     now = _time(now) if now is not None else datetime.now(timezone.utc)
-    if rule not in ("repeat-blame", "base-red", "auto-base-red"):
+    if rule not in ("repeat-blame", "base-red", "auto-base-red", "two-specs", "master-seed"):
         raise ValueError("unknown quarantine rule")
+    if rule in ("two-specs", "master-seed") and (
+            not isinstance(project, str) or not re.fullmatch(r"[A-Za-z0-9._-]+", project)
+            or project in (".", "..") or not valid_node(node) or not _metadata(node)
+            or not isinstance(windows, list) or not windows or any(not _metadata(w) for w in windows)):
+        raise ValueError("invalid quarantine evidence")
     current = active(fold.read_events(), project, now)
     if node in current:
         return current[node]
@@ -189,7 +340,8 @@ def _apply(project, *, now=None):
     # Decide both sets from one view: a green lift must not immediately earn
     # the very same quarantine again during this apply call.
     events = fold.read_events()
-    pending = base_due(events, project, now) + due(events, project, now)
+    pending = (base_due(events, project, now) + due(events, project, now)
+               + spec_due(events, project, now) + seed_due(events, project, now))
     import rulings
     receipts = []
     consumed = {e.get("ref") for e in events if e.get("type") == "quarantine-ruling-applied"}
@@ -213,7 +365,10 @@ def _apply(project, *, now=None):
                     default="Fix expired base-red quarantine for " + node,
                     deadline=(now+timedelta(days=1)).isoformat(),
                     revert="Remove escalation after the fix is verified")
-    recorded = [record(project, **item, now=now) for item in pending]
+    unique = {}
+    for item in pending:
+        unique.setdefault(item["node"], item)
+    recorded = [record(project, **item, now=now) for item in unique.values()]
     for source, nodes in receipts:
         _append("quarantine-ruling-applied", project, now, ref=source, nodes=nodes)
     import quarantine_file
