@@ -176,7 +176,7 @@ def authority_edit(current, base, branch, new):
     if base == branch:
         return current
     bl, nl = base.splitlines(keepends=True), branch.splitlines(keepends=True)
-    extra = [i for i, line in enumerate(nl) if re.fullmatch(r'\s*["\']' + re.escape(new) + r'["\'],\s*', line)]
+    extra = [i for i, line in enumerate(nl) if re.fullmatch(r'\s*["\']' + re.escape(new) + r'["\'],[ \t]*(#[^\n]*)?\s*', line)]
     if len(extra) != 1 or nl[:extra[0]] + nl[extra[0] + 1:] != bl:
         raise ValueError("unrecognised authority change")
     i = extra[0]
@@ -235,8 +235,18 @@ def mechanical(repo, cur, branch):
         raise ValueError("branch manifest and migration disagree")
     allowed = SHARED | {path}
     changed = out(repo, "diff", "--name-only", f"{base}..{branch}").splitlines()
+    added = set(out(repo, "diff", "--diff-filter=A", "--name-only", f"{base}..{branch}").splitlines())
+    rewritten_tests = {}
     for other in changed:
-        if other not in allowed and p.encode() in git(repo, "show", f"{branch}:{other}", check=False).stdout:
+        if other in allowed:
+            continue
+        content = git(repo, "show", f"{branch}:{other}", check=False).stdout
+        if (other in added and re.fullmatch(r"(?:api/)?tests/(?:.*/)?test_[^/]*\.py", other)
+                and git(repo, "cat-file", "-e", f"{cur}:{other}", check=False).returncode != 0):
+            for quote in (b'"', b"'"):
+                content = content.replace(quote + p.encode() + quote, quote + h.encode() + quote)
+            rewritten_tests[other] = content
+        if p.encode() in content:
             raise ValueError("old parent literal in another changed file")
     expected = test_edit(text(repo, base, TEST), p, r)
     if text(repo, branch, TEST) != expected:
@@ -251,6 +261,7 @@ def mechanical(repo, cur, branch):
         migration = source
     changes = {path: migration, MANIFEST: manifest_edit(text(repo, cur, MANIFEST), h, r, addition),
                TEST: test_edit(text(repo, cur, TEST), h, r), FINGERPRINT: blob(repo, cur, FINGERPRINT)}
+    changes.update(rewritten_tests)
     def optional(rev):
         q = git(repo, "show", f"{rev}:{AUTHORITY}", check=False)
         return q.stdout.decode() if q.returncode == 0 else None
@@ -271,6 +282,9 @@ def resolve(repo, cur, entry, window, *, ev):
             return commit, None
         if merged.returncode != 1:
             raise ValueError("merge-tree failed")
+        base = out(repo, "merge-base", cur, sha)
+        if not added_versions(repo, base, sha):
+            return None, "no added migration; ordinary conflict"
         conflicts = lines[1:lines.index("", 1)]
         changes, r, p, h, allowed = mechanical(repo, cur, sha)
         if not set(conflicts) <= allowed:
@@ -283,9 +297,10 @@ def resolve(repo, cur, entry, window, *, ev):
         ev("rechained", spec, window=window, branch=branch, branch_sha=sha, merge_sha=commit,
            old_parent=p, new_parent=h, revision=r, files=sorted(changes), mechanical=True)
         return commit, None
-    except (ValueError, KeyError, TypeError, SyntaxError, UnicodeError, subprocess.SubprocessError):
+    except (ValueError, KeyError, TypeError, SyntaxError, UnicodeError, subprocess.SubprocessError) as exc:
         why = "re-chain rules could not be applied safely"
-        ev("rechain-declined", spec, window=window, branch=branch, why=why)
+        rule = str(exc)[:200] if type(exc) is ValueError and str(exc) else type(exc).__name__
+        ev("rechain-declined", spec, window=window, branch=branch, why=why, rule=rule)
         return None, why
 
 

@@ -100,9 +100,9 @@ def replay_semantics(repo, cur, changes=None):
 
 
 class Fixture:
-    def __init__(self, root):
-        self.repo = pathlib.Path(root) / "repo"
-        self.repo.mkdir()
+    def __init__(self, root, *, repo=None):
+        self.repo = pathlib.Path(repo) if repo is not None else pathlib.Path(root) / "repo"
+        self.repo.mkdir(parents=True, exist_ok=True)
         git(self.repo, "init", "-b", "master")
         self.write(rechain.VERSIONS + "h0.py", "revision = 'h0'\ndown_revision = None\n")
         self.write(rechain.MANIFEST, json.dumps({"heads": [{"revision": "h0", "deployment": "routed",
@@ -190,6 +190,158 @@ class RechainTests(unittest.TestCase):
         cur, _ = window_gate.merge_into(self.fx.repo, self.fx.base, a[2], "a")
         return cur, b
 
+    def test_2111_ac1(self):
+        base = 'AUTHORITY_REVISIONS = frozenset(\n    {\n        "h0",\n    }\n)\n'
+        current = base.replace('        "h0",', '        "m1",\n        "h0",')
+        for line in ('        "r1",\n', '        "r1",  # Index-only migration; no authority changes.\n'):
+            branch = base.replace('    }', line + '    }')
+            result = rechain.authority_edit(current, base, branch, "r1")
+            self.assertEqual(result, current.replace('    }', line + '    }'))
+        response("2111-AC1", dict(comment_preserved=True, plain_preserved=True))
+
+    def test_2111_ac2(self):
+        base = 'AUTHORITY_REVISIONS = frozenset(\n    {\n        "h0",\n    }\n)\n'
+        line = '        "r1",  # note\n'
+        branch = base.replace('    }', line + '    }')
+        for changed in (branch.replace('"h0"', '"other"'),
+                        base.replace('    }', '        "r1",\n        "r1",\n    }'),
+                        base.replace('    }', '        "r1", x = 1\n    }')):
+            with self.assertRaisesRegex(ValueError, "^unrecognised authority change$"):
+                rechain.authority_edit(base, base, changed, "r1")
+        with self.assertRaisesRegex(ValueError, "^authority insertion outside revision set$"):
+            rechain.authority_edit(base, base, line + base, "r1")
+        response("2111-AC2", dict(strict_rejections=4))
+
+    def parent_case(self, *, comment=False, files=None, current_files=None):
+        a = self.fx.branch("a", mutation=lambda f: [
+            f.write(path, value) for path, value in (current_files or {}).items()])
+        def mutate(f):
+            if comment:
+                authority = (f.repo / rechain.AUTHORITY).read_text()
+                f.write(rechain.AUTHORITY, authority.replace('"b",', '"b",  # Index-only migration; no authority changes.'))
+            for path, value in (files or {}).items():
+                f.write(path, value)
+        b = self.fx.branch("b", mutation=mutate)
+        cur, _ = window_gate.merge_into(self.fx.repo, self.fx.base, a[2], "a")
+        self.fx.events.clear()
+        return cur, b
+
+    def assert_parent_resolves(self, *, comment=False, files=None, expected=None):
+        cur, b = self.parent_case(comment=comment, files=files)
+        sha, why = rechain.resolve(self.fx.repo, cur, b, "w", ev=self.fx.ev)
+        self.assertIsNone(why)
+        self.assertIsNotNone(sha)
+        self.assertEqual(rechain.revision(rechain.text(self.fx.repo, sha, rechain.VERSIONS + "b.py")), ("b", "a"))
+        self.assertEqual(rechain.routed_head(self.fx.repo, sha), "b")
+        event = self.fx.events[-1]
+        self.assertEqual(event["type"], "rechained")
+        for path, value in (expected or {}).items():
+            self.assertEqual(rechain.text(self.fx.repo, sha, path), value)
+            self.assertIn(path, event["files"])
+        if comment:
+            self.assertIn('"b",  # Index-only migration; no authority changes.',
+                          rechain.text(self.fx.repo, sha, rechain.AUTHORITY))
+        return sha
+
+    def test_2111_ac3(self):
+        self.assert_parent_resolves(comment=True)
+        response("2111-AC3", dict(head="b", parent="a", comment_preserved=True, event="rechained"))
+
+    def test_2111_ac4(self):
+        path = "api/tests/test_b_parent.py"
+        self.assert_parent_resolves(files={path: 'PARENT = "h0"\nOTHER = \'h0\'\n'},
+                                    expected={path: 'PARENT = "a"\nOTHER = \'a\'\n'})
+        response("2111-AC4", dict(two_quote_styles_rewritten=True, event_includes_test=True))
+
+    def test_2111_ac5(self):
+        path = "api/tests/test_b_parent.py"
+        self.assert_parent_resolves(comment=True, files={path: 'PARENT = "h0"\nOTHER = \'h0\'\n'},
+                                    expected={path: 'PARENT = "a"\nOTHER = \'a\'\n'})
+        response("2111-AC5", dict(comment_and_parent_pins=True))
+
+    def assert_rules_decline(self, cur, entry, rule):
+        before = len(self.fx.events)
+        sha, why = rechain.resolve(self.fx.repo, cur, entry, "w", ev=self.fx.ev)
+        self.assertIsNone(sha)
+        self.assertEqual(why, "re-chain rules could not be applied safely")
+        self.assertEqual(len(self.fx.events), before + 1)
+        event = self.fx.events[-1]
+        self.assertEqual(event["type"], "rechain-declined")
+        self.assertEqual(event["why"], why)
+        self.assertEqual(event["rule"], rule)
+        self.assertNotIn("stage", event)
+        self.assertNotIn("stderr_tail", event)
+
+    def test_2111_ac6(self):
+        path = "api/tests/test_b_parent.py"
+        cases = [
+            ({path: "# from h0\n"}, None, "old parent literal in another changed file"),
+            ({path: 'PARENT = "h0"\n# from h0\n'}, None, "old parent literal in another changed file"),
+            ({"outside.txt": '"h0"\n'}, None, "old parent literal in another changed file"),
+            ({"tools/helper_b.py": '"h0"\n'}, None, "old parent literal in another changed file"),
+            ({path: '"h0"\n'}, {path: "other\n"}, "old parent literal in another changed file"),
+            ({path: '"zz"\n'}, {path: "other\n"}, "conflict outside re-chain allowlist"),
+        ]
+        for i, (files, current, rule) in enumerate(cases):
+            with self.subTest(case=i), tempfile.TemporaryDirectory() as root:
+                self.fx = Fixture(root)
+                if i == 2:
+                    self.fx.write("api/tests/test_old.py", "before\n")
+                    self.fx.base = self.fx.commit("pre-existing test")
+                    files = {"api/tests/test_old.py": '"h0"\n'}
+                cur, b = self.parent_case(files=files, current_files=current)
+                self.assert_rules_decline(cur, b, rule)
+        for value, expected in [('PARENT = "h0"\nOTHER = "zz"\n', 'PARENT = "a"\nOTHER = "zz"\n'),
+                                ('ANCESTOR = "h0"\n', 'ANCESTOR = "a"\n')]:
+            with tempfile.TemporaryDirectory() as root:
+                self.fx = Fixture(root)
+                self.assert_parent_resolves(files={path: value}, expected={path: expected})
+        response("2111-AC6", dict(narrow_rejections=6, accepted_rewrites=2))
+
+    def test_2111_ac7(self):
+        self.test_rules_decline_fields_unchanged()
+        cur, b = self.parent_case(files={"api/tests/test_b_parent.py": "# from h0\n"})
+        self.assert_rules_decline(cur, b, "old parent literal in another changed file")
+        for exc, rule in [(KeyError("k"), "KeyError"), (ValueError("x" * 500), "x" * 200),
+                          (UnicodeDecodeError("utf-8", b"\\xff", 0, 1, "bad"), "UnicodeDecodeError"),
+                          (ValueError(""), "ValueError")]:
+            with patch.object(rechain, "mechanical", side_effect=exc):
+                self.assert_rules_decline(cur, b, rule)
+        response("2111-AC7", dict(rules_bounded=True, subclass_uses_class=True, legacy_fields_preserved=True))
+
+    def ordinary_branch(self):
+        git(self.fx.repo, "checkout", "-b", "br-c", self.fx.base)
+        self.fx.write("outside.txt", "c\n")
+        sha = self.fx.commit("ordinary conflict")
+        git(self.fx.repo, "checkout", "master")
+        return ("c", "br-c", sha)
+
+    def test_2111_ac8(self):
+        a = self.fx.branch("a", mutation=lambda f: f.write("outside.txt", "a\n"))
+        c = self.ordinary_branch()
+        cur, _ = window_gate.merge_into(self.fx.repo, self.fx.base, a[2], "a")
+        before = list(self.fx.events)
+        self.assertEqual(rechain.resolve(self.fx.repo, cur, c, "w", ev=self.fx.ev),
+                         (None, "no added migration; ordinary conflict"))
+        sha, why = rechain.resolve(self.fx.repo, self.fx.base, c, "w", ev=self.fx.ev)
+        self.assertIsNotNone(sha)
+        self.assertIsNone(why)
+        self.assertEqual(self.fx.events, before)
+        response("2111-AC8", dict(ordinary_conflict=True, clean_merge=True, events=0))
+
+    def test_2111_ac9(self):
+        a = self.fx.branch("a", mutation=lambda f: f.write("outside.txt", "a\n"))
+        b = self.fx.branch("b", mutation=lambda f: f.write(rechain.VERSIONS + "extra.py",
+                                                          "revision='extra'\ndown_revision='b'\n"))
+        cur, _ = window_gate.merge_into(self.fx.repo, self.fx.base, a[2], "a")
+        self.assert_rules_decline(cur, b, "branch must add exactly one active migration")
+        c = self.ordinary_branch()
+        with self.assertRaisesRegex(ValueError, "^branch must add exactly one active migration$"):
+            rechain.mechanical(self.fx.repo, cur, c[2])
+        with patch.object(rechain, "added_versions", side_effect=subprocess.CalledProcessError(1, "git")):
+            self.assert_rules_decline(cur, c, "CalledProcessError")
+        response("2111-AC9", dict(two_migrations_declined=True, mechanical_unchanged=True, failed_scan_closed=True))
+
     def fingerprint_env(self):
         root = pathlib.Path(self.tmp.name)
         env = self.fx.scripts(root)
@@ -275,6 +427,7 @@ class RechainTests(unittest.TestCase):
         self.assertEqual(why, "re-chain rules could not be applied safely")
         event = self.fx.events[-1]
         self.assertEqual(event["why"], why)
+        self.assertEqual(event["rule"], "conflict outside re-chain allowlist")
         self.assertNotIn("stderr_tail", event)
         self.assertNotIn("stage", event)
         response("1534-AC5-rules", dict(declined=True, why=why, no_stderr_tail=True))

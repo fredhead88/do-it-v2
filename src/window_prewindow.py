@@ -4,11 +4,13 @@ No checkout, refs, CI, migration execution, or database access. Prefix commits
 are unreachable Git objects so merge-tree can inspect the cumulative tree.
 """
 import ast
+import os
 import re
 import subprocess
 
 import dependency_holds
 import merge_gate
+import rechain
 
 VERSIONS = 'api/alembic_supabase/versions/'
 CENSUS = 'dashboard/src/lib/server-identity.test.ts'
@@ -182,8 +184,15 @@ def overlap(left, right):
     return None
 
 
-def merge_tree(repo, left, right):
+def merge_tree(repo, left, right, entry=None):
     result = git(repo, 'merge-tree', '--write-tree', '--name-only', left, right, check=False)
+    if result.returncode == 1 and entry is not None and os.environ.get("DOIT_WINDOW_RECHAIN", "on") == "on":
+        try:
+            commit, _ = rechain.resolve(repo, left, entry, "prewindow", ev=lambda *a, **kw: None)
+            if commit:
+                return git(repo, 'rev-parse', commit + '^{tree}').stdout.strip()
+        except Exception:
+            pass
     if result.returncode:
         raise ValueError('textual merge is not clean' if result.returncode == 1
                          else 'cannot determine textual merge')
@@ -255,7 +264,7 @@ def select(repo, base, main, entries, events, content, *, on=None):
                 raise ValueError('invalid spec metadata id')
             text, grant = metadata(repo, master, entry, events, content)
             # Establish intrinsic defects before considering other members.
-            alone = merge_tree(repo, master, sha)
+            alone = merge_tree(repo, master, sha, entry=entry)
             alone_paths = reader.read(alone)
             master_has_versions = any(p.startswith(VERSIONS) for p in master_paths)
             candidate_revisions(reader, alone_paths, master_has_versions)
