@@ -60,6 +60,8 @@ def _has_git_entry(path):
         if git.is_dir():
             return next(git.iterdir(), None) is not None
         return git.is_file() or git.is_symlink()
+    except FileNotFoundError:
+        return False   # Codex's sandbox makes and removes an empty .git here; gone means no repo
     except OSError:
         return True
 

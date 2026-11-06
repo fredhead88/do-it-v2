@@ -208,6 +208,12 @@ for kind1496 in ("nonempty", "file", "unreadable"):
     with patch.object(pathlib.Path, "iterdir", iter1496):
         check(raises(scratch.ScratchRootError, scratch.root) is not None, kind1496 + " refused")
     check(not (parent1496 / "child").exists(), "refused creates nothing")
+def vanished1496(self):
+    raise FileNotFoundError(self)
+set_env(DOIT_ROOT=base1496 / "ledger", DOIT_SCRATCH=base1496 / "vanished" / "child")
+(base1496 / "vanished" / ".git").mkdir(parents=True)
+with patch.object(pathlib.Path, "iterdir", vanished1496):
+    check(scratch.root() == (base1496 / "vanished" / "child").resolve(), "a .git gone mid-check is no repo")
 body1496 = json.dumps(dict(empty="accepted", nonempty="refused", file="refused", unreadable="refused"), sort_keys=True)
 print(json.dumps(dict(url="cli://scratch/AC7", status=0, body_sha256=hashlib.sha256(body1496.encode()).hexdigest(), body_excerpt=body1496)))
 print("L1496-AC7 ok")
