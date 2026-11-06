@@ -875,6 +875,56 @@ def rechain_checks():
                               for e in fx.events("merge-conflict")), "1534 genuine conflict stays conflict")
     response("1534-AC5-conflict", dict(real_conflict=True, files=["base.txt"]))
     fx.tempdir.cleanup()
+    # L-spec-2111 AC8: an ordinary conflict never records a re-chain decline.
+    fx, sf = fixture([])
+    try:
+        a = sf.branch("a", mutation=lambda f: f.write("outside.txt", "a\n"))
+        sh(["checkout", "-b", "br-c", sf.base], fx.repo)
+        sf.write("outside.txt", "c\n")
+        c = ("c", "br-c", sf.commit("ordinary branch"))
+        emitted = []
+        _, kept, conflicts = window_gate.build_candidate(
+            fx.repo, "ordinary", sf.base, [a, c], publish=False,
+            emit=lambda typ, subject, **kw: emitted.append(dict(type=typ, subject=subject, **kw)))
+        check(kept == ["a"] and conflicts == {"c": ["outside.txt"]}, "2111 AC8 ordinary conflict paths")
+        check(not any(e["type"] == "rechain-declined" for e in emitted), "2111 AC8 no decline event")
+        response("2111-AC8-window", dict(conflicts={"c": ["outside.txt"]}, declines=0))
+    finally:
+        fx.tempdir.cleanup()
+
+    # AC15 runs the real admission path; only the fingerprint backend is a stub.
+    fx, sf = fixture(["a", "b"])
+    try:
+        a_sha = sh(["rev-parse", "br-a"], fx.repo)
+        master, _ = window_gate.merge_into(fx.repo, sf.base, a_sha, "land a")
+        sh(["update-ref", "refs/heads/master", master], fx.repo)
+        sh(["push", "origin", "master"], fx.repo)
+        fx.base = master
+        fx.branches = {"b": "br-b"}
+        content = fx.root / "content"
+        content.mkdir(exist_ok=True)
+        b_sha = sh(["rev-parse", "br-b"], fx.repo)
+        paths = sh(["diff", "--name-only", sf.base, b_sha], fx.repo).splitlines()
+        (content / "b.md").write_text("Writes: " + ", ".join(paths) + "\n")
+        real_select, real_main = window_gate.window_prewindow.select, window_gate.main_
+        def real_admission(*args, **kw):
+            with patch.object(window_gate.window_prewindow, "select", side_effect=real_select):
+                return real_main(*args, **kw)
+        fx.run_n(1, 0, GREEN)
+        with patch.dict(os.environ, DOIT_WINDOW_RECHAIN="on"), \
+             patch.object(window_gate, "main_", side_effect=real_admission), \
+             patch.object(window_gate, "fingerprint_candidate", side_effect=lambda repo, candidate, *a, **kw: candidate):
+            rc = fx.go()
+        check(rc == 0 and [e["subject"] for e in fx.events("shipped")] == ["b"], "2111 AC15 ships b")
+        check(len(fx.events("rechained")) == 1, "2111 AC15 exactly one rechain event")
+        check(rechain.routed_head(fx.repo, fx.master()) == "b", "2111 AC15 routed head b")
+        check(not any(e["subject"] == "b" and e.get("reason") == "prewindow"
+                      for e in fx.events("window-dropped")), "2111 AC15 admission retains b")
+        response("2111-AC15", dict(shipped=["b"], rechained=1, routed_head="b",
+                                  prewindow_drops=0, fingerprint_backend="stub"))
+    finally:
+        fx.tempdir.cleanup()
+
     for case in cases:
         names = ["a", "b", "c", "d"] if case == "no-cap" else ["a", "b", "c"] if case == "green" else ["a", "b"]
         fx, sf = fixture(names, extra=case in ("no-cap", "owner-X", "owner-B", "second-red", "fingerprint-fail"))

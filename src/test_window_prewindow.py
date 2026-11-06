@@ -271,6 +271,61 @@ class PrewindowIntegrationTests(Fixture):
 
 
 class PrewindowTests(Fixture):
+    def test_2111_ac14(self):
+        import rechain
+        import window_prewindow
+        with patch.dict(os.environ):
+            from test_rechain import Fixture as MigrationFixture, response
+        with tempfile.TemporaryDirectory() as root:
+            fx = MigrationFixture(root)
+            self.repo = fx.repo
+            self.base = fx.base
+            a = fx.branch('a', mutation=lambda f: f.write('outside.txt', 'master edit\n'))
+            b = fx.branch('b')
+            c = fx.branch('c', mutation=lambda f: f.write('outside.txt', 'branch edit\n'))
+            content = self.root / 'content'
+            content.mkdir(exist_ok=True)
+            for entry in (a, b, c):
+                paths = self.git('diff', '--name-only', fx.base, entry[2]).splitlines()
+                (content / (entry[0] + '.md')).write_text('Writes: ' + ', '.join(paths) + '\n')
+            self.git('merge', '--no-ff', '-m', 'land a', a[2])
+            master = self.git('rev-parse', 'master')
+            self.base = master
+            observed = []
+            real_git = window_prewindow.git
+            def record(repo, *args, **kw):
+                result = real_git(repo, *args, **kw)
+                if 'commit-tree' in args:
+                    observed.append(rechain.routed_head(repo, result.stdout.strip()))
+                return result
+            with patch.dict(os.environ, DOIT_WINDOW_RECHAIN='on'), \
+                 patch.object(window_prewindow, 'git', side_effect=record):
+                self.assertEqual(self.select([b]), ([b], []))
+            self.assertEqual(observed, ['b'])
+            with patch.dict(os.environ, DOIT_WINDOW_RECHAIN='off'), \
+                 patch.object(rechain, 'resolve') as resolve:
+                self.assertEqual(self.select([b]), ([], [(b, 'textual merge is not clean')]))
+                resolve.assert_not_called()
+            with patch.dict(os.environ, DOIT_WINDOW_RECHAIN='on'):
+                self.assertEqual(self.select([c]), ([], [(c, 'textual merge is not clean')]))
+                with patch.object(rechain, 'resolve', side_effect=OSError):
+                    self.assertEqual(self.select([b]), ([], [(b, 'textual merge is not clean')]))
+                # A separate base keeps both members clean against master.
+                peer_root = pathlib.Path(root) / 'peer'
+                peer = MigrationFixture(peer_root)
+                first, second = peer.branch('first'), peer.branch('second')
+                for entry in (first, second):
+                    (content / (entry[0] + '.md')).write_text('Writes: ' + entry[0] + '.py\n')
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    kept, drops = window_prewindow.select(peer.repo, peer.base, 'master',
+                                                          [first, second], [], content)
+                self.assertEqual((kept, drops), ([first], []))
+                self.assertIn('merge with earlier window members', output.getvalue())
+            self.assertEqual(fx.events, [])
+        response('2111-AC14', dict(prefix_head='b', off_and_error_drop=True,
+                                  unrelated_drop=True, peer_conflict_deferred=True, events=0))
+
     def assertDeferred(self, fragment, entries=None):
         output = io.StringIO()
         with contextlib.redirect_stdout(output):

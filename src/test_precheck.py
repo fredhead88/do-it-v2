@@ -82,6 +82,99 @@ class PrecheckTests(unittest.TestCase):
                               body_sha256=hashlib.sha256(payload.encode()).hexdigest(),
                               body_excerpt=payload)))
 
+    def migration_queue(self):
+        # Importing the shared fixture must not change this driver's environment.
+        with patch.dict(os.environ):
+            from test_rechain import Fixture
+        import rechain
+        fx = Fixture(self.root, repo=self.repo)
+        a = fx.branch('a', mutation=lambda f: f.write('outside.txt', 'master edit\n'))
+        b = fx.branch('b')
+        c = fx.branch('c', mutation=lambda f: f.write('outside.txt', 'branch edit\n'))
+        self.git('merge', '--no-ff', '-m', 'land a', a[2])
+        self.master = self.git('rev-parse', 'HEAD')
+        self.events = [dict(type='queue-add', subject='L-b', project='proj', branch=b[1],
+                            rule='fixture', ts=NOW.isoformat())]
+        self.emitted.clear()
+        return fx, b, c
+
+    def test_2111_ac11(self):
+        import precheck
+        import rechain
+        fx, b, c = self.migration_queue()
+        guarded = []
+        def guards(tree):
+            guarded.append(rechain.revision((tree / (rechain.VERSIONS + 'b.py')).read_text()))
+            return []
+        with patch.dict(os.environ, DOIT_WINDOW_RECHAIN='on'):
+            result = self.run_check(guards)
+            self.assertEqual(result['clean'], ['L-b'])
+            self.assertEqual(result['conflict_master'], {})
+            self.assertEqual(guarded, [('b', 'a')])
+            self.assertFalse(any(e['type'] == 'merge-conflict' for e in self.emitted))
+        self.emitted.clear()
+        with patch.dict(os.environ, DOIT_WINDOW_RECHAIN='off'), patch.object(rechain, 'resolve') as resolve:
+            result = self.run_check()
+            self.assertIn('L-b', result['conflict_master'])
+            resolve.assert_not_called()
+        self.emitted.clear()
+        with patch.dict(os.environ, DOIT_WINDOW_RECHAIN='on'), \
+             patch.object(rechain, 'resolve', side_effect=OSError):
+            result = self.run_check()
+            self.assertIn('L-b', result['conflict_master'])
+            self.assertIn(result['conflict_master']['L-b'], rechain.SHARED)
+        self.events[0].update(subject='L-c', branch=c[1])
+        self.emitted.clear()
+        with patch.dict(os.environ, DOIT_WINDOW_RECHAIN='on'):
+            self.assertIn('L-c', self.run_check()['conflict_master'])
+        self.assertTrue(any(e['type'] == 'merge-conflict' and e['source'] == 'precheck'
+                            for e in self.emitted))
+        self.assertEqual(fx.events, [])
+        self.evidence('2111-AC11', dict(guarded_parent='a', clean=['L-b'], off_and_error_conflict=True,
+                                      unrelated_conflict=True, admission_emits_no_rechain=True))
+
+    def test_2111_ac12(self):
+        import precheck
+        import rechain
+        fx, b, c = self.migration_queue()
+        def build(entry):
+            return [dict(type='build-done', subject='L-' + entry[0], project='proj',
+                         branch=entry[1], ready_sha=entry[2], ts=NOW.isoformat())]
+        with patch.dict(os.environ, DOIT_WINDOW_RECHAIN='on'), \
+             patch.object(precheck, 'check_tree') as guards, \
+             patch.object(precheck.precheck_targeted, 'run') as targeted:
+            result = precheck.pregrade('proj', events=build(b), emit=self.emit)
+            self.assertEqual(result[0]['verdict'], 'undetermined')
+            self.assertNotIn('path', result[0])
+            self.assertNotIn('tests', result[0])
+            guards.assert_not_called()
+            targeted.assert_not_called()
+            self.assertEqual([e['type'] for e in self.emitted], ['precheck-pregrade'])
+            self.emitted.clear()
+            result = precheck.pregrade('proj', events=build(c), emit=self.emit)
+            self.assertEqual(result[0]['verdict'], 'conflict')
+            self.assertEqual(self.emitted[0]['source'], 'precheck-pregrade')
+            guards.assert_not_called()
+            targeted.assert_not_called()
+        self.assertEqual(fx.events, [])
+        self.evidence('2111-AC12', dict(recoverable='undetermined', unrelated='conflict',
+                                      tree_and_targeted_calls=0))
+
+    def test_2111_ac13(self):
+        import precheck
+        import rechain
+        _, b, _ = self.migration_queue()
+        row = dict(spec='L-b', branch=b[1])
+        with patch.dict(os.environ, DOIT_WINDOW_RECHAIN='on'):
+            commits = precheck.chain(self.repo, self.master, [row], {'L-b': b[2]})
+            self.assertEqual(len(commits), 1)
+            self.assertEqual(rechain.revision(rechain.text(self.repo, commits[0], rechain.VERSIONS + 'b.py')),
+                             ('b', 'a'))
+        with patch.dict(os.environ, DOIT_WINDOW_RECHAIN='off'):
+            with self.assertRaisesRegex(RuntimeError, '^precheck remainder conflicts$'):
+                precheck.chain(self.repo, self.master, [row], {'L-b': b[2]})
+        self.evidence('2111-AC13', dict(chain_parent='a', off_raises=True))
+
     def test_conflicts_classified(self):
         result = self.run_check()
         self.assertEqual(result['clean'], ['A', 'D'])

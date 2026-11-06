@@ -21,6 +21,7 @@ import window_gate
 import precheck_targeted
 import cpu_share
 import test_slots
+import rechain
 
 DOIT = str(Path(__file__).resolve().parent.parent / 'doit')
 
@@ -70,13 +71,20 @@ def fresh(event, master, now, minutes):
         return False
 
 
-def merge(repo, left, right):
+def merge(repo, left, right, *, entry=None):
     result = git(repo, 'merge-tree', '--write-tree', left, right, check=False)
     if result.returncode == 1:
         # Stage records precede the human-readable conflict diagnostics.
         paths = re.findall(r'^\d+ [0-9a-f]+ [123]\t(.+)$', result.stdout, re.M)
         if not paths:
             raise RuntimeError('merge conflict path unavailable')
+        if entry is not None and os.environ.get("DOIT_WINDOW_RECHAIN", "on") == "on":
+            try:
+                commit, _ = rechain.resolve(repo, left, entry, "precheck", ev=lambda *a, **kw: None)
+                if commit:
+                    return commit, None
+            except Exception:
+                pass
         return None, paths[0]
     if result.returncode:
         raise RuntimeError('merge-tree undetermined')
@@ -91,7 +99,8 @@ def merge(repo, left, right):
 def chain(repo, master, rows, shas):
     tip, prefixes = master, []
     for row in rows:
-        tip, conflict = merge(repo, tip, shas[row['spec']])
+        tip, conflict = merge(repo, tip, shas[row['spec']],
+                              entry=(row['spec'], row['branch'], shas[row['spec']]))
         if conflict:
             raise RuntimeError('precheck remainder conflicts')
         prefixes.append(tip)
@@ -167,11 +176,11 @@ def run(project, *, events=None, guard_runner=None, emit=None, now=None):
         for row in rows:
             sid = row['spec']
             sha = shas[sid] = master_sha(repo, row['branch'])
-            _, path = merge(repo, master, sha)
+            _, path = merge(repo, master, sha, entry=(sid, row['branch'], sha))
             if path:
                 result['conflict_master'][sid] = path
                 continue
-            candidate, path = merge(repo, tip, sha)
+            candidate, path = merge(repo, tip, sha, entry=(sid, row['branch'], sha))
             if path:
                 result['conflict_set'][sid] = path
             else:
@@ -265,6 +274,14 @@ def pregrade(project, *, events=None, guard_runner=None, targeted_runner=None, e
                     candidate, path = merge(repo, master, sha)
                     if path:
                         verdict, detail = 'conflict', dict(path=path)
+                        if os.environ.get("DOIT_WINDOW_RECHAIN", "on") == "on":
+                            try:
+                                rechained, _ = rechain.resolve(repo, master, (sid, build.get('branch', sha), sha),
+                                                               "precheck", ev=lambda *a, **kw: None)
+                                if rechained:
+                                    verdict, detail = 'undetermined', {}
+                            except Exception:
+                                pass
                     else:
                         runner = guard_runner or globals()['guard_runner'](repo)
                         with precheck_targeted.bounded(300):
