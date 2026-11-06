@@ -1677,7 +1677,10 @@ def train_checks():
         with patch.object(window_gate, "predecessor_state", side_effect=AssertionError("depth1 must not poll")) as poll:
             rc = fx.go()
         mark("no poll depth1", rc == 0 and not poll.called)
-        mark("verify signature unchanged", list(inspect.signature(window_gate.verify).parameters) == ["repo", "cand", "required", "window"])
+        params = inspect.signature(window_gate.verify).parameters
+        mark("verify rehearsal keyword defaults off", list(params) == ["repo", "cand", "required", "window", "rehearsal"]
+             and params["rehearsal"].kind == inspect.Parameter.KEYWORD_ONLY
+             and params["rehearsal"].default is False)
 
         # Red attribution waits for the predecessor and asks base-red about the root.
         node = "api/tests/test_z.py::test_bad"
@@ -1945,8 +1948,10 @@ def scope_checks():
     mark("AC2", "run_window passes scoped checks", rc == 0 and fx.calls()[0].endswith("|pytest;"), fx.calls())
     mark("AC2", "python-only no pg dispatch", not (fx.fdir / "base-calls").exists() and
          all(window_gate.PG_CHECK not in call for call in fx.calls()), fx.calls())
-    mark("AC2", "verify signature unchanged", list(inspect.signature(window_gate.verify).parameters) ==
-         ["repo", "cand", "required", "window"])
+    params = inspect.signature(window_gate.verify).parameters
+    mark("AC2", "verify rehearsal keyword defaults off", list(params) == ["repo", "cand", "required", "window", "rehearsal"]
+         and params["rehearsal"].kind == inspect.Parameter.KEYWORD_ONLY
+         and params["rehearsal"].default is False)
     mark("AC6", "window-verified scope fields", event["scope"] == ["pytest"] and
          event["scope_reason"] == "fixture python" and event["selfhosted_minutes"] == 0 and
          event["minutes_source"] == "estimate", {k: event[k] for k in ("scope", "scope_reason", "actions_minutes", "minutes_source")})

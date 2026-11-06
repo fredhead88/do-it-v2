@@ -1,7 +1,10 @@
 """Automatic base-red policy through real Git objects and the normal window gate."""
 from datetime import datetime, timedelta, timezone
+import copy
+import json
 import os
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -18,6 +21,60 @@ import window_gate as gate
 
 PROJECT = 'albert-scott'
 NODE = 'tests/test_clock.py::test_boundary'
+
+
+# Real job 126438799694, run 41789236664; all 26 recorded step names/conclusions.
+PG_STEPS = [
+    {'name': 'Set up job', 'conclusion': 'success'},
+    {'name': 'Set up runner', 'conclusion': 'success'},
+    {'name': 'Run actions/checkout@v4.4.0', 'conclusion': 'success'},
+    {'name': 'Run actions/setup-python@v5', 'conclusion': 'success'},
+    {'name': 'Install uv', 'conclusion': 'success'},
+    {'name': 'Install dependencies (pipelines lock)', 'conclusion': 'success'},
+    {'name': 'Install web-serving stack (spec 378 parity)', 'conclusion': 'success'},
+    {'name': 'Install API package (editable, dev extra)', 'conclusion': 'success'},
+    {'name': 'Install dev/test-only dependencies', 'conclusion': 'success'},
+    {'name': 'Verify test dependencies importable', 'conclusion': 'success'},
+    {'name': 'Start hosted PG18 service', 'conclusion': 'success'},
+    {'name': 'Start private socket-only PG18', 'conclusion': 'skipped'},
+    {'name': 'Bootstrap the PG-parity schema (alembic upgrade head, from empty)', 'conclusion': 'success'},
+    {'name': 'Run the spec-202 PG-parity data-layer suite against real Postgres', 'conclusion': 'success'},
+    {'name': 'Upload pg-parity junit.xml', 'conclusion': 'success'},
+    {'name': 'Seed agency_settings row for spec-1158 ingest tests (albert_scott)', 'conclusion': 'success'},
+    {'name': 'Run spec-1158 all-orders/ingestion-pipeline/MCF-channel ingest tests', 'conclusion': 'success'},
+    {'name': 'Install PG18 server and vector for ephemeral scratch fixtures', 'conclusion': 'success'},
+    {'name': 'Run spec-839/895/926/949 scratch-database tests (pg_scratch)', 'conclusion': 'failure'},
+    {'name': 'Stop private socket-only PG18', 'conclusion': 'skipped'},
+    {'name': 'Report test-execution status to job summary', 'conclusion': 'success'},
+    {'name': 'Post Install uv', 'conclusion': 'skipped'},
+    {'name': 'Post Run actions/setup-python@v5', 'conclusion': 'skipped'},
+    {'name': 'Post Run actions/checkout@v4.4.0', 'conclusion': 'success'},
+    {'name': 'Complete runner', 'conclusion': 'success'},
+    {'name': 'Complete job', 'conclusion': 'success'},
+]
+SPEC_202 = PG_STEPS[13]['name']
+SPEC_1158 = PG_STEPS[16]['name']
+PG_SCRATCH = PG_STEPS[18]['name']
+PG_FAILED = 'api/tests/test_claude_ro_exposure_live.py::test_AC04_peer_suites_run_without_skips'
+PG_ERROR = 'api/tests/test_049_verifier_ro_grants.py::test_select_policy_and_guarded_round_trip'
+# FAILED/ERROR lines and summary, verbatim
+# Reconstructed from the supplied raw log: 7 data lines, not the missing 15-line sample.
+# Only the step column is rewritten to UNKNOWN STEP.
+PG_LOG = (
+    'pg-parity (Postgres)\tUNKNOWN STEP\t2026-11-04T07:21:58.3198318Z api/tests/test_049_verifier_ro_grants.py::test_select_policy_and_guarded_round_trip ERROR [ 84%]\n'
+    'pg-parity (Postgres)\tUNKNOWN STEP\t2026-11-04T07:22:25.3471498Z api/tests/test_claude_ro_exposure_live.py::test_AC04_peer_suites_run_without_skips FAILED [ 90%]\n'
+    'pg-parity (Postgres)\tUNKNOWN STEP\t2026-11-04T07:27:36.2224154Z _________ ERROR at setup of test_select_policy_and_guarded_round_trip __________\n'
+    'pg-parity (Postgres)\tUNKNOWN STEP\t2026-11-04T07:27:36.2227792Z E   AssertionError: leftover cluster-global role doit_verifier_ro: no-role coverage requires its absence\n'
+    'pg-parity (Postgres)\tUNKNOWN STEP\t2026-11-04T07:27:36.2235318Z E   AssertionError: api/tests/test_562_genesis_drift.py: 1 failed, 1 passed, 22 deselected in 15.29s\n'
+    'pg-parity (Postgres)\tUNKNOWN STEP\t2026-11-04T07:27:38.8477076Z FAILED api/tests/test_claude_ro_exposure_live.py::test_AC04_peer_suites_run_without_skips - AssertionError: api/tests/test_562_genesis_drift.py: 1 failed, 1 passed, 22 deselected in 15.29s\n'
+    'pg-parity (Postgres)\tUNKNOWN STEP\t2026-11-04T07:27:38.8504969Z ERROR api/tests/test_049_verifier_ro_grants.py::test_select_policy_and_guarded_round_trip - AssertionError: leftover cluster-global role doit_verifier_ro: no-role coverage requires its absence\n'
+)
+PG_SUMMARY_LOG = '\n'.join(line for line in PG_LOG.splitlines()
+                           if 'Z FAILED ' in line or 'Z ERROR ' in line)
+# Synthetic no-id log, modelled on the reported uncaptured failure.
+PG_NO_IDS_LOG = '\n'.join(line for line in PG_LOG.splitlines()
+                          if 'Z FAILED ' not in line and 'Z ERROR ' not in line)
+PG_NO_IDS_LOG += '\n' + 'pg-parity (Postgres)\tUNKNOWN STEP\t2026-11-04T07:27:38.8509195Z = 1 failed, 1855 passed, 47 skipped, 1493 deselected, 1 xfailed, 110 warnings, 1 error in 1289.97s (0:21:29) =\n'
 
 
 class AutoQuarantineTests(unittest.TestCase):
@@ -163,6 +220,91 @@ class AutoQuarantineTests(unittest.TestCase):
         completed = subprocess.CompletedProcess([], 0, json.dumps(metadata), '')
         with patch.object(gate.subprocess, 'run', return_value=completed), self.assertRaisesRegex(RuntimeError, 'non-test step'):
             gate.pg_result(self.root, {'checks': {gate.PG_CHECK: {'run_id': '123'}}})
+
+    def pg_job(self, failed=None):
+        steps = copy.deepcopy(PG_STEPS)
+        if failed is not None:
+            for step in steps:
+                if step['conclusion'] != 'skipped':
+                    step['conclusion'] = 'failure' if step['name'] in failed else 'success'
+        return dict(name=gate.PG_CHECK, databaseId=126438799694, conclusion='failure', steps=steps)
+
+    def pg_call(self, job, log=PG_LOG, **kwargs):
+        def evidence(args, **unused):
+            if args == ['gh', 'run', 'view', '123', '--json', 'jobs']:
+                return subprocess.CompletedProcess(args, 0, json.dumps({'jobs': [job]}), '')
+            self.assertEqual(args, ['gh', 'run', 'view', '--job', '126438799694', '--log-failed'])
+            return subprocess.CompletedProcess(args, 0, log, '')
+        with patch.object(gate.subprocess, 'run', side_effect=evidence) as run:
+            result = gate.pg_result(self.root, {'checks': {gate.PG_CHECK: {'run_id': '123'}}}, **kwargs)
+        return result, run.call_args_list
+
+    def assert_pg_ids(self, result):
+        failed, ids = result
+        self.assertTrue(failed)
+        self.assertEqual(set(ids), {PG_FAILED, PG_ERROR})
+        self.assertTrue(ids[PG_FAILED].startswith('FAILED'))
+        self.assertIn('AssertionError', ids[PG_FAILED])
+        self.assertTrue(ids[PG_ERROR].startswith('ERROR'))
+        self.assertIn('leftover cluster-global role doit_verifier_ro', ids[PG_ERROR])
+
+    def test_pg_scratch_step_failure_is_parsed_as_test_failure(self):
+        self.assertEqual(len(PG_STEPS), 26)
+        self.assertEqual(len(PG_LOG.splitlines()), 7)
+        self.assert_pg_ids(self.pg_call(self.pg_job(), rehearsal=True)[0])
+
+    def test_spec_1158_step_failure_is_parsed_as_test_failure(self):
+        # Synthetic log: real summary lines reused under the same tab prefix.
+        self.assert_pg_ids(self.pg_call(self.pg_job([SPEC_1158]), PG_SUMMARY_LOG, rehearsal=True)[0])
+
+    def test_failed_test_step_with_no_parseable_ids_is_undetermined(self):
+        for step in (PG_SCRATCH, SPEC_1158):
+            with self.subTest(step=step), self.assertRaisesRegex(RuntimeError, 'no failing test id'):
+                self.pg_call(self.pg_job([step]), PG_NO_IDS_LOG, rehearsal=True)
+        self.assertEqual(self.pg_call(self.pg_job([SPEC_202]), PG_NO_IDS_LOG)[0], (True, {}))
+
+    def test_default_mode_keeps_only_spec_202_as_test_step(self):
+        for step in (PG_SCRATCH, SPEC_1158):
+            with self.subTest(step=step), self.assertRaisesRegex(RuntimeError, 'non-test step'):
+                self.pg_call(self.pg_job([step]))
+        self.assert_pg_ids(self.pg_call(self.pg_job([SPEC_202]))[0])
+
+    def test_other_failed_steps_still_make_pg_result_raise(self):
+        infrastructure = [PG_STEPS[17]['name'], PG_STEPS[15]['name'], PG_STEPS[12]['name']]
+        for failed in ([name] for name in infrastructure):
+            with self.subTest(failed=failed), self.assertRaisesRegex(RuntimeError, 'non-test step'):
+                self.pg_call(self.pg_job(failed), rehearsal=True)
+        for name in (infrastructure[0], 'Run a new unlisted suite'):
+            job = self.pg_job([PG_SCRATCH, name])
+            if name == 'Run a new unlisted suite':
+                job['steps'].append(dict(name=name, conclusion='failure'))
+            with self.subTest(name=name), patch.object(gate.subprocess, 'run', return_value=
+                    subprocess.CompletedProcess([], 0, json.dumps({'jobs': [job]}), '')) as run:
+                with self.assertRaisesRegex(RuntimeError, 'non-test step'):
+                    gate.pg_result(self.root, {'checks': {gate.PG_CHECK: {'run_id': '123'}}}, rehearsal=True)
+                self.assertFalse(any('--log-failed' in call.args[0] for call in run.call_args_list))
+
+    def test_successful_pg_parity_job_reads_no_log(self):
+        for rehearsal in (False, True):
+            job = self.pg_job([])
+            job['conclusion'] = 'success'
+            result, calls = self.pg_call(job, rehearsal=rehearsal)
+            self.assertEqual(result, (False, {}))
+            self.assertFalse(any('--log-failed' in call.args[0] for call in calls))
+
+    def test_default_mode_spec_202_only_failure_without_ids_returns_empty(self):
+        self.assertEqual(self.pg_call(self.pg_job([SPEC_202]), PG_NO_IDS_LOG)[0], (True, {}))
+
+    def test_rehearsal_mode_spec_202_only_failure_without_ids_is_unchanged(self):
+        self.assertEqual(self.pg_call(self.pg_job([SPEC_202]), PG_NO_IDS_LOG, rehearsal=True)[0], (True, {}))
+
+    def test_failed_job_with_no_failed_step_list_reads_log(self):
+        for rehearsal in (False, True):
+            job = self.pg_job()
+            del job['steps']
+            result, calls = self.pg_call(job, rehearsal=rehearsal)
+            self.assert_pg_ids(result)
+            self.assertTrue(any('--log-failed' in call.args[0] for call in calls))
 
     def test_named_quarantine_unfreezes_nightly_but_unknown_failures_still_hold(self):
         self.observation('1'); self.observation('2')

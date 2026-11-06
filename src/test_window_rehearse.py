@@ -92,7 +92,7 @@ class Rehearsal(unittest.TestCase):
     def rehearse(self, verdict=None, *, probe=None, attribute=None, args=None):
         verdict = verdict or dict(state='green', nodes=[], url='', doc={})
         output = io.StringIO()
-        def verify_session(*unused):
+        def verify_session(*unused, **kwargs):
             import test_slots
             self.assertEqual(test_slots.held_count(self.root), 1)
             records = [json.loads(line) for line in
@@ -111,6 +111,66 @@ class Rehearsal(unittest.TestCase):
         import test_slots
         self.assertEqual(test_slots.held_count(self.root), 0)
         return code, verify.call_args_list, retry.call_args_list, attribution.call_args_list, output.getvalue()
+
+    def test_undetermined_rehearsal_event_carries_why(self):
+        why = 'pg-parity has a failed non-test step'
+        cases = [why, 'x' * 800, None, 'token=fixture-value']
+        for index, reason in enumerate(cases):
+            verdict = dict(state='undetermined', nodes=[], url='https://example.invalid/run', doc={})
+            if reason is not None:
+                verdict['why'] = reason
+            code = self.rehearse(verdict, args=self.args(ident='rh-why-' + str(index)))[0]
+            self.assertEqual(code, 2)
+            row = next(e for e in reversed(fold.read_events()) if e['type'] == 'window-rehearsed')
+            self.assertEqual(row['state'], 'undetermined')
+            if reason is None:
+                self.assertNotIn('why', row)
+                continue
+            import prod_runner
+            expected = prod_runner.redact(reason)[:500]
+            self.assertEqual(row['why'], expected)
+            self.assertLessEqual(len(row['why']), 500)
+            if index == 3:
+                self.assertNotIn(reason, row['why'])
+            # Fresh process reads the actual production append, without fold's cache.
+            reader = subprocess.run([__import__('sys').executable, '-c',
+                "import json, fold; print(json.dumps(next(e for e in reversed(fold.read_events(use_cache=False)) "
+                "if e['type'] == 'window-rehearsed')))"],
+                env={**os.environ, 'PYTHONPATH': str(Path(wg.__file__).parent)},
+                capture_output=True, text=True, check=True)
+            self.assertEqual(json.loads(reader.stdout)['why'], expected)
+        red = dict(state='red', nodes=[NODE], url='', doc={})
+        self.assertEqual(self.rehearse(red, probe={'states': {NODE: 'red'}}, attribute=dict(
+            drop={}, proven={}, environment=[], unresolved=[NODE], mode='singles'))[0], 1)
+        row = next(e for e in reversed(fold.read_events()) if e['type'] == 'window-rehearsed')
+        self.assertNotIn('why', row)
+        self.assertEqual(self.rehearse()[0], 0)
+        row = next(e for e in reversed(fold.read_events()) if e['type'] == 'window-rehearsed')
+        self.assertNotIn('why', row)
+
+    def test_rehearsal_calls_verify_in_rehearsal_mode(self):
+        _, calls, _, _, _ = self.rehearse()
+        self.assertEqual(calls[0].kwargs, {'rehearsal': True})
+
+    def test_red_pg_only_rehearsal_is_never_promoted_when_probe_is_red_or_undetermined(self):
+        pg1 = 'api/tests/test_049_verifier_ro_grants.py::test_select_policy_and_guarded_round_trip'
+        pg2 = 'api/tests/test_claude_ro_exposure_live.py::test_AC04_peer_suites_run_without_skips'
+        verdict = dict(state='red', nodes=[pg1, pg2], url='https://example.invalid/run', doc={},
+                       pg_failed=True, pg_failures={pg1: 'ERROR x', pg2: 'ERROR y'}, other_nodes=[])
+        code, _, _, _, output = self.rehearse(verdict,
+            probe={'states': {pg1: 'red', pg2: 'undetermined'}},
+            attribute=dict(drop={}, proven={}, environment=[pg1], unresolved=[pg2], mode='singles'))
+        self.assertEqual(code, 1)
+        rows = fold.read_events()
+        row = next(e for e in reversed(rows) if e['type'] == 'window-rehearsed')
+        self.assertEqual(row['state'], 'red')
+        self.assertEqual(row['ids'], [pg1, pg2])
+        self.assertEqual(row['attribution']['environment'], [pg1])
+        self.assertEqual(row['attribution']['unresolved'], [pg2])
+        self.assertEqual(row['run_url'], 'https://example.invalid/run')
+        self.assertNotIn('ATTRIBUTED', output)
+        self.assertFalse(any(e['type'] in ('window-dropped', 'escalation-blocking', 'window-base-observed')
+                             for e in rows))
 
     def test_identical_tree_reuses_all_checks_and_skips_base_ci_after_master_reaches_on(self):
         before_refs = self.git('show-ref')

@@ -59,6 +59,11 @@ BASE_RED_WORKFLOWS = frozenset({"Python Tests", "Dashboard PR Quality"})
 BASE_RED_KINDS = frozenset({"pytest", "pg-parity", "vitest", "suite-error"})
 PYTEST_CHECK = "pytest"
 PG_CHECK = "pg-parity (Postgres)"
+PG_REHEARSAL_TEST_STEPS = frozenset({
+    "Run the spec-202 PG-parity data-layer suite against real Postgres",
+    "Run spec-1158 all-orders/ingestion-pipeline/MCF-channel ingest tests",
+    "Run spec-839/895/926/949 scratch-database tests (pg_scratch)",
+})
 # These workflows only run on master pushes/PRs, not ci-verify dispatches.
 # Every new deploy requirement must be classified here before a window can open.
 CI_VERIFY_EXCLUDED = frozenset({
@@ -667,7 +672,7 @@ def run_minutes(repo, docs, *, required=None):
         return estimate
 
 
-def pg_result(repo, doc):
+def pg_result(repo, doc, *, rehearsal=False):
     """Read the named job, not the workflow conclusion; retain failure signatures.
 
     The deploy gate enumerates pytest's baseline-aware NEW nodes, but pg-parity
@@ -694,9 +699,10 @@ def pg_result(repo, doc):
         if job["conclusion"] == "success":
             return False, {}
         steps = job.get("steps", [])
-        if any(step.get("conclusion") == "failure"
-               and step.get("name") != "Run the spec-202 PG-parity data-layer suite against real Postgres"
-               for step in steps):
+        legacy_step = "Run the spec-202 PG-parity data-layer suite against real Postgres"
+        test_steps = PG_REHEARSAL_TEST_STEPS if rehearsal else {legacy_step}
+        failed_steps = [step.get("name") for step in steps if step.get("conclusion") == "failure"]
+        if any(name not in test_steps for name in failed_steps):
             raise RuntimeError("pg-parity has a failed non-test step")
         jid = str(job.get("databaseId", ""))
         if not jid.isdigit():
@@ -708,6 +714,8 @@ def pg_result(repo, doc):
             m = re.search(r"\b(FAILED|ERROR)\s+([\w./-]+\.py::\S+)(.*)$", line)
             if m:
                 failures[m[2]] = m[1] + " " + m[3].strip()
+        if rehearsal and any(name != legacy_step for name in failed_steps) and not failures:
+            raise RuntimeError("pg-parity test step failed with no failing test id")
         return True, failures
     except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError) as e:
         raise RuntimeError("pg-parity job evidence unreadable") from e
@@ -819,7 +827,7 @@ def parse_verdict(out):
     return doc, nodes, url
 
 
-def verify(repo, cand, required, window):
+def verify(repo, cand, required, window, *, rehearsal=False):
     """-> dict(state=green|red|undetermined, nodes, url, doc). Anything that is not
     an unambiguous green is not green."""
     script = os.environ.get("DOIT_WINDOW_PREDEPLOY") or str(repo / PREDEPLOY)
@@ -876,7 +884,7 @@ def verify(repo, cand, required, window):
         pg_failed, pg_failures = False, {}
         if all_ran and PG_CHECK in required:
             try:
-                pg_failed, pg_failures = pg_result(repo, doc)
+                pg_failed, pg_failures = pg_result(repo, doc, rehearsal=rehearsal)
             except RuntimeError as e:
                 return dict(state="undetermined", nodes=[], url=url, doc=doc, why=str(e))
         detail = dict(pg_failed=pg_failed, pg_failures=pg_failures, other_nodes=list(nodes), output=out)
