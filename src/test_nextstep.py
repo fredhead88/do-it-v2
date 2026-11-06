@@ -177,6 +177,10 @@ class NextStepTests(unittest.TestCase):
         conflict = self.selected({'build': row, 'grade': row})
         self.assertTrue(conflict.reason.startswith('undetermined: conflicting actions'))
         self.assertEqual((conflict.state, conflict.owner), ('hold', 'executor'))
+        old, new = dict(row, since='2026-01-01T00:00:00+00:00'), dict(row, since='2026-01-02T00:00:00+00:00')
+        self.assertEqual(self.selected({'merge': old, 'grade': new}).action, 'grade')
+        self.assertTrue(self.selected({'merge': new, 'grade': old}).reason
+                        .startswith('undetermined: conflicting actions'))
         for name in ('wave-held', 'dependency-held'):
             held = self.selected({name: dict(row, blocker='L-spec-9002'), 'idle': row})
             self.assertEqual((held.state, held.owner), ('hold', 'tick'))
