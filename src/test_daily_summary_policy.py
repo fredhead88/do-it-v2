@@ -132,29 +132,29 @@ class DailySummaryPolicyTests(unittest.TestCase):
         self.assertEqual(messages[0],messages[1]);self.assertEqual(self.sent,[])
         self.run_daily();self.assertEqual(messages[0],[self.sent[0]])
 
-    def test_fake_transport_logs_shared_sender_and_restart_dedup_without_credentials(self):
+    def test_legacy_unlabelled_daily_sender_is_refused_without_transport(self):
         repo=Path(owed_digest.__file__).resolve().parents[1]
-        (self.root/'telegram').mkdir();shutil.copyfile(repo/'scripts/tg-send.sh',self.root/'telegram/tg-send.sh')
-        (self.root/'telegram/tg-send.sh').chmod(0o700)
-        (self.root/'telegram.token').write_text('fixture-secret-only\n')
-        (self.root/'telegram/chat_id').write_text('fixture-chat-only\n')
+        (self.root/'telegram').mkdir()
+        wrapper=self.root/'telegram/tg-send.sh'
+        import shlex
+        wrapper.write_text('#!/bin/sh\nexec '+shlex.quote(str(repo/'scripts/tg-send.sh'))+' "$@"\n')
+        wrapper.chmod(0o700)
         fakebin=self.root/'bin';fakebin.mkdir()
-        curl=fakebin/'curl';curl.write_text('#!/bin/sh\nprintf "200\\n"\n');curl.chmod(0o700)
+        curl=fakebin/'curl'
+        curl.write_text('#!/bin/sh\ntouch "$DOIT_ROOT/unexpected-transport"\nprintf "200\\n"\n')
+        curl.chmod(0o700)
         env=dict(os.environ,PATH=str(fakebin)+os.pathsep+os.environ['PATH'])
-        with patch.dict(os.environ,env):
-            self.assertEqual(owed_digest.run(now=NOW,alert=True),0)
-            # Fresh interpreter reads the same persisted delivery record.
+        with patch.dict(os.environ,env),contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(owed_digest.run(now=NOW,alert=True),1)
             code='import sys;sys.path.insert(0,sys.argv[1]);import stuck_digest;from datetime import datetime;raise SystemExit(stuck_digest.run(send=True,now=datetime.fromisoformat(sys.argv[2])))'
             result=subprocess.run([sys.executable,'-c',code,str(repo/'src'),NOW.isoformat()],env=env,capture_output=True,text=True)
-        self.assertEqual(result.returncode,0)
+        self.assertEqual(result.returncode,1)
+        self.assertFalse((self.root/'unexpected-transport').exists())
         rows=[json.loads(l) for l in (self.root/'logs/tg-send.jsonl').read_text().splitlines()]
-        self.assertEqual(len(rows),1)
-        self.assertEqual(set(rows[0]),{'time','sender','first_line'})
-        self.assertEqual(rows[0]['sender'],'daily-summary')
-        self.assertTrue(rows[0]['first_line'].startswith('Daily summary'))
-        self.assertIsNotNone(datetime.fromisoformat(rows[0]['time']).tzinfo)
-        self.assertNotIn('fixture-secret-only',json.dumps(rows)+result.stdout+result.stderr)
-        self.assertNotIn('fixture-chat-only',json.dumps(rows)+result.stdout+result.stderr)
+        self.assertEqual(len(rows),2)
+        self.assertTrue(all(r['event']=='refused' and r['label'] is None for r in rows))
+        self.assertTrue(all(r['sender']=='daily-summary' for r in rows))
+        self.assertNotIn('sent_date',json.loads((self.root/'state/telegram-summary.json').read_text()))
 
 
     def test_new_unmapped_engine_action_cannot_silence_the_combined_summary(self):
