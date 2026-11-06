@@ -658,6 +658,74 @@ def _nightly_rows(project):
     return rows
 
 
+def nightly_stale(events, project, now):
+    """Describe an unalarmed missing-verdict episode without performing I/O."""
+    if project != 'albert-scott':
+        return None
+    now = _time(now)
+    rows = [e for e in events if isinstance(e, dict) and e.get('project') == project]
+    completions, dispatches, invalid = [], [], False
+    for row in rows:
+        completion = (row.get('type') == 'base-red-nightly'
+                      and row.get('complete') is True
+                      and row.get('suite') in ('nightly', 'undeclared'))
+        dispatch = row.get('type') == 'base-red-nightly-dispatched'
+        if not (completion or dispatch):
+            continue
+        try:
+            stamp = _time(row.get('ts'))
+            if stamp > now:
+                raise ValueError('future timestamp')
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            invalid = invalid or completion
+            continue
+        (completions if completion else dispatches).append(stamp)
+    last = max(completions) if completions else None
+    anchor = last if last is not None else min(dispatches, default=None)
+    if last is not None and now - last <= timedelta(hours=26):
+        return None
+    if not invalid and anchor is not None and now - anchor <= timedelta(hours=26):
+        return None
+    episode = last.isoformat() if last is not None else 'never-observed'
+    subject = 'nightly-stale:' + project
+    if any(e.get('type') == 'escalation-blocking' and e.get('subject') == subject
+           and e.get('episode') == episode and fold.escalation_ok(e) for e in rows):
+        return None
+    uncertain = invalid or anchor is None
+    return dict(state='undetermined' if uncertain else 'stale', project=project,
+                subject=subject, episode=episode,
+                last_complete_at=last.isoformat() if last is not None else None,
+                reason=('nightly freshness cannot be established from valid timestamps' if uncertain
+                        else 'no qualifying nightly completion for more than 26 hours'),
+                default='Operator investigates dispatch/collection and restores the scheduled full nightly; '
+                        'retain missing-evidence status until a qualifying verdict lands',
+                deadline=(now + timedelta(hours=24)).isoformat(),
+                revert='Undo remediation that causes trouble and restore the previous nightly configuration; '
+                       'preserve historical evidence')
+
+
+def _nightly_staleness(result, project):
+    """Caller holds nightly.lock across this fresh read, decision and append."""
+    rows = _nightly_rows(project)
+    now = datetime.now(timezone.utc)
+    # Evaluate without alarms as well: None must not conflate fresh with notified.
+    episode = nightly_stale((e for e in rows if e.get('type') != 'escalation-blocking'), project, now)
+    if episode is None:
+        return
+    alert = nightly_stale(rows, project, now)
+    status = 'already-alarmed'
+    if alert is not None:
+        fields = {k: v for k, v in alert.items() if k not in ('project', 'subject')}
+        _append('escalation-blocking', project, result['sha'], complete=False, ids=[],
+                subject=alert['subject'], **fields)
+        status = 'appended'
+    result['complete'] = False
+    reason = episode['reason'] + '; episode ' + episode['episode'] + ' ' + status
+    result['undetermined'].append(reason)
+    result['nightly_staleness'] = dict(state=episode['state'], episode=episode['episode'],
+                                     alarm_status=status, reason=reason)
+
+
 def _nightly_suite(repo, sha):
     source = window_gate.git(repo, 'show', f'{sha}:.github/workflows/python-tests.yml')
     if source.returncode or not source.stdout.strip():
@@ -793,7 +861,7 @@ def nightly(project, *, sleep=None):
 
 
 def nightly_collect(project):
-    """Collect only the recorded dispatch, without fetching or resolving master."""
+    """Serialize collection and stale-alarm delivery, including error returns."""
     result = _result('')
     try:
         repo = _repo(project)
@@ -801,63 +869,83 @@ def nightly_collect(project):
         directory.mkdir(parents=True, exist_ok=True)
         with (directory / 'nightly.lock').open('a') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            if _pending(directory) and not _resolve_pending(project, directory):
+            result = _nightly_collect_locked(project, repo, directory)
+            if project == 'albert-scott':
+                _nightly_staleness(result, project)
+    except _NIGHTLY_ERRORS:
+        result['complete'] = False
+        reason = 'nightly collect could not establish evidence'
+        if project == 'albert-scott':
+            reason = 'nightly staleness alarm storage or lock unavailable'
+            result['nightly_staleness'] = dict(state='undetermined', episode='unknown',
+                                             alarm_status='failed', reason=reason)
+        result['undetermined'].append(reason)
+    return result
+
+
+def _nightly_collect_locked(project, repo, directory):
+    """Existing collection path; errors return while the caller still owns the lock."""
+    result = _result('')
+    try:
+        if _pending(directory) and not _resolve_pending(project, directory):
+            result['waiting'] = True
+            result['message'] = 'waiting for dispatch runs'
+            return result
+        rows = _nightly_rows(project)
+        dispatched = [e for e in rows if e.get('type') == 'base-red-nightly-dispatched']
+        if not dispatched:
+            result['message'] = 'no nightly dispatched'
+            return result
+        event = dispatched[-1]
+        sha, run_ids, suite = event['sha'], event['run_ids'], event['suite']
+        if (not isinstance(sha, str) or not re.fullmatch(r'[a-fA-F0-9]{40}', sha)
+                or not isinstance(run_ids, list) or len(run_ids) != len(WORKFLOWS)
+                or any(not isinstance(i, (str, int)) or not str(i).isdigit() for i in run_ids)
+                or len(set(map(str, run_ids))) != len(run_ids)
+                or suite not in ('nightly', 'undeclared')):
+            raise ValueError('malformed nightly dispatch')
+        if not isinstance(event['ts'], str):
+            raise ValueError('malformed nightly dispatch timestamp')
+        dispatched_at = _time(event['ts'])
+        result['sha'] = sha
+        if any(e.get('type') == 'base-red-nightly' and e.get('sha') == sha
+               and e.get('complete') is True for e in rows):
+            result['message'] = 'already collected'
+            return result
+        owner = _owner(repo)
+        listed = _api(f'repos/{owner}/actions/runs?head_sha={sha}&per_page=100', 'workflow_runs')
+        runs = [r for r in listed if str(r.get('id')) in set(map(str, run_ids))]
+        if len(runs) != len(run_ids) or any(r.get('head_sha') != sha for r in runs):
+            raise ValueError('dispatched runs missing or sha differs')
+        if any(r.get('conclusion') == 'cancelled' for r in runs):
+            raise ValueError('dispatched run cancelled')
+        if any(r.get('status') != 'completed' for r in runs):
+            if datetime.now(timezone.utc) - dispatched_at > timedelta(hours=24):
+                result['undetermined'].append('nightly overdue')
+            else:
                 result['waiting'] = True
-                result['message'] = 'waiting for dispatch runs'
-                return result
-            rows = _nightly_rows(project)
-            dispatched = [e for e in rows if e.get('type') == 'base-red-nightly-dispatched']
-            if not dispatched:
-                result['message'] = 'no nightly dispatched'
-                return result
-            event = dispatched[-1]
-            sha, run_ids, suite = event['sha'], event['run_ids'], event['suite']
-            if (not isinstance(sha, str) or not re.fullmatch(r'[a-fA-F0-9]{40}', sha)
-                    or not isinstance(run_ids, list) or len(run_ids) != len(WORKFLOWS)
-                    or any(not isinstance(i, (str, int)) or not str(i).isdigit() for i in run_ids)
-                    or len(set(map(str, run_ids))) != len(run_ids)
-                    or suite not in ('nightly', 'undeclared')):
-                raise ValueError('malformed nightly dispatch')
-            dispatched_at = _time(event['ts'])
-            result['sha'] = sha
-            if any(e.get('type') == 'base-red-nightly' and e.get('sha') == sha
-                   and e.get('complete') is True for e in rows):
-                result['message'] = 'already collected'
-                return result
-            owner = _owner(repo)
-            listed = _api(f'repos/{owner}/actions/runs?head_sha={sha}&per_page=100', 'workflow_runs')
-            runs = [r for r in listed if str(r.get('id')) in set(map(str, run_ids))]
-            if len(runs) != len(run_ids) or any(r.get('head_sha') != sha for r in runs):
-                raise ValueError('dispatched runs missing or sha differs')
-            if any(r.get('conclusion') == 'cancelled' for r in runs):
-                raise ValueError('dispatched run cancelled')
-            if any(r.get('status') != 'completed' for r in runs):
-                if datetime.now(timezone.utc) - dispatched_at > timedelta(hours=24):
-                    result['undetermined'].append('nightly overdue')
-                else:
-                    result['waiting'] = True
-                    result['message'] = 'nightly runs queued or in progress'
-                return result
-            result, _ = _snapshot(repo, sha, runs=runs)
-            if not result['complete'] or result['undetermined']:
-                result['complete'] = False
-                result['undetermined'].append('nightly snapshot incomplete')
-                return result
-            ids = sorted({i for values in result['ids'].values() for i in values})
-            new = sorted(set(ids) - set(known_red(project)))
-            alarms = [e for e in rows if e.get('type') == 'nightly-red' and e.get('sha') == sha]
-            subject = 'nightly:' + project
-            url = next(iter(result['sources']), '')
-            if new or alarms:
-                if not alarms:
-                    _append('nightly-red', project, sha, complete=True, ids=new, subject=subject, url=url)
-                if not any(e.get('type') == 'escalation-blocking' and e.get('subject') == subject
-                           and e.get('sha') == sha for e in rows):
-                    _append('escalation-blocking', project, sha, complete=True, ids=new, subject=subject,
-                            default='Create a quarantine-row or fix spec with owner integrator for these nightly ids',
-                            deadline=(datetime.now(timezone.utc) + timedelta(hours=24)).isoformat(),
-                            revert='Remove the quarantine row after the integrator fix is verified')
-            _append('base-red-nightly', project, sha, complete=True, ids=ids, url=url, suite=suite, run_ids=run_ids)
+                result['message'] = 'nightly runs queued or in progress'
+            return result
+        result, _ = _snapshot(repo, sha, runs=runs)
+        if not result['complete'] or result['undetermined']:
+            result['complete'] = False
+            result['undetermined'].append('nightly snapshot incomplete')
+            return result
+        ids = sorted({i for values in result['ids'].values() for i in values})
+        new = sorted(set(ids) - set(known_red(project)))
+        alarms = [e for e in rows if e.get('type') == 'nightly-red' and e.get('sha') == sha]
+        subject = 'nightly:' + project
+        url = next(iter(result['sources']), '')
+        if new or alarms:
+            if not alarms:
+                _append('nightly-red', project, sha, complete=True, ids=new, subject=subject, url=url)
+            if not any(e.get('type') == 'escalation-blocking' and e.get('subject') == subject
+                       and e.get('sha') == sha for e in rows):
+                _append('escalation-blocking', project, sha, complete=True, ids=new, subject=subject,
+                        default='Create a quarantine-row or fix spec with owner integrator for these nightly ids',
+                        deadline=(datetime.now(timezone.utc) + timedelta(hours=24)).isoformat(),
+                        revert='Remove the quarantine row after the integrator fix is verified')
+        _append('base-red-nightly', project, sha, complete=True, ids=ids, url=url, suite=suite, run_ids=run_ids)
         import quarantine
         quarantine.apply(project)
         return result
@@ -880,6 +968,9 @@ def main(argv=None):
         print(f'{args.project} {command}: {state}')
         for reason in result['undetermined']:
             print(reason)
+        if (command == 'nightly-collect'
+                and result.get('nightly_staleness', {}).get('alarm_status') == 'already-alarmed'):
+            return 0  # Acknowledge durable notification; printed verdict remains undetermined.
         return 2 if result['undetermined'] else 3 if result.get('waiting') else 0
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("project")
