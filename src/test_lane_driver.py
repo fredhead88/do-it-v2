@@ -316,7 +316,7 @@ class R7Fixture:
     def __init__(self, stack, default='main', case='default'):
         import packet
         import look
-        self.root = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix='r7-pin-')))
+        self.root = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix='r7-pin-'))).resolve()
         self.repo = self.root / 'repos/proj'
         self.wt = self.root / 'worktrees/proj' / self.sid.lower()
         self.spec = self.root / 'content' / (self.sid + '.md')
