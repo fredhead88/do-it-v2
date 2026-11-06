@@ -922,7 +922,7 @@ def _failure(evs, rules):
             return latest, 'retry'
         text = latest['reason'] if _base_blocked(latest) else _failure_text(latest)
         classification = classify_failure(text, latest.get('exit_code', 1), rules)
-        if (classification == 'unknown' and _attempt_role(latest) in {'builder', 'grader', 'reviewer'}
+        if (classification == 'unknown' and _attempt_role(latest) in {'builder', 'grader', 'reviewer', 'gate', 'planning'}
                 and latest.get('type') in {'spawn-failed', 'autodispatch-failed'}):
             classification = 'retry'
         if classification == 'base-refresh':
@@ -970,6 +970,10 @@ def _choose(c, rows, owners):
     if unknown:
         return _hold(sid, 'spec', stage, event, unknown['reason'], 'valid lane input')
     acting = [r for r in rows if c['table'][r['name']]['actor'] != 'none']
+    grade = next((r for r in acting if r['name'] == 'grade'), None)
+    if grade:                          # a rebuild's grade outranks the queue row from before it
+        acting = [r for r in acting
+                  if not (r['name'] == 'merge' and _time(r['since']) < _time(grade['since']))]
     if len({c['table'][r['name']]['action'] for r in acting}) > 1:
         return _hold(sid, 'spec', stage, event, 'undetermined: conflicting actions', 'one lane action')
     row = next(iter(acting), None)
