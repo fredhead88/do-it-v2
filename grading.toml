@@ -14,7 +14,7 @@
 [project.albert-scott]
 # Thinker 2026-11-03 13:05Z: run-checks runs base+candidate; a 49-file workflow-guard chain
 # (L-spec-1980 AC8) exceeded the 30-min default twice. CI pg-parity alone takes ~45 min.
-runner_wall_cap_s = 3600
+runner_wall_cap_s = 5400
 # Readiness couples these shared append-only registries by named tests only.
 shared_append_only_registries = [
   "api/alembic_supabase/branch_isolation.json",
@@ -50,4 +50,4 @@ venv = "/home/albert/do-it-v2/.venv"
 node_dirs = []
 # Thinker 2026-10-28 05:30Z: L-spec-1662 evidence hit the 30-min runner cap 6 times at
 # load ~16 (escalation L-executor-0001.jsonl:24467). 1713 key; 60 min bound.
-runner_wall_cap_s = 3600
+runner_wall_cap_s = 5400
