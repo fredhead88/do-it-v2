@@ -22,6 +22,7 @@ import fold
 import lane_rules
 import merge_queue
 import owed
+from pass_memo import once_per_list
 import routing
 import window_members
 
@@ -867,15 +868,20 @@ def _released_retry_trigger(evs, trigger, role):
     return max(matches,key=lambda e:_time(e['ts']),default=trigger)
 
 
+@once_per_list
+def _answers(events):
+    return [a for a in events if a['type'] in {'decision', 'unblocked'}]
+
+
 def _unanswered(evs, events):
     retry_pairs = retry_hold_pairs(evs)
     pending = [h for h,r in retry_pairs if r is None]
     retry_ids = {id(h) for h,r in retry_pairs}
     return pending + [e for e in evs if e['type'] in {'question', 'escalation-blocking'}
-            and id(e) not in retry_ids and not any(a['type'] in {'decision', 'unblocked'}
-                        and (_source(e) and a.get('ref') == _source(e)
-                             or a.get('subject') == e.get('subject')
-                             and _time(a['ts']) > _time(e['ts'])) for a in events)]
+            and id(e) not in retry_ids and not any(
+                        _source(e) and a.get('ref') == _source(e)
+                        or a.get('subject') == e.get('subject')
+                        and _time(a['ts']) > _time(e['ts']) for a in _answers(events))]
 
 
 def _wave(sid, evs, by, specs, waves):

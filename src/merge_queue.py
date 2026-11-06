@@ -14,6 +14,7 @@ import uuid
 import dispatch
 import fold
 import lane_rules
+from pass_memo import once_per_list
 import tick
 import window_gate
 
@@ -37,6 +38,9 @@ def _ordered(events):
                    fold.admits(e, e['actor']) is None), key=lambda e: lane_rules._time(e['ts']))
 
 
+_ordered_once = once_per_list(_ordered)   # read-only use: queue() runs per spec within a pass
+
+
 def _latest(events, kinds):
     return next((e for e in reversed(events) if e.get('type') in kinds), None)
 
@@ -44,7 +48,7 @@ def _latest(events, kinds):
 def queue(events, project=None, *, _include_terminal=False):
     """Fold corrections without consulting a mutable script or the wall clock."""
     live, returned = {}, set()
-    for pos, e in enumerate(_ordered(events)):
+    for pos, e in enumerate(_ordered_once(events)):
         sid, kind = e.get('subject'), e.get('type')
         if kind == 'queue-add':
             live.pop(sid, None)

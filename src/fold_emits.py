@@ -390,8 +390,16 @@ EMITS["infra-failure"] = {"builder", "grader", "reviewer", "spec-writer", "resea
                           "probe", "owed-sweeper", "executor", "build-runner"}
 
 
+from pass_memo import once_per_list
+
+
 def nightly_unowned(events, project):
     """Cumulative alarms since complete green; only strictly later owners clear ids."""
+    return list(_nightly_unowned(events, project))
+
+
+@once_per_list
+def _nightly_unowned(events, project):
     import re
     from datetime import datetime
 
