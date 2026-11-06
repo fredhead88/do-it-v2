@@ -208,6 +208,12 @@ def boundaries(text):
     return match.group(1) if match else ""
 
 
+def fenced(text, path):
+    """Only a complete repository-relative token inside Boundaries is a fence."""
+    return bool(re.search(r'(?<![\w/.-])' + re.escape(path) +
+                          r'(?=$|[^\w/.-]|[.,]+(?=\s|$))', boundaries(text)))
+
+
 def named(source, test):
     source, test = map(pathlib.PurePosixPath, (source, test))
     if not is_test(str(test)) or test.parent not in {
@@ -301,7 +307,6 @@ def scan(text, repo, rev=None):
     rev = git(repo, "rev-parse", "--verify", "--end-of-options", rev + "^{commit}").strip()
     tree = git(repo, "ls-tree", "-r", "--name-only", "-z", rev, "--").split("\0")
     tests = {p for p in tree if is_test(p) and not merge_gate.granted(p, grant)}
-    fenced = boundaries(text)
     deadline = time.monotonic() + GREP_SECONDS
     rows = []
     for source in writes_paths(grant, tree):
@@ -313,7 +318,7 @@ def scan(text, repo, rev=None):
             [source], tests, repo, rev, tree, timeout=remaining)}
         for tier, found in (("named", hits), ("referencing", (references & tests) - hits)):
             for test in sorted(found):
-                rows.append((tier, source, test, test in fenced))
+                rows.append((tier, source, test, fenced(text, test)))
     return rows
 
 
