@@ -1,5 +1,6 @@
 """No-spend readiness gate for first builds, invoked by the tick launch path."""
 import argparse
+import builtins
 import json
 import os
 from pathlib import Path
@@ -47,48 +48,119 @@ def inputs(text):
     return lines
 
 
+def _sources(text):
+    """Source keys qualify only explicit key/reference citations."""
+    sources = {}
+    for line in text.splitlines():
+        match = re.match(r'\s*(?:-\s*)?(?:Source\s+)?([A-Z][A-Za-z0-9]*):\s*(.*)', line)
+        if match:
+            sources[match[1]] = re.findall(
+                r'(?<![\w/])(?:/?[\w.-]+/)+[\w.-]+(?:[:]{1,2}[\w.,]+)?', match[2])
+    return sources
+
+
+def _expand_citations(line, sources):
+    def expand(match):
+        key, reference = match[1], match[2]
+        if key not in sources:
+            return match[0]
+        module, dot, symbol = reference.rpartition('.')
+        candidates = []
+        for target in sources[key]:
+            path = target.split(':', 1)[0]
+            if Path(path).name == reference:
+                candidates.append(path)
+            elif dot and Path(path).stem == module and Path(path).suffix in ('.py', '.ts', '.tsx', '.js'):
+                candidates.append(path + '::' + symbol)
+        candidates = list(dict.fromkeys(candidates))
+        if len(candidates) != 1:
+            raise NotReady('source ownership unresolved: ' + match[0])
+        return candidates[0]
+    return re.sub(r'\b([A-Z][A-Za-z0-9]*)/([\w]+(?:\.[\w]+)+)', expand, line)
+
+
 def missing_inputs(text, repo, base, tree):
     missing = []
     tree_set = set(tree)
     top_directories = {path.split('/', 1)[0] for path in tree if '/' in path}
+    project = Path(repo).name
+    registrations = Path(repo).parent
+    projects = {p.name for p in registrations.iterdir() if p.is_dir()}
+    sources = _sources(text)
+    try:
+        grant = merge_gate.grant_from_text(text)
+    except merge_gate.Undetermined as exc:
+        if 'states no writes:' not in str(exc):
+            raise
+        grant = []
     packages = set()
     for path in tree:
         if path.endswith('package.json') and 'node_modules/' not in path:
-            try:
-                data = json.loads(git(repo, 'show', base + ':' + path))
-                for field in ('dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'):
-                    packages.update(data.get(field, {}))
-            except (ValueError, NotReady):
+            data = json.loads(git(repo, 'show', base + ':' + path))
+            for field in ('dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'):
+                packages.update(data.get(field, {}))
+    for original in inputs(text):
+        # Outputs declared inline on a Consumes line are not consumed interfaces.
+        line = re.split(r'\bProduces:', original, maxsplit=1)[0]
+        line = _expand_citations(line, sources)
+        # Keep the backticks: deleting a template must not pair its opening
+        # delimiter with the next real input's delimiter.
+        line = re.sub(r'[^\s`]*[$<>][^\s`]*', '', line)
+        tokens = []
+        quoted = list(re.finditer(r'`([^`\n]*)`', line))
+        for match in quoted:
+            value = match[1].rstrip('.,:')
+            if not re.search(r'\s', value):
+                tokens.append((match.start(1), match.end(1), value))
+        bare = re.sub(r'`[^`\n]*`', lambda m: ' ' * len(m[0]), line)
+        for match in re.finditer(
+                r'(?<![\w:/$])(?:[\w@.-]+/)+[\w.*?@-]+(?:::{0,1}[\w.]+(?:\[[^]\s]+\])?)?', bare):
+            value = match[0].rstrip('.,:')
+            if Path(value.split(':')[0]).suffix or value.removeprefix('./').split('/', 1)[0] in top_directories:
+                tokens.append((match.start(), match.start() + len(value), value))
+        tokens.sort()
+        references = []
+        for start, end, value in tokens:
+            # Both symbol delimiters refer to the root symbol; [index] and
+            # a displayed call signature describe the symbol, not the filename.
+            symbol = None
+            citation = re.fullmatch(r'(.+?\.[\w]+):{1,2}([A-Za-z_][\w.]*)(?:\[[^]]+\])?(?:\(.*\))?', value)
+            if citation:
+                value, symbol = citation.groups()
+            if (any(c in value for c in '*{}=') or value.startswith(('http', '/'))
+                    or re.fullmatch(r'actions/[\w.-]+@[\w.-]+', value)):
                 continue
-    for line in inputs(text):
-        # Runtime paths with shell/template substitutions are not Git inputs.
-        line = re.sub(r'\S*[$<>][^\s`]*', '', line)
-        paths = re.findall(r'`([^`\n]+)`', line)
-        bare = re.sub(r'`[^`\n]*`', '', line)
-        for token in re.findall(r'(?<![\w:/$])(?:[\w@.-]+/)+[\w.*?-]+', bare):
-            token = token.rstrip('.,:')
-            if Path(token).suffix or token.removeprefix('./').split('/', 1)[0] in top_directories:
-                paths.append(token)
-        # Schedules, templates, globs and argument spans are not concrete Git inputs.
-        paths = list(dict.fromkeys(p.rstrip('.,:') for p in paths if
-                                 '/' in p and not any(char in p for char in '*{}=') and
-                                 not p.startswith(('http', '/')) and not re.search(r'\s', p)))
-        # `path::symbol`, `ref:path` (master:docs/x.md) and bare commit shas are spec prose, not Git
-        # inputs: strip the ref, keep the path, check the symbol in that file (2026-11-03: five
-        # specs bounced three times each on these forms).
-        cleaned, extra_symbols = [], []
-        for path in paths:
-            if '::' in path:
-                path, _, symbol = path.partition('::')
-                if re.fullmatch(r'[A-Za-z_][\w.]*', symbol):
-                    extra_symbols.append(symbol)
-            if re.match(r'^[\w.-]+:(?!//)[^\s]*/', path):
-                path = path.split(':', 1)[1]
-            if not re.fullmatch(r'[0-9a-f]{7,40}', path):
-                cleaned.append(path)
-        paths = list(dict.fromkeys(cleaned))
-        resolved = []
-        for path in paths:
+            if not citation and re.match(r'^[\w.-]+:(?!//)[^\s]*/', value):
+                value = value.split(':', 1)[1]
+            if '/' not in value and not (symbol or value in tree_set):
+                continue
+            owners = set()
+            before, after = line[:start].rstrip('`'), line[end:].lstrip('`')
+            prefix = re.search(r'([\w-]+)\s+$', before)
+            if prefix and prefix[1] in projects:
+                owners.add(prefix[1])
+            suffix = re.match(r'\s+in\s+(?:project\s+)?([\w-]+)', after)
+            if suffix:
+                if suffix[1] not in projects:
+                    raise NotReady('project ownership unresolved: ' + suffix[1])
+                owners.add(suffix[1])
+            references.append([value, symbol, owners])
+        # A cited producer and its repeated matching path establish the same
+        # ownership, without extending that ownership to unrelated paths.
+        if re.search(r'\bL-spec-\d+\b', line):
+            for value, _, owners in references:
+                for other, _, evidence in references:
+                    if other == value:
+                        owners.update(evidence)
+        resolved, citation_symbols, foreign_modules = [], [], set()
+        foreign_interface = False
+        for path, symbol, owners in references:
+            if len(owners) > 1:
+                raise NotReady('conflicting project ownership: ' + path)
+            if owners and project not in owners:
+                foreign_modules.add(Path(path).stem)
+                foreign_interface = True
+                continue
             package = '/'.join(path.split('/')[:2]) if path.startswith('@') else path.split('/')[0]
             if package in packages:
                 continue
@@ -99,18 +171,34 @@ def missing_inputs(text, repo, base, tree):
             if not found:
                 found = [p for p in tree if any(p.endswith('/' + v) for v in variants)]
             if not found and not any(merge_gate.granted(p, [path]) for p in tree):
-                missing.append(('path', path))
-            resolved += found
-        symbols = re.findall(r'\b(?:function|def|class|const)\s+([A-Za-z_$][\w$]*)', line)
-        symbols += re.findall(r'\b([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\(', line)
-        symbols += re.findall(r'`([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)`(?=\s*(?:from|in|\())', line)
-        symbols += extra_symbols
-        for symbol in dict.fromkeys(symbols):
-            name = symbol.rsplit('.', 1)[-1]
-            if re.fullmatch(r'[0-9a-f]{7,40}', name):
+                if not merge_gate.granted(path, grant):
+                    missing.append(('path', path))
+                # An absent self-written file has no existing symbol obligation.
                 continue
-            targets = resolved or [p for p in tree if p.endswith(('.py', '.ts', '.tsx', '.js', '.jsx'))]
-            # git grep accepts paths only after --; no spec text becomes options.
+            resolved += found
+            if symbol:
+                citation_symbols.append((symbol, found))
+        symbols = re.findall(r'\b(?:function|def|class|const)\s+([A-Za-z_$][\w$]*)', line)
+        symbols += re.findall(r'(?<![\w.-])([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\(', line)
+        if not re.search(r'\bevents?\b', line):
+            symbols += re.findall(r'`([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)`(?=\s*(?:from|in|\())', line)
+        events = set(re.findall(r'\bevents?\s+`([\w-]+)\(', line))
+        if re.search(r'\bcensus:', line):
+            events.update(re.findall(r'`([\w-]+)\(', line))
+        checks = citation_symbols + [(s, None) for s in dict.fromkeys(symbols)]
+        for symbol, specific in checks:
+            name = symbol.rsplit('.', 1)[-1]
+            if re.fullmatch(r'[0-9a-f]{7,40}', name) or (specific is None and hasattr(builtins, symbol)):
+                continue
+            if specific is None and (symbol.split('.')[0] in foreign_modules or (
+                    foreign_interface and not resolved and '.' not in symbol
+                    and re.search(r'\bL-spec-\d+\b', line))):
+                continue
+            # Plain event names appear in declared event/census signature lists.
+            if specific is None and symbol in events:
+                continue
+            module_targets = [p for p in tree if Path(p).stem == symbol.split('.')[0]] if '.' in symbol else []
+            targets = specific or module_targets or resolved or [p for p in tree if p.endswith(('.py', '.ts', '.tsx', '.js', '.jsx'))]
             found = subprocess.run(['git', '-C', str(repo), 'grep', '-q', '-w', '-F', '-e', name,
                                     base, '--', *targets], stdout=subprocess.DEVNULL,
                                    stderr=subprocess.DEVNULL, timeout=30,
@@ -152,7 +240,8 @@ def companion_matches(text, grant, repo, base, tree, *, registries=()):
     sources = coupled_tests.writes_paths(grant, tree)
     matches = [dict(test=test, source=source, kind='named',
                     pattern='local test name for ' + Path(source).stem)
-               for test in tests for source in sources if coupled_tests.named(source, test)]
+               for test in tests for source in sources if coupled_tests.named(source, test)
+               and not coupled_tests.fenced(text, test)]
     references = [source for source in sources if source not in registries]
     matches.extend(coupled_tests.reference_matches(references, tests, repo, base, tree))
 

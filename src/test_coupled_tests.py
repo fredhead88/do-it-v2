@@ -84,6 +84,9 @@ class CoupledTests(unittest.TestCase):
             ("fenced", "pkg/foo.py", "`pkg/tests/test_foo.py`: cannot break.",
              0, [named + "\tfenced", referencing]),
             ("basename-only", "pkg/foo.py", "test_foo.py", 3, [named, referencing]),
+            ("prefixed-path", "pkg/foo.py", "old/pkg/tests/test_foo.py", 3, [named, referencing]),
+            ("suffixed-path", "pkg/foo.py", "pkg/tests/test_foo.py.orig", 3, [named, referencing]),
+            ("different-path", "pkg/foo.py", "other/tests/test_foo.py", 3, [named, referencing]),
             ("outside-boundaries", "pkg/foo.py",
              "No exclusions.\n## Other\npkg/tests/test_foo.py", 3, [named, referencing]),
         ]
