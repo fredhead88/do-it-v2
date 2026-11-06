@@ -9,6 +9,7 @@ pure live state (executor silent, packets unclaimed, quota, disk ...) and takes 
   churn               unshipped, unkilled specs graded 3+ times in the last 48 h and still unconfirmed.
   vanished            spawns with no spawn-done / spawn-failed / spawn-stale whose spec has not shipped.
   merge info          whether a gate-clean spec was actually merged (a window or a commit on master).
+  nightly red         one operator request per project until later ownership or complete nightly green.
 
 Every omen carries owner, next action, since (first occurrence of the CURRENT active spell) and last seen.
 Only owner `operator` goes in NEEDS YOU; SYSTEM HEALTH never exceeds severity 1 (warning).
@@ -78,7 +79,8 @@ def norm_owner(o, default="thinker"):
 WANT = {"lesson", "brief", "build-started", "build-done", "build-blocked", "verdict", "merge-gate-clean", "shipped",
         "spawn-started", "spawn-done", "spawn-failed", "spawn-stale", "window-verified", "window-merged",
         "shipped-in-window", "spec-killed", "project-merged", "decision", "spec-amended", "spec-written", "unblocked",
-        "brief-answered", "note-answered", "message-sent"}
+        "brief-answered", "note-answered", "message-sent", "nightly-red", "nightly-red-owned",
+        "base-red-nightly", "escalation-blocking"}
 _MARKERS = tuple(('"type": "%s"' % t).encode() for t in WANT) + tuple(('"type":"%s"' % t).encode() for t in WANT)
 
 
@@ -110,6 +112,11 @@ def reduce_event(e):
         r.update(to=e.get("to"), why=_t(e.get("text") or e.get("why"), 200))
     elif ty == "build-blocked":
         r["why"] = _t(e.get("reason"), 200)
+    elif ty in ("nightly-red", "nightly-red-owned", "base-red-nightly", "escalation-blocking"):
+        r.update(ids=e.get("ids"), complete=e.get("complete"), own=e.get("owner"), actor=e.get("actor"))
+        # An omitted project inherits the nightly subject; an explicit mismatch does not.
+        if "project" not in e:
+            r.pop("pr")
     return r
 
 
@@ -143,6 +150,10 @@ def scan(events_dir, cache):
                 continue
             if e.get("subject") == "operator-ruling" or e.get("problem") == "operator-ruling":
                 continue
+            # D90: authority comes from the logical source name, including archived
+            # members, never from a JSON field supplied by the event writer.
+            parts = pathlib.Path(name).stem.split("-")
+            e["actor"] = "-".join(parts[1:-1]) if len(parts) >= 3 else pathlib.Path(name).stem
             r = reduce_event(e)
             if r:
                 if not r.get("actor"):
@@ -518,6 +529,74 @@ def merge_info(rows, by, states, master):
     return out
 
 
+def nightly_items(rows, now):
+    """Project-local cumulative alarms, matching the existing nightly ownership rule.
+
+    Escalations describe alarms but cannot open them. A non-green snapshot cannot
+    replace the cumulative set, and only ownership strictly after an alarm counts.
+    """
+    projects, uncertain, timed = {}, set(), []
+    for r in rows:
+        if r["ty"] not in ("nightly-red", "nightly-red-owned", "base-red-nightly"):
+            continue
+        try:
+            at = dt.datetime.fromisoformat(str(r["t"]).replace("Z", "+00:00"))
+        except ValueError:
+            at = None
+        if at is None or at.utcoffset() is None:
+            # Do not assume UTC for lifecycle comparisons. An unordered alarm
+            # stays visible even after ownership; use the read time for display.
+            subject = r.get("s")
+            if r["ty"] == "nightly-red" and isinstance(subject, str) and subject.startswith("nightly:"):
+                project = subject[len("nightly:"):]
+                if r.get("pr", project) == project:
+                    uncertain.add(project)
+            continue
+        timed.append((at, r))
+    for at, r in sorted(timed, key=lambda pair: pair[0]):
+        kind, subject = r["ty"], r.get("s")
+        if kind == "base-red-nightly":
+            project = r.get("pr")
+            if r.get("complete") is True and r.get("ids") == []:
+                projects.pop(project, None)
+            continue
+        if not isinstance(subject, str) or not subject.startswith("nightly:"):
+            continue
+        project = subject[len("nightly:"):]
+        if r.get("pr", project) != project:
+            continue
+        ids = r.get("ids")
+        valid = isinstance(ids, list) and all(isinstance(i, str) for i in ids)
+        if kind == "nightly-red":
+            alarms = ids if valid else ["nightly evidence undetermined"]
+            if not alarms:
+                continue
+            spell = projects.setdefault(project, {"pending": {}, "since": at, "last": at})
+            spell["pending"].update(dict.fromkeys(alarms, at))
+            spell["last"] = at
+        elif (valid and r.get("actor") in ("operator", "executor", "thinker")
+              and re.fullmatch(r"(?:L-spec-[0-9]{4}|quarantine)", str(r.get("own", "")))):
+            spell = projects.get(project)
+            if not spell:
+                continue
+            pending = spell["pending"]
+            remaining = {i: alarm for i, alarm in pending.items()
+                         if i == "nightly evidence undetermined" or i not in ids or at <= alarm}
+            if not remaining:
+                del projects[project]
+            elif remaining != pending:
+                spell.update(pending=remaining, last=at)
+    for project in uncertain:
+        spell = projects.setdefault(project, {"pending": {}, "since": now, "last": now})
+        spell["pending"]["nightly evidence undetermined"] = now
+        spell["last"] = now
+    return [_item("nightly:" + project, "nightly", 2, "Nightly red: " + project,
+                  f"{len(spell['pending'])} unresolved nightly failure(s): " + ", ".join(sorted(spell["pending"])),
+                  "operator", "Assign a fix spec or quarantine owner for each pending nightly ID",
+                  spell["since"], spell["last"], subjects=["nightly:" + project], variants=spell["pending"])
+            for project, spell in sorted(projects.items())]
+
+
 # ---- the entry point -----------------------------------------------------------------------------------------
 def compute(rows, states, now, root=None, master=None):
     """The whole model, as JSON-able data."""
@@ -528,6 +607,7 @@ def compute(rows, states, now, root=None, master=None):
         if it:
             active.append(it)
     active.extend(owed_digest_items(root, now))
+    active.extend(nightly_items(rows, now))
     # self-check: drop an omen whose subject specs are all finished
     st = dict(states or [])
     active = [i for i in active if i["kind"] in ("owedop", "owedhealth") or not (i["subjects"] and all(_gone(st.get(s)) for s in i["subjects"]))]   # digest rows live on shipped specs
