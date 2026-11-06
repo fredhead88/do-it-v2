@@ -367,9 +367,17 @@ def _grader_trigger(evs):
     return newest_bd, ("rework" if older_reject else "build-done")
 
 
-def _own_terminal_event(events, spawn):
-    if any(e.get("spawn") == spawn and e.get("type") in
-           ("verdict", "review", "build-done", "spawn-done", "spawn-failed") for e in events):
+OWN_TERMINAL_TYPES = ("verdict", "review", "build-done", "spawn-done", "spawn-failed")
+
+
+def _ended_spawns(events):
+    return {e.get("spawn") for e in events if e.get("type") in OWN_TERMINAL_TYPES}
+
+
+def _own_terminal_event(events, spawn, ended=None):
+    """`ended` is `_ended_spawns(events)`, passed by a caller asking about many
+    spawns so the events are scanned once rather than once per spawn."""
+    if spawn in (_ended_spawns(events) if ended is None else ended):
         return True
     # Re-read the spawn's own ledger file: a waiter that wrote spawn-done and exited
     # after `events` was read looked dead and was escalated as spawn-redispatch-lapsed
@@ -410,6 +418,7 @@ def dead_spawns(events, now):
         if e.get("type") in ("spawn-started", "build-started") and e.get("spawn"):
             starts_by_spawn.setdefault(e["spawn"], e)
 
+    ended = _ended_spawns(events)
     rows = []
     for spawn in set(stale_by_spawn) | set(starts_by_spawn):
         stale = stale_by_spawn.get(spawn)
@@ -428,7 +437,7 @@ def dead_spawns(events, now):
             continue
         if not subject:
             continue
-        if _own_terminal_event(events, spawn):
+        if _own_terminal_event(events, spawn, ended):
             continue
         if (now - visible_at).total_seconds() > 2 * 3600:
             continue
