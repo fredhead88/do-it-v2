@@ -1209,5 +1209,448 @@ def test_xfail(): assert False
             print("L-spec-1664 AC5 base_red ok")
 
 
+class StalenessTests(unittest.TestCase):
+    NOW = datetime(2026, 11, 6, 12, tzinfo=timezone.utc)
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='nightly-staleness-')
+        self.addCleanup(self.temp.cleanup)
+        self.root = pathlib.Path(self.temp.name)
+        self.repo = self.root / 'repos' / 'albert-scott'
+        self.repo.mkdir(parents=True)
+        def git(*args):
+            return subprocess.check_output(['git', '-C', str(self.repo), *args], text=True).strip()
+        git('init', '-q')
+        git('-c', 'user.name=test', '-c', 'user.email=test@localhost',
+            'commit', '--allow-empty', '-qm', 'scratch fixture')
+        git('remote', 'add', 'origin', 'git@github.com:example/scratch.git')
+        self.sha = git('rev-parse', 'HEAD')
+        self.ledger = self.root / 'events' / 'L-base-red-local.jsonl'
+        self.ledger.parent.mkdir()
+        stack = contextlib.ExitStack()
+        self.addCleanup(stack.close)
+        stack.enter_context(patch.object(br.fold, 'ROOT', self.root))
+        stack.enter_context(patch.dict(os.environ, DOIT_ROOT=str(self.root),
+            HOME=str(self.root / 'home'), PYTHONPATH=str(HERE)))
+
+    def mark(self, ac, body):
+        print(json.dumps(dict(url=f'cli://base-red/nightly-staleness/AC{ac}', status=0,
+              body_sha256=hashlib.sha256(body.encode()).hexdigest(), body_excerpt=body)))
+
+    def seed(self, rows):
+        self.ledger.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+
+    def alarms(self):
+        rows = [json.loads(line) for line in self.ledger.read_text().splitlines()] if self.ledger.exists() else []
+        return [row for row in rows if row.get('subject') == 'nightly-stale:albert-scott'
+                and row.get('type') == 'escalation-blocking']
+
+    def dispatch(self, at=None, **fields):
+        return dict(dict(type='base-red-nightly-dispatched', project='albert-scott',
+                         sha=self.sha, suite='nightly', run_ids=['1', '2'],
+                         ts=(at or self.NOW).isoformat()), **fields)
+
+    def assert_locked(self):
+        path = self.root / 'base-red' / 'albert-scott' / 'nightly.lock'
+        with path.open('a') as other:
+            with self.assertRaises(BlockingIOError):
+                br.fcntl.flock(other, br.fcntl.LOCK_EX | br.fcntl.LOCK_NB)
+
+    def completion(self, age=0, **fields):
+        return dict(dict(type='base-red-nightly', project='albert-scott',
+                         suite='nightly', complete=True,
+                         ts=(self.NOW - timedelta(seconds=age)).isoformat()), **fields)
+
+    def test_staleness_ac1_matrix(self):
+        for suite in ('nightly', 'undeclared', 'local-hermetic', None, 'unknown'):
+            for complete in (True, False, None, 'true'):
+                for project in ('albert-scott', 'foreign'):
+                    for kind in ('base-red-nightly', 'base-red-nightly-dispatched', 'base-red'):
+                        row = self.completion(suite=suite, complete=complete, project=project, type=kind)
+                        if suite is None:
+                            del row['suite']
+                        if complete is None:
+                            del row['complete']
+                        valid = (suite in ('nightly', 'undeclared') and complete is True
+                                 and project == 'albert-scott' and kind == 'base-red-nightly')
+                        case = f'{suite}/{complete}/{project}/{kind}'
+                        with self.subTest(case=case):
+                            rows = [self.completion(27 * 3600), row]
+                            alert = br.nightly_stale(rows, 'albert-scott', self.NOW)
+                            self.assertEqual(alert is None, valid)
+                            print('staleness ac1', case, 'PASS')
+        for age, stale in ((26 * 3600, False), (26 * 3600 + 1, True)):
+            row = self.completion(age)
+            self.assertEqual(br.nightly_stale([row], 'albert-scott', self.NOW) is not None, stale)
+            print('staleness ac1 boundary', age, 'PASS')
+        fresh, old = self.completion(ids=['red']), self.completion(100000)
+        for rows in ([old, fresh, old], [fresh, old, fresh]):
+            self.assertIsNone(br.nightly_stale(rows, 'albert-scott', self.NOW))
+        print('staleness ac1 unordered duplicate fresh-red PASS')
+        self.mark(1, 'PASS: 120 matrix cases; exact boundary; unordered duplicates; fresh red')
+
+    def test_staleness_ac2_episodes_and_uncertainty(self):
+        def alert(rows, now=None):
+            answer = br.nightly_stale(iter(rows), 'albert-scott', now or self.NOW)
+            self.assertEqual(answer, br.nightly_stale(reversed(rows), 'albert-scott', now or self.NOW))
+            return answer
+        empty = alert([])
+        self.assertEqual(empty['state'], 'undetermined')
+        self.assertEqual(empty['episode'], 'never-observed')
+        self.assertIsNone(empty['last_complete_at'])
+        self.assertTrue(br.fold.escalation_ok(empty))
+        self.assertEqual(br._time(empty['deadline']), self.NOW + timedelta(hours=24))
+        self.assertIsNone(br.nightly_stale([], 'do-it-v2', self.NOW))
+        for age, expected in ((26 * 3600, None), (26 * 3600 + 1, 'stale')):
+            rows = [self.dispatch(self.NOW - timedelta(seconds=age)), self.dispatch()]
+            result = alert(rows)
+            self.assertEqual(result['state'] if result else None, expected)
+            print('staleness ac2 dispatch-only boundary', age, 'PASS')
+        for stamp in ('bad', None, '2026-11-06T12:00:00', 42,
+                      (self.NOW + timedelta(seconds=1)).isoformat()):
+            rows = [self.completion(ts=stamp)]
+            self.assertEqual(alert(rows)['state'], 'undetermined')
+            self.assertEqual(alert(rows + [self.dispatch()])['state'], 'undetermined')
+            print('staleness ac2 invalid/future completion', repr(stamp), 'PASS')
+        self.assertEqual(alert([self.dispatch(ts='bad')])['state'], 'undetermined')
+        self.assertIsNone(alert([self.completion(ts='2026-11-06T14:00:00+02:00')]))
+        offset_now = self.NOW.astimezone(timezone(timedelta(hours=-5)))
+        old = self.completion(27 * 3600)
+        first = alert([old], offset_now)
+        self.assertEqual(first['last_complete_at'], old['ts'])
+        alarm = dict(first, type='escalation-blocking')
+        rows = [old, alarm, dict(type='decision', project='albert-scott', subject=first['subject'])]
+        for hours in range(1, 5):
+            self.assertIsNone(alert(rows + [self.dispatch()], self.NOW + timedelta(hours=hours)))
+        for wrong in (dict(alarm, project='foreign'), dict(alarm, episode='other'),
+                      dict(alarm, type='base-red'), dict(alarm, default='')):
+            self.assertIsNotNone(alert([old, wrong]))
+        recovered = self.completion()
+        self.assertIsNone(alert(rows + [recovered]))
+        second = alert(rows + [recovered], self.NOW + timedelta(hours=27))
+        self.assertNotEqual(first['episode'], second['episode'])
+        self.mark(2, 'PASS: empty/dispatch-only histories, invalid/future times, UTC normalization, '
+                     'repeated ticks, decisions, recovery, second outage, order independence')
+
+    def test_staleness_ac3_collector_branches(self):
+        now = datetime.now(timezone.utc)
+        old = self.completion(ts=(now - timedelta(hours=27)).isoformat(), sha='a' * 40)
+        dispatch = self.dispatch(now)
+        runs = [dict(id=i, head_sha=self.sha, status='completed', conclusion='success') for i in (1, 2)]
+        for branch in ('no-dispatch', 'already-collected', 'pending-unresolved', 'pending-error',
+                       'queued', 'in-progress', 'overdue', 'missing', 'cancelled',
+                       'malformed', 'malformed-time', 'malformed-null-time', 'unavailable-api', 'incomplete-snapshot'):
+            with self.subTest(branch=branch), contextlib.ExitStack() as stack:
+                rows = [old, dispatch]
+                if branch == 'no-dispatch':
+                    rows = []
+                elif branch == 'already-collected':
+                    rows = [dict(old, sha=self.sha), dispatch]
+                elif branch == 'malformed':
+                    rows[-1] = dict(dispatch, run_ids=[])
+                elif branch == 'malformed-time':
+                    rows[-1] = dict(dispatch, ts='broken')
+                elif branch == 'malformed-null-time':
+                    rows[-1] = dict(dispatch, ts=None)
+                elif branch == 'overdue':
+                    rows[-1] = self.dispatch(now - timedelta(hours=27))
+                self.seed(rows)
+                stack.enter_context(patch.object(br, '_pending', return_value=branch.startswith('pending')))
+                resolve = stack.enter_context(patch.object(br, '_resolve_pending', return_value=None))
+                if branch == 'pending-error':
+                    resolve.side_effect = ValueError('dispatch never appeared')
+                selected = [dict(run) for run in runs]
+                if branch in ('queued', 'in-progress', 'overdue'):
+                    selected[0]['status'] = 'in_progress' if branch == 'in-progress' else 'queued'
+                if branch == 'missing':
+                    selected = []
+                if branch == 'cancelled':
+                    selected[0]['conclusion'] = 'cancelled'
+                api = stack.enter_context(patch.object(br, '_api', return_value=selected))
+                if branch == 'unavailable-api':
+                    api.side_effect = ValueError('GitHub API failed')
+                stack.enter_context(patch.object(br, '_snapshot', return_value=(br._result(self.sha), {})))
+                for name in ('nightly', 'failing'):
+                    stack.enter_context(patch.object(br, name, side_effect=AssertionError('forbidden dispatch')))
+                stack.enter_context(patch.object(br.ghlimit, 'run', side_effect=AssertionError('unexpected gh')))
+                # Observe real reads, decisions and writes; do not replace persistence.
+                for name in ('_nightly_rows', 'nightly_stale', '_append'):
+                    original = getattr(br, name)
+                    def observe(*args, original=original, **kwargs):
+                        self.assert_locked()
+                        return original(*args, **kwargs)
+                    stack.enter_context(patch.object(br, name, side_effect=observe))
+                results = []
+                collect = br.nightly_collect
+                def record(project):
+                    result = collect(project)
+                    results.append(result)
+                    return result
+                stack.enter_context(patch.object(br, 'nightly_collect', side_effect=record))
+                for tick in range(4):
+                    output = io.StringIO()
+                    with contextlib.redirect_stdout(output):
+                        code = br.main(['nightly-collect', 'albert-scott'])
+                    result = results[-1]
+                    self.assertEqual(code, 2 if tick == 0 else 0, (branch, result))
+                    self.assertFalse(result['complete'])
+                    self.assertTrue(result['undetermined'])
+                    self.assertIn('undetermined', output.getvalue())
+                    status = 'appended' if tick == 0 else 'already-alarmed'
+                    self.assertEqual(result['nightly_staleness']['alarm_status'], status)
+                    self.assertIn(status, output.getvalue())
+                    self.assertEqual(len(self.alarms()), 1)
+                    print('staleness ac3', branch, 'tick', tick, 'exit', code, status, 'count=1 PASS')
+                if branch in ('no-dispatch', 'already-collected'):
+                    api.assert_not_called()
+        self.mark(3, 'PASS: 14 collector branches x 4 ticks; locked read/decision/append; '
+                     'first exit 2 then three exits 0 with explicit uncertainty and one durable alarm')
+
+    def test_staleness_ac3_fresh_completion_and_storage_errors(self):
+        now = datetime.now(timezone.utc)
+        self.seed([self.completion(ts=(now - timedelta(hours=27)).isoformat(), sha='a' * 40),
+                   self.dispatch(now)])
+        runs = [dict(id=i, head_sha=self.sha, status='completed', conclusion='success') for i in (1, 2)]
+        result = br._result(self.sha)
+        result['complete'] = True
+        with patch.object(br, '_api', return_value=runs), patch.object(br, '_snapshot', return_value=(result, {})), \
+             patch.object(br, 'known_red', return_value=[]), patch('quarantine.apply') as quarantine:
+            self.assertTrue(br.nightly_collect('albert-scott')['complete'])
+            quarantine.assert_called_once_with('albert-scott')
+        self.assertEqual(self.alarms(), [])
+        for failure in ('append', 'read', 'lock'):
+            self.seed([])
+            name = {'append': '_append', 'read': '_nightly_rows'}
+            target = patch.object(br, name[failure], side_effect=OSError('injected')) if failure != 'lock' else \
+                     patch.object(br.fcntl, 'flock', side_effect=OSError('injected'))
+            with target, contextlib.redirect_stdout(io.StringIO()):
+                answer = br.nightly_collect('albert-scott')
+                self.assertEqual(answer['nightly_staleness']['alarm_status'], 'failed')
+                self.assertTrue(answer['undetermined'])
+                self.assertEqual(br.main(['nightly-collect', 'albert-scott']), 2)
+            self.assertEqual(self.alarms(), [])
+            print('staleness ac3', failure, 'failure exit=2 PASS')
+        # Even an existing durable alarm cannot hide a new read/lock failure.
+        br.nightly_collect('albert-scott')
+        with patch.object(br, '_nightly_rows', side_effect=OSError('unreadable')), \
+             contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(br.main(['nightly-collect', 'albert-scott']), 2)
+        self.mark(3, 'PASS: newly committed completion is fresh; append/read/lock errors exit 2; '
+                     'prior delivery cannot mask a new storage failure')
+
+    def process_fixture(self):
+        """Unmodified production CLI/store, with a fake external gh executable."""
+        fake = self.root / 'gh'
+        fake.write_text('''#!/usr/bin/python3
+import fcntl, json, os, pathlib, sys, time
+root = pathlib.Path(os.environ['DOIT_ROOT'])
+assert sys.argv[1] == 'api', 'collector attempted a paid dispatch'
+if sys.argv[2] == 'rate_limit':
+    print(json.dumps({'resources': {k: dict(limit=5000, remaining=5000, reset=time.time()+3600)
+                                   for k in ('core', 'graphql')}}))
+else:
+    with (root / 'base-red/albert-scott/nightly.lock').open('a') as other:
+        try:
+            fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            pass
+        else:
+            raise AssertionError('API exception path was unlocked')
+    with (root / 'api-observed').open('a') as out:
+        out.write('unavailable-api\\n')
+    sys.exit(1)
+''')
+        fake.chmod(0o700)
+        self.child_env = dict(os.environ, DOIT_REAL_GH=str(fake),
+                              GH_LIMIT_STATE=str(self.root / 'quota.json'))
+        # Profiling observes the production functions and injects only the two
+        # explicitly required crash points. It never substitutes an append/read.
+        self.runner = self.root / 'collect.py'
+        self.runner.write_text('''import fcntl, json, os, pathlib, sys, time
+import base_red
+root = pathlib.Path(os.environ['DOIT_ROOT'])
+mode, sync = sys.argv[1:]
+trace = root / ('trace-' + str(os.getpid()))
+def record(value):
+    with trace.open('a') as out:
+        out.write(json.dumps(value) + '\\n')
+def locked():
+    with (root / 'base-red/albert-scott/nightly.lock').open('a') as other:
+        try:
+            fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return
+        raise AssertionError('alarm read/decision/append without nightly.lock')
+def observe(frame, event, arg):
+    if frame.f_code.co_filename != base_red.__file__:
+        return
+    name = frame.f_code.co_name
+    if event == 'call' and name in ('_nightly_rows', 'nightly_stale', '_append'):
+        locked()
+        record({'locked': name})
+        if name == '_append' and mode == 'before':
+            raise OSError('injected before append commit')
+    if event == 'return' and name == '_append' and mode == 'after':
+        record({'crash': 'after committed append'})
+        os._exit(19)
+    if event == 'return' and name == 'nightly_collect':
+        record({'result': arg})
+if sync != '-':
+    (root / ('ready-' + str(os.getpid()))).touch()
+    limit = time.monotonic() + 15
+    while not pathlib.Path(sync).exists():
+        assert time.monotonic() < limit, 'start coordination timed out'
+        time.sleep(.01)
+sys.setprofile(observe)
+sys.exit(base_red.main(['nightly-collect', 'albert-scott']))
+''')
+
+    def child(self, mode='normal'):
+        return subprocess.run([sys.executable, str(self.runner), mode, '-'],
+                              env=self.child_env, capture_output=True, text=True, timeout=30)
+
+    def fresh_alarm_read(self, expected):
+        # Each assertion is backed by both real raw bytes and the admitted fold
+        # in an independent interpreter, never a same-process cached snapshot.
+        code = '''import fold, json
+p = fold.ROOT / 'events/L-base-red-local.jsonl'
+raw = [json.loads(line) for line in p.read_text().splitlines()] if p.exists() else []
+def alarms(rows):
+    return [e for e in rows if e.get('type') == 'escalation-blocking'
+            and e.get('subject') == 'nightly-stale:albert-scott']
+raw, admitted = alarms(raw), alarms(fold.read_events(use_cache=False))
+assert len(raw) == len(admitted)
+for e in admitted:
+    assert fold.escalation_ok(e) and all(e.get(k) for k in ('default', 'deadline', 'revert'))
+    assert e['complete'] is False and e['ids'] == [] and e['project'] == 'albert-scott'
+print(json.dumps({'raw_count': len(raw), 'admitted_count': len(admitted),
+                  'episodes': [e['episode'] for e in admitted],
+                  'sha_empty': [not e['sha'] for e in admitted]}))
+'''
+        proc = subprocess.run([sys.executable, '-c', code], env=self.child_env,
+                              capture_output=True, text=True, timeout=20)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        result = json.loads(proc.stdout)
+        self.assertEqual(result['admitted_count'], expected, result)
+        print('staleness ac4 fresh reader', json.dumps(result))
+        return result
+
+    def test_staleness_ac4_real_store_concurrency_and_errors(self):
+        self.process_fixture()
+        for branch in ('no-dispatch', 'unavailable-api'):
+            with self.subTest(branch=branch):
+                now = datetime.now(timezone.utc)
+                rows = [] if branch == 'no-dispatch' else [self.dispatch(now - timedelta(hours=27))]
+                self.seed(rows)
+                before_api = (self.root / 'api-observed').read_text().count('\n') if (self.root / 'api-observed').exists() else 0
+                start = self.root / ('start-' + branch)
+                children = [subprocess.Popen([sys.executable, str(self.runner), 'normal', str(start)],
+                             env=self.child_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                            for _ in range(2)]
+                try:
+                    limit = time.monotonic() + 10
+                    while not all((self.root / ('ready-' + str(child.pid))).exists() for child in children):
+                        self.assertLess(time.monotonic(), limit, 'children did not reach start coordination')
+                        time.sleep(.01)
+                    start.touch()
+                    outcomes = []
+                    for child in children:
+                        stdout, stderr = child.communicate(timeout=30)
+                        self.assertIn('undetermined', stdout, stderr)
+                        outcomes.append(child.returncode)
+                        traces = [json.loads(line) for line in (self.root / ('trace-' + str(child.pid))).read_text().splitlines()]
+                        names = {row['locked'] for row in traces if 'locked' in row}
+                        self.assertTrue({'_nightly_rows', 'nightly_stale'} <= names)
+                        result = next(row['result'] for row in traces if 'result' in row)
+                        self.assertFalse(result['complete'])
+                        self.assertTrue(result['undetermined'])
+                        if child.returncode == 2:
+                            self.assertIn('_append', names)
+                            self.assertEqual(result['nightly_staleness']['alarm_status'], 'appended')
+                        else:
+                            self.assertEqual(result['nightly_staleness']['alarm_status'], 'already-alarmed')
+                    self.assertEqual(sorted(outcomes), [0, 2])
+                finally:
+                    for child in children:
+                        if child.poll() is None:
+                            child.kill()
+                        child.communicate()
+                if branch == 'unavailable-api':
+                    self.assertEqual((self.root / 'api-observed').read_text().count('\n') - before_api, 2)
+                summary = self.fresh_alarm_read(1)
+                self.assertEqual(summary['sha_empty'], [branch == 'no-dispatch'])
+                for _ in range(3):
+                    repeat = self.child()
+                    self.assertEqual(repeat.returncode, 0, repeat.stderr)
+                    self.assertIn('already-alarmed', repeat.stdout)
+                self.fresh_alarm_read(1)
+                print('staleness ac4 concurrent', branch, 'both entered; exits=0,2; count=1 PASS')
+        # The same production writer is exercised on either side of its commit.
+        self.seed([])
+        failure = self.child('before')
+        self.assertEqual(failure.returncode, 2, failure.stderr)
+        self.assertIn('storage or lock unavailable', failure.stdout)
+        self.fresh_alarm_read(0)
+        self.assertEqual(self.child().returncode, 2)
+        self.fresh_alarm_read(1)
+        self.seed([])
+        self.assertEqual(self.child('after').returncode, 19)
+        self.fresh_alarm_read(1)
+        self.assertEqual(self.child().returncode, 0)
+        self.fresh_alarm_read(1)
+        # Historic recovery fixture: fresh at landing, stale 27 hours later.
+        # Only history is synthetic; every alarm is appended by the real CLI.
+        now = datetime.now(timezone.utc)
+        recovered_at = now - timedelta(hours=27)
+        recovered = self.completion(ts=recovered_at.isoformat(), sha=self.sha)
+        prior = self.alarms()
+        self.assertIsNone(br.nightly_stale(prior + [recovered], 'albert-scott', recovered_at))
+        with self.ledger.open('a') as out:
+            out.write(json.dumps(recovered) + '\n')
+        self.assertEqual(self.child().returncode, 2)
+        summary = self.fresh_alarm_read(2)
+        self.assertEqual(len(set(summary['episodes'])), 2)
+        # Exercise both uninstrumented public CLI routes too.
+        for argv in ([str(br.DOIT), 'base-red', 'nightly-collect', 'albert-scott'],
+                     [sys.executable, str(HERE / 'base_red.py'), 'nightly-collect', 'albert-scott']):
+            proc = subprocess.run(argv, env=self.child_env, capture_output=True, text=True, timeout=30)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIn('undetermined', proc.stdout)
+            self.assertIn('already-alarmed', proc.stdout)
+        self.fresh_alarm_read(2)
+        self.mark(4, 'PASS: production CLI -> _append -> doit append; fresh raw/fold readers; '
+                     'no-dispatch and unavailable-API concurrent processes each yield one admitted alarm; '
+                     'locked reads/decisions/appends, precommit retry, postcommit crash, recovery and second outage')
+
+    def test_staleness_ac5_purity_security_and_scope(self):
+        hostile = '$(touch injected); `touch injected` <script>bad</script>'
+        rows = [self.completion(27 * 3600, reason=hostile), self.dispatch(ts=hostile),
+                dict(type='escalation-blocking', project='foreign', subject='nightly-stale:albert-scott',
+                     episode='never-observed', reason=hostile)]
+        with patch.object(br.subprocess, 'run', side_effect=AssertionError('pure helper called subprocess')), \
+             patch.object(br, '_api', side_effect=AssertionError('pure helper called API')), \
+             patch.object(pathlib.Path, 'open', side_effect=AssertionError('pure helper opened file')):
+            answer = br.nightly_stale(rows, 'albert-scott', self.NOW)
+            self.assertEqual(answer['state'], 'stale')
+            self.assertIsNone(br.nightly_stale(rows, 'do-it-v2', self.NOW))
+        # Arbitrary text stays JSON data through the actual argv/store path.
+        br._append('escalation-blocking', 'albert-scott', '', complete=False, ids=[],
+                   subject=answer['subject'], **{k: v for k, v in answer.items() if k not in ('subject', 'project', 'reason')},
+                   reason=hostile)
+        self.assertEqual(self.alarms()[0]['reason'], hostile)
+        self.assertFalse((pathlib.Path.cwd() / 'injected').exists())
+        foreign_repo = self.root / 'repos' / 'do-it-v2'
+        foreign_repo.mkdir()
+        before = self.ledger.read_bytes()
+        with patch.object(br, 'nightly', side_effect=AssertionError('paid dispatch')), \
+             patch.object(br.ghlimit, 'run', side_effect=AssertionError('paid dispatch')):
+            self.assertNotIn('nightly_staleness', br.nightly_collect('do-it-v2'))
+        self.assertEqual(self.ledger.read_bytes(), before)
+        with self.assertRaises(ValueError):
+            br._repo('../albert-scott')
+        self.mark(5, 'PASS: pure helper has no file/network/subprocess effects; real JSON argv preserves '
+                     'hostile text as data; no paid calls, project leakage or invalid repository traversal')
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
