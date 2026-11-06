@@ -1535,7 +1535,6 @@ def main(argv=None):
     n = 1 + len(list(PACKETS.glob(f"{a.subject}-{a.role}-*.md")))
     p = PACKETS / f"{a.subject}-{a.role}-{n}.md"
     p.write_text(text)
-    # read_bytes: read_text turns captured \r progress output into \n, and the check would never pass.
     assert p.read_bytes() == text.encode(), f"write to {p} did not land"
     return p
 
