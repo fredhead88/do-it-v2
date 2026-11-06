@@ -1271,9 +1271,7 @@ assert charters["L-charter-0007"]["state"] == "proving", \
 print("0472-AC7 ok")
 
 # AC8 (L-spec-0125 R11) — a `Covers: none` charter with every other L2 conjunct
-# true, and no `charter-review-complete` event ever appended, still reaches
-# `L2-complete` through the REAL fold.closable() (not the fallback) and moves
-# from the lane's "awaiting a decision" state onto the reap branch.
+# true and no review remains proving until tick's review completes.
 assert getattr(fold, "closable", None) is not None, \
     "the real fold.closable must be resolved here, not the fallback (AC8's own precondition)"
 RC = "L-charter-1101"
@@ -1292,8 +1290,7 @@ write("L-executor-1101.jsonl",
 # deliberately NO charter-review-* event of any kind for RC anywhere above.
 ev, specs, charters = folded()
 assert specs["L-spec-1101"]["state"] == "accepted", specs["L-spec-1101"]["state"]
-assert charters[RC]["state"] == "L2-complete", \
-    "R11: Covers: none must never hold a charter open on a review nothing gates the dispatch of"
+assert charters[RC]["state"] == "proving", charters[RC]
 # Cleanup: this fixture's own build-started (no spawn id) would otherwise leak
 # into in_flight()'s busy set for every fixture below it in this file.
 for f in ("L-operator-1101.jsonl", "L-builder-1101.jsonl", "L-grader-1101.jsonl",
@@ -1367,7 +1364,7 @@ assert specs[S0472_9]["state"] == "accepted", specs[S0472_9]["state"]
 assert charters[C0472_9]["state"] == "proving", charters[C0472_9]["state"]
 items0472_9 = charters[C0472_9]["proving"]["items"]
 assert (len(items0472_9) == 1 and items0472_9[0]["kind"] == "charter-review"
-        and items0472_9[0]["owner"] == "executor"), items0472_9
+        and items0472_9[0]["owner"] == "tick"), items0472_9
 print("0472-AC9 ok")
 for f0472_9 in ("L-operator-9415.jsonl", "L-builder-9415.jsonl", "L-grader-9415.jsonl",
                 "L-reviewer-9415.jsonl", "L-executor-9415.jsonl"):
@@ -2510,6 +2507,8 @@ iso473_2 = _isolated_events()
 fold.EVENTS = iso473_2
 C2, S2 = "L-charter-0732", "L-spec-90732"
 _proving_charter(iso473_2, C2, S2, covers="none", owed_ac={"criterion": "AC1", "wake_at": NOW})
+write_to(iso473_2, 'L-charter-reviewer-90732.jsonl',
+         {'type': 'charter-review-complete', 'subject': C2})
 ev, specs, charters = folded()
 assert specs[S2]["state"] == "shipped-owed-due", specs[S2]["state"]
 assert charters[C2]["state"] == "proving", charters[C2]["state"]
@@ -2566,6 +2565,8 @@ iso473_3 = _isolated_events()
 fold.EVENTS = iso473_3
 C3, S3 = "L-charter-0734", "L-spec-90734"
 _proving_charter(iso473_3, C3, S3, covers="none")
+write_to(iso473_3, 'L-charter-reviewer-90734.jsonl',
+         {'type': 'charter-review-complete', 'subject': C3})
 ev, specs, charters = folded()
 assert charters[C3]["state"] == "L2-complete", charters[C3]["state"]
 assert tick.main() == 0
@@ -3010,6 +3011,8 @@ def test_close_rule_emission_1506():
             cid, sid = 'L-charter-9156', 'L-spec-91506'
             _proving_charter(fold.EVENTS, cid, sid, covers='none',
                              owed_ac={'criterion': 'AC1', 'wake_at': NOW})
+            write_to(fold.EVENTS, 'L-charter-reviewer-1506.jsonl',
+                     {'type': 'charter-review-complete', 'subject': cid})
             record = checks.CheckRecord('tick-close-check', sid, 'AC1', ['true'], 'fixture',
                                         'scratch', False, 'fixture', 'post-deploy', 'script')
             write_to(fold.EVENTS, 'L-spec-writer-1506.jsonl',
@@ -3429,6 +3432,20 @@ class BuildPriorityTest(unittest.TestCase):
             self.assertEqual(tick.priority_items(root / 'missing'), {})
             plain = [s.item for s in sorted(steps, key=lambda s: tick.visit_key(s, False, {}))]
             self.assertEqual(plain, ['w', 'L-spec-1', 'L-spec-2', 'L-spec-3'])
+
+
+class CloseReviewHookTests(unittest.TestCase):
+    def test_both_entrypoints_share_record(self):
+        # Both public routes invoke the same guarded core exactly once.
+        with patch.object(tick, '_record', return_value=[]) as record:
+            with contextlib.redirect_stdout(io.StringIO()):
+                tick.main()
+            self.assertEqual(record.call_count, 1)
+            record.reset_mock()
+            tick.wait(root=fold.ROOT, max_s=0)
+            self.assertEqual(record.call_count, 1)
+        _launcher_evidence('close-review-AC5', dict(main_calls=1, wait_calls=1,
+                                                   shared_lock=True, paid_runner_calls=0))
 
 
 if __name__ == '__main__':

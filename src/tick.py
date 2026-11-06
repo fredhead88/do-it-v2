@@ -5,10 +5,10 @@
               dispatch ends with one). One at a time per ledger — flock — and a
               dropped duplicate loses nothing: the durable list is the queue.
 
-A tick starts no Executor, under any backend (L-adr-0035). It is a pure
-fold-and-record: it spends nothing, it can be run at any frequency by anything,
-and the one event it appends is what `fold` reads for staleness. The Executor is
-a supervised pane that reads the same lane for itself; nothing here launches it.
+A tick starts no Executor, under any backend (L-adr-0035). Its guarded dispatch
+passes launch routine roles, including due charter close reviews. The ordinary
+tick event is the durable heartbeat and close-review fork receipt. The Executor
+is a supervised pane that reads the same lane for itself.
 """
 import ledger_files
 import ledger_cache
@@ -1208,6 +1208,17 @@ def _record():
             _log_lane_driver(lines, fold.NOW)
         except OSError as exc:
             lane_driver_log_error = str(exc)
+    close_reviews_error = None
+    close_reviews_outcomes = []
+    try:
+        import close_reviews
+        import autodispatch
+        close_reviews_outcomes = close_reviews.run(ev, specs, fold.NOW,
+                                                   runner=autodispatch._real_runner)
+    except Exception as exc:
+        close_reviews_error = str(exc)
+        close_reviews_outcomes = getattr(exc, 'outcomes', close_reviews_outcomes)
+    log_outcomes(close_reviews_outcomes)
     log_outcomes(['start autodispatch'])
     try:
         import autodispatch
@@ -1343,6 +1354,9 @@ def _record():
         kv["worktrees_retained"] = worktrees_retained
     if proving_error:
         kv["proving_error"] = proving_error
+    kv['close_reviews_outcomes'] = close_reviews_outcomes
+    if close_reviews_error:
+        kv['close_reviews_error'] = close_reviews_error
     try:
         if any(not key.startswith('admission_') for key in admission) or len(json.dumps(admission).encode()) > 1024:
             admission = {'admission_error': 'oversize'}
@@ -1362,7 +1376,7 @@ def launch_precheck(events, now, *, project='albert-scott'):
 
 
 def main():
-    """Fold, compute the lane, append exactly one `tick`. Never a spawn (L-adr-0035)."""
+    """Run the guarded dispatch passes and append one ordinary tick heartbeat."""
     todo = _record()
     if todo is None:
         print("tick: one is running; this one is dropped")

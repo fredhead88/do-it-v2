@@ -380,25 +380,21 @@ def charter_review(evs):
 
 
 def charter_review_owed(charter_evs):
-    """R11 — the sole predicate for "is a charter-review owed for this charter":
-    `_closable`'s `review_owed` conjunct and `doit review-owed` both read this and
-    nothing else, so the L2 conjunct and the Executor's dispatch decision can never
-    disagree about the same fact.
+    """Sole owed predicate for closure, proving and tick close-review admission.
 
-    `False` only when the charter's own NEWEST `charter-filed` event's `covers`
-    field is the explicit string `none`/`null` (case-insensitive, surrounding
-    whitespace ignored — the D98/§12.2 convention `think.covers()`/`relay._ids()`
-    already write at land time). Every other case — a non-empty id list, an absent
-    `charter-filed` event, or a raw JSON `null` `covers` value (a tolerated
-    defensive input with no instance on the live ledger today, not a legacy
-    population) — falls through UNCHANGED to today's rule: undetermined is never
-    clean, only the explicit empty spelling buys "no review owed"."""
+    Explicit none/null charters retain historical standing closes. An open or
+    strictly newer reopened charter follows the newest verdict like any other
+    charter. Missing covers and JSON null keep the existing verdict rule.
+    """
     filed = [e for e in charter_evs if e["type"] == "charter-filed"]
     if filed:
         covers = filed[-1].get("covers")
         spelling = "" if covers is None else str(covers)
         if spelling.strip().lower() in ("none", "null"):
-            return False
+            closed = max((ts(e['ts']) for e in charter_evs if e['type'] == 'charter-closed'), default=None)
+            reopened = max((ts(e['ts']) for e in charter_evs if e['type'] == 'charter-reopened'), default=None)
+            if closed is not None and (reopened is None or reopened <= closed):
+                return False
     return charter_review(charter_evs) != "charter-review-complete"
 
 
@@ -1080,9 +1076,8 @@ def _closable(charter_evs, mine):
     `all_accepted and sweep_derived and owed_within_k and no_open_briefs and not
     review_owed` — written once so neither a builder nor a consumer picks it.
 
-    `review_owed` is `charter_review_owed(charter_evs)` — R11: a `Covers: none`
-    charter never owes a review nothing gates the dispatch of, no matter what
-    `charter_review` alone would answer.
+    `review_owed` is `charter_review_owed(charter_evs)`, including open Covers:
+    none charters. Historical standing closes retain their exemption.
 
     L-charter-0033/board-owners, Target 4: `all_accepted` additionally counts a
     `killed` spec as accepted-for-closure when its newest `spec-killed` event

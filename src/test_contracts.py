@@ -296,13 +296,21 @@ ok(
 )
 
 
-# --- AC21 — L-spec-0125 R11: row 52's not-owed branch, pinned to one literal ---
+# --- AC21 — close reviews are triggered by tick; Executor retains judgment ---
 
 ok(
     "AC21",
-    "L-spec-0125 R11 · charter-reviewer dispatched only where doit review-owed says owed",
-    present=[(EXECUTOR, "not-owed → no charter-reviewer dispatch")],
+    "L-spec-2157 · tick owns the close-review trigger",
+    present=[(EXECUTOR, "tick owns charter-review dispatch")],
+    absent=[(EXECUTOR, "not-owed → no charter-reviewer dispatch"),
+            (EXECUTOR, "owed` → dispatch `charter-reviewer`")],
 )
+
+_close_row = next(line for line in (ROOT / EXECUTOR).read_text().splitlines()
+                  if line.startswith('| **charter `L1-complete`'))
+assert 'tick owns charter-review dispatch' in _close_row
+assert 'dispatch `charter-reviewer`' not in _close_row
+assert 'charter is left for the reap branch' not in _close_row
 
 
 # --- L-spec-0277 — the Lessons `## ` heading is present, singular, and last --

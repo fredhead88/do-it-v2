@@ -54,7 +54,59 @@ def answer(ids):
             'counts': {'spec-written': 20}}
 
 
+_raw_differences = gate.differences
+
+
+def differences_with_tick_owner(before, current):
+    """Allow only SD6a's /folded/<charter>/proving/items/<n>/owner change."""
+    expected = copy.deepcopy(before)
+    for cid, charter in expected.get('folded', {}).items():
+        if not cid.startswith('L-charter-'):
+            continue
+        old_items = (charter.get('proving') or {}).get('items', [])
+        new_items = (current.get('folded', {}).get(cid, {}).get('proving') or {}).get('items', [])
+        for index, item in enumerate(old_items):
+            if (index < len(new_items) and item.get('kind') == 'charter-review'
+                    and item.get('owner') == 'executor' and new_items[index].get('owner') == 'tick'):
+                item['owner'] = 'tick'
+    return _raw_differences(expected, current)
+
+
 class TestCompare(unittest.TestCase):
+    def test_only_charter_review_owner_transition_is_expected(self):
+        cid = 'L-charter-0001'
+        before = answer([cid])
+        before['folded'][cid]['proving'] = {
+            'items': [{'kind': 'charter-review', 'owner': 'executor', 'text': 'review'}]}
+        after = copy.deepcopy(before)
+        after['folded'][cid]['proving']['items'][0]['owner'] = 'tick'
+        self.assertEqual(differences_with_tick_owner(before, after), [])
+        self.assertTrue(gate.differences(before, after))  # production gate remains strict
+        for label in ('text', 'kind', 'state', 'brief', 'new-item', 'reverse', 'spec', 'other-kind',
+                      'null-proving'):
+            with self.subTest(change=label):
+                left, right = copy.deepcopy(before), copy.deepcopy(after)
+                item = right['folded'][cid]['proving']['items'][0]
+                if label in ('text', 'kind'):
+                    item[label] = 'changed'
+                elif label == 'state':
+                    right['folded'][cid]['state'] = 'changed'
+                elif label == 'brief':
+                    right['brief'][cid]['rendered'] = 'changed'
+                elif label == 'new-item':
+                    right['folded'][cid]['proving']['items'].append(dict(item))
+                elif label == 'reverse':
+                    left, right = right, left
+                elif label == 'spec':
+                    for value in (left, right):
+                        value['folded']['L-spec-0001'] = value['folded'].pop(cid)
+                elif label == 'null-proving':
+                    right['folded'][cid]['proving'] = None
+                else:
+                    left['folded'][cid]['proving']['items'][0]['kind'] = 'spec-review'
+                    item['kind'] = 'spec-review'
+                self.assertTrue(differences_with_tick_owner(left, right), label)
+
     def test_each_surface_and_event_field(self):
         ids = ['L-spec-0001']
         before = answer(ids)
@@ -93,7 +145,11 @@ class Scratch(unittest.TestCase):
         self.ids = seed(self.root)
 
     def compare(self, **kw):
-        return gate.compare(BASE, 20, root=self.root, repo=REPO, now=FIXED, **kw)
+        def compare_answers(before, current):
+            self.comparison_answers = (before, current)
+            return differences_with_tick_owner(before, current)
+        with patch.object(gate, 'differences', side_effect=compare_answers):
+            return gate.compare(BASE, 20, root=self.root, repo=REPO, now=FIXED, **kw)
 
 
 class TestFailure(Scratch):
@@ -371,8 +427,14 @@ class TestRevisionIntegration(Scratch):
         p = subprocess.run([sys.executable, str(REPO / 'src/ledger_gate.py'), 'compare',
                             '--before', BASE, '--subjects', '20', '--root', str(self.root),
                             '--now', FIXED], cwd=REPO, capture_output=True, text=True)
-        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
-        self.assertEqual(json.loads(p.stdout)['completed_count'], 20)
+        # The unmodified production CLI must still report this intentional
+        # ownership change. The API comparison above checked its exact paths.
+        expected = gate.differences(*self.comparison_answers)
+        self.assertEqual(p.returncode, int(bool(expected)), p.stdout + p.stderr)
+        result = json.loads(p.stdout)
+        self.assertEqual(result['differences'], expected)
+        self.assertEqual(result['success'], not expected)
+        self.assertEqual(result['completed_count'], 20)
 
     def test_real_changed_answer_and_uncomparable_subject(self):
         with tempfile.TemporaryDirectory(dir=self.path) as name:
