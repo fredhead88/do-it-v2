@@ -274,7 +274,9 @@ def wave_blocker(all_ev, charter, subject, wave):
             return sid
     return None
 
-# ★ `probe` runs with its cwd OUTSIDE every repo on purpose (§4.6·10, §9.5): its run directory is under the ledger root so there is no accidental path into the product. "Not a repository" is a definite answer, not an undetermined one, and reading it as undetermined refused the probe before it ever spent.
+# Explicit scratch cwd lets `probe` run outside every repo (§4.6·10, §9.5).
+# Omitted cwd follows the shared project-repository default. "Not a repository"
+# remains a definite answer for explicit scratch runs, not an undetermined one.
 NOT_A_REPO = "<not a git repository>"
 
 # Paths other processes write to while a spawn runs — a cron's health file, a session hook's handoff — declared by the operator, never inferred. The baseline's finding 2 (a $2.19 spawn voided by the driver's own handoff file) fired again on the Albert Scott pilot: a cron rewrote docs/sessions/process- health.md under a 15-minute audit, and the whole spawn was void. The check is still whole-tree by default; this only lets a root declare what it knows moves.
@@ -1145,6 +1147,7 @@ def main(a):
 
 
 def _main(a):
+    import fold
     kind, tmin, usd = ROLES[a.role]
     atexit.register(poke)
     schema_path = AGENTS / f"{a.role}.schema.json"
@@ -1152,16 +1155,24 @@ def _main(a):
     if a.packet != "-" and not (a.packet and pathlib.Path(a.packet).is_file()):
         sys.exit(f"dispatch: --packet {a.packet!r} is not a file — nothing allocated, nothing spent")
     packet = a._packet if hasattr(a, "_packet") else sys.stdin.read() if a.packet == "-" else pathlib.Path(a.packet).read_text()
+    if a.cwd is None:
+        project = a.project if a.project is not None else fold.subject_project(a.subject)
+        try:
+            cwd = spawns.default_cwd(a.role, a.subject, project, ROOT)
+        except ValueError as exc:
+            sys.exit(f'dispatch: reason=preflight:cwd-unresolved {exc} — nothing allocated, nothing spent')
+        a.project = project
+    else:
+        cwd = spawns.resolve_cwd(a.cwd, ROOT)
+    a.cwd = cwd  # Every consumer, including history and commit-shape, sees this path.
     if a.role == "spec-writer" and getattr(a, "augment_history", False):
         # Carried specs bypass packet.py; `doit carry` passes --augment-history so they get
         # the same precomputed history section. Other packets stay byte-for-byte (AC6).
         import spec_history
-        packet = spec_history.augment_packet_text(packet, spawns.resolve_cwd(a.cwd, ROOT), a.project or "")
+        packet = spec_history.augment_packet_text(packet, cwd, a.project or "")
     EVENTS.mkdir(parents=True, exist_ok=True), CONTENT.mkdir(parents=True, exist_ok=True)
     ledger = alloc(EVENTS, f"L-{a.role}-", ".jsonl")
-    spawn, cwd, builder = ledger.stem, spawns.resolve_cwd(a.cwd, ROOT), a.role == "builder"
-    a.cwd = cwd     # R7: resolved once here — `events_for`'s COMMIT-SHAPE check reads
-                    # this same value later, never a second `a.cwd or os.getcwd()` guess.
+    spawn, builder = ledger.stem, a.role == "builder"
     base = {"subject": a.subject, "project": a.project or pathlib.Path(cwd).name, "spawn": spawn}
     if a.charter:
         base["charter"] = a.charter
@@ -1205,6 +1216,8 @@ def _main(a):
 
     def fail(why, reason=None, exit_code=1, backend_failure=False):
         import grading_env
+        if builder and (reason or '').startswith(('preflight:', 'stale-base', 'branch-not-descendant')):
+            why = f'{why} (cwd={cwd})'
         if a.role == "grader" and reason == "wall-cap":
             machine_failure(why, exit_code, category="runner-or-network")
             sys.exit(2)
@@ -1222,6 +1235,8 @@ def _main(a):
             kv['effective_base_sha'] = a.effective_base_sha
         if reason is not None:
             kv["reason"] = reason
+        if builder:
+            kv['cwd'] = cwd
         kv["tokens"] = tokens_for_spawn(spawn, ROOT, meta.get("spawn_path")) if backend_ran else None
         if backend_ran:
             kv["backend_ran"] = True
