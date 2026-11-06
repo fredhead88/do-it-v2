@@ -1,6 +1,6 @@
 """Bounded, isolated refresh of completed branches before builder recovery."""
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import fcntl
 import fnmatch
 import json
@@ -57,18 +57,46 @@ def refresh_note(events, spec):
     return ''
 
 
-def open_builder(events, spec):
-    active = set()
+def open_builder(events, spec, now=None):
+    import dispatch
+    now = now or datetime.now(timezone.utc)
+    active = {}
     for e in events:
         if e.get('subject') != spec:
             continue
         spawn = e.get('spawn')
-        builder = e.get('role') == 'builder' or str(spawn).startswith('L-builder-')
-        if e.get('type') in {'spawn-started', 'autodispatched', 'build-started'} and builder:
-            active.add(spawn)
+        kind = e.get('type')
+        role = (e.get('role') or '-'.join(str(spawn or '').split('-')[1:-1])
+                or ('builder' if kind == 'build-started' else ''))
+        if kind in {'spawn-started', 'build-started'} and role == 'builder':
+            cap = dispatch.ROLES['builder'][1]
+            stamp = datetime.fromisoformat(e['ts'].replace('Z', '+00:00'))
+            if (now - stamp).total_seconds() <= ((e.get('window_min') or cap) + cap) * 60:
+                active[spawn or spec] = e
         elif e.get('type') in {'spawn-done', 'spawn-failed', 'spawn-stale', 'build-done', 'build-blocked'}:
-            active.discard(spawn)
+            if not spawn and kind in {'build-done', 'build-blocked'}:
+                active.clear()
+            else:
+                active.pop(spawn or spec, None)
     return bool(active)
+
+
+def recut_refusal(events, spec, now):
+    """Return the newest standing refusal using ledger order and UTC time only."""
+    invalidators = {'branch-recut', 'build-started', 'build-done',
+                    'spec-written', 'decision', 'unblocked'}
+    for event in reversed(events):
+        if event.get('subject') != spec:
+            continue
+        if event.get('type') in invalidators:
+            return None
+        if event.get('type') != 'branch-recut-refused':
+            continue
+        retry = event.get('retry_at')
+        if retry and now >= datetime.fromisoformat(retry.replace('Z', '+00:00')):
+            return None
+        return {key: event.get(key) for key in ('reason', 'tip', 'retry_at')}
+    return None
 
 
 def holders(repo, ref):
@@ -153,11 +181,100 @@ def lock(repo, spec):
         yield stream
 
 
-def rework(spec, branch, events, *, paths, **facts):
+INVALIDATORS = frozenset({'branch-recut', 'build-started', 'build-done',
+                          'spec-written', 'decision', 'unblocked'})
+REWORK_REASONS = frozenset({'conflict', 'checks-failed', 'merge-gate'})
+
+
+def rework(spec, branch, events, *, paths, tip, recut_reason, **facts):
     import conflict
+    for event in reversed(events):
+        if event.get('subject') != spec:
+            continue
+        if event.get('type') in INVALIDATORS:
+            break
+        if event.get('type') in {'branch-recut-refused', 'conflict-rework'} and event.get('tip') != tip:
+            break
+        if event.get('type') == 'conflict-rework' and event.get('tip') == tip and event.get('recut_reason') == recut_reason:
+            return
     attempt = conflict.conflict_attempts(events, spec)
     emit('conflict-rework', spec, branch=branch, attempt=attempt.attempt,
-         verdict=attempt.verdict, paths=paths, **facts)
+         verdict=attempt.verdict, paths=paths, tip=tip, recut_reason=recut_reason, **facts)
+
+
+def recovery_receipt(spec, branch, events, project, reason, tip, now, **facts):
+    """Standing refusals and genuine rework have independent interval deduplication."""
+    retry_at = None
+    if reason == 'daily-limit':
+        tomorrow = now.astimezone(timezone.utc).date() + timedelta(days=1)
+        retry_at = datetime.combine(tomorrow, datetime.min.time(), timezone.utc).isoformat().replace('+00:00', 'Z')
+    if reason not in {'open-builder-dispatch', 'adoption-state-changed', 'already-current'}:
+        duplicate = False
+        for event in reversed(events):
+            if event.get('subject') != spec:
+                continue
+            if event.get('type') in INVALIDATORS:
+                break
+            if event.get('type') == 'branch-recut-refused':
+                if event.get('tip') != tip:
+                    break
+                if event.get('reason') == reason and event.get('retry_at') == retry_at:
+                    duplicate = True
+                    break
+        if not duplicate:
+            emit('branch-recut-refused', spec, reason=reason, tip=tip, retry_at=retry_at,
+                 owner='thinker', project=project, ts=now.isoformat())
+    if reason in REWORK_REASONS:
+        rework(spec, branch, events, tip=tip, recut_reason=reason, **facts)
+
+
+def attempt_count(events, spec, now):
+    day = str(now.astimezone(timezone.utc).date())
+    return sum(e.get('type') == 'branch-refresh-skipped' and e.get('reason') == 'attempt-started'
+               and e.get('subject') == spec
+               and (e.get('day') or str(utc_day(e['ts']))) == day for e in events)
+
+
+def pin_artifacts(repo, spec, old_base, base):
+    """Rewrite only this subject's existing artifacts; retain byte/mode pre-images."""
+    import re
+    content = (fold.ROOT / 'content').resolve()
+    paths = [content / (spec + '.md'), *sorted(content.glob('verify-' + spec + '-*.sh'))]
+    snapshots = []
+    try:
+        for path in paths:
+            if path.is_symlink() or path.resolve().parent != content:
+                raise ValueError('artifact escapes subject content')
+            if not path.is_file():
+                continue
+            original, mode = path.read_bytes(), path.stat().st_mode & 0o7777
+            def replace(match):
+                token = match.group()
+                resolved = git(repo, 'rev-parse', '--verify', '--end-of-options', token + '^{commit}', check=False)
+                return base if resolved.returncode == 0 and resolved.stdout.strip() == old_base else token
+            written = re.sub(r'(?<![A-Za-z0-9_])[0-9a-fA-F]{7,40}(?![A-Za-z0-9_])',
+                             replace, original.decode()).encode()
+            snapshots.append((path, original, mode, written))
+        for path, original, mode, written in snapshots:
+            if path.is_symlink() or path.read_bytes() != original or path.stat().st_mode & 0o7777 != mode:
+                raise ValueError('artifact changed before repin')
+            path.write_bytes(written)
+        return snapshots
+    except Exception:
+        restore_artifacts(snapshots)
+        raise
+
+
+def artifacts_unchanged(snapshots):
+    return all(not path.is_symlink() and path.is_file() and path.read_bytes() == written
+               and path.stat().st_mode & 0o7777 == mode for path, _, mode, written in snapshots)
+
+
+def restore_artifacts(snapshots):
+    for path, original, mode, written in snapshots:
+        if artifacts_unchanged([(path, original, mode, written)]):
+            path.write_bytes(original)
+            path.chmod(mode)
 
 
 def refresh(repo, branch, main, spec, *, events=None, now=None):
@@ -196,7 +313,7 @@ def refresh(repo, branch, main, spec, *, events=None, now=None):
         if any(fnmatch.fnmatch(path, pattern) or fnmatch.fnmatch(pattern, path)
                for path in writes for pattern in protected):
             return skip('migration-or-fingerprint')
-        if open_builder(events, spec):
+        if open_builder(events, spec, now=now):
             return skip('open-builder-dispatch')
         holding = holders(repo, ref)
         main_tree = Path(value(repo, 'rev-parse', '--path-format=absolute', '--git-common-dir')).parent.resolve()
@@ -208,8 +325,7 @@ def refresh(repo, branch, main, spec, *, events=None, now=None):
         if type(limit) is not int or limit < 1:
             return skip('invalid-daily-limit')
         day = now.astimezone(timezone.utc).date()
-        count = sum(e.get('type') == 'branch-refresh-skipped' and e.get('reason') == 'attempt-started'
-                    and e.get('subject') == spec and e.get('day', str(utc_day(e['ts']))) == str(day) for e in persisted)
+        count = attempt_count(persisted, spec, now)
         if count >= limit:
             return skip('daily-limit')
         # A committed ledger reservation counts conflicts/crashes as attempts too.
@@ -228,7 +344,7 @@ def refresh(repo, branch, main, spec, *, events=None, now=None):
                     git(tree, 'rebase', '--abort', check=False)
                     if not paths or paths == ['']:
                         return skip('rebase-undetermined')
-                    rework(spec, branch, events, paths=paths)
+                    rework(spec, branch, events, paths=paths, tip=before, recut_reason='conflict')
                     return dict(state='conflict', paths=paths)
                 after = value(tree, 'rev-parse', 'HEAD')
                 metadata = '%an%x00%ae%x00%aI%x00%B'
@@ -248,11 +364,13 @@ def refresh(repo, branch, main, spec, *, events=None, now=None):
                         or git(tree, 'diff', '--quiet', after, check=False).returncode):
                     failures.append('checks-modified-tree')
                 if failures:
-                    rework(spec, branch, events, paths=[], failing_ids=failures, rebased_sha=after)
+                    if failures != ['checks-undetermined']:
+                        rework(spec, branch, events, paths=[], tip=before, recut_reason='checks-failed',
+                               failing_ids=failures, rebased_sha=after)
                     return dict(state='checks-failed', failing_ids=failures, rebased_sha=after, reports=reports)
                 # Recheck every adoption precondition after potentially long checks.
                 if (value(repo, 'rev-parse', ref) != before or value(repo, 'rev-parse', main) != base
-                        or open_builder(ledger_cache.tail_refresh(), spec)
+                        or open_builder(ledger_cache.tail_refresh(), spec, now=now)
                         or holders(repo, ref) != holding or any(dirty(t) for t in holding)):
                     return skip('adoption-state-changed')
                 for t in holding:
@@ -269,6 +387,9 @@ def refresh(repo, branch, main, spec, *, events=None, now=None):
                 # Re-gating may itself refresh after another master move.
                 fcntl.flock(reservation, fcntl.LOCK_UN)
                 gate = regate(repo, branch, main, spec)
+                if gate:
+                    rework(spec, branch, ledger_cache.tail_refresh(), paths=[], tip=before,
+                           recut_reason='merge-gate', failing_ids=['merge-gate'])
                 return dict(state='refreshed', from_sha=before, to_sha=after, base_sha=base,
                             bundle=str(bundle), gate=gate, reports=reports)
             finally:
@@ -278,13 +399,14 @@ def refresh(repo, branch, main, spec, *, events=None, now=None):
                 git(repo, 'worktree', 'prune')
 
 
-def recut(repo, branch, main, spec):
+def recut(repo, branch, main, spec, *, now=None):
     """Replay non-merge patches on main, preserving the old tip before adoption."""
     import re
     import build_runner
     import merge_gate
     if not re.fullmatch(r'L-spec-\d+', spec):
         raise ValueError('invalid recut spec')
+    now = now or datetime.now(timezone.utc)
     repo = Path(repo).resolve()
     merge_gate.begin_run(repo)
     # Refresh under reservation/adoption locks and after git actions: never
@@ -292,15 +414,19 @@ def recut(repo, branch, main, spec):
     with lock(repo, spec) as reservation:
         events = ledger_cache.tail_refresh()
         project = next((e['project'] for e in reversed(events) if e.get('subject') == spec and e.get('project')), repo.name)
-        def skip(reason):
-            rework(spec, branch, events, paths=[], reason=reason)
+        before = None
+        def skip(reason, **facts):
+            recovery_receipt(spec, branch, events, project, reason, before, now, paths=[], **facts)
             return dict(state='skipped', reason=reason)
         ref = branch if branch.startswith('refs/heads/') else 'refs/heads/' + branch
         if git(repo, 'check-ref-format', ref, check=False).returncode:
             return skip('invalid-branch')
+        resolved = git(repo, 'rev-parse', '--verify', '--end-of-options', ref + '^{commit}', check=False)
+        if resolved.returncode:
+            return skip('invalid-branch')
+        before = resolved.stdout.strip()
         if ref in {'refs/heads/master', 'refs/heads/main'} or ref == value(repo, 'rev-parse', '--symbolic-full-name', '--end-of-options', main):
             return skip('main-branch')
-        before = value(repo, 'rev-parse', '--verify', ref + '^{commit}')
         base = value(repo, 'rev-parse', '--verify', '--end-of-options', main + '^{commit}')
         if git(repo, 'merge-base', '--is-ancestor', base, before, check=False).returncode == 0:
             return skip('already-current')
@@ -311,26 +437,26 @@ def recut(repo, branch, main, spec):
             return skip('migration-or-fingerprint')
         holding = holders(repo, ref)
         main_tree = Path(value(repo, 'rev-parse', '--path-format=absolute', '--git-common-dir')).parent.resolve()
-        if open_builder(events, spec):
+        if open_builder(events, spec, now=now):
             return skip('open-builder-dispatch')
         if any(t.resolve() == main_tree for t in holding) or len(holding) > 1:
             return skip('integrator-holds-branch')
         if any(dirty(t) for t in holding):
             return skip('uncommitted-state')
-        day = str(datetime.now(timezone.utc).date())
+        day = str(now.astimezone(timezone.utc).date())
         limit = config().get('merge_queue', {}).get('branch_refresh_per_day', 3)
         if type(limit) is not int or limit < 1:
             return skip('invalid-daily-limit')
-        if sum(e.get('type') == 'branch-refresh-skipped' and e.get('reason') == 'attempt-started'
-               and e.get('subject') == spec and e.get('day', str(utc_day(e['ts']))) == day for e in events) >= limit:
+        if attempt_count(events, spec, now) >= limit:
             return skip('daily-limit')
         commits = value(repo, 'rev-list', '--reverse', '--topo-order', '--no-merges', base + '..' + before).splitlines()
         merges = int(value(repo, 'rev-list', '--count', '--merges', base + '..' + before))
-        emit('branch-refresh-skipped', spec, reason='attempt-started', project=project, day=day)
+        emit('branch-refresh-skipped', spec, reason='attempt-started', project=project, day=day, ts=now.isoformat())
         with tempfile.TemporaryDirectory(prefix='branch-recut-', dir='/var/tmp') as name:
             tree, auxiliary = Path(name) / 'tree', Path(name) / 'checks'
             auxiliary.mkdir()
             tag = None
+            snapshots, adopted = [], False
             try:
                 git(repo, 'worktree', 'add', '--detach', str(tree), base)
                 for commit in commits:
@@ -343,11 +469,17 @@ def recut(repo, branch, main, spec):
                         git(tree, 'cherry-pick', '--abort', check=False)
                         if paths == ['']:
                             return skip('cherry-pick-undetermined')
-                        rework(spec, branch, events, paths=paths)
+                        recovery_receipt(spec, branch, events, project, 'conflict', before, now, paths=paths)
                         return dict(state='conflict', paths=paths)
                 after = value(tree, 'rev-parse', 'HEAD')
                 count = int(value(tree, 'rev-list', '--count', base + '..HEAD'))
+                old_base = value(repo, 'merge-base', before, base)
+                pin = re.search(r'(?m)^(?:base_sha:|Base:)\s*[`\"\']?([0-9a-fA-F]{7,40})\b', text)
+                if pin:
+                    old_base = value(repo, 'rev-parse', '--verify', '--end-of-options', pin[1] + '^{commit}')
                 try:
+                    snapshots = pin_artifacts(repo, spec, old_base, base)
+                    text = (fold.ROOT / 'content' / (spec + '.md')).read_text()
                     failures, reports = check_tree(spec, project, repo, tree, auxiliary, text)
                 except (OSError, ValueError, RuntimeError, subprocess.SubprocessError, build_runner.Undetermined):
                     failures, reports = ['checks-undetermined'], []
@@ -355,11 +487,13 @@ def recut(repo, branch, main, spec):
                         or git(tree, 'diff', '--quiet', after, check=False).returncode):
                     failures.append('checks-modified-tree')
                 if failures:
-                    rework(spec, branch, events, paths=[], failing_ids=failures)
+                    reason = 'checks-undetermined' if failures == ['checks-undetermined'] else 'checks-failed'
+                    recovery_receipt(spec, branch, events, project, reason, before, now, paths=[], failing_ids=failures)
                     return dict(state='checks-failed', failing_ids=failures, reports=reports)
                 if (value(repo, 'rev-parse', ref) != before or value(repo, 'rev-parse', main) != base
-                        or open_builder(ledger_cache.tail_refresh(), spec) or holders(repo, ref) != holding
-                        or any(dirty(t) or value(t, 'rev-parse', 'HEAD') != before for t in holding)):
+                        or open_builder(ledger_cache.tail_refresh(), spec, now=now) or holders(repo, ref) != holding
+                        or any(dirty(t) or value(t, 'rev-parse', 'HEAD') != before for t in holding)
+                        or not artifacts_unchanged(snapshots)):
                     return skip('adoption-state-changed')
                 tag, suffix = 'rework/' + spec.removeprefix('L-spec-') + '-prev', 1
                 stem = tag
@@ -367,14 +501,19 @@ def recut(repo, branch, main, spec):
                     suffix += 1
                     tag = stem + '-' + str(suffix)
                 git(repo, 'update-ref', 'refs/tags/' + tag, before, '')
+                if (value(repo, 'rev-parse', ref) != before or value(repo, 'rev-parse', main) != base
+                        or open_builder(ledger_cache.tail_refresh(), spec, now=now)
+                        or holders(repo, ref) != holding or not artifacts_unchanged(snapshots)
+                        or any(dirty(t) or value(t, 'rev-parse', 'HEAD') != before for t in holding)):
+                    return skip('adoption-state-changed')
                 try:
                     if holding:
                         git(holding[0], 'reset', '--hard', after)
                     else:
                         git(repo, 'update-ref', ref, after, before)
                 except subprocess.SubprocessError:
-                    git(repo, 'update-ref', '-d', 'refs/tags/' + tag, before)
-                    raise
+                    return skip('adoption-state-changed')
+                adopted = True
                 try:
                     bundle = build_runner.run(spec, after)
                     fcntl.flock(reservation, fcntl.LOCK_UN)
@@ -383,20 +522,31 @@ def recut(repo, branch, main, spec):
                     gate = 1
                 if gate:
                     fcntl.flock(reservation, fcntl.LOCK_EX)
+                    fresh = ledger_cache.tail_refresh()
                     if (value(repo, 'rev-parse', ref) == after and holders(repo, ref) == holding
+                            and not open_builder(fresh, spec, now=now)
                             and not any(dirty(t) or value(t, 'rev-parse', 'HEAD') != after for t in holding)):
                         if holding:
                             git(holding[0], 'reset', '--hard', before)
                         else:
                             git(repo, 'update-ref', ref, before, after)
-                        git(repo, 'update-ref', '-d', 'refs/tags/' + tag, before)
-                    rework(spec, branch, ledger_cache.tail_refresh(), paths=[], failing_ids=['merge-gate'])
+                        adopted = False
+                    recovery_receipt(spec, branch, fresh, project, 'merge-gate', before, now, paths=[], failing_ids=['merge-gate'])
                     return dict(state='checks-failed', failing_ids=['merge-gate'])
+                fcntl.flock(reservation, fcntl.LOCK_EX)
+                if (value(repo, 'rev-parse', ref) != after or value(repo, 'rev-parse', main) != base
+                        or open_builder(ledger_cache.tail_refresh(), spec, now=now)
+                        or holders(repo, ref) != holding or not artifacts_unchanged(snapshots)
+                        or any(dirty(t) or value(t, 'rev-parse', 'HEAD') != after for t in holding)):
+                    return skip('adoption-state-changed')
                 facts = dict(from_sha=before, to_sha=after, tag=tag, commit_count=count,
-                             skipped_merges=merges, dropped_empty=len(commits) - count)
+                             skipped_merges=merges, dropped_empty=len(commits) - count,
+                             old_base_sha=old_base, base_sha=base)
                 emit('branch-recut', spec, spec=spec, project=project, **facts)
                 return dict(state='recut', bundle=str(bundle), gate=gate, reports=reports, **facts)
             finally:
+                if not adopted:
+                    restore_artifacts(snapshots)
                 if tree.exists():
                     git(tree, 'cherry-pick', '--abort', check=False)
                     git(repo, 'worktree', 'remove', '--force', str(tree))
@@ -419,6 +569,7 @@ def before_refusal(runtime, a, reason):
 
 
 def dispatch_preflight(runtime, a, cwd, events, fail):
+    operation_time = datetime.now(timezone.utc)
     # Initial, unbuilt branches retain the existing builder admission contract.
     completed = any(e.get('subject') == a.subject and e.get('type') == 'build-done'
                     and e.get('status') == 'DONE' for e in events)
@@ -426,14 +577,11 @@ def dispatch_preflight(runtime, a, cwd, events, fail):
         return False
     if git(cwd, 'merge-base', '--is-ancestor', a.effective_base_sha, 'HEAD', check=False).returncode == 0:
         return True
-    outcome = before_refusal(runtime, a, 'branch-not-descendant')
-    if outcome and outcome['state'] == 'refreshed':
-        fail('branch-refreshed: branch checked, adopted and re-gated; no builder needed', reason='branch-refreshed')
     try:
         import packet_base
         repo = runtime.ROOT / 'repos' / a.project
         main = packet_base._effective_branch(repo, a.project, runtime.spec_path(a.subject), a.subject)
-        outcome = recut(repo, a.subject.lower(), main, a.subject)
+        outcome = recut(repo, a.subject.lower(), main, a.subject, now=operation_time)
     except (OSError, ValueError, subprocess.SubprocessError, __import__('merge_gate').Undetermined):
         outcome = None
     if outcome and outcome['state'] == 'recut':

@@ -25,6 +25,12 @@ class Fixture(unittest.TestCase):
         temp = tempfile.TemporaryDirectory(prefix='branch-refresh-test-')
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name)
+        isolated = {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}
+        isolated.update(HOME=str(self.root / 'home'), DOIT_ROOT=str(self.root))
+        environment = patch.dict(os.environ, isolated, clear=True)
+        environment.start()
+        self.addCleanup(environment.stop)
+        (self.root / 'home').mkdir()
         self.repo = self.root / 'repos/do-it-v2'
         self.repo.mkdir(parents=True)
         self.sid = 'L-spec-9774'
@@ -183,9 +189,11 @@ class TestAC3(Fixture):
                 with patch('branch_refresh.guard_commands', return_value=[('guard-fixture', 'false' if guard else 'true')]):
                     r = self.run_refresh()
                 self.assertEqual(r['state'], 'checks-failed')
-                event = self.read()[-1]
+                event = next(e for e in reversed(self.read()) if e['type'] == 'conflict-rework')
                 self.assertEqual(event['type'], 'conflict-rework')
                 self.assertTrue(event['failing_ids'])
+                self.assertIn('guard-fixture' if guard else 'verification-step-1', r['failing_ids'])
+                self.assertEqual(sum(e['type'] == 'conflict-rework' for e in self.read()), 1)
                 self.assertEqual(self.git('cat-file', '-t', event['rebased_sha']), 'commit')
                 self.assertFalse(any(e['type'] == 'branch-refreshed' for e in self.read()))
                 self.invariant(True)
@@ -223,9 +231,14 @@ class TestAC4(Fixture):
             a.pinned_base_sha = self.main
             self.assertEqual(db.effective_base(runtime, a, fail), self.main)
         self.git('reset', '--hard', self.start, cwd=self.tree)
-        with patch('branch_refresh.before_refusal', return_value={'state': 'refreshed'}):
-            with self.assertRaisesRegex(Refused, 'branch-refreshed'):
+        with patch('branch_refresh.before_refusal') as before, \
+             patch('branch_refresh.refresh') as refresh, \
+             patch('branch_refresh.recut', return_value={'state': 'recut'}) as recut:
+            with self.assertRaisesRegex(Refused, 'branch-recut'):
                 db.branch_preflight(runtime, a, self.tree, self.events, fail)
+            before.assert_not_called()
+            refresh.assert_not_called()
+            self.assertIsInstance(recut.call_args.kwargs['now'], datetime)
         runtime.pending_conflict_rework = lambda *_: True
         with patch('branch_refresh.before_refusal', return_value={'state': 'conflict'}), \
              patch('branch_refresh.recut', return_value={'state': 'conflict'}):
@@ -244,7 +257,7 @@ class TestAC5(Fixture):
         (self.tree / 'dirty').write_text('preserve')
         self.assertEqual(self.run_refresh()['reason'], 'uncommitted-state')
         (self.tree / 'dirty').unlink()
-        self.events.append(dict(type='spawn-started', subject=self.sid, role='builder', spawn='L-builder-9999'))
+        self.events.append(dict(type='spawn-started', subject=self.sid, role='builder', spawn='L-builder-9999', ts=self.now.isoformat()))
         self.assertEqual(self.run_refresh()['reason'], 'open-builder-dispatch')
         self.events.pop()
         for _ in range(3):
@@ -306,7 +319,7 @@ class RecutFixture(Fixture):
         self.spec.write_text(self.spec.read_text().replace('- feature.py', '- feature.py\n- second.txt\n- side.txt'))
 
     def run_recut(self):
-        return br.recut(self.repo, self.branch, 'main', self.sid)
+        return br.recut(self.repo, self.branch, 'main', self.sid, now=self.now)
 
     def snapshots(self):
         return dict(branch=self.git('rev-parse', self.branch), head=self.git('rev-parse', 'HEAD', cwd=self.tree),
@@ -417,9 +430,15 @@ class TestRecut(RecutFixture):
                 self.assertIn('recut-guard' if guard else 'verification-step-1', result['failing_ids'])
 
     def test_fresh_gate_failure_restores_old_tip_and_tag_set(self):
+        before = self.snapshots()
         with patch('branch_refresh.regate', return_value=1):
-            result = self.refused('checks-failed')
+            result = self.run_recut()
         self.assertIn('merge-gate', result['failing_ids'])
+        after = self.snapshots()
+        self.assertEqual(self.git('rev-parse', 'rework/9774-prev'), self.start)
+        self.assertEqual({k: v for k, v in after.items() if k != 'tags'},
+                         {k: v for k, v in before.items() if k != 'tags'})
+        self.invariant(True)
 
     def test_no_fallback_in_other_refresh_callers(self):
         runtime = SimpleNamespace(ROOT=self.root, spec_path=lambda _: self.spec)
@@ -484,7 +503,7 @@ class TestRecutDirty(RecutFixture):
         self.assertEqual((self.tree / 'second.txt').read_text(), 'arrived during checks\n')
         self.assertEqual(self.git('tag', '--list'), '')
         self.invariant(True)
-        self.assertEqual(self.read()[-1]['type'], 'conflict-rework')
+        self.assertFalse(any(e['type'] == 'conflict-rework' for e in self.read()))
         self.signed('recut-post-check-dirty', result=result, snapshots=self.snapshots(), cleanup=True)
 
 

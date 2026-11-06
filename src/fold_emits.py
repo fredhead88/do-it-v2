@@ -454,3 +454,7 @@ EMITS["branch-refreshed"] = {"executor"}
 EMITS["branch-refresh-skipped"] = {"executor"}
 REQUIRED_ROWS["branch-refreshed"] = ("spec", "from_sha", "to_sha", "base_sha", "checks")
 REQUIRED_ROWS["branch-refresh-skipped"] = ("reason",)
+EMITS['branch-recut'] = {'executor'}
+EMITS['branch-recut-refused'] = {'executor'}
+REQUIRED_ROWS['branch-recut'] = ('spec', 'from_sha', 'to_sha', 'tag', 'old_base_sha', 'base_sha')
+REQUIRED_ROWS['branch-recut-refused'] = ('reason', 'owner', 'project')
