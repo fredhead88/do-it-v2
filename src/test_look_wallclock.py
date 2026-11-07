@@ -403,7 +403,9 @@ print("AC5 ok")
 
 # ── AC6: planner attempts stuck — one restart exhausted + a later decision ──
 def _planner_stuck_fixture(root, cid, decision_offset_min):
-    append_raw(root, "L-thinker-0001.jsonl", iso(NOW - timedelta(days=2)), type="charter-filed", subject=cid)
+    (root / 'repos' / 'wallclock-fixture').mkdir(parents=True, exist_ok=True)
+    append_raw(root, "L-thinker-0001.jsonl", iso(NOW - timedelta(days=2)), type="charter-filed", subject=cid,
+               project='wallclock-fixture')
     append_raw(root, "L-planner-0001.jsonl", iso(NOW - timedelta(hours=5)), type="planner-started", subject=cid)
     append_raw(root, "L-planner-0001.jsonl", iso(NOW - timedelta(hours=4, minutes=50)), type="planner-ended",
               subject=cid, reason="charter-gap")

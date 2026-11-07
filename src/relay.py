@@ -235,17 +235,29 @@ def _footprint_clash(cid, paths, events, specs):
 
 # ── the queue ────────────────────────────────────────────────────────────────
 
-def open_charters(events, by_subject=None):
+def registered_projects(root=None):
+    from project_scope import registered
+    root = pathlib.Path(root or fold.ROOT)
+    try:
+        return {entry.name for entry in (root / 'repos').iterdir() if registered(root, entry.name)}
+    except OSError:
+        return set()
+
+
+def open_charters(events, by_subject=None, *, root=None):
     """Every charter that is filed and not yet cut, complete or retracted — the queue
     the Planner draws from, in ledger order."""
     if by_subject is None:
         _, _, _, by_subject = fold.fold(events)
     out = []
+    projects = registered_projects(root)
     for sid, evs in by_subject.items():
         if not re.fullmatch(r"L-charter-\d{4}", sid):
             continue
         types = {e["type"] for e in evs}
-        if "charter-filed" in types and not (types & {"cut-written", "l1-complete", "charter-retracted"}):
+        filed = next((e for e in reversed(evs) if e['type'] == 'charter-filed'), {})
+        project = filed.get('project')
+        if isinstance(project, str) and project in projects and not (types & {"cut-written", "l1-complete", "charter-retracted"}):
             out.append(sid)
     return out
 
@@ -326,7 +338,7 @@ def plannable(events, root=None):
                            and _in_flight(cid, specs))
 
     ready, waiting = [], []
-    for cid in open_charters(events, by_subject):
+    for cid in open_charters(events, by_subject, root=root):
         evs = by_subject[cid]
         goal_date = goal_date_of if (goal_date_of and (_covers(evs) & goal_ids)) else None
         set_order = None                    # L-adr-0030: carried, never populated
@@ -370,7 +382,7 @@ def unmeasured_footprints(events, root=None):
     is normally cut AFTER it is picked — but a skipped check that says nothing reads
     as a passed one, so this is what `waiting_lines` discloses."""
     root = pathlib.Path(root or fold.ROOT)
-    return [cid for cid in open_charters(events) if cut_footprint(cid, root) is None]
+    return [cid for cid in open_charters(events, root=root) if cut_footprint(cid, root) is None]
 
 
 def waiting_lines(events, root=None):
@@ -384,10 +396,18 @@ def waiting_lines(events, root=None):
     ready, waiting = plannable(events, root)
     notes = [f"note: footprint check unmeasured for {cid} (no content/cut-{cid}.md)"
              for cid in unmeasured_footprints(events, root)]
+    admitted = set(open_charters(events, root=root))
+    excluded = sum(bool(any(e['type'] == 'charter-filed' for e in rows))
+                   and not any(e['type'] in ('cut-written', 'l1-complete', 'charter-retracted') for e in rows)
+                   and cid not in admitted
+                   for cid, rows in fold.fold(events)[3].items()
+                   if re.fullmatch(r'L-charter-\d{4}', cid))
+    exclusion = ([f'note: excluded {excluded} open charter(s): newest filing has no registered project']
+                 if excluded else [])
     if not ready and not waiting:
-        return [DRY]
+        return [DRY] + exclusion
     return ([WAITING_HEAD] + [f"  {cid} · {why}" for cid, why in waiting]
-            + (["  (nothing waiting)"] if not waiting else []) + notes)
+            + (["  (nothing waiting)"] if not waiting else []) + notes + exclusion)
 
 
 # ── the ledger watermark ─────────────────────────────────────────────────────

@@ -210,7 +210,7 @@ def fix_for(condition, root, events):
     cls = _CLASSES.get(condition)
     if not cls: return None
     root = pathlib.Path(root)
-    for cid in relay.open_charters(events):
+    for cid in relay.open_charters(events, root=root):
         path = root / "content" / f"{cid}.md"
         try: text = path.read_text()[:4000]
         except OSError: continue
@@ -435,7 +435,7 @@ def _check_message_answered(events, emit, undetermined, *, tally=None):
 
 # ── check 4: planner attempts stuck ──────────────────────────────────────────
 def _check_planner_stuck(events, root, write_brief, out_briefs):
-    for cid in relay.open_charters(events):
+    for cid in relay.open_charters(events, root=root):
         pa = relay.planner_attempts(events, cid)
         if pa.get("next") != "escalate": continue
         decisions = [e for e in events if e.get("type") == "decision" and e.get("subject") == cid]

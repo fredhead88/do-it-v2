@@ -17,6 +17,7 @@ import datetime, json, os, pathlib, sys, tempfile
 
 TMP = pathlib.Path(tempfile.mkdtemp())
 PROJECT = "relay-fixture"
+(TMP / 'repos' / PROJECT).mkdir(parents=True)
 os.environ["DOIT_ROOT"], os.environ["DOIT_PROJECT"] = str(TMP), PROJECT
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 import dispatch, fold, pane_end, relay, up  # noqa: E402
@@ -195,6 +196,7 @@ def scene(name):
     d = TMP / name
     for sub in ("events", "content", "seat"):
         (d / sub).mkdir(parents=True, exist_ok=True)
+    (d / 'repos' / PROJECT).mkdir(parents=True, exist_ok=True)
     fold.ROOT, fold.EVENTS = d, d / "events"
     return d
 
@@ -212,7 +214,7 @@ def ev(d, actor_file, type_, subject, **kw):
 read = lambda: fold.read_events()
 TAIL = " (order keys unavailable: goal_date, set_order)"
 
-ok(relay.open_charters([], {sid: [{"type": "charter-filed"}]
+ok(relay.open_charters([], {sid: [{"type": "charter-filed", "project": PROJECT}]
                            for sid in ("L-charter-0008", "L-charter-reviewer-0008")})
    == ["L-charter-0008"], "only exact charter ids enter the planner queue")
 

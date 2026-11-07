@@ -250,6 +250,7 @@ class HeldPlannerTests(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory(prefix="held-supervisor-")
         self.addCleanup(tmp.cleanup)
         self.root = pathlib.Path(tmp.name)
+        (self.root / 'repos' / 'held-fixture').mkdir(parents=True)
         (self.root / "events").mkdir()
         self.clock = 0
         self.launches, self.holds = [], []
@@ -268,7 +269,7 @@ class HeldPlannerTests(unittest.TestCase):
     def emit(self, kind, subject=None, actor="operator", **fields):
         self.clock += 1
         row = {"v": 1, "ts": f"2026-10-27T05:08:{self.clock:02d}Z", "type": kind,
-               "subject": subject or self.A, **fields}
+               "subject": subject or self.A, "project": "held-fixture", **fields}
         with (fold.EVENTS / f"L-{actor}-9901.jsonl").open("a") as stream:
             stream.write(json.dumps(row) + "\n")
         return row["ts"]

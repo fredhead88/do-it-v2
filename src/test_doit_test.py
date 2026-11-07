@@ -37,6 +37,31 @@ out = pathlib.Path(os.environ["DOIT_TEST_PROBE_OUT"])
 home = os.environ.get("HOME")
 root = os.environ.get("DOIT_ROOT")
 xdg = os.environ.get("XDG_CONFIG_HOME")
+marker = os.environ.get('DOIT_TEST_PROCESS')
+machine_root = os.environ.get('DOIT_TEST_MACHINE_ROOT')
+live_root = os.environ.get('DOIT_TEST_LIVE_ROOT')
+assert marker == '1'
+assert machine_root and machine_root != root
+# Substitute only OS-account discovery. The real launcher supplies machine_root.
+import ledger_write_guard as guard, fold, dispatch
+guard._account_root = lambda: pathlib.Path(home) / 'surrogate-account'
+machine = pathlib.Path(machine_root)
+def inventory():
+    return {str(p.relative_to(machine)): p.read_bytes() if p.is_file() else None
+            for p in machine.rglob('*')}
+before = inventory()
+target = machine / 'events/L-operator-refused.jsonl'
+os.environ['DOIT_LEDGER_FILE'] = str(target)
+for writer in (lambda: fold.append(['observed', 'L-spec-9999', 'project=fixture']),
+               lambda: dispatch.emit(target, {'subject': 'L-spec-9999'}, 'observed')):
+    try:
+        writer()
+    except SystemExit as error:
+        assert str(error).startswith(guard.REFUSAL), str(error)
+    else:
+        raise AssertionError('captured caller-root write was allowed')
+assert inventory() == before
+del os.environ['DOIT_LEDGER_FILE']
 
 # Deliberately omit cleanup, as many real fixture helpers do. The launcher's
 # EXIT trap must own Python, shell and Node scratch, even on a failing run.
@@ -63,6 +88,8 @@ seat_dir.mkdir(parents=True, exist_ok=True)
 out.write_text(json.dumps({
     "HOME": home, "DOIT_ROOT": root, "XDG_CONFIG_HOME": xdg,
     "DOIT_LEDGER_FILE_present": "DOIT_LEDGER_FILE" in os.environ,
+    "marker": marker, "machine_root": machine_root, "live_root": live_root,
+    "caller_root_refusals": 2,
     "scratch": scratch,
 }))
 
@@ -89,7 +116,7 @@ ISOLATION_EXPORTS = ('           export HOME="$DOIT_TEST_ISO/home" DOIT_ROOT="$D
                      '                  XDG_CONFIG_HOME="$DOIT_TEST_ISO/xdg"\n')
 
 
-def _build_tree(tmp, *, content=False, isolated=True):
+def _build_tree(tmp, *, content=False, isolated=True, live=False):
     """Copy the real launcher with either one env probe or two content probes."""
     tree = pathlib.Path(tempfile.mkdtemp(dir=tmp))
     doit_copy = tree / "doit"
@@ -105,7 +132,7 @@ def _build_tree(tmp, *, content=False, isolated=True):
     shutil.copyfile(REPO_ROOT / "src" / "retired.py", tree / "src" / "retired.py")
     # Supply the machine gate and its real import dependencies in this checkout.
     for module in (REPO_ROOT / "src").glob("*.py"):
-        if not module.name.startswith("test_"):
+        if not module.name.startswith("test_") or module.name == 'test_slots.py':
             shutil.copyfile(module, tree / "src" / module.name)
     (tree / "retired.d").mkdir()
     (tree / "retired.d" / "fixture.toml").write_text(
@@ -113,19 +140,20 @@ def _build_tree(tmp, *, content=False, isolated=True):
         'pattern="removed fixture mechanism"\npaths=["src/test_*.py"]\n')
     subprocess.run(["git", "init", "-q", str(tree)], check=True)
     sources = ({name: CONTENT_PROBE_SRC for name in CONTENT_FIXTURES} if content
-               else {"test_probe.py": PROBE_SRC})
+               else {name: PROBE_SRC for name in
+                     (('test_harvest.py', 'test_problem_backfill.py') if live else ('test_probe.py',))})
     for name, source in sources.items():
         (tree / "src" / name).write_text(source)
     subprocess.run(["git", "-C", str(tree), "add", "src", "retired.d"], check=True)
     return tree
 
 
-def _run_case(outer_tmp, *, fail=False, content=False, isolated=True):
+def _run_case(outer_tmp, *, fail=False, content=False, isolated=True, live=False):
     """One full `bash <tree>/doit test` under a scoped sentinel HOME/DOIT_ROOT/
     XDG_CONFIG_HOME/DOIT_LEDGER_FILE/TMPDIR. Returns
     `(proc, probe, sentinel_home, sentinel_root, sentinel_xdg, iso_tmpdir)`,
     plus the before snapshot for content cases."""
-    tree = _build_tree(outer_tmp, content=content, isolated=isolated)
+    tree = _build_tree(outer_tmp, content=content, isolated=isolated, live=live)
     sentinel_home = pathlib.Path(tempfile.mkdtemp(dir=outer_tmp, prefix="sentinel-home-"))
     sentinel_root = pathlib.Path(tempfile.mkdtemp(dir=outer_tmp, prefix="sentinel-root-"))
     sentinel_xdg = pathlib.Path(tempfile.mkdtemp(dir=outer_tmp, prefix="sentinel-xdg-"))
@@ -149,7 +177,10 @@ def _run_case(outer_tmp, *, fail=False, content=False, isolated=True):
     }
     if fail:
         env["DOIT_TEST_PROBE_FAIL"] = "1"
-    proc = subprocess.run(["bash", str(tree / "doit"), "test"], cwd=str(tree),
+    if live:
+        (sentinel_root / 'events').mkdir()
+        (sentinel_root / 'events/L-operator-local.jsonl').write_text('{}\n')
+    proc = subprocess.run(["bash", str(tree / "doit"), "test", *(['--live'] if live else [])], cwd=str(tree),
                           env=env, capture_output=True, text=True, timeout=60)
     if content:
         probe = [json.loads(p.read_text()) for p in sorted(probe_out.parent.glob("*.json"))]
@@ -228,6 +259,9 @@ ok(probe1["HOME"] and probe1["DOIT_ROOT"] and probe1["XDG_CONFIG_HOME"],
    f"AC1: all three are still set (to something), just not the sentinels: {probe1}")
 ok(probe1["DOIT_LEDGER_FILE_present"] is False,
    f"AC1: DOIT_LEDGER_FILE is unset before any runner starts: {probe1}")
+ok(probe1['marker'] == '1' and probe1['machine_root'] == str(sroot1.resolve())
+   and probe1['live_root'] is None and probe1['caller_root_refusals'] == 2,
+   'AC1: ordinary launcher exports marker/captured root, clears live root, both writers refuse')
 ok(_empty(isotmp1), "AC1: the isolation temp dir (under our own TMPDIR) is removed after — nothing left behind")
 ok(all(not pathlib.Path(p).exists() for p in probe1["scratch"]),
    "AC1: unmanaged Python, shell, Node, TMP and TEMP scratch is removed")
@@ -259,4 +293,12 @@ print("AC2 ok")
 
 if __name__ == "__main__":
     test_multifile_content_isolation()
+    with tempfile.TemporaryDirectory(prefix='doit-test-live-marker-') as outer:
+        proc, probe, home, root, xdg, tmp = _run_case(outer, live=True)
+        ok(proc.returncode == 0, f'live launcher: {proc.stdout} {proc.stderr}')
+        ok(probe['marker'] == '1' and probe['machine_root'] == str(root.resolve())
+           and probe['live_root'] == str(root.resolve()) and probe['caller_root_refusals'] == 2,
+           'live launcher exports both captured roots and refuses both writes')
+        ok(_empty(tmp) and all(not pathlib.Path(p).exists() for p in probe['scratch']),
+           'live launcher cleans temporary roots and unmanaged scratch')
 print(f"doit_test: {N} checks pass")
